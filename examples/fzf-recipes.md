@@ -267,16 +267,17 @@ fshow
 
 **Features:**
 - Left pane: Commit graph with colors
-- Right pane: Full commit details on hover
-- Press Ctrl+M to view commit in less
-- Navigate with arrow keys
+- Right pane: Live preview of selected commit (60% width)
+- Preview updates automatically as you navigate
+- Press Ctrl+M to view full commit in pager (less)
 - Ctrl+S to toggle sort order
 
 **Controls:**
-- `Up/Down` - Navigate commits
-- `Ctrl+M` - View commit details in pager
+- `Up/Down` or `j/k` - Navigate commits (preview updates automatically)
+- `Ctrl+M` - Open full commit in pager (less) for detailed viewing
 - `Ctrl+S` - Toggle sort order
-- `Ctrl+C` - Exit
+- `Ctrl+C` or `ESC` - Exit
+- Type to filter commits by message/hash
 
 **Use Cases:**
 
