@@ -5,6 +5,10 @@ Personal configuration files managed with [dotbot](https://github.com/anishathal
 ## Contents
 
 - `gh/config.yml` - GitHub CLI configuration and aliases
+- `gitconfig` - Git configuration with aliases and settings
+- `zshrc` - Zsh configuration with oh-my-zsh
+- `p10k.zsh` - Powerlevel10k theme configuration
+- `config/git/ignore` - Global git ignore patterns
 
 ## Setup on a New Machine
 
