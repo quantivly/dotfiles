@@ -9,6 +9,11 @@ Personal configuration files for zsh, git, and various development tools, manage
 - **Security-focused** - Secrets never committed to git
 - **Well-documented** - Comments and examples throughout
 - **Easy installation** - One command setup on new machines
+- **Modern CLI tools** - Integration with bat, eza, fd, ripgrep, delta, and more
+- **Enhanced productivity** - 40+ useful aliases and 15+ utility functions
+- **FZF integration** - Fuzzy finding for files, directories, git branches, and commits
+- **Smart completion** - Case-insensitive, colored, with menu selection
+- **GitHub CLI power-user** - 35+ gh aliases for efficient PR and workflow management
 
 ## Structure
 
@@ -30,6 +35,7 @@ Personal configuration files for zsh, git, and various development tools, manage
 ├── zshrc                    # Main zsh config (sources modular files)
 ├── p10k.zsh                 # Powerlevel10k theme configuration
 ├── install.conf.yaml        # Dotbot installation configuration
+├── ENHANCEMENTS.md          # Detailed list of all enhancements and improvements
 └── README.md                # This file
 ```
 
@@ -217,20 +223,45 @@ Machine-specific settings that should NEVER be committed:
 4. **Rotate exposed tokens** - If you accidentally commit secrets, rotate them immediately
 5. **Use .gitignore** - The included `.gitignore` prevents common secret files from being committed
 
+## Recent Enhancements
+
+This configuration has been significantly enhanced with modern best practices. See **[ENHANCEMENTS.md](ENHANCEMENTS.md)** for complete details.
+
+**Highlights:**
+- ⚡ **Performance**: Optimized P10k instant prompt loading
+- 🔌 **Plugins**: Added extract, fzf, colored-man-pages, safe-paste, command-not-found
+- 🛠️ **Functions**: 15+ new utility functions (mkcd, backup, note, psgrep, gwt, etc.)
+- 🔗 **Aliases**: 40+ new aliases for git, docker, and system operations
+- 🚀 **Modern Tools**: Automatic integration with bat, eza, fd, ripgrep, delta, htop
+- 🔍 **FZF**: Comprehensive fuzzy finding for files, directories, git operations
+- ⌨️ **Key Bindings**: Ctrl/Alt+Arrow word movement, proper Home/End/Delete
+- 🎛️ **ZSH Options**: AUTO_CD, EXTENDED_GLOB, CORRECT, case-insensitive completion
+- 🐙 **GitHub CLI**: 35+ gh aliases for PR management, reviews, CI/CD, and workflows
+
 ## GitHub CLI Aliases
 
-This dotfiles includes useful GitHub CLI aliases (see `gh/config.yml`):
+This dotfiles includes extensive GitHub CLI aliases (see `gh/config.yml`):
 
+**PR Management:**
 - `gh mypr` - List your open PRs
 - `gh prs` - List all open, non-draft PRs
 - `gh prs!` - List PRs excluding dependency updates
-- `gh prs@` - List PRs targeting current branch
-- `gh prbase` - Show base branch for current PR
-- `gh prinfo` - Show formatted PR info
+- `gh prmerge` - Merge PR with squash and delete branch
+- `gh prchecks` - View PR checks
+- `gh prready` / `gh prdraft` - Toggle PR ready state
+
+**Review Workflow:**
 - `gh review` - List PRs where you're requested to review
-- `gh releases` - List recent releases
-- `gh latest` - View latest release
-- And many more! (see the file for full list)
+- `gh reviewed` - PRs you've already reviewed
+- `gh approve` - Approve PR
+- `gh request-changes` - Request changes on PR
+
+**CI/CD:**
+- `gh runs` - List workflow runs for current branch
+- `gh runwatch` - Watch workflow run in real-time
+- `gh rerun` - Rerun failed workflow
+
+**And 25+ more!** See [gh/config.yml](gh/config.yml) or [ENHANCEMENTS.md](ENHANCEMENTS.md) for the complete list.
 
 ## Customization
 

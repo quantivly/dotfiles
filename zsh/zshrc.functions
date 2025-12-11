@@ -24,3 +24,143 @@ clear-screen-and-scrollback() {
 }
 zle -N clear-screen-and-scrollback
 bindkey '^L' clear-screen-and-scrollback
+
+# Create directory and cd into it
+mkcd() {
+  # Usage: mkcd <directory>
+  # Creates a directory (including parents) and changes into it
+  if [ $# -ne 1 ]; then
+    echo "Usage: mkcd <directory>"
+    return 1
+  fi
+  mkdir -p "$1" && cd "$1"
+}
+
+# Find and cd to a directory using fzf
+fcd() {
+  # Usage: fcd [starting_directory]
+  # Fuzzy find directories and cd into selection
+  local dir
+  dir=$(find "${1:-.}" -type d 2>/dev/null | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap) && cd "$dir"
+}
+
+# Quick backup of a file
+backup() {
+  # Usage: backup <file>
+  # Creates a timestamped backup copy of a file
+  if [ $# -ne 1 ]; then
+    echo "Usage: backup <file>"
+    return 1
+  fi
+  local timestamp=$(date +%Y%m%d_%H%M%S)
+  cp "$1" "${1}.backup_${timestamp}"
+  echo "Created backup: ${1}.backup_${timestamp}"
+}
+
+# Extract archives of any type
+extract() {
+  # Usage: extract <file>
+  # Note: oh-my-zsh extract plugin also provides this, but this is a fallback
+  if [ $# -ne 1 ]; then
+    echo "Usage: extract <file>"
+    return 1
+  fi
+  if [ -f "$1" ]; then
+    case "$1" in
+      *.tar.bz2)   tar xjf "$1"     ;;
+      *.tar.gz)    tar xzf "$1"     ;;
+      *.bz2)       bunzip2 "$1"     ;;
+      *.rar)       unrar x "$1"     ;;
+      *.gz)        gunzip "$1"      ;;
+      *.tar)       tar xf "$1"      ;;
+      *.tbz2)      tar xjf "$1"     ;;
+      *.tgz)       tar xzf "$1"     ;;
+      *.zip)       unzip "$1"       ;;
+      *.Z)         uncompress "$1"  ;;
+      *.7z)        7z x "$1"        ;;
+      *)           echo "'$1' cannot be extracted via extract()" ;;
+    esac
+  else
+    echo "'$1' is not a valid file"
+  fi
+}
+
+# Get public IP address
+myip() {
+  # Usage: myip
+  # Displays your public IP address
+  curl -s https://api.ipify.org && echo
+}
+
+# Get local IP address
+localip() {
+  # Usage: localip
+  # Displays your local IP address
+  hostname -I | awk '{print $1}'
+}
+
+# Quick note taking
+note() {
+  # Usage: note <message>
+  # Appends a timestamped note to ~/notes.txt
+  local notes_file="${HOME}/notes.txt"
+  if [ $# -eq 0 ]; then
+    # Display notes if no arguments
+    if [ -f "$notes_file" ]; then
+      cat "$notes_file"
+    else
+      echo "No notes found. Use: note <message> to create one."
+    fi
+  else
+    # Add note with timestamp
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$notes_file"
+    echo "Note added to $notes_file"
+  fi
+}
+
+# Search for a running process
+psgrep() {
+  # Usage: psgrep <pattern>
+  # Greps for a process by name
+  ps aux | grep -v grep | grep -i -e VSZ -e "$@"
+}
+
+# Kill process by name
+killnamed() {
+  # Usage: killnamed <process_name>
+  # Kills all processes matching the given name
+  if [ $# -ne 1 ]; then
+    echo "Usage: killnamed <process_name>"
+    return 1
+  fi
+  ps aux | grep -v grep | grep "$1" | awk '{print $2}' | xargs kill
+}
+
+# Create a dated directory
+mkdate() {
+  # Usage: mkdate [prefix]
+  # Creates a directory with current date (YYYY-MM-DD format)
+  local date_str=$(date +%Y-%m-%d)
+  local dir_name="${1:+${1}_}${date_str}"
+  mkdir -p "$dir_name" && cd "$dir_name"
+}
+
+# Show directory sizes
+dirsize() {
+  # Usage: dirsize [directory]
+  # Shows sizes of directories in human-readable format
+  du -sh "${1:-.}"/* 2>/dev/null | sort -h
+}
+
+# Git worktree wrapper
+gwt() {
+  # Usage: gwt <branch_name>
+  # Creates a git worktree in ../worktrees/<branch_name>
+  if [ $# -ne 1 ]; then
+    echo "Usage: gwt <branch_name>"
+    echo "Creates a git worktree in ../worktrees/<branch_name>"
+    return 1
+  fi
+  local worktree_dir="../worktrees/$1"
+  git worktree add "$worktree_dir" "$1" && cd "$worktree_dir"
+}

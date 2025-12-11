@@ -26,7 +26,20 @@ alias gl='git pull'
 alias gf='git fetch'
 alias gcm='git commit -m'
 alias gca='git commit --amend'
+alias gcam='git commit -am'
+alias gaa='git add --all'
+alias gap='git add -p'
 alias glog='git log --oneline --graph --decorate'
+alias gloga='git log --oneline --graph --decorate --all'
+alias glogp='git log --graph --pretty=format:"%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset" --abbrev-commit'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias grh='git reset HEAD'
+alias grhh='git reset --hard HEAD'
+alias gclean='git clean -fd'
+alias gundo='git reset --soft HEAD^'
+alias gwip='git add -A && git commit -m "WIP: Work in progress"'
+alias gunwip='git log -n 1 | grep -q -c "WIP:" && git reset HEAD~1'
 
 # Directory shortcuts
 alias home='cd ~'
@@ -44,6 +57,17 @@ alias di='docker images'
 alias dlog='docker logs'
 alias dlogf='docker logs -f'
 alias dex='docker exec -it'
+alias dstop='docker stop $(docker ps -q)'
+alias dstopa='docker stop $(docker ps -aq)'
+alias drm='docker rm $(docker ps -aq)'
+alias drmi='docker rmi $(docker images -q)'
+alias dprune='docker system prune -af --volumes'
+alias dclean='docker system prune -f'
+alias dcp='docker compose'
+alias dcup='docker compose up -d'
+alias dcdown='docker compose down'
+alias dclogs='docker compose logs -f'
+alias dcps='docker compose ps'
 
 # Python
 alias py='python3'
@@ -54,3 +78,60 @@ alias activate='source venv/bin/activate'
 # Find and search
 alias ff='find . -type f -name'
 alias fd='find . -type d -name'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+
+# Modern tool alternatives (if installed)
+# Note: These are aliased conditionally in zshrc.conditionals if tools are available
+# alias cat='bat'          # Better cat with syntax highlighting
+# alias ls='exa'           # Better ls with colors and icons
+# alias find='fd'          # Better find
+# alias grep='rg'          # Better grep (ripgrep)
+
+# Quick edits
+alias zshrc='${EDITOR:-vim} ~/.zshrc'
+alias zshreload='source ~/.zshrc && echo "ZSH config reloaded!"'
+alias localrc='${EDITOR:-vim} ~/.zshrc.local'
+alias hosts='sudo ${EDITOR:-vim} /etc/hosts'
+
+# Useful system shortcuts
+alias h='history'
+alias hg='history | grep'
+alias c='clear'
+alias q='exit'
+alias x='exit'
+
+# Disk usage
+alias df='df -h'
+alias du='du -h'
+alias dud='du -d 1 -h'
+alias duf='du -sh *'
+
+# Network
+alias ping='ping -c 5'
+alias fastping='ping -c 100 -s.2'
+alias listen='lsof -P -i -n'
+alias wget='wget -c'
+
+# Process management
+alias psg='ps aux | grep -v grep | grep -i -e VSZ -e'
+alias top='htop'  # Use htop if available
+
+# Clipboard (Linux-specific, adjust for macOS)
+if command -v xclip &> /dev/null; then
+  alias pbcopy='xclip -selection clipboard'
+  alias pbpaste='xclip -selection clipboard -o'
+fi
+
+# Safety overrides (can be bypassed with \rm, \cp, \mv)
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+alias ln='ln -i'
+
+# Typo corrections
+alias cd..='cd ..'
+alias sl='ls'
+alias claer='clear'
+alias cleaer='clear'

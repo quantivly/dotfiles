@@ -8,23 +8,55 @@ prompt: enabled
 pager:
 # Aliases allow you to create nicknames for gh commands
 aliases:
+    # PR management
     co: pr checkout
     mypr: pr list --author @me --state open
     prs: pr list --state open --search "-is:draft"
+    prs!: pr list --state open --search "-is:draft NOT Bump in:title"
+    prs@: '!gh pr list --base $(git branch --show-current) "$@"'
     prv: pr view --web
     prc: pr checkout
     prd: pr diff --web
+    prmerge: pr merge --squash --delete-branch
+    prbase: '!gh pr view --json baseRefName -q .baseRefName'
+    prinfo: '!gh pr view --json number,title,headRefName,baseRefName -q "\"#\" + (.number|tostring) + \" \" + .title + \"\n  \" + .headRefName + \" → \" + .baseRefName"'
+    prchecks: pr checks
+    prready: pr ready
+    prdraft: pr ready --undo
+    prreopen: pr reopen
+
+    # Review management
     review: pr list --search "review-requested:@me -is:draft"
+    reviewed: pr list --search "reviewed-by:@me -is:draft"
+    approve: pr review --approve
+    comment: pr review --comment
+    request-changes: pr review --request-changes
+
+    # Release management
     releases: release list --limit 10
     latest: release view --web
     mkrelease: release create --generate-notes
+
+    # CI/CD
     runs: '!gh run list --branch $(git branch --show-current) --limit 5 "$@"'
     runlist: run list --branch $(git branch --show-current) --limit 5
     runview: run view --web
-    prs!: pr list --state open --search "-is:draft NOT Bump in:title"
-    prs@: '!gh pr list --base $(git branch --show-current) "$@"'
-    prbase: '!gh pr view --json baseRefName -q .baseRefName'
-    prinfo: '!gh pr view --json number,title,headRefName,baseRefName -q "\"#\" + (.number|tostring) + \" \" + .title + \"\n  \" + .headRefName + \" → \" + .baseRefName"'
+    runwatch: run watch
+    rerun: run rerun
+
+    # Issues
+    myissues: issue list --assignee @me
+    issues: issue list
+
+    # Repository
+    clone: repo clone
+    fork: repo fork
+    browse: repo view --web
+
+    # Workflow shortcuts
+    wflist: workflow list
+    wfview: workflow view
+    wfrun: workflow run
 # The path to a unix socket through which send HTTP connections. If blank, HTTP traffic will be handled by net/http.DefaultTransport.
 http_unix_socket:
 # What web browser gh should use when opening URLs. If blank, will refer to environment.
