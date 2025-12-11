@@ -1,4 +1,33 @@
-# Shell utility functions
+#==============================================================================
+# Shell Utility Functions
+#==============================================================================
+# Provides 14 utility functions organized by category.
+# All functions include inline "Usage: ..." documentation.
+#
+# File/Directory Management:
+#   - pathadd: Safely add directories to PATH (prevents duplicates)
+#   - mkcd: Create directory and cd into it
+#   - backup: Create timestamped backup of file
+#   - extract: Universal archive extractor (handles tar, zip, gz, etc.)
+#   - dirsize: Show directory sizes sorted by size
+#   - mkdate: Create dated directory with optional prefix
+#
+# Navigation:
+#   - fcd: Fuzzy directory search and cd (requires fzf)
+#   - clear-screen-and-scrollback: Enhanced clear (bound to Ctrl+L)
+#
+# Network:
+#   - myip: Get public IP address
+#   - localip: Get local IP address
+#
+# Development:
+#   - gwt: Git worktree helper (create worktree for branch)
+#   - note: Quick note taking with timestamps
+#   - psgrep: Search for processes by pattern
+#   - killnamed: Kill process by name (with confirmation)
+#
+# See also: examples/git-workflows.md, examples/docker-workflows.md
+#==============================================================================
 
 # Add directories to PATH if not already present
 pathadd() {

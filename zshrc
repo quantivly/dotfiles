@@ -119,6 +119,17 @@ bindkey '^[[3~' delete-char         # Delete
 #==============================================================================
 # Load modular configuration files
 #==============================================================================
+# Loading order is important:
+# 1. history - History settings (must load early)
+# 2. functions - Provides utility functions (pathadd, mkcd, etc.)
+# 3. aliases - Common portable aliases
+# 4. conditionals - Tool-specific config (overrides aliases if tool installed)
+# 5. company - Work-specific settings
+# 6. ~/.zshrc.local - Machine-specific secrets (NOT in git)
+#
+# Note: Conditionals load AFTER aliases, so tool-specific aliases
+# override the basic ones. Example: 'ls' becomes 'eza' if installed.
+#==============================================================================
 
 # History settings
 [ -f ~/.dotfiles/zsh/zshrc.history ] && source ~/.dotfiles/zsh/zshrc.history

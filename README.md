@@ -344,6 +344,45 @@ This dotfiles includes extensive GitHub CLI aliases (see `gh/config.yml`):
 
 **And 25+ more!** See [gh/config.yml](gh/config.yml) for the complete list.
 
+## Workflow Examples
+
+Comprehensive workflow guides are available in the `examples/` directory:
+
+### [Git Workflows](examples/git-workflows.md)
+Step-by-step guides for:
+- Feature branch development
+- Pull request review workflow
+- Merge conflict resolution
+- Quick WIP commits (`gwip`/`gunwip`)
+- Branch cleanup and maintenance
+- Advanced operations (rebase, cherry-pick, stash)
+
+### [Docker Workflows](examples/docker-workflows.md)
+Practical Docker workflows for:
+- Starting and monitoring services
+- Container debugging and inspection
+- Image management and cleanup
+- Networking and volumes
+- Troubleshooting common issues
+
+### [FZF Integration Recipes](examples/fzf-recipes.md)
+Power user tips for:
+- Interactive fuzzy finding (`Ctrl+T`, `Ctrl+R`, `Alt+C`)
+- Custom functions (`fcd`, `fbr`, `fco`, `fshow`)
+- Process management
+- Advanced file operations
+- Git and Docker integration
+
+### [Tool Verification](scripts/verify-tools.sh)
+Check which tools are installed:
+```bash
+./scripts/verify-tools.sh
+```
+
+Shows installation status of all tools (zsh, git, fzf, gh, bat, eza, fd, rg, htop, delta, nvm, pyenv, and more).
+
+See [examples/README.md](examples/README.md) for the complete index.
+
 ## Customization
 
 ### Adding New Modules

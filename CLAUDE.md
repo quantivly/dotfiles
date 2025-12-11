@@ -1,0 +1,483 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Repository Overview
+
+This is a personal dotfiles repository that manages zsh, git, and development tool configurations using [dotbot](https://github.com/anishathalye/dotbot). The configuration is modular, portable across machines, and security-focused with secrets separated from version control.
+
+## Installation & Testing
+
+**Install/update dotfiles:**
+```bash
+./install
+```
+
+This script:
+- Uses dotbot to create symlinks to configuration files
+- Initializes git submodules
+- Creates `~/.zshrc.local` from template if it doesn't exist
+
+**Test changes:**
+```bash
+source ~/.zshrc
+# or
+zsh -i -c exit  # Test for errors
+```
+
+**Profile startup performance:**
+```bash
+time zsh -i -c exit
+```
+
+## Architecture
+
+### Modular Configuration System
+
+The zsh configuration is split into focused modules loaded by `zshrc`:
+
+1. **zshrc.history** - History configuration (50k commands, timestamps, deduplication)
+2. **zshrc.functions** - Utility functions (`pathadd`, `mkcd`, `backup`, `gwt`, etc.)
+3. **zshrc.aliases** - Portable aliases for git, docker, python, system commands
+4. **zshrc.conditionals** - Conditional loading of optional tools (colorls, pyenv, nvm, direnv)
+5. **zshrc.company** - Work-specific configuration (Quantivly)
+6. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
+
+### Symlink Structure
+
+Dotbot creates these symlinks from `install.conf.yaml`:
+- `~/.zshrc` → `~/.dotfiles/zshrc`
+- `~/.p10k.zsh` → `~/.dotfiles/p10k.zsh`
+- `~/.gitconfig` → `~/.dotfiles/gitconfig`
+- `~/.config/gh/config.yml` → `~/.dotfiles/gh/config.yml`
+- `~/.config/git/ignore` → `~/.dotfiles/config/git/ignore`
+
+## Security Rules
+
+**CRITICAL:** Never commit sensitive information. All secrets belong in `~/.zshrc.local`:
+- API keys and tokens
+- SSH key paths
+- Machine-specific environment variables
+- Work-related credentials
+
+The `.gitignore` includes:
+- `*.local`
+- `*.secrets`
+- `.env*`
+- `secrets/`
+
+When editing configuration files, always review changes before committing to ensure no secrets were accidentally included.
+
+## Development Guidelines
+
+### Adding New Configuration
+
+**Add a new zsh module:**
+1. Create `zsh/zshrc.newmodule`
+2. Add source line in `zshrc` around line 120-136:
+   ```bash
+   [ -f ~/.dotfiles/zsh/zshrc.newmodule ] && source ~/.dotfiles/zsh/zshrc.newmodule
+   ```
+3. Test with `source ~/.zshrc`
+
+**Add new symlink:**
+1. Edit `install.conf.yaml`
+2. Add entry under `link:` section
+3. Run `./install` to create symlink
+
+### Modifying Existing Files
+
+**Key files and their purposes:**
+- `zshrc` - Main entry point, loads oh-my-zsh and modules
+- `zsh/zshrc.functions` - Add reusable shell functions here
+- `zsh/zshrc.aliases` - Add portable aliases here
+- `zsh/zshrc.conditionals` - Add tool-specific conditional setup here
+- `gitconfig` - Git configuration (user info is specific to this user)
+- `gh/config.yml` - GitHub CLI aliases (35+ workflow shortcuts)
+
+### Oh-My-Zsh Plugins
+
+Current plugins loaded (line 25-45 in `zshrc`):
+- autojump, colored-man-pages, command-not-found, direnv, extract
+- fzf, gh, git, poetry, safe-paste, sudo, web-search
+- zsh-autosuggestions, zsh-fzf-history-search, zsh-syntax-highlighting
+- quantivly (optional company plugin)
+
+**Note:** `zsh-syntax-highlighting` must be last in the list.
+
+### Configuration Loading Order
+
+Understanding the order in which configuration files are loaded helps debug issues and understand precedence:
+
+```
+Loading Order (from zshrc):
+1. Line 9-11:  Powerlevel10k instant prompt (performance optimization)
+2. Line 47:    oh-my-zsh core and plugins
+3. Line 50:    p10k.zsh theme configuration
+4. Line 124:   zsh/zshrc.history (history settings)
+5. Line 127:   zsh/zshrc.functions (utility functions like pathadd)
+6. Line 130:   zsh/zshrc.aliases (common aliases)
+7. Line 133:   zsh/zshrc.conditionals (tool-specific conditional config)
+8. Line 136:   zsh/zshrc.company (Quantivly work config)
+9. Line 150:   ~/.zshrc.local (machine-specific secrets)
+10. Line 160:  PATH additions
+```
+
+**Key Insight:** Conditionals load AFTER aliases, so conditional aliases override unconditional ones. This is intentional - tools that are installed get priority configuration.
+
+## Tool Dependencies
+
+### Required Tools (Must Install)
+
+These tools are required for the configuration to work properly:
+- **zsh** - The shell itself
+- **oh-my-zsh** - Plugin framework
+- **Powerlevel10k** - Prompt theme (git submodule)
+- **git** - Version control (used extensively)
+
+### Strongly Recommended Tools
+
+These tools significantly enhance the development experience:
+- **fzf** - Fuzzy finder (many functions depend on it: `fcd`, `fbr`, `fco`, `fshow`)
+- **gh** - GitHub CLI (35+ custom aliases configured in `gh/config.yml`)
+
+### Optional Modern CLI Replacements
+
+These tools have intelligent fallback chains - if not installed, standard commands are used:
+
+| Standard Tool | Modern Replacement | Priority | Install Command | Notes |
+|--------------|-------------------|----------|-----------------|-------|
+| cat | bat/batcat | Optional | `apt install bat` or `brew install bat` | Ubuntu uses `batcat` name |
+| ls | eza | First | `cargo install eza` or `brew install eza` | Maintained fork of exa |
+| ls | exa | Second | `apt install exa` or `brew install exa` | Original, unmaintained |
+| ls | colorls | Third | `gem install colorls` | Ruby-based fallback |
+| find | fd/fdfind | Optional | `apt install fd-find` or `brew install fd` | Ubuntu uses `fdfind` name |
+| grep | ripgrep | Optional | `apt install ripgrep` or `brew install ripgrep` | **Warning:** Not fully POSIX compatible |
+| top | htop | Optional | `apt install htop` or `brew install htop` | Interactive process viewer |
+| diff | delta | Optional | See https://github.com/dandavison/delta | Syntax-highlighted diffs |
+
+### Version Managers
+
+Optional tools for managing language versions:
+- **nvm** - Node.js version manager (https://github.com/nvm-sh/nvm)
+- **pyenv** - Python version manager (https://github.com/pyenv/pyenv)
+
+### Other Optional Tools
+
+- **direnv** - Per-directory environment variables (`apt install direnv`)
+- **autojump** - Fast directory navigation (`apt install autojump`)
+- **poetry** - Python dependency management (`pip install poetry`)
+- **xclip** - Clipboard support on Linux (`apt install xclip`)
+
+### Plugin Requirements
+
+Some oh-my-zsh plugins require external tools:
+- `autojump` plugin → requires `autojump` binary
+- `direnv` plugin → requires `direnv` binary
+- `fzf` plugin → requires `fzf` binary
+- `poetry` plugin → requires `poetry` binary
+- `gh` plugin → requires `gh` CLI tool
+- `quantivly` plugin → requires custom plugin installation (work-specific)
+
+**Note:** oh-my-zsh handles missing plugin dependencies gracefully - plugins simply won't activate if their tools aren't installed.
+
+## Command Behavior Changes
+
+When optional tools are installed, these standard commands behave differently:
+
+### grep → ripgrep (rg)
+**Changed by:** `zshrc.conditionals:54`
+**Behavior:** Completely replaces `grep` with `rg` if ripgrep is installed
+**Warning:** ripgrep is NOT fully POSIX compatible - it has different options and behavior
+**Workaround:** Use `\grep` to access original grep, or `command grep` to bypass alias
+
+### find → fd
+**Changed by:** `zshrc.conditionals:44-48`
+**Behavior:** Replaces `find` with `fd` (or `fdfind` on Ubuntu)
+**Key Difference:** fd respects `.gitignore` by default, has different syntax
+**Workaround:** Use `\find` to access original find command
+
+### cat → bat
+**Changed by:** `zshrc.conditionals:10-18`
+**Behavior:** Adds syntax highlighting and line numbers
+**Impact:** May alter output in scripts expecting plain text
+**Workaround:** Use `\cat` for original behavior, or `catp` alias for bat without line numbers
+
+### top → htop
+**Changed by:** `zshrc.conditionals:64-66`
+**Behavior:** Replaces with interactive htop interface
+**Note:** Only active if htop is installed (conditional check)
+**Workaround:** Use `\top` to access original top command
+
+### ls → eza/exa/colorls
+**Changed by:** `zshrc.conditionals:24-39`
+**Behavior:** Priority chain: eza → exa → colorls → standard ls
+**Features:** Icons, colors, git integration, better formatting
+**Workaround:** Use `\ls` or `command ls` for original ls
+
+### Alias Renamed: fd → fdir
+**Location:** `zshrc.aliases:80`
+**Previous:** `alias fd='find . -type d -name'` (find directories)
+**Current:** `alias fdir='find . -type d -name'`
+**Reason:** Avoid conflict with fd-find tool
+**Impact:** If you used `fd` for finding directories, use `fdir` instead
+
+## Important Patterns
+
+### pathadd Function
+
+Always use `pathadd` to add directories to PATH safely:
+```bash
+pathadd "${HOME}/.local/bin"
+pathadd "${HOME}/custom/bin"
+```
+
+This ensures:
+- Directory exists before adding
+- No duplicates in PATH
+- Works across different machines
+
+### Conditional Tool Loading
+
+The `zshrc.conditionals` module checks for tool availability before configuration:
+```bash
+if command -v colorls &> /dev/null; then
+    alias ls='colorls --sd --sf'
+fi
+```
+
+Follow this pattern when adding tool-specific configuration.
+
+### FZF Integration
+
+Several functions use fzf for fuzzy finding:
+- `fcd` - Fuzzy directory navigation
+- `fbr` - Fuzzy git branch selection (defined in conditionals)
+- `fco` - Fuzzy git commit selection
+- `fshow` - Git commit browser
+
+## Git Configuration
+
+**Key git settings:**
+- Default editor: VS Code (`code --wait`)
+- Default branch: `main`
+- Credential helper: GitHub CLI (`gh auth git-credential`)
+- GPG signing: Disabled by default
+- Difftool: VS Code
+
+**Useful git aliases:**
+- `git lg` - Pretty log with graph
+- `git conflicts` - Show files with merge conflicts
+
+## GitHub CLI Aliases
+
+The repository includes 35+ `gh` aliases in `gh/config.yml` for PR and workflow management:
+
+**Most used:**
+- `gh mypr` - Your open PRs
+- `gh prs` - All open non-draft PRs
+- `gh review` - PRs where you're requested as reviewer
+- `gh prmerge` - Squash merge and delete branch
+- `gh runs` - Recent workflow runs for current branch
+
+## Common Tasks
+
+**Update oh-my-zsh plugins:**
+```bash
+git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+```
+
+**Reload zsh config:**
+```bash
+source ~/.zshrc
+# or use alias
+zshreload
+```
+
+**Edit machine-specific config:**
+```bash
+vim ~/.zshrc.local  # or: localrc
+chmod 600 ~/.zshrc.local
+```
+
+**View PATH entries:**
+```bash
+path  # alias for: echo $PATH | tr ":" "\n"
+```
+
+**Verify tool installation status:**
+```bash
+./scripts/verify-tools.sh
+# Shows which tools are installed and which are missing
+```
+
+## Workflow Examples
+
+Comprehensive workflow guides are available in the `examples/` directory:
+
+### Git Workflows (`examples/git-workflows.md`)
+
+Step-by-step guides for common Git operations:
+- **Feature Branch Development** - Complete workflow from branch creation to PR
+- **Merge Conflict Resolution** - Handling conflicts when pulling or merging
+- **Pull Request Review** - Reviewing and approving team PRs locally
+- **Quick WIP Commits** - Temporary commits with `gwip`/`gunwip`
+- **Branch Cleanup** - Removing old and merged branches
+- **Advanced Operations** - Interactive rebase, cherry-pick, stash
+
+Quick examples:
+```bash
+# Create feature branch and PR
+gcb feature/my-feature && gaa && gcam "feat: My feature" && gp && gh pr create --web
+
+# Review PR locally
+gh review | head -5  # See PRs needing review
+gh co 123 && gd && gh approve && gh prmerge
+
+# WIP workflow
+gwip  # Save work temporarily
+# ... switch branches ...
+gunwip  # Restore work as uncommitted changes
+```
+
+### Docker Workflows (`examples/docker-workflows.md`)
+
+Practical Docker and Docker Compose workflows:
+- **Start and Monitor Services** - Using docker-compose for local development
+- **Container Debugging** - Accessing shells, viewing logs, inspecting state
+- **Image Management** - Building, pushing, and cleaning up images
+- **Cleanup Workflows** - Safe and aggressive cleanup strategies
+- **Networking and Volumes** - Managing networks and persistent data
+- **Troubleshooting** - Common issues and solutions
+
+Quick examples:
+```bash
+# Start services and check logs
+dcup && dps && dclogs
+
+# Debug container
+dex myapp bash
+
+# Cleanup workflow
+dstop && drm && dclean
+```
+
+### FZF Integration Recipes (`examples/fzf-recipes.md`)
+
+Interactive fuzzy finding workflows:
+- **Built-in Keybindings** - Ctrl+T (files), Ctrl+R (history), Alt+C (directories)
+- **Custom Functions** - `fcd`, `fbr`, `fco`, `fshow`
+- **Process Management** - Kill processes interactively
+- **File Operations** - Open files, copy paths, bulk operations
+- **Git Integration** - Interactive staging, commit selection, cherry-picking
+- **Docker Integration** - Select containers for exec, logs, stop
+
+Quick examples:
+```bash
+# Fuzzy file search with preview
+Ctrl+T  # then select file
+
+# Fuzzy git branch checkout
+fbr
+
+# Browse git history with preview
+fshow
+
+# Kill process interactively
+kill -9 $(ps aux | fzf | awk '{print $2}')
+```
+
+### Tool Verification Script
+
+Check which tools are installed:
+```bash
+./scripts/verify-tools.sh
+```
+
+This script shows:
+- Required tools (zsh, git) with versions
+- Recommended tools (fzf, gh) installation status
+- Modern CLI replacements (bat, eza, fd, rg, htop, delta)
+- Version managers (nvm, pyenv)
+- Optional tools (direnv, autojump, poetry, docker)
+- Oh-My-Zsh plugins (zsh-autosuggestions, zsh-syntax-highlighting)
+
+## Troubleshooting
+
+### Slow zsh startup
+- Profile with: `PS4='+ %D{%s.%.} %N:%i> ' && set -x && source ~/.zshrc && set +x`
+- Profile performance: `time zsh -i -c exit`
+- Disable slow plugins in `~/.zshrc.local`: `plugins=(${plugins:#poetry})`
+- Common culprits: nvm initialization, pyenv, poetry completions
+
+### Function not found
+- Ensure `zsh/zshrc.functions` is being sourced
+- Check symlink: `ls -la ~/.zshrc`
+- Re-run: `./install`
+- Verify no syntax errors: `zsh -n ~/.zshrc`
+
+### Tool not loading
+- Check if tool is installed: `command -v toolname`
+- Review `zsh/zshrc.conditionals` for conditional logic
+- Reload config: `source ~/.zshrc` or `zshreload`
+
+### Command not found after adding tool
+- Reload zsh configuration: `source ~/.zshrc` or `zshreload`
+- Verify tool is actually installed: `command -v toolname`
+- Check which configuration file should load it (see Configuration Loading Order above)
+- Ensure the tool's binary is in PATH: `echo $PATH | tr ":" "\n"`
+
+### Unexpected command behavior
+- Check if command has been aliased: `alias commandname`
+- See what actually runs: `type commandname` or `which commandname`
+- Use backslash to bypass alias: `\grep` instead of `grep`
+- Use `command` prefix to skip aliases: `command grep` instead of `grep`
+- Check zshrc.conditionals for tool replacement overrides
+
+### Alias conflicts
+- List all current aliases: `alias`
+- List specific alias: `alias aliasname`
+- Find where alias is defined: `grep -r "alias aliasname=" ~/.dotfiles/`
+- Override in `~/.zshrc.local` if needed: `unalias aliasname` then define your own
+- Temporarily disable: `\commandname` or `command commandname`
+
+### htop not found when running 'top'
+- This was a bug fixed in recent updates
+- Manually check if htop is installed: `command -v htop`
+- Install htop: `apt install htop` or `brew install htop`
+- Verify fix: The htop alias should only exist in `zshrc.conditionals:64-66` (conditional)
+- If still broken: Check that line 119 in `zshrc.aliases` does NOT have `alias top='htop'`
+
+### Git authentication issues
+- GitHub CLI handles credentials: `gh auth status`
+- Re-authenticate if needed: `gh auth login`
+- Credential helper configured in `gitconfig:11-16`
+
+### fzf functions not working (fbr, fco, fshow)
+- Check if fzf is installed: `command -v fzf`
+- Install fzf: `apt install fzf` or `brew install fzf`
+- Verify functions are defined: `type fbr`
+- These functions are defined in `zshrc.conditionals:107-132`
+
+### PATH not including custom directories
+- Use `pathadd` function for safety: `pathadd "${HOME}/mybin"`
+- Add to `~/.zshrc.local` for machine-specific paths
+- View current PATH: `path` alias or `echo $PATH | tr ":" "\n"`
+- Check order: Earlier entries take precedence
+
+### Oh-My-Zsh plugin not loading
+- Verify plugin exists: `ls ~/.oh-my-zsh/custom/plugins/`
+- For third-party plugins, ensure they're installed (e.g., zsh-autosuggestions)
+- Check plugin name matches directory name exactly
+- Reload after adding: `source ~/.zshrc`
+
+### Syntax errors or zsh won't start
+- Check syntax without running: `zsh -n ~/.zshrc`
+- Look for common issues: unmatched quotes, unclosed blocks
+- Test individual modules:
+  ```bash
+  zsh -n ~/.dotfiles/zsh/zshrc.aliases
+  zsh -n ~/.dotfiles/zsh/zshrc.functions
+  zsh -n ~/.dotfiles/zsh/zshrc.conditionals
+  ```
+- Temporarily disable modules by commenting out source lines in main `zshrc`
