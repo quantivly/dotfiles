@@ -35,7 +35,6 @@ Personal configuration files for zsh, git, and various development tools, manage
 ├── zshrc                    # Main zsh config (sources modular files)
 ├── p10k.zsh                 # Powerlevel10k theme configuration
 ├── install.conf.yaml        # Dotbot installation configuration
-├── ENHANCEMENTS.md          # Detailed list of all enhancements and improvements
 └── README.md                # This file
 ```
 
@@ -223,20 +222,102 @@ Machine-specific settings that should NEVER be committed:
 4. **Rotate exposed tokens** - If you accidentally commit secrets, rotate them immediately
 5. **Use .gitignore** - The included `.gitignore` prevents common secret files from being committed
 
-## Recent Enhancements
+## Key Features
 
-This configuration has been significantly enhanced with modern best practices. See **[ENHANCEMENTS.md](ENHANCEMENTS.md)** for complete details.
+### Shell Enhancements
 
-**Highlights:**
-- ⚡ **Performance**: Optimized P10k instant prompt loading
-- 🔌 **Plugins**: Added extract, fzf, colored-man-pages, safe-paste, command-not-found
-- 🛠️ **Functions**: 15+ new utility functions (mkcd, backup, note, psgrep, gwt, etc.)
-- 🔗 **Aliases**: 40+ new aliases for git, docker, and system operations
-- 🚀 **Modern Tools**: Automatic integration with bat, eza, fd, ripgrep, delta, htop
-- 🔍 **FZF**: Comprehensive fuzzy finding for files, directories, git operations
-- ⌨️ **Key Bindings**: Ctrl/Alt+Arrow word movement, proper Home/End/Delete
-- 🎛️ **ZSH Options**: AUTO_CD, EXTENDED_GLOB, CORRECT, case-insensitive completion
-- 🐙 **GitHub CLI**: 35+ gh aliases for PR management, reviews, CI/CD, and workflows
+**Navigation:**
+- `AUTO_CD` - Type directory name without cd command
+- Smart directory stack with duplicate prevention
+- Fuzzy directory search with `fcd`
+
+**Completion:**
+- Case-insensitive tab completion
+- Colored completion matching your LS_COLORS
+- Menu selection with arrow keys
+- Complete from within a word/phrase
+
+**History:**
+- 50,000 commands stored with timestamps
+- Smart duplicate removal
+- Shared across all sessions
+- Ignores common commands (ls, cd, pwd)
+
+**Key Bindings:**
+- Ctrl/Alt + Arrow keys for word movement
+- Proper Home/End/Delete key support
+- Ctrl+L clears screen and scrollback
+
+### Utility Functions
+
+**File & Directory:**
+- `mkcd <dir>` - Create directory and cd into it
+- `backup <file>` - Create timestamped backup
+- `extract <file>` - Universal archive extractor
+- `dirsize [dir]` - Show directory sizes sorted
+
+**Network:**
+- `myip` - Display public IP
+- `localip` - Display local IP
+
+**Development:**
+- `note <msg>` - Quick timestamped notes
+- `psgrep <pattern>` - Find processes
+- `killnamed <name>` - Kill processes by name
+- `gwt <branch>` - Git worktree wrapper
+
+### Modern CLI Tool Integration
+
+The configuration automatically detects and uses modern alternatives:
+
+| Standard | Modern Alternative | Benefit |
+|----------|-------------------|---------|
+| `cat` | `bat` | Syntax highlighting, line numbers |
+| `ls` | `eza`/`exa` | Colors, icons, better formatting |
+| `find` | `fd` | Faster, respects .gitignore |
+| `grep` | `ripgrep` | Much faster recursive search |
+| `top` | `htop` | Better process viewer |
+| git diff | `delta` | Syntax highlighting in diffs |
+
+Tools are only used if installed. Use `\command` to bypass aliases (e.g., `\cat`, `\ls`).
+
+### FZF Integration
+
+Fuzzy finding for:
+- Files and directories (`Ctrl+T`, `Alt+C`)
+- Command history (`Ctrl+R`)
+- Git branches: `fbr`
+- Git commits: `fco`
+- Git commit browser: `fshow`
+
+### Enhanced Aliases
+
+**Git shortcuts:**
+```bash
+gaa    # git add --all
+gcam   # git commit -am
+glogp  # Pretty git log with colors
+gundo  # Undo last commit (soft)
+gwip   # Quick WIP commit
+```
+
+**Docker shortcuts:**
+```bash
+dps    # docker ps
+dex    # docker exec -it
+dcup   # docker compose up -d
+dclogs # docker compose logs -f
+dclean # docker system prune
+```
+
+**System shortcuts:**
+```bash
+zshreload  # Reload zsh config
+localrc    # Edit ~/.zshrc.local
+c          # clear
+..         # cd ..
+...        # cd ../..
+```
 
 ## GitHub CLI Aliases
 
@@ -261,7 +342,7 @@ This dotfiles includes extensive GitHub CLI aliases (see `gh/config.yml`):
 - `gh runwatch` - Watch workflow run in real-time
 - `gh rerun` - Rerun failed workflow
 
-**And 25+ more!** See [gh/config.yml](gh/config.yml) or [ENHANCEMENTS.md](ENHANCEMENTS.md) for the complete list.
+**And 25+ more!** See [gh/config.yml](gh/config.yml) for the complete list.
 
 ## Customization
 
