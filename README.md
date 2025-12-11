@@ -177,7 +177,6 @@ Comprehensive history settings including:
 
 Utility functions:
 - `pathadd` - Safely add directories to PATH
-- `clear-screen-and-scrollback` - Enhanced clear (Ctrl+L)
 
 ### zshrc.aliases
 
@@ -246,7 +245,6 @@ Machine-specific settings that should NEVER be committed:
 **Key Bindings:**
 - Ctrl/Alt + Arrow keys for word movement
 - Proper Home/End/Delete key support
-- Ctrl+L clears screen and scrollback
 
 ### Utility Functions
 

@@ -134,7 +134,7 @@ bindkey '^[[3~' delete-char         # Delete
 # History settings
 [ -f ~/.dotfiles/zsh/zshrc.history ] && source ~/.dotfiles/zsh/zshrc.history
 
-# Utility functions (pathadd, clear-screen-and-scrollback, etc.)
+# Utility functions (pathadd, mkcd, backup, etc.)
 [ -f ~/.dotfiles/zsh/zshrc.functions ] && source ~/.dotfiles/zsh/zshrc.functions
 
 # Common aliases

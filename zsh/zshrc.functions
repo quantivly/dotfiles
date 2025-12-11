@@ -1,7 +1,7 @@
 #==============================================================================
 # Shell Utility Functions
 #==============================================================================
-# Provides 14 utility functions organized by category.
+# Provides 13 utility functions organized by category.
 # All functions include inline "Usage: ..." documentation.
 #
 # File/Directory Management:
@@ -14,7 +14,6 @@
 #
 # Navigation:
 #   - fcd: Fuzzy directory search and cd (requires fzf)
-#   - clear-screen-and-scrollback: Enhanced clear (bound to Ctrl+L)
 #
 # Network:
 #   - myip: Get public IP address
@@ -41,18 +40,6 @@ pathadd() {
     fi
   done
 }
-
-# Enhanced clear that also clears scrollback
-clear-screen-and-scrollback() {
-  builtin echoti civis >"$TTY"
-  builtin print -rn -- $'\e[H\e[2J' >"$TTY"
-  builtin zle .reset-prompt
-  builtin zle -R
-  builtin print -rn -- $'\e[3J' >"$TTY"
-  builtin echoti cnorm >"$TTY"
-}
-zle -N clear-screen-and-scrollback
-bindkey '^L' clear-screen-and-scrollback
 
 # Create directory and cd into it
 mkcd() {
