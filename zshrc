@@ -23,22 +23,17 @@ zstyle ':omz:update' mode auto
 # Plugins to load
 # Note: zsh-syntax-highlighting must be last in the list
 plugins=(
-    autojump         # Fast directory navigation (requires: autojump)
     colored-man-pages # Colorized man pages for better readability
     command-not-found # Suggest package installation for missing commands (Ubuntu/Debian)
-    copyfile         # Copy file contents to clipboard
-    copybuffer       # Copy command line to clipboard
     direnv           # Per-directory environment variables (requires: direnv)
     extract          # Universal archive extractor (extract <file>)
     fzf              # Fuzzy finder integration (requires: fzf)
     gh               # GitHub CLI completions
     git              # Git aliases and functions
-    github           # GitHub utilities
     poetry           # Python poetry completions (requires: poetry)
     quantivly        # Company-specific plugin (optional)
     safe-paste       # Prevent accidental execution of pasted commands
     sudo             # Prefix command with sudo via ESC ESC
-    web-search       # Search web from terminal
     zsh-autosuggestions      # Fish-like autosuggestions (requires manual install)
     zsh-fzf-history-search   # FZF history search (requires manual install)
     zsh-syntax-highlighting  # Fish-like syntax highlighting (requires manual install, must be last)

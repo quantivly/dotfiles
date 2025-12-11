@@ -45,6 +45,7 @@ alias gunwip='git log -n 1 | grep -q -c "WIP:" && git reset HEAD~1'
 # Directory shortcuts
 alias home='cd ~'
 alias dots='cd ~/.dotfiles'
+alias fhome='fcd ~'  # Fuzzy navigate home directory
 
 # System
 alias reload='source ~/.zshrc'
