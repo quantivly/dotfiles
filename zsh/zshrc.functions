@@ -21,7 +21,7 @@
 #   - localip: Get local IP address
 #
 # Development:
-#   - gwt: Git worktree helper (create worktree for branch)
+#   - gwtc: Git worktree create helper (create worktree in ../worktrees/<branch>)
 #   - note: Quick note taking with timestamps
 #   - psgrep: Search for processes by pattern
 #   - killnamed: Kill process by name (with confirmation)
@@ -181,12 +181,14 @@ dirsize() {
   du -sh "${1:-.}"/* 2>/dev/null | sort -h
 }
 
-# Git worktree wrapper
-gwt() {
-  # Usage: gwt <branch_name>
-  # Creates a git worktree in ../worktrees/<branch_name>
+# Git worktree wrapper - creates worktree in ../worktrees/<branch>
+# Note: 'gwt' is already defined by oh-my-zsh git plugin as 'git worktree'
+# So we use 'gwtc' (git worktree create) for this helper function
+gwtc() {
+  # Usage: gwtc <branch_name>
+  # Creates a git worktree in ../worktrees/<branch_name> and cd into it
   if [ $# -ne 1 ]; then
-    echo "Usage: gwt <branch_name>"
+    echo "Usage: gwtc <branch_name>"
     echo "Creates a git worktree in ../worktrees/<branch_name>"
     return 1
   fi
