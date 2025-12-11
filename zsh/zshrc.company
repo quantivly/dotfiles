@@ -1,0 +1,20 @@
+# Quantivly-specific configuration
+# This file contains work-related settings and should be loaded conditionally
+
+# Only load if the quantivly plugin is available
+if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
+  # Quantivly development environment settings
+  # These can be overridden in ~/.zshrc.local for machine-specific values
+  export Q_MODE="${Q_MODE:-development}"
+  export Q_DEV_CODE_ROOT="${Q_DEV_CODE_ROOT:-${HOME}/stacks/dev}"
+  export Q_WORKSPACES_ROOT="${Q_WORKSPACES_ROOT:-${HOME}/workspaces}"
+  export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
+  export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
+
+  # Note: The quantivly plugin provides:
+  # - pathadd function (already defined in zshrc.functions as fallback)
+  # - qn, qg, qh, qp commands (quanticli shortcuts)
+  # - dsh function (Docker shell access)
+  # - Various Docker and git aliases
+  # - IP_ADDRESS and EXTRA_HOSTS environment variables
+fi

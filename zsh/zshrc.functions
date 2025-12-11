@@ -1,0 +1,26 @@
+# Shell utility functions
+
+# Add directories to PATH if not already present
+pathadd() {
+  # Usage: pathadd <directory1> [directory2 ...]
+  # Adds one or more directories to PATH only if they exist and aren't already in PATH
+  for dir in "$@"; do
+    if [ -d "$dir" ]; then
+      if [[ ":$PATH:" != *":$dir:"* ]]; then
+        PATH="${PATH:+"$PATH:"}$dir"
+      fi
+    fi
+  done
+}
+
+# Enhanced clear that also clears scrollback
+clear-screen-and-scrollback() {
+  builtin echoti civis >"$TTY"
+  builtin print -rn -- $'\e[H\e[2J' >"$TTY"
+  builtin zle .reset-prompt
+  builtin zle -R
+  builtin print -rn -- $'\e[3J' >"$TTY"
+  builtin echoti cnorm >"$TTY"
+}
+zle -N clear-screen-and-scrollback
+bindkey '^L' clear-screen-and-scrollback

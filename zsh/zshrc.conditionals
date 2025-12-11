@@ -1,0 +1,65 @@
+# Optional tool configurations - only loaded if tools are installed
+
+# colorls - Ruby gem for colorized ls output
+# Install: gem install colorls
+if command -v colorls &> /dev/null; then
+  alias ls='colorls -A --sd --gs'
+fi
+
+# autojump - Fast directory navigation
+# Install: brew install autojump (macOS) or apt install autojump (Ubuntu)
+# Note: oh-my-zsh plugin also needs to be enabled in main zshrc
+
+# direnv - Environment variable manager per directory
+# Install: brew install direnv (macOS) or apt install direnv (Ubuntu)
+# Note: oh-my-zsh plugin handles the setup if enabled
+
+# NVM - Node Version Manager
+# Install: https://github.com/nvm-sh/nvm#installing-and-updating
+export NVM_DIR="${HOME}/.nvm"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+  \. "$NVM_DIR/nvm.sh"  # This loads nvm
+fi
+if [ -s "$NVM_DIR/bash_completion" ]; then
+  \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+fi
+
+# pyenv - Python version manager
+# Install: https://github.com/pyenv/pyenv#installation
+if [ -d "${HOME}/.pyenv" ]; then
+  export PYENV_ROOT="${HOME}/.pyenv"
+  command -v pyenv >/dev/null || export PATH="${PYENV_ROOT}/bin:${PATH}"
+  eval "$(pyenv init -)"
+fi
+
+# GPG signing setup
+# Required for git commit signing
+export GPG_TTY=$(tty)
+
+# SSH agent setup
+# Only configure if not already set up by system
+if [ -z "$SSH_AUTH_SOCK" ]; then
+  # Try XDG_RUNTIME_DIR first (systemd systems)
+  if [ -n "$XDG_RUNTIME_DIR" ] && [ -S "$XDG_RUNTIME_DIR/ssh-agent.socket" ]; then
+    export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+  else
+    # Fall back to starting ssh-agent if needed
+    if ! ssh-add -l &>/dev/null; then
+      eval "$(ssh-agent -s)" >/dev/null
+    fi
+  fi
+fi
+
+# Editor configuration
+# Use VS Code if available, fall back to vim
+if command -v code &> /dev/null; then
+  export EDITOR='code --wait'
+  export VISUAL='code --wait'
+elif command -v vim &> /dev/null; then
+  export EDITOR='vim'
+  export VISUAL='vim'
+fi
+
+# Locale settings
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8

@@ -1,189 +1,93 @@
-# If you come from bash you might have to change your $PATH.
-# export PATH=${HOME}/bin:/usr/local/bin:$PATH
+# Zvi's zsh configuration
+# Modular structure for maintainability and portability
 
-# Path to your oh-my-zsh installation.
+#==============================================================================
+# oh-my-zsh setup
+#==============================================================================
+
 export ZSH="${HOME}/.oh-my-zsh"
-
-# Set name of the theme to load --- if set to "random", it will
-# load a random theme each time oh-my-zsh is loaded, in which case,
-# to know which specific one was loaded, run: echo $RANDOM_THEME
-# See https://github.com/ohmyzsh/ohmyzsh/wiki/Themes
 ZSH_THEME="powerlevel10k/powerlevel10k"
 
-# Set list of themes to pick from when loading at random
-# Setting this variable when ZSH_THEME=random will cause zsh to load
-# a theme from this variable instead of looking in $ZSH/themes/
-# If set to an empty array, this variable will have no effect.
-# ZSH_THEME_RANDOM_CANDIDATES=( "robbyrussell" "agnoster" )
+# Auto-update without prompting
+zstyle ':omz:update' mode auto
 
-# Uncomment the following line to use case-sensitive completion.
-# CASE_SENSITIVE="true"
-
-# Uncomment the following line to use hyphen-insensitive completion.
-# Case-sensitive completion must be off. _ and - will be interchangeable.
-# HYPHEN_INSENSITIVE="true"
-
-# Uncomment one of the following lines to change the auto-update behavior
-# zstyle ':omz:update' mode disabled  # disable automatic updates
-zstyle ':omz:update' mode auto # update automatically without asking
-# zstyle ':omz:update' mode reminder  # just remind me to update when it's time
-
-# Uncomment the following line to change how often to auto-update (in days).
-# zstyle ':omz:update' frequency 13
-
-# Uncomment the following line if pasting URLs and other text is messed up.
-# DISABLE_MAGIC_FUNCTIONS="true"
-
-# Uncomment the following line to disable colors in ls.
-# DISABLE_LS_COLORS="true"
-
-# Uncomment the following line to disable auto-setting terminal title.
-# DISABLE_AUTO_TITLE="true"
-
-# Uncomment the following line to enable command auto-correction.
-# ENABLE_CORRECTION="true"
-
-# Uncomment the following line to display red dots whilst waiting for completion.
-# You can also set it to another string to have that shown instead of the default red dots.
-# e.g. COMPLETION_WAITING_DOTS="%F{yellow}waiting...%f"
-# Caution: this setting can cause issues with multiline prompts in zsh < 5.7.1 (see #5765)
-# COMPLETION_WAITING_DOTS="true"
-
-# Uncomment the following line if you want to disable marking untracked files
-# under VCS as dirty. This makes repository status check for large repositories
-# much, much faster.
-# DISABLE_UNTRACKED_FILES_DIRTY="true"
-
-# Uncomment the following line if you want to change the command execution time
-# stamp shown in the history command output.
-# You can set one of the optional three formats:
-# "mm/dd/yyyy"|"dd.mm.yyyy"|"yyyy-mm-dd"
-# or set a custom format using the strftime function format specifications,
-# see 'man strftime' for details.
-# HIST_STAMPS="mm/dd/yyyy"
-
-# Would you like to use another custom folder than $ZSH/custom?
-# ZSH_CUSTOM=/path/to/new-custom-folder
-
-# Which plugins would you like to load?
-# Standard plugins can be found in $ZSH/plugins/
-# Custom plugins may be added to $ZSH_CUSTOM/plugins/
-# Example format: plugins=(rails git textmate ruby lighthouse)
-# Add wisely, as too many plugins slow down shell startup.
+# Plugins to load
+# Note: zsh-syntax-highlighting must be last in the list
 plugins=(
-    autojump
-    copyfile
-    copybuffer
-    direnv
-    gh
-    git
-    github
-    poetry
-    quantivly
-    sudo
-    web-search
-    zsh-autosuggestions
-    zsh-fzf-history-search
-    zsh-syntax-highlighting
+    autojump         # Fast directory navigation (requires: autojump)
+    copyfile         # Copy file contents to clipboard
+    copybuffer       # Copy command line to clipboard
+    direnv           # Per-directory environment variables (requires: direnv)
+    gh               # GitHub CLI completions
+    git              # Git aliases and functions
+    github           # GitHub utilities
+    poetry           # Python poetry completions (requires: poetry)
+    quantivly        # Company-specific plugin (optional)
+    sudo             # Prefix command with sudo via ESC ESC
+    web-search       # Search web from terminal
+    zsh-autosuggestions      # Fish-like autosuggestions (requires manual install)
+    zsh-fzf-history-search   # FZF history search (requires manual install)
+    zsh-syntax-highlighting  # Fish-like syntax highlighting (requires manual install, must be last)
 )
 
 source "${ZSH}/oh-my-zsh.sh"
 
-# User configuration
+#==============================================================================
+# Powerlevel10k instant prompt
+#==============================================================================
 
-# export MANPATH="/usr/local/man:$MANPATH"
+# Enable Powerlevel10k instant prompt (should stay close to top of zshrc)
+if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
 
-# You may need to manually set your language environment
-# export LANG=en_US.UTF-8
-
-# Preferred editor for local and remote sessions
-# if [[ -n $SSH_CONNECTION ]]; then
-#   export EDITOR='vim'
-# else
-#   export EDITOR='mvim'
-# fi
-
-# Compilation flags
-# export ARCHFLAGS="-arch x86_64"
-
-# Set personal aliases, overriding those provided by oh-my-zsh libs,
-# plugins, and themes. Aliases can be placed here, though oh-my-zsh
-# users are encouraged to define aliases within the ZSH_CUSTOM folder.
-# For a full list of active aliases, run `alias`.
-#
-# Example aliases
-# alias zshconfig="mate ~/.zshrc"
-# alias ohmyzsh="mate ~/.oh-my-zsh"
-alias ls="colorls -A --sd --gs"
-
-# To customize prompt, run `p10k configure` or edit ~/.p10k.zsh.
+# To customize prompt, run `p10k configure` or edit ~/.p10k.zsh
 [[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
 
-source "/home/ubuntu/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+#==============================================================================
+# Load modular configuration files
+#==============================================================================
 
-pathadd "${HOME}/dcm4che-5.29.2/bin/"
-pathadd "${HOME}/.local/bin"
-pathadd "${HOME}/.docker/cli-plugins"
+# History settings
+[ -f ~/.dotfiles/zsh/zshrc.history ] && source ~/.dotfiles/zsh/zshrc.history
 
-# Set up pyenv
-export PYENV_ROOT="${HOME}/.pyenv"
-command -v pyenv >/dev/null || export PATH="${PYENV_ROOT}/bin:${PATH}"
-eval "$(pyenv init -)"
+# Utility functions (pathadd, clear-screen-and-scrollback, etc.)
+[ -f ~/.dotfiles/zsh/zshrc.functions ] && source ~/.dotfiles/zsh/zshrc.functions
 
-# This is required for GPG signing to work correctly.
-# https://github.com/keybase/keybase-issues/issues/2798#issue-205008630
-export GPG_TTY=$(tty)
+# Common aliases
+[ -f ~/.dotfiles/zsh/zshrc.aliases ] && source ~/.dotfiles/zsh/zshrc.aliases
 
-#
-# SSH
-#
-export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+# Optional tool configurations (colorls, pyenv, nvm, etc.)
+[ -f ~/.dotfiles/zsh/zshrc.conditionals ] && source ~/.dotfiles/zsh/zshrc.conditionals
 
-# Check if ssh-agent is actually running and accessible
-if ! ssh-add -l >/dev/null 2>&1; then
-    eval "$(ssh-agent -s)" >/dev/null
-    export SSH_AUTH_SOCK="$SSH_AUTH_SOCK"
-fi
+# Company/work-specific configuration
+[ -f ~/.dotfiles/zsh/zshrc.company ] && source ~/.dotfiles/zsh/zshrc.company
 
-# Add your SSH key to the agent silently
-SSH_KEY_PATH="${HOME}/.ssh/gh"
-if [ -f "$SSH_KEY_PATH" ]; then
-    ssh-add -l >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        ssh-add "${SSH_KEY_PATH}" >/dev/null 2>&1
-    fi
-fi
+#==============================================================================
+# Machine-specific configuration
+#==============================================================================
 
-# Set locations for the stacks and configured workspaces:
-export Q_MODE="development"
-export Q_DEV_CODE_ROOT="${HOME}/stacks/dev"
-export Q_WORKSPACES_ROOT="${HOME}/workspaces"
-export Q_WORKSPACE_NAME="test"
-export Q_TEST_WORKSPACE_NAME="cicd"
-
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
-[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
-
-# Secrets are loaded from ~/.zshrc.local (not in git)
-# Example:
-#   export DOCKERHUB_USERNAME=your-username
-#   export DOCKERHUB_TOKEN=your-token
-#   export LINEAR_API_KEY=your-key
-
-# Load local secrets (never commit this file!)
+# Load machine-specific settings and secrets
+# This file is NOT tracked in git
+# Examples of what to put here:
+#   - API keys and tokens
+#   - Machine-specific PATH additions
+#   - SSH key configuration
+#   - Custom aliases for this machine only
+#   - Override Q_MODE or other work variables
 if [ -f ~/.zshrc.local ]; then
     source ~/.zshrc.local
 fi
 
-# Clear the terminal with Ctrl+L
-function clear-screen-and-scrollback() {
-  builtin echoti civis >"$TTY"
-  builtin print -rn -- $'\e[H\e[2J' >"$TTY"
-  builtin zle .reset-prompt
-  builtin zle -R
-  builtin print -rn -- $'\e[3J' >"$TTY"
-  builtin echoti cnorm >"$TTY"
-}
-zle -N clear-screen-and-scrollback
-bindkey '^L' clear-screen-and-scrollback
+#==============================================================================
+# PATH additions
+#==============================================================================
+
+# Add common directories to PATH (if they exist)
+# Machine-specific paths should go in ~/.zshrc.local
+pathadd "${HOME}/.local/bin"
+pathadd "${HOME}/.docker/cli-plugins"
+
+# Note: Add machine-specific paths in ~/.zshrc.local, such as:
+#   pathadd "${HOME}/dcm4che-5.29.2/bin/"
+#   pathadd "${HOME}/go/bin"

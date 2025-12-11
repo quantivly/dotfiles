@@ -16,3 +16,11 @@
 
 - shell:
   - [git submodule update --init --recursive, Installing submodules]
+  - |
+    # Create ~/.zshrc.local if it doesn't exist
+    if [ ! -f ~/.zshrc.local ]; then
+      echo "Creating ~/.zshrc.local from template..."
+      cp ~/.dotfiles/zsh/zshrc.local.example ~/.zshrc.local
+      chmod 600 ~/.zshrc.local
+      echo "Please edit ~/.zshrc.local to add machine-specific configuration"
+    fi

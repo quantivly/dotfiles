@@ -1,0 +1,21 @@
+# History configuration
+
+# History file location
+HISTFILE="${HOME}/.zsh_history"
+
+# Number of commands to keep in memory
+HISTSIZE=50000
+
+# Number of commands to save to file
+SAVEHIST=50000
+
+# History options
+setopt EXTENDED_HISTORY          # Record timestamp of command in HISTFILE
+setopt HIST_EXPIRE_DUPS_FIRST    # Delete duplicates first when HISTFILE size exceeds HISTSIZE
+setopt HIST_IGNORE_DUPS          # Ignore duplicated commands history list
+setopt HIST_IGNORE_SPACE         # Ignore commands that start with space
+setopt HIST_VERIFY               # Show command with history expansion before running it
+setopt SHARE_HISTORY             # Share command history between all sessions
+setopt HIST_SAVE_NO_DUPS         # Don't write duplicate entries in the history file
+setopt HIST_FIND_NO_DUPS         # Don't display duplicates when searching history
+setopt INC_APPEND_HISTORY        # Write to history file immediately, not when shell exits
