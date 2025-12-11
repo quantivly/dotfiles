@@ -1,0 +1,9 @@
+# Ignore sensitive files
+**/hosts.yml
+**/*token*
+**/*secret*
+**/*password*
+
+# OS files
+.DS_Store
+Thumbs.db

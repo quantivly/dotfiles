@@ -1,0 +1,12 @@
+- defaults:
+    link:
+      relink: true
+      create: true
+
+- clean: ['~']
+
+- link:
+    ~/.config/gh/config.yml: gh/config.yml
+
+- shell:
+  - [git submodule update --init --recursive, Installing submodules]
