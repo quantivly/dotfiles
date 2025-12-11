@@ -9,7 +9,6 @@
     ~/.config/gh/config.yml: gh/config.yml
     ~/.config/git/ignore: config/git/ignore
     ~/.gitconfig: gitconfig
-    ~/.zshrc: zshrc
     ~/.p10k.zsh:
       path: p10k.zsh
       if: '[ -f p10k.zsh ]'
