@@ -135,7 +135,7 @@ if command -v fzf &> /dev/null; then
   }
 
   # fzf-home-widget - Fuzzy navigate home directory with keybinding
-  # Keybinding: Alt+Shift+H
+  # Keybinding: Ctrl+Alt+H
   fzf-home-widget() {
     local dir
     dir=$(find "${HOME}" -type d 2>/dev/null | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
@@ -145,7 +145,7 @@ if command -v fzf &> /dev/null; then
     fi
   }
   zle -N fzf-home-widget
-  bindkey '^[H' fzf-home-widget  # Alt+Shift+H
+  bindkey '\e^H' fzf-home-widget  # Ctrl+Alt+H
 fi
 
 #==============================================================================
