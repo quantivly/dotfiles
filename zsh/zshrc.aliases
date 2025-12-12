@@ -18,29 +18,23 @@ alias cp='cp -i'
 alias mv='mv -i'
 alias ln='ln -i'
 
-# Git aliases (beyond what oh-my-zsh git plugin provides)
-alias gst='git status'
-alias gco='git checkout'
-alias gcb='git checkout -b'
-alias gp='git push'
-alias gl='git pull'
-alias gf='git fetch'
-alias gcm='git commit -m'
-alias gca='git commit --amend'
-alias gcam='git commit -am'
-alias gaa='git add --all'
-alias gap='git add -p'
+# Git aliases (only ones NOT provided by oh-my-zsh git plugin)
+# Note: oh-my-zsh provides: gst, gco, gcb, gp, gl, gf, gcm, gca, gaa, gap, gd, grh
+# See: ~/.oh-my-zsh/plugins/git/git.plugin.zsh
+alias gcam='git commit -am'  # oh-my-zsh doesn't have this variant
 alias glog='git log --oneline --graph --decorate'
-alias gloga='git log --oneline --graph --decorate --all'
+alias gloga='git log --oneline --graph --decorate --all'  
 alias glogp='git log --graph --pretty=format:"%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset" --abbrev-commit'
-alias gd='git diff'
-alias gds='git diff --staged'
-alias grh='git reset HEAD'
-alias grhh='git reset --hard HEAD'
-alias gclean='git clean -fd'
-alias gundo='git reset --soft HEAD^'
-alias gwip='git add -A && git commit -m "WIP: Work in progress"'
-alias gunwip='git log -n 1 | grep -q -c "WIP:" && git reset HEAD~1'
+alias gds='git diff --staged'  # oh-my-zsh has gdca, but gds is more intuitive
+alias grhh='git reset --hard HEAD'  # oh-my-zsh doesn't have hard reset alias
+alias gclean='git clean -fd'  # oh-my-zsh doesn't have clean alias
+alias gundo='git reset --soft HEAD^'  # oh-my-zsh doesn't have undo alias
+alias gunwip='git log -n 1 | grep -q -c "WIP:" && git reset HEAD~1'  # Custom unwip function
+
+# Note: gwip is provided by oh-my-zsh but with different behavior
+# oh-my-zsh: git add -A; git rm $(git ls-files --deleted); git commit --no-verify --message "--wip-- [skip ci]"
+# Custom: git add -A && git commit -m "WIP: Work in progress" 
+# Keeping oh-my-zsh version which is more sophisticated
 
 # Directory shortcuts
 alias home='cd ~'

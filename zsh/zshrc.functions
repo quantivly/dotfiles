@@ -1,7 +1,7 @@
 #==============================================================================
 # Shell Utility Functions
 #==============================================================================
-# Provides 13 utility functions organized by category.
+# Provides 17 utility functions organized by category.
 # All functions include inline "Usage: ..." documentation.
 #
 # File/Directory Management:
@@ -13,7 +13,7 @@
 #   - mkdate: Create dated directory with optional prefix
 #
 # Navigation:
-#   - fcd: Fuzzy directory search and cd (requires fzf)
+#   - fcd: Fuzzy directory search and cd with enhanced preview (requires fzf)
 #
 # Network:
 #   - myip: Get public IP address
@@ -25,7 +25,12 @@
 #   - psgrep: Search for processes by pattern
 #   - killnamed: Kill process by name (with confirmation)
 #
-# See also: examples/git-workflows.md, examples/docker-workflows.md
+# Performance & Diagnostics:
+#   - zsh_bench: Benchmark zsh startup time with iterations
+#   - zsh_profile: Profile zsh startup with detailed timing breakdown
+#   - tool_status: Show modern CLI tool installation status
+#
+# See also: examples/git-workflows.md, examples/docker-workflows.md, examples/fzf-recipes.md
 #==============================================================================
 
 # Add directories to PATH if not already present
@@ -55,9 +60,12 @@ mkcd() {
 # Find and cd to a directory using fzf
 fcd() {
   # Usage: fcd [starting_directory]
-  # Fuzzy find directories and cd into selection
+  # Fuzzy find directories and cd into selection with enhanced preview
   local dir
   local start_dir="${1:-.}"
+
+  # Enhanced preview showing directory contents and git status if applicable
+  local preview_cmd='ls -la {} 2>/dev/null; echo ""; if [ -d {}/.git ]; then echo "Git repo:"; git -C {} status --short 2>/dev/null || echo "Git status unavailable"; fi'
 
   # Use fd if available (much faster), otherwise fall back to find
   if command -v fd &> /dev/null; then
@@ -66,7 +74,10 @@ fcd() {
       --exclude .venv --exclude venv \
       --exclude build --exclude dist --exclude target \
       --exclude .npm --exclude .cargo --exclude .gradle \
-      . "$start_dir" | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
+      . "$start_dir" | fzf +m \
+      --header "Navigate to directory (showing from: $start_dir)" \
+      --preview "$preview_cmd" \
+      --preview-window=right:50%:wrap)
   elif command -v fdfind &> /dev/null; then
     # Ubuntu installs it as fdfind
     dir=$(fdfind --type d --hidden --follow \
@@ -74,7 +85,10 @@ fcd() {
       --exclude .venv --exclude venv \
       --exclude build --exclude dist --exclude target \
       --exclude .npm --exclude .cargo --exclude .gradle \
-      . "$start_dir" | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
+      . "$start_dir" | fzf +m \
+      --header "Navigate to directory (showing from: $start_dir)" \
+      --preview "$preview_cmd" \
+      --preview-window=right:50%:wrap)
   else
     # Fallback to find with exclusions
     dir=$(find "$start_dir" -type d \( \
@@ -82,10 +96,15 @@ fcd() {
       -o -name .venv -o -name venv \
       -o -name build -o -name dist -o -name target \
       -o -name .npm -o -name .cargo -o -name .gradle \
-      \) -prune -o -type d -print 2>/dev/null | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
+      \) -prune -o -type d -print 2>/dev/null | fzf +m \
+      --header "Navigate to directory (showing from: $start_dir)" \
+      --preview "$preview_cmd" \
+      --preview-window=right:50%:wrap)
   fi
 
-  [ -n "$dir" ] && cd "$dir"
+  if [ -n "$dir" ]; then
+    cd "$dir" && echo "Changed to: $(pwd)"
+  fi
 }
 
 # Quick backup of a file
@@ -209,4 +228,75 @@ gwtc() {
   fi
   local worktree_dir="../worktrees/$1"
   git worktree add "$worktree_dir" "$1" && cd "$worktree_dir"
+}
+
+# Performance monitoring for zsh startup
+zsh_bench() {
+  # Usage: zsh_bench [iterations]
+  # Benchmarks zsh startup time with detailed breakdown
+  local iterations="${1:-5}"
+  echo "Benchmarking zsh startup time ($iterations iterations)..."
+  
+  for i in $(seq 1 $iterations); do
+    echo "Run $i:"
+    /usr/bin/time -f "  Real: %e seconds, User: %U, Sys: %S" zsh -i -c exit
+  done
+  
+  echo ""
+  echo "To profile what's slow, run: zsh_profile"
+}
+
+# Profile zsh startup with detailed timing
+zsh_profile() {
+  # Usage: zsh_profile
+  # Shows detailed timing of zsh startup components
+  echo "Profiling zsh startup with detailed timing..."
+  echo "This will show which parts of .zshrc are slowest:"
+  echo ""
+  
+  PS4='+ %D{%s.%.} %N:%i> ' zsh -i -x -c exit 2>&1 | \
+    awk '/\+.*source.*zshrc/ { start = $2; next } 
+         /\+.*\[/ { if (start) { print $2 - start " seconds: " $0; start = 0 } }' | \
+    sort -n | tail -10
+  
+  echo ""
+  echo "For a simpler benchmark, run: zsh_bench"
+}
+
+# Show tool installation status
+tool_status() {
+  # Usage: tool_status
+  # Shows which modern CLI tools are installed and available
+  echo "=== Modern CLI Tools Status ==="
+  
+  local tools=(
+    "fd:fdfind:Better find"
+    "bat:batcat:Syntax highlighting cat" 
+    "eza:exa:Better ls with icons"
+    "rg::Better grep (ripgrep)"
+    "delta::Better git diff"
+    "htop::Better top"
+    "fzf::Fuzzy finder"
+    "gh::GitHub CLI"
+    "direnv::Per-directory env vars"
+  )
+  
+  for tool_info in "${tools[@]}"; do
+    IFS=':' read -r primary alternative description <<< "$tool_info"
+    
+    if command -v "$primary" &> /dev/null; then
+      echo "✓ $primary - $description"
+    elif [[ -n "$alternative" ]] && command -v "$alternative" &> /dev/null; then
+      echo "✓ $alternative - $description (as $alternative)"
+    else
+      echo "✗ $primary - $description (not installed)"
+    fi
+  done
+  
+  echo ""
+  echo "Environment variables set:"
+  [[ -n "$_HAS_FD" ]] && echo "  _HAS_FD=$_HAS_FD"
+  [[ -n "$_HAS_BAT" ]] && echo "  _HAS_BAT=$_HAS_BAT"  
+  [[ -n "$_HAS_MODERN_LS" ]] && echo "  _HAS_MODERN_LS=$_HAS_MODERN_LS"
+  [[ -n "$_HAS_RG" ]] && echo "  _HAS_RG=$_HAS_RG"
 }

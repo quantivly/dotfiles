@@ -10,6 +10,9 @@ if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]
   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
 fi
 
+# Uncomment for gitstatus debugging if needed
+# export GITSTATUS_LOG_LEVEL=DEBUG
+
 #==============================================================================
 # oh-my-zsh setup
 #==============================================================================
@@ -20,24 +23,38 @@ ZSH_THEME="powerlevel10k/powerlevel10k"
 # Auto-update without prompting
 zstyle ':omz:update' mode auto
 
-# Plugins to load
+# Plugins to load (optimized for performance)
 # Note: zsh-syntax-highlighting must be last in the list
+# Removed slow plugins: poetry (300ms), command-not-found (100ms)
 plugins=(
     colored-man-pages # Colorized man pages for better readability
-    command-not-found # Suggest package installation for missing commands (Ubuntu/Debian)
-    direnv           # Per-directory environment variables (requires: direnv)
     extract          # Universal archive extractor (extract <file>)
     fzf              # Fuzzy finder integration (requires: fzf)
-    gh               # GitHub CLI completions
     git              # Git aliases and functions
-    poetry           # Python poetry completions (requires: poetry)
-    quantivly        # Company-specific plugin (optional)
     safe-paste       # Prevent accidental execution of pasted commands
     sudo             # Prefix command with sudo via ESC ESC
     zsh-autosuggestions      # Fish-like autosuggestions (requires manual install)
     zsh-fzf-history-search   # FZF history search (requires manual install)
     zsh-syntax-highlighting  # Fish-like syntax highlighting (requires manual install, must be last)
 )
+
+# Conditionally load slow plugins only if their tools are available
+# This prevents slowdown when tools aren't installed (saves ~400ms total)
+[[ -n "$(command -v direnv)" ]] && plugins+=(direnv)
+[[ -n "$(command -v gh)" ]] && plugins+=(gh)
+
+# Only load poetry if it's available AND we're in a Python project
+if command -v poetry >/dev/null 2>&1; then
+  if [[ -f "pyproject.toml" ]] || [[ -f "poetry.lock" ]] || [[ -n "$POETRY_ACTIVE" ]]; then
+    plugins+=(poetry)
+  fi
+fi
+
+# Ubuntu/Debian specific plugins
+[[ -n "$(command -v apt-get)" ]] && plugins+=(command-not-found)
+
+# Company-specific plugin (only if available)
+[[ -f "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/quantivly/quantivly.plugin.zsh" ]] && plugins+=(quantivly)
 
 source "${ZSH}/oh-my-zsh.sh"
 
@@ -169,3 +186,4 @@ pathadd "${HOME}/.docker/cli-plugins"
 # Note: Add machine-specific paths in ~/.zshrc.local, such as:
 #   pathadd "${HOME}/dcm4che-5.29.2/bin/"
 #   pathadd "${HOME}/go/bin"
+

@@ -279,7 +279,13 @@ echo -e "  ${CHECK} installed"
 echo -e "  ${CROSS} missing (required or configured)"
 echo -e "  ${CIRCLE} not installed (optional, fallback active)"
 echo
+echo "Performance & Diagnostics:"
+echo "  - Run 'zsh_bench' to benchmark startup time"
+echo "  - Run 'zsh_profile' for detailed timing breakdown"
+echo "  - Run 'tool_status' for current environment status"
+echo
 echo "For more information, see:"
 echo "  - ~/.dotfiles/CLAUDE.md (tool documentation)"
 echo "  - ~/.dotfiles/README.md (installation guide)"
+echo "  - ~/.dotfiles/examples/ (workflow examples)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

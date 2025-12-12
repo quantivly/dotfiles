@@ -6,16 +6,22 @@
 
 # bat - Better cat with syntax highlighting
 # Install: apt install bat (Ubuntu) or brew install bat (macOS)
-if command -v bat &> /dev/null; then
+if command -v bat &> /dev/null && [[ -n "$TERM" ]]; then
+  # Only use bat in interactive terminals with color support
   alias cat='bat --style=auto'
   alias catp='bat --style=plain'  # Plain cat without line numbers
   export BAT_THEME="Monokai Extended"
-elif command -v batcat &> /dev/null; then
+  export _HAS_BAT="bat"
+elif command -v batcat &> /dev/null && [[ -n "$TERM" ]]; then
   # Ubuntu installs it as batcat to avoid conflict
   alias bat='batcat'
-  alias cat='batcat --style=auto'
+  alias cat='batcat --style=auto'  
   alias catp='batcat --style=plain'
   export BAT_THEME="Monokai Extended"
+  export _HAS_BAT="batcat"
+else
+  # Fallback to standard cat
+  export _HAS_BAT="none"
 fi
 
 # exa/eza - Better ls with colors and icons
@@ -27,31 +33,55 @@ if command -v eza &> /dev/null; then
   alias ll='eza --icons --group-directories-first -lh'
   alias lla='eza --icons --group-directories-first -lha'
   alias tree='eza --tree --icons'
+  export _HAS_MODERN_LS="eza"
 elif command -v exa &> /dev/null; then
   alias ls='exa --icons --group-directories-first'
   alias la='exa --icons --group-directories-first -a'
   alias ll='exa --icons --group-directories-first -lh'
   alias lla='exa --icons --group-directories-first -lha'
   alias tree='exa --tree --icons'
+  export _HAS_MODERN_LS="exa"
 elif command -v colorls &> /dev/null; then
   # Fall back to colorls if exa/eza not available
   alias ls='colorls -A --sd --gs'
+  export _HAS_MODERN_LS="colorls"
+else
+  # Use standard ls with colors if available
+  if ls --color=auto >/dev/null 2>&1; then
+    alias ls='ls --color=auto --group-directories-first'
+  fi
+  export _HAS_MODERN_LS="standard"
 fi
 
 # fd - Better find
 # Install: apt install fd-find (Ubuntu) or brew install fd (macOS)
 if command -v fd &> /dev/null; then
   alias find='fd'
+  export _HAS_FD=1
 elif command -v fdfind &> /dev/null; then
   # Ubuntu installs it as fdfind
   alias fd='fdfind'
   alias find='fdfind'
+  export _HAS_FD=1
+else
+  # Provide informative message when first using find-related functions
+  export _HAS_FD=0
 fi
 
 # ripgrep - Better grep
 # Install: apt install ripgrep (Ubuntu) or brew install ripgrep (macOS)
+# WARNING: rg has different behavior than grep - not fully POSIX compatible
 if command -v rg &> /dev/null; then
   alias grep='rg'
+  export _HAS_RG=1
+  
+  # Provide warning function for users who might need POSIX grep
+  posix_grep() {
+    echo "Using standard grep for POSIX compatibility"
+    command grep "$@"
+  }
+else
+  export _HAS_RG=0
 fi
 
 # delta - Better git diff
@@ -84,7 +114,7 @@ if command -v fzf &> /dev/null; then
     --color=marker:#ff79c6,spinner:#ffb86c,header:#6272a4
   '
 
-  # Use fd for FZF if available (respects .gitignore)
+  # Use fd for FZF if available (respects .gitignore), fallback to find
   if command -v fd &> /dev/null; then
     export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
     export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
@@ -93,13 +123,21 @@ if command -v fzf &> /dev/null; then
     export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
     export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
     export FZF_ALT_C_COMMAND='fdfind --type d --hidden --follow --exclude .git'
+  else
+    # Fallback to find with basic .gitignore respect
+    export FZF_DEFAULT_COMMAND='find . -type f \! -path "./\.git/*" \! -path "./node_modules/*" \! -path "./.cache/*"'
+    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+    export FZF_ALT_C_COMMAND='find . -type d \! -path "./\.git/*" \! -path "./node_modules/*" \! -path "./.cache/*"'
   fi
 
-  # FZF preview with bat if available
+  # FZF preview with bat if available, fallback to cat
   if command -v bat &> /dev/null; then
     export FZF_CTRL_T_OPTS="--preview 'bat --color=always --style=numbers --line-range=:500 {}'"
   elif command -v batcat &> /dev/null; then
     export FZF_CTRL_T_OPTS="--preview 'batcat --color=always --style=numbers --line-range=:500 {}'"
+  else
+    # Fallback to cat with head for basic preview
+    export FZF_CTRL_T_OPTS="--preview 'head -500 {} 2>/dev/null || echo \"Binary file or permission denied\"'"
   fi
 
   # FZF Git integration
@@ -119,19 +157,20 @@ if command -v fzf &> /dev/null; then
     git checkout $(echo "$commit" | sed "s/ .*//")
   }
 
-  # fshow - Git commit browser with preview
+  # fshow - Git commit browser with enhanced preview
   fshow() {
-    git log --graph --color=always \
-        --format="%C(auto)%h%d %s %C(black)%C(bold)%cr" "$@" |
+    local format="%C(auto)%h%d %s %C(black)%C(bold)%cr %C(blue)%an"
+    
+    git log --graph --color=always --format="$format" "$@" |
     fzf --ansi --no-sort --reverse --tiebreak=index \
+        --header 'CTRL-S: Toggle sort, CTRL-D: Show diff, ENTER: Show commit' \
         --bind=ctrl-s:toggle-sort \
-        --preview 'grep -o "[a-f0-9]\{7,\}" <<< {} | head -1 | xargs git show --color=always' \
-        --preview-window=right:60% \
-        --bind "ctrl-m:execute:
-                  (grep -o '[a-f0-9]\{7\}' | head -1 |
-                  xargs -I % sh -c 'git show --color=always % | less -R') << 'FZF-EOF'
-                  {}
-  FZF-EOF"
+        --bind=ctrl-d:preview \
+        --preview-window=right:60%:wrap \
+        --preview 'echo {} | grep -o "[a-f0-9]\{7,\}" | head -1 | xargs git show --color=always --stat' \
+        --bind "enter:execute:
+                  echo {} | grep -o '[a-f0-9]\{7,\}' | head -1 |
+                  xargs -I % sh -c 'git show --color=always % | less -R'"
   }
 
   # fzf-home-widget - Fuzzy navigate home directory with keybinding
@@ -187,42 +226,45 @@ fi
 # Install: https://github.com/nvm-sh/nvm#installing-and-updating
 export NVM_DIR="${HOME}/.nvm"
 
-# Lazy load nvm to improve shell startup time (saves ~100-300ms)
-# nvm, node, and npm will be initialized on first use
-if [ -s "$NVM_DIR/nvm.sh" ]; then
+# Ultra-lazy load nvm to improve shell startup time (saves ~100-300ms)
+# Only check for nvm.sh once, cache the result
+if [[ -z "$_NVM_LOADED" && -s "$NVM_DIR/nvm.sh" ]]; then
+  _NVM_LOADED=1
+  
   nvm() {
-    unset -f nvm node npm
+    unset -f nvm node npm npx
     \. "$NVM_DIR/nvm.sh"
-    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+    [[ -s "$NVM_DIR/bash_completion" ]] && \. "$NVM_DIR/bash_completion"
     nvm "$@"
   }
 
-  # Create placeholder functions for node and npm to trigger nvm loading
-  node() {
-    unset -f nvm node npm
-    \. "$NVM_DIR/nvm.sh"
-    node "$@"
-  }
-
-  npm() {
-    unset -f nvm node npm
-    \. "$NVM_DIR/nvm.sh"
-    npm "$@"
-  }
+  # Create placeholder functions for all node tools
+  for cmd in node npm npx; do
+    eval "$cmd() { unset -f nvm node npm npx; . \"\$NVM_DIR/nvm.sh\"; $cmd \"\$@\"; }"
+  done
 fi
 
 # pyenv - Python version manager (lazy-loaded for performance)
 # Install: https://github.com/pyenv/pyenv#installation
-if [ -d "${HOME}/.pyenv" ]; then
+if [[ -z "$_PYENV_LOADED" && -d "${HOME}/.pyenv" ]]; then
+  _PYENV_LOADED=1
   export PYENV_ROOT="${HOME}/.pyenv"
-  command -v pyenv >/dev/null || export PATH="${PYENV_ROOT}/bin:${PATH}"
+  
+  # Only add to PATH if pyenv isn't already available
+  command -v pyenv >/dev/null || pathadd "${PYENV_ROOT}/bin"
 
-  # Lazy load pyenv to improve shell startup time (saves ~60-100ms)
-  # pyenv will be initialized on first use
+  # Ultra-lazy load pyenv (saves ~60-100ms)
   pyenv() {
-    unset -f pyenv
+    unset -f pyenv python pip
     eval "$(command pyenv init -)"
     pyenv "$@"
+  }
+  
+  # Lazy load python/pip if using pyenv
+  python() {
+    unset -f pyenv python pip
+    eval "$(command pyenv init -)"
+    python "$@"
   }
 fi
 
