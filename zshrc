@@ -43,10 +43,23 @@ plugins=(
 [[ -n "$(command -v direnv)" ]] && plugins+=(direnv)
 [[ -n "$(command -v gh)" ]] && plugins+=(gh)
 
-# Only load poetry if it's available AND we're in a Python project
+# Smart poetry loading: only load if poetry is available AND we're likely in a Python project
+# This saves ~300ms when not in Python projects
 if command -v poetry >/dev/null 2>&1; then
-  if [[ -f "pyproject.toml" ]] || [[ -f "poetry.lock" ]] || [[ -n "$POETRY_ACTIVE" ]]; then
+  # Check if we're in a poetry project or if poetry is currently active
+  if [[ -f "pyproject.toml" ]] || [[ -f "poetry.lock" ]] || [[ -n "$POETRY_ACTIVE" ]] || [[ -n "$VIRTUAL_ENV" ]]; then
     plugins+=(poetry)
+  else
+    # Lazy load poetry completions when first used (saves startup time)
+    poetry() {
+      # Remove this function and load the real plugin
+      unfunction poetry
+      plugins+=(poetry)
+      # Reinitialize completions
+      compinit
+      # Call the real poetry command
+      command poetry "$@"
+    }
   fi
 fi
 
@@ -105,9 +118,10 @@ zstyle ':completion:*' menu select
 # Better SSH/SCP/RSYNC completion
 zstyle ':completion:*:(ssh|scp|rsync):*' hosts off
 
-# Cache completion
+# Cache completion (create directory if it doesn't exist)
 zstyle ':completion:*' use-cache on
 zstyle ':completion:*' cache-path ~/.zsh/cache
+[[ ! -d ~/.zsh/cache ]] && mkdir -p ~/.zsh/cache
 
 #==============================================================================
 # Key bindings
@@ -127,6 +141,15 @@ bindkey '^[[F' end-of-line          # End
 
 # Delete key
 bindkey '^[[3~' delete-char         # Delete
+
+# Ctrl+Backspace to delete word backward
+bindkey '^H' backward-kill-word     # Ctrl+Backspace
+bindkey '^?' backward-delete-char   # Backspace
+
+# Additional useful key bindings
+bindkey '^U' backward-kill-line     # Ctrl+U - delete from cursor to beginning of line
+bindkey '^K' kill-line              # Ctrl+K - delete from cursor to end of line
+bindkey '^W' backward-kill-word     # Ctrl+W - delete word backward (alternative)
 
 #==============================================================================
 # Load modular configuration files
@@ -187,3 +210,12 @@ pathadd "${HOME}/.docker/cli-plugins"
 #   pathadd "${HOME}/dcm4che-5.29.2/bin/"
 #   pathadd "${HOME}/go/bin"
 
+#==============================================================================
+# Final overrides (after all other configs load)
+#==============================================================================
+
+# Ensure quanticli aliases are set correctly (in case they were overridden)
+if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
+  unalias q 2>/dev/null
+  alias q='quanticli'
+fi

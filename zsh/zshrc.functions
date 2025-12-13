@@ -115,9 +115,42 @@ backup() {
     echo "Usage: backup <file>"
     return 1
   fi
+  
+  # Check if file exists and is readable
+  if [ ! -f "$1" ]; then
+    echo "Error: File '$1' does not exist or is not a regular file"
+    return 1
+  fi
+  
+  if [ ! -r "$1" ]; then
+    echo "Error: Cannot read file '$1' (permission denied)"
+    return 1
+  fi
+  
   local timestamp=$(date +%Y%m%d_%H%M%S)
-  cp "$1" "${1}.backup_${timestamp}"
-  echo "Created backup: ${1}.backup_${timestamp}"
+  local backup_name="${1}.backup_${timestamp}"
+  
+  # Check if backup already exists (very unlikely but possible)
+  if [ -f "$backup_name" ]; then
+    echo "Warning: Backup file '$backup_name' already exists"
+    printf "Overwrite? [y/N] "
+    read -r response
+    case "$response" in
+      [yY]|[yY][eE][sS]) ;;
+      *)
+        echo "Backup cancelled."
+        return 1
+        ;;
+    esac
+  fi
+  
+  # Attempt to copy the file
+  if cp "$1" "$backup_name"; then
+    echo "Created backup: $backup_name"
+  else
+    echo "Error: Failed to create backup of '$1'"
+    return 1
+  fi
 }
 
 # Extract archives of any type
@@ -191,12 +224,40 @@ psgrep() {
 # Kill process by name
 killnamed() {
   # Usage: killnamed <process_name>
-  # Kills all processes matching the given name
+  # Kills all processes matching the given name (with confirmation)
   if [ $# -ne 1 ]; then
     echo "Usage: killnamed <process_name>"
     return 1
   fi
-  ps aux | grep -v grep | grep "$1" | awk '{print $2}' | xargs kill
+  
+  # Find matching processes
+  local processes=$(ps aux | grep -v grep | grep "$1")
+  
+  if [ -z "$processes" ]; then
+    echo "No processes found matching: $1"
+    return 1
+  fi
+  
+  echo "Found processes matching '$1':"
+  echo "$processes"
+  echo
+  
+  # Count number of processes
+  local count=$(echo "$processes" | wc -l)
+  
+  # Confirmation prompt
+  printf "Kill $count process(es)? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      echo "$processes" | awk '{print $2}' | xargs kill
+      echo "Processes killed."
+      ;;
+    *)
+      echo "Operation cancelled."
+      return 1
+      ;;
+  esac
 }
 
 # Create a dated directory
@@ -269,34 +330,556 @@ tool_status() {
   # Shows which modern CLI tools are installed and available
   echo "=== Modern CLI Tools Status ==="
   
-  local tools=(
+  local core_tools=(
     "fd:fdfind:Better find"
     "bat:batcat:Syntax highlighting cat" 
     "eza:exa:Better ls with icons"
     "rg::Better grep (ripgrep)"
     "delta::Better git diff"
-    "htop::Better top"
     "fzf::Fuzzy finder"
     "gh::GitHub CLI"
-    "direnv::Per-directory env vars"
   )
   
-  for tool_info in "${tools[@]}"; do
+  local monitoring_tools=(
+    "btop:htop:Modern resource monitor"
+    "ctop::Container monitoring"
+    "procs::Modern ps replacement"
+    "duf::Better df with visualization"
+    "dust::Intuitive du replacement"
+  )
+  
+  local developer_tools=(
+    "lazygit::Git TUI"
+    "dive::Docker image analyzer"
+    "just::Modern command runner"
+    "hyperfine::Command benchmarking"
+    "glow::Markdown renderer"
+    "difft::Structural diff tool"
+  )
+  
+  local productivity_tools=(
+    "zoxide::Smart cd replacement"
+    "thefuck::Command correction"
+    "tldr::Simplified man pages"
+    "cheat::Interactive cheatsheets"
+    "fastfetch:neofetch:System info display"
+  )
+  
+  local security_tools=(
+    "gitleaks::Git secrets scanner"
+    "pre-commit::Code quality automation"
+    "sops::Encrypted secrets management"
+  )
+  
+  echo "🚀 Core Tools:"
+  for tool_info in "${core_tools[@]}"; do
     IFS=':' read -r primary alternative description <<< "$tool_info"
-    
-    if command -v "$primary" &> /dev/null; then
-      echo "✓ $primary - $description"
-    elif [[ -n "$alternative" ]] && command -v "$alternative" &> /dev/null; then
-      echo "✓ $alternative - $description (as $alternative)"
-    else
-      echo "✗ $primary - $description (not installed)"
-    fi
+    check_tool "$primary" "$alternative" "$description"
   done
   
-  echo ""
+  echo
+  echo "📊 Monitoring & System:"
+  for tool_info in "${monitoring_tools[@]}"; do
+    IFS=':' read -r primary alternative description <<< "$tool_info"
+    check_tool "$primary" "$alternative" "$description"
+  done
+  
+  echo
+  echo "💻 Developer Tools:"
+  for tool_info in "${developer_tools[@]}"; do
+    IFS=':' read -r primary alternative description <<< "$tool_info"
+    check_tool "$primary" "$alternative" "$description"
+  done
+  
+  echo
+  echo "⚡ Productivity:"
+  for tool_info in "${productivity_tools[@]}"; do
+    IFS=':' read -r primary alternative description <<< "$tool_info"
+    check_tool "$primary" "$alternative" "$description"
+  done
+  
+  echo
+  echo "🔒 Security & Quality:"
+  for tool_info in "${security_tools[@]}"; do
+    IFS=':' read -r primary alternative description <<< "$tool_info"
+    check_tool "$primary" "$alternative" "$description"
+  done
+  
+  echo
+  echo "🔧 Optional Development Tools:"
+  check_tool "direnv" "" "Per-directory env vars"
+  check_tool "poetry" "" "Python dependency management"
+  check_tool "docker" "" "Container platform"
+  check_tool "nvm" "" "Node.js version manager (lazy-loaded)"
+  check_tool "pyenv" "" "Python version manager (lazy-loaded)"
+  
+  echo
   echo "Environment variables set:"
   [[ -n "$_HAS_FD" ]] && echo "  _HAS_FD=$_HAS_FD"
   [[ -n "$_HAS_BAT" ]] && echo "  _HAS_BAT=$_HAS_BAT"  
   [[ -n "$_HAS_MODERN_LS" ]] && echo "  _HAS_MODERN_LS=$_HAS_MODERN_LS"
   [[ -n "$_HAS_RG" ]] && echo "  _HAS_RG=$_HAS_RG"
+}
+
+# Helper function for tool checking
+check_tool() {
+  local primary="$1"
+  local alternative="$2"
+  local description="$3"
+  
+  if command -v "$primary" &> /dev/null; then
+    echo "  ✓ $primary - $description"
+  elif [[ -n "$alternative" ]] && command -v "$alternative" &> /dev/null; then
+    echo "  ✓ $alternative - $description (as $alternative)"
+  else
+    echo "  ✗ $primary - $description (not installed)"
+  fi
+}
+
+#==============================================================================
+# Enhanced FZF Functions
+#==============================================================================
+
+# fkill - Fuzzy process killer
+fkill() {
+  local pid
+  if [[ $# -gt 0 ]]; then
+    # If arguments provided, kill those processes
+    kill -9 "$@"
+  else
+    # Interactive selection with fzf
+    pid=$(ps -ef | sed 1d | fzf --multi --header='Select process(es) to kill' --preview='echo {}' | awk '{print $2}')
+    
+    if [[ -n "$pid" ]]; then
+      echo "Killing process(es): $pid"
+      echo "$pid" | xargs kill -9
+    else
+      echo "No process selected"
+    fi
+  fi
+}
+
+# fenv - Fuzzy environment variable browser
+fenv() {
+  env | fzf --preview='echo "Variable: {1}" && echo "Value: {2}"' --delimiter='=' --header='Environment Variables'
+}
+
+# fssh - Fuzzy SSH host selection
+fssh() {
+  local host
+  # Extract hosts from SSH config and known_hosts
+  host=$(cat ~/.ssh/config ~/.ssh/known_hosts 2>/dev/null | grep -E '^Host |^[a-zA-Z0-9]' | awk '{print $1}' | grep -v '\*' | sort -u | fzf --header='Select SSH host')
+  
+  if [[ -n "$host" ]]; then
+    ssh "$host"
+  fi
+}
+
+# fport - Find process using a specific port
+fport() {
+  if [[ $# -eq 0 ]]; then
+    echo "Usage: fport <port_number>"
+    return 1
+  fi
+  
+  local port=$1
+  local process
+  
+  if command -v lsof &> /dev/null; then
+    process=$(lsof -ti:$port)
+    if [[ -n "$process" ]]; then
+      echo "Port $port is being used by process ID: $process"
+      ps -p $process -o pid,ppid,cmd
+    else
+      echo "Port $port is not in use"
+    fi
+  else
+    echo "lsof command not available"
+    netstat -tulanp 2>/dev/null | grep ":$port "
+  fi
+}
+
+#==============================================================================
+# Enhanced Docker Functions
+#==============================================================================
+
+# dexec - Fuzzy Docker container exec
+dexec() {
+  local container cmd
+  
+  # Select container interactively
+  container=$(docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | tail -n +2 | fzf --header='Select container for exec' | awk '{print $1}')
+  
+  if [[ -z "$container" ]]; then
+    echo "No container selected"
+    return 1
+  fi
+  
+  # Default command or use provided command
+  cmd="${1:-bash}"
+  
+  echo "Executing '$cmd' in container: $container"
+  docker exec -it "$container" "$cmd"
+}
+
+# dlogs - Fuzzy Docker container logs
+dlogs() {
+  local container
+  
+  container=$(docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | tail -n +2 | fzf --header='Select container for logs' | awk '{print $1}')
+  
+  if [[ -n "$container" ]]; then
+    echo "Showing logs for container: $container"
+    docker logs -f "$container"
+  else
+    echo "No container selected"
+  fi
+}
+
+# dkill - Fuzzy Docker container killer
+dkill() {
+  local containers
+  
+  containers=$(docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | tail -n +2 | fzf --multi --header='Select container(s) to stop' | awk '{print $1}')
+  
+  if [[ -n "$containers" ]]; then
+    echo "Stopping containers: $containers"
+    echo "$containers" | xargs docker stop
+  else
+    echo "No containers selected"
+  fi
+}
+
+# dimages - Fuzzy Docker image management
+dimages() {
+  local action image
+  
+  echo "Docker Image Management:"
+  echo "1. Remove image(s)"
+  echo "2. Inspect image"
+  echo "3. History of image"
+  echo
+  read -p "Select action (1-3): " action
+  
+  case $action in
+    1)
+      image=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}" | tail -n +2 | fzf --multi --header='Select image(s) to remove' | awk '{print $4}')
+      if [[ -n "$image" ]]; then
+        echo "Removing images: $image"
+        echo "$image" | xargs docker rmi
+      fi
+      ;;
+    2)
+      image=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}" | tail -n +2 | fzf --header='Select image to inspect' | awk '{print $4}')
+      if [[ -n "$image" ]]; then
+        docker inspect "$image"
+      fi
+      ;;
+    3)
+      image=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}" | tail -n +2 | fzf --header='Select image for history' | awk '{print $4}')
+      if [[ -n "$image" ]]; then
+        docker history "$image"
+      fi
+      ;;
+    *)
+      echo "Invalid selection"
+      ;;
+  esac
+}
+
+#==============================================================================
+# Git Branch Management & Automation
+#==============================================================================
+
+# git_cleanup - Automated git branch cleanup
+git_cleanup() {
+  echo "=== Git Branch Cleanup ==="
+  echo
+  
+  # Show current status
+  echo "Current branch: $(git branch --show-current)"
+  echo "All branches:"
+  git branch -a
+  echo
+  
+  # Find merged branches (excluding main/master/develop)
+  local merged_branches=$(git branch --merged | grep -v -E '^\*|master|main|develop' | xargs)
+  
+  if [[ -n "$merged_branches" ]]; then
+    echo "Merged branches that can be deleted:"
+    echo "$merged_branches"
+    echo
+    
+    printf "Delete these merged branches? [y/N] "
+    read -r response
+    case "$response" in
+      [yY]|[yY][eE][sS])
+        echo "$merged_branches" | xargs git branch -d
+        echo "Merged branches deleted."
+        ;;
+      *)
+        echo "Cleanup cancelled."
+        ;;
+    esac
+  else
+    echo "No merged branches found to clean up."
+  fi
+  
+  echo
+  echo "Remote tracking branch cleanup..."
+  git remote prune origin
+  
+  # Optionally clean up remote references
+  printf "Remove stale remote tracking branches? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      git branch -r --merged | grep -v -E 'origin/(master|main|develop)' | sed 's/origin\///' | xargs -I {} git push origin --delete {} 2>/dev/null || true
+      echo "Remote branch cleanup completed."
+      ;;
+    *)
+      echo "Remote cleanup skipped."
+      ;;
+  esac
+}
+
+# fgit - Enhanced git operations with fzf
+fgit() {
+  local action
+  
+  echo "Git Operations:"
+  echo "1. Fuzzy checkout branch"
+  echo "2. Fuzzy checkout commit"
+  echo "3. Fuzzy git log"
+  echo "4. Fuzzy git stash"
+  echo "5. Fuzzy git diff"
+  echo
+  read -p "Select action (1-5): " action
+  
+  case $action in
+    1) fbr ;;
+    2) fco ;;
+    3) fshow ;;
+    4) fstash ;;
+    5) fdiff ;;
+    *) echo "Invalid selection" ;;
+  esac
+}
+
+# fstash - Fuzzy git stash management
+fstash() {
+  local stash_list stash
+  
+  stash_list=$(git stash list)
+  if [[ -z "$stash_list" ]]; then
+    echo "No stashes found"
+    return 1
+  fi
+  
+  stash=$(echo "$stash_list" | fzf --header='Select stash to apply' --preview='git stash show -p {1}' | cut -d: -f1)
+  
+  if [[ -n "$stash" ]]; then
+    echo "Applying stash: $stash"
+    git stash apply "$stash"
+  fi
+}
+
+# fdiff - Fuzzy git diff with file selection
+fdiff() {
+  local file
+  
+  file=$(git diff --name-only | fzf --header='Select file for diff' --preview='git diff --color=always {}')
+  
+  if [[ -n "$file" ]]; then
+    git diff "$file"
+  fi
+}
+
+#==============================================================================
+# Enhanced Performance Monitoring
+#==============================================================================
+
+# startup_monitor - Monitor shell startup performance with alerts
+startup_monitor() {
+  local threshold="${1:-1.0}"  # Default threshold: 1 second
+  local iterations="${2:-3}"
+  local total_time=0
+  local warning_shown=false
+  
+  echo "Monitoring shell startup performance..."
+  echo "Threshold: ${threshold}s, Iterations: $iterations"
+  echo
+  
+  for i in $(seq 1 $iterations); do
+    local start_time=$(date +%s.%N)
+    zsh -i -c exit 2>/dev/null
+    local end_time=$(date +%s.%N)
+    local elapsed=$(echo "$end_time - $start_time" | bc -l)
+    
+    printf "Run %d: %.3fs" "$i" "$elapsed"
+    
+    # Check if above threshold
+    if (( $(echo "$elapsed > $threshold" | bc -l) )); then
+      echo " ⚠️  SLOW"
+      warning_shown=true
+    else
+      echo " ✓"
+    fi
+    
+    total_time=$(echo "$total_time + $elapsed" | bc -l)
+  done
+  
+  local avg_time=$(echo "scale=3; $total_time / $iterations" | bc -l)
+  echo
+  echo "Average startup time: ${avg_time}s"
+  
+  if [[ "$warning_shown" == "true" ]]; then
+    echo
+    echo "⚠️  Performance Alert: Startup time exceeded threshold!"
+    echo "Suggestions to improve performance:"
+    echo "1. Run 'startup_profile' to identify slow components"
+    echo "2. Consider disabling slow plugins in ~/.zshrc.local:"
+    echo "   plugins=(\${plugins:#poetry})  # Remove poetry plugin"
+    echo "3. Use lazy loading for heavy tools (nvm, pyenv already optimized)"
+    echo "4. Check for slow functions with 'zsh_profile'"
+  fi
+}
+
+# startup_profile - Enhanced startup profiling with recommendations
+startup_profile() {
+  echo "Profiling shell startup components..."
+  echo "This will identify the slowest parts of your configuration."
+  echo
+  
+  local profile_file="/tmp/zsh_profile_$$.log"
+  
+  # Run with detailed timing
+  PS4='+ %D{%s.%.} %N:%i> ' zsh -i -x -c exit 2>"$profile_file"
+  
+  echo "=== Slowest Configuration Components ==="
+  
+  # Extract and analyze timing data
+  awk '
+    /^\+ [0-9]+\.[0-9]+ .*source/ { 
+      start_time = $2; 
+      source_file = $0; 
+      next 
+    }
+    /^\+ [0-9]+\.[0-9]+ / { 
+      if (start_time && $2 > start_time) {
+        duration = $2 - start_time
+        if (duration > 0.001) {  # Only show operations > 1ms
+          printf "%.3fs - %s\n", duration, source_file
+        }
+        start_time = 0
+      }
+    }
+  ' "$profile_file" | sort -rn | head -15
+  
+  echo
+  echo "=== Plugin Loading Times ==="
+  
+  # Analyze plugin loading specifically
+  grep -E '(plugins|source.*plugin)' "$profile_file" | \
+    awk '/^\+ [0-9]+\.[0-9]+/ { 
+      if (prev_time) {
+        duration = $2 - prev_time
+        if (duration > 0.01) printf "%.3fs - %s\n", duration, prev_line
+      }
+      prev_time = $2; prev_line = $0 
+    }' | sort -rn | head -10
+  
+  echo
+  echo "=== Recommendations ==="
+  
+  # Check for specific slow components and provide recommendations
+  if grep -q "poetry" "$profile_file"; then
+    echo "📝 Poetry detected - already optimized with lazy loading"
+  fi
+  
+  if grep -q "nvm" "$profile_file"; then
+    echo "📝 NVM detected - already optimized with lazy loading"
+  fi
+  
+  if grep -q "pyenv" "$profile_file"; then
+    echo "📝 Pyenv detected - already optimized with lazy loading"
+  fi
+  
+  local total_plugins=$(grep -c "plugins" "$profile_file" 2>/dev/null || echo "0")
+  if (( total_plugins > 15 )); then
+    echo "⚠️  Consider reducing plugin count (currently ~$total_plugins loaded)"
+  fi
+  
+  echo
+  echo "Full profile saved to: $profile_file"
+  echo "Run 'startup_monitor' to check if improvements helped"
+  
+  # Cleanup
+  # rm -f "$profile_file"
+}
+
+# system_health - Comprehensive system health check
+system_health() {
+  echo "=== System Health Check ==="
+  echo
+  
+  # Disk space
+  echo "📊 Disk Usage:"
+  if command -v duf &> /dev/null; then
+    duf | head -10
+  else
+    df -h | head -10
+  fi
+  echo
+  
+  # Memory usage
+  echo "💾 Memory Usage:"
+  if command -v free &> /dev/null; then
+    free -h
+  else
+    vm_stat 2>/dev/null || echo "Memory info not available"
+  fi
+  echo
+  
+  # Top processes by CPU/Memory
+  echo "🔥 Resource Usage:"
+  if command -v procs &> /dev/null; then
+    echo "Top CPU processes:"
+    procs --sortd cpu | head -5
+    echo
+    echo "Top Memory processes:"
+    procs --sortd memory | head -5
+  else
+    echo "Top processes:"
+    ps aux --sort=-%cpu | head -6
+  fi
+  echo
+  
+  # Check for common issues
+  echo "🔍 Health Checks:"
+  
+  # Check shell startup time
+  local startup_time
+  startup_time=$((/usr/bin/time -f "%e" zsh -i -c exit) 2>&1)
+  if (( $(echo "$startup_time > 2.0" | bc -l 2>/dev/null || echo "0") )); then
+    echo "⚠️  Slow shell startup: ${startup_time}s (consider optimization)"
+  else
+    echo "✓ Shell startup time: ${startup_time}s"
+  fi
+  
+  # Check git repository status
+  if git status &>/dev/null; then
+    local git_status=$(git status --porcelain 2>/dev/null | wc -l)
+    if (( git_status > 0 )); then
+      echo "📝 Git: $git_status uncommitted changes"
+    else
+      echo "✓ Git: Working directory clean"
+    fi
+  fi
+  
+  # Check for Docker resource usage
+  if command -v docker &> /dev/null && docker ps &>/dev/null; then
+    local running_containers=$(docker ps -q | wc -l)
+    echo "🐳 Docker: $running_containers containers running"
+  fi
 }

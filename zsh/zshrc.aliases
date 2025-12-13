@@ -53,12 +53,115 @@ alias di='docker images'
 alias dlog='docker logs'
 alias dlogf='docker logs -f'
 alias dex='docker exec -it'  # Usage: dex <container> <command>; Example: dex myapp bash
-alias dstop='docker stop $(docker ps -q)'
-alias dstopa='docker stop $(docker ps -aq)'
-alias drm='docker rm $(docker ps -aq)'
-alias drmi='docker rmi $(docker images -q)'
-alias dprune='docker system prune -af --volumes'
-alias dclean='docker system prune -f'
+# Safe Docker aliases with confirmation for destructive operations
+# Unalias any conflicting aliases that might exist from other sources
+unalias dstop 2>/dev/null
+unalias dstopa 2>/dev/null
+unalias drm 2>/dev/null
+unalias drmi 2>/dev/null
+unalias dprune 2>/dev/null
+
+dstop() {
+  local containers=$(docker ps -q)
+  if [ -z "$containers" ]; then
+    echo "No running containers to stop."
+    return 0
+  fi
+  echo "This will stop all running containers:"
+  docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  printf "\nProceed? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      docker stop $containers
+      ;;
+    *)
+      echo "Operation cancelled."
+      ;;
+  esac
+}
+
+dstopa() {
+  local containers=$(docker ps -aq)
+  if [ -z "$containers" ]; then
+    echo "No containers to stop."
+    return 0
+  fi
+  echo "This will stop ALL containers (running and stopped):"
+  docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  printf "\nProceed? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      docker stop $containers
+      ;;
+    *)
+      echo "Operation cancelled."
+      ;;
+  esac
+}
+
+drm() {
+  local containers=$(docker ps -aq)
+  if [ -z "$containers" ]; then
+    echo "No containers to remove."
+    return 0
+  fi
+  echo "This will REMOVE all containers:"
+  docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  printf "\nProceed? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      docker rm $containers
+      ;;
+    *)
+      echo "Operation cancelled."
+      ;;
+  esac
+}
+
+drmi() {
+  local images=$(docker images -q)
+  if [ -z "$images" ]; then
+    echo "No images to remove."
+    return 0
+  fi
+  echo "This will REMOVE all Docker images:"
+  docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+  printf "\nProceed? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      docker rmi $images
+      ;;
+    *)
+      echo "Operation cancelled."
+      ;;
+  esac
+}
+
+dprune() {
+  echo "⚠️  WARNING: This will DELETE:"
+  echo "   - All stopped containers"
+  echo "   - All unused networks"
+  echo "   - All unused images (not just dangling ones)"
+  echo "   - All unused volumes"
+  echo "   - All build cache"
+  echo
+  printf "This action cannot be undone. Proceed? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      docker system prune -af --volumes
+      ;;
+    *)
+      echo "Operation cancelled."
+      ;;
+  esac
+}
+
+alias dclean='docker system prune -f'  # This one is less destructive, keep as alias
 alias dcp='docker compose'
 alias dcup='docker compose up -d'
 alias dcdown='docker compose down'
@@ -95,7 +198,6 @@ alias hosts='sudo ${EDITOR:-vim} /etc/hosts'
 alias h='history'
 alias hg='history | grep'
 alias c='clear'
-alias q='exit'
 alias x='exit'
 
 # Disk usage

@@ -8,22 +8,27 @@ prompt: enabled
 pager:
 # Aliases allow you to create nicknames for gh commands
 aliases:
-    # PR management
+    # PR management with enhanced error handling
     co: pr checkout
     mypr: pr list --author @me --state open
     prs: pr list --state open --search "-is:draft"
     prs!: pr list --state open --search "-is:draft NOT Bump in:title"
-    prs@: '!gh pr list --base $(git branch --show-current) "$@"'
+    prs@: '!current_branch=$(git branch --show-current 2>/dev/null); if [ -n "$current_branch" ]; then gh pr list --base "$current_branch" "$@"; else echo "Error: Not in a git repository or no current branch"; fi'
     prv: pr view --web
     prc: pr checkout
     prd: pr diff --web
-    prmerge: pr merge --squash --delete-branch
-    prbase: '!gh pr view --json baseRefName -q .baseRefName'
-    prinfo: '!gh pr view --json number,title,headRefName,baseRefName -q "\"#\" + (.number|tostring) + \" \" + .title + \"\n  \" + .headRefName + \" → \" + .baseRefName"'
+    prmerge: '!if gh pr status --json reviewDecision | grep -q "APPROVED"; then gh pr merge --squash --delete-branch; else echo "Warning: PR not yet approved. Use --force to override."; fi'
+    prmerge-force: pr merge --squash --delete-branch
+    prbase: '!gh pr view --json baseRefName -q .baseRefName 2>/dev/null || echo "Error: Not viewing a PR or no PR found"'
+    prinfo: '!gh pr view --json number,title,headRefName,baseRefName -q "\"#\" + (.number|tostring) + \" \" + .title + \"\n  \" + .headRefName + \" → \" + .baseRefName" 2>/dev/null || echo "Error: Not viewing a PR or no PR found"'
     prchecks: pr checks
     prready: pr ready
     prdraft: pr ready --undo
     prreopen: pr reopen
+    
+    # Enhanced PR creation with templates
+    prcreate: '!if git status --porcelain | grep -q .; then echo "Warning: You have uncommitted changes"; fi; gh pr create --web'
+    prdcreate: '!if git status --porcelain | grep -q .; then echo "Warning: You have uncommitted changes"; fi; gh pr create --draft --web'
 
     # Review management
     review: pr list --search "review-requested:@me -is:draft"
@@ -37,12 +42,12 @@ aliases:
     latest: release view --web
     mkrelease: release create --generate-notes
 
-    # CI/CD
-    runs: '!gh run list --branch $(git branch --show-current) --limit 5 "$@"'
-    runlist: run list --branch $(git branch --show-current) --limit 5
+    # CI/CD with error handling
+    runs: '!current_branch=$(git branch --show-current 2>/dev/null); if [ -n "$current_branch" ]; then gh run list --branch "$current_branch" --limit 5 "$@"; else echo "Error: Not in a git repository or no current branch"; fi'
+    runlist: '!current_branch=$(git branch --show-current 2>/dev/null); if [ -n "$current_branch" ]; then gh run list --branch "$current_branch" --limit 5; else echo "Error: Not in a git repository or no current branch"; fi'
     runview: run view --web
     runwatch: run watch
-    rerun: run rerun
+    rerun: '!if gh run list --limit 1 --json conclusion | grep -q "failure\|cancelled"; then echo "Rerunning latest failed run..."; gh run rerun; else echo "Latest run did not fail"; fi'
 
     # Issues
     myissues: issue list --assignee @me

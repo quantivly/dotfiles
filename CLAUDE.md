@@ -141,20 +141,109 @@ These tools significantly enhance the development experience:
 - **fzf** - Fuzzy finder (many functions depend on it: `fcd`, `fbr`, `fco`, `fshow`)
 - **gh** - GitHub CLI (35+ custom aliases configured in `gh/config.yml`)
 
-### Optional Modern CLI Replacements
+### Modern CLI Tools (Enhanced in 2024)
 
-These tools have intelligent fallback chains - if not installed, standard commands are used:
+The dotfiles configuration now supports 25+ modern CLI tool replacements with intelligent fallback chains. All tools are optional and configured conditionally - your setup won't break if tools aren't installed.
 
+#### Core Replacement Tools
 | Standard Tool | Modern Replacement | Priority | Install Command | Notes |
 |--------------|-------------------|----------|-----------------|-------|
-| cat | bat/batcat | Optional | `apt install bat` or `brew install bat` | Ubuntu uses `batcat` name |
-| ls | eza | First | `cargo install eza` or `brew install eza` | Maintained fork of exa |
-| ls | exa | Second | `apt install exa` or `brew install exa` | Original, unmaintained |
+| cat | bat/batcat | Optional | `apt install bat` | Ubuntu uses `batcat` name |
+| ls | eza | First | `cargo install eza` | Maintained fork of exa |
+| ls | exa | Second | `apt install exa` | Original, unmaintained |
 | ls | colorls | Third | `gem install colorls` | Ruby-based fallback |
-| find | fd/fdfind | Optional | `apt install fd-find` or `brew install fd` | Ubuntu uses `fdfind` name |
-| grep | ripgrep | Optional | `apt install ripgrep` or `brew install ripgrep` | **Warning:** Not fully POSIX compatible |
-| top | htop | Optional | `apt install htop` or `brew install htop` | Interactive process viewer |
-| diff | delta | Optional | See https://github.com/dandavison/delta | Syntax-highlighted diffs |
+| find | fd/fdfind | Optional | `apt install fd-find` | Ubuntu uses `fdfind` name |
+| grep | ripgrep | Optional | `apt install ripgrep` | **Warning:** Not fully POSIX compatible |
+| cd | zoxide | **NEW** | `./scripts/install-modern-tools.sh` | Learns from usage patterns |
+| top | btop | **NEW** | `apt install btop` | Modern resource monitor |
+| ps | procs | **NEW** | `cargo install procs` | Tree view, search, sorting |
+| df | duf | **NEW** | `apt install duf` | Beautiful disk usage visualization |
+| du | dust | **NEW** | `cargo install du-dust` | Intuitive directory sizes |
+| diff | delta | Optional | GitHub releases | Syntax-highlighted diffs |
+| diff | difftastic | **NEW** | `cargo install difftastic` | Structural diffs |
+
+#### Developer & Git Tools
+| Tool | Purpose | Key Features |
+|------|---------|-------------|
+| **lazygit** | Git TUI | Interactive staging, branching, merging |
+| **dive** | Docker analyzer | Analyze image layers for optimization |
+| **forgit** | Git + FZF | Interactive git operations with fuzzy finding |
+| **just** | Command runner | Modern make alternative with better syntax |
+| **hyperfine** | Benchmarking | Command performance testing and comparison |
+| **glow** | Markdown viewer | Beautiful terminal markdown rendering |
+| **ctop** | Container monitor | htop-style interface for Docker containers |
+
+#### Security & Code Quality Tools  
+| Tool | Purpose | Key Features |
+|------|---------|-------------|
+| **gitleaks** | Secret scanner | Prevent secrets from entering git history |
+| **pre-commit** | Code quality | Automated checks before commits |
+| **sops** | Secrets management | Encrypted secrets with git integration |
+
+#### Productivity & Navigation
+| Tool | Purpose | Key Features |
+|------|---------|-------------|
+| **thefuck** | Command correction | Auto-fix previous commands with `fuck` |
+| **tldr** | Simplified docs | Concise command examples vs full man pages |
+| **cheat** | Interactive cheatsheets | Personal command cheatsheets |
+| **neofetch/fastfetch** | System info | Beautiful system information display |
+
+#### Easy Installation
+
+**Automated Installation Script:**
+```bash
+# Run the comprehensive installation script
+./scripts/install-modern-tools.sh
+
+# Interactive options:
+# 1. Essential tools (recommended for all users)
+# 2. Development tools (for developers)  
+# 3. All tools (complete setup)
+# 4. Install specific tool
+# 5. Show tool status
+```
+
+**Manual Installation Examples:**
+```bash
+# Core productivity tools
+curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
+apt install btop duf
+cargo install procs du-dust eza
+
+# Developer tools
+apt install lazygit  # or GitHub releases for latest
+cargo install just hyperfine difftastic
+pip install thefuck pre-commit gitleaks
+
+# Check what's installed
+tool_status  # runs comprehensive status check
+```
+
+#### New Functions Added
+
+**Enhanced FZF Functions:**
+- `fkill` - Fuzzy process killer with preview
+- `fenv` - Browse environment variables with fzf
+- `fssh` - SSH host selection from config/known_hosts
+- `fport` - Find what's using a specific port
+
+**Enhanced Docker Functions:**
+- `dexec` - Fuzzy container selection for exec
+- `dlogs` - Fuzzy container logs viewing
+- `dkill` - Fuzzy container stopping
+- `dimages` - Interactive image management
+
+**Git Workflow Functions:**
+- `git_cleanup` - Automated branch cleanup with confirmations
+- `fgit` - Menu-driven git operations
+- `fstash` - Fuzzy git stash management
+- `fdiff` - Fuzzy file selection for git diff
+- `fworktree` - Git worktree management with fzf
+
+**Performance Monitoring:**
+- `startup_monitor` - Monitor shell startup with alerts
+- `startup_profile` - Detailed startup profiling with recommendations
+- `system_health` - Comprehensive system health check
 
 ### Version Managers
 

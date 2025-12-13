@@ -56,29 +56,41 @@ fi
 # fd - Better find
 # Install: apt install fd-find (Ubuntu) or brew install fd (macOS)
 if command -v fd &> /dev/null; then
-  alias find='fd'
   export _HAS_FD=1
+  export _FD_COMMAND="fd"
 elif command -v fdfind &> /dev/null; then
   # Ubuntu installs it as fdfind
   alias fd='fdfind'
-  alias find='fdfind'
   export _HAS_FD=1
+  export _FD_COMMAND="fdfind"
 else
   # Provide informative message when first using find-related functions
   export _HAS_FD=0
 fi
 
+# fd provides better defaults for most use cases
+# Users can still use 'command find' or '\find' for full find functionality
+# The 'fd' command is available when installed
+
 # ripgrep - Better grep
 # Install: apt install ripgrep (Ubuntu) or brew install ripgrep (macOS)
 # WARNING: rg has different behavior than grep - not fully POSIX compatible
 if command -v rg &> /dev/null; then
-  alias grep='rg'
   export _HAS_RG=1
   
-  # Provide warning function for users who might need POSIX grep
+  # Note: Keeping standard grep alias for compatibility
+  # Users can use 'rg' directly for ripgrep features
+  # Or use '\grep' to bypass alias and access original grep behavior
+  
+  # Provide explicit functions for users who need specific behavior
   posix_grep() {
     echo "Using standard grep for POSIX compatibility"
     command grep "$@"
+  }
+  
+  rg_grep() {
+    echo "Using ripgrep explicitly"
+    rg "$@"
   }
 else
   export _HAS_RG=0
@@ -102,17 +114,45 @@ fi
 # FZF - Fuzzy finder
 # Install: apt install fzf (Ubuntu) or brew install fzf (macOS)
 if command -v fzf &> /dev/null; then
+  # FZF color scheme (configurable via FZF_THEME environment variable)
+  # Supported themes: dracula, gruvbox, nord, monokai
+  FZF_THEME="${FZF_THEME:-dracula}"
+  
+  case "$FZF_THEME" in
+    "gruvbox")
+      FZF_COLORS="--color=fg:#ebdbb2,bg:#282828,hl:#fabd2f
+                  --color=fg+:#ebdbb2,bg+:#3c3836,hl+:#fabd2f
+                  --color=info:#83a598,prompt:#bdae93,pointer:#83a598
+                  --color=marker:#fe8019,spinner:#fabd2f,header:#665c54"
+      ;;
+    "nord")
+      FZF_COLORS="--color=fg:#e5e9f0,bg:#3b4252,hl:#81a1c1
+                  --color=fg+:#e5e9f0,bg+:#434c5e,hl+:#81a1c1
+                  --color=info:#eacb8a,prompt:#bf616a,pointer:#b48ead
+                  --color=marker:#a3be8c,spinner:#b48ead,header:#4c566a"
+      ;;
+    "monokai")
+      FZF_COLORS="--color=fg:#f8f8f2,bg:#272822,hl:#f92672
+                  --color=fg+:#f8f8f2,bg+:#49483e,hl+:#f92672
+                  --color=info:#a6e22e,prompt:#f92672,pointer:#ae81ff
+                  --color=marker:#e6db74,spinner:#a6e22e,header:#75715e"
+      ;;
+    "dracula"|*)
+      FZF_COLORS="--color=fg:#f8f8f2,bg:#282a36,hl:#bd93f9
+                  --color=fg+:#f8f8f2,bg+:#44475a,hl+:#bd93f9
+                  --color=info:#ffb86c,prompt:#50fa7b,pointer:#ff79c6
+                  --color=marker:#ff79c6,spinner:#ffb86c,header:#6272a4"
+      ;;
+  esac
+
   # FZF default options
-  export FZF_DEFAULT_OPTS='
+  export FZF_DEFAULT_OPTS="
     --height 40%
     --layout=reverse
     --border
     --inline-info
-    --color=fg:#f8f8f2,bg:#282a36,hl:#bd93f9
-    --color=fg+:#f8f8f2,bg+:#44475a,hl+:#bd93f9
-    --color=info:#ffb86c,prompt:#50fa7b,pointer:#ff79c6
-    --color=marker:#ff79c6,spinner:#ffb86c,header:#6272a4
-  '
+    $FZF_COLORS
+  "
 
   # Use fd for FZF if available (respects .gitignore), fallback to find
   if command -v fd &> /dev/null; then
@@ -299,3 +339,350 @@ fi
 # Locale settings
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
+
+#==============================================================================
+# Modern Navigation Tools
+#==============================================================================
+
+# zoxide - Smarter cd that learns your patterns
+# Install: curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
+# Or: cargo install zoxide
+# Or: apt install zoxide (Ubuntu 21.10+)
+if command -v zoxide &> /dev/null; then
+  # Initialize zoxide
+  eval "$(zoxide init zsh)"
+  
+  # Enhanced aliases for different navigation patterns
+  alias cd='z'          # Replace cd with zoxide
+  alias cdi='zi'        # Interactive zoxide with fzf
+  alias cda='za'        # Add current directory to zoxide database
+  alias cdq='zq'        # Query zoxide database
+  
+  # Fuzzy navigation with preview (if fzf available)
+  if command -v fzf &> /dev/null; then
+    zf() {
+      local dir
+      dir=$(zoxide query -l | fzf --preview 'ls -la {}' --preview-window=right:50%:wrap) && cd "$dir"
+    }
+  fi
+  
+  # Show frequently visited directories
+  zshow() {
+    zoxide query -l -s | head -20
+  }
+fi
+
+#==============================================================================
+# Modern Monitoring & System Tools
+#==============================================================================
+
+# btop - Modern resource monitor (better than htop)
+# Install: apt install btop (Ubuntu 22.04+) or https://github.com/aristocratos/btop
+if command -v btop &> /dev/null; then
+  alias top='btop'
+  alias htop='btop'
+  # btop with specific themes
+  alias btop-dark='btop --utf-force --theme TTY'
+  alias btop-light='btop --utf-force --theme Default'
+fi
+
+# procs - Modern ps replacement
+# Install: cargo install procs or apt install procs (newer Ubuntu)
+if command -v procs &> /dev/null; then
+  alias ps='procs'
+  alias psa='procs --tree'          # Show process tree
+  alias psg='procs --search'        # Search processes: psg firefox
+  alias psm='procs --sortd memory'  # Sort by memory usage
+  alias psc='procs --sortd cpu'     # Sort by CPU usage
+fi
+
+# duf - Modern df replacement with better visualization
+# Install: apt install duf (Ubuntu 21.04+) or https://github.com/muesli/duf
+if command -v duf &> /dev/null; then
+  alias df='duf'
+  alias duf-json='duf --json'       # JSON output for scripting
+  alias duf-all='duf --all'         # Show all filesystems
+fi
+
+# dust - Intuitive du replacement
+# Install: cargo install du-dust or apt install du-dust (newer Ubuntu)
+if command -v dust &> /dev/null; then
+  alias du='dust'
+  alias dust-tree='dust -d 3'      # Limit depth to 3 levels
+  alias dust-size='dust -s'        # Sort by size
+  alias dust-files='dust -f'       # Show files, not just directories
+fi
+
+# ctop - Container monitoring (htop for containers)
+# Install: https://github.com/bcicen/ctop#install
+if command -v ctop &> /dev/null; then
+  alias dtop='ctop'                 # Docker top
+  alias ctop-compact='ctop -compact' # Compact view
+fi
+
+# neofetch/fastfetch - System information display
+# Install: apt install neofetch or https://github.com/fastfetch-cli/fastfetch
+if command -v fastfetch &> /dev/null; then
+  alias neofetch='fastfetch'
+  alias sysinfo='fastfetch'
+  # Custom fastfetch with specific modules
+  alias sysinfo-minimal='fastfetch --logo none --modules os,kernel,uptime,memory'
+elif command -v neofetch &> /dev/null; then
+  alias sysinfo='neofetch'
+  # Custom neofetch configurations
+  alias sysinfo-minimal='neofetch --disable packages resolution de wm wm_theme theme icons terminal terminal_font cpu gpu memory'
+fi
+
+#==============================================================================
+# Developer Tools & Command Correction
+#==============================================================================
+
+# thefuck - Command correction
+# Install: pip install thefuck
+if command -v thefuck &> /dev/null; then
+  eval $(thefuck --alias)
+  # Alternative aliases
+  alias fix='fuck'
+  alias oops='fuck'
+fi
+
+# lazygit - Terminal UI for git
+# Install: https://github.com/jesseduffield/lazygit#installation
+if command -v lazygit &> /dev/null; then
+  alias lg='lazygit'
+  alias git-ui='lazygit'
+fi
+
+# just - Command runner (modern make alternative)
+# Install: cargo install just or https://github.com/casey/just#installation
+if command -v just &> /dev/null; then
+  alias j='just'
+  alias jl='just --list'           # List available recipes
+  alias je='just --edit'           # Edit justfile
+  alias jd='just --dump'           # Show parsed justfile
+  
+  # Enable just completions if supported
+  if [[ -n "$ZSH_VERSION" ]]; then
+    eval "$(just --completions zsh)"
+  fi
+fi
+
+# hyperfine - Command benchmarking
+# Install: cargo install hyperfine or apt install hyperfine (newer Ubuntu)
+if command -v hyperfine &> /dev/null; then
+  alias bench='hyperfine'
+  alias benchmark='hyperfine --warmup 3'
+  
+  # Convenient benchmark functions
+  shell_bench() {
+    if [[ $# -eq 0 ]]; then
+      echo "Usage: shell_bench <command>"
+      echo "Example: shell_bench 'ls -la'"
+      return 1
+    fi
+    hyperfine --warmup 3 --min-runs 10 "$@"
+  }
+  
+  startup_bench() {
+    echo "Benchmarking shell startup time..."
+    hyperfine --warmup 5 --min-runs 20 'zsh -i -c exit'
+  }
+fi
+
+# glow - Markdown renderer
+# Install: https://github.com/charmbracelet/glow#installation
+if command -v glow &> /dev/null; then
+  alias markdown='glow'
+  alias md='glow'
+  alias readme='glow README.md'
+  
+  # Glow with different styles
+  alias glow-dark='glow --style dark'
+  alias glow-light='glow --style light'
+  alias glow-notty='glow --style notty'
+fi
+
+# tldr - Simplified man pages
+# Install: npm install -g tldr or apt install tldr (newer Ubuntu)
+if command -v tldr &> /dev/null; then
+  alias help='tldr'
+  alias cheat='tldr'
+  
+  # Update tldr database
+  alias tldr-update='tldr --update'
+fi
+
+# cheat - Interactive cheatsheets
+# Install: https://github.com/cheat/cheat#installing
+if command -v cheat &> /dev/null; then
+  alias cs='cheat'                 # cheat search
+  alias csl='cheat -l'             # list cheatsheets
+  alias cse='cheat -e'             # edit cheatsheet
+fi
+
+#==============================================================================
+# Container & Docker Enhancements
+#==============================================================================
+
+# dive - Docker image layer analyzer
+# Install: https://github.com/wagoodman/dive#installation
+if command -v dive &> /dev/null; then
+  alias docker-analyze='dive'
+  alias danalyze='dive'
+  
+  # Analyze image and save report
+  dive_report() {
+    if [[ $# -ne 1 ]]; then
+      echo "Usage: dive_report <image>"
+      return 1
+    fi
+    dive "$1" --ci --lowestEfficiency=0.95
+  }
+fi
+
+# lazydocker - Docker TUI
+# Install: https://github.com/jesseduffield/lazydocker#installation
+if command -v lazydocker &> /dev/null; then
+  alias lzd='lazydocker'
+  alias docker-ui='lazydocker'
+fi
+
+#==============================================================================
+# Security & Code Quality Tools
+#==============================================================================
+
+# gitleaks - Git secrets scanner
+# Install: https://github.com/gitleaks/gitleaks#installing
+if command -v gitleaks &> /dev/null; then
+  alias git-secrets='gitleaks detect'
+  alias git-secrets-verbose='gitleaks detect --verbose'
+  
+  # Scan current repo for secrets
+  scan_secrets() {
+    echo "Scanning repository for secrets..."
+    gitleaks detect --source . --verbose
+  }
+  
+  # Protect commits with gitleaks
+  git_protect() {
+    echo "Installing gitleaks pre-commit hook..."
+    gitleaks protect --staged --verbose
+  }
+fi
+
+# pre-commit - Code quality automation
+# Install: pip install pre-commit
+if command -v pre-commit &> /dev/null; then
+  alias pc='pre-commit'
+  alias pc-install='pre-commit install'
+  alias pc-update='pre-commit autoupdate'
+  alias pc-run='pre-commit run --all-files'
+  alias pc-clean='pre-commit clean'
+  
+  # Quick setup for new repos
+  precommit_setup() {
+    if [[ ! -f ".pre-commit-config.yaml" ]]; then
+      echo "Creating basic pre-commit configuration..."
+      cat > .pre-commit-config.yaml << 'EOF'
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.15.0
+    hooks:
+      - id: gitleaks
+EOF
+    fi
+    pre-commit install
+    echo "Pre-commit hooks installed successfully!"
+  }
+fi
+
+# sops - Encrypted secrets management
+# Install: https://github.com/getsops/sops#download
+if command -v sops &> /dev/null; then
+  alias secrets='sops'
+  alias secrets-edit='sops --in-place'
+  
+  # Edit encrypted file
+  sops_edit() {
+    if [[ $# -ne 1 ]]; then
+      echo "Usage: sops_edit <encrypted_file>"
+      return 1
+    fi
+    sops "$1"
+  }
+fi
+
+# difftastic - Structural diff tool
+# Install: cargo install difftastic or https://github.com/Wilfred/difftastic
+if command -v difft &> /dev/null; then
+  alias diff='difft'
+  alias difft-side-by-side='difft --display side-by-side'
+  alias difft-inline='difft --display inline'
+  
+  # Git integration for difftastic
+  git_difft() {
+    git diff --no-ext-diff "$@" | difft --stdin
+  }
+fi
+
+#==============================================================================
+# Enhanced Git Integration
+#==============================================================================
+
+# forgit - Interactive git operations via fzf
+# Install: https://github.com/wfxr/forgit#installation
+if [[ -f "${HOME}/.forgit/forgit.plugin.zsh" ]]; then
+  source "${HOME}/.forgit/forgit.plugin.zsh"
+elif command -v forgit &> /dev/null; then
+  # If installed via package manager
+  eval "$(forgit init zsh)"
+fi
+
+# Additional git workflow automation
+if command -v git &> /dev/null && command -v fzf &> /dev/null; then
+  # Enhanced git worktree with fzf selection
+  fworktree() {
+    local worktree_dir branch_name
+    
+    echo "Git Worktree Management:"
+    echo "1. Create new worktree"
+    echo "2. Switch to existing worktree"
+    echo "3. Remove worktree"
+    echo
+    read -p "Select action (1-3): " action
+    
+    case $action in
+      1)
+        read -p "Enter branch name: " branch_name
+        worktree_dir="../worktrees/$branch_name"
+        git worktree add "$worktree_dir" "$branch_name" && cd "$worktree_dir"
+        ;;
+      2)
+        worktree_dir=$(git worktree list | fzf --header='Select worktree' | awk '{print $1}')
+        if [[ -n "$worktree_dir" ]]; then
+          cd "$worktree_dir"
+        fi
+        ;;
+      3)
+        worktree_dir=$(git worktree list | tail -n +2 | fzf --header='Select worktree to remove' | awk '{print $1}')
+        if [[ -n "$worktree_dir" ]]; then
+          git worktree remove "$worktree_dir"
+        fi
+        ;;
+      *)
+        echo "Invalid selection"
+        ;;
+    esac
+  }
+fi
