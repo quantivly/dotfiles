@@ -39,8 +39,11 @@ install_apt() {
     local package="$1"
     if command_exists apt-get; then
         print_status "Installing $package via apt..."
-        sudo apt-get update -qq && sudo apt-get install -y "$package"
-        return 0
+        if sudo apt-get update -qq && sudo apt-get install -y "$package" 2>/dev/null; then
+            return 0
+        else
+            return 1
+        fi
     fi
     return 1
 }
@@ -168,12 +171,23 @@ install_tool() {
         "glow")
             install_apt glow || {
                 print_status "Installing glow from GitHub releases..."
-                GLOW_VERSION=$(curl -s "https://api.github.com/repos/charmbracelet/glow/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
-                curl -Lo glow.deb "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_linux_amd64.deb"
-                sudo dpkg -i glow.deb && rm glow.deb
+                # Get the download URL for amd64 .deb from latest release
+                GLOW_URL=$(curl -s https://api.github.com/repos/charmbracelet/glow/releases/latest | grep "browser_download_url.*amd64\.deb" | cut -d '"' -f 4)
+                if [ -z "$GLOW_URL" ]; then
+                    print_error "Failed to get glow download URL"
+                    return 1
+                fi
+                curl -sL "$GLOW_URL" -o glow.deb
+                if [ -f glow.deb ] && [ -s glow.deb ]; then
+                    sudo dpkg -i glow.deb && rm glow.deb
+                else
+                    print_error "Failed to download glow.deb"
+                    rm -f glow.deb
+                    return 1
+                fi
             }
             ;;
-        "difftastic")
+        "difft"|"difftastic")
             install_cargo difftastic || {
                 print_status "Installing difftastic from GitHub releases..."
                 DIFFT_VERSION=$(curl -s "https://api.github.com/repos/Wilfred/difftastic/releases/latest" | grep -Po '"tag_name": "\K[^"]*')
@@ -306,7 +320,7 @@ main() {
             install_tool "just" "" "Command runner"
             install_tool "hyperfine" "" "Command benchmarking"
             install_tool "glow" "" "Markdown renderer"
-            install_tool "difftastic" "" "Structural diff tool"
+            install_tool "difft" "difftastic" "Structural diff tool"
             install_tool "gitleaks" "" "Git secrets scanner"
             install_tool "pre-commit" "" "Code quality automation"
             install_forgit
@@ -328,7 +342,7 @@ main() {
             install_tool "just" "" "Command runner"
             install_tool "hyperfine" "" "Command benchmarking"
             install_tool "glow" "" "Markdown renderer"
-            install_tool "difftastic" "" "Structural diff tool"
+            install_tool "difft" "difftastic" "Structural diff tool"
             install_tool "lazydocker" "" "Docker TUI"
             
             # Productivity tools
@@ -349,7 +363,7 @@ main() {
             echo
             echo "Available tools:"
             echo "  zoxide, btop, procs, duf, dust, ctop"
-            echo "  lazygit, dive, just, hyperfine, glow, difftastic, lazydocker"
+            echo "  lazygit, dive, just, hyperfine, glow, difft, lazydocker"
             echo "  thefuck, tldr, cheat, neofetch, fastfetch"
             echo "  gitleaks, pre-commit, sops, forgit"
             echo
@@ -363,7 +377,7 @@ main() {
                 tool_status
             else
                 print_status "Checking basic tool availability..."
-                for tool in zoxide btop procs duf dust lazygit dive just hyperfine glow difftastic thefuck tldr cheat neofetch fastfetch gitleaks pre-commit sops; do
+                for tool in zoxide btop procs duf dust lazygit dive just hyperfine glow difft thefuck tldr cheat neofetch fastfetch gitleaks pre-commit sops; do
                     if command_exists "$tool"; then
                         print_success "$tool is installed"
                     else
