@@ -181,6 +181,9 @@ bindkey '^W' backward-kill-word     # Ctrl+W - delete word backward (alternative
 # Company/work-specific configuration
 [ -f ~/.dotfiles/zsh/zshrc.company ] && source ~/.dotfiles/zsh/zshrc.company
 
+# Help system with semantic categorization
+[ -f ~/.dotfiles/zsh/zshrc.help ] && source ~/.dotfiles/zsh/zshrc.help
+
 #==============================================================================
 # Machine-specific configuration
 #==============================================================================

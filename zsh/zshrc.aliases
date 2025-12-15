@@ -33,8 +33,44 @@ alias gunwip='git log -n 1 | grep -q -c "WIP:" && git reset HEAD~1'  # Custom un
 
 # Note: gwip is provided by oh-my-zsh but with different behavior
 # oh-my-zsh: git add -A; git rm $(git ls-files --deleted); git commit --no-verify --message "--wip-- [skip ci]"
-# Custom: git add -A && git commit -m "WIP: Work in progress" 
+# Custom: git add -A && git commit -m "WIP: Work in progress"
 # Keeping oh-my-zsh version which is more sophisticated
+
+#==============================================================================
+# Additional Git Aliases (beyond oh-my-zsh)
+#==============================================================================
+
+# Branch management
+alias gbrv='git branch -vv'                           # Verbose branch view with tracking
+
+# Current branch inspection
+alias gcurrent='git show HEAD'                        # Show current commit details
+alias gchanges='git log origin/main..HEAD --oneline' # Changes in current branch
+alias gstats='git diff --stat origin/main..HEAD'     # Stats for current branch changes
+
+# Convenient shorthands (oh-my-zsh provides grst, but gunstage is clearer)
+alias gunstage='git restore --staged'                 # Clearer than grst
+
+# Interactive rebase helpers (oh-my-zsh has grbi, but not these shortcuts)
+alias gsquash='git rebase -i HEAD~'                   # Squash last N commits (add number after ~)
+alias glogs='git log --all --grep'                    # Search commit messages
+
+# Worktree shortcuts (oh-my-zsh has gwt, gwta, but not list/remove shortcuts)
+alias gwtls='git worktree list'                       # List worktrees
+alias gwtrm='git worktree remove'                     # Remove worktree
+
+#==============================================================================
+# Git Safety Overrides
+#==============================================================================
+# Override oh-my-zsh git aliases with safer versions that require confirmation
+# These functions are defined in zshrc.functions
+#==============================================================================
+
+# Override gp (git push) with protected version for main/master/develop
+alias gp='gpush-safe'
+
+# Override gpf (git push --force) with confirmation requirement
+alias gpf='gpf-safe'
 
 # Directory shortcuts
 alias home='cd ~'

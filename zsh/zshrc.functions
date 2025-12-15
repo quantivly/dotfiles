@@ -883,3 +883,311 @@ system_health() {
     echo "🐳 Docker: $running_containers containers running"
   fi
 }
+
+#==============================================================================
+# Git Safety Functions
+#==============================================================================
+# Enhanced git operations with safety confirmations to prevent common mistakes
+#==============================================================================
+
+# Safe git push - prevents accidental pushes to protected branches
+gpush-safe() {
+  # Usage: gpush-safe [git push options]
+  # Prompts for confirmation when pushing to main, master, or develop branches
+  local branch="$(git branch --show-current 2>/dev/null)"
+
+  if [[ -z "$branch" ]]; then
+    echo "❌ Not in a git repository"
+    return 1
+  fi
+
+  # Check for protected branches
+  if [[ "$branch" == "main" || "$branch" == "master" || "$branch" == "develop" ]]; then
+    echo "⚠️  WARNING: You're about to push to '$branch'"
+    echo ""
+    printf "Type the branch name to confirm: "
+    read -r confirm
+
+    if [[ "$confirm" != "$branch" ]]; then
+      echo "❌ Push aborted"
+      return 1
+    fi
+  fi
+
+  git push "$@"
+}
+
+# Safe force push with explicit confirmation
+gpf-safe() {
+  # Usage: gpf-safe [git push options]
+  # Requires typing 'force' to confirm force push operation
+  local branch="$(git branch --show-current 2>/dev/null)"
+
+  if [[ -z "$branch" ]]; then
+    echo "❌ Not in a git repository"
+    return 1
+  fi
+
+  echo "⚠️  FORCE PUSH REQUESTED"
+  echo "Branch: $branch"
+  echo "Remote: $(git remote get-url origin 2>/dev/null || echo 'unknown')"
+  echo ""
+  echo "This will OVERWRITE remote history!"
+  echo ""
+  printf "Type 'force' to confirm: "
+  read -r confirm
+
+  if [[ "$confirm" != "force" ]]; then
+    echo "❌ Force push aborted"
+    return 1
+  fi
+
+  git push --force-with-lease "$@"
+}
+
+# Warn before checkout if uncommitted changes exist
+gco-safe() {
+  # Usage: gco-safe <branch>
+  # Prompts for confirmation if there are uncommitted changes
+  if [[ -n $(git status --porcelain 2>/dev/null) ]]; then
+    echo "⚠️  Warning: Uncommitted changes detected"
+    echo ""
+    git status --short
+    echo ""
+    printf "Continue checkout? [y/N] "
+    read -r response
+    [[ "$response" =~ ^[Yy]$ ]] || return 1
+  fi
+  git checkout "$@"
+}
+
+#==============================================================================
+# Additional FZF Interactive Functions
+#==============================================================================
+# Enhanced fuzzy finding functions for files, code, and git operations
+# Requires: fzf, bat/batcat (optional for preview), ripgrep (optional for fgrep)
+#==============================================================================
+
+# Fuzzy file browser with content preview
+fls() {
+  # Usage: fls
+  # Opens fuzzy file finder with preview, then opens selected file in $EDITOR
+  local selected
+  local cmd="${_FD_COMMAND:-find}"
+
+  if [[ "$cmd" == "fd" || "$cmd" == "fdfind" ]]; then
+    selected=$($cmd --type f --hidden --exclude .git | \
+      fzf --preview 'bat --style=numbers --color=always --line-range :500 {} 2>/dev/null || cat {}')
+  else
+    selected=$(find . -type f | \
+      fzf --preview 'bat --style=numbers --color=always --line-range :500 {} 2>/dev/null || cat {}')
+  fi
+
+  [[ -n "$selected" ]] && ${EDITOR:-vim} "$selected"
+}
+
+# Fuzzy grep with file preview and jump-to-line
+fzgrep() {
+  # Usage: fzgrep <pattern>
+  # Searches for pattern with ripgrep, allows fuzzy selection, opens in editor at line
+  local pattern="$1"
+  [[ -z "$pattern" ]] && { echo "Usage: fzgrep <pattern>"; return 1; }
+
+  if command -v rg &>/dev/null; then
+    local result
+    result=$(rg --line-number --no-heading --color=always "$pattern" | \
+      fzf --ansi \
+          --delimiter ':' \
+          --preview 'bat --style=numbers --color=always --highlight-line {2} {1}' \
+          --preview-window '+{2}/2')
+
+    if [[ -n "$result" ]]; then
+      local file="${result%%:*}"
+      local line="${result#*:}"
+      line="${line%%:*}"
+      ${EDITOR:-vim} "+${line}" "$file"
+    fi
+  else
+    echo "⚠️  ripgrep not installed. Using basic grep (install with: apt install ripgrep)"
+    command grep -rn "$pattern" . | \
+      fzf --delimiter ':' \
+          --preview 'bat --style=numbers --color=always {1} 2>/dev/null || cat {1}'
+  fi
+}
+
+# Fuzzy git tag operations
+ftag() {
+  # Usage: ftag
+  # Browse git tags with fuzzy finder, then checkout, show, or delete selected tag
+  local tag
+  tag=$(git tag | sort -V | \
+    fzf --preview 'git show --color=always {} --stat')
+
+  [[ -z "$tag" ]] && return 0
+
+  echo "Selected tag: $tag"
+  echo "1) Checkout tag"
+  echo "2) Show tag details"
+  echo "3) Delete tag"
+  printf "Choice [1]: "
+  read -r choice
+
+  case "${choice:-1}" in
+    1) git checkout "$tag" ;;
+    2) git show "$tag" ;;
+    3) git tag -d "$tag" ;;
+  esac
+}
+
+# Fuzzy merge with preview
+fmerge() {
+  # Usage: fmerge
+  # Select branch to merge with fuzzy finder and preview of commits
+  local branch
+  branch=$(git branch --all | grep -v HEAD | \
+    fzf --preview 'git log --color=always --oneline --graph {}' \
+        --preview-window right:60%)
+
+  [[ -z "$branch" ]] && return 0
+
+  branch="${branch##*/}"  # Remove remotes/origin/ prefix
+  branch="${branch#"${branch%%[![:space:]]*}"}"  # Trim leading whitespace
+
+  echo "Merging: $branch"
+  git merge "$branch"
+}
+
+# Show files changed in current branch with preview
+ffiles-changed() {
+  # Usage: ffiles-changed [base-branch]
+  # Shows files changed in current branch compared to base (default: main)
+  local base="${1:-main}"
+  local file
+
+  file=$(git diff --name-only "$base"...HEAD | \
+    fzf --preview "git diff --color=always $base...HEAD -- {}" \
+        --preview-window right:60%)
+
+  [[ -n "$file" ]] && git diff "$base"...HEAD -- "$file"
+}
+
+#==============================================================================
+# Additional Docker Functions
+#==============================================================================
+# Enhanced Docker operations with intelligent defaults and FZF integration
+# Requires: docker, fzf (for interactive functions), bat/batcat (optional for JSON preview)
+#==============================================================================
+
+# Intelligent shell detection and execution
+dshell() {
+  # Usage: dshell
+  # Opens fuzzy container selector, then tries shells in order: zsh, bash, sh, ash
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  local container
+  container=$(docker ps --format '{{.Names}}' | fzf --height 40% --header 'Select container')
+  [[ -z "$container" ]] && return 0
+
+  # Try shells in order of preference
+  for shell in zsh bash sh ash; do
+    if docker exec "$container" which "$shell" &>/dev/null; then
+      echo "🐚 Opening $shell in $container..."
+      docker exec -it "$container" "$shell"
+      return 0
+    fi
+  done
+
+  echo "❌ No shell found in container"
+  return 1
+}
+
+# Network management with fzf
+dnetwork() {
+  # Usage: dnetwork
+  # Interactive Docker network management menu
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  echo "Docker Network Operations:"
+  echo "1) List networks"
+  echo "2) Inspect network"
+  echo "3) Remove network"
+  echo "4) Prune unused networks"
+  printf "Select [1]: "
+  read -r choice
+
+  case "${choice:-1}" in
+    1) docker network ls ;;
+    2)
+      local net
+      net=$(docker network ls --format '{{.Name}}' | fzf --header 'Select network to inspect')
+      [[ -n "$net" ]] && docker network inspect "$net" | bat -l json 2>/dev/null || docker network inspect "$net"
+      ;;
+    3)
+      local net
+      net=$(docker network ls --format '{{.Name}}' | fzf --header 'Select network to remove')
+      [[ -n "$net" ]] && docker network rm "$net"
+      ;;
+    4)
+      echo "⚠️  This will remove all unused networks"
+      printf "Proceed? [y/N] "
+      read -r confirm
+      [[ "$confirm" =~ ^[Yy]$ ]] && docker network prune -f
+      ;;
+  esac
+}
+
+# Volume management with fzf
+dvolume() {
+  # Usage: dvolume
+  # Interactive Docker volume management menu
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  echo "Docker Volume Operations:"
+  echo "1) List volumes"
+  echo "2) Inspect volume"
+  echo "3) Remove volumes (multi-select)"
+  echo "4) Prune unused volumes"
+  printf "Select [1]: "
+  read -r choice
+
+  case "${choice:-1}" in
+    1) docker volume ls ;;
+    2)
+      local vol
+      vol=$(docker volume ls --format '{{.Name}}' | fzf --header 'Select volume to inspect')
+      [[ -n "$vol" ]] && docker volume inspect "$vol" | bat -l json 2>/dev/null || docker volume inspect "$vol"
+      ;;
+    3)
+      local vols
+      vols=$(docker volume ls --format '{{.Name}}' | fzf --multi --header 'Select volumes to remove (Tab for multi-select)')
+      [[ -n "$vols" ]] && echo "$vols" | xargs docker volume rm
+      ;;
+    4)
+      echo "⚠️  This will remove all unused volumes"
+      printf "Proceed? [y/N] "
+      read -r confirm
+      [[ "$confirm" =~ ^[Yy]$ ]] && docker volume prune -f
+      ;;
+  esac
+}
+
+# Container resource monitoring (enhanced dps)
+dstats-live() {
+  # Usage: dstats-live
+  # Shows real-time resource usage for all running containers
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+}

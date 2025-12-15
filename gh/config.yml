@@ -62,6 +62,12 @@ aliases:
     wflist: workflow list
     wfview: workflow view
     wfrun: workflow run
+
+    # Advanced workflow automation
+    pr-conflicts: '!gh pr list --state open --json number,title,mergeable --jq ".[] | select(.mergeable == \"CONFLICTING\") | \"PR #\(.number): \(.title)\""'
+    pr-status-current: '!branch=$(git branch --show-current 2>/dev/null); if [ -n "$branch" ]; then gh pr list --head "$branch" --json number,title,state,reviews --jq ".[] | \"PR #\(.number): \(.title) - \(.state) - Reviews: \(.reviews | length)\""; else echo "Error: Not in a git repository or no current branch"; fi'
+    deploy-current: '!branch=$(git branch --show-current 2>/dev/null); if [ -n "$branch" ]; then echo "🚀 Triggering deploy workflow for branch: $branch"; gh workflow run deploy.yml --ref "$branch"; echo "✅ Deployment triggered. Use ''gh run watch'' to monitor."; else echo "Error: Not in a git repository or no current branch"; fi'
+
 # The path to a unix socket through which send HTTP connections. If blank, HTTP traffic will be handled by net/http.DefaultTransport.
 http_unix_socket:
 # What web browser gh should use when opening URLs. If blank, will refer to environment.

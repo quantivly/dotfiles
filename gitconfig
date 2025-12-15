@@ -28,6 +28,11 @@
 
 [core]
 	editor = code --wait
+	preloadindex = true           # Faster operations on large repos
+
+[fetch]
+	prune = true                  # Auto-prune on fetch
+	pruneTags = true              # Prune tags as well
 
 [diff]
     tool = default-difftool
@@ -63,13 +68,17 @@
 [push]
 	default = simple
 	followTags = true
+	autoSetupRemote = true        # Set upstream on first push
 
 [branch]
 	autosetupmerge = always
 	autosetuprebase = always
+	sort = -committerdate         # Sort branches by recent activity
 
 [rebase]
 	autosquash = true
+	updateRefs = true             # Git 2.38+ - auto-update references
+	missingCommitsCheck = warn    # Warn if commits are missing
 
 [merge]
 	conflictstyle = diff3
@@ -82,3 +91,6 @@
 
 [hub]
 	protocol = ssh
+
+[feature]
+	manyFiles = true              # Optimize for repos with many files

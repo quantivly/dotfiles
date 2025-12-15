@@ -1,0 +1,256 @@
+#==============================================================================
+# Help System - Semantic Categorization of Aliases and Functions
+#==============================================================================
+# Provides discoverable help commands for all dotfiles functionality
+# Usage: galias, gh-help, docker-help, fzf-help, dothelp
+#==============================================================================
+
+# Git alias help - organized semantically
+galias() {
+  cat << 'EOF'
+📚 Git Aliases Quick Reference
+
+BRANCH MANAGEMENT:
+  gb      - git branch                    gba     - git branch --all
+  gbd     - git branch --delete           gbD     - git branch --delete --force
+  gbrv    - git branch -vv (verbose)      gbm     - git branch --move
+  gbnm    - git branch --no-merged        gbr     - git branch --remote
+
+CHECKOUT & SWITCH:
+  gco     - git checkout                  gsw     - git switch
+  gswc    - git switch --create           gcd     - git checkout develop
+  gcm     - git checkout main             gswm    - git switch main
+  gswd    - git switch develop
+
+COMMITS:
+  gc      - git commit                    gcam    - git commit -am
+  gcmsg   - git commit -m                 gca     - git commit --amend
+  gcurrent - git show HEAD                gwip    - git add all + WIP commit
+  gunwip  - undo WIP commit
+
+STAGING:
+  ga      - git add                       gaa     - git add --all
+  gapa    - git add --patch               gau     - git add --update
+  gunstage - git restore --staged         grs     - git restore
+  grst    - git restore --staged
+
+STATUS & DIFF:
+  gst     - git status                    gss     - git status --short
+  gsb     - git status --short --branch   gd      - git diff
+  gds     - git diff --staged             gstats  - git diff --stat main..HEAD
+
+LOGS & HISTORY:
+  glog    - git log --oneline --graph     gloga   - ... --all
+  glogp   - git log (pretty format)       glogs   - git log --all --grep
+  glo     - git log --oneline             glol    - git log --graph --pretty
+  gchanges - git log main..HEAD           fshow   - fuzzy commit browser
+
+REBASE & MERGE:
+  grb     - git rebase                    grbi    - git rebase -i
+  grbm    - git rebase main               grbd    - git rebase develop
+  gsquash - git rebase -i HEAD~           grba    - git rebase --abort
+  grbc    - git rebase --continue         grbs    - git rebase --skip
+  gm      - git merge                     gma     - git merge --abort
+  gmom    - git merge origin/main         fmerge  - fuzzy merge with preview
+
+PUSH & PULL (SAFETY ENHANCED):
+  gp      - git push (SAFE - prompts for main/master/develop)
+  gpf     - git push --force (SAFE - requires 'force' confirmation)
+  gl      - git pull                      gpr     - git pull --rebase
+  ggpush  - git push origin current       ggpull  - git pull origin current
+  gpsup   - git push --set-upstream
+
+STASH:
+  gsta    - git stash push                gstp    - git stash pop
+  gstl    - git stash list                gstd    - git stash drop
+  gstaa   - git stash apply               gstc    - git stash clear
+  fstash  - fuzzy stash browser
+
+WORKTREES:
+  gwt     - git worktree                  gwta    - git worktree add
+  gwtls   - git worktree list             gwtrm   - git worktree remove
+  fworktree - fuzzy worktree browser
+
+OTHER OPERATIONS:
+  gclean  - git clean -fd                 grhh    - git reset --hard HEAD
+  gundo   - git reset --soft HEAD^        grf     - git reflog
+
+💡 Use 'gh-help' for GitHub CLI aliases
+💡 Use 'fzf-help' for FZF functions
+💡 Use 'docker-help' for Docker commands
+
+Full list: alias | grep "^g"
+EOF
+}
+
+# GitHub CLI alias help
+gh-help() {
+  cat << 'EOF'
+📚 GitHub CLI Aliases
+
+PR MANAGEMENT:
+  co, prc      - Checkout PR              prv      - View PR in browser
+  prs          - List open PRs            mypr     - Your open PRs
+  prdraft      - Create draft PR          prmerge  - Squash merge PR
+  prbase       - Get base branch          prinfo   - Show PR info
+
+REVIEWS:
+  review       - PRs you need to review   approve  - Approve PR
+  changes      - Request changes          comment  - Comment on PR
+
+ISSUES:
+  il           - List issues              iv       - View issue
+  ic           - Create issue             imi      - Issues assigned to me
+
+WORKFLOWS:
+  runs         - Recent workflow runs     rerun    - Rerun workflow
+  wfrun        - Run workflow             deploy-current - Deploy current branch
+
+CONFLICTS & STATUS:
+  pr-conflicts      - Show PRs with conflicts
+  pr-status-current - Status of current branch PR
+
+💡 Use 'gh alias list' for full list
+💡 Use 'galias' for git aliases
+EOF
+}
+
+# Docker alias help
+docker-help() {
+  cat << 'EOF'
+📚 Docker Aliases & Functions
+
+CONTAINER OPERATIONS:
+  dps      - List running containers      dpsa     - List all containers
+  dex      - Execute command              dshell   - Smart shell selector (fzf)
+  dlog     - View logs                    dlogf    - Follow logs
+  dstop    - Stop containers (safe)       dstopa   - Stop all (safe)
+  drm      - Remove containers (safe)
+
+IMAGE OPERATIONS:
+  di       - List images                  dimages  - Image management (fzf)
+  drmi     - Remove images (safe)         dprune   - Aggressive cleanup (safe)
+
+COMPOSE:
+  dcp      - docker-compose               dcup     - docker-compose up -d
+  dcdown   - docker-compose down          dcps     - docker-compose ps
+  dclogs   - docker-compose logs          dclean   - Safe cleanup
+
+INTERACTIVE (FZF):
+  dshell    - Fuzzy shell selection (zsh/bash/sh/ash)
+  dexec     - Fuzzy container exec
+  dlogs     - Fuzzy container logs
+  dkill     - Multi-select stop
+  dimages   - Image menu (remove/inspect/history)
+  dvolume   - Volume management menu
+  dnetwork  - Network management menu
+
+MONITORING:
+  dstats-live - Real-time resource usage
+
+💡 All destructive operations require confirmation
+💡 Use 'fzf-help' for more FZF functions
+EOF
+}
+
+# FZF function help
+fzf-help() {
+  cat << 'EOF'
+📚 FZF Interactive Functions
+
+KEYBINDINGS:
+  Ctrl+T       - Fuzzy file finder
+  Ctrl+R       - Fuzzy history search
+  Alt+C        - Fuzzy directory change
+  Ctrl+Alt+H   - Fuzzy home directory navigation
+
+NAVIGATION:
+  fcd          - Fuzzy directory change with git status preview
+  z <keyword>  - Jump to frequently used directory (zoxide)
+  zi           - Interactive zoxide
+  fls          - Fuzzy file browser with preview (opens in $EDITOR)
+
+FILE & CODE SEARCH:
+  fzgrep <pat> - Fuzzy grep with jump-to-line editing
+  fls          - Browse files with bat preview
+  fenv         - Browse environment variables
+  fport        - Find process using specific port
+
+GIT (FZF):
+  fbr          - Fuzzy branch checkout
+  fco          - Fuzzy commit checkout
+  fshow        - Git commit browser with preview
+  fstash       - Stash management
+  fdiff        - File selection for diff
+  fworktree    - Worktree management
+  ftag         - Tag operations (checkout/show/delete)
+  fmerge       - Branch merge with preview
+  ffiles-changed - Files changed in current branch vs main
+
+SYSTEM:
+  fkill        - Process killer with preview
+  fssh         - SSH host selector
+  fhome        - Fuzzy navigate home directory
+
+DOCKER (FZF):
+  dshell       - Smart shell in container (auto-detects zsh/bash/sh/ash)
+  dexec        - Fuzzy container exec
+  dlogs        - Fuzzy container logs
+  dkill        - Multi-select container stop
+  dimages      - Interactive image management
+  dvolume      - Volume management menu (list/inspect/remove/prune)
+  dnetwork     - Network management menu (list/inspect/remove/prune)
+
+💡 Most fzf functions support preview with bat/batcat
+💡 Use Tab for multi-select where supported (dkill, dvolume remove)
+💡 Press ? in most fzf interfaces for keybinding help
+EOF
+}
+
+# Master help command
+dothelp() {
+  cat << 'EOF'
+🎯 Dotfiles Help System
+
+COMMAND REFERENCES:
+  galias       - Git aliases (semantic groups)
+  gh-help      - GitHub CLI aliases
+  docker-help  - Docker commands & functions
+  fzf-help     - FZF interactive functions
+
+TOOL VERIFICATION:
+  tool_status  - Check installed modern tools
+  ~/.dotfiles/scripts/verify-tools.sh - Detailed tool check
+
+PERFORMANCE:
+  startup_monitor  - Monitor shell startup with alerts
+  startup_profile  - Detailed startup profiling
+  system_health    - System health check
+  zsh_bench        - Benchmark zsh startup time
+
+CONFIGURATION:
+  localrc      - Edit ~/.zshrc.local (machine-specific secrets)
+  zshreload    - Reload zsh configuration
+  reload       - Same as zshreload
+
+SHORTCUTS:
+  dots         - cd ~/.dotfiles
+  home         - cd ~
+  fhome        - Fuzzy navigate home directory (Ctrl+Alt+H)
+
+SAFETY FEATURES:
+  ✓ gp prompts confirmation for main/master/develop branches
+  ✓ gpf requires typing 'force' to confirm force push
+  ✓ gco-safe warns about uncommitted changes
+  ✓ All Docker destructive operations require confirmation
+
+💡 All help commands show semantic groupings, not raw grep output
+💡 Use 'alias | grep pattern' for raw search if needed
+💡 Set FZF_THEME=gruvbox|nord|monokai|dracula in ~/.zshrc.local to change theme
+
+For detailed workflows, see:
+  ~/.dotfiles/examples/git-workflows.md
+  ~/.dotfiles/examples/docker-workflows.md
+  ~/.dotfiles/examples/fzf-recipes.md
+EOF
+}
