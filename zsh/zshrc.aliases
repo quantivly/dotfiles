@@ -227,7 +227,7 @@ alias fgrep='fgrep --color=auto'
 # Quick edits
 alias zshrc='${EDITOR:-vim} ~/.zshrc'
 alias zshreload='source ~/.zshrc && echo "ZSH config reloaded!"'
-alias localrc='${EDITOR:-vim} ~/.zshrc.local'
+alias localrc='code ~/.zshrc.local'
 alias hosts='sudo ${EDITOR:-vim} /etc/hosts'
 
 # Useful system shortcuts

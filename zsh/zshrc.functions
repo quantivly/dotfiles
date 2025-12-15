@@ -1,7 +1,7 @@
 #==============================================================================
 # Shell Utility Functions
 #==============================================================================
-# Provides 17 utility functions organized by category.
+# Provides 20 utility functions organized by category.
 # All functions include inline "Usage: ..." documentation.
 #
 # File/Directory Management:
@@ -9,6 +9,9 @@
 #   - mkcd: Create directory and cd into it
 #   - backup: Create timestamped backup of file
 #   - extract: Universal archive extractor (handles tar, zip, gz, etc.)
+#   - osc52: Copy text to local clipboard via OSC 52 (works over SSH!)
+#   - copyfile: Copy file contents to clipboard (auto-detects SSH, uses OSC 52 or xclip/pbcopy)
+#   - catcopy: View file with bat and copy raw contents to clipboard
 #   - dirsize: Show directory sizes sorted by size
 #   - mkdate: Create dated directory with optional prefix
 #
@@ -179,6 +182,99 @@ extract() {
   else
     echo "'$1' is not a valid file"
   fi
+}
+
+# Copy to clipboard using OSC 52 (works over SSH!)
+osc52() {
+  # Usage: osc52 <text> or echo "text" | osc52
+  # Copies text to local clipboard using OSC 52 escape sequence
+  # Works over SSH with modern terminals (iTerm2, tmux, Windows Terminal, etc.)
+  local input
+
+  if [ $# -gt 0 ]; then
+    input="$*"
+  else
+    input=$(cat)
+  fi
+
+  local len=${#input}
+  local encoded=$(printf "%s" "$input" | base64 | tr -d '\n')
+
+  # Send OSC 52 escape sequence
+  if [ -n "$TMUX" ]; then
+    # Inside tmux, wrap the escape sequence
+    printf "\033Ptmux;\033\033]52;c;%s\007\033\\" "$encoded"
+  else
+    printf "\033]52;c;%s\007" "$encoded"
+  fi
+
+  echo "✓ Copied ${len} characters to clipboard via OSC 52"
+}
+
+# Copy file contents to clipboard
+copyfile() {
+  # Usage: copyfile <file>
+  # Copies the contents of a file to the clipboard
+  # Tries multiple methods: OSC 52 (SSH-friendly), xclip, pbcopy, wl-copy
+  if [ $# -ne 1 ]; then
+    echo "Usage: copyfile <file>"
+    return 1
+  fi
+
+  if [ ! -f "$1" ]; then
+    echo "Error: File '$1' not found"
+    return 1
+  fi
+
+  # Try OSC 52 first (works over SSH!)
+  if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ]; then
+    cat "$1" | osc52
+    return 0
+  fi
+
+  # Fall back to local clipboard utilities
+  if command -v xclip &> /dev/null && [ -n "$DISPLAY" ]; then
+    cat "$1" | xclip -selection clipboard
+    echo "✓ Copied '$1' to clipboard (xclip)"
+  elif command -v pbcopy &> /dev/null; then
+    cat "$1" | pbcopy
+    echo "✓ Copied '$1' to clipboard (pbcopy)"
+  elif command -v wl-copy &> /dev/null; then
+    cat "$1" | wl-copy
+    echo "✓ Copied '$1' to clipboard (wl-copy)"
+  else
+    # Last resort: use OSC 52 anyway
+    echo "⚠ No local clipboard utility found, using OSC 52"
+    cat "$1" | osc52
+  fi
+}
+
+# View file with bat and copy to clipboard
+catcopy() {
+  # Usage: catcopy <file>
+  # Displays file with bat (syntax highlighted) and copies raw contents to clipboard
+  if [ $# -ne 1 ]; then
+    echo "Usage: catcopy <file>"
+    return 1
+  fi
+
+  if [ ! -f "$1" ]; then
+    echo "Error: File '$1' not found"
+    return 1
+  fi
+
+  # Show with bat for nice viewing
+  if command -v bat &> /dev/null; then
+    bat "$1"
+  elif command -v batcat &> /dev/null; then
+    batcat "$1"
+  else
+    cat "$1"
+  fi
+
+  # Copy raw contents to clipboard
+  echo ""
+  copyfile "$1"
 }
 
 # Get public IP address

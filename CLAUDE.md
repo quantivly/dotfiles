@@ -394,6 +394,25 @@ chmod 600 ~/.zshrc.local
 path  # alias for: echo $PATH | tr ":" "\n"
 ```
 
+**Copy file contents to clipboard:**
+```bash
+# Smart clipboard - auto-detects SSH and uses appropriate method
+copyfile filename           # Uses OSC 52 over SSH, xclip/pbcopy locally
+catcopy filename            # View with bat + copy to clipboard
+
+# Direct OSC 52 usage (works over SSH!)
+osc52 "some text"           # Copy text directly
+echo "text" | osc52         # Copy from pipe
+cat file.txt | osc52        # Copy file via pipe
+
+# Alternative methods
+\cat filename               # Use original cat to view/copy manually
+bat --plain filename        # Plain view without formatting
+catp filename               # Bat with plain style (no line numbers)
+```
+
+**Note:** OSC 52 copies to your **local** clipboard even when SSH'd into a remote machine. Requires a modern terminal (iTerm2, tmux, Windows Terminal, WezTerm, etc.).
+
 **Verify tool installation status:**
 ```bash
 ./scripts/verify-tools.sh

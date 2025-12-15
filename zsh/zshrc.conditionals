@@ -55,14 +55,16 @@ fi
 
 # fd - Better find
 # Install: apt install fd-find (Ubuntu) or brew install fd (macOS)
-if command -v fd &> /dev/null; then
-  export _HAS_FD=1
-  export _FD_COMMAND="fd"
-elif command -v fdfind &> /dev/null; then
+# Check for fd/fdfind binary (not alias)
+# Use 'whence -p' to find only executable files, not aliases
+if whence -p fdfind &> /dev/null; then
   # Ubuntu installs it as fdfind
   alias fd='fdfind'
   export _HAS_FD=1
   export _FD_COMMAND="fdfind"
+elif whence -p fd &> /dev/null; then
+  export _HAS_FD=1
+  export _FD_COMMAND="fd"
 else
   # Provide informative message when first using find-related functions
   export _HAS_FD=0
@@ -327,8 +329,8 @@ fi
 # Editor configuration
 # Use VS Code if available, fall back to vim
 if command -v code &> /dev/null; then
-  export EDITOR='code --wait'
-  export VISUAL='code --wait'
+  export EDITOR='code'
+  export VISUAL='code'
 elif command -v vim &> /dev/null; then
   export EDITOR='vim'
   export VISUAL='vim'

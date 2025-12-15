@@ -222,3 +222,5 @@ if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   unalias q 2>/dev/null
   alias q='quanticli'
 fi
+
+[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
