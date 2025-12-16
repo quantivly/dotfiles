@@ -56,14 +56,32 @@
     diffFilter = delta --color-only
 
 [delta]
-    features = line-numbers decorations
+    features = line-numbers
     syntax-theme = GitHub
     plus-style = "syntax #22863a"
     minus-style = "syntax #b31d28"
     line-numbers = true
-    decorations = true
-    # Removed side-by-side from features and settings to allow delta to auto-detect
-    # Delta will automatically use side-by-side when terminal is wide enough
+
+    # Navigation keybindings (n/N) for large diffs
+    navigate = true
+
+    # Clickable links for commits, files, line numbers
+    hyperlinks = true
+
+    # De-emphasize unchanged lines for cleaner visual
+    zero-style = dim syntax
+    line-numbers-zero-style = dim
+
+    # Hunk header with syntax only (filename shown in decoration above)
+    hunk-header-style = syntax
+    # No decorative boxes around hunk headers
+    hunk-header-decoration-style = none
+    # Emphasize file name with bold and color
+    hunk-header-file-style = bold blue
+    # Subtle underline decoration for file names
+    file-decoration-style = blue ul
+
+    # Auto-detect side-by-side based on terminal width
     # To force side-by-side: git diff --side-by-side
     # To force unified: git diff --no-side-by-side
 
