@@ -295,14 +295,16 @@ if [[ -z "$_PYENV_LOADED" && -d "${HOME}/.pyenv" ]]; then
 
   # Ultra-lazy load pyenv (saves ~60-100ms)
   pyenv() {
-    unset -f pyenv python pip
+    unalias pip 2>/dev/null || true
+    unset -f pyenv python
     eval "$(command pyenv init -)"
     pyenv "$@"
   }
   
   # Lazy load python/pip if using pyenv
   python() {
-    unset -f pyenv python pip
+    unalias pip 2>/dev/null || true
+    unset -f pyenv python
     eval "$(command pyenv init -)"
     python "$@"
   }
