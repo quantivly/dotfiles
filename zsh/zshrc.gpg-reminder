@@ -1,0 +1,19 @@
+# GPG Cache Reminder
+# Shows a one-time reminder per shell session if GPG signing is enabled but cache is not primed
+
+# Only check once per shell session
+if [[ -z "$_GPG_CACHE_CHECKED" ]]; then
+    export _GPG_CACHE_CHECKED=1
+
+    # Check if GPG signing is enabled
+    if [[ "$(git config --global --get commit.gpgsign 2>/dev/null)" == "true" ]]; then
+        # Check if cache is primed using the check script
+        if command -v git-check-gpg-cache &> /dev/null; then
+            if ! git-check-gpg-cache 2>/dev/null; then
+                echo ""
+                echo "💡 Tip: GPG cache not primed. Run \`gpg-prime\` to enable automatic commit signing."
+                echo ""
+            fi
+        fi
+    fi
+fi

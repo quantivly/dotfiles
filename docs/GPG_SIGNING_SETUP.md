@@ -46,24 +46,55 @@ GPG signing has been configured with secure passphrase caching so that:
    export GPG_TTY=$(tty)
    ```
 
+5. **~/.dotfiles/zsh/zshrc.gpg-reminder** - Shell startup reminder
+   - Shows one-time reminder per session if cache not primed
+   - Non-intrusive, easy to dismiss
+
+6. **~/.local/share/git-templates/hooks/pre-commit** - Pre-commit hook
+   - Blocks commits if GPG cache not primed
+   - Prevents hanging sessions
+   - Provides clear error message with fix instructions
+
+7. **~/.local/bin/git-check-gpg-cache** - Cache status checker
+   - Used by pre-commit hook and shell reminder
+   - Returns 0 if cache is ready, 1 if not
+
+8. **~/.local/bin/install-gpg-hooks** - Hook installer for existing repos
+   - Installs pre-commit hook in existing git repositories
+   - New repos automatically get the hook via git template
+
 ## Usage Instructions
 
 ### Daily Workflow
 
-**Before starting work with Claude Code:**
+The system includes **automatic safeguards** to prevent hanging sessions:
 
-1. Prime the GPG cache by running:
+1. **Shell Reminder**: When you open a new terminal, you'll see a one-time reminder if GPG cache isn't primed:
+   ```
+   💡 Tip: GPG cache not primed. Run `gpg-prime` to enable automatic commit signing.
+   ```
+
+2. **Pre-commit Hook**: If you try to commit without a primed cache, the commit will be blocked with clear instructions:
+   ```
+   ⚠️  GPG Cache Not Primed
+
+   To fix this, run:
+     gpg-prime
+
+   Or to commit without signing this once:
+     git commit --no-gpg-sign
+   ```
+
+3. **Prime the cache** when prompted:
    ```bash
-   gpg-prime-cache
-   # or use the alias:
    gpg-prime
    ```
 
-2. Enter your GPG passphrase when prompted
+4. Enter your GPG passphrase once
 
-3. Your passphrase is now cached securely for 8-24 hours
+5. Your passphrase is now cached securely for 8-24 hours
 
-4. Use Claude Code normally - commits will be signed automatically
+6. Work normally - commits will be signed automatically, and you'll never experience hanging sessions!
 
 ### Manual Testing
 
@@ -93,6 +124,20 @@ echo "test" | gpg --clearsign
 - **Automatic timeout**: Cache expires after 8 hours of inactivity
 - **Maximum lifetime**: Cache is cleared after 24 hours regardless of activity
 - **Per-session**: Cache is cleared when gpg-agent restarts or system reboots
+
+## Installing Hooks in Existing Repositories
+
+New repositories automatically get the pre-commit hook via git template configuration. For existing repositories:
+
+```bash
+# Install in specific repositories
+install-gpg-hooks ~/path/to/repo1 ~/path/to/repo2
+
+# Or search and install in all found repos
+install-gpg-hooks
+```
+
+The dotfiles repository already has the hook installed automatically.
 
 ## Troubleshooting
 

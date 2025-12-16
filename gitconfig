@@ -87,6 +87,7 @@
 
 [init]
 	defaultBranch = main
+	templateDir = /home/ubuntu/.local/share/git-templates
 
 [pull]
 	rebase = true

@@ -178,6 +178,9 @@ bindkey '^W' backward-kill-word     # Ctrl+W - delete word backward (alternative
 # Optional tool configurations (colorls, pyenv, nvm, etc.)
 [ -f ~/.dotfiles/zsh/zshrc.conditionals ] && source ~/.dotfiles/zsh/zshrc.conditionals
 
+# GPG cache reminder (one-time per session)
+[ -f ~/.dotfiles/zsh/zshrc.gpg-reminder ] && source ~/.dotfiles/zsh/zshrc.gpg-reminder
+
 # Company/work-specific configuration
 [ -f ~/.dotfiles/zsh/zshrc.company ] && source ~/.dotfiles/zsh/zshrc.company
 
