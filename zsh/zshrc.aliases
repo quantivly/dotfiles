@@ -266,3 +266,6 @@ alias cd..='cd ..'
 alias sl='ls'
 alias claer='clear'
 alias cleaer='clear'
+
+# GPG cache management
+alias gpg-prime='gpg-prime-cache'
