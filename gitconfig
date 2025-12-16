@@ -57,9 +57,9 @@
 
 [delta]
     features = line-numbers decorations
-    syntax-theme = Dracula
-    plus-style = "syntax #012800"
-    minus-style = "syntax #340001"
+    syntax-theme = GitHub
+    plus-style = "syntax #22863a"
+    minus-style = "syntax #b31d28"
     line-numbers = true
     decorations = true
     # Removed side-by-side from features and settings to allow delta to auto-detect
