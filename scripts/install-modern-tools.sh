@@ -85,7 +85,7 @@ install_tool() {
     local description="$3"
     
     # Skip if already installed
-    if command_exists "$tool_name" || [[ -n "$alt_name" && $(command_exists "$alt_name") ]]; then
+    if command_exists "$tool_name" || { [[ -n "$alt_name" ]] && command_exists "$alt_name"; }; then
         print_success "$tool_name already installed"
         return 0
     fi
@@ -278,7 +278,7 @@ install_tool() {
     esac
     
     # Verify installation
-    if command_exists "$tool_name" || [[ -n "$alt_name" && $(command_exists "$alt_name") ]]; then
+    if command_exists "$tool_name" || { [[ -n "$alt_name" ]] && command_exists "$alt_name"; }; then
         print_success "$tool_name installed successfully"
     else
         print_error "Failed to install $tool_name"
