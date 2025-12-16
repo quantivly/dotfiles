@@ -31,6 +31,7 @@
 [core]
 	editor = code --wait
 	preloadindex = true           # Faster operations on large repos
+	hooksPath = ~/.config/git/hooks  # Global hooks for all repositories
 
 [fetch]
 	prune = true                  # Auto-prune on fetch
@@ -87,7 +88,6 @@
 
 [init]
 	defaultBranch = main
-	templateDir = /home/ubuntu/.local/share/git-templates
 
 [pull]
 	rebase = true

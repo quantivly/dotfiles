@@ -1,0 +1,33 @@
+#!/bin/bash
+# Pre-commit hook: Check if GPG cache is primed before allowing commit
+# This prevents hanging sessions when GPG signing is enabled but cache is not primed
+
+# Check if git-check-gpg-cache exists
+if ! command -v git-check-gpg-cache &> /dev/null; then
+    # Script not found, allow commit to proceed
+    exit 0
+fi
+
+# Check if GPG cache is primed
+if ! git-check-gpg-cache; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "⚠️  GPG Cache Not Primed"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "GPG commit signing is enabled, but your passphrase is not cached."
+    echo "This would cause the commit to hang waiting for credentials."
+    echo ""
+    echo "To fix this, run:"
+    echo "  gpg-prime"
+    echo ""
+    echo "Or to commit without signing this once:"
+    echo "  git commit --no-gpg-sign"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    exit 1
+fi
+
+# Cache is primed, allow commit to proceed
+exit 0

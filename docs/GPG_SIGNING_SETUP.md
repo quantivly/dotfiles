@@ -50,18 +50,20 @@ GPG signing has been configured with secure passphrase caching so that:
    - Shows one-time reminder per session if cache not primed
    - Non-intrusive, easy to dismiss
 
-6. **~/.local/share/git-templates/hooks/pre-commit** - Pre-commit hook
+6. **~/.config/git/hooks/pre-commit** - Global pre-commit hook
    - Blocks commits if GPG cache not primed
    - Prevents hanging sessions
    - Provides clear error message with fix instructions
+   - **Applies to ALL git repositories automatically** (via core.hooksPath)
 
 7. **~/.local/bin/git-check-gpg-cache** - Cache status checker
    - Used by pre-commit hook and shell reminder
    - Returns 0 if cache is ready, 1 if not
 
-8. **~/.local/bin/install-gpg-hooks** - Hook installer for existing repos
-   - Installs pre-commit hook in existing git repositories
-   - New repos automatically get the hook via git template
+8. **gitconfig: core.hooksPath** - Global hooks configuration
+   - Points to ~/.config/git/hooks
+   - Makes pre-commit hook work in all repositories automatically
+   - No per-repo installation needed!
 
 ## Usage Instructions
 
@@ -125,19 +127,16 @@ echo "test" | gpg --clearsign
 - **Maximum lifetime**: Cache is cleared after 24 hours regardless of activity
 - **Per-session**: Cache is cleared when gpg-agent restarts or system reboots
 
-## Installing Hooks in Existing Repositories
+## Global Hooks - No Installation Needed!
 
-New repositories automatically get the pre-commit hook via git template configuration. For existing repositories:
+The pre-commit hook is configured as a **global hook** via `core.hooksPath`, which means:
 
-```bash
-# Install in specific repositories
-install-gpg-hooks ~/path/to/repo1 ~/path/to/repo2
+✅ **Works in ALL repositories automatically**
+✅ **No per-repo installation required**
+✅ **Existing repos protected immediately**
+✅ **New repos protected automatically**
 
-# Or search and install in all found repos
-install-gpg-hooks
-```
-
-The dotfiles repository already has the hook installed automatically.
+The hook is located at `~/.config/git/hooks/pre-commit` and applies to every git repository on your system.
 
 ## Troubleshooting
 
