@@ -24,6 +24,7 @@
 #
 # Development:
 #   - gwtc: Git worktree create helper (create worktree in ../worktrees/<branch>)
+#   - gd: Smart git diff (adapts to terminal width for side-by-side vs unified)
 #   - note: Quick note taking with timestamps
 #   - psgrep: Search for processes by pattern
 #   - killnamed: Kill process by name (with confirmation)
@@ -1056,6 +1057,35 @@ gco-safe() {
   fi
   git checkout "$@"
 }
+
+#==============================================================================
+# Git Delta Smart Display
+#==============================================================================
+# Smart git diff wrapper that adapts to terminal width
+# Uses side-by-side mode for wide terminals, unified for narrow (e.g., VSCode split)
+#==============================================================================
+
+# Smart git diff - adapts layout based on terminal width
+# Override oh-my-zsh's `gd` alias with a smart function
+unalias gd 2>/dev/null  # Remove oh-my-zsh alias if it exists
+
+gd() {
+  # Usage: gd [git diff options]
+  # Automatically uses side-by-side for wide terminals (>= 160 cols)
+  # and unified diff for narrow terminals (< 160 cols)
+  local width=$(tput cols 2>/dev/null || echo "80")
+  local threshold="${GD_WIDTH_THRESHOLD:-160}"  # Configurable via env var
+
+  if [ "$width" -ge "$threshold" ]; then
+    git -c delta.side-by-side=true diff "$@"
+  else
+    git -c delta.side-by-side=false diff "$@"
+  fi
+}
+
+# Variants for explicit control
+alias gdw='git -c delta.side-by-side=true diff'   # Force wide/side-by-side
+alias gdv='git -c delta.side-by-side=false diff'  # Force unified/vertical
 
 #==============================================================================
 # Additional FZF Interactive Functions

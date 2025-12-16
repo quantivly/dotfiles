@@ -3,9 +3,11 @@
 	email = zvi.baratz@quantivly.com
 	signingkey = C17A560D62ECBDA8
 
-# Machine-specific safe directories should be added locally
-# [safe]
-#	directory = /path/to/your/workspace
+# Machine-specific safe directories
+[safe]
+	directory = /home/ubuntu/workspaces/test
+	directory = /home/ubuntu/workspaces/sre
+	directory = /home/ubuntu/workspaces/cicd
 
 [credential "https://github.com"]
 	helper =
@@ -54,13 +56,16 @@
     diffFilter = delta --color-only
 
 [delta]
-    features = side-by-side line-numbers decorations
+    features = line-numbers decorations
     syntax-theme = Dracula
     plus-style = "syntax #012800"
     minus-style = "syntax #340001"
-    side-by-side = true
     line-numbers = true
     decorations = true
+    # Removed side-by-side from features and settings to allow delta to auto-detect
+    # Delta will automatically use side-by-side when terminal is wide enough
+    # To force side-by-side: git diff --side-by-side
+    # To force unified: git diff --no-side-by-side
 
 [init]
 	defaultBranch = main
@@ -97,3 +102,7 @@
 
 [feature]
 	manyFiles = true              # Optimize for repos with many files
+[safe]
+	directory = /home/ubuntu/workspaces/test
+	directory = /home/ubuntu/workspaces/sre
+	directory = /home/ubuntu/workspaces/cicd

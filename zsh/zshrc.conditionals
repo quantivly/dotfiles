@@ -647,12 +647,38 @@ fi
 
 # forgit - Interactive git operations via fzf
 # Install: https://github.com/wfxr/forgit#installation
+# Disable forgit's gd alias (we'll use our own smart version)
+export FORGIT_NO_ALIASES=1
+
 if [[ -f "${HOME}/.forgit/forgit.plugin.zsh" ]]; then
   source "${HOME}/.forgit/forgit.plugin.zsh"
 elif command -v forgit &> /dev/null; then
   # If installed via package manager
   eval "$(forgit init zsh)"
 fi
+
+# Define our smart width-aware gd function
+# (forgit's gd alias is disabled above, but we can still use forgit::diff if needed)
+gd() {
+  # Smart git diff that adapts to terminal width
+  local width=$(tput cols 2>/dev/null || echo "80")
+  local threshold="${GD_WIDTH_THRESHOLD:-160}"
+
+  if [ "$width" -ge "$threshold" ]; then
+    git -c delta.side-by-side=true diff "$@"
+  else
+    git -c delta.side-by-side=false diff "$@"
+  fi
+}
+
+# Restore other forgit aliases manually (since we disabled all)
+alias glo='forgit::log'
+alias ga='forgit::add'
+alias grh='forgit::reset::head'
+alias gcf='forgit::checkout::file'
+alias gcb='forgit::checkout::branch'
+alias gss='forgit::stash::show'
+alias gclean='forgit::clean'
 
 # Additional git workflow automation
 if command -v git &> /dev/null && command -v fzf &> /dev/null; then

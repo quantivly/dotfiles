@@ -217,6 +217,23 @@ pathadd "${HOME}/.docker/cli-plugins"
 # Final overrides (after all other configs load)
 #==============================================================================
 
+# Override forgit's gd alias with our smart width-aware version
+# This must load after forgit (in zshrc.conditionals)
+if alias gd &>/dev/null && [[ "$(alias gd)" == *"forgit"* ]]; then
+  unalias gd
+  gd() {
+    # Smart git diff that adapts to terminal width
+    local width=$(tput cols 2>/dev/null || echo "80")
+    local threshold="${GD_WIDTH_THRESHOLD:-160}"
+
+    if [ "$width" -ge "$threshold" ]; then
+      git -c delta.side-by-side=true diff "$@"
+    else
+      git -c delta.side-by-side=false diff "$@"
+    fi
+  }
+fi
+
 # Ensure quanticli aliases are set correctly (in case they were overridden)
 if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   unalias q 2>/dev/null
