@@ -88,6 +88,76 @@ git pull
 ./install
 ```
 
+## Utility Scripts
+
+The `scripts/` directory contains helpful tools for managing your dotfiles installation:
+
+### install-modern-tools.sh
+
+Automated installation script for modern CLI tools (25+ tools). This script makes it easy to install optional enhancement tools without tracking down installation commands.
+
+**Usage:**
+```bash
+./scripts/install-modern-tools.sh
+```
+
+**Features:**
+- Interactive menu with installation categories:
+  1. Essential tools (bat, eza, fd, ripgrep, zoxide, btop, etc.)
+  2. Development tools (lazygit, just, hyperfine, difftastic, etc.)
+  3. All tools (complete setup)
+  4. Install specific tool
+  5. Show tool status
+- Automatically detects your package manager (apt, cargo, pip)
+- Skips already-installed tools
+- Provides fallback installation methods
+
+**When to use:**
+- After initial dotfiles installation to enhance your CLI experience
+- When setting up a new machine
+- To check what modern tools are available
+
+### verify-tools.sh
+
+Checks installation status of all tools referenced in the dotfiles configuration.
+
+**Usage:**
+```bash
+./scripts/verify-tools.sh
+```
+
+**Shows:**
+- Required tools (zsh, git) with versions
+- Strongly recommended tools (fzf, gh)
+- Modern CLI replacements (bat, eza, fd, ripgrep, htop, delta)
+- Version managers (nvm, pyenv)
+- Optional tools (direnv, autojump, poetry, docker)
+- Oh-My-Zsh plugins status
+
+**When to use:**
+- After installation to see what's missing
+- Before reporting issues
+- To verify your environment is set up correctly
+- When troubleshooting configuration problems
+
+**Example output:**
+```
+=== Dotfiles Tool Installation Status ===
+
+Required Tools:
+  ✓ zsh: zsh 5.8
+  ✓ git: git version 2.34.1
+
+Strongly Recommended:
+  ✓ fzf: 0.42.0
+  ✗ gh: not installed
+
+Modern CLI Replacements:
+  ✓ bat (replaces cat): bat 0.22.1
+  ✓ eza (replaces ls): eza 0.17.0
+  ...
+```
+
 ## Dependencies
 
 ### Required
@@ -371,15 +441,9 @@ Power user tips for:
 - Advanced file operations
 - Git and Docker integration
 
-### [Tool Verification](scripts/verify-tools.sh)
-Check which tools are installed:
-```bash
-./scripts/verify-tools.sh
-```
-
-Shows installation status of all tools (zsh, git, fzf, gh, bat, eza, fd, rg, htop, delta, nvm, pyenv, and more).
-
 See [examples/README.md](examples/README.md) for the complete index.
+
+For tool installation and verification, see the [Utility Scripts](#utility-scripts) section.
 
 ## Customization
 
