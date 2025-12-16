@@ -240,6 +240,37 @@ install_tool() {
             gunzip cheat.gz && chmod +x cheat
             sudo mv cheat /usr/local/bin/
             ;;
+        "fd"|"fdfind")
+            # On Ubuntu, fd is installed as fdfind to avoid conflict with fdclone
+            install_apt fd-find || install_cargo fd-find
+            ;;
+        "bat"|"batcat")
+            # On Ubuntu, bat is installed as batcat to avoid conflict with bacula-console-qt
+            install_apt bat || install_cargo bat
+            ;;
+        "eza")
+            # eza is not in Ubuntu repos, must use cargo or GitHub
+            install_cargo eza || {
+                print_status "Installing eza from GitHub releases..."
+                EZA_VERSION=$(curl -s "https://api.github.com/repos/eza-community/eza/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+                curl -Lo eza.tar.gz "https://github.com/eza-community/eza/releases/download/v${EZA_VERSION}/eza_x86_64-unknown-linux-gnu.tar.gz"
+                tar xf eza.tar.gz
+                sudo install eza /usr/local/bin && rm eza eza.tar.gz
+            }
+            ;;
+        "rg"|"ripgrep")
+            install_apt ripgrep || install_cargo ripgrep
+            ;;
+        "delta")
+            # git-delta is best installed from GitHub releases or cargo
+            print_status "Installing delta from GitHub releases..."
+            DELTA_VERSION=$(curl -s "https://api.github.com/repos/dandavison/delta/releases/latest" | grep -Po '"tag_name": "\K[^"]*')
+            curl -Lo delta.tar.gz "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/delta-${DELTA_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+            tar xf delta.tar.gz --strip-components=1 "delta-${DELTA_VERSION}-x86_64-unknown-linux-gnu/delta"
+            sudo install delta /usr/local/bin && rm delta delta.tar.gz
+            # Fallback to cargo if GitHub release fails
+            [[ $? -ne 0 ]] && install_cargo git-delta
+            ;;
         *)
             print_warning "Unknown tool: $tool_name"
             return 1
@@ -305,6 +336,14 @@ main() {
         1)
             echo
             print_status "Installing essential tools..."
+            # Core CLI replacements
+            install_tool "fd" "fdfind" "Better find"
+            install_tool "bat" "batcat" "Syntax highlighting cat"
+            install_tool "eza" "" "Better ls with icons"
+            install_tool "rg" "ripgrep" "Better grep"
+            install_tool "delta" "" "Better git diff"
+
+            # Essential utilities
             install_tool "zoxide" "" "Smart cd replacement"
             install_tool "btop" "htop" "Modern resource monitor"
             install_tool "duf" "" "Better df visualization"
@@ -328,6 +367,13 @@ main() {
         3)
             echo
             print_status "Installing all tools..."
+            # Core CLI replacements
+            install_tool "fd" "fdfind" "Better find"
+            install_tool "bat" "batcat" "Syntax highlighting cat"
+            install_tool "eza" "" "Better ls with icons"
+            install_tool "rg" "ripgrep" "Better grep"
+            install_tool "delta" "" "Better git diff"
+
             # Essential tools
             install_tool "zoxide" "" "Smart cd replacement"
             install_tool "btop" "htop" "Modern resource monitor"
@@ -362,10 +408,11 @@ main() {
         4)
             echo
             echo "Available tools:"
-            echo "  zoxide, btop, procs, duf, dust, ctop"
-            echo "  lazygit, dive, just, hyperfine, glow, difft, lazydocker"
-            echo "  thefuck, tldr, cheat, neofetch, fastfetch"
-            echo "  gitleaks, pre-commit, sops, forgit"
+            echo "  Core CLI: fd, bat, eza, rg, delta"
+            echo "  Essential: zoxide, btop, procs, duf, dust, ctop"
+            echo "  Development: lazygit, dive, just, hyperfine, glow, difft, lazydocker"
+            echo "  Productivity: thefuck, tldr, cheat, neofetch, fastfetch"
+            echo "  Security: gitleaks, pre-commit, sops, forgit"
             echo
             read -p "Enter tool name: " tool_name
             install_tool "$tool_name" "" "Selected tool"
@@ -377,7 +424,7 @@ main() {
                 tool_status
             else
                 print_status "Checking basic tool availability..."
-                for tool in zoxide btop procs duf dust lazygit dive just hyperfine glow difft thefuck tldr cheat neofetch fastfetch gitleaks pre-commit sops; do
+                for tool in fd fdfind bat batcat eza rg delta zoxide btop procs duf dust lazygit dive just hyperfine glow difft thefuck tldr cheat neofetch fastfetch gitleaks pre-commit sops; do
                     if command_exists "$tool"; then
                         print_success "$tool is installed"
                     else
