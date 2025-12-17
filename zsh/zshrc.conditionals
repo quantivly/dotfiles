@@ -351,27 +351,30 @@ export LC_ALL=en_US.UTF-8
 # Or: cargo install zoxide
 # Or: apt install zoxide (Ubuntu 21.10+)
 if command -v zoxide &> /dev/null; then
-  # Initialize zoxide
-  eval "$(zoxide init zsh)"
-  
-  # Enhanced aliases for different navigation patterns
-  alias cd='z'          # Replace cd with zoxide
-  alias cdi='zi'        # Interactive zoxide with fzf
-  alias cda='za'        # Add current directory to zoxide database
-  alias cdq='zq'        # Query zoxide database
-  
-  # Fuzzy navigation with preview (if fzf available)
-  if command -v fzf &> /dev/null; then
-    zf() {
-      local dir
-      dir=$(zoxide query -l | fzf --preview 'ls -la {}' --preview-window=right:50%:wrap) && cd "$dir"
+  # Initialize zoxide (suppress errors in non-interactive contexts)
+  eval "$(zoxide init zsh 2>/dev/null)" 2>/dev/null
+
+  # Only set up aliases if zoxide initialized successfully
+  if (( ${+functions[__zoxide_z]} )); then
+    # Enhanced aliases for different navigation patterns
+    alias cd='z'          # Replace cd with zoxide
+    alias cdi='zi'        # Interactive zoxide with fzf
+    alias cda='za'        # Add current directory to zoxide database
+    alias cdq='zq'        # Query zoxide database
+
+    # Fuzzy navigation with preview (if fzf available)
+    if command -v fzf &> /dev/null; then
+      zf() {
+        local dir
+        dir=$(zoxide query -l | fzf --preview 'ls -la {}' --preview-window=right:50%:wrap) && cd "$dir"
+      }
+    fi
+
+    # Show frequently visited directories
+    zshow() {
+      zoxide query -l -s | head -20
     }
   fi
-  
-  # Show frequently visited directories
-  zshow() {
-    zoxide query -l -s | head -20
-  }
 fi
 
 #==============================================================================
