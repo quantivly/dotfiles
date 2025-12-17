@@ -386,6 +386,12 @@ git cherry-pick $(git log --oneline | fzf | awk '{print $1}')
 
 **Interactive rebase:**
 ```bash
+# Use the built-in frb function (recommended):
+frb
+# Shows preview of commits to be rebased
+# Select base commit interactively
+
+# Or the one-liner version:
 git rebase -i $(git log --oneline | fzf | awk '{print $1}')^
 # Select commit to start rebase from
 # Opens interactive rebase

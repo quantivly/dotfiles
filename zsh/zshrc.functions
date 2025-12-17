@@ -743,22 +743,24 @@ git_cleanup() {
 # fgit - Enhanced git operations with fzf
 fgit() {
   local action
-  
+
   echo "Git Operations:"
   echo "1. Fuzzy checkout branch"
   echo "2. Fuzzy checkout commit"
   echo "3. Fuzzy git log"
   echo "4. Fuzzy git stash"
   echo "5. Fuzzy git diff"
+  echo "6. Fuzzy interactive rebase"
   echo
-  read -p "Select action (1-5): " action
-  
+  read -p "Select action (1-6): " action
+
   case $action in
     1) fbr ;;
     2) fco ;;
     3) fshow ;;
     4) fstash ;;
     5) fdiff ;;
+    6) frb ;;
     *) echo "Invalid selection" ;;
   esac
 }
@@ -784,11 +786,39 @@ fstash() {
 # fdiff - Fuzzy git diff with file selection
 fdiff() {
   local file
-  
+
   file=$(git diff --name-only | fzf --header='Select file for diff' --preview='git diff --color=always {}')
-  
+
   if [[ -n "$file" ]]; then
     git diff "$file"
+  fi
+}
+
+# frb - Fuzzy git interactive rebase
+frb() {
+  local commits commit
+
+  # Get git log and let user select base commit
+  commits=$(git log --pretty=oneline --abbrev-commit --color=always) || return 1
+
+  if [[ -z "$commits" ]]; then
+    echo "No commits found"
+    return 1
+  fi
+
+  commit=$(echo "$commits" | \
+    fzf --ansi \
+        --no-sort \
+        --header='Select base commit for interactive rebase (rebase FROM this commit)' \
+        --preview='echo {} | grep -o "^[a-f0-9]\+" | head -1 | xargs -I @ sh -c "git log --graph --color=always --format=\"%C(auto)%h%d %s %C(black)%C(bold)%cr\" @^..HEAD"' \
+        --preview-window=right:60%:wrap | \
+    grep -o "^[a-f0-9]\+" | head -1)
+
+  if [[ -n "$commit" ]]; then
+    echo "Starting interactive rebase from commit: $commit"
+    git rebase -i "${commit}^"
+  else
+    echo "No commit selected"
   fi
 }
 
