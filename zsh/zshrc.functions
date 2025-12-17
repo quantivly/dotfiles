@@ -796,29 +796,30 @@ fdiff() {
 
 # frb - Fuzzy git interactive rebase
 frb() {
-  local commits commit
+  local branches branch current_branch
 
-  # Get git log and let user select base commit
-  commits=$(git log --pretty=oneline --abbrev-commit --color=always) || return 1
+  current_branch=$(git branch --show-current)
 
-  if [[ -z "$commits" ]]; then
-    echo "No commits found"
+  # Get all branches (local and remote)
+  branches=$(git branch --all --sort=-committerdate | grep -v HEAD) || return 1
+
+  if [[ -z "$branches" ]]; then
+    echo "No branches found"
     return 1
   fi
 
-  commit=$(echo "$commits" | \
+  branch=$(echo "$branches" | \
     fzf --ansi \
-        --no-sort \
-        --header='Select base commit for interactive rebase (rebase FROM this commit)' \
-        --preview='echo {} | grep -o "^[a-f0-9]\+" | head -1 | xargs -I @ sh -c "git log --graph --color=always --format=\"%C(auto)%h%d %s %C(black)%C(bold)%cr\" @^..HEAD"' \
+        --header="Select base branch for interactive rebase (current: $current_branch)" \
+        --preview='git log --graph --color=always --format="%C(auto)%h%d %s %C(black)%C(bold)%cr" $(echo {} | sed "s/.* //" | sed "s#remotes/[^/]*/##")...HEAD' \
         --preview-window=right:60%:wrap | \
-    grep -o "^[a-f0-9]\+" | head -1)
+    sed "s/.* //" | sed "s#remotes/[^/]*/##")
 
-  if [[ -n "$commit" ]]; then
-    echo "Starting interactive rebase from commit: $commit"
-    git rebase -i "${commit}^"
+  if [[ -n "$branch" ]]; then
+    echo "Starting interactive rebase onto: $branch"
+    git rebase -i "$branch"
   else
-    echo "No commit selected"
+    echo "No branch selected"
   fi
 }
 
