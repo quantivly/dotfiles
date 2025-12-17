@@ -181,13 +181,13 @@ if command -v fzf &> /dev/null; then
   fi
 
   # FZF Git integration
-  # fbr - Fuzzy checkout git branch
-  fbr() {
-    local branches branch
-    branches=$(git branch -a) &&
-    branch=$(echo "$branches" | fzf +m) &&
-    git checkout $(echo "$branch" | sed "s/.* //" | sed "s#remotes/[^/]*/##")
-  }
+  # fbr - Fuzzy checkout git branch (removed - use fgcb instead for richer forgit implementation)
+  # fbr() {
+  #   local branches branch
+  #   branches=$(git branch -a) &&
+  #   branch=$(echo "$branches" | fzf +m) &&
+  #   git checkout $(echo "$branch" | sed "s/.* //" | sed "s#remotes/[^/]*/##")
+  # }
 
   # fco - Fuzzy checkout git commit
   fco() {
@@ -672,11 +672,12 @@ gd() {
 }
 
 # Restore other forgit aliases manually (since we disabled all)
+# Note: Avoid overriding standard oh-my-zsh git aliases
 alias glo='forgit::log'
-alias ga='forgit::add'
+alias gfa='forgit::add'              # Changed from 'ga' to avoid conflict
 alias grh='forgit::reset::head'
 alias gcf='forgit::checkout::file'
-alias gcb='forgit::checkout::branch'
+alias fgcb='forgit::checkout::branch' # Fuzzy branch checkout (richer than custom fbr)
 alias gss='forgit::stash::show'
 alias gclean='forgit::clean'
 
