@@ -8,8 +8,15 @@
 	name = Your Name
 	email = your.email@quantivly.com
 
-# Optional: GPG signing configuration
-# Uncomment and configure if you want to sign your commits
+# GPG Signing (Recommended)
+# Signing your commits helps verify your identity and is strongly encouraged.
+#
+# Setup steps:
+# 1. Generate a GPG key: gpg --full-generate-key
+# 2. Get your key ID: gpg --list-secret-keys --keyid-format=long
+# 3. Add your key ID below (the part after "rsa4096/" or "ed25519/")
+# 4. Add your GPG public key to GitHub: https://github.com/settings/keys
+# 5. Uncomment the lines below:
 #
 # [user]
 # 	signingkey = YOUR_GPG_KEY_ID
@@ -20,5 +27,5 @@
 # [gpg]
 # 	program = gpg
 
-# Optional: Machine-specific git configuration
+# Machine-specific git configuration
 # Add any other personal git settings here

@@ -78,7 +78,7 @@ Shared configuration files for zsh, git, and various development tools used by t
        email = your.email@quantivly.com
    ```
 
-   Optionally, configure GPG signing if you use it (see comments in the file).
+   **Recommended:** Set up GPG signing to verify your commits (see [Personalization](#personalization) section for detailed instructions).
 
 5. **Customize machine-specific settings:**
 
@@ -322,12 +322,50 @@ Your personal git settings go in `~/.gitconfig.local`:
     name = Your Name
     email = your.email@quantivly.com
 
-# Optional: GPG signing
+# Recommended: GPG signing for commit verification
 [user]
     signingkey = YOUR_GPG_KEY_ID
 [commit]
     gpgsign = true
 ```
+
+**GPG signing is strongly encouraged** to verify your identity and ensure commit authenticity.
+
+<details>
+<summary><b>How to set up GPG signing (click to expand)</b></summary>
+
+```bash
+# 1. Generate a GPG key
+gpg --full-generate-key
+# Choose: RSA and RSA, 4096 bits, key doesn't expire (or set expiration)
+# Use your Quantivly email address
+
+# 2. Get your key ID
+gpg --list-secret-keys --keyid-format=long
+# Look for the line "sec   rsa4096/ABCD1234ABCD1234"
+# Your key ID is ABCD1234ABCD1234
+
+# 3. Export your public key
+gpg --armor --export YOUR_KEY_ID
+
+# 4. Add the public key to GitHub
+# Go to: https://github.com/settings/keys
+# Click "New GPG key" and paste the public key
+
+# 5. Configure git (in ~/.gitconfig.local)
+[user]
+    signingkey = YOUR_KEY_ID
+[commit]
+    gpgsign = true
+[gpg]
+    program = gpg
+
+# 6. Test signing
+git commit --allow-empty -m "Test GPG signing"
+# Should see "gpg: using ... for signing" in the output
+```
+
+</details>
 
 This file is automatically created from `gitconfig.local.example` during installation.
 

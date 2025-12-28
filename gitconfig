@@ -6,11 +6,13 @@
 #       name = Your Name
 #       email = your.email@quantivly.com
 #
-# For GPG signing, also add to ~/.gitconfig.local:
+# GPG signing is strongly encouraged. Add to ~/.gitconfig.local:
 #   [user]
 #       signingkey = <key-id>
 #   [commit]
 #       gpgsign = true
+#
+# See gitconfig.local.example for full setup instructions
 
 # Include machine-specific and personal configuration
 [include]
