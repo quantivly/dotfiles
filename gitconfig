@@ -1,10 +1,20 @@
-# User configuration should be set via:
-#   git config --global user.name "Your Name"
-#   git config --global user.email "your.email@quantivly.com"
+# User configuration should be set in ~/.gitconfig.local
+# This file is included below and is not tracked by dotfiles
 #
-# For GPG signing, also set:
-#   git config --global user.signingkey <key-id>
-#   git config --global commit.gpgsign true
+# Example ~/.gitconfig.local:
+#   [user]
+#       name = Your Name
+#       email = your.email@quantivly.com
+#
+# For GPG signing, also add to ~/.gitconfig.local:
+#   [user]
+#       signingkey = <key-id>
+#   [commit]
+#       gpgsign = true
+
+# Include machine-specific and personal configuration
+[include]
+	path = ~/.gitconfig.local
 
 # Machine-specific safe directories
 [safe]
