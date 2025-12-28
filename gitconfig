@@ -1,7 +1,10 @@
-[user]
-	name = Zvi Baratz
-	email = zvi.baratz@quantivly.com
-	signingkey = C17A560D62ECBDA8
+# User configuration should be set via:
+#   git config --global user.name "Your Name"
+#   git config --global user.email "your.email@quantivly.com"
+#
+# For GPG signing, also set:
+#   git config --global user.signingkey <key-id>
+#   git config --global commit.gpgsign true
 
 # Machine-specific safe directories
 [safe]
@@ -110,11 +113,14 @@
 [merge]
 	conflictstyle = diff3
 
-[commit]
-	gpgsign = true
-
-[gpg]
-	program = gpg
+# GPG signing disabled by default. To enable:
+#   git config --global commit.gpgsign true
+#   git config --global user.signingkey <key-id>
+# [commit]
+# 	gpgsign = true
+#
+# [gpg]
+# 	program = gpg
 
 [hub]
 	protocol = ssh
@@ -126,3 +132,4 @@
 	directory = /home/ubuntu/workspaces/sre
 	directory = /home/ubuntu/workspaces/cicd
 	directory = /home/ubuntu/workspaces/test2
+	directory = /home/ubuntu/workspaces/test
