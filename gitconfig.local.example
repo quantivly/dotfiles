@@ -1,0 +1,24 @@
+# Personal Git Configuration
+# This file is sourced by ~/.gitconfig and should contain your personal settings.
+# Copy this to ~/.gitconfig.local and customize it.
+#
+# DO NOT commit ~/.gitconfig.local to git - it contains personal information!
+
+[user]
+	name = Your Name
+	email = your.email@quantivly.com
+
+# Optional: GPG signing configuration
+# Uncomment and configure if you want to sign your commits
+#
+# [user]
+# 	signingkey = YOUR_GPG_KEY_ID
+#
+# [commit]
+# 	gpgsign = true
+#
+# [gpg]
+# 	program = gpg
+
+# Optional: Machine-specific git configuration
+# Add any other personal git settings here

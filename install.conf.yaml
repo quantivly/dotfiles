@@ -26,3 +26,11 @@
       chmod 600 ~/.zshrc.local
       echo "Please edit ~/.zshrc.local to add machine-specific configuration"
     fi
+  - |
+    # Create ~/.gitconfig.local if it doesn't exist
+    if [ ! -f ~/.gitconfig.local ]; then
+      echo "Creating ~/.gitconfig.local from template..."
+      cp ~/.dotfiles/gitconfig.local.example ~/.gitconfig.local
+      chmod 600 ~/.gitconfig.local
+      echo "Please edit ~/.gitconfig.local to add your git user information"
+    fi

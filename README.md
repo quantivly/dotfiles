@@ -1,6 +1,6 @@
-# Zvi's Dotfiles
+# Quantivly Dotfiles
 
-Personal configuration files for zsh, git, and various development tools, managed with [dotbot](https://github.com/anishathalye/dotbot).
+Shared configuration files for zsh, git, and various development tools used by the Quantivly team, managed with [dotbot](https://github.com/anishathalye/dotbot).
 
 ## Features
 
@@ -55,7 +55,7 @@ Personal configuration files for zsh, git, and various development tools, manage
 2. **Clone this repository:**
 
    ```bash
-   git clone --recursive https://github.com/zvi-quantivly/dotfiles.git ~/.dotfiles
+   git clone --recursive https://github.com/quantivly/dotfiles.git ~/.dotfiles
    cd ~/.dotfiles
    ```
 
@@ -65,7 +65,22 @@ Personal configuration files for zsh, git, and various development tools, manage
    ./install
    ```
 
-4. **Customize machine-specific settings:**
+4. **Configure your git identity:**
+
+   The installer creates `~/.gitconfig.local` from the template. Edit it to set your personal information:
+
+   ```bash
+   vim ~/.gitconfig.local  # or your preferred editor
+
+   # Set your name and email:
+   [user]
+       name = Your Name
+       email = your.email@quantivly.com
+   ```
+
+   Optionally, configure GPG signing if you use it (see comments in the file).
+
+5. **Customize machine-specific settings:**
 
    The installer creates `~/.zshrc.local` from the template. Edit it to add:
    - API keys and tokens
@@ -78,7 +93,7 @@ Personal configuration files for zsh, git, and various development tools, manage
    chmod 600 ~/.zshrc.local  # Ensure it's only readable by you
    ```
 
-5. **Install optional dependencies** (see below)
+6. **Install optional dependencies** (see below)
 
 ### Updating Existing Installation
 
@@ -283,10 +298,71 @@ Machine-specific settings that should NEVER be committed:
 - Local overrides of work variables
 - Custom aliases for this machine only
 
+### ~/.gitconfig.local (Not in Git)
+
+Personal git configuration that should NEVER be committed:
+- Your name and email address
+- GPG signing keys
+- Machine-specific git settings
+- Personal git aliases
+
+This file is included by the main `gitconfig` via the `[include]` directive.
+
+## Personalization
+
+These dotfiles are designed to be shared across the team while allowing personal customization.
+
+### Git Configuration
+
+Your personal git settings go in `~/.gitconfig.local`:
+
+```bash
+# Required: Your identity
+[user]
+    name = Your Name
+    email = your.email@quantivly.com
+
+# Optional: GPG signing
+[user]
+    signingkey = YOUR_GPG_KEY_ID
+[commit]
+    gpgsign = true
+```
+
+This file is automatically created from `gitconfig.local.example` during installation.
+
+### Shell Configuration
+
+Machine-specific shell settings go in `~/.zshrc.local`:
+
+```bash
+# API keys and secrets
+export ANTHROPIC_API_KEY="sk-..."
+
+# Machine-specific PATHs
+export PATH="$HOME/my-tools/bin:$PATH"
+
+# Custom aliases
+alias myproject="cd ~/projects/myproject"
+```
+
+This file is automatically created from `zsh/zshrc.local.example` during installation.
+
+### Forking for Personal Use
+
+If you want to heavily customize these dotfiles:
+
+1. Fork the repository: `https://github.com/quantivly/dotfiles`
+2. Clone your fork: `git clone https://github.com/yourusername/dotfiles.git ~/.dotfiles`
+3. Make your changes and commit them to your fork
+4. Keep your fork in sync with upstream for team updates
+
 ## Security Best Practices
 
-1. **Never commit secrets** - All sensitive data goes in `~/.zshrc.local`
-2. **Protect your local config** - `~/.zshrc.local` should have mode 600
+1. **Never commit personal information** - All sensitive and personal data goes in local files:
+   - `~/.zshrc.local` for shell secrets and machine-specific config
+   - `~/.gitconfig.local` for your git identity and GPG keys
+2. **Protect your local config** - Both `~/.zshrc.local` and `~/.gitconfig.local` should have mode 600
 3. **Review before committing** - Always check what you're committing to git
 4. **Rotate exposed tokens** - If you accidentally commit secrets, rotate them immediately
 5. **Use .gitignore** - The included `.gitignore` prevents common secret files from being committed
@@ -506,10 +582,12 @@ If SSH keys aren't loading automatically:
 
 ## Contributing
 
-This is a personal dotfiles repository, but feel free to:
-- Fork it and adapt it for your own use
-- Suggest improvements via issues
-- Share your own dotfiles approach
+Contributions from the team are welcome! To contribute:
+- Fork the repository and make your changes
+- Test your changes on a fresh installation
+- Submit a pull request with a clear description
+- Ensure changes don't break existing configurations
+- Keep personal information out of shared files (use `.local` files instead)
 
 ## License
 
