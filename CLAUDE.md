@@ -39,7 +39,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 1. **zshrc.history** - History configuration (50k commands, timestamps, deduplication)
 2. **zshrc.functions** - Utility functions (`pathadd`, `mkcd`, `backup`, `gwt`, etc.)
 3. **zshrc.aliases** - Portable aliases for git, docker, python, system commands
-4. **zshrc.conditionals** - Conditional loading of optional tools (colorls, pyenv, nvm, direnv)
+4. **zshrc.conditionals** - Conditional loading of optional tools (colorls, mise, direnv)
 5. **zshrc.company** - Work-specific configuration (Quantivly)
 6. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
 
@@ -245,11 +245,51 @@ tool_status  # runs comprehensive status check
 - `startup_profile` - Detailed startup profiling with recommendations
 - `system_health` - Comprehensive system health check
 
-### Version Managers
+### Version Manager
 
-Optional tools for managing language versions:
-- **nvm** - Node.js version manager (https://github.com/nvm-sh/nvm)
-- **pyenv** - Python version manager (https://github.com/pyenv/pyenv)
+- **mise** - Modern polyglot version manager (https://mise.jdx.dev/)
+  - **Replaces**: nvm, pyenv, rbenv, asdf
+  - **Install**: `./scripts/install-modern-tools.sh` or `curl https://mise.run | sh`
+  - **Config**: `~/.config/mise/config.toml` (global) or `.mise.toml` (per-project)
+  - **Legacy support**: Reads `.nvmrc`, `.python-version`, `.tool-versions` files
+  - **Performance**: ~5-10ms activation (no lazy loading needed)
+  - **Languages**: Node, Python, Ruby, Go, Rust, Java, PHP, and 100+ more
+
+#### Quick Start
+
+```bash
+# Install global versions
+mise use -g node@lts python@3.12
+
+# Install project-specific versions
+cd my-project/
+mise use node@20.10.0 python@3.11
+
+# List installed versions
+mise ls
+
+# List available versions
+mise ls-remote node
+mise ls-remote python
+```
+
+#### Migration from nvm/pyenv
+
+If you previously used nvm or pyenv:
+
+1. Install your versions with mise:
+   ```bash
+   mise use -g node@20 python@3.12
+   ```
+
+2. Remove old version managers:
+   ```bash
+   rm -rf ~/.nvm ~/.pyenv
+   ```
+
+3. Clean up `~/.zshrc.local` if you have nvm/pyenv exports
+
+4. Reload shell: `source ~/.zshrc`
 
 ### Other Optional Tools
 
@@ -506,7 +546,7 @@ This script shows:
 - Required tools (zsh, git) with versions
 - Recommended tools (fzf, gh) installation status
 - Modern CLI replacements (bat, eza, fd, rg, htop, delta)
-- Version managers (nvm, pyenv)
+- Version manager (mise)
 - Optional tools (direnv, autojump, poetry, docker)
 - Oh-My-Zsh plugins (zsh-autosuggestions, zsh-syntax-highlighting)
 
@@ -516,7 +556,8 @@ This script shows:
 - Profile with: `PS4='+ %D{%s.%.} %N:%i> ' && set -x && source ~/.zshrc && set +x`
 - Profile performance: `time zsh -i -c exit`
 - Disable slow plugins in `~/.zshrc.local`: `plugins=(${plugins:#poetry})`
-- Common culprits: nvm initialization, pyenv, poetry completions
+- Common culprits: mise activation issues, poetry completions
+- Note: mise is very fast (~5-10ms), much faster than the old nvm/pyenv setup
 
 ### Function not found
 - Ensure `zsh/zshrc.functions` is being sourced

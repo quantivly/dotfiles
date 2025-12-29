@@ -262,52 +262,24 @@ fi
 # Install: brew install direnv (macOS) or apt install direnv (Ubuntu)
 # Note: oh-my-zsh plugin handles the setup if enabled
 
-# NVM - Node Version Manager (lazy-loaded for performance)
-# Install: https://github.com/nvm-sh/nvm#installing-and-updating
-export NVM_DIR="${HOME}/.nvm"
+# =============================================================================
+# Mise - Modern Polyglot Version Manager
+# =============================================================================
+# Replaces nvm, pyenv, rbenv, etc. with a single fast tool (~5-10ms activation)
+# Install: ./scripts/install-modern-tools.sh or curl https://mise.run | sh
+# Docs: https://mise.jdx.dev/
+# Config: ~/.config/mise/config.toml or project .mise.toml/.tool-versions
 
-# Ultra-lazy load nvm to improve shell startup time (saves ~100-300ms)
-# Only check for nvm.sh once, cache the result
-if [[ -z "$_NVM_LOADED" && -s "$NVM_DIR/nvm.sh" ]]; then
-  _NVM_LOADED=1
-  
-  nvm() {
-    unset -f nvm node npm npx
-    \. "$NVM_DIR/nvm.sh"
-    [[ -s "$NVM_DIR/bash_completion" ]] && \. "$NVM_DIR/bash_completion"
-    nvm "$@"
-  }
+if command -v mise &> /dev/null; then
+    eval "$(mise activate zsh)"
 
-  # Create placeholder functions for all node tools
-  for cmd in node npm npx; do
-    eval "$cmd() { unset -f nvm node npm npx; . \"\$NVM_DIR/nvm.sh\"; $cmd \"\$@\"; }"
-  done
-fi
-
-# pyenv - Python version manager (lazy-loaded for performance)
-# Install: https://github.com/pyenv/pyenv#installation
-if [[ -z "$_PYENV_LOADED" && -d "${HOME}/.pyenv" ]]; then
-  _PYENV_LOADED=1
-  export PYENV_ROOT="${HOME}/.pyenv"
-  
-  # Only add to PATH if pyenv isn't already available
-  command -v pyenv >/dev/null || pathadd "${PYENV_ROOT}/bin"
-
-  # Ultra-lazy load pyenv (saves ~60-100ms)
-  pyenv() {
-    unalias pip 2>/dev/null || true
-    unset -f pyenv python
-    eval "$(command pyenv init -)"
-    pyenv "$@"
-  }
-  
-  # Lazy load python/pip if using pyenv
-  python() {
-    unalias pip 2>/dev/null || true
-    unset -f pyenv python
-    eval "$(command pyenv init -)"
-    python "$@"
-  }
+    # Enable legacy version file support
+    export MISE_LEGACY_VERSION_FILE=1    # Read .nvmrc, .python-version files
+    export MISE_NODE_COREPACK=1          # Enable corepack for pnpm/yarn
+elif [[ -x "$HOME/.local/bin/mise" ]]; then
+    eval "$($HOME/.local/bin/mise activate zsh)"
+    export MISE_LEGACY_VERSION_FILE=1
+    export MISE_NODE_COREPACK=1
 fi
 
 # GPG signing setup
