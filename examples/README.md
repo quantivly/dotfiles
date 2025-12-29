@@ -99,7 +99,7 @@ Interactive fuzzy finding workflows and power user tips.
 - Required tools (zsh, git)
 - Recommended tools (fzf, gh)
 - Modern CLI replacements (bat, eza, fd, rg, htop, delta)
-- Version managers (nvm, pyenv)
+- Version manager (mise)
 - Optional tools (direnv, autojump, poetry, docker)
 - Oh-My-Zsh plugins and theme
 

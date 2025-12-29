@@ -297,6 +297,66 @@ install_forgit() {
     fi
 }
 
+# Function to install mise
+install_mise() {
+    if command_exists mise; then
+        print_success "mise is already installed"
+        mise --version
+        return 0
+    fi
+
+    print_status "Installing mise (modern version manager)..."
+
+    # Try package manager first (faster, more reliable)
+    if command_exists apt-get; then
+        # Ubuntu 24.04+ has mise in repos
+        if apt-cache show mise &> /dev/null 2>&1; then
+            print_status "Installing mise via apt..."
+            if sudo apt-get update -qq && sudo apt-get install -y mise 2>/dev/null; then
+                print_success "mise installed via apt"
+                return 0
+            fi
+        fi
+
+        # Fallback to curl installer
+        print_status "Installing mise via official installer..."
+        if curl https://mise.run | sh; then
+            # Add to PATH if not already there
+            if [[ -x "$HOME/.local/bin/mise" ]] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+                export PATH="$HOME/.local/bin:$PATH"
+            fi
+            print_success "mise installed successfully"
+            return 0
+        fi
+    elif command_exists brew; then
+        print_status "Installing mise via Homebrew..."
+        if brew install mise; then
+            print_success "mise installed via Homebrew"
+            return 0
+        fi
+    else
+        # Generic installer for other systems
+        print_status "Installing mise via official installer..."
+        if curl https://mise.run | sh; then
+            if [[ -x "$HOME/.local/bin/mise" ]] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+                export PATH="$HOME/.local/bin:$PATH"
+            fi
+            print_success "mise installed successfully"
+            return 0
+        fi
+    fi
+
+    # Verify installation
+    if command_exists mise || [[ -x "$HOME/.local/bin/mise" ]]; then
+        print_success "mise installed successfully"
+        ${HOME}/.local/bin/mise --version || mise --version
+        return 0
+    else
+        print_error "mise installation failed"
+        return 1
+    fi
+}
+
 # Main installation menu
 main() {
     echo "=========================================="
@@ -336,6 +396,9 @@ main() {
         1)
             echo
             print_status "Installing essential tools..."
+            # Version manager (replaces nvm, pyenv, rbenv)
+            install_mise
+
             # Core CLI replacements
             install_tool "fd" "fdfind" "Better find"
             install_tool "bat" "batcat" "Syntax highlighting cat"
@@ -367,6 +430,9 @@ main() {
         3)
             echo
             print_status "Installing all tools..."
+            # Version manager (replaces nvm, pyenv, rbenv)
+            install_mise
+
             # Core CLI replacements
             install_tool "fd" "fdfind" "Better find"
             install_tool "bat" "batcat" "Syntax highlighting cat"

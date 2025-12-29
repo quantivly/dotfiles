@@ -23,7 +23,7 @@ Shared configuration files for zsh, git, and various development tools used by t
 │   ├── zshrc.history        # History configuration
 │   ├── zshrc.functions      # Utility functions (pathadd, etc.)
 │   ├── zshrc.aliases        # Common portable aliases
-│   ├── zshrc.conditionals   # Optional tool configs (pyenv, nvm, colorls, etc.)
+│   ├── zshrc.conditionals   # Optional tool configs (mise, colorls, etc.)
 │   ├── zshrc.company        # Work-specific configuration
 │   └── zshrc.local.example  # Template for machine-specific settings
 ├── gh/
@@ -145,7 +145,7 @@ Checks installation status of all tools referenced in the dotfiles configuration
 - Required tools (zsh, git) with versions
 - Strongly recommended tools (fzf, gh)
 - Modern CLI replacements (bat, eza, fd, ripgrep, htop, delta)
-- Version managers (nvm, pyenv)
+- Version manager (mise)
 - Optional tools (direnv, autojump, poetry, docker)
 - Oh-My-Zsh plugins status
 
@@ -216,14 +216,26 @@ Install these for the best experience:
   sudo apt install direnv
   ```
 
-- **pyenv** - Python version management
+- **mise** - Unified version manager for Node.js, Python, and 100+ languages
   ```bash
-  curl https://pyenv.run | bash
+  # Automated installation (recommended)
+  ./scripts/install-modern-tools.sh  # Select option 1 for essential tools
+
+  # Or manual installation:
+  # Ubuntu 24.04+
+  sudo apt install mise
+
+  # macOS
+  brew install mise
+
+  # Generic (curl installer)
+  curl https://mise.run | sh
   ```
 
-- **nvm** - Node.js version management
+  **Quick start:**
   ```bash
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+  mise use -g node@lts python@3.12  # Install global versions
+  mise ls                            # List installed versions
   ```
 
 - **zsh-autosuggestions** - Fish-like command suggestions
@@ -276,8 +288,7 @@ Common aliases that work across all systems:
 
 Conditional loading of optional tools:
 - colorls (if installed)
-- pyenv (if installed)
-- nvm (if installed)
+- mise (if installed)
 - Editor configuration (prefers VS Code, falls back to vim)
 - SSH agent setup
 - Locale settings

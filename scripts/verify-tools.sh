@@ -132,35 +132,38 @@ fi
 echo
 
 #==============================================================================
-# Version Managers
+# Version Manager
 #==============================================================================
 
-echo "Version Managers:"
+echo "Version Manager:"
 
-# nvm (Node Version Manager)
-if [[ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]]; then
-    # Source nvm to get version
-    source "${NVM_DIR:-$HOME/.nvm}/nvm.sh"
-    version=$(nvm --version 2>&1)
-    echo -e "  ${CHECK} nvm: v$version"
-    current_node=$(nvm current 2>&1)
-    if [[ "$current_node" != "none" ]]; then
-        echo "      Current Node.js: $current_node"
+# Mise (modern unified version manager - replaces nvm, pyenv, rbenv)
+if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
+    MISE_VERSION=$(mise --version 2>/dev/null || $HOME/.local/bin/mise --version 2>/dev/null)
+    echo -e "  ${CHECK} mise ${MISE_VERSION}"
+
+    # Show active versions
+    if command -v node &> /dev/null; then
+        NODE_VERSION=$(node --version)
+        echo "      Current Node.js: ${NODE_VERSION}"
+    fi
+
+    if command -v python &> /dev/null; then
+        PYTHON_VERSION=$(python --version 2>&1 | awk '{print $2}')
+        echo "      Current Python: ${PYTHON_VERSION}"
+    fi
+
+    # Check for old version managers (should be removed)
+    if [[ -d "$HOME/.nvm" ]]; then
+        echo -e "  ${WARN} Found old ~/.nvm directory (can be removed)"
+    fi
+
+    if [[ -d "$HOME/.pyenv" ]]; then
+        echo -e "  ${WARN} Found old ~/.pyenv directory (can be removed)"
     fi
 else
-    echo -e "  ${CIRCLE} nvm: not installed (optional)"
-    echo "      Install: https://github.com/nvm-sh/nvm#installing-and-updating"
-fi
-
-# pyenv (Python Version Manager)
-if command -v pyenv &>/dev/null; then
-    version=$(pyenv --version 2>&1 | awk '{print $2}')
-    echo -e "  ${CHECK} pyenv: $version"
-    current_python=$(pyenv version 2>&1 | awk '{print $1}')
-    echo "      Current Python: $current_python"
-else
-    echo -e "  ${CIRCLE} pyenv: not installed (optional)"
-    echo "      Install: https://github.com/pyenv/pyenv#installation"
+    echo -e "  ${CROSS} mise: not installed"
+    echo "      Install: ./scripts/install-modern-tools.sh"
 fi
 
 echo

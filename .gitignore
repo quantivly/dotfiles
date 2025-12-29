@@ -13,3 +13,7 @@ Thumbs.db
 .zshrc.local
 .env
 .env.local
+
+# Mise version manager
+.mise.local.toml
+.mise.*.local.toml

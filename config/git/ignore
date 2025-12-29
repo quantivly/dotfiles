@@ -1,3 +1,7 @@
 **/.claude/settings.local.json
 
 **/CLAUDE.local.md
+
+# Mise version manager local config (contains secrets)
+**/.mise.local.toml
+**/.mise.*.local.toml
