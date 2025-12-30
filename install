@@ -13,3 +13,26 @@ git -C "${DOTBOT_DIR}" submodule sync --quiet --recursive
 git submodule update --init --recursive "${DOTBOT_DIR}"
 
 "${BASEDIR}/${DOTBOT_DIR}/${DOTBOT_BIN}" -d "${BASEDIR}" -c "${CONFIG}" "${@}"
+
+# Check if mise tools are configured
+if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
+    echo ""
+    echo "==> Checking mise CLI tools..."
+
+    if [[ -f "$HOME/.config/mise/config.toml" ]]; then
+        echo "    ✓ mise config found"
+
+        if mise install &> /dev/null; then
+            echo "    ✓ CLI tools installed/updated"
+        else
+            echo "    ⚠ Some tools failed (check: mise doctor)"
+        fi
+    else
+        echo "    ℹ No mise config at ~/.config/mise/config.toml"
+        echo "      Create one to manage CLI tools (see CLAUDE.md)"
+    fi
+else
+    echo ""
+    echo "==> mise not installed"
+    echo "    Install via dev-setup or: curl https://mise.run | sh"
+fi

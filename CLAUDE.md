@@ -291,6 +291,91 @@ If you previously used nvm or pyenv:
 
 4. Reload shell: `source ~/.zshrc`
 
+## Managing CLI Tools with mise
+
+All modern CLI tools (bat, fd, eza, ripgrep, etc.) are managed through mise for unified version control.
+
+### Quick Commands
+
+```bash
+# View installed tools
+mise ls
+
+# Install/update all tools
+mise install      # Install from config
+mise upgrade      # Upgrade to latest
+
+# Add a new tool
+mise use -g bat@latest
+
+# Check status
+mise doctor
+```
+
+### Configuration
+
+**Global**: `~/.config/mise/config.toml` - Default versions for all projects
+**Project**: `.mise.toml` - Override versions per project (committed to git)
+
+See `examples/mise-config.toml` for template.
+
+### Available Tools
+
+**Managed by mise** (14 essential):
+- Core CLI: bat, fd, eza, delta
+- Navigation: zoxide
+- Monitoring: duf, dust
+- Developer: lazygit, just, glow
+- Security: gitleaks, pre-commit, sops
+- Productivity: fastfetch
+
+**Note:** btop should be installed via apt (`apt install btop`) due to aqua registry asset name issue.
+
+**Optional tools** (uncomment in config):
+- dive, lazydocker, ctop - Docker tools
+- hyperfine - Benchmarking
+- difftastic - Structural diffs
+- cheat - Interactive cheatsheets
+- tlrc - Rust-based tldr client
+
+**Not managed by mise**:
+- forgit - Manual git clone to ~/.forgit
+- procs - Install via `cargo install procs` (optional)
+
+### Per-Project Tool Versions
+
+Create `.mise.toml` in project root to pin specific versions:
+
+```toml
+[tools]
+just = "1.16.0"
+hyperfine = "1.18.0"
+```
+
+Commit this file to git for team consistency.
+
+### Per-Project Tool Versions Example
+
+For a project that needs specific tool versions:
+
+```bash
+cd ~/my-project
+
+# Create project config
+cat > .mise.toml << 'EOF'
+[tools]
+just = "1.16.0"
+node = "20.10.0"
+python = "3.11.5"
+EOF
+
+# Install project tools
+mise install
+
+# Verify
+mise ls
+```
+
 ### Other Optional Tools
 
 - **direnv** - Per-directory environment variables (`apt install direnv`)
