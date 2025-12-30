@@ -1,0 +1,58 @@
+# Example mise configuration for dotfiles
+# Copy to ~/.config/mise/config.toml to use
+
+[settings]
+legacy_version_file = true
+
+#==============================================================================
+# Essential CLI Tools
+#==============================================================================
+
+[tools]
+# Core CLI replacements
+bat = "latest"           # Syntax-highlighted cat
+fd = "latest"            # Fast find alternative
+eza = "latest"           # Modern ls with icons
+delta = "latest"         # Beautiful git diffs
+
+# Navigation
+zoxide = "latest"        # Smart cd replacement
+
+# System monitoring
+# btop = "latest"          # Modern top replacement (install via apt - aqua has asset name issue)
+duf = "latest"           # Pretty df output
+dust = "latest"          # Intuitive du
+
+# Git & development
+lazygit = "latest"       # Git terminal UI
+just = "latest"          # Command runner
+glow = "latest"          # Markdown renderer
+
+# Security
+gitleaks = "latest"      # Secret scanner
+pre-commit = "latest"    # Git hooks automation
+sops = "latest"          # Encrypted secrets
+
+# Productivity
+fastfetch = "latest"     # System info display
+
+#==============================================================================
+# Optional Tools (uncomment to enable)
+#==============================================================================
+
+# Docker development
+# dive = "latest"         # Docker image analyzer
+# lazydocker = "latest"   # Docker TUI
+# ctop = "latest"         # Container monitoring
+
+# Development utilities
+# hyperfine = "latest"    # Benchmarking tool
+# difftastic = "latest"   # Structural diff
+
+# Additional tools
+# cheat = "latest"        # Interactive cheatsheets
+# tlrc = "latest"         # Rust-based tldr client
+
+[env]
+BAT_THEME = "Monokai Extended"
+GIT_PAGER = "delta"

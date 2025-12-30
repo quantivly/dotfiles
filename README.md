@@ -103,75 +103,68 @@ git pull
 ./install
 ```
 
-## Utility Scripts
+## Installing Modern CLI Tools
 
-The `scripts/` directory contains helpful tools for managing your dotfiles installation:
+Modern CLI tools (bat, fd, eza, ripgrep, lazygit, etc.) are managed through mise for unified version control and cross-platform consistency.
 
-### install-modern-tools.sh
+### Option 1: Via dev-setup (Recommended for Quantivly developers)
 
-Automated installation script for modern CLI tools (25+ tools). This script makes it easy to install optional enhancement tools without tracking down installation commands.
-
-**Usage:**
+The dev-setup script installs everything automatically:
 ```bash
-./scripts/install-modern-tools.sh
+git clone https://github.com/quantivly/dev-setup.git
+cd dev-setup
+./setup.sh
 ```
 
-**Features:**
-- Interactive menu with installation categories:
-  1. Essential tools (bat, eza, fd, ripgrep, zoxide, btop, etc.)
-  2. Development tools (lazygit, just, hyperfine, difftastic, etc.)
-  3. All tools (complete setup)
-  4. Install specific tool
-  5. Show tool status
-- Automatically detects your package manager (apt, cargo, pip)
-- Skips already-installed tools
-- Provides fallback installation methods
+This installs: zsh, dotfiles, mise, Python, Poetry, quanticli, and all CLI tools.
 
-**When to use:**
-- After initial dotfiles installation to enhance your CLI experience
-- When setting up a new machine
-- To check what modern tools are available
+### Option 2: Manual Installation
 
-### verify-tools.sh
+1. **Install mise:**
+   ```bash
+   curl https://mise.run | sh
+   ```
 
-Checks installation status of all tools referenced in the dotfiles configuration.
+2. **Create tool config:**
+   ```bash
+   mkdir -p ~/.config/mise
+   cp examples/mise-config.toml ~/.config/mise/config.toml
+   ```
 
-**Usage:**
+3. **Install tools (5-10 minutes):**
+   ```bash
+   ~/.local/bin/mise install
+   ```
+
+4. **Reload shell:**
+   ```bash
+   source ~/.zshrc
+   ```
+
+5. **Verify installation:**
+   ```bash
+   mise ls
+   which bat fd eza delta
+   ```
+
+### Managing Tools
+
 ```bash
-./scripts/verify-tools.sh
+# View installed tools
+mise ls
+
+# Install/update all tools
+mise install      # Install from config
+mise upgrade      # Upgrade to latest
+
+# Add a new tool
+mise use -g bat@latest
+
+# Check status
+mise doctor
 ```
 
-**Shows:**
-- Required tools (zsh, git) with versions
-- Strongly recommended tools (fzf, gh)
-- Modern CLI replacements (bat, eza, fd, ripgrep, htop, delta)
-- Version manager (mise)
-- Optional tools (direnv, autojump, poetry, docker)
-- Oh-My-Zsh plugins status
-
-**When to use:**
-- After installation to see what's missing
-- Before reporting issues
-- To verify your environment is set up correctly
-- When troubleshooting configuration problems
-
-**Example output:**
-```
-=== Dotfiles Tool Installation Status ===
-
-Required Tools:
-  ✓ zsh: zsh 5.8
-  ✓ git: git version 2.34.1
-
-Strongly Recommended:
-  ✓ fzf: 0.42.0
-  ✗ gh: not installed
-
-Modern CLI Replacements:
-  ✓ bat (replaces cat): bat 0.22.1
-  ✓ eza (replaces ls): eza 0.17.0
-  ...
-```
+See `CLAUDE.md` for complete documentation on managing CLI tools with mise.
 
 ## Dependencies
 
