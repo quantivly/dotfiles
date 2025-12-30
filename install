@@ -19,20 +19,28 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     echo ""
     echo "==> Checking mise CLI tools..."
 
+    # Activate mise for current shell to make tools available immediately
+    if command -v mise &> /dev/null; then
+        eval "$(mise activate bash)" 2>/dev/null || eval "$(mise activate zsh)" 2>/dev/null || true
+    elif [[ -x "$HOME/.local/bin/mise" ]]; then
+        eval "$($HOME/.local/bin/mise activate bash)" 2>/dev/null || eval "$($HOME/.local/bin/mise activate zsh)" 2>/dev/null || true
+    fi
+
     if [[ -f "$HOME/.config/mise/config.toml" ]]; then
         echo "    ✓ mise config found"
 
         if mise install &> /dev/null; then
             echo "    ✓ CLI tools installed/updated"
+            echo "    ℹ Tools available in current shell after activation"
         else
-            echo "    ⚠ Some tools failed (check: mise doctor)"
+            echo "    ⚠ Some tools failed to install (check: mise doctor)"
         fi
     else
         echo "    ℹ No mise config at ~/.config/mise/config.toml"
-        echo "      Create one to manage CLI tools (see CLAUDE.md)"
+        echo "      Create one to manage CLI tools (see examples/mise-config.toml)"
     fi
 else
     echo ""
     echo "==> mise not installed"
-    echo "    Install via dev-setup or: curl https://mise.run | sh"
+    echo "    Install mise via dev-setup or: curl https://mise.run | sh"
 fi
