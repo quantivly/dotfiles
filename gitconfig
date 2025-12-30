@@ -21,8 +21,6 @@
 # Machine-specific safe directories
 [safe]
 	directory = /home/ubuntu/workspaces/test
-	directory = /home/ubuntu/workspaces/sre
-	directory = /home/ubuntu/workspaces/cicd
 
 [credential "https://github.com"]
 	helper =
@@ -139,9 +137,3 @@
 
 [feature]
 	manyFiles = true              # Optimize for repos with many files
-[safe]
-	directory = /home/ubuntu/workspaces/test
-	directory = /home/ubuntu/workspaces/sre
-	directory = /home/ubuntu/workspaces/cicd
-	directory = /home/ubuntu/workspaces/test2
-	directory = /home/ubuntu/workspaces/test
