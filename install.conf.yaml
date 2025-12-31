@@ -16,6 +16,26 @@
       path: p10k.zsh
       if: '[ -f p10k.zsh ]'
 
+    # GPG utility scripts
+    ~/.local/bin/gpg-prime-cache:
+      path: scripts/gpg-prime-cache
+      if: '[ -f scripts/gpg-prime-cache ]'
+      create: true
+      relink: true
+      force: true
+    ~/.local/bin/git-check-gpg-cache:
+      path: scripts/git-check-gpg-cache
+      if: '[ -f scripts/git-check-gpg-cache ]'
+      create: true
+      relink: true
+      force: true
+    ~/.local/bin/install-gpg-hooks:
+      path: scripts/install-gpg-hooks
+      if: '[ -f scripts/install-gpg-hooks ]'
+      create: true
+      relink: true
+      force: true
+
 - shell:
   - [git submodule update --init --recursive, Installing submodules]
   - |

@@ -1,0 +1,28 @@
+#!/bin/bash
+# Check if GPG cache is primed for commit signing
+# Returns 0 if cache is ready, 1 if not
+
+set -e
+
+# Check if GPG signing is enabled
+GPG_SIGN=$(git config --get commit.gpgsign 2>/dev/null || echo "false")
+if [[ "$GPG_SIGN" != "true" ]]; then
+    # Signing not enabled, no need to check cache
+    exit 0
+fi
+
+# Get the signing key
+SIGNING_KEY=$(git config --get user.signingkey 2>/dev/null)
+if [[ -z "$SIGNING_KEY" ]]; then
+    echo "Warning: GPG signing enabled but no signing key configured"
+    exit 1
+fi
+
+# Check if the key is cached by attempting a quick sign operation
+if echo "test" | gpg --sign --default-key "$SIGNING_KEY" --pinentry-mode loopback -o /dev/null 2>/dev/null; then
+    # Cache is primed
+    exit 0
+else
+    # Cache is not primed
+    exit 1
+fi

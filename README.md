@@ -333,43 +333,16 @@ Your personal git settings go in `~/.gitconfig.local`:
     gpgsign = true
 ```
 
-**GPG signing is strongly encouraged** to verify your identity and ensure commit authenticity.
+**GPG signing is strongly encouraged** to verify your identity and ensure commit authenticity. The dotfiles repository includes utilities to make GPG signing convenient:
 
-<details>
-<summary><b>How to set up GPG signing (click to expand)</b></summary>
+- **gpg-prime** - Prime your GPG cache once per work session (8-24 hour cache)
+- **Automatic prevention** - Pre-commit hook prevents hanging when cache expires
+- **Shell reminder** - One-time reminder per session if cache not primed
+- **Clear guidance** - Helpful error messages with actionable steps
 
-```bash
-# 1. Generate a GPG key
-gpg --full-generate-key
-# Choose: RSA and RSA, 4096 bits, key doesn't expire (or set expiration)
-# Use your Quantivly email address
+**Quick setup:** See [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md) for complete step-by-step instructions (5 minutes to verified commits).
 
-# 2. Get your key ID
-gpg --list-secret-keys --keyid-format=long
-# Look for the line "sec   rsa4096/ABCD1234ABCD1234"
-# Your key ID is ABCD1234ABCD1234
-
-# 3. Export your public key
-gpg --armor --export YOUR_KEY_ID
-
-# 4. Add the public key to GitHub
-# Go to: https://github.com/settings/keys
-# Click "New GPG key" and paste the public key
-
-# 5. Configure git (in ~/.gitconfig.local)
-[user]
-    signingkey = YOUR_KEY_ID
-[commit]
-    gpgsign = true
-[gpg]
-    program = gpg
-
-# 6. Test signing
-git commit --allow-empty -m "Test GPG signing"
-# Should see "gpg: using ... for signing" in the output
-```
-
-</details>
+**Already set up?** Just run `gpg-prime` once when you start working each day.
 
 This file is automatically created from `gitconfig.local.example` during installation.
 

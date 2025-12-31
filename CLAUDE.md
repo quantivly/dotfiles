@@ -483,6 +483,73 @@ Several functions use fzf for fuzzy finding:
 - `git lg` - Pretty log with graph
 - `git conflicts` - Show files with merge conflicts
 
+## GPG Commit Signing
+
+**Team Policy:** GPG signing is strongly encouraged for commit verification.
+
+### Quick Setup
+
+```bash
+# 1. Generate key
+gpg --full-generate-key
+
+# 2. Configure git (in ~/.gitconfig.local)
+[user]
+    signingkey = YOUR_KEY_ID
+[commit]
+    gpgsign = true
+
+# 3. Prime cache once per session
+gpg-prime
+```
+
+### Available Utilities
+
+- **gpg-prime** (alias for gpg-prime-cache) - Prime GPG cache for automatic signing
+- **git-check-gpg-cache** - Check if cache is primed (used by pre-commit hook)
+- **install-gpg-hooks** - Install hooks in existing repos (usually not needed)
+
+All scripts located in `/scripts/` and symlinked to `~/.local/bin/`.
+
+### How It Works
+
+1. **Shell reminder** - Shows once per session if cache not primed
+2. **Pre-commit hook** - Blocks commits if cache not primed (prevents hanging)
+3. **gpg-prime** - Cache passphrase for 8-24 hours
+4. **Automatic signing** - Commits signed without prompts
+
+### Graceful Degradation
+
+- If GPG not configured, commits work normally
+- To bypass signing: `git commit --no-gpg-sign`
+- Scripts fail gracefully with helpful messages
+- Pre-commit hook allows commit if check script missing
+
+### Documentation
+
+- **Team quick-start**: [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md)
+- **Technical reference**: [docs/GPG_SIGNING_SETUP.md](docs/GPG_SIGNING_SETUP.md)
+- **Git workflows**: [examples/git-workflows.md](examples/git-workflows.md)
+
+### Troubleshooting
+
+**"GPG failed to sign the data":**
+```bash
+gpg-prime  # Re-prime cache
+```
+
+**Cache expired during work:**
+```bash
+gpg-prime  # Run again
+```
+
+**Want to disable temporarily:**
+```bash
+git commit --no-gpg-sign -m "Message"
+```
+
+See full troubleshooting guide in [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md).
+
 ## GitHub CLI Aliases
 
 The repository includes 35+ `gh` aliases in `gh/config.yml` for PR and workflow management:

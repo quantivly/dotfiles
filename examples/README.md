@@ -84,6 +84,40 @@ Interactive fuzzy finding workflows and power user tips.
 
 ---
 
+### [GPG Setup Guide](gpg-setup-guide.md) 🔐
+
+Complete guide to setting up GPG commit signing for the team.
+
+**Topics Covered:**
+- Quick start (5 minutes to verified commits)
+- Step-by-step GPG key generation and configuration
+- Git configuration for automatic signing
+- Daily workflow with GPG cache management
+- Using the gpg-prime utility and other helpers
+- Troubleshooting common GPG issues
+- Advanced topics (cache duration, SSH signing alternative)
+
+**Key Utilities:**
+- `gpg-prime` (alias: `gpg-prime-cache`) - Prime GPG cache for automatic signing
+- `git-check-gpg-cache` - Check cache status (used by hooks)
+- `install-gpg-hooks` - Install hooks in repos (usually not needed)
+
+**How It Works:**
+1. Run `gpg-prime` once when you start working
+2. Enter your GPG passphrase
+3. Cache lasts 8-24 hours
+4. All commits signed automatically without prompts
+5. Pre-commit hook prevents hanging if cache expires
+
+**Best For:**
+- Team members setting up GPG signing for the first time
+- Understanding the GPG workflow and utilities
+- Troubleshooting GPG-related issues
+
+**Team Policy:** GPG signing is strongly encouraged but optional. You can use the dotfiles without configuring GPG - everything will work normally.
+
+---
+
 ## Tool Verification
 
 ### [verify-tools.sh](../scripts/verify-tools.sh) ✔️
