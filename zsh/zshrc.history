@@ -22,5 +22,5 @@ setopt HIST_FIND_NO_DUPS         # Don't display duplicates when searching histo
 setopt INC_APPEND_HISTORY        # Write to history file immediately, not when shell exits
 setopt HIST_REDUCE_BLANKS        # Remove superfluous blanks before recording entry
 
-# Ignore common commands in history
-export HISTORY_IGNORE="(ls|cd|pwd|exit|cd ..)"
+# Ignore common commands and sensitive patterns in history
+export HISTORY_IGNORE="(ls|cd|pwd|exit|cd ..|*secret*|*token*|*password*|*key=*|*API_KEY*|*SECRET*|export *TOKEN*|export *KEY*|*auth*token*)"

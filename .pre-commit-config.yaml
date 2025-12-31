@@ -1,0 +1,75 @@
+# Pre-commit hooks for dotfiles repository
+# Install: pre-commit install
+# Run manually: pre-commit run --all-files
+# Update hooks: pre-commit autoupdate
+
+repos:
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-yaml
+        name: Check YAML syntax
+      - id: end-of-file-fixer
+        name: Fix end of files
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+      - id: detect-private-key
+        name: Detect private keys
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+        name: Check for large files
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+      - id: check-case-conflict
+        name: Check for case conflicts
+      - id: mixed-line-ending
+        name: Check line endings
+
+  # Shell script linting
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.9.0.6
+    hooks:
+      - id: shellcheck
+        name: Shellcheck
+        args: ['-x']  # Follow sourced files
+        exclude: 'dotbot/'  # Exclude git submodule
+
+  # Shell script formatting (optional - uncomment if desired)
+  # - repo: https://github.com/scop/pre-commit-shfmt
+  #   rev: v3.7.0-1
+  #   hooks:
+  #     - id: shfmt
+  #       args: ['-w', '-i', '4', '-ci']
+  #       exclude: 'dotbot/'
+
+  # Additional script checks
+  - repo: https://github.com/jumanjihouse/pre-commit-hooks
+    rev: 3.0.0
+    hooks:
+      - id: script-must-have-extension
+        name: Check script extensions
+        exclude: '^(install|scripts/test-|dotbot/|p10k\.zsh)'  # Allow specific files without extension
+
+  # Security: Check for secrets patterns
+  - repo: local
+    hooks:
+      - id: check-secrets-patterns
+        name: Check for secret patterns
+        entry: bash -c 'if grep -rn -E "(password|secret|token|api[_-]?key)\\s*=\\s*[\"'\''][^\"'\'']{8,}" --include="*.sh" --include="*.bash" --include="*.zsh" --exclude-dir=".git" --exclude-dir="dotbot" . 2>/dev/null; then echo "Found potential secrets in files above"; exit 1; fi'
+        language: system
+        pass_filenames: false
+        files: '\.(sh|bash|zsh)$'
+
+      - id: check-history-ignore
+        name: Verify HISTORY_IGNORE includes secrets
+        entry: bash -c 'if [ -f zsh/zshrc.history ]; then if ! grep -q "\*secret\*" zsh/zshrc.history && ! grep -q "\*password\*" zsh/zshrc.history; then echo "HISTORY_IGNORE should include secret/password patterns"; exit 1; fi; fi'
+        language: system
+        pass_filenames: false
+        files: 'zsh/zshrc\.history$'
+
+      - id: check-no-local-files
+        name: Verify no .local files committed
+        entry: bash -c 'if git ls-files | grep -E "\.local$" 2>/dev/null; then echo "Found .local files - these should not be committed"; exit 1; fi'
+        language: system
+        pass_filenames: false

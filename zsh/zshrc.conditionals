@@ -35,17 +35,17 @@ fi
 # WARNING: rg has different behavior than grep - not fully POSIX compatible
 if command -v rg &> /dev/null; then
   export _HAS_RG=1
-  
+
   # Note: Keeping standard grep alias for compatibility
   # Users can use 'rg' directly for ripgrep features
   # Or use '\grep' to bypass alias and access original grep behavior
-  
+
   # Provide explicit functions for users who need specific behavior
   posix_grep() {
     echo "Using standard grep for POSIX compatibility"
     command grep "$@"
   }
-  
+
   rg_grep() {
     echo "Using ripgrep explicitly"
     rg "$@"
@@ -151,7 +151,7 @@ if command -v fzf &> /dev/null; then
   # fshow - Git commit browser with enhanced preview
   fshow() {
     local format="%C(auto)%h%d %s %C(black)%C(bold)%cr %C(blue)%an"
-    
+
     git log --graph --color=always --format="$format" "$@" |
     fzf --ansi --no-sort --reverse --tiebreak=index \
         --header 'CTRL-S: Toggle sort, CTRL-D: Show diff, ENTER: Show commit' \
@@ -391,7 +391,7 @@ if command -v just &> /dev/null; then
   alias jl='just --list'           # List available recipes
   alias je='just --edit'           # Edit justfile
   alias jd='just --dump'           # Show parsed justfile
-  
+
   # Enable just completions if supported
   if [[ -n "$ZSH_VERSION" ]]; then
     eval "$(just --completions zsh)"
@@ -403,7 +403,7 @@ fi
 if command -v hyperfine &> /dev/null; then
   alias bench='hyperfine'
   alias benchmark='hyperfine --warmup 3'
-  
+
   # Convenient benchmark functions
   shell_bench() {
     if [[ $# -eq 0 ]]; then
@@ -413,7 +413,7 @@ if command -v hyperfine &> /dev/null; then
     fi
     hyperfine --warmup 3 --min-runs 10 "$@"
   }
-  
+
   startup_bench() {
     echo "Benchmarking shell startup time..."
     hyperfine --warmup 5 --min-runs 20 'zsh -i -c exit'
@@ -426,7 +426,7 @@ if command -v glow &> /dev/null; then
   alias markdown='glow'
   alias md='glow'
   alias readme='glow README.md'
-  
+
   # Glow with different styles
   alias glow-dark='glow --style dark'
   alias glow-light='glow --style light'
@@ -438,7 +438,7 @@ fi
 if command -v tldr &> /dev/null; then
   alias help='tldr'
   alias cheat='tldr'
-  
+
   # Update tldr database
   alias tldr-update='tldr --update'
 fi
@@ -460,7 +460,7 @@ fi
 if command -v dive &> /dev/null; then
   alias docker-analyze='dive'
   alias danalyze='dive'
-  
+
   # Analyze image and save report
   dive_report() {
     if [[ $# -ne 1 ]]; then
@@ -487,13 +487,13 @@ fi
 if command -v gitleaks &> /dev/null; then
   alias git-secrets='gitleaks detect'
   alias git-secrets-verbose='gitleaks detect --verbose'
-  
+
   # Scan current repo for secrets
   scan_secrets() {
     echo "Scanning repository for secrets..."
     gitleaks detect --source . --verbose
   }
-  
+
   # Protect commits with gitleaks
   git_protect() {
     echo "Installing gitleaks pre-commit hook..."
@@ -509,7 +509,7 @@ if command -v pre-commit &> /dev/null; then
   alias pc-update='pre-commit autoupdate'
   alias pc-run='pre-commit run --all-files'
   alias pc-clean='pre-commit clean'
-  
+
   # Quick setup for new repos
   precommit_setup() {
     if [[ ! -f ".pre-commit-config.yaml" ]]; then
@@ -543,7 +543,7 @@ fi
 if command -v sops &> /dev/null; then
   alias secrets='sops'
   alias secrets-edit='sops --in-place'
-  
+
   # Edit encrypted file
   sops_edit() {
     if [[ $# -ne 1 ]]; then
@@ -560,7 +560,7 @@ if command -v difft &> /dev/null; then
   alias diff='difft'
   alias difft-side-by-side='difft --display side-by-side'
   alias difft-inline='difft --display inline'
-  
+
   # Git integration for difftastic
   git_difft() {
     git diff --no-ext-diff "$@" | difft --stdin
@@ -612,14 +612,14 @@ if command -v git &> /dev/null && command -v fzf &> /dev/null; then
   # Enhanced git worktree with fzf selection
   fworktree() {
     local worktree_dir branch_name
-    
+
     echo "Git Worktree Management:"
     echo "1. Create new worktree"
     echo "2. Switch to existing worktree"
     echo "3. Remove worktree"
     echo
     read -p "Select action (1-3): " action
-    
+
     case $action in
       1)
         read -p "Enter branch name: " branch_name

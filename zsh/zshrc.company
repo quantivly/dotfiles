@@ -11,7 +11,7 @@ if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
   export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
 
-  # Quanticli shortcuts  
+  # Quanticli shortcuts
   # Ensure q is not aliased to something else first
   unalias q 2>/dev/null
   alias q='quanticli'
@@ -19,12 +19,12 @@ if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   alias qgs='quanticli git status'
   alias qh='quanticli hub'
   alias qp='quanticli path'
-  
+
   # qn function - Change directory to quantivly submodule or stack directory
   qn() {
     cd $(quanticli path ${1-code})
   }
-  
+
   # Note: The quantivly plugin provides:
   # - pathadd function (already defined in zshrc.functions as fallback)
   # - qn, qg, qh, qp commands (quanticli shortcuts)

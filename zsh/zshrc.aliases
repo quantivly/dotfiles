@@ -23,7 +23,7 @@ alias ln='ln -i'
 # See: ~/.oh-my-zsh/plugins/git/git.plugin.zsh
 alias gcam='git commit -am'  # oh-my-zsh doesn't have this variant
 alias glog='git log --oneline --graph --decorate'
-alias gloga='git log --oneline --graph --decorate --all'  
+alias gloga='git log --oneline --graph --decorate --all'
 alias glogp='git log --graph --pretty=format:"%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset" --abbrev-commit'
 alias gds='git diff --staged'  # oh-my-zsh has gdca, but gds is more intuitive
 alias grhh='git reset --hard HEAD'  # oh-my-zsh doesn't have hard reset alias
@@ -109,7 +109,7 @@ dstop() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      docker stop $containers
+      echo "$containers" | xargs -r docker stop
       ;;
     *)
       echo "Operation cancelled."
@@ -129,7 +129,7 @@ dstopa() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      docker stop $containers
+      echo "$containers" | xargs -r docker stop
       ;;
     *)
       echo "Operation cancelled."
@@ -149,7 +149,7 @@ drm() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      docker rm $containers
+      echo "$containers" | xargs -r docker rm
       ;;
     *)
       echo "Operation cancelled."
@@ -169,7 +169,7 @@ drmi() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      docker rmi $images
+      echo "$images" | xargs -r docker rmi
       ;;
     *)
       echo "Operation cancelled."

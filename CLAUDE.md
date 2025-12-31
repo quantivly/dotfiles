@@ -173,7 +173,7 @@ The dotfiles configuration now supports 25+ modern CLI tool replacements with in
 | **glow** | Markdown viewer | Beautiful terminal markdown rendering |
 | **ctop** | Container monitor | htop-style interface for Docker containers |
 
-#### Security & Code Quality Tools  
+#### Security & Code Quality Tools
 | Tool | Purpose | Key Features |
 |------|---------|-------------|
 | **gitleaks** | Secret scanner | Prevent secrets from entering git history |
@@ -197,7 +197,7 @@ The dotfiles configuration now supports 25+ modern CLI tool replacements with in
 
 # Interactive options:
 # 1. Essential tools (recommended for all users)
-# 2. Development tools (for developers)  
+# 2. Development tools (for developers)
 # 3. All tools (complete setup)
 # 4. Install specific tool
 # 5. Show tool status
