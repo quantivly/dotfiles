@@ -98,6 +98,7 @@ unalias drmi 2>/dev/null
 unalias dprune 2>/dev/null
 
 dstop() {
+  # Security: Uses container IDs (-q) not names to avoid injection vulnerabilities
   local containers=$(docker ps -q)
   if [ -z "$containers" ]; then
     echo "No running containers to stop."
@@ -109,7 +110,10 @@ dstop() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      echo "$containers" | xargs -r docker stop
+      # Use while loop for safe iteration (handles any edge cases)
+      while IFS= read -r container; do
+        docker stop "$container" || echo "Failed to stop $container"
+      done <<< "$containers"
       ;;
     *)
       echo "Operation cancelled."
@@ -118,6 +122,7 @@ dstop() {
 }
 
 dstopa() {
+  # Security: Uses container IDs (-aq) not names to avoid injection vulnerabilities
   local containers=$(docker ps -aq)
   if [ -z "$containers" ]; then
     echo "No containers to stop."
@@ -129,7 +134,10 @@ dstopa() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      echo "$containers" | xargs -r docker stop
+      # Use while loop for safe iteration (handles any edge cases)
+      while IFS= read -r container; do
+        docker stop "$container" || echo "Failed to stop $container"
+      done <<< "$containers"
       ;;
     *)
       echo "Operation cancelled."
@@ -138,6 +146,7 @@ dstopa() {
 }
 
 drm() {
+  # Security: Uses container IDs (-aq) not names to avoid injection vulnerabilities
   local containers=$(docker ps -aq)
   if [ -z "$containers" ]; then
     echo "No containers to remove."
@@ -149,7 +158,10 @@ drm() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      echo "$containers" | xargs -r docker rm
+      # Use while loop for safe iteration (handles any edge cases)
+      while IFS= read -r container; do
+        docker rm "$container" || echo "Failed to remove $container"
+      done <<< "$containers"
       ;;
     *)
       echo "Operation cancelled."
@@ -158,6 +170,7 @@ drm() {
 }
 
 drmi() {
+  # Security: Uses image IDs (-q) not names to avoid injection vulnerabilities
   local images=$(docker images -q)
   if [ -z "$images" ]; then
     echo "No images to remove."
@@ -169,7 +182,10 @@ drmi() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      echo "$images" | xargs -r docker rmi
+      # Use while loop for safe iteration (handles any edge cases)
+      while IFS= read -r image; do
+        docker rmi "$image" || echo "Failed to remove $image"
+      done <<< "$images"
       ;;
     *)
       echo "Operation cancelled."
