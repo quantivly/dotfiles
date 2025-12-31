@@ -26,6 +26,19 @@
 #
 # [gpg]
 # 	program = gpg
+#
+# Need help with GPG setup? See:
+#   - Quick start: ~/.dotfiles/examples/gpg-setup-guide.md
+#   - Reference:   ~/.dotfiles/docs/GPG_SIGNING_SETUP.md
+#
+# Quick test after setup:
+#   gpg-prime                           # Prime cache (enter passphrase)
+#   git commit --allow-empty -m "Test"  # Test signing
+#   git log --show-signature -1         # Verify signature
+#
+# Daily usage:
+#   gpg-prime   # Run once when you start working
+#   # ... work normally, commits signed automatically ...
 
 # Machine-specific git configuration
 # Add any other personal git settings here

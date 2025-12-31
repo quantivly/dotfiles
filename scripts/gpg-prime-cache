@@ -1,0 +1,62 @@
+#!/bin/bash
+# Prime GPG cache for automated signing
+# This unlocks your GPG key and caches the passphrase for the configured time
+
+set -e
+
+# Check if GPG is installed
+if ! command -v gpg &> /dev/null; then
+    echo "Error: GPG is not installed"
+    echo ""
+    echo "Install GPG:"
+    echo "  macOS:          brew install gpg"
+    echo "  Ubuntu/Debian:  sudo apt install gpg"
+    echo ""
+    echo "Documentation: ~/.dotfiles/examples/gpg-setup-guide.md"
+    exit 1
+fi
+
+# Check if any secret keys exist
+if ! gpg --list-secret-keys &> /dev/null 2>&1; then
+    echo "Error: No GPG secret keys found"
+    echo ""
+    echo "Generate a key:"
+    echo "  gpg --full-generate-key"
+    echo ""
+    echo "Documentation: ~/.dotfiles/examples/gpg-setup-guide.md"
+    exit 1
+fi
+
+# Get the default signing key from git config (reads effective config including included files)
+SIGNING_KEY=$(git config user.signingkey 2>/dev/null || true)
+
+if [ -z "$SIGNING_KEY" ]; then
+    echo "Error: No signing key configured in git config"
+    echo "Run: git config --global user.signingkey YOUR_KEY_ID"
+    echo "Or add to ~/.gitconfig.local: [user] signingkey = YOUR_KEY_ID"
+    exit 1
+fi
+
+echo "Priming GPG cache for key: $SIGNING_KEY"
+echo "You will be prompted for your GPG passphrase."
+echo
+
+# Create a test signature to unlock the key and cache the passphrase
+# Allow stderr to pass through so pinentry can prompt for passphrase
+echo "test" | gpg --clearsign --default-key "$SIGNING_KEY" > /dev/null
+
+if [ $? -eq 0 ]; then
+    echo "✓ GPG cache primed successfully!"
+    echo
+    echo "Your passphrase is cached for:"
+    echo "  - 8 hours of inactivity (default-cache-ttl)"
+    echo "  - 24 hours maximum (max-cache-ttl)"
+else
+    echo "✗ Failed to prime GPG cache"
+    echo
+    echo "Troubleshooting:"
+    echo "  1. Verify your GPG key: gpg --list-secret-keys"
+    echo "  2. Check signing key config: git config --global user.signingkey"
+    echo "  3. Test signing manually: echo test | gpg --clearsign"
+    exit 1
+fi
