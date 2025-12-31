@@ -381,6 +381,7 @@ If you want to heavily customize these dotfiles:
 3. **Review before committing** - Always check what you're committing to git
 4. **Rotate exposed tokens** - If you accidentally commit secrets, rotate them immediately
 5. **Use .gitignore** - The included `.gitignore` prevents common secret files from being committed
+6. **Docker aliases security** - Docker cleanup functions (`dstop`, `drm`, `drmi`) use container/image IDs (not names) and safe iteration patterns to prevent command injection vulnerabilities
 
 ## Key Features
 
