@@ -1,11 +1,22 @@
 # Example mise configuration for dotfiles
-# Copy to ~/.config/mise/config.toml to use
+# ==========================================
+#
+# RECOMMENDED: Use the pinned version from ~/.dotfiles/.mise.toml
+#   This file is automatically installed by the dotfiles setup script.
+#   It provides reproducible, tested tool versions.
+#
+# ALTERNATIVE: Use this example to create your own custom config
+#   Copy to ~/.config/mise/config.toml and customize as needed.
+#   Using "latest" versions provides newest features but less reproducibility.
+#
+# To use pinned versions: cp ~/.dotfiles/.mise.toml ~/.config/mise/config.toml
+# To use latest versions: cp ~/.dotfiles/examples/mise-config.toml ~/.config/mise/config.toml
 
 [settings]
 legacy_version_file = true
 
 #==============================================================================
-# Essential CLI Tools
+# Essential CLI Tools (using "latest" versions)
 #==============================================================================
 
 [tools]
