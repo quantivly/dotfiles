@@ -35,6 +35,14 @@ repos:
         args: ['-x']  # Follow sourced files
         exclude: 'dotbot/'  # Exclude git submodule
 
+  # Secret detection with gitleaks
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: Gitleaks (secret detection)
+        description: Scan for hardcoded secrets, API keys, tokens, passwords
+
   # Shell script formatting (optional - uncomment if desired)
   # - repo: https://github.com/scop/pre-commit-shfmt
   #   rev: v3.7.0-1

@@ -1,0 +1,28 @@
+# Gitleaks configuration for dotfiles repository
+# Extends default rules with custom patterns for this repo
+
+[extend]
+useDefault = true
+
+# Allowlist for false positives
+[[allowlist]]
+description = "Ignore example credentials in documentation"
+paths = [
+  '''examples/.*''',
+  '''docs/.*''',
+  '''README\.md''',
+  '''CLAUDE\.md''',
+]
+
+[[allowlist]]
+description = "Ignore test files and git submodules"
+paths = [
+  '''dotbot/.*''',
+  '''\.git/.*''',
+]
+
+[[allowlist]]
+description = "Ignore placeholder tokens in config examples"
+regexes = [
+  '''(example|placeholder|your|INSERT|REPLACE|TODO)''',
+]
