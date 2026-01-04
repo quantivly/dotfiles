@@ -275,7 +275,9 @@ mise ls-remote python
 
 #### Migration from nvm/pyenv
 
-If you previously used nvm or pyenv:
+If you previously used nvm or pyenv, see [docs/MIGRATION.md](docs/MIGRATION.md) for comprehensive step-by-step migration instructions including verification, troubleshooting, and rollback procedures.
+
+**Quick migration (4 steps):**
 
 1. Install your versions with mise:
    ```bash
@@ -290,6 +292,8 @@ If you previously used nvm or pyenv:
 3. Clean up `~/.zshrc.local` if you have nvm/pyenv exports
 
 4. Reload shell: `source ~/.zshrc`
+
+For detailed instructions, see [docs/MIGRATION.md](docs/MIGRATION.md).
 
 ## Managing CLI Tools with mise
 
@@ -737,6 +741,7 @@ This script shows:
 - Disable slow plugins in `~/.zshrc.local`: `plugins=(${plugins:#poetry})`
 - Common culprits: mise activation issues, poetry completions
 - Note: mise is very fast (~5-10ms), much faster than the old nvm/pyenv setup
+- If still using nvm/pyenv, see [docs/MIGRATION.md](docs/MIGRATION.md) for migration instructions
 
 ### Function not found
 - Ensure `zsh/zshrc.functions` is being sourced
