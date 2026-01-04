@@ -1,0 +1,190 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run ShellCheck on all shell scripts
+        run: |
+          find . -name "*.sh" -o -name "*.bash" -o -name "*.zsh" | \
+          grep -v "dotbot/" | \
+          xargs shellcheck -x || true
+
+      - name: Check install script
+        run: shellcheck -x install
+
+  syntax-check:
+    name: Shell Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check bash syntax
+        run: bash -n install
+
+      - name: Check zsh syntax for all modules
+        run: |
+          for file in zsh/zshrc.* zshrc p10k.zsh; do
+            if [ -f "$file" ]; then
+              echo "Checking: $file"
+              zsh -n "$file" || exit 1
+            fi
+          done
+
+  yaml-validation:
+    name: YAML Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate YAML files
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_data: |
+            extends: default
+            rules:
+              line-length:
+                max: 120
+                level: warning
+              document-start: disable
+              truthy:
+                allowed-values: ['true', 'false', 'yes', 'no']
+
+  pre-commit:
+    name: Pre-commit Hooks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files
+
+  install-test-ubuntu-22:
+    name: Installation Test (Ubuntu 22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install mise (for tool availability)
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Run dotbot installation
+        run: ./install
+
+      - name: Verify symlinks created
+        run: |
+          test -L ~/.zshrc || (echo "~/.zshrc symlink not created" && exit 1)
+          test -L ~/.gitconfig || (echo "~/.gitconfig symlink not created" && exit 1)
+          echo "✅ Symlinks verified"
+
+      - name: Verify mise config deployed
+        run: |
+          test -f ~/.config/mise/config.toml || (echo "mise config not deployed" && exit 1)
+          echo "✅ Mise config verified"
+
+  install-test-ubuntu-24:
+    name: Installation Test (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install mise (for tool availability)
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Run dotbot installation
+        run: ./install
+
+      - name: Verify symlinks created
+        run: |
+          test -L ~/.zshrc || (echo "~/.zshrc symlink not created" && exit 1)
+          test -L ~/.gitconfig || (echo "~/.gitconfig symlink not created" && exit 1)
+          echo "✅ Symlinks verified"
+
+      - name: Verify mise config deployed
+        run: |
+          test -f ~/.config/mise/config.toml || (echo "mise config not deployed" && exit 1)
+          echo "✅ Mise config verified"
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for gitleaks
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  documentation:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for broken links in Markdown
+        uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          config-file: '.github/workflows/markdown-link-check-config.json'
+          use-quiet-mode: 'yes'
+
+      - name: Verify required documentation exists
+        run: |
+          required_docs=(
+            "README.md"
+            "CLAUDE.md"
+            "docs/GPG_SIGNING_SETUP.md"
+            "docs/SECURITY_INCIDENTS.md"
+            "examples/gpg-setup-guide.md"
+            "examples/git-workflows.md"
+          )
+
+          for doc in "${required_docs[@]}"; do
+            if [ ! -f "$doc" ]; then
+              echo "❌ Missing required documentation: $doc"
+              exit 1
+            fi
+          done
+
+          echo "✅ All required documentation present"
