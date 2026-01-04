@@ -82,13 +82,22 @@ check_tool just "--version"
 check_tool glow "--version"
 check_tool hyperfine "--version"
 check_tool dive "--version"
-check_tool ctop "--version"
+check_tool ctop "-v"  # ctop uses -v not --version
 check_tool lazydocker "--version"
 
 echo ""
 echo -e "${BLUE}=== Security & Code Quality ===${NC}"
 check_tool gitleaks "version"
-check_tool pre-commit "--version"
+
+# Check pre-commit (prefer user-installed version over virtualenv)
+if [[ -x "$HOME/.local/bin/pre-commit" ]]; then
+    check_tool "$HOME/.local/bin/pre-commit" "--version"
+elif command -v pre-commit &>/dev/null; then
+    check_tool pre-commit "--version"
+else
+    echo -e "  ○ pre-commit: not installed (optional)"
+fi
+
 check_tool sops "--version"
 check_tool gpg "--version"
 
