@@ -1,0 +1,353 @@
+#==============================================================================
+# Git Workflow & Safety Functions
+#==============================================================================
+# Enhanced git operations with fuzzy finding, safety confirmations, and automation.
+# All functions include inline "Usage: ..." documentation.
+#
+# Workflow Functions:
+#   - gwtc: Git worktree create helper (creates worktree in ../worktrees/<branch>)
+#   - git_cleanup: Automated branch cleanup with confirmations
+#   - fgit: Menu-driven git operations with fzf
+#   - fstash: Fuzzy git stash management
+#   - fdiff: Fuzzy file selection for git diff
+#   - frb: Fuzzy git interactive rebase
+#   - ftag: Fuzzy git tag operations
+#   - fmerge: Fuzzy merge with preview
+#   - ffiles-changed: Show files changed in current branch
+#
+# Safety Functions:
+#   - gpush-safe: Prevents accidental pushes to protected branches
+#   - gpf-safe: Safe force push with explicit confirmation
+#   - gco-safe: Warns before checkout if uncommitted changes exist
+#
+# Smart Display:
+#   - gd: Smart git diff (adapts to terminal width)
+#   - gdw: Force wide/side-by-side diff
+#   - gdv: Force unified/vertical diff
+#
+# Requires: git, fzf (for fuzzy functions), delta (for gd)
+# See also: examples/git-workflows.md
+#==============================================================================
+
+# Git worktree wrapper - creates worktree in ../worktrees/<branch>
+# Note: 'gwt' is already defined by oh-my-zsh git plugin as 'git worktree'
+# So we use 'gwtc' (git worktree create) for this helper function
+gwtc() {
+  # Usage: gwtc <branch_name>
+  # Creates a git worktree in ../worktrees/<branch_name> and cd into it
+  if [ $# -ne 1 ]; then
+    echo "Usage: gwtc <branch_name>"
+    echo "Creates a git worktree in ../worktrees/<branch_name>"
+    return 1
+  fi
+  local worktree_dir="../worktrees/$1"
+  git worktree add "$worktree_dir" "$1" && cd "$worktree_dir"
+}
+
+#==============================================================================
+# Git Branch Management & Automation
+#==============================================================================
+
+# git_cleanup - Automated git branch cleanup
+git_cleanup() {
+  echo "=== Git Branch Cleanup ==="
+  echo
+
+  # Show current status
+  echo "Current branch: $(git branch --show-current)"
+  echo "All branches:"
+  git branch -a
+  echo
+
+  # Find merged branches (excluding main/master/develop)
+  local merged_branches=$(git branch --merged | grep -v -E '^\*|master|main|develop' | xargs)
+
+  if [[ -n "$merged_branches" ]]; then
+    echo "Merged branches that can be deleted:"
+    echo "$merged_branches"
+    echo
+
+    printf "Delete these merged branches? [y/N] "
+    read -r response
+    case "$response" in
+      [yY]|[yY][eE][sS])
+        echo "$merged_branches" | xargs git branch -d
+        echo "Merged branches deleted."
+        ;;
+      *)
+        echo "Cleanup cancelled."
+        ;;
+    esac
+  else
+    echo "No merged branches found to clean up."
+  fi
+
+  echo
+  echo "Remote tracking branch cleanup..."
+  git remote prune origin
+
+  # Optionally clean up remote references
+  printf "Remove stale remote tracking branches? [y/N] "
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS])
+      git branch -r --merged | grep -v -E 'origin/(master|main|develop)' | sed 's/origin\///' | xargs -I {} git push origin --delete {} 2>/dev/null || true
+      echo "Remote branch cleanup completed."
+      ;;
+    *)
+      echo "Remote cleanup skipped."
+      ;;
+  esac
+}
+
+# fgit - Enhanced git operations with fzf
+fgit() {
+  local action
+
+  echo "Git Operations:"
+  echo "1. Fuzzy checkout branch"
+  echo "2. Fuzzy checkout commit"
+  echo "3. Fuzzy git log"
+  echo "4. Fuzzy git stash"
+  echo "5. Fuzzy git diff"
+  echo "6. Fuzzy interactive rebase"
+  echo
+  read -p "Select action (1-6): " action
+
+  case $action in
+    1) fbr ;;
+    2) fco ;;
+    3) fshow ;;
+    4) fstash ;;
+    5) fdiff ;;
+    6) frb ;;
+    *) echo "Invalid selection" ;;
+  esac
+}
+
+# fstash - Fuzzy git stash management
+fstash() {
+  local stash_list stash
+
+  stash_list=$(git stash list)
+  if [[ -z "$stash_list" ]]; then
+    echo "No stashes found"
+    return 1
+  fi
+
+  stash=$(echo "$stash_list" | fzf --header='Select stash to apply' --preview='git stash show -p {1}' | cut -d: -f1)
+
+  if [[ -n "$stash" ]]; then
+    echo "Applying stash: $stash"
+    git stash apply "$stash"
+  fi
+}
+
+# fdiff - Fuzzy git diff with file selection
+fdiff() {
+  local file
+
+  file=$(git diff --name-only | fzf --header='Select file for diff' --preview='git diff --color=always {}')
+
+  if [[ -n "$file" ]]; then
+    git diff "$file"
+  fi
+}
+
+# frb - Fuzzy git interactive rebase
+frb() {
+  local branches branch current_branch
+
+  current_branch=$(git branch --show-current)
+
+  # Get all branches (local and remote)
+  branches=$(git branch --all --sort=-committerdate | grep -v HEAD) || return 1
+
+  if [[ -z "$branches" ]]; then
+    echo "No branches found"
+    return 1
+  fi
+
+  branch=$(echo "$branches" | \
+    fzf --ansi \
+        --header="Select base branch for interactive rebase (current: $current_branch)" \
+        --preview='git log --graph --color=always --format="%C(auto)%h%d %s %C(black)%C(bold)%cr" $(echo {} | sed "s/.* //" | sed "s#remotes/[^/]*/##")...HEAD' \
+        --preview-window=right:60%:wrap | \
+    sed "s/.* //" | sed "s#remotes/[^/]*/##")
+
+  if [[ -n "$branch" ]]; then
+    echo "Starting interactive rebase onto: $branch"
+    git rebase -i "$branch"
+  else
+    echo "No branch selected"
+  fi
+}
+
+#==============================================================================
+# Git Safety Functions
+#==============================================================================
+# Enhanced git operations with safety confirmations to prevent common mistakes
+#==============================================================================
+
+# Safe git push - prevents accidental pushes to protected branches
+gpush-safe() {
+  # Usage: gpush-safe [git push options]
+  # Prompts for confirmation when pushing to main, master, or develop branches
+  local branch="$(git branch --show-current 2>/dev/null)"
+
+  if [[ -z "$branch" ]]; then
+    echo "❌ Not in a git repository"
+    return 1
+  fi
+
+  # Check for protected branches
+  if [[ "$branch" == "main" || "$branch" == "master" || "$branch" == "develop" ]]; then
+    echo "⚠️  WARNING: You're about to push to '$branch'"
+    echo ""
+    printf "Type the branch name to confirm: "
+    read -r confirm
+
+    if [[ "$confirm" != "$branch" ]]; then
+      echo "❌ Push aborted"
+      return 1
+    fi
+  fi
+
+  git push "$@"
+}
+
+# Safe force push with explicit confirmation
+gpf-safe() {
+  # Usage: gpf-safe [git push options]
+  # Requires typing 'force' to confirm force push operation
+  local branch="$(git branch --show-current 2>/dev/null)"
+
+  if [[ -z "$branch" ]]; then
+    echo "❌ Not in a git repository"
+    return 1
+  fi
+
+  echo "⚠️  FORCE PUSH REQUESTED"
+  echo "Branch: $branch"
+  echo "Remote: $(git remote get-url origin 2>/dev/null || echo 'unknown')"
+  echo ""
+  echo "This will OVERWRITE remote history!"
+  echo ""
+  printf "Type 'force' to confirm: "
+  read -r confirm
+
+  if [[ "$confirm" != "force" ]]; then
+    echo "❌ Force push aborted"
+    return 1
+  fi
+
+  git push --force-with-lease "$@"
+}
+
+# Warn before checkout if uncommitted changes exist
+gco-safe() {
+  # Usage: gco-safe <branch>
+  # Prompts for confirmation if there are uncommitted changes
+  if [[ -n $(git status --porcelain 2>/dev/null) ]]; then
+    echo "⚠️  Warning: Uncommitted changes detected"
+    echo ""
+    git status --short
+    echo ""
+    printf "Continue checkout? [y/N] "
+    read -r response
+    [[ "$response" =~ ^[Yy]$ ]] || return 1
+  fi
+  git checkout "$@"
+}
+
+#==============================================================================
+# Git Delta Smart Display
+#==============================================================================
+# Smart git diff wrapper that adapts to terminal width
+# Uses side-by-side mode for wide terminals, unified for narrow (e.g., VSCode split)
+#==============================================================================
+
+# Smart git diff - adapts layout based on terminal width
+# Override oh-my-zsh's `gd` alias with a smart function
+unalias gd 2>/dev/null  # Remove oh-my-zsh alias if it exists
+
+gd() {
+  # Usage: gd [git diff options]
+  # Automatically uses side-by-side for wide terminals (>= 160 cols)
+  # and unified diff for narrow terminals (< 160 cols)
+  local width=$(tput cols 2>/dev/null || echo "80")
+  local threshold="${GD_WIDTH_THRESHOLD:-160}"  # Configurable via env var
+
+  if [ "$width" -ge "$threshold" ]; then
+    git -c delta.side-by-side=true diff "$@"
+  else
+    git -c delta.side-by-side=false diff "$@"
+  fi
+}
+
+# Variants for explicit control
+alias gdw='git -c delta.side-by-side=true diff'   # Force wide/side-by-side
+alias gdv='git -c delta.side-by-side=false diff'  # Force unified/vertical
+
+#==============================================================================
+# Additional FZF Git Functions
+#==============================================================================
+# Enhanced fuzzy finding functions for git operations
+# Requires: fzf, bat/batcat (optional for preview)
+#==============================================================================
+
+# Fuzzy git tag operations
+ftag() {
+  # Usage: ftag
+  # Browse git tags with fuzzy finder, then checkout, show, or delete selected tag
+  local tag
+  tag=$(git tag | sort -V | \
+    fzf --preview 'git show --color=always {} --stat')
+
+  [[ -z "$tag" ]] && return 0
+
+  echo "Selected tag: $tag"
+  echo "1) Checkout tag"
+  echo "2) Show tag details"
+  echo "3) Delete tag"
+  printf "Choice [1]: "
+  read -r choice
+
+  case "${choice:-1}" in
+    1) git checkout "$tag" ;;
+    2) git show "$tag" ;;
+    3) git tag -d "$tag" ;;
+  esac
+}
+
+# Fuzzy merge with preview
+fmerge() {
+  # Usage: fmerge
+  # Select branch to merge with fuzzy finder and preview of commits
+  local branch
+  branch=$(git branch --all | grep -v HEAD | \
+    fzf --preview 'git log --color=always --oneline --graph {}' \
+        --preview-window right:60%)
+
+  [[ -z "$branch" ]] && return 0
+
+  branch="${branch##*/}"  # Remove remotes/origin/ prefix
+  branch="${branch#"${branch%%[![:space:]]*}"}"  # Trim leading whitespace
+
+  echo "Merging: $branch"
+  git merge "$branch"
+}
+
+# Show files changed in current branch with preview
+ffiles-changed() {
+  # Usage: ffiles-changed [base-branch]
+  # Shows files changed in current branch compared to base (default: main)
+  local base="${1:-main}"
+  local file
+
+  file=$(git diff --name-only "$base"...HEAD | \
+    fzf --preview "git diff --color=always $base...HEAD -- {}" \
+        --preview-window right:60%)
+
+  [[ -n "$file" ]] && git diff "$base"...HEAD -- "$file"
+}
