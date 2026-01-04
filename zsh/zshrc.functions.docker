@@ -1,0 +1,228 @@
+#==============================================================================
+# Docker Management Functions
+#==============================================================================
+# Enhanced Docker operations with intelligent defaults and FZF integration.
+# All functions include inline "Usage: ..." documentation.
+#
+# Interactive Functions:
+#   - dexec: Fuzzy Docker container exec
+#   - dlogs: Fuzzy Docker container logs
+#   - dkill: Fuzzy Docker container killer
+#   - dimages: Fuzzy Docker image management
+#   - dshell: Intelligent shell detection and execution
+#   - dnetwork: Network management with fzf
+#   - dvolume: Volume management with fzf
+#   - dstats-live: Container resource monitoring
+#
+# Requires: docker, fzf (for interactive functions), bat/batcat (optional for JSON preview)
+# See also: examples/docker-workflows.md
+#==============================================================================
+
+#==============================================================================
+# Enhanced Docker Functions
+#==============================================================================
+
+# dexec - Fuzzy Docker container exec
+dexec() {
+  local container cmd
+
+  # Select container interactively
+  container=$(docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | tail -n +2 | fzf --header='Select container for exec' | awk '{print $1}')
+
+  if [[ -z "$container" ]]; then
+    echo "No container selected"
+    return 1
+  fi
+
+  # Default command or use provided command
+  cmd="${1:-bash}"
+
+  echo "Executing '$cmd' in container: $container"
+  docker exec -it "$container" "$cmd"
+}
+
+# dlogs - Fuzzy Docker container logs
+dlogs() {
+  local container
+
+  container=$(docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | tail -n +2 | fzf --header='Select container for logs' | awk '{print $1}')
+
+  if [[ -n "$container" ]]; then
+    echo "Showing logs for container: $container"
+    docker logs -f "$container"
+  else
+    echo "No container selected"
+  fi
+}
+
+# dkill - Fuzzy Docker container killer
+dkill() {
+  local containers
+
+  containers=$(docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | tail -n +2 | fzf --multi --header='Select container(s) to stop' | awk '{print $1}')
+
+  if [[ -n "$containers" ]]; then
+    echo "Stopping containers: $containers"
+    echo "$containers" | xargs docker stop
+  else
+    echo "No containers selected"
+  fi
+}
+
+# dimages - Fuzzy Docker image management
+dimages() {
+  local action image
+
+  echo "Docker Image Management:"
+  echo "1. Remove image(s)"
+  echo "2. Inspect image"
+  echo "3. History of image"
+  echo
+  read -p "Select action (1-3): " action
+
+  case $action in
+    1)
+      image=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}" | tail -n +2 | fzf --multi --header='Select image(s) to remove' | awk '{print $4}')
+      if [[ -n "$image" ]]; then
+        echo "Removing images: $image"
+        echo "$image" | xargs docker rmi
+      fi
+      ;;
+    2)
+      image=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}" | tail -n +2 | fzf --header='Select image to inspect' | awk '{print $4}')
+      if [[ -n "$image" ]]; then
+        docker inspect "$image"
+      fi
+      ;;
+    3)
+      image=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}" | tail -n +2 | fzf --header='Select image for history' | awk '{print $4}')
+      if [[ -n "$image" ]]; then
+        docker history "$image"
+      fi
+      ;;
+    *)
+      echo "Invalid selection"
+      ;;
+  esac
+}
+
+#==============================================================================
+# Additional Docker Functions
+#==============================================================================
+# Enhanced Docker operations with intelligent defaults and FZF integration
+# Requires: docker, fzf (for interactive functions), bat/batcat (optional for JSON preview)
+#==============================================================================
+
+# Intelligent shell detection and execution
+dshell() {
+  # Usage: dshell
+  # Opens fuzzy container selector, then tries shells in order: zsh, bash, sh, ash
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  local container
+  container=$(docker ps --format '{{.Names}}' | fzf --height 40% --header 'Select container')
+  [[ -z "$container" ]] && return 0
+
+  # Try shells in order of preference
+  for shell in zsh bash sh ash; do
+    if docker exec "$container" which "$shell" &>/dev/null; then
+      echo "🐚 Opening $shell in $container..."
+      docker exec -it "$container" "$shell"
+      return 0
+    fi
+  done
+
+  echo "❌ No shell found in container"
+  return 1
+}
+
+# Network management with fzf
+dnetwork() {
+  # Usage: dnetwork
+  # Interactive Docker network management menu
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  echo "Docker Network Operations:"
+  echo "1) List networks"
+  echo "2) Inspect network"
+  echo "3) Remove network"
+  echo "4) Prune unused networks"
+  printf "Select [1]: "
+  read -r choice
+
+  case "${choice:-1}" in
+    1) docker network ls ;;
+    2)
+      local net
+      net=$(docker network ls --format '{{.Name}}' | fzf --header 'Select network to inspect')
+      [[ -n "$net" ]] && docker network inspect "$net" | bat -l json 2>/dev/null || docker network inspect "$net"
+      ;;
+    3)
+      local net
+      net=$(docker network ls --format '{{.Name}}' | fzf --header 'Select network to remove')
+      [[ -n "$net" ]] && docker network rm "$net"
+      ;;
+    4)
+      echo "⚠️  This will remove all unused networks"
+      printf "Proceed? [y/N] "
+      read -r confirm
+      [[ "$confirm" =~ ^[Yy]$ ]] && docker network prune -f
+      ;;
+  esac
+}
+
+# Volume management with fzf
+dvolume() {
+  # Usage: dvolume
+  # Interactive Docker volume management menu
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  echo "Docker Volume Operations:"
+  echo "1) List volumes"
+  echo "2) Inspect volume"
+  echo "3) Remove volumes (multi-select)"
+  echo "4) Prune unused volumes"
+  printf "Select [1]: "
+  read -r choice
+
+  case "${choice:-1}" in
+    1) docker volume ls ;;
+    2)
+      local vol
+      vol=$(docker volume ls --format '{{.Name}}' | fzf --header 'Select volume to inspect')
+      [[ -n "$vol" ]] && docker volume inspect "$vol" | bat -l json 2>/dev/null || docker volume inspect "$vol"
+      ;;
+    3)
+      local vols
+      vols=$(docker volume ls --format '{{.Name}}' | fzf --multi --header 'Select volumes to remove (Tab for multi-select)')
+      [[ -n "$vols" ]] && echo "$vols" | xargs docker volume rm
+      ;;
+    4)
+      echo "⚠️  This will remove all unused volumes"
+      printf "Proceed? [y/N] "
+      read -r confirm
+      [[ "$confirm" =~ ^[Yy]$ ]] && docker volume prune -f
+      ;;
+  esac
+}
+
+# Container resource monitoring (enhanced dps)
+dstats-live() {
+  # Usage: dstats-live
+  # Shows real-time resource usage for all running containers
+  if ! command -v docker &>/dev/null; then
+    echo "❌ Docker not installed"
+    return 1
+  fi
+
+  docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+}
