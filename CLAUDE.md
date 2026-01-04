@@ -386,25 +386,66 @@ mise use -g bat@latest
 mise doctor
 ```
 
+### Trust Configuration
+
+Mise requires explicit trust for config files as a security feature. When working in the dotfiles directory, you may see:
+
+```
+ERROR: Config files in ~/.dotfiles/.mise.toml are not trusted.
+```
+
+**Trust the dotfiles config** (one-time):
+```bash
+mise trust ~/.dotfiles/.mise.toml
+```
+
+**Verify configuration and trust status**:
+```bash
+# Check which config is active
+mise config path
+
+# List trusted configs
+ls ~/.local/state/mise/trusted-configs/
+
+# Show all config sources
+mise config ls
+```
+
+**When trust is needed**:
+- Working in `~/.dotfiles/` directory (template file)
+- Creating project-specific `.mise.toml` files
+- Any config file outside your home directory
+
+Your active config at `~/.config/mise/config.toml` is always trusted (it's in your home directory).
+
 ### Configuration
 
 The dotfiles repository provides a unified mise configuration:
 
 **Dotfiles (committed)**: `.mise.toml` - Pinned versions for reproducibility
+  - Location: `~/.dotfiles/.mise.toml` (template/source file)
   - Automatically installed by `./install` script to `~/.config/mise/config.toml`
   - Synchronized with dev-setup repository tool versions
   - Recommended for team consistency
+  - **Trust**: Required if working in dotfiles directory (`mise trust ~/.dotfiles/.mise.toml`)
 
 **Global**: `~/.config/mise/config.toml` - Active configuration
+  - Location: `~/.config/mise/config.toml` (your home directory)
   - Created from `.mise.toml` during installation
   - Can be customized per machine if needed
+  - **Trust**: Not required (home directory files are auto-trusted)
+  - This is what mise actually uses for tool management
 
 **Project**: `.mise.toml` - Override versions per project (optional)
+  - Location: Project root directory (e.g., `~/my-project/.mise.toml`)
   - Committed to git for project-specific requirements
+  - **Trust**: Required for each project (`mise trust`)
 
 **Example**: `examples/mise-config.toml` - Template with "latest" versions
+  - Location: `~/.dotfiles/examples/mise-config.toml` (reference only)
   - Use for custom configurations
   - Alternative to pinned versions
+  - **Trust**: Not applicable (example file, not used by mise)
 
 ### Version Management
 
@@ -823,6 +864,36 @@ This script shows:
 - Check if tool is installed: `command -v toolname`
 - Review `zsh/zshrc.conditionals` for conditional logic
 - Reload config: `source ~/.zshrc` or `zshreload`
+
+### mise config not trusted error
+**Error**: "Config files in ~/.dotfiles/.mise.toml are not trusted"
+
+This is a mise security feature that requires explicit trust for config files. It occurs when:
+- You're working in the `~/.dotfiles/` directory
+- Mise discovers the `.mise.toml` template file there
+- You haven't trusted it yet
+
+**Solutions**:
+```bash
+# Option 1: Trust the dotfiles config (recommended)
+mise trust ~/.dotfiles/.mise.toml
+
+# Option 2: Work outside the dotfiles directory
+cd ~  # or any other directory
+
+# Verify your active config
+mise config path  # Should show ~/.config/mise/config.toml
+
+# Check trust status
+ls ~/.local/state/mise/trusted-configs/
+```
+
+**Understanding the architecture**:
+- **Template**: `~/.dotfiles/.mise.toml` (pinned versions, requires trust when working in dotfiles dir)
+- **Active config**: `~/.config/mise/config.toml` (copied during `./install`, always trusted in home directory)
+- **Project configs**: `.mise.toml` in project directories (per-project overrides, require trust)
+
+The error doesn't affect your actual mise functionality - your active config at `~/.config/mise/config.toml` works fine. The trust requirement only applies when mise discovers the template file in the dotfiles directory.
 
 ### Command not found after adding tool
 - Reload zsh configuration: `source ~/.zshrc` or `zshreload`
