@@ -125,6 +125,76 @@ Loading Order (from zshrc):
 
 **Key Insight:** Conditionals load AFTER aliases, so conditional aliases override unconditional ones. This is intentional - tools that are installed get priority configuration.
 
+### CI/CD Testing
+
+The repository includes automated GitHub Actions workflows to ensure quality and prevent regressions.
+
+**Workflow Jobs** (see `.github/workflows/ci.yml`):
+
+1. **ShellCheck** - Lints all shell scripts for common issues
+2. **Syntax Check** - Validates bash and zsh syntax for all configuration modules
+3. **YAML Validation** - Ensures install.conf.yaml and other YAML files are valid
+4. **Pre-commit Hooks** - Runs security checks (gitleaks, secret detection, etc.)
+5. **Installation Tests** - Tests `./install` on Ubuntu 22.04 and 24.04
+6. **Security Scan** - Full repository scan for secrets via gitleaks
+7. **Documentation Check** - Validates markdown links and verifies required docs exist
+
+**Running Tests Locally:**
+
+```bash
+# Install pre-commit (via mise or pip)
+mise use -g pre-commit@latest
+# or
+pip install pre-commit
+
+# Run all checks
+pre-commit run --all-files
+
+# Test specific checks
+bash -n install                    # Syntax check install script
+zsh -n zsh/zshrc.aliases           # Syntax check zsh module
+shellcheck -x install              # Lint install script
+```
+
+**Local CI Simulation:**
+
+```bash
+# Install act (https://github.com/nektos/act)
+brew install act  # or download from releases
+
+# Run specific CI jobs locally
+act -j shellcheck
+act -j syntax-check
+act -j pre-commit
+
+# Run all CI jobs
+act pull_request
+```
+
+**When to Run Tests:**
+
+- **Before committing**: Run `pre-commit run --all-files`
+- **Before PR**: Ensure local tests pass
+- **After refactoring**: Test syntax and installation
+- **Adding new scripts**: Add to ShellCheck patterns
+
+**CI Badge:**
+
+The README includes a CI status badge showing build health:
+```
+![CI](https://github.com/quantivly/dotfiles/workflows/CI/badge.svg)
+```
+
+**Troubleshooting CI Failures:**
+
+- **ShellCheck errors**: Review warnings, fix or add `# shellcheck disable=SC####` with justification
+- **Syntax errors**: Test locally with `bash -n` or `zsh -n`
+- **Pre-commit failures**: Run locally to see full error context
+- **Installation test failures**: Test `./install` in clean container
+- **Secret detection**: Remove secrets, use `.local` files or sops
+
+For more details, see `.github/README.md`.
+
 ## Tool Dependencies
 
 ### Required Tools (Must Install)

@@ -16,6 +16,7 @@ repos:
         name: Trim trailing whitespace
       - id: detect-private-key
         name: Detect private keys
+        exclude: 'zsh/zshrc\.history'  # Contains pattern text, not actual keys
       - id: check-added-large-files
         args: ['--maxkb=500']
         name: Check for large files
@@ -32,8 +33,8 @@ repos:
     hooks:
       - id: shellcheck
         name: Shellcheck
-        args: ['-x']  # Follow sourced files
-        exclude: 'dotbot/'  # Exclude git submodule
+        args: ['-x', '-e', 'SC1071,SC1073,SC1072']  # Follow sourced files, exclude zsh-specific errors
+        exclude: '(dotbot/|p10k\.zsh|zsh/zshrc\.(conditionals|functions|aliases|company|history|gpg-reminder)|zshrc$)'  # Exclude git submodule and zsh-specific files
 
   # Secret detection with gitleaks
   - repo: https://github.com/gitleaks/gitleaks
@@ -64,14 +65,14 @@ repos:
     hooks:
       - id: check-secrets-patterns
         name: Check for secret patterns
-        entry: bash -c 'if grep -rn -E "(password|secret|token|api[_-]?key)\\s*=\\s*[\"'\''][^\"'\'']{8,}" --include="*.sh" --include="*.bash" --include="*.zsh" --exclude-dir=".git" --exclude-dir="dotbot" . 2>/dev/null; then echo "Found potential secrets in files above"; exit 1; fi'
+        entry: bash -c 'if grep -rn -E "(password|secret|token|api[_-]?key)\\s*=\\s*[\"'"'"'][^\"'"'"']{8,}" --include="*.sh" --include="*.bash" --include="*.zsh" --exclude-dir=".git" --exclude-dir="dotbot" . 2>/dev/null; then echo "Found potential secrets in files above"; exit 1; fi'
         language: system
         pass_filenames: false
         files: '\.(sh|bash|zsh)$'
 
       - id: check-history-ignore
         name: Verify HISTORY_IGNORE includes secrets
-        entry: bash -c 'if [ -f zsh/zshrc.history ]; then patterns=("secret" "password" "token" "AWS_ACCESS_KEY" "PRIVATE*KEY"); missing=(); for p in "${patterns[@]}"; do if ! grep -q "\*$p\*" zsh/zshrc.history; then missing+=("$p"); fi; done; if [ ${#missing[@]} -gt 0 ]; then echo "HISTORY_IGNORE missing patterns: ${missing[*]}"; exit 1; fi; fi'
+        entry: bash -c 'if [ -f zsh/zshrc.history ]; then patterns=("secret" "password" "token" "AWS_ACCESS_KEY" "BEGIN\*PRIVATE\*KEY"); missing=(); for p in "${patterns[@]}"; do if ! grep -q "\*$p\*" zsh/zshrc.history; then missing+=("$p"); fi; done; if [ ${#missing[@]} -gt 0 ]; then echo "HISTORY_IGNORE missing patterns - ${missing[*]}"; exit 1; fi; fi'
         language: system
         pass_filenames: false
         files: 'zsh/zshrc\.history$'

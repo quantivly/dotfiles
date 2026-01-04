@@ -1,5 +1,7 @@
 # Quantivly Dotfiles
 
+![CI](https://github.com/quantivly/dotfiles/workflows/CI/badge.svg)
+
 Shared configuration files for zsh, git, and various development tools used by the Quantivly team, managed with [dotbot](https://github.com/anishathalye/dotbot).
 
 ## Features
@@ -627,9 +629,21 @@ This repository includes multiple layers of security to prevent accidental crede
 Contributions from the team are welcome! To contribute:
 - Fork the repository and make your changes
 - Test your changes on a fresh installation
+- Run pre-commit checks locally: `pre-commit run --all-files`
+- Ensure CI pipeline passes (automatic on PR)
 - Submit a pull request with a clear description
 - Ensure changes don't break existing configurations
 - Keep personal information out of shared files (use `.local` files instead)
+
+**Automated Testing:** All PRs automatically run:
+- ShellCheck linting
+- Syntax validation (bash/zsh)
+- Pre-commit security hooks
+- Installation tests on Ubuntu 22.04 and 24.04
+- Secret detection via gitleaks
+- Documentation validation
+
+See `.github/README.md` for details on running tests locally.
 
 ## License
 
