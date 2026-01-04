@@ -166,6 +166,8 @@ mise doctor
 
 See `CLAUDE.md` for complete documentation on managing CLI tools with mise.
 
+**Migrating from nvm/pyenv?** See [docs/MIGRATION.md](docs/MIGRATION.md) for step-by-step migration instructions.
+
 ## Dependencies
 
 ### Required
@@ -635,7 +637,17 @@ MIT License - Feel free to use and modify as needed.
 
 ## Resources
 
+### Internal Documentation
+
+- [Migration Guide](docs/MIGRATION.md) - Migrating from nvm/pyenv to mise
+- [Security Incident Response](docs/SECURITY_INCIDENTS.md) - What to do if you accidentally commit secrets
+- [GPG Signing Setup](docs/GPG_SIGNING_SETUP.md) - Technical reference for GPG commit signing
+- [Workflow Examples](examples/README.md) - Git, Docker, and FZF workflow guides
+
+### External Documentation
+
 - [Dotbot Documentation](https://github.com/anishathalye/dotbot)
 - [oh-my-zsh Documentation](https://github.com/ohmyzsh/ohmyzsh/wiki)
 - [Powerlevel10k Documentation](https://github.com/romkatv/powerlevel10k)
 - [GitHub CLI Documentation](https://cli.github.com/manual/)
+- [mise Documentation](https://mise.jdx.dev/)
