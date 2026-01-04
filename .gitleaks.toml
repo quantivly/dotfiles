@@ -5,24 +5,17 @@
 useDefault = true
 
 # Allowlist for false positives
-[[allowlist]]
-description = "Ignore example credentials in documentation"
+[allowlist]
+description = "Ignore false positives in dotfiles"
 paths = [
   '''examples/.*''',
   '''docs/.*''',
   '''README\.md''',
   '''CLAUDE\.md''',
-]
-
-[[allowlist]]
-description = "Ignore test files and git submodules"
-paths = [
   '''dotbot/.*''',
   '''\.git/.*''',
+  '''zsh/zshrc\.history''',  # Contains pattern text like "PRIVATE*KEY", not actual keys
 ]
-
-[[allowlist]]
-description = "Ignore placeholder tokens in config examples"
 regexes = [
   '''(example|placeholder|your|INSERT|REPLACE|TODO)''',
 ]

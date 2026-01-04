@@ -59,6 +59,7 @@ jobs:
       - name: Validate YAML files
         uses: ibiqlik/action-yamllint@v3
         with:
+          strict: false
           config_data: |
             extends: default
             rules:

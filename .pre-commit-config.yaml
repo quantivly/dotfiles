@@ -72,7 +72,7 @@ repos:
 
       - id: check-history-ignore
         name: Verify HISTORY_IGNORE includes secrets
-        entry: bash -c 'if [ -f zsh/zshrc.history ]; then patterns=("secret" "password" "token" "AWS_ACCESS_KEY" "PRIVATE*KEY"); missing=(); for p in "${patterns[@]}"; do if ! grep -q "\\*$p\\*" zsh/zshrc.history; then missing+=("$p"); fi; done; if [ ${#missing[@]} -gt 0 ]; then echo "HISTORY_IGNORE missing patterns${missing[*]}"; exit 1; fi; fi'
+        entry: bash -c 'if [ -f zsh/zshrc.history ]; then patterns=("secret" "password" "token" "AWS_ACCESS_KEY" "BEGIN\*PRIVATE\*KEY"); missing=(); for p in "${patterns[@]}"; do if ! grep -q "\*$p\*" zsh/zshrc.history; then missing+=("$p"); fi; done; if [ ${#missing[@]} -gt 0 ]; then echo "HISTORY_IGNORE missing patterns - ${missing[*]}"; exit 1; fi; fi'
         language: system
         pass_filenames: false
         files: 'zsh/zshrc\.history$'
