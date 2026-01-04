@@ -43,9 +43,7 @@ echo
 
 # Create a test signature to unlock the key and cache the passphrase
 # Allow stderr to pass through so pinentry can prompt for passphrase
-echo "test" | gpg --clearsign --default-key "$SIGNING_KEY" > /dev/null
-
-if [ $? -eq 0 ]; then
+if echo "test" | gpg --clearsign --default-key "$SIGNING_KEY" > /dev/null; then
     echo "✓ GPG cache primed successfully!"
     echo
     echo "Your passphrase is cached for:"

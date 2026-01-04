@@ -23,7 +23,7 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     if command -v mise &> /dev/null; then
         eval "$(mise activate bash)" 2>/dev/null || eval "$(mise activate zsh)" 2>/dev/null || true
     elif [[ -x "$HOME/.local/bin/mise" ]]; then
-        eval "$($HOME/.local/bin/mise activate bash)" 2>/dev/null || eval "$($HOME/.local/bin/mise activate zsh)" 2>/dev/null || true
+        eval "$("$HOME/.local/bin/mise" activate bash)" 2>/dev/null || eval "$("$HOME/.local/bin/mise" activate zsh)" 2>/dev/null || true
     fi
 
     if [[ -f "$HOME/.config/mise/config.toml" ]]; then

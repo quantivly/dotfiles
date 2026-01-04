@@ -18,9 +18,10 @@
 [include]
 	path = ~/.gitconfig.local
 
-# Machine-specific safe directories
-[safe]
-	directory = /home/ubuntu/workspaces/test
+# Machine-specific safe directories should be set in ~/.gitconfig.local
+# Example:
+#   [safe]
+#       directory = /home/ubuntu/workspaces/test
 
 [credential "https://github.com"]
 	helper =
