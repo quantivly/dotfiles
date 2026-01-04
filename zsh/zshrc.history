@@ -23,4 +23,11 @@ setopt INC_APPEND_HISTORY        # Write to history file immediately, not when s
 setopt HIST_REDUCE_BLANKS        # Remove superfluous blanks before recording entry
 
 # Ignore common commands and sensitive patterns in history
-export HISTORY_IGNORE="(ls|cd|pwd|exit|cd ..|*secret*|*token*|*password*|*key=*|*API_KEY*|*SECRET*|export *TOKEN*|export *KEY*|*auth*token*)"
+# Comprehensive pattern matching for:
+# - Common commands (ls, cd, pwd, exit)
+# - Generic secrets (secret, token, password, key)
+# - AWS credentials (AWS_ACCESS_KEY, AWS_SECRET)
+# - Database connection strings with embedded passwords
+# - Private key headers (BEGIN PRIVATE KEY, BEGIN RSA PRIVATE KEY)
+# - Environment variable exports with sensitive keywords
+export HISTORY_IGNORE="(ls|cd|pwd|exit|cd ..|*secret*|*token*|*password*|*key=*|*API_KEY*|*SECRET*|export *TOKEN*|export *KEY*|*auth*token*|*AWS_ACCESS_KEY*|*AWS_SECRET*|export *PASSWORD*|*://[^@]*:[^@]*@*|*BEGIN*PRIVATE*KEY*|*BEGIN*RSA*PRIVATE*KEY*)"
