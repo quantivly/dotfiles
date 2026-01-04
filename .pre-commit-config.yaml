@@ -16,6 +16,7 @@ repos:
         name: Trim trailing whitespace
       - id: detect-private-key
         name: Detect private keys
+        exclude: 'zsh/zshrc\.history'  # Contains pattern text, not actual keys
       - id: check-added-large-files
         args: ['--maxkb=500']
         name: Check for large files
@@ -32,8 +33,8 @@ repos:
     hooks:
       - id: shellcheck
         name: Shellcheck
-        args: ['-x']  # Follow sourced files
-        exclude: 'dotbot/'  # Exclude git submodule
+        args: ['-x', '-e', 'SC1071,SC1073,SC1072']  # Follow sourced files, exclude zsh-specific errors
+        exclude: '(dotbot/|p10k\.zsh|zsh/zshrc\.(conditionals|functions|aliases|company|history|gpg-reminder)|zshrc$)'  # Exclude git submodule and zsh-specific files
 
   # Secret detection with gitleaks
   - repo: https://github.com/gitleaks/gitleaks
