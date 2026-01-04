@@ -5,6 +5,15 @@
     },
     {
       "pattern": "^https://github\\.com/quantivly/.*/(issues|pull)"
+    },
+    {
+      "pattern": "^\\.\\./.*"
+    },
+    {
+      "pattern": "^\\./.*"
+    },
+    {
+      "pattern": "^file://"
     }
   ],
   "timeout": "20s",

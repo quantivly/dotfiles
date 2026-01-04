@@ -64,14 +64,14 @@ repos:
     hooks:
       - id: check-secrets-patterns
         name: Check for secret patterns
-        entry: bash -c 'if grep -rn -E "(password|secret|token|api[_-]?key)\\s*=\\s*[\"'\''][^\"'\'']{8,}" --include="*.sh" --include="*.bash" --include="*.zsh" --exclude-dir=".git" --exclude-dir="dotbot" . 2>/dev/null; then echo "Found potential secrets in files above"; exit 1; fi'
+        entry: bash -c 'if grep -rn -E "(password|secret|token|api[_-]?key)\\s*=\\s*[\"'"'"'][^\"'"'"']{8,}" --include="*.sh" --include="*.bash" --include="*.zsh" --exclude-dir=".git" --exclude-dir="dotbot" . 2>/dev/null; then echo "Found potential secrets in files above"; exit 1; fi'
         language: system
         pass_filenames: false
         files: '\.(sh|bash|zsh)$'
 
       - id: check-history-ignore
         name: Verify HISTORY_IGNORE includes secrets
-        entry: bash -c 'if [ -f zsh/zshrc.history ]; then patterns=("secret" "password" "token" "AWS_ACCESS_KEY" "PRIVATE*KEY"); missing=(); for p in "${patterns[@]}"; do if ! grep -q "\*$p\*" zsh/zshrc.history; then missing+=("$p"); fi; done; if [ ${#missing[@]} -gt 0 ]; then echo "HISTORY_IGNORE missing patterns: ${missing[*]}"; exit 1; fi; fi'
+        entry: bash -c 'if [ -f zsh/zshrc.history ]; then patterns=("secret" "password" "token" "AWS_ACCESS_KEY" "PRIVATE*KEY"); missing=(); for p in "${patterns[@]}"; do if ! grep -q "\\*$p\\*" zsh/zshrc.history; then missing+=("$p"); fi; done; if [ ${#missing[@]} -gt 0 ]; then echo "HISTORY_IGNORE missing patterns${missing[*]}"; exit 1; fi; fi'
         language: system
         pass_filenames: false
         files: 'zsh/zshrc\.history$'
