@@ -8,7 +8,7 @@ This directory contains automated workflows for ensuring code quality and correc
 
 Runs on every push and pull request to `main`. Includes:
 
-1. **ShellCheck**: Lints all shell scripts for common issues
+1. **ShellCheck**: Lints all shell scripts for common issues (errors will fail CI)
 2. **Syntax Check**: Validates bash and zsh syntax for all modules
 3. **YAML Validation**: Ensures all YAML files are properly formatted
 4. **Pre-commit Hooks**: Runs security and quality checks
