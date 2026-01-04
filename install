@@ -60,3 +60,24 @@ else
     echo "==> mise not installed"
     echo "    Install mise via dev-setup or: curl https://mise.run | sh"
 fi
+
+# Install pre-commit hooks automatically
+if [[ -f "${BASEDIR}/.pre-commit-config.yaml" ]]; then
+    echo ""
+    echo "==> Installing pre-commit hooks..."
+
+    if command -v pre-commit &> /dev/null; then
+        # Install hooks with --install-hooks to download hook dependencies
+        if pre-commit install --install-hooks &> /dev/null; then
+            echo "    ✓ Pre-commit hooks installed successfully"
+            echo "    ℹ Hooks will run automatically before each commit"
+        else
+            echo "    ⚠ Failed to install pre-commit hooks"
+            echo "      Manual installation: pre-commit install --install-hooks"
+        fi
+    else
+        echo "    ℹ pre-commit not found"
+        echo "      Install via mise: mise use -g pre-commit@latest"
+        echo "      Or install directly: pip install pre-commit"
+    fi
+fi
