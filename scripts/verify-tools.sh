@@ -91,7 +91,9 @@ check_tool gitleaks "version"
 
 # Check pre-commit (prefer user-installed version over virtualenv)
 if [[ -x "$HOME/.local/bin/pre-commit" ]]; then
-    check_tool "$HOME/.local/bin/pre-commit" "--version"
+    # Use local version but display as "pre-commit" not full path
+    precommit_version=$("$HOME/.local/bin/pre-commit" --version 2>&1 | head -1)
+    echo -e "${GREEN}✓${NC} pre-commit: $precommit_version"
 elif command -v pre-commit &>/dev/null; then
     check_tool pre-commit "--version"
 else
