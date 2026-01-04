@@ -596,6 +596,30 @@ If SSH keys aren't loading automatically:
 2. Add SSH configuration to `~/.zshrc.local` (see template)
 3. Verify SSH_AUTH_SOCK is set: `echo $SSH_AUTH_SOCK`
 
+## Security
+
+This repository includes multiple layers of security to prevent accidental credential exposure:
+
+### Incident Response
+**Accidentally committed a secret?** Follow the step-by-step guide: [docs/SECURITY_INCIDENTS.md](docs/SECURITY_INCIDENTS.md)
+
+- Immediate credential rotation procedures
+- Git history cleanup instructions
+- Team notification templates
+- Post-incident review checklist
+
+### Automated Prevention
+- **Pre-commit hooks**: Automatic secret detection via gitleaks
+- **Private key detection**: Blocks SSH/GPG keys from commits
+- **Custom patterns**: HISTORY_IGNORE prevents secrets in shell history
+- **File patterns**: `.gitignore` blocks sensitive file types
+
+### Secret Storage
+- **Never** commit secrets to git - use `~/.zshrc.local` (chmod 600)
+- **Use sops** for encrypted secrets: `~/.secrets/env.enc.yaml`
+- **Rotate immediately** if a secret is exposed
+- **Enable GPG signing** to verify commit authenticity (see [Personalization](#personalization))
+
 ## Contributing
 
 Contributions from the team are welcome! To contribute:
