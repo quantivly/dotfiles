@@ -1,0 +1,63 @@
+# Unified mise Configuration for CLI Tools
+# ==========================================
+# This file defines pinned versions for all CLI tools managed by mise.
+# These versions are synchronized with dev-setup repository.
+#
+# To upgrade tools:
+#   1. Check for updates: mise outdated
+#   2. Test locally: mise use bat@0.25.0 (example)
+#   3. Update this file with new version
+#   4. Commit with changelog entry
+#
+# See: docs/TOOL_VERSION_UPDATES.md (coming in DO-152)
+
+[settings]
+# Enable legacy version file support (.nvmrc, .python-version, .tool-versions)
+legacy_version_file = true
+
+# Use aqua backend for enhanced security (GPG signature verification where available)
+experimental = true
+
+[tools]
+# Core CLI Tools (pinned versions for reproducibility)
+# Last updated: 2026-01-04
+# To upgrade: mise upgrade && mise ls to see new versions, then update here
+
+bat = "0.24.0"           # Syntax highlighter (cat replacement)
+fd = "9.0.0"             # Fast find alternative
+eza = "0.18.0"           # Modern ls replacement
+delta = "0.17.0"         # Git diff viewer with syntax highlighting
+zoxide = "0.9.4"         # Smart cd command that learns your patterns
+duf = "0.8.1"            # Disk usage viewer with colors
+dust = "0.9.0"           # Directory size analyzer (du replacement)
+lazygit = "0.42.0"       # Git TUI for interactive git operations
+just = "1.25.2"          # Command runner (make alternative)
+glow = "1.5.1"           # Markdown viewer for terminal
+gitleaks = "8.18.2"      # Secret scanner for git repositories
+pre-commit = "3.6.2"     # Pre-commit framework for git hooks
+sops = "3.8.1"           # Secrets encryption tool
+fastfetch = "2.8.10"     # System info display
+
+# Optional tools (uncomment to enable)
+# dive = "0.12.0"        # Docker image layer analyzer
+# lazydocker = "0.23.1"  # Docker TUI
+# ctop = "0.7.7"         # Container monitoring (htop for containers)
+# hyperfine = "1.18.0"   # Command benchmarking tool
+# difftastic = "0.58.0"  # Structural diff tool
+# cheat = "4.4.2"        # Interactive cheatsheets
+# tlrc = "1.9.2"         # Rust-based tldr client
+
+# Note: btop should be installed via apt/brew due to aqua registry compatibility
+# Install: apt install btop (Ubuntu) or brew install btop (macOS)
+
+# Note: procs is optional and installed via cargo
+# Install: cargo install procs (Rust-based ps replacement)
+
+# Note: forgit requires manual installation
+# Install: git clone https://github.com/wfxr/forgit.git ~/.forgit
+
+[env]
+# Tool-specific environment variables
+BAT_THEME = "Monokai Extended"
+GIT_PAGER = "delta"
+MISE_PYTHON_DEFAULT_PACKAGES_FILE = "~/.default-python-packages"

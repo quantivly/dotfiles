@@ -314,10 +314,37 @@ mise doctor
 
 ### Configuration
 
-**Global**: `~/.config/mise/config.toml` - Default versions for all projects
-**Project**: `.mise.toml` - Override versions per project (committed to git)
+The dotfiles repository provides a unified mise configuration:
 
-See `examples/mise-config.toml` for template.
+**Dotfiles (committed)**: `.mise.toml` - Pinned versions for reproducibility
+  - Automatically installed by `./install` script to `~/.config/mise/config.toml`
+  - Synchronized with dev-setup repository tool versions
+  - Recommended for team consistency
+
+**Global**: `~/.config/mise/config.toml` - Active configuration
+  - Created from `.mise.toml` during installation
+  - Can be customized per machine if needed
+
+**Project**: `.mise.toml` - Override versions per project (optional)
+  - Committed to git for project-specific requirements
+
+**Example**: `examples/mise-config.toml` - Template with "latest" versions
+  - Use for custom configurations
+  - Alternative to pinned versions
+
+### Version Management
+
+**Pinned Versions** (recommended):
+- Copy from dotfiles: `cp ~/.dotfiles/.mise.toml ~/.config/mise/config.toml`
+- Reproducible, tested versions
+- Synchronized across team
+
+**Latest Versions** (alternative):
+- Copy from examples: `cp ~/.dotfiles/examples/mise-config.toml ~/.config/mise/config.toml`
+- Always newest features
+- May have compatibility issues
+
+See `docs/TOOL_VERSION_UPDATES.md` (coming in DO-152) for update procedures.
 
 ### Available Tools
 
@@ -331,7 +358,7 @@ See `examples/mise-config.toml` for template.
 
 **Note:** btop should be installed via apt (`apt install btop`) due to aqua registry asset name issue.
 
-**Optional tools** (uncomment in config):
+**Optional tools** (uncomment in `.mise.toml`):
 - dive, lazydocker, ctop - Docker tools
 - hyperfine - Benchmarking
 - difftastic - Structural diffs

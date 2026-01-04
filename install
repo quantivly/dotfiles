@@ -17,7 +17,23 @@ git submodule update --init --recursive "${DOTBOT_DIR}"
 # Check if mise tools are configured
 if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     echo ""
-    echo "==> Checking mise CLI tools..."
+    echo "==> Configuring mise CLI tools..."
+
+    # Copy unified mise configuration from dotfiles
+    if [[ -f "${BASEDIR}/.mise.toml" ]]; then
+        mkdir -p "$HOME/.config/mise"
+
+        # Only copy if no existing config, or if dotfiles version is different
+        if [[ ! -f "$HOME/.config/mise/config.toml" ]]; then
+            cp "${BASEDIR}/.mise.toml" "$HOME/.config/mise/config.toml"
+            echo "    ✓ Installed unified mise configuration"
+        elif ! diff -q "${BASEDIR}/.mise.toml" "$HOME/.config/mise/config.toml" &>/dev/null; then
+            echo "    ℹ mise config exists and differs from dotfiles"
+            echo "      To use dotfiles version: cp ~/.dotfiles/.mise.toml ~/.config/mise/config.toml"
+        else
+            echo "    ✓ mise config already synchronized"
+        fi
+    fi
 
     # Activate mise for current shell to make tools available immediately
     if command -v mise &> /dev/null; then
@@ -27,17 +43,17 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     fi
 
     if [[ -f "$HOME/.config/mise/config.toml" ]]; then
-        echo "    ✓ mise config found"
+        echo "    ✓ Installing/updating CLI tools..."
 
         if mise install &> /dev/null; then
-            echo "    ✓ CLI tools installed/updated"
+            echo "    ✓ CLI tools installed/updated successfully"
             echo "    ℹ Tools available in current shell after activation"
         else
             echo "    ⚠ Some tools failed to install (check: mise doctor)"
         fi
     else
         echo "    ℹ No mise config at ~/.config/mise/config.toml"
-        echo "      Create one to manage CLI tools (see examples/mise-config.toml)"
+        echo "      Using dotfiles: ~/.dotfiles/.mise.toml"
     fi
 else
     echo ""
