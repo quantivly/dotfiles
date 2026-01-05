@@ -9,3 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **DO-155**: Fixed CI ShellCheck error suppression - Shell script errors now fail CI builds instead of being silently ignored
+- **DO-160**: Fixed mise activation error suppression in install script
+  - Replaced `|| true` with explicit error checking
+  - Shows warning message when activation fails
+  - Provides remediation instructions
+  - Users now informed when mise tools unavailable
