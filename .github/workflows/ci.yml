@@ -19,9 +19,17 @@ jobs:
 
       - name: Run ShellCheck on all shell scripts
         run: |
-          find . -name "*.sh" -o -name "*.bash" -o -name "*.zsh" | \
-          grep -v "dotbot/" | \
-          xargs shellcheck -x || true
+          # Find shell scripts with shebangs (exclude dotbot submodule)
+          scripts=$(find . \( -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \) -print0 | \
+                    xargs -0 grep -l "^#!" 2>/dev/null | \
+                    grep -v "dotbot/" || true)
+
+          if [ -n "$scripts" ]; then
+            echo "Checking scripts: $scripts"
+            echo "$scripts" | xargs shellcheck -x
+          else
+            echo "No shell scripts found to check"
+          fi
 
       - name: Check install script
         run: shellcheck -x install
