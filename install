@@ -37,9 +37,19 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
 
     # Activate mise for current shell to make tools available immediately
     if command -v mise &> /dev/null; then
-        eval "$(mise activate bash)" 2>/dev/null || eval "$(mise activate zsh)" 2>/dev/null || true
+        if ! eval "$(mise activate bash 2>/dev/null)"; then
+            if ! eval "$(mise activate zsh 2>/dev/null)"; then
+                echo "    ⚠️  Warning: mise activation failed. Tools may not be available."
+                echo "       This is normal if mise hasn't been configured yet."
+            fi
+        fi
     elif [[ -x "$HOME/.local/bin/mise" ]]; then
-        eval "$("$HOME/.local/bin/mise" activate bash)" 2>/dev/null || eval "$("$HOME/.local/bin/mise" activate zsh)" 2>/dev/null || true
+        if ! eval "$("$HOME/.local/bin/mise" activate bash 2>/dev/null)"; then
+            if ! eval "$("$HOME/.local/bin/mise" activate zsh 2>/dev/null)"; then
+                echo "    ⚠️  Warning: mise activation failed. Tools may not be available."
+                echo "       Run: mise install"
+            fi
+        fi
     fi
 
     if [[ -f "$HOME/.config/mise/config.toml" ]]; then
