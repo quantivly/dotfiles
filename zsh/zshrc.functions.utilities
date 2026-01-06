@@ -1,0 +1,56 @@
+# Common utility functions for zsh configuration
+# Reduces code duplication across dotfiles modules
+
+# Check if a command exists
+# Usage: if has_command bat; then ... fi
+# Replaces: if command -v bat &> /dev/null; then ... fi
+has_command() {
+    command -v "$1" &>/dev/null
+}
+
+# Interactive confirmation prompt
+# Usage: if confirm "Delete all files?"; then ... fi
+# Returns: 0 (success) if yes, 1 (failure) if no
+confirm() {
+    local message="${1:-Proceed?}"
+    printf "%s [y/N] " "$message"
+    read -r response
+    case "$response" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Resolve tool name for Ubuntu package variants
+# Usage: BAT_CMD=$(resolve_tool_name bat)
+# Handles: fd/fdfind, bat/batcat mappings on Ubuntu
+resolve_tool_name() {
+    local tool="$1"
+    case "$tool" in
+        fd)
+            if has_command fd; then
+                echo "fd"
+            elif has_command fdfind; then
+                echo "fdfind"
+            else
+                echo "find"
+            fi
+            ;;
+        bat)
+            if has_command bat; then
+                echo "bat"
+            elif has_command batcat; then
+                echo "batcat"
+            else
+                echo "cat"
+            fi
+            ;;
+        *)
+            if has_command "$tool"; then
+                echo "$tool"
+            else
+                echo "$tool"  # Return as-is if not found
+            fi
+            ;;
+    esac
+}

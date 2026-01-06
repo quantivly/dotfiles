@@ -106,19 +106,15 @@ dstop() {
   fi
   echo "This will stop all running containers:"
   docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
-  printf "\nProceed? [y/N] "
-  read -r response
-  case "$response" in
-    [yY]|[yY][eE][sS])
-      # Use while loop for safe iteration (handles any edge cases)
-      while IFS= read -r container; do
-        docker stop "$container" || echo "Failed to stop $container"
-      done <<< "$containers"
-      ;;
-    *)
-      echo "Operation cancelled."
-      ;;
-  esac
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r container; do
+      docker stop "$container" || echo "Failed to stop $container"
+    done <<< "$containers"
+  else
+    echo "Operation cancelled."
+  fi
 }
 
 dstopa() {
@@ -130,19 +126,15 @@ dstopa() {
   fi
   echo "This will stop ALL containers (running and stopped):"
   docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
-  printf "\nProceed? [y/N] "
-  read -r response
-  case "$response" in
-    [yY]|[yY][eE][sS])
-      # Use while loop for safe iteration (handles any edge cases)
-      while IFS= read -r container; do
-        docker stop "$container" || echo "Failed to stop $container"
-      done <<< "$containers"
-      ;;
-    *)
-      echo "Operation cancelled."
-      ;;
-  esac
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r container; do
+      docker stop "$container" || echo "Failed to stop $container"
+    done <<< "$containers"
+  else
+    echo "Operation cancelled."
+  fi
 }
 
 drm() {
@@ -154,19 +146,15 @@ drm() {
   fi
   echo "This will REMOVE all containers:"
   docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
-  printf "\nProceed? [y/N] "
-  read -r response
-  case "$response" in
-    [yY]|[yY][eE][sS])
-      # Use while loop for safe iteration (handles any edge cases)
-      while IFS= read -r container; do
-        docker rm "$container" || echo "Failed to remove $container"
-      done <<< "$containers"
-      ;;
-    *)
-      echo "Operation cancelled."
-      ;;
-  esac
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r container; do
+      docker rm "$container" || echo "Failed to remove $container"
+    done <<< "$containers"
+  else
+    echo "Operation cancelled."
+  fi
 }
 
 drmi() {
@@ -178,19 +166,15 @@ drmi() {
   fi
   echo "This will REMOVE all Docker images:"
   docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
-  printf "\nProceed? [y/N] "
-  read -r response
-  case "$response" in
-    [yY]|[yY][eE][sS])
-      # Use while loop for safe iteration (handles any edge cases)
-      while IFS= read -r image; do
-        docker rmi "$image" || echo "Failed to remove $image"
-      done <<< "$images"
-      ;;
-    *)
-      echo "Operation cancelled."
-      ;;
-  esac
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r image; do
+      docker rmi "$image" || echo "Failed to remove $image"
+    done <<< "$images"
+  else
+    echo "Operation cancelled."
+  fi
 }
 
 dprune() {
@@ -201,16 +185,11 @@ dprune() {
   echo "   - All unused volumes"
   echo "   - All build cache"
   echo
-  printf "This action cannot be undone. Proceed? [y/N] "
-  read -r response
-  case "$response" in
-    [yY]|[yY][eE][sS])
-      docker system prune -af --volumes
-      ;;
-    *)
-      echo "Operation cancelled."
-      ;;
-  esac
+  if confirm "This action cannot be undone. Proceed?"; then
+    docker system prune -af --volumes
+  else
+    echo "Operation cancelled."
+  fi
 }
 
 alias dclean='docker system prune -f'  # This one is less destructive, keep as alias

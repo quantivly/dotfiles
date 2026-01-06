@@ -5,14 +5,14 @@
 #==============================================================================
 
 # bat - Better cat with syntax highlighting (managed by mise)
-if command -v bat &> /dev/null; then
+if has_command bat; then
   alias cat='bat --style=auto'
   alias catp='bat --style=plain'
   export BAT_THEME="Monokai Extended"
 fi
 
 # eza - Modern ls replacement (managed by mise)
-if command -v eza &> /dev/null; then
+if has_command eza; then
   alias ls='eza --icons --group-directories-first'
   alias la='eza --icons --group-directories-first -a'
   alias ll='eza --icons --group-directories-first -lh'
@@ -26,14 +26,14 @@ else
 fi
 
 # fd - Fast find alternative (managed by mise)
-if command -v fd &> /dev/null; then
+if has_command fd; then
   export _FD_COMMAND="fd"
 fi
 
 # ripgrep - Better grep
 # Install: apt install ripgrep (Ubuntu) or brew install ripgrep (macOS)
 # WARNING: rg has different behavior than grep - not fully POSIX compatible
-if command -v rg &> /dev/null; then
+if has_command rg; then
   export _HAS_RG=1
 
   # Note: Keeping standard grep alias for compatibility
@@ -56,7 +56,7 @@ fi
 
 # delta - Better git diff
 # Install: https://github.com/dandavison/delta
-if command -v delta &> /dev/null; then
+if has_command delta; then
   export GIT_PAGER='delta'
 fi
 
@@ -66,7 +66,7 @@ fi
 
 # FZF - Fuzzy finder
 # Install: apt install fzf (Ubuntu) or brew install fzf (macOS)
-if command -v fzf &> /dev/null; then
+if has_command fzf; then
   # FZF color scheme (configurable via FZF_THEME environment variable)
   # Supported themes: dracula (default), gruvbox, nord, monokai
   # Set FZF_THEME in ~/.zshrc.local to change theme
@@ -106,11 +106,11 @@ if command -v fzf &> /dev/null; then
   esac
 
   # Use fd for FZF if available (respects .gitignore), fallback to find
-  if command -v fd &> /dev/null; then
+  if has_command fd; then
     export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
     export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
     export FZF_ALT_C_COMMAND='fd --type d --hidden --follow --exclude .git'
-  elif command -v fdfind &> /dev/null; then
+  elif has_command fdfind; then
     export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
     export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
     export FZF_ALT_C_COMMAND='fdfind --type d --hidden --follow --exclude .git'
@@ -122,9 +122,9 @@ if command -v fzf &> /dev/null; then
   fi
 
   # FZF preview with bat if available, fallback to cat
-  if command -v bat &> /dev/null; then
+  if has_command bat; then
     export FZF_CTRL_T_OPTS="--preview 'bat --color=always --style=numbers --line-range=:500 {}'"
-  elif command -v batcat &> /dev/null; then
+  elif has_command batcat; then
     export FZF_CTRL_T_OPTS="--preview 'batcat --color=always --style=numbers --line-range=:500 {}'"
   else
     # Fallback to cat with head for basic preview
@@ -170,14 +170,14 @@ if command -v fzf &> /dev/null; then
     local dir
 
     # Use fd if available (much faster for home directory), otherwise fall back to find
-    if command -v fd &> /dev/null; then
+    if has_command fd; then
       dir=$(fd --type d --hidden --follow \
         --exclude .git --exclude node_modules --exclude .cache \
         --exclude .venv --exclude venv \
         --exclude build --exclude dist --exclude target \
         --exclude .npm --exclude .cargo --exclude .gradle \
         . "${HOME}" | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
-    elif command -v fdfind &> /dev/null; then
+    elif has_command fdfind; then
       # Ubuntu installs it as fdfind
       dir=$(fdfind --type d --hidden --follow \
         --exclude .git --exclude node_modules --exclude .cache \
@@ -221,7 +221,7 @@ fi
 # Docs: https://mise.jdx.dev/
 # Config: ~/.config/mise/config.toml or project .mise.toml/.tool-versions
 
-if command -v mise &> /dev/null; then
+if has_command mise; then
     eval "$(mise activate zsh)"
 
     # Enable legacy version file support
@@ -252,13 +252,19 @@ if [ -z "$SSH_AUTH_SOCK" ]; then
 fi
 
 # Editor configuration
-# Use VS Code if available, fall back to vim
-if command -v code &> /dev/null; then
-  export EDITOR='code'
-  export VISUAL='code'
-elif command -v vim &> /dev/null; then
+# Priority: VS Code → vim → nano (always available)
+if has_command code; then
+  export EDITOR='code --wait'
+  export VISUAL='code --wait'
+  export GIT_EDITOR='code --wait'
+elif has_command vim; then
   export EDITOR='vim'
   export VISUAL='vim'
+  export GIT_EDITOR='vim'
+else
+  export EDITOR='nano'
+  export VISUAL='nano'
+  export GIT_EDITOR='nano'
 fi
 
 # Locale settings
@@ -273,7 +279,7 @@ export LC_ALL=en_US.UTF-8
 # Install: curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
 # Or: cargo install zoxide
 # Or: apt install zoxide (Ubuntu 21.10+)
-if command -v zoxide &> /dev/null; then
+if has_command zoxide; then
   # Initialize zoxide (suppress errors in non-interactive contexts)
   eval "$(zoxide init zsh 2>/dev/null)" 2>/dev/null
 
@@ -286,7 +292,7 @@ if command -v zoxide &> /dev/null; then
     alias cdq='zq'        # Query zoxide database
 
     # Fuzzy navigation with preview (if fzf available)
-    if command -v fzf &> /dev/null; then
+    if has_command fzf; then
       zf() {
         local dir
         dir=$(zoxide query -l | fzf --preview 'ls -la {}' --preview-window=right:50%:wrap) && cd "$dir"
@@ -306,7 +312,7 @@ fi
 
 # btop - Modern resource monitor (better than htop)
 # Install: apt install btop (Ubuntu 22.04+) or https://github.com/aristocratos/btop
-if command -v btop &> /dev/null; then
+if has_command btop; then
   alias top='btop'
   alias htop='btop'
   # btop with specific themes
@@ -316,7 +322,7 @@ fi
 
 # procs - Modern ps replacement
 # Install: cargo install procs or apt install procs (newer Ubuntu)
-if command -v procs &> /dev/null; then
+if has_command procs; then
   alias ps='procs'
   alias psa='procs --tree'          # Show process tree
   alias psg='procs --search'        # Search processes: psg firefox
@@ -326,7 +332,7 @@ fi
 
 # duf - Modern df replacement with better visualization
 # Install: apt install duf (Ubuntu 21.04+) or https://github.com/muesli/duf
-if command -v duf &> /dev/null; then
+if has_command duf; then
   alias df='duf'
   alias duf-json='duf --json'       # JSON output for scripting
   alias duf-all='duf --all'         # Show all filesystems
@@ -334,7 +340,7 @@ fi
 
 # dust - Intuitive du replacement
 # Install: cargo install du-dust or apt install du-dust (newer Ubuntu)
-if command -v dust &> /dev/null; then
+if has_command dust; then
   alias du='dust'
   alias dust-tree='dust -d 3'      # Limit depth to 3 levels
   alias dust-size='dust -s'        # Sort by size
@@ -343,19 +349,19 @@ fi
 
 # ctop - Container monitoring (htop for containers)
 # Install: https://github.com/bcicen/ctop#install
-if command -v ctop &> /dev/null; then
+if has_command ctop; then
   alias dtop='ctop'                 # Docker top
   alias ctop-compact='ctop -compact' # Compact view
 fi
 
 # neofetch/fastfetch - System information display
 # Install: apt install neofetch or https://github.com/fastfetch-cli/fastfetch
-if command -v fastfetch &> /dev/null; then
+if has_command fastfetch; then
   alias neofetch='fastfetch'
   alias sysinfo='fastfetch'
   # Custom fastfetch with specific modules
   alias sysinfo-minimal='fastfetch --logo none --modules os,kernel,uptime,memory'
-elif command -v neofetch &> /dev/null; then
+elif has_command neofetch; then
   alias sysinfo='neofetch'
   # Custom neofetch configurations
   alias sysinfo-minimal='neofetch --disable packages resolution de wm wm_theme theme icons terminal terminal_font cpu gpu memory'
@@ -368,7 +374,7 @@ fi
 # thefuck - Command correction
 # Install: pip install thefuck
 # Note: thefuck 3.32 has Python 3.12 compatibility issues (distutils removed)
-if command -v thefuck &> /dev/null; then
+if has_command thefuck; then
   # Wrap in error handling for Python 3.12+ compatibility
   if eval "$(thefuck --alias 2>/dev/null)"; then
     # Alternative aliases
@@ -379,14 +385,14 @@ fi
 
 # lazygit - Terminal UI for git
 # Install: https://github.com/jesseduffield/lazygit#installation
-if command -v lazygit &> /dev/null; then
+if has_command lazygit; then
   alias lg='lazygit'
   alias git-ui='lazygit'
 fi
 
 # just - Command runner (modern make alternative)
 # Install: cargo install just or https://github.com/casey/just#installation
-if command -v just &> /dev/null; then
+if has_command just; then
   alias j='just'
   alias jl='just --list'           # List available recipes
   alias je='just --edit'           # Edit justfile
@@ -400,7 +406,7 @@ fi
 
 # hyperfine - Command benchmarking
 # Install: cargo install hyperfine or apt install hyperfine (newer Ubuntu)
-if command -v hyperfine &> /dev/null; then
+if has_command hyperfine; then
   alias bench='hyperfine'
   alias benchmark='hyperfine --warmup 3'
 
@@ -422,7 +428,7 @@ fi
 
 # glow - Markdown renderer
 # Install: https://github.com/charmbracelet/glow#installation
-if command -v glow &> /dev/null; then
+if has_command glow; then
   alias markdown='glow'
   alias md='glow'
   alias readme='glow README.md'
@@ -435,7 +441,7 @@ fi
 
 # tldr - Simplified man pages
 # Install: npm install -g tldr or apt install tldr (newer Ubuntu)
-if command -v tldr &> /dev/null; then
+if has_command tldr; then
   alias help='tldr'
   alias cheat='tldr'
 
@@ -445,7 +451,7 @@ fi
 
 # cheat - Interactive cheatsheets
 # Install: https://github.com/cheat/cheat#installing
-if command -v cheat &> /dev/null; then
+if has_command cheat; then
   alias cs='cheat'                 # cheat search
   alias csl='cheat -l'             # list cheatsheets
   alias cse='cheat -e'             # edit cheatsheet
@@ -457,7 +463,7 @@ fi
 
 # dive - Docker image layer analyzer
 # Install: https://github.com/wagoodman/dive#installation
-if command -v dive &> /dev/null; then
+if has_command dive; then
   alias docker-analyze='dive'
   alias danalyze='dive'
 
@@ -473,7 +479,7 @@ fi
 
 # lazydocker - Docker TUI
 # Install: https://github.com/jesseduffield/lazydocker#installation
-if command -v lazydocker &> /dev/null; then
+if has_command lazydocker; then
   alias lzd='lazydocker'
   alias docker-ui='lazydocker'
 fi
@@ -484,7 +490,7 @@ fi
 
 # gitleaks - Git secrets scanner
 # Install: https://github.com/gitleaks/gitleaks#installing
-if command -v gitleaks &> /dev/null; then
+if has_command gitleaks; then
   alias git-secrets='gitleaks detect'
   alias git-secrets-verbose='gitleaks detect --verbose'
 
@@ -503,7 +509,7 @@ fi
 
 # pre-commit - Code quality automation
 # Install: pip install pre-commit
-if command -v pre-commit &> /dev/null; then
+if has_command pre-commit; then
   alias pc='pre-commit'
   alias pc-install='pre-commit install'
   alias pc-update='pre-commit autoupdate'
@@ -540,7 +546,7 @@ fi
 
 # sops - Encrypted secrets management
 # Install: https://github.com/getsops/sops#download
-if command -v sops &> /dev/null; then
+if has_command sops; then
   alias secrets='sops'
   alias secrets-edit='sops --in-place'
 
@@ -556,7 +562,7 @@ fi
 
 # difftastic - Structural diff tool
 # Install: cargo install difftastic or https://github.com/Wilfred/difftastic
-if command -v difft &> /dev/null; then
+if has_command difft; then
   alias diff='difft'
   alias difft-side-by-side='difft --display side-by-side'
   alias difft-inline='difft --display inline'
@@ -578,7 +584,7 @@ export FORGIT_NO_ALIASES=1
 
 if [[ -f "${HOME}/.forgit/forgit.plugin.zsh" ]]; then
   source "${HOME}/.forgit/forgit.plugin.zsh"
-elif command -v forgit &> /dev/null; then
+elif has_command forgit; then
   # If installed via package manager
   eval "$(forgit init zsh)"
 fi
@@ -608,7 +614,7 @@ alias gss='forgit::stash::show'
 alias gclean='forgit::clean'
 
 # Additional git workflow automation
-if command -v git &> /dev/null && command -v fzf &> /dev/null; then
+if has_command git && has_command fzf; then
   # Enhanced git worktree with fzf selection
   fworktree() {
     local worktree_dir branch_name
