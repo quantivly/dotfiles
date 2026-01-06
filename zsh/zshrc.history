@@ -33,16 +33,16 @@ setopt HIST_REDUCE_BLANKS        # Remove superfluous blanks before recording en
 # - Database connection strings with embedded passwords
 # - Private key headers (BEGIN PRIVATE KEY, BEGIN RSA PRIVATE KEY)
 # - Environment variable exports with sensitive keywords
-# Enhanced pattern covers both *_TOKEN and *TOKEN* formats to catch all variations
+# Enhanced pattern targets actual secret assignments, not just words containing these terms
 export HISTORY_IGNORE="(ls|cd|pwd|exit|clear|\
-*password*|*PASSWORD*|\
-*secret*|*SECRET*|\
-*token*|*TOKEN*|\
+*password=*|*PASSWORD=*|*=*password*|*=*PASSWORD*|\
+*secret=*|*SECRET=*|*=*secret*|*=*SECRET*|\
+*token=*|*TOKEN=*|*=*token*|*=*TOKEN*|\
 *key=*|*KEY=*|\
 *API_KEY*|*api_key*|\
 *AWS_ACCESS*|*AWS_SECRET*|*AWS_ACCESS_KEY*|\
 *GITHUB_TOKEN*|*github_token*|\
-*bearer*|*Bearer*|\
-export*KEY*|export*TOKEN*|export*SECRET*|\
+*bearer=*|*Bearer=*|\
+export*KEY*|export*TOKEN*|export*SECRET*|export*PASSWORD*|\
 *://[^@]*:[^@]*@*|\
 *BEGIN*PRIVATE*KEY*|*BEGIN*RSA*PRIVATE*KEY*)"

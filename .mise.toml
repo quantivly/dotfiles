@@ -71,7 +71,6 @@ fastfetch = "2.8.10"     # System info display
 # Install: git clone https://github.com/wfxr/forgit.git ~/.forgit
 
 [env]
-# Tool-specific environment variables
-BAT_THEME = "Monokai Extended"
-GIT_PAGER = "delta"
+# Mise-specific environment variables
+# Note: BAT_THEME and GIT_PAGER are set in zsh/zshrc.conditionals (with tool detection)
 MISE_PYTHON_DEFAULT_PACKAGES_FILE = "~/.default-python-packages"
