@@ -226,3 +226,104 @@ dstats-live() {
 
   docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
 }
+
+# ==============================================================================
+# Bulk Container/Image Operations with Safety Confirmations
+# ==============================================================================
+# Moved from zshrc.aliases for better organization (DO-168)
+# All functions use confirm() helper and iterate safely with while loops
+
+dstop() {
+  # Security: Uses container IDs (-q) not names to avoid injection vulnerabilities
+  local containers=$(docker ps -q)
+  if [ -z "$containers" ]; then
+    echo "No running containers to stop."
+    return 0
+  fi
+  echo "This will stop all running containers:"
+  docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r container; do
+      docker stop "$container" || echo "Failed to stop $container"
+    done <<< "$containers"
+  else
+    echo "Operation cancelled."
+  fi
+}
+
+dstopa() {
+  # Security: Uses container IDs (-aq) not names to avoid injection vulnerabilities
+  local containers=$(docker ps -aq)
+  if [ -z "$containers" ]; then
+    echo "No containers to stop."
+    return 0
+  fi
+  echo "This will stop ALL containers (running and stopped):"
+  docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r container; do
+      docker stop "$container" || echo "Failed to stop $container"
+    done <<< "$containers"
+  else
+    echo "Operation cancelled."
+  fi
+}
+
+drm() {
+  # Security: Uses container IDs (-aq) not names to avoid injection vulnerabilities
+  local containers=$(docker ps -aq)
+  if [ -z "$containers" ]; then
+    echo "No containers to remove."
+    return 0
+  fi
+  echo "This will REMOVE all containers:"
+  docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r container; do
+      docker rm "$container" || echo "Failed to remove $container"
+    done <<< "$containers"
+  else
+    echo "Operation cancelled."
+  fi
+}
+
+drmi() {
+  # Security: Uses image IDs (-q) not names to avoid injection vulnerabilities
+  local images=$(docker images -q)
+  if [ -z "$images" ]; then
+    echo "No images to remove."
+    return 0
+  fi
+  echo "This will REMOVE all Docker images:"
+  docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+  echo
+  if confirm "Proceed?"; then
+    # Use while loop for safe iteration (handles any edge cases)
+    while IFS= read -r image; do
+      docker rmi "$image" || echo "Failed to remove $image"
+    done <<< "$images"
+  else
+    echo "Operation cancelled."
+  fi
+}
+
+dprune() {
+  echo "⚠️  WARNING: This will DELETE:"
+  echo "   - All stopped containers"
+  echo "   - All unused networks"
+  echo "   - All unused images (not just dangling ones)"
+  echo "   - All unused volumes"
+  echo "   - All build cache"
+  echo
+  if confirm "This action cannot be undone. Proceed?"; then
+    docker system prune -af --volumes
+  else
+    echo "Operation cancelled."
+  fi
+}
