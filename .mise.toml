@@ -1,15 +1,29 @@
-# Unified mise Configuration for CLI Tools
-# ==========================================
-# This file defines pinned versions for all CLI tools managed by mise.
-# These versions are synchronized with dev-setup repository.
+# Dotfiles mise Configuration
+# ============================
+# ✨ SINGLE SOURCE OF TRUTH for CLI tool versions
+#
+# Configuration Flow:
+#   1. This file (.dotfiles/.mise.toml) - Defines all CLI tool versions
+#   2. Copied to: ~/.config/mise/config.toml (during dotfiles ./install)
+#   3. Used by: mise to install and manage CLI tools
+#
+# Note: dev-setup only installs the mise binary, not the tools
+# All CLI tools (bat, fd, eza, etc.) are managed here in dotfiles
+#
+# Personal Customization:
+#   ✓ Enable optional tools (dive, lazydocker, ctop, etc.)
+#   ✓ Override versions for testing
+#   ✓ Add project-specific tools
+#   ⚠️  Coordinate version changes with team if needed
 #
 # To upgrade tools:
 #   1. Check for updates: mise outdated
-#   2. Test locally: mise use bat@0.25.0 (example)
+#   2. Test locally: mise use <tool>@<new-version>
 #   3. Update this file with new version
-#   4. Commit with changelog entry
+#   4. Run: ./install to update ~/.config/mise/config.toml
+#   5. Commit with Linear issue reference
 #
-# See: docs/TOOL_VERSION_UPDATES.md (coming in DO-152)
+# See: docs/TOOL_VERSION_UPDATES.md for detailed procedures
 
 [settings]
 # Enable legacy version file support (.nvmrc, .python-version, .tool-versions)

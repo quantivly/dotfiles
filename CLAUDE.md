@@ -420,46 +420,76 @@ Your active config at `~/.config/mise/config.toml` is always trusted (it's in yo
 
 ### Configuration
 
-The dotfiles repository provides a unified mise configuration:
+**Configuration Architecture:**
 
-**Dotfiles (committed)**: `.mise.toml` - Pinned versions for reproducibility
-  - Location: `~/.dotfiles/.mise.toml` (template/source file)
-  - Automatically installed by `./install` script to `~/.config/mise/config.toml`
-  - Synchronized with dev-setup repository tool versions
-  - Recommended for team consistency
+Mise CLI tools are managed entirely by dotfiles with a clean separation of concerns:
+
+**1. Single Source of Truth** - `~/.dotfiles/.mise.toml`
+  - **Authoritative source** for all CLI tool versions
+  - Defines 14 core CLI tools with pinned versions (bat, fd, eza, delta, etc.)
+  - Copied to `~/.config/mise/config.toml` by dotfiles `./install` script
+  - All team members can use the same versions by using shared dotfiles
+  - **Why**: Single location, no duplication, clear ownership
   - **Trust**: Required if working in dotfiles directory (`mise trust ~/.dotfiles/.mise.toml`)
 
-**Global**: `~/.config/mise/config.toml` - Active configuration
+**2. Active Configuration** - `~/.config/mise/config.toml`
   - Location: `~/.config/mise/config.toml` (your home directory)
-  - Created from `.mise.toml` during installation
-  - Can be customized per machine if needed
-  - **Trust**: Not required (home directory files are auto-trusted)
+  - Created by dotfiles `./install` from `.dotfiles/.mise.toml`
   - This is what mise actually uses for tool management
+  - Can be manually edited for machine-specific needs
+  - **Trust**: Not required (home directory files are auto-trusted)
 
-**Project**: `.mise.toml` - Override versions per project (optional)
+**3. Dev-Setup Role** - `~/platform/dev-setup/`
+  - Installs the mise **binary** only (`install_mise()` function)
+  - Does **not** configure or install CLI tools
+  - Calls dotfiles `./install` which handles all tool configuration
+  - Clean separation: dev-setup = system setup, dotfiles = personal config
+
+**4. Project Overrides** - `.mise.toml` in project root
   - Location: Project root directory (e.g., `~/my-project/.mise.toml`)
-  - Committed to git for project-specific requirements
+  - Override versions for specific project requirements
+  - Committed to git for project team consistency
   - **Trust**: Required for each project (`mise trust`)
-
-**Example**: `examples/mise-config.toml` - Template with "latest" versions
-  - Location: `~/.dotfiles/examples/mise-config.toml` (reference only)
-  - Use for custom configurations
-  - Alternative to pinned versions
-  - **Trust**: Not applicable (example file, not used by mise)
 
 ### Version Management
 
-**Pinned Versions** (recommended):
-- Copy from dotfiles: `cp ~/.dotfiles/.mise.toml ~/.config/mise/config.toml`
-- Reproducible, tested versions
-- Synchronized across team
+**Standard Workflow**:
 
-**Latest Versions** (alternative):
-- Copy from examples: `cp ~/.dotfiles/examples/mise-config.toml ~/.config/mise/config.toml`
-- Always newest features
-- May have compatibility issues
+1. **Initial Setup**: Run `dev-setup/setup.sh` which installs mise and runs dotfiles
+   ```bash
+   cd ~/platform/dev-setup && ./setup.sh
+   # This installs mise binary, then runs dotfiles/install
+   # Dotfiles installs all CLI tools from .dotfiles/.mise.toml
+   ```
 
-See `docs/TOOL_VERSION_UPDATES.md` (coming in DO-152) for update procedures.
+2. **Check for Updates**:
+   ```bash
+   mise outdated  # Check for newer versions
+   ```
+
+3. **Update Tools**:
+   ```bash
+   cd ~/.dotfiles
+   # Edit .mise.toml with new versions
+   vim .mise.toml
+
+   # Test the new version
+   mise install <tool>@<new-version>
+
+   # Update active config
+   ./install
+
+   # Commit changes
+   git add .mise.toml
+   git commit -m "Updated <tool> to <version>"
+   ```
+
+**Team Coordination**:
+- If using shared dotfiles repo, coordinate version changes with team
+- Individual developers can customize their own dotfiles fork
+- No validation scripts needed (single source of truth)
+
+See `docs/TOOL_VERSION_UPDATES.md` for detailed update procedures.
 
 ### Available Tools
 

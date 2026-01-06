@@ -91,3 +91,28 @@ if [[ -f "${BASEDIR}/.pre-commit-config.yaml" ]]; then
         echo "      Or install directly: pip install pre-commit"
     fi
 fi
+
+# Forgit installation (optional git + fzf integration)
+echo ""
+echo "📦 Setting up forgit (interactive git with fzf)..."
+if [ -d "$HOME/.forgit" ]; then
+    echo "    ℹ Forgit already installed at ~/.forgit"
+    # Check if it's a git repo and can be updated
+    if [ -d "$HOME/.forgit/.git" ]; then
+        echo "    🔄 Checking for updates..."
+        if git -C "$HOME/.forgit" pull --quiet 2>/dev/null; then
+            echo "    ✓ Forgit updated to latest version"
+        else
+            echo "    ⚠ Could not update forgit (may need manual intervention)"
+        fi
+    fi
+else
+    echo "    📥 Installing forgit..."
+    if git clone --quiet https://github.com/wfxr/forgit.git "$HOME/.forgit" 2>/dev/null; then
+        echo "    ✓ Forgit installed successfully"
+        echo "    ℹ Forgit provides fuzzy git commands: gfa, gfco, gfcf, gfstash, etc."
+    else
+        echo "    ⚠ Forgit installation failed (optional feature)"
+        echo "      Manual installation: git clone https://github.com/wfxr/forgit.git ~/.forgit"
+    fi
+fi

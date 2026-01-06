@@ -24,10 +24,25 @@ setopt HIST_REDUCE_BLANKS        # Remove superfluous blanks before recording en
 
 # Ignore common commands and sensitive patterns in history
 # Comprehensive pattern matching for:
-# - Common commands (ls, cd, pwd, exit)
-# - Generic secrets (secret, token, password, key)
+# - Common commands (ls, cd, pwd, exit, clear)
+# - Generic secrets (secret, token, password, key) - both uppercase and lowercase
 # - AWS credentials (AWS_ACCESS_KEY, AWS_SECRET)
+# - GitHub tokens (GITHUB_TOKEN, github_token)
+# - Bearer tokens (bearer, Bearer)
+# - API keys (API_KEY, api_key)
 # - Database connection strings with embedded passwords
 # - Private key headers (BEGIN PRIVATE KEY, BEGIN RSA PRIVATE KEY)
 # - Environment variable exports with sensitive keywords
-export HISTORY_IGNORE="(ls|cd|pwd|exit|cd ..|*secret*|*token*|*password*|*key=*|*API_KEY*|*SECRET*|export *TOKEN*|export *KEY*|*auth*token*|*AWS_ACCESS_KEY*|*AWS_SECRET*|export *PASSWORD*|*://[^@]*:[^@]*@*|*BEGIN*PRIVATE*KEY*|*BEGIN*RSA*PRIVATE*KEY*)"
+# Enhanced pattern covers both *_TOKEN and *TOKEN* formats to catch all variations
+export HISTORY_IGNORE="(ls|cd|pwd|exit|clear|\
+*password*|*PASSWORD*|\
+*secret*|*SECRET*|\
+*token*|*TOKEN*|\
+*key=*|*KEY=*|\
+*API_KEY*|*api_key*|\
+*AWS_ACCESS*|*AWS_SECRET*|\
+*GITHUB_TOKEN*|*github_token*|\
+*bearer*|*Bearer*|\
+export*KEY*|export*TOKEN*|export*SECRET*|\
+*://[^@]*:[^@]*@*|\
+*BEGIN*PRIVATE*KEY*|*BEGIN*RSA*PRIVATE*KEY*)"

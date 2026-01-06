@@ -8,13 +8,17 @@ useDefault = true
 [allowlist]
 description = "Ignore false positives in dotfiles"
 paths = [
-  '''examples/.*''',
-  '''docs/.*''',
+  # More specific allowlist - only markdown files in examples/docs to prevent overly broad exclusion
+  '''examples/.*\.md$''',          # Only markdown examples
+  '''docs/.*\.md$''',              # Only markdown docs
   '''README\.md''',
   '''CLAUDE\.md''',
-  '''dotbot/.*''',
-  '''\.git/.*''',
-  '''zsh/zshrc\.history''',  # Contains pattern text like "PRIVATE*KEY", not actual keys
+  '''CONTRIBUTING\.md''',
+  '''CHANGELOG\.md''',
+  '''TROUBLESHOOTING\.md''',
+  '''dotbot/.*''',                 # Third-party dotbot framework
+  '''\.git/.*''',                  # Git metadata
+  '''zsh/zshrc\.history''',        # Contains pattern text like "PRIVATE*KEY", not actual keys
 ]
 regexes = [
   '''(example|placeholder|your|INSERT|REPLACE|TODO)''',

@@ -33,8 +33,16 @@ repos:
     hooks:
       - id: shellcheck
         name: Shellcheck
-        args: ['-x', '-e', 'SC1071,SC1073,SC1072']  # Follow sourced files, exclude zsh-specific errors
-        exclude: '(dotbot/|p10k\.zsh|zsh/zshrc\.(conditionals|functions|aliases|company|history|gpg-reminder)|zshrc$)'  # Exclude git submodule and zsh-specific files
+        # Common zsh-specific codes to exclude:
+        # SC1071: ShellCheck only supports sh/bash/dash/ksh
+        # SC1073: Couldn't parse this (zsh syntax)
+        # SC1072: Expected end of double quoted string (zsh arrays)
+        # SC2034: Variable appears unused (zsh uses many for configuration)
+        # SC2296: Parameter expansion in zsh differs from bash
+        args: ['-x', '-e', 'SC1071,SC1073,SC1072,SC2034,SC2296']
+        # Only exclude: dotbot (git submodule), p10k.zsh (external theme), main zshrc (sources others)
+        # Zsh modules ARE checked - add targeted '# shellcheck disable=SC####' comments as needed
+        exclude: '(dotbot/|p10k\.zsh|^zshrc$)'
 
   # Secret detection with gitleaks
   - repo: https://github.com/gitleaks/gitleaks
