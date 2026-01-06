@@ -497,20 +497,38 @@ mise doctor
 
 ### Trust Configuration
 
-Mise requires explicit trust for config files as a security feature. When working in the dotfiles directory, you may see:
+Mise requires explicit trust for config files as a security feature to prevent malicious config files from running arbitrary code.
 
+**When you'll see the trust warning:**
+
+You'll encounter this error ONLY when:
+1. You're working inside the `~/.dotfiles/` directory (e.g., `cd ~/.dotfiles`)
+2. You run a mise command (e.g., `mise ls`, `mise install`)
+3. You haven't trusted the `~/.dotfiles/.mise.toml` file yet
+
+The error message looks like this:
 ```
 ERROR: Config files in ~/.dotfiles/.mise.toml are not trusted.
+Trust ~/.dotfiles/.mise.toml with `mise trust`
 ```
 
-**Trust the dotfiles config** (one-time):
+**Important:** This does NOT affect normal mise usage! Your active config at `~/.config/mise/config.toml` (in your home directory) is always trusted automatically. The warning only appears when mise discovers the template file in the dotfiles directory.
+
+**Solution (one-time setup):**
 ```bash
+# Trust the dotfiles config
 mise trust ~/.dotfiles/.mise.toml
 ```
 
+**Why it's safe to trust:**
+- This is YOUR dotfiles repository that you control
+- The `.mise.toml` file only contains tool version definitions (no executable code)
+- You can inspect the file anytime: `cat ~/.dotfiles/.mise.toml`
+- This is a template file copied to `~/.config/mise/config.toml` by `./install`
+
 **Verify configuration and trust status**:
 ```bash
-# Check which config is active
+# Check which config is active (should be ~/.config/mise/config.toml)
 mise config path
 
 # List trusted configs
@@ -522,10 +540,10 @@ mise config ls
 
 **When trust is needed**:
 - Working in `~/.dotfiles/` directory (template file)
-- Creating project-specific `.mise.toml` files
+- Creating project-specific `.mise.toml` files in project directories
 - Any config file outside your home directory
 
-Your active config at `~/.config/mise/config.toml` is always trusted (it's in your home directory).
+**Note:** For detailed troubleshooting, see the [mise config not trusted error](#mise-config-not-trusted-error) section below.
 
 ### Configuration
 
@@ -539,7 +557,7 @@ Mise CLI tools are managed entirely by dotfiles with a clean separation of conce
   - Copied to `~/.config/mise/config.toml` by dotfiles `./install` script
   - All team members can use the same versions by using shared dotfiles
   - **Why**: Single location, no duplication, clear ownership
-  - **Trust**: Required if working in dotfiles directory (`mise trust ~/.dotfiles/.mise.toml`)
+  - **Trust**: Required if working in dotfiles directory (`mise trust ~/.dotfiles/.mise.toml`) - See [Trust Configuration](#trust-configuration)
 
 **2. Active Configuration** - `~/.config/mise/config.toml`
   - Location: `~/.config/mise/config.toml` (your home directory)
@@ -558,7 +576,7 @@ Mise CLI tools are managed entirely by dotfiles with a clean separation of conce
   - Location: Project root directory (e.g., `~/my-project/.mise.toml`)
   - Override versions for specific project requirements
   - Committed to git for project team consistency
-  - **Trust**: Required for each project (`mise trust`)
+  - **Trust**: Required for each project (`mise trust`) - See [Trust Configuration](#trust-configuration)
 
 ### Version Management
 
@@ -1009,7 +1027,9 @@ This script shows:
 ### mise config not trusted error
 **Error**: "Config files in ~/.dotfiles/.mise.toml are not trusted"
 
-This is a mise security feature that requires explicit trust for config files. It occurs when:
+This is a mise security feature that requires explicit trust for config files. For complete documentation of this feature, see the [Trust Configuration](#trust-configuration) section above.
+
+**Quick diagnosis:** This occurs when:
 - You're working in the `~/.dotfiles/` directory
 - Mise discovers the `.mise.toml` template file there
 - You haven't trusted it yet
