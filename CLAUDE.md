@@ -150,58 +150,6 @@ Loading Order (from zshrc):
 
 **Key Insight:** Conditionals load AFTER aliases, so conditional aliases override unconditional ones. This is intentional - tools that are installed get priority configuration.
 
-### Performance Considerations
-
-#### Architectural Decision: No Tool Availability Caching
-
-**This codebase does NOT use tool availability caching.** This is an intentional architectural decision based on empirical performance testing.
-
-**Historical Context (DO-169, January 2026)**:
-
-Tool availability caching was implemented to reduce repeated `command -v` calls by building a cache at startup. However, benchmark testing revealed it was **net-negative** for performance:
-
-```
-Method              | Average Startup Time | Impact
---------------------|---------------------|--------
-WITH cache          | 1173ms             | Baseline
-WITHOUT cache       | 1092ms             | 81ms faster
-```
-
-**Root Cause Analysis**:
-- **Cache overhead**: Building the cache checked 30+ tools unconditionally at startup
-- **Actual usage**: Most tools are checked only once in conditionals
-- **False optimization**: The cost of building the cache exceeded any benefit from cached lookups
-- **Conclusion**: Cache added 81ms overhead with no measurable benefit
-
-**Decision**: Tool availability caching was removed entirely from `zshrc.conditionals`. All tool checks now use direct `command -v tool &>/dev/null` calls.
-
-**Why This is Better**:
-1. **Faster**: 81ms faster startup (1092ms vs 1173ms)
-2. **Simpler**: No cache building code to maintain
-3. **Clearer**: Direct `command -v` checks are more explicit and easier to understand
-4. **Sufficient**: Even "repeated" checks are infrequent; the subprocess overhead is negligible
-
-**DO NOT Re-implement Tool Caching**:
-
-If you're considering adding tool availability caching in the future, you MUST:
-1. Have empirical benchmark data showing it improves performance
-2. Measure startup time with and without caching over 10+ iterations
-3. Document your findings and rationale in this section
-4. Get approval before merging
-
-The `command -v` pattern is fast enough for our use case. Premature optimization made the code slower, not faster.
-
-**Manual Performance Testing**:
-
-To measure shell startup time:
-```bash
-# Single measurement
-time zsh -i -c exit
-
-# Average over 10 runs
-for i in {1..10}; do time zsh -i -c exit 2>&1; done | grep real
-```
-
 ### CI/CD Testing
 
 The repository includes automated GitHub Actions workflows to ensure quality and prevent regressions.
@@ -750,18 +698,141 @@ This ensures:
 - No duplicates in PATH
 - Works across different machines
 
-### Conditional Tool Loading
+### Tool Availability Check Patterns
 
-The `zshrc.conditionals` module checks for tool availability before configuration using direct `command -v` checks:
+The codebase uses two patterns for checking if a tool is installed. Each pattern serves a specific purpose and should be used in the appropriate context.
+
+**Note**: This codebase previously used a third pattern (`_tool_cache` direct access) which was removed after benchmarking showed it slowed startup by 81ms. See [Performance Considerations](#performance-considerations) for historical context.
+
+#### 1. Direct `command -v` Check
+
+**When to use:**
+- One-time checks in conditional blocks
+- Script entry points that need immediate verification
+- Code outside the shell initialization (e.g., standalone scripts)
+
+**Example:**
 ```bash
+# In zshrc.conditionals
 if command -v colorls &> /dev/null; then
     alias ls='colorls --sd --sf'
 fi
+
+# In standalone scripts
+if ! command -v mise &>/dev/null; then
+    echo "Error: mise not found"
+    exit 1
+fi
 ```
 
-**Always use this pattern** when adding tool-specific configuration. This is the standard, fast, and clear approach for checking if commands exist.
+**Advantages:**
+- Standard POSIX-compliant approach
+- No dependencies on other functions
+- Clear and explicit
+- Works in any shell context
 
-**Note**: This codebase previously used tool availability caching (`_tool_cache`), but it was removed after benchmarking showed it slowed startup by 81ms. See [Performance Considerations](#performance-considerations) for details.
+**When NOT to use:**
+- Inside functions for cleaner syntax (use `has_command()` instead for readability)
+
+#### 2. `has_command()` Function
+
+**When to use:**
+- Inside functions for cleaner, more readable code
+- When you need consistent tool checking logic across functions
+- For better readability than inline `command -v` checks
+
+**Example:**
+```bash
+# In zshrc.functions.utilities
+has_command() {
+    command -v "$1" &>/dev/null
+}
+
+# Usage in functions
+setup_fzf() {
+    if has_command fzf; then
+        # Configure fzf keybindings
+    fi
+}
+```
+
+**Advantages:**
+- Cleaner syntax in functions: `if has_command fzf` vs `if command -v fzf &>/dev/null`
+- Consistent pattern across codebase
+- Easier to read and maintain
+- Single location to update if check logic needs to change
+
+**When NOT to use:**
+- In standalone scripts that don't source zsh functions (use `command -v` directly)
+- Early in zshrc before functions are loaded (use `command -v` directly)
+
+#### Decision Matrix
+
+| Context | Recommended Pattern | Rationale |
+|---------|-------------------|-----------|
+| `zshrc.conditionals` | `command -v` | Direct, explicit, fast enough |
+| Function definitions | `has_command()` | Clean syntax, readable |
+| Standalone scripts | `command -v` | No dependencies, POSIX-compliant |
+| Script initialization | `command -v` | Standard approach |
+| Any context | Either is fine | Both patterns are fast; choose for readability |
+
+#### Rationale for Two Patterns
+
+**Why two patterns instead of one?**
+
+1. **Context matters**: Shell functions benefit from cleaner `has_command()` syntax, while standalone scripts need `command -v` for portability
+2. **Readability**: `has_command fzf` is clearer than `command -v fzf &>/dev/null` in function bodies
+3. **Maintainability**: Having a function wrapper allows changing the implementation in one place if needed
+4. **Performance**: Both patterns are fast enough (~1-2ms per check); no caching needed
+
+**Consistency guidelines:**
+- Prefer `has_command()` in function definitions for readability
+- Use `command -v` in standalone scripts for portability
+- Either pattern is fine in `zshrc.conditionals` - choose for clarity
+- Don't mix patterns within the same function without reason
+
+**Historical Note**: This codebase previously used a third pattern (`_tool_cache` caching) which was removed after benchmarking showed it slowed startup by 81ms. Direct checks are fast enough without caching overhead.
+
+#### Examples
+
+**Good:**
+```bash
+# In zshrc.conditionals - use command -v (direct and clear)
+if command -v zoxide &>/dev/null; then
+    eval "$(zoxide init zsh)"
+fi
+
+# In zshrc.functions.git - use has_command (clean syntax)
+git_cleanup() {
+    if has_command fzf; then
+        # Interactive cleanup with fzf
+    else
+        # Fallback to simple cleanup
+    fi
+}
+
+# In standalone script - use command -v (portable)
+if ! command -v mise &>/dev/null; then
+    echo "mise not found"
+    exit 1
+fi
+```
+
+**Avoid:**
+```bash
+# In function - verbose inline checks (less readable)
+git_cleanup() {
+    if command -v fzf &>/dev/null; then  # Should use has_command() for clarity
+        # Interactive cleanup with fzf
+    fi
+}
+
+# In standalone script - using has_command (won't work)
+#!/bin/bash
+if has_command mise; then  # Error: has_command not defined in standalone scripts
+    mise install
+fi
+```
 
 ### FZF Integration
 
