@@ -178,3 +178,15 @@ jobs:
           done
 
           echo "✅ All required documentation present"
+
+  version-sync:
+    name: Version Documentation Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check version sync
+        run: |
+          chmod +x scripts/sync-version-docs.sh
+          scripts/sync-version-docs.sh --check
