@@ -40,7 +40,7 @@ export HISTORY_IGNORE="(ls|cd|pwd|exit|clear|\
 *token*|*TOKEN*|\
 *key=*|*KEY=*|\
 *API_KEY*|*api_key*|\
-*AWS_ACCESS*|*AWS_SECRET*|\
+*AWS_ACCESS*|*AWS_SECRET*|*AWS_ACCESS_KEY*|\
 *GITHUB_TOKEN*|*github_token*|\
 *bearer*|*Bearer*|\
 export*KEY*|export*TOKEN*|export*SECRET*|\

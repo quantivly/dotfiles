@@ -364,10 +364,9 @@ mise ls --json | jq '.[] | {tool, version, path}'
 ## References
 
 - [mise Documentation](https://mise.jdx.dev/)
-- [mise Configuration](https://mise.jdx.dev/configuration.html)
-- [aqua Backend](https://mise.jdx.dev/backends/aqua.html)
+- [mise Configuration](https://mise.jdx.dev/configuration)
+- [aqua Backend](https://mise.jdx.dev/dev-tools/backends/aqua)
 - [Tool Registry](https://github.com/aquaproj/aqua-registry)
-- [Dev-Setup Repository](https://github.com/quantivly/dev-setup)
 - [Dotfiles Repository](https://github.com/quantivly/dotfiles)
 
 ## Questions?
