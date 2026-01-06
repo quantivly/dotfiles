@@ -46,19 +46,19 @@ The team uses **pinned versions** by default for consistency.
 | Tool | Purpose | Current Version |
 |------|---------|----------------|
 | bat | Better cat with syntax highlighting | 0.24.0 |
-| fd | Better find with .gitignore support | 10.2.0 |
-| eza | Better ls with icons and colors | 0.23.4 |
-| delta | Git diff with syntax highlighting | 0.18.2 |
-| zoxide | Smart cd that learns patterns | 0.9.6 |
+| fd | Better find with .gitignore support | 9.0.0 |
+| eza | Better ls with icons and colors | 0.18.0 |
+| delta | Git diff with syntax highlighting | 0.17.0 |
+| zoxide | Smart cd that learns patterns | 0.9.4 |
 | duf | Beautiful disk usage | 0.8.1 |
-| dust | Intuitive directory sizes | 1.1.1 |
-| lazygit | Interactive git TUI | 0.45.1 |
-| just | Modern command runner | 1.38.0 |
-| glow | Terminal markdown renderer | 2.0.0 |
-| gitleaks | Secret detection | 8.21.2 |
-| pre-commit | Git hook framework | 4.0.1 |
-| sops | Encrypted secrets management | 3.9.2 |
-| fastfetch | System info display | 2.32.0 |
+| dust | Intuitive directory sizes | 0.9.0 |
+| lazygit | Interactive git TUI | 0.42.0 |
+| just | Modern command runner | 1.25.2 |
+| glow | Terminal markdown renderer | 1.5.1 |
+| gitleaks | Secret detection | 8.18.2 |
+| pre-commit | Git hook framework | 3.6.2 |
+| sops | Encrypted secrets management | 3.8.1 |
+| fastfetch | System info display | 2.8.10 |
 
 ### Optional Tools (uncomment in config)
 - dive, lazydocker, ctop - Docker tools
