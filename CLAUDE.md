@@ -150,6 +150,58 @@ Loading Order (from zshrc):
 
 **Key Insight:** Conditionals load AFTER aliases, so conditional aliases override unconditional ones. This is intentional - tools that are installed get priority configuration.
 
+### Performance Considerations
+
+#### Architectural Decision: No Tool Availability Caching
+
+**This codebase does NOT use tool availability caching.** This is an intentional architectural decision based on empirical performance testing.
+
+**Historical Context (DO-169, January 2026)**:
+
+Tool availability caching was implemented to reduce repeated `command -v` calls by building a cache at startup. However, benchmark testing revealed it was **net-negative** for performance:
+
+```
+Method              | Average Startup Time | Impact
+--------------------|---------------------|--------
+WITH cache          | 1173ms             | Baseline
+WITHOUT cache       | 1092ms             | 81ms faster
+```
+
+**Root Cause Analysis**:
+- **Cache overhead**: Building the cache checked 30+ tools unconditionally at startup
+- **Actual usage**: Most tools are checked only once in conditionals
+- **False optimization**: The cost of building the cache exceeded any benefit from cached lookups
+- **Conclusion**: Cache added 81ms overhead with no measurable benefit
+
+**Decision**: Tool availability caching was removed entirely from `zshrc.conditionals`. All tool checks now use direct `command -v tool &>/dev/null` calls.
+
+**Why This is Better**:
+1. **Faster**: 81ms faster startup (1092ms vs 1173ms)
+2. **Simpler**: No cache building code to maintain
+3. **Clearer**: Direct `command -v` checks are more explicit and easier to understand
+4. **Sufficient**: Even "repeated" checks are infrequent; the subprocess overhead is negligible
+
+**DO NOT Re-implement Tool Caching**:
+
+If you're considering adding tool availability caching in the future, you MUST:
+1. Have empirical benchmark data showing it improves performance
+2. Measure startup time with and without caching over 10+ iterations
+3. Document your findings and rationale in this section
+4. Get approval before merging
+
+The `command -v` pattern is fast enough for our use case. Premature optimization made the code slower, not faster.
+
+**Manual Performance Testing**:
+
+To measure shell startup time:
+```bash
+# Single measurement
+time zsh -i -c exit
+
+# Average over 10 runs
+for i in {1..10}; do time zsh -i -c exit 2>&1; done | grep real
+```
+
 ### CI/CD Testing
 
 The repository includes automated GitHub Actions workflows to ensure quality and prevent regressions.
@@ -682,14 +734,16 @@ This ensures:
 
 ### Conditional Tool Loading
 
-The `zshrc.conditionals` module checks for tool availability before configuration:
+The `zshrc.conditionals` module checks for tool availability before configuration using direct `command -v` checks:
 ```bash
 if command -v colorls &> /dev/null; then
     alias ls='colorls --sd --sf'
 fi
 ```
 
-Follow this pattern when adding tool-specific configuration.
+**Always use this pattern** when adding tool-specific configuration. This is the standard, fast, and clear approach for checking if commands exist.
+
+**Note**: This codebase previously used tool availability caching (`_tool_cache`), but it was removed after benchmarking showed it slowed startup by 81ms. See [Performance Considerations](#performance-considerations) for details.
 
 ### FZF Integration
 
