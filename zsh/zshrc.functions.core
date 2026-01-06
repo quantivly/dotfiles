@@ -289,6 +289,13 @@ killnamed() {
       for pid in ${(f)pids}; do  # zsh array splitting by lines
         # Validate PID is numeric
         if [[ "$pid" =~ ^[0-9]+$ ]]; then
+          # Safety check: Skip system-critical PIDs
+          if [[ "$pid" -le 10 ]]; then
+            echo "⚠️  Skipping system PID $pid (safety check)"
+            ((failed++))
+            continue
+          fi
+
           if kill "$pid" 2>/dev/null; then
             echo "✓ Killed PID $pid"
             ((killed++))
