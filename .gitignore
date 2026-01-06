@@ -17,3 +17,6 @@ Thumbs.db
 # Mise version manager
 .mise.local.toml
 .mise.*.local.toml
+
+# Poetry auth tokens (contains PyPI credentials)
+config/pypoetry/auth.toml

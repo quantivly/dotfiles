@@ -1,0 +1,19 @@
+# Poetry Configuration
+# Enables project-local virtualenvs for isolation and reliability
+#
+# This configuration follows industry best practices (2024-2026) and prevents
+# cross-project virtualenv contamination by creating .venv/ directories in
+# each project root instead of using a shared cache.
+#
+# Benefits:
+# - Better IDE auto-detection (.venv is standard convention)
+# - Easier CI/CD caching (venv included in project)
+# - Eliminates cross-project interference
+# - Predictable virtualenv locations
+#
+# References:
+# - https://python-poetry.org/docs/configuration/
+# - https://python-poetry.org/docs/managing-environments/
+
+[virtualenvs]
+in-project = true
