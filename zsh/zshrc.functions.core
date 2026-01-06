@@ -281,8 +281,30 @@ killnamed() {
   read -r response
   case "$response" in
     [yY]|[yY][eE][sS])
-      echo "$processes" | awk '{print $2}' | xargs kill
-      echo "Processes killed."
+      # Extract PIDs and validate they're numeric before killing
+      local pids=$(echo "$processes" | awk '{print $2}')
+      local killed=0
+      local failed=0
+
+      for pid in ${(f)pids}; do  # zsh array splitting by lines
+        # Validate PID is numeric
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+          if kill "$pid" 2>/dev/null; then
+            echo "✓ Killed PID $pid"
+            ((killed++))
+          else
+            echo "✗ Failed to kill PID $pid (may require sudo or already terminated)"
+            ((failed++))
+          fi
+        else
+          echo "✗ Invalid PID: $pid (skipping)"
+          ((failed++))
+        fi
+      done
+
+      echo ""
+      echo "Summary: $killed killed, $failed failed"
+      [ $failed -eq 0 ] && return 0 || return 1
       ;;
     *)
       echo "Operation cancelled."

@@ -89,11 +89,36 @@ When editing configuration files, always review changes before committing to ens
 
 **Key files and their purposes:**
 - `zshrc` - Main entry point, loads oh-my-zsh and modules
-- `zsh/zshrc.functions` - Add reusable shell functions here
+- `zsh/zshrc.functions.*` - Modular function files (see below)
 - `zsh/zshrc.aliases` - Add portable aliases here
 - `zsh/zshrc.conditionals` - Add tool-specific conditional setup here
 - `gitconfig` - Git configuration (user info is specific to this user)
 - `gh/config.yml` - GitHub CLI aliases (35+ workflow shortcuts)
+
+### Function Modules
+
+The zsh configuration uses modular function files for better organization:
+
+| Module | Purpose | Key Functions |
+|--------|---------|---------------|
+| `zshrc.functions.core` | Core utilities | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
+| `zshrc.functions.git` | Git workflows | `gd`, `git_cleanup`, `gco-safe`, `gpf-safe`, `gpush-safe` |
+| `zshrc.functions.fzf` | FZF integrations | `fcd`, `fkill`, `fenv`, `fssh`, `fport`, `fstash`, `fdiff` |
+| `zshrc.functions.docker` | Docker helpers | `dexec`, `dlogs`, `dkill`, `dimages`, `dnetwork`, `dvolume` |
+| `zshrc.functions.performance` | Performance monitoring | `startup_monitor`, `startup_profile`, `system_health`, `zsh_bench` |
+| `zshrc.functions.utilities` | Helper functions | `has_command`, `check_tool`, `resolve_tool_name`, `tool_status` |
+
+**Adding New Functions:**
+- Core utilities → `zshrc.functions.core`
+- Git-related → `zshrc.functions.git`
+- FZF-enhanced → `zshrc.functions.fzf`
+- Docker operations → `zshrc.functions.docker`
+- Performance/monitoring → `zshrc.functions.performance`
+- Internal helpers → `zshrc.functions.utilities`
+
+**Function Naming Convention:**
+- User-facing commands: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
+- Internal helpers: Underscores (e.g., `has_command`, `tool_status`, `check_tool`)
 
 ### Oh-My-Zsh Plugins
 
@@ -341,6 +366,38 @@ mise ls
 # List available versions
 mise ls-remote node
 mise ls-remote python
+```
+
+#### Why Mise Over NVM/Pyenv?
+
+**Performance:**
+- **mise**: ~5-10ms activation (no lazy loading needed)
+- **nvm**: ~200-400ms activation (requires lazy loading)
+- **pyenv**: ~100-200ms activation
+
+**Unified Management:**
+- **mise**: One tool for Node, Python, Ruby, Go, Rust, Java, PHP, and 100+ languages
+- **Previous**: Separate nvm, pyenv, rbenv, goenv, etc.
+- **Result**: Single configuration file, consistent commands, less cognitive load
+
+**Compatibility:**
+- Reads `.nvmrc`, `.python-version`, `.tool-versions` files automatically
+- Drop-in replacement for existing projects
+- No changes needed to team workflows
+
+**Features:**
+- Global + per-project version pinning
+- Parallel installation (faster than sequential installs)
+- Plugin ecosystem with 100+ language runtimes
+- Active development and community support
+
+**Example Speed Comparison:**
+```bash
+# nvm (slow - requires lazy loading in .zshrc)
+time nvm use  # ~300ms
+
+# mise (fast - always active)
+time mise which node  # ~5ms
 ```
 
 #### Migration from nvm/pyenv
