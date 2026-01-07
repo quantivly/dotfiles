@@ -1,5 +1,5 @@
 #!/bin/bash
-# Check if GPG cache is primed for commit signing
+# Check if GPG cache is primed for commit signing. For interactive cache priming, use: gpg-prime-cache
 # Returns 0 if cache is ready, 1 if not
 
 set -e
