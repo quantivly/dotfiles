@@ -21,10 +21,24 @@
 # Modern CLI Tool Replacements
 #==============================================================================
 
-# bat - Better cat with syntax highlighting (managed by mise)
+# Ubuntu package name variants - check once, use throughout
+# Ubuntu installs some tools with different names to avoid conflicts
 if command -v bat &>/dev/null; then
-  alias cat='bat --style=auto'
-  alias catp='bat --style=plain'
+  _BAT_CMD="bat"
+elif command -v batcat &>/dev/null; then
+  _BAT_CMD="batcat"
+fi
+
+if command -v fd &>/dev/null; then
+  _FD_CMD="fd"
+elif command -v fdfind &>/dev/null; then
+  _FD_CMD="fdfind"
+fi
+
+# bat - Better cat with syntax highlighting (managed by mise)
+if [[ -n "$_BAT_CMD" ]]; then
+  alias cat="$_BAT_CMD --style=auto"
+  alias catp="$_BAT_CMD --style=plain"
   export BAT_THEME="Monokai Extended"
 fi
 
@@ -40,11 +54,6 @@ else
   if ls --color=auto >/dev/null 2>&1; then
     alias ls='ls --color=auto --group-directories-first'
   fi
-fi
-
-# fd - Fast find alternative (managed by mise)
-if command -v fd &>/dev/null; then
-  export _FD_COMMAND="fd"
 fi
 
 # ripgrep - Better grep
@@ -94,14 +103,10 @@ if command -v fzf &>/dev/null; then
 --color=marker:#ff79c6,spinner:#ffb86c,header:#6272a4"
 
   # Use fd for FZF if available (respects .gitignore), fallback to find
-  if command -v fd &>/dev/null; then
-    export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+  if [[ -n "$_FD_CMD" ]]; then
+    export FZF_DEFAULT_COMMAND="$_FD_CMD --type f --hidden --follow --exclude .git"
     export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-    export FZF_ALT_C_COMMAND='fd --type d --hidden --follow --exclude .git'
-  elif command -v fdfind &>/dev/null; then
-    export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
-    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-    export FZF_ALT_C_COMMAND='fdfind --type d --hidden --follow --exclude .git'
+    export FZF_ALT_C_COMMAND="$_FD_CMD --type d --hidden --follow --exclude .git"
   else
     # Fallback to find with basic .gitignore respect
     export FZF_DEFAULT_COMMAND='find . -type f \! -path "./\.git/*" \! -path "./node_modules/*" \! -path "./.cache/*"'
@@ -110,10 +115,8 @@ if command -v fzf &>/dev/null; then
   fi
 
   # FZF preview with bat if available, fallback to cat
-  if command -v bat &>/dev/null; then
-    export FZF_CTRL_T_OPTS="--preview 'bat --color=always --style=numbers --line-range=:500 {}'"
-  elif command -v batcat &>/dev/null; then
-    export FZF_CTRL_T_OPTS="--preview 'batcat --color=always --style=numbers --line-range=:500 {}'"
+  if [[ -n "$_BAT_CMD" ]]; then
+    export FZF_CTRL_T_OPTS="--preview '$_BAT_CMD --color=always --style=numbers --line-range=:500 {}'"
   else
     # Fallback to cat with head for basic preview
     export FZF_CTRL_T_OPTS="--preview 'head -500 {} 2>/dev/null || echo \"Binary file or permission denied\"'"
@@ -158,16 +161,8 @@ if command -v fzf &>/dev/null; then
     local dir
 
     # Use fd if available (much faster for home directory), otherwise fall back to find
-    if command -v fd &>/dev/null; then
-      dir=$(fd --type d --hidden --follow \
-        --exclude .git --exclude node_modules --exclude .cache \
-        --exclude .venv --exclude venv \
-        --exclude build --exclude dist --exclude target \
-        --exclude .npm --exclude .cargo --exclude .gradle \
-        . "${HOME}" | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
-    elif command -v fdfind &>/dev/null; then
-      # Ubuntu installs it as fdfind
-      dir=$(fdfind --type d --hidden --follow \
+    if [[ -n "$_FD_CMD" ]]; then
+      dir=$($_FD_CMD --type d --hidden --follow \
         --exclude .git --exclude node_modules --exclude .cache \
         --exclude .venv --exclude venv \
         --exclude build --exclude dist --exclude target \
