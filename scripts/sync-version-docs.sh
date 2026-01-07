@@ -36,6 +36,53 @@ declare -A TOOL_DESCRIPTIONS=(
 # Tool order for table (must match documentation order)
 TOOL_ORDER=("bat" "fd" "eza" "delta" "zoxide" "duf" "dust" "lazygit" "just" "glow" "gitleaks" "pre-commit" "sops" "fastfetch")
 
+# Validate tool coverage - warn if tools in .mise.toml lack descriptions
+validate_tool_coverage() {
+    local mise_tools
+    mise_tools=$(sed -n '/^\[tools\]/,/^\[/p' "$MISE_CONFIG" | grep -oP '^\K\w+(?=\s*=)' || echo "")
+
+    local missing_descriptions=()
+    local missing_from_order=()
+
+    while IFS= read -r tool; do
+        [[ -z "$tool" ]] && continue
+
+        # Check if tool has a description
+        if [[ -z "${TOOL_DESCRIPTIONS[$tool]:-}" ]]; then
+            missing_descriptions+=("$tool")
+        fi
+
+        # Check if tool is in TOOL_ORDER
+        local in_order=0
+        for ordered_tool in "${TOOL_ORDER[@]}"; do
+            if [[ "$ordered_tool" == "$tool" ]]; then
+                in_order=1
+                break
+            fi
+        done
+        if [[ $in_order -eq 0 ]]; then
+            missing_from_order+=("$tool")
+        fi
+    done <<< "$mise_tools"
+
+    # Report warnings if any
+    if [[ ${#missing_descriptions[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Warning: Tools in .mise.toml missing descriptions in TOOL_DESCRIPTIONS:${NC}"
+        for tool in "${missing_descriptions[@]}"; do
+            echo -e "  ${YELLOW}⚠${NC} $tool"
+        done
+        echo ""
+    fi
+
+    if [[ ${#missing_from_order[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Warning: Tools in .mise.toml missing from TOOL_ORDER array:${NC}"
+        for tool in "${missing_from_order[@]}"; do
+            echo -e "  ${YELLOW}⚠${NC} $tool"
+        done
+        echo ""
+    fi
+}
+
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -216,6 +263,9 @@ main() {
         echo -e "${RED}Error: TOOL_VERSION_UPDATES.md not found at: $VERSION_DOC${NC}"
         exit 1
     fi
+
+    # Validate tool coverage
+    validate_tool_coverage
 
     # Execute requested mode
     case "$mode" in
