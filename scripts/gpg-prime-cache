@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prime GPG cache for automated signing
+# Prime GPG cache for automated signing. For non-interactive checks (e.g., in hooks), use: git-check-gpg-cache
 # This unlocks your GPG key and caches the passphrase for the configured time
 
 set -e
