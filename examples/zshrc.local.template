@@ -40,6 +40,7 @@
 #      - Create: sops ~/.secrets/env.yaml
 #      - Edit:   sops ~/.secrets/env.yaml
 #      - Load:   eval $(sops -d ~/.secrets/env.yaml | grep export)
+#      - Note:   Always verify sops output before eval for security
 #
 #   2. Use gpg-agent for SSH key passphrase caching
 #      - Prevents repeated passphrase prompts
@@ -59,6 +60,7 @@
 #
 # Use the pathadd function to safely add directories to PATH.
 # It checks if the directory exists and avoids duplicates.
+# Available after sourcing ~/.zshrc (defined in zshrc.functions.core)
 
 # pathadd "${HOME}/my-custom-bin"
 # pathadd "${HOME}/.cargo/bin"
@@ -77,8 +79,8 @@
 # =============================================================================
 #
 # Override oh-my-zsh plugins for this machine:
-# plugins=(${plugins:#poetry})  # Remove poetry plugin
-# plugins+=(my-custom-plugin)   # Add custom plugin
+# plugins=(${plugins:#poetry})  # Remove poetry plugin (array subtraction)
+# plugins+=(my-custom-plugin)   # Add custom plugin (array addition)
 
 # Disable specific aliases:
 # unalias ll  # If you don't want the 'll' alias
