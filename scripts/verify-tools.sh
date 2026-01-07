@@ -59,17 +59,28 @@ check_tool fzf "--version"
 check_tool gh "--version"
 
 echo ""
-echo -e "${BLUE}=== Modern CLI Tools (Replacements) ===${NC}"
-check_tool bat "--version" || check_tool batcat "--version"
-check_tool eza "--version" || check_tool exa "--version"
-check_tool fd "--version" || check_tool fdfind "--version"
-check_tool rg "--version"
-check_tool delta "--version"
-check_tool zoxide "--version"
-check_tool btop "--version"
-check_tool procs "--version"
-check_tool duf "--version"
-check_tool dust "--version"
+echo -e "${BLUE}=== Modern CLI Tools (From mise) ===${NC}"
+
+# Parse tools from .mise.toml [tools] section
+DOTFILES_ROOT="${HOME}/.dotfiles"
+if [[ -f "${DOTFILES_ROOT}/.mise.toml" ]]; then
+    # Extract tool names from .mise.toml
+    while IFS= read -r line; do
+        tool_name=$(echo "$line" | awk -F= '{print $1}' | xargs)
+        [[ -z "$tool_name" || "$tool_name" =~ ^# ]] && continue
+
+        case "$tool_name" in
+            bat) check_tool bat "--version" || check_tool batcat "--version" ;;
+            fd) check_tool fd "--version" || check_tool fdfind "--version" ;;
+            *) check_tool "$tool_name" "--version" ;;
+        esac
+    done < <(sed -n '/^\[tools\]/,/^\[/p' "${DOTFILES_ROOT}/.mise.toml" | grep -E '^\w+\s*=\s*"')
+else
+    echo -e "${YELLOW}⚠${NC} .mise.toml not found - using fallback"
+    check_tool bat "--version" || check_tool batcat "--version"
+    check_tool eza "--version"
+    check_tool fd "--version" || check_tool fdfind "--version"
+fi
 
 echo ""
 echo -e "${BLUE}=== Version Manager ===${NC}"
