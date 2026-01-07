@@ -55,8 +55,10 @@ if command -v poetry >/dev/null 2>&1; then
       # Remove this function and load the real plugin
       unfunction poetry
       plugins+=(poetry)
-      # Reinitialize completions
-      compinit
+      # Source the poetry plugin directly instead of calling compinit
+      if [ -f "${ZSH}/plugins/poetry/poetry.plugin.zsh" ]; then
+        source "${ZSH}/plugins/poetry/poetry.plugin.zsh"
+      fi
       # Call the real poetry command
       command poetry "$@"
     }

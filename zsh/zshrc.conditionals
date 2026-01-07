@@ -387,8 +387,10 @@ if command -v just &>/dev/null; then
   alias jd='just --dump'           # Show parsed justfile
 
   # Enable just completions if supported
-  if [[ -n "$ZSH_VERSION" ]]; then
-    eval "$(just --completions zsh)"
+  # Generate completion file if it doesn't exist
+  local just_completion="${HOME}/.oh-my-zsh/custom/plugins/_just"
+  if [[ ! -f "$just_completion" ]]; then
+    just --completions zsh > "$just_completion" 2>/dev/null
   fi
 fi
 
