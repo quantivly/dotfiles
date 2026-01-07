@@ -130,21 +130,20 @@ jobs:
           test -f ~/.config/mise/config.toml || (echo "mise config not deployed" && exit 1)
           echo "✅ Mise config verified"
 
-  # security-scan:
-  #   name: Security Scan
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-  #       with:
-  #         fetch-depth: 0  # Full history for gitleaks
-  #
-  #     - name: Run gitleaks
-  #       uses: gitleaks/gitleaks-action@v2
-  #       env:
-  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #   # NOTE: Gitleaks action requires GITLEAKS_LICENSE secret for organization repos
-  #   # Pre-commit hook runs gitleaks locally instead
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for gitleaks
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # NOTE: Gitleaks also runs via pre-commit hook locally for double protection
 
   documentation:
     name: Documentation Check
