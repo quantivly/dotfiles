@@ -23,6 +23,7 @@
 
 # Ubuntu package name variants - check once, use throughout
 # Ubuntu installs some tools with different names to avoid conflicts
+# Variables prefixed with _ indicate internal use (not for user modification)
 if command -v bat &>/dev/null; then
   _BAT_CMD="bat"
 elif command -v batcat &>/dev/null; then
