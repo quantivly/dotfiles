@@ -36,7 +36,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | `zshrc.functions.fzf` | FZF integrations | `fcd`, `fkill`, `fenv`, `fssh`, `fport`, `fstash`, `fdiff` |
 | `zshrc.functions.docker` | Docker helpers | `dexec`, `dlogs`, `dkill`, `dimages`, `dnetwork`, `dvolume` |
 | `zshrc.functions.performance` | Performance monitoring | `startup_monitor`, `startup_profile`, `system_health`, `zsh_bench` |
-| `zshrc.functions.utilities` | Helper functions | `has_command`, `check_tool`, `resolve_tool_name`, `tool_status` |
+| `zshrc.functions.utilities` | Helper functions | `has_command`, `check_tool`, `tool_status` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)

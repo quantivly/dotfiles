@@ -20,37 +20,3 @@ confirm() {
         *) return 1 ;;
     esac
 }
-
-# Resolve tool name for Ubuntu package variants
-# Usage: BAT_CMD=$(resolve_tool_name bat)
-# Handles: fd/fdfind, bat/batcat mappings on Ubuntu
-resolve_tool_name() {
-    local tool="$1"
-    case "$tool" in
-        fd)
-            if has_command fd; then
-                echo "fd"
-            elif has_command fdfind; then
-                echo "fdfind"
-            else
-                echo "find"
-            fi
-            ;;
-        bat)
-            if has_command bat; then
-                echo "bat"
-            elif has_command batcat; then
-                echo "batcat"
-            else
-                echo "cat"
-            fi
-            ;;
-        *)
-            if has_command "$tool"; then
-                echo "$tool"
-            else
-                echo "$tool"  # Return as-is if not found
-            fi
-            ;;
-    esac
-}
