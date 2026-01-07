@@ -8,26 +8,10 @@ This is a personal dotfiles repository that manages zsh, git, and development to
 
 ## Installation & Testing
 
-**Install/update dotfiles:**
 ```bash
-./install
-```
-
-This script:
-- Uses dotbot to create symlinks to configuration files
-- Initializes git submodules
-- Creates `~/.zshrc.local` from template if it doesn't exist
-
-**Test changes:**
-```bash
-source ~/.zshrc
-# or
-zsh -i -c exit  # Test for errors
-```
-
-**Profile startup performance:**
-```bash
-time zsh -i -c exit
+./install          # Install/update dotfiles (uses dotbot, creates symlinks, initializes submodules)
+source ~/.zshrc    # Test changes
+time zsh -i -c exit  # Profile startup performance
 ```
 
 ## Architecture
@@ -37,67 +21,13 @@ time zsh -i -c exit
 The zsh configuration is split into focused modules loaded by `zshrc`:
 
 1. **zshrc.history** - History configuration (50k commands, timestamps, deduplication)
-2. **zshrc.functions** - Utility functions (`pathadd`, `mkcd`, `backup`, `gwt`, etc.)
+2. **zshrc.functions.\*** - Utility functions organized by category (see Function Modules below)
 3. **zshrc.aliases** - Portable aliases for git, docker, python, system commands
 4. **zshrc.conditionals** - Conditional loading of optional tools (colorls, mise, direnv)
 5. **zshrc.company** - Work-specific configuration (Quantivly)
 6. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
 
-### Symlink Structure
-
-Dotbot creates these symlinks from `install.conf.yaml`:
-- `~/.zshrc` → `~/.dotfiles/zshrc`
-- `~/.p10k.zsh` → `~/.dotfiles/p10k.zsh`
-- `~/.gitconfig` → `~/.dotfiles/gitconfig`
-- `~/.config/gh/config.yml` → `~/.dotfiles/gh/config.yml`
-- `~/.config/git/ignore` → `~/.dotfiles/config/git/ignore`
-
-## Security Rules
-
-**CRITICAL:** Never commit sensitive information. All secrets belong in `~/.zshrc.local`:
-- API keys and tokens
-- SSH key paths
-- Machine-specific environment variables
-- Work-related credentials
-
-The `.gitignore` includes:
-- `*.local`
-- `*.secrets`
-- `.env*`
-- `secrets/`
-
-When editing configuration files, always review changes before committing to ensure no secrets were accidentally included.
-
-## Development Guidelines
-
-### Adding New Configuration
-
-**Add a new zsh module:**
-1. Create `zsh/zshrc.newmodule`
-2. Add source line in `zshrc` around line 120-136:
-   ```bash
-   [ -f ~/.dotfiles/zsh/zshrc.newmodule ] && source ~/.dotfiles/zsh/zshrc.newmodule
-   ```
-3. Test with `source ~/.zshrc`
-
-**Add new symlink:**
-1. Edit `install.conf.yaml`
-2. Add entry under `link:` section
-3. Run `./install` to create symlink
-
-### Modifying Existing Files
-
-**Key files and their purposes:**
-- `zshrc` - Main entry point, loads oh-my-zsh and modules
-- `zsh/zshrc.functions.*` - Modular function files (see below)
-- `zsh/zshrc.aliases` - Add portable aliases here
-- `zsh/zshrc.conditionals` - Add tool-specific conditional setup here
-- `gitconfig` - Git configuration (user info is specific to this user)
-- `gh/config.yml` - GitHub CLI aliases (35+ workflow shortcuts)
-
 ### Function Modules
-
-The zsh configuration uses modular function files for better organization:
 
 | Module | Purpose | Key Functions |
 |--------|---------|---------------|
@@ -108,825 +38,301 @@ The zsh configuration uses modular function files for better organization:
 | `zshrc.functions.performance` | Performance monitoring | `startup_monitor`, `startup_profile`, `system_health`, `zsh_bench` |
 | `zshrc.functions.utilities` | Helper functions | `has_command`, `check_tool`, `resolve_tool_name`, `tool_status` |
 
-**Adding New Functions:**
-- Core utilities → `zshrc.functions.core`
-- Git-related → `zshrc.functions.git`
-- FZF-enhanced → `zshrc.functions.fzf`
-- Docker operations → `zshrc.functions.docker`
-- Performance/monitoring → `zshrc.functions.performance`
-- Internal helpers → `zshrc.functions.utilities`
-
 **Function Naming Convention:**
-- User-facing commands: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
-- Internal helpers: Underscores (e.g., `has_command`, `tool_status`, `check_tool`)
+- User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
+- Internal helpers: Underscores (e.g., `has_command`, `tool_status`)
 
-### Oh-My-Zsh Plugins
+### Symlink Structure
 
-Current plugins loaded (line 25-45 in `zshrc`):
-- autojump, colored-man-pages, command-not-found, direnv, extract
-- fzf, gh, git, poetry, safe-paste, sudo, web-search
-- zsh-autosuggestions, zsh-fzf-history-search, zsh-syntax-highlighting
-- quantivly (optional company plugin)
-
-**Note:** `zsh-syntax-highlighting` must be last in the list.
+Dotbot creates symlinks from `install.conf.yaml`:
+- `~/.zshrc` → `~/.dotfiles/zshrc`
+- `~/.p10k.zsh` → `~/.dotfiles/p10k.zsh`
+- `~/.gitconfig` → `~/.dotfiles/gitconfig`
+- `~/.config/gh/config.yml` → `~/.dotfiles/gh/config.yml`
+- `~/.config/git/ignore` → `~/.dotfiles/config/git/ignore`
 
 ### Configuration Loading Order
 
-Understanding the order in which configuration files are loaded helps debug issues and understand precedence:
-
 ```
-Loading Order (from zshrc):
-1. Line 9-11:  Powerlevel10k instant prompt (performance optimization)
-2. Line 47:    oh-my-zsh core and plugins
-3. Line 50:    p10k.zsh theme configuration
-4. Line 124:   zsh/zshrc.history (history settings)
-5. Line 127:   zsh/zshrc.functions (utility functions like pathadd)
-6. Line 130:   zsh/zshrc.aliases (common aliases)
-7. Line 133:   zsh/zshrc.conditionals (tool-specific conditional config)
-8. Line 136:   zsh/zshrc.company (Quantivly work config)
-9. Line 150:   ~/.zshrc.local (machine-specific secrets)
-10. Line 160:  PATH additions
+1. Powerlevel10k instant prompt (performance)
+2. oh-my-zsh core and plugins
+3. p10k.zsh theme
+4. zsh/zshrc.history
+5. zsh/zshrc.functions.*
+6. zsh/zshrc.aliases
+7. zsh/zshrc.conditionals (overrides aliases if tools installed)
+8. zsh/zshrc.company
+9. ~/.zshrc.local (machine-specific secrets)
+10. PATH additions
 ```
 
-**Key Insight:** Conditionals load AFTER aliases, so conditional aliases override unconditional ones. This is intentional - tools that are installed get priority configuration.
+**Key Insight:** Conditionals load AFTER aliases, so tools that are installed get priority configuration.
+
+## Security Rules
+
+**CRITICAL:** Never commit sensitive information. All secrets belong in `~/.zshrc.local`:
+- API keys, tokens, passwords
+- SSH key paths
+- Machine-specific environment variables
+- Work-related credentials
+
+The `.gitignore` protects: `*.local`, `*.secrets`, `.env*`, `secrets/`
+
+## Development Guidelines
+
+### Adding New Configuration
+
+**New zsh module:**
+1. Create `zsh/zshrc.newmodule`
+2. Add source line in `zshrc` around line 120-136: `[ -f ~/.dotfiles/zsh/zshrc.newmodule ] && source ~/.dotfiles/zsh/zshrc.newmodule`
+3. Test: `source ~/.zshrc`
+
+**New symlink:**
+1. Edit `install.conf.yaml` under `link:` section
+2. Run `./install`
+
+### Oh-My-Zsh Plugins
+
+Current plugins: autojump, colored-man-pages, command-not-found, direnv, extract, fzf, gh, git, poetry, safe-paste, sudo, web-search, zsh-autosuggestions, zsh-fzf-history-search, zsh-syntax-highlighting, quantivly
+
+**Note:** `zsh-syntax-highlighting` must be last in the list.
 
 ### CI/CD Testing
 
-The repository includes automated GitHub Actions workflows to ensure quality and prevent regressions.
+GitHub Actions runs: ShellCheck, syntax validation, YAML validation, pre-commit hooks, installation tests (Ubuntu 22.04/24.04), security scans, and documentation checks.
 
-**Workflow Jobs** (see `.github/workflows/ci.yml`):
-
-1. **ShellCheck** - Lints all shell scripts for common issues
-2. **Syntax Check** - Validates bash and zsh syntax for all configuration modules
-3. **YAML Validation** - Ensures install.conf.yaml and other YAML files are valid
-4. **Pre-commit Hooks** - Runs security checks (gitleaks, secret detection, etc.)
-5. **Installation Tests** - Tests `./install` on Ubuntu 22.04 and 24.04
-6. **Security Scan** - Full repository scan for secrets via gitleaks
-7. **Documentation Check** - Validates markdown links and verifies required docs exist
-
-**Running Tests Locally:**
-
+**Run locally:**
 ```bash
-# Install pre-commit (via mise or pip)
-mise use -g pre-commit@latest
-# or
-pip install pre-commit
-
-# Run all checks
-pre-commit run --all-files
-
-# Test specific checks
-bash -n install                    # Syntax check install script
-zsh -n zsh/zshrc.aliases           # Syntax check zsh module
-shellcheck -x install              # Lint install script
+pre-commit run --all-files    # All checks
+bash -n install               # Syntax check
+shellcheck -x install         # Lint
+act -j shellcheck             # Run specific CI job locally (requires act)
 ```
 
-**Local CI Simulation:**
-
-```bash
-# Install act (https://github.com/nektos/act)
-brew install act  # or download from releases
-
-# Run specific CI jobs locally
-act -j shellcheck
-act -j syntax-check
-act -j pre-commit
-
-# Run all CI jobs
-act pull_request
-```
-
-**When to Run Tests:**
-
-- **Before committing**: Run `pre-commit run --all-files`
-- **Before PR**: Ensure local tests pass
-- **After refactoring**: Test syntax and installation
-- **Adding new scripts**: Add to ShellCheck patterns
-
-**CI Badge:**
-
-The README includes a CI status badge showing build health:
-```
-![CI](https://github.com/quantivly/dotfiles/workflows/CI/badge.svg)
-```
-
-**Troubleshooting CI Failures:**
-
-- **ShellCheck errors**: Review warnings, fix or add `# shellcheck disable=SC####` with justification
-- **Syntax errors**: Test locally with `bash -n` or `zsh -n`
-- **Pre-commit failures**: Run locally to see full error context
-- **Installation test failures**: Test `./install` in clean container
-- **Secret detection**: Remove secrets, use `.local` files or sops
-
-For more details, see `.github/README.md`.
+See `.github/README.md` for details.
 
 ## Tool Dependencies
 
-### Required Tools (Must Install)
+### Required Tools
+- **zsh**, **oh-my-zsh**, **Powerlevel10k** (git submodule), **git**
 
-These tools are required for the configuration to work properly:
-- **zsh** - The shell itself
-- **oh-my-zsh** - Plugin framework
-- **Powerlevel10k** - Prompt theme (git submodule)
-- **git** - Version control (used extensively)
+### Strongly Recommended
+- **fzf** - Fuzzy finder (many functions depend on it)
+- **gh** - GitHub CLI (35+ custom aliases in `gh/config.yml`)
 
-### Strongly Recommended Tools
+### Modern CLI Tools
 
-These tools significantly enhance the development experience:
-- **fzf** - Fuzzy finder (many functions depend on it: `fcd`, `fbr`, `fco`, `fshow`)
-- **gh** - GitHub CLI (35+ custom aliases configured in `gh/config.yml`)
+All tools are optional with intelligent fallbacks. Managed by mise (see below).
 
-### Modern CLI Tools (Enhanced in 2024)
+**Core replacements:**
+| Standard | Modern | Install |
+|----------|--------|---------|
+| cat | bat/batcat | `apt install bat` |
+| ls | eza/exa/colorls | `mise use -g eza@latest` |
+| find | fd/fdfind | `mise use -g fd@latest` |
+| grep | ripgrep | `apt install ripgrep` (⚠️ Not POSIX compatible) |
+| cd | zoxide | `mise use -g zoxide@latest` |
+| top | btop | `apt install btop` |
+| ps | procs | `cargo install procs` |
+| df | duf | `mise use -g duf@latest` |
+| du | dust | `mise use -g dust@latest` |
+| diff | delta/difftastic | `mise use -g delta@latest` |
 
-The dotfiles configuration now supports 25+ modern CLI tool replacements with intelligent fallback chains. All tools are optional and configured conditionally - your setup won't break if tools aren't installed.
+**Developer tools:** lazygit, just, glow, hyperfine, dive, forgit, ctop
+**Security:** gitleaks, pre-commit, sops
+**Productivity:** thefuck, tldr, cheat, neofetch/fastfetch
 
-#### Core Replacement Tools
-| Standard Tool | Modern Replacement | Priority | Install Command | Notes |
-|--------------|-------------------|----------|-----------------|-------|
-| cat | bat/batcat | Optional | `apt install bat` | Ubuntu uses `batcat` name |
-| ls | eza | First | `cargo install eza` | Maintained fork of exa |
-| ls | exa | Second | `apt install exa` | Original, unmaintained |
-| ls | colorls | Third | `gem install colorls` | Ruby-based fallback |
-| find | fd/fdfind | Optional | `apt install fd-find` | Ubuntu uses `fdfind` name |
-| grep | ripgrep | Optional | `apt install ripgrep` | **Warning:** Not fully POSIX compatible |
-| cd | zoxide | **NEW** | `./scripts/install-modern-tools.sh` | Learns from usage patterns |
-| top | btop | **NEW** | `apt install btop` | Modern resource monitor |
-| ps | procs | **NEW** | `cargo install procs` | Tree view, search, sorting |
-| df | duf | **NEW** | `apt install duf` | Beautiful disk usage visualization |
-| du | dust | **NEW** | `cargo install du-dust` | Intuitive directory sizes |
-| diff | delta | Optional | GitHub releases | Syntax-highlighted diffs |
-| diff | difftastic | **NEW** | `cargo install difftastic` | Structural diffs |
-
-#### Developer & Git Tools
-| Tool | Purpose | Key Features |
-|------|---------|-------------|
-| **lazygit** | Git TUI | Interactive staging, branching, merging |
-| **dive** | Docker analyzer | Analyze image layers for optimization |
-| **forgit** | Git + FZF | Interactive git operations with fuzzy finding |
-| **just** | Command runner | Modern make alternative with better syntax |
-| **hyperfine** | Benchmarking | Command performance testing and comparison |
-| **glow** | Markdown viewer | Beautiful terminal markdown rendering |
-| **ctop** | Container monitor | htop-style interface for Docker containers |
-
-#### Security & Code Quality Tools
-| Tool | Purpose | Key Features |
-|------|---------|-------------|
-| **gitleaks** | Secret scanner | Prevent secrets from entering git history |
-| **pre-commit** | Code quality | Automated checks before commits |
-| **sops** | Secrets management | Encrypted secrets with git integration |
-
-#### Productivity & Navigation
-| Tool | Purpose | Key Features |
-|------|---------|-------------|
-| **thefuck** | Command correction | Auto-fix previous commands with `fuck` |
-| **tldr** | Simplified docs | Concise command examples vs full man pages |
-| **cheat** | Interactive cheatsheets | Personal command cheatsheets |
-| **neofetch/fastfetch** | System info | Beautiful system information display |
-
-#### Easy Installation
-
-**Automated Installation Script:**
+**Installation:**
 ```bash
-# Run the comprehensive installation script
-./scripts/install-modern-tools.sh
-
-# Interactive options:
-# 1. Essential tools (recommended for all users)
-# 2. Development tools (for developers)
-# 3. All tools (complete setup)
-# 4. Install specific tool
-# 5. Show tool status
+./scripts/install-modern-tools.sh  # Interactive installer
+tool_status                         # Check what's installed
 ```
 
-**Manual Installation Examples:**
-```bash
-# Core productivity tools
-curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
-apt install btop duf
-cargo install procs du-dust eza
+### Version Manager: mise
 
-# Developer tools
-apt install lazygit  # or GitHub releases for latest
-cargo install just hyperfine difftastic
-pip install thefuck pre-commit gitleaks
-
-# Check what's installed
-tool_status  # runs comprehensive status check
-```
-
-#### New Functions Added
-
-**Enhanced FZF Functions:**
-- `fkill` - Fuzzy process killer with preview
-- `fenv` - Browse environment variables with fzf
-- `fssh` - SSH host selection from config/known_hosts
-- `fport` - Find what's using a specific port
-
-**Enhanced Docker Functions:**
-- `dexec` - Fuzzy container selection for exec
-- `dlogs` - Fuzzy container logs viewing
-- `dkill` - Fuzzy container stopping
-- `dimages` - Interactive image management
-
-**Git Workflow Functions:**
-- `git_cleanup` - Automated branch cleanup with confirmations
-- `fgit` - Menu-driven git operations
-- `fstash` - Fuzzy git stash management
-- `fdiff` - Fuzzy file selection for git diff
-- `fworktree` - Git worktree management with fzf
-
-**Performance Monitoring:**
-- `startup_monitor` - Monitor shell startup with alerts
-- `startup_profile` - Detailed startup profiling with recommendations
-- `system_health` - Comprehensive system health check
-
-### Version Manager
-
-- **mise** - Modern polyglot version manager (https://mise.jdx.dev/)
-  - **Replaces**: nvm, pyenv, rbenv, asdf
-  - **Install**: `./scripts/install-modern-tools.sh` or `curl https://mise.run | sh`
-  - **Config**: `~/.config/mise/config.toml` (global) or `.mise.toml` (per-project)
-  - **Legacy support**: Reads `.nvmrc`, `.python-version`, `.tool-versions` files
-  - **Performance**: ~5-10ms activation (no lazy loading needed)
-  - **Languages**: Node, Python, Ruby, Go, Rust, Java, PHP, and 100+ more
-
-#### Quick Start
+**mise** - Modern polyglot version manager replacing nvm, pyenv, rbenv, asdf
+- **Install**: `curl https://mise.run | sh` or via dev-setup
+- **Config**: `~/.config/mise/config.toml` (global) or `.mise.toml` (per-project)
+- **Performance**: ~5-10ms activation vs 200-400ms for nvm
+- **Compatibility**: Reads `.nvmrc`, `.python-version`, `.tool-versions`
 
 ```bash
-# Install global versions
-mise use -g node@lts python@3.12
-
-# Install project-specific versions
-cd my-project/
-mise use node@20.10.0 python@3.11
-
-# List installed versions
-mise ls
-
-# List available versions
-mise ls-remote node
-mise ls-remote python
+mise use -g node@lts python@3.12   # Install global versions
+mise ls                             # List installed
+mise outdated                       # Check for updates
 ```
 
-#### Why Mise Over NVM/Pyenv?
-
-**Performance:**
-- **mise**: ~5-10ms activation (no lazy loading needed)
-- **nvm**: ~200-400ms activation (requires lazy loading)
-- **pyenv**: ~100-200ms activation
-
-**Unified Management:**
-- **mise**: One tool for Node, Python, Ruby, Go, Rust, Java, PHP, and 100+ languages
-- **Previous**: Separate nvm, pyenv, rbenv, goenv, etc.
-- **Result**: Single configuration file, consistent commands, less cognitive load
-
-**Compatibility:**
-- Reads `.nvmrc`, `.python-version`, `.tool-versions` files automatically
-- Drop-in replacement for existing projects
-- No changes needed to team workflows
-
-**Features:**
-- Global + per-project version pinning
-- Parallel installation (faster than sequential installs)
-- Plugin ecosystem with 100+ language runtimes
-- Active development and community support
-
-**Example Speed Comparison:**
-```bash
-# nvm (slow - requires lazy loading in .zshrc)
-time nvm use  # ~300ms
-
-# mise (fast - always active)
-time mise which node  # ~5ms
-```
-
-#### Migration from nvm/pyenv
-
-If you previously used nvm or pyenv, see [docs/MIGRATION.md](docs/MIGRATION.md) for comprehensive step-by-step migration instructions including verification, troubleshooting, and rollback procedures.
-
-**Quick migration (4 steps):**
-
-1. Install your versions with mise:
-   ```bash
-   mise use -g node@20 python@3.12
-   ```
-
-2. Remove old version managers:
-   ```bash
-   rm -rf ~/.nvm ~/.pyenv
-   ```
-
-3. Clean up `~/.zshrc.local` if you have nvm/pyenv exports
-
-4. Reload shell: `source ~/.zshrc`
-
-For detailed instructions, see [docs/MIGRATION.md](docs/MIGRATION.md).
+For migration from nvm/pyenv, see [docs/MIGRATION.md](docs/MIGRATION.md).
 
 ## Managing CLI Tools with mise
 
-All modern CLI tools (bat, fd, eza, ripgrep, etc.) are managed through mise for unified version control.
-
-### Quick Commands
-
+Quick commands:
 ```bash
-# View installed tools
-mise ls
-
-# Install/update all tools
-mise install      # Install from config
-mise upgrade      # Upgrade to latest
-
-# Add a new tool
-mise use -g bat@latest
-
-# Check status
-mise doctor
+mise ls              # View installed tools
+mise install         # Install from config
+mise upgrade         # Upgrade to latest
+mise use -g bat@latest  # Add a new tool
+mise doctor          # Check status
 ```
+
+### Configuration Architecture
+
+**1. Single Source of Truth** - `~/.dotfiles/.mise.toml`
+- Authoritative source for all CLI tool versions
+- Defines 14 core CLI tools with pinned versions
+- Copied to `~/.config/mise/config.toml` by `./install`
+- **Trust**: Required when working in dotfiles directory: `mise trust ~/.dotfiles/.mise.toml`
+
+**2. Active Configuration** - `~/.config/mise/config.toml`
+- Created by `./install` from `.dotfiles/.mise.toml`
+- What mise actually uses
+- Auto-trusted (home directory)
+
+**3. Project Overrides** - `.mise.toml` in project root
+- Per-project version requirements
+- Requires trust: `mise trust`
 
 ### Trust Configuration
 
-Mise requires explicit trust for config files as a security feature to prevent malicious config files from running arbitrary code.
+Mise requires explicit trust for config files (security feature).
 
-**When you'll see the trust warning:**
+**When you'll see trust warnings:**
+- Working in `~/.dotfiles/` directory
+- Running mise commands in project directories
+- Haven't trusted the `.mise.toml` file yet
 
-You'll encounter this error ONLY when:
-1. You're working inside the `~/.dotfiles/` directory (e.g., `cd ~/.dotfiles`)
-2. You run a mise command (e.g., `mise ls`, `mise install`)
-3. You haven't trusted the `~/.dotfiles/.mise.toml` file yet
-
-The error message looks like this:
-```
-ERROR: Config files in ~/.dotfiles/.mise.toml are not trusted.
-Trust ~/.dotfiles/.mise.toml with `mise trust`
-```
-
-**Important:** This does NOT affect normal mise usage! Your active config at `~/.config/mise/config.toml` (in your home directory) is always trusted automatically. The warning only appears when mise discovers the template file in the dotfiles directory.
-
-**Solution (one-time setup):**
+**Solution:**
 ```bash
-# Trust the dotfiles config
-mise trust ~/.dotfiles/.mise.toml
+mise trust ~/.dotfiles/.mise.toml   # Trust dotfiles config (one-time)
+mise config path                    # Verify active config
 ```
 
-**Why it's safe to trust:**
-- This is YOUR dotfiles repository that you control
-- The `.mise.toml` file only contains tool version definitions (no executable code)
-- You can inspect the file anytime: `cat ~/.dotfiles/.mise.toml`
-- This is a template file copied to `~/.config/mise/config.toml` by `./install`
-
-**Verify configuration and trust status**:
-```bash
-# Check which config is active (should be ~/.config/mise/config.toml)
-mise config path
-
-# List trusted configs
-ls ~/.local/state/mise/trusted-configs/
-
-# Show all config sources
-mise config ls
-```
-
-**When trust is needed**:
-- Working in `~/.dotfiles/` directory (template file)
-- Creating project-specific `.mise.toml` files in project directories
-- Any config file outside your home directory
-
-**Note:** For detailed troubleshooting, see the [mise config not trusted error](#mise-config-not-trusted-error) section below.
-
-### Configuration
-
-**Configuration Architecture:**
-
-Mise CLI tools are managed entirely by dotfiles with a clean separation of concerns:
-
-**1. Single Source of Truth** - `~/.dotfiles/.mise.toml`
-  - **Authoritative source** for all CLI tool versions
-  - Defines 14 core CLI tools with pinned versions (bat, fd, eza, delta, etc.)
-  - Copied to `~/.config/mise/config.toml` by dotfiles `./install` script
-  - All team members can use the same versions by using shared dotfiles
-  - **Why**: Single location, no duplication, clear ownership
-  - **Trust**: Required if working in dotfiles directory (`mise trust ~/.dotfiles/.mise.toml`) - See [Trust Configuration](#trust-configuration)
-
-**2. Active Configuration** - `~/.config/mise/config.toml`
-  - Location: `~/.config/mise/config.toml` (your home directory)
-  - Created by dotfiles `./install` from `.dotfiles/.mise.toml`
-  - This is what mise actually uses for tool management
-  - Can be manually edited for machine-specific needs
-  - **Trust**: Not required (home directory files are auto-trusted)
-
-**3. Dev-Setup Role** - `~/platform/dev-setup/`
-  - Installs the mise **binary** only (`install_mise()` function)
-  - Does **not** configure or install CLI tools
-  - Calls dotfiles `./install` which handles all tool configuration
-  - Clean separation: dev-setup = system setup, dotfiles = personal config
-
-**4. Project Overrides** - `.mise.toml` in project root
-  - Location: Project root directory (e.g., `~/my-project/.mise.toml`)
-  - Override versions for specific project requirements
-  - Committed to git for project team consistency
-  - **Trust**: Required for each project (`mise trust`) - See [Trust Configuration](#trust-configuration)
-
-### Version Management
-
-**Standard Workflow**:
-
-1. **Initial Setup**: Run `dev-setup/setup.sh` which installs mise and runs dotfiles
-   ```bash
-   cd ~/platform/dev-setup && ./setup.sh
-   # This installs mise binary, then runs dotfiles/install
-   # Dotfiles installs all CLI tools from .dotfiles/.mise.toml
-   ```
-
-2. **Check for Updates**:
-   ```bash
-   mise outdated  # Check for newer versions
-   ```
-
-3. **Update Tools**:
-   ```bash
-   cd ~/.dotfiles
-   # Edit .mise.toml with new versions
-   vim .mise.toml
-
-   # Test the new version
-   mise install <tool>@<new-version>
-
-   # Update active config
-   ./install
-
-   # Commit changes
-   git add .mise.toml
-   git commit -m "Updated <tool> to <version>"
-   ```
-
-**Team Coordination**:
-- If using shared dotfiles repo, coordinate version changes with team
-- Individual developers can customize their own dotfiles fork
-- No validation scripts needed (single source of truth)
-
-See `docs/TOOL_VERSION_UPDATES.md` for detailed update procedures.
+**Important:** Active config at `~/.config/mise/config.toml` is always trusted. Template in dotfiles requires trust only when working in that directory.
 
 ### Available Tools
 
-**Managed by mise** (14 essential):
-- Core CLI: bat, fd, eza, delta
-- Navigation: zoxide
-- Monitoring: duf, dust
-- Developer: lazygit, just, glow
-- Security: gitleaks, pre-commit, sops
-- Productivity: fastfetch
+**Managed by mise** (14 essential): bat, fd, eza, delta, zoxide, duf, dust, lazygit, just, glow, gitleaks, pre-commit, sops, fastfetch
 
-**Note:** btop should be installed via apt (`apt install btop`) due to aqua registry asset name issue.
+**Optional** (uncomment in `.mise.toml`): dive, lazydocker, ctop, hyperfine, difftastic, cheat, tlrc
 
-**Optional tools** (uncomment in `.mise.toml`):
-- dive, lazydocker, ctop - Docker tools
-- hyperfine - Benchmarking
-- difftastic - Structural diffs
-- cheat - Interactive cheatsheets
-- tlrc - Rust-based tldr client
-
-**Not managed by mise**:
-- forgit - Manual git clone to ~/.forgit
-- procs - Install via `cargo install procs` (optional)
+**Not managed by mise**: forgit (manual install), procs (via cargo), btop (via apt)
 
 ### Per-Project Tool Versions
 
-Create `.mise.toml` in project root to pin specific versions:
-
+Create `.mise.toml` in project root:
 ```toml
-[tools]
-just = "1.16.0"
-hyperfine = "1.18.0"
-```
-
-Commit this file to git for team consistency.
-
-### Per-Project Tool Versions Example
-
-For a project that needs specific tool versions:
-
-```bash
-cd ~/my-project
-
-# Create project config
-cat > .mise.toml << 'EOF'
 [tools]
 just = "1.16.0"
 node = "20.10.0"
 python = "3.11.5"
-EOF
-
-# Install project tools
-mise install
-
-# Verify
-mise ls
 ```
 
-### Other Optional Tools
+Then: `mise install && mise ls`
 
-- **direnv** - Per-directory environment variables (`apt install direnv`)
-- **autojump** - Fast directory navigation (`apt install autojump`)
-- **poetry** - Python dependency management (`pip install poetry`)
-- **xclip** - Clipboard support on Linux (`apt install xclip`)
+### Version Updates
 
-### Plugin Requirements
+```bash
+cd ~/.dotfiles
+vim .mise.toml              # Update versions
+mise install <tool>@<ver>   # Test
+./install                   # Update active config
+git add .mise.toml && git commit -m "Updated <tool> to <version>"
+```
 
-Some oh-my-zsh plugins require external tools:
-- `autojump` plugin → requires `autojump` binary
-- `direnv` plugin → requires `direnv` binary
-- `fzf` plugin → requires `fzf` binary
-- `poetry` plugin → requires `poetry` binary
-- `gh` plugin → requires `gh` CLI tool
-- `quantivly` plugin → requires custom plugin installation (work-specific)
-
-**Note:** oh-my-zsh handles missing plugin dependencies gracefully - plugins simply won't activate if their tools aren't installed.
+See `docs/TOOL_VERSION_UPDATES.md` for details.
 
 ## Command Behavior Changes
 
-When optional tools are installed, these standard commands behave differently:
+When tools are installed, standard commands are replaced:
 
-### grep → ripgrep (rg)
-**Changed by:** `zshrc.conditionals:54`
-**Behavior:** Completely replaces `grep` with `rg` if ripgrep is installed
-**Warning:** ripgrep is NOT fully POSIX compatible - it has different options and behavior
-**Workaround:** Use `\grep` to access original grep, or `command grep` to bypass alias
+| Command | Replacement | Changed By | Workaround |
+|---------|-------------|------------|------------|
+| grep | ripgrep (rg) | `zshrc.conditionals:54` | `\grep` or `command grep` |
+| find | fd/fdfind | `zshrc.conditionals:44-48` | `\find` |
+| cat | bat | `zshrc.conditionals:10-18` | `\cat` or `catp` |
+| top | htop | `zshrc.conditionals:64-66` | `\top` |
+| ls | eza/exa/colorls | `zshrc.conditionals:24-39` | `\ls` |
 
-### find → fd
-**Changed by:** `zshrc.conditionals:44-48`
-**Behavior:** Replaces `find` with `fd` (or `fdfind` on Ubuntu)
-**Key Difference:** fd respects `.gitignore` by default, has different syntax
-**Workaround:** Use `\find` to access original find command
-
-### cat → bat
-**Changed by:** `zshrc.conditionals:10-18`
-**Behavior:** Adds syntax highlighting and line numbers
-**Impact:** May alter output in scripts expecting plain text
-**Workaround:** Use `\cat` for original behavior, or `catp` alias for bat without line numbers
-
-### top → htop
-**Changed by:** `zshrc.conditionals:64-66`
-**Behavior:** Replaces with interactive htop interface
-**Note:** Only active if htop is installed (conditional check)
-**Workaround:** Use `\top` to access original top command
-
-### ls → eza/exa/colorls
-**Changed by:** `zshrc.conditionals:24-39`
-**Behavior:** Priority chain: eza → exa → colorls → standard ls
-**Features:** Icons, colors, git integration, better formatting
-**Workaround:** Use `\ls` or `command ls` for original ls
-
-### Alias Renamed: fd → fdir
-**Location:** `zshrc.aliases:80`
-**Previous:** `alias fd='find . -type d -name'` (find directories)
-**Current:** `alias fdir='find . -type d -name'`
-**Reason:** Avoid conflict with fd-find tool
-**Impact:** If you used `fd` for finding directories, use `fdir` instead
+**Alias renamed:** `fd` → `fdir` (to avoid conflict with fd-find tool)
 
 ## Important Patterns
 
 ### pathadd Function
 
-Always use `pathadd` to add directories to PATH safely:
+Always use `pathadd` for safe PATH additions:
 ```bash
-pathadd "${HOME}/.local/bin"
-pathadd "${HOME}/custom/bin"
+pathadd "${HOME}/.local/bin"  # Checks existence, prevents duplicates
 ```
 
-This ensures:
-- Directory exists before adding
-- No duplicates in PATH
-- Works across different machines
+### Tool Availability Checks
 
-### Tool Availability Check Patterns
+Use two patterns depending on context:
 
-The codebase uses two patterns for checking if a tool is installed. Each pattern serves a specific purpose and should be used in the appropriate context.
-
-**Note**: This codebase previously used a third pattern (`_tool_cache` direct access) which was removed after benchmarking showed it slowed startup by 81ms. See [Performance Considerations](#performance-considerations) for historical context.
-
-#### 1. Direct `command -v` Check
-
-**When to use:**
-- One-time checks in conditional blocks
-- Script entry points that need immediate verification
-- Code outside the shell initialization (e.g., standalone scripts)
-
-**Example:**
+**1. Direct `command -v` check** - For conditionals and standalone scripts:
 ```bash
-# In zshrc.conditionals
-if command -v colorls &> /dev/null; then
+if command -v colorls &>/dev/null; then
     alias ls='colorls --sd --sf'
 fi
-
-# In standalone scripts
-if ! command -v mise &>/dev/null; then
-    echo "Error: mise not found"
-    exit 1
-fi
 ```
 
-**Advantages:**
-- Standard POSIX-compliant approach
-- No dependencies on other functions
-- Clear and explicit
-- Works in any shell context
-
-**When NOT to use:**
-- Inside functions for cleaner syntax (use `has_command()` instead for readability)
-
-#### 2. `has_command()` Function
-
-**When to use:**
-- Inside functions for cleaner, more readable code
-- When you need consistent tool checking logic across functions
-- For better readability than inline `command -v` checks
-
-**Example:**
+**2. `has_command()` function** - For cleaner syntax in functions:
 ```bash
-# In zshrc.functions.utilities
-has_command() {
-    command -v "$1" &>/dev/null
-}
+has_command() { command -v "$1" &>/dev/null; }
 
-# Usage in functions
 setup_fzf() {
     if has_command fzf; then
-        # Configure fzf keybindings
+        # Configure fzf
     fi
 }
 ```
 
-**Advantages:**
-- Cleaner syntax in functions: `if has_command fzf` vs `if command -v fzf &>/dev/null`
-- Consistent pattern across codebase
-- Easier to read and maintain
-- Single location to update if check logic needs to change
+**Guidelines:**
+- Use `command -v` in `zshrc.conditionals` and standalone scripts
+- Use `has_command()` inside functions for readability
+- Both are fast (~1-2ms); no caching needed
 
-**When NOT to use:**
-- In standalone scripts that don't source zsh functions (use `command -v` directly)
-- Early in zshrc before functions are loaded (use `command -v` directly)
-
-#### Decision Matrix
-
-| Context | Recommended Pattern | Rationale |
-|---------|-------------------|-----------|
-| `zshrc.conditionals` | `command -v` | Direct, explicit, fast enough |
-| Function definitions | `has_command()` | Clean syntax, readable |
-| Standalone scripts | `command -v` | No dependencies, POSIX-compliant |
-| Script initialization | `command -v` | Standard approach |
-| Any context | Either is fine | Both patterns are fast; choose for readability |
-
-#### Rationale for Two Patterns
-
-**Why two patterns instead of one?**
-
-1. **Context matters**: Shell functions benefit from cleaner `has_command()` syntax, while standalone scripts need `command -v` for portability
-2. **Readability**: `has_command fzf` is clearer than `command -v fzf &>/dev/null` in function bodies
-3. **Maintainability**: Having a function wrapper allows changing the implementation in one place if needed
-4. **Performance**: Both patterns are fast enough (~1-2ms per check); no caching needed
-
-**Consistency guidelines:**
-- Prefer `has_command()` in function definitions for readability
-- Use `command -v` in standalone scripts for portability
-- Either pattern is fine in `zshrc.conditionals` - choose for clarity
-- Don't mix patterns within the same function without reason
-
-**Historical Note**: This codebase previously used a third pattern (`_tool_cache` caching) which was removed after benchmarking showed it slowed startup by 81ms. Direct checks are fast enough without caching overhead.
-
-#### Examples
-
-**Good:**
-```bash
-# In zshrc.conditionals - use command -v (direct and clear)
-if command -v zoxide &>/dev/null; then
-    eval "$(zoxide init zsh)"
-fi
-
-# In zshrc.functions.git - use has_command (clean syntax)
-git_cleanup() {
-    if has_command fzf; then
-        # Interactive cleanup with fzf
-    else
-        # Fallback to simple cleanup
-    fi
-}
-
-# In standalone script - use command -v (portable)
-if ! command -v mise &>/dev/null; then
-    echo "mise not found"
-    exit 1
-fi
-```
-
-**Avoid:**
-```bash
-# In function - verbose inline checks (less readable)
-git_cleanup() {
-    if command -v fzf &>/dev/null; then  # Should use has_command() for clarity
-        # Interactive cleanup with fzf
-    fi
-}
-
-# In standalone script - using has_command (won't work)
-#!/bin/bash
-if has_command mise; then  # Error: has_command not defined in standalone scripts
-    mise install
-fi
-```
+**Historical note:** Tool cache was removed after benchmarks showed 81ms overhead.
 
 ### FZF Integration
 
-Several functions use fzf for fuzzy finding:
-- `fcd` - Fuzzy directory navigation
-- `fbr` - Fuzzy git branch selection (defined in conditionals)
-- `fco` - Fuzzy git commit selection
-- `fshow` - Git commit browser
+Key fzf functions: `fcd`, `fbr`, `fco`, `fshow`, `fkill`, `fenv`, `fssh`, `fport`
 
 ## Git Configuration
 
-**Key git settings:**
-- Default editor: VS Code (`code --wait`)
+**Key settings:**
+- Editor: VS Code (`code --wait`)
 - Default branch: `main`
 - Credential helper: GitHub CLI (`gh auth git-credential`)
-- GPG signing: Disabled by default
-- Difftool: VS Code
+- GPG signing: Disabled by default (see below to enable)
 
-**Useful git aliases:**
-- `git lg` - Pretty log with graph
-- `git conflicts` - Show files with merge conflicts
+**Useful aliases:** `git lg` (pretty log), `git conflicts` (show merge conflicts)
 
 ## GPG Commit Signing
 
-**Team Policy:** GPG signing is strongly encouraged for commit verification.
-
-### Quick Setup
-
+**Quick setup:**
 ```bash
-# 1. Generate key
 gpg --full-generate-key
-
-# 2. Configure git (in ~/.gitconfig.local)
-[user]
-    signingkey = YOUR_KEY_ID
-[commit]
-    gpgsign = true
-
-# 3. Prime cache once per session
-gpg-prime
+# In ~/.gitconfig.local:
+# [user]
+#     signingkey = YOUR_KEY_ID
+# [commit]
+#     gpgsign = true
+gpg-prime  # Prime cache once per session
 ```
 
-### Available Utilities
+**Utilities:**
+- `gpg-prime` - Prime cache for automatic signing
+- `git-check-gpg-cache` - Check cache status
+- `install-gpg-hooks` - Install pre-commit hooks
 
-- **gpg-prime** (alias for gpg-prime-cache) - Prime GPG cache for automatic signing
-- **git-check-gpg-cache** - Check if cache is primed (used by pre-commit hook)
-- **install-gpg-hooks** - Install hooks in existing repos (usually not needed)
-
-All scripts located in `/scripts/` and symlinked to `~/.local/bin/`.
-
-### How It Works
-
-1. **Shell reminder** - Shows once per session if cache not primed
-2. **Pre-commit hook** - Blocks commits if cache not primed (prevents hanging)
-3. **gpg-prime** - Cache passphrase for 8-24 hours
-4. **Automatic signing** - Commits signed without prompts
-
-### Graceful Degradation
-
-- If GPG not configured, commits work normally
-- To bypass signing: `git commit --no-gpg-sign`
-- Scripts fail gracefully with helpful messages
-- Pre-commit hook allows commit if check script missing
-
-### Documentation
-
-- **Team quick-start**: [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md)
-- **Technical reference**: [docs/GPG_SIGNING_SETUP.md](docs/GPG_SIGNING_SETUP.md)
-- **Git workflows**: [examples/git-workflows.md](examples/git-workflows.md)
-
-### Troubleshooting
-
-**"GPG failed to sign the data":**
-```bash
-gpg-prime  # Re-prime cache
-```
-
-**Cache expired during work:**
-```bash
-gpg-prime  # Run again
-```
-
-**Want to disable temporarily:**
-```bash
-git commit --no-gpg-sign -m "Message"
-```
-
-See full troubleshooting guide in [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md).
+**Documentation:**
+- Quick-start: [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md)
+- Technical: [docs/GPG_SIGNING_SETUP.md](docs/GPG_SIGNING_SETUP.md)
+- Workflows: [examples/git-workflows.md](examples/git-workflows.md)
 
 ## GitHub CLI Aliases
 
-The repository includes 35+ `gh` aliases in `gh/config.yml` for PR and workflow management:
-
-**Most used:**
+35+ `gh` aliases in `gh/config.yml`:
 - `gh mypr` - Your open PRs
 - `gh prs` - All open non-draft PRs
 - `gh review` - PRs where you're requested as reviewer
@@ -935,255 +341,111 @@ The repository includes 35+ `gh` aliases in `gh/config.yml` for PR and workflow 
 
 ## Common Tasks
 
-**Update oh-my-zsh plugins:**
 ```bash
-git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-```
+# Reload zsh config
+source ~/.zshrc  # or: zshreload
 
-**Reload zsh config:**
-```bash
-source ~/.zshrc
-# or use alias
-zshreload
-```
-
-**Edit machine-specific config:**
-```bash
+# Edit machine-specific config
 vim ~/.zshrc.local  # or: localrc
 chmod 600 ~/.zshrc.local
-```
 
-**View PATH entries:**
-```bash
+# View PATH
 path  # alias for: echo $PATH | tr ":" "\n"
-```
 
-**Copy file contents to clipboard:**
-```bash
-# Smart clipboard - auto-detects SSH and uses appropriate method
-copyfile filename           # Uses OSC 52 over SSH, xclip/pbcopy locally
-catcopy filename            # View with bat + copy to clipboard
+# Copy to clipboard (works over SSH with OSC 52!)
+copyfile filename    # Smart clipboard with auto-detection
+catcopy filename     # View with bat + copy
+osc52 "text"         # Direct OSC 52 copy
 
-# Direct OSC 52 usage (works over SSH!)
-osc52 "some text"           # Copy text directly
-echo "text" | osc52         # Copy from pipe
-cat file.txt | osc52        # Copy file via pipe
-
-# Alternative methods
-\cat filename               # Use original cat to view/copy manually
-bat --plain filename        # Plain view without formatting
-catp filename               # Bat with plain style (no line numbers)
-```
-
-**Note:** OSC 52 copies to your **local** clipboard even when SSH'd into a remote machine. Requires a modern terminal (iTerm2, tmux, Windows Terminal, WezTerm, etc.).
-
-**Verify tool installation status:**
-```bash
+# Verify tool status
 ./scripts/verify-tools.sh
-# Shows which tools are installed and which are missing
 ```
 
 ## Workflow Examples
 
-Comprehensive workflow guides are available in the `examples/` directory:
+Comprehensive guides in `examples/` directory:
 
-### Git Workflows (`examples/git-workflows.md`)
+- **[examples/git-workflows.md](examples/git-workflows.md)** - Feature branches, conflict resolution, PR reviews, WIP commits, cleanup
+- **[examples/docker-workflows.md](examples/docker-workflows.md)** - Service management, debugging, cleanup, networking
+- **[examples/fzf-recipes.md](examples/fzf-recipes.md)** - Interactive fuzzy finding, keybindings, integrations
 
-Step-by-step guides for common Git operations:
-- **Feature Branch Development** - Complete workflow from branch creation to PR
-- **Merge Conflict Resolution** - Handling conflicts when pulling or merging
-- **Pull Request Review** - Reviewing and approving team PRs locally
-- **Quick WIP Commits** - Temporary commits with `gwip`/`gunwip`
-- **Branch Cleanup** - Removing old and merged branches
-- **Advanced Operations** - Interactive rebase, cherry-pick, stash
-
-Quick examples:
+Quick reference:
 ```bash
-# Create feature branch and PR
+# Git workflow
 gcb feature/my-feature && gaa && gcam "feat: My feature" && gp && gh pr create --web
 
-# Review PR locally
-gh review | head -5  # See PRs needing review
-gh co 123 && gd && gh approve && gh prmerge
-
-# WIP workflow
-gwip  # Save work temporarily
-# ... switch branches ...
-gunwip  # Restore work as uncommitted changes
-```
-
-### Docker Workflows (`examples/docker-workflows.md`)
-
-Practical Docker and Docker Compose workflows:
-- **Start and Monitor Services** - Using docker-compose for local development
-- **Container Debugging** - Accessing shells, viewing logs, inspecting state
-- **Image Management** - Building, pushing, and cleaning up images
-- **Cleanup Workflows** - Safe and aggressive cleanup strategies
-- **Networking and Volumes** - Managing networks and persistent data
-- **Troubleshooting** - Common issues and solutions
-
-Quick examples:
-```bash
-# Start services and check logs
+# Docker workflow
 dcup && dps && dclogs
 
-# Debug container
-dex myapp bash
-
-# Cleanup workflow
-dstop && drm && dclean
+# FZF usage
+Ctrl+T    # Fuzzy file search
+fbr       # Fuzzy branch checkout
+fshow     # Browse git history
 ```
-
-### FZF Integration Recipes (`examples/fzf-recipes.md`)
-
-Interactive fuzzy finding workflows:
-- **Built-in Keybindings** - Ctrl+T (files), Ctrl+R (history), Alt+C (directories)
-- **Custom Functions** - `fcd`, `fbr`, `fco`, `fshow`
-- **Process Management** - Kill processes interactively
-- **File Operations** - Open files, copy paths, bulk operations
-- **Git Integration** - Interactive staging, commit selection, cherry-picking
-- **Docker Integration** - Select containers for exec, logs, stop
-
-Quick examples:
-```bash
-# Fuzzy file search with preview
-Ctrl+T  # then select file
-
-# Fuzzy git branch checkout
-fbr
-
-# Browse git history with preview
-fshow
-
-# Kill process interactively
-kill -9 $(ps aux | fzf | awk '{print $2}')
-```
-
-### Tool Verification Script
-
-Check which tools are installed:
-```bash
-./scripts/verify-tools.sh
-```
-
-This script shows:
-- Required tools (zsh, git) with versions
-- Recommended tools (fzf, gh) installation status
-- Modern CLI replacements (bat, eza, fd, rg, htop, delta)
-- Version manager (mise)
-- Optional tools (direnv, autojump, poetry, docker)
-- Oh-My-Zsh plugins (zsh-autosuggestions, zsh-syntax-highlighting)
 
 ## Troubleshooting
 
 ### Slow zsh startup
-- Profile with: `PS4='+ %D{%s.%.} %N:%i> ' && set -x && source ~/.zshrc && set +x`
-- Profile performance: `time zsh -i -c exit`
-- Disable slow plugins in `~/.zshrc.local`: `plugins=(${plugins:#poetry})`
-- Common culprits: mise activation issues, poetry completions
-- Note: mise is very fast (~5-10ms), much faster than the old nvm/pyenv setup
-- If still using nvm/pyenv, see [docs/MIGRATION.md](docs/MIGRATION.md) for migration instructions
-
-### Function not found
-- Ensure `zsh/zshrc.functions` is being sourced
-- Check symlink: `ls -la ~/.zshrc`
-- Re-run: `./install`
-- Verify no syntax errors: `zsh -n ~/.zshrc`
-
-### Tool not loading
-- Check if tool is installed: `command -v toolname`
-- Review `zsh/zshrc.conditionals` for conditional logic
-- Reload config: `source ~/.zshrc` or `zshreload`
-
-### mise config not trusted error
-**Error**: "Config files in ~/.dotfiles/.mise.toml are not trusted"
-
-This is a mise security feature that requires explicit trust for config files. For complete documentation of this feature, see the [Trust Configuration](#trust-configuration) section above.
-
-**Quick diagnosis:** This occurs when:
-- You're working in the `~/.dotfiles/` directory
-- Mise discovers the `.mise.toml` template file there
-- You haven't trusted it yet
-
-**Solutions**:
 ```bash
-# Option 1: Trust the dotfiles config (recommended)
-mise trust ~/.dotfiles/.mise.toml
-
-# Option 2: Work outside the dotfiles directory
-cd ~  # or any other directory
-
-# Verify your active config
-mise config path  # Should show ~/.config/mise/config.toml
-
-# Check trust status
-ls ~/.local/state/mise/trusted-configs/
+time zsh -i -c exit  # Profile performance
+# Disable slow plugins in ~/.zshrc.local: plugins=(${plugins:#poetry})
+# mise is fast (~5-10ms). If using nvm/pyenv, see docs/MIGRATION.md
 ```
 
-**Understanding the architecture**:
-- **Template**: `~/.dotfiles/.mise.toml` (pinned versions, requires trust when working in dotfiles dir)
-- **Active config**: `~/.config/mise/config.toml` (copied during `./install`, always trusted in home directory)
-- **Project configs**: `.mise.toml` in project directories (per-project overrides, require trust)
+### Function not found
+```bash
+ls -la ~/.zshrc      # Check symlink
+./install            # Re-run installer
+zsh -n ~/.zshrc      # Verify syntax
+```
 
-The error doesn't affect your actual mise functionality - your active config at `~/.config/mise/config.toml` works fine. The trust requirement only applies when mise discovers the template file in the dotfiles directory.
+### Tool not loading
+```bash
+command -v toolname  # Check if installed
+source ~/.zshrc      # Reload config
+```
+
+### mise config not trusted
+Trust the config file: `mise trust ~/.dotfiles/.mise.toml`
+
+See [Trust Configuration](#trust-configuration) section for full details.
 
 ### Command not found after adding tool
-- Reload zsh configuration: `source ~/.zshrc` or `zshreload`
-- Verify tool is actually installed: `command -v toolname`
-- Check which configuration file should load it (see Configuration Loading Order above)
-- Ensure the tool's binary is in PATH: `echo $PATH | tr ":" "\n"`
+```bash
+source ~/.zshrc              # Reload
+command -v toolname          # Verify installation
+echo $PATH | tr ":" "\n"     # Check PATH
+```
 
 ### Unexpected command behavior
-- Check if command has been aliased: `alias commandname`
-- See what actually runs: `type commandname` or `which commandname`
-- Use backslash to bypass alias: `\grep` instead of `grep`
-- Use `command` prefix to skip aliases: `command grep` instead of `grep`
-- Check zshrc.conditionals for tool replacement overrides
+```bash
+alias commandname            # Check for alias
+type commandname             # See what runs
+\commandname                 # Bypass alias
+```
 
 ### Alias conflicts
-- List all current aliases: `alias`
-- List specific alias: `alias aliasname`
-- Find where alias is defined: `grep -r "alias aliasname=" ~/.dotfiles/`
-- Override in `~/.zshrc.local` if needed: `unalias aliasname` then define your own
-- Temporarily disable: `\commandname` or `command commandname`
-
-### htop not found when running 'top'
-- This was a bug fixed in recent updates
-- Manually check if htop is installed: `command -v htop`
-- Install htop: `apt install htop` or `brew install htop`
-- Verify fix: The htop alias should only exist in `zshrc.conditionals:64-66` (conditional)
-- If still broken: Check that line 119 in `zshrc.aliases` does NOT have `alias top='htop'`
+```bash
+alias                                        # List all aliases
+grep -r "alias aliasname=" ~/.dotfiles/      # Find definition
+# Override in ~/.zshrc.local with: unalias aliasname
+```
 
 ### Git authentication issues
-- GitHub CLI handles credentials: `gh auth status`
-- Re-authenticate if needed: `gh auth login`
-- Credential helper configured in `gitconfig:11-16`
+```bash
+gh auth status   # Check status
+gh auth login    # Re-authenticate
+```
 
-### fzf functions not working (fbr, fco, fshow)
-- Check if fzf is installed: `command -v fzf`
-- Install fzf: `apt install fzf` or `brew install fzf`
-- Verify functions are defined: `type fbr`
-- These functions are defined in `zshrc.conditionals:107-132`
+### fzf functions not working
+```bash
+command -v fzf   # Check installation
+apt install fzf  # or: brew install fzf
+```
 
-### PATH not including custom directories
-- Use `pathadd` function for safety: `pathadd "${HOME}/mybin"`
-- Add to `~/.zshrc.local` for machine-specific paths
-- View current PATH: `path` alias or `echo $PATH | tr ":" "\n"`
-- Check order: Earlier entries take precedence
-
-### Oh-My-Zsh plugin not loading
-- Verify plugin exists: `ls ~/.oh-my-zsh/custom/plugins/`
-- For third-party plugins, ensure they're installed (e.g., zsh-autosuggestions)
-- Check plugin name matches directory name exactly
-- Reload after adding: `source ~/.zshrc`
-
-### Syntax errors or zsh won't start
-- Check syntax without running: `zsh -n ~/.zshrc`
-- Look for common issues: unmatched quotes, unclosed blocks
-- Test individual modules:
-  ```bash
-  zsh -n ~/.dotfiles/zsh/zshrc.aliases
-  zsh -n ~/.dotfiles/zsh/zshrc.functions
-  zsh -n ~/.dotfiles/zsh/zshrc.conditionals
-  ```
-- Temporarily disable modules by commenting out source lines in main `zshrc`
+### Syntax errors
+```bash
+zsh -n ~/.zshrc                         # Check main config
+zsh -n ~/.dotfiles/zsh/zshrc.aliases    # Check modules
+# Temporarily disable modules by commenting source lines in zshrc
+```
