@@ -1,0 +1,94 @@
+# Machine-Specific Shell Configuration
+#
+# This file is sourced by ~/.zshrc and is NOT tracked in git.
+# Use this for machine-specific settings, secrets, and overrides.
+#
+# Security: This file should have restrictive permissions (chmod 600)
+
+# =============================================================================
+# Quantivly Environment Variables
+# =============================================================================
+#
+# Quanticli provides sensible defaults for all variables.
+# Only uncomment and modify if you need to override the defaults.
+#
+# Defaults (from quanticli/path_finder.py):
+#   Q_DEV_CODE_ROOT     = $HOME/platform
+#   Q_WORKSPACES_ROOT   = $HOME/workspaces
+#   Q_HUB_ROOT          = $HOME/hub
+#   Q_MODE              = development
+#   Q_WORKSPACE_NAME    = dev
+#   Q_TEST_WORKSPACE_NAME = test
+#
+# Verify environment: quanticli doctor
+
+# export Q_DEV_CODE_ROOT="${HOME}/platform"
+# export Q_WORKSPACES_ROOT="${HOME}/workspaces"
+# export Q_HUB_ROOT="${HOME}/hub"
+# export Q_MODE="development"
+# export Q_WORKSPACE_NAME="dev"
+# export Q_TEST_WORKSPACE_NAME="test"
+
+# =============================================================================
+# Secrets and API Tokens
+# =============================================================================
+#
+# ⚠️  NEVER commit secrets to git! Keep them in this file only.
+#
+# Security Recommendations:
+#   1. Use sops for encrypted secrets (installed via mise)
+#      - Create: sops ~/.secrets/env.yaml
+#      - Edit:   sops ~/.secrets/env.yaml
+#      - Load:   eval $(sops -d ~/.secrets/env.yaml | grep export)
+#
+#   2. Use gpg-agent for SSH key passphrase caching
+#      - Prevents repeated passphrase prompts
+#      - See: ~/.dotfiles/docs/GPG_SIGNING_SETUP.md
+#
+#   3. Use GitHub CLI for git credentials (already configured)
+#      - No need to set GITHUB_TOKEN manually
+#      - Managed securely via: gh auth login
+#
+# Example (plaintext - use sops for sensitive data):
+# export GITHUB_TOKEN="your-token-here"
+# export AWS_PROFILE="your-profile"
+
+# =============================================================================
+# Machine-Specific PATH Additions
+# =============================================================================
+#
+# Use the pathadd function to safely add directories to PATH.
+# It checks if the directory exists and avoids duplicates.
+
+# pathadd "${HOME}/my-custom-bin"
+# pathadd "${HOME}/.cargo/bin"
+
+# =============================================================================
+# Machine-Specific Aliases
+# =============================================================================
+#
+# Add shortcuts for frequently-used directories or commands.
+
+# alias myproject="cd ~/projects/myproject"
+# alias logs="tail -f /var/log/myapp.log"
+
+# =============================================================================
+# Tool-Specific Overrides
+# =============================================================================
+#
+# Override oh-my-zsh plugins for this machine:
+# plugins=(${plugins:#poetry})  # Remove poetry plugin
+# plugins+=(my-custom-plugin)   # Add custom plugin
+
+# Disable specific aliases:
+# unalias ll  # If you don't want the 'll' alias
+
+# =============================================================================
+# SSH Agent Configuration (Optional)
+# =============================================================================
+#
+# If you use SSH keys with passphrases, consider adding ssh-agent:
+# if [ -z "$SSH_AUTH_SOCK" ]; then
+#     eval "$(ssh-agent -s)" > /dev/null
+#     ssh-add ~/.ssh/id_ed25519 2>/dev/null
+# fi

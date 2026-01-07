@@ -43,9 +43,12 @@
       # Create ~/.zshrc.local if it doesn't exist
       if [ ! -f ~/.zshrc.local ]; then
         echo "Creating ~/.zshrc.local from template..."
-        cp ~/.dotfiles/zsh/zshrc.local.example ~/.zshrc.local
+        cp ~/.dotfiles/examples/zshrc.local.template ~/.zshrc.local
         chmod 600 ~/.zshrc.local
-        echo "Please edit ~/.zshrc.local to add machine-specific configuration"
+        echo "✓ Created ~/.zshrc.local with Quantivly environment documentation"
+        echo "  Edit this file for machine-specific config (not tracked in git)"
+      else
+        echo "✓ ~/.zshrc.local already exists (preserving your customizations)"
       fi
     - |
       # Create ~/.gitconfig.local if it doesn't exist
