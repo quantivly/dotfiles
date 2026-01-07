@@ -34,6 +34,12 @@ jobs:
       - name: Check install script
         run: shellcheck -x install
 
+      - name: Check main zshrc
+        run: |
+          # Zshrc doesn't have shebang, check as bash (zsh is bash-compatible for linting)
+          # Exclude: SC1090 (can't follow non-constant source), SC1091 (not following sourced files)
+          shellcheck -x -e SC1090,SC1091 zshrc
+
   syntax-check:
     name: Shell Syntax Check
     runs-on: ubuntu-latest
