@@ -21,6 +21,7 @@
 # Machine-specific safe directories should be set in ~/.gitconfig.local
 # This prevents Git from polluting the tracked gitconfig with safe.directory entries
 #
+# Check your Git version: git --version
 # Git 2.35.2+ supports wildcard patterns (recommended):
 #   [safe]
 #       directory = ~/*

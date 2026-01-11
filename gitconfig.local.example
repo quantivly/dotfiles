@@ -44,6 +44,7 @@
 # Prevents Git from polluting your tracked gitconfig with safe.directory entries.
 # This is particularly important when running tests or working in temporary directories.
 #
+# Check your Git version: git --version
 # Git 2.35.2+ supports wildcard patterns. Recommended approach:
 [safe]
     directory = ~/*
