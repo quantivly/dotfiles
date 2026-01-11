@@ -19,8 +19,8 @@ if [[ -z "$SIGNING_KEY" ]]; then
 fi
 
 # Check if the key is cached by attempting a dry-run sign operation
-# Using --dry-run is more appropriate than --pinentry-mode loopback for testing
-if echo "test" | gpg --dry-run --clearsign --default-key "$SIGNING_KEY" -o /dev/null 2>/dev/null; then
+# Using --batch prevents interactive prompts; fails silently if cache not primed
+if echo "test" | gpg --batch --yes --dry-run --clearsign --default-key "$SIGNING_KEY" -o /dev/null 2>/dev/null; then
     # Cache is primed
     exit 0
 else
