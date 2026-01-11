@@ -19,9 +19,36 @@
 	path = ~/.gitconfig.local
 
 # Machine-specific safe directories should be set in ~/.gitconfig.local
-# Example:
+# This prevents Git from polluting the tracked gitconfig with safe.directory entries
+#
+# Check your Git version: git --version
+# Git 2.35.2+ supports wildcard patterns (recommended):
 #   [safe]
-#       directory = /home/ubuntu/workspaces/test
+#       directory = ~/*
+#       directory = /tmp/*
+#
+# Or be more specific (Quantivly development):
+#   [safe]
+#       directory = ~/platform/*      # Q_DEV_CODE_ROOT
+#       directory = ~/hub/*            # Q_HUB_ROOT
+#       directory = ~/workspaces/*     # Workspaces
+#       directory = ~/quanticli        # Quanticli repo
+#       directory = ~/quantivly/*      # Quantivly repos
+#       directory = ~/.dotfiles        # Personal dotfiles
+#       directory = /tmp/*             # Test directories
+#
+# More permissive option (trusts all directories):
+#   [safe]
+#       directory = *
+#
+# For older Git versions (no wildcards - list each directory):
+#   [safe]
+#       directory = ~/.dotfiles
+#       directory = ~/platform/auto-conf
+#       directory = ~/platform/sre-core
+#       directory = ~/hub/sre-customers-library
+#       directory = ~/workspaces/dev
+#       directory = ~/quanticli
 
 [credential "https://github.com"]
 	helper =

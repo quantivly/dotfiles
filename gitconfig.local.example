@@ -40,5 +40,38 @@
 #   gpg-prime   # Run once when you start working
 #   # ... work normally, commits signed automatically ...
 
+# Safe Directory Configuration (Recommended)
+# Prevents Git from polluting your tracked gitconfig with safe.directory entries.
+# This is particularly important when running tests or working in temporary directories.
+#
+# Check your Git version: git --version
+# Git 2.35.2+ supports wildcard patterns. Recommended approach:
+[safe]
+    directory = ~/*
+    directory = /tmp/*
+#
+# Or be more specific for Quantivly development (more secure):
+# [safe]
+#     directory = ~/platform/*      # Q_DEV_CODE_ROOT
+#     directory = ~/hub/*            # Q_HUB_ROOT
+#     directory = ~/workspaces/*     # Workspaces
+#     directory = ~/quanticli        # Quanticli repo
+#     directory = ~/quantivly/*      # Quantivly repos
+#     directory = ~/.dotfiles        # Personal dotfiles
+#     directory = /tmp/*             # Test directories
+#
+# Alternative (most permissive - trusts all directories):
+# [safe]
+#     directory = *
+#
+# For older Git versions (no wildcards - list each directory individually):
+# [safe]
+#     directory = ~/.dotfiles
+#     directory = ~/platform/auto-conf
+#     directory = ~/platform/sre-core
+#     directory = ~/hub/sre-customers-library
+#     directory = ~/workspaces/dev
+#     directory = ~/quanticli
+
 # Machine-specific git configuration
 # Add any other personal git settings here
