@@ -241,6 +241,117 @@ git add .mise.toml && git commit -m "Updated <tool> to <version>"
 
 See `docs/TOOL_VERSION_UPDATES.md` for details.
 
+## Python Environment Management
+
+### Architecture
+
+Projects use a unified **mise + direnv + Poetry** strategy:
+- **mise**: Fast Python version management (~5-10ms activation)
+- **direnv**: Automatic per-directory environment activation
+- **Poetry**: Dependency management with in-project `.venv/`
+
+**Why not pyenv?** mise is faster (~5-10ms vs ~100-200ms) and already installed by dev-setup.
+
+### Project Structure
+
+```
+project-root/
+├── .mise.toml               # mise Python version specification
+├── .python-version          # Python version (for documentation)
+├── .envrc                   # Auto-activation script (direnv)
+├── .venv/                   # Virtual environment (in-project)
+└── .vscode/settings.json    # IDE interpreter configuration
+```
+
+### Setup New Project
+
+```bash
+cd project-root
+
+# Create .mise.toml
+cat > .mise.toml << 'EOF'
+[tools]
+python = "3.11"
+EOF
+
+# Create .python-version (optional, for documentation)
+echo "3.11" > .python-version
+
+# Create .envrc (for plain virtualenv projects)
+cat > .envrc << 'EOF'
+# Activate mise environment (reads .mise.toml)
+eval "$(mise activate bash --shims)"
+
+# Source shared Python helpers
+source ~/.dotfiles/shell/python-env-helpers.sh
+
+# Create virtualenv if it doesn't exist
+if [ ! -d .venv ]; then
+    echo "Creating virtual environment..."
+    python -m venv .venv
+fi
+
+# Activate virtualenv
+export VIRTUAL_ENV="$(pwd)/.venv"
+PATH_add "$VIRTUAL_ENV/bin"
+
+# Check if dependencies need updating
+check_python_dependencies
+EOF
+
+# For Poetry projects, see examples/python-project-setup.md
+
+# Trust direnv and mise
+direnv allow
+mise trust
+
+# Install Python version
+mise install
+```
+
+### Verification
+
+```bash
+mise current           # Shows active Python version
+echo $VIRTUAL_ENV      # Shows .venv path
+which python           # Shows .venv/bin/python
+python --version       # Shows expected version
+```
+
+### Dependency Management
+
+The `.envrc` automatically checks if your dependencies need updating when you `cd` into a project:
+- **Poetry projects**: Checks if `poetry.lock` is newer than `.venv`
+- **pip + requirements.txt**: Checks if requirements.txt is newer than `.venv`
+- **pip + requirements/ directory**: Checks if any .txt file in requirements/ is newer than `.venv`
+- Shows: `⚠️  Dependencies outdated. Run: <command>`
+
+**Fully Automatic:** When you run `poetry install` or `pip install`, it modifies files in `.venv`, automatically updating its timestamp. The warning disappears on your next `cd` into the project - no manual marking needed!
+
+### Troubleshooting
+
+**Environment not activating:**
+```bash
+direnv allow           # Trust .envrc
+mise trust             # Trust .mise.toml
+mise install           # Install Python version
+direnv reload          # Force reload
+```
+
+**Wrong Python version:**
+```bash
+cat .mise.toml         # Check configured version
+mise ls python         # List installed versions
+mise install python@X.Y  # Install missing version
+```
+
+**VSCode using wrong interpreter:**
+- Cmd+Shift+P → "Python: Select Interpreter"
+- Choose `.venv/bin/python` from project
+- Ensure `"python.terminal.activateEnvironment": false` in settings (direnv handles it)
+
+**See:** [examples/python-project-setup.md](examples/python-project-setup.md) for complete examples.
+
 ## Command Behavior Changes
 
 When tools are installed, standard commands are replaced:
