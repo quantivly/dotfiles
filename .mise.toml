@@ -26,8 +26,9 @@
 # See: docs/TOOL_VERSION_UPDATES.md for detailed procedures
 
 [settings]
-# Enable legacy version file support (.nvmrc, .python-version, .tool-versions)
-legacy_version_file = true
+# Disable legacy version file support to prevent ancestor directory scanning
+# Projects will use explicit .mise.toml or rely on direnv + mise integration
+legacy_version_file = false
 
 # Use aqua backend for enhanced security (GPG signature verification where available)
 experimental = true
