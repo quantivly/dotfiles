@@ -1,0 +1,12 @@
+{
+  // Python interpreter - use project-local .venv
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+
+  // Terminal - direnv handles activation
+  "python.terminal.activateEnvironment": false,
+
+  // Formatting
+  "[python]": {
+    "editor.formatOnSave": true
+  }
+}

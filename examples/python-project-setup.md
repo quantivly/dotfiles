@@ -1,6 +1,35 @@
 # Python Project Setup Examples
 
-## Poetry Project (e.g., quanticli, auto-conf)
+## Simple Dependency Checking with quanticli
+
+All projects now use a **simple, single-location approach** with graceful degradation:
+
+**.envrc pattern:**
+- Conditionally calls `quanticli doctor deps --quiet` if quanticli is available
+- No coupling to dotfiles - projects work independently
+- Graceful degradation - environment activates even without quanticli
+- Automatic dependency checking when you `cd` into a project
+
+**What it checks:**
+- Poetry projects: `poetry.lock` vs `.venv` modification time
+- pip projects: `requirements.txt` vs `.venv`
+- Django-style: All `requirements/*.txt` files
+- PEP 621: `pyproject.toml` (non-Poetry)
+
+**Templates:** Three ready-to-use templates available at `~/.dotfiles/examples/envrc-templates/`
+- `minimal.envrc` - Poetry + requirements.txt
+- `extended.envrc` - Plus requirements/ directory
+- `hub-root.envrc` - No dependency checking
+
+**See:** [envrc-templates/README.md](envrc-templates/README.md) for complete template guide
+
+---
+
+## Examples: All Project Types
+
+The examples below show the standard pattern used by all projects.
+
+### Poetry Project (e.g., quanticli, auto-conf)
 
 ### Files
 
@@ -20,9 +49,6 @@ python = "3.10"
 # Activate mise environment (reads .mise.toml)
 eval "$(mise activate bash --shims)"
 
-# Source shared Python helpers
-source ~/.dotfiles/shell/python-env-helpers.sh
-
 # Create virtualenv if it doesn't exist
 if [ ! -d .venv ]; then
     echo "Creating virtual environment..."
@@ -36,8 +62,10 @@ PATH_add "$VIRTUAL_ENV/bin"
 # Mark as Poetry project
 [ -f poetry.lock ] && export POETRY_ACTIVE=1
 
-# Check dependencies
-check_python_dependencies
+# Check dependencies if quanticli is available
+if command -v quanticli &>/dev/null; then
+    quanticli doctor deps --quiet 2>/dev/null || true
+fi
 ```
 
 **pyproject.toml:**
@@ -55,15 +83,13 @@ build-backend = "poetry.core.masonry.api"
 ```
 
 **.vscode/settings.json:**
-```json
-{
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.terminal.activateEnvironment": false,
-  "[python]": {
-    "editor.formatOnSave": true
-  }
-}
+```bash
+# Copy template from dotfiles
+mkdir -p .vscode
+cp ~/.dotfiles/examples/vscode/settings.json .vscode/
 ```
+
+See [vscode/README.md](vscode/README.md) for details and customization options.
 
 ### Setup
 ```bash
@@ -104,9 +130,6 @@ python = "3.13"
 # Activate mise environment (reads .mise.toml)
 eval "$(mise activate bash --shims)"
 
-# Source shared Python helpers
-source ~/.dotfiles/shell/python-env-helpers.sh
-
 # Create virtualenv if it doesn't exist
 if [ ! -d .venv ]; then
     echo "Creating virtual environment..."
@@ -117,8 +140,10 @@ fi
 export VIRTUAL_ENV="$(pwd)/.venv"
 PATH_add "$VIRTUAL_ENV/bin"
 
-# Check dependencies
-check_python_dependencies
+# Check dependencies if quanticli is available
+if command -v quanticli &>/dev/null; then
+    quanticli doctor deps --quiet 2>/dev/null || true
+fi
 
 # Also check scripts/requirements.txt (hub-specific)
 if [ -f scripts/requirements.txt ] && [ -d .venv ]; then
@@ -135,15 +160,13 @@ rich>=13.7.0
 ```
 
 **.vscode/settings.json:**
-```json
-{
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.terminal.activateEnvironment": false,
-  "[python]": {
-    "editor.formatOnSave": true
-  }
-}
+```bash
+# Copy template from dotfiles
+mkdir -p .vscode
+cp ~/.dotfiles/examples/vscode/settings.json .vscode/
 ```
+
+See [vscode/README.md](vscode/README.md) for details and customization options.
 
 ### Setup
 ```bash
@@ -191,9 +214,6 @@ python = "3.13"
 # Activate mise environment (reads .mise.toml)
 eval "$(mise activate bash --shims)"
 
-# Source shared Python helpers
-source ~/.dotfiles/shell/python-env-helpers.sh
-
 # Create virtualenv if it doesn't exist
 if [ ! -d .venv ]; then
     echo "Creating virtual environment..."
@@ -204,20 +224,20 @@ fi
 export VIRTUAL_ENV="$(pwd)/.venv"
 PATH_add "$VIRTUAL_ENV/bin"
 
-# Check dependencies
-check_python_dependencies
+# Check dependencies if quanticli is available
+if command -v quanticli &>/dev/null; then
+    quanticli doctor deps --quiet 2>/dev/null || true
+fi
 ```
 
 **.vscode/settings.json:**
-```json
-{
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.terminal.activateEnvironment": false,
-  "[python]": {
-    "editor.formatOnSave": true
-  }
-}
+```bash
+# Copy template from dotfiles
+mkdir -p .vscode
+cp ~/.dotfiles/examples/vscode/settings.json .vscode/
 ```
+
+See [vscode/README.md](vscode/README.md) for details and customization options.
 
 ### Setup
 ```bash
