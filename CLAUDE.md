@@ -373,7 +373,7 @@ All 11 existing projects have been migrated to use this pattern:
 - Platform: auto-conf, quantivly-sdk, box, ptbi, healthcheck, auto-test, ris
 - Hub: sre-sdk, sre-core, hub root
 
-The old `~/.dotfiles/shell/python-env-helpers.sh` is deprecated.
+The old `~/.dotfiles/shell/python-env-helpers.sh` has been removed.
 
 ### Troubleshooting
 
