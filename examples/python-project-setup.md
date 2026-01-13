@@ -16,10 +16,9 @@ All projects now use a **simple, single-location approach** with graceful degrad
 - Django-style: All `requirements/*.txt` files
 - PEP 621: `pyproject.toml` (non-Poetry)
 
-**Templates:** Three ready-to-use templates available at `~/.dotfiles/examples/envrc-templates/`
-- `minimal.envrc` - Poetry + requirements.txt
-- `extended.envrc` - Plus requirements/ directory
-- `hub-root.envrc` - No dependency checking
+**Templates:** Two ready-to-use templates available at `~/.dotfiles/examples/envrc-templates/`
+- `minimal.envrc` - General-purpose (all project types: Poetry, pip, requirements/, pyproject.toml)
+- `hub-root.envrc` - Root directories with ad-hoc scripts
 
 **See:** [envrc-templates/README.md](envrc-templates/README.md) for complete template guide
 

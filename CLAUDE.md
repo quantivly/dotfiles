@@ -279,29 +279,9 @@ EOF
 # Create .python-version (optional, for documentation)
 echo "3.11" > .python-version
 
-# Create .envrc (for plain virtualenv projects)
-cat > .envrc << 'EOF'
-# Activate mise environment (reads .mise.toml)
-eval "$(mise activate bash --shims)"
-
-# Source shared Python helpers
-source ~/.dotfiles/shell/python-env-helpers.sh
-
-# Create virtualenv if it doesn't exist
-if [ ! -d .venv ]; then
-    echo "Creating virtual environment..."
-    python -m venv .venv
-fi
-
-# Activate virtualenv
-export VIRTUAL_ENV="$(pwd)/.venv"
-PATH_add "$VIRTUAL_ENV/bin"
-
-# Check if dependencies need updating
-check_python_dependencies
-EOF
-
-# For Poetry projects, see examples/python-project-setup.md
+# Copy .envrc template
+cp ~/.dotfiles/examples/envrc-templates/minimal.envrc .envrc
+# See examples/envrc-templates/README.md and examples/python-project-setup.md for details
 
 # Trust direnv and mise
 direnv allow
@@ -388,7 +368,12 @@ quanticli doctor deps --quiet      # Suppress output (for .envrc)
 ```
 
 **Migration from shared helper:**
-All 9 existing projects (quanticli, platform/*, hub) have been migrated to use this pattern. The old `~/.dotfiles/shell/python-env-helpers.sh` is deprecated.
+All 11 existing projects have been migrated to use this pattern:
+- quanticli
+- Platform: auto-conf, quantivly-sdk, box, ptbi, healthcheck, auto-test, ris
+- Hub: sre-sdk, sre-core, hub root
+
+The old `~/.dotfiles/shell/python-env-helpers.sh` is deprecated.
 
 ### Troubleshooting
 

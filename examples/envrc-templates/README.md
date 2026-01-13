@@ -19,31 +19,29 @@ Self-contained Python environment templates with **graceful dependency checking*
 
 ## Available Templates
 
-### 1. `minimal.envrc` - Poetry + requirements.txt
+### 1. `minimal.envrc` - General-Purpose Template
 
-**Supports:**
+**Supports all Python project types:**
 - Poetry projects (with `poetry.lock`)
 - pip projects (with `requirements.txt`)
+- Django-style projects (with `requirements/` directory)
+- PEP 621 projects (with `pyproject.toml`)
 - Automatic dependency checking via quanticli
 
-**Use for:** Most projects (quanticli, auto-conf, quantivly-sdk, box, ptbi, healthcheck, auto-test)
+**Use for:** All Python projects (quanticli, auto-conf, quantivly-sdk, box, ptbi, healthcheck, auto-test, ris, sre-core, sre-sdk, hub subdirectories)
 
-### 2. `extended.envrc` - Plus requirements/ directory
+**How it works:**
+- `quanticli doctor deps` automatically detects your project's dependency pattern
+- No configuration needed - just copy and use
+- Graceful degradation if quanticli not installed
 
-**Supports:**
-- All features of minimal
-- Plus: Django-style `requirements/` directory checking
-- Cross-platform compatible (macOS + Linux)
+### 2. `hub-root.envrc` - Root Directory Template
 
-**Use for:** Projects with requirements/ structure (hub/sre-core, platform/src/ris)
+**Differences from minimal:**
+- Omits `POETRY_ACTIVE` environment variable (root directories don't use Poetry)
+- Same dependency checking via quanticli (optional for ad-hoc scripts)
 
-### 3. `hub-root.envrc` - Optional dependency checking
-
-**Supports:**
-- Basic venv activation
-- Optional dependency checking via quanticli
-
-**Use for:** Root directories with ad-hoc scripts (hub root)
+**Use for:** Root-level directories with ad-hoc scripts (hub root)
 
 ## Usage
 
