@@ -50,6 +50,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.gitconfig` → `~/.dotfiles/gitconfig`
 - `~/.config/gh/config.yml` → `~/.dotfiles/gh/config.yml`
 - `~/.config/git/ignore` → `~/.dotfiles/config/git/ignore`
+- `~/.config/Code/User/settings.json` → `~/.dotfiles/vscode/settings.json`
 
 ### Configuration Loading Order
 
@@ -259,9 +260,10 @@ project-root/
 ├── .mise.toml               # mise Python version specification
 ├── .python-version          # Python version (for documentation)
 ├── .envrc                   # Auto-activation script (direnv)
-├── .venv/                   # Virtual environment (in-project)
-└── .vscode/settings.json    # IDE interpreter configuration
+└── .venv/                   # Virtual environment (in-project)
 ```
+
+**Note:** VSCode configuration is now managed globally via dotfiles (`~/.config/Code/User/settings.json`). Projects only need `.vscode/settings.json` for project-specific overrides.
 
 ### Setup New Project
 
@@ -277,29 +279,9 @@ EOF
 # Create .python-version (optional, for documentation)
 echo "3.11" > .python-version
 
-# Create .envrc (for plain virtualenv projects)
-cat > .envrc << 'EOF'
-# Activate mise environment (reads .mise.toml)
-eval "$(mise activate bash --shims)"
-
-# Source shared Python helpers
-source ~/.dotfiles/shell/python-env-helpers.sh
-
-# Create virtualenv if it doesn't exist
-if [ ! -d .venv ]; then
-    echo "Creating virtual environment..."
-    python -m venv .venv
-fi
-
-# Activate virtualenv
-export VIRTUAL_ENV="$(pwd)/.venv"
-PATH_add "$VIRTUAL_ENV/bin"
-
-# Check if dependencies need updating
-check_python_dependencies
-EOF
-
-# For Poetry projects, see examples/python-project-setup.md
+# Copy .envrc template
+cp ~/.dotfiles/examples/envrc-templates/minimal.envrc .envrc
+# See examples/envrc-templates/README.md and examples/python-project-setup.md for details
 
 # Trust direnv and mise
 direnv allow
@@ -328,6 +310,71 @@ The `.envrc` automatically checks if your dependencies need updating when you `c
 
 **Fully Automatic:** When you run `poetry install` or `pip install`, it modifies files in `.venv`, automatically updating its timestamp. The warning disappears on your next `cd` into the project - no manual marking needed!
 
+### Dependency Checking with quanticli
+
+**Simple, single-location approach** - no dotfiles coupling, graceful degradation:
+
+**.envrc pattern:**
+```bash
+# Activate mise environment (reads .mise.toml)
+eval "$(mise activate bash --shims)"
+
+# Create virtualenv if it doesn't exist
+if [ ! -d .venv ]; then
+    echo "Creating virtual environment..."
+    python -m venv .venv
+fi
+
+# Activate virtualenv
+export VIRTUAL_ENV="$(pwd)/.venv"
+PATH_add "$VIRTUAL_ENV/bin"
+
+# Mark Poetry projects (optional)
+[ -f poetry.lock ] && export POETRY_ACTIVE=1
+
+# Check dependencies if quanticli is available
+if command -v quanticli &>/dev/null; then
+    quanticli doctor deps --quiet 2>/dev/null || true
+fi
+```
+
+**How it works:**
+- `.envrc` conditionally calls `quanticli doctor deps --quiet` if quanticli is installed
+- No coupling to dotfiles - projects work independently
+- Graceful degradation - if quanticli not available, environment still activates
+- Automatic checking when you `cd` into a project
+- Manual checking: `quanticli doctor deps` (shows detailed output)
+- CI/CD integration: `quanticli doctor deps` (exit code 0 = success, 1 = outdated)
+
+**What it checks:**
+- Poetry projects: Compares `poetry.lock` vs `.venv` modification time
+- pip projects: Compares `requirements.txt` vs `.venv`
+- Django-style: Checks all `requirements/*.txt` files
+- PEP 621: Checks `pyproject.toml` (non-Poetry)
+
+**Benefits:**
+- ✅ No dotfiles coupling - independent projects
+- ✅ Graceful degradation - works without quanticli
+- ✅ Single implementation - updates in one place
+- ✅ Automatic checking - runs on `cd` via .envrc
+- ✅ Manual checking - `quanticli doctor deps` for diagnostics
+- ✅ CI/CD ready - proper exit codes
+
+**quanticli doctor deps usage:**
+```bash
+quanticli doctor deps              # Check current project
+quanticli doctor deps -p ~/project # Check specific project
+quanticli doctor deps --quiet      # Suppress output (for .envrc)
+```
+
+**Migration from shared helper:**
+All 11 existing projects have been migrated to use this pattern:
+- quanticli
+- Platform: auto-conf, quantivly-sdk, box, ptbi, healthcheck, auto-test, ris
+- Hub: sre-sdk, sre-core, hub root
+
+The old `~/.dotfiles/shell/python-env-helpers.sh` is deprecated.
+
 ### Troubleshooting
 
 **Environment not activating:**
@@ -348,7 +395,8 @@ mise install python@X.Y  # Install missing version
 **VSCode using wrong interpreter:**
 - Cmd+Shift+P → "Python: Select Interpreter"
 - Choose `.venv/bin/python` from project
-- Ensure `"python.terminal.activateEnvironment": false` in settings (direnv handles it)
+- Global settings (managed by dotfiles) already set `python.terminal.activateEnvironment: false`
+- Verify global settings: `cat ~/.config/Code/User/settings.json`
 
 **See:** [examples/python-project-setup.md](examples/python-project-setup.md) for complete examples.
 
