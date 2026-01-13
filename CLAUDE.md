@@ -50,6 +50,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.gitconfig` → `~/.dotfiles/gitconfig`
 - `~/.config/gh/config.yml` → `~/.dotfiles/gh/config.yml`
 - `~/.config/git/ignore` → `~/.dotfiles/config/git/ignore`
+- `~/.config/Code/User/settings.json` → `~/.dotfiles/vscode/settings.json`
 
 ### Configuration Loading Order
 
@@ -259,9 +260,10 @@ project-root/
 ├── .mise.toml               # mise Python version specification
 ├── .python-version          # Python version (for documentation)
 ├── .envrc                   # Auto-activation script (direnv)
-├── .venv/                   # Virtual environment (in-project)
-└── .vscode/settings.json    # IDE interpreter configuration
+└── .venv/                   # Virtual environment (in-project)
 ```
+
+**Note:** VSCode configuration is now managed globally via dotfiles (`~/.config/Code/User/settings.json`). Projects only need `.vscode/settings.json` for project-specific overrides.
 
 ### Setup New Project
 
@@ -408,7 +410,8 @@ mise install python@X.Y  # Install missing version
 **VSCode using wrong interpreter:**
 - Cmd+Shift+P → "Python: Select Interpreter"
 - Choose `.venv/bin/python` from project
-- Ensure `"python.terminal.activateEnvironment": false` in settings (direnv handles it)
+- Global settings (managed by dotfiles) already set `python.terminal.activateEnvironment: false`
+- Verify global settings: `cat ~/.config/Code/User/settings.json`
 
 **See:** [examples/python-project-setup.md](examples/python-project-setup.md) for complete examples.
 

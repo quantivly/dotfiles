@@ -1,12 +1,30 @@
 {
-  // Python interpreter - use project-local .venv
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  // NOTE: Most Python settings are configured globally via dotfiles
+  // (~/.config/Code/User/settings.json symlinked from ~/.dotfiles/vscode/settings.json)
+  //
+  // This template is for project-specific overrides only.
+  // Common overrides include:
+  //
+  // - Project-specific formatter settings
+  // - Custom test discovery paths
+  // - Language server configuration
+  // - Line length or other linting rules
+  //
+  // Example project-specific settings:
 
-  // Terminal - direnv handles activation
-  "python.terminal.activateEnvironment": false,
+  // Uncomment to override default interpreter path
+  // "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
 
-  // Formatting
-  "[python]": {
-    "editor.formatOnSave": true
-  }
+  // Project-specific code actions
+  // "[python]": {
+  //   "editor.codeActionsOnSave": {
+  //     "source.organizeImports": "explicit"
+  //   }
+  // },
+
+  // Project-specific pytest configuration
+  // "python.testing.pytestArgs": [
+  //   "tests",
+  //   "--cov=mypackage"
+  // ]
 }

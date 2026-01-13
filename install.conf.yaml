@@ -11,6 +11,7 @@
     ~/.config/git/ignore: config/git/ignore
     ~/.config/git/hooks: config/git/hooks
     ~/.config/pypoetry/config.toml: config/pypoetry/config.toml
+    ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.gitconfig: gitconfig
     ~/.zshrc: zshrc
     ~/.p10k.zsh:

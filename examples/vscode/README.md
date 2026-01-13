@@ -1,70 +1,69 @@
-# VSCode Python Project Settings
+# VSCode Python Configuration
 
-This directory contains VSCode settings templates for Python projects using mise + direnv + Poetry.
+VSCode settings for Python projects using mise + direnv + Poetry are managed globally via dotfiles.
 
-## Quick Setup
+## Global Configuration (Automatic)
 
-Copy the template to your project:
+The dotfiles installer (`./install`) symlinks `~/.dotfiles/vscode/settings.json` to `~/.config/Code/User/settings.json`, providing these settings for **all** Python projects:
 
-```bash
-mkdir -p .vscode
-cp ~/.dotfiles/examples/vscode/settings.json .vscode/
-```
+- **`python.terminal.activateEnvironment: false`** - Critical for direnv compatibility
+- **`python.defaultInterpreterPath`** - Uses project-local `.venv/bin/python`
+- **`[python]` formatting** - Format on save with Ruff as default formatter
+- **pytest enabled** - Pytest testing framework enabled by default
+- **File associations** - `.envrc`, `.python-version`, `.mise.toml` syntax highlighting
 
-## What It Does
+## Why Global Configuration?
 
-The template configures VSCode to work seamlessly with direnv-managed Python environments:
+Since you use direnv consistently across all Python projects, these settings should be global rather than duplicated in each project's `.vscode/settings.json`.
 
-- **`python.defaultInterpreterPath`**: Points to project-local `.venv/bin/python`
-- **`python.terminal.activateEnvironment: false`**: Critical - lets direnv handle activation instead of VSCode
-- **Format on save**: Enabled for Python files
+**Benefits:**
+- ✅ No need to configure VSCode per-project
+- ✅ Consistent behavior across all projects
+- ✅ Works for both standalone projects and multi-folder workspaces
+- ✅ Single source of truth in dotfiles
 
-## Why `python.terminal.activateEnvironment: false`?
+## Critical Setting: `python.terminal.activateEnvironment: false`
 
-When you use direnv (via `.envrc`), the virtualenv is automatically activated when you `cd` into the project. If VSCode also tries to activate it, you get conflicts and confusion.
+When you use direnv (via `.envrc`), the virtualenv is automatically activated when you `cd` into the project. If VSCode also tries to activate it, you get conflicts.
 
-**With this setting:**
+**With global setting to `false`:**
 - Open integrated terminal → direnv activates `.venv` automatically
 - No double-activation
 - Consistent behavior between terminal and VSCode
 
-## Customization
+## Project-Specific Overrides (Optional)
 
-You can extend the template with additional settings:
+Most projects don't need a `.vscode/settings.json` file. Only create one if you need project-specific settings like:
 
-```json
-{
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.terminal.activateEnvironment": false,
+- Custom pytest arguments
+- Project-specific formatters or linters
+- Special code actions
+- Non-standard interpreter paths
 
-  "[python]": {
-    "editor.formatOnSave": true,
-    "editor.defaultFormatter": "charliermarsh.ruff",  // If using Ruff
-    "editor.codeActionsOnSave": {
-      "source.organizeImports": "explicit"
-    }
-  },
+**Template for overrides:**
 
-  // Testing
-  "python.testing.pytestEnabled": true,
-  "python.testing.unittestEnabled": false,
-
-  // Type checking
-  "python.analysis.typeCheckingMode": "basic"
-}
+```bash
+mkdir -p .vscode
+cp ~/.dotfiles/examples/vscode/settings.json .vscode/
+# Edit .vscode/settings.json to uncomment and customize settings
 ```
 
-## Integration with Project Setup
+See `settings.json` in this directory for commented examples.
 
-This template is referenced in:
-- `~/.dotfiles/examples/python-project-setup.md`
-- `~/.dotfiles/examples/envrc-templates/README.md`
+## Verification
+
+Check your global settings:
+
+```bash
+cat ~/.config/Code/User/settings.json  # Should be symlinked to ~/.dotfiles/vscode/settings.json
+ls -la ~/.config/Code/User/settings.json  # Verify it's a symlink
+```
 
 ## Multi-Folder Workspaces
 
-For multi-folder workspaces (like `quantivly.code-workspace`), you need workspace-level settings. See DO-209 for workspace configuration.
+Global settings also work with multi-folder workspaces (like `quantivly.code-workspace`). Workspace settings can override global settings if needed.
 
 ---
 
-**Created:** 2026-01-13
-**Purpose:** Provide reusable VSCode settings for Python projects with direnv
+**Updated:** 2026-01-13
+**Purpose:** Global VSCode configuration for Python projects with direnv managed via dotfiles
