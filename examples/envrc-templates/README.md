@@ -157,7 +157,7 @@ vim project/.envrc
 
 ## Migration from Shared Helper
 
-All 9 existing projects have been migrated from the old shared helper pattern to use quanticli:
+All 11 existing projects have been migrated from the old shared helper pattern to use quanticli:
 
 **Before:**
 ```bash
@@ -172,7 +172,7 @@ if command -v quanticli &>/dev/null; then
 fi
 ```
 
-The old `~/.dotfiles/shell/python-env-helpers.sh` is deprecated and will be removed.
+The old `~/.dotfiles/shell/python-env-helpers.sh` has been removed.
 
 ## Troubleshooting
 
