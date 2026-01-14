@@ -31,4 +31,12 @@ if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   # - dsh function (Docker shell access)
   # - Various Docker and git aliases
   # - IP_ADDRESS and EXTRA_HOSTS environment variables
+else
+  # Warn user in interactive shells if the plugin is missing
+  # This helps diagnose why q, qn, qg aliases don't work
+  if [[ -o interactive ]]; then
+    echo "Warning: quantivly oh-my-zsh plugin not installed." >&2
+    echo "  Run: git clone git@github.com:quantivly/quantivly-zsh-plugin.git ~/.oh-my-zsh/custom/plugins/quantivly" >&2
+    echo "  Or run dev-setup: ~/quantivly/dev-setup/setup.sh" >&2
+  fi
 fi
