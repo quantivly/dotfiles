@@ -23,6 +23,10 @@ ZSH_THEME="powerlevel10k/powerlevel10k"
 # Auto-update without prompting
 zstyle ':omz:update' mode auto
 
+# Suppress direnv informational messages to avoid Powerlevel10k instant prompt warnings
+# This keeps error messages but silences "loading" and "export" notifications
+export DIRENV_LOG_FORMAT=""
+
 # Plugins to load (optimized for performance)
 # Note: zsh-syntax-highlighting must be last in the list
 # Removed slow plugins: poetry (300ms), command-not-found (100ms)

@@ -551,6 +551,13 @@ time zsh -i -c exit  # Profile performance
 # mise is fast (~5-10ms). If using nvm/pyenv, see docs/MIGRATION.md
 ```
 
+### Powerlevel10k warning about console output
+
+If you see a warning about "console output during zsh initialization" caused by direnv:
+- The dotfiles suppress direnv messages via `DIRENV_LOG_FORMAT=""`
+- If you still see output, check for `echo` statements in project `.envrc` files
+- Ensure `.envrc` files use redirects and `--quiet` flags (see examples/envrc-templates/)
+
 ### Function not found
 ```bash
 ls -la ~/.zshrc      # Check symlink
