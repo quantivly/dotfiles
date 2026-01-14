@@ -37,6 +37,6 @@ else
   if [[ -o interactive ]]; then
     echo "Warning: quantivly oh-my-zsh plugin not installed." >&2
     echo "  Run: quanticli install-plugin" >&2
-    echo "  Or reinstall dotfiles: cd ~/.dotfiles && ./install.sh" >&2
+    echo "  Or reinstall dotfiles: cd ~/.dotfiles && ./install" >&2
   fi
 fi
