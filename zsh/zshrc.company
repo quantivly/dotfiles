@@ -36,7 +36,7 @@ else
   # This helps diagnose why q, qn, qg aliases don't work
   if [[ -o interactive ]]; then
     echo "Warning: quantivly oh-my-zsh plugin not installed." >&2
-    echo "  Run: quanticli install-plugin" >&2
-    echo "  Or reinstall dotfiles: cd ~/.dotfiles && ./install" >&2
+    echo "  Run: git clone git@github.com:quantivly/quantivly-zsh-plugin.git ~/.oh-my-zsh/custom/plugins/quantivly" >&2
+    echo "  Or run dev-setup: ~/quantivly/dev-setup/setup.sh" >&2
   fi
 fi
