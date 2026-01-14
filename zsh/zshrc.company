@@ -6,7 +6,7 @@ if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   # Quantivly development environment settings
   # These can be overridden in ~/.zshrc.local for machine-specific values
   export Q_MODE="${Q_MODE:-development}"
-  export Q_DEV_CODE_ROOT="${Q_DEV_CODE_ROOT:-${HOME}/stacks/dev}"
+  export Q_DEV_CODE_ROOT="${Q_DEV_CODE_ROOT:-${HOME}/platform}"
   export Q_WORKSPACES_ROOT="${Q_WORKSPACES_ROOT:-${HOME}/workspaces}"
   export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
   export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
