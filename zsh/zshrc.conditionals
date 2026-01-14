@@ -196,6 +196,7 @@ fi
 # direnv - Environment variable manager per directory
 # Install: brew install direnv (macOS) or apt install direnv (Ubuntu)
 # Note: oh-my-zsh plugin handles the setup if enabled
+#       DIRENV_LOG_FORMAT="" in zshrc suppresses console output for Powerlevel10k compatibility
 
 # =============================================================================
 # Mise - Modern Polyglot Version Manager
