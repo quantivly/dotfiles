@@ -1,0 +1,375 @@
+#==============================================================================
+# Modern CLI Tool Replacements
+#==============================================================================
+
+# Ubuntu package name variants - check once, use throughout
+# Ubuntu installs some tools with different names to avoid conflicts
+# Variables prefixed with _ indicate internal use (not for user modification)
+if command -v bat &>/dev/null; then
+  _BAT_CMD="bat"
+elif command -v batcat &>/dev/null; then
+  _BAT_CMD="batcat"
+fi
+
+if command -v fd &>/dev/null; then
+  _FD_CMD="fd"
+elif command -v fdfind &>/dev/null; then
+  _FD_CMD="fdfind"
+fi
+
+# bat - Better cat with syntax highlighting (managed by mise)
+if [[ -n "$_BAT_CMD" ]]; then
+  alias cat="$_BAT_CMD --style=auto"
+  alias catp="$_BAT_CMD --style=plain"
+  export BAT_THEME="Monokai Extended"
+fi
+
+# eza - Modern ls replacement (managed by mise)
+if command -v eza &>/dev/null; then
+  alias ls='eza --icons --group-directories-first'
+  alias la='eza --icons --group-directories-first -a'
+  alias ll='eza --icons --group-directories-first -lh'
+  alias lla='eza --icons --group-directories-first -lha'
+  alias tree='eza --tree --icons'
+else
+  # Fallback to standard ls
+  if ls --color=auto >/dev/null 2>&1; then
+    alias ls='ls --color=auto --group-directories-first'
+  fi
+fi
+
+# ripgrep - Better grep
+# Install: apt install ripgrep (Ubuntu) or brew install ripgrep (macOS)
+# WARNING: rg has different behavior than grep - not fully POSIX compatible
+if command -v rg &>/dev/null; then
+  export _HAS_RG=1
+
+  # Note: Keeping standard grep alias for compatibility
+  # Users can use 'rg' directly for ripgrep features
+  # Or use '\grep' to bypass alias and access original grep behavior
+
+  # Provide explicit functions for users who need specific behavior
+  posix_grep() {
+    echo "Using standard grep for POSIX compatibility"
+    command grep "$@"
+  }
+
+  rg_grep() {
+    echo "Using ripgrep explicitly"
+    rg "$@"
+  }
+else
+  export _HAS_RG=0
+fi
+
+# delta - Better git diff
+# Install: https://github.com/dandavison/delta
+if command -v delta &>/dev/null; then
+  export GIT_PAGER='delta'
+fi
+
+
+#==============================================================================
+# Modern Navigation Tools
+#==============================================================================
+
+# zoxide - Smarter cd that learns your patterns
+# Install: curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
+# Or: cargo install zoxide
+# Or: apt install zoxide (Ubuntu 21.10+)
+if command -v zoxide &>/dev/null; then
+  # Initialize zoxide (suppress errors in non-interactive contexts)
+  eval "$(zoxide init zsh 2>/dev/null)" 2>/dev/null
+
+  # Only set up aliases if zoxide initialized successfully
+  if (( ${+functions[__zoxide_z]} )); then
+    # Enhanced aliases for different navigation patterns
+    alias cd='z'          # Replace cd with zoxide
+    alias cdi='zi'        # Interactive zoxide with fzf
+    alias cda='za'        # Add current directory to zoxide database
+    alias cdq='zq'        # Query zoxide database
+
+    # Fuzzy navigation with preview (if fzf available)
+    if command -v fzf &>/dev/null; then
+      zf() {
+        local dir
+        dir=$(zoxide query -l | fzf --preview 'ls -la {}' --preview-window=right:50%:wrap) && cd "$dir"
+      }
+    fi
+
+    # Show frequently visited directories
+    zshow() {
+      zoxide query -l -s | head -20
+    }
+  fi
+fi
+
+#==============================================================================
+# Modern Monitoring & System Tools
+#==============================================================================
+
+# btop - Modern resource monitor (better than htop)
+# Install: apt install btop (Ubuntu 22.04+) or https://github.com/aristocratos/btop
+if command -v btop &>/dev/null; then
+  alias top='btop'
+  alias htop='btop'
+  # btop with specific themes
+  alias btop-dark='btop --utf-force --theme TTY'
+  alias btop-light='btop --utf-force --theme Default'
+fi
+
+# procs - Modern ps replacement
+# Install: cargo install procs or apt install procs (newer Ubuntu)
+if command -v procs &>/dev/null; then
+  alias ps='procs'
+  alias psa='procs --tree'          # Show process tree
+  alias psg='procs --search'        # Search processes: psg firefox
+  alias psm='procs --sortd memory'  # Sort by memory usage
+  alias psc='procs --sortd cpu'     # Sort by CPU usage
+fi
+
+# duf - Modern df replacement with better visualization
+# Install: apt install duf (Ubuntu 21.04+) or https://github.com/muesli/duf
+if command -v duf &>/dev/null; then
+  alias df='duf'
+  alias duf-json='duf --json'       # JSON output for scripting
+  alias duf-all='duf --all'         # Show all filesystems
+fi
+
+# dust - Intuitive du replacement
+# Install: cargo install du-dust or apt install du-dust (newer Ubuntu)
+if command -v dust &>/dev/null; then
+  alias du='dust'
+  alias dust-tree='dust -d 3'      # Limit depth to 3 levels
+  alias dust-size='dust -s'        # Sort by size
+  alias dust-files='dust -f'       # Show files, not just directories
+fi
+
+# ctop - Container monitoring (htop for containers)
+# Install: https://github.com/bcicen/ctop#install
+if command -v ctop &>/dev/null; then
+  alias dtop='ctop'                 # Docker top
+  alias ctop-compact='ctop -compact' # Compact view
+fi
+
+# neofetch/fastfetch - System information display
+# Install: apt install neofetch or https://github.com/fastfetch-cli/fastfetch
+if command -v fastfetch &>/dev/null; then
+  alias neofetch='fastfetch'
+  alias sysinfo='fastfetch'
+  # Custom fastfetch with specific modules
+  alias sysinfo-minimal='fastfetch --logo none --modules os,kernel,uptime,memory'
+elif command -v neofetch &>/dev/null; then
+  alias sysinfo='neofetch'
+  # Custom neofetch configurations
+  alias sysinfo-minimal='neofetch --disable packages resolution de wm wm_theme theme icons terminal terminal_font cpu gpu memory'
+fi
+
+#==============================================================================
+# Developer Tools & Command Correction
+#==============================================================================
+
+# thefuck - Command correction
+# Install: pip install thefuck
+# Note: thefuck 3.32 has Python 3.12 compatibility issues (distutils removed)
+if command -v thefuck &>/dev/null; then
+  # Wrap in error handling for Python 3.12+ compatibility
+  if eval "$(thefuck --alias 2>/dev/null)"; then
+    # Alternative aliases
+    alias fix='fuck'
+    alias oops='fuck'
+  fi
+fi
+
+# lazygit - Terminal UI for git
+# Install: https://github.com/jesseduffield/lazygit#installation
+if command -v lazygit &>/dev/null; then
+  alias lg='lazygit'
+  alias git-ui='lazygit'
+fi
+
+# just - Command runner (modern make alternative)
+# Install: cargo install just or https://github.com/casey/just#installation
+if command -v just &>/dev/null; then
+  alias j='just'
+  alias jl='just --list'           # List available recipes
+  alias je='just --edit'           # Edit justfile
+  alias jd='just --dump'           # Show parsed justfile
+
+  # Enable just completions if supported
+  # Generate completion file if it doesn't exist
+  local just_completion="${HOME}/.oh-my-zsh/custom/plugins/_just"
+  if [[ ! -f "$just_completion" ]]; then
+    just --completions zsh > "$just_completion" 2>/dev/null
+  fi
+fi
+
+# hyperfine - Command benchmarking
+# Install: cargo install hyperfine or apt install hyperfine (newer Ubuntu)
+if command -v hyperfine &>/dev/null; then
+  alias bench='hyperfine'
+  alias benchmark='hyperfine --warmup 3'
+
+  # Convenient benchmark functions
+  shell_bench() {
+    if [[ $# -eq 0 ]]; then
+      echo "Usage: shell_bench <command>"
+      echo "Example: shell_bench 'ls -la'"
+      return 1
+    fi
+    hyperfine --warmup 3 --min-runs 10 "$@"
+  }
+
+  startup_bench() {
+    echo "Benchmarking shell startup time..."
+    hyperfine --warmup 5 --min-runs 20 'zsh -i -c exit'
+  }
+fi
+
+# glow - Markdown renderer
+# Install: https://github.com/charmbracelet/glow#installation
+if command -v glow &>/dev/null; then
+  alias markdown='glow'
+  alias md='glow'
+  alias readme='glow README.md'
+
+  # Glow with different styles
+  alias glow-dark='glow --style dark'
+  alias glow-light='glow --style light'
+  alias glow-notty='glow --style notty'
+fi
+
+# tldr - Simplified man pages
+# Install: npm install -g tldr or apt install tldr (newer Ubuntu)
+if command -v tldr &>/dev/null; then
+  alias help='tldr'
+  alias cheat='tldr'
+
+  # Update tldr database
+  alias tldr-update='tldr --update'
+fi
+
+# cheat - Interactive cheatsheets
+# Install: https://github.com/cheat/cheat#installing
+if command -v cheat &>/dev/null; then
+  alias cs='cheat'                 # cheat search
+  alias csl='cheat -l'             # list cheatsheets
+  alias cse='cheat -e'             # edit cheatsheet
+fi
+
+#==============================================================================
+# Container & Docker Enhancements
+#==============================================================================
+
+# dive - Docker image layer analyzer
+# Install: https://github.com/wagoodman/dive#installation
+if command -v dive &>/dev/null; then
+  alias docker-analyze='dive'
+  alias danalyze='dive'
+
+  # Analyze image and save report
+  dive_report() {
+    if [[ $# -ne 1 ]]; then
+      echo "Usage: dive_report <image>"
+      return 1
+    fi
+    dive "$1" --ci --lowestEfficiency=0.95
+  }
+fi
+
+# lazydocker - Docker TUI
+# Install: https://github.com/jesseduffield/lazydocker#installation
+if command -v lazydocker &>/dev/null; then
+  alias lzd='lazydocker'
+  alias docker-ui='lazydocker'
+fi
+
+#==============================================================================
+# Security & Code Quality Tools
+#==============================================================================
+
+# gitleaks - Git secrets scanner
+# Install: https://github.com/gitleaks/gitleaks#installing
+if command -v gitleaks &>/dev/null; then
+  alias git-secrets='gitleaks detect'
+  alias git-secrets-verbose='gitleaks detect --verbose'
+
+  # Scan current repo for secrets
+  scan_secrets() {
+    echo "Scanning repository for secrets..."
+    gitleaks detect --source . --verbose
+  }
+
+  # Protect commits with gitleaks
+  git_protect() {
+    echo "Installing gitleaks pre-commit hook..."
+    gitleaks protect --staged --verbose
+  }
+fi
+
+# pre-commit - Code quality automation
+# Install: pip install pre-commit
+if command -v pre-commit &>/dev/null; then
+  alias pc='pre-commit'
+  alias pc-install='pre-commit install'
+  alias pc-update='pre-commit autoupdate'
+  alias pc-run='pre-commit run --all-files'
+  alias pc-clean='pre-commit clean'
+
+  # Quick setup for new repos
+  precommit_setup() {
+    if [[ ! -f ".pre-commit-config.yaml" ]]; then
+      echo "Creating basic pre-commit configuration..."
+      cat > .pre-commit-config.yaml << 'EOF'
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.15.0
+    hooks:
+      - id: gitleaks
+EOF
+    fi
+    pre-commit install
+    echo "Pre-commit hooks installed successfully!"
+  }
+fi
+
+# sops - Encrypted secrets management
+# Install: https://github.com/getsops/sops#download
+if command -v sops &>/dev/null; then
+  alias secrets='sops'
+  alias secrets-edit='sops --in-place'
+
+  # Edit encrypted file
+  sops_edit() {
+    if [[ $# -ne 1 ]]; then
+      echo "Usage: sops_edit <encrypted_file>"
+      return 1
+    fi
+    sops "$1"
+  }
+fi
+
+# difftastic - Structural diff tool
+# Install: cargo install difftastic or https://github.com/Wilfred/difftastic
+if command -v difft &>/dev/null; then
+  alias diff='difft'
+  alias difft-side-by-side='difft --display side-by-side'
+  alias difft-inline='difft --display inline'
+
+  # Git integration for difftastic
+  git_difft() {
+    git diff --no-ext-diff "$@" | difft --stdin
+  }
+fi
+

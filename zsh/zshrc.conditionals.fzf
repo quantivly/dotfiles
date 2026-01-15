@@ -1,0 +1,102 @@
+#==============================================================================
+# FZF Configuration
+#==============================================================================
+
+# FZF - Fuzzy finder
+# Install: apt install fzf (Ubuntu) or brew install fzf (macOS)
+if command -v fzf &>/dev/null; then
+  # FZF default options with Dracula theme (most popular)
+  # To customize: set FZF_DEFAULT_OPTS in ~/.zshrc.local
+  # For other themes: see ~/.dotfiles/examples/fzf-themes.md
+  export FZF_DEFAULT_OPTS="--height 40% --layout=reverse --border --inline-info \
+--color=fg:#f8f8f2,bg:#282a36,hl:#bd93f9 \
+--color=fg+:#f8f8f2,bg+:#44475a,hl+:#bd93f9 \
+--color=info:#ffb86c,prompt:#50fa7b,pointer:#ff79c6 \
+--color=marker:#ff79c6,spinner:#ffb86c,header:#6272a4"
+
+  # Use fd for FZF if available (respects .gitignore), fallback to find
+  if [[ -n "$_FD_CMD" ]]; then
+    export FZF_DEFAULT_COMMAND="$_FD_CMD --type f --hidden --follow --exclude .git"
+    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+    export FZF_ALT_C_COMMAND="$_FD_CMD --type d --hidden --follow --exclude .git"
+  else
+    # Fallback to find with basic .gitignore respect
+    export FZF_DEFAULT_COMMAND='find . -type f \! -path "./\.git/*" \! -path "./node_modules/*" \! -path "./.cache/*"'
+    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+    export FZF_ALT_C_COMMAND='find . -type d \! -path "./\.git/*" \! -path "./node_modules/*" \! -path "./.cache/*"'
+  fi
+
+  # FZF preview with bat if available, fallback to cat
+  if [[ -n "$_BAT_CMD" ]]; then
+    export FZF_CTRL_T_OPTS="--preview '$_BAT_CMD --color=always --style=numbers --line-range=:500 {}'"
+  else
+    # Fallback to cat with head for basic preview
+    export FZF_CTRL_T_OPTS="--preview 'head -500 {} 2>/dev/null || echo \"Binary file or permission denied\"'"
+  fi
+
+  # FZF Git integration
+  # fbr - Fuzzy checkout git branch (removed - use fgcb instead for richer forgit implementation)
+  # fbr() {
+  #   local branches branch
+  #   branches=$(git branch -a) &&
+  #   branch=$(echo "$branches" | fzf +m) &&
+  #   git checkout $(echo "$branch" | sed "s/.* //" | sed "s#remotes/[^/]*/##")
+  # }
+
+  # fco - Fuzzy checkout git commit
+  fco() {
+    local commits commit
+    commits=$(git log --pretty=oneline --abbrev-commit --reverse) &&
+    commit=$(echo "$commits" | fzf --tac +s +m -e) &&
+    git checkout $(echo "$commit" | sed "s/ .*//")
+  }
+
+  # fshow - Git commit browser with enhanced preview
+  fshow() {
+    local format="%C(auto)%h%d %s %C(black)%C(bold)%cr %C(blue)%an"
+
+    git log --graph --color=always --format="$format" "$@" |
+    fzf --ansi --no-sort --reverse --tiebreak=index \
+        --header 'CTRL-S: Toggle sort, CTRL-D: Show diff, ENTER: Show commit' \
+        --bind=ctrl-s:toggle-sort \
+        --bind=ctrl-d:preview \
+        --preview-window=right:60%:wrap \
+        --preview 'echo {} | grep -o "[a-f0-9]\{7,\}" | head -1 | xargs git show --color=always --stat' \
+        --bind "enter:execute:
+                  echo {} | grep -o '[a-f0-9]\{7,\}' | head -1 |
+                  xargs -I % sh -c 'git show --color=always % | less -R'"
+  }
+
+  # fzf-home-widget - Fuzzy navigate home directory with keybinding
+  # Keybinding: Ctrl+Alt+H
+  fzf-home-widget() {
+    local dir
+
+    # Use fd if available (much faster for home directory), otherwise fall back to find
+    if [[ -n "$_FD_CMD" ]]; then
+      dir=$($_FD_CMD --type d --hidden --follow \
+        --exclude .git --exclude node_modules --exclude .cache \
+        --exclude .venv --exclude venv \
+        --exclude build --exclude dist --exclude target \
+        --exclude .npm --exclude .cargo --exclude .gradle \
+        . "${HOME}" | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
+    else
+      # Fallback to find with exclusions
+      dir=$(find "${HOME}" -type d \( \
+        -name .git -o -name node_modules -o -name .cache \
+        -o -name .venv -o -name venv \
+        -o -name build -o -name dist -o -name target \
+        -o -name .npm -o -name .cargo -o -name .gradle \
+        \) -prune -o -type d -print 2>/dev/null | fzf +m --preview 'ls -la {}' --preview-window=right:50%:wrap)
+    fi
+
+    if [ -n "$dir" ]; then
+      cd "$dir"
+    fi
+    # Always reset the prompt, even if cancelled
+    zle reset-prompt
+  }
+  zle -N fzf-home-widget
+  bindkey '\e^H' fzf-home-widget  # Ctrl+Alt+H
+fi
+
