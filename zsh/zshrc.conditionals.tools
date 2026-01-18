@@ -372,5 +372,3 @@ if command -v difft &>/dev/null; then
     git diff --no-ext-diff "$@" | difft --stdin
   }
 fi
-
-
