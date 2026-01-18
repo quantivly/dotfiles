@@ -113,7 +113,7 @@ alias dslf="docker service logs -f --raw"
 # Box database shortcuts (only if quanticli is available)
 if command -v quanticli &>/dev/null; then
   # Get workspace path dynamically
-  _box_workspace_path=$(quanticli path workspace 2>/dev/null || echo "$HOME/workspaces/dev")
+  _box_workspace_path=$(quanticli path workspace 2>/dev/null || echo "${Q_WORKSPACES_ROOT}/${Q_WORKSPACE_NAME}")
 
   alias box-psql="$_box_workspace_path/configs/box/postgres/psql.sh -d box"
   alias box-purge='$_box_workspace_path/configs/box/postgres/psql.sh -d box -c "truncate examination, acquisition restart identity cascade;"'
