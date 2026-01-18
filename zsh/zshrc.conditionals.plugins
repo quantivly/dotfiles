@@ -27,6 +27,10 @@ elif [[ -x "$HOME/.local/bin/mise" ]]; then
     export MISE_NODE_COREPACK=1
 fi
 
+#==============================================================================
+# Environment Configuration
+#==============================================================================
+
 # GPG signing setup
 # Required for git commit signing
 export GPG_TTY=$(tty)
