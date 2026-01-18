@@ -4,6 +4,13 @@
 # All Quantivly-specific functionality consolidated here for better
 # version control, easier updates, and single source of truth.
 
+# Warn about deprecated plugin (remove this block after 2026-03-01)
+if [[ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]]; then
+  echo "⚠️  Deprecated: quantivly oh-my-zsh plugin detected" >&2
+  echo "   Functionality now built into dotfiles (zshrc.company)" >&2
+  echo "   Safe to remove: rm -rf ~/.oh-my-zsh/custom/plugins/quantivly" >&2
+fi
+
 #==============================================================================
 # Environment Variables
 #==============================================================================
