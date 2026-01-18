@@ -23,7 +23,10 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 1. **zshrc.history** - History configuration (50k commands, timestamps, deduplication)
 2. **zshrc.functions.\*** - Utility functions organized by category (see Function Modules below)
 3. **zshrc.aliases** - Portable aliases for git, docker, python, system commands
-4. **zshrc.conditionals** - Conditional loading of optional tools (colorls, mise, direnv)
+4. **zshrc.conditionals** - Module dispatcher that loads:
+   - **zshrc.conditionals.tools** - Modern CLI tool configurations (bat, eza, ripgrep, zoxide, etc.)
+   - **zshrc.conditionals.fzf** - FZF fuzzy finder setup and key bindings
+   - **zshrc.conditionals.plugins** - Plugin integrations (mise, direnv, forgit, git workflows)
 5. **zshrc.company** - Work-specific configuration (Quantivly)
 6. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
 
@@ -61,7 +64,10 @@ Dotbot creates symlinks from `install.conf.yaml`:
 4. zsh/zshrc.history
 5. zsh/zshrc.functions.*
 6. zsh/zshrc.aliases
-7. zsh/zshrc.conditionals (overrides aliases if tools installed)
+7. zsh/zshrc.conditionals → loads three focused modules:
+   - zsh/zshrc.conditionals.tools (CLI tool overrides)
+   - zsh/zshrc.conditionals.fzf (FZF integration)
+   - zsh/zshrc.conditionals.plugins (mise, direnv, etc.)
 8. zsh/zshrc.company
 9. ~/.zshrc.local (machine-specific secrets)
 10. PATH additions

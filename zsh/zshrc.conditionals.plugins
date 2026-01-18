@@ -1,0 +1,133 @@
+#==============================================================================
+# Directory Navigation Tools
+#==============================================================================
+
+# direnv - Environment variable manager per directory
+# Install: brew install direnv (macOS) or apt install direnv (Ubuntu)
+# Note: oh-my-zsh plugin handles the setup if enabled
+#       DIRENV_LOG_FORMAT="" in zshrc suppresses console output for Powerlevel10k compatibility
+
+# =============================================================================
+# Mise - Modern Polyglot Version Manager
+# =============================================================================
+# Replaces nvm, pyenv, rbenv, etc. with a single fast tool (~5-10ms activation)
+# Install: ./scripts/install-modern-tools.sh or curl https://mise.run | sh
+# Docs: https://mise.jdx.dev/
+# Config: ~/.config/mise/config.toml or project .mise.toml/.tool-versions
+
+if command -v mise &>/dev/null; then
+    eval "$(mise activate zsh)"
+
+    # Enable legacy version file support
+    export MISE_LEGACY_VERSION_FILE=1    # Read .nvmrc, .python-version files
+    export MISE_NODE_COREPACK=1          # Enable corepack for pnpm/yarn
+elif [[ -x "$HOME/.local/bin/mise" ]]; then
+    eval "$($HOME/.local/bin/mise activate zsh)"
+    export MISE_LEGACY_VERSION_FILE=1
+    export MISE_NODE_COREPACK=1
+fi
+
+#==============================================================================
+# Environment Configuration
+#==============================================================================
+
+# GPG signing setup
+# Required for git commit signing
+export GPG_TTY=$(tty)
+
+# SSH agent setup
+# Only configure if not already set up by system
+if [ -z "$SSH_AUTH_SOCK" ]; then
+  # Try XDG_RUNTIME_DIR first (systemd systems)
+  if [ -n "$XDG_RUNTIME_DIR" ] && [ -S "$XDG_RUNTIME_DIR/ssh-agent.socket" ]; then
+    export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+  else
+    # Fall back to starting ssh-agent if needed
+    if ! ssh-add -l &>/dev/null; then
+      eval "$(ssh-agent -s)" >/dev/null
+    fi
+  fi
+fi
+
+# Editor configuration
+# Priority: VS Code → vim → nano (always available)
+if command -v code &>/dev/null; then
+  export EDITOR='code --wait'
+  export VISUAL='code --wait'
+  export GIT_EDITOR='code --wait'
+elif command -v vim &>/dev/null; then
+  export EDITOR='vim'
+  export VISUAL='vim'
+  export GIT_EDITOR='vim'
+else
+  export EDITOR='nano'
+  export VISUAL='nano'
+  export GIT_EDITOR='nano'
+fi
+
+# Locale settings
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
+
+#==============================================================================
+# Enhanced Git Integration
+#==============================================================================
+
+# forgit - Interactive git operations via fzf
+# Install: https://github.com/wfxr/forgit#installation
+# Note: Smart width-aware gd() function from zshrc.functions.git overrides forgit's gd alias
+
+if [[ -f "${HOME}/.forgit/forgit.plugin.zsh" ]]; then
+  source "${HOME}/.forgit/forgit.plugin.zsh"
+elif command -v forgit &>/dev/null; then
+  # If installed via package manager
+  eval "$(forgit init zsh)"
+fi
+
+# Forgit provides these aliases automatically:
+# - glo: forgit::log
+# - ga: forgit::add
+# - grh: forgit::reset::head
+# - gcf: forgit::checkout::file
+# - gss: forgit::stash::show
+# - gclean: forgit::clean
+# - gd: forgit::diff (overridden by our custom gd() function)
+
+# Additional git workflow automation
+if command -v git &>/dev/null && command -v fzf &>/dev/null; then
+  # Enhanced git worktree with fzf selection
+  fworktree() {
+    local worktree_dir branch_name
+
+    echo "Git Worktree Management:"
+    echo "1. Create new worktree"
+    echo "2. Switch to existing worktree"
+    echo "3. Remove worktree"
+    echo
+    read -p "Select action (1-3): " action
+
+    case $action in
+      1)
+        read -p "Enter branch name: " branch_name
+        worktree_dir="../worktrees/$branch_name"
+        git worktree add "$worktree_dir" "$branch_name" && cd "$worktree_dir"
+        ;;
+      2)
+        worktree_dir=$(git worktree list | fzf --header='Select worktree' | awk '{print $1}')
+        if [[ -n "$worktree_dir" ]]; then
+          cd "$worktree_dir"
+        fi
+        ;;
+      3)
+        worktree_dir=$(git worktree list | tail -n +2 | fzf --header='Select worktree to remove' | awk '{print $1}')
+        if [[ -n "$worktree_dir" ]]; then
+          git worktree remove "$worktree_dir"
+        fi
+        ;;
+      *)
+        echo "Invalid selection"
+        ;;
+    esac
+  }
+fi

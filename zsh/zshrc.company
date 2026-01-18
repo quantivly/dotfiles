@@ -1,42 +1,133 @@
 # Quantivly-specific configuration
-# This file contains work-related settings and should be loaded conditionally
+# This file contains work-related settings and company-specific utilities
+#
+# All Quantivly-specific functionality consolidated here for better
+# version control, easier updates, and single source of truth.
 
-# Only load if the quantivly plugin is available
-if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
-  # Quantivly development environment settings
-  # These can be overridden in ~/.zshrc.local for machine-specific values
-  export Q_MODE="${Q_MODE:-development}"
-  export Q_DEV_CODE_ROOT="${Q_DEV_CODE_ROOT:-${HOME}/platform}"
-  export Q_WORKSPACES_ROOT="${Q_WORKSPACES_ROOT:-${HOME}/workspaces}"
-  export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
-  export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
+# Warn about deprecated plugin (remove this block after 2026-03-01)
+if [[ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]]; then
+  echo "⚠️  Deprecated: quantivly oh-my-zsh plugin detected" >&2
+  echo "   Functionality now built into dotfiles (zshrc.company)" >&2
+  echo "   Safe to remove: rm -rf ~/.oh-my-zsh/custom/plugins/quantivly" >&2
+fi
 
-  # Quanticli shortcuts
-  # Ensure q is not aliased to something else first
-  unalias q 2>/dev/null
-  alias q='quanticli'
-  alias qg='quanticli git'
-  alias qgs='quanticli git status'
-  alias qh='quanticli hub'
-  alias qp='quanticli path'
+#==============================================================================
+# Environment Variables
+#==============================================================================
 
-  # qn function - Change directory to quantivly submodule or stack directory
-  qn() {
+# Quantivly development environment settings
+# These can be overridden in ~/.zshrc.local for machine-specific values
+export Q_MODE="${Q_MODE:-development}"
+export Q_DEV_CODE_ROOT="${Q_DEV_CODE_ROOT:-${HOME}/platform}"
+export Q_WORKSPACES_ROOT="${Q_WORKSPACES_ROOT:-${HOME}/workspaces}"
+export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
+export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
+
+# Docker environment variables
+# Use fallback IP if hostname -I fails (e.g., no network interfaces)
+_ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+export IP_ADDRESS="${_ip_addr:-127.0.0.1}"
+export EXTRA_HOSTS="$(hostname):${IP_ADDRESS}"
+unset _ip_addr
+
+# Platform test environment variables
+export TEST_BASELINE_DATA_DIR="$(command -v quanticli &>/dev/null && quanticli path data 2>/dev/null || echo '')"
+export TEST_BASELINE_REF_DIR="$(command -v quanticli &>/dev/null && quanticli path test 2>/dev/null || echo '')/testing-box-baseline/"
+
+#==============================================================================
+# Quanticli Aliases and Functions
+#==============================================================================
+
+# Quanticli shortcuts
+# Ensure q is not aliased to something else first
+unalias q 2>/dev/null
+alias q='quanticli'
+alias qg='quanticli git'
+alias qgs='quanticli git status'
+alias qh='quanticli hub'
+alias qp='quanticli path'
+
+# qn - Change directory to quantivly submodule or stack directory
+# Usage: qn <directory-name>
+# Example: qn auto-conf, qn sdk, qn (goes to code root)
+qn() {
+  : '
+    Function: qn
+    Description: Changes directory to the specified Quantivly submodule or stack directory.
+    Usage: qn <directory-name>
+    Parameters:
+      <directory-name> - The name of the Quantivly submodule or stack directory to change to (or a partial match).
+    Example:
+      qn auto-conf
+      qn sdk
+    Notes:
+      - If multiple directories match the specified name, the first match is used.
+      - If no directories match the specified name, the current directory is not changed.
+      - If no name is provided, the current directory will be changed to the root of the Quantivly repository.
+    '
+  if command -v quanticli &>/dev/null; then
     cd $(quanticli path ${1-code})
-  }
-
-  # Note: The quantivly plugin provides:
-  # - pathadd function (already defined in zshrc.functions as fallback)
-  # - qn, qg, qh, qp commands (quanticli shortcuts)
-  # - dsh function (Docker shell access)
-  # - Various Docker and git aliases
-  # - IP_ADDRESS and EXTRA_HOSTS environment variables
-else
-  # Warn user in interactive shells if the plugin is missing
-  # This helps diagnose why q, qn, qg aliases don't work
-  if [[ -o interactive ]]; then
-    echo "Warning: quantivly oh-my-zsh plugin not installed." >&2
-    echo "  Run: git clone git@github.com:quantivly/quantivly-zsh-plugin.git ~/.oh-my-zsh/custom/plugins/quantivly" >&2
-    echo "  Or run dev-setup: ~/quantivly/dev-setup/setup.sh" >&2
+  else
+    echo "Error: quanticli not found in PATH" >&2
+    return 1
   fi
+}
+
+#==============================================================================
+# Git Aliases (Quantivly-specific)
+#==============================================================================
+
+alias grpo="git remote prune origin"
+
+#==============================================================================
+# Docker Utilities
+#==============================================================================
+
+# dsh - Open a bash shell in specified Docker container
+# Usage: dsh <container_name>
+# Example: dsh my_container
+dsh() {
+  : '
+    Function: dsh
+    Description: Opens a bash shell in the specified Docker container.
+    Usage: dsh <container_name>
+    Parameters:
+      <container_name> - The name of the Docker container in which to open a bash shell.
+    Example:
+      dsh my_container
+    Notes:
+      - The container must be running.
+    '
+  if [[ -z "$1" ]]; then
+    echo "Usage: dsh <container_name>" >&2
+    return 1
+  fi
+
+  local container_id=$(docker ps -aqf "name=$1")
+  if [[ -z "$container_id" ]]; then
+    echo "Error: No running container found matching '$1'" >&2
+    return 1
+  fi
+
+  docker exec -it "$container_id" bash
+}
+
+# Docker service aliases
+alias dsls="docker service ls"
+alias dslf="docker service logs -f --raw"
+
+#==============================================================================
+# Database Utilities (Platform-specific)
+#==============================================================================
+
+# Box database shortcuts (only if quanticli is available)
+# Note: Workspace path is evaluated at shell startup - reload shell after switching workspaces
+if command -v quanticli &>/dev/null; then
+  # Get workspace path dynamically
+  _box_workspace_path=$(quanticli path workspace 2>/dev/null || echo "${Q_WORKSPACES_ROOT}/${Q_WORKSPACE_NAME}")
+
+  alias box-psql="$_box_workspace_path/configs/box/postgres/psql.sh -d box"
+  alias box-purge='$_box_workspace_path/configs/box/postgres/psql.sh -d box -c "truncate examination, acquisition restart identity cascade;"'
+
+  unset _box_workspace_path
 fi

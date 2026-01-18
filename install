@@ -19,20 +19,55 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     echo ""
     echo "==> Configuring mise CLI tools..."
 
-    # Copy unified mise configuration from dotfiles
+    # Symlink unified mise configuration from dotfiles
+    # Using symlink instead of copy to maintain single source of truth
     if [[ -f "${BASEDIR}/.mise.toml" ]]; then
         mkdir -p "$HOME/.config/mise"
 
-        # Only copy if no existing config, or if dotfiles version is different
-        if [[ ! -f "$HOME/.config/mise/config.toml" ]]; then
-            cp "${BASEDIR}/.mise.toml" "$HOME/.config/mise/config.toml"
-            echo "    ✓ Installed unified mise configuration"
-        elif ! diff -q "${BASEDIR}/.mise.toml" "$HOME/.config/mise/config.toml" &>/dev/null; then
-            echo "    ℹ mise config exists and differs from dotfiles"
-            echo "      To use dotfiles version: cp ~/.dotfiles/.mise.toml ~/.config/mise/config.toml"
+        mise_config="$HOME/.config/mise/config.toml"
+        dotfiles_mise="${BASEDIR}/.mise.toml"
+
+        # Check if config.toml exists and is not a symlink
+        if [[ -f "$mise_config" ]] && [[ ! -L "$mise_config" ]]; then
+            # Existing file that's not a symlink
+            if diff -q "$dotfiles_mise" "$mise_config" &>/dev/null; then
+                # Files are identical, safe to replace with symlink
+                rm "$mise_config"
+                ln -s "$dotfiles_mise" "$mise_config"
+                echo "    ✓ Replaced mise config with symlink (files were identical)"
+            else
+                # Files differ - preserve user changes
+                echo "    ⚠️  mise config exists with local changes"
+                echo "      Current: $mise_config"
+                echo "      Dotfiles: $dotfiles_mise"
+                echo "      Keeping your version (not replacing with symlink)"
+                echo "      To use dotfiles version: rm $mise_config && ln -s $dotfiles_mise $mise_config"
+            fi
+        elif [[ -L "$mise_config" ]]; then
+            # Already a symlink - check if broken or pointing elsewhere
+            if [[ ! -e "$mise_config" ]]; then
+                # Broken symlink (target doesn't exist)
+                echo "    ⚠️  Broken symlink detected, recreating..."
+                ln -sf "$dotfiles_mise" "$mise_config"
+                echo "    ✓ Fixed broken symlink to dotfiles"
+            else
+                # Valid symlink - check target
+                current_target=$(readlink "$mise_config")
+                if [[ "$current_target" == "$dotfiles_mise" ]]; then
+                    echo "    ✓ mise config already symlinked to dotfiles"
+                else
+                    echo "    ℹ mise config symlinked to: $current_target"
+                    echo "      To use dotfiles version: ln -sf $dotfiles_mise $mise_config"
+                fi
+            fi
         else
-            echo "    ✓ mise config already synchronized"
+            # No config exists yet, create symlink
+            ln -s "$dotfiles_mise" "$mise_config"
+            echo "    ✓ Installed mise configuration (symlinked to dotfiles)"
         fi
+
+        # Inform about local overrides
+        echo "    ℹ For personal tool overrides: create ~/.config/mise/config.local.toml"
     fi
 
     # Activate mise for current shell to make tools available immediately
@@ -52,18 +87,53 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
         fi
     fi
 
-    if [[ -f "$HOME/.config/mise/config.toml" ]]; then
-        echo "    ✓ Installing/updating CLI tools..."
+    if [[ -f "$HOME/.config/mise/config.toml" ]] || [[ -L "$HOME/.config/mise/config.toml" ]]; then
+        echo "    Installing/updating CLI tools..."
 
-        if mise install &> /dev/null; then
-            echo "    ✓ CLI tools installed/updated successfully"
+        # Capture mise install output for detailed error reporting
+        if MISE_OUTPUT=$(mise install 2>&1); then
+            # Show what was actually installed/updated if available
+            if echo "$MISE_OUTPUT" | grep -qE "installing|updating|installed|✓"; then
+                echo "    ✓ CLI tools installed/updated:"
+                echo "$MISE_OUTPUT" | grep -E "installing|updating|installed|✓" | sed 's/^/      /'
+            else
+                echo "    ✓ All CLI tools already up to date"
+            fi
             echo "    ℹ Tools available in current shell after activation"
         else
-            echo "    ⚠ Some tools failed to install (check: mise doctor)"
+            echo "    ⚠ Some tools failed to install"
+            echo ""
+
+            # Show specific failures
+            if echo "$MISE_OUTPUT" | grep -qi "error\|fail"; then
+                echo "    Failed installations:"
+                echo "$MISE_OUTPUT" | grep -i "error\|fail" | sed 's/^/      • /'
+                echo ""
+            fi
+
+            echo "    Troubleshooting:"
+            echo "      • Check details: mise doctor"
+            echo "      • Retry installation: mise install"
+            echo "      • Check specific tool: mise install <tool>"
+            echo ""
+
+            # Verify critical tools are available
+            missing_tools=()
+            for tool in bat fd eza delta zoxide; do
+                if ! command -v "$tool" &>/dev/null; then
+                    missing_tools+=("$tool")
+                fi
+            done
+
+            if [[ ${#missing_tools[@]} -gt 0 ]]; then
+                echo "    ⚠ Critical tools missing: ${missing_tools[*]}"
+                echo "      These are required for optimal shell experience"
+            fi
         fi
     else
-        echo "    ℹ No mise config at ~/.config/mise/config.toml"
-        echo "      Using dotfiles: ~/.dotfiles/.mise.toml"
+        echo "    ℹ No mise config found"
+        echo "      Expected: ~/.config/mise/config.toml (symlinked from dotfiles)"
+        echo "      Dotfiles version: ~/.dotfiles/.mise.toml"
     fi
 else
     echo ""
@@ -71,19 +141,45 @@ else
     echo "    Install mise via dev-setup or: curl https://mise.run | sh"
 fi
 
-# Install pre-commit hooks automatically
+# Install pre-commit hooks with user consent
 if [[ -f "${BASEDIR}/.pre-commit-config.yaml" ]]; then
     echo ""
-    echo "==> Installing pre-commit hooks..."
+    echo "==> Pre-commit hooks available"
 
     if command -v pre-commit &> /dev/null; then
-        # Install hooks with --install-hooks to download hook dependencies
-        if pre-commit install --install-hooks &> /dev/null; then
-            echo "    ✓ Pre-commit hooks installed successfully"
-            echo "    ℹ Hooks will run automatically before each commit"
+        echo "    Pre-commit hooks run before each commit to:"
+        echo "    • Check for security issues (gitleaks)"
+        echo "    • Validate shell scripts (shellcheck)"
+        echo "    • Format code consistently"
+        echo ""
+        echo "    Note: Hooks download dependencies from remote repositories"
+        echo ""
+
+        # Check if running in CI or non-interactive environment
+        if [[ -t 0 ]] && [[ -z "${CI:-}" ]]; then
+            # Interactive environment - ask for consent
+            read -p "    Install pre-commit hooks? (Y/n): " -n 1 -r
+            echo
+
+            if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+                # Install hooks with --install-hooks to download hook dependencies
+                echo "    Installing pre-commit hooks..."
+                if pre-commit install --install-hooks 2>&1 | sed 's/^/      /'; then
+                    echo "    ✓ Pre-commit hooks installed successfully"
+                    echo "    ℹ Hooks will run automatically before each commit"
+                else
+                    echo "    ⚠ Pre-commit hook installation failed"
+                    echo "      Manual installation: pre-commit install --install-hooks"
+                fi
+            else
+                echo "    ℹ Skipped pre-commit hooks installation"
+                echo "      Install later with: pre-commit install --install-hooks"
+            fi
         else
-            echo "    ⚠ Failed to install pre-commit hooks"
-            echo "      Manual installation: pre-commit install --install-hooks"
+            # Non-interactive or CI - skip with message
+            echo "    ℹ Non-interactive environment detected"
+            echo "      Skipping pre-commit hooks installation"
+            echo "      Install later with: pre-commit install --install-hooks"
         fi
     else
         echo "    ℹ pre-commit not found"
