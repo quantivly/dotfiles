@@ -100,3 +100,4 @@ if command -v fzf &>/dev/null; then
   bindkey '\e^H' fzf-home-widget  # Ctrl+Alt+H
 fi
 
+

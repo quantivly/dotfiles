@@ -24,8 +24,8 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     if [[ -f "${BASEDIR}/.mise.toml" ]]; then
         mkdir -p "$HOME/.config/mise"
 
-        local mise_config="$HOME/.config/mise/config.toml"
-        local dotfiles_mise="${BASEDIR}/.mise.toml"
+        mise_config="$HOME/.config/mise/config.toml"
+        dotfiles_mise="${BASEDIR}/.mise.toml"
 
         # Check if config.toml exists and is not a symlink
         if [[ -f "$mise_config" ]] && [[ ! -L "$mise_config" ]]; then
@@ -44,8 +44,8 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
                 echo "      To use dotfiles version: rm $mise_config && ln -s $dotfiles_mise $mise_config"
             fi
         elif [[ -L "$mise_config" ]]; then
-            # Already a symlink
-            local current_target=$(readlink "$mise_config")
+            # Already a symlink - check target
+            current_target=$(readlink "$mise_config")
             if [[ "$current_target" == "$dotfiles_mise" ]]; then
                 echo "    ✓ mise config already symlinked to dotfiles"
             else
@@ -104,7 +104,7 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
             echo ""
 
             # Verify critical tools are available
-            local missing_tools=()
+            missing_tools=()
             for tool in bat fd eza delta zoxide; do
                 if ! command -v "$tool" &>/dev/null; then
                     missing_tools+=("$tool")
