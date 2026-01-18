@@ -121,6 +121,7 @@ alias dslf="docker service logs -f --raw"
 #==============================================================================
 
 # Box database shortcuts (only if quanticli is available)
+# Note: Workspace path is evaluated at shell startup - reload shell after switching workspaces
 if command -v quanticli &>/dev/null; then
   # Get workspace path dynamically
   _box_workspace_path=$(quanticli path workspace 2>/dev/null || echo "${Q_WORKSPACES_ROOT}/${Q_WORKSPACE_NAME}")
