@@ -22,12 +22,15 @@ Shared configuration files for zsh, git, and various development tools used by t
 ```
 .dotfiles/
 ├── zsh/
-│   ├── zshrc.history        # History configuration
-│   ├── zshrc.functions      # Utility functions (pathadd, etc.)
-│   ├── zshrc.aliases        # Common portable aliases
-│   ├── zshrc.conditionals   # Optional tool configs (mise, colorls, etc.)
-│   ├── zshrc.company        # Work-specific configuration
-│   └── zshrc.local.example  # Template for machine-specific settings
+│   ├── zshrc.history               # History configuration
+│   ├── zshrc.functions             # Utility functions (pathadd, etc.)
+│   ├── zshrc.aliases               # Common portable aliases
+│   ├── zshrc.conditionals          # Module dispatcher
+│   ├── zshrc.conditionals.tools    # CLI tool configurations
+│   ├── zshrc.conditionals.fzf      # FZF setup
+│   ├── zshrc.conditionals.plugins  # Plugin integrations
+│   ├── zshrc.company               # Work-specific configuration
+│   └── zshrc.local.example         # Template for machine-specific settings
 ├── gh/
 │   └── config.yml           # GitHub CLI configuration with custom aliases
 ├── config/
@@ -283,12 +286,44 @@ Common aliases that work across all systems:
 
 ### zshrc.conditionals
 
-Conditional loading of optional tools:
-- colorls (if installed)
-- mise (if installed)
-- Editor configuration (prefers VS Code, falls back to vim)
-- SSH agent setup
-- Locale settings
+Module dispatcher that loads three focused sub-modules in dependency order:
+
+#### zshrc.conditionals.tools
+Modern CLI tool configurations and overrides:
+- **bat/batcat** - Syntax-highlighted `cat` replacement
+- **eza/exa** - Modern `ls` replacement with icons and git integration
+- **fd/fdfind** - Fast `find` alternative that respects .gitignore
+- **ripgrep (rg)** - Ultra-fast `grep` replacement
+- **zoxide** - Smarter `cd` command with frecency
+- **delta** - Syntax-highlighted git diff viewer
+- **lazygit** - Terminal UI for git commands
+- **just** - Command runner and task automation
+- **dive** - Docker image layer inspector
+- **thefuck** - Corrects previous console commands
+
+Sets internal variables (`_BAT_CMD`, `_FD_CMD`, `_HAS_RG`) used by other modules.
+
+#### zshrc.conditionals.fzf
+FZF fuzzy finder setup and integration:
+- Configures FZF with optimal defaults
+- Sets preview commands using bat/cat
+- Configures search commands using fd/find and ripgrep
+- Integrates with git (forgit plugin)
+- Key bindings for fuzzy file/directory/history search
+
+Depends on: `_BAT_CMD` and `_FD_CMD` from tools module.
+
+#### zshrc.conditionals.plugins
+Tool integrations and plugin configurations:
+- **mise** - Fast polyglot version manager activation
+- **direnv** - Automatic directory-based environment switching
+- **forgit** - Interactive git operations with fzf
+- **git workflows** - Enhanced git branch and worktree management
+- **Editor selection** - Prefers VS Code, falls back to vim
+- **SSH agent** - Automatic SSH key management
+- **Locale** - UTF-8 environment configuration
+
+Independent module with no dependencies on other conditionals.
 
 ### zshrc.company
 
