@@ -2,25 +2,32 @@
 # ============================
 # ✨ SINGLE SOURCE OF TRUTH for CLI tool versions
 #
-# Configuration Flow:
+# Configuration Flow (DO-255 - symlinked):
 #   1. This file (.dotfiles/.mise.toml) - Defines all CLI tool versions
-#   2. Copied to: ~/.config/mise/config.toml (during dotfiles ./install)
+#   2. Symlinked to: ~/.config/mise/config.toml (during dotfiles ./install)
 #   3. Used by: mise to install and manage CLI tools
 #
 # Note: dev-setup only installs the mise binary, not the tools
 # All CLI tools (bat, fd, eza, etc.) are managed here in dotfiles
 #
 # Personal Customization:
-#   ✓ Enable optional tools (dive, lazydocker, ctop, etc.)
+#   ✓ Enable optional tools (uncomment lines below)
 #   ✓ Override versions for testing
-#   ✓ Add project-specific tools
-#   ⚠️  Coordinate version changes with team if needed
+#   ✓ Add personal tools without affecting team
+#
+# For Personal Tool Overrides:
+#   Create: ~/.config/mise/config.local.toml
+#   Add your custom tools there (not tracked in dotfiles)
+#   Example:
+#     [tools]
+#     hyperfine = "1.18.0"  # Personal benchmarking tool
+#     dive = "0.12.0"        # Docker image analyzer
 #
 # To upgrade tools:
 #   1. Check for updates: mise outdated
 #   2. Test locally: mise use <tool>@<new-version>
 #   3. Update this file with new version
-#   4. Run: ./install to update ~/.config/mise/config.toml
+#   4. Pull changes: cd ~/.dotfiles && git pull && ./install
 #   5. Commit with Linear issue reference
 #
 # See: docs/TOOL_VERSION_UPDATES.md for detailed procedures

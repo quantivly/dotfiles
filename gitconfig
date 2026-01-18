@@ -1,18 +1,33 @@
-# User configuration should be set in ~/.gitconfig.local
-# This file is included below and is not tracked by dotfiles
+# Git Configuration Priority (DO-255)
+# ====================================
+# 1. Repository-specific: <repo>/.git/config (highest priority - overrides everything)
+# 2. User-specific (this machine): ~/.gitconfig.local (edit this for your identity)
+# 3. Shared defaults (all machines): ~/.gitconfig (this file - DON'T edit directly)
 #
-# Example ~/.gitconfig.local:
+# How to Configure Your Identity:
+# --------------------------------
+# Edit ~/.gitconfig.local (created automatically by dotfiles installer):
+#
 #   [user]
 #       name = Your Name
 #       email = your.email@quantivly.com
 #
-# GPG signing is strongly encouraged. Add to ~/.gitconfig.local:
+# GPG Signing (Strongly Recommended):
+# ------------------------------------
+# Add to ~/.gitconfig.local:
+#
 #   [user]
-#       signingkey = <key-id>
+#       signingkey = <your-gpg-key-id>
 #   [commit]
 #       gpgsign = true
 #
-# See gitconfig.local.example for full setup instructions
+# See ~/.dotfiles/gitconfig.local.example for full setup instructions
+# See ~/.dotfiles/docs/GPG_SIGNING_SETUP.md for GPG configuration
+#
+# Verify Your Config:
+# -------------------
+# Check effective values: git config --list --show-origin
+# Check your identity:    git config user.name && git config user.email
 
 # Include machine-specific and personal configuration
 [include]
