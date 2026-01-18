@@ -28,6 +28,8 @@
 # ==============================================================================
 
 # Load modular configuration
+# IMPORTANT: Order matters! The FZF module depends on $_FD_CMD and $_BAT_CMD
+#            variables defined in the tools module. Load tools first.
 DOTFILES_ZSH_DIR="${${(%):-%N}:A:h}"
 
 source "${DOTFILES_ZSH_DIR}/zshrc.conditionals.tools"
