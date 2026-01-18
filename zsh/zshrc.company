@@ -1,8 +1,7 @@
 # Quantivly-specific configuration
 # This file contains work-related settings and company-specific utilities
 #
-# CONSOLIDATED from quantivly oh-my-zsh plugin (DO-255)
-# All Quantivly-specific functionality is now in dotfiles for better
+# All Quantivly-specific functionality consolidated here for better
 # version control, easier updates, and single source of truth.
 
 #==============================================================================
@@ -18,7 +17,6 @@ export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
 export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
 
 # Docker environment variables
-# IP_ADDRESS: Fixed typo from IP_ADDERSS (DO-255)
 export IP_ADDRESS=$(hostname -I | awk '{print $1}')
 export EXTRA_HOSTS="$(hostname):${IP_ADDRESS}"
 

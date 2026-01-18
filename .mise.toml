@@ -2,7 +2,7 @@
 # ============================
 # ✨ SINGLE SOURCE OF TRUTH for CLI tool versions
 #
-# Configuration Flow (DO-255 - symlinked):
+# Configuration Flow:
 #   1. This file (.dotfiles/.mise.toml) - Defines all CLI tool versions
 #   2. Symlinked to: ~/.config/mise/config.toml (during dotfiles ./install)
 #   3. Used by: mise to install and manage CLI tools

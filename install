@@ -19,7 +19,7 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     echo ""
     echo "==> Configuring mise CLI tools..."
 
-    # Symlink unified mise configuration from dotfiles (DO-255)
+    # Symlink unified mise configuration from dotfiles
     # Using symlink instead of copy to maintain single source of truth
     if [[ -f "${BASEDIR}/.mise.toml" ]]; then
         mkdir -p "$HOME/.config/mise"
@@ -82,7 +82,7 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     if [[ -f "$HOME/.config/mise/config.toml" ]] || [[ -L "$HOME/.config/mise/config.toml" ]]; then
         echo "    Installing/updating CLI tools..."
 
-        # Capture mise install output for detailed error reporting (DO-255)
+        # Capture mise install output for detailed error reporting
         if MISE_OUTPUT=$(mise install 2>&1); then
             echo "    ✓ All CLI tools installed/updated successfully"
             echo "    ℹ Tools available in current shell after activation"
@@ -127,7 +127,7 @@ else
     echo "    Install mise via dev-setup or: curl https://mise.run | sh"
 fi
 
-# Install pre-commit hooks with user consent (DO-255)
+# Install pre-commit hooks with user consent
 if [[ -f "${BASEDIR}/.pre-commit-config.yaml" ]]; then
     echo ""
     echo "==> Pre-commit hooks available"
