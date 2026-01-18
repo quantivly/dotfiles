@@ -17,8 +17,11 @@ export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
 export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
 
 # Docker environment variables
-export IP_ADDRESS=$(hostname -I | awk '{print $1}')
+# Use fallback IP if hostname -I fails (e.g., no network interfaces)
+_ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+export IP_ADDRESS="${_ip_addr:-127.0.0.1}"
 export EXTRA_HOSTS="$(hostname):${IP_ADDRESS}"
+unset _ip_addr
 
 # Platform test environment variables
 export TEST_BASELINE_DATA_DIR="$(command -v quanticli &>/dev/null && quanticli path data 2>/dev/null || echo '')"
