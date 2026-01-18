@@ -92,7 +92,13 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
 
         # Capture mise install output for detailed error reporting
         if MISE_OUTPUT=$(mise install 2>&1); then
-            echo "    ✓ All CLI tools installed/updated successfully"
+            # Show what was actually installed/updated if available
+            if echo "$MISE_OUTPUT" | grep -qE "installing|updating|installed|✓"; then
+                echo "    ✓ CLI tools installed/updated:"
+                echo "$MISE_OUTPUT" | grep -E "installing|updating|installed|✓" | sed 's/^/      /'
+            else
+                echo "    ✓ All CLI tools already up to date"
+            fi
             echo "    ℹ Tools available in current shell after activation"
         else
             echo "    ⚠ Some tools failed to install"
