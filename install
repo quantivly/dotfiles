@@ -44,13 +44,21 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
                 echo "      To use dotfiles version: rm $mise_config && ln -s $dotfiles_mise $mise_config"
             fi
         elif [[ -L "$mise_config" ]]; then
-            # Already a symlink - check target
-            current_target=$(readlink "$mise_config")
-            if [[ "$current_target" == "$dotfiles_mise" ]]; then
-                echo "    ✓ mise config already symlinked to dotfiles"
+            # Already a symlink - check if broken or pointing elsewhere
+            if [[ ! -e "$mise_config" ]]; then
+                # Broken symlink (target doesn't exist)
+                echo "    ⚠️  Broken symlink detected, recreating..."
+                ln -sf "$dotfiles_mise" "$mise_config"
+                echo "    ✓ Fixed broken symlink to dotfiles"
             else
-                echo "    ℹ mise config symlinked to: $current_target"
-                echo "      To use dotfiles version: ln -sf $dotfiles_mise $mise_config"
+                # Valid symlink - check target
+                current_target=$(readlink "$mise_config")
+                if [[ "$current_target" == "$dotfiles_mise" ]]; then
+                    echo "    ✓ mise config already symlinked to dotfiles"
+                else
+                    echo "    ℹ mise config symlinked to: $current_target"
+                    echo "      To use dotfiles version: ln -sf $dotfiles_mise $mise_config"
+                fi
             fi
         else
             # No config exists yet, create symlink
