@@ -175,8 +175,11 @@ bindkey '^W' backward-kill-word     # Ctrl+W - delete word backward (alternative
 # History settings
 [ -f ~/.dotfiles/zsh/zshrc.history ] && source ~/.dotfiles/zsh/zshrc.history
 
-# Utility functions (modular: core, git, fzf, docker, performance)
-for func_module in ~/.dotfiles/zsh/zshrc.functions.*; do
+# Utility functions (modular: core, development, system)
+for func_module in \
+  ~/.dotfiles/zsh/functions/core.sh \
+  ~/.dotfiles/zsh/functions/development.sh \
+  ~/.dotfiles/zsh/functions/system.sh; do
   [ -f "$func_module" ] && source "$func_module"
 done
 unset func_module
