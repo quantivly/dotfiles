@@ -1,6 +1,51 @@
 #==============================================================================
-# Performance Monitoring & Diagnostics
+# System Functions
 #==============================================================================
+# Consolidated system utilities and performance monitoring functions.
+# This module combines common utilities and performance diagnostics
+# into a single, logically organized file.
+#
+# Sections:
+#   1. Utility Functions - Common helper functions used throughout dotfiles
+#   2. Performance Functions - Shell profiling and system health monitoring
+#
+# See individual section headers below for detailed function listings.
+#==============================================================================
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+# Common utility functions for zsh configuration
+# Reduces code duplication across dotfiles modules
+#
+# Functions:
+#   - has_command: Check if a command exists
+#   - confirm: Interactive confirmation prompt
+# =============================================================================
+
+# Check if a command exists
+# Usage: if has_command bat; then ... fi
+# Replaces: if command -v bat &> /dev/null; then ... fi
+has_command() {
+    command -v "$1" &>/dev/null
+}
+
+# Interactive confirmation prompt
+# Usage: if confirm "Delete all files?"; then ... fi
+# Returns: 0 (success) if yes, 1 (failure) if no
+confirm() {
+    local message="${1:-Proceed?}"
+    printf "%s [y/N] " "$message"
+    read -r response
+    case "$response" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# =============================================================================
+# Performance & System Monitoring Functions
+# =============================================================================
 # Shell performance profiling, tool status checking, and system health monitoring.
 # All functions include inline "Usage: ..." documentation.
 #
@@ -12,7 +57,7 @@
 #   - startup_monitor: Monitor shell startup performance with alerts
 #   - startup_profile: Enhanced startup profiling with recommendations
 #   - system_health: Comprehensive system health check
-#==============================================================================
+# =============================================================================
 
 # Performance monitoring for zsh startup
 zsh_bench() {
@@ -158,10 +203,6 @@ check_tool() {
     echo "  ✗ $primary - $description (not installed)"
   fi
 }
-
-#==============================================================================
-# Enhanced Performance Monitoring
-#==============================================================================
 
 # startup_monitor - Monitor shell startup performance with alerts
 startup_monitor() {

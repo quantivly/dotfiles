@@ -21,7 +21,7 @@ time zsh -i -c exit  # Profile startup performance
 The zsh configuration is split into focused modules loaded by `zshrc`:
 
 1. **zshrc.history** - History configuration (50k commands, timestamps, deduplication)
-2. **zshrc.functions.\*** - Utility functions organized by category (see Function Modules below)
+2. **zsh/functions/\*.sh** - Utility functions organized into 3 modules (see Function Modules below)
 3. **zshrc.aliases** - Portable aliases for git, docker, python, system commands
 4. **zshrc.conditionals** - Module dispatcher that loads:
    - **zshrc.conditionals.tools** - Modern CLI tool configurations (bat, eza, ripgrep, zoxide, etc.)
@@ -34,12 +34,9 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 
 | Module | Purpose | Key Functions |
 |--------|---------|---------------|
-| `zshrc.functions.core` | Core utilities | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
-| `zshrc.functions.git` | Git workflows | `gd`, `git_cleanup`, `gco-safe`, `gpf-safe`, `gpush-safe` |
-| `zshrc.functions.fzf` | FZF integrations | `fcd`, `fkill`, `fenv`, `fssh`, `fport`, `fstash`, `fdiff` |
-| `zshrc.functions.docker` | Docker helpers | `dexec`, `dlogs`, `dkill`, `dimages`, `dnetwork`, `dvolume` |
-| `zshrc.functions.performance` | Performance monitoring | `startup_monitor`, `startup_profile`, `system_health`, `zsh_bench` |
-| `zshrc.functions.utilities` | Helper functions | `has_command`, `check_tool`, `tool_status` |
+| `zsh/functions/core.sh` | Core utilities (22 functions) | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
+| `zsh/functions/development.sh` | Git + Docker + FZF (37 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill` |
+| `zsh/functions/system.sh` | Performance + Utilities (9 functions) | `startup_monitor`, `startup_profile`, `system_health`, `has_command`, `confirm` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
@@ -62,7 +59,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 2. oh-my-zsh core and plugins
 3. p10k.zsh theme
 4. zsh/zshrc.history
-5. zsh/zshrc.functions.*
+5. zsh/functions/*.sh (core, development, system)
 6. zsh/zshrc.aliases
 7. zsh/zshrc.conditionals → loads three focused modules:
    - zsh/zshrc.conditionals.tools (CLI tool overrides)
