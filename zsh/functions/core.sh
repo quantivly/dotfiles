@@ -287,7 +287,7 @@ killnamed() {
       local killed=0
       local failed=0
 
-      for pid in ${(f)pids}; do  # zsh array splitting by lines
+      while IFS= read -r pid; do
         # Validate PID is numeric
         if [[ "$pid" =~ ^[0-9]+$ ]]; then
           # Safety check: Skip system-critical PIDs
@@ -308,7 +308,7 @@ killnamed() {
           echo "✗ Invalid PID: $pid (skipping)"
           ((failed++))
         fi
-      done
+      done <<< "$pids"
 
       echo ""
       echo "Summary: $killed killed, $failed failed"
