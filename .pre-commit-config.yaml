@@ -41,8 +41,9 @@ repos:
         # SC2296: Parameter expansion in zsh differs from bash
         args: ['-x', '-e', 'SC1071,SC1073,SC1072,SC2034,SC2296']
         # Only exclude: dotbot (git submodule), p10k.zsh (external theme), main zshrc (sources others)
+        # zsh/functions/*.sh are sourced interactive functions, not strict shell scripts
         # Zsh modules ARE checked - add targeted '# shellcheck disable=SC####' comments as needed
-        exclude: '(dotbot/|p10k\.zsh|^zshrc$)'
+        exclude: '(dotbot/|p10k\.zsh|^zshrc$|zsh/functions/)'
 
   # Secret detection with gitleaks
   - repo: https://github.com/gitleaks/gitleaks
