@@ -1,3 +1,4 @@
+#!/usr/bin/env zsh
 #==============================================================================
 # System Functions
 #==============================================================================
@@ -365,7 +366,7 @@ system_health() {
 
   # Check shell startup time
   local startup_time
-  startup_time=$((/usr/bin/time -f "%e" zsh -i -c exit) 2>&1)
+  startup_time=$( (/usr/bin/time -f "%e" zsh -i -c exit) 2>&1)
   if (( $(echo "$startup_time > 2.0" | bc -l 2>/dev/null || echo "0") )); then
     echo "⚠️  Slow shell startup: ${startup_time}s (consider optimization)"
   else
