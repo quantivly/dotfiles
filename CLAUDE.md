@@ -350,10 +350,13 @@ fi
 - CI/CD integration: `quanticli doctor deps` (exit code 0 = success, 1 = outdated)
 
 **What it checks:**
-- Poetry projects: Compares `poetry.lock` vs `.venv` modification time
-- pip projects: Compares `requirements.txt` vs `.venv`
-- Django-style: Checks all `requirements/*.txt` files
-- PEP 621: Checks `pyproject.toml` (non-Poetry)
+- Poetry projects: Compares `poetry.lock` vs `.venv/lib/python*/site-packages` modification time
+- pip projects: Compares `requirements.txt` vs `.venv/lib/python*/site-packages`
+- Django-style: Checks all `requirements/*.txt` files vs site-packages
+- PEP 621: Checks `pyproject.toml` (non-Poetry) vs site-packages
+
+**Note:** The check uses `site-packages` modification time instead of `.venv` directory time
+because pip installations update files inside `.venv` but not the directory itself.
 
 **Benefits:**
 - ✅ No dotfiles coupling - independent projects
