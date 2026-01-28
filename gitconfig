@@ -180,3 +180,5 @@
 
 [feature]
 	manyFiles = true              # Optimize for repos with many files
+[gpg "ssh"]
+	program = /usr/bin/ssh-keygen
