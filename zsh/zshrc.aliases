@@ -166,4 +166,3 @@ alias cd..='cd ..'
 alias sl='ls'
 alias claer='clear'
 alias cleaer='clear'
-
