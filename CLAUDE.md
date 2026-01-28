@@ -533,6 +533,33 @@ echo "your.email@domain.com $(cat ~/.ssh/id_ed25519.pub)" > ~/.ssh/allowedSigner
 - Complete guide: [docs/SSH_SIGNING_SETUP.md](docs/SSH_SIGNING_SETUP.md)
 - Git workflows: [examples/git-workflows.md](examples/git-workflows.md)
 
+## SSH Configuration
+
+Comprehensive SSH client configuration template with universal best practices.
+
+**Quick setup:**
+```bash
+ssh-init  # Copy template to ~/.ssh/config
+vim ~/.ssh/config  # Customize for your hosts
+```
+
+**Key features:**
+- **Connection multiplexing (ControlMaster)** - Reuse connections for speed (subsequent connections < 1s)
+- **Connection stability (ServerAlive)** - Prevent disconnections and timeouts
+- **Bitwarden SSH agent integration** - Multiple install methods (snap/deb/appimage)
+- **SSH agent forwarding patterns** - Security considerations and trusted host patterns
+- **GitHub-specific optimizations** - Faster git operations with connection reuse
+- **Dual context support** - Laptop (connect TO servers) vs. Remote Server (connect FROM server)
+
+**Template:** `examples/ssh-config.template`
+**Guide:** `docs/SSH_CONFIG_GUIDE.md`
+
+**Important:** The template includes universal safe defaults (active) and optional features (commented). Work-specific hosts (dev, staging, etc.) should be added to your personal `~/.ssh/config` after copying - they do NOT belong in dotfiles.
+
+**Deployment contexts:**
+- **Laptop configuration** - Define all servers you connect TO, enable ForwardAgent for trusted hosts, configure Bitwarden IdentityAgent
+- **Remote server configuration** - Minimal config (GitHub + internal servers), receive forwarded agent from laptop, no Bitwarden needed
+
 ## GitHub CLI Aliases
 
 35+ `gh` aliases in `gh/config.yml`:

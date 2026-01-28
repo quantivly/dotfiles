@@ -1,0 +1,320 @@
+# SSH Client Configuration Template
+#
+# LOCATION: ~/.ssh/config (copy this template there)
+# PERMISSIONS: chmod 600 ~/.ssh/config
+# QUICK SETUP: ssh-init  # Copies this template to ~/.ssh/config
+#
+# This template provides universal SSH best practices with optional features.
+# Customize for your environment by uncommenting and replacing [REPLACE] placeholders.
+#
+# DOCUMENTATION: ~/.dotfiles/docs/SSH_CONFIG_GUIDE.md
+#
+# ============================================================================
+# DEPLOYMENT CONTEXT GUIDANCE
+# ============================================================================
+#
+# This SSH config is used in TWO different contexts. Configure appropriately:
+#
+# CONTEXT 1: LAPTOP (SSH Client → Remote Servers)
+# ------------------------------------------------
+# - You SSH TO remote servers (dev, staging, personal VPS, etc.)
+# - Run Bitwarden desktop app with SSH agent (or system agent)
+# - Enable ForwardAgent for trusted work servers
+# - Define many Host entries (all the servers you connect to)
+#
+# Enable in template:
+#   ✓ ControlMaster (speeds up connections)
+#   ✓ ServerAlive (prevents disconnections)
+#   ✓ Bitwarden IdentityAgent (if using Bitwarden SSH agent)
+#   ✓ ForwardAgent for trusted hosts (dev, staging, etc.)
+#   ✓ Many Host definitions (your work infrastructure)
+#
+# CONTEXT 2: REMOTE EC2 DEVELOPMENT MACHINE (SSH Server + Client)
+# ----------------------------------------------------------------
+# - You ARE the remote server (someone SSHs TO you)
+# - You also SSH FROM here (to GitHub, other servers)
+# - Receive forwarded agent from laptop (uses laptop's keys)
+# - Also run system SSH agent for local keys (via zshrc.local)
+#
+# Enable in template:
+#   ✓ ControlMaster (speeds up outbound connections)
+#   ✓ ServerAlive (prevents disconnections)
+#   ✗ Bitwarden IdentityAgent (use forwarded agent from laptop instead)
+#   ✗ ForwardAgent (usually not needed - you're already remote)
+#   ✗ Minimal Host definitions (just GitHub, maybe internal servers)
+#
+# KEY INSIGHT: Remote servers receive forwarded agents from laptops, so they
+# don't need Bitwarden configured. Laptops run Bitwarden and forward to servers.
+#
+# ============================================================================
+# UNIVERSAL DEFAULTS (Active - Works for BOTH Contexts)
+# ============================================================================
+#
+# Connection Multiplexing - Reuse connections for speed
+# • First connection creates socket, subsequent connections reuse it
+# • Speeds up: git operations, scp, multiple terminal sessions
+# • 10 minute persist keeps socket alive between commands
+#
+# Connection Stability - Prevent disconnections
+# • ServerAlive sends keepalive every 60s
+# • ServerAliveCountMax allows 3 missed responses (3 minutes)
+# • TCPKeepAlive detects broken connections at TCP level
+#
+Host *
+    # Connection multiplexing (reuse connections)
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%C
+    ControlPersist 10m
+
+    # Connection stability (prevent disconnections)
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    TCPKeepAlive yes
+
+    # Compression (helps over slow connections)
+    Compression yes
+
+# ============================================================================
+# SSH AGENT CONFIGURATION (Choose ONE, uncomment as needed)
+# ============================================================================
+#
+# Option 1: Bitwarden SSH Agent (LAPTOP ONLY - Desktop App Required)
+# -------------------------------------------------------------------
+# Use keys stored in Bitwarden vault. Enable on LAPTOPS running Bitwarden.
+# Remote servers should NOT use this - they receive forwarded agent instead.
+#
+# Choose your Bitwarden installation method:
+
+# Snap install (most common on Ubuntu)
+# Host *
+#     IdentityAgent ~/.var/app/com.bitwarden.desktop/config/Bitwarden/.bitwarden-ssh-agent.sock
+
+# Deb/AppImage install
+# Host *
+#     IdentityAgent ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
+
+# Flatpak install
+# Host *
+#     IdentityAgent ~/.var/app/com.bitwarden.desktop/config/Bitwarden/.bitwarden-ssh-agent.sock
+
+# Option 2: System SSH Agent (BOTH CONTEXTS)
+# -------------------------------------------
+# Auto-started by ~/.zshrc.local (see examples/zshrc.local.template)
+# Works on both laptops and remote servers for file-based keys.
+# No configuration needed here - agent socket set by SSH_AUTH_SOCK environment variable.
+
+# Option 3: Forwarded Agent (REMOTE SERVER CONTEXT)
+# --------------------------------------------------
+# Remote servers automatically receive forwarded agent from laptop when:
+# - Laptop has "ForwardAgent yes" for that host
+# - Server has "AllowAgentForwarding yes" in sshd_config (default)
+# No configuration needed here - SSH_AUTH_SOCK set automatically by sshd.
+
+# Option 4: File-Based Keys (BOTH CONTEXTS - Fallback)
+# -----------------------------------------------------
+# SSH automatically tries ~/.ssh/id_ed25519, ~/.ssh/id_rsa, etc.
+# Specify additional keys with IdentityFile:
+# Host *
+#     IdentityFile ~/.ssh/my-other-key
+
+# ============================================================================
+# LAPTOP CONFIGURATION: Hosts You Connect TO
+# ============================================================================
+#
+# LAPTOP CONTEXT: Define all remote servers you SSH to from your laptop.
+# Uncomment and customize with your actual infrastructure.
+
+# ----------------------------------------------------------------------------
+# Agent Forwarding (LAPTOP ONLY - Enable for Trusted Hosts)
+# ----------------------------------------------------------------------------
+#
+# ⚠️  SECURITY WARNING: ForwardAgent allows the remote server to use your
+# SSH keys. Only enable for servers YOU control and trust completely.
+#
+# Common use case: Enable git commit signing on remote development machines
+# using your laptop's SSH keys (from Bitwarden or system agent).
+#
+# Pattern: List trusted work servers
+# Host dev staging demo2 qspace qproxy
+#     ForwardAgent yes
+
+# Pattern: Use wildcards for consistent naming
+# Host *.mycompany.com *.internal
+#     ForwardAgent yes
+
+# Pattern: Specific server with full config
+# Host dev
+#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+#     IdentityFile ~/.ssh/id_ed25519
+
+# ----------------------------------------------------------------------------
+# Work Infrastructure (LAPTOP ONLY - Replace with Your Hosts)
+# ----------------------------------------------------------------------------
+#
+# Define all work servers you connect to. Replace [REPLACE] placeholders.
+# These should NOT be committed to dotfiles - keep in your personal ~/.ssh/config.
+
+# Development server
+# Host dev
+#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+
+# Staging environment
+# Host staging
+#     HostName [REPLACE: ec2-yy-yy-yy-yy.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+
+# Production bastion (jump host)
+# Host bastion
+#     HostName [REPLACE: bastion.company.com]
+#     User your-username
+#     # No ForwardAgent for bastion hosts (security best practice)
+
+# Internal server via bastion (ProxyJump)
+# Host internal-db
+#     HostName [REPLACE: 10.0.1.50]
+#     User admin
+#     ProxyJump bastion
+#     # No ForwardAgent through bastion
+
+# ----------------------------------------------------------------------------
+# Personal Infrastructure (LAPTOP ONLY - Your Personal Servers)
+# ----------------------------------------------------------------------------
+
+# Personal VPS
+# Host vps
+#     HostName [REPLACE: your-vps.example.com]
+#     User root
+#     IdentityFile ~/.ssh/personal_vps_key
+
+# Home server
+# Host homeserver
+#     HostName [REPLACE: home.example.com or Dynamic DNS]
+#     User your-username
+#     Port 2222  # Non-standard SSH port
+
+# ============================================================================
+# REMOTE SERVER CONFIGURATION: Hosts You Connect TO From Remote
+# ============================================================================
+#
+# REMOTE SERVER CONTEXT: Minimal config - you're already ON the remote server.
+# Usually only need GitHub and maybe other internal servers.
+
+# ----------------------------------------------------------------------------
+# GitHub (BOTH CONTEXTS - Version Control)
+# ----------------------------------------------------------------------------
+#
+# Optimizations for GitHub SSH connections (both laptop and remote server).
+
+# Host github.com
+#     # Auto-add key to agent on first use
+#     AddKeysToAgent yes
+#
+#     # Use specific key for GitHub (optional)
+#     # IdentityFile ~/.ssh/github_ed25519
+#
+#     # Strict host key checking (security)
+#     StrictHostKeyChecking yes
+#
+#     # Reuse connections (via global ControlMaster)
+#     ControlMaster auto
+#     ControlPath ~/.ssh/sockets/%C
+#     ControlPersist 10m
+
+# ----------------------------------------------------------------------------
+# Other Internal Servers (REMOTE SERVER CONTEXT)
+# ----------------------------------------------------------------------------
+#
+# From remote dev machine, you might need to connect to other internal servers:
+
+# Another internal server
+# Host staging
+#     HostName [REPLACE: ec2-zz-zz-zz-zz.compute-1.amazonaws.com]
+#     User ubuntu
+
+# Database server (internal IP)
+# Host db-primary
+#     HostName [REPLACE: 10.0.1.100]
+#     User postgres
+#     Port 5432
+
+# ============================================================================
+# ADVANCED PATTERNS
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Include Directive (Modular Configs)
+# ----------------------------------------------------------------------------
+#
+# Split config into multiple files for organization:
+# Include ~/.ssh/config.d/*.conf
+#
+# Example structure:
+#   ~/.ssh/config.d/work.conf       (work infrastructure)
+#   ~/.ssh/config.d/personal.conf   (personal servers)
+#   ~/.ssh/config.d/github.conf     (GitHub optimizations)
+
+# ----------------------------------------------------------------------------
+# Match Directives (Conditional Configuration)
+# ----------------------------------------------------------------------------
+#
+# Apply config based on conditions:
+
+# Enable agent forwarding only from specific source
+# Match host dev,staging exec "test $(hostname) = 'my-laptop'"
+#     ForwardAgent yes
+
+# Use different key based on user
+# Match user work-account
+#     IdentityFile ~/.ssh/work_key
+
+# ----------------------------------------------------------------------------
+# Per-Host Overrides
+# ----------------------------------------------------------------------------
+#
+# Override global settings for specific hosts:
+
+# Disable multiplexing for problematic host
+# Host legacy-server
+#     HostName [REPLACE: legacy.example.com]
+#     ControlMaster no
+
+# More aggressive keepalive for flaky connection
+# Host flaky
+#     HostName [REPLACE: flaky.example.com]
+#     ServerAliveInterval 30
+#     ServerAliveCountMax 5
+
+# ============================================================================
+# TROUBLESHOOTING
+# ============================================================================
+#
+# Connection multiplexing issues:
+#   ssh-clear          # Clear all ControlMaster sockets
+#   rm -f ~/.ssh/sockets/*
+#
+# Debug connection:
+#   ssh -vvv hostname  # Verbose debugging output
+#
+# Test config syntax:
+#   ssh -G hostname    # Show effective config for host
+#
+# Check which key is used:
+#   ssh -v hostname 2>&1 | grep "Offering\|Authenticating"
+#
+# Force specific key:
+#   ssh -i ~/.ssh/specific_key hostname
+#
+# Disable config temporarily:
+#   ssh -F /dev/null hostname
+#
+# List active ControlMaster connections:
+#   ls -l ~/.ssh/sockets/
+#
+# Manual socket cleanup:
+#   ssh -O exit hostname  # Close specific connection
+#   ssh -O check hostname # Check connection status

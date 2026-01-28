@@ -39,3 +39,10 @@
         chmod 600 ~/.gitconfig.local
         echo "Please edit ~/.gitconfig.local to add your git user information"
       fi
+    - |
+      # Create SSH sockets directory for ControlMaster
+      if [ ! -d ~/.ssh/sockets ]; then
+        mkdir -p ~/.ssh/sockets
+        chmod 700 ~/.ssh/sockets
+        echo "✓ Created ~/.ssh/sockets for SSH connection multiplexing"
+      fi

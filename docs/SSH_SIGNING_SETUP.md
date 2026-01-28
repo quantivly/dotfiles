@@ -90,7 +90,9 @@ If you use Bitwarden SSH agent (recommended for secure key management):
 
 ### SSH Agent Forwarding
 
-SSH signing works seamlessly with SSH agent forwarding:
+SSH signing works seamlessly with SSH agent forwarding. For comprehensive SSH client configuration including ForwardAgent setup patterns, connection multiplexing, and deployment context guidance (laptop vs. remote server), see the [SSH Configuration Guide](SSH_CONFIG_GUIDE.md) or copy the template with `ssh-init`.
+
+**How it works:**
 
 ```
 Laptop (SSH Agent)  →  EC2 Instance (forwarded agent)

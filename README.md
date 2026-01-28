@@ -449,6 +449,24 @@ Your personal git settings go in `~/.gitconfig.local`:
 
 This file is automatically created from `gitconfig.local.example` during installation.
 
+### SSH Configuration
+
+Optimize SSH connections with the included configuration template:
+
+```bash
+ssh-init  # Copy examples/ssh-config.template to ~/.ssh/config
+vim ~/.ssh/config  # Customize for your infrastructure
+```
+
+**Key features:**
+- **Connection multiplexing** - Reuse connections for instant reconnections (< 1 second)
+- **Connection stability** - Prevent timeouts and disconnections
+- **Bitwarden SSH agent integration** - Use keys stored in Bitwarden vault
+- **Agent forwarding patterns** - Enable git signing on remote servers
+- **GitHub optimizations** - Faster git operations with connection reuse
+
+See the [SSH Configuration Guide](docs/SSH_CONFIG_GUIDE.md) for complete setup instructions, deployment context guidance (laptop vs. remote server), security considerations, and troubleshooting tips.
+
 ### Shell Configuration
 
 Machine-specific shell settings go in `~/.zshrc.local`:

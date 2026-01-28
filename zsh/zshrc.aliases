@@ -175,3 +175,28 @@ alias tm='tmux'
 alias tma='tmux attach -t'
 alias tmn='tmux new -s'
 alias tml='tmux list-sessions'
+
+#==============================================================================
+# SSH
+#==============================================================================
+
+# Initialize SSH config from template
+# Creates ~/.ssh/config from examples/ssh-config.template
+# Includes: connection multiplexing, stability, agent integration, host patterns
+alias ssh-init='
+  if [ -f ~/.ssh/config ]; then
+    echo "⚠️  ~/.ssh/config already exists! Backup first:"
+    echo "   cp ~/.ssh/config ~/.ssh/config.backup"
+  else
+    cp ~/.dotfiles/examples/ssh-config.template ~/.ssh/config
+    chmod 600 ~/.ssh/config
+    echo "✓ Created ~/.ssh/config from template"
+    echo "  Edit to customize: vim ~/.ssh/config"
+    echo "  See guide: ~/.dotfiles/docs/SSH_CONFIG_GUIDE.md"
+  fi
+'
+
+# Clear all SSH ControlMaster connection sockets
+# Useful when connections hang or become stale
+# Location: ~/.ssh/sockets/ (created by ./install)
+alias ssh-clear='rm -f ~/.ssh/sockets/* && echo "✓ Cleared all SSH connection sockets"'

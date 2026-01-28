@@ -122,6 +122,49 @@ Complete guide to setting up commit signing for the team. **SSH signing is recom
 
 ---
 
+### [SSH Configuration Guide](../docs/SSH_CONFIG_GUIDE.md) 🔐
+
+Comprehensive SSH client configuration template with universal best practices and deployment context guidance.
+
+**Topics Covered:**
+- Connection multiplexing (ControlMaster) for instant reconnections
+- Connection stability (ServerAlive, TCPKeepAlive) to prevent timeouts
+- SSH agent integration (Bitwarden, system agent, forwarded agent, file-based keys)
+- Agent forwarding patterns with security considerations
+- Host-specific configuration examples (laptop and remote server patterns)
+- Deployment contexts (laptop vs. remote EC2 development machines)
+- Troubleshooting common SSH issues
+- Advanced topics (Include directive, Match conditions, port forwarding)
+
+**Quick Setup:**
+```bash
+ssh-init              # Copy template to ~/.ssh/config
+vim ~/.ssh/config     # Customize for your hosts
+```
+
+**Key Features:**
+- Universal defaults work for both laptop and remote server contexts
+- Connection multiplexing makes subsequent connections instant (< 1 second)
+- Bitwarden SSH agent integration with multiple install paths
+- Agent forwarding enables git signing on remote development servers
+- GitHub-specific optimizations for faster git operations
+
+**Deployment Contexts:**
+- **Laptop**: Define all servers you connect TO, enable ForwardAgent for trusted hosts, configure Bitwarden IdentityAgent
+- **Remote Server**: Minimal config (GitHub + internal servers), receive forwarded agent from laptop, no Bitwarden needed
+
+**Best For:**
+- Users wanting optimized SSH connections with connection reuse
+- Setting up Bitwarden SSH agent integration
+- Configuring agent forwarding for remote git signing
+- Understanding laptop vs. remote server SSH configuration patterns
+
+**Aliases:**
+- `ssh-init` - Copy template to ~/.ssh/config
+- `ssh-clear` - Clear all ControlMaster connection sockets
+
+---
+
 ## Tool Verification
 
 ### [verify-tools.sh](../scripts/verify-tools.sh) ✔️

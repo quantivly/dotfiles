@@ -99,6 +99,12 @@
 #   3. ~/.ssh/id_rsa     (legacy default)
 #
 # If you need to skip this (e.g., using a different SSH setup), comment it out.
+#
+# For advanced SSH client configuration (connection multiplexing, agent forwarding,
+# Bitwarden integration, host patterns), see:
+#   ~/.dotfiles/examples/ssh-config.template
+#
+# Quick setup: ssh-init
 
 if [ -z "$SSH_AUTH_SOCK" ]; then
     eval "$(ssh-agent -s)" > /dev/null
