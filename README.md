@@ -113,7 +113,7 @@ Shared configuration files for zsh, git, and various development tools used by t
        email = your.email@quantivly.com
    ```
 
-   **Recommended:** Set up GPG signing to verify your commits (see [Personalization](#personalization) section for detailed instructions).
+   **Recommended:** Set up SSH commit signing to verify your commits (see [Personalization](#personalization) section for detailed instructions).
 
 6. **Customize machine-specific settings:**
 
@@ -403,7 +403,7 @@ Machine-specific settings that should NEVER be committed:
 
 Personal git configuration that should NEVER be committed:
 - Your name and email address
-- GPG signing keys
+- SSH signing keys
 - Machine-specific git settings
 - Personal git aliases
 
@@ -423,23 +423,29 @@ Your personal git settings go in `~/.gitconfig.local`:
     name = Your Name
     email = your.email@quantivly.com
 
-# Recommended: GPG signing for commit verification
+# Recommended: SSH signing for commit verification
 [user]
-    signingkey = YOUR_GPG_KEY_ID
+    signingkey = ssh-ed25519 AAAAC3Nza... your.email@quantivly.com
 [commit]
     gpgsign = true
+[gpg]
+    format = ssh
+[gpg "ssh"]
+    allowedSignersFile = ~/.ssh/allowedSigners
 ```
 
-**GPG signing is strongly encouraged** to verify your identity and ensure commit authenticity. The dotfiles repository includes utilities to make GPG signing convenient:
+**SSH commit signing is strongly encouraged** to verify your identity and ensure commit authenticity. SSH signing (Git 2.34+) is simpler than GPG and integrates seamlessly with SSH agent workflows.
 
-- **gpg-prime** - Prime your GPG cache once per work session (8-24 hour cache)
-- **Automatic prevention** - Pre-commit hook prevents hanging when cache expires
-- **Shell reminder** - One-time reminder per session if cache not primed
-- **Clear guidance** - Helpful error messages with actionable steps
+**Why SSH signing?**
+- **Automatic**: Works with ssh-agent (no daily cache priming)
+- **Integrated**: Uses same keys as GitHub authentication
+- **Simple**: No pre-commit hooks or cache management needed
+- **Bitwarden-friendly**: Works perfectly with Bitwarden SSH agent
+- **Forwarding-compatible**: Sign commits on remote servers via SSH agent forwarding
 
-**Quick setup:** See [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md) for complete step-by-step instructions (5 minutes to verified commits).
+**Quick setup:** See [docs/SSH_SIGNING_SETUP.md](docs/SSH_SIGNING_SETUP.md) for complete instructions (5 minutes to verified commits).
 
-**Already set up?** Just run `gpg-prime` once when you start working each day.
+**Already using SSH keys?** Just configure git to use them for signing - it's automatic from there!
 
 This file is automatically created from `gitconfig.local.example` during installation.
 
@@ -520,7 +526,7 @@ If you want to heavily customize these dotfiles:
 
 1. **Never commit personal information** - All sensitive and personal data goes in local files:
    - `~/.zshrc.local` for shell secrets and machine-specific config
-   - `~/.gitconfig.local` for your git identity and GPG keys
+   - `~/.gitconfig.local` for your git identity and SSH signing keys
 2. **Protect your local config** - Both `~/.zshrc.local` and `~/.gitconfig.local` should have mode 600
 3. **Review before committing** - Always check what you're committing to git
 4. **Rotate exposed tokens** - If you accidentally commit secrets, rotate them immediately
@@ -762,7 +768,7 @@ This repository includes multiple layers of security to prevent accidental crede
 - **Never** commit secrets to git - use `~/.zshrc.local` (chmod 600)
 - **Use sops** for encrypted secrets: `~/.secrets/env.enc.yaml`
 - **Rotate immediately** if a secret is exposed
-- **Enable GPG signing** to verify commit authenticity (see [Personalization](#personalization))
+- **Enable SSH signing** to verify commit authenticity (see [Personalization](#personalization))
 
 ## Contributing
 
@@ -795,7 +801,7 @@ MIT License - Feel free to use and modify as needed.
 
 - [Migration Guide](docs/MIGRATION.md) - Migrating from nvm/pyenv to mise
 - [Security Incident Response](docs/SECURITY_INCIDENTS.md) - What to do if you accidentally commit secrets
-- [GPG Signing Setup](docs/GPG_SIGNING_SETUP.md) - Technical reference for GPG commit signing
+- [Commit Signing Setup](docs/SSH_SIGNING_SETUP.md) - Guide for SSH commit signing (recommended) with GPG alternative
 - [Workflow Examples](examples/README.md) - Git, Docker, and FZF workflow guides
 
 ### External Documentation
