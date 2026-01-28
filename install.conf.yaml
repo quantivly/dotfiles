@@ -12,6 +12,7 @@
     ~/.config/pypoetry/config.toml: config/pypoetry/config.toml
     ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.gitconfig: gitconfig
+    ~/.tmux.conf: tmux.conf
     ~/.zshrc: zshrc
     ~/.p10k.zsh:
       path: p10k.zsh

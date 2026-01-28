@@ -80,6 +80,9 @@ source "${ZSH}/oh-my-zsh.sh"
 # To customize prompt, run `p10k configure` or edit ~/.p10k.zsh
 [[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
 
+# Terminal configuration (colors, terminfo)
+[ -f ~/.dotfiles/zsh/zshrc.terminal ] && source ~/.dotfiles/zsh/zshrc.terminal
+
 #==============================================================================
 # ZSH options
 #==============================================================================

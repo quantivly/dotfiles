@@ -1,0 +1,22 @@
+# ============================================================================
+# Terminal Configuration
+# ============================================================================
+# This module configures terminal capabilities for optimal display.
+#
+# Key Features:
+# - True color support (24-bit)
+# - tmux 256-color configuration
+# - Terminal capability detection
+#
+# Loaded early in zshrc (after oh-my-zsh, before functions)
+# ============================================================================
+
+# Enable true color support (24-bit)
+# This allows applications to use the full 16 million color palette
+export COLORTERM=truecolor
+
+# Configure TERM for tmux sessions
+# tmux requires screen-256color for proper 256-color support
+if [[ -n "$TMUX" ]]; then
+    export TERM=screen-256color
+fi

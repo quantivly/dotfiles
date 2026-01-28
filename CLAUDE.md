@@ -148,6 +148,7 @@ See `.github/README.md` for details.
 ### Strongly Recommended
 - **fzf** - Fuzzy finder (many functions depend on it)
 - **gh** - GitHub CLI (35+ custom aliases in `gh/config.yml`)
+- **tmux** - Terminal multiplexer (session persistence, splits, remote work)
 
 ### Modern CLI Tools
 
@@ -541,6 +542,91 @@ echo "your.email@domain.com $(cat ~/.ssh/id_ed25519.pub)" > ~/.ssh/allowedSigner
 - `gh prmerge` - Squash merge and delete branch
 - `gh runs` - Recent workflow runs for current branch
 
+## Tmux Configuration
+
+Beginner-friendly tmux setup with modern features and vim-style navigation.
+
+### Quick Start
+
+```bash
+# Start a new session
+tmn mysession
+
+# Inside tmux:
+Ctrl+Space |  # Split vertically
+Ctrl+Space -  # Split horizontally
+Alt+h/j/k/l   # Navigate panes (no prefix!)
+Ctrl+Space d  # Detach (session keeps running)
+
+# Reattach later
+tma mysession
+
+# List all sessions
+tml
+
+# Kill session when done
+tmux kill-session -t mysession
+```
+
+### Key Features
+
+- **Prefix:** Ctrl+Space (ergonomic, no shell conflicts)
+- **Mouse support:** Click panes, drag borders, scroll with wheel
+- **True color:** 24-bit color support for beautiful syntax highlighting
+- **Vim navigation:** Alt+hjkl for pane switching (no prefix needed!)
+- **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
+- **Quick window switching:** Alt+1/2/3/4/5 (no prefix needed!)
+- **Large scrollback:** 10,000 lines (vs default 2,000)
+- **Smart defaults:** Windows start at 1, auto-renumber, splits open in current directory
+
+### Status Bar
+
+Dark theme matching Powerlevel10k:
+```
+[session-name] window-list | hostname | 14:30 28-Jan-2026
+```
+
+### Configuration
+
+- **Config file:** `~/.tmux.conf` (symlinked from dotfiles)
+- **Aliases:** `tm`, `tma`, `tmn`, `tml` (see `zsh/zshrc.aliases`)
+- **Help:** `help tmux` or `tmux_help` in zsh
+- **Workflows:** See `examples/tmux-workflows.md` for comprehensive guide
+
+### Important Notes
+
+- **No auto-start:** Tmux must be launched manually with `tmn <session>` - this is intentional to avoid interfering with scripts and quick commands
+- **Terminal-agnostic:** Works with any modern terminal that supports 24-bit color and OSC 52 (iTerm2, WezTerm, Alacritty, Windows Terminal, etc.)
+- **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
+
+### Common Workflows
+
+```bash
+# Development layout (3 panes: editor top, two terminals bottom)
+tmn dev
+Ctrl+Space -    # horizontal split
+Alt+j           # move to bottom
+Ctrl+Space |    # vertical split
+# Top: vim editor, Bottom-left: tests, Bottom-right: git
+
+# Multiple projects (one session per project)
+tmn api-backend
+tmn frontend
+Ctrl+Space s    # switch between sessions interactively
+
+# Remote work (SSH - survives disconnections)
+ssh user@server
+tmn work
+# Connection drops? Reconnect and: tma work
+
+# Long-running tasks
+tmn build
+./long-build.sh
+Ctrl+Space d    # detach and let it run
+```
+
+See `examples/tmux-workflows.md` for detailed examples, copy mode, troubleshooting, and advanced tips.
+
 ## Common Tasks
 
 ```bash
@@ -561,6 +647,12 @@ osc52 "text"         # Direct OSC 52 copy
 
 # Verify tool status
 ./scripts/verify-tools.sh
+
+# Start tmux session
+tmn work
+Ctrl+Space |  # split panes
+Ctrl+Space d  # detach
+tma work      # reattach later
 ```
 
 ## Workflow Examples
@@ -570,6 +662,7 @@ Comprehensive guides in `examples/` directory:
 - **[examples/git-workflows.md](examples/git-workflows.md)** - Feature branches, conflict resolution, PR reviews, WIP commits, cleanup
 - **[examples/docker-workflows.md](examples/docker-workflows.md)** - Service management, debugging, cleanup, networking
 - **[examples/fzf-recipes.md](examples/fzf-recipes.md)** - Interactive fuzzy finding, keybindings, integrations
+- **[examples/tmux-workflows.md](examples/tmux-workflows.md)** - Session management, pane layouts, copy mode, troubleshooting
 
 Quick reference:
 ```bash
@@ -583,6 +676,12 @@ dcup && dps && dclogs
 Ctrl+T    # Fuzzy file search
 fbr       # Fuzzy branch checkout
 fshow     # Browse git history
+
+# Tmux workflow
+tmn dev               # Start session
+Ctrl+Space -          # Split horizontally
+Alt+j && Ctrl+Space | # Navigate down and split vertically
+Ctrl+Space d          # Detach
 ```
 
 ## Troubleshooting
