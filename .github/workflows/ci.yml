@@ -99,6 +99,49 @@ jobs:
       - name: Run pre-commit on all files
         run: pre-commit run --all-files
 
+  prerequisites-test:
+    name: Prerequisites Installer Test (Ubuntu ${{ matrix.ubuntu-version }})
+    runs-on: ubuntu-${{ matrix.ubuntu-version }}
+    strategy:
+      matrix:
+        ubuntu-version: ['22.04', '24.04']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y zsh git curl build-essential
+
+      - name: Run prerequisites installer
+        run: ./scripts/install-prerequisites.sh
+
+      - name: Test idempotency (re-run should succeed)
+        run: ./scripts/install-prerequisites.sh
+
+      - name: Verify oh-my-zsh installed
+        run: |
+          test -d ~/.oh-my-zsh || (echo "oh-my-zsh not installed" && exit 1)
+          echo "✅ oh-my-zsh verified"
+
+      - name: Verify Powerlevel10k installed
+        run: |
+          test -d ~/.oh-my-zsh/custom/themes/powerlevel10k || (echo "Powerlevel10k not installed" && exit 1)
+          echo "✅ Powerlevel10k verified"
+
+      - name: Verify zsh plugins installed
+        run: |
+          test -d ~/.oh-my-zsh/custom/plugins/zsh-autosuggestions || (echo "zsh-autosuggestions not installed" && exit 1)
+          test -d ~/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting || (echo "zsh-syntax-highlighting not installed" && exit 1)
+          test -d ~/.oh-my-zsh/custom/plugins/zsh-fzf-history-search || (echo "zsh-fzf-history-search not installed" && exit 1)
+          echo "✅ zsh plugins verified"
+
+      - name: Verify fzf installed
+        run: |
+          command -v fzf || test -d ~/.fzf || (echo "fzf not installed" && exit 1)
+          echo "✅ fzf verified"
+
   install-test:
     name: Installation Test (Ubuntu ${{ matrix.ubuntu-version }})
     runs-on: ubuntu-${{ matrix.ubuntu-version }}

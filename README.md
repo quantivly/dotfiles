@@ -47,7 +47,7 @@ Shared configuration files for zsh, git, and various development tools used by t
 
 ### First-Time Setup (New Machine)
 
-1. **Install prerequisites:**
+1. **Install system packages:**
 
    ```bash
    # Ubuntu/Debian (minimal for dotfiles + CLI tools)
@@ -56,44 +56,51 @@ Shared configuration files for zsh, git, and various development tools used by t
 
    **Note**: These 4 packages are sufficient for dotfiles standalone installation. mise downloads pre-compiled binaries for CLI tools, so Python build dependencies (libssl-dev, zlib1g-dev, etc.) are NOT needed unless you're compiling Python from source.
 
-2. **Install oh-my-zsh (required):**
-
-   oh-my-zsh is a required dependency (not optional). The dotfiles hard-depend on it.
-
-   ```bash
-   # Install oh-my-zsh
-   sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-
-   # Install Powerlevel10k theme (required)
-   git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
-
-   # Install required zsh plugins
-   git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-   git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
-   git clone https://github.com/joshskidmore/zsh-fzf-history-search ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-fzf-history-search
-   ```
-
-3. **Install fzf (required):**
-
-   ```bash
-   git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
-   ~/.fzf/install
-   ```
-
-4. **Clone this repository:**
+2. **Clone this repository:**
 
    ```bash
    git clone --recursive https://github.com/quantivly/dotfiles.git ~/.dotfiles
    cd ~/.dotfiles
    ```
 
-5. **Run the installer:**
+3. **Install shell prerequisites:**
+
+   ```bash
+   ./scripts/install-prerequisites.sh
+   ```
+
+   This installs oh-my-zsh, Powerlevel10k, zsh plugins, and fzf with HTTPS security and network timeouts.
+
+   <details>
+   <summary>Manual installation (advanced users)</summary>
+
+   If you prefer manual control, you can install prerequisites individually:
+
+   ```bash
+   # Install oh-my-zsh
+   sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+
+   # Install Powerlevel10k theme
+   git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
+
+   # Install required zsh plugins
+   git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+   git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+   git clone --depth=1 https://github.com/joshskidmore/zsh-fzf-history-search ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-fzf-history-search
+
+   # Install fzf
+   git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
+   ~/.fzf/install
+   ```
+   </details>
+
+4. **Run the dotfiles installer:**
 
    ```bash
    ./install
    ```
 
-6. **Configure your git identity:**
+5. **Configure your git identity:**
 
    The installer creates `~/.gitconfig.local` from the template. Edit it to set your personal information:
 
@@ -108,7 +115,7 @@ Shared configuration files for zsh, git, and various development tools used by t
 
    **Recommended:** Set up GPG signing to verify your commits (see [Personalization](#personalization) section for detailed instructions).
 
-7. **Customize machine-specific settings:**
+6. **Customize machine-specific settings:**
 
    The installer creates `~/.zshrc.local` from the template. Edit it to add:
    - API keys and tokens
@@ -121,7 +128,7 @@ Shared configuration files for zsh, git, and various development tools used by t
    chmod 600 ~/.zshrc.local  # Ensure it's only readable by you
    ```
 
-8. **Install optional dependencies** (see below)
+7. **Install optional dependencies** (see below)
 
 ### Updating Existing Installation
 
