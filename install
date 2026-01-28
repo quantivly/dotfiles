@@ -88,6 +88,14 @@ if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then
     fi
 
     if [[ -f "$HOME/.config/mise/config.toml" ]] || [[ -L "$HOME/.config/mise/config.toml" ]]; then
+        # Trust the mise configuration (security requirement)
+        echo "    Trusting mise configuration..."
+        if command -v mise &> /dev/null; then
+            mise trust "$BASEDIR/.mise.toml" 2>/dev/null || true
+        elif [[ -x "$HOME/.local/bin/mise" ]]; then
+            "$HOME/.local/bin/mise" trust "$BASEDIR/.mise.toml" 2>/dev/null || true
+        fi
+
         echo "    Installing/updating CLI tools..."
 
         # Capture mise install output for detailed error reporting

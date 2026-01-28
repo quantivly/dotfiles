@@ -47,15 +47,14 @@ Shared configuration files for zsh, git, and various development tools used by t
 
 ### First-Time Setup (New Machine)
 
-1. **Install prerequisites:**
+1. **Install system packages:**
 
    ```bash
-   # macOS
-   brew install zsh git
-
-   # Ubuntu/Debian
-   sudo apt update && sudo apt install zsh git
+   # Ubuntu/Debian (minimal for dotfiles + CLI tools)
+   sudo apt update && sudo apt install zsh git curl build-essential
    ```
+
+   **Note**: These 4 packages are sufficient for dotfiles standalone installation. mise downloads pre-compiled binaries for CLI tools, so Python build dependencies (libssl-dev, zlib1g-dev, etc.) are NOT needed unless you're compiling Python from source.
 
 2. **Clone this repository:**
 
@@ -64,13 +63,44 @@ Shared configuration files for zsh, git, and various development tools used by t
    cd ~/.dotfiles
    ```
 
-3. **Run the installer:**
+3. **Install shell prerequisites:**
+
+   ```bash
+   ./scripts/install-prerequisites.sh
+   ```
+
+   This installs oh-my-zsh, Powerlevel10k, zsh plugins, and fzf with HTTPS security and network timeouts.
+
+   <details>
+   <summary>Manual installation (advanced users)</summary>
+
+   If you prefer manual control, you can install prerequisites individually:
+
+   ```bash
+   # Install oh-my-zsh
+   sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+
+   # Install Powerlevel10k theme
+   git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
+
+   # Install required zsh plugins
+   git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+   git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+   git clone --depth=1 https://github.com/joshskidmore/zsh-fzf-history-search ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-fzf-history-search
+
+   # Install fzf
+   git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
+   ~/.fzf/install
+   ```
+   </details>
+
+4. **Run the dotfiles installer:**
 
    ```bash
    ./install
    ```
 
-4. **Configure your git identity:**
+5. **Configure your git identity:**
 
    The installer creates `~/.gitconfig.local` from the template. Edit it to set your personal information:
 
@@ -85,7 +115,7 @@ Shared configuration files for zsh, git, and various development tools used by t
 
    **Recommended:** Set up GPG signing to verify your commits (see [Personalization](#personalization) section for detailed instructions).
 
-5. **Customize machine-specific settings:**
+6. **Customize machine-specific settings:**
 
    The installer creates `~/.zshrc.local` from the template. Edit it to add:
    - API keys and tokens
@@ -98,7 +128,7 @@ Shared configuration files for zsh, git, and various development tools used by t
    chmod 600 ~/.zshrc.local  # Ensure it's only readable by you
    ```
 
-6. **Install optional dependencies** (see below)
+7. **Install optional dependencies** (see below)
 
 ### Updating Existing Installation
 
@@ -123,34 +153,58 @@ cd dev-setup
 
 This installs: zsh, dotfiles, mise, Python, Poetry, quanticli, and all CLI tools.
 
-### Option 2: Manual Installation
+### Option 2: Standalone Installation (Without dev-setup)
 
-1. **Install mise:**
+If you want to use dotfiles without the full dev-setup (e.g., on a personal laptop):
+
+1. **Install prerequisites** (see "First-Time Setup" above - zsh, git, curl, build-essential, oh-my-zsh, fzf)
+
+2. **Install mise:**
+
    ```bash
    curl https://mise.run | sh
    ```
 
-2. **Create tool config:**
+3. **Clone dotfiles:**
+
    ```bash
-   mkdir -p ~/.config/mise
-   cp examples/mise-config.toml ~/.config/mise/config.toml
+   git clone --recursive git@github.com:quantivly/dotfiles.git ~/.dotfiles
+   cd ~/.dotfiles
    ```
 
-3. **Install tools (5-10 minutes):**
+4. **Trust mise configuration:**
+
+   mise requires explicit trust of .mise.toml files (security feature):
+
    ```bash
-   ~/.local/bin/mise install
+   ~/.local/bin/mise trust
    ```
 
-4. **Reload shell:**
+   **Note**: Use the full path `~/.local/bin/mise` since mise isn't in your PATH yet.
+
+5. **Run the installer:**
+
    ```bash
-   source ~/.zshrc
+   ./install
    ```
 
-5. **Verify installation:**
+   The installer will:
+   - Create symlinks for dotfiles (~/.zshrc, ~/.gitconfig, etc.)
+   - Trust and install CLI tools via mise (parallel installation)
+   - Set up pre-commit hooks (with your consent)
+   - Install forgit (optional git+fzf integration)
+
+6. **Set zsh as default shell:**
+
    ```bash
-   mise ls
-   which bat fd eza delta
+   chsh -s $(which zsh)
    ```
+
+   Log out and log back in for the change to take effect.
+
+7. **Personalize:**
+
+   Edit `~/.gitconfig.local` for git identity and `~/.zshrc.local` for machine-specific config.
 
 ### Managing Tools
 
@@ -179,6 +233,8 @@ See `CLAUDE.md` for complete documentation on managing CLI tools with mise.
 
 - **zsh** - Shell
 - **git** - Version control
+- **curl** - Download tool
+- **build-essential** - Compilation tools (for mise)
 - **oh-my-zsh** - Zsh framework
   ```bash
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
@@ -186,6 +242,23 @@ See `CLAUDE.md` for complete documentation on managing CLI tools with mise.
 - **Powerlevel10k** - Zsh theme
   ```bash
   git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
+  ```
+- **zsh-autosuggestions** - Fish-like command suggestions
+  ```bash
+  git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+  ```
+- **zsh-syntax-highlighting** - Fish-like syntax highlighting
+  ```bash
+  git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+  ```
+- **zsh-fzf-history-search** - Fuzzy history search
+  ```bash
+  git clone https://github.com/joshskidmore/zsh-fzf-history-search ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-fzf-history-search
+  ```
+- **fzf** - Fuzzy finder
+  ```bash
+  git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
+  ~/.fzf/install
   ```
 
 ### Optional (Recommended)
@@ -236,21 +309,6 @@ Install these for the best experience:
   ```bash
   mise use -g node@lts python@3.12  # Install global versions
   mise ls                            # List installed versions
-  ```
-
-- **zsh-autosuggestions** - Fish-like command suggestions
-  ```bash
-  git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-  ```
-
-- **zsh-syntax-highlighting** - Fish-like syntax highlighting
-  ```bash
-  git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
-  ```
-
-- **zsh-fzf-history-search** - Fuzzy history search
-  ```bash
-  git clone https://github.com/joshskidmore/zsh-fzf-history-search ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-fzf-history-search
   ```
 
 ### Work-Specific (Quantivly)
@@ -401,6 +459,53 @@ alias myproject="cd ~/projects/myproject"
 ```
 
 This file is automatically created from `zsh/zshrc.local.example` during installation.
+
+### SSH Agent Integration
+
+#### Using Bitwarden SSH Agent
+
+If you use Bitwarden's built-in SSH agent, configure it before zshrc loads:
+
+```bash
+cat << 'EOF' > ~/.zshenv
+# Bitwarden SSH Agent
+# Socket path depends on installation method:
+# - Snap install: $HOME/snap/bitwarden/current/.bitwarden-ssh-agent.sock
+# - Deb/AppImage: $HOME/.config/Bitwarden/.bitwarden-ssh-agent.sock
+# - Flatpak: $XDG_RUNTIME_DIR/app/com.bitwarden.desktop/ssh-agent.sock
+export SSH_AUTH_SOCK="$HOME/snap/bitwarden/current/.bitwarden-ssh-agent.sock"
+EOF
+```
+
+**How Bitwarden SSH Agent Works**:
+1. You generate SSH keys normally: `ssh-keygen -t ed25519 -C "your@email.com"`
+2. You import the **private key** into Bitwarden vault (securely stored)
+3. Bitwarden's SSH agent serves keys from the vault when unlocked
+4. The private key file on disk can be deleted after importing to Bitwarden
+5. Keys are available automatically when Bitwarden is unlocked
+
+**Why this works**: dotfiles checks `if [ -z "$SSH_AUTH_SOCK" ]` before starting its own ssh-agent. By setting SSH_AUTH_SOCK in `~/.zshenv` (which loads before `~/.zshrc`), dotfiles will detect it and skip starting a separate agent.
+
+**Finding your socket path**:
+```bash
+# Check if Bitwarden SSH agent is running
+ps aux | grep -i bitwarden | grep ssh
+
+# Common socket locations:
+# Snap: ~/snap/bitwarden/current/.bitwarden-ssh-agent.sock
+# Deb: ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
+# Flatpak: $XDG_RUNTIME_DIR/app/com.bitwarden.desktop/ssh-agent.sock
+```
+
+#### Other SSH Agents
+
+This pattern works for any SSH agent:
+
+- **1Password**: `export SSH_AUTH_SOCK="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"` (macOS)
+- **Secretive** (macOS): `export SSH_AUTH_SOCK="$HOME/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh"`
+- **System ssh-agent**: dotfiles will auto-detect if already running
+
+Just point SSH_AUTH_SOCK to your agent's socket in `~/.zshenv`.
 
 ### Forking for Personal Use
 

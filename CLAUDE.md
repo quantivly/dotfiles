@@ -8,6 +8,31 @@ This is a personal dotfiles repository that manages zsh, git, and development to
 
 ## Installation & Testing
 
+### Standalone Dotfiles Installation
+
+For standalone dotfiles use (without Quantivly dev-setup):
+
+```bash
+# 1. Install system packages
+sudo apt update && apt install zsh git curl build-essential
+
+# 2. Clone dotfiles
+git clone --recursive https://github.com/quantivly/dotfiles.git ~/.dotfiles
+cd ~/.dotfiles
+
+# 3. Install shell prerequisites (automated)
+./scripts/install-prerequisites.sh  # Installs oh-my-zsh, Powerlevel10k, plugins, fzf
+
+# 4. Install dotfiles
+./install
+```
+
+### Quantivly Developers
+
+For Quantivly developers: Use the `quantivly/dev-setup` repository which automatically installs prerequisites and dotfiles.
+
+### Testing Changes
+
 ```bash
 ./install          # Install/update dotfiles (uses dotbot, creates symlinks, initializes submodules)
 source ~/.zshrc    # Test changes
