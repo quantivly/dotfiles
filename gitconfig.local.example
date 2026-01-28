@@ -8,37 +8,45 @@
 	name = Your Name
 	email = your.email@quantivly.com
 
-# GPG Signing (Recommended)
+# Commit Signing with SSH (Recommended)
 # Signing your commits helps verify your identity and is strongly encouraged.
+# SSH signing (Git 2.34+) is simpler than GPG and integrates with SSH agent workflows.
 #
-# Setup steps:
-# 1. Generate a GPG key: gpg --full-generate-key
-# 2. Get your key ID: gpg --list-secret-keys --keyid-format=long
-# 3. Add your key ID below (the part after "rsa4096/" or "ed25519/")
-# 4. Add your GPG public key to GitHub: https://github.com/settings/keys
-# 5. Uncomment the lines below:
+# Setup steps (5 minutes):
+# 1. Get your SSH public key:
+#    - File-based: cat ~/.ssh/id_ed25519.pub
+#    - Bitwarden: ssh-add -L
+#
+# 2. Create allowed signers file:
+#    mkdir -p ~/.ssh
+#    echo "your.email@quantivly.com $(cat ~/.ssh/id_ed25519.pub)" > ~/.ssh/allowedSigners
+#
+# 3. Add your SSH public key to GitHub as a "Signing Key":
+#    https://github.com/settings/keys (select "Signing Key" type)
+#
+# 4. Uncomment and configure the lines below:
 #
 # [user]
-# 	signingkey = YOUR_GPG_KEY_ID
+# 	signingkey = ssh-ed25519 AAAAC3Nza... your.email@quantivly.com
 #
 # [commit]
 # 	gpgsign = true
 #
 # [gpg]
-# 	program = gpg
+# 	format = ssh
 #
-# Need help with GPG setup? See:
-#   - Quick start: ~/.dotfiles/examples/gpg-setup-guide.md
-#   - Reference:   ~/.dotfiles/docs/GPG_SIGNING_SETUP.md
+# [gpg "ssh"]
+# 	allowedSignersFile = ~/.ssh/allowedSigners
+#
+# Need help? See: ~/.dotfiles/docs/SSH_SIGNING_SETUP.md
 #
 # Quick test after setup:
-#   gpg-prime                           # Prime cache (enter passphrase)
-#   git commit --allow-empty -m "Test"  # Test signing
-#   git log --show-signature -1         # Verify signature
+#   git commit --allow-empty -m "Test SSH signing"
+#   git log --show-signature -1  # Should show "Good 'git' signature with ED25519 key..."
 #
 # Daily usage:
-#   gpg-prime   # Run once when you start working
-#   # ... work normally, commits signed automatically ...
+#   Just commit normally - signing is automatic via ssh-agent!
+#   (No cache priming needed unlike GPG)
 
 # Safe Directory Configuration (Recommended)
 # Prevents Git from polluting your tracked gitconfig with safe.directory entries.

@@ -84,37 +84,41 @@ Interactive fuzzy finding workflows and power user tips.
 
 ---
 
-### [GPG Setup Guide](gpg-setup-guide.md) 🔐
+### [Commit Signing Setup](../docs/SSH_SIGNING_SETUP.md) 🔐
 
-Complete guide to setting up GPG commit signing for the team.
+Complete guide to setting up commit signing for the team. **SSH signing is recommended** for simplicity and SSH workflow integration.
 
 **Topics Covered:**
-- Quick start (5 minutes to verified commits)
-- Step-by-step GPG key generation and configuration
-- Git configuration for automatic signing
-- Daily workflow with GPG cache management
-- Using the gpg-prime utility and other helpers
-- Troubleshooting common GPG issues
-- Advanced topics (cache duration, SSH signing alternative)
+- Quick start with SSH signing (5 minutes to verified commits)
+- Bitwarden SSH agent integration
+- GitHub signing key configuration
+- SSH agent forwarding for remote servers
+- Signature verification setup
+- Migration from GPG (if applicable)
+- GPG signing as alternative (deprecated, not recommended)
 
-**Key Utilities:**
-- `gpg-prime` (alias: `gpg-prime-cache`) - Prime GPG cache for automatic signing
-- `git-check-gpg-cache` - Check cache status (used by hooks)
-- `install-gpg-hooks` - Install hooks in repos (usually not needed)
+**Why SSH Signing:**
+- Automatic signing via ssh-agent (no cache priming)
+- Single authentication method (SSH for auth + signing)
+- Works with SSH agent forwarding to remote servers
+- Integrates with Bitwarden, 1Password, system ssh-agent
+- No pre-commit hooks or cache management needed
+- Simpler than GPG (2 config values vs multiple scripts)
 
 **How It Works:**
-1. Run `gpg-prime` once when you start working
-2. Enter your GPG passphrase
-3. Cache lasts 8-24 hours
-4. All commits signed automatically without prompts
-5. Pre-commit hook prevents hanging if cache expires
+1. Configure git with your SSH public key once
+2. Create allowed signers file for verification
+3. All commits signed automatically via ssh-agent
+4. No daily workflow changes needed
+5. Works seamlessly on remote servers via agent forwarding
 
 **Best For:**
-- Team members setting up GPG signing for the first time
-- Understanding the GPG workflow and utilities
-- Troubleshooting GPG-related issues
+- Team members setting up commit signing for the first time
+- Users who want automatic signing without cache management
+- SSH-based workflows with agent forwarding
+- Bitwarden or other SSH agent users
 
-**Team Policy:** GPG signing is strongly encouraged but optional. You can use the dotfiles without configuring GPG - everything will work normally.
+**Team Policy:** Commit signing is strongly encouraged but optional. SSH signing is recommended over GPG for simplicity and better integration.
 
 ---
 
