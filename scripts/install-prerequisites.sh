@@ -286,7 +286,6 @@ check_tmux() {
     else
         log WARNING "tmux is not installed"
         log INFO "Install with: sudo apt install tmux"
-        MISSING_PREREQS=true
     fi
 }
 
