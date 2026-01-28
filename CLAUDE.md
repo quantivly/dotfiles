@@ -29,7 +29,7 @@ cd ~/.dotfiles
 
 ### Quantivly Developers
 
-For Quantivly developers: Use [dev-setup](https://github.com/quantivly/dev-setup) which automatically installs prerequisites and dotfiles.
+For Quantivly developers: Use the `quantivly/dev-setup` repository which automatically installs prerequisites and dotfiles.
 
 ### Testing Changes
 
