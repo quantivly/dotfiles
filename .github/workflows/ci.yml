@@ -207,9 +207,8 @@ jobs:
           required_docs=(
             "README.md"
             "CLAUDE.md"
-            "docs/GPG_SIGNING_SETUP.md"
+            "docs/SSH_SIGNING_SETUP.md"
             "docs/SECURITY_INCIDENTS.md"
-            "examples/gpg-setup-guide.md"
             "examples/git-workflows.md"
           )
 
