@@ -493,32 +493,44 @@ Key fzf functions: `fcd`, `fbr`, `fco`, `fshow`, `fkill`, `fenv`, `fssh`, `fport
 - Editor: VS Code (`code --wait`)
 - Default branch: `main`
 - Credential helper: GitHub CLI (`gh auth git-credential`)
-- GPG signing: Disabled by default (see below to enable)
+- Commit signing: SSH signing recommended (see below to enable)
 
 **Useful aliases:** `git lg` (pretty log), `git conflicts` (show merge conflicts)
 
-## GPG Commit Signing
+## Commit Signing
+
+**Recommended: SSH Signing (Git 2.34+)**
+
+Simpler than GPG, integrates with SSH agent workflows.
 
 **Quick setup:**
 ```bash
-gpg --full-generate-key
+# Get your SSH public key
+cat ~/.ssh/id_ed25519.pub  # or: ssh-add -L (for Bitwarden)
+
 # In ~/.gitconfig.local:
 # [user]
-#     signingkey = YOUR_KEY_ID
+#     signingkey = ssh-ed25519 AAAAC3Nza... your.email@domain.com
 # [commit]
 #     gpgsign = true
-gpg-prime  # Prime cache once per session
+# [gpg]
+#     format = ssh
+# [gpg "ssh"]
+#     allowedSignersFile = ~/.ssh/allowedSigners
+
+# Create allowed signers file
+echo "your.email@domain.com $(cat ~/.ssh/id_ed25519.pub)" > ~/.ssh/allowedSigners
 ```
 
-**Utilities:**
-- `gpg-prime` - Prime cache for automatic signing
-- `git-check-gpg-cache` - Check cache status
-- `install-gpg-hooks` - Install pre-commit hooks
+**Benefits:**
+- Automatic signing via ssh-agent (no cache priming)
+- Works with SSH agent forwarding to remote servers
+- Integrates with Bitwarden, 1Password, system ssh-agent
+- No pre-commit hooks or cache management needed
 
 **Documentation:**
-- Quick-start: [examples/gpg-setup-guide.md](examples/gpg-setup-guide.md)
-- Technical: [docs/GPG_SIGNING_SETUP.md](docs/GPG_SIGNING_SETUP.md)
-- Workflows: [examples/git-workflows.md](examples/git-workflows.md)
+- Complete guide: [docs/SSH_SIGNING_SETUP.md](docs/SSH_SIGNING_SETUP.md)
+- Git workflows: [examples/git-workflows.md](examples/git-workflows.md)
 
 ## GitHub CLI Aliases
 
