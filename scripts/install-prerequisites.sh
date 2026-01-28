@@ -276,6 +276,21 @@ install_fzf() {
 }
 
 #######################################
+# Check for tmux installation
+#######################################
+check_tmux() {
+    log STEP "Checking for tmux"
+
+    if command_exists tmux; then
+        log SUCCESS "tmux is already installed: $(tmux -V)"
+    else
+        log WARNING "tmux is not installed"
+        log INFO "Install with: sudo apt install tmux"
+        MISSING_PREREQS=true
+    fi
+}
+
+#######################################
 # Main installation flow
 #######################################
 main() {
@@ -304,6 +319,7 @@ main() {
     install_powerlevel10k
     install_zsh_plugins
     install_fzf
+    check_tmux
 
     # Summary
     echo ""
