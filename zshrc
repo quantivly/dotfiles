@@ -235,6 +235,13 @@ pathadd "${HOME}/.docker/cli-plugins"
 # Note: Smart width-aware gd() function is defined in zshrc.functions.git
 # It will automatically override forgit's gd alias during module loading
 
+# Restore oh-my-zsh git aliases that forgit overrides
+# We want the standard git commands with tab completion, not fuzzy finders
+unalias gsw 2>/dev/null && alias gsw='git switch'
+unalias gswc 2>/dev/null && alias gswc='git switch --create'
+unalias gswd 2>/dev/null && alias gswd='git switch $(git_develop_branch)'
+unalias gswm 2>/dev/null && alias gswm='git switch $(git_main_branch)'
+
 # Ensure quanticli aliases are set correctly (in case they were overridden)
 if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   unalias q 2>/dev/null
