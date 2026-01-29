@@ -162,6 +162,7 @@
 	autosquash = true
 	updateRefs = true             # Git 2.38+ - auto-update references
 	missingCommitsCheck = warn    # Warn if commits are missing
+	gpgSign = false
 
 [merge]
 	conflictstyle = diff3
