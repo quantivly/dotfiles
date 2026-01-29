@@ -154,7 +154,7 @@
 	autoSetupRemote = true        # Set upstream on first push
 
 [branch]
-	autosetupmerge = always
+	autosetupmerge = true         # Only track remote branches, not local
 	autosetuprebase = always
 	sort = -committerdate         # Sort branches by recent activity
 
