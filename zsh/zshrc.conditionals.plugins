@@ -31,10 +31,6 @@ fi
 # Environment Configuration
 #==============================================================================
 
-# GPG signing setup
-# Required for git commit signing
-export GPG_TTY=$(tty)
-
 # SSH agent setup
 # Only configure if not already set up by system
 if [ -z "$SSH_AUTH_SOCK" ]; then
