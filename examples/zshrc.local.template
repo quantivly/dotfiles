@@ -36,17 +36,16 @@
 # ⚠️  NEVER commit secrets to git! Keep them in this file only.
 #
 # Security Recommendations:
-#   1. Use sops for encrypted secrets (installed via mise)
-#      - Create: sops ~/.secrets/env.yaml
+#   1. Use sops + age for encrypted secrets (both installed via mise)
+#      - Setup:  age-keygen -o ~/.config/sops/age/keys.txt
+#      - Export: export SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt
+#      - Create: sops --encrypt --age <your-age-public-key> ~/.secrets/env.yaml
 #      - Edit:   sops ~/.secrets/env.yaml
 #      - Load:   eval $(sops -d ~/.secrets/env.yaml | grep export)
-#      - Note:   Always verify sops output before eval for security
+#      - Note:   Age encryption requires no passphrases (unlike GPG)
+#      - Benefit: No passphrase prompts on shell startup
 #
-#   2. Use gpg-agent for SSH key passphrase caching
-#      - Prevents repeated passphrase prompts
-#      - See: ~/.dotfiles/docs/GPG_SIGNING_SETUP.md
-#
-#   3. Use GitHub CLI for git credentials (already configured)
+#   2. Use GitHub CLI for git credentials (already configured)
 #      - No need to set GITHUB_TOKEN manually
 #      - Managed securely via: gh auth login
 #

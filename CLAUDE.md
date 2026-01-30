@@ -169,7 +169,7 @@ All tools are optional with intelligent fallbacks. Managed by mise (see below).
 | diff | delta/difftastic | `mise use -g delta@latest` |
 
 **Developer tools:** lazygit, just, glow, hyperfine, dive, forgit, ctop
-**Security:** gitleaks, pre-commit, sops
+**Security:** gitleaks, pre-commit, sops, age
 **Productivity:** thefuck, tldr, cheat, neofetch/fastfetch
 
 **Installation:**
@@ -241,7 +241,7 @@ mise config path                    # Verify active config
 
 ### Available Tools
 
-**Managed by mise** (14 essential): bat, fd, eza, delta, zoxide, duf, dust, lazygit, just, glow, gitleaks, pre-commit, sops, fastfetch
+**Managed by mise** (15 essential): bat, fd, eza, delta, zoxide, duf, dust, lazygit, just, glow, gitleaks, pre-commit, sops, age, fastfetch
 
 **Optional** (uncomment in `.mise.toml`): dive, lazydocker, ctop, hyperfine, difftastic, cheat, tlrc
 

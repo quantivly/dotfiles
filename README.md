@@ -784,7 +784,7 @@ This repository includes multiple layers of security to prevent accidental crede
 
 ### Secret Storage
 - **Never** commit secrets to git - use `~/.zshrc.local` (chmod 600)
-- **Use sops** for encrypted secrets: `~/.secrets/env.enc.yaml`
+- **Use sops + age** for encrypted secrets: `~/.secrets/env.yaml` (age encryption requires no passphrases)
 - **Rotate immediately** if a secret is exposed
 - **Enable SSH signing** to verify commit authenticity (see [Personalization](#personalization))
 
