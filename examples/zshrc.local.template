@@ -38,8 +38,10 @@
 # Security Recommendations:
 #   1. Use sops + age for encrypted secrets (both installed via mise)
 #      - Setup:  age-keygen -o ~/.config/sops/age/keys.txt
+#                (outputs public key: age1xxxxxxxxx... - copy this!)
 #      - Export: export SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt
-#      - Create: sops --encrypt --age <your-age-public-key> ~/.secrets/env.yaml
+#      - Create: sops --encrypt --age age1xxxxxxxxx... ~/.secrets/env.yaml
+#                (replace age1xxxxxxxxx... with your public key from keygen output)
 #      - Edit:   sops ~/.secrets/env.yaml
 #      - Load:   eval $(sops -d ~/.secrets/env.yaml | grep export)
 #      - Note:   Age encryption requires no passphrases (unlike GPG)
