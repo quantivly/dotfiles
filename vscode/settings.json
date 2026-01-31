@@ -1,25 +1,183 @@
 {
-  // Python - direnv compatibility
-  // CRITICAL: direnv handles virtual environment activation automatically via .envrc
-  // Setting this to false prevents VSCode from interfering with direnv
-  "python.terminal.activateEnvironment": false,
-
-  // Python - Use project-local .venv by default
+  // === Python ===
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.inlayHints.functionReturnTypes": true,
+  "python.analysis.inlayHints.pytestParameters": true,
+  "python.analysis.typeCheckingMode": "standard",
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-
-  // Python - Formatting
-  "[python]": {
-    "editor.formatOnSave": true,
-    "editor.defaultFormatter": "charliermarsh.ruff"
-  },
-
-  // Python - Testing
+  "python.terminal.activateEnvironment": false,
+  "python.terminal.activateEnvInCurrentTerminal": true,
+  "python.terminal.focusAfterLaunch": true,
+  "python.terminal.shellIntegration.enabled": true,
   "python.testing.pytestEnabled": true,
 
-  // File associations for dotfiles-managed configurations
+  // === Editor ===
+  "editor.defaultFormatter": "charliermarsh.ruff",
+  "editor.formatOnSave": true,
+  "editor.inlineSuggest.enabled": true,
+  "editor.inlineSuggest.suppressSuggestions": true,
+  "editor.minimap.enabled": false,
+  "editor.stickyScroll.enabled": false,
+
+  // === File Associations & Exclusions ===
   "files.associations": {
     ".envrc": "shellscript",
     ".python-version": "plaintext",
     ".mise.toml": "toml"
+  },
+  "files.exclude": {
+    "**/__pycache__/**": true,
+    "**/.ruff_cache/**": true,
+    "**/.venv/**": true,
+    "**/*.egg-info/**": true,
+    "**/venv/**": true
+  },
+  "files.watcherExclude": {
+    "**/__pycache__/**": true,
+    "**/.venv/**": true,
+    "**/*.egg-info/**": true,
+    "**/venv/**": true
+  },
+
+  // === Terminal ===
+  "terminal.integrated.allowChords": false,
+  "terminal.integrated.defaultProfile.linux": "zsh",
+  "terminal.integrated.enableMultiLinePasteWarning": false,
+  "terminal.integrated.enableVisualBell": false,
+  "terminal.integrated.fontFamily": "MesloLGS NF",
+  "terminal.integrated.scrollback": 2500,
+
+  // === Workbench & UI ===
+  "explorer.confirmDelete": false,
+  "explorer.confirmDragAndDrop": false,
+  "window.autoDetectColorScheme": true,
+  "workbench.colorTheme": "Default Light Modern",
+  "workbench.editorAssociations": {
+    "*.ipynb": "jupyter-notebook",
+    "*.ods": "default"
+  },
+  "workbench.startupEditor": "none",
+
+  // === Git & Source Control ===
+  "git.autofetch": true,
+  "git.terminalAuthentication": false,
+  "git.blame.editorDecoration.enabled": true,
+  "gitlens.rebaseEditor.ordering": "asc",
+
+  // === GitHub Copilot ===
+  "github.copilot.advanced": {},
+  "github.copilot.chat.agent.thinkingTool": true,
+  "github.copilot.enable": {
+    "*": false,
+    "plaintext": false,
+    "markdown": true,
+    "scminput": false
+  },
+  "github.copilot.nextEditSuggestions.enabled": true,
+  "github.copilot.nextEditSuggestions.fixes": true,
+
+  // === GitHub Pull Requests ===
+  "githubPullRequests.fileListLayout": "tree",
+  "githubPullRequests.pullBranch": "never",
+  "githubPullRequests.pushBranch": "always",
+
+  // === Extensions & Language Features ===
+  "autoDocstring.docstringFormat": "numpy",
+  "cody.commandCodeLenses": false,
+  "cody.suggestions.mode": "off",
+  "dbt-formatter.upper": false,
+  "djlint.showInstallError": false,
+  "docker.extension.enableComposeLanguageServer": false,
+  "sourcery.codeLens": false,
+
+  // === Miscellaneous ===
+  "accessibility.signals.terminalBell": {
+    "sound": "off"
+  },
+  "atlascode.jira.lastCreateSiteAndProject": {
+    "siteId": "",
+    "projectKey": ""
+  },
+  "atlascode.jira.todoIssues.enabled": false,
+  "claudeCode.preferredLocation": "panel",
+  "markdown.editor.pasteUrlAsFormattedLink.enabled": "smart",
+  "prettier.printWidth": 88,
+  "redhat.telemetry.enabled": false,
+  "remote.SSH.connectTimeout": 60,
+  "security.workspace.trust.untrustedFiles": "open",
+  "settingsSync.ignoredExtensions": [
+    "ms-vsliveshare.vsliveshare-audio",
+    "ms-ceintl.vscode-language-pack-fr"
+  ],
+  "shellformat.flag": "-fn",
+  "notebook.cellToolbarLocation": {
+    "default": "right",
+    "jupyter-notebook": "left"
+  },
+
+  // === Per-language Settings ===
+  "[dockercompose]": {
+    "editor.insertSpaces": true,
+    "editor.tabSize": 2,
+    "editor.autoIndent": "advanced",
+    "editor.quickSuggestions": {
+      "other": true,
+      "comments": false,
+      "strings": true
+    },
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  "[django-html]": {
+    "editor.defaultFormatter": "monosans.djlint"
+  },
+  "[dockerfile]": {
+    "editor.defaultFormatter": "ms-azuretools.vscode-containers"
+  },
+  "[dotenv]": {
+    "editor.defaultFormatter": "foxundermoon.shell-format"
+  },
+  "[github-actions-workflow]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[ignore]": {
+    "editor.defaultFormatter": "foxundermoon.shell-format"
+  },
+  "[javascript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[jsonc]": {
+    "editor.defaultFormatter": "rvest.vs-code-prettier-eslint"
+  },
+  "[markdown]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.unicodeHighlight.ambiguousCharacters": false,
+    "editor.unicodeHighlight.invisibleCharacters": false,
+    "diffEditor.ignoreTrimWhitespace": false,
+    "editor.formatOnSave": true,
+    "editor.quickSuggestions": {
+      "comments": "off",
+      "strings": "off",
+      "other": "off"
+    },
+    "prettier.proseWrap": "always"
+  },
+  "[properties]": {
+    "editor.defaultFormatter": "foxundermoon.shell-format"
+  },
+  "[python]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "never"
+    }
+  },
+  "[sql]": {
+    "editor.defaultFormatter": "henriblancke.vscode-dbt-formatter"
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[vue]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
   }
 }

@@ -25,49 +25,40 @@ aliases:
     prready: pr ready
     prdraft: pr ready --undo
     prreopen: pr reopen
-
     # Enhanced PR creation with templates
     prcreate: '!if git status --porcelain | grep -q .; then echo "Warning: You have uncommitted changes"; fi; gh pr create --web'
     prdcreate: '!if git status --porcelain | grep -q .; then echo "Warning: You have uncommitted changes"; fi; gh pr create --draft --web'
-
     # Review management
     review: pr list --search "review-requested:@me -is:draft"
     reviewed: pr list --search "reviewed-by:@me -is:draft"
     approve: pr review --approve
     comment: pr review --comment
     request-changes: pr review --request-changes
-
     # Release management
     releases: release list --limit 10
     latest: release view --web
     mkrelease: release create --generate-notes
-
     # CI/CD with error handling
     runs: '!current_branch=$(git branch --show-current 2>/dev/null); if [ -n "$current_branch" ]; then gh run list --branch "$current_branch" --limit 5 "$@"; else echo "Error: Not in a git repository or no current branch"; fi'
     runlist: '!current_branch=$(git branch --show-current 2>/dev/null); if [ -n "$current_branch" ]; then gh run list --branch "$current_branch" --limit 5; else echo "Error: Not in a git repository or no current branch"; fi'
     runview: run view --web
     runwatch: run watch
     rerun: '!if gh run list --limit 1 --json conclusion | grep -q "failure\|cancelled"; then echo "Rerunning latest failed run..."; gh run rerun; else echo "Latest run did not fail"; fi'
-
     # Issues
     myissues: issue list --assignee @me
     issues: issue list
-
     # Repository
     clone: repo clone
     fork: repo fork
     browse: repo view --web
-
     # Workflow shortcuts
     wflist: workflow list
     wfview: workflow view
     wfrun: workflow run
-
     # Advanced workflow automation
     pr-conflicts: '!gh pr list --state open --json number,title,mergeable --jq ".[] | select(.mergeable == \"CONFLICTING\") | \"PR #\(.number): \(.title)\""'
     pr-status-current: '!branch=$(git branch --show-current 2>/dev/null); if [ -n "$branch" ]; then gh pr list --head "$branch" --json number,title,state,reviews --jq ".[] | \"PR #\(.number): \(.title) - \(.state) - Reviews: \(.reviews | length)\""; else echo "Error: Not in a git repository or no current branch"; fi'
-    deploy-current: '!branch=$(git branch --show-current 2>/dev/null); if [ -n "$branch" ]; then echo "🚀 Triggering deploy workflow for branch: $branch"; gh workflow run deploy.yml --ref "$branch"; echo "✅ Deployment triggered. Use ''gh run watch'' to monitor."; else echo "Error: Not in a git repository or no current branch"; fi'
-
+    deploy-current: "!branch=$(git branch --show-current 2>/dev/null); if [ -n \"$branch\" ]; then echo \"\U0001F680 Triggering deploy workflow for branch: $branch\"; gh workflow run deploy.yml --ref \"$branch\"; echo \"✅ Deployment triggered. Use 'gh run watch' to monitor.\"; else echo \"Error: Not in a git repository or no current branch\"; fi"
 # The path to a unix socket through which send HTTP connections. If blank, HTTP traffic will be handled by net/http.DefaultTransport.
 http_unix_socket:
 # What web browser gh should use when opening URLs. If blank, will refer to environment.
