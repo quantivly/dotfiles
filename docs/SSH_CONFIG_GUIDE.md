@@ -678,6 +678,82 @@ ssh -A dev  # -A forces agent forwarding
 ssh-add -l  # Should list same keys
 ```
 
+### VSCode SSH and Agent Forwarding
+
+**The Problem:**
+
+When using VSCode Remote SSH with agent forwarding, each connection creates a new session-specific socket:
+```
+/run/user/1000/vscode-ssh-auth-sock-<random-id>
+```
+
+On reconnection:
+1. VSCode creates a NEW socket with a different ID
+2. Your shell environment retains the OLD SSH_AUTH_SOCK value
+3. Git operations fail with "Repository not found" because the socket is stale
+
+**The Solution:**
+
+The dotfiles automatically detect and repair stale sockets on every shell startup:
+
+1. **Socket Validation** - Checks if SSH_AUTH_SOCK points to a valid, responsive socket
+2. **Auto-Discovery** - If stale, finds current VSCode socket in `/run/user/1000/`
+3. **Persistent Symlink** - Creates `~/.ssh/ssh_auth_sock` for tmux/docker compatibility
+4. **Fallback Chain** - VSCode socket → systemd socket → local agent
+
+**Implementation:** `zsh/zshrc.conditionals.plugins:34-98`
+
+**Performance:** ~6-8ms overhead when socket is valid (fast path), ~15-20ms when stale (only on reconnection)
+
+**Verification:**
+```bash
+# Check current socket
+echo $SSH_AUTH_SOCK
+# Shows: /run/user/1000/vscode-ssh-auth-sock-600136475
+
+# Verify it works
+ssh-add -l
+# Lists your keys
+
+# Check persistent symlink
+ls -la ~/.ssh/ssh_auth_sock
+# Shows: ~/.ssh/ssh_auth_sock -> /run/user/1000/vscode-ssh-auth-sock-600136475
+
+# Use symlink in scripts/docker/tmux
+SSH_AUTH_SOCK=~/.ssh/ssh_auth_sock git fetch
+```
+
+**Manual Fix (if auto-repair fails):**
+```bash
+# Find current VSCode socket (newest first)
+ls -lt /run/user/1000/vscode-ssh-auth-sock-* | head -1
+
+# Export it
+export SSH_AUTH_SOCK=/run/user/1000/vscode-ssh-auth-sock-<ID>
+
+# Test
+ssh-add -l
+
+# Reload config to create persistent symlink
+source ~/.zshrc
+```
+
+**Tmux Sessions:**
+
+The persistent symlink ensures tmux sessions work across reconnections:
+```bash
+# In ~/.tmux.conf
+set-environment -g SSH_AUTH_SOCK ~/.ssh/ssh_auth_sock
+
+# Or set in shell before starting tmux
+export SSH_AUTH_SOCK=~/.ssh/ssh_auth_sock
+tmux new -s work
+```
+
+**Related Issues:**
+- [microsoft/vscode-remote-release#1983](https://github.com/microsoft/vscode-remote-release/issues/1983) - VSCode SSH socket persistence
+- [microsoft/vscode-remote-release#6281](https://github.com/microsoft/vscode-remote-release/issues/6281) - Agent forwarding best practices
+
 ## Host Patterns and Examples
 
 ### Laptop Examples (Hosts You Connect TO)

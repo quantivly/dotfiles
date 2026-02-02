@@ -31,19 +31,71 @@ fi
 # Environment Configuration
 #==============================================================================
 
-# SSH agent setup
-# Only configure if not already set up by system
-if [ -z "$SSH_AUTH_SOCK" ]; then
-  # Try XDG_RUNTIME_DIR first (systemd systems)
-  if [ -n "$XDG_RUNTIME_DIR" ] && [ -S "$XDG_RUNTIME_DIR/ssh-agent.socket" ]; then
-    export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
-  else
-    # Fall back to starting ssh-agent if needed
-    if ! ssh-add -l &>/dev/null; then
-      eval "$(ssh-agent -s)" >/dev/null
+# SSH agent setup with socket validation and auto-repair
+# Handles VSCode SSH reconnection issues where SSH_AUTH_SOCK becomes stale
+
+# Helper: Test if socket exists AND responds to ssh-add
+_ssh_agent_is_valid() {
+  [[ -S "$1" ]] && SSH_AUTH_SOCK="$1" ssh-add -l &>/dev/null
+  return $?
+}
+
+# Helper: Find current VSCode SSH socket by modification time (newest first)
+_find_vscode_socket() {
+  [[ -n "$XDG_RUNTIME_DIR" ]] || return 1
+
+  local socket
+  # Find sockets matching VSCode pattern, sorted by modification time (newest first)
+  for socket in $(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name 'vscode-ssh-auth-sock-*' -type s 2>/dev/null | xargs -r ls -t 2>/dev/null); do
+    if _ssh_agent_is_valid "$socket"; then
+      echo "$socket"
+      return 0
     fi
+  done
+  return 1
+}
+
+# Helper: Setup SSH agent with validation and fallback chain
+_setup_ssh_agent() {
+  # Fast path: Current SSH_AUTH_SOCK is valid
+  if [[ -n "$SSH_AUTH_SOCK" ]] && _ssh_agent_is_valid "$SSH_AUTH_SOCK"; then
+    # Create/update persistent symlink for tmux/docker compatibility
+    [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
+    return 0
   fi
-fi
+
+  # Current socket is stale or missing - try to find a valid one
+  local new_socket
+
+  # Try 1: Find VSCode socket (common on remote EC2 instances)
+  if new_socket=$(_find_vscode_socket); then
+    export SSH_AUTH_SOCK="$new_socket"
+    [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
+    return 0
+  fi
+
+  # Try 2: Systemd socket (if available)
+  if [[ -n "$XDG_RUNTIME_DIR" ]] && _ssh_agent_is_valid "$XDG_RUNTIME_DIR/ssh-agent.socket"; then
+    export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+    [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
+    return 0
+  fi
+
+  # Try 3: Start local agent if all else fails
+  if ! ssh-add -l &>/dev/null; then
+    eval "$(ssh-agent -s)" >/dev/null
+    [[ -n "$SSH_AUTH_SOCK" ]] && ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
+  fi
+}
+
+# Run setup
+_setup_ssh_agent
+
+# Clean up helper functions
+unfunction _ssh_agent_is_valid _find_vscode_socket _setup_ssh_agent 2>/dev/null
 
 # Editor configuration
 # Priority: VS Code → vim → nano (always available)
