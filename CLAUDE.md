@@ -170,7 +170,7 @@ All tools are optional with intelligent fallbacks. Managed by mise (see below).
 
 **Developer tools:** lazygit, just, glow, hyperfine, dive, forgit, ctop
 **Security:** gitleaks, pre-commit, sops, age
-**Productivity:** thefuck, tldr, cheat, neofetch/fastfetch
+**Productivity:** tldr, cheat, neofetch/fastfetch
 
 **Installation:**
 ```bash
@@ -771,6 +771,42 @@ grep -r "alias aliasname=" ~/.dotfiles/      # Find definition
 gh auth status   # Check status
 gh auth login    # Re-authenticate
 ```
+
+### SSH agent forwarding issues (VSCode/remote servers)
+
+**Symptom:** Git operations fail with "Repository not found" after reconnecting to remote server.
+
+**Cause:** SSH_AUTH_SOCK points to a stale VSCode socket that no longer exists.
+
+**Solution:** The dotfiles automatically detect and repair stale sockets on shell startup:
+- Validates current SSH_AUTH_SOCK
+- Auto-discovers current VSCode socket if stale
+- Creates persistent symlink at `~/.ssh/ssh_auth_sock` for tmux/docker
+
+**Verification:**
+```bash
+echo $SSH_AUTH_SOCK          # Should point to current socket
+ssh-add -l                   # Should show your keys
+ls -la ~/.ssh/ssh_auth_sock  # Should exist and point to valid socket
+git fetch                    # Should work without errors
+```
+
+**Manual fix (if auto-repair fails):**
+```bash
+# Find current VSCode socket
+ls -lt /run/user/1000/vscode-ssh-auth-sock-* | head -1
+
+# Export it
+export SSH_AUTH_SOCK=/run/user/1000/vscode-ssh-auth-sock-<ID>
+
+# Test
+ssh-add -l
+
+# Reload config to create persistent symlink
+source ~/.zshrc
+```
+
+**Note:** Auto-repair adds ~6-8ms to shell startup when socket is valid, ~15-20ms when stale (only on reconnection).
 
 ### fzf functions not working
 ```bash

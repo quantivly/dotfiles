@@ -357,8 +357,6 @@ Modern CLI tool configurations and overrides:
 - **lazygit** - Terminal UI for git commands
 - **just** - Command runner and task automation
 - **dive** - Docker image layer inspector
-- **thefuck** - Corrects previous console commands
-
 Sets internal variables (`_BAT_CMD`, `_FD_CMD`, `_HAS_RG`) used by other modules.
 
 #### zshrc.conditionals.fzf

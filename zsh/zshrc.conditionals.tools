@@ -169,18 +169,6 @@ fi
 # Developer Tools & Command Correction
 #==============================================================================
 
-# thefuck - Command correction
-# Install: pip install thefuck
-# Note: thefuck 3.32 has Python 3.12 compatibility issues (distutils removed)
-if command -v thefuck &>/dev/null; then
-  # Wrap in error handling for Python 3.12+ compatibility
-  if eval "$(thefuck --alias 2>/dev/null)"; then
-    # Alternative aliases
-    alias fix='fuck'
-    alias oops='fuck'
-  fi
-fi
-
 # lazygit - Terminal UI for git
 # Install: https://github.com/jesseduffield/lazygit#installation
 if command -v lazygit &>/dev/null; then

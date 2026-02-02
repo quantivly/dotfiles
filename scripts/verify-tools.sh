@@ -116,7 +116,6 @@ check_tool gpg "--version"
 
 echo ""
 echo -e "${BLUE}=== Productivity Tools ===${NC}"
-check_tool thefuck "--version"
 check_tool tldr "--version"
 check_tool cheat "--version"
 check_tool fastfetch "--version" || check_tool neofetch "--version"

@@ -128,7 +128,6 @@ tool_status() {
 
   local productivity_tools=(
     "zoxide::Smart cd replacement"
-    "thefuck::Command correction"
     "tldr::Simplified man pages"
     "cheat::Interactive cheatsheets"
     "fastfetch:neofetch:System info display"
