@@ -357,6 +357,45 @@
   # Change the value of this parameter to show a different icon.
   typeset -g POWERLEVEL9K_VCS_UNTRACKED_ICON='?'
 
+  # Helper function to get PR number with caching.
+  #
+  # Returns PR number for current branch from cache or fetches from gh CLI.
+  # Cache location: ~/.cache/p10k-pr-cache/<repo>/<branch>
+  # Cache is invalidated automatically on branch change.
+  function _p10k_get_pr_number() {
+    emulate -L zsh
+
+    # Require VCS_STATUS_LOCAL_BRANCH to be set
+    [[ -z $VCS_STATUS_LOCAL_BRANCH ]] && return
+
+    # Get repo name from VCS_STATUS_WORKDIR
+    local repo_name="${VCS_STATUS_WORKDIR:t}"
+    local branch_name="$VCS_STATUS_LOCAL_BRANCH"
+
+    # Sanitize branch name for filesystem (replace / with -)
+    local cache_key="${branch_name//\//-}"
+    local cache_dir="${HOME}/.cache/p10k-pr-cache/${repo_name}"
+    local cache_file="${cache_dir}/${cache_key}"
+
+    # Check cache first (fast path)
+    if [[ -f $cache_file ]]; then
+      cat "$cache_file" 2>/dev/null
+      return
+    fi
+
+    # Fetch from gh CLI (slow path)
+    # Use timeout to prevent hangs, suppress all errors
+    local pr_num
+    pr_num=$(timeout 2s gh pr view --json number -q .number 2>/dev/null)
+
+    # Only cache if we got a valid numeric result
+    if [[ $pr_num =~ ^[0-9]+$ ]]; then
+      mkdir -p "$cache_dir" 2>/dev/null
+      echo "$pr_num" > "$cache_file" 2>/dev/null
+      echo "$pr_num"
+    fi
+  }
+
   # Formatter for Git status.
   #
   # Example output: master wip ⇣42⇡42 *42 merge ~42 +42 !42 ?42.
@@ -400,6 +439,10 @@
       # Tip: To always show local branch name in full without truncation, delete the next line.
       (( $#branch > 64 )) && branch[20,-13]="…"  # <-- this line
       res+="${clean}${(g::)POWERLEVEL9K_VCS_BRANCH_ICON}${branch//\%/%%}"
+
+      # Add PR number if available (cached for performance)
+      local pr_num=$(_p10k_get_pr_number)
+      [[ -n $pr_num ]] && res+=" ${meta}#${pr_num}"
     fi
 
     if [[ -n $VCS_STATUS_TAG

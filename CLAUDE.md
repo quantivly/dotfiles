@@ -97,6 +97,54 @@ Dotbot creates symlinks from `install.conf.yaml`:
 
 **Key Insight:** Conditionals load AFTER aliases, so tools that are installed get priority configuration.
 
+## Powerlevel10k Customizations
+
+### PR Number Display
+
+The prompt automatically shows GitHub PR numbers for branches with open pull requests.
+
+**Features:**
+- Displays `#123` after branch name in grey color
+- Smart caching for <5ms latency (typical)
+- Automatic cache invalidation on branch changes
+- No errors if `gh` CLI unavailable or PR doesn't exist
+
+**Example prompt:**
+```
+ feature/add-pr-display #42 ⇡1 !2 ?1
+```
+
+**Cache location:** `~/.cache/p10k-pr-cache/<repo>/<branch>`
+
+**Manual cache refresh:**
+```bash
+# Clear cache for specific branch
+rm ~/.cache/p10k-pr-cache/dotfiles/feature-my-branch
+
+# Clear all PR caches
+rm -rf ~/.cache/p10k-pr-cache
+```
+
+**Troubleshooting:**
+
+*PR not showing:*
+```bash
+# Verify gh CLI works
+gh pr view
+
+# Manually refresh cache
+rm ~/.cache/p10k-pr-cache/$(basename $(git rev-parse --show-toplevel))/$(git branch --show-current)
+source ~/.zshrc
+```
+
+*Stale PR number:*
+```bash
+# Cache persists after PR closed - refresh manually
+rm ~/.cache/p10k-pr-cache/$(basename $(git rev-parse --show-toplevel))/$(git branch --show-current)
+```
+
+**Implementation:** `_p10k_get_pr_number()` function in `p10k.zsh`
+
 ## Security Rules
 
 **CRITICAL:** Never commit sensitive information. All secrets belong in `~/.zshrc.local`:
