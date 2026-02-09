@@ -74,6 +74,54 @@ qn() {
 }
 
 #==============================================================================
+# GitHub CLI Multi-Account Switching
+#==============================================================================
+# Automatically switches gh CLI identity when entering Quantivly work directories.
+# Opt-in: only activates if ~/.config/gh-quantivly/ exists (created via:
+#   GH_CONFIG_DIR=~/.config/gh-quantivly gh auth login)
+
+if [[ -d "$HOME/.config/gh-quantivly" ]]; then
+    _update_gh_config() {
+        case "$PWD" in
+            "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
+                export GH_CONFIG_DIR="$HOME/.config/gh-quantivly"
+                ;;
+            *)
+                unset GH_CONFIG_DIR
+                ;;
+        esac
+    }
+    autoload -U add-zsh-hook
+    add-zsh-hook chpwd _update_gh_config
+    _update_gh_config  # Run once at shell startup
+fi
+
+#==============================================================================
+# Claude Code Multi-Account Switching
+#==============================================================================
+# Automatically switches Claude Code identity when entering Quantivly work directories.
+# Opt-in: only activates if ~/.claude-quantivly/ exists (created via:
+#   CLAUDE_CONFIG_DIR=~/.claude-quantivly claude)
+# Personal account (default): ~/.claude/
+# Work account (Quantivly): ~/.claude-quantivly/
+
+if [[ -d "$HOME/.claude-quantivly" ]]; then
+    _update_claude_config() {
+        case "$PWD" in
+            "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
+                export CLAUDE_CONFIG_DIR="$HOME/.claude-quantivly"
+                ;;
+            *)
+                unset CLAUDE_CONFIG_DIR
+                ;;
+        esac
+    }
+    autoload -U add-zsh-hook
+    add-zsh-hook chpwd _update_claude_config
+    _update_claude_config  # Run once at shell startup
+fi
+
+#==============================================================================
 # Git Aliases (Quantivly-specific)
 #==============================================================================
 
