@@ -29,7 +29,7 @@ export DIRENV_LOG_FORMAT=""
 
 # Plugins to load (optimized for performance)
 # Note: zsh-syntax-highlighting must be last in the list
-# Removed slow plugins: poetry (300ms), command-not-found (100ms)
+# Removed slow plugins: poetry (300ms)
 plugins=(
     colored-man-pages # Colorized man pages for better readability
     extract          # Universal archive extractor (extract <file>)
@@ -69,9 +69,6 @@ if command -v poetry >/dev/null 2>&1; then
   fi
 fi
 
-# Ubuntu/Debian specific plugins
-[[ -n "$(command -v apt-get)" ]] && plugins+=(command-not-found)
-
 # Company-specific plugin (only if available)
 [[ -f "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/quantivly/quantivly.plugin.zsh" ]] && plugins+=(quantivly)
 
@@ -107,9 +104,9 @@ setopt GLOB_DOTS            # Include dotfiles in glob patterns
 setopt INTERACTIVE_COMMENTS # Allow comments in interactive shell
 setopt NO_FLOW_CONTROL      # Disable flow control (Ctrl+S/Ctrl+Q)
 
-# Correction
-setopt CORRECT              # Command spelling correction
-setopt CORRECT_ALL          # Argument spelling correction (can be annoying, disable if needed)
+# Correction disabled - was producing unwanted "[nyae]?" prompts
+unsetopt CORRECT
+unsetopt CORRECT_ALL
 
 #==============================================================================
 # Completion configuration

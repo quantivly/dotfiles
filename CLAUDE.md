@@ -170,7 +170,7 @@ The `.gitignore` protects: `*.local`, `*.secrets`, `.env*`, `secrets/`
 
 ### Oh-My-Zsh Plugins
 
-Current plugins: autojump, colored-man-pages, command-not-found, direnv, extract, fzf, gh, git, poetry, safe-paste, sudo, web-search, zsh-autosuggestions, zsh-fzf-history-search, zsh-syntax-highlighting, quantivly
+Current plugins: autojump, colored-man-pages, direnv, extract, fzf, gh, git, poetry, safe-paste, sudo, web-search, zsh-autosuggestions, zsh-fzf-history-search, zsh-syntax-highlighting, quantivly
 
 **Note:** `zsh-syntax-highlighting` must be last in the list.
 
