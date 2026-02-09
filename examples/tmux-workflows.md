@@ -29,7 +29,8 @@ Comprehensive guide to using tmux for terminal multiplexing and session manageme
 | | `Ctrl+Alt+Arrow` | Resize panes (no prefix!) |
 | | `Alt+z` | Zoom pane toggle (no prefix!) |
 | **Windows** | `Ctrl+Shift+T` | New window (no prefix!) |
-| | `Alt+n` / `Alt+p` | Next/previous window (no prefix!) |
+| | `Ctrl+PageUp/Down` | Next/previous window (no prefix!) |
+| | `Ctrl+Shift+PageUp/Down` | Reorder windows (no prefix!) |
 | | `Alt+1-9` | Switch to window 1-9 |
 | | `Ctrl+Space ,` | Rename current window |
 | **Copy** | `Ctrl+Space [` | Enter copy mode |
@@ -189,9 +190,13 @@ Alt+3  # Switch to window 3
 Alt+4  # Switch to window 4
 Alt+5  # Switch to window 5
 
-# Next/previous window (NO PREFIX NEEDED!)
-Alt+n  # Next window
-Alt+p  # Previous window
+# Next/previous window (NO PREFIX NEEDED! Like browser tab switching)
+Ctrl+PageDown  # Next window
+Ctrl+PageUp    # Previous window
+
+# Reorder windows (NO PREFIX NEEDED! Like browser tab reordering)
+Ctrl+Shift+PageDown  # Move window right
+Ctrl+Shift+PageUp    # Move window left
 
 # Or with prefix
 Ctrl+Space 0-9  # Switch to window 0-9

@@ -643,7 +643,8 @@ Ctrl+Shift+T     # New window (like browser Ctrl+T)
 Ctrl+Shift+Arrow # Navigate panes
 Ctrl+Alt+Arrow  # Resize panes
 Alt+z            # Zoom toggle (fullscreen pane)
-Alt+n / Alt+p    # Next/previous window
+Ctrl+PageUp/Down # Next/previous window
+Ctrl+Shift+PageUp/Down # Reorder windows
 Ctrl+Space d     # Detach (session keeps running)
 
 # Reattach later
@@ -662,7 +663,7 @@ tmux kill-session -t mysession
 - **Mouse support:** Click panes, drag borders, scroll with wheel
 - **True color:** 24-bit color support for beautiful syntax highlighting
 - **Prefix-free pane management:** Ctrl+Shift for splits (E/O), close (W), and navigation (Arrow)
-- **Prefix-free window management:** Ctrl+Shift+T (new), Alt+n/p (next/prev), Alt+1-9 (direct)
+- **Prefix-free window management:** Ctrl+Shift+T (new), Ctrl+PageUp/Down (next/prev), Ctrl+Shift+PageUp/Down (reorder), Alt+1-9 (direct)
 - **Prefix-free resize & zoom:** Ctrl+Alt+Arrow (resize), Alt+z (zoom toggle)
 - **Vim fallback:** Alt+hjkl for pane switching still works
 - **OSC 52 clipboard:** Works over SSH with existing `osc52()` function

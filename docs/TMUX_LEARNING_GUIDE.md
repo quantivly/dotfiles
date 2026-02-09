@@ -59,8 +59,9 @@ tms work          # Attach-or-create (idempotent)
 | Action | Keys | Memory aid |
 |--------|------|------------|
 | New window | `Ctrl+Shift+T` | Like browser Ctrl+T, no prefix |
+| Next/prev window | `Ctrl+PageUp/Down` | Like browser tab switching |
+| Reorder windows | `Ctrl+Shift+PageUp/Down` | Like browser tab reordering |
 | Switch to window N | `Alt+1` through `Alt+9` | No prefix needed |
-| Next/prev window | `Alt+n` / `Alt+p` | No prefix needed |
 | Rename window | `Ctrl+Space ,` | Comma, then type name |
 | Close window | `Ctrl+Space &` | Asks confirmation |
 | Last window | `Ctrl+Space Tab` | Toggle back and forth |
@@ -87,7 +88,7 @@ Press `Alt+z` to make any pane fullscreen. Press again to restore. The status ba
 4. Ctrl+Shift+T       → new window (like browser new tab!)
 5. Ctrl+Space ,       → rename to "frontend"
 6. Alt+1 / Alt+2      → switch between them
-7. Alt+n / Alt+p      → next/prev window
+7. Ctrl+PageUp/Down   → next/prev window
 8. Ctrl+Space Tab     → toggle to last window (muscle memory!)
 ```
 
@@ -113,9 +114,9 @@ tdev    # Uses "dev" session in current directory
 ### What to internalize
 
 - **Windows = different tasks.** One window for editing, one for tests, one for logs.
-- **Alt+number is instant.** Switching windows should feel as fast as switching browser tabs. `Alt+n/p` for sequential cycling.
+- **Alt+number is instant.** Switching windows should feel as fast as switching browser tabs. `Ctrl+PageUp/Down` for sequential cycling.
 - **Zoom replaces window switching** for quick focus. `Alt+z` is instant — faster than switching to a dedicated full-screen window.
-- **Browser muscle memory works.** `Ctrl+Shift+T` = new tab, `Ctrl+Shift+W` = close tab.
+- **Browser muscle memory works.** `Ctrl+Shift+T` = new tab, `Ctrl+Shift+W` = close tab, `Ctrl+PageUp/Down` = switch tabs, `Ctrl+Shift+PageUp/Down` = reorder tabs.
 
 ## Level 3: Copy Mode & Clipboard (Week 2)
 
@@ -221,8 +222,8 @@ Each press resizes by 2 cells. For larger steps (5 cells), use the prefix altern
 
 | Action | Keys |
 |--------|------|
-| Move window left | `Ctrl+Space Shift+Left` |
-| Move window right | `Ctrl+Space Shift+Right` |
+| Move window left | `Ctrl+Shift+PageUp` |
+| Move window right | `Ctrl+Shift+PageDown` |
 
 ### Swap panes
 
@@ -361,7 +362,8 @@ Your setup has these tmux integrations built in:
 | `Ctrl+Shift+Arrow` | Navigate panes |
 | `Ctrl+Alt+Arrow` | Resize panes (2 cells) |
 | `Alt+z` | Zoom/unzoom pane |
-| `Alt+n` / `Alt+p` | Next/previous window |
+| `Ctrl+PageUp/Down` | Next/previous window |
+| `Ctrl+Shift+PageUp/Down` | Reorder windows |
 | `Alt+h/j/k/l` | Navigate panes (vim alternative) |
 | `Alt+1-9` | Switch to window N |
 
@@ -382,7 +384,6 @@ Your setup has these tmux integrations built in:
 | `&` | Close window | Windows |
 | `Tab` | Last window | Windows |
 | `BSpace` | Last pane | Windows |
-| `Shift+Left/Right` | Reorder window | Windows |
 | `[` | Enter copy mode | Copy |
 | `]` | Paste | Copy |
 | `d` | Detach | Sessions |
@@ -456,7 +457,7 @@ Ctrl+Shift+**letter** bindings (E, O, W, T) require two things:
 1. **Alacritty key bindings** in `~/.config/alacritty/alacritty.toml` that send CSI u sequences (e.g., `\x1b[101;6u` for E, `\x1b[119;6u` for W)
 2. **tmux extended-keys** enabled with `terminal-features` matching your `$TERM` (usually `xterm-256color`, not `alacritty`)
 
-Ctrl+Shift+**Arrow** and all **Alt-based** bindings (Alt+z, Alt+n/p, Ctrl+Alt+Arrow) work natively without Alacritty config.
+Ctrl+Shift+**Arrow**, Ctrl+PageUp/Down, Ctrl+Shift+PageUp/Down, Ctrl+Alt+Arrow, and Alt+z all work natively without Alacritty config.
 
 After changing `extended-keys` or `terminal-features`, you must restart the tmux server (`tmux kill-server`), not just reload config.
 

@@ -248,11 +248,11 @@ PANE RESIZING (prefix-free!):
 
 WINDOW MANAGEMENT (prefix-free!):
   Ctrl+Shift+T - New window (like browser new tab)
-  Alt+n / Alt+p - Next/previous window
+  Ctrl+PageUp/Down - Next/previous window
+  Ctrl+Shift+PageUp/Down - Reorder windows left/right
   Alt+1-9      - Switch to window 1-9
   Ctrl+Space Tab - Toggle last window
   Ctrl+Space , - Rename current window
-  Ctrl+Space Shift+Left/Right - Reorder windows
 
 COPY MODE (VIM-STYLE):
   Ctrl+Space [ - Enter copy mode
