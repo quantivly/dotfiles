@@ -94,7 +94,12 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
                 ;;
             *)
                 unset GH_CONFIG_DIR
-                unset GITHUB_PERSONAL_ACCESS_TOKEN
+                # Fall back to personal token (loaded from sops in ~/.zshrc.local)
+                if [[ -n "$_CACHED_PERSONAL_GH_TOKEN" ]]; then
+                    export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_PERSONAL_GH_TOKEN"
+                else
+                    unset GITHUB_PERSONAL_ACCESS_TOKEN
+                fi
                 ;;
         esac
     }

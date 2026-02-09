@@ -10,6 +10,7 @@
 #   1. Git Functions - Enhanced git operations with fuzzy finding and safety
 #   2. Docker Functions - Container and image management with interactive selection
 #   3. FZF Functions - Fuzzy finding for navigation, files, and processes
+#   4. Tmux Functions - Session management and layout automation
 #
 # See individual section headers below for detailed function listings.
 #==============================================================================
