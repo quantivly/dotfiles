@@ -77,6 +77,9 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.config/git/ignore` → `~/.dotfiles/config/git/ignore`
 - `~/.config/Code/User/settings.json` → `~/.dotfiles/vscode/settings.json`
 
+**Not symlinked (but coupled):**
+- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here
+
 ### Configuration Loading Order
 
 ```
@@ -494,6 +497,11 @@ When tools are installed, standard commands are replaced:
 
 **Alias renamed:** `fd` → `fdir` (to avoid conflict with fd-find tool)
 
+**Terminal gotchas:**
+- Alacritty sets `$TERM=xterm-256color` (not `alacritty`) — tmux `terminal-features` patterns must match `xterm-256color`
+- Ctrl+Shift+Arrow works natively in tmux (xterm modifier encoding). Ctrl+Shift+**letter** needs Alacritty key bindings sending CSI u sequences + tmux extended-keys
+- tmux `extended-keys` and `terminal-features` are server-level — require `tmux kill-server`, not just config reload
+
 ## Important Patterns
 
 ### pathadd Function
@@ -619,7 +627,7 @@ vim ~/.ssh/config  # Customize for your hosts
 
 ## Tmux Configuration
 
-Beginner-friendly tmux setup with modern features and vim-style navigation.
+Beginner-friendly tmux setup with Terminator-style prefix-free keybindings.
 
 ### Quick Start
 
@@ -628,10 +636,10 @@ Beginner-friendly tmux setup with modern features and vim-style navigation.
 tmn mysession
 
 # Inside tmux:
-Ctrl+Space |  # Split vertically
-Ctrl+Space -  # Split horizontally
-Alt+h/j/k/l   # Navigate panes (no prefix!)
-Ctrl+Space d  # Detach (session keeps running)
+Ctrl+Shift+E     # Split vertically (no prefix!)
+Ctrl+Shift+O     # Split horizontally (no prefix!)
+Ctrl+Shift+Arrow # Navigate panes (no prefix!)
+Ctrl+Space d     # Detach (session keeps running)
 
 # Reattach later
 tma mysession
@@ -648,7 +656,8 @@ tmux kill-session -t mysession
 - **Prefix:** Ctrl+Space (ergonomic, no shell conflicts)
 - **Mouse support:** Click panes, drag borders, scroll with wheel
 - **True color:** 24-bit color support for beautiful syntax highlighting
-- **Vim navigation:** Alt+hjkl for pane switching (no prefix needed!)
+- **Terminator-style navigation:** Ctrl+Shift+Arrow for panes, Ctrl+Shift+E/O for splits (no prefix!)
+- **Vim fallback:** Alt+hjkl for pane switching still works
 - **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
 - **Quick window switching:** Alt+1/2/3/4/5 (no prefix needed!)
 - **Large scrollback:** 10,000 lines (vs default 2,000)
@@ -671,7 +680,8 @@ Dark theme matching Powerlevel10k:
 ### Important Notes
 
 - **No auto-start:** Tmux must be launched manually with `tmn <session>` - this is intentional to avoid interfering with scripts and quick commands
-- **Terminal-agnostic:** Works with any modern terminal that supports 24-bit color and OSC 52 (iTerm2, WezTerm, Alacritty, Windows Terminal, etc.)
+- **Alacritty coupling:** Ctrl+Shift+letter bindings require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow works natively. Alacritty config is NOT tracked in dotfiles.
+- **tmux extended-keys:** Server-level setting — needs `tmux kill-server` + restart, not just config reload
 - **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
 
 ### Common Workflows
@@ -679,9 +689,9 @@ Dark theme matching Powerlevel10k:
 ```bash
 # Development layout (3 panes: editor top, two terminals bottom)
 tmn dev
-Ctrl+Space -    # horizontal split
-Alt+j           # move to bottom
-Ctrl+Space |    # vertical split
+Ctrl+Shift+O         # horizontal split
+Ctrl+Shift+Down      # move to bottom
+Ctrl+Shift+E         # vertical split
 # Top: vim editor, Bottom-left: tests, Bottom-right: git
 
 # Multiple projects (one session per project)

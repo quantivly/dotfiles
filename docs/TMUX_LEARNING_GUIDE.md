@@ -2,7 +2,7 @@
 
 A progressive guide to mastering your tmux setup. Organized by skill level so you can build muscle memory gradually.
 
-> **Your setup**: Ctrl+Space prefix, vim-style navigation, OSC 52 clipboard, tmux-resurrect + continuum, dark theme. See `examples/tmux-workflows.md` for the full reference.
+> **Your setup**: Ctrl+Space prefix, Terminator-style navigation (Ctrl+Shift+Arrow/E/O), OSC 52 clipboard, tmux-resurrect + continuum, dark theme. See `examples/tmux-workflows.md` for the full reference.
 
 ## Level 1: The Basics (Day 1)
 
@@ -22,30 +22,32 @@ tms work          # Attach-or-create (idempotent)
 
 | Action | Keys | Memory aid |
 |--------|------|------------|
-| Split vertical | `Ctrl+Space \|` | Pipe = vertical line |
-| Split horizontal | `Ctrl+Space -` | Dash = horizontal line |
-| Navigate panes | `Alt+h/j/k/l` | Vim directions, no prefix |
+| Split vertical | `Ctrl+Shift+E` | No prefix needed! |
+| Split horizontal | `Ctrl+Shift+O` | No prefix needed! |
+| Navigate panes | `Ctrl+Shift+Arrow` | Terminator-style, no prefix |
 | Close pane | `Ctrl+Space x` | x marks deletion |
 | Detach | `Ctrl+Space d` | d for detach |
+
+> **Vim alternative:** `Alt+h/j/k/l` also navigates panes. `Ctrl+Space |` and `Ctrl+Space -` also split.
 
 ### Exercise: First session
 
 ```
 1. tmn practice
-2. Ctrl+Space |       → you have 2 vertical panes
-3. Alt+h / Alt+l      → bounce between them
-4. Ctrl+Space -       → split the right pane horizontally
-5. Alt+j / Alt+k      → navigate up/down
-6. Ctrl+Space d       → detach
-7. tml                → see your session still running
-8. tma practice       → everything is still there
-9. tmk practice       → clean up
+2. Ctrl+Shift+E            → you have 2 vertical panes
+3. Ctrl+Shift+Left/Right   → bounce between them
+4. Ctrl+Shift+O            → split the right pane horizontally
+5. Ctrl+Shift+Up/Down      → navigate up/down
+6. Ctrl+Space d            → detach
+7. tml                     → see your session still running
+8. tma practice            → everything is still there
+9. tmk practice            → clean up
 ```
 
 ### What to internalize
 
 - **Sessions persist.** Detaching doesn't kill anything. This is the core mental model.
-- **Alt+hjkl has no prefix.** Just press Alt+direction. This is much faster than Ctrl+Space then arrow.
+- **Ctrl+Shift is your tmux modifier.** Splits and navigation are all prefix-free with Ctrl+Shift. Much faster than prefix-based shortcuts.
 - **Splits inherit your current directory.** New panes open where you are, not where the session started.
 
 ## Level 2: Windows & Workflow (Week 1)
@@ -259,12 +261,12 @@ What gets saved: window layouts, pane directories, pane contents, running progra
 
 ```
 1. tmn backend          → work on API
-2. Ctrl+Space |         → split for tests
+2. Ctrl+Shift+E        → split for tests
 3. Ctrl+Space c         → new window for logs
 4. Ctrl+Space d         → detach
 
 5. tmn frontend         → separate session for frontend
-6. Ctrl+Space |         → split
+6. Ctrl+Shift+E        → split
 
 7. ftmux               → fuzzy switch between sessions
    (or Ctrl+Space s from inside tmux)
@@ -350,15 +352,18 @@ Your setup has these tmux integrations built in:
 
 | Keys | Action |
 |------|--------|
-| `Alt+h/j/k/l` | Navigate panes |
+| `Ctrl+Shift+E` | Split vertical |
+| `Ctrl+Shift+O` | Split horizontal |
+| `Ctrl+Shift+Arrow` | Navigate panes |
+| `Alt+h/j/k/l` | Navigate panes (vim alternative) |
 | `Alt+1-9` | Switch to window N |
 
 ### With prefix (Ctrl+Space, then...)
 
 | Key | Action | Category |
 |-----|--------|----------|
-| `\|` | Split vertical | Panes |
-| `-` | Split horizontal | Panes |
+| `\|` | Split vertical (alternative) | Panes |
+| `-` | Split horizontal (alternative) | Panes |
 | `x` | Close pane | Panes |
 | `z` | Zoom/unzoom pane | Panes |
 | `H/J/K/L` | Resize pane (repeat) | Panes |
@@ -439,6 +444,15 @@ Ctrl+Space Ctrl+r
 # Check resurrect saved files:
 ls ~/.tmux/resurrect/
 ```
+
+### Ctrl+Shift+E/O not working
+Ctrl+Shift+**letter** bindings require two things:
+1. **Alacritty key bindings** in `~/.config/alacritty/alacritty.toml` that send CSI u sequences (e.g., `\x1b[101;6u` for E)
+2. **tmux extended-keys** enabled with `terminal-features` matching your `$TERM` (usually `xterm-256color`, not `alacritty`)
+
+Ctrl+Shift+**Arrow** works natively without either — different encoding mechanism.
+
+After changing `extended-keys` or `terminal-features`, you must restart the tmux server (`tmux kill-server`), not just reload config.
 
 ### Alt key not working
 This is a terminal setting, not tmux:
