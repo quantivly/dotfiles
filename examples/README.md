@@ -165,6 +165,29 @@ vim ~/.ssh/config     # Customize for your hosts
 
 ---
 
+### [Alacritty Configuration Template](alacritty.toml.template)
+
+Documented Alacritty terminal configuration with Catppuccin Mocha color scheme and tmux integration.
+
+**Quick Setup:**
+```bash
+alacritty-init    # Copy template to ~/.config/alacritty/alacritty.toml
+```
+
+**Key Features:**
+- Full Catppuccin Mocha color scheme (primary + 16 ANSI + cursor + selection + search)
+- CSI u keyboard bindings for tmux prefix-free shortcuts (Ctrl+Shift+E/O/W/T/S)
+- MesloLGS NF font (required for Powerlevel10k)
+- Reduced scrollback (1000 lines — tmux provides 50k via copy mode)
+- Documented settings with explanations
+
+**Why This Exists:**
+Alacritty config is not symlinked (users may customize fonts, opacity, etc.) but is coupled to the tmux configuration — the CSI u key bindings are required for prefix-free Ctrl+Shift+letter shortcuts to work. Without this template, those bindings silently fail on a fresh machine.
+
+**Best For:** New machine setup, Alacritty users who want tmux prefix-free keybindings
+
+---
+
 ## Tool Verification
 
 ### [verify-tools.sh](../scripts/verify-tools.sh) ✔️

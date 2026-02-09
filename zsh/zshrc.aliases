@@ -199,6 +199,25 @@ alias ssh-init='
   fi
 '
 
+#==============================================================================
+# Alacritty
+#==============================================================================
+
+# Initialize Alacritty config from template
+# Creates ~/.config/alacritty/alacritty.toml with Catppuccin Mocha theme
+# and CSI u key bindings required for tmux prefix-free shortcuts
+alias alacritty-init='
+  if [ -f ~/.config/alacritty/alacritty.toml ]; then
+    echo "~/.config/alacritty/alacritty.toml already exists! Backup first:"
+    echo "   cp ~/.config/alacritty/alacritty.toml ~/.config/alacritty/alacritty.toml.backup"
+  else
+    mkdir -p ~/.config/alacritty
+    cp ~/.dotfiles/examples/alacritty.toml.template ~/.config/alacritty/alacritty.toml
+    echo "Created ~/.config/alacritty/alacritty.toml from template"
+    echo "  Edit to customize: vim ~/.config/alacritty/alacritty.toml"
+  fi
+'
+
 # Clear all SSH ControlMaster connection sockets
 # Useful when connections hang or become stale
 # Location: ~/.ssh/sockets/ (created by ./install)

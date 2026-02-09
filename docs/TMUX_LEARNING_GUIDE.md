@@ -189,6 +189,7 @@ cat some-file.txt | osc52     # Copy file contents
 
 | Action | Keys / Command |
 |--------|---------------|
+| Switch sessions (no prefix!) | `Ctrl+Shift+S` |
 | List sessions interactively | `Ctrl+Space s` |
 | Switch to last session | `Ctrl+Space B` |
 | Fuzzy session picker | `ftmux` (shell command) |
@@ -359,6 +360,7 @@ Your setup has these tmux integrations built in:
 | `Ctrl+Shift+O` | Split horizontal |
 | `Ctrl+Shift+W` | Close pane (with confirmation) |
 | `Ctrl+Shift+T` | New window |
+| `Ctrl+Shift+S` | Switch sessions |
 | `Ctrl+Shift+Arrow` | Navigate panes |
 | `Ctrl+Alt+Arrow` | Resize panes (2 cells) |
 | `Alt+z` | Zoom/unzoom pane |
@@ -452,8 +454,8 @@ Ctrl+Space Ctrl+r
 ls ~/.tmux/resurrect/
 ```
 
-### Ctrl+Shift+E/O/W/T not working
-Ctrl+Shift+**letter** bindings (E, O, W, T) require two things:
+### Ctrl+Shift+E/O/W/T/S not working
+Ctrl+Shift+**letter** bindings (E, O, W, T, S) require two things:
 1. **Alacritty key bindings** in `~/.config/alacritty/alacritty.toml` that send CSI u sequences (e.g., `\x1b[101;6u` for E, `\x1b[119;6u` for W)
 2. **tmux extended-keys** enabled with `terminal-features` matching your `$TERM` (usually `xterm-256color`, not `alacritty`)
 

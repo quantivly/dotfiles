@@ -1,0 +1,168 @@
+# ============================================================================
+# Alacritty Configuration Template
+# ============================================================================
+# Optimized for use with tmux and the dotfiles tmux configuration.
+#
+# Quick setup:
+#   alacritty-init    # Copies this template to ~/.config/alacritty/alacritty.toml
+#
+# Key features:
+# - Catppuccin Mocha color scheme (full 16 ANSI colors + cursor + selection)
+# - CSI u keyboard bindings for tmux prefix-free Ctrl+Shift shortcuts
+# - Reduced scrollback (tmux provides 50k lines via copy mode)
+# - MesloLGS NF font (required for Powerlevel10k)
+#
+# Coupling with tmux:
+#   The [keyboard] bindings section sends CSI u escape sequences that tmux
+#   decodes via extended-keys. Without these, Ctrl+Shift+letter bindings
+#   (E, O, W, T, S) won't work in tmux. Ctrl+Shift+Arrow, Ctrl+Alt+Arrow,
+#   Ctrl+PageUp/Down, and Alt-based bindings work natively without these.
+#
+# See: ~/.dotfiles/tmux.conf for the tmux side of these bindings
+# See: ~/.dotfiles/docs/TMUX_LEARNING_GUIDE.md for usage guide
+# ============================================================================
+
+# ============================================================================
+# Window
+# ============================================================================
+
+[window]
+padding = { x = 10, y = 10 }
+dynamic_padding = true
+opacity = 0.90
+startup_mode = "Maximized"
+
+# ============================================================================
+# Font
+# ============================================================================
+# MesloLGS NF is required for Powerlevel10k prompt icons.
+# Install: https://github.com/romkatv/powerlevel10k#manual-font-installation
+
+[font]
+size = 12.0
+
+[font.normal]
+family = "MesloLGS NF"
+style = "Regular"
+
+# ============================================================================
+# Cursor
+# ============================================================================
+
+[cursor]
+style = { shape = "Block", blinking = "Always" }
+blink_interval = 500
+
+# ============================================================================
+# Selection
+# ============================================================================
+
+[selection]
+save_to_clipboard = true
+
+# ============================================================================
+# Shell
+# ============================================================================
+
+[terminal.shell]
+program = "/bin/zsh"
+args = ["--login"]
+
+# ============================================================================
+# Scrollback
+# ============================================================================
+# Reduced from default 10000 — tmux provides 50,000 lines of scrollback
+# accessible via copy mode (Ctrl+Space [). Keeping a small buffer here
+# for scrolling when NOT inside tmux.
+
+[scrolling]
+history = 1000
+
+# ============================================================================
+# Colors: Catppuccin Mocha
+# ============================================================================
+# Full color scheme from https://github.com/catppuccin/alacritty
+# Includes all 16 ANSI colors for consistent syntax highlighting.
+
+[colors.primary]
+background = "#1e1e2e"  # Base
+foreground = "#cdd6f4"  # Text
+
+[colors.cursor]
+cursor = "#f5e0dc"      # Rosewater
+text = "#1e1e2e"        # Base
+
+[colors.vi_mode_cursor]
+cursor = "#b4befe"      # Lavender
+text = "#1e1e2e"        # Base
+
+[colors.search.matches]
+foreground = "#1e1e2e"  # Base
+background = "#a6adc8"  # Subtext0
+
+[colors.search.focused_match]
+foreground = "#1e1e2e"  # Base
+background = "#a6e3a1"  # Green
+
+[colors.footer_bar]
+foreground = "#1e1e2e"  # Base
+background = "#a6adc8"  # Subtext0
+
+[colors.hints.start]
+foreground = "#1e1e2e"  # Base
+background = "#f9e2af"  # Yellow
+
+[colors.hints.end]
+foreground = "#1e1e2e"  # Base
+background = "#a6adc8"  # Subtext0
+
+[colors.selection]
+background = "#585b70"  # Surface2
+text = "#cdd6f4"        # Text
+
+# Normal colors (ANSI 0-7)
+[colors.normal]
+black   = "#45475a"     # Surface1
+red     = "#f38ba8"     # Red
+green   = "#a6e3a1"     # Green
+yellow  = "#f9e2af"     # Yellow
+blue    = "#89b4fa"     # Blue
+magenta = "#f5c2e7"     # Pink
+cyan    = "#94e2d5"     # Teal
+white   = "#bac2de"     # Subtext1
+
+# Bright colors (ANSI 8-15)
+[colors.bright]
+black   = "#585b70"     # Surface2
+red     = "#f38ba8"     # Red
+green   = "#a6e3a1"     # Green
+yellow  = "#f9e2af"     # Yellow
+blue    = "#89b4fa"     # Blue
+magenta = "#f5c2e7"     # Pink
+cyan    = "#94e2d5"     # Teal
+white   = "#a6adc8"     # Subtext0
+
+# ============================================================================
+# Keyboard Bindings
+# ============================================================================
+# CSI u encoded sequences for tmux prefix-free bindings.
+# Format: ESC [ <unicode_codepoint> ; <modifier> u
+# Modifier 6 = Ctrl+Shift (1 + Shift=1 + Ctrl=4)
+#
+# These enable tmux to distinguish Ctrl+Shift+letter from Ctrl+letter,
+# which terminals normally can't differentiate.
+# Requires tmux extended-keys (configured in tmux.conf).
+
+[keyboard]
+bindings = [
+  # Tmux: Split vertical (Ctrl+Shift+E, codepoint 101)
+  { key = "E", mods = "Control|Shift", chars = "\u001b[101;6u" },
+  # Tmux: Split horizontal (Ctrl+Shift+O, codepoint 111)
+  { key = "O", mods = "Control|Shift", chars = "\u001b[111;6u" },
+  # Tmux: Close pane (Ctrl+Shift+W, codepoint 119)
+  { key = "W", mods = "Control|Shift", chars = "\u001b[119;6u" },
+  # Tmux: New window (Ctrl+Shift+T, codepoint 116)
+  { key = "T", mods = "Control|Shift", chars = "\u001b[116;6u" },
+  # Tmux: Session switcher (Ctrl+Shift+S, codepoint 115)
+  { key = "S", mods = "Control|Shift", chars = "\u001b[115;6u" },
+]

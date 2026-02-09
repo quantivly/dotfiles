@@ -78,7 +78,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.config/Code/User/settings.json` → `~/.dotfiles/vscode/settings.json`
 
 **Not symlinked (but coupled):**
-- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here
+- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`
 
 ### Configuration Loading Order
 
@@ -640,6 +640,7 @@ Ctrl+Shift+E     # Split vertically
 Ctrl+Shift+O     # Split horizontally
 Ctrl+Shift+W     # Close pane
 Ctrl+Shift+T     # New window (like browser Ctrl+T)
+Ctrl+Shift+S     # Switch sessions
 Ctrl+Shift+Arrow # Navigate panes
 Ctrl+Alt+Arrow  # Resize panes
 Alt+z            # Zoom toggle (fullscreen pane)
@@ -687,7 +688,7 @@ Dark theme matching Powerlevel10k:
 ### Important Notes
 
 - **No auto-start:** Tmux must be launched manually with `tmn <session>` - this is intentional to avoid interfering with scripts and quick commands
-- **Alacritty coupling:** Ctrl+Shift+letter bindings (E, O, W, T) require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow, Ctrl+Alt+Arrow, and all Alt-based bindings work natively without Alacritty config. Alacritty config is NOT tracked in dotfiles.
+- **Alacritty coupling:** Ctrl+Shift+letter bindings (E, O, W, T, S) require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow, Ctrl+Alt+Arrow, and all Alt-based bindings work natively without Alacritty config. A documented template is provided at `examples/alacritty.toml.template` — use `alacritty-init` to install it.
 - **GNOME keybinding conflict:** Ctrl+Alt+Arrow (pane resize) requires removing GNOME's default workspace-switching shortcuts for those keys. Run: `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-{up,down,left,right}` to keep only Super-based alternatives. See `docs/TMUX_LEARNING_GUIDE.md` troubleshooting for full commands.
 - **tmux extended-keys:** Server-level setting — needs `tmux kill-server` + restart, not just config reload
 - **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
@@ -740,6 +741,9 @@ osc52 "text"         # Direct OSC 52 copy
 
 # Verify tool status
 ./scripts/verify-tools.sh
+
+# Set up Alacritty config (on new machine)
+alacritty-init  # Copies template to ~/.config/alacritty/alacritty.toml
 
 # Start tmux session
 tmn work

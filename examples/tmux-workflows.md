@@ -20,19 +20,22 @@ Comprehensive guide to using tmux for terminal multiplexing and session manageme
 | **Start/Stop** | `tmn mysession` | Create new named session |
 | | `tma mysession` | Attach to existing session |
 | | `tml` | List all sessions |
-| | `Ctrl+Space d` | Detach (session keeps running) |
 | | `tmux kill-session -t name` | Kill a specific session |
-| **Splits** | `Ctrl+Space \|` | Split vertically |
-| | `Ctrl+Space -` | Split horizontally |
-| | `Alt+h/j/k/l` | Navigate panes (no prefix!) |
+| **Splits** | `Ctrl+Shift+E` | Split vertically (no prefix!) |
+| | `Ctrl+Shift+O` | Split horizontally (no prefix!) |
+| | `Ctrl+Shift+Arrow` | Navigate panes (no prefix!) |
 | | `Ctrl+Shift+W` | Close pane (no prefix!) |
 | | `Ctrl+Alt+Arrow` | Resize panes (no prefix!) |
 | | `Alt+z` | Zoom pane toggle (no prefix!) |
+| | `Alt+h/j/k/l` | Navigate panes (vim alternative) |
 | **Windows** | `Ctrl+Shift+T` | New window (no prefix!) |
 | | `Ctrl+PageUp/Down` | Next/previous window (no prefix!) |
 | | `Ctrl+Shift+PageUp/Down` | Reorder windows (no prefix!) |
 | | `Alt+1-9` | Switch to window 1-9 |
 | | `Ctrl+Space ,` | Rename current window |
+| **Sessions** | `Ctrl+Shift+S` | Switch sessions (no prefix!) |
+| | `Ctrl+Space s` | Session picker (with prefix) |
+| | `Ctrl+Space d` | Detach (session keeps running) |
 | **Copy** | `Ctrl+Space [` | Enter copy mode |
 | | `v` | Start selection (vim-style) |
 | | `y` | Copy selection and exit |
@@ -79,7 +82,8 @@ tml
 tmux list-sessions
 
 # Switch to another session (while inside tmux)
-# Ctrl+Space s  # Interactive session list
+Ctrl+Shift+S      # Interactive session tree (no prefix!)
+# Ctrl+Space s    # Interactive session list (with prefix)
 
 # Switch to specific session by name
 tmux switch-client -t othersession
