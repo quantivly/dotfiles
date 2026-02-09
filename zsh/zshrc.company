@@ -81,13 +81,20 @@ qn() {
 #   GH_CONFIG_DIR=~/.config/gh-quantivly gh auth login)
 
 if [[ -d "$HOME/.config/gh-quantivly" ]]; then
+    # Cache the work GitHub token once (for GitHub MCP server in Claude Code)
+    if command -v gh &>/dev/null; then
+        _CACHED_GH_QUANTIVLY_TOKEN="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token 2>/dev/null)"
+    fi
+
     _update_gh_config() {
         case "$PWD" in
             "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
                 export GH_CONFIG_DIR="$HOME/.config/gh-quantivly"
+                [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]] && export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
                 ;;
             *)
                 unset GH_CONFIG_DIR
+                unset GITHUB_PERSONAL_ACCESS_TOKEN
                 ;;
         esac
     }
