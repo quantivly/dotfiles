@@ -56,8 +56,8 @@
 # • 10 minute persist keeps socket alive between commands
 #
 # Connection Stability - Prevent disconnections
-# • ServerAlive sends keepalive every 60s
-# • ServerAliveCountMax allows 3 missed responses (3 minutes)
+# • ServerAlive sends keepalive every 15s
+# • ServerAliveCountMax allows 3 missed responses (45 seconds)
 # • TCPKeepAlive detects broken connections at TCP level
 #
 Host *
@@ -67,7 +67,7 @@ Host *
     ControlPersist 10m
 
     # Connection stability (prevent disconnections)
-    ServerAliveInterval 60
+    ServerAliveInterval 15
     ServerAliveCountMax 3
     TCPKeepAlive yes
 
@@ -209,21 +209,33 @@ Host *
 # ----------------------------------------------------------------------------
 #
 # Optimizations for GitHub SSH connections (both laptop and remote server).
+#
+# MULTI-ACCOUNT SETUP (e.g., personal + work GitHub accounts):
+# Each Host block gets its own ControlPath to prevent multiplexing collision.
+# Without this, the first connection's identity wins for ALL github.com connections.
+# Combine with url.insteadOf in .gitconfig.work for transparent identity switching.
 
+# Personal GitHub (default identity)
 # Host github.com
-#     # Auto-add key to agent on first use
+#     HostName github.com
+#     IdentityFile ~/.ssh/id_personal.pub
+#     IdentitiesOnly yes
 #     AddKeysToAgent yes
-#
-#     # Use specific key for GitHub (optional)
-#     # IdentityFile ~/.ssh/github_ed25519
-#
-#     # Strict host key checking (security)
+#     ControlPath ~/.ssh/sockets/github-personal-%r@%h:%p
+
+# Work GitHub (via host alias - used by url.insteadOf rewrite)
+# Host github-work
+#     HostName github.com
+#     IdentityFile ~/.ssh/id_work.pub
+#     IdentitiesOnly yes
+#     AddKeysToAgent yes
+#     ControlPath ~/.ssh/sockets/github-work-%r@%h:%p
+
+# Single-account GitHub (simpler setup)
+# Host github.com
+#     AddKeysToAgent yes
+#     IdentityFile ~/.ssh/github_ed25519
 #     StrictHostKeyChecking yes
-#
-#     # Reuse connections (via global ControlMaster)
-#     ControlMaster auto
-#     ControlPath ~/.ssh/sockets/%C
-#     ControlPersist 10m
 
 # ----------------------------------------------------------------------------
 # Other Internal Servers (REMOTE SERVER CONTEXT)
