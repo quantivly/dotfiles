@@ -61,6 +61,8 @@ sops = "3.8.1"           # Secrets encryption tool
 age = "1.3.1"            # Modern file encryption (used with SOPS)
 fastfetch = "2.8.10"     # System info display
 node = "lts"
+python = "3.10"          # Required for pipx and Python CLI tools
+pipx = "1.8.0"           # Isolated Python CLI tool installer
 
 # Optional tools (uncomment to enable)
 # dive = "0.12.0"        # Docker image layer analyzer
