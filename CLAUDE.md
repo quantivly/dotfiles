@@ -635,10 +635,15 @@ Beginner-friendly tmux setup with Terminator-style prefix-free keybindings.
 # Start a new session
 tmn mysession
 
-# Inside tmux:
-Ctrl+Shift+E     # Split vertically (no prefix!)
-Ctrl+Shift+O     # Split horizontally (no prefix!)
-Ctrl+Shift+Arrow # Navigate panes (no prefix!)
+# Inside tmux (most operations are prefix-free!):
+Ctrl+Shift+E     # Split vertically
+Ctrl+Shift+O     # Split horizontally
+Ctrl+Shift+W     # Close pane
+Ctrl+Shift+T     # New window (like browser Ctrl+T)
+Ctrl+Shift+Arrow # Navigate panes
+Ctrl+Alt+Arrow  # Resize panes
+Alt+z            # Zoom toggle (fullscreen pane)
+Alt+n / Alt+p    # Next/previous window
 Ctrl+Space d     # Detach (session keeps running)
 
 # Reattach later
@@ -656,10 +661,11 @@ tmux kill-session -t mysession
 - **Prefix:** Ctrl+Space (ergonomic, no shell conflicts)
 - **Mouse support:** Click panes, drag borders, scroll with wheel
 - **True color:** 24-bit color support for beautiful syntax highlighting
-- **Terminator-style navigation:** Ctrl+Shift+Arrow for panes, Ctrl+Shift+E/O for splits (no prefix!)
+- **Prefix-free pane management:** Ctrl+Shift for splits (E/O), close (W), and navigation (Arrow)
+- **Prefix-free window management:** Ctrl+Shift+T (new), Alt+n/p (next/prev), Alt+1-9 (direct)
+- **Prefix-free resize & zoom:** Ctrl+Alt+Arrow (resize), Alt+z (zoom toggle)
 - **Vim fallback:** Alt+hjkl for pane switching still works
 - **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
-- **Quick window switching:** Alt+1/2/3/4/5 (no prefix needed!)
 - **Large scrollback:** 10,000 lines (vs default 2,000)
 - **Smart defaults:** Windows start at 1, auto-renumber, splits open in current directory
 
@@ -680,7 +686,8 @@ Dark theme matching Powerlevel10k:
 ### Important Notes
 
 - **No auto-start:** Tmux must be launched manually with `tmn <session>` - this is intentional to avoid interfering with scripts and quick commands
-- **Alacritty coupling:** Ctrl+Shift+letter bindings require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow works natively. Alacritty config is NOT tracked in dotfiles.
+- **Alacritty coupling:** Ctrl+Shift+letter bindings (E, O, W, T) require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow, Ctrl+Alt+Arrow, and all Alt-based bindings work natively without Alacritty config. Alacritty config is NOT tracked in dotfiles.
+- **GNOME keybinding conflict:** Ctrl+Alt+Arrow (pane resize) requires removing GNOME's default workspace-switching shortcuts for those keys. Run: `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-{up,down,left,right}` to keep only Super-based alternatives. See `docs/TMUX_LEARNING_GUIDE.md` troubleshooting for full commands.
 - **tmux extended-keys:** Server-level setting — needs `tmux kill-server` + restart, not just config reload
 - **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
 

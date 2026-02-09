@@ -25,18 +25,19 @@ Comprehensive guide to using tmux for terminal multiplexing and session manageme
 | **Splits** | `Ctrl+Space \|` | Split vertically |
 | | `Ctrl+Space -` | Split horizontally |
 | | `Alt+h/j/k/l` | Navigate panes (no prefix!) |
-| | `Ctrl+Space x` | Close current pane |
-| **Windows** | `Ctrl+Space c` | Create new window |
-| | `Alt+1/2/3/4/5` | Switch to window 1-5 |
+| | `Ctrl+Shift+W` | Close pane (no prefix!) |
+| | `Ctrl+Alt+Arrow` | Resize panes (no prefix!) |
+| | `Alt+z` | Zoom pane toggle (no prefix!) |
+| **Windows** | `Ctrl+Shift+T` | New window (no prefix!) |
+| | `Alt+n` / `Alt+p` | Next/previous window (no prefix!) |
+| | `Alt+1-9` | Switch to window 1-9 |
 | | `Ctrl+Space ,` | Rename current window |
-| | `Ctrl+Space n/p` | Next/previous window |
 | **Copy** | `Ctrl+Space [` | Enter copy mode |
 | | `v` | Start selection (vim-style) |
 | | `y` | Copy selection and exit |
 | | `Ctrl+Space ]` | Paste |
 | **Misc** | `Ctrl+Space ?` | Show all keybindings |
 | | `Ctrl+Space r` | Reload config |
-| | `Ctrl+Space z` | Zoom pane (toggle fullscreen) |
 
 ## Session Management
 
@@ -126,11 +127,17 @@ Ctrl+Space ←/↓/↑/→  # Arrow keys
 ### Resizing Panes
 
 ```bash
-# With prefix (repeatable - hold Shift and tap H/J/K/L multiple times)
-Ctrl+Space Shift+H  # Resize left (5 columns)
-Ctrl+Space Shift+J  # Resize down (5 rows)
-Ctrl+Space Shift+K  # Resize up (5 rows)
-Ctrl+Space Shift+L  # Resize right (5 columns)
+# No prefix needed! (2 cells per press)
+Ctrl+Alt+Left   # Resize left
+Ctrl+Alt+Down   # Resize down
+Ctrl+Alt+Up     # Resize up
+Ctrl+Alt+Right  # Resize right
+
+# With prefix (5 cells, repeatable - tap H/J/K/L multiple times)
+Ctrl+Space Shift+H  # Resize left
+Ctrl+Space Shift+J  # Resize down
+Ctrl+Space Shift+K  # Resize up
+Ctrl+Space Shift+L  # Resize right
 
 # Or drag borders with mouse
 ```
@@ -138,8 +145,8 @@ Ctrl+Space Shift+L  # Resize right (5 columns)
 ### Closing Panes
 
 ```bash
-# Close current pane
-Ctrl+Space x  # Prompts for confirmation
+# Close current pane (no prefix needed!)
+Ctrl+Shift+W  # Prompts for confirmation
 # or
 exit          # No confirmation
 # or
@@ -149,11 +156,11 @@ Ctrl+d        # No confirmation
 ### Zooming Panes
 
 ```bash
-# Toggle fullscreen for current pane
-Ctrl+Space z
+# Toggle fullscreen for current pane (no prefix needed!)
+Alt+z
 
 # Zoomed pane shows [Z] indicator in status bar
-# Zoom again to restore layout
+# Press Alt+z again to restore layout
 ```
 
 ## Window Management
@@ -161,11 +168,11 @@ Ctrl+Space z
 ### Creating Windows
 
 ```bash
-# Create new window
-Ctrl+Space c
+# Create new window (no prefix needed!)
+Ctrl+Shift+T
 
 # Create with specific name
-Ctrl+Space c
+Ctrl+Shift+T
 Ctrl+Space ,  # Then type new name
 
 # Create with command
@@ -182,10 +189,12 @@ Alt+3  # Switch to window 3
 Alt+4  # Switch to window 4
 Alt+5  # Switch to window 5
 
+# Next/previous window (NO PREFIX NEEDED!)
+Alt+n  # Next window
+Alt+p  # Previous window
+
 # Or with prefix
 Ctrl+Space 0-9  # Switch to window 0-9
-Ctrl+Space n    # Next window
-Ctrl+Space p    # Previous window
 Ctrl+Space l    # Last used window
 
 # Interactive window list
@@ -509,6 +518,23 @@ tmux set-option -g mouse on
 # Or add to ~/.tmux.conf and reload
 Ctrl+Space r
 ```
+
+### Ctrl+Alt+Arrow (Resize) Not Working
+
+**Problem:** Ctrl+Alt+Arrow doesn't resize panes.
+
+**Solution:**
+
+GNOME intercepts Ctrl+Alt+Arrow for workspace switching. Remove those defaults (your Super+PgUp/PgDown shortcuts are unaffected):
+
+```bash
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-up "['<Super>Page_Up']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-down "['<Super>Page_Down']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-left "['<Super><Alt>Left']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-right "['<Super><Alt>Right']"
+```
+
+Changes take effect immediately — no logout needed.
 
 ### Alt Key Not Working
 

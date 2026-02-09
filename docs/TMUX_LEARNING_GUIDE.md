@@ -2,7 +2,7 @@
 
 A progressive guide to mastering your tmux setup. Organized by skill level so you can build muscle memory gradually.
 
-> **Your setup**: Ctrl+Space prefix, Terminator-style navigation (Ctrl+Shift+Arrow/E/O), OSC 52 clipboard, tmux-resurrect + continuum, dark theme. See `examples/tmux-workflows.md` for the full reference.
+> **Your setup**: Ctrl+Space prefix (only for rare operations), prefix-free Ctrl+Shift and Alt bindings for daily use, OSC 52 clipboard, tmux-resurrect + continuum, dark theme. See `examples/tmux-workflows.md` for the full reference.
 
 ## Level 1: The Basics (Day 1)
 
@@ -25,7 +25,7 @@ tms work          # Attach-or-create (idempotent)
 | Split vertical | `Ctrl+Shift+E` | No prefix needed! |
 | Split horizontal | `Ctrl+Shift+O` | No prefix needed! |
 | Navigate panes | `Ctrl+Shift+Arrow` | Terminator-style, no prefix |
-| Close pane | `Ctrl+Space x` | x marks deletion |
+| Close pane | `Ctrl+Shift+W` | Like browser Ctrl+W, no prefix |
 | Detach | `Ctrl+Space d` | d for detach |
 
 > **Vim alternative:** `Alt+h/j/k/l` also navigates panes. `Ctrl+Space |` and `Ctrl+Space -` also split.
@@ -58,16 +58,16 @@ tms work          # Attach-or-create (idempotent)
 
 | Action | Keys | Memory aid |
 |--------|------|------------|
-| New window | `Ctrl+Space c` | c for create |
+| New window | `Ctrl+Shift+T` | Like browser Ctrl+T, no prefix |
 | Switch to window N | `Alt+1` through `Alt+9` | No prefix needed |
+| Next/prev window | `Alt+n` / `Alt+p` | No prefix needed |
 | Rename window | `Ctrl+Space ,` | Comma, then type name |
 | Close window | `Ctrl+Space &` | Asks confirmation |
-| Next/prev window | `Ctrl+Space n/p` | |
 | Last window | `Ctrl+Space Tab` | Toggle back and forth |
 
 ### Zoom
 
-Press `Ctrl+Space z` to make any pane fullscreen. Press again to restore. The status bar shows `[Z]` when zoomed.
+Press `Alt+z` to make any pane fullscreen. Press again to restore. The status bar shows `[Z]` when zoomed. No prefix needed!
 
 **Use case:** You have a 3-pane layout. You need to focus on one pane for a few minutes. Zoom it, do your work, unzoom.
 
@@ -84,10 +84,11 @@ Press `Ctrl+Space z` to make any pane fullscreen. Press again to restore. The st
 1. tmn projects
 2. Ctrl+Space ,       → rename to "api"
 3. (work on API here)
-4. Ctrl+Space c       → new window
+4. Ctrl+Shift+T       → new window (like browser new tab!)
 5. Ctrl+Space ,       → rename to "frontend"
 6. Alt+1 / Alt+2      → switch between them
-7. Ctrl+Space Tab     → toggle to last window (muscle memory!)
+7. Alt+n / Alt+p      → next/prev window
+8. Ctrl+Space Tab     → toggle to last window (muscle memory!)
 ```
 
 ### The `tdev` function
@@ -112,8 +113,9 @@ tdev    # Uses "dev" session in current directory
 ### What to internalize
 
 - **Windows = different tasks.** One window for editing, one for tests, one for logs.
-- **Alt+number is instant.** Switching windows should feel as fast as switching browser tabs.
-- **Zoom replaces window switching** for quick focus. Faster than switching to a dedicated full-screen window.
+- **Alt+number is instant.** Switching windows should feel as fast as switching browser tabs. `Alt+n/p` for sequential cycling.
+- **Zoom replaces window switching** for quick focus. `Alt+z` is instant — faster than switching to a dedicated full-screen window.
+- **Browser muscle memory works.** `Ctrl+Shift+T` = new tab, `Ctrl+Shift+W` = close tab.
 
 ## Level 3: Copy Mode & Clipboard (Week 2)
 
@@ -204,16 +206,16 @@ ftmux
 
 ### Resize panes
 
-With prefix (repeatable - hold the key):
+No prefix needed — use `Ctrl+Alt+Arrow`:
 
 | Action | Keys |
 |--------|------|
-| Resize left | `Ctrl+Space H` |
-| Resize down | `Ctrl+Space J` |
-| Resize up | `Ctrl+Space K` |
-| Resize right | `Ctrl+Space L` |
+| Resize left | `Ctrl+Alt+Left` |
+| Resize down | `Ctrl+Alt+Down` |
+| Resize up | `Ctrl+Alt+Up` |
+| Resize right | `Ctrl+Alt+Right` |
 
-The `-r` flag means you can press prefix once, then tap H/J/K/L multiple times. Or just drag borders with the mouse.
+Each press resizes by 2 cells. For larger steps (5 cells), use the prefix alternative: `Ctrl+Space H/J/K/L` (repeatable). Or just drag borders with the mouse.
 
 ### Reorder windows
 
@@ -262,7 +264,7 @@ What gets saved: window layouts, pane directories, pane contents, running progra
 ```
 1. tmn backend          → work on API
 2. Ctrl+Shift+E        → split for tests
-3. Ctrl+Space c         → new window for logs
+3. Ctrl+Shift+T        → new window for logs
 4. Ctrl+Space d         → detach
 
 5. tmn frontend         → separate session for frontend
@@ -354,7 +356,12 @@ Your setup has these tmux integrations built in:
 |------|--------|
 | `Ctrl+Shift+E` | Split vertical |
 | `Ctrl+Shift+O` | Split horizontal |
+| `Ctrl+Shift+W` | Close pane (with confirmation) |
+| `Ctrl+Shift+T` | New window |
 | `Ctrl+Shift+Arrow` | Navigate panes |
+| `Ctrl+Alt+Arrow` | Resize panes (2 cells) |
+| `Alt+z` | Zoom/unzoom pane |
+| `Alt+n` / `Alt+p` | Next/previous window |
 | `Alt+h/j/k/l` | Navigate panes (vim alternative) |
 | `Alt+1-9` | Switch to window N |
 
@@ -364,16 +371,15 @@ Your setup has these tmux integrations built in:
 |-----|--------|----------|
 | `\|` | Split vertical (alternative) | Panes |
 | `-` | Split horizontal (alternative) | Panes |
-| `x` | Close pane | Panes |
-| `z` | Zoom/unzoom pane | Panes |
-| `H/J/K/L` | Resize pane (repeat) | Panes |
+| `x` | Close pane (alternative) | Panes |
+| `z` | Zoom/unzoom pane (alternative) | Panes |
+| `H/J/K/L` | Resize pane (5 cells, repeatable) | Panes |
 | `>` / `<` | Swap pane down/up | Panes |
 | `S` | Toggle synchronized panes | Panes |
 | `!` | Break pane to window | Panes |
-| `c` | New window | Windows |
+| `c` | New window (alternative) | Windows |
 | `,` | Rename window | Windows |
 | `&` | Close window | Windows |
-| `n/p` | Next/prev window | Windows |
 | `Tab` | Last window | Windows |
 | `BSpace` | Last pane | Windows |
 | `Shift+Left/Right` | Reorder window | Windows |
@@ -445,14 +451,26 @@ Ctrl+Space Ctrl+r
 ls ~/.tmux/resurrect/
 ```
 
-### Ctrl+Shift+E/O not working
-Ctrl+Shift+**letter** bindings require two things:
-1. **Alacritty key bindings** in `~/.config/alacritty/alacritty.toml` that send CSI u sequences (e.g., `\x1b[101;6u` for E)
+### Ctrl+Shift+E/O/W/T not working
+Ctrl+Shift+**letter** bindings (E, O, W, T) require two things:
+1. **Alacritty key bindings** in `~/.config/alacritty/alacritty.toml` that send CSI u sequences (e.g., `\x1b[101;6u` for E, `\x1b[119;6u` for W)
 2. **tmux extended-keys** enabled with `terminal-features` matching your `$TERM` (usually `xterm-256color`, not `alacritty`)
 
-Ctrl+Shift+**Arrow** works natively without either — different encoding mechanism.
+Ctrl+Shift+**Arrow** and all **Alt-based** bindings (Alt+z, Alt+n/p, Ctrl+Alt+Arrow) work natively without Alacritty config.
 
 After changing `extended-keys` or `terminal-features`, you must restart the tmux server (`tmux kill-server`), not just reload config.
+
+### Ctrl+Alt+Arrow (resize) not working
+GNOME intercepts Ctrl+Alt+Arrow for workspace switching by default. Since we use Super+PgUp/PgDown for workspaces instead, remove the Ctrl+Alt bindings from GNOME:
+
+```bash
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-up "['<Super>Page_Up']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-down "['<Super>Page_Down']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-left "['<Super><Alt>Left']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-right "['<Super><Alt>Right']"
+```
+
+This is a one-time fix. Changes take effect immediately (no logout needed).
 
 ### Alt key not working
 This is a terminal setting, not tmux:

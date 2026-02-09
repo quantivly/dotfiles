@@ -230,26 +230,28 @@ KEY BINDINGS (PREFIX = Ctrl+Space):
   Ctrl+Space ? - Show all keybindings
   Ctrl+Space r - Reload config
 
-PANE MANAGEMENT:
-  Ctrl+Space | - Split vertically (left/right)
-  Ctrl+Space - - Split horizontally (top/bottom)
-  Alt+h/j/k/l  - Navigate panes (no prefix needed!)
-  Ctrl+Space x - Close current pane
-  Ctrl+Space z - Zoom current pane (toggle fullscreen)
+PANE MANAGEMENT (prefix-free!):
+  Ctrl+Shift+E - Split vertically (left/right)
+  Ctrl+Shift+O - Split horizontally (top/bottom)
+  Ctrl+Shift+W - Close pane (with confirmation)
+  Ctrl+Shift+Arrow - Navigate panes
+  Alt+h/j/k/l  - Navigate panes (vim-style)
+  Alt+z        - Zoom pane toggle (fullscreen)
   Ctrl+Space BSpace - Toggle last pane
   Ctrl+Space > - Swap pane down
   Ctrl+Space < - Swap pane up
   Ctrl+Space S - Toggle synchronized panes (type in all)
 
-PANE RESIZING:
-  Ctrl+Space Shift+H/J/K/L - Resize panes
+PANE RESIZING (prefix-free!):
+  Ctrl+Alt+Arrow - Resize panes (fine: 2 cells)
+  Ctrl+Space Shift+H/J/K/L - Resize panes (coarse: 5 cells)
 
-WINDOW MANAGEMENT:
-  Ctrl+Space c - Create new window
-  Alt+1-9      - Switch to window 1-9 (no prefix!)
+WINDOW MANAGEMENT (prefix-free!):
+  Ctrl+Shift+T - New window (like browser new tab)
+  Alt+n / Alt+p - Next/previous window
+  Alt+1-9      - Switch to window 1-9
   Ctrl+Space Tab - Toggle last window
   Ctrl+Space , - Rename current window
-  Ctrl+Space n/p - Next/previous window
   Ctrl+Space Shift+Left/Right - Reorder windows
 
 COPY MODE (VIM-STYLE):
@@ -281,9 +283,9 @@ FEATURES:
 COMMON WORKFLOWS:
   # Start session and split panes
   tmn dev
-  Ctrl+Space -  # horizontal split
+  Ctrl+Shift+O  # horizontal split (no prefix!)
   Alt+j         # move to bottom pane
-  Ctrl+Space |  # vertical split
+  Ctrl+Shift+E  # vertical split (no prefix!)
 
   # Quick dev layout (3 panes)
   tdev myproject ~/code/project
