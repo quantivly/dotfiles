@@ -868,3 +868,90 @@ fzgrep() {
           --preview 'bat --style=numbers --color=always {1} 2>/dev/null || cat {1}'
   fi
 }
+
+# =============================================================================
+# Tmux Functions
+# =============================================================================
+# Enhanced tmux session management with FZF integration.
+#
+# Functions:
+#   - ftmux: Fuzzy tmux session picker (attach/switch/kill)
+#   - tdev:  Create standard development layout
+# =============================================================================
+
+# ftmux - Fuzzy tmux session picker
+ftmux() {
+  if ! command -v fzf &>/dev/null; then
+    echo "fzf required for ftmux"
+    return 1
+  fi
+
+  local sessions
+  sessions=$(tmux list-sessions -F "#{session_name}: #{session_windows} windows (created #{session_created_string})#{?session_attached, [attached],}" 2>/dev/null)
+
+  if [[ -z "$sessions" ]]; then
+    printf "No sessions. Create one? Name: "
+    read -r name
+    [[ -n "$name" ]] && tmux new-session -s "$name"
+    return
+  fi
+
+  local selected
+  selected=$(echo "$sessions" | fzf \
+    --header="Enter=attach  Ctrl-K=kill  Ctrl-N=new" \
+    --expect=ctrl-k,ctrl-n \
+    --preview='tmux capture-pane -t $(echo {} | cut -d: -f1) -p 2>/dev/null | tail -30' \
+    --preview-window=right:50%:wrap)
+
+  [[ -z "$selected" ]] && return
+
+  local key session
+  key=$(echo "$selected" | head -1)
+  session=$(echo "$selected" | tail -1 | cut -d: -f1)
+
+  case "$key" in
+    ctrl-k)
+      tmux kill-session -t "$session" && echo "Killed: $session"
+      ;;
+    ctrl-n)
+      printf "Session name: "
+      read -r name
+      [[ -n "$name" ]] && tmux new-session -s "$name"
+      ;;
+    *)
+      if [[ -n "$TMUX" ]]; then
+        tmux switch-client -t "$session"
+      else
+        tmux attach -t "$session"
+      fi
+      ;;
+  esac
+}
+
+# tdev - Create standard development layout
+tdev() {
+  # Usage: tdev [session_name] [directory]
+  # Layout: Main (top 60%) / Tests (bottom-left) / Git (bottom-right)
+  local session="${1:-dev}"
+  local dir="${2:-$(pwd)}"
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    if [[ -n "$TMUX" ]]; then
+      tmux switch-client -t "$session"
+    else
+      tmux attach -t "$session"
+    fi
+    return
+  fi
+
+  tmux new-session -d -s "$session" -c "$dir"
+  tmux split-window -v -p 40 -t "$session" -c "$dir"
+  tmux split-window -h -t "$session" -c "$dir"
+  tmux select-pane -t "$session:.1"
+
+  if [[ -n "$TMUX" ]]; then
+    tmux switch-client -t "$session"
+  else
+    tmux attach -t "$session"
+  fi
+}

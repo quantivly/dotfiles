@@ -46,3 +46,10 @@
         chmod 700 ~/.ssh/sockets
         echo "✓ Created ~/.ssh/sockets for SSH connection multiplexing"
       fi
+    - |
+      # Install TPM (Tmux Plugin Manager) if not present
+      if [ ! -d ~/.tmux/plugins/tpm ]; then
+        git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+        echo "✓ Installed TPM (Tmux Plugin Manager)"
+        echo "  Run 'prefix + I' inside tmux to install plugins"
+      fi

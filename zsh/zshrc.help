@@ -192,6 +192,10 @@ SYSTEM:
   fssh         - SSH host selector
   fhome        - Fuzzy navigate home directory
 
+TMUX:
+  ftmux        - Fuzzy session picker (Enter=attach, Ctrl-K=kill, Ctrl-N=new)
+  tdev         - Create 3-pane dev layout (main/tests/git)
+
 DOCKER (FZF):
   dshell       - Smart shell in container (auto-detects zsh/bash/sh/ash)
   dexec        - Fuzzy container exec
@@ -215,9 +219,12 @@ tmux_help() {
 SESSIONS:
   tmn <name>   - Create new named session
   tma <name>   - Attach to existing session
+  tms <name>   - Attach-or-create session
   tml          - List all sessions
+  tmk <name>   - Kill session by name
+  tmka         - Kill all sessions except current
   Ctrl+Space d - Detach from session (keeps running!)
-  tmux kill-session -t <name> - Kill specific session
+  Ctrl+Space B - Switch to last session
 
 KEY BINDINGS (PREFIX = Ctrl+Space):
   Ctrl+Space ? - Show all keybindings
@@ -229,15 +236,21 @@ PANE MANAGEMENT:
   Alt+h/j/k/l  - Navigate panes (no prefix needed!)
   Ctrl+Space x - Close current pane
   Ctrl+Space z - Zoom current pane (toggle fullscreen)
+  Ctrl+Space BSpace - Toggle last pane
+  Ctrl+Space > - Swap pane down
+  Ctrl+Space < - Swap pane up
+  Ctrl+Space S - Toggle synchronized panes (type in all)
 
 PANE RESIZING:
   Ctrl+Space Shift+H/J/K/L - Resize panes
 
 WINDOW MANAGEMENT:
   Ctrl+Space c - Create new window
-  Alt+1/2/3/4/5 - Switch to window 1-5 (no prefix!)
+  Alt+1-9      - Switch to window 1-9 (no prefix!)
+  Ctrl+Space Tab - Toggle last window
   Ctrl+Space , - Rename current window
   Ctrl+Space n/p - Next/previous window
+  Ctrl+Space Shift+Left/Right - Reorder windows
 
 COPY MODE (VIM-STYLE):
   Ctrl+Space [ - Enter copy mode
@@ -245,11 +258,23 @@ COPY MODE (VIM-STYLE):
   y            - Copy selection and exit
   Ctrl+Space ] - Paste
 
+FUNCTIONS:
+  ftmux        - Fuzzy session picker (attach/switch/kill)
+  tdev [name] [dir] - Create 3-pane dev layout
+
+PLUGINS (TPM):
+  Ctrl+Space I - Install plugins
+  Ctrl+Space U - Update plugins
+  Ctrl+Space Ctrl-s - Save session (resurrect)
+  Ctrl+Space Ctrl-r - Restore session (resurrect)
+
 FEATURES:
   ✓ Mouse support (click panes, drag borders, scroll)
   ✓ True color (24-bit) enabled
   ✓ OSC 52 clipboard (works over SSH!)
   ✓ Vim navigation (Alt+hjkl)
+  ✓ SSH agent persistence across reconnections
+  ✓ Session persistence with tmux-resurrect
   ✓ Large scrollback (10,000 lines)
   ✓ Status bar: [session] windows | hostname | time
 
@@ -260,9 +285,12 @@ COMMON WORKFLOWS:
   Alt+j         # move to bottom pane
   Ctrl+Space |  # vertical split
 
+  # Quick dev layout (3 panes)
+  tdev myproject ~/code/project
+
   # Detach and reattach later
   Ctrl+Space d
-  tma dev
+  tms dev       # attach-or-create
 
 💡 Full guide: ~/.dotfiles/examples/tmux-workflows.md
 💡 All keybindings: Ctrl+Space ? (inside tmux)
