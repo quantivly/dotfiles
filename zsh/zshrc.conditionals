@@ -28,9 +28,23 @@
 # ==============================================================================
 
 # Load modular configuration
-# IMPORTANT: Order matters! The FZF module depends on $_FD_CMD and $_BAT_CMD
-#            variables defined in the tools module. Load tools first.
+# IMPORTANT: Order matters!
+#   1. Mise must activate FIRST so mise-managed tools (eza, bat, fd, etc.) are in PATH
+#   2. Tools module checks tool availability and sets aliases/variables ($_FD_CMD, $_BAT_CMD)
+#   3. FZF module depends on $_FD_CMD and $_BAT_CMD from the tools module
+#   4. Plugins module loads remaining integrations (direnv, forgit, etc.)
 DOTFILES_ZSH_DIR="${${(%):-%N}:A:h}"
+
+# Activate mise early so mise-managed tools are available for conditionals below
+if command -v mise &>/dev/null; then
+    eval "$(mise activate zsh)"
+    export MISE_LEGACY_VERSION_FILE=1    # Read .nvmrc, .python-version files
+    export MISE_NODE_COREPACK=1          # Enable corepack for pnpm/yarn
+elif [[ -x "$HOME/.local/bin/mise" ]]; then
+    eval "$($HOME/.local/bin/mise activate zsh)"
+    export MISE_LEGACY_VERSION_FILE=1
+    export MISE_NODE_COREPACK=1
+fi
 
 source "${DOTFILES_ZSH_DIR}/zshrc.conditionals.tools"
 source "${DOTFILES_ZSH_DIR}/zshrc.conditionals.fzf"

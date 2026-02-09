@@ -10,22 +10,9 @@
 # =============================================================================
 # Mise - Modern Polyglot Version Manager
 # =============================================================================
-# Replaces nvm, pyenv, rbenv, etc. with a single fast tool (~5-10ms activation)
-# Install: ./scripts/install-modern-tools.sh or curl https://mise.run | sh
-# Docs: https://mise.jdx.dev/
+# Activated early in zshrc.conditionals (before tools module) so mise-managed
+# tools (eza, bat, fd, etc.) are in PATH when conditionals.tools checks them.
 # Config: ~/.config/mise/config.toml or project .mise.toml/.tool-versions
-
-if command -v mise &>/dev/null; then
-    eval "$(mise activate zsh)"
-
-    # Enable legacy version file support
-    export MISE_LEGACY_VERSION_FILE=1    # Read .nvmrc, .python-version files
-    export MISE_NODE_COREPACK=1          # Enable corepack for pnpm/yarn
-elif [[ -x "$HOME/.local/bin/mise" ]]; then
-    eval "$($HOME/.local/bin/mise activate zsh)"
-    export MISE_LEGACY_VERSION_FILE=1
-    export MISE_NODE_COREPACK=1
-fi
 
 #==============================================================================
 # Environment Configuration
