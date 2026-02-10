@@ -853,6 +853,373 @@ Host db-primary
 - You use forwarded agent from laptop (no need for Bitwarden)
 - Usually only need GitHub and maybe other internal servers
 
+## SSH + Tmux Integration
+
+Automatically attach to persistent tmux sessions on SSH connection for robust server administration.
+
+### Overview
+
+SSH + tmux integration provides seamless remote work that survives disconnections:
+
+**Benefits:**
+- **Instant resume:** Reconnect and continue exactly where you left off
+- **Resilience:** Survives SSH disconnections, laptop sleep, network changes
+- **Persistence:** Long-running commands continue in background
+- **Organization:** Named sessions per task/project
+- **Multi-server management:** Coordinate work across multiple servers
+
+### Auto-Attach Pattern
+
+**Configuration:**
+```ssh
+Host dev
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s admin
+```
+
+**How it works:**
+- `RequestTTY yes` - Forces TTY allocation (required for tmux)
+- `RemoteCommand` - Runs command after authentication instead of shell
+- `tmux new-session -A -s admin` - Attach to 'admin' session or create if doesn't exist
+
+**Workflow:**
+```bash
+# First connection - creates 'admin' session
+ssh dev
+# You're now in tmux session 'admin'
+
+# Work, then disconnect (Ctrl+Space d or connection drop)
+# Session persists on server with all your work
+
+# Reconnect - instantly back to your exact state
+ssh dev
+# Everything is exactly as you left it!
+```
+
+### Bypassing Auto-Tmux
+
+For `scp`, `rsync`, or one-off commands, you need to bypass the RemoteCommand:
+
+**Method 1: Shell alias (recommended)**
+```ssh
+# Main host with auto-tmux
+Host dev
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s admin
+
+# Parallel alias without auto-tmux
+Host dev-shell
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    # No RequestTTY or RemoteCommand
+```
+
+**Usage:**
+```bash
+ssh dev              # Auto-attaches to tmux
+ssh dev-shell        # Direct shell, no tmux
+scp file.txt dev-shell:/path/  # Works without tmux
+```
+
+**Method 2: Override RemoteCommand (one-time bypass)**
+```bash
+ssh -o RemoteCommand=none dev
+scp -o RemoteCommand=none file.txt dev:/path/
+ssh -t dev "docker ps"  # Run single command
+```
+
+### Named Sessions Per Task
+
+Create task-specific persistent sessions on the same server:
+
+**Configuration:**
+```ssh
+# Backend development
+Host dev-backend
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s backend
+
+# Frontend development
+Host dev-frontend
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s frontend
+
+# Deployment tasks
+Host dev-deploy
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s deploy
+```
+
+**Workflow:**
+```bash
+# Work on backend
+ssh dev-backend
+# In 'backend' session
+
+# Switch to frontend work
+ssh dev-frontend
+# In 'frontend' session
+
+# Run deployment
+ssh dev-deploy
+# In 'deploy' session
+
+# All three sessions persist independently on the server
+```
+
+### Helper Functions
+
+The dotfiles include helper functions for SSH + tmux workflows (loaded from `zsh/functions/development.sh`):
+
+**ssht - Connect to host with named session:**
+```bash
+# Syntax: ssht <host> [session_name]
+ssht dev work           # Create/attach 'work' session on dev
+ssht staging deploy     # Create/attach 'deploy' session on staging
+ssht qspace monitor     # Create/attach 'monitor' session on qspace
+
+# Default session name is 'admin' if not specified
+ssht dev                # Create/attach 'admin' session
+```
+
+**sshls - List sessions on remote server:**
+```bash
+# View all tmux sessions without connecting
+sshls dev
+# Output:
+# admin: 2 windows (created Wed Jan 15 10:30:45 2025)
+# backend: 3 windows (created Wed Jan 15 14:22:10 2025)
+# deploy: 1 windows (created Wed Jan 15 16:45:33 2025)
+```
+
+**sshkill - Kill remote session:**
+```bash
+# Clean up old sessions remotely
+sshkill dev old-work    # Kill 'old-work' session on dev
+sshkill staging test    # Kill 'test' session on staging
+```
+
+### Multi-Server Workflows
+
+**Pattern 1: One local tmux window per server**
+
+Coordinate work across multiple servers using local tmux orchestration:
+
+```bash
+# Create local tmux session for orchestration
+tmn ops
+
+# Window 1: Dev work
+ssh dev
+# Work in tmux on dev server
+Ctrl+Space d  # Detach from remote session
+
+# Window 2: Staging work
+Ctrl+Shift+T  # New window (no prefix!)
+ssh staging
+# Work in tmux on staging server
+Ctrl+Space d
+
+# Window 3: Database work
+Ctrl+Shift+T
+ssh db-primary
+# Database administration
+Ctrl+Space d
+
+# Switch between windows with Ctrl+PageUp/Down or Alt+1/2/3
+# Each window maintains independent remote tmux session
+```
+
+**Pattern 2: Parallel deployments**
+
+Deploy to multiple environments simultaneously:
+
+```bash
+# Create local coordination session
+tmn deploy
+
+# Window 1: Build on dev
+ssh dev
+cd /app && ./build.sh
+Ctrl+Space d
+
+# Window 2: Stage to staging
+Ctrl+Shift+T
+ssh staging
+cd /app && ./deploy.sh
+Ctrl+Space d
+
+# Window 3: Monitor staging
+Ctrl+Shift+T
+ssh staging
+cd /app && tail -f logs/deploy.log
+Ctrl+Space d
+
+# Window 4: Promote to prod (when ready)
+Ctrl+Shift+T
+ssh prod
+cd /app && ./deploy.sh
+
+# Switch between windows to monitor progress
+Alt+1, Alt+2, Alt+3, Alt+4
+```
+
+**Pattern 3: Multi-server monitoring**
+
+Monitor logs or metrics across multiple servers:
+
+```bash
+# Create monitoring session
+tmn monitoring
+
+# Window 1: Dev logs
+ssh dev
+tail -f /var/log/app.log
+Ctrl+Space d
+
+# Window 2: Staging logs
+Ctrl+Shift+T
+ssh staging
+tail -f /var/log/app.log
+Ctrl+Space d
+
+# Window 3: Production logs
+Ctrl+Shift+T
+ssh prod
+tail -f /var/log/app.log
+Ctrl+Space d
+
+# Switch between windows with Ctrl+PageUp/Down
+# All logs stream independently
+```
+
+### Conditional Auto-Tmux
+
+Only enable auto-tmux when connecting from specific machine:
+
+```ssh
+# Auto-attach to tmux only from your main laptop
+Match host dev,staging exec "test $(hostname) = 'my-laptop'"
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s admin
+```
+
+**Use case:** Skip tmux when connecting from other machines (CI/CD, scripts, other laptops).
+
+### Troubleshooting SSH + Tmux
+
+**Problem: RemoteCommand interferes with scp/rsync**
+
+**Solution:** Use `-shell` host alias or `-o RemoteCommand=none`:
+```bash
+scp file.txt dev-shell:/path/
+# or
+scp -o RemoteCommand=none file.txt dev:/path/
+```
+
+**Problem: Can't run one-off commands**
+
+**Solution:** Use `-t` flag with command:
+```bash
+ssh -t dev "docker ps"
+ssh -t staging "systemctl status nginx"
+```
+
+**Problem: Session name collision**
+
+If multiple users connect to same server with same session name:
+```bash
+# Use unique session names per user
+ssht dev $(whoami)-admin
+# Creates session: 'myusername-admin'
+```
+
+**Problem: Connection hangs on reconnect**
+
+The auto-tmux might fail if previous session crashed:
+```bash
+# Connect without tmux to investigate
+ssh dev-shell
+
+# Check for hung tmux processes
+tmux list-sessions
+
+# Kill problematic session
+tmux kill-session -t admin
+
+# Reconnect with auto-tmux
+ssh dev
+```
+
+### Best Practices
+
+1. **Name sessions descriptively:** Use task-based names (backend, deploy, logs) not numbers
+
+2. **Clean up old sessions:** Use `sshls` regularly to check what's running, `sshkill` to remove unused sessions
+
+3. **Use `-shell` suffix:** Always create parallel host aliases for non-tmux access
+
+4. **One session per task:** Don't cram everything into a single 'admin' session
+
+5. **Local orchestration:** Use local tmux to coordinate work across multiple servers
+
+6. **Combine with connection multiplexing:** Subsequent connections are instant (~<1s)
+
+7. **Enable ForwardAgent:** For git signing and authentication on remote servers
+
+8. **Document session purposes:** Add comments in your workflow scripts
+
+### Performance
+
+**Connection speed with multiplexing:**
+```bash
+# First connection (normal)
+time ssh dev exit
+# ~2-3 seconds (authentication + tmux attach)
+
+# Subsequent connections (reuses socket)
+time ssh dev exit
+# ~0.2-0.5 seconds (instant!)
+```
+
+**Session persistence:**
+- Remote sessions survive SSH disconnections indefinitely
+- Processes continue running (builds, deployments, logs)
+- Reconnect hours or days later - everything still there
+
+### Security Considerations
+
+**RemoteCommand security:**
+- Only affects interactive SSH sessions
+- Non-interactive commands (scp, rsync, git operations) bypass RemoteCommand
+- Scripts using SSH still work normally
+
+**Session isolation:**
+- Each user gets separate tmux sessions
+- No cross-user session access (unless running as root)
+- Session permissions follow standard Unix permissions
+
+**Audit trail:**
+- SSH connection logs still work normally
+- Tmux maintains command history per session
+- Server logs show all activity
+
 ### GitHub-Specific Optimizations
 
 **Both laptop and remote server:**

@@ -255,6 +255,108 @@ Host *
 #     Port 5432
 
 # ============================================================================
+# SSH + TMUX INTEGRATION (Server Administration)
+# ============================================================================
+#
+# Automatically attach to persistent tmux sessions on SSH connection.
+# Great for server administration - your work persists through disconnections.
+#
+# Benefits:
+# - Instant resume: Reconnect and continue exactly where you left off
+# - Resilience: Survives SSH disconnections, laptop sleep, network changes
+# - Persistence: Long-running commands continue in background
+# - Organization: Named sessions per task/project
+#
+# Pattern 1: Auto-attach to tmux (primary workflow)
+# --------------------------------------------------
+# Automatically creates or attaches to 'admin' session on every connection.
+#
+# Host dev
+#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+#     RequestTTY yes
+#     RemoteCommand tmux new-session -A -s admin
+#
+# Usage:
+#   ssh dev           # Auto-creates/attaches to 'admin' session
+#   # Work, then disconnect (Ctrl+Space d or connection drop)
+#   ssh dev           # Instantly resumes to exact state
+#
+# Pattern 2: Bypass auto-tmux (for scp, one-off commands)
+# --------------------------------------------------------
+# Create parallel host alias without RemoteCommand for times when you
+# need direct shell access (scp, rsync, quick commands).
+#
+# Host dev-shell
+#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+#     # No RequestTTY or RemoteCommand
+#
+# Usage:
+#   ssh dev-shell                     # Direct shell, no tmux
+#   scp file.txt dev-shell:/path/     # Works without tmux interference
+#   ssh -o RemoteCommand=none dev     # Alternative bypass method
+#
+# Pattern 3: Project-specific sessions (multiple tasks per server)
+# -----------------------------------------------------------------
+# Create separate host aliases for different tasks on the same server,
+# each with its own persistent tmux session.
+#
+# Host dev-backend
+#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+#     RequestTTY yes
+#     RemoteCommand tmux new-session -A -s backend
+#
+# Host dev-frontend
+#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+#     RequestTTY yes
+#     RemoteCommand tmux new-session -A -s frontend
+#
+# Host dev-deploy
+#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+#     User ubuntu
+#     ForwardAgent yes
+#     RequestTTY yes
+#     RemoteCommand tmux new-session -A -s deploy
+#
+# Usage:
+#   ssh dev-backend    # Works on backend in 'backend' session
+#   ssh dev-frontend   # Works on frontend in 'frontend' session
+#   ssh dev-deploy     # Deployment tasks in 'deploy' session
+#
+# Pattern 4: Conditional auto-tmux (only from specific laptop)
+# -------------------------------------------------------------
+# Only auto-attach to tmux when connecting from your main laptop,
+# bypass tmux when connecting from other machines.
+#
+# Match host dev,staging exec "test $(hostname) = 'my-laptop'"
+#     RequestTTY yes
+#     RemoteCommand tmux new-session -A -s admin
+#
+# Helper Functions (from dotfiles)
+# ---------------------------------
+# The zsh functions provide convenient shortcuts:
+#
+#   ssht dev work           # Connect to dev, attach/create 'work' session
+#   ssht staging deploy     # Connect to staging, 'deploy' session
+#   sshls dev              # List all tmux sessions on dev (without connecting)
+#   sshkill dev old-work   # Kill 'old-work' session on dev
+#
+# Important Notes
+# ---------------
+# - RemoteCommand only affects interactive SSH sessions
+# - scp, rsync, and non-TTY commands work normally (they bypass RemoteCommand)
+# - Each server gets independent tmux sessions that persist across disconnections
+# - Connection multiplexing makes subsequent connections instant (~<1s)
+# - Combine with ForwardAgent for git signing on remote servers
+
+# ============================================================================
 # ADVANCED PATTERNS
 # ============================================================================
 

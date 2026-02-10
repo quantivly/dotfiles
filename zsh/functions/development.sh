@@ -956,3 +956,66 @@ tdev() {
     tmux attach -t "$session"
   fi
 }
+
+# =============================================================================
+# SSH + Tmux Integration Functions
+# =============================================================================
+# Smart SSH + tmux integration for seamless remote server administration.
+# All functions include inline "Usage: ..." documentation.
+#
+# Functions:
+#   - ssht: SSH to host and attach/create named tmux session
+#   - sshls: List tmux sessions on remote server
+#   - sshkill: Kill specific tmux session on remote server
+#
+# See also: docs/SSH_CONFIG_GUIDE.md, examples/tmux-workflows.md
+# =============================================================================
+
+# ssht - Smart SSH + tmux: Connect to server and attach/create named tmux session
+ssht() {
+  # Usage: ssht <host> [session_name]
+  # Connects to SSH host and automatically attaches to or creates a named tmux session
+  if [ $# -lt 1 ]; then
+    echo "Usage: ssht <host> [session_name]"
+    echo "  host         - SSH host from ~/.ssh/config"
+    echo "  session_name - Tmux session name (default: 'admin')"
+    echo ""
+    echo "Examples:"
+    echo "  ssht dev               # Connect to dev, attach/create 'admin' session"
+    echo "  ssht staging deploy    # Connect to staging, 'deploy' session"
+    echo "  ssht qspace monitor    # Connect to qspace, 'monitor' session"
+    return 1
+  fi
+
+  local host="$1"
+  local session="${2:-admin}"  # Default to 'admin' if not specified
+
+  # Connect and attach/create session
+  ssh -t "$host" "tmux new-session -A -s '$session'"
+}
+
+# sshls - SSH to server and list available tmux sessions
+sshls() {
+  # Usage: sshls <host>
+  # Lists all tmux sessions running on remote server
+  if [ $# -ne 1 ]; then
+    echo "Usage: sshls <host>"
+    echo "  Lists all tmux sessions on remote server"
+    return 1
+  fi
+
+  ssh -t "$1" "tmux list-sessions"
+}
+
+# sshkill - SSH to server and kill specific tmux session
+sshkill() {
+  # Usage: sshkill <host> <session_name>
+  # Kills specified tmux session on remote server
+  if [ $# -ne 2 ]; then
+    echo "Usage: sshkill <host> <session_name>"
+    echo "  Kills specified tmux session on remote server"
+    return 1
+  fi
+
+  ssh -t "$1" "tmux kill-session -t '$2'"
+}

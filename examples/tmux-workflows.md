@@ -363,22 +363,346 @@ Ctrl+Space d
 tma frontend
 ```
 
-### Remote Development (SSH)
+### Remote Development (SSH) - Enhanced
 
-Tmux is perfect for SSH sessions - your work persists if you disconnect:
+Tmux + SSH integration provides robust remote work that survives disconnections.
+
+#### Auto-Attach on SSH
+
+Configure servers to automatically attach to tmux - no need to remember to start it:
+
+**SSH config:**
+```ssh
+Host dev
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s admin
+```
+
+**Workflow:**
+```bash
+# Connect - auto-creates or attaches to 'admin' session
+ssh dev
+# You're immediately in tmux!
+
+# Work in persistent session
+# Edit files, run services, monitor logs
+# Everything persists across disconnections
+
+# Disconnect (connection drop or Ctrl+Space d)
+# Session keeps running on server
+
+# Reconnect - instantly resume
+ssh dev
+# Back to exact state - all windows, panes, processes intact!
+```
+
+**Benefits:**
+- No need to remember `tmn` or `tma` commands
+- Instant resume - everything exactly as you left it
+- Resilient to network issues, laptop sleep, connection drops
+- Long-running processes continue in background
+
+#### Bypass Auto-Tmux
+
+For times when you need direct shell access (scp, one-off commands):
+
+**Method 1: Create `-shell` alias in SSH config:**
+```ssh
+Host dev-shell
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    # No RequestTTY or RemoteCommand
+```
+
+**Usage:**
+```bash
+ssh dev-shell                    # Direct shell, no tmux
+scp file.txt dev-shell:/path/    # File transfers work
+ssh -t dev-shell "docker ps"     # One-off commands
+```
+
+**Method 2: Override RemoteCommand (one-time):**
+```bash
+ssh -o RemoteCommand=none dev
+scp -o RemoteCommand=none file.txt dev:/path/
+```
+
+#### Multi-Server Administration
+
+**Pattern 1: One local tmux window per server**
+
+Coordinate work across multiple servers using local tmux:
 
 ```bash
-# On remote server
-ssh user@server
-tmn work
+# Create local tmux for orchestration
+tmn ops
 
+# Window 1: Dev work
+ssh dev
+# Auto-attaches to dev's 'admin' session
 # Do work...
-# Connection drops? No problem!
+Ctrl+Space d  # Detach from remote session
 
-# Reconnect and resume
-ssh user@server
-tma work  # Everything is still there!
+# Window 2: Staging work
+Ctrl+Shift+T  # New window (no prefix!)
+ssh staging
+# Auto-attaches to staging's 'admin' session
+# Do work...
+Ctrl+Space d
+
+# Window 3: Database work
+Ctrl+Shift+T
+ssh db-primary
+# Auto-attaches to db's 'admin' session
+# Do work...
+Ctrl+Space d
+
+# Window 4: Production monitoring
+Ctrl+Shift+T
+ssh prod
+# Monitor logs, check status
+Ctrl+Space d
+
+# Switch between windows with Ctrl+PageUp/Down or Alt+1/2/3/4
+# Each window maintains independent remote tmux session
 ```
+
+**Why this works:**
+- Local tmux coordinates your workflow
+- Each SSH connection runs in its own local window
+- Each remote server has its own persistent tmux session
+- If a server connection drops, others are unaffected
+- Local tmux persists even if all SSH connections close
+
+**Pattern 2: Named sessions per task**
+
+Use different sessions for different tasks on the same server:
+
+**SSH config:**
+```ssh
+Host dev-backend
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s backend
+
+Host dev-frontend
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s frontend
+
+Host dev-deploy
+    HostName server.example.com
+    User ubuntu
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s deploy
+```
+
+**Workflow:**
+```bash
+# Backend work
+ssh dev-backend
+# In 'backend' session
+
+# Frontend work (in another local terminal)
+ssh dev-frontend
+# In 'frontend' session
+
+# All sessions persist independently on the server
+```
+
+**Helper functions (from dotfiles):**
+```bash
+# Alternative to SSH host aliases - use ssht function
+ssht dev backend     # Connect to dev, attach/create 'backend' session
+ssht dev frontend    # Connect to dev, attach/create 'frontend' session
+ssht dev deploy      # Connect to dev, attach/create 'deploy' session
+
+# List remote sessions
+sshls dev
+# Shows: backend, frontend, deploy, admin
+
+# Kill old session
+sshkill dev old-session
+```
+
+#### Deployment Workflow
+
+Coordinate deployments across multiple environments:
+
+```bash
+# Local tmux for coordination
+tmn deploy
+
+# Window 1: Build on dev
+ssh dev
+cd /app && ./build.sh
+# Monitor build output
+Ctrl+Space d
+
+# Window 2: Stage deployment
+Ctrl+Shift+T
+ssh staging
+cd /app && ./deploy.sh
+# Monitor deployment
+Ctrl+Space d
+
+# Window 3: Smoke tests
+Ctrl+Shift+T
+ssh staging
+cd /tests && ./smoke-tests.sh
+# Watch test results
+Ctrl+Space d
+
+# Window 4: Promote to prod
+Ctrl+Shift+T
+ssh prod
+cd /app && ./deploy.sh
+# Final deployment
+
+# Switch between windows to monitor progress
+Alt+1  # Build
+Alt+2  # Staging deploy
+Alt+3  # Tests
+Alt+4  # Prod deploy
+```
+
+**Benefits:**
+- All steps visible in separate windows
+- Can check on any step instantly
+- Each remote session persists independently
+- If local tmux detaches, all steps continue
+- Can reattach to local tmux and resume coordination
+
+#### Multi-Server Monitoring
+
+Monitor logs or metrics from multiple servers simultaneously:
+
+```bash
+# Create monitoring session
+tmn monitoring
+
+# Window 1: Dev logs
+ssh dev
+tail -f /var/log/app.log
+Ctrl+Space d
+
+# Window 2: Staging logs
+Ctrl+Shift+T
+ssh staging
+tail -f /var/log/app.log
+Ctrl+Space d
+
+# Window 3: Production logs
+Ctrl+Shift+T
+ssh prod
+tail -f /var/log/app.log
+Ctrl+Space d
+
+# Window 4: Database logs
+Ctrl+Shift+T
+ssh db-primary
+tail -f /var/log/postgresql/postgresql.log
+Ctrl+Space d
+
+# Switch between windows with Ctrl+PageUp/Down
+# All logs stream independently in their own remote sessions
+```
+
+**Alternative: Split panes for side-by-side monitoring:**
+```bash
+# Create monitoring session
+tmn monitoring
+
+# SSH to dev in first pane
+ssh dev
+tail -f /var/log/app.log
+
+# Split and SSH to staging
+Ctrl+Shift+E  # Vertical split (no prefix!)
+ssh staging
+tail -f /var/log/app.log
+
+# Split and SSH to prod
+Ctrl+Shift+O  # Horizontal split (no prefix!)
+ssh prod
+tail -f /var/log/app.log
+
+# Result: Three log streams visible simultaneously
+# Navigate with Ctrl+Shift+Arrow
+```
+
+#### Troubleshooting Remote SSH + Tmux
+
+**Problem: Can't copy files with scp**
+
+**Solution:** Use `-shell` alias or override RemoteCommand:
+```bash
+scp file.txt dev-shell:/path/
+# or
+scp -o RemoteCommand=none file.txt dev:/path/
+```
+
+**Problem: Connection hangs on reconnect**
+
+**Solution:** Previous session might have crashed:
+```bash
+# Connect without tmux
+ssh dev-shell
+
+# Check sessions
+tmux list-sessions
+
+# Kill problematic session
+tmux kill-session -t admin
+
+# Reconnect with auto-tmux
+ssh dev
+```
+
+**Problem: Lost changes after disconnection**
+
+**Not actually a problem!** This is tmux working correctly:
+- Your session persisted on the server
+- When you reconnect, everything is exactly as you left it
+- If you don't see your work, you might be in a different session
+
+**Solution:** List sessions and attach to the right one:
+```bash
+# On remote server
+tmux list-sessions
+# admin: 3 windows (created Wed Jan 15 10:30:45 2025)
+# work: 2 windows (created Wed Jan 15 14:22:10 2025)
+
+# Attach to the right session
+tmux attach -t work
+```
+
+#### Best Practices
+
+1. **Name sessions descriptively:** Use task-based names (backend, deploy, logs) not generic names
+
+2. **One task per session:** Don't cram everything into a single 'admin' session
+
+3. **Local tmux for orchestration:** Use local tmux to coordinate multiple remote sessions
+
+4. **Clean up old sessions:** Use `sshls <host>` to see what's running, `sshkill <host> <session>` to remove old sessions
+
+5. **Use `-shell` aliases:** Always create parallel SSH host aliases for non-tmux access
+
+6. **Detach, don't exit:** Use `Ctrl+Space d` to detach and keep session running
+
+7. **Connection multiplexing:** With SSH ControlMaster, subsequent connections are instant (~<1s)
+
+8. **Combine with agent forwarding:** Enable ForwardAgent for git signing on remote servers
 
 ### Pair Programming
 
