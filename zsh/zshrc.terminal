@@ -14,4 +14,3 @@
 # Enable true color support (24-bit)
 # This allows applications to use the full 16 million color palette
 export COLORTERM=truecolor
-
