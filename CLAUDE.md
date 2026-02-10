@@ -99,13 +99,30 @@ Host staging-shell
 
 Servers use a lightweight tool subset (`examples/server-mise.toml`) instead of the full workstation config. Includes: bat, fd, eza, delta, zoxide, duf, dust, lazygit, glow, fastfetch. Excludes dev-only tools (node, python, pre-commit, etc.).
 
-### AL2 Gotchas
+### AL2 2023 Gotchas
 
 | Issue | Solution |
 |-------|----------|
 | Missing `en_US.UTF-8` locale | Bootstrap runs `localedef` automatically |
+| `chsh` not available | Bootstrap installs `util-linux-user` package |
+| `gpg-agent` not installed | Node.js GPG verification fails; server config excludes node |
 | `gh auth git-credential` won't work | `.gitconfig.local` uses SSH URLs via `insteadOf` |
-| tmux version may be 3.2 (not 3.3+) | Most features work; may need `tmux kill-server` after first config |
+| tmux 3.2 (not 3.3+) | Most features work; may need `tmux kill-server` after first config |
+| Package manager is `dnf` (not `yum`) | Bootstrap auto-detects; both work |
+
+### Bootstrap Ordering Note
+
+The `./install` script skips the mise config section if mise isn't installed yet. The bootstrap handles this by installing mise in Phase 4 (after `./install` runs in Phase 3), then separately configuring the server mise config. On `--update` runs, mise is already installed, so `./install` handles it normally.
+
+### Piping Bootstrap via SSH
+
+Always use `ssh server 'bash -s' < script.sh` (not `ssh server 'script.sh'`) for bootstrap. This ensures the script runs in bash regardless of the remote user's default shell — critical if the login shell is broken or hanging.
+
+### Bootstrapped Servers
+
+| Server | Status | Date | Notes |
+|--------|--------|------|-------|
+| staging | Complete | 2026-02-10 | AL2 2023, had pre-existing partial zsh setup |
 
 ## Architecture
 
