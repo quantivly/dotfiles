@@ -118,6 +118,24 @@ The `./install` script skips the mise config section if mise isn't installed yet
 
 Always use `ssh server 'bash -s' < script.sh` (not `ssh server 'script.sh'`) for bootstrap. This ensures the script runs in bash regardless of the remote user's default shell — critical if the login shell is broken or hanging.
 
+### SSH Debugging (Remote Server Work)
+
+- **Empty SSH output?** Test with `-o ControlPath=none` to bypass ControlMaster muxing
+- **SSH command hangs?** Remote shell startup may be broken — use `ssh host 'bash -s'` piped via stdin
+- **`exec zsh` in `.bashrc`**: Anti-pattern that breaks non-interactive SSH. Fix: remove it, use `chsh` instead
+- **Push before bootstrap**: `server-bootstrap.sh` clones from GitHub — new files must be pushed first
+
+### Shell Script CI Requirements
+
+- **SC2088**: Use `$HOME` not `~` in quoted strings (tilde doesn't expand in quotes)
+- **SC2015**: Don't use `A && B || C` as if-then-else — rewrite as `if/then/else`
+- **SC2086**: Add `# shellcheck disable=SC2086` comment when word-splitting is intentional (e.g., `$PKG_INSTALL`)
+- **end-of-file-fixer**: All files must end with exactly one newline
+
+### Server mise Config Strategy
+
+Servers use a **copy** of `examples/server-mise.toml` (not a symlink). The `./install` script detects the differing file and preserves it ("Keeping your version"). This means server tool configs survive `./install` re-runs without special-casing.
+
 ### Bootstrapped Servers
 
 | Server | Status | Date | Notes |
