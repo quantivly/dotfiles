@@ -945,6 +945,36 @@ gh auth status   # Check status
 gh auth login    # Re-authenticate
 ```
 
+### GitHub CLI multi-account switching
+
+The `zshrc.company` `chpwd` hook switches `GH_CONFIG_DIR`, `GH_TOKEN`, and `GITHUB_PERSONAL_ACCESS_TOKEN` based on directory context (`~/quantivly/**` → work, everything else → personal).
+
+**Key gotcha — `gh auth token` keyring lookup:**
+- `gh auth token` (no `--user`) returns a shared/default keyring entry, NOT the per-user entry matching the config's `user:` field
+- Always use `gh auth token --user <username>` to get the correct per-user token from the keyring
+- To get the configured username: `gh config get -h github.com user`
+
+**Key gotcha — `GH_TOKEN` vs `GH_CONFIG_DIR`:**
+- `GH_CONFIG_DIR` tells `gh` which config to read, but authentication still goes through the shared keyring
+- `GH_TOKEN` env var is the highest-priority auth mechanism — it bypasses both config and keyring
+- For reliable multi-account switching, always set `GH_TOKEN` explicitly (not just `GH_CONFIG_DIR`)
+
+**Debugging multi-account issues:**
+```bash
+# Check which account a token authenticates as
+GH_TOKEN="$(gh auth token --user USERNAME)" gh api user --jq '.login'
+
+# Compare default vs per-user token (should match but may not!)
+gh auth token                    # shared default — may be wrong
+gh auth token --user USERNAME    # per-user keyring entry — correct
+
+# Verify directory-based switching
+cd ~ && echo "GH_TOKEN prefix: ${GH_TOKEN:0:15}" && gh api user --jq '.login'
+cd ~/quantivly && echo "GH_TOKEN prefix: ${GH_TOKEN:0:15}" && gh api user --jq '.login'
+```
+
+**Auth flow (precedence):** `GH_TOKEN` env → `GH_ENTERPRISE_TOKEN` → keyring (via `GH_CONFIG_DIR` config)
+
 ### SSH agent forwarding issues (VSCode/remote servers)
 
 **Symptom:** Git operations fail with "Repository not found" after reconnecting to remote server.
