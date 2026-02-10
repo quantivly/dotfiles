@@ -39,6 +39,74 @@ source ~/.zshrc    # Test changes
 time zsh -i -c exit  # Profile startup performance
 ```
 
+## Server Setup
+
+Bootstrap remote servers (AL2, Ubuntu, etc.) with the team's standard shell DX.
+
+### Bootstrap a New Server
+
+```bash
+# From your workstation (pipe over SSH):
+ssh server 'bash -s' < ~/.dotfiles/scripts/server-bootstrap.sh
+
+# Or on the server directly:
+curl -fsSL https://raw.githubusercontent.com/quantivly/dotfiles/main/scripts/server-bootstrap.sh | bash
+```
+
+The bootstrap script runs 6 phases: OS detection, system packages (zsh, git, tmux, etc.), dotfiles clone + install, mise tools (server-optimized subset), server identity templates, and verification.
+
+### Update Servers
+
+After dotfiles changes, update a server without reinstalling system packages:
+
+```bash
+ssh server-shell '~/.dotfiles/scripts/server-bootstrap.sh --update'
+```
+
+This pulls the latest dotfiles, re-runs `./install`, and updates mise tools.
+
+### SSH Config (Workstation-Side)
+
+Each server gets **two entries** in your `~/.ssh/config`:
+
+```ssh-config
+# Auto-tmux for terminal SSH
+Host staging
+    HostName <actual-hostname>
+    User ec2-user
+    ForwardAgent yes
+    RequestTTY yes
+    RemoteCommand tmux new-session -A -s admin
+
+# Clean access for VSCode Remote SSH, scp, one-off commands
+Host staging-shell
+    HostName <actual-hostname>
+    User ec2-user
+    ForwardAgent yes
+```
+
+**Why two entries**: VSCode Remote SSH breaks with `RemoteCommand`. The `-shell` variant gives clean access for VSCode, `scp`, and scripted commands (including `--update`). The base entry auto-attaches to a persistent tmux session.
+
+### Shared ec2-user Considerations
+
+- Servers use a shared `ec2-user` account (team standard)
+- Personal preferences go in `~/.zshrc.local` (never overwritten by bootstrap or updates)
+- `.gitconfig.local` uses a team email by default — update if needed
+- SSH agent forwarding carries your identity from your workstation — no keys stored on servers
+- `Q_MODE=server` in `.zshrc.local` tells `zshrc.company` to skip workstation-only features
+
+### Server mise Config
+
+Servers use a lightweight tool subset (`examples/server-mise.toml`) instead of the full workstation config. Includes: bat, fd, eza, delta, zoxide, duf, dust, lazygit, glow, fastfetch. Excludes dev-only tools (node, python, pre-commit, etc.).
+
+### AL2 Gotchas
+
+| Issue | Solution |
+|-------|----------|
+| Missing `en_US.UTF-8` locale | Bootstrap runs `localedef` automatically |
+| `gh auth git-credential` won't work | `.gitconfig.local` uses SSH URLs via `insteadOf` |
+| tmux version may be 3.2 (not 3.3+) | Most features work; may need `tmux kill-server` after first config |
+
 ## Architecture
 
 ### Modular Configuration System

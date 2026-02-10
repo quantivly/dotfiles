@@ -16,7 +16,9 @@
 #   ./scripts/install-prerequisites.sh
 #
 # Requirements:
-#   - zsh, git, curl installed (sudo apt install zsh git curl build-essential)
+#   - zsh, git, curl installed
+#     Ubuntu/Debian: sudo apt install zsh git curl build-essential
+#     Amazon Linux/RHEL: sudo yum install -y zsh git curl
 #   - Internet connection
 #
 # Security:
@@ -284,8 +286,11 @@ check_tmux() {
     if command_exists tmux; then
         log SUCCESS "tmux is already installed: $(tmux -V)"
     else
+        local tmux_install="sudo apt install tmux"
+        command_exists yum && tmux_install="sudo yum install -y tmux"
+        command_exists dnf && tmux_install="sudo dnf install -y tmux"
         log WARNING "tmux is not installed"
-        log INFO "Install with: sudo apt install tmux"
+        log INFO "Install with: $tmux_install"
     fi
 }
 
@@ -300,17 +305,22 @@ main() {
     echo "╚══════════════════════════════════════════════════════╝"
     echo -e "${RESET}"
 
+    # Detect package manager for error messages
+    local pkg_install="sudo apt install"
+    command_exists yum && pkg_install="sudo yum install -y"
+    command_exists dnf && pkg_install="sudo dnf install -y"
+
     # Check prerequisites
     if ! command_exists git; then
-        error_exit "git is not installed. Please install: sudo apt install git"
+        error_exit "git is not installed. Please install: $pkg_install git"
     fi
 
     if ! command_exists curl; then
-        error_exit "curl is not installed. Please install: sudo apt install curl"
+        error_exit "curl is not installed. Please install: $pkg_install curl"
     fi
 
     if ! command_exists zsh; then
-        error_exit "zsh is not installed. Please install: sudo apt install zsh"
+        error_exit "zsh is not installed. Please install: $pkg_install zsh"
     fi
 
     # Run installations

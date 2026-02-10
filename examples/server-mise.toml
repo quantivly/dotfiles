@@ -1,0 +1,39 @@
+# Server mise Configuration (Lightweight)
+# ========================================
+# Subset of the full dotfiles .mise.toml for remote servers.
+# Includes only tools useful for server administration and debugging.
+#
+# Used by: scripts/server-bootstrap.sh
+# Installed to: ~/.config/mise/config.toml (on servers)
+#
+# To add tools: edit this file, then re-run server-bootstrap.sh --update
+# For the full workstation config: see .mise.toml in repo root
+
+[settings]
+legacy_version_file = false
+experimental = true
+
+[tools]
+# Core CLI replacements (daily admin use)
+bat = "0.24.0"           # Syntax highlighter (cat replacement)
+fd = "9.0.0"             # Fast find alternative
+eza = "0.18.0"           # Modern ls replacement
+delta = "0.17.0"         # Git diff viewer with syntax highlighting
+zoxide = "0.9.4"         # Smart cd command
+
+# Disk and system monitoring
+duf = "0.8.1"            # Disk usage viewer with colors
+dust = "0.9.0"           # Directory size analyzer (du replacement)
+
+# Git and documentation
+lazygit = "0.42.0"       # Git TUI for interactive operations
+glow = "1.5.1"           # Markdown viewer for terminal
+
+# System info
+fastfetch = "2.8.10"     # System info display
+
+# Excluded (dev-only, not needed on servers):
+# node, python, pipx     - Not needed for admin
+# just                   - Build runner, not needed on servers
+# pre-commit, gitleaks   - Dev/security tooling
+# sops, age              - Secrets encryption (workstation only)

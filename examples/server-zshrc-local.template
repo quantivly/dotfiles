@@ -1,0 +1,82 @@
+# Server Shell Configuration
+# ==========================
+# Machine-specific settings for remote servers (AL2, staging, demo, etc.)
+# This file is NOT tracked in git. Created by server-bootstrap.sh.
+#
+# Security: chmod 600 (set by bootstrap script)
+# Shared account: ec2-user is shared — keep personal preferences minimal
+
+# =============================================================================
+# Server Identity
+# =============================================================================
+# Used by prompt customization and logging to identify which server you're on.
+
+export SERVER_NAME="${SERVER_NAME:-unknown}"  # e.g., staging, demo2, prod-admin
+export SERVER_ENV="${SERVER_ENV:-unknown}"    # e.g., staging, production, demo
+
+# =============================================================================
+# Server Mode
+# =============================================================================
+# Tells company config (zshrc.company) to skip workstation-only features
+# like quanticli, multi-account switching, database shortcuts, etc.
+
+export Q_MODE="server"
+
+# =============================================================================
+# Editor
+# =============================================================================
+# No VS Code on servers — use vim
+
+export EDITOR=vim
+export VISUAL=vim
+
+# =============================================================================
+# Docker Swarm Administration
+# =============================================================================
+# Common aliases for managing Docker Swarm stacks on servers.
+# Note: dsls and dslf are already defined in zshrc.company
+
+# Deploy/update a stack
+# Usage: stack-deploy <stack-name> <compose-file>
+alias stack-deploy='docker stack deploy --with-registry-auth -c'
+
+# List all stacks
+alias stack-ls='docker stack ls'
+
+# Stack services with resource usage
+alias stack-ps='docker stack ps'
+
+# Service inspection
+alias dsi='docker service inspect --pretty'
+alias dsps='docker service ps'
+
+# Node management
+alias dnls='docker node ls'
+alias dnps='docker node ps'
+
+# =============================================================================
+# System Monitoring
+# =============================================================================
+
+alias syslog='sudo journalctl -f'
+alias disk='df -h | grep -v tmpfs | grep -v loop'
+alias mem='free -h'
+alias topcpu='ps aux --sort=-%cpu | head -20'
+alias topmem='ps aux --sort=-%mem | head -20'
+alias ports='sudo ss -tulnp'
+
+# =============================================================================
+# SSH Agent (Server-Side)
+# =============================================================================
+# On servers, SSH agent is forwarded from your workstation.
+# No need to start ssh-agent or load keys here.
+# If agent forwarding breaks, reconnect your SSH session.
+
+# =============================================================================
+# Machine-Specific Overrides
+# =============================================================================
+# Add server-specific settings below this line.
+# Examples:
+#   export AWS_PROFILE="staging"
+#   pathadd "/opt/custom-tools/bin"
+#   alias app-logs='docker service logs -f myapp_web'
