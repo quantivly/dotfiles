@@ -63,6 +63,7 @@ fastfetch = "2.8.10"     # System info display
 node = "lts"
 python = "3.10"          # Required for pipx and Python CLI tools
 pipx = "1.8.0"           # Isolated Python CLI tool installer
+helix = "25.07.1"          # Modal text editor
 
 # Optional tools (uncomment to enable)
 # dive = "0.12.0"        # Docker image layer analyzer
