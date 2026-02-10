@@ -58,7 +58,9 @@ blink_interval = 500
 # ============================================================================
 
 [selection]
-save_to_clipboard = true
+# Disabled auto-copy to avoid conflicts with tmux copy mode and OSC 52 clipboard.
+# Use Ctrl+Shift+C/V for explicit copy/paste when not in tmux.
+save_to_clipboard = false
 
 # ============================================================================
 # Shell
@@ -165,4 +167,7 @@ bindings = [
   { key = "T", mods = "Control|Shift", chars = "\u001b[116;6u" },
   # Tmux: Session switcher (Ctrl+Shift+S, codepoint 115)
   { key = "S", mods = "Control|Shift", chars = "\u001b[115;6u" },
+  # Copy/Paste (used when not in tmux copy mode)
+  { key = "C", mods = "Control|Shift", action = "Copy" },
+  { key = "V", mods = "Control|Shift", action = "Paste" },
 ]
