@@ -168,8 +168,11 @@ install_system_packages() {
             if ! grep -q "$zsh_path" /etc/shells 2>/dev/null; then
                 echo "$zsh_path" | sudo tee -a /etc/shells >/dev/null
             fi
-            sudo chsh -s "$zsh_path" "$(whoami)" && log_success "Default shell set to zsh" \
-                || log_warn "Failed to set default shell — run: chsh -s $zsh_path"
+            if sudo chsh -s "$zsh_path" "$(whoami)"; then
+                log_success "Default shell set to zsh"
+            else
+                log_warn "Failed to set default shell — run: chsh -s $zsh_path"
+            fi
         fi
     else
         log_success "Default shell is already zsh"
@@ -290,7 +293,7 @@ setup_server_identity() {
             log_warn "Server template not found — .zshrc.local not created"
         fi
     else
-        log_success "~/.zshrc.local already exists (preserved)"
+        log_success "$HOME/.zshrc.local already exists (preserved)"
     fi
 
     # Create server-appropriate .gitconfig.local if not exists
@@ -318,7 +321,7 @@ GITCONFIG
         log_success "Created ~/.gitconfig.local (server defaults)"
         log_info "Update name/email if needed: vim ~/.gitconfig.local"
     else
-        log_success "~/.gitconfig.local already exists (preserved)"
+        log_success "$HOME/.gitconfig.local already exists (preserved)"
     fi
 }
 
