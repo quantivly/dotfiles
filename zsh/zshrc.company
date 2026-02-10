@@ -81,23 +81,31 @@ qn() {
 #   GH_CONFIG_DIR=~/.config/gh-quantivly gh auth login)
 
 if [[ -d "$HOME/.config/gh-quantivly" ]]; then
-    # Cache the work GitHub token once (for GitHub MCP server in Claude Code)
+    # Cache tokens once at startup for GH_TOKEN override and GITHUB_PERSONAL_ACCESS_TOKEN
+    # NOTE: Must use --user to get the correct per-user keyring entry;
+    # gh auth token without --user returns a shared default that may be wrong.
     if command -v gh &>/dev/null; then
-        _CACHED_GH_QUANTIVLY_TOKEN="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token 2>/dev/null)"
+        _q_gh_user="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh config get -h github.com user 2>/dev/null)"
+        _CACHED_GH_QUANTIVLY_TOKEN="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token --user "$_q_gh_user" 2>/dev/null)"
+        unset _q_gh_user
     fi
 
     _update_gh_config() {
         case "$PWD" in
             "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
                 export GH_CONFIG_DIR="$HOME/.config/gh-quantivly"
-                [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]] && export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
+                if [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]]; then
+                    export GH_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
+                    export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
+                fi
                 ;;
             *)
                 unset GH_CONFIG_DIR
-                # Fall back to personal token (loaded from sops in ~/.zshrc.local)
                 if [[ -n "$_CACHED_PERSONAL_GH_TOKEN" ]]; then
+                    export GH_TOKEN="$_CACHED_PERSONAL_GH_TOKEN"
                     export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_PERSONAL_GH_TOKEN"
                 else
+                    unset GH_TOKEN
                     unset GITHUB_PERSONAL_ACCESS_TOKEN
                 fi
                 ;;
