@@ -132,11 +132,12 @@ install_system_packages() {
     # Core packages needed for dotfiles
     local packages=(zsh git curl tmux jq htop make)
 
-    # Add gcc for building native extensions (mise tools may need it)
+    # Add OS-specific packages
     if [[ "$PKG_MGR" == "apt" ]]; then
         packages+=(build-essential locales)
     else
-        packages+=(gcc gcc-c++)
+        # gcc for native extensions, util-linux-user for chsh (missing on AL2 2023)
+        packages+=(gcc gcc-c++ util-linux-user)
     fi
 
     log_info "Installing: ${packages[*]}"
