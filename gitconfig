@@ -167,14 +167,16 @@
 [merge]
 	conflictstyle = diff3
 
-# GPG signing disabled by default. To enable:
-#   git config --global commit.gpgsign true
-#   git config --global user.signingkey <key-id>
-# [commit]
-# 	gpgsign = true
+# Commit signing disabled by default. To enable SSH signing,
+# add to ~/.gitconfig.local:
 #
-# [gpg]
-# 	program = gpg
+#   [user]
+#       signingkey = ssh-ed25519 AAAAC3Nza... your.email@domain.com
+#   [commit]
+#       gpgsign = true
+
+[gpg]
+	format = ssh
 
 [hub]
 	protocol = ssh
@@ -183,3 +185,4 @@
 	manyFiles = true              # Optimize for repos with many files
 [gpg "ssh"]
 	program = /usr/bin/ssh-keygen
+	allowedSignersFile = ~/.ssh/allowedSigners
