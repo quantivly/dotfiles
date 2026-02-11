@@ -181,7 +181,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.config/Code/User/settings.json` → `~/.dotfiles/vscode/settings.json`
 
 **Not symlinked (but coupled):**
-- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`
+- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`. **Gotcha:** Live config diverges from template — updating the template doesn't propagate. Also, Ctrl+Shift+letter combos that have Alacritty built-in defaults (e.g., F=SearchForward) must have explicit CSI u entries to override; letters without defaults (E, O, W, T, S) work via kitty keyboard protocol automatically.
 
 ### Configuration Loading Order
 
@@ -749,7 +749,8 @@ Ctrl+Alt+Arrow  # Resize panes
 Alt+z            # Zoom toggle (fullscreen pane)
 Ctrl+PageUp/Down # Next/previous window
 Ctrl+Shift+PageUp/Down # Reorder windows
-Ctrl+Space d     # Detach (session keeps running)
+Ctrl+Shift+F         # Thumbs: quick-copy hints (like Vimium)
+Ctrl+s d     # Detach (session keeps running)
 
 # Reattach later
 tma mysession
@@ -763,7 +764,7 @@ tmux kill-session -t mysession
 
 ### Key Features
 
-- **Prefix:** Ctrl+Space (ergonomic, no shell conflicts)
+- **Prefix:** Ctrl+s (ergonomic, no ghost input — requires NO_FLOW_CONTROL in zshrc)
 - **Mouse support:** Click panes, drag borders, scroll with wheel
 - **True color:** 24-bit color support for beautiful syntax highlighting
 - **Prefix-free pane management:** Ctrl+Shift for splits (E/O), close (W), and navigation (Arrow)
@@ -772,7 +773,7 @@ tmux kill-session -t mysession
 - **Vim fallback:** Alt+hjkl for pane switching still works
 - **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
 - **Large scrollback:** 10,000 lines (vs default 2,000)
-- **Popup windows:** Alt+g (lazygit), Ctrl+Space p (shell), Ctrl+Space G (git status), Ctrl+Space f (fzf session switcher)
+- **Popup windows:** Alt+g (lazygit), Ctrl+s t (terminal), Ctrl+s G (git status), Ctrl+s f (fzf session switcher)
 - **Smart defaults:** Windows start at 1, auto-renumber, splits open in current directory
 
 ### Status Bar
@@ -792,17 +793,17 @@ Dark theme matching Powerlevel10k:
 ### Important Notes
 
 - **No auto-start:** Tmux must be launched manually with `tmn <session>` - this is intentional to avoid interfering with scripts and quick commands
-- **Alacritty coupling:** Ctrl+Shift+letter bindings (E, O, W, T, S) require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow, Ctrl+Alt+Arrow, and all Alt-based bindings work natively without Alacritty config. A documented template is provided at `examples/alacritty.toml.template` — use `alacritty-init` to install it.
+- **Alacritty coupling:** Ctrl+Shift+letter bindings (E, O, W, T, S, F) require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow, Ctrl+Alt+Arrow, and all Alt-based bindings work natively without Alacritty config. A documented template is provided at `examples/alacritty.toml.template` — use `alacritty-init` to install it.
 - **GNOME keybinding conflict:** Ctrl+Alt+Arrow (pane resize) requires removing GNOME's default workspace-switching shortcuts for those keys. Run: `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-{up,down,left,right}` to keep only Super-based alternatives. See `docs/TMUX_LEARNING_GUIDE.md` troubleshooting for full commands.
 - **tmux extended-keys:** Server-level setting — needs `tmux kill-server` + restart, not just config reload
 - **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
-- **Plugins:** tmux-resurrect (session persistence), tmux-continuum (auto-save), tmux-thumbs (quick-copy hints with prefix+F), tmux-open (open URLs/files from copy mode)
-- **Copy mode enhancements:** Incremental search (`/` and `?` highlight as you type), `Ctrl+V` for rectangle selection, tmux-open `o` to open URLs in browser
+- **Plugins:** tmux-resurrect (session persistence), tmux-continuum (auto-save), tmux-thumbs (quick-copy hints with Ctrl+Shift+F or prefix+F), tmux-open (open URLs/files from copy mode)
+- **Copy mode enhancements:** prefix+v to enter, prefix+/ for direct search, `Y` to copy without exiting, incremental search (`/` and `?`), `Ctrl+V` for rectangle selection, tmux-open `o` to open URLs in browser, Alt+PageUp for quick scroll-back
 - **Unbound defaults:** `Alt+n`/`Alt+p` (redundant window nav) unbound to restore readline bindings
 
 ### Tmux-Thumbs Configuration
 
-Vimium-style quick-copy hints (prefix+F). Press a letter to copy, Shift+letter to open in browser.
+Vimium-style quick-copy hints (prefix+F). Also available prefix-free via Ctrl+Shift+F (requires Alacritty CSI u entry). Press a letter to copy, Shift+letter to open in browser.
 
 - **Hint position:** `off_left` (hints appear next to matches, not overlapping text)
 - **Colors:** Yellow badges on black (hints), cyan (matched text), green (selected) — Vimium-style
@@ -822,7 +823,7 @@ Ctrl+Shift+E         # vertical split
 # Multiple projects (one session per project)
 tmn api-backend
 tmn frontend
-Ctrl+Space s    # switch between sessions interactively
+Ctrl+s s    # switch between sessions interactively
 
 # Remote work (SSH - survives disconnections)
 ssh user@server
@@ -832,7 +833,7 @@ tmn work
 # Long-running tasks
 tmn build
 ./long-build.sh
-Ctrl+Space d    # detach and let it run
+Ctrl+s d    # detach and let it run
 ```
 
 See `examples/tmux-workflows.md` for detailed examples, copy mode, troubleshooting, and advanced tips.
@@ -863,9 +864,10 @@ alacritty-init  # Copies template to ~/.config/alacritty/alacritty.toml
 
 # Start tmux session
 tmn work
-Ctrl+Space |  # split panes
-Ctrl+Space d  # detach
-tma work      # reattach later
+Ctrl+s |     # split panes
+Ctrl+s v     # enter copy mode
+Ctrl+s d     # detach
+tma work     # reattach later
 ```
 
 ## Workflow Examples
@@ -892,9 +894,10 @@ fshow     # Browse git history
 
 # Tmux workflow
 tmn dev               # Start session
-Ctrl+Space -          # Split horizontally
-Alt+j && Ctrl+Space | # Navigate down and split vertically
-Ctrl+Space d          # Detach
+Ctrl+Shift+O          # Split horizontally (prefix-free)
+Ctrl+Shift+Down       # Navigate down
+Ctrl+Shift+E          # Split vertically (prefix-free)
+Ctrl+s d              # Detach
 ```
 
 ## Troubleshooting
