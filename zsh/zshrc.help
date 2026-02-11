@@ -257,8 +257,17 @@ WINDOW MANAGEMENT (prefix-free!):
 COPY MODE (VIM-STYLE):
   Ctrl+Space [ - Enter copy mode
   v            - Start selection
+  Ctrl+V       - Rectangle (block) selection
   y            - Copy selection and exit
+  /            - Incremental search forward (highlights as you type)
+  ?            - Incremental search backward
   Ctrl+Space ] - Paste
+
+POPUPS (floating overlays, dismiss with q or exit):
+  Alt+g        - Lazygit popup (prefix-free!)
+  Ctrl+Space p - Quick popup shell in current directory
+  Ctrl+Space G - Git status + recent log overview
+  Ctrl+Space f - Fuzzy session switcher (fzf with live preview)
 
 FUNCTIONS:
   ftmux        - Fuzzy session picker (attach/switch/kill)
@@ -269,6 +278,9 @@ PLUGINS (TPM):
   Ctrl+Space U - Update plugins
   Ctrl+Space Ctrl-s - Save session (resurrect)
   Ctrl+Space Ctrl-r - Restore session (resurrect)
+  Ctrl+Space F - Thumbs: show letter hints on copyable text (URLs, paths, hashes)
+  (copy mode) o - Open selected URL in browser (tmux-open)
+  (copy mode) Ctrl+o - Open selected file in $EDITOR (tmux-open)
 
 FEATURES:
   ✓ Mouse support (click panes, drag borders, scroll)

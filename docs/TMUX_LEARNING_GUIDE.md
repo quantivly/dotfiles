@@ -124,7 +124,7 @@ tdev    # Uses "dev" session in current directory
 
 ### Enter copy mode
 
-Press `Ctrl+Space [`. You're now in a vim-like mode where you can navigate the scrollback buffer (50,000 lines of history).
+Press `Ctrl+Space [`. You're now in a vim-like mode where you can navigate the scrollback buffer (10,000 lines of history).
 
 ### Navigate in copy mode
 
@@ -149,7 +149,7 @@ Press `Ctrl+Space [`. You're now in a vim-like mode where you can navigate the s
 6. Ctrl+Space ]       → paste
 ```
 
-For rectangular selection: press `r` after starting visual mode with `v`.
+For rectangular selection: press `r` or `Ctrl+V` (vim-style) after starting visual mode with `v`.
 
 ### OSC 52: Clipboard over SSH
 
@@ -349,6 +349,9 @@ Your setup has these tmux integrations built in:
 | Shell aliases | `tm`, `tma`, `tmn`, `tml`, `tms`, `tmk`, `tmka` |
 | `tmux_help` | Quick reference from the shell |
 | Auto-save | Continuum saves sessions every 15 minutes |
+| tmux-thumbs | Quick-copy hints: `Ctrl+Space F` highlights URLs, paths, hashes on screen |
+| tmux-open | Open URLs (`o`) or files (`Ctrl+o`) directly from copy mode |
+| Popup windows | Floating overlays for lazygit (`Alt+g`), shell, git status, session switching |
 
 ## Keybinding Cheat Sheet
 
@@ -368,6 +371,7 @@ Your setup has these tmux integrations built in:
 | `Ctrl+Shift+PageUp/Down` | Reorder windows |
 | `Alt+h/j/k/l` | Navigate panes (vim alternative) |
 | `Alt+1-9` | Switch to window N |
+| `Alt+g` | Lazygit popup (floating overlay) |
 
 ### With prefix (Ctrl+Space, then...)
 
@@ -395,6 +399,10 @@ Your setup has these tmux integrations built in:
 | `?` | Show all keybindings | Help |
 | `Ctrl+s` | Save sessions (resurrect) | Plugins |
 | `Ctrl+r` | Restore sessions (resurrect) | Plugins |
+| `p` | Popup shell (floating overlay) | Popups |
+| `G` | Popup git status overview | Popups |
+| `f` | Popup fzf session switcher | Popups |
+| `F` | Thumbs: letter hints on copyable text | Plugins |
 | `I` | Install plugins (TPM) | Plugins |
 | `U` | Update plugins (TPM) | Plugins |
 
@@ -404,9 +412,11 @@ Your setup has these tmux integrations built in:
 |-----|--------|
 | `h/j/k/l` | Move cursor |
 | `v` | Start selection |
-| `r` | Toggle rectangle selection |
+| `r` / `Ctrl+V` | Toggle rectangle selection |
 | `y` | Copy and exit |
-| `/` / `?` | Search forward/backward |
+| `o` | Open selected URL in browser (tmux-open) |
+| `Ctrl+o` | Open selected file in $EDITOR (tmux-open) |
+| `/` / `?` | Incremental search forward/backward |
 | `n` / `N` | Next/prev match |
 | `gg` / `G` | Top/bottom of buffer |
 | `0` / `$` | Start/end of line |

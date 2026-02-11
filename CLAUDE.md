@@ -772,6 +772,7 @@ tmux kill-session -t mysession
 - **Vim fallback:** Alt+hjkl for pane switching still works
 - **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
 - **Large scrollback:** 10,000 lines (vs default 2,000)
+- **Popup windows:** Alt+g (lazygit), Ctrl+Space p (shell), Ctrl+Space G (git status), Ctrl+Space f (fzf session switcher)
 - **Smart defaults:** Windows start at 1, auto-renumber, splits open in current directory
 
 ### Status Bar
@@ -795,6 +796,18 @@ Dark theme matching Powerlevel10k:
 - **GNOME keybinding conflict:** Ctrl+Alt+Arrow (pane resize) requires removing GNOME's default workspace-switching shortcuts for those keys. Run: `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-{up,down,left,right}` to keep only Super-based alternatives. See `docs/TMUX_LEARNING_GUIDE.md` troubleshooting for full commands.
 - **tmux extended-keys:** Server-level setting — needs `tmux kill-server` + restart, not just config reload
 - **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
+- **Plugins:** tmux-resurrect (session persistence), tmux-continuum (auto-save), tmux-thumbs (quick-copy hints with prefix+F), tmux-open (open URLs/files from copy mode)
+- **Copy mode enhancements:** Incremental search (`/` and `?` highlight as you type), `Ctrl+V` for rectangle selection, tmux-open `o` to open URLs in browser
+- **Unbound defaults:** `Alt+n`/`Alt+p` (redundant window nav) unbound to restore readline bindings
+
+### Tmux-Thumbs Configuration
+
+Vimium-style quick-copy hints (prefix+F). Press a letter to copy, Shift+letter to open in browser.
+
+- **Hint position:** `off_left` (hints appear next to matches, not overlapping text)
+- **Colors:** Yellow badges on black (hints), cyan (matched text), green (selected) — Vimium-style
+- **Clipboard:** Uses `tmux load-buffer -w` which triggers OSC 52 (works over SSH)
+- **Open:** Shift+hint uses `gio open` via `setsid` (GNOME notification, no tmux message)
 
 ### Common Workflows
 

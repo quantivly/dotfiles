@@ -9,7 +9,7 @@
 # Key features:
 # - Catppuccin Mocha color scheme (full 16 ANSI colors + cursor + selection)
 # - CSI u keyboard bindings for tmux prefix-free Ctrl+Shift shortcuts
-# - Reduced scrollback (tmux provides 50k lines via copy mode)
+# - Reduced scrollback (tmux provides 10k lines via copy mode)
 # - MesloLGS NF font (required for Powerlevel10k)
 #
 # Coupling with tmux:
@@ -73,7 +73,7 @@ args = ["--login"]
 # ============================================================================
 # Scrollback
 # ============================================================================
-# Reduced from default 10000 — tmux provides 50,000 lines of scrollback
+# Reduced from default 10000 — tmux provides 10,000 lines of scrollback
 # accessible via copy mode (Ctrl+Space [). Keeping a small buffer here
 # for scrolling when NOT inside tmux.
 
