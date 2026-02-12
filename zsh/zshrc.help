@@ -264,8 +264,11 @@ COPY MODE (VIM-STYLE):
   Ctrl+Space ] - Paste
 
 POPUPS (floating overlays, dismiss with q or exit):
+  Alt+f        - Fuzzy file finder with preview (prefix-free!)
+  Alt+s        - Fuzzy content search / live grep (prefix-free!)
   Alt+g        - Lazygit popup (prefix-free!)
   Ctrl+Space p - Quick popup shell in current directory
+  Ctrl+Space e - Fuzzy file finder (same as Alt+f)
   Ctrl+Space G - Git status + recent log overview
   Ctrl+Space f - Fuzzy session switcher (fzf with live preview)
 

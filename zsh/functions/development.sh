@@ -828,14 +828,22 @@ fls() {
   # Usage: fls
   # Opens fuzzy file finder with preview, then opens selected file in $EDITOR
   local selected
-  local cmd="${_FD_COMMAND:-find}"
+  local cmd="${_FD_CMD:-find}"
+  local bat="${_BAT_CMD:-cat}"
+
+  local preview_cmd
+  if [[ "$bat" != "cat" ]]; then
+    preview_cmd="$bat --style=numbers --color=always --line-range :500 {} 2>/dev/null || cat {}"
+  else
+    preview_cmd="cat {}"
+  fi
 
   if [[ "$cmd" == "fd" || "$cmd" == "fdfind" ]]; then
     selected=$($cmd --type f --hidden --exclude .git | \
-      fzf --preview 'bat --style=numbers --color=always --line-range :500 {} 2>/dev/null || cat {}')
+      fzf --preview "$preview_cmd")
   else
     selected=$(find . -type f | \
-      fzf --preview 'bat --style=numbers --color=always --line-range :500 {} 2>/dev/null || cat {}')
+      fzf --preview "$preview_cmd")
   fi
 
   [[ -n "$selected" ]] && ${EDITOR:-vim} "$selected"

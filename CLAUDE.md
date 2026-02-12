@@ -751,6 +751,8 @@ Alt+z            # Zoom toggle (fullscreen pane)
 Ctrl+PageUp/Down # Next/previous window
 Ctrl+Shift+PageUp/Down # Reorder windows
 Ctrl+Shift+F         # Thumbs: quick-copy hints (like Vimium)
+Alt+f                # Fuzzy file finder popup (bat preview)
+Alt+s                # Fuzzy content search popup (live ripgrep)
 Ctrl+s d     # Detach (session keeps running)
 
 # Reattach later
@@ -774,7 +776,7 @@ tmux kill-session -t mysession
 - **Vim fallback:** Alt+hjkl for pane switching still works
 - **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
 - **Large scrollback:** 10,000 lines (vs default 2,000)
-- **Popup windows:** Alt+g (lazygit), Ctrl+s t (terminal), Ctrl+s G (git status), Ctrl+s f (fzf session switcher)
+- **Popup windows:** Alt+f (fuzzy file finder), Alt+s (fuzzy content search), Alt+g (lazygit), Ctrl+s t (terminal), Ctrl+s e (file finder), Ctrl+s G (git status), Ctrl+s f (fzf session switcher)
 - **Smart defaults:** Windows start at 1, auto-renumber, splits open in current directory
 
 ### Status Bar
