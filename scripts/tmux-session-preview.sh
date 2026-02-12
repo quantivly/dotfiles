@@ -22,12 +22,13 @@ fi
 
 win_data=$(tmux list-windows -t "$session" \
   -F '#{window_index}|#{window_name}|#{?window_active,1,0}|#{window_panes}' 2>/dev/null)
-win_count=$(echo "$win_data" | wc -l)
+win_count=0
+[[ -n "$win_data" ]] && win_count=$(printf '%s\n' "$win_data" | wc -l)
 
 attached=$(tmux list-sessions -F '#{session_name}|#{session_attached}' 2>/dev/null |
   awk -F'|' -v s="$session" '$1==s{print $2}')
 att_str=""
-[ "$attached" -gt 0 ] 2>/dev/null && att_str=" · attached"
+[ "${attached:-0}" -gt 0 ] && att_str=" · attached"
 
 # --- Header ---
 
@@ -67,11 +68,8 @@ while IFS='|' read -r idx name active pane_count; do
   win_label[$i]="$lbl"
   win_is_active[$i]="$active"
 
-  # Get active pane (or first pane)
-  pid=$(tmux list-panes -t "${session}:${idx}" \
-    -F '#{?pane_active,#{pane_id},}' 2>/dev/null | command grep .)
-  [ -z "$pid" ] && pid=$(tmux list-panes -t "${session}:${idx}" \
-    -F '#{pane_id}' 2>/dev/null | head -1)
+  # Get active pane ID directly (tmux 1.9+)
+  pid=$(tmux display-message -t "${session}:${idx}" -p '#{pane_id}' 2>/dev/null)
 
   # Capture plain text (no ANSI), strip trailing blanks, take bottom lines
   if [ -n "$pid" ]; then

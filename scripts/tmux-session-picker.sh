@@ -34,7 +34,7 @@ session_list=$(
 
     # Display: name in default color, metadata in grey
     meta="\033[90m· ${wins}w · ${age}"
-    [ "$attached" -gt 0 ] && meta="${meta} · attached"
+    [ "${attached:-0}" -gt 0 ] && meta="${meta} · attached"
     meta="${meta}\033[0m"
 
     printf '%s\t  %s %b\n' "$name" "$name" "$meta"
@@ -69,8 +69,5 @@ selected=$(
 
 [ -z "$selected" ] && exit 0
 
-if tmux has-session -t "$selected" 2>/dev/null; then
-  tmux switch-client -t "$selected"
-else
-  tmux new-session -d -s "$selected" && tmux switch-client -t "$selected"
-fi
+tmux switch-client -t "$selected" 2>/dev/null ||
+  { tmux new-session -d -s "$selected" && tmux switch-client -t "$selected"; }
