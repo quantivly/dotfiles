@@ -20,20 +20,25 @@
 
 # SSH agent setup with socket validation and auto-repair
 # Handles VSCode SSH reconnection issues where SSH_AUTH_SOCK becomes stale
+#
+# Optimized for tmux panes: new panes inherit SSH_AUTH_SOCK from the parent,
+# so the fast path uses [[ -S ]] (zsh builtin, sub-ms) instead of ssh-add -l
+# (~56ms subprocess). Full validation only runs on the repair path.
 
-# Helper: Test if socket exists AND responds to ssh-add
+# Helper: Test if socket file exists (fast) AND agent responds (slow)
 _ssh_agent_is_valid() {
   [[ -S "$1" ]] && SSH_AUTH_SOCK="$1" ssh-add -l &>/dev/null
   return $?
 }
 
 # Helper: Find current VSCode SSH socket by modification time (newest first)
+# Uses zsh glob qualifiers instead of find|xargs|ls (zero subprocesses)
 _find_vscode_socket() {
   [[ -n "$XDG_RUNTIME_DIR" ]] || return 1
 
   local socket
-  # Find sockets matching VSCode pattern, sorted by modification time (newest first)
-  for socket in $(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name 'vscode-ssh-auth-sock-*' -type s 2>/dev/null | xargs -r ls -t 2>/dev/null); do
+  # Glob qualifiers: = (socket), N (nullglob), Om (sort by mtime descending)
+  for socket in "$XDG_RUNTIME_DIR"/vscode-ssh-auth-sock-*(=NOm); do
     if _ssh_agent_is_valid "$socket"; then
       echo "$socket"
       return 0
@@ -44,8 +49,9 @@ _find_vscode_socket() {
 
 # Helper: Setup SSH agent with validation and fallback chain
 _setup_ssh_agent() {
-  # Fast path: Current SSH_AUTH_SOCK is valid
-  if [[ -n "$SSH_AUTH_SOCK" ]] && _ssh_agent_is_valid "$SSH_AUTH_SOCK"; then
+  # Fast path: Socket file exists — almost always valid in tmux panes
+  # Skips ssh-add -l (~56ms) when the socket is present
+  if [[ -n "$SSH_AUTH_SOCK" && -S "$SSH_AUTH_SOCK" ]]; then
     # Create/update persistent symlink for tmux/docker compatibility
     [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
     ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
@@ -64,11 +70,14 @@ _setup_ssh_agent() {
   fi
 
   # Try 2: Systemd socket (if available)
-  if [[ -n "$XDG_RUNTIME_DIR" ]] && _ssh_agent_is_valid "$XDG_RUNTIME_DIR/ssh-agent.socket"; then
-    export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
-    [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
-    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
-    return 0
+  if [[ -n "$XDG_RUNTIME_DIR" && -S "$XDG_RUNTIME_DIR/ssh-agent.socket" ]]; then
+    # Socket file exists, verify agent responds before committing
+    if _ssh_agent_is_valid "$XDG_RUNTIME_DIR/ssh-agent.socket"; then
+      export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+      [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
+      ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
+      return 0
+    fi
   fi
 
   # Try 3: Start local agent if all else fails

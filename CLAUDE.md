@@ -212,6 +212,7 @@ The prompt automatically shows GitHub PR numbers for branches with open pull req
 **Features:**
 - Displays `#123` after branch name in grey color
 - Smart caching for <5ms latency (typical)
+- Non-blocking: cache miss spawns background fetch, PR number appears on next prompt (avoids up to 2s freeze on new branches)
 - Automatic cache invalidation on branch changes
 - No errors if `gh` CLI unavailable or PR doesn't exist
 
@@ -856,6 +857,10 @@ copyfile filename    # Smart clipboard with auto-detection
 catcopy filename     # View with bat + copy
 osc52 "text"         # Direct OSC 52 copy
 
+# Refresh startup caches (after config changes, gh auth login, etc.)
+qcache-refresh       # Quanticli paths (TEST_BASELINE_DATA_DIR, etc.)
+gh-refresh-tokens    # GH CLI token cache
+
 # Verify tool status
 ./scripts/verify-tools.sh
 
@@ -904,10 +909,19 @@ Ctrl+s d              # Detach
 
 ### Slow zsh startup
 ```bash
-time zsh -i -c exit  # Profile performance
+time zsh -i -c exit  # Profile performance (target: <250ms)
 # Disable slow plugins in ~/.zshrc.local: plugins=(${plugins:#poetry})
 # mise is fast (~5-10ms). If using nvm/pyenv, see docs/MIGRATION.md
 ```
+
+**Startup caching:** Quanticli paths, GH tokens, and PR numbers are cached to disk and refreshed in background `&!` jobs. This avoids ~600ms+ of synchronous subprocess calls. Cache locations:
+- `~/.cache/quanticli-paths/` — `data`, `test`, `workspace` files
+- `~/.cache/gh-token-cache/` — token files (chmod 600)
+- `~/.cache/p10k-pr-cache/` — PR numbers per repo/branch
+
+Manual refresh: `qcache-refresh`, `gh-refresh-tokens`
+
+**First shell after fresh install:** Env vars are empty until background jobs complete (~500ms). Subsequent shells read from cache instantly.
 
 ### Powerlevel10k warning about console output
 
@@ -1025,7 +1039,7 @@ ssh-add -l
 source ~/.zshrc
 ```
 
-**Note:** Auto-repair adds ~6-8ms to shell startup when socket is valid, ~15-20ms when stale (only on reconnection).
+**Note:** Fast path uses `[[ -S ]]` (zsh builtin, sub-ms) instead of `ssh-add -l` (~56ms). Full validation only runs on the repair path. VSCode socket discovery uses zsh glob qualifiers instead of `find | xargs ls -t`.
 
 ### fzf functions not working
 ```bash

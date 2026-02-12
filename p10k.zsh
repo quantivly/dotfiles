@@ -377,23 +377,23 @@
     local cache_dir="${HOME}/.cache/p10k-pr-cache/${repo_name}"
     local cache_file="${cache_dir}/${cache_key}"
 
-    # Check cache first (fast path)
+    # Check cache first (fast path — sub-ms with zsh builtin)
     if [[ -f $cache_file ]]; then
-      cat "$cache_file" 2>/dev/null
+      echo "$(<"$cache_file")"
       return
     fi
 
-    # Fetch from gh CLI (slow path)
-    # Use timeout to prevent hangs, suppress all errors
-    local pr_num
-    pr_num=$(timeout 2s gh pr view --json number -q .number 2>/dev/null)
-
-    # Only cache if we got a valid numeric result
-    if [[ $pr_num =~ ^[0-9]+$ ]]; then
-      mkdir -p "$cache_dir" 2>/dev/null
-      echo "$pr_num" > "$cache_file" 2>/dev/null
-      echo "$pr_num"
-    fi
+    # Cache miss: spawn background fetch instead of blocking the prompt.
+    # PR number appears on the next prompt render (after user's first command).
+    # This avoids up to 2s of prompt freeze on new branches.
+    {
+      local pr_num
+      pr_num=$(timeout 2s gh pr view --json number -q .number 2>/dev/null)
+      if [[ $pr_num =~ ^[0-9]+$ ]]; then
+        mkdir -p "$cache_dir" 2>/dev/null
+        printf '%s' "$pr_num" > "$cache_file" 2>/dev/null
+      fi
+    } &!
   }
 
   # Formatter for Git status.

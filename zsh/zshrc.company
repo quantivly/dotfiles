@@ -30,9 +30,23 @@ export IP_ADDRESS="${_ip_addr:-127.0.0.1}"
 export EXTRA_HOSTS="$(hostname):${IP_ADDRESS}"
 unset _ip_addr
 
-# Platform test environment variables
-export TEST_BASELINE_DATA_DIR="$(command -v quanticli &>/dev/null && quanticli path data 2>/dev/null || echo '')"
-export TEST_BASELINE_REF_DIR="$(command -v quanticli &>/dev/null && quanticli path test 2>/dev/null || echo '')/testing-box-baseline/"
+# Platform test environment variables (cached for fast startup)
+# Reads from ~/.cache/quanticli-paths/ synchronously (sub-ms),
+# background job refreshes cache on every shell start.
+# Manual refresh: qcache-refresh
+_qcache_dir="${HOME}/.cache/quanticli-paths"
+if [[ -r "$_qcache_dir/data" ]]; then
+  export TEST_BASELINE_DATA_DIR="$(<"$_qcache_dir/data")"
+else
+  export TEST_BASELINE_DATA_DIR=""
+fi
+if [[ -r "$_qcache_dir/test" ]]; then
+  _test_path="$(<"$_qcache_dir/test")"
+  export TEST_BASELINE_REF_DIR="${_test_path}/testing-box-baseline/"
+else
+  export TEST_BASELINE_REF_DIR=""
+fi
+unset _test_path _qcache_dir
 
 #==============================================================================
 # Quanticli Aliases and Functions
@@ -81,13 +95,32 @@ qn() {
 #   GH_CONFIG_DIR=~/.config/gh-quantivly gh auth login)
 
 if [[ -d "$HOME/.config/gh-quantivly" ]]; then
-    # Cache tokens once at startup for GH_TOKEN override and GITHUB_PERSONAL_ACCESS_TOKEN
+    # Cache tokens for GH_TOKEN override and GITHUB_PERSONAL_ACCESS_TOKEN.
+    # Reads from ~/.cache/gh-token-cache/ synchronously (sub-ms),
+    # background job refreshes cache on every shell start.
+    # Manual refresh: gh-refresh-tokens
     # NOTE: Must use --user to get the correct per-user keyring entry;
     # gh auth token without --user returns a shared default that may be wrong.
+    _gh_token_cache="${HOME}/.cache/gh-token-cache"
+    if [[ -r "$_gh_token_cache/quantivly" ]]; then
+        _CACHED_GH_QUANTIVLY_TOKEN="$(<"$_gh_token_cache/quantivly")"
+    fi
+    unset _gh_token_cache
+
+    # Background refresh of GH token cache (non-blocking)
     if command -v gh &>/dev/null; then
-        _q_gh_user="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh config get -h github.com user 2>/dev/null)"
-        _CACHED_GH_QUANTIVLY_TOKEN="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token --user "$_q_gh_user" 2>/dev/null)"
-        unset _q_gh_user
+        {
+            _dir="${HOME}/.cache/gh-token-cache"
+            mkdir -p "$_dir" && chmod 700 "$_dir"
+            _user="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh config get -h github.com user 2>/dev/null)"
+            if [[ -n "$_user" ]]; then
+                _token="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token --user "$_user" 2>/dev/null)"
+                if [[ -n "$_token" ]]; then
+                    printf '%s' "$_token" > "$_dir/quantivly"
+                    chmod 600 "$_dir/quantivly"
+                fi
+            fi
+        } &!
     fi
 
     _update_gh_config() {
@@ -188,14 +221,79 @@ alias dslf="docker service logs -f --raw"
 # Database Utilities (Platform-specific)
 #==============================================================================
 
-# Box database shortcuts (only if quanticli is available)
+# Box database shortcuts (uses cached workspace path)
 # Note: Workspace path is evaluated at shell startup - reload shell after switching workspaces
-if command -v quanticli &>/dev/null; then
-  # Get workspace path dynamically
-  _box_workspace_path=$(quanticli path workspace 2>/dev/null || echo "${Q_WORKSPACES_ROOT}/${Q_WORKSPACE_NAME}")
-
+_qcache_dir="${HOME}/.cache/quanticli-paths"
+if [[ -r "$_qcache_dir/workspace" ]]; then
+  _box_workspace_path="$(<"$_qcache_dir/workspace")"
+elif command -v quanticli &>/dev/null; then
+  _box_workspace_path="${Q_WORKSPACES_ROOT}/${Q_WORKSPACE_NAME}"
+fi
+if [[ -n "$_box_workspace_path" ]]; then
   alias box-psql="$_box_workspace_path/configs/box/postgres/psql.sh -d box"
   alias box-purge='$_box_workspace_path/configs/box/postgres/psql.sh -d box -c "truncate examination, acquisition restart identity cascade;"'
-
-  unset _box_workspace_path
 fi
+unset _box_workspace_path _qcache_dir
+
+# Background refresh of quanticli path cache (non-blocking)
+if command -v quanticli &>/dev/null; then
+  {
+    _dir="${HOME}/.cache/quanticli-paths"
+    mkdir -p "$_dir"
+    for _key in data test workspace; do
+      _val=$(quanticli path "$_key" 2>/dev/null)
+      [[ -n "$_val" ]] && printf '%s' "$_val" > "$_dir/$_key"
+    done
+  } &!
+fi
+
+# qcache-refresh - Force refresh of quanticli path cache and reload env vars
+qcache-refresh() {
+  if ! command -v quanticli &>/dev/null; then
+    echo "Error: quanticli not found in PATH" >&2
+    return 1
+  fi
+  local _dir="${HOME}/.cache/quanticli-paths"
+  mkdir -p "$_dir"
+  for _key in data test workspace; do
+    local _val
+    _val=$(quanticli path "$_key" 2>/dev/null)
+    if [[ -n "$_val" ]]; then
+      printf '%s' "$_val" > "$_dir/$_key"
+      echo "Cached $_key: $_val"
+    fi
+  done
+  # Reload the env vars
+  export TEST_BASELINE_DATA_DIR="$(<"$_dir/data")"
+  local _test_path="$(<"$_dir/test")"
+  export TEST_BASELINE_REF_DIR="${_test_path}/testing-box-baseline/"
+  echo "Environment variables updated."
+}
+
+# gh-refresh-tokens - Force refresh of GH token cache and reload env vars
+gh-refresh-tokens() {
+  if ! command -v gh &>/dev/null; then
+    echo "Error: gh CLI not found in PATH" >&2
+    return 1
+  fi
+  local _dir="${HOME}/.cache/gh-token-cache"
+  mkdir -p "$_dir" && chmod 700 "$_dir"
+  local _user
+  _user="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh config get -h github.com user 2>/dev/null)"
+  if [[ -z "$_user" ]]; then
+    echo "Error: Could not determine Quantivly GH username" >&2
+    return 1
+  fi
+  local _token
+  _token="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token --user "$_user" 2>/dev/null)"
+  if [[ -n "$_token" ]]; then
+    printf '%s' "$_token" > "$_dir/quantivly"
+    chmod 600 "$_dir/quantivly"
+    _CACHED_GH_QUANTIVLY_TOKEN="$_token"
+    echo "Cached token for user: $_user"
+    echo "Token refreshed. Run _update_gh_config or cd to apply."
+  else
+    echo "Error: Could not retrieve token for user $_user" >&2
+    return 1
+  fi
+}
