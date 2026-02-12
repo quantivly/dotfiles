@@ -296,13 +296,13 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
 **Essential bindings:** Ctrl+Shift+E/O (split), Ctrl+Shift+W (close), Ctrl+Shift+Arrow (navigate), Ctrl+Alt+Arrow (resize), Alt+z (zoom), Ctrl+Shift+T (new window), Ctrl+Shift+S (session picker)
 
-**Popup windows:** Alt+f (file finder), Alt+s (live grep), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
+**Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
 
 **Key notes:**
 - No auto-start — launch manually with `tmn <session>`
 - Alacritty coupling — Ctrl+Shift+letter bindings require CSI u entries in `~/.config/alacritty/alacritty.toml` (template: `examples/alacritty.toml.template`, install with `alacritty-init`)
 - `extended-keys` and `terminal-features` are server-level — require `tmux kill-server`, not just config reload
-- Plugins: tmux-resurrect, tmux-continuum, tmux-thumbs, tmux-open, tmux-fzf-finder
+- Plugins: tmux-resurrect, tmux-continuum, tmux-thumbs, tmux-open, tmux-ferret
 
 See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) and [examples/tmux-workflows.md](examples/tmux-workflows.md) for comprehensive guides.
 
