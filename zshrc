@@ -147,6 +147,7 @@ bindkey '^[[F' end-of-line          # End
 
 # Delete key
 bindkey '^[[3~' delete-char         # Delete
+bindkey '^[[3;5~' kill-word         # Ctrl+Delete - delete word forward
 
 # Ctrl+Backspace to delete word backward
 bindkey '^H' backward-kill-word     # Ctrl+Backspace
