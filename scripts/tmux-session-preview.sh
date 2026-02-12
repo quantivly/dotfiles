@@ -71,12 +71,75 @@ while IFS='|' read -r idx name active pane_count; do
   # Get active pane ID directly (tmux 1.9+)
   pid=$(tmux display-message -t "${session}:${idx}" -p '#{pane_id}' 2>/dev/null)
 
-  # Capture plain text (no ANSI), strip trailing blanks, take bottom lines
+  # Capture with ANSI colors, strip trailing blanks, take bottom lines,
+  # and format to exact width (ANSI-aware) — all in one perl call
   if [ -n "$pid" ]; then
-    win_lines[i]=$(tmux capture-pane -J -t "$pid" -p 2>/dev/null | \
-      expand | \
-      awk '/[^[:space:]]/{last=NR} {a[NR]=$0} END{for(i=1;i<=last;i++)print a[i]}' | \
-      tail -n "$inner_h")
+    win_lines[i]=$(tmux capture-pane -e -J -t "$pid" -p 2>/dev/null | \
+      perl -CSD -e '
+        use strict; use warnings;
+        my $W = $ARGV[0];
+        my $H = $ARGV[1];
+        my @lines = <STDIN>;
+        chomp @lines;
+
+        # Strip trailing blank lines (ignore SGR when checking blankness)
+        while (@lines) {
+          my $vis = $lines[-1];
+          $vis =~ s/\033\[[0-9;]*m//g;
+          last if $vis =~ /\S/;
+          pop @lines;
+        }
+
+        # Take last $H lines (bottom of pane where prompts live)
+        if (@lines > $H) {
+          @lines = @lines[-$H .. -1];
+        }
+
+        # Pad to exactly $H lines if fewer exist
+        while (@lines < $H) {
+          unshift @lines, "";
+        }
+
+        for my $line (@lines) {
+          # Count visible width and truncate/pad
+          my $out = "";
+          my $vw = 0;
+          my $truncated = 0;
+
+          while ($line =~ /(\033\[[0-9;]*m)|(.)/gs) {
+            if (defined $1) {
+              # SGR escape — zero width, always include unless truncated
+              $out .= $1 unless $truncated;
+            } else {
+              if ($vw >= $W) {
+                $truncated = 1;
+                next;
+              }
+              if ($vw == $W - 1 && length($line) > pos($line)) {
+                # Check if remaining has visible chars
+                my $rest = substr($line, pos($line));
+                my $vis_rest = $rest;
+                $vis_rest =~ s/\033\[[0-9;]*m//g;
+                if (length($vis_rest) > 0) {
+                  $out .= "\x{2026}";  # ellipsis
+                  $vw++;
+                  $truncated = 1;
+                  next;
+                }
+              }
+              $out .= $2;
+              $vw++;
+            }
+          }
+
+          # Pad short lines with spaces
+          if ($vw < $W) {
+            $out .= " " x ($W - $vw);
+          }
+          $out .= "\033[0m";
+          print "$out\n";
+        }
+      ' "$inner_w" "$inner_h")
   else
     win_lines[i]=""
   fi
@@ -95,22 +158,6 @@ for ((w = 0; w < i; w++)); do
 done
 
 # --- Helpers ---
-
-# Truncate or pad a string to exactly N characters.
-# ${#str} is correct here: capture-pane output is plain text (no ANSI escapes),
-# bash counts characters (not bytes) for ${#}, and the … ellipsis is 1 character.
-fit() {
-  local str="$1" w="$2"
-  local len=${#str}
-  if [ "$len" -gt "$w" ]; then
-    printf '%s' "${str:0:$((w - 1))}…"
-  elif [ "$len" -lt "$w" ]; then
-    printf '%s' "$str"
-    printf '%*s' "$((w - len))" ""
-  else
-    printf '%s' "$str"
-  fi
-}
 
 # Repeat a character N times
 rep() {
@@ -155,14 +202,13 @@ for ((row = 0; row < grid_rows; row++)); do
       [ "$wi" -ge "$win_count" ] && break
       [ "$col" -gt 0 ] && printf '%*s' "$gap" ""
 
-      # Get line from pre-split flat array
+      # Get pre-formatted line from flat array (already exact width + reset)
       content="${_line[wi * inner_h + li]}"
-      padded=$(fit "$content" "$inner_w")
 
       if [ "${win_is_active[wi]}" = "1" ]; then
-        printf '\033[1;37m│\033[0m%s\033[1;37m│\033[0m' "$padded"
+        printf '\033[1;37m│\033[0m%s\033[1;37m│\033[0m' "$content"
       else
-        printf '\033[38;5;238m│\033[0m\033[38;5;250m%s\033[0m\033[38;5;238m│\033[0m' "$padded"
+        printf '\033[38;5;238m│\033[0m%s\033[38;5;238m│\033[0m' "$content"
       fi
     done
     printf '\n'
