@@ -65,20 +65,20 @@ while IFS='|' read -r idx name active pane_count; do
   lbl="${idx}: ${name}"
   [ "$active" = "1" ] && lbl="${lbl} *"
   [ "$pane_count" -gt 1 ] 2>/dev/null && lbl="${lbl} (${pane_count}p)"
-  win_label[$i]="$lbl"
-  win_is_active[$i]="$active"
+  win_label[i]="$lbl"
+  win_is_active[i]="$active"
 
   # Get active pane ID directly (tmux 1.9+)
   pid=$(tmux display-message -t "${session}:${idx}" -p '#{pane_id}' 2>/dev/null)
 
   # Capture plain text (no ANSI), strip trailing blanks, take bottom lines
   if [ -n "$pid" ]; then
-    win_lines[$i]=$(tmux capture-pane -J -t "$pid" -p 2>/dev/null | \
+    win_lines[i]=$(tmux capture-pane -J -t "$pid" -p 2>/dev/null | \
       expand | \
       awk '/[^[:space:]]/{last=NR} {a[NR]=$0} END{for(i=1;i<=last;i++)print a[i]}' | \
       tail -n "$inner_h")
   else
-    win_lines[$i]=""
+    win_lines[i]=""
   fi
 
   i=$((i + 1))
@@ -96,7 +96,9 @@ done
 
 # --- Helpers ---
 
-# Truncate or pad a string to exactly N characters
+# Truncate or pad a string to exactly N characters.
+# ${#str} is correct here: capture-pane output is plain text (no ANSI escapes),
+# bash counts characters (not bytes) for ${#}, and the … ellipsis is 1 character.
 fit() {
   local str="$1" w="$2"
   local len=${#str}
@@ -128,7 +130,7 @@ for ((row = 0; row < grid_rows; row++)); do
     [ "$wi" -ge "$win_count" ] && break
     [ "$col" -gt 0 ] && printf '%*s' "$gap" ""
 
-    lbl=" ${win_label[$wi]} "
+    lbl=" ${win_label[wi]} "
     lbl_len=${#lbl}
     if [ "$lbl_len" -gt "$((inner_w - 1))" ]; then
       lbl="${lbl:0:$((inner_w - 3))}.."
@@ -138,7 +140,7 @@ for ((row = 0; row < grid_rows; row++)); do
     [ "$fill_len" -lt 0 ] && fill_len=0
     fill=$(rep '─' "$fill_len")
 
-    if [ "${win_is_active[$wi]}" = "1" ]; then
+    if [ "${win_is_active[wi]}" = "1" ]; then
       printf '\033[1;37m┌─%s%s┐\033[0m' "$lbl" "$fill"
     else
       printf '\033[38;5;244m┌─%s%s┐\033[0m' "$lbl" "$fill"
@@ -157,7 +159,7 @@ for ((row = 0; row < grid_rows; row++)); do
       content="${_line[wi * inner_h + li]}"
       padded=$(fit "$content" "$inner_w")
 
-      if [ "${win_is_active[$wi]}" = "1" ]; then
+      if [ "${win_is_active[wi]}" = "1" ]; then
         printf '\033[1;37m│\033[0m%s\033[1;37m│\033[0m' "$padded"
       else
         printf '\033[38;5;238m│\033[0m\033[38;5;250m%s\033[0m\033[38;5;238m│\033[0m' "$padded"
@@ -173,7 +175,7 @@ for ((row = 0; row < grid_rows; row++)); do
     [ "$col" -gt 0 ] && printf '%*s' "$gap" ""
 
     fill=$(rep '─' "$inner_w")
-    if [ "${win_is_active[$wi]}" = "1" ]; then
+    if [ "${win_is_active[wi]}" = "1" ]; then
       printf '\033[1;37m└%s┘\033[0m' "$fill"
     else
       printf '\033[38;5;244m└%s┘\033[0m' "$fill"
