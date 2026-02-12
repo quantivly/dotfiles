@@ -8,28 +8,9 @@ This is a personal dotfiles repository that manages zsh, git, and development to
 
 ## Installation & Testing
 
-### Standalone Dotfiles Installation
-
-For standalone dotfiles use (without Quantivly dev-setup):
-
-```bash
-# 1. Install system packages
-sudo apt update && apt install zsh git curl build-essential
-
-# 2. Clone dotfiles
-git clone --recursive https://github.com/quantivly/dotfiles.git ~/.dotfiles
-cd ~/.dotfiles
-
-# 3. Install shell prerequisites (automated)
-./scripts/install-prerequisites.sh  # Installs oh-my-zsh, Powerlevel10k, plugins, fzf
-
-# 4. Install dotfiles
-./install
-```
-
-### Quantivly Developers
-
 For Quantivly developers: Use the `quantivly/dev-setup` repository which automatically installs prerequisites and dotfiles.
+
+For standalone installation: `./scripts/install-prerequisites.sh && ./install`
 
 ### Testing Changes
 
@@ -41,106 +22,13 @@ time zsh -i -c exit  # Profile startup performance
 
 ## Server Setup
 
-Bootstrap remote servers (AL2, Ubuntu, etc.) with the team's standard shell DX.
+Bootstrap remote servers with `server-bootstrap.sh`. See [docs/SERVER_BOOTSTRAP_GUIDE.md](docs/SERVER_BOOTSTRAP_GUIDE.md) for full details including SSH config patterns, AL2 gotchas, and bootstrap ordering.
 
-### Bootstrap a New Server
-
+Key commands:
 ```bash
-# From your workstation (pipe over SSH):
-ssh server 'bash -s' < ~/.dotfiles/scripts/server-bootstrap.sh
-
-# Or on the server directly:
-curl -fsSL https://raw.githubusercontent.com/quantivly/dotfiles/main/scripts/server-bootstrap.sh | bash
+ssh server 'bash -s' < ~/.dotfiles/scripts/server-bootstrap.sh  # Bootstrap
+ssh server-shell '~/.dotfiles/scripts/server-bootstrap.sh --update'  # Update
 ```
-
-The bootstrap script runs 6 phases: OS detection, system packages (zsh, git, tmux, etc.), dotfiles clone + install, mise tools (server-optimized subset), server identity templates, and verification.
-
-### Update Servers
-
-After dotfiles changes, update a server without reinstalling system packages:
-
-```bash
-ssh server-shell '~/.dotfiles/scripts/server-bootstrap.sh --update'
-```
-
-This pulls the latest dotfiles, re-runs `./install`, and updates mise tools.
-
-### SSH Config (Workstation-Side)
-
-Each server gets **two entries** in your `~/.ssh/config`:
-
-```ssh-config
-# Auto-tmux for terminal SSH
-Host staging
-    HostName <actual-hostname>
-    User ec2-user
-    ForwardAgent yes
-    RequestTTY yes
-    RemoteCommand tmux new-session -A -s admin
-
-# Clean access for VSCode Remote SSH, scp, one-off commands
-Host staging-shell
-    HostName <actual-hostname>
-    User ec2-user
-    ForwardAgent yes
-```
-
-**Why two entries**: VSCode Remote SSH breaks with `RemoteCommand`. The `-shell` variant gives clean access for VSCode, `scp`, and scripted commands (including `--update`). The base entry auto-attaches to a persistent tmux session.
-
-### Shared ec2-user Considerations
-
-- Servers use a shared `ec2-user` account (team standard)
-- Personal preferences go in `~/.zshrc.local` (never overwritten by bootstrap or updates)
-- `.gitconfig.local` uses a team email by default — update if needed
-- SSH agent forwarding carries your identity from your workstation — no keys stored on servers
-- `Q_MODE=server` in `.zshrc.local` tells `zshrc.company` to skip workstation-only features
-
-### Server mise Config
-
-Servers use a lightweight tool subset (`examples/server-mise.toml`) instead of the full workstation config. Includes: bat, fd, eza, delta, zoxide, duf, dust, lazygit, glow, fastfetch. Excludes dev-only tools (node, python, pre-commit, etc.).
-
-### AL2 2023 Gotchas
-
-| Issue | Solution |
-|-------|----------|
-| Missing `en_US.UTF-8` locale | Bootstrap runs `localedef` automatically |
-| `chsh` not available | Bootstrap installs `util-linux-user` package |
-| `gpg-agent` not installed | Node.js GPG verification fails; server config excludes node |
-| `gh auth git-credential` won't work | `.gitconfig.local` uses SSH URLs via `insteadOf` |
-| tmux 3.2 (not 3.3+) | Most features work; may need `tmux kill-server` after first config |
-| Package manager is `dnf` (not `yum`) | Bootstrap auto-detects; both work |
-
-### Bootstrap Ordering Note
-
-The `./install` script skips the mise config section if mise isn't installed yet. The bootstrap handles this by installing mise in Phase 4 (after `./install` runs in Phase 3), then separately configuring the server mise config. On `--update` runs, mise is already installed, so `./install` handles it normally.
-
-### Piping Bootstrap via SSH
-
-Always use `ssh server 'bash -s' < script.sh` (not `ssh server 'script.sh'`) for bootstrap. This ensures the script runs in bash regardless of the remote user's default shell — critical if the login shell is broken or hanging.
-
-### SSH Debugging (Remote Server Work)
-
-- **Empty SSH output?** Test with `-o ControlPath=none` to bypass ControlMaster muxing
-- **SSH command hangs?** Remote shell startup may be broken — use `ssh host 'bash -s'` piped via stdin
-- **`exec zsh` in `.bashrc`**: Anti-pattern that breaks non-interactive SSH. Fix: remove it, use `chsh` instead
-- **Push before bootstrap**: `server-bootstrap.sh` clones from GitHub — new files must be pushed first
-
-### Shell Script CI Requirements
-
-- **SC2088**: Use `$HOME` not `~` in quoted strings (tilde doesn't expand in quotes)
-- **SC2015**: Don't use `A && B || C` as if-then-else — rewrite as `if/then/else`
-- **SC2086**: Add `# shellcheck disable=SC2086` comment when word-splitting is intentional (e.g., `$PKG_INSTALL`)
-- **end-of-file-fixer**: All files must end with exactly one newline
-
-### Server mise Config Strategy
-
-Servers use a **copy** of `examples/server-mise.toml` (not a symlink). The `./install` script detects the differing file and preserves it ("Keeping your version"). This means server tool configs survive `./install` re-runs without special-casing.
-
-### Bootstrapped Servers
-
-| Server | Status | Date | Notes |
-|--------|--------|------|-------|
-| staging | Complete | 2026-02-10 | AL2 2023, had pre-existing partial zsh setup |
 
 ## Architecture
 
@@ -205,52 +93,13 @@ Dotbot creates symlinks from `install.conf.yaml`:
 
 ## Powerlevel10k Customizations
 
-### PR Number Display
+Prompt shows GitHub PR numbers (`#123`) for branches with open pull requests. Uses smart caching for <5ms latency with non-blocking background fetch on cache miss.
 
-The prompt automatically shows GitHub PR numbers for branches with open pull requests.
+- **Implementation:** `_p10k_get_pr_number()` in `p10k.zsh`
+- **Cache location:** `~/.cache/p10k-pr-cache/<repo>/<branch>`
+- **Manual refresh:** `rm -rf ~/.cache/p10k-pr-cache` (or per-branch: `rm ~/.cache/p10k-pr-cache/<repo>/<branch>`)
 
-**Features:**
-- Displays `#123` after branch name in grey color
-- Smart caching for <5ms latency (typical)
-- Non-blocking: cache miss spawns background fetch, PR number appears on next prompt (avoids up to 2s freeze on new branches)
-- Automatic cache invalidation on branch changes
-- No errors if `gh` CLI unavailable or PR doesn't exist
-
-**Example prompt:**
-```
- feature/add-pr-display #42 ⇡1 !2 ?1
-```
-
-**Cache location:** `~/.cache/p10k-pr-cache/<repo>/<branch>`
-
-**Manual cache refresh:**
-```bash
-# Clear cache for specific branch
-rm ~/.cache/p10k-pr-cache/dotfiles/feature-my-branch
-
-# Clear all PR caches
-rm -rf ~/.cache/p10k-pr-cache
-```
-
-**Troubleshooting:**
-
-*PR not showing:*
-```bash
-# Verify gh CLI works
-gh pr view
-
-# Manually refresh cache
-rm ~/.cache/p10k-pr-cache/$(basename $(git rev-parse --show-toplevel))/$(git branch --show-current)
-source ~/.zshrc
-```
-
-*Stale PR number:*
-```bash
-# Cache persists after PR closed - refresh manually
-rm ~/.cache/p10k-pr-cache/$(basename $(git rev-parse --show-toplevel))/$(git branch --show-current)
-```
-
-**Implementation:** `_p10k_get_pr_number()` function in `p10k.zsh`
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for PR display troubleshooting.
 
 ## Security Rules
 
@@ -295,297 +144,61 @@ act -j shellcheck             # Run specific CI job locally (requires act)
 
 See `.github/README.md` for details.
 
-## Tool Dependencies
+## Tool Dependencies & mise
 
 ### Required Tools
 - **zsh**, **oh-my-zsh**, **Powerlevel10k** (git submodule), **git**
 
 ### Strongly Recommended
-- **fzf** - Fuzzy finder (many functions depend on it)
-- **gh** - GitHub CLI (35+ custom aliases in `gh/config.yml`)
-- **tmux** - Terminal multiplexer (session persistence, splits, remote work)
+- **fzf** — Fuzzy finder (many functions depend on it)
+- **gh** — GitHub CLI (35+ custom aliases in `gh/config.yml`)
+- **tmux** — Terminal multiplexer (session persistence, splits, remote work)
 
-### Modern CLI Tools
+### Modern CLI Replacements
 
-All tools are optional with intelligent fallbacks. Managed by mise (see below).
+All tools are optional with intelligent fallbacks. Managed by mise.
 
-**Core replacements:**
-| Standard | Modern | Install |
-|----------|--------|---------|
-| cat | bat/batcat | `apt install bat` |
-| ls | eza/exa/colorls | `mise use -g eza@latest` |
-| find | fd/fdfind | `mise use -g fd@latest` |
-| grep | ripgrep | `apt install ripgrep` (⚠️ Not POSIX compatible) |
-| cd | zoxide | `mise use -g zoxide@latest` |
-| top | btop | `apt install btop` |
-| ps | procs | `cargo install procs` |
-| df | duf | `mise use -g duf@latest` |
-| du | dust | `mise use -g dust@latest` |
-| diff | delta/difftastic | `mise use -g delta@latest` |
+| Standard | Modern | Standard | Modern |
+|----------|--------|----------|--------|
+| cat | bat/batcat | ps | procs |
+| ls | eza/exa/colorls | df | duf |
+| find | fd/fdfind | du | dust |
+| grep | ripgrep | diff | delta/difftastic |
+| cd | zoxide | top | btop |
 
-**Developer tools:** lazygit, just, glow, hyperfine, dive, forgit, ctop
-**Security:** gitleaks, pre-commit, sops, age
-**Productivity:** tldr, cheat, neofetch/fastfetch
+Additional: lazygit, just, glow, gitleaks, pre-commit, sops, age, fastfetch
 
-**Installation:**
-```bash
-./scripts/install-modern-tools.sh  # Interactive installer
-tool_status                         # Check what's installed
-```
+### mise (Version Manager)
 
-### Version Manager: mise
+Modern polyglot version manager replacing nvm, pyenv, rbenv, asdf (~5-10ms activation).
 
-**mise** - Modern polyglot version manager replacing nvm, pyenv, rbenv, asdf
-- **Install**: `curl https://mise.run | sh` or via dev-setup
-- **Config**: `~/.config/mise/config.toml` (global) or `.mise.toml` (per-project)
-- **Performance**: ~5-10ms activation vs 200-400ms for nvm
-- **Compatibility**: Reads `.nvmrc`, `.python-version`, `.tool-versions`
-
-```bash
-mise use -g node@lts python@3.12   # Install global versions
-mise ls                             # List installed
-mise outdated                       # Check for updates
-```
-
-For migration from nvm/pyenv, see [docs/MIGRATION.md](docs/MIGRATION.md).
-
-## Managing CLI Tools with mise
-
-Quick commands:
 ```bash
 mise ls              # View installed tools
 mise install         # Install from config
-mise upgrade         # Upgrade to latest
-mise use -g bat@latest  # Add a new tool
-mise doctor          # Check status
+mise trust ~/.dotfiles/.mise.toml  # Trust dotfiles config (one-time)
 ```
 
-### Configuration Architecture
+**Config architecture:**
+1. **Source of truth:** `~/.dotfiles/.mise.toml` — 14 core CLI tools with pinned versions, copied to active config by `./install`
+2. **Active config:** `~/.config/mise/config.toml` — what mise actually uses, auto-trusted
+3. **Project overrides:** `.mise.toml` in project root — per-project versions, requires `mise trust`
 
-**1. Single Source of Truth** - `~/.dotfiles/.mise.toml`
-- Authoritative source for all CLI tool versions
-- Defines 14 core CLI tools with pinned versions
-- Copied to `~/.config/mise/config.toml` by `./install`
-- **Trust**: Required when working in dotfiles directory: `mise trust ~/.dotfiles/.mise.toml`
-
-**2. Active Configuration** - `~/.config/mise/config.toml`
-- Created by `./install` from `.dotfiles/.mise.toml`
-- What mise actually uses
-- Auto-trusted (home directory)
-
-**3. Project Overrides** - `.mise.toml` in project root
-- Per-project version requirements
-- Requires trust: `mise trust`
-
-### Trust Configuration
-
-Mise requires explicit trust for config files (security feature).
-
-**When you'll see trust warnings:**
-- Working in `~/.dotfiles/` directory
-- Running mise commands in project directories
-- Haven't trusted the `.mise.toml` file yet
-
-**Solution:**
-```bash
-mise trust ~/.dotfiles/.mise.toml   # Trust dotfiles config (one-time)
-mise config path                    # Verify active config
-```
-
-**Important:** Active config at `~/.config/mise/config.toml` is always trusted. Template in dotfiles requires trust only when working in that directory.
-
-### Available Tools
-
-**Managed by mise** (15 essential): bat, fd, eza, delta, zoxide, duf, dust, lazygit, just, glow, gitleaks, pre-commit, sops, age, fastfetch
-
-**Optional** (uncomment in `.mise.toml`): dive, lazydocker, ctop, hyperfine, difftastic, cheat, tlrc
-
-**Not managed by mise**: forgit (manual install), procs (via cargo), btop (via apt)
-
-### Per-Project Tool Versions
-
-Create `.mise.toml` in project root:
-```toml
-[tools]
-just = "1.16.0"
-node = "20.10.0"
-python = "3.11.5"
-```
-
-Then: `mise install && mise ls`
-
-### Version Updates
-
-```bash
-cd ~/.dotfiles
-vim .mise.toml              # Update versions
-mise install <tool>@<ver>   # Test
-./install                   # Update active config
-git add .mise.toml && git commit -m "Updated <tool> to <version>"
-```
-
-See `docs/TOOL_VERSION_UPDATES.md` for details.
+See [docs/TOOL_VERSION_UPDATES.md](docs/TOOL_VERSION_UPDATES.md) for version update procedures and [docs/MIGRATION.md](docs/MIGRATION.md) for nvm/pyenv migration.
 
 ## Python Environment Management
 
-### Architecture
-
-Projects use a unified **mise + direnv + Poetry** strategy:
-- **mise**: Fast Python version management (~5-10ms activation)
-- **direnv**: Automatic per-directory environment activation
-- **Poetry**: Dependency management with in-project `.venv/`
-
-**Why not pyenv?** mise is faster (~5-10ms vs ~100-200ms) and already installed by dev-setup.
-
-### Project Structure
+Projects use **mise + direnv + Poetry**: mise for Python versions, direnv for automatic activation, Poetry for dependencies with in-project `.venv/`.
 
 ```
 project-root/
-├── .mise.toml               # mise Python version specification
-├── .python-version          # Python version (for documentation)
-├── .envrc                   # Auto-activation script (direnv)
-└── .venv/                   # Virtual environment (in-project)
+├── .mise.toml       # Python version
+├── .envrc           # Auto-activation (direnv)
+└── .venv/           # Virtual environment
 ```
 
-**Note:** VSCode configuration is now managed globally via dotfiles (`~/.config/Code/User/settings.json`). Projects only need `.vscode/settings.json` for project-specific overrides.
+Setup: `cp ~/.dotfiles/examples/envrc-templates/minimal.envrc .envrc && direnv allow && mise trust && mise install`
 
-### Setup New Project
-
-```bash
-cd project-root
-
-# Create .mise.toml
-cat > .mise.toml << 'EOF'
-[tools]
-python = "3.11"
-EOF
-
-# Create .python-version (optional, for documentation)
-echo "3.11" > .python-version
-
-# Copy .envrc template
-cp ~/.dotfiles/examples/envrc-templates/minimal.envrc .envrc
-# See examples/envrc-templates/README.md and examples/python-project-setup.md for details
-
-# Trust direnv and mise
-direnv allow
-mise trust
-
-# Install Python version
-mise install
-```
-
-### Verification
-
-```bash
-mise current           # Shows active Python version
-echo $VIRTUAL_ENV      # Shows .venv path
-which python           # Shows .venv/bin/python
-python --version       # Shows expected version
-```
-
-### Dependency Management
-
-The `.envrc` automatically checks if your dependencies need updating when you `cd` into a project:
-- **Poetry projects**: Checks if `poetry.lock` is newer than `.venv`
-- **pip + requirements.txt**: Checks if requirements.txt is newer than `.venv`
-- **pip + requirements/ directory**: Checks if any .txt file in requirements/ is newer than `.venv`
-- Shows: `⚠️  Dependencies outdated. Run: <command>`
-
-**Fully Automatic:** When you run `poetry install` or `pip install`, it modifies files in `.venv`, automatically updating its timestamp. The warning disappears on your next `cd` into the project - no manual marking needed!
-
-### Dependency Checking with quanticli
-
-**Simple, single-location approach** - no dotfiles coupling, graceful degradation:
-
-**.envrc pattern:**
-```bash
-# Activate mise environment (reads .mise.toml)
-eval "$(mise activate bash --shims)"
-
-# Create virtualenv if it doesn't exist
-if [ ! -d .venv ]; then
-    echo "Creating virtual environment..."
-    python -m venv .venv
-fi
-
-# Activate virtualenv
-export VIRTUAL_ENV="$(pwd)/.venv"
-PATH_add "$VIRTUAL_ENV/bin"
-
-# Mark Poetry projects (optional)
-[ -f poetry.lock ] && export POETRY_ACTIVE=1
-
-# Check dependencies if quanticli is available
-if command -v quanticli &>/dev/null; then
-    quanticli doctor deps --quiet 2>/dev/null || true
-fi
-```
-
-**How it works:**
-- `.envrc` conditionally calls `quanticli doctor deps --quiet` if quanticli is installed
-- No coupling to dotfiles - projects work independently
-- Graceful degradation - if quanticli not available, environment still activates
-- Automatic checking when you `cd` into a project
-- Manual checking: `quanticli doctor deps` (shows detailed output)
-- CI/CD integration: `quanticli doctor deps` (exit code 0 = success, 1 = outdated)
-
-**What it checks:**
-- Poetry projects: Compares `poetry.lock` vs `.venv/lib/python*/site-packages` modification time
-- pip projects: Compares `requirements.txt` vs `.venv/lib/python*/site-packages`
-- Django-style: Checks all `requirements/*.txt` files vs site-packages
-- PEP 621: Checks `pyproject.toml` (non-Poetry) vs site-packages
-
-**Note:** The check uses `site-packages` modification time instead of `.venv` directory time
-because pip installations update files inside `.venv` but not the directory itself.
-
-**Benefits:**
-- ✅ No dotfiles coupling - independent projects
-- ✅ Graceful degradation - works without quanticli
-- ✅ Single implementation - updates in one place
-- ✅ Automatic checking - runs on `cd` via .envrc
-- ✅ Manual checking - `quanticli doctor deps` for diagnostics
-- ✅ CI/CD ready - proper exit codes
-
-**quanticli doctor deps usage:**
-```bash
-quanticli doctor deps              # Check current project
-quanticli doctor deps -p ~/project # Check specific project
-quanticli doctor deps --quiet      # Suppress output (for .envrc)
-```
-
-**Migration from shared helper:**
-All 11 existing projects have been migrated to use this pattern:
-- quanticli
-- Platform: auto-conf, quantivly-sdk, box, ptbi, healthcheck, auto-test, ris
-- Hub: sre-sdk, sre-core, hub root
-
-The old `~/.dotfiles/shell/python-env-helpers.sh` has been removed.
-
-### Troubleshooting
-
-**Environment not activating:**
-```bash
-direnv allow           # Trust .envrc
-mise trust             # Trust .mise.toml
-mise install           # Install Python version
-direnv reload          # Force reload
-```
-
-**Wrong Python version:**
-```bash
-cat .mise.toml         # Check configured version
-mise ls python         # List installed versions
-mise install python@X.Y  # Install missing version
-```
-
-**VSCode using wrong interpreter:**
-- Cmd+Shift+P → "Python: Select Interpreter"
-- Choose `.venv/bin/python` from project
-- Global settings (managed by dotfiles) already set `python.terminal.activateEnvironment: false`
-- Verify global settings: `cat ~/.config/Code/User/settings.json`
-
-**See:** [examples/python-project-setup.md](examples/python-project-setup.md) for complete examples.
+See [examples/python-project-setup.md](examples/python-project-setup.md) for complete setup, envrc templates, and dependency checking with quanticli.
 
 ## Command Behavior Changes
 
@@ -660,65 +273,13 @@ Key fzf functions: `fcd`, `fbr`, `fco`, `fshow`, `fkill`, `fenv`, `fssh`, `fport
 
 ## Commit Signing
 
-**Recommended: SSH Signing (Git 2.34+)**
+SSH signing recommended (Git 2.34+). Configure in `~/.gitconfig.local` with `signingkey`, `gpgsign = true`, `format = ssh`.
 
-Simpler than GPG, integrates with SSH agent workflows.
-
-**Quick setup:**
-```bash
-# Get your SSH public key
-cat ~/.ssh/id_ed25519.pub  # or: ssh-add -L (for Bitwarden)
-
-# In ~/.gitconfig.local:
-# [user]
-#     signingkey = ssh-ed25519 AAAAC3Nza... your.email@domain.com
-# [commit]
-#     gpgsign = true
-# [gpg]
-#     format = ssh
-# [gpg "ssh"]
-#     allowedSignersFile = ~/.ssh/allowedSigners
-
-# Create allowed signers file
-echo "your.email@domain.com $(cat ~/.ssh/id_ed25519.pub)" > ~/.ssh/allowedSigners
-```
-
-**Benefits:**
-- Automatic signing via ssh-agent (no cache priming)
-- Works with SSH agent forwarding to remote servers
-- Integrates with Bitwarden, 1Password, system ssh-agent
-- No pre-commit hooks or cache management needed
-
-**Documentation:**
-- Complete guide: [docs/SSH_SIGNING_SETUP.md](docs/SSH_SIGNING_SETUP.md)
-- Git workflows: [examples/git-workflows.md](examples/git-workflows.md)
+See [docs/SSH_SIGNING_SETUP.md](docs/SSH_SIGNING_SETUP.md) for complete setup guide.
 
 ## SSH Configuration
 
-Comprehensive SSH client configuration template with universal best practices.
-
-**Quick setup:**
-```bash
-ssh-init  # Copy template to ~/.ssh/config
-vim ~/.ssh/config  # Customize for your hosts
-```
-
-**Key features:**
-- **Connection multiplexing (ControlMaster)** - Reuse connections for speed (subsequent connections < 1s)
-- **Connection stability (ServerAlive)** - Prevent disconnections and timeouts
-- **Bitwarden SSH agent integration** - Multiple install methods (snap/deb/appimage)
-- **SSH agent forwarding patterns** - Security considerations and trusted host patterns
-- **GitHub-specific optimizations** - Faster git operations with connection reuse
-- **Dual context support** - Laptop (connect TO servers) vs. Remote Server (connect FROM server)
-
-**Template:** `examples/ssh-config.template`
-**Guide:** `docs/SSH_CONFIG_GUIDE.md`
-
-**Important:** The template includes universal safe defaults (active) and optional features (commented). Work-specific hosts (dev, staging, etc.) should be added to your personal `~/.ssh/config` after copying - they do NOT belong in dotfiles.
-
-**Deployment contexts:**
-- **Laptop configuration** - Define all servers you connect TO, enable ForwardAgent for trusted hosts, configure Bitwarden IdentityAgent
-- **Remote server configuration** - Minimal config (GitHub + internal servers), receive forwarded agent from laptop, no Bitwarden needed
+Template at `examples/ssh-config.template`. Run `ssh-init` to install. See [docs/SSH_CONFIG_GUIDE.md](docs/SSH_CONFIG_GUIDE.md) for full guide (multiplexing, Bitwarden agent, forwarding patterns).
 
 ## GitHub CLI Aliases
 
@@ -731,345 +292,40 @@ vim ~/.ssh/config  # Customize for your hosts
 
 ## Tmux Configuration
 
-Beginner-friendly tmux setup with Terminator-style prefix-free keybindings.
+Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
-### Quick Start
+**Essential bindings:** Ctrl+Shift+E/O (split), Ctrl+Shift+W (close), Ctrl+Shift+Arrow (navigate), Ctrl+Alt+Arrow (resize), Alt+z (zoom), Ctrl+Shift+T (new window), Ctrl+Shift+S (session picker)
 
-```bash
-# Start a new session
-tmn mysession
+**Popup windows:** Alt+f (file finder), Alt+s (live grep), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
 
-# Inside tmux (most operations are prefix-free!):
-Ctrl+Shift+E     # Split vertically
-Ctrl+Shift+O     # Split horizontally
-Ctrl+Shift+W     # Close pane
-Ctrl+Shift+T     # New window (like browser Ctrl+T)
-Ctrl+Shift+S     # Switch sessions
-Ctrl+Shift+Arrow # Navigate panes
-Ctrl+Alt+Arrow  # Resize panes
-Alt+z            # Zoom toggle (fullscreen pane)
-Ctrl+PageUp/Down # Next/previous window
-Ctrl+Shift+PageUp/Down # Reorder windows
-Ctrl+Shift+F         # Thumbs: quick-copy hints (like Vimium)
-Alt+f                # Fuzzy file finder popup (tmux-fzf-finder plugin)
-Alt+s                # Live grep search popup (tmux-fzf-finder plugin)
-Ctrl+s d     # Detach (session keeps running)
+**Key notes:**
+- No auto-start — launch manually with `tmn <session>`
+- Alacritty coupling — Ctrl+Shift+letter bindings require CSI u entries in `~/.config/alacritty/alacritty.toml` (template: `examples/alacritty.toml.template`, install with `alacritty-init`)
+- `extended-keys` and `terminal-features` are server-level — require `tmux kill-server`, not just config reload
+- Plugins: tmux-resurrect, tmux-continuum, tmux-thumbs, tmux-open, tmux-fzf-finder
 
-# Reattach later
-tma mysession
+See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) and [examples/tmux-workflows.md](examples/tmux-workflows.md) for comprehensive guides.
 
-# List all sessions
-tml
-
-# Kill session when done
-tmux kill-session -t mysession
-```
-
-### Key Features
-
-- **Prefix:** Ctrl+s (ergonomic, no ghost input — requires NO_FLOW_CONTROL in zshrc)
-- **Mouse support:** Click panes, drag borders, scroll with wheel
-- **True color:** 24-bit color support for beautiful syntax highlighting
-- **Prefix-free pane management:** Ctrl+Shift for splits (E/O), close (W), and navigation (Arrow)
-- **Prefix-free window management:** Ctrl+Shift+T (new), Ctrl+PageUp/Down (next/prev), Ctrl+Shift+PageUp/Down (reorder), Alt+1-9 (direct)
-- **Prefix-free resize & zoom:** Ctrl+Alt+Arrow (resize), Alt+z (zoom toggle)
-- **Vim fallback:** Alt+hjkl for pane switching still works
-- **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
-- **Large scrollback:** 10,000 lines (vs default 2,000)
-- **Popup windows:** Alt+f (fuzzy file finder), Alt+s (live content search), Alt+g (lazygit), Ctrl+s t (terminal), Ctrl+s e (file finder), Ctrl+s G (git status), Ctrl+s f (fzf session switcher)
-- **tmux-fzf-finder plugin:** Mode switching (Ctrl+G/F), clipboard (Ctrl+Y), edit in popup or send to pane (Ctrl+O)
-- **Smart defaults:** Windows start at 1, auto-renumber, splits open in current directory
-
-### Status Bar
-
-Dark theme matching Powerlevel10k:
-```
-[session-name] window-list | hostname | 14:30 28-Jan-2026
-```
-
-### Configuration
-
-- **Config file:** `~/.tmux.conf` (symlinked from dotfiles)
-- **Aliases:** `tm`, `tma`, `tmn`, `tml` (see `zsh/zshrc.aliases`)
-- **Help:** `help tmux` or `tmux_help` in zsh
-- **Workflows:** See `examples/tmux-workflows.md` for comprehensive guide
-
-### Important Notes
-
-- **No auto-start:** Tmux must be launched manually with `tmn <session>` - this is intentional to avoid interfering with scripts and quick commands
-- **Alacritty coupling:** Ctrl+Shift+letter bindings (E, O, W, T, S, F) require matching key entries in `~/.config/alacritty/alacritty.toml` sending CSI u sequences. Ctrl+Shift+Arrow, Ctrl+Alt+Arrow, and all Alt-based bindings work natively without Alacritty config. A documented template is provided at `examples/alacritty.toml.template` — use `alacritty-init` to install it.
-- **GNOME keybinding conflict:** Ctrl+Alt+Arrow (pane resize) requires removing GNOME's default workspace-switching shortcuts for those keys. Run: `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-{up,down,left,right}` to keep only Super-based alternatives. See `docs/TMUX_LEARNING_GUIDE.md` troubleshooting for full commands.
-- **tmux extended-keys:** Server-level setting — needs `tmux kill-server` + restart, not just config reload
-- **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
-- **Plugins:** tmux-resurrect (session persistence), tmux-continuum (auto-save), tmux-thumbs (quick-copy hints with Ctrl+Shift+F or prefix+F), tmux-open (open URLs/files from copy mode), tmux-fzf-finder (fuzzy file finder + live grep popups with mode switching)
-- **Copy mode enhancements:** prefix+v to enter, prefix+/ for direct search, `Y` to copy without exiting, incremental search (`/` and `?`), `Ctrl+V` for rectangle selection, tmux-open `o` to open URLs in browser, Alt+PageUp for quick scroll-back
-- **Unbound defaults:** `Alt+n`/`Alt+p` (redundant window nav) unbound to restore readline bindings
-
-### Tmux-Thumbs Configuration
-
-Vimium-style quick-copy hints (prefix+F). Also available prefix-free via Ctrl+Shift+F (requires Alacritty CSI u entry). Press a letter to copy, Shift+letter to open in browser.
-
-- **Hint position:** `off_left` (hints appear next to matches, not overlapping text)
-- **Colors:** Yellow badges on black (hints), cyan (matched text), green (selected) — Vimium-style
-- **Clipboard:** Uses `tmux load-buffer -w` which triggers OSC 52 (works over SSH)
-- **Open:** Shift+hint uses `gio open` via `setsid` (GNOME notification, no tmux message)
-
-### Session Picker (Ctrl+Shift+S)
-
-fzf-based session switcher with choose-tree-style preview thumbnails. Files: `scripts/tmux-session-picker.sh`, `scripts/tmux-session-preview.sh`. Launched via `display-popup -E -w 85% -h 85%` in tmux.conf line 144.
-
-**Features:**
-- Session list with metadata (window count, age, attached status)
-- 2-column grid preview showing bordered thumbnail boxes per window
-- Each box captures the bottom of the active pane (where prompts/recent activity live)
-- Active window highlighted with bright borders, inactive dimmed
-- Type a new name to create a session on the fly
-
-**Architecture:**
-- Picker script builds session list, pipes through fzf with `--height=100%` (overrides `FZF_DEFAULT_OPTS`)
-- Preview script uses `FZF_PREVIEW_LINES`/`FZF_PREVIEW_COLUMNS` to calculate grid dimensions
-- Pane content captured as plain text (no `-e`) so `fit()` padding works with `${#str}` length
-- `capture-pane -J` joins wrapped lines, `expand` converts tabs, `tail` takes bottom N lines
-
-### Common Workflows
+## Common Tasks & Workflows
 
 ```bash
-# Development layout (3 panes: editor top, two terminals bottom)
-tmn dev
-Ctrl+Shift+O         # horizontal split
-Ctrl+Shift+Down      # move to bottom
-Ctrl+Shift+E         # vertical split
-# Top: vim editor, Bottom-left: tests, Bottom-right: git
-
-# Multiple projects (one session per project)
-tmn api-backend
-tmn frontend
-Ctrl+s s    # switch between sessions interactively
-
-# Remote work (SSH - survives disconnections)
-ssh user@server
-tmn work
-# Connection drops? Reconnect and: tma work
-
-# Long-running tasks
-tmn build
-./long-build.sh
-Ctrl+s d    # detach and let it run
+source ~/.zshrc      # Reload config (or: zshreload)
+localrc              # Edit ~/.zshrc.local
+qcache-refresh       # Refresh startup caches
+gh-refresh-tokens    # Refresh GH CLI token cache
+tool_status          # Check installed tools
+alacritty-init       # Set up Alacritty config (new machine)
 ```
 
-See `examples/tmux-workflows.md` for detailed examples, copy mode, troubleshooting, and advanced tips.
-
-## Common Tasks
-
-```bash
-# Reload zsh config
-source ~/.zshrc  # or: zshreload
-
-# Edit machine-specific config
-vim ~/.zshrc.local  # or: localrc
-chmod 600 ~/.zshrc.local
-
-# View PATH
-path  # alias for: echo $PATH | tr ":" "\n"
-
-# Copy to clipboard (works over SSH with OSC 52!)
-copyfile filename    # Smart clipboard with auto-detection
-catcopy filename     # View with bat + copy
-osc52 "text"         # Direct OSC 52 copy
-
-# Refresh startup caches (after config changes, gh auth login, etc.)
-qcache-refresh       # Quanticli paths (TEST_BASELINE_DATA_DIR, etc.)
-gh-refresh-tokens    # GH CLI token cache
-
-# Verify tool status
-./scripts/verify-tools.sh
-
-# Set up Alacritty config (on new machine)
-alacritty-init  # Copies template to ~/.config/alacritty/alacritty.toml
-
-# Start tmux session
-tmn work
-Ctrl+s |     # split panes
-Ctrl+s v     # enter copy mode
-Ctrl+s d     # detach
-tma work     # reattach later
-```
-
-## Workflow Examples
-
-Comprehensive guides in `examples/` directory:
-
-- **[examples/git-workflows.md](examples/git-workflows.md)** - Feature branches, conflict resolution, PR reviews, WIP commits, cleanup
-- **[examples/docker-workflows.md](examples/docker-workflows.md)** - Service management, debugging, cleanup, networking
-- **[examples/fzf-recipes.md](examples/fzf-recipes.md)** - Interactive fuzzy finding, keybindings, integrations
-- **[examples/tmux-workflows.md](examples/tmux-workflows.md)** - Session management, pane layouts, copy mode, troubleshooting
-
-Quick reference:
-```bash
-# Git workflow
-gcb feature/my-feature && gaa && gcam "feat: My feature" && gp && gh pr create --web
-
-# Docker workflow
-dcup && dps && dclogs
-
-# FZF usage
-Ctrl+T    # Fuzzy file search
-fbr       # Fuzzy branch checkout
-fshow     # Browse git history
-
-# Tmux workflow
-tmn dev               # Start session
-Ctrl+Shift+O          # Split horizontally (prefix-free)
-Ctrl+Shift+Down       # Navigate down
-Ctrl+Shift+E          # Split vertically (prefix-free)
-Ctrl+s d              # Detach
-```
+Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)
 
 ## Troubleshooting
 
-### Slow zsh startup
-```bash
-time zsh -i -c exit  # Profile performance (target: <250ms)
-# Disable slow plugins in ~/.zshrc.local: plugins=(${plugins:#poetry})
-# mise is fast (~5-10ms). If using nvm/pyenv, see docs/MIGRATION.md
-```
+Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed troubleshooting.
 
-**Startup caching:** Quanticli paths, GH tokens, and PR numbers are cached to disk and refreshed in background `&!` jobs. This avoids ~600ms+ of synchronous subprocess calls. Cache locations:
-- `~/.cache/quanticli-paths/` — `data`, `test`, `workspace` files
-- `~/.cache/gh-token-cache/` — token files (chmod 600)
-- `~/.cache/p10k-pr-cache/` — PR numbers per repo/branch
-
-Manual refresh: `qcache-refresh`, `gh-refresh-tokens`
-
-**First shell after fresh install:** Env vars are empty until background jobs complete (~500ms). Subsequent shells read from cache instantly.
-
-### Powerlevel10k warning about console output
-
-If you see a warning about "console output during zsh initialization" caused by direnv:
-- The dotfiles suppress direnv messages via `DIRENV_LOG_FORMAT=""`
-- If you still see output, check for `echo` statements in project `.envrc` files
-- Ensure `.envrc` files use redirects and `--quiet` flags (see examples/envrc-templates/)
-
-### Function not found
-```bash
-ls -la ~/.zshrc      # Check symlink
-./install            # Re-run installer
-zsh -n ~/.zshrc      # Verify syntax
-```
-
-### Tool not loading
-```bash
-command -v toolname  # Check if installed
-source ~/.zshrc      # Reload config
-```
-
-### mise config not trusted
-Trust the config file: `mise trust ~/.dotfiles/.mise.toml`
-
-See [Trust Configuration](#trust-configuration) section for full details.
-
-### Command not found after adding tool
-```bash
-source ~/.zshrc              # Reload
-command -v toolname          # Verify installation
-echo $PATH | tr ":" "\n"     # Check PATH
-```
-
-### Unexpected command behavior
-```bash
-alias commandname            # Check for alias
-type commandname             # See what runs
-\commandname                 # Bypass alias
-```
-
-### Alias conflicts
-```bash
-alias                                        # List all aliases
-grep -r "alias aliasname=" ~/.dotfiles/      # Find definition
-# Override in ~/.zshrc.local with: unalias aliasname
-```
-
-### Git authentication issues
-```bash
-gh auth status   # Check status
-gh auth login    # Re-authenticate
-```
-
-### GitHub CLI multi-account switching
-
-The `zshrc.company` `chpwd` hook switches `GH_CONFIG_DIR`, `GH_TOKEN`, and `GITHUB_PERSONAL_ACCESS_TOKEN` based on directory context (`~/quantivly/**` → work, everything else → personal).
-
-**Key gotcha — `gh auth token` keyring lookup:**
-- `gh auth token` (no `--user`) returns a shared/default keyring entry, NOT the per-user entry matching the config's `user:` field
-- Always use `gh auth token --user <username>` to get the correct per-user token from the keyring
-- To get the configured username: `gh config get -h github.com user`
-
-**Key gotcha — `GH_TOKEN` vs `GH_CONFIG_DIR`:**
-- `GH_CONFIG_DIR` tells `gh` which config to read, but authentication still goes through the shared keyring
-- `GH_TOKEN` env var is the highest-priority auth mechanism — it bypasses both config and keyring
-- For reliable multi-account switching, always set `GH_TOKEN` explicitly (not just `GH_CONFIG_DIR`)
-
-**Debugging multi-account issues:**
-```bash
-# Check which account a token authenticates as
-GH_TOKEN="$(gh auth token --user USERNAME)" gh api user --jq '.login'
-
-# Compare default vs per-user token (should match but may not!)
-gh auth token                    # shared default — may be wrong
-gh auth token --user USERNAME    # per-user keyring entry — correct
-
-# Verify directory-based switching
-cd ~ && echo "GH_TOKEN prefix: ${GH_TOKEN:0:15}" && gh api user --jq '.login'
-cd ~/quantivly && echo "GH_TOKEN prefix: ${GH_TOKEN:0:15}" && gh api user --jq '.login'
-```
-
-**Auth flow (precedence):** `GH_TOKEN` env → `GH_ENTERPRISE_TOKEN` → keyring (via `GH_CONFIG_DIR` config)
-
-### SSH agent forwarding issues (VSCode/remote servers)
-
-**Symptom:** Git operations fail with "Repository not found" after reconnecting to remote server.
-
-**Cause:** SSH_AUTH_SOCK points to a stale VSCode socket that no longer exists.
-
-**Solution:** The dotfiles automatically detect and repair stale sockets on shell startup:
-- Validates current SSH_AUTH_SOCK
-- Auto-discovers current VSCode socket if stale
-- Creates persistent symlink at `~/.ssh/ssh_auth_sock` for tmux/docker
-
-**Verification:**
-```bash
-echo $SSH_AUTH_SOCK          # Should point to current socket
-ssh-add -l                   # Should show your keys
-ls -la ~/.ssh/ssh_auth_sock  # Should exist and point to valid socket
-git fetch                    # Should work without errors
-```
-
-**Manual fix (if auto-repair fails):**
-```bash
-# Find current VSCode socket
-ls -lt /run/user/1000/vscode-ssh-auth-sock-* | head -1
-
-# Export it
-export SSH_AUTH_SOCK=/run/user/1000/vscode-ssh-auth-sock-<ID>
-
-# Test
-ssh-add -l
-
-# Reload config to create persistent symlink
-source ~/.zshrc
-```
-
-**Note:** Fast path uses `[[ -S ]]` (zsh builtin, sub-ms) instead of `ssh-add -l` (~56ms). Full validation only runs on the repair path. VSCode socket discovery uses zsh glob qualifiers instead of `find | xargs ls -t`.
-
-### fzf functions not working
-```bash
-command -v fzf   # Check installation
-apt install fzf  # or: brew install fzf
-```
-
-### Syntax errors
-```bash
-zsh -n ~/.zshrc                         # Check main config
-zsh -n ~/.dotfiles/zsh/zshrc.aliases    # Check modules
-# Temporarily disable modules by commenting source lines in zshrc
-```
+- **Slow startup:** `time zsh -i -c exit` (target: <250ms). Caches at `~/.cache/{quanticli-paths,gh-token-cache,p10k-pr-cache}/`
+- **Function not found:** Check symlink (`ls -la ~/.zshrc`), re-run `./install`
+- **Tool not loading:** `command -v toolname`, then `source ~/.zshrc`
+- **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
+- **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
+- **Git auth:** `gh auth status` / `gh auth login`
