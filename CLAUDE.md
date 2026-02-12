@@ -751,8 +751,8 @@ Alt+z            # Zoom toggle (fullscreen pane)
 Ctrl+PageUp/Down # Next/previous window
 Ctrl+Shift+PageUp/Down # Reorder windows
 Ctrl+Shift+F         # Thumbs: quick-copy hints (like Vimium)
-Alt+f                # Fuzzy file finder popup (bat preview)
-Alt+s                # Fuzzy content search popup (live ripgrep)
+Alt+f                # Fuzzy file finder popup (tmux-fzf-finder plugin)
+Alt+s                # Live grep search popup (tmux-fzf-finder plugin)
 Ctrl+s d     # Detach (session keeps running)
 
 # Reattach later
@@ -776,7 +776,8 @@ tmux kill-session -t mysession
 - **Vim fallback:** Alt+hjkl for pane switching still works
 - **OSC 52 clipboard:** Works over SSH with existing `osc52()` function
 - **Large scrollback:** 10,000 lines (vs default 2,000)
-- **Popup windows:** Alt+f (fuzzy file finder), Alt+s (fuzzy content search), Alt+g (lazygit), Ctrl+s t (terminal), Ctrl+s e (file finder), Ctrl+s G (git status), Ctrl+s f (fzf session switcher)
+- **Popup windows:** Alt+f (fuzzy file finder), Alt+s (live content search), Alt+g (lazygit), Ctrl+s t (terminal), Ctrl+s e (file finder), Ctrl+s G (git status), Ctrl+s f (fzf session switcher)
+- **tmux-fzf-finder plugin:** Mode switching (Ctrl+G/F), clipboard (Ctrl+Y), edit in popup or send to pane (Ctrl+O)
 - **Smart defaults:** Windows start at 1, auto-renumber, splits open in current directory
 
 ### Status Bar
@@ -800,7 +801,7 @@ Dark theme matching Powerlevel10k:
 - **GNOME keybinding conflict:** Ctrl+Alt+Arrow (pane resize) requires removing GNOME's default workspace-switching shortcuts for those keys. Run: `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-{up,down,left,right}` to keep only Super-based alternatives. See `docs/TMUX_LEARNING_GUIDE.md` troubleshooting for full commands.
 - **tmux extended-keys:** Server-level setting — needs `tmux kill-server` + restart, not just config reload
 - **Manual session management:** Sessions persist after detaching, so use `tml` to check what's running and `tmux kill-session -t <name>` to clean up
-- **Plugins:** tmux-resurrect (session persistence), tmux-continuum (auto-save), tmux-thumbs (quick-copy hints with Ctrl+Shift+F or prefix+F), tmux-open (open URLs/files from copy mode)
+- **Plugins:** tmux-resurrect (session persistence), tmux-continuum (auto-save), tmux-thumbs (quick-copy hints with Ctrl+Shift+F or prefix+F), tmux-open (open URLs/files from copy mode), tmux-fzf-finder (fuzzy file finder + live grep popups with mode switching)
 - **Copy mode enhancements:** prefix+v to enter, prefix+/ for direct search, `Y` to copy without exiting, incremental search (`/` and `?`), `Ctrl+V` for rectangle selection, tmux-open `o` to open URLs in browser, Alt+PageUp for quick scroll-back
 - **Unbound defaults:** `Alt+n`/`Alt+p` (redundant window nav) unbound to restore readline bindings
 
@@ -812,6 +813,23 @@ Vimium-style quick-copy hints (prefix+F). Also available prefix-free via Ctrl+Sh
 - **Colors:** Yellow badges on black (hints), cyan (matched text), green (selected) — Vimium-style
 - **Clipboard:** Uses `tmux load-buffer -w` which triggers OSC 52 (works over SSH)
 - **Open:** Shift+hint uses `gio open` via `setsid` (GNOME notification, no tmux message)
+
+### Session Picker (Ctrl+Shift+S)
+
+fzf-based session switcher with choose-tree-style preview thumbnails. Files: `scripts/tmux-session-picker.sh`, `scripts/tmux-session-preview.sh`. Launched via `display-popup -E -w 85% -h 85%` in tmux.conf line 144.
+
+**Features:**
+- Session list with metadata (window count, age, attached status)
+- 2-column grid preview showing bordered thumbnail boxes per window
+- Each box captures the bottom of the active pane (where prompts/recent activity live)
+- Active window highlighted with bright borders, inactive dimmed
+- Type a new name to create a session on the fly
+
+**Architecture:**
+- Picker script builds session list, pipes through fzf with `--height=100%` (overrides `FZF_DEFAULT_OPTS`)
+- Preview script uses `FZF_PREVIEW_LINES`/`FZF_PREVIEW_COLUMNS` to calculate grid dimensions
+- Pane content captured as plain text (no `-e`) so `fit()` padding works with `${#str}` length
+- `capture-pane -J` joins wrapped lines, `expand` converts tabs, `tail` takes bottom N lines
 
 ### Common Workflows
 
