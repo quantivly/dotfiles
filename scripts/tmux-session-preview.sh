@@ -86,6 +86,16 @@ while IFS='|' read -r idx name active pane_count; do
   i=$((i + 1))
 done <<< "$win_data"
 
+# Pre-split captured lines into flat array for O(1) lookup in render loop
+declare -a _line
+for ((w = 0; w < i; w++)); do
+  _tmp=()
+  [[ -n "${win_lines[w]}" ]] && mapfile -t _tmp <<< "${win_lines[w]}"
+  for ((l = 0; l < inner_h; l++)); do
+    _line[w * inner_h + l]="${_tmp[l]:-}"
+  done
+done
+
 # --- Helpers ---
 
 # Truncate or pad a string to exactly N characters
@@ -103,15 +113,19 @@ fit() {
 }
 
 # Repeat a character N times
-rep() { printf "$1%.0s" $(seq 1 "$2" 2>/dev/null); }
+rep() {
+  local s='' i
+  for ((i = 0; i < $2; i++)); do s+="$1"; done
+  printf '%s' "$s"
+}
 
 # --- Render grid ---
 
-for row in $(seq 0 $((grid_rows - 1))); do
+for ((row = 0; row < grid_rows; row++)); do
   start=$((row * grid_cols))
 
   # ┌─ label ──────┐  ┌─ label ──────┐
-  for col in $(seq 0 $((grid_cols - 1))); do
+  for ((col = 0; col < grid_cols; col++)); do
     wi=$((start + col))
     [ "$wi" -ge "$win_count" ] && break
     [ "$col" -gt 0 ] && printf '%*s' "$gap" ""
@@ -135,14 +149,14 @@ for row in $(seq 0 $((grid_rows - 1))); do
   printf '\n'
 
   # │ content │  │ content │
-  for li in $(seq 1 "$inner_h"); do
-    for col in $(seq 0 $((grid_cols - 1))); do
+  for ((li = 0; li < inner_h; li++)); do
+    for ((col = 0; col < grid_cols; col++)); do
       wi=$((start + col))
       [ "$wi" -ge "$win_count" ] && break
       [ "$col" -gt 0 ] && printf '%*s' "$gap" ""
 
-      # Get line from captured content
-      content=$(echo "${win_lines[$wi]}" | sed -n "${li}p")
+      # Get line from pre-split flat array
+      content="${_line[wi * inner_h + li]}"
       padded=$(fit "$content" "$inner_w")
 
       if [ "${win_is_active[$wi]}" = "1" ]; then
@@ -155,7 +169,7 @@ for row in $(seq 0 $((grid_rows - 1))); do
   done
 
   # └──────────────┘  └──────────────┘
-  for col in $(seq 0 $((grid_cols - 1))); do
+  for ((col = 0; col < grid_cols; col++)); do
     wi=$((start + col))
     [ "$wi" -ge "$win_count" ] && break
     [ "$col" -gt 0 ] && printf '%*s' "$gap" ""
