@@ -294,9 +294,9 @@ Template at `examples/ssh-config.template`. Run `ssh-init` to install. See [docs
 
 Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
-**Essential bindings:** Ctrl+Shift+E/O (split), Ctrl+Shift+W (close), Ctrl+Shift+Arrow (navigate), Ctrl+Alt+Arrow (resize), Alt+z (zoom), Ctrl+Shift+T (new window), Ctrl+Shift+S (session picker)
+**Essential bindings:** Ctrl+Shift+E/O (split), Ctrl+Shift+W (close), Ctrl+Shift+Arrow (navigate), Ctrl+Alt+Arrow (resize), Alt+z (zoom), Ctrl+Shift+T (new window)
 
-**Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
+**Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+w (session picker), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
 
 **Key notes:**
 - No auto-start — launch manually with `tmn <session>`

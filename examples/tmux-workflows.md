@@ -33,7 +33,7 @@ Comprehensive guide to using tmux for terminal multiplexing and session manageme
 | | `Ctrl+Shift+PageUp/Down` | Reorder windows (no prefix!) |
 | | `Alt+1-9` | Switch to window 1-9 |
 | | `Ctrl+Space ,` | Rename current window |
-| **Sessions** | `Ctrl+Shift+S` | Switch sessions (no prefix!) |
+| **Sessions** | `Alt+w` | Session picker (no prefix!) |
 | | `Ctrl+Space s` | Session picker (with prefix) |
 | | `Ctrl+Space d` | Detach (session keeps running) |
 | **Copy** | `Ctrl+Space [` | Enter copy mode |
@@ -82,7 +82,7 @@ tml
 tmux list-sessions
 
 # Switch to another session (while inside tmux)
-Ctrl+Shift+S      # Interactive session tree (no prefix!)
+Alt+w             # Session picker popup (no prefix!, via tmux-ferret)
 # Ctrl+Space s    # Interactive session list (with prefix)
 
 # Switch to specific session by name

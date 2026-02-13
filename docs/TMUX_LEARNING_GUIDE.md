@@ -189,7 +189,7 @@ cat some-file.txt | osc52     # Copy file contents
 
 | Action | Keys / Command |
 |--------|---------------|
-| Switch sessions (no prefix!) | `Ctrl+Shift+S` |
+| Switch sessions (no prefix!) | `Alt+w` (tmux-ferret plugin) |
 | List sessions interactively | `Ctrl+Space s` |
 | Switch to last session | `Ctrl+Space B` |
 | Fuzzy session picker | `ftmux` (shell command) |
@@ -363,7 +363,7 @@ Your setup has these tmux integrations built in:
 | `Ctrl+Shift+O` | Split horizontal |
 | `Ctrl+Shift+W` | Close pane (with confirmation) |
 | `Ctrl+Shift+T` | New window |
-| `Ctrl+Shift+S` | Switch sessions |
+| `Alt+w` | Session picker (tmux-ferret) |
 | `Ctrl+Shift+Arrow` | Navigate panes |
 | `Ctrl+Alt+Arrow` | Resize panes (2 cells) |
 | `Alt+z` | Zoom/unzoom pane |
