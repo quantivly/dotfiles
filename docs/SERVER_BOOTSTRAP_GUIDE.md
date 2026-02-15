@@ -62,7 +62,8 @@ Servers use a lightweight tool subset (`examples/server-mise.toml`) instead of t
 
 | Issue | Solution |
 |-------|----------|
-| Missing `en_US.UTF-8` locale | Bootstrap runs `localedef` automatically |
+| Missing `en_US.UTF-8` locale | Bootstrap runs `localedef` + writes `/etc/locale.conf` |
+| Locale not inherited by SSH sessions | Bootstrap persists to `/etc/locale.conf` (read by `pam_env` at login) |
 | `chsh` not available | Bootstrap installs `util-linux-user` package |
 | `gpg-agent` not installed | Node.js GPG verification fails; server config excludes node |
 | `gh auth git-credential` won't work | `.gitconfig.local` uses SSH URLs via `insteadOf` |
@@ -95,8 +96,40 @@ Always use `ssh server 'bash -s' < script.sh` (not `ssh server 'script.sh'`) for
 
 Servers use a **copy** of `examples/server-mise.toml` (not a symlink). The `./install` script detects the differing file and preserves it ("Keeping your version"). This means server tool configs survive `./install` re-runs without special-casing.
 
+## Remote Server Administration (qadmin)
+
+Two convenience functions for managing Quantivly staging/demo servers:
+
+```bash
+# Option 1: Plain SSH in local tmux (recommended — no nesting)
+qadmin                    # Opens local tmux session "qadmin" with staging+demo windows
+qadmin staging            # Just staging
+qadmin staging demo dev   # Custom server list
+
+# Option 2: Remote tmux for session persistence (nested tmux)
+qadmin-tmux               # Same but with remote tmux sessions
+# Press F12 to toggle outer tmux off (keys pass to inner)
+# Press F12 again to restore outer tmux
+```
+
+**How it works:**
+- `qadmin` uses `-shell` SSH hosts (e.g., `staging-shell`) — no `RemoteCommand`, no nesting
+- `qadmin-tmux` runs `tmux new-session -A -s admin` on the remote — creates nested tmux
+- Both are idempotent: running again attaches to the existing session
+- Inner tmux auto-detects nesting: gold bar at top (remote) vs blue bar at bottom (local)
+
+**When to use which:**
+- `qadmin` for quick server checks, log tailing, deployments — simpler, no nesting overhead
+- `qadmin-tmux` for long-running tasks that must survive SSH disconnects (remote tmux persists)
+
+**Prerequisites:**
+- SSH config must have `-shell` host aliases (e.g., `staging-shell`, `demo-shell`)
+- Servers must be bootstrapped (`server-bootstrap.sh`)
+- For nested tmux visual differentiation: `tmux kill-server` on remote after first bootstrap (picks up new config)
+
 ## Bootstrapped Servers
 
 | Server | Status | Date | Notes |
 |--------|--------|------|-------|
 | staging | Complete | 2026-02-10 | AL2 2023, had pre-existing partial zsh setup |
+| demo | Complete | 2026-02-15 | AL2 2023, was `demo2` — curl-minimal conflict required separate tmux install |

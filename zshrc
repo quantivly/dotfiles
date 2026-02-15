@@ -2,6 +2,15 @@
 # Modular structure for maintainability and portability
 
 #==============================================================================
+# Locale (must be set before Powerlevel10k instant prompt for icon rendering)
+#==============================================================================
+# On servers without a system-level locale default (e.g., AL2), SSH sessions
+# start with C/POSIX locale. p10k instant prompt caches rendering at source
+# time — if LANG isn't UTF-8 yet, Nerd Font glyphs render as underscores.
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
+#==============================================================================
 # Powerlevel10k instant prompt
 #==============================================================================
 

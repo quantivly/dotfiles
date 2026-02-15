@@ -51,7 +51,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | Module | Purpose | Key Functions |
 |--------|---------|---------------|
 | `zsh/functions/core.sh` | Core utilities (22 functions) | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
-| `zsh/functions/development.sh` | Git + Docker + FZF (37 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill` |
+| `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qadmin` |
 | `zsh/functions/system.sh` | Performance + Utilities (9 functions) | `startup_monitor`, `startup_profile`, `system_health`, `has_command`, `confirm` |
 
 **Function Naming Convention:**
@@ -74,19 +74,20 @@ Dotbot creates symlinks from `install.conf.yaml`:
 ### Configuration Loading Order
 
 ```
-1. Powerlevel10k instant prompt (performance)
-2. oh-my-zsh core and plugins
-3. p10k.zsh theme
-4. zsh/zshrc.history
-5. zsh/functions/*.sh (core, development, system)
-6. zsh/zshrc.aliases
-7. zsh/zshrc.conditionals → loads three focused modules:
+1. Locale export (LANG/LC_ALL — must be before p10k for icon rendering)
+2. Powerlevel10k instant prompt (performance)
+3. oh-my-zsh core and plugins
+4. p10k.zsh theme
+5. zsh/zshrc.history
+6. zsh/functions/*.sh (core, development, system)
+7. zsh/zshrc.aliases
+8. zsh/zshrc.conditionals → loads three focused modules:
    - zsh/zshrc.conditionals.tools (CLI tool overrides)
    - zsh/zshrc.conditionals.fzf (FZF integration)
    - zsh/zshrc.conditionals.plugins (mise, direnv, etc.)
-8. zsh/zshrc.company
-9. ~/.zshrc.local (machine-specific secrets)
-10. PATH additions
+9. zsh/zshrc.company
+10. ~/.zshrc.local (machine-specific secrets)
+11. PATH additions
 ```
 
 **Key Insight:** Conditionals load AFTER aliases, so tools that are installed get priority configuration.
@@ -298,11 +299,13 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
 **Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+w (session picker), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
 
+**Nested tmux (remote servers):** F12 toggles outer tmux off, passing all keys to inner tmux. Outer status bar turns grey with `[INNER]` label. Inner tmux auto-detects nesting and uses gold bar at top. Use with `qadmin-tmux` for remote server administration.
+
 **Key notes:**
 - No auto-start — launch manually with `tmn <session>`
 - Alacritty coupling — Ctrl+Shift+letter bindings require CSI u entries in `~/.config/alacritty/alacritty.toml` (template: `examples/alacritty.toml.template`, install with `alacritty-init`)
 - `extended-keys` and `terminal-features` are server-level — require `tmux kill-server`, not just config reload
-- Plugins: tmux-resurrect, tmux-continuum, tmux-thumbs, tmux-open, tmux-ferret
+- Plugins: tmux-resurrect, tmux-continuum, tmux-thumbs, tmux-open, tmux-dispatch
 
 See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) and [examples/tmux-workflows.md](examples/tmux-workflows.md) for comprehensive guides.
 
@@ -315,6 +318,8 @@ qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
 tool_status          # Check installed tools
 alacritty-init       # Set up Alacritty config (new machine)
+qadmin               # SSH to staging+demo in local tmux (no nesting)
+qadmin-tmux          # SSH to staging+demo with remote tmux (F12 toggle)
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)

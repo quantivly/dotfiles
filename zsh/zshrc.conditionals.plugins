@@ -109,9 +109,8 @@ else
   export GIT_EDITOR='nano'
 fi
 
-# Locale settings
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
+# Locale settings — now set at top of zshrc (before p10k instant prompt)
+# Kept here as comment for discoverability; see zshrc lines 7-12
 
 
 #==============================================================================

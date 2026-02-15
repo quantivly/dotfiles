@@ -74,6 +74,11 @@ Host *
     # Compression (helps over slow connections)
     Compression yes
 
+    # Forward locale to remote servers (defense in depth for UTF-8 icons)
+    # Only works if server sshd has AcceptEnv LANG LC_* (Ubuntu default, not AL2)
+    # Harmless when server doesn't accept — SSH silently drops unaccepted vars
+    SendEnv LANG LC_*
+
 # ============================================================================
 # SSH AGENT CONFIGURATION (Choose ONE, uncomment as needed)
 # ============================================================================
