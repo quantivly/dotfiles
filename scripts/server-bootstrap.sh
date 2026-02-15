@@ -157,6 +157,24 @@ install_system_packages() {
         log_success "en_US.UTF-8 locale already exists"
     fi
 
+    # Persist locale system-wide so SSH sessions inherit UTF-8
+    # Without this, non-interactive SSH and p10k instant prompt start with C/POSIX locale
+    if [[ "$PKG_MGR" == "apt" ]]; then
+        # Ubuntu/Debian: update-locale writes /etc/default/locale
+        if command -v update-locale &>/dev/null; then
+            sudo update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null || true
+            log_success "System locale set via update-locale"
+        fi
+    else
+        # AL2/RHEL/Fedora: /etc/locale.conf read by pam_env at login
+        if [[ ! -f /etc/locale.conf ]] || ! grep -q "LANG=en_US.UTF-8" /etc/locale.conf 2>/dev/null; then
+            printf 'LANG=en_US.UTF-8\nLC_ALL=en_US.UTF-8\n' | sudo tee /etc/locale.conf >/dev/null
+            log_success "System locale set via /etc/locale.conf"
+        else
+            log_success "System locale already configured"
+        fi
+    fi
+
     # Set zsh as default shell for current user
     local current_shell
     current_shell=$(getent passwd "$(whoami)" | cut -d: -f7)
