@@ -27,7 +27,7 @@ Bootstrap remote servers with `server-bootstrap.sh`. See [docs/SERVER_BOOTSTRAP_
 Key commands:
 ```bash
 ssh server 'bash -s' < ~/.dotfiles/scripts/server-bootstrap.sh  # Bootstrap
-ssh server-shell '~/.dotfiles/scripts/server-bootstrap.sh --update'  # Update
+ssh server '~/.dotfiles/scripts/server-bootstrap.sh --update'  # Update
 ```
 
 ## Architecture
@@ -51,7 +51,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | Module | Purpose | Key Functions |
 |--------|---------|---------------|
 | `zsh/functions/core.sh` | Core utilities (22 functions) | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
-| `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qadmin` |
+| `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
 | `zsh/functions/system.sh` | Performance + Utilities (9 functions) | `startup_monitor`, `startup_profile`, `system_health`, `has_command`, `confirm` |
 
 **Function Naming Convention:**
@@ -299,7 +299,7 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
 **Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+w (session picker), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
 
-**Nested tmux (remote servers):** F12 toggles outer tmux off, passing all keys to inner tmux. Outer status bar turns grey with `[INNER]` label. Inner tmux auto-detects nesting and uses gold bar at top. Use with `qadmin-tmux` for remote server administration.
+**Nested tmux (remote servers):** F12 toggles outer tmux off, passing all keys to inner tmux. Outer status bar turns grey with `[INNER]` label. Inner tmux auto-detects nesting and uses gold bar at top. For manual SSH-into-remote-tmux usage (e.g., `ssh -t server 'tmux a'`).
 
 **Key notes:**
 - No auto-start — launch manually with `tmn <session>`
@@ -318,8 +318,7 @@ qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
 tool_status          # Check installed tools
 alacritty-init       # Set up Alacritty config (new machine)
-qadmin               # SSH to staging+demo in local tmux (no nesting)
-qadmin-tmux          # SSH to staging+demo with remote tmux (F12 toggle)
+qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)
