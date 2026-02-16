@@ -975,8 +975,7 @@ tdev() {
 #   - ssht: SSH to host and attach/create named tmux session
 #   - sshls: List tmux sessions on remote server
 #   - sshkill: Kill specific tmux session on remote server
-#   - qadmin: Quantivly server admin — local tmux session with SSH windows (no nesting)
-#   - qadmin-tmux: Same but with remote tmux sessions (nested, use F12 toggle)
+#   - qmux: Quantivly server admin — per-server tmux sessions (Alt+w to switch)
 #
 # See also: docs/SSH_CONFIG_GUIDE.md, examples/tmux-workflows.md
 # =============================================================================
@@ -1030,111 +1029,37 @@ sshkill() {
   ssh -t "$1" "tmux kill-session -t '$2'"
 }
 
-# qadmin - Quantivly server admin via local tmux session (no nesting)
-# Creates a "qadmin" tmux session with per-server windows using -shell
-# SSH hosts (no RemoteCommand), avoiding nested tmux entirely.
-# For each server, creates 3 windows: shell, auto-conf, Workspace.
-qadmin() {
-  # Usage: qadmin [server...]
-  # Default servers: staging demo
-  # Requires: -shell SSH host aliases (e.g., staging-shell, demo-shell)
+# qmux - Quantivly server admin via per-server tmux sessions
+# Creates "Quantivly [<server>]" sessions with SSH to each server.
+# Uses session switching (Alt+w) instead of tmux nesting.
+qmux() {
+  # Usage: qmux [server...]
+  # Default servers: dev staging demo
   local -a servers
   if (( $# > 0 )); then
     servers=("$@")
   else
-    servers=(staging demo)
+    servers=(dev staging demo)
   fi
-  local session="qadmin"
 
-  # Idempotent: if session exists, just switch/attach
-  if tmux has-session -t "$session" 2>/dev/null; then
-    if [[ -n "$TMUX" ]]; then
-      tmux switch-client -t "$session"
-    else
-      tmux attach -t "$session"
+  # Create sessions for each server (skip existing)
+  local server session
+  for server in "${servers[@]}"; do
+    session="Quantivly [${server}]"
+    if tmux has-session -t "=$session" 2>/dev/null; then
+      continue
     fi
-    return 0
-  fi
-
-  # Create session with first server's shell window
-  # Uses send-keys instead of command argument so the pane survives SSH failures
-  local first="${servers[1]}"
-  tmux new-session -d -s "$session" -n "$first"
-  tmux send-keys -t "$session" "ssh ${first}-shell" Enter
-
-  # App windows for first server
-  tmux new-window -t "$session" -n "${first}:auto-conf"
-  tmux send-keys -t "$session" "ssh -t ${first}-shell 'cd /app/auto-conf && exec \$SHELL -l'" Enter
-  tmux new-window -t "$session" -n "${first}:Workspace"
-  tmux send-keys -t "$session" "ssh -t ${first}-shell 'cd /app/quantivly && exec \$SHELL -l'" Enter
-
-  # Remaining servers: shell + app windows each
-  local i
-  for i in "${servers[@]:1}"; do
-    tmux new-window -t "$session" -n "$i"
-    tmux send-keys -t "$session" "ssh ${i}-shell" Enter
-    tmux new-window -t "$session" -n "${i}:auto-conf"
-    tmux send-keys -t "$session" "ssh -t ${i}-shell 'cd /app/auto-conf && exec \$SHELL -l'" Enter
-    tmux new-window -t "$session" -n "${i}:Workspace"
-    tmux send-keys -t "$session" "ssh -t ${i}-shell 'cd /app/quantivly && exec \$SHELL -l'" Enter
+    # Uses send-keys so the pane survives SSH failures
+    tmux new-session -d -s "$session" -n "$server"
+    tmux setw -t "$session" automatic-rename off
+    tmux send-keys -t "$session" "ssh ${server}" Enter
   done
 
-  # Select first window
-  tmux select-window -t "$session:1"
-
-  # Attach or switch
+  # Switch/attach to the first server's session
+  local target="Quantivly [${servers[1]}]"
   if [[ -n "$TMUX" ]]; then
-    tmux switch-client -t "$session"
+    tmux switch-client -t "=$target"
   else
-    tmux attach -t "$session"
-  fi
-}
-
-# qadmin-tmux - Quantivly server admin with remote tmux sessions (nested)
-# Same as qadmin but connects through remote tmux for session persistence.
-# Creates nested tmux — use F12 to toggle outer/inner control.
-# Inner tmux auto-detects nesting: gold bar at top vs blue bar at bottom.
-qadmin-tmux() {
-  # Usage: qadmin-tmux [server...]
-  # Default servers: staging demo
-  # Requires: -shell SSH host aliases (e.g., staging-shell, demo-shell)
-  local -a servers
-  if (( $# > 0 )); then
-    servers=("$@")
-  else
-    servers=(staging demo)
-  fi
-  local session="qadmin"
-
-  # Idempotent: if session exists, just switch/attach
-  if tmux has-session -t "$session" 2>/dev/null; then
-    if [[ -n "$TMUX" ]]; then
-      tmux switch-client -t "$session"
-    else
-      tmux attach -t "$session"
-    fi
-    return 0
-  fi
-
-  # Create session with first server (remote tmux)
-  # Uses send-keys so the pane survives SSH failures
-  tmux new-session -d -s "$session" -n "${servers[1]}"
-  tmux send-keys -t "$session" "ssh -t ${servers[1]}-shell 'tmux new-session -A -s admin'" Enter
-
-  # Add windows for remaining servers (remote tmux)
-  local i
-  for i in "${servers[@]:1}"; do
-    tmux new-window -t "$session" -n "$i"
-    tmux send-keys -t "$session" "ssh -t ${i}-shell 'tmux new-session -A -s admin'" Enter
-  done
-
-  # Select first window
-  tmux select-window -t "$session:1"
-
-  # Attach or switch
-  if [[ -n "$TMUX" ]]; then
-    tmux switch-client -t "$session"
-  else
-    tmux attach -t "$session"
+    tmux attach -t "=$target"
   fi
 }

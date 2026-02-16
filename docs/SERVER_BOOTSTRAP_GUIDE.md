@@ -19,32 +19,23 @@ The bootstrap script runs 6 phases: OS detection, system packages (zsh, git, tmu
 After dotfiles changes, update a server without reinstalling system packages:
 
 ```bash
-ssh server-shell '~/.dotfiles/scripts/server-bootstrap.sh --update'
+ssh server '~/.dotfiles/scripts/server-bootstrap.sh --update'
 ```
 
 This pulls the latest dotfiles, re-runs `./install`, and updates mise tools.
 
 ## SSH Config (Workstation-Side)
 
-Each server gets **two entries** in your `~/.ssh/config`:
+Each server gets one entry in `~/.ssh/config`:
 
 ```ssh-config
-# Auto-tmux for terminal SSH
 Host staging
-    HostName <actual-hostname>
-    User ec2-user
-    ForwardAgent yes
-    RequestTTY yes
-    RemoteCommand tmux new-session -A -s admin
-
-# Clean access for VSCode Remote SSH, scp, one-off commands
-Host staging-shell
     HostName <actual-hostname>
     User ec2-user
     ForwardAgent yes
 ```
 
-**Why two entries**: VSCode Remote SSH breaks with `RemoteCommand`. The `-shell` variant gives clean access for VSCode, `scp`, and scripted commands (including `--update`). The base entry auto-attaches to a persistent tmux session.
+VSCode Remote SSH, `scp`, and `qmux` all work with the same entry.
 
 ## Shared ec2-user Considerations
 
@@ -96,36 +87,24 @@ Always use `ssh server 'bash -s' < script.sh` (not `ssh server 'script.sh'`) for
 
 Servers use a **copy** of `examples/server-mise.toml` (not a symlink). The `./install` script detects the differing file and preserves it ("Keeping your version"). This means server tool configs survive `./install` re-runs without special-casing.
 
-## Remote Server Administration (qadmin)
+## Remote Server Administration (qmux)
 
-Two convenience functions for managing Quantivly staging/demo servers:
+`qmux` creates per-server tmux sessions for Quantivly servers:
 
 ```bash
-# Option 1: Plain SSH in local tmux (recommended — no nesting)
-qadmin                    # Opens local tmux session "qadmin" with staging+demo windows
-qadmin staging            # Just staging
-qadmin staging demo dev   # Custom server list
-
-# Option 2: Remote tmux for session persistence (nested tmux)
-qadmin-tmux               # Same but with remote tmux sessions
-# Press F12 to toggle outer tmux off (keys pass to inner)
-# Press F12 again to restore outer tmux
+qmux                     # Creates "Quantivly [dev]", "[staging]", "[demo]" sessions
+qmux staging             # Just staging
+qmux dev staging demo    # Custom server list
 ```
 
 **How it works:**
-- `qadmin` uses `-shell` SSH hosts (e.g., `staging-shell`) — no `RemoteCommand`, no nesting
-- `qadmin-tmux` runs `tmux new-session -A -s admin` on the remote — creates nested tmux
-- Both are idempotent: running again attaches to the existing session
-- Inner tmux auto-detects nesting: gold bar at top (remote) vs blue bar at bottom (local)
-
-**When to use which:**
-- `qadmin` for quick server checks, log tailing, deployments — simpler, no nesting overhead
-- `qadmin-tmux` for long-running tasks that must survive SSH disconnects (remote tmux persists)
+- Creates one tmux session per server (e.g., "Quantivly [staging]")
+- Uses plain SSH (e.g., `ssh staging`) — no nesting
+- Switch between servers with Alt+w (tmux session picker)
+- Idempotent: running again switches to existing sessions
 
 **Prerequisites:**
-- SSH config must have `-shell` host aliases (e.g., `staging-shell`, `demo-shell`)
 - Servers must be bootstrapped (`server-bootstrap.sh`)
-- For nested tmux visual differentiation: `tmux kill-server` on remote after first bootstrap (picks up new config)
 
 ## Bootstrapped Servers
 
