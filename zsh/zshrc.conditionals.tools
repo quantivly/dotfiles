@@ -360,3 +360,19 @@ if command -v difft &>/dev/null; then
     git diff --no-ext-diff "$@" | difft --stdin
   }
 fi
+
+# Claude Code - Suppress tmux activity alerts during interactive sessions
+# TUI apps constantly redraw (spinner, status line), triggering monitor-activity
+if command -v claude &>/dev/null; then
+  claude() {
+    if [[ -n "$TMUX" ]]; then
+      tmux setw monitor-activity off
+      command claude "$@"
+      local ret=$?
+      tmux setw monitor-activity on
+      return $ret
+    else
+      command claude "$@"
+    fi
+  }
+fi
