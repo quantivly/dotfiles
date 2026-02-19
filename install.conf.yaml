@@ -12,6 +12,8 @@
     ~/.config/pypoetry/config.toml: config/pypoetry/config.toml
     ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.config/helix/config.toml: helix/config.toml
+    ~/.config/yazi/theme.toml: yazi/theme.toml
+    ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme
     ~/.gitconfig: gitconfig
     ~/.tmux.conf: tmux.conf
     ~/.zshrc: zshrc
