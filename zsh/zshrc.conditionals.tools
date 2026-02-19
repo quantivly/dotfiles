@@ -361,6 +361,23 @@ if command -v difft &>/dev/null; then
   }
 fi
 
+# yazi - Modern terminal file manager
+# Install: https://yazi-rs.github.io/docs/installation
+# Wrapper syncs shell CWD with yazi's final directory on exit
+if command -v yazi &>/dev/null; then
+  y() {
+    local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
+    # Suppress tmux activity alerts (TUI constant redraw)
+    [[ -n "$TMUX" ]] && tmux setw monitor-activity off
+    command yazi "$@" --cwd-file="$tmp"
+    [[ -n "$TMUX" ]] && tmux setw monitor-activity on
+    if cwd="$(command cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then
+      builtin cd -- "$cwd"
+    fi
+    rm -f -- "$tmp"
+  }
+fi
+
 # Claude Code - Suppress tmux activity alerts during interactive sessions
 # TUI apps constantly redraw (spinner, status line), triggering monitor-activity
 if command -v claude &>/dev/null; then
