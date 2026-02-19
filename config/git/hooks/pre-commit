@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Global pre-commit hook — delegates to pre-commit when a repo has config.
+# Installed by dotfiles (install.conf.yaml) → ~/.config/git/hooks/pre-commit
+# Works with core.hooksPath = ~/.config/git/hooks in gitconfig.
+
+# Skip if no pre-commit config in this repo
+if [ ! -f ".pre-commit-config.yaml" ]; then
+    exit 0
+fi
+
+# Find pre-commit binary (PATH first, then mise install path)
+PRE_COMMIT="$(command -v pre-commit 2>/dev/null)"
+if [ -z "$PRE_COMMIT" ]; then
+    PRE_COMMIT="$(find "$HOME/.local/share/mise/installs/pre-commit" -maxdepth 2 -name pre-commit -type f 2>/dev/null | head -1)"
+fi
+
+if [ -n "$PRE_COMMIT" ] && [ -x "$PRE_COMMIT" ]; then
+    exec "$PRE_COMMIT" run --hook-stage pre-commit
+else
+    echo "⚠ pre-commit not found — skipping hooks (install via mise)"
+    exit 0
+fi
