@@ -256,3 +256,6 @@ if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
 fi
 
 [ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
+
+# Disable XON/XOFF flow control so Ctrl+S works as tmux prefix
+stty -ixon 2>/dev/null
