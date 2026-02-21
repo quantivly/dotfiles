@@ -13,6 +13,7 @@
     ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.config/helix/config.toml: helix/config.toml
     ~/.config/yazi/theme.toml: yazi/theme.toml
+    ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme
     ~/.gitconfig: gitconfig
     ~/.tmux.conf: tmux.conf
