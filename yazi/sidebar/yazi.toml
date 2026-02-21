@@ -13,15 +13,18 @@ max_width = 1000
 max_height = 1000
 
 [opener]
+nvim-pane = [
+  { run = '$HOME/.dotfiles/scripts/yazi-nvim-open.sh "$@"', block = false, for = "unix" },
+]
 view = [
   { run = "bat --paging=always $@", block = true, for = "unix" },
 ]
 
 [open]
 prepend_rules = [
-  { mime = "text/*", use = [ "edit", "view", "reveal" ] },
-  { mime = "*/json", use = [ "edit", "view" ] },
-  { mime = "*/yaml", use = [ "edit", "view" ] },
-  { mime = "*/toml", use = [ "edit", "view" ] },
-  { mime = "*/xml", use = [ "edit", "view" ] },
+  { mime = "text/*", use = [ "nvim-pane", "edit", "view", "reveal" ] },
+  { mime = "*/json", use = [ "nvim-pane", "edit", "view" ] },
+  { mime = "*/yaml", use = [ "nvim-pane", "edit", "view" ] },
+  { mime = "*/toml", use = [ "nvim-pane", "edit", "view" ] },
+  { mime = "*/xml", use = [ "nvim-pane", "edit", "view" ] },
 ]
