@@ -1,0 +1,25 @@
+[mgr]
+ratio = [2, 4, 6]
+show_symlink = true
+linemode = "size"
+scrolloff = 5
+
+[preview]
+max_width = 1000
+max_height = 1000
+
+[opener]
+# Quick view with bat (syntax-highlighted, pager)
+view = [
+  { run = "bat --paging=always $@", block = true, for = "unix" },
+]
+
+[open]
+prepend_rules = [
+  # Text files: offer edit (default $EDITOR) + bat view
+  { mime = "text/*", use = [ "edit", "view", "reveal" ] },
+  { mime = "*/json", use = [ "edit", "view" ] },
+  { mime = "*/yaml", use = [ "edit", "view" ] },
+  { mime = "*/toml", use = [ "edit", "view" ] },
+  { mime = "*/xml", use = [ "edit", "view" ] },
+]

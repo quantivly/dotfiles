@@ -1,0 +1,27 @@
+# Yazi sidebar config — single-column layout for tmux side pane (Ctrl+b)
+# Inherits opener/open rules from main config aren't carried over;
+# YAZI_CONFIG_HOME replaces the entire config dir.
+
+[mgr]
+ratio = [0, 1, 0]
+show_symlink = true
+linemode = "size"
+scrolloff = 5
+
+[preview]
+max_width = 1000
+max_height = 1000
+
+[opener]
+view = [
+  { run = "bat --paging=always $@", block = true, for = "unix" },
+]
+
+[open]
+prepend_rules = [
+  { mime = "text/*", use = [ "edit", "view", "reveal" ] },
+  { mime = "*/json", use = [ "edit", "view" ] },
+  { mime = "*/yaml", use = [ "edit", "view" ] },
+  { mime = "*/toml", use = [ "edit", "view" ] },
+  { mime = "*/xml", use = [ "edit", "view" ] },
+]

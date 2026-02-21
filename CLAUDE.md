@@ -67,6 +67,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.config/gh/config.yml` → `~/.dotfiles/gh/config.yml`
 - `~/.config/git/ignore` → `~/.dotfiles/config/git/ignore`
 - `~/.config/Code/User/settings.json` → `~/.dotfiles/vscode/settings.json`
+- `~/.config/yazi/yazi.toml` → `~/.dotfiles/yazi/yazi.toml`
 
 **Not symlinked (but coupled):**
 - `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`. **Gotcha:** Live config diverges from template — updating the template doesn't propagate. Also, Ctrl+Shift+letter combos that have Alacritty built-in defaults (e.g., F=SearchForward) must have explicit CSI u entries to override; letters without defaults (E, O, W, T, S) work via kitty keyboard protocol automatically.
@@ -297,7 +298,7 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
 **Essential bindings:** Ctrl+Shift+E/O (split), Ctrl+Shift+W (close), Ctrl+Shift+Arrow (navigate), Ctrl+Alt+Arrow (resize), Alt+z (zoom), Ctrl+Shift+T (new window)
 
-**Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+w (session picker), Alt+g (lazygit), Ctrl+Shift+F (tmux-thumbs quick-copy)
+**Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+w (session picker), Alt+g (lazygit), Alt+y (yazi popup), Ctrl+b (yazi side pane toggle), Ctrl+Shift+F (tmux-thumbs quick-copy)
 
 **Nested tmux (remote servers):** F12 toggles outer tmux off, passing all keys to inner tmux. Outer status bar turns grey with `[INNER]` label. Inner tmux auto-detects nesting and uses gold bar at top. For manual SSH-into-remote-tmux usage (e.g., `ssh -t server 'tmux a'`).
 
