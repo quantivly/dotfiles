@@ -219,6 +219,14 @@ gpush-safe() {
 
   # Check for protected branches
   if [[ "$branch" == "main" || "$branch" == "master" || "$branch" == "develop" ]]; then
+    # Skip confirmation if there's nothing to push
+    local ahead
+    ahead="$(git rev-list @{u}..HEAD --count 2>/dev/null)"
+    if [[ $? -eq 0 && "$ahead" -eq 0 ]]; then
+      echo "Already up to date with '$branch' — nothing to push."
+      return 0
+    fi
+
     echo "⚠️  WARNING: You're about to push to '$branch'"
     echo ""
     printf "Type the branch name to confirm: "
