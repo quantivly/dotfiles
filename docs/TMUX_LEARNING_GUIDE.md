@@ -122,6 +122,12 @@ tdev    # Uses "dev" session in current directory
 
 **Goal:** Search scrollback, copy text, use clipboard over SSH.
 
+> **Note:** Claude Code runs in fullscreen (alternate-screen) mode, so its
+> conversation is **not** in tmux's scrollback and copy-mode won't see it.
+> Scroll and search inside Claude instead, or press `Ctrl+o` then `[` to dump
+> the conversation into tmux scrollback so copy-mode works on it. See
+> [CLAUDE_CODE_TMUX.md](CLAUDE_CODE_TMUX.md).
+
 ### Enter copy mode
 
 Press `Ctrl+Space [`. You're now in a vim-like mode where you can navigate the scrollback buffer (10,000 lines of history).
