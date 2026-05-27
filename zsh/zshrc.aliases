@@ -21,6 +21,9 @@ alias ln='ln -i'
 # Git aliases (only ones NOT provided by oh-my-zsh git plugin)
 # Note: oh-my-zsh provides: gst, gco, gcb, gp, gl, gf, gcm, gca, gaa, gap, gd, grh
 # See: ~/.oh-my-zsh/plugins/git/git.plugin.zsh
+
+# Remove oh-my-zsh aliases we don't want (collision risk with our own tooling)
+unalias gsd 2>/dev/null  # oh-my-zsh: 'git svn dcommit' — we don't use git-svn
 alias gcam='git commit -am'  # oh-my-zsh doesn't have this variant
 alias glog='git log --oneline --graph --decorate'
 alias gloga='git log --oneline --graph --decorate --all'
