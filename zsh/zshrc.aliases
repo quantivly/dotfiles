@@ -12,12 +12,6 @@ alias la='ls -A'
 alias ll='ls -lh'
 alias lh='ls -d .*'  # List hidden files only
 
-# Safety aliases
-alias rm='rm -i'
-alias cp='cp -i'
-alias mv='mv -i'
-alias ln='ln -i'
-
 # Git aliases (only ones NOT provided by oh-my-zsh git plugin)
 # Note: oh-my-zsh provides: gst, gco, gcb, gp, gl, gf, gcm, gca, gaa, gap, gd, grh
 # See: ~/.oh-my-zsh/plugins/git/git.plugin.zsh
@@ -157,9 +151,6 @@ if command -v xclip &> /dev/null; then
   alias pbcopy='xclip -selection clipboard'
   alias pbpaste='xclip -selection clipboard -o'
 fi
-
-# Safety overrides (can be bypassed with \rm, \cp, \mv)
-# Note: Safety aliases (rm -i, cp -i, mv -i, ln -i) are defined at the top of this file
 
 # Typo corrections
 alias cd..='cd ..'
