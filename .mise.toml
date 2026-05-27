@@ -65,6 +65,7 @@ python = "3.10"          # Required for pipx and Python CLI tools
 pipx = "1.8.0"           # Isolated Python CLI tool installer
 helix = "25.07.1"          # Modal text editor
 ripgrep = "15.1.0"        # Fast regex search (grep replacement)
+awscli = { version = "2.34.29", symlink_bins = "true" }  # AWS CLI v2 (binary nested in aws/dist/, needs symlink_bins)
 
 # Optional tools (uncomment to enable)
 # dive = "0.12.0"        # Docker image layer analyzer
