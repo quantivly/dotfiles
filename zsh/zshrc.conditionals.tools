@@ -381,6 +381,17 @@ fi
 # Claude Code - Suppress tmux activity alerts during interactive sessions
 # TUI apps constantly redraw (spinner, status line), triggering monitor-activity
 if command -v claude &>/dev/null; then
+  # Fullscreen rendering (alternate screen) — fixes tmux scrollback corruption
+  # caused by the classic in-place renderer redrawing on the normal screen.
+  # Exported at source time (not inside claude()) so every launch path inherits
+  # it: interactive shell, claude-squad panes, tmux teammate agents.
+  # Equivalent to running /tui fullscreen. See docs/CLAUDE_CODE_TMUX.md.
+  export CLAUDE_CODE_NO_FLICKER=1
+  # Smooth mouse-wheel scrolling inside the fullscreen view (matches vim's
+  # default; without it Alacritty/tmux send one line per notch). Re-tunable at
+  # runtime via /scroll-speed.
+  export CLAUDE_CODE_SCROLL_SPEED=3
+
   claude() {
     if [[ -n "$TMUX" ]]; then
       tmux setw monitor-activity off
