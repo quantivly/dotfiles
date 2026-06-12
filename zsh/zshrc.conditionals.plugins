@@ -25,10 +25,22 @@
 # so the fast path uses [[ -S ]] (zsh builtin, sub-ms) instead of ssh-add -l
 # (~56ms subprocess). Full validation only runs on the repair path.
 
-# Helper: Test if socket file exists (fast) AND agent responds (slow)
+# Helper: Is $1 a usable agent socket? By default "usable" = reachable AND holding
+# at least one key (ssh-add -l exit 0). Pass a non-empty $2 to also accept a
+# reachable-but-keyless agent (exit 1) — for the systemd socket and the stable
+# symlink, where a freshly started agent is keyless until a key loads on first use.
+# Keyless must NOT be accepted for the VSCode scan: a keyless forwarded socket means
+# broken forwarding, and newest-by-mtime would beat an older socket that still has
+# keys. ssh-add -l exit codes: 0 = keyed, 1 = empty, 2 = unreachable.
 _ssh_agent_is_valid() {
-  [[ -S "$1" ]] && SSH_AUTH_SOCK="$1" ssh-add -l &>/dev/null
-  return $?
+  [[ -S "$1" ]] || return 1
+  SSH_AUTH_SOCK="$1" ssh-add -l &>/dev/null
+  local rc=$?
+  if [[ -n "$2" ]]; then
+    [[ $rc -ne 2 ]]   # accept keyed (0) or keyless (1); reject only unreachable (2)
+  else
+    [[ $rc -eq 0 ]]   # require keys
+  fi
 }
 
 # Helper: Find current VSCode SSH socket by modification time (newest first)
@@ -52,9 +64,14 @@ _setup_ssh_agent() {
   # Fast path: Socket file exists — almost always valid in tmux panes
   # Skips ssh-add -l (~56ms) when the socket is present
   if [[ -n "$SSH_AUTH_SOCK" && -S "$SSH_AUTH_SOCK" ]]; then
-    # Create/update persistent symlink for tmux/docker compatibility
+    # Create/update persistent symlink for tmux/docker compatibility — but never
+    # relink it onto itself. tmux.conf sets SSH_AUTH_SOCK=~/.ssh/ssh_auth_sock in
+    # panes; `ln -sf X X` would make the symlink circular. `-ef` (same file by
+    # inode) skips the relink when SSH_AUTH_SOCK already resolves to that path,
+    # robust to aliasing (e.g. a doubled slash in $XDG_RUNTIME_DIR).
     [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
-    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
+    [[ ! "$SSH_AUTH_SOCK" -ef "$HOME/.ssh/ssh_auth_sock" ]] && \
+      ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
     return 0
   fi
 
@@ -72,7 +89,7 @@ _setup_ssh_agent() {
   # Try 2: Systemd socket (if available)
   if [[ -n "$XDG_RUNTIME_DIR" && -S "$XDG_RUNTIME_DIR/ssh-agent.socket" ]]; then
     # Socket file exists, verify agent responds before committing
-    if _ssh_agent_is_valid "$XDG_RUNTIME_DIR/ssh-agent.socket"; then
+    if _ssh_agent_is_valid "$XDG_RUNTIME_DIR/ssh-agent.socket" allow-empty; then
       export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
       [[ -d "$HOME/.ssh" ]] || mkdir -p "$HOME/.ssh"
       ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
@@ -80,8 +97,15 @@ _setup_ssh_agent() {
     fi
   fi
 
-  # Try 3: Start local agent if all else fails
-  if ! ssh-add -l &>/dev/null; then
+  # Try 3: Last resort (e.g. the systemd ssh-agent isn't running). First reuse the
+  # agent behind the stable symlink if it's alive — accepting a keyless agent (the
+  # allow-empty arg; depends on the default-strict _ssh_agent_is_valid change, since
+  # the agent we may spawn just below is itself keyless). Only spawn a brand-new
+  # agent when there's nothing to reuse; reusing the symlink keeps repeated shells
+  # from piling up duplicate agents when SSH_AUTH_SOCK starts unset.
+  if _ssh_agent_is_valid "$HOME/.ssh/ssh_auth_sock" allow-empty; then
+    export SSH_AUTH_SOCK="$HOME/.ssh/ssh_auth_sock"
+  elif ! ssh-add -l &>/dev/null; then
     eval "$(ssh-agent -s)" >/dev/null
     [[ -n "$SSH_AUTH_SOCK" ]] && ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
   fi
