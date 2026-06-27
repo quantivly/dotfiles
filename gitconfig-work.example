@@ -1,0 +1,33 @@
+# Work (Quantivly) Git Configuration — DUAL-IDENTITY PROFILE ONLY
+# ================================================================
+# This file is conditionally included by ~/.gitconfig.local via:
+#
+#   [includeIf "gitdir:~/quantivly/"]
+#       path = ~/.gitconfig-work
+#
+# so its settings apply ONLY inside git repositories under ~/quantivly/.
+# Outside ~/quantivly/, your personal identity from ~/.gitconfig.local wins.
+#
+# Copy this to ~/.gitconfig-work and customize it. It is NOT committed
+# (it holds your work identity). On a fresh machine, dev-setup's dual profile
+# (modules/accounts.sh) creates it from this template automatically.
+#
+# WORK-ONLY profile note: do NOT use this file. A work-only box sets a single
+# work identity in the GLOBAL config instead — there is no personal identity
+# to separate from, so no includeIf is needed.
+
+[user]
+	email = your.name@quantivly.com
+	# Work SSH signing key (public key string, not a path).
+	# Get it from the Bitwarden SSH agent: ssh-add -L
+	signingkey = ssh-ed25519 AAAAC3Nza... your.name@quantivly.com
+
+# Transparent SSH key selection for work repos.
+# ---------------------------------------------
+# Rewrites work remotes to the `github-work` host alias defined in ~/.ssh/config,
+# which binds github.com to your WORK key (IdentitiesOnly yes). This is what makes
+# `git@github.com:quantivly/...` push/pull with the work key instead of the
+# personal key, even though both accounts live on the same host. See
+# ~/.dotfiles/examples/ssh-config.template (the github.com / github-work blocks).
+[url "git@github-work:"]
+	insteadOf = git@github.com:

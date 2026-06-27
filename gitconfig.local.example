@@ -8,6 +8,23 @@
 	name = Your Name
 	email = your.email@quantivly.com
 
+# Work/Personal Routing (DUAL-IDENTITY PROFILE — commented out by default)
+# ------------------------------------------------------------------------
+# If you keep a personal AND a work identity on this machine, anchor the split
+# on the ~/quantivly path: set your PERSONAL identity above, then conditionally
+# include a work identity for any repo under ~/quantivly/. This is git-native
+# and authoritative regardless of shell state.
+#
+# To enable: set the [user] block above to your PERSONAL identity, create
+# ~/.gitconfig-work from ~/.dotfiles/gitconfig-work.example, and uncomment:
+#
+# [includeIf "gitdir:~/quantivly/"]
+#     path = ~/.gitconfig-work
+#
+# dev-setup's dual profile (modules/accounts.sh) wires this up automatically.
+# On a WORK-ONLY box, leave this commented and set the work identity directly
+# in the [user] block above (the whole machine is work — nothing to route).
+
 # Commit Signing with SSH (Recommended)
 # Signing your commits helps verify your identity and is strongly encouraged.
 # SSH signing (Git 2.34+) is simpler than GPG and integrates with SSH agent workflows.
