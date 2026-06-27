@@ -46,7 +46,6 @@ plugins=(
     safe-paste       # Prevent accidental execution of pasted commands
     sudo             # Prefix command with sudo via ESC ESC
     zsh-autosuggestions      # Fish-like autosuggestions (requires manual install)
-    zsh-fzf-history-search   # FZF history search (requires manual install)
     zsh-syntax-highlighting  # Fish-like syntax highlighting (requires manual install, must be last)
 )
 
