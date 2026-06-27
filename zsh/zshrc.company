@@ -18,7 +18,7 @@ fi
 # Quantivly development environment settings
 # These can be overridden in ~/.zshrc.local for machine-specific values
 export Q_MODE="${Q_MODE:-development}"
-export Q_DEV_CODE_ROOT="${Q_DEV_CODE_ROOT:-${HOME}/platform}"
+export Q_DEV_CODE_ROOT="${Q_DEV_CODE_ROOT:-${HOME}/quantivly/platform}"
 export Q_WORKSPACES_ROOT="${Q_WORKSPACES_ROOT:-${HOME}/workspaces}"
 export Q_WORKSPACE_NAME="${Q_WORKSPACE_NAME:-test}"
 export Q_TEST_WORKSPACE_NAME="${Q_TEST_WORKSPACE_NAME:-cicd}"
@@ -133,14 +133,12 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
                 fi
                 ;;
             *)
+                # Personal (default): use the default ~/.config/gh config dir.
+                # No token override needed — gh reads the personal identity from
+                # the default config. Clear any work token leaked from a prior dir.
                 unset GH_CONFIG_DIR
-                if [[ -n "$_CACHED_PERSONAL_GH_TOKEN" ]]; then
-                    export GH_TOKEN="$_CACHED_PERSONAL_GH_TOKEN"
-                    export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_PERSONAL_GH_TOKEN"
-                else
-                    unset GH_TOKEN
-                    unset GITHUB_PERSONAL_ACCESS_TOKEN
-                fi
+                unset GH_TOKEN
+                unset GITHUB_PERSONAL_ACCESS_TOKEN
                 ;;
         esac
     }
