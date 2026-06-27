@@ -42,7 +42,6 @@ export DIRENV_LOG_FORMAT=""
 plugins=(
     colored-man-pages # Colorized man pages for better readability
     extract          # Universal archive extractor (extract <file>)
-    fzf              # Fuzzy finder integration (requires: fzf)
     git              # Git aliases and functions
     safe-paste       # Prevent accidental execution of pasted commands
     sudo             # Prefix command with sudo via ESC ESC
@@ -254,8 +253,6 @@ if [ -d "${HOME}/.oh-my-zsh/custom/plugins/quantivly" ]; then
   unalias q 2>/dev/null
   alias q='quanticli'
 fi
-
-[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
 
 # Disable XON/XOFF flow control so Ctrl+S works as tmux prefix
 stty -ixon 2>/dev/null
