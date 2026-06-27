@@ -128,7 +128,9 @@ The `.gitignore` protects: `*.local`, `*.secrets`, `.env*`, `secrets/`
 
 ### Oh-My-Zsh Plugins
 
-Current plugins: autojump, colored-man-pages, direnv, extract, fzf, gh, git, poetry, safe-paste, sudo, web-search, zsh-autosuggestions, zsh-fzf-history-search, zsh-syntax-highlighting, quantivly
+Current plugins: autojump, colored-man-pages, direnv, extract, gh, git, poetry, safe-paste, sudo, web-search, zsh-autosuggestions, zsh-fzf-history-search, zsh-syntax-highlighting, quantivly
+
+**Note:** fzf is *not* an oh-my-zsh plugin here — its shell integration loads via `eval "$(fzf --zsh)"` in `zsh/zshrc.conditionals.fzf` (runs after mise activation; mise installs the fzf binary only, with no bundled shell scripts).
 
 **Note:** `zsh-syntax-highlighting` must be last in the list.
 

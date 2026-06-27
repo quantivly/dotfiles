@@ -34,6 +34,21 @@ if command -v fzf &>/dev/null; then
     export FZF_CTRL_T_OPTS="--preview 'head -500 {} 2>/dev/null || echo \"Binary file or permission denied\"'"
   fi
 
+  # Modern fzf shell integration (key bindings + completion).
+  # fzf >= 0.48 emits this directly via `fzf --zsh`; replaces the legacy
+  # oh-my-zsh fzf plugin and ~/.fzf.zsh (mise installs the binary only, with
+  # no bundled shell scripts). Fall back to known script locations for older
+  # fzf builds (e.g. distro packages on bootstrapped servers).
+  if fzf --zsh &>/dev/null; then
+    eval "$(fzf --zsh)"
+  else
+    for _fzf_dir in /usr/share/fzf /usr/share/doc/fzf/examples /usr/local/opt/fzf/shell "$HOME/.fzf/shell"; do
+      [[ -f "$_fzf_dir/key-bindings.zsh" ]] && source "$_fzf_dir/key-bindings.zsh"
+      [[ -f "$_fzf_dir/completion.zsh" ]] && source "$_fzf_dir/completion.zsh"
+    done
+    unset _fzf_dir
+  fi
+
   # FZF Git integration
   # fbr - Fuzzy checkout git branch (removed - use fgcb instead for richer forgit implementation)
   # fbr() {
