@@ -1,12 +1,15 @@
 # Work (Quantivly) Git Configuration — DUAL-IDENTITY PROFILE ONLY
 # ================================================================
-# This file is conditionally included by ~/.gitconfig.local via:
+# This file is conditionally included by ~/.gitconfig.local. Inclusion is
+# driven by the repo's REMOTE belonging to the quantivly org, e.g.:
 #
-#   [includeIf "gitdir:~/quantivly/"]
+#   [includeIf "hasconfig:remote.*.url:git@github.com:quantivly/**"]
 #       path = ~/.gitconfig-work
+#   (plus https:// and git@github-work: variants — see gitconfig.local.example)
 #
-# so its settings apply ONLY inside git repositories under ~/quantivly/.
-# Outside ~/quantivly/, your personal identity from ~/.gitconfig.local wins.
+# so its settings apply to ANY quantivly repo regardless of on-disk path
+# (Atrium worktrees, /tmp clones included). For non-quantivly repos, your
+# personal identity from ~/.gitconfig.local wins. Requires git >= 2.36.
 #
 # Copy this to ~/.gitconfig-work and customize it. It is NOT committed
 # (it holds your work identity). On a fresh machine, dev-setup's dual profile
@@ -24,10 +27,12 @@
 
 # Transparent SSH key selection for work repos.
 # ---------------------------------------------
-# Rewrites work remotes to the `github-work` host alias defined in ~/.ssh/config,
-# which binds github.com to your WORK key (IdentitiesOnly yes). This is what makes
-# `git@github.com:quantivly/...` push/pull with the work key instead of the
-# personal key, even though both accounts live on the same host. See
+# Rewrites quantivly remotes to the `github-work` host alias defined in
+# ~/.ssh/config, which binds github.com to your WORK key (IdentitiesOnly yes).
+# This is what makes `git@github.com:quantivly/...` push/pull with the work key
+# instead of the personal key, even though both accounts live on the same host.
+# Org-scoped, so a PERSONAL github.com remote that happens to co-exist in a work
+# repo (e.g. a personal fork as origin) is NOT rewritten onto the work key. See
 # ~/.dotfiles/examples/ssh-config.template (the github.com / github-work blocks).
-[url "git@github-work:"]
-	insteadOf = git@github.com:
+[url "git@github-work:quantivly/"]
+	insteadOf = git@github.com:quantivly/

@@ -10,15 +10,27 @@
 
 # Work/Personal Routing (DUAL-IDENTITY PROFILE — commented out by default)
 # ------------------------------------------------------------------------
-# If you keep a personal AND a work identity on this machine, anchor the split
-# on the ~/quantivly path: set your PERSONAL identity above, then conditionally
-# include a work identity for any repo under ~/quantivly/. This is git-native
-# and authoritative regardless of shell state.
+# If you keep a personal AND a work identity on this machine, set your PERSONAL
+# identity in the [user] block above, then conditionally include a work identity
+# for any repo that belongs to the quantivly org. Routing is git-native and
+# authoritative regardless of shell state OR the repo's on-disk path.
+#
+# The signal is the repo's REMOTE (its GitHub org), via hasconfig — so a work
+# repo routes correctly even when checked out outside ~/quantivly/ (e.g. Atrium
+# worktrees under ~/.atrium/worktrees/, or /tmp clones). Requires git >= 2.36
+# (check with `git --version`); on older git the conditions are silently ignored
+# and work repos fall back to the personal identity above.
 #
 # To enable: set the [user] block above to your PERSONAL identity, create
-# ~/.gitconfig-work from ~/.dotfiles/gitconfig-work.example, and uncomment:
+# ~/.gitconfig-work from ~/.dotfiles/gitconfig-work.example, and uncomment the
+# three rules below (all include the same work file; the three forms cover the
+# SSH, HTTPS, and github-work host-alias remote URLs):
 #
-# [includeIf "gitdir:~/quantivly/"]
+# [includeIf "hasconfig:remote.*.url:git@github.com:quantivly/**"]
+#     path = ~/.gitconfig-work
+# [includeIf "hasconfig:remote.*.url:https://github.com/quantivly/**"]
+#     path = ~/.gitconfig-work
+# [includeIf "hasconfig:remote.*.url:git@github-work:quantivly/**"]
 #     path = ~/.gitconfig-work
 #
 # dev-setup's dual profile (modules/accounts.sh) wires this up automatically.
