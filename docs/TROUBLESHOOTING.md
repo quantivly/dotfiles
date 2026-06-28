@@ -189,6 +189,41 @@ mise install python@X.Y  # Install missing version
 - Global settings (managed by dotfiles) already set `python.terminal.activateEnvironment: false`
 - Verify global settings: `cat ~/.config/Code/User/settings.json`
 
+## Broken `~/Desktop`, `~/Documents`, ... symlinks (XDG user dirs)
+
+**Symptom:** `cd ~/Documents` fails; GNOME Files shows red ✗ on Desktop/Documents/Music/Public/Templates/Videos with "The link is broken — target /home/zvi/X doesn't exist". The entries are **self-referential symlinks** (`~/Documents -> /home/zvi/Documents`).
+
+**Cause:** snapd (via `snapd-desktop-integration`) mirrors your XDG user dirs into each snap's sandbox home as symlinks to your real folders. To do that it reads `~/.config/user-dirs.dirs` and ensures the real target exists. If that config has dirs collapsed to `$HOME` (e.g. `XDG_DOCUMENTS_DIR="$HOME/"` instead of `"$HOME/Documents"`), the "ensure it exists" step creates a self-referential symlink in `$HOME` instead of a real directory. Only the misconfigured dirs break; correctly-mapped ones (e.g. `Downloads`, `Pictures`) are spared. Typically triggered by a first-login race on a fresh install where `xdg-user-dirs-update` collapses the config before the folders are created, then a snap launches into that state. Not caused by these dotfiles.
+
+**Diagnose:**
+```bash
+find ~ -maxdepth 1 -xtype l          # list broken symlinks in home
+cat ~/.config/user-dirs.dirs         # look for entries set to "$HOME/"
+```
+
+**Fix:**
+```bash
+# 1. Remove the broken self-referential symlinks (no data — targets never existed)
+for d in Desktop Documents Music Public Templates Videos; do
+  [ -L ~/"$d" ] && [ ! -e ~/"$d" ] && rm -v ~/"$d"
+done
+
+# 2. Repoint the XDG config at real subdirs (matches /etc/xdg/user-dirs.defaults)
+for pair in DESKTOP:Desktop DOCUMENTS:Documents MUSIC:Music PUBLICSHARE:Public \
+            TEMPLATES:Templates VIDEOS:Videos DOWNLOAD:Downloads PICTURES:Pictures; do
+  xdg-user-dirs-update --set "${pair%%:*}" "$HOME/${pair##*:}"
+done
+
+# 3. Create the real directories (xdg-user-dirs-update won't recreate already-listed dirs)
+mkdir -p ~/Desktop ~/Documents ~/Music ~/Public ~/Templates ~/Videos
+
+# 4. Verify, then refresh GNOME if needed
+find ~ -maxdepth 1 -xtype l    # expect: no output
+nautilus -q                    # relaunch Files to clear the stale view
+```
+
+Once `user-dirs.dirs` is valid and the real folders exist, the issue is self-healing: `xdg-user-dirs-update` (runs each login) is a no-op, and snapd creates normal sandbox symlinks instead of broken ones.
+
 ## Syntax errors
 
 ```bash
