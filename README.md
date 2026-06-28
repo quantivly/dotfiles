@@ -465,6 +465,26 @@ vim ~/.ssh/config  # Customize for your infrastructure
 
 See the [SSH Configuration Guide](docs/SSH_CONFIG_GUIDE.md) for complete setup instructions, deployment context guidance (laptop vs. remote server), security considerations, and troubleshooting tips.
 
+### GNOME Desktop (Ubuntu)
+
+A clean, modern GNOME desktop using **stock GNOME/Yaru only** — no third-party extensions or themes:
+
+```bash
+gnome-apply  # Apply curated config (also runs during ./install on GNOME)
+gnome-init   # Create ~/.gnome-settings.local for dock favorites & launch keys
+gnome-apply  # Re-apply with your overrides; then log out / log in once
+```
+
+**What you get:**
+- **Dark, green-tinted theme** - `Yaru-prussiangreen-dark` with a teal accent
+- **Sleek dock** - floating, autohiding, centered at the bottom; decluttered
+- **Empty desktop** - all icons hidden (extension kept, just invisible)
+- **tmux-friendly keys** - GNOME workspace switching moved off `Ctrl+Alt+Arrow`
+- **Reproducible** - schema-validated `gsettings` script (not `dconf dump`); machine-specific bits stay in `~/.gnome-settings.local`
+- **Backup/restore** - `gnome-backup` / `gnome-restore` for full personal snapshots
+
+See the [GNOME Configuration Guide](docs/GNOME_CONFIGURATION_GUIDE.md) for the full reference, keyboard workflow, customization, and Wayland notes.
+
 ### Shell Configuration
 
 Machine-specific shell settings go in `~/.zshrc.local`:

@@ -52,7 +52,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 |--------|---------|---------------|
 | `zsh/functions/core.sh` | Core utilities (22 functions) | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
-| `zsh/functions/system.sh` | Performance + Utilities (9 functions) | `startup_monitor`, `startup_profile`, `system_health`, `has_command`, `confirm` |
+| `zsh/functions/system.sh` | Performance + Utilities + GNOME (12 functions) | `startup_monitor`, `startup_profile`, `system_health`, `has_command`, `confirm`, `gnome-status`, `gnome-backup`, `gnome-restore` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
@@ -71,6 +71,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 
 **Not symlinked (but coupled):**
 - `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`. **Gotcha:** Live config diverges from template — updating the template doesn't propagate. Also, Ctrl+Shift+letter combos that have Alacritty built-in defaults (e.g., F=SearchForward) must have explicit CSI u entries to override; letters without defaults (E, O, W, T, S) work via kitty keyboard protocol automatically.
+- **GNOME settings** — not files, so not symlinked. Applied to the dconf database via `scripts/apply-gnome-settings.sh` (run by `./install` on GNOME, or `gnome-apply`). Machine-specific layer: `~/.gnome-settings.local` (template: `examples/gnome-settings.local.template`, install with `gnome-init`). See [GNOME Desktop Configuration](#gnome-desktop-configuration).
 
 ### Configuration Loading Order
 
@@ -313,6 +314,18 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
 See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) and [examples/tmux-workflows.md](examples/tmux-workflows.md) for comprehensive guides.
 
+## GNOME Desktop Configuration
+
+Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **bottom** dock, empty desktop, tmux-friendly keys) applied reproducibly via **stock GNOME/Yaru only** — no third-party extensions or themes.
+
+- **Mechanism:** curated `gsettings` script (schema-validated, idempotent, reviewable), **not** `dconf dump` (which drags in machine-specific cruft). GNOME has no first-party export/import.
+- **Source of truth:** `scripts/apply-gnome-settings.sh` (portable core). Runs automatically during `./install` on GNOME only (no-op on servers / other desktops).
+- **Machine-specific layer:** `~/.gnome-settings.local` (dock favorites, custom launch keys) — mirrors the `~/.zshrc.local` pattern, sourced by the apply script, never overwritten. Create with `gnome-init`.
+- **Tmux integration:** the script moves GNOME workspace switching off `Ctrl+Alt+Arrow` onto `Super`-based shortcuts so tmux pane-resize works (the previously-manual fix is now baked in).
+- **Wayland gotcha:** changes apply live; dock relayout is guaranteed after one log out / log in. `Alt+F2 r` / `Meta.restart` are X11-only — never use them.
+
+See [docs/GNOME_CONFIGURATION_GUIDE.md](docs/GNOME_CONFIGURATION_GUIDE.md) for the full guide.
+
 ## Common Tasks & Workflows
 
 ```bash
@@ -323,6 +336,9 @@ gh-refresh-tokens    # Refresh GH CLI token cache
 tool_status          # Check installed tools
 alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
+gnome-apply          # Apply curated GNOME desktop config (idempotent)
+gnome-init           # Create ~/.gnome-settings.local (dock favorites, launch keys)
+gnome-status         # Summary of GNOME version, theme, dock, extensions
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)

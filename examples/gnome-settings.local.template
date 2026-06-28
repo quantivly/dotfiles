@@ -1,0 +1,48 @@
+# shellcheck shell=bash
+# ~/.gnome-settings.local — machine-specific GNOME tweaks (NOT tracked in git)
+# ===========================================================================
+#
+# This file is *sourced* by scripts/apply-gnome-settings.sh (gnome-apply) AFTER
+# the portable core has been applied. Put anything machine-specific here:
+# dock favorites (app IDs differ per machine), custom launch keys, peripherals.
+#
+# The helper `gset <schema> <key> <value>` from the apply script is available
+# here (idempotent + schema-safe). Plain `gsettings set` also works.
+#
+# Install:  gnome-init      (copies this template to ~/.gnome-settings.local)
+# Apply:    gnome-apply     (re-runs the core + this file)
+
+# ---------------------------------------------------------------------------
+# Pinned dock apps (favorites)
+# ---------------------------------------------------------------------------
+# App IDs are machine-specific: snaps are '<name>_<name>.desktop', system apps
+# are 'org.gnome.X.desktop' / '<name>.desktop'. Find IDs with:
+#   gsettings get org.gnome.shell favorite-apps
+#   ls /usr/share/applications /var/lib/snapd/desktop/applications ~/.local/share/applications
+# Entries whose .desktop file is missing are silently ignored by GNOME.
+gset org.gnome.shell favorite-apps "['firefox_firefox.desktop', 'alacritty_alacritty.desktop', 'code_code.desktop', 'org.gnome.Nautilus.desktop', 'slack_slack.desktop', 'org.gnome.Settings.desktop']"
+
+# ---------------------------------------------------------------------------
+# Custom keybinding: Super+Return → Alacritty   (optional — uncomment to enable)
+# ---------------------------------------------------------------------------
+# Note: this overwrites custom-keybinding slot custom0. If you already use
+# custom keybindings, bump the index and extend the array accordingly.
+# gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings \
+#   "['/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/']"
+# _kb="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/"
+# gsettings set "$_kb" name 'Launch Alacritty'
+# gsettings set "$_kb" command 'alacritty'
+# gsettings set "$_kb" binding '<Super>Return'
+
+# ---------------------------------------------------------------------------
+# Laptop peripherals   (optional — uncomment on a laptop)
+# ---------------------------------------------------------------------------
+# gset org.gnome.desktop.peripherals.touchpad tap-to-click   "true"
+# gset org.gnome.desktop.peripherals.touchpad natural-scroll  "true"
+
+# ---------------------------------------------------------------------------
+# Appearance overrides   (optional — examples)
+# ---------------------------------------------------------------------------
+# Prefer a neutral dark theme instead of the green tint:
+# gset org.gnome.desktop.interface gtk-theme  "'Yaru-dark'"
+# gset org.gnome.desktop.interface icon-theme "'Yaru-dark'"
