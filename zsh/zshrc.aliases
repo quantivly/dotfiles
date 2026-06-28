@@ -216,3 +216,27 @@ alias alacritty-init='
 # Useful when connections hang or become stale
 # Location: ~/.ssh/sockets/ (created by ./install)
 alias ssh-clear='rm -f ~/.ssh/sockets/* && echo "✓ Cleared all SSH connection sockets"'
+
+#==============================================================================
+# GNOME desktop
+#==============================================================================
+# Apply the curated GNOME desktop config (dark theme, floating bottom dock,
+# clean desktop, tmux-friendly keys). Idempotent; no-ops cleanly off GNOME.
+# Source of truth: ~/.dotfiles/scripts/apply-gnome-settings.sh
+# Inspect/back up with gnome-status / gnome-backup (functions in system.sh).
+alias gnome-apply='bash ~/.dotfiles/scripts/apply-gnome-settings.sh'
+
+# Initialize machine-specific GNOME overrides (dock favorites, launch keys)
+# Creates ~/.gnome-settings.local from template; sourced by gnome-apply
+alias gnome-init='
+  if [ -f ~/.gnome-settings.local ]; then
+    echo "⚠️  ~/.gnome-settings.local already exists! Backup first:"
+    echo "   cp ~/.gnome-settings.local ~/.gnome-settings.local.backup"
+  else
+    cp ~/.dotfiles/examples/gnome-settings.local.template ~/.gnome-settings.local
+    echo "✓ Created ~/.gnome-settings.local from template"
+    echo "  Edit to customize pinned apps & keys: \${EDITOR:-vim} ~/.gnome-settings.local"
+    echo "  Then apply: gnome-apply"
+    echo "  See guide: ~/.dotfiles/docs/GNOME_CONFIGURATION_GUIDE.md"
+  fi
+'
