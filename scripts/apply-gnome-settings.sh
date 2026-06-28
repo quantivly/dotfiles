@@ -174,12 +174,18 @@ apply_desktop() {
 apply_keybindings() {
     # Free Ctrl+Alt+Arrow (GNOME workspace switching) so tmux pane-resize works.
     # See docs/TMUX_LEARNING_GUIDE.md and CLAUDE.md (Terminal gotchas).
+    #
+    # GNOME 40+ lays workspaces out in a single horizontal row, so only
+    # switch-to-workspace-left/right actually move between workspaces — up/down
+    # have no neighbor and are silent no-ops. Bind the Super+PgUp/PgDn
+    # muscle-memory keys to left/right (matching GNOME's own stock defaults,
+    # which ship Page_Up/Down on left/right) and leave up/down empty.
     log STEP "Keybindings — free Ctrl+Alt+Arrow for tmux"
     local schema="org.gnome.desktop.wm.keybindings"
-    gset "$schema" switch-to-workspace-up    "['<Super>Page_Up']"
-    gset "$schema" switch-to-workspace-down  "['<Super>Page_Down']"
-    gset "$schema" switch-to-workspace-left  "['<Super><Alt>Left']"
-    gset "$schema" switch-to-workspace-right "['<Super><Alt>Right']"
+    gset "$schema" switch-to-workspace-left  "['<Super>Page_Up', '<Super><Alt>Left']"
+    gset "$schema" switch-to-workspace-right "['<Super>Page_Down', '<Super><Alt>Right']"
+    gset "$schema" switch-to-workspace-up    "@as []"
+    gset "$schema" switch-to-workspace-down  "@as []"
 }
 
 apply_local_overrides() {
