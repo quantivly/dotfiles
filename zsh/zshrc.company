@@ -88,6 +88,27 @@ qn() {
 }
 
 #==============================================================================
+# Work-context detection (shared by gh + Claude account switching)
+#==============================================================================
+# A dir is "work" if it lives under the canonical ~/quantivly tree (fast path)
+# OR its origin remote belongs to the quantivly GitHub org. The remote check
+# mirrors the git identity routing (hasconfig in ~/.gitconfig.local), so the
+# gh/Claude account follows the repo anywhere it's checked out — Atrium
+# worktrees, /tmp clones, etc. — not just under ~/quantivly/.
+_q_is_work_context() {
+    case "$PWD" in
+        "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
+            return 0 ;;
+    esac
+    local _url
+    _url="$(command git remote get-url origin 2>/dev/null)" || return 1
+    case "$_url" in
+        *github.com[:/]quantivly/*|*github-work:quantivly/*) return 0 ;;
+    esac
+    return 1
+}
+
+#==============================================================================
 # GitHub CLI Multi-Account Switching
 #==============================================================================
 # Automatically switches gh CLI identity when entering Quantivly work directories.
@@ -124,23 +145,20 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     fi
 
     _update_gh_config() {
-        case "$PWD" in
-            "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
-                export GH_CONFIG_DIR="$HOME/.config/gh-quantivly"
-                if [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]]; then
-                    export GH_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
-                    export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
-                fi
-                ;;
-            *)
-                # Personal (default): use the default ~/.config/gh config dir.
-                # No token override needed — gh reads the personal identity from
-                # the default config. Clear any work token leaked from a prior dir.
-                unset GH_CONFIG_DIR
-                unset GH_TOKEN
-                unset GITHUB_PERSONAL_ACCESS_TOKEN
-                ;;
-        esac
+        if _q_is_work_context; then
+            export GH_CONFIG_DIR="$HOME/.config/gh-quantivly"
+            if [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]]; then
+                export GH_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
+                export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
+            fi
+        else
+            # Personal (default): use the default ~/.config/gh config dir.
+            # No token override needed — gh reads the personal identity from
+            # the default config. Clear any work token leaked from a prior dir.
+            unset GH_CONFIG_DIR
+            unset GH_TOKEN
+            unset GITHUB_PERSONAL_ACCESS_TOKEN
+        fi
     }
     autoload -U add-zsh-hook
     add-zsh-hook chpwd _update_gh_config
@@ -158,14 +176,11 @@ fi
 
 if [[ -d "$HOME/.claude-quantivly" ]]; then
     _update_claude_config() {
-        case "$PWD" in
-            "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
-                export CLAUDE_CONFIG_DIR="$HOME/.claude-quantivly"
-                ;;
-            *)
-                unset CLAUDE_CONFIG_DIR
-                ;;
-        esac
+        if _q_is_work_context; then
+            export CLAUDE_CONFIG_DIR="$HOME/.claude-quantivly"
+        else
+            unset CLAUDE_CONFIG_DIR
+        fi
     }
     autoload -U add-zsh-hook
     add-zsh-hook chpwd _update_claude_config

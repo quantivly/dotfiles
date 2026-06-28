@@ -94,9 +94,31 @@ gh auth status   # Check status
 gh auth login    # Re-authenticate
 ```
 
+## Git identity & SSH key routing (work vs personal)
+
+On a dual-identity machine, the work profile (`user.email`, `user.signingkey`, **and** the SSH key used for fetch/push) is selected by the repo's **remote org**, not by where it sits on disk. `~/.gitconfig.local` includes `~/.gitconfig-work` whenever any remote points at the quantivly org, via `includeIf "hasconfig:remote.*.url:…"` (requires **git ≥ 2.36**). This is path-independent, so it works in Atrium worktrees under `~/.atrium/worktrees/`, clones under `~/Projects/`, `/tmp`, etc. `~/.gitconfig-work` org-scopes the transport rewrite (`url."git@github-work:quantivly/".insteadOf`) so quantivly remotes use the work key while personal remotes stay on the personal key.
+
+**Symptom:** a work repo authenticates/commits as personal — e.g. `git push` denied (`Permission to quantivly/<repo>.git denied to <personal-user>`), or commits show the personal email/signature.
+
+**Verify which profile resolves (read-only, no network):**
+```bash
+git config --show-origin --get user.email   # work => …/.gitconfig-work  *@quantivly.com
+git config --get user.signingkey            # work => …Quantivly ; personal => …Personal
+git remote get-url --push origin            # work => git@github-work:quantivly/… (work key)
+ssh -G github-work | grep -i '^identityfile'  # => ~/.ssh/id_work.pub
+git ls-remote --heads origin                # read-only auth probe (no push)
+```
+
+**If a work repo resolves to personal:**
+- Check git version: `git --version` (must be ≥ 2.36; older git silently ignores `hasconfig`).
+- Confirm the rules exist: `git config --file ~/.gitconfig.local --get-regexp '^includeIf'` — expect three `hasconfig:remote.*.url:…quantivly/**` entries → `~/.gitconfig-work`.
+- The personal `[user]` block in `~/.gitconfig.local` must come **before** the `includeIf` lines (last-wins). Don't reorder the file.
+- Re-provision via dev-setup (`modules/accounts.sh`, dual profile) to (re)wire the rules idempotently.
+- New repo with **no remote yet** commits as personal until the quantivly remote is added — add the remote before the first commit, or set a repo-local `git config user.email`.
+
 ## GitHub CLI multi-account switching
 
-The `zshrc.company` `chpwd` hook switches `GH_CONFIG_DIR`, `GH_TOKEN`, and `GITHUB_PERSONAL_ACCESS_TOKEN` based on directory context (`~/quantivly/**` → work, everything else → personal).
+The `zshrc.company` `chpwd` hook switches `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`, and `CLAUDE_CONFIG_DIR` based on context: a dir is **work** if it lives under `~/quantivly/**` (fast path) **or** its `origin` remote belongs to the quantivly org (`_q_is_work_context`), everything else → personal. The remote check mirrors the git identity routing above, so the gh/Claude account follows the repo even when checked out outside `~/quantivly/`.
 
 **Key gotcha — `gh auth token` keyring lookup:**
 - `gh auth token` (no `--user`) returns a shared/default keyring entry, NOT the per-user entry matching the config's `user:` field
