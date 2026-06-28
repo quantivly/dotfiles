@@ -480,13 +480,18 @@ Ctrl+Shift+**Arrow**, Ctrl+PageUp/Down, Ctrl+Shift+PageUp/Down, Ctrl+Alt+Arrow, 
 After changing `extended-keys` or `terminal-features`, you must restart the tmux server (`tmux kill-server`), not just reload config.
 
 ### Ctrl+Alt+Arrow (resize) not working
-GNOME intercepts Ctrl+Alt+Arrow for workspace switching by default. Since we use Super+PgUp/PgDown for workspaces instead, remove the Ctrl+Alt bindings from GNOME:
+GNOME intercepts Ctrl+Alt+Arrow for workspace switching by default. Since we use Super+PgUp/PgDown for workspaces instead, remove the Ctrl+Alt bindings from GNOME.
+
+GNOME 40+ lays workspaces out in a single horizontal row, so only
+`switch-to-workspace-left`/`right` actually move between workspaces —
+`up`/`down` have no neighbor and are silent no-ops. Bind Super+PgUp/PgDn to
+left/right accordingly (this matches GNOME's own stock defaults):
 
 ```bash
-gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-up "['<Super>Page_Up']"
-gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-down "['<Super>Page_Down']"
-gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-left "['<Super><Alt>Left']"
-gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-right "['<Super><Alt>Right']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-left "['<Super>Page_Up', '<Super><Alt>Left']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-right "['<Super>Page_Down', '<Super><Alt>Right']"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-up "@as []"
+gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-down "@as []"
 ```
 
 This is a one-time fix. Changes take effect immediately (no logout needed).
