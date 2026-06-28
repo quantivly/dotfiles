@@ -388,3 +388,71 @@ system_health() {
     echo "🐳 Docker: $running_containers containers running"
   fi
 }
+
+# =============================================================================
+# GNOME Desktop Functions
+# =============================================================================
+# Inspect and back up the GNOME desktop configuration applied by
+# scripts/apply-gnome-settings.sh (run via the `gnome-apply` alias).
+# User-facing, dash-named (like gco-safe). See docs/GNOME_CONFIGURATION_GUIDE.md.
+#
+# Functions:
+#   - gnome-status:  Summary of GNOME version, session, theme, dock, extensions
+#   - gnome-backup:  Dump the full GNOME dconf tree to a timestamped file
+#   - gnome-restore: Load a GNOME dconf backup file (with confirmation)
+# =============================================================================
+
+# Quick summary of the current GNOME desktop state
+gnome-status() {
+  # Usage: gnome-status
+  if ! has_command gsettings; then
+    echo "gsettings not found — GNOME not detected."
+    return 1
+  fi
+  # Subshell: drop GIO_MODULE_DIR so gsettings uses the real dconf backend even
+  # from a snap-confined terminal (see scripts/apply-gnome-settings.sh).
+  (
+    unset GIO_MODULE_DIR
+    dtd="org.gnome.shell.extensions.dash-to-dock"
+    echo "=== GNOME Status ==="
+    echo "Shell:      $(gnome-shell --version 2>/dev/null || echo 'n/a')"
+    echo "Session:    ${XDG_SESSION_TYPE:-?} (${XDG_CURRENT_DESKTOP:-?})"
+    echo "Color:      $(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)"
+    echo "GTK theme:  $(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null)"
+    echo "Accent:     $(gsettings get org.gnome.desktop.interface accent-color 2>/dev/null)"
+    echo "Dock:       $(gsettings get "$dtd" dock-position 2>/dev/null) (extend-height=$(gsettings get "$dtd" extend-height 2>/dev/null))"
+    echo "Overrides:  $([ -f ~/.gnome-settings.local ] && echo '~/.gnome-settings.local present' || echo 'none (run gnome-init)')"
+    if has_command gnome-extensions; then
+      echo "Enabled extensions:"
+      gnome-extensions list --enabled 2>/dev/null | sed 's/^/  /'
+    fi
+  )
+}
+
+# Back up the full GNOME dconf subtree to a timestamped file (local, not tracked)
+gnome-backup() {
+  # Usage: gnome-backup [output-file]
+  if ! has_command dconf; then
+    echo "dconf not found — GNOME not detected."
+    return 1
+  fi
+  local out="${1:-$HOME/gnome-dconf-$(date +%F-%H%M).conf}"
+  dconf dump /org/gnome/ > "$out" && echo "✓ Saved GNOME settings to $out"
+}
+
+# Restore a GNOME dconf backup file (overwrites current settings)
+gnome-restore() {
+  # Usage: gnome-restore <backup-file>
+  if ! has_command dconf; then
+    echo "dconf not found — GNOME not detected."
+    return 1
+  fi
+  local in="${1:-}"
+  if [[ -z "$in" || ! -f "$in" ]]; then
+    echo "Usage: gnome-restore <backup-file>"
+    return 1
+  fi
+  if confirm "Load '$in' into /org/gnome/ (overwrites current GNOME settings)?"; then
+    dconf load /org/gnome/ < "$in" && echo "✓ Restored GNOME settings from $in"
+  fi
+}

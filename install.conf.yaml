@@ -57,3 +57,9 @@
         echo "✓ Installed TPM (Tmux Plugin Manager)"
         echo "  Run 'prefix + I' inside tmux to install plugins"
       fi
+    - |
+      # Apply curated GNOME desktop settings (workstation only; no-op off GNOME)
+      if command -v gsettings >/dev/null 2>&1 && \
+         printf '%s' "${XDG_CURRENT_DESKTOP:-}" | grep -qi gnome; then
+        bash ~/.dotfiles/scripts/apply-gnome-settings.sh
+      fi
