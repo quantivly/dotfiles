@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **DO-449 — Backup hardening (verification, health checks, safe-restore guardrails)**:
+  closes the *silent-failure* class for the backup system.
+  - `backup-doctor` — full-chain correctness assertion (file perms, config drift vs.
+    `~/.dotfiles`, the DO-448 EnvironmentFile drop-in, snapshot age, that healthcheck URLs are
+    actually set, emergency-kit/LUKS-header freshness, disk space); non-zero exit on any failure.
+  - Weekly verification — `scripts/backup-verify.sh` + `systemd/restic-verify.{service,timer}`
+    run a **content canary** (critical paths still present in the latest snapshot, catching a
+    regressed exclude) and a **restore canary** (one file actually restored), decoupled from the
+    `[b2.check]` integrity check and skipping cleanly when offline. `backup-drill` is the
+    on-demand equivalent. `restic check` proves *intact*; this proves *complete + restorable*.
+  - `backup-restore-system` — guarded `/etc`-slice restore that always excludes
+    `fstab`/`crypttab`/`machine-id`/`ssh_host_*`, so the bare-metal restore can't break boot.
+  - `setup-backup.sh` now warns when `BACKUP_HC_URL_*` are blank (alerting would be inert),
+    re-takes the LUKS header when stale, and points to `backup-doctor`. New
+    `BACKUP_HC_URL_VERIFY` / `BACKUP_CANARY_PATHS` knobs; optional `timeshift-autosnap` apt hook.
+  See [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 - **Backup & restore workflow** — encrypted 3-2-1 backups via restic + resticprofile to an
   external HDD (dock-triggered) and Backblaze B2 (offsite, append-only key + lifecycle for
   ransomware resistance). Declarative policy in `resticprofile/profiles.toml`; machine config

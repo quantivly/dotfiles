@@ -19,6 +19,8 @@ backup-setup                # one-time guided install (restic, repos, timers, ki
 
 backup-now                  # run a backup now (both targets; b2 first, external skipped if undocked)
 backup-status               # targets reachable? timers armed? latest snapshot?
+backup-doctor               # is the whole chain CORRECT? (perms, drift, alerting, freshness)
+backup-drill                # prove the backup is complete + restorable
 backup-restore              # guided restore of a snapshot to ~/restore-<ts>/
 ```
 
@@ -120,9 +122,12 @@ are for on-demand use and inspection.
 |---------|------|
 | `backup-now [b2\|external\|cilantro]` | Back up now (default both; b2 first; external skipped if the HDD isn't docked) |
 | `backup-status` | Targets reachable? timers armed? latest snapshot? |
+| `backup-doctor` | Full-chain **health assertion** — perms, config drift, env drop-in, snapshot age, inert alerting, stale recovery assets, disk space. Non-zero exit on any failure. |
+| `backup-drill [b2\|external]` | Prove the backup is **complete + restorable** (content + restore canary, then an integrity check) — the data half of a DR drill |
 | `backup-snapshots [b2\|external]` | List snapshots |
 | `backup-check [b2\|external]` | Verify repository integrity |
 | `backup-restore [b2\|external]` | Guided restore to `~/restore-<ts>/` |
+| `backup-restore-system [b2\|external] [--in-place]` | **Guarded** restore of the `/etc` slice + AWS VPN client; always excludes `fstab`/`crypttab`/`machine-id`/`ssh_host_*` so it can't break boot |
 | `backup-mount [b2\|external]` | Browse a repo via FUSE (`~/backup-mnt`) |
 | `backup-prune` | Prune B2 with the offline full key |
 | `backup-luks-header` | Re-take the LUKS header backup |
@@ -137,10 +142,20 @@ are for on-demand use and inspection.
   docked** and is a clean no-op otherwise. For an immediate backup after docking, run
   `backup-now external`. (A `.path` "exists" trigger is deliberately avoided — `PathExists`
   retriggers a oneshot service in a tight loop while the file exists.)
-- **Monitoring:** set `BACKUP_HC_URL_*` to [healthchecks.io](https://healthchecks.io)
-  check URLs. The run-after hook pings on success and `/fail` on failure, so you're
-  **alerted when a backup is overdue** (asleep / undocked / offline). This is the
-  difference between "I have backups" and "I had backups until five weeks ago."
+- **Weekly verification:** a separate timer
+  ([`systemd/restic-verify.timer`](../systemd/restic-verify.timer)) runs
+  [`scripts/backup-verify.sh`](../scripts/backup-verify.sh) — a **content canary** (asserts
+  critical paths are still *in* the latest snapshot, catching a regressed exclude) plus a
+  **restore canary** (restores one file to prove decrypt/extract works). It is deliberately
+  decoupled from the `[b2.check]` integrity check so a verification failure can't abort it,
+  and it **skips cleanly when offline** (offline ≠ failure). `restic check` proves the repo is
+  *intact*; this proves it's *complete and restorable*. On demand: `backup-drill`.
+- **Monitoring:** set `BACKUP_HC_URL_B2` / `BACKUP_HC_URL_EXTERNAL` / `BACKUP_HC_URL_VERIFY` to
+  [healthchecks.io](https://healthchecks.io) check URLs. The hooks ping on success and `/fail`
+  on failure, so you're **alerted when a backup or verification is overdue** (asleep /
+  undocked / offline). This is the difference between "I have backups" and "I had backups until
+  five weeks ago." **Leaving them blank makes the alerting silently inert — `backup-doctor`
+  warns when they are.**
 - **Desktop notifications** via `notify-send` (bridged from the root run into your GUI
   session by [`scripts/restic-notify.sh`](../scripts/restic-notify.sh)). **Failures always
   notify; successes are silent** unless you set `BACKUP_NOTIFY_SUCCESS=1` — the healthcheck
@@ -171,8 +186,12 @@ Keep a tested **Ubuntu install USB** with the kit. Then:
 4. **Bootstrap:** clone `dev-setup` + `dotfiles` over **HTTPS + PAT** (SSH/Bitwarden-agent
    isn't up yet). Run `dev-setup`, then dotfiles `./install`.
 5. **Restore data:** install restic, then restore the latest snapshot with the **full
-   key** → `/home` + the `/etc` slice. **Skip** `/etc/fstab`, `/etc/crypttab`,
-   `/etc/machine-id`, `ssh_host_*` (let the install's own versions stand).
+   key**. For `/home`, use `backup-restore`. For the system slice, use
+   **`backup-restore-system`** — it restores `/etc` + the AWS VPN client while *always*
+   excluding `/etc/fstab`, `/etc/crypttab`, `/etc/machine-id`, `ssh_host_*`, so you can't
+   produce an unbootable box (let the fresh install's own versions of those stand). Restore
+   to a scratch dir and copy what you need, or `backup-restore-system --in-place` once you're
+   sure.
 6. **Re-auth from Bitwarden:** SSH agent, `gh auth login`, app logins. The restored GNOME
    keyring / Chrome passwords are **not** relied upon to unlock (Bitwarden is the source
    of truth). Reinstall the **AWS VPN Client** and restore `~/.config/AWSVPNClient`.
@@ -182,8 +201,15 @@ Keep a tested **Ubuntu install USB** with the kit. Then:
 
 Backups you've never restored aren't backups. Maintain this regimen:
 
+- **`backup-doctor` anytime** — the fastest confidence check: it asserts the whole chain is
+  *correct* (perms, config drift, the env drop-in, snapshot age, that alerting is actually
+  wired, recovery-asset freshness, disk space). Run it after any change to the backup setup.
+- **`backup-drill` monthly-ish** — proves the data is *complete and restorable* (the content +
+  restore canary plus an integrity check) in one command. The weekly `restic-verify.timer`
+  does this automatically and alerts on failure; `backup-drill` is the on-demand version.
 - **Quarterly restore drill** — run the whole runbook from the kit into a VM or spare
-  disk. The real test is the *bootstrap* (network → vault → HTTPS clone), not just `restic restore`.
+  disk. The real test is the *bootstrap* (network → vault → HTTPS clone), not just `restic
+  restore`. `backup-drill` covers the data half; this covers the bootstrap half.
 - **Weekly** `restic check`; **monthly** `restic check --read-data-subset=10%` (rotating —
   full coverage over ~10 weeks). Scheduled automatically for B2; on demand via `backup-check`.
 - **Ransomware proof:** with the stored append-only key, `restic forget` must **fail**
@@ -201,12 +227,16 @@ Backups you've never restored aren't backups. Maintain this regimen:
 | `restic init` fails on external | Dock the drive first; re-run `backup-setup` (it inits then, or it inits on the first dock backup). |
 | Config parse error | `resticprofile -c /etc/resticprofile/profiles.toml show` to validate after edits. |
 | No desktop notification | Expected when logged out; check the healthchecks ping and `journalctl` instead. |
-| Restored files are root-owned | Restores run as root; `backup-restore` chowns `~/restore-*` back to you automatically. |
+| Restored files are root-owned | Restores run as root; `backup-restore`/`backup-restore-system` chown `~/restore-*` back to you automatically. |
+| `backup-doctor` reports "config drift" | The live `/etc` copy diverged from `~/.dotfiles` (e.g. you `git pull`ed a policy change but didn't redeploy). Re-run `backup-setup` to resync, or commit the local edit. |
+| `backup-doctor` warns "alerting INERT" | `BACKUP_HC_URL_B2`/`BACKUP_HC_URL_VERIFY` are blank — create checks at healthchecks.io and set them in `~/.backup.local`, then re-run `backup-setup`. |
+| Verification failed (`restic-verify`) | A critical path fell out of the snapshot (regressed exclude) or a restore failed. `journalctl -u restic-verify.service`, then `backup-drill` to reproduce. A genuine completeness regression — fix the include/exclude and re-run `backup-now`. |
 
 ## See also
 
 - [`resticprofile/profiles.toml`](../resticprofile/profiles.toml) — the backup policy (source of truth)
 - [`scripts/setup-backup.sh`](../scripts/setup-backup.sh) — the one-time installer
+- [`scripts/backup-verify.sh`](../scripts/backup-verify.sh) — the weekly content + restore canary
 - [`examples/backup.local.template`](../examples/backup.local.template) — machine-specific config
 - [GNOME_CONFIGURATION_GUIDE.md](GNOME_CONFIGURATION_GUIDE.md) — the sibling reproducible-config feature
 - [resticprofile docs](https://creativeprojects.github.io/resticprofile/) · [restic docs](https://restic.readthedocs.io/) · [Backblaze B2 + restic](https://www.backblaze.com/docs/cloud-storage-integrate-restic-with-backblaze-b2)

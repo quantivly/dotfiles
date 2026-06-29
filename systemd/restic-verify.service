@@ -1,0 +1,26 @@
+# systemd/restic-verify.service
+# ==============================
+# Oneshot weekly verification of the B2 repository: proves the latest snapshot is
+# COMPLETE (critical paths present) and RESTORABLE (one file actually restores) —
+# the failure modes `restic check` cannot see. Driven by restic-verify.timer.
+# Deliberately SEPARATE from resticprofile's [b2.check] so a verification failure
+# can never abort the weekly integrity check (independent failure domains).
+#
+# Runs as root (to read /etc/restic/repo.key + the B2 creds) and loads the same
+# EnvironmentFile the backup timers use. Nice/idle so it never makes the laptop
+# sluggish. Installed to /etc/systemd/system/ by scripts/setup-backup.sh.
+# On-demand equivalent: `backup-drill`.
+
+[Unit]
+Description=restic backup verification (content + restore canary)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+EnvironmentFile=/etc/restic/backup.local
+ExecStart=/usr/local/bin/backup-verify.sh b2
+TimeoutStartSec=1h

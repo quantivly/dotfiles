@@ -49,8 +49,19 @@ AWS_SECRET_ACCESS_KEY=
 # --- monitoring: healthchecks.io dead-man's-switch (blank = disabled) -------
 # The run-after hook pings <url> on success and <url>/fail on failure, so you
 # get alerted when a backup is OVERDUE (laptop asleep / undocked / offline).
+# Create one check per line at https://healthchecks.io and paste its ping URL.
+# Leaving these blank makes the alerting silently INERT — backup-doctor warns.
 BACKUP_HC_URL_B2=
 BACKUP_HC_URL_EXTERNAL=
+# Weekly verification (backup-verify.sh / backup-drill) dead-man's switch. A
+# separate check so a verify failure is distinguishable from a backup failure.
+BACKUP_HC_URL_VERIFY=
+
+# --- verification: critical paths the content canary asserts (blank = default)
+# Whitespace/newline-separated ABSOLUTE paths that MUST appear in the latest
+# snapshot. Blank uses the built-in set (~/.ssh, ~/.config, keyrings, ~/.dotfiles,
+# /etc/NetworkManager/system-connections, the system manifest).
+BACKUP_CANARY_PATHS=
 
 # --- desktop notifications --------------------------------------------------
 # BACKUP_NOTIFY: notify on FAILURE (1=on, 0=off). Success is silent by default
