@@ -71,3 +71,18 @@
       if [ -n "${XDG_CURRENT_DESKTOP:-}" ] && command -v xdg-user-dirs-update >/dev/null 2>&1; then
         bash ~/.dotfiles/scripts/repair-xdg-user-dirs.sh
       fi
+    - |
+      # Create ~/.backup.local from template (workstation only; no-op on servers).
+      # The heavy one-time setup (restic, repos, systemd timers, LUKS header,
+      # emergency kit) is a SEPARATE explicit command: `backup-setup`. ./install
+      # never uses sudo and never touches the backup engine itself.
+      if printf '%s' "${XDG_CURRENT_DESKTOP:-}" | grep -qi gnome; then
+        if [ ! -f ~/.backup.local ]; then
+          cp ~/.dotfiles/examples/backup.local.template ~/.backup.local
+          chmod 600 ~/.backup.local
+          echo "✓ Created ~/.backup.local from template"
+          echo "  Edit it, then run: backup-setup   (see docs/BACKUP_AND_RESTORE_GUIDE.md)"
+        else
+          echo "✓ ~/.backup.local already exists (preserving your customizations)"
+        fi
+      fi

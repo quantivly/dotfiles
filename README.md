@@ -485,6 +485,28 @@ gnome-apply  # Re-apply with your overrides; then log out / log in once
 
 See the [GNOME Configuration Guide](docs/GNOME_CONFIGURATION_GUIDE.md) for the full reference, keyboard workflow, customization, and Wayland notes.
 
+### Backup & Restore
+
+Encrypted **3-2-1 backups** via **restic** + **resticprofile** to an external HDD (when docked)
+and **Backblaze B2** (offsite). Covers what reprovisioning can't: credentials, unpushed work,
+app/desktop state, network/VPN secrets, personal files.
+
+```bash
+backup-init    # Create ~/.backup.local (repo paths, B2 keys, healthcheck URLs)
+backup-setup   # One-time guided install (restic, repos, systemd timers, kit)
+backup-now     # Run a backup now;  backup-status / backup-restore to inspect & recover
+```
+
+**What you get:**
+- **3-2-1** - laptop SSD + external HDD (backed up when docked) + Backblaze B2 (offsite)
+- **Encrypted & deduplicated** - restic; declarative policy in `resticprofile/profiles.toml`
+- **Ransomware-resistant cloud** - append-only B2 key + lifecycle rule (not Object Lock)
+- **Offline emergency kit** - age-encrypted; breaks the cold-start recovery deadlock
+- **Local rollback** - Timeshift for bad upgrades; LUKS header backup
+- **Monitored** - healthchecks.io dead-man's-switch alerts when a backup is overdue
+
+See the [Backup & Restore Guide](docs/BACKUP_AND_RESTORE_GUIDE.md) for setup, the disaster-recovery runbook, and verification drills.
+
 ### Shell Configuration
 
 Machine-specific shell settings go in `~/.zshrc.local`:

@@ -456,3 +456,166 @@ gnome-restore() {
     dconf load /org/gnome/ < "$in" && echo "✓ Restored GNOME settings from $in"
   fi
 }
+
+# =============================================================================
+# Backup Functions (restic + resticprofile)
+# =============================================================================
+# Thin, user-facing wrappers over the backup system set up by scripts/setup-backup.sh
+# (run via `backup-setup`). Dash-named (like gco-safe / gnome-*). The repos are
+# root-owned and the repo key is root-readable, so these run restic/resticprofile
+# via sudo with the env loaded from /etc/restic/backup.local.
+# See docs/BACKUP_AND_RESTORE_GUIDE.md.  (Note: `backup` in core.sh is a separate
+# single-file utility — these are `backup-*`.)
+#
+# Functions:
+#   - backup-now:         Run a backup now (default both targets, b2 first)
+#   - backup-status:      Targets reachable? timers armed? latest snapshots?
+#   - backup-snapshots:   List snapshots for a target (b2|external)
+#   - backup-check:       Verify repository integrity (slow / costs B2 reads)
+#   - backup-restore:     Guided restore of a snapshot to ~/restore-<ts>/
+#   - backup-mount:       Browse a repo via FUSE (~/backup-mnt)
+#   - backup-unmount:     Unmount the FUSE browse mount
+#   - backup-prune:       Prune B2 with the OFFLINE full key (append-only key can't)
+#   - backup-luks-header: Re-take the LUKS header backup
+#   - backup-kit:         Emergency-kit status + reminder
+# =============================================================================
+
+# Internal: run resticprofile as root with the backup env loaded.
+_backup_rp() {
+  sudo bash -c 'set -a; . /etc/restic/backup.local 2>/dev/null; set +a; exec resticprofile -c /etc/resticprofile/profiles.toml "$@"' _ "$@"
+}
+
+# Internal: run raw restic as root against a target repo. $1=b2|external, rest=args.
+_backup_restic() {
+  local target="${1:?usage: _backup_restic <b2|external> <restic args...>}"; shift
+  sudo env TARGET="$target" bash -c '
+    set -a; . /etc/restic/backup.local 2>/dev/null; set +a
+    case "$TARGET" in
+      external) export RESTIC_REPOSITORY="${BACKUP_EXTERNAL_REPO:?external repo not configured}" ;;
+      b2)       export RESTIC_REPOSITORY="${BACKUP_B2_REPO:?b2 repo not configured}" ;;
+      *) echo "unknown target: $TARGET (use b2 or external)" >&2; exit 2 ;;
+    esac
+    exec restic "$@"
+  ' _ "$@"
+}
+
+# Run a backup now. Default 'cilantro' group = both targets (b2 first, so the
+# offsite copy completes even when the external HDD is not docked).
+backup-now() {
+  # Usage: backup-now [b2|external|cilantro]
+  _backup_rp --name "${1:-cilantro}" backup
+}
+
+# Quick health summary of the backup system
+backup-status() {
+  # Usage: backup-status
+  echo "=== Backup Status (cilantro) ==="
+  if [[ -f ~/.backup.local ]]; then echo "Config:     ~/.backup.local present"; else
+    echo "Config:     ✗ missing — run 'backup-init', edit it, then 'backup-setup'"; return 1; fi
+  echo "restic:     $(restic version 2>/dev/null | head -1 || echo 'not installed')"
+  echo "profile:    $(resticprofile version 2>/dev/null | head -1 || echo 'resticprofile not installed')"
+  echo "Timers:"
+  systemctl list-timers --all 2>/dev/null | grep -iE 'restic|NEXT' | sed 's/^/  /' || echo "  (none — run backup-setup)"
+  echo "External timer: $(systemctl is-enabled restic-backup-external.timer 2>/dev/null || echo 'n/a — run backup-setup')"
+  local extcfg; extcfg="$(sed -n 's/^ConditionPathExists=\(.*\)/\1/p' /etc/systemd/system/restic-backup-external.service 2>/dev/null)"
+  if [[ -n "$extcfg" ]] && sudo test -e "$extcfg" 2>/dev/null; then
+    echo "External:   docked ✓ ($extcfg present)"
+  else
+    echo "External:   not docked / external repo not reachable"
+  fi
+  echo "Last B2 snapshot:"
+  timeout 25 sudo bash -c 'set -a; . /etc/restic/backup.local 2>/dev/null; set +a; export RESTIC_REPOSITORY="$BACKUP_B2_REPO"; restic snapshots --latest 1 2>/dev/null' \
+    | sed 's/^/  /' || echo "  (unreachable or none — try 'backup-snapshots b2')"
+}
+
+# List snapshots for a target
+backup-snapshots() {
+  # Usage: backup-snapshots [b2|external]
+  _backup_restic "${1:-b2}" snapshots
+}
+
+# Verify repository integrity (uses the profile's check config)
+backup-check() {
+  # Usage: backup-check [b2|external]
+  local target="${1:-b2}"
+  confirm "Run integrity check on '$target' (can be slow / costs B2 read API calls)?" || return 1
+  _backup_rp --name "$target" check
+}
+
+# Guided restore of a snapshot to a fresh ~/restore-<timestamp>/ directory
+backup-restore() {
+  # Usage: backup-restore [b2|external]
+  local target="${1:-b2}" snap dest
+  dest="$HOME/restore-$(date +%Y%m%d-%H%M%S)"
+  if has_command fzf; then
+    # Pick from snapshot rows only (8-hex ID at line start); Esc = restore latest.
+    snap="$(_backup_restic "$target" snapshots 2>/dev/null | grep -E '^[0-9a-f]{8} ' \
+            | fzf --tac --header="Select a $target snapshot (Esc = latest)" | awk '{print $1}')"
+  else
+    _backup_restic "$target" snapshots
+    printf "Snapshot ID to restore (or 'latest'): "; read -r snap
+  fi
+  [[ -n "$snap" ]] || snap="latest"
+  confirm "Restore $target snapshot '$snap' into $dest ?" || return 1
+  mkdir -p "$dest"
+  _backup_restic "$target" restore "$snap" --target "$dest" \
+    && sudo chown -R "$USER" "$dest" 2>/dev/null \
+    && echo "✓ Restored to $dest"
+}
+
+# Browse a repository via FUSE (read-only). Ctrl-C to stop.
+backup-mount() {
+  # Usage: backup-mount [b2|external]
+  local mnt="$HOME/backup-mnt"
+  mkdir -p "$mnt"
+  echo "Mounting ${1:-b2} at $mnt — browse in another terminal; Ctrl-C here to unmount."
+  _backup_restic "${1:-b2}" mount "$mnt"
+}
+
+# Unmount the FUSE browse mount
+backup-unmount() {
+  # Usage: backup-unmount
+  fusermount -u "$HOME/backup-mnt" 2>/dev/null || sudo umount "$HOME/backup-mnt" 2>/dev/null
+  echo "✓ Unmounted ~/backup-mnt"
+}
+
+# Prune B2 with the OFFLINE full-access key (the stored append-only key cannot delete)
+backup-prune() {
+  # Usage: export B2_FULL_KEY_ID=... B2_FULL_KEY=... ; backup-prune
+  echo "B2 prune needs the FULL-access key from your emergency kit (the stored key is append-only)."
+  if [[ -z "${B2_FULL_KEY_ID:-}" || -z "${B2_FULL_KEY:-}" ]]; then
+    echo "  Export it first:  export B2_FULL_KEY_ID=<keyID>  B2_FULL_KEY=<applicationKey>"
+    return 1
+  fi
+  confirm "Prune B2 with retention (7d/4w/12m/3y) — this permanently deletes old data?" || return 1
+  sudo env FULL_ID="$B2_FULL_KEY_ID" FULL_KEY="$B2_FULL_KEY" bash -c '
+    set -a; . /etc/restic/backup.local 2>/dev/null; set +a
+    export RESTIC_REPOSITORY="$BACKUP_B2_REPO"
+    export AWS_ACCESS_KEY_ID="$FULL_ID" AWS_SECRET_ACCESS_KEY="$FULL_KEY"
+    exec restic forget --prune \
+      --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --keep-yearly 3 --keep-last 3'
+}
+
+# Re-take the LUKS header backup (store the output in the offline kit)
+backup-luks-header() {
+  # Usage: backup-luks-header
+  local dev out
+  dev="$(lsblk -rno NAME,FSTYPE | awk '$2=="crypto_LUKS"{print "/dev/"$1; exit}')"
+  [[ -n "$dev" ]] || { echo "No crypto_LUKS device found."; return 1; }
+  out="$HOME/luks-header-$(hostname)-$(date +%Y%m%d).img"
+  confirm "Back up the LUKS header of $dev to $out ?" || return 1
+  sudo cryptsetup luksHeaderBackup "$dev" --header-backup-file "$out" \
+    && sudo chown "$USER" "$out" \
+    && echo "✓ $out — copy this into your OFFLINE emergency kit (re-take after any passphrase change)."
+}
+
+# Emergency-kit status + reminder
+backup-kit() {
+  # Usage: backup-kit
+  echo "=== Emergency Kit ==="
+  [[ -f ~/.config/age/emergency-kit-identity.txt ]] && echo "✓ age identity present" || echo "✗ no age identity (run backup-setup)"
+  [[ -f ~/emergency-kit.age ]] && echo "✓ emergency-kit.age built" \
+    || { [[ -f ~/emergency-kit.txt ]] && echo "… emergency-kit.txt drafted (fill, encrypt, shred)" || echo "✗ emergency kit not built (run backup-setup)"; }
+  echo "Keep the age identity on PAPER + an OFFLINE USB; keep emergency-kit.age on the USB"
+  echo "and inside the restic repo. See docs/BACKUP_AND_RESTORE_GUIDE.md (Disaster Recovery)."
+}

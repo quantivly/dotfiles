@@ -1,0 +1,62 @@
+# shellcheck shell=bash
+# ~/.backup.local — machine-specific backup config (NOT tracked in git)
+# ===========================================================================
+# Mirrors ~/.gnome-settings.local / ~/.zshrc.local. Holds the repo URLs, B2
+# credentials and healthcheck URLs that resticprofile/profiles.toml reads from
+# the environment. backup-setup copies this to /etc/restic/backup.local (root
+# 0600) — the systemd timers load it via an EnvironmentFile drop-in, and
+# `backup-now` sources it for manual runs.
+#
+# FORMAT: plain KEY=value, ONE per line, NO `export`, NO shell expansion
+#   ($USER/$HOME are NOT expanded here). This file is consumed both by `source`
+#   and by systemd's EnvironmentFile parser, which only understands KEY=value.
+#   Comments must be on their OWN line: systemd does not strip an inline "# ..."
+#   after a value — it would become part of the value and break the key.
+#
+# Install:  backup-init       (copies this template here)
+# Set up:   backup-setup      (one-time: installs restic+resticprofile, repos, timers)
+# Run now:  backup-now [b2|external|cilantro]
+#
+# SECRETS: the restic repo password lives in Bitwarden AND on disk at
+# /etc/restic/repo.key (root 0600), written by backup-setup. The B2 keys below
+# are the APPEND-ONLY key (listFiles,readFiles,writeFiles — no deleteFiles).
+# Keep the separate full-access key OFFLINE in the emergency kit, never here.
+# Never commit this file (it is gitignored via *.local).
+
+# --- restic repo password (root timers read this non-interactively) ---------
+RESTIC_PASSWORD_FILE=/etc/restic/repo.key
+
+# --- repo-v2 compression (text/code/configs compress well; ~free on binaries)
+RESTIC_COMPRESSION=auto
+
+# --- target 1: external HDD -------------------------------------------------
+# Label the backup partition "Backup" so GNOME mounts it at /media/zvi/Backup.
+# Find the UUID once docked:  lsblk -o NAME,UUID,LABEL,MOUNTPOINT
+BACKUP_EXTERNAL_REPO=/media/zvi/Backup/restic
+BACKUP_EXTERNAL_UUID=
+# Debounce auto-runs on re-dock (e.g. 6h):
+BACKUP_EXTERNAL_MIN_INTERVAL=6h
+
+# --- target 2: Backblaze B2 via the S3-compatible endpoint ------------------
+# Format: s3:s3.<region>.backblazeb2.com/<bucket>   (NOT the native b2: backend)
+# Region (e.g. us-west-002) is shown on the bucket's Endpoint in the B2 console.
+BACKUP_B2_REPO=s3:s3.us-west-002.backblazeb2.com/cilantro-backup
+# AWS_ACCESS_KEY_ID = B2 application keyID (the APPEND-ONLY key, no deleteFiles).
+# AWS_SECRET_ACCESS_KEY = its applicationKey. The full-access key stays OFFLINE.
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+
+# --- monitoring: healthchecks.io dead-man's-switch (blank = disabled) -------
+# The run-after hook pings <url> on success and <url>/fail on failure, so you
+# get alerted when a backup is OVERDUE (laptop asleep / undocked / offline).
+BACKUP_HC_URL_B2=
+BACKUP_HC_URL_EXTERNAL=
+
+# --- desktop notifications --------------------------------------------------
+# BACKUP_NOTIFY: notify on FAILURE (1=on, 0=off). Success is silent by default
+# (the healthcheck ping is the success signal). Set BACKUP_NOTIFY_SUCCESS=1 to
+# also get a popup on every successful backup.
+BACKUP_NOTIFY=1
+BACKUP_NOTIFY_SUCCESS=0
+# NOTIFY_USER: whose GUI session receives notify-send
+NOTIFY_USER=zvi

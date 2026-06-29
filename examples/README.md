@@ -188,6 +188,34 @@ Alacritty config is not symlinked (users may customize fonts, opacity, etc.) but
 
 ---
 
+### [Backup Configuration Template](backup.local.template)
+
+Machine-specific config for the restic + resticprofile backup system (repo paths, Backblaze
+B2 keys, healthcheck URLs). Paired with `backup-includes.txt` / `backup-excludes.txt` (the
+restic filter lists).
+
+**Quick Setup:**
+```bash
+backup-init     # Copy template to ~/.backup.local
+vim ~/.backup.local
+backup-setup    # One-time guided install (restic, repos, systemd timers, kit)
+```
+
+**Key Features:**
+- Encrypted, deduplicated 3-2-1 backups: external HDD (dock-triggered) + Backblaze B2 (offsite)
+- Ransomware-resistant cloud (append-only B2 key + lifecycle rule)
+- age-encrypted offline emergency kit that breaks the cold-start recovery deadlock
+- Plain `KEY=value` format (consumed by both shell `source` and systemd `EnvironmentFile`)
+
+**Why This Exists:** `dev-setup` + dotfiles reproduce the toolchain, but not credentials,
+unpushed work, app/desktop state, network/VPN secrets, or personal files. This is that layer.
+
+**Best For:** Protecting against a bricked machine, disk failure, theft, or ransomware.
+
+See [docs/BACKUP_AND_RESTORE_GUIDE.md](../docs/BACKUP_AND_RESTORE_GUIDE.md) for the full guide.
+
+---
+
 ## Tool Verification
 
 ### [verify-tools.sh](../scripts/verify-tools.sh) ✔️

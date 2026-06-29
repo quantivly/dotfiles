@@ -1,0 +1,80 @@
+# restic --exclude-file — regenerable paths to skip on cilantro
+# =============================================================
+# Installed to /etc/restic/excludes.txt by backup-setup; referenced by
+# resticprofile/profiles.toml ([base.backup] exclude-file).
+#
+# Syntax: one pattern per line; a leading "/" anchors to the snapshot root;
+# "**" matches across directories. Full-line "#" comments and blank lines are
+# ignored. IMPORTANT: restic does NOT strip INLINE comments — a "# ..." after a
+# pattern becomes part of the pattern and silently disables the exclude. Keep
+# every comment on its own line.
+#
+# `exclude-caches = true` (set in profiles.toml) additionally skips any dir
+# containing a CACHEDIR.TAG. Rule of thumb: exclude ONLY cheaply regenerable
+# data. Never add ~/.ssh, ~/.gnupg, ~/.config, ~/.local/share/keyrings,
+# ~/.dotfiles, or ~/.config/AWSVPNClient.
+
+# --- top-level regenerable caches ---
+/home/zvi/.cache
+/home/zvi/.npm
+# reinstalled by `mise install`
+/home/zvi/.local/share/mise
+/home/zvi/.local/state
+# reinstalled by install-prerequisites.sh
+/home/zvi/.oh-my-zsh
+/home/zvi/.forgit
+# reinstalled by TPM
+/home/zvi/.tmux/plugins
+/home/zvi/.local/share/Trash
+# transient; delete this line if you keep important files in Downloads
+/home/zvi/Downloads
+
+# --- per-project regenerables (anywhere under home) ---
+**/node_modules
+**/.venv
+**/.direnv
+**/__pycache__
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+# Rust build output
+**/target
+**/.next
+**/.turbo
+**/dist
+**/build
+
+# --- browser caches (KEEP profiles/bookmarks; drop heavy caches) ---
+/home/zvi/.config/google-chrome/*/Cache
+/home/zvi/.config/google-chrome/*/Code Cache
+/home/zvi/.config/google-chrome/*/GPUCache
+/home/zvi/.config/google-chrome/*/Service Worker/CacheStorage
+/home/zvi/.config/BraveSoftware/*/*/Cache
+/home/zvi/.config/BraveSoftware/*/*/Code Cache
+/home/zvi/.config/BraveSoftware/*/*/GPUCache
+
+# --- VS Code (KEEP settings; drop caches + re-installable extensions) ---
+/home/zvi/.config/Code/Cache
+/home/zvi/.config/Code/CachedData
+/home/zvi/.config/Code/Service Worker/CacheStorage
+/home/zvi/.config/Code/logs
+# extension list is captured in the system manifest instead
+/home/zvi/.vscode/extensions
+
+# --- snap regenerables (snap app data lives in ~/snap; drop its caches) ---
+/home/zvi/snap/*/*/.cache
+/home/zvi/snap/*/common/.cache
+
+# --- container / VM images (huge, rebuildable) ---
+/home/zvi/.local/share/containers
+/home/zvi/.docker/desktop
+
+# --- swap / pseudo-filesystems (belt & suspenders; one-file-system covers too) ---
+/swap.img
+/proc
+/sys
+/dev
+/run
+/var/cache
+/var/tmp
+/tmp

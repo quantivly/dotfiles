@@ -1,0 +1,97 @@
+# resticprofile configuration — cilantro backup policy
+# =====================================================
+# Declarative orchestration for restic. resticprofile is the established wrapper
+# that owns scheduling (systemd timers), retention, checks and hooks so we write
+# almost no bespoke shell. https://creativeprojects.github.io/resticprofile
+#
+# This file is the PORTABLE, SECRET-FREE source of truth. `backup-setup` COPIES it
+# to /etc/resticprofile/profiles.toml, root-owned — it is NEVER symlinked, because
+# root runs the hooks below and a user-writable config would be a privilege-
+# escalation hole.
+#
+# Machine-specific values (repo URLs, B2 credentials, healthcheck URLs) come from
+# the ENVIRONMENT, supplied by /etc/restic/backup.local (see
+# examples/backup.local.template):
+#   - scheduled runs: injected via the systemd drop-in (EnvironmentFile) that
+#     backup-setup writes to /etc/restic/systemd-env.conf
+#   - manual runs:    `backup-now` sources that file before invoking resticprofile
+#
+# Format: v1 (the stable, documented resticprofile format).
+# After any edit, validate with:  resticprofile -c /etc/resticprofile/profiles.toml show
+
+# ---------------------------------------------------------------------------
+# base — shared settings inherited by every target
+# ---------------------------------------------------------------------------
+[base]
+  password-file = "{{ .Env.RESTIC_PASSWORD_FILE }}"
+
+  [base.backup]
+    # The paths to protect + what to skip. Both files are installed to /etc/restic
+    # by backup-setup from examples/backup-includes.txt and examples/backup-excludes.txt.
+    files-from = ["/etc/restic/includes.txt"]
+    exclude-file = ["/etc/restic/excludes.txt"]
+    # Stay on the root filesystem; skip any dir tagged with CACHEDIR.TAG.
+    one-file-system = true
+    exclude-caches = true
+    tag = ["cilantro"]
+    # Refresh the self-documenting system manifest just before each snapshot.
+    run-before = "/usr/local/bin/backup-manifest.sh"
+    # Desktop notification + healthchecks.io ping (the script reads $PROFILE_NAME).
+    run-after = "/usr/local/bin/restic-notify success"
+    run-after-fail = "/usr/local/bin/restic-notify fail"
+
+# ---------------------------------------------------------------------------
+# external — local copy on the docked HDD (full retention + prune; dock-triggered)
+# ---------------------------------------------------------------------------
+[external]
+  inherit = "base"
+  repository = "{{ .Env.BACKUP_EXTERNAL_REPO }}"
+
+  [external.backup]
+    # Profile tags OVERRIDE (don't merge with) base.backup's tag, so list both.
+    tag = ["cilantro", "external"]
+    # No schedule here — systemd/restic-backup-external.timer drives this every 6h and its
+    # ConditionPathExists runs it only when the HDD is docked. Immediate: backup-now external.
+
+  [external.retention]
+    after-backup = true
+    keep-daily = 7
+    keep-weekly = 4
+    keep-monthly = 12
+    keep-yearly = 3
+    keep-last = 3
+    prune = true
+
+# ---------------------------------------------------------------------------
+# b2 — offsite, append-only (ransomware-resistant). NO scheduled prune.
+# ---------------------------------------------------------------------------
+[b2]
+  inherit = "base"
+  repository = "{{ .Env.BACKUP_B2_REPO }}"
+
+  [b2.backup]
+    # Profile tags OVERRIDE (don't merge with) base.backup's tag, so list both.
+    tag = ["cilantro", "b2"]
+    schedule = "*-*-* 13:00:00"
+    schedule-permission = "system"
+    schedule-after-network-online = true
+    # Inject /etc/restic/backup.local (repo URL + AWS creds) into the generated unit.
+    systemd-drop-in-files = ["/etc/restic/systemd-env.conf"]
+    # No [b2.retention]: the timer's B2 key is append-only and CANNOT prune.
+    # Pruning happens rarely & manually via `backup-prune` with the offline full key;
+    # a B2 lifecycle rule (daysFromHidingToDeleting=30) reaps hidden versions.
+
+  [b2.check]
+    schedule = "Sun *-*-* 04:00:00"
+    schedule-permission = "system"
+    schedule-after-network-online = true
+    systemd-drop-in-files = ["/etc/restic/systemd-env.conf"]
+    # Verify ~1/10 of pack data each week → full coverage over ~10 weeks.
+    read-data-subset = "10%"
+
+# ---------------------------------------------------------------------------
+# group — `backup-now` runs both (b2 first so the offsite always completes,
+# even when the external HDD is not docked)
+# ---------------------------------------------------------------------------
+[groups]
+  cilantro = ["b2", "external"]
