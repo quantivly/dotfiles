@@ -78,8 +78,9 @@
     schedule = "*-*-* 08..22/2:00:00"
     schedule-permission = "system"
     schedule-after-network-online = true
-    # Inject /etc/restic/backup.local (repo URL + AWS creds) into the generated unit.
-    systemd-drop-in-files = ["/etc/restic/systemd-env.conf"]
+    # Env (repo URL + AWS creds) is loaded via an EnvironmentFile drop-in that
+    # backup-setup writes for the generated units — resticprofile's own
+    # systemd-drop-in-files did not reliably inject it for @-template units (DO-448).
     # No [b2.retention]: the timer's B2 key is append-only and CANNOT prune.
     # Pruning happens rarely & manually via `backup-prune` with the offline full key;
     # a B2 lifecycle rule (daysFromHidingToDeleting=30) reaps hidden versions.
@@ -88,7 +89,6 @@
     schedule = "Sun *-*-* 04:00:00"
     schedule-permission = "system"
     schedule-after-network-online = true
-    systemd-drop-in-files = ["/etc/restic/systemd-env.conf"]
     # Verify ~1/10 of pack data each week → full coverage over ~10 weeks.
     read-data-subset = "10%"
     # The notify hooks live under [base.backup], so they do NOT apply to this
