@@ -198,7 +198,10 @@ apply_workspaces() {
     # client does not provide on Linux).
     #   - dynamic-workspaces=false + num-workspaces=3 : three static workspaces
     #     (the third doubles as a parking spot for background apps)
-    #   - current-workspace-only=true : Alt+Tab lists only this workspace's apps
+    #   - current-workspace-only=true : both the app switcher (default Alt+Tab)
+    #     and the window switcher (Alt+`) list only this workspace's apps —
+    #     setting both keeps the parking trick working even if Alt+Tab is later
+    #     rebound from switch-applications to switch-windows
     #   - isolate-workspaces=true     : the dock shows only this workspace's apps
     #
     # No native rule pins an app to a workspace in stock GNOME, so move the
@@ -208,6 +211,7 @@ apply_workspaces() {
     gset org.gnome.mutter                        dynamic-workspaces     "false"
     gset org.gnome.desktop.wm.preferences        num-workspaces         "3"
     gset org.gnome.shell.app-switcher            current-workspace-only "true"
+    gset org.gnome.shell.window-switcher         current-workspace-only "true"
     gset org.gnome.shell.extensions.dash-to-dock isolate-workspaces     "true"
 }
 
