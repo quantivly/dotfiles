@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Fixed
+- **DO-452**: the verification canary (`backup-verify.sh`) now runs its read-only `restic ls`
+  / `restore` with `--no-lock`, so it no longer takes a repo lock that blocked the structural
+  `restic check` in `backup-drill` (the check was being skipped rather than run). Added a
+  `backup-unlock [b2|external] [--force]` command to clear stale restic locks after an
+  interrupted run.
 - **DO-451**: `backup-drill` no longer reports a false "DRILL FAILED" when a backup is running
   concurrently. `restic check` needs an exclusive lock, which collides with the every-2h
   backup; the drill now passes `--retry-lock 2m` and treats a still-held lock as "repo busy /
