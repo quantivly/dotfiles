@@ -8,6 +8,7 @@
 #   - Dock:        floating, autohiding, centered at the bottom, decluttered
 #   - Desktop:     all icons hidden (ding kept enabled, just invisible)
 #   - Keybindings: free Ctrl+Alt+Arrow for tmux pane-resize (GNOME -> Super-based)
+#   - Workspaces:  fixed count, per-workspace Alt+Tab & dock (park always-on apps)
 #
 # The committed settings here are the *portable core* (the source of truth).
 # Machine-specific bits (dock favorites, custom launch keys) live in
@@ -188,6 +189,32 @@ apply_keybindings() {
     gset "$schema" switch-to-workspace-down  "@as []"
 }
 
+apply_workspaces() {
+    # Fixed workspaces with per-workspace Alt+Tab and dock. This lets an
+    # always-on window that must stay running — e.g. the AWS VPN Client, whose
+    # tunnel drops the moment its GUI is closed — sit parked on a spare
+    # workspace and vanish from Alt+Tab and the dock on the workspaces you
+    # actually work in (the closest you can get to a tray icon, which the AWS
+    # client does not provide on Linux).
+    #   - dynamic-workspaces=false + num-workspaces=3 : three static workspaces
+    #     (the third doubles as a parking spot for background apps)
+    #   - current-workspace-only=true : both the app switcher (default Alt+Tab)
+    #     and the window switcher (Alt+`) list only this workspace's apps —
+    #     setting both keeps the parking trick working even if Alt+Tab is later
+    #     rebound from switch-applications to switch-windows
+    #   - isolate-workspaces=true     : the dock shows only this workspace's apps
+    #
+    # No native rule pins an app to a workspace in stock GNOME, so move the
+    # parked window there once per session (right-click title bar → Move to
+    # Workspace, or drag it in the Overview).
+    log STEP "Workspaces — fixed count, per-workspace Alt+Tab & dock"
+    gset org.gnome.mutter                        dynamic-workspaces     "false"
+    gset org.gnome.desktop.wm.preferences        num-workspaces         "3"
+    gset org.gnome.shell.app-switcher            current-workspace-only "true"
+    gset org.gnome.shell.window-switcher         current-workspace-only "true"
+    gset org.gnome.shell.extensions.dash-to-dock isolate-workspaces     "true"
+}
+
 apply_local_overrides() {
     [[ -f "$LOCAL_OVERRIDES" ]] || return 0
     log STEP "Machine-specific overrides (~/.gnome-settings.local)"
@@ -211,6 +238,7 @@ main() {
     apply_dock
     apply_desktop
     apply_keybindings
+    apply_workspaces
     apply_local_overrides
 
     log STEP "Done"
