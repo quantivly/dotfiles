@@ -238,6 +238,26 @@ nautilus -q           # relaunch Files to clear the stale view (if open)
 
 The guard performs the underlying repair — (1) remove the broken self-referential symlinks (no data; the targets never existed), (2) `mkdir` the real directories, (3) `xdg-user-dirs-update --set` each XDG slot back to `$HOME/<Name>`. Once every standard XDG slot exists as a real directory and `user-dirs.dirs` points at them, the cycle is broken for good: `xdg-user-dirs-update` becomes a no-op and `snapd-desktop-integration` creates normal sandbox symlinks instead of broken ones. Keeping every slot — even unused ones — as a real (possibly empty) directory is what prevents recurrence; empty folders are harmless and desktop icons are hidden by the curated GNOME config.
 
+## AWS VPN Client clutters the workspace / won't minimize to a tray
+
+**Symptom:** The AWS VPN Client (`awsvpnclient`) window sits in Alt+Tab and the dock all day. Clicking its **✕** prompts "Are you sure you want to disconnect and quit the app?" — closing it drops the VPN. There is no minimize-to-tray option.
+
+**Cause:** The client is split into a root systemd service (`awsvpnclient.service` → `ACVC.GTK.Service`) that owns the `acvc-openvpn` tunnel, plus a user GUI that drives it over a private D-Bus socket. The **GUI owns the session lifecycle**: quitting it — or even `kill -9` of the process — tears down `tun0` and all routes (verified: the root daemon keeps running, but the tunnel drops). The app also bundles no AppIndicator/StatusNotifier libraries, so it cannot show a tray icon even though Ubuntu's GNOME ships AppIndicator support.
+
+**Fix:** Keep the GUI running; hide the *window* by parking it on a spare workspace. The curated GNOME config already sets fixed workspaces + per-workspace Alt+Tab and dock (`scripts/apply-gnome-settings.sh`, `apply_workspaces`), so a parked window disappears from both on the workspaces you work in while staying connected:
+```bash
+gnome-apply          # fixed 3 workspaces + current-workspace-only + dock isolate-workspaces
+```
+Then move the window to the spare workspace (right-click title bar → **Move to Workspace**, or drag it in the Overview). Stock GNOME has no rule to auto-pin an app to a workspace, so repeat this once after each reconnect.
+
+**Verify the tunnel (not the window):**
+```bash
+pgrep -a acvc-openvpn                       # tunnel process alive?
+ip route | grep -E 'tun0|0\.0\.0\.0/1'      # VPN routes present = connected
+```
+
+**Dead ends:** `kdocker`/`alltray` reparent X11 windows — useless on this Wayland session. Importing the endpoint into NetworkManager won't work either, since it uses federated/SSO (SAML) auth that a plain NM OpenVPN profile can't replicate.
+
 ## Syntax errors
 
 ```bash
