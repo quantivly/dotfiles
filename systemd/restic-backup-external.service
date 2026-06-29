@@ -1,0 +1,26 @@
+# systemd/restic-backup-external.service
+# ======================================
+# Oneshot that backs up to the external HDD via resticprofile's `external` profile.
+# Driven by restic-backup-external.timer; the ConditionPathExists below gates it
+# to run ONLY when the drive is docked (clean no-op otherwise). Also runnable on
+# demand: `sudo systemctl start restic-backup-external.service`, or `backup-now
+# external`. Installed to /etc/systemd/system/ by setup-backup.sh.
+#
+# Runs as root (to read /etc + the keyring) and loads repo URLs/creds from the
+# same EnvironmentFile the scheduled timers use. Nice/idle so it never makes the
+# laptop sluggish.
+
+[Unit]
+Description=restic backup to external HDD (dock-triggered)
+After=network-online.target
+# Don't fight a backup that's already running to the same repo.
+ConditionPathExists=/media/zvi/Backup/restic/config
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+EnvironmentFile=/etc/restic/backup.local
+ExecStart=/usr/local/bin/resticprofile -c /etc/resticprofile/profiles.toml --name external backup
+TimeoutStartSec=6h

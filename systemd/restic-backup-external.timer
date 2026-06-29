@@ -1,0 +1,26 @@
+# systemd/restic-backup-external.timer
+# =====================================
+# Periodically starts restic-backup-external.service, which is gated by a
+# ConditionPathExists on the repo's config file — so it backs up only when the
+# drive is docked, and is a clean no-op (condition not met) otherwise.
+# Installed + enabled by scripts/setup-backup.sh.
+#
+# WHY a timer and not a .path unit: a systemd PathExists path-unit retriggers a
+# oneshot service in a tight loop for as long as the watched file exists (the
+# service exits, the path still exists, so it fires again…), which hammers the
+# disk and spams notifications. A timer + ConditionPathExists is the robust,
+# loop-free equivalent. For an immediate backup after docking, run
+# `backup-now external` (or `sudo systemctl start restic-backup-external.service`).
+
+[Unit]
+Description=Periodic restic backup to external HDD (runs only when docked)
+
+[Timer]
+# Every 6 hours; Persistent catches up a missed run after the laptop wakes/boots.
+OnCalendar=00/6:00:00
+RandomizedDelaySec=5m
+Persistent=true
+Unit=restic-backup-external.service
+
+[Install]
+WantedBy=timers.target

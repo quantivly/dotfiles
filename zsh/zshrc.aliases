@@ -247,3 +247,30 @@ alias gnome-init='
     echo "  See guide: ~/.dotfiles/docs/GNOME_CONFIGURATION_GUIDE.md"
   fi
 '
+
+#==============================================================================
+# Backup & restore (restic + resticprofile)
+#==============================================================================
+# Encrypted 3-2-1 backups to an external HDD + Backblaze B2. backup-init drops the
+# machine-specific config; backup-setup does the one-time install (restic, repos,
+# systemd timers, LUKS header, emergency kit). backup-now / backup-status and the
+# other backup-* helpers are functions in zsh/functions/system.sh.
+# See ~/.dotfiles/docs/BACKUP_AND_RESTORE_GUIDE.md.
+
+# Initialize machine-specific backup config (repo URLs, B2 creds, healthcheck URLs)
+alias backup-init='
+  if [ -f ~/.backup.local ]; then
+    echo "⚠️  ~/.backup.local already exists! Backup first:"
+    echo "   cp ~/.backup.local ~/.backup.local.backup"
+  else
+    cp ~/.dotfiles/examples/backup.local.template ~/.backup.local
+    chmod 600 ~/.backup.local
+    echo "✓ Created ~/.backup.local from template"
+    echo "  Edit it (repo paths, B2 keys, healthcheck URLs): \${EDITOR:-vim} ~/.backup.local"
+    echo "  Then run the one-time setup: backup-setup"
+    echo "  See guide: ~/.dotfiles/docs/BACKUP_AND_RESTORE_GUIDE.md"
+  fi
+'
+
+# One-time guided installer (installs restic+resticprofile, repos, timers, kit)
+alias backup-setup='bash ~/.dotfiles/scripts/setup-backup.sh'

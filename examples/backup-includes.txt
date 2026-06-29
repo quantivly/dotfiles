@@ -1,0 +1,39 @@
+# restic --files-from list — what to back up on cilantro
+# =======================================================
+# Installed to /etc/restic/includes.txt by backup-setup; referenced by
+# resticprofile/profiles.toml ([base.backup] files-from). One path per line.
+#
+# IMPORTANT: restic --files-from skips blank lines and full-line "#" comments,
+# but an INLINE comment after a path becomes PART of the path (restic then
+# reports "does not match any files"). Keep every comment on its own line.
+#
+# Philosophy: with ~15 GB of real data on a 1.8 TB-free disk, err toward
+# OVER-inclusion. Everything regenerable is dropped in backup-excludes.txt.
+# The backup runs as ROOT so the root-only /etc bits below are readable.
+
+# The whole home (minus excludes)
+/home/zvi
+
+# --- curated /etc slice (machine identity & secrets not in dev-setup/dotfiles) ---
+# WiFi/VPN PSKs (root 0600)
+/etc/NetworkManager/system-connections
+/etc/hosts
+# kernel tuning drop-ins (Elasticsearch/Redis etc.)
+/etc/sysctl.d
+# third-party apt repos (Chrome/Docker/...) and their signing keys
+/etc/apt/sources.list.d
+/etc/apt/keyrings
+# custom units (incl. awsvpnclient.service)
+/etc/systemd/system
+
+# --- reference only: DO NOT restore these onto a fresh install (new UUIDs) ---
+# Captured for reference; the installer writes correct ones. See the guide.
+/etc/fstab
+/etc/crypttab
+
+# --- manually-installed apps not reprovisioned by dev-setup ---
+# AWS VPN Client (internal network access)
+/opt/awsvpnclient
+
+# --- self-documenting system manifest (regenerated each run) ---
+/var/backups/system-manifest.txt
