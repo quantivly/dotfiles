@@ -72,7 +72,10 @@
   [b2.backup]
     # Profile tags OVERRIDE (don't merge with) base.backup's tag, so list both.
     tag = ["cilantro", "b2"]
-    schedule = "*-*-* 13:00:00"
+    # Every 2h, 08:00–22:00 (~2h offsite RPO). Persistent catches up a missed run
+    # after sleep/off; nights are quiet. restic is incremental, so each run is a
+    # small delta. (Daily was the original; raised in DO-447.)
+    schedule = "*-*-* 08..22/2:00:00"
     schedule-permission = "system"
     schedule-after-network-online = true
     # Inject /etc/restic/backup.local (repo URL + AWS creds) into the generated unit.
