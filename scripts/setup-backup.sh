@@ -31,7 +31,6 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ETC_RESTIC="/etc/restic"
 REPO_KEY="${ETC_RESTIC}/repo.key"
 ENV_FILE="${ETC_RESTIC}/backup.local"
-DROP_IN="${ETC_RESTIC}/systemd-env.conf"
 RP_DIR="/etc/resticprofile"
 RP_CONFIG="${RP_DIR}/profiles.toml"
 USER_CONFIG="${HOME}/.backup.local"
@@ -160,11 +159,6 @@ install_configs() {
   sudo install -m 600 -o root -g root "$USER_CONFIG" "$ENV_FILE"
   log SUCCESS "$USER_CONFIG → $ENV_FILE (root 0600)"
 
-  # systemd drop-in so resticprofile's generated units load the env file.
-  printf '[Service]\nEnvironmentFile=%s\n' "$ENV_FILE" | sudo tee "$DROP_IN" >/dev/null
-  sudo chmod 644 "$DROP_IN"
-  log SUCCESS "systemd EnvironmentFile drop-in → $DROP_IN"
-
   # resticprofile config — COPIED root-owned (root runs its hooks; a user-writable
   # config executed by root would be a privilege-escalation hole).
   sudo install -d -m 755 "$RP_DIR"
@@ -251,6 +245,18 @@ install_schedules() {
   else
     log WARNING "Scheduling failed — check 'resticprofile -c $RP_CONFIG schedule --all'."
   fi
+
+  # resticprofile's systemd-drop-in-files does NOT reliably inject an EnvironmentFile
+  # into its generated @-template units (DO-448), so wire it in explicitly — otherwise
+  # the scheduled services run with an empty env and {{ .Env.* }} renders "<no value>"
+  # ("repository does not exist").
+  for tmpl in resticprofile-backup resticprofile-check; do
+    sudo install -d -m 755 "/etc/systemd/system/${tmpl}@.service.d"
+    printf '[Service]\nEnvironmentFile=%s\n' "$ENV_FILE" \
+      | sudo tee "/etc/systemd/system/${tmpl}@.service.d/10-backup-env.conf" >/dev/null
+  done
+  sudo systemctl daemon-reload
+  log SUCCESS "EnvironmentFile drop-in wired into scheduled backup/check services."
 
   # External backup: a timer drives a ConditionPathExists-gated oneshot, so it
   # backs up only when the drive is docked (loop-free; no .path unit).
