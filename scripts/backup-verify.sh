@@ -75,7 +75,10 @@ say "=== backup-verify ($TARGET) — $(date -Is) ==="
 # Repo unreachable (offline / HDD not docked) is NOT a verification failure —
 # skip silently so the weekly timer doesn't cry wolf on a plane. The backup
 # timers' own healthchecks already alert when backups themselves go overdue.
-if ! restic cat config >/dev/null 2>&1; then
+# Every restic call here is READ-ONLY and uses --no-lock: the canary must not
+# take a repo lock, or it would block a concurrent `restic check` (e.g. the one
+# backup-drill runs right after) and the integrity check would be skipped.
+if ! restic cat config --no-lock >/dev/null 2>&1; then
   say "repo unreachable (offline / not docked) — skipping verification (not a failure)."
   exit 0
 fi
@@ -83,8 +86,7 @@ fi
 # --- 1. content canary ------------------------------------------------------
 say "Content canary (critical paths present in latest snapshot):"
 for p in "${CANARY_PATHS[@]}"; do
-  if restic ls latest "$p" >/dev/null 2>&1 \
-       && [[ -n "$(restic ls latest "$p" 2>/dev/null | head -1)" ]]; then
+  if [[ -n "$(restic ls --no-lock latest "$p" 2>/dev/null | head -1)" ]]; then
     pass "$p"
   else
     fail "$p MISSING from latest snapshot"
@@ -95,7 +97,7 @@ done
 say "Restore canary (restore + verify one file):"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/backup-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-if restic restore latest --include "$MANIFEST" --target "$tmp" >/dev/null 2>&1 \
+if restic restore --no-lock latest --include "$MANIFEST" --target "$tmp" >/dev/null 2>&1 \
      && [[ -s "$tmp$MANIFEST" ]]; then
   pass "restored $MANIFEST ($(wc -c <"$tmp$MANIFEST" | tr -d ' ') bytes)"
 else

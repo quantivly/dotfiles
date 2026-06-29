@@ -129,6 +129,7 @@ are for on-demand use and inspection.
 | `backup-restore [b2\|external]` | Guided restore to `~/restore-<ts>/` |
 | `backup-restore-system [b2\|external] [--in-place]` | **Guarded** restore of the `/etc` slice + AWS VPN client; always excludes `fstab`/`crypttab`/`machine-id`/`ssh_host_*` so it can't break boot |
 | `backup-mount [b2\|external]` | Browse a repo via FUSE (`~/backup-mnt`) |
+| `backup-unlock [b2\|external] [--force]` | Clear stale restic locks after an interrupted run (`--force` removes all — only when idle) |
 | `backup-prune` | Prune B2 with the offline full key |
 | `backup-luks-header` | Re-take the LUKS header backup |
 | `backup-kit` | Emergency-kit status + reminder |
@@ -231,7 +232,7 @@ Backups you've never restored aren't backups. Maintain this regimen:
 | `backup-doctor` reports "config drift" | The live `/etc` copy diverged from `~/.dotfiles` (e.g. you `git pull`ed a policy change but didn't redeploy). Re-run `backup-setup` to resync, or commit the local edit. |
 | `backup-doctor` warns "alerting INERT" | `BACKUP_HC_URL_B2`/`BACKUP_HC_URL_VERIFY` are blank — create checks at healthchecks.io and set them in `~/.backup.local`, then re-run `backup-setup`. |
 | Verification failed (`restic-verify`) | A critical path fell out of the snapshot (regressed exclude) or a restore failed. `journalctl -u restic-verify.service`, then `backup-drill` to reproduce. A genuine completeness regression — fix the include/exclude and re-run `backup-now`. |
-| `backup-drill` says "repo is busy" / lock error | A backup was running (`restic check` needs an exclusive lock; backups run every 2h). Harmless — the content + restore canary already passed. The drill waits 2 min for the lock; re-run when idle for the structural check, or check the scheduled weekly `[b2.check]` instead. |
+| `backup-drill` says "repo is busy" / lock error | A real backup was running (`restic check` needs an exclusive lock; backups run every 2h). Harmless — the content + restore canary already passed. The drill waits 2 min; re-run when idle, or rely on the scheduled weekly `[b2.check]`. The canary itself is `--no-lock`, so it never causes this. If a lock lingers after an interrupted run, clear it with `backup-unlock` (or `backup-unlock <target> --force` when you're sure nothing's running). |
 
 ## See also
 

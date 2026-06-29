@@ -478,6 +478,7 @@ gnome-restore() {
 #   - backup-drill:        Prove the backup is COMPLETE + RESTORABLE (content + restore canary)
 #   - backup-mount:        Browse a repo via FUSE (~/backup-mnt)
 #   - backup-unmount:      Unmount the FUSE browse mount
+#   - backup-unlock:       Clear stale restic locks after an interrupted run
 #   - backup-prune:        Prune B2 with the OFFLINE full key (append-only key can't)
 #   - backup-luks-header:  Re-take the LUKS header backup
 #   - backup-kit:          Emergency-kit status + reminder
@@ -865,4 +866,26 @@ backup-drill() {
   fi
   echo "✗ Drill FAILED (verify=$v, check=$c) — investigate before trusting '$target'." >&2
   return 1
+}
+
+# Remove restic locks from a target repo after an interrupted run. Plain unlock
+# removes only locks restic deems stale; --force removes ALL locks and must be used
+# ONLY when no backup/check is running (it can corrupt a concurrent operation).
+backup-unlock() {
+  # Usage: backup-unlock [b2|external] [--force]
+  local target="b2" force=0 a
+  for a in "$@"; do
+    case "$a" in
+      b2|external) target="$a" ;;
+      --force)     force=1 ;;
+      *) echo "usage: backup-unlock [b2|external] [--force]" >&2; return 2 ;;
+    esac
+  done
+  if (( force )); then
+    confirm "Remove ALL locks on '$target'? Do this ONLY if no backup/check is running (it can corrupt a live run)." || return 1
+    _backup_restic "$target" unlock --remove-all && echo "✓ Removed all locks on $target."
+  else
+    _backup_restic "$target" unlock \
+      && echo "✓ Cleared stale locks on $target (use 'backup-unlock $target --force' for a stubborn lock when idle)."
+  fi
 }
