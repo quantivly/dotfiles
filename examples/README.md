@@ -205,6 +205,8 @@ backup-setup    # One-time guided install (restic, repos, systemd timers, kit)
 - Encrypted, deduplicated 3-2-1 backups: external HDD (dock-triggered) + Backblaze B2 (offsite)
 - Ransomware-resistant cloud (append-only B2 key + lifecycle rule)
 - age-encrypted offline emergency kit that breaks the cold-start recovery deadlock
+- Self-verifying: `backup-doctor` audits the whole chain; a weekly canary proves backups stay
+  complete + restorable; `backup-drill` is the on-demand proof-of-restore
 - Plain `KEY=value` format (consumed by both shell `source` and systemd `EnvironmentFile`)
 
 **Why This Exists:** `dev-setup` + dotfiles reproduce the toolchain, but not credentials,

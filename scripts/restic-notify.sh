@@ -36,6 +36,7 @@ hc_url=""
 case "$PROFILE" in
   b2)       hc_url="${BACKUP_HC_URL_B2:-}" ;;
   external) hc_url="${BACKUP_HC_URL_EXTERNAL:-}" ;;
+  verify)   hc_url="${BACKUP_HC_URL_VERIFY:-}" ;;   # backup-verify.sh dead-man's switch
 esac
 if [[ -n "$hc_url" ]] && command -v curl >/dev/null 2>&1; then
   [[ "$STATUS" == "fail" ]] && hc_url="${hc_url%/}/fail"

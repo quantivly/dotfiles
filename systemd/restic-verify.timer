@@ -1,0 +1,21 @@
+# systemd/restic-verify.timer
+# ============================
+# Runs restic-verify.service weekly. The service probes the repo first and skips
+# cleanly when offline, so a verification failure means a REAL completeness or
+# restorability problem — not "the laptop was on a plane". Persistent catches up
+# a missed run after the laptop wakes/boots.
+#
+# Installed + enabled by scripts/setup-backup.sh. On-demand: `backup-drill`.
+
+[Unit]
+Description=Weekly restic backup verification (content + restore canary)
+
+[Timer]
+# Weekly, offset from the Sunday-04:00 [b2.check] so they don't pile up.
+OnCalendar=Mon *-*-* 05:00:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=restic-verify.service
+
+[Install]
+WantedBy=timers.target

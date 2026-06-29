@@ -15,12 +15,12 @@
 #   2.  Generate the restic repo key  → /etc/restic/repo.key  (+ store in Bitwarden)
 #   3.  Lay down /etc/restic + /etc/resticprofile (configs COPIED, never symlinked)
 #   4.  restic init the external + B2 repositories
-#   5.  Install systemd timers (via `resticprofile schedule`) + the dock trigger
+#   5.  Install systemd timers (backup, dock trigger, weekly verification)
 #   6.  Guide the ransomware-resistant B2 key + lifecycle setup
-#   7.  Install Timeshift (local file-level rollback)
-#   8.  Back up the LUKS header
+#   7.  Install Timeshift (+ optional apt pre-upgrade autosnap)
+#   8.  Back up the LUKS header (re-taken when stale)
 #   9.  Build the offline emergency kit (age)
-#   10. Validate + dry-run
+#   10. Validate + dry-run + alerting check (run `backup-doctor` to confirm)
 #
 # See docs/BACKUP_AND_RESTORE_GUIDE.md for the full picture.
 
@@ -165,10 +165,11 @@ install_configs() {
   sudo install -m 644 -o root -g root "$DOTFILES/resticprofile/profiles.toml" "$RP_CONFIG"
   log SUCCESS "profiles.toml → $RP_CONFIG (root-owned copy)"
 
-  # Hook scripts on the root PATH.
+  # Hook + helper scripts on the root PATH.
   sudo install -m 755 "$DOTFILES/scripts/backup-manifest.sh" /usr/local/bin/backup-manifest.sh
   sudo install -m 755 "$DOTFILES/scripts/restic-notify.sh"   /usr/local/bin/restic-notify
-  log SUCCESS "backup-manifest.sh / restic-notify → /usr/local/bin"
+  sudo install -m 755 "$DOTFILES/scripts/backup-verify.sh"   /usr/local/bin/backup-verify.sh
+  log SUCCESS "backup-manifest.sh / restic-notify / backup-verify.sh → /usr/local/bin"
 }
 
 # Run resticprofile as root with the config env available (for {{ .Env.* }}).
@@ -274,6 +275,17 @@ install_schedules() {
   else
     log WARNING "Could not enable restic-backup-external.timer."
   fi
+
+  # Weekly verification (content + restore canary), DECOUPLED from [b2.check] so a
+  # verify failure can never abort the integrity check (independent failure domains).
+  sudo install -m 644 "$DOTFILES/systemd/restic-verify.service" /etc/systemd/system/restic-verify.service
+  sudo install -m 644 "$DOTFILES/systemd/restic-verify.timer"   /etc/systemd/system/restic-verify.timer
+  sudo systemctl daemon-reload
+  if sudo systemctl enable --now restic-verify.timer; then
+    log SUCCESS "Verification timer armed (weekly; proves backups are complete + restorable). On demand: backup-drill."
+  else
+    log WARNING "Could not enable restic-verify.timer."
+  fi
 }
 
 # ===========================================================================
@@ -319,6 +331,20 @@ install_timeshift() {
   log WARNING "Timeshift on this LVM-on-LUKS layout is for FILE-LEVEL rollback only —"
   log WARNING "do NOT rely on it for bare-metal restore (known LVM-on-LUKS restore bug)."
   log INFO "Configure snapshots + schedule in the Timeshift GUI (RSYNC mode; exclude the same caches)."
+
+  # Optional: auto-snapshot before every apt transaction (one-click rollback of a
+  # bad upgrade). Opt-in + low priority — the brick was hardware, not a bad upgrade,
+  # and Timeshift can't help a dead disk. timeshift-autosnap may need a PPA, so skip
+  # gracefully if apt can't find it.
+  if has_command timeshift && ! dpkg -s timeshift-autosnap >/dev/null 2>&1; then
+    if confirm "Also auto-snapshot before every apt upgrade (install timeshift-autosnap)?"; then
+      if sudo apt-get install -y timeshift-autosnap 2>/dev/null; then
+        log SUCCESS "timeshift-autosnap installed — snapshots run before apt operations."
+      else
+        log WARNING "timeshift-autosnap not available via apt — skipping (optional; needs a PPA on Ubuntu)."
+      fi
+    fi
+  fi
 }
 
 # ===========================================================================
@@ -333,13 +359,27 @@ backup_luks_header() {
     return 0
   fi
   local out; out="/root/luks-header-$(hostname).img"
+  local stale=0
   if sudo test -s "$out"; then
-    log SUCCESS "LUKS header backup already exists at $out."
+    local agedays; agedays=$(( ( $(date +%s) - $(sudo stat -c %Y "$out") ) / 86400 ))
+    if (( agedays > 180 )); then
+      log WARNING "LUKS header backup is ${agedays}d old — re-taking (a passphrase change would make it stale)."
+      stale=1
+    else
+      log SUCCESS "LUKS header backup exists at $out (${agedays}d old)."
+    fi
   else
+    stale=1
+  fi
+  if (( stale )); then
+    # cryptsetup refuses to overwrite, so write to .new and swap — never lose the
+    # existing good header if the re-take fails.
     log INFO "Backing up LUKS header of $dev → $out"
-    if sudo cryptsetup luksHeaderBackup "$dev" --header-backup-file "$out"; then
+    if sudo cryptsetup luksHeaderBackup "$dev" --header-backup-file "${out}.new"; then
+      sudo mv -f "${out}.new" "$out"
       log SUCCESS "LUKS header saved."
     else
+      sudo rm -f "${out}.new" 2>/dev/null || true
       log WARNING "Header backup failed."
     fi
   fi
@@ -406,9 +446,18 @@ final_checks() {
     log INFO "Dry-run backup to B2 (no data written)…"
     rp -n b2 backup --dry-run --verbose || log WARNING "Dry-run reported an issue — review above."
   fi
+
+  # Make the alerting non-theoretical: a blank dead-man's-switch URL means you will
+  # NOT be told when backups/verification stop — the silent-failure trap.
+  if [[ -z "${BACKUP_HC_URL_B2:-}" || -z "${BACKUP_HC_URL_VERIFY:-}" ]]; then
+    log WARNING "Healthcheck URL(s) blank in ~/.backup.local — overdue-backup/verify alerting is INERT."
+    log WARNING "Create checks at https://healthchecks.io, set BACKUP_HC_URL_B2 / BACKUP_HC_URL_VERIFY, then re-run."
+  fi
+
   echo
   log SUCCESS "Backup setup complete."
   log INFO "Next: dock the 'Backup' HDD (auto-runs external) • check 'backup-status' • 'systemctl list-timers'"
+  log INFO "Verify the whole chain:  backup-doctor   •   prove a restore works:  backup-drill"
   log INFO "Finish the offline kit (step 9) and read docs/BACKUP_AND_RESTORE_GUIDE.md (run a restore drill!)."
 }
 

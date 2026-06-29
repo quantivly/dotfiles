@@ -495,6 +495,7 @@ app/desktop state, network/VPN secrets, personal files.
 backup-init    # Create ~/.backup.local (repo paths, B2 keys, healthcheck URLs)
 backup-setup   # One-time guided install (restic, repos, systemd timers, kit)
 backup-now     # Run a backup now;  backup-status / backup-restore to inspect & recover
+backup-doctor  # Is the whole chain correct?   backup-drill  # Prove a restore works
 ```
 
 **What you get:**
@@ -504,6 +505,8 @@ backup-now     # Run a backup now;  backup-status / backup-restore to inspect & 
 - **Offline emergency kit** - age-encrypted; breaks the cold-start recovery deadlock
 - **Local rollback** - Timeshift for bad upgrades; LUKS header backup
 - **Monitored** - healthchecks.io dead-man's-switch alerts when a backup is overdue
+- **Self-verifying** - `backup-doctor` audits the chain; a weekly canary proves backups stay
+  complete + restorable; `backup-restore-system` guards the `/etc` restore against breaking boot
 
 See the [Backup & Restore Guide](docs/BACKUP_AND_RESTORE_GUIDE.md) for setup, the disaster-recovery runbook, and verification drills.
 
