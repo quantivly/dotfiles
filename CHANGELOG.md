@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Fixed
+- **DO-451**: `backup-drill` no longer reports a false "DRILL FAILED" when a backup is running
+  concurrently. `restic check` needs an exclusive lock, which collides with the every-2h
+  backup; the drill now passes `--retry-lock 2m` and treats a still-held lock as "repo busy /
+  skipped" rather than an integrity failure (the content + restore canary already proves
+  restorability).
 - **DO-450**: `backup-doctor` fixes found in live verification — its disk-space check used
   `df` (aliased to `duf`) so it silently printed nothing; now uses `command df -P` to bypass
   the alias. Also stops false-warning when `emergency-kit.age` isn't in `$HOME` (it's meant to

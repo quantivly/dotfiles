@@ -845,7 +845,17 @@ backup-drill() {
   echo "=== backup-drill ($target) ==="
   sudo "$vscript" "$target"; v=$?
   echo "Structural integrity check ($target)…"
-  _backup_restic "$target" check; c=$?
+  # `check` needs an EXCLUSIVE lock, so it collides with a concurrent backup
+  # (every 2h) or the drill's own restore canary. --retry-lock waits it out; if the
+  # repo is still busy after that, that's "busy", NOT an integrity failure — don't
+  # cry wolf (the content + restore canary above already proved restorability).
+  local checkout
+  checkout="$(_backup_restic "$target" check --retry-lock 2m 2>&1)"; c=$?
+  printf '%s\n' "$checkout"
+  if (( c != 0 )) && grep -qiE 'already locked|unable to create lock' <<<"$checkout"; then
+    echo "ℹ Structural check skipped — repo is busy (a backup is running). Re-run when idle; the canary already passed."
+    c=0
+  fi
   echo
   if [[ $v -eq 0 && $c -eq 0 ]]; then
     echo "✓ Drill passed — restore proven for '$target'."

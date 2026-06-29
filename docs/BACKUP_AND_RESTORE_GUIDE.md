@@ -231,6 +231,7 @@ Backups you've never restored aren't backups. Maintain this regimen:
 | `backup-doctor` reports "config drift" | The live `/etc` copy diverged from `~/.dotfiles` (e.g. you `git pull`ed a policy change but didn't redeploy). Re-run `backup-setup` to resync, or commit the local edit. |
 | `backup-doctor` warns "alerting INERT" | `BACKUP_HC_URL_B2`/`BACKUP_HC_URL_VERIFY` are blank — create checks at healthchecks.io and set them in `~/.backup.local`, then re-run `backup-setup`. |
 | Verification failed (`restic-verify`) | A critical path fell out of the snapshot (regressed exclude) or a restore failed. `journalctl -u restic-verify.service`, then `backup-drill` to reproduce. A genuine completeness regression — fix the include/exclude and re-run `backup-now`. |
+| `backup-drill` says "repo is busy" / lock error | A backup was running (`restic check` needs an exclusive lock; backups run every 2h). Harmless — the content + restore canary already passed. The drill waits 2 min for the lock; re-run when idle for the structural check, or check the scheduled weekly `[b2.check]` instead. |
 
 ## See also
 
