@@ -88,6 +88,11 @@
     systemd-drop-in-files = ["/etc/restic/systemd-env.conf"]
     # Verify ~1/10 of pack data each week → full coverage over ~10 weeks.
     read-data-subset = "10%"
+    # The notify hooks live under [base.backup], so they do NOT apply to this
+    # check command. Wire the failure hook here too — otherwise a check that
+    # detects corruption/tampering would fail SILENTLY (no healthchecks ping, no
+    # desktop alert), defeating the point of scheduled integrity verification.
+    run-after-fail = "/usr/local/bin/restic-notify fail"
 
 # ---------------------------------------------------------------------------
 # group — `backup-now` runs both (b2 first so the offsite always completes,

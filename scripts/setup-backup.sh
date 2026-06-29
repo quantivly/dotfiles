@@ -178,32 +178,42 @@ install_configs() {
 }
 
 # Run resticprofile as root with the config env available (for {{ .Env.* }}).
+# Source /etc/restic/backup.local INSIDE the root shell (already written by
+# install_configs) rather than passing creds on the command line, so the B2
+# secret never shows up in `ps`/`/proc`. Mirrors _backup_rp in system.sh.
 rp() {
-  sudo env \
-    "RESTIC_PASSWORD_FILE=${RESTIC_PASSWORD_FILE:-$REPO_KEY}" \
-    "RESTIC_COMPRESSION=${RESTIC_COMPRESSION:-auto}" \
-    "BACKUP_EXTERNAL_REPO=${BACKUP_EXTERNAL_REPO:-}" \
-    "BACKUP_B2_REPO=${BACKUP_B2_REPO:-}" \
-    "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}" \
-    "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}" \
-    resticprofile -c "$RP_CONFIG" "$@"
+  sudo bash -c '
+    set -a; . /etc/restic/backup.local 2>/dev/null; set +a
+    : "${RESTIC_PASSWORD_FILE:=/etc/restic/repo.key}"
+    : "${RESTIC_COMPRESSION:=auto}"
+    export RESTIC_PASSWORD_FILE RESTIC_COMPRESSION
+    cfg="$1"; shift
+    exec resticprofile -c "$cfg" "$@"' _ "$RP_CONFIG" "$@"
 }
 
-# restic init helper (idempotent): $1 = label, $2 = repository
+# restic init helper (idempotent): $1 = label, $2 = repository.
+# Sources the env file inside the root shell so the B2 secret stays out of argv;
+# the repo URL ($1, not a secret) is passed positionally.
 init_repo() {
   local label="$1" repo="$2"
   [[ -n "$repo" ]] || { log WARNING "$label repo not set in ~/.backup.local — skipping init."; return 0; }
-  if sudo env RESTIC_PASSWORD_FILE="$REPO_KEY" RESTIC_REPOSITORY="$repo" \
-       AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
-       restic cat config >/dev/null 2>&1; then
+  if sudo bash -c '
+       set -a; . /etc/restic/backup.local 2>/dev/null; set +a
+       : "${RESTIC_PASSWORD_FILE:=/etc/restic/repo.key}"; export RESTIC_PASSWORD_FILE
+       export RESTIC_REPOSITORY="$1"
+       restic cat config >/dev/null 2>&1' _ "$repo"; then
     log SUCCESS "$label repo already initialized."
   else
     log INFO "Initializing $label repo: $repo"
-    sudo env RESTIC_PASSWORD_FILE="$REPO_KEY" RESTIC_REPOSITORY="$repo" \
-       AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
-       restic init --repository-version 2 \
-      && log SUCCESS "$label repo initialized." \
-      || log WARNING "$label init failed (repo unreachable / creds / drive not docked) — re-run later."
+    if sudo bash -c '
+       set -a; . /etc/restic/backup.local 2>/dev/null; set +a
+       : "${RESTIC_PASSWORD_FILE:=/etc/restic/repo.key}"; export RESTIC_PASSWORD_FILE
+       export RESTIC_REPOSITORY="$1"
+       restic init --repository-version 2' _ "$repo"; then
+      log SUCCESS "$label repo initialized."
+    else
+      log WARNING "$label init failed (repo unreachable / creds / drive not docked) — re-run later."
+    fi
   fi
 }
 
@@ -229,12 +239,18 @@ install_schedules() {
   log STEP "5. Install systemd timers + dock trigger"
 
   log INFO "Validating resticprofile config…"
-  rp profiles >/dev/null && log SUCCESS "profiles.toml parses." \
-    || { log WARNING "resticprofile could not parse $RP_CONFIG — fix and re-run."; return 1; }
+  if rp profiles >/dev/null; then
+    log SUCCESS "profiles.toml parses."
+  else
+    log WARNING "resticprofile could not parse $RP_CONFIG — fix and re-run."; return 1
+  fi
 
   log INFO "Installing schedules (systemd timers, Persistent=true)…"
-  rp schedule --all && log SUCCESS "Timers installed (see: systemctl list-timers)." \
-    || log WARNING "Scheduling failed — check 'resticprofile -c $RP_CONFIG schedule --all'."
+  if rp schedule --all; then
+    log SUCCESS "Timers installed (see: systemctl list-timers)."
+  else
+    log WARNING "Scheduling failed — check 'resticprofile -c $RP_CONFIG schedule --all'."
+  fi
 
   # External backup: a timer drives a ConditionPathExists-gated oneshot, so it
   # backs up only when the drive is docked (loop-free; no .path unit).
@@ -247,9 +263,11 @@ install_schedules() {
     sudo sed -i "s|ConditionPathExists=.*|ConditionPathExists=${BACKUP_EXTERNAL_REPO}/config|" /etc/systemd/system/restic-backup-external.service
   fi
   sudo systemctl daemon-reload
-  sudo systemctl enable --now restic-backup-external.timer \
-    && log SUCCESS "External timer armed (every 6h; runs only when docked). Immediate: backup-now external." \
-    || log WARNING "Could not enable restic-backup-external.timer."
+  if sudo systemctl enable --now restic-backup-external.timer; then
+    log SUCCESS "External timer armed (every 6h; runs only when docked). Immediate: backup-now external."
+  else
+    log WARNING "Could not enable restic-backup-external.timer."
+  fi
 }
 
 # ===========================================================================
@@ -313,9 +331,11 @@ backup_luks_header() {
     log SUCCESS "LUKS header backup already exists at $out."
   else
     log INFO "Backing up LUKS header of $dev → $out"
-    sudo cryptsetup luksHeaderBackup "$dev" --header-backup-file "$out" \
-      && log SUCCESS "LUKS header saved." \
-      || log WARNING "Header backup failed."
+    if sudo cryptsetup luksHeaderBackup "$dev" --header-backup-file "$out"; then
+      log SUCCESS "LUKS header saved."
+    else
+      log WARNING "Header backup failed."
+    fi
   fi
   log WARNING "COPY $out into the offline emergency kit. A corrupt header = total data"
   log WARNING "loss even with the right passphrase. Re-take it after any passphrase change."

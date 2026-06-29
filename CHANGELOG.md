@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `~/.backup.local` (template + `backup-init`); one-time installer `scripts/setup-backup.sh`
   (`backup-setup`) wires repos, systemd timers, the dock trigger, Timeshift, a LUKS header
   backup, and an age-encrypted offline emergency kit. New `backup-*` functions in
-  `zsh/functions/system.sh`; restic pinned in `.mise.toml`. See
+  `zsh/functions/system.sh`. See
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Fixed

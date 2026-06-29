@@ -468,7 +468,7 @@ gnome-restore() {
 # single-file utility — these are `backup-*`.)
 #
 # Functions:
-#   - backup-now:         Run a backup now (default both targets, b2 first)
+#   - backup-now:         Run a backup now (default both, b2 first; external skipped if undocked)
 #   - backup-status:      Targets reachable? timers armed? latest snapshots?
 #   - backup-snapshots:   List snapshots for a target (b2|external)
 #   - backup-check:       Verify repository integrity (slow / costs B2 reads)
@@ -500,10 +500,23 @@ _backup_restic() {
 }
 
 # Run a backup now. Default 'cilantro' group = both targets (b2 first, so the
-# offsite copy completes even when the external HDD is not docked).
+# offsite copy completes even when the external HDD is not docked). For the
+# default group, the external target is skipped when the drive isn't docked —
+# otherwise it would fail and fire a false "Backup FAILED" alert + healthcheck
+# /fail ping. An explicit `backup-now external` still runs (and reports) as asked.
 backup-now() {
   # Usage: backup-now [b2|external|cilantro]
-  _backup_rp --name "${1:-cilantro}" backup
+  local target="${1:-cilantro}"
+  if [[ "$target" == "cilantro" ]]; then
+    local extrepo=""
+    [[ -r ~/.backup.local ]] && \
+      extrepo="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_EXTERNAL_REPO:-}")"
+    if [[ -z "$extrepo" || ! -e "$extrepo/config" ]]; then
+      echo "External HDD not docked — backing up to B2 only (run 'backup-now external' once docked)."
+      target="b2"
+    fi
+  fi
+  _backup_rp --name "$target" backup
 }
 
 # Quick health summary of the backup system
@@ -588,10 +601,13 @@ backup-prune() {
     return 1
   fi
   confirm "Prune B2 with retention (7d/4w/12m/3y) — this permanently deletes old data?" || return 1
-  sudo env FULL_ID="$B2_FULL_KEY_ID" FULL_KEY="$B2_FULL_KEY" bash -c '
+  # Feed the full-access key via stdin (NOT argv) so the secret never appears in
+  # `ps`/`/proc/<pid>/cmdline`. sudo still reads its password from the tty.
+  printf '%s\n%s\n' "$B2_FULL_KEY_ID" "$B2_FULL_KEY" | sudo bash -c '
+    IFS= read -r full_id; IFS= read -r full_key
     set -a; . /etc/restic/backup.local 2>/dev/null; set +a
     export RESTIC_REPOSITORY="$BACKUP_B2_REPO"
-    export AWS_ACCESS_KEY_ID="$FULL_ID" AWS_SECRET_ACCESS_KEY="$FULL_KEY"
+    export AWS_ACCESS_KEY_ID="$full_id" AWS_SECRET_ACCESS_KEY="$full_key"
     exec restic forget --prune \
       --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --keep-yearly 3 --keep-last 3'
 }

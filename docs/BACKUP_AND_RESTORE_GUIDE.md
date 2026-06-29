@@ -17,7 +17,7 @@ backup-init                 # create ~/.backup.local from the template
 ${EDITOR:-vim} ~/.backup.local   # fill in repo paths, B2 keys, healthcheck URLs
 backup-setup                # one-time guided install (restic, repos, timers, kit)
 
-backup-now                  # run a backup now (both targets; b2 first)
+backup-now                  # run a backup now (both targets; b2 first, external skipped if undocked)
 backup-status               # targets reachable? timers armed? latest snapshot?
 backup-restore              # guided restore of a snapshot to ~/restore-<ts>/
 ```
@@ -118,7 +118,7 @@ are for on-demand use and inspection.
 
 | Command | Does |
 |---------|------|
-| `backup-now [b2\|external\|cilantro]` | Back up now (default both; b2 first) |
+| `backup-now [b2\|external\|cilantro]` | Back up now (default both; b2 first; external skipped if the HDD isn't docked) |
 | `backup-status` | Targets reachable? timers armed? latest snapshot? |
 | `backup-snapshots [b2\|external]` | List snapshots |
 | `backup-check [b2\|external]` | Verify repository integrity |

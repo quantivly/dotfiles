@@ -24,7 +24,8 @@
 set -uo pipefail
 
 STATUS="${1:-success}"
-PROFILE="${PROFILE_NAME:-backup}"   # resticprofile exports PROFILE_NAME to hooks
+PROFILE="${PROFILE_NAME:-backup}"     # resticprofile exports PROFILE_NAME to hooks
+COMMAND="${PROFILE_COMMAND:-backup}"  # …and PROFILE_COMMAND (backup/check/…); used in the message
 
 # Load config if not already in the environment (manual runs / safety).
 # shellcheck source=/dev/null
@@ -53,11 +54,11 @@ if [[ "$notify_wanted" == "1" ]] && command -v notify-send >/dev/null 2>&1; then
   uid="$(id -u "$user" 2>/dev/null || echo)"
   if [[ -n "$uid" && -S "/run/user/$uid/bus" ]]; then
     if [[ "$STATUS" == "fail" ]]; then
-      urgency="critical"; icon="dialog-error"; title="Backup FAILED ($PROFILE)"
-      body="restic $PROFILE backup failed on $(hostname) — check the journal / resticprofile logs."
+      urgency="critical"; icon="dialog-error"; title="restic $PROFILE $COMMAND FAILED"
+      body="restic $PROFILE $COMMAND failed on $(hostname) — check the journal / resticprofile logs."
     else
-      urgency="low"; icon="emblem-default"; title="Backup complete ($PROFILE)"
-      body="restic $PROFILE snapshot finished on $(hostname)."
+      urgency="low"; icon="emblem-default"; title="restic $PROFILE $COMMAND complete"
+      body="restic $PROFILE $COMMAND finished on $(hostname)."
     fi
     sudo -u "$user" \
       DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
