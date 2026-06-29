@@ -752,7 +752,14 @@ backup-doctor() {
   else printf '  • external HDD not docked (normal — B2 covers offsite)\n'; fi
   [[ -f ~/.config/age/emergency-kit-identity.txt ]] && _backup_doctor_ok "age identity present" \
     || _backup_doctor_bad "age identity missing — cold-start recovery impossible (run backup-setup)"
-  _backup_doctor_age_check ~/emergency-kit.age 180 "emergency-kit.age"
+  # The encrypted kit is meant to live OFFLINE (USB) and inside the repo — not
+  # necessarily in $HOME. So only freshness-check a $HOME copy if present; absence
+  # is a neutral note (it's likely on the USB), not a warning we can't substantiate.
+  if [[ -f ~/emergency-kit.age ]]; then
+    _backup_doctor_age_check ~/emergency-kit.age 180 "emergency-kit.age"
+  else
+    printf '  • emergency-kit.age not in $HOME — OK if it lives on your offline USB / in the repo (rebuild periodically)\n'
+  fi
   local lh="/root/luks-header-$(hostname).img"
   if sudo test -s "$lh"; then
     local lmt ld; lmt="$(sudo stat -c %Y "$lh" 2>/dev/null)"; ld=$(( ( $(date +%s) - lmt ) / 86400 ))
@@ -763,11 +770,15 @@ backup-doctor() {
   fi
 
   echo "Disk space:"
-  local rootpct; rootpct="$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9')"
+  # `command df` bypasses the df='df -h' alias (which, on a `source ~/.zshrc`
+  # reload, gets baked into this function and breaks `--output=pcent`). `-P` gives
+  # portable columns; field 5 is Use%.
+  local rootpct; rootpct="$(command df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')"
   [[ -n "$rootpct" ]] && { (( rootpct > 90 )) && _backup_doctor_warn "root / at ${rootpct}% full" \
-    || _backup_doctor_ok "root / at ${rootpct}%"; }
+    || _backup_doctor_ok "root / at ${rootpct}%"; } \
+    || _backup_doctor_warn "could not read root / disk usage"
   if [[ -n "$extcfg" ]] && sudo test -e "$extcfg"; then
-    local extpct; extpct="$(df --output=pcent "$(dirname "$extcfg")" 2>/dev/null | tail -1 | tr -dc '0-9')"
+    local extpct; extpct="$(command df -P "$(dirname "$extcfg")" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')"
     [[ -n "$extpct" ]] && { (( extpct > 90 )) && _backup_doctor_warn "external HDD at ${extpct}% full" \
       || _backup_doctor_ok "external HDD at ${extpct}%"; }
   fi
