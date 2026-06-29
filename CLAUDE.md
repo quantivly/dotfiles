@@ -322,6 +322,7 @@ Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **botto
 - **Source of truth:** `scripts/apply-gnome-settings.sh` (portable core). Runs automatically during `./install` on GNOME only (no-op on servers / other desktops).
 - **Machine-specific layer:** `~/.gnome-settings.local` (dock favorites, custom launch keys) — mirrors the `~/.zshrc.local` pattern, sourced by the apply script, never overwritten. Create with `gnome-init`.
 - **Tmux integration:** the script moves GNOME workspace switching off `Ctrl+Alt+Arrow` onto `Super`-based shortcuts so tmux pane-resize works (the previously-manual fix is now baked in).
+- **XDG user-dir guard:** `scripts/repair-xdg-user-dirs.sh` (alias `xdg-repair`) keeps `~/Desktop`, `~/Documents`, … as real directories so `snapd-desktop-integration` can't turn them into broken self-referential symlinks. Idempotent; `./install` runs it on graphical workstations (gated on `$XDG_CURRENT_DESKTOP` + `xdg-user-dirs-update`, skipped on servers). See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 - **Wayland gotcha:** changes apply live; dock relayout is guaranteed after one log out / log in. `Alt+F2 r` / `Meta.restart` are X11-only — never use them.
 
 See [docs/GNOME_CONFIGURATION_GUIDE.md](docs/GNOME_CONFIGURATION_GUIDE.md) for the full guide.
@@ -337,6 +338,7 @@ tool_status          # Check installed tools
 alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
 gnome-apply          # Apply curated GNOME desktop config (idempotent)
+xdg-repair           # Fix/guard ~/Desktop, ~/Documents, ... XDG dirs (idempotent)
 gnome-init           # Create ~/.gnome-settings.local (dock favorites, launch keys)
 gnome-status         # Summary of GNOME version, theme, dock, extensions
 ```

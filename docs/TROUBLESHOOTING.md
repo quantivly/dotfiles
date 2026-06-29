@@ -215,7 +215,14 @@ mise install python@X.Y  # Install missing version
 
 **Symptom:** `cd ~/Documents` fails; GNOME Files shows red ✗ on Desktop/Documents/Music/Public/Templates/Videos with "The link is broken — target /home/zvi/X doesn't exist". The entries are **self-referential symlinks** (`~/Documents -> /home/zvi/Documents`).
 
-**Cause:** snapd (via `snapd-desktop-integration`) mirrors your XDG user dirs into each snap's sandbox home as symlinks to your real folders. To do that it reads `~/.config/user-dirs.dirs` and ensures the real target exists. If that config has dirs collapsed to `$HOME` (e.g. `XDG_DOCUMENTS_DIR="$HOME/"` instead of `"$HOME/Documents"`), the "ensure it exists" step creates a self-referential symlink in `$HOME` instead of a real directory. Only the misconfigured dirs break; correctly-mapped ones (e.g. `Downloads`, `Pictures`) are spared. Typically triggered by a first-login race on a fresh install where `xdg-user-dirs-update` collapses the config before the folders are created, then a snap launches into that state. Not caused by these dotfiles.
+**Cause:** a self-sustaining cycle between `xdg-user-dirs-update` and `snapd-desktop-integration`:
+
+1. A standard XDG dir doesn't exist as a real directory.
+2. At each login `xdg-user-dirs-update` runs (`enabled=True` in `/etc/xdg/user-dirs.conf`). Honouring its "don't recreate what the user deleted" rule, it **collapses** the entry in `~/.config/user-dirs.dirs` to `XDG_<X>_DIR="$HOME/"`.
+3. The running `snapd-desktop-integration` service mirrors your XDG dirs into snap sandboxes; for the collapsed/missing entries it creates a self-referential symlink (`~/Documents -> /home/zvi/Documents`) back in the real `$HOME`.
+4. That broken link keeps the dir "missing", so step 2 repeats every login — it never self-heals.
+
+Only the missing dirs break; ones that exist as **real directories** (e.g. `Downloads`, `Pictures`) are left alone by both tools. Not caused by these dotfiles.
 
 **Diagnose:**
 ```bash
@@ -223,28 +230,13 @@ find ~ -maxdepth 1 -xtype l          # list broken symlinks in home
 cat ~/.config/user-dirs.dirs         # look for entries set to "$HOME/"
 ```
 
-**Fix:**
+**Fix:** run the repair guard (idempotent — also runs automatically during `./install` on graphical workstations):
 ```bash
-# 1. Remove the broken self-referential symlinks (no data — targets never existed)
-for d in Desktop Documents Music Public Templates Videos; do
-  [ -L ~/"$d" ] && [ ! -e ~/"$d" ] && rm -v ~/"$d"
-done
-
-# 2. Repoint the XDG config at real subdirs (matches /etc/xdg/user-dirs.defaults)
-for pair in DESKTOP:Desktop DOCUMENTS:Documents MUSIC:Music PUBLICSHARE:Public \
-            TEMPLATES:Templates VIDEOS:Videos DOWNLOAD:Downloads PICTURES:Pictures; do
-  xdg-user-dirs-update --set "${pair%%:*}" "$HOME/${pair##*:}"
-done
-
-# 3. Create the real directories (xdg-user-dirs-update won't recreate already-listed dirs)
-mkdir -p ~/Desktop ~/Documents ~/Music ~/Public ~/Templates ~/Videos
-
-# 4. Verify, then refresh GNOME if needed
-find ~ -maxdepth 1 -xtype l    # expect: no output
-nautilus -q                    # relaunch Files to clear the stale view
+xdg-repair            # = bash ~/.dotfiles/scripts/repair-xdg-user-dirs.sh
+nautilus -q           # relaunch Files to clear the stale view (if open)
 ```
 
-Once `user-dirs.dirs` is valid and the real folders exist, the issue is self-healing: `xdg-user-dirs-update` (runs each login) is a no-op, and snapd creates normal sandbox symlinks instead of broken ones.
+The guard performs the underlying repair — (1) remove the broken self-referential symlinks (no data; the targets never existed), (2) `mkdir` the real directories, (3) `xdg-user-dirs-update --set` each XDG slot back to `$HOME/<Name>`. Once every standard XDG slot exists as a real directory and `user-dirs.dirs` points at them, the cycle is broken for good: `xdg-user-dirs-update` becomes a no-op and `snapd-desktop-integration` creates normal sandbox symlinks instead of broken ones. Keeping every slot — even unused ones — as a real (possibly empty) directory is what prevents recurrence; empty folders are harmless and desktop icons are hidden by the curated GNOME config.
 
 ## Syntax errors
 

@@ -63,3 +63,11 @@
          printf '%s' "${XDG_CURRENT_DESKTOP:-}" | grep -qi gnome; then
         bash ~/.dotfiles/scripts/apply-gnome-settings.sh
       fi
+    - |
+      # Keep XDG user dirs healthy on graphical workstations: prevents the broken
+      # self-referential ~/Desktop, ~/Documents, ... symlinks that
+      # snapd-desktop-integration creates after xdg-user-dirs-update collapses
+      # missing dirs to $HOME. Idempotent; no-op when healthy; skipped on servers.
+      if [ -n "${XDG_CURRENT_DESKTOP:-}" ] && command -v xdg-user-dirs-update >/dev/null 2>&1; then
+        bash ~/.dotfiles/scripts/repair-xdg-user-dirs.sh
+      fi

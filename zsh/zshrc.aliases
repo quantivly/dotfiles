@@ -226,6 +226,13 @@ alias ssh-clear='rm -f ~/.ssh/sockets/* && echo "✓ Cleared all SSH connection 
 # Inspect/back up with gnome-status / gnome-backup (functions in system.sh).
 alias gnome-apply='bash ~/.dotfiles/scripts/apply-gnome-settings.sh'
 
+# Repair/guard the standard XDG user dirs (Desktop, Documents, ...). Removes the
+# broken self-referential symlinks created by snapd-desktop-integration, ensures
+# the real dirs exist, and repoints ~/.config/user-dirs.dirs. Idempotent; ./install
+# runs it automatically on graphical workstations.
+# Source of truth: ~/.dotfiles/scripts/repair-xdg-user-dirs.sh
+alias xdg-repair='bash ~/.dotfiles/scripts/repair-xdg-user-dirs.sh'
+
 # Initialize machine-specific GNOME overrides (dock favorites, launch keys)
 # Creates ~/.gnome-settings.local from template; sourced by gnome-apply
 alias gnome-init='
