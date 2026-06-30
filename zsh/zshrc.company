@@ -147,9 +147,13 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             # Personal token from the default (~/.config/gh) config dir.
             # Consumed by GITHUB_PERSONAL_ACCESS_TOKEN in personal dirs (e.g.
             # Claude Code's github MCP plugin); gh itself ignores that var.
-            _puser="$(gh config get -h github.com user 2>/dev/null)"
+            # GH_CONFIG_DIR= forces the default config dir: this block forks
+            # before _update_gh_config runs, so an inherited GH_CONFIG_DIR (a
+            # nested shell / tmux pane / Claude-spawned shell started from a
+            # work dir) would otherwise cache the Quantivly token as personal.
+            _puser="$(GH_CONFIG_DIR= gh config get -h github.com user 2>/dev/null)"
             if [[ -n "$_puser" ]]; then
-                _ptoken="$(gh auth token --user "$_puser" 2>/dev/null)"
+                _ptoken="$(GH_CONFIG_DIR= gh auth token --user "$_puser" 2>/dev/null)"
                 if [[ -n "$_ptoken" ]]; then
                     printf '%s' "$_ptoken" > "$_dir/personal"
                     chmod 600 "$_dir/personal"
@@ -331,11 +335,14 @@ gh-refresh-tokens() {
     return 1
   fi
   # Personal token from the default (~/.config/gh) config dir.
+  # GH_CONFIG_DIR= forces the default config dir even when this runs from a
+  # work context (where GH_CONFIG_DIR is exported to gh-quantivly), so the
+  # personal cache never gets the Quantivly token written into it.
   local _puser
-  _puser="$(gh config get -h github.com user 2>/dev/null)"
+  _puser="$(GH_CONFIG_DIR= gh config get -h github.com user 2>/dev/null)"
   if [[ -n "$_puser" ]]; then
     local _ptoken
-    _ptoken="$(gh auth token --user "$_puser" 2>/dev/null)"
+    _ptoken="$(GH_CONFIG_DIR= gh auth token --user "$_puser" 2>/dev/null)"
     if [[ -n "$_ptoken" ]]; then
       printf '%s' "$_ptoken" > "$_dir/personal"
       chmod 600 "$_dir/personal"
