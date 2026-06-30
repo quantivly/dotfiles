@@ -126,6 +126,9 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     if [[ -r "$_gh_token_cache/quantivly" ]]; then
         _CACHED_GH_QUANTIVLY_TOKEN="$(<"$_gh_token_cache/quantivly")"
     fi
+    if [[ -r "$_gh_token_cache/personal" ]]; then
+        _CACHED_GH_PERSONAL_TOKEN="$(<"$_gh_token_cache/personal")"
+    fi
     unset _gh_token_cache
 
     # Background refresh of GH token cache (non-blocking)
@@ -141,6 +144,21 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
                     chmod 600 "$_dir/quantivly"
                 fi
             fi
+            # Personal token from the default (~/.config/gh) config dir.
+            # Consumed by GITHUB_PERSONAL_ACCESS_TOKEN in personal dirs (e.g.
+            # Claude Code's github MCP plugin); gh itself ignores that var.
+            # GH_CONFIG_DIR= forces the default config dir: this block forks
+            # before _update_gh_config runs, so an inherited GH_CONFIG_DIR (a
+            # nested shell / tmux pane / Claude-spawned shell started from a
+            # work dir) would otherwise cache the Quantivly token as personal.
+            _puser="$(GH_CONFIG_DIR= gh config get -h github.com user 2>/dev/null)"
+            if [[ -n "$_puser" ]]; then
+                _ptoken="$(GH_CONFIG_DIR= gh auth token --user "$_puser" 2>/dev/null)"
+                if [[ -n "$_ptoken" ]]; then
+                    printf '%s' "$_ptoken" > "$_dir/personal"
+                    chmod 600 "$_dir/personal"
+                fi
+            fi
         } &!
     fi
 
@@ -153,11 +171,19 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             fi
         else
             # Personal (default): use the default ~/.config/gh config dir.
-            # No token override needed — gh reads the personal identity from
-            # the default config. Clear any work token leaked from a prior dir.
+            # gh reads the personal identity from the default config, so no
+            # GH_TOKEN override is needed (leaving it unset keeps gh's own
+            # account selection intact). Export GITHUB_PERSONAL_ACCESS_TOKEN
+            # from the cached personal token for tools that consume it (e.g.
+            # Claude Code's github MCP plugin); clear any work token leaked
+            # from a prior dir.
             unset GH_CONFIG_DIR
             unset GH_TOKEN
-            unset GITHUB_PERSONAL_ACCESS_TOKEN
+            if [[ -n "$_CACHED_GH_PERSONAL_TOKEN" ]]; then
+                export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_PERSONAL_TOKEN"
+            else
+                unset GITHUB_PERSONAL_ACCESS_TOKEN
+            fi
         fi
     }
     autoload -U add-zsh-hook
@@ -304,9 +330,31 @@ gh-refresh-tokens() {
     chmod 600 "$_dir/quantivly"
     _CACHED_GH_QUANTIVLY_TOKEN="$_token"
     echo "Cached token for user: $_user"
-    echo "Token refreshed. Run _update_gh_config or cd to apply."
   else
     echo "Error: Could not retrieve token for user $_user" >&2
     return 1
+  fi
+  # Personal token from the default (~/.config/gh) config dir.
+  # GH_CONFIG_DIR= forces the default config dir even when this runs from a
+  # work context (where GH_CONFIG_DIR is exported to gh-quantivly), so the
+  # personal cache never gets the Quantivly token written into it.
+  local _puser
+  _puser="$(GH_CONFIG_DIR= gh config get -h github.com user 2>/dev/null)"
+  if [[ -n "$_puser" ]]; then
+    local _ptoken
+    _ptoken="$(GH_CONFIG_DIR= gh auth token --user "$_puser" 2>/dev/null)"
+    if [[ -n "$_ptoken" ]]; then
+      printf '%s' "$_ptoken" > "$_dir/personal"
+      chmod 600 "$_dir/personal"
+      _CACHED_GH_PERSONAL_TOKEN="$_ptoken"
+      echo "Cached personal token for user: $_puser"
+    fi
+  fi
+  # Re-apply env for the current directory context (no cd needed).
+  if command -v _update_gh_config &>/dev/null; then
+    _update_gh_config
+    echo "Applied tokens for current directory."
+  else
+    echo "Token refreshed. Run _update_gh_config or cd to apply."
   fi
 }
