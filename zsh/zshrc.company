@@ -198,6 +198,13 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             if [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]]; then
                 export GH_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
                 export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
+            else
+                # Cache miss (e.g. a fresh shell before the background refresh
+                # lands, or a cleared cache): clear both so a personal GH_TOKEN
+                # from a prior dir can't pin the CLI to the personal account in
+                # a work context (mirror of the personal branch below).
+                unset GH_TOKEN
+                unset GITHUB_PERSONAL_ACCESS_TOKEN
             fi
         else
             # Personal: prefer the isolated single-account gh-personal dir (immune
