@@ -108,6 +108,19 @@ _q_is_work_context() {
     return 1
 }
 
+# _in_atrium_session is true inside an Atrium-managed session
+# (github.com/ZviBaratz/atrium), where GH_CONFIG_DIR / CLAUDE_CONFIG_DIR /
+# GITHUB_PERSONAL_ACCESS_TOKEN are injected per-repo by Atrium and are
+# authoritative. The interactive switchers below must defer to that env — never
+# re-derive (and clobber) it from $PWD, which is a worktree under ~/.atrium/ that
+# _q_is_work_context can misclassify. Prefer Atrium's ATRIUM marker; fall back to
+# the tmux socket name so it also works on Atrium builds predating the marker.
+_in_atrium_session() {
+    [[ -n "$ATRIUM" ]] && return 0
+    case "${TMUX%%,*}" in */atrium|*/claudesquad) return 0 ;; esac
+    return 1
+}
+
 #==============================================================================
 # GitHub CLI Multi-Account Switching
 #==============================================================================
@@ -131,6 +144,18 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     fi
     unset _gh_token_cache
 
+    # Personal gh lives in its own single-account config dir when present
+    # (~/.config/gh-personal), isolating it from the promiscuous default
+    # ~/.config/gh whose active account gets flipped globally by `gh auth switch`.
+    # Empty => fall back to the default. Used by both the personal-token cache
+    # below and the else-branch of _update_gh_config, so a polluted default can
+    # neither be cached as the personal token nor selected in personal dirs.
+    if [[ -d "$HOME/.config/gh-personal" ]]; then
+        _GH_PERSONAL_CONFIG_DIR="$HOME/.config/gh-personal"
+    else
+        _GH_PERSONAL_CONFIG_DIR=""
+    fi
+
     # Background refresh of GH token cache (non-blocking)
     if command -v gh &>/dev/null; then
         {
@@ -144,16 +169,16 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
                     chmod 600 "$_dir/quantivly"
                 fi
             fi
-            # Personal token from the default (~/.config/gh) config dir.
-            # Consumed by GITHUB_PERSONAL_ACCESS_TOKEN in personal dirs (e.g.
-            # Claude Code's github MCP plugin); gh itself ignores that var.
-            # GH_CONFIG_DIR= forces the default config dir: this block forks
-            # before _update_gh_config runs, so an inherited GH_CONFIG_DIR (a
-            # nested shell / tmux pane / Claude-spawned shell started from a
-            # work dir) would otherwise cache the Quantivly token as personal.
-            _puser="$(GH_CONFIG_DIR= gh config get -h github.com user 2>/dev/null)"
+            # Personal token from the isolated personal config dir when present
+            # (~/.config/gh-personal), else the default ~/.config/gh. Consumed by
+            # GITHUB_PERSONAL_ACCESS_TOKEN in personal dirs (e.g. Claude Code's
+            # github MCP plugin); gh itself ignores that var. Pinning the config
+            # dir (never inheriting an ambient GH_CONFIG_DIR, and never trusting
+            # the polluted default) keeps the wrong account's token out of the
+            # personal cache.
+            _puser="$(GH_CONFIG_DIR="$_GH_PERSONAL_CONFIG_DIR" gh config get -h github.com user 2>/dev/null)"
             if [[ -n "$_puser" ]]; then
-                _ptoken="$(GH_CONFIG_DIR= gh auth token --user "$_puser" 2>/dev/null)"
+                _ptoken="$(GH_CONFIG_DIR="$_GH_PERSONAL_CONFIG_DIR" gh auth token --user "$_puser" 2>/dev/null)"
                 if [[ -n "$_ptoken" ]]; then
                     printf '%s' "$_ptoken" > "$_dir/personal"
                     chmod 600 "$_dir/personal"
@@ -163,6 +188,11 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     fi
 
     _update_gh_config() {
+        # Inside an Atrium session, Atrium injected the authoritative per-repo
+        # GH_CONFIG_DIR and token at session birth; never override or unset it
+        # based on $PWD (a worktree under ~/.atrium/ that _q_is_work_context can
+        # misclassify, which is what caused the wrong-account churn).
+        _in_atrium_session && return
         if _q_is_work_context; then
             export GH_CONFIG_DIR="$HOME/.config/gh-quantivly"
             if [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]]; then
@@ -170,14 +200,16 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
                 export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
             fi
         else
-            # Personal (default): use the default ~/.config/gh config dir.
-            # gh reads the personal identity from the default config, so no
-            # GH_TOKEN override is needed (leaving it unset keeps gh's own
-            # account selection intact). Export GITHUB_PERSONAL_ACCESS_TOKEN
-            # from the cached personal token for tools that consume it (e.g.
-            # Claude Code's github MCP plugin); clear any work token leaked
-            # from a prior dir.
-            unset GH_CONFIG_DIR
+            # Personal: prefer the isolated single-account gh-personal dir (immune
+            # to the shared default's gh-auth-switch churn); else the default. No
+            # GH_TOKEN override — the config dir selects the account. Export
+            # GITHUB_PERSONAL_ACCESS_TOKEN from the cached personal token for tools
+            # that consume it (github MCP); clear any work token from a prior dir.
+            if [[ -n "$_GH_PERSONAL_CONFIG_DIR" ]]; then
+                export GH_CONFIG_DIR="$_GH_PERSONAL_CONFIG_DIR"
+            else
+                unset GH_CONFIG_DIR
+            fi
             unset GH_TOKEN
             if [[ -n "$_CACHED_GH_PERSONAL_TOKEN" ]]; then
                 export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_PERSONAL_TOKEN"
@@ -202,6 +234,9 @@ fi
 
 if [[ -d "$HOME/.claude-quantivly" ]]; then
     _update_claude_config() {
+        # Defer to Atrium's injected CLAUDE_CONFIG_DIR inside a session (see
+        # _in_atrium_session / _update_gh_config).
+        _in_atrium_session && return
         if _q_is_work_context; then
             export CLAUDE_CONFIG_DIR="$HOME/.claude-quantivly"
         else
@@ -334,15 +369,15 @@ gh-refresh-tokens() {
     echo "Error: Could not retrieve token for user $_user" >&2
     return 1
   fi
-  # Personal token from the default (~/.config/gh) config dir.
-  # GH_CONFIG_DIR= forces the default config dir even when this runs from a
-  # work context (where GH_CONFIG_DIR is exported to gh-quantivly), so the
-  # personal cache never gets the Quantivly token written into it.
+  # Personal token from the isolated personal config dir when present
+  # (~/.config/gh-personal), else the default. Pinning the config dir (never
+  # inheriting an ambient GH_CONFIG_DIR from a work context, never trusting the
+  # promiscuous default) keeps the Quantivly token out of the personal cache.
   local _puser
-  _puser="$(GH_CONFIG_DIR= gh config get -h github.com user 2>/dev/null)"
+  _puser="$(GH_CONFIG_DIR="${_GH_PERSONAL_CONFIG_DIR}" gh config get -h github.com user 2>/dev/null)"
   if [[ -n "$_puser" ]]; then
     local _ptoken
-    _ptoken="$(GH_CONFIG_DIR= gh auth token --user "$_puser" 2>/dev/null)"
+    _ptoken="$(GH_CONFIG_DIR="${_GH_PERSONAL_CONFIG_DIR}" gh auth token --user "$_puser" 2>/dev/null)"
     if [[ -n "$_ptoken" ]]; then
       printf '%s' "$_ptoken" > "$_dir/personal"
       chmod 600 "$_dir/personal"
