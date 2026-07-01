@@ -198,22 +198,32 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             if [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]]; then
                 export GH_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
                 export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
+            else
+                # Cache miss (e.g. a fresh shell before the background refresh
+                # lands, or a cleared cache): clear both so a personal GH_TOKEN
+                # from a prior dir can't pin the CLI to the personal account in
+                # a work context (mirror of the personal branch below).
+                unset GH_TOKEN
+                unset GITHUB_PERSONAL_ACCESS_TOKEN
             fi
         else
             # Personal: prefer the isolated single-account gh-personal dir (immune
-            # to the shared default's gh-auth-switch churn); else the default. No
-            # GH_TOKEN override — the config dir selects the account. Export
-            # GITHUB_PERSONAL_ACCESS_TOKEN from the cached personal token for tools
-            # that consume it (github MCP); clear any work token from a prior dir.
+            # to the shared default's gh-auth-switch churn); else the default. Pin
+            # the account with GH_TOKEN too — GH_CONFIG_DIR alone still authenticates
+            # through the shared keyring default (see docs/TROUBLESHOOTING.md), so
+            # export the cached personal token as GH_TOKEN (for the gh CLI) and
+            # GITHUB_PERSONAL_ACCESS_TOKEN (for env-reading tools like the github
+            # MCP); clear both when nothing is cached so no work token leaks in.
             if [[ -n "$_GH_PERSONAL_CONFIG_DIR" ]]; then
                 export GH_CONFIG_DIR="$_GH_PERSONAL_CONFIG_DIR"
             else
                 unset GH_CONFIG_DIR
             fi
-            unset GH_TOKEN
             if [[ -n "$_CACHED_GH_PERSONAL_TOKEN" ]]; then
+                export GH_TOKEN="$_CACHED_GH_PERSONAL_TOKEN"
                 export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_PERSONAL_TOKEN"
             else
+                unset GH_TOKEN
                 unset GITHUB_PERSONAL_ACCESS_TOKEN
             fi
         fi
