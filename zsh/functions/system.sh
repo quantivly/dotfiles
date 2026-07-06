@@ -620,8 +620,12 @@ backup-prune() {
     set -a; . /etc/restic/backup.local 2>/dev/null; set +a
     export RESTIC_REPOSITORY="$BACKUP_B2_REPO"
     export AWS_ACCESS_KEY_ID="$full_id" AWS_SECRET_ACCESS_KEY="$full_key"
-    exec restic forget --prune \
-      --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --keep-yearly 3 --keep-last 3'
+    restic forget --prune \
+      --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --keep-yearly 3 --keep-last 3 \
+      || exit $?
+    # Stamp the prune so backup-doctor can remind when the next one is due.
+    install -d /var/lib/restic 2>/dev/null || true
+    date +%s > /var/lib/restic/last-b2-prune 2>/dev/null || true'
 }
 
 # Re-take the LUKS header backup (store the output in the offline kit)
@@ -736,6 +740,59 @@ backup-doctor() {
     else _backup_doctor_ok "latest B2 snapshot ${hrs}h old"; fi
   else
     _backup_doctor_warn "could not read latest B2 snapshot (offline? try 'backup-snapshots b2')"
+  fi
+
+  echo "Repo size & growth (B2):"
+  # The B2 repo is append-only (no scheduled prune), so it grows monotonically —
+  # these checks fire BEFORE the Backblaze storage cap does (which kills backups
+  # outright: restic can't even write its lock file once the cap is hit).
+  local warngb rawsz rawgb
+  warngb="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_B2_SIZE_WARN_GB:-}")"
+  if [[ -z "$warngb" ]]; then
+    _backup_doctor_warn "BACKUP_B2_SIZE_WARN_GB blank — cap-proximity check is INERT (set it in ~/.backup.local)"
+  else
+    # --no-lock is safe here: stats only reads snapshot/index metadata.
+    rawsz="$(timeout 60 sudo bash -c 'set -a; . /etc/restic/backup.local 2>/dev/null; set +a; export RESTIC_REPOSITORY="$BACKUP_B2_REPO"; restic stats --json --mode raw-data --no-lock 2>/dev/null' | grep -o '"total_size":[0-9]*' | cut -d: -f2)"
+    if [[ "$rawsz" =~ ^[0-9]+$ ]]; then
+      rawgb=$(( rawsz / 1073741824 ))
+      if (( rawsz > warngb * 1073741824 )); then
+        _backup_doctor_warn "B2 repo raw size ${rawgb}GB exceeds ${warngb}GB — run backup-prune (offline full key) before the Backblaze cap bites"
+      else
+        _backup_doctor_ok "B2 repo raw size ${rawgb}GB (warn at ${warngb}GB)"
+      fi
+    else
+      _backup_doctor_warn "could not read B2 repo size (offline? try 'backup-snapshots b2')"
+    fi
+  fi
+  # Churn guard: catches a NEW churn source (an app rewriting big blobs between
+  # runs) within one run instead of weeks later via the size check. Journal
+  # parsing is best-effort — a missing/unparsable line is a neutral note, not a
+  # warning we can't substantiate.
+  local churnmb churnln storedmb
+  churnmb="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_B2_CHURN_WARN_MB:-}")"
+  churnln="$(journalctl -u 'resticprofile-backup@profile-b2.service' --no-pager -n 400 2>/dev/null | grep 'Added to the repository' | tail -1)"
+  storedmb="$(printf '%s' "$churnln" | sed -n 's/.*(\([0-9.]*\) \([KMGT]\)iB stored).*/\1 \2/p' \
+    | awk '{v=$1; if($2=="K")v/=1024; else if($2=="G")v*=1024; else if($2=="T")v*=1048576; printf "%d", v}')"
+  if [[ -z "$churnmb" || -z "$storedmb" ]]; then
+    printf '  • no churn reading (journal rotated / no scheduled run yet / BACKUP_B2_CHURN_WARN_MB blank)\n'
+  elif (( storedmb > churnmb )); then
+    _backup_doctor_warn "last scheduled run stored ${storedmb}MB (>${churnmb}MB) — a new churn source? check excludes (journalctl -u 'resticprofile-backup@profile-b2.service')"
+  else
+    _backup_doctor_ok "last scheduled run stored ${storedmb}MB (warn at ${churnmb}MB)"
+  fi
+  # Prune cadence: backup-prune stamps /var/lib/restic/last-b2-prune on success.
+  local prd stamp pdays
+  prd="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_B2_PRUNE_REMIND_DAYS:-120}")"
+  stamp="$(sudo cat /var/lib/restic/last-b2-prune 2>/dev/null)"
+  if [[ "$stamp" =~ ^[0-9]+$ ]]; then
+    pdays=$(( ( $(date +%s) - stamp ) / 86400 ))
+    if (( pdays > prd )); then
+      _backup_doctor_warn "last B2 prune was ${pdays}d ago (>${prd}d) — run backup-prune with the offline full key"
+    else
+      _backup_doctor_ok "last B2 prune ${pdays}d ago"
+    fi
+  else
+    _backup_doctor_warn "B2 has never been pruned — append-only repos grow monotonically (run backup-prune)"
   fi
 
   echo "Alerting (healthchecks.io):"

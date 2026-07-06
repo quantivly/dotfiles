@@ -48,10 +48,37 @@
 /home/zvi/.config/google-chrome/*/Cache
 /home/zvi/.config/google-chrome/*/Code Cache
 /home/zvi/.config/google-chrome/*/GPUCache
-/home/zvi/.config/google-chrome/*/Service Worker/CacheStorage
+# offline PWA state; sites re-register workers on next visit
+/home/zvi/.config/google-chrome/*/Service Worker
+# extensions re-download from the Web Store (the install list is in Preferences,
+# which stays backed up); only a store-delisted extension would be unrecoverable
+/home/zvi/.config/google-chrome/*/Extensions
+# per-profile ML models, re-downloaded by the optimization-guide component
+/home/zvi/.config/google-chrome/*/optimization_guide_model_store
+# threat lists, re-downloaded
+/home/zvi/.config/google-chrome/*/Safe Browsing
+# Chrome component payloads (top-level under the user-data dir, not per-profile):
+# on-device AI models (4G+, REWRITTEN on updates — the top churn source), TTS
+# engine, packaged-extension download caches, staged UMA telemetry. All are
+# re-downloaded by Chrome's component updater; excluding them loses nothing.
+/home/zvi/.config/google-chrome/OptGuideOnDeviceModel
+/home/zvi/.config/google-chrome/OptGuideOnDeviceClassifierModel
+/home/zvi/.config/google-chrome/WasmTtsEngine
+/home/zvi/.config/google-chrome/component_crx_cache
+/home/zvi/.config/google-chrome/extensions_crx_cache
+/home/zvi/.config/google-chrome/DeferredBrowserMetrics
 /home/zvi/.config/BraveSoftware/*/*/Cache
 /home/zvi/.config/BraveSoftware/*/*/Code Cache
 /home/zvi/.config/BraveSoftware/*/*/GPUCache
+
+# --- AI/dev tool regenerables (settings/state stay; binaries+venvs re-download) ---
+# Claude Code binaries — a NEW ~240M dir per auto-update (near-daily): the single
+# biggest churn driver. The auto-updater re-downloads; ~/.claude settings stay.
+/home/zvi/.local/share/claude/versions
+# plugin download cache (~1G); plugins re-fetch on demand
+/home/zvi/.claude-work/plugins/cache
+# uv tool venvs; `uv tool install` regenerates (tool list is in the manifest)
+/home/zvi/.local/share/uv
 
 # --- VS Code (KEEP settings; drop caches + re-installable extensions) ---
 /home/zvi/.config/Code/Cache
