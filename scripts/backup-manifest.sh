@@ -70,6 +70,9 @@ mkdir -p "$(dirname "$OUT")"
   section "VS Code: installed extensions"
   run_as_user "code --list-extensions --show-versions 2>/dev/null"
 
+  section "uv: installed tools (venvs are excluded from backup; reinstall from this list)"
+  run_as_user "uv tool list 2>/dev/null"
+
   section "GNOME: enabled extensions"
   run_as_user "gnome-extensions list --enabled 2>/dev/null"
 
