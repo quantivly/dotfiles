@@ -519,15 +519,15 @@ _backup_pick_snapshot() {
   printf '%s' "$snap"
 }
 
-# Run a backup now. Default 'cilantro' group = both targets (b2 first, so the
+# Run a backup now. Default 'full' group = both targets (b2 first, so the
 # offsite copy completes even when the external HDD is not docked). For the
 # default group, the external target is skipped when the drive isn't docked —
 # otherwise it would fail and fire a false "Backup FAILED" alert + healthcheck
 # /fail ping. An explicit `backup-now external` still runs (and reports) as asked.
 backup-now() {
-  # Usage: backup-now [b2|external|cilantro]
-  local target="${1:-cilantro}"
-  if [[ "$target" == "cilantro" ]]; then
+  # Usage: backup-now [b2|external|full]
+  local target="${1:-full}"
+  if [[ "$target" == "full" ]]; then
     local extrepo=""
     [[ -r ~/.backup.local ]] && \
       extrepo="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_EXTERNAL_REPO:-}")"
@@ -542,7 +542,7 @@ backup-now() {
 # Quick health summary of the backup system
 backup-status() {
   # Usage: backup-status
-  echo "=== Backup Status (cilantro) ==="
+  echo "=== Backup Status ($(hostname)) ==="
   if [[ -f ~/.backup.local ]]; then echo "Config:     ~/.backup.local present"; else
     echo "Config:     ✗ missing — run 'backup-init', edit it, then 'backup-setup'"; return 1; fi
   echo "restic:     $(restic version 2>/dev/null | head -1 || echo 'not installed')"
@@ -665,6 +665,18 @@ _backup_doctor_cmp() {
   else _backup_doctor_warn "$3 differs from ~/.dotfiles — re-run backup-setup to resync (or commit local edits)"; fi
 }
 
+# Internal: compare a live /etc file against the RENDERED repo template — the
+# same scripts/backup-render.sh substitution backup-setup used at install, so
+# templated files don't report permanent drift. Rendered output goes to cmp
+# via stdin ("-"), not process substitution: sudo closes fds >2, which breaks
+# <(...); sudo is required because /etc/restic is 0700 root.
+_backup_doctor_cmp_rendered() {
+  if [[ ! -f "$2" ]]; then _backup_doctor_warn "$3: repo copy not found ($2)"; return; fi
+  if bash "${HOME}/.dotfiles/scripts/backup-render.sh" "$2" | sudo cmp -s "$1" -; then
+    _backup_doctor_ok "$3 matches version control (rendered)"
+  else _backup_doctor_warn "$3 differs from the rendered ~/.dotfiles template — re-run backup-setup to resync (or commit local edits)"; fi
+}
+
 # Internal: warn if a file is missing or older than N days. $1 file, $2 max-days, $3 label.
 _backup_doctor_age_check() {
   if [[ -f "$1" ]]; then
@@ -683,7 +695,7 @@ backup-doctor() {
   # Usage: backup-doctor
   _BD_FAIL=0 _BD_WARN=0
   local dotfiles="${HOME}/.dotfiles"
-  echo "=== Backup Doctor (cilantro) ==="
+  echo "=== Backup Doctor ($(hostname)) ==="
   sudo -v 2>/dev/null || { echo "sudo required (reads /etc/restic, drop-ins, /root)."; return 1; }
 
   echo "Config & permissions:"
@@ -706,8 +718,8 @@ backup-doctor() {
 
   echo "Config drift (live /etc vs ~/.dotfiles):"
   _backup_doctor_cmp /etc/resticprofile/profiles.toml "$dotfiles/resticprofile/profiles.toml" "profiles.toml"
-  _backup_doctor_cmp /etc/restic/includes.txt "$dotfiles/examples/backup-includes.txt" "includes.txt"
-  _backup_doctor_cmp /etc/restic/excludes.txt "$dotfiles/examples/backup-excludes.txt" "excludes.txt"
+  _backup_doctor_cmp_rendered /etc/restic/includes.txt "$dotfiles/examples/backup-includes.txt" "includes.txt"
+  _backup_doctor_cmp_rendered /etc/restic/excludes.txt "$dotfiles/examples/backup-excludes.txt" "excludes.txt"
 
   echo "Scheduled-unit env wiring (DO-448 guard):"
   local t

@@ -4,7 +4,9 @@
 # Driven by restic-backup-external.timer; the ConditionPathExists below gates it
 # to run ONLY when the drive is docked (clean no-op otherwise). Also runnable on
 # demand: `sudo systemctl start restic-backup-external.service`, or `backup-now
-# external`. Installed to /etc/systemd/system/ by setup-backup.sh.
+# external`. Installed to /etc/systemd/system/ by setup-backup.sh, which renders
+# the user placeholder below (scripts/backup-render.sh) and then overrides
+# ConditionPathExists from $BACKUP_EXTERNAL_REPO when set in ~/.backup.local.
 #
 # Runs as root (to read /etc + the keyring) and loads repo URLs/creds from the
 # same EnvironmentFile the scheduled timers use. Nice/idle so it never makes the
@@ -14,7 +16,7 @@
 Description=restic backup to external HDD (dock-triggered)
 After=network-online.target
 # Don't fight a backup that's already running to the same repo.
-ConditionPathExists=/media/zvi/Backup/restic/config
+ConditionPathExists=/media/__BACKUP_USER__/Backup/restic/config
 
 [Service]
 Type=oneshot

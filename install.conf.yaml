@@ -78,10 +78,18 @@
       # never uses sudo and never touches the backup engine itself.
       if printf '%s' "${XDG_CURRENT_DESKTOP:-}" | grep -qi gnome; then
         if [ ! -f ~/.backup.local ]; then
-          cp ~/.dotfiles/examples/backup.local.template ~/.backup.local
-          chmod 600 ~/.backup.local
-          echo "✓ Created ~/.backup.local from template"
-          echo "  Edit it, then run: backup-setup   (see docs/BACKUP_AND_RESTORE_GUIDE.md)"
+          # Render to a temp file (mktemp is mode 600) and move into place only on
+          # success — a failed render must not leave an empty ~/.backup.local that
+          # the guard above would later mistake for a valid config.
+          bl_tmp="$(mktemp)"
+          if bash ~/.dotfiles/scripts/backup-render.sh ~/.dotfiles/examples/backup.local.template > "$bl_tmp"; then
+            chmod 600 "$bl_tmp"; mv "$bl_tmp" ~/.backup.local
+            echo "✓ Created ~/.backup.local from template"
+            echo "  Edit it, then run: backup-setup   (see docs/BACKUP_AND_RESTORE_GUIDE.md)"
+          else
+            rm -f "$bl_tmp"
+            echo "✗ Failed to render ~/.backup.local — run 'backup-init' after fixing" >&2
+          fi
         else
           echo "✓ ~/.backup.local already exists (preserving your customizations)"
         fi

@@ -1,6 +1,8 @@
-# restic --files-from list — what to back up on cilantro
-# =======================================================
-# Installed to /etc/restic/includes.txt by backup-setup; referenced by
+# restic --files-from list — what to back up on this machine
+# ===========================================================
+# TEMPLATE: the home-directory placeholder is substituted with the invoking
+# user's home by scripts/backup-render.sh when backup-setup installs this to
+# /etc/restic/includes.txt (restic expands no variables itself); referenced by
 # resticprofile/profiles.toml ([base.backup] files-from). One path per line.
 #
 # IMPORTANT: restic --files-from skips blank lines and full-line "#" comments,
@@ -12,7 +14,7 @@
 # The backup runs as ROOT so the root-only /etc bits below are readable.
 
 # The whole home (minus excludes)
-/home/zvi
+__BACKUP_HOME__
 
 # --- curated /etc slice (machine identity & secrets not in dev-setup/dotfiles) ---
 # WiFi/VPN PSKs (root 0600)

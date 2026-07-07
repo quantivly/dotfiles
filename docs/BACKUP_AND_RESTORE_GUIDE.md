@@ -50,11 +50,16 @@ Bitwarden. The offline kit lives entirely outside this loop and breaks it.
 
 The backup runs **as root** (so it can read `/etc` and the GNOME keyring). Sources and
 excludes live in [`examples/backup-includes.txt`](../examples/backup-includes.txt) and
-[`examples/backup-excludes.txt`](../examples/backup-excludes.txt) (installed to `/etc/restic/`).
+[`examples/backup-excludes.txt`](../examples/backup-excludes.txt). These are **templates**:
+restic reads its files verbatim (no `$HOME` expansion), so `backup-setup` renders the
+`__BACKUP_HOME__` placeholder via [`scripts/backup-render.sh`](../scripts/backup-render.sh)
+when installing them to `/etc/restic/` — the same setup works for any user on any machine.
+To change what's backed up, edit the repo templates and re-run `backup-setup`
+(`backup-doctor` compares the live files against the *rendered* templates).
 
 | Backed up | Excluded (regenerable) |
 |-----------|------------------------|
-| All of `/home/zvi` (incl. `~/.ssh`, `~/.gnupg`, `~/.config`, keyring, `~/.dotfiles`) | `~/.cache`, `~/.npm`, `~/.local/share/mise`, `~/.oh-my-zsh` |
+| All of your home directory (incl. `~/.ssh`, `~/.gnupg`, `~/.config`, keyring, `~/.dotfiles`) | `~/.cache`, `~/.npm`, `~/.local/share/mise`, `~/.oh-my-zsh` |
 | `/etc/NetworkManager/system-connections` (WiFi/VPN secrets) | `**/node_modules`, `**/.venv`, `**/__pycache__`, build dirs |
 | `/etc` slice: `hosts`, `sysctl.d`, `apt` repos+keyrings, custom systemd units | browser `Cache`/`Code Cache`/`GPUCache` (profiles kept) |
 | `/opt/awsvpnclient` (AWS VPN Client) | `~/.vscode/extensions` (list captured in the manifest) |
@@ -75,7 +80,7 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
 
 1. **Bitwarden** — your existing vault is the root-of-trust (it already serves your SSH
    keys). You'll store the restic repo key there.
-2. **Backblaze B2** — create an account and a private bucket (e.g. `cilantro-backup`).
+2. **Backblaze B2** — create an account and a private bucket (e.g. `<hostname>-backup`).
    Note the bucket's **S3 endpoint** (e.g. `s3.us-west-002.backblazeb2.com`).
 3. **External HDD** — any **ext4** drive. Set `BACKUP_EXTERNAL_REPO` to
    `<mountpoint>/restic`; restic stores its repo in that subfolder *alongside* your
@@ -120,7 +125,7 @@ are for on-demand use and inspection.
 
 | Command | Does |
 |---------|------|
-| `backup-now [b2\|external\|cilantro]` | Back up now (default both; b2 first; external skipped if the HDD isn't docked) |
+| `backup-now [b2\|external\|full]` | Back up now (default both; b2 first; external skipped if the HDD isn't docked) |
 | `backup-status` | Targets reachable? timers armed? latest snapshot? |
 | `backup-doctor` | Full-chain **health assertion** — perms, config drift, env drop-in, snapshot age, B2 repo size/churn/prune-staleness, inert alerting, stale recovery assets, disk space. Non-zero exit on any failure. |
 | `backup-drill [b2\|external]` | Prove the backup is **complete + restorable** (content + restore canary, then an integrity check) — the data half of a DR drill |
