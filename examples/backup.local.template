@@ -59,6 +59,20 @@ BACKUP_HC_URL_EXTERNAL=
 # separate check so a verify failure is distinguishable from a backup failure.
 BACKUP_HC_URL_VERIFY=
 
+# --- capacity guardrails (backup-doctor; blank = check is skipped with a warn) ---
+# The B2 repo is APPEND-ONLY and grows monotonically between manual prunes, so
+# backup-doctor watches size and growth. Sizing rule: warn threshold ~60% of the
+# Backblaze storage cap; cap >= ~3x the expected raw repo size (absorbs growth
+# between prunes, prune's own repack uploads, and the ~30-day hidden-version
+# billing lag after a prune).
+# Warn when raw repo size (restic stats --mode raw-data) exceeds this many GB:
+BACKUP_B2_SIZE_WARN_GB=15
+# Warn when the last scheduled run stored more than this many MB (churn guard —
+# catches a new churn source within one run instead of weeks later):
+BACKUP_B2_CHURN_WARN_MB=512
+# Remind to run backup-prune (offline full key) after this many days:
+BACKUP_B2_PRUNE_REMIND_DAYS=120
+
 # --- verification: critical paths the content canary asserts (blank = default)
 # Whitespace/newline-separated ABSOLUTE paths that MUST appear in the latest
 # snapshot. Blank uses the built-in set (~/.ssh, ~/.config, keyrings, ~/.dotfiles,

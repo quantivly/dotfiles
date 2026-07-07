@@ -50,10 +50,37 @@ __BACKUP_HOME__/Downloads
 __BACKUP_HOME__/.config/google-chrome/*/Cache
 __BACKUP_HOME__/.config/google-chrome/*/Code Cache
 __BACKUP_HOME__/.config/google-chrome/*/GPUCache
-__BACKUP_HOME__/.config/google-chrome/*/Service Worker/CacheStorage
+# offline PWA state; sites re-register workers on next visit
+__BACKUP_HOME__/.config/google-chrome/*/Service Worker
+# extensions re-download from the Web Store (the install list is in Preferences,
+# which stays backed up); only a store-delisted extension would be unrecoverable
+__BACKUP_HOME__/.config/google-chrome/*/Extensions
+# per-profile ML models, re-downloaded by the optimization-guide component
+__BACKUP_HOME__/.config/google-chrome/*/optimization_guide_model_store
+# threat lists, re-downloaded
+__BACKUP_HOME__/.config/google-chrome/*/Safe Browsing
+# Chrome component payloads (top-level under the user-data dir, not per-profile):
+# on-device AI models (4G+, REWRITTEN on updates — the top churn source), TTS
+# engine, packaged-extension download caches, staged UMA telemetry. All are
+# re-downloaded by Chrome's component updater; excluding them loses nothing.
+__BACKUP_HOME__/.config/google-chrome/OptGuideOnDeviceModel
+__BACKUP_HOME__/.config/google-chrome/OptGuideOnDeviceClassifierModel
+__BACKUP_HOME__/.config/google-chrome/WasmTtsEngine
+__BACKUP_HOME__/.config/google-chrome/component_crx_cache
+__BACKUP_HOME__/.config/google-chrome/extensions_crx_cache
+__BACKUP_HOME__/.config/google-chrome/DeferredBrowserMetrics
 __BACKUP_HOME__/.config/BraveSoftware/*/*/Cache
 __BACKUP_HOME__/.config/BraveSoftware/*/*/Code Cache
 __BACKUP_HOME__/.config/BraveSoftware/*/*/GPUCache
+
+# --- AI/dev tool regenerables (settings/state stay; binaries+venvs re-download) ---
+# Claude Code binaries — a NEW ~240M dir per auto-update (near-daily): the single
+# biggest churn driver. The auto-updater re-downloads; ~/.claude settings stay.
+__BACKUP_HOME__/.local/share/claude/versions
+# plugin download cache (~1G); plugins re-fetch on demand
+__BACKUP_HOME__/.claude-work/plugins/cache
+# uv tool venvs; `uv tool install` regenerates (tool list is in the manifest)
+__BACKUP_HOME__/.local/share/uv
 
 # --- VS Code (KEEP settings; drop caches + re-installable extensions) ---
 __BACKUP_HOME__/.config/Code/Cache
