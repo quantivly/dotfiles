@@ -263,12 +263,17 @@ alias backup-init='
     echo "⚠️  ~/.backup.local already exists! Backup first:"
     echo "   cp ~/.backup.local ~/.backup.local.backup"
   else
-    bash ~/.dotfiles/scripts/backup-render.sh ~/.dotfiles/examples/backup.local.template > ~/.backup.local
-    chmod 600 ~/.backup.local
-    echo "✓ Created ~/.backup.local from template (user/hostname rendered)"
-    echo "  Edit it (repo paths, B2 keys, healthcheck URLs): \${EDITOR:-vim} ~/.backup.local"
-    echo "  Then run the one-time setup: backup-setup"
-    echo "  See guide: ~/.dotfiles/docs/BACKUP_AND_RESTORE_GUIDE.md"
+    bl_tmp="$(mktemp)"
+    if bash ~/.dotfiles/scripts/backup-render.sh ~/.dotfiles/examples/backup.local.template > "$bl_tmp"; then
+      chmod 600 "$bl_tmp"; mv "$bl_tmp" ~/.backup.local
+      echo "✓ Created ~/.backup.local from template (user/hostname rendered)"
+      echo "  Edit it (repo paths, B2 keys, healthcheck URLs): \${EDITOR:-vim} ~/.backup.local"
+      echo "  Then run the one-time setup: backup-setup"
+      echo "  See guide: ~/.dotfiles/docs/BACKUP_AND_RESTORE_GUIDE.md"
+    else
+      rm -f "$bl_tmp"
+      echo "✗ Failed to render template — ~/.backup.local not created" >&2
+    fi
   fi
 '
 
