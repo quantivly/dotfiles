@@ -47,19 +47,32 @@ esac
 
 # Desktop user → resolve their home so the default critical paths are correct
 # (this script runs as root, so $HOME is /root).
-vuser="${NOTIFY_USER:-$(id -un 1000 2>/dev/null || echo zvi)}"
-vhome="$(getent passwd "$vuser" 2>/dev/null | cut -d: -f6)"; : "${vhome:=/home/$vuser}"
+vuser="${NOTIFY_USER:-$(id -un 1000 2>/dev/null || true)}"
+vhome=""
+if [[ -n "$vuser" ]]; then
+  vhome="$(getent passwd "$vuser" 2>/dev/null | cut -d: -f6)"
+  : "${vhome:=/home/$vuser}"
+fi
 
 # Critical paths to assert in the latest snapshot. Override with BACKUP_CANARY_PATHS
 # (whitespace/newline-separated absolute paths) in ~/.backup.local.
 if [[ -n "${BACKUP_CANARY_PATHS:-}" ]]; then
   read -r -a CANARY_PATHS <<<"$BACKUP_CANARY_PATHS"
-else
+elif [[ -n "$vhome" ]]; then
   CANARY_PATHS=(
     "$vhome/.ssh"
     "$vhome/.config"
     "$vhome/.local/share/keyrings"
     "$vhome/.dotfiles"
+    "/etc/NetworkManager/system-connections"
+    "$MANIFEST"
+  )
+else
+  # No desktop user resolvable (NOTIFY_USER unset and no UID-1000 account):
+  # fall back to the system-level canaries rather than asserting /home/ paths
+  # that don't exist — but say so, since home coverage is the point.
+  echo "WARNING: no desktop user resolved (set NOTIFY_USER in ~/.backup.local) — home canaries skipped" >&2
+  CANARY_PATHS=(
     "/etc/NetworkManager/system-connections"
     "$MANIFEST"
   )

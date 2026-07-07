@@ -51,7 +51,9 @@ else
   [[ "${BACKUP_NOTIFY_SUCCESS:-0}" == "1" ]] && notify_wanted=1
 fi
 if [[ "$notify_wanted" == "1" ]] && command -v notify-send >/dev/null 2>&1; then
-  user="${NOTIFY_USER:-$(id -un 1000 2>/dev/null || echo zvi)}"
+  # No last-resort literal: an empty user makes `id -u ""` fail below, and the
+  # -n guard then skips the notification (nobody to notify anyway).
+  user="${NOTIFY_USER:-$(id -un 1000 2>/dev/null || true)}"
   uid="$(id -u "$user" 2>/dev/null || echo)"
   if [[ -n "$uid" && -S "/run/user/$uid/bus" ]]; then
     if [[ "$STATUS" == "fail" ]]; then

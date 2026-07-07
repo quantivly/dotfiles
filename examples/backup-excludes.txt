@@ -1,6 +1,8 @@
-# restic --exclude-file — regenerable paths to skip on cilantro
-# =============================================================
-# Installed to /etc/restic/excludes.txt by backup-setup; referenced by
+# restic --exclude-file — regenerable paths to skip on this machine
+# ==================================================================
+# TEMPLATE: the home-directory placeholder is substituted with the invoking
+# user's home by scripts/backup-render.sh when backup-setup installs this to
+# /etc/restic/excludes.txt (restic expands no variables itself); referenced by
 # resticprofile/profiles.toml ([base.backup] exclude-file).
 #
 # Syntax: one pattern per line; a leading "/" anchors to the snapshot root;
@@ -15,19 +17,19 @@
 # ~/.dotfiles, or ~/.config/AWSVPNClient.
 
 # --- top-level regenerable caches ---
-/home/zvi/.cache
-/home/zvi/.npm
+__BACKUP_HOME__/.cache
+__BACKUP_HOME__/.npm
 # reinstalled by `mise install`
-/home/zvi/.local/share/mise
-/home/zvi/.local/state
+__BACKUP_HOME__/.local/share/mise
+__BACKUP_HOME__/.local/state
 # reinstalled by install-prerequisites.sh
-/home/zvi/.oh-my-zsh
-/home/zvi/.forgit
+__BACKUP_HOME__/.oh-my-zsh
+__BACKUP_HOME__/.forgit
 # reinstalled by TPM
-/home/zvi/.tmux/plugins
-/home/zvi/.local/share/Trash
+__BACKUP_HOME__/.tmux/plugins
+__BACKUP_HOME__/.local/share/Trash
 # transient; delete this line if you keep important files in Downloads
-/home/zvi/Downloads
+__BACKUP_HOME__/Downloads
 
 # --- per-project regenerables (anywhere under home) ---
 **/node_modules
@@ -45,29 +47,29 @@
 **/build
 
 # --- browser caches (KEEP profiles/bookmarks; drop heavy caches) ---
-/home/zvi/.config/google-chrome/*/Cache
-/home/zvi/.config/google-chrome/*/Code Cache
-/home/zvi/.config/google-chrome/*/GPUCache
-/home/zvi/.config/google-chrome/*/Service Worker/CacheStorage
-/home/zvi/.config/BraveSoftware/*/*/Cache
-/home/zvi/.config/BraveSoftware/*/*/Code Cache
-/home/zvi/.config/BraveSoftware/*/*/GPUCache
+__BACKUP_HOME__/.config/google-chrome/*/Cache
+__BACKUP_HOME__/.config/google-chrome/*/Code Cache
+__BACKUP_HOME__/.config/google-chrome/*/GPUCache
+__BACKUP_HOME__/.config/google-chrome/*/Service Worker/CacheStorage
+__BACKUP_HOME__/.config/BraveSoftware/*/*/Cache
+__BACKUP_HOME__/.config/BraveSoftware/*/*/Code Cache
+__BACKUP_HOME__/.config/BraveSoftware/*/*/GPUCache
 
 # --- VS Code (KEEP settings; drop caches + re-installable extensions) ---
-/home/zvi/.config/Code/Cache
-/home/zvi/.config/Code/CachedData
-/home/zvi/.config/Code/Service Worker/CacheStorage
-/home/zvi/.config/Code/logs
+__BACKUP_HOME__/.config/Code/Cache
+__BACKUP_HOME__/.config/Code/CachedData
+__BACKUP_HOME__/.config/Code/Service Worker/CacheStorage
+__BACKUP_HOME__/.config/Code/logs
 # extension list is captured in the system manifest instead
-/home/zvi/.vscode/extensions
+__BACKUP_HOME__/.vscode/extensions
 
 # --- snap regenerables (snap app data lives in ~/snap; drop its caches) ---
-/home/zvi/snap/*/*/.cache
-/home/zvi/snap/*/common/.cache
+__BACKUP_HOME__/snap/*/*/.cache
+__BACKUP_HOME__/snap/*/common/.cache
 
 # --- container / VM images (huge, rebuildable) ---
-/home/zvi/.local/share/containers
-/home/zvi/.docker/desktop
+__BACKUP_HOME__/.local/share/containers
+__BACKUP_HOME__/.docker/desktop
 
 # --- swap / pseudo-filesystems (belt & suspenders; one-file-system covers too) ---
 /swap.img

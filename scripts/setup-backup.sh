@@ -3,7 +3,7 @@
 # scripts/setup-backup.sh
 # =======================
 #
-# One-time, guided, IDEMPOTENT installer for the cilantro backup system
+# One-time, guided, IDEMPOTENT installer for the workstation backup system
 # (restic + resticprofile → external HDD + Backblaze B2). Run it via `backup-setup`.
 #
 # This is the sudo-using counterpart to ./install (which stays sudo-free and only
@@ -55,6 +55,10 @@ confirm() {
   case "$r" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }
 has_command() { command -v "$1" &>/dev/null; }
+
+# Render a __BACKUP_*__ template (user/home/hostname) to stdout. backup-doctor
+# runs the SAME script for its drift compare, so keep all substitution there.
+render() { bash "$DOTFILES/scripts/backup-render.sh" "$1"; }
 
 # ===========================================================================
 # 0. Preflight
@@ -127,9 +131,8 @@ setup_repo_key() {
   local key; key="$(openssl rand -base64 48 2>/dev/null || head -c 36 /dev/urandom | base64)"
   echo
   log INFO "A new restic repository password has been generated. STORE IT FIRST:"
-  echo "    ┌────────────────────────────────────────────────────────────┐"
-  echo "    │  Bitwarden → new Secure Note: 'restic repo key — cilantro'   │"
-  echo "    └────────────────────────────────────────────────────────────┘"
+  echo
+  echo "    Bitwarden → new Secure Note: 'restic repo key — $(hostname)'"
   echo
   echo "    $key"
   echo
@@ -151,9 +154,12 @@ setup_repo_key() {
 install_configs() {
   log STEP "3. Install /etc configs + helper scripts"
 
-  sudo install -m 644 "$DOTFILES/examples/backup-includes.txt" "$ETC_RESTIC/includes.txt"
-  sudo install -m 644 "$DOTFILES/examples/backup-excludes.txt" "$ETC_RESTIC/excludes.txt"
-  log SUCCESS "includes.txt / excludes.txt → $ETC_RESTIC"
+  # Rendered (not copied): restic reads these verbatim — no $HOME expansion —
+  # so the user's home is baked in here. `sudo tee` keeps them root-owned.
+  render "$DOTFILES/examples/backup-includes.txt" | sudo tee "$ETC_RESTIC/includes.txt" >/dev/null
+  render "$DOTFILES/examples/backup-excludes.txt" | sudo tee "$ETC_RESTIC/excludes.txt" >/dev/null
+  sudo chmod 644 "$ETC_RESTIC/includes.txt" "$ETC_RESTIC/excludes.txt"
+  log SUCCESS "includes.txt / excludes.txt rendered → $ETC_RESTIC"
 
   # Root-readable copy of the secrets/URLs env file (the timers load this).
   sudo install -m 600 -o root -g root "$USER_CONFIG" "$ENV_FILE"
@@ -264,7 +270,8 @@ install_schedules() {
   # Clean up the obsolete looping .path unit if a previous run installed it.
   sudo systemctl disable --now restic-backup-external.path 2>/dev/null || true
   sudo rm -f /etc/systemd/system/restic-backup-external.path
-  sudo install -m 644 "$DOTFILES/systemd/restic-backup-external.service" /etc/systemd/system/restic-backup-external.service
+  render "$DOTFILES/systemd/restic-backup-external.service" | sudo tee /etc/systemd/system/restic-backup-external.service >/dev/null
+  sudo chmod 644 /etc/systemd/system/restic-backup-external.service
   sudo install -m 644 "$DOTFILES/systemd/restic-backup-external.timer"   /etc/systemd/system/restic-backup-external.timer
   if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]]; then
     sudo sed -i "s|ConditionPathExists=.*|ConditionPathExists=${BACKUP_EXTERNAL_REPO}/config|" /etc/systemd/system/restic-backup-external.service
@@ -413,9 +420,9 @@ build_emergency_kit() {
   local kit="${HOME}/emergency-kit.txt"
   if [[ ! -f "$kit" && ! -f "${kit%.txt}.age" ]]; then
     cat >"$kit" <<EOF
-EMERGENCY KIT — cilantro   (fill in, then encrypt, then SHRED this plaintext)
+EMERGENCY KIT — $(hostname)   (fill in, then encrypt, then SHRED this plaintext)
 ============================================================================
-restic repo password        : (from Bitwarden 'restic repo key — cilantro')
+restic repo password        : (from Bitwarden 'restic repo key — $(hostname)')
 B2 FULL-access key id/secret : (read+delete key — restore & prune)
 B2 account login + 2FA codes :
 Bitwarden master pw + 2FA recovery code :

@@ -29,8 +29,9 @@ OUT="${BACKUP_MANIFEST_FILE:-/var/backups/system-manifest.txt}"
 # shellcheck source=/dev/null
 [[ -r /etc/restic/backup.local ]] && { set -a; . /etc/restic/backup.local; set +a; } 2>/dev/null
 
-# Desktop user = NOTIFY_USER, else the primary UID-1000 account, else "zvi".
-BACKUP_USER="${NOTIFY_USER:-$(id -un 1000 2>/dev/null || echo zvi)}"
+# Desktop user = NOTIFY_USER, else the primary UID-1000 account. If neither
+# resolves, run_as_user's `|| true` leaves the user-context sections empty.
+BACKUP_USER="${NOTIFY_USER:-$(id -un 1000 2>/dev/null || true)}"
 
 # Run a command in the desktop user's login environment (for mise shims etc.).
 run_as_user() { sudo -u "$BACKUP_USER" -H bash -lc "$1" 2>/dev/null || true; }

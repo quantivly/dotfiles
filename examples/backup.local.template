@@ -13,9 +13,11 @@
 #   Comments must be on their OWN line: systemd does not strip an inline "# ..."
 #   after a value — it would become part of the value and break the key.
 #
-# Install:  backup-init       (copies this template here)
+# Install:  backup-init       (renders this template here — user/hostname
+#           placeholders become plain literals via scripts/backup-render.sh,
+#           so the installed file still needs NO shell expansion)
 # Set up:   backup-setup      (one-time: installs restic+resticprofile, repos, timers)
-# Run now:  backup-now [b2|external|cilantro]
+# Run now:  backup-now [b2|external|full]
 #
 # SECRETS: the restic repo password lives in Bitwarden AND on disk at
 # /etc/restic/repo.key (root 0600), written by backup-setup. The B2 keys below
@@ -30,9 +32,9 @@ RESTIC_PASSWORD_FILE=/etc/restic/repo.key
 RESTIC_COMPRESSION=auto
 
 # --- target 1: external HDD -------------------------------------------------
-# Label the backup partition "Backup" so GNOME mounts it at /media/zvi/Backup.
+# Label the backup partition "Backup" so GNOME mounts it at /media/<user>/Backup.
 # Find the UUID once docked:  lsblk -o NAME,UUID,LABEL,MOUNTPOINT
-BACKUP_EXTERNAL_REPO=/media/zvi/Backup/restic
+BACKUP_EXTERNAL_REPO=/media/__BACKUP_USER__/Backup/restic
 BACKUP_EXTERNAL_UUID=
 # Debounce auto-runs on re-dock (e.g. 6h):
 BACKUP_EXTERNAL_MIN_INTERVAL=6h
@@ -40,7 +42,7 @@ BACKUP_EXTERNAL_MIN_INTERVAL=6h
 # --- target 2: Backblaze B2 via the S3-compatible endpoint ------------------
 # Format: s3:s3.<region>.backblazeb2.com/<bucket>   (NOT the native b2: backend)
 # Region (e.g. us-west-002) is shown on the bucket's Endpoint in the B2 console.
-BACKUP_B2_REPO=s3:s3.us-west-002.backblazeb2.com/cilantro-backup
+BACKUP_B2_REPO=s3:s3.us-west-002.backblazeb2.com/__BACKUP_HOSTNAME__-backup
 # AWS_ACCESS_KEY_ID = B2 application keyID (the APPEND-ONLY key, no deleteFiles).
 # AWS_SECRET_ACCESS_KEY = its applicationKey. The full-access key stays OFFLINE.
 AWS_ACCESS_KEY_ID=
@@ -70,4 +72,4 @@ BACKUP_CANARY_PATHS=
 BACKUP_NOTIFY=1
 BACKUP_NOTIFY_SUCCESS=0
 # NOTIFY_USER: whose GUI session receives notify-send
-NOTIFY_USER=zvi
+NOTIFY_USER=__BACKUP_USER__

@@ -1,5 +1,5 @@
-# resticprofile configuration — cilantro backup policy
-# =====================================================
+# resticprofile configuration — workstation backup policy
+# ========================================================
 # Declarative orchestration for restic. resticprofile is the established wrapper
 # that owns scheduling (systemd timers), retention, checks and hooks so we write
 # almost no bespoke shell. https://creativeprojects.github.io/resticprofile
@@ -33,7 +33,10 @@
     # Stay on the root filesystem; skip any dir tagged with CACHEDIR.TAG.
     one-file-system = true
     exclude-caches = true
-    tag = ["cilantro"]
+    # The .Hostname template variable is rendered by resticprofile at run time
+    # (like the .Env references above), so the tag tracks the machine without
+    # editing this file.
+    tag = ["{{ .Hostname }}"]
     # Refresh the self-documenting system manifest just before each snapshot.
     run-before = "/usr/local/bin/backup-manifest.sh"
     # Desktop notification + healthchecks.io ping (the script reads $PROFILE_NAME).
@@ -49,7 +52,7 @@
 
   [external.backup]
     # Profile tags OVERRIDE (don't merge with) base.backup's tag, so list both.
-    tag = ["cilantro", "external"]
+    tag = ["{{ .Hostname }}", "external"]
     # No schedule here — systemd/restic-backup-external.timer drives this every 6h and its
     # ConditionPathExists runs it only when the HDD is docked. Immediate: backup-now external.
 
@@ -71,7 +74,7 @@
 
   [b2.backup]
     # Profile tags OVERRIDE (don't merge with) base.backup's tag, so list both.
-    tag = ["cilantro", "b2"]
+    tag = ["{{ .Hostname }}", "b2"]
     # Every 2h, 08:00–22:00 (~2h offsite RPO). Persistent catches up a missed run
     # after sleep/off; nights are quiet. restic is incremental, so each run is a
     # small delta. (Daily was the original; raised in DO-447.)
@@ -99,7 +102,8 @@
 
 # ---------------------------------------------------------------------------
 # group — `backup-now` runs both (b2 first so the offsite always completes,
-# even when the external HDD is not docked)
+# even when the external HDD is not docked). "full" is backup-now's default
+# target (system.sh) — rename them together.
 # ---------------------------------------------------------------------------
 [groups]
-  cilantro = ["b2", "external"]
+  full = ["b2", "external"]
