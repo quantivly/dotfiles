@@ -43,8 +43,9 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
    - **zshrc.conditionals.tools** - Modern CLI tool configurations (bat, eza, ripgrep, zoxide, etc.)
    - **zshrc.conditionals.fzf** - FZF fuzzy finder setup and key bindings
    - **zshrc.conditionals.plugins** - Plugin integrations (mise, direnv, forgit, git workflows)
-5. **zshrc.company** - Work-specific configuration (Quantivly)
-6. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
+5. **zshrc.buildlimits** - Build/test worker caps so parallel agent sessions can't each claim every core
+6. **zshrc.company** - Work-specific configuration (Quantivly)
+7. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
 
 ### Function Modules
 
@@ -88,9 +89,10 @@ Dotbot creates symlinks from `install.conf.yaml`:
    - zsh/zshrc.conditionals.tools (CLI tool overrides)
    - zsh/zshrc.conditionals.fzf (FZF integration)
    - zsh/zshrc.conditionals.plugins (mise, direnv, etc.)
-9. zsh/zshrc.company
-10. ~/.zshrc.local (machine-specific secrets)
-11. PATH additions
+9. zsh/zshrc.buildlimits (build/test worker caps)
+10. zsh/zshrc.company
+11. ~/.zshrc.local (machine-specific secrets)
+12. PATH additions
 ```
 
 **Key Insight:** Conditionals load AFTER aliases, so tools that are installed get priority configuration.
@@ -357,6 +359,7 @@ localrc              # Edit ~/.zshrc.local
 qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
 tool_status          # Check installed tools
+build-limits         # Show active build/test worker caps (see zshrc.buildlimits)
 alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
 gnome-apply          # Apply curated GNOME desktop config (idempotent)

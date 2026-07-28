@@ -198,6 +198,9 @@ unset func_module
 # Optional tool configurations (colorls, pyenv, nvm, etc.)
 [ -f ~/.dotfiles/zsh/zshrc.conditionals ] && source ~/.dotfiles/zsh/zshrc.conditionals
 
+# Build/test parallelism caps (keeps parallel agent sessions from oversubscribing)
+[ -f ~/.dotfiles/zsh/zshrc.buildlimits ] && source ~/.dotfiles/zsh/zshrc.buildlimits
+
 # Company/work-specific configuration
 [ -f ~/.dotfiles/zsh/zshrc.company ] && source ~/.dotfiles/zsh/zshrc.company
 
