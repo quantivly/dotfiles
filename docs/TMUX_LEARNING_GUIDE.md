@@ -473,7 +473,7 @@ ls ~/.tmux/resurrect/
 ### Ctrl+Shift+E/O/W/T/S not working
 Ctrl+Shift+**letter** bindings (E, O, W, T, S) require two things:
 1. **Alacritty key bindings** in `~/.config/alacritty/alacritty.toml` that send CSI u sequences (e.g., `\x1b[101;6u` for E, `\x1b[119;6u` for W)
-2. **tmux extended-keys** enabled with `terminal-features` matching your `$TERM` (usually `xterm-256color`, not `alacritty`)
+2. **tmux extended-keys** enabled with `terminal-features` matching your `$TERM` — which is `alacritty` or `xterm-256color` depending on whether the `alacritty` terminfo entry is installed (`tmux.conf:94-95` covers both; run `echo $TERM` outside tmux to see which you have)
 
 Ctrl+Shift+**Arrow**, Ctrl+PageUp/Down, Ctrl+Shift+PageUp/Down, Ctrl+Alt+Arrow, and Alt+z all work natively without Alacritty config.
 
