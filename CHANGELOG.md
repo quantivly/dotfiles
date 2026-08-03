@@ -16,7 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was shed this way and its empty output was read as "no matches". The match
   pattern requires `sending SIG… to process` — earlyoom's startup banner
   (`sending SIGTERM when mem avail <= 10.00%`) otherwise counts as a kill on every
-  boot.
+  boot. When the system journal can't be read at all (no `journalctl`; a user
+  outside `adm`/`systemd-journal`, who sees only their own journal while these
+  kills are logged by root units) the check reports `skipped` rather than a clean
+  ✓ — a false all-clear would reproduce the exact failure mode it exists to catch.
+  The journal read is narrowed to the `earlyoom`/`systemd-oomd`/`kernel`
+  identifiers, which is the same answer in 0.3s instead of 3.3s.
 - **Broadcast-kill audit tripwire** — a two-line auditd rule
   (`audit/99-logout-catch.rules`, installed root-owned by `audit-setup` /
   `scripts/setup-audit-rules.sh`) that records any real `kill(-1, sig)`: *"signal

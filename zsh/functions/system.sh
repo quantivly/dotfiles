@@ -398,19 +398,43 @@ system_health() {
   # Pattern note: match "sending SIG… to process", not just "sending SIG" —
   # earlyoom's startup banner ("sending SIGTERM when mem avail <= 10.00%")
   # otherwise counts as a kill on every boot.
+  #
+  # Never print the ✓ line when the journal couldn't actually be read: no
+  # journalctl at all (macOS), or a user outside adm/systemd-journal, who sees
+  # only their own journal — and these kills are logged by root units. A false
+  # all-clear is the very failure mode this check exists to catch, so report
+  # "skipped" instead. journalctl exits 0 in both the "no access" and "no
+  # matches" cases, so the signal is whether those identifiers yield *any* line
+  # at all before the kill pattern is applied: all three are system-scope and
+  # the kernel alone logs thousands of lines a week (23.8k here), so a readable
+  # journal is never empty over 7 days.
+  #
+  # -t also narrows the read: unfiltered, this dumps every entry of the last 7
+  # days (419k lines, 3.3s here) for the same result it gets in 0.4s.
   local oom_pat='earlyoom.*sending SIG[A-Z]+ to process|Killed process [0-9]+|oom-kill:|systemd-oomd.*Killed'
   local oom_log oom_kills oom_last
-  oom_log=$(journalctl --since "7 days ago" --no-pager 2>/dev/null | grep -E "$oom_pat")
-  oom_kills=$(printf '%s' "$oom_log" | grep -c . || true)
-  if (( oom_kills > 0 )); then
-    oom_last=$(printf '%s\n' "$oom_log" | tail -1 \
-      | sed 's/.*sending SIG[A-Z]* to process /pid /; s/, cmdline.*//')
-    echo "⚠️  Memory-pressure kills (7d): ${oom_kills} — latest: ${oom_last}"
-    echo "    A killed process usually still exits 0 with empty output, so treat"
-    echo "    empty results from around then as unanswered, not as an all-clear."
-    echo "    Detail: journalctl --since '7 days ago' | grep -E 'earlyoom|oom-kill'"
+  if ! has_command journalctl; then
+    echo "○ Memory-pressure kills: journalctl not available (skipped)"
+  elif [[ -z "$(journalctl --since '7 days ago' --no-pager -n 1 \
+        -t earlyoom -t systemd-oomd -t kernel 2>/dev/null)" ]]; then
+    echo "○ Memory-pressure kills: system journal unreadable (skipped)"
+    echo "    Needs journal access: sudo usermod -aG adm \"\$USER\" (re-login)"
   else
-    echo "✓ No memory-pressure kills in the last 7 days"
+    oom_log=$(journalctl --since "7 days ago" --no-pager \
+      -t earlyoom -t systemd-oomd -t kernel 2>/dev/null | grep -E "$oom_pat" || true)
+    oom_kills=$(printf '%s' "$oom_log" | grep -c . || true)
+    if (( oom_kills > 0 )); then
+      # Only earlyoom's format shortens cleanly; kernel/systemd-oomd victims
+      # keep their raw line (long, but complete).
+      oom_last=$(printf '%s\n' "$oom_log" | tail -1 \
+        | sed 's/.*sending SIG[A-Z]* to process /pid /; s/, cmdline.*//')
+      echo "⚠️  Memory-pressure kills (7d): ${oom_kills} — latest: ${oom_last}"
+      echo "    A killed process usually still exits 0 with empty output, so treat"
+      echo "    empty results from around then as unanswered, not as an all-clear."
+      echo "    Detail: journalctl --since '7 days ago' | grep -E 'earlyoom|oom-kill'"
+    else
+      echo "✓ No memory-pressure kills in the last 7 days"
+    fi
   fi
 }
 
