@@ -958,3 +958,72 @@ backup-unlock() {
       && echo "✓ Cleared stale locks on $target (use 'backup-unlock $target --force' for a stubborn lock when idle)."
   fi
 }
+
+# =============================================================================
+# Audit Functions (broadcast-kill tripwire)
+# =============================================================================
+# Thin wrappers over the audit rule installed by scripts/setup-audit-rules.sh
+# (run via `audit-setup`). The rule records any real kill(-1, sig) — "signal
+# every process I may signal", which on a desktop is the whole session — and the
+# audit record names the sender, its exe, cmdline and parent.
+#
+# Why this exists: a broadcast kill produces a perfectly orderly session
+# teardown. No crash, no OOM, no coredump, nothing in the journal explaining it.
+# Without this rule there is simply no evidence to find. See
+# docs/TROUBLESHOOTING.md ("Desktop session suddenly logged out").
+#
+# auditd is root-only, so these shell out via sudo.
+#
+# Functions:
+#   - audit-setup:   Install + load the tripwire (idempotent; resyncs after edits)
+#   - audit-status:  Is it armed? is auditd healthy, or silently suspended?
+#   - audit-sweeps:  Show broadcast-kill events (default: last 24h)
+# =============================================================================
+
+# Install/refresh the broadcast-kill audit rule.
+audit-setup() {
+  bash "${HOME}/.dotfiles/scripts/setup-audit-rules.sh" "$@"
+}
+
+# Is the tripwire actually armed, and is auditd in a state where it would record?
+audit-status() {
+  if ! command -v auditctl >/dev/null 2>&1; then
+    echo "✗ auditd not installed — run: audit-setup"; return 1
+  fi
+  local rules
+  rules=$(sudo auditctl -l 2>/dev/null | grep -c 'logoutsweep' || true)
+  if [[ "${rules:-0}" -lt 1 ]]; then
+    echo "✗ tripwire NOT armed (0 rules) — run: audit-setup"; return 1
+  fi
+  echo "✓ tripwire armed (${rules} rule(s))"
+  echo "  auditd: $(systemctl is-active auditd 2>/dev/null)"
+  # `lost` climbing, or a suspended daemon, means records are being dropped —
+  # and a dropped record looks exactly like a quiet machine. Surface both.
+  sudo auditctl -s 2>/dev/null | awk '
+    /^lost/    { printf "  lost records: %s%s\n", $2, ($2 == "0" ? "" : "  ← RECORDS DROPPED") }
+    /^backlog / { printf "  backlog: %s\n", $2 }'
+  echo "  note: disk_full/admin_space actions are SUSPEND — auditd stops logging"
+  echo "        (silently) if /var runs low. Check: df -h /var"
+}
+
+# Show broadcast-kill events. Optional arg: hours to look back (default 24).
+audit-sweeps() {
+  local hours="${1:-24}" date_ time_ raw count
+  command -v ausearch >/dev/null 2>&1 || { echo "✗ auditd not installed — run: audit-setup"; return 1; }
+  # ausearch -ts takes the date and the time as TWO arguments. Passing them as a
+  # single quoted string matches nothing and prints no error — indistinguishable
+  # from "no events", which is the worst possible failure for a tripwire reader.
+  date_=$(date -d "-${hours} hours" "+%m/%d/%Y")
+  time_=$(date -d "-${hours} hours" "+%H:%M:%S")
+  raw=$(sudo ausearch -k logoutsweep -ts "$date_" "$time_" -i 2>/dev/null || true)
+  count=$(printf '%s\n' "$raw" | grep -c '^type=SYSCALL' || true)
+  echo "Window: ${date_} ${time_} onward — ${count} record(s)."
+  if [[ "${count:-0}" -eq 0 ]]; then
+    echo "✓ No broadcast kills. (If this is unexpected, confirm with: audit-status)"
+    return 0
+  fi
+  printf '%s\n' "$raw" | grep '^type=SYSCALL'
+  echo
+  echo "Each line names the sender (pid/ppid/comm/exe). A burst from pid 1"
+  echo "(systemd-shutdown) at a reboot is normal; anything else is not."
+}

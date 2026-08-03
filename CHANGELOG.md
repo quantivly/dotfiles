@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Broadcast-kill audit tripwire** — a two-line auditd rule
+  (`audit/99-logout-catch.rules`, installed root-owned by `audit-setup` /
+  `scripts/setup-audit-rules.sh`) that records any real `kill(-1, sig)`: *"signal
+  every process I may signal"*, which on a desktop is the whole graphical
+  session. Motivated by three unexplained GNOME logouts (2026-08-02/03) in which
+  a broadcast kill from a project test suite produced a completely orderly
+  teardown — no crash, no OOM, no coredump, nothing in the journal — leaving the
+  audit log as the only place the sender's identity could exist.
+  - `audit-status` surfaces the three ways this instrumentation fails *silently*:
+    a rejected rule field leaves zero rules loaded with no error; auditd's
+    `SUSPEND` disk actions stop logging quietly when `/var` runs low; and a
+    climbing `lost` counter drops records. Each is indistinguishable from "no
+    events".
+  - `audit-sweeps [hours]` reads hits, encoding the fact that `ausearch -ts`
+    takes the date and time as **two** arguments — quoting them as one string
+    matches nothing and prints no error.
+  - Note: installing auditd moves AppArmor denials out of `journalctl -k` into
+    `sudo ausearch -m AVC`. See CLAUDE.md → Audit Tripwire and
+    docs/TROUBLESHOOTING.md → "Desktop session suddenly logged out".
 - **DO-449 — Backup hardening (verification, health checks, safe-restore guardrails)**:
   closes the *silent-failure* class for the backup system.
   - `backup-doctor` — full-chain correctness assertion (file perms, config drift vs.
