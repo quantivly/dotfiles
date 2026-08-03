@@ -1070,8 +1070,13 @@ audit-status() {
 
   # /var filling up is the remaining silent stop, and it is a config policy we
   # deliberately leave at SUSPEND rather than a value we can read back.
+  # `command df` bypasses the df='duf' / df='df -h' aliases, which on a
+  # `source ~/.zshrc` reload get baked into this function and silently produce
+  # nothing (DO-450 fixed exactly this in backup-doctor). Reporting "unknown" for
+  # the one signal that catches auditd's silent SUSPEND would defeat the point.
+  # `-P` gives portable columns; field 4 is Avail.
   local varfree
-  varfree=$(df -h --output=avail /var 2>/dev/null | tail -1 | tr -d ' ')
+  varfree=$(command df -Ph /var 2>/dev/null | awk 'NR==2{print $4}')
   echo "  note: disk_full/admin_space actions are SUSPEND — auditd stops logging"
   echo "        (silently) if /var runs low. /var avail: ${varfree:-unknown}"
   return $rc
