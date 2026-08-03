@@ -26,5 +26,18 @@
 ##
 ## Expect a burst from systemd-shutdown (pid 1) at every reboot: that is how
 ## systemd stops the world, and it is benign.
+##
+## SCOPE: this catches a0 == -1 only. Two neighbouring blast radii are NOT
+## covered, deliberately:
+##   * kill(0, sig)     — "my whole process group". A real hazard (and named as
+##     such in docs/TROUBLESHOOTING.md, since `kill -0 "$pid"` succeeds for it
+##     too), but shells and job control issue it routinely, so a rule would be
+##     noisy enough to train you to ignore the key. Add `-F a0=0x0` only if you
+##     are prepared to filter the noise.
+##   * kill(-pgid, sig) — one specific foreign process group. Indistinguishable
+##     from legitimate process-group teardown without knowing the pgid, so it is
+##     not expressible as a static rule.
+## -1 is the one that cannot be anything but a session-wide broadcast, which is
+## why it is the one worth alerting on.
 -a always,exit -F arch=b64 -S kill -F a0=0xFFFFFFFF -F a1!=0 -k logoutsweep
 -a always,exit -F arch=b32 -S kill -F a0=0xFFFFFFFF -F a1!=0 -k logoutsweep

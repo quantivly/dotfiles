@@ -16,14 +16,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a broadcast kill from a project test suite produced a completely orderly
   teardown — no crash, no OOM, no coredump, nothing in the journal — leaving the
   audit log as the only place the sender's identity could exist.
-  - `audit-status` surfaces the three ways this instrumentation fails *silently*:
-    a rejected rule field leaves zero rules loaded with no error; auditd's
-    `SUSPEND` disk actions stop logging quietly when `/var` runs low; and a
-    climbing `lost` counter drops records. Each is indistinguishable from "no
-    events".
+  - `audit-status` reports every way this instrumentation can go quiet as its own
+    distinct failure, so that "nothing found" can only mean "nothing happened":
+    a rejected rule field leaves zero rules loaded with no error; auditing
+    switched off (`enabled 0`); **no daemon registered (`pid 0`)** — rules live in
+    the kernel, so `auditctl -l` lists them happily while records go to the ring
+    buffer instead of `/var/log/audit/audit.log`, leaving `ausearch` blind
+    forever; a climbing `lost` counter dropping records; `/etc` drifted from
+    `~/.dotfiles` (the file is *copied*, so editing the repo alone changes
+    nothing); and auditd's `SUSPEND` disk actions, which stop logging quietly
+    when `/var` runs low. Exits non-zero on the fatal ones.
   - `audit-sweeps [hours]` reads hits, encoding the fact that `ausearch -ts`
     takes the date and time as **two** arguments — quoting them as one string
-    matches nothing and prints no error.
+    matches nothing and prints no error. It validates `hours`, and distinguishes
+    ausearch's benign "no matches" from a real read failure rather than
+    reporting both as an all-clear.
+  - `audit-setup` asserts all three arms (rules loaded, auditing on, daemon
+    recording) and fails loudly otherwise; it prompts before installing the
+    auditd package, since that has a system-wide side effect (`--yes` to skip).
+  - Scope is `kill(-1, …)` only; `audit/99-logout-catch.rules` documents why
+    `kill(0, …)` and `kill(-pgid, …)` are deliberately excluded.
   - Note: installing auditd moves AppArmor denials out of `journalctl -k` into
     `sudo ausearch -m AVC`. See CLAUDE.md → Audit Tripwire and
     docs/TROUBLESHOOTING.md → "Desktop session suddenly logged out".

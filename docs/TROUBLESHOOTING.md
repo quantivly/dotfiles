@@ -308,5 +308,15 @@ Two traps when validating a PID that came from a file or from user input:
   when the guard is removed.
 
 If `audit-sweeps` reports nothing, confirm the tripwire is actually armed before
-believing it — `audit-status`. A rejected rule field, a suspended auditd, or a
-climbing `lost` counter all look exactly like a quiet machine.
+believing it — `audit-status`, which exits non-zero if it is not.
+
+The trap specific to audit rules is that **`auditctl -l` listing your rule does
+not mean anything is being recorded.** Rules live in the kernel, so they list
+fine with `auditd` stopped — but then records go to the kernel ring buffer
+instead of `/var/log/audit/audit.log`, and `ausearch` finds nothing, forever,
+without an error. `audit-status` checks all of it: rules loaded, auditing
+`enabled`, a daemon registered (`pid != 0`), `lost` not climbing, `/etc` in sync
+with `~/.dotfiles`, and `/var` not about to trip auditd's `SUSPEND` action.
+
+Note the tripwire covers `kill(-1, …)` only — see `audit/99-logout-catch.rules`
+for why `kill(0, …)` and `kill(-pgid, …)` are deliberately left out.

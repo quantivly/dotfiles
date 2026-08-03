@@ -372,14 +372,28 @@ the record names the sending process, exe, cmdline and parent.
 - **auditd takes AppArmor denials out of the journal.** After install,
   `journalctl -k | grep apparmor` returns nothing — use `sudo ausearch -m AVC`.
   Relevant to the snap/`unprivileged_userns` notes above.
-- **Silent-failure modes** (`audit-status` surfaces all three): a rejected rule
-  field leaves *zero* rules loaded with no error; `disk_full_action`/
-  `admin_space_left_action` are `SUSPEND`, so auditd stops logging quietly if
-  `/var` runs low; and a climbing `lost` counter means records are being dropped.
-  Each looks exactly like "nothing bad happened".
+- **"Armed" is three independent things**, and each can be false while the other
+  two look fine: the rules are in the kernel (`auditctl -l`), auditing is switched
+  on (`enabled != 0`), and **a daemon is persisting records to disk** (`pid != 0`).
+  Rules live in the *kernel*, so `auditctl -l` lists them happily with auditd
+  stopped — but then records go to the kernel ring buffer instead of
+  `/var/log/audit/audit.log`, and `ausearch` (so `audit-sweeps`) is blind forever
+  with no error. `audit-setup` and `audit-status` both assert all three.
+- **Silent-failure modes** (`audit-status` reports each as its own failure): a
+  rejected rule field leaves *zero* rules loaded with no error; auditing switched
+  off; no daemon registered; a climbing `lost` counter dropping records;
+  `/etc` drifted from `~/.dotfiles` (the file is *copied*, so editing the repo
+  copy alone changes nothing); and `disk_full_action`/`admin_space_left_action`
+  are `SUSPEND`, so auditd stops logging quietly if `/var` runs low. Each
+  otherwise looks exactly like "nothing bad happened".
+- **Scope: `a0 == -1` only.** `kill(0, sig)` ("my whole process group") is a real
+  hazard but shells issue it routinely, so a rule would be noise; `kill(-pgid,
+  sig)` isn't expressible statically. `-1` is the one that can only ever be a
+  session-wide broadcast. See the rules file for the full reasoning.
 - Expect a benign burst from `systemd-shutdown` (pid 1) at every reboot.
 
-Commands: `audit-setup`, `audit-status`, `audit-sweeps`.
+Commands: `audit-setup` (add `--yes` to skip the auditd install prompt),
+`audit-status`, `audit-sweeps`.
 
 ## Common Tasks & Workflows
 
@@ -405,7 +419,7 @@ backup-drill         # Prove the backup is complete + restorable (content + rest
 backup-restore       # Guided restore of a snapshot to ~/restore-<ts>/
 backup-restore-system # Guarded /etc-slice restore (never clobbers fstab/crypttab/machine-id/ssh_host_*)
 audit-setup          # Install/refresh the broadcast-kill audit tripwire (idempotent)
-audit-status         # Is the tripwire armed? is auditd dropping or suspended?
+audit-status         # Armed, switched on, recording to disk, in sync? (non-zero on fail)
 audit-sweeps         # Show broadcast kill(-1) events (default: last 24h)
 ```
 
