@@ -387,6 +387,31 @@ system_health() {
     local running_containers=$(docker ps -q | wc -l)
     echo "🐳 Docker: $running_containers containers running"
   fi
+
+  # Memory-pressure kills (earlyoom / systemd-oomd / kernel OOM killer).
+  #
+  # Worth surfacing because the damage is silent rather than loud: a process
+  # killed mid-pipeline still lets the pipeline exit 0 with empty output, so the
+  # result is a confident wrong answer, not an error. On 2026-08-03 a 16 GB
+  # search was shed this way and its empty output was read as "no matches".
+  #
+  # Pattern note: match "sending SIG… to process", not just "sending SIG" —
+  # earlyoom's startup banner ("sending SIGTERM when mem avail <= 10.00%")
+  # otherwise counts as a kill on every boot.
+  local oom_pat='earlyoom.*sending SIG[A-Z]+ to process|Killed process [0-9]+|oom-kill:|systemd-oomd.*Killed'
+  local oom_log oom_kills oom_last
+  oom_log=$(journalctl --since "7 days ago" --no-pager 2>/dev/null | grep -E "$oom_pat")
+  oom_kills=$(printf '%s' "$oom_log" | grep -c . || true)
+  if (( oom_kills > 0 )); then
+    oom_last=$(printf '%s\n' "$oom_log" | tail -1 \
+      | sed 's/.*sending SIG[A-Z]* to process /pid /; s/, cmdline.*//')
+    echo "⚠️  Memory-pressure kills (7d): ${oom_kills} — latest: ${oom_last}"
+    echo "    A killed process usually still exits 0 with empty output, so treat"
+    echo "    empty results from around then as unanswered, not as an all-clear."
+    echo "    Detail: journalctl --since '7 days ago' | grep -E 'earlyoom|oom-kill'"
+  else
+    echo "✓ No memory-pressure kills in the last 7 days"
+  fi
 }
 
 # =============================================================================

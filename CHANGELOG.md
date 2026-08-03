@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`system_health` now reports memory-pressure kills** (earlyoom / systemd-oomd /
+  kernel OOM killer) over the last 7 days, with the most recent victim. These are
+  worth surfacing because the damage is *silent*: a process killed mid-pipeline
+  still lets the pipeline exit 0 with empty output, so the result is a confident
+  wrong answer rather than an error. Observed on 2026-08-03, when a 16 GB search
+  was shed this way and its empty output was read as "no matches". The match
+  pattern requires `sending SIG… to process` — earlyoom's startup banner
+  (`sending SIGTERM when mem avail <= 10.00%`) otherwise counts as a kill on every
+  boot.
 - **Broadcast-kill audit tripwire** — a two-line auditd rule
   (`audit/99-logout-catch.rules`, installed root-owned by `audit-setup` /
   `scripts/setup-audit-rules.sh`) that records any real `kill(-1, sig)`: *"signal
