@@ -958,3 +958,177 @@ backup-unlock() {
       && echo "✓ Cleared stale locks on $target (use 'backup-unlock $target --force' for a stubborn lock when idle)."
   fi
 }
+
+# =============================================================================
+# Audit Functions (broadcast-kill tripwire)
+# =============================================================================
+# Thin wrappers over the audit rule installed by scripts/setup-audit-rules.sh
+# (run via `audit-setup`). The rule records any real kill(-1, sig) — "signal
+# every process I may signal", which on a desktop is the whole session — and the
+# audit record names the sender, its exe, cmdline and parent.
+#
+# Why this exists: a broadcast kill produces a perfectly orderly session
+# teardown. No crash, no OOM, no coredump, nothing in the journal explaining it.
+# Without this rule there is simply no evidence to find. See
+# docs/TROUBLESHOOTING.md ("Desktop session suddenly logged out").
+#
+# auditd is root-only, so these shell out via sudo.
+#
+# Functions:
+#   - audit-setup:   Install + load the tripwire (idempotent; resyncs after edits)
+#   - audit-status:  Is it armed, switched on, recording to disk, and in sync?
+#   - audit-sweeps:  Show broadcast-kill events (default: last 24h)
+#
+# Both readers are built so that "nothing found" can only mean "nothing
+# happened". Every way this instrumentation can go quiet — rules rejected,
+# auditing switched off, no daemon persisting records, records dropped, /etc
+# drifted from the repo, ausearch unable to read the log — is reported as its own
+# distinct failure rather than as an all-clear.
+# =============================================================================
+
+# Install/refresh the broadcast-kill audit rule. Prefers the repo you are sitting
+# in, so running it from a worktree tests THAT branch's script rather than
+# whatever ~/.dotfiles happens to be checked out at.
+audit-setup() {
+  local script="${PWD}/scripts/setup-audit-rules.sh"
+  [[ -f "$script" && -f "${PWD}/audit/99-logout-catch.rules" ]] \
+    || script="${HOME}/.dotfiles/scripts/setup-audit-rules.sh"
+  bash "$script" "$@"
+}
+
+# Internal: read one field from `auditctl -s`, which prints "key value" per line
+# on audit 3.x but a single "AUDIT_STATUS: key=value ..." line on 2.x. Flatten
+# both to one token per line and take the token after the key. $1 raw, $2 key.
+_audit_stat_field() {
+  printf '%s\n' "$1" | tr '=' ' ' | tr -s '[:space:]' '\n' \
+    | awk -v k="$2" 'found { print; exit } $0 == k { found = 1 }'
+}
+
+# Is the tripwire actually armed, and is auditd in a state where it would record?
+# "Armed" is three independent things, each of which can be false while the other
+# two look fine: the rules are in the kernel, auditing is switched on, and a
+# daemon is persisting records to disk where ausearch can find them.
+audit-status() {
+  # NOTE: no local named `status` — that is read-only in zsh.
+  if ! command -v auditctl >/dev/null 2>&1; then
+    echo "✗ auditd not installed — run: audit-setup"; return 1
+  fi
+  local rules astat enabled_ pid_ lost_ rc=0
+  rules=$(sudo auditctl -l 2>/dev/null | grep -c 'logoutsweep' || true)
+  if [[ "${rules:-0}" -lt 1 ]]; then
+    echo "✗ tripwire NOT armed (0 rules) — run: audit-setup"; return 1
+  fi
+  echo "✓ tripwire armed (${rules} rule(s))"
+
+  astat=$(sudo auditctl -s 2>/dev/null || true)
+  if [[ -z "$astat" ]]; then
+    echo "✗ could not read 'auditctl -s' — cannot confirm auditing is live."; return 1
+  fi
+  enabled_=$(_audit_stat_field "$astat" enabled)
+  pid_=$(_audit_stat_field "$astat" pid)
+  lost_=$(_audit_stat_field "$astat" lost)
+
+  # enabled 0 means the rules can never match. enabled 2 is immutable-until-reboot.
+  case "${enabled_:-0}" in
+    0) echo "✗ kernel auditing is DISABLED (enabled 0) — rules will never match."
+       echo "  Fix: sudo auditctl -e 1"; rc=1 ;;
+    2) echo "✓ auditing enabled (immutable until reboot)" ;;
+    *) echo "✓ auditing enabled" ;;
+  esac
+
+  # pid 0 = no daemon holds the netlink socket, so records go to the kernel ring
+  # buffer instead of /var/log/audit/audit.log. `auditctl -l` still lists the
+  # rules, so this reads as "armed" while audit-sweeps is permanently blind.
+  if [[ "${pid_:-0}" == "0" ]]; then
+    echo "✗ NO audit daemon registered (pid 0) — nothing is being written to disk."
+    echo "  Rules are loaded but audit-sweeps will report nothing regardless."
+    echo "  Fix: sudo systemctl enable --now auditd"; rc=1
+  else
+    echo "✓ recording to disk (auditd pid ${pid_}, $(systemctl is-active auditd 2>/dev/null))"
+  fi
+
+  # A climbing `lost` counter means records were dropped — and a dropped record
+  # looks exactly like a quiet machine.
+  if [[ -n "$lost_" && "$lost_" != "0" ]]; then
+    echo "⚠ lost records: ${lost_}  ← RECORDS DROPPED (raise backlog_limit)"
+  else
+    echo "✓ lost records: 0"
+  fi
+
+  # The rules file is copied, not symlinked, so editing the repo copy leaves /etc
+  # stale with no signal. Same drift check backup-doctor does for /etc/restic.
+  local repo_rules="${HOME}/.dotfiles/audit/99-logout-catch.rules"
+  local live_rules=/etc/audit/rules.d/99-logout-catch.rules
+  if [[ ! -f "$repo_rules" ]]; then
+    echo "⚠ repo copy not found (${repo_rules}) — cannot check for drift"
+  elif sudo cmp -s "$live_rules" "$repo_rules" 2>/dev/null; then
+    echo "✓ rules file matches version control"
+  else
+    echo "⚠ ${live_rules} differs from ~/.dotfiles — re-run audit-setup to resync"
+    echo "  (or commit the local edits)"
+  fi
+
+  # /var filling up is the remaining silent stop, and it is a config policy we
+  # deliberately leave at SUSPEND rather than a value we can read back.
+  # `command df` bypasses the df='duf' / df='df -h' aliases, which on a
+  # `source ~/.zshrc` reload get baked into this function and silently produce
+  # nothing (DO-450 fixed exactly this in backup-doctor). Reporting "unknown" for
+  # the one signal that catches auditd's silent SUSPEND would defeat the point.
+  # `-P` gives portable columns; field 4 is Avail.
+  local varfree
+  varfree=$(command df -Ph /var 2>/dev/null | awk 'NR==2{print $4}')
+  echo "  note: disk_full/admin_space actions are SUSPEND — auditd stops logging"
+  echo "        (silently) if /var runs low. /var avail: ${varfree:-unknown}"
+  return $rc
+}
+
+# Show broadcast-kill events. Optional arg: hours to look back (default 24).
+audit-sweeps() {
+  local hours="${1:-24}" date_ time_ raw err count rc
+  command -v ausearch >/dev/null 2>&1 || { echo "✗ auditd not installed — run: audit-setup"; return 1; }
+  # Reject junk up front: a non-numeric arg makes `date` fail, leaving an empty
+  # window that ausearch answers with "nothing found" — a clean bill of health
+  # for a query that never ran.
+  if [[ ! "$hours" =~ ^[0-9]+$ ]] || (( hours == 0 )); then
+    echo "✗ usage: audit-sweeps [hours]  — a positive integer (default 24)" >&2
+    return 2
+  fi
+  # ausearch -ts takes the date and the time as TWO arguments. Passing them as a
+  # single quoted string matches nothing and prints no error — indistinguishable
+  # from "no events", which is the worst possible failure for a tripwire reader.
+  date_=$(date -d "-${hours} hours" "+%m/%d/%Y")
+  time_=$(date -d "-${hours} hours" "+%H:%M:%S")
+
+  # Keep stderr. ausearch exits non-zero both for "no matches" (normal) and for
+  # real errors (log unreadable, sudo refused, auditd never started so
+  # /var/log/audit/audit.log does not exist). Discarding stderr would make a
+  # broken query look exactly like a quiet machine — the failure this whole
+  # feature exists to prevent.
+  err=$(mktemp) || return 1
+  raw=$(sudo ausearch -k logoutsweep -ts "$date_" "$time_" -i 2>"$err"); rc=$?
+  count=$(printf '%s\n' "$raw" | grep -c '^type=SYSCALL' || true)
+  echo "Window: ${date_} ${time_} onward — ${count} record(s)."
+
+  # "no matches" is the one non-zero exit that is good news; anything else that
+  # produced no records is an unanswered question, not an all-clear.
+  if (( rc != 0 )) && ! grep -qi 'no matches' "$err"; then
+    echo "✗ ausearch failed (exit ${rc}) — this is NOT an all-clear:" >&2
+    sed 's/^/    /' "$err" >&2
+    rm -f "$err"
+    echo "  Confirm the tripwire is recording with: audit-status" >&2
+    return 1
+  fi
+  # Surface anything else ausearch said, but not its benign "<no matches>".
+  local notes; notes=$(grep -vi 'no matches' "$err" 2>/dev/null)
+  [[ -n "$notes" ]] && printf '%s\n' "$notes" | sed 's/^/  note: /'
+  rm -f "$err"
+
+  if [[ "${count:-0}" -eq 0 ]]; then
+    echo "✓ No broadcast kills. (If this is unexpected, confirm with: audit-status)"
+    return 0
+  fi
+  printf '%s\n' "$raw" | grep '^type=SYSCALL'
+  echo
+  echo "Each line names the sender (pid/ppid/comm/exe). A burst from pid 1"
+  echo "(systemd-shutdown) at a reboot is normal; anything else is not."
+}

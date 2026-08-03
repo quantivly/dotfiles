@@ -265,3 +265,58 @@ zsh -n ~/.zshrc                         # Check main config
 zsh -n ~/.dotfiles/zsh/zshrc.aliases    # Check modules
 # Temporarily disable modules by commenting source lines in zshrc
 ```
+
+## Desktop session suddenly logged out (no crash, no OOM)
+
+You are returned to the GDM login screen mid-work, or find yourself logged out
+after being away. The journal shows a *perfectly orderly* teardown —
+`gnome-session-manager` "Stopped", `session-N.scope: Deactivated successfully`,
+`ssh-agent: exiting on signal 15`, `Shutting down GNOME Shell` — and nothing at
+all in the seconds before it. `uptime` confirms the machine never rebooted.
+
+That orderliness is the diagnostic: it means something *asked* the session to
+end. Check the cheap causes first, then the tripwire.
+
+```bash
+uptime                              # still up? then it was the session, not the box
+journalctl --list-boots | tail -3   # boot ID unchanged = no reboot/panic
+coredumpctl list | tail             # gnome-shell crash? (usually empty here)
+journalctl -u systemd-oomd --since -1d ; journalctl --since -1d | grep earlyoom
+sar -r -f /var/log/sysstat/sa$(date +%d) | tail   # memory pressure at the time?
+audit-sweeps 24                     # ← a broadcast kill(-1)?
+```
+
+**The usual culprit here is a broadcast kill.** `kill -TERM -1` means "signal
+every process I am permitted to signal", which is the whole session. It leaves no
+explanation anywhere *except* the audit log, which is why
+`audit/99-logout-catch.rules` exists (see CLAUDE.md → Audit Tripwire).
+
+Real example (2026-08-03, three logouts in two days): a project test suite wrote
+a PID file containing `-1` to assert its reaper *rejected* it, but an uncommitted
+edit had removed the reaper's numeric guard. `kill -0 "-1"` **succeeds** — you
+are allowed to signal processes — and `/proc/-1/stat` is unreadable, so every
+liveness check fell through to "alive" and the reaper ran `kill -TERM -1`.
+
+Two traps when validating a PID that came from a file or from user input:
+
+- `kill -0 "$pid"` is **not** a validity check. It succeeds for `-1` (everything)
+  and `0` (your process group). Guard numerically *first*:
+  `case "$pid" in '' | *[!0-9]*) return 1 ;; esac` then `[ "$pid" -gt 0 ]`.
+- A hardcoded fixture like `-12345` does not test this: with the guard removed it
+  is still rejected, because `kill -0 -12345` fails when no such group exists.
+  Test against a `-pgid` that genuinely exists, and confirm the test goes red
+  when the guard is removed.
+
+If `audit-sweeps` reports nothing, confirm the tripwire is actually armed before
+believing it — `audit-status`, which exits non-zero if it is not.
+
+The trap specific to audit rules is that **`auditctl -l` listing your rule does
+not mean anything is being recorded.** Rules live in the kernel, so they list
+fine with `auditd` stopped — but then records go to the kernel ring buffer
+instead of `/var/log/audit/audit.log`, and `ausearch` finds nothing, forever,
+without an error. `audit-status` checks all of it: rules loaded, auditing
+`enabled`, a daemon registered (`pid != 0`), `lost` not climbing, `/etc` in sync
+with `~/.dotfiles`, and `/var` not about to trip auditd's `SUSPEND` action.
+
+Note the tripwire covers `kill(-1, …)` only — see `audit/99-logout-catch.rules`
+for why `kill(0, …)` and `kill(-pgid, …)` are deliberately left out.

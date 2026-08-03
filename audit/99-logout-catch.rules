@@ -1,0 +1,43 @@
+## Broadcast-kill tripwire.
+##
+## Records any real `kill(-1, sig)` — "signal every process I am permitted to
+## signal", which on a desktop means the entire graphical session. Nothing in
+## normal operation does this, so the rule is near-zero noise and decisive when
+## it fires: the audit record names the sending process, its exe, its cmdline
+## and its parent, which is exactly what is missing from every other log when a
+## session dies.
+##
+## Motivating incident (2026-08-03): three unexplained GNOME logouts over two
+## days, with no crash, no OOM, no coredump and a perfectly orderly teardown in
+## the journal. This rule caught `kill -TERM -1` from a project test suite whose
+## numeric PID guard had been removed, turning a two-day mystery into a
+## one-command answer. See docs/TROUBLESHOOTING.md.
+##
+## a0 is 0xFFFFFFFF and MUST NOT be widened to 0xFFFFFFFFFFFFFFFF. Audit's rule
+## field is u32, and on x86-64 a C `int` of -1 is passed via `mov edi,-1`, which
+## zero-extends, so the kernel sees 0x00000000FFFFFFFF. A 64-bit constant matches
+## nothing — and an audit rule that matches nothing is indistinguishable from a
+## machine where nothing bad ever happens. (The rule originally shipped with the
+## 64-bit value and only worked because auditctl silently truncated it.)
+##
+## a1!=0 drops signal-0 probes. Signal 0 performs error checking and sends
+## nothing, so it cannot end a session; some test suites legitimately probe with
+## kill(-1, 0), and without this filter every such run would leave benign hits.
+##
+## Expect a burst from systemd-shutdown (pid 1) at every reboot: that is how
+## systemd stops the world, and it is benign.
+##
+## SCOPE: this catches a0 == -1 only. Two neighbouring blast radii are NOT
+## covered, deliberately:
+##   * kill(0, sig)     — "my whole process group". A real hazard (and named as
+##     such in docs/TROUBLESHOOTING.md, since `kill -0 "$pid"` succeeds for it
+##     too), but shells and job control issue it routinely, so a rule would be
+##     noisy enough to train you to ignore the key. Add `-F a0=0x0` only if you
+##     are prepared to filter the noise.
+##   * kill(-pgid, sig) — one specific foreign process group. Indistinguishable
+##     from legitimate process-group teardown without knowing the pgid, so it is
+##     not expressible as a static rule.
+## -1 is the one that cannot be anything but a session-wide broadcast, which is
+## why it is the one worth alerting on.
+-a always,exit -F arch=b64 -S kill -F a0=0xFFFFFFFF -F a1!=0 -k logoutsweep
+-a always,exit -F arch=b32 -S kill -F a0=0xFFFFFFFF -F a1!=0 -k logoutsweep
