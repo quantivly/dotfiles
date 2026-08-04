@@ -15,5 +15,13 @@
 # - https://python-poetry.org/docs/configuration/
 # - https://python-poetry.org/docs/managing-environments/
 
+# Shell out to the system `git` instead of Poetry's bundled dulwich client.
+#
+# Load-bearing for private git dependencies: dulwich does not read ~/.gitconfig,
+# so it sees neither the `gh auth git-credential` helper nor the
+# `url.<base>.insteadOf` rewrites, and private-repo deps fail to resolve.
+# The system client inherits all of it.
+system-git-client = true
+
 [virtualenvs]
 in-project = true
