@@ -29,3 +29,18 @@ caioniehues/herdmates
 #   herdr plugin install natori-hrj/herdr-lazy && herdr-lazy restore
 # (the herdr-lazy() shell function in zshrc.company resolves the binary path).
 natori-hrj/herdr-lazy
+
+# Diff review sidebar — the Atrium DIFF/review loop had no herdr equivalent
+# until this. Added 2026-08-29 per herdr-setup-review.md P3.
+persiyanov/herdr-reviewr
+
+# Ticket -> worktree: files a herdr worktree from a Linear ticket, firing the
+# same worktree.created steps as any other worktree (tdi.worktree-setup).
+# Needs LINEAR_API_KEY in the server env to actually reach Linear. Added
+# 2026-08-29 per herdr-setup-review.md P3.
+tdi/herdr-worktree-from-linear
+
+# Publishes a `$pr` token on the focused agent pane, so the open pull request
+# for that worktree's branch shows up in the sidebar row instead of needing a
+# `gh pr view`. Added 2026-08-29 per the herdr optimization pass (decision 7).
+wyattjoh/herdr-plugin-gh-pr

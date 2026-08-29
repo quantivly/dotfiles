@@ -493,3 +493,105 @@ herdr-lazy() {
     "import json,sys;print([p['plugin_root'] for p in json.load(sys.stdin)['result']['plugins'] if p['plugin_id']=='herdr-lazy'][0])")
   env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR "$root/target/release/herdr-lazy" "$@"
 }
+
+#==============================================================================
+# hspawn — Atrium's `atrium new` loop, rebuilt on herdr primitives
+#==============================================================================
+# Atrium's core verb was a single call: worktree + branch + agent + first
+# prompt. herdr has every one of those primitives, just uncomposed, so this is
+# the composition and nothing more:
+#
+#   herdr worktree create  -> a worktree workspace on zvi/<slug>, and with it
+#                             the worktree.created hooks (tdi.worktree-setup
+#                             links node_modules et al, reviewr auto-opens)
+#   herdr agent start      -> claude in that workspace's root pane
+#   herdr agent prompt     -> the first instruction, waited on
+#
+# Usage:
+#   hspawn <repo-dir> <slug> [profile|-] [prompt...]
+#
+#   hspawn ~/work/api fix-auth
+#   hspawn ~/work/api fix-auth personal "Read AGENTS.md, then fix the 401 loop."
+#   hspawn ~/work/api fix-auth - "A prompt, on whatever account is current."
+#
+# The profile slot is positional, so `-` fills it when you want a prompt but no
+# particular clauth account.
+#
+# WHY A PROFILE CHANGES THE START PATH:
+#   `herdr agent start` launches the agent binary herdr knows about, but
+#   `clauth start <profile>` is a supervisor that spawns claude inside a
+#   per-profile CLAUDE_CONFIG_DIR — herdr cannot start that for us. So the
+#   profile path runs the supervisor as an ordinary pane command and then waits
+#   for herdr to *detect* the claude underneath it, which is what `agent wait`
+#   is for. The no-profile path is the direct one, and burns whatever account
+#   owns the global credentials.
+#
+# Every agent call targets the PANE ID, not a name: herdr accepts either, and
+# only the direct path gets to choose a name at all.
+#
+# These are isolated single-account workers — the whole point of the worktree —
+# so deliberately no teammux shim and no team lead. Use `claude` for that.
+hspawn() {
+  if (( $# < 2 )); then
+    echo "Usage: hspawn <repo-dir> <slug> [profile|-] [prompt...]" >&2
+    return 1
+  fi
+  if ! command -v jq &>/dev/null; then
+    echo "Error: hspawn needs jq to read herdr's JSON replies" >&2
+    return 1
+  fi
+
+  local repo="$1" slug="$2"
+  if [[ ! -d "$repo" ]]; then
+    echo "Error: '$repo' is not a directory" >&2
+    return 1
+  fi
+
+  local profile=""
+  if (( $# >= 3 )) && [[ "$3" != "-" ]]; then
+    profile="$3"
+  fi
+  local prompt=""
+  if (( $# >= 4 )); then
+    prompt="${(j: :)argv[4,-1]}"
+  fi
+
+  # Agent names are constrained to [a-z][a-z0-9_-]{0,31}. Only the name is
+  # folded down to fit — the branch and label keep the slug as typed, so an
+  # uppercase Linear id stays readable where you actually read it.
+  local name="${(L)slug}"
+  name="${name//[^a-z0-9_-]/-}"
+  [[ "$name" == [a-z]* ]] || name="w-$name"
+  name="${name[1,32]}"
+
+  local created pane
+  created="$(herdr worktree create --cwd "$repo" --branch "zvi/$slug" \
+                                   --label "$slug" --no-focus)" || return 1
+  pane="$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id // empty')"
+  if [[ -z "$pane" ]]; then
+    echo "Error: no .result.root_pane.pane_id in the worktree create reply:" >&2
+    printf '%s\n' "$created" >&2
+    return 1
+  fi
+  echo "worktree: zvi/$slug"
+  echo "pane:     $pane"
+
+  if [[ -n "$profile" ]]; then
+    herdr pane run "$pane" "clauth start $profile --permission-mode auto" || return 1
+    # Detection is not instant: the supervisor has to exec claude, and claude
+    # has to settle before a prompt can land. `blocked` counts as settled — a
+    # trust prompt on a brand-new worktree is exactly that, and waiting for
+    # `idle` alone would burn the full timeout staring at one.
+    herdr agent wait "$pane" --until idle --until blocked --timeout 180000 || return 1
+    echo "agent:    detected in $pane (clauth profile '$profile')"
+  else
+    herdr agent start "$name" --kind claude --pane "$pane" -- --permission-mode auto || return 1
+    echo "agent:    $name"
+  fi
+
+  if [[ -n "$prompt" ]]; then
+    herdr agent prompt "$pane" "$prompt" --wait || return 1
+  fi
+
+  echo "next:     herdr agent list"
+}

@@ -8,6 +8,7 @@
 #   - Dock:        floating, autohiding, centered at the bottom, decluttered
 #   - Desktop:     all icons hidden (ding kept enabled, just invisible)
 #   - Keybindings: free Ctrl+Alt+Arrow for tmux pane-resize (GNOME -> Super-based)
+#   - Input:       one layout switch (Super+Space); no Alt+Shift group toggle
 #   - Workspaces:  fixed count, per-workspace Alt+Tab & dock (park always-on apps)
 #
 # The committed settings here are the *portable core* (the source of truth).
@@ -189,6 +190,20 @@ apply_keybindings() {
     gset "$schema" switch-to-workspace-down  "@as []"
 }
 
+apply_input_sources() {
+    # `grp:alt_shift_toggle` made Alt+Shift the layout switch and swallowed one
+    # modifier of every Alt+Shift chord (herdr keybindings); `<Super>space`
+    # (`switch-input-source`) already switches us/il.
+    #
+    # Whichever of Alt/Shift is pressed second emits ISO_Next_Group instead of
+    # its own modifier, so every chord holding both arrived one modifier short:
+    # Ctrl+Alt+Shift+W reached the terminal as Ctrl+Shift+W, and flipped the
+    # layout on the way. Nothing is lost by clearing it — Super+Space is the
+    # switch actually in use, and it keeps working.
+    log STEP "Input sources — drop the Alt+Shift layout toggle (Super+Space stays)"
+    gset org.gnome.desktop.input-sources xkb-options "@as []"
+}
+
 apply_workspaces() {
     # Fixed workspaces with per-workspace Alt+Tab and dock. This lets an
     # always-on window that must stay running — e.g. the AWS VPN Client, whose
@@ -238,6 +253,7 @@ main() {
     apply_dock
     apply_desktop
     apply_keybindings
+    apply_input_sources
     apply_workspaces
     apply_local_overrides
 
