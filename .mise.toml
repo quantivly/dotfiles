@@ -53,6 +53,7 @@ zoxide = "0.9.4"         # Smart cd command that learns your patterns
 duf = "0.8.1"            # Disk usage viewer with colors
 dust = "0.9.0"           # Directory size analyzer (du replacement)
 lazygit = "0.42.0"       # Git TUI for interactive git operations
+yazi = "26.8.15"         # File manager TUI; herdr binds it to alt+y (config in yazi/)
 just = "1.25.2"          # Command runner (make alternative)
 glow = "1.5.1"           # Markdown viewer for terminal
 gitleaks = "8.18.2"      # Secret scanner for git repositories

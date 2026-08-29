@@ -45,8 +45,25 @@ manifest_check = true
 # ctrl+tab / ctrl+shift+tab arrive as distinct CSI u sequences and match the
 # config strings below. CONFIRMED at the keyboard on 2026-08-29 with
 # ~/.dotfiles/scripts/herdr-keyprobe.sh: ctrl+shift+e arrived as
-# ESC[101:69;6u (1b5b3130313a36393b3675), so no Alacritty `chars` fallback is
-# needed. Same run showed the layout caveat: with the `il` layout active,
+# ESC[101:69;6u (1b5b3130313a36393b3675).
+#
+# CORRECTION (2026-08-30): "ctrl+shift+e works, therefore ctrl+shift+<letter>
+# works" was an unsound generalisation. ALACRITTY HAS COMPILED-IN DEFAULT
+# BINDINGS THAT SWALLOW A CHORD'S KEY-PRESS, and they are per-key. ctrl+shift+o
+# (split_horizontal) was silently dead: config valid, `config check: ok`, reload
+# `applied`, zero diagnostics, and no error at any layer. The keyprobe signature
+# is a RELEASE event with no matching press (ESC[111:79;6:3u arriving alone),
+# because Alacritty bindings fire on press and consume it while the kitty
+# protocol still reports the release. Fixed OUTSIDE herdr, in
+# ~/.config/alacritty/alacritty.toml, with an explicit
+#   { key = "O", mods = "Control|Shift", action = "ReceiveChar" }
+# (ReceiveChar = "treat as unbound"; preferred over a hardcoded `chars` CSI-u
+# string because it follows whatever encoding mode is active). A sweep of the
+# other 15 bound chords (w t x r n g p a y l, ctrl+shift+tab, ctrl+shift+
+# left/right, ctrl+tab, ctrl+1) found all of them delivering a press — o was the
+# only casualty. Verify PER CHORD, not per class.
+#
+# Same probe run showed the layout caveat: with the `il` layout active,
 # unshifted letter chords carry the Hebrew codepoint (alt+j -> ESC[1495;3u,
 # ctrl+c -> ESC[1489;5u) and match nothing — use ctrl+shift+<letter> chords or
 # switch to `us` first; digits, arrows, F-keys and shifted letters are unaffected.
@@ -63,8 +80,12 @@ manifest_check = true
 prefix = "f12"
 
 # --- panes ---
-split_vertical   = ["ctrl+alt+v", "ctrl+shift+e"]   # split right (tmux C-S-e)
-split_horizontal = ["ctrl+alt+s", "ctrl+shift+o"]   # split down  (tmux C-S-o)
+# The stock prefix defaults are listed FIRST on purpose: setting this field
+# replaces it wholesale, and omitting them (as this file did until 2026-08-30)
+# silently deleted `f12 v` / `f12 -`, leaving the two splits as the only actions
+# with no prefix escape hatch — exactly what the layering rule above forbids.
+split_vertical   = ["prefix+v", "ctrl+alt+v", "ctrl+shift+e"]       # split right (tmux C-S-e)
+split_horizontal = ["prefix+minus", "ctrl+alt+s", "ctrl+shift+o"]   # split down  (tmux C-S-o)
 close_pane       = ["ctrl+alt+x", "ctrl+shift+w"]   # tmux C-S-w
 focus_pane_left  = ["ctrl+alt+h", "ctrl+shift+left"]
 focus_pane_down  = ["ctrl+alt+j", "ctrl+shift+down"]

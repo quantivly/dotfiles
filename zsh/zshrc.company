@@ -531,6 +531,45 @@ herdr-lazy() {
 #
 # These are isolated single-account workers — the whole point of the worktree —
 # so deliberately no teammux shim and no team lead. Use `claude` for that.
+# Answer Claude Code's trust-folder dialog in a freshly created worktree pane.
+#
+# Must run AFTER the agent is detected: this uses the agent surface, which is
+# what actually delivers the keys. Sending them at the pane level the moment the
+# dialog text renders does NOT work — Claude's TUI is not accepting input yet,
+# the keys are swallowed, and the dialog stays up with no error (verified
+# 2026-08-30).
+#
+# The dialog defaults to "No, exit", so the answer is: down, then enter.
+# Returns 0 when there is nothing to answer, which is the common case for a
+# worktree under an already-trusted parent.
+_hspawn_clear_trust_dialog() {
+  local pane="$1" attempt state
+  for attempt in 1 2 3; do
+    state="$(herdr agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_status // empty')"
+    [[ "$state" == "blocked" ]] || return 0
+    herdr agent read "$pane" --source detection --lines 30 2>/dev/null \
+      | grep -q "Yes, I trust this folder" || return 0
+    herdr agent send-keys "$pane" down  >/dev/null 2>&1
+    herdr agent send-keys "$pane" enter >/dev/null 2>&1
+    herdr agent wait "$pane" --until idle --timeout 15000 >/dev/null 2>&1
+  done
+  echo "warn:     trust dialog still up after 3 attempts" >&2
+  return 1
+}
+
+# Poll until herdr has actually detected an agent in the pane. `agent wait`
+# cannot do this: it resolves its target first and errors out if no agent is
+# there yet.
+_hspawn_await_agent() {
+  local pane="$1" limit="${2:-120}" waited=0
+  while (( waited < limit )); do
+    herdr agent get "$pane" >/dev/null 2>&1 && return 0
+    sleep 1
+    (( waited++ ))
+  done
+  return 1
+}
+
 hspawn() {
   if (( $# < 2 )); then
     echo "Usage: hspawn <repo-dir> <slug> [profile|-] [prompt...]" >&2
@@ -578,18 +617,36 @@ hspawn() {
 
   if [[ -n "$profile" ]]; then
     herdr pane run "$pane" "clauth start $profile --permission-mode auto" || return 1
-    # Detection is not instant: the supervisor has to exec claude, and claude
-    # has to settle before a prompt can land. `blocked` counts as settled — a
-    # trust prompt on a brand-new worktree is exactly that, and waiting for
-    # `idle` alone would burn the full timeout staring at one.
-    herdr agent wait "$pane" --until idle --until blocked --timeout 180000 || return 1
-    echo "agent:    detected in $pane (clauth profile '$profile')"
   else
-    herdr agent start "$name" --kind claude --pane "$pane" -- --permission-mode auto || return 1
-    echo "agent:    $name"
+    # `agent start` returns non-zero with agent_not_ready when the agent comes up
+    # blocked (which the trust dialog below guarantees), but it still registers
+    # the agent. So a failure here is NOT fatal on its own — _hspawn_await_agent
+    # below decides whether anything actually started.
+    herdr agent start "$name" --kind claude --pane "$pane" -- --permission-mode auto \
+      || echo "note:     agent start reported not-ready (expected if the trust dialog is up)"
   fi
 
+  _hspawn_await_agent "$pane" 120 || {
+    echo "Error: no agent detected in $pane after 120s — check the pane" >&2
+    return 1
+  }
+  herdr agent wait "$pane" --until idle --until blocked --timeout 180000 >/dev/null || return 1
+
+  # EVERY hspawn run creates a brand-new worktree directory, so Claude's
+  # trust-folder dialog is effectively guaranteed and its default is "No, exit".
+  _hspawn_clear_trust_dialog "$pane"
+  echo "agent:    detected in $pane${profile:+ (clauth profile '$profile')}"
+
   if [[ -n "$prompt" ]]; then
+    # herdr refuses to type into an agent sitting at an approval dialog, so say
+    # so plainly rather than emitting a bare agent_blocked error.
+    local state
+    state="$(herdr agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_status // empty')"
+    if [[ "$state" == "blocked" ]]; then
+      echo "Error: agent is blocked (unanswered dialog); prompt not sent." >&2
+      echo "       Inspect with: herdr agent read $pane --source detection" >&2
+      return 1
+    fi
     herdr agent prompt "$pane" "$prompt" --wait || return 1
   fi
 
