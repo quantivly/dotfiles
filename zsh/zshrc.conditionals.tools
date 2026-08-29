@@ -367,10 +367,13 @@ fi
 if command -v yazi &>/dev/null; then
   y() {
     local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
-    # Suppress tmux activity alerts (TUI constant redraw)
-    [[ -n "$TMUX" ]] && tmux setw monitor-activity off
+    # Suppress tmux activity alerts (TUI constant redraw). Guarded against
+    # herdmates' teammux shim (which sets $TMUX=teammux,...) inside a Herdr
+    # lead pane — that fake tmux doesn't recognize `setw`, so an unguarded
+    # call there fails with "teammux: unrecognized verb".
+    [[ -n "$TMUX" && "$TMUX" != teammux* ]] && tmux setw monitor-activity off
     command yazi "$@" --cwd-file="$tmp"
-    [[ -n "$TMUX" ]] && tmux setw monitor-activity on
+    [[ -n "$TMUX" && "$TMUX" != teammux* ]] && tmux setw monitor-activity on
     if cwd="$(command cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then
       builtin cd -- "$cwd"
     fi
@@ -392,15 +395,7 @@ if command -v claude &>/dev/null; then
   # runtime via /scroll-speed.
   export CLAUDE_CODE_SCROLL_SPEED=3
 
-  claude() {
-    if [[ -n "$TMUX" ]]; then
-      tmux setw monitor-activity off
-      command claude "$@"
-      local ret=$?
-      tmux setw monitor-activity on
-      return $ret
-    else
-      command claude "$@"
-    fi
-  }
+  # claude() itself is defined in zshrc.company (loaded later in zshrc's
+  # source order), which overrides whatever is defined here. A duplicate
+  # definition here was dead code — see herdr-setup-review.md P2-2.
 fi

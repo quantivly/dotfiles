@@ -1,0 +1,215 @@
+# herdr configuration
+# See `herdr --default-config` for the full annotated set of defaults.
+#
+# Layout of this file mirrors the default config's section order so the two can
+# be diffed against each other after a herdr upgrade.
+
+# Onboarding was completed during initial setup.
+onboarding = false
+
+[theme]
+name = "tokyo-night"
+
+[terminal]
+# Inherit the source pane/workspace cwd for new panes, tabs and workspaces.
+new_cwd = "follow"
+
+[update]
+channel = "stable"
+version_check = true
+manifest_check = true
+
+#==============================================================================
+# Keys — prefix-free
+#==============================================================================
+# The stock prefix (ctrl+b) collides three ways here:
+#   1. Claude Code binds ctrl+b to "background this task" — with a ctrl+b prefix
+#      you have to press it twice in every agent pane.
+#   2. tmux's own prefix, for any tmux run inside a pane.
+#   3. Atrium's sessions, during the migration off it.
+#
+# So the daily actions are bound directly on ctrl+alt+<key>, which the herdr docs
+# list among the most reliable direct chords ("ctrl+letter, function keys, and
+# explicit modified chords") and which collides with nothing in Claude Code and
+# nothing in ~/.atrium/atrium.conf (that binds S-PPage, M-PPage, S-Up/Down).
+#
+# Punctuation-with-modifiers is deliberately avoided throughout — the default
+# config warns it "may depend on your terminal/tmux setup". That is why the
+# down-split is ctrl+alt+s rather than the stock prefix+minus.
+#
+# The prefix still exists on f12 as an escape hatch, so every action NOT rebound
+# below keeps its documented prefix binding: f12 ? for help, f12 s for settings,
+# f12 1..9 to switch tabs, and f12 a for the clauth account popup.
+[keys]
+prefix = "f12"
+
+# --- panes ---
+# Only 2-modifier ctrl+alt chords below — herdr's own docs (herdr.dev/docs/keyboard/)
+# call this the one reliable cross-terminal set, and a live test on this machine
+# (Ubuntu/GNOME + Alacritty) confirmed why: 3-modifier ctrl+alt+shift chords were
+# either swallowed entirely or collapsed to plain ctrl+<letter> by the terminal,
+# so e.g. ctrl+alt+shift+w reached the pane as ctrl+w (readline delete-word)
+# instead of reaching herdr at all. Actions that don't fit the 2-modifier set are
+# left unbound here and fall back to herdr's stock prefix+shift+<letter> default
+# (f12, then the key) — prefix mode only needs the terminal to encode f12 and one
+# plain-modifier chord separately, never three modifiers at once.
+split_vertical   = "ctrl+alt+v"   # split right
+split_horizontal = "ctrl+alt+s"   # split down
+close_pane       = "ctrl+alt+x"
+focus_pane_left  = "ctrl+alt+h"
+focus_pane_down  = "ctrl+alt+j"
+focus_pane_up    = "ctrl+alt+k"
+focus_pane_right = "ctrl+alt+l"
+zoom             = "ctrl+alt+z"
+resize_mode      = "ctrl+alt+r"
+# rename_pane: unbound here -> falls back to default "prefix+shift+p" (f12 shift+p)
+
+# --- tabs ---
+# new_tab deliberately NOT bound to ctrl+alt+t: that chord is claimed by GNOME's
+# own "open a new terminal window" shortcut on Ubuntu and never reaches herdr at
+# all. Falls back to the stock "prefix+c" (f12 c).
+next_tab     = "ctrl+alt+n"
+previous_tab = "ctrl+alt+p"
+# rename_tab: unbound -> falls back to default "prefix+shift+t"
+# close_tab:  unbound -> falls back to default "prefix+shift+x"
+
+# --- workspaces ---
+workspace_picker  = "ctrl+alt+w"
+goto              = "ctrl+alt+g"
+# new_workspace:    unbound -> falls back to default "prefix+shift+n"
+# new_worktree:     unbound -> falls back to default "prefix+shift+g"
+# rename_workspace: unbound -> falls back to default "prefix+shift+w"
+# close_workspace:  unbound -> falls back to default "prefix+shift+d"
+
+# --- agents ---
+# The orchestrator's most-used key: jump straight to the Nth agent row. Paired
+# with agent_panel_sort = "priority" below, alt+1 is always whichever agent
+# most needs attention.
+#
+# NOT ctrl+alt+1..9: Alacritty implements the kitty keyboard protocol, not
+# xterm modifyOtherKeys (which is what herdr requests), so herdr receives
+# legacy encoding here — the same reason the old ctrl+alt+shift chords
+# collapsed. In legacy encoding ctrl+1/ctrl+9 have no distinct byte and
+# ctrl+3 is ESC, so ctrl+alt+1..9 would not reliably fire. alt+1..9 is
+# unambiguous (plain ESC + digit) and free on this machine.
+focus_agent = "alt+1..9"
+
+# --- session ---
+toggle_sidebar = "ctrl+alt+b"
+edit_scrollback = "ctrl+alt+e"
+detach         = "ctrl+alt+q"
+# The two highest-frequency moves in an attention-queue workflow, previously
+# stuck behind the prefix (f12 o / unbound). Both letters are free on this
+# machine (gsettings checked; not on herdr's documented avoid-list either).
+open_notification_target = "ctrl+alt+o"
+last_pane                = "ctrl+alt+f"
+
+# --- plugin-bound commands ---
+# Plugins cannot declare their own keybindings (herdr docs: plugins.mdx) — the
+# binding has to be wired here explicitly, or the plugin's popup is simply
+# unreachable no matter what its own docs/comments claim. Action ids verified
+# with `herdr plugin action list`.
+[[keys.command]]
+key = "prefix+a"        # f12 a
+type = "plugin_action"
+command = "clauth.open"
+description = "clauth accounts"
+
+[[keys.command]]
+key = "prefix+shift+l"  # f12 shift+l
+type = "plugin_action"
+command = "herdr-lazy.manage"
+description = "herdr-lazy manage"
+
+[server]
+# Size of the virtual terminal when no client is attached. The stock 120x40 is
+# cramped for a detached fan-out worker rendering diffs.
+headless_cols = 200
+headless_rows = 50
+
+[worktrees]
+# Deliberately NOT ~/.atrium/worktrees: while Atrium is winding down, neither
+# tool may reclaim the other's trees.
+directory = "~/.herdr/worktrees"
+
+[ui]
+# 36 is herdr's hard ceiling (not just a preference) — needed once several
+# rows are stacked per agent (title, agent+account, task, status).
+sidebar_width = 36
+
+# "priority" is an attention queue rather than a per-space grouping, so blocked
+# agents float to the top. This is the direct replacement for scanning Atrium's
+# session list to find what needs answering.
+agent_panel_sort = "priority"
+
+# Distinct static glyphs per state rather than colour-only dots.
+status_indicators = "symbols"
+
+# Show the detected agent in split-pane borders — with several workers on screen
+# the border label is faster to read than the sidebar.
+show_agent_labels_on_pane_borders = true
+
+# Sidebar agent rows, merged from both plugins that publish pane metadata:
+#   $clauth  — clauth: which account this pane burns (source id "clauth")
+#   $task    — herdmates: the native team lead's current task
+#   $status  — herdmates: that team's status
+#   $context, $model, $effort — NOT a plugin: ~/.claude/hooks/session-statusline.sh,
+#              a custom Claude Code statusLine command, publishes these via
+#              `herdr pane report-metadata` (source id "claude-context").
+#              Claude Code's own statusLine JSON is the only documented,
+#              stable source for context-window usage, model, and effort
+#              (hooks carry no usage data; the transcript JSONL format is
+#              explicitly unstable across versions). Claude only. Does NOT
+#              cover permission mode — statusLine's JSON has no field for it;
+#              it's visible in-pane (Claude's own "auto mode on" indicator)
+#              but not exposable to herdr's sidebar by any documented means.
+# Builtins used: state_icon, workspace, tab, agent. NOTE it is `state_text`,
+# not `state_label` — the latter does not exist.
+#
+# WARNING (herdmates docs, verified live): an unknown token name makes
+# `herdr server reload-config` return status "partial" and SILENTLY keep the
+# old layout — no error. If an edit appears to do nothing, that is the symptom.
+# Always confirm the reload reports "applied", not "partial".
+#
+# A row whose every token resolves to nothing is omitted rather than rendered
+# blank, so the team rows are safe on panes that will never populate them.
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["agent", "$clauth"],
+  ["$task"],
+  ["$status"],
+]
+
+# rows_by_agent REPLACES `rows` above for that agent kind (not merged), so the
+# team tokens are carried over explicitly. Claude gets its own OSC title
+# (terminal_title_stripped) added — the fastest "what is this agent doing"
+# signal available, and the direct replacement for a tab-rename plugin.
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "workspace", "tab"],
+  ["terminal_title_stripped"],
+  ["agent", "$clauth", "$context"],
+  ["$model", "$effort"],
+  ["$task"],
+  ["$status"],
+]
+
+[ui.toast]
+# Desktop notifications when a background agent finishes or blocks.
+delivery = "system"
+delay_seconds = 1
+
+[ui.sound]
+enabled = true
+
+[session]
+# Resume agent panes into their native conversations after a server restart.
+# Requires the official integration per agent (herdr integration install claude).
+resume_agents_on_restore = true
+
+[experimental]
+# Keep recent pane screen history across full server restarts. Costs disk;
+# buys back the screen content that a restart would otherwise drop.
+pane_history = true

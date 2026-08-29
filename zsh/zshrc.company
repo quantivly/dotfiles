@@ -234,29 +234,16 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
 fi
 
 #==============================================================================
-# Claude Code Multi-Account Switching
+# Claude Code Multi-Account Switching — REMOVED 2026-08-28
 #==============================================================================
-# Automatically switches Claude Code identity when entering Quantivly work directories.
-# Opt-in: only activates if ~/.claude-quantivly/ exists (created via:
-#   CLAUDE_CONFIG_DIR=~/.claude-quantivly claude)
-# Personal account (default): ~/.claude/
-# Work account (Quantivly): ~/.claude-quantivly/
-
-if [[ -d "$HOME/.claude-quantivly" ]]; then
-    _update_claude_config() {
-        # Defer to Atrium's injected CLAUDE_CONFIG_DIR inside a session (see
-        # _in_atrium_session / _update_gh_config).
-        _in_atrium_session && return
-        if _q_is_work_context; then
-            export CLAUDE_CONFIG_DIR="$HOME/.claude-quantivly"
-        else
-            unset CLAUDE_CONFIG_DIR
-        fi
-    }
-    autoload -U add-zsh-hook
-    add-zsh-hook chpwd _update_claude_config
-    _update_claude_config  # Run once at shell startup
-fi
+# Superseded by clauth (https://github.com/uwuclxdy/clauth). clauth owns
+# CLAUDE_CONFIG_DIR globally now (via profile switch, not a per-directory
+# chpwd hook) — a chpwd override here would fight it. Four profiles are
+# registered: quantivly-{1,2,3} (was ~/.claude-work{,2,3}) and personal
+# (was ~/.claude-personal). See ~/herdr-migration-next-steps.md.
+#
+# The old ~/.claude-quantivly this block gated on was already stale/abandoned
+# (last touched 2026-06-27) and is not one of the four accounts clauth manages.
 
 #==============================================================================
 # Git Aliases (Quantivly-specific)
@@ -402,4 +389,107 @@ gh-refresh-tokens() {
   else
     echo "Token refreshed. Run _update_gh_config or cd to apply."
   fi
+}
+
+#==============================================================================
+# Atrium wind-down guard (TEMPORARY — remove when Atrium is decommissioned)
+#==============================================================================
+# Atrium runs its agents on a dedicated tmux server (tmux -L atrium). A tmux
+# server inherits the environment of whichever client first started it, and
+# HERDR_* is not in tmux's default update-environment list, so a stale value
+# persists for the life of the server.
+#
+# Herdr's Claude integration hook (~/.claude/hooks/herdr-agent-state.sh) fires
+# on SessionStart and reports the agent's session ref to $HERDR_PANE_ID. If the
+# Atrium tmux server is ever started from inside a Herdr pane, EVERY Claude in
+# EVERY Atrium session inherits that one pane id and reports to it — pointing
+# Herdr's whole agent view at a single wrong pane.
+#
+# The server is currently clean (started before Herdr was installed; verify with
+# `tmux -L atrium show-environment -g | grep HERDR`). This function keeps it that
+# way by stripping the Herdr context before exec'ing the real binary.
+#
+# A function is required rather than a shim in ~/.local/bin: mise's Go bin dir
+# precedes ~/.local/bin on PATH, so a script there would not shadow atrium.
+# Functions are resolved before PATH, so this always wins. `command atrium`
+# bypasses it deliberately.
+#
+# REMOVE THIS BLOCK once `atrium ls` is empty and Atrium is retired.
+#
+# Also strips herdmates' teammux shim context: inside a lead pane, $TMUX is
+# faked as "teammux,..." and PATH is prefixed with the shim's bin dir, so an
+# unguarded `atrium` launched from there would send its own `tmux -L atrium`
+# calls into the fake tmux instead of the real one. See herdr-setup-review.md
+# P2-2.
+atrium() {
+  local clean_path="${PATH}"
+  [[ "$TMUX" == teammux* ]] && clean_path="${PATH#*/teammux/bin:}"
+  env -u HERDR_ENV \
+      -u HERDR_PANE_ID \
+      -u HERDR_SOCKET_PATH \
+      -u HERDR_WORKSPACE_ID \
+      -u HERDR_TAB_ID \
+      -u HERDR_BIN_PATH \
+      -u TMUX \
+      -u TMUX_PANE \
+      -u TEAMMUX_STATE_PATH \
+      -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS \
+      PATH="$clean_path" \
+      command atrium "$@"
+}
+
+#==============================================================================
+# Claude Code launcher — herdmates team lead inside Herdr
+#==============================================================================
+# Inside a Herdr pane, launch through herdmates' teammux shim so the session
+# becomes a native Claude Code *team lead*: Claude's split-pane teammate mode
+# (teammateMode: tmux) calls what it thinks is tmux, and the shim translates
+# every verb into `herdr pane` calls. Teammates then land as first-class,
+# steerable Herdr panes instead of hidden in-process subagents.
+#
+# Native agent teams are still gated behind CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,
+# so it is set here rather than globally — the flag only applies where herdmates
+# can actually host the result.
+#
+# Outside Herdr the shim has no output surface (Claude falls back to in-process
+# teammates), so plain claude is used. `command claude` bypasses this entirely.
+#
+# ACCOUNTS — how this composes with clauth:
+#   `clauth <profile>` switches the GLOBAL credentials in ~/.claude, so the very
+#   next `claude` here picks it up and you get lead + the right account. That is
+#   the path to use for a team lead.
+#
+#   `clauth start <profile>` instead spawns the claude BINARY in a per-profile
+#   runtime CLAUDE_CONFIG_DIR. It never goes through this shell function, so it
+#   gives you the right account but NOT a teammux lead. Use it for isolated
+#   single-account workers, not for the session that spawns a team.
+claude() {
+  if [[ -n "$HERDR_PANE_ID" ]] && command -v herdmates >/dev/null 2>&1; then
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 herdmates teammux-launch "$@"
+  else
+    command claude "$@"
+  fi
+}
+
+#==============================================================================
+# herdr-lazy — plugin CLI is not on PATH by design (README §Use)
+#==============================================================================
+# herdr-lazy manages the declared plugin set (~/.config/herdr/plugins/config/
+# herdr-lazy/plugins.list + plugins.lock, committed under ~/.dotfiles), but its
+# binary lives inside the plugin's own managed dir, not on PATH. Resolve it via
+# `herdr plugin list` each call rather than hardcoding the path (it changes if
+# herdr-lazy's own pin is bumped).
+#
+# The env -u guard works around a herdmates bug (verified, not yet fixed
+# upstream): herdmates sets HERDR_PLUGIN_STATE_DIR/HERDR_PLUGIN_CONFIG_DIR
+# process-wide before exec'ing claude, so every lead session and everything it
+# execs inherits herdmates' own plugin dirs instead of the caller's. Without
+# the guard, herdr-lazy silently reads/writes herdmates' state instead of its
+# own. Same guard applies to any other plugin CLI (e.g. `hap`) run from a lead
+# pane.
+herdr-lazy() {
+  local root
+  root=$(herdr plugin list --json 2>/dev/null | python3 -c \
+    "import json,sys;print([p['plugin_root'] for p in json.load(sys.stdin)['result']['plugins'] if p['plugin_id']=='herdr-lazy'][0])")
+  env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR "$root/target/release/herdr-lazy" "$@"
 }
