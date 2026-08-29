@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's
+  server PATH carries no mise shims, so it must also be reachable as `~/.local/bin/bun`
+  (`ln -s "$(mise which bun)" ~/.local/bin/bun`).
+- **herdr chord-first keymap and coloured agent sidebar** (`config/herdr/config.toml`,
+  `scripts/herdr-keyprobe.sh`, `hspawn` in `zsh/zshrc.company`, local `sidebar-icons`
+  plugin). Root cause of the earlier "3-modifier chords don't work": GNOME's
+  `grp:alt_shift_toggle` xkb option made Alt+Shift the layout switch and swallowed one
+  modifier of every Alt+Shift chord — now cleared by `apply-gnome-settings.sh`
+  (Super+space remains the switch).
 - **`system_health` now reports memory-pressure kills** (earlyoom / systemd-oomd /
   kernel OOM killer) over the last 7 days, with the most recent victim. These are
   worth surfacing because the damage is *silent*: a process killed mid-pipeline
