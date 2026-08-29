@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's
   server PATH carries no mise shims, so it must also be reachable as `~/.local/bin/bun`
   (`ln -s "$(mise which bun)" ~/.local/bin/bun`).
+- **[docs/HERDR_GUIDE.md](docs/HERDR_GUIDE.md)** — the team-facing guide to the recommended
+  agentic dev setup: prerequisites and how to verify them, keymap with rationale, sidebar
+  semantics, plugins, `hspawn`, troubleshooting, and criteria for who should use herdr at all
+  (non-developers are pointed at Orca, with the evaluation's limits stated). Leads with the
+  lesson that cost the most time: **every layer of this stack fails silently** — `config
+  check: ok` means the file parses, nothing more.
+- **`yazi` pinned in `.mise.toml`** (26.8.15) and added to `scripts/verify-tools.sh`. It was
+  bound to `alt+y` with its config symlinked into `~/.config/yazi`, but the binary had never
+  been installed, so the popup opened and closed instantly.
 - **herdr chord-first keymap and coloured agent sidebar** (`config/herdr/config.toml`,
   `scripts/herdr-keyprobe.sh`, `hspawn` in `zsh/zshrc.company`, local `sidebar-icons`
   plugin). Root cause of the earlier "3-modifier chords don't work": GNOME's
@@ -88,6 +97,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Fixed
+- **herdr: `hspawn` never worked.** Both code paths failed on every invocation. It creates a
+  fresh worktree each run, so Claude's trust-folder dialog is guaranteed, and neither path
+  answered it: the profile path called `herdr agent wait` before herdr had detected any agent
+  (`agent wait` resolves its target up front and cannot wait *for* detection, so it died with
+  `agent_not_found`), and the no-profile path died with `agent_not_ready`. Now polls for
+  detection first, then answers the dialog on the agent surface — sending the keys at the pane
+  level as the dialog renders does not work, because Claude's TUI is not yet accepting input
+  and the keys vanish without error. Both paths verified end to end.
+- **herdr: `f12 v` and `f12 -` had been silently deleted.** `split_vertical` /
+  `split_horizontal` were arrays that omitted the stock prefix defaults, and setting a key
+  field replaces it wholesale — leaving the two splits as the only actions with no prefix
+  escape hatch.
+- **herdr: `ctrl+shift+o` (split down) was dead**, because *Alacritty* has a compiled-in
+  default binding that consumes the key press; the keyprobe signature is a release event with
+  no matching press. Fixed in `~/.config/alacritty/alacritty.toml` (not symlinked from this
+  repo) with an explicit `{ key = "O", mods = "Control|Shift", action = "ReceiveChar" }`.
+  A sweep of the other 15 bound chords found `o` the only casualty — "one letter works, so the
+  class works" is an unsound inference, and `CLAUDE.md` has been corrected accordingly.
 - **DO-452**: the verification canary (`backup-verify.sh`) now runs its read-only `restic ls`
   / `restore` with `--no-lock`, so it no longer takes a repo lock that blocked the structural
   `restic check` in `backup-drill` (the check was being skipped rather than run). Added a

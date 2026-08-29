@@ -71,7 +71,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.config/yazi/yazi.toml` → `~/.dotfiles/yazi/yazi.toml`
 
 **Not symlinked (but coupled):**
-- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`. **Gotcha:** Live config diverges from template — updating the template doesn't propagate. Also, Ctrl+Shift+letter combos that have Alacritty built-in defaults (e.g., F=SearchForward) must have explicit CSI u entries to override; letters without defaults (E, O, W, T, S) work via kitty keyboard protocol automatically.
+- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`. **Gotcha:** Live config diverges from template — updating the template doesn't propagate. Also, Ctrl+Shift+letter combos that have Alacritty built-in defaults (e.g., F=SearchForward) must have explicit entries to override. **CORRECTED 2026-08-30 — `O` IS one of them.** This line previously listed (E, O, W, T, S) as "no defaults, work automatically"; `ctrl+shift+o` is in fact swallowed by a compiled-in Alacritty binding that appears in no man page and no shipped example config, which left herdr's split-down silently dead. Verified at the keyboard with `scripts/herdr-keyprobe.sh`: the signature is a **release event with no matching key-press** (`ESC[111:79;6:3u` arriving alone), because Alacritty bindings fire on press and consume it while the kitty protocol still reports the release. E, W and T were re-probed and do deliver presses; S was not re-tested. **Do not infer from one working letter that the class works — probe each chord you bind.** Preferred override is `action = "ReceiveChar"` ("treat as unbound") rather than a hardcoded `chars` CSI u string, since it follows whatever encoding mode is active instead of forcing kitty sequences into a legacy-mode terminal.
 - **GNOME settings** — not files, so not symlinked. Applied to the dconf database via `scripts/apply-gnome-settings.sh` (run by `./install` on GNOME, or `gnome-apply`). Machine-specific layer: `~/.gnome-settings.local` (template: `examples/gnome-settings.local.template`, install with `gnome-init`). See [GNOME Desktop Configuration](#gnome-desktop-configuration).
 - **Backup config** — `~/.backup.local` (repo paths, B2 keys, healthcheck URLs) is created from `examples/backup.local.template` by `./install` on GNOME (or `backup-init`) and never overwritten. The backup *policy* lives in `resticprofile/profiles.toml`, **copied** (never symlinked — root runs its hooks) to `/etc/resticprofile/` by `backup-setup`. See [Backup & Restore](#backup--restore).
 
@@ -317,6 +317,49 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 - Claude Code runs in fullscreen rendering (alt-screen) to avoid scrollback corruption — its output isn't in tmux copy-mode; scroll/search inside Claude (`Ctrl+o`, then `[` to dump to scrollback). See [docs/CLAUDE_CODE_TMUX.md](docs/CLAUDE_CODE_TMUX.md)
 
 See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) and [examples/tmux-workflows.md](examples/tmux-workflows.md) for comprehensive guides.
+
+## Herdr (agent workspace manager)
+
+Terminal workspace manager for coding agents (workspaces → tabs → panes, with agent detection).
+Config: `config/herdr/config.toml` → `~/.config/herdr/config.toml`. Full guide:
+[docs/HERDR_GUIDE.md](docs/HERDR_GUIDE.md).
+
+**The governing fact: every layer of this stack fails silently.** A 2026-08-30 walkthrough found
+five separately configured features completely dead — a keybinding, a prefix fallback, two
+popups, and `hspawn` — while `herdr config check` returned `ok` and `herdr server reload-config`
+returned `applied` with zero diagnostics throughout. **`config check: ok` means the file parses;
+it says nothing about whether anything works.** Verify effects, one binding at a time, and never
+generalise from one working example to a class.
+
+Gotchas, in the order they bite:
+
+- **Never run bare `herdr`** from a script or an agent — it attaches a client and hijacks the
+  user's UI. Subcommands only. (At a keyboard it is just how you re-attach after `ctrl+alt+q`.)
+- **An error anywhere in `[ui]` silently reverts ALL of `[ui]`** and reports `partial` with no
+  error text. After any config edit, `herdr server reload-config | jq '.result.status'` must say
+  `applied`. If an edit "did nothing", this is the first thing to check.
+- **Setting a key field REPLACES it wholesale.** An action relying on a stock prefix default must
+  re-list that default explicitly or it is silently lost (this is how `f12 v` / `f12 -`
+  disappeared).
+- **The herdr server's PATH is frozen at server start**, and mise only exposes *globally*
+  configured tools. A tool declared solely in a project `.mise.toml` is invisible to the server;
+  its popup or plugin opens and closes instantly with no error. Symlink into `~/.local/bin`
+  (on the server PATH) — this is why `bun`, `lazygit` and `yazi` are linked there.
+- **A plugin pane that flickers and vanishes means the command exited.** The error is real but
+  renders too briefly to read; reproduce it in a shell.
+- **Plugins cannot declare their own keybindings** — wire them in `config.toml` and verify IDs
+  with `herdr plugin action list`. An action appearing there does not mean its plugin is enabled.
+- **Claude's trust-folder dialog defaults to "No, exit"** and a fresh worktree triggers it every
+  time. Answer it on the **agent** surface (`herdr agent send-keys <pane> down`, then `enter`)
+  *after* detection — pane-level keys sent as the dialog renders are silently dropped, because
+  the TUI is not accepting input yet. `herdr agent prompt` refuses to type into a blocked agent.
+- **`herdr agent wait` requires an already-detected agent.** It resolves its target up front and
+  fails `agent_not_found`; it cannot wait *for* detection. Poll separately.
+- **herdmates leaks plugin env into lead sessions** (upstream). Prefix plugin CLIs with
+  `env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR`.
+- **`clauth start <profile>` bypasses the `claude()` shell function**, so the session gets the
+  right account but no team-lead capability. Team leads need `clauth <profile>` then `claude`.
+- **`herdr plugin link` state is herdr-local** and is not restored by herdr-lazy after a rebuild.
 
 ## GNOME Desktop Configuration
 
