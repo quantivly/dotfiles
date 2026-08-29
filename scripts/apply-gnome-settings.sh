@@ -202,6 +202,13 @@ apply_input_sources() {
     # switch actually in use, and it keeps working.
     log STEP "Input sources — drop the Alt+Shift layout toggle (Super+Space stays)"
     gset org.gnome.desktop.input-sources xkb-options "@as []"
+
+    # Alt+Space is GNOME's window-menu shortcut (screenshot / hide / resize…).
+    # It intercepts the chord before any terminal sees it, so it can never reach
+    # herdr or a TUI; the menu is also reachable via right-click on the title
+    # bar, so nothing is lost by freeing it.
+    log STEP "Window menu — free Alt+Space for terminal use"
+    gset org.gnome.desktop.wm.keybindings activate-window-menu "@as []"
 }
 
 apply_workspaces() {

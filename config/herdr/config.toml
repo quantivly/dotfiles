@@ -43,10 +43,13 @@ manifest_check = true
 # PushKeyboardEnhancementFlags — no capability probe gates it), and Alacritty
 # 0.16.1 speaks the kitty protocol, so ctrl+shift+<letter>, ctrl+1..9 and
 # ctrl+tab / ctrl+shift+tab arrive as distinct CSI u sequences and match the
-# config strings below. That is still being confirmed at the keyboard by the
-# Phase 0 probe (~/.dotfiles/scripts/herdr-keyprobe.sh); if it comes back
-# negative the fallback is per-chord `chars = "[<code>;<mod>u"` entries in
-# ~/.config/alacritty/alacritty.toml, not a different keymap here.
+# config strings below. CONFIRMED at the keyboard on 2026-08-29 with
+# ~/.dotfiles/scripts/herdr-keyprobe.sh: ctrl+shift+e arrived as
+# ESC[101:69;6u (1b5b3130313a36393b3675), so no Alacritty `chars` fallback is
+# needed. Same run showed the layout caveat: with the `il` layout active,
+# unshifted letter chords carry the Hebrew codepoint (alt+j -> ESC[1495;3u,
+# ctrl+c -> ESC[1489;5u) and match nothing — use ctrl+shift+<letter> chords or
+# switch to `us` first; digits, arrows, F-keys and shifted letters are unaffected.
 #
 # Deliberately NOT bound, because something else on this box owns them:
 # ctrl+shift+{c,v,f,b,space} (Alacritty), ctrl+shift+u (IBus unicode),
@@ -117,7 +120,7 @@ new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
 # arrived as ctrl+shift+w) and flipped the keyboard layout as a side effect.
 # The option has been removed (Super+space still switches layouts), which is
 # what makes alt+shift+left/right usable for move_tab_* above. Kitty-protocol
-# support is a separate question, still being confirmed by the Phase 0 probe.
+# support was confirmed separately by the Phase 0 probe (see the [keys] header).
 # alt+1..9 is kept regardless: it is protocol-independent (plain ESC + digit)
 # and free on this machine.
 focus_agent    = "alt+1..9"

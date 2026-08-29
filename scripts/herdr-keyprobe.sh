@@ -121,6 +121,18 @@ import tty
 
 IDLE_TIMEOUT_S = 0.020
 
+# Ways out. Under kitty flags 7 the terminal no longer sends the legacy control
+# bytes, so Ctrl+C arrives as `ESC[99;5u` (press) rather than 0x03 and never
+# raises SIGINT in raw mode; recognise both encodings, plus Ctrl+G and a bare q.
+# Note: on a non-Latin layout (il) Ctrl+C is reported with the layout's own
+# codepoint (`ESC[1489;5u`) and is NOT recognised — switch to us, press q, or
+# wait for the timeout.
+EXIT_PREFIXES = (b"\x03", b"\x07", b"q", b"\x1b[99;5", b"\x1b[103;5", b"\x1b[113;1u", b"\x1b[113u")
+
+
+def is_exit(data: bytes) -> bool:
+    return any(data.startswith(p) for p in EXIT_PREFIXES)
+
 
 def to_hex(data: bytes) -> str:
     return data.hex()
@@ -168,10 +180,15 @@ def main() -> int:
     interactive = sys.stdin.isatty()
     old = termios.tcgetattr(fd) if interactive else None
 
+    # Raw mode also disables output post-processing (OPOST), so a bare "\n"
+    # no longer implies a carriage return and lines would stair-step across the
+    # screen. Emit explicit CRLF while interactive.
+    eol = "\r\n" if interactive else "\n"
+
     if interactive:
-        print("capture-keys: raw mode enabled", file=sys.stderr)
-        print("capture-keys: press Ctrl+C to quit", file=sys.stderr)
-    print("family\thex\tescaped", file=sys.stdout)
+        print("capture-keys: raw mode enabled", end=eol, file=sys.stderr)
+        print("capture-keys: press Ctrl+C or q to quit", end=eol, file=sys.stderr)
+    print("family\thex\tescaped", end=eol, file=sys.stdout)
     sys.stdout.flush()
 
     try:
@@ -181,8 +198,10 @@ def main() -> int:
             data = read_sequence()
             if not data:
                 return 0
-            print(f"captured\t{to_hex(data)}\t{escaped(data)}", file=sys.stdout)
+            print(f"captured\t{to_hex(data)}\t{escaped(data)}", end=eol, file=sys.stdout)
             sys.stdout.flush()
+            if is_exit(data):
+                return 0
     except KeyboardInterrupt:
         return 0
     finally:
@@ -253,7 +272,7 @@ Layout check — press these two once more with `il` active
 
 TABLE
 
-printf 'Starting capture (%ss). Ctrl+C when done — Ctrl+G will NOT exit.\n\n' "$PROBE_TIMEOUT_S"
+printf 'Starting capture (%ss). Press q or Ctrl+C when done (on the us layout — under il the\nchord carries a Hebrew codepoint and is not recognised).\n\n' "$PROBE_TIMEOUT_S"
 
 # Push kitty progressive enhancement, flags 7 (disambiguate escape codes, report
 # event types, report alternate keys) — the same set herdr itself requests.
