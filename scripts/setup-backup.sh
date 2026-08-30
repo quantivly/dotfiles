@@ -246,6 +246,62 @@ install_external_fstab() {
   fi
 }
 
+# ===========================================================================
+# 3c. External HDD: remount it whenever it comes back
+# ===========================================================================
+install_external_udev() {
+  log STEP "3c. External HDD hotplug remount (udev)"
+
+  local uuid="${BACKUP_EXTERNAL_UUID:-}"
+  local repo="${BACKUP_EXTERNAL_REPO:-}"
+  local mnt unit rules tmp
+
+  [[ -n "$uuid" && -n "$repo" ]] || { log INFO "UUID/repo not set — skipping (see step 3b)."; return 0; }
+  grep -qs "$uuid" /etc/fstab || {
+    log WARNING "no /etc/fstab entry for this UUID — skipping the udev rule, which starts the fstab-generated unit."
+    return 0
+  }
+
+  mnt="$(dirname "$repo")"
+  # The escaped unit name is COMPUTED, never hand-written: any mount path with a
+  # dash needs \x2d, and getting it wrong yields a rule that verifies happily
+  # and then never fires.
+  unit="$(systemd-escape -p --suffix=mount "$mnt")"
+  rules=/etc/udev/rules.d/99-backup-external.rules
+
+  tmp="$(mktemp)"
+  {
+    printf '# Remount the external backup HDD whenever it reappears (dock / re-dock).\n'
+    printf '#\n'
+    printf '# The fstab entry only mounts at BOOT. On a laptop the disk vanishes and\n'
+    printf '# returns many times between reboots, and each return otherwise leaves it\n'
+    printf '# attached-but-unmounted -- which makes restic-backup-external.service fail\n'
+    printf '# its ConditionPathExists and be SKIPPED, which is not a failure: no error,\n'
+    printf '# no failed unit, no notification, no healthcheck ping.\n'
+    printf '#\n'
+    printf '# Written by scripts/setup-backup.sh. Do not hand-edit.\n'
+    printf 'ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="%s", ENV{SYSTEMD_WANTS}+="%s"\n' \
+      "$uuid" "$unit"
+  } > "$tmp"
+
+  if ! udevadm verify "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    log WARNING "udevadm rejected the generated rule — skipping (hotplug remount not installed)."
+    return 0
+  fi
+
+  if [[ -f "$rules" ]] && sudo cmp -s "$tmp" "$rules"; then
+    rm -f "$tmp"
+    log SUCCESS "udev rule already installed and current"
+    return 0
+  fi
+
+  sudo install -m 644 -o root -g root "$tmp" "$rules"
+  rm -f "$tmp"
+  sudo udevadm control --reload
+  log SUCCESS "udev hotplug remount installed → $rules"
+}
+
 # Run resticprofile as root with the config env available (for {{ .Env.* }}).
 # Source /etc/restic/backup.local INSIDE the root shell (already written by
 # install_configs) rather than passing creds on the command line, so the B2
@@ -542,6 +598,7 @@ main() {
   setup_repo_key
   install_configs
   install_external_fstab
+  install_external_udev
   init_repos
   install_schedules
   guide_b2_hardening

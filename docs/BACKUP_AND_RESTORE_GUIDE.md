@@ -90,9 +90,12 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    restic encrypts the repo and the emergency kit is age-encrypted.
 
    **Also set `BACKUP_EXTERNAL_UUID`** (`lsblk -o NAME,UUID,LABEL`). `backup-setup`
-   uses it to write an `/etc/fstab` entry so the drive mounts at boot, with `nofail`
-   so an undocked drive can never break boot. Leave it blank and you are relying on
-   the desktop to mount the drive — see the warning under *Scheduling* below.
+   uses it for two things: an `/etc/fstab` entry so the drive mounts at boot (with
+   `nofail`, so an undocked drive can never break boot), and a udev rule so it
+   *remounts whenever it reappears*. The second matters on a laptop: a drive behind
+   a docking station leaves and returns with every dock cycle, and fstab alone only
+   covers boot. Leave the UUID blank and you are relying on the desktop to mount the
+   drive — see the warning under *Scheduling* below.
 
 **Two B2 application keys** (ransomware resistance):
 

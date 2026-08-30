@@ -898,6 +898,16 @@ backup-doctor() {
   else
     _backup_doctor_warn "BACKUP_EXTERNAL_UUID set but absent from /etc/fstab — the disk will not mount after a reboot (re-run backup-setup)"
   fi
+  # fstab only covers BOOT. On a laptop the disk leaves and returns with every
+  # dock cycle, and without the udev rule each return leaves it unmounted until
+  # the next reboot -- landing back in the silent-skip branch above.
+  if [[ -n "$extuuid" ]]; then
+    if sudo grep -qs "$extuuid" /etc/udev/rules.d/99-backup-external.rules 2>/dev/null; then
+      _backup_doctor_ok "external HDD has a udev hotplug rule (remounts on re-dock)"
+    else
+      _backup_doctor_warn "no udev hotplug rule — the disk will stay unmounted after an undock/re-dock until reboot (re-run backup-setup)"
+    fi
+  fi
 
   echo "Recovery assets:"
   [[ -f ~/.config/age/emergency-kit-identity.txt ]] && _backup_doctor_ok "age identity present" \
