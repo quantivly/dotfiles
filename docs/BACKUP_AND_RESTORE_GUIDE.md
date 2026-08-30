@@ -82,12 +82,22 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    keys). You'll store the restic repo key there.
 2. **Backblaze B2** — create an account and a private bucket (e.g. `<hostname>-backup`).
    Note the bucket's **S3 endpoint** (e.g. `s3.us-west-002.backblazeb2.com`).
-3. **External HDD** — any **ext4** drive. Set `BACKUP_EXTERNAL_REPO` to
-   `<mountpoint>/restic`; restic stores its repo in that subfolder *alongside* your
-   existing files (non-destructive). Modern udisks mounts removable drives at
-   `/run/media/<user>/<label>` (older setups: `/media/<user>/<label>`) — confirm with
-   `findmnt /dev/sdXN` and match the config to it. No need to LUKS-encrypt the drive:
-   restic encrypts the repo and the emergency kit is age-encrypted.
+3. **External HDD** — any drive (the filesystem type is read off the disk, not
+   assumed). Set `BACKUP_EXTERNAL_REPO` to `<mountpoint>/restic`; restic stores its repo
+   in that subfolder *alongside* your existing files (non-destructive). Modern udisks
+   mounts removable drives at `/run/media/<user>/<label>` (older setups:
+   `/media/<user>/<label>`) — confirm with `findmnt /dev/sdXN` and match the config to it.
+   No need to LUKS-encrypt the drive: restic encrypts the repo and the emergency kit is
+   age-encrypted.
+
+   > **Get the depth right.** The mount point is derived as `dirname
+   > $BACKUP_EXTERNAL_REPO`, and it is what goes into `/etc/fstab`. A repo path one level
+   > too shallow (the drive's mount point itself, rather than a directory on it) resolves
+   > to `/run/media/<user>`, and a typo can resolve to your home directory — which would
+   > mean the external disk mounted over it at every boot, hiding everything in it.
+   > `backup-setup` refuses those: a non-absolute or unnormalised path, `$HOME`, `/media`,
+   > `/run/media`, their per-user subdirectories, the usual system directories, and any
+   > existing non-empty directory that is not already a mount point.
 
    **Also set `BACKUP_EXTERNAL_UUID`** (`lsblk -o NAME,UUID,LABEL`). `backup-setup`
    uses it for two things: an `/etc/fstab` entry so the drive mounts at boot (with
@@ -185,9 +195,22 @@ are for on-demand use and inspection.
   template rather than grepping it for the UUID (the load-bearing half is the
   `systemd-escape`'d mount unit name, which goes stale the moment the repo path changes
   and leaves a rule that still contains the UUID, still passes `udevadm verify`, and never
-  fires). After touching any of it, run
-  [`scripts/test-backup-external.sh`](../scripts/test-backup-external.sh) — it exercises
-  the install and doctor decisions against a fake fstab, with no root and no real disk.
+  fires). Every path on which `backup-setup` declines to install the udev rule also
+  **removes** one an earlier run left behind, and `backup-doctor` reports a leftover rule
+  even when no external drive is configured at all — otherwise a rule naming a UUID that
+  now belongs to a different disk simply persists, unmentioned by anything.
+
+  Both the `/etc/fstab` lookup and `backup-doctor` ask for the UUID **twice**: once as
+  `UUID=<uuid>` and once as the literal `/dev/disk/by-uuid/<uuid>`. `findmnt -S UUID=…`
+  resolves the tag through `/dev/disk/by-uuid`, so on its own it matches an entry written
+  in the second form — the form Ubuntu's own installer uses — only while the disk is
+  attached. Undocked, which is the state this whole mechanism exists for, a perfectly
+  correct `/etc/fstab` would read as having no entry at all.
+
+  [`scripts/test-backup-external.sh`](../scripts/test-backup-external.sh) exercises the
+  install and doctor decisions against a fake fstab, with no root and no real disk, and
+  **runs in CI** (`backup-external-test`) so a regression cannot merge green. Run it
+  locally after touching any of this.
 - **Weekly verification:** a separate timer
   ([`systemd/restic-verify.timer`](../systemd/restic-verify.timer)) runs
   [`scripts/backup-verify.sh`](../scripts/backup-verify.sh) — a **content canary** (asserts
@@ -301,6 +324,9 @@ Backups you've never restored aren't backups. Maintain this regimen:
 | `backup-status` shows no timers | Run `backup-setup`; check `resticprofile -c /etc/resticprofile/profiles.toml schedule --all`. |
 | External backup doesn't run when docked | Start with `backup-doctor` — it separates "not attached" from "attached but NOT MOUNTED", which is the state that looks like success. The service skips (condition not met) unless `<BACKUP_EXTERNAL_REPO>/config` exists, so confirm the drive is mounted where `~/.backup.local` expects (modern udisks uses `/run/media/<user>/<label>`). Then `systemctl status restic-backup-external.timer` and `journalctl -u restic-backup-external.service`. Force one now: `backup-now external`. |
 | `backup-setup` says "another /etc/fstab entry already targets …" or reports a mount-point mismatch | Two entries want the same mount point, or `/etc/fstab` mounts the UUID somewhere other than `dirname $BACKUP_EXTERNAL_REPO`. `backup-setup` refuses rather than guessing: inspect with `findmnt --fstab`, remove the stale entry, re-run. |
+| `backup-setup` says "refusing to mount the external HDD over …" | The mount point derived from `BACKUP_EXTERNAL_REPO` is a system directory or your home. The repo path is one level too shallow, or has a typo — it must name a directory **on** the drive, e.g. `/run/media/<user>/<label>/restic`. |
+| `backup-setup` says "… already contains files and is not a mount point" | The derived mount point is a real directory on the internal disk holding real data; mounting over it would hide it at every boot. Point `BACKUP_EXTERNAL_REPO` at the drive's actual mount point, or empty/rename that directory first. |
+| `backup-doctor` says a udev rule exists "but no external HDD is configured" | A rule left over from an earlier install, naming a UUID that may now belong to a different disk. Re-run `backup-setup` — it removes the stale rule. |
 | B2 backup fails (`AccessDenied`) | The append-only key can't prune — ensure no `[b2.retention]` is set; for pruning use `backup-prune` with the full key. |
 | B2 backup fails (`storage cap exceeded`) | The Backblaze storage cap is hit; every run fails at the lock write until fixed. In order: **(1)** raise the cap in the B2 console (Caps & Alerts) — prune *uploads*, so this comes first; **(2)** fix whatever grew (check `backup-doctor`'s churn warning; add excludes, redeploy with `backup-setup`); **(3)** `backup-now b2` for a fresh lean snapshot; **(4)** `backup-prune` with the offline full key; **(5)** `sudo systemctl reset-failed 'resticprofile-*@profile-b2.service'`; **(6)** `backup-doctor`. Console usage stays high ~30 days after prune (hidden versions) — see [Capacity & pruning](#capacity--pruning-b2). |
 | `restic init` fails on external | Dock the drive first; re-run `backup-setup` (it inits then, or it inits on the first dock backup). |

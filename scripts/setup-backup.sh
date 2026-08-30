@@ -71,6 +71,30 @@ render_external() {
       bash "$DOTFILES/scripts/backup-render.sh" "$3"
 }
 
+# Render template $1 to root-owned $2 with mode $3 (default 644).
+#
+# NEVER `render ... | sudo tee /etc/...`: tee truncates the destination the
+# instant the pipeline starts, long before the renderer's exit status is known,
+# so a render that fails — an unresolved __BACKUP_*__ placeholder (a hard error
+# since #87), a missing `hostname` under `set -e` — leaves a ZERO-BYTE file in
+# /etc. An empty includes.txt backs up nothing; an empty .service is a unit that
+# does nothing. Both install "successfully" and read as present forever.
+render_install() {
+  local tpl="$1" dest="$2" mode="${3:-644}" tmp
+  tmp="$(mktemp)"
+  if ! render "$tpl" > "$tmp"; then
+    rm -f "$tmp"
+    log WARNING "could not render $tpl — $dest left unchanged."
+    return 1
+  fi
+  if ! sudo install -m "$mode" -o root -g root "$tmp" "$dest"; then
+    rm -f "$tmp"
+    log WARNING "could not install $dest."
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
 # ===========================================================================
 # 0. Preflight
 # ===========================================================================
@@ -166,10 +190,13 @@ install_configs() {
   log STEP "3. Install /etc configs + helper scripts"
 
   # Rendered (not copied): restic reads these verbatim — no $HOME expansion —
-  # so the user's home is baked in here. `sudo tee` keeps them root-owned.
-  render "$DOTFILES/examples/backup-includes.txt" | sudo tee "$ETC_RESTIC/includes.txt" >/dev/null
-  render "$DOTFILES/examples/backup-excludes.txt" | sudo tee "$ETC_RESTIC/excludes.txt" >/dev/null
-  sudo chmod 644 "$ETC_RESTIC/includes.txt" "$ETC_RESTIC/excludes.txt"
+  # so the user's home is baked in here. Aborting on a failed render is the
+  # point: an empty includes.txt is a backup of nothing, and it would install
+  # cleanly and keep reporting as present.
+  render_install "$DOTFILES/examples/backup-includes.txt" "$ETC_RESTIC/includes.txt" \
+    || { log WARNING "aborting — restic would back up NOTHING with an unrendered includes.txt."; return 1; }
+  render_install "$DOTFILES/examples/backup-excludes.txt" "$ETC_RESTIC/excludes.txt" \
+    || { log WARNING "aborting — an unrendered excludes.txt would sweep in caches and VMs."; return 1; }
   log SUCCESS "includes.txt / excludes.txt rendered → $ETC_RESTIC"
 
   # Root-readable copy of the secrets/URLs env file (the timers load this).
@@ -210,10 +237,86 @@ external_mount_unit() { systemd-escape -p --suffix=mount "$1"; }
 # internal disk.
 external_is_mounted() { findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1; }
 
-# fstab escaping: a literal space must be written \040 (mount(8) unescapes it).
-# Raw, the line parses as a different and shorter entry, or not at all — and
-# labels with spaces are the factory default on consumer drives ("My Book").
-fstab_escape() { printf '%s' "${1// /\\040}"; }
+# Refuse a mount point that would shadow live data. BACKUP_EXTERNAL_REPO is
+# hand-edited in ~/.backup.local and the mount point is merely its dirname, so a
+# repo path one level too shallow (the drive root instead of a directory on it)
+# resolves to /media/<user>, and an ordinary typo resolves to $HOME. Everything
+# downstream then passes: nothing else claims the path, the generated line
+# parses, and it resolves back out of the table — so the external disk gets
+# mounted over the user's home at every boot, hiding everything in it. `nofail`
+# is no help; the mount succeeds. Until this check the string went straight into
+# a permanent, privileged /etc/fstab write with no floor at all.
+#
+# Deliberately pure — no sudo, no writes — so scripts/test-backup-external.sh
+# can exercise every rejection without root.
+external_mount_point_sane() {
+  local mnt="$1" p
+  if [[ "$mnt" != /* ]]; then
+    log WARNING "mount point '$mnt' is not an absolute path — check BACKUP_EXTERNAL_REPO in $USER_CONFIG."
+    return 1
+  fi
+  if [[ "$mnt" == *//* || "$mnt" == */. || "$mnt" == */.. || "$mnt" == */../* ]]; then
+    log WARNING "mount point '$mnt' is not a normalised path — check BACKUP_EXTERNAL_REPO in $USER_CONFIG."
+    return 1
+  fi
+  # Directories a removable disk must never be mounted over. $HOME and the two
+  # udisks parents are where a plausible BACKUP_EXTERNAL_REPO typo actually lands.
+  for p in / /boot /dev /etc /home /media /mnt /opt /proc /root /run /run/media \
+           /srv /sys /tmp /usr /var "$HOME" "/media/${USER:-}" "/run/media/${USER:-}"; do
+    if [[ "$mnt" == "$p" ]]; then
+      log WARNING "refusing to mount the external HDD over $mnt."
+      log WARNING "BACKUP_EXTERNAL_REPO must point at a directory ON the drive (e.g. $mnt/<label>/restic), not one level up."
+      return 1
+    fi
+  done
+  # An existing non-empty directory that is not already a mount point is live
+  # data on the internal disk. Mounting over it hides it at every boot, and the
+  # hidden files keep consuming the root filesystem invisibly.
+  if [[ -d "$mnt" ]] && ! external_is_mounted "$mnt" && [[ -n "$(ls -A "$mnt" 2>/dev/null)" ]]; then
+    log WARNING "$mnt already contains files and is not a mount point — mounting the external HDD there would hide them."
+    log WARNING "Point BACKUP_EXTERNAL_REPO at the drive's own mount point, or empty/rename $mnt first. Skipping."
+    return 1
+  fi
+  return 0
+}
+
+# Where table file $1 mounts UUID $2, or empty. Never grep /etc/fstab: a
+# substring match counts a commented-out or wrong-mount-point entry as present,
+# and a regex built from the mount point matches unrelated paths whenever the
+# label contains . + * ? [ or (.
+#
+# TWO queries, because `-S UUID=x` resolves the tag through /dev/disk/by-uuid
+# and therefore matches a `/dev/disk/by-uuid/x` entry — the form Ubuntu's own
+# installer writes, and the form used for /boot on this machine — ONLY while the
+# disk is attached. Undocked, which is the state this whole feature exists for,
+# it reports "no entry" for a perfectly correct fstab; callers then add a
+# duplicate, refuse the udev rule, and warn that the entry is missing. The
+# second query is a literal string match on the table, so it works either way.
+fstab_target_for_uuid() {
+  local table="$1" uuid="$2" out
+  out="$(LC_ALL=C findmnt --fstab --tab-file "$table" -no TARGET -S "UUID=$uuid" 2>/dev/null | head -1)"
+  if [[ -z "$out" ]]; then
+    out="$(LC_ALL=C findmnt --fstab --tab-file "$table" -no TARGET -S "/dev/disk/by-uuid/$uuid" 2>/dev/null | head -1)"
+  fi
+  printf '%s' "$out"
+}
+
+# fstab escaping. mount(8) unescapes \ooo octal, and fstab(5) requires it for
+# every character that would otherwise be read as structure: space (\040), tab
+# (\011), newline (\012) and backslash itself (\134). Raw, the line parses as a
+# different and shorter entry, or not at all — and labels with spaces are the
+# factory default on consumer drives ("My Book").
+#
+# The backslash MUST be substituted first, or it would re-escape the backslashes
+# the later substitutions just introduced.
+fstab_escape() {
+  local s="$1"
+  s="${s//\\/\\134}"
+  s="${s// /\\040}"
+  s="${s//$'\t'/\\011}"
+  s="${s//$'\n'/\\012}"
+  printf '%s' "$s"
+}
 
 # Number of "N parse errors" findmnt --verify reports for the table file $1.
 # Parse errors are the ONLY class that matters when validating what we write.
@@ -222,9 +325,15 @@ fstab_escape() { printf '%s' "${1// /\\040}"; }
 # findmnt's exit code would reject every correct entry, in exactly the two
 # states this step exists to fix. Prints 999 when findmnt emits no summary at
 # all (it cannot process the table), so callers treat that as unusable.
+#
+# LC_ALL=C is load-bearing, not hygiene: both summary strings are gettext-marked
+# in util-linux and shipped translated in Ubuntu's language packs. Under a
+# translated locale neither pattern below matches, every clean table returns the
+# 999 sentinel, and the step refuses to install anything — permanently, on every
+# re-run, for an /etc/fstab with no defect at all.
 fstab_parse_errors() {
   local out n
-  out="$(findmnt --verify --tab-file "$1" 2>&1 || true)"
+  out="$(LC_ALL=C findmnt --verify --tab-file "$1" 2>&1 || true)"
   # findmnt has TWO summary shapes: the counted one ("N parse errors, M errors,
   # K warnings") whenever it has anything to report, and a bare "Success, no
   # errors or warnings detected" when it does not. Reading only the first makes
@@ -255,12 +364,9 @@ install_external_fstab() {
     return 0
   fi
   mnt="$(external_mount_point)"
+  external_mount_point_sane "$mnt" || return 0
 
-  # Query the PARSED table, never grep /etc/fstab. A substring match counts a
-  # commented-out or wrong-mount-point entry as "already installed", and a
-  # regex built from $mnt matches unrelated paths whenever the label contains
-  # . + * ? [ or ( — both of which end in "installed nothing, reported ✓".
-  existing="$(findmnt --fstab --tab-file "$FSTAB" -no TARGET -S "UUID=$uuid" 2>/dev/null || true)"
+  existing="$(fstab_target_for_uuid "$FSTAB" "$uuid")"
   if [[ -n "$existing" && "$existing" != "$mnt" ]]; then
     log WARNING "/etc/fstab mounts UUID=$uuid at $existing, but $USER_CONFIG implies $mnt."
     log WARNING "restic-backup-external.service gates on $repo/config, so it would skip forever — resolve by hand. Skipping."
@@ -269,7 +375,7 @@ install_external_fstab() {
   if [[ -n "$existing" ]]; then
     log SUCCESS "/etc/fstab already mounts UUID=$uuid at $mnt"
   else
-    claimed="$(findmnt --fstab --tab-file "$FSTAB" -no SOURCE --target "$mnt" 2>/dev/null || true)"
+    claimed="$(LC_ALL=C findmnt --fstab --tab-file "$FSTAB" -no SOURCE --target "$mnt" 2>/dev/null || true)"
     if [[ -n "$claimed" ]]; then
       log WARNING "another /etc/fstab entry ($claimed) already targets $mnt — resolve by hand. Skipping."
       return 0
@@ -341,7 +447,7 @@ build_external_fstab_candidate() {
   # mount point intended. This is what actually proves the line is well-formed —
   # field count, \040 escaping and all — without depending on whether the disk
   # happens to be attached right now.
-  got="$(findmnt --fstab --tab-file "$cand" -no TARGET -S "UUID=$uuid" 2>/dev/null || true)"
+  got="$(fstab_target_for_uuid "$cand" "$uuid")"
   if [[ "$got" != "$mnt" ]]; then
     log WARNING "the generated entry parses as '${got:-nothing}', not '$mnt' — not installing."
     return 1
@@ -397,17 +503,42 @@ mount_external_now() {
   fi
   # mount(8) will not create the mount point. systemd's fstab generator does,
   # so the boot path works without this; the on-demand path does not.
-  sudo mkdir -p "$mnt"
+  local created=0
+  if [[ ! -d "$mnt" ]]; then
+    sudo mkdir -p "$mnt" || { log WARNING "could not create $mnt — skipping the immediate mount."; return 0; }
+    created=1
+  fi
   if sudo mount "$mnt"; then
     log SUCCESS "mounted $mnt"
-  else
-    log WARNING "could not mount $mnt — see: sudo mount -v $mnt (wrong filesystem type? fsck needed?)"
+    return 0
   fi
+  log WARNING "could not mount $mnt — see: sudo mount -v $mnt (wrong filesystem type? fsck needed?)"
+  # Undo the directory we just made. udisks2 owns /run/media/<user> and manages
+  # /media/<user>/<label>, creating them user-owned 0700; a leftover root-owned
+  # 0755 child can block or alter the desktop's own mount of the same drive. It
+  # is also precisely the "leftover directory on the internal disk" that makes
+  # `test -e "$repo/config"` report a docked drive that is not there.
+  # rmdir only, and only the leaf: it cannot touch a directory that has content,
+  # and any parent levels mkdir -p created belong to udisks, not to us.
+  if (( created )); then sudo rmdir "$mnt" 2>/dev/null || true; fi
 }
 
 # ===========================================================================
 # 3c. External HDD: remount it whenever it comes back
 # ===========================================================================
+# The one place the rule's path is written down, so the install and removal
+# halves cannot drift apart.
+EXT_UDEV_RULES=/etc/udev/rules.d/99-backup-external.rules
+
+# Drop a previously installed hotplug rule, saying why. Silent when there is
+# nothing to remove, so it is safe on every skip path.
+remove_external_udev() {
+  sudo test -f "$EXT_UDEV_RULES" || return 0
+  sudo rm -f "$EXT_UDEV_RULES"
+  sudo udevadm control --reload 2>/dev/null || true
+  log WARNING "removed the stale udev hotplug rule ($EXT_UDEV_RULES): $1."
+}
+
 install_external_udev() {
   log STEP "3c. External HDD hotplug remount (udev)"
 
@@ -415,23 +546,39 @@ install_external_udev() {
   local repo="${BACKUP_EXTERNAL_REPO:-}"
   local mnt unit rules tmp fstabmnt
 
-  [[ -n "$uuid" && -n "$repo" ]] || { log INFO "UUID/repo not set — skipping (see step 3b)."; return 0; }
+  # Every path that declines to install the rule REMOVES any rule a previous run
+  # left behind. A stale rule names a UUID that may now belong to a different
+  # disk and a .mount unit that may no longer exist; it keeps passing `udevadm
+  # verify` and simply never fires. Nothing else would ever mention it — the
+  # doctor's drift check has to be told what to compare against, which is
+  # exactly what is missing in this state.
+  if [[ -z "$uuid" || -z "$repo" ]]; then
+    log INFO "UUID/repo not set — skipping (see step 3b)."
+    remove_external_udev "UUID/repo no longer configured"
+    return 0
+  fi
   mnt="$(external_mount_point)"
+  if ! external_mount_point_sane "$mnt"; then
+    remove_external_udev "mount point is not usable"
+    return 0
+  fi
   # The rule starts the unit /etc/fstab generates for $mnt, so it is only
   # meaningful if fstab really mounts this UUID there. Installing it anyway
   # would produce a rule that validates and then starts a unit that does not
   # exist — the exact silent no-op this step exists to remove.
-  fstabmnt="$(findmnt --fstab --tab-file "$FSTAB" -no TARGET -S "UUID=$uuid" 2>/dev/null || true)"
+  fstabmnt="$(fstab_target_for_uuid "$FSTAB" "$uuid")"
   if [[ -z "$fstabmnt" ]]; then
     log WARNING "no /etc/fstab entry for UUID=$uuid — skipping the udev rule, which only starts the fstab-generated unit."
+    remove_external_udev "no matching /etc/fstab entry"
     return 0
   fi
   if [[ "$fstabmnt" != "$mnt" ]]; then
     log WARNING "/etc/fstab mounts UUID=$uuid at $fstabmnt, not $mnt (see step 3b) — skipping the udev rule."
+    remove_external_udev "/etc/fstab disagrees with the configured mount point"
     return 0
   fi
   unit="$(external_mount_unit "$mnt")"
-  rules=/etc/udev/rules.d/99-backup-external.rules
+  rules="$EXT_UDEV_RULES"
 
   tmp="$(mktemp)"
   if ! render_external "$uuid" "$unit" "$DOTFILES/udev/99-backup-external.rules" > "$tmp"; then
@@ -557,8 +704,9 @@ install_schedules() {
   # Clean up the obsolete looping .path unit if a previous run installed it.
   sudo systemctl disable --now restic-backup-external.path 2>/dev/null || true
   sudo rm -f /etc/systemd/system/restic-backup-external.path
-  render "$DOTFILES/systemd/restic-backup-external.service" | sudo tee /etc/systemd/system/restic-backup-external.service >/dev/null
-  sudo chmod 644 /etc/systemd/system/restic-backup-external.service
+  render_install "$DOTFILES/systemd/restic-backup-external.service" \
+                 /etc/systemd/system/restic-backup-external.service \
+    || { log WARNING "external backup unit not installed — external runs will not happen."; return 1; }
   sudo install -m 644 "$DOTFILES/systemd/restic-backup-external.timer"   /etc/systemd/system/restic-backup-external.timer
   local extdropin=/etc/systemd/system/restic-backup-external.service.d
   if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]]; then
