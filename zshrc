@@ -258,16 +258,3 @@ fi
 
 # Disable XON/XOFF flow control so Ctrl+S works as tmux prefix
 stty -ixon 2>/dev/null
-
-export PATH="$PATH:/home/zvi/.cache/tmp/claude-1000/-home-zvi--atrium-worktrees-zvi-issue-652-18ca63dd895cbaf2/8f3b8a75-819f-4c6a-acd3-75dfc29cd2e8/scratchpad/bin"
-
-export PATH="$PATH:/home/zvi/.cache/tmp/claude-1000/-home-zvi--atrium-worktrees-zvi-issue-652-18ca63dd895cbaf2/8f3b8a75-819f-4c6a-acd3-75dfc29cd2e8/scratchpad/bin"
-
-export PATH="$PATH:/home/zvi/.cache/tmp/claude-1000/-home-zvi--atrium-worktrees-zvi-issue-652-18ca63dd895cbaf2/8f3b8a75-819f-4c6a-acd3-75dfc29cd2e8/scratchpad/bin"
-
-export PATH="$PATH:/home/zvi/.cache/tmp/claude-1000/-home-zvi--atrium-worktrees-zvi-issue-652-18ca63dd895cbaf2/8f3b8a75-819f-4c6a-acd3-75dfc29cd2e8/scratchpad/bin"
-
-export PATH="$PATH:/home/zvi/.cache/tmp/claude-1000/-home-zvi--atrium-worktrees-zvi-issue-652-18ca63dd895cbaf2/8f3b8a75-819f-4c6a-acd3-75dfc29cd2e8/scratchpad/bin"
-
-# clauth completions
-source "/home/zvi/.clauth/completions/clauth.zsh"
