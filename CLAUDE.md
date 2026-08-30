@@ -71,7 +71,7 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - `~/.config/yazi/yazi.toml` → `~/.dotfiles/yazi/yazi.toml`
 
 **Not symlinked (but coupled):**
-- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`. **Gotcha:** Live config diverges from template — updating the template doesn't propagate. Also, Ctrl+Shift+letter combos that have Alacritty built-in defaults (e.g., F=SearchForward) must have explicit entries to override. **CORRECTED 2026-08-30 — `O` IS one of them.** This line previously listed (E, O, W, T, S) as "no defaults, work automatically"; `ctrl+shift+o` is in fact swallowed by a compiled-in Alacritty binding that appears in no man page and no shipped example config, which left herdr's split-down silently dead. Verified at the keyboard with `scripts/herdr-keyprobe.sh`: the signature is a **release event with no matching key-press** (`ESC[111:79;6:3u` arriving alone), because Alacritty bindings fire on press and consume it while the kitty protocol still reports the release. E, W and T were re-probed and do deliver presses; S was not re-tested. **Do not infer from one working letter that the class works — probe each chord you bind.** Preferred override is `action = "ReceiveChar"` ("treat as unbound") rather than a hardcoded `chars` CSI u string, since it follows whatever encoding mode is active instead of forcing kitty sequences into a legacy-mode terminal.
+- `~/.config/alacritty/alacritty.toml` — Terminator-style tmux keybindings require CSI u key entries here. Template: `examples/alacritty.toml.template`, install with `alacritty-init`. **Gotcha:** Live config diverges from template — updating the template doesn't propagate. Also, Ctrl+Shift+letter combos that have Alacritty built-in defaults (e.g., F=SearchForward) must have explicit entries to override. **CORRECTED 2026-08-30 — `O` IS one of them.** This line previously listed (E, O, W, T, S) as "no defaults, work automatically"; `ctrl+shift+o` is in fact swallowed by an Alacritty default. **Where it is documented (corrected again after review):** it is a shipped `[[hints.enabled]]` default — `man 5 alacritty` shows `binding = { key = "O", mods = "Control|Shift" }`. It is a *hints* binding, not a `keyboard.bindings` one, which is why it does not appear in `man 5 alacritty-bindings` and why an earlier note here wrongly said "no man page". Look in the hints section. It left herdr's split-down silently dead. Verified at the keyboard with `scripts/herdr-keyprobe.sh`: the signature is a **release event with no matching key-press** (`ESC[111:79;6:3u` arriving alone), because Alacritty bindings fire on press and consume it while the kitty protocol still reports the release. E, W and T were re-probed and do deliver presses; S was not re-tested. **Do not infer from one working letter that the class works — probe each chord you bind.** Preferred override is `action = "ReceiveChar"` ("treat as unbound") rather than a hardcoded `chars` CSI u string, since it follows whatever encoding mode is active instead of forcing kitty sequences into a legacy-mode terminal.
 - **GNOME settings** — not files, so not symlinked. Applied to the dconf database via `scripts/apply-gnome-settings.sh` (run by `./install` on GNOME, or `gnome-apply`). Machine-specific layer: `~/.gnome-settings.local` (template: `examples/gnome-settings.local.template`, install with `gnome-init`). See [GNOME Desktop Configuration](#gnome-desktop-configuration).
 - **Backup config** — `~/.backup.local` (repo paths, B2 keys, healthcheck URLs) is created from `examples/backup.local.template` by `./install` on GNOME (or `backup-init`) and never overwritten. The backup *policy* lives in `resticprofile/profiles.toml`, **copied** (never symlinked — root runs its hooks) to `/etc/resticprofile/` by `backup-setup`. See [Backup & Restore](#backup--restore).
 
@@ -358,10 +358,15 @@ Gotchas, in the order they bite:
 - **Setting a key field REPLACES it wholesale.** An action relying on a stock prefix default must
   re-list that default explicitly or it is silently lost (this is how `f12 v` / `f12 -`
   disappeared).
-- **The herdr server's PATH is frozen at server start**, and mise only exposes *globally*
-  configured tools. A tool declared solely in a project `.mise.toml` is invisible to the server;
-  its popup or plugin opens and closes instantly with no error. Symlink into `~/.local/bin`
-  (on the server PATH) — this is why `bun`, `lazygit` and `yazi` are linked there.
+- **The herdr server's PATH is a snapshot taken when the server starts.** It carries the mise
+  `installs/<tool>/<version>` dirs for whatever was *globally* configured at that instant (not
+  mise's `shims` dir). Two consequences: a tool declared only in a project `.mise.toml` is
+  invisible to the server, and a tool added globally *after* launch stays invisible until the
+  server restarts — in both cases the popup or plugin opens and closes instantly with no error.
+  Symlinking into `~/.local/bin` (also on the server PATH) makes a tool available *without* a
+  restart, which is why `bun`, `lazygit` and `yazi` are linked there. An earlier version of this
+  note said the server PATH "has no mise shims", which is literally true but misleading — it
+  implied mise tools never resolve there, and they do.
 - **A plugin pane that flickers and vanishes means the command exited.** The error is real but
   renders too briefly to read; reproduce it in a shell.
 - **Plugins cannot declare their own keybindings** — wire them in `config.toml` and verify IDs

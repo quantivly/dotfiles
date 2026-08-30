@@ -174,7 +174,10 @@ eff_key=$(printf '%s\n' "$fields" | sed -n '2p')
 eff_val=$(printf '%s\n' "$fields" | sed -n '3p')
 ctx_key=$(printf '%s\n' "$fields" | sed -n '4p')
 ctx_val=$(printf '%s\n' "$fields" | sed -n '5p')
-rl_key=$(printf '%s\n' "$fields" | sed -n '6p')
+# Line 6 is the rate-limit BAND key. It is intentionally not read: the rl_* tokens
+# are no longer published to herdr (see the header), only rl_val is still printed in
+# the visible status line. The python block keeps emitting it so these sed indices
+# stay absolute and stable — do not renumber.
 rl_val=$(printf '%s\n' "$fields" | sed -n '7p')
 cost_val=$(printf '%s\n' "$fields" | sed -n '8p')
 model=$(printf '%s\n' "$fields" | sed -n '9p')

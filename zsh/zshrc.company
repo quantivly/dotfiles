@@ -422,8 +422,26 @@ gh-refresh-tokens() {
 # calls into the fake tmux instead of the real one. See herdr-setup-review.md
 # P2-2.
 atrium() {
+  # Resolve the real binary UP FRONT. `env` execs a binary, and `command` is a
+  # shell builtin with no /usr/bin/command on Linux or macOS — `env … command
+  # atrium` therefore fails with "env: 'command': No such file or directory"
+  # (exit 127) and this whole guard silently never runs Atrium at all.
+  local atrium_bin
+  atrium_bin="$(whence -p atrium)" || {
+    print -u2 "atrium: not found on PATH"
+    return 127
+  }
+
+  # Drop ONLY the teammux shim entry. `${PATH#*/teammux/bin:}` is a shortest-
+  # prefix removal: it deletes everything up to and including the shim, so any
+  # entries that happened to precede it are lost too (measured: the shim sits at
+  # position 3 here, so that form silently dropped 3 entries).
   local clean_path="${PATH}"
-  [[ "$TMUX" == teammux* ]] && clean_path="${PATH#*/teammux/bin:}"
+  if [[ "$TMUX" == teammux* ]]; then
+    local -a _ap=("${(@s.:.)PATH}")
+    _ap=("${(@)_ap:#*/teammux/bin}")
+    clean_path="${(j.:.)_ap}"
+  fi
   env -u HERDR_ENV \
       -u HERDR_PANE_ID \
       -u HERDR_SOCKET_PATH \
@@ -435,7 +453,7 @@ atrium() {
       -u TEAMMUX_STATE_PATH \
       -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS \
       PATH="$clean_path" \
-      command atrium "$@"
+      "$atrium_bin" "$@"
 }
 
 #==============================================================================

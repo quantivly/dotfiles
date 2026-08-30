@@ -80,8 +80,11 @@ usually the terminal itself — consumed the key-down.
 
 > **Verified, and it will catch you out:** *one working letter does not validate the class.*
 > On Alacritty 0.16.1, `ctrl+shift+e` works with no configuration at all, while
-> `ctrl+shift+o` is swallowed by a compiled-in Alacritty binding that appears in no man page
-> and in no shipped example config. Probe **every** chord you bind.
+> `ctrl+shift+o` is swallowed by an Alacritty default. It is a **hints** binding, not a
+> `keyboard.bindings` one — `man 5 alacritty` documents it as a shipped `[[hints.enabled]]`
+> default (`binding = { key = "O", mods = "Control|Shift" }`), which is why it is absent from
+> `man 5 alacritty-bindings` and from the example config. Probe **every** chord you bind, and
+> when one is missing, check the hints section too.
 
 Fix for a swallowed chord, in `alacritty.toml`:
 
@@ -112,9 +115,17 @@ unreliable" for weeks. `apply-gnome-settings.sh` also moves GNOME's workspace sw
 
 ### 2.3 Tools must be reachable by the herdr *server*
 
-**The herdr server's PATH is frozen when the server starts**, and mise only puts *globally*
-configured tools on PATH. A tool declared solely in a project `.mise.toml` is invisible to the
-server — its popup or plugin will open and close instantly, with no error anywhere.
+**The herdr server's PATH is frozen at the moment the server starts.** mise exposes only
+*globally* configured tools, so a tool declared solely in a project `.mise.toml` is invisible to
+the server — its popup or plugin opens and closes instantly, with no error anywhere.
+
+> **Precise version, corrected after review.** The server PATH does *not* contain mise's `shims`
+> directory, but it **does** contain the per-tool `installs/<tool>/<version>` directories for
+> whatever was globally configured when the server launched (9 of them on this machine). So the
+> operative rule is not "mise is invisible to the server" — it is **"the server's view of PATH is
+> a snapshot"**. A tool you add globally *after* the server started stays invisible until the
+> server restarts. The `~/.local/bin` symlinks below are what make it work *immediately*, without
+> a restart; after a restart the global config alone would have sufficed.
 
 ```bash
 mise use -g lazygit@0.42.0 yazi@26.8.15 bun@1.4.0
@@ -432,6 +443,20 @@ Regenerate it after every `herdr update`.
 | Sidebar width ignores the config | `session.json` pins the live width; double-click the divider. |
 | Agent never receives its prompt | It is `blocked` — usually an unanswered trust dialog. |
 | Alt-letter chords dead | See the layout note below. |
+
+### Portability gaps to fix before adopting on macOS
+
+Two pieces of this setup are Linux-only and **fail silently** rather than erroring — the exact
+class §0 is about. Neither matters on Linux; both matter the moment a teammate adopts this.
+
+- **The statusline publisher** (`claude/hooks/session-statusline.sh`) uses `date +%s%N` for its
+  `--seq` value and GNU `timeout` to bound the herdr call. BSD `date` emits a literal `N`, and
+  macOS has no `timeout` — and the call is wrapped in `|| true` with stderr going to a log file,
+  so the sidebar simply never populates and nothing complains. Use `gdate`/`timeout` from
+  coreutils, or drop `--seq`/`timeout` on that platform.
+- **`tab_bar_right`** (`config/herdr/config.toml`) parses `/proc/loadavg` and `/proc/meminfo`.
+  There is no `/proc` on macOS, so the widget renders nothing. This file is symlinked to every
+  teammate by `install.conf.yaml`.
 
 **Machine-specific notes.** These describe this workstation (Ubuntu / GNOME / Wayland +
 Alacritty, `us`+`il` layouts). Label them as such when adopting elsewhere; on macOS or another

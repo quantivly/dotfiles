@@ -272,6 +272,10 @@ status_indicators = "symbols"
 # the border label is faster to read than the sidebar.
 show_agent_labels_on_pane_borders = true
 
+# LINUX-ONLY: reads /proc directly, so this widget renders nothing on macOS. It
+# fails silently (no /proc, no output, no error) — this file is symlinked to every
+# teammate, so anyone adopting on macOS should drop or rewrite this entry.
+#
 # Host load / memory at the right edge of the tab bar, off the agent rows
 # entirely. Runs on the herdr SERVER via /bin/sh -lc; herdr keeps the last
 # stdout line, capped at 80 chars. Reads /proc directly instead of shelling out
