@@ -40,9 +40,16 @@ repos:
         # SC2034: Variable appears unused (zsh uses many for configuration)
         # SC2296: Parameter expansion in zsh differs from bash
         args: ['-x', '-e', 'SC1071,SC1073,SC1072,SC2034,SC2296']
-        # Only exclude: dotbot (git submodule), p10k.zsh (external theme), main zshrc (sources others)
-        # zsh/functions/*.sh are sourced interactive functions, not strict shell scripts
-        # Zsh modules ARE checked - add targeted '# shellcheck disable=SC####' comments as needed
+        # Excluded: dotbot (git submodule), p10k.zsh (external theme), main zshrc (sources others),
+        # zsh/functions/*.sh (sourced interactive functions, not strict shell scripts).
+        # What this hook actually covers (verified 2026-08-30): files pre-commit types as `shell`,
+        # i.e. *.sh/*.bash/*.zsh or a shell shebang. The zsh modules zsh/zshrc.* have neither, so
+        # `identify` types them as plain text and this hook NEVER sees them — an earlier comment
+        # here claiming "Zsh modules ARE checked" was wrong. It could not check them anyway:
+        # ShellCheck cannot parse zsh (`} &!` in zsh/zshrc.company stops it at the first hit).
+        # The only check that runs on zsh/zshrc.* is `zsh -n`, in CI's "Shell Syntax Check" job
+        # (.github/workflows/ci.yml loops over zsh/zshrc.* zshrc p10k.zsh). CI's own ShellCheck
+        # job is narrower still: *.sh/*.bash/*.zsh files that also carry a shebang.
         exclude: '(dotbot/|p10k\.zsh|^zshrc$|zsh/functions/)'
 
   # Secret detection with gitleaks

@@ -226,6 +226,115 @@ if command -v mise &>/dev/null && [[ -f "$MISE_REPO" ]]; then
 fi
 
 echo ""
+echo -e "${BLUE}=== herdr server environment hygiene ===${NC}"
+# Why this check exists: every herdr pane inherits the SERVER's environment, and
+# the server inherits whatever started it. On 2026-08-29 the server was restarted
+# from inside a herdmates team-lead pane, so every pane on the machine got a fake
+# TMUX=teammux,0,0, the teammux shim ahead of real tmux on PATH, HERDR_PANE_ID=w2:p1,
+# CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 and herdmates' plugin state dirs. Every
+# Claude session became a "team of one", `tmn`/`tmux kill-server` hit the shim, the
+# runbook's `command -v tmux` capability check passed for everyone — and nothing
+# reported it (herdr-eval finding F1). scripts/herdr-server-launch.sh (run by
+# systemd/herdr-server.service) is the fix; this asserts the RUNNING server is
+# actually clean. Variable NAMES only are printed, never values.
+#
+# `(^|/)herdr server$`, not the guide's looser `herdr server`: the loose form also
+# matches any shell whose command line merely contains the string — including a
+# `bash -c '… herdr server …'` that is running this very check.
+HERDR_FORBIDDEN_VARS=(TMUX TMUX_PANE TEAMMUX_STATE_PATH HERDR_PANE_ID HERDR_TAB_ID
+    HERDR_WORKSPACE_ID HERDR_PLUGIN_STATE_DIR HERDR_PLUGIN_CONFIG_DIR
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS CLAUDECODE CLAUDE_CODE_SESSION_ID
+    CLAUDE_CODE_CHILD_SESSION)
+herdr_pid=$(pgrep -f '(^|/)herdr server$' 2>/dev/null | head -1)
+server_path=""
+if [[ -z "$herdr_pid" ]]; then
+    echo "  ○ no 'herdr server' process — skipped (start: systemctl --user start herdr-server.service)"
+elif [[ ! -r "/proc/$herdr_pid/environ" ]]; then
+    echo -e "${YELLOW}⚠${NC} cannot read /proc/$herdr_pid/environ — skipped (no /proc here? try: ps eww -p $herdr_pid)"
+else
+    # NUL-delimited parse: a value containing a newline must not masquerade as a name.
+    server_names=""
+    while IFS= read -r -d '' entry; do
+        name="${entry%%=*}"
+        server_names+="$name"$'\n'
+        [[ "$name" == PATH ]] && server_path="${entry#PATH=}"
+    done < "/proc/$herdr_pid/environ"
+
+    leaked=""
+    for v in "${HERDR_FORBIDDEN_VARS[@]}"; do
+        grep -qx "$v" <<<"$server_names" && leaked+=" $v"
+    done
+    shim_entries=$(tr ':' '\n' <<<"$server_path" | grep '/teammux/bin' | tr '\n' ' ')
+    shim_entries="${shim_entries% }"
+
+    if [[ -z "$leaked" && -z "$shim_entries" ]]; then
+        echo -e "${GREEN}✓${NC} herdr server (pid $herdr_pid) environment is clean"
+    else
+        [[ -n "$leaked" ]] && echo -e "${YELLOW}✗${NC} FAIL: herdr server (pid $herdr_pid) environment carries:$leaked"
+        [[ -n "$shim_entries" ]] && echo -e "${YELLOW}✗${NC} FAIL: herdr server PATH contains a teammux shim: $shim_entries"
+        echo "    The server was started from inside a herdr pane or a Claude session, and"
+        echo "    every pane inherits this. Restart it from a clean environment — this ENDS"
+        echo "    every agent session, so check 'herdr pane list' first:"
+        echo "      systemctl --user restart herdr-server.service         # if the unit is enabled"
+        echo "      herdr server stop; scripts/herdr-server-launch.sh &   # else, from a PLAIN terminal"
+    fi
+
+    if grep -qx 'LINEAR_API_KEY' <<<"$server_names"; then
+        echo -e "${GREEN}✓${NC} LINEAR_API_KEY present in the server environment"
+    else
+        echo -e "${YELLOW}⚠${NC} LINEAR_API_KEY absent from the server environment — tdi.worktree-from-linear"
+        echo "    (the Linear picker) cannot authenticate. Set it in ~/.zshrc.local BEFORE the"
+        echo "    server starts; the launcher reads it from there."
+    fi
+fi
+
+echo ""
+echo -e "${BLUE}=== Plugin dependencies under the herdr SERVER PATH ===${NC}"
+# Why: the server's PATH is a snapshot taken when it started, and it is what every
+# plugin and popup resolves against — not your shell's PATH (mise adds tools per
+# shell from a precmd hook, so a shell check proves nothing). A tool missing here
+# shows up as a pane that flickers and vanishes, with no error anywhere. Checked
+# ONE AT A TIME: POSIX `command -v a b` exits 0 when only the FIRST resolves.
+# `/bin/sh` by absolute path so `env -i` does not have to find the shell itself.
+# With no server running, the launcher's declared PATH is used instead, so a fresh
+# machine still learns what would be missing.
+HERDR_SERVER_DEPS=(herdr herdmates teammux bun node python3 jq gh notify-send lazygit yazi clauth sh bash)
+herdr_launcher="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/herdr-server-launch.sh"
+declared_path=""
+if [[ -x "$herdr_launcher" ]]; then
+    declared_path=$("$herdr_launcher" --print-env 2>/dev/null | sed -n 's/^PATH=//p')
+fi
+if [[ -n "$server_path" ]]; then
+    echo "  resolving against the live server's PATH (pid $herdr_pid)"
+elif [[ -n "$declared_path" ]]; then
+    server_path="$declared_path"
+    echo "  no server running — resolving against the launcher's declared PATH"
+fi
+if [[ -z "$server_path" ]]; then
+    echo "  ○ no server PATH available (no server, no launcher) — skipped"
+else
+    missing_deps=""
+    for dep in "${HERDR_SERVER_DEPS[@]}"; do
+        # shellcheck disable=SC2016  # "$1" is for /bin/sh to expand, deliberately not bash
+        if resolved=$(env -i PATH="$server_path" /bin/sh -c 'command -v "$1"' sh "$dep" 2>/dev/null); then
+            echo -e "${GREEN}✓${NC} $dep → $resolved"
+        else
+            echo -e "${YELLOW}✗${NC} $dep: MISSING under the server PATH"
+            missing_deps+=" $dep"
+        fi
+    done
+    if [[ -n "$missing_deps" ]]; then
+        echo "    Install it, or symlink it into ~/.local/bin (on the server PATH; takes effect"
+        echo "    without a restart). A tool added to mise needs a server restart to be seen."
+    fi
+    if [[ -n "$herdr_pid" && -n "$declared_path" && "$declared_path" != "$server_path" ]]; then
+        echo -e "${YELLOW}⚠${NC} the live server's PATH differs from the launcher's declared PATH — the server"
+        echo "    predates a mise/PATH change, or was not started via herdr-server-launch.sh."
+        echo "    A restart (see above) brings the two back together."
+    fi
+fi
+
+echo ""
 echo -e "${BLUE}=== Summary ===${NC}"
 echo "For installation instructions, see:"
 echo "  - ~/.dotfiles/CLAUDE.md (comprehensive guide)"

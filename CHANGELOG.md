@@ -254,6 +254,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   targets; and a hardcoded `ext4` passes `findmnt --verify` (a type mismatch is only a
   warning) and then fails to mount, which `nofail` converts straight back into a silent
   non-mount.
+||||||| parent of 7c5a252 (fix(herdr): clean server environment, enforceable cleanup, honest docs — remediation of the 2026-08-30 evaluation)
+- **herdr: the 2026-08-30 independent-evaluation batch** (`~/herdr-eval-findings.md`, F1–F11).
+  The live herdr server had been restarted from inside a herdmates team-lead pane, so every pane
+  inherited a fake `TMUX`, the teammux shim as `tmux`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+  and herdmates' plugin dirs: every Claude session became a team of one, `tmn` / `tmux
+  kill-server` hit the shim, `$status` appeared on nearly every sidebar row, and the runbooks'
+  own pre-flight (`command -v tmux` → the shim) passed for everyone. Nothing detected it.
+  - The server now runs from a declared, clean environment: `systemd/herdr-server.service` +
+    `scripts/herdr-server-launch.sh` (`--print-env`; refuses to start from inside a pane or a
+    Claude session; PATH from `~/.local/bin` + `mise bin-paths`, never a plugin shim;
+    `LINEAR_API_KEY` from `~/.zshrc.local`; the session-bus variables toasts need).
+    `scripts/verify-tools.sh` gained "herdr server environment hygiene" (the running server's env
+    carries none of the pane/team/plugin variables) and "Plugin dependencies under the herdr
+    SERVER PATH" (each dependency resolved one at a time under the *server's* PATH).
+  - Cleanup is executable instead of prose: `hspawn` gained `-p/-m/-e/--mode/-b/-n` and a
+    registry (`~/.local/state/hspawn/`), plus `hdespawn <slug>` and `hreap [--close] [--mine]
+    [--older MIN]` — every Claude process herdr hosts, detected or not, with idle age, memory and
+    creator. `herdr agent list` had been the documented "what is alive", and it misses herdmates
+    teammates and trust-dialog panes (14 agents shown while 33 claude processes ran, 15 of them
+    finished teammates holding 4.5 GB).
+  - Sidebar: an idle band `$idle_ok|$idle_warn|$idle_crit` (5/10 min, matching herdmates'
+    quiet/stalled tiers) published by `session-statusline.sh` — the sidebar had no time
+    dimension; the tab bar shows `agents <detected>/<claude procs>`; `remove_worktree` and
+    `previous_workspace`/`next_workspace` bound; the `$task $status` comment corrected (`$status`
+    is not team-only in practice, and `stale` = no transcript write for 10 min);
+    `0xGosu/herdr-auto-pilot` dropped from `plugins.list`.
+  - Guide + CLAUDE.md corrected: the from-zero sequence no longer strands a new hire at step 4
+    (rustup, jq, `herdr plugin install natori-hrj/herdr-lazy` *before* `herdr-lazy check`,
+    `LINEAR_API_KEY` before the server first starts, the unit, then `verify-tools.sh`);
+    `clauth start` lacks `teammateMode: tmux`, not "team capability"; five sidebar rows, not
+    six; the hspawn branch is `${HSPAWN_BRANCH_PREFIX:-$USER}/<slug>`, not `zvi/<slug>`; the
+    keymap table's "swap panes / copy mode" row (no such actions exist) replaced with the real
+    prefix actions; macOS labels on rotation, `/proc` and `notify-send`; `herdr agent explain`
+    and named test sessions in troubleshooting. `config check` turned out stricter than §0 had
+    said — probing showed it catches bogus keys, bad inline fields, non-hex colours and chord
+    collisions among listed actions — but it still misses collisions with unlisted stock
+    defaults, terminal-swallowed chords, missing popup binaries and unpublished tokens; §0 and
+    the CLAUDE.md intro now say exactly that.
+  - Upstream: teammates go undetected because Claude Code execs them via its versioned binary
+    (process name `2.1.251`, not `claude`) while `herdr agent explain --file` accepts the same
+    screen. Issue drafts for herdr (same class as herdrdev/herdr#803) and herdmates
+    (`HERDR_AGENT=claude` on the respawned command, or `pane report-agent` from its hooks) are
+    under `~/herdr-eval-upstream/`.
 - **herdr: `hspawn` never worked.** Both code paths failed on every invocation. It creates a
   fresh worktree each run, so Claude's trust-folder dialog is guaranteed, and neither path
   answered it: the profile path called `herdr agent wait` before herdr had detected any agent

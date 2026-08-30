@@ -1,0 +1,62 @@
+# systemd/herdr-server.service
+# ============================
+# Runs the herdr server headless as a systemd USER service, from the declared
+# clean environment built by scripts/herdr-server-launch.sh — read that header
+# for the why (herdr-eval finding F1: a server restarted from inside a team-lead
+# pane handed a fake TMUX, the teammux shim, HERDR_PANE_ID=w2:p1 and
+# CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 to every pane on the machine). Same
+# pattern as clauth-daemon.service.
+#
+# Symlinked to ~/.config/systemd/user/ by ./install (install.conf.yaml). Linking
+# does NOT enable it. One-time switch-over, from a PLAIN terminal — not a herdr
+# pane, not a Claude session:
+#   systemctl --user daemon-reload
+#   herdr server stop                       # ends EVERY agent session on the machine
+#   systemctl --user enable --now herdr-server.service
+#   scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
+#   journalctl --user -u herdr-server.service -e
+# Afterwards bare `herdr` at a keyboard attaches to this server ("Launch or
+# attach to the persistent session", `herdr --help`) instead of starting its
+# own; ctrl+alt+q detaches the client and leaves the server running as before.
+#
+# `systemctl --user stop|restart herdr-server.service` ENDS EVERY AGENT SESSION.
+# Pane shells and the agents inside them are children of the server and live in
+# this unit's cgroup; stopping the unit is `tmux kill-server`, not a reload.
+# `herdr server reload-config` is still the way to apply config changes. Before
+# stopping, look at `herdr pane list` as well as `herdr agent list` — herdmates
+# teammates and panes on Claude's trust dialog are not detected as agents.
+#
+# Comments must be on their own lines: systemd treats text after a value as part
+# of the value.
+
+[Unit]
+Description=herdr server (headless, clean declared environment)
+Documentation=file://%h/.dotfiles/docs/HERDR_GUIDE.md
+
+[Service]
+Type=simple
+# The launcher `env -i`s and re-declares the environment itself, so nothing from
+# the user manager reaches the server except what it passes through explicitly
+# (DBUS_SESSION_BUS_ADDRESS, WAYLAND_DISPLAY, DISPLAY, ... — see its header).
+# No Environment=/EnvironmentFile= here on purpose: one place declares the env.
+ExecStart=%h/.dotfiles/scripts/herdr-server-launch.sh
+# Stop through herdr's own API ("Stop the running server via the API socket",
+# `herdr server stop --help`) so herdr, not a signal, winds down its panes.
+# Runs under the manager's env, which has HOME — enough to find the default
+# socket ~/.config/herdr/herdr.sock. UNVERIFIED under the unit until first use.
+ExecStop=%h/.local/bin/herdr server stop
+# mixed: after ExecStop, SIGTERM goes to the server process only; anything still
+# alive in the cgroup after TimeoutStopSec (orphaned pane shells, agents) gets
+# SIGKILL. control-group (the default) would SIGTERM every pane process at the
+# same instant as the server; process would leave orphans running forever.
+KillMode=mixed
+TimeoutStopSec=30
+# on-failure, not always: a deliberate `herdr server stop` from a shell must
+# stay down (assumes herdr exits 0 on a requested stop — UNVERIFIED; if the
+# server comes back 2s after a manual stop, this is why). systemd's default
+# start-rate limit (5 in 10s) ends a crash loop, e.g. herdr missing from PATH.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

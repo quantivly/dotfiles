@@ -344,14 +344,27 @@ Config: `config/herdr/config.toml` → `~/.config/herdr/config.toml`. Full guide
 **The governing fact: every layer of this stack fails silently.** A 2026-08-30 walkthrough found
 five separately configured features completely dead — a keybinding, a prefix fallback, two
 popups, and `hspawn` — while `herdr config check` returned `ok` and `herdr server reload-config`
-returned `applied` with zero diagnostics throughout. **`config check: ok` means the file parses;
-it says nothing about whether anything works.** Verify effects, one binding at a time, and never
-generalise from one working example to a class.
+returned `applied` with zero diagnostics throughout. **`config check: ok` means the file parses and
+its keys, chords and `[ui]` schema are internally consistent; it says nothing about effects.** It
+does catch bogus keys, bad inline fields, non-hex colours and chord collisions among *listed*
+actions (probed 2026-08-30) — but not a collision with an unlisted stock default, a chord the
+terminal swallows, a missing popup binary, or a token that is never published. Verify effects, one
+binding at a time, and never generalise from one working example to a class.
 
 Gotchas, in the order they bite:
 
 - **Never run bare `herdr`** from a script or an agent — it attaches a client and hijacks the
   user's UI. Subcommands only. (At a keyboard it is just how you re-attach after `ctrl+alt+q`.)
+- **Never start or restart the herdr server from inside a pane or a Claude session.** The server's
+  environment is a snapshot of whoever launched it, and every pane inherits it. The live server was
+  once relaunched from a team-lead pane (2026-08-29), so every pane got the teammux shim as `tmux`,
+  a fake `TMUX`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and herdmates' plugin dirs — a dozen-plus
+  team-of-one sessions, `tmn`/`tmux kill-server` dead, `$status` on every row, and the runbooks'
+  `command -v tmux` pre-flight passing for everyone. Use the unit:
+  `systemctl --user restart herdr-server.service` (`systemd/herdr-server.service`, launcher
+  `scripts/herdr-server-launch.sh`; `--print-env` shows the environment it builds, and it refuses to
+  start when `HERDR_ENV`, `CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` is set). `scripts/verify-tools.sh`
+  asserts the running server's env is clean. See HERDR_GUIDE §2.4.
 - **An error anywhere in `[ui]` silently reverts ALL of `[ui]`** and reports `partial` with no
   error text. After any config edit, `herdr server reload-config | jq '.result.status'` must say
   `applied`. If an edit "did nothing", this is the first thing to check.
@@ -381,8 +394,14 @@ Gotchas, in the order they bite:
   fails `agent_not_found`; it cannot wait *for* detection. Poll separately.
 - **herdmates leaks plugin env into lead sessions** (upstream). Prefix plugin CLIs with
   `env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR`.
-- **`clauth start <profile>` bypasses the `claude()` shell function**, so the session gets the
-  right account but no team-lead capability. Team leads need `clauth <profile>` then `claude`.
+- **`clauth start <profile>` bypasses the `claude()` shell function**, so it lacks what that function
+  adds: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and a launch via `herdmates teammux-launch`, which
+  passes `--settings '{"teammateMode":"tmux"}'` so teammates become herdr panes. Whether teams are
+  enabled at all depends on the flag *reaching the process* — a contaminated server hands it to
+  everyone, and such a session leads a team whose teammates run in-process, invisible to herdr
+  (INFERRED from Claude Code's default `teammateMode`; not observed). Team leads need
+  `clauth <profile>` then `claude`; prove it with `herdr pane process-info --pane <id>` showing
+  `teammateMode`, not with `command -v tmux`.
 - **`herdr plugin link` state is herdr-local** and is not restored by herdr-lazy after a rebuild.
 - **If you spawn agents or panes, CLOSE THEM when their work is collected.** This is not tidiness
   — memory is the binding constraint on this box (8 threads, swap runs hot, and `system_health`
@@ -391,12 +410,23 @@ Gotchas, in the order they bite:
   claude processes**, endangering ten unrelated in-flight sessions; tearing those six down
   recovered it to load 11.5 / 84% / 23. An idle agent still holds its memory. Close panes you
   created once you have their output; keep one only if you have a concrete next task for it.
-  (Closing panes you did *not* create is a different matter — don't, unless asked.)
+  (Closing panes you did *not* create is a different matter — don't, unless asked.) Enumerate with
+  `hreap` — every Claude process herdr hosts, detected or not, with idle age, memory and creator
+  (default view is idle ≥ 30 min; `--older 0` shows all); `hreap --close --mine` closes only your
+  registry-tagged idle spawns — **not** `herdr agent list`,
+  which misses herdmates teammates and trust-dialog panes (it showed 14 while 33 claude processes
+  ran). `hspawn` records each spawn in `~/.local/state/hspawn/`; `hdespawn <slug>` tears one down
+  (pane, workspace, worktree, registry entry).
 - **Teammates in a herdmates team are NOT detected as herdr agents.** They exist as panes but are
   absent from `herdr agent list`, the sidebar rows, the priority sort and toasts — only the lead
   is detected. A lead also reports `done` while its teammates are still working, so read the
   lead's own roster for progress, not its agent state. Same blind spot applies to any pane sitting
-  on Claude's trust dialog.
+  on Claude's trust dialog. The cause is the process name: Claude Code execs teammates via its
+  versioned binary, so `herdr pane process-info --pane <id>` shows a foreground process named
+  `2.1.251` rather than `claude`, and herdr never consults the Claude manifest — although
+  `herdr agent explain --file <screen> --agent claude` accepts the same pane's screen (`state: idle`,
+  rule `live_prompt_box`). `herdr agent explain <pane>` is the first diagnostic; `agent_not_found`
+  means nothing was detected at all. Reported upstream (drafts: `~/herdr-eval-upstream/`).
 - **The sidebar publisher needs TWO things wired, and `./install` only does one.**
   `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
   also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo). Without
