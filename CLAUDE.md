@@ -357,7 +357,9 @@ Gotchas, in the order they bite:
   `applied`. If an edit "did nothing", this is the first thing to check.
 - **Setting a key field REPLACES it wholesale.** An action relying on a stock prefix default must
   re-list that default explicitly or it is silently lost (this is how `f12 v` / `f12 -`
-  disappeared).
+  disappeared — an audit found 15 of 25 rebound actions had lost theirs). A bare value is only
+  safe for actions whose stock default is empty (`focus_agent`, `next_agent`, `previous_agent`,
+  `move_tab_*`, `resize_pane_*`). Diff against `herdr --default-config` after any keymap edit.
 - **The herdr server's PATH is a snapshot taken when the server starts.** It carries the mise
   `installs/<tool>/<version>` dirs for whatever was *globally* configured at that instant (not
   mise's `shims` dir). Two consequences: a tool declared only in a project `.mise.toml` is

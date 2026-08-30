@@ -519,7 +519,8 @@ herdr-lazy() {
 # prompt. herdr has every one of those primitives, just uncomposed, so this is
 # the composition and nothing more:
 #
-#   herdr worktree create  -> a worktree workspace on zvi/<slug>, and with it
+#   herdr worktree create  -> a worktree workspace on <prefix>/<slug> (prefix =
+#                             $HSPAWN_BRANCH_PREFIX, default $USER), and with it
 #                             the worktree.created hooks (tdi.worktree-setup
 #                             links node_modules et al, reviewr auto-opens)
 #   herdr agent start      -> claude in that workspace's root pane
@@ -622,7 +623,10 @@ hspawn() {
   name="${name[1,32]}"
 
   local created pane
-  created="$(herdr worktree create --cwd "$repo" --branch "zvi/$slug" \
+  # Branch prefix follows the repo's <person>/<topic> convention. Defaults to
+  # $USER rather than a hardcoded name — this file is shared with the team.
+  local branch_prefix="${HSPAWN_BRANCH_PREFIX:-$USER}"
+  created="$(herdr worktree create --cwd "$repo" --branch "$branch_prefix/$slug" \
                                    --label "$slug" --no-focus)" || return 1
   pane="$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id // empty')"
   if [[ -z "$pane" ]]; then
@@ -630,7 +634,7 @@ hspawn() {
     printf '%s\n' "$created" >&2
     return 1
   fi
-  echo "worktree: zvi/$slug"
+  echo "worktree: $branch_prefix/$slug"
   echo "pane:     $pane"
 
   if [[ -n "$profile" ]]; then

@@ -139,7 +139,10 @@ Verify the way the *server* resolves them, not the way your shell does:
 ```bash
 pid=$(pgrep -f 'herdr server' | head -1)
 spath=$(tr '\0' '\n' < /proc/$pid/environ | sed -n 's/^PATH=//p')
-env -i PATH="$spath" HOME="$HOME" /bin/sh -c 'command -v lazygit yazi bun'
+# NOTE: `command -v a b c` takes ONE operand in POSIX sh and exits 0 if the FIRST
+# resolves — it will happily "pass" with the other two missing. Check one at a time.
+env -i PATH="$spath" HOME="$HOME" /bin/sh -c \
+  'for b in lazygit yazi bun; do command -v "$b" >/dev/null || echo "MISSING: $b"; done'
 ```
 
 `scripts/verify-tools.sh` covers the wider toolchain, and also asserts that
@@ -151,6 +154,40 @@ exists in its backend "installs" successfully and yields **no binary at all** wh
 ---
 
 ## 3. Install and update
+
+### From zero
+
+An earlier version of this guide jumped straight to `herdr update` and never said how to get
+any of this in the first place. Full sequence:
+
+```bash
+# 1. The dotfiles themselves — this is what symlinks config.toml, the statusline
+#    publisher, the plugin list and the plugin lock into place.
+git clone git@github.com:quantivly/dotfiles.git ~/.dotfiles && cd ~/.dotfiles && ./install
+
+# 2. herdr itself (see herdr.dev for the current installer; this repo does not vendor it)
+herdr --version          # confirm it is on PATH before continuing
+
+# 3. Wire the statusline publisher into Claude Code. ./install creates the symlink but
+#    CANNOT edit ~/.claude/settings.json — see §6. Without this the sidebar rows are empty.
+
+# 4. Plugins. The curated set lives in config/herdr/plugins/plugins.list, pinned by
+#    plugins.lock. herdr-lazy installs them:
+herdr-lazy check         # read-only: what is installed vs listed
+herdr-lazy install       # install what is missing, restore drifted pins
+
+# 5. The LOCAL sidebar-icons plugin is not in the list — it is linked, not installed:
+herdr plugin link ~/.dotfiles/config/herdr/plugins/local/sidebar-icons
+#    Link state is herdr-local and is NOT restored by herdr-lazy after a rebuild.
+
+# 6. clauth, only if you need several Claude accounts. Not required for single-account use.
+```
+
+**Two things `./install` cannot do for you**, and both fail silently: the `statusLine` entry in
+`~/.claude/settings.json` (§6), and `herdr plugin link` for the local plugin. Neither produces an
+error — you just get empty sidebar rows and no agent glyphs.
+
+### Updating
 
 ```bash
 herdr update                                        # stable channel
@@ -204,15 +241,15 @@ not survive. `f12 ?` shows both bindings per action.
 | resize pane | `ctrl+alt+←↓↑→` | `f12 r` for mode | direct, no mode |
 | zoom | `alt+z` | `f12 z` | tmux `M-z` |
 | new / close / rename tab | `ctrl+shift+t` / `ctrl+shift+x` / `ctrl+shift+r` | `f12 c` / `f12 shift+x` / `f12 shift+t` | — |
-| next / previous tab | `ctrl+tab` / `ctrl+shift+tab` | — | browser habit |
+| next / previous tab | `ctrl+tab` / `ctrl+shift+tab` | `f12 n` / `f12 p` | browser habit |
 | move tab | `alt+shift+←` / `alt+shift+→` | `f12 shift+←/→` | tmux `S-Left/Right` |
 | tab 1–9 | `ctrl+1..9` | `f12 1..9` | — |
 | **agent 1–9** | `alt+1..9` | — | the attention queue |
 | next / previous agent | `alt+j` / `alt+k` | — | — |
-| last pane | `alt+a` | — | tmux `M-a` |
-| goto / navigator | `alt+s` | — | tmux `M-s` |
+| last pane | `alt+a` | — (unbound by default) | tmux `M-a` |
+| goto / navigator | `alt+s` | `f12 g` | tmux `M-s` |
 | new workspace / worktree | `ctrl+shift+n` / `ctrl+shift+g` | `f12 shift+n` / `f12 shift+g` | — |
-| sidebar · scrollback · detach · notification target | `ctrl+alt+b` · `ctrl+alt+e` · `ctrl+alt+q` · `ctrl+alt+o` | — | — |
+| sidebar · scrollback · detach · notification target | `ctrl+alt+b` · `ctrl+alt+e` · `ctrl+alt+q` · `ctrl+alt+o` | `f12 b` · `f12 e` · `f12 q` · `f12 o` | — |
 | close/rename workspace, swap panes, copy mode, reload, help | — | prefix only | rare or destructive |
 | lazygit · yazi popups | `alt+g` · `alt+y` | — | tmux `M-g` / `M-y` |
 
@@ -229,8 +266,11 @@ split_horizontal = ["prefix+minus", "ctrl+alt+s", "ctrl+shift+o"]
 ```
 
 An action that relied on a stock prefix default **must list that default explicitly** or it is
-lost, with no warning. Only never-defaulted actions (`next_agent`, `previous_agent`,
-`move_tab_*`, `resize_pane_*`) take a bare value.
+lost, with no warning. A bare value is only safe for actions whose stock default is **empty**
+(`""`, i.e. unbound out of the box) — there is nothing to preserve. Those are `focus_agent`,
+`next_agent`, `previous_agent`, `move_tab_*` and `resize_pane_*`. (An earlier version of this
+line called them "never-defaulted" and omitted `focus_agent`; they *are* defaulted, just
+defaulted to nothing.)
 
 This is easy to get wrong at scale: an audit of this config on 2026-08-30 found **15 of 25
 rebound actions had silently dropped their prefix binding**, which would have left most of the
@@ -300,6 +340,11 @@ Constraints worth knowing:
 > **An error anywhere inside `[ui]` silently reverts ALL of `[ui]`** and reports `partial` with
 > no error text. After any config edit:
 > `herdr server reload-config | jq '.result.status'` — it must say `applied`.
+>
+> *Confidence note:* this rests on a **single observation** during the original config work and
+> has not been deliberately reproduced. Checking that reload says `applied` costs nothing and is
+> worth doing regardless, but if you are debugging something specific, do not treat the
+> total-revert behaviour as established — verify it first.
 
 Also: `session.json` pins the live sidebar width, so a width change in the config does nothing
 until you **double-click the divider**.
@@ -498,11 +543,13 @@ What makes Orca the better fit for non-devs is the **GUI and the phone app**, no
 feature set — its capabilities overlap herdr's substantially, worktrees included. Arriving from
 a GUI rather than a terminal is the whole point.
 
-**One hard constraint if you try both.** Orca installs its own Claude Code `statusLine` hook,
-and Claude Code has exactly **one** `statusLine` slot — the same one the herdr sidebar publisher
-occupies (§6). On a shared `~/.claude` the two cannot coexist. Orca's earlier trial here added
-11 hook entries and grew `settings.json` from 3 KB to 26 KB; removal was clean, but plan on one
-or the other per machine, not both.
+**One likely constraint if you try both — stated with its evidence, because it is partly
+inference.** *Measured:* Orca's leftovers here include its own `claude-statusline.sh` plus an
+`installed` marker, and its trial added 11 hook entries, growing `settings.json` from 3 KB to
+26 KB; removal was clean. `settings.json` has exactly one `statusLine` key. *Inferred:* that the
+two therefore cannot coexist on a shared `~/.claude`. Nobody has actually run them side by side,
+and clauth's per-profile config dirs might isolate them. Plan on one or the other per machine,
+but treat the conflict as expected rather than proven.
 
 > **Honest caveat, and please treat it as one.** This recommendation rests on research and a
 > short hands-on evaluation — **not** on running Orca end to end on real work. Nobody here has

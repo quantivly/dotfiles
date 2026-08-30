@@ -20,6 +20,10 @@
     # "statusLine" in ~/.claude/settings.json — see docs/HERDR_GUIDE.md.
     ~/.claude/hooks/session-statusline.sh: claude/hooks/session-statusline.sh
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.list: config/herdr/plugins/plugins.list
+    # NOTE: this is a symlink INTO the repo, so `herdr-lazy sync`/`update` write
+    # straight through and leave your dotfiles working tree dirty. That is
+    # intentional — the lock is meant to be version-controlled — but it means a
+    # plugin refresh shows up as an unexpected `M config/herdr/plugins/plugins.lock`.
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.lock: config/herdr/plugins/plugins.lock
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml

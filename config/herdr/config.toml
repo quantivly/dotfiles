@@ -33,8 +33,11 @@ manifest_check = true
 # Layering rule: every rebound action is an ARRAY, [<old/prefix binding>,
 # <new chord>]. Setting a field REPLACES its default, so an action that relied
 # on a stock prefix default has to list that default explicitly or it is lost
-# (e.g. new_tab = ["prefix+c", "ctrl+shift+t"]). Only never-defaulted actions
-# (next_agent, previous_agent, move_tab_*, resize_pane_*) take a bare value.
+# (e.g. new_tab = ["prefix+c", "ctrl+shift+t"]). A bare value is only safe for
+# actions whose stock default is EMPTY ("" — unbound out of the box), because
+# there is nothing to preserve: focus_agent, next_agent, previous_agent,
+# move_tab_* and resize_pane_*. (Corrected 2026-08-30: an earlier version called
+# these "never-defaulted" and omitted focus_agent. They are defaulted — to "".)
 # Nothing that works today stops working, and the prefix stays available for
 # muscle memory and for `herdr --remote` onto foreign hosts.
 #
