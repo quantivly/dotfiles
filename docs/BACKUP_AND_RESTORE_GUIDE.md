@@ -166,6 +166,28 @@ are for on-demand use and inspection.
   > `/etc/fstab` entry, set `BACKUP_HC_URL_EXTERNAL` so an overdue run is externally
   > visible, and run `backup-doctor` — it reports an attached-but-unmounted drive as a
   > hard failure and warns when the UUID is set but missing from `/etc/fstab`.
+
+  **Three things keep the drive mounted, and they cover different windows.** The
+  `/etc/fstab` entry covers **boot** (`nofail` + `x-systemd.device-timeout=10s`, so an
+  undocked drive can never break or stall it). [`udev/99-backup-external.rules`](../udev/99-backup-external.rules)
+  covers **dock cycles**, which on a laptop outnumber boots — it starts the
+  fstab-generated `.mount` unit whenever that partition reappears, so it can never mount
+  anything `/etc/fstab` would not. And a `restic-backup-external.service.d/10-external-mount.conf`
+  drop-in orders the run `After=` that mount unit, because `nofail` deliberately takes the
+  mount *out* of `local-fs.target`'s ordering — without it, the timer's `Persistent=true`
+  catch-up at boot can fire while the USB disk is still enumerating (measured at 18–21s
+  here) and be skipped. That ordering is `After=` only: `Requires=`/`RequiresMountsFor=`
+  would turn an undocked drive into a **failed** unit every six hours, which is exactly the
+  false alarm the `ConditionPathExists` design exists to avoid.
+
+  `backup-setup` installs all three from `BACKUP_EXTERNAL_UUID` and re-runs safely;
+  `backup-doctor` checks each one, comparing the live udev rule against the rendered repo
+  template rather than grepping it for the UUID (the load-bearing half is the
+  `systemd-escape`'d mount unit name, which goes stale the moment the repo path changes
+  and leaves a rule that still contains the UUID, still passes `udevadm verify`, and never
+  fires). After touching any of it, run
+  [`scripts/test-backup-external.sh`](../scripts/test-backup-external.sh) — it exercises
+  the install and doctor decisions against a fake fstab, with no root and no real disk.
 - **Weekly verification:** a separate timer
   ([`systemd/restic-verify.timer`](../systemd/restic-verify.timer)) runs
   [`scripts/backup-verify.sh`](../scripts/backup-verify.sh) — a **content canary** (asserts
@@ -277,7 +299,8 @@ Backups you've never restored aren't backups. Maintain this regimen:
 | Symptom | Fix |
 |---------|-----|
 | `backup-status` shows no timers | Run `backup-setup`; check `resticprofile -c /etc/resticprofile/profiles.toml schedule --all`. |
-| External backup doesn't run when docked | Check `systemctl status restic-backup-external.timer` and `journalctl -u restic-backup-external.service`. The service skips (condition not met) unless `<BACKUP_EXTERNAL_REPO>/config` exists — confirm the drive is mounted where `~/.backup.local` expects (modern udisks uses `/run/media/<user>/<label>`). Force one now: `backup-now external`. |
+| External backup doesn't run when docked | Start with `backup-doctor` — it separates "not attached" from "attached but NOT MOUNTED", which is the state that looks like success. The service skips (condition not met) unless `<BACKUP_EXTERNAL_REPO>/config` exists, so confirm the drive is mounted where `~/.backup.local` expects (modern udisks uses `/run/media/<user>/<label>`). Then `systemctl status restic-backup-external.timer` and `journalctl -u restic-backup-external.service`. Force one now: `backup-now external`. |
+| `backup-setup` says "another /etc/fstab entry already targets …" or reports a mount-point mismatch | Two entries want the same mount point, or `/etc/fstab` mounts the UUID somewhere other than `dirname $BACKUP_EXTERNAL_REPO`. `backup-setup` refuses rather than guessing: inspect with `findmnt --fstab`, remove the stale entry, re-run. |
 | B2 backup fails (`AccessDenied`) | The append-only key can't prune — ensure no `[b2.retention]` is set; for pruning use `backup-prune` with the full key. |
 | B2 backup fails (`storage cap exceeded`) | The Backblaze storage cap is hit; every run fails at the lock write until fixed. In order: **(1)** raise the cap in the B2 console (Caps & Alerts) — prune *uploads*, so this comes first; **(2)** fix whatever grew (check `backup-doctor`'s churn warning; add excludes, redeploy with `backup-setup`); **(3)** `backup-now b2` for a fresh lean snapshot; **(4)** `backup-prune` with the offline full key; **(5)** `sudo systemctl reset-failed 'resticprofile-*@profile-b2.service'`; **(6)** `backup-doctor`. Console usage stays high ~30 days after prune (hidden versions) — see [Capacity & pruning](#capacity--pruning-b2). |
 | `restic init` fails on external | Dock the drive first; re-run `backup-setup` (it inits then, or it inits on the first dock backup). |
