@@ -89,6 +89,11 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    `findmnt /dev/sdXN` and match the config to it. No need to LUKS-encrypt the drive:
    restic encrypts the repo and the emergency kit is age-encrypted.
 
+   **Also set `BACKUP_EXTERNAL_UUID`** (`lsblk -o NAME,UUID,LABEL`). `backup-setup`
+   uses it to write an `/etc/fstab` entry so the drive mounts at boot, with `nofail`
+   so an undocked drive can never break boot. Leave it blank and you are relying on
+   the desktop to mount the drive — see the warning under *Scheduling* below.
+
 **Two B2 application keys** (ransomware resistance):
 
 | Key | Capabilities | Lives where | Used by |
@@ -149,6 +154,15 @@ are for on-demand use and inspection.
   docked** and is a clean no-op otherwise. For an immediate backup after docking, run
   `backup-now external`. (A `.path` "exists" trigger is deliberately avoided — `PathExists`
   retriggers a oneshot service in a tight loop while the file exists.)
+
+  > **The gate is silent by design, so make sure the drive actually mounts.** An
+  > unmet `ConditionPathExists` makes systemd *skip* the unit, and a skipped unit is
+  > not a failed one: no error, nothing in `--state=failed`, no desktop notification,
+  > and no healthchecks ping. An attached-but-unmounted drive therefore looks exactly
+  > like "no backup was due". Set `BACKUP_EXTERNAL_UUID` so `backup-setup` writes the
+  > `/etc/fstab` entry, set `BACKUP_HC_URL_EXTERNAL` so an overdue run is externally
+  > visible, and run `backup-doctor` — it reports an attached-but-unmounted drive as a
+  > hard failure and warns when the UUID is set but missing from `/etc/fstab`.
 - **Weekly verification:** a separate timer
   ([`systemd/restic-verify.timer`](../systemd/restic-verify.timer)) runs
   [`scripts/backup-verify.sh`](../scripts/backup-verify.sh) — a **content canary** (asserts

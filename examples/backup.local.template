@@ -32,10 +32,22 @@ RESTIC_PASSWORD_FILE=/etc/restic/repo.key
 RESTIC_COMPRESSION=auto
 
 # --- target 1: external HDD -------------------------------------------------
-# Label the backup partition "Backup" so GNOME mounts it at /media/<user>/Backup.
-# Find the UUID once docked:  lsblk -o NAME,UUID,LABEL,MOUNTPOINT
-BACKUP_EXTERNAL_REPO=/media/__BACKUP_USER__/Backup/restic
+# BACKUP_EXTERNAL_UUID is REQUIRED for the disk to mount by itself. backup-setup
+# writes an /etc/fstab entry from it, with `nofail` so an undocked disk can never
+# break boot.
+#
+# Do not rely on the desktop to mount it. If the disk is not mounted,
+# restic-backup-external.service fails its ConditionPathExists and systemd SKIPS
+# it — and a skipped unit is not a failed unit: no error, no failed-unit entry,
+# no desktop notification, and no healthchecks ping. The external target can sit
+# dead for weeks while everything looks fine.
+#
+# Find it once docked:  lsblk -o NAME,UUID,LABEL,MOUNTPOINT
 BACKUP_EXTERNAL_UUID=
+# The repo sits one level under the mount point: backup-setup derives the mount
+# point as this path's dirname, and the service gates on "<repo>/config". Keep
+# them consistent.
+BACKUP_EXTERNAL_REPO=/media/__BACKUP_USER__/Backup/restic
 # Debounce auto-runs on re-dock (e.g. 6h):
 BACKUP_EXTERNAL_MIN_INTERVAL=6h
 
@@ -53,6 +65,10 @@ AWS_SECRET_ACCESS_KEY=
 # get alerted when a backup is OVERDUE (laptop asleep / undocked / offline).
 # Create one check per line at https://healthchecks.io and paste its ping URL.
 # Leaving these blank makes the alerting silently INERT — backup-doctor warns.
+#
+# BACKUP_HC_URL_EXTERNAL matters more than it looks: a SKIPPED external run
+# pings nothing at all, so without this check the external target has no
+# dead-man's switch of any kind.
 BACKUP_HC_URL_B2=
 BACKUP_HC_URL_EXTERNAL=
 # Weekly verification (backup-verify.sh / backup-drill) dead-man's switch. A

@@ -178,6 +178,74 @@ install_configs() {
   log SUCCESS "backup-manifest.sh / restic-notify / backup-verify.sh → /usr/local/bin"
 }
 
+# ===========================================================================
+# 3b. External HDD: make it mount at boot
+# ===========================================================================
+install_external_fstab() {
+  log STEP "3b. External HDD auto-mount (/etc/fstab)"
+
+  # preflight() sourced $USER_CONFIG with `set -a`, so these are already exported.
+  local uuid="${BACKUP_EXTERNAL_UUID:-}"
+  local repo="${BACKUP_EXTERNAL_REPO:-}"
+  local mnt bak line
+
+  if [[ -z "$uuid" ]]; then
+    log WARNING "BACKUP_EXTERNAL_UUID blank — the external HDD will NOT mount automatically."
+    log WARNING "Find it with: lsblk -o NAME,UUID,LABEL  → set BACKUP_EXTERNAL_UUID in $USER_CONFIG, re-run."
+    return 0
+  fi
+  if [[ -z "$repo" ]]; then
+    log WARNING "BACKUP_EXTERNAL_REPO blank — cannot derive a mount point. Skipping."
+    return 0
+  fi
+
+  # The repo lives one level under the mount point, which is the only place the
+  # mount point is recorded — restic-backup-external.service gates on
+  # "$repo/config", so these two must agree or the unit skips forever.
+  mnt="$(dirname "$repo")"
+
+  if grep -qs "$uuid" /etc/fstab; then
+    log SUCCESS "/etc/fstab already has an entry for UUID=$uuid"
+    return 0
+  fi
+  if grep -qsE "^[^#]*[[:space:]]${mnt//\//\\/}[[:space:]]" /etc/fstab; then
+    log WARNING "another /etc/fstab entry already targets $mnt — resolve by hand. Skipping."
+    return 0
+  fi
+
+  # nofail                       : an absent external disk must never break boot
+  # x-systemd.device-timeout=10s : don't stall boot waiting for a sleeping USB disk
+  # nosuid,nodev                 : backup data, never executables
+  # 0 0                          : no boot fsck — a periodic check on a multi-TB
+  #                                disk can add minutes to boot; restic's own
+  #                                weekly `check` covers repository integrity.
+  line="UUID=$uuid  $mnt  ext4  defaults,nofail,nosuid,nodev,x-systemd.device-timeout=10s  0  0"
+
+  bak="/etc/fstab.bak-$(date +%Y%m%d-%H%M%S)"
+  sudo cp -a /etc/fstab "$bak"
+  printf '\n# External backup HDD (restic). nofail: absence must not break boot.\n%s\n' "$line" \
+    | sudo tee -a /etc/fstab >/dev/null
+
+  if ! sudo findmnt --verify >/dev/null 2>&1; then
+    sudo cp -a "$bak" /etc/fstab
+    log WARNING "findmnt --verify rejected the new /etc/fstab — rolled back to $bak"
+    return 0
+  fi
+  sudo systemctl daemon-reload
+  log SUCCESS "fstab entry added (backup: $bak)"
+
+  # Mount it now if the disk is attached, so the next scheduled run finds it
+  # instead of waiting for a reboot.
+  if [[ -e "/dev/disk/by-uuid/$uuid" ]] && ! mountpoint -q "$mnt"; then
+    sudo mkdir -p "$mnt"
+    if sudo mount "$mnt"; then
+      log SUCCESS "mounted $mnt"
+    else
+      log WARNING "could not mount $mnt now — it will mount at next boot"
+    fi
+  fi
+}
+
 # Run resticprofile as root with the config env available (for {{ .Env.* }}).
 # Source /etc/restic/backup.local INSIDE the root shell (already written by
 # install_configs) rather than passing creds on the command line, so the B2
@@ -473,6 +541,7 @@ main() {
   install_tools
   setup_repo_key
   install_configs
+  install_external_fstab
   init_repos
   install_schedules
   guide_b2_hardening

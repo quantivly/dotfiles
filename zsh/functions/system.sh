@@ -857,18 +857,49 @@ backup-doctor() {
   fi
 
   echo "Alerting (healthchecks.io):"
-  local hcb hcv
+  local hcb hcv hce
   hcb="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_HC_URL_B2:-}")"
   hcv="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_HC_URL_VERIFY:-}")"
+  hce="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_HC_URL_EXTERNAL:-}")"
   [[ -n "$hcb" ]] && _backup_doctor_ok "B2 healthcheck URL set" \
     || _backup_doctor_warn "BACKUP_HC_URL_B2 blank — overdue-backup alerting is INERT (set it in ~/.backup.local)"
   [[ -n "$hcv" ]] && _backup_doctor_ok "verify healthcheck URL set" \
     || _backup_doctor_warn "BACKUP_HC_URL_VERIFY blank — weekly verify is not externally monitored"
+  # A skipped external run pings nothing, so without this the external target
+  # has no dead-man's switch of any kind.
+  [[ -n "$hce" ]] && _backup_doctor_ok "external healthcheck URL set" \
+    || _backup_doctor_warn "BACKUP_HC_URL_EXTERNAL blank — a silently skipped external run is invisible"
+
+  echo "External HDD:"
+  local extcfg extuuid extrepo extmnt
+  extcfg="$(sed -n 's/^ConditionPathExists=\(.*\)/\1/p' /etc/systemd/system/restic-backup-external.service 2>/dev/null)"
+  extuuid="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_EXTERNAL_UUID:-}")"
+  extrepo="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_EXTERNAL_REPO:-}")"
+  extmnt="${extrepo:+$(dirname "$extrepo")}"
+  if [[ -n "$extcfg" ]] && sudo test -e "$extcfg"; then
+    _backup_doctor_ok "external HDD docked"
+  elif [[ -n "$extuuid" && -e "/dev/disk/by-uuid/$extuuid" ]]; then
+    # Attached but unmounted is the one external fault that looks like success:
+    # ConditionPathExists fails, so systemd SKIPS the unit, which is not a
+    # failure -- no failed unit, no notification, no healthcheck ping. Reported
+    # as a hard fault because nothing else in the chain will ever mention it.
+    _backup_doctor_bad "external HDD attached but NOT MOUNTED — every scheduled external run is being skipped silently${extmnt:+ (mount: sudo mount $extmnt)}"
+  else
+    # Deliberately does not claim B2 has this covered: when this last bit, B2
+    # was capped and failing too. Point at the freshness check instead.
+    printf '  • external HDD not attached (offsite falls to B2 — see its snapshot freshness above)\n'
+  fi
+  # Boot-time mountability: without an fstab entry an attached disk reverts to
+  # unmounted after every reboot, which lands back in the branch above.
+  if [[ -z "$extuuid" ]]; then
+    _backup_doctor_warn "BACKUP_EXTERNAL_UUID blank — external HDD cannot be auto-mounted (set it in ~/.backup.local, re-run backup-setup)"
+  elif grep -qs "$extuuid" /etc/fstab; then
+    _backup_doctor_ok "external HDD has an /etc/fstab entry (mounts at boot)"
+  else
+    _backup_doctor_warn "BACKUP_EXTERNAL_UUID set but absent from /etc/fstab — the disk will not mount after a reboot (re-run backup-setup)"
+  fi
 
   echo "Recovery assets:"
-  local extcfg; extcfg="$(sed -n 's/^ConditionPathExists=\(.*\)/\1/p' /etc/systemd/system/restic-backup-external.service 2>/dev/null)"
-  if [[ -n "$extcfg" ]] && sudo test -e "$extcfg"; then _backup_doctor_ok "external HDD docked"
-  else printf '  • external HDD not docked (normal — B2 covers offsite)\n'; fi
   [[ -f ~/.config/age/emergency-kit-identity.txt ]] && _backup_doctor_ok "age identity present" \
     || _backup_doctor_bad "age identity missing — cold-start recovery impossible (run backup-setup)"
   # The encrypted kit is meant to live OFFLINE (USB) and inside the repo — not
