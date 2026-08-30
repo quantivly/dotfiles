@@ -187,9 +187,26 @@ mise trust ~/.dotfiles/.mise.toml  # Trust dotfiles config (one-time)
 ```
 
 **Config architecture:**
-1. **Source of truth:** `~/.dotfiles/.mise.toml` — 14 core CLI tools with pinned versions, copied to active config by `./install`
-2. **Active config:** `~/.config/mise/config.toml` — what mise actually uses, auto-trusted
+1. **Source of truth:** `~/.dotfiles/.mise.toml` — ~25 CLI tools with pinned versions
+2. **Active config:** `~/.config/mise/config.toml` — a **symlink** to the above (corrected
+   2026-08-30; this file previously said "copied", which is what let the drift below go
+   unnoticed). `mise use -g` writes *through* the symlink to the repo file, so the two cannot
+   diverge — which is the whole point.
 3. **Project overrides:** `.mise.toml` in project root — per-project versions, requires `mise trust`
+
+**The failure mode this architecture has, and how it is detected.** `./install` only creates
+that symlink when the target is absent or byte-identical; if a real file is already there and
+differs, it prints one warning and **keeps the local copy forever**. That state is stable,
+self-perpetuating, and invisible. It happened here: the live config declared 10 tools while the
+repo declared 23, so ~11 installed tools were never put on PATH — including `delta`, which
+`gitconfig` routes `pager.diff/log/show/reflog` through, so `git diff` failed outright in a
+terminal with `unable to execute pager 'delta'`. Nothing reported it.
+
+`scripts/verify-tools.sh` now asserts both halves: that the symlink is intact, and that every
+declared tool actually contributes a binary (`mise bin-paths`). Run it after any mise change.
+A version pin that no longer exists in its backend "installs" successfully and produces **no
+binary at all** while `mise install` reports success — `glow 1.5.1` and `fastfetch 2.8.10` both
+did exactly this.
 
 See [docs/TOOL_VERSION_UPDATES.md](docs/TOOL_VERSION_UPDATES.md) for version update procedures and [docs/MIGRATION.md](docs/MIGRATION.md) for nvm/pyenv migration.
 

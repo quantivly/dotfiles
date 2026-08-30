@@ -131,7 +131,11 @@ spath=$(tr '\0' '\n' < /proc/$pid/environ | sed -n 's/^PATH=//p')
 env -i PATH="$spath" HOME="$HOME" /bin/sh -c 'command -v lazygit yazi bun'
 ```
 
-`scripts/verify-tools.sh` covers the wider toolchain.
+`scripts/verify-tools.sh` covers the wider toolchain, and also asserts that
+`~/.config/mise/config.toml` is still symlinked to the repo and that every declared tool
+actually contributes a binary. Run it after any mise change — a version pin that no longer
+exists in its backend "installs" successfully and yields **no binary at all** while
+`mise install` reports success.
 
 ---
 
