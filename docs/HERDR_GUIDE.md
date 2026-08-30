@@ -382,8 +382,28 @@ later as `agent_blocked`.
 ### Teams
 
 **herdmates** hosts Claude Code's *native* agent teams as herdr panes. It ships a `teammux`
-binary that shims `tmux` on the pane PATH, so teammates materialise as real herdr panes and show
-up in the sidebar and `herdr agent list` like anything else.
+binary that shims `tmux` on the pane PATH — Claude Code's team feature requires tmux, and teammux
+translates those calls into herdr panes.
+
+> **Corrected 2026-08-30, after actually running a team.** An earlier version of this guide said
+> teammates "show up in the sidebar and `herdr agent list` like anything else". They do **not**.
+> Teammates appear as real *panes*, but herdr does not detect them as *agents* — so they are
+> absent from `herdr agent list`, from the sidebar's agent rows, from the priority sort, and from
+> toasts. The lead is detected; its teammates are not. That claim was inferred from the shim's
+> existence rather than observed, which is the same mistake §0 warns about.
+>
+> Two further observations from that run, both worth knowing before you rely on the sidebar to
+> supervise a team:
+> - **A lead reports `done` while its teammates are still working.** A lead waiting on its team
+>   looks finished. Read the lead's own roster (it lists each teammate with elapsed time), not the
+>   agent state.
+> - Of the herdmates sidebar tokens, `$status` populated (`online`, later `waiting`); **`$task`
+>   never did.**
+
+**Related blind spot:** a pane sitting on Claude's trust dialog is *also* undetected as an agent,
+so it never enters the attention queue and never raises a toast. Since a fresh directory triggers
+that dialog every time, the interrupt path is blind precisely at startup — when agents most
+commonly block. Two review agents sat stalled this way and were only noticed by eye.
 
 Choosing between the two:
 
