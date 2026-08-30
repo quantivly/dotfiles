@@ -286,8 +286,9 @@ tab_bar_right = [{ type = "command", command = '''awk 'NR==FNR{l=$1;next}/^MemTo
 #   $eff_xhigh $eff_max       effort band (exactly one set)      |  session-statusline.sh,
 #   $ctx_ok $ctx_warn         context ramp + %, e.g. "▅ 62%"     |  a Claude Code
 #   $ctx_crit                 (<75 / 75-89 / >=90)               |  statusLine command
-#   $rl_ok $rl_warn $rl_crit  "5h 62% 7d 31%" rate limits        |  (source id
-#   $cost                     "$1.42" session cost               /  "claude-context")
+#   (rl_* and cost are deliberately NO LONGER published or        |  (source id
+#    rendered — see the context row below; both remain in the     /  "claude-context")
+#    in-pane status text.)
 #   $pr                       PR chip — wyattjoh/herdr-plugin-gh-pr
 #   $icon                     agent glyph (❖ ✦ ✜) — the local `sidebar-icons`
 #                             plugin, on pane.agent_detected; non-Claude panes
@@ -335,13 +336,17 @@ claude = [
     { token = "$eff_xhigh", fg = "#ff9e64", dim = false },
     { token = "$eff_max", fg = "#f7768e", bold = true, dim = false },
   ],
+  # Context only. The rate-limit bands were removed 2026-08-30: the clauth daemon
+  # already rotates accounts automatically (95%/5h, 98%/7d), so the numbers
+  # explained why a rotation had happened rather than prompting any action, and
+  # every published token is a silent-failure surface. Rate limits and session
+  # cost are still printed by the statusLine command IN the pane, where you are
+  # already looking. The context ramp stays: it is the only warning before a
+  # forced compaction, and nothing else surfaces it across panes.
   [
     { token = "$ctx_ok", fg = "#9ece6a", dim = false },
     { token = "$ctx_warn", fg = "#e0af68", dim = false },
     { token = "$ctx_crit", fg = "#f7768e", bold = true, dim = false },
-    "$rl_ok",
-    { token = "$rl_warn", fg = "#e0af68", dim = false },
-    { token = "$rl_crit", fg = "#f7768e", dim = false },
   ],
   ["$task"],
   ["$status"],

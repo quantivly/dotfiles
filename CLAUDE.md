@@ -360,6 +360,12 @@ Gotchas, in the order they bite:
 - **`clauth start <profile>` bypasses the `claude()` shell function**, so the session gets the
   right account but no team-lead capability. Team leads need `clauth <profile>` then `claude`.
 - **`herdr plugin link` state is herdr-local** and is not restored by herdr-lazy after a rebuild.
+- **The sidebar publisher needs TWO things wired, and `./install` only does one.**
+  `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
+  also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo). Without
+  that it never runs, every `$mdl`/`$eff_*`/`$ctx_*` token resolves to nothing, and those sidebar
+  rows render empty with no error. It doubles as the in-pane status line, so visible model/context
+  text inside a pane means the publisher is alive.
 
 ## GNOME Desktop Configuration
 

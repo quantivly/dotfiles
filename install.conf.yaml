@@ -13,6 +13,12 @@
     ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.config/helix/config.toml: helix/config.toml
     ~/.config/herdr/config.toml: config/herdr/config.toml
+    # Publishes model/effort/context to the herdr agent sidebar via
+    # `herdr pane report-metadata`, and doubles as Claude Code's own status line.
+    # Without it the sidebar's rows_by_agent.claude tokens resolve to nothing and
+    # those rows render empty, with no error anywhere. Must also be wired up as
+    # "statusLine" in ~/.claude/settings.json — see docs/HERDR_GUIDE.md.
+    ~/.claude/hooks/session-statusline.sh: claude/hooks/session-statusline.sh
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.list: config/herdr/plugins/plugins.list
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.lock: config/herdr/plugins/plugins.lock
     ~/.config/yazi/theme.toml: yazi/theme.toml

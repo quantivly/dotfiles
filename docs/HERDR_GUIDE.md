@@ -225,7 +225,14 @@ lost, with no warning. Only never-defaulted actions (`next_agent`, `previous_age
 blocked agents float to the top, so `alt+1` is always whatever most needs you.
 
 Claude panes get six rows: identity (state, workspace, tab, account, PR chip) · terminal title ·
-model + effort · context ramp + rate limits · two herdmates team rows that vanish when empty.
+model + effort · context ramp · two herdmates team rows that vanish when empty.
+
+> **Rate limits and session cost are deliberately *not* in the sidebar** (removed 2026-08-30).
+> The clauth daemon already rotates accounts at its thresholds, so those numbers explained why
+> a rotation had happened rather than prompting any action — and every published token is one
+> more thing that can fail silently. Both are still printed in the **in-pane** status line,
+> where you are already looking, at no extra cost. The context ramp stays: it is the only
+> warning before a forced compaction, and nothing else surfaces it across panes.
 
 ### How the colour works
 
@@ -235,8 +242,21 @@ value. The only styling knob is per token **occurrence** in the config. So colou
 `ctx_ok` / `ctx_warn` / `ctx_crit` and clears its siblings in the same call. Empty tokens elide
 along with their separator, so only the applicable band draws, in its own colour.
 
-Fed by `~/.claude/hooks/session-statusline.sh`, a Claude Code `statusLine` command that also
-calls `herdr pane report-metadata`. Constraints worth knowing:
+Fed by `claude/hooks/session-statusline.sh` in this repo, symlinked to
+`~/.claude/hooks/session-statusline.sh` by `./install`. **It also has to be wired up as Claude
+Code's `statusLine`**, which `./install` does not do — add this to `~/.claude/settings.json`:
+
+```json
+{ "statusLine": { "type": "command",
+                  "command": "~/.claude/hooks/session-statusline.sh",
+                  "refreshInterval": 60 } }
+```
+
+Without that, the script never runs, every `$mdl` / `$eff_*` / `$ctx_*` token resolves to nothing,
+and those sidebar rows render empty — with no error anywhere. It doubles as your in-pane status
+line, so if you can see model/context text inside the pane, the publisher is alive.
+
+Constraints worth knowing:
 
 - One `report-metadata` call per tick; `--seq` so a cancelled run's straggler cannot overwrite a
   newer report; `--ttl-ms 240000` so a dead Claude leaves a clean row within four minutes.
@@ -435,7 +455,7 @@ or the other per machine, not both.
 |---|---|
 | Config | `config/herdr/config.toml` → `~/.config/herdr/config.toml` |
 | Key encoding probe | `scripts/herdr-keyprobe.sh` |
-| Sidebar publisher | `~/.claude/hooks/session-statusline.sh` |
+| Sidebar publisher | `claude/hooks/session-statusline.sh` → `~/.claude/hooks/` (+ `statusLine` in `~/.claude/settings.json`) |
 | Agent skill | `~/.claude/skills/herdr/SKILL.md` (`herdr --skill`) |
 | Spawn helper | `hspawn` in `zsh/zshrc.company` |
 | Plugin list | `config/herdr/plugins/plugins.list` |
