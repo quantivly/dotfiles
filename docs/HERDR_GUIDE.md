@@ -468,6 +468,23 @@ Choosing between the two:
 - **One goal that decomposes into parts needing shared findings or ordering** → a team, so you
   state the goal once instead of becoming the message bus yourself.
 
+### Clean up what you spawn
+
+Whether you spawn with `hspawn`, a team, or `herdr agent start`, **close the pane once you have
+the output.** An idle agent holds its memory regardless of whether it is doing anything, and on a
+constrained box memory is what runs out first — silently. In one session six spawned panes left
+running after delivering took this machine to **load 27 and 96% swap across 33 claude processes**,
+putting ten unrelated working sessions at risk; closing them recovered it to load 11.5 / 84% / 23.
+
+```bash
+herdr agent list                 # what is alive
+herdr pane close <pane_id>       # panes YOU created, once their work is collected
+herdr worktree remove --workspace <ws> --force    # for hspawn worktrees
+```
+
+Reuse a pane only when you have a concrete next task for it. Do not close panes you did not
+create.
+
 ### Orchestrating from an agent
 
 `~/.claude/skills/herdr/SKILL.md` teaches a lead Claude `herdr agent list/read/prompt/wait`.

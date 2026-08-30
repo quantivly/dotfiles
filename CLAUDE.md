@@ -384,6 +384,19 @@ Gotchas, in the order they bite:
 - **`clauth start <profile>` bypasses the `claude()` shell function**, so the session gets the
   right account but no team-lead capability. Team leads need `clauth <profile>` then `claude`.
 - **`herdr plugin link` state is herdr-local** and is not restored by herdr-lazy after a rebuild.
+- **If you spawn agents or panes, CLOSE THEM when their work is collected.** This is not tidiness
+  — memory is the binding constraint on this box (8 threads, swap runs hot, and `system_health`
+  exists because memory-pressure kills here are *silent*). A session that spawned six panes and
+  left them idling after they had delivered drove the machine to **load 27 and 96% swap with 33
+  claude processes**, endangering ten unrelated in-flight sessions; tearing those six down
+  recovered it to load 11.5 / 84% / 23. An idle agent still holds its memory. Close panes you
+  created once you have their output; keep one only if you have a concrete next task for it.
+  (Closing panes you did *not* create is a different matter — don't, unless asked.)
+- **Teammates in a herdmates team are NOT detected as herdr agents.** They exist as panes but are
+  absent from `herdr agent list`, the sidebar rows, the priority sort and toasts — only the lead
+  is detected. A lead also reports `done` while its teammates are still working, so read the
+  lead's own roster for progress, not its agent state. Same blind spot applies to any pane sitting
+  on Claude's trust dialog.
 - **The sidebar publisher needs TWO things wired, and `./install` only does one.**
   `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
   also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo). Without
