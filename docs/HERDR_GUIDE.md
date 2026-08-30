@@ -184,7 +184,7 @@ not survive. `f12 ?` shows both bindings per action.
 | Action | Chord | Prefix | Rationale |
 |---|---|---|---|
 | split right / down | `ctrl+shift+e` / `ctrl+shift+o` | `f12 v` / `f12 -` | tmux `C-S-e` / `C-S-o` |
-| close pane | `ctrl+shift+w` | `f12 x` | tmux; **autorepeats — tap it** |
+| close pane | `ctrl+alt+x` | `f12 x` | **not** `ctrl+shift+w` — see below |
 | focus pane | `ctrl+shift+←↓↑→` | `f12 h/j/k/l` | tmux |
 | resize pane | `ctrl+alt+←↓↑→` | `f12 r` for mode | direct, no mode |
 | zoom | `alt+z` | `f12 z` | tmux `M-z` |
@@ -216,6 +216,20 @@ split_horizontal = ["prefix+minus", "ctrl+alt+s", "ctrl+shift+o"]
 An action that relied on a stock prefix default **must list that default explicitly** or it is
 lost, with no warning. Only never-defaulted actions (`next_agent`, `previous_agent`,
 `move_tab_*`, `resize_pane_*`) take a bare value.
+
+This is easy to get wrong at scale: an audit of this config on 2026-08-30 found **15 of 25
+rebound actions had silently dropped their prefix binding**, which would have left most of the
+keymap unreachable over `herdr --remote` on a host where the chords don't survive. Diff against
+`herdr --default-config` after any keymap change.
+
+### Why `close_pane` is not on `ctrl+shift+w`
+
+It was, and it closed a live agent session by accident. `ctrl+shift+w` is a decade of browser
+"close tab" muscle memory, and herdr's `close_pane` **autorepeats** if the chord is held.
+
+herdr has **no pane-level close confirmation** — `[ui] confirm_close` covers *workspaces* only —
+so there is nothing to switch on. The mitigation is to not offer the accident-prone chord:
+`close_pane` is `["prefix+x", "ctrl+alt+x"]`. Worth copying if you value your sessions.
 
 ---
 

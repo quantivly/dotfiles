@@ -38,6 +38,15 @@ manifest_check = true
 # Nothing that works today stops working, and the prefix stays available for
 # muscle memory and for `herdr --remote` onto foreign hosts.
 #
+# AUDITED 2026-08-30, and the claim above was FALSE for 15 of 25 rebound actions:
+# close_pane, detach, edit_scrollback, focus_pane_*, goto, next_tab/previous_tab,
+# open_notification_target, resize_mode, toggle_sidebar, workspace_picker and zoom
+# had all silently dropped their stock prefix binding. On a `herdr --remote` host
+# where the chords do not survive, most of the keymap would have been unreachable —
+# the exact failure the escape hatch exists to prevent. All 15 restored. When
+# rebinding anything here, diff against `herdr --default-config` and re-list the
+# stock default as the first array element.
+#
 # Encoding: herdr's client unconditionally pushes the kitty keyboard
 # enhancement flags to the host terminal (CSI > 7 u, via crossterm's
 # PushKeyboardEnhancementFlags — no capability probe gates it), and Alacritty
@@ -86,19 +95,24 @@ prefix = "f12"
 # with no prefix escape hatch — exactly what the layering rule above forbids.
 split_vertical   = ["prefix+v", "ctrl+alt+v", "ctrl+shift+e"]       # split right (tmux C-S-e)
 split_horizontal = ["prefix+minus", "ctrl+alt+s", "ctrl+shift+o"]   # split down  (tmux C-S-o)
-close_pane       = ["ctrl+alt+x", "ctrl+shift+w"]   # tmux C-S-w
-focus_pane_left  = ["ctrl+alt+h", "ctrl+shift+left"]
-focus_pane_down  = ["ctrl+alt+j", "ctrl+shift+down"]
-focus_pane_up    = ["ctrl+alt+k", "ctrl+shift+up"]
-focus_pane_right = ["ctrl+alt+l", "ctrl+shift+right"]
+# SAFEGUARD (2026-08-30): ctrl+shift+w removed after it closed a live agent
+# session by accident. herdr has no pane-level close confirmation — `confirm_close`
+# covers WORKSPACES only — so the mitigation is to stop offering the chord that
+# collides with a decade of browser "close tab" muscle memory, and that autorepeats
+# if held. prefix+x (deliberate, two-step) and ctrl+alt+x remain.
+close_pane       = ["prefix+x", "ctrl+alt+x"]
+focus_pane_left  = ["prefix+h", "ctrl+alt+h", "ctrl+shift+left"]
+focus_pane_down  = ["prefix+j", "ctrl+alt+j", "ctrl+shift+down"]
+focus_pane_up    = ["prefix+k", "ctrl+alt+k", "ctrl+shift+up"]
+focus_pane_right = ["prefix+l", "ctrl+alt+l", "ctrl+shift+right"]
 # Direct resize without entering resize mode (tmux C-M-Arrow). GNOME moved its
 # workspace shortcuts to Super, so ctrl+alt+arrows are free here.
 resize_pane_left  = "ctrl+alt+left"
 resize_pane_down  = "ctrl+alt+down"
 resize_pane_up    = "ctrl+alt+up"
 resize_pane_right = "ctrl+alt+right"
-zoom             = ["ctrl+alt+z", "alt+z"]          # tmux M-z
-resize_mode      = "ctrl+alt+r"
+zoom             = ["prefix+z", "ctrl+alt+z", "alt+z"]   # tmux M-z
+resize_mode      = ["prefix+r", "ctrl+alt+r"]
 rename_pane      = ["prefix+shift+p", "ctrl+shift+p"]
 
 # --- tabs ---
@@ -107,8 +121,8 @@ rename_pane      = ["prefix+shift+p", "ctrl+shift+p"]
 new_tab      = ["prefix+c", "ctrl+shift+t"]
 close_tab    = ["prefix+shift+x", "ctrl+shift+x"]
 rename_tab   = ["prefix+shift+t", "ctrl+shift+r"]
-next_tab     = ["ctrl+alt+n", "ctrl+tab"]           # browser habit; tmux's
-previous_tab = ["ctrl+alt+p", "ctrl+shift+tab"]     # C-PgUp/PgDn is unbindable
+next_tab     = ["prefix+n", "ctrl+alt+n", "ctrl+tab"]     # browser habit; tmux's
+previous_tab = ["prefix+p", "ctrl+alt+p", "ctrl+shift+tab"]  # C-PgUp/PgDn unbindable
 # tmux S-Left / S-Right. alt+shift+arrows are usable again now that the GNOME
 # xkb option grp:alt_shift_toggle has been removed (see focus_agent below).
 move_tab_previous = ["prefix+shift+left", "alt+shift+left"]
@@ -117,9 +131,9 @@ move_tab_next     = ["prefix+shift+right", "alt+shift+right"]
 switch_tab   = ["prefix+1..9", "ctrl+1..9"]
 
 # --- workspaces ---
-workspace_picker = "ctrl+alt+w"
+workspace_picker = ["prefix+w", "ctrl+alt+w"]
 # tmux M-s session picker. NOT alt+w — Claude Code binds meta+w.
-goto             = ["ctrl+alt+g", "alt+s"]
+goto             = ["prefix+g", "ctrl+alt+g", "alt+s"]
 new_workspace    = ["prefix+shift+n", "ctrl+shift+n"]
 new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
 # rename_workspace: unbound -> falls back to default "prefix+shift+w"
@@ -152,12 +166,12 @@ next_agent     = "alt+j"
 previous_agent = "alt+k"
 
 # --- session ---
-toggle_sidebar  = "ctrl+alt+b"
-edit_scrollback = "ctrl+alt+e"
-detach          = "ctrl+alt+q"
+toggle_sidebar  = ["prefix+b", "ctrl+alt+b"]
+edit_scrollback = ["prefix+e", "ctrl+alt+e"]
+detach          = ["prefix+q", "ctrl+alt+q"]
 # The two highest-frequency moves in an attention-queue workflow, previously
 # stuck behind the prefix (f12 o / unbound).
-open_notification_target = "ctrl+alt+o"
+open_notification_target = ["prefix+o", "ctrl+alt+o"]
 last_pane                = ["ctrl+alt+f", "alt+a"]  # tmux M-a last-session
 
 # --- plugin-bound commands and popups ---
@@ -329,21 +343,26 @@ rows = [
 claude = [
   ["state_icon", "workspace", "tab", { token = "$clauth", dim = false }, { token = "$pr", dim = false }],
   [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
+  # Model, effort and the context ramp share ONE row (merged 2026-08-30). There is
+  # no alignment/right-edge/spacer support in this schema — a row is a token list
+  # and the only per-token knobs are fg/bold/dim — so the ramp cannot be pushed to
+  # the right edge; merging is what actually reclaims the empty line. Worst case
+  # is ~25 columns ("✻ Opus 5 1M" + "xhigh" + "▄ 47%" + separators) against
+  # sidebar_width 40, so it does not trigger truncation.
+  #
+  # The rate-limit bands were removed 2026-08-30: the clauth daemon already
+  # rotates accounts automatically (95%/5h, 98%/7d), so the numbers explained why
+  # a rotation had happened rather than prompting any action, and every published
+  # token is a silent-failure surface. Rate limits and session cost are still
+  # printed by the statusLine command IN the pane. The context ramp stays: it is
+  # the only warning before a forced compaction, and nothing else surfaces it
+  # across panes.
   [
     { token = "$mdl", fg = "#d97757", bold = true, dim = false },
     "$eff_lo",
     { token = "$eff_high", fg = "#7aa2f7", dim = false },
     { token = "$eff_xhigh", fg = "#ff9e64", dim = false },
     { token = "$eff_max", fg = "#f7768e", bold = true, dim = false },
-  ],
-  # Context only. The rate-limit bands were removed 2026-08-30: the clauth daemon
-  # already rotates accounts automatically (95%/5h, 98%/7d), so the numbers
-  # explained why a rotation had happened rather than prompting any action, and
-  # every published token is a silent-failure surface. Rate limits and session
-  # cost are still printed by the statusLine command IN the pane, where you are
-  # already looking. The context ramp stays: it is the only warning before a
-  # forced compaction, and nothing else surfaces it across panes.
-  [
     { token = "$ctx_ok", fg = "#9ece6a", dim = false },
     { token = "$ctx_warn", fg = "#e0af68", dim = false },
     { token = "$ctx_crit", fg = "#f7768e", bold = true, dim = false },
