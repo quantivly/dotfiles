@@ -1,0 +1,419 @@
+# herdr configuration
+# See `herdr --default-config` for the full annotated set of defaults.
+#
+# Layout of this file mirrors the default config's section order so the two can
+# be diffed against each other after a herdr upgrade.
+
+# Onboarding was completed during initial setup.
+onboarding = false
+
+[theme]
+name = "tokyo-night"
+
+[terminal]
+# Inherit the source pane/workspace cwd for new panes, tabs and workspaces.
+new_cwd = "follow"
+
+[update]
+channel = "stable"
+version_check = true
+manifest_check = true
+
+#==============================================================================
+# Keys — chords first, f12 prefix kept as an escape hatch
+#==============================================================================
+# The stock prefix (ctrl+b) collides three ways here:
+#   1. Claude Code binds ctrl+b to "background this task" — with a ctrl+b prefix
+#      you have to press it twice in every agent pane.
+#   2. tmux's own prefix, for any tmux run inside a pane.
+#   3. Atrium's sessions, during the migration off it.
+# So the prefix lives on f12 and the daily actions are ALSO bound to ordinary
+# chords, mirroring ~/.dotfiles/tmux.conf's root table wherever a habit exists.
+#
+# Layering rule: every rebound action is an ARRAY, [<old/prefix binding>,
+# <new chord>]. Setting a field REPLACES its default, so an action that relied
+# on a stock prefix default has to list that default explicitly or it is lost
+# (e.g. new_tab = ["prefix+c", "ctrl+shift+t"]). A bare value is only safe for
+# actions whose stock default is EMPTY ("" — unbound out of the box), because
+# there is nothing to preserve: focus_agent, next_agent, previous_agent,
+# move_tab_* and resize_pane_*. (Corrected 2026-08-30: an earlier version called
+# these "never-defaulted" and omitted focus_agent. They are defaulted — to "".)
+# Nothing that works today stops working, and the prefix stays available for
+# muscle memory and for `herdr --remote` onto foreign hosts.
+#
+# AUDITED 2026-08-30, and the claim above was FALSE for 15 of 25 rebound actions:
+# close_pane, detach, edit_scrollback, focus_pane_*, goto, next_tab/previous_tab,
+# open_notification_target, resize_mode, toggle_sidebar, workspace_picker and zoom
+# had all silently dropped their stock prefix binding. On a `herdr --remote` host
+# where the chords do not survive, most of the keymap would have been unreachable —
+# the exact failure the escape hatch exists to prevent. All 15 restored. When
+# rebinding anything here, diff against `herdr --default-config` and re-list the
+# stock default as the first array element.
+#
+# Encoding: herdr's client unconditionally pushes the kitty keyboard
+# enhancement flags to the host terminal (CSI > 7 u, via crossterm's
+# PushKeyboardEnhancementFlags — no capability probe gates it), and Alacritty
+# 0.16.1 speaks the kitty protocol, so ctrl+shift+<letter>, ctrl+1..9 and
+# ctrl+tab / ctrl+shift+tab arrive as distinct CSI u sequences and match the
+# config strings below. CONFIRMED at the keyboard on 2026-08-29 with
+# ~/.dotfiles/scripts/herdr-keyprobe.sh: ctrl+shift+e arrived as
+# ESC[101:69;6u (1b5b3130313a36393b3675).
+#
+# CORRECTION (2026-08-30): "ctrl+shift+e works, therefore ctrl+shift+<letter>
+# works" was an unsound generalisation. ALACRITTY HAS COMPILED-IN DEFAULT
+# BINDINGS THAT SWALLOW A CHORD'S KEY-PRESS, and they are per-key. ctrl+shift+o
+# (split_horizontal) was silently dead: config valid, `config check: ok`, reload
+# `applied`, zero diagnostics, and no error at any layer. The keyprobe signature
+# is a RELEASE event with no matching press (ESC[111:79;6:3u arriving alone),
+# because Alacritty bindings fire on press and consume it while the kitty
+# protocol still reports the release. Fixed OUTSIDE herdr, in
+# ~/.config/alacritty/alacritty.toml, with an explicit
+#   { key = "O", mods = "Control|Shift", action = "ReceiveChar" }
+# (ReceiveChar = "treat as unbound"; preferred over a hardcoded `chars` CSI-u
+# string because it follows whatever encoding mode is active). A sweep of the
+# other 15 bound chords (w t x r n g p a y l, ctrl+shift+tab, ctrl+shift+
+# left/right, ctrl+tab, ctrl+1) found all of them delivering a press — o was the
+# only casualty. Verify PER CHORD, not per class.
+#
+# Same probe run showed the layout caveat: with the `il` layout active,
+# unshifted letter chords carry the Hebrew codepoint (alt+j -> ESC[1495;3u,
+# ctrl+c -> ESC[1489;5u) and match nothing — use ctrl+shift+<letter> chords or
+# switch to `us` first; digits, arrows, F-keys and shifted letters are unaffected.
+#
+# Deliberately NOT bound, because something else on this box owns them:
+# ctrl+shift+{c,v,f,b,space} (Alacritty), ctrl+shift+u (IBus unicode),
+# ctrl+shift+m (GNOME maximize), ctrl+alt+{t,d,tab,esc,del} and
+# ctrl+shift+alt+arrows (GNOME), alt+{p,o,t,w} (Claude Code model / fast /
+# thinking / workflow toggles), alt+c (fzf), alt+[ and alt+] (ambiguous CSI
+# introducer in legacy mode), and any unmodified key.
+# Known cost: alt+{a,g,j,k,s,y,z} are swallowed before zsh or a pane TUI sees
+# them (herdr intercepts globally) — the same trade already made in tmux.
+[keys]
+prefix = "f12"
+
+# --- panes ---
+# The stock prefix defaults are listed FIRST on purpose: setting this field
+# replaces it wholesale, and omitting them (as this file did until 2026-08-30)
+# silently deleted `f12 v` / `f12 -`, leaving the two splits as the only actions
+# with no prefix escape hatch — exactly what the layering rule above forbids.
+split_vertical   = ["prefix+v", "ctrl+alt+v", "ctrl+shift+e"]       # split right (tmux C-S-e)
+split_horizontal = ["prefix+minus", "ctrl+alt+s", "ctrl+shift+o"]   # split down  (tmux C-S-o)
+# SAFEGUARD (2026-08-30): ctrl+shift+w removed after it closed a live agent
+# session by accident. herdr has no pane-level close confirmation — `confirm_close`
+# covers WORKSPACES only — so the mitigation is to stop offering the chord that
+# collides with a decade of browser "close tab" muscle memory, and that autorepeats
+# if held. prefix+x (deliberate, two-step) and ctrl+alt+x remain.
+close_pane       = ["prefix+x", "ctrl+alt+x"]
+focus_pane_left  = ["prefix+h", "ctrl+alt+h", "ctrl+shift+left"]
+focus_pane_down  = ["prefix+j", "ctrl+alt+j", "ctrl+shift+down"]
+focus_pane_up    = ["prefix+k", "ctrl+alt+k", "ctrl+shift+up"]
+focus_pane_right = ["prefix+l", "ctrl+alt+l", "ctrl+shift+right"]
+# Direct resize without entering resize mode (tmux C-M-Arrow). GNOME moved its
+# workspace shortcuts to Super, so ctrl+alt+arrows are free here.
+resize_pane_left  = "ctrl+alt+left"
+resize_pane_down  = "ctrl+alt+down"
+resize_pane_up    = "ctrl+alt+up"
+resize_pane_right = "ctrl+alt+right"
+zoom             = ["prefix+z", "ctrl+alt+z", "alt+z"]   # tmux M-z
+resize_mode      = ["prefix+r", "ctrl+alt+r"]
+rename_pane      = ["prefix+shift+p", "ctrl+shift+p"]
+
+# --- tabs ---
+# new_tab is deliberately NOT on ctrl+alt+t: GNOME claims that chord for "open a
+# new terminal window" and it never reaches herdr.
+new_tab      = ["prefix+c", "ctrl+shift+t"]
+close_tab    = ["prefix+shift+x", "ctrl+shift+x"]
+rename_tab   = ["prefix+shift+t", "ctrl+shift+r"]
+next_tab     = ["prefix+n", "ctrl+alt+n", "ctrl+tab"]     # browser habit; tmux's
+previous_tab = ["prefix+p", "ctrl+alt+p", "ctrl+shift+tab"]  # C-PgUp/PgDn unbindable
+# tmux S-Left / S-Right. alt+shift+arrows are usable again now that the GNOME
+# xkb option grp:alt_shift_toggle has been removed (see focus_agent below).
+move_tab_previous = ["prefix+shift+left", "alt+shift+left"]
+move_tab_next     = ["prefix+shift+right", "alt+shift+right"]
+# Digits: tabs on ctrl+1..9, agents stay on alt+1..9.
+switch_tab   = ["prefix+1..9", "ctrl+1..9"]
+
+# --- workspaces ---
+workspace_picker = ["prefix+w", "ctrl+alt+w"]
+# tmux M-s session picker. NOT alt+w — Claude Code binds meta+w.
+goto             = ["prefix+g", "ctrl+alt+g", "alt+s"]
+new_workspace    = ["prefix+shift+n", "ctrl+shift+n"]
+new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
+# rename_workspace: unbound -> falls back to default "prefix+shift+w"
+# close_workspace:  unbound -> falls back to default "prefix+shift+d"
+#                   (destructive or rare: left on the prefix deliberately)
+
+# --- agents ---
+# The orchestrator's most-used key: jump straight to the Nth agent row. Paired
+# with agent_panel_sort = "priority" below, alt+1 is always whichever agent
+# most needs attention.
+#
+# NOTE (corrected 2026-08-29): the note that used to sit here blamed Alacritty's
+# "legacy encoding" for the ctrl+alt+shift chords that misfired. That was wrong.
+# The verified root cause was a GNOME xkb option: `gsettings get
+# org.gnome.desktop.input-sources xkb-options` returned ['grp:alt_shift_toggle'],
+# which makes Alt+Shift the us/il layout switch — whichever of the two is
+# pressed second emits ISO_Next_Group instead of its modifier, so every
+# Alt+Shift chord reached the terminal one modifier short (ctrl+alt+shift+w
+# arrived as ctrl+shift+w) and flipped the keyboard layout as a side effect.
+# The option has been removed (Super+space still switches layouts), which is
+# what makes alt+shift+left/right usable for move_tab_* above. Kitty-protocol
+# support was confirmed separately by the Phase 0 probe (see the [keys] header).
+# alt+1..9 is kept regardless: it is protocol-independent (plain ESC + digit)
+# and free on this machine.
+focus_agent    = "alt+1..9"
+# Walk the priority-sorted attention queue. alt+j: Claude Code 2.1.251 has a
+# *gated* meta+j (app:toggleTerminal) — if a Claude pane reacts to it, move this
+# to alt+n. zsh leaves ^[j / ^[k unbound, so nothing is lost there.
+next_agent     = "alt+j"
+previous_agent = "alt+k"
+
+# --- session ---
+toggle_sidebar  = ["prefix+b", "ctrl+alt+b"]
+edit_scrollback = ["prefix+e", "ctrl+alt+e"]
+detach          = ["prefix+q", "ctrl+alt+q"]
+# The two highest-frequency moves in an attention-queue workflow, previously
+# stuck behind the prefix (f12 o / unbound).
+open_notification_target = ["prefix+o", "ctrl+alt+o"]
+last_pane                = ["ctrl+alt+f", "alt+a"]  # tmux M-a last-session
+
+# --- plugin-bound commands and popups ---
+# Plugins cannot declare their own keybindings (herdr docs: plugins.mdx) — the
+# binding has to be wired here explicitly, or the plugin's action is simply
+# unreachable no matter what its own docs/comments claim. Action ids verified
+# with `herdr plugin action list`.
+#
+# `key` accepts the same arrays as the [keys] actions above, so a prefix
+# binding and a direct chord live in a single entry.
+[[keys.command]]
+key = ["prefix+a", "ctrl+shift+a"]   # f12 a
+type = "plugin_action"
+command = "clauth.open"
+description = "clauth accounts"
+
+[[keys.command]]
+key = "prefix+shift+l"  # f12 shift+l
+type = "plugin_action"
+command = "herdr-lazy.manage"
+description = "herdr-lazy manage"
+
+# NOT ctrl+shift+d: if kitty mode ever lapses (herdr inside tmux, Alacritty
+# vi/search mode) ctrl+shift+X collapses to ctrl+X in the pane, and ctrl+d is
+# EOF / "exit Claude".
+[[keys.command]]
+key = "ctrl+shift+y"
+type = "plugin_action"
+command = "persiyanov.reviewr.toggle"
+description = "reviewr: toggle diff review"
+
+[[keys.command]]
+key = "ctrl+shift+l"
+type = "plugin_action"
+command = "tdi.worktree-from-linear.pick"
+description = "worktree from Linear issue"
+
+# Popups run through /bin/sh in the FOCUSED PANE's cwd (navigate.rs passes None,
+# popup.rs falls back to the pane cwd), so a bare command name is enough — no
+# `cd` wrapper needed. While a popup is open herdr forwards EVERY key to it,
+# including f12 and the chord that opened it, so alt+g cannot toggle lazygit
+# shut: quit with q.
+[[keys.command]]
+key = "alt+g"          # tmux M-g
+type = "popup"
+command = "lazygit"
+width = "90%"
+height = "90%"
+description = "lazygit (q closes)"
+
+[[keys.command]]
+key = "alt+y"          # tmux M-y
+type = "popup"
+command = "yazi"
+width = "90%"
+height = "90%"
+description = "yazi (q closes)"
+
+[server]
+# Size of the virtual terminal when no client is attached. The stock 120x40 is
+# cramped for a detached fan-out worker rendering diffs.
+headless_cols = 200
+headless_rows = 50
+
+[worktrees]
+# Deliberately NOT ~/.atrium/worktrees: while Atrium is winding down, neither
+# tool may reclaim the other's trees.
+directory = "~/.herdr/worktrees"
+
+[ui]
+# CORRECTED 2026-08-29: 36 is not a hard ceiling, it is the DEFAULT value of
+# ui.sidebar_max_width, which is itself configurable (a herdr test sets 80).
+# 40 columns fit the stacked Claude rows below (state/space/tab/account/PR,
+# title, model+effort, context+rate limits) with room to spare; 44 is the
+# manual-drag ceiling. The terminal here is 174 cols, so even 44 leaves 130
+# columns of pane area (65 each when split side by side).
+#
+# GOTCHA: session.json persists the live sidebar width, and `herdr server
+# reload-config` only adopts the config width when the persisted value is still
+# herdr's default — after a reload the sidebar stays at the old 36 until the
+# SIDEBAR DIVIDER IS DOUBLE-CLICKED, which resets it to the config value.
+sidebar_width = 40
+sidebar_max_width = 44
+
+# Reclaim the scrollbar column beside every pane and keep it out of
+# terminal-native (mouse) selections.
+pane_scrollbars = false
+
+# "priority" is an attention queue rather than a per-space grouping, so blocked
+# agents float to the top. This is the direct replacement for scanning Atrium's
+# session list to find what needs answering.
+agent_panel_sort = "priority"
+
+# Distinct static glyphs per state rather than colour-only dots.
+status_indicators = "symbols"
+
+# Show the detected agent in split-pane borders — with several workers on screen
+# the border label is faster to read than the sidebar.
+show_agent_labels_on_pane_borders = true
+
+# LINUX-ONLY: reads /proc directly, so this widget renders nothing on macOS. It
+# fails silently (no /proc, no output, no error) — this file is symlinked to every
+# teammate, so anyone adopting on macOS should drop or rewrite this entry.
+#
+# Host load / memory at the right edge of the tab bar, off the agent rows
+# entirely. Runs on the herdr SERVER via /bin/sh -lc; herdr keeps the last
+# stdout line, capped at 80 chars. Reads /proc directly instead of shelling out
+# to uptime/free, so it costs one awk per tick. The tab bar has to stay visible
+# for this to render, so hide_tab_bar_when_single_tab is deliberately NOT set —
+# it would hide the right-hand entries too.
+tab_bar_right = [{ type = "command", command = '''awk 'NR==FNR{l=$1;next}/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf "load %.1f · mem %d%%\n",l,(t-a)*100/t}' /proc/loadavg /proc/meminfo''', interval_seconds = 30, timeout_seconds = 2 }]
+
+# Sidebar agent rows.
+#
+# HOW STYLING WORKS: token *values* are plain text — the report-metadata wire
+# schema has no style fields, and nothing inspects a token's value. The only
+# styling knob is per token OCCURRENCE in the rows below:
+# { token = "$x", fg = "#rrggbb", bold = true, dim = false }, and `fg` accepts
+# strict #RGB / #RRGGBB only. That is why colour is carried by MUTUALLY
+# EXCLUSIVE BAND TOKENS: the publisher sets exactly one of $ctx_ok / $ctx_warn /
+# $ctx_crit (and one $eff_*, one $rl_*) per tick and clears its siblings in the
+# same call. Empty tokens elide along with their separator, so only the band
+# that applies is drawn, in its own colour.
+# Custom tokens default to overlay0 + DIM, so every slot that sets fg or bold
+# ALSO sets dim = false — otherwise it renders BOLD|DIM and comes out muddy.
+#
+# TOKENS AND WHERE THEY COME FROM:
+#   $mdl                      model, e.g. "✻ Fable 5 1M"        \
+#   $eff_lo $eff_high                                            |  ~/.claude/hooks/
+#   $eff_xhigh $eff_max       effort band (exactly one set)      |  session-statusline.sh,
+#   $ctx_ok $ctx_warn         context ramp + %, e.g. "▅ 62%"     |  a Claude Code
+#   $ctx_crit                 (<75 / 75-89 / >=90)               |  statusLine command
+#   (rl_* and cost are deliberately NO LONGER published or        |  (source id
+#    rendered — see the context row below; both remain in the     /  "claude-context")
+#    in-pane status text.)
+#   $pr                       PR chip — wyattjoh/herdr-plugin-gh-pr
+#   $icon                     agent glyph (❖ ✦ ✜) — the local `sidebar-icons`
+#                             plugin, on pane.agent_detected; non-Claude panes
+#   $clauth                   which clauth account this pane burns — clauth plugin
+#   $task $status             herdmates: the native team lead's task and status.
+#                             Published only inside a native team; the rows
+#                             vanish everywhere else.
+# `model` is deliberately NOT used as a token name: names are global per pane
+# and herdmates publishes its own `model` on team-lead panes — last writer wins.
+# Builtins used: state_icon, workspace, tab, agent, terminal_title_stripped.
+# NOTE it is `state_text`, not `state_label` — the latter does not exist.
+#
+# WARNING (verified live): an unknown token name makes `herdr server
+# reload-config` return status "partial" and SILENTLY keep the old [ui] — no
+# error. If an edit appears to do nothing, that is the symptom. Always confirm
+# the reload reports "applied", not "partial".
+#
+# A row whose every token resolves to nothing is omitted rather than rendered
+# blank, so the team rows are safe on panes that will never populate them.
+# Under width pressure herdr grows every token round-robin from 1 column, so
+# truncation lands on the LONGEST value regardless of order — keep the
+# identifying part at the start of a value. Never put U+00B7 "·" inside a token
+# value: it is indistinguishable from herdr's own separator.
+[ui.sidebar.agents]
+# One blank line between agents. Affordable at <=4 agents in a 33-row body.
+row_gap = 1
+# Generic rows: every non-Claude agent. rows_by_agent REPLACES this wholesale,
+# so each override below repeats all three rows.
+rows = [
+  ["state_icon", "workspace", "tab"],
+  [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
+  [{ token = "$icon", dim = false }, { token = "agent", bold = true, dim = false }],
+]
+
+# rows_by_agent REPLACES `rows` above for that agent kind (not merged). Keys are
+# strict canonical agent ids (claude, codex, gemini, agy, copilot, ...).
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "workspace", "tab", { token = "$clauth", dim = false }, { token = "$pr", dim = false }],
+  [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
+  # Model, effort and the context ramp share ONE row (merged 2026-08-30). There is
+  # no alignment/right-edge/spacer support in this schema — a row is a token list
+  # and the only per-token knobs are fg/bold/dim — so the ramp cannot be pushed to
+  # the right edge; merging is what actually reclaims the empty line. Worst case
+  # is ~25 columns ("✻ Opus 5 1M" + "xhigh" + "▄ 47%" + separators) against
+  # sidebar_width 40, so it does not trigger truncation.
+  #
+  # The rate-limit bands were removed 2026-08-30: the clauth daemon already
+  # rotates accounts automatically (95%/5h, 98%/7d), so the numbers explained why
+  # a rotation had happened rather than prompting any action, and every published
+  # token is a silent-failure surface. Rate limits and session cost are still
+  # printed by the statusLine command IN the pane. The context ramp stays: it is
+  # the only warning before a forced compaction, and nothing else surfaces it
+  # across panes.
+  [
+    { token = "$mdl", fg = "#d97757", bold = true, dim = false },
+    "$eff_lo",
+    { token = "$eff_high", fg = "#7aa2f7", dim = false },
+    { token = "$eff_xhigh", fg = "#ff9e64", dim = false },
+    { token = "$eff_max", fg = "#f7768e", bold = true, dim = false },
+    { token = "$ctx_ok", fg = "#9ece6a", dim = false },
+    { token = "$ctx_warn", fg = "#e0af68", dim = false },
+    { token = "$ctx_crit", fg = "#f7768e", bold = true, dim = false },
+  ],
+  ["$task"],
+  ["$status"],
+]
+# Non-Claude agents: the generic three rows, with the glyph and the agent name
+# in each vendor's brand colour.
+codex = [
+  ["state_icon", "workspace", "tab"],
+  [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
+  [{ token = "$icon", fg = "#10a37f", dim = false }, { token = "agent", fg = "#10a37f", bold = true, dim = false }],
+]
+gemini = [
+  ["state_icon", "workspace", "tab"],
+  [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
+  [{ token = "$icon", fg = "#4285f4", dim = false }, { token = "agent", fg = "#4285f4", bold = true, dim = false }],
+]
+agy = [
+  ["state_icon", "workspace", "tab"],
+  [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
+  [{ token = "$icon", fg = "#8ab4f8", dim = false }, { token = "agent", fg = "#8ab4f8", bold = true, dim = false }],
+]
+copilot = [
+  ["state_icon", "workspace", "tab"],
+  [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
+  [{ token = "$icon", fg = "#8957e5", dim = false }, { token = "agent", fg = "#8957e5", bold = true, dim = false }],
+]
+
+[ui.toast]
+# Desktop notifications when a background agent finishes or blocks.
+delivery = "system"
+delay_seconds = 1
+
+[ui.sound]
+enabled = true
+
+[session]
+# Resume agent panes into their native conversations after a server restart.
+# Requires the official integration per agent (herdr integration install claude).
+resume_agents_on_restore = true
+
+[experimental]
+# Keep recent pane screen history across full server restarts. Costs disk;
+# buys back the screen content that a restart would otherwise drop.
+pane_history = true

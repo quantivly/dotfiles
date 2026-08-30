@@ -53,19 +53,33 @@ zoxide = "0.9.4"         # Smart cd command that learns your patterns
 duf = "0.8.1"            # Disk usage viewer with colors
 dust = "0.9.0"           # Directory size analyzer (du replacement)
 lazygit = "0.42.0"       # Git TUI for interactive git operations
+yazi = "26.8.15"         # File manager TUI; herdr binds it to alt+y (config in yazi/)
 just = "1.25.2"          # Command runner (make alternative)
-glow = "1.5.1"           # Markdown viewer for terminal
+glow = "2.1.2"           # Markdown viewer for terminal
 gitleaks = "8.18.2"      # Secret scanner for git repositories
 pre-commit = "3.6.2"     # Pre-commit framework for git hooks
 sops = "3.8.1"           # Secrets encryption tool
 age = "1.3.1"            # Modern file encryption (used with SOPS)
-fastfetch = "2.8.10"     # System info display
-node = "lts"
+fastfetch = "2.67.1"     # System info display
+node = "20"             # NOT "lts": lts now resolves to 24.x. Node 20 is what this machine
+                        # runs and what quantivly/dev-setup bootstraps. (An earlier version of
+                        # this comment also cited CLAUDE.md — it has zero node mentions.)
 python = "3.10"          # Required for pipx and Python CLI tools
 pipx = "1.8.0"           # Isolated Python CLI tool installer
 helix = "25.07.1"          # Modal text editor
 ripgrep = "15.1.0"        # Fast regex search (grep replacement)
 awscli = { version = "2.34.29", symlink_bins = "true" }  # AWS CLI v2 (binary nested in aws/dist/, needs symlink_bins)
+bun = "1.4.0"            # JS runtime required by the herdr gh-pr plugin
+# Added 2026-08-30. These were active in ~/.config/mise/config.toml but undeclared
+# here, so restoring the symlink would have silently removed them — fzf especially,
+# which a dozen shell functions depend on.
+fzf = "latest"
+go = "1.26.4"
+# NOT rust: it was in the live config but is inert there — rustc/cargo come from
+# rustup via ~/.cargo/bin, and mise contributes no bin path for it (verified with
+# `mise bin-paths`). Declaring it would make verify-tools.sh permanently red for
+# no reason, and a check that is always failing gets ignored.
+                         # herdr server PATH is a snapshot at launch: ln -s "$(mise which bun)" ~/.local/bin/bun
 
 # Optional tools (uncomment to enable)
 # dive = "0.12.0"        # Docker image layer analyzer

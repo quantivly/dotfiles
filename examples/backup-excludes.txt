@@ -77,8 +77,16 @@ __BACKUP_HOME__/.config/BraveSoftware/*/*/GPUCache
 # Claude Code binaries — a NEW ~240M dir per auto-update (near-daily): the single
 # biggest churn driver. The auto-updater re-downloads; ~/.claude settings stay.
 __BACKUP_HOME__/.local/share/claude/versions
-# plugin download cache (~1G); plugins re-fetch on demand
+# plugin download cache (~1G); plugins re-fetch on demand. ~/.claude is the
+# clauth-era global config surface (post Atrium->Herdr migration); the
+# ~/.claude-work* / ~/.claude-personal dirs are the pre-migration per-account
+# ones, still live until the Atrium wind-down finishes (see
+# ~/herdr-migration-next-steps.md) — drop these once those are retired.
+__BACKUP_HOME__/.claude/plugins/cache
 __BACKUP_HOME__/.claude-work/plugins/cache
+__BACKUP_HOME__/.claude-work2/plugins/cache
+__BACKUP_HOME__/.claude-work3/plugins/cache
+__BACKUP_HOME__/.claude-personal/plugins/cache
 # uv tool venvs; `uv tool install` regenerates (tool list is in the manifest)
 __BACKUP_HOME__/.local/share/uv
 

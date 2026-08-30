@@ -860,6 +860,9 @@ MIT License - Feel free to use and modify as needed.
 
 ### Internal Documentation
 
+- [Herdr Guide](docs/HERDR_GUIDE.md) - Recommended agentic dev setup: running several coding
+  agents at once (worktrees, keymap, sidebar, plugins, account rotation). Non-developers:
+  see its final section.
 - [Migration Guide](docs/MIGRATION.md) - Migrating from nvm/pyenv to mise
 - [Security Incident Response](docs/SECURITY_INCIDENTS.md) - What to do if you accidentally commit secrets
 - [Commit Signing Setup](docs/SSH_SIGNING_SETUP.md) - Guide for SSH commit signing (recommended) with GPG alternative

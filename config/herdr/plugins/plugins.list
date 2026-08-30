@@ -1,0 +1,46 @@
+# herdr plugin set — declared, not accumulated.
+# Each entry replaces a capability retired with Atrium. `herdr-lazy sync`
+# converges a machine to this list; the lockfile beside it pins commits.
+#
+# Deliberately NOT `herdr-lazy init` output: that writes a curated default
+# bundle. This list is only what earned a place.
+
+# Multi-account Claude: profiles, usage monitor, auto-switch fallback chain.
+# Replaces Atrium's claude_accounts + pool round-robin.
+uwuclxdy/clauth/herdr-plugin
+
+# worktree.created hook: symlink node_modules et al, copy settings.local.json.
+# Replaces Atrium's link_paths + carry_files. herdr's own worktree commands
+# have no hook system, which is the entire gap this fills.
+tdi/herdr-worktree-setup
+
+# Orchestration substrate: hosts Claude Code's NATIVE agent teams as real
+# herdr panes (teammux shim). Replaces Atrium's fan-out.
+caioniehues/herdmates
+
+# Auto-prompting. Replaces Atrium's autoyes daemon (which was OFF). DISABLED
+# (2026-08-28, `herdr plugin disable` + `hap pause`): it runs a live daemon by
+# default, not the shadow-mode-only behavior originally intended — re-enable
+# only after confirming it stays observe-only. See ~/herdr-setup-review.md P0-4.
+0xGosu/herdr-auto-pilot
+
+# This manager itself. NOT on PATH by design (README §Use) and auto-sync is
+# off, so a rebuild restores it only via:
+#   herdr plugin install natori-hrj/herdr-lazy && herdr-lazy restore
+# (the herdr-lazy() shell function in zshrc.company resolves the binary path).
+natori-hrj/herdr-lazy
+
+# Diff review sidebar — the Atrium DIFF/review loop had no herdr equivalent
+# until this. Added 2026-08-29 per herdr-setup-review.md P3.
+persiyanov/herdr-reviewr
+
+# Ticket -> worktree: files a herdr worktree from a Linear ticket, firing the
+# same worktree.created steps as any other worktree (tdi.worktree-setup).
+# Needs LINEAR_API_KEY in the server env to actually reach Linear. Added
+# 2026-08-29 per herdr-setup-review.md P3.
+tdi/herdr-worktree-from-linear
+
+# Publishes a `$pr` token on the focused agent pane, so the open pull request
+# for that worktree's branch shows up in the sidebar row instead of needing a
+# `gh pr view`. Added 2026-08-29 per the herdr optimization pass (decision 7).
+wyattjoh/herdr-plugin-gh-pr

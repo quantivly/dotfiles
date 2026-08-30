@@ -12,7 +12,13 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 
-set -e
+# NO `set -e` HERE — deliberately. This script's entire purpose is to report which
+# tools are missing, and check_tool returns 1 for each one it doesn't find. Under
+# errexit, a `check_tool x || check_tool x_fallback` pair where BOTH are absent kills
+# the script outright. It had been dying at the first fully-missing tool (`bat`) after
+# 12 lines and exit 1, silently reporting nothing about the other ~20 tools — which is
+# why the missing `delta` that broke `git diff` was never surfaced despite this script
+# existing to surface exactly that. A verifier must outlive the failures it reports.
 
 # Color codes (only if TTY)
 if [[ -t 1 ]]; then
@@ -89,6 +95,7 @@ check_tool mise "--version"
 echo ""
 echo -e "${BLUE}=== Developer Tools ===${NC}"
 check_tool lazygit "--version"
+check_tool yazi "--version"
 check_tool just "--version"
 check_tool glow "--version"
 check_tool hyperfine "--version"
@@ -160,6 +167,62 @@ if [[ -d ~/.forgit ]]; then
     echo -e "${GREEN}✓${NC} forgit: installed"
 else
     echo -e "  ○ forgit: not installed (optional)"
+fi
+
+echo ""
+echo -e "${BLUE}=== mise config drift ===${NC}"
+# Why this check exists: ~/.config/mise/config.toml is supposed to be a SYMLINK to
+# ~/.dotfiles/.mise.toml, so the repo is the single source of truth. `./install`
+# only creates that symlink when the target is absent or byte-identical; if a real
+# file is already there and differs, it prints one warning and keeps the local copy
+# — forever. That state is stable, self-perpetuating, and invisible.
+#
+# It happened, and it was not cosmetic: the live config declared 10 tools while the
+# repo declared 23, so ~11 installed tools were simply never put on PATH. `delta` was
+# one of them, and gitconfig routes pager.diff/log/show/reflog through it — so
+# `git diff` failed outright in a terminal with "unable to execute pager 'delta'".
+# Nothing anywhere reported it.
+MISE_ACTIVE="$HOME/.config/mise/config.toml"
+MISE_REPO="$HOME/.dotfiles/.mise.toml"
+if [[ ! -e "$MISE_ACTIVE" ]]; then
+    echo -e "${YELLOW}✗${NC} no active mise config at $MISE_ACTIVE"
+elif [[ -L "$MISE_ACTIVE" ]] && [[ "$(readlink -f "$MISE_ACTIVE")" == "$(readlink -f "$MISE_REPO")" ]]; then
+    echo -e "${GREEN}✓${NC} mise config symlinked to dotfiles (single source of truth)"
+else
+    echo -e "${YELLOW}✗${NC} mise config is NOT symlinked to $MISE_REPO"
+    echo "    Declared tools will silently never reach PATH. Diff them, then:"
+    echo "      ln -sfn $MISE_REPO $MISE_ACTIVE && mise install"
+fi
+
+# Every tool the repo declares must actually contribute a binary directory.
+#
+# `mise bin-paths` is the right probe, and the only one that isn't a heuristic: it
+# lists the bin dir each active tool contributes, which is exactly what comes back
+# EMPTY when a version pin no longer exists in its backend. glow 1.5.1 and fastfetch
+# 2.8.10 both failed this way — mise created the install directory, reported "all
+# tools are installed", and produced no binary at all.
+#
+# Rejected alternatives, each of which produced false positives here:
+#   - `mise which <tool>` takes a BINARY name; several tools ship binaries named
+#     differently (awscli->aws, ripgrep->rg, helix->hx, rust->rustc).
+#   - `mise where <tool>` + find: the install dir may be a symlink (rust) and the
+#     binary may sit at an arbitrary depth (fastfetch: <pkg>/usr/bin/fastfetch).
+if command -v mise &>/dev/null && [[ -f "$MISE_REPO" ]]; then
+    binpaths=$(mise bin-paths 2>/dev/null)
+    no_binary=""
+    while IFS= read -r tool; do
+        grep -q "/installs/${tool}/" <<<"$binpaths" || no_binary+=" $tool"
+    done < <(sed -n '/^\[tools\]/,/^\[/p' "$MISE_REPO" | grep -oE '^[a-z0-9_-]+' | sort -u)
+
+    if [[ -z "$no_binary" ]]; then
+        echo -e "${GREEN}✓${NC} every tool declared in .mise.toml contributes a binary"
+    else
+        echo -e "${YELLOW}✗${NC} declared but contributing NO binary:$no_binary"
+        echo "    Usually a version pin that no longer exists in its backend — mise"
+        echo "    still reports 'installed'. Check 'mise ls-remote <tool>' and re-pin,"
+        echo "    or remove the tool from .mise.toml. A declaration that does not match"
+        echo "    reality is what caused the drift above."
+    fi
 fi
 
 echo ""

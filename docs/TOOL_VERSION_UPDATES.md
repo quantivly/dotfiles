@@ -54,11 +54,13 @@ The team uses **pinned versions** by default for consistency.
 | dust | Intuitive directory sizes | 0.9.0 |
 | lazygit | Interactive git TUI | 0.42.0 |
 | just | Modern command runner | 1.25.2 |
-| glow | Terminal markdown renderer | 1.5.1 |
+| glow | Terminal markdown renderer | 2.1.2 |
 | gitleaks | Secret detection | 8.18.2 |
 | pre-commit | Git hook framework | 3.6.2 |
 | sops | Encrypted secrets management | 3.8.1 |
-| fastfetch | System info display | 2.8.10 |
+| fastfetch | System info display | 2.67.1 |
+
+
 
 ### Optional Tools (uncomment in config)
 - dive, lazydocker, ctop - Docker tools

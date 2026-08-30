@@ -1,0 +1,14 @@
+id = "sidebar-icons"
+name = "Sidebar Icons"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Tags each agent pane with a per-agent glyph in an `icon` sidebar token"
+platforms = ["linux", "macos"]
+
+# One event is enough: the glyph depends only on WHICH agent is in the pane,
+# and that is settled the moment herdr detects it. Nothing later changes the
+# answer, so there is no reason to also hook agent_status_changed the way a
+# status-carrying plugin (clauth) must.
+[[events]]
+on = "pane.agent_detected"
+command = ["sh", "on-agent-detected.sh"]

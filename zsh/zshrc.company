@@ -234,29 +234,16 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
 fi
 
 #==============================================================================
-# Claude Code Multi-Account Switching
+# Claude Code Multi-Account Switching — REMOVED 2026-08-28
 #==============================================================================
-# Automatically switches Claude Code identity when entering Quantivly work directories.
-# Opt-in: only activates if ~/.claude-quantivly/ exists (created via:
-#   CLAUDE_CONFIG_DIR=~/.claude-quantivly claude)
-# Personal account (default): ~/.claude/
-# Work account (Quantivly): ~/.claude-quantivly/
-
-if [[ -d "$HOME/.claude-quantivly" ]]; then
-    _update_claude_config() {
-        # Defer to Atrium's injected CLAUDE_CONFIG_DIR inside a session (see
-        # _in_atrium_session / _update_gh_config).
-        _in_atrium_session && return
-        if _q_is_work_context; then
-            export CLAUDE_CONFIG_DIR="$HOME/.claude-quantivly"
-        else
-            unset CLAUDE_CONFIG_DIR
-        fi
-    }
-    autoload -U add-zsh-hook
-    add-zsh-hook chpwd _update_claude_config
-    _update_claude_config  # Run once at shell startup
-fi
+# Superseded by clauth (https://github.com/uwuclxdy/clauth). clauth owns
+# CLAUDE_CONFIG_DIR globally now (via profile switch, not a per-directory
+# chpwd hook) — a chpwd override here would fight it. Four profiles are
+# registered: quantivly-{1,2,3} (was ~/.claude-work{,2,3}) and personal
+# (was ~/.claude-personal). See ~/herdr-migration-next-steps.md.
+#
+# The old ~/.claude-quantivly this block gated on was already stale/abandoned
+# (last touched 2026-06-27) and is not one of the four accounts clauth manages.
 
 #==============================================================================
 # Git Aliases (Quantivly-specific)
@@ -402,4 +389,288 @@ gh-refresh-tokens() {
   else
     echo "Token refreshed. Run _update_gh_config or cd to apply."
   fi
+}
+
+#==============================================================================
+# Atrium wind-down guard (TEMPORARY — remove when Atrium is decommissioned)
+#==============================================================================
+# Atrium runs its agents on a dedicated tmux server (tmux -L atrium). A tmux
+# server inherits the environment of whichever client first started it, and
+# HERDR_* is not in tmux's default update-environment list, so a stale value
+# persists for the life of the server.
+#
+# Herdr's Claude integration hook (~/.claude/hooks/herdr-agent-state.sh) fires
+# on SessionStart and reports the agent's session ref to $HERDR_PANE_ID. If the
+# Atrium tmux server is ever started from inside a Herdr pane, EVERY Claude in
+# EVERY Atrium session inherits that one pane id and reports to it — pointing
+# Herdr's whole agent view at a single wrong pane.
+#
+# The server is currently clean (started before Herdr was installed; verify with
+# `tmux -L atrium show-environment -g | grep HERDR`). This function keeps it that
+# way by stripping the Herdr context before exec'ing the real binary.
+#
+# A function is required rather than a shim in ~/.local/bin: mise's Go bin dir
+# precedes ~/.local/bin on PATH, so a script there would not shadow atrium.
+# Functions are resolved before PATH, so this always wins. `command atrium`
+# bypasses it deliberately.
+#
+# REMOVE THIS BLOCK once `atrium ls` is empty and Atrium is retired.
+#
+# Also strips herdmates' teammux shim context: inside a lead pane, $TMUX is
+# faked as "teammux,..." and PATH is prefixed with the shim's bin dir, so an
+# unguarded `atrium` launched from there would send its own `tmux -L atrium`
+# calls into the fake tmux instead of the real one. See herdr-setup-review.md
+# P2-2.
+atrium() {
+  # Resolve the real binary UP FRONT. `env` execs a binary, and `command` is a
+  # shell builtin with no /usr/bin/command on Linux or macOS — `env … command
+  # atrium` therefore fails with "env: 'command': No such file or directory"
+  # (exit 127) and this whole guard silently never runs Atrium at all.
+  local atrium_bin
+  atrium_bin="$(whence -p atrium)" || {
+    print -u2 "atrium: not found on PATH"
+    return 127
+  }
+
+  # Drop ONLY the teammux shim entry. `${PATH#*/teammux/bin:}` is a shortest-
+  # prefix removal: it deletes everything up to and including the shim, so any
+  # entries that happened to precede it are lost too (measured: the shim sits at
+  # position 3 here, so that form silently dropped 3 entries).
+  local clean_path="${PATH}"
+  if [[ "$TMUX" == teammux* ]]; then
+    local -a _ap=("${(@s.:.)PATH}")
+    _ap=("${(@)_ap:#*/teammux/bin}")
+    clean_path="${(j.:.)_ap}"
+  fi
+  env -u HERDR_ENV \
+      -u HERDR_PANE_ID \
+      -u HERDR_SOCKET_PATH \
+      -u HERDR_WORKSPACE_ID \
+      -u HERDR_TAB_ID \
+      -u HERDR_BIN_PATH \
+      -u TMUX \
+      -u TMUX_PANE \
+      -u TEAMMUX_STATE_PATH \
+      -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS \
+      PATH="$clean_path" \
+      "$atrium_bin" "$@"
+}
+
+#==============================================================================
+# Claude Code launcher — herdmates team lead inside Herdr
+#==============================================================================
+# Inside a Herdr pane, launch through herdmates' teammux shim so the session
+# becomes a native Claude Code *team lead*: Claude's split-pane teammate mode
+# (teammateMode: tmux) calls what it thinks is tmux, and the shim translates
+# every verb into `herdr pane` calls. Teammates then land as first-class,
+# steerable Herdr panes instead of hidden in-process subagents.
+#
+# Native agent teams are still gated behind CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,
+# so it is set here rather than globally — the flag only applies where herdmates
+# can actually host the result.
+#
+# Outside Herdr the shim has no output surface (Claude falls back to in-process
+# teammates), so plain claude is used. `command claude` bypasses this entirely.
+#
+# ACCOUNTS — how this composes with clauth:
+#   `clauth <profile>` switches the GLOBAL credentials in ~/.claude, so the very
+#   next `claude` here picks it up and you get lead + the right account. That is
+#   the path to use for a team lead.
+#
+#   `clauth start <profile>` instead spawns the claude BINARY in a per-profile
+#   runtime CLAUDE_CONFIG_DIR. It never goes through this shell function, so it
+#   gives you the right account but NOT a teammux lead. Use it for isolated
+#   single-account workers, not for the session that spawns a team.
+claude() {
+  if [[ -n "$HERDR_PANE_ID" ]] && command -v herdmates >/dev/null 2>&1; then
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 herdmates teammux-launch "$@"
+  else
+    command claude "$@"
+  fi
+}
+
+#==============================================================================
+# herdr-lazy — plugin CLI is not on PATH by design (README §Use)
+#==============================================================================
+# herdr-lazy manages the declared plugin set (~/.config/herdr/plugins/config/
+# herdr-lazy/plugins.list + plugins.lock, committed under ~/.dotfiles), but its
+# binary lives inside the plugin's own managed dir, not on PATH. Resolve it via
+# `herdr plugin list` each call rather than hardcoding the path (it changes if
+# herdr-lazy's own pin is bumped).
+#
+# The env -u guard works around a herdmates bug (verified, not yet fixed
+# upstream): herdmates sets HERDR_PLUGIN_STATE_DIR/HERDR_PLUGIN_CONFIG_DIR
+# process-wide before exec'ing claude, so every lead session and everything it
+# execs inherits herdmates' own plugin dirs instead of the caller's. Without
+# the guard, herdr-lazy silently reads/writes herdmates' state instead of its
+# own. Same guard applies to any other plugin CLI (e.g. `hap`) run from a lead
+# pane.
+herdr-lazy() {
+  local root
+  root=$(herdr plugin list --json 2>/dev/null | python3 -c \
+    "import json,sys;print([p['plugin_root'] for p in json.load(sys.stdin)['result']['plugins'] if p['plugin_id']=='herdr-lazy'][0])")
+  env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR "$root/target/release/herdr-lazy" "$@"
+}
+
+#==============================================================================
+# hspawn — Atrium's `atrium new` loop, rebuilt on herdr primitives
+#==============================================================================
+# Atrium's core verb was a single call: worktree + branch + agent + first
+# prompt. herdr has every one of those primitives, just uncomposed, so this is
+# the composition and nothing more:
+#
+#   herdr worktree create  -> a worktree workspace on <prefix>/<slug> (prefix =
+#                             $HSPAWN_BRANCH_PREFIX, default $USER), and with it
+#                             the worktree.created hooks (tdi.worktree-setup
+#                             links node_modules et al, reviewr auto-opens)
+#   herdr agent start      -> claude in that workspace's root pane
+#   herdr agent prompt     -> the first instruction, waited on
+#
+# Usage:
+#   hspawn <repo-dir> <slug> [profile|-] [prompt...]
+#
+#   hspawn ~/work/api fix-auth
+#   hspawn ~/work/api fix-auth personal "Read AGENTS.md, then fix the 401 loop."
+#   hspawn ~/work/api fix-auth - "A prompt, on whatever account is current."
+#
+# The profile slot is positional, so `-` fills it when you want a prompt but no
+# particular clauth account.
+#
+# WHY A PROFILE CHANGES THE START PATH:
+#   `herdr agent start` launches the agent binary herdr knows about, but
+#   `clauth start <profile>` is a supervisor that spawns claude inside a
+#   per-profile CLAUDE_CONFIG_DIR — herdr cannot start that for us. So the
+#   profile path runs the supervisor as an ordinary pane command and then waits
+#   for herdr to *detect* the claude underneath it, which is what `agent wait`
+#   is for. The no-profile path is the direct one, and burns whatever account
+#   owns the global credentials.
+#
+# Every agent call targets the PANE ID, not a name: herdr accepts either, and
+# only the direct path gets to choose a name at all.
+#
+# These are isolated single-account workers — the whole point of the worktree —
+# so deliberately no teammux shim and no team lead. Use `claude` for that.
+# Answer Claude Code's trust-folder dialog in a freshly created worktree pane.
+#
+# Must run AFTER the agent is detected: this uses the agent surface, which is
+# what actually delivers the keys. Sending them at the pane level the moment the
+# dialog text renders does NOT work — Claude's TUI is not accepting input yet,
+# the keys are swallowed, and the dialog stays up with no error (verified
+# 2026-08-30).
+#
+# The dialog defaults to "No, exit", so the answer is: down, then enter.
+# Returns 0 when there is nothing to answer, which is the common case for a
+# worktree under an already-trusted parent.
+_hspawn_clear_trust_dialog() {
+  local pane="$1" attempt state
+  for attempt in 1 2 3; do
+    state="$(herdr agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_status // empty')"
+    [[ "$state" == "blocked" ]] || return 0
+    herdr agent read "$pane" --source detection --lines 30 2>/dev/null \
+      | grep -q "Yes, I trust this folder" || return 0
+    herdr agent send-keys "$pane" down  >/dev/null 2>&1
+    herdr agent send-keys "$pane" enter >/dev/null 2>&1
+    herdr agent wait "$pane" --until idle --timeout 15000 >/dev/null 2>&1
+  done
+  echo "warn:     trust dialog still up after 3 attempts" >&2
+  return 1
+}
+
+# Poll until herdr has actually detected an agent in the pane. `agent wait`
+# cannot do this: it resolves its target first and errors out if no agent is
+# there yet.
+_hspawn_await_agent() {
+  local pane="$1" limit="${2:-120}" waited=0
+  while (( waited < limit )); do
+    herdr agent get "$pane" >/dev/null 2>&1 && return 0
+    sleep 1
+    (( waited++ ))
+  done
+  return 1
+}
+
+hspawn() {
+  if (( $# < 2 )); then
+    echo "Usage: hspawn <repo-dir> <slug> [profile|-] [prompt...]" >&2
+    return 1
+  fi
+  if ! command -v jq &>/dev/null; then
+    echo "Error: hspawn needs jq to read herdr's JSON replies" >&2
+    return 1
+  fi
+
+  local repo="$1" slug="$2"
+  if [[ ! -d "$repo" ]]; then
+    echo "Error: '$repo' is not a directory" >&2
+    return 1
+  fi
+
+  local profile=""
+  if (( $# >= 3 )) && [[ "$3" != "-" ]]; then
+    profile="$3"
+  fi
+  local prompt=""
+  if (( $# >= 4 )); then
+    prompt="${(j: :)argv[4,-1]}"
+  fi
+
+  # Agent names are constrained to [a-z][a-z0-9_-]{0,31}. Only the name is
+  # folded down to fit — the branch and label keep the slug as typed, so an
+  # uppercase Linear id stays readable where you actually read it.
+  local name="${(L)slug}"
+  name="${name//[^a-z0-9_-]/-}"
+  [[ "$name" == [a-z]* ]] || name="w-$name"
+  name="${name[1,32]}"
+
+  local created pane
+  # Branch prefix follows the repo's <person>/<topic> convention. Defaults to
+  # $USER rather than a hardcoded name — this file is shared with the team.
+  local branch_prefix="${HSPAWN_BRANCH_PREFIX:-$USER}"
+  created="$(herdr worktree create --cwd "$repo" --branch "$branch_prefix/$slug" \
+                                   --label "$slug" --no-focus)" || return 1
+  pane="$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id // empty')"
+  if [[ -z "$pane" ]]; then
+    echo "Error: no .result.root_pane.pane_id in the worktree create reply:" >&2
+    printf '%s\n' "$created" >&2
+    return 1
+  fi
+  echo "worktree: $branch_prefix/$slug"
+  echo "pane:     $pane"
+
+  if [[ -n "$profile" ]]; then
+    herdr pane run "$pane" "clauth start $profile --permission-mode auto" || return 1
+  else
+    # `agent start` returns non-zero with agent_not_ready when the agent comes up
+    # blocked (which the trust dialog below guarantees), but it still registers
+    # the agent. So a failure here is NOT fatal on its own — _hspawn_await_agent
+    # below decides whether anything actually started.
+    herdr agent start "$name" --kind claude --pane "$pane" -- --permission-mode auto \
+      || echo "note:     agent start reported not-ready (expected if the trust dialog is up)"
+  fi
+
+  _hspawn_await_agent "$pane" 120 || {
+    echo "Error: no agent detected in $pane after 120s — check the pane" >&2
+    return 1
+  }
+  herdr agent wait "$pane" --until idle --until blocked --timeout 180000 >/dev/null || return 1
+
+  # EVERY hspawn run creates a brand-new worktree directory, so Claude's
+  # trust-folder dialog is effectively guaranteed and its default is "No, exit".
+  _hspawn_clear_trust_dialog "$pane"
+  echo "agent:    detected in $pane${profile:+ (clauth profile '$profile')}"
+
+  if [[ -n "$prompt" ]]; then
+    # herdr refuses to type into an agent sitting at an approval dialog, so say
+    # so plainly rather than emitting a bare agent_blocked error.
+    local state
+    state="$(herdr agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_status // empty')"
+    if [[ "$state" == "blocked" ]]; then
+      echo "Error: agent is blocked (unanswered dialog); prompt not sent." >&2
+      echo "       Inspect with: herdr agent read $pane --source detection" >&2
+      return 1
+    fi
+    herdr agent prompt "$pane" "$prompt" --wait || return 1
+  fi
+
+  echo "next:     herdr agent list"
 }
