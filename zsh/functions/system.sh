@@ -533,6 +533,65 @@ gnome-restore() {
 #   - backup-kit:          Emergency-kit status + reminder
 # =============================================================================
 
+# Internal: read values out of ~/.backup.local, one per line in the order asked
+# (blank for anything unset or if the file is unreadable).
+#
+# Batched deliberately: backup-doctor needs eight of these, and eight separate
+# `( . ~/.backup.local; echo $VAR )` subshells both fork eight times and can
+# disagree with each other if the file is edited mid-run. Sourcing the file into
+# the CALLING shell instead is not an option — it holds the B2 credentials, and
+# they must not end up in an interactive environment.
+#
+# Values must not contain newlines; ~/.backup.local is plain KEY=value (it is
+# also read by systemd's EnvironmentFile, which has the same constraint).
+_backup_local_get() {
+  if [[ ! -r ~/.backup.local ]]; then printf '%.0s\n' "$@"; return 0; fi
+  ( . ~/.backup.local 2>/dev/null
+    for _bl_v in "$@"; do eval "printf '%s\n' \"\${${_bl_v}-}\""; done )
+}
+
+# Internal: the external HDD's mount point — the repo lives one level under it,
+# and that is the only place the mount point is recorded.
+_backup_external_mnt() {
+  local repo; repo="$(_backup_local_get BACKUP_EXTERNAL_REPO)"
+  [[ -n "$repo" ]] && dirname "$repo"
+}
+
+# Internal: is the external HDD actually MOUNTED at $1? findmnt reads
+# /proc/self/mountinfo, so this is exact and needs no root.
+#
+# `test -e "$repo/config"` is NOT equivalent, and every caller here used to use
+# it: a leftover directory on the ROOT filesystem satisfies it while the disk
+# sits unmounted, so the caller reports "docked" while anything that writes
+# lands on the internal disk.
+_backup_external_mounted() {
+  [[ -n "${1:-}" ]] && findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1
+}
+
+# Internal: is the external HDD physically ATTACHED (mounted or not)?
+# $1 = BACKUP_EXTERNAL_UUID (may be blank), $2 = mount point.
+#
+# Deliberately not gated on the UUID alone. That key went unread for the entire
+# life of the backup system, so every pre-existing install has it blank — which
+# is exactly the population that needs "attached but not mounted" to fire. Falls
+# back to the /etc/fstab source for the mount point, then to the mount point's
+# basename as a filesystem label (udisks names the directory after the label).
+_backup_external_attached() {
+  local uuid="${1:-}" mnt="${2:-}" src label
+  [[ -n "$uuid" && -e "/dev/disk/by-uuid/$uuid" ]] && return 0
+  [[ -n "$mnt" ]] || return 1
+  src="$(findmnt --fstab -no SOURCE --target "$mnt" 2>/dev/null)"
+  case "$src" in
+    UUID=*)  [[ -e "/dev/disk/by-uuid/${src#UUID=}"   ]] && return 0 ;;
+    LABEL=*) [[ -e "/dev/disk/by-label/${src#LABEL=}" ]] && return 0 ;;
+    /dev/*)  [[ -b "$src" ]] && return 0 ;;
+  esac
+  # /dev/disk/by-label uses udev escaping, so a space is \x20 there too.
+  label="${mnt##*/}"
+  [[ -n "$label" && -e "/dev/disk/by-label/${label// /\\x20}" ]] && return 0
+  return 1
+}
+
 # Internal: run resticprofile as root with the backup env loaded.
 _backup_rp() {
   sudo bash -c 'set -a; . /etc/restic/backup.local 2>/dev/null; set +a; exec resticprofile -c /etc/resticprofile/profiles.toml "$@"' _ "$@"
@@ -577,10 +636,14 @@ backup-now() {
   # Usage: backup-now [b2|external|full]
   local target="${1:-full}"
   if [[ "$target" == "full" ]]; then
-    local extrepo=""
-    [[ -r ~/.backup.local ]] && \
-      extrepo="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_EXTERNAL_REPO:-}")"
-    if [[ -z "$extrepo" || ! -e "$extrepo/config" ]]; then
+    local extrepo extmnt
+    extrepo="$(_backup_local_get BACKUP_EXTERNAL_REPO)"
+    extmnt="${extrepo:+$(dirname "$extrepo")}"
+    # Both conditions matter: the mount check is what stops a leftover directory
+    # on the internal disk from passing for a docked drive, and the repo check
+    # is what keeps a mounted-but-uninitialised drive from raising a false
+    # "Backup FAILED" alert.
+    if ! _backup_external_mounted "$extmnt" || [[ ! -e "$extrepo/config" ]]; then
       echo "External HDD not docked — backing up to B2 only (run 'backup-now external' once docked)."
       target="b2"
     fi
@@ -599,11 +662,15 @@ backup-status() {
   echo "Timers:"
   systemctl list-timers --all 2>/dev/null | grep -iE 'restic|NEXT' | sed 's/^/  /' || echo "  (none — run backup-setup)"
   echo "External timer: $(systemctl is-enabled restic-backup-external.timer 2>/dev/null || echo 'n/a — run backup-setup')"
-  local extcfg; extcfg="$(sed -n 's/^ConditionPathExists=\(.*\)/\1/p' /etc/systemd/system/restic-backup-external.service 2>/dev/null)"
-  if [[ -n "$extcfg" ]] && sudo test -e "$extcfg" 2>/dev/null; then
-    echo "External:   docked ✓ ($extcfg present)"
+  local extuuid extrepo extmnt
+  { read -r extuuid; read -r extrepo; } <<< "$(_backup_local_get BACKUP_EXTERNAL_UUID BACKUP_EXTERNAL_REPO)"
+  extmnt="${extrepo:+$(dirname "$extrepo")}"
+  if _backup_external_mounted "$extmnt"; then
+    echo "External:   docked ✓ ($extmnt)"
+  elif _backup_external_attached "$extuuid" "$extmnt"; then
+    echo "External:   ✗ attached but NOT MOUNTED — every scheduled run is being skipped (see backup-doctor)"
   else
-    echo "External:   not docked / external repo not reachable"
+    echo "External:   not attached"
   fi
   echo "Last B2 snapshot:"
   timeout 25 sudo bash -c 'set -a; . /etc/restic/backup.local 2>/dev/null; set +a; export RESTIC_REPOSITORY="$BACKUP_B2_REPO"; restic snapshots --latest 1 2>/dev/null' \
@@ -737,6 +804,85 @@ _backup_doctor_age_check() {
   fi
 }
 
+# Internal: backup-doctor's external-HDD section. $1 = ~/.dotfiles, $2 =
+# BACKUP_EXTERNAL_UUID, $3 = BACKUP_EXTERNAL_REPO, $4 = its mount point. Split
+# out of backup-doctor so its branch selection can be exercised without root or
+# a real disk (scripts/test-backup-external.sh); reports through the same
+# _BD_FAIL/_BD_WARN globals as every other check.
+_backup_doctor_external() {
+  local dotfiles="$1" extuuid="$2" extrepo="$3" extmnt="$4"
+  local extcfg extunit extrules extfstab
+  extcfg="$(sed -n 's/^ConditionPathExists=\(.*\)/\1/p' /etc/systemd/system/restic-backup-external.service 2>/dev/null | tail -1)"
+
+  if [[ -z "$extrepo" ]]; then
+    _backup_doctor_warn "BACKUP_EXTERNAL_REPO blank — there is no external target at all (set it in ~/.backup.local, re-run backup-setup)"
+  else
+    # The unit is gated on ConditionPathExists, so if that path and the
+    # configured repo disagree it skips forever regardless of what the disk is
+    # doing -- and being skipped is not a failure, so nothing else in the chain
+    # would ever say so.
+    if [[ -n "$extcfg" && "$extcfg" != "$extrepo/config" ]]; then
+      _backup_doctor_bad "restic-backup-external.service gates on $extcfg but the repo is $extrepo — every run is skipped (re-run backup-setup)"
+    fi
+
+    # Is it MOUNTED -- not "does a path under the mount point exist". A leftover
+    # directory on the internal disk satisfies the latter, and then this reports
+    # a healthy external target while writes land on the root filesystem.
+    if _backup_external_mounted "$extmnt"; then
+      _backup_doctor_ok "external HDD docked ($extmnt)"
+    elif _backup_external_attached "$extuuid" "$extmnt"; then
+      # Attached but unmounted is the one external fault that looks like
+      # success: ConditionPathExists fails, so systemd SKIPS the unit, which is
+      # not a failure -- no failed unit, no notification, no healthcheck ping.
+      # Reported as a hard fault because nothing else will ever mention it.
+      _backup_doctor_bad "external HDD attached but NOT MOUNTED — every scheduled external run is being skipped silently (mount: sudo mount '$extmnt')"
+    else
+      # Deliberately does not claim B2 has this covered: when this last bit, B2
+      # was capped and failing too. Point at the freshness check instead.
+      printf '  • external HDD not attached (offsite falls to B2 — see its snapshot freshness above)\n'
+    fi
+  fi
+
+  # Boot-time mountability: without an fstab entry an attached disk reverts to
+  # unmounted after every reboot, which lands back in the branch above. Asked of
+  # the PARSED table, not grep: a substring match counts a commented-out entry,
+  # and one pointing at the wrong mount point, as present.
+  if [[ -z "$extuuid" ]]; then
+    _backup_doctor_warn "BACKUP_EXTERNAL_UUID blank — external HDD cannot be auto-mounted (set it in ~/.backup.local, re-run backup-setup)"
+  else
+    extfstab="$(findmnt --fstab -no TARGET -S "UUID=$extuuid" 2>/dev/null)"
+    if [[ -z "$extfstab" ]]; then
+      _backup_doctor_warn "BACKUP_EXTERNAL_UUID set but absent from /etc/fstab — the disk will not mount after a reboot (re-run backup-setup)"
+    elif [[ -n "$extmnt" && "$extfstab" != "$extmnt" ]]; then
+      _backup_doctor_bad "/etc/fstab mounts UUID=$extuuid at $extfstab but the repo implies $extmnt — ConditionPathExists can never become true (resolve by hand)"
+    else
+      _backup_doctor_ok "external HDD has an /etc/fstab entry (mounts at boot)"
+    fi
+  fi
+
+  # fstab only covers BOOT. On a laptop the disk leaves and returns with every
+  # dock cycle, and without the udev rule each return leaves it unmounted until
+  # the next reboot -- landing back in the silent-skip branch above.
+  #
+  # Compared against the RENDERED repo template rather than grepped for the
+  # UUID: the load-bearing half of that rule is the systemd-escaped .mount unit
+  # name, which goes stale the moment the repo path changes and yields a rule
+  # that still contains the UUID, still passes udevadm verify, and never fires.
+  extrules=/etc/udev/rules.d/99-backup-external.rules
+  if [[ -n "$extuuid" && -n "$extmnt" ]]; then
+    extunit="$(systemd-escape -p --suffix=mount "$extmnt" 2>/dev/null)"
+    if ! sudo test -f "$extrules"; then
+      _backup_doctor_warn "no udev hotplug rule — the disk will stay unmounted after an undock/re-dock until reboot (re-run backup-setup)"
+    elif env BACKUP_RENDER_EXTERNAL_UUID="$extuuid" BACKUP_RENDER_EXTERNAL_MOUNT_UNIT="$extunit" \
+              bash "$dotfiles/scripts/backup-render.sh" "$dotfiles/udev/99-backup-external.rules" 2>/dev/null \
+         | sudo cmp -s "$extrules" -; then
+      _backup_doctor_ok "external HDD has a udev hotplug rule (remounts on re-dock)"
+    else
+      _backup_doctor_warn "udev hotplug rule differs from the rendered ~/.dotfiles template (stale mount unit after a repo-path change? hand-edited?) — re-run backup-setup"
+    fi
+  fi
+}
+
 # Full-chain health assertion: is the backup system not just running, but CORRECT?
 # Catches the silent lies backup-status can't see (config drift, missing env drop-in,
 # stale snapshots, inert alerting, stale recovery assets). Non-zero exit on any FAIL.
@@ -746,6 +892,18 @@ backup-doctor() {
   local dotfiles="${HOME}/.dotfiles"
   echo "=== Backup Doctor ($(hostname)) ==="
   sudo -v 2>/dev/null || { echo "sudo required (reads /etc/restic, drop-ins, /root)."; return 1; }
+
+  # Every ~/.backup.local value this run needs, read in ONE subshell — see
+  # _backup_local_get for why not eight, and why not sourced into this shell.
+  local warngb churnmb prunedays hcb hcv hce extuuid extrepo extmnt
+  { read -r warngb; read -r churnmb; read -r prunedays
+    read -r hcb; read -r hcv; read -r hce
+    read -r extuuid; read -r extrepo
+  } <<< "$(_backup_local_get BACKUP_B2_SIZE_WARN_GB BACKUP_B2_CHURN_WARN_MB BACKUP_B2_PRUNE_REMIND_DAYS \
+                             BACKUP_HC_URL_B2 BACKUP_HC_URL_VERIFY BACKUP_HC_URL_EXTERNAL \
+                             BACKUP_EXTERNAL_UUID BACKUP_EXTERNAL_REPO)"
+  : "${prunedays:=120}"
+  extmnt="${extrepo:+$(dirname "$extrepo")}"
 
   echo "Config & permissions:"
   if [[ -f ~/.backup.local ]]; then
@@ -807,8 +965,7 @@ backup-doctor() {
   # The B2 repo is append-only (no scheduled prune), so it grows monotonically —
   # these checks fire BEFORE the Backblaze storage cap does (which kills backups
   # outright: restic can't even write its lock file once the cap is hit).
-  local warngb rawsz rawgb
-  warngb="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_B2_SIZE_WARN_GB:-}")"
+  local rawsz rawgb
   if [[ -z "$warngb" ]]; then
     _backup_doctor_warn "BACKUP_B2_SIZE_WARN_GB blank — cap-proximity check is INERT (set it in ~/.backup.local)"
   else
@@ -829,8 +986,7 @@ backup-doctor() {
   # runs) within one run instead of weeks later via the size check. Journal
   # parsing is best-effort — a missing/unparsable line is a neutral note, not a
   # warning we can't substantiate.
-  local churnmb churnln storedmb
-  churnmb="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_B2_CHURN_WARN_MB:-}")"
+  local churnln storedmb
   churnln="$(journalctl -u 'resticprofile-backup@profile-b2.service' --no-pager -n 400 2>/dev/null | grep 'Added to the repository' | tail -1)"
   storedmb="$(printf '%s' "$churnln" | sed -n 's/.*(\([0-9.]*\) \([KMGT]\)iB stored).*/\1 \2/p' \
     | awk '{v=$1; if($2=="K")v/=1024; else if($2=="G")v*=1024; else if($2=="T")v*=1048576; printf "%d", v}')"
@@ -842,13 +998,12 @@ backup-doctor() {
     _backup_doctor_ok "last scheduled run stored ${storedmb}MB (warn at ${churnmb}MB)"
   fi
   # Prune cadence: backup-prune stamps /var/lib/restic/last-b2-prune on success.
-  local prd stamp pdays
-  prd="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_B2_PRUNE_REMIND_DAYS:-120}")"
+  local stamp pdays
   stamp="$(sudo cat /var/lib/restic/last-b2-prune 2>/dev/null)"
   if [[ "$stamp" =~ ^[0-9]+$ ]]; then
     pdays=$(( ( $(date +%s) - stamp ) / 86400 ))
-    if (( pdays > prd )); then
-      _backup_doctor_warn "last B2 prune was ${pdays}d ago (>${prd}d) — run backup-prune with the offline full key"
+    if (( pdays > prunedays )); then
+      _backup_doctor_warn "last B2 prune was ${pdays}d ago (>${prunedays}d) — run backup-prune with the offline full key"
     else
       _backup_doctor_ok "last B2 prune ${pdays}d ago"
     fi
@@ -857,18 +1012,19 @@ backup-doctor() {
   fi
 
   echo "Alerting (healthchecks.io):"
-  local hcb hcv
-  hcb="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_HC_URL_B2:-}")"
-  hcv="$(. ~/.backup.local 2>/dev/null; printf '%s' "${BACKUP_HC_URL_VERIFY:-}")"
   [[ -n "$hcb" ]] && _backup_doctor_ok "B2 healthcheck URL set" \
     || _backup_doctor_warn "BACKUP_HC_URL_B2 blank — overdue-backup alerting is INERT (set it in ~/.backup.local)"
   [[ -n "$hcv" ]] && _backup_doctor_ok "verify healthcheck URL set" \
     || _backup_doctor_warn "BACKUP_HC_URL_VERIFY blank — weekly verify is not externally monitored"
+  # A skipped external run pings nothing, so without this the external target
+  # has no dead-man's switch of any kind.
+  [[ -n "$hce" ]] && _backup_doctor_ok "external healthcheck URL set" \
+    || _backup_doctor_warn "BACKUP_HC_URL_EXTERNAL blank — a silently skipped external run is invisible"
+
+  echo "External HDD:"
+  _backup_doctor_external "$dotfiles" "$extuuid" "$extrepo" "$extmnt"
 
   echo "Recovery assets:"
-  local extcfg; extcfg="$(sed -n 's/^ConditionPathExists=\(.*\)/\1/p' /etc/systemd/system/restic-backup-external.service 2>/dev/null)"
-  if [[ -n "$extcfg" ]] && sudo test -e "$extcfg"; then _backup_doctor_ok "external HDD docked"
-  else printf '  • external HDD not docked (normal — B2 covers offsite)\n'; fi
   [[ -f ~/.config/age/emergency-kit-identity.txt ]] && _backup_doctor_ok "age identity present" \
     || _backup_doctor_bad "age identity missing — cold-start recovery impossible (run backup-setup)"
   # The encrypted kit is meant to live OFFLINE (USB) and inside the repo — not
@@ -896,8 +1052,10 @@ backup-doctor() {
   [[ -n "$rootpct" ]] && { (( rootpct > 90 )) && _backup_doctor_warn "root / at ${rootpct}% full" \
     || _backup_doctor_ok "root / at ${rootpct}%"; } \
     || _backup_doctor_warn "could not read root / disk usage"
-  if [[ -n "$extcfg" ]] && sudo test -e "$extcfg"; then
-    local extpct; extpct="$(command df -P "$(dirname "$extcfg")" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')"
+  # Only when the drive is really mounted: df on an unmounted mount point
+  # silently reports the ROOT filesystem's usage, labelled "external HDD".
+  if _backup_external_mounted "$extmnt"; then
+    local extpct; extpct="$(command df -P "$extmnt" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')"
     [[ -n "$extpct" ]] && { (( extpct > 90 )) && _backup_doctor_warn "external HDD at ${extpct}% full" \
       || _backup_doctor_ok "external HDD at ${extpct}%"; }
   fi

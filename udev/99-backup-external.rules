@@ -1,0 +1,28 @@
+# udev/99-backup-external.rules
+# =============================
+#
+# Remount the external backup HDD whenever it reappears (dock / re-dock).
+#
+# The /etc/fstab entry only mounts at BOOT. On a laptop the disk vanishes and
+# returns many times between reboots, and each return otherwise leaves it
+# attached-but-unmounted -- which makes restic-backup-external.service fail its
+# ConditionPathExists and be SKIPPED, which is not a failure: no error, no
+# failed unit, no notification, no healthcheck ping.
+#
+# SOURCE OF TRUTH. Copied root-owned to /etc/udev/rules.d/ by
+# scripts/setup-backup.sh (never symlinked -- root's udevd reads it), with the
+# placeholders below rendered by scripts/backup-render.sh. Do not hand-edit the
+# /etc copy: backup-doctor re-renders this file and compares, so a local edit
+# there reports as drift.
+#
+#   __BACKUP_EXTERNAL_UUID__        BACKUP_EXTERNAL_UUID from ~/.backup.local.
+#   __BACKUP_EXTERNAL_MOUNT_UNIT__  systemd-escape -p --suffix=mount of the
+#                                   mount point (dirname of the repo path).
+#                                   COMPUTED, never hand-written: a path with a
+#                                   dash needs \x2d and a space needs \x20, and
+#                                   a wrong unit name yields a rule that
+#                                   verifies cleanly and then never fires.
+#
+# The rule only *starts a unit /etc/fstab already defines*, so it can never
+# mount anything the fstab entry would not.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="__BACKUP_EXTERNAL_UUID__", ENV{SYSTEMD_WANTS}+="__BACKUP_EXTERNAL_MOUNT_UNIT__"

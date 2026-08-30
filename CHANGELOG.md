@@ -97,6 +97,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Fixed
+- **Backups: the external HDD stopped mounting, and every layer said it was fine.**
+  `BACKUP_EXTERNAL_UUID` had been declared in `backup.local.template` since the backup
+  system was written and nothing ever read it. Without an `/etc/fstab` entry the drive
+  stays unmounted, `restic-backup-external.service` fails its `ConditionPathExists`, and
+  systemd **skips** it — which is not a failure: no error, nothing in `--state=failed`, no
+  notification, and no healthchecks ping, because a skipped unit pings nothing. On a laptop
+  it compounds, since the drive leaves and returns with every dock cycle (twelve times in
+  seven days on the machine this came from) and fstab alone only covers boot. `backup-doctor`
+  reported all of it as a neutral note claiming `B2 covers offsite`, a reassurance it never
+  checked — while B2 was simultaneously failing on a storage cap.
+
+  `backup-setup` now installs three things from that key, covering three different windows:
+  an `/etc/fstab` entry for **boot** (`nofail` + `x-systemd.device-timeout=10s`, so an absent
+  disk can never break or stall it, and the filesystem type is read off the disk rather than
+  assumed), [`udev/99-backup-external.rules`](udev/99-backup-external.rules) for **dock
+  cycles**, and a `service.d` drop-in ordering the run `After=` the mount unit so the timer's
+  `Persistent=true` catch-up cannot lose a race against USB enumeration at boot. The ordering
+  is `After=` only — `Requires=`/`RequiresMountsFor=` would turn an undocked disk into a
+  *failed* unit every six hours, which is the false alarm the `ConditionPathExists` design
+  exists to avoid.
+
+  `backup-status` and `backup-doctor` now distinguish **attached-but-unmounted** (a hard
+  failure: it is the one external fault that looks exactly like "nothing was due") from
+  genuinely absent, without depending on `BACKUP_EXTERNAL_UUID` being set — the population
+  that has this bug is precisely the one that never set it. Both now test whether the mount
+  point *is a mount point*, rather than whether a path under it exists: a leftover directory
+  on the internal disk satisfied the old check, so "docked ✓" could be reported while writes
+  landed on the root filesystem. `backup-doctor` also checks `BACKUP_HC_URL_EXTERNAL` (the
+  external target's only possible dead-man's switch), that the unit's `ConditionPathExists`
+  and the configured repo agree, and compares the live udev rule against the rendered repo
+  template — its load-bearing half is the `systemd-escape`'d mount unit name, which goes
+  stale on a repo-path change and leaves a rule that still contains the UUID, still passes
+  `udevadm verify`, and never fires.
+
+  [`scripts/test-backup-external.sh`](scripts/test-backup-external.sh) pins the install and
+  doctor decisions against a fake fstab, with no root and no real disk. Two traps it exists
+  to hold down: `findmnt --verify` reports "unreachable on boot" as an **error** for a
+  `nofail` entry whenever the disk is undocked or its mount point directory is absent, so
+  gating on its exit code rejects every correct entry in exactly the two states this fix
+  targets; and a hardcoded `ext4` passes `findmnt --verify` (a type mismatch is only a
+  warning) and then fails to mount, which `nofail` converts straight back into a silent
+  non-mount.
 - **herdr: `hspawn` never worked.** Both code paths failed on every invocation. It creates a
   fresh worktree each run, so Claude's trust-folder dialog is guaranteed, and neither path
   answered it: the profile path called `herdr agent wait` before herdr had detected any agent
