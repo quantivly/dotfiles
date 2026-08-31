@@ -258,3 +258,22 @@ fi
 
 # Disable XON/XOFF flow control so Ctrl+S works as tmux prefix
 stty -ixon 2>/dev/null
+
+#==============================================================================
+# Dotfiles live-config guard
+#==============================================================================
+# ~/.dotfiles is installed with dotbot `link:`, so this file and every other
+# managed config IS the working tree — `git checkout` there is a deploy. Warn
+# once when the live config is not the reviewed branch. See the section header
+# in zsh/functions/system.sh for the two outages that motivated it.
+#
+# Deferred to the first prompt rather than run here: p10k's instant prompt turns
+# any console output during initialization into a warning box, and a guard whose
+# side effect is a warning about warnings teaches people to silence it.
+if (( $+functions[_dotfiles_live_config_warn] )); then
+  _dotfiles_guard_precmd() {
+    add-zsh-hook -d precmd _dotfiles_guard_precmd
+    _dotfiles_live_config_warn
+  }
+  autoload -Uz add-zsh-hook && add-zsh-hook precmd _dotfiles_guard_precmd
+fi

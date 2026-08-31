@@ -75,6 +75,56 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - **GNOME settings** — not files, so not symlinked. Applied to the dconf database via `scripts/apply-gnome-settings.sh` (run by `./install` on GNOME, or `gnome-apply`). Machine-specific layer: `~/.gnome-settings.local` (template: `examples/gnome-settings.local.template`, install with `gnome-init`). See [GNOME Desktop Configuration](#gnome-desktop-configuration).
 - **Backup config** — `~/.backup.local` (repo paths, B2 keys, healthcheck URLs) is created from `examples/backup.local.template` by `./install` on GNOME (or `backup-init`) and never overwritten. The backup *policy* lives in `resticprofile/profiles.toml`, **copied** (never symlinked — root runs its hooks) to `/etc/resticprofile/` by `backup-setup`. See [Backup & Restore](#backup--restore).
 
+### The checkout IS the deployment
+
+Everything above is a **symlink into the git working tree**. Nothing is copied. So
+`git checkout` in this repo is not a branch switch, it is a deploy: the instant HEAD
+moves, `~/.zshrc`, `~/.gitconfig`, `~/.config/git/ignore`, the gh account configs and
+the rest change under the running system — no install step, no restart, no log line,
+and `git status` stays clean throughout. `~/.zshrc` also sources the whole of `zsh/`,
+so a change to `zsh/functions/system.sh` is just as live as a linked file.
+
+Both directions have caused real failures, both on 2026-08-31:
+
+- **Behind the default branch.** The checkout predated PR #87, so `backup-doctor` was
+  still printing `• external HDD not docked (normal — B2 covers offsite)` — the exact
+  false reassurance that had already let a backup outage run unnoticed. Found, fixed,
+  reviewed, merged, and still not running, because nothing re-pointed the symlink
+  target at the fix.
+- **Ahead of it.** ~830 lines of an open, unmerged, unreviewed PR's `zshrc.company`
+  were being sourced by every new interactive shell.
+
+Note the asymmetry that proves the mechanism: system-level files are **copied**
+(`/etc/udev/rules.d/99-backup-external.rules`, `/etc/resticprofile/profiles.toml`), and
+they kept working across the same branch switch that broke the symlinked half.
+
+**The convention: the primary checkout stays on `main`; feature work happens in a
+worktree.** No symlink points into a worktree, so you can edit, rebase, stash and
+bisect there without changing the shell you are typing into.
+
+```bash
+dotfiles-work my/branch      # create/enter ~/dotfiles-worktrees/my-branch
+dotfiles-work --list         # list worktrees
+dotfiles-work --remove b     # remove one
+dotfiles-doctor              # is the live config the reviewed config?
+```
+
+`dotfiles-doctor` reports the pin state, commits ahead/behind `origin/main`, **which
+managed files actually differ** (the blast radius, not just a commit count),
+uncommitted changes, and link integrity in both directions — declared-but-not-installed
+(the file is not live, edits to it do nothing) and installed-but-dangling (linked while
+on a branch that declares the target, left behind after switching away).
+
+A one-line warning also fires on the first prompt of any shell whose live config is off
+the pin branch. It reads `.git/HEAD` directly rather than forking `git` — 0.04 ms versus
+1.9 ms, on every shell, forever. Silence it with `DOTFILES_GUARD_QUIET=1` when
+deliberately dogfooding a branch. Override the pin with `DOTFILES_PIN_BRANCH`.
+
+State table: `scripts/test-dotfiles-guard.sh` (47 checks, run in CI). Both bugs found
+in the guard while writing it printed a green tick rather than an error — a `local path`
+declaration that blanks `PATH` in zsh, and a diff against a ref that did not exist — so
+the states are executed in CI rather than left to a hand-run.
+
 ### Configuration Loading Order
 
 ```
@@ -129,6 +179,10 @@ The `.gitignore` protects: `*.local`, `*.secrets`, `.env*`, `secrets/`
 **New symlink:**
 1. Edit `install.conf.yaml` under `link:` section
 2. Run `./install`
+
+**Any change at all:** work in a worktree (`dotfiles-work <branch>`), not by moving the
+primary checkout — see [The checkout IS the deployment](#the-checkout-is-the-deployment).
+Check with `dotfiles-doctor` before and after.
 
 ### Oh-My-Zsh Plugins
 

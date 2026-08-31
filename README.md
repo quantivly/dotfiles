@@ -510,6 +510,27 @@ backup-doctor  # Is the whole chain correct?   backup-drill  # Prove a restore w
 
 See the [Backup & Restore Guide](docs/BACKUP_AND_RESTORE_GUIDE.md) for setup, the disaster-recovery runbook, and verification drills.
 
+### Working on this repo safely
+
+This repo installs itself with dotbot `link:`, so every managed file is a **symlink into
+the working tree**. `git checkout` here is therefore a deploy, not a branch switch: the
+moment HEAD moves, your live `~/.zshrc`, `~/.gitconfig`, global gitignore and gh account
+config change under the running system — silently, with a clean `git status`.
+
+Keep the primary checkout on `main` and do feature work in a worktree; nothing symlinks
+into one.
+
+```bash
+dotfiles-work my/branch   # create/enter ~/dotfiles-worktrees/my-branch
+dotfiles-doctor           # is the live config the reviewed config?
+```
+
+`dotfiles-doctor` reports the branch you are pinned to, commits ahead/behind
+`origin/main`, exactly which managed files differ, uncommitted changes, and link
+integrity (declared-but-not-installed, and installed-but-dangling). A one-line warning
+also fires on the first prompt of any shell whose live config is off `main` —
+`DOTFILES_GUARD_QUIET=1` silences it while you are deliberately dogfooding a branch.
+
 ### Shell Configuration
 
 Machine-specific shell settings go in `~/.zshrc.local`:

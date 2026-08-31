@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Dotfiles live-config guard** (`dotfiles-doctor`, `dotfiles-work`, a one-line warning on
+  the first prompt of an off-pin shell; `zsh/functions/system.sh`, `zshrc`). This repo is
+  installed with dotbot `link:`, so every managed file is a symlink into the working tree
+  and `git checkout` is a **deploy**: HEAD moves and `~/.zshrc`, `~/.gitconfig`,
+  `~/.config/git/ignore` and the gh account configs change under the running system, with
+  no install step and a clean `git status` throughout. Both directions bit us on
+  2026-08-31 — a checkout predating #87 kept `backup-doctor` printing its false
+  "external HDD not docked (normal — B2 covers offsite)" reassurance long after the fix
+  merged, and ~830 lines of an open PR's `zshrc.company` were live in every new shell.
+  The convention is now: primary checkout pinned to `main`, feature work in worktrees
+  (nothing symlinks into one). `dotfiles-doctor` reports pin state, ahead/behind, the
+  file-level blast radius, and link integrity in both directions (declared-but-not-
+  installed, installed-but-dangling). The startup check reads `.git/HEAD` directly rather
+  than forking git: 0.04 ms vs 1.9 ms, on every shell, forever. Deferred to the first
+  prompt so p10k's instant prompt does not turn it into a warning box.
+  `DOTFILES_GUARD_QUIET=1` opts out; `DOTFILES_PIN_BRANCH` overrides the branch.
+- **[scripts/test-dotfiles-guard.sh](scripts/test-dotfiles-guard.sh)** — 47-check state
+  table for the guard, run in CI. Both bugs found while writing the guard printed a green
+  tick rather than an error: `local path` in zsh is tied to the `PATH` array, so declaring
+  it blanked PATH and every later external command vanished — git's empty output then read
+  as "no drift" and the doctor announced "none — every live file matches"; and folding
+  git's stderr into the parsed value with `2>&1` produced a section that printed nothing at
+  all. Both are now regression checks. The fixture builds its own repo and its own `HOME`,
+  so the table is hermetic.
 - **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's
   server PATH carries no mise shims, so it must also be reachable as `~/.local/bin/bun`
   (`ln -s "$(mise which bun)" ~/.local/bin/bun`).
