@@ -176,12 +176,16 @@ Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 `DOTFILES_GUARD_QUIET=1` (silence the startup line while dogfooding a branch),
 `DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_EXPECTED_DIRTY`.
 
-State table: `scripts/test-dotfiles-guard.sh` (116 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (132 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
 ref, an unparseable link map, a symlink into another worktree, and an emptiness guard
-made unreachable by a hardcoded fallback path.
+made unreachable by a hardcoded fallback path. It also covers the `_doctor_*` reporting
+helpers that `dotfiles-doctor` and `backup-doctor` share — including the "declare the
+counters `local`" convention, asserted over every function that calls `_doctor_summary`
+rather than a fixed list, because a doctor that forgets it silently restores the globals
+and inherits the previous run's exit code.
 
 ### Configuration Loading Order
 

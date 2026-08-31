@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one lands outside the checkout, and the startup line resolves `~/.zshrc` (forklessly,
   with zsh's `:A`) to report a shell sourced from somewhere else entirely — between them
   they catch the machines already installed that way.
-- **[scripts/test-dotfiles-guard.sh](scripts/test-dotfiles-guard.sh)** — 116-check state
+- **[scripts/test-dotfiles-guard.sh](scripts/test-dotfiles-guard.sh)** — 132-check state
   table for the guard, run in CI. Every bug found in the guard so far printed a green tick
   rather than an error, so each is a row: `local path` in zsh is tied to the `PATH` array,
   so declaring it blanked PATH and every later external command vanished — git's empty
@@ -147,7 +147,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delegate, so a change to how results are emitted is made once. Their counters are also
   no longer globals — zsh scopes locals dynamically, so each doctor declares them and a
   run leaves nothing behind in the shell (four `_D*` variables used to persist in every
-  shell, and a nested call clobbered the outer count).
+  shell, and a nested call clobbered the outer count). The summary's wording and exit
+  status had no coverage in either suite before this — `backup-doctor`'s own table asserts
+  printed findings, never the verdict — so the state table now pins all three paths, the
+  dynamic-scoping mechanism, the `_backup_doctor_*` delegation, and the local-counter
+  convention across every doctor entry point.
 
 ### Fixed
 - **External-HDD auto-mount: the review follow-up to #87.** An independent xhigh review of

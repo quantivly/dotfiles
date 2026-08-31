@@ -7,7 +7,9 @@
 # (_dotfiles_head_state, _dotfiles_ref_sha, _dotfiles_pin_divergence,
 # _dotfiles_guard_verdict, _dotfiles_live_config_warn, _dotfiles_link_map,
 # _dotfiles_static_live_paths, _dotfiles_fetch_age_hours, dotfiles-doctor,
-# dotfiles-work).
+# dotfiles-work) and the _doctor_* reporting helpers those share with
+# backup-doctor — including, over every doctor entry point rather than a fixed
+# list, the "declare the counters local" convention they depend on.
 #
 # Why this exists: the guard's whole job is to notice that the running config is
 # not the reviewed config. A guard that reports "all clear" when it is actually
@@ -529,6 +531,61 @@ done
 check "no _D* left after the startup warning" \
       "$(zsh -c "source '$SYSTEM_SH'; DOTFILES_ROOT='$TMPROOT/br' _dotfiles_live_config_warn >/dev/null 2>&1; print -r -- \"\${_DOTFILES_VERDICT-unset}\"")" \
       "unset"
+
+echo
+echo "=== shared doctor reporting (dotfiles-doctor AND backup-doctor) ==="
+# _doctor_ok/bad/warn/note/summary are shared by both doctors, and backup-doctor
+# reaches them through its _backup_doctor_* names. Two things here had no
+# coverage anywhere: the summary's wording and exit status (backup-doctor's own
+# suite asserts printed findings, never the verdict), and the convention that
+# each doctor declares the counters as locals. The counters are the CALLER's
+# locals — zsh scopes locals dynamically — which is what keeps them out of every
+# interactive shell, and it is exactly the kind of convention a comment cannot
+# enforce: a doctor that forgets the declaration silently recreates the globals
+# and its exit code becomes whatever the previous run left behind.
+summary() { zsh -c "source '$SYSTEM_SH'; f() { local _DOCTOR_FAIL=$1 _DOCTOR_WARN=$2; _doctor_summary 'all good' 'the fix hint'; print -r -- \"rc=\$?\"; }; f" 2>&1; }
+
+check "failures: both counts"   "$(summary 2 1 | grep -c '✗ 2 failure(s), 1 warning(s)')"   "1"
+check "failures: fix hint"      "$(summary 2 1 | grep -c 'the fix hint')"                    "1"
+check "failures: exit 1"        "$(summary 2 1 | grep -c 'rc=1')"                            "1"
+check "warnings: no failures"   "$(summary 0 3 | grep -c '⚠ 3 warning(s), no failures')"     "1"
+# A warning is not a failure: backup-doctor is wired into alerting, and a
+# warning-only run turning non-zero would make every run look broken.
+check "warnings: exit 0"        "$(summary 0 3 | grep -c 'rc=0')"                            "1"
+check "clean: all-clear text"   "$(summary 0 0 | grep -c '✓ all good')"                      "1"
+check "clean: no fix hint"      "$(summary 0 0 | grep -c 'the fix hint')"                    "0"
+check "clean: exit 0"           "$(summary 0 0 | grep -c 'rc=0')"                            "1"
+
+# The mechanism the whole design rests on: a callee's increment reaches the
+# caller's declaration, and does not outlive it.
+mech() { zsh -c "source '$SYSTEM_SH'; f() { local _DOCTOR_FAIL=0 _DOCTOR_WARN=0; _doctor_bad b >/dev/null; _doctor_warn w >/dev/null; _doctor_ok o >/dev/null; _doctor_note n >/dev/null; print -r -- \"in=\$_DOCTOR_FAIL/\$_DOCTOR_WARN\"; }; f; print -r -- \"out=\${_DOCTOR_FAIL-unset}\"" 2>&1; }
+check "callee writes caller local" "$(mech | grep -c 'in=1/1')"    "1"
+check "✓ and · count as neither"   "$(mech | grep -c 'in=1/1')"    "1"
+check "counters do not outlive it" "$(mech | grep -c 'out=unset')" "1"
+
+# backup-doctor's emitters are now thin wrappers; if the delegation breaks, its
+# findings still print and its verdict silently becomes "all checks passed".
+wrap() { zsh -c "source '$SYSTEM_SH'; f() { local _DOCTOR_FAIL=0 _DOCTOR_WARN=0; _backup_doctor_bad b >/dev/null; _backup_doctor_warn w >/dev/null; _backup_doctor_ok o >/dev/null; print -r -- \"\$_DOCTOR_FAIL/\$_DOCTOR_WARN\"; }; f" 2>&1; }
+check "backup wrappers still count" "$(wrap)" "1/1"
+
+# Over EVERY doctor entry point, found by asking which functions call
+# _doctor_summary rather than from a hardcoded list — so a third doctor is
+# covered the moment it is written, which is the only way this convention stays
+# true.
+doctors="$(zsh -c "source '$SYSTEM_SH'; for f in \${(k)functions}; do [[ \"\${functions[\$f]}\" == *_doctor_summary* ]] && print -r -- \$f; done" | sort)"
+[[ -n "$doctors" ]] || fatal "no functions call _doctor_summary — were the emitters renamed?"
+check "dotfiles-doctor is a doctor" "$(printf '%s\n' "$doctors" | grep -cx 'dotfiles-doctor')" "1"
+check "backup-doctor is a doctor"   "$(printf '%s\n' "$doctors" | grep -cx 'backup-doctor')"   "1"
+while IFS= read -r d; do
+  [[ -n "$d" ]] || continue
+  body="$(zsh -c "source '$SYSTEM_SH'; print -r -- \"\${functions[$d]}\"")"
+  case "$body" in
+    *"local _DOCTOR_FAIL=0 _DOCTOR_WARN=0"*|*"local _DOCTOR_FAIL"*"local _DOCTOR_WARN"*)
+      ok "$d declares its own counters" ;;
+    *)
+      bad "$d calls _doctor_summary without declaring _DOCTOR_FAIL/_DOCTOR_WARN local — the globals are back" ;;
+  esac
+done <<< "$doctors"
 
 echo
 echo "=== dotfiles-work ==="
