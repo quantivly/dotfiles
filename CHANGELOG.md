@@ -50,10 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BACKUP_EXTERNAL_REPO=$HOME/restic` — the most canonical error there is — into "could not
   check, keeping the rule" on any host whose name service was merely slow, and leaving the
   `/media/$USER` literals unreachable in the one state where anything rests on them.
-  `install_external_udev`
-  keys on that status to leave an already-installed hotplug rule **alone**, so a transient
-  NSS failure cannot delete a rule an earlier successful run got right; only a genuinely
-  unusable mount point still removes it. 68 checks → 92, driven by a fake `getent` on PATH
+  **Every** step that installs
+  persistent state keys on that status to change nothing at all, so a transient NSS failure
+  cannot undo what an earlier successful run got right; only a genuinely unusable mount
+  point still tears state down. All four consumers were checked individually: the fstab
+  write skips, `install_external_udev` keeps the existing rule, `init_repos` skips and says
+  "could not be checked" rather than "unusable", and `install_external_schedule` returns
+  **before it writes** — that ordering matters, because it re-renders the unit from the
+  template first and that resets `ConditionPathExists` to the template's own path, so a
+  later bail-out has already destroyed what it meant to preserve, and it then removes the
+  `After=` ordering drop-in. A unit whose `ConditionPathExists` names a nonexistent path is
+  *skipped, not failed*, and `backup-doctor` has no check for `10-external-mount.conf`, so
+  the whole loss would have been invisible. The lookup bound is 5s rather than 2, since an
+  unanswered lookup is now a refusal and a cold SSSD cache over a VPN routinely takes
+  several seconds — too tight a bound makes a healthy host permanently unconfigurable.
+  68 checks → 99, driven by a fake `getent` on PATH
   (a shell function is invisible to a lookup made through `timeout`, so a stub would have
   passed vacuously), and the two sub-shell probes now print a positive token so a broken
   probe fails loudly instead of asserting an absence it would produce anyway.

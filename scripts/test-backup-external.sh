@@ -66,7 +66,7 @@ for fn in install_external_fstab build_external_fstab_candidate \
           remove_external_udev external_mount_point external_mount_unit \
           external_is_mounted external_mount_point_sane fstab_escape \
           fstab_parse_errors fstab_target_for_uuid render render_install \
-          install_external_schedule path_is_account_directory; do
+          install_external_schedule path_is_account_directory init_repos; do
   declare -F "$fn" >/dev/null || missing+=("$fn")
 done
 (( ${#missing[@]} == 0 )) || fatal "not defined after sourcing setup-backup.sh: ${missing[*]}"
@@ -298,24 +298,34 @@ check "  ...while the uid window alone still catches a /home-less login account"
 # ran. Folding those into "not an account" switches the rule off in silence on
 # exactly the LDAP/SSSD hosts the timeout was added for, and the fstab step then
 # writes a permanent entry mounting the disk over another login user's parent.
+# TWO stubs, because the two things worth pinning have very different costs.
+# SLOW_NSS proves the `timeout` wrapper genuinely fires, and is used ONCE: the
+# bound is 5s, so every assertion driven through it costs 5s of wall clock, and
+# the sleep has to sit well clear of the bound or the test races it. DEAD_NSS
+# exercises the same branch — any getent status that is neither 0 nor 2 means
+# "the question was not answered" — for free, so everything else uses that.
 SLOW_NSS="$TMPROOT/slowbin"; mkdir -p "$SLOW_NSS"
-printf '#!/bin/sh\nsleep 5\n' > "$SLOW_NSS/getent"
+printf '#!/bin/sh\nsleep 30\n' > "$SLOW_NSS/getent"
 chmod +x "$SLOW_NSS/getent"
+DEAD_NSS="$TMPROOT/deadbin"; mkdir -p "$DEAD_NSS"
+printf '#!/bin/sh\nexit 127\n' > "$DEAD_NSS/getent"
+chmod +x "$DEAD_NSS/getent"
 slow() { PATH="$SLOW_NSS:$PATH" external_mount_point_sane "$1"; }
+dead() { PATH="$DEAD_NSS:$PATH" external_mount_point_sane "$1"; }
 # An empty PATH reproduces "getent is not installed" without needing a machine
 # that lacks it. The function tolerates the rest going missing: id and realpath
 # already have fallbacks, and the account check runs before either matters.
 mkdir -p "$TMPROOT/nobin"
 nogetent() { PATH="$TMPROOT/nobin" external_mount_point_sane "$1"; }
 
-check "a lookup that never answers is refused, not accepted" \
+check "a lookup that outlives the timeout is refused, not accepted" \
       "$(slow /media/alice 2>/dev/null && echo ok)" ""
 check "  ...with the distinct status its callers key on (2, not 1)" \
-      "$(slow /media/alice >/dev/null 2>&1; echo $?)" "2"
+      "$(dead /media/alice >/dev/null 2>&1; echo $?)" "2"
 check "  ...saying the lookup did not complete, not that the path is wrong" \
-      "$(slow /media/alice 2>&1 | grep -c 'did not complete')" "1"
-check "  ...and naming the component whose lookup hung" \
-      "$(slow /media/alice 2>&1 | grep -c "for 'alice'")" "1"
+      "$(dead /media/alice 2>&1 | grep -c 'did not complete')" "1"
+check "  ...and naming the component whose lookup went unanswered" \
+      "$(dead /media/alice 2>&1 | grep -c "for 'alice'")" "1"
 check "a missing getent is the same unanswered question, not a clean 'no'" \
       "$(nogetent /media/alice >/dev/null 2>&1; echo $?)" "2"
 
@@ -332,7 +342,7 @@ udev_remove_marks() (
     install_external_udev 2>/dev/null | grep -c REMOVED
 )
 check "an unanswered lookup leaves the existing udev rule alone" \
-      "$(udev_remove_marks /media/alice/restic "$SLOW_NSS")" "0"
+      "$(udev_remove_marks /media/alice/restic "$DEAD_NSS")" "0"
 check "  ...while a genuinely unusable mount point still removes it" \
       "$(udev_remove_marks "$HOME/restic" "$FAKE_NSS")" "1"
 
@@ -342,12 +352,54 @@ check "  ...while a genuinely unusable mount point still removes it" \
 # into "keeping the rule, go fix your name service" on any host whose directory
 # server is merely slow, and would make the /media/$me and /run/media/$me
 # literals unreachable in the one state where anything rests on them.
-check "\$HOME is refused outright, not deferred, when the lookup hangs" \
-      "$(slow "$HOME" >/dev/null 2>&1; echo $?)" "1"
+check "\$HOME is refused outright, not deferred, when the lookup is unanswered" \
+      "$(dead "$HOME" >/dev/null 2>&1; echo $?)" "1"
 check "  ...and the udev rule is still removed for it" \
-      "$(udev_remove_marks "$HOME/restic" "$SLOW_NSS")" "1"
+      "$(udev_remove_marks "$HOME/restic" "$DEAD_NSS")" "1"
 check "  ...the belt-and-braces /media/\$me literal fires in that state too" \
-      "$(slow "/media/$(id -un)" >/dev/null 2>&1; echo $?)" "1"
+      "$(dead "/media/$(id -un)" >/dev/null 2>&1; echo $?)" "1"
+
+# install_external_udev was taught about status 2; install_external_schedule was
+# not, and that is the more expensive omission. It rewrites the unit from the
+# template FIRST, which resets ConditionPathExists to the template's own path, so
+# a bail-out placed after that has already destroyed what it meant to preserve —
+# and it then rm -f's the After= drop-in. A unit whose ConditionPathExists names
+# a nonexistent path is SKIPPED, not failed, so nothing reports it, and
+# backup-doctor has no check for 10-external-mount.conf at all. The whole
+# function must therefore decide before it writes anything.
+sched_writes() (
+  # All three are called indirectly, from inside install_external_schedule.
+  # shellcheck disable=SC2317,SC2329
+  render_install() { printf 'RENDER '; }
+  # shellcheck disable=SC2317,SC2329
+  sudo() { printf 'SUDO(%s) ' "$1"; }
+  # shellcheck disable=SC2317,SC2329
+  external_mount_unit() { printf 'x.mount'; }
+  BACKUP_EXTERNAL_UUID=dead-beef BACKUP_EXTERNAL_REPO="$1" PATH="$2:$PATH" \
+    install_external_schedule 2>/dev/null | tr -d '\n'
+)
+check "an unanswered lookup makes the schedule step write nothing at all" \
+      "$(sched_writes /media/alice/restic "$DEAD_NSS")" ""
+check "  ...so the unit is never re-rendered out from under its ConditionPathExists" \
+      "$(sched_writes /media/alice/restic "$DEAD_NSS" | grep -c RENDER)" "0"
+check "  ...while a usable mount point still installs the ordering drop-in" \
+      "$(sched_writes /media/no-such-account-8f3a1c/restic "$FAKE_NSS" | grep -c RENDER)" "1"
+check "  ...and a definitely-unusable one still runs, and drops the ordering file" \
+      "$(sched_writes "$HOME/restic" "$FAKE_NSS" | grep -c RENDER)" "1"
+
+# init_repos must not call an undetermined path "unusable" — the warnings printed
+# immediately above it say which of the two it is, and they have different fixes.
+init_says() (
+  # shellcheck disable=SC2317,SC2329
+  init_repo() { :; }
+  BACKUP_EXTERNAL_REPO="$1" BACKUP_B2_REPO="" PATH="$2:$PATH" init_repos 2>&1
+)
+check "init_repos reports an unanswered lookup as unchecked, not as unusable" \
+      "$(init_says /media/alice/restic "$DEAD_NSS" | grep -c 'could not be checked')" "1"
+check "  ...and does not also call it unusable" \
+      "$(init_says /media/alice/restic "$DEAD_NSS" | grep -c 'unusable')" "0"
+check "  ...while a genuinely unusable mount point is still called that" \
+      "$(init_says "$HOME/restic" "$FAKE_NSS" | grep -c 'unusable')" "1"
 
 # The rule must need no identity resolution AT ALL — the $USER hole generalised:
 # not just "$USER is empty" but "nothing can tell us who we are". Guarded on the

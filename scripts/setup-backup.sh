@@ -284,6 +284,10 @@ path_is_account_directory() {
   # getent goes through NSS, so an LDAP/SSSD account has its parent protected
   # too — but on a host whose directory server is unreachable a lookup blocks for
   # the NSS timeout, and the installer would sit there with no output. Bound it.
+  # 5s, not 2: a cold SSSD cache resolving against a remote DC over a VPN takes
+  # several seconds routinely, and since an unanswered lookup is now a REFUSAL,
+  # too tight a bound turns a healthy-but-slow host into a permanent installer
+  # failure telling the user to fix a name service that is working.
   # If `timeout` itself is missing, call getent directly rather than let every
   # lookup come back empty: that would switch this entire rule off with no sign,
   # which is the failure mode this file exists to refuse.
@@ -297,7 +301,7 @@ path_is_account_directory() {
     # early exit would SIGPIPE getent and the assignment would fail the installer.
     rc=0
     if [[ -n "$tmo" ]]; then
-      pw="$("$tmo" 2 getent passwd -- "$leaf" 2>/dev/null)" || rc=$?
+      pw="$("$tmo" 5 getent passwd -- "$leaf" 2>/dev/null)" || rc=$?
     else
       pw="$(getent passwd -- "$leaf" 2>/dev/null)" || rc=$?
     fi
@@ -870,8 +874,11 @@ init_repo() {
 # ===========================================================================
 init_repos() {
   log STEP "4. Initialize restic repositories"
-  local extmnt=""
+  local extmnt="" extsanerc=0
   [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]] && extmnt="$(external_mount_point)"
+  if [[ -n "$extmnt" ]]; then
+    external_mount_point_sane "$extmnt" || extsanerc=$?
+  fi
   # The SAME floor step 3b applies before touching /etc/fstab has to apply here,
   # because this is the step that creates the repository. `external_is_mounted`
   # alone is not a floor: a BACKUP_EXTERNAL_REPO of "/restic" derives the mount
@@ -882,7 +889,13 @@ init_repos() {
   # External: only if the drive is currently docked/mounted.
   if [[ -z "$extmnt" ]]; then
     log INFO "BACKUP_EXTERNAL_REPO not set — skipping external init."
-  elif ! external_mount_point_sane "$extmnt"; then
+  elif (( extsanerc == 2 )); then
+    # "Could not check" is not "unusable", and the warnings printed just above
+    # say which one it is. Collapsing them here would contradict them, and the
+    # two have different fixes: repair name-service resolution, or edit
+    # BACKUP_EXTERNAL_REPO.
+    log WARNING "external mount point could not be checked (see above) — skipping external init."
+  elif (( extsanerc != 0 )); then
     log WARNING "external mount point unusable (see above) — skipping external init."
   elif external_is_mounted "$extmnt"; then
     sudo install -d -o root -g root "$BACKUP_EXTERNAL_REPO" 2>/dev/null || true
@@ -952,6 +965,31 @@ install_schedules() {
 # 6-hourly timer and the After= drop-in. Split out of install_schedules so a
 # failure can be reported and stepped over instead of aborting the installer.
 install_external_schedule() {
+  local extdropin=/etc/systemd/system/restic-backup-external.service.d
+  local sanerc=0
+  if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]]; then
+    external_mount_point_sane "$(external_mount_point)" || sanerc=$?
+  else
+    sanerc=1
+  fi
+  # Asked FIRST, before anything is written, because `render_install` below
+  # rewrites the unit from the template and that resets ConditionPathExists to
+  # the template's own path. A bail-out placed after it has already destroyed
+  # the setting it meant to preserve, leaving a unit whose condition names a
+  # path that does not exist — so every 6-hourly run is SKIPPED, which systemd
+  # does not count as a failure and nothing reports.
+  #
+  # So on "could not determine" this run changes nothing at all: the unit, its
+  # ConditionPathExists and the After= drop-in an earlier successful run
+  # installed are left exactly as they are. Same call as install_external_udev,
+  # for the same reason — a name-service hiccup must not undo correct state —
+  # and it matters more here, because backup-doctor checks the 10-backup-env.conf
+  # drop-in but has no check at all for 10-external-mount.conf, so losing that
+  # one is invisible.
+  if (( sanerc == 2 )); then
+    log WARNING "leaving the external unit and its mount ordering untouched — the mount point could not be checked on this run."
+    return 0
+  fi
   # Clean up the obsolete looping .path unit if a previous run installed it.
   sudo systemctl disable --now restic-backup-external.path 2>/dev/null || true
   sudo rm -f /etc/systemd/system/restic-backup-external.path
@@ -959,13 +997,12 @@ install_external_schedule() {
                  /etc/systemd/system/restic-backup-external.service \
     || { log WARNING "external backup unit not installed — external runs will not happen."; return 1; }
   sudo install -m 644 "$DOTFILES/systemd/restic-backup-external.timer"   /etc/systemd/system/restic-backup-external.timer
-  local extdropin=/etc/systemd/system/restic-backup-external.service.d
   # Gated on the same floor as steps 3b/4: pointing ConditionPathExists and the
   # After= unit at a mount point that must never be mounted over would arm a
   # 6-hourly run against the internal disk. Left ungated, the shipped
   # ConditionPathExists names a path that does not exist, so the unit skips —
   # which is the safe outcome.
-  if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]] && external_mount_point_sane "$(external_mount_point)"; then
+  if (( sanerc == 0 )); then
     sudo sed -i "s|ConditionPathExists=.*|ConditionPathExists=${BACKUP_EXTERNAL_REPO}/config|" /etc/systemd/system/restic-backup-external.service
     # Order the run AFTER the external .mount unit. `nofail` deliberately takes
     # that mount out of local-fs.target's ordering, so at boot the timer's

@@ -114,8 +114,9 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    > *answered* — unreachable directory server, or no `getent` — the path is refused with a
    > message saying so, because the correct mount point is one component under `/media` too,
    > so guessing would wave through the dangerous spelling just as readily; that particular
-   > refusal deliberately leaves an already-installed udev rule alone, since the fix is
-   > name-service resolution rather than `BACKUP_EXTERNAL_REPO`. The same
+   > refusal deliberately changes no installed state — the udev rule, the external unit and
+   > its mount ordering are all left as an earlier successful run set them — since the fix
+   > is name-service resolution rather than `BACKUP_EXTERNAL_REPO`. The same
    > check gates every step that uses the mount point — the `/etc/fstab` entry, the udev
    > rule, `restic init`, and the unit's `ConditionPathExists`.
 
