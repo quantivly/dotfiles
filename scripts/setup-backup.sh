@@ -250,20 +250,43 @@ external_is_mounted() { findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1; }
 # Deliberately pure — no sudo, no writes — so scripts/test-backup-external.sh
 # can exercise every rejection without root.
 external_mount_point_sane() {
-  local mnt="$1" p
+  local mnt="$1" me real p
+  local -a deny
   if [[ "$mnt" != /* ]]; then
     log WARNING "mount point '$mnt' is not an absolute path — check BACKUP_EXTERNAL_REPO in $USER_CONFIG."
     return 1
   fi
-  if [[ "$mnt" == *//* || "$mnt" == */. || "$mnt" == */.. || "$mnt" == */../* ]]; then
+  # Every rejection below is a STRING compare, so any component that resolves to
+  # something other than what it spells has to be refused up front: `/media/./x`
+  # IS `/media/x` to the kernel but matches no deny-list entry. `*/./*` is not
+  # decoration — it is a form a plausible hand-edit actually produces, and it
+  # lands on exactly the directory the deny-list exists to protect.
+  if [[ "$mnt" == *//* || "$mnt" == */. || "$mnt" == */./* \
+     || "$mnt" == */.. || "$mnt" == */../* ]]; then
     log WARNING "mount point '$mnt' is not a normalised path — check BACKUP_EXTERNAL_REPO in $USER_CONFIG."
+    return 1
+  fi
+  if [[ -L "$mnt" ]]; then
+    log WARNING "mount point '$mnt' is a symlink — mount(8) resolves it elsewhere, so the string cannot be checked. Point BACKUP_EXTERNAL_REPO at the real directory."
     return 1
   fi
   # Directories a removable disk must never be mounted over. $HOME and the two
   # udisks parents are where a plausible BACKUP_EXTERNAL_REPO typo actually lands.
-  for p in / /boot /dev /etc /home /media /mnt /opt /proc /root /run /run/media \
-           /srv /sys /tmp /usr /var "$HOME" "/media/${USER:-}" "/run/media/${USER:-}"; do
-    if [[ "$mnt" == "$p" ]]; then
+  deny=( / /boot /dev /etc /home /media /mnt /opt /proc /root /run /run/media
+         /srv /sys /tmp /usr /var "$HOME" )
+  # `id -un`, never $USER: $USER is set by login/PAM, not by the shell, so it is
+  # empty under `sudo -u`, `env -i`, a systemd unit or a bare container shell —
+  # and "/media/${USER:-}" is then "/media/", which matches nothing and silently
+  # drops the two likeliest typo targets out of the deny-list.
+  # scripts/backup-render.sh resolves the same identity the same way.
+  me="$(id -un 2>/dev/null)" || me=""
+  [[ -n "$me" ]] && deny+=( "/media/$me" "/run/media/$me" )
+  # The resolved path is checked too, so a symlink among the PARENT components
+  # cannot smuggle a denied directory past the string compare.
+  real="$(realpath -m -- "$mnt" 2>/dev/null)" || real=""
+  : "${real:=$mnt}"
+  for p in "${deny[@]}"; do
+    if [[ "$mnt" == "$p" || "$real" == "$p" ]]; then
       log WARNING "refusing to mount the external HDD over $mnt."
       log WARNING "BACKUP_EXTERNAL_REPO must point at a directory ON the drive (e.g. $mnt/<label>/restic), not one level up."
       return 1
@@ -272,10 +295,21 @@ external_mount_point_sane() {
   # An existing non-empty directory that is not already a mount point is live
   # data on the internal disk. Mounting over it hides it at every boot, and the
   # hidden files keep consuming the root filesystem invisibly.
-  if [[ -d "$mnt" ]] && ! external_is_mounted "$mnt" && [[ -n "$(ls -A "$mnt" 2>/dev/null)" ]]; then
-    log WARNING "$mnt already contains files and is not a mount point — mounting the external HDD there would hide them."
-    log WARNING "Point BACKUP_EXTERNAL_REPO at the drive's own mount point, or empty/rename $mnt first. Skipping."
-    return 1
+  if [[ -d "$mnt" ]] && ! external_is_mounted "$mnt"; then
+    # "Cannot list it" is NOT "it is empty". This runs unprivileged (preflight
+    # refuses to run as root), so `ls -A` on a 0700 root-owned directory —
+    # /etc/ssl/private, /var/lib/private, any DynamicUser state dir — yields
+    # nothing, and the emptiness test below would wave a full directory through.
+    if [[ ! -r "$mnt" || ! -x "$mnt" ]]; then
+      log WARNING "$mnt exists but its contents cannot be listed as ${me:-this user} — refusing to mount over a directory that cannot be checked."
+      log WARNING "Point BACKUP_EXTERNAL_REPO at the drive's own mount point. Skipping."
+      return 1
+    fi
+    if [[ -n "$(ls -A "$mnt" 2>/dev/null)" ]]; then
+      log WARNING "$mnt already contains files and is not a mount point — mounting the external HDD there would hide them."
+      log WARNING "Point BACKUP_EXTERNAL_REPO at the drive's own mount point, or empty/rename $mnt first. Skipping."
+      return 1
+    fi
   fi
   return 0
 }
@@ -292,13 +326,21 @@ external_mount_point_sane() {
 # it reports "no entry" for a perfectly correct fstab; callers then add a
 # duplicate, refuse the udev rule, and warn that the entry is missing. The
 # second query is a literal string match on the table, so it works either way.
+#
+# EVERY distinct target is reported, space-joined, never just the first. Two
+# entries for one UUID at two mount points is a real /etc/fstab defect, and
+# `head -1` would hand back whichever came first — so if that one happened to
+# match the configured mount point the caller would say "already installed ✓"
+# and go on to install the udev rule, with the conflicting second entry never
+# mentioned. A multi-target answer can equal no single mount point, so the
+# callers' `!= "$mnt"` comparison reports it by construction.
 fstab_target_for_uuid() {
   local table="$1" uuid="$2" out
-  out="$(LC_ALL=C findmnt --fstab --tab-file "$table" -no TARGET -S "UUID=$uuid" 2>/dev/null | head -1)"
-  if [[ -z "$out" ]]; then
-    out="$(LC_ALL=C findmnt --fstab --tab-file "$table" -no TARGET -S "/dev/disk/by-uuid/$uuid" 2>/dev/null | head -1)"
+  out="$(LC_ALL=C findmnt --fstab --tab-file "$table" -no TARGET -S "UUID=$uuid" 2>/dev/null | sort -u | tr '\n' ' ')"
+  if [[ -z "${out// /}" ]]; then
+    out="$(LC_ALL=C findmnt --fstab --tab-file "$table" -no TARGET -S "/dev/disk/by-uuid/$uuid" 2>/dev/null | sort -u | tr '\n' ' ')"
   fi
-  printf '%s' "$out"
+  printf '%s' "${out% }"
 }
 
 # fstab escaping. mount(8) unescapes \ooo octal, and fstab(5) requires it for
@@ -503,24 +545,36 @@ mount_external_now() {
   fi
   # mount(8) will not create the mount point. systemd's fstab generator does,
   # so the boot path works without this; the on-demand path does not.
-  local created=0
+  #
+  # Record EVERY level `mkdir -p` is about to create, deepest first, not just the
+  # leaf. The harm being undone below is a root-owned 0755 directory where udisks
+  # expects to create its own user-owned 0700 one — and that is the PARENT,
+  # /run/media/<user>, at least as often as the leaf.
+  local d created=""
   if [[ ! -d "$mnt" ]]; then
+    d="$mnt"
+    while [[ "$d" != "/" && "$d" != "." && ! -d "$d" ]]; do
+      created+="$d"$'\n'
+      d="$(dirname "$d")"
+    done
     sudo mkdir -p "$mnt" || { log WARNING "could not create $mnt — skipping the immediate mount."; return 0; }
-    created=1
   fi
   if sudo mount "$mnt"; then
     log SUCCESS "mounted $mnt"
     return 0
   fi
   log WARNING "could not mount $mnt — see: sudo mount -v $mnt (wrong filesystem type? fsck needed?)"
-  # Undo the directory we just made. udisks2 owns /run/media/<user> and manages
+  # Undo the directories we just made. udisks2 owns /run/media/<user> and manages
   # /media/<user>/<label>, creating them user-owned 0700; a leftover root-owned
-  # 0755 child can block or alter the desktop's own mount of the same drive. It
+  # 0755 one can block or alter the desktop's own mount of the same drive. It
   # is also precisely the "leftover directory on the internal disk" that makes
   # `test -e "$repo/config"` report a docked drive that is not there.
-  # rmdir only, and only the leaf: it cannot touch a directory that has content,
-  # and any parent levels mkdir -p created belong to udisks, not to us.
-  if (( created )); then sudo rmdir "$mnt" 2>/dev/null || true; fi
+  # rmdir only, leaf first: it cannot touch a directory that has content, so a
+  # level something else has meanwhile populated is left exactly as it is.
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    sudo rmdir "$d" 2>/dev/null || break
+  done <<< "$created"
 }
 
 # ===========================================================================
@@ -544,14 +598,20 @@ install_external_udev() {
 
   local uuid="${BACKUP_EXTERNAL_UUID:-}"
   local repo="${BACKUP_EXTERNAL_REPO:-}"
-  local mnt unit rules tmp fstabmnt
+  local mnt unit tmp fstabmnt
 
-  # Every path that declines to install the rule REMOVES any rule a previous run
-  # left behind. A stale rule names a UUID that may now belong to a different
-  # disk and a .mount unit that may no longer exist; it keeps passing `udevadm
-  # verify` and simply never fires. Nothing else would ever mention it — the
-  # doctor's drift check has to be told what to compare against, which is
-  # exactly what is missing in this state.
+  # Every path that declines because the CONFIGURATION no longer supports a rule
+  # (below) removes any rule a previous run left behind. A stale rule names a
+  # UUID that may now belong to a different disk and a .mount unit that may no
+  # longer exist; it keeps passing `udevadm verify` and simply never fires, and
+  # nothing else would ever mention it — the doctor's drift check has to be told
+  # what to compare against, which is exactly what is missing in this state.
+  #
+  # The two later bail-outs (render failure, udevadm rejection) deliberately do
+  # NOT remove: there the configuration is still valid and only this run could
+  # not produce a rule, so an installed rule is more likely correct than absent.
+  # They are covered instead by the doctor's drift compare, which runs whenever
+  # a UUID and mount point are configured — i.e. exactly in those two states.
   if [[ -z "$uuid" || -z "$repo" ]]; then
     log INFO "UUID/repo not set — skipping (see step 3b)."
     remove_external_udev "UUID/repo no longer configured"
@@ -578,7 +638,6 @@ install_external_udev() {
     return 0
   fi
   unit="$(external_mount_unit "$mnt")"
-  rules="$EXT_UDEV_RULES"
 
   tmp="$(mktemp)"
   if ! render_external "$uuid" "$unit" "$DOTFILES/udev/99-backup-external.rules" > "$tmp"; then
@@ -600,16 +659,16 @@ install_external_udev() {
     log INFO "udevadm verify unavailable (systemd < 254) — installing the rule unchecked."
   fi
 
-  if [[ -f "$rules" ]] && sudo cmp -s "$tmp" "$rules"; then
+  if [[ -f "$EXT_UDEV_RULES" ]] && sudo cmp -s "$tmp" "$EXT_UDEV_RULES"; then
     rm -f "$tmp"
     log SUCCESS "udev rule already installed and current"
     return 0
   fi
 
-  sudo install -m 644 -o root -g root "$tmp" "$rules"
+  sudo install -m 644 -o root -g root "$tmp" "$EXT_UDEV_RULES"
   rm -f "$tmp"
   sudo udevadm control --reload
-  log SUCCESS "udev hotplug remount installed → $rules"
+  log SUCCESS "udev hotplug remount installed → $EXT_UDEV_RULES"
 }
 
 # Run resticprofile as root with the config env available (for {{ .Env.* }}).
@@ -657,8 +716,21 @@ init_repo() {
 # ===========================================================================
 init_repos() {
   log STEP "4. Initialize restic repositories"
+  local extmnt=""
+  [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]] && extmnt="$(external_mount_point)"
+  # The SAME floor step 3b applies before touching /etc/fstab has to apply here,
+  # because this is the step that creates the repository. `external_is_mounted`
+  # alone is not a floor: a BACKUP_EXTERNAL_REPO of "/restic" derives the mount
+  # point "/", which IS mounted, so restic would initialise the "external"
+  # repository on the ROOT filesystem — and /restic/config then satisfies the
+  # unit's ConditionPathExists forever, so every 6-hourly "external" run writes
+  # to the internal disk while backup-status reports "docked ✓".
   # External: only if the drive is currently docked/mounted.
-  if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]] && external_is_mounted "$(external_mount_point)"; then
+  if [[ -z "$extmnt" ]]; then
+    log INFO "BACKUP_EXTERNAL_REPO not set — skipping external init."
+  elif ! external_mount_point_sane "$extmnt"; then
+    log WARNING "external mount point unusable (see above) — skipping external init."
+  elif external_is_mounted "$extmnt"; then
     sudo install -d -o root -g root "$BACKUP_EXTERNAL_REPO" 2>/dev/null || true
     init_repo "external" "$BACKUP_EXTERNAL_REPO"
   else
@@ -701,6 +773,31 @@ install_schedules() {
 
   # External backup: a timer drives a ConditionPathExists-gated oneshot, so it
   # backs up only when the drive is docked (loop-free; no .path unit).
+  #
+  # Its own function, called `|| true`, because a failure here must NOT abort
+  # install_schedules: `return 1` propagates through `set -e` in main() and would
+  # skip everything after it — the weekly verification timer, the LUKS header
+  # backup and, worst, build_emergency_kit, the one asset a restore cannot start
+  # without. One optional unit failing to render is not a reason to leave the
+  # cold-start kit unbuilt.
+  install_external_schedule || true
+
+  # Weekly verification (content + restore canary), DECOUPLED from [b2.check] so a
+  # verify failure can never abort the integrity check (independent failure domains).
+  sudo install -m 644 "$DOTFILES/systemd/restic-verify.service" /etc/systemd/system/restic-verify.service
+  sudo install -m 644 "$DOTFILES/systemd/restic-verify.timer"   /etc/systemd/system/restic-verify.timer
+  sudo systemctl daemon-reload
+  if sudo systemctl enable --now restic-verify.timer; then
+    log SUCCESS "Verification timer armed (weekly; proves backups are complete + restorable). On demand: backup-drill."
+  else
+    log WARNING "Could not enable restic-verify.timer."
+  fi
+}
+
+# The external half of step 5: the ConditionPathExists-gated oneshot, its
+# 6-hourly timer and the After= drop-in. Split out of install_schedules so a
+# failure can be reported and stepped over instead of aborting the installer.
+install_external_schedule() {
   # Clean up the obsolete looping .path unit if a previous run installed it.
   sudo systemctl disable --now restic-backup-external.path 2>/dev/null || true
   sudo rm -f /etc/systemd/system/restic-backup-external.path
@@ -709,7 +806,12 @@ install_schedules() {
     || { log WARNING "external backup unit not installed — external runs will not happen."; return 1; }
   sudo install -m 644 "$DOTFILES/systemd/restic-backup-external.timer"   /etc/systemd/system/restic-backup-external.timer
   local extdropin=/etc/systemd/system/restic-backup-external.service.d
-  if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]]; then
+  # Gated on the same floor as steps 3b/4: pointing ConditionPathExists and the
+  # After= unit at a mount point that must never be mounted over would arm a
+  # 6-hourly run against the internal disk. Left ungated, the shipped
+  # ConditionPathExists names a path that does not exist, so the unit skips —
+  # which is the safe outcome.
+  if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]] && external_mount_point_sane "$(external_mount_point)"; then
     sudo sed -i "s|ConditionPathExists=.*|ConditionPathExists=${BACKUP_EXTERNAL_REPO}/config|" /etc/systemd/system/restic-backup-external.service
     # Order the run AFTER the external .mount unit. `nofail` deliberately takes
     # that mount out of local-fs.target's ordering, so at boot the timer's
@@ -733,17 +835,6 @@ install_schedules() {
     log SUCCESS "External timer armed (every 6h; runs only when docked). Immediate: backup-now external."
   else
     log WARNING "Could not enable restic-backup-external.timer."
-  fi
-
-  # Weekly verification (content + restore canary), DECOUPLED from [b2.check] so a
-  # verify failure can never abort the integrity check (independent failure domains).
-  sudo install -m 644 "$DOTFILES/systemd/restic-verify.service" /etc/systemd/system/restic-verify.service
-  sudo install -m 644 "$DOTFILES/systemd/restic-verify.timer"   /etc/systemd/system/restic-verify.timer
-  sudo systemctl daemon-reload
-  if sudo systemctl enable --now restic-verify.timer; then
-    log SUCCESS "Verification timer armed (weekly; proves backups are complete + restorable). On demand: backup-drill."
-  else
-    log WARNING "Could not enable restic-verify.timer."
   fi
 }
 

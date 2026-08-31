@@ -65,7 +65,8 @@ for fn in install_external_fstab build_external_fstab_candidate \
           write_external_fstab_entry mount_external_now install_external_udev \
           remove_external_udev external_mount_point external_mount_unit \
           external_is_mounted external_mount_point_sane fstab_escape \
-          fstab_parse_errors fstab_target_for_uuid render_install; do
+          fstab_parse_errors fstab_target_for_uuid render render_install \
+          install_external_schedule; do
   declare -F "$fn" >/dev/null || missing+=("$fn")
 done
 (( ${#missing[@]} == 0 )) || fatal "not defined after sourcing setup-backup.sh: ${missing[*]}"
@@ -168,6 +169,28 @@ check "a relative path is refused" \
       "$(external_mount_point_sane relative/path 2>/dev/null && echo ok)" ""
 check "an unnormalised path is refused" \
       "$(external_mount_point_sane /media/zvi/../Backup 2>/dev/null && echo ok)" ""
+# Every rejection is a STRING compare, so a component that resolves elsewhere
+# has to be refused before the deny-list is consulted: /media/./<user> IS
+# /media/<user>, and it matched no deny-list entry.
+check "a /./ component is refused (it resolves past the deny-list)" \
+      "$(external_mount_point_sane "/media/./${USER:-nobody}" 2>/dev/null && echo ok)" ""
+ln -sfn /media "$TMPROOT/link-to-media"
+check "a symlinked mount point is refused" \
+      "$(external_mount_point_sane "$TMPROOT/link-to-media" 2>/dev/null && echo ok)" ""
+# $USER is set by login/PAM, not by the shell: empty under sudo -u / env -i / a
+# systemd unit, and "/media/${USER:-}" is then "/media/", which matches nothing.
+# shellcheck disable=SC2016  # $1/$(id -un) must expand in the inner shell, not here
+nouser_probe='source "$1"; set +e; external_mount_point_sane "/media/$(id -un)" 2>/dev/null && echo ok'
+check "the per-user deny-list entries survive an empty \$USER" \
+      "$(env -u USER bash -c "$nouser_probe" _ "$DOTFILES/scripts/setup-backup.sh")" ""
+# `ls -A` on a 0700 root-owned directory returns nothing to an unprivileged
+# user, so "cannot list it" must not be read as "it is empty".
+if (( EUID != 0 )); then
+  mkdir -p "$TMPROOT/opaque" && : > "$TMPROOT/opaque/live-data" && chmod 000 "$TMPROOT/opaque"
+  check "an existing directory whose contents cannot be listed is refused" \
+        "$(external_mount_point_sane "$TMPROOT/opaque" 2>/dev/null && echo ok)" ""
+  chmod 755 "$TMPROOT/opaque"
+fi
 mkdir -p "$TMPROOT/populated" && : > "$TMPROOT/populated/live-data"
 check "an existing non-empty directory is refused (mounting over it hides data)" \
       "$(external_mount_point_sane "$TMPROOT/populated" 2>/dev/null && echo ok)" ""
@@ -259,6 +282,21 @@ check "an existing /dev/disk/by-uuid entry counts as already installed" \
 check "  ...and no duplicate line is appended" \
       "$(grep -c "$UUID" "$FSTAB")" "1"
 
+# Two entries for one UUID at two mount points is a real fstab defect. Reporting
+# only the FIRST match would tick "already installed ✓" whenever that one
+# happened to be the configured mount point, and the conflicting second entry
+# would never be mentioned by anything.
+run_install "UUID=$UUID  /media/zvi/Backup    ext4  defaults,nofail  0 0
+UUID=$UUID  /media/zvi/Elsewhere  ext4  defaults,nofail  0 0
+" /media/zvi/Backup >/dev/null
+check "a duplicate entry for the same UUID is reported, not read as installed" \
+      "$(grep -c 'would skip forever' "$TMPROOT/out")" "1"
+check "  ...and nothing claims the entry is already correct" \
+      "$(grep -c 'already mounts' "$TMPROOT/out")" "0"
+check "fstab_target_for_uuid reports BOTH targets, not just the first" \
+      "$(printf 'UUID=%s /a ext4 defaults 0 0\nUUID=%s /b ext4 defaults 0 0\n' "$UUID" "$UUID" > "$TMPROOT/t6"
+         fstab_target_for_uuid "$TMPROOT/t6" "$UUID")" "/a /b"
+
 echo
 echo "=== install: idempotence ==="
 run_install "tmpfs /tmp tmpfs defaults 0 0
@@ -327,8 +365,9 @@ check "  ...and does not report a disk state it cannot know" \
 # checker teaches people to skim it.
 check "  ...and does not warn twice about the same non-configuration" \
       "$(printf '%s' "$got" | grep -c 'BACKUP_EXTERNAL_UUID blank')" "0"
+got="$(doctor_state no no /mnt/ext/restic "")"
 check "  ...while a configured repo with no UUID still gets that warning" \
-      "$(doctor_state no no /mnt/ext/restic "" | grep -c 'BACKUP_EXTERNAL_UUID blank')" "1"
+      "$(printf '%s' "$got" | grep -c 'BACKUP_EXTERNAL_UUID blank')" "1"
 
 echo
 echo "=== render_install: a failed render must not damage the destination ==="

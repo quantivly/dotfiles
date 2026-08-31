@@ -570,12 +570,19 @@ _backup_external_mounted() {
 # attached. Undocked, which is exactly when this check matters, one query alone
 # reports "no entry" for a correct fstab and the doctor warns about a defect that
 # is not there. The second is a literal match on the table, so it works either way.
+#
+# EVERY distinct target, space-joined, never just the first: two entries for one
+# UUID at two mount points is a real defect, and `head -1` would report whichever
+# came first — so if that one matched the configured mount point the doctor would
+# tick "has an /etc/fstab entry ✓" and never mention the conflicting second one.
+# A multi-target answer equals no single mount point, so the caller's `!=` test
+# reports it by construction.
 _backup_fstab_target_for_uuid() {
   local uuid="${1:-}" out
   [[ -n "$uuid" ]] || return 0
-  out="$(LC_ALL=C findmnt --fstab -no TARGET -S "UUID=$uuid" 2>/dev/null | head -1)"
-  [[ -n "$out" ]] || out="$(LC_ALL=C findmnt --fstab -no TARGET -S "/dev/disk/by-uuid/$uuid" 2>/dev/null | head -1)"
-  printf '%s' "$out"
+  out="$(LC_ALL=C findmnt --fstab -no TARGET -S "UUID=$uuid" 2>/dev/null | sort -u | tr '\n' ' ')"
+  [[ -n "${out// /}" ]] || out="$(LC_ALL=C findmnt --fstab -no TARGET -S "/dev/disk/by-uuid/$uuid" 2>/dev/null | sort -u | tr '\n' ' ')"
+  printf '%s' "${out% }"
 }
 
 # Internal: is the external HDD physically ATTACHED (mounted or not)?
@@ -689,6 +696,15 @@ backup-status() {
     echo "External:   docked ✓ ($extmnt)"
   elif _backup_external_attached "$extuuid" "$extmnt"; then
     echo "External:   ✗ attached but NOT MOUNTED — every scheduled run is being skipped (see backup-doctor)"
+  elif [[ -z "$extuuid" ]] && ! findmnt --fstab -no SOURCE --target "$extmnt" >/dev/null 2>&1; then
+    # _backup_external_attached identifies the drive by UUID, or by whatever
+    # /etc/fstab names as the source for the mount point. With neither — the
+    # state every install predating BACKUP_EXTERNAL_UUID being read is in — it
+    # returns false because it has nothing to ask, not because the disk is
+    # absent. Saying "not attached" there asserts exactly what this command
+    # cannot know, which is the same mistake the "not configured" branch above
+    # exists to avoid.
+    echo "External:   unknown — no BACKUP_EXTERNAL_UUID and no /etc/fstab entry, so an attached-but-unmounted drive cannot be told from an absent one (set it in ~/.backup.local, then run backup-setup)"
   else
     echo "External:   not attached"
   fi
@@ -902,7 +918,12 @@ _backup_doctor_external() {
   extrules=/etc/udev/rules.d/99-backup-external.rules
   if [[ -z "$extuuid" || -z "$extmnt" ]]; then
     if sudo test -f "$extrules"; then
-      _backup_doctor_warn "$extrules exists but no external HDD is configured — a stale hotplug rule for an unknown disk (re-run backup-setup to remove it)"
+      # Name what is actually missing. "No external HDD is configured" is false
+      # when only the UUID is blank, and a checker that misreports the state it
+      # is in gets read as noise.
+      local extwhy="no external HDD is configured"
+      [[ -n "$extmnt" ]] && extwhy="BACKUP_EXTERNAL_UUID is blank"
+      _backup_doctor_warn "$extrules exists but $extwhy — a stale hotplug rule for an unknown disk (re-run backup-setup to remove it)"
     fi
   else
     extunit="$(systemd-escape -p --suffix=mount "$extmnt" 2>/dev/null)"
@@ -913,7 +934,7 @@ _backup_doctor_external() {
          | sudo cmp -s "$extrules" -; then
       _backup_doctor_ok "external HDD has a udev hotplug rule (remounts on re-dock)"
     else
-      _backup_doctor_warn "udev hotplug rule differs from the rendered ~/.dotfiles template (stale mount unit after a repo-path change? hand-edited?) — re-run backup-setup"
+      _backup_doctor_warn "udev hotplug rule differs from the rendered ~/.dotfiles template (stale mount unit after a repo-path change? hand-edited? the shipped template changed since it was installed?) — re-run backup-setup"
     fi
   fi
 }

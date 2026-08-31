@@ -95,9 +95,12 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    > too shallow (the drive's mount point itself, rather than a directory on it) resolves
    > to `/run/media/<user>`, and a typo can resolve to your home directory — which would
    > mean the external disk mounted over it at every boot, hiding everything in it.
-   > `backup-setup` refuses those: a non-absolute or unnormalised path, `$HOME`, `/media`,
-   > `/run/media`, their per-user subdirectories, the usual system directories, and any
-   > existing non-empty directory that is not already a mount point.
+   > `backup-setup` refuses those: a non-absolute, unnormalised (`/./` included) or
+   > symlinked path, `$HOME`, `/media`, `/run/media`, their per-user subdirectories, the
+   > usual system directories, and any existing directory that is not already a mount point
+   > and is either non-empty or unreadable. The same check gates every step that uses the
+   > mount point — the `/etc/fstab` entry, the udev rule, `restic init`, and the unit's
+   > `ConditionPathExists`.
 
    **Also set `BACKUP_EXTERNAL_UUID`** (`lsblk -o NAME,UUID,LABEL`). `backup-setup`
    uses it for two things: an `/etc/fstab` entry so the drive mounts at boot (with

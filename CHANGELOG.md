@@ -103,9 +103,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at all — a repo path one level too shallow resolves to `/media/<user>` and a typo resolves
   to `$HOME`, and every check downstream passed, so the external disk would have been mounted
   over the user's home at every boot. `nofail` is no help there; the mount *succeeds*.
-  `external_mount_point_sane` now refuses non-absolute and unnormalised paths, a deny-list of
-  system directories (`$HOME`, `/media/$USER`, `/run/media/$USER`, …), and any existing
-  non-empty directory that is not already a mount point.
+  `external_mount_point_sane` now refuses non-absolute, unnormalised (`/./` included) and
+  symlinked paths, a deny-list of system directories (`$HOME`, `/media/$USER`,
+  `/run/media/$USER`, … — the user resolved with `id -un`, never the login-set `$USER`,
+  which is empty under `sudo -u`/`env -i`), and any existing directory that is not already a
+  mount point and is either non-empty or unlistable. It gates the `/etc/fstab` write, the
+  udev rule, `restic init` **and** the `ConditionPathExists`/`After=` wiring — the repo
+  init is the step that would otherwise create the "external" repository on the internal
+  disk for a `BACKUP_EXTERNAL_REPO` of `/restic`, since `/` is a mount point.
   - **`render … | sudo tee /etc/…` truncates on failure.** `backup-render.sh` became fallible
     when unresolved placeholders were made a hard error, but three call sites still piped it
     into `tee`, which empties the destination before the renderer's status is known — leaving
@@ -143,7 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the suite re-declares `set +e` — without it the first expected-to-fail assignment killed
   the run mid-table with no failure count printed. It also aborts unless every function under
   test is defined and every required tool present: most of these assertions are "nothing was
-  installed", which is exactly what a suite that loaded nothing produces. 27 checks → 61.
+  installed", which is exactly what a suite that loaded nothing produces. 27 checks → 68.
 
 - **Backups: the external HDD stopped mounting, and every layer said it was fine.**
   `BACKUP_EXTERNAL_UUID` had been declared in `backup.local.template` since the backup
