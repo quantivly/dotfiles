@@ -270,9 +270,18 @@ stty -ixon 2>/dev/null
 # Deferred to the first prompt rather than run here: p10k's instant prompt turns
 # any console output during initialization into a warning box, and a guard whose
 # side effect is a warning about warnings teaches people to silence it.
-if (( $+functions[_dotfiles_live_config_warn] )); then
+# Once per SHELL, not once per source. The hook unhooks itself, but re-sourcing
+# this file — `zshreload`, `source ~/.zshrc`, the edit loop CLAUDE.md documents
+# for testing config changes — re-defined and re-armed it, so anyone iterating
+# on their dotfiles got the three-line warning on every single reload. That is
+# the same "guard people learn to silence" failure the deferral above exists to
+# avoid, reached from the other direction. _DOTFILES_GUARD_SHOWN is this shell
+# remembering it has already said its piece.
+if (( $+functions[_dotfiles_live_config_warn] )) && [[ -z "${_DOTFILES_GUARD_SHOWN:-}" ]]; then
   _dotfiles_guard_precmd() {
     add-zsh-hook -d precmd _dotfiles_guard_precmd
+    typeset -g _DOTFILES_GUARD_SHOWN=1
+    unfunction _dotfiles_guard_precmd   # no dead function left in the table
     _dotfiles_live_config_warn
   }
   autoload -Uz add-zsh-hook && add-zsh-hook precmd _dotfiles_guard_precmd

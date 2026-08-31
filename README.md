@@ -530,19 +530,26 @@ dotfiles-doctor --fetch   # ...against the real remote, not the ref already on d
 ref is** (nothing fetches on a schedule, so "not behind" is only ever as current as your
 last `git fetch` — `--fetch` fixes that), commits ahead/behind it, exactly which managed
 files differ, uncommitted changes to them, and link integrity: declared-but-not-installed,
-installed-but-dangling, and linked-but-pointing-outside-this-checkout. The live set is
-wider than the link list — `zsh/` is sourced by the linked `~/.zshrc`, and `scripts/` is
-executed straight out of the working tree by the `backup-*`/`audit-*` commands and by a
-systemd unit.
+installed-but-dangling, linked-but-pointing-outside-this-checkout, and linked inside it
+but at the wrong file (rename a source and forget to re-run `./install`: the old link
+still resolves to a real file, so the other three all pass while your live config is the
+old source). The live set is wider than the link list — `zsh/` is sourced by the linked
+`~/.zshrc`, `scripts/` is executed straight out of the working tree by the
+`backup-*`/`audit-*` commands and by a systemd unit, and `~/.config/mise/config.toml` is
+a symlink `install` creates itself rather than through dotbot.
 
 A one-line warning also fires on the first prompt of any shell whose live config is off
-`main`, is on `main` at a different commit than `origin/main`, or was sourced from a
-different checkout altogether — `DOTFILES_GUARD_QUIET=1` silences it while you are
-deliberately dogfooding a branch.
+`main`, is on `main` at a different commit than `origin/main`, is on `main` and matching a
+ref you have not refreshed in a week (both commits are read off local disk, so they agree
+forever once you stop fetching), or was sourced from a different checkout altogether. It
+appears once per shell — reloading with `source ~/.zshrc` will not repeat it — and
+`DOTFILES_GUARD_QUIET=1` silences it while you are deliberately dogfooding a branch.
 
 `./install` refuses to run from a worktree: linking from there would point your live
-`~/.zshrc` and `~/.gitconfig` at a feature branch, invisibly. Override with
-`DOTFILES_ALLOW_WORKTREE_INSTALL=1` if that is genuinely what you want.
+`~/.zshrc` and `~/.gitconfig` at a feature branch, invisibly. It is a worktree only if
+git says so (git-dir ≠ git-common-dir), so a `--separate-git-dir` clone or a submodule
+installs normally. Override with `DOTFILES_ALLOW_WORKTREE_INSTALL=1` if a worktree really
+is what you mean.
 
 ### Shell Configuration
 

@@ -4,12 +4,14 @@
 # ==============================
 #
 # State table for the dotfiles live-config guard in zsh/functions/system.sh
-# (_dotfiles_head_state, _dotfiles_ref_sha, _dotfiles_pin_divergence,
-# _dotfiles_guard_verdict, _dotfiles_live_config_warn, _dotfiles_link_map,
-# _dotfiles_static_live_paths, _dotfiles_fetch_age_hours, dotfiles-doctor,
-# dotfiles-work) and the _doctor_* reporting helpers those share with
-# backup-doctor — including, over every doctor entry point rather than a fixed
-# list, the "declare the counters local" convention they depend on.
+# (_dotfiles_git_dir, _dotfiles_head_state, _dotfiles_ref_sha,
+# _dotfiles_pin_divergence, _dotfiles_guard_verdict, _dotfiles_live_config_warn,
+# _dotfiles_link_map, _dotfiles_static_live_paths, _dotfiles_extra_links,
+# _dotfiles_fetch_age_hours, dotfiles-doctor, dotfiles-work), the _doctor_*
+# reporting helpers those share with backup-doctor — including, over every doctor
+# entry point rather than a fixed list, the "declare the counters local"
+# convention they depend on — and the two files that consume them: `install`'s
+# worktree refusal and the one-shot precmd hook in `zshrc`.
 #
 # Why this exists: the guard's whole job is to notice that the running config is
 # not the reviewed config. A guard that reports "all clear" when it is actually
@@ -45,6 +47,10 @@ for tool in zsh git awk; do
   command -v "$tool" >/dev/null || missing+=("$tool")
 done
 (( ${#missing[@]} == 0 )) || fatal "missing required tool(s): ${missing[*]}"
+# One row writes to /dev/full to make printf fail for real. Without it that row
+# would pass for the wrong reason, which is the failure mode of every other row
+# in this file.
+[[ -c /dev/full ]] || fatal "/dev/full is required (the failing-printf row needs a write that returns ENOSPC)"
 [[ -r "$SYSTEM_SH" ]] || fatal "cannot read $SYSTEM_SH"
 
 # Assert the code under test actually loads before asserting anything about what
@@ -98,6 +104,38 @@ check "newline-only HEAD"     "$(head_state "$TMPROOT/blank")" "unknown"
 check "no .git at all"        "$(head_state "$TMPROOT/none")"  "unknown"
 check "worktree .git file"    "$(head_state "$TMPROOT/wt")"    "unknown"
 check "empty root argument"   "$(head_state '')"               "unknown"
+
+echo
+echo "=== _dotfiles_git_dir: which .git layouts hold a live checkout ==="
+# `.git` is a directory in an ordinary clone and a FILE in two layouts that must
+# not be treated alike. The old `[[ -f .git ]]` test filed a --separate-git-dir
+# clone under "worktree", so ./install refused and dotfiles-doctor returned 1 on
+# every single run of one — a permanently-red checker, i.e. an ignored one. git's
+# own marker for a linked worktree is the `commondir` file in the dir it points
+# at, so that is what is read, rather than pattern-matching the path.
+SEP="$TMPROOT/sepgitdir"
+git init -q -b main --separate-git-dir="$TMPROOT/sepgit" "$SEP"
+PRIMARY="$TMPROOT/wtmain"
+git init -q -b main "$PRIMARY"
+git -C "$PRIMARY" config user.email t@example.com
+git -C "$PRIMARY" config user.name  Test
+git -C "$PRIMARY" commit -q --allow-empty -m init
+git -C "$PRIMARY" worktree add -q -b wtbranch "$TMPROOT/realwt" >/dev/null 2>&1
+[[ -f "$TMPROOT/realwt/.git" && -f "$SEP/.git" ]] \
+  || fatal "fixture: both a linked worktree and a --separate-git-dir clone must have a .git FILE"
+
+gitkind() { zrun "_dotfiles_git_dir '$1'; print -r -- \$_DOTFILES_GIT_KIND"; }
+
+check "ordinary clone"           "$(gitkind "$PRIMARY")"         "primary"
+check "separate-git-dir clone"   "$(gitkind "$SEP")"             "separate"
+check "linked worktree"          "$(gitkind "$TMPROOT/realwt")"  "worktree"
+check "not a repo at all"        "$(gitkind "$TMPROOT/none")"    "none"
+check "empty root argument"      "$(gitkind '')"                 "none"
+# Why the distinction is worth drawing: a --separate-git-dir clone is an ordinary
+# place to work and its HEAD must be readable. A linked worktree's must not be —
+# nothing there is live, so "unknown", and therefore silence, is the answer.
+check "separate-git-dir HEAD read"    "$(head_state "$SEP")"            "branch main"
+check "linked worktree stays unknown" "$(head_state "$TMPROOT/realwt")" "unknown"
 
 echo
 echo "=== _dotfiles_live_config_warn: what the user sees at shell startup ==="
@@ -200,6 +238,39 @@ check "commented path ignored" "$(map | grep -c 'commented-out')"               
 check "no spurious entries"    "$(map | wc -l | tr -d ' ')"                                    "4"
 check "unreadable conf fails"  "$(zsh -c "source '$SYSTEM_SH'; _dotfiles_link_map '$TMPROOT/none'" >/dev/null 2>&1; echo $?)" "1"
 
+# Quoting, dotbot's null form, and where an entry ENDS. All three were silent:
+# a quoted source kept its quotes and became a git pathspec matching nothing
+# (git exits 0 for that, so the file left the drift check while still counting as
+# an installed link); the null form — `~/.vimrc:`, source inferred from the
+# destination, which dotbot installs for real — was dropped entirely; and
+# `target` was never cleared when the link: block ended, so the next `path:`
+# anywhere below became the last link's source.
+mkdir -p "$TMPROOT/conf2"
+cat > "$TMPROOT/conf2/install.conf.yaml" <<'YAML'
+- link:
+    ~/.gitconfig: 'gitconfig'
+    ~/.tmux.conf: "tmux.conf"
+    ~/.vimrc:
+    ~/.config/git/ignore:
+    '~/.quoted': quoted-src
+    ~/.last.zsh:
+      path: last.zsh
+- shell:
+    - command: echo hi
+      path: NOT-A-LINK-SOURCE
+YAML
+map2() { zrun "_dotfiles_link_map '$TMPROOT/conf2'"; }
+
+check "single-quoted source"    "$(map2 | grep -c '^~/.gitconfig gitconfig 0$')"      "1"
+check "double-quoted source"    "$(map2 | grep -c '^~/.tmux.conf tmux.conf 0$')"      "1"
+# dotbot's _default_target(): the destination's basename, minus one leading dot.
+check "null source inferred"    "$(map2 | grep -c '^~/.vimrc vimrc 0$')"              "1"
+check "null source, nested"     "$(map2 | grep -c '^~/.config/git/ignore ignore 0$')" "1"
+check "quoted destination"      "$(map2 | grep -c '^~/.quoted quoted-src 0$')"        "1"
+check "last entry still parsed" "$(map2 | grep -c '^~/.last.zsh last.zsh 0$')"        "1"
+check "entry ends with its block" "$(map2 | grep -c 'NOT-A-LINK-SOURCE')"             "0"
+check "no spurious entries (2)" "$(map2 | wc -l | tr -d ' ')"                         "6"
+
 # Live-but-unlinked paths. `zsh` because ~/.zshrc sources all of it; `scripts`
 # because backup-*/audit-*/gnome-apply shell out to ~/.dotfiles/scripts/... and
 # systemd/herdr-server.service ExecStarts from there — a running unit whose next
@@ -241,6 +312,47 @@ check "packed ref diverges"   "$(diverged "$REFREPO")"                         "
 rm "$REFREPO/.git/packed-refs"
 check "no remote ref: unknown" "$(diverged "$REFREPO")"                        "unknown"
 check "worktree: unknown"      "$(diverged "$TMPROOT/wt")"                     "unknown"
+
+# Equal shas are not by themselves an all-clear. Both are read off local disk, so
+# they agree the instant the machine stops fetching — permanently, and most of
+# all on the machine that has not fetched since the fix it is missing was merged.
+# That is #87 exactly, and the age of the ref is therefore part of the answer.
+# Epoch arithmetic, not `touch -d '8 days ago'`: that is a WALL-CLOCK offset, so
+# it lands 7d23h or 8d1h back across a DST change and the row fails twice a year
+# on a developer's laptop for no reason connected to the code.
+staleref() { touch -d "@$(( $(date +%s) - $1 * 86400 ))" "$2"; }
+printf '%s\n' "$SHA_A" > "$REFREPO/.git/refs/remotes/origin/main"
+check "fresh and same => same"      "$(diverged "$REFREPO")" "same"
+staleref 8 "$REFREPO/.git/refs/remotes/origin/main"
+check "stale and same => stale"     "$(diverged "$REFREPO")" "stale"
+check "threshold is overridable" \
+      "$(zrun "DOTFILES_STALE_WARN_HOURS=1000 _dotfiles_pin_divergence '$REFREPO' main; print -r -- \$_DOTFILES_DIVERGED")" "same"
+# An unreadable age must not fall back to the answer it would have had if
+# everything were fine: refs in packed-refs alone have no mtime to read.
+rm "$REFREPO/.git/refs/remotes/origin/main"
+cat > "$REFREPO/.git/packed-refs" <<PACKED
+# pack-refs with: peeled fully-peeled sorted
+$SHA_A refs/remotes/origin/main
+PACKED
+check "unknown age is not 'same'"   "$(diverged "$REFREPO")" "unknown"
+rm "$REFREPO/.git/packed-refs"
+# A difference is knowable whatever the ref's age, and outranks staleness.
+printf '%s\n' "$SHA_B" > "$REFREPO/.git/refs/remotes/origin/main"
+staleref 8 "$REFREPO/.git/refs/remotes/origin/main"
+check "stale but differing => differs" "$(diverged "$REFREPO")" "differs"
+
+# The startup line for it. Silence in this state is what let a merged fix sit
+# unrun for a day while every check on the machine reported an all-clear.
+mkdir -p "$TMPROOT/stalepin/.git/refs/heads" "$TMPROOT/stalepin/.git/refs/remotes/origin"
+printf 'ref: refs/heads/main\n' > "$TMPROOT/stalepin/.git/HEAD"
+printf '%s\n' "$SHA_A" > "$TMPROOT/stalepin/.git/refs/heads/main"
+printf '%s\n' "$SHA_A" > "$TMPROOT/stalepin/.git/refs/remotes/origin/main"
+staleref 10 "$TMPROOT/stalepin/.git/refs/remotes/origin/main"
+check "stale pin warns at startup"  "$(warn "$TMPROOT/stalepin" main | grep -c 'has not been fetched in 10d')" "1"
+check "stale pin names the fix"     "$(warn "$TMPROOT/stalepin" main | grep -c 'dotfiles-doctor --fetch')"     "1"
+check "QUIET silences stale too"    "$(warn "$TMPROOT/stalepin" main 'DOTFILES_GUARD_QUIET=1')"               ""
+touch "$TMPROOT/stalepin/.git/refs/remotes/origin/main"
+check "fresh pin is silent again"   "$(warn "$TMPROOT/stalepin" main)"                                        ""
 
 echo
 echo "=== dotfiles-doctor against a real fixture repo ==="
@@ -415,6 +527,15 @@ check "empty map: no all-clear"   "$(nomap | grep -c 'none — every live file m
 check "empty map: no green tick"  "$(nomap | grep -c 'Live config is the reviewed config')" "0"
 check "empty map exits 1" \
       "$(zsh -c "source '$SYSTEM_SH'; DOTFILES_ROOT='$NOMAP' DOTFILES_PIN_BRANCH=main dotfiles-doctor" >/dev/null 2>&1; echo $?)" "1"
+# And the two ways of not knowing are named apart, because their fixes differ.
+# _dotfiles_link_map has always returned non-zero for "could not read the file",
+# but its only caller took its output through a process substitution and threw
+# the status away, so both landed on one message that named only the other one.
+check "empty map says which"      "$(nomap | grep -c 'declares nothing this parser recognises')" "1"
+mv "$NOMAP/install.conf.yaml" "$NOMAP/install.conf.yaml.gone"
+check "unreadable map says which" "$(nomap | grep -c 'missing or unreadable')"                   "1"
+check "unreadable map: no tick"   "$(nomap | grep -c 'Live config is the reviewed config')"      "0"
+mv "$NOMAP/install.conf.yaml.gone" "$NOMAP/install.conf.yaml"
 
 echo
 echo "=== uncommitted changes are scoped to live files ==="
@@ -437,6 +558,22 @@ check "expected-dirty exits 0"    "$(doctor_rc main "DOTFILES_EXPECTED_DIRTY='co
 check "unexpected-dirty warns"    "$(doctor main | grep -c '⚠ M config/thing.toml')" "1"
 git -C "$REPO" checkout -q -- config/thing.toml
 
+# Plain --porcelain is not a format you can compare paths against: it C-quotes
+# any path holding a space and writes a rename as "old -> new". Both reached
+# DOTFILES_EXPECTED_DIRTY as a string no entry could ever equal, so such a file
+# was a permanent warning with no way to excuse it — and word-splitting the
+# variable made a spaced path impossible to express in the first place.
+doctor_arr() { zrun "HOME='$FAKEHOME'; DOTFILES_ROOT='$REPO'; DOTFILES_PIN_BRANCH=main; DOTFILES_EXPECTED_DIRTY=($1); dotfiles-doctor"; }
+: > "$REPO/zsh/a file with spaces.sh"
+check "spaced path is unquoted"  "$(doctor main | grep -c '?? zsh/a file with spaces.sh')"                  "1"
+check "spaced path excusable"    "$(doctor_arr "'zsh/a file with spaces.sh'" | grep -c 'spaces.sh (expected')" "1"
+rm "$REPO/zsh/a file with spaces.sh"
+git -C "$REPO" mv zsh/zshrc.company zsh/zshrc.renamed
+check "rename shows both paths"  "$(doctor main | grep -c 'zsh/zshrc.company → zsh/zshrc.renamed')"         "1"
+check "rename excusable by old"  "$(doctor main "DOTFILES_EXPECTED_DIRTY='zsh/zshrc.company'" | grep -c '(expected')" "1"
+check "rename excusable by new"  "$(doctor main "DOTFILES_EXPECTED_DIRTY='zsh/zshrc.renamed'" | grep -c '(expected')" "1"
+git -C "$REPO" mv zsh/zshrc.renamed zsh/zshrc.company
+
 echo
 echo "=== links must resolve INSIDE this checkout ==="
 # `./install` run from a worktree re-points the whole live config at a feature
@@ -453,6 +590,24 @@ check "foreign link named"     "$(doctor main | grep -c 'otherworktree/gitconfig
 check "foreign link exits 1"   "$(doctor_rc main)"                                      "1"
 ln -sf "$REPO/gitconfig" "$FAKEHOME/.gitconfig"
 check "own links pass"         "$(doctor main | grep -c 'every link resolves inside')"  "1"
+
+echo
+echo "=== a link into the RIGHT tree but at the WRONG file ==="
+# Rename a source in install.conf.yaml and forget to re-run ./install: the old
+# link still resolves to a real file inside the checkout, so it is not missing,
+# not dangling and not foreign. Three green ticks and a full all-clear, while the
+# live file is the old source — permanently, since nothing else ever looks.
+ln -sf "$REPO/p10k.zsh" "$FAKEHOME/.config/thing.toml"
+check "wrong-file link reported" "$(doctor main | grep -c 'points at the WRONG file')"          "1"
+check "wrong-file link named"    "$(doctor main | grep -c '[~]/.config/thing.toml→p10k.zsh')"  "1"
+check "wrong-file exits 1"       "$(doctor_rc main)"                                            "1"
+# It is none of the other three, so it must not be miscounted as one of them —
+# each has a different fix, and "not linked (run ./install)" is wrong advice here.
+check "wrong file is not foreign"  "$(doctor main | grep -c 'points OUTSIDE')"                  "0"
+check "wrong file is not missing"  "$(doctor main | grep -c 'not linked: ~/.config/thing.toml')" "0"
+check "wrong file is not dangling" "$(doctor main | grep -c 'dangling (target absent')"          "0"
+ln -sf "$REPO/config/thing.toml" "$FAKEHOME/.config/thing.toml"
+check "correct link passes"      "$(doctor main | grep -c 'points at the source install.conf.yaml declares')" "1"
 
 echo
 echo "=== a conditional link (\`if:\`) that is absent is not a failure ==="
@@ -491,8 +646,12 @@ echo "=== a stale origin ref is not a current one ==="
 # ago". That is the #87 scenario reported as a green tick.
 check "fresh fetch is stated"  "$(doctor main | grep -c 'last fetched 0h ago')" "1"
 
-touch -d '3 days ago' "$REPO/.git/FETCH_HEAD"
-[[ -e "$REPO/.git/refs/remotes/origin/main" ]] && touch -d '3 days ago' "$REPO/.git/refs/remotes/origin/main"
+# Epoch arithmetic, not `touch -d '3 days ago'`: that is a wall-clock offset, so
+# across a DST transition it lands 71 or 73 hours back and this row fails twice a
+# year on a developer's machine for a reason unconnected to the code. CI runs UTC
+# and would never have shown it.
+staleref 3 "$REPO/.git/FETCH_HEAD"
+[[ -e "$REPO/.git/refs/remotes/origin/main" ]] && staleref 3 "$REPO/.git/refs/remotes/origin/main"
 check "stale ref warns"        "$(doctor main | grep -c 'last fetched 72h ago')"            "1"
 check "stale ref: no green tick" "$(doctor main | grep -c 'Live config is the reviewed config')" "0"
 check "stale ref still exits 0"  "$(doctor_rc main)"                                        "0"
@@ -518,6 +677,94 @@ git -C "$PUSHER" push -q origin main
 check "stale run cannot see it"  "$(doctor main | grep -c 'commit(s) BEHIND')" "0"
 check "--fetch sees it"          "$(doctor main '' '--fetch' | grep -c '1 commit(s) BEHIND')" "1"
 check "--fetch exits 1"          "$(doctor_rc main '' '--fetch')" "1"
+
+echo
+echo "=== install's own symlinks are live too (~/.config/mise/config.toml) ==="
+# .mise.toml is symlinked by `install` itself, not by dotbot, so it appears in no
+# link: block — and was therefore in nothing the doctor checked. CLAUDE.md
+# records the bill for that going unnoticed: the live config declared 10 tools
+# against the repo's 23, ~11 binaries never reached PATH, and `git diff` died
+# with "unable to execute pager 'delta'", for months, with nothing reporting it.
+MISEREPO="$TMPROOT/miserepo"; MISEHOME="$TMPROOT/misehome"
+git init -q -b main "$MISEREPO"
+git -C "$MISEREPO" config user.email t@example.com
+git -C "$MISEREPO" config user.name  Test
+mkdir -p "$MISEREPO/zsh"
+printf -- '- link:\n    ~/.gitconfig: gitconfig\n' > "$MISEREPO/install.conf.yaml"
+printf '[user]\n\tname = Fixture\n' > "$MISEREPO/gitconfig"
+printf '[tools]\n' > "$MISEREPO/.mise.toml"
+git -C "$MISEREPO" add -A >/dev/null && git -C "$MISEREPO" commit -qm init
+mkdir -p "$MISEHOME/.local/bin" "$MISEHOME/.config/mise"
+printf '#!/bin/sh\n' > "$MISEHOME/.local/bin/mise"; chmod +x "$MISEHOME/.local/bin/mise"
+ln -s "$MISEREPO/gitconfig" "$MISEHOME/.gitconfig"
+
+# PATH is emptied for the unit rows so the answer depends on the fixture and not
+# on whether the machine running the suite happens to have mise installed.
+extra() { zrun "PATH=/nonexistent; HOME='$1'; _dotfiles_extra_links '$2'"; }
+check "emitted when install would" "$(extra "$MISEHOME" "$MISEREPO" | grep -c '^~/.config/mise/config.toml .mise.toml 0$')" "1"
+# Both halves of install's own gate, because a link install never made is not a
+# fault — and a checker that is red for a correct state is one nobody reads.
+check "no .mise.toml: not emitted"  "$(extra "$MISEHOME"   "$REPO"     | wc -l | tr -d ' ')" "0"
+check "no mise at all: not emitted" "$(extra "$TMPROOT/none" "$MISEREPO" | wc -l | tr -d ' ')" "0"
+check "mise on PATH also counts" \
+      "$(zrun "PATH='$MISEHOME/.local/bin'; HOME='$TMPROOT/none'; _dotfiles_extra_links '$MISEREPO'" | wc -l | tr -d ' ')" "1"
+
+misedoc() { zrun "HOME='$MISEHOME' DOTFILES_ROOT='$MISEREPO' DOTFILES_PIN_BRANCH=main dotfiles-doctor"; }
+check "counted with the declared links" "$(misedoc | grep -c '1/2 present')"                                 "1"
+check "absent mise link is named"       "$(misedoc | grep -c 'not linked: ~/.config/mise/config.toml')"      "1"
+ln -s "$MISEREPO/.mise.toml" "$MISEHOME/.config/mise/config.toml"
+check "installed mise link passes"      "$(misedoc | grep -c '2/2 declared links present')"                  "1"
+# ...and being in the link list is what puts .mise.toml in the live set at all.
+echo 'changed = true' >> "$MISEREPO/.mise.toml"
+check "its drift is visible"            "$(misedoc | grep -c 'M .mise.toml')"                                "1"
+git -C "$MISEREPO" checkout -q -- .mise.toml
+
+echo
+echo "=== a declared source that is not in the tree is checked by NOTHING ==="
+# git exits 0 with empty output for a pathspec matching nothing, so a typo or a
+# rename left un-propagated into install.conf.yaml silently NARROWS every check
+# instead of failing one: `~/.zshrc: zshrcc` takes the most live file in the repo
+# out of the drift check and still prints a green tick.
+printf -- '- link:\n    ~/.gitconfig: gitconfigg\n' > "$MISEREPO/install.conf.yaml"
+misedoc_rc() { zsh -c "source '$SYSTEM_SH'; HOME='$MISEHOME' DOTFILES_ROOT='$MISEREPO' DOTFILES_PIN_BRANCH=main dotfiles-doctor" >/dev/null 2>&1; echo $?; }
+check "absent source reported" "$(misedoc | grep -c 'declared source(s) absent from this tree')" "1"
+check "absent source named"    "$(misedoc | grep -c '[~]/.gitconfig → gitconfigg')"             "1"
+check "absent source exits 1"  "$(misedoc_rc)"                                                   "1"
+check "absent source: no tick" "$(misedoc | grep -c 'Live config is the reviewed config')"       "0"
+
+echo
+echo "=== a failing ✓ printf must not be counted as a ✗ ==="
+# `cond && _doctor_ok … || _doctor_bad …` runs BOTH branches when the ✓ printf
+# returns non-zero, so a check that PASSED increments the failure count and the
+# doctor exits 1. ShellCheck names the idiom (SC2015) but never sees this file.
+#
+# The write must actually fail, and closing stdout is not enough: zsh's printf
+# prints "write error: bad file descriptor" and still returns 0 there, so a
+# `>&-` run reproduces nothing. /dev/full returns ENOSPC and a status of 1,
+# which is the real-world case — a redirected run on a filesystem that filled
+# up. Verified both ways against a copy with the old idiom restored.
+# Its own pristine repo: $REPO is a commit behind by this point in the table
+# (the --fetch rows put it there), and a doctor that legitimately exits 1 would
+# make this row measure the fixture instead of the idiom.
+CLEANREPO="$TMPROOT/cleanrepo"; CLEANHOME="$TMPROOT/cleanhome"
+git init -q --bare -b main "$TMPROOT/cleanremote.git"
+git init -q -b main "$CLEANREPO"
+git -C "$CLEANREPO" config user.email t@example.com
+git -C "$CLEANREPO" config user.name  Test
+mkdir -p "$CLEANREPO/zsh" "$CLEANREPO/scripts"
+printf -- '- link:\n    ~/.gitconfig: gitconfig\n' > "$CLEANREPO/install.conf.yaml"
+printf '[user]\n\tname = Fixture\n' > "$CLEANREPO/gitconfig"
+echo 'echo hi' > "$CLEANREPO/zsh/zshrc.company"
+echo 'echo hi' > "$CLEANREPO/scripts/thing.sh"
+git -C "$CLEANREPO" add -A >/dev/null && git -C "$CLEANREPO" commit -qm init
+git -C "$CLEANREPO" remote add origin "$TMPROOT/cleanremote.git"
+git -C "$CLEANREPO" push -q origin main && git -C "$CLEANREPO" fetch -q origin
+mkdir -p "$CLEANHOME"; ln -s "$CLEANREPO/gitconfig" "$CLEANHOME/.gitconfig"
+clean_rc() { zsh -c "source '$SYSTEM_SH'; HOME='$CLEANHOME' DOTFILES_ROOT='$CLEANREPO' DOTFILES_PIN_BRANCH=main dotfiles-doctor $1"; echo $?; }
+# Assert the fixture before the behaviour: "exits 0 when writes fail" is also
+# what a doctor that never ran at all would produce.
+check "fixture is clean to begin with"     "$(clean_rc '>/dev/null 2>&1')" "0"
+check "unwritable stdout is not a failure" "$(clean_rc '>/dev/full 2>/dev/null')" "0"
 
 echo
 echo "=== the doctor leaves nothing behind in the shell ==="
@@ -616,6 +863,66 @@ check "new branch has no upstream" "$(git -C "$WTBASE/feat-new" config --get bra
 check "no upstream merge ref"      "$(git -C "$WTBASE/feat-new" config --get branch.feat/new.merge)"  ""
 check "re-entry is recognised"     "$(work feat/new | grep -c 'Entered existing worktree')"           "1"
 check "re-entry exits 0"           "$(work_rc feat/new)"                                              "0"
+
+echo
+echo "=== ./install refuses a worktree — and ONLY a worktree ==="
+# The refusal is the first thing the script does, so a fixture with no dotbot
+# submodule fails right after it either way: these rows read the MESSAGE, not the
+# exit code. `[[ -f .git ]]` was the old test, and a --separate-git-dir clone and
+# a submodule both have a .git FILE — they got this refusal on every run, with
+# only an env var framed as "deploy this worktree" to escape it.
+try_install() { ( cd "$1" && cp "$DOTFILES/install" . && bash ./install 2>&1 ); }
+check "refuses a linked worktree"   "$(try_install "$TMPROOT/realwt" | grep -c 'Refusing to install from a git worktree')" "1"
+check "allows --separate-git-dir"   "$(try_install "$SEP"            | grep -c 'Refusing to install from a git worktree')" "0"
+check "allows an ordinary checkout" "$(try_install "$PRIMARY"        | grep -c 'Refusing to install from a git worktree')" "0"
+check "override still escapes it" \
+      "$( ( cd "$TMPROOT/realwt" && DOTFILES_ALLOW_WORKTREE_INSTALL=1 bash ./install 2>&1 ) | grep -c 'Refusing to install' )" "0"
+
+echo
+echo "=== the startup warning fires once per SHELL, not once per source ==="
+# The hook unhooks itself, but re-sourcing zshrc re-defined and re-armed it, so
+# `zshreload` / `source ~/.zshrc` — the edit loop CLAUDE.md documents for testing
+# config changes — reprinted the three-line warning every single time. A guard
+# that repeats itself on every reload is one people learn to silence, which is
+# the same failure the deferral to the first prompt exists to avoid.
+GUARDSNIP="$TMPROOT/guardsnip.zsh"
+sed -n '/^# Once per SHELL/,/^fi$/p' "$DOTFILES/zshrc" > "$GUARDSNIP"
+grep -q '_dotfiles_guard_precmd' "$GUARDSNIP" || fatal "could not extract the guard hook from $DOTFILES/zshrc"
+# $1 is whatever happens AFTER the first prompt has already been drawn.
+hookruns() {
+  zsh -c "
+    source '$SYSTEM_SH'
+    HOME='$WARNHOME'; DOTFILES_ROOT='$TMPROOT/br'; DOTFILES_PIN_BRANCH=main
+    autoload -Uz add-zsh-hook
+    prompt() { local f; for f in \$precmd_functions; do \$f; done }
+    source '$GUARDSNIP'; prompt
+    $1
+  " 2>&1 | grep -c 'live config is branch'
+}
+check "first prompt warns once"     "$(hookruns '')"                             "1"
+check "later prompts stay quiet"    "$(hookruns 'prompt; prompt')"               "1"
+check "a reload does not re-arm it" "$(hookruns "source '$GUARDSNIP'; prompt")"  "1"
+check "no dead hook left in the table" \
+      "$(zsh -c "
+          source '$SYSTEM_SH'
+          HOME='$WARNHOME'; DOTFILES_ROOT='$TMPROOT/br'; DOTFILES_PIN_BRANCH=main
+          autoload -Uz add-zsh-hook
+          source '$GUARDSNIP'
+          { for f in \$precmd_functions; do \$f; done } >/dev/null 2>&1
+          print -r -- \$+functions[_dotfiles_guard_precmd]")" "0"
+
+echo
+echo "=== the module itself: one note glyph, and it parses ==="
+# The two doctors share ✓/✗/⚠ through _doctor_*; a hand-rolled fourth glyph in
+# one of them is the deduplication half-done, and puts the next change to how
+# notes render back in four places.
+check "no hand-rolled note lines" "$(grep -c "printf '  • " "$SYSTEM_SH")" "0"
+# zsh/functions/*.sh is read by no other static check: the shellcheck job selects
+# files by a `^#!` shebang and these have none, and pre-commit excludes the
+# directory because the syntax is zsh. CI now runs `zsh -n` over it; so does this,
+# so a local run catches it before the push.
+check "every functions module parses" \
+      "$(for f in "$DOTFILES"/zsh/functions/*.sh; do zsh -n "$f" 2>&1 || echo BAD; done | grep -c BAD)" "0"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

@@ -112,13 +112,22 @@ dotfiles-doctor --fetch      # ...compared against the actual remote, not a stal
 
 `dotfiles-doctor` reports the pin state, how stale `origin/main` is, commits
 ahead/behind it, **which managed files actually differ** (the blast radius, not just a
-commit count), uncommitted changes to those files, and link integrity in three
-directions — declared-but-not-installed, installed-but-dangling, and
-linked-but-pointing-outside-this-checkout.
+commit count), uncommitted changes to those files, and link integrity in four
+directions — declared-but-not-installed, installed-but-dangling,
+linked-but-pointing-outside-this-checkout, and linked-inside-the-checkout-but-at-the-
+wrong-file (rename a source without re-running `./install` and the first three all pass
+while the live file is the old source, permanently).
 
 A one-line warning also fires on the first prompt of any shell whose live config is off
-the pin branch, **or is on it at a different commit than `origin/main`** — that second
-case is the #87 outage, and nothing about a checkout sitting on `main` looks wrong. It
+the pin branch, **or is on it at a different commit than `origin/main`**, **or is on it
+and matching a ref older than `DOTFILES_STALE_WARN_HOURS` (168 = 7d)** — that second
+case is the #87 outage, and nothing about a checkout sitting on `main` looks wrong. The
+third exists because the first two shas are both read off local disk, so they agree the
+moment the machine stops fetching: "identical to `origin/main`" on a checkout that has
+not fetched in a month means identical to a month-old idea of `main`. The threshold is
+far more forgiving than the doctor's 24h deliberately — the doctor is asked, this fires
+unasked, and a line that appears every morning is a line nobody reads. Once per *shell*,
+not once per source: re-sourcing `zshrc` (`zshreload`) does not reprint it. It
 reads `.git/HEAD` and the two ref files directly rather than forking `git`: 0.07 ms for
 HEAD, 0.3 ms including both refs, against 2–5 ms for a single `git symbolic-ref` on this
 box, on every shell, forever. It cannot say *which* direction the divergence goes
@@ -137,8 +146,8 @@ review, all of which reported success:
   remote.
 - **`./install` from a worktree re-points the whole live config at a feature branch**,
   silently: `git status` stays clean either side, and the doctor's branch and drift
-  checks read the primary checkout. Three things now catch it: `install` refuses (`.git`
-  is a *file* in a worktree; `DOTFILES_ALLOW_WORKTREE_INSTALL=1` overrides), the doctor
+  checks read the primary checkout. Three things now catch it: `install` refuses
+  (`DOTFILES_ALLOW_WORKTREE_INSTALL=1` overrides), the doctor
   resolves every link to check it lands inside the checkout (testing only "is it a
   symlink" passed that state with "17/17 declared links present"), and the startup line
   resolves `~/.zshrc` — where the shell it is warning in was actually sourced from — with
@@ -155,6 +164,44 @@ review, all of which reported success:
 - **An unparseable `install.conf.yaml` yields no paths, and no paths reads as no drift.**
   The map is parsed once and a failure to read a single link is reported as
   `what is live is UNKNOWN` with a non-zero exit, never as "every live file matches".
+  "Could not read the file" and "the `link:` block declares nothing" are named apart,
+  because their fixes differ.
+- **A pathspec that matches nothing exits 0 with empty output**, so every way of getting
+  a source wrong *narrows* the drift check instead of failing it — and the narrowing is
+  invisible. Four of them were live at once: a quoted scalar (`~/.zshrc: 'zshrc'` is
+  ordinary YAML) kept its quotes; dotbot's null form (`~/.vimrc:`, source inferred from
+  the destination's basename minus one dot — `link.py:_default_target`) was dropped
+  whole; `target` was never cleared when the `link:` block ended, so the next `path:`
+  anywhere below became the last link's source; and nothing checked that a declared
+  source *exists*, so `~/.zshrc: zshrcc` would take the most live file in the repo out
+  of every check and still print a green tick. Every declared source is now asserted
+  present in the tree, once, before anything derived from the map runs.
+- **`~/.config/mise/config.toml` is a live symlink that dotbot does not create** —
+  `install` makes it itself, so it is in no `link:` block and was in nothing the doctor
+  checked. It is emitted alongside the declared links now, under both halves of
+  `install`'s own gate (the source exists, and mise is installed), so a machine without
+  mise does not get a permanently-red check for a link that correctly does not exist.
+  What its drifting costs is already recorded above: ~11 tools off `PATH` and a dead
+  `git diff`, for months.
+- **`git status --porcelain` is not a format you can compare paths against.** It
+  C-quotes any path with a space and writes a rename as `old -> new`, so no
+  `DOTFILES_EXPECTED_DIRTY` entry could ever match either and such a file was a
+  permanent, inexcusable warning. `-z` records are unquoted; a rename's original path
+  arrives as its own record; and the variable may now be a zsh array, since
+  word-splitting a scalar makes a path with a space impossible to express.
+- **`cond && ok || bad` reports both outcomes when the ✓ printf fails** (SC2015),
+  counting a failure for a check that passed. Not academic: `zsh`'s printf returns 1 on
+  ENOSPC, so a redirected run on a full filesystem inverted five checks. The lint that
+  names this never sees the file — the ShellCheck job selects by `^#!` shebang and
+  `zsh/functions/*.sh` has none, while pre-commit excludes the directory outright
+  because the syntax is zsh. CI's `zsh -n` loop now covers it, which is the only static
+  check that ever will.
+- **`[[ -f .git ]]` is not the worktree test.** A `--separate-git-dir` clone and a
+  submodule also have a `.git` FILE, and both are ordinary places to install from — they
+  got `./install`'s refusal on every run and a `dotfiles-doctor` that returned 1 forever,
+  with only an env var framed as "deploy this worktree" to escape. git's own definition
+  is git-dir ≠ git-common-dir (`install`), or the `commondir` file git writes in a linked
+  worktree's git dir (the forkless startup path).
 - **A git that cannot read the repo answers every question with silence.** A malformed
   `~/.gitconfig` (itself a managed symlink, so a bad branch can cause this) made
   `rev-parse` fail and the doctor announce "no origin/main ref — Fix: git fetch origin"
@@ -174,14 +221,17 @@ review, all of which reported success:
 
 Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 `DOTFILES_GUARD_QUIET=1` (silence the startup line while dogfooding a branch),
-`DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_EXPECTED_DIRTY`.
+`DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_STALE_WARN_HOURS`, `DOTFILES_EXPECTED_DIRTY`
+(scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`.
 
-State table: `scripts/test-dotfiles-guard.sh` (132 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (195 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
-ref, an unparseable link map, a symlink into another worktree, and an emptiness guard
-made unreachable by a hardcoded fallback path. It also covers the `_doctor_*` reporting
+ref, an unparseable link map, a symlink into another worktree, an emptiness guard made
+unreachable by a hardcoded fallback path, and every way of naming a link source that
+makes its git pathspec match nothing. Each is pinned by mutation: the fix is reverted in
+a copy of the tree and the row that names it has to fail. It also covers the `_doctor_*` reporting
 helpers that `dotfiles-doctor` and `backup-doctor` share — including the "declare the
 counters `local`" convention, asserted over every function that calls `_doctor_summary`
 rather than a fixed list, because a doctor that forgets it silently restores the globals

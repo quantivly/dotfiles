@@ -49,9 +49,15 @@ jobs:
       - name: Check bash syntax
         run: bash -n install
 
+      # zsh/functions/*.sh is included deliberately: it is the largest zsh in
+      # the repo and no other CI job reads it. The shellcheck job selects files
+      # by a `^#!` shebang and these have none (they are sourced, not run), and
+      # pre-commit's shellcheck excludes the directory outright because the
+      # syntax is zsh, not bash. Without this line a syntax error there is
+      # caught only if some test happens to source the file.
       - name: Check zsh syntax for all modules
         run: |
-          for file in zsh/zshrc.* zshrc p10k.zsh; do
+          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh; do
             if [ -f "$file" ]; then
               echo "Checking: $file"
               zsh -n "$file" || exit 1
