@@ -9,6 +9,42 @@ DOTBOT_BIN="bin/dotbot"
 BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${BASEDIR}"
+
+# This repo installs itself with dotbot `link:`, so every managed file becomes a
+# SYMLINK into ${BASEDIR}. Run from a git worktree, install therefore re-points
+# the entire live config — ~/.zshrc, ~/.gitconfig, ~/.config/git/ignore, the gh
+# account configs — at a feature branch, and nothing afterwards says so:
+# `git status` in the primary checkout stays clean, dotfiles-doctor's branch and
+# drift checks read that checkout, and only `readlink` reveals where the live
+# files actually come from. (dotfiles-doctor's link-integrity check does now flag
+# it, but only if someone runs it.)
+#
+# git's own definition of a linked worktree is that its git-dir differs from its
+# git-common-dir, and that is the test used here. `[[ -f .git ]]` is NOT that
+# test: a --separate-git-dir clone and a submodule also have a .git FILE, and
+# both are perfectly ordinary places to install from — they got this refusal on
+# every run, with only an env var framed as "deploy this worktree" to escape it.
+# Two empty answers (no git, or no repo) mean no evidence, so no refusal.
+git_dir="$(git -C "${BASEDIR}" rev-parse --git-dir 2>/dev/null || true)"
+git_common_dir="$(git -C "${BASEDIR}" rev-parse --git-common-dir 2>/dev/null || true)"
+if [[ -n "${git_dir}" && -n "${git_common_dir}" && "${git_dir}" != "${git_common_dir}" ]] \
+   && [[ -z "${DOTFILES_ALLOW_WORKTREE_INSTALL:-}" ]]; then
+    cat >&2 <<EOF
+✗ Refusing to install from a git worktree.
+
+  ${BASEDIR} is a worktree, so linking from here would point your live config
+  (~/.zshrc, ~/.gitconfig, ...) at this branch instead of the primary checkout —
+  silently, and with a clean 'git status' either side.
+
+  Install from the primary checkout instead:
+    cd ~/.dotfiles && ./install
+
+  If you really do mean to deploy this worktree:
+    DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install
+EOF
+    exit 1
+fi
+
 git -C "${DOTBOT_DIR}" submodule sync --quiet --recursive
 git submodule update --init --recursive "${DOTBOT_DIR}"
 
