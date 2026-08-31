@@ -245,7 +245,12 @@ echo "=== dotfiles-doctor against a real fixture repo ==="
 # A throwaway repo with an origin, so ahead/behind and the file-level diff get
 # exercised for real rather than stubbed.
 REMOTE="$TMPROOT/remote.git"; REPO="$TMPROOT/repo"
-git init -q --bare "$REMOTE"
+# -b main is load-bearing: without it the bare repo's HEAD points at an unborn
+# `master` on any machine that has not set init.defaultBranch (every CI runner),
+# a clone of it checks out nothing, and the push-from-elsewhere fixture below
+# then pushes no commit — making the --fetch rows fail for a reason that has
+# nothing to do with the code under test.
+git init -q --bare -b main "$REMOTE"
 git init -q -b main "$REPO"
 git -C "$REPO" config user.email t@example.com
 git -C "$REPO" config user.name  Test
@@ -494,12 +499,20 @@ check "stale ref still exits 0"  "$(doctor_rc main)"                            
 # this checkout never fetches, and the read-only run therefore cannot see it.
 # --fetch is the only thing that can, so it must actually change the verdict.
 PUSHER="$TMPROOT/pusher"
-git clone -q "$REMOTE" "$PUSHER"
+git clone -q -b main "$REMOTE" "$PUSHER"
 git -C "$PUSHER" config user.email t@example.com
 git -C "$PUSHER" config user.name Test
+# Assert the fixture before asserting the behaviour. Both rows below are of the
+# form "the doctor now sees a commit it could not see before", and a clone that
+# checked out nothing produces the same output as a doctor that ignored the
+# fetch — which is how this failed in CI while passing locally.
+git -C "$PUSHER" rev-parse --verify -q HEAD >/dev/null \
+  || fatal "pusher clone has no HEAD — the bare remote's default branch is wrong"
 echo 'echo merged-elsewhere' >> "$PUSHER/zsh/zshrc.company"
 git -C "$PUSHER" commit -qam "a fix merged by someone else"
 git -C "$PUSHER" push -q origin main
+[[ "$(git -C "$REMOTE" rev-parse refs/heads/main)" != "$(git -C "$REPO" rev-parse HEAD)" ]] \
+  || fatal "the pushed commit did not land on the remote — nothing for --fetch to find"
 check "stale run cannot see it"  "$(doctor main | grep -c 'commit(s) BEHIND')" "0"
 check "--fetch sees it"          "$(doctor main '' '--fetch' | grep -c '1 commit(s) BEHIND')" "1"
 check "--fetch exits 1"          "$(doctor_rc main '' '--fetch')" "1"
