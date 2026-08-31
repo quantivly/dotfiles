@@ -987,7 +987,7 @@ install_external_schedule() {
   # drop-in but has no check at all for 10-external-mount.conf, so losing that
   # one is invisible.
   if (( sanerc == 2 )); then
-    log WARNING "leaving the external unit and its mount ordering untouched — the mount point could not be checked on this run."
+    log WARNING "not installing or changing the external unit or its mount ordering — the mount point could not be checked on this run. Anything an earlier run installed is left as it was."
     return 0
   fi
   # Clean up the obsolete looping .path unit if a previous run installed it.
