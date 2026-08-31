@@ -11,6 +11,16 @@
 # Usage:
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
+#
+# EXIT CODE: non-zero if and only if the "herdr server environment hygiene"
+# section FAILs — forbidden variables in the running server's environment, or a
+# teammux shim dir on its PATH. That is the one section the switch-over runbooks
+# (systemd/herdr-server.service, scripts/herdr-server-launch.sh) treat as an
+# assertion ("must be green"), so it must be gateable by a caller or CI, like
+# backup-doctor and audit-status. Everything else stays informational and exits
+# 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
+# keyless machine is degraded, not contaminated), and the hygiene check being
+# SKIPPED because no server is running.
 
 # NO `set -e` HERE — deliberately. This script's entire purpose is to report which
 # tools are missing, and check_tool returns 1 for each one it doesn't find. Under
@@ -22,11 +32,13 @@
 
 # Color codes (only if TTY)
 if [[ -t 1 ]]; then
+    RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[0;33m'
     BLUE='\033[0;34m'
     NC='\033[0m' # No Color
 else
+    RED=''
     GREEN=''
     YELLOW=''
     BLUE=''
@@ -245,6 +257,9 @@ HERDR_FORBIDDEN_VARS=(TMUX TMUX_PANE TEAMMUX_STATE_PATH HERDR_PANE_ID HERDR_TAB_
     HERDR_WORKSPACE_ID HERDR_PLUGIN_STATE_DIR HERDR_PLUGIN_CONFIG_DIR
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS CLAUDECODE CLAUDE_CODE_SESSION_ID
     CLAUDE_CODE_CHILD_SESSION)
+# This section is the one ASSERTION in the script (see EXIT CODE in the header):
+# a FAIL here sets this flag and the script exits non-zero at the bottom.
+herdr_hygiene_failed=0
 herdr_pid=$(pgrep -f '(^|/)herdr server$' 2>/dev/null | head -1)
 server_path=""
 if [[ -z "$herdr_pid" ]]; then
@@ -270,8 +285,14 @@ else
     if [[ -z "$leaked" && -z "$shim_entries" ]]; then
         echo -e "${GREEN}✓${NC} herdr server (pid $herdr_pid) environment is clean"
     else
-        [[ -n "$leaked" ]] && echo -e "${YELLOW}✗${NC} FAIL: herdr server (pid $herdr_pid) environment carries:$leaked"
-        [[ -n "$shim_entries" ]] && echo -e "${YELLOW}✗${NC} FAIL: herdr server PATH contains a teammux shim: $shim_entries"
+        if [[ -n "$leaked" ]]; then
+            echo -e "${RED}✗ FAIL:${NC} herdr server (pid $herdr_pid) environment carries:$leaked"
+            herdr_hygiene_failed=1
+        fi
+        if [[ -n "$shim_entries" ]]; then
+            echo -e "${RED}✗ FAIL:${NC} herdr server PATH contains a teammux shim: $shim_entries"
+            herdr_hygiene_failed=1
+        fi
         echo "    The server was started from inside a herdr pane or a Claude session, and"
         echo "    every pane inherits this. Restart it from a clean environment — this ENDS"
         echo "    every agent session, so check 'herdr pane list' first:"
@@ -279,6 +300,8 @@ else
         echo "      herdr server stop; scripts/herdr-server-launch.sh &   # else, from a PLAIN terminal"
     fi
 
+    # WARN, not FAIL, and it does not affect the exit code: a server without the
+    # key is degraded (no Linear picker), not contaminated.
     if grep -qx 'LINEAR_API_KEY' <<<"$server_names"; then
         echo -e "${GREEN}✓${NC} LINEAR_API_KEY present in the server environment"
     else
@@ -343,3 +366,6 @@ echo ""
 echo "To install missing tools via mise:"
 echo "  mise install"
 echo ""
+
+# Non-zero ONLY on a herdr server hygiene FAIL — see EXIT CODE in the header.
+exit "$herdr_hygiene_failed"

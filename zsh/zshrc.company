@@ -528,7 +528,7 @@ herdr-lazy() {
 #
 # Usage:
 #   hspawn [-p|--profile <clauth-profile>] [-m|--model <model>] [-e|--effort <level>]
-#          [--mode <auto|acceptEdits|plan|default>] [-b|--base <ref>] [-n|--name <agent-name>]
+#          [--mode <auto|acceptEdits|plan|dontAsk|default>] [-b|--base <ref>] [-n|--name <agent-name>]
 #          [--] <repo-dir> <slug> [prompt...]
 #
 #   hspawn ~/work/api fix-auth
@@ -548,6 +548,9 @@ herdr-lazy() {
 # args to claude verbatim, per `clauth start --help`). --mode defaults to auto,
 # today's behaviour. `default` is accepted as a spelling of what `claude --help`
 # (2.1.x) lists as `manual`; the CLI has no mode literally called "default".
+# `dontAsk` (also 2.1.x) is accepted. `bypassPermissions` is refused ON PURPOSE:
+# hspawn spawns run unattended, and unattended plus every permission gate off is
+# not a combination this helper hands out — the error says so.
 #
 # WHY A PROFILE CHANGES THE START PATH:
 #   `herdr agent start` launches the agent binary herdr knows about, but
@@ -618,7 +621,8 @@ _hspawn_usage() {
     '  -m, --model <model>             claude --model (an alias like opus, or a full model name)' \
     '  -e, --effort <level>            claude --effort (low|medium|high|xhigh|max)' \
     '      --mode <mode>               claude --permission-mode: auto (default) | acceptEdits | plan |' \
-    '                                  default (claude 2.1.x calls this one "manual")' \
+    '                                  dontAsk | default (claude 2.1.x calls this one "manual").' \
+    '                                  bypassPermissions is refused: hspawn spawns run unattended.' \
     '  -b, --base <ref>                start the worktree branch from <ref> (default: herdr'"'"'s own)' \
     '  -n, --name <agent-name>         herdr agent name (default: <slug> folded to [a-z][a-z0-9_-]{0,31})' \
     '  -h, --help' \
@@ -766,9 +770,14 @@ hspawn() {
 
   case "$mode" in
     default) mode="manual" ;;
-    auto|acceptEdits|plan|manual) ;;
+    auto|acceptEdits|plan|manual|dontAsk) ;;
+    bypassPermissions)
+      echo "Error: --mode bypassPermissions is refused on purpose: hspawn spawns run unattended," >&2
+      echo "       and an unattended agent with every permission gate off is not something this" >&2
+      echo "       helper hands out. Use --mode dontAsk, or start the pane by hand." >&2
+      return 1 ;;
     *)
-      echo "Error: --mode must be auto, acceptEdits, plan or default (got '$mode')" >&2
+      echo "Error: --mode must be auto, acceptEdits, plan, dontAsk or default (got '$mode')" >&2
       return 1 ;;
   esac
 
@@ -928,20 +937,27 @@ hspawn() {
 # hdespawn — tear down one hspawn worktree, resolved through the registry
 #------------------------------------------------------------------------------
 # Resolves <slug|pane-id> to its registry file, shows what is about to go —
-# including what `herdr worktree remove --force` would DISCARD: uncommitted
-# paths (`git status --porcelain`) and commits the upstream lacks (with no
-# upstream: commits origin/HEAD, else origin/main, else main lacks — labelled
-# "not on <ref>") — asks, then removes the workspace and drops the registry
+# including what removal would DISCARD: uncommitted paths (`git status
+# --porcelain`) and unpushed commits: commits @{upstream} lacks, or with no
+# upstream (the normal state of a fresh hspawn branch) commits on NO origin
+# branch at all (`rev-list HEAD --not --remotes=origin`) — so a worktree cut
+# from a pushed feature branch counts 0, not that branch's lead over
+# origin/main — asks, then removes the workspace and drops the registry
 # file. Guard: without --yes the work summary is part of the question; with
-# --yes it REFUSES to remove a live workspace whose worktree is dirty, has
-# such commits, or could not be inspected, unless --force is also given. (The
-# user declined to kill Atrium sessions today for exactly this reason:
+# --yes it REFUSES to remove a workspace/worktree whose checkout is dirty,
+# has such commits, or could not be inspected, unless --force is also given.
+# (The user declined to kill Atrium sessions today for exactly this reason:
 # unpushed commits.) The branch is left alone — deleting it is the user's
 # call, so the command is printed, not run. A registry entry whose workspace
 # is no longer in the session (closed by hand, by `hreap --close`, or a server
-# restart) removes nothing: it reports the lingering worktree (with the same
-# work summary) and drops the entry. If the workspace id now holds a
-# different worktree than the entry recorded, nothing is touched at all.
+# restart) FINISHES the teardown herdr can no longer do: the same at-risk
+# guard applies (--yes refuses, entry kept, unless --force), then
+# `git worktree remove` (--force when discarding) takes the worktree dir, and
+# only then does the entry go — so hreap's "Finish with: hdespawn <slug>"
+# line is a promise, not a hope. With no worktree dir left on disk there is
+# nothing to discard and the stale entry is simply dropped. If the workspace
+# id now holds a different worktree than the entry recorded, nothing is
+# touched at all.
 hdespawn() {
   local yes=0 force=0 target=""
   while (( $# )); do
@@ -956,7 +972,14 @@ hdespawn() {
       -?*)
         echo "Error: unknown option '$1' (hdespawn --help)" >&2
         return 1 ;;
-      *) target="$1" ;;
+      *)
+        # A destructive command silently acting on the LAST of two targets is
+        # how the wrong worktree dies; exactly one <slug|pane-id> is accepted.
+        if [[ -n "$target" ]]; then
+          echo "Error: hdespawn takes exactly one <slug|pane-id> (got '$target' and '$1')" >&2
+          return 1
+        fi
+        target="$1" ;;
     esac
     shift
   done
@@ -991,9 +1014,14 @@ hdespawn() {
     esac
   fi
 
-  # jq @sh-quotes every value, so eval is safe against odd characters.
+  # @sh single-quotes STRINGS only — a JSON array becomes several bare shell
+  # words and a number/boolean one unquoted word, which eval would run — so
+  # every field is forced through `tostring` first (an array/number collapses
+  # to one quoted string). hspawn writes strings via --arg, but the registry
+  # is just a file on disk; defence in depth. A jq failure (corrupt file)
+  # leaves every field empty and the ws guard below rejects the entry.
   local pane="" ws="" branch="" repo="" slug="" wt_path="" reg_path="" created_at="" creator="" closed_at="" closed_by=""
-  eval "$(jq -r '@sh "pane=\(.pane_id // "") ws=\(.workspace_id // "") branch=\(.branch // "") repo=\(.repo // "") slug=\(.slug // "") wt_path=\(.path // "") created_at=\(.created_at // "") creator=\(.creator_session // "") closed_at=\(.closed_at // "") closed_by=\(.closed_by // "")"' "$registry")"
+  eval "$(jq -r '@sh "pane=\(.pane_id // "" | tostring) ws=\(.workspace_id // "" | tostring) branch=\(.branch // "" | tostring) repo=\(.repo // "" | tostring) slug=\(.slug // "" | tostring) wt_path=\(.path // "" | tostring) created_at=\(.created_at // "" | tostring) creator=\(.creator_session // "" | tostring) closed_at=\(.closed_at // "" | tostring) closed_by=\(.closed_by // "" | tostring)"' "$registry")"
   reg_path="$wt_path"
   if [[ -z "$ws" ]]; then
     echo "Error: $registry has no workspace_id — remove it by hand" >&2
@@ -1032,31 +1060,26 @@ hdespawn() {
   _hspawn_say branch "$branch"
   _hspawn_say worktree "${wt_path:-(path unknown to herdr)}"
 
-  # What `worktree remove --force` would discard. dirty = paths in
-  # `git status --porcelain` (untracked included); unpushed = commits on HEAD
-  # that @{upstream} lacks or, with no upstream (the normal state of a fresh
-  # hspawn branch), that origin/HEAD — else origin/main, else main — lacks.
+  # What removal would discard. dirty = paths in `git status --porcelain`
+  # (untracked included); unpushed = commits on HEAD that @{upstream} lacks
+  # or, with no upstream (the normal state of a fresh hspawn branch), commits
+  # on NO origin branch at all. Comparing against origin/HEAD or origin/main
+  # here overcounted: a worktree cut from a pushed feature branch carries that
+  # branch's lead over main, and --yes refused over commits that were in fact
+  # on origin/<feature> (observed 2026-08-31). In a repo with no origin every
+  # commit counts — alarming but fail-safe (at_risk, not silent removal).
   local dirty="" unpushed="" unpushed_label="unpushed" work="" at_risk=0
   if [[ -n "$wt_path" && -d "$wt_path" ]] \
      && command git -C "$wt_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     dirty="$(command git -C "$wt_path" status --porcelain 2>/dev/null | command wc -l)"
     dirty="${dirty// /}"
-    local upstream="" base_ref=""
+    local upstream=""
     if upstream="$(command git -C "$wt_path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)"; then
       unpushed="$(command git -C "$wt_path" rev-list --count "$upstream..HEAD" 2>/dev/null)"
       unpushed_label="not on $upstream"
     else
-      base_ref="$(command git -C "$wt_path" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"
-      if [[ -z "$base_ref" ]]; then
-        for base_ref in origin/main main; do
-          command git -C "$wt_path" rev-parse -q --verify "$base_ref" >/dev/null 2>&1 && break
-          base_ref=""
-        done
-      fi
-      if [[ -n "$base_ref" ]]; then
-        unpushed="$(command git -C "$wt_path" rev-list --count "$base_ref..HEAD" 2>/dev/null)"
-        unpushed_label="not on $base_ref (no upstream)"
-      fi
+      unpushed="$(command git -C "$wt_path" rev-list --count HEAD --not --remotes=origin 2>/dev/null)"
+      unpushed_label="not on any origin branch (no upstream)"
     fi
   fi
   if [[ "$dirty" == <-> && "$unpushed" == <-> ]]; then
@@ -1067,7 +1090,7 @@ hdespawn() {
       at_risk=1
     fi
   elif [[ "$dirty" == <-> ]]; then
-    work="$dirty uncommitted path(s); commits: no upstream and no origin/HEAD, origin/main or main to compare"
+    work="$dirty uncommitted path(s); commit count unavailable (git rev-list failed)"
     at_risk=1
   else
     work="unknown — worktree could not be inspected"
@@ -1084,7 +1107,13 @@ hdespawn() {
   fi
 
   local question="Remove workspace $ws and its worktree ($work)?"
-  [[ -n "$ws_live" ]] || question="Workspace $ws is gone; drop its registry entry ($work)?"
+  if [[ -z "$ws_live" ]]; then
+    if [[ -n "$wt_path" && -d "$wt_path" ]]; then
+      question="Workspace $ws is gone; remove its worktree and registry entry ($work)?"
+    else
+      question="Workspace $ws is gone and no worktree dir is on disk; drop the registry entry?"
+    fi
+  fi
   if (( ! yes )); then
     if (( $+functions[confirm] )); then
       confirm "$question" || { echo "aborted"; return 1; }
@@ -1092,10 +1121,11 @@ hdespawn() {
       read -q "?$question [y/N] " || { echo; echo "aborted"; return 1; }
       echo
     fi
-  elif (( at_risk && ! force )) && [[ -n "$ws_live" ]]; then
-    # Only the live path discards anything; the gone-workspace path below just
-    # prints the lingering worktree and drops the entry.
-    echo "Error: refusing --yes: $work — \`herdr worktree remove --force\` would discard it." >&2
+  elif (( at_risk && ! force )) && [[ -n "$ws_live" || ( -n "$wt_path" && -d "$wt_path" ) ]]; then
+    # The guard holds on BOTH paths: a gone workspace whose worktree dir is
+    # still on disk (exactly what `hreap --close` leaves behind) has the same
+    # work to lose. Only with no dir left is --yes free to drop the entry.
+    echo "Error: refusing --yes: $work — removing the worktree would discard it. Entry kept: $registry" >&2
     echo "       Commit/push first, run without --yes to decide interactively, or add --force." >&2
     return 1
   fi
@@ -1109,11 +1139,20 @@ hdespawn() {
     fi
     _hspawn_say removed "workspace $ws${wt_path:+ + worktree $wt_path}"
   else
-    _hspawn_say note "workspace $ws is gone already; dropping the stale registry entry"
+    _hspawn_say note "workspace $ws is gone already; finishing the teardown herdr no longer can"
     if [[ -n "$wt_path" && -d "$wt_path" ]]; then
-      local wr_force=""
-      (( at_risk )) && wr_force=" --force"
-      _hspawn_say note "worktree dir still exists ($work) — git -C ${(q)repo} worktree remove${wr_force} ${(q)wt_path}"
+      # git refuses a dirty worktree without --force; discarding is exactly
+      # what was just confirmed (interactively, or via --yes --force).
+      local wr_force="" wr_out
+      (( at_risk || force )) && wr_force="--force"
+      if ! wr_out="$(command git -C "$repo" worktree remove ${wr_force:+"$wr_force"} "$wt_path" 2>&1)"; then
+        echo "Error: git -C ${(q)repo} worktree remove${wr_force:+ $wr_force} ${(q)wt_path} failed (registry entry kept: $registry):" >&2
+        printf '%s\n' "$wr_out" >&2
+        return 1
+      fi
+      _hspawn_say removed "worktree $wt_path (git worktree remove${wr_force:+ $wr_force})"
+    else
+      _hspawn_say note "no worktree dir on disk${wt_path:+ at $wt_path} — nothing to remove"
     fi
   fi
   rm -f -- "$registry"
@@ -1143,8 +1182,17 @@ hdespawn() {
 # servers and tool shells are not counted, so the true cost is higher.
 #
 # --close is the only writing mode and it is deliberately narrow: it closes
-# panes that are tagged in the hspawn registry AND idle (transcript-based) for
-# at least --older minutes, via `herdr pane close`. The registry entry is NOT
+# panes that are tagged in the hspawn registry AND whose agent status is idle
+# or done AND that are idle (transcript-based) for at least --older minutes,
+# via `herdr pane close`. Any other status — working, blocked, unknown (an
+# undetected teammate or trust-dialog pane) — is skipped with a `skip:` line;
+# there is deliberately NO override flag, because a transcript can sit
+# untouched through a 45-minute tool call while the agent works: killing a
+# working agent takes an explicit raw `herdr pane close <pane>`. Mind the
+# blast radius: bare --close is MACHINE-WIDE — it acts on every registry-
+# tagged pane meeting those tests, whoever spawned it (the user at a keyboard
+# included); --mine is what narrows it to this session's own spawns, and the
+# docs should only ever show the --mine form. The registry entry is NOT
 # deleted — it is annotated with closed_at/closed_by so `hdespawn <slug>` can
 # finish the teardown later (worktree, workspace if still open, entry) behind
 # its uncommitted/unpushed guard; each per-close line names that command. An
@@ -1204,8 +1252,12 @@ hreap() {
           '  Every Claude process in a herdr pane, detected or not, oldest-idle first.' \
           '  --older N   only rows idle >= N minutes (default 30; 0 = everything)' \
           '  --mine      only hspawn spawns created by this Claude session ($CLAUDE_CODE_SESSION_ID)' \
-          '  --close     close the listed panes that are hspawn-tagged AND idle >= N (transcript-based);' \
-          '              untagged panes are never touched. Read-only without it.' \
+          '  --close     close the listed panes that are hspawn-tagged, agent-status idle/done, AND' \
+          '              idle >= N (transcript-based). working/blocked/unknown agents are skipped, with' \
+          '              no override — killing a working agent takes a raw `herdr pane close`. Untagged' \
+          '              panes are never touched. Read-only without --close.' \
+          '              WARNING: without --mine, --close is machine-wide — every tagged pane on this' \
+          '              box, whoever spawned it, not just yours.' \
           '  --json      machine-readable rows' \
           '  idle marked * = no transcript found, process age shown instead' >&2
         return 0 ;;
@@ -1240,7 +1292,7 @@ hreap() {
   local total=0
   local pane ws detected astatus sid disp aname wslabel wpath
   local pinfo pid pname pcwd dashed tfile mtime idle_s idle_src et
-  local rss_kb swap_kb mem_kb k v registry tagged creator rname rslug rbranch rclosed name
+  local rss_kb swap_kb mem_kb k v registry reg_vals tagged creator rname rslug rbranch rclosed name
   while IFS="$sep" read -r pane ws detected astatus sid disp aname wslabel wpath; do
     pinfo="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || continue
     while IFS="$sep" read -r pid pname pcwd; do
@@ -1288,11 +1340,16 @@ hreap() {
         mem_kb=$(( rss_kb + swap_kb ))
       fi
 
-      # hspawn registry tag.
+      # hspawn registry tag. @sh quotes strings only, so every field goes
+      # through tostring (a JSON array/number would otherwise become extra
+      # shell words under eval). jq -e fails on a corrupt or 0-byte file, and
+      # that MUST leave tagged=false: an entry hreap cannot read entitles
+      # --close to nothing (it used to leave tagged=true with an empty
+      # creator — still eligible for bare --close).
       registry="$state_dir/${pane//:/_}.json"
       tagged=false creator="" rname="" rslug="" rbranch="" rclosed=""
-      if [[ -f "$registry" ]]; then
-        eval "$(jq -r '@sh "creator=\(.creator_session // "") rname=\(.name // "") rslug=\(.slug // "") rbranch=\(.branch // "") rclosed=\(.closed_at // "")"' "$registry" 2>/dev/null)"
+      if [[ -f "$registry" ]] && reg_vals="$(jq -re '@sh "creator=\(.creator_session // "" | tostring) rname=\(.name // "" | tostring) rslug=\(.slug // "" | tostring) rbranch=\(.branch // "" | tostring) rclosed=\(.closed_at // "" | tostring)"' "$registry" 2>/dev/null)"; then
+        eval "$reg_vals"
         if [[ -n "$rclosed" ]]; then
           # Already closed by hreap: that pane is gone, so a live process under
           # the same id belongs to someone else. Not tagged, not attributed.
@@ -1397,11 +1454,20 @@ hreap() {
   if (( close )); then
     local closed=0 freed_kb=0 untagged=0 reply
     local -a done_panes=()
-    while IFS="$sep" read -r pane name idle_s idle_src mem_kb tagged wpath rbranch rslug; do
+    while IFS="$sep" read -r pane name astatus idle_s idle_src mem_kb tagged wpath rbranch rslug; do
       if [[ "$tagged" != true ]]; then
         (( untagged++ ))
         continue
       fi
+      # Only an agent herdr reports as idle or done may be closed. working
+      # means exactly that; blocked/unknown means a dialog or an undetected
+      # process — none of them fair game, and there is no override flag.
+      case "$astatus" in
+        idle|done) ;;
+        *)
+          echo "skip:      $pane ($name) — status $astatus, not closing"
+          continue ;;
+      esac
       if [[ "$idle_src" != transcript ]]; then
         echo "skip:      $pane ($name) — tagged, but no transcript found; not closing on process age alone"
         continue
@@ -1429,7 +1495,7 @@ hreap() {
         echo "Error: herdr pane close $pane failed: $reply" >&2
       fi
     done < <(printf '%s' "$sorted" | jq -r '.[]
-      | [ .pane, .name, (.idle_s // ""), .idle_src, (.mem_kb // ""), .tagged, .worktree_path, .branch, .slug ]
+      | [ .pane, .name, .status, (.idle_s // ""), .idle_src, (.mem_kb // ""), .tagged, .worktree_path, .branch, .slug ]
       | map(tostring) | join("\u001f")')
     echo "reaped:    $closed pane(s), ~$(_hreap_fmt_kb "$freed_kb") RSS+swap; $untagged untagged row(s) left alone"
     if (( closed )); then

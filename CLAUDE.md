@@ -411,11 +411,12 @@ Gotchas, in the order they bite:
   recovered it to load 11.5 / 84% / 23. An idle agent still holds its memory. Close panes you
   created once you have their output; keep one only if you have a concrete next task for it.
   (Closing panes you did *not* create is a different matter — don't, unless asked.) Enumerate with
-  `hreap` — every Claude process herdr hosts, detected or not, with idle age, memory and creator
-  (default view is idle ≥ 30 min; `--older 0` shows all); `hreap --close --mine` closes only your
-  registry-tagged idle spawns — **not** `herdr agent list`,
-  which misses herdmates teammates and trust-dialog panes (it showed 14 while 33 claude processes
-  ran). `hspawn` records each spawn in `~/.local/state/hspawn/`; `hdespawn <slug>` tears one down
+  `hreap` — every Claude process **in a herdr pane**, detected or not, with idle age, memory and
+  creator (default view is idle ≥ 30 min; `--older 0` shows all); `hreap --close --mine` closes
+  only your registry-tagged idle spawns — **not** `herdr agent list`, which misses herdmates
+  teammates and trust-dialog panes (it showed 14 while 33 claude processes ran — though note ~8 of
+  those were Claude under Atrium's tmux, outside herdr panes and so outside `hreap` too; the tab
+  bar's `agents <detected>/<procs>` gap is the full census). `hspawn` records each spawn in `~/.local/state/hspawn/`; `hdespawn <slug>` tears one down
   (pane, workspace, worktree, registry entry).
 - **Teammates in a herdmates team are NOT detected as herdr agents.** They exist as panes but are
   absent from `herdr agent list`, the sidebar rows, the priority sort and toasts — only the lead
@@ -427,10 +428,12 @@ Gotchas, in the order they bite:
   `herdr agent explain --file <screen> --agent claude` accepts the same pane's screen (`state: idle`,
   rule `live_prompt_box`). `herdr agent explain <pane>` is the first diagnostic; `agent_not_found`
   means nothing was detected at all. Reported upstream (drafts: `~/herdr-eval-upstream/`).
-- **The sidebar publisher needs TWO things wired, and `./install` only does one.**
+- **The sidebar publisher needs THREE things wired, and `./install` only does one.**
   `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
-  also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo). Without
-  that it never runs, every `$mdl`/`$eff_*`/`$ctx_*` token resolves to nothing, and those sidebar
+  also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo), and that
+  entry needs `"refreshInterval": 60` — without the interval the idle band freezes when the session
+  goes quiet and every token then expires on the 4-minute TTL, blanking the rows. Without the
+  statusLine entry it never runs, every `$mdl`/`$eff_*`/`$ctx_*` token resolves to nothing, and those sidebar
   rows render empty with no error. It doubles as the in-pane status line, so visible model/context
   text inside a pane means the publisher is alive.
 

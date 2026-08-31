@@ -14,6 +14,7 @@
 #   herdr server stop                       # ends EVERY agent session on the machine
 #   systemctl --user enable --now herdr-server.service
 #   scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
+#                                           # (non-zero exit on a hygiene FAIL)
 #   journalctl --user -u herdr-server.service -e
 # Afterwards bare `herdr` at a keyboard attaches to this server ("Launch or
 # attach to the persistent session", `herdr --help`) instead of starting its
@@ -43,19 +44,32 @@ ExecStart=%h/.dotfiles/scripts/herdr-server-launch.sh
 # Stop through herdr's own API ("Stop the running server via the API socket",
 # `herdr server stop --help`) so herdr, not a signal, winds down its panes.
 # Runs under the manager's env, which has HOME — enough to find the default
-# socket ~/.config/herdr/herdr.sock. UNVERIFIED under the unit until first use.
-ExecStop=%h/.local/bin/herdr server stop
+# socket ~/.config/herdr/herdr.sock. Resolve herdr instead of hardcoding one
+# location (ExecStart's launcher resolves it across ~/.local/bin, the mise bin
+# dirs and ~/.cargo/bin): prefer ~/.local/bin/herdr, where it lives here, else
+# fall back to the manager's PATH — a hardcoded path that is wrong on another
+# machine fails 203/EXEC and the wind-down falls straight to SIGTERM. If neither
+# resolves, sh exits non-zero and stop likewise falls through to KillMode below.
+# ($$ is systemd's escape for a literal $, so the shell sees $h / $(...).)
+# UNVERIFIED under the unit until first use.
+ExecStop=/bin/sh -c 'h=%h/.local/bin/herdr; [ -x "$$h" ] || h=$$(command -v herdr) || exit 1; exec "$$h" server stop'
 # mixed: after ExecStop, SIGTERM goes to the server process only; anything still
 # alive in the cgroup after TimeoutStopSec (orphaned pane shells, agents) gets
 # SIGKILL. control-group (the default) would SIGTERM every pane process at the
 # same instant as the server; process would leave orphans running forever.
 KillMode=mixed
 TimeoutStopSec=30
-# on-failure, not always: a deliberate `herdr server stop` from a shell must
-# stay down (assumes herdr exits 0 on a requested stop — UNVERIFIED; if the
-# server comes back 2s after a manual stop, this is why). systemd's default
-# start-rate limit (5 in 10s) ends a crash loop, e.g. herdr missing from PATH.
-Restart=on-failure
+# on-abnormal, not on-failure: a deliberate `herdr server stop` from a shell
+# must stay down, and both documented switch-over/remediation sequences run
+# exactly that stop followed by a start. herdr's exit code on a requested stop
+# is UNVERIFIED — under on-failure a non-zero exit there would resurrect the
+# server 2s later, racing the very runbook that stopped it. on-abnormal never
+# restarts on ANY exit code (clean or not), so nothing rides on that unknown; it
+# still restarts after unclean signals, timeouts and watchdog kills, where
+# systemd's default start-rate limit (5 in 10s) still ends a crash loop. A
+# launcher that die()s (herdr missing from PATH, contaminated caller) exits 1
+# and correctly stays down rather than looping.
+Restart=on-abnormal
 RestartSec=2
 
 [Install]

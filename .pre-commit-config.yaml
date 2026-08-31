@@ -98,3 +98,12 @@ repos:
         entry: bash -c 'if git ls-files | grep -E "\.local$" 2>/dev/null; then echo "Found .local files - these should not be committed"; exit 1; fi'
         language: system
         pass_filenames: false
+
+      - id: check-diff3-base-marker
+        name: Check for diff3 conflict base markers
+        # check-merge-conflict catches <<<<<<< / ======= / >>>>>>> but NOT the
+        # diff3-style "|||||||" base marker; one survived a conflict resolution
+        # into CHANGELOG.md (PR #89 review, F2). pygrep: entry is the regex.
+        entry: '^\|{7}'
+        language: pygrep
+        types: [text]

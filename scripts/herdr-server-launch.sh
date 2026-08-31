@@ -27,6 +27,7 @@
 #     herdr server stop                       # ends EVERY agent session on the machine
 #     systemctl --user enable --now herdr-server.service
 #     scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
+#                                             # (non-zero exit on a hygiene FAIL)
 #     journalctl --user -u herdr-server.service -e   # server log
 #   Manual fallback (no systemd), again from a plain terminal:
 #     scripts/herdr-server-launch.sh &
@@ -62,13 +63,23 @@
 #   XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS   the session bus — `notify-send`
 #               toasts and gh's keyring lookups both go through it. Defaults
 #               /run/user/<uid> and unix:path=<that>/bus when the caller has neither.
-#   WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE   passed through
-#               when set, for anything a plugin opens on the desktop (xdg-open,
-#               `gh … --web`). Under the unit these come from the user manager's
-#               environment (`systemctl --user show-environment`), which GNOME
-#               populates at login; UNVERIFIED whether default.target reaches this
-#               unit before or after that import on a cold login. Toasts need only
-#               the D-Bus address, which is always present.
+#   WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
+#               passed through when set, for anything a plugin opens on the desktop
+#               (xdg-open, `gh … --web`). XAUTHORITY must travel with DISPLAY: on
+#               this Wayland box mutter writes the Xwayland cookie to
+#               /run/user/<uid>/.mutter-Xwaylandauth.XXXXXX (there is no
+#               ~/.Xauthority), so an X11 client with DISPLAY but no XAUTHORITY is
+#               refused with "Authorization required" — worse than no DISPLAY at
+#               all, because callers stop falling back. CAVEAT: that cookie path is
+#               regenerated at each login, so a long-lived server can hold a STALE
+#               XAUTHORITY after a re-login — X11 tools then fail until the next
+#               server restart; Wayland-native clients (WAYLAND_DISPLAY) are
+#               unaffected. Under the unit these come from the user manager's
+#               environment (`systemctl --user show-environment`, which carries all
+#               of them here), which GNOME populates at login; UNVERIFIED whether
+#               default.target reaches this unit before or after that import on a
+#               cold login. Toasts need only the D-Bus address, which is always
+#               present.
 #   SSH_AUTH_SOCK    passed through when set. The user manager, the live server and
 #               every pane carry the same Bitwarden agent socket today. Pane shells
 #               CAN recover one without it (zshrc.conditionals.plugins'
@@ -77,9 +88,19 @@
 #               instead of the sub-ms fast path. Same class as the D-Bus address: a
 #               session resource, not launching-pane state.
 #   LINEAR_API_KEY   read from ~/.zshrc.local in a NON-interactive zsh (no prompt,
-#               no plugins, just the file); passed only when non-empty, never
-#               printed. tdi.worktree-from-linear needs it IN THE SERVER ENV — a
-#               key exported after the server started is never seen.
+#               no plugins, just the file); when non-empty, handed to the server
+#               via a 0600 file under XDG_RUNTIME_DIR that /bin/sh exports (and
+#               deletes) just before exec'ing herdr — NEVER via argv: `env -i
+#               LINEAR_API_KEY=… ` would put the value in env(1)'s
+#               /proc/<pid>/cmdline, which is world-readable (no hidepid on this
+#               box). Never printed; --print-env masks it as <set>.
+#               Why this key sits in the server env at all when GH_TOKEN
+#               deliberately does not: tdi.worktree-from-linear reads
+#               LINEAR_API_KEY from the SERVER environment and has no keyring
+#               path — a key exported after the server started is never seen.
+#               gh, by contrast, authenticates through its config + keyring
+#               (GH_CONFIG_DIR only selects the account), so no token needs to
+#               sit in an environment every pane inherits.
 #   GH_CONFIG_DIR    ~/.config/gh-quantivly when that directory exists — see the
 #               trade-off where it is set below.
 
@@ -164,7 +185,9 @@ xdg_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
 dbus_address="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$xdg_runtime_dir/bus}"
 
 # ---------------------------------------------------------------------------
-# Secrets the plugins need. Values are captured, never echoed.
+# Secrets the plugins need. Values are captured, never echoed — and never placed
+# in any argv either (see LINEAR_API_KEY in the header): /proc/<pid>/cmdline is
+# world-readable, so a secret in argv is a secret published.
 # ---------------------------------------------------------------------------
 linear_key=""
 if [[ -r "$home/.zshrc.local" ]] && command -v zsh >/dev/null 2>&1; then
@@ -180,8 +203,10 @@ fi
 # docs/TROUBLESHOOTING.md, GH_CONFIG_DIR alone selects the config while auth still
 # goes through the shared keyring default; a GH_TOKEN would pin the account but would
 # put a token into an environment every pane inherits, so it is deliberately not set
-# here. UNVERIFIED which account `gh` resolves to under this env — after the first
-# start, check with the server's own env:
+# here. VERIFIED 2026-08-31, under exactly this env (env -i with the declared PATH,
+# HOME, GH_CONFIG_DIR, DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR): `gh auth status`
+# → "✓ Logged in to github.com account zvi-quantivly (keyring)". Re-check against a
+# RUNNING server with the server's own values:
 #   pid=$(pgrep -f '(^|/)herdr server$'); env -i $(tr '\0' '\n' </proc/$pid/environ \
 #     | grep -E '^(HOME|PATH|GH_CONFIG_DIR|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR)=') gh auth status
 gh_config_dir=""
@@ -205,22 +230,29 @@ server_env=(
 # Pass-through, only when set. SSH_AUTH_SOCK is not in the brief's list; see the
 # header for why it is here (the same Bitwarden socket the server has always had;
 # without it every new pane shell takes zshrc's slow agent-repair path).
-for var in LANG LC_ALL WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE SSH_AUTH_SOCK; do
+for var in LANG LC_ALL WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE SSH_AUTH_SOCK; do
     if [[ -n "${!var:-}" ]]; then server_env+=("$var=${!var}"); fi
 done
-if [[ -n "$linear_key" ]]; then server_env+=("LINEAR_API_KEY=$linear_key"); fi
+# LINEAR_API_KEY is deliberately NOT in server_env: server_env becomes env(1)'s
+# argv, and /proc/<pid>/cmdline is world-readable. It reaches the server via the
+# 0600 env file at the exec below.
 if [[ -n "$gh_config_dir" ]]; then server_env+=("GH_CONFIG_DIR=$gh_config_dir"); fi
 
 if [[ "$print_env_only" == true ]]; then
     mask_re='KEY|TOKEN|SECRET|PASSWORD'
-    for entry in "${server_env[@]}"; do
-        key="${entry%%=*}"
-        if [[ "$key" =~ $mask_re ]]; then
-            printf '%s=<set>\n' "$key"
-        else
-            printf '%s\n' "$entry"
-        fi
-    done | sort
+    {
+        for entry in "${server_env[@]}"; do
+            key="${entry%%=*}"
+            if [[ "$key" =~ $mask_re ]]; then
+                printf '%s=<set>\n' "$key"
+            else
+                printf '%s\n' "$entry"
+            fi
+        done
+        # Not in server_env (argv hygiene, above) but part of the environment the
+        # server WOULD get — shown masked, like any other secret.
+        if [[ -n "$linear_key" ]]; then printf 'LINEAR_API_KEY=<set>\n'; fi
+    } | sort
     if [[ -z "$herdr_bin" ]]; then
         warn "note: herdr is NOT resolvable on the declared PATH — a real launch would refuse"
     fi
@@ -232,4 +264,18 @@ fi
 # Deterministic cwd (the unit's default is $HOME too); panes open in their
 # workspace directories, not here.
 cd "$home"
+if [[ -n "$linear_key" ]]; then
+    # Argv hygiene: `env -i LINEAR_API_KEY=… ` would publish the value in
+    # env(1)'s /proc/<pid>/cmdline (world-readable; no hidepid here). Instead the
+    # key goes into a 0600 file under XDG_RUNTIME_DIR (user-only tmpfs) that the
+    # intermediate /bin/sh exports and deletes before exec'ing herdr — every argv
+    # along the way carries only paths. Single-quote-escaped so the value can
+    # never be parsed as anything but one assignment.
+    envfile="$xdg_runtime_dir/herdr-server-env.$$"
+    sq_key=${linear_key//\'/\'\\\'\'}
+    ( umask 077; printf "LINEAR_API_KEY='%s'\n" "$sq_key" > "$envfile" )
+    # shellcheck disable=SC2016  # "$1"/"$2" are for /bin/sh to expand, deliberately not bash
+    exec env -i "${server_env[@]}" /bin/sh -c \
+        'set -a; . "$1"; set +a; rm -f -- "$1"; exec "$2" server' sh "$envfile" "$herdr_bin"
+fi
 exec env -i "${server_env[@]}" "$herdr_bin" server

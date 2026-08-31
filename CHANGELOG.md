@@ -254,7 +254,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   targets; and a hardcoded `ext4` passes `findmnt --verify` (a type mismatch is only a
   warning) and then fails to mount, which `nofail` converts straight back into a silent
   non-mount.
-||||||| parent of 7c5a252 (fix(herdr): clean server environment, enforceable cleanup, honest docs — remediation of the 2026-08-30 evaluation)
 - **herdr: the 2026-08-30 independent-evaluation batch** (`~/herdr-eval-findings.md`, F1–F11).
   The live herdr server had been restarted from inside a herdmates team-lead pane, so every pane
   inherited a fake `TMUX`, the teammux shim as `tmux`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`

@@ -221,7 +221,7 @@ dependency resolved one at a time under the server's own PATH). The one-liner th
 wraps (Linux — it reads `/proc`):
 
 ```bash
-pid=$(pgrep -f 'herdr server$' | head -1)
+pid=$(pgrep -f '(^|/)herdr server$' | head -1)   # anchored: the loose form also matches a shell whose cmdline contains the string
 tr '\0' '\n' < /proc/$pid/environ | grep -E '^(TMUX|TMUX_PANE|TEAMMUX_STATE_PATH|HERDR_PANE_ID|HERDR_TAB_ID|HERDR_WORKSPACE_ID|HERDR_PLUGIN_STATE_DIR|HERDR_PLUGIN_CONFIG_DIR|CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|CLAUDECODE|CLAUDE_CODE_SESSION_ID)='
 # Any output means contaminated. macOS has no /proc: `ps eww -p $pid` prints the environment after
 # the command line (UNVERIFIED here — no Mac available; BSD ps may want `-E` instead of `e`).
