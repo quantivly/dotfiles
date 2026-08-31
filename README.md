@@ -523,13 +523,26 @@ into one.
 ```bash
 dotfiles-work my/branch   # create/enter ~/dotfiles-worktrees/my-branch
 dotfiles-doctor           # is the live config the reviewed config?
+dotfiles-doctor --fetch   # ...against the real remote, not the ref already on disk
 ```
 
-`dotfiles-doctor` reports the branch you are pinned to, commits ahead/behind
-`origin/main`, exactly which managed files differ, uncommitted changes, and link
-integrity (declared-but-not-installed, and installed-but-dangling). A one-line warning
-also fires on the first prompt of any shell whose live config is off `main` —
-`DOTFILES_GUARD_QUIET=1` silences it while you are deliberately dogfooding a branch.
+`dotfiles-doctor` reports the branch you are pinned to, **how stale your `origin/main`
+ref is** (nothing fetches on a schedule, so "not behind" is only ever as current as your
+last `git fetch` — `--fetch` fixes that), commits ahead/behind it, exactly which managed
+files differ, uncommitted changes to them, and link integrity: declared-but-not-installed,
+installed-but-dangling, and linked-but-pointing-outside-this-checkout. The live set is
+wider than the link list — `zsh/` is sourced by the linked `~/.zshrc`, and `scripts/` is
+executed straight out of the working tree by the `backup-*`/`audit-*` commands and by a
+systemd unit.
+
+A one-line warning also fires on the first prompt of any shell whose live config is off
+`main`, is on `main` at a different commit than `origin/main`, or was sourced from a
+different checkout altogether — `DOTFILES_GUARD_QUIET=1` silences it while you are
+deliberately dogfooding a branch.
+
+`./install` refuses to run from a worktree: linking from there would point your live
+`~/.zshrc` and `~/.gitconfig` at a feature branch, invisibly. Override with
+`DOTFILES_ALLOW_WORKTREE_INSTALL=1` if that is genuinely what you want.
 
 ### Shell Configuration
 

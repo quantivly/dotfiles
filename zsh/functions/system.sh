@@ -22,6 +22,7 @@
 # Functions:
 #   - has_command: Check if a command exists
 #   - confirm: Interactive confirmation prompt
+#   - _doctor_*: shared ✓/✗/⚠/· emitters + summary for the doctor commands
 # =============================================================================
 
 # Check if a command exists
@@ -42,6 +43,47 @@ confirm() {
         [yY]|[yY][eE][sS]) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# -----------------------------------------------------------------------------
+# Doctor report emitters (shared by dotfiles-doctor and backup-doctor)
+# -----------------------------------------------------------------------------
+# One implementation, because there were two identical ones: a fix here (routing
+# ✗ to stderr, honouring NO_COLOR, changing the summary wording) previously had
+# to be made in both and would have been forgotten in one.
+#
+# The counters are deliberately NOT globals. zsh — like bash — scopes locals
+# dynamically, so a callee assigning to _DOCTOR_FAIL writes the *caller's*
+# declaration. Every doctor therefore opens with
+#
+#     local _DOCTOR_FAIL=0 _DOCTOR_WARN=0
+#
+# which keeps them out of every interactive shell (the old globals leaked into
+# each one) and gives a nested call its own count instead of corrupting the
+# outer one. Forgetting that line does not silently lose counts — it recreates
+# the leak, which is what the state table asserts against.
+_doctor_ok()   { printf '  ✓ %s\n' "$*"; }
+_doctor_bad()  { printf '  ✗ %s\n' "$*"; _DOCTOR_FAIL=$((_DOCTOR_FAIL+1)); }
+_doctor_warn() { printf '  ⚠ %s\n' "$*"; _DOCTOR_WARN=$((_DOCTOR_WARN+1)); }
+# A fact worth showing that is not a finding: an expected-dirty file, a link
+# that is conditional and correctly absent. Counted as neither, because a
+# checker that reports normal states as warnings is one people stop reading.
+_doctor_note() { printf '  · %s\n' "$*"; }
+
+# Closing verdict. Exit status is the doctor's: non-zero iff a ✗ was emitted.
+# Usage: _doctor_summary <all-clear-message> [fix-hint]
+_doctor_summary() {
+  if (( _DOCTOR_FAIL > 0 )); then
+    printf '✗ %d failure(s), %d warning(s) — fix the ✗ items above.\n' "$_DOCTOR_FAIL" "$_DOCTOR_WARN"
+    [[ -n "${2:-}" ]] && printf '  %s\n' "$2"
+    return 1
+  fi
+  if (( _DOCTOR_WARN > 0 )); then
+    printf '⚠ %d warning(s), no failures — review the ⚠ items above.\n' "$_DOCTOR_WARN"
+    return 0
+  fi
+  printf '✓ %s\n' "$1"
+  return 0
 }
 
 # =============================================================================
@@ -467,6 +509,14 @@ system_health() {
 # where the damage actually lands, which is a new shell sourcing whatever the
 # working tree happens to hold.
 #
+# EVERY assertion here is about a state that otherwise looks like success, so
+# each one has to survive the question "what does this print when the thing it
+# reads is broken?". A missing ref, an unparseable link map, a stale
+# remote-tracking ref, a git that cannot run at all, and a symlink pointing into
+# somebody else's worktree all produce an *empty* result, and empty reads as
+# clean. Where a check cannot answer, it says so; it never returns the answer it
+# would have given if everything were fine.
+#
 # Functions:
 #   - dotfiles-work:   create/enter a worktree instead of moving the checkout
 #   - dotfiles-doctor: pin state, drift vs the default branch, blast radius
@@ -478,11 +528,23 @@ system_health() {
 : "${DOTFILES_PIN_BRANCH:=main}"
 : "${DOTFILES_ROOT:=${HOME}/.dotfiles}"
 
+# How old origin/<pin> may be before "not behind" stops meaning anything. This
+# machine fetches only when a human types `git fetch`, so the ref can be weeks
+# stale while every comparison against it still returns "clean".
+: "${DOTFILES_FETCH_MAX_AGE_HOURS:=24}"
+
+# Working-tree paths whose modification is the documented normal state, so the
+# doctor reports them as notes rather than warnings. `herdr-lazy sync` writes
+# plugins.lock straight through its symlink into the repo — install.conf.yaml
+# says so at the link itself. Space-separated; extend in ~/.zshrc.local.
+: "${DOTFILES_EXPECTED_DIRTY:=config/herdr/plugins/plugins.lock}"
+
 # Read HEAD without forking. This runs on EVERY interactive shell start, so it
 # must not cost a process: `git symbolic-ref` is a few ms that every shell, on
 # every machine, pays forever. One file read costs nothing measurable. Sets a
 # global rather than echoing for the same reason — a command substitution is a
-# fork, which is the cost being avoided.
+# fork, which is the cost being avoided. Callers that do not want it in their
+# shell declare it `local` and get it by dynamic scope (see _doctor_ok above).
 #
 # This deliberately reads the PRIMARY checkout's .git/HEAD. A worktree has a
 # .git *file*, not a directory, so this reports "unknown" from inside one —
@@ -490,15 +552,73 @@ system_health() {
 _dotfiles_head_state() {
   # Usage: _dotfiles_head_state <checkout-root>
   # Sets:  _DOTFILES_HEAD = "branch <name>" | "detached <sha>" | "unknown"
-  local head_file="${1}/.git/HEAD" line
+  local head_file="${1}/.git/HEAD" line=""
   _DOTFILES_HEAD="unknown"
   [[ -n "${1:-}" && -r "$head_file" ]] || return 0
-  read -r line < "$head_file" 2>/dev/null || return 0
+  # No `|| return` on the read: an empty HEAD makes `read` exit non-zero with
+  # $line empty, and a HEAD holding only a newline makes it exit zero with $line
+  # empty. Both are the same answer, so both fall through to the "" case below.
+  # (An earlier version returned early on read failure, which left that case
+  # unreachable — and therefore untested while appearing tested.)
+  read -r line < "$head_file" 2>/dev/null
   case "$line" in
     "ref: refs/heads/"*) _DOTFILES_HEAD="branch ${line#ref: refs/heads/}" ;;
     "")                  _DOTFILES_HEAD="unknown" ;;
     *)                   _DOTFILES_HEAD="detached ${line}" ;;
   esac
+}
+
+# Read a ref's sha, also without forking, and also from the primary checkout
+# only. Two storage forms exist and both must be handled: a loose file under
+# .git/refs/, and a line in .git/packed-refs after git has packed them. Handling
+# only the loose form would make the caller below silently stop checking on any
+# repo that has been gc'd — passing forever, for a reason nobody would look for.
+_dotfiles_ref_sha() {
+  # Usage: _dotfiles_ref_sha <checkout-root> <ref>  (e.g. refs/heads/main)
+  # Sets:  _DOTFILES_REF_SHA = <sha> | "" when the ref cannot be read
+  local root="${1:-}" ref="${2:-}" line=""
+  _DOTFILES_REF_SHA=""
+  [[ -n "$root" && -n "$ref" ]] || return 0
+  if [[ -r "$root/.git/$ref" ]]; then
+    read -r line < "$root/.git/$ref" 2>/dev/null
+    _DOTFILES_REF_SHA="${line%% *}"
+    return 0
+  fi
+  [[ -r "$root/.git/packed-refs" ]] || return 0
+  # A peeled-tag line ("^<sha>") and the header comment carry no ref name, so
+  # matching on the trailing " <ref>" skips them without a special case.
+  while read -r line; do
+    if [[ "$line" == *" $ref" ]]; then
+      _DOTFILES_REF_SHA="${line%% *}"
+      return 0
+    fi
+  done < "$root/.git/packed-refs"
+  return 0
+}
+
+# Is the pinned branch at the same commit as its remote-tracking ref? Being ON
+# main is not the same as being UP TO DATE with main, and "behind" is the
+# direction that caused the #87 outage — a merged, reviewed fix that was simply
+# not running. Two more forkless file reads, so the startup path can check it.
+#
+# It cannot say WHICH direction without git (that needs a merge base), so it
+# does not claim one. "unknown" whenever either ref is unreadable — including
+# from inside a worktree, and on a fresh clone with no remote-tracking ref yet.
+_dotfiles_pin_divergence() {
+  # Usage: _dotfiles_pin_divergence <checkout-root> <pin-branch>
+  # Sets:  _DOTFILES_DIVERGED = same | differs | unknown
+  local root="${1:-}" pin="${2:-}" local_sha="" remote_sha=""
+  local _DOTFILES_REF_SHA
+  _DOTFILES_DIVERGED="unknown"
+  [[ -n "$root" && -n "$pin" ]] || return 0
+  _dotfiles_ref_sha "$root" "refs/heads/$pin";          local_sha="$_DOTFILES_REF_SHA"
+  _dotfiles_ref_sha "$root" "refs/remotes/origin/$pin"; remote_sha="$_DOTFILES_REF_SHA"
+  [[ -n "$local_sha" && -n "$remote_sha" ]] || return 0
+  if [[ "$local_sha" == "$remote_sha" ]]; then
+    _DOTFILES_DIVERGED="same"
+  else
+    _DOTFILES_DIVERGED="differs"
+  fi
 }
 
 # The decision itself, split from both the reading and the printing so the state
@@ -531,10 +651,44 @@ _dotfiles_guard_verdict() {
 # that cries wolf in normal states is one people learn to ignore.
 _dotfiles_live_config_warn() {
   [[ -n "${DOTFILES_GUARD_QUIET:-}" ]] && return 0
+  # Locals, so the helpers' results reach this function by dynamic scope and
+  # then vanish, instead of parking four _D* variables in every shell.
+  local _DOTFILES_HEAD _DOTFILES_VERDICT _DOTFILES_DIVERGED
+
+  # First: does the shell being started actually come from the checkout every
+  # other line below reads? `./install` run from a worktree re-points every
+  # managed symlink at a feature branch, and the branch checks are then reporting
+  # on a tree that is no longer live — silently, which is how one stray
+  # ./install defeated the whole feature. `install` now refuses, but a machine
+  # already in that state has to be told. `:A` resolves the link in-shell, so
+  # this is still forkless. Only meaningful when ~/.zshrc IS a symlink and
+  # DOTFILES_ROOT is a checkout; a copied or hand-written ~/.zshrc is somebody
+  # else's arrangement and gets no opinion.
+  if [[ -L "${HOME}/.zshrc" && -d "${DOTFILES_ROOT}/.git" ]]; then
+    local live_zshrc="${${:-${HOME}/.zshrc}:A}" root_real="${${:-${DOTFILES_ROOT}}:A}"
+    if [[ "$live_zshrc" != "$root_real"/* ]]; then
+      printf '\033[0;33m⚠ dotfiles: this shell was sourced from %s\033[0m\n' "$live_zshrc"
+      printf '  ...which is outside %s — your live config is another checkout or worktree.\n' "$root_real"
+      printf '  `dotfiles-doctor` for the full picture; re-run ./install from %s to fix.\n' "$root_real"
+      return 0
+    fi
+  fi
+
   _dotfiles_head_state "$DOTFILES_ROOT"
   _dotfiles_guard_verdict "$_DOTFILES_HEAD" "$DOTFILES_PIN_BRANCH"
   case "$_DOTFILES_VERDICT" in
-    ok|unknown) return 0 ;;
+    unknown) return 0 ;;
+    ok)
+      # On the pin branch, but is it the pin branch as reviewed? This is the
+      # #87 state, and it is the one with no other detection path: nothing
+      # about a checkout sitting on main looks wrong.
+      _dotfiles_pin_divergence "$DOTFILES_ROOT" "$DOTFILES_PIN_BRANCH"
+      [[ "$_DOTFILES_DIVERGED" == "differs" ]] || return 0
+      printf '\033[0;33m⚠ dotfiles: live config is %s, but not the same commit as origin/%s\033[0m\n' \
+        "$DOTFILES_PIN_BRANCH" "$DOTFILES_PIN_BRANCH"
+      printf '  Merged fixes may not be running, or unmerged commits may be.\n'
+      printf '  `dotfiles-doctor` says which files differ.\n'
+      return 0 ;;
     "off-pin "*)
       printf '\033[0;33m⚠ dotfiles: live config is branch %s, not %s\033[0m\n' \
         "${_DOTFILES_VERDICT#off-pin }" "$DOTFILES_PIN_BRANCH" ;;
@@ -546,89 +700,215 @@ _dotfiles_live_config_warn() {
   printf '  `dotfiles-doctor` for detail; `dotfiles-work <branch>` to move work off it.\n'
 }
 
-# Parse dotbot's link map. Two forms are in use and both must be handled:
-#   ~/.gitconfig: gitconfig                    (inline)
-#   ~/.p10k.zsh:                               (expanded, with `path:` beneath)
+# Parse dotbot's link map. Three forms are accepted by dotbot and all three are
+# handled, because a parser that knows only some of them omits the rest
+# *silently* — and silent omission is the failure this whole file exists to
+# prevent. An omitted link is a file the doctor never checks.
+#
+#   ~/.gitconfig: gitconfig                       (inline)
+#   ~/.p10k.zsh:                                  (expanded, keys beneath)
 #     path: p10k.zsh
-# A parser that only knows the inline form silently omits the others, and this
-# whole file exists because of silent omissions. Emits "<target> <source>".
+#     if: '[ -f p10k.zsh ]'
+#   ~/.p10k.zsh: {path: p10k.zsh, if: '[ -f ... ]'}   (flow mapping)
+#
+# The flow form is handled defensively rather than because it is in use: read as
+# an inline source it yields the literal string "{path: p10k.zsh, if: ...}",
+# which then goes into a git pathspec and makes the whole drift check fail.
+#
+# `if:` must be captured, not skipped. A conditional link that is correctly not
+# installed is not a fault, and reporting it as one makes `dotfiles-doctor` exit
+# non-zero forever on any machine where the condition is false — and a
+# permanently-red checker is a permanently-ignored checker.
+#
+# Emits "<target> <source> <conditional 0|1>". Non-zero when the file cannot be
+# read at all, so callers can tell "no links" from "could not look".
 _dotfiles_link_map() {
   # Usage: _dotfiles_link_map <checkout-root>
-  local conf="${1}/install.conf.yaml"
-  [[ -r "$conf" ]] || return 0
+  local conf="${1:-}/install.conf.yaml"
+  [[ -r "$conf" ]] || return 1
   awk '
+    function flush() {
+      if (target != "" && src != "") print target, src, cond
+      target = ""; src = ""; cond = 0
+    }
+    function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    # A comment can hold anything, including a plausible-looking link line or a
+    # commented-out `path:`. It never declares one.
+    /^[[:space:]]*#/ { next }
     /^[[:space:]]*~/ {
-      line = $0
-      sub(/^[[:space:]]*/, "", line)
+      flush()
+      line = trim($0)
       i = index(line, ":")
       if (i == 0) next
       target = substr(line, 1, i - 1)
       rest   = substr(line, i + 1)
       sub(/[[:space:]]*#.*$/, "", rest)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", rest)
-      if (rest != "") { print target, rest; pending = "" } else { pending = target }
+      rest = trim(rest)
+      if (rest ~ /^\{/) {
+        if (match(rest, /path:[[:space:]]*[^,}]+/)) {
+          s = substr(rest, RSTART, RLENGTH)
+          sub(/path:[[:space:]]*/, "", s)
+          src = trim(s)
+        }
+        if (rest ~ /(^\{|,)[[:space:]]*if:/) cond = 1
+        flush()
+      } else if (rest != "") {
+        src = rest
+        flush()
+      }
       next
     }
-    pending != "" && /^[[:space:]]*path:/ {
-      src = $0
-      sub(/^[[:space:]]*path:[[:space:]]*/, "", src)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", src)
-      if (src != "") { print pending, src }
-      pending = ""
+    target != "" && /^[[:space:]]*path:/ {
+      s = $0
+      sub(/^[[:space:]]*path:[[:space:]]*/, "", s)
+      sub(/[[:space:]]*#.*$/, "", s)
+      src = trim(s)
+      next
     }
+    target != "" && /^[[:space:]]*if:/ { cond = 1; next }
+    END { flush() }
   ' "$conf"
 }
 
-# Repo-relative paths whose content is LIVE — whose bytes reach the running
-# system the moment HEAD moves. That is more than the link list: ~/.zshrc is
-# linked and in turn sources the whole of zsh/, so zsh/functions/system.sh is
-# exactly as live as a directly-linked file even though nothing links to it.
-# Reporting only the link list would understate the blast radius, and zsh/ is
-# where every failure so far has actually come from.
-_dotfiles_live_paths() {
-  # Usage: _dotfiles_live_paths <checkout-root>
-  _dotfiles_link_map "$1" | awk '{print $2}'
-  echo "zsh"
+# Repo-relative paths whose content is LIVE without being linked — whose bytes
+# reach the running system the moment HEAD moves, even though no symlink names
+# them. Reporting only the link list understates the blast radius.
+#
+#   zsh/     — ~/.zshrc is linked and sources all of it, so a change to
+#              zsh/functions/system.sh is exactly as live as a linked file.
+#   scripts/ — executed out of the working tree BY PATH, never copied: every
+#              backup-*, audit-*, gnome-apply, xdg-repair and verify-tools
+#              command shells out to ~/.dotfiles/scripts/…, and
+#              systemd/herdr-server.service has
+#              ExecStart=%h/.dotfiles/scripts/herdr-server-launch.sh — a running
+#              unit whose next exec comes from whatever HEAD points at. Some of
+#              those scripts write root-owned files into /etc.
+#
+# Deliberately NOT here: resticprofile/, audit/ and udev/ are *copied* to /etc
+# by their setup commands, so moving HEAD does not change what is running —
+# backup-doctor and audit-status drift-check those against the repo instead.
+_dotfiles_static_live_paths() {
+  printf '%s\n' zsh scripts
 }
 
-_df_ok()   { printf '  ✓ %s\n' "$*"; }
-_df_warn() { printf '  ⚠ %s\n' "$*"; _DF_WARN=$((_DF_WARN+1)); }
-_df_bad()  { printf '  ✗ %s\n' "$*"; _DF_FAIL=$((_DF_FAIL+1)); }
+# How stale is the ref we are about to compare against? mtime of the newest of
+# FETCH_HEAD (rewritten by every fetch, including a pull's) and the loose ref
+# file (a fresh clone that never fetched again). packed-refs is deliberately
+# excluded: gc rewrites it, which would make a repo look freshly fetched when it
+# was only repacked, and overstating freshness is the failure being fixed.
+# Prints whole hours; non-zero and prints nothing when it cannot tell.
+_dotfiles_fetch_age_hours() {
+  # Usage: _dotfiles_fetch_age_hours <checkout-root> <pin-branch>
+  local root="${1:-}" pin="${2:-}" f mt newest=0 now
+  for f in "$root/.git/FETCH_HEAD" "$root/.git/refs/remotes/origin/$pin"; do
+    [[ -e "$f" ]] || continue
+    mt="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)" || continue
+    [[ "$mt" =~ ^[0-9]+$ ]] || continue
+    (( mt > newest )) && newest=$mt
+  done
+  (( newest > 0 )) || return 1
+  now="$(date +%s)"
+  [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  (( now < newest )) && { printf '0\n'; return 0; }
+  printf '%d\n' $(( (now - newest) / 3600 ))
+}
 
 dotfiles-doctor() {
-  # Usage: dotfiles-doctor
+  # Usage: dotfiles-doctor [--fetch]
   # Reports whether the live config is the reviewed config, and when it is not,
-  # exactly which managed files differ. Read-only: no sudo, no network, no
-  # fetch — it compares against the origin/<pin> ref you already have, and says
-  # so when that ref is stale or missing rather than assuming it is current.
-  local root="${DOTFILES_ROOT}" pin="${DOTFILES_PIN_BRANCH}"
-  _DF_FAIL=0 _DF_WARN=0
+  # exactly which managed files differ. Read-only by default: no sudo, no
+  # network — it compares against the origin/<pin> ref already on disk and says
+  # how old that ref is instead of assuming it is current. `--fetch` updates the
+  # ref first, which is the only way to get an answer about the actual remote.
+  local root="${DOTFILES_ROOT}" pin="${DOTFILES_PIN_BRANCH}" do_fetch=0
+  # Locals by dynamic scope — see _doctor_ok. Both the counters and the
+  # internals' result variables, so a run leaves nothing behind in the shell.
+  local _DOCTOR_FAIL=0 _DOCTOR_WARN=0
+  local _DOTFILES_HEAD _DOTFILES_VERDICT
+
+  case "${1:-}" in
+    "")        ;;
+    --fetch)   do_fetch=1 ;;
+    --help|-h) echo "Usage: dotfiles-doctor [--fetch]   (--fetch updates origin/$pin first)"; return 0 ;;
+    *)         echo "usage: dotfiles-doctor [--fetch]" >&2; return 2 ;;
+  esac
 
   echo "=== Dotfiles Doctor ==="
   if [[ ! -d "$root/.git" ]]; then
     echo "  ✗ $root is not a primary git checkout — nothing to check"
     return 1
   fi
+
+  # Prove git can read this repo BEFORE any answer depends on it. Four checks
+  # below are git invocations, and a repo-wide git failure makes each of them
+  # return empty — which two of them would have reported as a definite fact
+  # ("no origin/main ref"; "no worktrees"). The trigger is not hypothetical: a
+  # malformed ~/.gitconfig does it, and ~/.gitconfig is itself one of the
+  # managed symlinks whose content changes on the branch switch this function
+  # is about, so a bad branch can blind the guard to that branch.
+  local probe prc
+  probe="$(git -C "$root" rev-parse --git-dir 2>&1)"; prc=$?
+  if (( prc != 0 )); then
+    echo "  ✗ git cannot read $root (exit $prc) — every check below would be a guess"
+    printf '    %s\n' "$probe"
+    echo "    A malformed ~/.gitconfig does this, and ~/.gitconfig is a managed symlink."
+    return 1
+  fi
+
   echo "Checkout:  $root"
   echo "Pinned to: $pin"
+
+  if (( do_fetch )); then
+    echo "Refreshing origin/$pin:"
+    if git -C "$root" fetch --quiet origin "$pin" 2>/dev/null; then
+      _doctor_ok "fetched — the comparison below is against the real remote"
+    else
+      _doctor_warn "fetch failed (offline? no remote?) — falling back to the ref on disk"
+    fi
+  fi
 
   echo "Live branch:"
   _dotfiles_head_state "$root"
   _dotfiles_guard_verdict "$_DOTFILES_HEAD" "$pin"
   case "$_DOTFILES_VERDICT" in
-    ok)           _df_ok "on '$pin' — live config is the reviewed config" ;;
-    "off-pin "*)  _df_bad "on '${_DOTFILES_VERDICT#off-pin }', not '$pin'" ;;
-    "detached "*) _df_bad "detached HEAD at ${_DOTFILES_VERDICT#detached }" ;;
-    *)            _df_warn "could not read $root/.git/HEAD" ;;
+    ok)           _doctor_ok "on '$pin' — the pinned branch" ;;
+    "off-pin "*)  _doctor_bad "on '${_DOTFILES_VERDICT#off-pin }', not '$pin'" ;;
+    "detached "*) _doctor_bad "detached HEAD at ${_DOTFILES_VERDICT#detached }" ;;
+    *)            _doctor_warn "could not read $root/.git/HEAD" ;;
   esac
 
   # Does the ref we are about to compare against actually exist? Every check
   # below is a diff against origin/<pin>; without it they all return empty,
   # which reads identically to "no drift". Establish it once, loudly, and let
   # the rest skip rather than print a clean bill of health they cannot support.
+  # git's health is already proven above, so a non-zero status here means the
+  # ref is genuinely absent rather than that git could not be asked.
   local have_ref=0
   if git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$pin" >/dev/null 2>&1; then
     have_ref=1
+  fi
+
+  # Existence is not currency, and this is the check the whole feature turns on.
+  # Nothing on this machine fetches on a schedule — origin/<pin> is exactly as
+  # old as the last time a human typed `git fetch`. Against a week-old ref,
+  # "not behind" means "not behind what was true a week ago", which is the #87
+  # scenario reported as an all-clear. So the age is stated every run, and a
+  # stale ref is a warning that suppresses the unqualified ✓ at the end.
+  echo "Freshness of origin/$pin:"
+  if (( have_ref )); then
+    local age_h
+    if age_h="$(_dotfiles_fetch_age_hours "$root" "$pin")" && [[ -n "$age_h" ]]; then
+      if (( age_h > DOTFILES_FETCH_MAX_AGE_HOURS )); then
+        _doctor_warn "last fetched ${age_h}h ago (>${DOTFILES_FETCH_MAX_AGE_HOURS}h) — everything below is only as current as that (dotfiles-doctor --fetch)"
+      else
+        _doctor_ok "last fetched ${age_h}h ago"
+      fi
+    else
+      _doctor_warn "cannot tell when origin/$pin was last fetched — treat the comparison below as of unknown age (dotfiles-doctor --fetch)"
+    fi
+  else
+    _doctor_bad "no origin/$pin ref — cannot tell reviewed from unreviewed"
+    echo "    Fix: git -C $root fetch origin"
   fi
 
   echo "Position vs origin/$pin:"
@@ -637,135 +917,206 @@ dotfiles-doctor() {
     counts="$(git -C "$root" rev-list --left-right --count "origin/$pin...HEAD" 2>/dev/null)"
     read -r behind ahead <<< "$counts"
     if [[ -z "${behind:-}" || -z "${ahead:-}" ]]; then
-      _df_warn "could not compare against origin/$pin"
+      _doctor_warn "could not compare against origin/$pin"
     else
-      [[ "$behind" == "0" ]] && _df_ok "not behind — every merged commit is live" \
-        || _df_bad "$behind commit(s) BEHIND — merged, reviewed fixes are NOT running"
-      [[ "$ahead" == "0" ]] && _df_ok "not ahead — nothing unreviewed is live" \
-        || _df_warn "$ahead commit(s) AHEAD — unmerged code IS running"
+      [[ "$behind" == "0" ]] && _doctor_ok "not behind that ref — every commit it has is live" \
+        || _doctor_bad "$behind commit(s) BEHIND — merged, reviewed fixes are NOT running"
+      [[ "$ahead" == "0" ]] && _doctor_ok "not ahead — nothing unreviewed is live" \
+        || _doctor_warn "$ahead commit(s) AHEAD — unmerged code IS running"
     fi
   else
-    _df_bad "no origin/$pin ref — cannot tell reviewed from unreviewed"
-    echo "    Fix: git -C $root fetch origin"
+    _doctor_warn "skipped — no origin/$pin to compare against"
+  fi
+
+  # The link map is parsed ONCE here and every check below is derived from it.
+  # Two reasons: it was parsed twice (two awk forks, two reads, and two
+  # consumers that could disagree if the file changed between them), and more
+  # importantly a parse failure has to stop the derived checks. An unreadable
+  # install.conf.yaml yields no paths, an empty pathspec diffs the whole tree or
+  # nothing at all, and the section prints "every live file matches" — a false
+  # all-clear produced by not knowing what is live.
+  local -a link_lines=()
+  local l
+  while IFS= read -r l; do
+    [[ -n "$l" ]] && link_lines+=("$l")
+  done < <(_dotfiles_link_map "$root")
+
+  local map_ok=1
+  (( ${#link_lines[@]} > 0 )) || map_ok=0
+
+  local -a live_paths=()
+  if (( map_ok )); then
+    local mt ms mc
+    for l in "${link_lines[@]}"; do
+      read -r mt ms mc <<< "$l"
+      [[ -n "$ms" ]] && live_paths+=("$ms")
+    done
+    while IFS= read -r l; do
+      [[ -n "$l" ]] && live_paths+=("$l")
+    done < <(_dotfiles_static_live_paths)
   fi
 
   # The blast radius in files. Commit counts say how far apart the trees are;
   # this says whether the difference actually reaches your shell.
   echo "Managed files differing from origin/$pin:"
-  if (( have_ref )); then
-    local -a live_paths=()
-    local p
-    while IFS= read -r p; do
-      [[ -n "$p" ]] && live_paths+=("$p")
-    done < <(_dotfiles_live_paths "$root")
-
-    if (( ${#live_paths[@]} == 0 )); then
-      _df_warn "no live paths resolved — install.conf.yaml unreadable?"
-    else
-      # NOT named `path`: in zsh that identifier is tied to the PATH array, so
-      # `local path` blanks PATH for the rest of the function and every external
-      # command after it silently vanishes. The first draft of this function did
-      # exactly that — git was not found, its error went to /dev/null, and the
-      # empty result printed as "✓ none — every live file matches". A false
-      # all-clear, in the function written to detect false all-clears.
-      local diffstat add del relpath rc
-      # stderr is DISCARDED, not folded in with 2>&1, and the exit status is what
-      # decides. git writes warnings to stderr while still succeeding (a malformed
-      # ~/.gitconfig, for one), and merging that into the value being parsed put a
-      # non-numstat line into the loop below, where it matched nothing and printed
-      # nothing at all — no tick, no cross, an empty section. Status is the only
-      # reliable signal; captured output is data and must stay data.
-      diffstat="$(git -C "$root" diff --numstat "origin/$pin" HEAD -- "${live_paths[@]}" 2>/dev/null)"
-      rc=$?
-      if (( rc != 0 )); then
-        # Never infer "no drift" from a failed command. An empty result and a
-        # broken invocation are indistinguishable downstream, so separate them here.
-        _df_bad "could not diff against origin/$pin (git exit $rc) — drift UNKNOWN"
-        echo "    Re-run to see why: git -C $root diff --numstat origin/$pin HEAD"
-      elif [[ -z "$diffstat" ]]; then
-        _df_ok "none — every live file matches origin/$pin"
-      else
-        # Fed by here-string, not a pipe: a pipeline's last stage is a subshell
-        # in both bash and zsh, so _DF_FAIL would be incremented in a child and
-        # discarded, and the summary would report zero problems after printing
-        # a screen of them.
-        while IFS=$'\t' read -r add del relpath; do
-          [[ -n "$relpath" ]] && _df_bad "$relpath (+$add/-$del)"
-        done <<< "$diffstat"
-      fi
-    fi
+  if (( ! map_ok )); then
+    _doctor_bad "cannot read any link from $root/install.conf.yaml — what is live is UNKNOWN, so drift cannot be reported"
+    echo "    Check: $root/install.conf.yaml is readable and its 'link:' block parses"
+  elif (( ! have_ref )); then
+    _doctor_warn "skipped — no origin/$pin to compare against"
   else
-    _df_warn "skipped — no origin/$pin to compare against"
+    # NOT named `path`: in zsh that identifier is tied to the PATH array, so
+    # `local path` blanks PATH for the rest of the function and every external
+    # command after it silently vanishes. The first draft of this function did
+    # exactly that — git was not found, its error went to /dev/null, and the
+    # empty result printed as "✓ none — every live file matches". A false
+    # all-clear, in the function written to detect false all-clears.
+    local diffstat add del relpath rc
+    # stderr is DISCARDED, not folded in with 2>&1, and the exit status is what
+    # decides. git writes warnings to stderr while still succeeding (a malformed
+    # ~/.gitconfig, for one), and merging that into the value being parsed put a
+    # non-numstat line into the loop below, where it matched nothing and printed
+    # nothing at all — no tick, no cross, an empty section. Status is the only
+    # reliable signal; captured output is data and must stay data.
+    diffstat="$(git -C "$root" diff --numstat "origin/$pin" HEAD -- "${live_paths[@]}" 2>/dev/null)"
+    rc=$?
+    if (( rc != 0 )); then
+      # Never infer "no drift" from a failed command. An empty result and a
+      # broken invocation are indistinguishable downstream, so separate them here.
+      _doctor_bad "could not diff against origin/$pin (git exit $rc) — drift UNKNOWN"
+      echo "    Re-run to see why: git -C $root diff --numstat origin/$pin HEAD"
+    elif [[ -z "$diffstat" ]]; then
+      _doctor_ok "none — every live file matches origin/$pin"
+    else
+      # Fed by here-string, not a pipe: a pipeline's last stage is a subshell
+      # in both bash and zsh, so the counters would be incremented in a child
+      # and discarded, and the summary would report zero problems after printing
+      # a screen of them.
+      while IFS=$'\t' read -r add del relpath; do
+        [[ -n "$relpath" ]] && _doctor_bad "$relpath (+$add/-$del)"
+      done <<< "$diffstat"
+    fi
   fi
 
   # Uncommitted edits are live too. This is the one case `git status` does
   # surface, but only if you happen to run it in this repo — which is not where
   # you notice a shell function behaving oddly.
-  echo "Uncommitted changes to managed files:"
-  local dirty line drc
-  dirty="$(git -C "$root" status --porcelain 2>/dev/null)"
-  drc=$?
-  if (( drc != 0 )); then
-    _df_bad "could not read working-tree status (git exit $drc)"
-  elif [[ -z "$dirty" ]]; then
-    _df_ok "none"
+  #
+  # Scoped to the live paths, not the whole repo. Unscoped it reported every
+  # scratch file and node_modules/ in the tree as a finding, with untracked
+  # directories collapsed so the offending file was not even named — noise in
+  # exactly the normal states that teach people to stop reading the output.
+  echo "Uncommitted changes to live files:"
+  if (( ! map_ok )); then
+    _doctor_warn "skipped — the link map did not parse, so 'live' is undefined"
   else
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && _df_warn "$line"
-    done <<< "$dirty"
+    local dirty line drc dpath dcode expected p
+    dirty="$(git -C "$root" status --porcelain --untracked-files=all -- "${live_paths[@]}" 2>/dev/null)"
+    drc=$?
+    if (( drc != 0 )); then
+      _doctor_bad "could not read working-tree status (git exit $drc)"
+    elif [[ -z "$dirty" ]]; then
+      _doctor_ok "none"
+    else
+      while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        # Porcelain lines are "XY path", where X or Y may be a space. Squeezing
+        # the status field keeps the output aligned as one column of codes
+        # instead of a ragged " M"/"??" mix.
+        dcode="${${line:0:2}// /}"
+        dpath="${line:3}"
+        expected=0
+        for p in ${=DOTFILES_EXPECTED_DIRTY}; do
+          [[ "$dpath" == "$p" ]] && { expected=1; break; }
+        done
+        if (( expected )); then
+          _doctor_note "$dcode $dpath (expected — see install.conf.yaml)"
+        else
+          _doctor_warn "$dcode $dpath"
+        fi
+      done <<< "$dirty"
+    fi
   fi
 
-  # Link integrity, in both directions:
+  # Link integrity, in three directions:
   #   declared but not linked — ./install has not run since it was added, so
-  #     that file is NOT live and edits to it do nothing;
+  #     that file is NOT live and edits to it do nothing (unless the link is
+  #     conditional and its `if:` is false, which is correct, not a fault);
   #   linked but dangling — a link installed while on a branch that declares it,
   #     left behind after switching away. The target no longer exists in the
   #     tree. This is not hypothetical: a systemd user unit is in exactly that
-  #     state on any machine that ran ./install on the herdr branch.
+  #     state on any machine that ran ./install on the herdr branch;
+  #   linked but pointing OUTSIDE this checkout — `./install` run from a
+  #     worktree re-points the whole live config at a feature branch. Checking
+  #     only "is it a symlink" passed that state with "N/N declared links
+  #     present" while every other check in this function inspected the wrong
+  #     tree, and the startup warning stayed silent. `install` now refuses to
+  #     run from a worktree; this catches the ones already installed, and any
+  #     other foreign target.
   echo "Link integrity:"
-  local target src declared=0 linked=0 missing="" dangling=""
-  while read -r target src; do
-    [[ -n "$target" && -n "$src" ]] || continue
-    declared=$((declared + 1))
-    local abs="${HOME}/${target#\~/}"
-    if [[ -L "$abs" ]]; then
-      linked=$((linked + 1))
-      [[ -e "$abs" ]] || dangling+=" $target"
-    else
-      missing+=" $target"
-    fi
-  done < <(_dotfiles_link_map "$root")
-
-  if (( declared == 0 )); then
-    _df_warn "no links declared in $root/install.conf.yaml — parse failed?"
+  if (( ! map_ok )); then
+    _doctor_bad "no links readable from $root/install.conf.yaml — link integrity UNKNOWN"
   else
-    [[ -z "$missing" ]] && _df_ok "$linked/$declared declared links present" \
-      || _df_bad "$linked/$declared present — not linked:$missing (run ./install)"
-    [[ -z "$dangling" ]] && _df_ok "no dangling links" \
-      || _df_bad "dangling (target absent on this branch):$dangling"
+    local target src cond abs resolved rootreal declared=0 linked=0
+    local missing="" dangling="" foreign="" skipped=""
+    # Canonicalised once: ~/.dotfiles is itself a symlink on some machines, and
+    # comparing a resolved target against an unresolved root would then report
+    # every correctly-installed link as foreign.
+    rootreal="$(readlink -f "$root" 2>/dev/null)" || rootreal=""
+    [[ -n "$rootreal" ]] || rootreal="$root"
+    for l in "${link_lines[@]}"; do
+      read -r target src cond <<< "$l"
+      [[ -n "$target" && -n "$src" ]] || continue
+      declared=$((declared + 1))
+      abs="${HOME}/${target#\~/}"
+      if [[ -L "$abs" ]]; then
+        linked=$((linked + 1))
+        [[ -e "$abs" ]] || dangling+=" $target"
+        # -f, not -e: resolves the path even when the target is missing, so a
+        # dangling link is still checked for pointing at the wrong tree.
+        resolved="$(readlink -f "$abs" 2>/dev/null)" || resolved=""
+        if [[ -n "$resolved" && "$resolved" != "$rootreal" && "$resolved" != "$rootreal"/* ]]; then
+          foreign+=" ${target}→${resolved}"
+        fi
+      elif [[ "$cond" == "1" ]]; then
+        skipped+=" $target"
+      else
+        missing+=" $target"
+      fi
+    done
+
+    [[ -z "$missing" ]] && _doctor_ok "$linked/$declared declared links present" \
+      || _doctor_bad "$linked/$declared present — not linked:$missing (run ./install)"
+    [[ -z "$dangling" ]] && _doctor_ok "no dangling links" \
+      || _doctor_bad "dangling (target absent on this branch):$dangling"
+    [[ -z "$foreign" ]] && _doctor_ok "every link resolves inside $rootreal" \
+      || _doctor_bad "link points OUTSIDE the checkout — the live config is NOT this tree:$foreign"
+    if [[ -n "$skipped" ]]; then
+      _doctor_note "conditional in install.conf.yaml (\`if:\`) and not installed:$skipped"
+    fi
   fi
 
   echo "Worktrees (where feature work belongs):"
-  local wt
-  wt="$(git -C "$root" worktree list 2>/dev/null | tail -n +2)"
-  if [[ -z "$wt" ]]; then
-    echo "  (none) — dotfiles-work <branch> to make one"
+  local wt wrc
+  wt="$(git -C "$root" worktree list 2>/dev/null)"; wrc=$?
+  if (( wrc != 0 )); then
+    _doctor_warn "could not list worktrees (git exit $wrc)"
   else
-    printf '%s\n' "$wt" | sed 's/^/  /'
+    # Line one is the primary checkout, which is not a worktree in the sense
+    # meant here. Split in-shell rather than piping to tail: a pipeline's status
+    # would be tail's, and this used to discard git's.
+    local -a wt_lines
+    wt_lines=("${(f)wt}")
+    if (( ${#wt_lines[@]} <= 1 )); then
+      echo "  (none) — dotfiles-work <branch> to make one"
+    else
+      printf '  %s\n' "${wt_lines[@]:1}"
+    fi
   fi
 
   echo
-  if (( _DF_FAIL > 0 )); then
-    echo "✗ $_DF_FAIL problem(s), $_DF_WARN warning(s)."
-    echo "  Usual fix: git -C $root checkout $pin && dotfiles-work <branch>"
-    return 1
-  fi
-  if (( _DF_WARN > 0 )); then
-    echo "⚠ $_DF_WARN warning(s)."
-    return 0
-  fi
-  echo "✓ Live config is the reviewed config."
-  return 0
+  _doctor_summary "Live config is the reviewed config." \
+    "Usual fix: git -C $root checkout $pin && dotfiles-work <branch>"
 }
 
 dotfiles-work() {
@@ -800,8 +1151,26 @@ dotfiles-work() {
   local branch="$1" dir="${base}/${1//\//-}"
 
   if [[ -d "$dir" ]]; then
+    # A directory at the expected path is not a worktree. It is also what
+    # `rm -rf` without `git worktree prune`, a half-failed `worktree remove`,
+    # and a plain name collision leave behind — and the previous version cd'd
+    # into it, printed "Entered existing worktree" with an empty branch, and
+    # returned 0, so the next hour of edits went into a directory git knew
+    # nothing about.
+    local wt_branch
+    if ! wt_branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
+      echo "✗ $dir exists but is not a git worktree — refusing to use it" >&2
+      echo "  Left over from a removed worktree, or a name collision. Clear it with:" >&2
+      echo "    rm -rf '$dir' && git -C '$root' worktree prune" >&2
+      return 1
+    fi
+    # Branch names flatten / to - for the directory name, so two branches can
+    # want the same directory. Say which one is actually there.
+    if [[ "$wt_branch" != "$branch" ]]; then
+      echo "⚠ $dir is on '$wt_branch', not '$branch' — using it as-is" >&2
+    fi
     cd "$dir" || return 1
-    echo "Entered existing worktree: $dir ($(git rev-parse --abbrev-ref HEAD))"
+    echo "Entered existing worktree: $dir ($wt_branch)"
     return 0
   fi
 
@@ -816,7 +1185,16 @@ dotfiles-work() {
     git -C "$root" worktree add --track -b "$branch" "$dir" "origin/$branch" || return 1
   else
     git -C "$root" fetch --quiet origin "$pin" 2>/dev/null
-    git -C "$root" worktree add -b "$branch" "$dir" "origin/$pin" || return 1
+    # --no-track is load-bearing. Without it the new branch takes origin/<pin>
+    # as its upstream, and under this repo's own push.default=simple a plain
+    # `git push` then fails with "the upstream branch of your current branch
+    # does not match the name of your current branch" and helpfully suggests
+    # `git push origin HEAD:main` — pushing unreviewed feature commits straight
+    # onto the branch this whole feature exists to protect. It also made
+    # `git status` read "ahead of origin/main by N" and, with pull.rebase=true,
+    # made `git pull` rebase onto main unasked. push.autoSetupRemote=true sets
+    # the correct upstream on the first push instead.
+    git -C "$root" worktree add --no-track -b "$branch" "$dir" "origin/$pin" || return 1
   fi
 
   cd "$dir" || return 1
@@ -1190,11 +1568,15 @@ backup-kit() {
   echo "and inside the restic repo. See docs/BACKUP_AND_RESTORE_GUIDE.md (Disaster Recovery)."
 }
 
-# Internal: backup-doctor result emitters. They mutate the globals _BD_FAIL/_BD_WARN
-# (backup-doctor resets + unsets them) — separate functions can't share a `local`.
-_backup_doctor_ok()   { printf '  ✓ %s\n' "$*"; }
-_backup_doctor_warn() { printf '  ⚠ %s\n' "$*"; _BD_WARN=$((_BD_WARN+1)); }
-_backup_doctor_bad()  { printf '  ✗ %s\n' "$*"; _BD_FAIL=$((_BD_FAIL+1)); }
+# Internal: backup-doctor result emitters. Kept as names (30-odd call sites read
+# better with the subject in them) but delegating to the shared _doctor_*
+# implementation — there used to be a byte-for-byte duplicate pair here and in
+# the dotfiles guard, so any change to how results are emitted had to be made
+# twice. The counters they increment are backup-doctor's `local`s, reached by
+# zsh's dynamic scoping; see _doctor_ok.
+_backup_doctor_ok()   { _doctor_ok   "$@"; }
+_backup_doctor_warn() { _doctor_warn "$@"; }
+_backup_doctor_bad()  { _doctor_bad  "$@"; }
 
 # Internal: compare a live /etc file against its ~/.dotfiles source. $1 live, $2 repo, $3 label.
 _backup_doctor_cmp() {
@@ -1230,7 +1612,7 @@ _backup_doctor_age_check() {
 # BACKUP_EXTERNAL_UUID, $3 = BACKUP_EXTERNAL_REPO, $4 = its mount point. Split
 # out of backup-doctor so its branch selection can be exercised without root or
 # a real disk (scripts/test-backup-external.sh); reports through the same
-# _BD_FAIL/_BD_WARN globals as every other check.
+# result counters as every other check (backup-doctor's locals, via dynamic scope).
 _backup_doctor_external() {
   local dotfiles="$1" extuuid="$2" extrepo="$3" extmnt="$4"
   local extcfg extunit extrules extfstab
@@ -1330,7 +1712,9 @@ _backup_doctor_external() {
 # stale snapshots, inert alerting, stale recovery assets). Non-zero exit on any FAIL.
 backup-doctor() {
   # Usage: backup-doctor
-  _BD_FAIL=0 _BD_WARN=0
+  # Locals, not globals: see _doctor_ok. These used to persist in every shell
+  # that ran backup-doctor, and a nested call clobbered the outer count.
+  local _DOCTOR_FAIL=0 _DOCTOR_WARN=0
   local dotfiles="${HOME}/.dotfiles"
   echo "=== Backup Doctor ($(hostname)) ==="
   sudo -v 2>/dev/null || { echo "sudo required (reads /etc/restic, drop-ins, /root)."; return 1; }
@@ -1503,16 +1887,7 @@ backup-doctor() {
   fi
 
   echo
-  if (( _BD_FAIL > 0 )); then
-    echo "✗ ${_BD_FAIL} failure(s), ${_BD_WARN} warning(s) — fix the ✗ items above."
-    unset _BD_FAIL _BD_WARN; return 1
-  elif (( _BD_WARN > 0 )); then
-    echo "⚠ ${_BD_WARN} warning(s), no failures — review the ⚠ items above."
-    unset _BD_FAIL _BD_WARN; return 0
-  else
-    echo "✓ All checks passed — the backup chain is correct end-to-end."
-    unset _BD_FAIL _BD_WARN; return 0
-  fi
+  _doctor_summary "All checks passed — the backup chain is correct end-to-end."
 }
 
 # Guarded restore of the /etc slice (+ AWS VPN client) for bare-metal recovery.

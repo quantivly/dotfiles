@@ -324,7 +324,7 @@ doctor_state() {
     sudo() { return 1; }          # no udev rule, no unit file
     findmnt() { return 1; }       # no fstab entry
     sed() { return 1; }           # no ConditionPathExists to read
-    _BD_FAIL=0 _BD_WARN=0
+    _DOCTOR_FAIL=0 _DOCTOR_WARN=0    # the counters backup-doctor would declare; it is bypassed here
     _backup_doctor_external "'"$DOTFILES"'" "'"$uuid"'" "'"$3"'" "'"${3%/restic}"'"
   ' 2>&1
 }

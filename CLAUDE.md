@@ -53,7 +53,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 |--------|---------|---------------|
 | `zsh/functions/core.sh` | Core utilities (22 functions) | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
-| `zsh/functions/system.sh` | Performance + Utilities + GNOME + Backup + Audit (37 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
+| `zsh/functions/system.sh` | Performance + Utilities + Dotfiles guard + GNOME + Backup + Audit (59 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `dotfiles-doctor`, `dotfiles-work`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
@@ -107,23 +107,81 @@ dotfiles-work my/branch      # create/enter ~/dotfiles-worktrees/my-branch
 dotfiles-work --list         # list worktrees
 dotfiles-work --remove b     # remove one
 dotfiles-doctor              # is the live config the reviewed config?
+dotfiles-doctor --fetch      # ...compared against the actual remote, not a stale ref
 ```
 
-`dotfiles-doctor` reports the pin state, commits ahead/behind `origin/main`, **which
-managed files actually differ** (the blast radius, not just a commit count),
-uncommitted changes, and link integrity in both directions — declared-but-not-installed
-(the file is not live, edits to it do nothing) and installed-but-dangling (linked while
-on a branch that declares the target, left behind after switching away).
+`dotfiles-doctor` reports the pin state, how stale `origin/main` is, commits
+ahead/behind it, **which managed files actually differ** (the blast radius, not just a
+commit count), uncommitted changes to those files, and link integrity in three
+directions — declared-but-not-installed, installed-but-dangling, and
+linked-but-pointing-outside-this-checkout.
 
 A one-line warning also fires on the first prompt of any shell whose live config is off
-the pin branch. It reads `.git/HEAD` directly rather than forking `git` — 0.04 ms versus
-1.9 ms, on every shell, forever. Silence it with `DOTFILES_GUARD_QUIET=1` when
-deliberately dogfooding a branch. Override the pin with `DOTFILES_PIN_BRANCH`.
+the pin branch, **or is on it at a different commit than `origin/main`** — that second
+case is the #87 outage, and nothing about a checkout sitting on `main` looks wrong. It
+reads `.git/HEAD` and the two ref files directly rather than forking `git`: 0.07 ms for
+HEAD, 0.3 ms including both refs, against 2–5 ms for a single `git symbolic-ref` on this
+box, on every shell, forever. It cannot say *which* direction the divergence goes
+(that needs a merge base, which needs a fork), so it does not claim one.
 
-State table: `scripts/test-dotfiles-guard.sh` (47 checks, run in CI). Both bugs found
-in the guard while writing it printed a green tick rather than an error — a `local path`
-declaration that blanks `PATH` in zsh, and a diff against a ref that did not exist — so
-the states are executed in CI rather than left to a hand-run.
+**Every layer of this feature fails by looking clean**, so each check is written against
+the state that produces a green tick rather than an error. The ones that bit during
+review, all of which reported success:
+
+- **`config check`-style existence is not currency.** Nothing on this machine fetches on
+  a schedule, so `origin/main` is exactly as old as the last time a human typed
+  `git fetch` — and against a week-old ref, "not behind" means "not behind whatever was
+  true then", which is #87 reported as an all-clear. The doctor therefore states the
+  fetch age every run and warns past `DOTFILES_FETCH_MAX_AGE_HOURS` (24), which
+  suppresses the unqualified ✓. `--fetch` is the only form that answers about the real
+  remote.
+- **`./install` from a worktree re-points the whole live config at a feature branch**,
+  silently: `git status` stays clean either side, and the doctor's branch and drift
+  checks read the primary checkout. Three things now catch it: `install` refuses (`.git`
+  is a *file* in a worktree; `DOTFILES_ALLOW_WORKTREE_INSTALL=1` overrides), the doctor
+  resolves every link to check it lands inside the checkout (testing only "is it a
+  symlink" passed that state with "17/17 declared links present"), and the startup line
+  resolves `~/.zshrc` — where the shell it is warning in was actually sourced from — with
+  zsh's `:A`, so it stays forkless.
+- **The live set is bigger than the link list.** `zsh/` is sourced by the linked
+  `~/.zshrc`, and `scripts/` is executed *by path* out of the working tree — every
+  `backup-*`/`audit-*`/`gnome-apply`/`verify-tools` command shells out to
+  `~/.dotfiles/scripts/…`, and `systemd/herdr-server.service` has
+  `ExecStart=%h/.dotfiles/scripts/herdr-server-launch.sh`. Omitting `scripts/` hid four
+  drifting files, one of which writes root-owned files into `/etc`. `resticprofile/`,
+  `audit/` and `udev/` are deliberately *not* in the set: they are **copied** to `/etc`,
+  so moving HEAD does not change what runs — `backup-doctor`/`audit-status` drift-check
+  those instead.
+- **An unparseable `install.conf.yaml` yields no paths, and no paths reads as no drift.**
+  The map is parsed once and a failure to read a single link is reported as
+  `what is live is UNKNOWN` with a non-zero exit, never as "every live file matches".
+- **A git that cannot read the repo answers every question with silence.** A malformed
+  `~/.gitconfig` (itself a managed symlink, so a bad branch can cause this) made
+  `rev-parse` fail and the doctor announce "no origin/main ref — Fix: git fetch origin"
+  when the ref was there. One health probe runs first; if it fails, the doctor says so
+  and reports nothing else.
+- **Noise in normal states is a failure too.** The working-tree check is scoped to the
+  live paths (unscoped it reported every scratch file and `node_modules/` in the tree),
+  `DOTFILES_EXPECTED_DIRTY` covers files a tool is *meant* to write through its symlink
+  (`plugins.lock`, per `install.conf.yaml`), and a conditional link (`if:` in
+  `install.conf.yaml`, e.g. `~/.p10k.zsh`) that is correctly absent is a note, not a
+  failure — reporting it as one made the doctor exit non-zero forever.
+- **`dotfiles-work <branch>` needs `--no-track`.** Without it the new branch takes
+  `origin/main` as upstream, and under this repo's own `push.default=simple` a plain
+  `git push` fails and suggests `git push origin HEAD:main` — pushing unreviewed commits
+  straight onto the protected branch. It also refuses a leftover directory that is not a
+  worktree instead of `cd`-ing in and reporting success.
+
+Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
+`DOTFILES_GUARD_QUIET=1` (silence the startup line while dogfooding a branch),
+`DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_EXPECTED_DIRTY`.
+
+State table: `scripts/test-dotfiles-guard.sh` (116 checks, run in CI, hermetic — it
+builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
+printed a green tick rather than an error, so each one is a row: a `local path`
+declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
+ref, an unparseable link map, a symlink into another worktree, and an emptiness guard
+made unreachable by a hardcoded fallback path.
 
 ### Configuration Loading Order
 
@@ -143,6 +201,10 @@ the states are executed in CI rather than left to a hand-run.
 10. zsh/zshrc.company
 11. ~/.zshrc.local (machine-specific secrets)
 12. PATH additions
+13. Dotfiles live-config guard — registers a one-shot `precmd` hook that runs
+    `_dotfiles_live_config_warn` on the FIRST prompt, then removes itself.
+    Deferred rather than run here because p10k's instant prompt turns any output
+    during initialization into a warning box.
 ```
 
 **Key Insight:** Conditionals load AFTER aliases, so tools that are installed get priority configuration.
@@ -555,6 +617,8 @@ tool_status          # Check installed tools
 build-limits         # Show active build/test worker caps (see zshrc.buildlimits)
 alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
+dotfiles-doctor      # Is the live config the reviewed config? (--fetch to check the real remote)
+dotfiles-work <br>   # Create/enter a worktree so the primary checkout stays on main
 gnome-apply          # Apply curated GNOME desktop config (idempotent)
 xdg-repair           # Fix/guard ~/Desktop, ~/Documents, ... XDG dirs (idempotent)
 gnome-init           # Create ~/.gnome-settings.local (dock favorites, launch keys)

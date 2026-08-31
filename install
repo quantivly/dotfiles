@@ -9,6 +9,33 @@ DOTBOT_BIN="bin/dotbot"
 BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${BASEDIR}"
+
+# This repo installs itself with dotbot `link:`, so every managed file becomes a
+# SYMLINK into ${BASEDIR}. Run from a git worktree, install therefore re-points
+# the entire live config — ~/.zshrc, ~/.gitconfig, ~/.config/git/ignore, the gh
+# account configs — at a feature branch, and nothing afterwards says so:
+# `git status` in the primary checkout stays clean, dotfiles-doctor's branch and
+# drift checks read that checkout, and only `readlink` reveals where the live
+# files actually come from. (dotfiles-doctor's link-integrity check does now flag
+# it, but only if someone runs it.) A worktree has a .git FILE; a primary
+# checkout has a .git DIRECTORY.
+if [[ -f "${BASEDIR}/.git" ]] && [[ -z "${DOTFILES_ALLOW_WORKTREE_INSTALL:-}" ]]; then
+    cat >&2 <<EOF
+✗ Refusing to install from a git worktree.
+
+  ${BASEDIR} is a worktree, so linking from here would point your live config
+  (~/.zshrc, ~/.gitconfig, ...) at this branch instead of the primary checkout —
+  silently, and with a clean 'git status' either side.
+
+  Install from the primary checkout instead:
+    cd ~/.dotfiles && ./install
+
+  If you really do mean to deploy this worktree:
+    DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install
+EOF
+    exit 1
+fi
+
 git -C "${DOTBOT_DIR}" submodule sync --quiet --recursive
 git submodule update --init --recursive "${DOTBOT_DIR}"
 
