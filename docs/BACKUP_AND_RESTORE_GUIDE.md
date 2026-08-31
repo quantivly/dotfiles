@@ -96,11 +96,29 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    > to `/run/media/<user>`, and a typo can resolve to your home directory — which would
    > mean the external disk mounted over it at every boot, hiding everything in it.
    > `backup-setup` refuses those: a non-absolute, unnormalised (`/./` included) or
-   > symlinked path, `$HOME`, `/media`, `/run/media`, their per-user subdirectories, the
-   > usual system directories, and any existing directory that is not already a mount point
-   > and is either non-empty or unreadable. The same check gates every step that uses the
-   > mount point — the `/etc/fstab` entry, the udev rule, `restic init`, and the unit's
-   > `ConditionPathExists`.
+   > symlinked path, `$HOME`, `/media`, `/run/media`, the usual system directories, and any
+   > existing directory that is not already a mount point and is either non-empty or
+   > unreadable. It also refuses `/home/<x>`, `/media/<x>` and `/run/media/<x>` whenever
+   > `<x>` is the name of a **login account** on the machine — those are the per-user
+   > directories the system creates and mounts removable media inside, and they are empty
+   > exactly when no drive is docked, so nothing about their contents gives them away.
+   > An account counts when its uid falls inside `UID_MIN`–`UID_MAX` from `/etc/login.defs`
+   > **or** its home directory is under `/home/` — the second test because AD accounts
+   > id-mapped by SSSD, and systemd-homed accounts, sit outside that window entirely. So
+   > `/media/backup` is fine (`backup` is a stock system account, uid 34, housed in
+   > `/var/backups`), as are `/media/backup-hdd` and `/mnt/store`. `root` is outside the
+   > window and `/root` is not under `/home`, so `/media/root` is accepted — a deliberate
+   > carve-out rather than a claim about udisks, which does use that name for a mount a
+   > uid-0 session started; `backup-setup` refuses to run as root, so a supported install
+   > cannot reach the case. If the lookup cannot be
+   > *answered* — unreachable directory server, or no `getent` — the path is refused with a
+   > message saying so, because the correct mount point is one component under `/media` too,
+   > so guessing would wave through the dangerous spelling just as readily; that particular
+   > refusal deliberately changes no installed state — the udev rule, the external unit and
+   > its mount ordering are all left as an earlier successful run set them — since the fix
+   > is name-service resolution rather than `BACKUP_EXTERNAL_REPO`. The same
+   > check gates every step that uses the mount point — the `/etc/fstab` entry, the udev
+   > rule, `restic init`, and the unit's `ConditionPathExists`.
 
    **Also set `BACKUP_EXTERNAL_UUID`** (`lsblk -o NAME,UUID,LABEL`). `backup-setup`
    uses it for two things: an `/etc/fstab` entry so the drive mounts at boot (with

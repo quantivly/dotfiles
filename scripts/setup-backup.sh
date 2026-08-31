@@ -247,10 +247,107 @@ external_is_mounted() { findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1; }
 # is no help; the mount succeeds. Until this check the string went straight into
 # a permanent, privileged /etc/fstab write with no floor at all.
 #
+# Prints the account name and returns 0 when $1 is exactly <parent>/<account>
+# for a parent whose children are per-user directories the SYSTEM creates: udisks2
+# makes /media/<user> and /run/media/<user> on its own and mounts removable media
+# inside them, and /home/<user> is the same shape. A disk mounted over one of
+# those hides whatever the owning user puts there, at every boot.
+#
+# Asked of the system rather than of a list, for two reasons. It covers EVERY
+# account, not just the one running the installer — /media/<someone-else> is no
+# safer — and it needs no identity resolution at all, so the class of bug where
+# `$USER` is empty and the per-user deny entries collapse to "/media/" cannot
+# recur in it.
+#
+# REGULAR LOGIN ACCOUNTS ONLY, which is the whole discriminator. udisks makes
+# these directories for accounts that log in to a desktop session; it has never
+# made one for `backup` (uid 34), `games` (uid 5) or `nobody` (uid 65534). And
+# /media/backup is a thoroughly plausible hand-made mount point for a backup
+# disk — the guide advertises /media/backup-hdd, two characters away. Refusing
+# it would not merely skip a step: install_external_udev treats an unusable
+# mount point as a reason to REMOVE the hotplug rule, so a working install would
+# quietly lose its remount-on-dock. The uid bounds come from the machine's own
+# login.defs, with shadow-utils' defaults as the fallback.
+#
+# Deliberately pure, like its caller: no sudo, no writes.
+path_is_account_directory() {
+  local path="$1" parent leaf pw rest uid home tmo k v rc
+  local uid_min=1000 uid_max=60000
+  if [[ -r /etc/login.defs ]]; then
+    while read -r k v _; do
+      case "$k" in
+        UID_MIN) [[ "$v" =~ ^[0-9]+$ ]] && uid_min="$v" ;;
+        UID_MAX) [[ "$v" =~ ^[0-9]+$ ]] && uid_max="$v" ;;
+      esac
+    done < /etc/login.defs
+  fi
+  # getent goes through NSS, so an LDAP/SSSD account has its parent protected
+  # too — but on a host whose directory server is unreachable a lookup blocks for
+  # the NSS timeout, and the installer would sit there with no output. Bound it.
+  # 5s, not 2: a cold SSSD cache resolving against a remote DC over a VPN takes
+  # several seconds routinely, and since an unanswered lookup is now a REFUSAL,
+  # too tight a bound turns a healthy-but-slow host into a permanent installer
+  # failure telling the user to fix a name service that is working.
+  # If `timeout` itself is missing, call getent directly rather than let every
+  # lookup come back empty: that would switch this entire rule off with no sign,
+  # which is the failure mode this file exists to refuse.
+  tmo="$(command -v timeout 2>/dev/null)" || tmo=""
+  for parent in /home /media /run/media; do
+    [[ "$path" == "$parent"/* ]] || continue
+    leaf="${path#"$parent"/}"
+    # One component only: /media/<user>/<label> is the CORRECT answer, not a hit.
+    [[ -n "$leaf" && "$leaf" != */* ]] || continue
+    # No pipe into `head`: under the `set -o pipefail` this file declares, head's
+    # early exit would SIGPIPE getent and the assignment would fail the installer.
+    rc=0
+    if [[ -n "$tmo" ]]; then
+      pw="$("$tmo" 5 getent passwd -- "$leaf" 2>/dev/null)" || rc=$?
+    else
+      pw="$(getent passwd -- "$leaf" 2>/dev/null)" || rc=$?
+    fi
+    # ONLY getent's exit 2 means "no such key". Every other failure is "the
+    # question was never answered": 124 because timeout(1) fired when the
+    # directory server did not reply, 127 because getent is not installed.
+    # Folding those into the empty-output case reports "not an account" for a
+    # lookup that never ran, which switches this entire rule off in silence on
+    # exactly the hosts the timeout above was added for. Report a third outcome
+    # and let the caller decide; it must not look like a clean "no".
+    # Print the leaf even here: the caller's message has to name the thing whose
+    # lookup hung, and the second call site checks $real, not $path.
+    (( rc == 0 || rc == 2 )) || { printf '%s' "$leaf"; return 2; }
+    (( rc == 0 )) || pw=""
+    # Compare the NAME field back. `getent passwd 1000` resolves a numeric key to
+    # a real account, and /media/1000 is not a directory udisks would ever make.
+    [[ -n "$pw" && "${pw%%:*}" == "$leaf" ]] || continue
+    rest="${pw#*:}"; rest="${rest#*:}"; uid="${rest%%:*}"
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    home="${pw#*:*:*:*:*:}"; home="${home%%:*}"
+    # TWO tests, because the login.defs window alone is wrong for exactly the
+    # accounts the getent call was added to cover. SSSD's AD id-mapping starts at
+    # ldap_idmap_range_min=200000 by default, real AD-mapped uids land in the
+    # millions, and systemd-homed allocates above UID_MAX — all outside a window
+    # that stops at 60000, so a domain-joined workstation got no protection at
+    # all beyond the current user. Their home is /home/<name> (SSSD's
+    # fallback_homedir default), so ask that too.
+    #
+    # Neither test matches the names a hand-made mount point plausibly collides
+    # with, which is the whole point of not simply matching any passwd entry:
+    # backup lives in /var/backups, games in /usr/games, nobody in /nonexistent
+    # and root in /root. See the /media/backup regression this bound exists for.
+    if (( uid >= uid_min && uid <= uid_max )) || [[ "$home" == /home/* ]]; then
+      printf '%s' "$leaf"
+      return 0
+    fi
+    continue
+  done
+  return 1
+}
+
 # Deliberately pure — no sudo, no writes — so scripts/test-backup-external.sh
 # can exercise every rejection without root.
 external_mount_point_sane() {
-  local mnt="$1" me real p
+  local mnt="$1" me real p acct
+  local acctrc=0
   local -a deny
   if [[ "$mnt" != /* ]]; then
     log WARNING "mount point '$mnt' is not an absolute path — check BACKUP_EXTERNAL_REPO in $USER_CONFIG."
@@ -274,6 +371,11 @@ external_mount_point_sane() {
   # udisks parents are where a plausible BACKUP_EXTERNAL_REPO typo actually lands.
   deny=( / /boot /dev /etc /home /media /mnt /opt /proc /root /run /run/media
          /srv /sys /tmp /usr /var "$HOME" )
+  # Kept as belt-and-braces, no longer load-bearing: path_is_account_directory
+  # below is what actually refuses the udisks parents. These two stay because
+  # they cost nothing and, since the undetermined-lookup return was moved to the
+  # END of this function, they still fire when getent is unavailable or times
+  # out — which is the only state in which anything rests on them.
   # `id -un`, never $USER: $USER is set by login/PAM, not by the shell, so it is
   # empty under `sudo -u`, `env -i`, a systemd unit or a bare container shell —
   # and "/media/${USER:-}" is then "/media/", which matches nothing and silently
@@ -285,6 +387,36 @@ external_mount_point_sane() {
   # cannot smuggle a denied directory past the string compare.
   real="$(realpath -m -- "$mnt" 2>/dev/null)" || real=""
   : "${real:=$mnt}"
+  # The list above can only refuse spellings someone thought of, and for every
+  # entry on it EXCEPT the udisks parents that does not matter: /etc, /usr and
+  # $HOME are non-empty, so the content checks below refuse them whether or not
+  # anyone listed them. The parents are the one case where content proves
+  # nothing — /media/<user> is legitimately EMPTY whenever no drive is docked,
+  # and is also legitimately the parent of the right answer — so there, and only
+  # there, the string list is load-bearing and alone. Both holes found in it so
+  # far (an empty $USER, and `/media/./<user>`) were in exactly that spot.
+  #
+  # So stop enumerating and ask the system. This still accepts /media/backup-hdd,
+  # /mnt/store and /srv/backup: a hand-made directory that happens to sit under
+  # one of these parents is refused only when its name is an actual account.
+  acct="$(path_is_account_directory "$mnt")" || acctrc=$?
+  if [[ -z "$acct" && "$acctrc" -ne 2 && "$real" != "$mnt" ]]; then
+    acct="$(path_is_account_directory "$real")" || acctrc=$?
+  fi
+  # Only a DEFINITE hit acts here; "could not determine" is deferred to the very
+  # end of the function. Returning 2 at this point would pre-empt the deny-list
+  # and the content checks below, which turns the most canonical error of all —
+  # BACKUP_EXTERNAL_REPO=$HOME/restic — from a refusal that removes the stale
+  # udev rule into "could not check, keeping the rule", on any host whose name
+  # service is merely slow. A certain refusal must never be downgraded to an
+  # uncertain one by a lookup that was not needed to reach it.
+  if [[ "$acctrc" -ne 2 && -n "$acct" ]]; then
+    # Name the account. Without it the refusal is baffling — the offending thing
+    # is the NAME of the last component, which the path alone does not advertise.
+    log WARNING "refusing to mount the external HDD over $mnt — '$acct' is a login account on this machine, so that is a per-user directory udisks creates and mounts removable media inside."
+    log WARNING "BACKUP_EXTERNAL_REPO must point at a directory ON the drive (e.g. $mnt/<label>/restic), not one level up."
+    return 1
+  fi
   for p in "${deny[@]}"; do
     if [[ "$mnt" == "$p" || "$real" == "$p" ]]; then
       log WARNING "refusing to mount the external HDD over $mnt."
@@ -310,6 +442,22 @@ external_mount_point_sane() {
       log WARNING "Point BACKUP_EXTERNAL_REPO at the drive's own mount point, or empty/rename $mnt first. Skipping."
       return 1
     fi
+  fi
+  # Last, so that everything able to settle this path with certainty has had its
+  # turn. Reaching here means the path survived every other check and the one
+  # question that could still condemn it went unanswered: not "this path is
+  # wrong" but "this run could not find out". The two need different words
+  # because they have different fixes — repair name-service resolution, do not
+  # edit BACKUP_EXTERNAL_REPO. Refusing is still the answer, since the correct
+  # configuration is also one component under /media, so accepting on a failed
+  # lookup waves through /media/<another-login-user> as readily as /media/<label>.
+  # The distinct status matters to the call sites that install persistent state:
+  # install_external_udev must not delete a rule an earlier successful run got
+  # right just because NSS hiccuped today.
+  if [[ "$acctrc" -eq 2 ]]; then
+    log WARNING "cannot tell whether $mnt is a per-user directory — the account lookup for '$acct' did not complete (name service unreachable, or getent missing)."
+    log WARNING "Refusing rather than guessing. Fix name-service resolution and re-run, or point BACKUP_EXTERNAL_REPO outside /home, /media and /run/media."
+    return 2
   fi
   return 0
 }
@@ -599,6 +747,7 @@ install_external_udev() {
   local uuid="${BACKUP_EXTERNAL_UUID:-}"
   local repo="${BACKUP_EXTERNAL_REPO:-}"
   local mnt unit tmp fstabmnt
+  local sanerc=0
 
   # Every path that declines because the CONFIGURATION no longer supports a rule
   # (below) removes any rule a previous run left behind. A stale rule names a
@@ -618,7 +767,16 @@ install_external_udev() {
     return 0
   fi
   mnt="$(external_mount_point)"
-  if ! external_mount_point_sane "$mnt"; then
+  external_mount_point_sane "$mnt" || sanerc=$?
+  if (( sanerc == 2 )); then
+    # Only THIS run failed to check the path. Removing the rule here would turn a
+    # name-service hiccup into a permanent loss of remount-on-dock, and a rule a
+    # previous run installed is likelier right than absent — the same call the
+    # render and udevadm bail-outs below already make. backup-doctor's drift
+    # compare is what catches a rule that really has gone stale.
+    log WARNING "leaving any existing udev rule in place — the mount point could not be checked on this run."
+    return 0
+  elif (( sanerc != 0 )); then
     remove_external_udev "mount point is not usable"
     return 0
   fi
@@ -716,8 +874,11 @@ init_repo() {
 # ===========================================================================
 init_repos() {
   log STEP "4. Initialize restic repositories"
-  local extmnt=""
+  local extmnt="" extsanerc=0
   [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]] && extmnt="$(external_mount_point)"
+  if [[ -n "$extmnt" ]]; then
+    external_mount_point_sane "$extmnt" || extsanerc=$?
+  fi
   # The SAME floor step 3b applies before touching /etc/fstab has to apply here,
   # because this is the step that creates the repository. `external_is_mounted`
   # alone is not a floor: a BACKUP_EXTERNAL_REPO of "/restic" derives the mount
@@ -728,7 +889,13 @@ init_repos() {
   # External: only if the drive is currently docked/mounted.
   if [[ -z "$extmnt" ]]; then
     log INFO "BACKUP_EXTERNAL_REPO not set — skipping external init."
-  elif ! external_mount_point_sane "$extmnt"; then
+  elif (( extsanerc == 2 )); then
+    # "Could not check" is not "unusable", and the warnings printed just above
+    # say which one it is. Collapsing them here would contradict them, and the
+    # two have different fixes: repair name-service resolution, or edit
+    # BACKUP_EXTERNAL_REPO.
+    log WARNING "external mount point could not be checked (see above) — skipping external init."
+  elif (( extsanerc != 0 )); then
     log WARNING "external mount point unusable (see above) — skipping external init."
   elif external_is_mounted "$extmnt"; then
     sudo install -d -o root -g root "$BACKUP_EXTERNAL_REPO" 2>/dev/null || true
@@ -798,6 +965,31 @@ install_schedules() {
 # 6-hourly timer and the After= drop-in. Split out of install_schedules so a
 # failure can be reported and stepped over instead of aborting the installer.
 install_external_schedule() {
+  local extdropin=/etc/systemd/system/restic-backup-external.service.d
+  local sanerc=0
+  if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]]; then
+    external_mount_point_sane "$(external_mount_point)" || sanerc=$?
+  else
+    sanerc=1
+  fi
+  # Asked FIRST, before anything is written, because `render_install` below
+  # rewrites the unit from the template and that resets ConditionPathExists to
+  # the template's own path. A bail-out placed after it has already destroyed
+  # the setting it meant to preserve, leaving a unit whose condition names a
+  # path that does not exist — so every 6-hourly run is SKIPPED, which systemd
+  # does not count as a failure and nothing reports.
+  #
+  # So on "could not determine" this run changes nothing at all: the unit, its
+  # ConditionPathExists and the After= drop-in an earlier successful run
+  # installed are left exactly as they are. Same call as install_external_udev,
+  # for the same reason — a name-service hiccup must not undo correct state —
+  # and it matters more here, because backup-doctor checks the 10-backup-env.conf
+  # drop-in but has no check at all for 10-external-mount.conf, so losing that
+  # one is invisible.
+  if (( sanerc == 2 )); then
+    log WARNING "not installing or changing the external unit or its mount ordering — the mount point could not be checked on this run. Anything an earlier run installed is left as it was."
+    return 0
+  fi
   # Clean up the obsolete looping .path unit if a previous run installed it.
   sudo systemctl disable --now restic-backup-external.path 2>/dev/null || true
   sudo rm -f /etc/systemd/system/restic-backup-external.path
@@ -805,13 +997,12 @@ install_external_schedule() {
                  /etc/systemd/system/restic-backup-external.service \
     || { log WARNING "external backup unit not installed — external runs will not happen."; return 1; }
   sudo install -m 644 "$DOTFILES/systemd/restic-backup-external.timer"   /etc/systemd/system/restic-backup-external.timer
-  local extdropin=/etc/systemd/system/restic-backup-external.service.d
   # Gated on the same floor as steps 3b/4: pointing ConditionPathExists and the
   # After= unit at a mount point that must never be mounted over would arm a
   # 6-hourly run against the internal disk. Left ungated, the shipped
   # ConditionPathExists names a path that does not exist, so the unit skips —
   # which is the safe outcome.
-  if [[ -n "${BACKUP_EXTERNAL_REPO:-}" ]] && external_mount_point_sane "$(external_mount_point)"; then
+  if (( sanerc == 0 )); then
     sudo sed -i "s|ConditionPathExists=.*|ConditionPathExists=${BACKUP_EXTERNAL_REPO}/config|" /etc/systemd/system/restic-backup-external.service
     # Order the run AFTER the external .mount unit. `nofail` deliberately takes
     # that mount out of local-fs.target's ordering, so at boot the timer's

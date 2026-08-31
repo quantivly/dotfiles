@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Backups: the mount-point guard's last enumerated case is now a structural rule.**
+  `external_mount_point_sane` refused `/media/$USER` and `/run/media/$USER` as literal
+  strings, and both holes ever found in that guard were in exactly those two entries — an
+  empty `$USER` collapsed them to `/media/`, and `/media/./<user>` resolved past them. That
+  is not a coincidence: for every other entry on the deny-list the list is belt-and-braces,
+  because `/etc`, `/usr` and `$HOME` are non-empty and the content checks refuse them
+  unlisted. The udisks parents are the one dangerous directory that is *legitimately empty*
+  whenever no drive is docked — and legitimately the parent of the correct answer — so
+  there the string list was load-bearing and alone. `path_is_account_directory` replaces
+  them: `<parent>/<leaf>` under `/home`, `/media` or `/run/media` is refused when
+  `getent passwd` says `<leaf>` names a **regular login account** — uid within login.defs'
+  `UID_MIN`..`UID_MAX`, **or** a home directory under `/home/`. The window alone is right
+  for local accounts and useless for the ones the `getent` call was justified by: SSSD's
+  AD id-mapping starts at 200000 by default, real AD-mapped uids land in the millions, and
+  systemd-homed allocates above `UID_MAX`, so a domain-joined workstation had no protection
+  past the current user. Their home is `/home/<name>`, which catches them while still
+  matching none of `backup` (`/var/backups`), `games`, `nobody` or `root` (`/root`). It covers every account rather than just the current one, and it
+  asks nothing about who is running the installer, so the `$USER` class of bug cannot recur
+  in it. The literals stay as belt-and-braces but no longer carry the guard.
+  The uid bound is the discriminator, not a detail: matching *any* passwd entry would
+  refuse `/media/backup` — a plausible hand-made mount point, `backup` being a stock uid-34
+  account — and that is not a harmless over-rejection, because `install_external_udev`
+  treats an unusable mount point as a reason to **remove** the hotplug rule, so a working
+  install would silently lose its remount-on-dock. It is also not a depth rule ("three
+  components under `/media`"), which would reject `/media/backup-hdd`, `/media/external`
+  and `/mnt/store`. The passwd *name* field is compared back so a numeric key
+  (`getent passwd 1000`) does not make `/media/1000` look like a user directory, and the
+  lookup runs under `timeout` so an unreachable NSS source cannot hang the installer.
+  An **unanswered** lookup is not read as a clean "no": only `getent`'s exit 2 means "no
+  such key", while `timeout`'s 124 and a missing `getent` (127) mean the question never
+  ran, and folding those into "not an account" switched the whole rule off in silence on
+  precisely the LDAP/SSSD hosts the timeout was added for. The guard now reports a third
+  status for "could not determine" and refuses — a correct mount point is one component
+  under `/media` too, so guessing would wave through `/media/<another-login-user>` just as
+  readily — with a message that names the lookup rather than blaming the path, since the
+  fix is name-service resolution and not `BACKUP_EXTERNAL_REPO`. That refusal is issued from the **end** of
+  the function, after every check that could settle the path with certainty: returning it
+  as soon as the lookup failed downgraded certain refusals to uncertain ones, turning
+  `BACKUP_EXTERNAL_REPO=$HOME/restic` — the most canonical error there is — into "could not
+  check, keeping the rule" on any host whose name service was merely slow, and leaving the
+  `/media/$USER` literals unreachable in the one state where anything rests on them.
+  **Every** step that installs
+  persistent state keys on that status to change nothing at all, so a transient NSS failure
+  cannot undo what an earlier successful run got right; only a genuinely unusable mount
+  point still tears state down. All four consumers were checked individually: the fstab
+  write skips, `install_external_udev` keeps the existing rule, `init_repos` skips and says
+  "could not be checked" rather than "unusable", and `install_external_schedule` returns
+  **before it writes** — that ordering matters, because it re-renders the unit from the
+  template first and that resets `ConditionPathExists` to the template's own path, so a
+  later bail-out has already destroyed what it meant to preserve, and it then removes the
+  `After=` ordering drop-in. A unit whose `ConditionPathExists` names a nonexistent path is
+  *skipped, not failed*, and `backup-doctor` has no check for `10-external-mount.conf`, so
+  the whole loss would have been invisible. The lookup bound is 5s rather than 2, since an
+  unanswered lookup is now a refusal and a cold SSSD cache over a VPN routinely takes
+  several seconds — too tight a bound makes a healthy host permanently unconfigurable.
+  68 checks → 99, driven by a fake `getent` on PATH
+  (a shell function is invisible to a lookup made through `timeout`, so a stub would have
+  passed vacuously), and the two sub-shell probes now print a positive token so a broken
+  probe fails loudly instead of asserting an absence it would produce anyway.
+
 ### Added
 - **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's
   server PATH carries no mise shims, so it must also be reachable as `~/.local/bin/bun`
