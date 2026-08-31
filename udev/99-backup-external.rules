@@ -15,13 +15,18 @@
 # /etc copy: backup-doctor re-renders this file and compares, so a local edit
 # there reports as drift.
 #
-#   __BACKUP_EXTERNAL_UUID__        BACKUP_EXTERNAL_UUID from ~/.backup.local.
-#   __BACKUP_EXTERNAL_MOUNT_UNIT__  systemd-escape -p --suffix=mount of the
-#                                   mount point (dirname of the repo path).
-#                                   COMPUTED, never hand-written: a path with a
-#                                   dash needs \x2d and a space needs \x20, and
-#                                   a wrong unit name yields a rule that
-#                                   verifies cleanly and then never fires.
+# Two fields of the rule below are substituted at install time. They are named
+# here by FIELD, not by placeholder token, because the renderer rewrites every
+# occurrence of a token -- including one inside a comment -- so spelling them out
+# would replace this explanation with the values in the only copy an
+# administrator ever opens.
+#
+#   ENV{ID_FS_UUID}     <- BACKUP_EXTERNAL_UUID from ~/.backup.local.
+#   ENV{SYSTEMD_WANTS}  <- systemd-escape -p --suffix=mount of the mount point
+#                          (dirname of the repo path). COMPUTED, never hand-
+#                          written: a path with a dash needs \x2d and a space
+#                          needs \x20, and a wrong unit name yields a rule that
+#                          verifies cleanly and then never fires.
 #
 # The rule only *starts a unit /etc/fstab already defines*, so it can never
 # mount anything the fstab entry would not.

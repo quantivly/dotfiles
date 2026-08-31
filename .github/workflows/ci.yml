@@ -58,6 +58,27 @@ jobs:
             fi
           done
 
+  backup-external-test:
+    name: Backup External-HDD State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      # The external-HDD steps decide, from a handful of disk/fstab states,
+      # whether to write to /etc/fstab. Every bug found in them so far was a
+      # guard that only misfires in a state the author's machine was not in, and
+      # reports success. Shellcheck cannot see that class, so the state table is
+      # executed here rather than left to "run it after touching these steps".
+      # Needs only util-linux + systemd, and no root.
+      - name: Run the external-HDD state table
+        run: ./scripts/test-backup-external.sh
+
   yaml-validation:
     name: YAML Validation
     runs-on: ubuntu-latest

@@ -97,6 +97,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Fixed
+- **External-HDD auto-mount: the review follow-up to #87.** An independent xhigh review of
+  the merged change found fifteen defects, all confirmed. The dangerous one: the `/etc/fstab`
+  mount point was a blind `dirname` of the hand-edited `BACKUP_EXTERNAL_REPO`, with no floor
+  at all — a repo path one level too shallow resolves to `/media/<user>` and a typo resolves
+  to `$HOME`, and every check downstream passed, so the external disk would have been mounted
+  over the user's home at every boot. `nofail` is no help there; the mount *succeeds*.
+  `external_mount_point_sane` now refuses non-absolute, unnormalised (`/./` included) and
+  symlinked paths, a deny-list of system directories (`$HOME`, `/media/$USER`,
+  `/run/media/$USER`, … — the user resolved with `id -un`, never the login-set `$USER`,
+  which is empty under `sudo -u`/`env -i`), and any existing directory that is not already a
+  mount point and is either non-empty or unlistable. It gates the `/etc/fstab` write, the
+  udev rule, `restic init` **and** the `ConditionPathExists`/`After=` wiring — the repo
+  init is the step that would otherwise create the "external" repository on the internal
+  disk for a `BACKUP_EXTERNAL_REPO` of `/restic`, since `/` is a mount point.
+  - **`render … | sudo tee /etc/…` truncates on failure.** `backup-render.sh` became fallible
+    when unresolved placeholders were made a hard error, but three call sites still piped it
+    into `tee`, which empties the destination before the renderer's status is known — leaving
+    a zero-byte `includes.txt` (restic backs up nothing) or `.service` (a unit that does
+    nothing), both installed and reading as present. Replaced with `render_install`
+    (render → temp → check → `install`), the pattern the udev step already used.
+  - **`findmnt -S UUID=x` misses `/dev/disk/by-uuid/x` entries while the disk is undocked**,
+    because it resolves the tag through `/dev/disk/by-uuid`. That is the form Ubuntu's
+    installer writes (and what `/boot` uses here), so a correct `/etc/fstab` read as empty in
+    exactly the state the feature exists for — producing a duplicate entry, a refused udev
+    rule, and a false "will not mount after a reboot" warning. Both the installer and
+    `backup-doctor` now query the literal device path as a second step.
+  - **`findmnt`'s summary is translated.** Both `N parse errors, …` and `Success, no errors or
+    warnings detected` are gettext-marked in util-linux; under a translated locale the parse
+    returned the 999 "unusable" sentinel for every clean table and the step refused to install
+    anything, permanently. Now read under `LC_ALL=C`.
+  - **A failed mount no longer leaves a root-owned mount point behind** — udisks owns
+    `/run/media/<user>` and creates it user-owned, and the leftover is precisely the
+    directory that makes `test -e "$repo/config"` report a drive that is not there.
+  - **Stale udev rules are removed and reported.** Every path on which the step declines to
+    install now removes a rule an earlier run left, and `backup-doctor` checks for one even
+    when nothing is configured — the check used to be gated on "is anything configured",
+    which is how a rule naming a since-reassigned UUID stayed invisible.
+  - `fstab_escape` covers the full fstab(5) set (`\011`, `\012`, `\134`, not just `\040`);
+    `backup-status` reports "not configured" instead of asserting "not attached" for a disk
+    it cannot know about; `backup-doctor` no longer warns twice about a single
+    non-configuration; `_backup_external_attached` no longer treats *any* volume whose label
+    matches the mount point's basename as the backup drive (a name coincidence was enough to
+    raise a hard, non-zero-exit failure); the dead `_backup_external_mnt` helper and the
+    unused `out_of` test helper are gone; and the udev template's own documentation header no
+    longer names the placeholder tokens inline, which had the renderer replacing the
+    explanation with the values in the only copy an administrator ever opens.
+- **`scripts/test-backup-external.sh` now runs in CI** (`backup-external-test`) and checks its
+  own harness first. Sourcing `setup-backup.sh` also runs that script's `set -euo pipefail`,
+  so the suite re-declares `set +e` — without it the first expected-to-fail assignment killed
+  the run mid-table with no failure count printed. It also aborts unless every function under
+  test is defined and every required tool present: most of these assertions are "nothing was
+  installed", which is exactly what a suite that loaded nothing produces. 27 checks → 68.
+
 - **Backups: the external HDD stopped mounting, and every layer said it was fine.**
   `BACKUP_EXTERNAL_UUID` had been declared in `backup.local.template` since the backup
   system was written and nothing ever read it. Without an `/etc/fstab` entry the drive
