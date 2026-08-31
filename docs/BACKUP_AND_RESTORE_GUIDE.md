@@ -96,11 +96,15 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    > to `/run/media/<user>`, and a typo can resolve to your home directory — which would
    > mean the external disk mounted over it at every boot, hiding everything in it.
    > `backup-setup` refuses those: a non-absolute, unnormalised (`/./` included) or
-   > symlinked path, `$HOME`, `/media`, `/run/media`, their per-user subdirectories, the
-   > usual system directories, and any existing directory that is not already a mount point
-   > and is either non-empty or unreadable. The same check gates every step that uses the
-   > mount point — the `/etc/fstab` entry, the udev rule, `restic init`, and the unit's
-   > `ConditionPathExists`.
+   > symlinked path, `$HOME`, `/media`, `/run/media`, the usual system directories, and any
+   > existing directory that is not already a mount point and is either non-empty or
+   > unreadable. It also refuses `/home/<x>`, `/media/<x>` and `/run/media/<x>` whenever
+   > `<x>` is an account on the machine — those are the per-user directories the system
+   > creates and mounts removable media inside, and they are empty exactly when no drive is
+   > docked, so nothing about their contents gives them away. A directory there that is
+   > *not* an account name — `/media/backup-hdd`, `/mnt/store` — is accepted. The same
+   > check gates every step that uses the mount point — the `/etc/fstab` entry, the udev
+   > rule, `restic init`, and the unit's `ConditionPathExists`.
 
    **Also set `BACKUP_EXTERNAL_UUID`** (`lsblk -o NAME,UUID,LABEL`). `backup-setup`
    uses it for two things: an `/etc/fstab` entry so the drive mounts at boot (with

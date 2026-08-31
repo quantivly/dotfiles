@@ -66,7 +66,7 @@ for fn in install_external_fstab build_external_fstab_candidate \
           remove_external_udev external_mount_point external_mount_unit \
           external_is_mounted external_mount_point_sane fstab_escape \
           fstab_parse_errors fstab_target_for_uuid render render_install \
-          install_external_schedule; do
+          install_external_schedule path_is_account_directory; do
   declare -F "$fn" >/dev/null || missing+=("$fn")
 done
 (( ${#missing[@]} == 0 )) || fatal "not defined after sourcing setup-backup.sh: ${missing[*]}"
@@ -194,6 +194,40 @@ fi
 mkdir -p "$TMPROOT/populated" && : > "$TMPROOT/populated/live-data"
 check "an existing non-empty directory is refused (mounting over it hides data)" \
       "$(external_mount_point_sane "$TMPROOT/populated" 2>/dev/null && echo ok)" ""
+
+# The list of literal paths is belt-and-braces for everything except the udisks
+# parents: /etc and $HOME are non-empty, so the two content checks above refuse
+# them whether or not anyone listed them. /media/<user> is the one dangerous
+# directory that is legitimately EMPTY whenever no drive is docked, so there the
+# list was load-bearing and alone — and both holes found in it so far were there.
+# These assert the structural rule that replaced it.
+#
+# `root` on purpose: an account that is NOT the user running the suite, so a rule
+# that only ever knew about "me" cannot pass these.
+check "/media/<account> is refused for an account that is not the current user" \
+      "$(external_mount_point_sane /media/root 2>/dev/null && echo ok)" ""
+check "/run/media/<account> likewise" \
+      "$(external_mount_point_sane /run/media/root 2>/dev/null && echo ok)" ""
+check "/home/<account> likewise" \
+      "$(external_mount_point_sane /home/root 2>/dev/null && echo ok)" ""
+# The rule must need no identity resolution AT ALL — this is the $USER hole
+# generalised: not just "$USER is empty" but "nothing can tell us who we are".
+# shellcheck disable=SC2016  # must expand in the inner shell, not this one
+noid_probe='source "$1"; set +e; id() { return 1; }; external_mount_point_sane "/media/$2" 2>/dev/null && echo ok'
+check "  ...and still refused with \$USER unset AND id(1) failing" \
+      "$(env -u USER bash -c "$noid_probe" _ "$DOTFILES/scripts/setup-backup.sh" "$(id -un)")" ""
+# The other half of the bargain: it must not reject ordinary hand-made mount
+# points, which a depth rule ("three components under /media") would have.
+check "a hand-made /media/<dir> that is not an account is accepted" \
+      "$(external_mount_point_sane /media/no-such-account-8f3a1c 2>/dev/null && echo ok)" "ok"
+check "  ...and so is /mnt/<dir>" \
+      "$(external_mount_point_sane /mnt/no-such-account-8f3a1c 2>/dev/null && echo ok)" "ok"
+# `getent passwd 1000` resolves a NUMERIC key to a real account, so the name
+# field is compared back — /media/1000 is not a directory udisks would create.
+check "  ...and a numeric /media/<uid>, which resolves to an account by uid" \
+      "$(external_mount_point_sane /media/1000 2>/dev/null && echo ok)" "ok"
+check "the correct answer, /media/<user>/<label>, is still accepted" \
+      "$(external_mount_point_sane "/media/$(id -un)/Backup" 2>/dev/null && echo ok)" "ok"
 check "  ...and says why" \
       "$(external_mount_point_sane "$TMPROOT/populated" 2>&1 | grep -c 'would hide them')" "1"
 mkdir -p "$TMPROOT/empty"

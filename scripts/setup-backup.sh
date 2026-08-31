@@ -247,6 +247,38 @@ external_is_mounted() { findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1; }
 # is no help; the mount succeeds. Until this check the string went straight into
 # a permanent, privileged /etc/fstab write with no floor at all.
 #
+# Is $1 exactly <parent>/<account>, for a parent whose children are per-user
+# directories the SYSTEM creates and owns? udisks2 makes /media/<user> and
+# /run/media/<user> on its own and mounts removable media inside them; /home/<user>
+# is the same shape. Mounting a disk over one of those hides whatever the owning
+# service or user puts there, at every boot.
+#
+# Asked of the system rather than of a list, for two reasons. It covers EVERY
+# account, not just the one running the installer — /media/<someone-else> is no
+# safer — and it needs no identity resolution at all, so the class of bug where
+# `$USER` is empty and the per-user deny entries silently collapse to "/media/"
+# cannot recur in it.
+#
+# Deliberately pure, like its caller: no sudo, no writes.
+path_is_account_directory() {
+  local path="$1" parent leaf pw
+  for parent in /home /media /run/media; do
+    [[ "$path" == "$parent"/* ]] || continue
+    leaf="${path#"$parent"/}"
+    # One component only: /media/<user>/<label> is the CORRECT answer, not a hit.
+    [[ -n "$leaf" && "$leaf" != */* ]] || continue
+    # getent, so NSS answers — an LDAP/SSSD account has a udisks parent too, and
+    # scanning /etc/passwd would miss it. No pipe into `head`: under the
+    # `set -o pipefail` this file declares, head's early exit would SIGPIPE
+    # getent and the assignment would fail the whole installer.
+    pw="$(getent passwd -- "$leaf" 2>/dev/null)" || pw=""
+    # Compare the NAME field back. `getent passwd 1000` resolves a numeric key to
+    # a real account, and /media/1000 is not a directory udisks would ever make.
+    [[ -n "$pw" && "${pw%%:*}" == "$leaf" ]] && return 0
+  done
+  return 1
+}
+
 # Deliberately pure — no sudo, no writes — so scripts/test-backup-external.sh
 # can exercise every rejection without root.
 external_mount_point_sane() {
@@ -292,6 +324,23 @@ external_mount_point_sane() {
       return 1
     fi
   done
+  # The list above can only refuse spellings someone thought of, and for every
+  # entry on it EXCEPT the udisks parents that does not matter: /etc, /usr and
+  # $HOME are non-empty, so the content checks below refuse them whether or not
+  # anyone listed them. The parents are the one case where content proves
+  # nothing — /media/<user> is legitimately EMPTY whenever no drive is docked,
+  # and is also legitimately the parent of the right answer — so there, and only
+  # there, the string list is load-bearing and alone. Both holes found in it so
+  # far (an empty $USER, and `/media/./<user>`) were in exactly that spot.
+  #
+  # So stop enumerating and ask the system. This still accepts /media/backup-hdd,
+  # /mnt/store and /srv/backup: a hand-made directory that happens to sit under
+  # one of these parents is refused only when its name is an actual account.
+  if path_is_account_directory "$mnt" || path_is_account_directory "$real"; then
+    log WARNING "refusing to mount the external HDD over $mnt — that is a per-user directory the system creates and manages (/media/<user>, /run/media/<user>, /home/<user>)."
+    log WARNING "BACKUP_EXTERNAL_REPO must point at a directory ON the drive (e.g. $mnt/<label>/restic), not one level up."
+    return 1
+  fi
   # An existing non-empty directory that is not already a mount point is live
   # data on the internal disk. Mounting over it hides it at every boot, and the
   # hidden files keep consuming the root filesystem invisibly.

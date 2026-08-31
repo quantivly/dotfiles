@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Backups: the mount-point guard's last enumerated case is now a structural rule.**
+  `external_mount_point_sane` refused `/media/$USER` and `/run/media/$USER` as literal
+  strings, and both holes ever found in that guard were in exactly those two entries — an
+  empty `$USER` collapsed them to `/media/`, and `/media/./<user>` resolved past them. That
+  is not a coincidence: for every other entry on the deny-list the list is belt-and-braces,
+  because `/etc`, `/usr` and `$HOME` are non-empty and the content checks refuse them
+  unlisted. The udisks parents are the one dangerous directory that is *legitimately empty*
+  whenever no drive is docked — and legitimately the parent of the correct answer — so
+  there the string list was load-bearing and alone. `path_is_account_directory` replaces
+  them: `<parent>/<leaf>` under `/home`, `/media` or `/run/media` is refused when
+  `getent passwd` says `<leaf>` names an account. It covers every account rather than just
+  the current one, and it asks nothing about who is running the installer, so the `$USER`
+  class of bug cannot recur in it. It still accepts `/media/backup-hdd`, `/mnt/store` and
+  `/srv/backup` — a depth rule ("three components under `/media`") would have rejected all
+  three. The passwd *name* field is compared back so a numeric key (`getent passwd 1000`)
+  does not make `/media/1000` look like a user directory. 68 checks → 76, including a
+  negative test that the new rule, not the old literals, is what carries the refusal when
+  `$USER` is unset *and* `id(1)` fails.
+
 ### Added
 - **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's
   server PATH carries no mise shims, so it must also be reachable as `~/.local/bin/bun`
