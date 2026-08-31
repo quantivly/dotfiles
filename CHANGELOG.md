@@ -19,8 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whenever no drive is docked — and legitimately the parent of the correct answer — so
   there the string list was load-bearing and alone. `path_is_account_directory` replaces
   them: `<parent>/<leaf>` under `/home`, `/media` or `/run/media` is refused when
-  `getent passwd` says `<leaf>` names a **regular login account** (uid within login.defs'
-  `UID_MIN`..`UID_MAX`). It covers every account rather than just the current one, and it
+  `getent passwd` says `<leaf>` names a **regular login account** — uid within login.defs'
+  `UID_MIN`..`UID_MAX`, **or** a home directory under `/home/`. The window alone is right
+  for local accounts and useless for the ones the `getent` call was justified by: SSSD's
+  AD id-mapping starts at 200000 by default, real AD-mapped uids land in the millions, and
+  systemd-homed allocates above `UID_MAX`, so a domain-joined workstation had no protection
+  past the current user. Their home is `/home/<name>`, which catches them while still
+  matching none of `backup` (`/var/backups`), `games`, `nobody` or `root` (`/root`). It covers every account rather than just the current one, and it
   asks nothing about who is running the installer, so the `$USER` class of bug cannot recur
   in it. The literals stay as belt-and-braces but no longer carry the guard.
   The uid bound is the discriminator, not a detail: matching *any* passwd entry would
@@ -39,10 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status for "could not determine" and refuses — a correct mount point is one component
   under `/media` too, so guessing would wave through `/media/<another-login-user>` just as
   readily — with a message that names the lookup rather than blaming the path, since the
-  fix is name-service resolution and not `BACKUP_EXTERNAL_REPO`. `install_external_udev`
+  fix is name-service resolution and not `BACKUP_EXTERNAL_REPO`. That refusal is issued from the **end** of
+  the function, after every check that could settle the path with certainty: returning it
+  as soon as the lookup failed downgraded certain refusals to uncertain ones, turning
+  `BACKUP_EXTERNAL_REPO=$HOME/restic` — the most canonical error there is — into "could not
+  check, keeping the rule" on any host whose name service was merely slow, and leaving the
+  `/media/$USER` literals unreachable in the one state where anything rests on them.
+  `install_external_udev`
   keys on that status to leave an already-installed hotplug rule **alone**, so a transient
   NSS failure cannot delete a rule an earlier successful run got right; only a genuinely
-  unusable mount point still removes it. 68 checks → 85, driven by a fake `getent` on PATH
+  unusable mount point still removes it. 68 checks → 92, driven by a fake `getent` on PATH
   (a shell function is invisible to a lookup made through `timeout`, so a stub would have
   passed vacuously), and the two sub-shell probes now print a positive token so a broken
   probe fails loudly instead of asserting an absence it would produce anyway.

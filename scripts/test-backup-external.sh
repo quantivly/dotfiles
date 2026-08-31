@@ -223,6 +223,17 @@ cat > "$FAKE_NSS/getent" <<'FAKEEOF'
 case "$3" in
   alice) echo "alice:x:1234:1234::/home/alice:/bin/bash"; exit 0 ;;
   svcacct) echo "svcacct:x:34:34::/var/svcacct:/usr/sbin/nologin"; exit 0 ;;
+  # An AD account id-mapped by SSSD, and a systemd-homed one: both sit outside
+  # login.defs' 1000..60000, both are ordinary desktop logins with a /home.
+  jdoe) echo "jdoe:x:1653201234:1653201234::/home/jdoe:/bin/bash"; exit 0 ;;
+  homed) echo "homed:x:60123:60123::/home/homed:/bin/bash"; exit 0 ;;
+  # In the uid window but housed outside /home: proves the two tests are an OR,
+  # not a coincidence of every account having both properties.
+  oddhome) echo "oddhome:x:1500:1500::/var/lib/oddhome:/bin/bash"; exit 0 ;;
+  # These two answer for assertions that would otherwise consult the RUNNER's
+  # real passwd file and pass vacuously wherever uid 1000 is unassigned.
+  1000) echo "alice:x:1234:1234::/home/alice:/bin/bash"; exit 0 ;;
+  root) echo "root:x:0:0:root:/root:/bin/bash"; exit 0 ;;
 esac
 exit 2
 FAKEEOF
@@ -253,8 +264,8 @@ check "a system account is NOT treated as a udisks parent (uid below UID_MIN)" \
 # would have to reach past every system account on the way — reintroducing the
 # /media/backup regression above to close a case the preflight already forecloses
 # by refusing to run this installer as root.
-check "  ...nor is root: uid 0 is outside UID_MIN..UID_MAX by design" \
-      "$(external_mount_point_sane /media/root 2>/dev/null && echo ok)" "ok"
+check "  ...nor is root: uid 0 is outside the window, and /root is not under /home" \
+      "$(nss /media/root 2>/dev/null && echo ok)" "ok"
 # The other half of the bargain: ordinary hand-made mount points must survive.
 # A depth rule ("three components under /media") would have rejected all of these.
 check "a hand-made /media/<dir> that is not an account is accepted" \
@@ -264,7 +275,21 @@ check "  ...and so is /mnt/<dir>" \
 # `getent passwd 1000` resolves a NUMERIC key to a real account, so the name field
 # is compared back — /media/1000 is not a directory udisks would create.
 check "  ...and a numeric /media/<uid>, which resolves to an account by uid" \
-      "$(external_mount_point_sane /media/1000 2>/dev/null && echo ok)" "ok"
+      "$(nss /media/1000 2>/dev/null && echo ok)" "ok"
+
+# The login.defs window is right for local accounts and useless for the ones the
+# getent call was justified by: SSSD's AD id-mapping starts at 200000 and
+# systemd-homed allocates above UID_MAX, so a domain-joined workstation had no
+# protection past the current user. Their home is /home/<name>, so that is asked
+# too — an OR, which the oddhome case pins from the other side.
+check "an AD account id-mapped far above UID_MAX is still a udisks parent" \
+      "$(nss /media/jdoe 2>/dev/null && echo ok)" ""
+check "  ...under every parent, not just /media" \
+      "$(nss /home/jdoe 2>/dev/null && echo ok)$(nss /run/media/jdoe 2>/dev/null && echo ok)" ""
+check "  ...and so is a systemd-homed account just past UID_MAX" \
+      "$(nss /media/homed 2>/dev/null && echo ok)" ""
+check "  ...while the uid window alone still catches a /home-less login account" \
+      "$(nss /media/oddhome 2>/dev/null && echo ok)" ""
 
 # An answered "no such account" and an UNANSWERED lookup are different facts, and
 # the whole value of asking the system rests on not confusing them. getent's exit
@@ -310,6 +335,19 @@ check "an unanswered lookup leaves the existing udev rule alone" \
       "$(udev_remove_marks /media/alice/restic "$SLOW_NSS")" "0"
 check "  ...while a genuinely unusable mount point still removes it" \
       "$(udev_remove_marks "$HOME/restic" "$FAKE_NSS")" "1"
+
+# ...and "could not determine" must never DOWNGRADE a refusal that some other
+# check had already settled. Returning 2 as soon as the lookup failed would turn
+# the single most canonical error there is — BACKUP_EXTERNAL_REPO=$HOME/restic —
+# into "keeping the rule, go fix your name service" on any host whose directory
+# server is merely slow, and would make the /media/$me and /run/media/$me
+# literals unreachable in the one state where anything rests on them.
+check "\$HOME is refused outright, not deferred, when the lookup hangs" \
+      "$(slow "$HOME" >/dev/null 2>&1; echo $?)" "1"
+check "  ...and the udev rule is still removed for it" \
+      "$(udev_remove_marks "$HOME/restic" "$SLOW_NSS")" "1"
+check "  ...the belt-and-braces /media/\$me literal fires in that state too" \
+      "$(slow "/media/$(id -un)" >/dev/null 2>&1; echo $?)" "1"
 
 # The rule must need no identity resolution AT ALL — the $USER hole generalised:
 # not just "$USER is empty" but "nothing can tell us who we are". Guarded on the

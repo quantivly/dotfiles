@@ -271,7 +271,7 @@ external_is_mounted() { findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1; }
 #
 # Deliberately pure, like its caller: no sudo, no writes.
 path_is_account_directory() {
-  local path="$1" parent leaf pw rest uid tmo k v rc
+  local path="$1" parent leaf pw rest uid home tmo k v rc
   local uid_min=1000 uid_max=60000
   if [[ -r /etc/login.defs ]]; then
     while read -r k v _; do
@@ -317,9 +317,24 @@ path_is_account_directory() {
     [[ -n "$pw" && "${pw%%:*}" == "$leaf" ]] || continue
     rest="${pw#*:}"; rest="${rest#*:}"; uid="${rest%%:*}"
     [[ "$uid" =~ ^[0-9]+$ ]] || continue
-    (( uid >= uid_min && uid <= uid_max )) || continue
-    printf '%s' "$leaf"
-    return 0
+    home="${pw#*:*:*:*:*:}"; home="${home%%:*}"
+    # TWO tests, because the login.defs window alone is wrong for exactly the
+    # accounts the getent call was added to cover. SSSD's AD id-mapping starts at
+    # ldap_idmap_range_min=200000 by default, real AD-mapped uids land in the
+    # millions, and systemd-homed allocates above UID_MAX — all outside a window
+    # that stops at 60000, so a domain-joined workstation got no protection at
+    # all beyond the current user. Their home is /home/<name> (SSSD's
+    # fallback_homedir default), so ask that too.
+    #
+    # Neither test matches the names a hand-made mount point plausibly collides
+    # with, which is the whole point of not simply matching any passwd entry:
+    # backup lives in /var/backups, games in /usr/games, nobody in /nonexistent
+    # and root in /root. See the /media/backup regression this bound exists for.
+    if (( uid >= uid_min && uid <= uid_max )) || [[ "$home" == /home/* ]]; then
+      printf '%s' "$leaf"
+      return 0
+    fi
+    continue
   done
   return 1
 }
@@ -354,7 +369,9 @@ external_mount_point_sane() {
          /srv /sys /tmp /usr /var "$HOME" )
   # Kept as belt-and-braces, no longer load-bearing: path_is_account_directory
   # below is what actually refuses the udisks parents. These two stay because
-  # they cost nothing and still fire if getent is unavailable or times out.
+  # they cost nothing and, since the undetermined-lookup return was moved to the
+  # END of this function, they still fire when getent is unavailable or times
+  # out — which is the only state in which anything rests on them.
   # `id -un`, never $USER: $USER is set by login/PAM, not by the shell, so it is
   # empty under `sudo -u`, `env -i`, a systemd unit or a bare container shell —
   # and "/media/${USER:-}" is then "/media/", which matches nothing and silently
@@ -382,21 +399,14 @@ external_mount_point_sane() {
   if [[ -z "$acct" && "$acctrc" -ne 2 && "$real" != "$mnt" ]]; then
     acct="$(path_is_account_directory "$real")" || acctrc=$?
   fi
-  if [[ "$acctrc" -eq 2 ]]; then
-    # Not "this path is wrong" but "this run could not find out", and the two
-    # need different words because they have different fixes — repair name-service
-    # resolution, do not edit BACKUP_EXTERNAL_REPO. Refusing is still the answer:
-    # an unverified path is the thing this whole function exists to refuse, and
-    # the correct configuration is one component under /media too, so accepting
-    # on a failed lookup waves through /media/<another-login-user> as readily as
-    # /media/<label>. The distinct status matters at the call sites that install
-    # persistent state: see install_external_udev, which must not delete a rule
-    # an earlier successful run got right just because NSS hiccuped today.
-    log WARNING "cannot tell whether $mnt is a per-user directory — the account lookup for '$acct' did not complete (name service unreachable, or getent missing)."
-    log WARNING "Refusing rather than guessing. Fix name-service resolution and re-run, or point BACKUP_EXTERNAL_REPO outside /home, /media and /run/media."
-    return 2
-  fi
-  if [[ -n "$acct" ]]; then
+  # Only a DEFINITE hit acts here; "could not determine" is deferred to the very
+  # end of the function. Returning 2 at this point would pre-empt the deny-list
+  # and the content checks below, which turns the most canonical error of all —
+  # BACKUP_EXTERNAL_REPO=$HOME/restic — from a refusal that removes the stale
+  # udev rule into "could not check, keeping the rule", on any host whose name
+  # service is merely slow. A certain refusal must never be downgraded to an
+  # uncertain one by a lookup that was not needed to reach it.
+  if [[ "$acctrc" -ne 2 && -n "$acct" ]]; then
     # Name the account. Without it the refusal is baffling — the offending thing
     # is the NAME of the last component, which the path alone does not advertise.
     log WARNING "refusing to mount the external HDD over $mnt — '$acct' is a login account on this machine, so that is a per-user directory udisks creates and mounts removable media inside."
@@ -428,6 +438,22 @@ external_mount_point_sane() {
       log WARNING "Point BACKUP_EXTERNAL_REPO at the drive's own mount point, or empty/rename $mnt first. Skipping."
       return 1
     fi
+  fi
+  # Last, so that everything able to settle this path with certainty has had its
+  # turn. Reaching here means the path survived every other check and the one
+  # question that could still condemn it went unanswered: not "this path is
+  # wrong" but "this run could not find out". The two need different words
+  # because they have different fixes — repair name-service resolution, do not
+  # edit BACKUP_EXTERNAL_REPO. Refusing is still the answer, since the correct
+  # configuration is also one component under /media, so accepting on a failed
+  # lookup waves through /media/<another-login-user> as readily as /media/<label>.
+  # The distinct status matters to the call sites that install persistent state:
+  # install_external_udev must not delete a rule an earlier successful run got
+  # right just because NSS hiccuped today.
+  if [[ "$acctrc" -eq 2 ]]; then
+    log WARNING "cannot tell whether $mnt is a per-user directory — the account lookup for '$acct' did not complete (name service unreachable, or getent missing)."
+    log WARNING "Refusing rather than guessing. Fix name-service resolution and re-run, or point BACKUP_EXTERNAL_REPO outside /home, /media and /run/media."
+    return 2
   fi
   return 0
 }

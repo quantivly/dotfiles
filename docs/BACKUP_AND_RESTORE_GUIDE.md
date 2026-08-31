@@ -102,12 +102,15 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    > `<x>` is the name of a **login account** on the machine — those are the per-user
    > directories the system creates and mounts removable media inside, and they are empty
    > exactly when no drive is docked, so nothing about their contents gives them away.
-   > Only accounts whose uid falls inside `UID_MIN`–`UID_MAX` from `/etc/login.defs` count,
-   > so `/media/backup` is fine (`backup` is a stock system account, uid 34), as are
-   > `/media/backup-hdd` and `/mnt/store`. `root` is outside that range too, so
-   > `/media/root` is accepted — a deliberate carve-out rather than a claim about udisks,
-   > which does use that name for a mount a uid-0 session started; `backup-setup` refuses to
-   > run as root, so a supported install cannot reach the case. If the lookup cannot be
+   > An account counts when its uid falls inside `UID_MIN`–`UID_MAX` from `/etc/login.defs`
+   > **or** its home directory is under `/home/` — the second test because AD accounts
+   > id-mapped by SSSD, and systemd-homed accounts, sit outside that window entirely. So
+   > `/media/backup` is fine (`backup` is a stock system account, uid 34, housed in
+   > `/var/backups`), as are `/media/backup-hdd` and `/mnt/store`. `root` is outside the
+   > window and `/root` is not under `/home`, so `/media/root` is accepted — a deliberate
+   > carve-out rather than a claim about udisks, which does use that name for a mount a
+   > uid-0 session started; `backup-setup` refuses to run as root, so a supported install
+   > cannot reach the case. If the lookup cannot be
    > *answered* — unreachable directory server, or no `getent` — the path is refused with a
    > message saying so, because the correct mount point is one component under `/media` too,
    > so guessing would wave through the dangerous spelling just as readily; that particular
