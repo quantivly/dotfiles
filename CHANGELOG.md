@@ -32,10 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `/mnt/store`. The passwd *name* field is compared back so a numeric key
   (`getent passwd 1000`) does not make `/media/1000` look like a user directory, and the
   lookup runs under `timeout` so an unreachable NSS source cannot hang the installer.
-  68 checks → 78, driven by a fake `getent` on PATH (a shell function is invisible to a
-  lookup made through `timeout`, so a stub would have passed vacuously), and the two
-  sub-shell probes now print a positive token so a broken probe fails loudly instead of
-  asserting an absence it would produce anyway.
+  An **unanswered** lookup is not read as a clean "no": only `getent`'s exit 2 means "no
+  such key", while `timeout`'s 124 and a missing `getent` (127) mean the question never
+  ran, and folding those into "not an account" switched the whole rule off in silence on
+  precisely the LDAP/SSSD hosts the timeout was added for. The guard now reports a third
+  status for "could not determine" and refuses — a correct mount point is one component
+  under `/media` too, so guessing would wave through `/media/<another-login-user>` just as
+  readily — with a message that names the lookup rather than blaming the path, since the
+  fix is name-service resolution and not `BACKUP_EXTERNAL_REPO`. `install_external_udev`
+  keys on that status to leave an already-installed hotplug rule **alone**, so a transient
+  NSS failure cannot delete a rule an earlier successful run got right; only a genuinely
+  unusable mount point still removes it. 68 checks → 85, driven by a fake `getent` on PATH
+  (a shell function is invisible to a lookup made through `timeout`, so a stub would have
+  passed vacuously), and the two sub-shell probes now print a positive token so a broken
+  probe fails loudly instead of asserting an absence it would produce anyway.
 
 ### Added
 - **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's

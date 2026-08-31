@@ -246,7 +246,14 @@ check "  ...and the refusal names the account, since the NAME is what triggered 
 # silently lose its remount-on-dock.
 check "a system account is NOT treated as a udisks parent (uid below UID_MIN)" \
       "$(nss /media/svcacct 2>/dev/null && echo ok)" "ok"
-check "  ...nor is root, whose uid is 0" \
+# root is a deliberate carve-out, NOT a claim about udisks: on Ubuntu's
+# /media/<user> layout udisks2 does use /media/root for a mount a uid-0 session
+# initiated, so that directory is a genuine udisks parent. It is accepted anyway
+# because uid 0 sits outside UID_MIN..UID_MAX, and widening the bound to reach it
+# would have to reach past every system account on the way — reintroducing the
+# /media/backup regression above to close a case the preflight already forecloses
+# by refusing to run this installer as root.
+check "  ...nor is root: uid 0 is outside UID_MIN..UID_MAX by design" \
       "$(external_mount_point_sane /media/root 2>/dev/null && echo ok)" "ok"
 # The other half of the bargain: ordinary hand-made mount points must survive.
 # A depth rule ("three components under /media") would have rejected all of these.
@@ -258,6 +265,51 @@ check "  ...and so is /mnt/<dir>" \
 # is compared back — /media/1000 is not a directory udisks would create.
 check "  ...and a numeric /media/<uid>, which resolves to an account by uid" \
       "$(external_mount_point_sane /media/1000 2>/dev/null && echo ok)" "ok"
+
+# An answered "no such account" and an UNANSWERED lookup are different facts, and
+# the whole value of asking the system rests on not confusing them. getent's exit
+# 2 is the only one that means "no such key"; timeout(1)'s 124 (the directory
+# server never replied) and 127 (getent is not installed) mean the question never
+# ran. Folding those into "not an account" switches the rule off in silence on
+# exactly the LDAP/SSSD hosts the timeout was added for, and the fstab step then
+# writes a permanent entry mounting the disk over another login user's parent.
+SLOW_NSS="$TMPROOT/slowbin"; mkdir -p "$SLOW_NSS"
+printf '#!/bin/sh\nsleep 5\n' > "$SLOW_NSS/getent"
+chmod +x "$SLOW_NSS/getent"
+slow() { PATH="$SLOW_NSS:$PATH" external_mount_point_sane "$1"; }
+# An empty PATH reproduces "getent is not installed" without needing a machine
+# that lacks it. The function tolerates the rest going missing: id and realpath
+# already have fallbacks, and the account check runs before either matters.
+mkdir -p "$TMPROOT/nobin"
+nogetent() { PATH="$TMPROOT/nobin" external_mount_point_sane "$1"; }
+
+check "a lookup that never answers is refused, not accepted" \
+      "$(slow /media/alice 2>/dev/null && echo ok)" ""
+check "  ...with the distinct status its callers key on (2, not 1)" \
+      "$(slow /media/alice >/dev/null 2>&1; echo $?)" "2"
+check "  ...saying the lookup did not complete, not that the path is wrong" \
+      "$(slow /media/alice 2>&1 | grep -c 'did not complete')" "1"
+check "  ...and naming the component whose lookup hung" \
+      "$(slow /media/alice 2>&1 | grep -c "for 'alice'")" "1"
+check "a missing getent is the same unanswered question, not a clean 'no'" \
+      "$(nogetent /media/alice >/dev/null 2>&1; echo $?)" "2"
+
+# Why that status is worth carrying: install_external_udev REMOVES the hotplug
+# rule when the mount point is unusable. A name-service hiccup must not delete a
+# rule an earlier successful run installed correctly — only a genuinely bad
+# configuration should. The second check is the non-vacuity control; without it a
+# stub that never fires would pass the first.
+udev_remove_marks() (
+  # Called indirectly, from inside install_external_udev.
+  # shellcheck disable=SC2317,SC2329
+  remove_external_udev() { printf 'REMOVED'; }
+  BACKUP_EXTERNAL_UUID=dead-beef BACKUP_EXTERNAL_REPO="$1" PATH="$2:$PATH" \
+    install_external_udev 2>/dev/null | grep -c REMOVED
+)
+check "an unanswered lookup leaves the existing udev rule alone" \
+      "$(udev_remove_marks /media/alice/restic "$SLOW_NSS")" "0"
+check "  ...while a genuinely unusable mount point still removes it" \
+      "$(udev_remove_marks "$HOME/restic" "$FAKE_NSS")" "1"
 
 # The rule must need no identity resolution AT ALL — the $USER hole generalised:
 # not just "$USER is empty" but "nothing can tell us who we are". Guarded on the

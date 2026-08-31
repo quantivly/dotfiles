@@ -102,9 +102,17 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    > `<x>` is the name of a **login account** on the machine — those are the per-user
    > directories the system creates and mounts removable media inside, and they are empty
    > exactly when no drive is docked, so nothing about their contents gives them away.
-   > Only real login accounts count, so `/media/backup` and `/media/root` are fine
-   > (`backup` and `root` are system accounts, and udisks never mounts anything there), as
-   > are `/media/backup-hdd` and `/mnt/store`. The same
+   > Only accounts whose uid falls inside `UID_MIN`–`UID_MAX` from `/etc/login.defs` count,
+   > so `/media/backup` is fine (`backup` is a stock system account, uid 34), as are
+   > `/media/backup-hdd` and `/mnt/store`. `root` is outside that range too, so
+   > `/media/root` is accepted — a deliberate carve-out rather than a claim about udisks,
+   > which does use that name for a mount a uid-0 session started; `backup-setup` refuses to
+   > run as root, so a supported install cannot reach the case. If the lookup cannot be
+   > *answered* — unreachable directory server, or no `getent` — the path is refused with a
+   > message saying so, because the correct mount point is one component under `/media` too,
+   > so guessing would wave through the dangerous spelling just as readily; that particular
+   > refusal deliberately leaves an already-installed udev rule alone, since the fix is
+   > name-service resolution rather than `BACKUP_EXTERNAL_REPO`. The same
    > check gates every step that uses the mount point — the `/etc/fstab` entry, the udev
    > rule, `restic init`, and the unit's `ConditionPathExists`.
 

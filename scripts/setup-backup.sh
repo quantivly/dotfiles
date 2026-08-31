@@ -271,7 +271,7 @@ external_is_mounted() { findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1; }
 #
 # Deliberately pure, like its caller: no sudo, no writes.
 path_is_account_directory() {
-  local path="$1" parent leaf pw rest uid tmo k v
+  local path="$1" parent leaf pw rest uid tmo k v rc
   local uid_min=1000 uid_max=60000
   if [[ -r /etc/login.defs ]]; then
     while read -r k v _; do
@@ -295,11 +295,23 @@ path_is_account_directory() {
     [[ -n "$leaf" && "$leaf" != */* ]] || continue
     # No pipe into `head`: under the `set -o pipefail` this file declares, head's
     # early exit would SIGPIPE getent and the assignment would fail the installer.
+    rc=0
     if [[ -n "$tmo" ]]; then
-      pw="$("$tmo" 2 getent passwd -- "$leaf" 2>/dev/null)" || pw=""
+      pw="$("$tmo" 2 getent passwd -- "$leaf" 2>/dev/null)" || rc=$?
     else
-      pw="$(getent passwd -- "$leaf" 2>/dev/null)" || pw=""
+      pw="$(getent passwd -- "$leaf" 2>/dev/null)" || rc=$?
     fi
+    # ONLY getent's exit 2 means "no such key". Every other failure is "the
+    # question was never answered": 124 because timeout(1) fired when the
+    # directory server did not reply, 127 because getent is not installed.
+    # Folding those into the empty-output case reports "not an account" for a
+    # lookup that never ran, which switches this entire rule off in silence on
+    # exactly the hosts the timeout above was added for. Report a third outcome
+    # and let the caller decide; it must not look like a clean "no".
+    # Print the leaf even here: the caller's message has to name the thing whose
+    # lookup hung, and the second call site checks $real, not $path.
+    (( rc == 0 || rc == 2 )) || { printf '%s' "$leaf"; return 2; }
+    (( rc == 0 )) || pw=""
     # Compare the NAME field back. `getent passwd 1000` resolves a numeric key to
     # a real account, and /media/1000 is not a directory udisks would ever make.
     [[ -n "$pw" && "${pw%%:*}" == "$leaf" ]] || continue
@@ -316,6 +328,7 @@ path_is_account_directory() {
 # can exercise every rejection without root.
 external_mount_point_sane() {
   local mnt="$1" me real p acct
+  local acctrc=0
   local -a deny
   if [[ "$mnt" != /* ]]; then
     log WARNING "mount point '$mnt' is not an absolute path — check BACKUP_EXTERNAL_REPO in $USER_CONFIG."
@@ -365,9 +378,23 @@ external_mount_point_sane() {
   # So stop enumerating and ask the system. This still accepts /media/backup-hdd,
   # /mnt/store and /srv/backup: a hand-made directory that happens to sit under
   # one of these parents is refused only when its name is an actual account.
-  acct="$(path_is_account_directory "$mnt")" || acct=""
-  if [[ -z "$acct" && "$real" != "$mnt" ]]; then
-    acct="$(path_is_account_directory "$real")" || acct=""
+  acct="$(path_is_account_directory "$mnt")" || acctrc=$?
+  if [[ -z "$acct" && "$acctrc" -ne 2 && "$real" != "$mnt" ]]; then
+    acct="$(path_is_account_directory "$real")" || acctrc=$?
+  fi
+  if [[ "$acctrc" -eq 2 ]]; then
+    # Not "this path is wrong" but "this run could not find out", and the two
+    # need different words because they have different fixes — repair name-service
+    # resolution, do not edit BACKUP_EXTERNAL_REPO. Refusing is still the answer:
+    # an unverified path is the thing this whole function exists to refuse, and
+    # the correct configuration is one component under /media too, so accepting
+    # on a failed lookup waves through /media/<another-login-user> as readily as
+    # /media/<label>. The distinct status matters at the call sites that install
+    # persistent state: see install_external_udev, which must not delete a rule
+    # an earlier successful run got right just because NSS hiccuped today.
+    log WARNING "cannot tell whether $mnt is a per-user directory — the account lookup for '$acct' did not complete (name service unreachable, or getent missing)."
+    log WARNING "Refusing rather than guessing. Fix name-service resolution and re-run, or point BACKUP_EXTERNAL_REPO outside /home, /media and /run/media."
+    return 2
   fi
   if [[ -n "$acct" ]]; then
     # Name the account. Without it the refusal is baffling — the offending thing
@@ -690,6 +717,7 @@ install_external_udev() {
   local uuid="${BACKUP_EXTERNAL_UUID:-}"
   local repo="${BACKUP_EXTERNAL_REPO:-}"
   local mnt unit tmp fstabmnt
+  local sanerc=0
 
   # Every path that declines because the CONFIGURATION no longer supports a rule
   # (below) removes any rule a previous run left behind. A stale rule names a
@@ -709,7 +737,16 @@ install_external_udev() {
     return 0
   fi
   mnt="$(external_mount_point)"
-  if ! external_mount_point_sane "$mnt"; then
+  external_mount_point_sane "$mnt" || sanerc=$?
+  if (( sanerc == 2 )); then
+    # Only THIS run failed to check the path. Removing the rule here would turn a
+    # name-service hiccup into a permanent loss of remount-on-dock, and a rule a
+    # previous run installed is likelier right than absent — the same call the
+    # render and udevadm bail-outs below already make. backup-doctor's drift
+    # compare is what catches a rule that really has gone stale.
+    log WARNING "leaving any existing udev rule in place — the mount point could not be checked on this run."
+    return 0
+  elif (( sanerc != 0 )); then
     remove_external_udev "mount point is not usable"
     return 0
   fi
