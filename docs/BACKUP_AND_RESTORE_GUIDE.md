@@ -99,10 +99,12 @@ showmanual`, third-party apt repos, `snap list` + connections, VS Code/GNOME ext
    > symlinked path, `$HOME`, `/media`, `/run/media`, the usual system directories, and any
    > existing directory that is not already a mount point and is either non-empty or
    > unreadable. It also refuses `/home/<x>`, `/media/<x>` and `/run/media/<x>` whenever
-   > `<x>` is an account on the machine — those are the per-user directories the system
-   > creates and mounts removable media inside, and they are empty exactly when no drive is
-   > docked, so nothing about their contents gives them away. A directory there that is
-   > *not* an account name — `/media/backup-hdd`, `/mnt/store` — is accepted. The same
+   > `<x>` is the name of a **login account** on the machine — those are the per-user
+   > directories the system creates and mounts removable media inside, and they are empty
+   > exactly when no drive is docked, so nothing about their contents gives them away.
+   > Only real login accounts count, so `/media/backup` and `/media/root` are fine
+   > (`backup` and `root` are system accounts, and udisks never mounts anything there), as
+   > are `/media/backup-hdd` and `/mnt/store`. The same
    > check gates every step that uses the mount point — the `/etc/fstab` entry, the udev
    > rule, `restic init`, and the unit's `ConditionPathExists`.
 

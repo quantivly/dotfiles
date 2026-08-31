@@ -154,8 +154,10 @@ echo
 echo "=== the mount-point sanity floor ==="
 # The mount point is only ever a dirname of a hand-edited repo path, and before
 # this floor it went straight into a permanent, privileged /etc/fstab write.
+# Not a hardcoded /media/zvi: that passes on any machine where /media/zvi simply
+# does not exist, which is every CI runner — right answer, wrong reason.
 check "a normal drive path is accepted" \
-      "$(external_mount_point_sane /media/zvi/Backup 2>/dev/null && echo ok)" "ok"
+      "$(external_mount_point_sane "/media/$(id -un)/Backup" 2>/dev/null && echo ok)" "ok"
 check "\$HOME is refused" \
       "$(external_mount_point_sane "$HOME" 2>/dev/null && echo ok)" ""
 check "  ...and says why" \
@@ -180,9 +182,13 @@ check "a symlinked mount point is refused" \
 # $USER is set by login/PAM, not by the shell: empty under sudo -u / env -i / a
 # systemd unit, and "/media/${USER:-}" is then "/media/", which matches nothing.
 # shellcheck disable=SC2016  # $1/$(id -un) must expand in the inner shell, not here
-nouser_probe='source "$1"; set +e; external_mount_point_sane "/media/$(id -un)" 2>/dev/null && echo ok'
-check "the per-user deny-list entries survive an empty \$USER" \
-      "$(env -u USER bash -c "$nouser_probe" _ "$DOTFILES/scripts/setup-backup.sh")" ""
+# Prints `live` unconditionally BEFORE the assertion. Asserting only the absence
+# of `ok` would make every failure of the probe itself — a bad path, a source
+# error — a silent pass, which is the exact vacuous-pass class the fatal()
+# preamble at the top of this file exists to prevent.
+nouser_probe='source "$1" || exit 9; set +e; printf live; external_mount_point_sane "/media/$(id -un)" 2>/dev/null && printf ok'
+check "the per-user deny entries survive an empty \$USER" \
+      "$(env -u USER bash -c "$nouser_probe" _ "$DOTFILES/scripts/setup-backup.sh")" "live"
 # `ls -A` on a 0700 root-owned directory returns nothing to an unprivileged
 # user, so "cannot list it" must not be read as "it is empty".
 if (( EUID != 0 )); then
@@ -194,45 +200,75 @@ fi
 mkdir -p "$TMPROOT/populated" && : > "$TMPROOT/populated/live-data"
 check "an existing non-empty directory is refused (mounting over it hides data)" \
       "$(external_mount_point_sane "$TMPROOT/populated" 2>/dev/null && echo ok)" ""
-
-# The list of literal paths is belt-and-braces for everything except the udisks
-# parents: /etc and $HOME are non-empty, so the two content checks above refuse
-# them whether or not anyone listed them. /media/<user> is the one dangerous
-# directory that is legitimately EMPTY whenever no drive is docked, so there the
-# list was load-bearing and alone — and both holes found in it so far were there.
-# These assert the structural rule that replaced it.
-#
-# `root` on purpose: an account that is NOT the user running the suite, so a rule
-# that only ever knew about "me" cannot pass these.
-check "/media/<account> is refused for an account that is not the current user" \
-      "$(external_mount_point_sane /media/root 2>/dev/null && echo ok)" ""
-check "/run/media/<account> likewise" \
-      "$(external_mount_point_sane /run/media/root 2>/dev/null && echo ok)" ""
-check "/home/<account> likewise" \
-      "$(external_mount_point_sane /home/root 2>/dev/null && echo ok)" ""
-# The rule must need no identity resolution AT ALL — this is the $USER hole
-# generalised: not just "$USER is empty" but "nothing can tell us who we are".
-# shellcheck disable=SC2016  # must expand in the inner shell, not this one
-noid_probe='source "$1"; set +e; id() { return 1; }; external_mount_point_sane "/media/$2" 2>/dev/null && echo ok'
-check "  ...and still refused with \$USER unset AND id(1) failing" \
-      "$(env -u USER bash -c "$noid_probe" _ "$DOTFILES/scripts/setup-backup.sh" "$(id -un)")" ""
-# The other half of the bargain: it must not reject ordinary hand-made mount
-# points, which a depth rule ("three components under /media") would have.
-check "a hand-made /media/<dir> that is not an account is accepted" \
-      "$(external_mount_point_sane /media/no-such-account-8f3a1c 2>/dev/null && echo ok)" "ok"
-check "  ...and so is /mnt/<dir>" \
-      "$(external_mount_point_sane /mnt/no-such-account-8f3a1c 2>/dev/null && echo ok)" "ok"
-# `getent passwd 1000` resolves a NUMERIC key to a real account, so the name
-# field is compared back — /media/1000 is not a directory udisks would create.
-check "  ...and a numeric /media/<uid>, which resolves to an account by uid" \
-      "$(external_mount_point_sane /media/1000 2>/dev/null && echo ok)" "ok"
-check "the correct answer, /media/<user>/<label>, is still accepted" \
-      "$(external_mount_point_sane "/media/$(id -un)/Backup" 2>/dev/null && echo ok)" "ok"
 check "  ...and says why" \
       "$(external_mount_point_sane "$TMPROOT/populated" 2>&1 | grep -c 'would hide them')" "1"
 mkdir -p "$TMPROOT/empty"
 check "an existing EMPTY directory is fine (the normal undocked case)" \
       "$(external_mount_point_sane "$TMPROOT/empty" 2>/dev/null && echo ok)" "ok"
+
+# The literal deny-list is belt-and-braces for everything except the udisks
+# parents: /etc and $HOME are non-empty, so the two content checks above refuse
+# them whether or not anyone listed them. /media/<user> is the one dangerous
+# directory that is legitimately EMPTY whenever no drive is docked, so there the
+# list was load-bearing and alone — and both holes ever found in it were there.
+#
+# A fake `getent` on PATH, not a shell function: path_is_account_directory calls
+# it through `timeout`, which execs the real binary and never sees a function.
+# A stub that cannot be reached would make every assertion below pass vacuously.
+FAKE_NSS="$TMPROOT/fakebin"
+mkdir -p "$FAKE_NSS"
+cat > "$FAKE_NSS/getent" <<'FAKEEOF'
+#!/bin/sh
+[ "$1" = passwd ] || exit 2
+case "$3" in
+  alice) echo "alice:x:1234:1234::/home/alice:/bin/bash"; exit 0 ;;
+  svcacct) echo "svcacct:x:34:34::/var/svcacct:/usr/sbin/nologin"; exit 0 ;;
+esac
+exit 2
+FAKEEOF
+chmod +x "$FAKE_NSS/getent"
+nss() { PATH="$FAKE_NSS:$PATH" external_mount_point_sane "$1"; }
+
+# alice is deliberately NOT the user running the suite: a rule that only ever
+# knew about "me" cannot pass these.
+check "/media/<login account> is refused for an account that is not the current user" \
+      "$(nss /media/alice 2>/dev/null && echo ok)" ""
+check "/run/media/<login account> likewise" \
+      "$(nss /run/media/alice 2>/dev/null && echo ok)" ""
+check "/home/<login account> likewise" \
+      "$(nss /home/alice 2>/dev/null && echo ok)" ""
+check "  ...and the refusal names the account, since the NAME is what triggered it" \
+      "$(nss /media/alice 2>&1 | grep -c "'alice' is a login account")" "1"
+# A SYSTEM account is not a udisks parent. /media/backup is a plausible hand-made
+# mount point (the guide advertises /media/backup-hdd), `backup` is uid 34, and
+# refusing it would not just skip a step: install_external_udev treats an unusable
+# mount point as a reason to REMOVE the hotplug rule, so a working install would
+# silently lose its remount-on-dock.
+check "a system account is NOT treated as a udisks parent (uid below UID_MIN)" \
+      "$(nss /media/svcacct 2>/dev/null && echo ok)" "ok"
+check "  ...nor is root, whose uid is 0" \
+      "$(external_mount_point_sane /media/root 2>/dev/null && echo ok)" "ok"
+# The other half of the bargain: ordinary hand-made mount points must survive.
+# A depth rule ("three components under /media") would have rejected all of these.
+check "a hand-made /media/<dir> that is not an account is accepted" \
+      "$(nss /media/no-such-account-8f3a1c 2>/dev/null && echo ok)" "ok"
+check "  ...and so is /mnt/<dir>" \
+      "$(external_mount_point_sane /mnt/no-such-account-8f3a1c 2>/dev/null && echo ok)" "ok"
+# `getent passwd 1000` resolves a NUMERIC key to a real account, so the name field
+# is compared back — /media/1000 is not a directory udisks would create.
+check "  ...and a numeric /media/<uid>, which resolves to an account by uid" \
+      "$(external_mount_point_sane /media/1000 2>/dev/null && echo ok)" "ok"
+
+# The rule must need no identity resolution AT ALL — the $USER hole generalised:
+# not just "$USER is empty" but "nothing can tell us who we are". Guarded on the
+# suite running as a regular account, since the assertion is that the CURRENT
+# user's parent is refused. Same positive control as nouser_probe above.
+if (( EUID >= 1000 )); then
+  # shellcheck disable=SC2016  # must expand in the inner shell, not this one
+  noid_probe='source "$1" || exit 9; set +e; id() { return 1; }; printf live; external_mount_point_sane "/media/$2" 2>/dev/null && printf ok'
+  check "the current user's parent is refused with \$USER unset AND id(1) failing" \
+        "$(env -u USER bash -c "$noid_probe" _ "$DOTFILES/scripts/setup-backup.sh" "$(id -un)")" "live"
+fi
 
 echo
 echo "=== install: the states that must produce an entry ==="

@@ -19,14 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whenever no drive is docked — and legitimately the parent of the correct answer — so
   there the string list was load-bearing and alone. `path_is_account_directory` replaces
   them: `<parent>/<leaf>` under `/home`, `/media` or `/run/media` is refused when
-  `getent passwd` says `<leaf>` names an account. It covers every account rather than just
-  the current one, and it asks nothing about who is running the installer, so the `$USER`
-  class of bug cannot recur in it. It still accepts `/media/backup-hdd`, `/mnt/store` and
-  `/srv/backup` — a depth rule ("three components under `/media`") would have rejected all
-  three. The passwd *name* field is compared back so a numeric key (`getent passwd 1000`)
-  does not make `/media/1000` look like a user directory. 68 checks → 76, including a
-  negative test that the new rule, not the old literals, is what carries the refusal when
-  `$USER` is unset *and* `id(1)` fails.
+  `getent passwd` says `<leaf>` names a **regular login account** (uid within login.defs'
+  `UID_MIN`..`UID_MAX`). It covers every account rather than just the current one, and it
+  asks nothing about who is running the installer, so the `$USER` class of bug cannot recur
+  in it. The literals stay as belt-and-braces but no longer carry the guard.
+  The uid bound is the discriminator, not a detail: matching *any* passwd entry would
+  refuse `/media/backup` — a plausible hand-made mount point, `backup` being a stock uid-34
+  account — and that is not a harmless over-rejection, because `install_external_udev`
+  treats an unusable mount point as a reason to **remove** the hotplug rule, so a working
+  install would silently lose its remount-on-dock. It is also not a depth rule ("three
+  components under `/media`"), which would reject `/media/backup-hdd`, `/media/external`
+  and `/mnt/store`. The passwd *name* field is compared back so a numeric key
+  (`getent passwd 1000`) does not make `/media/1000` look like a user directory, and the
+  lookup runs under `timeout` so an unreachable NSS source cannot hang the installer.
+  68 checks → 78, driven by a fake `getent` on PATH (a shell function is invisible to a
+  lookup made through `timeout`, so a stub would have passed vacuously), and the two
+  sub-shell probes now print a positive token so a broken probe fails loudly instead of
+  asserting an absence it would produce anyway.
 
 ### Added
 - **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's

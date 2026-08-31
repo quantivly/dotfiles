@@ -247,34 +247,67 @@ external_is_mounted() { findmnt -rno TARGET --mountpoint "$1" >/dev/null 2>&1; }
 # is no help; the mount succeeds. Until this check the string went straight into
 # a permanent, privileged /etc/fstab write with no floor at all.
 #
-# Is $1 exactly <parent>/<account>, for a parent whose children are per-user
-# directories the SYSTEM creates and owns? udisks2 makes /media/<user> and
-# /run/media/<user> on its own and mounts removable media inside them; /home/<user>
-# is the same shape. Mounting a disk over one of those hides whatever the owning
-# service or user puts there, at every boot.
+# Prints the account name and returns 0 when $1 is exactly <parent>/<account>
+# for a parent whose children are per-user directories the SYSTEM creates: udisks2
+# makes /media/<user> and /run/media/<user> on its own and mounts removable media
+# inside them, and /home/<user> is the same shape. A disk mounted over one of
+# those hides whatever the owning user puts there, at every boot.
 #
 # Asked of the system rather than of a list, for two reasons. It covers EVERY
 # account, not just the one running the installer — /media/<someone-else> is no
 # safer — and it needs no identity resolution at all, so the class of bug where
-# `$USER` is empty and the per-user deny entries silently collapse to "/media/"
-# cannot recur in it.
+# `$USER` is empty and the per-user deny entries collapse to "/media/" cannot
+# recur in it.
+#
+# REGULAR LOGIN ACCOUNTS ONLY, which is the whole discriminator. udisks makes
+# these directories for accounts that log in to a desktop session; it has never
+# made one for `backup` (uid 34), `games` (uid 5) or `nobody` (uid 65534). And
+# /media/backup is a thoroughly plausible hand-made mount point for a backup
+# disk — the guide advertises /media/backup-hdd, two characters away. Refusing
+# it would not merely skip a step: install_external_udev treats an unusable
+# mount point as a reason to REMOVE the hotplug rule, so a working install would
+# quietly lose its remount-on-dock. The uid bounds come from the machine's own
+# login.defs, with shadow-utils' defaults as the fallback.
 #
 # Deliberately pure, like its caller: no sudo, no writes.
 path_is_account_directory() {
-  local path="$1" parent leaf pw
+  local path="$1" parent leaf pw rest uid tmo k v
+  local uid_min=1000 uid_max=60000
+  if [[ -r /etc/login.defs ]]; then
+    while read -r k v _; do
+      case "$k" in
+        UID_MIN) [[ "$v" =~ ^[0-9]+$ ]] && uid_min="$v" ;;
+        UID_MAX) [[ "$v" =~ ^[0-9]+$ ]] && uid_max="$v" ;;
+      esac
+    done < /etc/login.defs
+  fi
+  # getent goes through NSS, so an LDAP/SSSD account has its parent protected
+  # too — but on a host whose directory server is unreachable a lookup blocks for
+  # the NSS timeout, and the installer would sit there with no output. Bound it.
+  # If `timeout` itself is missing, call getent directly rather than let every
+  # lookup come back empty: that would switch this entire rule off with no sign,
+  # which is the failure mode this file exists to refuse.
+  tmo="$(command -v timeout 2>/dev/null)" || tmo=""
   for parent in /home /media /run/media; do
     [[ "$path" == "$parent"/* ]] || continue
     leaf="${path#"$parent"/}"
     # One component only: /media/<user>/<label> is the CORRECT answer, not a hit.
     [[ -n "$leaf" && "$leaf" != */* ]] || continue
-    # getent, so NSS answers — an LDAP/SSSD account has a udisks parent too, and
-    # scanning /etc/passwd would miss it. No pipe into `head`: under the
-    # `set -o pipefail` this file declares, head's early exit would SIGPIPE
-    # getent and the assignment would fail the whole installer.
-    pw="$(getent passwd -- "$leaf" 2>/dev/null)" || pw=""
+    # No pipe into `head`: under the `set -o pipefail` this file declares, head's
+    # early exit would SIGPIPE getent and the assignment would fail the installer.
+    if [[ -n "$tmo" ]]; then
+      pw="$("$tmo" 2 getent passwd -- "$leaf" 2>/dev/null)" || pw=""
+    else
+      pw="$(getent passwd -- "$leaf" 2>/dev/null)" || pw=""
+    fi
     # Compare the NAME field back. `getent passwd 1000` resolves a numeric key to
     # a real account, and /media/1000 is not a directory udisks would ever make.
-    [[ -n "$pw" && "${pw%%:*}" == "$leaf" ]] && return 0
+    [[ -n "$pw" && "${pw%%:*}" == "$leaf" ]] || continue
+    rest="${pw#*:}"; rest="${rest#*:}"; uid="${rest%%:*}"
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    (( uid >= uid_min && uid <= uid_max )) || continue
+    printf '%s' "$leaf"
+    return 0
   done
   return 1
 }
@@ -282,7 +315,7 @@ path_is_account_directory() {
 # Deliberately pure — no sudo, no writes — so scripts/test-backup-external.sh
 # can exercise every rejection without root.
 external_mount_point_sane() {
-  local mnt="$1" me real p
+  local mnt="$1" me real p acct
   local -a deny
   if [[ "$mnt" != /* ]]; then
     log WARNING "mount point '$mnt' is not an absolute path — check BACKUP_EXTERNAL_REPO in $USER_CONFIG."
@@ -306,6 +339,9 @@ external_mount_point_sane() {
   # udisks parents are where a plausible BACKUP_EXTERNAL_REPO typo actually lands.
   deny=( / /boot /dev /etc /home /media /mnt /opt /proc /root /run /run/media
          /srv /sys /tmp /usr /var "$HOME" )
+  # Kept as belt-and-braces, no longer load-bearing: path_is_account_directory
+  # below is what actually refuses the udisks parents. These two stay because
+  # they cost nothing and still fire if getent is unavailable or times out.
   # `id -un`, never $USER: $USER is set by login/PAM, not by the shell, so it is
   # empty under `sudo -u`, `env -i`, a systemd unit or a bare container shell —
   # and "/media/${USER:-}" is then "/media/", which matches nothing and silently
@@ -317,13 +353,6 @@ external_mount_point_sane() {
   # cannot smuggle a denied directory past the string compare.
   real="$(realpath -m -- "$mnt" 2>/dev/null)" || real=""
   : "${real:=$mnt}"
-  for p in "${deny[@]}"; do
-    if [[ "$mnt" == "$p" || "$real" == "$p" ]]; then
-      log WARNING "refusing to mount the external HDD over $mnt."
-      log WARNING "BACKUP_EXTERNAL_REPO must point at a directory ON the drive (e.g. $mnt/<label>/restic), not one level up."
-      return 1
-    fi
-  done
   # The list above can only refuse spellings someone thought of, and for every
   # entry on it EXCEPT the udisks parents that does not matter: /etc, /usr and
   # $HOME are non-empty, so the content checks below refuse them whether or not
@@ -336,11 +365,24 @@ external_mount_point_sane() {
   # So stop enumerating and ask the system. This still accepts /media/backup-hdd,
   # /mnt/store and /srv/backup: a hand-made directory that happens to sit under
   # one of these parents is refused only when its name is an actual account.
-  if path_is_account_directory "$mnt" || path_is_account_directory "$real"; then
-    log WARNING "refusing to mount the external HDD over $mnt — that is a per-user directory the system creates and manages (/media/<user>, /run/media/<user>, /home/<user>)."
+  acct="$(path_is_account_directory "$mnt")" || acct=""
+  if [[ -z "$acct" && "$real" != "$mnt" ]]; then
+    acct="$(path_is_account_directory "$real")" || acct=""
+  fi
+  if [[ -n "$acct" ]]; then
+    # Name the account. Without it the refusal is baffling — the offending thing
+    # is the NAME of the last component, which the path alone does not advertise.
+    log WARNING "refusing to mount the external HDD over $mnt — '$acct' is a login account on this machine, so that is a per-user directory udisks creates and mounts removable media inside."
     log WARNING "BACKUP_EXTERNAL_REPO must point at a directory ON the drive (e.g. $mnt/<label>/restic), not one level up."
     return 1
   fi
+  for p in "${deny[@]}"; do
+    if [[ "$mnt" == "$p" || "$real" == "$p" ]]; then
+      log WARNING "refusing to mount the external HDD over $mnt."
+      log WARNING "BACKUP_EXTERNAL_REPO must point at a directory ON the drive (e.g. $mnt/<label>/restic), not one level up."
+      return 1
+    fi
+  done
   # An existing non-empty directory that is not already a mount point is live
   # data on the internal disk. Mounting over it hides it at every boot, and the
   # hidden files keep consuming the root filesystem invisibly.
