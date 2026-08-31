@@ -718,8 +718,12 @@ hspawn() {
         rest=("$@")
         break ;;
       -p|--profile|-m|--model|-e|--effort|--mode|-b|--base|-n|--name)
-        if (( $# < 2 )); then
-          echo "Error: $1 needs a value (hspawn --help)" >&2
+        # Empty as well as missing: `-p ''` / `--profile=` would otherwise set
+        # profile_set with an empty profile, silently taking the no-profile path
+        # (burning whatever account holds the global credentials) AND disabling
+        # the legacy positional slot.
+        if (( $# < 2 )) || [[ -z "$2" ]]; then
+          echo "Error: $1 needs a non-empty value (hspawn --help)" >&2
           return 1
         fi
         case "$1" in
@@ -1258,7 +1262,7 @@ hreap() {
           '              panes are never touched. Read-only without --close.' \
           '              WARNING: without --mine, --close is machine-wide — every tagged pane on this' \
           '              box, whoever spawned it, not just yours.' \
-          '  --json      machine-readable rows' \
+          '  --json      machine-readable rows; read-only, refuses to combine with --close' \
           '  idle marked * = no transcript found, process age shown instead' >&2
         return 0 ;;
       *)
@@ -1267,6 +1271,11 @@ hreap() {
     esac
     shift
   done
+  if (( json && close )); then
+    echo "Error: --json is read-only — it prints the rows and returns before anything is" >&2
+    echo "       closed, so --json --close would silently reap nothing. Run one or the other." >&2
+    return 1
+  fi
   if ! command -v jq &>/dev/null; then
     echo "Error: hreap needs jq to read herdr's JSON replies" >&2
     return 1
@@ -1366,14 +1375,18 @@ hreap() {
         (( idle_s >= older * 60 )) || continue
       fi
 
-      # Name: detected agent name, else display_agent/label/title (snapshot, then
-      # `pane get` in case the snapshot omitted them), else the registry name.
+      # Name: detected agent name, else the pane's own terminal title, else the
+      # registry name. herdr 0.8.2 panes carry NO display_agent/label/title — not
+      # in `api snapshot`, not in `pane get` (whose keys are agent, agent_session,
+      # agent_status, cwd, focused, foreground_cwd, pane_id, revision, scroll,
+      # tab_id, terminal_id, terminal_title, terminal_title_stripped, tokens,
+      # workspace_id). A fallback chain on those three therefore always fell
+      # through to "-" — live, 4 of 5 rows — and the `pane get` call that repeated
+      # them cost one RPC per unnamed pane for a guaranteed-empty answer.
+      # terminal_title_stripped is in the snapshot already, so $disp carries it
+      # and no second call is needed.
       name="$aname"
       [[ -n "$name" ]] || name="$disp"
-      if [[ -z "$name" ]]; then
-        name="$(herdr pane get "$pane" 2>/dev/null \
-          | jq -r '.result.pane | (.display_agent // .label // .title // empty)')"
-      fi
       [[ -n "$name" ]] || name="$rname"
       [[ -n "$name" ]] || name="-"
 
@@ -1402,7 +1415,7 @@ hreap() {
         (if (.agent // "") != "" then "yes" else "no" end),
         (.agent_status // "unknown"),
         (.agent_session.value // ""),
-        (.display_agent // .label // .title // ""),
+        (.terminal_title_stripped // ""),
         ($names[.pane_id] // ""),
         ($wsi[.workspace_id].label // ""),
         ($wsi[.workspace_id].path // "") ]
@@ -1452,7 +1465,7 @@ hreap() {
   (( starred )) && echo "           * no transcript found — process age shown, not idle time"
 
   if (( close )); then
-    local closed=0 freed_kb=0 untagged=0 reply
+    local closed=0 freed_kb=0 untagged=0 reply now_status
     local -a done_panes=()
     while IFS="$sep" read -r pane name astatus idle_s idle_src mem_kb tagged wpath rbranch rslug; do
       if [[ "$tagged" != true ]]; then
@@ -1474,6 +1487,19 @@ hreap() {
       fi
       (( idle_s >= older * 60 )) || continue
       [[ " ${done_panes[*]} " == *" $pane "* ]] && continue
+      # $astatus came from the snapshot taken at the top of this run. Re-read it
+      # here: there is deliberately no override flag, so "never close a working
+      # agent" is the whole safety story and it has to hold at the moment of the
+      # close, not at scan time. The scan is fast (~0.1 s over 9 panes on this
+      # box), so the window is small — but it is not zero, and an agent that woke
+      # inside it would be killed mid-turn.
+      now_status="$(herdr pane get "$pane" 2>/dev/null | jq -r '.result.pane.agent_status // "unknown"')"
+      case "$now_status" in
+        idle|done) ;;
+        *)
+          echo "skip:      $pane ($name) — status changed to $now_status since the scan, not closing"
+          continue ;;
+      esac
       if reply="$(herdr pane close "$pane" 2>&1)"; then
         done_panes+=("$pane")
         (( closed++ ))
