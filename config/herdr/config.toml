@@ -132,8 +132,12 @@ close_tab    = ["prefix+shift+x", "ctrl+shift+x"]
 rename_tab   = ["prefix+shift+t", "ctrl+shift+r"]
 next_tab     = ["prefix+n", "ctrl+alt+n", "ctrl+tab"]     # browser habit; tmux's
 previous_tab = ["prefix+p", "ctrl+alt+p", "ctrl+shift+tab"]  # C-PgUp/PgDn unbindable
-# tmux S-Left / S-Right. alt+shift+arrows are usable again now that the GNOME
-# xkb option grp:alt_shift_toggle has been removed (see focus_agent below).
+# tmux S-Left / S-Right. CONFIRMED WORKING 2026-09-01 (Zvi) — and they had never
+# worked before that, despite this comment. `apply-gnome-settings.sh` did clear
+# grp:alt_shift_toggle, but ~/.gnome-settings.local re-enabled it three lines
+# later in the same `gnome-apply` run, both printed as ✓. The comment was true of
+# the repo and false of the machine, which is the whole failure class this branch
+# is about. See previous_workspace below for the mechanism.
 move_tab_previous = ["prefix+shift+left", "alt+shift+left"]
 move_tab_next     = ["prefix+shift+right", "alt+shift+right"]
 # Digits: tabs on ctrl+1..9, agents stay on alt+1..9.
@@ -170,9 +174,12 @@ new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
 # switch, and whichever of Alt/Shift was pressed second emitted ISO_Next_Group
 # instead of its own modifier. Every Alt+Shift chord therefore arrived one
 # modifier short, move_tab_previous/next above included. The override is now
-# removed and Super+Space switches us/il. Confirm at the keyboard; if a chord
-# still does nothing, scripts/herdr-keyprobe.sh in a PLAIN Alacritty window
-# separates "the terminal never delivered it" from "herdr did not act".
+# removed and Super+Space (plus Shift+Super+Space) switches us/il.
+# CONFIRMED WORKING 2026-09-01 (Zvi): all four alt+shift+arrow chords fire — the
+# two here and move_tab_previous/next above. No keyprobe was needed in the end:
+# the chords were never a protocol problem, they were a modifier being eaten. If
+# one ever goes quiet again, check `gsettings get org.gnome.desktop.input-sources
+# xkb-options` FIRST — it is a one-line answer, where the keyprobe is a ritual.
 previous_workspace = ["prefix+shift+up", "alt+shift+up"]
 next_workspace     = ["prefix+shift+down", "alt+shift+down"]
 # remove_worktree opens herdr's own confirmation before removing a worktree
