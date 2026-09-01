@@ -37,7 +37,7 @@ ssh server '~/.dotfiles/scripts/server-bootstrap.sh --update'  # Update
 The zsh configuration is split into focused modules loaded by `zshrc`:
 
 1. **zshrc.history** - History configuration (50k commands, timestamps, deduplication)
-2. **zsh/functions/\*.sh** - Utility functions organized into 3 modules (see Function Modules below)
+2. **zsh/functions/\*.sh** - Utility functions organized into 4 modules (see Function Modules below)
 3. **zshrc.aliases** - Portable aliases for git, docker, python, system commands
 4. **zshrc.conditionals** - Module dispatcher that loads:
    - **zshrc.conditionals.tools** - Modern CLI tool configurations (bat, eza, ripgrep, zoxide, etc.)
@@ -54,6 +54,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | `zsh/functions/core.sh` | Core utilities (22 functions) | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
 | `zsh/functions/system.sh` | Performance + Utilities + Dotfiles guard + GNOME + Backup + Audit (59 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `dotfiles-doctor`, `dotfiles-work`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
+| `zsh/functions/github.sh` | gh account routing + diagnosis (10 functions) | `gh-doctor` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
@@ -245,7 +246,8 @@ and inherits the previous run's exit code.
 3. oh-my-zsh core and plugins
 4. p10k.zsh theme
 5. zsh/zshrc.history
-6. zsh/functions/*.sh (core, development, system)
+6. zsh/functions/*.sh (core, development, system, github — github after
+   system, which defines the shared _doctor_* emitters it uses)
 7. zsh/zshrc.aliases
 8. zsh/zshrc.conditionals → loads three focused modules:
    - zsh/zshrc.conditionals.tools (CLI tool overrides)
@@ -485,6 +487,94 @@ Template at `examples/ssh-config.template`. Run `ssh-init` to install. See [docs
 - `gh review` - PRs where you're requested as reviewer
 - `gh prmerge` - Squash merge and delete branch
 - `gh runs` - Recent workflow runs for current branch
+
+## GitHub Account Routing (`gh-doctor`)
+
+**`GH_CONFIG_DIR` does not isolate the credential, and `gh auth status` will not tell
+you.** gh stores its tokens in the system keyring keyed by **host**, not by config dir,
+so `GH_CONFIG_DIR` isolates `hosts.yml` and `config.yml` and nothing else. Observed here
+on 2026-09-01:
+
+```
+config dir      hosts.yml declares    an API call resolves to
+gh              zvi-quantivly      →  zvi-quantivly
+gh-personal     ZviBaratz          →  zvi-quantivly   ← mismatch
+gh-quantivly    zvi-quantivly      →  zvi-quantivly
+```
+
+`gh auth status` reports the *declared* user throughout — so it says `ZviBaratz` while
+the API answers `zvi-quantivly`. **A status command describing intent rather than
+effect**, the same shape as the `backup-doctor` bug and the live-config guard's false
+all-clear. The direction matters: with `GH_TOKEN` unset it falls back to the **work**
+account, in any directory, so a personal repo silently gets work credentials while git
+correctly signs the commits as personal.
+
+`zshrc.company` already works around it by caching per-account tokens
+(`~/.cache/gh-token-cache/{personal,quantivly}`, 600, refreshed on shell start) and
+exporting the right one as `GH_TOKEN`; its own comment notes that `gh auth token`
+**without `--user`** "returns a shared default that may be wrong". So the mechanism was
+known — **the defect is the failure mode**, which is invisible and biased toward work.
+
+`gh-doctor` (`zsh/functions/github.sh`) makes it visible. For a directory it prints the
+account the **remote** routes to, the account gh **declares**, the account an actual
+`GET /user` **returns**, and which mechanism decided (`GH_TOKEN` / `GITHUB_TOKEN` /
+config-dir keyring). Everything it says about "effective" comes from a real request;
+nothing is inferred from configuration, because that inference *is* the bug. It also
+proves the workaround still works — for each config dir it probes twice, once with the
+token env cleared (which reproduces the collapse) and once pinned with
+`gh auth token --user <login>` (which does isolate) — so nobody is told to rely on a
+mechanism that has itself broken.
+
+**Routing follows the repo REMOTE, not `$PWD`** — the rule git identity already uses
+(#67, `hasconfig:remote.*.url` in `~/.gitconfig.local`), so a work repo routes correctly
+wherever it is checked out and a personal repo under `~/quantivly/` does not get the work
+account. Like `hasconfig`, **any** remote can match, not just `origin`: in a fork workflow
+origin is the personal fork and upstream is the work repo, and matching origin alone would
+hand that repo the personal account while git signs its commits as work.
+
+```bash
+gh-doctor                 # this directory
+gh-doctor --offline       # config only — every network answer marked NOT CHECKED
+gh-doctor ~/some/repo
+```
+
+Configuration is data, in `zsh/zshrc.company` (or `~/.zshrc.local`), read by the doctor:
+
+```zsh
+GH_ACCOUNT_ROUTES=( "quantivly=$HOME/.config/gh-quantivly" )   # owner-glob=config-dir
+GH_ACCOUNT_DEFAULT_DIR="$HOME/.config/gh-personal"             # empty = indeterminate
+```
+
+Traps this area has, each of which produced a green tick or a confident wrong answer:
+
+- **A route whose config dir does not exist can never fire**, and reporting that only when
+  the route happens to match means the fault first surfaces on the day it was finally
+  needed. The whole table is checked every run, matched or not. This is not hypothetical:
+  writing the entry in **single** quotes (`'quantivly=$HOME/...'`) leaves a literal
+  `$HOME` that never exists, and the route silently never matches.
+- **`env VAR=x some_shell_function` cannot work** — `env` execs a binary — and **`env
+  GH_TOKEN=x -u GITHUB_TOKEN gh …` runs a program called `-u`**, because env stops parsing
+  options at the first operand. Both surfaced as *"could not resolve the account"*, i.e.
+  as a fact about GitHub rather than about the command line. `_gh_run_prefix` builds the
+  prefix as an array and hoists every `-u` above every assignment.
+- **`${~pat}` enables tilde expansion as well as globbing**, so a route pattern beginning
+  with `~` aborted the lookup with "no such user or named directory" and took every later
+  route with it. Owner patterns are restricted to `[A-Za-z0-9_.-]` plus `*` and `?`, and
+  anything else is named as a bad table entry rather than left to misfire at match time.
+- **An unparseable routing table selects nothing, and nothing reads as "this repo is
+  personal"** — the unparseable-link-map failure from the live-config guard, in a new
+  place. `bad-table` is its own state and is reported as UNUSABLE.
+- **zsh's `local NAME` on a name already local in that scope is a DISPLAY command**, so a
+  `local` inside a loop printed `du=zvi-quantivly` into the middle of the report.
+- **An empty answer is never agreement.** A failed or timed-out API call is a ✗ with the
+  error, and every comparison that depended on it is reported as *skipped*, never passed.
+  `--offline` marks its answers NOT CHECKED for the same reason.
+
+State table: `scripts/test-gh-routing.sh` (100 checks, run in CI, hermetic — `gh` is
+stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
+keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
+row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make
+the row that names it fail.
 
 ## Tmux Configuration
 
@@ -768,6 +858,7 @@ source ~/.zshrc      # Reload config (or: zshreload)
 localrc              # Edit ~/.zshrc.local
 qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
+gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offline)
 tool_status          # Check installed tools
 build-limits         # Show active build/test worker caps (see zshrc.buildlimits)
 alacritty-init       # Set up Alacritty config (new machine)
@@ -802,5 +893,5 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **Tool not loading:** `command -v toolname`, then `source ~/.zshrc`
 - **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
-- **Git auth:** `gh auth status` / `gh auth login`
+- **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
 - **Backups:** `backup-doctor` (full-chain correctness — start here), `backup-status` (quick health), `systemctl list-timers | grep restic`, `resticprofile -c /etc/resticprofile/profiles.toml show` (validate config)

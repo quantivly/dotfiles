@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gh-doctor`: which GitHub account is `gh` *actually* using here?**
+  `gh` keys its tokens in the system keyring by **host**, not by config dir, so
+  `GH_CONFIG_DIR` isolates `hosts.yml` and nothing else: three config dirs declaring
+  three different accounts all resolved to one, and `gh auth status` kept reporting the
+  declared one throughout (`gh-personal` said `ZviBaratz` while the API answered
+  `zvi-quantivly`). The fallback direction is the bad one — with `GH_TOKEN` unset, a
+  personal repository silently gets **work** credentials while git correctly signs its
+  commits as personal. A status command describing intent rather than effect, the same
+  shape as the `backup-doctor` bug and the live-config guard's false all-clear.
+
+  `gh-doctor` (`zsh/functions/github.sh`) reports, for a directory: the account the
+  repo's **remote** routes to, the account gh **declares**, the account a real
+  `GET /user` **returns**, and which mechanism decided. It then probes each config dir
+  twice — once with the token env cleared, which reproduces the collapse, and once
+  pinned with `gh auth token --user <login>`, which does isolate — so the workaround is
+  demonstrated rather than asserted. `--offline` marks every network answer NOT CHECKED
+  instead of omitting it.
+
+  Routing keys on the repo **remote**, matching git identity (#67,
+  `hasconfig:remote.*.url`), and consults **every** remote rather than just `origin`, so
+  a fork whose upstream is the work repo routes the same way git already signs it.
+  Configuration is data: `GH_ACCOUNT_ROUTES` / `GH_ACCOUNT_DEFAULT_DIR`, set in
+  `zsh/zshrc.company`. Nothing consumes them yet — this release only makes the state
+  visible; it does not change which account any shell selects.
+
+  State table: `scripts/test-gh-routing.sh` (100 checks, new CI job
+  `gh-routing-test`, hermetic — `gh` is stubbed, so no network, no keyring, no account).
+  The rows that already caught something: `env VAR=x some_shell_function` (env execs a
+  binary) and `env GH_TOKEN=x -u GITHUB_TOKEN gh …` (env stops parsing options at the
+  first operand, so it ran a program called `-u`), both of which surfaced as *"could not
+  resolve the account"*; `${~pat}` doing tilde expansion as well as globbing, so a route
+  pattern starting with `~` aborted the whole lookup; zsh's `local NAME` on an
+  already-local name being a DISPLAY command, which printed `du=zvi-quantivly` into the
+  middle of the report; and a route whose config dir does not exist being reported only
+  when it happened to match.
+
+  `scripts/test-dotfiles-guard.sh`'s "every doctor declares its counters local" sweep now
+  sources every `zsh/functions/*.sh` rather than only `system.sh` — `gh-doctor` is the
+  first doctor that does not live in that file, and the sweep exists precisely so a new
+  one is covered the moment it is written.
+
 ### Changed
 - **`apply-gnome-settings.sh` now says when the machine-specific layer overrides the portable
   one** (`scripts/apply-gnome-settings.sh`). Both layers log a plain `✓`, so a `~/.gnome-settings.local`

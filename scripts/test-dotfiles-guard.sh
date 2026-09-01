@@ -819,13 +819,19 @@ check "backup wrappers still count" "$(wrap)" "1/1"
 # _doctor_summary rather than from a hardcoded list — so a third doctor is
 # covered the moment it is written, which is the only way this convention stays
 # true.
-doctors="$(zsh -c "source '$SYSTEM_SH'; for f in \${(k)functions}; do [[ \"\${functions[\$f]}\" == *_doctor_summary* ]] && print -r -- \$f; done" | sort)"
+# Every functions module, not just system.sh: the emitters live here but
+# doctors do not have to, and gh-doctor (zsh/functions/github.sh) is the first
+# that does not — the sweep has to find it or the convention holds only for the
+# doctors that happen to share a file with it.
+ALLFUNCS="$(printf "source '%s'; " "$DOTFILES"/zsh/functions/*.sh)"
+doctors="$(zsh -c "$ALLFUNCS for f in \${(k)functions}; do [[ \"\${functions[\$f]}\" == *_doctor_summary* ]] && print -r -- \$f; done" | sort)"
 [[ -n "$doctors" ]] || fatal "no functions call _doctor_summary — were the emitters renamed?"
 check "dotfiles-doctor is a doctor" "$(printf '%s\n' "$doctors" | grep -cx 'dotfiles-doctor')" "1"
 check "backup-doctor is a doctor"   "$(printf '%s\n' "$doctors" | grep -cx 'backup-doctor')"   "1"
+check "gh-doctor is a doctor"       "$(printf '%s\n' "$doctors" | grep -cx 'gh-doctor')"       "1"
 while IFS= read -r d; do
   [[ -n "$d" ]] || continue
-  body="$(zsh -c "source '$SYSTEM_SH'; print -r -- \"\${functions[$d]}\"")"
+  body="$(zsh -c "$ALLFUNCS print -r -- \"\${functions[$d]}\"")"
   case "$body" in
     *"local _DOCTOR_FAIL=0 _DOCTOR_WARN=0"*|*"local _DOCTOR_FAIL"*"local _DOCTOR_WARN"*)
       ok "$d declares its own counters" ;;

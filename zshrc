@@ -183,11 +183,14 @@ bindkey '^W' backward-kill-word     # Ctrl+W - delete word backward (alternative
 # History settings
 [ -f ~/.dotfiles/zsh/zshrc.history ] && source ~/.dotfiles/zsh/zshrc.history
 
-# Utility functions (modular: core, development, system)
+# Utility functions (modular: core, development, system, github)
+# github.sh comes after system.sh: gh-doctor uses the shared _doctor_* emitters
+# defined there.
 for func_module in \
   ~/.dotfiles/zsh/functions/core.sh \
   ~/.dotfiles/zsh/functions/development.sh \
-  ~/.dotfiles/zsh/functions/system.sh; do
+  ~/.dotfiles/zsh/functions/system.sh \
+  ~/.dotfiles/zsh/functions/github.sh; do
   [ -f "$func_module" ] && source "$func_module"
 done
 unset func_module

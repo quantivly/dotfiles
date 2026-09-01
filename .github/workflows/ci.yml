@@ -153,6 +153,28 @@ jobs:
       - name: Run the hspawn state table
         run: ./scripts/test-hspawn.sh
 
+  gh-routing-test:
+    name: GitHub Account Routing State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      # gh keys its tokens by HOST, not by config dir, so several config dirs
+      # declaring different accounts can all resolve to one — while
+      # `gh auth status` keeps reporting the declared one. gh-doctor exists to
+      # catch that, which makes a gh-doctor that reports agreement when there is
+      # none worse than none at all. gh itself is stubbed, so the runner needs
+      # no credentials, no keyring and no network; the stub reproduces the
+      # collapse, which a real gh cannot be made to do on demand.
+      - name: Run the gh account routing state table
+        run: ./scripts/test-gh-routing.sh
+
   yaml-validation:
     name: YAML Validation
     runs-on: ubuntu-latest

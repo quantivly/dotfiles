@@ -144,6 +144,18 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     fi
     unset _gh_token_cache
 
+    # Routing table for gh-doctor (zsh/functions/github.sh). Data only — no
+    # behaviour here reads it yet, so adding it changes nothing about which
+    # account any shell uses; it tells the doctor what the answer is SUPPOSED
+    # to be so it can compare that against an actual API call.
+    #
+    # Keyed on the repo's GitHub owner, matching the git identity rules in
+    # ~/.gitconfig.local (`hasconfig:remote.*.url:...quantivly/**`, #67), so the
+    # two cannot disagree about which repo is work. Double-quoted: a
+    # single-quoted "$HOME/..." would be a literal path that never exists, and
+    # the route would silently never fire (gh-doctor reports that state).
+    GH_ACCOUNT_ROUTES=( "quantivly=$HOME/.config/gh-quantivly" )
+
     # Personal gh lives in its own single-account config dir when present
     # (~/.config/gh-personal), isolating it from the promiscuous default
     # ~/.config/gh whose active account gets flipped globally by `gh auth switch`.
@@ -155,6 +167,11 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     else
         _GH_PERSONAL_CONFIG_DIR=""
     fi
+    # Same value under the name gh-doctor reads. Empty stays empty: with no
+    # isolated personal dir the remote genuinely does not determine an account
+    # for a non-quantivly repo, and the doctor should say so rather than have a
+    # default invented for it.
+    GH_ACCOUNT_DEFAULT_DIR="$_GH_PERSONAL_CONFIG_DIR"
 
     # Background refresh of GH token cache (non-blocking)
     if command -v gh &>/dev/null; then
