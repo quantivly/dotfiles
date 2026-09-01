@@ -912,7 +912,13 @@ hspawn() {
 
   # EVERY hspawn run creates a brand-new worktree directory, so Claude's
   # trust-folder dialog is effectively guaranteed and its default is "No, exit".
-  _hspawn_clear_trust_dialog "$pane"
+  # The status has to propagate. The helper already warns on stderr after three
+  # attempts, but without this hspawn returned 0 and printed its success lines,
+  # leaving a pane parked on that dialog: absent from `herdr agent list`, the
+  # sidebar and the priority sort, and holding ~400MB where memory is the binding
+  # constraint. The blocked re-check below cannot cover it — that one lives inside
+  # `if [[ -n "$prompt" ]]`, so it only guards the with-prompt path.
+  _hspawn_clear_trust_dialog "$pane" || return 1
 
   if [[ -n "$profile" ]]; then
     # clauth started the agent, so herdr never got to name it. Name it now.

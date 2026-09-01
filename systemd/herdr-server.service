@@ -68,6 +68,21 @@ ExecStop=/bin/sh -c 'h=%h/.local/bin/herdr; [ -x "$$h" ] || h=$$(command -v herd
 # alive in the cgroup after TimeoutStopSec (orphaned pane shells, agents) gets
 # SIGKILL. control-group (the default) would SIGTERM every pane process at the
 # same instant as the server; process would leave orphans running forever.
+# One OOM kill must not take the fleet. Panes are children of this unit and get
+# no per-pane scope, so they share its cgroup — and the manager default,
+# DefaultOOMPolicy=stop, means one OOM-killed process ANYWHERE in that cgroup
+# makes systemd stop the whole unit, ending every agent session on the machine.
+# Restart= does not rescue it: a unit stopped by OOMPolicy is neither a failure
+# nor an abnormal exit. This is not a hypothetical pressure — CLAUDE.md records
+# this box at load 27 and 96% swap with 33 claude processes, endangering ten
+# unrelated sessions, and systemd-oomd is active and enabled with
+# ManagedOOMMemoryPressure=kill on user@1000.service, i.e. armed to kill
+# descendant cgroups in exactly that state. Before this unit existed the server
+# was client-spawned into the terminal's scope with no OOM policy at all, so a
+# kill took one process; inheriting `stop` here would be a regression the unit
+# introduces. (Atrium's tmux takes the other route — a scope per spawn — so the
+# per-pane escape hatch exists; herdr does not use it.)
+OOMPolicy=continue
 KillMode=mixed
 TimeoutStopSec=30
 # on-abnormal, not on-failure: a deliberate `herdr server stop` from a shell

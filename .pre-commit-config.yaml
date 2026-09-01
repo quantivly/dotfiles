@@ -99,11 +99,21 @@ repos:
         language: system
         pass_filenames: false
 
-      - id: check-diff3-base-marker
-        name: Check for diff3 conflict base markers
-        # check-merge-conflict catches <<<<<<< / ======= / >>>>>>> but NOT the
-        # diff3-style "|||||||" base marker; one survived a conflict resolution
-        # into CHANGELOG.md (PR #89 review, F2). pygrep: entry is the regex.
-        entry: '^\|{7}'
+      - id: check-conflict-markers-anytime
+        name: Check for conflict markers (outside a merge too)
+        # check-merge-conflict above is INERT outside a merge: it inspects files
+        # only when .git/MERGE_MSG and MERGE_HEAD exist. Verified — it PASSES on a
+        # file containing all four markers at ordinary commit time. That is the
+        # state that matters, because a marker survives a *resolution* and gets
+        # committed after the merge state is cleared; one reached CHANGELOG.md
+        # exactly that way. So this covers <<<<<<<, ||||||| and >>>>>>> whenever
+        # pre-commit runs, not only mid-merge.
+        #
+        # `={7}` is deliberately absent. Two separator lines in scripts/ begin
+        # with seven equals (herdr-keyprobe.sh, setup-backup.sh), so matching it
+        # would make this hook permanently red — and a permanently-red check is a
+        # permanently-ignored one. Nothing is lost: a real conflict always carries
+        # <<<<<<< and >>>>>>> alongside the =======. pygrep: entry is the regex.
+        entry: '^(<{7}|>{7}|\|{7})'
         language: pygrep
         types: [text]
