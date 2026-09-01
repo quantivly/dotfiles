@@ -150,15 +150,29 @@ new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
 # them; the prefix form is still listed first, for the `--remote` escape hatch.
 # alt+shift+up/down because the sidebar stacks spaces vertically and it
 # completes the alt+shift+arrow family move_tab_* already uses (left/right
-# rearrange tabs, up/down walk spaces). NOT alt+up/down: Claude Code 2.1.251
-# binds meta+up, meta+down and alt+down itself (key strings in the binary), so
-# herdr would steal them from every agent pane. prefix+shift+up/down are free in
+# rearrange tabs, up/down walk spaces). NOT alt+up/down *for this action*: Claude
+# Code 2.1.251 binds meta+up, meta+down and alt+down itself (key strings in the
+# binary), so herdr would steal them from every agent pane. That is a reason to
+# avoid the chord HERE, not a prohibition — next_agent/previous_agent below take
+# alt+down/alt+up deliberately and document the trade they accept. Read the two
+# together; taken alone this paragraph reads as forbidding what they do, and an
+# independent review duly filed it as a contradiction.
+# prefix+shift+up/down are free in
 # `herdr --default-config` and in this file; arrows are unaffected by the `il`
 # layout; Alacritty has no default on them (`man 5 alacritty-bindings`: its only
 # arrow defaults are Vi-mode) and GNOME's only Alt+Shift chords are F6/Escape/Tab
-# (gsettings, 2026-08-30). UNVERIFIED at the keyboard: the 2026-08-30 keyprobe
-# sweep covered ctrl+shift+left/right, not alt+shift+arrows — run
-# scripts/herdr-keyprobe.sh on both before trusting them.
+# (gsettings, 2026-08-30).
+#
+# These were DEAD from the day they were written until 2026-09-01, and nothing
+# said so. ~/.gnome-settings.local re-enabled `grp:alt_shift_toggle` immediately
+# after apply-gnome-settings.sh cleared it — two ✓ lines in one `gnome-apply`
+# run, the second silently undoing the first — so Alt+Shift was the layout
+# switch, and whichever of Alt/Shift was pressed second emitted ISO_Next_Group
+# instead of its own modifier. Every Alt+Shift chord therefore arrived one
+# modifier short, move_tab_previous/next above included. The override is now
+# removed and Super+Space switches us/il. Confirm at the keyboard; if a chord
+# still does nothing, scripts/herdr-keyprobe.sh in a PLAIN Alacritty window
+# separates "the terminal never delivered it" from "herdr did not act".
 previous_workspace = ["prefix+shift+up", "alt+shift+up"]
 next_workspace     = ["prefix+shift+down", "alt+shift+down"]
 # remove_worktree opens herdr's own confirmation before removing a worktree
@@ -203,9 +217,12 @@ focus_agent    = "alt+1..9"
 # unverified), and herdr intercepts globally, so whatever those do in a Claude
 # pane is now unreachable there. GNOME is clear (plain <Alt>Up/Down unbound;
 # only <Super><Alt> and <Ctrl><Shift><Alt> variants exist), Alacritty's arrow
-# defaults are Vi-mode only, and arrows survive the `il` layout. NOT yet probed
-# at the keyboard (scripts/herdr-keyprobe.sh) — if a chord does nothing, probe
-# first. Rollback: drop the second array element, `herdr server reload-config`.
+# defaults are Vi-mode only, and arrows survive the `il` layout.
+# CONFIRMED IN USE 2026-09-01 (Zvi): both fire and walk the queue, and nothing
+# was missed inside panes — so the trade above is settled rather than
+# hypothetical, and no keyprobe is needed for these two (an action firing is
+# stronger evidence than an escape sequence arriving).
+# Rollback: drop the second array element, `herdr server reload-config`.
 # Stock defaults are "" (layering rule above), so the arrays lose nothing.
 next_agent     = ["alt+j", "alt+down"]
 previous_agent = ["alt+k", "alt+up"]
