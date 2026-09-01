@@ -70,6 +70,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe fails loudly instead of asserting an absence it would produce anyway.
 
 ### Added
+- **Dotfiles live-config guard** (`dotfiles-doctor`, `dotfiles-work`, a one-line warning on
+  the first prompt of an off-pin shell; `zsh/functions/system.sh`, `zshrc`). This repo is
+  installed with dotbot `link:`, so every managed file is a symlink into the working tree
+  and `git checkout` is a **deploy**: HEAD moves and `~/.zshrc`, `~/.gitconfig`,
+  `~/.config/git/ignore` and the gh account configs change under the running system, with
+  no install step and a clean `git status` throughout. Both directions bit us on
+  2026-08-31 — a checkout predating #87 kept `backup-doctor` printing its false
+  "external HDD not docked (normal — B2 covers offsite)" reassurance long after the fix
+  merged, and ~830 lines of an open PR's `zshrc.company` were live in every new shell.
+  The convention is now: primary checkout pinned to `main`, feature work in worktrees
+  (nothing symlinks into one). `dotfiles-doctor` reports pin state, **how stale the
+  `origin/main` ref it compares against is** (nothing here fetches on a schedule, so
+  "not behind" is only as current as the last `git fetch`; `--fetch` refreshes it),
+  ahead/behind, the file-level blast radius — the link list *plus* `zsh/` and `scripts/`,
+  both of which are live without being linked — uncommitted changes to those files, and
+  link integrity in four directions (declared-but-not-installed, installed-but-dangling,
+  linked-but-pointing-outside-the-checkout, and linked-inside-it-but-at-the-wrong-file:
+  rename a source without re-running `./install` and the other three all pass while the
+  live file stays the old source). The startup check reads `.git/HEAD` and
+  the two ref files directly rather than forking git — 0.07 ms / 0.3 ms against 2–5 ms for
+  one `git symbolic-ref` — and fires both when the checkout is off `main` and when it is
+  on `main` at a different commit than `origin/main`, which is the #87 case and the one
+  with no other detection path — and, since both of those shas come off local disk and so
+  agree the moment the machine stops fetching, when the ref they came from is older than
+  `DOTFILES_STALE_WARN_HOURS` (168 = 7d, far more forgiving than the doctor's 24h because
+  this one fires unasked). Deferred to the first prompt so p10k's instant prompt does not
+  turn it into a warning box, and shown once per *shell* rather than once per source, so
+  `zshreload` does not reprint it. `DOTFILES_GUARD_QUIET=1` opts out;
+  `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
+  `DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_STALE_WARN_HOURS` and
+  `DOTFILES_EXPECTED_DIRTY` (scalar or zsh array) override the rest.
+- **`./install` refuses to run from a git worktree** — git-dir ≠ git-common-dir, which is
+  git's own definition, and unlike `[[ -f .git ]]` does not also catch a
+  `--separate-git-dir` clone or a submodule (`DOTFILES_ALLOW_WORKTREE_INSTALL=1`
+  overrides). Installing from a worktree re-points every managed symlink — `~/.zshrc`,
+  `~/.gitconfig`, the gh configs — at a feature branch, with a clean `git status` either
+  side and nothing but `readlink` to reveal it; one `./install` in the wrong directory
+  defeated the whole feature. `dotfiles-doctor` now also resolves each link and fails when
+  one lands outside the checkout, and the startup line resolves `~/.zshrc` (forklessly,
+  with zsh's `:A`) to report a shell sourced from somewhere else entirely — between them
+  they catch the machines already installed that way.
+- **[scripts/test-dotfiles-guard.sh](scripts/test-dotfiles-guard.sh)** — 195-check state
+  table for the guard, run in CI. Every bug found in the guard so far printed a green tick
+  rather than an error, so each is a row: `local path` in zsh is tied to the `PATH` array,
+  so declaring it blanked PATH and every later external command vanished — git's empty
+  output then read as "no drift" and the doctor announced "none — every live file
+  matches"; folding git's stderr into the parsed value with `2>&1` produced a section that
+  printed nothing at all; a stale remote-tracking ref made a merged-but-not-running fix
+  report "not behind"; an unparseable `install.conf.yaml` resolved no live paths, which
+  read as no drift; a symlink into another worktree passed as "17/17 links present"; and a
+  malformed `~/.gitconfig` turned every git failure into a confident wrong claim. The
+  fixture builds its own repo, remote and `HOME`, so the table is hermetic. A second
+  review pass added rows for every way a link source can be got wrong without anything
+  saying so — a quoted YAML scalar, dotbot's null form, an entry left open past the end of
+  the `link:` block, and a declared source absent from the tree — because a git pathspec
+  that matches nothing exits 0 with empty output, so each of those *narrowed* the drift
+  check rather than failing it. Plus: `--separate-git-dir` and linked-worktree layouts,
+  the mise symlink `install` creates itself, spaced and renamed paths in the working-tree
+  check, a stale-but-identical ref, `./install`'s refusal end to end, the startup line
+  surviving a reload, and a run whose ✓ printf fails for real (`/dev/full` — a closed fd
+  does not do it: zsh's printf warns and returns 0 there).
+
 - **`bun` pinned in `.mise.toml`** (1.4.0) — runtime for the herdr `gh-pr` plugin. herdr's
   server PATH carries no mise shims, so it must also be reachable as `~/.local/bin/bun`
   (`ln -s "$(mise which bun)" ~/.local/bin/bun`).
@@ -157,6 +219,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backup, and an age-encrypted offline emergency kit. New `backup-*` functions in
   `zsh/functions/system.sh`. See
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
+
+### Changed
+- **One doctor-reporting implementation** (`_doctor_ok`/`_doctor_bad`/`_doctor_warn`/
+  `_doctor_note`/`_doctor_summary` in `zsh/functions/system.sh`). `backup-doctor` had a
+  byte-for-byte duplicate of the ✓/✗/⚠ emitters and its own hand-rolled summary; both now
+  delegate, so a change to how results are emitted is made once. Their counters are also
+  no longer globals — zsh scopes locals dynamically, so each doctor declares them and a
+  run leaves nothing behind in the shell (four `_D*` variables used to persist in every
+  shell, and a nested call clobbered the outer count). The summary's wording and exit
+  status had no coverage in either suite before this — `backup-doctor`'s own table asserts
+  printed findings, never the verdict — so the state table now pins all three paths, the
+  dynamic-scoping mechanism, the `_backup_doctor_*` delegation, and the local-counter
+  convention across every doctor entry point. `backup-doctor`'s three remaining
+  hand-rolled `• …` note lines now go through `_doctor_note` too, so the neutral marker
+  is not a fourth glyph in the one function the consolidation was about.
+- **CI runs `zsh -n` over `zsh/functions/*.sh`** (`.github/workflows/ci.yml`). It is the
+  largest zsh in the repo and no static check read it: the ShellCheck job selects files by
+  a `^#!` shebang and these have none (they are sourced, not run), and pre-commit excludes
+  the directory because the syntax is zsh, not bash. A syntax error there was caught only
+  when some test happened to source the file.
+- **`~/.config/mise/config.toml` is checked like any other managed link.** `install`
+  creates it itself rather than via dotbot, so it appeared in no `link:` block and in
+  nothing `dotfiles-doctor` looked at — while CLAUDE.md already records what its drifting
+  cost once: ~11 tools missing from `PATH` and `git diff` dead with "unable to execute
+  pager 'delta'". Emitted under both halves of `install`'s own gate, so a machine without
+  mise is not permanently red for a link that correctly does not exist.
 
 ### Fixed
 - **External-HDD auto-mount: the review follow-up to #87.** An independent xhigh review of

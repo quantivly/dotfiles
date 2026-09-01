@@ -49,9 +49,15 @@ jobs:
       - name: Check bash syntax
         run: bash -n install
 
+      # zsh/functions/*.sh is included deliberately: it is the largest zsh in
+      # the repo and no other CI job reads it. The shellcheck job selects files
+      # by a `^#!` shebang and these have none (they are sourced, not run), and
+      # pre-commit's shellcheck excludes the directory outright because the
+      # syntax is zsh, not bash. Without this line a syntax error there is
+      # caught only if some test happens to source the file.
       - name: Check zsh syntax for all modules
         run: |
-          for file in zsh/zshrc.* zshrc p10k.zsh; do
+          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh; do
             if [ -f "$file" ]; then
               echo "Checking: $file"
               zsh -n "$file" || exit 1
@@ -78,6 +84,28 @@ jobs:
       # Needs only util-linux + systemd, and no root.
       - name: Run the external-HDD state table
         run: ./scripts/test-backup-external.sh
+
+  dotfiles-guard-test:
+    name: Dotfiles Live-Config Guard State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      # This repo installs itself with dotbot `link:`, so a checkout IS a deploy
+      # and the guard's job is to notice when the running config is not the
+      # reviewed config. Every bug found in it so far printed a green tick rather
+      # than an error — a blanked PATH, and a diff against a ref that did not
+      # exist — so the states are executed here, not left to a hand-run on a
+      # machine that happens to be in the passing one. Needs zsh, git and awk;
+      # builds its own fixture repo, so no real checkout and no network.
+      - name: Run the live-config guard state table
+        run: ./scripts/test-dotfiles-guard.sh
 
   yaml-validation:
     name: YAML Validation

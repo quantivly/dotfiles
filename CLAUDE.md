@@ -53,7 +53,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 |--------|---------|---------------|
 | `zsh/functions/core.sh` | Core utilities (22 functions) | `pathadd`, `mkcd`, `backup`, `extract`, `osc52`, `killnamed` |
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
-| `zsh/functions/system.sh` | Performance + Utilities + GNOME + Backup + Audit (37 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
+| `zsh/functions/system.sh` | Performance + Utilities + Dotfiles guard + GNOME + Backup + Audit (59 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `dotfiles-doctor`, `dotfiles-work`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
@@ -75,6 +75,168 @@ Dotbot creates symlinks from `install.conf.yaml`:
 - **GNOME settings** — not files, so not symlinked. Applied to the dconf database via `scripts/apply-gnome-settings.sh` (run by `./install` on GNOME, or `gnome-apply`). Machine-specific layer: `~/.gnome-settings.local` (template: `examples/gnome-settings.local.template`, install with `gnome-init`). See [GNOME Desktop Configuration](#gnome-desktop-configuration).
 - **Backup config** — `~/.backup.local` (repo paths, B2 keys, healthcheck URLs) is created from `examples/backup.local.template` by `./install` on GNOME (or `backup-init`) and never overwritten. The backup *policy* lives in `resticprofile/profiles.toml`, **copied** (never symlinked — root runs its hooks) to `/etc/resticprofile/` by `backup-setup`. See [Backup & Restore](#backup--restore).
 
+### The checkout IS the deployment
+
+Everything above is a **symlink into the git working tree**. Nothing is copied. So
+`git checkout` in this repo is not a branch switch, it is a deploy: the instant HEAD
+moves, `~/.zshrc`, `~/.gitconfig`, `~/.config/git/ignore`, the gh account configs and
+the rest change under the running system — no install step, no restart, no log line,
+and `git status` stays clean throughout. `~/.zshrc` also sources the whole of `zsh/`,
+so a change to `zsh/functions/system.sh` is just as live as a linked file.
+
+Both directions have caused real failures, both on 2026-08-31:
+
+- **Behind the default branch.** The checkout predated PR #87, so `backup-doctor` was
+  still printing `• external HDD not docked (normal — B2 covers offsite)` — the exact
+  false reassurance that had already let a backup outage run unnoticed. Found, fixed,
+  reviewed, merged, and still not running, because nothing re-pointed the symlink
+  target at the fix.
+- **Ahead of it.** ~830 lines of an open, unmerged, unreviewed PR's `zshrc.company`
+  were being sourced by every new interactive shell.
+
+Note the asymmetry that proves the mechanism: system-level files are **copied**
+(`/etc/udev/rules.d/99-backup-external.rules`, `/etc/resticprofile/profiles.toml`), and
+they kept working across the same branch switch that broke the symlinked half.
+
+**The convention: the primary checkout stays on `main`; feature work happens in a
+worktree.** No symlink points into a worktree, so you can edit, rebase, stash and
+bisect there without changing the shell you are typing into.
+
+```bash
+dotfiles-work my/branch      # create/enter ~/dotfiles-worktrees/my-branch
+dotfiles-work --list         # list worktrees
+dotfiles-work --remove b     # remove one
+dotfiles-doctor              # is the live config the reviewed config?
+dotfiles-doctor --fetch      # ...compared against the actual remote, not a stale ref
+```
+
+`dotfiles-doctor` reports the pin state, how stale `origin/main` is, commits
+ahead/behind it, **which managed files actually differ** (the blast radius, not just a
+commit count), uncommitted changes to those files, and link integrity in four
+directions — declared-but-not-installed, installed-but-dangling,
+linked-but-pointing-outside-this-checkout, and linked-inside-the-checkout-but-at-the-
+wrong-file (rename a source without re-running `./install` and the first three all pass
+while the live file is the old source, permanently).
+
+A one-line warning also fires on the first prompt of any shell whose live config is off
+the pin branch, **or is on it at a different commit than `origin/main`**, **or is on it
+and matching a ref older than `DOTFILES_STALE_WARN_HOURS` (168 = 7d)** — that second
+case is the #87 outage, and nothing about a checkout sitting on `main` looks wrong. The
+third exists because the first two shas are both read off local disk, so they agree the
+moment the machine stops fetching: "identical to `origin/main`" on a checkout that has
+not fetched in a month means identical to a month-old idea of `main`. The threshold is
+far more forgiving than the doctor's 24h deliberately — the doctor is asked, this fires
+unasked, and a line that appears every morning is a line nobody reads. Once per *shell*,
+not once per source: re-sourcing `zshrc` (`zshreload`) does not reprint it. It
+reads `.git/HEAD` and the two ref files directly rather than forking `git`: 0.07 ms for
+HEAD, 0.3 ms including both refs, against 2–5 ms for a single `git symbolic-ref` on this
+box, on every shell, forever. It cannot say *which* direction the divergence goes
+(that needs a merge base, which needs a fork), so it does not claim one.
+
+**Every layer of this feature fails by looking clean**, so each check is written against
+the state that produces a green tick rather than an error. The ones that bit during
+review, all of which reported success:
+
+- **`config check`-style existence is not currency.** Nothing on this machine fetches on
+  a schedule, so `origin/main` is exactly as old as the last time a human typed
+  `git fetch` — and against a week-old ref, "not behind" means "not behind whatever was
+  true then", which is #87 reported as an all-clear. The doctor therefore states the
+  fetch age every run and warns past `DOTFILES_FETCH_MAX_AGE_HOURS` (24), which
+  suppresses the unqualified ✓. `--fetch` is the only form that answers about the real
+  remote.
+- **`./install` from a worktree re-points the whole live config at a feature branch**,
+  silently: `git status` stays clean either side, and the doctor's branch and drift
+  checks read the primary checkout. Three things now catch it: `install` refuses
+  (`DOTFILES_ALLOW_WORKTREE_INSTALL=1` overrides), the doctor
+  resolves every link to check it lands inside the checkout (testing only "is it a
+  symlink" passed that state with "17/17 declared links present"), and the startup line
+  resolves `~/.zshrc` — where the shell it is warning in was actually sourced from — with
+  zsh's `:A`, so it stays forkless.
+- **The live set is bigger than the link list.** `zsh/` is sourced by the linked
+  `~/.zshrc`, and `scripts/` is executed *by path* out of the working tree — every
+  `backup-*`/`audit-*`/`gnome-apply`/`verify-tools` command shells out to
+  `~/.dotfiles/scripts/…`, and `systemd/herdr-server.service` has
+  `ExecStart=%h/.dotfiles/scripts/herdr-server-launch.sh`. Omitting `scripts/` hid four
+  drifting files, one of which writes root-owned files into `/etc`. `resticprofile/`,
+  `audit/` and `udev/` are deliberately *not* in the set: they are **copied** to `/etc`,
+  so moving HEAD does not change what runs — `backup-doctor`/`audit-status` drift-check
+  those instead.
+- **An unparseable `install.conf.yaml` yields no paths, and no paths reads as no drift.**
+  The map is parsed once and a failure to read a single link is reported as
+  `what is live is UNKNOWN` with a non-zero exit, never as "every live file matches".
+  "Could not read the file" and "the `link:` block declares nothing" are named apart,
+  because their fixes differ.
+- **A pathspec that matches nothing exits 0 with empty output**, so every way of getting
+  a source wrong *narrows* the drift check instead of failing it — and the narrowing is
+  invisible. Four of them were live at once: a quoted scalar (`~/.zshrc: 'zshrc'` is
+  ordinary YAML) kept its quotes; dotbot's null form (`~/.vimrc:`, source inferred from
+  the destination's basename minus one dot — `link.py:_default_target`) was dropped
+  whole; `target` was never cleared when the `link:` block ended, so the next `path:`
+  anywhere below became the last link's source; and nothing checked that a declared
+  source *exists*, so `~/.zshrc: zshrcc` would take the most live file in the repo out
+  of every check and still print a green tick. Every declared source is now asserted
+  present in the tree, once, before anything derived from the map runs.
+- **`~/.config/mise/config.toml` is a live symlink that dotbot does not create** —
+  `install` makes it itself, so it is in no `link:` block and was in nothing the doctor
+  checked. It is emitted alongside the declared links now, under both halves of
+  `install`'s own gate (the source exists, and mise is installed), so a machine without
+  mise does not get a permanently-red check for a link that correctly does not exist.
+  What its drifting costs is already recorded above: ~11 tools off `PATH` and a dead
+  `git diff`, for months.
+- **`git status --porcelain` is not a format you can compare paths against.** It
+  C-quotes any path with a space and writes a rename as `old -> new`, so no
+  `DOTFILES_EXPECTED_DIRTY` entry could ever match either and such a file was a
+  permanent, inexcusable warning. `-z` records are unquoted; a rename's original path
+  arrives as its own record; and the variable may now be a zsh array, since
+  word-splitting a scalar makes a path with a space impossible to express.
+- **`cond && ok || bad` reports both outcomes when the ✓ printf fails** (SC2015),
+  counting a failure for a check that passed. Not academic: `zsh`'s printf returns 1 on
+  ENOSPC, so a redirected run on a full filesystem inverted five checks. The lint that
+  names this never sees the file — the ShellCheck job selects by `^#!` shebang and
+  `zsh/functions/*.sh` has none, while pre-commit excludes the directory outright
+  because the syntax is zsh. CI's `zsh -n` loop now covers it, which is the only static
+  check that ever will.
+- **`[[ -f .git ]]` is not the worktree test.** A `--separate-git-dir` clone and a
+  submodule also have a `.git` FILE, and both are ordinary places to install from — they
+  got `./install`'s refusal on every run and a `dotfiles-doctor` that returned 1 forever,
+  with only an env var framed as "deploy this worktree" to escape. git's own definition
+  is git-dir ≠ git-common-dir (`install`), or the `commondir` file git writes in a linked
+  worktree's git dir (the forkless startup path).
+- **A git that cannot read the repo answers every question with silence.** A malformed
+  `~/.gitconfig` (itself a managed symlink, so a bad branch can cause this) made
+  `rev-parse` fail and the doctor announce "no origin/main ref — Fix: git fetch origin"
+  when the ref was there. One health probe runs first; if it fails, the doctor says so
+  and reports nothing else.
+- **Noise in normal states is a failure too.** The working-tree check is scoped to the
+  live paths (unscoped it reported every scratch file and `node_modules/` in the tree),
+  `DOTFILES_EXPECTED_DIRTY` covers files a tool is *meant* to write through its symlink
+  (`plugins.lock`, per `install.conf.yaml`), and a conditional link (`if:` in
+  `install.conf.yaml`, e.g. `~/.p10k.zsh`) that is correctly absent is a note, not a
+  failure — reporting it as one made the doctor exit non-zero forever.
+- **`dotfiles-work <branch>` needs `--no-track`.** Without it the new branch takes
+  `origin/main` as upstream, and under this repo's own `push.default=simple` a plain
+  `git push` fails and suggests `git push origin HEAD:main` — pushing unreviewed commits
+  straight onto the protected branch. It also refuses a leftover directory that is not a
+  worktree instead of `cd`-ing in and reporting success.
+
+Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
+`DOTFILES_GUARD_QUIET=1` (silence the startup line while dogfooding a branch),
+`DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_STALE_WARN_HOURS`, `DOTFILES_EXPECTED_DIRTY`
+(scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`.
+
+State table: `scripts/test-dotfiles-guard.sh` (195 checks, run in CI, hermetic — it
+builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
+printed a green tick rather than an error, so each one is a row: a `local path`
+declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
+ref, an unparseable link map, a symlink into another worktree, an emptiness guard made
+unreachable by a hardcoded fallback path, and every way of naming a link source that
+makes its git pathspec match nothing. Each is pinned by mutation: the fix is reverted in
+a copy of the tree and the row that names it has to fail. It also covers the `_doctor_*` reporting
+helpers that `dotfiles-doctor` and `backup-doctor` share — including the "declare the
+counters `local`" convention, asserted over every function that calls `_doctor_summary`
+rather than a fixed list, because a doctor that forgets it silently restores the globals
+and inherits the previous run's exit code.
+
 ### Configuration Loading Order
 
 ```
@@ -93,6 +255,10 @@ Dotbot creates symlinks from `install.conf.yaml`:
 10. zsh/zshrc.company
 11. ~/.zshrc.local (machine-specific secrets)
 12. PATH additions
+13. Dotfiles live-config guard — registers a one-shot `precmd` hook that runs
+    `_dotfiles_live_config_warn` on the FIRST prompt, then removes itself.
+    Deferred rather than run here because p10k's instant prompt turns any output
+    during initialization into a warning box.
 ```
 
 **Key Insight:** Conditionals load AFTER aliases, so tools that are installed get priority configuration.
@@ -129,6 +295,10 @@ The `.gitignore` protects: `*.local`, `*.secrets`, `.env*`, `secrets/`
 **New symlink:**
 1. Edit `install.conf.yaml` under `link:` section
 2. Run `./install`
+
+**Any change at all:** work in a worktree (`dotfiles-work <branch>`), not by moving the
+primary checkout — see [The checkout IS the deployment](#the-checkout-is-the-deployment).
+Check with `dotfiles-doctor` before and after.
 
 ### Oh-My-Zsh Plugins
 
@@ -539,6 +709,8 @@ tool_status          # Check installed tools
 build-limits         # Show active build/test worker caps (see zshrc.buildlimits)
 alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
+dotfiles-doctor      # Is the live config the reviewed config? (--fetch to check the real remote)
+dotfiles-work <br>   # Create/enter a worktree so the primary checkout stays on main
 gnome-apply          # Apply curated GNOME desktop config (idempotent)
 xdg-repair           # Fix/guard ~/Desktop, ~/Documents, ... XDG dirs (idempotent)
 gnome-init           # Create ~/.gnome-settings.local (dock favorites, launch keys)

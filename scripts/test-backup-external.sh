@@ -536,7 +536,7 @@ doctor_state() {
     sudo() { return 1; }          # no udev rule, no unit file
     findmnt() { return 1; }       # no fstab entry
     sed() { return 1; }           # no ConditionPathExists to read
-    _BD_FAIL=0 _BD_WARN=0
+    _DOCTOR_FAIL=0 _DOCTOR_WARN=0    # the counters backup-doctor would declare; it is bypassed here
     _backup_doctor_external "'"$DOTFILES"'" "'"$uuid"'" "'"$3"'" "'"${3%/restic}"'"
   ' 2>&1
 }
@@ -562,8 +562,12 @@ check "attached but not mounted → hard failure" \
       "$(printf '%s' "$got" | grep -c '✗ external HDD attached but NOT MOUNTED')" "1"
 
 got="$(doctor_state no no /mnt/ext/restic)"
+# `·`, not `•`: this line goes through the shared _doctor_note now, so the two
+# doctors no longer disagree on the neutral marker. Pinning the glyph is the
+# point of the row — it is what a future change to how notes render must update
+# in ONE place rather than four.
 check "genuinely absent → neutral note, not a failure" \
-      "$(printf '%s' "$got" | grep -c '• external HDD not attached')" "1"
+      "$(printf '%s' "$got" | grep -c '· external HDD not attached')" "1"
 check "  ...and nothing claims it is docked" \
       "$(printf '%s' "$got" | grep -c 'external HDD docked')" "0"
 
