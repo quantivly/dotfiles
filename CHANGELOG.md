@@ -226,13 +226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `systemd/herdr-server.service`). A linked unit is not a reconciled one: systemd records
   `[Install]` at `enable` time as a `<target>.target.wants/` symlink, and editing `WantedBy=`
   afterwards moves nothing — not even after `daemon-reload`, which re-reads the unit but never
-  revisits the symlink. Only `reenable` does, and unlike `restart` it leaves the running process
-  alone (verified: same MainPID, still active). This repo manufactures that drift, because
+  revisits the symlink. The obvious primitive is a trap: `systemctl reenable` (= `disable` +
+  `enable`) DESTROYS a dotbot-installed unit, because `disable` removes every symlink in the unit
+  search path pointing at it — and the entry in `~/.config/systemd/user` is such a symlink, into
+  the checkout. The enable half then fails with "Unit does not exist" and the unit is left neither
+  linked nor enabled; this happened on a real machine on 2026-09-01, following advice added in the
+  same series of commits. The reconciler therefore `enable`s (which only ADDS `.wants` links) and
+  prunes the stale link itself, enable first so a failure leaves the unit enabled under the old
+  target rather than off. This repo manufactures that drift, because
   `git checkout` here is a deploy and install is not in that path — so reconciliation at install
   time is necessary but not sufficient, and the load-bearing half is the check, which runs
   whenever anyone asks about the machine. The reconciler is gated twice: it no-ops without a user
-  manager (servers, containers, CI), and it re-enables only a unit already enabled, because
-  `reenable` on a disabled unit ENABLES it — it reconciles a decision, never makes one. It also
+  manager (servers, containers, CI), and it acts only on a unit already enabled, so it reconciles
+  a decision and never makes one. It also
   says plainly that a RUNNING server keeps the old unit until a restart, which ends every agent
   session, rather than printing a success nobody can act on. `--check` reports, `--plan` lists
   what `--apply` would touch (which is how the gate became testable without systemd).
@@ -251,7 +257,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were caught before this landed: a note-prefix check that passed when two different notes
   collapsed into one, a "plain file ignored" row that was really testing containment, a dead
   comment-skip rule in the awk that could not fire because the pattern is anchored, and — worst —
-  the `reenable` gate, which was unpinnable while it sat inside a manager-gated loop.
+  the reconcile gate, which was unpinnable while it sat inside a manager-gated loop. A later,
+  costlier lesson from the same change is pinned too: the suite now asserts the script never
+  reaches for `reenable`/`disable`, because the first version did and it cost a machine its unit.
 - **One doctor-reporting implementation** (`_doctor_ok`/`_doctor_bad`/`_doctor_warn`/
   `_doctor_note`/`_doctor_summary` in `zsh/functions/system.sh`). `backup-doctor` had a
   byte-for-byte duplicate of the ✓/✗/⚠ emitters and its own hand-rolled summary; both now

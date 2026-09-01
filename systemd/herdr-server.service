@@ -12,8 +12,9 @@
 # pane, not a Claude session:
 #   systemctl --user daemon-reload
 #   herdr server stop                       # ends EVERY agent session on the machine
-#   systemctl --user reenable herdr-server.service    # moves the .wants/ symlink if
-#                                           # [Install] changed; does NOT restart
+#   ./install                               # moves the .wants/ symlink if [Install]
+#                                           # changed. NEVER `systemctl reenable`
+#                                           # — see the [Install] note below.
 #   systemctl --user enable --now herdr-server.service
 #   scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
 #                                           # (non-zero exit on a hygiene FAIL)
@@ -114,11 +115,20 @@ RestartSec=2
 #
 # CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK. A unit enabled under
 # the old target keeps its default.target.wants/ link until re-enabled:
-#   systemctl --user daemon-reload
-#   systemctl --user reenable herdr-server.service   # disable+enable in one step,
-#                                                    # and does NOT restart the unit
-# `./install` now does both of those, and scripts/verify-tools.sh FAILS when the
-# enablement has drifted from this field — necessary because `git checkout` in
-# this repo is a deploy and install is not in that path.
+#   ./install                                        # daemon-reload, enable, and
+#                                                    # prune the stale .wants link
+#
+# NOT `systemctl --user reenable`, and NOT `disable`. `disable` removes every
+# symlink in the unit search path that points at this unit — and the entry in
+# ~/.config/systemd/user IS such a symlink, installed by dotbot, into the
+# checkout. So reenable deletes the unit from systemd's view and its enable half
+# then fails with "Unit herdr-server.service does not exist", leaving the unit
+# neither linked nor enabled. That happened on this machine on 2026-09-01,
+# following advice in this very file. `enable` alone is safe: it only ADDS
+# .wants links.
+#
+# scripts/verify-tools.sh FAILS when the enablement has drifted from this field,
+# which matters because `git checkout` in this repo is a deploy and install is
+# not in that path.
 # Verify: scripts/reconcile-systemd-units.sh --check
 WantedBy=graphical-session.target

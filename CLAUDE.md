@@ -551,15 +551,22 @@ Gotchas, in the order they bite:
 - **A LINKED systemd unit is not a RECONCILED one, and the difference is invisible.** systemd
   records `[Install]` at `enable` time, as a symlink under `<target>.target.wants/`. Editing
   `WantedBy=` afterwards changes nothing about what starts — **not even after `daemon-reload`**,
-  which re-reads the unit but never revisits the symlink. Only `reenable` moves it, and unlike
-  `restart` it leaves the running process alone (same MainPID, still active — probed). Meanwhile
+  which re-reads the unit but never revisits the symlink. **And the obvious fix is a trap:
+  `systemctl reenable` (= `disable` + `enable`) DESTROYS a dotbot-installed unit.** `disable`
+  removes every symlink in the unit search path pointing at the unit, and the entry in
+  `~/.config/systemd/user` is exactly such a symlink, into the checkout — so the enable half then
+  fails with "Unit does not exist" and the unit is left neither linked nor enabled. That happened
+  here on 2026-09-01. What is safe is `enable` (it only ADDS `.wants` links) plus pruning the
+  stale link by hand, in that order. A probe using a real FILE rather than a symlink showed
+  `reenable` working perfectly, which is how the advice got written — **a fixture that differs
+  from production in the one property that decides the outcome proves nothing.** Meanwhile
   `systemctl status` is happy, so the unit file under review says one thing and what boots is
   another. This repo *manufactures* that drift, because `git checkout` here is a deploy and
   `./install` is not in that path: HEAD moves, the linked unit file changes under systemd, nothing
   re-enables anything. It cost one reboot's worth of every pane losing `gh --web`, `xdg-open` and
   the ssh agent, with every check on the machine green. Now: `./install` reconciles
   (`scripts/reconcile-systemd-units.sh`, gated — no-op without a user manager, and it re-enables
-  only a unit that is *already* enabled, because `reenable` on a disabled one ENABLES it), and
+  only a unit that is *already* enabled, so it reconciles a decision rather than making one), and
   `scripts/verify-tools.sh` **fails** when the enablement has drifted. `--check` reports,
   `--plan` lists what `--apply` would touch. State table: `scripts/test-systemd-reconcile.sh`
   (36 checks, in CI as `systemd-reconcile-test`) — hermetic and needing no systemd at all, since

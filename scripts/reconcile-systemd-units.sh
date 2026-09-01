@@ -14,11 +14,22 @@
 #
 #   * `daemon-reload` re-reads the unit but does NOT move the .wants/ symlink
 #     (verified: loaded WantedBy stayed at the old target).
-#   * only `reenable` moves it — and, unlike `restart`, it leaves the running
-#     process alone (verified: same MainPID, unit still active).
-#   * `reenable` on a *disabled* unit ENABLES it (verified), which is why the
-#     reconcile path below is gated on the unit already being enabled. This
-#     script reconciles a decision; it must never make one.
+#   * **`reenable` and `disable` MUST NOT be used here.** `disable` removes every
+#     symlink in the unit search path that points at the unit — and for a unit
+#     installed by dotbot, the entry in ~/.config/systemd/user IS such a symlink,
+#     into this checkout. So `reenable` (= disable + enable) deletes the unit from
+#     the search path, and the `enable` half then fails with "Unit does not
+#     exist", leaving the unit neither linked nor enabled. Verified twice: once on
+#     this machine, by following advice that said to run it, and once on a probe
+#     built to reproduce it. An earlier probe used a real FILE rather than a
+#     symlink and therefore showed `reenable` working perfectly — the fixture
+#     differed from production in the one property that decided the outcome.
+#   * what is safe: `enable` (it only ADDS .wants links and leaves the unit
+#     symlink alone), plus removing the stale .wants links by hand. Enable first,
+#     remove second, so a failure leaves the unit enabled under the old target
+#     rather than not enabled at all.
+#   * the reconcile path is gated on the unit already being enabled, so this
+#     script reconciles a decision and never makes one.
 #
 # The drift is silent, and this repo produces it routinely, because `git
 # checkout` here IS the deploy (CLAUDE.md, "The checkout IS the deployment"):
@@ -35,8 +46,11 @@
 # -----
 #   reconcile-systemd-units.sh           reconcile (daemon-reload, then reenable)
 #   reconcile-systemd-units.sh --check   report only; exit 1 if anything drifted
-#   reconcile-systemd-units.sh --plan    list the units --apply would re-enable,
+#   reconcile-systemd-units.sh --plan    list the units --apply would act on,
 #                                        computed from the filesystem alone
+#   reconcile-systemd-units.sh --plan-stale
+#                                        list the .wants symlinks --apply would
+#                                        REMOVE — never the unit symlink itself
 #
 # Exit code: 0 when nothing drifted (or there is nothing to look at); 1 from
 # --check when a managed unit's enablement does not match its unit file. Never
@@ -130,6 +144,30 @@ unit_enablement_state() {
     fi
 }
 
+# The .wants symlinks --apply removes: every target the unit is currently enabled
+# under that its file no longer declares. Emitted as full paths, and deliberately
+# NEVER the unit symlink in SYSTEMD_USER_DIR itself — deleting that is exactly
+# what `systemctl disable` does to a dotbot-installed unit, and it is the bug
+# this function exists to avoid repeating. The test suite asserts that absence.
+stale_wants_links() {
+    local unit="$1" declared actual t
+    declared=" $(declared_targets "$SYSTEMD_USER_DIR/$unit") "
+    actual="$(actual_targets "$unit")"
+    for t in $actual; do
+        [[ "$declared" == *" $t "* ]] && continue
+        printf '%s\n' "$SYSTEMD_USER_DIR/${t}.wants/${unit}"
+    done
+}
+
+do_plan_stale() {
+    local unit
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        stale_wants_links "$unit"
+    done < <(units_to_reenable)
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # systemd interaction
 # ---------------------------------------------------------------------------
@@ -162,7 +200,8 @@ do_check() {
                 drifted=1
                 printf '  ✗ %s: enabled under %s, but its unit file declares %s\n' "$unit" "${actual:-nothing}" "$declared"
                 printf '      The file changed and the enablement did not follow, so what starts is\n'
-                printf '      still the OLD target. Fix: systemctl --user reenable %s\n' "$unit"
+                printf '      still the OLD target. Fix: ./install — NOT systemctl reenable,\n'
+                printf '      whose disable half deletes the unit symlink this repo installs.\n'
                 ;;
         esac
 
@@ -216,9 +255,16 @@ do_reconcile() {
         return 0
     }
 
+    local link
     while IFS= read -r unit; do
         [[ -n "$unit" ]] || continue
-        if systemctl --user reenable "$unit" >/dev/null 2>&1; then
+        # enable FIRST: it only adds .wants links and leaves the unit symlink
+        # alone, so a failure here leaves the unit enabled under the old target
+        # rather than not enabled at all. Never `reenable` — see the header.
+        if systemctl --user enable "$unit" >/dev/null 2>&1; then
+            while IFS= read -r link; do
+                [[ -n "$link" ]] && rm -f "$link"
+            done < <(stale_wants_links "$unit")
             printf '  ✓ %s: enablement moved to %s\n' "$unit" "$(declared_targets "$SYSTEMD_USER_DIR/$unit")"
             if [[ "$(systemctl --user is-active "$unit" 2>/dev/null)" == "active" ]]; then
                 printf '    NOTE: the RUNNING instance still has the old unit and environment.\n'
@@ -226,7 +272,9 @@ do_reconcile() {
                 printf '      systemctl --user restart %s   # from a PLAIN terminal, not a pane\n' "$unit"
             fi
         else
-            printf '  ⚠ %s: reenable failed — run: systemctl --user reenable %s\n' "$unit" "$unit" >&2
+            printf '  ⚠ %s: enable failed — run: systemctl --user enable %s\n' "$unit" "$unit" >&2
+            printf '    Do NOT use systemctl --user reenable: its disable half deletes the\n' >&2
+            printf '    unit symlink this repo installs, and the enable half then cannot find it.\n' >&2
         fi
     done < <(units_to_reenable)
     return 0
@@ -235,7 +283,8 @@ do_reconcile() {
 case "${1:-}" in
     --check)      do_check ;;
     --plan)       do_plan ;;
+    --plan-stale) do_plan_stale ;;
     ""|--apply)   do_reconcile ;;
     --help|-h)    sed -n '3,50p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *)            printf 'usage: %s [--check|--plan|--apply]\n' "${0##*/}" >&2; exit 2 ;;
+    *)            printf 'usage: %s [--check|--plan|--plan-stale|--apply]\n' "${0##*/}" >&2; exit 2 ;;
 esac

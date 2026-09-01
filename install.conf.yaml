@@ -104,10 +104,12 @@
       # Reconcile systemd USER unit enablement with the unit files linked above.
       # A LINKED unit is not a RECONCILED one: systemd records [Install] at
       # `enable` time as a .wants/ symlink, so editing WantedBy= in the file moves
-      # nothing — not even after daemon-reload. Only `reenable` does, and it does
-      # not restart the unit. The script gates itself: no-op without a user
-      # manager (servers, containers, CI), and it re-enables only a unit that is
-      # already enabled, so it reconciles a decision rather than making one.
+      # nothing — not even after daemon-reload. The script enables (which only ADDS
+      # .wants links) and prunes the stale one itself; it must never use
+      # `systemctl reenable`, whose disable half deletes the unit symlink dotbot
+      # installs here. It gates itself: no-op without a user manager (servers,
+      # containers, CI), and it acts only on a unit that is already enabled, so it
+      # reconciles a decision rather than making one.
       # Relative, not ~/.dotfiles: dotbot runs shell steps with cwd set to the
       # checkout (that is why the `git submodule update` step above needs no
       # path), and the checkout is not always at ~/.dotfiles — in CI it is under

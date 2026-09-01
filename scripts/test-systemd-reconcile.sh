@@ -210,6 +210,34 @@ check "plan: moved no symlink"         "$([[ -e "$TMPROOT/states/sysd/graphical-
 check "plan: left the old one alone"   "$([[ -e "$TMPROOT/states/sysd/default.target.wants/drifted.service" ]] && echo kept || echo gone)"       "kept"
 
 echo
+echo "=== --plan-stale: what --apply removes, and what it must never remove ==="
+# The bug this pins cost a real machine its unit. `systemctl disable` (and so
+# `reenable`) removes EVERY symlink in the unit search path pointing at the unit
+# — and for a dotbot-installed unit, the entry in ~/.config/systemd/user IS such
+# a symlink, into the checkout. So reenable deleted the unit and the enable half
+# then failed with "Unit does not exist". --apply therefore enables (which only
+# ADDS links) and prunes the stale .wants links itself.
+check "stale: the old target's link"  "$(run_sut states --plan-stale | grep -c 'default.target.wants/drifted.service')" "1"
+check "stale: not the new target's"   "$(run_sut states --plan-stale | grep -c 'graphical-session.target.wants/drifted')" "0"
+# The regression test for the incident: the unit symlink itself must never be in
+# the removal list, however the targets are arranged.
+check "stale: NEVER the unit symlink" \
+      "$(run_sut states --plan-stale | grep -cE '/sysd/[a-z]+\.service$')" "0"
+check "stale: nothing for a matching unit" "$(run_sut states --plan-stale | grep -c 'ok.service')"         "0"
+check "stale: nothing for not-enabled"     "$(run_sut states --plan-stale | grep -c 'notenabled.service')" "0"
+check "stale: exits 0"                     "$(rc_sut states --plan-stale)"                                 "0"
+check "stale: removes nothing itself"      "$([[ -e "$TMPROOT/states/sysd/default.target.wants/drifted.service" ]] && echo kept)" "kept"
+
+# Crude on purpose, and worth it: the whole incident was one wrong verb. A future
+# edit that reaches for `reenable` or `disable` because it reads as the obvious
+# primitive should fail here and be sent to the header comment explaining why.
+# Comment and printf/echo lines are stripped first: the script deliberately NAMES
+# those verbs, at length, in the header and in its advice — and a real invocation
+# never shares a line with a comment marker, printf or echo.
+check "the script never calls reenable/disable" \
+      "$(grep -vE 'printf|echo|^[[:space:]]*#' "$SUT" | grep -cE 'systemctl[^#]*(reenable|disable)')" "0"
+
+echo
 echo "=== usage ==="
 check "a bogus argument exits 2" "$(rc_sut empty --nonsense)" "2"
 check "--help exits 0"           "$(rc_sut empty --help)"     "0"
