@@ -86,6 +86,83 @@ _doctor_summary() {
   return 0
 }
 
+# -----------------------------------------------------------------------------
+# Login-group umask guard
+# -----------------------------------------------------------------------------
+# Ubuntu's pam_umask relaxes the umask from 022 to 002 when the login group is a
+# "user private group" — same name as the user — on the reasoning that group
+# permissions are then permissions for yourself alone. Sound reasoning, and
+# false on this machine: `getent group zvi` returned `zvi:x:1000:quantivly`, so
+# the group named after the user had a second member, and under umask 002 nearly
+# every file the user created — $HOME dotfiles included — was group-writable by
+# a service account (uid 242, /bin/sh, never logged in). `.zshenv` that way is a
+# code-execution path, not just a disclosure one.
+#
+# The real defect is that extra member, and removing it is the fix:
+#
+#     sudo gpasswd -d <service-account> <login-group>
+#
+# This is the belt to that braces: while any OTHER account is in the login
+# group, refuse the relaxed umask.
+#
+# GATED ON THE CONDITION, NOT ON THE ORDER the fixes were applied in.
+# `dev-setup` adds the service account to the user's group deliberately
+# (modules/system.sh) because workspaces are meant to be shared through it — so
+# a blanket `umask 022` in a repo that installs on other people's machines would
+# silently break that sharing, on exactly the hosts where the grant is real.
+# Asking whether the group is actually shared answers correctly for every host,
+# needs no ordering discipline, and stops tightening by itself the moment the
+# grant is removed. It is also the one form that cannot go stale: it re-reads
+# the answer every shell instead of encoding one machine's state in a config.
+#
+# Forkless — `$(<file)` does not fork in zsh, and `$GID` is a shell parameter —
+# because this runs in every shell.
+#
+# "Cannot tell" (no /etc/group entry: SSSD, systemd-homed) leaves the umask
+# exactly as the system set it and says so. Guessing in either direction is
+# worse than the state the machine is already in: tightening breaks sharing that
+# may be load-bearing, relaxing re-creates the exposure.
+#
+# Override: DOTFILES_UMASK=<mask> in ~/.zshenv, which loads before zshrc.
+_dotfiles_umask_guard() {
+  # Usage: _dotfiles_umask_guard   (call from zshrc; sets the shell's umask)
+  # Sets:  _DOTFILES_UMASK_WHY — one line, for dotfiles-doctor and humans.
+  # Returns non-zero only when it could not determine the answer.
+  local grpfile="${DOTFILES_GROUP_FILE:-/etc/group}"
+  local line me="${USERNAME:-${LOGNAME:-$USER}}"
+  local -a fields others
+  _DOTFILES_UMASK_WHY=""
+
+  if [[ -n "${DOTFILES_UMASK:-}" ]]; then
+    umask "$DOTFILES_UMASK"
+    _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK=$DOTFILES_UMASK — set explicitly"
+    return 0
+  fi
+
+  if [[ ! -r "$grpfile" ]]; then
+    _DOTFILES_UMASK_WHY="cannot read $grpfile — umask left as the system set it"
+    return 1
+  fi
+
+  for line in ${(f)"$(<$grpfile)"}; do
+    fields=( "${(@s.:.)line}" )
+    [[ "${fields[3]:-}" == "$GID" ]] || continue
+    # Being listed in your own group is not sharing.
+    others=( ${(s.,.)${fields[4]:-}} )
+    others=( ${others:#$me} )
+    if (( ${#others} )); then
+      umask 022
+      _DOTFILES_UMASK_WHY="022 — login group '${fields[1]}' also contains ${(j:, :)others}, so group-write is write access for someone else"
+    else
+      _DOTFILES_UMASK_WHY="left as the system set it — login group '${fields[1]}' has no other members"
+    fi
+    return 0
+  done
+
+  _DOTFILES_UMASK_WHY="no $grpfile entry for gid $GID — umask left as the system set it"
+  return 1
+}
+
 # =============================================================================
 # Performance & System Monitoring Functions
 # =============================================================================
@@ -1391,6 +1468,21 @@ dotfiles-doctor() {
     if [[ -n "$skipped" ]]; then
       _doctor_note "conditional in install.conf.yaml (\`if:\`) and not installed:$skipped"
     fi
+  fi
+
+  # Not a dotfiles-link question, but it is a "what is live in this shell"
+  # question, and the failure is the same shape: the value looks ordinary and
+  # nothing reports the difference. 002 with a shared login group made every
+  # file this user creates writable by another account.
+  echo "File-creation mask:"
+  local _DOTFILES_UMASK_WHY
+  if _dotfiles_umask_guard; then
+    case "$_DOTFILES_UMASK_WHY" in
+      022*) _doctor_ok "$_DOTFILES_UMASK_WHY" ;;
+      *)    _doctor_note "$_DOTFILES_UMASK_WHY" ;;
+    esac
+  else
+    _doctor_warn "$_DOTFILES_UMASK_WHY"
   fi
 
   echo "Worktrees (where feature work belongs):"

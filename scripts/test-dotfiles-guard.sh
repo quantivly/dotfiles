@@ -918,6 +918,56 @@ check "no dead hook left in the table" \
           print -r -- \$+functions[_dotfiles_guard_precmd]")" "0"
 
 echo
+echo "=== _dotfiles_umask_guard: tighten only while the group is really shared ==="
+# Ubuntu's pam_umask gives 002 whenever the login group is named after the user,
+# on the reasoning that its permissions are then yours alone — and dev-setup
+# breaks that by adding a service account to the group. Every row is a state
+# where getting it wrong is invisible: too loose leaves $HOME group-writable by
+# another account, too tight silently breaks workspace sharing on the hosts
+# where the grant is real.
+GRPDIR="$TMPROOT/groups"; mkdir -p "$GRPDIR"
+printf 'root:x:0:\ntester:x:%s:\nsvc:x:242:tester\n'  "$(id -g)" > "$GRPDIR/private"
+printf 'root:x:0:\ntester:x:%s:%s\n'  "$(id -g)" "$(id -un)"      > "$GRPDIR/selfonly"
+printf 'root:x:0:\ntester:x:%s:svc,other\n' "$(id -g)"            > "$GRPDIR/shared"
+printf 'root:x:0:\nsomethingelse:x:64999:\n'                      > "$GRPDIR/nogroup"
+umaskrun() {  # umaskrun <env-assignments>  -> "<rc> <umask> <why>"
+  zsh -c "umask 002; source '$SYSTEM_SH'
+          $1 _dotfiles_umask_guard; rc=\$?
+          print -r -- \"\$rc \$(umask) \$_DOTFILES_UMASK_WHY\"" 2>&1
+}
+check "shared group tightens to 022" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/shared" | cut -d' ' -f1,2)" "0 022"
+check "...and names who else is in it" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/shared" | grep -c 'svc, other')" "1"
+# The whole point of gating on the condition: once `gpasswd -d` has run, the
+# guard must stop firing on its own rather than needing a second edit.
+check "private group is left alone" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/private" | cut -d' ' -f1,2)" "0 002"
+# Being listed in your own group is not sharing.
+check "self-membership is not sharing" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/selfonly" | cut -d' ' -f1,2)" "0 002"
+# "Could not determine" must not pick a side: tightening breaks sharing that may
+# be load-bearing, relaxing recreates the exposure. Both report non-zero.
+check "no entry for our gid: unchanged" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/nogroup" | cut -d' ' -f1,2)" "1 002"
+check "...and says why"  "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/nogroup" | grep -c 'no .* entry for gid')" "1"
+check "unreadable group file: unchanged" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$TMPROOT/no-such-group" | cut -d' ' -f1,2)" "1 002"
+check "DOTFILES_UMASK wins outright" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/shared DOTFILES_UMASK=077" | cut -d' ' -f1,2)" "0 077"
+# It runs in every shell, so it must not fork: $(<file) and $GID, never getent.
+check "no getent/awk fork in the guard" \
+      "$(zsh -c "source '$SYSTEM_SH'; print -r -- \"\${functions[_dotfiles_umask_guard]}\"" \
+         | grep -cE 'getent|\bawk\b|\bid -')" "0"
+check "no \$_DOTFILES_UMASK_WHY left behind by the doctor" \
+      "$(leak _DOTFILES_UMASK_WHY)" "unset"
+# zshrc must actually call it, and must not leak the reason into every shell.
+check "zshrc calls the guard" \
+      "$(grep -cE '^[[:space:]]*_dotfiles_umask_guard[[:space:]]*$' "$DOTFILES/zshrc")" "1"
+check "zshrc unsets the reason"  \
+      "$(grep -c 'unset _DOTFILES_UMASK_WHY' "$DOTFILES/zshrc")" "1"
+
+echo
 echo "=== the module itself: one note glyph, and it parses ==="
 # The two doctors share ✓/✗/⚠ through _doctor_*; a hand-rolled fourth glyph in
 # one of them is the deduplication half-done, and puts the next change to how

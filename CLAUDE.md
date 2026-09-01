@@ -220,12 +220,35 @@ review, all of which reported success:
   straight onto the protected branch. It also refuses a leftover directory that is not a
   worktree instead of `cd`-ing in and reporting success.
 
+**The umask is part of "what is live in this shell", and it failed the same way.**
+Ubuntu's `pam_umask` relaxes 022 to 002 whenever the login group is named after the user
+— sound reasoning, because such a group is normally yours alone. `dev-setup` breaks that
+assumption: `modules/system.sh` adds the `quantivly` service account to the user's group
+(`getent group zvi` → `zvi:x:1000:quantivly`), so under 002 nearly every file the user
+created was group-writable by an account that never logs in — `$HOME` dotfiles included,
+and `.zshenv` that way is a code-execution path, not just a disclosure one. Nothing
+reported it, because 002 on a user-private group is the correct, expected value.
+
+The fix is removing the extra member (`sudo gpasswd -d quantivly zvi`);
+`_dotfiles_umask_guard` is the belt to that braces, and it is **gated on the condition,
+not on the order the fixes were applied in**. It reads the login group's member list and
+tightens to 022 only while somebody else is in it — so it is right before *and* after the
+`gpasswd`, stops firing by itself once the grant is gone, and leaves sharing alone on the
+hosts where the reverse grant is genuinely load-bearing (which is why a blanket
+`umask 022` in a repo installed on other people's machines would be wrong). Forkless
+(`$(<file)` and `$GID`, never `getent`), because it runs in every shell: 0.5 ms.
+"Cannot tell" — no `/etc/group` entry, as on SSSD or systemd-homed — leaves the umask
+exactly as the system set it and says so, since guessing either way is worse than the
+state the machine is already in. `dotfiles-doctor` reports the verdict; override with
+`DOTFILES_UMASK` in `~/.zshenv`, or just call `umask` in `~/.zshrc.local`.
+
 Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 `DOTFILES_GUARD_QUIET=1` (silence the startup line while dogfooding a branch),
 `DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_STALE_WARN_HOURS`, `DOTFILES_EXPECTED_DIRTY`
-(scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`.
+(scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
+`DOTFILES_GROUP_FILE`.
 
-State table: `scripts/test-dotfiles-guard.sh` (195 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (209 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale

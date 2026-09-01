@@ -95,6 +95,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normal case, which is how a diagnostic becomes one nobody reads. `GNOME_LOCAL_OVERRIDES` makes
   the path injectable so the behaviour can be exercised against a fixture.
 
+- **`umask`: 022 while the login group is actually shared.** Ubuntu's `pam_umask` relaxes
+  022 to 002 whenever the login group is named after the user, because such a group is
+  normally yours alone — and `dev-setup` breaks that by adding the `quantivly` service
+  account to it (`zvi:x:1000:quantivly`). Under 002, nearly every file the user created was
+  group-writable by an account that never logs in, `$HOME` dotfiles included; `.zshenv`
+  that way is a code-execution path. Nothing reported it, because 002 on a user-private
+  group is the correct, expected value.
+
+  `_dotfiles_umask_guard` reads the login group's member list and tightens only while
+  someone else is in it — gated on the condition rather than on the order the fixes were
+  applied in, so it is right before *and* after `gpasswd -d`, stops firing by itself once
+  the grant is removed, and leaves sharing alone on hosts where the reverse grant is
+  load-bearing (a blanket `umask 022` in a repo that installs on other people's machines
+  would break exactly those). Forkless (`$(<file)` and `$GID`, never `getent`) at 0.5 ms
+  per shell. "Cannot tell" leaves the umask as the system set it and says so.
+  `dotfiles-doctor` reports the verdict; `DOTFILES_UMASK` overrides.
+
 ### Removed
 - **Atrium coupling in the live shell config.** Atrium is retired (2026-09-01), so
   `_in_atrium_session()` and the interactive account switchers' early-return that deferred
