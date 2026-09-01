@@ -1057,9 +1057,22 @@ hdespawn() {
     return 1
   fi
   [[ -n "$live_path" ]] && wt_path="$live_path"
-  if [[ -z "$wt_path" && -n "$ws_live" ]]; then
+  # NOT gated on $ws_live. After `hreap --close` the workspace is gone, and that is
+  # exactly the state this recovery exists for — gating it on a live workspace made
+  # it unreachable there, so hdespawn printed "no worktree dir on disk — nothing to
+  # remove", removed the registry entry anyway, and left the worktree and its branch
+  # orphaned with nothing pointing at them. The opposite of this function's promise.
+  if [[ -z "$wt_path" ]]; then
     wt_path="$(herdr worktree list --cwd "$repo" 2>/dev/null \
       | jq -r --arg b "$branch" 'first(.result.worktrees[]? | select(.branch == $b) | .path) // empty')"
+  fi
+  # And git knows even when herdr does not: the worktree outlives the workspace,
+  # which is the whole reason an entry can be stranded in the first place.
+  if [[ -z "$wt_path" ]]; then
+    wt_path="$(git -C "$repo" worktree list --porcelain 2>/dev/null \
+      | awk -v b="refs/heads/$branch" '
+          /^worktree /{ p = substr($0, 10) }
+          /^branch /  { if (substr($0, 8) == b) { print p; exit } }')"
   fi
 
   local ws_note="not in the current herdr session"

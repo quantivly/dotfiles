@@ -86,8 +86,8 @@
 #               exists — so a unit wanted by default.target would start with none
 #               of these set. Toasts need only the D-Bus address, which is always
 #               present.
-#   SSH_AUTH_SOCK    the caller's value when set, else ~/.ssh/ssh_auth_sock — the
-#               STABLE SYMLINK, which is the point. The real agent socket here
+#   SSH_AUTH_SOCK    ~/.ssh/ssh_auth_sock when that exists — the STABLE SYMLINK,
+#               which is the point — and only otherwise the caller's value. The real agent socket here
 #               belongs to the Bitwarden snap, and Bitwarden is a GNOME *autostart*
 #               app (~/.config/autostart/bitwarden_bitwarden.desktop), so it launches
 #               AFTER graphical-session.target: even with the unit ordered there, the
@@ -198,12 +198,21 @@ herdr_bin="$(env -i PATH="$path" /bin/sh -c 'command -v herdr' 2>/dev/null || tr
 # ---------------------------------------------------------------------------
 xdg_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
 dbus_address="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$xdg_runtime_dir/bus}"
-# SSH_AUTH_SOCK: the caller's value, else the stable symlink (see the header).
+# SSH_AUTH_SOCK: the STABLE SYMLINK when there is one, else the caller's value.
+# That order is the point (see the header), and it used to be the other way
+# round — which made the symlink branch DEAD on the one restart path the runbooks
+# sanction. `systemctl --user restart` runs with the user manager's environment,
+# and that carries the live snap path, so the caller's value always won and the
+# server got a snapshot after all. The server's environment is inherited by every
+# pane for as long as it runs, so snapshotting a path that moves when the agent
+# restarts is precisely what the indirection exists to avoid.
+#
 # -L, not -S, on purpose: a dangling symlink still names where the agent will
 # bind, and the Bitwarden snap that owns it autostarts after this unit.
-ssh_auth_sock="${SSH_AUTH_SOCK:-}"
-if [[ -z "$ssh_auth_sock" && -L "$home/.ssh/ssh_auth_sock" ]]; then
+if [[ -L "$home/.ssh/ssh_auth_sock" ]]; then
     ssh_auth_sock="$home/.ssh/ssh_auth_sock"
+else
+    ssh_auth_sock="${SSH_AUTH_SOCK:-}"
 fi
 
 # ---------------------------------------------------------------------------

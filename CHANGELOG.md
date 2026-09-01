@@ -221,6 +221,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Changed
+- **Three more findings from the independent review of #89.** (1) The launcher preferred the
+  CALLER's `SSH_AUTH_SOCK` over the stable `~/.ssh/ssh_auth_sock` symlink, which made the symlink
+  branch dead on the one restart path the runbooks sanction — `systemctl --user restart` carries
+  the manager's environment, so the live snap path always won and the server got the snapshot the
+  indirection exists to avoid. The header already described the intended order; the code did the
+  opposite. (2) `hdespawn`'s worktree-path recovery was gated on a live workspace, so it was
+  unreachable in the post-`hreap --close` state it exists for: hdespawn then said "no worktree dir
+  on disk", removed the registry entry anyway, and orphaned the worktree and its branch. It now
+  runs ungated and falls back to `git worktree list`, which knows even when herdr does not.
+  (3) `plugins.lock` still pinned `herdr-auto-pilot` after `plugins.list` dropped it, so
+  `herdr-lazy restore` would have reinstated the plugin the change exists to keep out.
 - **`./install` reconciles systemd user unit enablement, and `verify-tools.sh` fails when it has
   drifted** (`scripts/reconcile-systemd-units.sh`, `install.conf.yaml`, `scripts/verify-tools.sh`,
   `systemd/herdr-server.service`). A linked unit is not a reconciled one: systemd records
