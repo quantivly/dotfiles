@@ -587,6 +587,16 @@ herdr-lazy() {
 #   hdespawn can still finish the teardown; hdespawn is what removes entries.
 #   Nothing else writes there.
 #
+#   A PANE ID IS NOT A PERMANENT NAME. herdr's workspace ids come from a short
+#   alphabet whose counter lives only in the running server, so a restart
+#   reissues them (w4, w5, wN and wP were each created twice in five days in
+#   this box's herdr-server.log) and each new workspace's first pane is p1 —
+#   while the registry is a file that outlives every restart and deliberately
+#   keeps entries around. So the key collides, and hspawn preserves rather than
+#   overwrites (_hspawn_preserve_stale_registry). It also means `hdespawn
+#   <pane-id>` is the exact form and `hdespawn <slug>` can go ambiguous, which
+#   is why every "finish it with" line printed by this family names the pane.
+#
 #   hdespawn <slug|pane-id> [--yes]                  tear one spawn down
 #   hreap [--close] [--mine] [--older N] [--json]    every Claude process herdr
 #                                                    hosts, detected or not
@@ -602,6 +612,58 @@ _hspawn_state_dir() {
 # Registry file for a pane id: "wL:p1" -> ".../wL_p1.json".
 _hspawn_registry_file() {
   print -r -- "$(_hspawn_state_dir)/${1//:/_}.json"
+}
+
+# Move an existing registry entry aside before hspawn writes a new one over it.
+# Returns 0 when there was nothing to preserve or the move succeeded, 1 when an
+# entry is there and could NOT be moved — the caller then declines to write, so
+# the failure costs the new spawn's tracking (loud, and the pane is in front of
+# you) rather than the old spawn's worktree (silent, and unrecoverable).
+#
+# Why this is needed: THE REGISTRY IS KEYED ON A PANE ID, AND A PANE ID IS NOT
+# UNIQUE OVER TIME. herdr draws workspace ids from a short base-32 alphabet
+# whose allocator lives only in the running server — ~/.config/herdr/session.json
+# persists the workspaces themselves but no next-id counter — so a server
+# restart reissues them from the start, and each new workspace's first pane is
+# always p1. This box's own herdr-server.log has four instances in five days:
+# w4 created 2026-08-28 and again 2026-08-29, w5 twice on 08-29, wN and wP on
+# 08-30 and again on 08-31. So "wN:p1" has already been two different panes.
+#
+# The registry, by contrast, is a file under ~/.local/state and outlives every
+# restart, and entries are deliberately long-lived: every hspawn bail-out says
+# "registry entry kept", and `hreap --close` annotates rather than deletes so
+# `hdespawn` can finish the teardown later. A bare `>` therefore destroys one of
+# those entries without a word, and its worktree and branch are then orphaned
+# with nothing on disk pointing at them — the exact failure hdespawn exists to
+# prevent. hreap and hdespawn both already reason about id reuse; hspawn was the
+# one of the three that did not.
+#
+# Renamed, not deleted, and kept in the same directory with a .json suffix so
+# hdespawn's slug scan still finds it: `hdespawn <slug>` remains the way to
+# finish it. If that slug is no longer unique the scan refuses and names the
+# candidate FILES, which is why that listing prints the path.
+_hspawn_preserve_stale_registry() {
+  local registry="$1" archive stale_slug stale_branch stale_path stamp n=1
+  [[ -f "$registry" ]] || return 0
+  stale_slug="$(jq -r '.slug // empty'   "$registry" 2>/dev/null)"
+  stale_branch="$(jq -r '.branch // empty' "$registry" 2>/dev/null)"
+  stale_path="$(jq -r '.path // empty'   "$registry" 2>/dev/null)"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="${registry%.json}.stale-$stamp.json"
+  # Two spawns into the same reused id within one second is absurd and would
+  # still lose an entry, so it is handled rather than assumed away.
+  while [[ -e "$archive" ]]; do
+    archive="${registry%.json}.stale-$stamp-$n.json"
+    (( n++ ))
+  done
+  if command mv -- "$registry" "$archive" 2>/dev/null && [[ ! -e "$registry" ]]; then
+    _hspawn_say warn "pane id reused: $registry already held an un-torn-down spawn" >&2
+    _hspawn_say warn "  kept as $archive" >&2
+    _hspawn_say warn "  it is '${stale_slug:-?}'${stale_branch:+ ($stale_branch)}${stale_path:+ at $stale_path}${stale_slug:+ — finish it with: hdespawn $stale_slug}" >&2
+    return 0
+  fi
+  _hspawn_say warn "could not move the existing $registry aside; NOT overwriting it" >&2
+  return 1
 }
 
 # Aligned `key:       value` progress lines. printf is a builtin, so this is
@@ -621,13 +683,15 @@ _hspawn_usage() {
     '  -m, --model <model>             claude --model (an alias like opus, or a full model name)' \
     '  -e, --effort <level>            claude --effort (low|medium|high|xhigh|max)' \
     '      --mode <mode>               claude --permission-mode: auto (default) | acceptEdits | plan |' \
-    '                                  dontAsk | default (claude 2.1.x calls this one "manual").' \
+    '                                  dontAsk | default, a.k.a. manual (claude 2.1.x'"'"'s own name for' \
+    '                                  it; both spellings are accepted).' \
     '                                  bypassPermissions is refused: hspawn spawns run unattended.' \
     '  -b, --base <ref>                start the worktree branch from <ref> (default: herdr'"'"'s own)' \
     '  -n, --name <agent-name>         herdr agent name (default: <slug> folded to [a-z][a-z0-9_-]{0,31})' \
     '  -h, --help' \
     '' \
     'Deprecated (kept one release): hspawn <repo-dir> <slug> [profile|-] [prompt...]' \
+    '  (not after `--`: that turns the slot off, so a literal `-` stays in the prompt)' \
     '' \
     'Examples:' \
     '  hspawn ~/work/api fix-auth' \
@@ -663,19 +727,57 @@ _hspawn_clear_trust_dialog() {
   return 1
 }
 
-# Poll until the pane's shell is at its prompt: `pane process-info` lists
-# exactly one foreground process and it is the shell itself (zsh, bash, sh,
-# fish or dash). Right after `worktree create` that is not yet true (see the
-# header), and `agent start` then fails with agent_pane_busy while `pane run`
-# text goes nowhere. Prints the seconds waited on success; on timeout prints
-# the foreground names it last saw and returns 1.
+# Is the pane's shell at its prompt? Reads ONE `pane process-info` reply (as
+# $1) and prints true/false. Split out of the poll loop below so it can be
+# tested against recorded replies — scripts/test-hspawn.sh.
+#
+# The pane is at its prompt exactly when the tty's FOREGROUND PROCESS GROUP is
+# the shell itself. herdr publishes both halves of that comparison —
+# `shell_pid` and `foreground_process_group_id`, both declared fields of
+# ProcessInfo in `herdr api schema --json` — and probed across every live pane
+# on this box (2026-09-01, herdr 0.8.2) the two are EQUAL in each pane sitting
+# at a zsh prompt and DIFFER in each pane running Claude. Nothing else
+# separates the two states as cleanly.
+#
+# It replaced "exactly one foreground process, and its name is one of zsh,
+# bash, sh, fish, dash". The name list is the defect: a pane whose shell is not
+# one of those five never reads ready, so hspawn aborts at its 60 s timeout
+# with the worktree, the workspace and the registry entry ALREADY created —
+# and $SHELL was never consulted, with no override to reach for. (The
+# `length == 1` half read as a second defect and is not one: the field is the
+# foreground process GROUP, so a second entry appears only while the shell is
+# BUSY running a pipeline, which is correctly not-ready. Recorded here so it is
+# not "fixed" later by loosening the test to `any`, which would report ready
+# while a command is still running.)
+#
+# The name test survives only as a fallback for a herdr that publishes neither
+# pid, and it now includes $SHELL's own basename.
+_hspawn_shell_ready() {
+  local -a shell_names=(zsh bash sh fish dash)
+  [[ -n "${SHELL:t}" ]] && shell_names+=("${SHELL:t}")
+  # Space-delimited membership rather than jq --args: one string argument works
+  # on every jq this repo has run against, and a shell basename cannot contain
+  # a space.
+  printf '%s' "$1" | jq -r --arg shells " ${(j: :)shell_names} " '
+    (.result.process_info // {}) as $pi
+    | if ($pi.shell_pid // null) != null and ($pi.foreground_process_group_id // null) != null
+      then $pi.foreground_process_group_id == $pi.shell_pid
+      else (($pi.foreground_processes // []) | length) == 1
+           and ($shells | contains(" " + (($pi.foreground_processes // [])[0].name // "") + " "))
+      end' 2>/dev/null
+}
+
+# Poll until the pane's shell is at its prompt (see _hspawn_shell_ready). Right
+# after `worktree create` that is not yet true (see the header), and
+# `agent start` then fails with agent_pane_busy while `pane run` text goes
+# nowhere. Prints the seconds waited on success; on timeout prints what it last
+# saw — the foreground names AND both pids, because with the pid test in front
+# the names alone no longer explain a refusal.
 _hspawn_await_shell() {
-  local pane="$1" limit="${2:-60}" waited=0 info ready names
+  local pane="$1" limit="${2:-60}" waited=0 info ready names pids
   while :; do
     info="$(herdr pane process-info --pane "$pane" 2>/dev/null)"
-    ready="$(printf '%s' "$info" | jq -r '
-      .result.process_info.foreground_processes // []
-      | length == 1 and (.[0].name | IN("zsh", "bash", "sh", "fish", "dash"))' 2>/dev/null)"
+    ready="$(_hspawn_shell_ready "$info")"
     if [[ "$ready" == true ]]; then
       print -r -- "$waited"
       return 0
@@ -685,7 +787,9 @@ _hspawn_await_shell() {
     (( waited++ ))
   done
   names="$(printf '%s' "$info" | jq -r '[.result.process_info.foreground_processes[]?.name] | join(", ")' 2>/dev/null)"
-  echo "Error: pane $pane has not reached a shell prompt after ${limit}s (foreground: ${names:-none/unknown})" >&2
+  pids="$(printf '%s' "$info" | jq -r '.result.process_info
+    | "fg pgid \(.foreground_process_group_id // "?"), shell pid \(.shell_pid // "?")"' 2>/dev/null)"
+  echo "Error: pane $pane has not reached a shell prompt after ${limit}s (foreground: ${names:-none/unknown}${pids:+; $pids})" >&2
   return 1
 }
 
@@ -704,6 +808,7 @@ _hspawn_await_agent() {
 
 hspawn() {
   local profile="" profile_set=0 model="" effort="" mode="auto" base="" name_override=""
+  local endopts=0
   local -a rest=()
   while (( $# )); do
     case "$1" in
@@ -714,6 +819,13 @@ hspawn() {
         _hspawn_usage
         return 0 ;;
       --)
+        # Recorded, because `--` also has to switch OFF the deprecated
+        # positional [profile|-] slot below. That slot triggers on a literal
+        # "-" in the third position, which is precisely the argument a user
+        # writes `--` to protect: without this, `hspawn -- ~/repo slug - "…"`
+        # ate the "-" and printed a deprecation note the user had just opted
+        # out of, so `--` did not mean what it says.
+        endopts=1
         shift
         rest=("$@")
         break ;;
@@ -756,7 +868,8 @@ hspawn() {
   local repo="${rest[1]}" slug="${rest[2]}"
   local -a prompt_words=("${(@)rest[3,-1]}")
   # Legacy positional form (see header): [profile|-] in the third slot.
-  if (( ! profile_set && ${#rest} >= 3 )); then
+  # Never after an explicit `--` — see the endopts note in the parser.
+  if (( ! profile_set && ! endopts && ${#rest} >= 3 )); then
     local third="${rest[3]}"
     if [[ "$third" == "-" || -d "$HOME/.clauth/profiles/$third" ]]; then
       [[ "$third" == "-" ]] || profile="$third"
@@ -781,7 +894,11 @@ hspawn() {
       echo "       helper hands out. Use --mode dontAsk, or start the pane by hand." >&2
       return 1 ;;
     *)
-      echo "Error: --mode must be auto, acceptEdits, plan, dontAsk or default (got '$mode')" >&2
+      # `manual` is listed here because the validator accepts it: it is what
+      # claude 2.1.x actually calls the mode, `default` is only rewritten to it
+      # above, and an error message that omits a value it would have accepted
+      # sends the user to re-read --help for a mode that was already right.
+      echo "Error: --mode must be auto, acceptEdits, plan, dontAsk, manual or default (got '$mode')" >&2
       return 1 ;;
   esac
 
@@ -841,7 +958,7 @@ hspawn() {
   local state_dir registry
   state_dir="$(_hspawn_state_dir)"
   registry="$(_hspawn_registry_file "$pane")"
-  if mkdir -p "$state_dir" && jq -n \
+  if mkdir -p "$state_dir" && _hspawn_preserve_stale_registry "$registry" && jq -n \
       --arg pane_id "$pane" --arg workspace_id "$workspace" --arg branch "$branch" \
       --arg slug "$slug" --arg repo "$repo" --arg profile "$profile" --arg name "$name" \
       --arg path "$wt_path" --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -853,9 +970,16 @@ hspawn() {
   fi
 
   # Race 1 (header): the pane's shell is usually not at its prompt yet.
+  #
+  # Every bail-out from here down names the PANE ID rather than the slug, for
+  # the reason spelled out at hreap's "Finish with:" line: the registry file is
+  # keyed on the pane id, so that lookup is exact, while `hdespawn <slug>` scans
+  # and REFUSES when two entries share the slug. These messages are printed in
+  # precisely the state that manufactures a duplicate — a spawn that failed and
+  # left its entry behind, then retried under the same slug.
   local shell_wait
   shell_wait="$(_hspawn_await_shell "$pane" 60)" || {
-    echo "       (registry entry kept; \`hdespawn $slug\` tears the worktree down)" >&2
+    echo "       (registry entry kept; \`hdespawn $pane\` tears the worktree down)" >&2
     return 1
   }
   _hspawn_say shell "at prompt after ${shell_wait}s"
@@ -890,14 +1014,14 @@ hspawn() {
         agent_pane_busy)
           if (( attempt > 10 )); then
             echo "Error: pane $pane still busy after 10 retries — herdr agent start: $msg" >&2
-            echo "       (registry entry kept; \`hdespawn $slug\` tears the worktree down)" >&2
+            echo "       (registry entry kept; \`hdespawn $pane\` tears the worktree down)" >&2
             return 1
           fi
           _hspawn_say note "pane busy (agent_pane_busy) — retry $attempt/10 in 2s"
           sleep 2 ;;
         *)
           echo "Error: herdr agent start failed${code:+ ($code)}: $msg" >&2
-          echo "       (registry entry kept; \`hdespawn $slug\` tears the worktree down)" >&2
+          echo "       (registry entry kept; \`hdespawn $pane\` tears the worktree down)" >&2
           return 1 ;;
       esac
     done
@@ -905,7 +1029,7 @@ hspawn() {
 
   _hspawn_await_agent "$pane" 120 || {
     echo "Error: no agent detected in $pane after 120s — check the pane" >&2
-    echo "       (registry entry kept; \`hdespawn $slug\` tears the worktree down)" >&2
+    echo "       (registry entry kept; \`hdespawn $pane\` tears the worktree down)" >&2
     return 1
   }
   herdr agent wait "$pane" --until idle --until blocked --timeout 180000 >/dev/null || return 1
@@ -1016,9 +1140,14 @@ hdespawn() {
         return 1 ;;
       1) registry="${hits[1]}" ;;
       *)
+        # The FILE is named too, not just the pane id: pane ids are reused (see
+        # _hspawn_preserve_stale_registry), so two entries for one slug can
+        # carry the SAME pane id — one live, one preserved from before a server
+        # restart — and then the pane id disambiguates nothing. The path always
+        # does, and it is what a human needs to finish the older one by hand.
         echo "Error: slug '$target' matches ${#hits} spawns — use the pane id:" >&2
         for f in "${hits[@]}"; do
-          jq -r '"  \(.pane_id)  \(.repo)  \(.branch)"' "$f" >&2
+          jq -r --arg f "$f" '"  \(.pane_id)  \(.repo)  \(.branch)   [\($f)]"' "$f" >&2
         done
         return 1 ;;
     esac
@@ -1048,13 +1177,23 @@ hdespawn() {
       | (first($s.panes[]? | select(.pane_id == $pane)) // {}) as $p
       | @sh "ws_live=\($w.workspace_id // "") live_path=\($w.worktree.checkout_path // "") agent_status=\($p.agent_status // "")"' 2>/dev/null)"
   fi
-  # Same id, different worktree? Whether herdr recycles workspace ids is
-  # UNVERIFIED, and the check is cheap: never remove a workspace whose live
-  # checkout is not the one this entry recorded.
+  # Same id, different worktree. No longer "UNVERIFIED": herdr DOES reuse
+  # workspace ids — the allocator lives only in the running server, so a restart
+  # reissues them from the start, and this box's server log shows w4, w5, wN and
+  # wP each issued twice in five days (see _hspawn_preserve_stale_registry).
+  # The registry outlives every restart, so an entry naming a workspace that now
+  # belongs to somebody else's worktree is a state that happens.
+  #
+  # Refusing outright — what this did — is safe but dead-ends: the entry's own
+  # worktree is still on disk and no command will ever finish it. So the live
+  # workspace is DISOWNED instead, treated exactly like one that is gone, and
+  # the teardown continues against the path THIS entry recorded, behind the same
+  # uncommitted/unpushed guard. Nothing herdr owns is touched on that path: no
+  # `worktree remove`, no pane close, no agent killed.
   if [[ -n "$ws_live" && -n "$live_path" && -n "$reg_path" && "$live_path" != "$reg_path" ]]; then
-    echo "Error: workspace $ws now holds $live_path, but this registry entry recorded $reg_path" >&2
-    echo "       — not the same worktree; refusing to touch anything. Entry kept: $registry" >&2
-    return 1
+    _hspawn_say note "workspace $ws now holds $live_path, not this entry's $reg_path"
+    _hspawn_say note "  the id was reused — leaving that workspace alone; finishing this entry from disk"
+    ws_live="" live_path="" agent_status=""
   fi
   [[ -n "$live_path" ]] && wt_path="$live_path"
   # NOT gated on $ws_live. After `hreap --close` the workspace is gone, and that is
@@ -1317,12 +1456,17 @@ hreap() {
   local sep=$'\x1f'
 
   local -a rows=() cands=()
-  local total=0
+  # $total is offered as the full census ("of N in herdr panes"), so a pane it
+  # could not ask about has to be visible rather than folded into silence: a
+  # failed `pane process-info` used to `continue` before counting, and the
+  # census then read lower than the truth with nothing saying why — the same
+  # shape of silent undercount that made hreap necessary in the first place.
+  local total=0 unqueried=0
   local pane ws detected astatus sid disp aname wslabel wpath
   local pinfo pid pname pcwd dashed tfile mtime idle_s idle_src et
   local rss_kb swap_kb mem_kb k v registry reg_vals tagged creator rname rslug rbranch rclosed name
   while IFS="$sep" read -r pane ws detected astatus sid disp aname wslabel wpath; do
-    pinfo="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || continue
+    pinfo="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || { (( unqueried++ )); continue; }
     while IFS="$sep" read -r pid pname pcwd; do
       [[ -n "$pid" ]] || continue
       (( total++ ))
@@ -1449,9 +1593,11 @@ hreap() {
 
   local filter="idle >= ${older}m"
   (( mine )) && filter+=", --mine"
+  local unq_note=""
+  (( unqueried )) && unq_note=" + $unqueried pane(s) that could not be queried"
   shown="$(printf '%s' "$sorted" | jq 'length')"
   if (( shown == 0 )); then
-    echo "hreap: nothing matches ($filter) — $total Claude process(es) in herdr panes"
+    echo "hreap: nothing matches ($filter) — $total Claude process(es) in herdr panes$unq_note"
     return 0
   fi
 
@@ -1480,7 +1626,7 @@ hreap() {
     | map(tostring) | join("\u001f")')
   local sum_kb
   sum_kb="$(printf '%s' "$sorted" | jq '[.[] | .mem_kb // 0] | add // 0')"
-  echo "totals:    $shown Claude process(es) shown, $(_hreap_fmt_kb "$sum_kb") RSS+swap (of $total in herdr panes; $filter)"
+  echo "totals:    $shown Claude process(es) shown, $(_hreap_fmt_kb "$sum_kb") RSS+swap (of $total in herdr panes$unq_note; $filter)"
   (( starred )) && echo "           * no transcript found — process age shown, not idle time"
 
   if (( close )); then
@@ -1535,7 +1681,15 @@ hreap() {
           echo "warn:      could not annotate $registry — hdespawn will still find it by slug" >&2
         fi
         echo "closed:    $pane ($name, idle $(_hreap_fmt_dur "$idle_s"), $(_hreap_fmt_kb "$mem_kb"))"
-        echo "           worktree kept${wpath:+: $wpath}${rbranch:+ ($rbranch)} — may hold uncommitted work. Finish with: hdespawn ${rslug:-$pane}"
+        # The PANE ID, not the slug. The registry file is keyed on the pane id,
+        # so `hdespawn wN:p1` is an exact file lookup, while `hdespawn <slug>`
+        # SCANS every entry and refuses outright when two match. This line runs
+        # only where that collision is being manufactured: --close deliberately
+        # keeps the entry so hdespawn can finish the teardown, so a second spawn
+        # of the same slug — a retried ticket, the same branch respawned — makes
+        # the printed command fail on the entry it just named. The slug is still
+        # shown, as text, for the human reading the line.
+        echo "           worktree kept${wpath:+: $wpath}${rbranch:+ ($rbranch)} — may hold uncommitted work. Finish with: hdespawn $pane${rslug:+  (slug: $rslug)}"
       else
         echo "Error: herdr pane close $pane failed: $reply" >&2
       fi
