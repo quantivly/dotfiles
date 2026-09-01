@@ -732,6 +732,77 @@ keyring collapse, which a real `gh` cannot be made to do on demand). Each trap a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make
 the row that names it fail.
 
+## Keeping secrets out of transcripts
+
+**Everything a command prints is recorded, and that is where the credentials went.** An
+audit on 2026-09-01 found *both* of this machine's live GitHub tokens in plaintext in five
+Claude Code session transcripts — two written days earlier, matched by SHA-256 against the
+live values, so not a historical artifact. Transcripts are conversation context, so those
+values had also left the host.
+
+No single dramatic mistake produced this. Ordinary diagnostics do it: `ps` showing a
+process launched with `-e GH_TOKEN=…`, a `printf` of `$GH_TOKEN`, a bare `gh auth token`.
+
+**Rotation is the wrong loop to optimise.** For GitHub it is browser-only — `gh auth` has
+no `revoke`, `/authorizations` and `/applications/grants` are 404 (the API was removed in
+2020), and the endpoints that can revoke need the OAuth *app's* client secret, i.e. you
+would have to be GitHub. `gh auth logout` looks like rotation and is not: it drops the
+local copy while the leaked value stays valid. So rotation is manual, and it does nothing
+about the next capture.
+
+Two pieces attack the emission instead:
+
+- **`scripts/redact-secrets.sh`** — a stdin→stdout filter. **Two rules, because either
+  alone leaks.** Shape matching (`gho_…`, `sk-ant-…`, `AKIA…`) finds a credential anywhere,
+  including bare in prose, but cannot know that `CLAUDE_CODE_MESSAGING_TOKEN=b7dc…` is a
+  secret — 32 hex characters is also every short git SHA. Name matching (`…TOKEN=`,
+  `…SECRET=`) catches those in the `VAR=value` shapes an env dump produces, without
+  false-positiving on arbitrary hex. That gap was found by running the pair against a real
+  `printenv` and seeing what survived.
+- **`claude/hooks/secret-emission-guard.sh`** — a `PreToolUse` hook (matcher `Bash`) that
+  **refuses** the handful of command shapes that print credentials unless piped through the
+  redactor: `gh auth token`, `gh auth status --show-token`, `ps` with full command lines,
+  `pgrep -a`, a bare `env`/`printenv`, and reads of `/proc/*/cmdline|environ`.
+
+Design decisions that are load-bearing, not preferences:
+
+- **Deny, not ask.** The remedy is mechanical (append `| redact-secrets`), so a prompt
+  would only train the human to click through — and an `ask` on commands an agent runs
+  constantly makes the guard the most irritating thing on the machine.
+- **Fail open, always.** Bad JSON, no `jq`, an unreadable payload, *or the hook file not
+  being deployed yet* — all allow. A hook that breaks the shell when it breaks gets
+  disabled wholesale, taking its protection with it. The registration in
+  `~/.claude/settings.json` carries its own `[ -r "$f" ]` guard for exactly this: the file
+  arrives via dotbot, so it is absent whenever the checkout is mid-deploy or on a branch
+  without it, and registering it without that guard put `exit 127` on **every** Bash call
+  in every session on the box until it was fixed.
+- **Most of the state table asserts what it must NOT block.** `ps -o comm=`,
+  `env -u GH_TOKEN … gh api user`, `printenv GH_CONFIG_DIR`, and
+  `git commit -m "stop ps aux leaking"` all have to pass — quoted strings are stripped
+  before matching so a command that merely *mentions* a shape is not refused. A false
+  positive costs the entire guard; a miss costs one redaction.
+- **It is a papercut guard, not a boundary.** Any command can print a secret and this knows
+  about six shapes. The real fixes are shorter-lived credentials (a fine-grained PAT with
+  an expiry, so a leak decays on its own) and narrower scopes — both `gh` tokens here carry
+  `admin:public_key`, the scope that lets a leak plant an SSH key surviving revocation.
+
+**`.gitignore`'s `**/*secret*` rule excluded all three of these files**, whose entire job
+is secrets — and `git add -A` skips ignored paths **silently**, so `git commit`, `git push`
+and `gh pr create` all reported success with the content absent. Only CI caught it, via
+`No such file or directory` on the test script and dotbot's `Nonexistent target` on the
+hook. Three negations after the rule fix it (`!scripts/redact-secrets.sh` etc.), and the
+check that matters is `git add --dry-run`, not `git check-ignore -v` — the latter exits 0
+when a path matches *any* rule, negations included, so it reports "matched" for a file that
+is not ignored at all and reads as the opposite of the truth.
+
+**Like the sidebar publisher, `./install` only does half.** dotbot puts the hook file in
+`~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
+`~/.claude/settings.json`, which is user-level and not in this repo.
+
+State table: `scripts/test-secret-guard.sh` (51 checks, run in CI, hermetic — the fixture
+credentials are assembled at runtime so this file contains no string that would trip the
+`gitleaks` pre-commit hook over its own test data).
+
 ## Tmux Configuration
 
 Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
@@ -1022,6 +1093,7 @@ localrc              # Edit ~/.zshrc.local
 qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
 gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offline)
+scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 tool_status          # Check installed tools
 build-limits         # Show active build/test worker caps (see zshrc.buildlimits)
 alacritty-init       # Set up Alacritty config (new machine)

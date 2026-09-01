@@ -50,6 +50,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first doctor that does not live in that file, and the sweep exists precisely so a new
   one is covered the moment it is written.
 
+### Added
+
+- **Keeping secrets out of transcripts** (`scripts/redact-secrets.sh`,
+  `claude/hooks/secret-emission-guard.sh`). An audit found *both* of this machine's live
+  GitHub tokens in plaintext in five Claude Code session transcripts — two written days
+  earlier, SHA-256-matched against the live values. Transcripts are conversation context,
+  so those values had left the host as well. Nothing dramatic caused it: ordinary
+  diagnostics print secrets (`ps` on a process launched with `-e GH_TOKEN=…`, a `printf` of
+  `$GH_TOKEN`, a bare `gh auth token`) and everything printed is recorded.
+
+  Rotation cannot be the answer: for GitHub it is browser-only (`gh auth` has no `revoke`,
+  `/authorizations` and `/applications/grants` are 404 since the API was removed in 2020,
+  and the endpoints that can revoke need the OAuth app's own client secret), and it does
+  nothing about the next capture. `gh auth logout` looks like rotation and is not — it
+  drops the local copy while the leaked value stays valid.
+
+  So: a redaction filter and a `PreToolUse` hook that refuses the shapes that print
+  credentials unless piped through it. **Two redaction rules, because either alone leaks** —
+  shape matching cannot know `CLAUDE_CODE_MESSAGING_TOKEN=b7dc…` is a secret (32 hex is also
+  every short git SHA), and name matching only sees `VAR=value`. Deny rather than ask, since
+  the remedy is mechanical and a prompt just trains people to click through. **Fail open
+  everywhere**, including when the hook file is not deployed yet: registering it without a
+  `[ -r "$f" ]` guard put `exit 127` on every Bash call in every session on the box until
+  that was fixed, which is the deployment coupling this repo keeps relearning.
+
+  Most of the 51 state-table rows assert what it must **not** block — `ps -o comm=`,
+  `env -u GH_TOKEN … gh api user`, `git commit -m "stop ps aux leaking"`. A false positive
+  costs the whole guard, because a hook that refuses ordinary commands is deleted within a
+  day; a miss costs one redaction. New CI job `secret-guard-test`. Fixture credentials are
+  assembled at runtime so the test file cannot trip the repo's own scanners over its own
+  data — the first version pasted in a real session token and spelled a private-key header
+  out in full, and `gitleaks` and `detect-private-key` caught both.
+
+  `.gitignore`'s `**/*secret*` rule excluded all three files on the first attempt, and
+  `git add -A` skips ignored paths silently — commit, push and PR creation all succeeded
+  with the content missing, and only CI noticed. Negations added; verify such a fix with
+  `git add --dry-run`, since `git check-ignore -v` exits 0 for a negation match too and so
+  reports the opposite of the truth.
+
+  It is a papercut guard, not a boundary — any command can print a secret and this knows six
+  shapes. The durable fixes are a shorter-lived credential and narrower scopes.
+
 ### Changed
 
 - **gh account routing keys on the repo remote, and pins the account instead of hoping.**

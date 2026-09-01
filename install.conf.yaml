@@ -29,6 +29,12 @@
     # those rows render empty, with no error anywhere. Must also be wired up as
     # "statusLine" in ~/.claude/settings.json — see docs/HERDR_GUIDE.md.
     ~/.claude/hooks/session-statusline.sh: claude/hooks/session-statusline.sh
+    # Refuses Bash commands that PRINT credentials unless piped through
+    # scripts/redact-secrets.sh. Like the statusline above, dotbot only puts the
+    # file in place — it does nothing until it is also registered as a
+    # PreToolUse hook in ~/.claude/settings.json, which is user-level and not in
+    # this repo. See "Keeping secrets out of transcripts" in CLAUDE.md.
+    ~/.claude/hooks/secret-emission-guard.sh: claude/hooks/secret-emission-guard.sh
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.list: config/herdr/plugins/plugins.list
     # NOTE: this is a symlink INTO the repo, so `herdr-lazy sync`/`update` write
     # straight through and leave your dotfiles working tree dirty. That is
