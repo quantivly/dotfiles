@@ -652,7 +652,7 @@ Gotchas, in the order they bite:
   <slug>` scans and REFUSES when two entries share a slug, which `--close` makes likely by
   design), and an entry whose workspace id now holds someone else's worktree is finished from the
   recorded path with herdr's live workspace left untouched, rather than refused forever. State
-  table: `scripts/test-hspawn.sh` (220 checks, in CI as `hspawn-test`) — hermetic via a recording
+  table: `scripts/test-hspawn.sh` (235 checks, in CI as `hspawn-test`) — hermetic via a recording
   `herdr` **stub** at the front of `PATH`, never via herdr's absence: the box this was written on
   has a real one wired to a live server, and a suite that assumed absence would pass in CI and
   remove a real workspace here.
