@@ -2,6 +2,13 @@
 **/hosts.yml
 **/*token*
 **/*secret*
+# ...but not the tooling whose JOB is secrets. `**/*secret*` above matched all
+# three of these by name, and `git add -A` skips ignored paths SILENTLY — the
+# commit, the push and the PR all succeeded with the files absent, and only CI
+# noticed. Negations must come after the rule they undo.
+!scripts/redact-secrets.sh
+!scripts/test-secret-guard.sh
+!claude/hooks/secret-emission-guard.sh
 **/*password*
 
 # OS files

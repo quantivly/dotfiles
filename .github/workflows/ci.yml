@@ -175,6 +175,25 @@ jobs:
       - name: Run the gh account routing state table
         run: ./scripts/test-gh-routing.sh
 
+  secret-guard-test:
+    name: Secret Emission Guard State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Both live GitHub tokens on the author's machine were found in plaintext
+      # in five session transcripts, two of them days old — not through any
+      # dramatic mistake, but because ordinary diagnostics print secrets and
+      # everything printed is recorded. These two files attack the emission.
+      # Most rows assert what the guard must NOT block: a hook that refuses
+      # ordinary commands gets deleted within a day, and then it protects
+      # nothing. Needs bash, jq and sed; no network and no secrets.
+      - name: Run the secret emission guard state table
+        run: ./scripts/test-secret-guard.sh
+
   yaml-validation:
     name: YAML Validation
     runs-on: ubuntu-latest
