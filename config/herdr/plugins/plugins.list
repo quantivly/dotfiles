@@ -26,9 +26,9 @@ caioniehues/herdmates
 # daemon they never enable. Add it back, only after confirming it stays
 # observe-only, with:
 #   herdr-lazy add 0xGosu/herdr-auto-pilot
-# See ~/herdr-setup-review.md P0-4. plugins.lock still pins it until the next
-# lock-writing command (`sync`, `update`, `lock`) regenerates the lock from what
-# herdr actually has installed; `sync --prune` is what would uninstall it.
+# plugins.lock no longer pins it: a lock-writing command (`sync`, `update`,
+# `lock`) has since regenerated the lock from what herdr actually has installed.
+# `sync --prune` is what would uninstall it from a machine that still has it.
 
 # This manager itself. NOT on PATH by design (README §Use) and auto-sync is
 # off, so a rebuild restores it only via:
@@ -37,13 +37,13 @@ caioniehues/herdmates
 natori-hrj/herdr-lazy
 
 # Diff review sidebar — the Atrium DIFF/review loop had no herdr equivalent
-# until this. Added 2026-08-29 per herdr-setup-review.md P3.
+# until this. Added 2026-08-29.
 persiyanov/herdr-reviewr
 
 # Ticket -> worktree: files a herdr worktree from a Linear ticket, firing the
 # same worktree.created steps as any other worktree (tdi.worktree-setup).
 # Needs LINEAR_API_KEY in the server env to actually reach Linear. Added
-# 2026-08-29 per herdr-setup-review.md P3.
+# 2026-08-29.
 tdi/herdr-worktree-from-linear
 
 # Publishes a `$pr` token on the focused agent pane, so the open pull request

@@ -397,5 +397,5 @@ if command -v claude &>/dev/null; then
 
   # claude() itself is defined in zshrc.company (loaded later in zshrc's
   # source order), which overrides whatever is defined here. A duplicate
-  # definition here was dead code — see herdr-setup-review.md P2-2.
+  # definition here was dead code, and was removed 2026-08-28.
 fi
