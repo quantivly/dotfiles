@@ -33,6 +33,10 @@
     # from a PLAIN terminal (ends every agent session):
     #   systemctl --user daemon-reload && herdr server stop && \
     #   systemctl --user enable --now herdr-server.service
+    # It is wanted by graphical-session.target, not default.target, so it starts
+    # once GNOME has imported the session environment — and survives logout,
+    # because WantedBy propagates start only. If it was already enabled under
+    # default.target, `disable` then `enable` to move the symlink.
     ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml

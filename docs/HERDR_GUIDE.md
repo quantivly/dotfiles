@@ -197,7 +197,14 @@ Use the systemd user unit, which builds a declared, clean environment every time
 
 ```bash
 # systemd/herdr-server.service → ~/.config/systemd/user/herdr-server.service (linked by ./install)
+# Wanted by graphical-session.target, so it starts once GNOME has imported the session
+# environment (DISPLAY/WAYLAND_DISPLAY/XAUTHORITY) — and survives logout, because WantedBy
+# propagates START only; stop propagation would need PartOf=, which the unit does not have.
+# Linger=yes here means default.target is reached at BOOT, before any session exists, which is
+# why hanging off it would hand the server an environment with none of those set.
 systemctl --user daemon-reload && systemctl --user enable --now herdr-server.service
+systemctl --user disable herdr-server.service    # only if it was enabled under an OLD target:
+                                                 # changing [Install] moves no existing symlink
 systemctl --user restart herdr-server.service    # the only sanctioned restart
 scripts/herdr-server-launch.sh --print-env       # the environment the unit hands the server (secrets masked)
 ```
@@ -277,7 +284,10 @@ herdr plugin link ~/.dotfiles/config/herdr/plugins/local/sidebar-icons
 #    Link state is herdr-local and is NOT restored by herdr-lazy after a rebuild.
 
 # 5. Start the server from a clean, declared environment — never from inside a pane or a
-#    Claude session (§2.4). ./install links the unit; enabling it is yours to do:
+#    Claude session (§2.4). ./install links the unit; enabling it is yours to do. It is wanted
+#    by graphical-session.target, so on a desktop it comes up by itself at every login and
+#    needs nothing manual; on a headless/SSH-only boot that target is never reached, so start
+#    it by hand there with `systemctl --user start herdr-server.service`.
 systemctl --user daemon-reload && systemctl --user enable --now herdr-server.service
 
 # 6. Prove it the way the SERVER sees it — mise symlink and binaries, server-env hygiene, and
@@ -802,7 +812,7 @@ but treat the conflict as expected rather than proven.
 | Key encoding probe | `scripts/herdr-keyprobe.sh` |
 | Sidebar publisher | `claude/hooks/session-statusline.sh` → `~/.claude/hooks/` (+ `statusLine` in `~/.claude/settings.json`) |
 | Agent skill | `~/.claude/skills/herdr/SKILL.md` (`herdr --skill`) |
-| Server unit | `systemd/herdr-server.service` → `~/.config/systemd/user/herdr-server.service` (`systemctl --user enable --now herdr-server.service`) |
+| Server unit | `systemd/herdr-server.service` → `~/.config/systemd/user/herdr-server.service` (`systemctl --user enable --now herdr-server.service`; wanted by `graphical-session.target`, survives logout) |
 | Server launcher | `scripts/herdr-server-launch.sh` (`--print-env` shows the environment it builds) |
 | Spawn helpers | `hspawn`, `hdespawn`, `hreap` in `zsh/zshrc.company`; registry `~/.local/state/hspawn/` |
 | Detection diagnosis | `herdr agent explain <pane>` · `herdr pane process-info --pane <pane>` |

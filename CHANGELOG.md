@@ -263,7 +263,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The server now runs from a declared, clean environment: `systemd/herdr-server.service` +
     `scripts/herdr-server-launch.sh` (`--print-env`; refuses to start from inside a pane or a
     Claude session; PATH from `~/.local/bin` + `mise bin-paths`, never a plugin shim;
-    `LINEAR_API_KEY` from `~/.zshrc.local`; the session-bus variables toasts need).
+    `LINEAR_API_KEY` from `~/.zshrc.local`; the session-bus variables toasts need). The unit is
+    wanted by `graphical-session.target`, not `default.target`: `Linger=yes` here means the user
+    manager comes up at boot, so a `default.target` unit would start before GNOME imports
+    `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY` and get none of them. `WantedBy` propagates start
+    only and the unit has no `PartOf`, so it still survives logout with every session alive.
+    `SSH_AUTH_SOCK` resolves to the stable `~/.ssh/ssh_auth_sock` symlink rather than the live
+    snap path, because the Bitwarden agent that owns it autostarts *after* that target.
     `scripts/verify-tools.sh` gained "herdr server environment hygiene" (the running server's env
     carries none of the pane/team/plugin variables) and "Plugin dependencies under the herdr
     SERVER PATH" (each dependency resolved one at a time under the *server's* PATH).

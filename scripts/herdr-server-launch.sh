@@ -25,7 +25,9 @@
 #   switch-over, from a PLAIN terminal (not a herdr pane, not a Claude session):
 #     systemctl --user daemon-reload
 #     herdr server stop                       # ends EVERY agent session on the machine
-#     systemctl --user enable --now herdr-server.service
+#     systemctl --user disable herdr-server.service   # only if it was enabled under the OLD
+#     systemctl --user enable --now herdr-server.service   # target; changing [Install] does
+#                                             # not move an existing .wants/ symlink
 #     scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
 #                                             # (non-zero exit on a hygiene FAIL)
 #     journalctl --user -u herdr-server.service -e   # server log
@@ -76,17 +78,30 @@
 #               server restart; Wayland-native clients (WAYLAND_DISPLAY) are
 #               unaffected. Under the unit these come from the user manager's
 #               environment (`systemctl --user show-environment`, which carries all
-#               of them here), which GNOME populates at login; UNVERIFIED whether
-#               default.target reaches this unit before or after that import on a
-#               cold login. Toasts need only the D-Bus address, which is always
+#               of them here), which GNOME populates at session start. That
+#               ordering used to be UNVERIFIED; it is now settled and it is why the
+#               unit hangs off graphical-session.target rather than default.target.
+#               Linger=yes on this account means the user manager, and so
+#               default.target, comes up at BOOT — before any graphical session
+#               exists — so a unit wanted by default.target would start with none
+#               of these set. Toasts need only the D-Bus address, which is always
 #               present.
-#   SSH_AUTH_SOCK    passed through when set. The user manager, the live server and
-#               every pane carry the same Bitwarden agent socket today. Pane shells
-#               CAN recover one without it (zshrc.conditionals.plugins'
-#               _setup_ssh_agent falls back to ~/.ssh/ssh_auth_sock), but only via
-#               the repair path — two `ssh-add -l` probes (~56 ms each) per new pane
-#               instead of the sub-ms fast path. Same class as the D-Bus address: a
-#               session resource, not launching-pane state.
+#   SSH_AUTH_SOCK    the caller's value when set, else ~/.ssh/ssh_auth_sock — the
+#               STABLE SYMLINK, which is the point. The real agent socket here
+#               belongs to the Bitwarden snap, and Bitwarden is a GNOME *autostart*
+#               app (~/.config/autostart/bitwarden_bitwarden.desktop), so it launches
+#               AFTER graphical-session.target: even with the unit ordered there, the
+#               live path is often not in the manager's environment yet. Handing the
+#               server a symlink instead of a snapshot makes that a non-race — the
+#               agent binds that path whenever it starts, before or after the server,
+#               and every pane inherits an indirection that stays correct.
+#               zshrc.conditionals.plugins' _setup_ssh_agent re-points the symlink
+#               whenever the real path changes, and tmux.conf already relies on
+#               exactly this (see its own comment). The symlink is used even when
+#               currently DANGLING, deliberately: at boot it names where the agent
+#               will appear. Without any of this, pane shells still recover via
+#               _setup_ssh_agent's repair path — two `ssh-add -l` probes (~56 ms
+#               each) per new pane instead of the sub-ms fast path.
 #   LINEAR_API_KEY   read from ~/.zshrc.local in a NON-interactive zsh (no prompt,
 #               no plugins, just the file); when non-empty, handed to the server
 #               via a 0600 file under XDG_RUNTIME_DIR that /bin/sh exports (and
@@ -183,6 +198,13 @@ herdr_bin="$(env -i PATH="$path" /bin/sh -c 'command -v herdr' 2>/dev/null || tr
 # ---------------------------------------------------------------------------
 xdg_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
 dbus_address="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$xdg_runtime_dir/bus}"
+# SSH_AUTH_SOCK: the caller's value, else the stable symlink (see the header).
+# -L, not -S, on purpose: a dangling symlink still names where the agent will
+# bind, and the Bitwarden snap that owns it autostarts after this unit.
+ssh_auth_sock="${SSH_AUTH_SOCK:-}"
+if [[ -z "$ssh_auth_sock" && -L "$home/.ssh/ssh_auth_sock" ]]; then
+    ssh_auth_sock="$home/.ssh/ssh_auth_sock"
+fi
 
 # ---------------------------------------------------------------------------
 # Secrets the plugins need. Values are captured, never echoed — and never placed
@@ -227,12 +249,13 @@ server_env=(
     "XDG_RUNTIME_DIR=$xdg_runtime_dir"
     "DBUS_SESSION_BUS_ADDRESS=$dbus_address"
 )
-# Pass-through, only when set. SSH_AUTH_SOCK is not in the brief's list; see the
-# header for why it is here (the same Bitwarden socket the server has always had;
-# without it every new pane shell takes zshrc's slow agent-repair path).
-for var in LANG LC_ALL WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE SSH_AUTH_SOCK; do
+# Pass-through, only when set.
+for var in LANG LC_ALL WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE; do
     if [[ -n "${!var:-}" ]]; then server_env+=("$var=${!var}"); fi
 done
+# SSH_AUTH_SOCK is resolved above rather than merely passed through: without it
+# every new pane shell takes zshrc's slow agent-repair path.
+if [[ -n "$ssh_auth_sock" ]]; then server_env+=("SSH_AUTH_SOCK=$ssh_auth_sock"); fi
 # LINEAR_API_KEY is deliberately NOT in server_env: server_env becomes env(1)'s
 # argv, and /proc/<pid>/cmdline is world-readable. It reaches the server via the
 # 0600 env file at the exec below.

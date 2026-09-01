@@ -364,7 +364,12 @@ Gotchas, in the order they bite:
   `systemctl --user restart herdr-server.service` (`systemd/herdr-server.service`, launcher
   `scripts/herdr-server-launch.sh`; `--print-env` shows the environment it builds, and it refuses to
   start when `HERDR_ENV`, `CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` is set). `scripts/verify-tools.sh`
-  asserts the running server's env is clean. See HERDR_GUIDE §2.4.
+  asserts the running server's env is clean. The unit is wanted by `graphical-session.target`, **not
+  `default.target`**: `Linger=yes` on this account brings the user manager up at *boot*, so a
+  `default.target` unit would start before GNOME imports `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY`
+  and get none of them. It still survives logout — `WantedBy` propagates start only, and the unit
+  has no `PartOf` — so every agent session stays alive. Nothing is manual per boot. See
+  HERDR_GUIDE §2.4.
 - **An error anywhere in `[ui]` silently reverts ALL of `[ui]`** and reports `partial` with no
   error text. After any config edit, `herdr server reload-config | jq '.result.status'` must say
   `applied`. If an edit "did nothing", this is the first thing to check.

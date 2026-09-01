@@ -12,6 +12,7 @@
 # pane, not a Claude session:
 #   systemctl --user daemon-reload
 #   herdr server stop                       # ends EVERY agent session on the machine
+#   systemctl --user disable herdr-server.service     # only if enabled under the OLD target
 #   systemctl --user enable --now herdr-server.service
 #   scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
 #                                           # (non-zero exit on a hygiene FAIL)
@@ -33,6 +34,16 @@
 [Unit]
 Description=herdr server (headless, clean declared environment)
 Documentation=file://%h/.dotfiles/docs/HERDR_GUIDE.md
+# Ordered AFTER the graphical session, and started BY it (see [Install]). The
+# launcher passes DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / SSH_AUTH_SOCK through
+# only when set, and those reach the user manager when GNOME imports them at
+# session start. `loginctl show-user` reports Linger=yes here, so the user
+# manager — and therefore default.target — comes up at BOOT, well before any
+# graphical session exists: a unit wanted by default.target would start with
+# none of them. graphical-session.target is reached via gnome-session.target
+# after gnome-session-manager@<session>.service, which is what performs that
+# import, so hanging off it is what makes the environment complete.
+After=graphical-session.target
 
 [Service]
 Type=simple
@@ -73,4 +84,22 @@ Restart=on-abnormal
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+# graphical-session.target, NOT default.target — see the After= note above; the
+# server needs the session environment that only exists once GNOME has imported
+# it. This does NOT cost persistence: WantedBy propagates START only. Stop
+# propagation would need PartOf=/BindsTo=, which this unit deliberately does not
+# have, so the server survives logout and keeps every agent session alive — the
+# entire point of running it as a persistent host. Re-login is idempotent (the
+# unit is already active, so the second start is a no-op).
+#
+# Cost, accepted: on a headless or SSH-only boot graphical-session.target is
+# never reached and no server starts. Start one by hand there:
+#   systemctl --user start herdr-server.service
+#
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK. A unit enabled under
+# the old target keeps its default.target.wants/ link until re-enabled:
+#   systemctl --user daemon-reload
+#   systemctl --user disable herdr-server.service
+#   systemctl --user enable herdr-server.service     # --now only if none runs
+# Verify: systemctl --user show herdr-server.service -p WantedBy
+WantedBy=graphical-session.target
