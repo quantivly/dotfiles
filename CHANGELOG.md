@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`apply-gnome-settings.sh` now says when the machine-specific layer overrides the portable
+  one** (`scripts/apply-gnome-settings.sh`). Both layers log a plain `✓`, so a `~/.gnome-settings.local`
+  line that undoes a setting three lines after the portable layer applied it was invisible: two
+  successes that cancel, reported as two successes. That is exactly how `grp:alt_shift_toggle`
+  stayed enabled — `apply_input_sources` cleared it, the local file re-enabled it every run, and
+  all four of herdr's `alt+shift+arrow` bindings were dead for as long as they had existed while
+  `gnome-apply` reported success and `gsettings get` showed the override as though it were the
+  applied value. An overriding set now reads `✓ key → value  (overrides <previous>, set above)`.
+  A NOTE rather than a warning, deliberately: overriding is what that layer is *for* — the
+  workspace-switch keys are legitimate overrides — and a warning on each would be noise in the
+  normal case, which is how a diagnostic becomes one nobody reads. `GNOME_LOCAL_OVERRIDES` makes
+  the path injectable so the behaviour can be exercised against a fixture.
+
 ### Fixed
 
 - **Backups: the mount-point guard's last enumerated case is now a structural rule.**
