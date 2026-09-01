@@ -16,8 +16,8 @@
 # authoritative regardless of shell state OR the repo's on-disk path.
 #
 # The signal is the repo's REMOTE (its GitHub org), via hasconfig — so a work
-# repo routes correctly even when checked out outside ~/quantivly/ (e.g. Atrium
-# worktrees under ~/.atrium/worktrees/, or /tmp clones). Requires git >= 2.36
+# repo routes correctly even when checked out outside ~/quantivly/ (e.g. herdr
+# worktrees under ~/.herdr/worktrees/, or /tmp clones). Requires git >= 2.36
 # (check with `git --version`); on older git the conditions are silently ignored
 # and work repos fall back to the personal identity above.
 #

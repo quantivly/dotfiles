@@ -6,16 +6,23 @@
 #
 # Why: most test runners and build tools default to "one worker per core".
 # That default assumes it is the only thing running. With N parallel Claude
-# Code sessions (Atrium) it becomes N x cores of demand on a machine that has
+# Code sessions it becomes N x cores of demand on a machine that has
 # cores, turning a 250ms prompt into a multi-second stall. Measured on this
 # host: three sessions running tsc + vitest + go build together pushed the run
 # queue past 40 on 8 threads.
 #
 # Two tiers:
-#   - Inside an Atrium session ($ATRIUM_SESSION set): tight cap, since an
-#     unknown number of sibling agents share the box.
+#   - Inside a herdr pane ($HERDR_PANE_ID set): tight cap, since an unknown
+#     number of sibling agents share the box.
 #   - Interactive shell: half the cores, which still leaves the desktop
 #     responsive while you wait on your own build.
+#
+# The gate was $ATRIUM_SESSION until Atrium was retired (2026-09-01). That is
+# worth naming rather than quietly rewriting: an unset variable selects the
+# LOOSE tier, so once Atrium stopped running, every agent pane silently got the
+# half-the-cores budget meant for a solo human — the exact over-subscription
+# this file exists to prevent, arriving as a config file that still looked
+# correct. $HERDR_PANE_ID is herdr's equivalent and is set in every pane.
 #
 # Every value is a default, not an override: an explicitly-set variable or a
 # per-invocation flag (`vitest --max-workers=8`) always wins.
@@ -26,7 +33,7 @@
 # Hardware thread count, with a conservative fallback if nproc is missing.
 _bl_cores=$(command nproc 2>/dev/null || echo 4)
 
-if [ -n "${ATRIUM_SESSION:-}" ]; then
+if [ -n "${HERDR_PANE_ID:-}" ]; then
     # Sharing the machine with sibling agent sessions.
     _bl_jobs=2
 else
@@ -43,7 +50,7 @@ export NPM_CONFIG_JOBS="${NPM_CONFIG_JOBS:-$_bl_jobs}"
 
 # --- Go ----------------------------------------------------------------------
 # -p caps parallel build/test actions. Deliberately NOT GOMAXPROCS: that would
-# throttle the Go runtime of every binary we run, including Atrium's own TUI.
+# throttle the Go runtime of every binary we run, herdr's own server included.
 # Unknown GOFLAGS entries are ignored by unrelated subcommands (verified against
 # go env / version / help on go1.26).
 export GOFLAGS="${GOFLAGS:--p=$_bl_jobs}"
@@ -66,7 +73,7 @@ unset _bl_cores _bl_jobs
 # Report the active caps. Useful when a build feels slower than expected.
 build-limits() {
     local context="interactive shell"
-    [ -n "${ATRIUM_SESSION:-}" ] && context="Atrium session ($ATRIUM_SESSION)"
+    [ -n "${HERDR_PANE_ID:-}" ] && context="herdr pane ($HERDR_PANE_ID)"
     printf '%-34s %s\n' \
         "context" "$context" \
         "cores (nproc)" "$(command nproc 2>/dev/null || echo '?')" \

@@ -772,7 +772,8 @@ echo "=== the doctor leaves nothing behind in the shell ==="
 # _D* variables persisted in every shell that ran the doctor (or merely started,
 # for two of them), and a nested call clobbered the outer count.
 leak() { zsh -c "source '$SYSTEM_SH'; HOME='$FAKEHOME' DOTFILES_ROOT='$REPO' dotfiles-doctor >/dev/null 2>&1; print -r -- \"\${$1-unset}\""; }
-for v in _DOCTOR_FAIL _DOCTOR_WARN _DOTFILES_HEAD _DOTFILES_VERDICT; do
+for v in _DOCTOR_FAIL _DOCTOR_WARN _DOTFILES_HEAD _DOTFILES_VERDICT \
+         _DOTFILES_UMASK_WANT _DOTFILES_UMASK_MODE; do
   check "no \$$v left behind" "$(leak "$v")" "unset"
 done
 check "no _D* left after the startup warning" \
@@ -819,13 +820,19 @@ check "backup wrappers still count" "$(wrap)" "1/1"
 # _doctor_summary rather than from a hardcoded list — so a third doctor is
 # covered the moment it is written, which is the only way this convention stays
 # true.
-doctors="$(zsh -c "source '$SYSTEM_SH'; for f in \${(k)functions}; do [[ \"\${functions[\$f]}\" == *_doctor_summary* ]] && print -r -- \$f; done" | sort)"
+# Every functions module, not just system.sh: the emitters live here but
+# doctors do not have to, and gh-doctor (zsh/functions/github.sh) is the first
+# that does not — the sweep has to find it or the convention holds only for the
+# doctors that happen to share a file with it.
+ALLFUNCS="$(printf "source '%s'; " "$DOTFILES"/zsh/functions/*.sh)"
+doctors="$(zsh -c "$ALLFUNCS for f in \${(k)functions}; do [[ \"\${functions[\$f]}\" == *_doctor_summary* ]] && print -r -- \$f; done" | sort)"
 [[ -n "$doctors" ]] || fatal "no functions call _doctor_summary — were the emitters renamed?"
 check "dotfiles-doctor is a doctor" "$(printf '%s\n' "$doctors" | grep -cx 'dotfiles-doctor')" "1"
 check "backup-doctor is a doctor"   "$(printf '%s\n' "$doctors" | grep -cx 'backup-doctor')"   "1"
+check "gh-doctor is a doctor"       "$(printf '%s\n' "$doctors" | grep -cx 'gh-doctor')"       "1"
 while IFS= read -r d; do
   [[ -n "$d" ]] || continue
-  body="$(zsh -c "source '$SYSTEM_SH'; print -r -- \"\${functions[$d]}\"")"
+  body="$(zsh -c "$ALLFUNCS print -r -- \"\${functions[$d]}\"")"
   case "$body" in
     *"local _DOCTOR_FAIL=0 _DOCTOR_WARN=0"*|*"local _DOCTOR_FAIL"*"local _DOCTOR_WARN"*)
       ok "$d declares its own counters" ;;
@@ -910,6 +917,113 @@ check "no dead hook left in the table" \
           source '$GUARDSNIP'
           { for f in \$precmd_functions; do \$f; done } >/dev/null 2>&1
           print -r -- \$+functions[_dotfiles_guard_precmd]")" "0"
+
+echo
+echo "=== _dotfiles_umask_guard: tighten only while the group is really shared ==="
+# Ubuntu's pam_umask gives 002 whenever the login group is named after the user,
+# on the reasoning that its permissions are then yours alone — and dev-setup
+# breaks that by adding a service account to the group. Every row is a state
+# where getting it wrong is invisible: too loose leaves $HOME group-writable by
+# another account, too tight silently breaks workspace sharing on the hosts
+# where the grant is real.
+GRPDIR="$TMPROOT/groups"; mkdir -p "$GRPDIR"
+printf 'root:x:0:\ntester:x:%s:\nsvc:x:242:tester\n'  "$(id -g)" > "$GRPDIR/private"
+printf 'root:x:0:\ntester:x:%s:%s\n'  "$(id -g)" "$(id -un)"      > "$GRPDIR/selfonly"
+printf 'root:x:0:\ntester:x:%s:svc,other\n' "$(id -g)"            > "$GRPDIR/shared"
+printf 'root:x:0:\nsomethingelse:x:64999:\n'                      > "$GRPDIR/nogroup"
+umaskrun() {  # umaskrun <env-assignments>  -> "<rc> <umask> <why>"
+  zsh -c "umask 002; source '$SYSTEM_SH'
+          $1 _dotfiles_umask_guard; rc=\$?
+          print -r -- \"\$rc \$(umask) \$_DOTFILES_UMASK_WHY\"" 2>&1
+}
+check "shared group tightens to 022" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/shared" | cut -d' ' -f1,2)" "0 022"
+check "...and names who else is in it" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/shared" | grep -c 'svc, other')" "1"
+# The whole point of gating on the condition: once `gpasswd -d` has run, the
+# guard must stop firing on its own rather than needing a second edit.
+check "private group is left alone" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/private" | cut -d' ' -f1,2)" "0 002"
+# Being listed in your own group is not sharing.
+check "self-membership is not sharing" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/selfonly" | cut -d' ' -f1,2)" "0 002"
+# "Could not determine" must not pick a side: tightening breaks sharing that may
+# be load-bearing, relaxing recreates the exposure. Both report non-zero.
+check "no entry for our gid: unchanged" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/nogroup" | cut -d' ' -f1,2)" "1 002"
+check "...and says why"  "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/nogroup" | grep -c 'no .* entry for gid')" "1"
+check "unreadable group file: unchanged" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$TMPROOT/no-such-group" | cut -d' ' -f1,2)" "1 002"
+check "DOTFILES_UMASK wins outright" \
+      "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/shared DOTFILES_UMASK=077" | cut -d' ' -f1,2)" "0 077"
+# It may only RESTRICT. `umask 022` is an absolute assignment, so a guard
+# installed to harden silently LOOSENED an already-hardened host — and the
+# doctor printed that as ✓ 022. Two arithmetic traps live here too: $(( ))
+# yields DECIMAL while umask parses OCTAL, so passing the union straight
+# through set 0o63 from 077 and errored "bad umask" from 002.
+stricter() {  # stricter <starting-mask> -> resulting mask
+  zsh -c "umask $1; source '$SYSTEM_SH'
+          DOTFILES_GROUP_FILE='$GRPDIR/shared' _dotfiles_umask_guard 2>/dev/null
+          print -r -- \$(umask)"
+}
+check "002 tightens to 022"            "$(stricter 002)" "022"
+check "022 is already there"           "$(stricter 022)" "022"
+check "077 is NOT loosened"            "$(stricter 077)" "077"
+check "007 unions rather than replaces" "$(stricter 007)" "027"
+# An override that is not a valid mask must be reported, not reported as applied
+# — and its error must not escape to stderr during shell initialisation, where
+# it lands inside p10k's instant-prompt warning box.
+check "invalid DOTFILES_UMASK is a failure" \
+      "$(umaskrun "DOTFILES_UMASK=nonsense" | cut -d' ' -f1,2)" "1 002"
+check "...named as invalid, not as applied" \
+      "$(umaskrun "DOTFILES_UMASK=nonsense" | grep -c 'is not a valid mask')" "1"
+# Validity belongs to the VERDICT, not to applying it: while only the guard
+# knew, dotfiles-doctor (which asks for the verdict alone) called a nonsense
+# override ✓ — reproducing, inside the checker, the very "reported as applied"
+# defect the guard had just been fixed for.
+check "the verdict itself rejects an invalid override" \
+      "$(zsh -c "source '$SYSTEM_SH'
+                 local _DOTFILES_UMASK_MODE _DOTFILES_UMASK_WANT _DOTFILES_UMASK_WHY
+                 DOTFILES_UMASK=nonsense _dotfiles_umask_verdict
+                 print -r -- \"\$?/\${_DOTFILES_UMASK_MODE:-none}\"")" "1/none"
+check "the doctor calls it a warning, not ✓" \
+      "$(zsh -c "source '$SYSTEM_SH'
+                 DOTFILES_UMASK=nonsense HOME='$FAKEHOME' DOTFILES_ROOT='$REPO' \
+                   dotfiles-doctor 2>&1" | grep -c '⚠ umask .* not a valid mask')" "1"
+check "...and emits no math error" \
+      "$(zsh -c "source '$SYSTEM_SH'
+                 DOTFILES_UMASK=nonsense HOME='$FAKEHOME' DOTFILES_ROOT='$REPO' \
+                   dotfiles-doctor 2>&1" | grep -ci 'bad math')" "0"
+# The restriction is applied symbolically, so there is no current-mask read and
+# no base conversion — the two traps the numeric form kept producing.
+check "the guard performs no umask read" \
+      "$(zsh -c "source '$SYSTEM_SH'; print -r -- \"\${functions[_dotfiles_umask_guard]}\"" \
+         | grep -cE '\$\(umask\)|8#')" "0"
+check "...and prints nothing to stderr" \
+      "$(zsh -c "source '$SYSTEM_SH'; DOTFILES_UMASK=nonsense _dotfiles_umask_guard 2>&1 >/dev/null" | wc -c | tr -d ' ')" "0"
+# The doctor is a read-only assertion; it must not reset the umask of the shell
+# it runs in (a `umask 077` set before handling something sensitive would go).
+check "dotfiles-doctor does not touch the umask" \
+      "$(zsh -c "umask 077; source '$SYSTEM_SH'
+                 DOTFILES_GROUP_FILE='$GRPDIR/shared' HOME='$FAKEHOME' DOTFILES_ROOT='$REPO' \
+                   dotfiles-doctor >/dev/null 2>&1
+                 print -r -- \$(umask)")" "077"
+check "...and the verdict function applies nothing" \
+      "$(zsh -c "umask 002; source '$SYSTEM_SH'
+                 local _DOTFILES_UMASK_MODE _DOTFILES_UMASK_WANT _DOTFILES_UMASK_WHY
+                 DOTFILES_GROUP_FILE='$GRPDIR/shared' _dotfiles_umask_verdict
+                 print -r -- \"\$(umask) mode=\$_DOTFILES_UMASK_MODE\"")" "002 mode=restrict"
+# It runs in every shell, so it must not fork: $(<file) and $GID, never getent.
+check "no getent/awk fork in the guard" \
+      "$(zsh -c "source '$SYSTEM_SH'; print -r -- \"\${functions[_dotfiles_umask_guard]}\"" \
+         | grep -cE 'getent|\bawk\b|\bid -')" "0"
+check "no \$_DOTFILES_UMASK_WHY left behind by the doctor" \
+      "$(leak _DOTFILES_UMASK_WHY)" "unset"
+# zshrc must actually call it, and must not leak the reason into every shell.
+check "zshrc calls the guard" \
+      "$(grep -cE '^[[:space:]]*_dotfiles_umask_guard[[:space:]]*$' "$DOTFILES/zshrc")" "1"
+check "zshrc unsets the reason"  \
+      "$(grep -c 'unset _DOTFILES_UMASK_WHY' "$DOTFILES/zshrc")" "1"
 
 echo
 echo "=== the module itself: one note glyph, and it parses ==="

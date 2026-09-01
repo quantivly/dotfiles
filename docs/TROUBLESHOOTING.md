@@ -90,13 +90,19 @@ grep -r "alias aliasname=" ~/.dotfiles/      # Find definition
 ## Git authentication issues
 
 ```bash
-gh auth status   # Check status
+gh-doctor        # Which account is gh ACTUALLY using here? (start here)
+gh auth status   # What gh has been CONFIGURED with — not the same question
 gh auth login    # Re-authenticate
 ```
 
+`gh auth status` reports the *declared* active user for a config dir. Whether an
+API call comes back as that user is a separate question, and on a multi-account
+machine the two routinely disagree — see [GitHub CLI multi-account
+switching](#github-cli-multi-account-switching) below.
+
 ## Git identity & SSH key routing (work vs personal)
 
-On a dual-identity machine, the work profile (`user.email`, `user.signingkey`, **and** the SSH key used for fetch/push) is selected by the repo's **remote org**, not by where it sits on disk. `~/.gitconfig.local` includes `~/.gitconfig-work` whenever any remote points at the quantivly org, via `includeIf "hasconfig:remote.*.url:…"` (requires **git ≥ 2.36**). This is path-independent, so it works in Atrium worktrees under `~/.atrium/worktrees/`, clones under `~/Projects/`, `/tmp`, etc. `~/.gitconfig-work` org-scopes the transport rewrite (`url."git@github-work:quantivly/".insteadOf`) so quantivly remotes use the work key while personal remotes stay on the personal key.
+On a dual-identity machine, the work profile (`user.email`, `user.signingkey`, **and** the SSH key used for fetch/push) is selected by the repo's **remote org**, not by where it sits on disk. `~/.gitconfig.local` includes `~/.gitconfig-work` whenever any remote points at the quantivly org, via `includeIf "hasconfig:remote.*.url:…"` (requires **git ≥ 2.36**). This is path-independent, so it works in herdr worktrees under `~/.herdr/worktrees/`, clones under `~/Projects/`, `/tmp`, etc. `~/.gitconfig-work` org-scopes the transport rewrite (`url."git@github-work:quantivly/".insteadOf`) so quantivly remotes use the work key while personal remotes stay on the personal key.
 
 **Symptom:** a work repo authenticates/commits as personal — e.g. `git push` denied (`Permission to quantivly/<repo>.git denied to <personal-user>`), or commits show the personal email/signature.
 
@@ -118,7 +124,53 @@ git ls-remote --heads origin                # read-only auth probe (no push)
 
 ## GitHub CLI multi-account switching
 
-The `zshrc.company` `chpwd` hook switches `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`, and `CLAUDE_CONFIG_DIR` based on context: a dir is **work** if it lives under `~/quantivly/**` (fast path) **or** its `origin` remote belongs to the quantivly org (`_q_is_work_context`), everything else → personal. The remote check mirrors the git identity routing above, so the gh/Claude account follows the repo even when checked out outside `~/quantivly/`.
+**Start with `gh-doctor`.** It prints, for the current directory: the account the
+repo's remote routes to, the account gh *declares*, the account a real `GET /user`
+*returns*, and which mechanism decided. Everything it says about "effective" comes
+from an actual request — that is the whole point, because inferring the account
+from configuration is precisely how this goes wrong.
+
+The `zshrc.company` `chpwd` hook (`_update_gh_config`) selects a gh config dir from
+the repo's **remote** via `GH_ACCOUNT_ROUTES`, then **pins** the account by
+exporting `GH_TOKEN` from `~/.cache/gh-token-cache/<config-dir-basename>`. Routing
+consults **every** remote, not just `origin`, mirroring git's
+`hasconfig:remote.*.url` — so a fork whose `upstream` is the work repo routes the
+way git already signs it. Outside a repo (or when no route matches) it falls to
+`GH_ACCOUNT_DEFAULT_DIR`, the personal dir, which is still an explicit pin.
+
+It routed on `$PWD` first until 2026-09-01. That let gh and git disagree about the
+same repository — a quantivly clone outside `~/quantivly/` got the personal account
+from gh and the work identity from git.
+
+**Key gotcha — `GH_CONFIG_DIR` does not isolate the credential.** gh keys its
+tokens in the system keyring by **host**, not by config dir, so several config dirs
+declaring different accounts all resolve to one:
+
+```
+config dir      hosts.yml declares    an API call resolves to
+gh              zvi-quantivly      →  zvi-quantivly
+gh-personal     ZviBaratz          →  zvi-quantivly   ← mismatch
+gh-quantivly    zvi-quantivly      →  zvi-quantivly
+```
+
+`gh auth status` reports the declared user throughout. With `GH_TOKEN` unset the
+fallback is the **work** account, in any directory — so a personal repo silently
+gets work credentials. Reproduce it with `gh-doctor`, or by hand:
+
+```bash
+for d in gh gh-personal gh-quantivly; do
+  printf '%-14s -> %s\n' "$d" \
+    "$(env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$HOME/.config/$d" gh api user --jq .login)"
+done
+```
+
+`"$HOME/..."`, not `~/...`: **zsh does not tilde-expand after `=` in a command
+word**, only in a real assignment, so `env GH_CONFIG_DIR=~/.config/gh` hands gh the
+literal string `~/.config/gh` (bash expands it, which is how the broken form gets
+written). gh then reads a nonexistent relative directory for every iteration and
+all three rows print the same keyring default — the collapse appears confirmed for
+entirely the wrong reason, and the table would look identical on a machine where
+`GH_CONFIG_DIR` isolation worked perfectly.
 
 **Key gotcha — `gh auth token` keyring lookup:**
 - `gh auth token` (no `--user`) returns a shared/default keyring entry, NOT the per-user entry matching the config's `user:` field
@@ -132,6 +184,9 @@ The `zshrc.company` `chpwd` hook switches `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_P
 
 **Debugging multi-account issues:**
 ```bash
+gh-doctor                        # all of the below, in one report, per directory
+gh-refresh-tokens                # re-cache per-account tokens, then re-apply here
+
 # Check which account a token authenticates as
 GH_TOKEN="$(gh auth token --user USERNAME)" gh api user --jq '.login'
 
@@ -139,10 +194,16 @@ GH_TOKEN="$(gh auth token --user USERNAME)" gh api user --jq '.login'
 gh auth token                    # shared default — may be wrong
 gh auth token --user USERNAME    # per-user keyring entry — correct
 
-# Verify directory-based switching
-cd ~ && echo "GH_TOKEN prefix: ${GH_TOKEN:0:15}" && gh api user --jq '.login'
-cd ~/quantivly && echo "GH_TOKEN prefix: ${GH_TOKEN:0:15}" && gh api user --jq '.login'
+# Verify remote-based switching (never print the token itself)
+cd ~ && gh api user --jq '.login'
+cd ~/quantivly/platform && gh api user --jq '.login'
 ```
+
+**"account NOT pinned" on the first prompt of a shell.** The token cache is
+repopulated by a background job at shell start, so the very first `cd` can beat
+it. Transient. If it persists, that account has no per-user keyring entry —
+`gh-refresh-tokens` will say which, and the fix is `gh auth login` in that config
+dir.
 
 **Auth flow (precedence):** `GH_TOKEN` env → `GH_ENTERPRISE_TOKEN` → keyring (via `GH_CONFIG_DIR` config)
 

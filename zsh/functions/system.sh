@@ -86,6 +86,145 @@ _doctor_summary() {
   return 0
 }
 
+# -----------------------------------------------------------------------------
+# Login-group umask guard
+# -----------------------------------------------------------------------------
+# Ubuntu's pam_umask relaxes the umask from 022 to 002 when the login group is a
+# "user private group" — same name as the user — on the reasoning that group
+# permissions are then permissions for yourself alone. Sound reasoning, and
+# false on this machine: `getent group zvi` returned `zvi:x:1000:quantivly`, so
+# the group named after the user had a second member, and under umask 002 nearly
+# every file the user created — $HOME dotfiles included — was group-writable by
+# a service account (uid 242, /bin/sh, never logged in). `.zshenv` that way is a
+# code-execution path, not just a disclosure one.
+#
+# The real defect is that extra member, and removing it is the fix:
+#
+#     sudo gpasswd -d <service-account> <login-group>
+#
+# This is the belt to that braces: while any OTHER account is in the login
+# group, refuse the relaxed umask.
+#
+# GATED ON THE CONDITION, NOT ON THE ORDER the fixes were applied in.
+# `dev-setup` adds the service account to the user's group deliberately
+# (modules/system.sh) because workspaces are meant to be shared through it — so
+# a blanket `umask 022` in a repo that installs on other people's machines would
+# silently break that sharing, on exactly the hosts where the grant is real.
+# Asking whether the group is actually shared answers correctly for every host,
+# needs no ordering discipline, and stops tightening by itself the moment the
+# grant is removed. It is also the one form that cannot go stale: it re-reads
+# the answer every shell instead of encoding one machine's state in a config.
+#
+# Forkless — `$(<file)` does not fork in zsh, and `$GID` is a shell parameter —
+# because this runs in every interactive shell.
+#
+# SCOPE, stated because the paragraphs above could be read as a guarantee:
+# `zshrc` is sourced only by INTERACTIVE shells, so `zsh -c …`, systemd --user
+# units, GUI applications and cron keep whatever pam_umask handed them. This is
+# a belt, and a partial one; removing the extra group member is the braces and
+# the actual fix. Covering the rest would mean owning `~/.zshenv` — which is
+# also where DOTFILES_UMASK goes, and which this repo deliberately does not
+# install, since it is machine-local.
+#
+# "Cannot tell" (no /etc/group entry: SSSD, systemd-homed) leaves the umask
+# exactly as the system set it and says so. Guessing in either direction is
+# worse than the state the machine is already in: tightening breaks sharing that
+# may be load-bearing, relaxing re-creates the exposure.
+#
+# It only ever RESTRICTS. `umask 022` is an absolute assignment, so on a host
+# already hardened to 077 a guard installed to tighten silently LOOSENED the
+# mask — and dotfiles-doctor printed that as `✓ 022`. The verdict is now OR-ed
+# into the current value.
+#
+# Override: DOTFILES_UMASK=<mask> in ~/.zshenv, which loads before zshrc.
+#
+# The decision is separate from the application so dotfiles-doctor can ask
+# without doing: a read-only health check that resets the umask of the shell it
+# is run in is the predicate-with-side-effects shape, and would quietly undo a
+# `umask 077` the user set before handling something sensitive.
+_dotfiles_umask_verdict() {
+  # Usage: _dotfiles_umask_verdict   (pure — reads nothing but /etc/group)
+  # Sets:  _DOTFILES_UMASK_MODE = "" | explicit | restrict
+  #        _DOTFILES_UMASK_WANT = "" | the mask an `explicit` verdict applies
+  #        _DOTFILES_UMASK_WHY  = one line, for dotfiles-doctor and humans
+  # Returns non-zero when it could not determine the answer, INCLUDING when an
+  # explicit override is not a usable mask — the validity of DOTFILES_UMASK is
+  # part of the verdict, not of applying it. Leaving it to the guard meant the
+  # doctor, which only asks for the verdict, called a nonsense override ✓.
+  local grpfile="${DOTFILES_GROUP_FILE:-/etc/group}"
+  local line me="${USERNAME:-${LOGNAME:-$USER}}"
+  local -a fields others
+  _DOTFILES_UMASK_MODE=""; _DOTFILES_UMASK_WANT=""; _DOTFILES_UMASK_WHY=""
+
+  if [[ -n "${DOTFILES_UMASK:-}" ]]; then
+    # Validity is only knowable by trying it, so try it somewhere harmless. One
+    # fork, only when the override is set.
+    if ( umask "$DOTFILES_UMASK" ) 2>/dev/null; then
+      _DOTFILES_UMASK_MODE=explicit
+      _DOTFILES_UMASK_WANT="$DOTFILES_UMASK"
+      _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK=$DOTFILES_UMASK — set explicitly"
+      return 0
+    fi
+    _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK='$DOTFILES_UMASK' is not a valid mask — ignored, umask left as the system set it"
+    return 1
+  fi
+
+  if [[ ! -r "$grpfile" ]]; then
+    _DOTFILES_UMASK_WHY="cannot read $grpfile — umask left as the system set it"
+    return 1
+  fi
+
+  for line in ${(f)"$(<$grpfile)"}; do
+    fields=( "${(@s.:.)line}" )
+    [[ "${fields[3]:-}" == "$GID" ]] || continue
+    # Being listed in your own group is not sharing.
+    others=( ${(s.,.)${fields[4]:-}} )
+    others=( ${others:#$me} )
+    if (( ${#others} )); then
+      _DOTFILES_UMASK_MODE=restrict
+      _DOTFILES_UMASK_WHY="at least 022 — login group '${fields[1]}' also contains ${(j:, :)others}, so group-write is write access for someone else"
+    else
+      _DOTFILES_UMASK_WHY="left as the system set it — login group '${fields[1]}' has no other members"
+    fi
+    return 0
+  done
+
+  _DOTFILES_UMASK_WHY="no $grpfile entry for gid $GID — umask left as the system set it"
+  return 1
+}
+
+_dotfiles_umask_guard() {
+  # Usage: _dotfiles_umask_guard   (call from zshrc; APPLIES the verdict)
+  # Sets:  _DOTFILES_UMASK_WHY, as above.
+  local rc
+  local _DOTFILES_UMASK_MODE _DOTFILES_UMASK_WANT
+  _dotfiles_umask_verdict; rc=$?
+  (( rc == 0 )) || return $rc
+
+  if [[ "$_DOTFILES_UMASK_MODE" == "explicit" ]]; then
+    # Already proven applicable by the verdict, so this cannot emit an error —
+    # which matters because it runs during initialisation, where output lands
+    # inside p10k's instant-prompt warning box.
+    umask "$_DOTFILES_UMASK_WANT"
+    return 0
+  fi
+  [[ "$_DOTFILES_UMASK_MODE" == "restrict" ]] || return 0
+
+  # Restrict, never relax — as a SYMBOLIC mask, which is the whole answer.
+  #
+  # The numeric route needed the current value (a `$(umask)` fork, in a function
+  # whose own comment claims to be forkless because it runs in every shell) and
+  # then an OR, which brought its own trap: `$(( 8#077 | 8#022 ))` is 63
+  # DECIMAL while `umask` parses a bare number as OCTAL, so passing it through
+  # set 0o63 on a host at 077 — a further silent loosening by the guard meant to
+  # harden — and errored `bad umask` from 002, where the decimal 18 is not valid
+  # octal. `umask g-w,o-w` denies exactly those bits relative to whatever is
+  # already set: 002→022, 022→022, 077→077, 007→027. No read, no arithmetic, no
+  # base confusion, and nothing to get wrong a third time.
+  umask g-w,o-w
+  return 0
+}
+
 # =============================================================================
 # Performance & System Monitoring Functions
 # =============================================================================
@@ -1391,6 +1530,44 @@ dotfiles-doctor() {
     if [[ -n "$skipped" ]]; then
       _doctor_note "conditional in install.conf.yaml (\`if:\`) and not installed:$skipped"
     fi
+  fi
+
+  # Not a dotfiles-link question, but it is a "what is live in this shell"
+  # question, and the failure is the same shape: the value looks ordinary and
+  # nothing reports the difference. 002 with a shared login group made every
+  # file this user creates writable by another account.
+  echo "File-creation mask:"
+  # _verdict, not _guard: the doctor must not change the umask of the shell it
+  # is run in. It reports what is live and what the rule wants, and says so when
+  # those differ — which is how you notice a shell that started before the rule
+  # existed, or one where an override failed.
+  # Ask what the rule WOULD do by running the guard in a subshell and comparing
+  # masks — never by re-deriving the comparison here. The re-derived version
+  # used `8#$_DOTFILES_UMASK_WANT`, which is a math error for any non-octal
+  # DOTFILES_UMASK: `DOTFILES_UMASK=nonsense` printed `bad math expression` and
+  # then `✓ … set explicitly`, i.e. it reproduced, in the checker, the exact
+  # "reported as applied" defect the guard had just been fixed for. A fork in a
+  # doctor is free; a second implementation of the rule is not.
+  local _DOTFILES_UMASK_WHY _DOTFILES_UMASK_MODE _DOTFILES_UMASK_WANT
+  local _cur _would
+  _cur="$(umask)"
+  # Ask what the rule WOULD do by running the guard in a subshell, never by
+  # re-deriving it here. The re-derived version used `8#$_DOTFILES_UMASK_WANT`,
+  # a math error for any non-octal override, and then printed ✓ — reproducing,
+  # inside the checker, the "reported as applied" defect the guard had just been
+  # fixed for. A fork in a doctor is free; a second implementation is not.
+  _would="$(_dotfiles_umask_guard >/dev/null 2>&1; umask)"
+  if _dotfiles_umask_verdict; then
+    if [[ "$_would" != "$_cur" ]]; then
+      _doctor_bad "umask is $_cur but the rule would set $_would — this shell predates the rule ($_DOTFILES_UMASK_WHY)"
+    else
+      case "$_DOTFILES_UMASK_MODE" in
+        "") _doctor_note "umask $_cur — $_DOTFILES_UMASK_WHY" ;;
+        *)  _doctor_ok   "umask $_cur — $_DOTFILES_UMASK_WHY" ;;
+      esac
+    fi
+  else
+    _doctor_warn "umask $_cur — $_DOTFILES_UMASK_WHY"
   fi
 
   echo "Worktrees (where feature work belongs):"

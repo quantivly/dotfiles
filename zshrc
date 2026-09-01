@@ -183,14 +183,31 @@ bindkey '^W' backward-kill-word     # Ctrl+W - delete word backward (alternative
 # History settings
 [ -f ~/.dotfiles/zsh/zshrc.history ] && source ~/.dotfiles/zsh/zshrc.history
 
-# Utility functions (modular: core, development, system)
+# Utility functions (modular: core, development, system, github)
+# github.sh comes after system.sh: gh-doctor uses the shared _doctor_* emitters
+# defined there.
 for func_module in \
   ~/.dotfiles/zsh/functions/core.sh \
   ~/.dotfiles/zsh/functions/development.sh \
-  ~/.dotfiles/zsh/functions/system.sh; do
+  ~/.dotfiles/zsh/functions/system.sh \
+  ~/.dotfiles/zsh/functions/github.sh; do
   [ -f "$func_module" ] && source "$func_module"
 done
 unset func_module
+
+# File-creation mask. Ubuntu's pam_umask hands out 002 whenever the login group
+# is named after the user, on the assumption that makes it yours alone — an
+# assumption `dev-setup` breaks by adding a service account to that group. The
+# guard tightens to 022 only while the group really does contain someone else,
+# so it is correct both before and after `gpasswd -d`, and on hosts where the
+# grant is load-bearing it leaves sharing alone. Forkless; see
+# _dotfiles_umask_guard in zsh/functions/system.sh. Override with
+# DOTFILES_UMASK in ~/.zshenv, or just call `umask` in ~/.zshrc.local, which is
+# sourced later.
+if (( $+functions[_dotfiles_umask_guard] )); then
+  _dotfiles_umask_guard
+  unset _DOTFILES_UMASK_WHY   # the doctor re-derives it; don't leak it here
+fi
 
 # Common aliases
 [ -f ~/.dotfiles/zsh/zshrc.aliases ] && source ~/.dotfiles/zsh/zshrc.aliases

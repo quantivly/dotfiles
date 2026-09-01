@@ -7,7 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gh-doctor`: which GitHub account is `gh` *actually* using here?**
+  `gh` keys its tokens in the system keyring by **host**, not by config dir, so
+  `GH_CONFIG_DIR` isolates `hosts.yml` and nothing else: three config dirs declaring
+  three different accounts all resolved to one, and `gh auth status` kept reporting the
+  declared one throughout (`gh-personal` said `ZviBaratz` while the API answered
+  `zvi-quantivly`). The fallback direction is the bad one — with `GH_TOKEN` unset, a
+  personal repository silently gets **work** credentials while git correctly signs its
+  commits as personal. A status command describing intent rather than effect, the same
+  shape as the `backup-doctor` bug and the live-config guard's false all-clear.
+
+  `gh-doctor` (`zsh/functions/github.sh`) reports, for a directory: the account the
+  repo's **remote** routes to, the account gh **declares**, the account a real
+  `GET /user` **returns**, and which mechanism decided. It then probes each config dir
+  twice — once with the token env cleared, which reproduces the collapse, and once
+  pinned with `gh auth token --user <login>`, which does isolate — so the workaround is
+  demonstrated rather than asserted. `--offline` marks every network answer NOT CHECKED
+  instead of omitting it.
+
+  Routing keys on the repo **remote**, matching git identity (#67,
+  `hasconfig:remote.*.url`), and consults **every** remote rather than just `origin`, so
+  a fork whose upstream is the work repo routes the same way git already signs it.
+  Configuration is data: `GH_ACCOUNT_ROUTES` / `GH_ACCOUNT_DEFAULT_DIR`, set in
+  `zsh/zshrc.company` and consumed by both `gh-doctor` and the `chpwd` hook — see the
+  routing entry under **Changed**, which is where the account selection actually moves.
+
+  State table: `scripts/test-gh-routing.sh` (145 checks, new CI job
+  `gh-routing-test`, hermetic — `gh` is stubbed, so no network, no keyring, no account).
+  The rows that already caught something: `env VAR=x some_shell_function` (env execs a
+  binary) and `env GH_TOKEN=x -u GITHUB_TOKEN gh …` (env stops parsing options at the
+  first operand, so it ran a program called `-u`), both of which surfaced as *"could not
+  resolve the account"*; `${~pat}` doing tilde expansion as well as globbing, so a route
+  pattern starting with `~` aborted the whole lookup; zsh's `local NAME` on an
+  already-local name being a DISPLAY command, which printed `du=zvi-quantivly` into the
+  middle of the report; and a route whose config dir does not exist being reported only
+  when it happened to match.
+
+  `scripts/test-dotfiles-guard.sh`'s "every doctor declares its counters local" sweep now
+  sources every `zsh/functions/*.sh` rather than only `system.sh` — `gh-doctor` is the
+  first doctor that does not live in that file, and the sweep exists precisely so a new
+  one is covered the moment it is written.
+
 ### Changed
+
+- **gh account routing keys on the repo remote, and pins the account instead of hoping.**
+  `_update_gh_config` asked `$PWD` first (`~/quantivly/**`, then the `origin` remote), which
+  is exactly the signal #67 moved git identity *off* — so gh and git could disagree about
+  the same repository: a quantivly clone outside `~/quantivly/` got the personal account
+  from gh and the work identity from git. It now uses the same `_gh_route_for` `gh-doctor`
+  uses (one implementation, so the oracle cannot drift from the thing it checks), consults
+  **every** remote like git's `hasconfig:remote.*.url`, and exports `GH_TOKEN` — because
+  `GH_CONFIG_DIR` alone leaves the host-keyed keyring to choose, and it chooses work.
+
+  Every directory now pins an account explicitly. Outside a repo the routing falls through
+  to `GH_ACCOUNT_DEFAULT_DIR` (personal), which is what git identity does there too, and is
+  deliberately silent: `$HOME` is a shell's normal resting state, and warning on every `cd`
+  into a non-repo directory is how a warning stops being read. The loud path is reserved
+  for states where nothing *can* be pinned — no default configured, an unusable routing
+  table, or a routed account with no cached token — printed at most once per distinct
+  message per shell, and never before the first prompt (output during initialisation lands
+  inside p10k's instant-prompt warning box).
+
+  The token cache is keyed by config-dir basename (`gh-quantivly`, `gh-personal`) rather
+  than by nickname, so the routing table is the single place an account is named.
+  `gh-refresh-tokens` and the shell-start background job are both driven by
+  `_gh_configured_dirs` and both delete the old nickname-keyed files, which would otherwise
+  remain as a second, never-refreshed copy of a live credential. The first shell after this
+  lands may report "account NOT pinned" once, before its background refresh completes.
+
+- **Build/test parallelism caps now key on `$HERDR_PANE_ID`, not `$ATRIUM_SESSION`.** An
+  unset gate selects the LOOSE tier, so once Atrium stopped running every agent pane
+  silently got the half-the-cores budget meant for a solo human — the exact
+  over-subscription `zsh/zshrc.buildlimits` exists to prevent, presented as a config file
+  that still looked correct.
 - **`apply-gnome-settings.sh` now says when the machine-specific layer overrides the portable
   one** (`scripts/apply-gnome-settings.sh`). Both layers log a plain `✓`, so a `~/.gnome-settings.local`
   line that undoes a setting three lines after the portable layer applied it was invisible: two
@@ -20,6 +94,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace-switch keys are legitimate overrides — and a warning on each would be noise in the
   normal case, which is how a diagnostic becomes one nobody reads. `GNOME_LOCAL_OVERRIDES` makes
   the path injectable so the behaviour can be exercised against a fixture.
+
+- **`umask`: 022 while the login group is actually shared.** Ubuntu's `pam_umask` relaxes
+  022 to 002 whenever the login group is named after the user, because such a group is
+  normally yours alone — and `dev-setup` breaks that by adding the `quantivly` service
+  account to it (`zvi:x:1000:quantivly`). Under 002, nearly every file the user created was
+  group-writable by an account that never logs in, `$HOME` dotfiles included; `.zshenv`
+  that way is a code-execution path. Nothing reported it, because 002 on a user-private
+  group is the correct, expected value.
+
+  `_dotfiles_umask_guard` reads the login group's member list and tightens only while
+  someone else is in it — gated on the condition rather than on the order the fixes were
+  applied in, so it is right before *and* after `gpasswd -d`, stops firing by itself once
+  the grant is removed, and leaves sharing alone on hosts where the reverse grant is
+  load-bearing (a blanket `umask 022` in a repo that installs on other people's machines
+  would break exactly those). Forkless (`$(<file)` and `$GID`, never `getent`) at 0.5 ms
+  per shell. "Cannot tell" leaves the umask as the system set it and says so.
+  `dotfiles-doctor` reports the verdict; `DOTFILES_UMASK` overrides.
+
+- **Review follow-up: eight defects in the above, found before merge.** Each reported
+  success, which is the criterion the state tables are written against; each is now a row
+  that fails when the fix is reverted.
+  - **The gh invocation moved from `env VAR=val` argv to a subshell environment.**
+    *Corrected below* — the first version of this entry called it a live credential leak
+    "for the length of the call", which is wrong: `env` consumes its assignments and then
+    execs, so the token never reaches the exec'd program's `/proc/<pid>/cmdline`. The real
+    payoff is retiring the whole `env`-argv class, which had already produced two bugs
+    here.
+  - **git's exit status was discarded**, so 128 ("cannot read the repository" — a malformed
+    `~/.gitconfig` does it, and `~/.gitconfig` is a managed symlink in this repo) read as
+    "not a git repository" and routed a quantivly clone to the *personal* account, on the
+    one path that deliberately does not warn. `git-error` is now its own state and stops.
+  - **The first-prompt hook replayed a stale message instead of re-running the routing.**
+    The startup call routinely loses the cache race it is meant to lose; replaying left
+    `GH_TOKEN` unset for the life of that shell, putting every `gh` call back on the
+    keyring default inside a personal repo.
+  - **`GITHUB_TOKEN` was never cleared** alongside `GH_TOKEN`; gh ranks it second, so an
+    inherited one authenticated as a third account while the warning blamed the keyring.
+  - **`gh-doctor <dir>` compared that directory's route against the current shell's
+    account**, producing a confident ✗ ("land under the wrong account") for a state that
+    cannot occur — on the documented `gh-doctor ~/some/repo` form.
+  - **The legacy-nickname purge ran after the write loop**, deleting a token it had just
+    cached whenever a config dir was named `quantivly` or `personal`.
+  - **`umask 022` is an assignment, not a tightening**, so on a host hardened to 077 the
+    guard *loosened* it and the doctor printed `✓ 022`; and `$(( ))` yields decimal where
+    `umask` parses octal, so the union set `0o63` from 077 and errored `bad umask` from
+    002. An invalid `DOTFILES_UMASK` was reported as applied, with its error emitted during
+    initialisation — inside p10k's instant-prompt box.
+  - **`dotfiles-doctor` reset the umask of the shell it ran in.** The decision is now
+    `_dotfiles_umask_verdict`, which decides without applying.
+
+  Also: `_q_is_work_context` was dead (its only caller was the branch this PR deleted) and
+  the comment added here claimed otherwise — both removed; an explicit
+  `GH_ACCOUNT_ROUTING_OFF=1` replaces the capability the Atrium deferral provided, without
+  the sniffing that made it dangerous; the `TROUBLESHOOTING.md` reproduction used
+  `GH_CONFIG_DIR=~/...`, which **zsh does not tilde-expand in a command word**, so every
+  row printed the same keyring default for entirely the wrong reason.
+
+- **Second review round: fifteen more defects, including three vacuous tests.** The first
+  round's fixes were themselves unreviewed, and the second round found that three of the
+  new state-table rows could not fail — the criterion this repo cares about most.
+  - **CORRECTION to the entry above.** `env VAR=val prog` does **not** put the assignment
+    in `prog`'s `/proc/<pid>/cmdline` — measured. `env` consumes it and execs; the token
+    was in argv only of the short-lived `env` process, between fork and exec. That is a
+    microsecond race, not the lifetime of the call, and not the same shape as the 28-day
+    tmux server. The subshell fix stands (it closes the race and retires the `env` class),
+    but the severity claimed for it did not. The `/proc` test rows would also have passed
+    under the old implementation; the row that actually pins the change is the source-text
+    one, now labelled as such.
+  - **`exec` resolves shell functions, which `env` could not** — so the subshell form let a
+    user's `gh` wrapper be run instead of the binary and its output taken as the effective
+    login. `exec command gh`. Only reachable on the no-`timeout` fallback, so the test
+    needs a PATH fixture with `gh` and without `timeout`.
+  - **`gh-refresh-tokens` is outside the `~/.config/gh-quantivly` gate while its cache
+    helpers were inside it.** On a personal-only box it hit `command not found`, took an
+    *empty* cache path, wrote a live token to `/<basename>` at the filesystem root, and
+    printed `✓ … cached token` with exit 0.
+  - **`GITHUB_TOKEN` survived the success path.** gh outranks it; the GitHub MCP server,
+    `act` and `hub` do not — so an inherited one authenticated as a third account in a
+    correctly-routed directory.
+  - **The `git-error` state reached only two of its three consumers**, so `gh-doctor`
+    announced `✗ user.email is unset` when git simply could not be read; and the one
+    message blamed `~/.gitconfig` for every cause, including git being absent (127) and
+    "dubious ownership" (which wants `safe.directory`). git's own text is kept now.
+  - **`GH_ACCOUNT_ROUTING_OFF` suppressed only the no-route warning**, so a deliberately
+    unrouted shell inside a *matching* repo still got the confident ✗ the switch exists to
+    prevent.
+  - **`gh-doctor <dir>` skipped the route-vs-effective question instead of answering it.**
+    It now probes the routed dir's own per-user token — what a shell there would be pinned
+    to — restoring the value of the advertised form.
+  - **The first-prompt hook unhooked after one attempt**, so a shell that lost the cache
+    race twice stayed on the keyring default for life.
+  - **`gh-refresh-tokens` printed ✓ without checking the write or the chmod.**
+  - **The umask numeric repair introduced two more traps** — a `$(umask)` fork in a
+    function documented as forkless, and decimal-vs-octal (`$(( 8#077 | 8#022 ))` is 63
+    decimal; `umask` reads octal, so it set `0o63` from 077 and errored `bad umask` from
+    002). Replaced by the symbolic `umask g-w,o-w`, which needs no read and no arithmetic.
+    Override validity moved into the verdict, because `dotfiles-doctor` asks only for the
+    verdict and was calling a nonsense override ✓ — and the doctor's re-derived comparison
+    reproduced, inside the checker, the defect the guard had just been fixed for.
+  - **Three test rows were vacuous**: the git-error hook row never defined
+    `_update_gh_config`, and the argv rows could not fail. Rewritten; each fix is now
+    pinned by mutation.
+
+  Also: a `$(...)` helper introduced to deduplicate the cache path put a fork back in the
+  `chpwd` hot path (a parameter does the same job); the legacy-nickname purge now subtracts
+  the configured basenames rather than depending on ordering; and CLAUDE.md still
+  documented the deleted `_gh_run_prefix`.
+
+### Removed
+- **Atrium coupling in the live shell config.** Atrium is retired (2026-09-01), so
+  `_in_atrium_session()` and the interactive account switchers' early-return that deferred
+  to Atrium's injected `GH_CONFIG_DIR` / `GH_TOKEN` / `GITHUB_PERSONAL_ACCESS_TOKEN` are
+  gone, along with the `atrium()` wind-down guard that stripped `HERDR_*` before exec'ing
+  the binary. The early-return was the risky half: it keyed on `$ATRIUM` or a tmux socket
+  named `*/atrium`, so anything that set either would have left whatever account was
+  inherited, silently, in a shell that now believes it routes by remote.
 
 ### Fixed
 
