@@ -569,8 +569,22 @@ Gotchas, in the order they bite:
   only a unit that is *already* enabled, so it reconciles a decision rather than making one), and
   `scripts/verify-tools.sh` **fails** when the enablement has drifted. `--check` reports,
   `--plan` lists what `--apply` would touch. State table: `scripts/test-systemd-reconcile.sh`
-  (36 checks, in CI as `systemd-reconcile-test`) — hermetic and needing no systemd at all, since
-  the whole comparison is filesystem state.
+  (130 checks, in CI as `systemd-reconcile-test`) — hermetic via a recording **`systemctl` stub**
+  at the front of `PATH`, never via systemctl's absence: this box has a real one wired to the live
+  user manager that holds the herdr server. Reading "the comparison is filesystem state, so no
+  manager is needed" as "set `RECONCILE_NO_SYSTEMCTL=1` on every row" left `do_reconcile`'s body
+  executing **zero times** across a 44/44 pass — the read-only decision layer pinned completely,
+  the layer that DELETES SYMLINKS not at all. Making `do_reconcile` also `rm -f` the unit symlink,
+  i.e. reproducing the incident the file exists to prevent, passed 44/44.
+- **Four more ways the reconciler answered "nothing to look at" over real drift**, all fixed and
+  each pinned by a row that fails without the fix: `[[ -e ]]` follows symlinks, so a **dangling**
+  unit symlink (rename a source, don't re-run `./install`) was skipped and reported
+  character-for-character like an empty machine; a unit whose `[Install]` was **deleted** kept its
+  `.wants` link forever and read as `static`, "nothing to reconcile"; `pwd` is **logical** while
+  the containment test used `readlink -f`, so a checkout reached through a symlink
+  (`~/.dotfiles -> ~/src/dotfiles`) yielded zero managed units and a green tick; and the unit glob
+  was hardcoded to `*.service`/`*.timer` in the function whose own header argues against
+  hardcoding, so a drifted `.socket`/`.path`/`.target` was invisible.
 - **"Clean" is not "complete" for the server environment.** `verify-tools.sh` used to ask only
   whether anything FORBIDDEN was present, so a server started at boot — before any graphical
   session existed to import an environment from — carried no forbidden variable and passed as

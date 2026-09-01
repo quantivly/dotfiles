@@ -261,10 +261,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports nothing), FAILs on a variable the session offers and the server lacks, and WARNs when
   `DISPLAY`/`WAYLAND_DISPLAY` name a previous login. `SSH_AUTH_SOCK` is excluded from the value
   comparison because the launcher substitutes a stable symlink for it by design.
-- **[scripts/test-systemd-reconcile.sh](scripts/test-systemd-reconcile.sh)** — 36-check state
+- **[scripts/test-systemd-reconcile.sh](scripts/test-systemd-reconcile.sh)** — 130-check state
   table for the reconciler, in CI as `systemd-reconcile-test`, needing no systemd user manager
-  because the comparison is filesystem state (a runner has no manager, and a suite that skips in
-  CI is one that never runs). Each fix is pinned by mutation, which is how four hollow assertions
+  because the read-only comparison is filesystem state and the mutating half runs against a
+  recording `systemctl` **stub** at the front of `PATH` (a runner has no manager, and a suite that
+  skips in CI is one that never runs; but "hermetic" has to mean answered-by-a-fake, not
+  tool-happens-to-be-absent — this box has a real systemctl wired to the user manager holding the
+  herdr server). Each fix is pinned by mutation, which is how four hollow assertions
   were caught before this landed: a note-prefix check that passed when two different notes
   collapsed into one, a "plain file ignored" row that was really testing containment, a dead
   comment-skip rule in the awk that could not fire because the pattern is anchored, and — worst —
