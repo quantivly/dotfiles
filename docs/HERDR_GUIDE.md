@@ -583,7 +583,7 @@ wherever it remains installed — see the third bullet below.) The local `sideba
 ### `hspawn` — one isolated worker per task
 
 ```bash
-hspawn [-p profile] [-m model] [-e effort] [--mode auto|acceptEdits|plan|default] [-b base] [-n name] [--] <repo> <slug> [prompt…]
+hspawn [-p profile] [-m model] [-e effort] [--mode auto|acceptEdits|plan|dontAsk|default(=manual)] [-b base] [-n name] [--] <repo> <slug> [prompt…]
 hdespawn <slug|pane-id> [--yes]                  # tear one worker down: pane, workspace, worktree, registry entry
 hreap [--close] [--mine] [--older N] [--json]    # Claude processes herdr hosts, with idle age and memory (default: idle >= 30 min; --older 0 = all)
 ```
@@ -609,6 +609,32 @@ Two things it has to handle, and any homegrown equivalent must too:
 
 `herdr agent prompt` refuses to type into a blocked agent, so an unanswered dialog resurfaces
 later as `agent_blocked`.
+
+**A pane id is not a permanent name, and the registry is permanent.** herdr allocates workspace
+ids from a short alphabet whose counter lives only in the running server, so a restart reissues
+them from the start — `~/.config/herdr/herdr-server.log` on this box shows `w4`, `w5`, `wN` and
+`wP` each created twice in five days — and every new workspace's first pane is `p1`. The registry
+under `~/.local/state/hspawn/` is a file, so it outlives all of that, and its entries are
+deliberately long-lived: every hspawn bail-out keeps its entry, and `hreap --close` annotates
+rather than deletes so `hdespawn` can finish the teardown later. Three consequences worth knowing:
+
+- hspawn **never overwrites** an existing entry for a reused pane id. It renames it to
+  `<pane>.stale-<timestamp>.json` (still a `*.json`, so `hdespawn <slug>` still finds it) and says
+  so. Before, the older spawn's worktree and branch were orphaned silently.
+- **`hdespawn <pane-id>` is the exact form** — it is a direct file lookup. `hdespawn <slug>` scans
+  every entry and refuses when two match, which `hreap --close` makes likely by design. That is
+  why hreap's `Finish with:` line and hspawn's failure messages print the pane id.
+- If the workspace id in an entry now holds **someone else's** worktree, hdespawn disowns the live
+  workspace — it touches nothing herdr owns — and finishes the teardown from the path the entry
+  recorded, behind the same uncommitted/unpushed guard.
+
+`--` means what it says: after it, nothing is parsed as an option *or* as the deprecated
+positional `[profile|-]` slot, so `hspawn -- <repo> <slug> - "prompt"` keeps the literal `-`.
+
+State table: `scripts/test-hspawn.sh` (126 checks, in CI as `hspawn-test`). It is hermetic in a
+specific way — a recording `herdr` **stub** goes at the front of `PATH` for every run, rather than
+relying on `herdr` being absent, because the machine this was written on has a real one talking to
+a live server and hdespawn's job is to remove workspaces.
 
 ### Teams
 
