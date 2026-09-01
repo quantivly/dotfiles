@@ -94,6 +94,39 @@ qn() {
 # Opt-in: only activates if ~/.config/gh-quantivly/ exists (created via:
 #   GH_CONFIG_DIR=~/.config/gh-quantivly gh auth login)
 
+# Token cache location and the pre-2026-09-01 nickname purge.
+#
+# DEFINED OUTSIDE THE OPT-IN GATE BELOW. They were inside it, while
+# `gh-refresh-tokens` — which calls both — is outside: on a machine with no
+# ~/.config/gh-quantivly (a personal-only box, the exact case the gate exists
+# for) the function hit `command not found`, took an EMPTY cache path, and then
+# wrote a live token to `/<basename>` at the filesystem root while reporting
+# `✓ … cached token` and returning 0.
+#
+# A parameter, not a `$(...)` helper: _update_gh_config reads it on every `cd`,
+# and a command substitution there is a fork in the chpwd hot path — in a file
+# whose own notes say that path was cut to a single git fork. One assignment
+# achieves the deduplication a function was reached for.
+typeset -g _GH_TOKEN_CACHE="${HOME}/.cache/gh-token-cache"
+
+# `quantivly` and `personal` are also perfectly legal config-dir basenames, so
+# this purges by name MINUS whatever the routing table currently uses. Ordering
+# then stops mattering: purging after the writes deleted a token just cached,
+# and purging before them threw away a still-valid token whenever that
+# iteration's `gh auth token` failed transiently (keyring locked, gh updating).
+_gh_purge_legacy_token_cache() {
+  local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY current
+  local legacy
+  if (( $+functions[_gh_configured_dirs] )); then
+    _gh_configured_dirs
+    current=( "${(@)_GH_CONFIGURED_DIRS:t}" )
+  fi
+  for legacy in quantivly personal; do
+    (( ${current[(Ie)$legacy]} )) && continue
+    [[ -e "$_GH_TOKEN_CACHE/$legacy" ]] && rm -f "$_GH_TOKEN_CACHE/$legacy"
+  done
+}
+
 if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # Routing table for zsh/functions/github.sh (_gh_route_for, gh-doctor, the
     # chpwd hook below). Keyed on the repo's GitHub OWNER, matching the git
@@ -145,25 +178,6 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # gh-personal) rather than by a nickname, so the routing table is the single
     # place an account is named — a route added there needs no matching edit
     # here, and a stale nickname cannot silently address the wrong dir.
-    # One definition. It was written out three times (two of them `local`, one a
-    # global that leaked into every interactive shell) and the legacy-name purge
-    # twice, so moving the cache or adding a name to purge meant finding them
-    # all — and missing one leaves a never-refreshed copy of a live credential,
-    # the exact hazard the purge exists to remove.
-    _gh_token_cache_dir() { print -r -- "${HOME}/.cache/gh-token-cache"; }
-
-    # Nickname-keyed files from before the basename scheme. Left in place they
-    # are a second, never-refreshed copy of a live credential.
-    #
-    # Runs BEFORE the write loop, not after: a route whose config dir is
-    # literally named `quantivly` or `personal` writes to that same filename,
-    # and purging afterwards deleted the token that had just been cached — every
-    # shell start, silently, leaving that account permanently unpinned.
-    _gh_purge_legacy_token_cache() {
-      local cache; cache="$(_gh_token_cache_dir)"
-      rm -f "$cache/quantivly" "$cache/personal"
-    }
-
     # Background refresh (non-blocking). Driven by the routing table, so it
     # refreshes exactly the dirs routing can select. --user is mandatory:
     # `gh auth token` without it returns the shared keyring default, which is
@@ -176,10 +190,8 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # dynamically-scoped globals would have been the other way to get it wrong.
     _gh_refresh_token_cache_bg() {
         local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY
-        local cache d u t
-        cache="$(_gh_token_cache_dir)"
-        mkdir -p "$cache" && chmod 700 "$cache"
-        _gh_purge_legacy_token_cache
+        local cache="$_GH_TOKEN_CACHE" d u t
+        mkdir -p "$cache" && chmod 700 "$cache" || return 1
         _gh_configured_dirs
         for d in "${_GH_CONFIGURED_DIRS[@]}"; do
             [[ -d "$d" ]] || continue
@@ -187,9 +199,9 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             [[ -n "$u" ]] || continue
             t="$(GH_CONFIG_DIR="$d" gh auth token --user "$u" 2>/dev/null)"
             [[ -n "$t" ]] || continue
-            printf '%s' "$t" > "$cache/${d:t}"
-            chmod 600 "$cache/${d:t}"
+            printf '%s' "$t" > "$cache/${d:t}" && chmod 600 "$cache/${d:t}"
         done
+        _gh_purge_legacy_token_cache
     }
     if command -v gh &>/dev/null && (( $+functions[_gh_configured_dirs] )); then
         _gh_refresh_token_cache_bg &!
@@ -251,7 +263,7 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
         esac
 
         export GH_CONFIG_DIR="$_GH_ROUTE_DIR"
-        _tokfile="$(_gh_token_cache_dir)/${_GH_ROUTE_DIR:t}"
+        _tokfile="${_GH_TOKEN_CACHE}/${_GH_ROUTE_DIR:t}"
         if [[ -r "$_tokfile" ]]; then
             _tok="$(<"$_tokfile")"
         else
@@ -262,6 +274,16 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             # For env-reading tools (Claude Code's github MCP plugin); gh itself
             # ignores this one.
             export GITHUB_PERSONAL_ACCESS_TOKEN="$_tok"
+            # Cleared on the SUCCESS path as well, not just the failures. gh is
+            # fine either way (GH_TOKEN outranks GITHUB_TOKEN), but everything
+            # else that reads GITHUB_TOKEN — the GitHub MCP server, act, hub,
+            # most Actions-shaped tooling — would keep authenticating as an
+            # inherited third account in a correctly-routed directory, with
+            # gh-doctor reporting `credential: $GH_TOKEN` and showing nothing
+            # wrong. This hook owns the GitHub credential environment; leaving
+            # one of its three variables pointing somewhere else is not owning
+            # it. GH_ACCOUNT_ROUTING_OFF is the way to inject your own.
+            unset GITHUB_TOKEN
         else
             # GH_CONFIG_DIR alone does NOT select the account, so this is not a
             # partial success — it is the keyring deciding. GITHUB_TOKEN is
@@ -310,7 +332,17 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     _gh_route_first_prompt() {
         _GH_ROUTE_INTERACTIVE=1
         _GH_ROUTE_LAST_MSG=""      # startup was silent; do not suppress a real one now
-        _update_gh_config
+        # Only re-run while there is nothing pinned. Once GH_TOKEN is set the
+        # routing has already succeeded, and re-running would spend two more git
+        # forks per prompt to reach the same answer.
+        [[ -n "$GH_TOKEN" ]] || _update_gh_config
+        # Retire the hook only once it has something to show for itself. It used
+        # to unhook unconditionally after one attempt, so a shell that lost the
+        # cache race TWICE — the refresher does two gh forks, and p10k's instant
+        # prompt can arrive first on a loaded box — stayed on the host-keyed
+        # keyring default for the rest of its life. Every later prompt is free:
+        # the test above short-circuits before any fork.
+        [[ -n "$GH_TOKEN" || -n "$GH_ACCOUNT_ROUTING_OFF" ]] || return 0
         add-zsh-hook -d precmd _gh_route_first_prompt
         unfunction _gh_route_first_prompt
     }
@@ -445,10 +477,11 @@ gh-refresh-tokens() {
     return 1
   fi
   local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY
-  local dir user token cached=0 failed=0 cache
-  cache="$(_gh_token_cache_dir)"
-  mkdir -p "$cache" && chmod 700 "$cache"
-  _gh_purge_legacy_token_cache   # before the writes — see the function's comment
+  local dir user token cached=0 failed=0 cache="$_GH_TOKEN_CACHE"
+  if ! mkdir -p "$cache" || ! chmod 700 "$cache"; then
+    echo "Error: cannot prepare $cache" >&2
+    return 1
+  fi
 
   _gh_configured_dirs
   if (( ${#_GH_CONFIGURED_DIRS[@]} == 0 )); then
@@ -474,11 +507,24 @@ gh-refresh-tokens() {
       failed=$((failed + 1))
       continue
     fi
-    printf '%s' "$token" > "$cache/${dir:t}"
-    chmod 600 "$cache/${dir:t}"
+    # Check the write AND the chmod before claiming success. Printing ✓ on an
+    # unwritable cache (or a full filesystem) is the silent-failure shape, in
+    # the one command a user runs specifically to repair the cache.
+    if ! printf '%s' "$token" > "$cache/${dir:t}" 2>/dev/null; then
+      echo "  ✗ ${dir:t}: could not write $cache/${dir:t}" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    if ! chmod 600 "$cache/${dir:t}"; then
+      echo "  ✗ ${dir:t}: cached but could not chmod 600 — removing" >&2
+      rm -f "$cache/${dir:t}"
+      failed=$((failed + 1))
+      continue
+    fi
     echo "  ✓ ${dir:t}: cached token for $user"
     cached=$((cached + 1))
   done
+  _gh_purge_legacy_token_cache
 
   # Re-apply for the current directory (no cd needed).
   if (( $+functions[_update_gh_config] )); then

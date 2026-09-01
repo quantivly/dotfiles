@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zsh/zshrc.company` and consumed by both `gh-doctor` and the `chpwd` hook — see the
   routing entry under **Changed**, which is where the account selection actually moves.
 
-  State table: `scripts/test-gh-routing.sh` (129 checks, new CI job
+  State table: `scripts/test-gh-routing.sh` (145 checks, new CI job
   `gh-routing-test`, hermetic — `gh` is stubbed, so no network, no keyring, no account).
   The rows that already caught something: `env VAR=x some_shell_function` (env execs a
   binary) and `env GH_TOKEN=x -u GITHUB_TOKEN gh …` (env stops parsing options at the
@@ -115,12 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Review follow-up: eight defects in the above, found before merge.** Each reported
   success, which is the criterion the state tables are written against; each is now a row
   that fails when the fix is reverted.
-  - **A live credential was passed in argv.** `_gh_probe_login` ran
-    `env GH_TOKEN=gho_… gh api user`, and `/proc/<pid>/cmdline` is world-readable (444)
-    while `/proc/<pid>/environ` is not (400) — publishing the token to every local account
-    for the length of the call, in the tool written *because* this machine had a token in a
-    tmux server's cmdline for 28 days. `_gh_run` sets the environment inside a subshell,
-    which also retires the whole `env`-argv class.
+  - **The gh invocation moved from `env VAR=val` argv to a subshell environment.**
+    *Corrected below* — the first version of this entry called it a live credential leak
+    "for the length of the call", which is wrong: `env` consumes its assignments and then
+    execs, so the token never reaches the exec'd program's `/proc/<pid>/cmdline`. The real
+    payoff is retiring the whole `env`-argv class, which had already produced two bugs
+    here.
   - **git's exit status was discarded**, so 128 ("cannot read the repository" — a malformed
     `~/.gitconfig` does it, and `~/.gitconfig` is a managed symlink in this repo) read as
     "not a git repository" and routed a quantivly clone to the *personal* account, on the
@@ -150,6 +150,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the sniffing that made it dangerous; the `TROUBLESHOOTING.md` reproduction used
   `GH_CONFIG_DIR=~/...`, which **zsh does not tilde-expand in a command word**, so every
   row printed the same keyring default for entirely the wrong reason.
+
+- **Second review round: fifteen more defects, including three vacuous tests.** The first
+  round's fixes were themselves unreviewed, and the second round found that three of the
+  new state-table rows could not fail — the criterion this repo cares about most.
+  - **CORRECTION to the entry above.** `env VAR=val prog` does **not** put the assignment
+    in `prog`'s `/proc/<pid>/cmdline` — measured. `env` consumes it and execs; the token
+    was in argv only of the short-lived `env` process, between fork and exec. That is a
+    microsecond race, not the lifetime of the call, and not the same shape as the 28-day
+    tmux server. The subshell fix stands (it closes the race and retires the `env` class),
+    but the severity claimed for it did not. The `/proc` test rows would also have passed
+    under the old implementation; the row that actually pins the change is the source-text
+    one, now labelled as such.
+  - **`exec` resolves shell functions, which `env` could not** — so the subshell form let a
+    user's `gh` wrapper be run instead of the binary and its output taken as the effective
+    login. `exec command gh`. Only reachable on the no-`timeout` fallback, so the test
+    needs a PATH fixture with `gh` and without `timeout`.
+  - **`gh-refresh-tokens` is outside the `~/.config/gh-quantivly` gate while its cache
+    helpers were inside it.** On a personal-only box it hit `command not found`, took an
+    *empty* cache path, wrote a live token to `/<basename>` at the filesystem root, and
+    printed `✓ … cached token` with exit 0.
+  - **`GITHUB_TOKEN` survived the success path.** gh outranks it; the GitHub MCP server,
+    `act` and `hub` do not — so an inherited one authenticated as a third account in a
+    correctly-routed directory.
+  - **The `git-error` state reached only two of its three consumers**, so `gh-doctor`
+    announced `✗ user.email is unset` when git simply could not be read; and the one
+    message blamed `~/.gitconfig` for every cause, including git being absent (127) and
+    "dubious ownership" (which wants `safe.directory`). git's own text is kept now.
+  - **`GH_ACCOUNT_ROUTING_OFF` suppressed only the no-route warning**, so a deliberately
+    unrouted shell inside a *matching* repo still got the confident ✗ the switch exists to
+    prevent.
+  - **`gh-doctor <dir>` skipped the route-vs-effective question instead of answering it.**
+    It now probes the routed dir's own per-user token — what a shell there would be pinned
+    to — restoring the value of the advertised form.
+  - **The first-prompt hook unhooked after one attempt**, so a shell that lost the cache
+    race twice stayed on the keyring default for life.
+  - **`gh-refresh-tokens` printed ✓ without checking the write or the chmod.**
+  - **The umask numeric repair introduced two more traps** — a `$(umask)` fork in a
+    function documented as forkless, and decimal-vs-octal (`$(( 8#077 | 8#022 ))` is 63
+    decimal; `umask` reads octal, so it set `0o63` from 077 and errored `bad umask` from
+    002). Replaced by the symbolic `umask g-w,o-w`, which needs no read and no arithmetic.
+    Override validity moved into the verdict, because `dotfiles-doctor` asks only for the
+    verdict and was calling a nonsense override ✓ — and the doctor's re-derived comparison
+    reproduced, inside the checker, the defect the guard had just been fixed for.
+  - **Three test rows were vacuous**: the git-error hook row never defined
+    `_update_gh_config`, and the argv rows could not fail. Rewritten; each fix is now
+    pinned by mutation.
+
+  Also: a `$(...)` helper introduced to deduplicate the cache path put a fork back in the
+  `chpwd` hot path (a parameter does the same job); the legacy-nickname purge now subtracts
+  the configured basenames rather than depending on ordering; and CLAUDE.md still
+  documented the deleted `_gh_run_prefix`.
 
 ### Removed
 - **Atrium coupling in the live shell config.** Atrium is retired (2026-09-01), so

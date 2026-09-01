@@ -247,14 +247,18 @@ Three traps in the guard itself, each of which reported success:
 
 - **`umask 022` is an absolute assignment, not a tightening.** On a host already hardened
   to 077 a guard installed to harden it silently *loosened* the mask, and the doctor
-  printed `✓ 022`. The verdict is OR-ed into the current value now.
-- **`$(( ))` yields decimal; `umask` parses octal.** Passing the union straight through set
-  `0o63` from 077 (a further loosening) and errored `bad umask` from 002, where the decimal
-  result `18` is not valid octal. `$(( [##8] … ))` formats in the base the builtin reads.
-- **An invalid `DOTFILES_UMASK` was reported as applied**: `umask` failed, the function
-  returned 0, and the doctor rendered it as an ordinary note — while the error itself was
-  emitted during initialization, landing inside p10k's instant-prompt warning box, the
-  exact thing every other startup message here is deferred to avoid.
+  printed `✓ 022`. The numeric repair then produced two more of its own — `$(umask)` is a
+  fork in a function documented as forkless, and `$(( 8#077 | 8#022 ))` is 63 **decimal**
+  while `umask` parses a bare number as **octal**, so the union set `0o63` from 077 and
+  errored `bad umask` from 002. The answer is the symbolic form: **`umask g-w,o-w`** denies
+  exactly those bits relative to whatever is set (002→022, 022→022, 077→077, 007→027), with
+  no read, no arithmetic and no base to confuse.
+- **An invalid `DOTFILES_UMASK` was reported as applied**, and validity belongs to the
+  *verdict*, not to applying it: while only the guard knew, `dotfiles-doctor` — which asks
+  for the verdict alone — called a nonsense override ✓. The doctor also re-derived the
+  comparison with `8#$WANT`, reproducing inside the checker the very defect the guard had
+  just been fixed for. It runs the guard in a subshell and compares masks now; a fork in a
+  doctor is free, a second implementation of the rule is not.
 
 **Scope, since the above could be read as a guarantee:** `zshrc` is sourced only by
 *interactive* shells, so `zsh -c …`, systemd --user units, GUI applications and cron keep
@@ -266,9 +270,9 @@ Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 `DOTFILES_GUARD_QUIET=1` (silence the startup line while dogfooding a branch),
 `DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_STALE_WARN_HOURS`, `DOTFILES_EXPECTED_DIRTY`
 (scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
-`DOTFILES_GROUP_FILE`, `GH_ACCOUNT_ROUTING_OFF`.
+`DOTFILES_GROUP_FILE`.
 
-State table: `scripts/test-dotfiles-guard.sh` (219 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (224 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
@@ -626,11 +630,6 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   needed. The whole table is checked every run, matched or not. This is not hypothetical:
   writing the entry in **single** quotes (`'quantivly=$HOME/...'`) leaves a literal
   `$HOME` that never exists, and the route silently never matches.
-- **`env VAR=x some_shell_function` cannot work** — `env` execs a binary — and **`env
-  GH_TOKEN=x -u GITHUB_TOKEN gh …` runs a program called `-u`**, because env stops parsing
-  options at the first operand. Both surfaced as *"could not resolve the account"*, i.e.
-  as a fact about GitHub rather than about the command line. `_gh_run_prefix` builds the
-  prefix as an array and hoists every `-u` above every assignment.
 - **`${~pat}` enables tilde expansion as well as globbing**, so a route pattern beginning
   with `~` aborted the lookup with "no such user or named directory" and took every later
   route with it. Owner patterns are restricted to `[A-Za-z0-9_.-]` plus `*` and `?`, and
@@ -643,13 +642,23 @@ Traps this area has, each of which produced a green tick or a confident wrong an
 - **An empty answer is never agreement.** A failed or timed-out API call is a ✗ with the
   error, and every comparison that depended on it is reported as *skipped*, never passed.
   `--offline` marks its answers NOT CHECKED for the same reason.
-- **A credential must never reach argv.** `/proc/<pid>/cmdline` is world-readable (444);
-  `/proc/<pid>/environ` is owner-only (400). The first implementation ran
-  `env GH_TOKEN=gho_… gh api user`, publishing a live token to every local account for the
-  length of the call — in the tool written *because* this machine had a token sitting in a
-  tmux server's cmdline for 28 days. `_gh_run` sets the environment inside a subshell
-  instead, which also retires the whole `env`-argv class (no option-ordering rule, no
-  shell-function-after-`env` trap, because there is no `env`).
+- **The environment, not argv — and the severity of that was overstated once already.**
+  `/proc/<pid>/cmdline` is world-readable (444) while `/proc/<pid>/environ` is owner-only
+  (400), so `env GH_TOKEN=gho_… gh api user` looks like a leak. **It mostly is not**:
+  measured, `env` *consumes* its assignments and then execs, so the token never reaches the
+  exec'd program's cmdline — only the short-lived `env` process's own, between fork and
+  exec. A microsecond race, not the length of the call, and **not** the same shape as the
+  28-day tmux server this machine actually found. `_gh_run` uses a subshell anyway: it
+  closes even the race, and — the real payoff — retires the whole `env`-argv class, which
+  had already produced two bugs here (a shell function after `env`; `-u` after an
+  assignment), both surfacing as *"could not resolve the account"*.
+  The correction matters as much as the fix: a checker whose findings are inflated is a
+  checker whose findings stop being believed.
+- **`exec` resolves shell functions; `env` could not.** So the subshell form introduced a
+  hazard the old one lacked — a user's `gh` wrapper in `~/.zshrc.local` being run instead
+  of the binary, and its output taken as the effective login. `exec command gh`. Reachable
+  only on the no-`timeout` fallback, which is why the test needs a PATH fixture that has
+  `gh` but not `timeout`; without that it silently exercises the safe path.
 - **git's exit status is load-bearing.** 0 = matched, 1 = no match, **128 = git could not
   read the repository at all** — which a malformed `~/.gitconfig` produces, and
   `~/.gitconfig` is itself a managed symlink in this repo, so a bad branch causes it.
@@ -671,9 +680,33 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   shell's* environment, which the hook pinned for `$PWD`; comparing it against a different
   directory's route produced a confident ✗ for a state that cannot occur, since cd-ing
   there repins first. The comparison now runs only for `$PWD`.
-- **The legacy-nickname purge runs before the writes.** `quantivly` and `personal` are also
-  legal config-dir basenames, so purging afterwards deleted a token that had just been
-  cached — every shell start, silently, leaving that account permanently unpinned.
+- **The legacy-nickname purge subtracts the configured basenames.** `quantivly` and
+  `personal` are also legal config-dir basenames, so purging *after* the writes deleted a
+  token just cached, and purging *before* them discarded a still-valid one whenever that
+  iteration's `gh auth token` failed transiently. Naming the exception removes the ordering
+  question rather than answering it.
+- **Helpers used outside the opt-in gate must be defined outside it.** `gh-refresh-tokens`
+  sits outside `[[ -d ~/.config/gh-quantivly ]]` while its cache helpers sat inside, so on
+  a personal-only box — the exact machine the gate exists for — it hit `command not found`,
+  took an *empty* cache path, wrote a live token to `/<basename>` at the filesystem root,
+  and printed `✓ … cached token` with exit 0.
+- **A chpwd helper may not be a `$(...)` call.** Replacing a parameter with a function to
+  deduplicate a path put a fork back in the hot path this file had just been cut down to
+  one git fork. One assignment deduplicates just as well.
+- **The first-prompt hook retires only once it has pinned something.** Unhooking after a
+  single attempt meant a shell that lost the cache race twice — the refresher does two `gh`
+  forks, and p10k's instant prompt can beat them — stayed on the keyring default for life.
+  Later prompts are free: it short-circuits on `[[ -n $GH_TOKEN ]]` before any fork.
+- **`GITHUB_TOKEN` is cleared on the SUCCESS path too, not just the failures.** gh outranks
+  it, but the GitHub MCP server, `act`, `hub` and most Actions-shaped tooling do not — so
+  an inherited one kept authenticating as a third account inside a correctly-routed
+  directory, with `gh-doctor` reporting `credential: $GH_TOKEN` and showing nothing wrong.
+- **Keep git's own error.** Collapsing every non-0/1 status into one sentence blaming
+  `~/.gitconfig` was wrong for most of them: git missing is 127, `$PWD` may be deleted, and
+  "detected dubious ownership" is ordinary on external media and wants `safe.directory`.
+  stderr is folded into the capture (a temp file would need `rm`, and a broken PATH is one
+  of the states being diagnosed), and the parser shape-checks `remote.<name>.url` so a
+  warning cannot become a phantom remote.
 - **`local` outside a function is an error in zsh**, and the shell-start refresher was an
   inline `{ … } &!` block — so the error went to a backgrounded subshell's stderr where
   nobody sees it, the cache stayed empty, and every directory reported "account NOT
@@ -685,7 +718,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   --get-regexp` exits non-zero for "not a repo" and "no such key" alike, so the `rev-parse`
   that tells them apart runs only when there was nothing to parse.
 
-State table: `scripts/test-gh-routing.sh` (129 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (145 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

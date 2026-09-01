@@ -121,6 +121,7 @@ _gh_url_owner() {
 # Every remote of a repository, with the owner each one parses to.
 # Usage: _gh_repo_remotes [dir]
 # Sets:  _GH_REMOTE_STATE = ok | no-repo | no-remotes | git-error
+#        _GH_REMOTE_ERR = git's own message, when the state is git-error
 #        _GH_REMOTE_NAMES / _GH_REMOTE_URLS / _GH_REMOTE_OWNERS  (parallel;
 #        owner is "" for a remote that is not a parsable GitHub URL)
 # Returns non-zero unless the state is ok.
@@ -133,7 +134,7 @@ _gh_repo_remotes() {
   local dir="${1:-$PWD}" line key name url
   local _GH_URL_STATE
   local -a lines
-  _GH_REMOTE_NAMES=(); _GH_REMOTE_URLS=(); _GH_REMOTE_OWNERS=()
+  _GH_REMOTE_NAMES=(); _GH_REMOTE_URLS=(); _GH_REMOTE_OWNERS=(); _GH_REMOTE_ERR=""
   _GH_REMOTE_STATE=no-repo
 
   # One git fork on the common path. This runs from the chpwd hook, so the
@@ -149,9 +150,22 @@ _gh_repo_remotes() {
   # falls through to the personal account and, by design, does not warn. Exactly
   # the failure CLAUDE.md already records for dotfiles-doctor: "A git that
   # cannot read the repo answers every question with silence."
+  # stderr is folded into the capture rather than parked in a temp file: the
+  # cleanup would need `rm`, and one of the states being diagnosed is a broken
+  # PATH, where `command rm` is itself not found. The fold is safe because the
+  # capture is only PARSED when rc is 0, and the parser below accepts a line
+  # only if it really is `remote.<name>.url <value>`, so a warning on stderr
+  # cannot become a phantom remote.
   local out rc
-  out="$(command git -C "$dir" config --get-regexp '^remote\..*\.url$' 2>/dev/null)"; rc=$?
+  out="$(command git -C "$dir" config --get-regexp '^remote\..*\.url$' 2>&1)"; rc=$?
   if (( rc != 0 && rc != 1 )); then
+    # KEEP git's own message. Collapsing every non-0/1 status into one sentence
+    # that blamed ~/.gitconfig was wrong for most of them: `command git` exits
+    # 127 when git is not installed, $PWD may have been deleted, and "detected
+    # dubious ownership" (whose fix is safe.directory, not the gitconfig) is
+    # ordinary for a repo on external media. Discarding stderr left neither the
+    # hook nor the doctor able to say what actually happened.
+    _GH_REMOTE_ERR="${${out%%$'\n'*}:-git exited $rc with no message}"
     _GH_REMOTE_STATE=git-error
     return 1
   fi
@@ -161,6 +175,10 @@ _gh_repo_remotes() {
     key="${line%% *}"
     url="${line#* }"
     [[ "$key" != "$line" ]] || continue
+    # Shape-check the key rather than trusting anything with a space in it: with
+    # stderr folded into the capture, a git warning would otherwise be parsed as
+    # a remote named "warning:" and shown as one in the doctor.
+    [[ "$key" == remote.*.url ]] || continue
     name="${key#remote.}"; name="${name%.url}"
     _GH_REMOTE_NAMES+=("$name")
     _GH_REMOTE_URLS+=("$url")
@@ -234,7 +252,7 @@ _gh_route_for() {
   # path that deliberately stays quiet, so this one stops here and is loud.
   if [[ "$_GH_REMOTE_STATE" == "git-error" ]]; then
     _GH_ROUTE_STATE=git-error
-    _GH_ROUTE_WHY="git cannot read '$dir' (a malformed ~/.gitconfig does this, and ~/.gitconfig is a managed symlink) — the remote is UNKNOWN, so no account was selected"
+    _GH_ROUTE_WHY="git could not read '$dir' — the remote is UNKNOWN, so no account was selected: ${_GH_REMOTE_ERR:-(no message)}"
     return 1
   fi
   case "$_GH_REMOTE_STATE" in
@@ -331,16 +349,29 @@ _gh_token_source() {
 # Prints gh's stdout; stderr is the caller's to redirect. Returns gh's status,
 # or 124 when `timeout` killed it.
 #
-# THE ENVIRONMENT IS SET INSIDE A SUBSHELL, NEVER AS `env VAR=val` ARGV.
-# /proc/<pid>/cmdline is world-readable (mode 444); /proc/<pid>/environ is
-# owner-only (400). So `env GH_TOKEN=gho_… gh api user` publishes a live
-# credential to every local account for the lifetime of the call, catchable by
-# any `ps auxww`. This repository found exactly that leak on 2026-09-01 — a
-# tmux server started 28 days earlier with `-e GH_TOKEN=gho_…` on its command
-# line — and putting one back inside the tool written to diagnose it would be
-# worse than not having the tool. It also retires the whole `env` argv-ordering
-# class: no `-u`-after-assignment ordering rule, no shell-function-after-`env`
-# trap, because there is no `env`.
+# The environment is set inside a subshell rather than as `env VAR=val` argv.
+#
+# CALIBRATION, because the first version of this comment overstated it: `env`
+# CONSUMES its assignments and then execs, so the token never reaches the
+# exec'd program's `/proc/<pid>/cmdline` — measured, not assumed. It is in argv
+# only of the short-lived `env` process itself, between fork and exec. That is a
+# microsecond race, not the length of the call, and it is NOT the same shape as
+# the 28-day-old tmux server this machine found on 2026-09-01, whose credential
+# sat in a long-lived process's own cmdline.
+#
+# It is still worth not doing: /proc/<pid>/cmdline is world-readable (444) and
+# /proc/<pid>/environ is owner-only (400), so the subshell form closes even the
+# race — and, the actual payoff, it retires the whole `env` argv class. Two bugs
+# in this file came from it (a shell function after `env`, and `-u` after an
+# assignment), and both surfaced as "could not resolve the account", i.e. as
+# facts about GitHub.
+#
+# `exec command gh`, not `exec gh`: zsh's `exec` resolves SHELL FUNCTIONS, so a
+# user-defined `gh` wrapper in ~/.zshrc.local would be run instead of the binary
+# and its output taken as the effective login. `env` could not do that, so this
+# hazard is new with the subshell — it is the one thing the old form was better
+# at, and it only bites on the no-`timeout` fallback (on the normal path
+# `timeout` execs the binary itself).
 #
 # A missing `timeout` degrades to an unbounded call rather than to failure —
 # the same reasoning as setup-backup.sh's account lookup, where "the question
@@ -358,7 +389,7 @@ _gh_run() {
     if (( $+commands[timeout] )); then
       exec timeout "$secs" gh "$@"
     else
-      exec gh "$@"
+      exec command gh "$@"
     fi
   )
 }
@@ -439,7 +470,7 @@ gh-doctor() {
   local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY
   # zsh's `local` on an existing name in the same scope PRINTS it, so every
   # loop-body variable is declared once, here.
-  local cd_ why_ cu_ dir_is_pwd
+  local cd_ why_ cu_ dir_is_pwd rt
 
   while (( $# )); do
     case "$1" in
@@ -605,8 +636,14 @@ gh-doctor() {
     _doctor_warn "declared vs effective: skipped — the effective account is unknown"
   fi
 
-  if [[ -n "$want_user" && -n "$eff_user" ]] && (( ! dir_is_pwd )); then
-    _doctor_note "route vs effective: not applicable — '$want_user' is $dir's account, '$eff_user' is this shell's"
+  if [[ -n "$want_user" && -n "$eff_user" ]] && [[ -n "${GH_ACCOUNT_ROUTING_OFF:-}" ]]; then
+    # The opt-out previously suppressed only the "no route determined" warning,
+    # so a deliberately-unrouted shell inside a repo that DOES match a route
+    # still got "✗ … land under the wrong account" and a non-zero exit — the
+    # exact false alarm the switch exists to prevent.
+    _doctor_note "route vs effective: not compared — \$GH_ACCOUNT_ROUTING_OFF is set, so '$eff_user' is whatever provisioned this shell"
+  elif [[ -n "$want_user" && -n "$eff_user" ]] && (( ! dir_is_pwd )); then
+    _doctor_note "route vs effective: this shell is '$eff_user'; for $dir see the routed-account probe below"
   elif [[ -n "$want_user" && -n "$eff_user" ]]; then
     if [[ "${want_user:l}" == "${eff_user:l}" ]]; then
       _doctor_ok "the remote routes to '$want_user', and that is who gh is"
@@ -618,6 +655,29 @@ gh-doctor() {
     _doctor_warn "route vs effective: skipped — the effective account is unknown"
   elif [[ -z "$want_dir" && -n "$eff_user" ]] && (( dir_is_pwd )) && [[ -z "${GH_ACCOUNT_ROUTING_OFF:-}" ]]; then
     _doctor_warn "no route determined an account, yet gh is authenticated as '$eff_user' — that account was chosen by something other than the remote"
+  fi
+
+  # For an argument directory, the question "which account would I be there?"
+  # is answerable — it is the routed dir's own per-user token, which is exactly
+  # what the chpwd hook would pin. Skipping it turned the advertised
+  # `gh-doctor ~/some/repo` form into a note, which is a suppression rather than
+  # a fix: the one question a user asks about another repo could then only be
+  # answered by cd-ing into it.
+  if (( ! dir_is_pwd )) && [[ -n "$want_dir" && -n "$want_user" ]] && (( ! offline )); then
+    echo "Routed account for $dir (what a shell there would be pinned to):"
+    local rt
+    rt="$(_gh_user_token "$want_dir" "$want_user")" || rt=""
+    if [[ -z "$rt" ]]; then
+      _doctor_warn "no per-user token for $want_user — a shell there could not be pinned either"
+    elif _gh_probe_login "$want_dir" "$rt"; then
+      if [[ "${_GH_PROBE_LOGIN:l}" == "${want_user:l}" ]]; then
+        _doctor_ok "resolves to $_GH_PROBE_LOGIN, which is what the remote routes to"
+      else
+        _doctor_bad "routes to '$want_user' but its own token resolves to '$_GH_PROBE_LOGIN'"
+      fi
+    else
+      _doctor_warn "could not resolve — $_GH_PROBE_ERR"
+    fi
   fi
 
   # ---- 3. Does GH_CONFIG_DIR isolate the credential? ----------------------
@@ -681,7 +741,12 @@ gh-doctor() {
   # a real and confusing state, and both are supposed to key off the remote.
   echo
   echo "Git identity here (same signal — #67):"
-  if [[ "$_GH_REMOTE_STATE" == "no-repo" ]]; then
+  if [[ "$_GH_REMOTE_STATE" == "git-error" ]]; then
+    # Two of the three _GH_REMOTE_STATE consumers were taught about git-error
+    # and this one was missed, so it announced "user.email is unset" — a
+    # confident, wrong diagnosis — when git simply could not be read.
+    _doctor_note "git could not be read here, so the identity is unknown too"
+  elif [[ "$_GH_REMOTE_STATE" == "no-repo" ]]; then
     _doctor_note "not a git repository"
   else
     local gname gmail

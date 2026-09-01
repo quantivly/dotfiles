@@ -144,18 +144,29 @@ _doctor_summary() {
 # `umask 077` the user set before handling something sensitive.
 _dotfiles_umask_verdict() {
   # Usage: _dotfiles_umask_verdict   (pure — reads nothing but /etc/group)
-  # Sets:  _DOTFILES_UMASK_WANT = "" | a mask to restrict BY
+  # Sets:  _DOTFILES_UMASK_MODE = "" | explicit | restrict
+  #        _DOTFILES_UMASK_WANT = "" | the mask an `explicit` verdict applies
   #        _DOTFILES_UMASK_WHY  = one line, for dotfiles-doctor and humans
-  # Returns non-zero only when it could not determine the answer.
+  # Returns non-zero when it could not determine the answer, INCLUDING when an
+  # explicit override is not a usable mask — the validity of DOTFILES_UMASK is
+  # part of the verdict, not of applying it. Leaving it to the guard meant the
+  # doctor, which only asks for the verdict, called a nonsense override ✓.
   local grpfile="${DOTFILES_GROUP_FILE:-/etc/group}"
   local line me="${USERNAME:-${LOGNAME:-$USER}}"
   local -a fields others
-  _DOTFILES_UMASK_WANT=""; _DOTFILES_UMASK_WHY=""
+  _DOTFILES_UMASK_MODE=""; _DOTFILES_UMASK_WANT=""; _DOTFILES_UMASK_WHY=""
 
   if [[ -n "${DOTFILES_UMASK:-}" ]]; then
-    _DOTFILES_UMASK_WANT="$DOTFILES_UMASK"
-    _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK=$DOTFILES_UMASK — set explicitly"
-    return 0
+    # Validity is only knowable by trying it, so try it somewhere harmless. One
+    # fork, only when the override is set.
+    if ( umask "$DOTFILES_UMASK" ) 2>/dev/null; then
+      _DOTFILES_UMASK_MODE=explicit
+      _DOTFILES_UMASK_WANT="$DOTFILES_UMASK"
+      _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK=$DOTFILES_UMASK — set explicitly"
+      return 0
+    fi
+    _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK='$DOTFILES_UMASK' is not a valid mask — ignored, umask left as the system set it"
+    return 1
   fi
 
   if [[ ! -r "$grpfile" ]]; then
@@ -170,7 +181,7 @@ _dotfiles_umask_verdict() {
     others=( ${(s.,.)${fields[4]:-}} )
     others=( ${others:#$me} )
     if (( ${#others} )); then
-      _DOTFILES_UMASK_WANT=022
+      _DOTFILES_UMASK_MODE=restrict
       _DOTFILES_UMASK_WHY="at least 022 — login group '${fields[1]}' also contains ${(j:, :)others}, so group-write is write access for someone else"
     else
       _DOTFILES_UMASK_WHY="left as the system set it — login group '${fields[1]}' has no other members"
@@ -185,34 +196,32 @@ _dotfiles_umask_verdict() {
 _dotfiles_umask_guard() {
   # Usage: _dotfiles_umask_guard   (call from zshrc; APPLIES the verdict)
   # Sets:  _DOTFILES_UMASK_WHY, as above.
-  local cur rc
-  local _DOTFILES_UMASK_WANT
+  local rc
+  local _DOTFILES_UMASK_MODE _DOTFILES_UMASK_WANT
   _dotfiles_umask_verdict; rc=$?
-  [[ -n "$_DOTFILES_UMASK_WANT" ]] || return $rc
+  (( rc == 0 )) || return $rc
 
-  # An explicit override may be nonsense. `umask` then fails, and returning 0
-  # regardless reported a mask that was never applied — as a plain note in the
-  # doctor, and, at startup, as an error emitted during initialisation, which
-  # lands inside p10k's instant-prompt warning box: the exact thing every other
-  # startup message in this repo is deferred to avoid.
-  if [[ -n "${DOTFILES_UMASK:-}" ]]; then
-    if umask "$DOTFILES_UMASK" 2>/dev/null; then
-      return 0
-    fi
-    _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK='$DOTFILES_UMASK' is not a valid mask — ignored, umask left as the system set it"
-    return 1
+  if [[ "$_DOTFILES_UMASK_MODE" == "explicit" ]]; then
+    # Already proven applicable by the verdict, so this cannot emit an error —
+    # which matters because it runs during initialisation, where output lands
+    # inside p10k's instant-prompt warning box.
+    umask "$_DOTFILES_UMASK_WANT"
+    return 0
   fi
+  [[ "$_DOTFILES_UMASK_MODE" == "restrict" ]] || return 0
 
-  # Restrict, never relax. One fork, and only on the path that has something to
-  # do — the healthy case (a login group with no other members) never gets here.
+  # Restrict, never relax — as a SYMBOLIC mask, which is the whole answer.
   #
-  # `[##8]` is not decoration: `$(( 8#077 | 8#022 ))` is 63 DECIMAL, and `umask`
-  # reads a bare number as OCTAL, so passing it through set 0o63 on a host at
-  # 077 (a further silent loosening) and errored with "bad umask" from 002,
-  # where the decimal result 18 is not even valid octal. Format the result in
-  # the base the builtin actually parses.
-  cur="$(umask)"
-  umask $(( [##8] (8#$cur | 8#$_DOTFILES_UMASK_WANT) ))
+  # The numeric route needed the current value (a `$(umask)` fork, in a function
+  # whose own comment claims to be forkless because it runs in every shell) and
+  # then an OR, which brought its own trap: `$(( 8#077 | 8#022 ))` is 63
+  # DECIMAL while `umask` parses a bare number as OCTAL, so passing it through
+  # set 0o63 on a host at 077 — a further silent loosening by the guard meant to
+  # harden — and errored `bad umask` from 002, where the decimal 18 is not valid
+  # octal. `umask g-w,o-w` denies exactly those bits relative to whatever is
+  # already set: 002→022, 022→022, 077→077, 007→027. No read, no arithmetic, no
+  # base confusion, and nothing to get wrong a third time.
+  umask g-w,o-w
   return 0
 }
 
@@ -1532,14 +1541,27 @@ dotfiles-doctor() {
   # is run in. It reports what is live and what the rule wants, and says so when
   # those differ — which is how you notice a shell that started before the rule
   # existed, or one where an override failed.
-  local _DOTFILES_UMASK_WHY _DOTFILES_UMASK_WANT
-  local _cur; _cur="$(umask)"
+  # Ask what the rule WOULD do by running the guard in a subshell and comparing
+  # masks — never by re-deriving the comparison here. The re-derived version
+  # used `8#$_DOTFILES_UMASK_WANT`, which is a math error for any non-octal
+  # DOTFILES_UMASK: `DOTFILES_UMASK=nonsense` printed `bad math expression` and
+  # then `✓ … set explicitly`, i.e. it reproduced, in the checker, the exact
+  # "reported as applied" defect the guard had just been fixed for. A fork in a
+  # doctor is free; a second implementation of the rule is not.
+  local _DOTFILES_UMASK_WHY _DOTFILES_UMASK_MODE _DOTFILES_UMASK_WANT
+  local _cur _would
+  _cur="$(umask)"
+  # Ask what the rule WOULD do by running the guard in a subshell, never by
+  # re-deriving it here. The re-derived version used `8#$_DOTFILES_UMASK_WANT`,
+  # a math error for any non-octal override, and then printed ✓ — reproducing,
+  # inside the checker, the "reported as applied" defect the guard had just been
+  # fixed for. A fork in a doctor is free; a second implementation is not.
+  _would="$(_dotfiles_umask_guard >/dev/null 2>&1; umask)"
   if _dotfiles_umask_verdict; then
-    if [[ -n "$_DOTFILES_UMASK_WANT" ]] \
-       && (( (8#$_cur | 8#$_DOTFILES_UMASK_WANT) != 8#$_cur )); then
-      _doctor_bad "umask is $_cur but the rule wants $_DOTFILES_UMASK_WHY — this shell predates the rule, or an override overrode it"
+    if [[ "$_would" != "$_cur" ]]; then
+      _doctor_bad "umask is $_cur but the rule would set $_would — this shell predates the rule ($_DOTFILES_UMASK_WHY)"
     else
-      case "$_DOTFILES_UMASK_WANT" in
+      case "$_DOTFILES_UMASK_MODE" in
         "") _doctor_note "umask $_cur — $_DOTFILES_UMASK_WHY" ;;
         *)  _doctor_ok   "umask $_cur — $_DOTFILES_UMASK_WHY" ;;
       esac
