@@ -659,7 +659,14 @@ _hspawn_preserve_stale_registry() {
   if command mv -- "$registry" "$archive" 2>/dev/null && [[ ! -e "$registry" ]]; then
     _hspawn_say warn "pane id reused: $registry already held an un-torn-down spawn" >&2
     _hspawn_say warn "  kept as $archive" >&2
+    # The SLUG here, not the pane id. Both files now carry this pane id, and
+    # hdespawn resolves a pane id to the live `<pane>.json`, so the pane form would
+    # finish the NEW spawn rather than this archived one. The slug is what
+    # distinguishes them — except when the same slug was respawned into the reused
+    # id, where hdespawn refuses with "matches N spawns" and lists the files. The
+    # archive path is printed above for exactly that case.
     _hspawn_say warn "  it is '${stale_slug:-?}'${stale_branch:+ ($stale_branch)}${stale_path:+ at $stale_path}${stale_slug:+ — finish it with: hdespawn $stale_slug}" >&2
+    _hspawn_say warn "  (if that reports 'matches 2 spawns', this entry is the file named above)" >&2
     return 0
   fi
   _hspawn_say warn "could not move the existing $registry aside; NOT overwriting it" >&2
@@ -956,6 +963,7 @@ hspawn() {
 
   # Registry entry — written now, not after detection (see header).
   local state_dir registry
+  local registry_failed=0
   state_dir="$(_hspawn_state_dir)"
   registry="$(_hspawn_registry_file "$pane")"
   if mkdir -p "$state_dir" && _hspawn_preserve_stale_registry "$registry" && jq -n \
@@ -966,7 +974,15 @@ hspawn() {
       '$ARGS.named' > "$registry"; then
     _hspawn_say registry "$registry"
   else
+    # The spawn CONTINUES — the pane and the agent are usable, and discarding them
+    # over a bookkeeping failure would be worse. But it must not report SUCCESS:
+    # with no registry entry, hdespawn and hreap cannot see this worktree at all,
+    # so it is a leak on a box where memory is the binding constraint, and
+    # `hspawn … && echo ok` printed ok. The status is carried to the end of the
+    # function rather than returned here.
+    registry_failed=1
     _hspawn_say warn "could not write $registry — hdespawn/hreap will not know this spawn" >&2
+    _hspawn_say warn "  finish it by hand: herdr worktree remove --workspace $workspace --force" >&2
   fi
 
   # Race 1 (header): the pane's shell is usually not at its prompt yet.
@@ -1042,7 +1058,13 @@ hspawn() {
   # sidebar and the priority sort, and holding ~400MB where memory is the binding
   # constraint. The blocked re-check below cannot cover it — that one lives inside
   # `if [[ -n "$prompt" ]]`, so it only guards the with-prompt path.
-  _hspawn_clear_trust_dialog "$pane" || return 1
+  if ! _hspawn_clear_trust_dialog "$pane"; then
+    # Every bail-out from here down names the pane id; this one printed nothing at
+    # all, leaving the worktree, workspace, pane and registry entry with no stated
+    # way to finish them.
+    echo "       (registry entry kept; \`hdespawn $pane\` tears the worktree down)" >&2
+    return 1
+  fi
 
   if [[ -n "$profile" ]]; then
     # clauth started the agent, so herdr never got to name it. Name it now.
@@ -1065,6 +1087,11 @@ hspawn() {
   fi
 
   _hspawn_say next "herdr agent read $pane · hreap · hdespawn $slug"
+  # Non-zero when the registry entry could not be written: the spawn worked, but
+  # nothing can find it afterwards, and a caller chaining on hspawn's status has to
+  # know that. The manual teardown is printed with the warning above.
+  (( registry_failed )) && return 1
+  return 0
 }
 
 #------------------------------------------------------------------------------
@@ -1190,9 +1217,24 @@ hdespawn() {
   # the teardown continues against the path THIS entry recorded, behind the same
   # uncommitted/unpushed guard. Nothing herdr owns is touched on that path: no
   # `worktree remove`, no pane close, no agent killed.
-  if [[ -n "$ws_live" && -n "$live_path" && -n "$reg_path" && "$live_path" != "$reg_path" ]]; then
-    _hspawn_say note "workspace $ws now holds $live_path, not this entry's $reg_path"
-    _hspawn_say note "  the id was reused — leaving that workspace alone; finishing this entry from disk"
+  # Fires whenever this entry cannot be PROVEN to own the live workspace, which is
+  # two cases, not one:
+  #   * the recorded path differs from the live one — the id was reused;
+  #   * the entry recorded NO path at all. Not hypothetical: that is precisely the
+  #     state the recovery below exists for. Requiring a non-empty reg_path meant
+  #     such an entry skipped the disown, adopted the live workspace's checkout as
+  #     its own two lines down, and then tore it down — `herdr worktree remove
+  #     --workspace` would have removed ANOTHER spawn's worktree and closed their
+  #     pane. The branch lookups below identify this entry's worktree without
+  #     guessing, so falling through to them is both safe and correct.
+  if [[ -n "$ws_live" && -n "$live_path" ]] && [[ -z "$reg_path" || "$live_path" != "$reg_path" ]]; then
+    if [[ -z "$reg_path" ]]; then
+      _hspawn_say note "this entry recorded no worktree path, so workspace $ws ($live_path) cannot be shown to be its own"
+      _hspawn_say note "  leaving that workspace alone; finishing this entry from its branch"
+    else
+      _hspawn_say note "workspace $ws now holds $live_path, not this entry's $reg_path"
+      _hspawn_say note "  the id was reused — leaving that workspace alone; finishing this entry from disk"
+    fi
     ws_live="" live_path="" agent_status=""
   fi
   [[ -n "$live_path" ]] && wt_path="$live_path"

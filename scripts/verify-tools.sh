@@ -281,7 +281,7 @@ else
         # outlived a logout holds a DISPLAY naming a dead session — present, so a
         # names-only check cannot see it.
         case "$name" in
-            DISPLAY|WAYLAND_DISPLAY) server_sess+="$entry"$'\n' ;;
+            DISPLAY|WAYLAND_DISPLAY|XAUTHORITY) server_sess+="$entry"$'\n' ;;
         esac
     done < "/proc/$herdr_pid/environ"
 
@@ -312,10 +312,20 @@ else
                 sess_missing+=" $v"
                 continue
             fi
-            # SSH_AUTH_SOCK is deliberately excluded from the VALUE comparison:
-            # the launcher substitutes a stable symlink for it on purpose, so a
-            # difference there is by design rather than drift.
-            case "$v" in DISPLAY|WAYLAND_DISPLAY) ;; *) continue ;; esac
+            # SSH_AUTH_SOCK, and ONLY SSH_AUTH_SOCK, is excluded from the VALUE
+            # comparison: the launcher substitutes a stable symlink for it on
+            # purpose, so a difference there is by design rather than drift.
+            #
+            # XAUTHORITY used to be excluded too, silently — and it is the only
+            # one of the three that a re-login changes. DISPLAY (:0) and
+            # WAYLAND_DISPLAY (wayland-0) are deterministic per session, so
+            # comparing them detects nothing; XAUTHORITY is a per-login temp file
+            # (/run/user/1000/.mutter-Xwaylandauth.<random>). A server that
+            # outlived a logout therefore matched on both compared values and
+            # printed the all-clear while holding a deleted Xauthority — exactly
+            # the case this check was added for, and the one the launcher's own
+            # header warns about ("X11 tools then fail until the next ...").
+            case "$v" in SSH_AUTH_SOCK) continue ;; esac
             if [[ "$(grep "^${v}=" <<<"$mgr_env" | head -1)" \
                != "$(grep "^${v}=" <<<"$server_sess" | head -1)" ]]; then
                 sess_stale+=" $v"
@@ -372,8 +382,8 @@ fi
 echo ""
 echo -e "${BLUE}=== systemd user unit enablement vs the linked unit files ===${NC}"
 # Also an ASSERTION (see EXIT CODE in the header). systemd records [Install] at
-# `enable` time, so editing WantedBy= in a unit file moves nothing until someone
-# runs `reenable` — and ./install is not in this repo's deploy path, because
+# `enable` time, so editing WantedBy= in a unit file moves nothing until the
+# enablement is redone — and ./install is not in this repo's deploy path, because
 # `git checkout` here IS the deploy. So the enablement silently keeps pointing at
 # whatever target was current when the unit was first enabled. On this machine
 # that meant the server would have kept starting at boot, before any graphical
@@ -381,10 +391,25 @@ echo -e "${BLUE}=== systemd user unit enablement vs the linked unit files ===${N
 if [[ -x "$DOTFILES_ROOT/scripts/reconcile-systemd-units.sh" ]]; then
     if ! "$DOTFILES_ROOT/scripts/reconcile-systemd-units.sh" --check; then
         herdr_hygiene_failed=1
-        echo "    Fix: ./install (it reconciles), or systemctl --user reenable <unit>"
+        echo "    Fix: ./install — it reconciles this."
+        # NOT `systemctl --user reenable`, which this line used to suggest. Its
+        # disable half removes every symlink in the unit search path pointing at
+        # the unit, and for a dotbot-installed unit the entry in
+        # ~/.config/systemd/user IS such a symlink, into the checkout — so it
+        # deletes the unit and the enable half then fails with "Unit does not
+        # exist". That happened on this machine on 2026-09-01, from advice this
+        # repo printed. The warning was added to the unit header, install.conf.yaml
+        # and CLAUDE.md, and missed here: the one place a user reads mid-failure,
+        # with the destructive command last on the line.
     fi
 else
-    echo -e "${YELLOW}⚠${NC} scripts/reconcile-systemd-units.sh missing — enablement UNCHECKED"
+    # A FAIL, not a warning: this section is one of the two assertions the exit
+    # code is built on, and "the checker is missing" is not a pass. Reporting it
+    # as a warning let the check be absent and the script still exit 0 — the
+    # unanswerable question resolving to the answer it would have had if
+    # everything were fine, which is the failure mode this whole file is about.
+    echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/reconcile-systemd-units.sh missing — enablement UNCHECKED"
+    herdr_hygiene_failed=1
 fi
 
 echo ""

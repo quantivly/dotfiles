@@ -282,8 +282,33 @@ check "it is the OLD one that moved"  "$(jq -r .slug "$STATE"/wZ_p1.stale-*.json
 check "the new entry is written"      "$(jq -r .slug "$STATE/wZ_p1.json")"               "slug"
 check "the clobber is reported"       "$(inout "pane id reused")"                        "1"
 check "and names how to finish it"    "$(inout "hdespawn older")"                        "1"
+# The SLUG is correct here and the pane id would be wrong: both files carry this
+# pane id, and hdespawn resolves a pane id to the live <pane>.json, so the pane
+# form would finish the NEW spawn. Pinned so a future "convert everything to the
+# pane id" sweep has to read the reasoning before changing it.
+check "it does NOT advertise the pane" "$(inout "hdespawn wZ:p1")"                  "0"
+check "the ambiguous case is named"    "$(inout "matches 2 spawns")"                "1"
 # The preserved entry stays reachable by slug: hdespawn's scan globs *.json.
 check "the archive keeps .json"       "$(find "$STATE" -maxdepth 1 -name 'wZ_p1.stale-*.json' -print | wc -l | tr -d ' ')" "1"
+
+# H5: the helper is pinned in isolation above and the happy path is pinned, but
+# the WIRING was not — a mutation making hspawn ignore this helper's failure
+# passed 126/126. That is the F6 defect class in a new function: a status that
+# propagates nowhere. Force the unmovable-entry state and assert hspawn's own
+# exit code, which is the thing no row asserted.
+if [[ "$(id -u)" != "0" ]]; then
+    rm -f "$STATE"/*.json
+    cat > "$STATE/wZ_p1.json" <<'JSON'
+{"pane_id":"wZ:p1","workspace_id":"wZ","slug":"older"}
+JSON
+    chmod 500 "$STATE"
+    run "hspawn '$REPO' slug"
+    chmod 700 "$STATE"
+    check "unmovable entry: hspawn fails" "$([[ $RC -ne 0 ]] && echo yes || echo no)"  "yes"
+    check "unmovable entry: says why"     "$(inout "NOT overwriting it")"              "1"
+    check "unmovable entry: entry intact" "$(jq -r .slug "$STATE/wZ_p1.json" 2>/dev/null)" "older"
+    rm -f "$STATE"/*.json
+fi
 if [[ "$(id -u)" != "0" ]]; then
     rm -f "$STATE"/*.json; mkdir -p "$STATE/ro"
     cat > "$STATE/ro/wZ_p1.json" <<'JSON'

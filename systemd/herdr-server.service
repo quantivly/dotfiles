@@ -74,8 +74,19 @@ ExecStop=/bin/sh -c 'h=%h/.local/bin/herdr; [ -x "$$h" ] || h=$$(command -v herd
 # no per-pane scope, so they share its cgroup — and the manager default,
 # DefaultOOMPolicy=stop, means one OOM-killed process ANYWHERE in that cgroup
 # makes systemd stop the whole unit, ending every agent session on the machine.
-# Restart= does not rescue it: a unit stopped by OOMPolicy is neither a failure
-# nor an abnormal exit. This is not a hypothetical pressure — CLAUDE.md records
+# This covers the KERNEL-OOM path only, and the distinction matters. OOMPolicy
+# governs what systemd does to the unit AFTER something in its cgroup has already
+# been killed; it does not influence whether systemd-oomd SELECTS this cgroup in
+# the first place. That is ManagedOOMPreference=avoid, which this unit does NOT
+# set (live: none) — a deliberate omission rather than an oversight, since asking
+# oomd to spare this cgroup means asking it to kill something else on a box where
+# memory is the binding constraint. Raise it here if that trade is ever wanted.
+#
+# One correction to an earlier version of this comment: it claimed "Restart= does
+# not rescue it". `man systemd.service` says a unit killed this way enters the
+# oom-kill failed state, "after which Restart= may apply" — so Restart= can fire.
+# It is not relied on, because a restarted server is a server whose panes are all
+# gone; continuing without stopping the unit is the actual protection. This is not a hypothetical pressure — CLAUDE.md records
 # this box at load 27 and 96% swap with 33 claude processes, endangering ten
 # unrelated sessions, and systemd-oomd is active and enabled with
 # ManagedOOMMemoryPressure=kill on user@1000.service, i.e. armed to kill

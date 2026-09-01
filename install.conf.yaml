@@ -3,6 +3,16 @@
       relink: true
       create: true
       backup: true
+    shell:
+      # dotbot's shell plugin defaults BOTH of these to false, and `install` does
+      # not pass -vv — so every shell step below ran silently. That is not merely
+      # quiet: the systemd reconciler's `⚠ enable failed` and its "a restart ENDS
+      # EVERY AGENT SESSION" note were discarded, and because it returns 0 by
+      # design (a missing user manager must not fail an install on a server),
+      # dotbot had nothing to report either. A step that cannot be seen to fail
+      # and cannot report failure is a step nobody knows ran.
+      stdout: true
+      stderr: true
 
 - clean: ['~', '~/.config']
 
