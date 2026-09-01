@@ -1701,6 +1701,13 @@ hreap() {
       # box), so the window is small — but it is not zero, and an agent that woke
       # inside it would be killed mid-turn.
       now_status="$(herdr pane get "$pane" 2>/dev/null | jq -r '.result.pane.agent_status // "unknown"')"
+      # jq prints NOTHING on empty input, so that `// "unknown"` never fires when
+      # the call itself fails or returns nothing — and the skip line below then
+      # read "status changed to  since the scan", sending whoever reads it after a
+      # status change that never happened. The skip is right either way; only the
+      # stated reason was wrong. Unknown is also the correct value: an agent herdr
+      # will not talk about is exactly what "unknown" means here.
+      [[ -n "$now_status" ]] || now_status="unknown"
       case "$now_status" in
         idle|done) ;;
         *)
