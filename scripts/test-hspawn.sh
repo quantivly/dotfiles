@@ -162,6 +162,12 @@ run() {
 inout()  { grep -cF -- "$1" <<<"$OUT" || true; }
 inargs() { grep -cFx -- "ARG $1" "$LOG" || true; }
 incmd()  { grep -cF -- "CMD $1" "$LOG" || true; }
+# Every herdr call the run made, deduplicated, sorted, `|`-joined — the whole
+# set rather than a count of one command. A count only refuses the failure you
+# thought of: `incmd "worktree remove"` is 0 both when hdespawn correctly left a
+# foreign workspace alone and when it destroyed it via some other subcommand.
+# The set names what DID run, so any extra call fails the row.
+herdrcmds() { sed -n 's/^CMD //p' "$LOG" | sort -u | paste -sd'|' -; }
 # The work summary, anchored to its own line: the same sentence is repeated
 # inside the --yes refusal, so an unanchored count is 2 and an assertion written
 # as "at least one" would pass on either line, including the wrong one.
@@ -379,7 +385,7 @@ git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m two
 # at which point "the worktree dir is gone" passes because it was never there.
 # (Found by mutation: reverting the fix under test did not fail that row.)
 # Pushed WITHOUT -u: no upstream, which is the normal state of an hspawn branch.
-for b in clean dirty ahead reused; do
+for b in clean dirty ahead reused orphan foreign; do
     git -C "$REPO" branch -q "tester/$b" HEAD
     git -C "$REPO" push -q origin "tester/$b"
 done
@@ -493,10 +499,65 @@ cat > "$STUBDIR/snapshot.json" <<JSON
 JSON
 run "hdespawn --yes reused"
 check "the reuse is reported"         "$(inout "the id was reused")"                     "1"
+# There are TWO disown messages and they describe different states; an operator
+# reading the wrong one goes looking for a path mismatch that never happened.
+check "not the no-path message"       "$(inout "recorded no worktree path")"             "0"
 check "no herdr worktree remove"      "$(incmd "worktree remove")"                       "0"
+# The whole set, not just the one command: the entry's own path was recorded and
+# still resolves, so the snapshot is the ONLY thing herdr is asked for.
+check "herdr is asked nothing else"   "$(herdrcmds)"                                     "api snapshot"
+check "it works on its own checkout"  "$(inout "worktree:  $TMPROOT/wt-reused")"         "1"
 check "the recorded worktree is gone" "$([[ -d "$TMPROOT/wt-reused" ]] && echo yes || echo no)" "no"
 check "the entry is dropped"          "$([[ -f "$STATE/wreused_p1.json" ]] && echo yes || echo no)" "no"
 check "it exits 0"                    "$RC"                                              "0"
+rm -f "$STUBDIR/snapshot.json"
+
+echo
+echo "=== hdespawn: a live workspace an entry cannot be PROVEN to own ==="
+# The other half of the same guard, and the dangerous one. A registry entry can
+# carry an EMPTY .path — a `worktree create` reply without `worktree.path`, or a
+# partially-failed run; the whole worktree-path recovery below the guard exists
+# because that state occurs. Requiring a non-empty recorded path before disowning
+# meant such an entry kept ws_live/live_path set, adopted the LIVE workspace's
+# checkout as its own two lines down, and tore that down: `herdr worktree remove
+# --workspace` removes another spawn's worktree and closes their pane. On a box
+# running a dozen agent sessions that is somebody else's work destroyed.
+#
+# So: same workspace id, live and holding wt-foreign; this entry recorded no path
+# at all. wt-foreign is a REAL, clean worktree, so a mutated hdespawn sails past
+# the at-risk guard and reaches the removal — the row has to be reachable to be
+# a row.
+mkwt "$TMPROOT/wt-orphan" orphan
+mkwt "$TMPROOT/wt-foreign" foreign
+rm -f "$STATE/wforeign_p1.json"     # wt-foreign is the bystander, not a target
+cat > "$STATE/worphan_p1.json" <<JSON
+{"pane_id":"worphan:p1","workspace_id":"worphan","branch":"tester/orphan","slug":"orphan",
+ "repo":"$REPO","path":"","created_at":"2026-09-01T10:00:00Z","creator_session":"sess-1"}
+JSON
+cat > "$STUBDIR/snapshot.json" <<JSON
+{"result":{"snapshot":{"workspaces":[{"workspace_id":"worphan","label":"someone else",
+ "worktree":{"checkout_path":"$TMPROOT/wt-foreign"}}],
+ "panes":[{"pane_id":"worphan:p1","agent_status":"idle"}],"agents":[]}}}
+JSON
+run "hdespawn --yes orphan"
+check "the empty path is reported"    "$(inout "recorded no worktree path, so workspace worphan ($TMPROOT/wt-foreign) cannot be shown to be its own")" "1"
+check "not the id-reused message"     "$(inout "the id was reused")"                     "0"
+check "it says what it will do next"  "$(inout "finishing this entry from its branch")"  "1"
+# The adoption itself, which is the defect: wt_path must NOT become the live
+# workspace's checkout. The branch lookups are what identify this entry's own.
+check "the foreign checkout is not adopted" "$(inout "worktree:  $TMPROOT/wt-foreign")"  "0"
+check "the branch lookup finds its own"     "$(inout "worktree:  $TMPROOT/wt-orphan")"   "1"
+check "and the workspace reads as gone"     "$(inout "workspace: worphan (not in the current herdr session)")" "1"
+# The blast radius, as a set: a snapshot, then the worktree lookup the disown
+# forced. No `worktree remove --workspace worphan`, and nothing else either.
+check "herdr is never asked to remove"      "$(herdrcmds)"   "api snapshot|worktree list --cwd $REPO"
+check "the bystander checkout survives"     "$([[ -d "$TMPROOT/wt-foreign" ]] && echo yes || echo no)" "yes"
+# ...and the teardown still COMPLETED against the right path. Disowning must not
+# turn into the dead end it replaced: entry dropped with its worktree stranded.
+check "its own worktree is removed"         "$(inout "removed:   worktree $TMPROOT/wt-orphan (git worktree remove)")" "1"
+check "the dir is really gone"              "$([[ -d "$TMPROOT/wt-orphan" ]] && echo yes || echo no)" "no"
+check "the entry is dropped"                "$([[ -f "$STATE/worphan_p1.json" ]] && echo yes || echo no)" "no"
+check "it exits 0"                          "$RC"                                        "0"
 rm -f "$STUBDIR/snapshot.json"
 
 echo
