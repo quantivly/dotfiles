@@ -108,7 +108,14 @@
       # not restart the unit. The script gates itself: no-op without a user
       # manager (servers, containers, CI), and it re-enables only a unit that is
       # already enabled, so it reconciles a decision rather than making one.
-      bash ~/.dotfiles/scripts/reconcile-systemd-units.sh
+      # Relative, not ~/.dotfiles: dotbot runs shell steps with cwd set to the
+      # checkout (that is why the `git submodule update` step above needs no
+      # path), and the checkout is not always at ~/.dotfiles — in CI it is under
+      # /home/runner/work. The guard keeps a partial checkout from failing the
+      # whole install rather than skipping one step.
+      if [ -f scripts/reconcile-systemd-units.sh ]; then
+        bash scripts/reconcile-systemd-units.sh
+      fi
     - |
       # Create ~/.backup.local from template (workstation only; no-op on servers).
       # The heavy one-time setup (restic, repos, systemd timers, LUKS header,
