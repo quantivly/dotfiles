@@ -624,6 +624,24 @@ Gotchas, in the order they bite:
   those were Claude under Atrium's tmux, outside herdr panes and so outside `hreap` too; the tab
   bar's `agents <detected>/<procs>` gap is the full census). `hspawn` records each spawn in `~/.local/state/hspawn/`; `hdespawn <slug>` tears one down
   (pane, workspace, worktree, registry entry).
+- **A pane id is not a permanent name, and the registry that keys on it is.** herdr allocates
+  workspace ids from a short alphabet whose counter lives only in the running server
+  (`~/.config/herdr/session.json` persists the workspaces but no next-id counter), so a restart
+  reissues them from the start — the server log here shows `w4`, `w5`, `wN` and `wP` each created
+  twice in five days — and every new workspace's first pane is `p1`. Meanwhile
+  `~/.local/state/hspawn/` is a file tree that outlives every restart, and its entries are
+  deliberately long-lived: each hspawn bail-out keeps its entry, and `hreap --close` annotates
+  rather than deletes so `hdespawn` can finish later. So `wN:p1` names two different spawns, and
+  hspawn's `>` used to destroy the older entry silently, orphaning its worktree and branch with
+  nothing on disk pointing at them. It now renames it to `<pane>.stale-<ts>.json` and says so. Two
+  habits follow: **`hdespawn <pane-id>` is the exact form** (a direct file lookup — `hdespawn
+  <slug>` scans and REFUSES when two entries share a slug, which `--close` makes likely by
+  design), and an entry whose workspace id now holds someone else's worktree is finished from the
+  recorded path with herdr's live workspace left untouched, rather than refused forever. State
+  table: `scripts/test-hspawn.sh` (126 checks, in CI as `hspawn-test`) — hermetic via a recording
+  `herdr` **stub** at the front of `PATH`, never via herdr's absence: the box this was written on
+  has a real one wired to a live server, and a suite that assumed absence would pass in CI and
+  remove a real workspace here.
 - **Teammates in a herdmates team are NOT detected as herdr agents.** They exist as panes but are
   absent from `herdr agent list`, the sidebar rows, the priority sort and toasts — only the lead
   is detected. A lead also reports `done` while its teammates are still working, so read the

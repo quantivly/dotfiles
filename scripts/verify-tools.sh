@@ -403,11 +403,26 @@ declared_path=""
 if [[ -x "$herdr_launcher" ]]; then
     declared_path=$("$herdr_launcher" --print-env 2>/dev/null | sed -n 's/^PATH=//p')
 fi
-if [[ -n "$server_path" ]]; then
+# $server_path is only set above when /proc/<pid>/environ was READABLE, so an
+# empty one means either "no server" or "a server whose environment could not be
+# read" — two states that need different sentences and, more importantly,
+# different downstream behaviour. Reported as one, this section announced "no
+# server running" about a server that is running, and the live-vs-declared drift
+# warning at the bottom then compared the declared PATH against itself and could
+# never fire again. Hence live_server_path: the drift check needs the LIVE value,
+# not whatever $server_path was last assigned.
+live_server_path="$server_path"
+if [[ -n "$live_server_path" ]]; then
     echo "  resolving against the live server's PATH (pid $herdr_pid)"
 elif [[ -n "$declared_path" ]]; then
     server_path="$declared_path"
-    echo "  no server running — resolving against the launcher's declared PATH"
+    if [[ -n "$herdr_pid" ]]; then
+        echo -e "  ${YELLOW}⚠${NC} server pid $herdr_pid is running but its environment was unreadable —"
+        echo "    resolving against the launcher's declared PATH instead; live-vs-declared PATH"
+        echo "    drift is UNCHECKED for this run (see the ⚠ in the hygiene section above)."
+    else
+        echo "  no server running — resolving against the launcher's declared PATH"
+    fi
 fi
 if [[ -z "$server_path" ]]; then
     echo "  ○ no server PATH available (no server, no launcher) — skipped"
@@ -426,7 +441,10 @@ else
         echo "    Install it, or symlink it into ~/.local/bin (on the server PATH; takes effect"
         echo "    without a restart). A tool added to mise needs a server restart to be seen."
     fi
-    if [[ -n "$herdr_pid" && -n "$declared_path" && "$declared_path" != "$server_path" ]]; then
+    # $live_server_path, never $server_path: the latter falls back to
+    # $declared_path, and comparing that against itself is a check that reports
+    # success in every state, including the one it exists to catch.
+    if [[ -n "$live_server_path" && -n "$declared_path" && "$declared_path" != "$live_server_path" ]]; then
         echo -e "${YELLOW}⚠${NC} the live server's PATH differs from the launcher's declared PATH — the server"
         echo "    predates a mise/PATH change, or was not started via herdr-server-launch.sh."
         echo "    A restart (see above) brings the two back together."
