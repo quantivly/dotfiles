@@ -639,6 +639,14 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   place. `bad-table` is its own state and is reported as UNUSABLE.
 - **zsh's `local NAME` on a name already local in that scope is a DISPLAY command**, so a
   `local` inside a loop printed `du=zvi-quantivly` into the middle of the report.
+- **An unfixable condition is a ⚠, not a ✗.** The keyring collapse is a property of `gh`;
+  nothing here can repair it. Reporting it as a failure made `gh-doctor` exit 1 on *every*
+  run — the permanently-red checker this file warns about two sections up, in the command
+  written to avoid it, found only once it was deployed and run for real. The isolation
+  section is the *rationale* for pinning (here is the collapse; here is proof the per-user
+  token defeats it); ✗ is reserved for what someone can act on — the route disagreeing with
+  the effective account, a missing route dir, an unreachable API, and a per-user token that
+  resolves to the wrong login, which means that account needs `gh auth login`.
 - **An empty answer is never agreement.** A failed or timed-out API call is a ✗ with the
   error, and every comparison that depended on it is reported as *skipped*, never passed.
   `--offline` marks its answers NOT CHECKED for the same reason.
@@ -718,7 +726,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   --get-regexp` exits non-zero for "not a repo" and "no such key" alike, so the `rev-parse`
   that tells them apart runs only when there was nothing to parse.
 
-State table: `scripts/test-gh-routing.sh` (145 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (152 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

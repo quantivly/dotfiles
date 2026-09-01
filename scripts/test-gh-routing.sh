@@ -151,6 +151,11 @@ case "$sub" in
     done
     [ -n "$u" ] || exit 1
     case " ${GH_STUB_NO_TOKEN_FOR:-} " in *" $u "*) exit 1 ;; esac
+    # A per-user entry that is real but belongs to the wrong account — the one
+    # isolation state that IS actionable (that config dir needs a re-login).
+    if [ -n "${GH_STUB_WRONG_USER_TOKEN:-}" ]; then
+      printf 'tok-someoneelse\n'; exit 0
+    fi
     printf 'tok-%s\n' "$u" ;;
   *) echo "stub gh: unsupported: $*" >&2; exit 1 ;;
 esac
@@ -419,7 +424,7 @@ out="$(doctor "'$R_PERS'" "$COLLAPSE")"
 check "personal repo: the wrong account is named" \
       "$(printf '%s\n' "$out" | grep -c "routes to 'persony', but gh is 'worky'")" "1"
 check "personal repo: and it fails"      "$(printf '%s\n' "$out" | grep -c 'rc=1')" "1"
-check "personal repo: isolation ✗ names the dir" \
+check "personal repo: the collapse is named" \
       "$(printf '%s\n' "$out" | grep -c 'does NOT isolate the credential')" "1"
 check "personal repo: and says the per-user token does work" \
       "$(printf '%s\n' "$out" | grep -c 'pinned with its per-user token, resolves to persony')" "1"
@@ -433,6 +438,34 @@ check "work repo, pinned: declared == effective" \
 # reports the machine's state, not this directory's luck.
 check "work repo, pinned: the isolation defect is still reported" \
       "$(printf '%s\n' "$out" | grep -c 'does NOT isolate the credential')" "1"
+
+echo
+echo "=== the collapse is a ⚠, not a ✗: gh-doctor must not be permanently red ==="
+# gh keys tokens by host, so no configuration on this machine can make a config
+# dir isolate. Reporting that as a failure made gh-doctor exit 1 on EVERY run —
+# the "permanently red checker" this repo warns about, in the command written to
+# avoid it. It must still be REPORTED (it is why $GH_TOKEN is pinned at all),
+# and ✗ must still fire for anything actually actionable.
+out="$(doctor "'$R_WORK'" "$COLLAPSE GH_TOKEN=tok-worky GH_CONFIG_DIR=$CFG_WORK")"
+check "the collapse is reported as a warning" \
+      "$(printf '%s\n' "$out" | grep -c '⚠ .*does NOT isolate the credential')" "1"
+check "...and not as a failure" \
+      "$(printf '%s\n' "$out" | grep -c '✗ .*does NOT isolate the credential')" "0"
+check "a correctly routed machine exits 0 despite the collapse" \
+      "$(printf '%s\n' "$out" | grep -c 'rc=0')" "1"
+check "...and says so in the summary" \
+      "$(printf '%s\n' "$out" | grep -c 'warning(s), no failures')" "1"
+# The actionable neighbour keeps its ✗: if even the per-user token resolves to
+# the wrong login, pinning cannot work for that account and it needs a re-login.
+out="$(doctor "'$R_WORK'" "GH_STUB_KEYRING_LOGIN=worky GH_STUB_WRONG_USER_TOKEN=1 \
+                           GH_TOKEN=tok-worky GH_CONFIG_DIR=$CFG_WORK")"
+# Both configured dirs are probed, and the knob breaks both, so two ✗ lines.
+check "a broken per-user token is still ✗" \
+      "$(printf '%s\n' "$out" | grep -c '✗ .*even the per-user token')" "2"
+check "...and still exits non-zero" \
+      "$(printf '%s\n' "$out" | grep -c 'rc=1')" "1"
+check "...and points at the fix" \
+      "$(printf '%s\n' "$out" | grep -c 'gh auth login')" "2"
 
 # With no collapse to find, the doctor must go quiet. A checker that fails in the
 # healthy state is one people stop running.

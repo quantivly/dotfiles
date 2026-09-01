@@ -681,8 +681,23 @@ gh-doctor() {
   fi
 
   # ---- 3. Does GH_CONFIG_DIR isolate the credential? ----------------------
-  # The defect itself. Probed per config dir with the token env cleared, which
-  # is the state every `env -u GH_TOKEN gh ...` invocation runs in.
+  # Probed per config dir with the token env cleared, which is the state every
+  # `env -u GH_TOKEN gh ...` invocation runs in.
+  #
+  # A MISMATCH HERE IS A WARNING, NOT A FAILURE, and that distinction is the
+  # reason the section is worth reading. The collapse is a property of gh —
+  # tokens keyed by host, not by config dir — and no configuration on this
+  # machine can repair it. Reporting an unfixable condition as a failure made
+  # gh-doctor exit 1 on EVERY run, which is the state CLAUDE.md already warns
+  # about in this repo ("reporting it as one made the doctor exit non-zero
+  # forever") and which this command exists to avoid: a checker that always
+  # fails cannot be wired into anything, and people stop reading it.
+  #
+  # So this section reads as the RATIONALE for pinning — here is the collapse,
+  # and here is proof the per-user token still defeats it — while ✗ is kept for
+  # states someone can act on: the route disagreeing with the effective
+  # account, a route dir that does not exist, an unreachable API, and the one
+  # below where even the per-user token resolves to the wrong login.
   echo
   echo "Credential isolation (GH_CONFIG_DIR with no \$GH_TOKEN):"
   if (( offline )); then
@@ -712,7 +727,7 @@ gh-doctor() {
         if [[ "${_GH_PROBE_LOGIN:l}" == "${du:l}" ]]; then
           _doctor_ok "${d/#$HOME/~}: declares $du, resolves to $_GH_PROBE_LOGIN"
         else
-          _doctor_bad "${d/#$HOME/~}: declares $du, resolves to $_GH_PROBE_LOGIN — the dir does NOT isolate the credential"
+          _doctor_warn "${d/#$HOME/~}: declares $du, resolves to $_GH_PROBE_LOGIN — the dir does NOT isolate the credential (gh keys tokens by host; this is why \$GH_TOKEN is pinned)"
         fi
       else
         _doctor_warn "${d/#$HOME/~}: declares $du, could not resolve — $_GH_PROBE_ERR"
@@ -728,7 +743,9 @@ gh-doctor() {
         if [[ "${_GH_PROBE_LOGIN:l}" == "${du:l}" ]]; then
           _doctor_ok "${d/#$HOME/~}: pinned with its per-user token, resolves to $_GH_PROBE_LOGIN"
         else
-          _doctor_bad "${d/#$HOME/~}: even the per-user token for $du resolves to $_GH_PROBE_LOGIN"
+          # Unlike the line above this one is fixable, and it breaks pinning:
+          # the workaround the whole design rests on fails for that account.
+          _doctor_bad "${d/#$HOME/~}: even the per-user token for $du resolves to $_GH_PROBE_LOGIN — re-run \`gh auth login\` in that config dir"
         fi
       else
         _doctor_warn "${d/#$HOME/~}: per-user token for $du could not resolve — $_GH_PROBE_ERR"
@@ -761,5 +778,5 @@ gh-doctor() {
 
   echo
   _doctor_summary "gh acts as the account this repo's remote routes to." \
-    "Pin the account explicitly (GH_TOKEN from \`gh auth token --user <login>\`); a config dir alone does not."
+    "Start with the route: a missing config dir, an account with no per-user token, or a remote no route matches."
 }

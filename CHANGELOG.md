@@ -202,6 +202,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configured basenames rather than depending on ordering; and CLAUDE.md still
   documented the deleted `_gh_run_prefix`.
 
+- **`gh-doctor` no longer exits non-zero on every run.** Deploying #94 immediately showed
+  it: the "Credential isolation" section reported the keyring collapse as ✗, and that
+  collapse is a property of `gh` — tokens keyed by host, not by config dir — which no
+  configuration on this machine can repair. So a correctly-routed, fully-pinned machine
+  still failed, every time. That is exactly the state CLAUDE.md warns about
+  ("reporting it as one made the doctor exit non-zero forever"), reintroduced in the
+  command written to avoid it, and it matters beyond tidiness: a checker that always fails
+  cannot be wired into a hook, a healthcheck or a cron, and people stop reading it.
+
+  The mismatch is a ⚠ now — still printed, still counted, exit 0 — and the section reads as
+  the rationale for pinning rather than as a fault list. ✗ is kept for the states someone
+  can act on: the route disagreeing with the effective account, a route dir that does not
+  exist, an unreachable API, and a per-user token that resolves to the wrong login (which
+  means that config dir needs `gh auth login`, and the message now says so). Seven new
+  state-table rows, including one asserting a machine whose only problem is the collapse
+  exits 0 — the old behaviour was never pinned, because the rows grepped the message text
+  and never the glyph or the exit status.
+
 ### Removed
 - **Atrium coupling in the live shell config.** Atrium is retired (2026-09-01), so
   `_in_atrium_session()` and the interactive account switchers' early-return that deferred
