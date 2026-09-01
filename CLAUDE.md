@@ -239,16 +239,36 @@ hosts where the reverse grant is genuinely load-bearing (which is why a blanket
 (`$(<file)` and `$GID`, never `getent`), because it runs in every shell: 0.5 ms.
 "Cannot tell" — no `/etc/group` entry, as on SSSD or systemd-homed — leaves the umask
 exactly as the system set it and says so, since guessing either way is worse than the
-state the machine is already in. `dotfiles-doctor` reports the verdict; override with
-`DOTFILES_UMASK` in `~/.zshenv`, or just call `umask` in `~/.zshrc.local`.
+state the machine is already in. `dotfiles-doctor` reports the verdict — via `_dotfiles_umask_verdict`, which decides
+without applying, because a read-only health check that resets the umask of the shell it
+runs in would quietly undo a `umask 077` set before handling something sensitive.
+
+Three traps in the guard itself, each of which reported success:
+
+- **`umask 022` is an absolute assignment, not a tightening.** On a host already hardened
+  to 077 a guard installed to harden it silently *loosened* the mask, and the doctor
+  printed `✓ 022`. The verdict is OR-ed into the current value now.
+- **`$(( ))` yields decimal; `umask` parses octal.** Passing the union straight through set
+  `0o63` from 077 (a further loosening) and errored `bad umask` from 002, where the decimal
+  result `18` is not valid octal. `$(( [##8] … ))` formats in the base the builtin reads.
+- **An invalid `DOTFILES_UMASK` was reported as applied**: `umask` failed, the function
+  returned 0, and the doctor rendered it as an ordinary note — while the error itself was
+  emitted during initialization, landing inside p10k's instant-prompt warning box, the
+  exact thing every other startup message here is deferred to avoid.
+
+**Scope, since the above could be read as a guarantee:** `zshrc` is sourced only by
+*interactive* shells, so `zsh -c …`, systemd --user units, GUI applications and cron keep
+whatever pam_umask handed them. This is a belt and a partial one — removing the extra group
+member is the braces and the actual fix. Override with `DOTFILES_UMASK` in `~/.zshenv`, or
+just call `umask` in `~/.zshrc.local`.
 
 Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 `DOTFILES_GUARD_QUIET=1` (silence the startup line while dogfooding a branch),
 `DOTFILES_FETCH_MAX_AGE_HOURS`, `DOTFILES_STALE_WARN_HOURS`, `DOTFILES_EXPECTED_DIRTY`
 (scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
-`DOTFILES_GROUP_FILE`.
+`DOTFILES_GROUP_FILE`, `GH_ACCOUNT_ROUTING_OFF`.
 
-State table: `scripts/test-dotfiles-guard.sh` (209 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (219 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
@@ -538,6 +558,13 @@ exporting the right one as `GH_TOKEN`; its own comment notes that `gh auth token
 **without `--user`** "returns a shared default that may be wrong". So the mechanism was
 known — **the defect is the failure mode**, which is invisible and biased toward work.
 
+There is one deliberate escape hatch: `GH_ACCOUNT_ROUTING_OFF=1` makes the hook return
+without touching anything, for a supervisor that provisions per-session credentials of its
+own. It replaces the Atrium deferral, whose problem was the *detection* (`$ATRIUM`, or a
+tmux socket named `*/atrium` — anything could set either), not the capability; being named
+rather than sniffed also lets `gh-doctor` report such a shell as deliberate instead of
+faulty.
+
 `gh-doctor` (`zsh/functions/github.sh`) makes it visible. For a directory it prints the
 account the **remote** routes to, the account gh **declares**, the account an actual
 `GET /user` **returns**, and which mechanism decided (`GH_TOKEN` / `GITHUB_TOKEN` /
@@ -616,6 +643,37 @@ Traps this area has, each of which produced a green tick or a confident wrong an
 - **An empty answer is never agreement.** A failed or timed-out API call is a ✗ with the
   error, and every comparison that depended on it is reported as *skipped*, never passed.
   `--offline` marks its answers NOT CHECKED for the same reason.
+- **A credential must never reach argv.** `/proc/<pid>/cmdline` is world-readable (444);
+  `/proc/<pid>/environ` is owner-only (400). The first implementation ran
+  `env GH_TOKEN=gho_… gh api user`, publishing a live token to every local account for the
+  length of the call — in the tool written *because* this machine had a token sitting in a
+  tmux server's cmdline for 28 days. `_gh_run` sets the environment inside a subshell
+  instead, which also retires the whole `env`-argv class (no option-ordering rule, no
+  shell-function-after-`env` trap, because there is no `env`).
+- **git's exit status is load-bearing.** 0 = matched, 1 = no match, **128 = git could not
+  read the repository at all** — which a malformed `~/.gitconfig` produces, and
+  `~/.gitconfig` is itself a managed symlink in this repo, so a bad branch causes it.
+  Discarding the status left the state at its initialised `no-repo`, which falls through to
+  the personal default: a quantivly clone silently authenticating as the personal account,
+  on the one path that deliberately does not warn. `git-error` is its own state, it stops
+  rather than falling through, and it is loud.
+- **The first prompt re-runs the routing; it does not replay what startup recorded.** The
+  startup call routinely loses a race it is *meant* to lose — the token cache is
+  repopulated by a background job that lands a second later — so the shell starts unpinned.
+  Replaying that message printed something no longer true *and* left `GH_TOKEN` unset for
+  the life of the shell, putting every `gh` call back on the keyring default inside a
+  personal repo. The defect this mechanism exists to close, reintroduced in the one shell
+  per boot nobody would re-check.
+- **`GITHUB_TOKEN` is cleared everywhere `GH_TOKEN` is.** gh ranks it second, so leaving it
+  set on an unpinned path means a third account nobody named wins — while the warning
+  blames the keyring.
+- **`gh-doctor <dir>` is not `gh-doctor`.** The effective-account probe reads *this
+  shell's* environment, which the hook pinned for `$PWD`; comparing it against a different
+  directory's route produced a confident ✗ for a state that cannot occur, since cd-ing
+  there repins first. The comparison now runs only for `$PWD`.
+- **The legacy-nickname purge runs before the writes.** `quantivly` and `personal` are also
+  legal config-dir basenames, so purging afterwards deleted a token that had just been
+  cached — every shell start, silently, leaving that account permanently unpinned.
 - **`local` outside a function is an error in zsh**, and the shell-start refresher was an
   inline `{ … } &!` block — so the error went to a backgrounded subshell's stderr where
   nobody sees it, the cache stayed empty, and every directory reported "account NOT
@@ -627,7 +685,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   --get-regexp` exits non-zero for "not a repo" and "no such key" alike, so the `rev-parse`
   that tells them apart runs only when there was nothing to parse.
 
-State table: `scripts/test-gh-routing.sh` (105 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (129 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

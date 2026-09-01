@@ -116,25 +116,44 @@ _doctor_summary() {
 # the answer every shell instead of encoding one machine's state in a config.
 #
 # Forkless — `$(<file)` does not fork in zsh, and `$GID` is a shell parameter —
-# because this runs in every shell.
+# because this runs in every interactive shell.
+#
+# SCOPE, stated because the paragraphs above could be read as a guarantee:
+# `zshrc` is sourced only by INTERACTIVE shells, so `zsh -c …`, systemd --user
+# units, GUI applications and cron keep whatever pam_umask handed them. This is
+# a belt, and a partial one; removing the extra group member is the braces and
+# the actual fix. Covering the rest would mean owning `~/.zshenv` — which is
+# also where DOTFILES_UMASK goes, and which this repo deliberately does not
+# install, since it is machine-local.
 #
 # "Cannot tell" (no /etc/group entry: SSSD, systemd-homed) leaves the umask
 # exactly as the system set it and says so. Guessing in either direction is
 # worse than the state the machine is already in: tightening breaks sharing that
 # may be load-bearing, relaxing re-creates the exposure.
 #
+# It only ever RESTRICTS. `umask 022` is an absolute assignment, so on a host
+# already hardened to 077 a guard installed to tighten silently LOOSENED the
+# mask — and dotfiles-doctor printed that as `✓ 022`. The verdict is now OR-ed
+# into the current value.
+#
 # Override: DOTFILES_UMASK=<mask> in ~/.zshenv, which loads before zshrc.
-_dotfiles_umask_guard() {
-  # Usage: _dotfiles_umask_guard   (call from zshrc; sets the shell's umask)
-  # Sets:  _DOTFILES_UMASK_WHY — one line, for dotfiles-doctor and humans.
+#
+# The decision is separate from the application so dotfiles-doctor can ask
+# without doing: a read-only health check that resets the umask of the shell it
+# is run in is the predicate-with-side-effects shape, and would quietly undo a
+# `umask 077` the user set before handling something sensitive.
+_dotfiles_umask_verdict() {
+  # Usage: _dotfiles_umask_verdict   (pure — reads nothing but /etc/group)
+  # Sets:  _DOTFILES_UMASK_WANT = "" | a mask to restrict BY
+  #        _DOTFILES_UMASK_WHY  = one line, for dotfiles-doctor and humans
   # Returns non-zero only when it could not determine the answer.
   local grpfile="${DOTFILES_GROUP_FILE:-/etc/group}"
   local line me="${USERNAME:-${LOGNAME:-$USER}}"
   local -a fields others
-  _DOTFILES_UMASK_WHY=""
+  _DOTFILES_UMASK_WANT=""; _DOTFILES_UMASK_WHY=""
 
   if [[ -n "${DOTFILES_UMASK:-}" ]]; then
-    umask "$DOTFILES_UMASK"
+    _DOTFILES_UMASK_WANT="$DOTFILES_UMASK"
     _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK=$DOTFILES_UMASK — set explicitly"
     return 0
   fi
@@ -151,8 +170,8 @@ _dotfiles_umask_guard() {
     others=( ${(s.,.)${fields[4]:-}} )
     others=( ${others:#$me} )
     if (( ${#others} )); then
-      umask 022
-      _DOTFILES_UMASK_WHY="022 — login group '${fields[1]}' also contains ${(j:, :)others}, so group-write is write access for someone else"
+      _DOTFILES_UMASK_WANT=022
+      _DOTFILES_UMASK_WHY="at least 022 — login group '${fields[1]}' also contains ${(j:, :)others}, so group-write is write access for someone else"
     else
       _DOTFILES_UMASK_WHY="left as the system set it — login group '${fields[1]}' has no other members"
     fi
@@ -161,6 +180,40 @@ _dotfiles_umask_guard() {
 
   _DOTFILES_UMASK_WHY="no $grpfile entry for gid $GID — umask left as the system set it"
   return 1
+}
+
+_dotfiles_umask_guard() {
+  # Usage: _dotfiles_umask_guard   (call from zshrc; APPLIES the verdict)
+  # Sets:  _DOTFILES_UMASK_WHY, as above.
+  local cur rc
+  local _DOTFILES_UMASK_WANT
+  _dotfiles_umask_verdict; rc=$?
+  [[ -n "$_DOTFILES_UMASK_WANT" ]] || return $rc
+
+  # An explicit override may be nonsense. `umask` then fails, and returning 0
+  # regardless reported a mask that was never applied — as a plain note in the
+  # doctor, and, at startup, as an error emitted during initialisation, which
+  # lands inside p10k's instant-prompt warning box: the exact thing every other
+  # startup message in this repo is deferred to avoid.
+  if [[ -n "${DOTFILES_UMASK:-}" ]]; then
+    if umask "$DOTFILES_UMASK" 2>/dev/null; then
+      return 0
+    fi
+    _DOTFILES_UMASK_WHY="\$DOTFILES_UMASK='$DOTFILES_UMASK' is not a valid mask — ignored, umask left as the system set it"
+    return 1
+  fi
+
+  # Restrict, never relax. One fork, and only on the path that has something to
+  # do — the healthy case (a login group with no other members) never gets here.
+  #
+  # `[##8]` is not decoration: `$(( 8#077 | 8#022 ))` is 63 DECIMAL, and `umask`
+  # reads a bare number as OCTAL, so passing it through set 0o63 on a host at
+  # 077 (a further silent loosening) and errored with "bad umask" from 002,
+  # where the decimal result 18 is not even valid octal. Format the result in
+  # the base the builtin actually parses.
+  cur="$(umask)"
+  umask $(( [##8] (8#$cur | 8#$_DOTFILES_UMASK_WANT) ))
+  return 0
 }
 
 # =============================================================================
@@ -1475,14 +1528,24 @@ dotfiles-doctor() {
   # nothing reports the difference. 002 with a shared login group made every
   # file this user creates writable by another account.
   echo "File-creation mask:"
-  local _DOTFILES_UMASK_WHY
-  if _dotfiles_umask_guard; then
-    case "$_DOTFILES_UMASK_WHY" in
-      022*) _doctor_ok "$_DOTFILES_UMASK_WHY" ;;
-      *)    _doctor_note "$_DOTFILES_UMASK_WHY" ;;
-    esac
+  # _verdict, not _guard: the doctor must not change the umask of the shell it
+  # is run in. It reports what is live and what the rule wants, and says so when
+  # those differ — which is how you notice a shell that started before the rule
+  # existed, or one where an override failed.
+  local _DOTFILES_UMASK_WHY _DOTFILES_UMASK_WANT
+  local _cur; _cur="$(umask)"
+  if _dotfiles_umask_verdict; then
+    if [[ -n "$_DOTFILES_UMASK_WANT" ]] \
+       && (( (8#$_cur | 8#$_DOTFILES_UMASK_WANT) != 8#$_cur )); then
+      _doctor_bad "umask is $_cur but the rule wants $_DOTFILES_UMASK_WHY — this shell predates the rule, or an override overrode it"
+    else
+      case "$_DOTFILES_UMASK_WANT" in
+        "") _doctor_note "umask $_cur — $_DOTFILES_UMASK_WHY" ;;
+        *)  _doctor_ok   "umask $_cur — $_DOTFILES_UMASK_WHY" ;;
+      esac
+    fi
   else
-    _doctor_warn "$_DOTFILES_UMASK_WHY"
+    _doctor_warn "umask $_cur — $_DOTFILES_UMASK_WHY"
   fi
 
   echo "Worktrees (where feature work belongs):"

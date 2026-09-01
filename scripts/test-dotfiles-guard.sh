@@ -772,7 +772,7 @@ echo "=== the doctor leaves nothing behind in the shell ==="
 # _D* variables persisted in every shell that ran the doctor (or merely started,
 # for two of them), and a nested call clobbered the outer count.
 leak() { zsh -c "source '$SYSTEM_SH'; HOME='$FAKEHOME' DOTFILES_ROOT='$REPO' dotfiles-doctor >/dev/null 2>&1; print -r -- \"\${$1-unset}\""; }
-for v in _DOCTOR_FAIL _DOCTOR_WARN _DOTFILES_HEAD _DOTFILES_VERDICT; do
+for v in _DOCTOR_FAIL _DOCTOR_WARN _DOTFILES_HEAD _DOTFILES_VERDICT _DOTFILES_UMASK_WANT; do
   check "no \$$v left behind" "$(leak "$v")" "unset"
 done
 check "no _D* left after the startup warning" \
@@ -955,6 +955,41 @@ check "unreadable group file: unchanged" \
       "$(umaskrun "DOTFILES_GROUP_FILE=$TMPROOT/no-such-group" | cut -d' ' -f1,2)" "1 002"
 check "DOTFILES_UMASK wins outright" \
       "$(umaskrun "DOTFILES_GROUP_FILE=$GRPDIR/shared DOTFILES_UMASK=077" | cut -d' ' -f1,2)" "0 077"
+# It may only RESTRICT. `umask 022` is an absolute assignment, so a guard
+# installed to harden silently LOOSENED an already-hardened host — and the
+# doctor printed that as ✓ 022. Two arithmetic traps live here too: $(( ))
+# yields DECIMAL while umask parses OCTAL, so passing the union straight
+# through set 0o63 from 077 and errored "bad umask" from 002.
+stricter() {  # stricter <starting-mask> -> resulting mask
+  zsh -c "umask $1; source '$SYSTEM_SH'
+          DOTFILES_GROUP_FILE='$GRPDIR/shared' _dotfiles_umask_guard 2>/dev/null
+          print -r -- \$(umask)"
+}
+check "002 tightens to 022"            "$(stricter 002)" "022"
+check "022 is already there"           "$(stricter 022)" "022"
+check "077 is NOT loosened"            "$(stricter 077)" "077"
+check "007 unions rather than replaces" "$(stricter 007)" "027"
+# An override that is not a valid mask must be reported, not reported as applied
+# — and its error must not escape to stderr during shell initialisation, where
+# it lands inside p10k's instant-prompt warning box.
+check "invalid DOTFILES_UMASK is a failure" \
+      "$(umaskrun "DOTFILES_UMASK=nonsense" | cut -d' ' -f1,2)" "1 002"
+check "...named as invalid, not as applied" \
+      "$(umaskrun "DOTFILES_UMASK=nonsense" | grep -c 'is not a valid mask')" "1"
+check "...and prints nothing to stderr" \
+      "$(zsh -c "source '$SYSTEM_SH'; DOTFILES_UMASK=nonsense _dotfiles_umask_guard 2>&1 >/dev/null" | wc -c | tr -d ' ')" "0"
+# The doctor is a read-only assertion; it must not reset the umask of the shell
+# it runs in (a `umask 077` set before handling something sensitive would go).
+check "dotfiles-doctor does not touch the umask" \
+      "$(zsh -c "umask 077; source '$SYSTEM_SH'
+                 DOTFILES_GROUP_FILE='$GRPDIR/shared' HOME='$FAKEHOME' DOTFILES_ROOT='$REPO' \
+                   dotfiles-doctor >/dev/null 2>&1
+                 print -r -- \$(umask)")" "077"
+check "...and the verdict function applies nothing" \
+      "$(zsh -c "umask 002; source '$SYSTEM_SH'
+                 local _DOTFILES_UMASK_WANT _DOTFILES_UMASK_WHY
+                 DOTFILES_GROUP_FILE='$GRPDIR/shared' _dotfiles_umask_verdict
+                 print -r -- \"\$(umask) want=\$_DOTFILES_UMASK_WANT\"")" "002 want=022"
 # It runs in every shell, so it must not fork: $(<file) and $GID, never getent.
 check "no getent/awk fork in the guard" \
       "$(zsh -c "source '$SYSTEM_SH'; print -r -- \"\${functions[_dotfiles_umask_guard]}\"" \

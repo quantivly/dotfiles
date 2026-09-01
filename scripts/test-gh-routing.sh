@@ -5,8 +5,15 @@
 #
 # State table for the GitHub account routing and diagnosis in
 # zsh/functions/github.sh (_gh_url_owner, _gh_repo_remotes, _gh_route_for,
-# _gh_configured_dirs, _gh_active_config_dir, _gh_token_source, _gh_run_prefix,
-# _gh_config_dir_user, _gh_probe_login, _gh_user_token, gh-doctor).
+# _gh_configured_dirs, _gh_active_config_dir, _gh_token_source, _gh_run,
+# _gh_config_dir_user, _gh_probe_login, _gh_user_token, gh-doctor) AND the half
+# of it that actually chooses every shell's account: _update_gh_config,
+# _gh_route_report and the first-prompt hook in zsh/zshrc.company.
+#
+# That second half had no coverage at first, and two of the worst bugs found in
+# review lived there — a shell left permanently unpinned after losing a startup
+# race, and GITHUB_TOKEN never being cleared so a third account won silently.
+# Both produce a wrong account with no error, which is this file's whole remit.
 #
 # Why this exists: `gh` stores its tokens in the system keyring keyed by HOST,
 # not by config dir, so three config dirs declaring three different accounts can
@@ -18,12 +25,26 @@
 # tick somewhere if the code is wrong.
 #
 # The rows that already caught something, kept as named rows:
+#   - a live credential passed as `env GH_TOKEN=… gh api user`, i.e. in ARGV,
+#     which /proc/<pid>/cmdline publishes to every local account (mode 444)
+#     while /proc/<pid>/environ does not (400). In the tool written because this
+#     machine had a token in a tmux server's cmdline for 28 days.
+#   - git's exit status discarded, so 128 ("cannot read the repository", which a
+#     malformed ~/.gitconfig produces — and ~/.gitconfig is a managed symlink in
+#     THIS repo) read as "not a git repository" and routed a work clone to the
+#     personal account, on the one path that deliberately does not warn.
+#   - the first-prompt hook replaying what startup recorded instead of re-running
+#     the routing, leaving the shell that lost the cache race unpinned for life.
+#   - GITHUB_TOKEN, which gh ranks second, never cleared alongside GH_TOKEN.
+#   - the legacy-nickname purge running AFTER the write loop, deleting a token it
+#     had just cached whenever a config dir was named `quantivly` or `personal`.
 #   - `env VAR=x some_shell_function` cannot work (env execs a binary), and the
 #     probe reported the resulting "No such file or directory" as an
 #     unresolvable GitHub account.
 #   - `env GH_TOKEN=x -u GITHUB_TOKEN gh ...` runs a program called `-u`: env
 #     stops parsing options at the first operand. Same disguise — it surfaced as
-#     a fact about GitHub rather than about the command line.
+#     a fact about GitHub rather than about the command line. (Both env traps
+#     are retired with `env` itself; the row asserting so remains.)
 #   - zsh's `local NAME` on a name already local in that scope PRINTS it, so a
 #     `local du` inside a loop emitted `du=zvi-quantivly` into the report.
 #   - `${~pat}` enables tilde expansion as well as globbing, so a route pattern
@@ -42,6 +63,11 @@
 #
 # Usage: scripts/test-gh-routing.sh
 
+# This suite drives zsh by handing it source text, so a single-quoted
+# `${GH_TOKEN:+pinned}` is the POINT: it must reach the inner shell unexpanded
+# and be evaluated there. SC2016 ("expressions don't expand in single quotes")
+# is therefore correct and unwanted on every occurrence in this file.
+# shellcheck disable=SC2016
 set -uo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,7 +92,7 @@ for tool in zsh git; do command -v "$tool" >/dev/null || missing+=("$tool"); don
 # about. Most rows below are "the report said X"; a module that failed to source
 # produces no report at all, which greps to zero just as convincingly.
 for fn in _gh_url_owner _gh_repo_remotes _gh_route_for _gh_configured_dirs \
-          _gh_run_prefix _gh_config_dir_user _gh_probe_login _gh_user_token gh-doctor; do
+          _gh_run _gh_config_dir_user _gh_probe_login _gh_user_token gh-doctor; do
   zsh -c "source '$SYSTEM_SH'; source '$GITHUB_SH'; (( \$+functions[$fn] ))" \
     || fatal "sourcing $GITHUB_SH did not define $fn"
 done
@@ -108,6 +134,16 @@ case "$sub" in
     fi
     # No token (or an unrecognised one): the shared, host-keyed default.
     printf '%s\n' "${GH_STUB_KEYRING_LOGIN:-nobody}" ;;
+  "__argv__ ")
+    # Reports whether a credential reached ARGV (world-readable at
+    # /proc/<pid>/cmdline) as opposed to the ENVIRONMENT (owner-only, 400).
+    seen="$(tr '\0' ' ' < /proc/self/cmdline)$(tr '\0' ' ' < /proc/$PPID/cmdline 2>/dev/null)"
+    if [ -n "${GH_TOKEN:-}" ]; then
+      case "$seen" in *"$GH_TOKEN"*) echo "TOKEN-IN-ARGV" ;; *) echo "argv-clean" ;; esac
+      echo "token-in-env"
+    else
+      echo "argv-clean"; echo "no-token-in-env"
+    fi ;;
   "auth token")
     shift 2; u=""
     while [ $# -gt 0 ]; do
@@ -229,6 +265,26 @@ nodef() { zrun "GH_ACCOUNT_DEFAULT_DIR=''; _gh_route_for '$1'
                 print -r -- \"\$_GH_ROUTE_STATE:\${_GH_ROUTE_DIR:t}\""; }
 check "no remotes, no default"   "$(nodef "$R_NONE")"  "no-remotes:"
 check "not a repo, no default"   "$(nodef "$NOTREPO")" "no-repo:"
+# git exits 128 when it cannot read the repository at all — a malformed
+# ~/.gitconfig does it, and ~/.gitconfig is a managed symlink in THIS repo, so a
+# bad branch causes it. Discarding that status left _GH_REMOTE_STATE at its
+# initialised "no-repo", which falls through to the personal default: a
+# quantivly clone silently authenticating as the personal account, on the one
+# path that deliberately does not warn.
+BADHOME="$TMPROOT/badhome"; mkdir -p "$BADHOME"
+printf 'this is not valid git config\n' > "$BADHOME/.gitconfig"
+giterr() { PATH="$STUBBIN:$PATH" HOME="$BADHOME" zsh -c "
+    source '$SYSTEM_SH'; source '$GITHUB_SH'
+    GH_ACCOUNT_ROUTES=( 'acme=$CFG_WORK' ); GH_ACCOUNT_DEFAULT_DIR='$CFG_PERS'
+    $1" 2>&1; }
+check "unreadable git is its own state, not 'no repo'" \
+      "$(giterr "_gh_repo_remotes '$R_WORK'; print -r -- \$_GH_REMOTE_STATE")" "git-error"
+check "...and does NOT fall through to the default" \
+      "$(giterr "_gh_route_for '$R_WORK'; print -r -- \"\$_GH_ROUTE_STATE:\${_GH_ROUTE_DIR:t}\"")" "git-error:"
+# Both the remotes section and the route section have to say so: a reader who
+# skims to "Route" must not find a confident answer built on a failed question.
+check "...and both doctor sections call it UNKNOWN" \
+      "$(giterr "gh-doctor --offline '$R_WORK'" | grep -c 'remote is UNKNOWN')" "2"
 check "unmatched, no default"    "$(nodef "$R_PERS")"  "none:"
 # Remotes exist but none is GitHub: nothing to route on, so the default — not a
 # guess drawn from the one non-GitHub remote.
@@ -273,17 +329,22 @@ check "else the config dir"  "$(src '')"                          "config-dir"
 check "empty GH_TOKEN is not a pin" "$(src 'GH_TOKEN=')"          "config-dir"
 
 echo
-echo "=== _gh_run_prefix: env's argv, which twice looked like a GitHub fault ==="
-# `env` execs a binary, so a shell function can never follow it, and it stops
-# parsing options at the first operand, so every -u must precede every VAR=val.
-pre() { zrun "local -a _GH_RUN; _gh_run_prefix 7 $1; print -r -- \"\${_GH_RUN[*]}\""; }
-check "unsets are hoisted above assignments" \
-      "$(pre '"GH_TOKEN=x" -u GITHUB_TOKEN "GH_CONFIG_DIR=/d"' | sed 's/ timeout 7//')" \
-      "command env -u GITHUB_TOKEN GH_TOKEN=x GH_CONFIG_DIR=/d"
-check "no shell word after env" \
-      "$(pre '-u GH_TOKEN' | tr ' ' '\n' | grep -c '^command$')" "1"
-check "the run is time-bounded" \
-      "$(pre '-u GH_TOKEN' | grep -c 'timeout 7')" "1"
+echo "=== _gh_run: a credential must never reach argv ==="
+# /proc/<pid>/cmdline is world-readable (444); /proc/<pid>/environ is owner-only
+# (400). The first implementation built `env GH_TOKEN=gho_… gh api user`, which
+# publishes a live token to every local account for the length of the call — in
+# a tool written because this machine had a token sitting in a tmux server's
+# cmdline for 28 days. Asserted against real /proc, not against the source text.
+argvprobe() { zrun "_gh_run 5 '' '$1' __argv__"; }
+check "a pinned token stays out of argv"  "$(argvprobe tok-persony | grep -c 'TOKEN-IN-ARGV')" "0"
+check "...and is confirmed argv-clean"    "$(argvprobe tok-persony | grep -c 'argv-clean')"    "1"
+check "...while still reaching gh's env"  "$(argvprobe tok-persony | grep -c '^token-in-env')" "1"
+check "the cleared form passes no token"  "$(argvprobe '' | grep -c 'no-token-in-env')"        "1"
+# The `env` argv-ordering class is retired with `env` itself; assert it stays so.
+check "no env-assignment prefix remains" \
+      "$(zrun "print -r -- \"\${functions[_gh_run]}\"" | grep -cE '\benv\b')" "0"
+check "the run is still time-bounded" \
+      "$(zrun "print -r -- \"\${functions[_gh_run]}\"" | grep -c 'timeout')" "2"
 
 echo
 echo "=== _gh_config_dir_user: what a config dir DECLARES (no credential) ==="
@@ -316,7 +377,12 @@ echo "=== gh-doctor: the defect it exists to catch ==="
 # The live state on the machine this was written for: the keyring hands out the
 # WORK account no matter which config dir is selected, and `gh auth status`
 # keeps reporting the declared one.
-doctor() { zrun "$2 gh-doctor $1; print -r -- \"rc=\$?\""; }
+# cd in first: that is how the hook and the doctor are actually used together,
+# and the route-vs-effective comparison is only meaningful for $PWD (see the
+# foreign-directory rows below).
+doctor() {  # doctor <dir> <env-assignments> [gh-doctor flags]
+  zrun "builtin cd $1 2>/dev/null; $2 gh-doctor ${3:-}; print -r -- \"rc=\$?\""
+}
 COLLAPSE="GH_STUB_KEYRING_LOGIN=worky"
 
 out="$(doctor "'$R_PERS'" "$COLLAPSE")"
@@ -347,8 +413,41 @@ check "a healthy machine: no failures" "$(printf '%s\n' "$out" | grep -c 'rc=0')
 check "a healthy machine: says so"     "$(printf '%s\n' "$out" | grep -c '✓ gh acts as the account')" "1"
 
 echo
+echo "=== gh-doctor <dir>: an argument is not this shell ==="
+# The effective-account probe reads THIS shell's environment, which the chpwd
+# hook pinned for $PWD. Comparing that against a DIFFERENT directory's route
+# produced a confident ✗ — "Commits, PRs and API writes from here land under the
+# wrong account" — for a state that cannot occur, because cd-ing there repins
+# first. `gh-doctor ~/some/repo` is an advertised form, so this was a false
+# alarm on the documented usage.
+out="$(zrun "builtin cd '$R_WORK' 2>/dev/null
+             GH_STUB_KEYRING_LOGIN=worky GH_TOKEN=tok-worky GH_CONFIG_DIR=$CFG_WORK \
+               gh-doctor '$R_PERS'; print -r -- \"rc=\$?\"")"
+check "says which shell it is describing" \
+      "$(printf '%s\n' "$out" | grep -c 'describes the CURRENT shell')" "1"
+check "route vs effective is n/a, not a failure" \
+      "$(printf '%s\n' "$out" | grep -c 'not applicable')" "1"
+check "and it does NOT claim the wrong account" \
+      "$(printf '%s\n' "$out" | grep -c 'land under the wrong account')" "0"
+# Same directory, no argument: the comparison is meaningful and must still run.
+check "for \$PWD the comparison still runs" \
+      "$(doctor "'$R_PERS'" "$COLLAPSE" | grep -c "routes to 'persony', but gh is 'worky'")" "1"
+
+echo
+echo "=== gh-doctor: a deliberately unrouted shell is not a fault ==="
+# Removing the Atrium deferral removed the only way for a supervisor that
+# provisions per-session credentials to say "leave this shell alone". The
+# replacement is explicit rather than sniffed, so the doctor can report it.
+out="$(zrun "builtin cd '$R_NONE' 2>/dev/null
+             GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_DEFAULT_DIR=''
+             GH_STUB_KEYRING_LOGIN=worky GH_ACCOUNT_ROUTING_OFF=1 gh-doctor; print -r -- \"rc=\$?\"")"
+check "the opt-out is reported"          "$(printf '%s\n' "$out" | grep -c 'deliberately not routed')" "1"
+check "and suppresses the 'who chose this?' warning" \
+      "$(printf '%s\n' "$out" | grep -c 'chosen by something other than the remote')" "0"
+
+echo
 echo "=== gh-doctor: states that must not read as a clean bill of health ==="
-out="$(doctor "--offline '$R_PERS'" "$COLLAPSE")"
+out="$(doctor "'$R_PERS'" "$COLLAPSE" --offline)"
 check "--offline never claims an effective account" \
       "$(printf '%s\n' "$out" | grep -c '✓.*effective account')" "0"
 check "--offline says the check did not run" \
@@ -389,6 +488,141 @@ check "a missing gh stops the doctor rather than passing it" \
                  gh-doctor >/dev/null 2>&1; print -r -- \$?")" "1"
 check "a directory that is not one" \
       "$(zrun "gh-doctor '$TMPROOT/no-such-dir' 2>&1 | grep -c 'not a directory'")" "1"
+
+echo
+echo "=== _update_gh_config: the hook that pins every shell's account ==="
+COMPANY_SH="$DOTFILES/zsh/zshrc.company"
+[[ -r "$COMPANY_SH" ]] || fatal "cannot read $COMPANY_SH"
+# A fixture HOME with the two config dirs the routing table names, so sourcing
+# zshrc.company takes its opt-in gate and the stub gh reads fixture hosts.yml.
+HOOKHOME="$TMPROOT/hookhome"
+mkdir -p "$HOOKHOME/.config/gh-quantivly" "$HOOKHOME/.config/gh-personal" "$HOOKHOME/.cache"
+printf 'github.com:\n    users:\n        worky:\n    user: worky\n'     > "$HOOKHOME/.config/gh-quantivly/hosts.yml"
+printf 'github.com:\n    users:\n        persony:\n    user: persony\n' > "$HOOKHOME/.config/gh-personal/hosts.yml"
+printf '[user]\n\temail = fixture@example.invalid\n' > "$HOOKHOME/.gitconfig"
+# Repos whose owners match the table zshrc.company actually ships.
+R_QUANT="$(mkrepo quantivly "origin=git@github.com:quantivly/platform.git")"
+R_MINE="$(mkrepo mine       "origin=git@github.com:someone/blog.git")"
+
+# Source the real zshrc.company, wait for its background refresh, then drive the
+# hook. `env -i` so the ambient GH_* of the developer's own shell cannot leak in
+# and make a row pass for the wrong reason.
+hookrun() {  # hookrun <dir> <setup-statements> <report-expression>
+  # $2 holds STATEMENTS, not a command prefix: a prefix assignment
+  # (`FOO=1 _update_gh_config`) lasts only for the call, so a row asserting what
+  # the hook LEFT in the environment read the previous call's values instead.
+  # The hook's own warnings go to stderr and are dropped here; the rows that
+  # assert on a message capture it explicitly.
+  env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$HOOKHOME" TERM=dumb \
+    zsh -c "
+      source '$SYSTEM_SH'; source '$GITHUB_SH'
+      source '$COMPANY_SH' >/dev/null 2>&1
+      # The background refresher is the point of several rows; wait for it.
+      for _i in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -e \$HOME/.cache/gh-token-cache/gh-personal ]] && break
+        sleep 0.2
+      done
+      _GH_ROUTE_INTERACTIVE=1
+      builtin cd '$1' 2>/dev/null
+      $2
+      _update_gh_config 2>/dev/null
+      $3" 2>/dev/null
+}
+pin() { hookrun "$1" "${2:-}" 'print -r -- "${${GH_CONFIG_DIR:t}:-none}/${${GH_TOKEN:+pinned}:-UNPINNED}"'; }
+
+check "work repo pins the work dir"      "$(pin "$R_QUANT")" "gh-quantivly/pinned"
+check "personal repo pins the personal dir" "$(pin "$R_MINE")"  "gh-personal/pinned"
+check "outside a repo takes the default" "$(pin "$TMPROOT")"  "gh-personal/pinned"
+# The cache key is the config dir's BASENAME; a nickname-keyed file must not be
+# what the hook reads, or the routing table stops being the only place an
+# account is named.
+check "the cache is keyed by basename" \
+      "$(hookrun "$R_QUANT" "" 'print -r -- ${(j:,:)${(f)"$(ls $HOME/.cache/gh-token-cache)"}}')" \
+      "gh-personal,gh-quantivly"
+check "legacy nickname files are purged" \
+      "$(hookrun "$R_QUANT" "" 'print -r -- $(ls $HOME/.cache/gh-token-cache | grep -cx "quantivly\|personal")')" "0"
+# ...and the purge must not delete a token it just wrote. The legacy names are
+# `quantivly` and `personal`, which are also perfectly legal config-dir
+# basenames — so with the purge running AFTER the write loop, a route named
+# `~/.config/personal` had its freshly-cached token deleted on every shell
+# start, leaving that account permanently unpinned with no error anywhere.
+mkdir -p "$HOOKHOME/.config/personal"
+printf 'github.com:\n    users:\n        namesake:\n    user: namesake\n' \
+  > "$HOOKHOME/.config/personal/hosts.yml"
+# The refresher must run AFTER the new default is in place — it is started at
+# source time, so setting the route afterwards would test nothing.
+check "a config dir named like a legacy key survives the purge" \
+      "$(hookrun "$R_MINE" "GH_ACCOUNT_DEFAULT_DIR=\$HOME/.config/personal
+                            _gh_refresh_token_cache_bg" \
+         'print -r -- "${${GH_CONFIG_DIR:t}:-none}/${${GH_TOKEN:+pinned}:-UNPINNED}"')" \
+      "personal/pinned"
+rm -rf "$HOOKHOME/.config/personal"
+
+# gh ranks GITHUB_TOKEN second, so leaving it set on a path that clears GH_TOKEN
+# means a third account nobody named wins — while the message blames the keyring.
+check "GITHUB_TOKEN is cleared with GH_TOKEN" \
+      "$(hookrun "$TMPROOT" "GH_ACCOUNT_DEFAULT_DIR=''; export GITHUB_TOKEN=tok-someoneelse" \
+         'print -r -- "${GITHUB_TOKEN:-cleared}"')" "cleared"
+check "...and the account really is unpinned then" \
+      "$(hookrun "$TMPROOT" "GH_ACCOUNT_DEFAULT_DIR=''; export GITHUB_TOKEN=tok-someoneelse" \
+         'print -r -- "$(GH_STUB_KEYRING_LOGIN=keyring gh api user --jq .login)"')" "keyring"
+
+# git-error must not fall through to the personal default.
+check "unreadable git pins nothing" \
+      "$(env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$BADHOME" TERM=dumb zsh -c "
+           source '$SYSTEM_SH'; source '$GITHUB_SH'
+           GH_ACCOUNT_ROUTES=( 'quantivly=$CFG_WORK' ); GH_ACCOUNT_DEFAULT_DIR='$CFG_PERS'
+           _gh_token_cache_dir() { print -r -- '$TMPROOT/nocache'; }
+           _gh_route_report() { : }
+           builtin cd '$R_QUANT' 2>/dev/null
+           _update_gh_config 2>/dev/null
+           print -r -- \"\${GH_CONFIG_DIR:-none}/\${\${GH_TOKEN:+pinned}:-UNPINNED}\"" 2>&1)" \
+      "none/UNPINNED"
+
+# The explicit opt-out must leave an injected credential entirely alone.
+check "GH_ACCOUNT_ROUTING_OFF leaves the env untouched" \
+      "$(hookrun "$R_QUANT" "export GH_ACCOUNT_ROUTING_OFF=1 GH_CONFIG_DIR=/injected GH_TOKEN=tok-injected" \
+         'print -r -- "${GH_CONFIG_DIR}/${GH_TOKEN}"')" "/injected/tok-injected"
+
+echo
+echo "=== the first prompt must RE-RUN routing, not replay a stale line ==="
+# The startup call routinely loses a race it is meant to lose: the cache is
+# repopulated by a background job that lands ~1s later, so the shell starts
+# unpinned and records "account NOT pinned". Replaying that at the first prompt
+# printed a message that was no longer true AND left GH_TOKEN unset for the life
+# of the shell — every gh call then falling to the host-keyed keyring default
+# (work) inside a personal repo, which is the defect this all exists to close.
+cat > "$TMPROOT/firstprompt.zsh" <<'FP'
+source "$T_SYSTEM_SH"; source "$T_GITHUB_SH"
+source "$T_COMPANY_SH" >/dev/null 2>&1
+builtin cd "$T_DIR" 2>/dev/null
+# Force the miss deterministically rather than trying to out-race the
+# background refresher — against a stub gh that race is a coin flip, and a
+# flaky row in a suite about silent failures is worse than no row.
+rm -rf "$HOME/.cache/gh-token-cache"
+_update_gh_config 2>/dev/null               # the startup call: silent, unpinned
+startup="${${GH_TOKEN:+pinned}:-UNPINNED}"
+_gh_refresh_token_cache_bg                  # what the background job does, ~1s later
+# The hook runs in THIS shell, with stderr diverted to a file. Capturing it in
+# a command substitution instead put _update_gh_config's exports in a subshell,
+# so the row read the parent's unchanged environment and failed for a reason
+# that had nothing to do with the code under test.
+exec 3>&2 2>"$T_MSG"
+for f in $precmd_functions; do $f; done
+exec 2>&3 3>&-
+msg="$(<$T_MSG)"
+print -r -- "$startup|${${GH_TOKEN:+pinned}:-UNPINNED}|${msg:+said}"
+FP
+firstprompt() {  # <dir> -> "<pinned at startup>|<pinned after first prompt>|<said?>"
+  env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$HOOKHOME" TERM=dumb \
+      T_SYSTEM_SH="$SYSTEM_SH" T_GITHUB_SH="$GITHUB_SH" T_COMPANY_SH="$COMPANY_SH" \
+      T_DIR="$1" T_MSG="$TMPROOT/firstprompt.err" zsh "$TMPROOT/firstprompt.zsh" 2>/dev/null
+}
+check "startup loses the race, the first prompt repairs it" \
+      "$(firstprompt "$R_MINE")" "UNPINNED|pinned|"
+check "the hook removes itself" \
+      "$(hookrun "$R_MINE" "" 'for f in $precmd_functions; do $f; done >/dev/null 2>&1
+                               print -r -- ${+functions[_gh_route_first_prompt]}')" "0"
 
 echo
 echo "=== the report never leaks a variable into the shell ==="

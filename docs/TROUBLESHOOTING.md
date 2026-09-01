@@ -160,9 +160,17 @@ gets work credentials. Reproduce it with `gh-doctor`, or by hand:
 ```bash
 for d in gh gh-personal gh-quantivly; do
   printf '%-14s -> %s\n' "$d" \
-    "$(env -u GH_TOKEN GH_CONFIG_DIR=~/.config/$d gh api user --jq .login)"
+    "$(env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$HOME/.config/$d" gh api user --jq .login)"
 done
 ```
+
+`"$HOME/..."`, not `~/...`: **zsh does not tilde-expand after `=` in a command
+word**, only in a real assignment, so `env GH_CONFIG_DIR=~/.config/gh` hands gh the
+literal string `~/.config/gh` (bash expands it, which is how the broken form gets
+written). gh then reads a nonexistent relative directory for every iteration and
+all three rows print the same keyring default — the collapse appears confirmed for
+entirely the wrong reason, and the table would look identical on a machine where
+`GH_CONFIG_DIR` isolation worked perfectly.
 
 **Key gotcha — `gh auth token` keyring lookup:**
 - `gh auth token` (no `--user`) returns a shared/default keyring entry, NOT the per-user entry matching the config's `user:` field

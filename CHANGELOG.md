@@ -31,10 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hasconfig:remote.*.url`), and consults **every** remote rather than just `origin`, so
   a fork whose upstream is the work repo routes the same way git already signs it.
   Configuration is data: `GH_ACCOUNT_ROUTES` / `GH_ACCOUNT_DEFAULT_DIR`, set in
-  `zsh/zshrc.company`. Nothing consumes them yet — this release only makes the state
-  visible; it does not change which account any shell selects.
+  `zsh/zshrc.company` and consumed by both `gh-doctor` and the `chpwd` hook — see the
+  routing entry under **Changed**, which is where the account selection actually moves.
 
-  State table: `scripts/test-gh-routing.sh` (100 checks, new CI job
+  State table: `scripts/test-gh-routing.sh` (129 checks, new CI job
   `gh-routing-test`, hermetic — `gh` is stubbed, so no network, no keyring, no account).
   The rows that already caught something: `env VAR=x some_shell_function` (env execs a
   binary) and `env GH_TOKEN=x -u GITHUB_TOKEN gh …` (env stops parsing options at the
@@ -111,6 +111,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would break exactly those). Forkless (`$(<file)` and `$GID`, never `getent`) at 0.5 ms
   per shell. "Cannot tell" leaves the umask as the system set it and says so.
   `dotfiles-doctor` reports the verdict; `DOTFILES_UMASK` overrides.
+
+- **Review follow-up: eight defects in the above, found before merge.** Each reported
+  success, which is the criterion the state tables are written against; each is now a row
+  that fails when the fix is reverted.
+  - **A live credential was passed in argv.** `_gh_probe_login` ran
+    `env GH_TOKEN=gho_… gh api user`, and `/proc/<pid>/cmdline` is world-readable (444)
+    while `/proc/<pid>/environ` is not (400) — publishing the token to every local account
+    for the length of the call, in the tool written *because* this machine had a token in a
+    tmux server's cmdline for 28 days. `_gh_run` sets the environment inside a subshell,
+    which also retires the whole `env`-argv class.
+  - **git's exit status was discarded**, so 128 ("cannot read the repository" — a malformed
+    `~/.gitconfig` does it, and `~/.gitconfig` is a managed symlink in this repo) read as
+    "not a git repository" and routed a quantivly clone to the *personal* account, on the
+    one path that deliberately does not warn. `git-error` is now its own state and stops.
+  - **The first-prompt hook replayed a stale message instead of re-running the routing.**
+    The startup call routinely loses the cache race it is meant to lose; replaying left
+    `GH_TOKEN` unset for the life of that shell, putting every `gh` call back on the
+    keyring default inside a personal repo.
+  - **`GITHUB_TOKEN` was never cleared** alongside `GH_TOKEN`; gh ranks it second, so an
+    inherited one authenticated as a third account while the warning blamed the keyring.
+  - **`gh-doctor <dir>` compared that directory's route against the current shell's
+    account**, producing a confident ✗ ("land under the wrong account") for a state that
+    cannot occur — on the documented `gh-doctor ~/some/repo` form.
+  - **The legacy-nickname purge ran after the write loop**, deleting a token it had just
+    cached whenever a config dir was named `quantivly` or `personal`.
+  - **`umask 022` is an assignment, not a tightening**, so on a host hardened to 077 the
+    guard *loosened* it and the doctor printed `✓ 022`; and `$(( ))` yields decimal where
+    `umask` parses octal, so the union set `0o63` from 077 and errored `bad umask` from
+    002. An invalid `DOTFILES_UMASK` was reported as applied, with its error emitted during
+    initialisation — inside p10k's instant-prompt box.
+  - **`dotfiles-doctor` reset the umask of the shell it ran in.** The decision is now
+    `_dotfiles_umask_verdict`, which decides without applying.
+
+  Also: `_q_is_work_context` was dead (its only caller was the branch this PR deleted) and
+  the comment added here claimed otherwise — both removed; an explicit
+  `GH_ACCOUNT_ROUTING_OFF=1` replaces the capability the Atrium deferral provided, without
+  the sniffing that made it dangerous; the `TROUBLESHOOTING.md` reproduction used
+  `GH_CONFIG_DIR=~/...`, which **zsh does not tilde-expand in a command word**, so every
+  row printed the same keyring default for entirely the wrong reason.
 
 ### Removed
 - **Atrium coupling in the live shell config.** Atrium is retired (2026-09-01), so

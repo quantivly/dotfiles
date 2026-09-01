@@ -88,31 +88,6 @@ qn() {
 }
 
 #==============================================================================
-# Work-context detection (shared by gh + Claude account switching)
-#==============================================================================
-# A dir is "work" if it lives under the canonical ~/quantivly tree (fast path)
-# OR its origin remote belongs to the quantivly GitHub org. The remote check
-# mirrors the git identity routing (hasconfig in ~/.gitconfig.local), so the
-# gh/Claude account follows the repo anywhere it's checked out — herdr worktrees
-# under ~/.herdr/worktrees/, /tmp clones, etc. — not just under ~/quantivly/.
-#
-# Still used by the non-gh work-context consumers below. gh account routing no
-# longer goes through it: it consults $PWD first, and $PWD is exactly the signal
-# #67 moved git identity OFF. See _update_gh_config.
-_q_is_work_context() {
-    case "$PWD" in
-        "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
-            return 0 ;;
-    esac
-    local _url
-    _url="$(command git remote get-url origin 2>/dev/null)" || return 1
-    case "$_url" in
-        *github.com[:/]quantivly/*|*github-work:quantivly/*) return 0 ;;
-    esac
-    return 1
-}
-
-#==============================================================================
 # GitHub CLI Multi-Account Switching
 #==============================================================================
 # Automatically switches gh CLI identity when entering Quantivly work directories.
@@ -170,7 +145,24 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # gh-personal) rather than by a nickname, so the routing table is the single
     # place an account is named — a route added there needs no matching edit
     # here, and a stale nickname cannot silently address the wrong dir.
-    _gh_token_cache="${HOME}/.cache/gh-token-cache"
+    # One definition. It was written out three times (two of them `local`, one a
+    # global that leaked into every interactive shell) and the legacy-name purge
+    # twice, so moving the cache or adding a name to purge meant finding them
+    # all — and missing one leaves a never-refreshed copy of a live credential,
+    # the exact hazard the purge exists to remove.
+    _gh_token_cache_dir() { print -r -- "${HOME}/.cache/gh-token-cache"; }
+
+    # Nickname-keyed files from before the basename scheme. Left in place they
+    # are a second, never-refreshed copy of a live credential.
+    #
+    # Runs BEFORE the write loop, not after: a route whose config dir is
+    # literally named `quantivly` or `personal` writes to that same filename,
+    # and purging afterwards deleted the token that had just been cached — every
+    # shell start, silently, leaving that account permanently unpinned.
+    _gh_purge_legacy_token_cache() {
+      local cache; cache="$(_gh_token_cache_dir)"
+      rm -f "$cache/quantivly" "$cache/personal"
+    }
 
     # Background refresh (non-blocking). Driven by the routing table, so it
     # refreshes exactly the dirs routing can select. --user is mandatory:
@@ -184,8 +176,10 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # dynamically-scoped globals would have been the other way to get it wrong.
     _gh_refresh_token_cache_bg() {
         local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY
-        local cache="${HOME}/.cache/gh-token-cache" d u t
+        local cache d u t
+        cache="$(_gh_token_cache_dir)"
         mkdir -p "$cache" && chmod 700 "$cache"
+        _gh_purge_legacy_token_cache
         _gh_configured_dirs
         for d in "${_GH_CONFIGURED_DIRS[@]}"; do
             [[ -d "$d" ]] || continue
@@ -196,9 +190,6 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             printf '%s' "$t" > "$cache/${d:t}"
             chmod 600 "$cache/${d:t}"
         done
-        # Nickname-keyed files from before the basename scheme. Left in place
-        # they are a second, never-refreshed copy of a live credential.
-        rm -f "$cache/quantivly" "$cache/personal"
     }
     if command -v gh &>/dev/null && (( $+functions[_gh_configured_dirs] )); then
         _gh_refresh_token_cache_bg &!
@@ -214,11 +205,22 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
         local _GH_ROUTE_STATE _GH_ROUTE_DIR _GH_ROUTE_WHY _tokfile _tok
         _GH_ROUTE_MSG=""
 
+        # Explicit opt-out. Removing the Atrium deferral removed the only way a
+        # supervisor that provisions per-session credentials could say "leave
+        # this shell alone", and the hook would now clobber an injected
+        # GH_CONFIG_DIR/GH_TOKEN on the first cd. The detection was the bad part
+        # ($ATRIUM, or a tmux socket named */atrium — anything could set
+        # either); a named switch restores the capability with no guessing, and
+        # lets gh-doctor report such a shell as deliberate rather than faulty.
+        if [[ -n "${GH_ACCOUNT_ROUTING_OFF:-}" ]]; then
+            return 0
+        fi
+
         if ! (( $+functions[_gh_route_for] )); then
             # zsh/functions/github.sh did not load. Choosing an account from a
             # routing table that is not there would mean choosing it from the
             # keyring, which is the defect; say so and pin nothing.
-            unset GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+            unset GH_TOKEN GITHUB_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
             _GH_ROUTE_MSG="zsh/functions/github.sh is not loaded — account NOT routed; gh will use the keyring default"
             _gh_route_report
             return
@@ -227,9 +229,14 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
         _gh_route_for "$PWD"
         case "$_GH_ROUTE_STATE" in
             matched|default) ;;
-            bad-table)
-                unset GH_CONFIG_DIR GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
-                _GH_ROUTE_MSG="GH_ACCOUNT_ROUTES is unusable ($_GH_ROUTE_WHY) — account NOT routed"
+            bad-table|git-error)
+                # git-error is NOT "there is no repo here": git could not be
+                # asked, so the remote is unknown. Falling through to the
+                # personal default would hand a work repo the wrong account on
+                # the one path that stays quiet, so this one pins nothing and
+                # says so.
+                unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+                _GH_ROUTE_MSG="$_GH_ROUTE_WHY — account NOT routed"
                 _gh_route_report
                 return ;;
             *)
@@ -237,14 +244,14 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
                 # matching route and no default). Clearing GH_TOKEN leaves the
                 # keyring to answer, and it answers WORK — so this is stated
                 # rather than left to look like a personal-account directory.
-                unset GH_CONFIG_DIR GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+                unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
                 _GH_ROUTE_MSG="no GitHub account is determined here ($_GH_ROUTE_WHY) — gh will use the keyring default, which is not necessarily the one you want"
                 _gh_route_report
                 return ;;
         esac
 
         export GH_CONFIG_DIR="$_GH_ROUTE_DIR"
-        _tokfile="${_gh_token_cache}/${_GH_ROUTE_DIR:t}"
+        _tokfile="$(_gh_token_cache_dir)/${_GH_ROUTE_DIR:t}"
         if [[ -r "$_tokfile" ]]; then
             _tok="$(<"$_tokfile")"
         else
@@ -257,11 +264,15 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
             export GITHUB_PERSONAL_ACCESS_TOKEN="$_tok"
         else
             # GH_CONFIG_DIR alone does NOT select the account, so this is not a
-            # partial success — it is the keyring deciding. A cache miss is
+            # partial success — it is the keyring deciding. GITHUB_TOKEN is
+            # cleared alongside GH_TOKEN on every such path because gh ranks it
+            # second: an inherited one (a CI runner, an MCP wrapper, an .envrc)
+            # would otherwise authenticate as a third account nobody named,
+            # while this very message blamed the keyring. A cache miss is
             # normally transient (the background refresh above lands within a
             # second or two of shell start); a persistent one means that account
             # needs `gh auth login`.
-            unset GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+            unset GH_TOKEN GITHUB_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
             _GH_ROUTE_MSG="no cached token for ${_GH_ROUTE_DIR:t} — account NOT pinned; run gh-refresh-tokens (or gh-doctor)"
         fi
         _gh_route_report
@@ -285,9 +296,21 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # Release the startup warning at the first prompt, then unhook. Deferred for
     # the same reason as the dotfiles live-config guard: output during
     # initialisation lands inside p10k's instant-prompt warning box.
+    #
+    # It RE-RUNS the routing rather than replaying what startup recorded. The
+    # startup call commonly loses a race it is expected to lose: the token cache
+    # is repopulated by the background job above, which lands a second or so
+    # later, so the shell starts unpinned and records "account NOT pinned". By
+    # the first prompt that is usually false — and replaying it both printed a
+    # message that was no longer true AND left GH_TOKEN unset for the entire
+    # life of the shell, so every gh call fell through to the host-keyed keyring
+    # default (work) inside a personal repo. That is precisely the defect this
+    # whole mechanism exists to close, reintroduced in the one shell per boot
+    # nobody would think to re-check.
     _gh_route_first_prompt() {
         _GH_ROUTE_INTERACTIVE=1
-        _gh_route_report
+        _GH_ROUTE_LAST_MSG=""      # startup was silent; do not suppress a real one now
+        _update_gh_config
         add-zsh-hook -d precmd _gh_route_first_prompt
         unfunction _gh_route_first_prompt
     }
@@ -422,9 +445,10 @@ gh-refresh-tokens() {
     return 1
   fi
   local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY
-  local dir user token cached=0 failed=0
-  local cache="${HOME}/.cache/gh-token-cache"
+  local dir user token cached=0 failed=0 cache
+  cache="$(_gh_token_cache_dir)"
   mkdir -p "$cache" && chmod 700 "$cache"
+  _gh_purge_legacy_token_cache   # before the writes — see the function's comment
 
   _gh_configured_dirs
   if (( ${#_GH_CONFIGURED_DIRS[@]} == 0 )); then
@@ -455,10 +479,6 @@ gh-refresh-tokens() {
     echo "  ✓ ${dir:t}: cached token for $user"
     cached=$((cached + 1))
   done
-
-  # Nickname-keyed files from before the basename scheme: a second, never
-  # refreshed copy of a live credential if left behind.
-  rm -f "$cache/quantivly" "$cache/personal"
 
   # Re-apply for the current directory (no cd needed).
   if (( $+functions[_update_gh_config] )); then
