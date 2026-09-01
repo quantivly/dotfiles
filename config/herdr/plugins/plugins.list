@@ -18,11 +18,17 @@ tdi/herdr-worktree-setup
 # herdr panes (teammux shim). Replaces Atrium's fan-out.
 caioniehues/herdmates
 
-# Auto-prompting. Replaces Atrium's autoyes daemon (which was OFF). DISABLED
-# (2026-08-28, `herdr plugin disable` + `hap pause`): it runs a live daemon by
-# default, not the shadow-mode-only behavior originally intended — re-enable
-# only after confirming it stays observe-only. See ~/herdr-setup-review.md P0-4.
-0xGosu/herdr-auto-pilot
+# Auto-prompting (0xGosu/herdr-auto-pilot) — NOT installed by default. Dropped
+# from this list 2026-08-30 (eval F11); it had already been DISABLED here since
+# 2026-08-28 (`herdr plugin disable` + `hap pause`) because it runs a live daemon
+# by default, not the shadow-mode-only behavior originally intended. Left listed,
+# a teammate running `herdr-lazy install`/`sync` would build an embedding-model
+# daemon they never enable. Add it back, only after confirming it stays
+# observe-only, with:
+#   herdr-lazy add 0xGosu/herdr-auto-pilot
+# See ~/herdr-setup-review.md P0-4. plugins.lock still pins it until the next
+# lock-writing command (`sync`, `update`, `lock`) regenerates the lock from what
+# herdr actually has installed; `sync --prune` is what would uninstall it.
 
 # This manager itself. NOT on PATH by design (README §Use) and auto-sync is
 # off, so a rebuild restores it only via:

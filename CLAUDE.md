@@ -514,14 +514,32 @@ Config: `config/herdr/config.toml` → `~/.config/herdr/config.toml`. Full guide
 **The governing fact: every layer of this stack fails silently.** A 2026-08-30 walkthrough found
 five separately configured features completely dead — a keybinding, a prefix fallback, two
 popups, and `hspawn` — while `herdr config check` returned `ok` and `herdr server reload-config`
-returned `applied` with zero diagnostics throughout. **`config check: ok` means the file parses;
-it says nothing about whether anything works.** Verify effects, one binding at a time, and never
-generalise from one working example to a class.
+returned `applied` with zero diagnostics throughout. **`config check: ok` means the file parses and
+its keys, chords and `[ui]` schema are internally consistent; it says nothing about effects.** It
+does catch bogus keys, bad inline fields, non-hex colours and chord collisions among *listed*
+actions (probed 2026-08-30) — but not a collision with an unlisted stock default, a chord the
+terminal swallows, a missing popup binary, or a token that is never published. Verify effects, one
+binding at a time, and never generalise from one working example to a class.
 
 Gotchas, in the order they bite:
 
 - **Never run bare `herdr`** from a script or an agent — it attaches a client and hijacks the
   user's UI. Subcommands only. (At a keyboard it is just how you re-attach after `ctrl+alt+q`.)
+- **Never start or restart the herdr server from inside a pane or a Claude session.** The server's
+  environment is a snapshot of whoever launched it, and every pane inherits it. The live server was
+  once relaunched from a team-lead pane (2026-08-29), so every pane got the teammux shim as `tmux`,
+  a fake `TMUX`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and herdmates' plugin dirs — a dozen-plus
+  team-of-one sessions, `tmn`/`tmux kill-server` dead, `$status` on every row, and the runbooks'
+  `command -v tmux` pre-flight passing for everyone. Use the unit:
+  `systemctl --user restart herdr-server.service` (`systemd/herdr-server.service`, launcher
+  `scripts/herdr-server-launch.sh`; `--print-env` shows the environment it builds, and it refuses to
+  start when `HERDR_ENV`, `CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` is set). `scripts/verify-tools.sh`
+  asserts the running server's env is clean. The unit is wanted by `graphical-session.target`, **not
+  `default.target`**: `Linger=yes` on this account brings the user manager up at *boot*, so a
+  `default.target` unit would start before GNOME imports `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY`
+  and get none of them. It still survives logout — `WantedBy` propagates start only, and the unit
+  has no `PartOf` — so every agent session stays alive. Nothing is manual per boot. See
+  HERDR_GUIDE §2.4.
 - **An error anywhere in `[ui]` silently reverts ALL of `[ui]`** and reports `partial` with no
   error text. After any config edit, `herdr server reload-config | jq '.result.status'` must say
   `applied`. If an edit "did nothing", this is the first thing to check.
@@ -530,6 +548,51 @@ Gotchas, in the order they bite:
   disappeared — an audit found 15 of 25 rebound actions had lost theirs). A bare value is only
   safe for actions whose stock default is empty (`focus_agent`, `next_agent`, `previous_agent`,
   `move_tab_*`, `resize_pane_*`). Diff against `herdr --default-config` after any keymap edit.
+- **A LINKED systemd unit is not a RECONCILED one, and the difference is invisible.** systemd
+  records `[Install]` at `enable` time, as a symlink under `<target>.target.wants/`. Editing
+  `WantedBy=` afterwards changes nothing about what starts — **not even after `daemon-reload`**,
+  which re-reads the unit but never revisits the symlink. **And the obvious fix is a trap:
+  `systemctl reenable` (= `disable` + `enable`) DESTROYS a dotbot-installed unit.** `disable`
+  removes every symlink in the unit search path pointing at the unit, and the entry in
+  `~/.config/systemd/user` is exactly such a symlink, into the checkout — so the enable half then
+  fails with "Unit does not exist" and the unit is left neither linked nor enabled. That happened
+  here on 2026-09-01. What is safe is `enable` (it only ADDS `.wants` links) plus pruning the
+  stale link by hand, in that order. A probe using a real FILE rather than a symlink showed
+  `reenable` working perfectly, which is how the advice got written — **a fixture that differs
+  from production in the one property that decides the outcome proves nothing.** Meanwhile
+  `systemctl status` is happy, so the unit file under review says one thing and what boots is
+  another. This repo *manufactures* that drift, because `git checkout` here is a deploy and
+  `./install` is not in that path: HEAD moves, the linked unit file changes under systemd, nothing
+  re-enables anything. It cost one reboot's worth of every pane losing `gh --web`, `xdg-open` and
+  the ssh agent, with every check on the machine green. Now: `./install` reconciles
+  (`scripts/reconcile-systemd-units.sh`, gated — no-op without a user manager, and it re-enables
+  only a unit that is *already* enabled, so it reconciles a decision rather than making one), and
+  `scripts/verify-tools.sh` **fails** when the enablement has drifted. `--check` reports,
+  `--plan` lists what `--apply` would touch. State table: `scripts/test-systemd-reconcile.sh`
+  (130 checks, in CI as `systemd-reconcile-test`) — hermetic via a recording **`systemctl` stub**
+  at the front of `PATH`, never via systemctl's absence: this box has a real one wired to the live
+  user manager that holds the herdr server. Reading "the comparison is filesystem state, so no
+  manager is needed" as "set `RECONCILE_NO_SYSTEMCTL=1` on every row" left `do_reconcile`'s body
+  executing **zero times** across a 44/44 pass — the read-only decision layer pinned completely,
+  the layer that DELETES SYMLINKS not at all. Making `do_reconcile` also `rm -f` the unit symlink,
+  i.e. reproducing the incident the file exists to prevent, passed 44/44.
+- **Four more ways the reconciler answered "nothing to look at" over real drift**, all fixed and
+  each pinned by a row that fails without the fix: `[[ -e ]]` follows symlinks, so a **dangling**
+  unit symlink (rename a source, don't re-run `./install`) was skipped and reported
+  character-for-character like an empty machine; a unit whose `[Install]` was **deleted** kept its
+  `.wants` link forever and read as `static`, "nothing to reconcile"; `pwd` is **logical** while
+  the containment test used `readlink -f`, so a checkout reached through a symlink
+  (`~/.dotfiles -> ~/src/dotfiles`) yielded zero managed units and a green tick; and the unit glob
+  was hardcoded to `*.service`/`*.timer` in the function whose own header argues against
+  hardcoding, so a drifted `.socket`/`.path`/`.target` was invisible.
+- **"Clean" is not "complete" for the server environment.** `verify-tools.sh` used to ask only
+  whether anything FORBIDDEN was present, so a server started at boot — before any graphical
+  session existed to import an environment from — carried no forbidden variable and passed as
+  clean while every pane had lost `gh --web`, `xdg-open` and the ssh agent. It now also asserts
+  that the session variables the *user manager* offers are actually present in the server, and
+  warns when `DISPLAY`/`WAYLAND_DISPLAY` name a **previous** login (a server deliberately
+  survives logout, so it keeps the dead session's values). `SSH_AUTH_SOCK` is excluded from that
+  value comparison on purpose — the launcher substitutes a stable symlink for it by design.
 - **The herdr server's PATH is a snapshot taken when the server starts.** It carries the mise
   `installs/<tool>/<version>` dirs for whatever was *globally* configured at that instant (not
   mise's `shims` dir). Two consequences: a tool declared only in a project `.mise.toml` is
@@ -551,8 +614,14 @@ Gotchas, in the order they bite:
   fails `agent_not_found`; it cannot wait *for* detection. Poll separately.
 - **herdmates leaks plugin env into lead sessions** (upstream). Prefix plugin CLIs with
   `env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR`.
-- **`clauth start <profile>` bypasses the `claude()` shell function**, so the session gets the
-  right account but no team-lead capability. Team leads need `clauth <profile>` then `claude`.
+- **`clauth start <profile>` bypasses the `claude()` shell function**, so it lacks what that function
+  adds: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and a launch via `herdmates teammux-launch`, which
+  passes `--settings '{"teammateMode":"tmux"}'` so teammates become herdr panes. Whether teams are
+  enabled at all depends on the flag *reaching the process* — a contaminated server hands it to
+  everyone, and such a session leads a team whose teammates run in-process, invisible to herdr
+  (INFERRED from Claude Code's default `teammateMode`; not observed). Team leads need
+  `clauth <profile>` then `claude`; prove it with `herdr pane process-info --pane <id>` showing
+  `teammateMode`, not with `command -v tmux`.
 - **`herdr plugin link` state is herdr-local** and is not restored by herdr-lazy after a rebuild.
 - **If you spawn agents or panes, CLOSE THEM when their work is collected.** This is not tidiness
   — memory is the binding constraint on this box (8 threads, swap runs hot, and `system_health`
@@ -561,16 +630,48 @@ Gotchas, in the order they bite:
   claude processes**, endangering ten unrelated in-flight sessions; tearing those six down
   recovered it to load 11.5 / 84% / 23. An idle agent still holds its memory. Close panes you
   created once you have their output; keep one only if you have a concrete next task for it.
-  (Closing panes you did *not* create is a different matter — don't, unless asked.)
+  (Closing panes you did *not* create is a different matter — don't, unless asked.) Enumerate with
+  `hreap` — every Claude process **in a herdr pane**, detected or not, with idle age, memory and
+  creator (default view is idle ≥ 30 min; `--older 0` shows all); `hreap --close --mine` closes
+  only your registry-tagged idle spawns — **not** `herdr agent list`, which misses herdmates
+  teammates and trust-dialog panes (it showed 14 while 33 claude processes ran — though note ~8 of
+  those were Claude under Atrium's tmux, outside herdr panes and so outside `hreap` too; the tab
+  bar's `agents <detected>/<procs>` gap is the full census). `hspawn` records each spawn in `~/.local/state/hspawn/`; `hdespawn <slug>` tears one down
+  (pane, workspace, worktree, registry entry).
+- **A pane id is not a permanent name, and the registry that keys on it is.** herdr allocates
+  workspace ids from a short alphabet whose counter lives only in the running server
+  (`~/.config/herdr/session.json` persists the workspaces but no next-id counter), so a restart
+  reissues them from the start — the server log here shows `w4`, `w5`, `wN` and `wP` each created
+  twice in five days — and every new workspace's first pane is `p1`. Meanwhile
+  `~/.local/state/hspawn/` is a file tree that outlives every restart, and its entries are
+  deliberately long-lived: each hspawn bail-out keeps its entry, and `hreap --close` annotates
+  rather than deletes so `hdespawn` can finish later. So `wN:p1` names two different spawns, and
+  hspawn's `>` used to destroy the older entry silently, orphaning its worktree and branch with
+  nothing on disk pointing at them. It now renames it to `<pane>.stale-<ts>.json` and says so. Two
+  habits follow: **`hdespawn <pane-id>` is the exact form** (a direct file lookup — `hdespawn
+  <slug>` scans and REFUSES when two entries share a slug, which `--close` makes likely by
+  design), and an entry whose workspace id now holds someone else's worktree is finished from the
+  recorded path with herdr's live workspace left untouched, rather than refused forever. State
+  table: `scripts/test-hspawn.sh` (235 checks, in CI as `hspawn-test`) — hermetic via a recording
+  `herdr` **stub** at the front of `PATH`, never via herdr's absence: the box this was written on
+  has a real one wired to a live server, and a suite that assumed absence would pass in CI and
+  remove a real workspace here.
 - **Teammates in a herdmates team are NOT detected as herdr agents.** They exist as panes but are
   absent from `herdr agent list`, the sidebar rows, the priority sort and toasts — only the lead
   is detected. A lead also reports `done` while its teammates are still working, so read the
   lead's own roster for progress, not its agent state. Same blind spot applies to any pane sitting
-  on Claude's trust dialog.
-- **The sidebar publisher needs TWO things wired, and `./install` only does one.**
+  on Claude's trust dialog. The cause is the process name: Claude Code execs teammates via its
+  versioned binary, so `herdr pane process-info --pane <id>` shows a foreground process named
+  `2.1.251` rather than `claude`, and herdr never consults the Claude manifest — although
+  `herdr agent explain --file <screen> --agent claude` accepts the same pane's screen (`state: idle`,
+  rule `live_prompt_box`). `herdr agent explain <pane>` is the first diagnostic; `agent_not_found`
+  means nothing was detected at all. Reported upstream (drafts: `~/herdr-eval-upstream/`).
+- **The sidebar publisher needs THREE things wired, and `./install` only does one.**
   `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
-  also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo). Without
-  that it never runs, every `$mdl`/`$eff_*`/`$ctx_*` token resolves to nothing, and those sidebar
+  also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo), and that
+  entry needs `"refreshInterval": 60` — without the interval the idle band freezes when the session
+  goes quiet and every token then expires on the 4-minute TTL, blanking the rows. Without the
+  statusLine entry it never runs, every `$mdl`/`$eff_*`/`$ctx_*` token resolves to nothing, and those sidebar
   rows render empty with no error. It doubles as the in-pane status line, so visible model/context
   text inside a pane means the publisher is alive.
 

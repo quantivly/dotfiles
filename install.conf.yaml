@@ -3,6 +3,16 @@
       relink: true
       create: true
       backup: true
+    shell:
+      # dotbot's shell plugin defaults BOTH of these to false, and `install` does
+      # not pass -vv — so every shell step below ran silently. That is not merely
+      # quiet: the systemd reconciler's `⚠ enable failed` and its "a restart ENDS
+      # EVERY AGENT SESSION" note were discarded, and because it returns 0 by
+      # design (a missing user manager must not fail an install on a server),
+      # dotbot had nothing to report either. A step that cannot be seen to fail
+      # and cannot report failure is a step nobody knows ran.
+      stdout: true
+      stderr: true
 
 - clean: ['~', '~/.config']
 
@@ -25,6 +35,22 @@
     # intentional — the lock is meant to be version-controlled — but it means a
     # plugin refresh shows up as an unexpected `M config/herdr/plugins/plugins.lock`.
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.lock: config/herdr/plugins/plugins.lock
+    # herdr server as a systemd USER unit: runs the server from a declared, clean
+    # environment (scripts/herdr-server-launch.sh) instead of whichever shell last
+    # restarted it — a server restarted from a team-lead pane once handed a fake
+    # TMUX, the teammux shim and CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 to every
+    # pane on the machine (herdr-eval F1). Linking does NOT enable or start it;
+    # from a PLAIN terminal (ends every agent session):
+    #   systemctl --user daemon-reload && herdr server stop && \
+    #   systemctl --user enable --now herdr-server.service
+    # It is wanted by graphical-session.target, not default.target, so it starts
+    # once GNOME has imported the session environment — and survives logout,
+    # because WantedBy propagates start only. Changing that line does NOT move an
+    # existing .wants/ symlink, so the shell step at the bottom of this file
+    # reconciles it (scripts/reconcile-systemd-units.sh), and
+    # scripts/verify-tools.sh FAILS when it has drifted — `git checkout` here is a
+    # deploy, and install is not in that path.
+    ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme
@@ -83,6 +109,24 @@
       # missing dirs to $HOME. Idempotent; no-op when healthy; skipped on servers.
       if [ -n "${XDG_CURRENT_DESKTOP:-}" ] && command -v xdg-user-dirs-update >/dev/null 2>&1; then
         bash ~/.dotfiles/scripts/repair-xdg-user-dirs.sh
+      fi
+    - |
+      # Reconcile systemd USER unit enablement with the unit files linked above.
+      # A LINKED unit is not a RECONCILED one: systemd records [Install] at
+      # `enable` time as a .wants/ symlink, so editing WantedBy= in the file moves
+      # nothing — not even after daemon-reload. The script enables (which only ADDS
+      # .wants links) and prunes the stale one itself; it must never use
+      # `systemctl reenable`, whose disable half deletes the unit symlink dotbot
+      # installs here. It gates itself: no-op without a user manager (servers,
+      # containers, CI), and it acts only on a unit that is already enabled, so it
+      # reconciles a decision rather than making one.
+      # Relative, not ~/.dotfiles: dotbot runs shell steps with cwd set to the
+      # checkout (that is why the `git submodule update` step above needs no
+      # path), and the checkout is not always at ~/.dotfiles — in CI it is under
+      # /home/runner/work. The guard keeps a partial checkout from failing the
+      # whole install rather than skipping one step.
+      if [ -f scripts/reconcile-systemd-units.sh ]; then
+        bash scripts/reconcile-systemd-units.sh
       fi
     - |
       # Create ~/.backup.local from template (workstation only; no-op on servers).

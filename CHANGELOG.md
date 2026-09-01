@@ -235,6 +235,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Changed
+- **Three more findings from the independent review of #89.** (1) The launcher preferred the
+  CALLER's `SSH_AUTH_SOCK` over the stable `~/.ssh/ssh_auth_sock` symlink, which made the symlink
+  branch dead on the one restart path the runbooks sanction — `systemctl --user restart` carries
+  the manager's environment, so the live snap path always won and the server got the snapshot the
+  indirection exists to avoid. The header already described the intended order; the code did the
+  opposite. (2) `hdespawn`'s worktree-path recovery was gated on a live workspace, so it was
+  unreachable in the post-`hreap --close` state it exists for: hdespawn then said "no worktree dir
+  on disk", removed the registry entry anyway, and orphaned the worktree and its branch. It now
+  runs ungated and falls back to `git worktree list`, which knows even when herdr does not.
+  (3) `plugins.lock` still pinned `herdr-auto-pilot` after `plugins.list` dropped it, so
+  `herdr-lazy restore` would have reinstated the plugin the change exists to keep out.
+- **`./install` reconciles systemd user unit enablement, and `verify-tools.sh` fails when it has
+  drifted** (`scripts/reconcile-systemd-units.sh`, `install.conf.yaml`, `scripts/verify-tools.sh`,
+  `systemd/herdr-server.service`). A linked unit is not a reconciled one: systemd records
+  `[Install]` at `enable` time as a `<target>.target.wants/` symlink, and editing `WantedBy=`
+  afterwards moves nothing — not even after `daemon-reload`, which re-reads the unit but never
+  revisits the symlink. The obvious primitive is a trap: `systemctl reenable` (= `disable` +
+  `enable`) DESTROYS a dotbot-installed unit, because `disable` removes every symlink in the unit
+  search path pointing at it — and the entry in `~/.config/systemd/user` is such a symlink, into
+  the checkout. The enable half then fails with "Unit does not exist" and the unit is left neither
+  linked nor enabled; this happened on a real machine on 2026-09-01, following advice added in the
+  same series of commits. The reconciler therefore `enable`s (which only ADDS `.wants` links) and
+  prunes the stale link itself, enable first so a failure leaves the unit enabled under the old
+  target rather than off. This repo manufactures that drift, because
+  `git checkout` here is a deploy and install is not in that path — so reconciliation at install
+  time is necessary but not sufficient, and the load-bearing half is the check, which runs
+  whenever anyone asks about the machine. The reconciler is gated twice: it no-ops without a user
+  manager (servers, containers, CI), and it acts only on a unit already enabled, so it reconciles
+  a decision and never makes one. It also
+  says plainly that a RUNNING server keeps the old unit until a restart, which ends every agent
+  session, rather than printing a success nobody can act on. `--check` reports, `--plan` lists
+  what `--apply` would touch (which is how the gate became testable without systemd).
+- **`verify-tools.sh` now asserts the server environment is COMPLETE, not just uncontaminated.**
+  It only ever asked whether anything forbidden was present, so a server started at boot — before
+  any graphical session existed to import an environment from — carried no forbidden variable and
+  printed "environment is clean" while every pane had lost `gh --web`, `xdg-open` and the ssh
+  agent. It now compares against the user manager's own environment (so a headless box correctly
+  reports nothing), FAILs on a variable the session offers and the server lacks, and WARNs when
+  `DISPLAY`/`WAYLAND_DISPLAY` name a previous login. `SSH_AUTH_SOCK` is excluded from the value
+  comparison because the launcher substitutes a stable symlink for it by design.
+- **[scripts/test-systemd-reconcile.sh](scripts/test-systemd-reconcile.sh)** — 130-check state
+  table for the reconciler, in CI as `systemd-reconcile-test`, needing no systemd user manager
+  because the read-only comparison is filesystem state and the mutating half runs against a
+  recording `systemctl` **stub** at the front of `PATH` (a runner has no manager, and a suite that
+  skips in CI is one that never runs; but "hermetic" has to mean answered-by-a-fake, not
+  tool-happens-to-be-absent — this box has a real systemctl wired to the user manager holding the
+  herdr server). Each fix is pinned by mutation, which is how four hollow assertions
+  were caught before this landed: a note-prefix check that passed when two different notes
+  collapsed into one, a "plain file ignored" row that was really testing containment, a dead
+  comment-skip rule in the awk that could not fire because the pattern is anchored, and — worst —
+  the reconcile gate, which was unpinnable while it sat inside a manager-gated loop. A later,
+  costlier lesson from the same change is pinned too: the suite now asserts the script never
+  reaches for `reenable`/`disable`, because the first version did and it cost a machine its unit.
 - **One doctor-reporting implementation** (`_doctor_ok`/`_doctor_bad`/`_doctor_warn`/
   `_doctor_note`/`_doctor_summary` in `zsh/functions/system.sh`). `backup-doctor` had a
   byte-for-byte duplicate of the ✓/✗/⚠ emitters and its own hand-rolled summary; both now
@@ -356,6 +409,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   targets; and a hardcoded `ext4` passes `findmnt --verify` (a type mismatch is only a
   warning) and then fails to mount, which `nofail` converts straight back into a silent
   non-mount.
+- **herdr: the 2026-08-30 independent-evaluation batch** (`~/herdr-eval-findings.md`, F1–F11).
+  The live herdr server had been restarted from inside a herdmates team-lead pane, so every pane
+  inherited a fake `TMUX`, the teammux shim as `tmux`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+  and herdmates' plugin dirs: every Claude session became a team of one, `tmn` / `tmux
+  kill-server` hit the shim, `$status` appeared on nearly every sidebar row, and the runbooks'
+  own pre-flight (`command -v tmux` → the shim) passed for everyone. Nothing detected it.
+  - The server now runs from a declared, clean environment: `systemd/herdr-server.service` +
+    `scripts/herdr-server-launch.sh` (`--print-env`; refuses to start from inside a pane or a
+    Claude session; PATH from `~/.local/bin` + `mise bin-paths`, never a plugin shim;
+    `LINEAR_API_KEY` from `~/.zshrc.local`; the session-bus variables toasts need). The unit is
+    wanted by `graphical-session.target`, not `default.target`: `Linger=yes` here means the user
+    manager comes up at boot, so a `default.target` unit would start before GNOME imports
+    `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY` and get none of them. `WantedBy` propagates start
+    only and the unit has no `PartOf`, so it still survives logout with every session alive.
+    `SSH_AUTH_SOCK` resolves to the stable `~/.ssh/ssh_auth_sock` symlink rather than the live
+    snap path, because the Bitwarden agent that owns it autostarts *after* that target.
+    `scripts/verify-tools.sh` gained "herdr server environment hygiene" (the running server's env
+    carries none of the pane/team/plugin variables) and "Plugin dependencies under the herdr
+    SERVER PATH" (each dependency resolved one at a time under the *server's* PATH).
+  - Cleanup is executable instead of prose: `hspawn` gained `-p/-m/-e/--mode/-b/-n` and a
+    registry (`~/.local/state/hspawn/`), plus `hdespawn <slug>` and `hreap [--close] [--mine]
+    [--older MIN]` — every Claude process herdr hosts, detected or not, with idle age, memory and
+    creator. `herdr agent list` had been the documented "what is alive", and it misses herdmates
+    teammates and trust-dialog panes (14 agents shown while 33 claude processes ran, 15 of them
+    finished teammates holding 4.5 GB).
+  - Sidebar: an idle band `$idle_ok|$idle_warn|$idle_crit` (5/10 min, matching herdmates'
+    quiet/stalled tiers) published by `session-statusline.sh` — the sidebar had no time
+    dimension; the tab bar shows `agents <detected>/<claude procs>`; `remove_worktree` and
+    `previous_workspace`/`next_workspace` bound; the `$task $status` comment corrected (`$status`
+    is not team-only in practice, and `stale` = no transcript write for 10 min);
+    `0xGosu/herdr-auto-pilot` dropped from `plugins.list`.
+  - Guide + CLAUDE.md corrected: the from-zero sequence no longer strands a new hire at step 4
+    (rustup, jq, `herdr plugin install natori-hrj/herdr-lazy` *before* `herdr-lazy check`,
+    `LINEAR_API_KEY` before the server first starts, the unit, then `verify-tools.sh`);
+    `clauth start` lacks `teammateMode: tmux`, not "team capability"; five sidebar rows, not
+    six; the hspawn branch is `${HSPAWN_BRANCH_PREFIX:-$USER}/<slug>`, not `zvi/<slug>`; the
+    keymap table's "swap panes / copy mode" row (no such actions exist) replaced with the real
+    prefix actions; macOS labels on rotation, `/proc` and `notify-send`; `herdr agent explain`
+    and named test sessions in troubleshooting. `config check` turned out stricter than §0 had
+    said — probing showed it catches bogus keys, bad inline fields, non-hex colours and chord
+    collisions among listed actions — but it still misses collisions with unlisted stock
+    defaults, terminal-swallowed chords, missing popup binaries and unpublished tokens; §0 and
+    the CLAUDE.md intro now say exactly that.
+  - Upstream: teammates go undetected because Claude Code execs them via its versioned binary
+    (process name `2.1.251`, not `claude`) while `herdr agent explain --file` accepts the same
+    screen. Issue drafts for herdr (same class as herdrdev/herdr#803) and herdmates
+    (`HERDR_AGENT=claude` on the respawned command, or `pane report-agent` from its hooks) are
+    under `~/herdr-eval-upstream/`.
 - **herdr: `hspawn` never worked.** Both code paths failed on every invocation. It creates a
   fresh worktree each run, so Claude's trust-folder dialog is guaranteed, and neither path
   answered it: the profile path called `herdr agent wait` before herdr had detected any agent

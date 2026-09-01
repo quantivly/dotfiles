@@ -1,0 +1,145 @@
+# systemd/herdr-server.service
+# ============================
+# Runs the herdr server headless as a systemd USER service, from the declared
+# clean environment built by scripts/herdr-server-launch.sh — read that header
+# for the why (herdr-eval finding F1: a server restarted from inside a team-lead
+# pane handed a fake TMUX, the teammux shim, HERDR_PANE_ID=w2:p1 and
+# CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 to every pane on the machine). Same
+# pattern as clauth-daemon.service.
+#
+# Symlinked to ~/.config/systemd/user/ by ./install (install.conf.yaml). Linking
+# does NOT enable it. One-time switch-over, from a PLAIN terminal — not a herdr
+# pane, not a Claude session:
+#   systemctl --user daemon-reload
+#   herdr server stop                       # ends EVERY agent session on the machine
+#   ./install                               # moves the .wants/ symlink if [Install]
+#                                           # changed. NEVER `systemctl reenable`
+#                                           # — see the [Install] note below.
+#   systemctl --user enable --now herdr-server.service
+#   scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
+#                                           # (non-zero exit on a hygiene FAIL)
+#   journalctl --user -u herdr-server.service -e
+# Afterwards bare `herdr` at a keyboard attaches to this server ("Launch or
+# attach to the persistent session", `herdr --help`) instead of starting its
+# own; ctrl+alt+q detaches the client and leaves the server running as before.
+#
+# `systemctl --user stop|restart herdr-server.service` ENDS EVERY AGENT SESSION.
+# Pane shells and the agents inside them are children of the server and live in
+# this unit's cgroup; stopping the unit is `tmux kill-server`, not a reload.
+# `herdr server reload-config` is still the way to apply config changes. Before
+# stopping, look at `herdr pane list` as well as `herdr agent list` — herdmates
+# teammates and panes on Claude's trust dialog are not detected as agents.
+#
+# Comments must be on their own lines: systemd treats text after a value as part
+# of the value.
+
+[Unit]
+Description=herdr server (headless, clean declared environment)
+Documentation=file://%h/.dotfiles/docs/HERDR_GUIDE.md
+# Ordered AFTER the graphical session, and started BY it (see [Install]). The
+# launcher passes DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / SSH_AUTH_SOCK through
+# only when set, and those reach the user manager when GNOME imports them at
+# session start. `loginctl show-user` reports Linger=yes here, so the user
+# manager — and therefore default.target — comes up at BOOT, well before any
+# graphical session exists: a unit wanted by default.target would start with
+# none of them. graphical-session.target is reached via gnome-session.target
+# after gnome-session-manager@<session>.service, which is what performs that
+# import, so hanging off it is what makes the environment complete.
+After=graphical-session.target
+
+[Service]
+Type=simple
+# The launcher `env -i`s and re-declares the environment itself, so nothing from
+# the user manager reaches the server except what it passes through explicitly
+# (DBUS_SESSION_BUS_ADDRESS, WAYLAND_DISPLAY, DISPLAY, ... — see its header).
+# No Environment=/EnvironmentFile= here on purpose: one place declares the env.
+ExecStart=%h/.dotfiles/scripts/herdr-server-launch.sh
+# Stop through herdr's own API ("Stop the running server via the API socket",
+# `herdr server stop --help`) so herdr, not a signal, winds down its panes.
+# Runs under the manager's env, which has HOME — enough to find the default
+# socket ~/.config/herdr/herdr.sock. Resolve herdr instead of hardcoding one
+# location (ExecStart's launcher resolves it across ~/.local/bin, the mise bin
+# dirs and ~/.cargo/bin): prefer ~/.local/bin/herdr, where it lives here, else
+# fall back to the manager's PATH — a hardcoded path that is wrong on another
+# machine fails 203/EXEC and the wind-down falls straight to SIGTERM. If neither
+# resolves, sh exits non-zero and stop likewise falls through to KillMode below.
+# ($$ is systemd's escape for a literal $, so the shell sees $h / $(...).)
+# UNVERIFIED under the unit until first use.
+ExecStop=/bin/sh -c 'h=%h/.local/bin/herdr; [ -x "$$h" ] || h=$$(command -v herdr) || exit 1; exec "$$h" server stop'
+# mixed: after ExecStop, SIGTERM goes to the server process only; anything still
+# alive in the cgroup after TimeoutStopSec (orphaned pane shells, agents) gets
+# SIGKILL. control-group (the default) would SIGTERM every pane process at the
+# same instant as the server; process would leave orphans running forever.
+# One OOM kill must not take the fleet. Panes are children of this unit and get
+# no per-pane scope, so they share its cgroup — and the manager default,
+# DefaultOOMPolicy=stop, means one OOM-killed process ANYWHERE in that cgroup
+# makes systemd stop the whole unit, ending every agent session on the machine.
+# This covers the KERNEL-OOM path only, and the distinction matters. OOMPolicy
+# governs what systemd does to the unit AFTER something in its cgroup has already
+# been killed; it does not influence whether systemd-oomd SELECTS this cgroup in
+# the first place. That is ManagedOOMPreference=avoid, which this unit does NOT
+# set (live: none) — a deliberate omission rather than an oversight, since asking
+# oomd to spare this cgroup means asking it to kill something else on a box where
+# memory is the binding constraint. Raise it here if that trade is ever wanted.
+#
+# One correction to an earlier version of this comment: it claimed "Restart= does
+# not rescue it". `man systemd.service` says a unit killed this way enters the
+# oom-kill failed state, "after which Restart= may apply" — so Restart= can fire.
+# It is not relied on, because a restarted server is a server whose panes are all
+# gone; continuing without stopping the unit is the actual protection. This is not a hypothetical pressure — CLAUDE.md records
+# this box at load 27 and 96% swap with 33 claude processes, endangering ten
+# unrelated sessions, and systemd-oomd is active and enabled with
+# ManagedOOMMemoryPressure=kill on user@1000.service, i.e. armed to kill
+# descendant cgroups in exactly that state. Before this unit existed the server
+# was client-spawned into the terminal's scope with no OOM policy at all, so a
+# kill took one process; inheriting `stop` here would be a regression the unit
+# introduces. (Atrium's tmux takes the other route — a scope per spawn — so the
+# per-pane escape hatch exists; herdr does not use it.)
+OOMPolicy=continue
+KillMode=mixed
+TimeoutStopSec=30
+# on-abnormal, not on-failure: a deliberate `herdr server stop` from a shell
+# must stay down, and both documented switch-over/remediation sequences run
+# exactly that stop followed by a start. herdr's exit code on a requested stop
+# is UNVERIFIED — under on-failure a non-zero exit there would resurrect the
+# server 2s later, racing the very runbook that stopped it. on-abnormal never
+# restarts on ANY exit code (clean or not), so nothing rides on that unknown; it
+# still restarts after unclean signals, timeouts and watchdog kills, where
+# systemd's default start-rate limit (5 in 10s) still ends a crash loop. A
+# launcher that die()s (herdr missing from PATH, contaminated caller) exits 1
+# and correctly stays down rather than looping.
+Restart=on-abnormal
+RestartSec=2
+
+[Install]
+# graphical-session.target, NOT default.target — see the After= note above; the
+# server needs the session environment that only exists once GNOME has imported
+# it. This does NOT cost persistence: WantedBy propagates START only. Stop
+# propagation would need PartOf=/BindsTo=, which this unit deliberately does not
+# have, so the server survives logout and keeps every agent session alive — the
+# entire point of running it as a persistent host. Re-login is idempotent (the
+# unit is already active, so the second start is a no-op).
+#
+# Cost, accepted: on a headless or SSH-only boot graphical-session.target is
+# never reached and no server starts. Start one by hand there:
+#   systemctl --user start herdr-server.service
+#
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK. A unit enabled under
+# the old target keeps its default.target.wants/ link until re-enabled:
+#   ./install                                        # daemon-reload, enable, and
+#                                                    # prune the stale .wants link
+#
+# NOT `systemctl --user reenable`, and NOT `disable`. `disable` removes every
+# symlink in the unit search path that points at this unit — and the entry in
+# ~/.config/systemd/user IS such a symlink, installed by dotbot, into the
+# checkout. So reenable deletes the unit from systemd's view and its enable half
+# then fails with "Unit herdr-server.service does not exist", leaving the unit
+# neither linked nor enabled. That happened on this machine on 2026-09-01,
+# following advice in this very file. `enable` alone is safe: it only ADDS
+# .wants links.
+#
+# scripts/verify-tools.sh FAILS when the enablement has drifted from this field,
+# which matters because `git checkout` in this repo is a deploy and install is
+# not in that path.
+# Verify: scripts/reconcile-systemd-units.sh --check
+WantedBy=graphical-session.target

@@ -86,8 +86,14 @@ manifest_check = true
 # ctrl+shift+alt+arrows (GNOME), alt+{p,o,t,w} (Claude Code model / fast /
 # thinking / workflow toggles), alt+c (fzf), alt+[ and alt+] (ambiguous CSI
 # introducer in legacy mode), and any unmodified key.
-# Known cost: alt+{a,g,j,k,s,y,z} are swallowed before zsh or a pane TUI sees
-# them (herdr intercepts globally) — the same trade already made in tmux.
+# Known cost: alt+{a,g,j,k,s,y,z}, alt+up/down and alt+shift+arrows are
+# swallowed before zsh or a pane TUI sees them (herdr intercepts globally) —
+# the same trade
+# already made in tmux. Claude Code 2.1.251's binary also carries binding
+# strings for meta+{d,e,i,j,l,m,q,r,s,u,x,space,tab,up,down} and
+# alt+{d,v,down,tab,f4} (found 2026-08-30 by grepping the binary; which
+# contexts they fire in is UNVERIFIED), so alt+s (goto) and alt+j (next_agent)
+# above do shadow something of Claude's; alt+k does not appear in that list.
 [keys]
 prefix = "f12"
 
@@ -126,8 +132,12 @@ close_tab    = ["prefix+shift+x", "ctrl+shift+x"]
 rename_tab   = ["prefix+shift+t", "ctrl+shift+r"]
 next_tab     = ["prefix+n", "ctrl+alt+n", "ctrl+tab"]     # browser habit; tmux's
 previous_tab = ["prefix+p", "ctrl+alt+p", "ctrl+shift+tab"]  # C-PgUp/PgDn unbindable
-# tmux S-Left / S-Right. alt+shift+arrows are usable again now that the GNOME
-# xkb option grp:alt_shift_toggle has been removed (see focus_agent below).
+# tmux S-Left / S-Right. CONFIRMED WORKING 2026-09-01 (Zvi) — and they had never
+# worked before that, despite this comment. `apply-gnome-settings.sh` did clear
+# grp:alt_shift_toggle, but ~/.gnome-settings.local re-enabled it three lines
+# later in the same `gnome-apply` run, both printed as ✓. The comment was true of
+# the repo and false of the machine, which is the whole failure class this branch
+# is about. See previous_workspace below for the mechanism.
 move_tab_previous = ["prefix+shift+left", "alt+shift+left"]
 move_tab_next     = ["prefix+shift+right", "alt+shift+right"]
 # Digits: tabs on ctrl+1..9, agents stay on alt+1..9.
@@ -139,6 +149,49 @@ workspace_picker = ["prefix+w", "ctrl+alt+w"]
 goto             = ["prefix+g", "ctrl+alt+g", "alt+s"]
 new_workspace    = ["prefix+shift+n", "ctrl+shift+n"]
 new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
+# Walk the sidebar's space list (added 2026-08-30, eval F9: unbound with eight
+# live workspaces). Both stock defaults are "" so nothing is lost by binding
+# them; the prefix form is still listed first, for the `--remote` escape hatch.
+# alt+shift+up/down because the sidebar stacks spaces vertically and it
+# completes the alt+shift+arrow family move_tab_* already uses (left/right
+# rearrange tabs, up/down walk spaces). NOT alt+up/down *for this action*: Claude
+# Code 2.1.251 binds meta+up, meta+down and alt+down itself (key strings in the
+# binary), so herdr would steal them from every agent pane. That is a reason to
+# avoid the chord HERE, not a prohibition — next_agent/previous_agent below take
+# alt+down/alt+up deliberately and document the trade they accept. Read the two
+# together; taken alone this paragraph reads as forbidding what they do, and an
+# independent review duly filed it as a contradiction.
+# prefix+shift+up/down are free in
+# `herdr --default-config` and in this file; arrows are unaffected by the `il`
+# layout; Alacritty has no default on them (`man 5 alacritty-bindings`: its only
+# arrow defaults are Vi-mode) and GNOME's only Alt+Shift chords are F6/Escape/Tab
+# (gsettings, 2026-08-30).
+#
+# These were DEAD from the day they were written until 2026-09-01, and nothing
+# said so. ~/.gnome-settings.local re-enabled `grp:alt_shift_toggle` immediately
+# after apply-gnome-settings.sh cleared it — two ✓ lines in one `gnome-apply`
+# run, the second silently undoing the first — so Alt+Shift was the layout
+# switch, and whichever of Alt/Shift was pressed second emitted ISO_Next_Group
+# instead of its own modifier. Every Alt+Shift chord therefore arrived one
+# modifier short, move_tab_previous/next above included. The override is now
+# removed and Super+Space (plus Shift+Super+Space) switches us/il.
+# CONFIRMED WORKING 2026-09-01 (Zvi): all four alt+shift+arrow chords fire — the
+# two here and move_tab_previous/next above. No keyprobe was needed in the end:
+# the chords were never a protocol problem, they were a modifier being eaten. If
+# one ever goes quiet again, check `gsettings get org.gnome.desktop.input-sources
+# xkb-options` FIRST — it is a one-line answer, where the keyprobe is a ritual.
+previous_workspace = ["prefix+shift+up", "alt+shift+up"]
+next_workspace     = ["prefix+shift+down", "alt+shift+down"]
+# remove_worktree opens herdr's own confirmation before removing a worktree
+# (`herdr --default-config`: "opens confirmation"). It was unbound, so the
+# cleanup rule in CLAUDE.md had no key behind it (eval F2/F9). Prefix-only on
+# purpose — destructive, like close_workspace. K as in tmux's kill-pane /
+# kill-window; the obvious prefix+shift+r is reload_config. Collision check:
+# the stock prefix table and every binding in this file use k only unshifted
+# (focus_pane_up); a prefix chord is two plain key presses (f12, then K), so
+# GNOME, Alacritty and IBus never see a modifier to swallow, and shifted letters
+# survive the `il` layout. Stock default is "" — a bare value loses nothing.
+remove_worktree  = "prefix+shift+k"
 # rename_workspace: unbound -> falls back to default "prefix+shift+w"
 # close_workspace:  unbound -> falls back to default "prefix+shift+d"
 #                   (destructive or rare: left on the prefix deliberately)
@@ -165,8 +218,21 @@ focus_agent    = "alt+1..9"
 # Walk the priority-sorted attention queue. alt+j: Claude Code 2.1.251 has a
 # *gated* meta+j (app:toggleTerminal) — if a Claude pane reacts to it, move this
 # to alt+n. zsh leaves ^[j / ^[k unbound, so nothing is lost there.
-next_agent     = "alt+j"
-previous_agent = "alt+k"
+# alt+down / alt+up added 2026-08-30 (Zvi): arrows mirror the sidebar's vertical
+# list; j/k stay for muscle memory. KNOWN TRADE, accepted: Claude Code 2.1.251's
+# binary carries binding strings for meta+up, meta+down and alt+down (contexts
+# unverified), and herdr intercepts globally, so whatever those do in a Claude
+# pane is now unreachable there. GNOME is clear (plain <Alt>Up/Down unbound;
+# only <Super><Alt> and <Ctrl><Shift><Alt> variants exist), Alacritty's arrow
+# defaults are Vi-mode only, and arrows survive the `il` layout.
+# CONFIRMED IN USE 2026-09-01 (Zvi): both fire and walk the queue, and nothing
+# was missed inside panes — so the trade above is settled rather than
+# hypothetical, and no keyprobe is needed for these two (an action firing is
+# stronger evidence than an escape sequence arriving).
+# Rollback: drop the second array element, `herdr server reload-config`.
+# Stock defaults are "" (layering rule above), so the arrays lose nothing.
+next_agent     = ["alt+j", "alt+down"]
+previous_agent = ["alt+k", "alt+up"]
 
 # --- session ---
 toggle_sidebar  = ["prefix+b", "ctrl+alt+b"]
@@ -275,17 +341,41 @@ status_indicators = "symbols"
 # the border label is faster to read than the sidebar.
 show_agent_labels_on_pane_borders = true
 
-# LINUX-ONLY: reads /proc directly, so this widget renders nothing on macOS. It
-# fails silently (no /proc, no output, no error) — this file is symlinked to every
-# teammate, so anyone adopting on macOS should drop or rewrite this entry.
+# LINUX-ONLY: the first entry reads /proc directly, so it renders nothing on
+# macOS. It fails silently (no /proc, no output, no error) — this file is
+# symlinked to every teammate, so anyone adopting on macOS should drop or
+# rewrite it. The second entry's process-name rules were verified on Linux only.
 #
-# Host load / memory at the right edge of the tab bar, off the agent rows
-# entirely. Runs on the herdr SERVER via /bin/sh -lc; herdr keeps the last
-# stdout line, capped at 80 chars. Reads /proc directly instead of shelling out
-# to uptime/free, so it costs one awk per tick. The tab bar has to stay visible
-# for this to render, so hide_tab_bar_when_single_tab is deliberately NOT set —
-# it would hide the right-hand entries too.
-tab_bar_right = [{ type = "command", command = '''awk 'NR==FNR{l=$1;next}/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf "load %.1f · mem %d%%\n",l,(t-a)*100/t}' /proc/loadavg /proc/meminfo''', interval_seconds = 30, timeout_seconds = 2 }]
+# Two entries at the right edge of the tab bar, off the agent rows entirely.
+# Both run on the herdr SERVER via /bin/sh -lc; herdr keeps each command's last
+# stdout line, capped at 80 chars. The tab bar has to stay visible for these to
+# render, so hide_tab_bar_when_single_tab is deliberately NOT set — it would
+# hide the right-hand entries too.
+#
+# 1. Host load / memory. Reads /proc instead of shelling out to uptime/free, so
+#    it costs one awk per tick.
+# 2. "agents <detected>/<claude procs>" (added 2026-08-30, eval F2): Claude Code
+#    processes on the box vs agents herdr has detected. The gap is what nothing
+#    else shows — herdmates teammates (process name 2.1.251, eval F3), panes
+#    parked on the trust dialog, Atrium's tmux sessions — and it is the number
+#    that read 33/14 when the machine hit load 27 / 96% swap. Counting rule,
+#    one `ps` + one awk: comm is `claude` (the ~/.local/bin/claude symlink,
+#    also what `clauth start` forks) OR argv[0] contains /claude/versions/
+#    (teammates), EXCLUDING `--chrome-native-host` (the Chrome extension's
+#    helper is the same binary and would sit in the count forever — 2 here).
+#    `clauth` (comm clauth) and herdmates never match. The awk text contains
+#    "claude", so the sh -lc wrapper's cmdline does too, but its comm and
+#    argv[0] are `sh`: it cannot count itself. Detected = `herdr agent list`;
+#    herdr AND jq must be on the server's PATH (HERDR_BIN_PATH is not
+#    guaranteed in that shell) and the CLI must find the socket without
+#    HERDR_SOCKET_PATH — it does from a clean `env -i … /bin/sh -lc` (printed
+#    "agents 12/20" on 2026-08-30). UNVERIFIED until the next reload: that the
+#    server answers its own command runner's client. A jq/herdr failure prints
+#    "agents ?/N" rather than a silently wrong number.
+tab_bar_right = [
+  { type = "command", command = '''awk 'NR==FNR{l=$1;next}/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf "load %.1f · mem %d%%\n",l,(t-a)*100/t}' /proc/loadavg /proc/meminfo''', interval_seconds = 30, timeout_seconds = 2 },
+  { type = "command", command = '''d=$(herdr agent list 2>/dev/null | jq -r '(.result.agents//empty)|length' 2>/dev/null); p=$(ps -eo comm=,args= | awk '($1=="claude"||$2~/\/claude\/versions\//)&&$0!~/--chrome-native-host/{n++}END{print n+0}'); printf 'agents %s/%s\n' "${d:-?}" "$p"''', interval_seconds = 30, timeout_seconds = 3 },
+]
 
 # Sidebar agent rows.
 #
@@ -307,16 +397,36 @@ tab_bar_right = [{ type = "command", command = '''awk 'NR==FNR{l=$1;next}/^MemTo
 #   $eff_xhigh $eff_max       effort band (exactly one set)      |  session-statusline.sh,
 #   $ctx_ok $ctx_warn         context ramp + %, e.g. "▅ 62%"     |  a Claude Code
 #   $ctx_crit                 (<75 / 75-89 / >=90)               |  statusLine command
-#   (rl_* and cost are deliberately NO LONGER published or        |  (source id
-#    rendered — see the context row below; both remain in the     /  "claude-context")
+#   $idle_ok $idle_warn       idle age (now - transcript mtime)  |  re-run every 60 s by
+#   $idle_crit                e.g. "idle 12m"; <5 / 5-9 / >=10   |  refreshInterval, which
+#                             min = herdmates quiet/stalled      |  is what lets idle_*
+#   (rl_* and cost are deliberately NO LONGER published or        |  tick while idle
+#    rendered — see the context row below; both remain in the     /  (source id "claude-context")
 #    in-pane status text.)
 #   $pr                       PR chip — wyattjoh/herdr-plugin-gh-pr
 #   $icon                     agent glyph (❖ ✦ ✜) — the local `sidebar-icons`
 #                             plugin, on pane.agent_detected; non-Claude panes
 #   $clauth                   which clauth account this pane burns — clauth plugin
-#   $task $status             herdmates: the native team lead's task and status.
-#                             Published only inside a native team; the rows
-#                             vanish everywhere else.
+#   $task $status             herdmates (its own report-metadata source).
+#                             $task = the team lead's current task (absent on
+#                             every pane today). $status = herdmates' five-state
+#                             word for the pane's session: online | waiting |
+#                             blocked | stale | "!! needs-you" (brain.rs
+#                             FiveState, tokens.rs state_value). It is published
+#                             on ANY pane whose session has a team dir under
+#                             ~/.claude/teams (gather.rs list_team_dirs), lead
+#                             or not: on the contaminated server (eval F1, every
+#                             session a team of one) that was 10 of 14 Claude
+#                             panes. `stale` = no transcript write for >= 10
+#                             min, the hard "stalled" tier of signal_engine.rs
+#                             (quiet 5 min, stalled 10 min); `waiting` covers
+#                             the soft tier and "unknown". CORRECTED 2026-08-30
+#                             — this used to say "published only inside a native
+#                             team; the rows vanish everywhere else". One token
+#                             whose VALUE varies cannot be coloured per state
+#                             (contrast the band tokens above): `stale` renders
+#                             exactly like `online`. The coloured time cue is
+#                             $idle_*, drawn on the same row.
 # `model` is deliberately NOT used as a token name: names are global per pane
 # and herdmates publishes its own `model` on team-lead panes — last writer wins.
 # Builtins used: state_icon, workspace, tab, agent, terminal_title_stripped.
@@ -375,7 +485,23 @@ claude = [
     { token = "$ctx_crit", fg = "#f7768e", bold = true, dim = false },
   ],
   ["$task"],
-  ["$status"],
+  # Time row (added 2026-08-30, eval F8): herdmates' bare status word plus the
+  # coloured idle band from session-statusline.sh — exactly one of $idle_ok /
+  # $idle_warn / $idle_crit is set per tick, thresholds 5 / 10 min = herdmates'
+  # quiet / stalled. The sidebar had identity and context pressure but no time
+  # dimension, and time is the cleanup cue. Shares $status's row on purpose:
+  # adding "idle 47m" to the model row would take its worst case from ~25 to
+  # ~39 columns ("✻ Fable 5 1M" + "xhigh" + "▄ 47%" + "idle 47m" + three
+  # separators) against sidebar_width 40, and a row of its own would cost every
+  # Claude agent a sixth line. Here the row reads "stale · idle 47m" while
+  # herdmates publishes and "idle 47m" alone when it does not, <= 23 columns
+  # ("!! needs-you" + "idle 47m"). Values: "idle 2m" / "idle 3h" / "idle 2d".
+  [
+    "$status",
+    "$idle_ok",
+    { token = "$idle_warn", fg = "#e0af68", dim = false },
+    { token = "$idle_crit", fg = "#f7768e", bold = true, dim = false },
+  ],
 ]
 # Non-Claude agents: the generic three rows, with the glyph and the agent name
 # in each vendor's brand colour.

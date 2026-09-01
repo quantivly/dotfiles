@@ -20,6 +20,32 @@
 #   mdl                                     "✻ Fable 5 1M"     (brand colour)
 #   eff_lo | eff_high | eff_xhigh | eff_max "xhigh"            (dim/blue/orange/red)
 #   ctx_ok | ctx_warn | ctx_crit            "▅ 62%"            (green/yellow/red)
+#   idle_ok | idle_warn | idle_crit         "idle 12m"         (dim/yellow/red)
+#
+# idle_* (added 2026-08-30, eval F8) is now - mtime(transcript_path): Claude
+# appends to the transcript on every turn and tool result, so its mtime is "last
+# activity" — the same fact herdmates' quiet/stalled tiers read, and the
+# thresholds match them (signal_engine.rs: quiet 5 min, stalled 10 min):
+# < 5 min idle_ok, 5-9 idle_warn, >= 10 idle_crit; values "idle 2m", "idle 3h",
+# "idle 2d" (<= 12 chars). Purpose: the sidebar showed identity and context
+# pressure but no time dimension, herdmates' `stale` is a bare uncoloured word,
+# and time is the cleanup cue — an idle_crit row is the one to reap. The visible
+# line gets "| idle Nm" too, but only from 5 min, so an active session is not
+# nagged.
+#
+# THIS BAND ONLY WORKS BECAUSE settings.json SETS refreshInterval. Claude Code
+# re-runs the statusLine command on conversation events, debounced at 300 ms,
+# and those events go quiet exactly when idle grows; `"refreshInterval": 60` in
+# the statusLine entry re-runs it every 60 s regardless (docs:
+# code.claude.com/docs/en/statusline, "event-driven triggers can go quiet when
+# the main session is idle"). Without it the band would freeze at its last
+# value and then every token here would expire with the 4-minute TTL below.
+# INFERRED, not separately proven: that timer is also why mdl/eff/ctx survive
+# for hours on idle panes today.
+#
+# macOS: the idle age comes from python's os.stat, which is portable — BSD
+# `stat -f` and GNU `stat -c` disagree, which is why no `stat` binary is used.
+# The remaining GNU-isms are `date +%s%N` and `timeout` (HERDR_GUIDE.md §10).
 #
 # NOT published to herdr (removed 2026-08-30): rate limits and session cost.
 # The clauth daemon already rotates accounts automatically at its thresholds, so
@@ -39,7 +65,8 @@
 #     the pane lives on (tokens are never cleared on process exit).
 #   - timeout 2 … || true: the CLI has no socket timeout, and a wedged herdr
 #     must never wedge the status line.
-#   - <= 8 keys per call (herdr's limit is 16 per report, 32 retained).
+#   - 11 keys per call — mdl + 4 eff_* + 3 ctx_* + 3 idle_*, sets and clears
+#     together (herdr's limit is 16 per report, 32 retained).
 #   - Token names are global per pane, last writer wins across sources:
 #     herdmates publishes `model` on team-lead panes, so ours is `mdl`.
 #     `context`/`effort` are deliberately no longer published (legacy names).
@@ -58,14 +85,16 @@ set -eu
 
 input="$(cat)"
 
-# One python3 call; prints 11 lines, each field on its own line:
+# One python3 call; prints 13 lines, each field on its own line:
 #   1 mdl value  2 eff key  3 eff value  4 ctx key  5 ctx value
 #   6 rl key     7 rl value 8 cost value 9 model    10 ctx pct  11 cwd
+#   12 idle key  13 idle value
+# New fields are APPENDED so the absolute `sed -n 'Np'` indices below stay valid.
 # Reads defensively: any field may be missing or JSON null, and a total parse
 # failure must still leave the status line printable.
 read_fields() {
   printf '%s' "$input" | python3 -c '
-import json, sys
+import json, os, sys, time
 
 try:
     d = json.load(sys.stdin)
@@ -158,8 +187,31 @@ cost_val = ("$%.2f" % cost) if cost is not None else ""
 cwd = sub("workspace").get("current_dir")
 cwd = cwd if isinstance(cwd, str) else ""
 
+# --- idle band -----------------------------------------------------------
+# now - mtime(transcript_path). Defensive: the field may be missing, the file
+# may not exist yet (no turn written), or the clock may sit behind the mtime
+# (clamped to 0). Any failure means "no idle band", which clears all three
+# tokens rather than leaving a stale one behind.
+idle_key = ""
+idle_val = ""
+tp = d.get("transcript_path")
+if isinstance(tp, str) and tp:
+    try:
+        secs = max(0, int(time.time() - os.stat(tp).st_mtime))
+    except (OSError, ValueError, OverflowError):
+        secs = None
+    if secs is not None:
+        mins = secs // 60
+        if mins >= 1440:
+            idle_val = "idle %dd" % (mins // 1440)
+        elif mins >= 60:
+            idle_val = "idle %dh" % (mins // 60)
+        else:
+            idle_val = "idle %dm" % mins
+        idle_key = "idle_ok" if secs < 300 else ("idle_warn" if secs < 600 else "idle_crit")
+
 for line in (mdl, eff_key, lvl, ctx_key, ctx_val, rl_key, rl_val, cost_val,
-             model, ("" if cpct is None else str(cpct)), cwd):
+             model, ("" if cpct is None else str(cpct)), cwd, idle_key, idle_val):
     print(oneline(line))
 '
 }
@@ -183,6 +235,8 @@ cost_val=$(printf '%s\n' "$fields" | sed -n '8p')
 model=$(printf '%s\n' "$fields" | sed -n '9p')
 pct=$(printf '%s\n' "$fields" | sed -n '10p')
 cwd=$(printf '%s\n' "$fields" | sed -n '11p')
+idle_key=$(printf '%s\n' "$fields" | sed -n '12p')
+idle_val=$(printf '%s\n' "$fields" | sed -n '13p')
 
 # `mdl` is non-empty whenever python succeeded (model falls back to "claude"),
 # so an empty one means "no data" — publish nothing rather than clearing bands.
@@ -204,6 +258,13 @@ if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
       set -- "$@" --clear-token "$k"
     fi
   done
+  for k in idle_ok idle_warn idle_crit; do
+    if [ "$k" = "$idle_key" ]; then
+      set -- "$@" --token "$k=$idle_val"
+    else
+      set -- "$@" --clear-token "$k"
+    fi
+  done
   timeout 2 herdr pane "$@" >/dev/null 2>>"$HOME/.cache/statusline-herdr.err" || true
 fi
 
@@ -211,6 +272,8 @@ fi
 printf '%s' "${model:-claude}"
 [ -n "$eff_val" ] && printf ' (%s)' "$eff_val"
 [ -n "$pct" ] && printf ' | ctx %s%%' "$pct"
+# Idle only from 5 min (idle_warn / idle_crit): an active session is not nagged.
+case "$idle_key" in idle_warn|idle_crit) printf ' | %s' "$idle_val" ;; esac
 [ -n "$rl_val" ] && printf ' | %s' "$rl_val"
 [ -n "$cost_val" ] && printf ' | %s' "$cost_val"
 [ -n "$cwd" ] && printf ' | %s' "$cwd"
