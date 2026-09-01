@@ -62,7 +62,9 @@ else
     readonly RESET=''
 fi
 
-readonly LOCAL_OVERRIDES="${HOME}/.gnome-settings.local"
+# Overridable so the shadowing annotation can be exercised against a fixture
+# instead of the real machine-specific file.
+readonly LOCAL_OVERRIDES="${GNOME_LOCAL_OVERRIDES:-${HOME}/.gnome-settings.local}"
 
 #######################################
 # Logging function with color support
@@ -96,12 +98,39 @@ SCHEMAS="$(gsettings list-schemas 2>/dev/null || true)"
 #   $2 - key
 #   $3 - value in `gsettings get` form (strings keep their single quotes)
 #######################################
+# What the PORTABLE layer declared, keyed "<schema> <key>". Used only to annotate
+# the machine-specific layer's output — see the note in gset() below.
+declare -A PORTABLE_DECLARED=()
+IN_LOCAL_OVERRIDES=0
+
 gset() {
     local schema="$1" key="$2" value="$3"
 
     if ! grep -qx "$schema" <<<"$SCHEMAS"; then
         log WARNING "Schema '$schema' not found — skipping $key"
         return 0
+    fi
+
+    # Two ✓ lines in one run, the second silently undoing the first, is how the
+    # alt+shift+arrow keybindings stayed dead for as long as they were bound:
+    # apply_input_sources cleared grp:alt_shift_toggle, ~/.gnome-settings.local
+    # re-enabled it three lines later, and both printed as plain successes. So a
+    # machine-specific value that replaces one the portable layer declared says
+    # so, naming what it replaced.
+    #
+    # A NOTE, not a warning: overriding is what this layer is FOR — the
+    # workspace-switch keys here are deliberate overrides — and a warning on
+    # every one of them would be noise in the normal case, which is how a
+    # diagnostic becomes something people stop reading. The annotation makes the
+    # shadowing visible without claiming it is wrong.
+    local decl_key="$schema $key" shadowed=""
+    if (( IN_LOCAL_OVERRIDES )); then
+        shadowed="${PORTABLE_DECLARED[$decl_key]:-}"
+        [[ -n "$shadowed" && "$shadowed" == "$value" ]] && shadowed=""
+    else
+        # Recorded BEFORE the no-change early return below: shadowing is about
+        # what each layer declares, not about which writes happened to be needed.
+        PORTABLE_DECLARED[$decl_key]="$value"
     fi
 
     local current
@@ -119,7 +148,11 @@ gset() {
     fi
 
     if gsettings set "$schema" "$key" "$value" 2>/dev/null; then
-        log SUCCESS "$key → $value"
+        if [[ -n "$shadowed" ]]; then
+            log SUCCESS "$key → $value  (overrides $shadowed, set above)"
+        else
+            log SUCCESS "$key → $value"
+        fi
     else
         log WARNING "Could not set $schema $key (key may not exist on this version)"
     fi
@@ -236,8 +269,10 @@ apply_local_overrides() {
     # Sourced so it can reuse gset()/log(). User overrides must never abort the
     # run, so relax errexit around the include.
     set +e
+    IN_LOCAL_OVERRIDES=1
     # shellcheck source=/dev/null
     source "$LOCAL_OVERRIDES"
+    IN_LOCAL_OVERRIDES=0
     set -e
 }
 
