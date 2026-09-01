@@ -637,17 +637,58 @@ check "legacy nickname files are purged" \
 # basenames — so with the purge running AFTER the write loop, a route named
 # `~/.config/personal` had its freshly-cached token deleted on every shell
 # start, leaving that account permanently unpinned with no error anywhere.
-mkdir -p "$HOOKHOME/.config/personal"
-printf 'github.com:\n    users:\n        namesake:\n    user: namesake\n' \
-  > "$HOOKHOME/.config/personal/hosts.yml"
-# The refresher must run AFTER the new default is in place — it is started at
-# source time, so setting the route afterwards would test nothing.
-check "a config dir named like a legacy key survives the purge" \
-      "$(hookrun "$R_MINE" "GH_ACCOUNT_DEFAULT_DIR=\$HOME/.config/personal
-                            _gh_refresh_token_cache_bg" \
-         'print -r -- "${${GH_CONFIG_DIR:t}:-none}/${${GH_TOKEN:+pinned}:-UNPINNED}"')" \
-      "personal/pinned"
-rm -rf "$HOOKHOME/.config/personal"
+# Its own HOME, and that isolation is the whole fix — it failed about one run in
+# five under load without it.
+#
+# Every `hookrun` row sources zshrc.company, which starts its token refresher
+# with `&!` — DISOWNED, so it outlives the `zsh -c` that spawned it. All those
+# rows share one $HOOKHOME. This row is the only one that changes the routing
+# table mid-flight, and a leftover refresher from an EARLIER row still holds the
+# old table: its purge does not know `personal` is now a configured basename, so
+# it deletes the entry this row just wrote, and the row reads UNPINNED.
+#
+# Two fixes were tried and rejected before this one, both from guessing at the
+# cause instead of measuring it: raising the `gh config get` timeout (forcing
+# that timeout to 1 ms did not reproduce the failure at all), and a barrier
+# waiting for this row's own refresher to finish (it synchronises against the
+# wrong process — the contaminating one belongs to a previous row). A private
+# HOME removes the shared state the race needs, and reproduces clean where the
+# barrier alone still failed.
+#
+# Not a production bug: overlapping refreshers on a real machine always share a
+# table, so a purge can only remove what that table does not name.
+PURGEHOME="$TMPROOT/purgehome"
+mkdir -p "$PURGEHOME/.config/gh-quantivly" "$PURGEHOME/.config/gh-personal" \
+         "$PURGEHOME/.config/personal" "$PURGEHOME/.cache"
+printf 'github.com:\n    users:\n        worky:\n    user: worky\n'       > "$PURGEHOME/.config/gh-quantivly/hosts.yml"
+printf 'github.com:\n    users:\n        persony:\n    user: persony\n'   > "$PURGEHOME/.config/gh-personal/hosts.yml"
+printf 'github.com:\n    users:\n        namesake:\n    user: namesake\n' > "$PURGEHOME/.config/personal/hosts.yml"
+printf '[user]\n\temail = fixture@example.invalid\n' > "$PURGEHOME/.gitconfig"
+purge_row() {
+  env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$PURGEHOME" TERM=dumb zsh -c "
+    mkdir -p \$HOME/.cache/gh-token-cache
+    print legacy > \$HOME/.cache/gh-token-cache/personal
+    print legacy > \$HOME/.cache/gh-token-cache/quantivly
+    source '$SYSTEM_SH'; source '$GITHUB_SH'
+    source '$COMPANY_SH' >/dev/null 2>&1
+    # Barrier against this HOME's own refresher: both basename entries written
+    # AND both legacy names purged. Waiting only for a file it CREATES is not
+    # enough — the purge is its last act, so the entries appear before it ends.
+    for _i in {1..100}; do
+      [[ -e \$HOME/.cache/gh-token-cache/gh-personal \
+         && -e \$HOME/.cache/gh-token-cache/gh-quantivly \
+         && ! -e \$HOME/.cache/gh-token-cache/personal \
+         && ! -e \$HOME/.cache/gh-token-cache/quantivly ]] && break
+      sleep 0.1
+    done
+    GH_ACCOUNT_DEFAULT_DIR=\$HOME/.config/personal
+    _gh_refresh_token_cache_bg
+    _GH_ROUTE_INTERACTIVE=1
+    builtin cd '$R_MINE' 2>/dev/null
+    _update_gh_config 2>/dev/null
+    print -r -- \"\${\${GH_CONFIG_DIR:t}:-none}/\${\${GH_TOKEN:+pinned}:-UNPINNED}\"" 2>/dev/null
+}
+check "a config dir named like a legacy key survives the purge" "$(purge_row)" "personal/pinned"
 
 # gh ranks GITHUB_TOKEN second, so leaving it set on a path that clears GH_TOKEN
 # means a third account nobody named wins — while the message blames the keyring.
