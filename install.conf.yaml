@@ -35,8 +35,11 @@
     #   systemctl --user enable --now herdr-server.service
     # It is wanted by graphical-session.target, not default.target, so it starts
     # once GNOME has imported the session environment — and survives logout,
-    # because WantedBy propagates start only. If it was already enabled under
-    # default.target, `disable` then `enable` to move the symlink.
+    # because WantedBy propagates start only. Changing that line does NOT move an
+    # existing .wants/ symlink, so the shell step at the bottom of this file
+    # reconciles it (scripts/reconcile-systemd-units.sh), and
+    # scripts/verify-tools.sh FAILS when it has drifted — `git checkout` here is a
+    # deploy, and install is not in that path.
     ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
@@ -97,6 +100,15 @@
       if [ -n "${XDG_CURRENT_DESKTOP:-}" ] && command -v xdg-user-dirs-update >/dev/null 2>&1; then
         bash ~/.dotfiles/scripts/repair-xdg-user-dirs.sh
       fi
+    - |
+      # Reconcile systemd USER unit enablement with the unit files linked above.
+      # A LINKED unit is not a RECONCILED one: systemd records [Install] at
+      # `enable` time as a .wants/ symlink, so editing WantedBy= in the file moves
+      # nothing — not even after daemon-reload. Only `reenable` does, and it does
+      # not restart the unit. The script gates itself: no-op without a user
+      # manager (servers, containers, CI), and it re-enables only a unit that is
+      # already enabled, so it reconciles a decision rather than making one.
+      bash ~/.dotfiles/scripts/reconcile-systemd-units.sh
     - |
       # Create ~/.backup.local from template (workstation only; no-op on servers).
       # The heavy one-time setup (restic, repos, systemd timers, LUKS header,

@@ -221,6 +221,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md).
 
 ### Changed
+- **`./install` reconciles systemd user unit enablement, and `verify-tools.sh` fails when it has
+  drifted** (`scripts/reconcile-systemd-units.sh`, `install.conf.yaml`, `scripts/verify-tools.sh`,
+  `systemd/herdr-server.service`). A linked unit is not a reconciled one: systemd records
+  `[Install]` at `enable` time as a `<target>.target.wants/` symlink, and editing `WantedBy=`
+  afterwards moves nothing — not even after `daemon-reload`, which re-reads the unit but never
+  revisits the symlink. Only `reenable` does, and unlike `restart` it leaves the running process
+  alone (verified: same MainPID, still active). This repo manufactures that drift, because
+  `git checkout` here is a deploy and install is not in that path — so reconciliation at install
+  time is necessary but not sufficient, and the load-bearing half is the check, which runs
+  whenever anyone asks about the machine. The reconciler is gated twice: it no-ops without a user
+  manager (servers, containers, CI), and it re-enables only a unit already enabled, because
+  `reenable` on a disabled unit ENABLES it — it reconciles a decision, never makes one. It also
+  says plainly that a RUNNING server keeps the old unit until a restart, which ends every agent
+  session, rather than printing a success nobody can act on. `--check` reports, `--plan` lists
+  what `--apply` would touch (which is how the gate became testable without systemd).
+- **`verify-tools.sh` now asserts the server environment is COMPLETE, not just uncontaminated.**
+  It only ever asked whether anything forbidden was present, so a server started at boot — before
+  any graphical session existed to import an environment from — carried no forbidden variable and
+  printed "environment is clean" while every pane had lost `gh --web`, `xdg-open` and the ssh
+  agent. It now compares against the user manager's own environment (so a headless box correctly
+  reports nothing), FAILs on a variable the session offers and the server lacks, and WARNs when
+  `DISPLAY`/`WAYLAND_DISPLAY` name a previous login. `SSH_AUTH_SOCK` is excluded from the value
+  comparison because the launcher substitutes a stable symlink for it by design.
+- **[scripts/test-systemd-reconcile.sh](scripts/test-systemd-reconcile.sh)** — 36-check state
+  table for the reconciler, in CI as `systemd-reconcile-test`, needing no systemd user manager
+  because the comparison is filesystem state (a runner has no manager, and a suite that skips in
+  CI is one that never runs). Each fix is pinned by mutation, which is how four hollow assertions
+  were caught before this landed: a note-prefix check that passed when two different notes
+  collapsed into one, a "plain file ignored" row that was really testing containment, a dead
+  comment-skip rule in the awk that could not fire because the pattern is anchored, and — worst —
+  the `reenable` gate, which was unpinnable while it sat inside a manager-gated loop.
 - **One doctor-reporting implementation** (`_doctor_ok`/`_doctor_bad`/`_doctor_warn`/
   `_doctor_note`/`_doctor_summary` in `zsh/functions/system.sh`). `backup-doctor` had a
   byte-for-byte duplicate of the ✓/✗/⚠ emitters and its own hand-rolled summary; both now

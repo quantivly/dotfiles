@@ -548,6 +548,30 @@ Gotchas, in the order they bite:
   disappeared — an audit found 15 of 25 rebound actions had lost theirs). A bare value is only
   safe for actions whose stock default is empty (`focus_agent`, `next_agent`, `previous_agent`,
   `move_tab_*`, `resize_pane_*`). Diff against `herdr --default-config` after any keymap edit.
+- **A LINKED systemd unit is not a RECONCILED one, and the difference is invisible.** systemd
+  records `[Install]` at `enable` time, as a symlink under `<target>.target.wants/`. Editing
+  `WantedBy=` afterwards changes nothing about what starts — **not even after `daemon-reload`**,
+  which re-reads the unit but never revisits the symlink. Only `reenable` moves it, and unlike
+  `restart` it leaves the running process alone (same MainPID, still active — probed). Meanwhile
+  `systemctl status` is happy, so the unit file under review says one thing and what boots is
+  another. This repo *manufactures* that drift, because `git checkout` here is a deploy and
+  `./install` is not in that path: HEAD moves, the linked unit file changes under systemd, nothing
+  re-enables anything. It cost one reboot's worth of every pane losing `gh --web`, `xdg-open` and
+  the ssh agent, with every check on the machine green. Now: `./install` reconciles
+  (`scripts/reconcile-systemd-units.sh`, gated — no-op without a user manager, and it re-enables
+  only a unit that is *already* enabled, because `reenable` on a disabled one ENABLES it), and
+  `scripts/verify-tools.sh` **fails** when the enablement has drifted. `--check` reports,
+  `--plan` lists what `--apply` would touch. State table: `scripts/test-systemd-reconcile.sh`
+  (36 checks, in CI as `systemd-reconcile-test`) — hermetic and needing no systemd at all, since
+  the whole comparison is filesystem state.
+- **"Clean" is not "complete" for the server environment.** `verify-tools.sh` used to ask only
+  whether anything FORBIDDEN was present, so a server started at boot — before any graphical
+  session existed to import an environment from — carried no forbidden variable and passed as
+  clean while every pane had lost `gh --web`, `xdg-open` and the ssh agent. It now also asserts
+  that the session variables the *user manager* offers are actually present in the server, and
+  warns when `DISPLAY`/`WAYLAND_DISPLAY` name a **previous** login (a server deliberately
+  survives logout, so it keeps the dead session's values). `SSH_AUTH_SOCK` is excluded from that
+  value comparison on purpose — the launcher substitutes a stable symlink for it by design.
 - **The herdr server's PATH is a snapshot taken when the server starts.** It carries the mise
   `installs/<tool>/<version>` dirs for whatever was *globally* configured at that instant (not
   mise's `shims` dir). Two consequences: a tool declared only in a project `.mise.toml` is

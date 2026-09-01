@@ -85,6 +85,27 @@ jobs:
       - name: Run the external-HDD state table
         run: ./scripts/test-backup-external.sh
 
+  systemd-reconcile-test:
+    name: systemd Unit Enablement State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The defect here is a .wants/ symlink in the wrong directory: systemd
+      # records [Install] at `enable` time, so editing WantedBy= moves nothing
+      # and `systemctl status` stays happy while what actually starts is the old
+      # target. Invisible, and it cost every pane its session environment after
+      # one reboot with every check on the machine green.
+      #
+      # The comparison is pure filesystem state, so this needs no systemd user
+      # manager — which matters, because a runner has none and a suite that
+      # skips in CI is a suite that never runs.
+      - name: Run the unit-enablement state table
+        run: ./scripts/test-systemd-reconcile.sh
+
   dotfiles-guard-test:
     name: Dotfiles Live-Config Guard State Table
     runs-on: ubuntu-latest

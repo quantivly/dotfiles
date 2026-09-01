@@ -12,7 +12,8 @@
 # pane, not a Claude session:
 #   systemctl --user daemon-reload
 #   herdr server stop                       # ends EVERY agent session on the machine
-#   systemctl --user disable herdr-server.service     # only if enabled under the OLD target
+#   systemctl --user reenable herdr-server.service    # moves the .wants/ symlink if
+#                                           # [Install] changed; does NOT restart
 #   systemctl --user enable --now herdr-server.service
 #   scripts/verify-tools.sh                 # "herdr server environment hygiene" must be green
 #                                           # (non-zero exit on a hygiene FAIL)
@@ -114,7 +115,10 @@ RestartSec=2
 # CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK. A unit enabled under
 # the old target keeps its default.target.wants/ link until re-enabled:
 #   systemctl --user daemon-reload
-#   systemctl --user disable herdr-server.service
-#   systemctl --user enable herdr-server.service     # --now only if none runs
-# Verify: systemctl --user show herdr-server.service -p WantedBy
+#   systemctl --user reenable herdr-server.service   # disable+enable in one step,
+#                                                    # and does NOT restart the unit
+# `./install` now does both of those, and scripts/verify-tools.sh FAILS when the
+# enablement has drifted from this field — necessary because `git checkout` in
+# this repo is a deploy and install is not in that path.
+# Verify: scripts/reconcile-systemd-units.sh --check
 WantedBy=graphical-session.target

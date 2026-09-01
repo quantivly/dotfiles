@@ -12,9 +12,12 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 #
-# EXIT CODE: non-zero if and only if the "herdr server environment hygiene"
-# section FAILs — forbidden variables in the running server's environment, or a
-# teammux shim dir on its PATH. That is the one section the switch-over runbooks
+# EXIT CODE: non-zero if and only if one of the two ASSERTION sections FAILs:
+# "herdr server environment hygiene" — forbidden variables in the running
+# server's environment, a teammux shim dir on its PATH, or session variables the
+# session provides that the server does not have — or "systemd user unit
+# enablement", where a unit's .wants/ symlink no longer matches the WantedBy= in
+# the unit file this checkout links. That is the one section the switch-over runbooks
 # (systemd/herdr-server.service, scripts/herdr-server-launch.sh) treat as an
 # assertion ("must be green"), so it must be gateable by a caller or CI, like
 # backup-doctor and audit-status. Everything else stays informational and exits
@@ -269,10 +272,17 @@ elif [[ ! -r "/proc/$herdr_pid/environ" ]]; then
 else
     # NUL-delimited parse: a value containing a newline must not masquerade as a name.
     server_names=""
+    server_sess=""
     while IFS= read -r -d '' entry; do
         name="${entry%%=*}"
         server_names+="$name"$'\n'
         [[ "$name" == PATH ]] && server_path="${entry#PATH=}"
+        # Kept with their VALUES for the completeness check below. A server that
+        # outlived a logout holds a DISPLAY naming a dead session — present, so a
+        # names-only check cannot see it.
+        case "$name" in
+            DISPLAY|WAYLAND_DISPLAY) server_sess+="$entry"$'\n' ;;
+        esac
     done < "/proc/$herdr_pid/environ"
 
     leaked=""
@@ -281,6 +291,37 @@ else
     done
     shim_entries=$(tr ':' '\n' <<<"$server_path" | grep '/teammux/bin' | tr '\n' ' ')
     shim_entries="${shim_entries% }"
+
+    # "Clean" is not "complete", and they are different questions. Everything
+    # above asks only whether something FORBIDDEN is present. A server started at
+    # boot — before any graphical session existed to import an environment from —
+    # carries no forbidden variable at all, so it passed as clean while every pane
+    # had lost `gh --web`, `xdg-open` and the ssh agent. That is the regression the
+    # graphical-session.target [Install] exists to prevent, and nothing here saw it.
+    #
+    # Compared against the USER MANAGER's own environment rather than a fixed
+    # list: that is what a correctly started server would have inherited, and on a
+    # headless box neither side has these, so there is correctly nothing to
+    # report. Names only in the output — see the note at the top of this section.
+    sess_missing=""; sess_stale=""; mgr_env=""
+    if command -v systemctl >/dev/null 2>&1 && [[ -n "${XDG_RUNTIME_DIR:-}" ]] \
+       && mgr_env="$(systemctl --user show-environment 2>/dev/null)"; then
+        for v in DISPLAY WAYLAND_DISPLAY XAUTHORITY SSH_AUTH_SOCK; do
+            grep -q "^${v}=" <<<"$mgr_env" || continue   # this session does not offer it
+            if ! grep -qx "$v" <<<"$server_names"; then
+                sess_missing+=" $v"
+                continue
+            fi
+            # SSH_AUTH_SOCK is deliberately excluded from the VALUE comparison:
+            # the launcher substitutes a stable symlink for it on purpose, so a
+            # difference there is by design rather than drift.
+            case "$v" in DISPLAY|WAYLAND_DISPLAY) ;; *) continue ;; esac
+            if [[ "$(grep "^${v}=" <<<"$mgr_env" | head -1)" \
+               != "$(grep "^${v}=" <<<"$server_sess" | head -1)" ]]; then
+                sess_stale+=" $v"
+            fi
+        done
+    fi
 
     if [[ -z "$leaked" && -z "$shim_entries" ]]; then
         echo -e "${GREEN}✓${NC} herdr server (pid $herdr_pid) environment is clean"
@@ -300,6 +341,23 @@ else
         echo "      herdr server stop; scripts/herdr-server-launch.sh &   # else, from a PLAIN terminal"
     fi
 
+    if [[ -n "$sess_missing" ]]; then
+        echo -e "${RED}✗ FAIL:${NC} herdr server is missing session variables this session provides:$sess_missing"
+        echo "    Panes inherit that: no 'gh --web', no 'xdg-open', and the slow ssh-agent path."
+        echo "    Typically a server started before the graphical session existed. Check that the"
+        echo "    unit is enabled under the target its own file declares:"
+        echo "      scripts/reconcile-systemd-units.sh --check"
+        herdr_hygiene_failed=1
+    elif [[ -n "$sess_stale" ]]; then
+        # WARN, not FAIL: everything works until the old session's socket dies,
+        # and the unit deliberately does not restart across a logout.
+        echo -e "${YELLOW}⚠${NC} herdr server holds session variables from a PREVIOUS login:$sess_stale"
+        echo "    Desktop-opening plugin actions fail silently. A restart fixes it and ENDS EVERY"
+        echo "    AGENT SESSION — do it from a plain terminal when the panes are idle."
+    elif [[ -n "$mgr_env" ]]; then
+        echo -e "${GREEN}✓${NC} herdr server has the session variables this session provides"
+    fi
+
     # WARN, not FAIL, and it does not affect the exit code: a server without the
     # key is degraded (no Linear picker), not contaminated.
     if grep -qx 'LINEAR_API_KEY' <<<"$server_names"; then
@@ -309,6 +367,24 @@ else
         echo "    (the Linear picker) cannot authenticate. Set it in ~/.zshrc.local BEFORE the"
         echo "    server starts; the launcher reads it from there."
     fi
+fi
+
+echo ""
+echo -e "${BLUE}=== systemd user unit enablement vs the linked unit files ===${NC}"
+# Also an ASSERTION (see EXIT CODE in the header). systemd records [Install] at
+# `enable` time, so editing WantedBy= in a unit file moves nothing until someone
+# runs `reenable` — and ./install is not in this repo's deploy path, because
+# `git checkout` here IS the deploy. So the enablement silently keeps pointing at
+# whatever target was current when the unit was first enabled. On this machine
+# that meant the server would have kept starting at boot, before any graphical
+# session existed, which the section above would then have called "clean".
+if [[ -x "$DOTFILES_ROOT/scripts/reconcile-systemd-units.sh" ]]; then
+    if ! "$DOTFILES_ROOT/scripts/reconcile-systemd-units.sh" --check; then
+        herdr_hygiene_failed=1
+        echo "    Fix: ./install (it reconciles), or systemctl --user reenable <unit>"
+    fi
+else
+    echo -e "${YELLOW}⚠${NC} scripts/reconcile-systemd-units.sh missing — enablement UNCHECKED"
 fi
 
 echo ""
