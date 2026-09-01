@@ -92,6 +92,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It is a papercut guard, not a boundary — any command can print a secret and this knows six
   shapes. The durable fixes are a shorter-lived credential and narrower scopes.
 
+### Fixed
+
+- **A flaky row in `scripts/test-gh-routing.sh`** — "a config dir named like a legacy key
+  survives the purge" failed roughly one run in five under load, which by that suite's own
+  standard ("a flaky row in a suite about silent failures is worse than no row") makes the
+  whole table less believable.
+
+  Every `hookrun` row sources `zshrc.company`, whose token refresher starts with `&!` —
+  **disowned, so it outlives the shell that spawned it** — and all those rows share one
+  fixture `HOME`. This row is the only one that changes the routing table mid-flight, so a
+  leftover refresher from an *earlier* row, still holding the old table, does not know
+  `personal` has become a configured basename and purges the entry this row just wrote.
+  A private `HOME` removes the shared state the race needs: 8 runs under 8-way CPU load,
+  0 failures, against a harness that produced 2 failures in 9 before.
+
+  Two earlier fixes were wrong because they were guesses rather than measurements — raising
+  the `gh config get` timeout (forcing it to 1 ms did not reproduce the failure at all) and
+  a barrier against this row's *own* refresher (it synchronises against the wrong process).
+  Both are recorded in the comment so the next reader does not retry them. No production
+  bug: overlapping refreshers on a real machine always share a table, so a purge can only
+  remove what that table does not name.
+
 ### Changed
 
 - **gh account routing keys on the repo remote, and pins the account instead of hoping.**
