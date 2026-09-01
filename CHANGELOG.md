@@ -51,6 +51,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one is covered the moment it is written.
 
 ### Changed
+
+- **gh account routing keys on the repo remote, and pins the account instead of hoping.**
+  `_update_gh_config` asked `$PWD` first (`~/quantivly/**`, then the `origin` remote), which
+  is exactly the signal #67 moved git identity *off* — so gh and git could disagree about
+  the same repository: a quantivly clone outside `~/quantivly/` got the personal account
+  from gh and the work identity from git. It now uses the same `_gh_route_for` `gh-doctor`
+  uses (one implementation, so the oracle cannot drift from the thing it checks), consults
+  **every** remote like git's `hasconfig:remote.*.url`, and exports `GH_TOKEN` — because
+  `GH_CONFIG_DIR` alone leaves the host-keyed keyring to choose, and it chooses work.
+
+  Every directory now pins an account explicitly. Outside a repo the routing falls through
+  to `GH_ACCOUNT_DEFAULT_DIR` (personal), which is what git identity does there too, and is
+  deliberately silent: `$HOME` is a shell's normal resting state, and warning on every `cd`
+  into a non-repo directory is how a warning stops being read. The loud path is reserved
+  for states where nothing *can* be pinned — no default configured, an unusable routing
+  table, or a routed account with no cached token — printed at most once per distinct
+  message per shell, and never before the first prompt (output during initialisation lands
+  inside p10k's instant-prompt warning box).
+
+  The token cache is keyed by config-dir basename (`gh-quantivly`, `gh-personal`) rather
+  than by nickname, so the routing table is the single place an account is named.
+  `gh-refresh-tokens` and the shell-start background job are both driven by
+  `_gh_configured_dirs` and both delete the old nickname-keyed files, which would otherwise
+  remain as a second, never-refreshed copy of a live credential. The first shell after this
+  lands may report "account NOT pinned" once, before its background refresh completes.
+
+- **Build/test parallelism caps now key on `$HERDR_PANE_ID`, not `$ATRIUM_SESSION`.** An
+  unset gate selects the LOOSE tier, so once Atrium stopped running every agent pane
+  silently got the half-the-cores budget meant for a solo human — the exact
+  over-subscription `zsh/zshrc.buildlimits` exists to prevent, presented as a config file
+  that still looked correct.
 - **`apply-gnome-settings.sh` now says when the machine-specific layer overrides the portable
   one** (`scripts/apply-gnome-settings.sh`). Both layers log a plain `✓`, so a `~/.gnome-settings.local`
   line that undoes a setting three lines after the portable layer applied it was invisible: two
@@ -63,6 +94,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace-switch keys are legitimate overrides — and a warning on each would be noise in the
   normal case, which is how a diagnostic becomes one nobody reads. `GNOME_LOCAL_OVERRIDES` makes
   the path injectable so the behaviour can be exercised against a fixture.
+
+### Removed
+- **Atrium coupling in the live shell config.** Atrium is retired (2026-09-01), so
+  `_in_atrium_session()` and the interactive account switchers' early-return that deferred
+  to Atrium's injected `GH_CONFIG_DIR` / `GH_TOKEN` / `GITHUB_PERSONAL_ACCESS_TOKEN` are
+  gone, along with the `atrium()` wind-down guard that stripped `HERDR_*` before exec'ing
+  the binary. The early-return was the risky half: it keyed on `$ATRIUM` or a tmux socket
+  named `*/atrium`, so anything that set either would have left whatever account was
+  inherited, silently, in a shell that now believes it routes by remote.
 
 ### Fixed
 

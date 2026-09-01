@@ -2,7 +2,7 @@
 # Custom statusLine command (~/.claude/settings.json "statusLine").
 #
 # statusLine's JSON stdin is the only documented, stable source for several
-# per-session facts Atrium used to show in its own dashboard: model, effort
+# per-session facts a dedicated agent dashboard would show: model, effort
 # level, context-window usage, rate-limit usage, and running API cost. Hooks
 # carry none of this; the transcript JSONL format is explicitly undocumented/
 # unstable across versions. Confirmed live-reloaded — no restart needed for

@@ -78,10 +78,10 @@ __BACKUP_HOME__/.config/BraveSoftware/*/*/GPUCache
 # biggest churn driver. The auto-updater re-downloads; ~/.claude settings stay.
 __BACKUP_HOME__/.local/share/claude/versions
 # plugin download cache (~1G); plugins re-fetch on demand. ~/.claude is the
-# clauth-era global config surface (post Atrium->Herdr migration); the
-# ~/.claude-work* / ~/.claude-personal dirs are the pre-migration per-account
-# ones, still live until the Atrium wind-down finishes (see
-# ~/herdr-migration-next-steps.md) — drop these once those are retired.
+# clauth-era global config surface; the ~/.claude-work* / ~/.claude-personal
+# dirs are the pre-clauth per-account ones. Listing a path that no longer exists
+# costs nothing and excluding one that reappears costs nothing either, so these
+# stay until the directories are actually deleted.
 __BACKUP_HOME__/.claude/plugins/cache
 __BACKUP_HOME__/.claude-work/plugins/cache
 __BACKUP_HOME__/.claude-work2/plugins/cache

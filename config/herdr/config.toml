@@ -26,7 +26,7 @@ manifest_check = true
 #   1. Claude Code binds ctrl+b to "background this task" — with a ctrl+b prefix
 #      you have to press it twice in every agent pane.
 #   2. tmux's own prefix, for any tmux run inside a pane.
-#   3. Atrium's sessions, during the migration off it.
+#   3. Any pre-herdr agent multiplexer running on its own tmux server.
 # So the prefix lives on f12 and the daily actions are ALSO bound to ordinary
 # chords, mirroring ~/.dotfiles/tmux.conf's root table wherever a habit exists.
 #
@@ -306,8 +306,10 @@ headless_cols = 200
 headless_rows = 50
 
 [worktrees]
-# Deliberately NOT ~/.atrium/worktrees: while Atrium is winding down, neither
-# tool may reclaim the other's trees.
+# herdr's own tree, deliberately separate from any other tool's worktree root:
+# two managers pointed at one directory will reclaim each other's trees. (It was
+# kept off ~/.atrium/worktrees for exactly that reason until Atrium was retired
+# on 2026-09-01.)
 directory = "~/.herdr/worktrees"
 
 [ui]

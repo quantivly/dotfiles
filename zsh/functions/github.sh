@@ -136,9 +136,11 @@ _gh_repo_remotes() {
   _GH_REMOTE_NAMES=(); _GH_REMOTE_URLS=(); _GH_REMOTE_OWNERS=()
   _GH_REMOTE_STATE=no-repo
 
-  command git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 1
-  _GH_REMOTE_STATE=no-remotes
-
+  # One git fork on the common path. This runs from the chpwd hook, so the
+  # obvious `rev-parse --git-dir` guard first would double the cost of every
+  # `cd` for an answer only the empty case needs — `config --get-regexp` exits
+  # non-zero for "not a repo" and for "no such key" alike, so rev-parse is asked
+  # only when there was nothing to parse.
   lines=( ${(f)"$(command git -C "$dir" config --get-regexp '^remote\..*\.url$' 2>/dev/null)"} )
   for line in "${lines[@]}"; do
     [[ -n "$line" ]] || continue      # ${(f)} on empty output yields one blank
@@ -155,7 +157,10 @@ _gh_repo_remotes() {
     fi
   done
 
-  (( ${#_GH_REMOTE_NAMES[@]} > 0 )) || return 1
+  if (( ${#_GH_REMOTE_NAMES[@]} == 0 )); then
+    command git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && _GH_REMOTE_STATE=no-remotes
+    return 1
+  fi
   _GH_REMOTE_STATE=ok
   return 0
 }
@@ -198,12 +203,19 @@ _gh_route_for() {
     fi
   done
 
+  # No repo and no remotes are NOT failures — `$HOME` is the normal resting
+  # state of a shell — but they are also not licence to let the keyring answer.
+  # They fall through to GH_ACCOUNT_DEFAULT_DIR below, which is what git
+  # identity does outside a work repo (the personal `[user]` block). Only with
+  # no default configured does the account become genuinely undetermined, and
+  # only then is it worth saying so. Warning on every `cd` into a non-repo
+  # directory is how the whole mechanism gets tuned out.
+  local why_no_route
   _gh_repo_remotes "$dir"
   case "$_GH_REMOTE_STATE" in
-    no-repo)    _GH_ROUTE_STATE=no-repo
-                _GH_ROUTE_WHY="not a git repository — no remote to route on"; return 1 ;;
-    no-remotes) _GH_ROUTE_STATE=no-remotes
-                _GH_ROUTE_WHY="git repository with no remotes — nothing to route on"; return 1 ;;
+    no-repo)    why_no_route="not a git repository — no remote to route on" ;;
+    no-remotes) why_no_route="git repository with no remotes — nothing to route on" ;;
+    *)          why_no_route="no route matched any remote" ;;
   esac
 
   for entry in "${GH_ACCOUNT_ROUTES[@]}"; do
@@ -224,11 +236,18 @@ _gh_route_for() {
   if [[ -n "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
     _GH_ROUTE_STATE=default
     _GH_ROUTE_DIR="$GH_ACCOUNT_DEFAULT_DIR"
-    _GH_ROUTE_WHY="no route matched any remote — GH_ACCOUNT_DEFAULT_DIR"
+    [[ "$_GH_ROUTE_DIR" == '~'* ]] && _GH_ROUTE_DIR="${HOME}${_GH_ROUTE_DIR#\~}"
+    _GH_ROUTE_WHY="$why_no_route — GH_ACCOUNT_DEFAULT_DIR"
     return 0
   fi
-  _GH_ROUTE_STATE=none
-  _GH_ROUTE_WHY="no route matched any remote, and GH_ACCOUNT_DEFAULT_DIR is unset"
+  # Report which flavour of "nothing to go on" this is: a missing route and a
+  # missing repository have different fixes.
+  case "$_GH_REMOTE_STATE" in
+    no-repo)    _GH_ROUTE_STATE=no-repo ;;
+    no-remotes) _GH_ROUTE_STATE=no-remotes ;;
+    *)          _GH_ROUTE_STATE=none ;;
+  esac
+  _GH_ROUTE_WHY="$why_no_route, and GH_ACCOUNT_DEFAULT_DIR is unset"
   return 1
 }
 

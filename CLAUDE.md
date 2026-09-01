@@ -532,6 +532,30 @@ account. Like `hasconfig`, **any** remote can match, not just `origin`: in a for
 origin is the personal fork and upstream is the work repo, and matching origin alone would
 hand that repo the personal account while git signs its commits as work.
 
+The `chpwd` hook (`_update_gh_config` in `zshrc.company`) uses the same
+`_gh_route_for` the doctor does — one implementation, so the oracle cannot drift from the
+thing it checks — then **pins** the account by exporting `GH_TOKEN` from
+`~/.cache/gh-token-cache/<config-dir-basename>`. It routed on `$PWD` first until
+2026-09-01, which let gh and git disagree about the same repository: a quantivly clone
+outside `~/quantivly/` got the personal account from gh and the work identity from git.
+
+**Every directory now pins an account explicitly; the keyring never decides.** Outside a
+repo — `$HOME` is the normal resting state of a shell — the routing falls through to
+`GH_ACCOUNT_DEFAULT_DIR` (personal), which is what git identity does there too. That is
+deliberately *not* treated as a failure: warning on every `cd` into a non-repo directory is
+how a warning stops being read. The loud path is reserved for the states where nothing can
+be pinned — no default configured, an unusable table, or a routed account with no cached
+token — and even then the message is printed **at most once per distinct message per
+shell**, and never before the first prompt (output during initialization lands inside
+p10k's instant-prompt warning box, the same reason the live-config guard defers).
+
+The token cache is keyed by the config dir's **basename** (`gh-quantivly`, `gh-personal`),
+not by a nickname, so the routing table is the single place an account is named — adding a
+route needs no matching edit to the refresher, and a stale nickname cannot address the
+wrong dir. `gh-refresh-tokens` and the shell-start background job are both driven by
+`_gh_configured_dirs`, and both delete the pre-2026-09-01 nickname files, which would
+otherwise sit there as a second, never-refreshed copy of a live credential.
+
 ```bash
 gh-doctor                 # this directory
 gh-doctor --offline       # config only — every network answer marked NOT CHECKED
@@ -569,8 +593,18 @@ Traps this area has, each of which produced a green tick or a confident wrong an
 - **An empty answer is never agreement.** A failed or timed-out API call is a ✗ with the
   error, and every comparison that depended on it is reported as *skipped*, never passed.
   `--offline` marks its answers NOT CHECKED for the same reason.
+- **`local` outside a function is an error in zsh**, and the shell-start refresher was an
+  inline `{ … } &!` block — so the error went to a backgrounded subshell's stderr where
+  nobody sees it, the cache stayed empty, and every directory reported "account NOT
+  pinned". It is a function now. (Writing a credential out of dynamically-scoped globals
+  would have been the other way to get that wrong.)
+- **A `chpwd` hook cannot afford a `gh` fork.** The doctor may spend ~50 ms per config dir
+  asking gh what it declares; the hook may not, so it reads the cache file directly and
+  `_gh_repo_remotes` was reduced to a single `git` fork on the common path — `git config
+  --get-regexp` exits non-zero for "not a repo" and "no such key" alike, so the `rev-parse`
+  that tells them apart runs only when there was nothing to parse.
 
-State table: `scripts/test-gh-routing.sh` (100 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (105 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make
@@ -756,6 +790,13 @@ Gotchas, in the order they bite:
   `herdr agent explain --file <screen> --agent claude` accepts the same pane's screen (`state: idle`,
   rule `live_prompt_box`). `herdr agent explain <pane>` is the first diagnostic; `agent_not_found`
   means nothing was detected at all. Reported upstream (drafts: `~/herdr-eval-upstream/`).
+- **The build/test parallelism caps key on `$HERDR_PANE_ID`** (`zsh/zshrc.buildlimits`), and
+  that gate was `$ATRIUM_SESSION` until 2026-09-01. An *unset* variable selects the LOOSE
+  tier, so the day Atrium stopped running, every agent pane silently got the half-the-cores
+  budget meant for a solo human — the exact over-subscription the file exists to prevent,
+  arriving as a config file that still looked correct. Any migration that moves the marker
+  variable has this shape: check what an unset gate falls back to before assuming the old
+  name is merely dead. `build-limits` prints which tier is active.
 - **The sidebar publisher needs THREE things wired, and `./install` only does one.**
   `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
   also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo), and that

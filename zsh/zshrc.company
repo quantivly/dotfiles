@@ -93,8 +93,12 @@ qn() {
 # A dir is "work" if it lives under the canonical ~/quantivly tree (fast path)
 # OR its origin remote belongs to the quantivly GitHub org. The remote check
 # mirrors the git identity routing (hasconfig in ~/.gitconfig.local), so the
-# gh/Claude account follows the repo anywhere it's checked out — Atrium
-# worktrees, /tmp clones, etc. — not just under ~/quantivly/.
+# gh/Claude account follows the repo anywhere it's checked out — herdr worktrees
+# under ~/.herdr/worktrees/, /tmp clones, etc. — not just under ~/quantivly/.
+#
+# Still used by the non-gh work-context consumers below. gh account routing no
+# longer goes through it: it consults $PWD first, and $PWD is exactly the signal
+# #67 moved git identity OFF. See _update_gh_config.
 _q_is_work_context() {
     case "$PWD" in
         "$HOME"/quantivly/*|"$HOME"/quantivly|"${Q_DEV_CODE_ROOT}"/*|"${Q_DEV_CODE_ROOT}")
@@ -108,19 +112,6 @@ _q_is_work_context() {
     return 1
 }
 
-# _in_atrium_session is true inside an Atrium-managed session
-# (github.com/ZviBaratz/atrium), where GH_CONFIG_DIR / CLAUDE_CONFIG_DIR /
-# GITHUB_PERSONAL_ACCESS_TOKEN are injected per-repo by Atrium and are
-# authoritative. The interactive switchers below must defer to that env — never
-# re-derive (and clobber) it from $PWD, which is a worktree under ~/.atrium/ that
-# _q_is_work_context can misclassify. Prefer Atrium's ATRIUM marker; fall back to
-# the tmux socket name so it also works on Atrium builds predating the marker.
-_in_atrium_session() {
-    [[ -n "$ATRIUM" ]] && return 0
-    case "${TMUX%%,*}" in */atrium|*/claudesquad) return 0 ;; esac
-    return 1
-}
-
 #==============================================================================
 # GitHub CLI Multi-Account Switching
 #==============================================================================
@@ -129,125 +120,178 @@ _in_atrium_session() {
 #   GH_CONFIG_DIR=~/.config/gh-quantivly gh auth login)
 
 if [[ -d "$HOME/.config/gh-quantivly" ]]; then
-    # Cache tokens for GH_TOKEN override and GITHUB_PERSONAL_ACCESS_TOKEN.
-    # Reads from ~/.cache/gh-token-cache/ synchronously (sub-ms),
-    # background job refreshes cache on every shell start.
-    # Manual refresh: gh-refresh-tokens
-    # NOTE: Must use --user to get the correct per-user keyring entry;
-    # gh auth token without --user returns a shared default that may be wrong.
-    _gh_token_cache="${HOME}/.cache/gh-token-cache"
-    if [[ -r "$_gh_token_cache/quantivly" ]]; then
-        _CACHED_GH_QUANTIVLY_TOKEN="$(<"$_gh_token_cache/quantivly")"
-    fi
-    if [[ -r "$_gh_token_cache/personal" ]]; then
-        _CACHED_GH_PERSONAL_TOKEN="$(<"$_gh_token_cache/personal")"
-    fi
-    unset _gh_token_cache
-
-    # Routing table for gh-doctor (zsh/functions/github.sh). Data only — no
-    # behaviour here reads it yet, so adding it changes nothing about which
-    # account any shell uses; it tells the doctor what the answer is SUPPOSED
-    # to be so it can compare that against an actual API call.
+    # Routing table for zsh/functions/github.sh (_gh_route_for, gh-doctor, the
+    # chpwd hook below). Keyed on the repo's GitHub OWNER, matching the git
+    # identity rules in ~/.gitconfig.local
+    # (`hasconfig:remote.*.url:...quantivly/**`, #67) so the two cannot disagree
+    # about which repository is work.
     #
-    # Keyed on the repo's GitHub owner, matching the git identity rules in
-    # ~/.gitconfig.local (`hasconfig:remote.*.url:...quantivly/**`, #67), so the
-    # two cannot disagree about which repo is work. Double-quoted: a
-    # single-quoted "$HOME/..." would be a literal path that never exists, and
-    # the route would silently never fire (gh-doctor reports that state).
+    # Double-quoted deliberately: a single-quoted "$HOME/..." is a literal path
+    # that never exists, and the route then silently never fires. gh-doctor
+    # reports that state, but only because it checks the whole table rather than
+    # the entry that happened to match.
+    #
+    # Declared inside the opt-in gate, not above it: a route naming a config dir
+    # that does not exist on this machine is a permanent ✗ in gh-doctor, and a
+    # checker that is permanently red is one nobody reads.
     GH_ACCOUNT_ROUTES=( "quantivly=$HOME/.config/gh-quantivly" )
 
-    # Personal gh lives in its own single-account config dir when present
-    # (~/.config/gh-personal), isolating it from the promiscuous default
-    # ~/.config/gh whose active account gets flipped globally by `gh auth switch`.
-    # Empty => fall back to the default. Used by both the personal-token cache
-    # below and the else-branch of _update_gh_config, so a polluted default can
-    # neither be cached as the personal token nor selected in personal dirs.
+    # Everything the routes do not match. The isolated single-account personal
+    # dir when it exists (immune to `gh auth switch` flipping the shared
+    # default's active user); otherwise EMPTY — with no dir to name, the remote
+    # genuinely does not determine an account, and _update_gh_config says so
+    # rather than having a default invented for it.
     if [[ -d "$HOME/.config/gh-personal" ]]; then
-        _GH_PERSONAL_CONFIG_DIR="$HOME/.config/gh-personal"
+        GH_ACCOUNT_DEFAULT_DIR="$HOME/.config/gh-personal"
     else
-        _GH_PERSONAL_CONFIG_DIR=""
-    fi
-    # Same value under the name gh-doctor reads. Empty stays empty: with no
-    # isolated personal dir the remote genuinely does not determine an account
-    # for a non-quantivly repo, and the doctor should say so rather than have a
-    # default invented for it.
-    GH_ACCOUNT_DEFAULT_DIR="$_GH_PERSONAL_CONFIG_DIR"
-
-    # Background refresh of GH token cache (non-blocking)
-    if command -v gh &>/dev/null; then
-        {
-            _dir="${HOME}/.cache/gh-token-cache"
-            mkdir -p "$_dir" && chmod 700 "$_dir"
-            _user="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh config get -h github.com user 2>/dev/null)"
-            if [[ -n "$_user" ]]; then
-                _token="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token --user "$_user" 2>/dev/null)"
-                if [[ -n "$_token" ]]; then
-                    printf '%s' "$_token" > "$_dir/quantivly"
-                    chmod 600 "$_dir/quantivly"
-                fi
-            fi
-            # Personal token from the isolated personal config dir when present
-            # (~/.config/gh-personal), else the default ~/.config/gh. Consumed by
-            # GITHUB_PERSONAL_ACCESS_TOKEN in personal dirs (e.g. Claude Code's
-            # github MCP plugin); gh itself ignores that var. Pinning the config
-            # dir (never inheriting an ambient GH_CONFIG_DIR, and never trusting
-            # the polluted default) keeps the wrong account's token out of the
-            # personal cache.
-            _puser="$(GH_CONFIG_DIR="$_GH_PERSONAL_CONFIG_DIR" gh config get -h github.com user 2>/dev/null)"
-            if [[ -n "$_puser" ]]; then
-                _ptoken="$(GH_CONFIG_DIR="$_GH_PERSONAL_CONFIG_DIR" gh auth token --user "$_puser" 2>/dev/null)"
-                if [[ -n "$_ptoken" ]]; then
-                    printf '%s' "$_ptoken" > "$_dir/personal"
-                    chmod 600 "$_dir/personal"
-                fi
-            fi
-        } &!
+        GH_ACCOUNT_DEFAULT_DIR=""
     fi
 
-    _update_gh_config() {
-        # Inside an Atrium session, Atrium injected the authoritative per-repo
-        # GH_CONFIG_DIR and token at session birth; never override or unset it
-        # based on $PWD (a worktree under ~/.atrium/ that _q_is_work_context can
-        # misclassify, which is what caused the wrong-account churn).
-        _in_atrium_session && return
-        if _q_is_work_context; then
-            export GH_CONFIG_DIR="$HOME/.config/gh-quantivly"
-            if [[ -n "$_CACHED_GH_QUANTIVLY_TOKEN" ]]; then
-                export GH_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
-                export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_QUANTIVLY_TOKEN"
-            else
-                # Cache miss (e.g. a fresh shell before the background refresh
-                # lands, or a cleared cache): clear both so a personal GH_TOKEN
-                # from a prior dir can't pin the CLI to the personal account in
-                # a work context (mirror of the personal branch below).
-                unset GH_TOKEN
-                unset GITHUB_PERSONAL_ACCESS_TOKEN
-            fi
-        else
-            # Personal: prefer the isolated single-account gh-personal dir (immune
-            # to the shared default's gh-auth-switch churn); else the default. Pin
-            # the account with GH_TOKEN too — GH_CONFIG_DIR alone still authenticates
-            # through the shared keyring default (see docs/TROUBLESHOOTING.md), so
-            # export the cached personal token as GH_TOKEN (for the gh CLI) and
-            # GITHUB_PERSONAL_ACCESS_TOKEN (for env-reading tools like the github
-            # MCP); clear both when nothing is cached so no work token leaks in.
-            if [[ -n "$_GH_PERSONAL_CONFIG_DIR" ]]; then
-                export GH_CONFIG_DIR="$_GH_PERSONAL_CONFIG_DIR"
-            else
-                unset GH_CONFIG_DIR
-            fi
-            if [[ -n "$_CACHED_GH_PERSONAL_TOKEN" ]]; then
-                export GH_TOKEN="$_CACHED_GH_PERSONAL_TOKEN"
-                export GITHUB_PERSONAL_ACCESS_TOKEN="$_CACHED_GH_PERSONAL_TOKEN"
-            else
-                unset GH_TOKEN
-                unset GITHUB_PERSONAL_ACCESS_TOKEN
-            fi
-        fi
+    # The account is chosen by the repo's REMOTE and pinned with $GH_TOKEN.
+    # ------------------------------------------------------------------------
+    # Two independent decisions, and each was previously made the wrong way:
+    #
+    # WHICH ACCOUNT — by remote (via GH_ACCOUNT_ROUTES above and _gh_route_for
+    # in zsh/functions/github.sh), not by $PWD. $PWD is exactly the signal #67
+    # moved git identity off, and keeping it here meant gh and git could
+    # disagree about the same repository: a quantivly clone outside ~/quantivly/
+    # got the personal account from gh and the work identity from git. The
+    # routing now consults EVERY remote, like git's `hasconfig:remote.*.url`, so
+    # a fork whose upstream is the work repo routes the way git already signs
+    # it.
+    #
+    # HOW IT IS APPLIED — GH_CONFIG_DIR is not enough, and never was. gh keys
+    # its tokens in the system keyring by HOST, so a config dir declaring one
+    # account authenticates as whatever the shared default is; here that default
+    # is the WORK account, in every directory. Only $GH_TOKEN actually pins it.
+    # Run `gh-doctor` to see declared vs effective for the current directory.
+    #
+    # The cache is keyed by the config dir's BASENAME (gh-quantivly,
+    # gh-personal) rather than by a nickname, so the routing table is the single
+    # place an account is named — a route added there needs no matching edit
+    # here, and a stale nickname cannot silently address the wrong dir.
+    _gh_token_cache="${HOME}/.cache/gh-token-cache"
+
+    # Background refresh (non-blocking). Driven by the routing table, so it
+    # refreshes exactly the dirs routing can select. --user is mandatory:
+    # `gh auth token` without it returns the shared keyring default, which is
+    # the very thing being worked around.
+    #
+    # A FUNCTION, not an inline `{ ... } &!` block: `local` outside a function
+    # is an error in zsh, and the error goes to a backgrounded subshell's
+    # stderr where nobody sees it — the cache simply stayed empty, and every
+    # directory then reported "account NOT pinned". Writing a credential from
+    # dynamically-scoped globals would have been the other way to get it wrong.
+    _gh_refresh_token_cache_bg() {
+        local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY
+        local cache="${HOME}/.cache/gh-token-cache" d u t
+        mkdir -p "$cache" && chmod 700 "$cache"
+        _gh_configured_dirs
+        for d in "${_GH_CONFIGURED_DIRS[@]}"; do
+            [[ -d "$d" ]] || continue
+            u="$(GH_CONFIG_DIR="$d" gh config get -h github.com user 2>/dev/null)"
+            [[ -n "$u" ]] || continue
+            t="$(GH_CONFIG_DIR="$d" gh auth token --user "$u" 2>/dev/null)"
+            [[ -n "$t" ]] || continue
+            printf '%s' "$t" > "$cache/${d:t}"
+            chmod 600 "$cache/${d:t}"
+        done
+        # Nickname-keyed files from before the basename scheme. Left in place
+        # they are a second, never-refreshed copy of a live credential.
+        rm -f "$cache/quantivly" "$cache/personal"
     }
+    if command -v gh &>/dev/null && (( $+functions[_gh_configured_dirs] )); then
+        _gh_refresh_token_cache_bg &!
+    fi
+
+    # Select and pin the account for the current directory.
+    #
+    # Never prints during shell initialisation: p10k's instant prompt turns any
+    # output there into a warning box. The first-prompt hook at the bottom of
+    # this block flushes whatever the startup call recorded — the same deferral
+    # the dotfiles live-config guard uses, for the same reason.
+    _update_gh_config() {
+        local _GH_ROUTE_STATE _GH_ROUTE_DIR _GH_ROUTE_WHY _tokfile _tok
+        _GH_ROUTE_MSG=""
+
+        if ! (( $+functions[_gh_route_for] )); then
+            # zsh/functions/github.sh did not load. Choosing an account from a
+            # routing table that is not there would mean choosing it from the
+            # keyring, which is the defect; say so and pin nothing.
+            unset GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+            _GH_ROUTE_MSG="zsh/functions/github.sh is not loaded — account NOT routed; gh will use the keyring default"
+            _gh_route_report
+            return
+        fi
+
+        _gh_route_for "$PWD"
+        case "$_GH_ROUTE_STATE" in
+            matched|default) ;;
+            bad-table)
+                unset GH_CONFIG_DIR GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+                _GH_ROUTE_MSG="GH_ACCOUNT_ROUTES is unusable ($_GH_ROUTE_WHY) — account NOT routed"
+                _gh_route_report
+                return ;;
+            *)
+                # The remote determines nothing here (no repo, no remotes, no
+                # matching route and no default). Clearing GH_TOKEN leaves the
+                # keyring to answer, and it answers WORK — so this is stated
+                # rather than left to look like a personal-account directory.
+                unset GH_CONFIG_DIR GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+                _GH_ROUTE_MSG="no GitHub account is determined here ($_GH_ROUTE_WHY) — gh will use the keyring default, which is not necessarily the one you want"
+                _gh_route_report
+                return ;;
+        esac
+
+        export GH_CONFIG_DIR="$_GH_ROUTE_DIR"
+        _tokfile="${_gh_token_cache}/${_GH_ROUTE_DIR:t}"
+        if [[ -r "$_tokfile" ]]; then
+            _tok="$(<"$_tokfile")"
+        else
+            _tok=""
+        fi
+        if [[ -n "$_tok" ]]; then
+            export GH_TOKEN="$_tok"
+            # For env-reading tools (Claude Code's github MCP plugin); gh itself
+            # ignores this one.
+            export GITHUB_PERSONAL_ACCESS_TOKEN="$_tok"
+        else
+            # GH_CONFIG_DIR alone does NOT select the account, so this is not a
+            # partial success — it is the keyring deciding. A cache miss is
+            # normally transient (the background refresh above lands within a
+            # second or two of shell start); a persistent one means that account
+            # needs `gh auth login`.
+            unset GH_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN
+            _GH_ROUTE_MSG="no cached token for ${_GH_ROUTE_DIR:t} — account NOT pinned; run gh-refresh-tokens (or gh-doctor)"
+        fi
+        _gh_route_report
+    }
+
+    # Print a routing problem at most once per distinct message, and never
+    # before the first prompt. Repeating the same line on every `cd` inside one
+    # repository is how a warning becomes invisible.
+    _gh_route_report() {
+        [[ -n "$_GH_ROUTE_MSG" ]] || return 0
+        (( _GH_ROUTE_INTERACTIVE )) || return 0
+        [[ "$_GH_ROUTE_MSG" == "$_GH_ROUTE_LAST_MSG" ]] && return 0
+        _GH_ROUTE_LAST_MSG="$_GH_ROUTE_MSG"
+        print -u2 -- "gh: $_GH_ROUTE_MSG"
+    }
+
     autoload -U add-zsh-hook
     add-zsh-hook chpwd _update_gh_config
-    _update_gh_config  # Run once at shell startup
+    _update_gh_config  # Run once at shell startup (silent — see below)
+
+    # Release the startup warning at the first prompt, then unhook. Deferred for
+    # the same reason as the dotfiles live-config guard: output during
+    # initialisation lands inside p10k's instant-prompt warning box.
+    _gh_route_first_prompt() {
+        _GH_ROUTE_INTERACTIVE=1
+        _gh_route_report
+        add-zsh-hook -d precmd _gh_route_first_prompt
+        unfunction _gh_route_first_prompt
+    }
+    add-zsh-hook precmd _gh_route_first_prompt
 fi
 
 #==============================================================================
@@ -358,119 +402,71 @@ qcache-refresh() {
   echo "Environment variables updated."
 }
 
-# gh-refresh-tokens - Force refresh of GH token cache and reload env vars
+# gh-refresh-tokens - Force refresh of the GH token cache and re-apply it here
+#
+# Same work the background job at shell start does, synchronously and with
+# output. Driven by GH_ACCOUNT_ROUTES, so it covers exactly the config dirs
+# routing can select and needs no edit when a route is added.
+#
+# --user is not optional: `gh auth token` without it returns the shared,
+# host-keyed keyring default, which on this machine is the WORK account
+# regardless of GH_CONFIG_DIR. Caching that as the personal token is how the
+# wrong credential gets pinned deliberately. See `gh-doctor`.
 gh-refresh-tokens() {
   if ! command -v gh &>/dev/null; then
     echo "Error: gh CLI not found in PATH" >&2
     return 1
   fi
-  local _dir="${HOME}/.cache/gh-token-cache"
-  mkdir -p "$_dir" && chmod 700 "$_dir"
-  local _user
-  _user="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh config get -h github.com user 2>/dev/null)"
-  if [[ -z "$_user" ]]; then
-    echo "Error: Could not determine Quantivly GH username" >&2
+  if ! (( $+functions[_gh_configured_dirs] )); then
+    echo "Error: zsh/functions/github.sh is not loaded — no routing table to refresh from" >&2
     return 1
   fi
-  local _token
-  _token="$(GH_CONFIG_DIR="$HOME/.config/gh-quantivly" gh auth token --user "$_user" 2>/dev/null)"
-  if [[ -n "$_token" ]]; then
-    printf '%s' "$_token" > "$_dir/quantivly"
-    chmod 600 "$_dir/quantivly"
-    _CACHED_GH_QUANTIVLY_TOKEN="$_token"
-    echo "Cached token for user: $_user"
-  else
-    echo "Error: Could not retrieve token for user $_user" >&2
+  local -a _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY
+  local dir user token cached=0 failed=0
+  local cache="${HOME}/.cache/gh-token-cache"
+  mkdir -p "$cache" && chmod 700 "$cache"
+
+  _gh_configured_dirs
+  if (( ${#_GH_CONFIGURED_DIRS[@]} == 0 )); then
+    echo "Error: GH_ACCOUNT_ROUTES and GH_ACCOUNT_DEFAULT_DIR are both empty" >&2
     return 1
   fi
-  # Personal token from the isolated personal config dir when present
-  # (~/.config/gh-personal), else the default. Pinning the config dir (never
-  # inheriting an ambient GH_CONFIG_DIR from a work context, never trusting the
-  # promiscuous default) keeps the Quantivly token out of the personal cache.
-  local _puser
-  _puser="$(GH_CONFIG_DIR="${_GH_PERSONAL_CONFIG_DIR}" gh config get -h github.com user 2>/dev/null)"
-  if [[ -n "$_puser" ]]; then
-    local _ptoken
-    _ptoken="$(GH_CONFIG_DIR="${_GH_PERSONAL_CONFIG_DIR}" gh auth token --user "$_puser" 2>/dev/null)"
-    if [[ -n "$_ptoken" ]]; then
-      printf '%s' "$_ptoken" > "$_dir/personal"
-      chmod 600 "$_dir/personal"
-      _CACHED_GH_PERSONAL_TOKEN="$_ptoken"
-      echo "Cached personal token for user: $_puser"
+
+  for dir in "${_GH_CONFIGURED_DIRS[@]}"; do
+    if [[ ! -d "$dir" ]]; then
+      echo "  ✗ ${dir/#$HOME/~}: no such directory (fix GH_ACCOUNT_ROUTES)" >&2
+      failed=$((failed + 1))
+      continue
     fi
-  fi
-  # Re-apply env for the current directory context (no cd needed).
-  if command -v _update_gh_config &>/dev/null; then
+    user="$(GH_CONFIG_DIR="$dir" gh config get -h github.com user 2>/dev/null)"
+    if [[ -z "$user" ]]; then
+      echo "  ✗ ${dir/#$HOME/~}: declares no github.com user (gh auth login there?)" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    token="$(GH_CONFIG_DIR="$dir" gh auth token --user "$user" 2>/dev/null)"
+    if [[ -z "$token" ]]; then
+      echo "  ✗ ${dir/#$HOME/~}: no per-user token for $user" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    printf '%s' "$token" > "$cache/${dir:t}"
+    chmod 600 "$cache/${dir:t}"
+    echo "  ✓ ${dir:t}: cached token for $user"
+    cached=$((cached + 1))
+  done
+
+  # Nickname-keyed files from before the basename scheme: a second, never
+  # refreshed copy of a live credential if left behind.
+  rm -f "$cache/quantivly" "$cache/personal"
+
+  # Re-apply for the current directory (no cd needed).
+  if (( $+functions[_update_gh_config] )); then
     _update_gh_config
-    echo "Applied tokens for current directory."
-  else
-    echo "Token refreshed. Run _update_gh_config or cd to apply."
+    echo "Applied for $PWD."
   fi
-}
-
-#==============================================================================
-# Atrium wind-down guard (TEMPORARY — remove when Atrium is decommissioned)
-#==============================================================================
-# Atrium runs its agents on a dedicated tmux server (tmux -L atrium). A tmux
-# server inherits the environment of whichever client first started it, and
-# HERDR_* is not in tmux's default update-environment list, so a stale value
-# persists for the life of the server.
-#
-# Herdr's Claude integration hook (~/.claude/hooks/herdr-agent-state.sh) fires
-# on SessionStart and reports the agent's session ref to $HERDR_PANE_ID. If the
-# Atrium tmux server is ever started from inside a Herdr pane, EVERY Claude in
-# EVERY Atrium session inherits that one pane id and reports to it — pointing
-# Herdr's whole agent view at a single wrong pane.
-#
-# The server is currently clean (started before Herdr was installed; verify with
-# `tmux -L atrium show-environment -g | grep HERDR`). This function keeps it that
-# way by stripping the Herdr context before exec'ing the real binary.
-#
-# A function is required rather than a shim in ~/.local/bin: mise's Go bin dir
-# precedes ~/.local/bin on PATH, so a script there would not shadow atrium.
-# Functions are resolved before PATH, so this always wins. `command atrium`
-# bypasses it deliberately.
-#
-# REMOVE THIS BLOCK once `atrium ls` is empty and Atrium is retired.
-#
-# Also strips herdmates' teammux shim context: inside a lead pane, $TMUX is
-# faked as "teammux,..." and PATH is prefixed with the shim's bin dir, so an
-# unguarded `atrium` launched from there would send its own `tmux -L atrium`
-# calls into the fake tmux instead of the real one. See herdr-setup-review.md
-# P2-2.
-atrium() {
-  # Resolve the real binary UP FRONT. `env` execs a binary, and `command` is a
-  # shell builtin with no /usr/bin/command on Linux or macOS — `env … command
-  # atrium` therefore fails with "env: 'command': No such file or directory"
-  # (exit 127) and this whole guard silently never runs Atrium at all.
-  local atrium_bin
-  atrium_bin="$(whence -p atrium)" || {
-    print -u2 "atrium: not found on PATH"
-    return 127
-  }
-
-  # Drop ONLY the teammux shim entry. `${PATH#*/teammux/bin:}` is a shortest-
-  # prefix removal: it deletes everything up to and including the shim, so any
-  # entries that happened to precede it are lost too (measured: the shim sits at
-  # position 3 here, so that form silently dropped 3 entries).
-  local clean_path="${PATH}"
-  if [[ "$TMUX" == teammux* ]]; then
-    local -a _ap=("${(@s.:.)PATH}")
-    _ap=("${(@)_ap:#*/teammux/bin}")
-    clean_path="${(j.:.)_ap}"
-  fi
-  env -u HERDR_ENV \
-      -u HERDR_PANE_ID \
-      -u HERDR_SOCKET_PATH \
-      -u HERDR_WORKSPACE_ID \
-      -u HERDR_TAB_ID \
-      -u HERDR_BIN_PATH \
-      -u TMUX \
-      -u TMUX_PANE \
-      -u TEAMMUX_STATE_PATH \
-      -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS \
-      PATH="$clean_path" \
-      "$atrium_bin" "$@"
+  (( failed == 0 )) || return 1
+  (( cached > 0 ))
 }
 
 #==============================================================================

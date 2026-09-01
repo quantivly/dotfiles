@@ -212,15 +212,28 @@ route() {  # route <dir> [table-entry ...]   (default: the one work route)
 }
 check "work remote matches"      "$(route "$R_WORK")" "matched:work"
 check "personal falls to default" "$(route "$R_PERS")" "default:personal"
+# `$HOME` is the normal resting state of a shell, not a fault: with a default
+# configured, no repo and no remotes take it, so the account is still PINNED
+# explicitly and the keyring never decides. Warning on every `cd` into a
+# non-repo directory is how a warning stops being read.
+check "no repo takes the default"    "$(route "$NOTREPO")" "default:personal"
+check "no remotes takes the default" "$(route "$R_NONE")"  "default:personal"
 # The fork case is the reason ALL remotes are consulted: origin is the personal
 # fork, upstream is the work repo, and git identity (hasconfig:remote.*.url)
 # already routes it to work. Matching origin only would split the two.
 check "fork routes on upstream"  "$(route "$R_FORK")" "matched:work"
-check "no remotes"               "$(route "$R_NONE")" "no-remotes:"
-check "not a repository"         "$(route "$NOTREPO")" "no-repo:"
+# ...and with NO default there is genuinely nothing to go on. Each flavour keeps
+# its own state, because "add a route" and "you are not in a repository" are
+# different fixes.
+nodef() { zrun "GH_ACCOUNT_DEFAULT_DIR=''; _gh_route_for '$1'
+                print -r -- \"\$_GH_ROUTE_STATE:\${_GH_ROUTE_DIR:t}\""; }
+check "no remotes, no default"   "$(nodef "$R_NONE")"  "no-remotes:"
+check "not a repo, no default"   "$(nodef "$NOTREPO")" "no-repo:"
+check "unmatched, no default"    "$(nodef "$R_PERS")"  "none:"
 # Remotes exist but none is GitHub: nothing to route on, so the default — not a
 # guess drawn from the one non-GitHub remote.
 check "only a non-GitHub remote"  "$(route "$R_GL")" "default:personal"
+check "and with no default, 'none'" "$(nodef "$R_GL")" "none:"
 check "owner match is case-insensitive" \
       "$(zrun "cd '$TMPROOT'; d=\$(mktemp -d); git -C \$d init -q
                git -C \$d remote add origin git@github.com:AcMe/p.git
@@ -240,9 +253,12 @@ check "a later bad entry is not masked by an earlier match" \
 check "~ in the config dir expands" \
       "$(zrun "GH_ACCOUNT_ROUTES=( 'acme=~/somecfg' ); _gh_route_for '$R_WORK'
                print -r -- \"\${_GH_ROUTE_DIR#\$HOME/}\"")" "somecfg"
-check "no route and no default is 'none', not a guess" \
+check "empty table and no default is 'none', not a guess" \
       "$(zrun "GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_DEFAULT_DIR=''
                _gh_route_for '$R_PERS'; print -r -- \$_GH_ROUTE_STATE")" "none"
+check "~ in GH_ACCOUNT_DEFAULT_DIR expands" \
+      "$(zrun "GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_DEFAULT_DIR='~/defcfg'
+               _gh_route_for '$R_PERS'; print -r -- \"\${_GH_ROUTE_DIR#\$HOME/}\"")" "defcfg"
 
 echo
 echo "=== what gh will use right now ==="
