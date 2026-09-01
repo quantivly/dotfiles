@@ -128,6 +128,31 @@ jobs:
       - name: Run the live-config guard state table
         run: ./scripts/test-dotfiles-guard.sh
 
+  hspawn-test:
+    name: hspawn / hdespawn / hreap State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh and jq
+        run: sudo apt-get update && sudo apt-get install -y zsh jq
+
+      # These three commands create worktrees, type into agent panes and DELETE
+      # worktrees, and every failure found in them so far was silent: a spawn
+      # that returned 0 with its agent parked on a dialog, a registry entry
+      # overwritten without a word, a `--yes` refusal over commits that were
+      # already pushed. The suite puts a recording `herdr` STUB at the front of
+      # PATH for every run — not "no herdr on PATH", because the machine this
+      # code is written on has a real one talking to a live server, and a suite
+      # that relied on absence would pass here and remove a real workspace
+      # there. Needs zsh, git and jq; builds its own git repo with a bare
+      # origin, so no network, no herdr and no real panes.
+      - name: Run the hspawn state table
+        run: ./scripts/test-hspawn.sh
+
   yaml-validation:
     name: YAML Validation
     runs-on: ubuntu-latest
