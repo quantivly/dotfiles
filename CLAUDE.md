@@ -47,7 +47,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 6. **zshrc.herdr** - The herdr agent-workspace layer (portable; split out of
    zshrc.company by DO-555 so herdr can be adopted without the work half)
 7. **zshrc.company** - Work-specific configuration (Quantivly)
-7. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
+8. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
 
 ### Function Modules
 
@@ -57,7 +57,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
 | `zsh/functions/system.sh` | Performance + Utilities + Dotfiles guard + GNOME + Backup + Audit (59 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `dotfiles-doctor`, `dotfiles-work`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
 | `zsh/functions/github.sh` | gh account routing + diagnosis (10 functions) | `gh-doctor` |
-| `zsh/zshrc.herdr` | herdr agent workspaces (14 functions) — **agent-facing**, a human at the keyboard uses the herdr UI and `clauth` instead | `hspawn`, `hdespawn`, `hreap`, `claude`, `herdr-lazy` |
+| `zsh/zshrc.herdr` | herdr agent workspaces (16 functions) — **agent-facing**, a human at the keyboard uses the herdr UI and `clauth` instead | `hspawn`, `hdespawn`, `hreap`, `claude`, `herdr-lazy` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)

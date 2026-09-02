@@ -33,7 +33,7 @@ caioniehues/herdmates
 # This manager itself. NOT on PATH by design (README §Use) and auto-sync is
 # off, so a rebuild restores it only via:
 #   herdr plugin install natori-hrj/herdr-lazy && herdr-lazy restore
-# (the herdr-lazy() shell function in zshrc.company resolves the binary path).
+# (the herdr-lazy() shell function in zshrc.herdr resolves the binary path).
 natori-hrj/herdr-lazy
 
 # Diff review sidebar — the Atrium DIFF/review loop had no herdr equivalent

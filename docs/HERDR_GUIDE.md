@@ -234,7 +234,7 @@ tr '\0' '\n' < /proc/$pid/environ | grep -E '^(TMUX|TMUX_PANE|TEAMMUX_STATE_PATH
 # the command line (UNVERIFIED here — no Mac available; BSD ps may want `-E` instead of `e`).
 ```
 
-The repo already guards the mirror-image hazard for Atrium — `atrium()` in `zsh/zshrc.company`
+The repo already guards the mirror-image hazard for Atrium — `atrium()` in `zsh/zshrc.herdr`
 strips `HERDR_*`, `TMUX` and `TEAMMUX_STATE_PATH` before exec, because a tmux server likewise
 inherits whichever client first started it. Nothing guarded herdr's own server until the unit.
 
@@ -275,7 +275,7 @@ Either way the checkout must be at `~/.dotfiles`: the unit's `ExecStart` is the 
 #    - jq: hspawn / hdespawn / hreap read herdr's JSON replies and refuse to run without it.
 #      Not managed by mise here — `apt install jq` (or brew).
 #    - mise ITSELF: nothing in this repo installs it, and ./install gates its entire tool
-#      section on mise already being present (install:53). No mise means no node/python/bun
+#      section on mise already being present (the mise gate in `install`). No mise means no node/python/bun
 #      and no message saying so. `curl https://mise.run | sh`.
 #    - python3, node, bun: the sidebar publisher AND herdr's own Claude hook need python3; the
 #      Linear plugin runs on node; gh-pr on bun. All three are pinned in .mise.toml, and
@@ -360,7 +360,7 @@ happens without a TUI open. `max_auto_spend = 0` — no unattended pay-as-you-go
 on a Mac — do not assume rotation there until you have watched it happen.
 
 > **The distinction that bites — corrected 2026-08-30.** `clauth start <profile>` spawns the
-> claude *binary*, bypassing the `claude()` shell function in `zsh/zshrc.company`. That function
+> claude *binary*, bypassing the `claude()` shell function in `zsh/zshrc.herdr`. That function
 > adds two things: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, and a launch through
 > `herdmates teammux-launch`, which passes `--settings '{"teammateMode":"tmux"}'` so teammates
 > materialise as herdr *panes* (a detected lead's argv shows exactly that). An earlier version of
@@ -863,7 +863,7 @@ but treat the conflict as expected rather than proven.
 | Agent skill | `~/.claude/skills/herdr/SKILL.md` (`herdr --skill`) |
 | Server unit | `systemd/herdr-server.service` → `~/.config/systemd/user/herdr-server.service` (`systemctl --user enable --now herdr-server.service`; wanted by `graphical-session.target`, survives logout) |
 | Server launcher | `scripts/herdr-server-launch.sh` (`--print-env` shows the environment it builds) |
-| Spawn helpers | `hspawn`, `hdespawn`, `hreap` in `zsh/zshrc.company`; registry `~/.local/state/hspawn/` |
+| Spawn helpers | `hspawn`, `hdespawn`, `hreap` in `zsh/zshrc.herdr`; registry `~/.local/state/hspawn/` |
 | Detection diagnosis | `herdr agent explain <pane>` · `herdr pane process-info --pane <pane>` |
 | Upstream issue drafts | `~/herdr-eval-upstream/` (herdr: teammate detection; herdmates: report-agent bridge) |
 | Plugin list | `config/herdr/plugins/plugins.list` |

@@ -70,13 +70,23 @@ say "herdr runtime dependencies"
 say "${DIM}──────────────────────────${OFF}"
 
 # Not managed by mise, and no version opinion: any jq parses herdr's replies.
+# herdr itself. Nothing in this repo installs it, and every next-step the
+# installer prints invokes it -- so omitting it let this script report "all
+# required dependencies present" on a machine with no herdr at all.
+check herdr    required - \
+      "everything. Install it: curl -fsSL https://herdr.dev/install.sh | sh"
 check jq       required - \
       "hspawn / hdespawn / hreap read herdr's JSON replies and refuse to run"
 check git      required - "worktrees"
+# REQUIRED, not optional: herdr-lazy() resolves its own binary through a
+# python3 one-liner, so without python3 \$root is empty and `herdr-lazy install`
+# dies with env: '/target/release/herdr-lazy': No such file or directory -- an
+# error that names neither python nor herdr-lazy. It also drives the sidebar
+# status-line publisher, which merely stays blank.
+check python3  required python \
+      "herdr-lazy cannot resolve its binary, and the sidebar stays blank"
 check cargo    optional - \
       "the herdmates plugin compiles from source; without Rust it will not install"
-check python3  optional python \
-      "the sidebar status-line publisher; sidebar rows stay empty, silently"
 check node     optional node \
       "the Linear-to-worktree plugin"
 check bun      optional bun \
@@ -88,8 +98,19 @@ if (( ${#WANTED[@]} )); then
         say "  mise is installed. To get the missing ones at the versions we run:"
         say "    ${DIM}mise use -g ${WANTED[*]}${OFF}"
         say ""
-        say "  ${DIM}That writes to YOUR global mise config. This repo's own pins stay${OFF}"
-        say "  ${DIM}in ${MISE_TOML/#$HOME/\~} and are not linked into your setup by --herdr.${OFF}"
+        # On a machine that ran the FULL install, ~/.config/mise/config.toml is a
+        # symlink to this repo's .mise.toml -- so `mise use -g` writes THROUGH it
+        # and edits the repo. Telling such a user their pins are untouched is a
+        # confident wrong answer, so check rather than assert.
+        local_mise="${HOME}/.config/mise/config.toml"
+        if [[ -L "$local_mise" && "$(readlink -f "$local_mise")" == "$(readlink -f "$MISE_TOML")" ]]; then
+            say "  ${YEL}⚠${OFF} Your global mise config is a SYMLINK to ${MISE_TOML/#$HOME/\~}."
+            say "  ${DIM}   'mise use -g' would write through it and edit this repo. Install the${OFF}"
+            say "  ${DIM}   tools some other way, or expect a modified .mise.toml.${OFF}"
+        else
+            say "  ${DIM}That writes to YOUR global mise config. This repo's own pins stay${OFF}"
+            say "  ${DIM}in ${MISE_TOML/#$HOME/\~} and are not linked into your setup by --herdr.${OFF}"
+        fi
     else
         say "  mise is not installed. Versions we run, however you prefer to get them:"
         for w in "${WANTED[@]}"; do say "    ${DIM}${w/@/ }${OFF}"; done
