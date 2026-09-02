@@ -222,18 +222,36 @@ jobs:
           [[ "$n" -eq 0 ]] || { echo "::error::refused but linked $n file(s)"; exit 1; }
           echo "refused with exit $rc and linked nothing."
 
-      - name: Dependency report runs and classifies correctly
+      # Both directions. A runner has no herdr, so the bare script correctly
+      # exits 1 here -- asserting "it runs cleanly" would have been asserting
+      # that herdr is NOT required, which is the opposite of the contract.
+      - name: Dependency report classifies required vs optional
         run: |
-          set -euo pipefail
-          ./scripts/herdr-deps-check.sh
+          set -uo pipefail
           D="$(mktemp -d)"
-          for b in bash sed head tr git dirname; do ln -sf "$(command -v $b)" "$D/$b"; done
-          set +e
-          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/dev/null 2>&1
+          for b in bash sed head tr git dirname python3 jq; do
+            ln -sf "$(command -v $b)" "$D/$b"
+          done
+
+          # No herdr -> required missing -> exit 1.
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/a 2>&1
           rc=$?
-          set -e
-          [[ $rc -eq 1 ]] || { echo "::error::missing required dep should exit 1, got $rc"; exit 1; }
-          echo "exits 1 when a required dependency is absent."
+          [[ $rc -eq 1 ]] || { cat /tmp/a; echo "::error::no herdr should exit 1, got $rc"; exit 1; }
+          grep -q 'herdr' /tmp/a || { echo "::error::herdr not named in the report"; exit 1; }
+
+          # Stub herdr present, node/bun/cargo still absent -> optional only -> exit 0.
+          printf '#!/bin/sh\necho "herdr 0.0.0-stub"\n' > "$D/herdr"
+          chmod +x "$D/herdr"
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/b 2>&1
+          rc=$?
+          [[ $rc -eq 0 ]] || { cat /tmp/b; echo "::error::optional-only should exit 0, got $rc"; exit 1; }
+          grep -q 'All required dependencies present' /tmp/b \
+            || { cat /tmp/b; echo "::error::expected the all-present line"; exit 1; }
+
+          # With no mise it must name versions rather than offer `mise use -g`.
+          grep -q 'however you prefer to get them' /tmp/b \
+            || { cat /tmp/b; echo "::error::mise-absent branch not taken"; exit 1; }
+          echo "exit 1 without herdr, exit 0 with only optional gaps, mise-absent branch OK."
 
   gh-routing-test:
     name: GitHub Account Routing State Table
