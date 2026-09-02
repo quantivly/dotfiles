@@ -176,7 +176,7 @@ whoever launched it**, and every pane, plugin subprocess and agent the server cr
 that snapshot — not the environment of the shell you happen to be typing in.
 
 Launch it from the wrong place and the mistake is copied everywhere. Verified on this machine
-(independent evaluation, 2026-08-30, `~/herdr-eval-findings.md` F1): the live server had been
+(independent evaluation, 2026-08-30, finding F1): the live server had been
 restarted on 2026-08-29 from *inside a herdmates team-lead pane*, so its environment carried
 `HERDR_PANE_ID=w2:p1`, `TMUX=teammux,0,0`, `TEAMMUX_STATE_PATH=…/w2_p1.json`,
 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, herdmates' `HERDR_PLUGIN_STATE_DIR` /
@@ -693,7 +693,7 @@ translates those calls into herdr panes.
 > where a nix wrapper named `.claude-unwrapped` is invisible in the same way. Drafts of the two
 > issues (herdr: recognise `…/claude/versions/<v>`, or trust the hook-reported
 > `agent_session.agent`; herdmates: set `HERDR_AGENT=claude` on the respawned command, or report
-> state through `herdr pane report-agent`) sit in `~/herdr-eval-upstream/` until filed.
+> state through `herdr pane report-agent`) are written but not yet filed.
 
 **Related blind spot:** a pane sitting on Claude's trust dialog is *also* undetected as an agent,
 so it never enters the attention queue and never raises a toast. Since a fresh directory triggers
@@ -759,7 +759,7 @@ Regenerate it after every `herdr update`.
 | Sidebar width ignores the config | `session.json` pins the live width; double-click the divider. |
 | Agent never receives its prompt | It is `blocked` — usually an unanswered trust dialog. |
 | Alt-letter chords dead | See the layout note below. |
-| A pane runs Claude but is not in the sidebar or `herdr agent list` | `herdr agent explain <pane>` says why. If it returns `agent_not_found`, herdr never detected an agent there at all: check `herdr pane process-info --pane <pane>` — a foreground process named like `2.1.251` (Claude's versioned binary, which is what herdmates teammates run as) is not recognised (upstream; drafts in `~/herdr-eval-upstream/`, §9), and a pane on the trust dialog is not detected either. |
+| A pane runs Claude but is not in the sidebar or `herdr agent list` | `herdr agent explain <pane>` says why. If it returns `agent_not_found`, herdr never detected an agent there at all: check `herdr pane process-info --pane <pane>` — a foreground process named like `2.1.251` (Claude's versioned binary, which is what herdmates teammates run as) is not recognised (upstream, drafted but not yet filed — §9), and a pane on the trust dialog is not detected either. |
 | `tmux` prints `teammux: unrecognized verb` | The herdr server was started from inside a team-lead pane and every pane inherits the teammux shim on PATH (§2.4). Restart it through the unit; meanwhile `/usr/bin/tmux` is the real one. |
 | `~/.claude/teams/` fills with team-of-one directories; `$status` on every Claude pane | Same cause: the server hands `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and a fake `TMUX` to everyone (§2.4). |
 
@@ -792,8 +792,10 @@ class §0 is about. Neither matters on Linux; both matter the moment a teammate 
 - **`tab_bar_right`** (`config/herdr/config.toml`) parses `/proc/loadavg` and `/proc/meminfo`.
   There is no `/proc` on macOS, so the widget renders nothing. This file is symlinked to every
   teammate by `install.conf.yaml`.
-- **The server-environment check** (§2.4) reads `/proc/<pid>/environ`, and `hreap`'s memory
-  column reads `/proc/<pid>/status`. On macOS use `ps eww -p <pid>` for the environment
+- **The server-environment check** (§2.4) reads `/proc/<pid>/environ`, and `hreap` reads
+  `/proc/<pid>/status` for its memory column *and* `ps -o etimes` for the process age it falls
+  back to when no transcript is found — BSD `ps` has no `etimes`, so `hreap` needs porting on
+  both counts, not just the one. On macOS use `ps eww -p <pid>` for the environment
   (UNVERIFIED here; BSD `ps` may want `-E`). Both hook scripts — the publisher and herdr's own
   `~/.claude/hooks/herdr-agent-state.sh` — need `python3`.
 
@@ -865,7 +867,7 @@ but treat the conflict as expected rather than proven.
 | Server launcher | `scripts/herdr-server-launch.sh` (`--print-env` shows the environment it builds) |
 | Spawn helpers | `hspawn`, `hdespawn`, `hreap` in `zsh/zshrc.herdr`; registry `~/.local/state/hspawn/` |
 | Detection diagnosis | `herdr agent explain <pane>` · `herdr pane process-info --pane <pane>` |
-| Upstream issue drafts | `~/herdr-eval-upstream/` (herdr: teammate detection; herdmates: report-agent bridge) |
+| Upstream issues | Drafted, not yet filed — herdr: teammate detection; herdmates: report-agent bridge (§9) |
 | Plugin list | `config/herdr/plugins/plugins.list` |
 | Local plugin | `config/herdr/plugins/local/sidebar-icons` |
 | Tool check | `scripts/verify-tools.sh` |

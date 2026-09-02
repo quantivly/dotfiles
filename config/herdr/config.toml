@@ -278,6 +278,28 @@ type = "plugin_action"
 command = "tdi.worktree-from-linear.pick"
 description = "worktree from Linear issue"
 
+# herdr-draft's one action (plugin id `draft`, action id `open`).
+#
+# ADOPTERS: THIS ONE IS A DEAD KEY FOR YOU, and it will not tell you so. Delete
+# the four lines below, or point them at a plugin you actually have. herdr-draft
+# is installed here as `local:~/Projects/herdr-draft` via `herdr plugin link` —
+# an unpublished directory with no repo, so it is deliberately absent from
+# plugins.list and `herdr-lazy install` will never fetch it. Binding an action
+# whose plugin is missing is accepted silently at every layer: `config check`
+# returns ok, `reload-config` returns applied, and alt+n simply does nothing.
+# That is the §0 failure mode, shipped in the config file itself — check it
+# against `herdr plugin action list` on YOUR machine rather than trusting this.
+#
+# The chord choice is worth keeping whatever you bind here: alt+n is
+# protocol-independent (plain ESC + n), free in the [keys] tables above, and zsh
+# leaves ^[n unbound, so nothing in a pane is shadowed. Not prefix+n (next_tab)
+# and not prefix/ctrl+shift+n (new_workspace).
+[[keys.command]]
+key = "alt+n"
+type = "plugin_action"
+command = "draft.open"
+description = "new agent session"
+
 # Popups run through /bin/sh in the FOCUSED PANE's cwd (navigate.rs passes None,
 # popup.rs falls back to the pane cwd), so a bare command name is enough — no
 # `cd` wrapper needed. While a popup is open herdr forwards EVERY key to it,

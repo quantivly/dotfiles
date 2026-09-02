@@ -1010,7 +1010,7 @@ Gotchas, in the order they bite:
   `2.1.251` rather than `claude`, and herdr never consults the Claude manifest — although
   `herdr agent explain --file <screen> --agent claude` accepts the same pane's screen (`state: idle`,
   rule `live_prompt_box`). `herdr agent explain <pane>` is the first diagnostic; `agent_not_found`
-  means nothing was detected at all. Reported upstream (drafts: `~/herdr-eval-upstream/`).
+  means nothing was detected at all. An upstream report is drafted, not yet filed.
 - **The build/test parallelism caps key on `$HERDR_PANE_ID`** (`zsh/zshrc.buildlimits`), and
   that gate was `$ATRIUM_SESSION` until 2026-09-01. An *unset* variable selects the LOOSE
   tier, so the day Atrium stopped running, every agent pane silently got the half-the-cores
