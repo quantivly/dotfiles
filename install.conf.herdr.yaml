@@ -1,0 +1,69 @@
+# Modular herdr install — `./install --herdr` (DO-555)
+# ============================================================================
+# The five links below are the ENTIRE herdr footprint of this repo. The full
+# install.conf.yaml links 18 destinations, among them ~/.zshrc, ~/.gitconfig,
+# ~/.tmux.conf, ~/.p10k.zsh and VS Code's settings.json — a reasonable thing to
+# decline, and declining it should not mean declining herdr.
+#
+# Deliberately ABSENT, and each omission is a decision:
+#
+#   clean:            the full config cleans ~ and ~/.config of dead symlinks.
+#                     Harmless there, out of scope here: a modular install has
+#                     no business tidying directories it was not asked about.
+#   ~/.zshrc          NOT linked. The shell layer (hspawn/hdespawn/hreap, the
+#                     claude and herdr-lazy wrappers) lives in zsh/zshrc.herdr
+#                     and the adopter sources that one line from their OWN
+#                     shell rc. `./install --herdr` prints the line.
+#   ~/.zshrc.local,   templates the full install creates. A modular adopter
+#   ~/.gitconfig.local  already has their own.
+#   mise config       linking ~/.config/mise/config.toml would pin ~25 tools
+#                     and override whatever node/python they already run.
+#                     scripts/herdr-deps-check.sh reports instead of imposing.
+#   GNOME, XDG, TPM,  nothing to do with herdr.
+#   backup, forgit
+#
+# The systemd reconcile IS here, because this config links a unit and a linked
+# unit is not an enabled one — see the note in install.conf.yaml.
+
+- defaults:
+    link:
+      relink: true
+      create: true
+      backup: true
+    shell:
+      stdout: true
+      stderr: true
+
+- link:
+    # The keymap and UI.
+    ~/.config/herdr/config.toml: config/herdr/config.toml
+
+    # Declared plugin set, read by herdr-lazy. These are symlinks INTO the repo,
+    # so `herdr-lazy sync`/`update` write through to the working tree and a
+    # plugin refresh shows up as a modified plugins.lock — same as the full
+    # install, and the same reason.
+    ~/.config/herdr/plugins/config/herdr-lazy/plugins.list: config/herdr/plugins/plugins.list
+    ~/.config/herdr/plugins/config/herdr-lazy/plugins.lock: config/herdr/plugins/plugins.lock
+
+    # Publishes model / effort / context into the herdr agent sidebar, and
+    # doubles as Claude Code's own status line. Linking it is not enough: it
+    # must also be registered as `statusLine` in ~/.claude/settings.json, which
+    # is user-level and not in this repo. `./install --herdr` prints the JSON.
+    ~/.claude/hooks/session-statusline.sh: claude/hooks/session-statusline.sh
+
+    # The server as a declared service, run from a clean environment rather than
+    # inheriting whichever shell last started it. ExecStart is
+    # %h/.dotfiles/scripts/herdr-server-launch.sh, so this unit only works if the
+    # checkout is at ~/.dotfiles — `./install --herdr` refuses otherwise rather
+    # than linking a unit whose ExecStart does not exist.
+    ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
+
+- shell:
+    - [git submodule update --init --recursive dotbot, Installing dotbot]
+    - |
+      # A LINKED unit is not a RECONCILED one — see install.conf.yaml for the
+      # full reasoning. Gated the same way: no-op without a user manager, and it
+      # only ever reconciles a unit that is already enabled.
+      if [ -f scripts/reconcile-systemd-units.sh ]; then
+        bash scripts/reconcile-systemd-units.sh
+      fi

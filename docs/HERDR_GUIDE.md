@@ -247,6 +247,26 @@ inherits whichever client first started it. Nothing guarded herdr's own server u
 An earlier version of this guide jumped straight to `herdr update` and never said how to get
 any of this in the first place. Full sequence:
 
+**Pick a path first.** `./install --herdr` (DO-555) links only the five destinations that
+are herdr — `config.toml`, `plugins.list`, `plugins.lock`, the statusline hook, the systemd
+unit — and leaves your `~/.zshrc`, `~/.gitconfig`, `~/.tmux.conf`, `~/.p10k.zsh` and VS Code
+settings alone. That is the right path for anyone adopting herdr rather than adopting this
+repo, and it is what the team-facing write-up documents. The bare `./install` below is the
+full 18-link version, correct only if you want this whole configuration.
+
+Two differences that matter if you take the modular path:
+
+- **The shell layer is not linked.** Add `[ -f ~/.dotfiles/zsh/zshrc.herdr ] && source
+  ~/.dotfiles/zsh/zshrc.herdr` to your own rc. That file is self-contained apart from
+  `confirm` (`zsh/functions/system.sh`), and it is where `hspawn`/`hdespawn`/`hreap`, the
+  `claude` team-lead wrapper and `herdr-lazy` live.
+- **mise is not configured for you**, so step 0's `python3`/`node`/`bun` are yours to
+  provide. `scripts/herdr-deps-check.sh` says what is missing, what each one costs, and —
+  if you have mise — the exact `mise use -g` line at the versions pinned here.
+
+Either way the checkout must be at `~/.dotfiles`: the unit's `ExecStart` is the absolute
+`%h/.dotfiles/scripts/herdr-server-launch.sh`.
+
 ```bash
 # 0. Prerequisites the earlier version of this list left implicit. Each one strands a step below.
 #    - rustup (https://rustup.rs): herdmates is compiled by its plugin build hook
@@ -254,6 +274,9 @@ any of this in the first place. Full sequence:
 #      cargo comes from ~/.cargo/bin (see the comment in .mise.toml).
 #    - jq: hspawn / hdespawn / hreap read herdr's JSON replies and refuse to run without it.
 #      Not managed by mise here — `apt install jq` (or brew).
+#    - mise ITSELF: nothing in this repo installs it, and ./install gates its entire tool
+#      section on mise already being present (install:53). No mise means no node/python/bun
+#      and no message saying so. `curl https://mise.run | sh`.
 #    - python3, node, bun: the sidebar publisher AND herdr's own Claude hook need python3; the
 #      Linear plugin runs on node; gh-pr on bun. All three are pinned in .mise.toml, and
 #      ./install runs `mise install`, so step 1 provides them.

@@ -10,6 +10,25 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${BASEDIR}"
 
+# --herdr: install ONLY the herdr layer (DO-555). The full config links 18
+# destinations including ~/.zshrc, ~/.gitconfig, ~/.tmux.conf and VS Code's
+# settings.json; adopting herdr should not require handing all of that over.
+# Parsed out of "$@" here because everything left in "$@" is forwarded to dotbot,
+# which would reject an unknown flag.
+HERDR_ONLY=0
+_args=()
+for _a in "$@"; do
+    case "$_a" in
+        --herdr) HERDR_ONLY=1 ;;
+        *)       _args+=("$_a") ;;
+    esac
+done
+set -- ${_args+"${_args[@]}"}
+if (( HERDR_ONLY )); then
+    CONFIG="install.conf.herdr.yaml"
+fi
+
+
 # This repo installs itself with dotbot `link:`, so every managed file becomes a
 # SYMLINK into ${BASEDIR}. Run from a git worktree, install therefore re-points
 # the entire live config — ~/.zshrc, ~/.gitconfig, ~/.config/git/ignore, the gh
@@ -49,6 +68,59 @@ git -C "${DOTBOT_DIR}" submodule sync --quiet --recursive
 git submodule update --init --recursive "${DOTBOT_DIR}"
 
 "${BASEDIR}/${DOTBOT_DIR}/${DOTBOT_BIN}" -d "${BASEDIR}" -c "${CONFIG}" "${@}"
+
+if (( HERDR_ONLY )); then
+    echo ""
+    echo "==> herdr-only install complete."
+
+    # The unit's ExecStart is %h/.dotfiles/scripts/herdr-server-launch.sh — an
+    # absolute, hardcoded path. Linked from anywhere else it is a unit that fails
+    # at start with a status nobody reads, so say so now rather than at boot.
+    launcher="${HOME}/.dotfiles/scripts/herdr-server-launch.sh"
+    if [[ ! -x "$launcher" ]]; then
+        echo ""
+        echo "    ⚠ The systemd unit runs ${launcher}, which does not exist."
+        echo "      This checkout is at ${BASEDIR}. Either clone to ~/.dotfiles, or"
+        echo "      edit ExecStart in ~/.config/systemd/user/herdr-server.service."
+    fi
+
+    bash "${BASEDIR}/scripts/herdr-deps-check.sh" || true
+
+    cat <<'NEXT'
+  Three things this installer cannot do for you. Each fails silently.
+
+  1. Shell layer — add to your own shell rc (~/.zshrc, ~/.zshrc.local, ...):
+
+       [ -f ~/.dotfiles/zsh/zshrc.herdr ] && source ~/.dotfiles/zsh/zshrc.herdr
+
+     Gives you hspawn / hdespawn / hreap (your AGENTS drive these), plus the
+     `claude` team-lead wrapper and `herdr-lazy`. Nothing else from this repo.
+
+  2. Status line — add to ~/.claude/settings.json, with YOUR absolute path:
+
+       "statusLine": {
+         "type": "command",
+         "command": "bash '/home/YOU/.claude/hooks/session-statusline.sh'",
+         "refreshInterval": 60
+       }
+
+     Without it every sidebar row renders empty and nothing reports why.
+
+  3. Plugins and the server:
+
+       herdr plugin install natori-hrj/herdr-lazy
+       herdr-lazy install
+       herdr plugin link ~/.dotfiles/config/herdr/plugins/local/sidebar-icons
+       systemctl --user daemon-reload
+       systemctl --user enable --now herdr-server.service
+
+  Then prove it the way the SERVER sees it:
+
+       ~/.dotfiles/scripts/verify-tools.sh
+
+NEXT
+    exit 0
+fi
 
 # Check if mise tools are configured
 if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then

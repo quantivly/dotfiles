@@ -44,7 +44,9 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
    - **zshrc.conditionals.fzf** - FZF fuzzy finder setup and key bindings
    - **zshrc.conditionals.plugins** - Plugin integrations (mise, direnv, forgit, git workflows)
 5. **zshrc.buildlimits** - Build/test worker caps so parallel agent sessions can't each claim every core
-6. **zshrc.company** - Work-specific configuration (Quantivly)
+6. **zshrc.herdr** - The herdr agent-workspace layer (portable; split out of
+   zshrc.company by DO-555 so herdr can be adopted without the work half)
+7. **zshrc.company** - Work-specific configuration (Quantivly)
 7. **~/.zshrc.local** - Machine-specific secrets and settings (NOT in git)
 
 ### Function Modules
@@ -55,6 +57,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
 | `zsh/functions/system.sh` | Performance + Utilities + Dotfiles guard + GNOME + Backup + Audit (59 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `dotfiles-doctor`, `dotfiles-work`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
 | `zsh/functions/github.sh` | gh account routing + diagnosis (10 functions) | `gh-doctor` |
+| `zsh/zshrc.herdr` | herdr agent workspaces (14 functions) — **agent-facing**, a human at the keyboard uses the herdr UI and `clauth` instead | `hspawn`, `hdespawn`, `hreap`, `claude`, `herdr-lazy` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
@@ -301,10 +304,12 @@ and inherits the previous run's exit code.
    - zsh/zshrc.conditionals.fzf (FZF integration)
    - zsh/zshrc.conditionals.plugins (mise, direnv, etc.)
 9. zsh/zshrc.buildlimits (build/test worker caps)
-10. zsh/zshrc.company
-11. ~/.zshrc.local (machine-specific secrets)
-12. PATH additions
-13. Dotfiles live-config guard — registers a one-shot `precmd` hook that runs
+10. zsh/zshrc.herdr (herdr layer — before company, and independent of it:
+    a modular adopter sources this one file and nothing else)
+11. zsh/zshrc.company
+12. ~/.zshrc.local (machine-specific secrets)
+13. PATH additions
+14. Dotfiles live-config guard — registers a one-shot `precmd` hook that runs
     `_dotfiles_live_config_warn` on the FIRST prompt, then removes itself.
     Deferred rather than run here because p10k's instant prompt turns any output
     during initialization into a warning box.
@@ -827,6 +832,29 @@ See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) and [examples/tmu
 Terminal workspace manager for coding agents (workspaces → tabs → panes, with agent detection).
 Config: `config/herdr/config.toml` → `~/.config/herdr/config.toml`. Full guide:
 [docs/HERDR_GUIDE.md](docs/HERDR_GUIDE.md).
+
+**Two install paths, and the modular one is the default recommendation for anyone else
+(DO-555).** `./install --herdr` links the FIVE destinations that are actually herdr —
+`config.toml`, `plugins.list`, `plugins.lock`, the statusline hook and the systemd unit —
+and stops. The full `./install` links 18, among them `~/.zshrc`, `~/.gitconfig`,
+`~/.tmux.conf`, `~/.p10k.zsh` and VS Code's `settings.json`; requiring all of that to run
+herdr is how an invitation becomes an ultimatum. The modular path deliberately does NOT
+link `~/.config/mise/config.toml` (it would pin ~25 tools and override whatever
+node/python the machine already runs) — `scripts/herdr-deps-check.sh` reports what is
+present, names the one feature each missing tool costs, and offers the exact `mise use -g`
+line with versions read out of `.mise.toml` so it cannot drift from the pins. It handles
+mise-absent too, by naming the versions and leaving the method alone.
+
+The shell layer is `zsh/zshrc.herdr`, sourced by `zshrc` and **safe to source alone** — a
+modular adopter adds one line to their own rc. Its only external dependency is `confirm`
+(`zsh/functions/system.sh`). `hspawn`/`hdespawn`/`hreap` in it are **agent-facing**: a lead
+agent drives them to fan work into worktrees and reap it. A human uses the herdr UI and
+`clauth`. Two things the modular installer cannot do, both silent: the `statusLine` entry
+in `~/.claude/settings.json`, and `herdr plugin link` for the local plugin. It prints both.
+
+The unit's `ExecStart` is the absolute `%h/.dotfiles/scripts/herdr-server-launch.sh`, so
+the checkout must be at `~/.dotfiles` whichever path is used; `--herdr` warns when it is not
+rather than linking a unit that fails at boot with a status nobody reads.
 
 **The governing fact: every layer of this stack fails silently.** A 2026-08-30 walkthrough found
 five separately configured features completely dead — a keybinding, a prefix fallback, two
