@@ -7,9 +7,14 @@
 #
 # Deliberately ABSENT, and each omission is a decision:
 #
-#   clean:            the full config cleans ~ and ~/.config of dead symlinks.
-#                     Harmless there, out of scope here: a modular install has
-#                     no business tidying directories it was not asked about.
+#   clean:            omitted, and it costs nothing -- dotbot's clean defaults to
+#                     recursive=False (dotbot/src/dotbot/plugins/clean.py:32), so
+#                     `['~','~/.config']` only sweeps those two directories' own
+#                     children. All five links below sit deeper than that, so the
+#                     FULL config never swept them either. (An earlier version of
+#                     this note claimed it was a scope decision. It reads well and
+#                     it is not the reason; a rationale nobody can trust is worse
+#                     than none, in a file that is mostly rationale.)
 #   ~/.zshrc          NOT linked. The shell layer (hspawn/hdespawn/hreap, the
 #                     claude and herdr-lazy wrappers) lives in zsh/zshrc.herdr
 #                     and the adopter sources that one line from their OWN
