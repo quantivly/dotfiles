@@ -78,6 +78,11 @@ check herdr    required - \
 check jq       required - \
       "hspawn / hdespawn / hreap read herdr's JSON replies and refuse to run"
 check git      required - "worktrees"
+# The shell layer is hard zsh -- `bash -n zsh/zshrc.herdr` dies on the glob
+# qualifier at line 741 -- and next-step 1 of the installer tells the adopter to
+# source it. Without zsh the report was otherwise happy to say everything was fine.
+check zsh      required - \
+      "the shell layer: hspawn / hdespawn / hreap / claude cannot be sourced"
 # REQUIRED, not optional: herdr-lazy() resolves its own binary through a
 # python3 one-liner, so without python3 \$root is empty and `herdr-lazy install`
 # dies with env: '/target/release/herdr-lazy': No such file or directory -- an

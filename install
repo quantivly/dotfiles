@@ -110,7 +110,12 @@ if (( HERDR_ONLY )); then
         echo "      or edit ExecStart in ~/.config/systemd/user/herdr-server.service."
     fi
 
-    bash "${BASEDIR}/scripts/herdr-deps-check.sh" || true
+    # NOT `|| true`: herdr, jq, git, zsh and python3 are REQUIRED, and swallowing
+    # that status made `--herdr` exit 0 on a machine where the next steps cannot
+    # work. The links are already made and are still correct, so keep printing the
+    # next steps -- but carry the status out, so a scripted install can see it.
+    deps_rc=0
+    bash "${BASEDIR}/scripts/herdr-deps-check.sh" || deps_rc=$?
 
     cat <<NEXT
   Three things this installer cannot do for you. Each fails silently.
@@ -145,7 +150,12 @@ if (( HERDR_ONLY )); then
        ${BASEDIR}/scripts/verify-tools.sh
 
 NEXT
-    exit 0
+    if (( deps_rc != 0 )); then
+        echo "  ⚠ The links are in place, but a REQUIRED dependency above is missing."
+        echo "    The steps you were just given will not work until it is installed."
+        echo ""
+    fi
+    exit "$deps_rc"
 fi
 
 # Check if mise tools are configured

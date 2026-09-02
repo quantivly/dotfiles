@@ -234,9 +234,13 @@ tr '\0' '\n' < /proc/$pid/environ | grep -E '^(TMUX|TMUX_PANE|TEAMMUX_STATE_PATH
 # the command line (UNVERIFIED here — no Mac available; BSD ps may want `-E` instead of `e`).
 ```
 
-The repo already guards the mirror-image hazard for Atrium — `atrium()` in `zsh/zshrc.herdr`
-strips `HERDR_*`, `TMUX` and `TEAMMUX_STATE_PATH` before exec, because a tmux server likewise
-inherits whichever client first started it. Nothing guarded herdr's own server until the unit.
+The repo used to guard the mirror-image hazard for Atrium with an `atrium()` wrapper that
+stripped `HERDR_*`, `TMUX` and `TEAMMUX_STATE_PATH` before exec, because a tmux server likewise
+inherits whichever client first started it. That wrapper went away with Atrium itself (89d3517),
+and this guide kept citing it for months afterwards. What enforces the rule today is
+`scripts/herdr-server-launch.sh`, which builds the environment from `env -i` rather than
+scrubbing an inherited one, and `scripts/verify-tools.sh`, whose `HERDR_FORBIDDEN_VARS` asserts
+none of those variables reached the running server.
 
 ---
 

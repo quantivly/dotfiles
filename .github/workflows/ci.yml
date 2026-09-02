@@ -182,24 +182,33 @@ jobs:
           DOTFILES_ALLOW_WORKTREE_INSTALL=1 \
           HERDR_ALLOW_FOREIGN_CHECKOUT=1 \
             ./install --herdr
-          mapfile -t got < <(cd "$FAKE" && find . -type l | sed 's|^\./||' | sort)
-          want=(
-            .claude/hooks/session-statusline.sh
-            .config/herdr/config.toml
-            .config/herdr/plugins/config/herdr-lazy/plugins.list
-            .config/herdr/plugins/config/herdr-lazy/plugins.lock
-            .config/systemd/user/herdr-server.service
+          # Destination -> source. Asserting the destination set and that links
+          # merely RESOLVE is not enough: repointing a source at another real file
+          # in this repo passes both. That is the fourth failure direction
+          # dotfiles-doctor already names -- linked-inside-the-checkout-but-at-the-
+          # wrong-file -- and it would ship a systemd unit whose content is the
+          # gitconfig, green forever.
+          declare -A want=(
+            [.claude/hooks/session-statusline.sh]=claude/hooks/session-statusline.sh
+            [.config/herdr/config.toml]=config/herdr/config.toml
+            [.config/herdr/plugins/config/herdr-lazy/plugins.list]=config/herdr/plugins/plugins.list
+            [.config/herdr/plugins/config/herdr-lazy/plugins.lock]=config/herdr/plugins/plugins.lock
+            [.config/systemd/user/herdr-server.service]=systemd/herdr-server.service
           )
+          mapfile -t got < <(cd "$FAKE" && find . -type l | sed 's|^\./||' | sort)
+          mapfile -t exp < <(printf '%s\n' "${!want[@]}" | sort)
           printf '%s\n' "${got[@]}"
-          if [[ "${got[*]}" != "${want[*]}" ]]; then
+          if [[ "${got[*]}" != "${exp[*]}" ]]; then
             echo "::error::--herdr link set changed"
-            printf 'wanted: %s\n' "${want[*]}"
+            printf 'wanted: %s\n' "${exp[*]}"
             exit 1
           fi
-          # Every link must resolve -- a dangling one is what a bad source path
-          # in install.conf.herdr.yaml actually produces.
           for l in "${got[@]}"; do
             [[ -e "$FAKE/$l" ]] || { echo "::error::dangling link: $l"; exit 1; }
+            actual="$(readlink -f "$FAKE/$l")"
+            expect="$(readlink -f "${want[$l]}")"
+            [[ "$actual" == "$expect" ]] || {
+              echo "::error::$l points at $actual, expected $expect"; exit 1; }
           done
           # And the takeover this flag exists to avoid must not have happened.
           for f in .zshrc .gitconfig .tmux.conf .p10k.zsh .config/mise/config.toml; do
@@ -227,7 +236,7 @@ jobs:
         run: |
           set -uo pipefail
           D="$(mktemp -d)"
-          for b in bash sed head tr git dirname python3 jq; do
+          for b in bash sed head tr git dirname python3 jq zsh; do
             ln -sf "$(command -v $b)" "$D/$b"
           done
 
@@ -253,7 +262,23 @@ jobs:
           # With no mise it must name versions rather than offer `mise use -g`.
           grep -q 'however you prefer to get them' /tmp/b \
             || { cat /tmp/b; echo "::error::mise-absent branch not taken"; exit 1; }
-          echo "exit 1 without herdr, exit 0 with only optional gaps, mise-absent branch OK."
+
+          # python3 REQUIRED has its own guard: both cases above carry python3, so
+          # demoting it back to optional would change neither outcome and pass green.
+          # herdr-lazy() resolves its binary through a python3 one-liner, so an
+          # empty $root there is a silent wrong-path failure, not a missing feature.
+          rm -f "$D/python3"
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/c 2>&1 || rc=$?
+          [[ $rc -eq 1 ]] || { cat /tmp/c; echo "::error::no python3 should exit 1, got $rc"; exit 1; }
+
+          # Same for zsh: the shell layer next-step 1 tells you to source is hard zsh.
+          ln -sf "$(command -v python3)" "$D/python3"
+          rm -f "$D/zsh"
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/d 2>&1 || rc=$?
+          [[ $rc -eq 1 ]] || { cat /tmp/d; echo "::error::no zsh should exit 1, got $rc"; exit 1; }
+          echo "required (herdr, python3, zsh) exit 1; optional-only exits 0; mise-absent branch OK."
 
   gh-routing-test:
     name: GitHub Account Routing State Table

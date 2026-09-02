@@ -846,7 +846,7 @@ line with versions read out of `.mise.toml` so it cannot drift from the pins. It
 mise-absent too, by naming the versions and leaving the method alone.
 
 The shell layer is `zsh/zshrc.herdr`, sourced by `zshrc` and **safe to source alone** — a
-modular adopter adds one line to their own rc. Its only external dependency is `confirm`
+modular adopter adds one line to their own rc. It needs zsh, and `hdespawn` prefers `confirm`
 (`zsh/functions/system.sh`). `hspawn`/`hdespawn`/`hreap` in it are **agent-facing**: a lead
 agent drives them to fan work into worktrees and reap it. A human uses the herdr UI and
 `clauth`. Two things the modular installer cannot do, both silent: the `statusLine` entry

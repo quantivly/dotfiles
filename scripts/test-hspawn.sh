@@ -3,7 +3,8 @@
 # scripts/test-hspawn.sh
 # ======================
 #
-# State table for the hspawn / hdespawn / hreap family in zsh/zshrc.company.
+# State table for the hspawn / hdespawn / hreap family in zsh/zshrc.herdr
+# (DO-555 moved it there out of zsh/zshrc.company).
 #
 # Why this exists: these three commands create worktrees, type into agent panes
 # and DELETE worktrees, and every failure mode found in them so far was silent —
