@@ -211,10 +211,8 @@ jobs:
         run: |
           set -uo pipefail
           FAKE="$(mktemp -d)"
-          set +e
-          HOME="$FAKE" DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install --herdr >/tmp/out 2>&1
-          rc=$?
-          set -e
+          rc=0
+          HOME="$FAKE" DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install --herdr >/tmp/out 2>&1 || rc=$?
           cat /tmp/out
           [[ $rc -ne 0 ]] || { echo "::error::expected refusal, got exit 0"; exit 1; }
           # The point of refusing BEFORE dotbot: nothing may be linked.
@@ -233,17 +231,21 @@ jobs:
             ln -sf "$(command -v $b)" "$D/$b"
           done
 
+          # `rc=0; cmd || rc=$?` rather than `cmd; rc=$?`: GitHub runs steps under
+          # `bash -e {0}`, which a `set +e` inside the script does not undo for the
+          # step's own shell -- the previous version died on the first deliberate
+          # non-zero exit before it could read $?.
           # No herdr -> required missing -> exit 1.
-          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/a 2>&1
-          rc=$?
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/a 2>&1 || rc=$?
           [[ $rc -eq 1 ]] || { cat /tmp/a; echo "::error::no herdr should exit 1, got $rc"; exit 1; }
           grep -q 'herdr' /tmp/a || { echo "::error::herdr not named in the report"; exit 1; }
 
           # Stub herdr present, node/bun/cargo still absent -> optional only -> exit 0.
           printf '#!/bin/sh\necho "herdr 0.0.0-stub"\n' > "$D/herdr"
           chmod +x "$D/herdr"
-          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/b 2>&1
-          rc=$?
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/b 2>&1 || rc=$?
           [[ $rc -eq 0 ]] || { cat /tmp/b; echo "::error::optional-only should exit 0, got $rc"; exit 1; }
           grep -q 'All required dependencies present' /tmp/b \
             || { cat /tmp/b; echo "::error::expected the all-present line"; exit 1; }
