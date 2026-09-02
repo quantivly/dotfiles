@@ -261,9 +261,10 @@ full 18-link version, correct only if you want this whole configuration.
 Two differences that matter if you take the modular path:
 
 - **The shell layer is not linked.** Add `[ -f ~/.dotfiles/zsh/zshrc.herdr ] && source
-  ~/.dotfiles/zsh/zshrc.herdr` to your own rc. That file is self-contained apart from
-  `confirm` (`zsh/functions/system.sh`), and it is where `hspawn`/`hdespawn`/`hreap`, the
-  `claude` team-lead wrapper and `herdr-lazy` live.
+  ~/.dotfiles/zsh/zshrc.herdr` to your own rc. It needs **zsh** — it is not bash-parseable —
+  and `hdespawn` prefers `confirm` (`zsh/functions/system.sh`) but falls back to its own
+  `read -q` prompt, so it is not a dependency. That file is where `hspawn`/`hdespawn`/`hreap`,
+  the `claude` team-lead wrapper and `herdr-lazy` live.
 - **mise is not configured for you**, so step 0's `python3`/`node`/`bun` are yours to
   provide. `scripts/herdr-deps-check.sh` says what is missing, what each one costs, and —
   if you have mise — the exact `mise use -g` line at the versions pinned here.
