@@ -12,8 +12,16 @@
 #
 # That is exactly what `./install --herdr` sets a modular adopter up to do.
 #
-# External dependency: `confirm` (zsh/functions/system.sh), used by hdespawn.
-# Everything else here is self-contained or shells out to `herdr` / `git` / `jq`.
+# Self-contained. hdespawn PREFERS `confirm` (zsh/functions/system.sh) and falls
+# back to a `read -q` prompt when it is absent, so a modular adopter who sources
+# only this file still gets a confirmation rather than a silent teardown.
+# Everything else here shells out to `herdr` / `git` / `jq`.
+#
+# build-limits lives in zshrc.buildlimits but keys on $HERDR_PANE_ID, so it is
+# part of this layer in everything but filename, and it is documented alongside
+# these commands. zshrc sources zshrc.buildlimits BEFORE this file, so in a full
+# install the guard below is a no-op; it exists so that sourcing this one file
+# does not leave a documented command quietly missing.
 #
 # WHO CALLS WHAT. hspawn / hdespawn / hreap are AGENT-facing: a lead agent
 # drives them to fan work out into worktrees and reap it afterwards. A human
@@ -21,6 +29,12 @@
 # `claude` and `herdr-lazy` wrappers below are the reverse — they exist for the
 # human's interactive shell.
 #==============================================================================
+
+if (( ! $+functions[build-limits] )); then
+  _herdr_layer_dir="${${(%):-%x}:A:h}"
+  [[ -f "$_herdr_layer_dir/zshrc.buildlimits" ]] && source "$_herdr_layer_dir/zshrc.buildlimits"
+  unset _herdr_layer_dir
+fi
 
 #==============================================================================
 # Claude Code launcher — herdmates team lead inside Herdr
