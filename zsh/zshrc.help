@@ -326,11 +326,13 @@ SPAWN & REAP:
              hspawn [-p profile] [-m model] [-e effort] [--mode M] [-b ref]
                     [-n name] <repo-dir> <slug> [prompt...]
   hreap    - census of EVERY claude process in a herdr pane, detected or not
+             hreap                                 DEFAULTS to idle >= 30 min
+             hreap --older 0                       every process, no idle filter
              hreap [--older N] [--mine] [--json]   read-only
              hreap --close --mine                  close only this session's spawns
   hdespawn - tear one spawn down: pane, workspace, worktree, registry entry
              hdespawn [-y|--yes] [-f|--force] <slug|pane-id>
-  Registry:  ~/.local/state/hspawn/
+  Registry:  ${HSPAWN_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/hspawn}
 
 ACCOUNTS (clauth):
   clauth <profile>        - switch global credentials; then 'claude' is a TEAM LEAD
@@ -339,7 +341,8 @@ ACCOUNTS (clauth):
 
 PLUGINS:
   herdr-lazy check          - installed vs declared in plugins.list
-  herdr-lazy sync           - converge this machine to the declared set
+  herdr-lazy sync           - install what plugins.list declares and is missing
+  herdr-lazy sync --prune   - that, AND remove anything installed but undeclared
   herdr plugin action list  - verify an action id before binding it
 
 RESOURCES:

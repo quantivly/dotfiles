@@ -26,9 +26,13 @@ caioniehues/herdmates
 # daemon they never enable. Add it back, only after confirming it stays
 # observe-only, with:
 #   herdr-lazy add 0xGosu/herdr-auto-pilot
-# plugins.lock no longer pins it: a lock-writing command (`sync`, `update`,
-# `lock`) has since regenerated the lock from what herdr actually has installed.
-# `sync --prune` is what would uninstall it from a machine that still has it.
+# plugins.lock no longer pins it, so `herdr-lazy install` will not build it on a
+# fresh machine. But do NOT read the lock as a picture of what is installed: the
+# lock tracks this file entry-for-entry, not `herdr plugin list`. This very
+# workstation still HAS auto-pilot, disabled, at 0xGosu/herdr-auto-pilot@ba923b1
+# -- one `herdr plugin enable` from live. Dropping an installed-but-undeclared
+# plugin takes `herdr-lazy sync --prune`; a bare `sync` leaves it exactly where
+# it is.
 
 # This manager itself. NOT on PATH by design (README §Use) and auto-sync is
 # off, so a rebuild restores it only via:
