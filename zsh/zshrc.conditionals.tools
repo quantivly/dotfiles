@@ -395,7 +395,7 @@ if command -v claude &>/dev/null; then
   # runtime via /scroll-speed.
   export CLAUDE_CODE_SCROLL_SPEED=3
 
-  # claude() itself is defined in zshrc.company (loaded later in zshrc's
+  # claude() itself is defined in zshrc.herdr (loaded later in zshrc's
   # source order), which overrides whatever is defined here. A duplicate
   # definition here was dead code, and was removed in #86 (2026-08-30).
 fi

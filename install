@@ -10,6 +10,51 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${BASEDIR}"
 
+# --herdr: install ONLY the herdr layer (DO-555). The full config links 18
+# destinations including ~/.zshrc, ~/.gitconfig, ~/.tmux.conf and VS Code's
+# settings.json; adopting herdr should not require handing all of that over.
+# Parsed out of "$@" here because everything left in "$@" is forwarded to dotbot,
+# which would reject an unknown flag.
+HERDR_ONLY=0
+_args=()
+for _a in "$@"; do
+    case "$_a" in
+        --herdr) HERDR_ONLY=1 ;;
+        *)       _args+=("$_a") ;;
+    esac
+done
+set -- ${_args+"${_args[@]}"}
+if (( HERDR_ONLY )); then
+    CONFIG="install.conf.herdr.yaml"
+
+    # The unit's ExecStart is the ABSOLUTE %h/.dotfiles/scripts/herdr-server-launch.sh.
+    # Linked from any other checkout it is a unit that fails at start with 203/EXEC —
+    # a status nobody reads, which is the failure mode this whole setup is written
+    # against. An earlier version of this printed a warning AFTER dotbot had already
+    # created the link and exited 0; the warning then scrolled away behind the
+    # dependency report and the next-steps block, so it warned nobody. Refuse here,
+    # before anything is linked, or the refusal is theatre.
+    if [[ "${BASEDIR}" != "${HOME}/.dotfiles" && -z "${HERDR_ALLOW_FOREIGN_CHECKOUT:-}" ]]; then
+        cat >&2 <<EOF
+✗ Refusing --herdr from ${BASEDIR}.
+
+  systemd/herdr-server.service runs ${HOME}/.dotfiles/scripts/herdr-server-launch.sh,
+  an absolute path baked into the unit. Installed from here, that file does not
+  exist and the unit fails at start with 203/EXEC — reported nowhere you will look.
+
+  Clone to ~/.dotfiles instead:
+    git clone https://github.com/quantivly/dotfiles.git ~/.dotfiles
+    cd ~/.dotfiles && ./install --herdr
+
+  To link everything EXCEPT a working unit anyway (macOS has no systemd, and a
+  sandbox/CI run does not need one):
+    HERDR_ALLOW_FOREIGN_CHECKOUT=1 ./install --herdr
+EOF
+        exit 1
+    fi
+fi
+
+
 # This repo installs itself with dotbot `link:`, so every managed file becomes a
 # SYMLINK into ${BASEDIR}. Run from a git worktree, install therefore re-points
 # the entire live config — ~/.zshrc, ~/.gitconfig, ~/.config/git/ignore, the gh
@@ -49,6 +94,69 @@ git -C "${DOTBOT_DIR}" submodule sync --quiet --recursive
 git submodule update --init --recursive "${DOTBOT_DIR}"
 
 "${BASEDIR}/${DOTBOT_DIR}/${DOTBOT_BIN}" -d "${BASEDIR}" -c "${CONFIG}" "${@}"
+
+if (( HERDR_ONLY )); then
+    echo ""
+    echo "==> herdr-only install complete."
+
+    # Only reachable via HERDR_ALLOW_FOREIGN_CHECKOUT — the gate above exits
+    # otherwise. Restated here because the override is precisely the case where
+    # the unit is knowingly broken, and step 3 below still tells you to enable it.
+    launcher="${HOME}/.dotfiles/scripts/herdr-server-launch.sh"
+    if [[ ! -x "$launcher" ]]; then
+        echo ""
+        echo "    ⚠ HERDR_ALLOW_FOREIGN_CHECKOUT is set and ${launcher} does not exist."
+        echo "      The unit was linked but CANNOT start. Skip step 3's systemctl lines,"
+        echo "      or edit ExecStart in ~/.config/systemd/user/herdr-server.service."
+    fi
+
+    # NOT `|| true`: herdr, jq, git, zsh and python3 are REQUIRED, and swallowing
+    # that status made `--herdr` exit 0 on a machine where the next steps cannot
+    # work. The links are already made and are still correct, so keep printing the
+    # next steps -- but carry the status out, so a scripted install can see it.
+    deps_rc=0
+    bash "${BASEDIR}/scripts/herdr-deps-check.sh" || deps_rc=$?
+
+    cat <<NEXT
+  Three things this installer cannot do for you. Each fails silently.
+
+  1. Shell layer — add to your own shell rc (~/.zshrc, ~/.zshrc.local, ...):
+
+       [ -f ${BASEDIR}/zsh/zshrc.herdr ] && source ${BASEDIR}/zsh/zshrc.herdr
+
+     Gives you hspawn / hdespawn / hreap (your AGENTS drive these), plus the
+     'claude' team-lead wrapper and 'herdr-lazy'. Nothing else from this repo.
+
+  2. Status line — add to ~/.claude/settings.json exactly as printed:
+
+       "statusLine": {
+         "type": "command",
+         "command": "bash '${HOME}/.claude/hooks/session-statusline.sh'",
+         "refreshInterval": 60
+       }
+
+     Without it every sidebar row renders empty and nothing reports why.
+
+  3. Plugins and the server:
+
+       herdr plugin install natori-hrj/herdr-lazy
+       herdr-lazy install
+       herdr plugin link ${BASEDIR}/config/herdr/plugins/local/sidebar-icons
+       systemctl --user daemon-reload
+       systemctl --user enable --now herdr-server.service
+
+  Then prove it the way the SERVER sees it:
+
+       ${BASEDIR}/scripts/verify-tools.sh
+
+NEXT
+    if (( deps_rc != 0 )); then
+        echo "  ⚠ The links are in place, but a REQUIRED dependency above is missing."
+        echo "    The steps you were just given will not work until it is installed."
+        echo ""
+    fi
+    exit "$deps_rc"
+fi
 
 # Check if mise tools are configured
 if command -v mise &> /dev/null || [[ -x "$HOME/.local/bin/mise" ]]; then

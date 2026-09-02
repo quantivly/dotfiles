@@ -153,6 +153,144 @@ jobs:
       - name: Run the hspawn state table
         run: ./scripts/test-hspawn.sh
 
+  herdr-modular-install:
+    name: Modular herdr Install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # zsh so the ONLY required dependency missing on the runner is herdr
+      # itself, which makes the exit-status assertion below exact.
+      - name: Install jq and zsh
+        run: sudo apt-get update && sudo apt-get install -y jq zsh
+
+      # install.conf.herdr.yaml is asserted by nothing else. dotfiles-doctor's
+      # link map hardcodes install.conf.yaml (_dotfiles_link_map), so its
+      # declared-source-exists check skips this file entirely, and install-test
+      # below only ever runs the full install. A typo in a source path here is
+      # therefore invisible until an adopter runs it -- dotbot fails loudly with
+      # "Nonexistent target", but on their machine, never on ours.
+      - name: --herdr links exactly the five herdr destinations
+        run: |
+          set -euo pipefail
+          FAKE="$(mktemp -d)"
+          # HERDR_ALLOW_FOREIGN_CHECKOUT because the runner's checkout is not
+          # ~/.dotfiles and the unit's ExecStart is an absolute path. The refusal
+          # that override bypasses is asserted as its own step below.
+          # --herdr now exits with the dependency status, and a runner has no
+          # herdr binary, so a bare call would take this step down under `-e`
+          # before any link was inspected. Capture it: the LINKS are what this
+          # step is about, and the status gets its own assertion just below.
+          rc=0
+          HOME="$FAKE" \
+          DOTFILES_ALLOW_WORKTREE_INSTALL=1 \
+          HERDR_ALLOW_FOREIGN_CHECKOUT=1 \
+            ./install --herdr || rc=$?
+          # Exactly 1: herdr is the only required dependency absent here (the
+          # step above installs jq and zsh; git and python3 are preinstalled).
+          # A 0 would mean the deps report stopped being consulted at all.
+          [[ $rc -eq 1 ]] || { echo "::error::expected exit 1 (no herdr), got $rc"; exit 1; }
+          # Destination -> source. Asserting the destination set and that links
+          # merely RESOLVE is not enough: repointing a source at another real file
+          # in this repo passes both. That is the fourth failure direction
+          # dotfiles-doctor already names -- linked-inside-the-checkout-but-at-the-
+          # wrong-file -- and it would ship a systemd unit whose content is the
+          # gitconfig, green forever.
+          declare -A want=(
+            [.claude/hooks/session-statusline.sh]=claude/hooks/session-statusline.sh
+            [.config/herdr/config.toml]=config/herdr/config.toml
+            [.config/herdr/plugins/config/herdr-lazy/plugins.list]=config/herdr/plugins/plugins.list
+            [.config/herdr/plugins/config/herdr-lazy/plugins.lock]=config/herdr/plugins/plugins.lock
+            [.config/systemd/user/herdr-server.service]=systemd/herdr-server.service
+          )
+          mapfile -t got < <(cd "$FAKE" && find . -type l | sed 's|^\./||' | sort)
+          mapfile -t exp < <(printf '%s\n' "${!want[@]}" | sort)
+          printf '%s\n' "${got[@]}"
+          if [[ "${got[*]}" != "${exp[*]}" ]]; then
+            echo "::error::--herdr link set changed"
+            printf 'wanted: %s\n' "${exp[*]}"
+            exit 1
+          fi
+          for l in "${got[@]}"; do
+            [[ -e "$FAKE/$l" ]] || { echo "::error::dangling link: $l"; exit 1; }
+            actual="$(readlink -f "$FAKE/$l")"
+            expect="$(readlink -f "${want[$l]}")"
+            [[ "$actual" == "$expect" ]] || {
+              echo "::error::$l points at $actual, expected $expect"; exit 1; }
+          done
+          # And the takeover this flag exists to avoid must not have happened.
+          for f in .zshrc .gitconfig .tmux.conf .p10k.zsh .config/mise/config.toml; do
+            [[ -e "$FAKE/$f" ]] && { echo "::error::--herdr created $f"; exit 1; }
+          done
+          echo "5 links, all resolving, nothing else touched."
+
+      - name: --herdr refuses a checkout that is not ~/.dotfiles
+        run: |
+          set -uo pipefail
+          FAKE="$(mktemp -d)"
+          rc=0
+          HOME="$FAKE" DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install --herdr >/tmp/out 2>&1 || rc=$?
+          cat /tmp/out
+          [[ $rc -ne 0 ]] || { echo "::error::expected refusal, got exit 0"; exit 1; }
+          # The point of refusing BEFORE dotbot: nothing may be linked.
+          n=$(find "$FAKE" -type l | wc -l)
+          [[ "$n" -eq 0 ]] || { echo "::error::refused but linked $n file(s)"; exit 1; }
+          echo "refused with exit $rc and linked nothing."
+
+      # Both directions. A runner has no herdr, so the bare script correctly
+      # exits 1 here -- asserting "it runs cleanly" would have been asserting
+      # that herdr is NOT required, which is the opposite of the contract.
+      - name: Dependency report classifies required vs optional
+        run: |
+          set -uo pipefail
+          D="$(mktemp -d)"
+          for b in bash sed head tr git dirname python3 jq zsh; do
+            ln -sf "$(command -v $b)" "$D/$b"
+          done
+
+          # `rc=0; cmd || rc=$?` rather than `cmd; rc=$?`: GitHub runs steps under
+          # `bash -e {0}`, which a `set +e` inside the script does not undo for the
+          # step's own shell -- the previous version died on the first deliberate
+          # non-zero exit before it could read $?.
+          # No herdr -> required missing -> exit 1.
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/a 2>&1 || rc=$?
+          [[ $rc -eq 1 ]] || { cat /tmp/a; echo "::error::no herdr should exit 1, got $rc"; exit 1; }
+          grep -q 'herdr' /tmp/a || { echo "::error::herdr not named in the report"; exit 1; }
+
+          # Stub herdr present, node/bun/cargo still absent -> optional only -> exit 0.
+          printf '#!/bin/sh\necho "herdr 0.0.0-stub"\n' > "$D/herdr"
+          chmod +x "$D/herdr"
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/b 2>&1 || rc=$?
+          [[ $rc -eq 0 ]] || { cat /tmp/b; echo "::error::optional-only should exit 0, got $rc"; exit 1; }
+          grep -q 'All required dependencies present' /tmp/b \
+            || { cat /tmp/b; echo "::error::expected the all-present line"; exit 1; }
+
+          # With no mise it must name versions rather than offer `mise use -g`.
+          grep -q 'however you prefer to get them' /tmp/b \
+            || { cat /tmp/b; echo "::error::mise-absent branch not taken"; exit 1; }
+
+          # python3 REQUIRED has its own guard: both cases above carry python3, so
+          # demoting it back to optional would change neither outcome and pass green.
+          # herdr-lazy() resolves its binary through a python3 one-liner, so an
+          # empty $root there is a silent wrong-path failure, not a missing feature.
+          rm -f "$D/python3"
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/c 2>&1 || rc=$?
+          [[ $rc -eq 1 ]] || { cat /tmp/c; echo "::error::no python3 should exit 1, got $rc"; exit 1; }
+
+          # Same for zsh: the shell layer next-step 1 tells you to source is hard zsh.
+          ln -sf "$(command -v python3)" "$D/python3"
+          rm -f "$D/zsh"
+          rc=0
+          env -i HOME=/nonexistent PATH="$D" bash ./scripts/herdr-deps-check.sh >/tmp/d 2>&1 || rc=$?
+          [[ $rc -eq 1 ]] || { cat /tmp/d; echo "::error::no zsh should exit 1, got $rc"; exit 1; }
+          echo "required (herdr, python3, zsh) exit 1; optional-only exits 0; mise-absent branch OK."
+
   gh-routing-test:
     name: GitHub Account Routing State Table
     runs-on: ubuntu-latest

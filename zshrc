@@ -219,6 +219,10 @@ fi
 [ -f ~/.dotfiles/zsh/zshrc.buildlimits ] && source ~/.dotfiles/zsh/zshrc.buildlimits
 
 # Company/work-specific configuration
+# herdr agent-workspace layer. Before company on purpose: it is the portable
+# half, and zshrc.company may reference nothing in it (verified: it does not).
+[ -f ~/.dotfiles/zsh/zshrc.herdr ] && source ~/.dotfiles/zsh/zshrc.herdr
+
 [ -f ~/.dotfiles/zsh/zshrc.company ] && source ~/.dotfiles/zsh/zshrc.company
 
 # Help system with semantic categorization

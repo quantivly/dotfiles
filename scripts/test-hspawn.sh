@@ -3,7 +3,8 @@
 # scripts/test-hspawn.sh
 # ======================
 #
-# State table for the hspawn / hdespawn / hreap family in zsh/zshrc.company.
+# State table for the hspawn / hdespawn / hreap family in zsh/zshrc.herdr
+# (DO-555 moved it there out of zsh/zshrc.company).
 #
 # Why this exists: these three commands create worktrees, type into agent panes
 # and DELETE worktrees, and every failure mode found in them so far was silent —
@@ -32,7 +33,9 @@
 set -uo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPANY="$DOTFILES/zsh/zshrc.company"
+# DO-555 moved the herdr layer out of zshrc.company into its own file so it
+# can be adopted without the work-specific half. This suite follows it.
+HERDRRC="$DOTFILES/zsh/zshrc.herdr"
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -45,15 +48,15 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 1; }
 for tool in zsh git jq; do
     command -v "$tool" >/dev/null || fatal "$tool is required"
 done
-[[ -r "$COMPANY" ]] || fatal "cannot read $COMPANY"
+[[ -r "$HERDRRC" ]] || fatal "cannot read $HERDRRC"
 
 # Assert the functions under test are actually DEFINED before asserting on their
 # behaviour. Most rows below are "nothing was created / nothing was removed",
 # which is also exactly what a suite that loaded nothing produces.
 for fn in hspawn hdespawn hreap _hspawn_shell_ready _hspawn_preserve_stale_registry \
           _hspawn_registry_file _hreap_fmt_dur _hreap_fmt_kb; do
-    zsh -c "source '$COMPANY' >/dev/null 2>&1; (( \$+functions[$fn] ))" \
-        || fatal "$fn is not defined after sourcing $COMPANY — the suite would assert nothing"
+    zsh -c "source '$HERDRRC' >/dev/null 2>&1; (( \$+functions[$fn] ))" \
+        || fatal "$fn is not defined after sourcing $HERDRRC — the suite would assert nothing"
 done
 
 FHOME="$TMPROOT/home";    mkdir -p "$FHOME/.clauth/profiles/personal"
@@ -155,7 +158,7 @@ run() {
            HSPAWN_BRANCH_PREFIX=tester HERDR_STUB_LOG="$LOG" HERDR_STUB_DIR="$STUBDIR" \
            HERDR_STUB_MODE="${MODE:-full}" CLAUDE_CODE_SESSION_ID="${SESS:-}" \
            HERDR_STUB_PANE_DIR="${PANEDIR:-}" \
-           zsh -c "source '$COMPANY' >/dev/null 2>&1; $1" 2>&1)"
+           zsh -c "source '$HERDRRC' >/dev/null 2>&1; $1" 2>&1)"
     RC=$?
 }
 # grep -c over the captured output / the stub log, always returning a number.
@@ -598,15 +601,15 @@ echo "=== hreap: what it advertises after a --close ==="
 # slug — which is precisely what --close manufactures by keeping the entry.
 # shellcheck disable=SC2016  # the literal string `$pane` is what is grepped for
 check "close line uses the pane id" \
-      "$(grep -c 'Finish with: hdespawn \$pane' "$COMPANY")"                             "1"
+      "$(grep -c 'Finish with: hdespawn \$pane' "$HERDRRC")"                             "1"
 # shellcheck disable=SC2016  # ditto: a literal, not an expansion
 check "close line does not use \$slug alone" \
-      "$(grep -c 'Finish with: hdespawn \${rslug:-\$pane}' "$COMPANY")"                  "0"
+      "$(grep -c 'Finish with: hdespawn \${rslug:-\$pane}' "$HERDRRC")"                  "0"
 # And the census must not swallow a pane it could not ask about.
 check "a failed process-info is counted" \
-      "$(grep -c 'unqueried++' "$COMPANY")"                                              "1"
+      "$(grep -c 'unqueried++' "$HERDRRC")"                                              "1"
 check "and is reported in the totals" \
-      "$(grep -c 'pane(s) that could not be queried' "$COMPANY")"                        "1"
+      "$(grep -c 'pane(s) that could not be queried' "$HERDRRC")"                        "1"
 
 echo
 echo "=== hspawn: the trust dialog, and hspawn's own exit code ==="
