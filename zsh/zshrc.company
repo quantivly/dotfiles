@@ -356,7 +356,7 @@ fi
 # CLAUDE_CONFIG_DIR globally now (via profile switch, not a per-directory
 # chpwd hook) — a chpwd override here would fight it. Four profiles are
 # registered: quantivly-{1,2,3} (was ~/.claude-work{,2,3}) and personal
-# (was ~/.claude-personal). See ~/herdr-migration-next-steps.md.
+# (was ~/.claude-personal).
 #
 # The old ~/.claude-quantivly this block gated on was already stale/abandoned
 # (last touched 2026-06-27) and is not one of the four accounts clauth manages.
