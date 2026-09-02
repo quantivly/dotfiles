@@ -278,6 +278,21 @@ type = "plugin_action"
 command = "tdi.worktree-from-linear.pick"
 description = "worktree from Linear issue"
 
+# herdr-draft's one action (plugin id `draft`, action id `open`), SHIPPED
+# COMMENTED because herdr-draft is not in plugins.list — binding an action whose
+# plugin is absent is a dead key, and a dead key is exactly the silent failure
+# this file's header warns about. Uncomment only after adding the plugin.
+#
+# The chord choice is the part worth keeping: alt+n is protocol-independent
+# (plain ESC + n), free in the [keys] tables above, and zsh leaves ^[n unbound,
+# so nothing in a pane is shadowed. Not prefix+n (next_tab) and not
+# prefix/ctrl+shift+n (new_workspace).
+# [[keys.command]]
+# key = "alt+n"
+# type = "plugin_action"
+# command = "draft.open"
+# description = "new agent session"
+
 # Popups run through /bin/sh in the FOCUSED PANE's cwd (navigate.rs passes None,
 # popup.rs falls back to the pane cwd), so a bare command name is enough — no
 # `cd` wrapper needed. While a popup is open herdr forwards EVERY key to it,
