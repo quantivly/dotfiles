@@ -162,8 +162,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+      # zsh so the ONLY required dependency missing on the runner is herdr
+      # itself, which makes the exit-status assertion below exact.
+      - name: Install jq and zsh
+        run: sudo apt-get update && sudo apt-get install -y jq zsh
 
       # install.conf.herdr.yaml is asserted by nothing else. dotfiles-doctor's
       # link map hardcodes install.conf.yaml (_dotfiles_link_map), so its
@@ -178,10 +180,19 @@ jobs:
           # HERDR_ALLOW_FOREIGN_CHECKOUT because the runner's checkout is not
           # ~/.dotfiles and the unit's ExecStart is an absolute path. The refusal
           # that override bypasses is asserted as its own step below.
+          # --herdr now exits with the dependency status, and a runner has no
+          # herdr binary, so a bare call would take this step down under `-e`
+          # before any link was inspected. Capture it: the LINKS are what this
+          # step is about, and the status gets its own assertion just below.
+          rc=0
           HOME="$FAKE" \
           DOTFILES_ALLOW_WORKTREE_INSTALL=1 \
           HERDR_ALLOW_FOREIGN_CHECKOUT=1 \
-            ./install --herdr
+            ./install --herdr || rc=$?
+          # Exactly 1: herdr is the only required dependency absent here (the
+          # step above installs jq and zsh; git and python3 are preinstalled).
+          # A 0 would mean the deps report stopped being consulted at all.
+          [[ $rc -eq 1 ]] || { echo "::error::expected exit 1 (no herdr), got $rc"; exit 1; }
           # Destination -> source. Asserting the destination set and that links
           # merely RESOLVE is not enough: repointing a source at another real file
           # in this repo passes both. That is the fourth failure direction
