@@ -127,15 +127,15 @@ if (( HERDR_ONLY )); then
      Gives you hspawn / hdespawn / hreap (your AGENTS drive these), plus the
      'claude' team-lead wrapper and 'herdr-lazy'. Nothing else from this repo.
 
-  2. Status line — add to ~/.claude/settings.json exactly as printed:
+  2. Claude Code wiring — one command, idempotent:
 
-       "statusLine": {
-         "type": "command",
-         "command": "bash '${HOME}/.claude/hooks/session-statusline.sh'",
-         "refreshInterval": 60
-       }
+       ${BASEDIR}/scripts/herdr-claude-wire.sh
 
-     Without it every sidebar row renders empty and nothing reports why.
+     Sets statusLine in ~/.claude/settings.json (user-level, not in this repo,
+     so dotbot cannot) and generates ~/.claude/skills/herdr/SKILL.md. Without
+     the first, every sidebar row renders empty and nothing reports why; without
+     the second, your agents have no herdr CLI reference. It refuses to touch a
+     statusLine that belongs to something else rather than overwriting it.
 
   3. Plugins and the server:
 
@@ -145,9 +145,14 @@ if (( HERDR_ONLY )); then
        systemctl --user daemon-reload
        systemctl --user enable --now herdr-server.service
 
-  Then prove it the way the SERVER sees it:
+  Then prove it the way the SERVER sees it — server env, unit enablement, every
+  plugin dependency under the server's PATH, and the wiring from step 2:
 
-       ${BASEDIR}/scripts/verify-tools.sh
+       ${BASEDIR}/scripts/verify-tools.sh --herdr
+
+  (--herdr, not a bare run: the full report covers the 18-link install, so on
+  this machine its mise section would print a ✗ and offer a paste that pins ~25
+  tools globally. Exit 0 there means done.)
 
 NEXT
     if (( deps_rc != 0 )); then

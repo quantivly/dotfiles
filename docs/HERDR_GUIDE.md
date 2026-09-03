@@ -296,8 +296,9 @@ git clone git@github.com:quantivly/dotfiles.git ~/.dotfiles && cd ~/.dotfiles &&
 # 2. herdr itself (see herdr.dev for the current installer; this repo does not vendor it).
 herdr --version          # confirm it is on PATH before continuing (~/.local/bin/herdr here)
 
-# 3. Wire the statusline publisher into Claude Code. ./install creates the symlink but
-#    CANNOT edit ~/.claude/settings.json — see §6. Without this the sidebar rows are empty.
+# 3. Wire Claude Code: the statusLine entry (./install creates the symlink but CANNOT edit
+#    ~/.claude/settings.json) and the agent skill file. One idempotent command, and it
+#    refuses a statusLine owned by something else rather than overwriting it. See §6.
 
 # 4. Plugins. herdr-lazy is the manager — and it is itself a plugin, so it does not exist until
 #    you install it. (The earlier version of this list began at `herdr-lazy check`; on a fresh
@@ -318,17 +319,20 @@ herdr plugin link ~/.dotfiles/config/herdr/plugins/local/sidebar-icons
 #    it by hand there with `systemctl --user start herdr-server.service`.
 systemctl --user daemon-reload && systemctl --user enable --now herdr-server.service
 
-# 6. Prove it the way the SERVER sees it — mise symlink and binaries, server-env hygiene, and
-#    every plugin dependency resolved under the server's PATH:
-scripts/verify-tools.sh
+# 6. Prove it the way the SERVER sees it — server-env hygiene, unit enablement, every plugin
+#    dependency resolved under the server's PATH, and the step-3 wiring:
+scripts/verify-tools.sh --herdr        # modular install: exit 0 means done
+scripts/verify-tools.sh                # full install: the above plus mise + the tool inventory
 
 # 7. clauth, only if you need several Claude accounts. Not required for single-account use.
 ```
 
-**Three things `./install` cannot do for you**, and all fail silently: the `statusLine` entry in
-`~/.claude/settings.json` (§6), `herdr plugin link` for the local plugin, and enabling the
-`herdr-server` unit (it links the file, nothing more). None produces an error — you just get empty
-sidebar rows, no agent glyphs, or a server started by hand from wherever you happened to be.
+**Three things `./install` cannot do for you**, and all fail silently: Claude Code's `statusLine`
+plus the agent skill file (§6 — both done by `scripts/herdr-claude-wire.sh`), `herdr plugin link`
+for the local plugin, and enabling the `herdr-server` unit (it links the file, nothing more). None
+produces an error — you just get empty sidebar rows, no agent glyphs, or a server started by hand
+from wherever you happened to be. `verify-tools.sh --herdr` is what tells you which of them you
+skipped; before DO-563 nothing checked the first two at all.
 
 ### Updating
 
@@ -497,17 +501,24 @@ along with their separator, so only the applicable band draws, in its own colour
 
 Fed by `claude/hooks/session-statusline.sh` in this repo, symlinked to
 `~/.claude/hooks/session-statusline.sh` by `./install`. **It also has to be wired up as Claude
-Code's `statusLine`**, which `./install` does not do — add this to `~/.claude/settings.json`:
+Code's `statusLine`**, which `./install` does not do:
+
+```bash
+scripts/herdr-claude-wire.sh          # writes it; --print shows what it would change
+```
+
+That produces:
 
 ```json
 { "statusLine": { "type": "command",
-                  "command": "bash /home/<you>/.claude/hooks/session-statusline.sh",
+                  "command": "bash '/home/<you>/.claude/hooks/session-statusline.sh'",
                   "refreshInterval": 60 } }
 ```
 
-Use the absolute path — that is the form running here. Whether `~` is expanded inside
-`statusLine.command` is UNVERIFIED, and a publisher that never starts is indistinguishable from
-an empty sidebar.
+The absolute path is deliberate — whether `~` is expanded inside `statusLine.command` is
+UNVERIFIED, and a publisher that never starts is indistinguishable from an empty sidebar. Hence
+also the script rather than this block: hand-substituting your own home directory into JSON is
+the step people skip, and `verify-tools.sh --herdr` now fails when it has been skipped.
 
 Without that, the script never runs, every `$mdl` / `$eff_*` / `$ctx_*` token resolves to nothing,
 and those sidebar rows render empty — with no error anywhere. It doubles as your in-pane status
@@ -866,7 +877,7 @@ but treat the conflict as expected rather than proven.
 |---|---|
 | Config | `config/herdr/config.toml` → `~/.config/herdr/config.toml` |
 | Key encoding probe | `scripts/herdr-keyprobe.sh` |
-| Sidebar publisher | `claude/hooks/session-statusline.sh` → `~/.claude/hooks/` (+ `statusLine` in `~/.claude/settings.json`) |
+| Sidebar publisher | `claude/hooks/session-statusline.sh` → `~/.claude/hooks/` (+ `statusLine` in `~/.claude/settings.json`, via `scripts/herdr-claude-wire.sh`) |
 | Agent skill | `~/.claude/skills/herdr/SKILL.md` (`herdr --skill`) |
 | Server unit | `systemd/herdr-server.service` → `~/.config/systemd/user/herdr-server.service` (`systemctl --user enable --now herdr-server.service`; wanted by `graphical-session.target`, survives logout) |
 | Server launcher | `scripts/herdr-server-launch.sh` (`--print-env` shows the environment it builds) |
@@ -875,5 +886,7 @@ but treat the conflict as expected rather than proven.
 | Upstream issues | Drafted, not yet filed — herdr: teammate detection; herdmates: report-agent bridge (§9) |
 | Plugin list | `config/herdr/plugins/plugins.list` |
 | Local plugin | `config/herdr/plugins/local/sidebar-icons` |
-| Tool check | `scripts/verify-tools.sh` |
+| Tool check | `scripts/verify-tools.sh` (`--herdr` for a modular install) |
+| Claude wiring | `scripts/herdr-claude-wire.sh` (statusLine + agent skill file) |
+| State table | `scripts/test-herdr-modular.sh` (CI: `herdr-modular-test`) |
 | Desktop keys | `scripts/apply-gnome-settings.sh` (`gnome-apply`) |

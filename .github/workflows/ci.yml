@@ -153,6 +153,31 @@ jobs:
       - name: Run the hspawn state table
         run: ./scripts/test-hspawn.sh
 
+  herdr-modular-test:
+    name: Modular herdr Checks State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh and jq
+        run: sudo apt-get update && sudo apt-get install -y zsh jq
+
+      # The two commands a modular adopter actually runs -- `verify-tools.sh
+      # --herdr` and `herdr-claude-wire.sh` -- plus the assertion that
+      # `herdr-help` lives in the layer they source.
+      #
+      # Most rows assert that something was NOT written or NOT reported, which
+      # is also what a suite whose subjects vanished produces, so the suite
+      # asserts its subjects exist before anything else. It stubs `herdr` at the
+      # front of PATH rather than relying on its absence: the machine this was
+      # written on has a real one wired to a live server, and the wirer
+      # regenerates a file under $HOME. Fake $HOME per row; no network.
+      - name: Run the modular herdr state table
+        run: ./scripts/test-herdr-modular.sh
+
   herdr-modular-install:
     name: Modular herdr Install
     runs-on: ubuntu-latest
