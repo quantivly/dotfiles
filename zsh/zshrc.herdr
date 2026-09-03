@@ -1374,9 +1374,16 @@ RESOURCES:
   build-limits - active build/test parallelism tier
                  (tight inside a herdr pane, loose outside)
 
+SETUP (both fail silently if skipped):
+  ~/.dotfiles/scripts/herdr-claude-wire.sh
+                                         - statusLine + agent skill file; the
+                                           two things ./install cannot do
 VERIFY:
-  ~/.dotfiles/scripts/verify-tools.sh    - server env hygiene + plugin deps on
-                                           the SERVER's PATH
+  ~/.dotfiles/scripts/verify-tools.sh --herdr
+                                         - server env, unit enablement, plugin
+                                           deps on the SERVER's PATH, wiring.
+                                           Drop --herdr only if you installed
+                                           the whole repo, not just herdr.
   ~/.dotfiles/scripts/herdr-keyprobe.sh  - what bytes a chord actually produces
   herdr agent explain <pane>             - why a pane is (not) detected
   herdr server reload-config | jq '.result.status'

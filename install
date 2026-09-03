@@ -152,7 +152,13 @@ if (( HERDR_ONLY )); then
 
   (--herdr, not a bare run: the full report covers the 18-link install, so on
   this machine its mise section would print a ✗ and offer a paste that pins ~25
-  tools globally. Exit 0 there means done.)
+  tools globally.)
+
+  Exit 0 means the three ASSERTIONS passed — server environment, unit enablement
+  and Claude Code wiring. The plugin-dependency ✗ lines are informational and do
+  NOT affect it, which matters most for exactly this audience: --herdr links no
+  mise config, so node/bun/lazygit/yazi are all plausibly absent. Read those
+  lines, and scripts/herdr-deps-check.sh for what each missing one costs.
 
 NEXT
     if (( deps_rc != 0 )); then

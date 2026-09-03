@@ -299,6 +299,7 @@ herdr --version          # confirm it is on PATH before continuing (~/.local/bin
 # 3. Wire Claude Code: the statusLine entry (./install creates the symlink but CANNOT edit
 #    ~/.claude/settings.json) and the agent skill file. One idempotent command, and it
 #    refuses a statusLine owned by something else rather than overwriting it. See §6.
+scripts/herdr-claude-wire.sh           # --print shows what it would change
 
 # 4. Plugins. herdr-lazy is the manager — and it is itself a plugin, so it does not exist until
 #    you install it. (The earlier version of this list began at `herdr-lazy check`; on a fresh
@@ -321,7 +322,10 @@ systemctl --user daemon-reload && systemctl --user enable --now herdr-server.ser
 
 # 6. Prove it the way the SERVER sees it — server-env hygiene, unit enablement, every plugin
 #    dependency resolved under the server's PATH, and the step-3 wiring:
-scripts/verify-tools.sh --herdr        # modular install: exit 0 means done
+scripts/verify-tools.sh --herdr        # modular install
+#    Exit 0 covers the three ASSERTIONS (server env, unit enablement, Claude
+#    wiring). The plugin-dependency FAIL lines do NOT affect it -- read them, and
+#    scripts/herdr-deps-check.sh for what each missing tool costs.
 scripts/verify-tools.sh                # full install: the above plus mise + the tool inventory
 
 # 7. clauth, only if you need several Claude accounts. Not required for single-account use.
@@ -808,6 +812,10 @@ class §0 is about. Neither matters on Linux; both matter the moment a teammate 
 - **`tab_bar_right`** (`config/herdr/config.toml`) parses `/proc/loadavg` and `/proc/meminfo`.
   There is no `/proc` on macOS, so the widget renders nothing. This file is symlinked to every
   teammate by `install.conf.yaml`.
+- **`readlink -f` is GNU-only**, and `scripts/verify-tools.sh` uses it to derive
+  its own checkout root — so on macOS the whole script mis-resolves, not just one
+  check. BSD needs a manual walk, or
+  `python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))'`.
 - **The server-environment check** (§2.4) reads `/proc/<pid>/environ`, and `hreap` reads
   `/proc/<pid>/status` for its memory column *and* `ps -o etimes` for the process age it falls
   back to when no transcript is found — BSD `ps` has no `etimes`, so `hreap` needs porting on

@@ -60,6 +60,12 @@ warn() { say "  ${YEL}○${OFF} $*"; }
 bad()  { say "  ${RED}✗${OFF} $*"; RC=1; }
 RC=0
 
+# A signal mid-run left a temp file beside the destination (verified in review).
+# $tmp is reused by both sections; clearing it after each successful mv keeps the
+# trap from chasing a path that is already gone.
+tmp=""
+trap 'rm -f "${tmp:-}"' EXIT INT TERM
+
 say ""
 say "Wiring Claude Code to herdr"
 say "${DIM}───────────────────────────${OFF}"
@@ -83,14 +89,26 @@ else
     # The command is stored as an ABSOLUTE path inside a bash -c wrapper: `~` is
     # not reliably expanded in this field, and a bare path is not executed by a
     # shell, so the wrapper is what makes it portable across Claude versions.
-    want_cmd="bash '$HOOK'"
+    # printf %q, not manual single quotes: "bash '$HOOK'" produced a command
+    # that does not parse when $HOME contains a single quote, and the script
+    # reported ✓ for it. A HOME with a space was already fine; this covers both.
+    printf -v want_cmd 'bash %q' "$HOOK"
 
     existing=""
     st_type=""
     parse_ok=true
     if [[ -e "$SETTINGS" ]]; then
-        if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
+        # Three different states, three different remedies. `jq -e .` conflates
+        # them: it fails for an unreadable file (a permissions problem), and it
+        # exits 1 for a VALID `null` document (nothing wrong with the syntax).
+        # Reporting either as "not valid JSON" sends the user to fix the wrong
+        # thing, and the advice here is "fix it by hand".
+        if [[ ! -r "$SETTINGS" ]]; then
+            parse_ok=unreadable
+        elif ! jq empty "$SETTINGS" >/dev/null 2>&1; then
             parse_ok=false
+        elif [[ "$(jq -r 'type' "$SETTINGS" 2>/dev/null)" != object ]]; then
+            parse_ok=nonobject
         else
             # Read the TYPE before the value. `.statusLine.command // ""` is a
             # jq ERROR when statusLine is not an object ("Cannot index string
@@ -109,7 +127,12 @@ else
         fi
     fi
 
-    if [[ "$parse_ok" != true ]]; then
+    if [[ "$parse_ok" == unreadable ]]; then
+        bad "cannot read ${SETTINGS/#$HOME/\~} — check its permissions, then re-run"
+    elif [[ "$parse_ok" == nonobject ]]; then
+        bad "${SETTINGS/#$HOME/\~} is valid JSON but not an object — Claude Code cannot use it"
+        say "      ${DIM}A bare null/array/string document has no place to put statusLine.${OFF}"
+    elif [[ "$parse_ok" != true ]]; then
         # An unparseable settings.json is not an absent one, and treating it as
         # absent would replace a file we cannot read with one we wrote.
         bad "${SETTINGS/#$HOME/\~} is not valid JSON — fix it by hand, then re-run"
@@ -119,9 +142,14 @@ else
         bad "statusLine is a ${st_type}, not an object — that is not ours; not touching it"
         say "      ${DIM}Claude Code will not run it in that shape either. Inspect it,${OFF}"
         say "      ${DIM}remove it if it is stale, then re-run this script.${OFF}"
-    elif [[ -n "$existing" && "$existing" != *session-statusline.sh* ]]; then
+    elif [[ "$st_type" == object && "$existing" != *session-statusline.sh* ]]; then
+        # An OBJECT whose command is not ours is still somebody else's key --
+        # including {} and {"command":null}. Testing `-n "$existing"` instead
+        # let those through, because an absent command reads identically to an
+        # absent statusLine. "Ours" is a positive test, never the absence of
+        # evidence that it is not.
         bad "a statusLine belonging to something else is already set — not touching it"
-        say "      ${DIM}found: ${existing}${OFF}"
+        say "      ${DIM}found: ${existing:-<an object with no command field>}${OFF}"
         say "      ${DIM}Remove it first if you want herdr's sidebar rows to populate;${OFF}"
         say "      ${DIM}settings.json has room for exactly one statusLine.${OFF}"
     else
@@ -160,6 +188,7 @@ else
                 # failure for a write that succeeded. That exact inversion is
                 # logged in CLAUDE.md against five checks in this repo.
                 if mv "$tmp" "$SETTINGS"; then
+                    tmp=""
                     good "statusLine set (refreshInterval ${REFRESH})"
                 else
                     bad "could not replace ${SETTINGS/#$HOME/\~}"
@@ -194,6 +223,7 @@ else
         # nothing, and an empty SKILL.md is indistinguishable from a wired one
         # until an agent reads it.
         if mv "$tmp" "$SKILL"; then
+            tmp=""
             good "skill file regenerated from 'herdr --skill'"
         else
             bad "could not replace ${SKILL/#$HOME/\~}"
