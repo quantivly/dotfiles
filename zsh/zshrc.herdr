@@ -1331,3 +1331,70 @@ hreap() {
     fi
   fi
 }
+
+#==============================================================================
+# herdr-help — in-shell cheat sheet
+#==============================================================================
+# Moved here from zsh/zshrc.help (DO-563). It had been sitting in the general
+# help module, which the FULL install sources and a modular adopter never does
+# — so the one command that lists hspawn/hreap/clauth was missing on exactly
+# the machines whose owner had not read the guide, and the write-up had to
+# apologise for its absence. `dothelp` still lists it; the definition lives
+# with the rest of the layer it documents.
+# Herdr agent-workspace help
+herdr-help() {
+  cat << 'EOF'
+🐑 Herdr Agent Workspace Quick Reference
+
+SPAWN & REAP:
+  hspawn   - worktree + branch + agent + first prompt, in one call
+             hspawn [-p profile] [-m model] [-e effort] [--mode M] [-b ref]
+                    [-n name] <repo-dir> <slug> [prompt...]
+  hreap    - census of EVERY claude process in a herdr pane, detected or not
+             hreap                                 DEFAULTS to idle >= 30 min
+             hreap --older 0                       every process, no idle filter
+             hreap [--older N] [--mine] [--json]   read-only
+             hreap --close --mine                  close only this session's spawns
+  hdespawn - tear one spawn down: pane, workspace, worktree, registry entry
+             hdespawn [-y|--yes] [-f|--force] <slug|pane-id>
+  Registry:  ${HSPAWN_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/hspawn}
+
+ACCOUNTS (clauth):
+  clauth <profile>        - switch global credentials; then 'claude' is a TEAM LEAD
+  clauth start <profile>  - isolated worker on that account, NOT a lead
+  clauth list             - profiles with usage
+
+PLUGINS:
+  herdr-lazy check          - installed vs declared in plugins.list
+  herdr-lazy sync           - install what plugins.list declares and is missing
+  herdr-lazy sync --prune   - that, AND remove anything installed but undeclared
+  herdr plugin action list  - verify an action id before binding it
+
+RESOURCES:
+  build-limits - active build/test parallelism tier
+                 (tight inside a herdr pane, loose outside)
+
+SETUP (both fail silently if skipped):
+  ~/.dotfiles/scripts/herdr-claude-wire.sh
+                                         - statusLine + agent skill file; the
+                                           two things ./install cannot do
+VERIFY:
+  ~/.dotfiles/scripts/verify-tools.sh --herdr
+                                         - server env, unit enablement, plugin
+                                           deps on the SERVER's PATH, wiring.
+                                           Drop --herdr only if you installed
+                                           the whole repo, not just herdr.
+  ~/.dotfiles/scripts/herdr-keyprobe.sh  - what bytes a chord actually produces
+  herdr agent explain <pane>             - why a pane is (not) detected
+  herdr server reload-config | jq '.result.status'
+                                         - must say 'applied', never 'partial'
+
+⚠️  hreap --close without --mine is MACHINE-WIDE, not just your spawns
+⚠️  Never start or restart the herdr server from inside a pane or a Claude
+    session. Use: systemctl --user restart herdr-server.service
+⚠️  The server's PATH is a snapshot from when it started; a newly installed
+    tool stays invisible to plugins and popups until it restarts
+
+Full guide: ~/.dotfiles/docs/HERDR_GUIDE.md
+EOF
+}

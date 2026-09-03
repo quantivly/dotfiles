@@ -57,7 +57,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
 | `zsh/functions/system.sh` | Performance + Utilities + Dotfiles guard + GNOME + Backup + Audit (59 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `dotfiles-doctor`, `dotfiles-work`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
 | `zsh/functions/github.sh` | gh account routing + diagnosis (10 functions) | `gh-doctor` |
-| `zsh/zshrc.herdr` | herdr agent workspaces (16 functions) — **agent-facing**, a human at the keyboard uses the herdr UI and `clauth` instead | `hspawn`, `hdespawn`, `hreap`, `claude`, `herdr-lazy` |
+| `zsh/zshrc.herdr` | herdr agent workspaces (17 functions) — mostly **agent-facing**, a human at the keyboard uses the herdr UI and `clauth` instead | `hspawn`, `hdespawn`, `hreap`, `claude`, `herdr-lazy`, `herdr-help` |
 
 **Function Naming Convention:**
 - User-facing: No separator or dashes (e.g., `fcd`, `dexec`, `gco-safe`)
@@ -849,8 +849,20 @@ The shell layer is `zsh/zshrc.herdr`, sourced by `zshrc` and **safe to source al
 modular adopter adds one line to their own rc. It needs zsh, and `hdespawn` prefers `confirm`
 (`zsh/functions/system.sh`). `hspawn`/`hdespawn`/`hreap` in it are **agent-facing**: a lead
 agent drives them to fan work into worktrees and reap it. A human uses the herdr UI and
-`clauth`. Two things the modular installer cannot do, both silent: the `statusLine` entry
-in `~/.claude/settings.json`, and `herdr plugin link` for the local plugin. It prints both.
+`clauth`. It also carries `herdr-help`, the in-shell cheat sheet — moved here from
+`zsh/zshrc.help` by DO-563, because that module is sourced by the FULL install only, so the one
+command that lists `hspawn`/`hreap`/`clauth` was missing on exactly the machines whose owner had
+not read the guide.
+
+Two things the modular installer cannot do, both silent: Claude Code's `statusLine` +
+agent skill file, and `herdr plugin link` for the local plugin. It prints both, and the first is
+now one idempotent command — `scripts/herdr-claude-wire.sh` — rather than a JSON block with the
+reader's own home directory to substitute in. `scripts/verify-tools.sh --herdr` is the single
+check afterwards: the three herdr sections plus that wiring, and **none** of the eleven
+full-install sections, whose mise check would otherwise print a ✗ and offer a paste that pins
+~25 tools globally on a machine that deliberately linked no mise config. A checker that needs a
+prose disclaimer telling you to ignore it is the permanently-red checker this file warns about
+twice, and it had reached the one path written to avoid it.
 
 The unit's `ExecStart` is the absolute `%h/.dotfiles/scripts/herdr-server-launch.sh`, so
 the checkout must be at `~/.dotfiles` whichever path is used; `--herdr` warns when it is not
@@ -1018,7 +1030,9 @@ Gotchas, in the order they bite:
   arriving as a config file that still looked correct. Any migration that moves the marker
   variable has this shape: check what an unset gate falls back to before assuming the old
   name is merely dead. `build-limits` prints which tier is active.
-- **The sidebar publisher needs THREE things wired, and `./install` only does one.**
+- **The sidebar publisher needs THREE things wired, and `./install` only does one** —
+  `scripts/herdr-claude-wire.sh` now does the other two, and `verify-tools.sh --herdr` fails when
+  they are missing (before DO-563 nothing checked either, in either install path).
   `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
   also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo), and that
   entry needs `"refreshInterval": 60` — without the interval the idle band freezes when the session
@@ -1123,6 +1137,7 @@ gh-refresh-tokens    # Refresh GH CLI token cache
 gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offline)
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 tool_status          # Check installed tools
+herdr-help           # In-shell herdr cheat sheet (hspawn/hreap/clauth)
 build-limits         # Show active build/test worker caps (see zshrc.buildlimits)
 alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
@@ -1132,6 +1147,8 @@ gnome-apply          # Apply curated GNOME desktop config (idempotent)
 xdg-repair           # Fix/guard ~/Desktop, ~/Documents, ... XDG dirs (idempotent)
 gnome-init           # Create ~/.gnome-settings.local (dock favorites, launch keys)
 gnome-status         # Summary of GNOME version, theme, dock, extensions
+scripts/herdr-claude-wire.sh    # Wire Claude Code to herdr (statusLine + agent skill file)
+scripts/verify-tools.sh --herdr # The one check a modular herdr adopter runs
 backup-init          # Create ~/.backup.local (repo paths, B2 keys)
 backup-setup         # One-time guided backup install (restic, repos, timers, kit)
 backup-now           # Run a backup now (external HDD + Backblaze B2)

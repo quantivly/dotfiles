@@ -12,7 +12,7 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 #
-# EXIT CODE: non-zero if and only if one of the two ASSERTION sections FAILs:
+# EXIT CODE: non-zero if and only if one of the three ASSERTION sections FAILs:
 # "herdr server environment hygiene" — forbidden variables in the running
 # server's environment, a teammux shim dir on its PATH, or session variables the
 # session provides that the server does not have — or "systemd user unit
@@ -20,7 +20,10 @@
 # the unit file this checkout links. That is the one section the switch-over runbooks
 # (systemd/herdr-server.service, scripts/herdr-server-launch.sh) treat as an
 # assertion ("must be green"), so it must be gateable by a caller or CI, like
-# backup-doctor and audit-status. Everything else stays informational and exits
+# backup-doctor and audit-status. The third is "Claude Code wiring" -- the
+# statusLine and agent-skill file that ./install links a hook for but cannot
+# finish, both of which fail silently and neither of which anything checked
+# before DO-563. Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
 # SKIPPED because no server is running.
@@ -32,6 +35,55 @@
 # 12 lines and exit 1, silently reporting nothing about the other ~20 tools — which is
 # why the missing `delta` that broke `git diff` was never surfaced despite this script
 # existing to surface exactly that. A verifier must outlive the failures it reports.
+
+# --herdr: report ONLY what a modular herdr adopter installed (DO-563).
+#
+# Why this flag exists. `./install --herdr` links five files and deliberately
+# does NOT link ~/.config/mise/config.toml, so on such a machine the eleven
+# full-install sections below are all noise -- and the mise-drift check is
+# worse than noise: it prints a FAIL and offers a pasteable `ln -sfn` that
+# would pin ~25 tools globally and override whatever node/python the machine
+# already runs. The team write-up had to carry a callout telling readers to
+# ignore both. A checker that needs a prose disclaimer is the permanently-red
+# checker this repo's own CLAUDE.md warns about twice; the fix is scope, not
+# prose.
+# This checkout, resolved from THIS script rather than from $HOME/.dotfiles.
+# Two reasons, and the first one bit during DO-563: the old definition lived
+# inside the full-install report, so --herdr left it empty and the enablement
+# assertion failed with "/scripts/reconcile-systemd-units.sh missing" — a FAIL
+# reporting the checker's absence, in a section whose whole point is that a
+# missing checker is not a pass. The second is that a checkout is not
+# necessarily at ~/.dotfiles (see DO-564), and a verifier that can only verify
+# one path is one more thing to be wrong somewhere else.
+DOTFILES_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+HERDR_ONLY=false
+case "$#:${1:-}" in
+    0:) ;;
+    1:--herdr) HERDR_ONLY=true ;;
+    1:-h | 1:--help)
+        cat <<'USAGE'
+Usage: verify-tools.sh [--herdr]
+  (no args)  full report: every tool this repo declares, plus the herdr checks
+  --herdr    ONLY the herdr checks -- server env, unit enablement, plugin deps
+             under the server PATH, and Claude Code wiring. For a machine that
+             ran `./install --herdr` and linked five files, not eighteen.
+
+EXIT: non-zero if a herdr assertion FAILs (server env, unit enablement, Claude
+Code wiring). Missing optional tools and mise drift stay informational.
+USAGE
+        exit 0 ;;
+    *)
+        # The case key is "$#:$1", so any arity != 1 lands here -- and blaming
+        # "$1" then accused the VALID flag of being unknown when the real fault
+        # was a second word. Separate the two messages.
+        if (( $# > 1 )); then
+            echo "verify-tools.sh: too many arguments (expected at most one, got $#: $*)" >&2
+        else
+            echo "verify-tools.sh: unknown argument '${1}' (try --help)" >&2
+        fi
+        exit 2 ;;
+esac
 
 # Color codes (only if TTY)
 if [[ -t 1 ]]; then
@@ -69,6 +121,12 @@ check_tool() {
     fi
 }
 
+# Everything from here to the herdr sections is the FULL-INSTALL report, and is
+# skipped wholesale under --herdr. Deliberately NOT re-indented: wrapping ~170
+# lines in an `if` purely to change their indentation would bury the one-line
+# change that actually happened in a diff nobody can read.
+if [[ "$HERDR_ONLY" != true ]]; then
+
 echo -e "${BLUE}=== Required Tools ===${NC}"
 check_tool zsh "--version" true
 check_tool git "--version" true
@@ -83,7 +141,6 @@ echo ""
 echo -e "${BLUE}=== Modern CLI Tools (From mise) ===${NC}"
 
 # Parse tools from .mise.toml [tools] section
-DOTFILES_ROOT="${HOME}/.dotfiles"
 if [[ -f "${DOTFILES_ROOT}/.mise.toml" ]]; then
     # Extract tool names from .mise.toml
     while IFS= read -r line; do
@@ -198,6 +255,11 @@ echo -e "${BLUE}=== mise config drift ===${NC}"
 # `git diff` failed outright in a terminal with "unable to execute pager 'delta'".
 # Nothing anywhere reported it.
 MISE_ACTIVE="$HOME/.config/mise/config.toml"
+# Deliberately $HOME/.dotfiles, NOT $DOTFILES_ROOT — the inconsistency with the
+# tool inventory above is the point, not an oversight. This check asks whether
+# the LIVE symlink points at the canonical deployment; run from a worktree,
+# comparing against the worktree's own .mise.toml would call a correctly-linked
+# machine drifted.
 MISE_REPO="$HOME/.dotfiles/.mise.toml"
 if [[ ! -e "$MISE_ACTIVE" ]]; then
     echo -e "${YELLOW}✗${NC} no active mise config at $MISE_ACTIVE"
@@ -239,6 +301,8 @@ if command -v mise &>/dev/null && [[ -f "$MISE_REPO" ]]; then
         echo "    reality is what caused the drift above."
     fi
 fi
+
+fi  # end of the full-install report (skipped under --herdr)
 
 echo ""
 echo -e "${BLUE}=== herdr server environment hygiene ===${NC}"
@@ -388,10 +452,57 @@ echo -e "${BLUE}=== systemd user unit enablement vs the linked unit files ===${N
 # whatever target was current when the unit was first enabled. On this machine
 # that meant the server would have kept starting at boot, before any graphical
 # session existed, which the section above would then have called "clean".
-if [[ -x "$DOTFILES_ROOT/scripts/reconcile-systemd-units.sh" ]]; then
-    if ! "$DOTFILES_ROOT/scripts/reconcile-systemd-units.sh" --check; then
+# WHICH checkout to ask about. Not $DOTFILES_ROOT: deriving that from
+# BASH_SOURCE fixed a real bug (see :58) but made THIS assertion vacuous when
+# run from a worktree -- which `dotfiles-work` makes the normal place to run it.
+# It skipped with "no units linked from <worktree>" while the live deployment
+# had an enabled unit, so exit 0 meant "not checked" in the section whose own
+# comment says a missing checker is not a pass. Found in review.
+#
+# The enablement question is about the LIVE deployment, so resolve it from the
+# links systemd actually holds and report which checkout that turned out to be.
+# A side benefit: with a fake HOME there are no links, so nothing is executed
+# and the section is genuinely hermetic (it used to shell out to the real
+# script on every test row).
+enable_root=""
+enable_found_link=0
+for _u in "$HOME"/.config/systemd/user/*.service "$HOME"/.config/systemd/user/*.timer \
+          "$HOME"/.config/systemd/user/*.socket  "$HOME"/.config/systemd/user/*.path \
+          "$HOME"/.config/systemd/user/*.target; do
+    [[ -L "$_u" ]] || continue
+    _t="$(readlink -f "$_u" 2>/dev/null)" || continue
+    # Only links that point into a checkout's systemd/ dir are ours to reconcile.
+    [[ "$_t" == */systemd/* ]] || continue
+    enable_found_link=1
+    _cand="${_t%/systemd/*}"
+    if [[ -x "$_cand/scripts/reconcile-systemd-units.sh" ]]; then
+        enable_root="$_cand"
+        break
+    fi
+done
+
+if (( ! enable_found_link )); then
+    echo "  ○ no managed systemd user units linked into ~/.config/systemd/user — skipped"
+elif [[ -z "$enable_root" ]]; then
+    # Units ARE linked; we just cannot check them. Not a pass.
+    echo -e "${RED}✗ FAIL:${NC} units are linked into ~/.config/systemd/user but the checkout they"
+    echo "    point into has no scripts/reconcile-systemd-units.sh — enablement UNCHECKED"
+    herdr_hygiene_failed=1
+elif [[ -x "$enable_root/scripts/reconcile-systemd-units.sh" ]]; then
+    [[ "$enable_root" != "$DOTFILES_ROOT" ]] && \
+        echo "  · checking the checkout the live links point into: $enable_root"
+    if ! "$enable_root/scripts/reconcile-systemd-units.sh" --check; then
         herdr_hygiene_failed=1
-        echo "    Fix: ./install — it reconciles this."
+        # `./install` on a modular machine links ~/.zshrc, ~/.gitconfig,
+        # ~/.tmux.conf, ~/.p10k.zsh and VS Code's settings -- the exact takeover
+        # --herdr exists to avoid, printed as the remedy inside --herdr output.
+        # install.conf.herdr.yaml runs the reconcile too, so the right advice
+        # already exists.
+        if [[ "$HERDR_ONLY" == true ]]; then
+            echo "    Fix: ./install --herdr — it reconciles this."
+        else
+            echo "    Fix: ./install — it reconciles this."
+        fi
         # NOT `systemctl --user reenable`, which this line used to suggest. Its
         # disable half removes every symlink in the unit search path pointing at
         # the unit, and for a dotbot-installed unit the entry in
@@ -408,7 +519,7 @@ else
     # as a warning let the check be absent and the script still exit 0 — the
     # unanswerable question resolving to the answer it would have had if
     # everything were fine, which is the failure mode this whole file is about.
-    echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/reconcile-systemd-units.sh missing — enablement UNCHECKED"
+    echo -e "${RED}✗ FAIL:${NC} $enable_root/scripts/reconcile-systemd-units.sh missing — enablement UNCHECKED"
     herdr_hygiene_failed=1
 fi
 
@@ -477,14 +588,172 @@ else
 fi
 
 echo ""
-echo -e "${BLUE}=== Summary ===${NC}"
-echo "For installation instructions, see:"
-echo "  - ~/.dotfiles/CLAUDE.md (comprehensive guide)"
-echo "  - ~/.dotfiles/scripts/install-modern-tools.sh (automated installer)"
+echo -e "${BLUE}=== Claude Code wiring ===${NC}"
+# The two steps ./install CANNOT do, both of which fail silently and neither of
+# which was checked by anything until DO-563. Asserted in BOTH modes: the full
+# install links the statusline hook and wires nothing, exactly like the modular
+# one, so this is not a modular-only concern.
+#
+#   statusLine       without it every $mdl / $eff_* / $ctx_* token resolves to
+#                    nothing and those sidebar rows render EMPTY, no error.
+#   refreshInterval  without it the idle band freezes when a session goes quiet
+#                    and every token then expires on the 4-minute TTL -- the
+#                    same blank rows, arriving later and looking unrelated.
+#   SKILL.md         `herdr --skill` only PRINTS; nothing generates the file, so
+#                    a lead agent silently has no herdr CLI reference.
+#
+# FAIL rather than WARN because both are one command to fix, and that command is
+# named on every failing line. An unfixable condition would be a WARN (see the
+# keyring collapse in gh-doctor); these are not.
+claude_wiring_failed=0
+CC_SETTINGS="$HOME/.claude/settings.json"
+CC_HOOK="$HOME/.claude/hooks/session-statusline.sh"
+CC_SKILL="$HOME/.claude/skills/herdr/SKILL.md"
+# Absolute: this script may be invoked as `verify-tools` from ~/.local/bin, and
+# a relative remedy is not pasteable from an arbitrary cwd. The full-install
+# summary already prints absolute paths, so relative ones here made the two
+# halves of one report disagree.
+CC_FIX="    Fix: $DOTFILES_ROOT/scripts/herdr-claude-wire.sh"
+
+# SKIP when there is nothing to wire, matching all three sibling herdr sections
+# (each degrades to `○ skipped` when its subject is absent). Asserting
+# unconditionally made this permanently red for a full-install user who does not
+# run herdr -- whose only "fix" would be to install two programs they chose not
+# to -- and red on any machine straight after `./install`, before anyone had the
+# chance to wire anything. That is the permanently-red checker this repo warns
+# about twice, reproduced in the change that exists to remove one. Found in
+# review, not in use.
+#
+# The gate is deliberately narrow: herdr present AND Claude Code having run here
+# means an unwired statusLine is a real, actionable fault, so it stays a ✗.
+# Body NOT re-indented, same reason as the full-install block above.
+if ! command -v herdr &>/dev/null; then
+    echo "  ○ herdr not installed — skipped (this section checks the bridge between herdr and Claude Code)"
+elif [[ ! -d "$HOME/.claude" ]]; then
+    # Belt-and-braces only: dotbot links ~/.claude/hooks/session-statusline.sh in
+    # BOTH install paths, so this directory exists on any machine that ran either
+    # one. `command -v herdr` is the arm that actually fires; this one covers a
+    # hand-copied checkout.
+    echo "  ○ no ~/.claude — Claude Code has not run here; skipped"
+else
+
+if ! command -v jq &>/dev/null; then
+    # An empty answer is never agreement: with no JSON parser this check cannot
+    # be performed, and saying nothing would read as saying it passed.
+    echo -e "${YELLOW}⚠${NC} jq not installed — statusLine NOT CHECKED (install jq to check it)"
+elif [[ ! -e "$CC_SETTINGS" ]]; then
+    echo -e "${RED}✗ FAIL:${NC} no ${CC_SETTINGS/#$HOME/\~} — statusLine is not wired"
+    echo "$CC_FIX"
+    claude_wiring_failed=1
+elif ! jq -e . "$CC_SETTINGS" &>/dev/null; then
+    echo -e "${RED}✗ FAIL:${NC} ${CC_SETTINGS/#$HOME/\~} is not valid JSON — statusLine cannot be read"
+    echo "    Claude Code reads this file too, so this is not only a herdr problem. Fix it by hand."
+    claude_wiring_failed=1
+else
+    # Type before value: `.statusLine.command` is a jq ERROR on a non-object
+    # statusLine, and an unchecked empty capture reported "no statusLine" for a
+    # file that has one of the wrong shape -- a confident wrong answer, and it
+    # leaked jq's own stderr into the report. Same defect as the wirer's.
+    cc_type="$(jq -r '.statusLine | type' "$CC_SETTINGS" 2>/dev/null)" || cc_type=""
+    [[ -n "$cc_type" ]] || cc_type="unreadable"
+    cc_cmd=""; cc_int=""
+    if [[ "$cc_type" == object ]]; then
+        cc_cmd="$(jq -r '.statusLine.command // ""' "$CC_SETTINGS" 2>/dev/null)"
+        cc_int="$(jq -r '.statusLine.refreshInterval // ""' "$CC_SETTINGS" 2>/dev/null)"
+    fi
+    if [[ "$cc_type" != null && "$cc_type" != object ]]; then
+        echo -e "${RED}✗ FAIL:${NC} statusLine is a ${cc_type}, not an object — Claude Code will not run it"
+        echo "    Inspect ${CC_SETTINGS/#$HOME/\~} by hand; herdr-claude-wire.sh refuses to overwrite it."
+        claude_wiring_failed=1
+    elif [[ -z "$cc_cmd" ]]; then
+        echo -e "${RED}✗ FAIL:${NC} no statusLine in ${CC_SETTINGS/#$HOME/\~} — every sidebar row will render empty"
+        echo "$CC_FIX"
+        claude_wiring_failed=1
+    elif [[ "$cc_cmd" != *session-statusline.sh* ]]; then
+        # Not ours, and settings.json has room for exactly one statusLine.
+        echo -e "${RED}✗ FAIL:${NC} statusLine belongs to something else: $cc_cmd"
+        echo "    herdr's sidebar rows cannot populate while another publisher owns this key."
+        claude_wiring_failed=1
+    elif ! jq -e '.statusLine.refreshInterval | type == "number" and . > 0 and . <= 240' \
+              "$CC_SETTINGS" >/dev/null 2>&1; then
+        # A bare numeric regex on `jq -r` output accepted three values that are
+        # equivalent to the key being absent: the JSON STRING "60" (jq -r strips
+        # the quotes), 0, and anything past the TTL. All three reported ✓.
+        #
+        # The 240s upper bound is INFERRED from this repo's own note that tokens
+        # expire on a 4-minute TTL -- not from testing Claude Code, which has not
+        # been checked for whether it honours 0 or a string. The lower bound and
+        # the type are not inferences.
+        echo -e "${RED}✗ FAIL:${NC} statusLine refreshInterval is not a usable number: ${cc_int:-<absent>}"
+        echo "    Must be a JSON number, 0 < n <= 240 — tokens expire on a 4-minute TTL, so a"
+        echo "    larger interval (or 0, or a quoted \"60\") blanks the rows it exists to keep alive."
+        echo "$CC_FIX"
+        claude_wiring_failed=1
+    elif [[ ! -e "$CC_HOOK" ]]; then
+        echo -e "${RED}✗ FAIL:${NC} statusLine points at ${CC_HOOK/#$HOME/\~}, which does not exist"
+        echo "    Run ./install --herdr (dotbot links it); wiring alone cannot substitute for the file."
+        claude_wiring_failed=1
+    else
+        echo -e "${GREEN}✓${NC} statusLine wired (refreshInterval ${cc_int})"
+    fi
+fi
+
+# -f, not -e: a DIRECTORY named SKILL.md satisfies both -e and -s (a directory
+# is never zero-length), so `mkdir SKILL.md` produced "✓ agent skill file
+# present" and exit 0. Found in review.
+if [[ -d "$CC_SKILL" ]]; then
+    echo -e "${RED}✗ FAIL:${NC} ${CC_SKILL/#$HOME/\~} is a DIRECTORY, not a file"
+    echo "    Remove it; nothing can generate the skill file over a directory."
+    claude_wiring_failed=1
+elif [[ ! -f "$CC_SKILL" ]]; then
+    echo -e "${RED}✗ FAIL:${NC} no ${CC_SKILL/#$HOME/\~} — your agents have no herdr CLI reference"
+    echo "$CC_FIX"
+    claude_wiring_failed=1
+elif [[ ! -s "$CC_SKILL" ]]; then
+    # `herdr --skill` on a broken install exits 0 and prints nothing, so a
+    # zero-byte file is the likely result of a truncated redirect -- and it is
+    # indistinguishable from a wired one until an agent reads it.
+    echo -e "${RED}✗ FAIL:${NC} ${CC_SKILL/#$HOME/\~} is empty — 'herdr --skill' produced nothing"
+    echo "$CC_FIX"
+    claude_wiring_failed=1
+elif command -v herdr &>/dev/null && ! diff -q <(herdr --skill 2>/dev/null) "$CC_SKILL" &>/dev/null; then
+    # A stale skill file is what the wirer's own header calls "worse than none,
+    # because it looks fine": it teaches a lead agent flags that no longer
+    # exist. ⚠ and NOT part of the exit code, deliberately -- it goes stale on
+    # every `herdr update`, and a ✗ that appears on every upgrade until someone
+    # re-runs a command is the permanently-red checker in slow motion.
+    echo -e "${YELLOW}⚠${NC} agent skill file is stale — it differs from 'herdr --skill' output"
+    echo "    Regenerate: scripts/herdr-claude-wire.sh (it is version-specific)"
+else
+    echo -e "${GREEN}✓${NC} agent skill file present"
+fi
+
+fi  # end of the Claude Code wiring section (skipped when there is nothing to wire)
+
 echo ""
-echo "To install missing tools via mise:"
-echo "  mise install"
+echo -e "${BLUE}=== Summary ===${NC}"
+if [[ "$HERDR_ONLY" == true ]]; then
+    # Deliberately NOT the full report's advice: a modular adopter linked five
+    # files and no mise config, so "run mise install" and "read CLAUDE.md" are
+    # instructions for a machine they did not install.
+    echo "Modular herdr install."
+    echo "  Runtime dependencies: $DOTFILES_ROOT/scripts/herdr-deps-check.sh"
+    echo "  Claude Code wiring:   $DOTFILES_ROOT/scripts/herdr-claude-wire.sh"
+    echo "  Full guide:           $DOTFILES_ROOT/docs/HERDR_GUIDE.md"
+else
+    echo "For installation instructions, see:"
+    echo "  - ~/.dotfiles/CLAUDE.md (comprehensive guide)"
+    echo "  - ~/.dotfiles/scripts/install-modern-tools.sh (automated installer)"
+    echo ""
+    echo "To install missing tools via mise:"
+    echo "  mise install"
+fi
 echo ""
 
-# Non-zero ONLY on a herdr server hygiene FAIL — see EXIT CODE in the header.
-exit "$herdr_hygiene_failed"
+# Non-zero on a herdr ASSERTION failure — see EXIT CODE in the header. Both
+# counters, not just the first: OR-ing them here is what keeps a green tick from
+# one section standing in for the other.
+if (( herdr_hygiene_failed || claude_wiring_failed )); then
+    exit 1
+fi
+exit 0

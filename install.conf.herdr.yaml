@@ -53,7 +53,10 @@
     # Publishes model / effort / context into the herdr agent sidebar, and
     # doubles as Claude Code's own status line. Linking it is not enough: it
     # must also be registered as `statusLine` in ~/.claude/settings.json, which
-    # is user-level and not in this repo. `./install --herdr` prints the JSON.
+    # is user-level and not in this repo -- and the agent skill file
+    # (~/.claude/skills/herdr/SKILL.md) has to be generated. `./install --herdr`
+    # prints one command that does both: scripts/herdr-claude-wire.sh. (It used
+    # to print the raw JSON for the reader to hand-edit; DO-563.)
     ~/.claude/hooks/session-statusline.sh: claude/hooks/session-statusline.sh
 
     # The server as a declared service, run from a clean environment rather than
