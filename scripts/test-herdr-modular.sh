@@ -179,6 +179,44 @@ mkdir -p "$H/.claude/skills/herdr"; : >"$H/.claude/skills/herdr/SKILL.md"
 has "$(wiring_line "$H")" "✗" 'empty SKILL.md is a FAIL — "herdr --skill" only prints, so a truncated redirect is the likely state'
 
 echo
+echo "=== Claude Code wiring: nothing to wire is SKIPPED, not FAILED ==="
+# The permanently-red-checker trap, reproduced in the PR that exists to remove
+# one and caught in review. The three sibling herdr sections all degrade to a
+# `○ skipped` note when their subject is absent (no server, no linked units, no
+# server PATH). This one asserted unconditionally, so a full-install user who
+# does not run herdr was red forever with no action available to them, and a
+# clean `./install` was red before anyone had a chance to wire anything.
+#
+# PATH=/usr/bin:/bin has jq but no herdr (herdr lives in ~/.local/bin here), so
+# this is "herdr absent" honestly rather than by hiding a stub.
+verify_noherdr() { PATH="/usr/bin:/bin" HOME="$1" "$VERIFY" "${@:2}" 2>&1; }
+noherdr_section() { verify_noherdr "$1" --herdr | awk '/^=== Claude Code wiring/{f=1;next} /^===/{f=0} f'; }
+
+H="$(new_home noherdr)"          # hook present, but nothing wired and no herdr
+out="$(noherdr_section "$H")"
+hasnt "$out" "✗" "herdr absent: no FAIL"
+has   "$out" "○" "herdr absent: reported as a skip"
+has   "$out" "herdr not installed" "...naming herdr as the reason (not incidental text)"
+rc=0; verify_noherdr "$H" --herdr >/dev/null || rc=$?
+check "herdr absent: exit 0" "$rc" "0"
+
+# Claude Code never ran on this machine: no ~/.claude at all. Nothing to wire,
+# so nothing to fail — the wirer would refuse here too (no hook).
+H="$WORK/home.noclaude"; rm -rf "$H"; mkdir -p "$H"
+out="$(wiring_line "$H")"
+hasnt "$out" "✗" "no ~/.claude: no FAIL"
+has   "$out" "○" "no ~/.claude: reported as a skip"
+rc=0; verify "$H" --herdr >/dev/null || rc=$?
+check "no ~/.claude: exit 0" "$rc" "0"
+
+# But the skip must not swallow the real fault: herdr present AND ~/.claude
+# present AND unwired is still actionable, so still a FAIL. (Asserted again
+# below with the full matrix; this row is here so the two skips above cannot be
+# widened into "never fail" without something going red.)
+H="$(new_home stillfails)"
+has "$(wiring_line "$H")" "✗" "herdr + ~/.claude present but unwired: still a FAIL"
+
+echo
 echo "=== Claude Code wiring: correct is green, and unreadable is not green ==="
 H="$(new_home good)"
 good_statusline "$H" >"$H/.claude/settings.json"

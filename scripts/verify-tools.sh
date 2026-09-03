@@ -552,6 +552,24 @@ CC_HOOK="$HOME/.claude/hooks/session-statusline.sh"
 CC_SKILL="$HOME/.claude/skills/herdr/SKILL.md"
 CC_FIX="    Fix: scripts/herdr-claude-wire.sh"
 
+# SKIP when there is nothing to wire, matching all three sibling herdr sections
+# (each degrades to `○ skipped` when its subject is absent). Asserting
+# unconditionally made this permanently red for a full-install user who does not
+# run herdr -- whose only "fix" would be to install two programs they chose not
+# to -- and red on any machine straight after `./install`, before anyone had the
+# chance to wire anything. That is the permanently-red checker this repo warns
+# about twice, reproduced in the change that exists to remove one. Found in
+# review, not in use.
+#
+# The gate is deliberately narrow: herdr present AND Claude Code having run here
+# means an unwired statusLine is a real, actionable fault, so it stays a ✗.
+# Body NOT re-indented, same reason as the full-install block above.
+if ! command -v herdr &>/dev/null; then
+    echo "  ○ herdr not installed — skipped (this section checks the bridge between herdr and Claude Code)"
+elif [[ ! -d "$HOME/.claude" ]]; then
+    echo "  ○ no ~/.claude — Claude Code has not run here; skipped"
+else
+
 if ! command -v jq &>/dev/null; then
     # An empty answer is never agreement: with no JSON parser this check cannot
     # be performed, and saying nothing would read as saying it passed.
@@ -603,6 +621,8 @@ elif [[ ! -s "$CC_SKILL" ]]; then
 else
     echo -e "${GREEN}✓${NC} agent skill file present"
 fi
+
+fi  # end of the Claude Code wiring section (skipped when there is nothing to wire)
 
 echo ""
 echo -e "${BLUE}=== Summary ===${NC}"
