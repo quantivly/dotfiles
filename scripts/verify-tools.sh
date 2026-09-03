@@ -583,9 +583,22 @@ elif ! jq -e . "$CC_SETTINGS" &>/dev/null; then
     echo "    Claude Code reads this file too, so this is not only a herdr problem. Fix it by hand."
     claude_wiring_failed=1
 else
-    cc_cmd="$(jq -r '.statusLine.command // ""' "$CC_SETTINGS")"
-    cc_int="$(jq -r '.statusLine.refreshInterval // ""' "$CC_SETTINGS")"
-    if [[ -z "$cc_cmd" ]]; then
+    # Type before value: `.statusLine.command` is a jq ERROR on a non-object
+    # statusLine, and an unchecked empty capture reported "no statusLine" for a
+    # file that has one of the wrong shape -- a confident wrong answer, and it
+    # leaked jq's own stderr into the report. Same defect as the wirer's.
+    cc_type="$(jq -r '.statusLine | type' "$CC_SETTINGS" 2>/dev/null)" || cc_type=""
+    [[ -n "$cc_type" ]] || cc_type="unreadable"
+    cc_cmd=""; cc_int=""
+    if [[ "$cc_type" == object ]]; then
+        cc_cmd="$(jq -r '.statusLine.command // ""' "$CC_SETTINGS" 2>/dev/null)"
+        cc_int="$(jq -r '.statusLine.refreshInterval // ""' "$CC_SETTINGS" 2>/dev/null)"
+    fi
+    if [[ "$cc_type" != null && "$cc_type" != object ]]; then
+        echo -e "${RED}✗ FAIL:${NC} statusLine is a ${cc_type}, not an object — Claude Code will not run it"
+        echo "    Inspect ${CC_SETTINGS/#$HOME/\~} by hand; herdr-claude-wire.sh refuses to overwrite it."
+        claude_wiring_failed=1
+    elif [[ -z "$cc_cmd" ]]; then
         echo -e "${RED}✗ FAIL:${NC} no statusLine in ${CC_SETTINGS/#$HOME/\~} — every sidebar row will render empty"
         echo "$CC_FIX"
         claude_wiring_failed=1

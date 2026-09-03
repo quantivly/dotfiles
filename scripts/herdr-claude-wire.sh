@@ -86,12 +86,26 @@ else
     want_cmd="bash '$HOOK'"
 
     existing=""
+    st_type=""
     parse_ok=true
     if [[ -e "$SETTINGS" ]]; then
         if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
             parse_ok=false
         else
-            existing="$(jq -r '.statusLine.command // ""' "$SETTINGS")"
+            # Read the TYPE before the value. `.statusLine.command // ""` is a
+            # jq ERROR when statusLine is not an object ("Cannot index string
+            # with string"), and jq's exit status used to be discarded here --
+            # so the empty capture read as "nothing is set" and this script
+            # OVERWROTE another tool's statusLine and printed "Claude Code is
+            # wired", exit 0. `//` substitutes for null; it is no defence
+            # against a type error. Found in review, not in use.
+            st_type="$(jq -r '.statusLine | type' "$SETTINGS" 2>/dev/null)" || st_type=""
+            # An unreadable type is not a missing one: falling through on an
+            # empty answer is how the original bug destroyed data.
+            [[ -n "$st_type" ]] || st_type="unreadable"
+            if [[ "$st_type" == object ]]; then
+                existing="$(jq -r '.statusLine.command // ""' "$SETTINGS" 2>/dev/null)"
+            fi
         fi
     fi
 
@@ -99,6 +113,12 @@ else
         # An unparseable settings.json is not an absent one, and treating it as
         # absent would replace a file we cannot read with one we wrote.
         bad "${SETTINGS/#$HOME/\~} is not valid JSON — fix it by hand, then re-run"
+    elif [[ -n "$st_type" && "$st_type" != null && "$st_type" != object ]]; then
+        # Any shape that is not an object is somebody else's key, whatever it
+        # holds -- and "unreadable" lands here too, deliberately.
+        bad "statusLine is a ${st_type}, not an object — that is not ours; not touching it"
+        say "      ${DIM}Claude Code will not run it in that shape either. Inspect it,${OFF}"
+        say "      ${DIM}remove it if it is stale, then re-run this script.${OFF}"
     elif [[ -n "$existing" && "$existing" != *session-statusline.sh* ]]; then
         bad "a statusLine belonging to something else is already set — not touching it"
         say "      ${DIM}found: ${existing}${OFF}"

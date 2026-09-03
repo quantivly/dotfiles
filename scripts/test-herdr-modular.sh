@@ -280,6 +280,40 @@ check "...and leaves it untouched" "$(jq -c . "$H/.claude/settings.json")" "$(jq
 has "$out" "statusLine" "...and says which key it refused to touch"
 
 echo
+echo "=== herdr-claude-wire: a statusLine of the WRONG SHAPE is still not ours ==="
+# Found in review. `jq -r '.statusLine.command // ""'` ERRORS on a statusLine
+# that is not an object ("Cannot index string with string") and jq's status was
+# discarded, so the empty capture read as "no statusLine is set" -- and the
+# script then OVERWROTE another tool's entry and printed "Claude Code is wired",
+# exit 0. The // operator does not defend against this: it substitutes for null,
+# not for a type error. Any non-object shape is somebody else's key.
+for shape_desc in string:'"/opt/other/thing.sh"' array:'["a"]' number:'42' bool:'true'; do
+  kind="${shape_desc%%:*}"; val="${shape_desc#*:}"
+  H="$(new_home "wireshape-$kind")"
+  printf '{"model":"opus","statusLine":%s}\n' "$val" >"$H/.claude/settings.json"
+  before="$(cat "$H/.claude/settings.json")"
+  rc=0; out="$(wire "$H")" || rc=$?
+  check "statusLine as a $kind: refuses (exit 1)" "$rc" "1"
+  check "statusLine as a $kind: file untouched" "$(cat "$H/.claude/settings.json")" "$before"
+  has "$out" "statusLine" "statusLine as a $kind: says which key it refused"
+done
+
+echo
+echo "=== verify-tools: a wrong-shaped statusLine is a FAIL that names the shape ==="
+H="$(new_home shapecheck)"
+mkdir -p "$H/.claude/skills/herdr"; printf 'b\n' >"$H/.claude/skills/herdr/SKILL.md"
+printf '{"statusLine":"/opt/other/thing.sh"}\n' >"$H/.claude/settings.json"
+out="$(wiring_line "$H")"
+has   "$out" "✗"            "wrong-shaped statusLine is a FAIL"
+has   "$out" "not an object" "...and the message says the shape is wrong, not 'no statusLine'"
+# These two rows passed for the WRONG REASON before this was tightened: jq's own
+# "Cannot index string with string" error was leaking into the captured output
+# and satisfying an assertion that merely looked for the word "string". A
+# checker that reports a fault by leaking its parser's stderr is not reporting.
+hasnt "$out" "Cannot index" "...without leaking jq's raw error into the report"
+hasnt "$out" "no statusLine" "...and without claiming there is no statusLine when there is one"
+
+echo
 echo "=== herdr-claude-wire: it must not half-succeed in silence ==="
 # A script that cannot finish its job and exits 0 is the failure mode this whole
 # stack is written against.
