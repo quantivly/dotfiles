@@ -6,7 +6,17 @@
 # bundle. This list is only what earned a place.
 
 # Multi-account Claude: profiles, usage monitor, auto-switch fallback chain.
-# Replaces Atrium's claude_accounts + pool round-robin.
+# Replaces Atrium's claude_accounts. NOT its pool round-robin, and this line used to
+# claim it did. The difference decides whether the feature does what you wanted:
+# clauth's chain is FAILOVER. It is walked only after a usage refresh, only when the
+# ACTIVE account is exhausted (95%/5h, 98%/7d) or dead, and a switch rewrites the
+# machine-global ~/.claude/.credentials.json. So it is one active account at a time
+# and parallel sessions all spend it -- there is no per-session spreading, and ten
+# agents burn one 5h window until clauth moves everybody at ~95%. The walk is
+# round-robin in ORDERING ("from the slot after it, wrapping"), which is why the
+# upstream wording is easy to read as the other thing.
+# `clauth start <profile>` is the per-session primitive (its own CLAUDE_CONFIG_DIR);
+# HERDR_GUIDE §4 has what that costs a team lead.
 uwuclxdy/clauth/herdr-plugin
 
 # worktree.created hook: symlink node_modules et al, copy settings.local.json.

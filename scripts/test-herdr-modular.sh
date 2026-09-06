@@ -584,5 +584,137 @@ rc=0; zsh -n "$DOTFILES/zsh/zshrc.herdr" || rc=$?
 check "zshrc.herdr still parses" "$rc" "0"
 
 echo
+echo "=== the server-PATH section says WHICH server it is talking about ==="
+# The fake HOME makes the launcher declare a PATH under it, so herdr/bun/lazygit/
+# yazi/clauth do not resolve -- which is exactly the state the first outside
+# adopter was in when he ran this four steps early and asked whether the ✗ lines
+# were a problem. Both rows are about telling him, in front of the ✗.
+has "$OUT_HERDR" "no server running" \
+    "names the no-server branch"
+has "$OUT_HERDR" "PREDICTION" \
+    "...and says its answers are a prediction, not an observation of a running server"
+has "$OUT_HERDR" "arrive in LATER install steps" \
+    "missing deps: says some arrive in later steps"
+has "$OUT_HERDR" "clauth comes with the plugins" \
+    "...and names clauth specifically, the one that CANNOT be present yet"
+# The whole point of the line above is that it does not promote these to failures.
+# A row that only checked the text would pass just as well with the ✗ lines wired
+# into the exit code, which is the change this line must never become.
+rc=0; verify "$H" --herdr >/dev/null || rc=$?
+check "...and missing plugin deps still do not affect the exit code" "$rc" "0"
+
+# The mirror row: with nothing missing the advisory must be ABSENT, or it becomes
+# a line that appears on every run and therefore is read on none.
+NODEPS_BIN="$WORK/alldeps-bin"
+mkdir -p "$NODEPS_BIN"
+for b in herdr herdmates teammux bun node python3 jq gh notify-send lazygit yazi clauth sh bash; do
+    printf '#!/bin/sh\nexit 0\n' >"$NODEPS_BIN/$b"; chmod +x "$NODEPS_BIN/$b"
+done
+H2="$(new_home alldeps)"
+good_statusline "$H2" >"$H2/.claude/settings.json"
+mkdir -p "$H2/.claude/skills/herdr"; printf 'x\n' >"$H2/.claude/skills/herdr/SKILL.md"
+mkdir -p "$H2/.local/bin"
+cp "$NODEPS_BIN"/* "$H2/.local/bin/"
+out="$(verify "$H2" --herdr)"
+hasnt "$out" "MISSING under the server PATH" \
+    "harness: every dep resolves under the declared PATH for this row"
+hasnt "$out" "arrive in LATER install steps" \
+    "nothing missing: the advisory is absent rather than printed unconditionally"
+
+echo
+echo "=== herdr-deps-check: version floors ==="
+# WHY FLOORS AT ALL. Two of the three things that stranded the first outside
+# adopter were versions, not absences, so a checker that only asks "is it on
+# PATH" reported a green tick over both. curl 7.68 rejects
+# `--retry-all-errors` (reviewr's build hook) and exits 2; node 10.19 cannot run
+# npm 9, so `npm ci` fails building tdi/herdr-worktree-setup. Neither error names
+# the tool that is actually too old.
+#
+# STUBS, not this machine: it has curl 8.18.0 and node 20.20.2, so every row
+# below would pass for the wrong reason against the real binaries -- and would
+# start failing the day someone upgrades. Same argument as the herdr and
+# systemctl stubs above.
+DEPS="$DOTFILES/scripts/herdr-deps-check.sh"
+[[ -x "$DEPS" ]] || fatal "not executable: $DEPS"
+
+verbin() {  # verbin <dir> <tool>=<--version output> ...
+    local d="$WORK/ver.$1"; rm -rf "$d"; mkdir -p "$d"; shift
+    local spec
+    for spec in "$@"; do
+        printf '#!/bin/sh\nprintf "%%s\\n" %q\n' "${spec#*=}" >"$d/${spec%%=*}"
+        chmod +x "$d/${spec%%=*}"
+    done
+    printf '%s' "$d"
+}
+deps() { PATH="$1:$STUB_BIN:$PATH" bash "$DEPS" 2>&1; }
+
+# The output must be greppable at all. herdr-deps-check.sh emitted colour
+# unconditionally, so `✓ curl` never appeared as a literal anywhere and the
+# `hasnt "✓ curl"` row below passed whatever was printed -- decorative, in the
+# suite whose header argues against exactly that. It honours -t 1 now, like
+# verify-tools.sh, and this row is what keeps it doing so.
+out="$(deps "$STUB_BIN")"
+hasnt "$out" "$(printf '\033')" "not a TTY: the report carries no ANSI escapes"
+
+# His exact versions, from the transcript on the page.
+D="$(verbin old 'curl=curl 7.68.0 (x86_64-pc-linux-gnu) libcurl/7.68.0' 'node=v10.19.0' 'npm=9.2.0')"
+out="$(deps "$D")"
+has "$out" "7.68.0, need 7.71.0+"  "curl below the floor is reported as a VERSION failure"
+has "$out" "10.19.0, need 18.0.0+" "node below the floor is reported as a VERSION failure"
+hasnt "$out" "✓ curl"              "...and an old curl does not also get a ✓"
+has "$out" "herdr-reviewr"         "the curl line names the plugin whose build breaks"
+has "$out" "worktree-setup"        "the node line names the plugin whose build breaks"
+# A floor on an OPTIONAL dependency must not start refusing the install: the
+# file's own header says an installer that refuses over a plugin you may not
+# want is its own problem.
+rc=0; deps "$D" >/dev/null || rc=$?
+check "an old optional dep does not change the exit code" "$rc" "0"
+
+# The version we cannot parse is its own state. Reporting it as ✓ is the
+# empty-answer-is-agreement bug; reporting it as ✗ blames a machine for our
+# parser.
+D="$(verbin unparsable 'curl=curl (unknown build)')"
+out="$(deps "$D")"
+has   "$out" "version could not be read" "an unreadable version is named, not assumed fine"
+hasnt "$out" "✓ curl"                    "...and does not get a ✓"
+rc=0; deps "$D" >/dev/null || rc=$?
+check "...and does not fail the run either" "$rc" "0"
+
+# A version at exactly the floor passes. Off-by-one here would tell everybody on
+# the pinned version to upgrade.
+D="$(verbin exact 'curl=curl 7.71.0 (x86_64) libcurl/7.71.0' 'node=v18.0.0')"
+out="$(deps "$D")"
+has   "$out" "✓ curl" "curl exactly at the floor passes"
+has   "$out" "✓ node" "node exactly at the floor passes"
+hasnt "$out" "need 7.71.0+" "...with no version complaint"
+
+# The greedy-capture trap: `curl X (...) libcurl/Y` ends in a SECOND version, and
+# a `.*[^0-9]([0-9.]+)` capture takes the last one -- reporting libcurl's version
+# as curl's. Here libcurl is new enough and curl is not, so a greedy parser
+# passes this row and the real fault goes unreported.
+D="$(verbin twoversions 'curl=curl 7.68.0 (x86_64-pc-linux-gnu) libcurl/8.18.0')"
+out="$(deps "$D")"
+has "$out" "7.68.0, need 7.71.0+" "reads curl's own version, not the trailing libcurl one"
+
+echo
+echo "=== herdr-deps-check: curl and npm are checked at all ==="
+# Both were absent from the list entirely, so a machine without them reported
+# "All required dependencies present". A PATH built by NAMING what the script may
+# use, like NOJQ_BIN above -- not by hiding two tools from a full PATH, which
+# leaves the rest of $PATH able to supply them.
+MINBIN="$WORK/min-bin"
+mkdir -p "$MINBIN"
+ln -sf "$STUB_BIN/herdr" "$MINBIN/herdr"
+for b in bash env sed head grep tr readlink mktemp cat jq git zsh python3; do
+    pp="$(command -v "$b" 2>/dev/null)" && ln -sf "$pp" "$MINBIN/$b"
+done
+out="$(PATH="$MINBIN" bash "$DEPS" 2>&1)"
+has "$out" "○ curl" "curl absent is reported (it was in no list at all before)"
+has "$out" "○ npm"  "npm absent is reported"
+# ...and still without refusing: they are optional.
+rc=0; PATH="$MINBIN" bash "$DEPS" >/dev/null 2>&1 || rc=$?
+check "an absent optional dep does not change the exit code" "$rc" "0"
+
+echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -31,7 +31,17 @@ MISE_TOML="${BASEDIR}/.mise.toml"
 QUIET=0
 [[ "${1:-}" == "--quiet" ]] && QUIET=1
 
-RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YEL=$'\033[0;33m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+# Colour only on a TTY, matching scripts/verify-tools.sh. This was unconditional,
+# which put escape sequences into every redirect and pipe -- `./install --herdr
+# > install.log` and the CI job both captured `\033[0;32m✓\033[0m curl`. It also
+# made a grep for `✓ curl` impossible, so a state-table row asserting an old curl
+# does NOT get a ✓ passed no matter what was printed: the literal never matched
+# either way. A checker whose output cannot be grepped cannot be pinned.
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YEL=$'\033[0;33m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+else
+    RED=''; GRN=''; YEL=''; DIM=''; OFF=''
+fi
 MISSING_REQUIRED=0
 declare -a WANTED=()
 
@@ -46,11 +56,60 @@ pinned() {
         "$MISE_TOML" | head -1
 }
 
-# check <binary> <required|optional> <mise-tool-or--> <what breaks without it>
+# First dotted-numeric token in a --version line. `grep -oE ... | head -1`
+# deliberately, NOT a greedy sed capture: `curl 8.18.0 (x86_64-pc-linux-gnu)
+# libcurl/8.18.0` ends in a second version, and `.*[^0-9]([0-9.]+)` captures the
+# LAST one -- which on a mismatched build reports libcurl's version as curl's.
+first_version() {
+    printf '%s\n' "$1" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1
+}
+
+# 0 if $1 >= $2, comparing dotted numerics field by field.
+#
+# NOT `sort -V`: BSD sort has no -V, so on a Mac the comparison would fail open
+# and every version floor would silently pass -- and HERDR_GUIDE already tracks
+# macOS portability as an open gap, so this file cannot assume GNU coreutils.
+# A floor that passes everything is worse than no floor, because it reports a
+# green tick over the exact state it exists to catch.
+version_ge() {
+    local h w i
+    local -a hp wp
+    IFS=. read -r -a hp <<<"$1"
+    IFS=. read -r -a wp <<<"$2"
+    for ((i = 0; i < 3; i++)); do
+        h="${hp[i]:-0}"; w="${wp[i]:-0}"
+        h="${h//[^0-9]/}"; w="${w//[^0-9]/}"    # "7.68.0-DEV" -> 0
+        (( ${h:-0} > ${w:-0} )) && return 0
+        (( ${h:-0} < ${w:-0} )) && return 1
+    done
+    return 0
+}
+
+# check <binary> <required|optional> <mise-tool-or--> <what breaks without it> [min-version]
+#
+# A version floor is checked only when the binary is PRESENT. Too old counts as
+# missing for exit-status purposes when the dependency is required: the whole
+# point of the floor is that the tool resolving on PATH is not the question.
 check() {
-    local bin="$1" need="$2" tool="$3" breaks="$4" ver pin
+    local bin="$1" need="$2" tool="$3" breaks="$4" floor="${5:-}" ver pin have
     if command -v "$bin" >/dev/null 2>&1; then
         ver="$("$bin" --version 2>/dev/null | head -1 | tr -d '\n')"
+        if [[ -n "$floor" ]]; then
+            have="$(first_version "$ver")"
+            if [[ -z "$have" ]]; then
+                # "Could not read the version" is not "the version is fine" --
+                # the empty-answer-is-never-agreement rule. Reported, and it
+                # does NOT count as a failure, because the tool is there and a
+                # parse we cannot do is our problem, not the machine's.
+                say "  ${YEL}⚠${OFF} ${bin}  present, but its version could not be read (need ${floor}+) — ${DIM}${ver}${OFF}"
+                return 0
+            fi
+            if ! version_ge "$have" "$floor"; then
+                say "  ${RED}✗${OFF} ${bin}  ${RED}${have}, need ${floor}+${OFF} — ${breaks}"
+                [[ "$need" == required ]] && MISSING_REQUIRED=$((MISSING_REQUIRED + 1))
+                return 1
+            fi
+        fi
         say "  ${GRN}✓${OFF} ${bin}  ${DIM}${ver:-present}${OFF}"
         return 0
     fi
@@ -92,8 +151,35 @@ check python3  required python \
       "herdr-lazy cannot resolve its binary, and the sidebar stays blank"
 check cargo    optional - \
       "the herdmates plugin compiles from source; without Rust it will not install"
+# curl's PRESENCE is never the question by the time anyone runs this -- installing
+# herdr, mise and rustup all go through it. Its VERSION is: reviewr's build hook
+# runs `curl --retry-all-errors`, added in curl 7.71.0, and an unknown option makes
+# curl exit 2 under that hook's `set -euo pipefail`. herdr surfaces it as
+# `plugin build failed ... status: exit status: 2`, naming neither curl nor the flag.
+# Reported by the first outside adopter, 2026-09-04, on a distro shipping 7.68.
+check curl     optional - \
+      "herdr-lazy install fails building persiyanov/herdr-reviewr; its build hook needs --retry-all-errors" \
+      7.71.0
+# node is BUILD-time here, and the floor matters more than the presence.
+# tdi/herdr-worktree-setup declares `[[build]] command = ["npm", "ci"]`, so a node
+# too old for npm fails `herdr-lazy install` outright rather than degrading one
+# feature. An earlier version of this line called node optional "for the
+# Linear-to-worktree plugin": wrong plugin (worktree-from-linear has no build step)
+# and wrong severity. 18.0.0 is npm's own supported floor, not a guess -- npm says
+# `^14.17.0 || ^16.13.0 || >=18.0.0` -- and .mise.toml pins 20, so this is below
+# what we run rather than a second opinion about it.
+#
+# It is what catches the state the adopter above was actually in: mise never
+# activated, `node` resolved to /usr/bin/node at v10.19.0, and the failure arrived
+# as `npm v9.2.0 is known not to run on Node.js v10.19.0` -- so the report blamed
+# npm, which was the newer of the two.
 check node     optional node \
-      "the Linear-to-worktree plugin"
+      "herdr-lazy install fails building tdi/herdr-worktree-setup, whose build is npm ci" \
+      18.0.0
+# No floor: npm 9 was fine on the machine above, node was not. Presence only --
+# and no mise tool, since npm arrives with node.
+check npm      optional - \
+      "the same build: tdi/herdr-worktree-setup runs npm ci"
 check bun      optional bun \
       "the gh-pr sidebar plugin"
 

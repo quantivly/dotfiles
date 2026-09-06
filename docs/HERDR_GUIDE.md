@@ -282,9 +282,22 @@ Either way the checkout must be at `~/.dotfiles`: the unit's `ExecStart` is the 
 #    - mise ITSELF: nothing in this repo installs it, and ./install gates its entire tool
 #      section on mise already being present (the mise gate in `install`). No mise means no node/python/bun
 #      and no message saying so. `curl https://mise.run | sh`.
-#    - python3, node, bun: the sidebar publisher AND herdr's own Claude hook need python3; the
-#      Linear plugin runs on node; gh-pr on bun. All three are pinned in .mise.toml, and
-#      ./install runs `mise install`, so step 1 provides them.
+#    - python3, node, bun: the sidebar publisher AND herdr's own Claude hook need python3;
+#      tdi/herdr-worktree-setup declares `[[build]] command = ["npm","ci"]`, so node is needed
+#      at plugin-INSTALL time and not merely at runtime, at >= 18 (npm's own supported floor);
+#      gh-pr on bun. All three are pinned in .mise.toml and the FULL ./install runs
+#      `mise install`, so step 1 provides them THERE -- but `./install --herdr` deliberately
+#      links no mise config, so on the MODULAR path step 1 provides none of them and they are
+#      yours to install. An earlier version of this line said "step 1 provides them" flatly,
+#      and also attributed node to the Linear plugin (which has no build step at all). That is
+#      what stranded the first outside adopter on 2026-09-04: mise never activated, `node`
+#      resolved to /usr/bin/node at v10.19.0, and `herdr-lazy install` died with an error
+#      naming npm -- the newer of the two. scripts/herdr-deps-check.sh reports the floors.
+#    - curl >= 7.71.0: persiyanov/herdr-reviewr's build hook runs `curl --retry-all-errors`,
+#      added in 7.71. An older curl exits 2 on the unknown option, and under the hook's
+#      `set -euo pipefail` herdr reports `plugin build failed ... status: exit status: 2` --
+#      naming neither curl nor the flag. `apt` gives only what the release ships; Ubuntu 20.04
+#      has 7.68, so an older distro needs a newer curl from somewhere else.
 #    - LINEAR_API_KEY in ~/.zshrc.local BEFORE the server first starts (step 5). The launcher
 #      reads it from there, and a running server never re-reads shell config — add it later and
 #      you need `systemctl --user restart herdr-server.service` (§2.4).
@@ -449,6 +462,13 @@ on a Mac — do not assume rotation there until you have watched it happen.
 
 `f12` is the prefix. The stock `ctrl+b` collides three ways here: Claude Code binds it to
 "background this task", tmux wants it, and it clashed with the previous orchestrator.
+
+**Everything written about herdr anywhere else assumes `ctrl+b`** — herdr.dev, and any LLM you
+ask. Every rebound action below keeps its stock `prefix+<key>` as the *first* array entry (the
+layering rule, below), so the translation is mechanical: `ctrl+b v` is `f12 v`, `ctrl+b c` is
+`f12 c`, `ctrl+b w` is `f12 w`, `ctrl+b q` is `f12 q`. A tutorial whose keys "do nothing" here
+is almost always this and not a broken install — which is how it read to the first person
+outside this repo to follow one (2026-09-04).
 
 Every daily action **also** has a direct chord, so the prefix is an escape hatch rather than the
 main path — useful for muscle memory and for `herdr --remote` onto hosts where your chords may
