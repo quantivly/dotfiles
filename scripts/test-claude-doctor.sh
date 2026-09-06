@@ -303,6 +303,36 @@ new_home d5; write_cred
 WITH_CLAUTH=1 CLAUTH_STUB_WHICH='' run_doctor
 want_out "clauth answering nothing is NOT read as healthy" "could not determine the active profile"
 
+# An ORPHANED live credential: it matches no registered profile, so clauth holds
+# no copy of it and the next switch overwrites it irrecoverably. Observed live on
+# 2026-09-06 right after a /login recovery, where it rendered as two quiet `·`
+# notes — the state that can cost you a credential, reported like a footnote.
+new_home d6; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "belongs-to-nobody"' \
+    > "$FHOME/.clauth/profiles/p1/credentials.json"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+want_out "an unrecognised live credential is a warning" "matches NO registered clauth profile"
+want_out "and says what a switch would cost"            "no way back"
+
+# The live credential belonging to a DIFFERENT profile than the active one is its
+# own state: every other check passes while the session bills another account.
+new_home d7; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1" "$FHOME/.clauth/profiles/p2"
+jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "other"' \
+    > "$FHOME/.clauth/profiles/p1/credentials.json"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p2/credentials.json"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+want_out "a live credential owned by another profile is named" "belongs to 'p2', but the active profile is 'p1'"
+
+# The healthy case must stay quiet, or the two rows above are just noise.
+new_home d8; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+no_out "a recognised live credential raises nothing" "matches NO registered clauth profile"
+no_out "and no ownership mismatch is claimed"        "but the active profile is"
+
 #-----------------------------------------------------------------------------
 section "E. MCP servers — read the log store, not the config"
 #-----------------------------------------------------------------------------
