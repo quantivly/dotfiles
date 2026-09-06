@@ -1338,6 +1338,64 @@ Anything set there is silently wiped at the next profile switch. Shell-level (`z
 is the durable place. Note also that `settings.json` is user-level and **not** in this repo, so
 `./install` does not deploy it and nothing version-controls the MCP surface.
 
+### Every session on its own credential (`claude-account-dirs`)
+
+`scripts/claude-account-dirs.sh <profile>` builds `~/.local/state/claude-account-dirs/<profile>/`
+and prints its path: **`clauth start`'s own runtime layout at a stable path.** Everything in
+`~/.claude/` is symlinked back except three files — `.credentials.json` (a symlink to
+`~/.clauth/profiles/<p>/credentials.json`), `settings.json` (a real file, refreshed from the
+global one on every build) and `.claude.json` (a real file, seeded once). So a session gets an
+isolated credential and loses **no** plugin, hook, skill, statusline or user-level `CLAUDE.md`.
+
+`claude()` in `zsh/zshrc.herdr` now uses one by default, which is what finally moves the
+seventeen shared-file processes counted above. It composes with the teammux launch because
+`CLAUDE_CONFIG_DIR=<dir> claude` is a prefix assignment on a *function* call, and **zsh exports
+those into the function's children** (`zsh -f -c 'f(){ printenv V; }; V=x f'` prints `x`) — the
+single fact the whole path rests on, and not obvious. So **isolation no longer costs a team
+lead**, and `hspawn`'s isolated path stopped running `clauth start` for the same reason.
+
+```bash
+claude                     # isolated onto the least-used profile, AND a team lead
+claude-as quantivly-1      # the same, on a named account
+CLAUDE_ISOLATION_OFF=1 …   # opt out; CLAUDE_ACCOUNT_PROFILE pins, CLAUDE_ACCOUNT_QUIET silences
+```
+
+Design points that are load-bearing rather than preferences:
+
+- **The credential is a symlink, never a copy** — see the correction above. A copy is an
+  independent holder of one grant, which is the failure this exists to remove rather than to
+  manufacture. The symlink is written *through*, not replaced: the profile stores carry `mcpOAuth`
+  discovery records that only Claude Code writes.
+- **`settings.json` is a copy, not a symlink.** clauth rewrites the global file's `env` and
+  `[models]` on a profile switch (which is how `model` came to be `null` there), and a symlink
+  would import that churn into every account dir. A persistent dir has no fresh-launch moment to
+  re-snapshot at, so the builder is that moment and says when the copy had drifted.
+- **`.claude.json` is seeded from `~/.claude.json`, NOT `~/.claude/.claude.json`.** Claude Code
+  keeps it in `$HOME` and only moves it under `CLAUDE_CONFIG_DIR` when that is set. On this
+  machine `~/.claude/.claude.json` is a **1,156-byte husk** with `projects: {}`, no
+  `hasCompletedOnboarding` and a *different* `machineID`, untouched since 2026-08-28, while
+  `~/.claude.json` is 95 kB with 21 projects and matches what clauth seeds. Seeding from the husk
+  gives every account dir first-run onboarding and a trust dialog in every worktree — silently,
+  because a husk is still valid JSON. An implausibly small seed is a hard error for that reason.
+- **The default profile is the least-loaded one, not `clauth which`.** That call answers from
+  `$CLAUDE_CONFIG_DIR`, so **inside an isolated pane it returns the parent session's profile** —
+  measured, it says `quantivly-3` in an isolated shell and `unknown` in a bare one. Defaulting to
+  it puts every spawn in its parent's credential group, which is the concentration being undone.
+  Holders are counted from pidfiles under `<dir>/holders/`, pruned by `kill -0` as they are
+  counted; `claude()` blocks for the session, so the shell's pid stands in for it.
+- **Credential groups can only equal logins.** Four profiles against 18–30 sessions gives groups
+  of five to seven; `clauth login <name>` is what makes them smaller. Whether two profiles can
+  hold *the same* account independently is **untested** — if each `/login` yields an independent
+  grant it would shrink groups without new accounts, and if it does not, the second authorisation
+  may revoke the first and log out every holder. Test it on a non-preferred profile, when nothing
+  is in flight.
+- **`preferred = true` on `quantivly-3` stays.** Once nothing reads the global credential the
+  daemon's walk-back rewrites a file with no readers. Revisit if `claude-doctor`'s
+  processes-on-the-shared-file count is non-zero.
+- **`zsh/zshrc.herdr` is portable**, so the whole block is gated on clauth *and* the builder both
+  being present, and the fallback is the previous behaviour byte for byte. A modular adopter with
+  neither sees no change, and a state-table row asserts it.
+
 Traps specific to the checker, each of which produced a green tick first:
 
 - **A HASH OF NOTHING IS A HASH, and it matches every other hash of nothing.**
@@ -1419,14 +1477,22 @@ Traps specific to the checker, each of which produced a green tick first:
   `<command-name>/login</command-name>` writes that string into the current transcript. Exclude
   the running session, or the number climbs as you measure it.
 
-State table: `scripts/test-claude-doctor.sh` (101 checks, in CI as `claude-doctor-test`) —
-hermetic via a fixture `$HOME`, a from-scratch `PATH`, a recording `clauth` stub, and a fixture
-process tree (`CLAUDE_DOCTOR_PROC_ROOT`) so the concurrency grouping can be pinned without
-depending on whatever happens to be running on the machine. 25 mutants were run against it and
-all 25 died, including "count files instead of successes" (the desktop-commander bug), "print the
-token in the report", and one for each trap above. Twelve of those rows exist only because a
-review found the fixes unpinned — the first pass shipped 13 mutants and a false green underneath
-them.
+State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `PATH`:
+
+- `scripts/test-claude-doctor.sh` (103 checks, `claude-doctor-test`) — recording `clauth` stub,
+  and a fixture process tree (`CLAUDE_DOCTOR_PROC_ROOT`) so the concurrency grouping can be pinned
+  without depending on what happens to be running. 25 mutants, all died. Twelve of those rows
+  exist only because a review found the fixes unpinned: the first pass shipped 13 mutants and a
+  false green underneath them.
+- `scripts/test-claude-account-dirs.sh` (36 checks, `claude-account-dirs-test`) — the builder.
+  10 mutants, all died, including "seed `.claude.json` from the husk" and "copy the credential
+  instead of symlinking it".
+- `scripts/test-hspawn.sh` (269 checks, `hspawn-test`) — now also covers `claude()`/`claude-as`.
+  Two leaks found while writing those rows, both the same class and both worth remembering: the
+  suite inherited **`CLAUDE_CONFIG_DIR`** from the developer's own isolated session, so every
+  isolation row took the "already placed" branch and asserted nothing; and it inherited
+  **`HERDR_PANE_ID`**, so rows written for the plain `command claude` path all took the herdmates
+  branch instead. Both shapes pass on CI and fail on the machine — the least useful way round.
 
 ```bash
 claude-doctor              # auth + MCP health, from the log store
@@ -1532,6 +1598,8 @@ qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
 gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offline)
 claude-doctor        # Claude auth + MCP health; run BEFORE 'clauth <profile>'
+claude-as <profile>  # claude on a named account: isolated AND still a team lead
+scripts/claude-account-dirs.sh --all   # (re)build every profile's persistent config dir
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 tool_status          # Check installed tools
 herdr-help           # In-shell herdr cheat sheet (hspawn/hreap/clauth)
@@ -1571,5 +1639,5 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
 - **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
-- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth <profile>` while the doctor reports the stored copy DIFFERS from the live credential. If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.
+- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth <profile>` while the doctor reports the stored copy DIFFERS from the live credential — and prefer `claude-as <profile>`, which changes nothing outside your own session. If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.
 - **Backups:** `backup-doctor` (full-chain correctness — start here), `backup-status` (quick health), `systemctl list-timers | grep restic`, `resticprofile -c /etc/resticprofile/profiles.toml show` (validate config)

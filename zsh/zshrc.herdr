@@ -52,21 +52,144 @@ fi
 # Outside Herdr the shim has no output surface (Claude falls back to in-process
 # teammates), so plain claude is used. `command claude` bypasses this entirely.
 #
-# ACCOUNTS — how this composes with clauth:
-#   `clauth <profile>` switches the GLOBAL credentials in ~/.claude, so the very
-#   next `claude` here picks it up and you get lead + the right account. That is
-#   the path to use for a team lead.
+# ACCOUNTS — isolated by default since 2026-09-06:
+#   ~/.claude/.credentials.json holds the login AND every plugin MCP token, at
+#   0600, with no lock. Measured on this box that day: 17 of 18 live Claude
+#   processes had no CLAUDE_CONFIG_DIR at all, so they were seventeen holders of
+#   one file — and that file belonged to no registered clauth profile, so they
+#   were billing an account nobody had selected. The nine login-expiry incidents
+#   in the preceding eight days hit 1, 1, 5, 4, 3, 1, 1, 3 and 6 sessions: five of
+#   the nine were simultaneous, which is one bad value landing in one shared file
+#   taking a whole group down, not holders orphaning each other.
 #
-#   `clauth start <profile>` instead spawns the claude BINARY in a per-profile
-#   runtime CLAUDE_CONFIG_DIR. It never goes through this shell function, so it
-#   gives you the right account but NOT a teammux lead. Use it for isolated
-#   single-account workers, not for the session that spawns a team.
+#   So a plain `claude` now runs in a persistent per-profile config dir built by
+#   scripts/claude-account-dirs.sh — the same layout `clauth start` uses, at a
+#   stable path. It keeps the teammux launch below (the dir is just an
+#   environment variable, and zsh exports a prefix assignment on a FUNCTION call
+#   into that function's children), so isolation no longer costs a team lead.
+#
+#   `clauth start <profile>` remains the supervised path, with --with-fallback
+#   quota rotation; it launches the claude BINARY, so it never reaches this
+#   function and cannot lead a team. `clauth <profile>` switches the GLOBAL
+#   credential — which under this scheme nothing reads.
+#
+#   ESCAPE HATCHES, because this must not become an ultimatum:
+#     CLAUDE_ISOLATION_OFF=1  — behave exactly as before, on the global file
+#     CLAUDE_ACCOUNT_PROFILE  — pin a profile instead of choosing one
+#     CLAUDE_ACCOUNT_QUIET=1  — suppress the one-line account announcement
+#     `command claude`        — bypasses this function entirely, as it always did
+#
+#   WITHOUT CLAUTH NOTHING CHANGES. This file is sourced by modular adopters who
+#   have no clauth and no ~/.dotfiles/scripts — the whole block is gated on both
+#   being present, and the fallback is the previous behaviour byte for byte.
+
+# Where the persistent per-profile config dirs live. Same default as the builder,
+# and overridable the same way, so the two cannot disagree.
+_claude_account_root() { print -r -- "${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"; }
+_claude_account_builder() { print -r -- "${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-account-dirs.sh"; }
+
+# Live holders of one profile's credential file, counted from pidfiles and
+# pruned as it counts. `claude()` blocks for the whole session, so the shell's own
+# pid is a faithful stand-in for the session; a shell killed without running its
+# cleanup leaves an entry that the next count removes. Deliberately NOT read from
+# the process table: this runs in an interactive shell, and reading other
+# processes' environments to answer a question a file can answer is the wrong
+# trade — see "Keeping secrets out of transcripts" in CLAUDE.md.
+_claude_holder_count() {
+  local dir f n=0
+  dir="$(_claude_account_root)/$1/holders"
+  [[ -d "$dir" ]] || { print -r -- 0; return 0 }
+  for f in "$dir"/*(N.); do
+    if kill -0 "${f:t}" 2>/dev/null; then (( n++ )); else command rm -f -- "$f"; fi
+  done
+  print -r -- "$n"
+}
+
+# The registered profile with the fewest live holders. THIS is what makes a
+# bigger profile pool pay off: `clauth which` cannot do it, because it answers
+# from $CLAUDE_CONFIG_DIR and so returns the PARENT session's profile inside an
+# isolated pane — measured 2026-09-06, it says quantivly-3 in an isolated shell
+# and `unknown` in a bare one. Defaulting to it herds every session onto one
+# credential group, which is the thing being fixed.
+#
+# Ties break in glob (alphabetical) order, so the choice is deterministic.
+_claude_pick_profile() {
+  local p name best="" best_n=-1 n
+  for p in "$HOME"/.clauth/profiles/*(N/); do
+    name="${p:t}"
+    [[ -f "$p/credentials.json" ]] || continue
+    n="$(_claude_holder_count "$name")"
+    if (( best_n < 0 || n < best_n )); then best="$name"; best_n=$n; fi
+  done
+  [[ -n "$best" ]] || return 1
+  print -r -- "$best"
+}
+
 claude() {
-  if [[ -n "$HERDR_PANE_ID" ]] && command -v herdmates >/dev/null 2>&1; then
-    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 herdmates teammux-launch "$@"
-  else
-    command claude "$@"
+  # local -x, never a bare export: an export here would leak the config dir into
+  # the pane's shell and silently pin every LATER command in it to this account.
+  # -x still exports to this function's children, which is all that is needed.
+  local -x CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
+  local profile="" dir="" holder=""
+
+  # An inherited CLAUDE_CONFIG_DIR is never overridden: that is what keeps a
+  # `clauth start` pane, a herdmates teammate, and hspawn's own launch intact.
+  if [[ -z "$CLAUDE_CONFIG_DIR" && -z "${CLAUDE_ISOLATION_OFF:-}" ]] \
+     && command -v clauth >/dev/null 2>&1 && [[ -x "$(_claude_account_builder)" ]]; then
+    profile="${CLAUDE_ACCOUNT_PROFILE:-$(_claude_pick_profile)}"
+    if [[ -z "$profile" ]]; then
+      # NEVER SILENT in either direction: which credential a session burns decides
+      # which account is billed, and nothing about the running pane reveals it
+      # afterwards. Falling back to the shared file is right — inventing a profile
+      # would bill an account nobody picked — but it must be said.
+      print -u2 -- "claude: clauth is installed but no profile has a credential — this session shares"
+      print -u2 -- "        ~/.claude/.credentials.json. 'clauth login <name>' to give it its own."
+    elif dir="$(command "$(_claude_account_builder)" "$profile")" && [[ -n "$dir" ]]; then
+      CLAUDE_CONFIG_DIR="$dir"
+    else
+      profile=""
+      print -u2 -- "claude: could not build an account dir (its reason is above) — this session"
+      print -u2 -- "        shares ~/.claude/.credentials.json with every other."
+    fi
   fi
+
+  # Count as a holder however CLAUDE_CONFIG_DIR came to point at an account dir.
+  # hspawn sets it itself, and a spawn that did not register would make the
+  # chooser above hand the next session the busiest profile.
+  if [[ "$CLAUDE_CONFIG_DIR" == "$(_claude_account_root)/"* ]]; then
+    profile="${${CLAUDE_CONFIG_DIR#$(_claude_account_root)/}%%/*}"
+    holder="$(_claude_account_root)/$profile/holders/$$"
+    command mkdir -p "${holder:h}" 2>/dev/null && : > "$holder" 2>/dev/null || holder=""
+    [[ -n "${CLAUDE_ACCOUNT_QUIET:-}" ]] || \
+      print -u2 -- "claude: account '$profile' (isolated: ${CLAUDE_CONFIG_DIR/#$HOME/~})"
+  fi
+
+  {
+    if [[ -n "$HERDR_PANE_ID" ]] && command -v herdmates >/dev/null 2>&1; then
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 herdmates teammux-launch "$@"
+    else
+      command claude "$@"
+    fi
+  } always {
+    [[ -n "$holder" ]] && command rm -f -- "$holder"
+  }
+}
+
+# Run claude under a NAMED account, isolated, still able to lead a team.
+#
+# The verb that replaces `clauth <profile>` for picking an account to work under:
+# that one switches the global credential for the whole machine and can log out
+# every session holding the profile it restores, while this one changes nothing
+# outside this session.
+claude-as() {
+  if (( $# == 0 )) || [[ "$1" == -h || "$1" == --help ]]; then
+    print -u2 -- "Usage: claude-as <clauth-profile> [claude args...]"
+    print -u2 -- "  Isolated onto that profile's credential, and still a herdr team lead."
+    print -u2 -- "  Accounts: ${$(print -l "$HOME"/.clauth/profiles/*(N/:t)):-<none registered>}"
+    return 2
+  fi
+  local profile="$1"; shift
+  CLAUDE_ACCOUNT_PROFILE="$profile" claude "$@"
 }
 
 #==============================================================================
@@ -124,39 +247,42 @@ herdr-lazy() {
 # note on stderr.
 #
 # --model / --effort / --mode reach claude on BOTH start paths: after `--` for
-# `herdr agent start`, appended for `clauth start` (which hands unrecognised
-# args to claude verbatim, per `clauth start --help`). --mode defaults to auto,
-# today's behaviour. `default` is accepted as a spelling of what `claude --help`
-# (2.1.x) lists as `manual`; the CLI has no mode literally called "default".
-# `dontAsk` (also 2.1.x) is accepted. `bypassPermissions` is refused ON PURPOSE:
-# hspawn spawns run unattended, and unattended plus every permission gate off is
-# not a combination this helper hands out — the error says so.
+# `herdr agent start`, appended to the pane command for the isolated path.
+# --mode defaults to auto, today's behaviour. `default` is accepted as a spelling
+# of what `claude --help` (2.1.x) lists as `manual`; the CLI has no mode literally
+# called "default". `dontAsk` (also 2.1.x) is accepted. `bypassPermissions` is
+# refused ON PURPOSE: hspawn spawns run unattended, and unattended plus every
+# permission gate off is not a combination this helper hands out.
 #
 # WHY A PROFILE CHANGES THE START PATH:
-#   `herdr agent start` launches the agent binary herdr knows about, but
-#   `clauth start <profile>` is a supervisor that spawns claude inside a
-#   per-profile CLAUDE_CONFIG_DIR — herdr cannot start that for us. So the
-#   profile path runs the supervisor as an ordinary pane command and then waits
-#   for herdr to *detect* the claude underneath it, which is what `agent wait`
-#   is for. The no-profile path is the direct one, and burns whatever account
-#   owns the global credentials.
+#   `herdr agent start` launches the agent binary herdr knows about, and gives it
+#   no chance to inherit a CLAUDE_CONFIG_DIR. So the isolated path types a command
+#   into the pane instead — `CLAUDE_CONFIG_DIR=<account dir> claude ...`, which
+#   the pane's own shell resolves to the claude() wrapper above — and then waits
+#   for herdr to *detect* the claude underneath it, which is what `agent wait` is
+#   for. The --shared path is the direct one, and burns whatever account owns the
+#   global credential.
 #
-# WHY A SPAWN IS ISOLATED BY DEFAULT (changed 2026-09-06):
+# WHY A SPAWN IS ISOLATED BY DEFAULT (2026-09-06):
 #   ~/.claude/.credentials.json holds the login AND every MCP server's OAuth
-#   token, at 0600, with NO lock — every refresh rewrites the whole file. With
-#   ~23 Claude processes on this box that race is the mechanism behind the
-#   random logouts AND the "Unauthorized on a token that has not expired" MCP
-#   failures; the plugin:slack:slack entry was twice caught mid-write with a
-#   zero-length accessToken. Every spawn that runs on the shared credential is
-#   one more writer, so hspawn now defaults to the active clauth profile and its
-#   own CLAUDE_CONFIG_DIR. Claude Code really does isolate credentials per
-#   config dir — the opposite of GH_CONFIG_DIR, see CLAUDE.md.
+#   token, at 0600, with NO lock — every refresh rewrites the whole file, and a
+#   `clauth <profile>` switch rewrites it wholesale under every live session. That
+#   is the mechanism behind the random logouts: of nine login-expiry incidents in
+#   the eight days to 2026-09-06, five were SIMULTANEOUS across 3 to 6 sessions,
+#   which is one bad value in one shared file rather than holders orphaning each
+#   other. Every spawn on the shared credential is one more member of that group.
 #
-#   THE COST IS REAL AND IS NOT RECOVERABLE LATER: a `clauth start` session
-#   never goes through the claude() wrapper above, so it has no
-#   teammateMode:tmux and CANNOT LEAD A HERDR TEAM. `--shared` is the escape
-#   hatch for a worker that must lead one. Both paths print which credential
-#   they took, because nothing about the running pane reveals it afterwards.
+#   THE COST USED TO BE REAL AND IS NOT ANY MORE. Until 2026-09-06 the isolated
+#   path ran `clauth start <profile>`, which launches the claude BINARY, never
+#   reaches the claude() wrapper, and therefore had no teammateMode:tmux and could
+#   not lead a herdr team; `--shared` existed as the escape hatch for a worker that
+#   had to. It now points CLAUDE_CONFIG_DIR at a persistent account dir and calls
+#   `claude`, so a spawn is isolated AND can lead. `--shared` still means what it
+#   says — use the global credential — and is now needed only when there is no
+#   clauth profile to use.
+#
+#   Both paths print which credential they took, because nothing about the running
+#   pane reveals it afterwards.
 #
 # Every agent call targets the PANE ID, not a name: herdr accepts either. The
 # direct path names the agent at start; the profile path names it afterwards
@@ -282,11 +408,13 @@ _hspawn_usage() {
     'Usage: hspawn [options] [--] <repo-dir> <slug> [prompt...]' \
     '' \
     'Options:' \
-    '  -p, --profile <clauth-profile>  start through `clauth start <profile>`, in that profile'"'"'s own' \
-    '                                  CLAUDE_CONFIG_DIR (default: the active clauth profile)' \
-    '      --shared                    use the SHARED global credential instead. Needed only when the' \
-    '                                  worker must LEAD a herdr team; adds a writer to the unlocked' \
-    '                                  ~/.claude/.credentials.json. See `claude-doctor`.' \
+    '  -p, --profile <clauth-profile>  run in that profile'"'"'s own persistent CLAUDE_CONFIG_DIR' \
+    '                                  (default: the clauth profile with the fewest live sessions).' \
+    '                                  Isolated AND able to lead a herdr team.' \
+    '      --shared                    use the SHARED global credential instead — adds a writer to the' \
+    '                                  unlocked ~/.claude/.credentials.json, which a profile switch' \
+    '                                  overwrites under every holder at once. Needed only when there is' \
+    '                                  no clauth profile to use. See `claude-doctor`.' \
     '  -m, --model <model>             claude --model (an alias like opus, or a full model name)' \
     '  -e, --effort <level>            claude --effort (low|medium|high|xhigh|max)' \
     '      --mode <mode>               claude --permission-mode: auto (default) | acceptEdits | plan |' \
@@ -538,12 +666,10 @@ hspawn() {
 
   # ---- Isolate the spawn's credentials unless told otherwise ----------------
   # See "WHY A SPAWN IS ISOLATED BY DEFAULT" in the header. Without a profile a
-  # spawn runs on the SHARED ~/.claude/.credentials.json, which has no lock and
-  # is rewritten in full on every token refresh; ~23 concurrent writers is the
-  # mechanism behind the random logouts and the "Unauthorized on a token that
-  # has not expired" MCP failures. `clauth start <profile>` gives the worker its
-  # own CLAUDE_CONFIG_DIR, and Claude Code genuinely isolates credentials per
-  # config dir (unlike gh — see CLAUDE.md).
+  # spawn runs on the SHARED ~/.claude/.credentials.json, which has no lock, is
+  # rewritten in full on every token refresh, and is replaced wholesale by a
+  # `clauth <profile>` switch — five of the nine login-expiry incidents in the
+  # eight days to 2026-09-06 took 3 to 6 sessions down at the same instant.
   #
   # PLACED AFTER every argument check, so an invocation that is about to be
   # refused does not fork clauth first. That is not only tidiness: several rows
@@ -551,23 +677,44 @@ hspawn() {
   # resolution step in front of the validation makes them false.
   #
   # NEVER SILENT, in either direction: which credential a spawn burns decides
-  # which account is billed and whether it can lead a team, so both paths say so.
+  # which account is billed, so both paths say so.
   if (( ! profile_set )) && [[ -z "$profile" ]] && (( ! shared )); then
     if command -v clauth >/dev/null 2>&1; then
-      profile="$(clauth which 2>/dev/null | tr -d '[:space:]')"
-      if [[ -z "$profile" || ! -d "$HOME/.clauth/profiles/$profile" ]]; then
+      # NOT `clauth which`. That answers from $CLAUDE_CONFIG_DIR, so inside an
+      # isolated pane it returns THIS session's own profile — measured
+      # 2026-09-06, it says `quantivly-3` in an isolated shell and `unknown` in a
+      # bare one. Defaulting to it puts every spawn in the same credential group
+      # as its parent, which is the concentration this is meant to undo.
+      profile="$(_claude_pick_profile)"
+      if [[ -z "$profile" ]]; then
         # Could not name an account. Falling through to the shared credential is
         # the right choice — it is the old behaviour, and inventing a profile
         # would bill an account the user did not pick — but it must be REPORTED,
         # because the caller asked for isolation by omission and is not getting
         # it, and nothing about the running pane reveals that afterwards.
-        profile=""
         shared=1
-        echo "hspawn: clauth is installed but named no active profile — this spawn shares the" >&2
-        echo "        global credential (no isolation). Pass -p <profile> to isolate it." >&2
+        echo "hspawn: clauth is installed but no profile has a credential — this spawn shares the" >&2
+        echo "        global credential (no isolation). 'clauth login <name>', or pass -p <profile>." >&2
       fi
     else
       shared=1
+    fi
+  fi
+
+  # The account dir is built HERE, before a worktree, a pane or a registry entry
+  # exists. A spawn whose credential cannot be prepared should cost nothing to
+  # clean up — the same reasoning that put the resolution above after argument
+  # validation.
+  local account_dir=""
+  if [[ -n "$profile" ]]; then
+    if [[ ! -x "$(_claude_account_builder)" ]]; then
+      echo "hspawn: ${$(_claude_account_builder)/#$HOME/~} is not available, so this spawn cannot be" >&2
+      echo "        isolated. Sharing the global credential instead." >&2
+      profile=""; shared=1
+    elif ! account_dir="$(command "$(_claude_account_builder)" "$profile")" || [[ -z "$account_dir" ]]; then
+      echo "Error: could not build an account dir for clauth profile '$profile' (reason above)." >&2
+      echo "       Fix it, name another with -p, or pass --shared to use the global credential." >&2
+      return 1
     fi
   fi
 
@@ -609,9 +756,9 @@ hspawn() {
   # paths: it decides which account is billed AND whether the worker can lead a
   # herdr team, and neither is recoverable by looking at the pane afterwards.
   if [[ -n "$profile" ]]; then
-    _hspawn_say account "clauth profile '$profile' (isolated CLAUDE_CONFIG_DIR; cannot lead a team)"
+    _hspawn_say account "clauth profile '$profile' (isolated; can lead a team)"
   else
-    _hspawn_say account "shared global credential (can lead a team; adds a writer to ~/.claude/.credentials.json)"
+    _hspawn_say account "SHARED global credential (one more holder of ~/.claude/.credentials.json)"
   fi
 
   # Registry entry — written now, not after detection (see header).
@@ -658,7 +805,12 @@ hspawn() {
     # inside double quotes zsh joins an array BEFORE applying (q), which would
     # yield one backslash-escaped word (`--permission-mode\ auto`); (@) keeps the
     # elements separate so each is quoted on its own, then (j: :) joins them.
-    herdr pane run "$pane" "clauth start ${(q)profile} ${(j: :)${(@q)claude_args}}" || return 1
+    # `claude`, not the claude BINARY: the pane's own shell resolves it to the
+    # claude() wrapper at the top of this file, which is what supplies
+    # teammateMode:tmux. CLAUDE_CONFIG_DIR is a prefix assignment on a FUNCTION
+    # call, and zsh exports those into the function's children — verified, and the
+    # single fact this whole path rests on.
+    herdr pane run "$pane" "CLAUDE_CONFIG_DIR=${(q)account_dir} claude ${(j: :)${(@q)claude_args}}" || return 1
   else
     # `agent start` fails in three distinguishable ways (error JSON on stderr):
     #   agent_not_ready — the agent came up blocked (the trust dialog below all
@@ -720,7 +872,8 @@ hspawn() {
   fi
 
   if [[ -n "$profile" ]]; then
-    # clauth started the agent, so herdr never got to name it. Name it now.
+    # The pane command started the agent, so herdr never got to name it at
+    # `agent start` time. Name it now.
     herdr agent rename "$pane" "$name" >/dev/null 2>&1 \
       || _hspawn_say note "rename to '$name' failed (name taken?) — address the agent as $pane"
   fi
@@ -1432,14 +1585,22 @@ SPAWN & REAP:
              hdespawn [-y|--yes] [-f|--force] <slug|pane-id>
   Registry:  ${HSPAWN_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/hspawn}
 
-ACCOUNTS (clauth):
-  clauth <profile>        - switch global credentials; then 'claude' is a TEAM LEAD
-  clauth start <profile>  - isolated worker on that account, NOT a lead
+ACCOUNTS (every session on its own credential file):
+  claude                  - isolated onto the least-used clauth profile, AND a
+                            team lead. Prints which account it took.
+  claude-as <profile>     - the same, on a named account
+  CLAUDE_ISOLATION_OFF=1  - opt out: run on the shared global credential
   clauth list             - profiles with usage
+  clauth login <name>     - add an account; more accounts = smaller blast radius
+  clauth start <profile>  - supervised worker (--with-fallback quota rotation),
+                            launches the BINARY so it is NOT a team lead
+  clauth <profile>        - switches the GLOBAL credential, which nothing reads
+                            once sessions are isolated. AVOID: it overwrites that
+                            file under every holder at once
   claude-doctor           - auth + MCP health; RUN BEFORE 'clauth <profile>'
                             (a switch restores clauth's STORED tokens over the
                              live ones — if they have drifted it can log out
-                             every running session at once)
+                             every session holding that profile)
 
 PLUGINS:
   herdr-lazy check          - installed vs declared in plugins.list

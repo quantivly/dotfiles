@@ -157,6 +157,79 @@ exit 0
 STUB
 chmod +x "$STUBBIN/clauth"
 
+#-----------------------------------------------------------------------------
+# The account-dir builder stub
+#-----------------------------------------------------------------------------
+# Since 2026-09-06 an isolated spawn runs `CLAUDE_CONFIG_DIR=<account dir> claude`
+# rather than `clauth start <profile>`, so hspawn asks
+# scripts/claude-account-dirs.sh where that dir is. Stubbed for the same reason
+# clauth and herdr are: the real one writes into ~/.local/state and reads
+# ~/.clauth/profiles, and on this box those hold four live logins. What the real
+# builder does is pinned by scripts/test-claude-account-dirs.sh; what hspawn does
+# with its answer is pinned here.
+#
+# DOTFILES_ROOT points at this fake tree, which is how hspawn resolves the script.
+FAKE_DOTFILES="$TMPROOT/dotfiles"; mkdir -p "$FAKE_DOTFILES/scripts"
+ACCT="$FHOME/.local/state/claude-account-dirs"
+cat > "$FAKE_DOTFILES/scripts/claude-account-dirs.sh" <<STUB
+#!/bin/sh
+printf 'CMD %s\n' "\$*" >> "\$ACCOUNT_STUB_LOG"
+[ -n "\${ACCOUNT_STUB_FAIL:-}" ] && { echo "stub refuses" >&2; exit 1; }
+printf '%s/%s\n' "$ACCT" "\$1"
+STUB
+chmod +x "$FAKE_DOTFILES/scripts/claude-account-dirs.sh"
+ACCOUNT_LOG="$TMPROOT/account.log"; : > "$ACCOUNT_LOG"
+
+#-----------------------------------------------------------------------------
+# The claude / herdmates stubs, for the claude() wrapper rows
+#-----------------------------------------------------------------------------
+# Both record the CLAUDE_CONFIG_DIR they were handed, which is the only way to
+# tell an isolated launch from a shared one — nothing about a running session
+# reveals it afterwards, which is why claude() announces it in the first place.
+# The claude stub also lists the holder pidfiles that exist WHILE it runs: the
+# registry is cleaned up on return, so a row checking afterwards would see an
+# empty directory whether or not registration ever happened.
+CLAUDE_LOG="$TMPROOT/claude.log"; : > "$CLAUDE_LOG"
+cat > "$STUBBIN/claude" <<'STUB'
+#!/bin/sh
+{
+    printf 'CMD %s\n' "$*"
+    printf 'CFG %s\n' "${CLAUDE_CONFIG_DIR:-<unset>}"
+    printf 'TEAMS %s\n' "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-<unset>}"
+    for h in "$CLAUDE_ACCOUNT_DIRS_ROOT"/*/holders/*; do
+        [ -e "$h" ] && printf 'HOLDER %s\n' "$h"
+    done
+} >> "$CLAUDE_STUB_LOG"
+exit 0
+STUB
+cat > "$STUBBIN/herdmates" <<'STUB'
+#!/bin/sh
+{
+    printf 'CMD herdmates %s\n' "$*"
+    printf 'CFG %s\n' "${CLAUDE_CONFIG_DIR:-<unset>}"
+    printf 'TEAMS %s\n' "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-<unset>}"
+} >> "$CLAUDE_STUB_LOG"
+exit 0
+STUB
+chmod +x "$STUBBIN/claude" "$STUBBIN/herdmates"
+
+# A PATH built FROM SCRATCH, holding the stubs minus clauth and nothing else but
+# the tools the code under test actually calls.
+#
+# It has to be a replacement, not a prepend: a directory that merely LACKS clauth
+# leaves ~/.local/bin/clauth on the tail, `command -v clauth` finds it, and the
+# row proves nothing. It equally cannot be an EMPTY path — zsh itself has to stay
+# reachable, or the row fails with "command not found: zsh" and looks like a
+# genuine result. Same construction, and the same two reasons, as SYSBIN /
+# NOJQBIN in scripts/test-claude-doctor.sh.
+NOCLAUTHBIN="$TMPROOT/bin-noclauth"; mkdir -p "$NOCLAUTHBIN"
+for t in zsh sh git jq grep sed awk date stat mkdir rm ls cat sort uniq head tail \
+         cut tr wc find basename dirname readlink env chmod cp mv; do
+    p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$NOCLAUTHBIN/$t"
+done
+cp -a "$STUBBIN/herdr" "$STUBBIN/claude" "$STUBBIN/herdmates" "$NOCLAUTHBIN/"
+[[ -e "$NOCLAUTHBIN/clauth" ]] && fatal "the no-clauth PATH still has a clauth on it"
+
 WT="$TMPROOT/wt/tester-slug"
 cat > "$STUBDIR/worktree-create.json" <<JSON
 {"result":{"workspace":{"workspace_id":"wZ"},"tab":{},"root_pane":{"pane_id":"wZ:p1"},
@@ -177,14 +250,41 @@ REPO="$TMPROOT/repo"
 mkdir -p "$REPO"
 
 # $1 = zsh code. Runs it with the fixture environment and the stub on PATH.
+#
+# CLAUDE_CONFIG_DIR is CLEARED, not inherited. Whoever runs this suite is very
+# likely inside an isolated Claude session themselves, so the ambient value is
+# set — and claude() deliberately leaves an inherited one alone, so every
+# isolation row silently took the "already placed" branch and asserted nothing.
+# That shape passes on CI and fails on the developer's machine, which is the
+# least useful way round; it is also the same class of leak as inheriting $PATH.
+#
+# HERDR_PANE_ID is cleared for the same reason and it is the sharper of the two:
+# this suite is normally run FROM a herdr pane, so it is set, so claude() took
+# the herdmates branch on every row — including the ones written to exercise the
+# plain `command claude` path, which therefore asserted nothing about it.
 OUT=""; RC=0
 run() {
     : > "$LOG"
-    OUT="$(HOME="$FHOME" PATH="$STUBBIN:$PATH" HSPAWN_STATE_DIR="$STATE" \
+    : > "$ACCOUNT_LOG"
+    : > "$CLAUDE_LOG"
+    # NOCLAUTH replaces the PATH rather than prepending to it. Prepending a
+    # directory that merely LACKS clauth proves nothing: ~/.local/bin/clauth is
+    # still on the tail, `command -v clauth` still finds it, and the row passes
+    # or fails for reasons unrelated to the code. CLAUDE.md is explicit that this
+    # box has a real one wired to four live accounts.
+    local pathspec="$STUBBIN:$PATH"
+    [[ -n "${NOCLAUTH:-}" ]] && pathspec="$NOCLAUTHBIN"
+    OUT="$(HOME="$FHOME" PATH="$pathspec" HSPAWN_STATE_DIR="$STATE" \
+           CLAUDE_STUB_LOG="$CLAUDE_LOG" \
+           CLAUDE_ISOLATION_OFF="${ISOOFF:-}" CLAUDE_ACCOUNT_PROFILE="${ACCTPROFILE:-}" \
+           CLAUDE_ACCOUNT_QUIET="${ACCTQUIET:-}" \
+           CLAUDE_CONFIG_DIR="${CFGDIR:-}" HERDR_PANE_ID="${PANEID:-}" \
            HSPAWN_BRANCH_PREFIX=tester HERDR_STUB_LOG="$LOG" HERDR_STUB_DIR="$STUBDIR" \
            HERDR_STUB_MODE="${MODE:-full}" CLAUDE_CODE_SESSION_ID="${SESS:-}" \
            HERDR_STUB_PANE_DIR="${PANEDIR:-}" CLAUTH_STUB_WHICH="${WHICH:-}" \
            CLAUTH_STUB_LOG="$TMPROOT/clauth.log" \
+           DOTFILES_ROOT="$FAKE_DOTFILES" CLAUDE_ACCOUNT_DIRS_ROOT="$ACCT" \
+           ACCOUNT_STUB_LOG="$ACCOUNT_LOG" ACCOUNT_STUB_FAIL="${ACCTFAIL:-}" \
            zsh -c "source '$HERDRRC' >/dev/null 2>&1; $1" 2>&1)"
     RC=$?
 }
@@ -280,11 +380,11 @@ echo "=== hspawn: the deprecated positional [profile|-] slot, and -- ==="
 MODE=full
 run "hspawn '$REPO' slug personal a prompt"
 check "legacy profile is taken"      "$(inout "deprecated: the positional")"  "1"
-check "legacy profile runs clauth"   "$(inargs "clauth start personal --permission-mode auto")" "1"
+check "legacy profile isolates"      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto")" "1"
 check "legacy profile drops the slot" "$(inargs "a prompt")"                 "1"
 run "hspawn '$REPO' slug - a prompt"
 check "legacy - is taken"            "$(inout "deprecated: the positional")"  "1"
-check "legacy - starts no clauth"    "$(incmd "pane run")"                    "0"
+check "legacy - starts no pane run"  "$(incmd "pane run")"                    "0"
 check "legacy - drops the slot"      "$(inargs "a prompt")"                   "1"
 # `--` has to switch the slot OFF. It did not: the slot triggers on a literal
 # "-", which is exactly the argument `--` exists to protect, so `--` printed a
@@ -304,7 +404,7 @@ check "a -v is not an option"        "$(inout "unknown option")"              "0
 # the option have to survive that.
 run "hspawn --profile=personal '$REPO' slug word1 word2"
 check "--opt=value keeps later args" "$(inargs "word1 word2")"                "1"
-check "--opt=value sets the profile" "$(inargs "clauth start personal --permission-mode auto")" "1"
+check "--opt=value sets the profile" "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto")" "1"
 check "--opt=value: no deprecation"  "$(inout "deprecated: the positional")"  "0"
 
 echo
@@ -315,15 +415,15 @@ echo "=== hspawn: quoting the claude args for the shell \`pane run\` types into 
 # \${(j: :)\${(@q)arr}} quotes each element and then joins.
 run "hspawn -p personal -m opus -e high '$REPO' slug"
 check "plain args are not escaped" \
-      "$(inargs "clauth start personal --permission-mode auto --model opus --effort high")" "1"
+      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto --model opus --effort high")" "1"
 # The row that catches \${arr[*]}: a value with a space in it must arrive as ONE
 # word at the far end, i.e. quoted, i.e. backslash-escaped here.
 run "hspawn -p personal -m 'opus latest' '$REPO' slug"
 check "a value with a space is quoted" \
-      "$(inargs 'clauth start personal --permission-mode auto --model opus\ latest')" "1"
+      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto --model opus\\ latest")" "1"
 run "hspawn -p 'two words' '$REPO' slug"
 check "the profile is quoted too" \
-      "$(inargs 'clauth start two\ words --permission-mode auto')" "1"
+      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/two\\ words claude --permission-mode auto")" "1"
 # The no-profile path hands claude's args to `agent start` as real argv, where
 # no quoting is involved and none must appear.
 run "hspawn --mode default '$REPO' slug"
@@ -339,42 +439,152 @@ check "a long name is cut to 32"      "$(inargs "aaaaaaaaaabbbbbbbbbbccccccccccd
 echo
 echo "=== hspawn: credentials are isolated by DEFAULT (2026-09-06) ==="
 # ~/.claude/.credentials.json holds the login and every MCP token, has no lock,
-# and is rewritten whole on each refresh. Every spawn on the shared credential
-# is one more writer in that race, so an unqualified hspawn now takes the active
-# clauth profile and its own CLAUDE_CONFIG_DIR.
+# and is replaced wholesale by a `clauth <profile>` switch. Five of the nine
+# login-expiry incidents in the eight days to 2026-09-06 took 3 to 6 sessions
+# down at the same instant, so every spawn on that file is one more member of the
+# group a single bad write destroys.
 #
-# WHICH= is the clauth stub's answer. The rows below are the reason it is a stub
-# at all: with the real binary the default profile is whichever of four live
-# accounts clauth happens to hold, which changed under this very suite.
+# The default profile is now chosen by _claude_pick_profile — the registered
+# profile with the fewest live holders — NOT by `clauth which`. That call answers
+# from $CLAUDE_CONFIG_DIR, so inside an isolated pane it returns the PARENT
+# session's profile and every spawn lands in its parent's credential group, which
+# is the concentration this exists to undo. A profile is only a candidate once it
+# has a credential, so the fixture creates one here and removes it afterwards:
+# every row outside this section is written against the shared path.
 mkdir -p "$FHOME/.clauth/profiles/personal"
-WHICH=personal run "hspawn '$REPO' slug"
-check "no -p defaults to the active profile" \
-      "$(inargs "clauth start personal --permission-mode auto")" "1"
+printf '{"claudeAiOauth":{"accessToken":"t"}}\n' > "$FHOME/.clauth/profiles/personal/credentials.json"
+
+run "hspawn '$REPO' slug"
+check "no -p defaults to a clauth profile" \
+      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto")" "1"
 # Matched on THIS line's own wording: "clauth profile 'personal'" also appears
 # in the agent summary line, so a row counting that phrase gets 2 and would pass
 # just as happily with the account line deleted.
-check "and says which credential it took" "$(outgrep "isolated CLAUDE_CONFIG_DIR")" "1"
+check "and says which credential it took" "$(outgrep "(isolated; can lead a team)")" "1"
+# THE POINT OF THE 2026-09-06 CHANGE. `clauth start` launches the claude BINARY,
+# so it never reaches the claude() wrapper and the worker could not lead a team.
+# The pane command must invoke `claude`, which the pane's shell resolves to that
+# wrapper, or isolation silently costs a capability again.
+check "the isolated path no longer runs clauth start" "$(inargs "clauth start personal --permission-mode auto")" "0"
+check "and the builder was asked for the dir" "$(grep -cF -- 'CMD personal' "$ACCOUNT_LOG" || true)" "1"
 
 # The escape hatch has to actually reach the un-isolated path, or the isolation
-# is not a default but a mandate — and a worker that must LEAD a team needs it.
-WHICH=personal run "hspawn --shared '$REPO' slug"
+# is not a default but a mandate.
+run "hspawn --shared '$REPO' slug"
 check "--shared returns to the direct path" \
-      "$(inargs "clauth start personal --permission-mode auto")" "0"
+      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto")" "0"
 check "--shared still starts an agent"      "$(incmd "agent start")"  "1"
-check "and says it took the shared one"     "$(outgrep "shared global credential")" "1"
+check "and says it took the shared one"     "$(outgrep "SHARED global credential")" "1"
 
 # The legacy "-" slot always meant "no profile". It must not silently acquire
 # the new default, or an old invocation quietly changes which account it bills.
-WHICH=personal run "hspawn '$REPO' slug - 'do a thing'"
+run "hspawn '$REPO' slug - 'do a thing'"
 check "legacy '-' still means shared" \
-      "$(inargs "clauth start personal --permission-mode auto")" "0"
+      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto")" "0"
+
+# A builder that refuses must stop the spawn BEFORE anything is created. The
+# worktree, the pane and the registry entry all outlive a failed hspawn, so a
+# credential problem discovered after them costs a manual teardown.
+ACCTFAIL=1 run "hspawn -p personal '$REPO' slug"; ACCTFAIL=
+check "a builder failure refuses the spawn"   "$RC"                        "1"
+check "and creates no worktree"               "$(incmd "worktree create")" "0"
+check "and names the escape"                  "$(outgrep -- "--shared")"   "1"
 
 # clauth present but naming nothing: falling back to the shared credential is
 # right (inventing a profile would bill an account nobody chose), but it must be
 # SAID, because the caller asked for isolation by omission and did not get it.
-WHICH='' run "hspawn '$REPO' slug"
+rm -f "$FHOME/.clauth/profiles/personal/credentials.json"
+run "hspawn '$REPO' slug"
 check "an unnameable profile is reported, not silent" \
-      "$(outgrep "named no active profile")" "1"
+      "$(outgrep "no profile has a credential")" "1"
+check "and it falls back to the direct path" "$(incmd "agent start")" "1"
+
+echo
+echo "=== claude(): isolated by default, and still a team lead ==="
+# The measurement that motivated this: on 2026-09-06, 17 of 18 live Claude
+# processes on this box had no CLAUDE_CONFIG_DIR, so they were seventeen holders
+# of one unlocked file — and that file matched no registered clauth profile, so
+# they were billing an account nobody had selected. hspawn's isolation (#107)
+# never touched them, because a human's own `claude` does not go through hspawn.
+inclaude() { grep -cFx -- "$1" "$CLAUDE_LOG" || true; }
+
+mkdir -p "$FHOME/.clauth/profiles/personal" "$FHOME/.clauth/profiles/work"
+printf '{"claudeAiOauth":{"accessToken":"t"}}\n' > "$FHOME/.clauth/profiles/personal/credentials.json"
+
+run "claude --dangerously-nothing"
+check "an unqualified claude is isolated"  "$(inclaude "CFG $ACCT/personal")"  "1"
+check "and its args are passed through"    "$(inclaude "CMD --dangerously-nothing")" "1"
+check "and it says which account it took"  "$(outgrep "account 'personal'")"   "1"
+
+# THE WHOLE POINT. Isolation used to cost the teammux launch, because the only
+# isolated path was `clauth start`, which execs the claude BINARY. Inside a herdr
+# pane the wrapper must still take the herdmates path AND carry the config dir.
+PANEID=w1:p1 run "claude"; PANEID=
+check "inside a herdr pane it still leads a team" "$(inclaude "CMD herdmates teammux-launch")" "1"
+check "and the teams flag is set"                 "$(inclaude "TEAMS 1")"                      "1"
+check "and it is isolated at the same time"       "$(inclaude "CFG $ACCT/personal")"           "1"
+
+# An export here would pin every LATER command in the pane to this account, and
+# nothing would say so. local -x reaches the child and stops at the return.
+run "claude >/dev/null 2>&1; printf 'AFTER=%s\n' \"\${CLAUDE_CONFIG_DIR:-<unset>}\""
+check "CLAUDE_CONFIG_DIR does not leak into the shell" "$(inout "AFTER=<unset>")" "1"
+
+# An inherited config dir is what a clauth start pane, a herdmates teammate and
+# hspawn's own pane command all rely on. Overriding it would re-scatter exactly
+# the sessions that were already placed.
+run "CLAUDE_CONFIG_DIR=/somewhere/else claude"
+check "an inherited CLAUDE_CONFIG_DIR is never overridden" "$(inclaude "CFG /somewhere/else")" "1"
+check "and no account line is printed for it"              "$(outgrep "account '")"            "0"
+
+# Escape hatches. A default that cannot be turned off is a mandate.
+ISOOFF=1 run "claude"; ISOOFF=
+check "CLAUDE_ISOLATION_OFF=1 restores the shared path" "$(inclaude "CFG <unset>")" "1"
+ACCTQUIET=1 run "claude"; ACCTQUIET=
+check "CLAUDE_ACCOUNT_QUIET=1 silences the line"  "$(outgrep "account 'personal'")" "0"
+check "but still isolates"                        "$(inclaude "CFG $ACCT/personal")" "1"
+
+# WITHOUT CLAUTH NOTHING CHANGES — zsh/zshrc.herdr is sourced by modular adopters
+# who have neither clauth nor these scripts, and a portable file that quietly
+# depends on a work tool is how an invitation becomes an ultimatum (DO-555).
+NOCLAUTH=1 run "claude"; NOCLAUTH=
+check "with no clauth the launch is unchanged"  "$(inclaude "CFG <unset>")" "1"
+check "and nothing is said about accounts"      "$(outgrep "account '")"    "0"
+
+# Pinning: claude-as is the verb that replaces `clauth <profile>` for choosing an
+# account, without rewriting the global credential under every other session.
+ACCTPROFILE=work run "claude"; ACCTPROFILE=
+check "CLAUDE_ACCOUNT_PROFILE pins the account" "$(inclaude "CFG $ACCT/work")" "1"
+run "claude-as work"
+check "claude-as pins it too"                   "$(inclaude "CFG $ACCT/work")" "1"
+run "claude-as"
+check "claude-as with no argument is a usage error" "$RC" "2"
+
+# The holder registry is what lets the chooser spread sessions. It has to exist
+# WHILE the session runs and be gone afterwards; a row that only looked after
+# would pass with registration deleted entirely.
+run "claude"
+check "a holder pidfile exists while claude runs" \
+      "$(grep -c '^HOLDER .*/personal/holders/' "$CLAUDE_LOG" || true)" "1"
+check "and it is removed when claude returns" \
+      "$(find "$ACCT/personal/holders" -type f 2>/dev/null | wc -l)" "0"
+
+# Least-loaded, not "the active profile": `clauth which` answers from
+# $CLAUDE_CONFIG_DIR, so inside an isolated pane it names the PARENT's profile
+# and every session piles onto one credential group.
+printf '{"claudeAiOauth":{"accessToken":"t"}}\n' > "$FHOME/.clauth/profiles/work/credentials.json"
+mkdir -p "$ACCT/personal/holders"; : > "$ACCT/personal/holders/$$"   # a live holder
+run "claude"
+check "the least-loaded profile is chosen" "$(inclaude "CFG $ACCT/work")" "1"
+# A shell killed without running its cleanup must not park a profile forever.
+# A genuinely dead pid, not a guess: a large number is not reliably free
+# (pid_max here is in the millions) and a row that depends on which pids happen
+# to be in use is a row that fails for a reason unrelated to the code.
+sh -c 'exit 0' & DEADPID=$!; wait "$DEADPID" 2>/dev/null
+mkdir -p "$ACCT/work/holders"; : > "$ACCT/work/holders/$DEADPID"
+run "claude"
+check "a dead holder is pruned, not counted" \
+      "$(test -e "$ACCT/work/holders/$DEADPID" && echo present || echo pruned)" "pruned"
+rm -rf "$ACCT" "$FHOME/.clauth/profiles/work" "$FHOME/.clauth/profiles/personal/credentials.json"
 
 echo
 echo "=== hspawn: a reused pane id must not clobber an un-torn-down entry ==="

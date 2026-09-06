@@ -19,17 +19,19 @@ claude-doctor --days 30    # widen the MCP window from the default 7
 
 ## 1. The one rule
 
-**Run `claude-doctor` before `clauth <profile>`, every time.**
+**Prefer `claude-as <profile>` to `clauth <profile>`, and run `claude-doctor`
+before you use the latter at all.**
 
-A profile switch rewrites the machine-wide `~/.claude/.credentials.json` under
+`claude-as` puts *your* session on that account and touches nothing else.
+`clauth <profile>` rewrites the machine-wide `~/.claude/.credentials.json` under
 every session still using it — which is the mechanism behind the mass logouts, not
 a side effect of them. Of the nine login-expiry incidents in the eight days to
 2026-09-06, five hit 3–6 sessions **at the same instant**.
 
-What it writes is that profile's *stored* tokens. Claude Code rotates refresh
-tokens, and clauth only notices on a ~90 s poll, so between a rotation and that
-poll the stored copy is a **superseded** token. Restoring it can log out every
-running session at once.
+A profile switch restores that profile's *stored* tokens over the live ones.
+Claude Code rotates refresh tokens, and clauth only notices on a ~90 s poll, so
+between a rotation and that poll the stored copy is a **superseded** token.
+Restoring it can log out every running session at once.
 
 If the doctor says:
 
@@ -207,22 +209,43 @@ A `"result"` carrying `serverInfo` is a working server.
 ## 5. Reducing the race
 
 Every Claude session on the shared `~/.claude/.credentials.json` is one more
-member of the group that a single bad write destroys — and `claude-doctor`'s
-concurrency section now prints that grouping, one line per credential file.
+member of the group that a single bad write destroys.
 
-- **`hspawn` isolates by default** (2026-09-06): with no `-p`, it starts through
-  `clauth start <active profile>` in that profile's own `CLAUDE_CONFIG_DIR`.
-  It prints which credential it took, every time.
-- **`hspawn --shared`** opts back in to the shared credential. Needed only when
-  the worker must **lead a herdr team** — a `clauth start` session never passes
-  through the `claude()` wrapper, so it has no `teammateMode: tmux`.
+- **`claude` isolates by default.** It runs in
+  `~/.local/state/claude-account-dirs/<profile>/`, built on demand by
+  `scripts/claude-account-dirs.sh`, and prints which account it took. The profile
+  is the registered one with the fewest live sessions, so sessions spread rather
+  than piling onto whichever account happens to be active.
+- **`claude-as <profile>`** does the same on a named account.
+- **`hspawn` isolates by default** and, since 2026-09-06, its workers can also
+  **lead a herdr team** — it launches `CLAUDE_CONFIG_DIR=<dir> claude` rather than
+  `clauth start`, so the pane's own `claude()` supplies `teammateMode: tmux`.
+- **`hspawn --shared`** and **`CLAUDE_ISOLATION_OFF=1`** opt back in to the shared
+  credential. Needed only when there is no clauth profile to use.
+- **`clauth start <profile>`** remains the *supervised* path, and is the only one
+  with `--with-fallback` quota rotation. It launches the claude binary directly,
+  so it never reaches `claude()` and cannot lead a team.
 - **`hreap`** enumerates Claude processes in herdr panes with idle age and
   memory; `hreap --close --mine` closes your own idle spawns. An idle agent
   still holds its memory *and* still refreshes its token.
 
-The number to drive to zero is the one the doctor reports on **the SHARED global
-file**: it was 17 of 18 when this was written, because a human's own `claude`
-does not go through `hspawn`.
+**How many groups you get is how many logins you have.** Four profiles against
+18–30 concurrent sessions means groups of five to seven; `clauth login <name>`
+is the only thing that makes them smaller. `claude-doctor`'s concurrency section
+prints the current grouping, and the number to drive to zero is the one on
+**the SHARED global file** — it was 17 of 18 when this was written.
+
+### Adopting a new profile
+
+A profile's `mcpOAuth` entries are its own, so a fresh one starts with none and
+`claude-doctor` lists each plugin MCP server as *never authorised in this config
+dir*. Two ways to settle that, and the second is usually right:
+
+1. Authorise each server once from `/mcp` inside a session on that profile.
+2. Use the **claude.ai connector** for that service instead of the plugin MCP
+   server. Connectors ride the login token, need no per-config-dir OAuth at all,
+   and `claude-doctor` already warns that Linear, Notion and Slack are reachable
+   on both paths.
 
 ---
 
