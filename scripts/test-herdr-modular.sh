@@ -67,9 +67,38 @@ mkdir -p "$STUB_BIN"
 cat >"$STUB_BIN/herdr" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${HERDR_STUB_LOG:-/dev/null}"
+# `integration status/install` is modelled, not stubbed to exit 0, because the
+# real command's OUTPUT is what both scripts branch on. The state lives in a file
+# so an `install` can flip what a later `status` reports -- which is the only way
+# to pin "re-read instead of trusting exit 0".
+stub_state() {
+  if [[ -n "${HERDR_STUB_STATE_FILE:-}" && -f "${HERDR_STUB_STATE_FILE}" ]]; then
+    cat "$HERDR_STUB_STATE_FILE"
+  else
+    printf '%s' "${HERDR_STUB_INTEGRATION:-current}"
+  fi
+}
 case "$1" in
   --skill)   printf -- '---\nname: herdr\n---\nSTUB SKILL BODY\n' ;;
   --version) printf 'herdr 9.9.9-stub\n' ;;
+  integration)
+    # An older herdr has no `integration` subcommand at all and exits 2.
+    [[ "${HERDR_STUB_NO_INTEGRATION:-0}" == 1 ]] && exit 2
+    case "${2:-}" in
+      status)
+        printf 'codex: current (v8) (/fake/codex-hook.sh)\n'
+        [[ "${HERDR_STUB_NO_CLAUDE_ROW:-0}" == 1 ]] || \
+          printf 'claude: %s (v8) (/fake/claude-hook.sh)\n' "$(stub_state)"
+        ;;
+      install)
+        [[ "${HERDR_STUB_INSTALL_FAILS:-0}" == 1 ]] && exit 1
+        # NOOP models the nastiest real state: exit 0 with nothing changed.
+        [[ "${HERDR_STUB_INSTALL_NOOP:-0}" == 1 ]] || \
+          { [[ -n "${HERDR_STUB_STATE_FILE:-}" ]] && printf 'current' >"$HERDR_STUB_STATE_FILE"; }
+        printf 'installed claude integration hook\n'
+        ;;
+      *) exit 2 ;;
+    esac ;;
   *)         exit 0 ;;
 esac
 STUB
@@ -714,6 +743,91 @@ has "$out" "○ npm"  "npm absent is reported"
 # ...and still without refusing: they are optional.
 rc=0; PATH="$MINBIN" bash "$DEPS" >/dev/null 2>&1 || rc=$?
 check "an absent optional dep does not change the exit code" "$rc" "0"
+
+echo
+echo "=== herdr's own Claude integration: the step no install path had ==="
+# config/herdr/config.toml ships `resume_agents_on_restore = true`, whose own
+# comment says it needs `herdr integration install claude`. That command was in
+# NO install path and NO checker -- invisible because this workstation has had it
+# since before the instructions existed. Both halves are pinned here: the wirer
+# installs it, and the checker fails when it is absent.
+istate() { printf '%s' "$WORK/istate.$1"; }
+
+# --- verify-tools: absent is a FAIL, and it takes the exit code with it -------
+H="$(new_home integ-absent)"
+good_statusline "$H" >"$H/.claude/settings.json"
+mkdir -p "$H/.claude/skills/herdr"
+herdr --skill >"$H/.claude/skills/herdr/SKILL.md" 2>/dev/null \
+  || PATH="$STUB_BIN:$PATH" herdr --skill >"$H/.claude/skills/herdr/SKILL.md"
+out="$(HERDR_STUB_INTEGRATION='not installed' verify "$H" --herdr)"
+has "$out" "integration is 'not installed'" "an absent integration is reported"
+has "$out" "resume_agents_on_restore"       "...and names the setting that cannot work"
+has "$out" "herdr-claude-wire.sh"           "...and names the command that fixes it"
+rc=0; HERDR_STUB_INTEGRATION='not installed' verify "$H" --herdr >/dev/null || rc=$?
+check "...and it is part of the exit code" "$rc" "1"
+
+# --- verify-tools: current is a ✓ ---------------------------------------------
+out="$(HERDR_STUB_INTEGRATION=current verify "$H" --herdr)"
+has "$out" "herdr Claude integration installed" "a current integration passes"
+rc=0; HERDR_STUB_INTEGRATION=current verify "$H" --herdr >/dev/null || rc=$?
+check "...and does not fail the run" "$rc" "0"
+
+# --- an older herdr without the subcommand is a ⚠, never a ✗ ------------------
+# Upgrading herdr is not a fix this report can ask for, so it must not be part of
+# the exit code -- the rule that stopped gh-doctor being permanently red.
+out="$(HERDR_STUB_NO_INTEGRATION=1 verify "$H" --herdr)"
+has   "$out" "no 'integration' subcommand" "an older herdr is named"
+hasnt "$out" "✗ FAIL: herdr Claude integration" "...as a ⚠, not a ✗"
+rc=0; HERDR_STUB_NO_INTEGRATION=1 verify "$H" --herdr >/dev/null || rc=$?
+check "...and does not fail the run" "$rc" "0"
+
+# --- a table with no claude row is NOT CHECKED, never a pass ------------------
+out="$(HERDR_STUB_NO_CLAUDE_ROW=1 verify "$H" --herdr)"
+has   "$out" "named no claude row"                "a table without a claude row is named"
+hasnt "$out" "herdr Claude integration installed" "...and is never reported as installed"
+
+# --- the wirer installs it, and proves the state changed ----------------------
+S="$(istate wire)"; printf 'not installed' >"$S"
+LOG="$WORK/integ.log"; : >"$LOG"
+out="$(HERDR_STUB_STATE_FILE="$S" HERDR_STUB_LOG="$LOG" wire "$H")"
+has "$out" "Claude integration installed" "the wirer installs an absent integration"
+has "$(cat "$LOG")" "integration install claude" "...by actually running the command"
+check "...and the state really changed" "$(cat "$S")" "current"
+
+# --- exit 0 with nothing changed must NOT report success ----------------------
+# The whole point of re-reading the status: `install` exiting 0 is not evidence
+# that anything happened, and a ✓ here would be the confident wrong answer this
+# repo has logged four times.
+S="$(istate noop)"; printf 'not installed' >"$S"
+out="$(HERDR_STUB_STATE_FILE="$S" HERDR_STUB_INSTALL_NOOP=1 wire "$H")"
+has   "$out" "exited 0, but status still reads" "install exiting 0 with no change is a ✗"
+hasnt "$out" "✓ herdr's Claude integration installed" "...and gets no ✓"
+rc=0; HERDR_STUB_STATE_FILE="$S" HERDR_STUB_INSTALL_NOOP=1 wire "$H" >/dev/null || rc=$?
+check "...and fails the wirer" "$rc" "1"
+
+# --- already current: nothing is run -----------------------------------------
+# Idempotence, asserted on the RECORDED ARGV rather than on the exit code: a
+# wirer that reinstalls on every run would pass an exit-code-only row.
+S="$(istate cur)"; printf 'current' >"$S"
+LOG="$WORK/integ2.log"; : >"$LOG"
+out="$(HERDR_STUB_STATE_FILE="$S" HERDR_STUB_LOG="$LOG" wire "$H")"
+has   "$out" "integration is current"                         "a current integration is left alone"
+hasnt "$(cat "$LOG")" "integration install claude"            "...and install is never invoked"
+
+# --- --print writes nothing and runs nothing ---------------------------------
+S="$(istate print)"; printf 'not installed' >"$S"
+LOG="$WORK/integ3.log"; : >"$LOG"
+out="$(HERDR_STUB_STATE_FILE="$S" HERDR_STUB_LOG="$LOG" wire "$H" --print)"
+has   "$out" "would run 'herdr integration install claude'" "--print says what it would do"
+hasnt "$(cat "$LOG")" "integration install claude"           "--print runs no install"
+check "--print leaves the state untouched" "$(cat "$S")" "not installed"
+
+# --- a failing install is a ✗ with a next step -------------------------------
+S="$(istate fail)"; printf 'not installed' >"$S"
+out="$(HERDR_STUB_STATE_FILE="$S" HERDR_STUB_INSTALL_FAILS=1 wire "$H")"
+has "$out" "failed" "a failing install is reported"
+rc=0; HERDR_STUB_STATE_FILE="$S" HERDR_STUB_INSTALL_FAILS=1 wire "$H" >/dev/null || rc=$?
+check "...and fails the wirer" "$rc" "1"
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"

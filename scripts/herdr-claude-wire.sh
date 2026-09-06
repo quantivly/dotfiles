@@ -3,8 +3,9 @@
 # scripts/herdr-claude-wire.sh
 # ============================
 #
-# Wire Claude Code to herdr: the two things `./install --herdr` links a file for
-# but cannot finish, both of which fail silently when skipped (DO-563).
+# Wire Claude Code to herdr: the three things `./install --herdr` links a file
+# for, or depends on, but cannot finish — each of which fails silently when
+# skipped (DO-563, and the third added after adoption feedback on 2026-09-04).
 #
 #   1. statusLine in ~/.claude/settings.json  -> publishes model / effort /
 #      context into the herdr agent sidebar, and doubles as the in-pane status
@@ -17,6 +18,13 @@
 #   2. ~/.claude/skills/herdr/SKILL.md        -> the CLI reference a lead agent
 #      reads to drive other panes. `herdr --skill` only PRINTS it; nothing
 #      generates the file, and the installer never even mentioned it.
+#
+#   3. `herdr integration install claude`     -> the SessionStart hook that tells
+#      herdr which Claude session is in which pane. config/herdr/config.toml
+#      ships `resume_agents_on_restore = true`, which needs it; without it a
+#      server restart brings the panes back without their conversations. The
+#      command was in none of our instructions, because this workstation has had
+#      it installed since before any of them were written (2026-09-04).
 #
 # WHY A SCRIPT AND NOT A PARAGRAPH. Both were prose in the team write-up, step 4
 # of seven, with the reader hand-substituting their own home directory into a
@@ -233,6 +241,88 @@ else
         rm -f "$tmp"
         bad "'herdr --skill' produced nothing — ${SKILL/#$HOME/\~} left as it was"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3. herdr's own Claude integration
+# ---------------------------------------------------------------------------
+# WHY HERE AND NOT IN install.conf.herdr.yaml. It writes two things into
+# ~/.claude -- the hook file, and a SessionStart entry in settings.json -- which
+# is exactly the territory dotbot cannot touch and this script already owns.
+#
+# WHY IT IS A STEP AT ALL. config/herdr/config.toml sets
+# `[session] resume_agents_on_restore = true`, and that setting's own comment
+# says it "Requires the official integration per agent (herdr integration
+# install claude)". The command appeared NOWHERE else: not in `install`, not in
+# install.conf.herdr.yaml, not here, not in HERDR_GUIDE.md, not in
+# verify-tools.sh. It stayed invisible because this workstation has had it since
+# long before any of those were written -- `herdr integration status` reports
+# `claude: current (v8)` here. So we shipped a config that depends on a step our
+# own instructions omit, and the first outside adopter had no way to find it
+# (2026-09-04).
+#
+# WHAT BREAKS WITHOUT IT, read off the installed hook rather than assumed: it is
+# one SessionStart hook calling `pane.report_agent_session` with the Claude
+# session id and transcript path. So the cost is SESSION RESUME after a server
+# restart -- panes come back without their conversations, silently, on a machine
+# whose config claims otherwise -- and NOT agent-state detection, which is
+# screen-scraping either way and always was. The hook's own comment records that
+# older integrations mapped SubagentStop to state and that this was removed, so
+# do not restate the old behaviour from memory.
+#
+# SAFE TO CALL, probed in a throwaway $HOME rather than assumed: it does not
+# prompt, exits 0 with stdin closed, is idempotent, and MERGES settings.json --
+# an existing statusLine, unrelated top-level keys and other SessionStart hooks
+# all survive. That last property is load-bearing here, because section 1 above
+# writes the statusLine into the same file a few lines earlier.
+
+# The word(s) after "claude:" in the status table, with the trailing path and
+# version parenthetical stripped: "current", "not installed", or whatever a
+# future herdr adds.
+integration_state() {
+    herdr integration status 2>/dev/null \
+        | sed -n 's/^claude:[[:space:]]*\([^(]*\).*/\1/p' \
+        | head -1 | sed 's/[[:space:]]*$//'
+}
+
+if ! command -v herdr >/dev/null 2>&1; then
+    : # Section 2 already reported this. A second identical ✗ is noise, and it
+      # would double-count one fault in a report read for its ✗ lines.
+elif ! herdr integration status >/dev/null 2>&1; then
+    # An older herdr with no `integration` subcommand (it exits 2). Nothing the
+    # reader can do here except upgrade herdr, so ⚠ and not ✗ -- the
+    # unfixable-condition rule that stopped gh-doctor being permanently red.
+    warn "this herdr has no 'integration' subcommand — session resume cannot work"
+    say "      ${DIM}Upgrade herdr (https://herdr.dev) for resume_agents_on_restore.${OFF}"
+else
+    state="$(integration_state)"
+    case "$state" in
+        current)
+            good "herdr's Claude integration is current" ;;
+        "")
+            # The subcommand ran but said nothing about claude. Never read as
+            # "fine": an empty answer is not agreement, the same rule the
+            # statusLine section above is built on.
+            warn "could not read 'herdr integration status' for claude — NOT CHECKED" ;;
+        *)
+            if [[ "$PRINT_ONLY" == true ]]; then
+                warn "would run 'herdr integration install claude' (currently: $state)"
+            elif herdr integration install claude </dev/null >/dev/null 2>&1; then
+                # Re-read instead of trusting exit 0 -- a positive test that the
+                # state actually changed, not the absence of an error. Same
+                # reasoning as reading .statusLine back rather than believing
+                # the write.
+                state="$(integration_state)"
+                if [[ "$state" == current ]]; then
+                    good "herdr's Claude integration installed"
+                else
+                    bad "'herdr integration install claude' exited 0, but status still reads: ${state:-unreadable}"
+                fi
+            else
+                bad "'herdr integration install claude' failed"
+                say "      ${DIM}Run it by hand to see why — resume_agents_on_restore needs it.${OFF}"
+            fi ;;
+    esac
 fi
 
 say ""

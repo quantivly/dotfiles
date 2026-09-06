@@ -1116,7 +1116,29 @@ Gotchas, in the order they bite:
   against the launcher's declared PATH` — which is correct and was phrased as though it were a
   live measurement; it now says it is a **prediction** about the server the enable step will
   start.
-- **State table: `scripts/test-herdr-modular.sh`** (146 checks, in CI as `herdr-modular-test`) —
+- **We shipped a config that depends on an install step none of our instructions mention.**
+  `config/herdr/config.toml` sets `[session] resume_agents_on_restore = true`, whose own comment
+  says it "Requires the official integration per agent (`herdr integration install claude`)" —
+  and that command appeared in **no** install path and **no** checker: not `install`, not
+  `install.conf.herdr.yaml`, not `herdr-claude-wire.sh`, not `HERDR_GUIDE.md`, not
+  `verify-tools.sh`. It stayed invisible for the most ordinary reason there is: `herdr
+  integration status` on this workstation says `claude: current (v8)`, installed here long
+  before any of those files were written. Found by the first outside adopter, 2026-09-04.
+  **What breaks without it is session resume, NOT agent-state detection** — read off the
+  installed hook rather than assumed: it is one `SessionStart` hook calling
+  `pane.report_agent_session` with the Claude session id and transcript path, so a server
+  restart returns the panes without their conversations, silently. Detection is screen-scraping
+  either way; the hook's own comment records that older versions mapped `SubagentStop` to state
+  and that this was removed upstream, so do not restate the old behaviour from memory. It now
+  lives in `scripts/herdr-claude-wire.sh` — the one script that already owns what dotbot cannot
+  write into `~/.claude` — and `verify-tools.sh --herdr` asserts it. Probed in a throwaway
+  `$HOME` rather than assumed before wiring it in: it does not prompt, exits 0 with stdin
+  closed, is idempotent, and **merges** `settings.json`, so an existing `statusLine`, unrelated
+  top-level keys and other `SessionStart` hooks all survive — which is load-bearing, because the
+  wirer writes the statusLine into that same file a few lines earlier. The wirer re-reads the
+  status afterwards rather than trusting exit 0, and an older herdr with no `integration`
+  subcommand is a ⚠, not a ✗: upgrading herdr is not a fix a report can ask for.
+- **State table: `scripts/test-herdr-modular.sh`** (170 checks, in CI as `herdr-modular-test`) —
   the two commands a modular adopter runs, hermetic via a recording `herdr` stub and fake `$HOME`.
   Two defects in the suite itself are worth more than most of its rows:
   - **A row that cannot reach the branch it names is unfailable.** The row asserting `--herdr`

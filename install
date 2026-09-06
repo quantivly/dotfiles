@@ -132,10 +132,13 @@ if (( HERDR_ONLY )); then
        ${BASEDIR}/scripts/herdr-claude-wire.sh
 
      Sets statusLine in ~/.claude/settings.json (user-level, not in this repo,
-     so dotbot cannot) and generates ~/.claude/skills/herdr/SKILL.md. Without
-     the first, every sidebar row renders empty and nothing reports why; without
-     the second, your agents have no herdr CLI reference. It refuses to touch a
-     statusLine that belongs to something else rather than overwriting it.
+     so dotbot cannot), generates ~/.claude/skills/herdr/SKILL.md, and installs
+     herdr's own Claude integration. Without the first, every sidebar row renders
+     empty and nothing reports why; without the second, your agents have no herdr
+     CLI reference; without the third, config.toml's resume_agents_on_restore
+     cannot work and a server restart returns your panes without their
+     conversations. It refuses to touch a statusLine that belongs to something
+     else rather than overwriting it.
 
   3. Plugins and the server:
 
