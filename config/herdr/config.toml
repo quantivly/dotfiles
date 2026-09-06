@@ -520,8 +520,23 @@ claude = [
   # Claude agent a sixth line. Here the row reads "stale · idle 47m" while
   # herdmates publishes and "idle 47m" alone when it does not, <= 23 columns
   # ("!! needs-you" + "idle 47m"). Values: "idle 2m" / "idle 3h" / "idle 2d".
+  #
+  # $reap (added 2026-09-03) shares this row for the same reason: it is a time
+  # dimension too. It is how many of THIS lead's teammates have finished and
+  # are still running, published only on a team lead's pane and only when the
+  # count is non-zero, so it costs nothing on every other Claude pane and the
+  # row still renders on $status alone. A Claude Code teammate is a persistent
+  # session -- nothing but TaskStop ends one -- and this count is the only
+  # ambient sign that they are accumulating. Values: "1 to stop" / "2 to stop".
+  # Amber, not red: an unreaped teammate is waste, not breakage.
+  #
+  # Worst case for the row goes from ~23 to ~34 columns ("!! needs-you" +
+  # "2 to stop" + "idle 47m" + separators) against sidebar_width 40, so it
+  # still does not truncate -- but that is now the tightest row in the table,
+  # so check it before adding a fourth token here.
   [
     "$status",
+    { token = "$reap", fg = "#e0af68", dim = false },
     "$idle_ok",
     { token = "$idle_warn", fg = "#e0af68", dim = false },
     { token = "$idle_crit", fg = "#f7768e", bold = true, dim = false },
