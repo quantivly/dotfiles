@@ -160,6 +160,15 @@ if (( HERDR_ONLY )); then
   mise config, so node/bun/lazygit/yazi are all plausibly absent. Read those
   lines, and scripts/herdr-deps-check.sh for what each missing one costs.
 
+  Before your first update: if you cannot push to this repo, FORK IT FIRST.
+  plugins.list and plugins.lock are symlinks INTO this checkout, deliberately, so
+  herdr-lazy writes a plugin change through as a reviewable diff. Without push
+  access that same property leaves you holding modifications you can never
+  publish, and your next 'git pull' conflicts on a file a tool wrote for you.
+  Nothing errors; you just stop being able to update. Fork, keep this repo as
+  'upstream', and rebase onto it — docs/HERDR_GUIDE.md, section 3,
+  "Updating a modular install you cannot push to", has the sequence.
+
 NEXT
     if (( deps_rc != 0 )); then
         echo "  ⚠ The links are in place, but a REQUIRED dependency above is missing."

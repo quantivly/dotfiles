@@ -213,7 +213,8 @@ jobs:
           HOME="$FAKE" \
           DOTFILES_ALLOW_WORKTREE_INSTALL=1 \
           HERDR_ALLOW_FOREIGN_CHECKOUT=1 \
-            ./install --herdr || rc=$?
+            ./install --herdr >/tmp/herdr-install.out 2>&1 || rc=$?
+          cat /tmp/herdr-install.out
           # Exactly 1: herdr is the only required dependency absent here (the
           # step above installs jq and zsh; git and python3 are preinstalled).
           # A 0 would mean the deps report stopped being consulted at all.
@@ -251,6 +252,32 @@ jobs:
             [[ -e "$FAKE/$f" ]] && { echo "::error::--herdr created $f"; exit 1; }
           done
           echo "5 links, all resolving, nothing else touched."
+
+          # DO-566. plugins.list/plugins.lock are links INTO the checkout, so
+          # herdr-lazy writes through them -- correct for us, and for an adopter
+          # without push access it is permanent unpublishable dirt plus a pull
+          # that conflicts on a file a tool wrote for them. The only place that
+          # warning reaches them in time is here, standing in the installer's
+          # output, so assert it is still printed.
+          grep -qi 'fork' /tmp/herdr-install.out \
+            || { echo "::error::next-steps no longer tells an adopter to fork"; exit 1; }
+          grep -q 'upstream' /tmp/herdr-install.out \
+            || { echo "::error::next-steps no longer names the upstream remote"; exit 1; }
+          # And the section it sends them to has to exist: a pointer into a doc
+          # keeps printing perfectly after the heading it names is renamed --
+          # green tick, dead end. The title is read out of the pointer line
+          # itself rather than restated here, because a third copy of it would
+          # only be one more thing to forget to rename.
+          # `|| true` because the step runs under `set -e` with pipefail: an
+          # empty grep would otherwise kill the step on the assignment itself,
+          # replacing the diagnosis below with a bare non-zero exit.
+          sec="$(sed -n '/docs\/HERDR_GUIDE.md/,+1p' /tmp/herdr-install.out \
+                 | grep -o '"[^"]*"' | head -1 | tr -d '"' || true)"
+          [[ -n "$sec" ]] \
+            || { echo "::error::next-steps no longer names a HERDR_GUIDE section"; exit 1; }
+          grep -qF "### $sec" docs/HERDR_GUIDE.md \
+            || { echo "::error::install points at HERDR_GUIDE section '$sec', which does not exist"; exit 1; }
+          echo "update path: fork + upstream named, pointing at a section that exists."
 
       - name: --herdr refuses a checkout that is not ~/.dotfiles
         run: |

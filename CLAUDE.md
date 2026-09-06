@@ -504,6 +504,13 @@ setup_fzf() {
 - Use `command -v` in `zshrc.conditionals` and standalone scripts
 - Use `has_command()` inside functions for readability
 - Both are fast (~1-2ms); no caching needed
+- **One name per call.** `command -v a b c` takes a single operand in POSIX sh, and the
+  shells disagree about the rest: measured here, `command -v bash nosuchtool` prints only
+  `/usr/bin/bash` and exits **0** in bash and dash, and **1** in zsh — so the same line is a
+  silent pass with two tools missing in one shell and an unexplained failure naming none of
+  them in the other. It is not academic: `docs/HERDR_GUIDE.md` §2.3 carries this warning in a
+  comment, and the team-facing write-up derived from it then used exactly that shape as a
+  verification step. Loop, or call it once per tool.
 
 **Historical note:** Tool cache was removed after benchmarks showed 81ms overhead.
 
@@ -845,6 +852,18 @@ present, names the one feature each missing tool costs, and offers the exact `mi
 line with versions read out of `.mise.toml` so it cannot drift from the pins. It handles
 mise-absent too, by naming the versions and leaving the method alone.
 
+**The linked lockfile assumes push access, and an outside adopter does not have it (DO-566).**
+`plugins.list` and `plugins.lock` are symlinks into the checkout in BOTH configs, deliberately,
+so `herdr-lazy` writes a plugin change through as a reviewable diff. For anyone who cannot push
+here that is permanent local modification of somebody else's repo plus a `git pull` that
+conflicts on a file a tool wrote for them — no error, just an update path that stops working.
+The answer is a fork with this repo as `upstream`, documented in HERDR_GUIDE §3 "Updating a
+modular install you cannot push to" and printed by `./install --herdr`, where the reader is
+standing when it matters. Copying the two files for the modular path instead was considered and
+rejected: a copy is written once and never reconciled, which is the `~/.config/mise/config.toml`
+failure above (one warning, keep the stale local copy, forever), and it costs the reviewable
+diff that is most of why the lockfile is in git.
+
 The shell layer is `zsh/zshrc.herdr`, sourced by `zshrc` and **safe to source alone** — a
 modular adopter adds one line to their own rc. It needs zsh, and `hdespawn` prefers `confirm`
 (`zsh/functions/system.sh`). `hspawn`/`hdespawn`/`hreap` in it are **agent-facing**: a lead
@@ -1040,6 +1059,42 @@ Gotchas, in the order they bite:
   statusLine entry it never runs, every `$mdl`/`$eff_*`/`$ctx_*` token resolves to nothing, and those sidebar
   rows render empty with no error. It doubles as the in-pane status line, so visible model/context
   text inside a pane means the publisher is alive.
+- **`//` substitutes for null, never for a type error.** `jq -r '.statusLine.command // ""'`
+  *errors* on a `statusLine` that is not an object (`Cannot index string with string`), and the
+  discarded exit status left an empty capture that read as **the key is absent** — so
+  `herdr-claude-wire.sh` overwrote another tool's statusLine and printed "Claude Code is wired",
+  exit 0, in exactly the state the script is written to refuse. Read the **type** first
+  (`.statusLine | type`), and land "could not read the answer" in the same arm as "it belongs to
+  somebody else": ours is a positive test — an object whose `.command` names our own hook — never
+  the absence of evidence against. `verify-tools.sh` had the mirror-image bug, reporting the fault
+  by leaking jq's parser error into its own message, which satisfied a row that merely looked for
+  the word "string". An object is not enough either: `{"command":null}` and
+  `{"type":"custom","script":"/opt/x"}` are objects whose `.command` comes back empty.
+- **The permanently-red checker recurred inside the change written to remove one.** DO-563 exists
+  because `verify-tools.sh` printed a ✗ that the write-up had to tell modular adopters in prose to
+  ignore; the Claude-wiring section it added then asserted unconditionally, so any machine without
+  herdr and Claude Code was red forever with nothing to act on, and a clean `./install` was red
+  before anyone had the chance to wire anything. It reports `○ skipped` when there is nothing to
+  wire and fails only when herdr and `~/.claude` are both present. This file already documents the
+  class twice (gh-doctor, backup-doctor); a third recurrence means it is not something to remember
+  but a question to ask of **every new check**: on a machine that legitimately lacks this subject,
+  what does it print, and what can the reader do about it?
+- **State table: `scripts/test-herdr-modular.sh`** (122 checks, in CI as `herdr-modular-test`) —
+  the two commands a modular adopter runs, hermetic via a recording `herdr` stub and fake `$HOME`.
+  Two defects in the suite itself are worth more than most of its rows:
+  - **A row that cannot reach the branch it names is unfailable.** The row asserting `--herdr`
+    never prints the `ln -sfn` that pins ~25 tools globally passed with the full-install report
+    un-gated *entirely* — that string is emitted only from the mise-drift FAIL branch, and the
+    fake `$HOME` had no active mise config, so every run took the "nothing to compare" branch
+    instead. The one row the whole change's rationale rests on was decorative. The fixture now
+    writes a real, differing `~/.config/mise/config.toml` to make the branch reachable. Mutation
+    testing is what found it: a row that passes both ways is worthless however carefully worded.
+  - **A suite that shells out to the live machine is not hermetic, whatever its header says.** It
+    `pgrep`'d for the real herdr server, so a contaminated server turned two exit-code rows red
+    for a reason unrelated to the diff *and* made every row expecting `rc=1` pass for the wrong
+    reason — red for no reason and green for no reason at once, under a header claiming "no
+    server". Stub it, the way `test-systemd-reconcile.sh` stubs `systemctl`; never rely on the
+    tool's absence, because this box has the real thing.
 
 ## GNOME Desktop Configuration
 

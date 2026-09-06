@@ -355,6 +355,62 @@ default's section order to keep that diff readable.
 **Never run bare `herdr`** from a script or an agent — it attaches a client. Use subcommands.
 (At a keyboard it is simply how you re-attach after `ctrl+alt+q`.)
 
+### Updating a modular install you cannot push to
+
+`plugins.list` and `plugins.lock` are linked **into the checkout**, never copied, and that
+is deliberate: `herdr-lazy sync`/`update` write straight through the symlink, so a plugin
+change arrives as a reviewable diff in a tracked file rather than as a quiet mutation of a
+copy nobody reads. That reasoning assumes you can push. If you cannot — the normal case for
+someone who took the modular path precisely because they are adopting herdr and not this
+repo — the same property hands you permanent local modifications to somebody else's
+checkout, and your next `git pull` conflicts on a file a tool wrote for you without asking.
+Nothing errors; you simply cannot update any more.
+
+**Fork, and keep this repo as `upstream`.** Once, on the checkout you already have:
+
+```bash
+gh repo fork quantivly/dotfiles --clone=false        # or the web UI
+git -C ~/.dotfiles remote rename origin upstream
+git -C ~/.dotfiles remote add origin git@github.com:<you>/dotfiles.git
+git -C ~/.dotfiles push -u origin main
+```
+
+The checkout still has to live at `~/.dotfiles` — the unit's `ExecStart` is the absolute
+`%h/.dotfiles/scripts/herdr-server-launch.sh`, and forking changes nothing about that.
+
+Then an update is a rebase, not a pull:
+
+```bash
+git -C ~/.dotfiles fetch upstream
+git -C ~/.dotfiles rebase upstream/main   # your plugin commits replay on top of ours
+herdr-lazy check                          # declared vs installed, after the rebase
+herdr-lazy install                        # converge, which rewrites plugins.lock again
+```
+
+**Expect `plugins.lock` to conflict**, because it is the one file both sides edit with a
+tool. Resolve it by naming the ref, never with `--ours`/`--theirs`: those are *inverted*
+during a rebase (git replays your commits onto upstream, so "ours" is upstream), and
+picking the wrong one silently reinstates the pins you were trying to update.
+
+```bash
+git -C ~/.dotfiles checkout upstream/main -- config/herdr/plugins/   # take our plugin set
+git -C ~/.dotfiles rebase --continue
+herdr-lazy install
+```
+
+Rebasing rather than merging is what keeps `git diff upstream/main -- config/herdr/plugins/`
+readable as "what I changed", which is the only thing that makes a lockfile you did not
+write reviewable at all.
+
+**Why the modular path does not just copy those two files instead.** A copy is written once
+and then never reconciled, so `./install` would have to choose on every run between
+overwriting a lock `herdr-lazy` has just updated and keeping a stale one forever. This repo
+already has that bug on record: `~/.config/mise/config.toml` was a real file that differed
+from the repo's, `./install` printed one warning and kept the local copy, and ~11 tools
+stayed off `PATH` for months with every check green (CLAUDE.md, "mise (Version Manager)").
+Copying also costs the reviewable diff, which is most of why the lockfile is in git.
+Forking keeps both properties and puts the divergence somewhere `git status` shows it.
+
 ---
 
 ## 4. Accounts
