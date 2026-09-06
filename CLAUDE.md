@@ -1184,6 +1184,30 @@ three live in the one file and the writer that added Slack carried a stale copy 
 is also why sessions log `No access token in storage` → `UnauthorizedError` while the file on
 disk holds an unexpired token, and why the daily counts track concurrency, not token lifetime.
 
+**CORRECTED 2026-09-06 — the 10:48 row is not a race, and reading it as one cost five false
+failures.** `mcpOAuth` is stored **per config dir**, and the entry Claude Code writes after OAuth
+*discovery* but before *authorisation* has an empty `accessToken` with `clientId`,
+`discoveryState`, `issuer`, `redirectUri`, `serverName` and `serverUrl` — and **no** `refreshToken`,
+`expiresAt` or `scope` at all. That is exactly the 10:48 signature. Every isolated session starts
+there, so `hspawn` workers have had no plugin Notion/Linear/Slack since #107 made isolation the
+default, and `claude-doctor` reported three ✗ "interleaved write" against a perfectly healthy
+session while the same three entries read `✓ valid, refreshable` out of the global file in the
+same minute.
+
+**The discriminator is the metadata, not the token.** An authorised entry that loses its
+`accessToken` *keeps* its `expiresAt` and `scope`, because a token cannot shed its own string and
+keep its bookkeeping by expiring. Empty token **with** that metadata is a lost race; empty token
+**without** it is a server nobody has authorised in this config dir. The rows from 11:38 and 12:00
+— entries that were valid for 23 h and then went to length 0, or vanished outright — remain
+genuine interleaved writes; only the 10:48 shape was misread.
+
+**The per-config-dir storage is the unpaid cost of isolation, and it has a cheap answer.** Adopting
+a profile otherwise means one browser OAuth flow per plugin MCP server per profile. The **claude.ai
+connectors** for the same three services need no `mcpOAuth` entry at all — they ride the login
+token — and already work in an isolated session. `claude-doctor` has warned that all three are
+duplicated across both paths since it was written; retiring the plugin copies makes the per-profile
+MCP cost zero and clears the warnings at the same time.
+
 **But read the last row before drawing a threshold.** Two back-to-back re-auths at the *highest*
 concurrency of the day left all three intact. This is a race, not a limit: more writers raise the
 odds of losing it, they do not decide the outcome. So "it worked" is never evidence that a
@@ -1206,12 +1230,46 @@ timestamps on 2026-09-06, and this is the dominant mechanism, above the partial-
 ```
 
 Refresh-token rotation is **server-side**: when any one session refreshes, the old refresh token
-is invalidated *everywhere*. So N sessions sharing one credential file are not N independent
-logins — they are one login with N holders, and the first rotation orphans the other N-1. That
-is what "occasional random logouts" actually is. It is also why the fix is isolation
-(`CLAUDE_CONFIG_DIR` per session) rather than anything that makes the file-writing safer: even a
-perfectly atomic, perfectly locked write would not help, because the invalidation happens at
-Anthropic, not on disk.
+is invalidated *everywhere*. The fix is therefore isolation (`CLAUDE_CONFIG_DIR` per session)
+rather than anything that makes the file-writing safer — even a perfectly atomic, perfectly
+locked write would not help, because the invalidation happens at Anthropic, not on disk.
+
+**But do not over-read that into "N holders, and the first rotation orphans the other N−1".** An
+earlier version of this section said exactly that, and the transcript record does not support it.
+Counting `isApiErrorMessage` login-expiry events across 694 transcripts and grouping them into
+incidents, the eight days to 2026-09-06 gave:
+
+| when (UTC) | sessions hit | | when (UTC) | sessions hit |
+|---|---|---|---|---|
+| 08-30 06:36 | 1 | | 09-03 05:43 | 1 |
+| 08-31 09:46 | 1 | | 09-05 10:13 | 1 |
+| **09-01 14:52** | **5** | | **09-06 01:46–04:16** | **3** |
+| **09-02 06:23** | **4** | | **09-06 09:23** | **6** |
+| **09-02 14:09** | **3** | | | |
+
+**Nine incidents, five of them simultaneous across 3–6 sessions.** Literal per-holder orphaning
+would not look like this: access tokens last ~7.5 h, so ~25 processes produce roughly three
+rotations an hour, and a holder orphaned by every other holder's rotation would be logged out
+within the hour — dozens of times a day. This box averages about one. The reconcilable reading is
+that Claude Code re-reads the credential file when it refreshes, so same-file holders mostly heal,
+and the damage comes from **a third party writing a superseded credential into the shared file** —
+a `clauth <profile>` switch, or a lost interleaved write.
+
+Two consequences, and they decide the design rather than decorating it:
+
+- **Removing the third writer and emptying the shared-global group is the high-value move.** Going
+  finer than one credential file per *login* buys little.
+- **A per-session credential COPY would make things worse**, turning the rare singleton class into
+  the common one by creating genuinely independent holders of a single grant. Every per-session
+  config dir in this repo therefore *symlinks* its credential to a profile store; none copies one.
+  (The symlink is written *through*, not replaced — the profile stores carry `mcpOAuth` discovery
+  records that only Claude Code writes.)
+
+One more number from the same day, because it is the one the whole mechanism is aimed at: **17 of
+18 live Claude processes had no `CLAUDE_CONFIG_DIR` at all**, so they were seventeen holders of one
+file — and that file matched no registered clauth profile, so they were billing an account nobody
+had selected. #107 isolated `hspawn` workers and touched none of them, because a human's own
+`claude` does not go through `hspawn`.
 
 Two things follow, and both bit during this investigation:
 
@@ -1282,6 +1340,31 @@ is the durable place. Note also that `settings.json` is user-level and **not** i
 
 Traps specific to the checker, each of which produced a green tick first:
 
+- **A checker can go blind in the configuration the repo just made default, and this one did.**
+  Run inside a `clauth start` session — what `hspawn` has used since #107 — `claude-doctor`
+  reported `✗ mode 777` (`stat -c %a` does not dereference, so it read the *symlink's* mode
+  against a target that was 600), three `✗ accessToken is EMPTY` against discovery stubs, a
+  vacuous `✓ stored copy matches` (it compared the profile store with itself through the symlink),
+  and it **missed** a genuinely orphaned global credential. Four wrong answers, no error, in the
+  newest checker in the repo. The fixes: `stat -Lc`, the metadata discriminator above, and
+  `_claude_global_cred_file` — every clauth check reads `~/.claude/.credentials.json` explicitly,
+  because that is the file a switch overwrites regardless of where the shell running the doctor
+  is pointed. **When adding a check, run it in both shells and diff the output.**
+- **A check that cannot fire is indistinguishable from a healthy machine.** The "auto-switch armed
+  … AND IS NOT LOGGED" note matched `fallback_chain[^]]*\]` with a line-based `grep -oE`, and
+  clauth writes that array over several lines — so on the box it was written for it matched
+  nothing, exited 1, and had never once printed. The suite's single-line fixture hid it exactly.
+- **`clauth which` answers the literal string `unknown`**, a sentinel and not a profile name.
+  Taken as one it produced "no stored credentials for 'unknown'", which reads like a missing file,
+  and it skipped the `status.json` fallback that names the real active profile.
+- **Four legacy `~/.claude-*` config dirs still hold full credential files**, three written on
+  2026-09-01 — four days after `zsh/zshrc.company` records that scheme as removed. Untracked
+  logins and untracked rotation participants; nothing on the machine mentioned them until the
+  doctor was taught to.
+- **`readlink -f` is a dependency; `${path:A}` is not.** The state table builds a `PATH` from
+  scratch, `readlink` was not on it, and path resolution silently returned nothing — degrading two
+  findings on exactly the machines whose `PATH` is unusual. Same modifier the live-config guard
+  uses in `zshrc`, and forkless.
 - **A row that cannot reach the branch it names is unfailable.** The "absent log store is NOT
   CHECKED" row matched the bare string `NOT CHECKED`, which the *duplicated-services* section
   also prints — so it passed with the line it names replaced by a `✓`. Mutation testing found it;
@@ -1299,10 +1382,12 @@ Traps specific to the checker, each of which produced a green tick first:
   `<command-name>/login</command-name>` writes that string into the current transcript. Exclude
   the running session, or the number climbs as you measure it.
 
-State table: `scripts/test-claude-doctor.sh` (42 checks, in CI as `claude-doctor-test`) —
-hermetic via a fixture `$HOME`, a from-scratch `PATH` and a recording `clauth` stub. Eight
-mutants were run against it and all eight died, including "count files instead of successes"
-(the desktop-commander bug) and "print the token in the report".
+State table: `scripts/test-claude-doctor.sh` (78 checks, in CI as `claude-doctor-test`) —
+hermetic via a fixture `$HOME`, a from-scratch `PATH`, a recording `clauth` stub, and a fixture
+process tree (`CLAUDE_DOCTOR_PROC_ROOT`) so the concurrency grouping can be pinned without
+depending on whatever happens to be running on the machine. 13 mutants were run against it and
+all 13 died, including "count files instead of successes" (the desktop-commander bug), "print the
+token in the report", and one for each blind spot above.
 
 ```bash
 claude-doctor              # auth + MCP health, from the log store
@@ -1447,5 +1532,5 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
 - **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
-- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth <profile>` while the doctor reports the stored copy DIFFERS from the live credential.
+- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth <profile>` while the doctor reports the stored copy DIFFERS from the live credential. If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.
 - **Backups:** `backup-doctor` (full-chain correctness — start here), `backup-status` (quick health), `systemctl list-timers | grep restic`, `resticprofile -c /etc/resticprofile/profiles.toml show` (validate config)
