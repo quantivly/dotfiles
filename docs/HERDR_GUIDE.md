@@ -310,8 +310,16 @@ git clone git@github.com:quantivly/dotfiles.git ~/.dotfiles && cd ~/.dotfiles &&
 herdr --version          # confirm it is on PATH before continuing (~/.local/bin/herdr here)
 
 # 3. Wire Claude Code: the statusLine entry (./install creates the symlink but CANNOT edit
-#    ~/.claude/settings.json) and the agent skill file. One idempotent command, and it
-#    refuses a statusLine owned by something else rather than overwriting it. See §6.
+#    ~/.claude/settings.json), the agent skill file, and herdr's own Claude integration
+#    (`herdr integration install claude`). One idempotent command, and it refuses a
+#    statusLine owned by something else rather than overwriting it. See §6.
+#    The integration is what `[session] resume_agents_on_restore = true` in config.toml
+#    needs -- it is the SessionStart hook that reports which Claude session is in which
+#    pane, so without it a server restart returns the panes without their conversations,
+#    silently. Until 2026-09-04 that command was in NO install path and NO checker; it
+#    was invisible because this workstation had had it since before the instructions were
+#    written. It does NOT affect agent-state detection, which is screen-scraping either
+#    way -- an older integration version reported state and that was removed upstream.
 scripts/herdr-claude-wire.sh           # --print shows what it would change
 
 # 4. Plugins. herdr-lazy is the manager — and it is itself a plugin, so it does not exist until

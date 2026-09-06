@@ -23,7 +23,10 @@
 # backup-doctor and audit-status. The third is "Claude Code wiring" -- the
 # statusLine and agent-skill file that ./install links a hook for but cannot
 # finish, both of which fail silently and neither of which anything checked
-# before DO-563. Everything else stays informational and exits
+# before DO-563; plus herdr's own Claude integration, which the shipped
+# config.toml depends on (`resume_agents_on_restore`) and which NO install path
+# installed and nothing checked at all, until adoption feedback surfaced it on
+# 2026-09-04. Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
 # SKIPPED because no server is running.
@@ -746,6 +749,36 @@ elif command -v herdr &>/dev/null && ! diff -q <(herdr --skill 2>/dev/null) "$CC
     echo "    Regenerate: scripts/herdr-claude-wire.sh (it is version-specific)"
 else
     echo -e "${GREEN}✓${NC} agent skill file present"
+fi
+
+# herdr's own Claude integration -- the SessionStart hook that reports which
+# Claude session lives in which pane. config/herdr/config.toml ships
+# `[session] resume_agents_on_restore = true`, which cannot work without it:
+# herdr has no session id to resume, so a server restart returns the panes
+# without their conversations and nothing says why. Nothing checked this before,
+# and nothing installed it either -- the command was in no install path at all,
+# invisible because this workstation has had it since before the instructions
+# existed (`claude: current (v8)`). Found by the first outside adopter, 2026-09-04.
+#
+# A ✗, not a ⚠: it is one command to fix and that command is on the failing line.
+# The `integration` subcommand's own absence is the ⚠ case, since upgrading herdr
+# is not something this report can ask for as a fix.
+if ! herdr integration status >/dev/null 2>&1; then
+    echo -e "${YELLOW}⚠${NC} this herdr has no 'integration' subcommand — session resume NOT CHECKED"
+else
+    cc_integ="$(herdr integration status 2>/dev/null \
+        | sed -n 's/^claude:[[:space:]]*\([^(]*\).*/\1/p' | head -1 | sed 's/[[:space:]]*$//')"
+    if [[ "$cc_integ" == current ]]; then
+        echo -e "${GREEN}✓${NC} herdr Claude integration installed"
+    elif [[ -z "$cc_integ" ]]; then
+        # The table parsed but named no claude row. An empty answer is never
+        # agreement -- the rule this whole file is built on.
+        echo -e "${YELLOW}⚠${NC} 'herdr integration status' named no claude row — NOT CHECKED"
+    else
+        echo -e "${RED}✗ FAIL:${NC} herdr Claude integration is '${cc_integ}' — resume_agents_on_restore cannot work"
+        echo "$CC_FIX"
+        claude_wiring_failed=1
+    fi
 fi
 
 fi  # end of the Claude Code wiring section (skipped when there is nothing to wire)
