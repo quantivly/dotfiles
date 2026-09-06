@@ -64,7 +64,9 @@ done
 # Assert the functions under test are actually DEFINED before asserting on their
 # behaviour. Most rows below are "this line does not appear", which is also
 # exactly what a suite that loaded nothing produces.
-for fn in claude-doctor _claude_cred_file _claude_now_ms _claude_fmt_delta _claude_mcp_log_root; do
+for fn in claude-doctor _claude_cred_file _claude_now_ms _claude_fmt_delta _claude_mcp_log_root \
+          _claude_global_cred_file _claude_cred_id _claude_cred_owner \
+          _claude_legacy_cred_dirs _claude_proc_root; do
     zsh -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $CLAUDESH — the suite would assert nothing"
 done
@@ -635,6 +637,170 @@ printf 'fallback_chain = ["p1"]\n' > "$FHOME/.clauth/profiles.toml"
 printf '# preferred = true\n' > "$FHOME/.clauth/profiles/p1/config.toml"
 WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
 no_out "a COMMENTED preferred is not read as set" "is preferred"
+
+#-----------------------------------------------------------------------------
+section "M. Two unreadable files are not two matching files"
+#-----------------------------------------------------------------------------
+# THE ROW THAT 13 MUTANTS MISSED. `_claude_cred_id` piped jq straight into
+# sha256sum, so a jq failure hashed EMPTY INPUT — a constant. Every unreadable
+# credential therefore had the same id and "matched" every other unreadable
+# credential, printing "✓ stored copy matches — switching away and back is safe"
+# across two corrupt files and making all three NOT-CHECKED branches dead code.
+# Nothing here fed it a broken file, which is exactly why it survived.
+
+new_home m1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf '{"claudeAiOauth":{"accessTok\n' > "$CRED"                      # torn mid-write
+printf 'not json at all\n' > "$FHOME/.clauth/profiles/p1/credentials.json"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+no_out   "two unparseable credentials do NOT match"  "switching away and back is safe"
+
+# THE GLOBAL FILE, FROM AN ISOLATED SESSION. This row must be isolated or it
+# proves nothing: un-isolated, $cred and $gcred are the same file and SECTION 1's
+# pre-existing "NOT VALID JSON" check fires and returns early, so the section-3
+# check can be deleted outright and the row still passes. It did — the mutant
+# survived, which is the "a row that cannot reach the branch it names is
+# unfailable" trap for the second time in this file.
+new_home m1b; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1" "$FHOME/iso"
+jq '{claudeAiOauth,mcpOAuth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+chmod 600 "$FHOME/.clauth/profiles/p1/credentials.json"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$FHOME/iso/.credentials.json"
+printf '{"claudeAiOauth":{"accessTok\n' > "$CRED"                      # the GLOBAL is torn
+CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor; CFGDIR=""
+want_out "a torn GLOBAL file is reported from an isolated session" "NOT VALID JSON"
+want_out "and says who reads it"                                   "every non-isolated session reads it"
+want_rc  "and it fails the doctor"                                 1
+no_out   "and no ownership is claimed for an unreadable file"      "belongs to profile"
+
+# The same bug one level up: a file that parses but has no claudeAiOauth yields
+# {accessToken:null,...}, which is also a constant across every such file.
+new_home m2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf '{"mcpOAuth":{}}\n'  > "$CRED"
+printf '{"other":1}\n'      > "$FHOME/.clauth/profiles/p1/credentials.json"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+no_out "two credential-less files do NOT match either" "switching away and back is safe"
+
+#-----------------------------------------------------------------------------
+section "N. The fallback_chain match must not run past its own assignment"
+#-----------------------------------------------------------------------------
+# Fixing the line-based grep by flattening the file with `tr` removed the very
+# boundary that bounded it, so `fallback_chain[^]]*\]` ran to the next `]`
+# ANYWHERE — reporting armed for a disabled chain and printing whatever sat in
+# between into a report that lands in transcripts.
+new_home n1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+{ printf '# fallback_chain is intentionally DISABLED on this machine\n'
+  printf 'oauth_token = "%s-IN-PROFILES-TOML"\n' "$FAKE_TOKEN"
+  printf '[profiles.p1]\n'; } > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+no_out "a commented-out chain is not reported as armed" "auto-switch armed"
+no_out "and nothing from profiles.toml leaks into the report" "$FAKE_TOKEN"
+
+new_home n2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'fallback_chain = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+no_out "an empty chain is configured but not armed" "auto-switch armed"
+
+# The armed note must survive the orphaned state, where a switch is most
+# dangerous. It was gated on $active, and the `unknown` sentinel blanks $active.
+new_home n3; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken="nobody"' \
+    > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'fallback_chain = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+printf 'preferred = true\n' > "$FHOME/.clauth/profiles/p1/config.toml"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=unknown run_doctor
+want_out "an unattributable credential still reports the armed chain" "auto-switch armed"
+want_out "and still names the preferred profile"                      "is preferred"
+
+#-----------------------------------------------------------------------------
+section "O. Checks that must not depend on clauth, or on there being profiles"
+#-----------------------------------------------------------------------------
+# The legacy scan sat inside the "clauth is installed" branch — backwards, since
+# a machine that never adopted clauth is the one most likely to still carry
+# ~/.claude-work and ~/.claude-personal.
+new_home o1; write_cred
+mkdir -p "$FHOME/.claude-work"
+cp "$CRED" "$FHOME/.claude-work/.credentials.json"
+run_doctor    # clauth ABSENT
+want_out "a legacy credential dir is reported with no clauth installed" \
+         "legacy config dir still holds a credential"
+
+# A clauth with no profiles registered must not warn forever about a credential
+# it could never attribute.
+new_home o2; write_cred
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH='' run_doctor
+no_out   "no profiles yet is not an orphan warning" "matches NO registered clauth profile"
+want_out "it is a note saying so"                   "nothing to attribute the credential to"
+
+#-----------------------------------------------------------------------------
+section "P. One credential file is one group"
+#-----------------------------------------------------------------------------
+# Every per-process path is resolved with :A; leaving the shared-group key raw
+# split one physical file across two groups, and put a ✓ on a process that a
+# write to that store would log out.
+new_home p1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1/runtime-1-0"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+rm -f "$CRED"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$CRED"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
+      "$FHOME/.clauth/profiles/p1/runtime-1-0/.credentials.json"
+mk_proc 201 claude ""
+mk_proc 202 claude "$FHOME/.clauth/profiles/p1/runtime-1-0"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+want_out "two processes on one physical file are ONE group" "2 on"
+no_out   "and not split across two"                         "1 on clauth profile 'p1'"
+
+# The threshold comes from the incident data, not from the flat count it replaced.
+new_home p2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1/runtime-1-0"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
+      "$FHOME/.clauth/profiles/p1/runtime-1-0/.credentials.json"
+for i in 301 302 303; do mk_proc "$i" claude "$FHOME/.clauth/profiles/p1/runtime-1-0"; done
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+want_out "a group of 3 warns — the smallest observed incident" "3 on clauth profile 'p1'"
+want_out "and it fails nothing, being a ⚠"                     "⚠ 3 on clauth profile 'p1'"
+
+# Grouping must not have eaten the total-count warning: memory, not the
+# credential file, is the binding constraint on this box.
+new_home p3; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1/runtime-1-0"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
+      "$FHOME/.clauth/profiles/p1/runtime-1-0/.credentials.json"
+for i in $(seq 401 410); do mk_proc "$i" claude "$FHOME/.clauth/profiles/p1/runtime-1-0"; done
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+want_out "a high TOTAL still warns even when grouped" "Claude processes in total"
+want_out "and still points at hreap"                  "hreap --close --mine"
+
+#-----------------------------------------------------------------------------
+section "Q. States that used to be misreported as something else"
+#-----------------------------------------------------------------------------
+# test -f FOLLOWS symlinks, so a dangling credential link is "not a regular
+# file" and used to print "not logged in — run /login", sending the reader to
+# re-authenticate instead of at the broken link.
+new_home q1; write_cred
+mkdir -p "$FHOME/iso"
+ln -s "$FHOME/.clauth/profiles/gone/credentials.json" "$FHOME/iso/.credentials.json"
+CFGDIR="$FHOME/iso" run_doctor; CFGDIR=""
+want_out "a dangling credential symlink is named as dangling" "DANGLING"
+no_out   "and is not misreported as a missing login"          "is not logged in"
+
+# An mcpOAuth value that is not an object is a plausible product of the very
+# interleaved write this section hunts. jq's error used to land in the report and
+# the entry was then excused as a harmless discovery record.
+new_home q2; write_cred '.mcpOAuth["plugin:linear:linear|abc"] = "corrupted-to-a-string"'
+run_doctor --all
+want_out "a non-object mcpOAuth entry is NOT CHECKED" "not an object"
+no_out   "and is not excused as never authorised"     "never authorised in this config dir"
+no_out   "and jq's parser error never reaches the report" "Cannot"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

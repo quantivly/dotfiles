@@ -1340,6 +1340,43 @@ is the durable place. Note also that `settings.json` is user-level and **not** i
 
 Traps specific to the checker, each of which produced a green tick first:
 
+- **A HASH OF NOTHING IS A HASH, and it matches every other hash of nothing.**
+  `_claude_cred_id` piped `jq` straight into `sha256sum`, so a parse failure hashed
+  jq's *empty* output — the constant `e3b0c442…`. Two unreadable credential files
+  therefore had the same id and "matched", printing `✓ stored copy matches —
+  switching away and back is safe` across two corrupt files, and making all three
+  of the function's own `NOT CHECKED` branches dead code. Its doc comment
+  ("empty output means could not read it") was false. A file that parses but has
+  no `claudeAiOauth` was the same bug one level up: `{accessToken:null,…}` is also
+  a constant. **Check the exit status, never the emptiness of a pipeline's output**
+  — `jq -e`, and a `select(. != null)` so a missing block produces none. This
+  survived 13 mutants because no row ever fed the comparison a broken file: a
+  mutation suite only proves the rows it has.
+- **Fixing a line-based match by removing the lines removes the bound as well.**
+  `grep -oE 'fallback_chain[^]]*\]'` never fired against clauth's multi-line array,
+  so the first fix flattened the file with `tr '\n' ' '` — and the pattern then ran
+  from anywhere those words appear to the next `]` **anywhere in the file**. It
+  reported an armed chain on a machine whose chain was commented out, and printed a
+  neighbouring line verbatim into a report that lands in transcripts, in the file
+  whose own header says NEVER PRINTS A CREDENTIAL. A `sed` *range* from an anchored
+  assignment to the first `]`, quitting there, is bounded by construction. Also
+  `fallback_chain = []` is configured, not armed.
+- **Read the type before indexing — the second recurrence.** CLAUDE.md already
+  records this for `herdr-claude-wire.sh` (`//` substitutes for null, never for a
+  type error). An `mcpOAuth` value that is a string — a plausible product of the
+  interleaved write this doctor hunts — made four `.mcpOAuth[$k].x` calls fail with
+  `Cannot index string with string`, printed all four into the middle of the
+  report, and then the empty captures read as a benign shape so the entry was
+  *excused*. One `| type` check before the loop body, once.
+- **`test -f` follows symlinks, so a dangling credential link is "no credential
+  file".** It reported `not logged in — run /login` and sent the reader to
+  re-authenticate instead of at the broken link; a deleted clauth profile leaving a
+  live `clauth start` runtime dir behind is a real way to reach it.
+- **A new external tool is a new way for a check to go quiet, twice in one day.**
+  The `readlink -f` note below was written, and then an `awk`-based rewrite of the
+  chain match reintroduced exactly the same failure — awk is not on the state
+  table's from-scratch `PATH`, so the check silently produced nothing. Prefer a zsh
+  builtin or a tool the file already uses.
 - **A checker can go blind in the configuration the repo just made default, and this one did.**
   Run inside a `clauth start` session — what `hspawn` has used since #107 — `claude-doctor`
   reported `✗ mode 777` (`stat -c %a` does not dereference, so it read the *symlink's* mode
@@ -1382,12 +1419,14 @@ Traps specific to the checker, each of which produced a green tick first:
   `<command-name>/login</command-name>` writes that string into the current transcript. Exclude
   the running session, or the number climbs as you measure it.
 
-State table: `scripts/test-claude-doctor.sh` (78 checks, in CI as `claude-doctor-test`) —
+State table: `scripts/test-claude-doctor.sh` (101 checks, in CI as `claude-doctor-test`) —
 hermetic via a fixture `$HOME`, a from-scratch `PATH`, a recording `clauth` stub, and a fixture
 process tree (`CLAUDE_DOCTOR_PROC_ROOT`) so the concurrency grouping can be pinned without
-depending on whatever happens to be running on the machine. 13 mutants were run against it and
-all 13 died, including "count files instead of successes" (the desktop-commander bug), "print the
-token in the report", and one for each blind spot above.
+depending on whatever happens to be running on the machine. 25 mutants were run against it and
+all 25 died, including "count files instead of successes" (the desktop-commander bug), "print the
+token in the report", and one for each trap above. Twelve of those rows exist only because a
+review found the fixes unpinned — the first pass shipped 13 mutants and a false green underneath
+them.
 
 ```bash
 claude-doctor              # auth + MCP health, from the log store

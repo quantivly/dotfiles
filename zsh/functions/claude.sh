@@ -100,17 +100,35 @@ _claude_global_cred_file() { print -r -- "$HOME/.claude/.credentials.json"; }
 # triple. Never the tokens themselves — see "NEVER PRINTS A CREDENTIAL" above.
 # Empty output means "could not read it", which callers must not treat as a match.
 _claude_cred_id() {
+  local body
   [[ -f "$1" ]] || return 1
-  jq -S -c '.claudeAiOauth | {accessToken,refreshToken,expiresAt}' "$1" 2>/dev/null \
-    | sha256sum | cut -c1-16
+  # jq's EXIT STATUS, not just its output. Piping jq straight into sha256sum
+  # hashes jq's EMPTY output when it fails, and sha256sum of nothing is a
+  # constant (e3b0c44298fc1c14) — so every unreadable file got the same id and
+  # therefore "matched" every other unreadable file. That printed
+  # "✓ stored copy matches — switching away and back is safe" across two corrupt
+  # credentials and made all three of this file's NOT-CHECKED branches
+  # unreachable. A file that parses but carries no claudeAiOauth was the same bug
+  # one level up: {accessToken:null,...} is also a constant.
+  #
+  # -e makes jq exit non-zero when it produced no output, and the select() makes
+  # a missing claudeAiOauth produce none.
+  body="$(jq -e -S -c '.claudeAiOauth | select(. != null) | {accessToken,refreshToken,expiresAt}' "$1" 2>/dev/null)" || return 1
+  [[ -n "$body" ]] || return 1
+  print -r -- "$body" | sha256sum | cut -c1-16
 }
 
-# Which registered clauth profile owns the credential in $1. Prints the profile
-# name, or nothing when no profile matches (which is a real, reportable state —
+# Which registered clauth profile owns the credential whose ID is $1. Prints the
+# profile name, or nothing when no profile matches (a real, reportable state —
 # see the orphan check — not an error).
+#
+# Takes the ID rather than a path on purpose: the caller already has it, and
+# deriving it here meant the global credential's id was computed up to three
+# times per run — once for the staleness comparison, once here, and once more to
+# tell "no match" apart from "unreadable" — roughly 21 forks with four profiles
+# registered.
 _claude_cred_owner() {
-  local want pdir
-  want="$(_claude_cred_id "$1")" || return 1
+  local want="$1" pdir
   [[ -n "$want" ]] || return 1
   for pdir in "$HOME"/.clauth/profiles/*(N/); do
     [[ -f "$pdir/credentials.json" ]] || continue
@@ -184,11 +202,11 @@ claude-doctor() {
   # every loop-body variable is declared once, here. CLAUDE.md records the run
   # where forgetting that printed `du=zvi-quantivly` into the middle of a report.
   local cred now_ms mode exp delta nproc_claude sub scopes chain
-  local active stored_hash live_hash p pdir owner
+  local active stored_hash live_hash p pdir
   local root d srv ok_n fail_n key empty_tok no_refresh
   local i comm svc a b
-  local gcred link_target session_owner global_owner has_meta
-  local shared_n unknown_n cfgdir credpath ldir grp envblob n label procroot
+  local gcred gcred_id link_target session_owner global_owner has_meta
+  local unknown_n cfgdir credpath ldir grp envblob n label procroot
   local -a date_prefixes files
   local -A group_n group_label
 
@@ -226,7 +244,17 @@ claude-doctor() {
   # ---- 1. The credential file ---------------------------------------------
   echo
   echo "Credential file: ${cred/#$HOME/~}"
-  if [[ ! -f "$cred" ]]; then
+  if [[ -L "$cred" && ! -e "$cred" ]]; then
+    # BEFORE the -f test, which FOLLOWS symlinks: a dangling link is "not a
+    # regular file", so this state used to print "not logged in — run /login"
+    # and send the reader to re-authenticate instead of at the broken link. A
+    # deleted clauth profile leaving a live `clauth start` runtime dir behind is
+    # a real way to reach it. (The stat branch below cannot report this: it runs
+    # only once -f has already passed.)
+    _doctor_bad "credential symlink is DANGLING -> $(readlink "$cred")"
+    echo "    Its target is gone — a deleted clauth profile does this. Fix: point"
+    echo "    CLAUDE_CONFIG_DIR somewhere real, or re-create the profile."
+  elif [[ ! -f "$cred" ]]; then
     _doctor_warn "no credential file — this shell's Claude Code is not logged in"
     echo "    Fix: run 'claude' and /login, or 'clauth login <profile>'."
   elif ! jq -e . "$cred" >/dev/null 2>&1; then
@@ -247,7 +275,7 @@ claude-doctor() {
     # permanently-red checker CLAUDE.md warns about three times over.
     mode=$(stat -Lc %a "$cred" 2>/dev/null)
     if [[ -z "$mode" ]]; then
-      _doctor_bad "cannot stat the credential file — a dangling symlink looks like this"
+      _doctor_bad "cannot stat the credential file"
     elif [[ "$mode" == "600" ]]; then
       _doctor_ok "mode $mode"
     else
@@ -334,13 +362,26 @@ claude-doctor() {
     echo "MCP OAuth entries (in the same unlocked file as the login):"
     for key in ${(f)"$(jq -r '.mcpOAuth | keys[]' "$cred" 2>/dev/null)"}; do
       [[ -n "$key" ]] || continue
-      srv=$(jq -r --arg k "$key" '.mcpOAuth[$k].serverName // $k' "$cred")
-      empty_tok=$(jq -r --arg k "$key" '((.mcpOAuth[$k].accessToken // "") | length) == 0' "$cred")
-      no_refresh=$(jq -r --arg k "$key" '((.mcpOAuth[$k].refreshToken // "") | length) == 0' "$cred")
+      # READ THE TYPE FIRST, once, before anything indexes the entry. An
+      # mcpOAuth value that is a string or null is a plausible product of the
+      # very interleaved write this section hunts, and every `.mcpOAuth[$k].x`
+      # below then fails with "Cannot index string with string" — four parser
+      # errors printed into the middle of the report, after which the empty
+      # captures read as a benign shape and the entry was excused. CLAUDE.md
+      # records the same lesson from herdr-claude-wire.sh: `//` substitutes for
+      # null, never for a type error.
+      if [[ "$(jq -r --arg k "$key" '.mcpOAuth[$k] | type' "$cred" 2>/dev/null)" != "object" ]]; then
+        _doctor_warn "$key: entry is not an object — NOT CHECKED (a lost race can produce this)"
+        continue
+      fi
+      srv=$(jq -r --arg k "$key" '.mcpOAuth[$k].serverName // $k' "$cred" 2>/dev/null)
+      [[ -n "$srv" ]] || srv="$key"
+      empty_tok=$(jq -r --arg k "$key" '((.mcpOAuth[$k].accessToken // "") | length) == 0' "$cred" 2>/dev/null)
+      no_refresh=$(jq -r --arg k "$key" '((.mcpOAuth[$k].refreshToken // "") | length) == 0' "$cred" 2>/dev/null)
       has_meta=$(jq -r --arg k "$key" \
         '(.mcpOAuth[$k] | has("expiresAt")) or (.mcpOAuth[$k] | has("scope"))
-         or (((.mcpOAuth[$k].refreshToken // "") | length) > 0)' "$cred")
-      exp=$(jq -r --arg k "$key" '.mcpOAuth[$k].expiresAt // empty' "$cred")
+         or (((.mcpOAuth[$k].refreshToken // "") | length) > 0)' "$cred" 2>/dev/null)
+      exp=$(jq -r --arg k "$key" '.mcpOAuth[$k].expiresAt // empty' "$cred" 2>/dev/null)
 
       if [[ "$empty_tok" == "true" && "$has_meta" != "true" ]]; then
         _doctor_note "$srv: never authorised in this config dir (discovery record only)"
@@ -375,7 +416,13 @@ claude-doctor() {
   # stopped working the moment #107 made isolation the default — see
   # _claude_global_cred_file for the measurement.
   echo
-  gcred="$(_claude_global_cred_file)"
+  # :A here too. Every per-process path below is normalised, and leaving this one
+  # raw put two processes on the SAME physical credential file into two groups —
+  # "⚠ 1 on the SHARED global file" and "✓ 1 on clauth profile p1" — when
+  # ~/.claude/.credentials.json is itself a symlink into a profile store. The ✓
+  # was on a process a write to that store would log out, under a heading that
+  # promises one file is one group.
+  gcred="$(_claude_global_cred_file)"; gcred="${gcred:A}"
   if ! command -v clauth >/dev/null 2>&1; then
     echo "clauth: ○ not installed — single-account machine, nothing to check"
   else
@@ -411,6 +458,14 @@ claude-doctor() {
     # unreachable in precisely the state it exists to report. They are siblings.
     if [[ ! -f "$gcred" ]]; then
       _doctor_note "no global credential file — nothing for a profile switch to overwrite"
+    elif ! jq -e . "$gcred" >/dev/null 2>&1; then
+      # Section 1 makes this check against THIS SESSION's credential. Under
+      # isolation that is a different file, so a torn global went unmentioned by
+      # the doctor whose entire subject is torn writes — while it reported the
+      # session's own healthy file as ✓.
+      _doctor_bad "the live credential is present but NOT VALID JSON — every check below is UNKNOWN"
+      echo "    A partial write does this, and every non-isolated session reads it."
+      echo "    Fix: /login (or 'clauth login') to rewrite it."
     else
       # (a) THE HAZARD. `clauth <profile>` restores the profile's STORED copy over
       # the global file. Claude Code rotates refresh tokens — clauth's own log says
@@ -419,10 +474,12 @@ claude-doctor() {
       # the stored copy is a SUPERSEDED refresh token, and restoring it can
       # invalidate every holder at once. This is the one check that predicts a mass
       # logout before it happens.
+      # Derived once, here, and reused by both checks below.
+      gcred_id="$(_claude_cred_id "$gcred")" || gcred_id=""
       pdir="$HOME/.clauth/profiles/$active"
       if [[ -n "$active" && -f "$pdir/credentials.json" ]]; then
-        live_hash="$(_claude_cred_id "$gcred")"
-        stored_hash="$(_claude_cred_id "$pdir/credentials.json")"
+        live_hash="$gcred_id"
+        stored_hash="$(_claude_cred_id "$pdir/credentials.json")" || stored_hash=""
         if [[ -z "$live_hash" || -z "$stored_hash" ]]; then
           _doctor_warn "could not compare stored and live credentials — NOT CHECKED (an unreadable file is not agreement)"
         elif [[ "$live_hash" == "$stored_hash" ]]; then
@@ -443,19 +500,23 @@ claude-doctor() {
       # with no way back. Normal for a few minutes right after a /login; a standing
       # hazard after that — observed 2026-09-06 12:25 and still unhealed three
       # daemon polls later.
-      if ! global_owner="$(_claude_cred_owner "$gcred")"; then
-        if [[ -z "$(_claude_cred_id "$gcred")" ]]; then
-          # An unreadable file is not agreement. Naming it apart from "orphaned"
-          # matters: the fixes differ, and only one of them is /login.
-          _doctor_warn "could not read the live credential — NOT CHECKED"
-        else
-          _doctor_warn "the live credential matches NO registered clauth profile"
-          echo "    clauth cannot identify it, so it has no copy to restore and the next"
-          echo "    'clauth <profile>' will overwrite it with no way back. Normal right after"
-          echo "    a /login — and note that a rotation clauth has not adopted yet looks"
-          echo "    exactly like this, so read it together with the comparison above."
-          echo "    Capture it into the profile it belongs to before switching."
-        fi
+      if [[ ! -d "$HOME/.clauth/profiles" ]]; then
+        # No profiles registered (a fresh clauth, or a relocated profile root).
+        # Without this the orphan warning below fires on every run forever,
+        # telling the reader to "capture it into the profile it belongs to" when
+        # there are no profiles at all — the permanently-red checker again.
+        _doctor_note "no registered profiles yet — nothing to attribute the credential to"
+      elif [[ -z "$gcred_id" ]]; then
+        # An unreadable file is not agreement. Naming it apart from "orphaned"
+        # matters: the fixes differ, and only one of them is /login.
+        _doctor_warn "could not read the live credential — NOT CHECKED"
+      elif ! global_owner="$(_claude_cred_owner "$gcred_id")"; then
+        _doctor_warn "the live credential matches NO registered clauth profile"
+        echo "    clauth cannot identify it, so it has no copy to restore and the next"
+        echo "    'clauth <profile>' will overwrite it with no way back. Normal right after"
+        echo "    a /login — and note that a rotation clauth has not adopted yet looks"
+        echo "    exactly like this, so read it together with the comparison above."
+        echo "    Capture it into the profile it belongs to before switching."
       else
         _doctor_note "live credential belongs to profile '$global_owner'"
         if [[ -n "$active" && "$global_owner" != "$active" ]]; then
@@ -466,16 +527,12 @@ claude-doctor() {
       fi
     fi
 
-    # Legacy pre-clauth config dirs. Each is a login nobody rotates, tracks, or
-    # would think to revoke.
-    for ldir in ${(f)"$(_claude_legacy_cred_dirs)"}; do
-      [[ -n "$ldir" ]] || continue
-      _doctor_warn "legacy config dir still holds a credential: ${ldir/#$HOME/~}/.credentials.json"
-      echo "    An untracked copy of a login, and an untracked participant in refresh"
-      echo "    rotation. Remove it once nothing launches with CLAUDE_CONFIG_DIR=$ldir."
-    done
-
-    if [[ -n "$active" ]]; then
+    # NOT gated on $active. It was, and `[[ "$active" == "unknown" ]] && active=""`
+    # above then made that gate fail in exactly the orphaned-credential state — so
+    # the report said least about the armed, unlogged fallback chain precisely
+    # when a switch was most dangerous. Neither note needs to know the active
+    # profile.
+    {
       # Armed auto-switch is a loaded landmine, not a fault: when quota fills it
       # rewrites the shared credential under every live session. Report it so it
       # is never a surprise; do not call a deliberate setting broken.
@@ -487,14 +544,30 @@ claude-doctor() {
       # quiet log is not a quiet mechanism, and a reader who does not know that
       # will draw the same wrong conclusion.
       if [[ -f "$HOME/.clauth/profiles.toml" ]]; then
-        # FLATTENED FIRST, because `grep -oE` is line-based and clauth writes the
-        # array over several lines. Measured 2026-09-06: against this machine's own
-        # profiles.toml the un-flattened pattern matched nothing and exited 1, so
-        # the whole note — the one that says a switch is unlogged — had never once
-        # printed on the box it was written for. A check that cannot fire is
-        # indistinguishable from a machine with auto-switch disarmed.
-        chain=$(tr '\n' ' ' < "$HOME/.clauth/profiles.toml" 2>/dev/null \
-                | grep -oE 'fallback_chain[^]]*\]' | head -1 | tr -s ' ')
+        # BOUNDED, and anchored to a real assignment. The first fix for this
+        # was `tr '\n' ' '` + the old pattern, which removed the very line
+        # boundary that limited the match: `fallback_chain[^]]*\]` then ran from
+        # anywhere the words appear to the next `]` ANYWHERE in the file. Review
+        # reproduced both halves of that — "auto-switch armed" reported for a
+        # machine whose chain was commented out, and a token from a neighbouring
+        # line printed verbatim into a report that lands in transcripts, in the
+        # file whose own header says NEVER PRINTS A CREDENTIAL.
+        #
+        # A sed RANGE from a line that actually assigns fallback_chain to the
+        # first line carrying `]`, quitting there so a second assignment cannot
+        # extend it. The span can never leave the assignment.
+        #
+        # sed rather than awk for one reason, and it is the second time today:
+        # the state table builds a PATH from scratch holding only what the doctor
+        # uses, awk is not on it, and an awk-based version silently produced
+        # nothing — the same shape as the `readlink -f` dependency this file
+        # already carries a note about. sed and tr are both already in use here.
+        chain=$(sed -n '/^[[:space:]]*fallback_chain[[:space:]]*=/,/]/{p; /]/q}' \
+                    "$HOME/.clauth/profiles.toml" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+        # `fallback_chain = []` is a configured-but-empty chain: it parses, it is
+        # not armed, and reporting it as armed is the same false positive by a
+        # shorter route. A member is a quoted string.
+        [[ "$chain" == *'"'* ]] || chain=""
         if [[ -n "$chain" ]]; then
           _doctor_note "auto-switch armed: $chain"
           _doctor_note "a switch rewrites the global credential under running sessions AND IS NOT LOGGED —"
@@ -510,8 +583,21 @@ claude-doctor() {
             && _doctor_note "profile '${pdir:t}' is preferred — the daemon walks the active account back to it, unlogged"
         done
       fi
-    fi
+    }
   fi
+
+  # ---- 3b. Legacy pre-clauth config dirs -----------------------------------
+  # OUTSIDE the clauth branch, deliberately. This sat inside the `else` of
+  # "is clauth installed", which is exactly backwards: a machine that never
+  # adopted clauth is the one most likely to still carry ~/.claude-work and
+  # ~/.claude-personal, and it was the one machine that got no report at all.
+  # The check depends on nothing clauth provides.
+  for ldir in ${(f)"$(_claude_legacy_cred_dirs)"}; do
+    [[ -n "$ldir" ]] || continue
+    _doctor_warn "legacy config dir still holds a credential: ${ldir/#$HOME/~}/.credentials.json"
+    echo "    An untracked copy of a login, and an untracked participant in refresh"
+    echo "    rotation. Remove it once nothing launches with CLAUDE_CONFIG_DIR=$ldir."
+  done
 
   # ---- 4. Concurrency on the shared file -----------------------------------
   # Claude Code does not lock .credentials.json. That is upstream's to fix, not
@@ -523,7 +609,7 @@ claude-doctor() {
   # binary and so appear as "2.1.259" rather than "claude" — the same blind spot
   # that made `herdr agent list` report 14 while 33 processes ran.
   echo
-  nproc_claude=0; shared_n=0; unknown_n=0
+  nproc_claude=0; unknown_n=0
   group_n=(); group_label=()
   procroot="$(_claude_proc_root)"
   for p in $procroot/[0-9]*(N); do
@@ -545,7 +631,7 @@ claude-doctor() {
     cfgdir="$(print -r -- "$envblob" | grep -m1 '^CLAUDE_CONFIG_DIR=')"
     cfgdir="${cfgdir#CLAUDE_CONFIG_DIR=}"
     if [[ -z "$cfgdir" ]]; then
-      credpath="$gcred"; grp="the SHARED global file"; (( shared_n++ ))
+      credpath="$gcred"; grp="the SHARED global file"
     else
       credpath="$cfgdir/.credentials.json"
       credpath="${credpath:A}"          # see the :A note in section 1
@@ -585,14 +671,30 @@ claude-doctor() {
         else
           _doctor_note "$n on $label"
         fi
-      elif (( n > 6 )); then
+      elif (( n >= 3 )); then
+        # THREE, from the evidence above rather than from the >8 flat count this
+        # replaced: the observed multi-session incidents hit 3, 3, 4, 5 and 6
+        # sessions, so a group of 6 printing ✓ meant the largest event on record
+        # read as healthy. The remedy is named because more groups needs more
+        # logins, not rebalancing.
         _doctor_warn "$n on $label — one lost write logs out all $n"
       else
         _doctor_ok "$n on $label"
       fi
     done
     (( unknown_n > 0 )) && _doctor_note "$unknown_n process(es) whose config dir could not be read — NOT CHECKED"
-    _doctor_note "$nproc_claude Claude process(es) total; the credential file has no lock in any of them"
+    # The TOTAL still matters and the grouping does not capture it. Replacing the
+    # old flat count outright meant forty processes spread over eight groups of
+    # five reported eight ✓ and no warning — while CLAUDE.md records 33 Claude
+    # processes driving this box to load 27 and 96% swap. Memory, not the
+    # credential file, is the binding constraint here.
+    if (( nproc_claude > 8 )); then
+      _doctor_warn "$nproc_claude Claude processes in total — memory is the binding constraint on this box"
+      echo "    Reduce with 'hreap --close --mine'; an idle agent still holds its memory"
+      echo "    AND still refreshes its token. To add credential groups: 'clauth login <name>'."
+    else
+      _doctor_note "$nproc_claude Claude process(es) total; the credential file has no lock in any of them"
+    fi
   fi
 
   # ---- 5. MCP servers, from the log store ----------------------------------
