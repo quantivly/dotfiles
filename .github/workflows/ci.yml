@@ -153,6 +153,33 @@ jobs:
       - name: Run the hspawn state table
         run: ./scripts/test-hspawn.sh
 
+  claude-doctor-test:
+    name: Claude Account & MCP Doctor State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh and jq
+        run: sudo apt-get update && sudo apt-get install -y zsh jq
+
+      # Every fault claude-doctor reports was, before it, reported by nothing:
+      # plugin:desktop-commander connected 0 times in 509 attempts over 34 days,
+      # the claude.ai Linear connector 404'd 1936 times, and the slack
+      # credential was twice caught mid-write with a zero-length accessToken —
+      # all while every status surface stayed green. So the rows assert against
+      # the states that produce a GREEN TICK, not against obvious errors.
+      #
+      # The suite builds its PATH from scratch and puts a recording `clauth`
+      # STUB in front — not "no clauth on PATH", because the machine this was
+      # written on has a real one wired to a daemon that owns four live Claude
+      # accounts, and `clauth <profile>` REWRITES the machine's credentials. The
+      # first draft of this suite inherited $PATH and ran that real binary.
+      - name: Run the claude-doctor state table
+        run: ./scripts/test-claude-doctor.sh
+
   herdr-modular-test:
     name: Modular herdr Checks State Table
     runs-on: ubuntu-latest
