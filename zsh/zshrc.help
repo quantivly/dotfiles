@@ -332,6 +332,13 @@ TOOL VERIFICATION:
   tool_status  - Check installed modern tools
   ~/.dotfiles/scripts/verify-tools.sh - Detailed tool check
 
+HEALTH CHECKS (each reports EFFECT, not configuration):
+  claude-doctor    - Claude Code auth + MCP servers (run before 'clauth <profile>')
+  gh-doctor        - which GitHub account gh is ACTUALLY using here
+  dotfiles-doctor  - is the live config the reviewed config?
+  backup-doctor    - full backup chain: perms, drift, alerting, freshness
+  audit-status     - broadcast-kill tripwire: armed, on, and recording?
+
 PERFORMANCE:
   startup_monitor  - Monitor shell startup with alerts
   startup_profile  - Detailed startup profiling

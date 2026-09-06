@@ -57,6 +57,7 @@ The zsh configuration is split into focused modules loaded by `zshrc`:
 | `zsh/functions/development.sh` | Git + Docker + FZF (39 functions) | `gd`, `git_cleanup`, `gco-safe`, `dexec`, `dlogs`, `fcd`, `fkill`, `qmux` |
 | `zsh/functions/system.sh` | Performance + Utilities + Dotfiles guard + GNOME + Backup + Audit (59 functions) | `startup_monitor`, `system_health`, `has_command`, `confirm`, `dotfiles-doctor`, `dotfiles-work`, `gnome-status`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-restore`, `backup-restore-system`, `audit-sweeps` |
 | `zsh/functions/github.sh` | gh account routing + diagnosis (10 functions) | `gh-doctor` |
+| `zsh/functions/claude.sh` | Claude Code auth + MCP diagnosis (5 functions) | `claude-doctor` |
 | `zsh/zshrc.herdr` | herdr agent workspaces (17 functions) — mostly **agent-facing**, a human at the keyboard uses the herdr UI and `clauth` instead | `hspawn`, `hdespawn`, `hreap`, `claude`, `herdr-lazy`, `herdr-help` |
 
 **Function Naming Convention:**
@@ -296,8 +297,8 @@ and inherits the previous run's exit code.
 3. oh-my-zsh core and plugins
 4. p10k.zsh theme
 5. zsh/zshrc.history
-6. zsh/functions/*.sh (core, development, system, github — github after
-   system, which defines the shared _doctor_* emitters it uses)
+6. zsh/functions/*.sh (core, development, system, github, claude — github and
+   claude after system, which defines the shared _doctor_* emitters they use)
 7. zsh/zshrc.aliases
 8. zsh/zshrc.conditionals → loads three focused modules:
    - zsh/zshrc.conditionals.tools (CLI tool overrides)
@@ -1096,6 +1097,134 @@ Gotchas, in the order they bite:
     server". Stub it, the way `test-systemd-reconcile.sh` stubs `systemctl`; never rely on the
     tool's absence, because this box has the real thing.
 
+## Claude Code accounts & MCP (`claude-doctor`)
+
+**One unlocked file holds the login AND every MCP token, and ~23 processes write it.**
+`~/.claude/.credentials.json` (0600) carries both `claudeAiOauth` — the claude.ai login —
+and an `mcpOAuth` map with each plugin MCP server's own OAuth tokens. There is a
+`~/.claude/.claude.json.lock` for the *config* file and **nothing for the credentials**, so
+every token refresh is a read-modify-write of the whole file by whichever process gets there
+first. `CLAUDE_CONFIG_DIR` **does** isolate credentials here (the file moves under it, and the
+macOS Keychain entry is keyed to it) — the **opposite** of `GH_CONFIG_DIR` two sections up, so
+do not carry that intuition across. Isolation working is what makes `clauth start` a fix.
+
+The race is not theoretical, and the damage moves between entries. Four reads of the same file
+on 2026-09-06:
+
+| time  | slack | Notion | linear | Claude procs |
+|-------|-------|--------|--------|--------------|
+| 10:48 | `accessToken` **zero-length**, `refreshToken`/`expiresAt`/`scope` absent | valid 23 h | valid 23 h | ~23 |
+| 11:00 | `expiresAt: null`, no refresh | valid 23 h | valid 23 h | 25 |
+| 11:38 | token length 0 | **entry absent** | **entry absent** | 26 |
+| 12:00 | valid 11 h (re-authed via `/mcp`) | token length 0 | token length 0 | 27 |
+| 12:09 | valid 11 h | valid 23 h (re-authed) | valid 23 h (re-authed) | 30 |
+
+**Expiries do not grow keys back, a 23-hour token does not decay into a blank string, and
+entries do not vanish and reappear.** Those are interleaved writes. The 12:00 row is the
+sharpest: authenticating *one* server through `/mcp` is what blanked the other two, because all
+three live in the one file and the writer that added Slack carried a stale copy of the rest. It
+is also why sessions log `No access token in storage` → `UnauthorizedError` while the file on
+disk holds an unexpired token, and why the daily counts track concurrency, not token lifetime.
+
+**But read the last row before drawing a threshold.** Two back-to-back re-auths at the *highest*
+concurrency of the day left all three intact. This is a race, not a limit: more writers raise the
+odds of losing it, they do not decide the outcome. So "it worked" is never evidence that a
+sequence is safe, and one clean run is not a fix — which is exactly why the check after any
+`/mcp` authentication has to be *all* the entries, every time.
+
+**The two symptoms are one report.** The login's scopes include `user:mcp_servers`, and the
+claude.ai connectors are fetched *with that token* — so a login that goes bad drops all of them
+at once. "I get randomly logged out" and "my MCP servers keep disconnecting" are the same event
+seen from two sides. Measured: `/login` run 8 times in 30 days across 665 transcripts.
+
+**clauth is a third writer, and it holds a stale copy.** `clauth <profile>` replaces the
+`claudeAiOauth` subtree with the profile's **stored** tokens; its own strings say *"a session on
+the global credentials adopts the change on its next token refresh"* and *"claude code's freshly
+written credentials will be overwritten with the account's stored tokens."* Claude Code **rotates
+refresh tokens** — clauth's log proves it (`adopted the live session's rotated login … the
+running claude refreshed first`) — and clauth only notices on a ~90 s poll. In that window the
+stored copy is a **superseded** refresh token, and restoring it can log out every live session.
+`claude-doctor` compares live against stored and says so **before** a switch.
+
+**And a switch leaves no record, so "it has not happened" is not a readable state.** The
+investigation first concluded auto-switch had never fired, because 39 log lines since 08-29
+contain no switch event — only `adopted the live session's rotated login` (twice) and
+`another instance holds the usage-fetch lease` (35 times). That conclusion was **wrong**: the
+active profile went `quantivly-3` → `quantivly-2` → `quantivly-3` inside about five minutes
+*during the session that wrote this section*, the live credential's hash tracked each move, and
+**`clauth.log` records none of it**. `status.json` shows only the current value and
+`pending_switch: null`. So the fallback chain (95 %/5 h, 98 %/7 d) rewrites the shared
+credential under every running session and the only evidence is the before-and-after value.
+Read the active profile, never the log, and do not infer quiescence from a quiet log file.
+
+Be precise about the rate, though: a 15-second sample over the following two minutes was
+perfectly stable, so this is occasional switching, **not** constant flapping — the daemon's
+90-second poll is a refresh cycle, not a switch cycle. Overstating it as flapping would put the
+blame on the wrong mechanism.
+
+**Most MCP noise was two deterministic bugs, not the race** — and both were invisible because
+nothing read the log store Claude Code had been writing all along
+(`~/.cache/claude-cli-nodejs/<slugified-cwd>/mcp-logs-<server>/<ISO>.jsonl`, 6,663 files):
+
+- **`plugin:desktop-commander` had connected 0 times in 509 attempts over 34 days.** Its
+  `npx -y @wonderwhy-er/desktop-commander@latest` hit a half-finished npm reify from 2026-06-30
+  in `~/.npm/_npx/4b4c857f6efdfb61/` — 414 orphaned `.<pkg>-<random>` staging dirs, **no
+  `.package-lock.json`** (the only one of 17 npx caches missing it), and an **empty**
+  `@wonderwhy-er/` — so npm's rename-to-staging failed `ENOTEMPTY` every launch. `rm -rf` on the
+  whole tree fixed it; removing one directory would not have, because `md-to-pdf` (×275),
+  `pdf-lib` (×29) and `pizzip` each take over as the blocking rename in turn.
+- **The `claude.ai Linear` connector id had gone dead upstream**, returning
+  `mcp_endpoint_not_found` 1,936 times and accelerating (136 failures / 0 successes on the day
+  it was found). It still advertised a full tool list, so **the tool list is not evidence of
+  health** — only the log store is.
+
+**Attempt count is not health.** A server that has never worked writes exactly as many log files
+as one that always does; the only discriminator is the `Successfully connected` marker against
+`Connection failed`. Counting files is how 34 days of total failure read as activity.
+
+**Stdio MCP servers are never auto-reconnected** (documented). Remote ones retry five times with
+1/2/4/8/16 s backoff; a stdio server that dies at startup stays dead for the whole session, which
+is why desktop-commander's failure was once per session rather than once ever.
+
+**Do not put MCP or auth env vars in `~/.claude/settings.json`'s `env` block.** clauth merges a
+profile's `[env]` into it on switch and **clears it on switch away** — it is `{}` for that reason.
+Anything set there is silently wiped at the next profile switch. Shell-level (`zsh/zshrc.herdr`)
+is the durable place. Note also that `settings.json` is user-level and **not** in this repo, so
+`./install` does not deploy it and nothing version-controls the MCP surface.
+
+Traps specific to the checker, each of which produced a green tick first:
+
+- **A row that cannot reach the branch it names is unfailable.** The "absent log store is NOT
+  CHECKED" row matched the bare string `NOT CHECKED`, which the *duplicated-services* section
+  also prints — so it passed with the line it names replaced by a `✓`. Mutation testing found it;
+  the row now matches that section's own wording.
+- **A suite that inherits `$PATH` is not hermetic, whatever its header says.** The first draft's
+  "clauth is absent" row found the **real** `~/.local/bin/clauth`. This box has one wired to a
+  daemon owning four live accounts, and `clauth <profile>` rewrites the machine's credentials.
+  The suite now builds its `PATH` from scratch and prepends a recording stub only when a row asks
+  for it — the same rule as the `herdr` and `systemctl` stubs above.
+- **A diagnostic that prints a credential is worse than no diagnostic.** `claude-doctor` reports
+  lengths, expiries, presence and truncated hashes, never a token; a state-table row feeds it a
+  canary secret and asserts the canary never reaches the output, on the success *and* failure
+  paths. See "Keeping secrets out of transcripts".
+- The `/login`-count metric **self-contaminates**: grepping transcripts for
+  `<command-name>/login</command-name>` writes that string into the current transcript. Exclude
+  the running session, or the number climbs as you measure it.
+
+State table: `scripts/test-claude-doctor.sh` (42 checks, in CI as `claude-doctor-test`) —
+hermetic via a fixture `$HOME`, a from-scratch `PATH` and a recording `clauth` stub. Eight
+mutants were run against it and all eight died, including "count files instead of successes"
+(the desktop-commander bug) and "print the token in the report".
+
+```bash
+claude-doctor              # auth + MCP health, from the log store
+claude-doctor --all        # include the servers that are fine
+claude-doctor --days 30    # widen the MCP window
+```
+
+Operational half — the connector cleanup that has to be done at claude.ai, what each finding
+means, and how to revive a dead stdio server: [docs/CLAUDE_ACCOUNT_MCP.md](docs/CLAUDE_ACCOUNT_MCP.md).
+
 ## GNOME Desktop Configuration
 
 Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **bottom** dock, empty desktop, tmux-friendly keys) applied reproducibly via **stock GNOME/Yaru only** — no third-party extensions or themes.
@@ -1190,6 +1319,7 @@ localrc              # Edit ~/.zshrc.local
 qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
 gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offline)
+claude-doctor        # Claude auth + MCP health; run BEFORE 'clauth <profile>'
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 tool_status          # Check installed tools
 herdr-help           # In-shell herdr cheat sheet (hspawn/hreap/clauth)
@@ -1229,4 +1359,5 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
 - **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
+- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth <profile>` while the doctor reports the stored copy DIFFERS from the live credential.
 - **Backups:** `backup-doctor` (full-chain correctness — start here), `backup-status` (quick health), `systemctl list-timers | grep restic`, `resticprofile -c /etc/resticprofile/profiles.toml show` (validate config)

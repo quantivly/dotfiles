@@ -131,6 +131,32 @@ exit 0
 STUB
 chmod +x "$STUBBIN/herdr"
 
+#-----------------------------------------------------------------------------
+# The clauth stub
+#-----------------------------------------------------------------------------
+# hspawn calls `clauth which` to pick the default profile (isolated spawns,
+# 2026-09-06). Without this stub the suite runs the REAL ~/.local/bin/clauth,
+# and every row's start path then depends on which of four live accounts happens
+# to be active on the developer's machine that minute — which is not a fixed
+# thing: the active profile changed from quantivly-3 to quantivly-2 midway
+# through the session this stub was written in, with nothing logging it.
+#
+# CLAUTH_STUB_WHICH empty (the default) means "clauth names no profile", so the
+# rows written before the isolated default keep their original start path.
+#
+# It records into its OWN log, never $HERDR_STUB_LOG: several rows assert that a
+# rejected invocation reached herdr ZERO times, and a clauth line in the herdr
+# log makes those rows fail for a reason that has nothing to do with herdr.
+cat > "$STUBBIN/clauth" <<'STUB'
+#!/bin/sh
+printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
+case "$1" in
+    which) [ -n "${CLAUTH_STUB_WHICH:-}" ] && printf '%s\n' "$CLAUTH_STUB_WHICH"; exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBBIN/clauth"
+
 WT="$TMPROOT/wt/tester-slug"
 cat > "$STUBDIR/worktree-create.json" <<JSON
 {"result":{"workspace":{"workspace_id":"wZ"},"tab":{},"root_pane":{"pane_id":"wZ:p1"},
@@ -157,7 +183,8 @@ run() {
     OUT="$(HOME="$FHOME" PATH="$STUBBIN:$PATH" HSPAWN_STATE_DIR="$STATE" \
            HSPAWN_BRANCH_PREFIX=tester HERDR_STUB_LOG="$LOG" HERDR_STUB_DIR="$STUBDIR" \
            HERDR_STUB_MODE="${MODE:-full}" CLAUDE_CODE_SESSION_ID="${SESS:-}" \
-           HERDR_STUB_PANE_DIR="${PANEDIR:-}" \
+           HERDR_STUB_PANE_DIR="${PANEDIR:-}" CLAUTH_STUB_WHICH="${WHICH:-}" \
+           CLAUTH_STUB_LOG="$TMPROOT/clauth.log" \
            zsh -c "source '$HERDRRC' >/dev/null 2>&1; $1" 2>&1)"
     RC=$?
 }
@@ -175,6 +202,9 @@ herdrcmds() { sed -n 's/^CMD //p' "$LOG" | sort -u | paste -sd'|' -; }
 # inside the --yes refusal, so an unanchored count is 2 and an assertion written
 # as "at least one" would pass on either line, including the wrong one.
 inwork() { grep -cE "^work: +$1" <<<"$OUT" || true; }
+# A fixed-string count over the captured stdout+stderr, for the lines hspawn
+# prints about itself (which credential it took, why it could not isolate).
+outgrep() { grep -cF -- "$1" <<<"$OUT" || true; }
 
 echo "=== _hspawn_shell_ready: is the pane's shell at its prompt? ==="
 # The pids are real, recorded from live panes. The predicate replaced a
@@ -305,6 +335,46 @@ run "hspawn '$REPO' 9lives"
 check "a digit-leading slug gets w-"  "$(inargs "w-9lives")"                  "1"
 run "hspawn '$REPO' aaaaaaaaaabbbbbbbbbbccccccccccddddddddddd"
 check "a long name is cut to 32"      "$(inargs "aaaaaaaaaabbbbbbbbbbccccccccccdd")" "1"
+
+echo
+echo "=== hspawn: credentials are isolated by DEFAULT (2026-09-06) ==="
+# ~/.claude/.credentials.json holds the login and every MCP token, has no lock,
+# and is rewritten whole on each refresh. Every spawn on the shared credential
+# is one more writer in that race, so an unqualified hspawn now takes the active
+# clauth profile and its own CLAUDE_CONFIG_DIR.
+#
+# WHICH= is the clauth stub's answer. The rows below are the reason it is a stub
+# at all: with the real binary the default profile is whichever of four live
+# accounts clauth happens to hold, which changed under this very suite.
+mkdir -p "$FHOME/.clauth/profiles/personal"
+WHICH=personal run "hspawn '$REPO' slug"
+check "no -p defaults to the active profile" \
+      "$(inargs "clauth start personal --permission-mode auto")" "1"
+# Matched on THIS line's own wording: "clauth profile 'personal'" also appears
+# in the agent summary line, so a row counting that phrase gets 2 and would pass
+# just as happily with the account line deleted.
+check "and says which credential it took" "$(outgrep "isolated CLAUDE_CONFIG_DIR")" "1"
+
+# The escape hatch has to actually reach the un-isolated path, or the isolation
+# is not a default but a mandate — and a worker that must LEAD a team needs it.
+WHICH=personal run "hspawn --shared '$REPO' slug"
+check "--shared returns to the direct path" \
+      "$(inargs "clauth start personal --permission-mode auto")" "0"
+check "--shared still starts an agent"      "$(incmd "agent start")"  "1"
+check "and says it took the shared one"     "$(outgrep "shared global credential")" "1"
+
+# The legacy "-" slot always meant "no profile". It must not silently acquire
+# the new default, or an old invocation quietly changes which account it bills.
+WHICH=personal run "hspawn '$REPO' slug - 'do a thing'"
+check "legacy '-' still means shared" \
+      "$(inargs "clauth start personal --permission-mode auto")" "0"
+
+# clauth present but naming nothing: falling back to the shared credential is
+# right (inventing a profile would bill an account nobody chose), but it must be
+# SAID, because the caller asked for isolation by omission and did not get it.
+WHICH= run "hspawn '$REPO' slug"
+check "an unnameable profile is reported, not silent" \
+      "$(outgrep "named no active profile")" "1"
 
 echo
 echo "=== hspawn: a reused pane id must not clobber an un-torn-down entry ==="

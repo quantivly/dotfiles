@@ -141,6 +141,23 @@ herdr-lazy() {
 #   is for. The no-profile path is the direct one, and burns whatever account
 #   owns the global credentials.
 #
+# WHY A SPAWN IS ISOLATED BY DEFAULT (changed 2026-09-06):
+#   ~/.claude/.credentials.json holds the login AND every MCP server's OAuth
+#   token, at 0600, with NO lock — every refresh rewrites the whole file. With
+#   ~23 Claude processes on this box that race is the mechanism behind the
+#   random logouts AND the "Unauthorized on a token that has not expired" MCP
+#   failures; the plugin:slack:slack entry was twice caught mid-write with a
+#   zero-length accessToken. Every spawn that runs on the shared credential is
+#   one more writer, so hspawn now defaults to the active clauth profile and its
+#   own CLAUDE_CONFIG_DIR. Claude Code really does isolate credentials per
+#   config dir — the opposite of GH_CONFIG_DIR, see CLAUDE.md.
+#
+#   THE COST IS REAL AND IS NOT RECOVERABLE LATER: a `clauth start` session
+#   never goes through the claude() wrapper above, so it has no
+#   teammateMode:tmux and CANNOT LEAD A HERDR TEAM. `--shared` is the escape
+#   hatch for a worker that must lead one. Both paths print which credential
+#   they took, because nothing about the running pane reveals it afterwards.
+#
 # Every agent call targets the PANE ID, not a name: herdr accepts either. The
 # direct path names the agent at start; the profile path names it afterwards
 # with `herdr agent rename <pane> <name>` (target first — checked against a
@@ -265,8 +282,11 @@ _hspawn_usage() {
     'Usage: hspawn [options] [--] <repo-dir> <slug> [prompt...]' \
     '' \
     'Options:' \
-    '  -p, --profile <clauth-profile>  start through `clauth start <profile>` (default: the account' \
-    '                                  currently holding the global credentials)' \
+    '  -p, --profile <clauth-profile>  start through `clauth start <profile>`, in that profile'"'"'s own' \
+    '                                  CLAUDE_CONFIG_DIR (default: the active clauth profile)' \
+    '      --shared                    use the SHARED global credential instead. Needed only when the' \
+    '                                  worker must LEAD a herdr team; adds a writer to the unlocked' \
+    '                                  ~/.claude/.credentials.json. See `claude-doctor`.' \
     '  -m, --model <model>             claude --model (an alias like opus, or a full model name)' \
     '  -e, --effort <level>            claude --effort (low|medium|high|xhigh|max)' \
     '      --mode <mode>               claude --permission-mode: auto (default) | acceptEdits | plan |' \
@@ -395,10 +415,17 @@ _hspawn_await_agent() {
 
 hspawn() {
   local profile="" profile_set=0 model="" effort="" mode="auto" base="" name_override=""
-  local endopts=0
+  local endopts=0 shared=0
   local -a rest=()
   while (( $# )); do
     case "$1" in
+      --shared)
+        # Opt back into the shared global credential. See "WHY A SPAWN IS
+        # ISOLATED BY DEFAULT" in the header: this is the flag for a worker that
+        # has to LEAD a team, and it is the only way to get the old behaviour.
+        shared=1
+        shift
+        continue ;;
       --profile=*|--model=*|--effort=*|--mode=*|--base=*|--name=*)
         set -- "${1%%=*}" "${1#*=}" "${(@)argv[2,-1]}"
         continue ;;
@@ -459,7 +486,10 @@ hspawn() {
   if (( ! profile_set && ! endopts && ${#rest} >= 3 )); then
     local third="${rest[3]}"
     if [[ "$third" == "-" || -d "$HOME/.clauth/profiles/$third" ]]; then
-      [[ "$third" == "-" ]] || profile="$third"
+      # A literal "-" was always "no profile", i.e. the shared global credential.
+      # It keeps meaning that, so the legacy form does not silently acquire the
+      # new isolated default.
+      if [[ "$third" == "-" ]]; then shared=1; else profile="$third"; fi
       prompt_words=("${(@)rest[4,-1]}")
       echo "deprecated: the positional [profile|-] slot; use -p/--profile <profile> (or just omit it)" >&2
     fi
@@ -506,6 +536,41 @@ hspawn() {
     name="${name[1,32]}"
   fi
 
+  # ---- Isolate the spawn's credentials unless told otherwise ----------------
+  # See "WHY A SPAWN IS ISOLATED BY DEFAULT" in the header. Without a profile a
+  # spawn runs on the SHARED ~/.claude/.credentials.json, which has no lock and
+  # is rewritten in full on every token refresh; ~23 concurrent writers is the
+  # mechanism behind the random logouts and the "Unauthorized on a token that
+  # has not expired" MCP failures. `clauth start <profile>` gives the worker its
+  # own CLAUDE_CONFIG_DIR, and Claude Code genuinely isolates credentials per
+  # config dir (unlike gh — see CLAUDE.md).
+  #
+  # PLACED AFTER every argument check, so an invocation that is about to be
+  # refused does not fork clauth first. That is not only tidiness: several rows
+  # of the state table assert that a rejected hspawn reached NOTHING, and a
+  # resolution step in front of the validation makes them false.
+  #
+  # NEVER SILENT, in either direction: which credential a spawn burns decides
+  # which account is billed and whether it can lead a team, so both paths say so.
+  if (( ! profile_set )) && [[ -z "$profile" ]] && (( ! shared )); then
+    if command -v clauth >/dev/null 2>&1; then
+      profile="$(clauth which 2>/dev/null | tr -d '[:space:]')"
+      if [[ -z "$profile" || ! -d "$HOME/.clauth/profiles/$profile" ]]; then
+        # Could not name an account. Falling through to the shared credential is
+        # the right choice — it is the old behaviour, and inventing a profile
+        # would bill an account the user did not pick — but it must be REPORTED,
+        # because the caller asked for isolation by omission and is not getting
+        # it, and nothing about the running pane reveals that afterwards.
+        profile=""
+        shared=1
+        echo "hspawn: clauth is installed but named no active profile — this spawn shares the" >&2
+        echo "        global credential (no isolation). Pass -p <profile> to isolate it." >&2
+      fi
+    else
+      shared=1
+    fi
+  fi
+
   # Claude's own args — identical on both start paths.
   local -a claude_args=(--permission-mode "$mode")
   [[ -n "$model" ]]  && claude_args+=(--model "$model")
@@ -540,6 +605,14 @@ hspawn() {
   _hspawn_say base "${base:-(herdr default)}"
   _hspawn_say pane "$pane"
   _hspawn_say workspace "$workspace"
+  # Which credential this spawn burns, and what that costs it. Stated on both
+  # paths: it decides which account is billed AND whether the worker can lead a
+  # herdr team, and neither is recoverable by looking at the pane afterwards.
+  if [[ -n "$profile" ]]; then
+    _hspawn_say account "clauth profile '$profile' (isolated CLAUDE_CONFIG_DIR; cannot lead a team)"
+  else
+    _hspawn_say account "shared global credential (can lead a team; adds a writer to ~/.claude/.credentials.json)"
+  fi
 
   # Registry entry — written now, not after detection (see header).
   local state_dir registry
@@ -1363,6 +1436,10 @@ ACCOUNTS (clauth):
   clauth <profile>        - switch global credentials; then 'claude' is a TEAM LEAD
   clauth start <profile>  - isolated worker on that account, NOT a lead
   clauth list             - profiles with usage
+  claude-doctor           - auth + MCP health; RUN BEFORE 'clauth <profile>'
+                            (a switch restores clauth's STORED tokens over the
+                             live ones — if they have drifted it can log out
+                             every running session at once)
 
 PLUGINS:
   herdr-lazy check          - installed vs declared in plugins.list
