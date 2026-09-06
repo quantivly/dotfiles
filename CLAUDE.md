@@ -1137,6 +1137,36 @@ claude.ai connectors are fetched *with that token* — so a login that goes bad 
 at once. "I get randomly logged out" and "my MCP servers keep disconnecting" are the same event
 seen from two sides. Measured: `/login` run 8 times in 30 days across 665 transcripts.
 
+**A logout is not one session's problem — it takes the whole box at once.** Caught with
+timestamps on 2026-09-06, and this is the dominant mechanism, above the partial-write race:
+
+```
+12:23:33  clauth rewrites ~/.clauth/profiles/quantivly-3/credentials.json  (the LIVE profile)
+12:23:35  six sessions begin failing "Login expired · Please run /login"
+12:24:16  ...the last of them, 41 seconds end to end
+12:25:09  /login recovery writes a `max` (personal) credential into the GLOBAL file
+```
+
+Refresh-token rotation is **server-side**: when any one session refreshes, the old refresh token
+is invalidated *everywhere*. So N sessions sharing one credential file are not N independent
+logins — they are one login with N holders, and the first rotation orphans the other N-1. That
+is what "occasional random logouts" actually is. It is also why the fix is isolation
+(`CLAUDE_CONFIG_DIR` per session) rather than anything that makes the file-writing safer: even a
+perfectly atomic, perfectly locked write would not help, because the invalidation happens at
+Anthropic, not on disk.
+
+Two things follow, and both bit during this investigation:
+
+- **Count only `isApiErrorMessage` records.** A raw grep for `Login expired` over the same window
+  returned nine hits across nine files; one file contained only *prose* — an agent quoting the
+  error in an instruction. Six sessions actually failed. The transcript is both the evidence and
+  a place the evidence is discussed, so the marker is what separates them.
+- **After a `/login`, the live credential belongs to no clauth profile.** `clauth which` answers
+  `unknown`, clauth holds no copy of it, and the next `clauth <profile>` overwrites it with
+  nothing to restore. `claude-doctor` reports that as a ⚠ (it rendered as two `·` notes until
+  2026-09-06), and separately names the case where the live credential belongs to a *different*
+  profile than the active one — every other check passes while the session bills another account.
+
 **clauth is a third writer, and it holds a stale copy.** `clauth <profile>` replaces the
 `claudeAiOauth` subtree with the profile's **stored** tokens; its own strings say *"a session on
 the global credentials adopts the change on its next token refresh"* and *"claude code's freshly

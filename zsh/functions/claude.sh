@@ -104,7 +104,7 @@ claude-doctor() {
   # every loop-body variable is declared once, here. CLAUDE.md records the run
   # where forgetting that printed `du=zvi-quantivly` into the middle of a report.
   local cred now_ms mode exp delta nproc_claude sub scopes chain
-  local active stored_hash live_hash p pdir
+  local active stored_hash live_hash p pdir owner
   local root d srv ok_n fail_n key empty_tok no_refresh
   local i comm svc a b
   local -a date_prefixes files
@@ -263,6 +263,32 @@ claude-doctor() {
         fi
       else
         _doctor_note "no stored credentials for '$active' to compare against"
+      fi
+      # An ORPHANED live credential: it belongs to none of the registered
+      # profiles. `clauth which` answers `unknown`, which the block above
+      # reports as two quiet notes — far too quiet for what it means. Observed
+      # 2026-09-06 12:25 immediately after a /login recovery: the fresh
+      # credential is one clauth has never captured, so (a) clauth cannot
+      # restore it if you switch away, and (b) the next `clauth <profile>`
+      # overwrites a credential of which no copy exists anywhere.
+      if [[ -f "$cred" && -d "$HOME/.clauth/profiles" ]]; then
+        live_hash=$(jq -S -c '.claudeAiOauth | {accessToken,refreshToken,expiresAt}' "$cred" 2>/dev/null | sha256sum | cut -c1-16)
+        if [[ -n "$live_hash" ]]; then
+          owner=""
+          for pdir in "$HOME"/.clauth/profiles/*(N/); do
+            [[ -f "$pdir/credentials.json" ]] || continue
+            stored_hash=$(jq -S -c '.claudeAiOauth | {accessToken,refreshToken,expiresAt}' "$pdir/credentials.json" 2>/dev/null | sha256sum | cut -c1-16)
+            [[ "$stored_hash" == "$live_hash" ]] && { owner="${pdir:t}"; break; }
+          done
+          if [[ -z "$owner" ]]; then
+            _doctor_warn "the live credential matches NO registered clauth profile"
+            echo "    clauth cannot identify it, so it has no copy to restore and the next"
+            echo "    'clauth <profile>' will overwrite it with no way back. Normal right after"
+            echo "    a /login. Capture it into the profile it belongs to before switching."
+          elif [[ -n "$active" && "$owner" != "$active" ]]; then
+            _doctor_warn "the live credential belongs to '$owner', but the active profile is '$active'"
+          fi
+        fi
       fi
       # Armed auto-switch is a loaded landmine, not a fault: when quota fills it
       # rewrites the shared credential under every live session. Report it so it
