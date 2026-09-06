@@ -372,7 +372,7 @@ check "legacy '-' still means shared" \
 # clauth present but naming nothing: falling back to the shared credential is
 # right (inventing a profile would bill an account nobody chose), but it must be
 # SAID, because the caller asked for isolation by omission and did not get it.
-WHICH= run "hspawn '$REPO' slug"
+WHICH='' run "hspawn '$REPO' slug"
 check "an unnameable profile is reported, not silent" \
       "$(outgrep "named no active profile")" "1"
 

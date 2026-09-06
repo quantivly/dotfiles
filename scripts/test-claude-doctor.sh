@@ -300,7 +300,7 @@ WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
 want_out "armed auto-switch is surfaced" "auto-switch armed"
 
 new_home d5; write_cred
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH= run_doctor
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH='' run_doctor
 want_out "clauth answering nothing is NOT read as healthy" "could not determine the active profile"
 
 #-----------------------------------------------------------------------------
