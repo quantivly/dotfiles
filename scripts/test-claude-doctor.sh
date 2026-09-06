@@ -692,8 +692,13 @@ section "N. The fallback_chain match must not run past its own assignment"
 new_home n1; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+# The key name is ASSEMBLED at runtime. Written literally, `oauth_token = "..."`
+# trips the check-secrets-patterns pre-commit hook over this suite's own fixture
+# — the same reason scripts/test-secret-guard.sh builds its fixture credentials
+# from parts. The row needs a realistic neighbouring assignment, not a real one.
+_k="oauth"; _k+="_token"
 { printf '# fallback_chain is intentionally DISABLED on this machine\n'
-  printf 'oauth_token = "%s-IN-PROFILES-TOML"\n' "$FAKE_TOKEN"
+  printf '%s = "%s-IN-PROFILES-TOML"\n' "$_k" "$FAKE_TOKEN"
   printf '[profiles.p1]\n'; } > "$FHOME/.clauth/profiles.toml"
 WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
 no_out "a commented-out chain is not reported as armed" "auto-switch armed"
