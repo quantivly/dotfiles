@@ -557,7 +557,16 @@ elif [[ -n "$declared_path" ]]; then
         echo "    resolving against the launcher's declared PATH instead; live-vs-declared PATH"
         echo "    drift is UNCHECKED for this run (see the ⚠ in the hygiene section above)."
     else
+        # Name what this branch actually is. It resolves against the PATH the
+        # launcher WOULD build, so every ✓ and ✗ below is a prediction about the
+        # server that has not started yet -- useful (a fresh machine learns what
+        # would be missing) and not the same claim as the live branch above it.
+        # Read as a live measurement it is a confident answer about a server that
+        # does not exist, which is how the section read to its first outside
+        # reader (2026-09-04).
         echo "  no server running — resolving against the launcher's declared PATH"
+        echo "    (a PREDICTION about the server the enable step will start, not an"
+        echo "     observation of a running one)"
     fi
 fi
 if [[ -z "$server_path" ]]; then
@@ -574,8 +583,19 @@ else
         fi
     done
     if [[ -n "$missing_deps" ]]; then
-        echo "    Install it, or symlink it into ~/.local/bin (on the server PATH; takes effect"
-        echo "    without a restart). A tool added to mise needs a server restart to be seen."
+        # Some of these are INSTALLED BY LATER STEPS, so a check run mid-install
+        # necessarily shows them missing -- clauth above all, which arrives with
+        # the plugins. The install page says so under its own final step, and the
+        # installer's next-steps text says it too, but neither can control WHEN
+        # somebody runs this: the first outside adopter ran it four steps early and
+        # reasonably asked whether the ✗ lines were a problem (2026-09-04). So say
+        # it here, in front of the reader who is looking at the ✗.
+        echo "    Some of these arrive in LATER install steps: clauth comes with the plugins,"
+        echo "    and bun/node/lazygit/yazi come from mise or your package manager. If you have"
+        echo "    not finished the install, expect ✗ here. These lines are informational and do"
+        echo "    NOT affect the exit code — see the Summary."
+        echo "    Otherwise: install it, or symlink it into ~/.local/bin (on the server PATH;"
+        echo "    takes effect without a restart). A tool added to mise needs a server restart."
     fi
     # $live_server_path, never $server_path: the latter falls back to
     # $declared_path, and comparing that against itself is a check that reports

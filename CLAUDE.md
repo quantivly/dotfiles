@@ -1080,7 +1080,43 @@ Gotchas, in the order they bite:
   class twice (gh-doctor, backup-doctor); a third recurrence means it is not something to remember
   but a question to ask of **every new check**: on a machine that legitimately lacks this subject,
   what does it print, and what can the reader do about it?
-- **State table: `scripts/test-herdr-modular.sh`** (122 checks, in CI as `herdr-modular-test`) —
+- **The first outside adopter's three install failures were one root cause: the modular path
+  provides no mise, and step 1 of every write-up assumed it did (2026-09-04).** `./install
+  --herdr` deliberately links no `~/.config/mise/config.toml`, so nothing puts mise's node on
+  `PATH` — and the documented activation line was the bare `eval "$(mise activate zsh)"`, which
+  cannot work at that point because mise is not on `PATH` yet. `zsh/zshrc.conditionals` has had
+  the two-branch form (`command -v mise` **elif** `-x ~/.local/bin/mise`) all along; the
+  instructions dropped it. Downstream, `node` resolved to `/usr/bin/node` at v10.19.0 and
+  `herdr-lazy install` died building `tdi/herdr-worktree-setup` — whose build is `npm ci` — with
+  `npm v9.2.0 is known not to run on Node.js v10.19.0`, so the error blamed **npm**, the newer of
+  the two. `HERDR_GUIDE.md` §3 step 0 had also attributed node to the Linear plugin, which has no
+  build step at all, and told the reader "step 1 provides them", true only of the FULL install.
+  Separately `persiyanov/herdr-reviewr`'s build hook runs `curl --retry-all-errors`, added in
+  **curl 7.71.0**; an older curl exits **2** on the unknown option and herdr reports `plugin
+  build failed … status: exit status: 2`, naming neither curl nor the flag. `apt` only supplies
+  what the release ships (Ubuntu 20.04: curl 7.68, node 10.19), so both are floors to state, not
+  bugs to chase. **The lesson is about the checker, not the versions:** `herdr-deps-check.sh`
+  asked only "is it on `PATH`", so it printed a green tick over both — a presence check cannot
+  see a version problem, and two of the three failures were versions. It now carries floors for
+  curl and node (18.0.0, npm's own supported floor, not a second opinion about `.mise.toml`'s
+  20), checks `npm` at all (it was in no list), reports an unparseable version as its own ⚠
+  state rather than as agreement, and compares fields by hand rather than with `sort -V`, which
+  BSD sort lacks — a floor that fails open on a Mac is worse than no floor. It also honours
+  `-t 1` now: its colour was unconditional, which put escapes into every redirect **and** made
+  `✓ curl` un-greppable, so the state-table row asserting an old curl gets no ✓ had been passing
+  whatever was printed. A checker whose output cannot be grepped cannot be pinned.
+- **`verify-tools.sh` answered a question nobody had asked yet.** The same adopter ran
+  `--herdr` four steps early and reasonably asked whether `✗ bun / lazygit / yazi / clauth:
+  MISSING under the server PATH` was a problem. It was not — `clauth` is *installed by* the
+  plugin step, so a check run before it necessarily shows it missing — and both the page and the
+  installer's next-steps text say the plugin-dependency lines do not affect the exit code. But
+  neither can control *when* somebody runs the checker, so the advisory now prints in the
+  section itself, only when something is missing (unconditionally would make it a line nobody
+  reads). His run also took a branch this machine never does — `no server running — resolving
+  against the launcher's declared PATH` — which is correct and was phrased as though it were a
+  live measurement; it now says it is a **prediction** about the server the enable step will
+  start.
+- **State table: `scripts/test-herdr-modular.sh`** (146 checks, in CI as `herdr-modular-test`) —
   the two commands a modular adopter runs, hermetic via a recording `herdr` stub and fake `$HOME`.
   Two defects in the suite itself are worth more than most of its rows:
   - **A row that cannot reach the branch it names is unfailable.** The row asserting `--herdr`
