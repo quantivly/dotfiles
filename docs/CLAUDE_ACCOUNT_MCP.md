@@ -19,12 +19,17 @@ claude-doctor --days 30    # widen the MCP window from the default 7
 
 ## 1. The one rule
 
-**Run `claude-doctor` before `clauth <profile>`.**
+**Run `claude-doctor` before `clauth <profile>`, every time.**
 
-A profile switch restores that profile's *stored* tokens over the live ones.
-Claude Code rotates refresh tokens, and clauth only notices on a ~90 s poll, so
-between a rotation and that poll the stored copy is a **superseded** token.
-Restoring it can log out every running session at once.
+A profile switch rewrites the machine-wide `~/.claude/.credentials.json` under
+every session still using it — which is the mechanism behind the mass logouts, not
+a side effect of them. Of the nine login-expiry incidents in the eight days to
+2026-09-06, five hit 3–6 sessions **at the same instant**.
+
+What it writes is that profile's *stored* tokens. Claude Code rotates refresh
+tokens, and clauth only notices on a ~90 s poll, so between a rotation and that
+poll the stored copy is a **superseded** token. Restoring it can log out every
+running session at once.
 
 If the doctor says:
 
@@ -202,7 +207,8 @@ A `"result"` carrying `serverInfo` is a working server.
 ## 5. Reducing the race
 
 Every Claude session on the shared `~/.claude/.credentials.json` is one more
-writer on an unlocked file that is rewritten whole on each refresh.
+member of the group that a single bad write destroys — and `claude-doctor`'s
+concurrency section now prints that grouping, one line per credential file.
 
 - **`hspawn` isolates by default** (2026-09-06): with no `-p`, it starts through
   `clauth start <active profile>` in that profile's own `CLAUDE_CONFIG_DIR`.
@@ -213,6 +219,10 @@ writer on an unlocked file that is rewritten whole on each refresh.
 - **`hreap`** enumerates Claude processes in herdr panes with idle age and
   memory; `hreap --close --mine` closes your own idle spawns. An idle agent
   still holds its memory *and* still refreshes its token.
+
+The number to drive to zero is the one the doctor reports on **the SHARED global
+file**: it was 17 of 18 when this was written, because a human's own `claude`
+does not go through `hspawn`.
 
 ---
 
@@ -228,6 +238,13 @@ for the logouts. It is a one-year token with no refresh and no race, which makes
 it tempting — but the documentation is explicit that it *"can only make model
 requests, so it can't establish Remote Control sessions or fetch claude.ai
 connectors."* It would trade the logouts for permanently dead connectors.
+
+**Do not read an empty `accessToken` as damage on its own.** An `mcpOAuth` entry
+with an empty token and **no** `expiresAt`, `scope` or `refreshToken` is a
+*discovery record* — a server nobody has authorised in this config dir yet, which
+is the normal starting state for every isolated session. Only an empty token that
+**kept** its `expiresAt`/`scope` is the fossil of a lost race. `claude-doctor`
+distinguishes them; a person reading the file by hand should too.
 
 **Do not measure `/login` recoveries by grepping transcripts without excluding
 the running session.** The pattern `<command-name>/login</command-name>` gets
