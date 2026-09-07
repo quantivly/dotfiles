@@ -180,6 +180,33 @@ jobs:
       - name: Run the claude-doctor state table
         run: ./scripts/test-claude-doctor.sh
 
+  claude-account-dirs-test:
+    name: Claude Account Dirs State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # scripts/claude-account-dirs.sh builds the persistent per-profile
+      # CLAUDE_CONFIG_DIR that lets a session be isolated AND still lead a herdr
+      # team. Every row is written against a state that produces a
+      # SUCCESSFUL-looking build, because that is how its predecessor failed: it
+      # seeded .claude.json from ~/.claude/.claude.json, a 1,156-byte husk with
+      # no projects, no hasCompletedOnboarding and a different machineID. That is
+      # still valid JSON, so the build "worked" and every session would have
+      # started with first-run onboarding and a trust dialog in every worktree.
+      #
+      # Hermetic via a fixture $HOME, and that is load-bearing rather than tidy:
+      # the script writes to ~/.local/state and reads ~/.clauth/profiles, which on
+      # the machine this was written on hold four live Claude logins.
+      - name: Run the claude-account-dirs state table
+        run: ./scripts/test-claude-account-dirs.sh
+
   herdr-modular-test:
     name: Modular herdr Checks State Table
     runs-on: ubuntu-latest

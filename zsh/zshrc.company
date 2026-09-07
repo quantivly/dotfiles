@@ -352,11 +352,22 @@ fi
 #==============================================================================
 # Claude Code Multi-Account Switching — REMOVED 2026-08-28
 #==============================================================================
-# Superseded by clauth (https://github.com/uwuclxdy/clauth). clauth owns
-# CLAUDE_CONFIG_DIR globally now (via profile switch, not a per-directory
-# chpwd hook) — a chpwd override here would fight it. Four profiles are
-# registered: quantivly-{1,2,3} (was ~/.claude-work{,2,3}) and personal
+# Superseded by clauth (https://github.com/uwuclxdy/clauth), which owns the four
+# registered profiles: quantivly-{1,2,3} (was ~/.claude-work{,2,3}) and personal
 # (was ~/.claude-personal).
+#
+# CORRECTED 2026-09-06: this used to say "clauth owns CLAUDE_CONFIG_DIR globally
+# now", which stopped being true and was never quite right. `clauth <profile>`
+# does not set CLAUDE_CONFIG_DIR at all — it rewrites ~/.claude/.credentials.json
+# in place, under every running session. CLAUDE_CONFIG_DIR is now set per session
+# by claude() in zsh/zshrc.herdr, pointing at a persistent per-profile dir, so
+# that no two sessions need share one credential file. A chpwd override here
+# would still be wrong, for the original reason and one more: routing by
+# directory would move a running session's account mid-flight.
+#
+# The four ~/.claude-* directories this block replaced still exist and three of
+# them were written as late as 2026-09-01, each holding a full credential file
+# that nothing rotates or tracks. `claude-doctor` reports them.
 #
 # The old ~/.claude-quantivly this block gated on was already stale/abandoned
 # (last touched 2026-06-27) and is not one of the four accounts clauth manages.
