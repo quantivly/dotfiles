@@ -939,6 +939,27 @@ Gotchas, in the order they bite:
 
 - **Never run bare `herdr`** from a script or an agent — it attaches a client and hijacks the
   user's UI. Subcommands only. (At a keyboard it is just how you re-attach after `ctrl+alt+q`.)
+- **Closing one terminal in the spaces sidebar can close the whole space, silently.** A close
+  aimed at a single pane issues a **`tab.close`**, which kills every pane in that tab — and when
+  the space holds only that one tab, the space goes with it. On 2026-09-07 at 09:57 an empty root
+  terminal was closed in a space containing two nested Claude sessions; the server log shows one
+  `method="tab.close"` followed by three `pane.exit` records (`code: 1`, and a `Hangup` for the
+  third), and the space disappeared from the sidebar. Five sessions went that way across four such
+  closes that morning. **There is no undo**: `herdr session` manages server *sessions*, not closed
+  workspaces, and `~/.config/herdr/session-history.json` mirrors the LIVE set rather than retaining
+  closed ones — verified, its entry count tracks `herdr workspace list` exactly. The layout is
+  unrecoverable; the conversations are not, because Claude Code transcripts outlive the pane
+  (`claude --resume <session-id>` from the original cwd). Two things make the post-mortem possible
+  and are worth knowing before you need them: a killed pane's transcript stops at the instant of
+  `pane.exit`, so matching transcript last-write times against exit timestamps identifies which
+  session died where **to the second**; and the log records a workspace's *creation* and *closure*
+  but **never its label**, so afterwards you can prove what was in a space and not what it was
+  called.
+- **`request_id="cli:…"` in the herdr log does NOT mean a program did it.** All 6,183 requests in
+  this machine's server log carry that prefix — the TUI is a client speaking the same API — so the
+  field cannot tell a human's click from an agent's CLI call. It was read as proof that "an agent
+  closed these, not the user", and that was wrong. Nothing in the log attributes an action to a
+  human.
 - **Never start or restart the herdr server from inside a pane or a Claude session.** The server's
   environment is a snapshot of whoever launched it, and every pane inherits it. The live server was
   once relaunched from a team-lead pane (2026-08-29), so every pane got the teammux shim as `tmux`,
@@ -1080,6 +1101,16 @@ Gotchas, in the order they bite:
   `herdr agent explain --file <screen> --agent claude` accepts the same pane's screen (`state: idle`,
   rule `live_prompt_box`). `herdr agent explain <pane>` is the first diagnostic; `agent_not_found`
   means nothing was detected at all. An upstream report is drafted, not yet filed.
+  **The reaping consequence, learned the hard way on 2026-09-07:** in `hreap`, a row reading
+  `DET no` / `unknown` and idle for many hours is a **teammate**, not an abandoned session. Six
+  such rows — 17–20 h idle, named `general-purpose`, ~380 MB each — were about to be closed as
+  "stale, pure upside" when `process-info` showed every one of them running `2.1.259`, the
+  versioned-binary signature above. They belonged to leads that were still working. CLAUDE.md's
+  own words apply to the status field too: `unknown` "does not prove completion". A clean `git
+  status` in the pane's cwd is not evidence either — a teammate's work in progress lives in its
+  conversation and in findings it has not yet reported to its lead. The reap path for a teammate
+  is **`TaskStop` from its lead**, never closing its pane; left alone, those six were reaped
+  correctly by their leads within the hour.
 - **The build/test parallelism caps key on `$HERDR_PANE_ID`** (`zsh/zshrc.buildlimits`), and
   that gate was `$ATRIUM_SESSION` until 2026-09-01. An *unset* variable selects the LOOSE
   tier, so the day Atrium stopped running, every agent pane silently got the half-the-cores

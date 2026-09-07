@@ -866,6 +866,51 @@ Regenerate it after every `herdr update`.
 | A pane runs Claude but is not in the sidebar or `herdr agent list` | `herdr agent explain <pane>` says why. If it returns `agent_not_found`, herdr never detected an agent there at all: check `herdr pane process-info --pane <pane>` — a foreground process named like `2.1.251` (Claude's versioned binary, which is what herdmates teammates run as) is not recognised (upstream, drafted but not yet filed — §9), and a pane on the trust dialog is not detected either. |
 | `tmux` prints `teammux: unrecognized verb` | The herdr server was started from inside a team-lead pane and every pane inherits the teammux shim on PATH (§2.4). Restart it through the unit; meanwhile `/usr/bin/tmux` is the real one. |
 | `~/.claude/teams/` fills with team-of-one directories; `$status` on every Claude pane | Same cause: the server hands `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and a fake `TMUX` to everyone (§2.4). |
+| Closing one terminal made the whole space disappear | The close issued a `tab.close`, which kills every pane in that tab; a single-tab space dies with it. No undo — see below. |
+
+### Recovering sessions from a space you closed by accident
+
+**The layout is gone and there is no undo.** `herdr session` manages server *sessions*, not closed
+workspaces, and `~/.config/herdr/session-history.json` mirrors the live set rather than keeping
+closed ones. **The conversations survive**, because Claude Code transcripts outlive the pane.
+
+Find what died, from `~/.config/herdr/herdr-server.log`:
+
+```bash
+grep 'workspace closed' ~/.config/herdr/herdr-server.log | tail
+grep -E 'pane child exited.*pane_id=<N>' ~/.config/herdr/herdr-server.log
+```
+
+Match that exit instant against transcript last-write times — a killed session's transcript stops
+exactly when its pane dies, which identifies which conversation was where **to the second**. The
+log is UTC; file mtimes are local:
+
+```bash
+find ~/.claude/projects -name '*.jsonl' -newermt '<exit-1s>' ! -newermt '<exit+2s>'
+```
+
+Then resume from the original working directory, isolated so it does not pile onto the shared
+credential (§4):
+
+```bash
+cd <original-cwd> && claude-as <profile> --resume <session-id>
+```
+
+Three checks before resuming anything:
+
+- **Is it already running?** A frozen transcript can mean "idle", not "dead". Confirm the pane
+  actually exited in the log, and that no live process holds that cwd.
+- **Does the worktree still exist?** A session whose worktree *and* branch were removed cannot be
+  resumed anywhere; the transcript is readable and that is all.
+- **Is it a subagent?** If its first user message opens with `<teammate-message
+  teammate_id="team-lead">` it is an implementer or reviewer teammate, not a session. Resuming it
+  standalone produces work with no lead to collect it — restart the lead, or read the transcript
+  and keep whatever it left on disk.
+
+For a large session Claude Code offers "resume from summary" over a full resume, warning that the
+full path spends a substantial part of your usage limits. The summary is usually right: the work
+in progress is on disk in the worktree either way, and what a summary costs is the reasoning
+behind earlier choices, not the changes themselves.
 
 ### Test a config change in a named session, not on the live server
 
