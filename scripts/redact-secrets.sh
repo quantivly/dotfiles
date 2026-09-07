@@ -54,7 +54,30 @@ exec sed -E \
   -e 's/ASIA[0-9A-Z]{16}/<REDACTED:aws-temp-key-id>/g' \
   -e 's/(aws_secret_access_key[[:space:]]*=[[:space:]]*)[A-Za-z0-9\/+=]{30,}/\1<REDACTED:aws-secret>/g' \
   -e 's/glpat-[A-Za-z0-9_-]{20,}/<REDACTED:gitlab-pat>/g' \
+  -e 's/ntn_[A-Za-z0-9]{40,}/<REDACTED:notion-token>/g' \
+  -e 's/lin_api_[A-Za-z0-9]{30,}/<REDACTED:linear-key>/g' \
   -e 's/([Bb]earer[[:space:]]+)[A-Za-z0-9._~+\/-]{20,}=*/\1<REDACTED:bearer>/g' \
   -e 's/(-----BEGIN [A-Z ]*PRIVATE KEY-----).*/\1<REDACTED:private-key>/g' \
   -e 's/(https?:\/\/[^:@[:space:]\/]+):[^@[:space:]\/]+@/\1:<REDACTED:url-password>@/g' \
-  -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Z0-9_]*=)[^[:space:]]+/\1<REDACTED:by-name>/g'
+  -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Z0-9_]*=)[^[:space:]]+/\1<REDACTED:by-name>/g' \
+  -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*_PAT=)[^[:space:]]+/\1<REDACTED:by-name>/g'
+  # `_PAT` is its OWN rule, not another entry in the alternation above, and the
+  # anchoring is the whole point. The alternation is followed by `[A-Z0-9_]*=`,
+  # so ANY form of PAT placed inside it has that trailing class absorb whatever
+  # follows: measured, both `PAT` and `_PAT` there redact `SOME_PATH=/x`,
+  # `MY_PATHS=/a` and `COMPATIBLE=yes`. Requiring `_PAT` immediately before the
+  # `=` excludes all three, and a redactor that mangles ordinary variables is
+  # one somebody removes from the pipeline, after which it redacts nothing.
+  #
+  # `PATH=` and `PATTERN=` are safe for a different and simpler reason -- the
+  # `=` adjacency, since both have a character between `PAT` and the `=`. An
+  # earlier version of this comment claimed naked `PAT` in the alternation
+  # swallowed `PATH=`; it does not, because the leading `[A-Z]` consumes the
+  # `P`. Only a rule allowing PAT *anywhere* before the `=` reaches PATH, which
+  # is the mutation the PATH and PATTERN rows in the state table pin.
+  #
+  # Found 2026-09-07, and it mattered more than an ordinary miss: DO-576 had
+  # just made the guard refuse `tail ~/.zshrc.local` and name this script as
+  # the remedy, so a NOTION_PAT that matched neither a shape nor a name rule
+  # printed in full through the very pipe the deny message recommends. A remedy
+  # that silently does not remedy is worse than no remedy.

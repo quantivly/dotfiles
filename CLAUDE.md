@@ -815,6 +815,21 @@ Design decisions that are load-bearing, not preferences:
   deliberately not verbs. A `python3` heredoc that opens the file is not caught either: it
   prints nothing by default, and refusing it would block ordinary edits to the very file
   people are told to keep their secrets in.
+- **The remedy the guard names did not remedy.** Immediately after the rule above shipped,
+  running its own suggested `tail ~/.zshrc.local | redact-secrets` against the real file
+  printed the `NOTION_PAT` in full. `NOTION_PAT` matched no name pattern (the alternation is
+  `TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL`) and `ntn_` matched no shape pattern, so
+  it fell through both rules — the exact case the redactor's header says two rules exist to
+  prevent. **Worse than a plain miss:** the deny message points at the redactor, so the
+  failure mode is guard blocks, human adds the pipe, token prints anyway, and it looks
+  handled. Fixed by `ntn_` and `lin_api_` shape rules plus a `_PAT=` name rule. That last one
+  is its OWN `-e`, never an entry in the alternation: the alternation is followed by
+  `[A-Z0-9_]*=`, so any PAT inside it has the trailing class absorb what follows and redacts
+  `SOME_PATH=`, `MY_PATHS=` and `COMPATIBLE=` (measured, both for `PAT` and `_PAT`). `PATH=`
+  and `PATTERN=` are safe for a different reason — the `=` adjacency — and only a rule
+  allowing PAT anywhere before the `=` reaches them. Six mutations, all pinned; the reasoning
+  above was wrong on first writing (it blamed `PATH=` for what actually breaks `SOME_PATH=`)
+  and the state table is what corrected it.
 - **The quote-stripping has a hole of its own, found the same day and NOT fixed.** A heredoc
   body is not a quoted string, so a command whose heredoc merely *quotes this guard's own
   source* trips the `/proc/*cmdline*` rule — which happened while editing the guard, and the
@@ -834,7 +849,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (69 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (79 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data).
 
