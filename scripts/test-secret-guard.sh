@@ -147,6 +147,58 @@ check "allows the redirected form" \
       "$(ask 'ps aux 2>&1 | ~/.dotfiles/scripts/redact-secrets.sh')" "allow"
 
 echo
+echo "=== reading a file that HOLDS credentials ==="
+# Every rule above catches a command that prints a secret it FETCHED. None
+# caught a command that prints a FILE -- and CLAUDE.md's Security Rules send
+# every secret on the machine to ~/.zshrc.local, so the guard covered every
+# emission shape except the documented home of all of them.
+#
+# On 2026-09-07 an agent ran `tail -8 ~/.zshrc.local` to find where to append a
+# pathadd line. The tail of that file held a live LINEAR_API_KEY and a
+# NOTION_PAT; both reached the transcript and had to be rotated. Same class as
+# the 2026-09-01 incident that created this hook.
+for c in \
+  'tail -8 ~/.zshrc.local' \
+  'cat ~/.zshrc.local' \
+  'grep TOKEN ~/.zshrc.local' \
+  'source ~/.zshrc.local' \
+  'head -20 /home/zvi/.backup.local' \
+  'less ~/.gitconfig.local' \
+  'cat ~/.claude/.credentials.json'
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+# The QUOTED path is the row that decides whether this rule works at all.
+# $probe has quoted strings stripped, so a rule matching the path on $probe
+# would miss the most natural spelling. Hence path-on-$cmd, verb-on-$probe.
+# shellcheck disable=SC2016  # the $HOME must reach the guard UNEXPANDED -- an
+# expanded /home/zvi/... would test a different string than the one this row is
+# about, which is a command whose path only exists inside double quotes.
+check "refuses the quoted path, which \$probe cannot see" \
+      "$(ask 'cat "$HOME/.zshrc.local"')" "deny"
+
+echo
+echo "=== ...without refusing the commands people actually run on it ==="
+# Group 2, and it matters more than the group above. Naming the file is not
+# reading it, and metadata is not content. A guard that refuses `ls` on a path,
+# or a commit message that mentions it, gets switched off within a day.
+for c in \
+  'git commit -m "move flyctl to ~/.zshrc.local"' \
+  'echo "secrets live in ~/.zshrc.local"' \
+  'ls -l ~/.zshrc.local' \
+  'stat -c %y ~/.zshrc.local' \
+  'test -f ~/.zshrc.local && echo yes' \
+  'wc -l ~/.zshrc.local' \
+  'readlink -f ~/.zshrc.local' \
+  'cat ~/.zshrc' \
+  'grep -n pathadd ~/.dotfiles/zshrc'
+do
+  check "allows: $c" "$(ask "$c")" "allow"
+done
+check "allows the redacted read — the remedy the deny message names" \
+      "$(ask 'tail -8 ~/.zshrc.local | ~/.dotfiles/scripts/redact-secrets.sh')" "allow"
+
+echo
 echo "=== the guard fails OPEN, always ==="
 # A hook that blocks the shell when it breaks gets disabled wholesale, taking
 # its protection with it. Every malformed input must allow.

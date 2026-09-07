@@ -76,6 +76,33 @@ if [[ -z "$why" ]]; then
     why="a bare \`${BASH_REMATCH[2]}\` dumps every variable, including exported tokens"
   elif [[ "$probe" == */proc/*cmdline* || "$probe" == */proc/*environ* ]]; then
     why="/proc command lines and environments contain other processes' secrets"
+  # Reading a file that HOLDS credentials, which every rule above misses: they
+  # all match a command that prints a secret it fetched, not one that prints a
+  # file. CLAUDE.md's Security Rules send every secret on the machine to
+  # ~/.zshrc.local, so this guard covered every emission shape except the
+  # documented home of all of them. On 2026-09-07 a `tail -8 ~/.zshrc.local`,
+  # run to find where to append a PATH line, put a live LINEAR_API_KEY and a
+  # NOTION_PAT into a transcript. Same class as the incident that created this
+  # hook; this rule is that gap closed.
+  #
+  # TWO conditions, and the split between them is load-bearing:
+  #
+  #   the PATH matches on "$cmd", the RAW command, because $probe has had quoted
+  #   strings stripped -- and `cat "$HOME/.zshrc.local"` is the most natural way
+  #   to write it, so matching the path on $probe would miss exactly that.
+  #
+  #   the VERB matches on $probe, and both must hold. Path-alone on the raw
+  #   command refuses `git commit -m "move flyctl out of zshrc.local"` -- a
+  #   message merely NAMING the file -- which is precisely the false positive
+  #   this file's header says costs the whole guard.
+  #
+  # Metadata-only commands (ls, stat, test -f, readlink) print no content and are
+  # deliberately not verbs here. A python3 heredoc that opens the file is not
+  # caught either: it prints nothing by default, and blocking it would refuse
+  # ordinary edits to the very file people are told to put their secrets in.
+  elif [[ "$cmd" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json) ]] \
+     && [[ "$probe" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]]; then
+    why="\`${BASH_REMATCH[2]}\` on a file that holds credentials (CLAUDE.md sends every secret to ~/.zshrc.local)"
   fi
 fi
 

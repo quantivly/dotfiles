@@ -795,9 +795,31 @@ Design decisions that are load-bearing, not preferences:
   before matching so a command that merely *mentions* a shape is not refused. A false
   positive costs the entire guard; a miss costs one redaction.
 - **It is a papercut guard, not a boundary.** Any command can print a secret and this knows
-  about six shapes. The real fixes are shorter-lived credentials (a fine-grained PAT with
+  about seven shapes. The real fixes are shorter-lived credentials (a fine-grained PAT with
   an expiry, so a leak decays on its own) and narrower scopes — both `gh` tokens here carry
   `admin:public_key`, the scope that lets a leak plant an SSH key surviving revocation.
+- **Every original rule caught a command printing a secret it FETCHED; none caught one
+  printing a FILE — and this file's own Security Rules send every secret to
+  `~/.zshrc.local`.** So the guard covered every emission shape except the documented home
+  of all of them. On 2026-09-07 an agent ran `tail -8 ~/.zshrc.local` to find where to
+  append a `pathadd` line; the tail of that file held a live `LINEAR_API_KEY` and a
+  `NOTION_PAT`, both reached the transcript, and both had to be rotated — the same class as
+  the incident that created the hook, six days later. The rule added for it fires on
+  `~/.zshrc.local`, `~/.gitconfig.local`, `~/.backup.local` and `~/.claude/.credentials.json`
+  and **needs two conditions, whose split is the whole design**: the PATH matches on the raw
+  command (`$probe` has quoted strings stripped, so `cat "$HOME/.zshrc.local"` — the most
+  natural spelling — would escape a `$probe` match), while the VERB matches on `$probe`.
+  Path-alone on the raw command refuses `git commit -m "move flyctl to ~/.zshrc.local"`, a
+  message merely *naming* the file, which is the false positive that costs the whole guard.
+  Metadata-only commands (`ls`, `stat`, `test -f`, `wc`, `readlink`) print no content and are
+  deliberately not verbs. A `python3` heredoc that opens the file is not caught either: it
+  prints nothing by default, and refusing it would block ordinary edits to the very file
+  people are told to keep their secrets in.
+- **The quote-stripping has a hole of its own, found the same day and NOT fixed.** A heredoc
+  body is not a quoted string, so a command whose heredoc merely *quotes this guard's own
+  source* trips the `/proc/*cmdline*` rule — which happened while editing the guard, and the
+  workaround is the documented one (pipe through the redactor). Worth knowing before assuming
+  a refusal means the command really would have leaked.
 
 **`.gitignore`'s `**/*secret*` rule excluded all three of these files**, whose entire job
 is secrets — and `git add -A` skips ignored paths **silently**, so `git commit`, `git push`
@@ -812,7 +834,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (51 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (69 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data).
 
