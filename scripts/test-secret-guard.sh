@@ -74,6 +74,22 @@ check "secret by NAME, unguessable shape" \
       "$(red "CLAUDE_CODE_MESSAGING_TOKEN=$HEX32")" \
       "CLAUDE_CODE_MESSAGING_TOKEN=<REDACTED:by-name>"
 check "…and other name suffixes" "$(red 'DB_PASSWORD=hunter2')" "DB_PASSWORD=<REDACTED:by-name>"
+# Notion and Linear, added 2026-09-07 after a NOTION_PAT went through this
+# script untouched. It mattered more than an ordinary miss: DO-576 had just made
+# the emission guard refuse `tail ~/.zshrc.local` and name THIS script as the
+# remedy, so the token printed in full through the very pipe the deny message
+# recommends. `NOTION_PAT` matched no name pattern ("PAT" was absent from the
+# alternation) and `ntn_` matched no shape pattern — both rules missed, which is
+# the exact case the header says two rules exist to prevent.
+NTN="ntn_$(printf 'f%.0s' {1..43})"
+LIN="lin_api_$(printf 'g%.0s' {1..40})"
+check "notion token by name"  "$(red "NOTION_PAT=$NTN")"  "NOTION_PAT=<REDACTED:by-name>"
+check "notion token by shape, bare in prose" \
+      "$(red "see $NTN here")" "see <REDACTED:notion-token> here"
+check "linear key by shape, bare in prose" \
+      "$(red "see $LIN here")" "see <REDACTED:linear-key> here"
+check "linear key by name too" "$(red "LINEAR_API_KEY=$LIN")" \
+                               "LINEAR_API_KEY=<REDACTED:by-name>"
 
 echo
 echo "=== redact-secrets: what it must NOT touch ==="
@@ -87,6 +103,24 @@ check "an ordinary VAR"      "$(red 'MY_VAR=hello')"        "MY_VAR=hello"
 check "a lowercase token flag" "$(red 'curl --token=abc')"  "curl --token=abc"
 check "prose"                "$(red 'the token is stored in the keyring')" \
                              "the token is stored in the keyring"
+# The `_PAT` rule's anchoring, and these rows are why it is its own -e rule
+# rather than another entry in the alternation. That alternation is followed by
+# `[A-Z0-9_]*=`, so any form of PAT inside it has the trailing class absorb
+# whatever follows: measured, both `PAT` and `_PAT` there redact SOME_PATH=,
+# MY_PATHS= and COMPATIBLE=. Those three rows pin that mutation.
+#
+# PATH= and PATTERN= are safe for a simpler reason -- the `=` adjacency, since
+# both have a character between PAT and the `=`. They are pinned by a different
+# mutation: a rule allowing PAT anywhere before the `=`. Stated because an
+# earlier version of this comment had it wrong, claiming naked `PAT` in the
+# alternation swallowed PATH= (it does not; the leading `[A-Z]` eats the `P`),
+# and a justification nobody can reproduce is worse than none.
+check "PATH is not a PAT"     "$(red 'PATH=/usr/bin:/bin')"  "PATH=/usr/bin:/bin"
+check "nor is SOME_PATH"      "$(red 'SOME_PATH=/x/y')"      "SOME_PATH=/x/y"
+check "nor MY_PATHS"          "$(red 'MY_PATHS=/a:/b')"      "MY_PATHS=/a:/b"
+check "nor COMPATIBLE"        "$(red 'COMPATIBLE=yes')"      "COMPATIBLE=yes"
+check "nor PATTERN"           "$(red 'PATTERN=foo')"         "PATTERN=foo"
+check "a short ntn_ word is not a token" "$(red 'ntn_short')" "ntn_short"
 check "empty input"          "$(printf '' | "$REDACT")"     ""
 # Streaming filter: it must not swallow the command's status.
 check "exit status survives the pipe" \
