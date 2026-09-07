@@ -96,6 +96,13 @@ _claude_cred_file() {
 # shell running the doctor happens to be pointed.
 _claude_global_cred_file() { print -r -- "$HOME/.claude/.credentials.json"; }
 
+# The GLOBAL settings.json, for exactly the reason _claude_global_cred_file exists.
+# `clauth start` gives its runtime an OWN real settings.json (not a symlink), and a
+# `claude-as` account dir may carry one too — so a check written against
+# $CLAUDE_CONFIG_DIR asks about a copy, while the file clauth REWRITES is always
+# this one. Section 7 is about that file and no other.
+_claude_global_settings_file() { print -r -- "$HOME/.claude/settings.json"; }
+
 # The identity clauth's profiles are keyed on: a truncated hash of the login
 # triple. Never the tokens themselves — see "NEVER PRINTS A CREDENTIAL" above.
 # Empty output means "could not read it", which callers must not treat as a match.
@@ -205,7 +212,7 @@ claude-doctor() {
   local active stored_hash live_hash p pdir
   local root d srv ok_n fail_n key empty_tok no_refresh
   local i comm svc a b
-  local gcred gcred_id link_target session_owner global_owner has_meta
+  local gcred gcred_id link_target session_owner global_owner has_meta gsettings val
   local unknown_n cfgdir credpath ldir grp envblob n label procroot
   local -a date_prefixes files
   local -A group_n group_label
@@ -758,6 +765,69 @@ claude-doctor() {
     done
   else
     _doctor_note "no log store — NOT CHECKED"
+  fi
+
+  # ---- 7. Global settings.json: keys a third party can remove --------------
+  # ~/.claude/settings.json is user-level, NOT in this repo, and clauth REWRITES
+  # it: it merges a profile's [env] on switch and clears it on switch away (which
+  # is why `env` is `{}`), and it writes the profile's [models] block. On
+  # 2026-09-06 that removed `model: opus[1m]` outright — every new session
+  # silently defaulted to a different model for a day before anyone noticed. The
+  # file also carries the statusLine publisher, the secret-emission guard hook and
+  # 23 enabled plugins, so a key vanishing from it is not cosmetic.
+  #
+  # Deliberately NOT managed by dotbot. A symlink would make clauth write through
+  # it, and clauth rewrites on every profile switch — a permanently dirty tracked
+  # file, which is the churn DOTFILES_EXPECTED_DIRTY exists to paper over
+  # elsewhere. Detect the damage instead of fighting for ownership of the file:
+  # the same choice claude-doctor makes about the credential.
+  #
+  # The check is ARMED BY THE USER and silent by default. A hardcoded list of
+  # required keys would be a permanently-red check on every machine that
+  # legitimately sets none of them — the trap this file's own header warns about.
+  # Declare what matters in ~/.zshrc.local:
+  #
+  #     CLAUDE_SETTINGS_REQUIRE=( model statusLine.command )
+  #
+  # Values are jq paths, tested for "present and non-empty". Unarmed, the section
+  # still PRINTS the current values, so a removal is visible to a reader even when
+  # nothing fails — visible beats silent, and neither is a false alarm.
+  echo
+  echo "Global settings (${$(_claude_global_settings_file)/#$HOME/~} — clauth rewrites this file):"
+  gsettings="$(_claude_global_settings_file)"
+  if [[ ! -f "$gsettings" ]]; then
+    _doctor_note "no global settings.json — NOT CHECKED"
+  elif ! jq -e . "$gsettings" >/dev/null 2>&1; then
+    _doctor_bad "global settings.json is NOT VALID JSON — Claude Code will ignore it wholesale"
+  else
+    for key in model statusLine.command; do
+      val="$(jq -r --arg k "$key" 'getpath($k | split(".")) // empty' "$gsettings" 2>/dev/null)"
+      _doctor_note "$key = ${val:-<absent>}"
+    done
+    _doctor_note "plugins enabled: $(jq -r '(.enabledPlugins // {}) | length' "$gsettings" 2>/dev/null), hook events: $(jq -r '(.hooks // {}) | length' "$gsettings" 2>/dev/null)"
+    # Accepts a zsh array (the documented form, for ~/.zshrc.local) OR a plain
+    # space-separated scalar, which is all an exported environment variable can
+    # be. Joining then splitting normalises both. Safe here in a way it would NOT
+    # be for DOTFILES_EXPECTED_DIRTY — CLAUDE.md records that word-splitting a
+    # scalar makes a PATH containing a space impossible to express; these are jq
+    # key paths, which cannot contain spaces.
+    local -a req
+    req=( ${=${(j: :)CLAUDE_SETTINGS_REQUIRE}} )
+    if (( ${#req} == 0 )); then
+      _doctor_note "no CLAUDE_SETTINGS_REQUIRE set — nothing is asserted; see the note in claude.sh to arm it"
+    else
+      for key in "${req[@]}"; do
+        [[ -n "$key" ]] || continue
+        val="$(jq -r --arg k "$key" 'getpath($k | split(".")) // empty' "$gsettings" 2>/dev/null)"
+        if [[ -n "$val" ]]; then
+          _doctor_ok "required key '$key' present"
+        else
+          _doctor_bad "required key '$key' is MISSING from the global settings.json"
+          echo "    clauth clears \`env\` and rewrites \`[models]\` on every profile switch."
+          echo "    Restore it, or drop the key from CLAUDE_SETTINGS_REQUIRE if it is no longer wanted."
+        fi
+      done
+    fi
   fi
 
   echo

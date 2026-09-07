@@ -206,6 +206,7 @@ run_doctor() {
     OUT="$(env "${pre[@]}" HOME="$FHOME" \
               CLAUDE_DOCTOR_PROC_ROOT="${PROC_ROOT:-$FHOME/procfix}" \
               CLAUTH_STUB_LOG="$CLAUTH_LOG" CLAUTH_STUB_WHICH="${CLAUTH_STUB_WHICH:-}" \
+              CLAUDE_SETTINGS_REQUIRE="${REQUIRE:-}" \
               "PATH=$p" \
         "$SYSBIN/zsh" -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; claude-doctor $*" 2>&1)"
     RC=$?
@@ -806,6 +807,65 @@ run_doctor --all
 want_out "a non-object mcpOAuth entry is NOT CHECKED" "not an object"
 no_out   "and is not excused as never authorised"     "never authorised in this config dir"
 no_out   "and jq's parser error never reaches the report" "Cannot"
+
+#-----------------------------------------------------------------------------
+section "H. Global settings.json — keys a third party can remove"
+#-----------------------------------------------------------------------------
+# clauth rewrites ~/.claude/settings.json: it clears `env` on switch away and
+# writes the profile's [models] block. On 2026-09-06 that removed
+# `model: opus[1m]` outright and every new session silently defaulted for a day.
+
+mk_settings() {   # $1 = jq filter over a healthy baseline
+    jq -n '{model:"opus[1m]", effortLevel:"high",
+            statusLine:{type:"command", command:"bash /h/statusline.sh"},
+            enabledPlugins:{a:true,b:true}, hooks:{PreToolUse:[],SessionStart:[]}}' \
+      | jq "${1:-.}" > "$FHOME/.claude/settings.json"
+}
+
+# Unarmed is the default and must assert NOTHING. A hardcoded required-key list
+# would be a permanently-red check on every machine that sets none of them.
+new_home h1; write_cred; mk_settings
+run_doctor
+want_out "unarmed prints the current model"      "model = opus[1m]"
+want_out "unarmed says it is asserting nothing"  "nothing is asserted"
+want_rc  "unarmed adds no failure"               0
+
+new_home h2; write_cred; mk_settings 'del(.model)'
+run_doctor
+want_out "an absent model is still VISIBLE unarmed" "model = <absent>"
+want_rc  "but unarmed still does not fail"          0
+
+# Armed is the whole point: this is the state that went unnoticed for a day.
+new_home h3; write_cred; mk_settings 'del(.model)'
+REQUIRE="model" run_doctor
+want_out "armed, a missing required key fails"   "required key 'model' is MISSING"
+want_out "and names clauth as the writer"        "clauth clears"
+want_rc  "armed missing key exits non-zero"      1
+
+new_home h4; write_cred; mk_settings
+REQUIRE="model statusLine.command" run_doctor
+want_out "armed, a present nested key passes"    "required key 'statusLine.command' present"
+want_rc  "armed and satisfied exits 0"           0
+
+# THE ROW THIS SECTION EXISTS FOR. Under `clauth start` the session's
+# settings.json is its own real file; the one clauth REWRITES is always the
+# global. A check written against $CLAUDE_CONFIG_DIR would read the copy, report
+# it healthy, and miss the global losing the key — the exact defect #109 fixed
+# for credentials, in a new place.
+new_home h5; write_cred; mk_settings 'del(.model)'
+mkdir -p "$FHOME/isolated"
+jq -n '{model:"opus[1m]"}' > "$FHOME/isolated/settings.json"
+CFGDIR="$FHOME/isolated" REQUIRE="model" run_doctor
+want_out "reads the GLOBAL settings even from an isolated session" "required key 'model' is MISSING"
+
+new_home h6; write_cred; printf '{"model":' > "$FHOME/.claude/settings.json"
+run_doctor
+want_out "unparseable settings.json is its own state" "NOT VALID JSON"
+
+new_home h7; write_cred
+run_doctor
+want_out "absent settings.json is NOT CHECKED"  "no global settings.json — NOT CHECKED"
+no_out   "and is not reported as satisfied"     "required key"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

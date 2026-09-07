@@ -1568,6 +1568,30 @@ claude-doctor --all        # include the servers that are fine
 claude-doctor --days 30    # widen the MCP window
 ```
 
+**clauth silently removes keys from `~/.claude/settings.json`, and that file is not in this
+repo.** It merges a profile's `[env]` on switch and clears it on switch away (which is why `env`
+is `{}`), and it writes the profile's `[models]` block — on 2026-09-06 that removed
+`model: opus[1m]` outright, so every new session defaulted to a different model for a day before
+anyone noticed. The same file carries the statusLine publisher, the secret-emission guard hook
+and 23 enabled plugins, so a key vanishing from it is not cosmetic.
+
+It is deliberately **not** dotbot-managed: a symlink would make clauth write through it on every
+profile switch, i.e. a permanently dirty tracked file — the churn `DOTFILES_EXPECTED_DIRTY` exists
+to paper over elsewhere. `claude-doctor` detects the damage instead of fighting for ownership of
+the file, the same choice it already makes about the credential. The check reads the **global**
+settings.json, never `$CLAUDE_CONFIG_DIR`'s: `clauth start` gives its runtime its own real
+settings.json, so a check written against the session would read a copy and miss the global losing
+a key — the defect #109 fixed for credentials, one file over.
+
+Silent by default, because a hardcoded list of required keys is a permanently-red check on any
+machine that legitimately sets none of them. Unarmed it still *prints* `model`, `statusLine.command`
+and the plugin/hook counts, so a removal is visible without being an alarm. Arm it in
+`~/.zshrc.local` with the keys you actually care about — jq paths, tested for present-and-non-empty:
+
+```zsh
+CLAUDE_SETTINGS_REQUIRE=( model statusLine.command )
+```
+
 Operational half — the connector cleanup that has to be done at claude.ai, what each finding
 means, and how to revive a dead stdio server: [docs/CLAUDE_ACCOUNT_MCP.md](docs/CLAUDE_ACCOUNT_MCP.md).
 
