@@ -894,7 +894,8 @@ claude-doctor() {
   echo "--- Account dirs ---"
   {
     local adroot="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
-    local ad name store link shared tstate real_n=0 seen=0
+    local ad name store shared tstate real_n=0 seen=0
+    local vfile verdict vdetail vage vline id_a id_s adlink
     local -a shared_missing
 
     if [[ ! -d "$adroot" ]]; then
@@ -917,23 +918,38 @@ claude-doctor() {
         # "no file" and would be reported as "not logged in" — sending the reader
         # to /login instead of at the broken link. CLAUDE.md records this exact
         # trap for the credential check one section up.
+        #
+        # `${x:A}`, NOT `readlink`. CLAUDE.md records readlink as a DEPENDENCY the
+        # state table's from-scratch PATH does not carry, and this section shipped
+        # in #116 using it anyway — so under that PATH readlink produced NOTHING,
+        # every comparison failed, and a perfectly healthy link was reported as
+        # "links to ANOTHER profile's store". Found the moment this section finally
+        # got rows, which it shipped without. `:A` is a zsh modifier: no fork, no
+        # dependency, and it is what the credential check above already uses.
         if [[ -L "$ad/.credentials.json" ]]; then
-          link="$(readlink "$ad/.credentials.json")"
-          if [[ "$link" == "$store" ]]; then
-            if [[ -e "$store" ]]; then
-              _doctor_ok "$name: credential shared with the clauth store"
-            else
-              _doctor_bad "$name: credential link DANGLES — its store is gone"
-              echo "    'clauth login $name' to recreate it."
-            fi
+          if [[ ! -e "$ad/.credentials.json" ]]; then
+            _doctor_bad "$name: credential link DANGLES — its target is gone"
+            echo "    -> ${${ad}/#$HOME/~}/.credentials.json"
+            echo "    'clauth login $name' to recreate it."
+          # `:A` is a MODIFIER on a parameter, not a glob qualifier: written as
+          # `"$x"(:A)` inside [[ ]] it parses fine and resolves nothing, so every
+          # healthy link compared unequal. Bind the paths first.
+          elif adlink="$ad/.credentials.json"; [[ "${adlink:A}" == "${store:A}" ]]; then
+            _doctor_ok "$name: credential shared with the clauth store"
           else
             _doctor_bad "$name: credential links to ANOTHER profile's store"
-            echo "    -> ${link/#$HOME/~}"
+            echo "    -> ${${ad}/#$HOME/~}/.credentials.json"
             echo "    Sessions in this dir bill that account. Re-run the builder to repoint it."
           fi
         elif [[ -f "$ad/.credentials.json" ]]; then
           real_n=$(( real_n + 1 ))
-          if cmp -s "$ad/.credentials.json" "$store"; then
+          # `_claude_cred_id`, not `cmp`: cmp is not on the state table's PATH
+          # either, so it failed silently and every identical pair was reported as
+          # DIFFERING. The id helper is jq+sha256sum, both of which ARE on it, and
+          # it already refuses to hash nothing.
+          id_a="$(_claude_cred_id "$ad/.credentials.json" 2>/dev/null)" || id_a=""
+          id_s="$(_claude_cred_id "$store" 2>/dev/null)" || id_s=""
+          if [[ -n "$id_a" && "$id_a" == "$id_s" ]]; then
             # Identical content: a rotation that has not been reconciled yet, or
             # none since the last one. Harmless until they diverge, so it is a
             # note about pending work, not an alarm.
@@ -948,12 +964,60 @@ claude-doctor() {
             # the same state "Expected after a token refresh". It is still worth
             # naming, because until it IS reconciled clauth is polling with a
             # stale token, which is how an account gets quarantined.
+            #
+            # WHICH ADVICE TO GIVE depends on whether the reconciler will actually
+            # resolve it, and only the reconciler knows: it REFUSES a divergence it
+            # cannot attribute (a login as another account, an unreadable file, a
+            # profile with no anchor), and for those the timer hits the same wall
+            # every two minutes forever. Saying "the timer normally handles it"
+            # there is a checker prescribing something that cannot work — the
+            # failure this whole feature exists to remove. So the reconciler writes
+            # its verdict down and this reads it, rather than re-deriving the rule
+            # and drifting from it.
             _doctor_warn "$name: credential is a real file that DIFFERS from the clauth store"
-            echo "    An ordinary token refresh produces this. Until it is reconciled, clauth"
-            echo "    polls with the stale stored token, which is how an account gets"
-            echo "    quarantined as auth_broken. The 2-minute timer normally handles it; to"
-            echo "    do it now:"
-            echo "      ~/.dotfiles/scripts/claude-account-dirs.sh --reconcile"
+            vfile="$ad/.reconcile-status"; verdict=""; vdetail=""; vage=""
+            if [[ -r "$vfile" ]]; then
+                vline="$(< "$vfile")"
+                verdict="${${(s: :)vline}[2]}"
+                vdetail="${vline#* * }"
+                # `date`, not EPOCHSECONDS: that needs zsh/datetime, which this
+                # file never loads, and the state table builds a PATH from scratch
+                # — so the module would be absent there and the check would go
+                # quiet rather than fail. `date` is already on that PATH.
+                vage=$(( $(date +%s) - ${${(s: :)vline}[1]:-0} ))
+            fi
+
+            if [[ "$verdict" == refused-* ]]; then
+                echo "    The reconciler REFUSED this one ($verdict), so the timer will not fix"
+                echo "    it — it will refuse again on every tick. Until then clauth polls with"
+                echo "    the stale stored token, which is how an account gets quarantined."
+                case "$verdict" in
+                    refused-not-rotation)
+                        echo "    The two credentials differ outside the fields a refresh touches and"
+                        echo "    could not be shown to be the same account — a login as a DIFFERENT"
+                        echo "    account looks exactly like this." ;;
+                    refused-no-anchor)
+                        echo "    clauth has no account_id.json anchor for this profile." ;;
+                    refused-unreadable)
+                        echo "    One of the two files could not be read well enough to decide." ;;
+                    refused-no-store)
+                        echo "    The clauth profile has no stored credential to reconcile against." ;;
+                esac
+                [[ -n "$vdetail" ]] && echo "    Fix: $vdetail"
+            else
+                echo "    An ordinary token refresh produces this. Until it is reconciled, clauth"
+                echo "    polls with the stale stored token, which is how an account gets"
+                echo "    quarantined as auth_broken. The 2-minute timer normally handles it; to"
+                echo "    do it now:"
+                echo "      ~/.dotfiles/scripts/claude-account-dirs.sh --reconcile"
+                # No verdict on record is its own state: it means the reconciler has
+                # not run here since this was introduced, NOT that all is well.
+                [[ -z "$verdict" ]] && \
+                    echo "    (no reconciler verdict on record yet for this account dir)"
+            fi
+            if [[ -n "$verdict" && -n "$vage" ]] && (( vage > 900 )); then
+                echo "    Last reconciler verdict is $(( vage / 60 ))m old — is the timer running?"
+            fi
           fi
         else
           _doctor_bad "$name: no credential in the account dir at all"

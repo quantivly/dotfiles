@@ -387,6 +387,55 @@ cred_relink() {
     ln -s "$store" "$link" || return 1
 }
 
+# Record what the last reconcile DECIDED, so a reader does not have to guess.
+#
+# WHY. claude-doctor could see that a credential had diverged but not whether the
+# reconciler would fix it, so it told the reader "the 2-minute timer normally
+# handles it" -- advice that is right for a rotation and silently WRONG for a
+# refusal, where the timer will hit the same wall every two minutes forever. That
+# is a checker giving instructions that cannot work, which is the class this whole
+# feature exists to remove.
+#
+# The reconciler is the only thing that knows, so it writes the answer down rather
+# than the doctor re-deriving it -- a second implementation of the rule would drift
+# from the first, and this file already records what that costs.
+#
+# One line: "<epoch> <verdict> <detail...>". Never a credential.
+cred_write_verdict() {  # $1 = account dir, $2 = verdict, $3.. = detail
+    local dir="$1" verdict="$2"; shift 2
+    printf '%s %s %s\n' "$(date +%s)" "$verdict" "$*" > "$dir/.reconcile-status" 2>/dev/null || true
+    chmod 600 "$dir/.reconcile-status" 2>/dev/null || true
+}
+
+# Is the account dir PROVABLY the same account as the profile store?
+#
+# clauth's own anchor (account_id.json, a bare JSON string it backfills on login
+# and on every successful adoption) against the oauthAccount.accountUuid Claude
+# Code writes into that dir's .claude.json.
+#
+# A PERMIT, NEVER A VETO, and the asymmetry is the whole safety argument. That
+# .claude.json is seeded once by this script and only corrected when Claude Code
+# rewrites it, so it is STALE on any dir that has not seen a login -- measured
+# 2026-09-08, quantivly-1 and quantivly-2 both still advertised quantivly-3's
+# account. Treating a mismatch as proof of a DIFFERENT account would therefore
+# refuse two healthy profiles' ordinary rotations. Treating a match as proof of
+# the SAME account cannot go wrong in that direction: a stale uuid names some
+# other profile's account, so it fails to match this store's anchor and simply
+# falls through to the shape gate.
+#
+# So: match -> identity proven, adopt even when the shape check would refuse.
+#      anything else -> no opinion, the shape gate decides as before.
+cred_same_account() {  # $1 = account dir, $2 = profile dir
+    local dir="$1" pdir="$2" anchor uuid
+    has_jq || return 1
+    [[ -s "$pdir/account_id.json" && -s "$dir/.claude.json" ]] || return 1
+    anchor="$(jq -e -r 'select(type == "string") | select(. != "")' \
+              "$pdir/account_id.json" 2>/dev/null)" || return 1
+    uuid="$(jq -e -r '.oauthAccount.accountUuid | select(type == "string") | select(. != "")' \
+            "$dir/.claude.json" 2>/dev/null)" || return 1
+    [[ "$anchor" == "$uuid" ]]
+}
+
 # Bring one account dir's credential back to the invariant: a symlink to the
 # profile store, with the LIVE token in the store. Never destroys a credential
 # without keeping a copy, and never restores a superseded one over a live one.
@@ -424,11 +473,13 @@ _reconcile_credential_locked() {
     local side backup
 
     if [[ -L "$S" ]]; then
+        cred_write_verdict "$account_dir" refused-store-symlink "the clauth store credential is itself a symlink"
         warn "$profile: the clauth store credential is itself a symlink — an unexpected"
         warn "        shape, so both files are left exactly as they are."
         return 1
     fi
     if [[ ! -f "$S" ]]; then
+        cred_write_verdict "$account_dir" refused-no-store "clauth login $profile"
         warn "$profile: no credential in the clauth store (${S/#$HOME/\~}) — refusing to"
         warn "        invent one. Run 'clauth login $profile'."
         return 1
@@ -436,11 +487,13 @@ _reconcile_credential_locked() {
 
     # The healthy state, and by far the common one.
     if [[ -L "$A" && "$(readlink "$A")" == "$S" ]]; then
+        cred_write_verdict "$account_dir" linked
         return 0
     fi
 
     if [[ -L "$A" ]]; then
         if cred_relink "$A" "$S"; then
+            cred_write_verdict "$account_dir" linked "repointed from another profile's store"
             warn "$profile: the credential link pointed somewhere other than this profile's"
             warn "        store — repointed. Check which account that session was billing."
             return 0
@@ -456,9 +509,11 @@ _reconcile_credential_locked() {
         # write a fresh, independent login there -- manufacturing exactly the
         # independent holder this design forbids.
         if ! cred_relink "$A" "$S"; then
+            cred_write_verdict "$account_dir" error-no-link "could not create the credential link"
             warn "$profile: could not create the credential link in ${A%/*}"
             return 1
         fi
+        cred_write_verdict "$account_dir" linked
         return 0
     fi
 
@@ -467,9 +522,11 @@ _reconcile_credential_locked() {
     # adopted, or none has happened, so relinking loses nothing.
     if cmp -s "$A" "$S"; then
         cred_relink "$A" "$S" || {
+            cred_write_verdict "$account_dir" error-no-relink "could not relink an identical credential"
             warn "$profile: could not relink an identical credential — left as a real file."
             return 1
         }
+        cred_write_verdict "$account_dir" linked
         return 0
     fi
 
@@ -481,21 +538,38 @@ _reconcile_credential_locked() {
     ra="$(cred_rotation_residual "$A")" || ra=""
     rs_="$(cred_rotation_residual "$S")" || rs_=""
     if [[ -z "$ra" || -z "$rs_" ]]; then
+        cred_write_verdict "$account_dir" refused-unreadable "clauth login $profile"
         warn "$profile: could not read one of the credentials well enough to tell a token"
         warn "        refresh from a different account. Both left untouched."
         return 1
     fi
     if [[ "$ra" != "$rs_" ]]; then
-        warn "$profile: the account dir's credential is NOT a rotation of the stored one —"
-        warn "        it differs outside the fields a refresh touches, which is what a login"
-        warn "        as a DIFFERENT account looks like. Not adopting; both left untouched."
-        warn "        If that was deliberate, capture it with 'clauth login $profile'."
-        return 1
+        # ...unless the two are PROVABLY the same account. A plain re-login of the
+        # same account is not shaped like a rotation -- a fresh /login can fill in
+        # fields an older stored credential left null, and one did here on
+        # 2026-09-08: `personal` went rateLimitTier null -> default_claude_max_20x
+        # and was refused, with the doctor then telling the reader to wait for a
+        # timer that would refuse it again every two minutes. A /login happens
+        # about eight times a month on this machine, so that is real friction for
+        # no safety: identity is a STRONGER answer than shape, not a weaker one.
+        if cred_same_account "$account_dir" "$pdir"; then
+            warn "$profile: the account dir's credential is not shaped like a rotation, but it"
+            warn "        belongs to the SAME account (clauth's anchor matches this dir's"
+            warn "        oauthAccount) — a re-login. Proceeding."
+        else
+            cred_write_verdict "$account_dir" refused-not-rotation "clauth login $profile"
+            warn "$profile: the account dir's credential is NOT a rotation of the stored one —"
+            warn "        it differs outside the fields a refresh touches, which is what a login"
+            warn "        as a DIFFERENT account looks like. Not adopting; both left untouched."
+            warn "        If that was deliberate, capture it with 'clauth login $profile'."
+            return 1
+        fi
     fi
 
     # 2. Upstream's free anchor rule: no identity on record for this profile means
     #    nothing to reason about, so refuse rather than write.
     if [[ ! -s "$pdir/account_id.json" ]]; then
+        cred_write_verdict "$account_dir" refused-no-anchor "clauth login $profile"
         warn "$profile: the clauth profile has no account_id.json anchor — refusing to"
         warn "        write its credential store. 'clauth login $profile' establishes it."
         return 1
@@ -532,6 +606,7 @@ _reconcile_credential_locked() {
             if cmp -s "$merged" "$S"; then
                 # The store already holds the answer; only the link needs fixing.
                 rm -f "$merged"
+                cred_write_verdict "$account_dir" linked
             else
                 backup="$(cred_backup "$S")" || {
                     rm -f "$merged"
@@ -546,9 +621,11 @@ _reconcile_credential_locked() {
                 fi
                 rm -f "$merged"
                 if [[ "$side" == A ]]; then
+                    cred_write_verdict "$account_dir" adopted
                     warn "$profile: adopted the live session's rotated credential into the clauth"
                     warn "        store (superseded store copy kept as ${backup##*/})."
                 else
+                    cred_write_verdict "$account_dir" kept-store
                     warn "$profile: kept the stored credential and merged in the account dir's"
                     warn "        MCP logins (previous store copy kept as ${backup##*/})."
                 fi
@@ -560,6 +637,7 @@ _reconcile_credential_locked() {
             }
             ;;
         *)
+            cred_write_verdict "$account_dir" refused-undecidable "clauth login $profile"
             warn "$profile: the account dir and the clauth store hold DIFFERENT credentials"
             warn "        and neither could be shown to be the live one. Both are left"
             warn "        untouched. 'claude-doctor' explains; 'clauth login $profile' fixes."

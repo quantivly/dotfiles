@@ -130,6 +130,15 @@ as_rotated_real_file() {  # $1 = profile, $2 = expiresAt | stub | bad, $3 = mark
 }
 
 store_of()  { printf '%s\n' "$FHOME/.clauth/profiles/$1/credentials.json"; }
+
+# Stamp an account uuid into an account dir's .claude.json, which is what the
+# identity permit reads. `same` makes it match the profile's clauth anchor.
+set_dir_account() {  # $1 = profile, $2 = same|other
+    local f="$FHOME/.local/state/claude-account-dirs/$1/.claude.json" uuid
+    [[ "$2" == same ]] && uuid="uuid-of-$1" || uuid="uuid-of-somebody-else"
+    local tmp="$f.tmp"
+    jq --arg u "$uuid" '.oauthAccount = {accountUuid: $u}' "$f" > "$tmp" && mv -f "$tmp" "$f"
+}
 backups_of(){ shopt -s nullglob; local g=("$1".superseded-*); shopt -u nullglob; printf '%d\n' "${#g[@]}"; }
 
 run_sut() {
@@ -733,6 +742,127 @@ if command -v flock >/dev/null 2>&1; then
     fi
 else
     ok "(clauth-lock row skipped: no flock)"
+fi
+
+#-----------------------------------------------------------------------------
+section "F4. The identity permit — a PERMIT, never a veto"
+#-----------------------------------------------------------------------------
+# A plain re-login of the SAME account is not shaped like a rotation: a fresh
+# /login can fill in fields an old stored credential left null. `personal` did
+# exactly that on 2026-09-08 (rateLimitTier null -> default_claude_max_20x) and
+# was refused, while the doctor told the reader to wait for a timer that would
+# refuse it again every two minutes.
+#
+# The permit's safety rests entirely on its DIRECTION. .claude.json is seeded once
+# and is stale on any dir that has not seen a login, so a MISMATCH proves nothing
+# and must never refuse; a MATCH is clauth's own anchor agreeing with the account
+# Claude Code recorded, and that does prove sameness.
+
+new_home f21; mk_profile p1
+run_sut p1
+set_dir_account p1 same
+mk_cred "$(store_of p1)" 1000 mine
+as_rotated_real_file p1 other relogin        # non-rotation shape, later expiry
+run_sut p1
+want_out "a proven same-account re-login is allowed through the shape gate" "belongs to the SAME account"
+if grep -q 'CANARY-relogin' "$(store_of p1)" 2>/dev/null; then
+    ok "and the re-login is adopted rather than refused"
+else
+    bad "a same-account re-login was still refused"
+fi
+
+# The direction that carries the safety: no proof of sameness means the shape gate
+# still decides, and a non-rotation is still refused.
+new_home f22; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+mk_cred "$(store_of p1)" 1000 mine
+cp "$(store_of p1)" "$TMPROOT/f22.mine"
+as_rotated_real_file p1 other theirs
+run_sut p1
+want_out "an unproven identity does NOT permit a non-rotation" "NOT a rotation of the stored one"
+if cmp -s "$TMPROOT/f22.mine" "$(store_of p1)"; then
+    ok "and the store is untouched"
+else
+    bad "a non-rotation was adopted without proof of identity"
+fi
+
+# A stale or absent .claude.json must not VETO an ordinary rotation — quantivly-1
+# and quantivly-2 both advertise another profile's account, and their rotations
+# have to keep working.
+new_home f23; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated         # ordinary rotation shape
+run_sut p1
+if grep -q 'CANARY-rotated' "$(store_of p1)" 2>/dev/null; then
+    ok "a mismatched identity does not veto an ordinary rotation"
+else
+    bad "a stale .claude.json blocked a legitimate rotation — the permit became a veto"
+fi
+
+#-----------------------------------------------------------------------------
+section "F5. The verdict file — so the doctor need not re-derive the rule"
+#-----------------------------------------------------------------------------
+verdict_of() { cut -d' ' -f2 "$ACCOUNT_ROOT/$1/.reconcile-status" 2>/dev/null; }
+
+new_home f24; mk_profile p1
+run_sut p1
+if [[ "$(verdict_of p1)" == linked ]]; then
+    ok "a healthy account dir records 'linked'"
+else
+    bad "healthy state recorded '$(verdict_of p1)', expected 'linked'"
+fi
+
+new_home f25; mk_profile p1
+run_sut p1
+set_dir_account p1 same
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+run_sut p1
+if [[ "$(verdict_of p1)" == adopted ]]; then
+    ok "an adopted rotation records 'adopted'"
+else
+    bad "adopt recorded '$(verdict_of p1)', expected 'adopted'"
+fi
+
+new_home f26; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+mk_cred "$(store_of p1)" 1000 mine
+as_rotated_real_file p1 other theirs
+run_sut p1
+if [[ "$(verdict_of p1)" == refused-not-rotation ]]; then
+    ok "a refusal records WHY, so the doctor can give advice that works"
+else
+    bad "refusal recorded '$(verdict_of p1)', expected 'refused-not-rotation'"
+fi
+want_out "and the recorded detail names the remedy" "clauth login p1"
+
+new_home f27; mk_profile p1 noanchor
+run_sut p1
+set_dir_account p1 same 2>/dev/null || true
+mk_cred "$(store_of p1)" 1000 mine
+as_rotated_real_file p1 9999 rotated
+run_sut p1
+if [[ "$(verdict_of p1)" == refused-no-anchor ]]; then
+    ok "a missing anchor is recorded as its own refusal"
+else
+    bad "missing anchor recorded '$(verdict_of p1)', expected 'refused-no-anchor'"
+fi
+
+# The verdict is a state file, not a credential dump.
+new_home f28; mk_profile p1
+run_sut p1
+set_dir_account p1 same
+mk_cred "$(store_of p1)" 1000 storeside
+as_rotated_real_file p1 9999 liveside
+run_sut p1
+if grep -q 'CANARY-' "$ACCOUNT_ROOT/p1/.reconcile-status" 2>/dev/null; then
+    bad "the verdict file contains a credential"
+else
+    ok "the verdict file never contains a credential"
 fi
 
 #-----------------------------------------------------------------------------
