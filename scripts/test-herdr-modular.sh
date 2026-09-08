@@ -830,5 +830,295 @@ rc=0; HERDR_STUB_STATE_FILE="$S" HERDR_STUB_INSTALL_FAILS=1 wire "$H" >/dev/null
 check "...and fails the wirer" "$rc" "1"
 
 echo
+echo "=== DO-564: the unit ExecStart drop-in ==="
+# Before this, --herdr REFUSED to install from anywhere but ~/.dotfiles, because
+# the unit's ExecStart is an absolute %h/.dotfiles/scripts/herdr-server-launch.sh
+# and a foreign checkout linked a unit that failed at start with 203/EXEC. The
+# refusal was correct given the unit; the unit was the problem.
+#
+# HERMETIC. Fake checkouts under $WORK and a fake SYSTEMD_USER_DIR; no systemd
+# manager is touched and this box's live server is never involved. That is not a
+# convenience — a running server keeps its original ExecStart until a restart
+# that ends every agent session, so a live test is impossible and the file-level
+# assertions below are the only ones there can be.
+DROPIN="$DOTFILES/scripts/herdr-unit-dropin.sh"
+[[ -x "$DROPIN" ]] || fatal "not executable: $DROPIN (DO-564 not implemented)"
+
+# A checkout that looks enough like this repo for the script: a launcher, a
+# template, and the unit under systemd/.
+fake_checkout() {
+    local r="$WORK/co.$1"
+    rm -rf "$r"
+    mkdir -p "$r/scripts" "$r/systemd/herdr-server.service.d" "$r/docs"
+    printf '#!/bin/sh\nexit 0\n' >"$r/scripts/herdr-server-launch.sh"
+    chmod +x "$r/scripts/herdr-server-launch.sh"
+    cp "$DOTFILES/systemd/herdr-server.service" "$r/systemd/herdr-server.service"
+    cp "$DOTFILES/systemd/herdr-server.service.d/10-execstart.conf" \
+       "$r/systemd/herdr-server.service.d/10-execstart.conf"
+    # A PASSING reconcile stub, so that when verify-tools.sh is pointed at a HOME
+    # whose unit links into this checkout, the ENABLEMENT section is green and the
+    # ExecStart section is the only thing that can fail. Without it that section
+    # FAILs on its own ("units are linked but the checkout they point into has no
+    # scripts/reconcile-systemd-units.sh"), which set the exit code by itself --
+    # so the row asserting the ExecStart fault reaches the exit code passed with
+    # that assertion REMOVED ENTIRELY. Found by mutation (M11).
+    cat >"$r/scripts/reconcile-systemd-units.sh" <<'RSTUB'
+#!/usr/bin/env bash
+echo "  ✓ stub reconcile: nothing drifted"
+exit 0
+RSTUB
+    chmod +x "$r/scripts/reconcile-systemd-units.sh"
+    printf '%s' "$r"
+}
+# A systemd user dir with the unit linked from checkout $1.
+fake_sysd() {
+    local d="$WORK/sysd.$2"
+    rm -rf "$d"; mkdir -p "$d"
+    ln -sfn "$1/systemd/herdr-server.service" "$d/herdr-server.service"
+    printf '%s' "$d"
+}
+dropin() { SYSTEMD_USER_DIR="$1" HERDR_ROOT="$2" bash "$DROPIN" "${@:3}" 2>&1; }
+
+# A HOME that ALREADY HAS a working ~/.dotfiles — which is the DO-564 audience:
+# the adopter whose own checkout is somewhere else. The distinction is what makes
+# the rows below sharp. With a HOME that has no ~/.dotfiles, the base
+# ExecStart's %h expands to a path that does not exist, so the "is it
+# executable" check fails and every foreign-checkout row passes for the WRONG
+# REASON — it would keep passing with the checkout comparison stubbed out
+# entirely (found by mutation, M5). Here %h resolves to a real executable, so
+# only comparing it against the checkout the unit link points into can catch it.
+OWNHOME="$WORK/ownhome"
+mkdir -p "$OWNHOME/.dotfiles/scripts"
+printf '#!/bin/sh\nexit 0\n' >"$OWNHOME/.dotfiles/scripts/herdr-server-launch.sh"
+chmod +x "$OWNHOME/.dotfiles/scripts/herdr-server-launch.sh"
+
+# --- render: the placeholder is resolved, and nothing is left behind ---------
+CO="$(fake_checkout render)"
+out="$(HERDR_ROOT="$CO" bash "$DROPIN" --print)"
+has   "$out" "ExecStart=\"$CO/scripts/herdr-server-launch.sh\"" "--print pins ExecStart to the checkout, quoted"
+hasnt "$out" "__HERDR_"                                     "--print leaves no placeholder"
+
+# The empty reset before the value. NOT cosmetic: ExecStart is a list, so a
+# drop-in that merely adds one gives the unit two, and systemd then refuses it
+# outright ("Service has more than one ExecStart= setting, which is only allowed
+# for Type=oneshot services"). A drop-in without this line installs perfectly and
+# takes the server down at the next restart.
+# One label on BOTH paths, so the row is greppable whichever way it goes --
+# the convention check/has/hasnt already follow. A row whose failure text differs
+# from its success text cannot be pinned by mutation, which is how this very row
+# survived its first mutant.
+_lbl="the empty ExecStart= reset comes FIRST, so systemd does not see two"
+if [[ "$(grep -n '^ExecStart' <<<"$out" | head -1)" == *":ExecStart=" ]]; then
+    ok "$_lbl"
+else
+    bad "$_lbl — systemd would refuse the unit"
+fi
+
+# --- an unresolved placeholder is a HARD ERROR, never a blank ---------------
+# ExecStart=/scripts/herdr-server-launch.sh is not a degraded result; it is a
+# unit pointing at the filesystem root. Same rule as backup-render.sh.
+BAD="$(fake_checkout badtpl)"
+printf '[Service]\nExecStart=\nExecStart=__HERDR_NOPE__/x\n' \
+    >"$BAD/systemd/herdr-server.service.d/10-execstart.conf"
+rc=0; out="$(HERDR_ROOT="$BAD" bash "$DROPIN" --print 2>&1)" || rc=$?
+check "an unresolved placeholder exits non-zero" "$rc" "1"
+has   "$out" "unresolved placeholder" "...and says so"
+
+# --- a failed render must not damage the destination ------------------------
+# `render > "$DROPIN"` truncates before the renderer's status is known, so a
+# failed render leaves a ZERO-BYTE drop-in — which, being a valid empty drop-in,
+# installs "successfully" and changes nothing, forever.
+SD="$(fake_sysd "$BAD" badtpl)"
+mkdir -p "$SD/herdr-server.service.d"
+printf 'PRE-EXISTING\n' >"$SD/herdr-server.service.d/10-execstart.conf"
+rc=0; dropin "$SD" "$BAD" >/dev/null || rc=$?
+check "a failed render exits non-zero" "$rc" "1"
+check "...and leaves the destination untouched" \
+      "$(cat "$SD/herdr-server.service.d/10-execstart.conf")" "PRE-EXISTING"
+
+# --- --check: nothing linked is a SKIP, not a failure ----------------------
+# The permanently-red-checker rule. A machine with no unit linked has nothing to
+# act on, and a ✗ there is a ✗ nobody can clear.
+SD="$WORK/sysd.empty"; rm -rf "$SD"; mkdir -p "$SD"
+rc=0; out="$(SYSTEMD_USER_DIR="$SD" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "--check with nothing linked exits 0" "$rc" "0"
+has   "$out" "skipped" "...and says skipped"
+
+# --- --check: a foreign checkout with NO drop-in is the DO-564 bug ---------
+# The state that used to ship: unit linked from checkout X, ExecStart still the
+# absolute ~/.dotfiles path. Nothing on the machine reported it and the unit
+# failed at start with 203/EXEC.
+CO="$(fake_checkout foreign)"
+SD="$(fake_sysd "$CO" foreign)"
+rc=0; out="$(SYSTEMD_USER_DIR="$SD" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "--check FAILS a foreign checkout with no drop-in" "$rc" "1"
+has   "$out" "WRONG launcher"                       "...and names the fault"
+has   "$out" "$CO/scripts/herdr-server-launch.sh"   "...and the launcher it should have run"
+has   "$out" "203/EXEC"                             "...and what the silence would have looked like"
+
+# --- ...and rendering the drop-in fixes exactly that ----------------------
+out="$(dropin "$SD" "$CO")"
+has "$out" "ExecStart pinned to $CO" "--install reports the checkout it pinned"
+rc=0; out="$(SYSTEMD_USER_DIR="$SD" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "--check passes after --install" "$rc" "0"
+has   "$out" "$CO/scripts/herdr-server-launch.sh" "...naming the launcher that will run"
+
+# --- --check: a drop-in left behind by a checkout that MOVED --------------
+# The failure mode a copy-based fix would have had permanently, and the reason
+# --check asks about the outcome rather than about the drop-in's existence.
+MOVED="$(fake_checkout moved)"
+SD2="$(fake_sysd "$MOVED" moved)"
+mkdir -p "$SD2/herdr-server.service.d"
+printf '[Service]\nExecStart=\nExecStart=%s/scripts/herdr-server-launch.sh\n' "$CO" \
+    >"$SD2/herdr-server.service.d/10-execstart.conf"
+rc=0; out="$(SYSTEMD_USER_DIR="$SD2" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "--check FAILS a stale drop-in from a moved checkout" "$rc" "1"
+has   "$out" "$MOVED" "...and names the checkout the unit link actually points into"
+
+# --- --check: a checkout reached through a SYMLINK is not drift -----------
+# `want` comes from a physical readlink -f; `bin` comes from the unit text with
+# %h expanded to $HOME, which is logical. On the layout this repo explicitly
+# supports — ~/.dotfiles -> ~/src/dotfiles — a naive string compare calls a
+# CORRECT machine drifted, in every shell, forever. The same trap
+# reconcile-systemd-units.sh carries a paragraph about.
+REAL="$(fake_checkout physical)"
+LINKED="$WORK/co.logical"; rm -f "$LINKED"; ln -sfn "$REAL" "$LINKED"
+SD3="$(fake_sysd "$LINKED" logical)"
+mkdir -p "$SD3/herdr-server.service.d"
+printf '[Service]\nExecStart=\nExecStart=%s/scripts/herdr-server-launch.sh\n' "$LINKED" \
+    >"$SD3/herdr-server.service.d/10-execstart.conf"
+rc=0; out="$(SYSTEMD_USER_DIR="$SD3" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "--check accepts a checkout reached through a symlink" "$rc" "0"
+
+# --- --check: an ExecStart naming a non-executable is not a pass ----------
+CO4="$(fake_checkout noexec)"
+SD4="$(fake_sysd "$CO4" noexec)"
+chmod -x "$CO4/scripts/herdr-server-launch.sh"
+mkdir -p "$SD4/herdr-server.service.d"
+printf '[Service]\nExecStart=\nExecStart=%s/scripts/herdr-server-launch.sh\n' "$CO4" \
+    >"$SD4/herdr-server.service.d/10-execstart.conf"
+rc=0; out="$(SYSTEMD_USER_DIR="$SD4" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "--check FAILS an ExecStart that is not executable" "$rc" "1"
+has   "$out" "not executable" "...and says which"
+
+# --- the reset semantics are implemented, not assumed --------------------
+# A drop-in whose empty reset is missing leaves the base value in force, so the
+# effective ExecStart is the ~/.dotfiles one and --check must still fail. This is
+# the row that proves the merge is really being computed rather than the drop-in
+# simply being read.
+CO5="$(fake_checkout noreset)"
+SD5="$(fake_sysd "$CO5" noreset)"
+mkdir -p "$SD5/herdr-server.service.d"
+printf '[Service]\nExecStart=%s/scripts/herdr-server-launch.sh\n' "$CO5" \
+    >"$SD5/herdr-server.service.d/10-execstart.conf"
+rc=0; out="$(SYSTEMD_USER_DIR="$SD5" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "a drop-in without the reset still resolves to the checkout" "$rc" "0"
+
+# --- verify-tools --herdr carries the section, and it ASSERTS -------------
+H="$(new_home execstart)"
+mkdir -p "$H/.claude/skills/herdr"; printf 'b\n' >"$H/.claude/skills/herdr/SKILL.md"
+good_statusline "$H" >"$H/.claude/settings.json"
+out="$(verify "$H" --herdr)"
+has "$out" "herdr unit ExecStart" "--herdr reports the ExecStart section"
+# With nothing linked it must SKIP -- otherwise every modular adopter is red
+# before they have linked anything, which is the failure this repo has logged
+# three times.
+has "$out" "not linked" "...and skips cleanly when no unit is linked"
+
+# Now put a genuinely broken deployment in that HOME and require a FAIL.
+CO6="$(fake_checkout vt)"
+mkdir -p "$H/.config/systemd/user"
+ln -sfn "$CO6/systemd/herdr-server.service" "$H/.config/systemd/user/herdr-server.service"
+out="$(verify "$H" --herdr)"
+has "$out" "WRONG launcher" "a foreign checkout with no drop-in is a FAIL in verify-tools"
+rc=0; verify "$H" --herdr >/dev/null || rc=$?
+check "...and it carries into the exit code" "$rc" "1"
+
+# --- a checkout path with a SPACE must still produce a working unit ------
+# systemd splits an unquoted value on whitespace, so an unquoted render at
+# ~/my dotfiles gives a unit hunting for a binary called /home/me/my — 203/EXEC,
+# the exact failure DO-564 removes, reintroduced for anyone with a space in
+# their path. The render is quoted unconditionally, and --check has to be able
+# to read its own output back.
+SPCO="$WORK/co with space"
+rm -rf "$SPCO"; mkdir -p "$SPCO/scripts" "$SPCO/systemd/herdr-server.service.d" "$SPCO/docs"
+printf '#!/bin/sh\nexit 0\n' >"$SPCO/scripts/herdr-server-launch.sh"
+chmod +x "$SPCO/scripts/herdr-server-launch.sh"
+cp "$DOTFILES/systemd/herdr-server.service" "$SPCO/systemd/herdr-server.service"
+cp "$DOTFILES/systemd/herdr-server.service.d/10-execstart.conf"    "$SPCO/systemd/herdr-server.service.d/10-execstart.conf"
+SPSD="$WORK/sysd.space"; rm -rf "$SPSD"; mkdir -p "$SPSD"
+ln -sfn "$SPCO/systemd/herdr-server.service" "$SPSD/herdr-server.service"
+out="$(dropin "$SPSD" "$SPCO")"
+has "$out" "ExecStart pinned" "a checkout path with a space installs"
+rc=0; out="$(SYSTEMD_USER_DIR="$SPSD" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "...and --check reads its own quoted output back" "$rc" "0"
+has   "$out" "$SPCO/scripts/herdr-server-launch.sh" "...naming the full path, unsplit"
+# And systemd itself must accept it -- the assertion that actually matters, and
+# the only one available: a running server keeps its old ExecStart until a
+# restart that ends every agent session.
+if command -v systemd-analyze >/dev/null 2>&1; then
+    vout="$(SYSTEMD_UNIT_PATH="$SPSD" systemd-analyze verify --user herdr-server.service 2>&1)"
+    hasnt "$vout" "more than one ExecStart" "systemd sees exactly one ExecStart"
+    hasnt "$vout" "is not executable"       "...and it resolves to the launcher"
+fi
+
+# --- an unexpandable specifier is NOT CHECKED, never a confident FAIL ----
+# %h is the only specifier expanded. A unit somebody legitimately extended with
+# another one must not be reported as running the wrong launcher -- that is a
+# permanently-red assertion, and this repo has logged that class three times.
+SPEC="$(fake_checkout spec)"
+SPECSD="$(fake_sysd "$SPEC" spec)"
+mkdir -p "$SPECSD/herdr-server.service.d"
+printf '[Service]\nExecStart=\nExecStart="%%t/herdr/launch.sh"\n'     >"$SPECSD/herdr-server.service.d/10-execstart.conf"
+rc=0; out="$(SYSTEMD_USER_DIR="$SPECSD" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "an unexpandable specifier exits 0" "$rc" "0"
+has   "$out" "NOT CHECKED" "...reported as NOT CHECKED, not as a wrong launcher"
+hasnt "$out" "WRONG launcher" "...and never claimed to be wrong"
+
+# --- ...but a unit with NO ExecStart at all is still a real failure ------
+NOES="$(fake_checkout noes)"
+NOESSD="$(fake_sysd "$NOES" noes)"
+mkdir -p "$NOESSD/herdr-server.service.d"
+printf '[Service]\nExecStart=\n' >"$NOESSD/herdr-server.service.d/10-execstart.conf"
+rc=0; out="$(SYSTEMD_USER_DIR="$NOESSD" HOME="$OWNHOME" bash "$DROPIN" --check 2>&1)" || rc=$?
+check "a unit with no effective ExecStart FAILS" "$rc" "1"
+has   "$out" "no effective ExecStart" "...and says systemd will refuse to load it"
+
+# --- the drop-in's scope is enforced, not just documented ----------------
+# There is no byte-level drift check against the template (it would report drift
+# on a comment edit, on every machine). The cost is that a NEW setting here
+# would reach new installs and be silently missing from existing ones. So the
+# scope is pinned: exactly the two path-derived settings --check knows about.
+mapfile -t _keys < <(grep -oE '^[A-Za-z][A-Za-z0-9]*='                        "$DOTFILES/systemd/herdr-server.service.d/10-execstart.conf"                      | tr -d '=' | sort -u)
+check "the drop-in template declares only ExecStart and Documentation"       "${_keys[*]}" "Documentation ExecStart"
+if [[ "${_keys[*]}" != "Documentation ExecStart" ]]; then
+    bad "a setting was added to the drop-in template — extend herdr-unit-dropin.sh --check to assert it, or existing installs will silently lack it"
+fi
+
+# --- the refusal and its override are GONE -------------------------------
+# Deleting them is most of the point: the override was the documented escape and
+# the installer then warned that it produced a unit which could not start.
+hasnt "$(cat "$DOTFILES/install")"                 "HERDR_ALLOW_FOREIGN_CHECKOUT" \
+      "install no longer references the foreign-checkout override"
+hasnt "$(cat "$DOTFILES/install")"                 "CANNOT start" \
+      "install no longer warns about a unit that cannot start"
+hasnt "$(cat "$DOTFILES/docs/HERDR_GUIDE.md")"     "the checkout must be at" \
+      "the guide no longer requires ~/.dotfiles"
+# And both install paths must actually render it -- the deletions above are
+# harmless only because something replaced them.
+#
+# Matching the bare FILENAME is not enough, and this row proved it: the step is
+# wrapped in `if [ -f scripts/herdr-unit-dropin.sh ]`, so deleting the
+# invocation and leaving the guard kept the filename in the file and the row
+# green (found by mutation, M9). A filename can appear in a comment or a guard;
+# only the invocation runs anything. The behavioural proof that --herdr really
+# renders it lives in CI's herdr-modular-install job, which installs into a fake
+# HOME and asserts the rendered drop-in pins ExecStart.
+has "$(cat "$DOTFILES/install.conf.yaml")"       "bash scripts/herdr-unit-dropin.sh" \
+    "the full install renders the drop-in"
+has "$(cat "$DOTFILES/install.conf.herdr.yaml")" "bash scripts/herdr-unit-dropin.sh" \
+    "--herdr renders the drop-in"
+
+echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

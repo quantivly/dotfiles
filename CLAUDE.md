@@ -921,9 +921,67 @@ full-install sections, whose mise check would otherwise print a ✗ and offer a 
 prose disclaimer telling you to ignore it is the permanently-red checker this file warns about
 twice, and it had reached the one path written to avoid it.
 
-The unit's `ExecStart` is the absolute `%h/.dotfiles/scripts/herdr-server-launch.sh`, so
-the checkout must be at `~/.dotfiles` whichever path is used; `--herdr` warns when it is not
-rather than linking a unit that fails at boot with a status nobody reads.
+**The checkout may live anywhere, and getting there needed a drop-in rather than a rendered
+unit (DO-564).** The unit's own `ExecStart` is the absolute
+`%h/.dotfiles/scripts/herdr-server-launch.sh`, so `--herdr` used to REFUSE any other
+directory — the cost landing on the adopter we most want to say yes, someone who already has
+their own `~/.dotfiles`, and the team page escalated it to "come and talk to us before you
+move anything". `./install` now renders
+`~/.config/systemd/user/herdr-server.service.d/10-execstart.conf`
+(`scripts/herdr-unit-dropin.sh`, template under `systemd/herdr-server.service.d/`) pinning
+ExecStart to the installing checkout. Six things about it are load-bearing:
+
+- **A rendered COPY of the unit was the obvious move and is wrong.** Two checkers derive
+  "which checkout is live" from the unit being a **symlink** —
+  `reconcile-systemd-units.sh`'s `managed_units()` requires `-L`, and `verify-tools.sh`'s
+  enablement assertion walks `~/.config/systemd/user/*` taking `readlink -f`. A copy makes
+  both find nothing and **skip silently**, in the section whose own comment says a missing
+  checker is not a pass. A copy would also be a copy of *reviewed content* (`OOMPolicy`,
+  `KillMode`, `Restart`, `[Install]`) that stops tracking the repo the moment HEAD moves —
+  the `~/.config/mise/config.toml` failure DO-566 refused to repeat.
+- **What is rendered is machine IDENTITY, not content, which is why DO-566's objection does
+  not transfer.** The drop-in holds one fact — where the checkout is — and HEAD cannot stale
+  it. That is the `__BACKUP_*__` case (DO-459), not the mise case: the mise file is written
+  by a *tool* and diverges from a reviewed source, a rendered path diverges from nothing.
+- **The empty assignment before each value is required, not stylistic.** `ExecStart` is a
+  list, so a drop-in that merely adds one gets you two, and systemd then refuses the unit:
+  *"Service has more than one ExecStart= setting, which is only allowed for Type=oneshot
+  services."* Verified both ways with `systemd-analyze verify --user` under
+  `SYSTEMD_UNIT_PATH`, which needs **no manager and no running server** — the only way to
+  test this at all, since a running server keeps its original `ExecStart` until a restart
+  that would end every agent session.
+- **The check asks the outcome, never the mechanism.** "A drop-in exists" is permanently red
+  on a healthy machine at `~/.dotfiles`, where the unit's own value is already correct.
+  `herdr-unit-dropin.sh --check` asks instead whether the **effective** `ExecStart` — base
+  unit merged with its drop-ins, reset semantics applied — names an executable launcher
+  inside the checkout the unit symlink resolves to. One rule, no severity branch, and it
+  catches both real states: a foreign checkout nobody rendered for, and a drop-in left
+  behind by a checkout that has since moved. Both sides are canonicalised before comparing,
+  because `want` comes from a physical `readlink -f` and `bin` from `%h` expanded to `$HOME`
+  — on the supported `~/.dotfiles -> ~/src/dotfiles` layout a naive compare reports drift on
+  a correct machine forever.
+- **The rendered value is QUOTED, and a local review pass is what caught why.** systemd splits
+  an unquoted setting on whitespace, so a checkout at `~/my dotfiles` rendered
+  `ExecStart=/home/me/my dotfiles/scripts/…` and systemd went hunting for a binary called
+  `/home/me/my` — **203/EXEC, the exact failure this change removes, reintroduced for anyone
+  with a space in their path.** Quoting unconditionally rather than only-when-needed is
+  deliberate: a conditional puts the space case on a branch that never runs on our machines,
+  and this repo has already shipped a row that could not reach the branch it named. The
+  parser side had to learn quoting too, or `--check` could not read its own output back.
+- **Only `%h` is expanded, and anything else is NOT CHECKED rather than guessed.** An earlier
+  version also mapped `%%` → `%` and did it in the wrong order, so `%%h` — a literal `%h` —
+  became `%$HOME`: dead code that was also wrong. A value carrying an unexpanded specifier is
+  declined, because comparing it would report "wrong launcher" about a unit somebody
+  legitimately extended, i.e. a permanently-red assertion. "No `ExecStart` at all" stays a
+  hard FAIL, so the two empties are kept apart — an empty answer is never agreement.
+
+**A mutation that no longer APPLIES reads exactly like a surviving mutant, and that cost two
+full sweeps here.** `str.replace` on a pattern that stopped matching is a silent no-op, so
+after the drop-in template was reworded the row-pinning mutant "survived" twice while
+changing nothing. The mutation harness must diff the mutated tree against the original and
+treat "nothing changed" as a harness error, never as a result — the same rule this file
+already states for rows ("a row that cannot reach the branch it names is unfailable"), one
+level up. Dry-run every mutation for applicability before paying for the suite runs.
 
 **The governing fact: every layer of this stack fails silently.** A 2026-08-30 walkthrough found
 five separately configured features completely dead — a keybinding, a prefix fallback, two

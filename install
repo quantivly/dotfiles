@@ -24,34 +24,16 @@ for _a in "$@"; do
     esac
 done
 set -- ${_args+"${_args[@]}"}
+# The checkout may live ANYWHERE (DO-564). This used to refuse any directory but
+# ~/.dotfiles, because the unit's ExecStart is an absolute
+# %h/.dotfiles/scripts/herdr-server-launch.sh and installing elsewhere linked a
+# unit that failed at start with 203/EXEC. The refusal was correct given the
+# unit; the unit was the problem. install.conf.herdr.yaml now renders a drop-in
+# that pins ExecStart to this checkout, and scripts/verify-tools.sh asserts the
+# result, so the cost no longer lands on the adopter who already has their own
+# ~/.dotfiles — the one we most want to say yes.
 if (( HERDR_ONLY )); then
     CONFIG="install.conf.herdr.yaml"
-
-    # The unit's ExecStart is the ABSOLUTE %h/.dotfiles/scripts/herdr-server-launch.sh.
-    # Linked from any other checkout it is a unit that fails at start with 203/EXEC —
-    # a status nobody reads, which is the failure mode this whole setup is written
-    # against. An earlier version of this printed a warning AFTER dotbot had already
-    # created the link and exited 0; the warning then scrolled away behind the
-    # dependency report and the next-steps block, so it warned nobody. Refuse here,
-    # before anything is linked, or the refusal is theatre.
-    if [[ "${BASEDIR}" != "${HOME}/.dotfiles" && -z "${HERDR_ALLOW_FOREIGN_CHECKOUT:-}" ]]; then
-        cat >&2 <<EOF
-✗ Refusing --herdr from ${BASEDIR}.
-
-  systemd/herdr-server.service runs ${HOME}/.dotfiles/scripts/herdr-server-launch.sh,
-  an absolute path baked into the unit. Installed from here, that file does not
-  exist and the unit fails at start with 203/EXEC — reported nowhere you will look.
-
-  Clone to ~/.dotfiles instead:
-    git clone https://github.com/quantivly/dotfiles.git ~/.dotfiles
-    cd ~/.dotfiles && ./install --herdr
-
-  To link everything EXCEPT a working unit anyway (macOS has no systemd, and a
-  sandbox/CI run does not need one):
-    HERDR_ALLOW_FOREIGN_CHECKOUT=1 ./install --herdr
-EOF
-        exit 1
-    fi
 fi
 
 
@@ -98,17 +80,6 @@ git submodule update --init --recursive "${DOTBOT_DIR}"
 if (( HERDR_ONLY )); then
     echo ""
     echo "==> herdr-only install complete."
-
-    # Only reachable via HERDR_ALLOW_FOREIGN_CHECKOUT — the gate above exits
-    # otherwise. Restated here because the override is precisely the case where
-    # the unit is knowingly broken, and step 3 below still tells you to enable it.
-    launcher="${HOME}/.dotfiles/scripts/herdr-server-launch.sh"
-    if [[ ! -x "$launcher" ]]; then
-        echo ""
-        echo "    ⚠ HERDR_ALLOW_FOREIGN_CHECKOUT is set and ${launcher} does not exist."
-        echo "      The unit was linked but CANNOT start. Skip step 3's systemctl lines,"
-        echo "      or edit ExecStart in ~/.config/systemd/user/herdr-server.service."
-    fi
 
     # NOT `|| true`: herdr, jq, git, zsh and python3 are REQUIRED, and swallowing
     # that status made `--herdr` exit 0 on a machine where the next steps cannot

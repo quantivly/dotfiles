@@ -269,8 +269,12 @@ Two differences that matter if you take the modular path:
   provide. `scripts/herdr-deps-check.sh` says what is missing, what each one costs, and —
   if you have mise — the exact `mise use -g` line at the versions pinned here.
 
-Either way the checkout must be at `~/.dotfiles`: the unit's `ExecStart` is the absolute
-`%h/.dotfiles/scripts/herdr-server-launch.sh`.
+The checkout can live anywhere (DO-564). The unit's own `ExecStart` is the absolute
+`%h/.dotfiles/scripts/herdr-server-launch.sh`, so `./install` renders
+`~/.config/systemd/user/herdr-server.service.d/10-execstart.conf` pinning it to whichever
+checkout installed it. The unit itself stays a symlink — `scripts/verify-tools.sh --herdr`
+asserts that the launcher which will actually run is the one in that checkout, and says so
+if you ever move it without re-running `./install`.
 
 ```bash
 # 0. Prerequisites the earlier version of this list left implicit. Each one strands a step below.
@@ -396,8 +400,8 @@ git -C ~/.dotfiles remote add origin git@github.com:<you>/dotfiles.git
 git -C ~/.dotfiles push -u origin main
 ```
 
-The checkout still has to live at `~/.dotfiles` — the unit's `ExecStart` is the absolute
-`%h/.dotfiles/scripts/herdr-server-launch.sh`, and forking changes nothing about that.
+Your fork can live wherever you keep it; `./install` pins the unit's `ExecStart` to that
+checkout (DO-564). Re-run `./install --herdr` if you ever move it.
 
 Then an update is a rebase, not a pull:
 

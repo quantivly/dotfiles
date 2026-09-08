@@ -256,9 +256,10 @@ jobs:
         run: |
           set -euo pipefail
           FAKE="$(mktemp -d)"
-          # HERDR_ALLOW_FOREIGN_CHECKOUT because the runner's checkout is not
-          # ~/.dotfiles and the unit's ExecStart is an absolute path. The refusal
-          # that override bypasses is asserted as its own step below.
+          # No HERDR_ALLOW_FOREIGN_CHECKOUT any more (DO-564): the runner's
+          # checkout is under /home/runner/work, which is now a supported place to
+          # install from, and this step is the proof. It used to need that override
+          # because the unit's ExecStart was an absolute ~/.dotfiles path.
           # --herdr now exits with the dependency status, and a runner has no
           # herdr binary, so a bare call would take this step down under `-e`
           # before any link was inspected. Capture it: the LINKS are what this
@@ -266,7 +267,6 @@ jobs:
           rc=0
           HOME="$FAKE" \
           DOTFILES_ALLOW_WORKTREE_INSTALL=1 \
-          HERDR_ALLOW_FOREIGN_CHECKOUT=1 \
             ./install --herdr >/tmp/herdr-install.out 2>&1 || rc=$?
           cat /tmp/herdr-install.out
           # Exactly 1: herdr is the only required dependency absent here (the
@@ -333,18 +333,65 @@ jobs:
             || { echo "::error::install points at HERDR_GUIDE section '$sec', which does not exist"; exit 1; }
           echo "update path: fork + upstream named, pointing at a section that exists."
 
-      - name: --herdr refuses a checkout that is not ~/.dotfiles
+      # DO-564. The inverse of the step this replaces, which asserted that
+      # --herdr REFUSED any checkout but ~/.dotfiles. A runner is a foreign
+      # checkout, so this is the real thing rather than a simulation of it.
+      - name: --herdr installs from a foreign checkout and pins ExecStart to it
         run: |
           set -uo pipefail
           FAKE="$(mktemp -d)"
           rc=0
           HOME="$FAKE" DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install --herdr >/tmp/out 2>&1 || rc=$?
           cat /tmp/out
-          [[ $rc -ne 0 ]] || { echo "::error::expected refusal, got exit 0"; exit 1; }
-          # The point of refusing BEFORE dotbot: nothing may be linked.
-          n=$(find "$FAKE" -type l | wc -l)
-          [[ "$n" -eq 0 ]] || { echo "::error::refused but linked $n file(s)"; exit 1; }
-          echo "refused with exit $rc and linked nothing."
+          # 1 = "no herdr binary", the same dependency status the step above
+          # asserts. Anything else means the install itself failed.
+          [[ $rc -eq 1 ]] || { echo "::error::expected exit 1 (no herdr), got $rc"; exit 1; }
+          # The DELETED message, verbatim -- not a loose 'refus' match. The
+          # next-steps block legitimately contains the word ("It refuses to touch
+          # a statusLine that belongs to something else"), so the loose form
+          # failed this step against a perfectly good install.
+          grep -qF 'Refusing --herdr from' /tmp/out \
+            && { echo "::error::--herdr still refuses a foreign checkout"; exit 1; }
+
+          # The drop-in must exist and name THIS checkout's launcher. Asserting it
+          # merely exists is not enough: the whole defect being fixed is an
+          # ExecStart pointing at a launcher that is not there.
+          D="$FAKE/.config/systemd/user/herdr-server.service.d/10-execstart.conf"
+          [[ -f "$D" ]] || { echo "::error::no ExecStart drop-in rendered"; exit 1; }
+          cat "$D"
+          # Quoted: systemd splits an unquoted value on whitespace, so a
+          # checkout path with a space would otherwise name a binary that is not
+          # there -- the very 203/EXEC this PR removes.
+          want="$PWD/scripts/herdr-server-launch.sh"
+          grep -qxF "ExecStart=\"$want\"" "$D" \
+            || { echo "::error::drop-in does not pin ExecStart to $want"; exit 1; }
+          # The empty reset must precede it, or systemd refuses the unit outright
+          # with "Service has more than one ExecStart=".
+          grep -qxF 'ExecStart=' "$D" \
+            || { echo "::error::drop-in lacks the empty ExecStart= reset"; exit 1; }
+          # No placeholder may survive: ExecStart=/scripts/... is not a degraded
+          # result, it is a unit pointing at the filesystem root.
+          grep -q '__HERDR_' "$D" \
+            && { echo "::error::unresolved placeholder in the drop-in"; exit 1; }
+
+          # And the merged unit must actually load. systemd-analyze verify needs
+          # no manager and no running server, which is the only way to test this:
+          # a running server keeps its old ExecStart until a restart that would
+          # end every agent session.
+          if command -v systemd-analyze >/dev/null 2>&1; then
+            out="$(SYSTEMD_UNIT_PATH="$FAKE/.config/systemd/user" \
+                   systemd-analyze verify --user herdr-server.service 2>&1 || true)"
+            echo "$out"
+            grep -qi 'more than one ExecStart' <<<"$out" \
+              && { echo "::error::merged unit has two ExecStart settings"; exit 1; }
+            grep -qi 'not executable' <<<"$out" \
+              && { echo "::error::merged unit ExecStart is not executable"; exit 1; }
+          fi
+
+          # The outcome assertion the adopter actually runs.
+          HOME="$FAKE" ./scripts/herdr-unit-dropin.sh --check \
+            || { echo "::error::--check rejects the install it just performed"; exit 1; }
+          echo "installed from a foreign checkout; ExecStart pinned and merged unit valid."
 
       # Both directions. A runner has no herdr, so the bare script correctly
       # exits 1 here -- asserting "it runs cleanly" would have been asserting

@@ -60,14 +60,27 @@
     ~/.claude/hooks/session-statusline.sh: claude/hooks/session-statusline.sh
 
     # The server as a declared service, run from a clean environment rather than
-    # inheriting whichever shell last started it. ExecStart is
-    # %h/.dotfiles/scripts/herdr-server-launch.sh, so this unit only works if the
-    # checkout is at ~/.dotfiles — `./install --herdr` refuses otherwise rather
-    # than linking a unit whose ExecStart does not exist.
+    # inheriting whichever shell last started it. The unit's own ExecStart is
+    # %h/.dotfiles/scripts/herdr-server-launch.sh, correct only at the
+    # conventional location; the shell step below renders a drop-in that pins it
+    # to THIS checkout, which is what lets --herdr install from anywhere (DO-564).
+    # Kept a LINK and not a rendered copy on purpose: reconcile-systemd-units.sh
+    # and verify-tools.sh both derive which checkout is live from this symlink.
     ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
 
 - shell:
     - [git submodule update --init --recursive dotbot, Installing dotbot]
+    - |
+      # DO-564. Pin the herdr unit's ExecStart to THIS checkout — this is what
+      # lets --herdr install from anywhere. The unit is LINKED, not copied, so
+      # its baked-in %h/.dotfiles/... ExecStart is right in exactly one place;
+      # the rendered drop-in makes it right here. Before the reconcile below,
+      # whose daemon-reload is what makes systemd read it. Not fatal: the links
+      # are made and still correct, an abort would take the next-steps block with
+      # it, and verify-tools.sh --herdr asserts the outcome.
+      if [ -f scripts/herdr-unit-dropin.sh ]; then
+        bash scripts/herdr-unit-dropin.sh || true
+      fi
     - |
       # A LINKED unit is not a RECONCILED one — see install.conf.yaml for the
       # full reasoning. Gated the same way: no-op without a user manager, and it

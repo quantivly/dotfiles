@@ -12,7 +12,7 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 #
-# EXIT CODE: non-zero if and only if one of the three ASSERTION sections FAILs:
+# EXIT CODE: non-zero if and only if one of the four ASSERTION sections FAILs:
 # "herdr server environment hygiene" — forbidden variables in the running
 # server's environment, a teammux shim dir on its PATH, or session variables the
 # session provides that the server does not have — or "systemd user unit
@@ -26,7 +26,12 @@
 # before DO-563; plus herdr's own Claude integration, which the shipped
 # config.toml depends on (`resume_agents_on_restore`) and which NO install path
 # installed and nothing checked at all, until adoption feedback surfaced it on
-# 2026-09-04. Everything else stays informational and exits
+# 2026-09-04. The FOURTH is "herdr unit ExecStart", added by DO-564: the unit's
+# ExecStart is absolute, so a checkout anywhere but ~/.dotfiles needs the drop-in
+# ./install renders, and without it the unit fails at start with 203/EXEC. It
+# cannot be caught live — a running server keeps its old ExecStart until a
+# restart that ends every agent session — so it is asserted from the files.
+# Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
 # SKIPPED because no server is running.
@@ -68,12 +73,14 @@ case "$#:${1:-}" in
         cat <<'USAGE'
 Usage: verify-tools.sh [--herdr]
   (no args)  full report: every tool this repo declares, plus the herdr checks
-  --herdr    ONLY the herdr checks -- server env, unit enablement, plugin deps
-             under the server PATH, and Claude Code wiring. For a machine that
-             ran `./install --herdr` and linked five files, not eighteen.
+  --herdr    ONLY the herdr checks -- server env, unit enablement, unit
+             ExecStart, plugin deps under the server PATH, and Claude Code
+             wiring. For a machine that ran `./install --herdr` and linked five
+             files, not eighteen.
 
-EXIT: non-zero if a herdr assertion FAILs (server env, unit enablement, Claude
-Code wiring). Missing optional tools and mise drift stay informational.
+EXIT: non-zero if a herdr assertion FAILs (server env, unit enablement, unit
+ExecStart, Claude Code wiring). Missing optional tools and mise drift stay
+informational.
 USAGE
         exit 0 ;;
     *)
@@ -523,6 +530,34 @@ else
     # unanswerable question resolving to the answer it would have had if
     # everything were fine, which is the failure mode this whole file is about.
     echo -e "${RED}✗ FAIL:${NC} $enable_root/scripts/reconcile-systemd-units.sh missing — enablement UNCHECKED"
+    herdr_hygiene_failed=1
+fi
+
+echo ""
+echo -e "${BLUE}=== herdr unit ExecStart vs the checkout the unit link points into ===${NC}"
+# Also an ASSERTION (see EXIT CODE in the header). DO-564: the unit's own
+# ExecStart is an absolute %h/.dotfiles/scripts/herdr-server-launch.sh, so it is
+# the right answer in exactly one location. `./install` renders a drop-in pinning
+# it to the installing checkout — and a drop-in that was never rendered, or was
+# rendered by a checkout that has since moved, leaves a unit that fails at start
+# with 203/EXEC. systemd reports that where nobody looks, and it cannot be caught
+# by a live test either, because a running server keeps its original ExecStart
+# until something restarts it — which ends every agent session on the machine.
+# So this is checked from the FILES, and the question asked is the outcome ("the
+# launcher that will run is the one in the checkout systemd is pointed at"),
+# never the mechanism ("a drop-in exists") — the latter is red forever on a
+# perfectly healthy machine at ~/.dotfiles.
+#
+# Resolved from the links systemd actually holds, like the section above, so a
+# fake HOME has nothing to resolve and the row is hermetic.
+if [[ -x "$DOTFILES_ROOT/scripts/herdr-unit-dropin.sh" ]]; then
+    if ! "$DOTFILES_ROOT/scripts/herdr-unit-dropin.sh" --check; then
+        herdr_hygiene_failed=1
+    fi
+else
+    # A FAIL, not a note: this is one of the assertions the exit code is built
+    # on, and "the checker is missing" is not a pass.
+    echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/herdr-unit-dropin.sh missing — ExecStart UNCHECKED"
     herdr_hygiene_failed=1
 fi
 
