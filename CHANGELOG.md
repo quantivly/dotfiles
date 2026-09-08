@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`dotfiles-doctor` names a `safe.directory`-polluted gitconfig, and says which entries are
+  dead (DO-589).** `~/.gitconfig` is a symlink into the checkout and `git config --global`
+  writes through it, so a `safe.directory` entry added by anything lands in a tracked file in
+  a public repo — seven did in five days, each an absolute path carrying an agent session
+  UUID, and no agent typed one: auto-conf's `configure.py` adds one for every workspace it
+  builds, and its dedup does not understand the `~/*` glob that already covered them. The
+  doctor now reads the tracked file with `--no-includes` (the entries *belong* in the included
+  `~/.gitconfig.local`, so following it would call the right place wrong), labels each entry
+  `gone` / `same owner` (measured with the list reset, not inferred) / `other owner` /
+  `not a repo` / `pattern`, tells committed from uncommitted, and turns the generic
+  `⚠ M gitconfig` into a pointer only when the entries are the whole diff. A `PreToolUse` hook
+  on the `git config` text was considered and dropped: it would have matched none of the
+  seven, because the write happened inside a subprocess. 26 rows in
+  `scripts/test-dotfiles-guard.sh`, 18 mutants, all killed; `other owner` is reached without
+  root via `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`. The `gitconfig` comment now carries the right
+  calls. The cause itself is upstream, in auto-conf.
+
 - **`gh-doctor`: which GitHub account is `gh` *actually* using here?**
   `gh` keys its tokens in the system keyring by **host**, not by config dir, so
   `GH_CONFIG_DIR` isolates `hosts.yml` and nothing else: three config dirs declaring

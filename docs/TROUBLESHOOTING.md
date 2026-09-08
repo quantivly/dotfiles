@@ -100,6 +100,24 @@ API call comes back as that user is a separate question, and on a multi-account
 machine the two routinely disagree — see [GitHub CLI multi-account
 switching](#github-cli-multi-account-switching) below.
 
+## `gitconfig` in `~/.dotfiles` keeps showing up modified with a `[safe]` block
+
+`~/.gitconfig` is a symlink into the checkout and `git config --global` writes through it,
+so a `safe.directory` entry added by **any** git-using tool lands in the tracked file.
+auto-conf's `configure.py` does this for every workspace it builds; agent sessions that run
+it leave absolute scratchpad paths behind, and the paths usually outlive the directories.
+
+```bash
+dotfiles-doctor                        # names each entry: gone / same owner / other owner / pattern
+git -C ~/.dotfiles restore gitconfig   # clears the uncommitted ones — nothing is lost if none is 'other owner'
+git config --file ~/.gitconfig.local --add safe.directory <path>   # where a NEEDED entry goes
+```
+
+`~/.gitconfig.local` on a dotfiles machine typically already carries `safe.directory = ~/*`,
+which git (≥ 2.46) reads as "every repository under HOME" — so an entry naming a scratchpad
+path under your home was redundant before it was written. Details and the upstream fix that
+would remove the cause: CLAUDE.md, "`safe.directory` in the tracked gitconfig".
+
 ## Git identity & SSH key routing (work vs personal)
 
 On a dual-identity machine, the work profile (`user.email`, `user.signingkey`, **and** the SSH key used for fetch/push) is selected by the repo's **remote org**, not by where it sits on disk. `~/.gitconfig.local` includes `~/.gitconfig-work` whenever any remote points at the quantivly org, via `includeIf "hasconfig:remote.*.url:…"` (requires **git ≥ 2.36**). This is path-independent, so it works in herdr worktrees under `~/.herdr/worktrees/`, clones under `~/Projects/`, `/tmp`, etc. `~/.gitconfig-work` org-scopes the transport rewrite (`url."git@github-work:quantivly/".insteadOf`) so quantivly remotes use the work key while personal remotes stay on the personal key.

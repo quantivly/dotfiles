@@ -316,7 +316,7 @@ Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 (scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
 `DOTFILES_GROUP_FILE`.
 
-State table: `scripts/test-dotfiles-guard.sh` (224 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (251 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
@@ -328,6 +328,82 @@ helpers that `dotfiles-doctor` and `backup-doctor` share — including the "decl
 counters `local`" convention, asserted over every function that calls `_doctor_summary`
 rather than a fixed list, because a doctor that forgets it silently restores the globals
 and inherits the previous run's exit code.
+
+### `safe.directory` in the tracked gitconfig (DO-589)
+
+`~/.gitconfig` is a symlink into this checkout and `git config --global` writes **through**
+the link, so a `safe.directory` entry added by anything lands in a tracked file in a public
+repository. Seven did between 2026-09-03 and 09-07, each an absolute `/home/<user>/…` path
+carrying an agent session UUID — and **no agent typed one**: the transcripts of both
+sessions, subagents included, contain no `git config` call. The writer was auto-conf's
+`configure.py`. `ConfigModuleBuilder.ensure_config_is_initialized` runs
+`git config --global --add safe.directory <output_dir>` for every workspace it builds
+(since 2022-08-08, for a "dubious ownership" error on servers where git runs as a different
+user than the workspace owner), guarded only by a dedup that recognises the literal `*` or
+the exact path. One session ran it as `poetry run python configure.py`; the other imported
+`ConfigBuilder` under a `subprocess.run` shim that let only `git` through. auto-conf's test
+suite has known for a while — its `isolate_git_config` fixture points `GIT_CONFIG_GLOBAL` at a
+throwaway file and its docstring names "a symlink into tracked dotfiles" — but the
+production path has no such containment.
+
+Three findings, each of which decided something:
+
+- **Every entry protected against nothing.** The directories were owned by the user running
+  git — measured with `-c safe.directory=`, which resets the list, not inferred from `stat` —
+  and `~/.gitconfig.local` already carried `safe.directory = ~/*`. git honours the trailing
+  `/*` as "every repository below" (verified on 2.53 under `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`),
+  so every scratchpad was trusted before configure.py looked; its dedup does not understand
+  that glob. A dead entry never fires and never errors, so nothing would ever prompt its
+  removal — both of the second batch outlived their directories by a day.
+- **A `PreToolUse` hook on `git config --global safe.directory` would have matched none of
+  the seven.** The command text was `poetry run python ./configure.py …`; the write happened
+  inside a subprocess. A third deny hook that misses the whole observed cause is cost
+  without cover, so there is none.
+- **The fix that removes the cause is upstream, in auto-conf**: add the entry only when a
+  probe with the list reset actually fails with "dubious ownership", or contain the write
+  with `GIT_CONFIG_GLOBAL` the way its tests already do. Until then, expect a dirty
+  `gitconfig` after any configure.py run on a dev box.
+
+What this repo does: `dotfiles-doctor` names the state. Its "safe.directory in the tracked
+gitconfig" section reads `gitconfig` with `--no-includes` — the file includes
+`~/.gitconfig.local`, which is where entries *belong*, so following the include would report
+the correct state as the fault — lists every entry as `gone` (path no longer exists),
+`same owner` (git works there without it; measured), `other owner` (git refuses without it,
+so that one belongs in `~/.gitconfig.local`), `not a repo` or `pattern`, tells committed from
+uncommitted (`git restore` for one, a PR for the other), and turns the generic
+`⚠ M gitconfig` into a pointer when the entries are the whole diff — and only then; any other
+edit keeps its warning. A file git cannot parse is `UNKNOWN`, never a tick.
+
+The right calls, for a human or an agent that does need one:
+
+```bash
+git -c safe.directory=<path> <command>                            # one call; nothing persists
+git config --file ~/.gitconfig.local --add safe.directory <path>  # persist, where the include looks
+GIT_CONFIG_GLOBAL=<shim> <tool>                                   # a tool that writes global config itself
+git -C ~/.dotfiles restore gitconfig                              # clear what a tool left
+```
+
+The shim is a one-line file, `[include] path = ~/.gitconfig`: reads are unchanged — nested
+includes are followed, so `~/.gitconfig.local` is reached — and every `--global` write the
+tool makes lands in the shim instead. Measured: the alias, the identity and the safe list
+all resolved through it, and the tracked file gained nothing. Making that permanent in the
+shell layer (option 3 in DO-589) is deliberately *not* done here: it reaches only processes
+that inherit the interactive shell, it also redirects the writes people make on purpose,
+and it is a larger decision than this issue's.
+
+Rows: `scripts/test-dotfiles-guard.sh`, "safe.directory in the tracked gitconfig" — each
+state above, the generic-warning downgrade and its limit, the include not being followed,
+committed vs uncommitted, and unreadable-is-UNKNOWN. Two of them needed a way in:
+
+- **`other owner` needs no root.** `GIT_TEST_ASSUME_DIFFERENT_OWNER=1` makes git treat every
+  repository as somebody else's; a `*` in the fixture's `~/.gitconfig.local` keeps the
+  doctor's own git calls alive while the per-entry probe, which resets the list, still sees
+  the refusal. The same fixture without the variable must read `same owner`, or the row
+  proves only that the variable works.
+- **`UNKNOWN` is reachable only while `~/.gitconfig` points elsewhere.** Linked, a malformed
+  tracked gitconfig kills every git call and the doctor stops at its health probe, which is
+  the right answer there — so the row re-points the fake `~/.gitconfig` first, and a row
+  written without that step would have passed for the wrong reason.
 
 ### Configuration Loading Order
 

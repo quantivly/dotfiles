@@ -1376,6 +1376,119 @@ dotfiles-doctor() {
     fi
   fi
 
+  # safe.directory in the TRACKED gitconfig. ~/.gitconfig is a symlink into this
+  # checkout and `git config --global` writes THROUGH the link, so an entry that
+  # any git-using tool adds lands in a tracked file in a public repository — in
+  # the observed case an absolute /home/<user>/… path carrying an agent session
+  # UUID. Seven arrived between 2026-09-03 and 09-07 and nobody typed one:
+  # auto-conf's configure.py (ConfigModuleBuilder.ensure_config_is_initialized)
+  # runs `git config --global --add safe.directory <output_dir>` for every
+  # workspace it builds, guarded only by a dedup that knows the literal `*` and
+  # the exact path. On this machine they protected against nothing — same owner,
+  # and ~/.gitconfig.local already carried `safe.directory = ~/*` — and a dead
+  # entry never fires and never errors, so nothing else would ever name them.
+  #
+  # Two things the generic "uncommitted changes" line cannot say: WHAT the edit
+  # is, so the reader knows `git restore gitconfig` loses nothing, and per entry
+  # whether git ever needed it. Each path is probed with the list reset
+  # (`-c safe.directory=`), so "same owner" is measured rather than inferred.
+  # `--no-includes` is spelled out even though --file defaults to it: the tracked
+  # file includes ~/.gitconfig.local, which is where these entries BELONG, and
+  # following the include would report the correct state as the fault.
+  echo "safe.directory in the tracked gitconfig:"
+  local gc="$root/gitconfig" gc_only_pollution=0
+  local -a sd_entries=() sd_head=()
+  local sd_out sd_rc sd_n sd_word sd_path sd_abs sd_label sd_suffix sd_probe sd_prc
+  local sd_committed=0 sd_uncommitted=0 sd_other=0 sd_head_known=0
+  local gc_diff gc_line gc_body
+  if [[ ! -e "$gc" ]]; then
+    _doctor_note "no gitconfig in $root — nothing to check"
+  else
+    sd_out="$(git config --file "$gc" --no-includes --get-all safe.directory 2>/dev/null)"; sd_rc=$?
+    if (( sd_rc == 1 )); then
+      _doctor_ok "none — machine-specific entries belong in ~/.gitconfig.local"
+    elif (( sd_rc != 0 )); then
+      # Status decides, never emptiness: a file git cannot parse also yields no
+      # entries, and "could not read it" must not print as "nothing there".
+      _doctor_bad "could not read $gc (git config exit $sd_rc) — safe.directory state UNKNOWN"
+    else
+      for l in "${(f)sd_out}"; do [[ -n "$l" ]] && sd_entries+=("$l"); done
+      # Which of them HEAD already has: those need a PR, not a restore. cat-file
+      # first, because `config --blob` exits 1 both for "no such key" and for
+      # "no such blob", and the two want different sentences.
+      if git -C "$root" cat-file -e HEAD:gitconfig 2>/dev/null; then
+        sd_head_known=1
+        sd_out="$(git -C "$root" config --blob HEAD:gitconfig --no-includes --get-all safe.directory 2>/dev/null)"
+        for l in "${(f)sd_out}"; do [[ -n "$l" ]] && sd_head+=("$l"); done
+      fi
+      sd_n=${#sd_entries[@]}; sd_word=entries; (( sd_n == 1 )) && sd_word=entry
+      _doctor_bad "$sd_n $sd_word in the TRACKED gitconfig — written through the ~/.gitconfig symlink, and \`git add -A\` would commit them"
+      for sd_path in "${sd_entries[@]}"; do
+        # The same reading git gives the value: ~/ expands, a glob names no
+        # single directory to probe, and %(prefix) is git's install prefix.
+        sd_abs="${sd_path/#\~\//$HOME/}"
+        if [[ "$sd_path" == *[\*\?]* || "$sd_path" == '%(prefix)'* ]]; then
+          sd_label="pattern"
+        elif [[ ! -e "$sd_abs" ]]; then
+          sd_label="gone"
+        else
+          # The list reset to empty, so ownership alone decides.
+          sd_probe="$(git -C "$sd_abs" -c safe.directory= rev-parse --git-dir 2>&1)"; sd_prc=$?
+          if (( sd_prc == 0 )); then
+            sd_label="same owner"
+          elif [[ "$sd_probe" == *"dubious ownership"* ]]; then
+            sd_label="other owner"; sd_other=$((sd_other + 1))
+          else
+            sd_label="not a repo"
+          fi
+        fi
+        if (( sd_head_known )) && (( ${sd_head[(Ie)$sd_path]} )); then
+          sd_committed=$((sd_committed + 1)); sd_suffix="  (committed)"
+        else
+          sd_uncommitted=$((sd_uncommitted + 1)); sd_suffix=""
+        fi
+        printf '      %-12s%s%s\n' "$sd_label" "$sd_path" "$sd_suffix"
+      done
+      echo "    gone = path no longer exists · same owner = git works there without it · other owner = git refuses without it · pattern = not probed"
+      if (( ! sd_head_known )); then
+        echo "    HEAD has no gitconfig, so committed cannot be told from uncommitted and \`git restore\` cannot help — remove them from the file by hand."
+      else
+        if (( sd_uncommitted > 0 )); then
+          echo "    Fix (uncommitted, $sd_uncommitted): git -C $root restore gitconfig"
+        fi
+        if (( sd_committed > 0 )); then
+          echo "    Fix (committed in HEAD, $sd_committed): remove them in a PR — this file is in a public repository"
+        fi
+      fi
+      if (( sd_other > 0 )); then
+        echo "    An 'other owner' entry IS needed — after the restore, put it where the include looks: git config --file ~/.gitconfig.local --add safe.directory <path>"
+      fi
+      echo "    A tool writes these, not necessarily you — auto-conf's configure.py does, for every workspace it builds. CLAUDE.md § safe.directory."
+
+      # Whether the working-tree diff of gitconfig is NOTHING BUT these entries.
+      # If so, the generic uncommitted-changes line below becomes a pointer here
+      # rather than a second, vaguer report of the same fact. Any other edit
+      # keeps its own warning, since this section says nothing about it — and
+      # a failed diff yields no lines, which leaves the warning in place: the
+      # safe direction.
+      if (( sd_head_known && sd_uncommitted > 0 )); then
+        gc_diff="$(git -C "$root" diff -U0 -- gitconfig 2>/dev/null)"
+        if [[ -n "$gc_diff" ]]; then
+          gc_only_pollution=1
+          for gc_line in "${(f)gc_diff}"; do
+            case "$gc_line" in
+              '+++ '*|'--- '*) ;;
+              '-'*) gc_only_pollution=0; break ;;
+              '+'*)
+                gc_body="${gc_line#+}"; gc_body="${gc_body//[[:space:]]/}"
+                [[ "$gc_body" == '[safe]' || "$gc_body" == 'directory='* ]] || { gc_only_pollution=0; break; } ;;
+            esac
+          done
+        fi
+      fi
+    fi
+  fi
+
   # Uncommitted edits are live too. This is the one case `git status` does
   # surface, but only if you happen to run it in this repo — which is not where
   # you notice a shell function behaving oddly.
@@ -1442,6 +1555,10 @@ dotfiles-doctor() {
         [[ -n "$dorig" ]] && dpath="$dorig → $dpath"
         if (( expected )); then
           _doctor_note "$dcode $dpath (expected — see install.conf.yaml)"
+        elif [[ "$dpath" == "gitconfig" && "$dcode" == "M" ]] && (( gc_only_pollution )); then
+          # Named above, with the remedy. Two reports of one fact, the second
+          # vaguer than the first, is how a reader learns to skim the doctor.
+          _doctor_note "M gitconfig — only the safe.directory entries reported above"
         else
           _doctor_warn "$dcode $dpath"
         fi
