@@ -1130,6 +1130,234 @@ _dotfiles_fetch_age_hours() {
   return 0
 }
 
+# -----------------------------------------------------------------------------
+# safe.directory in the tracked gitconfig (dotfiles-doctor section)
+# -----------------------------------------------------------------------------
+# ~/.gitconfig is a symlink into the checkout and `git config --global` writes
+# THROUGH the link, so a safe.directory entry added by any git-using tool lands
+# in a tracked file — auto-conf's configure.py adds one per workspace it builds.
+# The generic "uncommitted changes" line cannot say what the edit is or whether
+# git ever needed it; this section does both. History and the upstream fix:
+# CLAUDE.md "safe.directory in the tracked gitconfig".
+#
+# Split out of dotfiles-doctor (the _backup_doctor_external shape) so the state
+# table can drive it directly; it reports through _doctor_* by dynamic scope and
+# sets _DOTFILES_GC_ONLY_POLLUTION for the working-tree section that follows.
+
+# Every safe.directory value from one config source, empties included.
+#   $1 --file|--blob   $2 its argument   $3 raw|path   $4 repo root (for --blob)
+# Fills `reply`. Returns 0 with values, 1 when the key is absent, and 2 when
+# the source could not be read or parsed — which the caller must report as
+# UNKNOWN, never as "none". The split needs a --list probe first: --get-all
+# exits 1 alike for "no such key", an unreadable file (EACCES), a directory,
+# and a malformed blob, while --list exits 128 for every one of those.
+#
+# --no-includes is load-bearing on the --blob reads (they follow includes by
+# default; --file does not): the tracked file includes ~/.gitconfig.local, which
+# is where entries BELONG, and following it would mark a value that is also in
+# the include as "(committed)" and send the reader to a PR for something a
+# restore would clear. -z keeps an empty value — git's "reset the list"
+# directive — as a countable record instead of a blank line that gets dropped.
+_dotfiles_sd_read() {
+  local -a src=(config "$1" "$2" --no-includes)
+  reply=()
+  git -C "$4" "${src[@]}" --list >/dev/null 2>&1 || return 2
+  [[ "$3" == path ]] && src+=(--type=path)
+  local rec rc
+  while IFS= read -r -d '' rec; do reply+=("$rec"); done \
+    < <(git -C "$4" "${src[@]}" -z --get-all safe.directory 2>/dev/null; printf '%d\0' $?)
+  rc="${reply[-1]:-2}"
+  reply=("${(@)reply[1,-2]}")
+  return "$rc"
+}
+
+# Do the worktree copy AND the index copy differ from HEAD by nothing but
+# safe.directory entries? Decided by stripping those entries from a copy of
+# each with git's own editor (`--unset-all` removes the values and the section
+# header it leaves empty) and comparing bytes. NOT by parsing a diff: color.ui
+# or a diff.external driver in ~/.gitconfig.local reshapes `git diff` into
+# something no parser here recognises, and the parser this replaces then
+# downgraded the warning for ANY edit. Every failure answers "no", which keeps
+# the warning — the safe direction.
+#   $1 root  $2 source path  $3 worktree file  $4 1 if the index holds a copy
+_dotfiles_sd_only_pollution() {
+  local root="$1" src="$2" gc="$3" ix="$4" tmp f rc=1
+  tmp="$(mktemp -d 2>/dev/null)" || return 1
+  {
+    git -C "$root" show "HEAD:$src" > "$tmp/head" 2>/dev/null || return 1
+    cp -- "$gc" "$tmp/wt" 2>/dev/null || return 1
+    if (( ix )); then
+      git -C "$root" show ":$src" > "$tmp/ix" 2>/dev/null || return 1
+    else
+      cp -- "$tmp/head" "$tmp/ix"
+    fi
+    for f in head wt ix; do
+      git config --file "$tmp/$f" --unset-all safe.directory >/dev/null 2>&1   # 5 = there were none
+    done
+    cmp -s -- "$tmp/wt" "$tmp/head" && cmp -s -- "$tmp/ix" "$tmp/head"
+    rc=$?
+  } always {
+    rm -rf -- "$tmp"
+  }
+  return "$rc"
+}
+
+#   $1 root   $2 the tracked file ~/.gitconfig links to, relative to root
+_dotfiles_doctor_safedir() {
+  local root="$1" src="$2" gc="$1/$2"
+  local -a reply wt_raw wt_path ix_raw ix_path hd_raw ent_raw ent_path ent_where lines
+  local rc i raw p label mark probe prc where
+  local ix_have=0 hd_state=absent n_uncommitted=0 n_committed=0 n_other=0
+  _DOTFILES_GC_ONLY_POLLUTION=0
+
+  if [[ ! -e "$gc" ]]; then
+    _doctor_note "no $src in $root — nothing to check"
+    return 0
+  fi
+
+  # Worktree copy: what ~/.gitconfig writes through to.
+  _dotfiles_sd_read --file "$gc" raw "$root"; rc=$?
+  if (( rc > 1 )); then
+    _doctor_bad "cannot read $gc — safe.directory state UNKNOWN (git config --list exit status was not 0)"
+    return 0
+  fi
+  wt_raw=("${reply[@]}")
+  _dotfiles_sd_read --file "$gc" path "$root" >/dev/null 2>&1; wt_path=("${reply[@]}")
+
+  # Index copy: `git add -A` has already run when it holds one, and an entry that
+  # is ONLY there — worktree reverted, index not — is one commit from public and
+  # invisible to a read of the file.
+  if git -C "$root" cat-file -e ":$src" 2>/dev/null; then
+    _dotfiles_sd_read --blob ":$src" raw "$root"; rc=$?
+    if (( rc <= 1 )); then
+      ix_have=1; ix_raw=("${reply[@]}")
+      _dotfiles_sd_read --blob ":$src" path "$root" >/dev/null 2>&1; ix_path=("${reply[@]}")
+    fi
+  fi
+
+  # HEAD copy: what is already committed. Three states, kept apart because the
+  # remedies differ — and because a HEAD copy git cannot parse is exactly the
+  # file `git restore` would put under the live ~/.gitconfig symlink.
+  if git -C "$root" cat-file -e "HEAD:$src" 2>/dev/null; then
+    _dotfiles_sd_read --blob "HEAD:$src" raw "$root"; rc=$?
+    if (( rc <= 1 )); then hd_state=ok; hd_raw=("${reply[@]}"); else hd_state=unreadable; fi
+  fi
+
+  # Worktree entries first, then anything the index holds that the worktree no
+  # longer does. Raw value is the entry's identity (for display and the HEAD
+  # comparison); the --type=path expansion is what the probe visits, because
+  # git — not this function — knows that `~user/x` and `%(prefix)/y` are paths.
+  for (( i = 1; i <= ${#wt_raw[@]}; i++ )); do
+    ent_raw+=("${wt_raw[i]}"); ent_path+=("${wt_path[i]:-${wt_raw[i]}}"); ent_where+=(worktree)
+  done
+  if (( ix_have )); then
+    for (( i = 1; i <= ${#ix_raw[@]}; i++ )); do
+      raw="${ix_raw[i]}"
+      [[ -n "$raw" ]] && (( ${wt_raw[(Ie)$raw]} )) && continue
+      ent_raw+=("$raw"); ent_path+=("${ix_path[i]:-$raw}"); ent_where+=(index)
+    done
+  fi
+
+  if (( ${#ent_raw[@]} == 0 )); then
+    _doctor_ok "none — machine-specific entries belong in ~/.gitconfig.local"
+    return 0
+  fi
+
+  for (( i = 1; i <= ${#ent_raw[@]}; i++ )); do
+    raw="${ent_raw[i]}"; p="${ent_path[i]}"; where="${ent_where[i]}"; mark=""
+    # git's reading of the value, not a guess at it: an empty value resets the
+    # list; only a bare `*` and a trailing `/*` are patterns (a `?` or a `*`
+    # anywhere else is compared literally); a relative path draws a warning and
+    # is ignored. Everything else names one directory, so probe it with the
+    # list reset (`-c safe.directory=`) — ownership alone decides, measured.
+    if [[ -z "$raw" ]]; then
+      label="empty"
+    elif [[ "$raw" == "*" || "$raw" == */\* ]]; then
+      label="pattern"
+    elif [[ "$p" != /* ]]; then
+      label="relative"
+    elif [[ ! -e "$p" ]]; then
+      label="gone"
+    else
+      # Classified by exit status, never by matching git's message: "dubious
+      # ownership" and "not a git repository" are both translated in localized
+      # builds, and a string match there turns a needed entry into "not a
+      # repo" with restore advice. Three probes, each with the list RESET first
+      # (`-c safe.directory=`; a lone `-c safe.directory=<x>` only appends, so
+      # the `~/*` in ~/.gitconfig.local would answer for every entry under
+      # HOME): nothing (does ownership alone stop git?), this entry as written
+      # (does it unlock the directory?), and `*` (is there a repository here
+      # at all, whoever owns it?).
+      probe="$(git -C "$p" -c safe.directory= rev-parse --git-dir 2>&1)"; prc=$?
+      if (( prc == 0 )); then
+        label="same owner"
+      elif git -C "$p" -c safe.directory= -c safe.directory="$raw" rev-parse --git-dir >/dev/null 2>&1; then
+        label="other owner"; n_other=$((n_other + 1))
+      elif git -C "$p" -c safe.directory= -c 'safe.directory=*' rev-parse --git-dir >/dev/null 2>&1; then
+        # A repository git accepts with `*` but not with this entry: it names
+        # a subdirectory, or is spelled so that git's path comparison fails.
+        label="not matched"; mark="  (${probe%%$'\n'*})"
+      else
+        # Not a repository, or one git cannot reach — EACCES, a stale mount, a
+        # deleted parent. git's own first line says which, in its own words.
+        label="not a repo"; mark="  (${probe%%$'\n'*})"
+      fi
+    fi
+    if [[ "$hd_state" == ok ]] && [[ -n "$raw" ]] && (( ${hd_raw[(Ie)$raw]} )); then
+      n_committed=$((n_committed + 1)); mark+="  (committed)"
+    else
+      n_uncommitted=$((n_uncommitted + 1))
+      if [[ "$where" == index ]]; then
+        mark+="  (staged only)"
+      elif (( ix_have )) && [[ -n "$raw" ]] && (( ${ix_raw[(Ie)$raw]} )); then
+        mark+="  (staged)"
+      fi
+    fi
+    lines+=("$(printf '      %-12s%s%s' "$label" "${raw:-<empty>}" "$mark")")
+  done
+
+  # Uncommitted entries are a ✗: a tool left them and one command clears them.
+  # Entries already in HEAD are a ⚠: they passed review, so they are not a
+  # live-vs-reviewed divergence, and an adopter may have committed `*` on
+  # purpose — a ✗ there would be the permanently-red checker nobody reads.
+  if (( n_uncommitted > 0 )) || [[ "$hd_state" != ok ]]; then
+    _doctor_bad "${#ent_raw[@]} safe.directory entry(s) in $src — ~/.gitconfig writes through the symlink into this tracked file"
+  else
+    _doctor_warn "${#ent_raw[@]} safe.directory entry(s) committed in $src — they belong in ~/.gitconfig.local"
+  fi
+  printf '%s\n' "${lines[@]}"
+  echo "    empty = git's list reset · pattern = git's \`*\`/\`dir/*\` forms, not probed · relative = git ignores it · gone = path absent or unreachable · same owner = git works there without it · other owner = git refuses without it · not matched = a repo git accepts with \`*\` but not with this entry · not a repo = no safe.directory value makes git work there"
+
+  case "$hd_state" in
+    ok)
+      if (( n_uncommitted > 0 )); then
+        # --staged --worktree, source HEAD: a plain `restore` copies the INDEX
+        # into the worktree, which is a no-op the moment the entries have been
+        # `git add`ed — the very step the headline warns is next.
+        _dotfiles_sd_only_pollution "$root" "$src" "$gc" "$ix_have" && _DOTFILES_GC_ONLY_POLLUTION=1
+        echo "    Fix ($n_uncommitted not in HEAD): git -C $root restore --staged --worktree -- $src"
+        if (( ! _DOTFILES_GC_ONLY_POLLUTION )); then
+          echo "    $src also differs from HEAD in other ways — \`git -C $root diff HEAD -- $src\` first; the restore discards those edits too"
+        fi
+      fi
+      ;;
+    unreadable)
+      echo "    HEAD's $src cannot be parsed, so committed cannot be told from uncommitted — and a restore would install that copy. Fix HEAD first."
+      ;;
+    absent)
+      echo "    $src is not in HEAD, so there is nothing to restore from — remove the entries by hand."
+      ;;
+  esac
+  if (( n_committed > 0 )); then
+    echo "    Committed in HEAD ($n_committed): remove them in a PR — machine-specific entries belong in ~/.gitconfig.local"
+  fi
+  if (( n_other > 0 )); then
+    echo "    An 'other owner' entry IS needed there — after the restore: git config --file ~/.gitconfig.local --add safe.directory <path>"
+  fi
+  echo "    A tool writes these, not necessarily you — auto-conf's configure.py does. docs/TROUBLESHOOTING.md, \"gitconfig … [safe] block\"."
+  return 0
+}
+
 dotfiles-doctor() {
   # Usage: dotfiles-doctor [--fetch]
   # Reports whether the live config is the reviewed config, and when it is not,
@@ -1378,6 +1606,27 @@ dotfiles-doctor() {
     fi
   fi
 
+  # safe.directory in the TRACKED gitconfig — see _dotfiles_doctor_safedir. The
+  # file is looked up in the link map rather than assumed to be `gitconfig`:
+  # rename the source and a hardcoded name reads "nothing to check" over a
+  # polluted live file, which is the fourth link direction's failure mode in a
+  # new place.
+  echo "safe.directory in the tracked gitconfig:"
+  local gc_src="" gmt gms gmc _DOTFILES_GC_ONLY_POLLUTION=0
+  if (( ! map_ok )); then
+    _doctor_warn "skipped — the link map did not parse, so which file ~/.gitconfig writes through to is unknown"
+  else
+    for l in "${link_lines[@]}"; do
+      read -r gmt gms gmc <<< "$l"
+      if [[ "$gmt" == '~/.gitconfig' ]]; then gc_src="$gms"; break; fi
+    done
+    if [[ -z "$gc_src" ]]; then
+      _doctor_note "~/.gitconfig is not a declared link — nothing writes through into this tree"
+    else
+      _dotfiles_doctor_safedir "$root" "$gc_src"
+    fi
+  fi
+
   # Uncommitted edits are live too. This is the one case `git status` does
   # surface, but only if you happen to run it in this repo — which is not where
   # you notice a shell function behaving oddly.
@@ -1444,6 +1693,10 @@ dotfiles-doctor() {
         [[ -n "$dorig" ]] && dpath="$dorig → $dpath"
         if (( expected )); then
           _doctor_note "$dcode $dpath (expected — see install.conf.yaml)"
+        elif [[ "$dpath" == "$gc_src" && ( "$dcode" == "M" || "$dcode" == "MM" ) ]] && (( _DOTFILES_GC_ONLY_POLLUTION )); then
+          # Named above, with the remedy. Two reports of one fact, the second
+          # vaguer than the first, is how a reader learns to skim the doctor.
+          _doctor_note "$dcode $dpath — only the safe.directory entries reported above"
         else
           _doctor_warn "$dcode $dpath"
         fi

@@ -22,7 +22,7 @@
 #       gpgsign = true
 #
 # See ~/.dotfiles/gitconfig.local.example for full setup instructions
-# See ~/.dotfiles/docs/GPG_SIGNING_SETUP.md for GPG configuration
+# See ~/.dotfiles/docs/SSH_SIGNING_SETUP.md for signing configuration
 #
 # Verify Your Config:
 # -------------------
@@ -33,11 +33,17 @@
 [include]
 	path = ~/.gitconfig.local
 
-# Machine-specific safe directories should be set in ~/.gitconfig.local
-# This prevents Git from polluting the tracked gitconfig with safe.directory entries
+# Machine-specific safe directories belong in ~/.gitconfig.local, NOT here.
+# ~/.gitconfig is a symlink into the dotfiles checkout and `git config --global`
+# writes THROUGH it, so an entry added here — by you, or by a tool such as
+# auto-conf's configure.py, which adds one for every workspace it builds —
+# lands in this tracked file in a public repository. `dotfiles-doctor` reports
+# any that arrive and says which are dead; the right calls (persist in
+# ~/.gitconfig.local, per-invocation `-c`, and the restore that clears staged
+# entries too) are in docs/TROUBLESHOOTING.md under "[safe] block".
 #
 # Check your Git version: git --version
-# Git 2.35.2+ supports wildcard patterns (recommended):
+# A bare `*` needs Git 2.35.2; a trailing `/*` ("everything below") needs 2.46:
 #   [safe]
 #       directory = ~/*
 #       directory = /tmp/*

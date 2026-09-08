@@ -82,7 +82,9 @@
 # This is particularly important when running tests or working in temporary directories.
 #
 # Check your Git version: git --version
-# Git 2.35.2+ supports wildcard patterns. Recommended approach:
+# A bare `*` needs Git 2.35.2; the trailing `/*` form below ("everything under
+# that directory") needs Git 2.46 — on an older git it is a literal path that
+# never matches. Recommended approach:
 [safe]
     directory = ~/*
     directory = /tmp/*
