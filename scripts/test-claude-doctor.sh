@@ -809,6 +809,67 @@ no_out   "and is not excused as never authorised"     "never authorised in this 
 no_out   "and jq's parser error never reaches the report" "Cannot"
 
 #-----------------------------------------------------------------------------
+section "I. MCP servers — never-authorised is not never-worked"
+#-----------------------------------------------------------------------------
+# Three states share "0 successes" and only one is a fault the reader can act
+# on. Conflating them made this section permanently red on 2026-09-07 with ten
+# claude.ai catalogue connectors the user had never set up.
+
+# A never-authorised connector: every attempt ends in mcp_unauthorized_no_token.
+# NOTE the lowercase "connection failed" — the claude.ai proxy writes it that
+# way, while $_CLAUDE_LOG_FAIL matches "Connection failed". The first draft of
+# this fix keyed on fail_n and so could never fire; the fixture reproduces the
+# real casing on purpose, and a fixture that used the capitalised form would let
+# that bug back in unnoticed.
+mk_unauthed() {   # $1 = server dir name, $2 = attempts
+    local d="$FHOME/.cache/claude-cli-nodejs/-fixture/mcp-logs-$1" i
+    mkdir -p "$d"
+    for (( i = 0; i < ${2:-3}; i++ )); do
+        printf '{"debug":"claude.ai proxy connection failed after 974ms: Error POSTing to endpoint: {\"error_code\":\"mcp_unauthorized_no_token\"}"}\n' \
+            > "$d/$(date +%Y-%m-%d)T0${i}-00-00-000Z.jsonl"
+    done
+}
+mk_invalidated() {   # a connector that DID work and whose token died
+    local d="$FHOME/.cache/claude-cli-nodejs/-fixture/mcp-logs-$1" i
+    mkdir -p "$d"
+    for (( i = 0; i < ${2:-3}; i++ )); do
+        printf '{"debug":"claude.ai proxy connection failed: OAuth token has been invalidated. Re-authentication is required."}\n' \
+            > "$d/$(date +%Y-%m-%d)T1${i}-00-00-000Z.jsonl"
+    done
+}
+
+new_home i1; write_cred; mk_unauthed "claude-ai-Apollo" 4
+run_doctor
+no_out "a never-authorised connector is NOT a failure" "claude-ai-Apollo: 0 successful"
+want_rc "and does not make the doctor exit non-zero"   0
+
+new_home i2; write_cred; mk_unauthed "claude-ai-Apollo" 4
+run_doctor --all
+want_out "--all shows it as never authorised" "claude-ai-Apollo: never authorised"
+
+# The volume floor that would NOT have worked: the real connectors had 24
+# attempts each and Miro 73, so a minimum-attempts rule cannot separate them.
+new_home i3; write_cred; mk_unauthed "claude-ai-Attio" 30
+run_doctor
+no_out "30 attempts does not make never-authorised a fault" "claude-ai-Attio: 0 successful"
+
+# A token that WAS valid and got invalidated is a real, actionable fault — and
+# must not be told "it has never worked", which is false.
+new_home i4; write_cred; mk_invalidated "claude-ai-Miro" 5
+run_doctor
+want_out "an invalidated token is a failure"        "claude-ai-Miro: OAuth token invalidated"
+want_out "and says how to fix it"                   "re-authenticate"
+no_out   "and is NOT called never-worked"           "claude-ai-Miro: 0 successful connections"
+want_rc  "an invalidated token exits non-zero"      1
+
+# The original finding must survive: a server that genuinely never worked, for
+# reasons other than authorisation, is still a ✗.
+new_home i5; write_cred; mk_logs "plugin-broken-broken" 0 6
+run_doctor
+want_out "a genuinely broken server is still a failure" "0 successful connections"
+want_rc  "and still exits non-zero"                     1
+
+#-----------------------------------------------------------------------------
 section "H. Global settings.json — keys a third party can remove"
 #-----------------------------------------------------------------------------
 # clauth rewrites ~/.claude/settings.json: it clears `env` on switch away and
