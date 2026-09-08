@@ -872,6 +872,390 @@ check "re-entry is recognised"     "$(work feat/new | grep -c 'Entered existing 
 check "re-entry exits 0"           "$(work_rc feat/new)"                                              "0"
 
 echo
+echo "=== dotfiles-work --remove: a worktree ./install has run in ==="
+# install:76 runs `git submodule update --init --recursive dotbot` in whichever
+# checkout it is run from — in a worktree that takes the
+# DOTFILES_ALLOW_WORKTREE_INSTALL=1 override install:56-72 otherwise refuses, or
+# a hand-run `git submodule update`, which is what installed_wt() below does —
+# so a worktree anyone has installed from carries a populated dotbot submodule,
+# and `git worktree remove` refuses those outright:
+#   fatal: working trees containing submodules cannot be moved or removed
+# The documented cleanup command therefore worked only on worktrees nobody had
+# installed from (2026-09-08: of two removed that day, the one ./install had run
+# in refused). `--force` is the fix, and it discards git's own dirty-tree check,
+# so the function performs that check itself — with the command git runs for it,
+# `status --porcelain --ignore-submodules=none` — and refuses when it is
+# non-empty OR when it cannot be read: a state that cannot be inspected is not a
+# clean one.
+#
+# `git submodule deinit` first, then a plain remove, was the alternative and does
+# not work: git refuses on the mere existence of .git/worktrees/<id>/modules,
+# which deinit keeps — and deinit run inside a worktree removes
+# submodule.<name>.* from the SHARED config, unregistering the primary
+# checkout's copy too. A row below asserts the primary's registration survives.
+#
+# A separate fixture repo with a REAL submodule: every row here is unfailable
+# unless the worktree actually carries a populated one, so the fixture proves
+# that git refuses the plain remove before any row runs.
+SUBSRC="$TMPROOT/subsrc"; SUBREMOTE="$TMPROOT/subremote.git"; SUBREPO="$TMPROOT/subrepo"
+SUBWT="$TMPROOT/subworktrees"
+git init -q -b main "$SUBSRC"
+git -C "$SUBSRC" -c user.email=t@example.com -c user.name=Test commit -q --allow-empty -m subinit
+git init -q --bare -b main "$SUBREMOTE"
+git init -q -b main "$SUBREPO"
+git -C "$SUBREPO" config user.email t@example.com
+git -C "$SUBREPO" config user.name  Test
+echo 'tracked' > "$SUBREPO/file.txt"
+git -C "$SUBREPO" add -A >/dev/null
+git -C "$SUBREPO" commit -qm init
+# file:// submodule clones are refused by default since git 2.38.1
+# (CVE-2022-39253), so every place the fixture clones one has to allow them.
+git -C "$SUBREPO" -c protocol.file.allow=always submodule add -q "$SUBSRC" dotbot >/dev/null 2>&1 \
+  || fatal "fixture: could not add the dotbot submodule"
+git -C "$SUBREPO" commit -qm addsub
+git -C "$SUBREPO" remote add origin "$SUBREMOTE"
+git -C "$SUBREPO" push -q origin main
+git -C "$SUBREPO" fetch -q origin
+
+# One run, both answers kept: a second run for the exit code would see a
+# worktree that the first one already removed.
+subwork_run() {
+  OUT="$(zsh -c "source '$SYSTEM_SH'; HOME='$FAKEHOME' DOTFILES_ROOT='$SUBREPO' DOTFILES_PIN_BRANCH='${2:-main}' DOTFILES_WORKTREES='$SUBWT' dotfiles-work $1" 2>&1)"
+  RC=$?
+}
+# A worktree made through the function, with its submodule populated the way
+# install:76 populates it. Asserted, not assumed: a fixture that silently fails
+# to populate it makes every row below pass with the fix reverted.
+installed_wt() {
+  subwork_run "$1"
+  (( RC == 0 )) || fatal "fixture: dotfiles-work $1 failed: $OUT"
+  git -C "$SUBWT/${1//\//-}" -c protocol.file.allow=always submodule update --init --recursive dotbot >/dev/null 2>&1
+  [[ -f "$SUBWT/${1//\//-}/dotbot/.git" ]] || fatal "fixture: submodule not populated in $SUBWT/${1//\//-}"
+}
+branch_state() { git -C "$SUBREPO" show-ref --verify --quiet "refs/heads/$1" && echo kept || echo deleted; }
+dir_state()    { [[ -e "$SUBWT/$1" ]] && echo present || echo gone; }
+
+# The precondition every row rests on: git itself refuses this fixture. If it did
+# not, the rows would pass whether or not --force is passed.
+installed_wt probe/plain
+plain_out="$(git -C "$SUBREPO" worktree remove "$SUBWT/probe-plain" 2>&1)"; plain_rc=$?
+if (( plain_rc == 0 )) || [[ "$plain_out" != *"containing submodules"* ]]; then
+  fatal "fixture: git did not refuse a plain 'worktree remove' on the populated submodule (rc=$plain_rc: $plain_out) — the rows below cannot fail"
+fi
+
+subwork_run '--remove probe/plain'
+check "populated submodule: removed (rc 0)" "$RC"                                                     "0"
+check "populated submodule: dir gone"       "$(dir_state probe-plain)"                                 "gone"
+check "populated submodule: unlisted"       "$(git -C "$SUBREPO" worktree list | grep -c 'probe-plain')" "0"
+check "populated submodule: primary unmoved" "$(git -C "$SUBREPO" rev-parse --abbrev-ref HEAD)"        "main"
+check "primary submodule still registered"  "$(git -C "$SUBREPO" config --get submodule.dotbot.url >/dev/null && echo yes || echo no)" "yes"
+# Its tree is origin/main's, so nothing on the branch is unlanded: deleted, and
+# the reason stated.
+check "landed branch deleted"               "$(branch_state probe/plain)"                              "deleted"
+check "landed branch: says why"             "$(printf '%s\n' "$OUT" | grep -c 'identical to origin/main')" "1"
+
+# The protection --force discards, performed by the function instead. Both kinds
+# of change git's own check refuses on: a modified tracked file and an untracked one.
+installed_wt probe/dirty
+echo 'unsaved work' >  "$SUBWT/probe-dirty/notes.txt"
+echo 'edited'       >> "$SUBWT/probe-dirty/file.txt"
+subwork_run '--remove probe/dirty'
+check "dirty worktree refused (rc 1)"       "$RC"                                                     "1"
+check "dirty worktree: dir kept"            "$(dir_state probe-dirty)"                                 "present"
+check "dirty worktree: untracked file kept" "$(cat "$SUBWT/probe-dirty/notes.txt" 2>/dev/null)"        "unsaved work"
+check "dirty worktree: names the untracked" "$(printf '%s\n' "$OUT" | grep -c 'notes.txt')"            "1"
+check "dirty worktree: names the modified"  "$(printf '%s\n' "$OUT" | grep -c 'file.txt')"             "1"
+check "dirty worktree: names the override"  "$(printf '%s\n' "$OUT" | grep -c -- '--remove --force probe/dirty')" "1"
+check "dirty worktree: branch kept"         "$(branch_state probe/dirty)"                              "kept"
+# The override the refusal names has to work — a remedy that does not remedy is
+# the redactor lesson in "Keeping secrets out of transcripts".
+subwork_run '--remove --force probe/dirty'
+check "--force override removes it"         "$RC"                                                     "0"
+check "--force override: dir gone"          "$(dir_state probe-dirty)"                                 "gone"
+
+# A directory at the path that git knows nothing about. Its state cannot be read,
+# and an unreadable state must not be forced through: the answer is a refusal
+# that says so, never `worktree remove --force` on whatever is there.
+mkdir -p "$SUBWT/probe-stale"; echo 'keep me' > "$SUBWT/probe-stale/keep.txt"
+subwork_run '--remove probe/stale'
+check "unreadable state refused (rc 1)"     "$RC"                                                     "1"
+check "unreadable state: dir kept"          "$(cat "$SUBWT/probe-stale/keep.txt" 2>/dev/null)"         "keep me"
+check "unreadable state: says so"           "$(printf '%s\n' "$OUT" | grep -c 'refusing to force')"    "1"
+check "unreadable state: says untracked"    "$(printf '%s\n' "$OUT" | grep -c 'is not a worktree of')"  "1"
+check "unreadable state: names the cleanup" "$(printf '%s\n' "$OUT" | grep -c 'worktree prune')"       "1"
+
+# A REGISTERED worktree whose state cannot be read — a half-failed removal, or a
+# .git file something overwrote. Same refusal, for the same reason, and this is
+# the row that reaches the status-failure branch: the unregistered directory
+# above never runs `git status` at all.
+installed_wt probe/broken
+echo 'garbage' > "$SUBWT/probe-broken/.git"
+subwork_run '--remove probe/broken'
+check "unreadable registered: refused (rc 1)" "$RC"                                                   "1"
+check "unreadable registered: dir kept"     "$(dir_state probe-broken)"                                "present"
+check "unreadable registered: says so"      "$(printf '%s\n' "$OUT" | grep -c 'cannot read the state of')" "1"
+check "unreadable registered: not blamed on the dir" "$(printf '%s\n' "$OUT" | grep -c 'is not a worktree of')" "0"
+
+# A registered worktree whose directory has been rm -rf'd — the leftover the
+# create path warns about. Nothing is left to protect, and git runs neither its
+# submodule nor its cleanliness check on a directory that is not there, so this
+# passed BEFORE the fix. It is here because the state check the fix adds must not
+# refuse a directory it cannot find: the entry is pruned, and the branch handled.
+installed_wt probe/gone
+rm -rf "$SUBWT/probe-gone"
+subwork_run '--remove probe/gone'
+check "vanished dir: entry pruned (rc 0)"   "$RC"                                                     "0"
+check "vanished dir: unlisted"              "$(git -C "$SUBREPO" worktree list | grep -c 'probe-gone')" "0"
+
+# One --force, never two: a LOCKED worktree needs `-f -f`, and the lock is the
+# one protection --force leaves in place. The branch is untouched when the
+# removal did not happen.
+installed_wt probe/locked
+git -C "$SUBREPO" worktree lock "$SUBWT/probe-locked"
+subwork_run '--remove probe/locked'
+check "locked worktree still refused"       "$([[ $RC -ne 0 ]] && echo refused || echo removed)"       "refused"
+check "locked worktree: dir kept"           "$(dir_state probe-locked)"                                 "present"
+check "locked worktree: branch kept"        "$(branch_state probe/locked)"                              "kept"
+git -C "$SUBREPO" worktree unlock "$SUBWT/probe-locked"
+
+# A branch with unlanded commits is kept, and the hint says -D — a squash-merged
+# branch is not an ancestor of main, so -d calls a fully landed branch unmerged.
+installed_wt probe/ahead
+echo 'new' > "$SUBWT/probe-ahead/new.txt"
+git -C "$SUBWT/probe-ahead" add new.txt
+git -C "$SUBWT/probe-ahead" commit -qm ahead
+subwork_run '--remove probe/ahead'
+check "unlanded branch: worktree removed"   "$RC"                                                     "0"
+check "unlanded branch kept"                "$(branch_state probe/ahead)"                              "kept"
+check "unlanded branch: -D hint"            "$(printf '%s\n' "$OUT" | grep -c 'branch -D probe/ahead')" "1"
+check "unlanded branch: never -d"           "$(printf '%s\n' "$OUT" | grep -c 'branch -d ')"           "0"
+
+# The squash shape itself: main carries the branch's content in a commit that is
+# NOT the branch's, so `merge-base --is-ancestor` says unmerged and `branch -d`
+# refuses — while `git diff <branch> origin/main` is empty. Only -D deletes it.
+installed_wt probe/squashed
+echo 'squashed content' > "$SUBWT/probe-squashed/sq.txt"
+git -C "$SUBWT/probe-squashed" add sq.txt
+git -C "$SUBWT/probe-squashed" commit -qm 'feature commit'
+echo 'squashed content' > "$SUBREPO/sq.txt"
+git -C "$SUBREPO" add sq.txt
+git -C "$SUBREPO" commit -qm 'Squash merge of probe/squashed'
+git -C "$SUBREPO" push -q origin main
+git -C "$SUBREPO" fetch -q origin
+git -C "$SUBREPO" merge-base --is-ancestor probe/squashed origin/main \
+  && fatal "fixture: probe/squashed is an ancestor of origin/main — this is not the squash shape"
+git -C "$SUBREPO" diff --quiet probe/squashed origin/main \
+  || fatal "fixture: probe/squashed's tree differs from origin/main — this is not the squash shape"
+subwork_run '--remove probe/squashed'
+check "squash-merged: worktree removed"     "$RC"                                                     "0"
+check "squash-merged branch deleted"        "$(branch_state probe/squashed)"                           "deleted"
+
+# No origin/<pin> to compare with: a comparison that cannot run is not "landed".
+installed_wt probe/nopin
+subwork_run '--remove probe/nopin' nosuch
+check "no origin/<pin>: worktree removed"   "$RC"                                                     "0"
+check "no origin/<pin>: branch kept"        "$(branch_state probe/nopin)"                              "kept"
+check "no origin/<pin>: says could not compare" "$(printf '%s\n' "$OUT" | grep -c 'could not compare')" "1"
+
+# A detached worktree has no branch to delete, and must not be reported as if it had.
+git -C "$SUBREPO" worktree add -q --detach "$SUBWT/probe-detached" origin/main 2>/dev/null
+git -C "$SUBWT/probe-detached" -c protocol.file.allow=always submodule update --init --recursive dotbot >/dev/null 2>&1
+[[ -f "$SUBWT/probe-detached/dotbot/.git" ]] || fatal "fixture: submodule not populated in $SUBWT/probe-detached"
+subwork_run '--remove probe/detached'
+check "detached worktree: removed"          "$RC"                                                     "0"
+check "detached worktree: no branch action" "$(printf '%s\n' "$OUT" | grep -c 'branch -D')"            "0"
+check "detached worktree: says detached"    "$(printf '%s\n' "$OUT" | grep -c 'detached HEAD')"         "1"
+
+# The create path cd's INTO the worktree, so the shell that removes one is often
+# standing in it — and a shell left in a deleted directory fails every relative
+# path from then on. Removing from inside moves the shell to the primary checkout.
+installed_wt probe/inside
+check "removed from inside: shell moved out" \
+      "$(zsh -c "cd '$SUBWT/probe-inside' && source '$SYSTEM_SH' && HOME='$FAKEHOME' DOTFILES_ROOT='$SUBREPO' DOTFILES_PIN_BRANCH=main DOTFILES_WORKTREES='$SUBWT' dotfiles-work --remove probe/inside >/dev/null 2>&1; print -r -- \"\${PWD:A}\"")" \
+      "$(cd "$SUBREPO" && pwd -P)"
+check "removed from inside: dir gone"       "$(dir_state probe-inside)"                                "gone"
+
+# A git that cannot read the repo answers every question with silence, and the
+# registry lookup's silence must not be taken for "not a worktree" — that message
+# blames the directory for a fault in the repo, and sends the reader to rm -rf it.
+# The directory EXISTS here on purpose: that is the only state in which the
+# swallowed failure produces the wrong message, so without it the third row
+# passes with the fix reverted (found by mutation).
+mkdir -p "$SUBWT/probe-whatever"
+OUT="$(zsh -c "source '$SYSTEM_SH'; HOME='$FAKEHOME' DOTFILES_ROOT='$TMPROOT/none' DOTFILES_PIN_BRANCH=main DOTFILES_WORKTREES='$SUBWT' dotfiles-work --remove probe/whatever" 2>&1)"; RC=$?
+check "unreadable repo: refused (rc 1)"     "$RC"                                                     "1"
+check "unreadable repo: names git"          "$(printf '%s\n' "$OUT" | grep -c 'could not list the worktrees')" "1"
+check "unreadable repo: not blamed on the dir" "$(printf '%s\n' "$OUT" | grep -c 'is not a worktree of')" "0"
+
+# stderr is not a dirty file. `git status` can warn with exit 0, and a capture
+# that folds stderr into the listing would refuse a clean worktree over a
+# warning — so the check reads stdout only. Injected through a PATH stub that
+# wraps the real git, the way the systemctl and herdr suites stub theirs.
+REALGIT="$(command -v git)"
+STUBGIT="$TMPROOT/stubgit"; mkdir -p "$STUBGIT"
+cat > "$STUBGIT/git" <<EOF
+#!/usr/bin/env bash
+case " \$* " in *" status "*) echo 'warning: injected stderr noise' >&2 ;; esac
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$STUBGIT/git"
+installed_wt probe/noisy
+OUT="$(zsh -c "PATH='$STUBGIT:$PATH'; source '$SYSTEM_SH'; HOME='$FAKEHOME' DOTFILES_ROOT='$SUBREPO' DOTFILES_PIN_BRANCH=main DOTFILES_WORKTREES='$SUBWT' dotfiles-work --remove probe/noisy" 2>&1)"; RC=$?
+check "stderr warning is not dirt: removed" "$RC"                                                     "0"
+check "stderr warning is not dirt: dir gone" "$(dir_state probe-noisy)"                               "gone"
+check "stderr warning is not dirt: not listed" "$(printf '%s\n' "$OUT" | grep -c 'uncommitted changes')" "0"
+check "stderr warning is not dirt: surfaced" "$(printf '%s\n' "$OUT" | grep -c 'injected stderr noise')" "1"
+
+# `status.showUntrackedFiles = no` — a standard large-repo tweak, and settable
+# from this repo's own ~/.gitconfig.local — makes `status --porcelain` print
+# NOTHING for an untracked file. git's own check has that hole; this one must
+# not, so the flag is passed explicitly. Set on the fixture's shared config,
+# which is where a worktree reads it, and unset before the rows are judged.
+git -C "$SUBREPO" config status.showUntrackedFiles no
+installed_wt probe/hidden
+echo 'invisible work' > "$SUBWT/probe-hidden/hidden.txt"
+subwork_run '--remove probe/hidden'
+git -C "$SUBREPO" config --unset status.showUntrackedFiles
+check "hidden untracked: refused (rc 1)"    "$RC"                                                     "1"
+check "hidden untracked: file kept"         "$(cat "$SUBWT/probe-hidden/hidden.txt" 2>/dev/null)"     "invisible work"
+check "hidden untracked: named"             "$(printf '%s\n' "$OUT" | grep -c 'hidden.txt')"          "1"
+
+# `dotfiles-work main` is allowed when the primary is off-pin (the create path
+# takes any existing branch), and its tree is origin/main's by definition — so
+# `--remove main` deleted local main. The pin branch is never deleted, whatever
+# the diff says.
+git -C "$SUBREPO" checkout -q -b side
+installed_wt main
+subwork_run '--remove main'
+# Read the branch's state BEFORE moving the primary back: `git checkout main`
+# with no local main DWIMs one back into existence from origin/main, and a row
+# that read the state afterwards passed with the guard absent (found by mutation).
+main_after="$(branch_state main)"
+git -C "$SUBREPO" checkout -q main
+check "pin branch: worktree removed"        "$RC"                                                     "0"
+check "pin branch never deleted"            "$main_after"                                             "kept"
+check "pin branch: says why"                "$(printf '%s\n' "$OUT" | grep -c 'pin branch')"          "1"
+
+# The worktrees this fix makes removable are exactly the ones an install has run
+# in — and an install run there re-pointed every managed symlink INTO it.
+# Removing it would leave the live rc file dangling, and the next shell would
+# source nothing, with none of the doctors present to say so. The sentinel is
+# the rc symlink in HOME, resolved the forkless way the startup guard resolves
+# it. --force does NOT override this one: the remedy is a non-destructive re-run
+# of ./install, and there is no state in which a dangling live config is what
+# anyone wants. A separate HOME keeps the link away from every other row.
+LIVEHOME="$TMPROOT/livehome"; mkdir -p "$LIVEHOME"
+installed_wt probe/live
+ln -s "$SUBWT/probe-live/file.txt" "$LIVEHOME/.zshrc"
+live_run() { OUT="$(zsh -c "source '$SYSTEM_SH'; HOME='$LIVEHOME' DOTFILES_ROOT='$SUBREPO' DOTFILES_PIN_BRANCH=main DOTFILES_WORKTREES='$SUBWT' dotfiles-work $1" 2>&1)"; RC=$?; }
+live_run '--remove probe/live'
+check "live config inside: refused (rc 1)"  "$RC"                                                     "1"
+check "live config inside: dir kept"        "$(dir_state probe-live)"                                  "present"
+check "live config inside: names ./install" "$(printf '%s\n' "$OUT" | grep -c './install')"           "1"
+live_run '--remove --force probe/live'
+check "live config inside: --force does not override" "$RC"                                           "1"
+check "live config inside: still present"   "$(dir_state probe-live)"                                  "present"
+rm "$LIVEHOME/.zshrc"
+live_run '--remove probe/live'
+check "live config elsewhere: removed"      "$RC"                                                     "0"
+
+# Directory names flatten / to -, so `feat/y` and `feat-y` share one. The remove
+# path acts on the branch the registry records, and — like the create path — has
+# to say so when that is not the name it was given.
+installed_wt feat/y
+subwork_run '--remove feat-y'
+check "flattened name: removed"             "$RC"                                                     "0"
+check "flattened name: notes the branch"    "$(printf '%s\n' "$OUT" | grep -c "is on 'feat/y', not 'feat-y'")" "1"
+
+# When git refuses the -D, its reason is the actionable part. A
+# reference-transaction hook that aborts every ref update is the hermetic way to
+# make it refuse — installed AFTER the worktree exists, because `worktree add -b`
+# is a ref update too, and with core.hooksPath set on the fixture because a
+# global hooksPath (this machine has one) would otherwise hide the hook. The
+# hook prints its own marker: git relays a hook's stderr whatever version it is,
+# while git's own wording for the abort changed between 2.53 and 2.55 and made
+# this row red on CI when it matched that instead.
+installed_wt probe/hookfail
+HOOKS="$TMPROOT/hooks"; mkdir -p "$HOOKS"
+cat > "$HOOKS/reference-transaction" <<'HOOK'
+#!/bin/sh
+if [ "$1" = prepared ]; then
+  echo 'reference-transaction hook: deletion refused for this test' >&2
+  exit 1
+fi
+exit 0
+HOOK
+chmod +x "$HOOKS/reference-transaction"
+git -C "$SUBREPO" config core.hooksPath "$HOOKS"
+subwork_run '--remove probe/hookfail'
+git -C "$SUBREPO" config --unset core.hooksPath
+check "-D refused by git: worktree removed" "$RC"                                                     "0"
+check "-D refused by git: branch kept"      "$(branch_state probe/hookfail)"                           "kept"
+check "-D refused by git: said so"          "$(printf '%s\n' "$OUT" | grep -c 'would not delete it')"  "1"
+check "-D refused by git: reason shown"     "$(printf '%s\n' "$OUT" | grep -c 'deletion refused for this test')" "1"
+
+# Argument parsing, and the listing cap.
+subwork_run '--remove --bogus probe/x'
+check "--remove: unknown option refused"    "$RC"                                                     "1"
+check "--remove: unknown option named"      "$(printf '%s\n' "$OUT" | grep -c "unknown option '--bogus'")" "1"
+subwork_run '--remove a b'
+check "--remove: two targets refused"       "$RC"                                                     "1"
+installed_wt probe/many
+for i in $(seq 1 12); do echo x > "$SUBWT/probe-many/u$i.txt"; done
+subwork_run '--remove probe/many'
+check "many dirty files: refused"           "$RC"                                                     "1"
+check "many dirty files: listing capped"    "$(printf '%s\n' "$OUT" | grep -c 'and 2 more')"          "1"
+
+# The sentinel was ~/.zshrc alone, and `./install --herdr` never links ~/.zshrc:
+# it links five herdr destinations, among them the systemd unit that owns every
+# agent session — so a herdr-shape install from a worktree was removed with rc 0
+# and left the unit dangling (found by the local reviewer, reproduced). The check
+# enumerates the declared links of BOTH confs instead, read from the primary and
+# from the worktree, with the mise link and ~/.zshrc as a floor. The fixture repo
+# gains a conf declaring two herdr-shape links; ~/.zshrc stays on the primary.
+mkdir -p "$SUBREPO/config/herdr" "$SUBREPO/systemd"
+echo 'herdr'  > "$SUBREPO/config/herdr/config.toml"
+echo '[Unit]' > "$SUBREPO/systemd/herdr-server.service"
+cat > "$SUBREPO/install.conf.yaml" <<'YAML'
+- link:
+    ~/.config/herdr/config.toml: config/herdr/config.toml
+    ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
+YAML
+git -C "$SUBREPO" add -A >/dev/null
+git -C "$SUBREPO" commit -qm 'declare herdr links'
+git -C "$SUBREPO" push -q origin main
+git -C "$SUBREPO" fetch -q origin
+HERDRHOME="$TMPROOT/herdrhome"; mkdir -p "$HERDRHOME/.config/herdr" "$HERDRHOME/.config/systemd/user"
+installed_wt probe/herdr
+ln -s "$SUBREPO/file.txt" "$HERDRHOME/.zshrc"
+ln -s "$SUBWT/probe-herdr/config/herdr/config.toml"          "$HERDRHOME/.config/herdr/config.toml"
+ln -s "$SUBWT/probe-herdr/systemd/herdr-server.service"      "$HERDRHOME/.config/systemd/user/herdr-server.service"
+herdr_run() { OUT="$(zsh -c "source '$SYSTEM_SH'; HOME='$HERDRHOME' DOTFILES_ROOT='$SUBREPO' DOTFILES_PIN_BRANCH=main DOTFILES_WORKTREES='$SUBWT' dotfiles-work $1" 2>&1)"; RC=$?; }
+herdr_run '--remove probe/herdr'
+check "herdr-shape links inside: refused (rc 1)" "$RC"                                                "1"
+check "herdr-shape links inside: dir kept"  "$(dir_state probe-herdr)"                                 "present"
+check "herdr-shape links inside: names the unit" "$(printf '%s\n' "$OUT" | grep -c 'herdr-server.service')" "1"
+check "herdr-shape links inside: unit not dangling" "$([[ -e "$HERDRHOME/.config/systemd/user/herdr-server.service" ]] && echo resolves || echo dangling)" "resolves"
+rm "$HERDRHOME/.config/herdr/config.toml" "$HERDRHOME/.config/systemd/user/herdr-server.service"
+herdr_run '--remove probe/herdr'
+check "herdr-shape links elsewhere: removed" "$RC"                                                    "0"
+
+# git's own check_clean_worktree pins GIT_DIR=<wt>/.git and GIT_WORK_TREE=<wt>. A
+# plain `git -C <wt>` discovers UPWARD when the gitfile is gone, and under an
+# ancestor repo that ignores everything it reads THAT repo as clean — so --force
+# reached git for a directory whose state was never read. The ancestor repo is
+# created here, LAST, so that no other row's worktree sits under one.
+installed_wt probe/orphan
+echo 'orphaned work' > "$SUBWT/probe-orphan/orphan.txt"
+rm "$SUBWT/probe-orphan/.git"
+git init -q "$SUBWT"
+echo '*' > "$SUBWT/.gitignore"
+subwork_run '--remove probe/orphan'
+check "gitfile gone under a repo: refused (rc 1)" "$RC"                                               "1"
+check "gitfile gone under a repo: file kept" "$(cat "$SUBWT/probe-orphan/orphan.txt" 2>/dev/null)"    "orphaned work"
+check "gitfile gone under a repo: says unreadable" "$(printf '%s\n' "$OUT" | grep -c 'cannot read the state of')" "1"
+
+echo
 echo "=== ./install refuses a worktree — and ONLY a worktree ==="
 # The refusal is the first thing the script does, so a fixture with no dotbot
 # submodule fails right after it either way: these rows read the MESSAGE, not the
@@ -1031,6 +1415,12 @@ echo "=== the module itself: one note glyph, and it parses ==="
 # one of them is the deduplication half-done, and puts the next change to how
 # notes render back in four places.
 check "no hand-rolled note lines" "$(grep -c "printf '  • " "$SYSTEM_SH")" "0"
+# `local path` blanks PATH for the function's lifetime (zsh ties that array to
+# PATH). The doctor row above pins it behaviourally for one function; this pins
+# the class for the whole module, because it recurred in DO-583 — the link
+# enumerator lost `awk`, read every conf as unparseable, and refused every
+# removal with the wrong reason. Static, so it fires before any behaviour does.
+check "no local named path in the module" "$(grep -cE '^[[:space:]]*local\b.*\bpath\b' "$SYSTEM_SH")" "0"
 # zsh/functions/*.sh is read by no other static check: the shellcheck job selects
 # files by a `^#!` shebang and these have none, and pre-commit excludes the
 # directory because the syntax is zsh. CI now runs `zsh -n` over it; so does this,

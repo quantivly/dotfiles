@@ -110,7 +110,7 @@ bisect there without changing the shell you are typing into.
 ```bash
 dotfiles-work my/branch      # create/enter ~/dotfiles-worktrees/my-branch
 dotfiles-work --list         # list worktrees
-dotfiles-work --remove b     # remove one
+dotfiles-work --remove b     # remove one; deletes its branch only once its tree is on origin/main
 dotfiles-doctor              # is the live config the reviewed config?
 dotfiles-doctor --fetch      # ...compared against the actual remote, not a stale ref
 ```
@@ -263,6 +263,41 @@ review, all of which reported success:
   `git push` fails and suggests `git push origin HEAD:main` — pushing unreviewed commits
   straight onto the protected branch. It also refuses a leftover directory that is not a
   worktree instead of `cd`-ing in and reporting success.
+- **`dotfiles-work --remove` could not remove any worktree `./install` had run in
+  (DO-583).** `install` populates the dotbot submodule in whichever checkout it runs from
+  (in a worktree, only under `DOTFILES_ALLOW_WORKTREE_INSTALL=1`, or by a hand-run
+  `git submodule update`), and `git worktree remove` refuses a worktree containing one —
+  `working trees containing submodules cannot be moved or removed` — so the documented
+  cleanup worked only on worktrees nobody had installed from (2026-09-08: one of each, the
+  installed one refused). The fix is `--force`, which also skips git's dirty-tree check,
+  so the function runs that check itself first — the same `status --porcelain
+  --ignore-submodules=none` git runs, pinned with `GIT_DIR`/`GIT_WORK_TREE` the way git
+  pins it (a plain `git -C` discovers UPWARD when the gitfile is gone and reads an
+  ancestor repo as clean), plus `--untracked-files=normal`, because
+  `status.showUntrackedFiles = no` makes an untracked file print NOTHING and git's own
+  check has that hole — and refuses on any output **or on a status it cannot read**;
+  `--remove --force` is the explicit override. Two refusals `--force` does not override:
+  a directory git does not list as a worktree, and a worktree any live managed link
+  resolves into — the worktrees this fix makes removable are exactly the ones an install
+  has run in, and removing one would leave those links dangling; the remedy is
+  `./install` from the primary, which is non-destructive. **Enumerated, not
+  sentinelled:** the first version checked `~/.zshrc` alone, and `./install --herdr`
+  never links `~/.zshrc` — it links five herdr destinations including the systemd unit
+  that owns every agent session, and a herdr-shape worktree was removed with rc 0 and
+  left the unit dangling. Every destination in BOTH confs is checked now, read from the
+  primary and from the worktree, with the mise link and `~/.zshrc` as a floor. `git submodule deinit` first was the obvious alternative and does not
+  work: git refuses on the mere existence of `.git/worktrees/<id>/modules`, which deinit
+  keeps, and deinit run inside a worktree removes `submodule.<name>.*` from the **shared**
+  config, unregistering the primary checkout's copy from a command whose whole purpose is
+  to leave the primary alone. One `--force`, never two: a locked worktree still refuses.
+  Afterwards the branch is deleted with `-D` only when `git diff <branch> origin/main` is
+  empty (the squash-merge test above — `-d` and `merge-base` call a fully landed branch
+  unmerged), kept with the `-D` command printed otherwise, kept when the comparison
+  cannot run, and **never deleted when it is the pin branch** — `dotfiles-work main` is
+  allowed while the primary is off-pin, and main's tree is origin/main's by definition,
+  so without that arm `--remove main` deleted local `main` and called it landed. Every row for it runs against a fixture with a REAL populated submodule, and
+  the fixture asserts git refuses the plain remove before any row runs — otherwise the
+  rows pass with the fix reverted.
 
 **The umask is part of "what is live in this shell", and it failed the same way.**
 Ubuntu's `pam_umask` relaxes 022 to 002 whenever the login group is named after the user
@@ -316,7 +351,7 @@ Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 (scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
 `DOTFILES_GROUP_FILE`.
 
-State table: `scripts/test-dotfiles-guard.sh` (224 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (308 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale
