@@ -319,13 +319,32 @@ cred_has_refresh() {
 # store writes 5 -- it keeps neither rateLimitTier nor refreshTokenExpiresAt. So
 # every time the STORE won, a live credential silently lost its plan tier.
 #
-# That is not cosmetic. rateLimitTier is how Claude Code knows which plan the
-# account is on, and without it the model picker offers Fable as "Requires usage
-# credits" -- reported from a teammate's machine on 2026-09-08 after switching
-# accounts with clauth, and reproduced here: `personal` went
-# default_claude_max_20x -> absent through this very function, with no backup of
-# the losing side, because the comment claimed there was "no losing side any more"
-# when that was only ever true of mcpOAuth.
+# It is still worth preventing: rateLimitTier is how Claude Code knows the plan
+# locally, and `personal` went default_claude_max_20x -> absent through this very
+# function, with no backup of the losing side, because the comment claimed there
+# was "no losing side any more" when that was only ever true of mcpOAuth. Silently
+# dropping a field another writer owns is a defect whatever it costs.
+#
+# CORRECTED 2026-09-08, SAME DAY. An earlier version of this comment -- and the
+# commit message that shipped it -- said the loss made "the model picker offer
+# Fable as 'Requires usage credits'", citing a teammate's report. THAT CAUSAL
+# CLAIM IS WRONG and was never tested. A peer session read the Claude Code bundle
+# (2.1.263) and closed the path: the suffix comes from `sxe()`, gated on `EF()`
+# and `OW()`; the only tier-dependent arm of `EF()` tests
+# `rateLimitTier === "default_claude_zero"`, which a real tier string is not, so
+# ABSENCE of the field cannot flip it. The credits state itself is a server-set
+# latch (`fableCreditsRequired()`) plus gates keyed on `subscriptionType` -- which
+# clauth preserves. Where rateLimitTier IS read for entitlement, there is a
+# network fallback to `organization.rate_limit_tier`, so losing it costs a
+# round-trip and not the entitlement.
+#
+# The teammate's A/B (manual login fine, clauth switch broken) cannot isolate
+# credential CONTENTS either: a clauth switch changes the ACCOUNT as well as the
+# file, so it has two variables. What it isolates is which account.
+#
+# The lesson is the one this file keeps relearning: a measured correlation
+# (clauth's store lacks the field) plus a plausible mechanism is not a cause, and
+# writing it down as one puts it in a commit message that outlives the mistake.
 #
 # The rule: the winner supplies every field it actually has a value for; a field
 # the winner LACKS (or holds null for) is taken from the other side. Tokens and

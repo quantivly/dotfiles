@@ -864,7 +864,7 @@ fi
 #-----------------------------------------------------------------------------
 section "F6b. A field only one writer stores must survive the merge"
 #-----------------------------------------------------------------------------
-# CAUSED REAL DAMAGE BEFORE ANYONE NOTICED. clauth's store keeps 5 of the 7 keys
+# DESTROYED DATA BEFORE ANYONE NOTICED. clauth's store keeps 5 of the 7 keys
 # Claude Code writes -- it drops rateLimitTier and refreshTokenExpiresAt -- and
 # this merge used to take the winner's claudeAiOauth block WHOLE. So every time
 # the STORE won, a live credential lost its plan tier, with no backup of the
@@ -872,10 +872,11 @@ section "F6b. A field only one writer stores must survive the merge"
 # when that was only ever true of mcpOAuth. `personal` went
 # default_claude_max_20x -> absent that way on this machine.
 #
-# It is not cosmetic: rateLimitTier is how Claude Code knows the plan, and without
-# it the model picker offers Fable as "Requires usage credits" -- a teammate hit
-# exactly that after switching accounts with clauth, deleted ~/.clauth, retried
-# from scratch, and went back to switching by hand.
+# CORRECTED 2026-09-08: an earlier version of this header claimed the loss is what
+# makes the model picker offer Fable as "Requires usage credits". It does not --
+# see the correction in scripts/claude-account-dirs.sh for the bundle-level
+# reasoning. The rows below are unaffected: they assert that a field one writer
+# owns survives a merge, which is right whatever the field is worth.
 
 # The store wins the credential decision, and must NOT strip the tier.
 new_home f36; mk_profile p1
