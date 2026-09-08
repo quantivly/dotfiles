@@ -260,12 +260,34 @@ cred_live_side() {
 cred_rotation_residual() {
     local f="$1"
     has_jq || return 1
-    # refreshTokenExpiresAt rotates too -- leaving it in would make EVERY genuine
-    # rotation look like a shape change, i.e. refuse everything.
+    # Two kinds of field are excluded, and the second was learned the hard way.
+    #
+    # ROTATING: accessToken, refreshToken, expiresAt, refreshTokenExpiresAt. A
+    # refresh rewrites all four, so leaving any of them in makes EVERY genuine
+    # rotation look like a shape change -- i.e. refuse everything.
+    #
+    # WRITER-DEPENDENT: rateLimitTier. Claude Code writes it into the credential;
+    # clauth writes its store WITHOUT it. So the field differs according to which
+    # program last wrote each file, not according to which account it belongs to
+    # -- and including it made the gate refuse permanently, with no remedy that
+    # could ever work: `clauth login` rewrites the store in clauth's own shape, so
+    # the gap reopens on the spot. Observed on quantivly-1, 2026-09-08: refused,
+    # re-authenticated as instructed, refused again with the identical residual.
+    #
+    # THE TEST FOR THIS CLASS: if a field can differ between two files that hold
+    # the SAME account's login, it cannot be evidence about WHICH account the
+    # login is for. Comparing it does not make the gate stricter, it makes it
+    # unfixable -- and an unfixable refusal is a permanently-red checker wearing a
+    # different hat.
+    #
+    # What is left -- scopes and subscriptionType -- still separates a personal
+    # account from a work one. It does NOT separate two work accounts on the same
+    # plan, and never did; that is what the identity permit is for.
     jq -e -S -c 'del(.claudeAiOauth.accessToken,
                      .claudeAiOauth.refreshToken,
                      .claudeAiOauth.expiresAt,
-                     .claudeAiOauth.refreshTokenExpiresAt)
+                     .claudeAiOauth.refreshTokenExpiresAt,
+                     .claudeAiOauth.rateLimitTier)
                  | del(.mcpOAuth)' "$f" 2>/dev/null || return 1
 }
 
@@ -278,20 +300,38 @@ cred_has_refresh() {
     jq -e '(.claudeAiOauth.refreshToken // "") != ""' "$f" >/dev/null 2>&1
 }
 
-# The merged credential: the WINNING side's login, plus the UNION of both sides'
-# MCP-server logins, on stdout.
+# The merged credential: the WINNING side's login, the UNION of both sides'
+# MCP-server logins, and every account field either side knows about.
 #
-# The union is what stops this being a coin flip with a real cost. Measured
-# 2026-09-08: quantivly-3's store held ZERO mcpOAuth entries while its account dir
-# held one, and quantivly-2's store held one against three in its dir -- so
+# THE mcpOAuth UNION stops the decision being a coin flip with a real cost.
+# Measured 2026-09-08: quantivly-3's store held ZERO mcpOAuth entries while its
+# account dir held one, and quantivly-2's store held one against three -- so
 # whichever side happened to rotate last decided whether those logins survived,
 # twice an hour per profile once the timer runs. Each one lost is a browser OAuth
-# flow to get back, which is precisely the tax that made isolation expensive.
+# flow to get back, the tax that made isolation expensive in the first place.
+# Per server: an entry with a real accessToken always beats one without (a
+# discovery stub must never overwrite an authorised entry), then later expiry wins.
 #
-# Per server: an entry with a real accessToken always beats one without (CLAUDE.md's
-# own discriminator -- a discovery stub must never overwrite an authorised entry),
-# then the later expiresAt wins.
-cred_merge() {  # $1 = winner file (its claudeAiOauth is kept), $2 = the other
+# THE FIELD UNION exists because taking the winner's claudeAiOauth block WHOLE
+# destroyed data, and it did so here before anyone noticed. The two writers do not
+# store the same keys: Claude Code writes 7 (accessToken, refreshToken, expiresAt,
+# refreshTokenExpiresAt, scopes, subscriptionType, rateLimitTier) and clauth's
+# store writes 5 -- it keeps neither rateLimitTier nor refreshTokenExpiresAt. So
+# every time the STORE won, a live credential silently lost its plan tier.
+#
+# That is not cosmetic. rateLimitTier is how Claude Code knows which plan the
+# account is on, and without it the model picker offers Fable as "Requires usage
+# credits" -- reported from a teammate's machine on 2026-09-08 after switching
+# accounts with clauth, and reproduced here: `personal` went
+# default_claude_max_20x -> absent through this very function, with no backup of
+# the losing side, because the comment claimed there was "no losing side any more"
+# when that was only ever true of mcpOAuth.
+#
+# The rule: the winner supplies every field it actually has a value for; a field
+# the winner LACKS (or holds null for) is taken from the other side. Tokens and
+# expiries are always present on the winner, so they are never back-filled from a
+# superseded credential -- only descriptive fields neither writer disputes.
+cred_merge() {  # $1 = winner file (its login wins), $2 = the other
     local win="$1" other="$2"
     has_jq || return 1
     jq -e -s '
@@ -308,9 +348,17 @@ cred_merge() {  # $1 = winner file (its claudeAiOauth is kept), $2 = the other
         (.[0] // {}) as $w | (.[1] // {}) as $o
       | ($w.mcpOAuth // {}) as $wm | ($o.mcpOAuth // {}) as $om
       | (($wm | keys) + ($om | keys) | unique) as $ks
-      | ($ks | map({key: ., value: better($wm[.]; $om[.])}) | from_entries) as $merged
+      | ($ks | map({key: ., value: better($wm[.]; $om[.])}) | from_entries) as $mcp
+      # Field union: other as the base, winner overriding wherever it has a real
+      # value. `with_entries(select(.value != null))` is what makes an explicit
+      # null on the winner defer instead of erasing -- clauth writes some fields
+      # as null rather than omitting them.
+      | ($o.claudeAiOauth // {}) as $ob
+      | ($w.claudeAiOauth // {} | with_entries(select(.value != null))) as $wb
       | $w
-      | if ($ks | length) > 0 then .mcpOAuth = $merged else . end
+      | if (($ob | length) > 0 or ($wb | length) > 0)
+        then .claudeAiOauth = ($ob + $wb) else . end
+      | if ($ks | length) > 0 then .mcpOAuth = $mcp else . end
     ' "$win" "$other" 2>/dev/null || return 1
 }
 
@@ -729,6 +777,43 @@ build_one() {
         mv -f "$account_dir/.settings.json.new" "$account_dir/settings.json"
     else
         warn "$profile: no ~/.claude/settings.json to copy — the statusline and hooks will be absent"
+    fi
+
+    # 5b. A STALE ACCOUNT IDENTITY in .claude.json. Seeded once from the global
+    #     file (below), that block names whichever account was live at seed time
+    #     and is corrected only if Claude Code happens to rewrite it -- so on this
+    #     machine quantivly-1 and quantivly-2 both advertised quantivly-3's
+    #     account, complete with its organizationName, seatTier and rate-limit
+    #     tiers. Two costs: those sessions report the wrong org, and the identity
+    #     permit (cred_same_account) cannot fire, so an ordinary re-login gets
+    #     refused by the shape gate instead.
+    #
+    #     Dropping the block rather than rewriting it: Claude Code re-derives its
+    #     own identity when it is absent, which is exactly what clauth does on a
+    #     profile switch ("the stale account-identity block is dropped, so Claude
+    #     Code re-derives identity"). Guessing the other fields ourselves would be
+    #     inventing account metadata.
+    if [[ -f "$account_dir/.claude.json" && -s "$pdir/account_id.json" ]] && has_jq; then
+        local want_uuid have_uuid
+        want_uuid="$(jq -e -r 'select(type == "string") | select(. != "")' \
+                     "$pdir/account_id.json" 2>/dev/null)" || want_uuid=""
+        have_uuid="$(jq -e -r '.oauthAccount.accountUuid | select(type == "string") | select(. != "")' \
+                     "$account_dir/.claude.json" 2>/dev/null)" || have_uuid=""
+        # Only when BOTH are known and they disagree. An absent block is the state
+        # we would be creating anyway, and an unreadable anchor is not evidence.
+        if [[ -n "$want_uuid" && -n "$have_uuid" && "$want_uuid" != "$have_uuid" ]]; then
+            local cj_tmp="$account_dir/.claude.json.tmp.$$"
+            if jq -e 'del(.oauthAccount)' "$account_dir/.claude.json" > "$cj_tmp" 2>/dev/null \
+               && [[ -s "$cj_tmp" ]]; then
+                chmod 600 "$cj_tmp" 2>/dev/null || true
+                mv -f "$cj_tmp" "$account_dir/.claude.json"
+                warn "$profile: dropped a stale account identity from .claude.json (it named"
+                warn "        another profile's account) — Claude Code will re-derive it."
+            else
+                rm -f "$cj_tmp"
+                warn "$profile: could not drop the stale account identity from .claude.json"
+            fi
+        fi
     fi
 
     # 5. .claude.json: real, seeded once, never overwritten by a re-run.
