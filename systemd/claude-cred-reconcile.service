@@ -1,0 +1,45 @@
+# systemd/claude-cred-reconcile.service
+# =====================================
+# Keeps each Claude account dir's credential and its clauth profile store as ONE
+# file, between session launches.
+#
+# WHY A TIMER AND NOT JUST THE LAUNCH PATH. scripts/claude-account-dirs.sh
+# reconciles on every `claude` launch, which is enough to stop the LOGOUT (a
+# superseded token can no longer be restored over a live one). It is not enough
+# to keep clauth healthy: Claude Code writes .credentials.json atomically, so a
+# token refresh replaces the symlink with a real file and clauth's store stops
+# receiving rotations. clauth then polls with a token the server has already
+# invalidated, and quarantines the account as auth_broken — which is exactly how
+# `personal` was quarantined on this machine on 2026-09-08, with a session
+# happily running on the account the whole time. Nothing reported it, because a
+# quarantined account simply stops being picked.
+#
+# So the store has to be brought forward on a clock, not only at launch.
+#
+# READ-MOSTLY AND SAFE TO RUN AT ANY MOMENT. --reconcile builds nothing: it
+# touches only .credentials.json, never settings.json or .claude.json, and it is
+# a no-op in the healthy state (a symlink pointing at the store). Where the two
+# files differ it keeps a copy of the loser before writing, and where it cannot
+# tell which is live it refuses and touches neither.
+#
+# Symlinked to ~/.config/systemd/user/ by ./install (install.conf.yaml). Linking
+# does NOT enable it; ./install reconciles enablement via
+# scripts/reconcile-systemd-units.sh. Enable once:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now claude-cred-reconcile.timer
+#
+# Watch it:  journalctl --user -u claude-cred-reconcile.service -e
+# Ask it:    claude-doctor        (the "Account dirs" section)
+
+[Unit]
+Description=Reconcile Claude account-dir credentials with their clauth profile stores
+Documentation=file://%h/.dotfiles/scripts/claude-account-dirs.sh
+
+[Service]
+Type=oneshot
+# Absolute, like the herdr unit: the checkout has to be at ~/.dotfiles either way.
+ExecStart=%h/.dotfiles/scripts/claude-account-dirs.sh --reconcile
+# A machine with no clauth profiles and no account dirs is a legitimate state,
+# and --reconcile exits 0 there. A non-zero exit means it genuinely could not
+# decide something, which is worth a failed unit rather than silence.
+Nice=10

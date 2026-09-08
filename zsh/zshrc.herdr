@@ -105,27 +105,133 @@ _claude_holder_count() {
   print -r -- "$n"
 }
 
-# The registered profile with the fewest live holders. THIS is what makes a
-# bigger profile pool pay off: `clauth which` cannot do it, because it answers
-# from $CLAUDE_CONFIG_DIR and so returns the PARENT session's profile inside an
-# isolated pane — measured 2026-09-06, it says quantivly-3 in an isolated shell
-# and `unknown` in a bare one. Defaulting to it herds every session onto one
-# credential group, which is the thing being fixed.
+# THE POOL. Atrium had a pool of work accounts and a separate personal one; this
+# is that, as data. Empty (the default) means "every registered profile", which
+# is what a modular adopter with one account wants and what this did before.
 #
-# Ties break in glob (alphabetical) order, so the choice is deterministic.
+#   CLAUDE_ACCOUNT_POOL=(quantivly-1 quantivly-2 quantivly-3)
+#
+# Set it in ~/.zshrc.local. A profile OUTSIDE the pool is never chosen
+# automatically — only by name, via `claude-as <profile>`. That is the whole
+# point of separating personal from work: a personal account should never be
+# spent by a work session that merely happened to start next.
+(( ${+CLAUDE_ACCOUNT_POOL} )) || typeset -ga CLAUDE_ACCOUNT_POOL=()
+
+# Is this profile excluded from automatic selection, and why? Prints a reason, or
+# nothing when the profile is selectable.
+#
+# Both states below are ones clauth writes and nothing here can repair. Picking a
+# quarantined account is not a neutral mistake: `personal` was auth_broken on
+# 2026-09-08 and the old holder-count picker chose it *because* nothing was
+# running on it — the emptiness that quarantine causes read as headroom.
+_claude_profile_excluded() {
+  local name="$1" cfg="$HOME/.clauth/profiles/$1/config.toml"
+  local toml="$HOME/.clauth/profiles.toml"
+  # `disabled = true`, ignoring commented-out template lines.
+  if [[ -r "$cfg" ]] && command grep -qE '^[[:space:]]*disabled[[:space:]]*=[[:space:]]*true' "$cfg"; then
+    print -r -- "disabled"; return 0
+  fi
+  # auth_broken = ["a", "b"] — clauth's quarantine list, which it writes itself.
+  if [[ -r "$toml" ]]; then
+    local line
+    line="$(command grep -m1 -E '^[[:space:]]*auth_broken[[:space:]]*=' "$toml" 2>/dev/null)"
+    if [[ -n "$line" && "$line" == *"\"$name\""* ]]; then
+      print -r -- "auth broken — clauth login $name"; return 0
+    fi
+  fi
+  return 1
+}
+
+# The worse of a profile's 5h and 7d utilization, as an integer 0-100, from the
+# usage cache clauth already maintains. Prints nothing when it cannot be read.
+#
+# The 7d window counts as much as the 5h one: an account at 3% of five hours and
+# 96% of its week has almost nothing left to give, and ranking on 5h alone would
+# send every new session straight to it.
+_claude_profile_load() {
+  local f="$HOME/.clauth/profiles/$1/usage_cache.json"
+  [[ -r "$f" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  # -e so the exit status decides, never the emptiness of the output.
+  jq -e -r '[(.five_hour.utilization // empty), (.seven_day.utilization // empty)]
+            | select(length > 0) | max | floor' "$f" 2>/dev/null || return 1
+}
+
+# Seconds since a profile's usage cache was written, or nothing.
+#
+# Loads its own modules. A helper that depends on a module its CALLER happened to
+# load returns nothing when called any other way — and "no age" reads as "fresh",
+# so a stale reading would have been believed.
+_claude_profile_cache_age() {
+  local f="$HOME/.clauth/profiles/$1/usage_cache.json" mtime
+  [[ -r "$f" ]] || return 1
+  zmodload -F zsh/stat b:zstat 2>/dev/null || return 1
+  zmodload zsh/datetime 2>/dev/null || return 1
+  mtime=$(zstat +mtime "$f" 2>/dev/null) || return 1
+  print -r -- $(( EPOCHSECONDS - mtime ))
+}
+
+# The pool member with the most headroom. `clauth which` cannot answer this — it
+# reads $CLAUDE_CONFIG_DIR and so returns the PARENT session's profile inside an
+# isolated pane (measured 2026-09-06: quantivly-3 in an isolated shell, `unknown`
+# in a bare one), which would herd every spawn into its parent's credential group.
+#
+# Ranked by utilization, then by live holders, then alphabetically — so the
+# choice is deterministic and two shells starting together do not both pile onto
+# the same account.
+#
+# A STALE cache is its own state, never silent agreement. A quarantined account
+# stops being polled, so its numbers freeze at whatever they were: trusting them
+# is how the picker would walk straight back onto a dead account.
 _claude_pick_profile() {
-  local p name best="" best_n=-1 n
+  zmodload -F zsh/stat b:zstat 2>/dev/null
+  zmodload zsh/datetime 2>/dev/null
+  local p name load age why
+  local -a candidates
+  local max_age=${CLAUDE_ACCOUNT_CACHE_MAX_AGE:-3600}
+
   for p in "$HOME"/.clauth/profiles/*(N/); do
     name="${p:t}"
     [[ -f "$p/credentials.json" ]] || continue
-    n="$(_claude_holder_count "$name")"
-    if (( best_n < 0 || n < best_n )); then best="$name"; best_n=$n; fi
+    if (( ${#CLAUDE_ACCOUNT_POOL} )); then
+      (( ${CLAUDE_ACCOUNT_POOL[(Ie)$name]} )) || continue
+    fi
+    if why="$(_claude_profile_excluded "$name")"; then
+      _claude_pick_skipped+=("$name ($why)")
+      continue
+    fi
+    load="$(_claude_profile_load "$name")" || load=""
+    age="$(_claude_profile_cache_age "$name")" || age=""
+    # No reading, or one too old to believe, sorts last rather than first: it is
+    # "unknown", and unknown must never outrank a measured 0%.
+    if [[ -z "$load" ]] || [[ -n "$age" && "$age" -gt "$max_age" ]]; then
+      load=101
+    fi
+    # zsh sorts these as strings, so the numeric fields are zero-padded.
+    candidates+=("${(l:3::0:)load} ${(l:3::0:)$(_claude_holder_count "$name")} $name")
   done
-  [[ -n "$best" ]] || return 1
-  print -r -- "$best"
+
+  (( ${#candidates} )) || return 1
+  # Sort into an ARRAY. `${${(o)candidates}[1]}` joins the array into one scalar
+  # and then indexes its first CHARACTER — it returned "0" (from the zero-padded
+  # load) and the picker silently chose nothing.
+  local -a ranked=( "${(@o)candidates}" )
+  local -a best=( ${=ranked[1]} )
+  _claude_pick_load="${best[1]}"
+  # REPLY, not stdout: this must be called DIRECTLY. A `$(...)` call is a
+  # subshell, and the two globals above — the load that won, and every account
+  # the pool refused — would die with it, leaving the announcement silent in
+  # exactly the case it exists for.
+  REPLY="${best[3]}"
+  return 0
 }
 
 claude() {
+  # Reset per call: these carry the picker's explanation out to the announcement,
+  # and a second launch in the same shell must not inherit the first's reasons.
+  local _claude_pick_load="" REPLY=""
+  local -a _claude_pick_skipped=()
+
   # local -x, never a bare export: an export here would leak the config dir into
   # the pane's shell and silently pin every LATER command in it to this account.
   # -x still exports to this function's children, which is all that is needed.
@@ -136,14 +242,26 @@ claude() {
   # `clauth start` pane, a herdmates teammate, and hspawn's own launch intact.
   if [[ -z "$CLAUDE_CONFIG_DIR" && -z "${CLAUDE_ISOLATION_OFF:-}" ]] \
      && command -v clauth >/dev/null 2>&1 && [[ -x "$(_claude_account_builder)" ]]; then
-    profile="${CLAUDE_ACCOUNT_PROFILE:-$(_claude_pick_profile)}"
+    if [[ -n "${CLAUDE_ACCOUNT_PROFILE:-}" ]]; then
+      profile="$CLAUDE_ACCOUNT_PROFILE"
+    elif _claude_pick_profile; then
+      profile="$REPLY"
+    else
+      profile=""
+    fi
     if [[ -z "$profile" ]]; then
       # NEVER SILENT in either direction: which credential a session burns decides
       # which account is billed, and nothing about the running pane reveals it
       # afterwards. Falling back to the shared file is right — inventing a profile
       # would bill an account nobody picked — but it must be said.
-      print -u2 -- "claude: clauth is installed but no profile has a credential — this session shares"
-      print -u2 -- "        ~/.claude/.credentials.json. 'clauth login <name>' to give it its own."
+      if (( ${#_claude_pick_skipped} )); then
+        print -u2 -- "claude: every account in the pool is unusable — this session shares"
+        print -u2 -- "        ~/.claude/.credentials.json with every other one."
+        print -u2 -- "        refused: ${(j:, :)_claude_pick_skipped}"
+      else
+        print -u2 -- "claude: clauth is installed but no profile has a credential — this session shares"
+        print -u2 -- "        ~/.claude/.credentials.json. 'clauth login <name>' to give it its own."
+      fi
     elif dir="$(command "$(_claude_account_builder)" "$profile")" && [[ -n "$dir" ]]; then
       CLAUDE_CONFIG_DIR="$dir"
     else
@@ -160,8 +278,18 @@ claude() {
     profile="${${CLAUDE_CONFIG_DIR#$(_claude_account_root)/}%%/*}"
     holder="$(_claude_account_root)/$profile/holders/$$"
     command mkdir -p "${holder:h}" 2>/dev/null && : > "$holder" 2>/dev/null || holder=""
-    [[ -n "${CLAUDE_ACCOUNT_QUIET:-}" ]] || \
-      print -u2 -- "claude: account '$profile' (isolated: ${CLAUDE_CONFIG_DIR/#$HOME/~})"
+    if [[ -z "${CLAUDE_ACCOUNT_QUIET:-}" ]]; then
+      local detail=""
+      # The load that WON, and anything the pool refused — a session that lands on
+      # an unexpected account should say why without being asked.
+      if [[ -n "${_claude_pick_load:-}" ]]; then
+        if (( _claude_pick_load > 100 )); then detail=" — no usage reading"
+        else detail=" — $(( 10#$_claude_pick_load ))% used"; fi
+      fi
+      print -u2 -- "claude: account '$profile'$detail (isolated: ${CLAUDE_CONFIG_DIR/#$HOME/~})"
+      (( ${#_claude_pick_skipped} )) && \
+        print -u2 -- "        skipped: ${(j:, :)_claude_pick_skipped}"
+    fi
   fi
 
   {
@@ -544,6 +672,11 @@ _hspawn_await_agent() {
 hspawn() {
   local profile="" profile_set=0 model="" effort="" mode="auto" base="" name_override=""
   local endopts=0 shared=0
+  # REPLY is how _claude_pick_profile answers, and it is a shell-wide name: local
+  # here so a spawn cannot leave its choice behind in the calling shell.
+  local REPLY=""
+  local _claude_pick_load=""
+  local -a _claude_pick_skipped=()
   local -a rest=()
   while (( $# )); do
     case "$1" in
@@ -685,7 +818,10 @@ hspawn() {
       # 2026-09-06, it says `quantivly-3` in an isolated shell and `unknown` in a
       # bare one. Defaulting to it puts every spawn in the same credential group
       # as its parent, which is the concentration this is meant to undo.
-      profile="$(_claude_pick_profile)"
+      # Called DIRECTLY, never as `$(...)`: the picker reports through globals
+      # (the load that won, and every account it refused) and a subshell would
+      # discard them — and with them the reason a spawn landed where it did.
+      if _claude_pick_profile; then profile="$REPLY"; else profile=""; fi
       if [[ -z "$profile" ]]; then
         # Could not name an account. Falling through to the shared credential is
         # the right choice — it is the old behaviour, and inventing a profile

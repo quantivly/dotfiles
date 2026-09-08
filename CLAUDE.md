@@ -1432,8 +1432,44 @@ Design points that are load-bearing rather than preferences:
 
 - **The credential is a symlink, never a copy** — see the correction above. A copy is an
   independent holder of one grant, which is the failure this exists to remove rather than to
-  manufacture. The symlink is written *through*, not replaced: the profile stores carry `mcpOAuth`
-  discovery records that only Claude Code writes.
+  manufacture. **CORRECTED 2026-09-08: the claim that followed here — "the symlink is written
+  *through*, not replaced" — was FALSE, and it was never checked.** Claude Code writes
+  `.credentials.json` **atomically** (temp file + rename), and a rename *replaces* a symlink with a
+  real file holding the freshly rotated token. That much is survivable; what was not is what the
+  builder then did with it. Its step 3 ran an unconditional `ln -sfn`, restoring the store's
+  **superseded** token — and since rotation is server-side, that invalidated credential logged out
+  every live session on the account. `claude()` runs the builder on **every** launch, so each new
+  session on a profile re-armed the trap for the ones already running.
+  Measured that morning: three of four account dirs held real, diverged files, `personal` was
+  already quarantined by clauth as `auth_broken`, and every check on the machine was green.
+  The builder now **reconciles** (`reconcile_credential`) instead of relinking: it decides which
+  side is live from the `expiresAt` inside each file (falling back to mtime with no `jq`), adopts a
+  session's rotation *into* the store, copies the loser aside first, and **refuses** when it cannot
+  tell. A discovery stub — empty `accessToken`, no `expiresAt` — never counts as live. State table:
+  `scripts/test-claude-account-dirs.sh` (70 checks, 9 mutants, all died), and
+  `scripts/claude-account-dirs.sh --reconcile` is the same code path on a 2-minute
+  `systemd --user` timer, because launch-time alone leaves the store stale between a rotation and
+  the next launch — which is precisely how `personal` got quarantined.
+  **The invariant, stated once: for each account there is exactly ONE credential file, and every
+  process using that account reads it.** `claude-doctor`'s "Account dirs" section asserts it, along
+  with the pooled-sharing one below.
+  Two bugs inside the fix, both of which reported success: `exec {fd}>file 2>/dev/null` has **no
+  command**, so *both* redirections applied to the shell permanently and the script's own stderr
+  went to `/dev/null` for the rest of the run — every later `warn()` and `die()` silently lost, in
+  the file whose whole purpose is to say what it did to a credential. And `cond && cmd` as a bare
+  statement is a *failing command* when `cond` is false, which under `set -e` exits the script with
+  no message at all (the SC2015 class this file already records twice).
+- **Everything except the credential is SHARED, and that is the point of a pool.** Each account dir
+  symlinks `projects/` (so memory and every transcript), `plugins/`, `skills/`, `hooks/`, `teams/`,
+  `tasks/` and the user-level `CLAUDE.md` back to `~/.claude/`, derived from the live directory
+  rather than a list. So accounts in a pool share memory, plugin configuration and skills; only the
+  identity differs. `claude-doctor` asserts it per account dir, because nothing about a session
+  reveals that it has quietly stopped sharing.
+  The one genuine exception is **plugin MCP OAuth**: `mcpOAuth` lives *inside* `.credentials.json`,
+  so it is per-account by construction and each profile needs its own browser flow per plugin MCP
+  server. The **claude.ai connectors** for the same services ride the login token and need no such
+  entry, which is why retiring the duplicated plugin copies makes the per-profile MCP cost zero.
+
 - **`settings.json` is a copy, not a symlink.** clauth rewrites the global file's `env` and
   `[models]` on a profile switch (which is how `model` came to be `null` there), and a symlink
   would import that churn into every account dir. A persistent dir has no fresh-launch moment to
@@ -1445,12 +1481,33 @@ Design points that are load-bearing rather than preferences:
   `~/.claude.json` is 95 kB with 21 projects and matches what clauth seeds. Seeding from the husk
   gives every account dir first-run onboarding and a trust dialog in every worktree — silently,
   because a husk is still valid JSON. An implausibly small seed is a hard error for that reason.
-- **The default profile is the least-loaded one, not `clauth which`.** That call answers from
-  `$CLAUDE_CONFIG_DIR`, so **inside an isolated pane it returns the parent session's profile** —
-  measured, it says `quantivly-3` in an isolated shell and `unknown` in a bare one. Defaulting to
-  it puts every spawn in its parent's credential group, which is the concentration being undone.
-  Holders are counted from pidfiles under `<dir>/holders/`, pruned by `kill -0` as they are
+- **The default profile is the pool member with the most HEADROOM, not `clauth which`.** That call
+  answers from `$CLAUDE_CONFIG_DIR`, so **inside an isolated pane it returns the parent session's
+  profile** — measured, it says `quantivly-3` in an isolated shell and `unknown` in a bare one.
+  Defaulting to it puts every spawn in its parent's credential group, which is the concentration
+  being undone.
+  **`CLAUDE_ACCOUNT_POOL` is the pool** (set it in `~/.zshrc.local`; empty = every registered
+  profile, which is what a one-account adopter wants). A profile outside it is never chosen
+  automatically — only by name with `claude-as` — which is how a personal account stops being spent
+  by a work session that merely happened to start next.
+  Ranked by the **worse of the 5h and 7d** utilization from `~/.clauth/profiles/<p>/usage_cache.json`,
+  then by live holders, then alphabetically. 7d counts as much as 5h: an account at 3% of five hours
+  and 96% of its week has almost nothing left, and ranking on 5h alone sends every new session
+  straight to it. A reading that is missing or older than `CLAUDE_ACCOUNT_CACHE_MAX_AGE` (3600 s)
+  sorts **last**, never first — unknown must not outrank a measured 0%.
+  **Accounts clauth has excluded are skipped, and this is not cosmetic.** `disabled` comes from the
+  profile's `config.toml`, `auth_broken` from clauth's own quarantine list. Until 2026-09-08 the
+  picker ranked on holder count alone and chose `personal` — *because* it was quarantined and so had
+  nothing running on it. **The emptiness that a quarantine causes read as headroom.** A quarantined
+  account also stops being polled, so its usage numbers freeze at whatever they were (`personal`'s
+  were 21.7 h stale when this was found), which is why a stale reading can never be believed.
+  Holders are still counted from pidfiles under `<dir>/holders/`, pruned by `kill -0` as they are
   counted; `claude()` blocks for the session, so the shell's pid stands in for it.
+  **The picker sets `REPLY` and must be called DIRECTLY.** A `$(...)` call is a subshell, and the
+  two globals it reports through — the load that won, and every account it refused — would die with
+  it, leaving the announcement silent in exactly the case it exists for. It printed to stdout at
+  first, and did. Also `${${(o)arr}[1]}` **joins the array into one scalar and indexes its first
+  CHARACTER**: it returned `0` from the zero-padded sort key, and the picker silently chose nothing.
 - **Credential groups can only equal logins.** Four profiles against 18–30 sessions gives groups
   of five to seven; `clauth login <name>` is what makes them smaller. Whether two profiles can
   hold *the same* account independently is **untested** — if each `/login` yields an independent
@@ -1487,6 +1544,14 @@ Traps specific to the checker, each of which produced a green tick first:
   whose own header says NEVER PRINTS A CREDENTIAL. A `sed` *range* from an anchored
   assignment to the first `]`, quitting there, is bounded by construction. Also
   `fallback_chain = []` is configured, not armed.
+  **And do not read that as a description of this machine.** The chain here was
+  `["quantivly-3","quantivly-1","quantivly-2"]` with a live daemon until 2026-09-08, while 15 of 21
+  Claude processes had no `CLAUDE_CONFIG_DIR` at all and so read the very file the chain repoints —
+  which is what a login-expiry incident hitting five sessions in the same minute looks like. It is
+  empty now **by decision**: with every session placed on its own account dir at launch, an account
+  is chosen where choosing is free, instead of being swapped underneath sessions already running.
+  Per-session rotation is still available where it is actually wanted, via
+  `clauth start <p> --with-fallback`, which moves that one session and touches no other.
 - **Read the type before indexing — the second recurrence.** CLAUDE.md already
   records this for `herdr-claude-wire.sh` (`//` substitutes for null, never for a
   type error). An `mcpOAuth` value that is a string — a plausible product of the

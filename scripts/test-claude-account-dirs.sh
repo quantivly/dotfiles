@@ -78,6 +78,33 @@ mk_profile() {  # $1 = name; $2 = "nocred" to create the dir without a credentia
         > "$FHOME/.clauth/profiles/$1/credentials.json"
 }
 
+# A credential with a chosen expiry. `stub` is the shape Claude Code writes after
+# OAuth discovery but before authorisation -- an empty accessToken and NO
+# expiresAt -- which is a real state on the machine this was written for and must
+# never be mistaken for a live credential. `bad` is unparseable.
+mk_cred() {  # $1 = path, $2 = expiresAt | stub | bad, $3 = optional marker
+    local path="$1" kind="$2" mark="${3:-m}"
+    case "$kind" in
+        stub) printf '{"claudeAiOauth":{"accessToken":"","clientId":"c","serverName":"s"}}\n' > "$path" ;;
+        bad)  printf 'not json at all: %s\n' "$mark" > "$path" ;;
+        *)    printf '{"claudeAiOauth":{"accessToken":"CANARY-%s","expiresAt":%s},"mcpOAuth":{"n":{}}}\n' \
+                  "$mark" "$kind" > "$path" ;;
+    esac
+    chmod 600 "$path"
+}
+
+# Put the account dir into the state a token refresh leaves behind: a REAL file
+# where the symlink used to be. This is not corruption -- Claude Code writes the
+# credential atomically, and a rename replaces a symlink.
+as_rotated_real_file() {  # $1 = profile, $2 = expiresAt | stub | bad, $3 = marker
+    local a="$ACCOUNT_ROOT/$1/.credentials.json"
+    rm -f "$a"
+    mk_cred "$a" "$2" "${3:-live}"
+}
+
+store_of()  { printf '%s\n' "$FHOME/.clauth/profiles/$1/credentials.json"; }
+backups_of(){ shopt -s nullglob; local g=("$1".superseded-*); shopt -u nullglob; printf '%d\n' "${#g[@]}"; }
+
 run_sut() {
     [[ -n "${FHOME:-}" && -d "$FHOME" ]] || fatal "no fixture HOME — refusing to run against the real one"
     OUT="$(env -u CLAUDE_ACCOUNT_DIRS_ROOT HOME="$FHOME" bash "$SUT" "$@" 2>&1)"
@@ -253,6 +280,236 @@ if [[ ! -d "$ACCOUNT_ROOT/p3" ]]; then
 else
     bad "--all built an account dir for a profile with no credential"
 fi
+
+#-----------------------------------------------------------------------------
+section "F. Credential reconciliation — the account dir vs the clauth store"
+#-----------------------------------------------------------------------------
+# THE BUG THIS SECTION EXISTS FOR. Claude Code writes .credentials.json
+# atomically, so a rename REPLACES the symlink this script creates with a real
+# file holding a freshly ROTATED token. The old code then ran an unconditional
+# `ln -sfn` on the next launch, restoring the store's SUPERSEDED token -- and
+# because rotation is server-side, that logged out every live session on the
+# account. Three of four account dirs were in this state when it was found, and
+# clauth had already quarantined one profile as auth_broken.
+
+new_home f1; mk_profile p1
+run_sut p1
+want_link "a first build links the credential to the store" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+run_sut p1
+want_link "a rebuild leaves a healthy link alone" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+if [[ "$(backups_of "$(store_of p1)")" == 0 ]]; then
+    ok "and the healthy path makes no backups"
+else
+    bad "a healthy rebuild made a backup"
+fi
+
+# The row the whole fix rests on: revert reconcile_credential to `ln -sfn` and
+# this must fail.
+new_home f2; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+cp "$ACCOUNT_ROOT/p1/.credentials.json" "$TMPROOT/f2.rotated"
+run_sut p1
+want_rc  "a rebuild over a rotated credential succeeds" 0
+want_out "and says it adopted it"                       "adopted the live session"
+want_link "the account dir is a symlink again" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+if cmp -s "$TMPROOT/f2.rotated" "$(store_of p1)"; then
+    ok "THE ROTATED TOKEN SURVIVED: the store now holds it, not the superseded one"
+else
+    bad "the rotated credential was CLOBBERED — this is the logout bug"
+fi
+if [[ "$(backups_of "$(store_of p1)")" == 1 ]]; then
+    ok "and the superseded store copy was kept, not destroyed"
+else
+    bad "the superseded store copy was not kept"
+fi
+
+# The mirror image: a stale real file must not be adopted over a newer store.
+new_home f3; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 9999 fresh
+cp "$(store_of p1)" "$TMPROOT/f3.store"
+as_rotated_real_file p1 1000 stale
+run_sut p1
+want_out "a superseded account-dir credential is relinked, not adopted" "superseded credential"
+if cmp -s "$TMPROOT/f3.store" "$(store_of p1)"; then
+    ok "and the store's newer credential is untouched"
+else
+    bad "a stale account-dir credential overwrote a newer store credential"
+fi
+if [[ "$(backups_of "$ACCOUNT_ROOT/p1/.credentials.json")" == 1 ]]; then
+    ok "and the discarded copy was kept anyway"
+else
+    bad "the discarded account-dir credential was destroyed"
+fi
+
+# A discovery stub is not a live credential, however recently it was written.
+new_home f4; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 5000 real
+cp "$(store_of p1)" "$TMPROOT/f4.store"
+as_rotated_real_file p1 stub
+run_sut p1
+if cmp -s "$TMPROOT/f4.store" "$(store_of p1)"; then
+    ok "a discovery stub never displaces a real credential"
+else
+    bad "a discovery stub was adopted over a live credential"
+fi
+
+new_home f5; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" bad storeside
+as_rotated_real_file p1 bad liveside
+cp "$(store_of p1)" "$TMPROOT/f5.store"
+run_sut p1
+want_out "two unreadable credentials are refused, not guessed at" "neither could be read"
+want_file "and the account dir file is left exactly as it was" "$ACCOUNT_ROOT/p1/.credentials.json"
+if cmp -s "$TMPROOT/f5.store" "$(store_of p1)"; then
+    ok "and so is the store"
+else
+    bad "an unreadable pair was written to anyway"
+fi
+
+# A build refuses earlier, on its own guard, and never reaches the reconciler.
+new_home f6; mk_profile p1
+run_sut p1
+rm -f "$(store_of p1)"
+as_rotated_real_file p1 9999 live
+run_sut p1
+want_out "a build with no store credential is refused before reconciling" "has no credentials.json yet"
+want_file "and the live account-dir credential is not touched" "$ACCOUNT_ROOT/p1/.credentials.json"
+
+# --reconcile has no such guard -- it is the timer's path, and it must refuse to
+# invent a credential rather than leave a dangling link where a live one was.
+new_home f6b; mk_profile p1
+run_sut p1
+rm -f "$(store_of p1)"
+as_rotated_real_file p1 9999 live
+cp "$ACCOUNT_ROOT/p1/.credentials.json" "$TMPROOT/f6b.live"
+run_sut --reconcile
+want_out "--reconcile refuses a missing store credential, never invents one" "refusing to"
+want_out "and names the fix"                                                 "clauth login p1"
+want_file "and leaves the live credential exactly where it is" "$ACCOUNT_ROOT/p1/.credentials.json"
+if cmp -s "$TMPROOT/f6b.live" "$ACCOUNT_ROOT/p1/.credentials.json"; then
+    ok "and unmodified — a refusal that destroys the only copy is worse than none"
+else
+    bad "the only surviving credential was altered by a refusal path"
+fi
+
+new_home f7; mk_profile p1; mk_profile p2
+run_sut p1
+ln -sfn "$(store_of p2)" "$ACCOUNT_ROOT/p1/.credentials.json"
+run_sut p1
+want_out "a link to the WRONG profile's store is caught" "pointed somewhere other than"
+want_link "and repointed at this profile's own store" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+
+# The mtime fallback, exercised on a PATH with no jq. Without this row the
+# fallback is unreachable code that only runs on someone else's machine.
+new_home f8; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 9999 old
+touch -d '2020-01-01' "$(store_of p1)"
+as_rotated_real_file p1 1000 rotated
+cp "$ACCOUNT_ROOT/p1/.credentials.json" "$TMPROOT/f8.rotated"
+NOJQ="$TMPROOT/nojq"; mkdir -p "$NOJQ"
+for b in bash cp mv rm ln stat date cmp chmod mkdir basename ls awk readlink flock; do
+    src="$(command -v "$b" 2>/dev/null)" && ln -sf "$src" "$NOJQ/$b"
+done
+OUT="$(env -u CLAUDE_ACCOUNT_DIRS_ROOT HOME="$FHOME" PATH="$NOJQ" bash "$SUT" p1 2>&1)"; RC=$?
+if ! command -v jq >/dev/null 2>&1 || [[ -x "$NOJQ/jq" ]]; then
+    ok "(jq fallback row skipped: could not build a jq-free PATH)"
+elif cmp -s "$TMPROOT/f8.rotated" "$(store_of p1)"; then
+    ok "with no jq, mtime still adopts the file written last"
+else
+    bad "with no jq, the newer account-dir credential was clobbered"
+fi
+
+# `claude()` runs this on every launch, so two sessions starting together race
+# the adopt: both read the diverged state, both back up, both write. Testing that
+# by racing real processes is flaky in both directions, so this holds the lock
+# from OUTSIDE and asserts the script WAITS for it -- deterministic, and it fails
+# the moment the locking is removed.
+new_home f9; mk_profile p1
+run_sut p1
+if command -v flock >/dev/null 2>&1; then
+    LOCKF="$FHOME/.clauth/profiles/p1/.reconcile.lock"
+    flock -x "$LOCKF" -c 'sleep 3' &
+    HOLDER=$!
+    sleep 0.4                       # let the holder actually take it
+    T0=$(date +%s%N)
+    run_sut p1
+    T1=$(date +%s%N)
+    wait "$HOLDER" 2>/dev/null
+    WAITED_MS=$(( (T1 - T0) / 1000000 ))
+    if (( WAITED_MS >= 1500 )); then
+        ok "a second launch WAITS for the credential lock (${WAITED_MS}ms)"
+    else
+        bad "a second launch did not wait for the lock (${WAITED_MS}ms) — two launches can race the adopt"
+    fi
+    want_rc "and still succeeds once it has the lock" 0
+else
+    ok "(lock row skipped: no flock on this machine)"
+fi
+
+#-----------------------------------------------------------------------------
+section "G. --reconcile — the path the timer takes"
+#-----------------------------------------------------------------------------
+new_home g1; mk_profile p1; mk_profile p2
+run_sut --all
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+cp "$ACCOUNT_ROOT/p1/.credentials.json" "$TMPROOT/g1.rotated"
+run_sut --reconcile
+want_rc  "--reconcile succeeds" 0
+want_link "and restores the invariant" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+if cmp -s "$TMPROOT/g1.rotated" "$(store_of p1)"; then
+    ok "and adopts the rotation without a rebuild"
+else
+    bad "--reconcile lost the rotated credential"
+fi
+
+new_home g2; mk_profile p1
+run_sut --all
+rm -f "$ACCOUNT_ROOT/p1/settings.json"
+run_sut --reconcile
+if [[ ! -e "$ACCOUNT_ROOT/p1/settings.json" ]]; then
+    ok "--reconcile builds nothing: it only touches credentials"
+else
+    bad "--reconcile rebuilt settings.json — it is not a build"
+fi
+
+new_home g3; mk_profile p1
+run_sut --all
+mkdir -p "$ACCOUNT_ROOT/orphan"
+run_sut --reconcile
+want_out "an account dir with no clauth profile is named, not acted on" "no clauth profile"
+
+new_home g4
+mkdir -p "$FHOME/.clauth/profiles"
+run_sut --reconcile
+want_rc "--reconcile with nothing to do is not an error" 0
+
+#-----------------------------------------------------------------------------
+section "H. A diagnostic that prints a credential is worse than no diagnostic"
+#-----------------------------------------------------------------------------
+# Every message above names files and states. None may carry a token. The
+# fixtures stamp CANARY- into every accessToken for exactly this row.
+new_home h1; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 storeside
+as_rotated_real_file p1 9999 livesid
+run_sut p1
+no_out "the adopt path never prints a token"  "CANARY-"
+as_rotated_real_file p1 bad liveside
+mk_cred "$(store_of p1)" bad storeside
+run_sut p1
+no_out "and neither does the refusal path"    "CANARY-"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
