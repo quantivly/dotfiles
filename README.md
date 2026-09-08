@@ -522,6 +522,7 @@ into one.
 
 ```bash
 dotfiles-work my/branch   # create/enter ~/dotfiles-worktrees/my-branch
+dotfiles-work --remove my/branch   # remove it; refuses uncommitted work (--force discards it)
 dotfiles-doctor           # is the live config the reviewed config?
 dotfiles-doctor --fetch   # ...against the real remote, not the ref already on disk
 ```

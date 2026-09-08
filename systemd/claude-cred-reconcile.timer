@@ -1,0 +1,38 @@
+# systemd/claude-cred-reconcile.timer
+# ===================================
+# Runs claude-cred-reconcile.service every 2 minutes. See that unit's header for
+# what it does and why a launch-time reconcile is not sufficient on its own.
+#
+# WHY 2 MINUTES. The window being closed is "a session rotated its token and
+# clauth's store does not have it yet"; clauth polls usage every 90s by default
+# (refresh_interval_ms), and a store that is stale when it polls is what gets an
+# account quarantined. Anything much longer leaves that race open most of the
+# time; anything much shorter spends wakeups to no purpose, since the work is a
+# stat and a compare per account and is a no-op in the healthy state.
+#
+# Persistent=true so a laptop that was asleep reconciles once on resume rather
+# than waiting for the next tick — the resume case is exactly when a stale store
+# is most likely.
+
+[Unit]
+Description=Reconcile Claude account-dir credentials periodically
+Documentation=file://%h/.dotfiles/scripts/claude-account-dirs.sh
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Persistent=true
+AccuracySec=30s
+
+[Install]
+# default.target, NOT graphical-session.target: this needs no session
+# environment (no DISPLAY, no DBus, no ssh agent — just files under $HOME), and
+# Linger=yes on this account brings the user manager up at boot, so a
+# default.target timer starts then and keeps running across logout. The herdr
+# server is the opposite case for a documented reason: it needs the graphical
+# environment GNOME imports.
+#
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK — run ./install, never
+# `systemctl --user reenable`, which would delete the dotbot symlink that IS the
+# unit. See systemd/herdr-server.service's [Install] note for the full account.
+WantedBy=default.target
