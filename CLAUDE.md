@@ -1679,6 +1679,41 @@ Design points that are load-bearing rather than preferences:
   *replaces* a symlink; a shell redirect follows it. The code was right and the test was wrong, which
   is the harder direction to spot.
 
+  **clauth's store keeps 5 of the 7 keys Claude Code writes, and its own writes DESTROY the other
+  two — plus every MCP login.** Read out of clauth's source (on disk at
+  `~/.config/herdr/plugins/github/clauth-4596d4a41686`, commit `ff25762`):
+  `profile.rs:2236 serialize_credentials_preserving_extra` serialises a typed `ClaudeCredentials`,
+  then `preserve_extra_blocks` (`:2251`) re-attaches every top-level block the existing file has
+  **except** `claudeAiOauth` — an explicit `if key == "claudeAiOauth" { continue; }`. So siblings
+  survive and any SUBKEY clauth does not model is dropped; `rateLimitTier` appears nowhere in its
+  source. The doc comment justifying the sibling rule says *"Dropping it here would lose data no
+  other writer holds"*, and does not apply that argument one level down.
+  Measured live on 2026-09-08: with the daemon running, all four profile stores were rewritten
+  within ~20 minutes (staggered, matching the 90 s poll) and lost **both** `rateLimitTier` **and
+  every `mcpOAuth` entry** — 2/3/3/1 logins to zero. The shape is the discriminator and it is not
+  ambiguous: the reconciler here unions `mcpOAuth` and always writes it, so a 509-byte five-key
+  file with no siblings can only be clauth's serializer. Recoverable from
+  `~/.cache/cred-backup-*/account-dirs/*` and the `.superseded-*` copies. **The clauth daemon is
+  paused** (`systemctl --user stop|disable clauth-daemon.service`) pending an upstream fix; the
+  cost is stale usage numbers, which the picker already treats as unknown-and-sorted-last.
+
+  **CORRECTED 2026-09-08, hours after it shipped: `rateLimitTier` does NOT cause the "Fable ·
+  Requires usage credits" banner, and the commit message of #123 says it does.** That claim was
+  written from a measured correlation (clauth's store lacks the field) plus a teammate's report,
+  and was never tested. A peer session read the Claude Code bundle (2.1.263) and closed the path:
+  the suffix comes from `sxe()`, gated on `EF()` and `OW()`; the only tier-dependent arm of `EF()`
+  tests `rateLimitTier === "default_claude_zero"`, which a real tier string is not — so the
+  field's ABSENCE cannot flip it. The credits state is a server-set latch
+  (`fableCreditsRequired()`) plus gates keyed on `subscriptionType`, which clauth preserves; where
+  the tier IS read for entitlement there is a network fallback to `organization.rate_limit_tier`,
+  so losing it costs a round-trip, not the entitlement.
+  **The teammate's A/B cannot isolate credential contents**: a clauth switch changes the ACCOUNT as
+  well as the file, so it has two variables, and what it isolates is which account. Two lessons,
+  both cheap to state and expensive to relearn: a correlation plus a plausible mechanism is not a
+  cause; and an untested causal claim in a COMMIT MESSAGE outlives the mistake, because a squash
+  merge makes it the permanent record — this one had to be corrected by a follow-up commit rather
+  than an amend, since #123 had already landed.
+
   **A sixth survivor was a row that passed because the TEST raced, not because the fix was missing.**
   Both lock rows started a background holder and then `sleep 0.4` before measuring — and on a loaded
   machine, which a mutation run guarantees, the holder had sometimes not acquired yet, so the
