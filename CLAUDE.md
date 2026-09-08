@@ -346,7 +346,7 @@ Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 (scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
 `DOTFILES_GROUP_FILE`.
 
-State table: `scripts/test-dotfiles-guard.sh` (301 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (302 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale

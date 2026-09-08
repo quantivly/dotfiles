@@ -1171,12 +1171,18 @@ check "flattened name: notes the branch"    "$(printf '%s\n' "$OUT" | grep -c "i
 # reference-transaction hook that aborts every ref update is the hermetic way to
 # make it refuse — installed AFTER the worktree exists, because `worktree add -b`
 # is a ref update too, and with core.hooksPath set on the fixture because a
-# global hooksPath (this machine has one) would otherwise hide the hook.
+# global hooksPath (this machine has one) would otherwise hide the hook. The
+# hook prints its own marker: git relays a hook's stderr whatever version it is,
+# while git's own wording for the abort changed between 2.53 and 2.55 and made
+# this row red on CI when it matched that instead.
 installed_wt probe/hookfail
 HOOKS="$TMPROOT/hooks"; mkdir -p "$HOOKS"
 cat > "$HOOKS/reference-transaction" <<'HOOK'
 #!/bin/sh
-[ "$1" = prepared ] && exit 1
+if [ "$1" = prepared ]; then
+  echo 'reference-transaction hook: deletion refused for this test' >&2
+  exit 1
+fi
 exit 0
 HOOK
 chmod +x "$HOOKS/reference-transaction"
@@ -1185,7 +1191,8 @@ subwork_run '--remove probe/hookfail'
 git -C "$SUBREPO" config --unset core.hooksPath
 check "-D refused by git: worktree removed" "$RC"                                                     "0"
 check "-D refused by git: branch kept"      "$(branch_state probe/hookfail)"                           "kept"
-check "-D refused by git: reason shown"     "$(printf '%s\n' "$OUT" | grep -c 'aborted by hook')"     "1"
+check "-D refused by git: said so"          "$(printf '%s\n' "$OUT" | grep -c 'would not delete it')"  "1"
+check "-D refused by git: reason shown"     "$(printf '%s\n' "$OUT" | grep -c 'deletion refused for this test')" "1"
 
 # Argument parsing, and the listing cap.
 subwork_run '--remove --bogus probe/x'
