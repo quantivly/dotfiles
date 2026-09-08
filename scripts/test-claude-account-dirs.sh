@@ -102,6 +102,12 @@ mk_cred() {  # $1 = path, $2 = shape, $3 = optional marker
         # NOT work: jq renders it as 1500000000000, an integer, so the guard was
         # never reached and the row pinned nothing.
         frac)   printf '{"claudeAiOauth":{"accessToken":"CANARY-%s","refreshToken":"rt","expiresAt":1.5,"scopes":["s"],"subscriptionType":"team"}}\n' "$mark" > "$path" ;;
+        # CLAUDE CODE's shape for the SAME account: identical everywhere the
+        # account is described, but carrying rateLimitTier, which Claude Code
+        # writes and clauth's store does not. If the gate compares that field the
+        # refusal is PERMANENT -- `clauth login` rewrites the store in clauth's
+        # shape, so the difference reopens immediately.
+        ccshape) printf '{"claudeAiOauth":{"accessToken":"CANARY-%s","refreshToken":"rt","expiresAt":99999,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"default_claude_max_5x"}}\n' "$mark" > "$path" ;;
         # A DIFFERENT ACCOUNT: same rotating fields, different non-rotating ones.
         # This is what a /login as another account inside an isolated session
         # leaves behind, and it must never be adopted.
@@ -800,6 +806,199 @@ if grep -q 'CANARY-rotated' "$(store_of p1)" 2>/dev/null; then
     ok "a mismatched identity does not veto an ordinary rotation"
 else
     bad "a stale .claude.json blocked a legitimate rotation — the permit became a veto"
+fi
+
+#-----------------------------------------------------------------------------
+section "F6. Writer-dependent fields are not evidence about WHICH account"
+#-----------------------------------------------------------------------------
+# SHIPPED BROKEN, 2026-09-08. The shape gate compared rateLimitTier -- but Claude
+# Code writes that field into the credential and clauth writes its store WITHOUT
+# it, so it differs by WRITER, not by account. quantivly-1 was refused, the doctor
+# said "clauth login quantivly-1", the user ran it, and it was refused again with
+# a byte-identical residual: clauth login rewrites the store in clauth's own
+# shape, so the gap reopens on the spot.
+#
+# The test for the class: if a field can differ between two files holding the SAME
+# account's login, comparing it cannot make the gate stricter — only unfixable.
+
+new_home f29; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 stored              # clauth's shape: no rateLimitTier
+as_rotated_real_file p1 ccshape live              # Claude Code's shape: has one
+run_sut p1
+no_out "a writer-only field is not read as a different account" "NOT a rotation of the stored one"
+if grep -q 'CANARY-live' "$(store_of p1)" 2>/dev/null; then
+    ok "and the rotation is adopted"
+else
+    bad "a rateLimitTier difference blocked a same-account rotation — a PERMANENT refusal"
+fi
+
+# The remedy the doctor prints has to actually work. Re-login, reconcile, and the
+# account must end up on the invariant rather than refused a second time.
+new_home f30; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 stored
+as_rotated_real_file p1 ccshape live
+run_sut p1
+mk_cred "$(store_of p1)" 5000 relogged            # what `clauth login` leaves behind
+run_sut --reconcile
+want_link "after a re-login the account dir is linked again, not refused twice" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+
+# ...but a genuinely different ACCOUNT is still refused, or the fix above would
+# just have removed the gate.
+new_home f31; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+mk_cred "$(store_of p1)" 1000 mine
+cp "$(store_of p1)" "$TMPROOT/f31.mine"
+as_rotated_real_file p1 other theirs
+run_sut p1
+want_out "a different account is STILL refused" "NOT a rotation of the stored one"
+if cmp -s "$TMPROOT/f31.mine" "$(store_of p1)"; then
+    ok "and its store is untouched"
+else
+    bad "widening the residual let another account's credential through"
+fi
+
+#-----------------------------------------------------------------------------
+section "F6b. A field only one writer stores must survive the merge"
+#-----------------------------------------------------------------------------
+# CAUSED REAL DAMAGE BEFORE ANYONE NOTICED. clauth's store keeps 5 of the 7 keys
+# Claude Code writes -- it drops rateLimitTier and refreshTokenExpiresAt -- and
+# this merge used to take the winner's claudeAiOauth block WHOLE. So every time
+# the STORE won, a live credential lost its plan tier, with no backup of the
+# losing side, because the comment claimed there was "no losing side any more"
+# when that was only ever true of mcpOAuth. `personal` went
+# default_claude_max_20x -> absent that way on this machine.
+#
+# It is not cosmetic: rateLimitTier is how Claude Code knows the plan, and without
+# it the model picker offers Fable as "Requires usage credits" -- a teammate hit
+# exactly that after switching accounts with clauth, deleted ~/.clauth, retried
+# from scratch, and went back to switching by hand.
+
+# The store wins the credential decision, and must NOT strip the tier.
+new_home f36; mk_profile p1
+run_sut p1
+printf '{"claudeAiOauth":{"accessToken":"CANARY-store","refreshToken":"rt","expiresAt":9000,"scopes":["s"],"subscriptionType":"team"}}\n' > "$(store_of p1)"
+rm -f "$ACCOUNT_ROOT/p1/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"CANARY-live","refreshToken":"rt","expiresAt":1000,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"default_claude_max_20x"}}\n' > "$ACCOUNT_ROOT/p1/.credentials.json"
+run_sut p1
+if [[ "$(jq -r '.claudeAiOauth.rateLimitTier // "ABSENT"' "$(store_of p1)")" == default_claude_max_20x ]]; then
+    ok "the plan tier survives when the STORE wins the credential"
+else
+    bad "the plan tier was destroyed — this is the 'Fable requires usage credits' bug"
+fi
+if grep -q 'CANARY-store' "$(store_of p1)" 2>/dev/null; then
+    ok "and the winning login is still the store's"
+else
+    bad "preserving the tier also replaced the login"
+fi
+
+# ...and the same in the other direction, so the fix is not just "always keep A".
+new_home f37; mk_profile p1
+run_sut p1
+printf '{"claudeAiOauth":{"accessToken":"CANARY-store","refreshToken":"rt","expiresAt":1000,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"default_claude_max_5x"}}\n' > "$(store_of p1)"
+rm -f "$ACCOUNT_ROOT/p1/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"CANARY-live","refreshToken":"rt","expiresAt":9000,"scopes":["s"],"subscriptionType":"team"}}\n' > "$ACCOUNT_ROOT/p1/.credentials.json"
+run_sut p1
+if [[ "$(jq -r '.claudeAiOauth.rateLimitTier // "ABSENT"' "$(store_of p1)")" == default_claude_max_5x ]]; then
+    ok "a field only the LOSER has is preserved in the adopt direction too"
+else
+    bad "the adopt direction dropped a field only the store had"
+fi
+if grep -q 'CANARY-live' "$(store_of p1)" 2>/dev/null; then
+    ok "and the rotated login still wins"
+else
+    bad "preserving a field also reverted the login"
+fi
+
+# An explicit null must DEFER, not erase: clauth writes some fields as null rather
+# than omitting them, so a null on the winner would otherwise wipe a real value.
+new_home f38; mk_profile p1
+run_sut p1
+printf '{"claudeAiOauth":{"accessToken":"CANARY-store","refreshToken":"rt","expiresAt":9000,"scopes":["s"],"subscriptionType":"team","rateLimitTier":null}}\n' > "$(store_of p1)"
+rm -f "$ACCOUNT_ROOT/p1/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"CANARY-live","refreshToken":"rt","expiresAt":1000,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"default_claude_max_20x"}}\n' > "$ACCOUNT_ROOT/p1/.credentials.json"
+run_sut p1
+if [[ "$(jq -r '.claudeAiOauth.rateLimitTier // "ABSENT"' "$(store_of p1)")" == default_claude_max_20x ]]; then
+    ok "an explicit null on the winner defers to a real value, rather than erasing it"
+else
+    bad "a null on the winning side wiped a real plan tier"
+fi
+
+# A field BOTH sides hold is the winner's -- back-filling a stale value would be
+# its own bug (a plan change would never take effect).
+new_home f39; mk_profile p1
+run_sut p1
+printf '{"claudeAiOauth":{"accessToken":"CANARY-store","refreshToken":"rt","expiresAt":1000,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"OLD-tier"}}\n' > "$(store_of p1)"
+rm -f "$ACCOUNT_ROOT/p1/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"CANARY-live","refreshToken":"rt","expiresAt":9000,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"NEW-tier"}}\n' > "$ACCOUNT_ROOT/p1/.credentials.json"
+run_sut p1
+if [[ "$(jq -r '.claudeAiOauth.rateLimitTier' "$(store_of p1)")" == NEW-tier ]]; then
+    ok "where both sides have the field, the winner's value wins"
+else
+    bad "a stale value was back-filled over the winner's — a plan change would never land"
+fi
+
+#-----------------------------------------------------------------------------
+section "F7. A stale account identity in .claude.json is dropped, not kept"
+#-----------------------------------------------------------------------------
+# The builder seeds .claude.json once from the global file, so it names whichever
+# account was live at seed time. Measured: two of four dirs advertised a third
+# profile's account, org name, seat tier and rate-limit tiers -- and the identity
+# permit could not fire for them, so ordinary re-logins hit the shape gate.
+
+new_home f32; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+run_sut p1
+want_out "a stale account identity is reported" "dropped a stale account identity"
+if [[ "$(jq -r 'has("oauthAccount")' "$ACCOUNT_ROOT/p1/.claude.json")" == false ]]; then
+    ok "and removed, so Claude Code re-derives it"
+else
+    bad "the stale oauthAccount block was kept"
+fi
+
+# A CORRECT identity must survive: dropping it unconditionally would throw away
+# the block on every healthy dir and re-trigger onboarding churn.
+new_home f33; mk_profile p1
+run_sut p1
+set_dir_account p1 same
+run_sut p1
+no_out "a correct account identity is left alone" "dropped a stale account identity"
+if [[ "$(jq -r '.oauthAccount.accountUuid' "$ACCOUNT_ROOT/p1/.claude.json")" == "uuid-of-p1" ]]; then
+    ok "and kept intact"
+else
+    bad "a correct oauthAccount block was destroyed"
+fi
+
+# ...and the whole point: once the identity is right, the permit can fire, so a
+# re-login is adopted instead of refused.
+new_home f34; mk_profile p1
+run_sut p1
+set_dir_account p1 other                  # stale -> permit cannot fire yet
+run_sut p1                                # ...this run drops it
+set_dir_account p1 same                   # Claude Code re-derives it correctly
+mk_cred "$(store_of p1)" 1000 mine
+as_rotated_real_file p1 other relogin
+run_sut p1
+if grep -q 'CANARY-relogin' "$(store_of p1)" 2>/dev/null; then
+    ok "with the identity repaired, a re-login is adopted rather than refused"
+else
+    bad "a re-login was still refused after the identity was repaired"
+fi
+
+# Nothing else in .claude.json may be disturbed -- it carries the onboarding flag
+# and every project's trust record.
+new_home f35; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+run_sut p1
+if [[ "$(jq -r '.hasCompletedOnboarding' "$ACCOUNT_ROOT/p1/.claude.json")" == true ]]; then
+    ok "and the rest of .claude.json survives (onboarding, trust records)"
+else
+    bad "dropping the identity damaged the rest of .claude.json"
 fi
 
 #-----------------------------------------------------------------------------
