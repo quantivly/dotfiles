@@ -194,6 +194,44 @@ mk_proc() {
 # The process tree is a fixture too. Left unset the doctor walks the real one,
 # which makes the concurrency rows depend on whatever is running on the machine —
 # and this box runs twenty Claude processes.
+# An account dir, in whichever state the row is about. The doctor reads
+# ${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}, and
+# run_doctor sets HOME to the fixture, so the default path lands inside it.
+#
+# `shared` builds the pooled-sharing links (projects/plugins/skills/hooks and
+# CLAUDE.md back to ~/.claude) that the doctor asserts are still symlinks.
+mk_account_dir() {  # $1 = profile, $2 = linked|real-same|real-diff|dangling|wrong-profile|absent
+    local p="$1" mode="$2"
+    local ad="$FHOME/.local/state/claude-account-dirs/$p"
+    local pd="$FHOME/.clauth/profiles/$p"
+    mkdir -p "$ad" "$pd"
+    printf '{"claudeAiOauth":{"accessToken":"store-%s","expiresAt":9}}\n' "$p" > "$pd/credentials.json"
+    printf '"uuid-%s"\n' "$p" > "$pd/account_id.json"
+    local x
+    for x in projects plugins skills hooks CLAUDE.md; do
+        mkdir -p "$FHOME/.claude/$x" 2>/dev/null || :
+        ln -sfn "$FHOME/.claude/$x" "$ad/$x"
+    done
+    rm -f "$ad/.credentials.json"
+    case "$mode" in
+        linked)        ln -s "$pd/credentials.json" "$ad/.credentials.json" ;;
+        real-same)     cp "$pd/credentials.json" "$ad/.credentials.json" ;;
+        real-diff)     printf '{"claudeAiOauth":{"accessToken":"live-%s","expiresAt":99}}\n' "$p" \
+                           > "$ad/.credentials.json" ;;
+        dangling)      ln -s "$pd/gone.json" "$ad/.credentials.json" ;;
+        wrong-profile) mkdir -p "$FHOME/.clauth/profiles/other"
+                       printf '{}\n' > "$FHOME/.clauth/profiles/other/credentials.json"
+                       ln -s "$FHOME/.clauth/profiles/other/credentials.json" "$ad/.credentials.json" ;;
+        absent)        : ;;
+    esac
+}
+
+# The verdict the reconciler leaves behind. Its absence is a state too.
+mk_verdict() {  # $1 = profile, $2 = verdict, $3 = detail, $4 = optional age in seconds
+    local ad="$FHOME/.local/state/claude-account-dirs/$1"
+    printf '%s %s %s\n' "$(( $(date +%s) - ${4:-0} ))" "$2" "${3:-}" > "$ad/.reconcile-status"
+}
+
 run_doctor() {
     local base="$SYSBIN" p
     [[ "${NO_JQ:-0}" == 1 ]] && base="$NOJQBIN"
@@ -927,6 +965,87 @@ new_home h7; write_cred
 run_doctor
 want_out "absent settings.json is NOT CHECKED"  "no global settings.json — NOT CHECKED"
 no_out   "and is not reported as satisfied"     "required key"
+
+#-----------------------------------------------------------------------------
+section "R. Account dirs — the section #116 shipped with NO rows at all"
+#-----------------------------------------------------------------------------
+# This whole section of claude-doctor went out unpinned. Every check below is one
+# that can only fail by going quiet: it reports on credentials nothing else looks
+# at, so a broken check and a healthy machine print the same thing.
+
+new_home r1; write_cred '.'
+mk_account_dir p1 linked
+run_doctor
+want_out "a credential linked to its store reads healthy" "p1: credential shared with the clauth store"
+want_rc  "and does not fail the run on that account"      0
+
+# THE FOLLOW-UP'S POINT. A divergence the reconciler REFUSED will not be fixed by
+# the timer -- it refuses again every tick -- so telling the reader to wait for it
+# is advice that cannot work. That was the state of `personal` on this machine.
+new_home r2; write_cred '.'
+mk_account_dir p1 real-diff
+mk_verdict p1 refused-not-rotation "clauth login p1"
+run_doctor
+want_out "a REFUSED divergence says the reconciler refused it"  "The reconciler REFUSED this one"
+want_out "and names what to actually run"                       "Fix: clauth login p1"
+no_out   "and does NOT tell the reader to wait for the timer"    "The 2-minute timer normally handles it"
+
+# ...while an ordinary rotation still gets the ordinary advice.
+new_home r3; write_cred '.'
+mk_account_dir p1 real-diff
+mk_verdict p1 adopted
+run_doctor
+want_out "a reconcilable divergence keeps the timer advice" "The 2-minute timer normally handles it"
+no_out   "and is not reported as a refusal"                 "The reconciler REFUSED"
+
+# No verdict on record is its own state, not evidence that all is well -- the
+# reconciler may simply never have run here.
+new_home r4; write_cred '.'
+mk_account_dir p1 real-diff
+run_doctor
+want_out "an absent verdict is named, not read as agreement" "no reconciler verdict on record"
+
+# A verdict that has stopped being refreshed means the timer is not running, which
+# is the drift this repo keeps meeting: a LINKED unit is not a RUNNING one.
+new_home r5; write_cred '.'
+mk_account_dir p1 real-diff
+mk_verdict p1 adopted "" 3600
+run_doctor
+want_out "a stale verdict asks whether the timer is running" "is the timer running?"
+
+new_home r6; write_cred '.'
+mk_account_dir p1 dangling
+run_doctor
+want_out "a dangling credential link is a failure" "p1: credential link DANGLES"
+want_rc  "and fails the run"                       1
+
+new_home r7; write_cred '.'
+mk_account_dir p1 wrong-profile
+run_doctor
+want_out "a link into ANOTHER profile's store is caught" "links to ANOTHER profile's store"
+want_rc  "and fails the run"                             1
+
+new_home r8; write_cred '.'
+mk_account_dir p1 absent
+run_doctor
+want_out "an account dir with no credential at all is a failure" "no credential in the account dir"
+
+# The pooled-sharing invariant: accounts in a pool are supposed to share memory,
+# plugins and skills, and nothing about a session reveals when they stop.
+new_home r9; write_cred '.'
+mk_account_dir p1 linked
+rm -f "$FHOME/.local/state/claude-account-dirs/p1/projects"
+mkdir -p "$FHOME/.local/state/claude-account-dirs/p1/projects"
+run_doctor
+want_out "an account dir that stopped sharing projects/ is caught" "not sharing projects"
+want_rc  "and fails the run"                                       1
+
+# A machine with no account dirs is a legitimate state, not a fault -- otherwise
+# this section is the permanently-red checker all over again.
+new_home r10; write_cred '.'
+run_doctor
+want_out "no account dirs is a note, not a finding" "nothing isolated yet"
+no_out   "and nothing claims a credential is broken" "credential is a real file that DIFFERS"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
