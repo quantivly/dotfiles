@@ -529,7 +529,9 @@ dotfiles-doctor --fetch   # ...against the real remote, not the ref already on d
 `dotfiles-doctor` reports the branch you are pinned to, **how stale your `origin/main`
 ref is** (nothing fetches on a schedule, so "not behind" is only ever as current as your
 last `git fetch` — `--fetch` fixes that), commits ahead/behind it, exactly which managed
-files differ, uncommitted changes to them, and link integrity: declared-but-not-installed,
+files differ, uncommitted changes to them, `safe.directory` entries a tool has written
+through `~/.gitconfig` into the tracked `gitconfig` (labelled gone / same owner / other
+owner, with the restore that clears them), and link integrity: declared-but-not-installed,
 installed-but-dangling, linked-but-pointing-outside-this-checkout, and linked inside it
 but at the wrong file (rename a source and forget to re-run `./install`: the old link
 still resolves to a real file, so the other three all pass while your live config is the

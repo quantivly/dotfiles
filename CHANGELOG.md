@@ -15,16 +15,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a public repo — seven did in five days, each an absolute path carrying an agent session
   UUID, and no agent typed one: auto-conf's `configure.py` adds one for every workspace it
   builds, and its dedup does not understand the `~/*` glob that already covered them. The
-  doctor now reads the tracked file with `--no-includes` (the entries *belong* in the included
-  `~/.gitconfig.local`, so following it would call the right place wrong), labels each entry
-  `gone` / `same owner` (measured with the list reset, not inferred) / `other owner` /
-  `not a repo` / `pattern`, tells committed from uncommitted, and turns the generic
-  `⚠ M gitconfig` into a pointer only when the entries are the whole diff. A `PreToolUse` hook
-  on the `git config` text was considered and dropped: it would have matched none of the
-  seven, because the write happened inside a subprocess. 26 rows in
-  `scripts/test-dotfiles-guard.sh`, 18 mutants, all killed; `other owner` is reached without
-  root via `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`. The `gitconfig` comment now carries the right
-  calls. The cause itself is upstream, in auto-conf.
+  doctor reads the file the link map says `~/.gitconfig` points at from the worktree, the
+  index and HEAD (a staged entry is one commit from public; an index-only one is invisible to
+  a read of the file), with `--no-includes` on every read because the entries *belong* in the
+  included `~/.gitconfig.local`. Each entry is labelled by git's own reading of the value
+  (`--type=path` for `~`, `~user/` and `%(prefix)`; only `*` and a trailing `/*` are patterns;
+  an empty value is the list reset; a relative path is ignored) and probed with the list reset
+  and by exit status, never by matching git's translatable messages: `same owner`,
+  `other owner`, `not matched`, `not a repo`. Uncommitted entries are a ✗ with
+  `git restore --staged --worktree -- gitconfig` — a bare `restore` copies the index and is a
+  no-op once the entries are staged — and committed ones a ⚠. The generic `⚠ M gitconfig`
+  becomes a pointer only when worktree and index differ from HEAD by nothing else, decided by
+  stripping the entries with `git config --unset-all` and comparing bytes rather than parsing
+  a diff that `color.ui` or `diff.external` can reshape. An unreadable file, index copy or HEAD
+  copy is `UNKNOWN` or "fix HEAD first", never a tick and never a restore that would install
+  the broken copy. A `PreToolUse` hook on the `git config` text was considered and dropped: it
+  would have matched none of the seven, because the write happened inside a subprocess.
+  63 rows in `scripts/test-dotfiles-guard.sh`, one of which runs the printed fix and asserts
+  the tree is clean; 33 mutants, all killed. `other owner` is reached without root via
+  `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`. The `gitconfig` and `gitconfig.local.example` comments
+  now state the git versions correctly (`*` needs 2.35.2, a trailing `/*` needs 2.46) and
+  point at docs/TROUBLESHOOTING.md for the calls. The cause itself is upstream, in auto-conf.
 
 - **`gh-doctor`: which GitHub account is `gh` *actually* using here?**
   `gh` keys its tokens in the system keyring by **host**, not by config dir, so

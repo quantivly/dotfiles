@@ -581,85 +581,229 @@ echo
 echo "=== safe.directory in the tracked gitconfig ==="
 # ~/.gitconfig is a symlink into the checkout and `git config --global` writes
 # through it, so a safe.directory entry added by ANY git-using tool lands in a
-# tracked file in a public repo. Seven did on 2026-09-03..07, each an absolute
-# path carrying an agent session UUID, and nobody typed one: auto-conf's
-# configure.py adds one for every workspace it builds. The generic uncommitted-
-# changes warning cannot say what the edit is or whether git ever needed it;
-# this section does both, and every state it names is a row here.
+# tracked file in a public repo — auto-conf's configure.py adds one for every
+# workspace it builds. The generic uncommitted-changes warning cannot say what
+# the edit is or whether git ever needed it; the doctor's section does both, and
+# every state it names is a row here. Several of these rows exist because a
+# review reached a state the first version never tested: a STAGED entry, for
+# which the advertised `git restore` was a no-op; an index-only entry behind a
+# green tick; colour and diff.external settings that blinded a diff parser; an
+# unreadable file that exited 1 like "no entries"; and git's own reading of
+# `~`, `~user/`, `?`, an empty value and a relative path.
 SCRATCH="$TMPROOT/scratch"
 GONE="$SCRATCH/gone-workspace"                                     # deleted with its scratchpad
 OWN="$SCRATCH/own-workspace";  mkdir -p "$OWN";  git init -q "$OWN"  # exists, owned by the tester
 PLAIN="$SCRATCH/plain-dir";    mkdir -p "$PLAIN"                   # exists, not a repository
+sdadd() { git config --file "$REPO/gitconfig" --add safe.directory "$1"; }
+sdclean() { git -C "$REPO" restore --staged --worktree -- gitconfig; }
 check "clean gitconfig: its own tick"  "$(doctor main | grep -c 'none — machine-specific entries belong in ~/.gitconfig.local')" "1"
-git config --file "$REPO/gitconfig" --add safe.directory "$GONE"
-git config --file "$REPO/gitconfig" --add safe.directory "$OWN"
-git config --file "$REPO/gitconfig" --add safe.directory "$PLAIN"
+sdadd "$GONE"; sdadd "$OWN"; sdadd "$PLAIN"
 # The tilde is git's to expand, not the shell's: `~/*` is exactly how the real
 # ~/.gitconfig.local spells "every repository under HOME".
 # shellcheck disable=SC2088
-git config --file "$REPO/gitconfig" --add safe.directory '~/*'
-check "polluted gitconfig is a ✗"        "$(doctor main | grep -c '✗ 4 entries in the TRACKED gitconfig')"  "1"
+sdadd '~/*'
+check "polluted gitconfig is a ✗"        "$(doctor main | grep -c '✗ 4 safe.directory entry(s) in gitconfig')" "1"
 check "polluted gitconfig exits 1"       "$(doctor_rc main)"                                               "1"
 check "deleted workspace is 'gone'"      "$(doctor main | grep -cE "^ +gone +$GONE\$")"                   "1"
 check "same-owner workspace is measured" "$(doctor main | grep -cE "^ +same owner +$OWN\$")"              "1"
-check "non-repo is 'not a repo'"         "$(doctor main | grep -cE "^ +not a repo +$PLAIN\$")"            "1"
-check "glob is 'pattern', not 'gone'"    "$(doctor main | grep -cE "^ +pattern +~/\\*\$")"                "1"
-check "restore is the fix"               "$(doctor main | grep -c "Fix (uncommitted, 4): git -C $REPO restore gitconfig")" "1"
-check "no PR advice while uncommitted"   "$(doctor main | grep -c 'Fix (committed')"                       "0"
+# Classified by exit status, so the label holds under a localized git; git's
+# own first line follows in parentheses, in whatever language it speaks.
+check "non-repo is 'not a repo'"         "$(doctor main | grep -cE "^ +not a repo +$PLAIN  \\(")"        "1"
+check "trailing /* is 'pattern'"         "$(doctor main | grep -cE "^ +pattern +~/\\*\$")"                "1"
+# --staged --worktree, not a bare restore: the bare form copies the INDEX into
+# the worktree and is a no-op the moment the entries have been `git add`ed.
+check "the fix restores index and worktree" "$(doctor main | grep -c "Fix (4 not in HEAD): git -C $REPO restore --staged --worktree -- gitconfig")" "1"
+check "no PR advice while uncommitted"   "$(doctor main | grep -c 'Committed in HEAD')"                    "0"
+check "no other-edits caveat"            "$(doctor main | grep -c 'also differs from HEAD in other ways')" "0"
+# The reader is told a TOOL does this, or the next question is "which of my
+# sessions typed that" — the question the investigation spent a day on.
+check "the writer is named"              "$(doctor main | grep -c "auto-conf's configure.py does")"        "1"
 # The generic line becomes a pointer, not a second vaguer report of the same fact…
 check "generic line points up"           "$(doctor main | grep -c '· M gitconfig — only the safe.directory entries reported above')" "1"
 check "generic ⚠ is not duplicated"      "$(doctor main | grep -c '⚠ M gitconfig')"                       "0"
-# …but only while the entries are the WHOLE diff. Another edit keeps its warning,
-# because the section above says nothing about it.
+# …but only while the entries are the WHOLE difference from HEAD. Another edit
+# keeps its warning, and the printed fix says the restore would discard it.
 printf '[alias]\n\tst = status\n' >> "$REPO/gitconfig"
 check "other edits keep the generic ⚠"   "$(doctor main | grep -c '⚠ M gitconfig')"                       "1"
-git -C "$REPO" checkout -q -- gitconfig
+check "…and the fix carries a caveat"    "$(doctor main | grep -c 'also differs from HEAD in other ways')" "1"
+# color.ui=always and a diff.external driver (difftastic's documented setup) in
+# the INCLUDED ~/.gitconfig.local reshape `git diff` output. The first version
+# parsed that output and downgraded the warning for ANY edit in this state.
+printf '[color]\n\tui = always\n[diff]\n\texternal = /bin/echo\n' > "$FAKEHOME/.gitconfig.local"
+check "colour + external diff do not hide the edit" "$(doctor main | grep -c '⚠ M gitconfig')"            "1"
+rm "$FAKEHOME/.gitconfig.local"
+sdclean
+# Staged — `git add -A` has run, the commit has not. The state the headline
+# warns is next, and the one a bare `git restore` cannot reach.
+sdadd "$GONE"; git -C "$REPO" add gitconfig
+check "staged entry is reported"         "$(doctor main | grep -c '✗ 1 safe.directory entry(s) in gitconfig')" "1"
+check "staged entry is marked"           "$(doctor main | grep -c "$GONE  (staged)\$")"                    "1"
+check "staged: generic line still a pointer" "$(doctor main | grep -c '· M gitconfig — only the safe.directory')" "1"
+# The remedy must remedy: run the fix exactly as the doctor prints it.
+fix="$(doctor main | sed -n 's/^    Fix ([^)]*): //p')"
+eval "$fix"
+check "running the printed fix clears the index too" "$(git -C "$REPO" status --porcelain -- gitconfig)" ""
+check "…and the tick returns"            "$(doctor main | grep -c 'none — machine-specific')"             "1"
+# Index-only: staged, then the worktree copy reverted by hand. A read of the
+# file sees nothing; a plain `git commit` would still carry the entry.
+sdadd "$GONE"; git -C "$REPO" add gitconfig; git -C "$REPO" show HEAD:gitconfig > "$REPO/gitconfig"
+check "index-only entry is not a green tick" "$(doctor main | grep -c 'none — machine-specific')"         "0"
+check "index-only entry is reported"     "$(doctor main | grep -c '✗ 1 safe.directory entry(s) in gitconfig')" "1"
+check "…marked staged only"              "$(doctor main | grep -c "$GONE  (staged only)\$")"               "1"
+sdclean
 # Entries in the INCLUDED ~/.gitconfig.local are the correct state and must not
-# be reported. With --includes, `git config --file` would follow the include
-# and call the right place wrong.
+# be reported — and the HEAD read must not follow the include either: --blob
+# follows includes BY DEFAULT (--file does not), so without --no-includes a
+# value present in both files reads as "(committed)" and the reader is sent to
+# a PR for something the restore would clear.
 printf '[safe]\n\tdirectory = *\n' > "$FAKEHOME/.gitconfig.local"
 check "entries in ~/.gitconfig.local are not pollution" "$(doctor main | grep -c 'none — machine-specific entries belong')" "1"
+printf '[safe]\n\tdirectory = %s\n' "$GONE" > "$FAKEHOME/.gitconfig.local"; sdadd "$GONE"
+check "an include-only value is not '(committed)'" "$(doctor main | grep -c "$GONE  (committed)")"        "0"
+check "…it is uncommitted"               "$(doctor main | grep -c 'Fix (1 not in HEAD)')"                  "1"
+sdclean
 # A workspace git genuinely refuses. GIT_TEST_ASSUME_DIFFERENT_OWNER makes git
 # treat every repository as somebody else's — the only way to reach the state
 # without root. The `*` in the fake ~/.gitconfig.local keeps the doctor's own
 # git calls working; the per-entry probe resets the list, so it still sees the
-# refusal. Same fixture without the variable must read "same owner".
-git config --file "$REPO/gitconfig" --add safe.directory "$OWN"
+# refusal. Same fixture without the variable must read "same owner", or the row
+# proves only that the variable works.
+printf '[safe]\n\tdirectory = *\n' > "$FAKEHOME/.gitconfig.local"
+sdadd "$OWN"
 check "foreign-owned workspace is 'other owner'" "$(doctor main GIT_TEST_ASSUME_DIFFERENT_OWNER=1 | grep -cE "^ +other owner +$OWN\$")" "1"
 check "…and is sent to ~/.gitconfig.local"       "$(doctor main GIT_TEST_ASSUME_DIFFERENT_OWNER=1 | grep -c 'git config --file ~/.gitconfig.local --add safe.directory')" "1"
+# An entry naming a SUBDIRECTORY of that repository is one git never honours
+# (measured: with the list reset, `repo/sub` and `repo?` are refused while
+# `repo`, `repo/`, a symlink to it and `*` are accepted). The probe that says
+# so must reset the list first: a lone `-c safe.directory=<entry>` only
+# appends, and the `*` in this fixture's include would answer for it.
+mkdir -p "$OWN/sub"; sdadd "$OWN/sub"
+check "subdirectory of a foreign repo is 'not matched'" "$(doctor main GIT_TEST_ASSUME_DIFFERENT_OWNER=1 | grep -cE "^ +not matched +$OWN/sub  \\(")" "1"
 check "same fixture, same owner without it"      "$(doctor main | grep -cE "^ +same owner +$OWN\$")"       "1"
 check "no ~/.gitconfig.local advice then"        "$(doctor main | grep -c 'git config --file ~/.gitconfig.local --add')" "0"
-git -C "$REPO" checkout -q -- gitconfig
+sdclean
 rm "$FAKEHOME/.gitconfig.local"
-# Committed: `git add -A` already did its worst. A restore fixes nothing; a PR does.
-git -C "$REPO" checkout -q -b feature/polluted
-git config --file "$REPO/gitconfig" --add safe.directory "$GONE"
+# git's reading of the value, not this function's. `--type=path` expands a bare
+# `~` and `~/x` (and `~user/x`, which needs a passwd entry and is not staged
+# here); only `*` and a trailing `/*` are patterns — a `?` or a `*` elsewhere is
+# compared literally; an empty value is the documented "reset the list"; a
+# relative path is warned about and ignored. The first version dropped the
+# empty value on the floor and printed "✗ 0 entries" with no fix line.
+git init -q "$FAKEHOME/own"
+# The tildes are git's to expand, deliberately not the shell's.
+# shellcheck disable=SC2088
+sdadd '~'
+# shellcheck disable=SC2088
+sdadd '~/own'
+sdadd ''; sdadd "scratch/own-workspace"; sdadd "$SCRATCH/*/own-workspace"; sdadd "${PLAIN}?"
+check "all six are counted, the empty one included" "$(doctor main | grep -c '✗ 6 safe.directory entry(s)')" "1"
+check "bare ~ is expanded, not 'gone'"   "$(doctor main | grep -cE "^ +not a repo +~  \\(")"             "1"
+# shellcheck disable=SC2088
+check "~/x is expanded and probed"       "$(doctor main | grep -cE "^ +same owner +~/own\$")"             "1"
+check "empty value is git's list reset"  "$(doctor main | grep -cE "^ +empty +<empty>\$")"                "1"
+check "relative path is 'relative'"      "$(doctor main | grep -cE "^ +relative +scratch/own-workspace\$")" "1"
+check "mid-path * is literal: 'gone'"    "$(doctor main | grep -cE "^ +gone +$SCRATCH/\\*/own-workspace\$")" "1"
+check "? is literal: 'gone'"             "$(doctor main | grep -cE "^ +gone +$PLAIN\\?\$")"               "1"
+check "none of them is 'pattern'"        "$(doctor main | grep -cE '^ +pattern ')"                        "0"
+sdclean
+rm -rf "$FAKEHOME/own"
+# Committed: it passed review, so it is a ⚠ and not the permanently-red ✗ an
+# adopter who committed `*` on purpose would learn to ignore. Pushed to the
+# fixture remote so nothing else in the report is red.
+# shellcheck disable=SC2088
+sdadd '~/committed-ws'
 git -C "$REPO" commit -qam "commit a safe.directory entry"
-check "committed entry is marked"          "$(doctor main | grep -c "$GONE  (committed)")"       "1"
-check "committed entry wants a PR"         "$(doctor main | grep -c 'Fix (committed in HEAD, 1)')" "1"
-check "committed entry: no restore advice" "$(doctor main | grep -c 'Fix (uncommitted')"          "0"
-git -C "$REPO" checkout -q main
-git -C "$REPO" branch -qD feature/polluted
-# Unreadable: UNKNOWN, never a tick. Reachable only while ~/.gitconfig points
+git -C "$REPO" push -q origin main && git -C "$REPO" fetch -q origin
+check "committed entry is a ⚠"            "$(doctor main | grep -c '⚠ 1 safe.directory entry(s) committed in gitconfig')" "1"
+check "committed entry alone exits 0"     "$(doctor_rc main)"                                              "0"
+# shellcheck disable=SC2088
+check "committed entry is marked"         "$(doctor main | grep -c '~/committed-ws  (committed)$')"        "1"
+check "committed entry wants a PR"        "$(doctor main | grep -c 'Committed in HEAD (1)')"               "1"
+check "committed entry: no restore advice" "$(doctor main | grep -c 'Fix (')"                              "0"
+# …and a fresh uncommitted one beside it is still a ✗ with a restore. It is a
+# glob on purpose: the HEAD lookup must compare values, not use the new value
+# as a PATTERN over the committed ones — `(I)` instead of `(Ie)` would match
+# `~/*` against `~/committed-ws`, call the glob committed, and lose its fix.
+# shellcheck disable=SC2088
+sdadd '~/*'
+check "mixed: the uncommitted one makes it a ✗" "$(doctor main | grep -c '✗ 2 safe.directory entry(s) in gitconfig')" "1"
+check "mixed: restore counts only the new one"  "$(doctor main | grep -c 'Fix (1 not in HEAD)')"           "1"
+# shellcheck disable=SC2088
+check "an uncommitted glob is not matched against committed paths" "$(doctor main | grep -c '~/\*  (committed)')" "0"
+sdclean
+git -C "$REPO" reset -q --hard HEAD~1
+git -C "$REPO" push -q -f origin main && git -C "$REPO" fetch -q origin
+# Unparseable: UNKNOWN, never a tick. Reachable only while ~/.gitconfig points
 # elsewhere — linked, a malformed tracked gitconfig kills every git call and the
 # doctor stops at its health probe, which is the right answer there.
 printf '[user]\n\tname = Elsewhere\n' > "$SCRATCH/other-gitconfig"
 ln -sf "$SCRATCH/other-gitconfig" "$FAKEHOME/.gitconfig"
 printf '[[[not a git config\n' > "$REPO/gitconfig"
-check "unreadable gitconfig is UNKNOWN"  "$(doctor main | grep -c 'safe.directory state UNKNOWN')"  "1"
-check "unreadable gitconfig: no tick"    "$(doctor main | grep -c 'none — machine-specific')"       "0"
+check "unparseable gitconfig is UNKNOWN" "$(doctor main | grep -c 'safe.directory state UNKNOWN')"  "1"
+check "unparseable gitconfig: no tick"   "$(doctor main | grep -c 'none — machine-specific')"       "0"
 git -C "$REPO" checkout -q -- gitconfig
 ln -sf "$REPO/gitconfig" "$FAKEHOME/.gitconfig"
+# Unreadable: `git config --get-all` exits 1 for EACCES, the same status as "no
+# such key", and the first version printed ✓ over a file it could not open.
+# git merely warns about an unreadable ~/.gitconfig, so the link can stay.
+if (( EUID != 0 )); then
+  sdadd "$GONE"; chmod 000 "$REPO/gitconfig"
+  check "unreadable gitconfig is UNKNOWN"  "$(doctor main | grep -c 'safe.directory state UNKNOWN')" "1"
+  check "unreadable gitconfig: no tick"    "$(doctor main | grep -c 'none — machine-specific')"      "0"
+  chmod 644 "$REPO/gitconfig"; sdclean
+else
+  echo "  · unreadable-file rows skipped: root reads mode-000 files"
+fi
+# A HEAD copy git cannot parse: committed cannot be told from uncommitted, and a
+# restore would put that copy under the live ~/.gitconfig symlink. `config
+# --blob` exits 1 for it — the "no such key" status — so the first version read
+# it as "no entries" and advised exactly that restore.
+git -C "$REPO" checkout -q -b feature/badhead
+printf '[[[not a git config\n' > "$REPO/gitconfig"
+git -C "$REPO" commit -qam "a broken gitconfig in HEAD"
+printf '[user]\n\tname = Fixture\n[safe]\n\tdirectory = %s\n' "$GONE" > "$REPO/gitconfig"
+check "unparseable HEAD copy is named"   "$(doctor main | grep -c "HEAD's gitconfig cannot be parsed")" "1"
+check "unparseable HEAD: no restore advice" "$(doctor main | grep -c 'Fix (')"                         "0"
+check "unparseable HEAD is still a ✗"    "$(doctor main | grep -c '✗ 1 safe.directory entry(s)')"      "1"
+git -C "$REPO" checkout -q -- gitconfig
+git -C "$REPO" checkout -q main
+git -C "$REPO" branch -qD feature/badhead
 # No gitconfig in the tree is a note, not a finding: the other fixture repos
 # have none, and neither does an adopter who does not manage git through here.
 check "no gitconfig is a note"           "$(noref | grep -c '· no gitconfig in')"                  "1"
-# One that exists but is not in HEAD: still reported, and honest about what a
-# restore can and cannot do, rather than advising one that would fail.
+# One that exists but is in neither HEAD nor the index: reported, and honest
+# that there is nothing to restore from rather than advising a restore that
+# would fail.
 git config --file "$NOREMOTE/gitconfig" --add safe.directory "$GONE"
-check "untracked gitconfig still reported" "$(noref | grep -c '✗ 1 entry in the TRACKED gitconfig')" "1"
-check "…and HEAD's silence is named"       "$(noref | grep -c 'HEAD has no gitconfig')"             "1"
-check "…with no restore advice"            "$(noref | grep -c 'Fix (uncommitted')"                  "0"
+check "untracked gitconfig still reported" "$(noref | grep -c '✗ 1 safe.directory entry(s) in gitconfig')" "1"
+check "…and HEAD's silence is named"       "$(noref | grep -c 'not in HEAD, so there is nothing to restore from')" "1"
+check "…with no restore advice"            "$(noref | grep -c 'Fix (')"                             "0"
 rm "$NOREMOTE/gitconfig"
+# The file is whatever the link map says ~/.gitconfig points at, not a hardcoded
+# `gitconfig`: rename the source and a hardcoded name reads "nothing to check"
+# over a polluted live file — the fourth link direction's failure, in a new place.
+SRCMAP="$TMPROOT/srcmap"
+git init -q -b main "$SRCMAP"
+git -C "$SRCMAP" config user.email t@example.com
+git -C "$SRCMAP" config user.name Test
+mkdir -p "$SRCMAP/git"
+printf -- '- link:\n    ~/.gitconfig: git/config\n' > "$SRCMAP/install.conf.yaml"
+printf '[user]\n\tname = Renamed\n' > "$SRCMAP/git/config"
+git -C "$SRCMAP" add -A >/dev/null && git -C "$SRCMAP" commit -qm init
+git config --file "$SRCMAP/git/config" --add safe.directory "$GONE"
+srcmap() { zrun "DOTFILES_ROOT='$SRCMAP' DOTFILES_PIN_BRANCH=main dotfiles-doctor"; }
+check "source path comes from the link map" "$(srcmap | grep -c '✗ 1 safe.directory entry(s) in git/config')" "1"
+check "…and the fix names it"            "$(srcmap | grep -c 'restore --staged --worktree -- git/config')" "1"
+check "…and the generic line follows it" "$(srcmap | grep -c '· M git/config — only the safe.directory')" "1"
+# A map that declares no ~/.gitconfig at all: nothing writes through, so a note.
+NOLINK="$TMPROOT/nolink"
+git init -q -b main "$NOLINK"
+git -C "$NOLINK" config user.email t@example.com
+git -C "$NOLINK" config user.name Test
+printf -- '- link:\n    ~/.thing: thing\n' > "$NOLINK/install.conf.yaml"
+echo thing > "$NOLINK/thing"
+git -C "$NOLINK" add -A >/dev/null && git -C "$NOLINK" commit -qm init
+check "undeclared ~/.gitconfig is a note" "$(zrun "DOTFILES_ROOT='$NOLINK' DOTFILES_PIN_BRANCH=main dotfiles-doctor" | grep -c '· ~/.gitconfig is not a declared link')" "1"
 
 echo
 echo "=== links must resolve INSIDE this checkout ==="
