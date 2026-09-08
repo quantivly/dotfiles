@@ -417,7 +417,7 @@ touch -d '2020-01-01' "$(store_of p1)"
 as_rotated_real_file p1 1000 rotated
 cp "$ACCOUNT_ROOT/p1/.credentials.json" "$TMPROOT/f8.rotated"
 NOJQ="$TMPROOT/nojq"; mkdir -p "$NOJQ"
-for b in bash cp mv rm ln stat date cmp chmod mkdir basename ls awk readlink flock; do
+for b in bash cp mv rm ln stat date cmp chmod mkdir basename ls sort readlink flock; do
     src="$(command -v "$b" 2>/dev/null)" && ln -sf "$src" "$NOJQ/$b"
 done
 OUT="$(env -u CLAUDE_ACCOUNT_DIRS_ROOT HOME="$FHOME" PATH="$NOJQ" bash "$SUT" p1 2>&1)"; RC=$?

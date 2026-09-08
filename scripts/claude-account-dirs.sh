@@ -164,7 +164,7 @@ cred_live_side() {
 
 # Copy a credential aside before it is overwritten; prints the backup's path.
 cred_backup() {
-    local f="$1" dest old victims=()
+    local f="$1" dest victims=()
     dest="$f.superseded-$(date +%Y%m%d-%H%M%S)-$$"
     cp -p "$f" "$dest" 2>/dev/null || return 1
     chmod 600 "$dest" 2>/dev/null || true
@@ -172,9 +172,15 @@ cred_backup() {
     victims=("$f".superseded-*)
     shopt -u nullglob
     if (( ${#victims[@]} > CRED_BACKUPS_KEPT )); then
-        while IFS= read -r old; do if [[ -n "$old" ]]; then rm -f "$old"; fi; done < <(
-            ls -1t "${victims[@]}" 2>/dev/null | awk -v k="$CRED_BACKUPS_KEPT" 'NR > k'
-        )
+        # `stat | sort -rn`, not `ls -t` (SC2012) and not awk. awk is not on the
+        # from-scratch PATH the state tables build, and CLAUDE.md records two
+        # checks that silently produced nothing for exactly that reason. These
+        # names are generated here, so a plain `read` split is safe.
+        local _mtime path kept=0
+        while read -r _mtime path; do
+            kept=$(( kept + 1 ))
+            if (( kept > CRED_BACKUPS_KEPT )); then rm -f "$path"; fi
+        done < <(stat -c '%Y %n' "${victims[@]}" 2>/dev/null | sort -rn)
     fi
     printf '%s\n' "$dest"
 }
