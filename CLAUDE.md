@@ -115,6 +115,46 @@ dotfiles-doctor              # is the live config the reviewed config?
 dotfiles-doctor --fetch      # ...compared against the actual remote, not a stale ref
 ```
 
+**Performing the deploy — and `git pull` is NOT the command.** Advancing the primary
+checkout is the whole deploy, and the obvious way to do it fails **in this repo's
+ordinary resting state**, which is why it is written down here rather than left to be
+rediscovered:
+
+```bash
+git -C ~/.dotfiles fetch origin main
+git -C ~/.dotfiles merge --ff-only origin/main   # NOT `git pull`
+bash ~/.dotfiles/install                          # renders/relinks what moved
+dotfiles-doctor                                   # before and after
+```
+
+`pull.rebase = true` is set in `~/.gitconfig` — *itself a managed symlink into this
+repo* — so `git pull` attempts a rebase and aborts with `cannot pull with rebase: You
+have unstaged changes` the moment anything is dirty. **`--ff-only` does not override
+it**; the rebase is chosen before the fast-forward is considered. And this repo
+*expects* a dirty file: `DOTFILES_EXPECTED_DIRTY` defaults to
+`config/herdr/plugins/plugins.lock`, a symlink `herdr-lazy` writes straight through by
+design. So the failure is not an edge case — it is the normal state, and the deploy
+command has to be one that tolerates it.
+
+A fast-forward **merge** needs no clean tree, provided the dirty paths are not in the
+incoming diff. Check that first, because a merge that *does* touch them will stop
+halfway:
+
+```bash
+git -C ~/.dotfiles diff --name-only HEAD..origin/main   # dirty paths must not appear
+```
+
+**Do not reach for `git stash` to make `pull` work.** The stash stack is shared with
+every worktree and every other agent session on the box, so a `pop` can take somebody
+else's work — the hazard `dotfiles-work` exists to avoid in the first place. If the
+dirty file genuinely blocks the merge, deal with that file; do not park it somewhere
+global.
+
+One asymmetry to expect afterwards: a squash-merged branch is **not** an ancestor of
+`main`, so `git merge-base --is-ancestor` reports "not merged" for a branch that landed
+in full. `git diff <branch> origin/main` being empty is the test that answers whether it
+is safe to delete.
+
 `dotfiles-doctor` reports the pin state, how stale `origin/main` is, commits
 ahead/behind it, **which managed files actually differ** (the blast radius, not just a
 commit count), uncommitted changes to those files, and link integrity in four
@@ -1758,6 +1798,7 @@ alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)
 dotfiles-doctor      # Is the live config the reviewed config? (--fetch to check the real remote)
 dotfiles-work <br>   # Create/enter a worktree so the primary checkout stays on main
+git -C ~/.dotfiles merge --ff-only origin/main   # DEPLOY (after a fetch). NOT `git pull`
 gnome-apply          # Apply curated GNOME desktop config (idempotent)
 xdg-repair           # Fix/guard ~/Desktop, ~/Documents, ... XDG dirs (idempotent)
 gnome-init           # Create ~/.gnome-settings.local (dock favorites, launch keys)
