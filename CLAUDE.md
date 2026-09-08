@@ -1530,8 +1530,140 @@ Design points that are load-bearing rather than preferences:
 
 - **The credential is a symlink, never a copy** — see the correction above. A copy is an
   independent holder of one grant, which is the failure this exists to remove rather than to
-  manufacture. The symlink is written *through*, not replaced: the profile stores carry `mcpOAuth`
-  discovery records that only Claude Code writes.
+  manufacture. **CORRECTED 2026-09-08: the claim that followed here — "the symlink is written
+  *through*, not replaced" — was FALSE, and it was never checked.** Claude Code writes
+  `.credentials.json` **atomically** (temp file + rename), and a rename *replaces* a symlink with a
+  real file holding the freshly rotated token. That much is survivable; what was not is what the
+  builder then did with it. Its step 3 ran an unconditional `ln -sfn`, restoring the store's
+  **superseded** token — and since rotation is server-side, that invalidated credential logged out
+  every live session on the account. `claude()` runs the builder on **every** launch, so each new
+  session on a profile re-armed the trap for the ones already running.
+  Measured that morning: three of four account dirs held real, diverged files, `personal` was
+  already quarantined by clauth as `auth_broken`, and every check on the machine was green.
+  The builder now **reconciles** (`reconcile_credential`) instead of relinking: it decides which
+  side is live from the `expiresAt` inside each file (falling back to mtime with no `jq`), adopts a
+  session's rotation *into* the store, copies the loser aside first, and **refuses** when it cannot
+  tell. A discovery stub — empty `accessToken`, no `expiresAt` — never counts as live. State table:
+  `scripts/test-claude-account-dirs.sh` (70 checks, 9 mutants, all died), and
+  `scripts/claude-account-dirs.sh --reconcile` is the same code path on a 2-minute
+  `systemd --user` timer, because launch-time alone leaves the store stale between a rotation and
+  the next launch — which is precisely how `personal` got quarantined.
+  **The invariant, stated once: for each account there is exactly ONE credential file, and every
+  process using that account reads it.** `claude-doctor`'s "Account dirs" section asserts it, along
+  with the pooled-sharing one below.
+  Two bugs inside the fix, both of which reported success: `exec {fd}>file 2>/dev/null` has **no
+  command**, so *both* redirections applied to the shell permanently and the script's own stderr
+  went to `/dev/null` for the rest of the run — every later `warn()` and `die()` silently lost, in
+  the file whose whole purpose is to say what it did to a credential. And `cond && cmd` as a bare
+  statement is a *failing command* when `cond` is false, which under `set -e` exits the script with
+  no message at all (the SC2015 class this file already records twice).
+
+  **An adversarial review then found six more that DESTROYED a credential while reporting success,
+  and the first is the one to remember.** The decision function ranked on `expiresAt` alone and
+  never looked at `accessToken` — but this file's own discriminator for an interleaved write is
+  that the victim *keeps* its `expiresAt` and `scope` and *loses* its `accessToken`. So the victim
+  of a lost race outranked the credential that still worked, and adopting it copied an **empty
+  token over a good one**, after which clauth polls with nothing and quarantines the account: the
+  exact outcome the whole change exists to prevent. Reproduced, then fixed by requiring a non-empty
+  `accessToken` before a file counts as live at all. The lesson generalises past this file: **a
+  freshness signal is not an aliveness signal**, and ranking on the one while meaning the other is
+  how a broken thing wins.
+  The other five, each now a state-table row and a dead mutant: an **equal** expiry with different
+  content was "resolved" by discarding the account dir's file, silently dropping the `mcpOAuth`
+  logins it had gained (one browser OAuth flow per server per profile, every time the timer ran) —
+  identical logins now adopt rather than discard; a non-integer expiry made `(( ea > es ))` a bash
+  **arithmetic error** whose failure read as a decision; **UNKNOWN on one side** handed the other a
+  confident win, because "does not parse" and "parses but is unusable" had been collapsed into one
+  return code — they are now distinct, and either side being unreadable is a refusal; `cred_backup`
+  used **`cp -p`**, stamping the *source's* mtime on the backup while the prune ranked by mtime, so
+  the call could delete the copy it had just made and still return its path — the only safety net
+  under every decision above; and `cred_relink`'s status was discarded at all four call sites next
+  to a bare `ln -s`, so an unwritable account dir yielded **exit 0 with no credential**, which
+  Claude Code answers by writing a fresh independent login — manufacturing the very independent
+  holder the design forbids.
+  Three more from the same review that were not credential-destroying but were the familiar shapes:
+  the `auth_broken` exclusion matched a **single line** while clauth already writes `profiles = [`
+  multi-line in that same file with the same writer (the `fallback_chain` recurrence — a `sed`
+  range fixes it, again); the new doctor section made **the machine's ordinary post-refresh state a
+  ✗**, three lines above its own note calling that state expected — the permanently-red checker,
+  **fifth** recurrence, now a ⚠; and `--reconcile` returned non-zero for states only a human can
+  resolve, which as a 2-minute `oneshot` is a unit that fails 720 times a day forever. A timer's
+  `ExecStart` must distinguish "I could not decide" from "the machine is broken", and only the
+  second deserves a failed unit. Also: **`<->` is a zsh numeric glob and a syntax error in bash** —
+  `bash -n` caught it, which is the argument for running the checker rather than reading it.
+  And the review's own design finding, taken: when every pool member is excluded the picker used to
+  fall through to the **shared** credential — but exclusions correlate with load, so that path was
+  rare in calm weather and concentrated in bad, which is the opposite of a safe degradation. It now
+  falls back to an *account* (clauth's active profile, isolated) and reserves the shared file for an
+  explicit `CLAUDE_ISOLATION_OFF=1`.
+
+  **A second review round found more than the first, and the framing is the part to keep: the
+  decision function implemented ONE QUARTER of the upstream one.** clauth's `try_adopt_live_rotation`
+  gates an adopt on four things — a refresh token present, both expiries present, live > stored
+  **strictly**, and identity **proven** — and refuses on any. This kept the expiry comparison and
+  turned its *refusal* case into a destructive relink: on a tie upstream does nothing, where this
+  relinked and discarded. When mirroring a tool's mechanism, mirror its **refusals**, not just its
+  happy path — they are most of what the mechanism is.
+  What that omission cost, all reproduced: a `/login` as a **different account** inside an isolated
+  session was adopted into the wrong profile's store on the strength of a later expiry (this machine's
+  journal holds 8 upstream refusals of exactly that event), which bills the wrong account, poisons
+  that profile's usage numbers so the picker ranks on them, and would be installed machine-wide by
+  `clauth <profile>` — while the new doctor printed **✓** for it, because it compared paths and never
+  identity. Fixed with a **rotation-shape gate**: adopt only when the two files differ in the fields a
+  refresh rewrites, refuse everything else by name. Be honest about its strength — measured here it
+  separates `personal` from the work accounts and `quantivly-3` from the other two, but `quantivly-1`
+  and `quantivly-2` carry an identical residual, so it is a filter, not a proof.
+  **And the store was written holding only OUR lock.** clauth serialises every credential write on
+  `~/.clauth/.lock` (`runtime.rs:3095` carries a `debug_assert` demanding it), so an adopt could land
+  on top of a rotation clauth had just performed and restore the pre-rotation token — the original
+  logout bug, re-created from the other end of the same pipe. Take the other tool's lock, not only
+  your own, whenever you write a file it owns.
+  The **mcpOAuth union** mattered more than it looked: `quantivly-3`'s store held *zero* MCP logins
+  against one in its account dir, so whichever side happened to rotate last decided whether they
+  survived — twice an hour per profile once the timer runs, at a browser OAuth flow each to get back.
+  Merging both sides means there is no losing side at all, which also makes the tie harmless rather
+  than destructive.
+
+  **Five mutants survived, and every one was a row that could not fail** — the class this file
+  already warns about, met five times in one change. Worth the pattern rather than the list: a
+  fixture that does not reach the branch (`expiresAt: 1.5e12` renders as an integer, so the
+  non-integer guard was never entered); a fixture below the threshold (six backups were needed to
+  reach a prune that only runs past five — and giving all six the *same* ancient mtime made the
+  prune's choice arbitrary rather than wrong, so the count matched either way); a row whose failure
+  came from somewhere else (an unwritable dir failed on `settings.json` first, so the link guard was
+  never exercised — `--reconcile` writes no settings, which is the path that isolates it); and a row
+  testing the wrong side (the MCP union only matters when the side WITHOUT the logins wins, so a
+  fixture where the MCP-bearing side won proved nothing). **Ask of every new row: what single change
+  to the code would make this fail? If the answer is "none", the row is decoration.**
+  One survivor was not a missing pin but genuinely unreachable code: the shape gate now refuses an
+  unparseable file before the decision function sees it, so that function's own UNKNOWN branch cannot
+  be entered. It is kept as defence in depth and the mutant retired, with both facts written down —
+  a mutant that can never die is worse than no mutant, because it reads as coverage.
+  A fixture bug worth its own line: one row wrote **through** the credential symlink with `>` and so
+  clobbered the store instead of creating the real file it meant to test. Claude Code's atomic rename
+  *replaces* a symlink; a shell redirect follows it. The code was right and the test was wrong, which
+  is the harder direction to spot.
+
+  **A sixth survivor was a row that passed because the TEST raced, not because the fix was missing.**
+  Both lock rows started a background holder and then `sleep 0.4` before measuring — and on a loaded
+  machine, which a mutation run guarantees, the holder had sometimes not acquired yet, so the
+  reconcile took the lock uncontended, returned fast, and the row passed with the locking removed.
+  Run alone it pinned its fix perfectly; run under load it pinned nothing, which is the worst of both
+  (it looks like coverage and reports green exactly when the suite is working hardest). The holder now
+  **signals** that it holds the lock and the row waits for the signal. **A timing-based row is a
+  probabilistic row unless something synchronises it** — and its flakiness will show up first in
+  mutation testing, where the machine is busiest, not in the clean single run you wrote it against.
+- **Everything except the credential is SHARED, and that is the point of a pool.** Each account dir
+  symlinks `projects/` (so memory and every transcript), `plugins/`, `skills/`, `hooks/`, `teams/`,
+  `tasks/` and the user-level `CLAUDE.md` back to `~/.claude/`, derived from the live directory
+  rather than a list. So accounts in a pool share memory, plugin configuration and skills; only the
+  identity differs. `claude-doctor` asserts it per account dir, because nothing about a session
+  reveals that it has quietly stopped sharing.
+  The one genuine exception is **plugin MCP OAuth**: `mcpOAuth` lives *inside* `.credentials.json`,
+  so it is per-account by construction and each profile needs its own browser flow per plugin MCP
+  server. The **claude.ai connectors** for the same services ride the login token and need no such
+  entry, which is why retiring the duplicated plugin copies makes the per-profile MCP cost zero.
+
 - **`settings.json` is a copy, not a symlink.** clauth rewrites the global file's `env` and
   `[models]` on a profile switch (which is how `model` came to be `null` there), and a symlink
   would import that churn into every account dir. A persistent dir has no fresh-launch moment to
@@ -1543,12 +1675,33 @@ Design points that are load-bearing rather than preferences:
   `~/.claude.json` is 95 kB with 21 projects and matches what clauth seeds. Seeding from the husk
   gives every account dir first-run onboarding and a trust dialog in every worktree — silently,
   because a husk is still valid JSON. An implausibly small seed is a hard error for that reason.
-- **The default profile is the least-loaded one, not `clauth which`.** That call answers from
-  `$CLAUDE_CONFIG_DIR`, so **inside an isolated pane it returns the parent session's profile** —
-  measured, it says `quantivly-3` in an isolated shell and `unknown` in a bare one. Defaulting to
-  it puts every spawn in its parent's credential group, which is the concentration being undone.
-  Holders are counted from pidfiles under `<dir>/holders/`, pruned by `kill -0` as they are
+- **The default profile is the pool member with the most HEADROOM, not `clauth which`.** That call
+  answers from `$CLAUDE_CONFIG_DIR`, so **inside an isolated pane it returns the parent session's
+  profile** — measured, it says `quantivly-3` in an isolated shell and `unknown` in a bare one.
+  Defaulting to it puts every spawn in its parent's credential group, which is the concentration
+  being undone.
+  **`CLAUDE_ACCOUNT_POOL` is the pool** (set it in `~/.zshrc.local`; empty = every registered
+  profile, which is what a one-account adopter wants). A profile outside it is never chosen
+  automatically — only by name with `claude-as` — which is how a personal account stops being spent
+  by a work session that merely happened to start next.
+  Ranked by the **worse of the 5h and 7d** utilization from `~/.clauth/profiles/<p>/usage_cache.json`,
+  then by live holders, then alphabetically. 7d counts as much as 5h: an account at 3% of five hours
+  and 96% of its week has almost nothing left, and ranking on 5h alone sends every new session
+  straight to it. A reading that is missing or older than `CLAUDE_ACCOUNT_CACHE_MAX_AGE` (3600 s)
+  sorts **last**, never first — unknown must not outrank a measured 0%.
+  **Accounts clauth has excluded are skipped, and this is not cosmetic.** `disabled` comes from the
+  profile's `config.toml`, `auth_broken` from clauth's own quarantine list. Until 2026-09-08 the
+  picker ranked on holder count alone and chose `personal` — *because* it was quarantined and so had
+  nothing running on it. **The emptiness that a quarantine causes read as headroom.** A quarantined
+  account also stops being polled, so its usage numbers freeze at whatever they were (`personal`'s
+  were 21.7 h stale when this was found), which is why a stale reading can never be believed.
+  Holders are still counted from pidfiles under `<dir>/holders/`, pruned by `kill -0` as they are
   counted; `claude()` blocks for the session, so the shell's pid stands in for it.
+  **The picker sets `REPLY` and must be called DIRECTLY.** A `$(...)` call is a subshell, and the
+  two globals it reports through — the load that won, and every account it refused — would die with
+  it, leaving the announcement silent in exactly the case it exists for. It printed to stdout at
+  first, and did. Also `${${(o)arr}[1]}` **joins the array into one scalar and indexes its first
+  CHARACTER**: it returned `0` from the zero-padded sort key, and the picker silently chose nothing.
 - **Credential groups can only equal logins.** Four profiles against 18–30 sessions gives groups
   of five to seven; `clauth login <name>` is what makes them smaller. Whether two profiles can
   hold *the same* account independently is **untested** — if each `/login` yields an independent
@@ -1585,6 +1738,14 @@ Traps specific to the checker, each of which produced a green tick first:
   whose own header says NEVER PRINTS A CREDENTIAL. A `sed` *range* from an anchored
   assignment to the first `]`, quitting there, is bounded by construction. Also
   `fallback_chain = []` is configured, not armed.
+  **And do not read that as a description of this machine.** The chain here was
+  `["quantivly-3","quantivly-1","quantivly-2"]` with a live daemon until 2026-09-08, while 15 of 21
+  Claude processes had no `CLAUDE_CONFIG_DIR` at all and so read the very file the chain repoints —
+  which is what a login-expiry incident hitting five sessions in the same minute looks like. It is
+  empty now **by decision**: with every session placed on its own account dir at launch, an account
+  is chosen where choosing is free, instead of being swapped underneath sessions already running.
+  Per-session rotation is still available where it is actually wanted, via
+  `clauth start <p> --with-fallback`, which moves that one session and touches no other.
 - **Read the type before indexing — the second recurrence.** CLAUDE.md already
   records this for `herdr-claude-wire.sh` (`//` substitutes for null, never for a
   type error). An `mcpOAuth` value that is a string — a plausible product of the

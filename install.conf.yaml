@@ -57,6 +57,11 @@
     # scripts/verify-tools.sh FAILS when it has drifted — `git checkout` here is a
     # deploy, and install is not in that path.
     ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
+    # Keeps each account dir's credential and its clauth profile store as ONE
+    # file between launches, so a rotation cannot leave clauth polling with a
+    # token the server already invalidated (which quarantines the account).
+    ~/.config/systemd/user/claude-cred-reconcile.service: systemd/claude-cred-reconcile.service
+    ~/.config/systemd/user/claude-cred-reconcile.timer: systemd/claude-cred-reconcile.timer
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme

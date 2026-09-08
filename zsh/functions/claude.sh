@@ -874,6 +874,140 @@ claude-doctor() {
   fi
 
   echo
+  #===========================================================================
+  # The account dirs: one credential per account, and a shared everything else
+  #===========================================================================
+  # WHY THIS SECTION EXISTS. scripts/claude-account-dirs.sh points each account
+  # dir's .credentials.json at the clauth profile store as a SYMLINK, and Claude
+  # Code writes that file ATOMICALLY -- a rename, which REPLACES the symlink with
+  # a real file holding a freshly rotated token. The builder then used to restore
+  # the link unconditionally, putting the store's SUPERSEDED token back; rotation
+  # is server-side, so that logged out every live session on the account. Three
+  # of four account dirs were in that state when it was found (2026-09-08), with
+  # one profile already quarantined by clauth as auth_broken, and NOTHING on the
+  # machine reported any of it.
+  #
+  # The builder now reconciles instead. This is the check that says whether the
+  # invariant actually holds -- for each account, exactly ONE credential file,
+  # read by every process using that account.
+  echo
+  echo "--- Account dirs ---"
+  {
+    local adroot="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
+    local ad name store link shared tstate real_n=0 seen=0
+    local -a shared_missing
+
+    if [[ ! -d "$adroot" ]]; then
+      # Nothing to check is not a failure: a modular adopter, or anyone who has
+      # not run an isolated session, legitimately has no account dirs.
+      _doctor_note "no account dirs at ${adroot/#$HOME/~} — nothing isolated yet"
+    else
+      for ad in "$adroot"/*(N/); do
+        name="${ad:t}"
+        store="$HOME/.clauth/profiles/$name/credentials.json"
+        seen=1
+
+        if [[ ! -e "$store" && ! -L "$store" ]]; then
+          _doctor_warn "$name: an account dir with no clauth profile store"
+          echo "    Nothing can reconcile it. 'clauth login $name', or remove the dir."
+          continue
+        fi
+
+        # -L before -e: [[ -e ]] FOLLOWS symlinks, so a dangling link reads as
+        # "no file" and would be reported as "not logged in" — sending the reader
+        # to /login instead of at the broken link. CLAUDE.md records this exact
+        # trap for the credential check one section up.
+        if [[ -L "$ad/.credentials.json" ]]; then
+          link="$(readlink "$ad/.credentials.json")"
+          if [[ "$link" == "$store" ]]; then
+            if [[ -e "$store" ]]; then
+              _doctor_ok "$name: credential shared with the clauth store"
+            else
+              _doctor_bad "$name: credential link DANGLES — its store is gone"
+              echo "    'clauth login $name' to recreate it."
+            fi
+          else
+            _doctor_bad "$name: credential links to ANOTHER profile's store"
+            echo "    -> ${link/#$HOME/~}"
+            echo "    Sessions in this dir bill that account. Re-run the builder to repoint it."
+          fi
+        elif [[ -f "$ad/.credentials.json" ]]; then
+          real_n=$(( real_n + 1 ))
+          if cmp -s "$ad/.credentials.json" "$store"; then
+            # Identical content: a rotation that has not been reconciled yet, or
+            # none since the last one. Harmless until they diverge, so it is a
+            # note about pending work, not an alarm.
+            _doctor_note "$name: credential is a real file, still identical to the store"
+            echo "    A session's atomic write replaced the link. Reconciling relinks it."
+          else
+            # A ⚠, NOT a ✗. This state is produced by an ordinary token refresh and
+            # is resolved by the reconciler on the next launch or the next timer
+            # tick, so calling it a failure makes claude-doctor exit non-zero on a
+            # busy machine essentially always — the permanently-red checker this
+            # repo has now documented four times, three lines above a note calling
+            # the same state "Expected after a token refresh". It is still worth
+            # naming, because until it IS reconciled clauth is polling with a
+            # stale token, which is how an account gets quarantined.
+            _doctor_warn "$name: credential is a real file that DIFFERS from the clauth store"
+            echo "    An ordinary token refresh produces this. Until it is reconciled, clauth"
+            echo "    polls with the stale stored token, which is how an account gets"
+            echo "    quarantined as auth_broken. The 2-minute timer normally handles it; to"
+            echo "    do it now:"
+            echo "      ~/.dotfiles/scripts/claude-account-dirs.sh --reconcile"
+          fi
+        else
+          _doctor_bad "$name: no credential in the account dir at all"
+          echo "    Sessions started here will not be logged in. Re-run the builder."
+        fi
+
+        # THE POOLED-SHARING INVARIANT. Memory, plugins, skills, hooks and the
+        # user-level CLAUDE.md must stay symlinked back to ~/.claude, or accounts
+        # in a pool silently stop sharing them — and a session cannot tell.
+        shared_missing=()
+        for shared in projects plugins skills hooks CLAUDE.md; do
+          [[ -e "$HOME/.claude/$shared" || -L "$HOME/.claude/$shared" ]] || continue
+          if [[ ! -L "$ad/$shared" ]]; then shared_missing+=("$shared"); fi
+        done
+        if (( ${#shared_missing} )); then
+          _doctor_bad "$name: not sharing ${(j:, :)shared_missing} with ~/.claude"
+          echo "    Accounts in a pool are supposed to share memory, plugins and skills."
+          echo "    Re-run: ~/.dotfiles/scripts/claude-account-dirs.sh $name"
+        fi
+      done
+
+      # The reconciler timer. A LINKED unit is not a RUNNING one, and this whole
+      # section exists because a credential quietly goes stale between launches;
+      # a reconciler that is installed but not enabled restores exactly that
+      # failure while every other line here reads green.
+      #
+      # Reported only when there is something to reconcile AND a user manager to
+      # ask, so a machine with no systemd (a container, a server) and a machine
+      # with no account dirs both stay silent rather than permanently red.
+      if (( seen )) && command -v systemctl >/dev/null 2>&1; then
+        tstate="$(systemctl --user is-active claude-cred-reconcile.timer 2>/dev/null)"
+        if [[ "$tstate" == active ]]; then
+          _doctor_ok "the credential reconciler timer is running"
+        elif [[ -z "$tstate" ]]; then
+          # No user manager to answer (no session bus, a container). "Could not
+          # ask" is not "it is broken".
+          _doctor_note "could not ask systemd about the reconciler timer — NOT CHECKED"
+        else
+          _doctor_warn "the credential reconciler timer is not running ($tstate)"
+          echo "    Credentials are reconciled at launch, but a rotation between launches"
+          echo "    leaves clauth polling a stale token, which is how an account gets"
+          echo "    quarantined. Enable it:"
+          echo "      systemctl --user enable --now claude-cred-reconcile.timer"
+        fi
+      fi
+
+      (( seen )) || _doctor_note "no account dirs built yet"
+      if (( real_n )); then
+        _doctor_note "$real_n account dir(s) hold a real credential file rather than a link"
+        echo "    Expected after a token refresh. '--reconcile' adopts the live one and relinks."
+      fi
+    fi
+  }
+
   _doctor_summary "Claude Code auth and MCP surface look healthy." \
     "Start with the ✗ items; 'claude-doctor --all' also lists the servers that are fine."
 }
