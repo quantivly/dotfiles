@@ -277,10 +277,15 @@ review, all of which reported success:
   `status.showUntrackedFiles = no` makes an untracked file print NOTHING and git's own
   check has that hole — and refuses on any output **or on a status it cannot read**;
   `--remove --force` is the explicit override. Two refusals `--force` does not override:
-  a directory git does not list as a worktree, and a worktree the live `~/.zshrc`
+  a directory git does not list as a worktree, and a worktree any live managed link
   resolves into — the worktrees this fix makes removable are exactly the ones an install
-  has run in, and removing one would leave every new shell with nothing to source; the
-  remedy is `./install` from the primary, which is non-destructive. `git submodule deinit` first was the obvious alternative and does not
+  has run in, and removing one would leave those links dangling; the remedy is
+  `./install` from the primary, which is non-destructive. **Enumerated, not
+  sentinelled:** the first version checked `~/.zshrc` alone, and `./install --herdr`
+  never links `~/.zshrc` — it links five herdr destinations including the systemd unit
+  that owns every agent session, and a herdr-shape worktree was removed with rc 0 and
+  left the unit dangling. Every destination in BOTH confs is checked now, read from the
+  primary and from the worktree, with the mise link and `~/.zshrc` as a floor. `git submodule deinit` first was the obvious alternative and does not
   work: git refuses on the mere existence of `.git/worktrees/<id>/modules`, which deinit
   keeps, and deinit run inside a worktree removes `submodule.<name>.*` from the **shared**
   config, unregistering the primary checkout's copy from a command whose whole purpose is
@@ -346,7 +351,7 @@ Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 (scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
 `DOTFILES_GROUP_FILE`.
 
-State table: `scripts/test-dotfiles-guard.sh` (302 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (308 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale

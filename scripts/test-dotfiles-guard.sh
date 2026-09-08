@@ -1206,6 +1206,40 @@ subwork_run '--remove probe/many'
 check "many dirty files: refused"           "$RC"                                                     "1"
 check "many dirty files: listing capped"    "$(printf '%s\n' "$OUT" | grep -c 'and 2 more')"          "1"
 
+# The sentinel was ~/.zshrc alone, and `./install --herdr` never links ~/.zshrc:
+# it links five herdr destinations, among them the systemd unit that owns every
+# agent session — so a herdr-shape install from a worktree was removed with rc 0
+# and left the unit dangling (found by the local reviewer, reproduced). The check
+# enumerates the declared links of BOTH confs instead, read from the primary and
+# from the worktree, with the mise link and ~/.zshrc as a floor. The fixture repo
+# gains a conf declaring two herdr-shape links; ~/.zshrc stays on the primary.
+mkdir -p "$SUBREPO/config/herdr" "$SUBREPO/systemd"
+echo 'herdr'  > "$SUBREPO/config/herdr/config.toml"
+echo '[Unit]' > "$SUBREPO/systemd/herdr-server.service"
+cat > "$SUBREPO/install.conf.yaml" <<'YAML'
+- link:
+    ~/.config/herdr/config.toml: config/herdr/config.toml
+    ~/.config/systemd/user/herdr-server.service: systemd/herdr-server.service
+YAML
+git -C "$SUBREPO" add -A >/dev/null
+git -C "$SUBREPO" commit -qm 'declare herdr links'
+git -C "$SUBREPO" push -q origin main
+git -C "$SUBREPO" fetch -q origin
+HERDRHOME="$TMPROOT/herdrhome"; mkdir -p "$HERDRHOME/.config/herdr" "$HERDRHOME/.config/systemd/user"
+installed_wt probe/herdr
+ln -s "$SUBREPO/file.txt" "$HERDRHOME/.zshrc"
+ln -s "$SUBWT/probe-herdr/config/herdr/config.toml"          "$HERDRHOME/.config/herdr/config.toml"
+ln -s "$SUBWT/probe-herdr/systemd/herdr-server.service"      "$HERDRHOME/.config/systemd/user/herdr-server.service"
+herdr_run() { OUT="$(zsh -c "source '$SYSTEM_SH'; HOME='$HERDRHOME' DOTFILES_ROOT='$SUBREPO' DOTFILES_PIN_BRANCH=main DOTFILES_WORKTREES='$SUBWT' dotfiles-work $1" 2>&1)"; RC=$?; }
+herdr_run '--remove probe/herdr'
+check "herdr-shape links inside: refused (rc 1)" "$RC"                                                "1"
+check "herdr-shape links inside: dir kept"  "$(dir_state probe-herdr)"                                 "present"
+check "herdr-shape links inside: names the unit" "$(printf '%s\n' "$OUT" | grep -c 'herdr-server.service')" "1"
+check "herdr-shape links inside: unit not dangling" "$([[ -e "$HERDRHOME/.config/systemd/user/herdr-server.service" ]] && echo resolves || echo dangling)" "resolves"
+rm "$HERDRHOME/.config/herdr/config.toml" "$HERDRHOME/.config/systemd/user/herdr-server.service"
+herdr_run '--remove probe/herdr'
+check "herdr-shape links elsewhere: removed" "$RC"                                                    "0"
+
 # git's own check_clean_worktree pins GIT_DIR=<wt>/.git and GIT_WORK_TREE=<wt>. A
 # plain `git -C <wt>` discovers UPWARD when the gitfile is gone, and under an
 # ancestor repo that ignores everything it reads THAT repo as clean — so --force
@@ -1381,6 +1415,12 @@ echo "=== the module itself: one note glyph, and it parses ==="
 # one of them is the deduplication half-done, and puts the next change to how
 # notes render back in four places.
 check "no hand-rolled note lines" "$(grep -c "printf '  • " "$SYSTEM_SH")" "0"
+# `local path` blanks PATH for the function's lifetime (zsh ties that array to
+# PATH). The doctor row above pins it behaviourally for one function; this pins
+# the class for the whole module, because it recurred in DO-583 — the link
+# enumerator lost `awk`, read every conf as unparseable, and refused every
+# removal with the wrong reason. Static, so it fires before any behaviour does.
+check "no local named path in the module" "$(grep -cE '^[[:space:]]*local\b.*\bpath\b' "$SYSTEM_SH")" "0"
 # zsh/functions/*.sh is read by no other static check: the shellcheck job selects
 # files by a `^#!` shebang and these have none, and pre-commit excludes the
 # directory because the syntax is zsh. CI now runs `zsh -n` over it; so does this,

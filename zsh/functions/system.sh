@@ -961,8 +961,10 @@ _dotfiles_live_config_warn() {
 # read at all, so callers can tell "no links" from "could not look" — and the
 # caller does branch on it; see dotfiles-doctor.
 _dotfiles_link_map() {
-  # Usage: _dotfiles_link_map <checkout-root>
-  local conf="${1:-}/install.conf.yaml"
+  # Usage: _dotfiles_link_map <checkout-root> [conf-name]
+  # The default is the full install's conf; `./install --herdr` links from
+  # install.conf.herdr.yaml, and dotfiles-work --remove reads both.
+  local conf="${1:-}/${2:-install.conf.yaml}"
   [[ -r "$conf" ]] || return 1
   awk '
     BEGIN { SQ = sprintf("%c", 39); DQ = "\""; tindent = -1 }
@@ -1618,6 +1620,58 @@ _dotfiles_work_branch_of() {
   print -r -- "$out"
 }
 
+# Live symlinks that resolve INTO worktree $2 of repo $1 — the state a
+# `DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install` (or `./install --herdr`) run
+# from that worktree leaves behind, and the state in which removing it dangles
+# the live config. Enumerated, not sentinelled: the first version checked
+# ~/.zshrc alone, and `./install --herdr` never links ~/.zshrc — it links five
+# herdr destinations, among them the systemd unit that owns every agent
+# session, and a herdr-shape install from a worktree was removed with rc 0 and
+# left the unit dangling. So: every destination BOTH confs declare, read from
+# the primary AND from the worktree (a branch may add a link), plus the mise
+# link and ~/.zshrc as a floor for a repo with no conf at all.
+#
+# Prints one "<dest> → <target>" line per offending link. Returns 0 for none,
+# 1 for some, 2 when a conf that exists could not be parsed — an unreadable map
+# is not "no links", and the caller refuses on it.
+_dotfiles_work_links_into() {
+  local root="$1" dir="$2" dir_real="${2:A}"
+  local -a confs dests
+  confs=(install.conf.yaml install.conf.herdr.yaml)
+  dests=('~/.zshrc')
+  # Every local is declared here, once: zsh's `local NAME` on a name already
+  # local in this scope is a DISPLAY command, and inside a loop it prints. And
+  # none of them is `path`: zsh ties that array to PATH, so `local path` blanks
+  # PATH for the function's lifetime — this one lost `awk`, read every conf as
+  # unparseable, and refused every removal with the wrong reason.
+  local r c line map d dest_path target found=0
+  for r in "$root" "$dir"; do
+    for c in "${confs[@]}"; do
+      [[ -e "$r/$c" ]] || continue
+      if ! map="$(_dotfiles_link_map "$r" "$c")"; then
+        print -r -- "could not parse $r/$c"
+        return 2
+      fi
+      for line in "${(f)map}"; do
+        [[ -n "$line" ]] && dests+=("${line%% *}")
+      done
+    done
+    for line in "${(f)$(_dotfiles_extra_links "$r")}"; do
+      [[ -n "$line" ]] && dests+=("${line%% *}")
+    done
+  done
+  for d in "${(u)dests[@]}"; do
+    if [[ "$d" == "~/"* ]]; then dest_path="${HOME}/${d#\~/}"; else dest_path="$d"; fi
+    [[ -L "$dest_path" ]] || continue
+    target="${dest_path:A}"
+    if [[ "$target" == "$dir_real" || "$target" == "$dir_real"/* ]]; then
+      print -r -- "$d → $target"
+      found=1
+    fi
+  done
+  return $found
+}
+
 # dotfiles-work --remove, once the arguments are parsed.
 #   $1 root   $2 pin branch   $3 worktree directory   $4 the name as typed
 #   $5 1 to discard uncommitted changes (--force)
@@ -1667,19 +1721,23 @@ _dotfiles_work_remove() {
       return 1
     fi
     # The worktrees this fix makes removable are exactly the ones an install
-    # has run in — and an install run there re-pointed every managed symlink
-    # INTO it, so removing it would leave ~/.zshrc dangling: the next shell
-    # sources nothing, with none of the doctors present to say so. ~/.zshrc is
-    # the sentinel, resolved the forkless way the startup guard resolves it.
+    # has run in — and an install run there re-pointed the managed symlinks
+    # INTO it, so removing it would leave them dangling: ~/.zshrc, and the
+    # next shell sources nothing with no doctor left to say so; or the herdr
+    # systemd unit, and the server that owns every agent session cannot
+    # restart. Every declared link is checked (see _dotfiles_work_links_into).
     # NOT overridable by --force: the remedy is a non-destructive ./install
     # from the primary, and no one wants a dangling live config.
-    if [[ -L "${HOME}/.zshrc" ]]; then
-      local live_zshrc="${${:-${HOME}/.zshrc}:A}" dir_real="${dir:A}"
-      if [[ "$live_zshrc" == "$dir_real" || "$live_zshrc" == "$dir_real"/* ]]; then
-        echo "✗ the live config points into $dir (~/.zshrc → $live_zshrc) — removing it would leave every new shell with nothing to source" >&2
-        echo "  Re-point it at the primary checkout first:  cd '$root' && ./install" >&2
-        return 1
-      fi
+    local into intorc
+    into="$(_dotfiles_work_links_into "$root" "$dir")"; intorc=$?
+    if (( intorc == 2 )); then
+      echo "✗ cannot tell which live links point into $dir ($into) — nothing removed" >&2
+      return 1
+    elif (( intorc != 0 )); then
+      echo "✗ the live config points into $dir — removing it would leave these dangling:" >&2
+      printf '    %s\n' "${(f)into}" >&2
+      echo "  Re-point them at the primary checkout first:  cd '$root' && ./install   (or ./install --herdr)" >&2
+      return 1
     fi
     # The check `git worktree remove` would have made, run here because the
     # --force below skips it, and pinned the way git's own check_clean_worktree
