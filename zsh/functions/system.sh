@@ -1593,10 +1593,202 @@ dotfiles-doctor() {
     "Usual fix: git -C $root checkout $pin && dotfiles-work <branch>"
 }
 
+# The branch checked out in worktree $2 of repo $1, read from git's worktree
+# REGISTRY rather than from the directory, so a directory that has been rm -rf'd
+# still answers. Prints the branch, `HEAD` for a detached worktree, and nothing
+# when $2 is not a worktree of $1 at all. Returns git's status when the registry
+# itself could not be read — a git that cannot read the repo answers every
+# question with silence, and that silence must not be taken for "not a
+# worktree". Both paths are canonicalised with :A before comparing: git records
+# the physical path, the caller has the logical one, and :A resolves a path
+# whose leaf no longer exists.
+_dotfiles_work_branch_of() {
+  local root="$1" want="${2:A}" line cur="" out="" listing lrc
+  listing="$(git -C "$root" worktree list --porcelain 2>/dev/null)"; lrc=$?
+  (( lrc == 0 )) || return $lrc
+  local -a lines
+  lines=("${(f)listing}")
+  for line in "${lines[@]}"; do
+    case "$line" in
+      "worktree "*)          cur="${line#worktree }" ;;
+      "branch refs/heads/"*) [[ "${cur:A}" == "$want" ]] && out="${line#branch refs/heads/}" ;;
+      detached)              [[ "${cur:A}" == "$want" ]] && out="HEAD" ;;
+    esac
+  done
+  print -r -- "$out"
+}
+
+# dotfiles-work --remove, once the arguments are parsed.
+#   $1 root   $2 pin branch   $3 worktree directory   $4 the name as typed
+#   $5 1 to discard uncommitted changes (--force)
+#
+# `./install` runs `git submodule update --init --recursive dotbot` in whichever
+# checkout it is run from — in a worktree that takes the
+# DOTFILES_ALLOW_WORKTREE_INSTALL=1 override, or a hand-run `git submodule
+# update` — so a worktree anyone has installed from carries a populated dotbot
+# submodule, and `git worktree remove` refuses those outright
+# ("working trees containing submodules cannot be moved or removed"). Until
+# DO-583 this function passed no --force, so the documented cleanup command
+# worked only on worktrees nobody had installed from.
+#
+# `git submodule deinit` first was the alternative and does not work: git refuses
+# on the mere existence of .git/worktrees/<id>/modules, which deinit keeps, and
+# deinit run inside a worktree removes submodule.<name>.* from the SHARED
+# config — unregistering the primary checkout's submodule from a command whose
+# whole purpose is to leave the primary checkout alone. So: --force, and the
+# check --force skips is performed here first.
+_dotfiles_work_remove() {
+  local root="$1" pin="$2" dir="$3" name="$4" force="$5"
+  local wt_branch lrc
+  wt_branch="$(_dotfiles_work_branch_of "$root" "$dir")"; lrc=$?
+  if (( lrc != 0 )); then
+    echo "✗ git could not list the worktrees of $root (exit $lrc) — nothing removed" >&2
+    return 1
+  fi
+
+  # Directory names flatten / to -, so two branches can map to one directory.
+  # The registry's answer is what gets removed and (maybe) deleted; say so when
+  # it is not the name that was typed, as the create path does.
+  if [[ -n "$wt_branch" && "$wt_branch" != HEAD && "$wt_branch" != "$name" ]]; then
+    echo "⚠ $dir is on '$wt_branch', not '$name' — acting on '$wt_branch'" >&2
+  fi
+
+  local -a rm_args
+  rm_args=()
+  if [[ -e "$dir" ]]; then
+    if [[ -z "$wt_branch" ]]; then
+      # A directory at the path that git does not list as a worktree: what an
+      # `rm -rf` without `worktree prune`, a half-failed remove or a name
+      # collision leaves. Its contents are unknown to git, so nothing here may
+      # force them away.
+      echo "✗ $dir is not a worktree of $root — refusing to force-remove what git does not track" >&2
+      echo "  If it is a leftover directory:" >&2
+      echo "    rm -rf '$dir' && git -C '$root' worktree prune" >&2
+      return 1
+    fi
+    # The worktrees this fix makes removable are exactly the ones an install
+    # has run in — and an install run there re-pointed every managed symlink
+    # INTO it, so removing it would leave ~/.zshrc dangling: the next shell
+    # sources nothing, with none of the doctors present to say so. ~/.zshrc is
+    # the sentinel, resolved the forkless way the startup guard resolves it.
+    # NOT overridable by --force: the remedy is a non-destructive ./install
+    # from the primary, and no one wants a dangling live config.
+    if [[ -L "${HOME}/.zshrc" ]]; then
+      local live_zshrc="${${:-${HOME}/.zshrc}:A}" dir_real="${dir:A}"
+      if [[ "$live_zshrc" == "$dir_real" || "$live_zshrc" == "$dir_real"/* ]]; then
+        echo "✗ the live config points into $dir (~/.zshrc → $live_zshrc) — removing it would leave every new shell with nothing to source" >&2
+        echo "  Re-point it at the primary checkout first:  cd '$root' && ./install" >&2
+        return 1
+      fi
+    fi
+    # The check `git worktree remove` would have made, run here because the
+    # --force below skips it, and pinned the way git's own check_clean_worktree
+    # pins it: GIT_DIR/GIT_WORK_TREE set explicitly, because a plain `git -C`
+    # discovers UPWARD when the gitfile is gone, and under an ancestor repo that
+    # ignores everything it reads THAT repo as clean. Same definition of dirty:
+    # modified and untracked, not ignored; a populated, unmodified submodule
+    # prints nothing. --untracked-files=normal is not redundant:
+    # `status.showUntrackedFiles = no` (settable from ~/.gitconfig.local) makes
+    # an untracked file print NOTHING, and git's own check has that hole. stdout
+    # is the listing; stderr is kept apart, because a warning with exit 0 is not
+    # a dirty file, and folding it in would list it as one.
+    local st strc err errf
+    errf="$(mktemp)" || { echo "✗ cannot create a temp file for git's stderr — nothing removed" >&2; return 1; }
+    st="$(GIT_DIR="$dir/.git" GIT_WORK_TREE="$dir" git -C "$dir" status --porcelain --untracked-files=normal --ignore-submodules=none 2>"$errf")"; strc=$?
+    err="$(<"$errf")"; rm -f "$errf"
+    local -a err_lines
+    err_lines=("${(f)err}")
+    if (( strc != 0 )); then
+      # An unreadable state is not a clean one.
+      echo "✗ cannot read the state of $dir (git exit $strc) — refusing to force-remove what cannot be inspected" >&2
+      [[ -n "$err" ]] && printf '  %s\n' "${err_lines[@]:0:3}" >&2
+      echo "  If it is a leftover directory:" >&2
+      echo "    rm -rf '$dir' && git -C '$root' worktree prune" >&2
+      return 1
+    fi
+    if [[ -n "$err" ]]; then
+      # Not dirt, not hidden either.
+      echo "  note — git status also said:" >&2
+      printf '    %s\n' "${err_lines[@]:0:3}" >&2
+    fi
+    if [[ -n "$st" ]] && (( ! force )); then
+      local -a st_lines
+      st_lines=("${(f)st}")
+      echo "✗ $dir has uncommitted changes — refusing to remove it:" >&2
+      printf '  %s\n' "${st_lines[@]:0:10}" >&2
+      (( ${#st_lines[@]} > 10 )) && echo "  … and $(( ${#st_lines[@]} - 10 )) more" >&2
+      echo "  Commit or move them first. To discard them:" >&2
+      echo "    dotfiles-work --remove --force $name" >&2
+      return 1
+    fi
+    # ONE --force: past the submodule refusal and the cleanliness check just
+    # performed, and nothing else. A LOCKED worktree needs `-f -f`; that
+    # refusal is git's and stays.
+    rm_args=(--force)
+  fi
+  # A directory that is already gone has nothing to protect, and git runs neither
+  # of its checks on one: a plain remove prunes the entry.
+
+  # If the shell is standing in the worktree — the create path cd's into it —
+  # leave BEFORE the directory goes, or every relative path afterwards fails.
+  local was_inside=0
+  [[ "${PWD:A}" == "${dir:A}" || "${PWD:A}" == "${dir:A}"/* ]] && was_inside=1
+
+  git -C "$root" worktree remove "${rm_args[@]}" "$dir" || return $?
+  echo "Removed worktree: $dir"
+  if (( was_inside )); then
+    cd "$root" && echo "  You were inside it — moved to $root"
+  fi
+
+  case "$wt_branch" in
+    "")   echo "  No branch recorded for it — nothing deleted." ;;
+    HEAD) echo "  It was on a detached HEAD, so there is no branch to delete." ;;
+    "$pin")
+      # `dotfiles-work <pin>` is allowed when the primary is off-pin, and the
+      # pin branch's tree is origin/<pin>'s by definition — so without this arm
+      # `--remove <pin>` deleted local main and called it landed.
+      echo "Kept branch $wt_branch: it is the pin branch, and never deleted here." ;;
+    *)
+      # Content, not ancestry. A squash-merged branch is not an ancestor of
+      # main, so `branch -d` and `merge-base --is-ancestor` both call a fully
+      # landed branch unmerged; an EMPTY DIFF against origin/<pin> means every
+      # byte on the branch is on main already, and that stays true when the ref
+      # is stale — an old origin/<pin> only makes the test stricter. So: -D on
+      # an empty diff, keep on anything else, including a comparison that could
+      # not run.
+      # Full ref names and a `--`: a branch named like a path is otherwise an
+      # "ambiguous argument". --quiet prints nothing on stdout, so the capture
+      # is git's stderr, kept for the arm that cannot compare.
+      local drc derr
+      derr="$(git -C "$root" diff --quiet "refs/heads/$wt_branch" "refs/remotes/origin/$pin" -- 2>&1)"; drc=$?
+      case $drc in
+        0)
+          local berr
+          if berr="$(git -C "$root" branch -q -D "$wt_branch" 2>&1)"; then
+            echo "Deleted branch $wt_branch: its tree is identical to origin/$pin (as last fetched), so nothing on it was unlanded."
+          else
+            # Keep git's own error: it is the actionable part.
+            echo "Kept branch $wt_branch: its tree is identical to origin/$pin, but git would not delete it:"
+            [[ -n "$berr" ]] && printf '    %s\n' "${(f)berr}"
+          fi ;;
+        1)
+          echo "Kept branch $wt_branch: it differs from origin/$pin (as last fetched)."
+          echo "  Once it has landed:  git -C '$root' branch -D $wt_branch"
+          echo "  (-D, not -d: a squash-merged branch is not an ancestor of $pin, so -d calls it unmerged.)" ;;
+        *)
+          echo "Kept branch $wt_branch: could not compare it with origin/$pin (git exit $drc)."
+          [[ -n "$derr" ]] && printf '    %s\n' "${(f)derr}"
+          echo "  If it has landed:  git -C '$root' branch -D $wt_branch" ;;
+      esac ;;
+  esac
+  return 0
+}
+
 dotfiles-work() {
   # Usage: dotfiles-work <branch>          create/enter a worktree for <branch>
   #        dotfiles-work --list            list existing worktrees
-  #        dotfiles-work --remove <branch> remove one
+  #        dotfiles-work --remove [--force] <branch>
+  #                                        remove one (and its branch, once landed)
   #
   # Feature work on this repo happens in a worktree, never by moving the primary
   # checkout — because moving the primary checkout is a deploy (see the section
@@ -1610,14 +1802,34 @@ dotfiles-work() {
       git -C "$root" worktree list
       return $? ;;
     --remove|-r)
-      if [[ -z "${2:-}" ]]; then
-        echo "Usage: dotfiles-work --remove <branch>" >&2
+      shift
+      # --force is the one option: it discards uncommitted changes in the
+      # worktree, which is the check _dotfiles_work_remove performs itself
+      # because the `git worktree remove --force` it has to issue skips it.
+      local rm_force=0 rm_target="" rm_arg
+      for rm_arg in "$@"; do
+        case "$rm_arg" in
+          --force|-f) rm_force=1 ;;
+          -*)
+            echo "dotfiles-work --remove: unknown option '$rm_arg'" >&2
+            echo "Usage: dotfiles-work --remove [--force] <branch>" >&2
+            return 1 ;;
+          *)
+            if [[ -n "$rm_target" ]]; then
+              echo "Usage: dotfiles-work --remove [--force] <branch>" >&2
+              return 1
+            fi
+            rm_target="$rm_arg" ;;
+        esac
+      done
+      if [[ -z "$rm_target" ]]; then
+        echo "Usage: dotfiles-work --remove [--force] <branch>" >&2
         return 1
       fi
-      git -C "$root" worktree remove "${base}/${2//\//-}"
+      _dotfiles_work_remove "$root" "$pin" "${base}/${rm_target//\//-}" "$rm_target" "$rm_force"
       return $? ;;
     ""|--help|-h)
-      echo "Usage: dotfiles-work <branch> | --list | --remove <branch>"
+      echo "Usage: dotfiles-work <branch> | --list | --remove [--force] <branch>"
       echo "Creates ${base}/<branch> so the primary checkout stays on '$pin'."
       return 0 ;;
   esac
