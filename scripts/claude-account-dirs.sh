@@ -77,9 +77,17 @@
 # named its files explicitly hardcoded five machine-specific settings.json.bak-*
 # entries and still missed two that clauth links.
 #
-# Idempotent and additive. It never writes to ~/.claude/, ~/.claude.json or
-# anything under ~/.clauth/. Delete the whole tree and re-run: the only thing lost
-# is each account's .claude.json, which costs one onboarding.
+# Idempotent and additive. It never writes to ~/.claude/ or ~/.claude.json.
+#
+# It DOES write under ~/.clauth/profiles/<p>/ -- corrected 2026-09-08, because the
+# previous sentence here claimed otherwise and this file exists because one
+# unverified header sentence was believed for weeks. Reconciling a rotation means
+# writing the adopted credential into the profile store, and it also creates
+# `.reconcile.lock`, `credentials.json.superseded-*` backups and a transient
+# `.credentials.adopt.$$`. Nothing else under ~/.clauth is touched.
+#
+# Delete the whole account-dir tree and re-run: the only thing lost is each
+# account's .claude.json, which costs one onboarding.
 #
 # Usage:
 #   scripts/claude-account-dirs.sh <profile> [<profile>...]
@@ -116,57 +124,233 @@ CRED_BACKUPS_KEPT=5
 
 has_jq() { command -v jq >/dev/null 2>&1; }
 
-# The expiry stamp inside a credential file, on stdout.
-#   0 = a usable claudeAiOauth block, its expiresAt printed
-#   1 = the file parses but carries no usable block. A discovery stub is the
-#       common case: the entry Claude Code writes after OAuth discovery but
-#       before authorisation has an empty accessToken and no expiresAt at all.
-#   2 = no jq, so the question could not be asked
+# The state of one credential file. Prints its expiresAt on stdout when, and
+# only when, the file holds a credential that can actually authenticate.
+#
+#   0 = LIVE    -- an object, a NON-EMPTY accessToken, and a numeric expiresAt
+#   1 = DEAD    -- parses, but cannot authenticate (no block, empty token, no
+#                  expiry). A discovery stub is one shape of this; so is the
+#                  VICTIM of an interleaved write.
+#   2 = UNKNOWN -- does not parse, or there is no jq to ask with
+#
+# THE accessToken CHECK IS THE WHOLE POINT, and leaving it out was a
+# credential-destroying bug (found in review, 2026-09-08). CLAUDE.md's own
+# discriminator for an interleaved write is that the victim "keeps its expiresAt
+# and scope" while losing its accessToken -- so ranking on expiry ALONE makes the
+# victim of a lost race outrank the credential that still works, and adopting it
+# copies an empty token over a good one. clauth then polls with nothing and
+# quarantines the account, which is the exact outcome this file exists to prevent.
+#
+# DEAD and UNKNOWN must stay apart: "this credential cannot work" is a decision,
+# "I could not read it" is a refusal, and collapsing them lets one unreadable side
+# hand the other a confident win.
+#
 # NEVER prints a token: an integer is the only thing that leaves this function.
-cred_expiry() {
+cred_state() {
     local f="$1"
     has_jq || return 2
-    [[ -s "$f" ]] || return 1
+    [[ -s "$f" ]] || return 2
+    jq -e . "$f" >/dev/null 2>&1 || return 2
     # -e so the EXIT STATUS decides, never the emptiness of the output. A capture
     # of nothing is indistinguishable from a legitimate answer, which is a bug
     # this repo has already shipped once (CLAUDE.md, _claude_cred_id).
-    jq -e -r '.claudeAiOauth | select(type == "object") | .expiresAt
-              | select(. != null) | tonumber' "$f" 2>/dev/null || return 1
+    jq -e -r '.claudeAiOauth
+              | select(type == "object")
+              | select((.accessToken // "") != "")
+              | .expiresAt | select(type == "number")' "$f" 2>/dev/null || return 1
 }
+
+# The claudeAiOauth block alone, canonicalised, for deciding whether two files
+# differ only in what surrounds the login (mcpOAuth entries, mostly).
+cred_login_id() {
+    local f="$1"
+    has_jq || return 1
+    jq -e -S -c '.claudeAiOauth | select(type == "object")' "$f" 2>/dev/null || return 1
+}
+
+# Bash, not zsh: `<->` is a zsh numeric glob and is a SYNTAX ERROR here.
+is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 # Which of the two files holds the LIVE credential: "A" (the account dir's real
 # file, written by a running session) or "S" (clauth's store). "?" means the
-# question could not be answered, and then nothing is touched.
+# question could not be answered, and then NOTHING is touched.
+#
+# Every branch that cannot be certain returns "?" rather than guessing. A wrong
+# answer here overwrites a working login with a dead one.
 cred_live_side() {
-    local a="$1" s="$2" ea es ra rs ma ms
-    ea="$(cred_expiry "$a")" && ra=0 || ra=$?
-    es="$(cred_expiry "$s")" && rs=0 || rs=$?
+    local a="$1" s="$2" ea es ra rs ma ms la ls
+    ea="$(cred_state "$a")" && ra=0 || ra=$?
+    es="$(cred_state "$s")" && rs=0 || rs=$?
 
+    # UNKNOWN on EITHER side is a refusal, not a win for the other. A file that
+    # parses but carries trailing garbage -- the signature of a partial write --
+    # must not hand its counterpart a confident victory.
+    #
+    # DEFENCE IN DEPTH, and deliberately unreachable on the current path: the
+    # rotation-shape gate in _reconcile_credential_locked refuses an unparseable
+    # file before this function is ever called, so no state-table row can enter
+    # this branch and no mutant of it can die. Kept because this function is the
+    # one that decides which credential survives, and it should not depend on a
+    # caller's guard for that.
     if (( ra == 2 || rs == 2 )); then
-        # No jq. mtime is a coarser proxy for "which was written last", and both
-        # branches copy the loser aside before overwriting, so a wrong guess here
-        # is recoverable rather than destructive.
-        ma="$(stat -c %Y "$a" 2>/dev/null)" || { printf '?\n'; return 0; }
-        ms="$(stat -c %Y "$s" 2>/dev/null)" || { printf '?\n'; return 0; }
-        if (( ma > ms )); then printf 'A\n'; else printf 'S\n'; fi
-        return 0
+        # With no jq at all, mtime is the only question we can ask. Both branches
+        # copy the loser aside before overwriting, so a wrong guess is
+        # recoverable; a file we could not parse WITH jq available is not the
+        # same case and stays a refusal.
+        if ! has_jq; then
+            ma="$(stat -c %Y "$a" 2>/dev/null)" || { printf '?\n'; return 0; }
+            ms="$(stat -c %Y "$s" 2>/dev/null)" || { printf '?\n'; return 0; }
+            if (( ma > ms )); then printf 'A\n'; else printf 'S\n'; fi
+            return 0
+        fi
+        printf '?\n'; return 0
     fi
 
-    if   (( ra == 0 && rs != 0 )); then printf 'A\n'
-    elif (( rs == 0 && ra != 0 )); then printf 'S\n'
-    elif (( ra != 0 && rs != 0 )); then printf '?\n'
-    # Both parse: the later expiry is the one a refresh produced. A tie resolves
-    # to the store, which changes nothing and touches no file.
-    elif (( ea > es ));            then printf 'A\n'
-    else                                printf 'S\n'
+    # One side can authenticate and the other cannot: no arithmetic needed.
+    if   (( ra == 0 && rs != 0 )); then printf 'A\n'; return 0
+    elif (( rs == 0 && ra != 0 )); then printf 'S\n'; return 0
+    elif (( ra != 0 && rs != 0 )); then printf '?\n'; return 0
     fi
+
+    # Both are live. A non-integer expiry would make the comparison below a bash
+    # arithmetic ERROR, and an errored comparison must never read as a decision.
+    if ! is_uint "$ea" || ! is_uint "$es"; then printf '?\n'; return 0; fi
+
+    if   (( ea > es )); then printf 'A\n'; return 0
+    elif (( es > ea )); then printf 'S\n'; return 0
+    fi
+
+    # Equal expiry, yet the files differ -- we only reach this function after
+    # `cmp -s` said so. If the LOGIN blocks are identical, the difference is
+    # everything around them, which in practice is mcpOAuth: the account dir has
+    # gained MCP-server logins the store never had. Adopting A keeps them; the
+    # old code relinked and silently discarded them, costing one browser OAuth
+    # flow per server per profile, every time the timer ran.
+    la="$(cred_login_id "$a")" || la=""
+    ls="$(cred_login_id "$s")" || ls=""
+    if [[ -n "$la" && "$la" == "$ls" ]]; then printf 'A\n'; return 0; fi
+
+    # Same expiry, different logins: genuinely ambiguous.
+    printf '?\n'
+}
+
+# THE ROTATION-SHAPE GATE. Everything a token refresh touches, and nothing else.
+#
+# WHY THIS EXISTS. Upstream clauth's `try_adopt_live_rotation` gates an adopt on
+# FOUR things -- a refresh token present, both expiries present, live > stored
+# STRICTLY, and identity PROVEN -- and refuses on any. It proves identity with an
+# HTTP call under the live token, which a 2-minute unattended timer cannot afford
+# (a request per profile per tick, and a live token in a subprocess).
+#
+# So we gate on shape instead: adopt only when the two files differ in the fields
+# a rotation actually rewrites, and refuse everything else by name -- the same
+# event clauth logs as "belongs to a DIFFERENT account. Not adopting". Without
+# this, a `/login` as another account inside an isolated session was adopted into
+# the wrong profile's store on the strength of a later expiry, which then bills
+# the wrong account, poisons that profile's usage numbers (so the picker ranks on
+# them), and would be installed machine-wide by `clauth <profile>`. Reproduced in
+# review, 2026-09-08.
+#
+# BE HONEST ABOUT ITS STRENGTH: it is a filter, not a proof. Measured here, the
+# residual separates `personal` from the work accounts and `quantivly-3` from the
+# other two -- but `quantivly-1` and `quantivly-2` carry an identical residual
+# (same rateLimitTier, subscriptionType and scope count), so a mix-up between
+# exactly those two would pass. It is defence in depth, and the refusal path is
+# what carries the safety.
+cred_rotation_residual() {
+    local f="$1"
+    has_jq || return 1
+    # refreshTokenExpiresAt rotates too -- leaving it in would make EVERY genuine
+    # rotation look like a shape change, i.e. refuse everything.
+    jq -e -S -c 'del(.claudeAiOauth.accessToken,
+                     .claudeAiOauth.refreshToken,
+                     .claudeAiOauth.expiresAt,
+                     .claudeAiOauth.refreshTokenExpiresAt)
+                 | del(.mcpOAuth)' "$f" 2>/dev/null || return 1
+}
+
+# Does this file carry a credential that can actually authenticate AND renew?
+# Upstream refuses a live file with no refresh token outright; so do we. It also
+# happens to catch the interleaved-write victim a second time.
+cred_has_refresh() {
+    local f="$1"
+    has_jq || return 1
+    jq -e '(.claudeAiOauth.refreshToken // "") != ""' "$f" >/dev/null 2>&1
+}
+
+# The merged credential: the WINNING side's login, plus the UNION of both sides'
+# MCP-server logins, on stdout.
+#
+# The union is what stops this being a coin flip with a real cost. Measured
+# 2026-09-08: quantivly-3's store held ZERO mcpOAuth entries while its account dir
+# held one, and quantivly-2's store held one against three in its dir -- so
+# whichever side happened to rotate last decided whether those logins survived,
+# twice an hour per profile once the timer runs. Each one lost is a browser OAuth
+# flow to get back, which is precisely the tax that made isolation expensive.
+#
+# Per server: an entry with a real accessToken always beats one without (CLAUDE.md's
+# own discriminator -- a discovery stub must never overwrite an authorised entry),
+# then the later expiresAt wins.
+cred_merge() {  # $1 = winner file (its claudeAiOauth is kept), $2 = the other
+    local win="$1" other="$2"
+    has_jq || return 1
+    jq -e -s '
+      def live(e): ((e.accessToken // "") != "");
+      def exp(e):  (e.expiresAt // 0);
+      def better(a; b):
+        if a == null then b
+        elif b == null then a
+        elif live(a) and (live(b) | not) then a
+        elif live(b) and (live(a) | not) then b
+        elif exp(a) >= exp(b) then a
+        else b
+        end;
+        (.[0] // {}) as $w | (.[1] // {}) as $o
+      | ($w.mcpOAuth // {}) as $wm | ($o.mcpOAuth // {}) as $om
+      | (($wm | keys) + ($om | keys) | unique) as $ks
+      | ($ks | map({key: ., value: better($wm[.]; $om[.])}) | from_entries) as $merged
+      | $w
+      | if ($ks | length) > 0 then .mcpOAuth = $merged else . end
+    ' "$win" "$other" 2>/dev/null || return 1
+}
+
+# Run a command holding CLAUTH'S OWN state lock, not just ours.
+#
+# clauth serialises every credential write on ~/.clauth/.lock -- `runtime.rs:3095`
+# carries a debug_assert demanding it, with the comment "Running this outside the
+# state flock races the credential writes of a concurrent acquire or switch".
+# Our own per-profile lock serialises us against ourselves and against nothing
+# else, so an adopt could land on top of a rotation clauth had just performed and
+# restore the pre-rotation token -- the original logout bug, re-created from the
+# other end of the same pipe. Found in review, 2026-09-08.
+#
+# Advisory and best-effort: if the lock cannot be taken we say so and proceed,
+# because refusing to reconcile leaves the worse state in place.
+with_clauth_lock() {
+    local lockf="$HOME/.clauth/.lock" fd="" rc=0
+    if command -v flock >/dev/null 2>&1 && [[ -e "$lockf" ]]; then
+        if { exec {fd}<"$lockf"; } 2>/dev/null; then
+            flock -w 25 "$fd" 2>/dev/null \
+                || warn "could not take clauth's state lock in 25s — proceeding without it"
+        else
+            fd=""
+        fi
+    fi
+    "$@" || rc=$?
+    if [[ -n "$fd" ]]; then exec {fd}<&-; fi
+    return $rc
 }
 
 # Copy a credential aside before it is overwritten; prints the backup's path.
 cred_backup() {
     local f="$1" dest victims=()
     dest="$f.superseded-$(date +%Y%m%d-%H%M%S)-$$"
-    cp -p "$f" "$dest" 2>/dev/null || return 1
+    # NOT `cp -p`. Preserving the mtime stamps the SOURCE's time on the backup,
+    # and the prune below ranks by mtime -- so a backup of an old file sorts
+    # oldest and can be deleted by the very call that created it, which then
+    # returns 0 and a path, and the caller destroys the original believing a copy
+    # exists. This is the only safety net under every adopt/discard decision.
+    cp "$f" "$dest" 2>/dev/null || return 1
     chmod 600 "$dest" 2>/dev/null || true
     shopt -s nullglob
     victims=("$f".superseded-*)
@@ -256,14 +440,25 @@ _reconcile_credential_locked() {
     fi
 
     if [[ -L "$A" ]]; then
-        cred_relink "$A" "$S"
-        warn "$profile: the credential link pointed somewhere other than this profile's"
-        warn "        store — repointed. Check which account that session was billing."
-        return 0
+        if cred_relink "$A" "$S"; then
+            warn "$profile: the credential link pointed somewhere other than this profile's"
+            warn "        store — repointed. Check which account that session was billing."
+            return 0
+        fi
+        warn "$profile: the credential link points at another profile's store and could"
+        warn "        NOT be repointed. Sessions here are billing the wrong account."
+        return 1
     fi
 
     if [[ ! -e "$A" ]]; then
-        ln -s "$S" "$A"
+        # Never a bare `ln -s`: an unwritable account dir would otherwise leave
+        # this returning 0 with no credential at all, and Claude Code would then
+        # write a fresh, independent login there -- manufacturing exactly the
+        # independent holder this design forbids.
+        if ! cred_relink "$A" "$S"; then
+            warn "$profile: could not create the credential link in ${A%/*}"
+            return 1
+        fi
         return 0
     fi
 
@@ -271,40 +466,103 @@ _reconcile_credential_locked() {
     # header), not corruption. Identical content means the refresh was already
     # adopted, or none has happened, so relinking loses nothing.
     if cmp -s "$A" "$S"; then
-        cred_relink "$A" "$S"
+        cred_relink "$A" "$S" || {
+            warn "$profile: could not relink an identical credential — left as a real file."
+            return 1
+        }
         return 0
     fi
 
+    # Everything from here is a REAL FILE that differs from the store.
+
+    # 1. Is this even shaped like a rotation? Anything else -- a different
+    #    account's login above all -- is refused by name, never adopted.
+    local ra rs_
+    ra="$(cred_rotation_residual "$A")" || ra=""
+    rs_="$(cred_rotation_residual "$S")" || rs_=""
+    if [[ -z "$ra" || -z "$rs_" ]]; then
+        warn "$profile: could not read one of the credentials well enough to tell a token"
+        warn "        refresh from a different account. Both left untouched."
+        return 1
+    fi
+    if [[ "$ra" != "$rs_" ]]; then
+        warn "$profile: the account dir's credential is NOT a rotation of the stored one —"
+        warn "        it differs outside the fields a refresh touches, which is what a login"
+        warn "        as a DIFFERENT account looks like. Not adopting; both left untouched."
+        warn "        If that was deliberate, capture it with 'clauth login $profile'."
+        return 1
+    fi
+
+    # 2. Upstream's free anchor rule: no identity on record for this profile means
+    #    nothing to reason about, so refuse rather than write.
+    if [[ ! -s "$pdir/account_id.json" ]]; then
+        warn "$profile: the clauth profile has no account_id.json anchor — refusing to"
+        warn "        write its credential store. 'clauth login $profile' establishes it."
+        return 1
+    fi
+
+    # 3. A credential with no refresh token cannot renew, so it is never the one to
+    #    keep. Upstream rejects such a live file outright.
+    local a_ok=0 s_ok=0
+    cred_has_refresh "$A" && a_ok=1
+    cred_has_refresh "$S" && s_ok=1
+
     side="$(cred_live_side "$A" "$S")"
+    if   (( a_ok && ! s_ok )); then side=A
+    elif (( s_ok && ! a_ok )); then side=S
+    elif (( ! a_ok && ! s_ok )); then side="?"
+    fi
+
     case "$side" in
-        A)
-            backup="$(cred_backup "$S")" || {
-                warn "$profile: could not copy the store credential aside — nothing changed."
-                return 1
-            }
-            if cred_install "$A" "$S"; then
-                cred_relink "$A" "$S"
-                warn "$profile: adopted the live session's rotated credential into the clauth"
-                warn "        store (superseded store copy kept as ${backup##*/})."
-            else
-                warn "$profile: could not write the adopted credential into the store — the"
-                warn "        account dir's own file is left in place, unharmed."
+        A|S)
+            local winner other
+            if [[ "$side" == A ]]; then winner="$A"; other="$S"; else winner="$S"; other="$A"; fi
+
+            # ONE write path, and it discards nothing: the winner's login plus the
+            # UNION of both sides' MCP logins. There is no losing side any more,
+            # which is what makes a tie harmless rather than destructive.
+            local merged="$pdir/.credentials.merged.$$"
+            if ! cred_merge "$winner" "$other" > "$merged" 2>/dev/null || [[ ! -s "$merged" ]]; then
+                rm -f "$merged"
+                warn "$profile: could not merge the two credentials — nothing changed."
                 return 1
             fi
-            ;;
-        S)
-            backup="$(cred_backup "$A")" || {
-                warn "$profile: could not copy the account dir credential aside — nothing changed."
+            chmod 600 "$merged" 2>/dev/null || true
+
+            if cmp -s "$merged" "$S"; then
+                # The store already holds the answer; only the link needs fixing.
+                rm -f "$merged"
+            else
+                backup="$(cred_backup "$S")" || {
+                    rm -f "$merged"
+                    warn "$profile: could not copy the store credential aside — nothing changed."
+                    return 1
+                }
+                if ! with_clauth_lock cred_install "$merged" "$S"; then
+                    rm -f "$merged"
+                    warn "$profile: could not write the store — the account dir's own file is"
+                    warn "        left in place, unharmed."
+                    return 1
+                fi
+                rm -f "$merged"
+                if [[ "$side" == A ]]; then
+                    warn "$profile: adopted the live session's rotated credential into the clauth"
+                    warn "        store (superseded store copy kept as ${backup##*/})."
+                else
+                    warn "$profile: kept the stored credential and merged in the account dir's"
+                    warn "        MCP logins (previous store copy kept as ${backup##*/})."
+                fi
+            fi
+
+            cred_relink "$A" "$S" || {
+                warn "$profile: reconciled the store, but could not relink — it stays a real file."
                 return 1
             }
-            cred_relink "$A" "$S"
-            warn "$profile: the account dir held a superseded credential — relinked to the"
-            warn "        store (old copy kept as ${backup##*/})."
             ;;
         *)
             warn "$profile: the account dir and the clauth store hold DIFFERENT credentials"
-            warn "        and neither could be read well enough to say which is live. Both are"
-            warn "        left untouched. 'claude-doctor' explains; 'clauth login $profile' fixes."
+            warn "        and neither could be shown to be the live one. Both are left"
+            warn "        untouched. 'claude-doctor' explains; 'clauth login $profile' fixes."
             return 1
             ;;
     esac
@@ -331,7 +589,16 @@ reconcile_all() {
     done
     shopt -u nullglob
     (( seen )) || warn "no account dirs under ${ROOT/#$HOME/\~} matched a clauth profile"
-    return $rc
+
+    # DELIBERATELY 0 even when a profile was refused. This is a timer's ExecStart:
+    # the refusals it can hit (a credential only a human can disambiguate, a
+    # profile with no store yet) are states nobody can fix from here, and
+    # returning non-zero for them means a oneshot that fails 720 times a day
+    # forever -- an alarm that is always on, which is an alarm nobody reads. Every
+    # refusal is printed, and `claude-doctor` is the surface that reports them as
+    # findings. $rc is kept for callers that want it.
+    (( rc == 0 )) || warn "some profiles were refused (above); claude-doctor explains"
+    return 0
 }
 
 build_one() {

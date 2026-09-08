@@ -894,7 +894,7 @@ claude-doctor() {
   echo "--- Account dirs ---"
   {
     local adroot="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
-    local ad name store link shared real_n=0 seen=0
+    local ad name store link shared tstate real_n=0 seen=0
     local -a shared_missing
 
     if [[ ! -d "$adroot" ]]; then
@@ -940,10 +940,19 @@ claude-doctor() {
             _doctor_note "$name: credential is a real file, still identical to the store"
             echo "    A session's atomic write replaced the link. Reconciling relinks it."
           else
-            _doctor_bad "$name: credential is a real file that DIFFERS from the clauth store"
-            echo "    This is the logout bug's precondition: the account dir and the store hold"
-            echo "    different tokens, and only one of them is live. Reconcile before the next"
-            echo "    launch, or a superseded token gets restored over the live one:"
+            # A ⚠, NOT a ✗. This state is produced by an ordinary token refresh and
+            # is resolved by the reconciler on the next launch or the next timer
+            # tick, so calling it a failure makes claude-doctor exit non-zero on a
+            # busy machine essentially always — the permanently-red checker this
+            # repo has now documented four times, three lines above a note calling
+            # the same state "Expected after a token refresh". It is still worth
+            # naming, because until it IS reconciled clauth is polling with a
+            # stale token, which is how an account gets quarantined.
+            _doctor_warn "$name: credential is a real file that DIFFERS from the clauth store"
+            echo "    An ordinary token refresh produces this. Until it is reconciled, clauth"
+            echo "    polls with the stale stored token, which is how an account gets"
+            echo "    quarantined as auth_broken. The 2-minute timer normally handles it; to"
+            echo "    do it now:"
             echo "      ~/.dotfiles/scripts/claude-account-dirs.sh --reconcile"
           fi
         else
@@ -965,6 +974,31 @@ claude-doctor() {
           echo "    Re-run: ~/.dotfiles/scripts/claude-account-dirs.sh $name"
         fi
       done
+
+      # The reconciler timer. A LINKED unit is not a RUNNING one, and this whole
+      # section exists because a credential quietly goes stale between launches;
+      # a reconciler that is installed but not enabled restores exactly that
+      # failure while every other line here reads green.
+      #
+      # Reported only when there is something to reconcile AND a user manager to
+      # ask, so a machine with no systemd (a container, a server) and a machine
+      # with no account dirs both stay silent rather than permanently red.
+      if (( seen )) && command -v systemctl >/dev/null 2>&1; then
+        tstate="$(systemctl --user is-active claude-cred-reconcile.timer 2>/dev/null)"
+        if [[ "$tstate" == active ]]; then
+          _doctor_ok "the credential reconciler timer is running"
+        elif [[ -z "$tstate" ]]; then
+          # No user manager to answer (no session bus, a container). "Could not
+          # ask" is not "it is broken".
+          _doctor_note "could not ask systemd about the reconciler timer — NOT CHECKED"
+        else
+          _doctor_warn "the credential reconciler timer is not running ($tstate)"
+          echo "    Credentials are reconciled at launch, but a rotation between launches"
+          echo "    leaves clauth polling a stale token, which is how an account gets"
+          echo "    quarantined. Enable it:"
+          echo "      systemctl --user enable --now claude-cred-reconcile.timer"
+        fi
+      fi
 
       (( seen )) || _doctor_note "no account dirs built yet"
       if (( real_n )); then

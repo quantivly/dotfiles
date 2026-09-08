@@ -132,10 +132,18 @@ _claude_profile_excluded() {
     print -r -- "disabled"; return 0
   fi
   # auth_broken = ["a", "b"] — clauth's quarantine list, which it writes itself.
+  #
+  # A sed RANGE, not a single line: clauth already writes `profiles = [` across
+  # several lines in this same file, with the same writer and the same array
+  # type, so a line-based match is one quarantined account away from silently
+  # seeing nothing — and then the quarantined profile reads as maximum headroom,
+  # which is the bug this exclusion exists to prevent. Same shape CLAUDE.md
+  # records for `fallback_chain` in claude-doctor. Bounded by construction:
+  # anchored at the assignment, quits at the first `]`.
   if [[ -r "$toml" ]]; then
-    local line
-    line="$(command grep -m1 -E '^[[:space:]]*auth_broken[[:space:]]*=' "$toml" 2>/dev/null)"
-    if [[ -n "$line" && "$line" == *"\"$name\""* ]]; then
+    local span
+    span="$(command sed -n '/^[[:space:]]*auth_broken[[:space:]]*=/,/]/{p; /]/q}' "$toml" 2>/dev/null)"
+    if [[ -n "$span" && "$span" == *"\"$name\""* ]]; then
       print -r -- "auth broken — clauth login $name"; return 0
     fi
   fi
@@ -153,8 +161,16 @@ _claude_profile_load() {
   [[ -r "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   # -e so the exit status decides, never the emptiness of the output.
-  jq -e -r '[(.five_hour.utilization // empty), (.seven_day.utilization // empty)]
-            | select(length > 0) | max | floor' "$f" 2>/dev/null || return 1
+  # weekly_scoped (the per-model weeks, e.g. "7d fable") counts as well. Measured
+  # 2026-09-08: `personal` read 5h 6% / 7d 80% while its "7d fable" window was at
+  # 100% — an account with nothing left for that model would otherwise have
+  # ranked as comparatively idle. Same "emptiness reads as headroom" class as the
+  # quarantine exclusion above.
+  jq -e -r '[(.five_hour.utilization // empty),
+             (.seven_day.utilization // empty),
+             ((.weekly_scoped // []) | .[]? | .utilization // empty)]
+            | map(select(type == "number")) | select(length > 0) | max | floor' \
+      "$f" 2>/dev/null || return 1
 }
 
 # Seconds since a profile's usage cache was written, or nothing.
@@ -169,6 +185,20 @@ _claude_profile_cache_age() {
   zmodload zsh/datetime 2>/dev/null || return 1
   mtime=$(zstat +mtime "$f" 2>/dev/null) || return 1
   print -r -- $(( EPOCHSECONDS - mtime ))
+}
+
+# clauth's own active profile, when it has a credential and is not excluded.
+# This is the last-resort ACCOUNT: it keeps a session isolated when every pool
+# member is unusable, instead of dropping it onto the shared global file.
+_claude_fallback_profile() {
+  local ap
+  [[ -r "$HOME/.clauth/status.json" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  ap="$(jq -e -r '.active_profile | select(type == "string") | select(. != "")' \
+        "$HOME/.clauth/status.json" 2>/dev/null)" || return 1
+  [[ -f "$HOME/.clauth/profiles/$ap/credentials.json" ]] || return 1
+  _claude_profile_excluded "$ap" >/dev/null && return 1
+  print -r -- "$ap"
 }
 
 # The pool member with the most headroom. `clauth which` cannot answer this — it
@@ -207,22 +237,43 @@ _claude_pick_profile() {
     if [[ -z "$load" ]] || [[ -n "$age" && "$age" -gt "$max_age" ]]; then
       load=101
     fi
-    # zsh sorts these as strings, so the numeric fields are zero-padded.
-    candidates+=("${(l:3::0:)load} ${(l:3::0:)$(_claude_holder_count "$name")} $name")
+    # zsh sorts these as strings, so the numeric fields are zero-padded. Width 4,
+    # not 3: `${(l:3::0:)N}` TRUNCATES anything longer, so a bogus load of 1000
+    # became "100" — or worse "000", ranking a spent account as the most idle one.
+    candidates+=("${(l:4::0:)load} ${(l:4::0:)$(_claude_holder_count "$name")} $name")
   done
 
-  (( ${#candidates} )) || return 1
+  # Nothing in the pool is usable. Fall back to an ACCOUNT, not to the shared
+  # file: the exclusions that empty the pool (quarantine, disabled) correlate
+  # with load, so this path is rare in calm weather and concentrated in bad
+  # weather — the opposite of a safe degradation. Dropping onto
+  # ~/.claude/.credentials.json there would put the session in the one group
+  # where a single bad write logs everybody out, at the moment most sessions are
+  # starting, controlled only by a stderr line nobody reads.
+  if (( ! ${#candidates} )); then
+    local fb
+    if fb="$(_claude_fallback_profile)"; then
+      _claude_pick_load=1001          # sorts as "unknown"; announced as such
+      REPLY="$fb"
+      _claude_pick_skipped+=("fell back to the active account '$fb'")
+      return 0
+    fi
+    return 1
+  fi
   # Sort into an ARRAY. `${${(o)candidates}[1]}` joins the array into one scalar
   # and then indexes its first CHARACTER — it returned "0" (from the zero-padded
   # load) and the picker silently chose nothing.
   local -a ranked=( "${(@o)candidates}" )
-  local -a best=( ${=ranked[1]} )
-  _claude_pick_load="${best[1]}"
+  # Strip the two sort fields by prefix rather than word-splitting: `${=...}` cuts
+  # a profile name at its first space, and a directory name may contain one.
+  local best="${ranked[1]}"
+  _claude_pick_load="${best%% *}"
+  local rest="${best#* }"
   # REPLY, not stdout: this must be called DIRECTLY. A `$(...)` call is a
   # subshell, and the two globals above — the load that won, and every account
   # the pool refused — would die with it, leaving the announcement silent in
   # exactly the case it exists for.
-  REPLY="${best[3]}"
+  REPLY="${rest#* }"
   return 0
 }
 
@@ -255,9 +306,13 @@ claude() {
       # afterwards. Falling back to the shared file is right — inventing a profile
       # would bill an account nobody picked — but it must be said.
       if (( ${#_claude_pick_skipped} )); then
-        print -u2 -- "claude: every account in the pool is unusable — this session shares"
-        print -u2 -- "        ~/.claude/.credentials.json with every other one."
+        print -u2 -- "claude: NO usable account — not the pool, and not clauth's active one."
+        print -u2 -- "        This session shares ~/.claude/.credentials.json with every other,"
+        print -u2 -- "        which is the group where one bad write logs all of them out."
         print -u2 -- "        refused: ${(j:, :)_claude_pick_skipped}"
+        print -u2 -- "        Fix one account ('clauth login <name>'), or choose deliberately:"
+        print -u2 -- "          claude-as <profile>      # isolated onto a named account"
+        print -u2 -- "          CLAUDE_ISOLATION_OFF=1   # the shared file, on purpose"
       else
         print -u2 -- "claude: clauth is installed but no profile has a credential — this session shares"
         print -u2 -- "        ~/.claude/.credentials.json. 'clauth login <name>' to give it its own."
@@ -283,7 +338,8 @@ claude() {
       # The load that WON, and anything the pool refused — a session that lands on
       # an unexpected account should say why without being asked.
       if [[ -n "${_claude_pick_load:-}" ]]; then
-        if (( _claude_pick_load > 100 )); then detail=" — no usage reading"
+        if (( _claude_pick_load > 1000 )); then detail=" — fallback: the pool was unusable"
+        elif (( _claude_pick_load > 100 )); then detail=" — no usage reading"
         else detail=" — $(( 10#$_claude_pick_load ))% used"; fi
       fi
       print -u2 -- "claude: account '$profile'$detail (isolated: ${CLAUDE_CONFIG_DIR/#$HOME/~})"

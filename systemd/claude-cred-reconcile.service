@@ -39,7 +39,16 @@ Documentation=file://%h/.dotfiles/scripts/claude-account-dirs.sh
 Type=oneshot
 # Absolute, like the herdr unit: the checkout has to be at ~/.dotfiles either way.
 ExecStart=%h/.dotfiles/scripts/claude-account-dirs.sh --reconcile
-# A machine with no clauth profiles and no account dirs is a legitimate state,
-# and --reconcile exits 0 there. A non-zero exit means it genuinely could not
-# decide something, which is worth a failed unit rather than silence.
+# --reconcile exits 0 even when it REFUSED a profile, and that is deliberate. The
+# refusals it can hit (two credentials it cannot tell apart, a profile with no
+# store yet) are states nobody can resolve from a timer, so failing on them would
+# mean a oneshot that fails 720 times a day forever — an alarm that is always on
+# is an alarm nobody reads. Every refusal is printed to the journal, and
+# `claude-doctor`'s "Account dirs" section is the surface that reports them.
 Nice=10
+# Type=oneshot has NO start timeout by default (man 5 systemd.service), and this
+# run takes a per-profile flock. A single blocking operation — `cmp -s` on a FIFO
+# left where a credential should be, say — would hold that lock forever, and
+# systemd would never fire the timer again: the reconciler stops, silently, in
+# exactly the way this whole feature exists to prevent.
+TimeoutStartSec=60
