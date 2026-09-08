@@ -75,18 +75,40 @@ twelve broken servers. They are not connected at claude.ai at all — they are t
 There is nothing to disconnect, and the two stub tools each are the cost of the
 offer, not evidence of a fault.
 
-The distinction that matters: a connector you **have** connected and that is
-failing writes to `~/.cache/claude-cli-nodejs/*/mcp-logs-claude-ai-<name>/`. One
-you have merely been offered writes nothing. So use the log store, not the tool
-list:
+An earlier version of this page said a connector you have merely been *offered*
+"writes nothing" to the log store, so its presence there proved you had connected
+it. **That is false.** Every advertised connector is attempted and logged: Apollo,
+Attio, Canva and the rest had **24 attempt files each** — Miro 73 — all ending in
+
+```
+authentication_error … error_code: mcp_unauthorized_no_token
+```
+
+So presence in the log store proves nothing, and neither does volume — a
+minimum-attempts floor was tried and does not separate them. **The error code is
+the only discriminator**, and there are three failing states worth telling apart:
+
+| in the logs | means | what to do |
+|---|---|---|
+| `mcp_unauthorized_no_token` on every attempt | never authorised — offered, not configured | nothing; `claude-doctor` shows it only under `--all` |
+| `OAuth token has been invalidated` | it *did* work and the token died | re-authenticate from `/mcp` or at claude.ai |
+| `mcp_endpoint_not_found` | the connector id is dead upstream | remove and re-add it at claude.ai (the Linear case, §2.1) |
+| anything else with 0 successes | genuinely broken | diagnose from the newest log (§4) |
+
+To list every connector that has ever been attempted:
 
 ```bash
 ls -d ~/.cache/claude-cli-nodejs/*/mcp-logs-claude-ai-* | sed 's#.*mcp-logs-##' | sort -u
 ```
 
-`claude-doctor` reports only what that store contains, which is why it flagged
-`claude-ai-Miro` (0 successes in 5 real attempts) and said nothing about the
-other eleven.
+`claude-doctor` applies that table, so a never-authorised connector stays quiet by
+default and only the last three rows raise a `✗`.
+
+**One trap if you grep these logs by hand:** the claude.ai proxy writes lowercase
+`connection failed`, while stdio and HTTP servers write `Connection failed`. A
+case-sensitive grep for the capitalised form finds nothing for any claude.ai
+connector — which is exactly how the first attempt at this fix became a silent
+no-op.
 
 ### 2.3 Pick one path per duplicated service
 

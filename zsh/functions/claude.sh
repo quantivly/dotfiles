@@ -210,7 +210,7 @@ claude-doctor() {
   # where forgetting that printed `du=zvi-quantivly` into the middle of a report.
   local cred now_ms mode exp delta nproc_claude sub scopes chain
   local active stored_hash live_hash p pdir
-  local root d srv ok_n fail_n key empty_tok no_refresh
+  local root d srv ok_n fail_n unauth_n invalid_n key empty_tok no_refresh
   local i comm svc a b
   local gcred gcred_id link_target session_owner global_owner has_meta gsettings val
   local unknown_n cfgdir credpath ldir grp envblob n label procroot
@@ -725,7 +725,50 @@ claude-doctor() {
       (( ${#files} )) || continue
       ok_n=$(grep -l -- "$_CLAUDE_LOG_OK" $files 2>/dev/null | wc -l)
       fail_n=$(grep -l -- "$_CLAUDE_LOG_FAIL" $files 2>/dev/null | wc -l)
-      if (( ok_n == 0 )); then
+      # "Never connected" and "never authorised" are different findings, and
+      # conflating them made this section permanently red. On 2026-09-07 it
+      # flagged ten claude.ai connectors that had never been set up — Apollo,
+      # Attio, Canva, Clay, Doc360, HubSpot, Lightfield, Miro, Superhuman,
+      # Sybill — as failures. They are the catalogue claude.ai advertises, not
+      # anything configured here, and every attempt ends the same way:
+      #
+      #   authentication_error … error_code: mcp_unauthorized_no_token
+      #
+      # Nothing can be repaired, so a ✗ there is a line the reader cannot act
+      # on — and a checker that emits those stops being read. Fifth time this
+      # repo has hit that trap.
+      #
+      # A MINIMUM-ATTEMPTS FLOOR WOULD NOT HAVE WORKED, which is worth saying
+      # because it is the obvious fix: those connectors had 24 attempts each,
+      # Miro 73. Volume does not separate them. The discriminator is the ERROR
+      # CODE — the same lesson #109 learned for mcpOAuth, where the metadata
+      # rather than the absence told two states apart. `mcp_unauthorized_no_token`
+      # is never-authorised; `mcp_endpoint_not_found` (the dead claude.ai Linear
+      # connector, 1,936 times) is configured-and-broken, which is what ✗ is for.
+      # Keyed on the ATTEMPT COUNT, not on fail_n, and that is not a style
+      # choice. $_CLAUDE_LOG_FAIL is "Connection failed", but the claude.ai proxy
+      # transport writes LOWERCASE "claude.ai proxy connection failed" — so
+      # fail_n is 0 for every connector of this kind, and a `fail_n > 0` guard
+      # here could never be true. (First draft of this fix had exactly that and
+      # changed nothing; the live run is what caught it.) A pre-existing
+      # consequence, left alone deliberately because widening the match would
+      # move every ⚠ threshold in this section and wants its own change: the
+      # "mostly failing" warning below undercounts claude.ai connectors whose
+      # failures only ever appear in lowercase.
+      # A THIRD state, found by running this against the real log store rather
+      # than reasoning about it: claude.ai Miro fails 72 of 73 attempts with
+      # "OAuth token has been invalidated. Re-authentication is required." That
+      # connector DID work once, so "it has never worked in this window" was
+      # both false and unactionable — the reader needs to be told to
+      # re-authenticate, not that the thing is dead. Still a ✗: unlike the
+      # never-authorised case there is something to do about it.
+      unauth_n=$(grep -l -- 'mcp_unauthorized_no_token' $files 2>/dev/null | wc -l)
+      invalid_n=$(grep -l -- 'OAuth token has been invalidated' $files 2>/dev/null | wc -l)
+      if (( ok_n == 0 && unauth_n == ${#files} )); then
+        (( show_all )) && _doctor_note "$srv: never authorised — ${#files} attempts, all mcp_unauthorized_no_token (offered, not configured)"
+      elif (( ok_n == 0 && invalid_n > 0 )); then
+        _doctor_bad "$srv: OAuth token invalidated — 0 of ${#files} attempts connected; re-authenticate it (/mcp, or at claude.ai)"
+      elif (( ok_n == 0 )); then
         _doctor_bad "$srv: 0 successful connections in ${#files} attempts — it has never worked in this window"
       elif (( fail_n * 4 > ${#files} )); then
         _doctor_warn "$srv: $fail_n/${#files} attempts failed ($ok_n succeeded)"
