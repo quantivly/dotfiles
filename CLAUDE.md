@@ -151,9 +151,33 @@ dirty file genuinely blocks the merge, deal with that file; do not park it somew
 global.
 
 One asymmetry to expect afterwards: a squash-merged branch is **not** an ancestor of
-`main`, so `git merge-base --is-ancestor` reports "not merged" for a branch that landed
-in full. `git diff <branch> origin/main` being empty is the test that answers whether it
-is safe to delete.
+`main`, so `git merge-base --is-ancestor` reports "not merged" for a branch that landed in
+full — and `git branch -d` refuses it for the same reason, which is why the delete has to
+be `-D`.
+
+**Do not reach for a tree diff as the replacement.** An earlier version of this section
+said `git diff <branch> origin/main` being empty is the test that answers whether a branch
+landed. It is not, and it fails in the ORDINARY case: the moment any other commit lands on
+`main`, that diff is non-empty for a branch whose own work is fully merged. Restricting it
+to the files the branch touched does not rescue it either — nearly every change here
+touches this file, so `CLAUDE.md` always differs.
+
+**The merge record is the authority**, not the tree:
+
+```bash
+gh pr view <n> --json state,mergeCommit     # MERGED, and the commit it landed as
+git -C ~/.dotfiles log --oneline --grep '(#<n>)' origin/main
+```
+
+A tree diff can only corroborate, and only while `main` has not moved since the merge —
+`git rev-list --count <branch>..origin/main` must be `0` for it to mean anything.
+
+`dotfiles-work --remove` inherits the weak test today (the `--quiet` diff against
+`origin/<pin>`). It errs safe — it keeps the branch and prints the `-D` command rather
+than deleting something unmerged — but the guard therefore almost never fires, and its
+message asserts something false. Measured 2026-09-08 on DO-583's own branch, merged as
+`e1a68d9`: "Kept branch …: it differs from origin/main … Once it has landed", about a
+branch that had already landed.
 
 `dotfiles-doctor` reports the pin state, how stale `origin/main` is, commits
 ahead/behind it, **which managed files actually differ** (the blast radius, not just a
