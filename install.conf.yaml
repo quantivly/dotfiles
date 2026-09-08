@@ -117,6 +117,23 @@
         bash ~/.dotfiles/scripts/repair-xdg-user-dirs.sh
       fi
     - |
+      # DO-564. Pin the herdr unit's ExecStart to THIS checkout, by rendering
+      # ~/.config/systemd/user/herdr-server.service.d/10-execstart.conf. The unit
+      # is LINKED, not copied — two checkers derive "which checkout is live" from
+      # that symlink — so its baked-in %h/.dotfiles/... ExecStart is the right
+      # answer in exactly one location, and the drop-in makes it right everywhere.
+      # Runs BEFORE the reconcile step below, whose daemon-reload is what makes
+      # systemd read it.
+      if [ -f scripts/herdr-unit-dropin.sh ]; then
+        # Deliberately NOT fatal, which is not the `|| true` carelessness
+        # CLAUDE.md warns about: the links are already made and still correct, and
+        # scripts/verify-tools.sh ASSERTS the outcome (herdr-unit-dropin.sh
+        # --check), so a failure here is reported by the check people are told to
+        # run rather than swallowed. On --herdr an abort would also take the
+        # next-steps block with it — the block that says how to finish.
+        bash scripts/herdr-unit-dropin.sh || true
+      fi
+    - |
       # Reconcile systemd USER unit enablement with the unit files linked above.
       # A LINKED unit is not a RECONCILED one: systemd records [Install] at
       # `enable` time as a .wants/ symlink, so editing WantedBy= in the file moves

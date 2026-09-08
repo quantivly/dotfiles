@@ -53,6 +53,15 @@ Type=simple
 # the user manager reaches the server except what it passes through explicitly
 # (DBUS_SESSION_BUS_ADDRESS, WAYLAND_DISPLAY, DISPLAY, ... — see its header).
 # No Environment=/EnvironmentFile= here on purpose: one place declares the env.
+# ExecStart is the CONVENTIONAL location and is overridden per checkout. DO-564:
+# ./install renders herdr-server.service.d/10-execstart.conf (template alongside
+# this file, written by scripts/herdr-unit-dropin.sh) pinning this to whichever
+# checkout installed the unit, so an adopter who already has their own
+# ~/.dotfiles no longer has to move it. The value below is what applies when no
+# drop-in has been rendered, which is correct at ~/.dotfiles and nowhere else —
+# so do not read it as "what runs". `systemctl cat herdr-server.service` shows
+# the merge, and scripts/verify-tools.sh asserts that the launcher which will
+# actually run lives in the checkout this unit is symlinked from.
 ExecStart=%h/.dotfiles/scripts/herdr-server-launch.sh
 # Stop through herdr's own API ("Stop the running server via the API socket",
 # `herdr server stop --help`) so herdr, not a signal, winds down its panes.
