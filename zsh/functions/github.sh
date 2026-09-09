@@ -26,11 +26,17 @@
 # actual API call returns, and which mechanism decided. Everything it reports
 # about "effective" comes from a real request; nothing is inferred from config.
 #
-# Routing follows the REPO REMOTE, the way git identity already does (#67,
-# `hasconfig:remote.*.url` in ~/.gitconfig.local) — not $PWD, so a work repo
-# routes correctly wherever it is checked out, and a personal repo under
+# Routing follows the REPO REMOTE first, the way git identity already does
+# (#67, `hasconfig:remote.*.url` in ~/.gitconfig.local) — not $PWD, so a work
+# repo routes correctly wherever it is checked out, and a personal repo under
 # ~/quantivly/ does not get the work account. Like hasconfig, ANY remote can
-# match, not just origin.
+# match, not just origin. A PATH route (GH_ACCOUNT_PATH_ROUTES) decides only a
+# directory that has no GitHub remote to decide it — a multi-repo workspace
+# root, a scratch directory — which otherwise fell to the personal default even
+# inside the work tree. 2026-09-09: a Claude Code session started in
+# ~/quantivly/qspace carried the personal token into gh AND the GitHub MCP
+# plugin (whose token is fixed at startup), and every private work repository
+# 404'd for the life of the session.
 #
 # Functions:
 #   _gh_url_owner        parse a remote URL -> GitHub owner (pure)
@@ -55,14 +61,26 @@
 #
 #     GH_ACCOUNT_ROUTES=( "quantivly=$HOME/.config/gh-quantivly" )
 #
-# GH_ACCOUNT_DEFAULT_DIR: the config dir for a repo no route matches. Empty
-# means "the remote does not determine an account" — which gh-doctor reports as
-# a finding rather than letting the keyring pick one silently.
+# GH_ACCOUNT_PATH_ROUTES: ordered 'absolute-prefix=gh-config-dir' entries,
+# consulted only for a directory with NO GitHub remote — not a repository, a
+# repository with no remotes, or only non-GitHub remotes. A leading ~ in either
+# half is expanded; prefix and directory are both resolved through symlinks
+# before comparing, and the match is by path component, so ~/quantivly-other is
+# not under ~/quantivly. A directory WITH a GitHub remote never reaches this
+# table: its remote decides, matched or not, exactly as git identity's
+# hasconfig rule does.
 #
-# Both are deliberately empty here and set by the machine's own config
+#     GH_ACCOUNT_PATH_ROUTES=( "$HOME/quantivly=$HOME/.config/gh-quantivly" )
+#
+# GH_ACCOUNT_DEFAULT_DIR: the config dir for everything the two tables above
+# do not decide. Empty means "the remote does not determine an account" —
+# which gh-doctor reports as a finding rather than letting the keyring pick one
+# silently.
+#
+# All three are deliberately empty here and set by the machine's own config
 # (zsh/zshrc.company, or ~/.zshrc.local): this file is the mechanism, the
 # accounts are data.
-typeset -ga GH_ACCOUNT_ROUTES
+typeset -ga GH_ACCOUNT_ROUTES GH_ACCOUNT_PATH_ROUTES
 : "${GH_ACCOUNT_DEFAULT_DIR=}"
 
 # -----------------------------------------------------------------------------
@@ -200,7 +218,14 @@ _gh_repo_remotes() {
   return 0
 }
 
-# Which gh config dir GH_ACCOUNT_ROUTES selects for a directory.
+# Which gh config dir the routing tables select for a directory. Precedence:
+#   1. GH_ACCOUNT_ROUTES      — a GitHub remote's owner matches an entry
+#   2. GH_ACCOUNT_PATH_ROUTES — the directory is under a prefix AND has no
+#                               GitHub remote at all (a remote that matches no
+#                               route means "personal, by remote", as with git)
+#   3. GH_ACCOUNT_DEFAULT_DIR — everything else
+# git-error stops before any of them: an unreadable repository under a path
+# route could be a personal one, and "git could not be asked" stays loud.
 # Usage: _gh_route_for [dir]
 # Sets:  _GH_ROUTE_STATE = matched | default | none | no-repo | no-remotes
 #                        | bad-table | git-error
@@ -212,7 +237,7 @@ _gh_repo_remotes() {
 # nothing, and "nothing" is indistinguishable from "this repo is personal" —
 # the unparseable-link-map failure from the live-config guard, in a new place.
 _gh_route_for() {
-  local dir="${1:-$PWD}" entry pat rdir i
+  local dir="${1:-$PWD}" entry pat rdir ppfx i
   local -a _GH_REMOTE_NAMES _GH_REMOTE_URLS _GH_REMOTE_OWNERS
   local _GH_REMOTE_STATE
   _GH_ROUTE_STATE=none; _GH_ROUTE_DIR=""; _GH_ROUTE_WHY=""
@@ -234,6 +259,23 @@ _gh_route_for() {
     if [[ -n "${${entry%%=*}//[A-Za-z0-9_.?*-]/}" ]]; then
       _GH_ROUTE_STATE=bad-table
       _GH_ROUTE_WHY="GH_ACCOUNT_ROUTES owner pattern may only contain letters, digits, - _ . and the * ? wildcards: '${entry%%=*}'"
+      return 1
+    fi
+  done
+  # The path table gets the same whole-table-first check, and a prefix must be
+  # absolute once ~ is expanded: a relative one would be matched against
+  # whatever $PWD happens to be — the $PWD routing #67 removed, back by typo.
+  for entry in "${GH_ACCOUNT_PATH_ROUTES[@]}"; do
+    if [[ "$entry" != *=* || -z "${entry%%=*}" || -z "${entry#*=}" ]]; then
+      _GH_ROUTE_STATE=bad-table
+      _GH_ROUTE_WHY="GH_ACCOUNT_PATH_ROUTES entry is not 'absolute-prefix=config-dir': '$entry'"
+      return 1
+    fi
+    ppfx="${entry%%=*}"
+    [[ "$ppfx" == '~'* ]] && ppfx="${HOME}${ppfx#\~}"
+    if [[ "$ppfx" != /* ]]; then
+      _GH_ROUTE_STATE=bad-table
+      _GH_ROUTE_WHY="GH_ACCOUNT_PATH_ROUTES prefix must be an absolute path (a leading ~ is expanded): '${entry%%=*}'"
       return 1
     fi
   done
@@ -276,6 +318,31 @@ _gh_route_for() {
     done
   done
 
+  # No GitHub remote decided anything: not a repository, no remotes, or only
+  # non-GitHub ones. Only then may the directory's PLACE decide. A GitHub remote
+  # that matched no route has already answered "personal" — the answer git
+  # identity gives — and the path table must not overrule it. Both sides are
+  # resolved through symlinks and compared by component, so a sibling that
+  # merely shares the prefix string stays out.
+  local has_github_remote=0 dir_abs="${dir:A}" ppfx_abs
+  for (( i = 1; i <= ${#_GH_REMOTE_OWNERS[@]}; i++ )); do
+    [[ -n "${_GH_REMOTE_OWNERS[i]}" ]] && { has_github_remote=1; break; }
+  done
+  if (( ! has_github_remote )); then
+    for entry in "${GH_ACCOUNT_PATH_ROUTES[@]}"; do
+      ppfx="${entry%%=*}"; rdir="${entry#*=}"
+      [[ "$ppfx" == '~'* ]] && ppfx="${HOME}${ppfx#\~}"
+      [[ "$rdir" == '~'* ]] && rdir="${HOME}${rdir#\~}"
+      ppfx_abs="${ppfx:A}"
+      if [[ "$dir_abs" == "$ppfx_abs" || "$dir_abs" == "$ppfx_abs"/* ]]; then
+        _GH_ROUTE_STATE=matched
+        _GH_ROUTE_DIR="$rdir"
+        _GH_ROUTE_WHY="$why_no_route — under path route '${entry%%=*}'"
+        return 0
+      fi
+    done
+  fi
+
   if [[ -n "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
     _GH_ROUTE_STATE=default
     _GH_ROUTE_DIR="$GH_ACCOUNT_DEFAULT_DIR"
@@ -294,7 +361,8 @@ _gh_route_for() {
   return 1
 }
 
-# Every gh config dir the routing table names, in table order, deduplicated,
+# Every gh config dir the routing tables name — owner routes, then path routes,
+# then the default — in table order, deduplicated,
 # with ~ expanded. Shared by the table check and the isolation probe so the two
 # can never disagree about what is configured.
 # Usage: _gh_configured_dirs
@@ -307,6 +375,12 @@ _gh_configured_dirs() {
     d="${entry#*=}"; [[ "$d" == '~'* ]] && d="${HOME}${d#\~}"
     (( ${_GH_CONFIGURED_DIRS[(Ie)$d]} )) && continue
     _GH_CONFIGURED_DIRS+=("$d"); _GH_CONFIGURED_WHY+=("route '${entry%%=*}'")
+  done
+  for entry in "${GH_ACCOUNT_PATH_ROUTES[@]}"; do
+    [[ "$entry" == *=* ]] || continue
+    d="${entry#*=}"; [[ "$d" == '~'* ]] && d="${HOME}${d#\~}"
+    (( ${_GH_CONFIGURED_DIRS[(Ie)$d]} )) && continue
+    _GH_CONFIGURED_DIRS+=("$d"); _GH_CONFIGURED_WHY+=("path route '${entry%%=*}'")
   done
   if [[ -n "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
     d="$GH_ACCOUNT_DEFAULT_DIR"; [[ "$d" == '~'* ]] && d="${HOME}${d#\~}"
@@ -499,7 +573,7 @@ gh-doctor() {
 
   # ---- 1. What the remote says --------------------------------------------
   echo
-  echo "Remotes (routing follows these, not \$PWD — #67):"
+  echo "Remotes (the remote decides first — #67; a path route only decides a directory without one):"
   local i
   _gh_repo_remotes "$dir"
   case "$_GH_REMOTE_STATE" in
@@ -525,8 +599,8 @@ gh-doctor() {
   # to route quietly gets whatever the keyring hands out.
   echo "Routing table:"
   local j
-  if (( ${#GH_ACCOUNT_ROUTES[@]} == 0 )) && [[ -z "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
-    _doctor_warn "empty — set GH_ACCOUNT_ROUTES / GH_ACCOUNT_DEFAULT_DIR (see zsh/functions/github.sh)"
+  if (( ${#GH_ACCOUNT_ROUTES[@]} == 0 && ${#GH_ACCOUNT_PATH_ROUTES[@]} == 0 )) && [[ -z "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
+    _doctor_warn "empty — set GH_ACCOUNT_ROUTES / GH_ACCOUNT_PATH_ROUTES / GH_ACCOUNT_DEFAULT_DIR (see zsh/functions/github.sh)"
   else
     _gh_configured_dirs
     for (( j = 1; j <= ${#_GH_CONFIGURED_DIRS[@]}; j++ )); do
@@ -543,7 +617,7 @@ gh-doctor() {
 
   echo "Route for this directory:"
   local want_dir="" want_user=""
-  if (( ${#GH_ACCOUNT_ROUTES[@]} == 0 )) && [[ -z "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
+  if (( ${#GH_ACCOUNT_ROUTES[@]} == 0 && ${#GH_ACCOUNT_PATH_ROUTES[@]} == 0 )) && [[ -z "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
     _doctor_note "skipped — no routing table"
   else
     _gh_route_for "$dir"

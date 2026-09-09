@@ -8,7 +8,7 @@
 # _gh_configured_dirs, _gh_active_config_dir, _gh_token_source, _gh_run,
 # _gh_config_dir_user, _gh_probe_login, _gh_user_token, gh-doctor) AND the half
 # of it that actually chooses every shell's account: _update_gh_config,
-# _gh_route_report and the first-prompt hook in zsh/zshrc.company.
+# _gh_route_report, _gh_cache_write and the first-prompt hook in zsh/zshrc.company.
 #
 # That second half had no coverage at first, and two of the worst bugs found in
 # review lived there — a shell left permanently unpinned after losing a startup
@@ -52,6 +52,14 @@
 #   - a route whose config dir does not exist can never fire; reporting it only
 #     when it happens to match means the fault first appears on the day the
 #     route was finally needed.
+#   - a workspace root that holds work repositories but is not itself one fell
+#     to the personal default, and a Claude Code session started there carried
+#     the personal token into gh and the GitHub MCP plugin for its whole life.
+#   - the refresher truncating the live cache file before rewriting it, so a
+#     shell starting during another shell's refresh read an EMPTY token and
+#     started unpinned — and the inode row that pins the fix was itself flaky
+#     until each row got its own HOME: a leftover refresher can free the
+#     recorded inode and hand it straight back to the new temp file.
 #
 # gh itself is STUBBED (bin/gh below), deliberately: the stub reproduces the
 # keyring collapse exactly, which no CI runner's real gh can be made to do, and
@@ -203,6 +211,7 @@ zrun() {
     source '$SYSTEM_SH'; source '$GITHUB_SH'
     GH_ACCOUNT_ROUTES=( 'acme=$CFG_WORK' )
     GH_ACCOUNT_DEFAULT_DIR='$CFG_PERS'
+    GH_ACCOUNT_PATH_ROUTES=()
     unset GH_TOKEN GITHUB_TOKEN GH_CONFIG_DIR
     $1" 2>&1
 }
@@ -320,6 +329,81 @@ check "empty table and no default is 'none', not a guess" \
 check "~ in GH_ACCOUNT_DEFAULT_DIR expands" \
       "$(zrun "GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_DEFAULT_DIR='~/defcfg'
                _gh_route_for '$R_PERS'; print -r -- \"\${_GH_ROUTE_DIR#\$HOME/}\"")" "defcfg"
+
+echo
+echo "=== _gh_route_for: a path route decides only what no remote can ==="
+# A workspace root that holds several repositories is not itself a repository,
+# so the remote has nothing to say about it — and the personal default is the
+# wrong answer for one that lives inside the work tree. On 2026-09-09 a Claude
+# Code session started in ~/quantivly/qspace took the personal account into gh
+# AND into the GitHub MCP plugin (whose token is fixed at startup), and every
+# private work repository 404'd for the life of the session. A path route
+# answers exactly that case, and ONLY that case: a directory with a GitHub
+# remote is still routed by the remote, so a personal-remote repository under
+# the work tree stays personal — the way git identity (hasconfig:remote.*.url)
+# already signs it.
+TREE="$TMPROOT/tree"; mkdir -p "$TREE/ws" "$TMPROOT/tree-other/x"
+mktree() {  # mktree <name> [name=url ...]  -> a repo UNDER $TREE (mkrepo roots elsewhere)
+  local d="$TREE/$1"; shift
+  mkdir -p "$d"; git -C "$d" init -q
+  local spec
+  for spec in "$@"; do git -C "$d" remote add "${spec%%=*}" "${spec#*=}"; done
+  printf '%s' "$d"
+}
+T_NOREM="$(mktree norem)"
+T_GL="$(mktree gl "gl=git@gitlab.com:a/b.git")"
+T_PERS="$(mktree personal "origin=git@github.com:someone/blog.git")"
+T_WORK="$(mktree work "origin=git@github.com:acme/platform.git")"
+ln -s "$TREE/ws" "$TMPROOT/link-to-ws"
+mkdir -p "$FAKEHOME/tree/ws"
+proute() {  # proute <dir> [path-entry ...]   (default: the one work path route)
+  local dir="$1"; shift
+  local tbl="'$TREE=$CFG_WORK'"
+  (( $# )) && tbl="$(printf "'%s' " "$@")"
+  zrun "GH_ACCOUNT_PATH_ROUTES=( $tbl ); _gh_route_for '$dir'
+        print -r -- \"\$_GH_ROUTE_STATE:\${_GH_ROUTE_DIR:t}\""
+}
+proute_why() { zrun "GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_route_for '$1'; print -r -- \"\$_GH_ROUTE_WHY\""; }
+check "a plain directory under the path route takes it"    "$(proute "$TREE/ws")"  "matched:work"
+check "the path route's own directory takes it"            "$(proute "$TREE")"     "matched:work"
+check "a repository with no remotes under it takes it"     "$(proute "$T_NOREM")"  "matched:work"
+check "only a non-GitHub remote under it takes it"         "$(proute "$T_GL")"     "matched:work"
+check "a symlink into the path route resolves"             "$(proute "$TMPROOT/link-to-ws")" "matched:work"
+# The remote decides first. A GitHub remote whose owner matches no route means
+# "personal, by remote" — exactly what git identity concludes — so the path
+# route must NOT overrule it.
+check "a personal GitHub remote under it stays personal"   "$(proute "$T_PERS")"   "default:personal"
+check "a work remote under it is routed by the REMOTE"     "$(proute "$T_WORK")"   "matched:work"
+check "...and the reason names the remote, not the path"   "$(proute_why "$T_WORK" | grep -c "remote 'origin'")" "1"
+check "...while a plain directory's reason names the path" "$(proute_why "$TREE/ws" | grep -c "under path route")" "1"
+# String-prefix trap: ~/quantivly-other is not under ~/quantivly.
+check "a sibling sharing the prefix string is not under it" "$(proute "$TMPROOT/tree-other/x")" "default:personal"
+check "a plain directory outside it takes the default"     "$(proute "$NOTREPO")"  "default:personal"
+# The tilde is DATA for the routing's own expansion (same as the 'acme=~/somecfg'
+# row above), not a path this shell should expand — hence the quotes.
+# shellcheck disable=SC2088
+check "~ in the path prefix expands"                       "$(proute "$FAKEHOME/tree/ws" "~/tree=$CFG_WORK")" "matched:work"
+# git-error still stops: an unreadable repository under the work tree could be
+# a personal one, and "git could not be asked" must stay loud.
+check "unreadable git under the path route still stops" \
+      "$(giterr "GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_route_for '$T_WORK'; print -r -- \"\$_GH_ROUTE_STATE:\${_GH_ROUTE_DIR:t}\"")" "git-error:"
+# An unusable path table must not select nothing and let that read as personal.
+check "path entry without ="              "$(proute "$TREE/ws" "$TREE")"            "bad-table:"
+check "path entry with a relative prefix" "$(proute "$TREE/ws" "tree=$CFG_WORK")"   "bad-table:"
+check "path entry with an empty dir"      "$(proute "$TREE/ws" "$TREE=")"           "bad-table:"
+check "a bad path entry is not masked by an owner match" \
+      "$(zrun "GH_ACCOUNT_PATH_ROUTES=( 'oops' ); _gh_route_for '$R_WORK'; print -r -- \"\$_GH_ROUTE_STATE:\${_GH_ROUTE_DIR:t}\"")" "bad-table:"
+# The refresher, the legacy purge and the doctor's table check all read
+# _gh_configured_dirs, so a path route's dir must be listed there — or its token
+# is never cached and the route pins nothing.
+check "_gh_configured_dirs lists the path route's dir, after the owner routes" \
+      "$(zrun "GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_configured_dirs
+               print -r -- \"\${(j:,:)\${(@)_GH_CONFIGURED_DIRS:t}}|\${(j:,:)_GH_CONFIGURED_WHY}\"")" \
+      "work,personal|route 'acme',GH_ACCOUNT_DEFAULT_DIR"
+check "...and names it as a path route when it is only reachable that way" \
+      "$(zrun "GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_configured_dirs
+               print -r -- \"\${(j:,:)\${(@)_GH_CONFIGURED_DIRS:t}}|\${(j:,:)_GH_CONFIGURED_WHY}\"")" \
+      "work,personal|path route '$TREE',GH_ACCOUNT_DEFAULT_DIR"
 
 echo
 echo "=== what gh will use right now ==="
@@ -624,6 +708,13 @@ pin() { hookrun "$1" "${2:-}" 'print -r -- "${${GH_CONFIG_DIR:t}:-none}/${${GH_T
 check "work repo pins the work dir"      "$(pin "$R_QUANT")" "gh-quantivly/pinned"
 check "personal repo pins the personal dir" "$(pin "$R_MINE")"  "gh-personal/pinned"
 check "outside a repo takes the default" "$(pin "$TMPROOT")"  "gh-personal/pinned"
+# The shipped table names ~/quantivly as a path route, so a plain directory
+# under the fixture HOME's quantivly/ must pin work — that is the workspace root
+# of 2026-09-09 — while a sibling sharing the prefix string still takes the
+# default.
+mkdir -p "$HOOKHOME/quantivly/ws" "$HOOKHOME/quantivly-other/x"
+check "a plain directory under ~/quantivly pins the work dir" "$(pin "$HOOKHOME/quantivly/ws")" "gh-quantivly/pinned"
+check "...but a sibling sharing the prefix string does not"   "$(pin "$HOOKHOME/quantivly-other/x")" "gh-personal/pinned"
 # The cache key is the config dir's BASENAME; a nickname-keyed file must not be
 # what the hook reads, or the routing table stops being the only place an
 # account is named.
@@ -752,6 +843,52 @@ check "...and the token lands there, not at the filesystem root" \
       "$(nogate 'print -r -- "$(ls $HOME/.cache/gh-token-cache)"')" "gh-personal"
 
 echo
+echo "=== the cache is replaced, never truncated ==="
+# Every interactive shell start runs the refresher, and the hook reads the cache
+# at startup, at the first prompt and on every cd. `printf > file` truncates
+# before it writes, so a shell starting while another shell's refresher is
+# mid-write reads an EMPTY token and starts unpinned — and a Claude Code session
+# launched from it carries no GitHub credential at all, for its whole life.
+# herdr and Herdmates start several panes at once, which is exactly that state.
+# Writing a temp file and renaming it is atomic: a reader sees the old token or
+# the new one, never nothing. The rename also changes the live file's inode,
+# which is how these rows tell a replace from a truncate-in-place. The temp is
+# created under umask 077, so the credential is never group-readable either —
+# the old write was 664 under this machine's umask until its chmod landed.
+# One HOME per row. The shell-start refresher is disowned and outlives its
+# `zsh -c`; a leftover from the PREVIOUS row renaming over this row's file frees
+# the inode this row just recorded, and the temp this row then creates can be
+# handed that same inode number back — so "unchanged inode" would no longer
+# mean "truncated in place". The same shared-HOME contamination the purge row
+# above hit, with the same fix.
+atomrow() {  # atomrow <refresher-call> -> "<replaced|truncated-in-place>|<content>|<mode>|<temps left>"
+  local home="$TMPROOT/atomhome-$1"
+  mkdir -p "$home/.config/gh-quantivly" "$home/.config/gh-personal" "$home/.cache/gh-token-cache"
+  printf 'github.com:\n    users:\n        worky:\n    user: worky\n'     > "$home/.config/gh-quantivly/hosts.yml"
+  printf 'github.com:\n    users:\n        persony:\n    user: persony\n' > "$home/.config/gh-personal/hosts.yml"
+  printf '[user]\n\temail = fixture@example.invalid\n' > "$home/.gitconfig"
+  env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$home" TERM=dumb zsh -c "
+    source '$SYSTEM_SH'; source '$GITHUB_SH'
+    source '$COMPANY_SH' >/dev/null 2>&1
+    # Let the shell-start refresher land both files, so this row measures its
+    # own call: after its second rename it only purges legacy names.
+    for _i in {1..100}; do
+      [[ -e \$HOME/.cache/gh-token-cache/gh-quantivly && -e \$HOME/.cache/gh-token-cache/gh-personal ]] && break
+      sleep 0.1
+    done
+    f=\$HOME/.cache/gh-token-cache/gh-quantivly
+    print -r -- stale > \$f; chmod 644 \$f
+    before=\$(stat -c %i \$f)
+    umask 000
+    $1 >/dev/null 2>&1
+    after=\$(stat -c %i \$f)
+    [[ \$before != \$after ]] && how=replaced || how=truncated-in-place
+    print -r -- \"\$how|\$(<\$f)|\$(stat -c %a \$f)|\$(ls -A \$HOME/.cache/gh-token-cache | grep -c '^\\.')\"" 2>/dev/null
+}
+check "the shell-start refresher replaces the live file" "$(atomrow _gh_refresh_token_cache_bg)" "replaced|tok-worky|600|0"
+check "gh-refresh-tokens replaces the live file"          "$(atomrow gh-refresh-tokens)"          "replaced|tok-worky|600|0"
+
+echo
 echo "=== the first prompt must RE-RUN routing, not replay a stale line ==="
 # The startup call routinely loses a race it is meant to lose: the cache is
 # repopulated by a background job that lands ~1s later, so the shell starts
@@ -805,6 +942,20 @@ check "...and a later prompt still repairs it" \
           print -r -- "${${GH_TOKEN:+pinned}:-UNPINNED}"')" "pinned"
 
 echo
+echo "=== gh-doctor: a path route is reported as such ==="
+pdoctor() {  # pdoctor <dir>   (the path route is the ONLY way to the work dir here)
+  zrun "GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); builtin cd '$1' 2>/dev/null
+        gh-doctor --offline; print -r -- \"rc=\$?\""
+}
+out="$(pdoctor "$TREE/ws")"
+check "plain directory under the path route: the route line names the path" \
+      "$(printf '%s\n' "$out" | grep -c "under path route")" "1"
+check "...and the table check lists the path route too" \
+      "$(printf '%s\n' "$out" | grep -c "path route '$TREE'")" "2"
+check "...and nothing says the remote does not determine an account" \
+      "$(printf '%s\n' "$out" | grep -c "does not determine an account")" "0"
+
+echo
 echo "=== the report never leaks a variable into the shell ==="
 # The doctor runs in the user's interactive shell. Every internal is a local by
 # dynamic scope; one missing declaration and the value persists (and a nested
@@ -831,6 +982,10 @@ check "gh-doctor declares its own counters" \
 # The emitters live in system.sh; github.sh must not grow a fourth glyph.
 check "no hand-rolled report glyphs" \
       "$(grep -cE "printf '  [•*-] " "$GITHUB_SH")" "0"
+# A truncating redirect onto the LIVE cache file is the bug the inode rows pin;
+# name it at the source too, so a later writer cannot reintroduce it quietly.
+check "no writer truncates a live cache file in place" \
+      "$(grep -cE '> *"\$cache/\$\{(d|dir):t\}"' "$COMPANY_SH")" "0"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

@@ -162,8 +162,13 @@ the repo's **remote** via `GH_ACCOUNT_ROUTES`, then **pins** the account by
 exporting `GH_TOKEN` from `~/.cache/gh-token-cache/<config-dir-basename>`. Routing
 consults **every** remote, not just `origin`, mirroring git's
 `hasconfig:remote.*.url` — so a fork whose `upstream` is the work repo routes the
-way git already signs it. Outside a repo (or when no route matches) it falls to
-`GH_ACCOUNT_DEFAULT_DIR`, the personal dir, which is still an explicit pin.
+way git already signs it. A directory with **no GitHub remote at all** — a
+multi-repo workspace root such as `~/quantivly/qspace`, a scratch directory — is
+checked against `GH_ACCOUNT_PATH_ROUTES` (`~/quantivly` → the work dir) before it
+falls to `GH_ACCOUNT_DEFAULT_DIR`, the personal dir, which is still an explicit
+pin. A directory that *has* a GitHub remote never reaches the path table: its
+remote decides, matched or not, so a personal repository under `~/quantivly`
+stays personal, as git signs it.
 
 It routed on `$PWD` first until 2026-09-01. That let gh and git disagree about the
 same repository — a quantivly clone outside `~/quantivly/` got the personal account
