@@ -255,6 +255,15 @@ idle_val=$(printf '%s\n' "$fields" | sed -n '13p')
 # No U+00B7: it is indistinguishable from herdr's own token separator, so a
 # profile name carrying one would render as two tokens. Stripped, not
 # rejected, because a wrong-looking name beats a vanished row.
+#
+# `sed`, NEVER `tr -d`. tr deletes BYTES, and U+00B7 is the two-byte sequence
+# C2 B7 -- so `tr -d '\302\267'` also strips those bytes out of unrelated
+# characters that merely contain one, emitting INVALID UTF-8: measured, it
+# turns U+00B1 (C2 B1) into a lone \xB1 and U+04B7 (D2 B7) into a lone \xD2.
+# That is worse than the separator it guards against, and it shipped in the
+# first version of this hook. sed matches the pair as a unit in both a UTF-8
+# and a C locale (checked; /bin/sh here is dash and the locale is not
+# guaranteed). sed is already used throughout this file, so it adds nothing.
 acct=$(
   d="${CLAUDE_CONFIG_DIR:-}"
   case "$d" in
@@ -262,7 +271,7 @@ acct=$(
     *)
       b="${d%/}"
       b="${b##*/}"
-      if [ -n "$b" ]; then printf '%s' "$b" | tr -d '\302\267'; else printf 'shared'; fi
+      if [ -n "$b" ]; then printf '%s' "$b" | sed 's/·//g'; else printf 'shared'; fi
       ;;
   esac
 )
