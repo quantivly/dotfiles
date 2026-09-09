@@ -773,7 +773,12 @@ not repositories (`~/quantivly/qspace` holds two repositories and is itself none
 no `.zshrc`, so they inherit Claude's environment verbatim, and the GitHub MCP plugin's
 `Authorization` header is expanded from that environment once at startup — so every `gh`
 call and every MCP request in the session was the personal account, 404ing on private work
-repositories until the session was restarted from a correctly routed shell.
+repositories until the session was restarted from a correctly routed shell. One deliberate
+trade-off: a repository with *no* GitHub remote under `~/quantivly` (a fresh `git init`, a
+GitLab checkout) is routed by place, while git identity stays personal until a quantivly
+remote is added — the state `docs/TROUBLESHOOTING.md` already documents for git alone. A
+GitHub URL the parser rejects is *not* that case: it counts as a GitHub remote, blocks the
+path table, and `gh-doctor` flags it.
 
 The `chpwd` hook (`_update_gh_config` in `zshrc.company`) uses the same
 `_gh_route_for` the doctor does — one implementation, so the oracle cannot drift from the
@@ -929,15 +934,34 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   shell start and rewrote both cache files in place, so a shell starting while another
   shell's refresher was mid-write read an *empty* token and started unpinned — and a Claude
   Code session launched from it carried no GitHub credential at all. herdr and Herdmates
-  start several panes at once, which is that state. `_gh_cache_write` writes a temp under
-  `umask 077` and renames it into place: a reader sees the old token or the new one, never
-  nothing, and the file is never group-readable (it was 664 under this machine's umask until
-  the old write's chmod landed). The state table tells a replace from a truncate by the live
-  file's inode — which only holds with one fixture HOME per row, because a leftover
-  refresher from an earlier row can free the recorded inode and hand it straight back to the
-  new temp.
+  start several panes at once, which is that state. `_gh_cache_write` writes a temp and
+  renames it into place: a reader sees the old token or the new one, never nothing. The
+  chmod before the rename guarantees the live file's mode; the `umask 077` only closes the
+  moment before it, inside a 700 directory, and is deliberately not what the rows measure.
+  Independent review then found two more traps in the writer, both now pinned: the temp
+  was named by `$$.$RANDOM`, and **both are inherited unchanged across a zsh fork**, so the
+  disowned shell-start refresher and a foreground `gh-refresh-tokens` shared one name and
+  the loser printed a false ✗ (`sysparams[pid]` is the real PID); and `mv -f` onto a
+  *directory* moves into it and succeeds, so a directory at the cache path got a live token
+  inside it and a ✓ (refused now, as `main`'s writer refused it). The state table tells a
+  replace from a truncate by the live file's inode — which only holds with one fixture HOME
+  per row, because a leftover refresher from an earlier row can free the recorded inode and
+  hand it straight back to the new temp.
+- **A deduplicated table hides a route.** `_gh_configured_dirs` deduplicates by config dir,
+  and on the shipped configuration the path route names the *same* dir as the owner route —
+  so the path table vanished from `gh-doctor` entirely, and a mistyped prefix was a silently
+  inert route under a fully green report: the exact fault the table check exists to name,
+  two lines above the code that hid it. A shared dir now carries every reason
+  (`route 'quantivly' + path route '~/quantivly'`), and a prefix that does not exist on disk
+  is a ✗ that "can never fire". Found by an independent review pass, not by the author.
+- **"No GitHub remote" had a fourth case.** A GitHub URL the parser rejects left the owner
+  slot empty exactly like a non-GitHub remote did, so it took the path route: a repository
+  under the work tree whose only remote is `git@github.com:someone` was pinned to work while
+  git signs it personal, with a reason that said "no route matched". `_gh_repo_remotes` now
+  records the parse state per remote; `unparsable` counts as a GitHub remote, blocks the path
+  table, and the doctor lists it as a ⚠.
 
-State table: `scripts/test-gh-routing.sh` (179 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (196 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

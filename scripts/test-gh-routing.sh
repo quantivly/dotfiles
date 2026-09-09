@@ -399,11 +399,25 @@ check "a bad path entry is not masked by an owner match" \
 check "_gh_configured_dirs lists the path route's dir, after the owner routes" \
       "$(zrun "GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_configured_dirs
                print -r -- \"\${(j:,:)\${(@)_GH_CONFIGURED_DIRS:t}}|\${(j:,:)_GH_CONFIGURED_WHY}\"")" \
-      "work,personal|route 'acme',GH_ACCOUNT_DEFAULT_DIR"
+      "work,personal|route 'acme' + path route '$TREE',GH_ACCOUNT_DEFAULT_DIR"
 check "...and names it as a path route when it is only reachable that way" \
       "$(zrun "GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_configured_dirs
                print -r -- \"\${(j:,:)\${(@)_GH_CONFIGURED_DIRS:t}}|\${(j:,:)_GH_CONFIGURED_WHY}\"")" \
       "work,personal|path route '$TREE',GH_ACCOUNT_DEFAULT_DIR"
+# A GitHub URL the parser rejects is not "no GitHub remote" — it is a GitHub
+# remote nobody can read, and the module's rule for those is to guess NOTHING
+# (its header: a rule that silently fails to parse reads as the wrong account
+# with no error). Before this row such a repository under the work tree was
+# pinned to work while git signs it personal.
+T_UNP="$(mktree unparsable "origin=https://github.com/someone")"
+check "an unparsable GitHub URL under it does NOT take the path route" "$(proute "$T_UNP")" "default:personal"
+check "...and the reason says the URL could not be parsed" \
+      "$(proute_why "$T_UNP" | grep -c "could not be parsed")" "1"
+# ~user is a named directory this expansion cannot honour; the old code turned
+# it into an absolute garbage path that passed validation and silently never
+# matched. The owner table already rejects ~ for the same reason.
+# shellcheck disable=SC2088
+check "a ~user prefix is bad-table, not a garbage absolute path" "$(proute "$TREE/ws" "~root=$CFG_WORK")" "bad-table:"
 
 echo
 echo "=== what gh will use right now ==="
@@ -852,9 +866,10 @@ echo "=== the cache is replaced, never truncated ==="
 # herdr and Herdmates start several panes at once, which is exactly that state.
 # Writing a temp file and renaming it is atomic: a reader sees the old token or
 # the new one, never nothing. The rename also changes the live file's inode,
-# which is how these rows tell a replace from a truncate-in-place. The temp is
-# created under umask 077, so the credential is never group-readable either —
-# the old write was 664 under this machine's umask until its chmod landed.
+# which is how these rows tell a replace from a truncate-in-place. The |600|
+# field is the LIVE file's mode, guaranteed by the chmod before the rename; the
+# writer's umask 077 only closes the moment before that chmod, inside a 700
+# directory, and is deliberately not what these rows measure.
 # One HOME per row. The shell-start refresher is disowned and outlives its
 # `zsh -c`; a leftover from the PREVIOUS row renaming over this row's file frees
 # the inode this row just recorded, and the temp this row then creates can be
@@ -887,6 +902,23 @@ atomrow() {  # atomrow <refresher-call> -> "<replaced|truncated-in-place>|<conte
 }
 check "the shell-start refresher replaces the live file" "$(atomrow _gh_refresh_token_cache_bg)" "replaced|tok-worky|600|0"
 check "gh-refresh-tokens replaces the live file"          "$(atomrow gh-refresh-tokens)"          "replaced|tok-worky|600|0"
+# $$ and $RANDOM are both inherited unchanged across a zsh fork, so the
+# shell-start refresher (a disowned child) and a gh-refresh-tokens run in the
+# same shell computed the SAME temp name, and one could rename the other's
+# file away between its printf and its chmod — a false ✗ from the one command
+# written to avoid false reports. sysparams[pid] is the real PID of a fork.
+check "the temp name uses the real PID, not \$\$ or \$RANDOM" \
+      "$(zrun "source '$COMPANY_SH' >/dev/null 2>&1; print -r -- \"\${functions[_gh_cache_write]}\"" | grep -cE 'RANDOM|\$\$')" "0"
+check "...and that PID differs in a forked child" \
+      "$(zrun "source '$COMPANY_SH' >/dev/null 2>&1; a=\$sysparams[pid]; b=\$( print -r -- \$sysparams[pid] )
+               [[ -n \$a && \$a != \$b ]] && print distinct || print same")" "distinct"
+# \`mv -f\` onto a DIRECTORY moves into it: a cache path that was a directory got
+# a live token dropped inside it, a ✓ from gh-refresh-tokens, and an unpinned
+# shell — the reporting-vs-effect inversion this file is about, and one that
+# main's writer refused cleanly.
+check "a cache path that is a directory is refused, nothing written inside" \
+      "$(zrun "source '$COMPANY_SH' >/dev/null 2>&1; d=\$(mktemp -d); mkdir -p \$d/f
+               _gh_cache_write \$d/f tok >/dev/null 2>&1; print -r -- \"rc=\$?|inside=\$(/bin/ls -A \$d/f | wc -l)\"")" "rc=1|inside=0"
 
 echo
 echo "=== the first prompt must RE-RUN routing, not replay a stale line ==="
@@ -954,6 +986,23 @@ check "...and the table check lists the path route too" \
       "$(printf '%s\n' "$out" | grep -c "path route '$TREE'")" "2"
 check "...and nothing says the remote does not determine an account" \
       "$(printf '%s\n' "$out" | grep -c "does not determine an account")" "0"
+# On the SHIPPED configuration the path route names the same config dir as the
+# owner route, and _gh_configured_dirs deduplicates by dir — so the path route
+# vanished from the doctor's table entirely, and a mistyped prefix was a
+# silently inert route under a fully green report. The table line must carry
+# both reasons, and a prefix that does not exist on disk is a route that can
+# never fire: the fault this table check exists to name.
+pdoctor_shared() {  # pdoctor_shared <prefix>   (zrun's owner table stays; the path route shares its dir)
+  zrun "GH_ACCOUNT_PATH_ROUTES=( '$1=$CFG_WORK' ); builtin cd '$TREE/ws' 2>/dev/null
+        gh-doctor --offline; print -r -- \"rc=\$?\""
+}
+out="$(pdoctor_shared "$TREE")"
+check "a path route sharing an owner route's dir still appears in the table" \
+      "$(printf '%s\n' "$out" | grep -c "route 'acme' + path route '$TREE'")" "1"
+out="$(pdoctor_shared "$TMPROOT/no-such-tree")"
+check "a path route whose prefix does not exist is a ✗ that can never fire" \
+      "$(printf '%s\n' "$out" | grep -c "no-such-tree.*can never fire")" "1"
+check "...and the report fails" "$(printf '%s\n' "$out" | grep -c 'rc=1')" "1"
 
 echo
 echo "=== the report never leaks a variable into the shell ==="
@@ -962,7 +1011,8 @@ echo "=== the report never leaks a variable into the shell ==="
 # call corrupts the outer one).
 for v in _DOCTOR_FAIL _DOCTOR_WARN _GH_URL_STATE _GH_REMOTE_STATE _GH_ROUTE_STATE \
          _GH_ROUTE_DIR _GH_ROUTE_WHY _GH_TOKEN_SOURCE _GH_PROBE_LOGIN _GH_PROBE_ERR \
-         _GH_CONFIGURED_DIRS _GH_RUN du ut cd_ cu_ why_; do
+         _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY _GH_REMOTE_KINDS _GH_RUN du ut cd_ cu_ why_ \
+         pp_ pe_ ppfx ppfx_abs dir_abs has_github_remote; do
   check "no \$$v left behind" \
         "$(zrun "gh-doctor '$R_WORK' >/dev/null 2>&1; print -r -- \"\${$v-unset}\"")" "unset"
 done

@@ -136,16 +136,37 @@ _gh_purge_legacy_token_cache() {
 # session launched from it carried no GitHub credential for its whole life.
 # herdr and Herdmates start several panes at once, which is exactly that state.
 # A temp file in the same directory, renamed into place, is atomic: a reader
-# sees the old token or the new one, never nothing. umask 077 in the subshell
-# means the credential is never group-readable either — the old write was 664
-# under this machine's umask until its chmod landed.
+# sees the old token or the new one, never nothing. The chmod before the rename
+# is what guarantees the live file's mode; umask 077 in the subshell only
+# closes the moment before that chmod, inside a directory that is itself 700.
+#
+# The temp is named by the REAL pid (sysparams[pid]), not $$: in zsh both $$
+# and $RANDOM's state are inherited unchanged across a fork, so the disowned
+# shell-start refresher and a gh-refresh-tokens run in the same shell computed
+# one and the same temp name, and either could rename the other's file away
+# between its printf and its chmod — a false ✗ from the one command written to
+# avoid false reports. Loaded here, outside the gate, for the same reason the
+# function is.
 #
 # Outside the opt-in gate on purpose: gh-refresh-tokens is defined outside it
 # and calls this, and a helper inside the gate is the "command not found" that
 # once wrote a live token to the filesystem root (see gh-refresh-tokens).
 # Usage: _gh_cache_write <file> <token>   (non-zero: nothing landed, file untouched)
+zmodload -F zsh/system p:sysparams 2>/dev/null
 _gh_cache_write() {
-  local file="$1" tmp="${1:h}/.${1:t}.$$.$RANDOM"
+  local file="$1" tmp
+  # Without the module there is no unique name to write to; say so by failing
+  # (the hook then reports "no cached token", which is visible) rather than by
+  # sharing a name.
+  [[ -n "${sysparams[pid]-}" ]] || return 1
+  tmp="${file:h}/.${file:t}.${sysparams[pid]}"
+  # `mv -f` onto a DIRECTORY moves into it and succeeds: a directory at the
+  # cache path would get a live token dropped inside it and a ✓ from the
+  # caller, while the hook's read fails. Refuse anything at the path that is
+  # not a regular file — main's writer refused this cleanly, and so must this.
+  if [[ -e "$file" && ! -f "$file" ]]; then
+    return 1
+  fi
   if ( umask 077; printf '%s' "$2" > "$tmp" ) && chmod 600 "$tmp" \
      && command mv -f -- "$tmp" "$file"; then
     return 0
@@ -178,9 +199,13 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # the personal default; on 2026-09-09 a Claude Code session started in one
     # carried the personal token into gh AND the GitHub MCP plugin (whose token
     # is fixed at startup), and every private work repository 404'd for the life
-    # of the session. A repository is still routed by its remote first, so gh and
-    # git identity (dev-setup's remote-based includeIf) never disagree about a
-    # repository. Double-quoted for the same reason as the owner route above.
+    # of the session. A repository with a GitHub remote is still routed by that
+    # remote first, so gh and git identity (dev-setup's remote-based includeIf)
+    # agree on every such repository. A repository with NO remote — a fresh
+    # `git init`, a GitLab checkout — is the one place they part: gh routes it
+    # by place (work) while git commits as personal until a quantivly remote is
+    # added, the state docs/TROUBLESHOOTING.md already documents for git alone.
+    # Double-quoted for the same reason as the owner route above.
     GH_ACCOUNT_PATH_ROUTES=( "$HOME/quantivly=$HOME/.config/gh-quantivly" )
 
     # Everything the routes do not match. The isolated single-account personal
@@ -221,7 +246,7 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # gh-personal) rather than by a nickname, so the routing table is the single
     # place an account is named — a route added there needs no matching edit
     # here, and a stale nickname cannot silently address the wrong dir.
-    # Background refresh (non-blocking). Driven by the routing table, so it
+    # Background refresh (non-blocking). Driven by the routing tables, so it
     # refreshes exactly the dirs routing can select. --user is mandatory:
     # `gh auth token` without it returns the shared keyring default, which is
     # the very thing being worked around.
@@ -514,7 +539,7 @@ qcache-refresh() {
 # gh-refresh-tokens - Force refresh of the GH token cache and re-apply it here
 #
 # Same work the background job at shell start does, synchronously and with
-# output. Driven by GH_ACCOUNT_ROUTES, so it covers exactly the config dirs
+# output. Driven by the routing tables, so it covers exactly the config dirs
 # routing can select and needs no edit when a route is added.
 #
 # --user is not optional: `gh auth token` without it returns the shared,
@@ -539,13 +564,13 @@ gh-refresh-tokens() {
 
   _gh_configured_dirs
   if (( ${#_GH_CONFIGURED_DIRS[@]} == 0 )); then
-    echo "Error: GH_ACCOUNT_ROUTES and GH_ACCOUNT_DEFAULT_DIR are both empty" >&2
+    echo "Error: GH_ACCOUNT_ROUTES, GH_ACCOUNT_PATH_ROUTES and GH_ACCOUNT_DEFAULT_DIR are all empty" >&2
     return 1
   fi
 
   for dir in "${_GH_CONFIGURED_DIRS[@]}"; do
     if [[ ! -d "$dir" ]]; then
-      echo "  ✗ ${dir/#$HOME/~}: no such directory (fix GH_ACCOUNT_ROUTES)" >&2
+      echo "  ✗ ${dir/#$HOME/~}: no such directory (fix GH_ACCOUNT_ROUTES / GH_ACCOUNT_PATH_ROUTES)" >&2
       failed=$((failed + 1))
       continue
     fi

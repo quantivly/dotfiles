@@ -168,7 +168,10 @@ checked against `GH_ACCOUNT_PATH_ROUTES` (`~/quantivly` → the work dir) before
 falls to `GH_ACCOUNT_DEFAULT_DIR`, the personal dir, which is still an explicit
 pin. A directory that *has* a GitHub remote never reaches the path table: its
 remote decides, matched or not, so a personal repository under `~/quantivly`
-stays personal, as git signs it.
+stays personal, as git signs it. A repository with **no remote at all** under
+`~/quantivly` is the one place the two part: gh routes it by place (work) while
+git commits as personal until the quantivly remote is added — the same "add the
+remote before the first commit" note as above.
 
 It routed on `$PWD` first until 2026-09-01. That let gh and git disagree about the
 same repository — a quantivly clone outside `~/quantivly/` got the personal account
