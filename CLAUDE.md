@@ -1927,9 +1927,17 @@ Design points that are load-bearing rather than preferences:
   grant it would shrink groups without new accounts, and if it does not, the second authorisation
   may revoke the first and log out every holder. Test it on a non-preferred profile, when nothing
   is in flight.
-- **`preferred = true` on `quantivly-3` stays.** Once nothing reads the global credential the
-  daemon's walk-back rewrites a file with no readers. Revisit if `claude-doctor`'s
-  processes-on-the-shared-file count is non-zero.
+- **`preferred = true` on `quantivly-3` should be REMOVED — corrected 2026-09-09.** This line
+  previously read "stays", on the reasoning that once nothing reads the global credential the
+  daemon's walk-back rewrites a file with no readers. That argument only holds while **both** halves
+  stay true, and it quietly depends on the more fragile one. Per-session placement makes a "home"
+  account meaningless in the first place, and the flag is inert **only** while the daemon is
+  disabled — so the day the daemon is re-enabled (after its serializer is fixed upstream, which is
+  the plan) it starts walking the machine-global credential back to one account underneath every
+  session still on the shared file, with nothing announcing it. A setting whose safety rests on
+  another component staying broken is not a setting to keep. **Verified 2026-09-09: it is still
+  present** in `~/.clauth/profiles/quantivly-3/config.toml` — the removal is pending, not done, and
+  this entry says so rather than describing the intended end state as if it had happened.
 - **`zsh/zshrc.herdr` is portable**, so the whole block is gated on clauth *and* the builder both
   being present, and the fallback is the previous behaviour byte for byte. A modular adopter with
   neither sees no change, and a state-table row asserts it.

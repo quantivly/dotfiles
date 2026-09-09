@@ -441,17 +441,50 @@ Forking keeps both properties and puts the divergence somewhere `git status` sho
 ## 4. Accounts
 
 Claude Code accounts are managed with **clauth**, which owns credentials and per-session config
-directories. Profiles rotate automatically as quotas fill:
+directories.
 
-```
-quantivly-3 (home) → quantivly-1 → quantivly-2      thresholds 95%/5h, 98%/7d
-```
+> **Corrected 2026-09-09.** This section used to describe an armed rotation chain
+> (`quantivly-3 (home) → quantivly-1 → quantivly-2`, thresholds 95 %/5 h and 98 %/7 d) driven by a
+> running `clauth-daemon.service`. **Neither is true, and both had been untrue for some time.**
+> Measured on the machine this file is written on:
+>
+> ```
+> systemctl --user is-active clauth-daemon.service   → inactive
+> systemctl --user is-enabled clauth-daemon.service  → disabled
+> fallback_chain in ~/.clauth/profiles.toml          → []
+> ```
+>
+> Read the values, not this document, if it matters to you — and read them with a `sed` **range**
+> anchored at the assignment, because clauth writes these arrays across several lines and a
+> line-based `grep` sees nothing while reporting success.
 
-A `clauth-daemon.service` systemd **user** unit runs the refresh/auto-switch loop, so rotation
-happens without a TUI open. `max_auto_spend = 0` — no unattended pay-as-you-go spend.
-*Linux-verified.* On macOS this is **UNVERIFIED**: `clauth start --help` says `--with-fallback`
-(the in-session chain switch) is "not available … on macOS", and nobody here has run the daemon
-on a Mac — do not assume rotation there until you have watched it happen.
+**Nothing rotates automatically.** The chain is empty **by decision**, not by neglect: every session
+is now placed on its own account *at launch* (`claude()` in `zsh/zshrc.herdr` picks one and exports
+`CLAUDE_CONFIG_DIR`), so an account is chosen where choosing is free, instead of being swapped
+underneath sessions that are already running. A chain rewrites the machine-global credential under
+every live session; per-session placement does not. Per-session rotation is still available where it
+is genuinely wanted, via `clauth start <p> --with-fallback`, which moves that one session and touches
+no other.
+
+**The daemon is disabled deliberately, and re-enabling it destroys data.** Its serializer models five
+of the seven top-level keys Claude Code writes and drops the rest: measured 2026-09-08, a running
+daemon rewrote all four profile stores within ~20 minutes and lost **`rateLimitTier` and every
+`mcpOAuth` entry** — 2/3/3/1 plugin MCP logins to zero, each costing a browser OAuth flow to restore.
+Leave it stopped until that is fixed upstream.
+
+**What the daemon being off actually costs is usage-cache freshness**, and the cost is larger than it
+looks. Reading clauth's source: the only writer of `usage_cache.json` is
+`src/usage/scheduler.rs:1563`, every fetch is gated on the single-fetcher lease, and
+`FetchLease::acquire()` is called from exactly two places — the **TUI** (`src/tui/app.rs:2236`) and
+the **daemon**. No CLI subcommand acquires it, and neither `clauth start` nor `clauth mcp` does. So
+with the daemon off, the caches are refreshed **only while somebody has the clauth TUI open**, which
+is why they arrive in bursts across all four profiles and then age monotonically for tens of minutes.
+Anything that ranks accounts on those numbers has to treat a stale reading as *unknown* rather than
+as agreement — which the picker does.
+
+`max_auto_spend = 0` — no unattended pay-as-you-go spend. On macOS the rotation story is
+**UNVERIFIED** either way: `clauth start --help` says `--with-fallback` is "not available … on
+macOS", and nobody here has run the daemon on a Mac.
 
 > **The distinction that bites — corrected 2026-08-30.** `clauth start <profile>` spawns the
 > claude *binary*, bypassing the `claude()` shell function in `zsh/zshrc.herdr`. That function
@@ -464,9 +497,20 @@ on a Mac — do not assume rotation there until you have watched it happen.
 > teammates run **in-process** rather than as panes (INFERRED from Claude Code's default
 > `teammateMode`, not observed), invisible to herdr and easy to misread as "herdmates is broken".
 > What `clauth start` reliably lacks is the `teammateMode: tmux` setting. For a session that
-> will lead a team, use `clauth <profile>` and then `claude`, and prove it with
+> will lead a team, use **`claude-as <profile>`**, and prove it with
 > `herdr pane process-info --pane <id>` showing `--settings {"teammateMode":"tmux"}` — not with
 > `command -v tmux`, which passes for everyone on a contaminated server.
+>
+> **Corrected 2026-09-09: this used to say `clauth <profile>` and then `claude`. Do not.**
+> `clauth <profile>` switches the credential for the **whole machine** — it replaces the
+> `claudeAiOauth` subtree in the shared `~/.claude/.credentials.json` with that profile's *stored*
+> tokens. Claude Code rotates refresh tokens and the rotation is **server-side**, so restoring a
+> stored copy that a live session has already rotated past invalidates it everywhere and logs out
+> every session holding that account. That is not hypothetical: a `clauth` credential rewrite at
+> 12:23:33 on 2026-09-06 was followed by six sessions failing with "Login expired" over the next 41
+> seconds. `claude-as <profile>` does the same job for *your* session — isolated onto that account,
+> still a team lead — and changes nothing outside it. Run `claude-doctor` before any `clauth
+> <profile>`, and never run one while it reports the stored copy DIFFERS from the live credential.
 
 ---
 
