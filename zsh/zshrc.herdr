@@ -117,6 +117,248 @@ _claude_holder_count() {
 # spent by a work session that merely happened to start next.
 (( ${+CLAUDE_ACCOUNT_POOL} )) || typeset -ga CLAUDE_ACCOUNT_POOL=()
 
+# TENANTS. The pool above answers "which account", but not "which account for
+# THIS directory" — so a session started in a personal repository could be billed
+# to a work account, and nothing reported it. gh identity and git identity are
+# both already routed by repository remote; this makes Claude account selection
+# the third, using the SAME rule rather than a second one that can disagree.
+#
+# The table is DATA and lives outside this repo, exactly as GH_ACCOUNT_ROUTES
+# does. Sourced here rather than from ~/.zshrc.local for two reasons: that file
+# holds secrets (the secret-emission hook refuses to read it), and it is sourced
+# after this one, which would be too late for the functions below.
+#
+#   CLAUDE_TENANT_ROUTES=( "quantivly=work" )        # owner-glob=tenant
+#   CLAUDE_TENANT_PATH_ROUTES=( "$HOME/quantivly=work" )  # only without a remote
+#   CLAUDE_TENANT_DEFAULT=personal
+#   CLAUDE_TENANT_POOL=( work "quantivly-1 quantivly-2" personal "personal" )
+#
+# No table loaded is the modular adopter's normal state: the resolver is skipped
+# entirely and CLAUDE_ACCOUNT_POOL keeps its exact meaning.
+typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_BUCKETS
+: "${CLAUDE_TENANT_DEFAULT=}"
+[[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
+  source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+
+# Is the WHOLE tenant table usable? Checked before any lookup, so a typo in entry
+# three cannot be masked by entry one happening to match — the rule _gh_route_for
+# pays for, and the unparseable-link-map failure the live-config guard pays for,
+# in a third place.
+#
+# Returns 1 for BOTH "no table" and "bad table". They are different states with
+# different fixes, and _CLAUDE_TENANT_STATE says which: `none` falls back to
+# CLAUDE_ACCOUNT_POOL semantics, `bad-table` is loud and selects nothing.
+_claude_tenant_table_ok() {
+  local entry t m ppfx
+  _CLAUDE_TENANT_WHY=""
+  if (( ! ${#CLAUDE_TENANT_ROUTES} && ! ${#CLAUDE_TENANT_PATH_ROUTES} \
+        && ! ${#CLAUDE_TENANT_POOL} )) && [[ -z "$CLAUDE_TENANT_DEFAULT" ]]; then
+    _CLAUDE_TENANT_STATE=none
+    return 1
+  fi
+  for entry in "${CLAUDE_TENANT_ROUTES[@]}"; do
+    if [[ "$entry" != *=* || -z "${entry%%=*}" || -z "${entry#*=}" ]]; then
+      _CLAUDE_TENANT_STATE=bad-table
+      _CLAUDE_TENANT_WHY="CLAUDE_TENANT_ROUTES entry is not 'owner-pattern=tenant': '$entry'"
+      return 1
+    fi
+    # ${~pat} enables tilde expansion as well as globbing, so a pattern starting
+    # with ~ aborts the lookup with "no such user or named directory" and takes
+    # every later route with it. Same restriction, for the same reason, as
+    # _gh_route_for's owner patterns.
+    if [[ -n "${${entry%%=*}//[A-Za-z0-9_.?*-]/}" ]]; then
+      _CLAUDE_TENANT_STATE=bad-table
+      _CLAUDE_TENANT_WHY="CLAUDE_TENANT_ROUTES owner pattern may only contain letters, digits, - _ . and the * ? wildcards: '${entry%%=*}'"
+      return 1
+    fi
+  done
+  for entry in "${CLAUDE_TENANT_PATH_ROUTES[@]}"; do
+    if [[ "$entry" != *=* || -z "${entry%%=*}" || -z "${entry#*=}" ]]; then
+      _CLAUDE_TENANT_STATE=bad-table
+      _CLAUDE_TENANT_WHY="CLAUDE_TENANT_PATH_ROUTES entry is not 'absolute-prefix=tenant': '$entry'"
+      return 1
+    fi
+    ppfx="${entry%%=*}"
+    if [[ "$ppfx" == '~' || "$ppfx" == '~/'* ]]; then
+      ppfx="${HOME}${ppfx#\~}"
+    elif [[ "$ppfx" == '~'* ]]; then
+      # ~user is a named directory this expansion cannot honour; splicing $HOME
+      # in front of it yields an absolute garbage path that passes the check
+      # below and then silently never matches.
+      _CLAUDE_TENANT_STATE=bad-table
+      _CLAUDE_TENANT_WHY="CLAUDE_TENANT_PATH_ROUTES prefix '${entry%%=*}' is a named directory (~user); write the absolute path"
+      return 1
+    fi
+    if [[ "$ppfx" != /* ]]; then
+      _CLAUDE_TENANT_STATE=bad-table
+      _CLAUDE_TENANT_WHY="CLAUDE_TENANT_PATH_ROUTES prefix must be an absolute path (a leading ~/ is expanded): '${entry%%=*}'"
+      return 1
+    fi
+  done
+  # Every tenant a route, the default, or an overflow key names must have a pool.
+  # A tenant with no pool selects an EMPTY set, and an empty set is
+  # indistinguishable from "no pool configured" — which means EVERY profile. So a
+  # typo here would silently WIDEN the pool at the moment it looks narrowed.
+  for t in "${(@)${(@)CLAUDE_TENANT_ROUTES#*=}}" "${(@)${(@)CLAUDE_TENANT_PATH_ROUTES#*=}}" \
+           "${(@k)CLAUDE_TENANT_OVERFLOW}" $CLAUDE_TENANT_DEFAULT; do
+    [[ -n "$t" ]] || continue
+    if [[ -z "${CLAUDE_TENANT_POOL[$t]-}" ]]; then
+      _CLAUDE_TENANT_STATE=bad-table
+      _CLAUDE_TENANT_WHY="tenant '$t' is named by a route, the default or an overflow entry but has no CLAUDE_TENANT_POOL entry"
+      return 1
+    fi
+  done
+  # Pool values are whitespace-split, so a profile name needing whitespace cannot
+  # be expressed at all; anything else illegal is named here rather than left to
+  # quietly match no profile later.
+  for t in "${(@v)CLAUDE_TENANT_POOL}" "${(@v)CLAUDE_TENANT_OVERFLOW}"; do
+    for m in ${=t}; do
+      if [[ -n "${m//[A-Za-z0-9_.-]/}" ]]; then
+        _CLAUDE_TENANT_STATE=bad-table
+        _CLAUDE_TENANT_WHY="pool member '$m' may only contain letters, digits, - _ and ."
+        return 1
+      fi
+    done
+  done
+  return 0
+}
+
+# Which tenant owns a directory? Remote first, path second, default last — the
+# rule _gh_route_for applies, REUSED rather than reimplemented. Copying
+# _gh_url_owner here would give the machine two answers to "who owns this repo",
+# and the whole point of this layer is that gh, git and Claude give one.
+#
+# Usage: _claude_tenant_for [dir]
+# Sets:  _CLAUDE_TENANT_STATE = matched | default | none | bad-table
+#                             | git-error | unsupported
+#        _CLAUDE_TENANT, _CLAUDE_TENANT_WHY
+# Returns 0 when _CLAUDE_TENANT is usable.
+_claude_tenant_for() {
+  local dir="${1:-$PWD}" entry pat ppfx ppfx_abs dir_abs t i
+  local -a _GH_REMOTE_NAMES _GH_REMOTE_URLS _GH_REMOTE_OWNERS _GH_REMOTE_KINDS
+  local _GH_REMOTE_STATE _GH_REMOTE_ERR
+  local has_github_remote=0 why_no_route=""
+  _CLAUDE_TENANT=""; _CLAUDE_TENANT_WHY=""; _CLAUDE_TENANT_STATE=""
+
+  _claude_tenant_table_ok || return 1        # leaves state none | bad-table
+
+  # A modular adopter has zshrc.herdr and no github.sh, so the owner half of the
+  # table cannot be evaluated at all. That is a MESSAGE, not a second URL parser
+  # — duplicating _gh_url_owner here is exactly the drift this design avoids.
+  # Path routes and the default still work.
+  if (( ! $+functions[_gh_repo_remotes] )); then
+    if (( ${#CLAUDE_TENANT_ROUTES} )); then
+      # Once per SHELL, not once per call: this fires from a chpwd-adjacent path
+      # and a line printed on every cd is a line nobody reads.
+      if [[ -z "${_CLAUDE_TENANT_WARNED_UNSUPPORTED:-}" ]]; then
+        typeset -g _CLAUDE_TENANT_WARNED_UNSUPPORTED=1
+        print -u2 -- "claude: CLAUDE_TENANT_ROUTES needs zsh/functions/github.sh, which is not loaded — owner routes are being skipped; path routes and the default still apply."
+      fi
+      _CLAUDE_TENANT_STATE=unsupported
+    fi
+    why_no_route="owner routes unavailable (github.sh not loaded)"
+  else
+    _gh_repo_remotes "$dir"
+    # "git could not be asked" is NOT "there is nothing here". Falling through to
+    # the default would hand a work repository the personal pool on the one path
+    # that deliberately stays quiet — the silent-wrong-account shape this whole
+    # layer exists to end.
+    if [[ "$_GH_REMOTE_STATE" == "git-error" ]]; then
+      _CLAUDE_TENANT_STATE=git-error
+      _CLAUDE_TENANT_WHY="git could not read '$dir' — the remote is UNKNOWN, so no tenant was selected: ${_GH_REMOTE_ERR:-(no message)}"
+      return 1
+    fi
+    case "$_GH_REMOTE_STATE" in
+      no-repo)    why_no_route="not a git repository — no remote to route on" ;;
+      no-remotes) why_no_route="git repository with no remotes — nothing to route on" ;;
+      *)          why_no_route="no route matched any remote" ;;
+    esac
+    for entry in "${CLAUDE_TENANT_ROUTES[@]}"; do
+      pat="${entry%%=*}"; t="${entry#*=}"
+      for (( i = 1; i <= ${#_GH_REMOTE_OWNERS[@]}; i++ )); do
+        [[ -n "${_GH_REMOTE_OWNERS[i]}" ]] || continue
+        if [[ "${_GH_REMOTE_OWNERS[i]:l}" == ${~pat:l} ]]; then
+          _CLAUDE_TENANT_STATE=matched
+          _CLAUDE_TENANT="$t"
+          _CLAUDE_TENANT_WHY="remote '${_GH_REMOTE_NAMES[i]}' owner '${_GH_REMOTE_OWNERS[i]}' matches route '$pat'"
+          return 0
+        fi
+      done
+    done
+    for (( i = 1; i <= ${#_GH_REMOTE_KINDS[@]}; i++ )); do
+      case "${_GH_REMOTE_KINDS[i]}" in
+        github) has_github_remote=1; break ;;
+        unparsable)
+          # A GitHub URL nobody can read is still a GitHub remote: it blocks the
+          # path table and the default answers. The same rule as #127's, so gh
+          # and Claude cannot disagree about the same directory.
+          has_github_remote=1
+          why_no_route="remote '${_GH_REMOTE_NAMES[i]}' looks like GitHub but its URL could not be parsed — not routed by path"
+          break ;;
+      esac
+    done
+  fi
+
+  # Only a directory with no GitHub remote may be decided by its PLACE. A remote
+  # that matched no route has already answered "the default tenant" — the answer
+  # git identity gives — and the path table must not overrule it.
+  if (( ! has_github_remote )); then
+    dir_abs="${dir:A}"
+    for entry in "${CLAUDE_TENANT_PATH_ROUTES[@]}"; do
+      ppfx="${entry%%=*}"; t="${entry#*=}"
+      [[ "$ppfx" == '~'* ]] && ppfx="${HOME}${ppfx#\~}"
+      ppfx_abs="${ppfx:A}"
+      # Component match, both sides resolved through symlinks: ~/quantivly-other
+      # is not under ~/quantivly, and a symlinked checkout still lands inside.
+      if [[ "$dir_abs" == "$ppfx_abs" || "$dir_abs" == "$ppfx_abs"/* ]]; then
+        # `unsupported` survives a path match for the same reason it survives the
+        # default: an owner route might have matched FIRST and chosen a different
+        # tenant, and the caller cannot tell a complete answer from one produced
+        # with half the table unreadable unless this says so.
+        [[ "$_CLAUDE_TENANT_STATE" == unsupported ]] || _CLAUDE_TENANT_STATE=matched
+        _CLAUDE_TENANT="$t"
+        _CLAUDE_TENANT_WHY="$why_no_route — under path route '${entry%%=*}'"
+        return 0
+      fi
+    done
+  fi
+
+  if [[ -n "$CLAUDE_TENANT_DEFAULT" ]]; then
+    # `unsupported` survives: the caller must be able to tell a complete answer
+    # from one produced with half the table unreadable.
+    [[ "$_CLAUDE_TENANT_STATE" == unsupported ]] || _CLAUDE_TENANT_STATE=default
+    _CLAUDE_TENANT="$CLAUDE_TENANT_DEFAULT"
+    _CLAUDE_TENANT_WHY="$why_no_route — CLAUDE_TENANT_DEFAULT"
+    return 0
+  fi
+  _CLAUDE_TENANT_STATE=none
+  _CLAUDE_TENANT_WHY="$why_no_route, and CLAUDE_TENANT_DEFAULT is unset"
+  return 1
+}
+
+# Derive the gh routing tables from the tenant table, so adding a root is ONE
+# edit rather than two that can disagree. Additive and idempotent: it never
+# removes or reorders a team default.
+#
+# Defined here, deliberately NOT called here. Load order is zshrc.herdr (this
+# file) -> zshrc.company, which ASSIGNS GH_ACCOUNT_ROUTES=(…) wholesale and would
+# discard anything added first -> ~/.zshrc.local -> the machine's own overlay,
+# which calls this as its last line. Only that caller knows the order has ended.
+claude-tenants-apply-gh() {
+  local e t d
+  for e in "${CLAUDE_TENANT_ROUTES[@]}"; do
+    t="${e#*=}"; d="${CLAUDE_TENANT_GH_DIR[$t]:-}"; [[ -n "$d" ]] || continue
+    (( ${GH_ACCOUNT_ROUTES[(I)${e%%=*}=*]} )) || GH_ACCOUNT_ROUTES+=("${e%%=*}=$d")
+  done
+  for e in "${CLAUDE_TENANT_PATH_ROUTES[@]}"; do
+    t="${e#*=}"; d="${CLAUDE_TENANT_GH_DIR[$t]:-}"; [[ -n "$d" ]] || continue
+    (( ${GH_ACCOUNT_PATH_ROUTES[(I)${e%%=*}=*]} )) || GH_ACCOUNT_PATH_ROUTES+=("${e%%=*}=$d")
+  done
+  [[ -n "${GH_ACCOUNT_DEFAULT_DIR:-}" ]] || \
+    GH_ACCOUNT_DEFAULT_DIR="${CLAUDE_TENANT_GH_DIR[$CLAUDE_TENANT_DEFAULT]:-}"
+}
+
 # Is this profile excluded from automatic selection, and why? Prints a reason, or
 # nothing when the profile is selectable.
 #
