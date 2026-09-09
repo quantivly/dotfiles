@@ -953,7 +953,9 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   inert route under a fully green report: the exact fault the table check exists to name,
   two lines above the code that hid it. A shared dir now carries every reason
   (`route 'quantivly' + path route '~/quantivly'`), and a prefix that does not exist on disk
-  is a ✗ that "can never fire". Found by an independent review pass, not by the author.
+  is a ⚠ that "can never fire" — a ⚠, not a ✗, because a machine with the work config dir
+  and no work tree has nothing to route there and must not carry a permanently red doctor.
+  Found by an independent review pass, not by the author.
 - **"No GitHub remote" had a fourth case.** A GitHub URL the parser rejects left the owner
   slot empty exactly like a non-GitHub remote did, so it took the path route: a repository
   under the work tree whose only remote is `git@github.com:someone` was pinned to work while
@@ -961,7 +963,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   records the parse state per remote; `unparsable` counts as a GitHub remote, blocks the path
   table, and the doctor lists it as a ⚠.
 
-State table: `scripts/test-gh-routing.sh` (196 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (199 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

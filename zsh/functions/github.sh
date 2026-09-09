@@ -391,13 +391,13 @@ _gh_route_for() {
 }
 
 # Every gh config dir the routing tables name — owner routes, then path routes,
-# then the default — in table order, deduplicated. A dir named by more than one
-# table keeps EVERY reason: on the shipped config the path route names the same
-# dir as the owner route, and dropping its reason made the path table invisible
-# to gh-doctor, so a mistyped prefix was a silently inert route under a green
-# report. Deduplicated,
-# with ~ expanded. Shared by the table check and the isolation probe so the two
-# can never disagree about what is configured.
+# then the default — in table order, deduplicated, with ~ expanded. A dir named
+# by more than one table keeps EVERY reason (`route 'quantivly' + path route
+# '~/quantivly'`): on the shipped config the path route names the same dir as
+# the owner route, and dropping its reason made the path table invisible to
+# gh-doctor, so a mistyped prefix was a silently inert route under a green
+# report. Shared by the table check and the isolation probe so the two can
+# never disagree about what is configured.
 # Usage: _gh_configured_dirs
 # Sets:  _GH_CONFIGURED_DIRS (parallel with _GH_CONFIGURED_WHY)
 _gh_configured_dirs() {
@@ -421,7 +421,10 @@ _gh_configured_dirs() {
   done
   if [[ -n "$GH_ACCOUNT_DEFAULT_DIR" ]]; then
     d="$GH_ACCOUNT_DEFAULT_DIR"; [[ "$d" == '~'* ]] && d="${HOME}${d#\~}"
-    if ! (( ${_GH_CONFIGURED_DIRS[(Ie)$d]} )); then
+    idx=${_GH_CONFIGURED_DIRS[(Ie)$d]}
+    if (( idx )); then
+      _GH_CONFIGURED_WHY[idx]+=" + GH_ACCOUNT_DEFAULT_DIR"
+    else
       _GH_CONFIGURED_DIRS+=("$d"); _GH_CONFIGURED_WHY+=("GH_ACCOUNT_DEFAULT_DIR")
     fi
   fi
@@ -653,15 +656,18 @@ gh-doctor() {
       fi
     done
     # A path route's PREFIX is a directory too, and one that does not exist on
-    # disk is a route that can never fire — the same fault as a missing config
-    # dir, with the same silence: a one-letter typo in the prefix leaves the
-    # work tree on the personal default under an otherwise green report.
+    # disk is a route that can never fire — with the same silence as a missing
+    # config dir: a one-letter typo in the prefix leaves the work tree on the
+    # personal default under an otherwise green report. A ⚠, not a ✗: a machine
+    # that has the work config dir and no work tree (the gate says nothing about
+    # ~/quantivly) has nothing there to route, and the default is right — a ✗
+    # would make this doctor permanently red there, the checker nobody reads.
     for pp_ in "${GH_ACCOUNT_PATH_ROUTES[@]}"; do
       [[ "$pp_" == *=* ]] || continue
       pe_="${pp_%%=*}"
       [[ "$pe_" == '~' || "$pe_" == '~/'* ]] && pe_="${HOME}${pe_#\~}"
       if [[ ! -d "$pe_" ]]; then
-        _doctor_bad "path route '${pp_%%=*}' names a directory that does not exist (${pe_/#$HOME/~}) — it can never fire"
+        _doctor_warn "path route '${pp_%%=*}' names a directory that does not exist (${pe_/#$HOME/~}) — nothing there to route, so it can never fire; if that is a typo, it is otherwise silent"
       fi
     done
   fi

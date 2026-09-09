@@ -29,10 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remote": it blocks the path table and the default answers, as before, and `gh-doctor`
   lists it as a ⚠. A dir named by both tables keeps both reasons in the doctor's table
   (`route 'quantivly' + path route '~/quantivly'`), and a prefix that does not exist on
-  disk is a ✗ that can never fire — an independent review found the path table entirely
+  disk is a ⚠ that can never fire — an independent review found the path table entirely
   invisible to the doctor on the shipped configuration, since it shares the owner route's
-  dir. `~user` prefixes are `bad-table`. Forty-four new checks in
-  `scripts/test-gh-routing.sh` (152 → 196), including the guard rows that pin the
+  dir. `~user` prefixes are `bad-table`. Forty-seven new checks in
+  `scripts/test-gh-routing.sh` (152 → 199), including the guard rows that pin the
   precedence.
 - **`dotfiles-doctor` names a `safe.directory`-polluted gitconfig, and says which entries are
   dead (DO-589).** `~/.gitconfig` is a symlink into the checkout and `git config --global`

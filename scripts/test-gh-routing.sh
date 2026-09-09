@@ -400,6 +400,10 @@ check "_gh_configured_dirs lists the path route's dir, after the owner routes" \
       "$(zrun "GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_configured_dirs
                print -r -- \"\${(j:,:)\${(@)_GH_CONFIGURED_DIRS:t}}|\${(j:,:)_GH_CONFIGURED_WHY}\"")" \
       "work,personal|route 'acme' + path route '$TREE',GH_ACCOUNT_DEFAULT_DIR"
+check "GH_ACCOUNT_DEFAULT_DIR keeps its reason on a shared dir too" \
+      "$(zrun "GH_ACCOUNT_DEFAULT_DIR='$CFG_WORK'; _gh_configured_dirs
+               print -r -- \"\${(j:,:)\${(@)_GH_CONFIGURED_DIRS:t}}|\${(j:,:)_GH_CONFIGURED_WHY}\"")" \
+      "work|route 'acme' + GH_ACCOUNT_DEFAULT_DIR"
 check "...and names it as a path route when it is only reachable that way" \
       "$(zrun "GH_ACCOUNT_ROUTES=(); GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); _gh_configured_dirs
                print -r -- \"\${(j:,:)\${(@)_GH_CONFIGURED_DIRS:t}}|\${(j:,:)_GH_CONFIGURED_WHY}\"")" \
@@ -917,7 +921,7 @@ check "...and that PID differs in a forked child" \
 # shell — the reporting-vs-effect inversion this file is about, and one that
 # main's writer refused cleanly.
 check "a cache path that is a directory is refused, nothing written inside" \
-      "$(zrun "source '$COMPANY_SH' >/dev/null 2>&1; d=\$(mktemp -d); mkdir -p \$d/f
+      "$(zrun "source '$COMPANY_SH' >/dev/null 2>&1; d='$TMPROOT/dirpath'; mkdir -p \$d/f
                _gh_cache_write \$d/f tok >/dev/null 2>&1; print -r -- \"rc=\$?|inside=\$(/bin/ls -A \$d/f | wc -l)\"")" "rc=1|inside=0"
 
 echo
@@ -999,10 +1003,19 @@ pdoctor_shared() {  # pdoctor_shared <prefix>   (zrun's owner table stays; the p
 out="$(pdoctor_shared "$TREE")"
 check "a path route sharing an owner route's dir still appears in the table" \
       "$(printf '%s\n' "$out" | grep -c "route 'acme' + path route '$TREE'")" "1"
+# ...but a ⚠, not a ✗: a machine that has the work config dir and no work tree
+# (the gate says nothing about ~/quantivly) has nothing there to route, and the
+# default is the right answer — a ✗ would make gh-doctor permanently red there,
+# the checker nobody reads. The typo is still named, in the glyph that fits.
 out="$(pdoctor_shared "$TMPROOT/no-such-tree")"
-check "a path route whose prefix does not exist is a ✗ that can never fire" \
-      "$(printf '%s\n' "$out" | grep -c "no-such-tree.*can never fire")" "1"
-check "...and the report fails" "$(printf '%s\n' "$out" | grep -c 'rc=1')" "1"
+check "a path route whose prefix does not exist is a ⚠ that can never fire" \
+      "$(printf '%s\n' "$out" | grep -c "⚠.*no-such-tree.*can never fire")" "1"
+check "...and the report does not fail for it" "$(printf '%s\n' "$out" | grep -c 'rc=0')" "1"
+# The doctor's own branch for an unparsable GitHub URL is a ⚠ in the Remotes
+# section; the route rows above never run the doctor, so pin it here.
+out="$(zrun "GH_ACCOUNT_PATH_ROUTES=( '$TREE=$CFG_WORK' ); builtin cd '$T_UNP' 2>/dev/null; gh-doctor --offline")"
+check "an unparsable GitHub URL is a ⚠ in the doctor's remotes" \
+      "$(printf '%s\n' "$out" | grep -c "⚠.*could not be parsed.*blocks the path table")" "1"
 
 echo
 echo "=== the report never leaks a variable into the shell ==="
@@ -1012,7 +1025,7 @@ echo "=== the report never leaks a variable into the shell ==="
 for v in _DOCTOR_FAIL _DOCTOR_WARN _GH_URL_STATE _GH_REMOTE_STATE _GH_ROUTE_STATE \
          _GH_ROUTE_DIR _GH_ROUTE_WHY _GH_TOKEN_SOURCE _GH_PROBE_LOGIN _GH_PROBE_ERR \
          _GH_CONFIGURED_DIRS _GH_CONFIGURED_WHY _GH_REMOTE_KINDS _GH_RUN du ut cd_ cu_ why_ \
-         pp_ pe_ ppfx ppfx_abs dir_abs has_github_remote; do
+         pp_ pe_ ppfx ppfx_abs dir_abs has_github_remote idx; do
   check "no \$$v left behind" \
         "$(zrun "gh-doctor '$R_WORK' >/dev/null 2>&1; print -r -- \"\${$v-unset}\"")" "unset"
 done

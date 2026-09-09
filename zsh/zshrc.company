@@ -146,13 +146,16 @@ _gh_purge_legacy_token_cache() {
 # one and the same temp name, and either could rename the other's file away
 # between its printf and its chmod — a false ✗ from the one command written to
 # avoid false reports. Loaded here, outside the gate, for the same reason the
-# function is.
+# function is — and loaded plain, not with -F: a -F load of a module nothing
+# has loaded yet enables ONLY the named feature, and anything sourced later
+# that expects zsystem/sysopen from a plain `zmodload zsh/system` would find
+# them disabled.
 #
 # Outside the opt-in gate on purpose: gh-refresh-tokens is defined outside it
 # and calls this, and a helper inside the gate is the "command not found" that
 # once wrote a live token to the filesystem root (see gh-refresh-tokens).
 # Usage: _gh_cache_write <file> <token>   (non-zero: nothing landed, file untouched)
-zmodload -F zsh/system p:sysparams 2>/dev/null
+zmodload zsh/system 2>/dev/null
 _gh_cache_write() {
   local file="$1" tmp
   # Without the module there is no unique name to write to; say so by failing
