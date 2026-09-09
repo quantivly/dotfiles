@@ -1338,6 +1338,47 @@ Gotchas, in the order they bite:
   arriving as a config file that still looked correct. Any migration that moves the marker
   variable has this shape: check what an unset gate falls back to before assuming the old
   name is merely dead. `build-limits` prints which tier is active.
+- **The sidebar's account tag named the wrong account on every isolated pane, and that
+  is the surface that hid the concentration (DO-590).** clauth's herdr plugin resolves
+  the account from the **machine-wide active profile**, and it cannot see a foreign
+  `CLAUDE_CONFIG_DIR` — so once `claude()` started isolating every session by default,
+  the one column that says which account a pane is spending stopped tracking it.
+  Measured 2026-09-09 on a pane billing `quantivly-2`: the published token was
+  `clauth: "unknown"`, the same literal sentinel `clauth which` returns from inside an
+  isolated shell. Not a wrong-but-plausible name — no name at all.
+  The fix belongs here rather than upstream because our own
+  `claude/hooks/session-statusline.sh` runs **inside** the session, so a token it
+  derives from that process's own `CLAUDE_CONFIG_DIR` is correct by construction and
+  cannot disagree with the credential being spent. It publishes `acct`, and the claude
+  row in `config/herdr/config.toml` consumes `$acct` in place of `$clauth`. **Both were
+  not kept**: two account fields disagreeing, one of them reading `unknown`, is the
+  surface being removed, not one to double. `acct=shared` is a **finding, not a
+  formatting fallback** — it means the session is on the shared global credential, the
+  file a profile switch overwrites under every holder at once.
+  Three things the change turned up that outlast the change itself:
+  - **A publisher and a consumer that each fail silently can only be checked as a
+    PAIR.** An unpublished token renders as nothing; an unconsumed one is never drawn.
+    So a half-applied deploy — `./install` relinks `config.toml`, a checkout that moved
+    without it does not — looks exactly like a healthy sidebar from either side alone.
+    `verify-tools.sh --herdr` asserts the two together, against the **live**
+    `~/.config/herdr/config.toml` and never the repo copy: the repo copy always carries
+    `$acct` after this change, so reading it would print a green tick for precisely the
+    half-applied state the check exists to catch. A mutation that swapped the path
+    proved it.
+  - **Presence is not correctness, and the state table said otherwise for a while.**
+    Every row asserted that `acct` was published and consumed; none asserted its
+    VALUE. A hook hardcoded to `acct=shared` therefore passed the entire table while
+    showing every pane the same wrong account — the original bug, reintroduced, under
+    a green suite. Only mutation testing found it (M6 survived; six derivation rows
+    were added to kill it). The derivation *is* the feature: rows that check the
+    plumbing and not the answer are decoration.
+  - **A fixture `$HOME` needs `.cache/`.** The hook redirects the publish call's stderr
+    into `$HOME/.cache/`, so without that directory the redirection itself fails,
+    `herdr` is never exec'd, and the stub records nothing — which reads identically to
+    "the hook published no token". The first draft of those rows failed for exactly
+    that reason, and had passed beforehand only because an ad-hoc run used the real
+    `$HOME`.
+
 - **The sidebar publisher needs THREE things wired, and `./install` only does one** —
   `scripts/herdr-claude-wire.sh` now does the other two, and `verify-tools.sh --herdr` fails when
   they are missing (before DO-563 nothing checked either, in either install path).
