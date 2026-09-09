@@ -54,7 +54,8 @@ done
 # behaviour. Most rows below are "nothing was created / nothing was removed",
 # which is also exactly what a suite that loaded nothing produces.
 for fn in hspawn hdespawn hreap _hspawn_shell_ready _hspawn_preserve_stale_registry \
-          _hspawn_registry_file _hreap_fmt_dur _hreap_fmt_kb; do
+          _hspawn_registry_file _hreap_fmt_dur _hreap_fmt_kb \
+          _claude_tenant_table_ok _claude_tenant_for claude-tenants-apply-gh; do
     zsh -c "source '$HERDRRC' >/dev/null 2>&1; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $HERDRRC — the suite would assert nothing"
 done
@@ -1260,6 +1261,393 @@ check "the entry is NOT annotated"          "$(jq -r '.closed_at // "none"' "$ST
 rm -f "$STUBDIR/close-fails" "$STUBDIR/snapshot.json"
 rm -f "$STATE"/*.json
 PANEDIR=""
+
+echo "=== tenant table: the whole table is validated before any lookup ==="
+#
+# Every row here is a state that otherwise reads as "no tenant matched", which
+# falls through to the default pool — i.e. a typo silently bills the wrong
+# account rather than erroring. bad-table is its own state for that reason.
+
+# Run a snippet against a tenant file and print the resulting state. `zsh -f` so
+# the developer's own ~/.zshrc (and their real tenant file) cannot leak in.
+tenant_state() {   # $1 = tenant-file body, $2 = snippet (default: just validate)
+    local f="$TMPROOT/tenants.$RANDOM.zsh"
+    printf '%s\n' "$1" > "$f"
+    zsh -f -c "
+      CLAUDE_TENANTS_FILE='$f'
+      source '$HERDRRC' >/dev/null 2>&1
+      ${2:-_claude_tenant_table_ok}
+      print -r -- \"\$_CLAUDE_TENANT_STATE\"
+    " 2>/dev/null
+}
+
+check "a well-formed table validates" \
+      "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "quantivly=work" )
+CLAUDE_TENANT_PATH_ROUTES=( "/roots/work=work" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( work "a b" home "c" )')" ""
+
+check "a route entry with no '=' is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "quantivly" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c" )')" "bad-table"
+
+check "a route entry with an empty tenant is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "quantivly=" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c" )')" "bad-table"
+
+check "an owner pattern containing ~ is bad-table (the \${~pat} tilde trap)" \
+      "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "~quantivly=work" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( work "a" home "c" )')" "bad-table"
+
+check "a ~user path prefix is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_PATH_ROUTES=( "~someone/x=work" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( work "a" home "c" )')" "bad-table"
+
+check "a relative path prefix is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_PATH_ROUTES=( "quantivly=work" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( work "a" home "c" )')" "bad-table"
+
+check "a ~/ path prefix is accepted (it is expanded, not refused)" \
+      "$(tenant_state 'CLAUDE_TENANT_PATH_ROUTES=( "~/quantivly=work" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( work "a" home "c" )')" ""
+
+check "a tenant named by a route with no pool entry is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "quantivly=work" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c" )')" "bad-table"
+
+check "a tenant named only by an OVERFLOW key with no pool is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c" )
+CLAUDE_TENANT_OVERFLOW=( ghost "c" )')" "bad-table"
+
+check "a pool member with an illegal character is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c;rm" )')" "bad-table"
+
+check "an empty default is NOT bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "quantivly=work" )
+CLAUDE_TENANT_DEFAULT=
+CLAUDE_TENANT_POOL=( work "a" )')" ""
+
+check "no table at all leaves the state 'none', not 'bad-table'" \
+      "$(zsh -f -c "CLAUDE_TENANTS_FILE=/nonexistent
+        source '$HERDRRC' >/dev/null 2>&1
+        _claude_tenant_table_ok
+        print -r -- \"\$_CLAUDE_TENANT_STATE\"" 2>/dev/null)" "none"
+
+echo "=== tenant resolver: the remote decides first, the path only without one ==="
+#
+# This mirrors _gh_route_for's rule deliberately. Any divergence here means gh
+# and Claude can disagree about the same directory, which is the class of bug
+# that put a personal token into a work session for its whole life (#127).
+
+TROOT="$TMPROOT/tenant"
+mkdir -p "$TROOT/roots/work/plain" "$TROOT/roots/client" "$TROOT/roots/work-other"
+TENANTS="$TROOT/tenants.zsh"
+cat > "$TENANTS" <<EOF
+CLAUDE_TENANT_ROUTES=( "quantivly=work" "Toysim-LTD=client" )
+CLAUDE_TENANT_PATH_ROUTES=( "$TROOT/roots/work=work" "$TROOT/roots/client=client" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( work "w1 w2" client "c1" home "h1" )
+EOF
+
+mkrepo() {   # $1 = path, rest = name=url pairs -> prints the path
+    local d="$1"; shift
+    mkdir -p "$d"
+    git -C "$d" init -q >/dev/null 2>&1
+    local p
+    for p in "$@"; do git -C "$d" remote add "${p%%=*}" "${p#*=}" >/dev/null 2>&1; done
+    printf '%s' "$d"
+}
+resolve() {  # $1 = dir -> "state:tenant"
+    zsh -f -c "
+      CLAUDE_TENANTS_FILE='$TENANTS'
+      source '$DOTFILES/zsh/functions/github.sh' >/dev/null 2>&1
+      source '$HERDRRC' >/dev/null 2>&1
+      _claude_tenant_for '$1'
+      print -r -- \"\$_CLAUDE_TENANT_STATE:\$_CLAUDE_TENANT\"
+    " 2>/dev/null
+}
+
+R_WORK="$(mkrepo "$TROOT/r/work" 'origin=git@github.com:quantivly/platform.git')"
+check "owner route matches on origin"       "$(resolve "$R_WORK")"  "matched:work"
+
+R_UP="$(mkrepo "$TROOT/r/up" 'origin=git@github.com:someone/fork.git' \
+                             'upstream=https://github.com/quantivly/platform.git')"
+check "owner route matches on upstream too" "$(resolve "$R_UP")"    "matched:work"
+
+R_CASE="$(mkrepo "$TROOT/r/case" 'origin=https://github.com/toysim-ltd/x.git')"
+check "owner route is case-insensitive"     "$(resolve "$R_CASE")"  "matched:client"
+
+check "a plain dir under a path root takes the path route" \
+      "$(resolve "$TROOT/roots/work/plain")"                        "matched:work"
+
+# The rule that matters most: place never overrules a remote.
+R_PERS="$(mkrepo "$TROOT/roots/work/mine" 'origin=git@github.com:ZviBaratz/mine.git')"
+check "a repo whose remote matches no route, UNDER a path root, is the default" \
+      "$(resolve "$R_PERS")"                                        "default:home"
+
+check "a sibling that merely shares the prefix string is not under the root" \
+      "$(resolve "$TROOT/roots/work-other")"                        "default:home"
+
+R_UNP="$(mkrepo "$TROOT/roots/work/unp" 'origin=https://github.com/acme')"
+check "an unparsable GitHub URL blocks the path table" \
+      "$(resolve "$R_UNP")"                                         "default:home"
+
+R_NONGH="$(mkrepo "$TROOT/roots/work/gl" 'origin=git@gitlab.com:x/y.git')"
+check "a non-GitHub remote does NOT block the path table" \
+      "$(resolve "$R_NONGH")"                                       "matched:work"
+
+# A real git-error, the way test-gh-routing.sh makes one: a HOME whose
+# ~/.gitconfig does not parse, so git answers 128 to every question. Not a
+# corrupt .git directory — git calls THAT "not a repository", which resolves to
+# no-repo and would have made this row pass while testing nothing.
+# This is reachable in production because ~/.gitconfig is a managed symlink into
+# this repo, so a bad branch produces exactly it.
+TBADHOME="$TROOT/badhome"; mkdir -p "$TBADHOME"
+printf 'this is not valid git config\n' > "$TBADHOME/.gitconfig"
+check "git-error stops and does NOT fall through to the default" \
+      "$(HOME="$TBADHOME" zsh -f -c "
+          export HOME='$TBADHOME'
+          CLAUDE_TENANTS_FILE='$TENANTS'
+          source '$DOTFILES/zsh/functions/github.sh' >/dev/null 2>&1
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_tenant_for '$R_WORK'
+          print -r -- \"\$_CLAUDE_TENANT_STATE:\$_CLAUDE_TENANT\"" 2>/dev/null)" \
+      "git-error:"
+
+SYM="$TROOT/symlink-to-work"; ln -sfn "$TROOT/roots/work/plain" "$SYM"
+check "a symlinked directory resolves through the link" \
+      "$(resolve "$SYM")"                                           "matched:work"
+
+# An empty default is legal (§5.1) but means "indeterminate": a directory that
+# matches nothing must resolve to `none` and let the caller decide, NOT be handed
+# a pool by accident.
+cat > "$TROOT/nodefault.zsh" <<EOF
+CLAUDE_TENANT_ROUTES=( "quantivly=work" )
+CLAUDE_TENANT_DEFAULT=
+CLAUDE_TENANT_POOL=( work "w1" )
+EOF
+check "an empty default with no match is state 'none', never a silent pick" \
+      "$(zsh -f -c "
+          CLAUDE_TENANTS_FILE='$TROOT/nodefault.zsh'
+          source '$DOTFILES/zsh/functions/github.sh' >/dev/null 2>&1
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_tenant_for '$TROOT/roots/client'
+          print -r -- \"\$_CLAUDE_TENANT_STATE:\$_CLAUDE_TENANT\"" 2>/dev/null)" \
+      "none:"
+
+# github.sh absent: the modular adopter. Owner routes cannot be evaluated, so the
+# answer is degraded and SAYS so rather than quietly using half a table.
+check "github.sh not loaded, owner routes configured -> unsupported" \
+      "$(zsh -f -c "
+          CLAUDE_TENANTS_FILE='$TENANTS'
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_tenant_for '$TROOT/roots/work/plain'
+          print -r -- \"\$_CLAUDE_TENANT_STATE:\$_CLAUDE_TENANT\"" 2>/dev/null)" \
+      "unsupported:work"
+
+check "the unsupported warning is printed once per shell, not once per call" \
+      "$(zsh -f -c "
+          CLAUDE_TENANTS_FILE='$TENANTS'
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_tenant_for '$TROOT/roots/work/plain'
+          _claude_tenant_for '$TROOT/roots/work/plain'" 2>&1 >/dev/null \
+        | grep -c 'github.sh')" "1"
+
+cat > "$TROOT/bad.zsh" <<EOF
+CLAUDE_TENANT_ROUTES=( "quantivly=work" "oops-no-equals" )
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( work "w1" home "h1" )
+EOF
+check "a bad table stops the resolver before it looks at any directory" \
+      "$(zsh -f -c "
+          CLAUDE_TENANTS_FILE='$TROOT/bad.zsh'
+          source '$DOTFILES/zsh/functions/github.sh' >/dev/null 2>&1
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_tenant_for '$R_WORK'
+          print -r -- \"\$_CLAUDE_TENANT_STATE:\$_CLAUDE_TENANT\"" 2>/dev/null)" \
+      "bad-table:"
+
+echo "=== tenant pools: membership, overflow, and the flat-pool contract ==="
+#
+# The flat-pool rows are the compatibility promise made executable. A modular
+# adopter has no tenant table, and "no table" must mean "exactly what this did
+# before" — not "an empty pool", which the picker reads as EVERY profile.
+
+PHOME="$TROOT/pickhome"
+for prof in w1 w2 c1 h1; do
+    mkdir -p "$PHOME/.clauth/profiles/$prof"
+    : > "$PHOME/.clauth/profiles/$prof/credentials.json"
+done
+printf 'active_profile = "w1"\n' > "$PHOME/.clauth/profiles.toml"
+
+pick() {   # $1 = tenant file, $2 = tenant arg (may be empty), $3 = extra prelude
+    zsh -f -c "
+      export HOME='$PHOME'
+      CLAUDE_TENANTS_FILE='$1'
+      source '$HERDRRC' >/dev/null 2>&1
+      ${3:-}
+      _claude_pick_profile ${2:+'$2'} && print -r -- \"\$REPLY:\$_claude_pick_overflow\"
+    " 2>/dev/null
+}
+
+check "a tenant pool restricts the candidate set to its own members" \
+      "$(pick "$TENANTS" work | cut -d: -f1 | grep -cE '^(w1|w2)$')" "1"
+check "a profile outside the tenant pool is never chosen" \
+      "$(pick "$TENANTS" work | cut -d: -f1 | grep -cE '^(c1|h1)$')" "0"
+check "a one-member pool picks that member"        "$(pick "$TENANTS" client)" "c1:0"
+
+# Overflow: only when the pool has ZERO eligible members. The pool here names a
+# profile that does not exist, which is the realistic shape (an account named in
+# the table before it has been registered).
+cat > "$TROOT/overflow.zsh" <<EOF
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "h1" client "not-registered" )
+CLAUDE_TENANT_OVERFLOW=( client "h1" )
+EOF
+check "overflow is used when the pool has no eligible member, and says so" \
+      "$(pick "$TROOT/overflow.zsh" client)" "h1:1"
+
+# This fixture must give the tenant a WORKING pool *and* a non-empty overflow, or
+# the second loop guard (`overflow is empty`) breaks the pass on its own and the
+# row passes with the "pool still has candidates" check deleted. Measured: with
+# no CLAUDE_TENANT_OVERFLOW at all it was exactly that decoration.
+cat > "$TROOT/overflow-unused.zsh" <<EOF
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "h1" client "c1" )
+CLAUDE_TENANT_OVERFLOW=( client "w1 w2" )
+EOF
+check "overflow is NOT consulted while the pool still has one" \
+      "$(pick "$TROOT/overflow-unused.zsh" client)" "c1:0"
+
+# Both empty. The reset matters only when the pick still SUCCEEDS by another
+# route, so the fixture needs a working last-resort account — otherwise the pick
+# returns 1, prints nothing, and the row says nothing about the flag at all.
+printf '{"active_profile":"h1"}\n' > "$PHOME/.clauth/status.json"
+cat > "$TROOT/overflow-both-empty.zsh" <<EOF
+CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "h1" client "not-registered" )
+CLAUDE_TENANT_OVERFLOW=( client "also-not-registered" )
+EOF
+check "a pool and overflow that are both empty do not claim an overflow pick" \
+      "$(pick "$TROOT/overflow-both-empty.zsh" client)" "h1:0"
+
+# The compatibility contract.
+check "no tenant table: CLAUDE_ACCOUNT_POOL still decides" \
+      "$(pick /nonexistent '' 'CLAUDE_ACCOUNT_POOL=(c1)')" "c1:0"
+check "no tenant table and no flat pool: every profile is a candidate" \
+      "$(pick /nonexistent '' | cut -d: -f1 | grep -cE '^(w1|w2|c1|h1)$')" "1"
+check "a tenant argument makes CLAUDE_ACCOUNT_POOL inert" \
+      "$(pick "$TENANTS" client 'CLAUDE_ACCOUNT_POOL=(w1)')" "c1:0"
+# The dangerous direction is WIDENING, not narrowing: an unknown tenant yields an
+# empty member list, which the membership test reads as "no filter" — i.e. every
+# account on the machine, which is exactly what this layer exists to prevent.
+# A caller-supplied tenant never passes through the table check, so it is refused
+# here instead of silently falling back to a pool it did not ask for.
+check "an unknown tenant is REFUSED, never widened to every account" \
+      "$(pick "$TENANTS" nosuchtenant 'CLAUDE_ACCOUNT_POOL=(w2)')" ""
+check "...and the refusal names the reason" \
+      "$(zsh -f -c "
+          export HOME='$PHOME'
+          CLAUDE_TENANTS_FILE='$TENANTS'
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_pick_profile nosuchtenant
+          print -r -- \"\${_claude_pick_skipped[1]}\"" 2>/dev/null)" \
+      "tenant 'nosuchtenant' has no CLAUDE_TENANT_POOL entry — refusing to widen the pool to every account"
+
+echo "=== tenant integration: which directory each caller resolves, and the pins ==="
+#
+# The directory a caller resolves is the whole point: claude() must ask about
+# $PWD, and hspawn about the tree it is spawning INTO — a lead standing in one
+# repo routinely spawns workers into another.
+
+RESOLVEREC="$TROOT/resolver-calls"
+# claude()'s isolation block is GATED on clauth being present and the account-dir
+# builder being executable. Without both, it never reaches the resolver at all —
+# and "the resolver was not called" is exactly what these rows assert, so an
+# ungated fixture makes every one of them pass while testing a dead branch.
+# (Measured: four of these five did precisely that on first writing.) So the
+# fixture supplies both, and the "claude() resolves \$PWD" row is what proves the
+# gate is open for all of them.
+TBIN="$TROOT/bin"; mkdir -p "$TBIN"
+printf '#!/bin/sh\nexit 0\n'                       > "$TBIN/clauth";  chmod +x "$TBIN/clauth"
+printf '#!/bin/sh\nexit 0\n'                       > "$TBIN/claude";  chmod +x "$TBIN/claude"
+TFAKEDOT="$TROOT/fakedotfiles"; mkdir -p "$TFAKEDOT/scripts"
+# A heredoc, not printf: the `$1` below belongs to the STUB, not to this suite,
+# and inside a single-quoted printf format shellcheck reads it as a missed
+# expansion (SC2016). `\$1` in an unquoted heredoc says the same thing plainly.
+cat > "$TFAKEDOT/scripts/claude-account-dirs.sh" <<EOF
+#!/bin/sh
+printf '%s' "$PHOME/.local/state/claude-account-dirs/\$1"
+EOF
+chmod +x "$TFAKEDOT/scripts/claude-account-dirs.sh"
+
+# A recording stub for the resolver, so the rows assert the ARGUMENT rather than
+# re-testing the resolver itself.
+claude_with_stub() {   # $1 = snippet -> prints the dirs the resolver was asked about
+    : > "$RESOLVEREC"
+    # CLAUDE_CONFIG_DIR and HERDR_PANE_ID are CLEARED, not inherited — the same
+    # rule the spawn helper above states, and for the same reason: whoever runs
+    # this suite is very likely inside an isolated Claude session, and claude()'s
+    # first act is to honour an inherited CLAUDE_CONFIG_DIR and skip everything
+    # below it. Inheriting one makes every row here assert nothing while passing.
+    # (Measured: it did exactly that on first writing.)
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE \
+            CLAUDE_ACCOUNT_TENANT CLAUDE_ISOLATION_OFF CLAUDE_ACCOUNT_QUIET
+      export HOME='$PHOME'
+      export PATH='$TBIN:\$PATH'
+      export DOTFILES_ROOT='$TFAKEDOT'
+      CLAUDE_TENANTS_FILE='$TENANTS'
+      source '$HERDRRC' >/dev/null 2>&1
+      _claude_tenant_for() {
+        print -r -- \"\$1\" >> '$RESOLVEREC'
+        _CLAUDE_TENANT=work; _CLAUDE_TENANT_STATE=matched; return 0
+      }
+      $1
+    " >/dev/null 2>&1
+    cat "$RESOLVEREC" 2>/dev/null
+}
+
+check "claude() resolves the tenant for \$PWD" \
+      "$(cd "$TROOT/roots/work/plain" && claude_with_stub 'cd "'"$TROOT"'/roots/work/plain"; claude --version' | head -1)" \
+      "$TROOT/roots/work/plain"
+
+check "claude-as bypasses the resolver entirely" \
+      "$(claude_with_stub 'CLAUDE_ACCOUNT_PROFILE=c1 claude --version' | wc -l | tr -d ' ')" "0"
+
+check "CLAUDE_ACCOUNT_TENANT pins the tenant and skips the resolver" \
+      "$(claude_with_stub 'CLAUDE_ACCOUNT_TENANT=client claude --version' | wc -l | tr -d ' ')" "0"
+
+check "an inherited CLAUDE_CONFIG_DIR is never overridden, so nothing is resolved" \
+      "$(claude_with_stub 'CLAUDE_CONFIG_DIR=/somewhere claude --version' | wc -l | tr -d ' ')" "0"
+
+check "CLAUDE_ISOLATION_OFF skips the resolver too" \
+      "$(claude_with_stub 'CLAUDE_ISOLATION_OFF=1 claude --version' | wc -l | tr -d ' ')" "0"
+
+# hspawn's argument surface.
+hspawn_opt() {   # $1 = args -> stderr
+    zsh -f -c "
+      export HOME='$PHOME'
+      source '$HERDRRC' >/dev/null 2>&1
+      hspawn $1" 2>&1
+}
+check "hspawn --tenant is a known option" \
+      "$(hspawn_opt '--tenant client --help' | grep -c "unknown option")" "0"
+check "hspawn --tenant= is a known option" \
+      "$(hspawn_opt '--tenant=client --help' | grep -c "unknown option")" "0"
+check "hspawn --tenant with an empty value is refused, not silently ignored" \
+      "$(hspawn_opt "--tenant '' ~/x slug" | grep -c 'needs a non-empty value')" "1"
+check "hspawn --help documents --tenant" \
+      "$(hspawn_opt '--help' | grep -c -- '--tenant <tenant>')" "1"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
