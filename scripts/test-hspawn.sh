@@ -1563,6 +1563,36 @@ check "...and the refusal names the reason" \
           print -r -- \"\${_claude_pick_skipped[1]}\"" 2>/dev/null)" \
       "tenant 'nosuchtenant' has no CLAUDE_TENANT_POOL entry — refusing to widen the pool to every account"
 
+# The SAME widening, one level up: not an unknown tenant, but a tenant table that
+# resolved nothing at all (bad-table, git-error, or an empty default). The caller
+# leaves the tenant empty and lands on the flat pool — and an EMPTY flat pool
+# means "every registered profile". Measured 2026-09-09 on the live machine, with
+# a one-character error in the tenant file and CLAUDE_ACCOUNT_POOL deleted:
+# ~/Projects picked quantivly-3. It looked like an ordinary successful launch.
+check "a configured-but-unresolvable table REFUSES rather than widening" \
+      "$(pick "$TENANTS" '' '')" ""
+check "...and the refusal names the state and the reason" \
+      "$(zsh -f -c "
+          export HOME='$PHOME'
+          CLAUDE_TENANTS_FILE='$TROOT/bad.zsh'
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_tenant_for '$TROOT/roots/client' >/dev/null 2>&1
+          _claude_pick_profile \"\$_CLAUDE_TENANT\"
+          print -r -- \"\${_claude_pick_skipped[1]}\"" 2>/dev/null | cut -c1-62)" \
+      "the tenant table is configured but resolved nothing (bad-table"
+
+# The two states that MUST still fall through, or a modular adopter breaks and an
+# explicit flat pool stops being an override.
+# The modular adopter is no table AND no flat pool — that combination must still
+# mean "every registered profile", because it is the whole mechanism they have.
+# An earlier version of this row set CLAUDE_ACCOUNT_POOL=(w1), which cannot reach
+# the guard's first condition at all: the mutant that drops the "is a table
+# configured" half survived it.
+check "no table and no flat pool still means every profile (modular adopter)" \
+      "$(pick /nonexistent '' '')" "c1:0"
+check "an EXPLICIT flat pool is still honoured when the table resolves nothing" \
+      "$(pick "$TENANTS" '' 'CLAUDE_ACCOUNT_POOL=(w2)')" "w2:0"
+
 echo "=== tenant integration: which directory each caller resolves, and the pins ==="
 #
 # The directory a caller resolves is the whole point: claude() must ask about

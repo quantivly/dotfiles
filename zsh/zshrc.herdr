@@ -485,6 +485,32 @@ _claude_pick_profile() {
     pool=( ${=CLAUDE_TENANT_POOL[$tenant]} )
     overflow=( ${=CLAUDE_TENANT_OVERFLOW[$tenant]-} )
   else
+    # No tenant. Two very different situations reach here, and only one of them
+    # is safe to answer with CLAUDE_ACCOUNT_POOL:
+    #
+    #   1. No tenant table is configured at all — the modular adopter. The flat
+    #      pool is the whole mechanism, an empty one means "every registered
+    #      profile", and that is correct: they have one account. UNCHANGED.
+    #   2. A tenant table IS configured but the resolver could not answer —
+    #      `bad-table`, `git-error`, or an empty CLAUDE_TENANT_DEFAULT. The
+    #      caller leaves tenant empty and lands here, and if CLAUDE_ACCOUNT_POOL
+    #      is also empty this loop reads that as EVERY profile. So a single typo
+    #      in the tenant file silently bills personal work to a work account —
+    #      the exact failure this layer exists to remove, reintroduced through
+    #      the back door.
+    #
+    # Measured 2026-09-09, with a one-character error in the tenant file and no
+    # flat pool set: `~/Projects` picked `quantivly-3`. It read as an ordinary
+    # successful launch, because the reason lives in _CLAUDE_TENANT_WHY and the
+    # announcement never showed it.
+    #
+    # This is the same widening the per-tenant guard above refuses, one level up:
+    # there the empty list comes from an unknown tenant, here from an unusable
+    # table. Both must refuse rather than fall back to everything.
+    if (( ${#CLAUDE_TENANT_POOL} )) && (( ! ${#CLAUDE_ACCOUNT_POOL} )); then
+      _claude_pick_skipped+=("the tenant table is configured but resolved nothing (${_CLAUDE_TENANT_STATE:-no state}${_CLAUDE_TENANT_WHY:+: $_CLAUDE_TENANT_WHY}) — refusing to widen the pool to every account")
+      return 1
+    fi
     pool=( "${CLAUDE_ACCOUNT_POOL[@]}" )
   fi
 
