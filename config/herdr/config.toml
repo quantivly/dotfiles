@@ -481,8 +481,24 @@ rows = [
 # rows_by_agent REPLACES `rows` above for that agent kind (not merged). Keys are
 # strict canonical agent ids (claude, codex, gemini, agy, copilot, ...).
 [ui.sidebar.agents.rows_by_agent]
+# `$acct` REPLACED `$clauth` (DO-590). clauth's herdr plugin resolves the
+# account from the machine-wide active profile, so on an isolated pane — which
+# every session started by `claude()` now is — it is wrong or, measured
+# 2026-09-09 on a pane billing `quantivly-2`, the literal sentinel `unknown`.
+# `$acct` is published by claude/hooks/session-statusline.sh from inside the
+# session's own CLAUDE_CONFIG_DIR, so it cannot disagree with the credential
+# the pane is actually spending. Its value `shared` is a finding, not a
+# fallback: that session is on the global file a switch overwrites.
+#
+# Both were NOT kept. Two account fields disagreeing — one of them reading
+# `unknown` — is the surface this change exists to remove, not to double.
+#
+# ADOPTERS: `$acct` is empty unless that hook is wired as `statusLine` in
+# ~/.claude/settings.json (scripts/herdr-claude-wire.sh does it;
+# scripts/verify-tools.sh --herdr asserts it). An unpublished token renders as
+# nothing, silently — the same failure mode as every other token here.
 claude = [
-  ["state_icon", "workspace", "tab", { token = "$clauth", dim = false }, { token = "$pr", dim = false }],
+  ["state_icon", "workspace", "tab", { token = "$acct", dim = false }, { token = "$pr", dim = false }],
   [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
   # Model, effort and the context ramp share ONE row (merged 2026-08-30). There is
   # no alignment/right-edge/spacer support in this schema — a row is a token list

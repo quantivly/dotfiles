@@ -756,6 +756,60 @@ else
     fi
 fi
 
+# The `$acct` token has a PUBLISHER (our statusLine hook) and a CONSUMER (the
+# claude row in herdr's live config.toml). Neither half fails loudly on its own:
+# an unpublished token renders as nothing and an unconsumed one is never drawn,
+# so a half-applied DO-590 looks exactly like a healthy sidebar. Only the PAIR
+# is checkable, which is why this is one check and not two.
+#
+# It reads the LIVE config, never the repo copy: both install paths symlink
+# ~/.config/herdr/config.toml into the checkout, so the live file is what herdr
+# actually parses -- and reading the repo copy would report success on a machine
+# whose link is missing or points at another checkout.
+#
+# `o skipped` when there is no live config: a machine that has not run ./install
+# has nothing to act on, and a FAIL it cannot clear is the permanently-red
+# checker this repo has already recorded five times.
+HERDR_LIVE_CONF="$HOME/.config/herdr/config.toml"
+if [[ ! -e "$HERDR_LIVE_CONF" ]]; then
+    echo "  ○ no ${HERDR_LIVE_CONF/#$HOME/\~} — sidebar account token skipped (run ./install --herdr)"
+elif [[ ! -r "$CC_HOOK" ]]; then
+    echo "  ○ ${CC_HOOK/#$HOME/\~} unreadable — sidebar account token NOT CHECKED"
+else
+    # Anchored to the assignment, not a bare grep for the word: `acct` appears in
+    # the hook's own prose, and a comment must never satisfy the publisher half.
+    acct_pub=0; acct_con=0
+    grep -q -- '--token "acct=' "$CC_HOOK" && acct_pub=1
+    # The consumer must be inside the CLAUDE row. A `$acct` anywhere else in the
+    # file (the generic `rows`, or a comment) draws nothing on a claude pane.
+    if python3 - "$HERDR_LIVE_CONF" <<'PYEOF' >/dev/null 2>&1
+import sys, tomllib
+with open(sys.argv[1], "rb") as fh:
+    d = tomllib.load(fh)
+rows = d["ui"]["sidebar"]["agents"]["rows_by_agent"]["claude"]
+toks = [t.get("token") if isinstance(t, dict) else t for r in rows for t in r]
+sys.exit(0 if "$acct" in toks else 1)
+PYEOF
+    then acct_con=1; fi
+
+    if (( acct_pub && acct_con )); then
+        echo -e "${GREEN}✓${NC} sidebar account token wired (publisher + claude row)"
+    elif (( acct_pub )); then
+        echo -e "${RED}✗ FAIL:${NC} the hook publishes \$acct but no claude sidebar row consumes it"
+        echo "    Every isolated pane shows no account at all. Add { token = \"\$acct\" } to"
+        echo "    [ui.sidebar.agents.rows_by_agent].claude in config/herdr/config.toml, then ./install."
+        claude_wiring_failed=1
+    elif (( acct_con )); then
+        echo -e "${RED}✗ FAIL:${NC} a claude sidebar row wants \$acct but the hook never publishes it"
+        echo "    The row renders empty, silently. Check ${CC_HOOK/#$HOME/\~} still carries --token \"acct=\"."
+        claude_wiring_failed=1
+    else
+        # Neither half: a checkout predating DO-590. Consistent, so nothing is
+        # broken, and not actionable beyond deploying.
+        echo "  · sidebar account token not in use (pre-DO-590 config and hook — consistent)"
+    fi
+fi
+
 # -f, not -e: a DIRECTORY named SKILL.md satisfies both -e and -s (a directory
 # is never zero-length), so `mkdir SKILL.md` produced "✓ agent skill file
 # present" and exit 0. Found in review.

@@ -65,8 +65,8 @@
 #     the pane lives on (tokens are never cleared on process exit).
 #   - timeout 2 … || true: the CLI has no socket timeout, and a wedged herdr
 #     must never wedge the status line.
-#   - 11 keys per call — mdl + 4 eff_* + 3 ctx_* + 3 idle_*, sets and clears
-#     together (herdr's limit is 16 per report, 32 retained).
+#   - 12 keys per call — acct + mdl + 4 eff_* + 3 ctx_* + 3 idle_*, sets and
+#     clears together (herdr's limit is 16 per report, 32 retained).
 #   - Token names are global per pane, last writer wins across sources:
 #     herdmates publishes `model` on team-lead panes, so ours is `mdl`.
 #     `context`/`effort` are deliberately no longer published (legacy names).
@@ -238,12 +238,42 @@ cwd=$(printf '%s\n' "$fields" | sed -n '11p')
 idle_key=$(printf '%s\n' "$fields" | sed -n '12p')
 idle_val=$(printf '%s\n' "$fields" | sed -n '13p')
 
+# The account this session actually bills, read from THIS PROCESS'S OWN
+# CLAUDE_CONFIG_DIR — so it is correct by construction, which is the whole
+# point. clauth's herdr plugin cannot see a foreign CLAUDE_CONFIG_DIR and so
+# publishes the machine-wide active profile, or the literal sentinel
+# `unknown`; measured 2026-09-09, a pane billing `quantivly-2` carried
+# `clauth: "unknown"`. That is the surface that hid the account concentration
+# CLAUDE.md counts (17 of 18 processes on one credential).
+#
+# "shared" is NOT a formatting fallback — it is the finding. An unset
+# CLAUDE_CONFIG_DIR means this session is on ~/.claude/.credentials.json, the
+# file a profile switch overwrites under every holder at once, so it must be
+# visible rather than blank. `~/.claude` is spelled out because a session
+# pointed there explicitly is on that same shared file.
+#
+# No U+00B7: it is indistinguishable from herdr's own token separator, so a
+# profile name carrying one would render as two tokens. Stripped, not
+# rejected, because a wrong-looking name beats a vanished row.
+acct=$(
+  d="${CLAUDE_CONFIG_DIR:-}"
+  case "$d" in
+    "" | "$HOME/.claude" | "$HOME/.claude/") printf 'shared' ;;
+    *)
+      b="${d%/}"
+      b="${b##*/}"
+      if [ -n "$b" ]; then printf '%s' "$b" | tr -d '\302\267'; else printf 'shared'; fi
+      ;;
+  esac
+)
+
 # `mdl` is non-empty whenever python succeeded (model falls back to "claude"),
 # so an empty one means "no data" — publish nothing rather than clearing bands.
 if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
    && [ -n "${HERDR_SOCKET_PATH:-}" ] && [ -n "$mdl" ]; then
   set -- report-metadata "$HERDR_PANE_ID" --source claude-context \
-         --seq "$(date +%s%N)" --ttl-ms 240000 --token "mdl=$mdl"
+         --seq "$(date +%s%N)" --ttl-ms 240000 --token "mdl=$mdl" \
+         --token "acct=$acct"
   for k in eff_lo eff_high eff_xhigh eff_max; do
     if [ "$k" = "$eff_key" ]; then
       set -- "$@" --token "$k=$eff_val"

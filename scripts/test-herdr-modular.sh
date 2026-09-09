@@ -1119,6 +1119,189 @@ has "$(cat "$DOTFILES/install.conf.yaml")"       "bash scripts/herdr-unit-dropin
 has "$(cat "$DOTFILES/install.conf.herdr.yaml")" "bash scripts/herdr-unit-dropin.sh" \
     "--herdr renders the drop-in"
 
+# --- DO-590: the $acct sidebar token, publisher AND consumer ------------------
+#
+# The bug: clauth's herdr plugin resolves the account from the MACHINE-WIDE
+# active profile, so on an isolated pane it is wrong -- measured 2026-09-09, a
+# pane billing `quantivly-2` published `clauth: "unknown"`. Our statusLine hook
+# runs inside the session and reads its own CLAUDE_CONFIG_DIR, so it cannot
+# disagree with the credential being spent.
+#
+# Why the check is a PAIR and these rows come in four states: an unpublished
+# token renders as nothing and an unconsumed one is never drawn, so each half
+# alone fails silently and looks exactly like a healthy sidebar. Only the
+# combination is observable, and only these rows distinguish the three broken
+# combinations from the two legitimate ones.
+echo
+echo "=== DO-590: sidebar account token ==="
+
+# A live herdr config for a fake HOME. `$2` = the token to put in the claude
+# row; empty means the pre-DO-590 shape.
+acct_conf() {
+    local h="$1" tok="$2"
+    mkdir -p "$h/.config/herdr"
+    {
+        printf '[ui.sidebar.agents]\n'
+        printf 'rows = [["state_icon"]]\n'
+        printf '[ui.sidebar.agents.rows_by_agent]\n'
+        if [[ -n "$tok" ]]; then
+            printf 'claude = [["state_icon", { token = "%s", dim = false }]]\n' "$tok"
+        else
+            printf 'claude = [["state_icon"]]\n'
+        fi
+    } >"$h/.config/herdr/config.toml"
+}
+
+# Strip the publisher from a HOME's copy of the hook, leaving everything else.
+strip_publisher() {
+    local f="$1/.claude/hooks/session-statusline.sh"
+    grep -v -- '--token "acct=' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# 1. Both halves present: the shipped state.
+H="$(new_home acct_ok)"; good_statusline "$H" >"$H/.claude/settings.json"
+# shellcheck disable=SC2016  # a literal token NAME, not an expansion
+acct_conf "$H" '$acct'
+out="$(verify "$H" --herdr)"
+has "$out" "sidebar account token wired" "both halves present: reports wired"
+
+# 2. Publisher only -- the config was never updated. THE row for a half-applied
+#    deploy, which is the realistic failure: ./install relinks config.toml, and
+#    a checkout that moved without it leaves the old row in place.
+H="$(new_home acct_pubonly)"; good_statusline "$H" >"$H/.claude/settings.json"
+acct_conf "$H" ''
+out="$(verify "$H" --herdr)"; rc=0; verify "$H" --herdr >/dev/null 2>&1 || rc=$?
+has "$out" "no claude sidebar row consumes it" "publisher only: FAILs and names the missing consumer"
+check "publisher only: takes the exit code with it" "$rc" "1"
+
+# 3. Consumer only -- the row wants $acct but the hook cannot publish it. The
+#    mirror image, and the one that renders an empty column rather than a wrong
+#    one, so nothing on screen says anything is wrong.
+H="$(new_home acct_cononly)"; good_statusline "$H" >"$H/.claude/settings.json"
+# shellcheck disable=SC2016  # a literal token NAME, not an expansion
+acct_conf "$H" '$acct'; strip_publisher "$H"
+out="$(verify "$H" --herdr)"; rc=0; verify "$H" --herdr >/dev/null 2>&1 || rc=$?
+has "$out" "the hook never publishes it" "consumer only: FAILs and names the missing publisher"
+check "consumer only: takes the exit code with it" "$rc" "1"
+
+# 4. Neither half -- a checkout predating DO-590. Consistent, so it must NOT be
+#    a failure: this is the permanently-red checker this repo has recorded five
+#    times, and the one state where a FAIL would be unactionable.
+H="$(new_home acct_neither)"; good_statusline "$H" >"$H/.claude/settings.json"
+acct_conf "$H" ''; strip_publisher "$H"
+out="$(verify "$H" --herdr)"
+has  "$out" "sidebar account token not in use" "neither half: reports a note"
+hasnt "$out" "no claude sidebar row consumes it" "neither half: does NOT report the publisher-only fault"
+
+# 5. No live config at all -- a machine that has not run ./install. Skipped, and
+#    specifically not a FAIL. Every OTHER row in this suite also runs in this
+#    state (new_home writes no herdr config), so a check that failed here would
+#    have reddened the whole file.
+H="$(new_home acct_noconf)"; good_statusline "$H" >"$H/.claude/settings.json"
+out="$(verify "$H" --herdr)"
+has  "$out" "sidebar account token skipped" "no live config: skipped"
+hasnt "$out" "sidebar account token wired"  "no live config: does not claim it is wired"
+
+# 6. The check must read the LIVE config, not the repo copy. The repo copy
+#    ALWAYS carries $acct after this change, so a check that read it would print
+#    the ✓ in state 2 above -- reporting success for the exact half-applied
+#    deploy the pair exists to catch. This row makes that substitution fail.
+# shellcheck disable=SC2016  # the literal source line, $HOME included
+has "$(cat "$DOTFILES/scripts/verify-tools.sh")" 'HERDR_LIVE_CONF="$HOME/.config/herdr/config.toml"' \
+    "the check is anchored at the live config, not the checkout"
+
+# 7. The shipped config and hook actually agree -- the rows above all use
+#    synthetic fixtures, so without this one the repo could ship a config
+#    missing $acct and every row would still pass.
+# shellcheck disable=SC2016  # a literal token NAME, not an expansion
+has "$(cat "$DOTFILES/$HOOK_REL")" '--token "acct=$acct"' \
+    "the shipped hook publishes acct"
+if python3 - "$DOTFILES/config/herdr/config.toml" <<'PYEOF'
+import sys, tomllib
+with open(sys.argv[1], "rb") as fh:
+    d = tomllib.load(fh)
+rows = d["ui"]["sidebar"]["agents"]["rows_by_agent"]["claude"]
+toks = [t.get("token") if isinstance(t, dict) else t for r in rows for t in r]
+sys.exit(0 if "$acct" in toks else 1)
+PYEOF
+then ok "the shipped claude row consumes acct"; else bad "the shipped claude row does not consume acct"; fi
+
+# 7b. THE VALUE, not just the presence. Rows 1-7 only assert that `acct` is
+#     published and consumed; a hook hardcoded to `acct=shared` satisfies every
+#     one of them while showing every pane the same wrong account -- which is
+#     the bug this change exists to remove, reintroduced. Found by mutation
+#     (M6 SURVIVED the whole table above). The derivation IS the feature, so it
+#     needs rows of its own.
+#
+#     Driven through a recording `herdr` stub: the hook must never reach the
+#     real server, and this box has one.
+ACCT_BIN="$WORK/acct-bin"; mkdir -p "$ACCT_BIN"
+cat >"$ACCT_BIN/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$ACCT_CALLS"
+exit 0
+STUB
+chmod +x "$ACCT_BIN/herdr"
+
+# Minimal statusLine payload: `mdl` must be non-empty or the hook publishes
+# nothing at all and every row below would read <none> for the wrong reason.
+ACCT_PAYLOAD='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp"}}'
+
+# A SUBSHELL, never `env VAR=x ... cmd`: env's options must precede its
+# assignments, so an `--unset` appended after them is read as the COMMAND name
+# and the hook never runs -- which reads as "the token was not published",
+# i.e. exactly what these rows are trying to measure. CLAUDE.md already records
+# two bugs from this same `env`-argv shape; a subshell retires the class.
+acct_value() { # $1 = CLAUDE_CONFIG_DIR, or the literal UNSET
+    local h="$WORK/home.acctval"
+    # `.cache` is REQUIRED, not tidiness: the hook redirects the publish call's
+    # stderr to $HOME/.cache/statusline-herdr.err, so without the directory the
+    # redirection itself fails, `herdr` is never exec'd, and the stub records
+    # nothing -- which reads identically to "the hook published no acct token".
+    # The first draft of these rows failed for exactly that reason.
+    [[ -d "$h" ]] || { mkdir -p "$h/.claude/hooks" "$h/.cache"; cp "$DOTFILES/$HOOK_REL" "$h/.claude/hooks/"; }
+    local calls="$WORK/acct.calls"; : >"$calls"
+    (
+        export PATH="$ACCT_BIN:$PATH" HOME="$h" ACCT_CALLS="$calls"
+        export HERDR_ENV=1 HERDR_PANE_ID=wZ:pZ HERDR_SOCKET_PATH="$WORK/sock"
+        if [[ "$1" == UNSET ]]; then unset CLAUDE_CONFIG_DIR
+        else export CLAUDE_CONFIG_DIR="$1"; fi
+        printf '%s' "$ACCT_PAYLOAD" | sh "$h/.claude/hooks/session-statusline.sh" >/dev/null 2>&1
+    ) || true
+    sed -n 's/.*--token acct=\([^ ]*\).*/\1/p' "$calls" | head -1
+}
+
+# An unset CLAUDE_CONFIG_DIR is the SHARED global credential -- the file a
+# profile switch overwrites under every holder at once. Reporting it is the
+# finding, not a fallback.
+check "acct: unset CLAUDE_CONFIG_DIR reports shared" "$(acct_value UNSET)" "shared"
+check "acct: an explicit ~/.claude is also shared" \
+      "$(acct_value "$WORK/home.acctval/.claude")" "shared"
+# The case the sidebar was lying about: an isolated pane must name ITS account.
+check "acct: an account dir reports its profile" \
+      "$(acct_value /home/x/.local/state/claude-account-dirs/quantivly-2)" "quantivly-2"
+check "acct: a trailing slash does not blank it" \
+      "$(acct_value /home/x/.local/state/claude-account-dirs/quantivly-2/)" "quantivly-2"
+check "acct: a clauth start runtime reports its profile" \
+      "$(acct_value /home/x/.clauth/runtime/quantivly-3)" "quantivly-3"
+# U+00B7 is herdr's own token separator: one inside a value splits the row in
+# two. Stripped rather than rejected -- a wrong-looking name beats a vanished row.
+check "acct: U+00B7 is stripped from the value" \
+      "$(acct_value "/home/x/ac/bad"$'·'"name")" "badname"
+
+# 8. `$clauth` is GONE from the claude row. Keeping both would leave two account
+#    fields disagreeing, one of them reading `unknown` -- the surface this change
+#    removes rather than doubles.
+if python3 - "$DOTFILES/config/herdr/config.toml" <<'PYEOF'
+import sys, tomllib
+with open(sys.argv[1], "rb") as fh:
+    d = tomllib.load(fh)
+rows = d["ui"]["sidebar"]["agents"]["rows_by_agent"]["claude"]
+toks = [t.get("token") if isinstance(t, dict) else t for r in rows for t in r]
+sys.exit(0 if "$clauth" not in toks else 1)
+PYEOF
+then ok "the claude row no longer consumes the machine-wide \$clauth"; else bad "the claude row still consumes \$clauth"; fi
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
