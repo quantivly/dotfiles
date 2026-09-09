@@ -25,8 +25,12 @@
 set -uo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REDACT="$DOTFILES/scripts/redact-secrets.sh"
-GUARD="$DOTFILES/claude/hooks/secret-emission-guard.sh"
+# Overridable so a candidate can be tested WITHOUT copying it over the live
+# hook. The hook is symlinked into ~/.claude/hooks, so installing an unproven
+# guard to run the suite would weaken the running shell for the length of the
+# edit — which is the window this suite exists to keep closed.
+REDACT="${REDACT:-$DOTFILES/scripts/redact-secrets.sh}"
+GUARD="${GUARD:-$DOTFILES/claude/hooks/secret-emission-guard.sh}"
 
 PASS=0; FAIL=0
 ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
@@ -231,6 +235,117 @@ do
 done
 check "allows the redacted read — the remedy the deny message names" \
       "$(ask 'tail -8 ~/.zshrc.local | ~/.dotfiles/scripts/redact-secrets.sh')" "allow"
+
+echo
+echo "=== ...and the verb must be reading THE FILE, not merely present ==="
+# The rule's two conditions were independent existence tests over the WHOLE
+# command string, so nothing tied the verb to the file: any compound command
+# that named a credential file anywhere and read some OTHER file anywhere was
+# refused. Hit on 2026-09-09 while authoring documentation about
+# ~/.gitconfig.local and then grepping the draft to check the result. Group 2,
+# and the kind of row that decides whether the hook survives the week.
+check "allows: the verb reads a different file" \
+      "$(ask 'head -5 README.md && echo mentions ~/.zshrc.local')" "allow"
+check "allows: the verb is in an unrelated later segment" \
+      "$(ask 'echo ~/.zshrc.local > notes.txt; sed -n 1p README.md')" "allow"
+
+# A heredoc BODY is content being WRITTEN, not a file being read — even when the
+# prose inside it names a credential file next to a reading verb.
+authoring_prose="$(printf '%s\n' \
+  'python3 - <<PY' \
+  "s = 'the ~/.gitconfig.local file carries the work identity'" \
+  'PY' \
+  'grep -n hasconfig NOTES.md')"
+check "allows: authoring prose about the file, then grepping the draft" \
+      "$(ask "$authoring_prose")" "allow"
+
+# A heredoc body is data being written, not a file being read — but the guard
+# does NOT strip heredoc bodies, and that is deliberate. A stripper has to guess
+# where the body ends, and every wrong guess DELETES the rest of the command
+# from the rule's view, which is a leak: `cat <<-X` with a tab-indented
+# terminator, a mismatched terminator, or a `<<` inside a quoted string each
+# swallowed a following real read. Over-stripping leaks; not stripping only
+# costs this one false positive, on unquoted prose that names a credential file
+# right next to a reading verb. Quoted prose — the usual shape when generating
+# code or docs — is already allowed by the row above, because the verb test runs
+# on the quote-stripped segment.
+heredoc_prose="$(printf '%s\n' \
+  "cat > doc.md <<'PY'" \
+  'never cat ~/.zshrc.local in a transcript' \
+  'PY')"
+check "refuses: unquoted prose in a heredoc (known, accepted FP)" \
+      "$(ask "$heredoc_prose")" "deny"
+
+# The separators that split a command must be the ones the SHELL would treat as
+# separators — not any `;` or `|` character. A `;` or `|` inside a quoted script
+# argument is data, and splitting on it tears the verb away from the filename,
+# which is a miss. Every row here dumps the file and every one was allowed by
+# the first version of the segmenting rule.
+check "refuses: grep -E with a quoted alternation" \
+      "$(ask "grep -E 'a|b' ~/.zshrc.local")" "deny"
+check "refuses: sed with a quoted multi-address script" \
+      "$(ask "sed -n '1,5p;10p' ~/.zshrc.local")" "deny"
+check "refuses: sed script whose whole body is 'p;'" \
+      "$(ask "sed -n 'p;' ./.zshrc.local")" "deny"
+check "refuses: awk with a quoted pipe as field separator" \
+      "$(ask "awk -F'|' '{print \$2}' ~/.zshrc.local")" "deny"
+check "refuses: grep pattern containing a semicolon" \
+      "$(ask "grep 'a;b' ~/.zshrc.local")" "deny"
+
+# A newline is the separator the segmenter is most likely to get wrong, because
+# it is BOTH the commonest real separator and, in two places, not a separator at
+# all. The first version protected `;` and `|` inside quotes but not `\n`, and
+# the suite could not tell that build from a fixed one -- these five rows are
+# what closes that blind spot.
+#
+#   backslash-newline is a line continuation: the shell deletes both characters
+#   and joins the lines, so it must not end a segment.
+bs_nl_cat="$(printf '%s\n' $'cat \\' '  ~/.zshrc.local')"
+check "refuses: read split by a line continuation" \
+      "$(ask "$bs_nl_cat")" "deny"
+bs_nl_grep="$(printf '%s\n' $'grep -n TOKEN \\' '  ~/.zshrc.local')"
+check "refuses: grep split by a line continuation" \
+      "$(ask "$bs_nl_grep")" "deny"
+# ...and a line continuation can rejoin a word mid-verb, so the backslash and
+# the newline must both vanish rather than becoming whitespace.
+bs_nl_word="$(printf '%s\n' $'ca\\' 't ~/.zshrc.local')"
+check "refuses: a verb rejoined across a line continuation" \
+      "$(ask "$bs_nl_word")" "deny"
+
+#   a newline INSIDE quotes is data -- a multi-line awk or sed script is one
+#   command, exactly as a quoted `;` is one command.
+multiline_awk="$(printf '%s\n' "awk '" '/PATH/ {print}' "' ~/.zshrc.local")"
+check "refuses: multi-line quoted awk script" \
+      "$(ask "$multiline_awk")" "deny"
+multiline_pat="$(printf '%s\n' 'grep -E "foo' 'bar" ~/.zshrc.local')"
+check "refuses: quoted pattern spanning a newline" \
+      "$(ask "$multiline_pat")" "deny"
+
+# A pipeline is ONE unit of data flow, so it is never split: the file named in
+# one stage is read by a verb in another.
+check "refuses: the path is piped into the reader" \
+      "$(ask 'echo ~/.zshrc.local | xargs cat')" "deny"
+
+# Heredoc shapes that a body-stripper would have mis-terminated, each followed by
+# a real read that must still be seen.
+hd_dash="$(printf '%s\n' 'cat <<-X' '	body' '	X' 'cat ./.zshrc.local')"
+check "refuses: read after a <<- with a tab-indented terminator" \
+      "$(ask "$hd_dash")" "deny"
+hd_quoted="$(printf '%s\n' 'echo "a <<EOF b"' 'cat ./.zshrc.local')"
+check "refuses: read after a << inside a quoted string" \
+      "$(ask "$hd_quoted")" "deny"
+hd_mismatch="$(printf '%s\n' 'python3 - <<PY' 'print(1)' 'PY_END' 'cat ~/.zshrc.local')"
+check "refuses: read after a heredoc that never terminates" \
+      "$(ask "$hd_mismatch")" "deny"
+
+# ...while a read in ANY segment is still a read. Segmenting the command must not
+# become a way to smuggle one past the rule.
+check "refuses: the read is in the second segment" \
+      "$(ask 'cd /tmp && cat ~/.gitconfig.local')" "deny"
+check "refuses: redirected into a reader" \
+      "$(ask 'grep KEY < ~/.zshrc.local')" "deny"
+check "refuses: piped onward to another command" \
+      "$(ask 'cat ~/.zshrc.local | sort')" "deny"
 
 echo
 echo "=== the guard fails OPEN, always ==="

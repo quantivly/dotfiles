@@ -55,6 +55,127 @@ cmd="$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null
 # false positive that gets a hook turned off.
 probe="$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
 
+# --- credential-file reads -------------------------------------------------
+#
+# `cmd_segments` emits one command segment per line, splitting only where the
+# SHELL would: a newline, `;`, `&&` or `||` that is not inside quotes. The
+# credential-file rule then requires a filename and a reading verb to land in
+# the SAME segment.
+#
+# Why segment at all: the rule used to test for the filename and for the verb
+# independently over the whole command string, so it refused any compound
+# command that named such a file anywhere and read some OTHER file anywhere --
+# authoring documentation about ~/.gitconfig.local and then grepping the draft,
+# for instance. That is group 2, the false positive that gets a hook deleted.
+#
+# Three decisions in here are load-bearing, and each is a row in
+# scripts/test-secret-guard.sh:
+#
+#   QUOTES. A `;` or `|` inside a quoted script argument is data, not a
+#   separator. `sed -n '1,5p;10p' <file>` and `grep -E 'a|b' <file>` are single
+#   commands that dump the file; splitting on those characters tore the verb
+#   away from the filename and allowed the read. So the scan tracks quote state
+#   and only breaks outside it. An unbalanced quote makes the remainder count as
+#   quoted, which merges segments rather than splitting them -- the direction
+#   that denies, not the one that leaks.
+#
+#   PIPELINES ARE NOT SPLIT. A pipeline is one unit of data flow: the file named
+#   in one stage is read by a verb in another, as in `echo <file> | xargs cat`.
+#   Lone `&` is likewise left alone, so `2>&1` cannot break a segment apart.
+#
+#   NO HEREDOC STRIPPING. A heredoc body is data being written, and stripping it
+#   would drop prose that names a credential file next to a verb. But a stripper
+#   must guess where the body ends, and every wrong guess DELETES the rest of
+#   the command from the rule's view: `<<-` with a tab-indented terminator, a
+#   mismatched terminator, or a `<<` inside a quoted string each swallowed a
+#   following real read. Over-stripping leaks; not stripping costs one false
+#   positive, on UNQUOTED heredoc prose. Quoted prose -- the usual shape when
+#   generating code or docs -- is already fine, because the verb test runs on
+#   the quote-stripped segment.
+#
+# Pure bash on purpose: no awk, no second dependency, and nothing that can fail
+# to empty output and silently switch the rule off.
+cmd_segments() {
+  # Two statements on purpose: ${#s} in the same `local` as s= would be expanded
+  # before s was assigned, leaving n empty -- the loop then never runs, every
+  # segment vanishes and the rule silently allows everything. shellcheck SC2318.
+  local s="$1"
+  local n=${#s} i=0 ch nxt q="" out=""
+
+  # A pathological command is not worth a character loop. Emitting it whole
+  # merges every segment, which can only over-deny. Newlines are flattened to
+  # spaces first: `out` must carry a newline ONLY where a break is intended,
+  # and the caller's `while read` would otherwise break on the raw ones.
+  if (( n > 8192 )); then printf '%s\n' "${s//$'\n'/ }"; return 0; fi
+
+  while (( i < n )); do
+    ch="${s:i:1}"
+    if [[ -n "$q" ]]; then
+      # Single quotes take no escapes in sh; inside double quotes a backslash
+      # protects the next character, including a closing quote.
+      if [[ "$q" == '"' && "$ch" == \\ ]]; then
+        # Backslash-newline inside double quotes is a line continuation: the
+        # shell removes both characters and joins the lines. Emit nothing.
+        if [[ "${s:i+1:1}" == $'\n' ]]; then (( i += 2 )); continue; fi
+        out+="$ch"; (( i++ ))
+        (( i < n )) && out+="${s:i:1}"
+        (( i++ )); continue
+      fi
+      # A newline INSIDE quotes is data, exactly as a `;` inside quotes is --
+      # a multi-line awk or sed script is one command. Emitting it verbatim
+      # would let the caller's `while read` break the segment there and tear
+      # the verb away from the filename, so it becomes a space.
+      if [[ "$ch" == $'\n' ]]; then out+=' '; (( i++ )); continue; fi
+      out+="$ch"
+      [[ "$ch" == "$q" ]] && q=""
+      (( i++ )); continue
+    fi
+    case "$ch" in
+      "'"|'"') q="$ch"; out+="$ch" ;;
+      \\)
+        # Unquoted backslash-newline is a line continuation. The shell deletes
+        # both characters, joining what follows onto this line -- possibly
+        # mid-word, as in `ca\` + newline + `t file` -- so emit nothing rather
+        # than a space, or the rejoined verb would no longer match.
+        if [[ "${s:i+1:1}" == $'\n' ]]; then (( i += 2 )); continue; fi
+        out+="$ch"; (( i++ )); (( i < n )) && out+="${s:i:1}" ;;
+      ';'|$'\n') out+=$'\n' ;;
+      '&'|'|')
+        nxt="${s:i+1:1}"
+        # `&&` and `||` separate commands; a single `|` or `&` does not.
+        if [[ "$nxt" == "$ch" ]]; then out+=$'\n'; (( i++ )); else out+="$ch"; fi ;;
+      *) out+="$ch" ;;
+    esac
+    (( i++ ))
+  done
+  printf '%s\n' "$out"
+}
+
+CFR_WHY=""
+credential_file_read() {
+  local seg stripped hit verb
+
+  # `|| [[ -n $seg ]]` so a final segment with no trailing newline is still seen.
+  while IFS= read -r seg || [[ -n "$seg" ]]; do
+    [[ -n "$seg" ]] || continue
+
+    # Path on the RAW segment: `cat "$HOME/.zshrc.local"` must still match, and
+    # $stripped below cannot see a path that exists only inside quotes.
+    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json) ]] || continue
+    hit="${BASH_REMATCH[1]}"
+
+    # Verb on the QUOTE-STRIPPED segment: a message naming the file is not a read.
+    stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
+    [[ "$stripped" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]] || continue
+    verb="${BASH_REMATCH[2]}"
+
+    CFR_WHY="\`$verb\` on \`$hit\`, which holds credentials"
+    return 0
+  done < <(cmd_segments "$cmd")
+
+  return 1
+}
+
 why=""
 case "$probe" in
   # Prints a token to stdout. That is its entire purpose.
@@ -85,24 +206,45 @@ if [[ -z "$why" ]]; then
   # NOTION_PAT into a transcript. Same class as the incident that created this
   # hook; this rule is that gap closed.
   #
-  # TWO conditions, and the split between them is load-bearing:
+  # TWO conditions, and the split between them is load-bearing. Both are applied
+  # per SEGMENT by credential_file_read above, which is where the details and the
+  # quoting/pipeline/heredoc decisions are written down:
   #
-  #   the PATH matches on "$cmd", the RAW command, because $probe has had quoted
-  #   strings stripped -- and `cat "$HOME/.zshrc.local"` is the most natural way
-  #   to write it, so matching the path on $probe would miss exactly that.
+  #   the PATH matches on the RAW segment, because the quote-stripped copy cannot
+  #   see a path that exists only inside quotes -- and `cat "$HOME/.zshrc.local"`
+  #   is the most natural way to write it.
   #
-  #   the VERB matches on $probe, and both must hold. Path-alone on the raw
-  #   command refuses `git commit -m "move flyctl out of zshrc.local"` -- a
-  #   message merely NAMING the file -- which is precisely the false positive
-  #   this file's header says costs the whole guard.
+  #   the VERB matches on the quote-stripped segment, and both must hold.
+  #   Path-alone on the raw command refuses `git commit -m "move flyctl out of
+  #   zshrc.local"` -- a message merely NAMING the file -- which is precisely the
+  #   false positive this file's header says costs the whole guard.
   #
   # Metadata-only commands (ls, stat, test -f, readlink) print no content and are
   # deliberately not verbs here. A python3 heredoc that opens the file is not
   # caught either: it prints nothing by default, and blocking it would refuse
   # ordinary edits to the very file people are told to put their secrets in.
-  elif [[ "$cmd" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json) ]] \
-     && [[ "$probe" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]]; then
-    why="\`${BASH_REMATCH[2]}\` on a file that holds credentials (CLAUDE.md sends every secret to ~/.zshrc.local)"
+  #
+  # Known-uncovered, tracked in DO-597. Two groups, and the difference matters:
+  #
+  #   NEVER caught, by this rule or the whole-string one before it: verbs absent
+  #   from the list (cut, tr, base64, tee, paste, xargs, while read, mapfile),
+  #   an interpreter handed the path, command substitution, `eval`, and
+  #   glob-reached paths.
+  #
+  #   caught BEFORE segmenting and no longer caught -- a deliberate reduction,
+  #   not an oversight. Segmenting cannot follow data from one segment into the
+  #   next, so indirection escapes it:
+  #     for f in <file>; do cat $f; done
+  #     f=<file> && cat "$f"
+  #     [ -f <file> ] && cat "$_"
+  #     cp <file> /tmp/x && cat /tmp/x
+  #   The whole-string rule caught these by the same accident that made it
+  #   refuse `git commit -m "... <file>"` -- filename anywhere plus verb
+  #   anywhere. Keeping them would mean keeping that false positive; telling
+  #   them apart needs real dataflow, which a command-string matcher does not
+  #   have. Do not read the verb list as coverage.
+  elif credential_file_read; then
+    why="$CFR_WHY"
   fi
 fi
 
