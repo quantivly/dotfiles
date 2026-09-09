@@ -57,48 +57,105 @@ probe="$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
 
 # --- credential-file reads -------------------------------------------------
 #
-# Deny only when ONE command segment both names a credential file and applies a
-# reading verb to it. The two conditions used to be independent existence tests
-# over the whole command string, which denied any compound command that merely
-# mentioned such a file somewhere and read some *other* file elsewhere -- e.g.
-# authoring documentation about ~/.gitconfig.local and then grepping the draft.
-# That is the false-positive class this file's header says costs the whole guard.
+# `cmd_segments` emits one command segment per line, splitting only where the
+# SHELL would: a newline, `;`, `&&` or `||` that is not inside quotes. The
+# credential-file rule then requires a filename and a reading verb to land in
+# the SAME segment.
 #
-# Heredoc BODIES are dropped first: their content is data being written, not a
-# file being read, so prose that names a credential file is not a read of it.
+# Why segment at all: the rule used to test for the filename and for the verb
+# independently over the whole command string, so it refused any compound
+# command that named such a file anywhere and read some OTHER file anywhere --
+# authoring documentation about ~/.gitconfig.local and then grepping the draft,
+# for instance. That is group 2, the false positive that gets a hook deleted.
+#
+# Three decisions in here are load-bearing, and each is a row in
+# scripts/test-secret-guard.sh:
+#
+#   QUOTES. A `;` or `|` inside a quoted script argument is data, not a
+#   separator. `sed -n '1,5p;10p' <file>` and `grep -E 'a|b' <file>` are single
+#   commands that dump the file; splitting on those characters tore the verb
+#   away from the filename and allowed the read. So the scan tracks quote state
+#   and only breaks outside it. An unbalanced quote makes the remainder count as
+#   quoted, which merges segments rather than splitting them -- the direction
+#   that denies, not the one that leaks.
+#
+#   PIPELINES ARE NOT SPLIT. A pipeline is one unit of data flow: the file named
+#   in one stage is read by a verb in another, as in `echo <file> | xargs cat`.
+#   Lone `&` is likewise left alone, so `2>&1` cannot break a segment apart.
+#
+#   NO HEREDOC STRIPPING. A heredoc body is data being written, and stripping it
+#   would drop prose that names a credential file next to a verb. But a stripper
+#   must guess where the body ends, and every wrong guess DELETES the rest of
+#   the command from the rule's view: `<<-` with a tab-indented terminator, a
+#   mismatched terminator, or a `<<` inside a quoted string each swallowed a
+#   following real read. Over-stripping leaks; not stripping costs one false
+#   positive, on UNQUOTED heredoc prose. Quoted prose -- the usual shape when
+#   generating code or docs -- is already fine, because the verb test runs on
+#   the quote-stripped segment.
+#
+# Pure bash on purpose: no awk, no second dependency, and nothing that can fail
+# to empty output and silently switch the rule off.
+cmd_segments() {
+  # Two statements on purpose: ${#s} in the same `local` as s= would be expanded
+  # before s was assigned, leaving n empty -- the loop then never runs, every
+  # segment vanishes and the rule silently allows everything. shellcheck SC2318.
+  local s="$1"
+  local n=${#s} i=0 ch nxt q="" out=""
+
+  # A pathological command is not worth a character loop. Emitting it whole
+  # merges every segment, which can only over-deny.
+  if (( n > 8192 )); then printf '%s\n' "$s"; return 0; fi
+
+  while (( i < n )); do
+    ch="${s:i:1}"
+    if [[ -n "$q" ]]; then
+      # Single quotes take no escapes in sh; inside double quotes a backslash
+      # protects the next character, including a closing quote.
+      if [[ "$q" == '"' && "$ch" == \\ ]]; then
+        out+="$ch"; (( i++ ))
+        (( i < n )) && out+="${s:i:1}"
+        (( i++ )); continue
+      fi
+      out+="$ch"
+      [[ "$ch" == "$q" ]] && q=""
+      (( i++ )); continue
+    fi
+    case "$ch" in
+      "'"|'"') q="$ch"; out+="$ch" ;;
+      \\)      out+="$ch"; (( i++ )); (( i < n )) && out+="${s:i:1}" ;;
+      ';'|$'\n') out+=$'\n' ;;
+      '&'|'|')
+        nxt="${s:i+1:1}"
+        # `&&` and `||` separate commands; a single `|` or `&` does not.
+        if [[ "$nxt" == "$ch" ]]; then out+=$'\n'; (( i++ )); else out+="$ch"; fi ;;
+      *) out+="$ch" ;;
+    esac
+    (( i++ ))
+  done
+  printf '%s\n' "$out"
+}
+
 CFR_WHY=""
 credential_file_read() {
-  local src seg raw hit verb
+  local seg stripped hit verb
 
-  # Drop heredoc bodies, keeping the line that carries the << operator.
-  src="$(printf '%s\n' "$cmd" | awk '
-    tag != "" { if ($0 == tag || $0 == tag";") tag = ""; next }
-    {
-      if (match($0, /<<-?[ \t]*'\''?[A-Za-z_][A-Za-z0-9_]*'\''?/)) {
-        t = substr($0, RSTART, RLENGTH)
-        gsub(/^<<-?[ \t]*|'\''/, "", t)
-        tag = t
-      }
-      print
-    }')"
-
-  # One segment per shell separator; a read cannot span them.
   # `|| [[ -n $seg ]]` so a final segment with no trailing newline is still seen.
   while IFS= read -r seg || [[ -n "$seg" ]]; do
     [[ -n "$seg" ]] || continue
 
-    # Path on the RAW segment: `cat "$HOME/.zshrc.local"` must still match.
+    # Path on the RAW segment: `cat "$HOME/.zshrc.local"` must still match, and
+    # $stripped below cannot see a path that exists only inside quotes.
     [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json) ]] || continue
     hit="${BASH_REMATCH[1]}"
 
     # Verb on the QUOTE-STRIPPED segment: a message naming the file is not a read.
-    raw="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
-    [[ "$raw" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]] || continue
+    stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
+    [[ "$stripped" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]] || continue
     verb="${BASH_REMATCH[2]}"
 
     CFR_WHY="\`$verb\` on \`$hit\`, which holds credentials"
     return 0
-  done < <(printf '%s\n' "$src" | sed -E 's/(\|\||&&|[;|&])/\n/g')
+  done < <(cmd_segments "$cmd")
 
   return 1
 }
@@ -133,21 +190,28 @@ if [[ -z "$why" ]]; then
   # NOTION_PAT into a transcript. Same class as the incident that created this
   # hook; this rule is that gap closed.
   #
-  # TWO conditions, and the split between them is load-bearing:
+  # TWO conditions, and the split between them is load-bearing. Both are applied
+  # per SEGMENT by credential_file_read above, which is where the details and the
+  # quoting/pipeline/heredoc decisions are written down:
   #
-  #   the PATH matches on "$cmd", the RAW command, because $probe has had quoted
-  #   strings stripped -- and `cat "$HOME/.zshrc.local"` is the most natural way
-  #   to write it, so matching the path on $probe would miss exactly that.
+  #   the PATH matches on the RAW segment, because the quote-stripped copy cannot
+  #   see a path that exists only inside quotes -- and `cat "$HOME/.zshrc.local"`
+  #   is the most natural way to write it.
   #
-  #   the VERB matches on $probe, and both must hold. Path-alone on the raw
-  #   command refuses `git commit -m "move flyctl out of zshrc.local"` -- a
-  #   message merely NAMING the file -- which is precisely the false positive
-  #   this file's header says costs the whole guard.
+  #   the VERB matches on the quote-stripped segment, and both must hold.
+  #   Path-alone on the raw command refuses `git commit -m "move flyctl out of
+  #   zshrc.local"` -- a message merely NAMING the file -- which is precisely the
+  #   false positive this file's header says costs the whole guard.
   #
   # Metadata-only commands (ls, stat, test -f, readlink) print no content and are
   # deliberately not verbs here. A python3 heredoc that opens the file is not
   # caught either: it prints nothing by default, and blocking it would refuse
   # ordinary edits to the very file people are told to put their secrets in.
+  #
+  # Known-uncovered, tracked in DO-597: verbs absent from the list (cut, tr,
+  # base64, tee, paste, xargs, while read, mapfile), an interpreter handed the
+  # path, command substitution, `eval`, and glob-reached paths. Neither this
+  # version nor any before it caught those -- do not read the list as coverage.
   elif credential_file_read; then
     why="$CFR_WHY"
   fi
