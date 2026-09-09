@@ -1168,7 +1168,12 @@ has "$out" "sidebar account token wired" "both halves present: reports wired"
 # 2. Publisher only -- the config was never updated. THE row for a half-applied
 #    deploy, which is the realistic failure: ./install relinks config.toml, and
 #    a checkout that moved without it leaves the old row in place.
-H="$(new_home acct_pubonly)"; good_statusline "$H" >"$H/.claude/settings.json"
+# `wire`, not `good_statusline`: a bare new_home also fails the agent-skill
+# check, so rc was 1 whatever the acct half did and this row passed for the
+# WRONG reason -- green for no reason, which CLAUDE.md rates as badly as red for
+# no reason. After `wire` the fixture passes with rc 0, so the acct half is the
+# only thing that can move it.
+H="$(new_home acct_pubonly)"; wire "$H" >/dev/null
 acct_conf "$H" ''
 out="$(verify "$H" --herdr)"; rc=0; verify "$H" --herdr >/dev/null 2>&1 || rc=$?
 has "$out" "no claude sidebar row consumes it" "publisher only: FAILs and names the missing consumer"
@@ -1177,7 +1182,7 @@ check "publisher only: takes the exit code with it" "$rc" "1"
 # 3. Consumer only -- the row wants $acct but the hook cannot publish it. The
 #    mirror image, and the one that renders an empty column rather than a wrong
 #    one, so nothing on screen says anything is wrong.
-H="$(new_home acct_cononly)"; good_statusline "$H" >"$H/.claude/settings.json"
+H="$(new_home acct_cononly)"; wire "$H" >/dev/null
 # shellcheck disable=SC2016  # a literal token NAME, not an expansion
 acct_conf "$H" '$acct'; strip_publisher "$H"
 out="$(verify "$H" --herdr)"; rc=0; verify "$H" --herdr >/dev/null 2>&1 || rc=$?
@@ -1216,14 +1221,16 @@ has "$(cat "$DOTFILES/scripts/verify-tools.sh")" 'HERDR_LIVE_CONF="$HOME/.config
 # shellcheck disable=SC2016  # a literal token NAME, not an expansion
 has "$(cat "$DOTFILES/$HOOK_REL")" '--token "acct=$acct"' \
     "the shipped hook publishes acct"
-if python3 - "$DOTFILES/config/herdr/config.toml" <<'PYEOF'
-import sys, tomllib
-with open(sys.argv[1], "rb") as fh:
-    d = tomllib.load(fh)
-rows = d["ui"]["sidebar"]["agents"]["rows_by_agent"]["claude"]
-toks = [t.get("token") if isinstance(t, dict) else t for r in rows for t in r]
-sys.exit(0 if "$acct" in toks else 1)
-PYEOF
+# Same sed RANGE the checker uses, and deliberately so: a suite that proved the
+# shipped config with a TOML parser while the checker read it with sed would be
+# asserting a different question than the one production asks. (It also removes
+# a python3 + tomllib dependency -- tomllib is 3.11+, and Ubuntu 20.04 ships 3.8.)
+shipped_claude_rows() {
+    sed -n '/^[[:space:]]*claude[[:space:]]*=[[:space:]]*\[/,/^[[:space:]]*\]/{p; /^[[:space:]]*\]/q}' \
+        "$DOTFILES/config/herdr/config.toml" 2>/dev/null
+}
+# shellcheck disable=SC2016  # literal token NAMES, not expansions
+if grep -qF -- '$acct' <<<"$(shipped_claude_rows)"
 then ok "the shipped claude row consumes acct"; else bad "the shipped claude row does not consume acct"; fi
 
 # 7b. THE VALUE, not just the presence. Rows 1-7 only assert that `acct` is
@@ -1288,19 +1295,49 @@ check "acct: a clauth start runtime reports its profile" \
 # two. Stripped rather than rejected -- a wrong-looking name beats a vanished row.
 check "acct: U+00B7 is stripped from the value" \
       "$(acct_value "/home/x/ac/bad"$'·'"name")" "badname"
+# ...and stripping it must not damage the NEIGHBOURS. The first version used
+# `tr -d '\302\267'`, which deletes those two BYTES individually rather than
+# the character they spell: U+00B1 is C2 B1 and U+04B7 is D2 B7, so both came
+# out as a lone orphaned byte -- INVALID UTF-8, published straight into the
+# sidebar. Worse than the separator the strip exists to prevent, and the row
+# above passed the whole time because it only ever fed in the exact character
+# being stripped. A guard needs a row for what it must LEAVE ALONE, not just
+# for what it removes.
+check "acct: U+00B1 (shares byte C2) survives intact" \
+      "$(acct_value "/home/x/ac/ca"$'\u00b1'"fe")" "ca"$'\u00b1'"fe"
+check "acct: U+04B7 (shares byte B7) survives intact" \
+      "$(acct_value "/home/x/ac/a"$'\u04b7'"b")" "a"$'\u04b7'"b"
+check "acct: an ordinary accented name is untouched" \
+      "$(acct_value "/home/x/ac/caf"$'\u00e9')" "caf"$'\u00e9'
 
 # 8. `$clauth` is GONE from the claude row. Keeping both would leave two account
 #    fields disagreeing, one of them reading `unknown` -- the surface this change
 #    removes rather than doubles.
-if python3 - "$DOTFILES/config/herdr/config.toml" <<'PYEOF'
-import sys, tomllib
-with open(sys.argv[1], "rb") as fh:
-    d = tomllib.load(fh)
-rows = d["ui"]["sidebar"]["agents"]["rows_by_agent"]["claude"]
-toks = [t.get("token") if isinstance(t, dict) else t for r in rows for t in r]
-sys.exit(0 if "$clauth" not in toks else 1)
-PYEOF
+# shellcheck disable=SC2016  # literal token NAMES, not expansions
+if ! grep -qF -- '$clauth' <<<"$(shipped_claude_rows)"
 then ok "the claude row no longer consumes the machine-wide \$clauth"; else bad "the claude row still consumes \$clauth"; fi
+
+# 9. "Could not read the row" must NOT be reported as "the row does not want it".
+#    The first version shelled out to python3+tomllib and treated ANY non-zero
+#    exit -- python3 absent, tomllib absent (3.11+, and Ubuntu 20.04 ships 3.8),
+#    file unreadable -- as a confident FAIL naming a fault that does not exist,
+#    and took the exit code with it. On the adopter machine CLAUDE.md names, the
+#    new check would have been red on arrival.
+H="$(new_home acct_unreadable)"; wire "$H" >/dev/null
+mkdir -p "$H/.config/herdr"
+printf '[ui.sidebar.agents]\nrows = [["state_icon"]]\n' >"$H/.config/herdr/config.toml"
+out="$(verify "$H" --herdr)"; rc=0; verify "$H" --herdr >/dev/null 2>&1 || rc=$?
+has  "$out" "sidebar account token NOT CHECKED" "no claude row at all: NOT CHECKED, not a verdict"
+hasnt "$out" "no claude sidebar row consumes it" "no claude row at all: does not invent a consumer fault"
+check "no claude row at all: does not take the exit code" "$rc" "0"
+
+# 10. The checker must not depend on a TOML parser. python3 appears in this file
+#     only as a NAME in HERDR_SERVER_DEPS; an invocation would be a new way for
+#     the check to go quiet, which is the rule that made row 9 necessary.
+# `import tomllib`, not the bare word: the checker's own comment explains why it
+# does NOT use tomllib, and a row matching the topic fails on the explanation.
+hasnt "$(cat "$DOTFILES/scripts/verify-tools.sh")" "import tomllib" \
+      "the checker does not parse TOML with python3"
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"

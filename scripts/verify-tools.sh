@@ -778,21 +778,46 @@ elif [[ ! -r "$CC_HOOK" ]]; then
 else
     # Anchored to the assignment, not a bare grep for the word: `acct` appears in
     # the hook's own prose, and a comment must never satisfy the publisher half.
-    acct_pub=0; acct_con=0
+    acct_pub=0
     grep -q -- '--token "acct=' "$CC_HOOK" && acct_pub=1
-    # The consumer must be inside the CLAUDE row. A `$acct` anywhere else in the
-    # file (the generic `rows`, or a comment) draws nothing on a claude pane.
-    if python3 - "$HERDR_LIVE_CONF" <<'PYEOF' >/dev/null 2>&1
-import sys, tomllib
-with open(sys.argv[1], "rb") as fh:
-    d = tomllib.load(fh)
-rows = d["ui"]["sidebar"]["agents"]["rows_by_agent"]["claude"]
-toks = [t.get("token") if isinstance(t, dict) else t for r in rows for t in r]
-sys.exit(0 if "$acct" in toks else 1)
-PYEOF
-    then acct_con=1; fi
 
-    if (( acct_pub && acct_con )); then
+    # The consumer must be inside the CLAUDE row: a `$acct` anywhere else in the
+    # file (the generic `rows`, or a comment) draws nothing on a claude pane. So
+    # this needs the row, not a bare grep of the file.
+    #
+    # A sed RANGE, not a TOML parser. The first version shelled out to python3
+    # and its stdlib TOML module, which is TWO faults this repo has already
+    # written down. python3 was not invoked anywhere in this file before -- it
+    # appeared only as a NAME in HERDR_SERVER_DEPS -- so it was a new dependency
+    # in a checker, "a new way for a check to go quiet"; and that module is
+    # 3.11+, while Ubuntu 20.04 (the first outside adopter's box, named in
+    # CLAUDE.md) ships 3.8. sed is already used throughout, and the range is the
+    # same bounded technique claude-doctor uses for `fallback_chain`.
+    #
+    # The state-table row for this greps for the import, so do not name it
+    # literally here -- the row would then match this very comment.
+    #
+    # TRI-STATE, because "could not read the row" is not "the row does not want
+    # it". Collapsing them made an unreadable or reshaped config print a
+    # confident "no claude sidebar row consumes it" -- a FAIL naming a fault
+    # that does not exist, and it took the exit code with it. An empty answer is
+    # never agreement.
+    acct_rows="$(sed -n '/^[[:space:]]*claude[[:space:]]*=[[:space:]]*\[/,/^[[:space:]]*\]/{p; /^[[:space:]]*\]/q}' \
+                     "$HERDR_LIVE_CONF" 2>/dev/null)"
+    # shellcheck disable=SC2016  # a literal herdr token NAME, not an expansion
+    acct_token='$acct'
+    if [[ -z "$acct_rows" ]]; then
+        acct_con=unknown
+    elif grep -qF -- "$acct_token" <<<"$acct_rows"; then
+        acct_con=1
+    else
+        acct_con=0
+    fi
+
+    if [[ "$acct_con" == unknown ]]; then
+        echo -e "${YELLOW}⚠${NC} no 'claude = [' row found in ${HERDR_LIVE_CONF/#$HOME/\~} — sidebar account token NOT CHECKED"
+        echo "    Neither wired nor broken as far as this can tell; the file may be reshaped or unreadable."
+    elif (( acct_pub && acct_con )); then
         echo -e "${GREEN}✓${NC} sidebar account token wired (publisher + claude row)"
     elif (( acct_pub )); then
         echo -e "${RED}✗ FAIL:${NC} the hook publishes \$acct but no claude sidebar row consumes it"

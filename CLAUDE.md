@@ -1372,6 +1372,46 @@ Gotchas, in the order they bite:
     a green suite. Only mutation testing found it (M6 survived; six derivation rows
     were added to kill it). The derivation *is* the feature: rows that check the
     plumbing and not the answer are decoration.
+  - **The pair check itself shipped with two of this file's own recorded faults, and
+    CI was 20/20 green over both.** It read the claude row by shelling out to python3
+    and its stdlib TOML module. python3 had never been *invoked* in
+    `scripts/verify-tools.sh` — it appeared only as a NAME inside
+    `HERDR_SERVER_DEPS` — so that was a new dependency in a checker, "a new way for a
+    check to go quiet"; and that module is 3.11+, while Ubuntu 20.04, the first
+    outside adopter's box, ships 3.8. Worse, **every** non-zero exit (python3 absent,
+    module absent, file unreadable) was collapsed into `acct_con=0`, which printed a
+    confident `✗ the hook publishes $acct but no claude sidebar row consumes it` — a
+    FAIL naming a fault that does not exist, taking the exit code with it. On the one
+    machine class the herdr work exists to support, the new check would have been red
+    on arrival: the permanently-red checker, **sixth** recurrence, inside the check
+    written while citing the rule. Now a bounded `sed` range (the `fallback_chain`
+    technique) and a **tri-state**, where "could not read the row" is `NOT CHECKED`
+    and never a verdict.
+  - **Three of the new rows asserted an exit code against a fixture that was already
+    failing something else.** `new_home` does not write the agent-skill file, so
+    `verify-tools.sh --herdr` returned 1 regardless of what the account check did, and
+    "takes the exit code with it" passed without testing anything — green for no
+    reason, which this file already rates as badly as red for no reason. Build the
+    fixture with `wire`, which the suite's own end-to-end row proves exits 0, so the
+    thing under test is the only thing that can move the code.
+  - **A row that greps for a defect will match the comment explaining the defect.**
+    The row asserting the checker no longer imports the TOML module matched the
+    checker's own comment saying why it does not. Both were right; the pair was
+    circular. The comment now says so explicitly, so the next person does not
+    reintroduce the literal string.
+  - **`tr -d` deletes BYTES, so a multi-byte strip corrupts its neighbours.** The
+    guard against U+00B7 (herdr's own token separator) shipped as
+    `tr -d '\302\267'`, which removes those two bytes *individually* rather than the
+    character they spell — measured, it turns U+00B1 (`C2 B1`) into a lone `\xB1` and
+    U+04B7 (`D2 B7`) into a lone `\xD2`, i.e. **invalid UTF-8 published straight into
+    the sidebar**, which is worse than the separator it was guarding against. `sed
+    's/·//g'` matches the pair as a unit in a UTF-8 *and* a C locale (both checked;
+    `/bin/sh` here is dash and the locale is not guaranteed), and sed is already used
+    throughout that file so it adds no dependency. **The row that covered this passed
+    the entire time**, because it only ever fed in the exact character being stripped:
+    a guard needs a row for what it must LEAVE ALONE, not only for what it removes.
+    Found by asking what a reviewer would attack — after CI had gone 20/20 green over
+    it.
   - **A fixture `$HOME` needs `.cache/`.** The hook redirects the publish call's stderr
     into `$HOME/.cache/`, so without that directory the redirection itself fails,
     `herdr` is never exec'd, and the stub records nothing — which reads identically to
