@@ -1581,8 +1581,13 @@ TBIN="$TROOT/bin"; mkdir -p "$TBIN"
 printf '#!/bin/sh\nexit 0\n'                       > "$TBIN/clauth";  chmod +x "$TBIN/clauth"
 printf '#!/bin/sh\nexit 0\n'                       > "$TBIN/claude";  chmod +x "$TBIN/claude"
 TFAKEDOT="$TROOT/fakedotfiles"; mkdir -p "$TFAKEDOT/scripts"
-printf '#!/bin/sh\nprintf "%%s" "%s/.local/state/claude-account-dirs/$1"\n' "$PHOME" \
-    > "$TFAKEDOT/scripts/claude-account-dirs.sh"
+# A heredoc, not printf: the `$1` below belongs to the STUB, not to this suite,
+# and inside a single-quoted printf format shellcheck reads it as a missed
+# expansion (SC2016). `\$1` in an unquoted heredoc says the same thing plainly.
+cat > "$TFAKEDOT/scripts/claude-account-dirs.sh" <<EOF
+#!/bin/sh
+printf '%s' "$PHOME/.local/state/claude-account-dirs/\$1"
+EOF
 chmod +x "$TFAKEDOT/scripts/claude-account-dirs.sh"
 
 # A recording stub for the resolver, so the rows assert the ARGUMENT rather than
