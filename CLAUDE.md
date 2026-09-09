@@ -2138,6 +2138,23 @@ Traps this area has, each of which produced a **passing test** first:
   the machine, which is exactly what this layer exists to prevent. The table check catches a tenant
   named in the table; a caller-supplied one (`CLAUDE_ACCOUNT_TENANT`, `hspawn --tenant`) never passes
   through it, so the picker **refuses** rather than falling back to a pool nobody asked for.
+- **An unusable TABLE widens it the same way, and that one shipped.** When the resolver cannot answer
+  — `bad-table`, `git-error`, or an empty `CLAUDE_TENANT_DEFAULT` — the caller leaves the tenant empty
+  and lands on `CLAUDE_ACCOUNT_POOL`, and an **empty** flat pool means "every registered profile".
+  So one mistyped character in the tenant file silently bills personal work to a work account. It was
+  latent while `CLAUDE_ACCOUNT_POOL` was still set to the three work accounts (wrong, but bounded);
+  deleting that assignment — the very cleanup the tenant table makes correct — is what exposed it.
+  **Measured 2026-09-09: with a one-character error in the tenant file, `~/Projects` picked
+  `quantivly-3`, and it read as an ordinary successful launch**, because the reason lives in
+  `_CLAUDE_TENANT_WHY` and the announcement never showed it. The picker now refuses when a table is
+  configured **and** no explicit flat pool is set, naming the state and the reason. Both other
+  combinations are unchanged and each is pinned: no table at all with no flat pool still means every
+  profile (the modular adopter's whole mechanism), and an explicitly-set flat pool is still honoured
+  as the deliberate override it is.
+  The general shape is worth more than the instance: **a guard that narrows a set must treat "empty"
+  and "unconfigured" as different**, because most collection tests read an empty filter as "match
+  everything" — so the failure is always a silent widening, in the direction of the thing the filter
+  existed to prevent.
 - **A corrupt `.git` directory is not a `git-error` fixture.** git calls that *"not a repository"*, so
   it resolves to `no-repo`, and the row asserting "git-error stops" passed while testing nothing. A
   real one is a `HOME` whose `~/.gitconfig` does not parse — how `test-gh-routing.sh` makes one, and
