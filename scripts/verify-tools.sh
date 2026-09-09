@@ -779,7 +779,10 @@ else
     # Anchored to the assignment, not a bare grep for the word: `acct` appears in
     # the hook's own prose, and a comment must never satisfy the publisher half.
     acct_pub=0
-    grep -q -- '--token "acct=' "$CC_HOOK" && acct_pub=1
+    # Full-line comments dropped FIRST. The comment below used to claim this
+    # anchor stopped a comment satisfying the half, and it did not: a hook
+    # carrying `# disabled: --token "acct=$acct"` was reported as wired.
+    grep -v '^[[:space:]]*#' "$CC_HOOK" | grep -q -- '--token "acct=' && acct_pub=1
 
     # The consumer must be inside the CLAUDE row: a `$acct` anywhere else in the
     # file (the generic `rows`, or a comment) draws nothing on a claude pane. So
@@ -802,13 +805,37 @@ else
     # confident "no claude sidebar row consumes it" -- a FAIL naming a fault
     # that does not exist, and it took the exit code with it. An empty answer is
     # never agreement.
-    acct_rows="$(sed -n '/^[[:space:]]*claude[[:space:]]*=[[:space:]]*\[/,/^[[:space:]]*\]/{p; /^[[:space:]]*\]/q}' \
+    #
+    # The range ENDS on a column-0 `]` and not on `^[[:space:]]*\]`. The claude
+    # array is an array OF ARRAYS, so its rows close with an indented `],` -- an
+    # end pattern allowing leading whitespace stops at the first multi-line row
+    # instead of the array, capturing 27 of 61 lines here. That passed only
+    # because `$acct` happens to sit on row 1; moving it to any row below the
+    # first multi-line one made the check report a confident "no claude sidebar
+    # row consumes it". The fixture missed it by writing a SINGLE-LINE array,
+    # which cannot reach the branch -- the unfailable-row trap, again.
+    # BOTH ends anchored at column 0, symmetrically. A start that tolerated
+    # leading whitespace against an end that did not is the mirror bug: on an
+    # indented config the start matched, the end never did, and the range ran to
+    # EOF swallowing the codex/gemini/copilot rows. A top-level TOML key sits at
+    # column 0, so if this matches nothing the tri-state below says NOT CHECKED
+    # -- the safe failure, never a wrong verdict.
+    acct_rows="$(sed -n '/^claude[[:space:]]*=[[:space:]]*\[/,/^\]/{p; /^\]/q}' \
                      "$HERDR_LIVE_CONF" 2>/dev/null)"
+    # TWO narrowings, because the region is half comments and the first version
+    # grepped it whole: a `# TODO: put { token = "$acct" } back` line reported
+    # the sidebar as wired.
+    #   1. drop full-line comments;
+    #   2. require the TOKEN SHAPE, not the bare name, so prose mentioning
+    #      $acct in a surviving trailing comment cannot satisfy it either.
+    # Trailing comments are NOT stripped, deliberately: `#` occurs inside this
+    # file's colour strings (fg = "#a9b1d6"), so a naive strip would cut real
+    # token rows in half. The shape requirement is what covers that gap.
     # shellcheck disable=SC2016  # a literal herdr token NAME, not an expansion
-    acct_token='$acct'
+    acct_token='token = "$acct"'
     if [[ -z "$acct_rows" ]]; then
         acct_con=unknown
-    elif grep -qF -- "$acct_token" <<<"$acct_rows"; then
+    elif grep -v '^[[:space:]]*#' <<<"$acct_rows" | grep -qF -- "$acct_token"; then
         acct_con=1
     else
         acct_con=0

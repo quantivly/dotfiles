@@ -238,9 +238,19 @@ cwd=$(printf '%s\n' "$fields" | sed -n '11p')
 idle_key=$(printf '%s\n' "$fields" | sed -n '12p')
 idle_val=$(printf '%s\n' "$fields" | sed -n '13p')
 
-# The account this session actually bills, read from THIS PROCESS'S OWN
-# CLAUDE_CONFIG_DIR — so it is correct by construction, which is the whole
-# point. clauth's herdr plugin cannot see a foreign CLAUDE_CONFIG_DIR and so
+# The account this session is configured against, read from THIS PROCESS'S OWN
+# CLAUDE_CONFIG_DIR.
+#
+# BE PRECISE ABOUT WHAT THIS PROVES, because the first draft of this comment
+# said "correct by construction ... cannot disagree with the credential being
+# spent" and that is an overclaim of exactly the declared-vs-effective kind
+# CLAUDE.md records twice (gh-doctor's keyring collapse; clauth's stored copy).
+# What it names is the credential FILE this process reads. It does NOT ask the
+# API who that credential authenticates as, so a `/login` as a different
+# account inside an isolated session leaves the directory name unchanged and
+# the token wrong -- a case CLAUDE.md already documents (8 upstream refusals).
+# What it is strictly better than is the alternative: clauth's plugin reports
+# the machine-wide active profile, which is unrelated to this pane. clauth's herdr plugin cannot see a foreign CLAUDE_CONFIG_DIR and so
 # publishes the machine-wide active profile, or the literal sentinel
 # `unknown`; measured 2026-09-09, a pane billing `quantivly-2` carried
 # `clauth: "unknown"`. That is the surface that hid the account concentration

@@ -1348,8 +1348,13 @@ Gotchas, in the order they bite:
   isolated shell. Not a wrong-but-plausible name — no name at all.
   The fix belongs here rather than upstream because our own
   `claude/hooks/session-statusline.sh` runs **inside** the session, so a token it
-  derives from that process's own `CLAUDE_CONFIG_DIR` is correct by construction and
-  cannot disagree with the credential being spent. It publishes `acct`, and the claude
+  derives from that process's own `CLAUDE_CONFIG_DIR` names the credential **file**
+  the pane reads rather than a machine-wide setting. **It is not "correct by
+  construction"** — that phrasing shipped in the first draft and is the
+  declared-vs-effective overclaim this file records twice already. `$acct` is a
+  directory name, not an API answer: a `/login` as a different account inside an
+  isolated session leaves it unchanged and wrong. What it beats is the alternative,
+  which reports an account belonging to a different pane entirely. It publishes `acct`, and the claude
   row in `config/herdr/config.toml` consumes `$acct` in place of `$clauth`. **Both were
   not kept**: two account fields disagreeing, one of them reading `unknown`, is the
   surface being removed, not one to double. `acct=shared` is a **finding, not a
