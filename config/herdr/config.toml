@@ -278,7 +278,7 @@ type = "plugin_action"
 command = "tdi.worktree-from-linear.pick"
 description = "worktree from Linear issue"
 
-# herdr-draft's one action (plugin id `draft`, action id `open`).
+# herdr-draft's one action (plugin id `zvibaratz.draft`, action id `open`).
 #
 # ADOPTERS: THIS ONE IS A DEAD KEY FOR YOU, and it will not tell you so. Delete
 # the four lines below, or point them at a plugin you actually have. herdr-draft
@@ -297,7 +297,7 @@ description = "worktree from Linear issue"
 [[keys.command]]
 key = "alt+n"
 type = "plugin_action"
-command = "draft.open"
+command = "zvibaratz.draft.open"
 description = "new agent session"
 
 # Popups run through /bin/sh in the FOCUSED PANE's cwd (navigate.rs passes None,
