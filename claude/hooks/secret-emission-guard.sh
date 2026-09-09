@@ -103,8 +103,10 @@ cmd_segments() {
   local n=${#s} i=0 ch nxt q="" out=""
 
   # A pathological command is not worth a character loop. Emitting it whole
-  # merges every segment, which can only over-deny.
-  if (( n > 8192 )); then printf '%s\n' "$s"; return 0; fi
+  # merges every segment, which can only over-deny. Newlines are flattened to
+  # spaces first: `out` must carry a newline ONLY where a break is intended,
+  # and the caller's `while read` would otherwise break on the raw ones.
+  if (( n > 8192 )); then printf '%s\n' "${s//$'\n'/ }"; return 0; fi
 
   while (( i < n )); do
     ch="${s:i:1}"
@@ -112,17 +114,31 @@ cmd_segments() {
       # Single quotes take no escapes in sh; inside double quotes a backslash
       # protects the next character, including a closing quote.
       if [[ "$q" == '"' && "$ch" == \\ ]]; then
+        # Backslash-newline inside double quotes is a line continuation: the
+        # shell removes both characters and joins the lines. Emit nothing.
+        if [[ "${s:i+1:1}" == $'\n' ]]; then (( i += 2 )); continue; fi
         out+="$ch"; (( i++ ))
         (( i < n )) && out+="${s:i:1}"
         (( i++ )); continue
       fi
+      # A newline INSIDE quotes is data, exactly as a `;` inside quotes is --
+      # a multi-line awk or sed script is one command. Emitting it verbatim
+      # would let the caller's `while read` break the segment there and tear
+      # the verb away from the filename, so it becomes a space.
+      if [[ "$ch" == $'\n' ]]; then out+=' '; (( i++ )); continue; fi
       out+="$ch"
       [[ "$ch" == "$q" ]] && q=""
       (( i++ )); continue
     fi
     case "$ch" in
       "'"|'"') q="$ch"; out+="$ch" ;;
-      \\)      out+="$ch"; (( i++ )); (( i < n )) && out+="${s:i:1}" ;;
+      \\)
+        # Unquoted backslash-newline is a line continuation. The shell deletes
+        # both characters, joining what follows onto this line -- possibly
+        # mid-word, as in `ca\` + newline + `t file` -- so emit nothing rather
+        # than a space, or the rejoined verb would no longer match.
+        if [[ "${s:i+1:1}" == $'\n' ]]; then (( i += 2 )); continue; fi
+        out+="$ch"; (( i++ )); (( i < n )) && out+="${s:i:1}" ;;
       ';'|$'\n') out+=$'\n' ;;
       '&'|'|')
         nxt="${s:i+1:1}"
@@ -208,10 +224,25 @@ if [[ -z "$why" ]]; then
   # caught either: it prints nothing by default, and blocking it would refuse
   # ordinary edits to the very file people are told to put their secrets in.
   #
-  # Known-uncovered, tracked in DO-597: verbs absent from the list (cut, tr,
-  # base64, tee, paste, xargs, while read, mapfile), an interpreter handed the
-  # path, command substitution, `eval`, and glob-reached paths. Neither this
-  # version nor any before it caught those -- do not read the list as coverage.
+  # Known-uncovered, tracked in DO-597. Two groups, and the difference matters:
+  #
+  #   NEVER caught, by this rule or the whole-string one before it: verbs absent
+  #   from the list (cut, tr, base64, tee, paste, xargs, while read, mapfile),
+  #   an interpreter handed the path, command substitution, `eval`, and
+  #   glob-reached paths.
+  #
+  #   caught BEFORE segmenting and no longer caught -- a deliberate reduction,
+  #   not an oversight. Segmenting cannot follow data from one segment into the
+  #   next, so indirection escapes it:
+  #     for f in <file>; do cat $f; done
+  #     f=<file> && cat "$f"
+  #     [ -f <file> ] && cat "$_"
+  #     cp <file> /tmp/x && cat /tmp/x
+  #   The whole-string rule caught these by the same accident that made it
+  #   refuse `git commit -m "... <file>"` -- filename anywhere plus verb
+  #   anywhere. Keeping them would mean keeping that false positive; telling
+  #   them apart needs real dataflow, which a command-string matcher does not
+  #   have. Do not read the verb list as coverage.
   elif credential_file_read; then
     why="$CFR_WHY"
   fi

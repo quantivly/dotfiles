@@ -292,6 +292,35 @@ check "refuses: awk with a quoted pipe as field separator" \
 check "refuses: grep pattern containing a semicolon" \
       "$(ask "grep 'a;b' ~/.zshrc.local")" "deny"
 
+# A newline is the separator the segmenter is most likely to get wrong, because
+# it is BOTH the commonest real separator and, in two places, not a separator at
+# all. The first version protected `;` and `|` inside quotes but not `\n`, and
+# the suite could not tell that build from a fixed one -- these five rows are
+# what closes that blind spot.
+#
+#   backslash-newline is a line continuation: the shell deletes both characters
+#   and joins the lines, so it must not end a segment.
+bs_nl_cat="$(printf '%s\n' $'cat \\' '  ~/.zshrc.local')"
+check "refuses: read split by a line continuation" \
+      "$(ask "$bs_nl_cat")" "deny"
+bs_nl_grep="$(printf '%s\n' $'grep -n TOKEN \\' '  ~/.zshrc.local')"
+check "refuses: grep split by a line continuation" \
+      "$(ask "$bs_nl_grep")" "deny"
+# ...and a line continuation can rejoin a word mid-verb, so the backslash and
+# the newline must both vanish rather than becoming whitespace.
+bs_nl_word="$(printf '%s\n' $'ca\\' 't ~/.zshrc.local')"
+check "refuses: a verb rejoined across a line continuation" \
+      "$(ask "$bs_nl_word")" "deny"
+
+#   a newline INSIDE quotes is data -- a multi-line awk or sed script is one
+#   command, exactly as a quoted `;` is one command.
+multiline_awk="$(printf '%s\n' "awk '" '/PATH/ {print}' "' ~/.zshrc.local")"
+check "refuses: multi-line quoted awk script" \
+      "$(ask "$multiline_awk")" "deny"
+multiline_pat="$(printf '%s\n' 'grep -E "foo' 'bar" ~/.zshrc.local')"
+check "refuses: quoted pattern spanning a newline" \
+      "$(ask "$multiline_pat")" "deny"
+
 # A pipeline is ONE unit of data flow, so it is never split: the file named in
 # one stage is read by a verb in another.
 check "refuses: the path is piped into the reader" \
