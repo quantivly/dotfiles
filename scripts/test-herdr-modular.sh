@@ -1144,10 +1144,15 @@ acct_conf() {
         printf '[ui.sidebar.agents]\n'
         printf 'rows = [["state_icon"]]\n'
         printf '[ui.sidebar.agents.rows_by_agent]\n'
+        # MULTI-LINE, and the token on a LATE row, because the real config is an
+        # array OF ARRAYS whose rows close with an indented `],`. A single-line
+        # fixture cannot reach the checker's range-end branch at all: the first
+        # version wrote one, and a range that stopped at the first inner `]`
+        # -- capturing 27 of the real file's 61 lines -- passed every row.
         if [[ -n "$tok" ]]; then
-            printf 'claude = [["state_icon", { token = "%s", dim = false }]]\n' "$tok"
+            printf 'claude = [\n  ["state_icon"],\n  [\n    "terminal_title_stripped",\n  ],\n  [{ token = "%s", dim = false }],\n]\n' "$tok"
         else
-            printf 'claude = [["state_icon"]]\n'
+            printf 'claude = [\n  ["state_icon"],\n  [\n    "terminal_title_stripped",\n  ],\n  ["tab"],\n]\n'
         fi
     } >"$h/.config/herdr/config.toml"
 }
@@ -1225,12 +1230,26 @@ has "$(cat "$DOTFILES/$HOOK_REL")" '--token "acct=$acct"' \
 # shipped config with a TOML parser while the checker read it with sed would be
 # asserting a different question than the one production asks. (It also removes
 # a python3 + tomllib dependency -- tomllib is 3.11+, and Ubuntu 20.04 ships 3.8.)
+# The range is duplicated from verify-tools.sh, and row 8b below FAILS if the
+# two copies ever differ. That row is not decoration: the checker's copy was
+# fixed for the truncation bug and this one was not, so rows 7/8 -- the only
+# rows asserting anything about the SHIPPED config -- went on reading a
+# 27-of-61-line region, and a reviewer put `$clauth` back on a late row while
+# the suite printed "✓ the claude row no longer consumes the machine-wide
+# $clauth". Two copies of one rule always drift; what stops it is an assertion
+# that they have not.
+ACCT_RANGE='/^claude[[:space:]]*=[[:space:]]*\[/,/^\]/{p; /^\]/q}'
 shipped_claude_rows() {
-    sed -n '/^[[:space:]]*claude[[:space:]]*=[[:space:]]*\[/,/^[[:space:]]*\]/{p; /^[[:space:]]*\]/q}' \
-        "$DOTFILES/config/herdr/config.toml" 2>/dev/null
+    sed -n "$ACCT_RANGE" "$DOTFILES/config/herdr/config.toml" 2>/dev/null
+}
+# Comments dropped and the token SHAPE required, exactly as the checker does it:
+# a row asking an easier question than production would pass a config that
+# production rejects.
+acct_rows_have() { # $1 = token name
+    grep -v '^[[:space:]]*#' <<<"$(shipped_claude_rows)" | grep -qF -- "token = \"$1\""
 }
 # shellcheck disable=SC2016  # literal token NAMES, not expansions
-if grep -qF -- '$acct' <<<"$(shipped_claude_rows)"
+if acct_rows_have '$acct'
 then ok "the shipped claude row consumes acct"; else bad "the shipped claude row does not consume acct"; fi
 
 # 7b. THE VALUE, not just the presence. Rows 1-7 only assert that `acct` is
@@ -1314,8 +1333,79 @@ check "acct: an ordinary accented name is untouched" \
 #    fields disagreeing, one of them reading `unknown` -- the surface this change
 #    removes rather than doubles.
 # shellcheck disable=SC2016  # literal token NAMES, not expansions
-if ! grep -qF -- '$clauth' <<<"$(shipped_claude_rows)"
+if ! acct_rows_have '$clauth'
 then ok "the claude row no longer consumes the machine-wide \$clauth"; else bad "the claude row still consumes \$clauth"; fi
+
+# 8a-i. A COMMENT must not satisfy the consumer half. The region between
+#       `claude = [` and its close is half comments in the real file, and the
+#       first version grepped it whole -- so a `# TODO: put { token = "$acct" }
+#       back` line reported the sidebar as wired while it drew no account at
+#       all. Found by an independent reviewer AFTER CI went 20/20 green; the
+#       code fix then SURVIVED mutation (M12) because no row fed it a comment.
+H="$(new_home acct_comment_only)"; wire "$H" >/dev/null
+mkdir -p "$H/.config/herdr"
+# shellcheck disable=SC2016  # a literal token NAME inside fixture text
+{ printf '[ui.sidebar.agents]\nrows = [["state_icon"]]\n'
+  printf '[ui.sidebar.agents.rows_by_agent]\n'
+  printf 'claude = [\n  ["state_icon"],\n  # TODO: put { token = "$acct" } back one day\n  ["tab"],\n]\n'
+} >"$H/.config/herdr/config.toml"
+out="$(verify "$H" --herdr)"
+hasnt "$out" "sidebar account token wired" "a commented-out consumer is NOT wired"
+has   "$out" "no claude sidebar row consumes it" "...and is reported as the missing consumer"
+
+# 8a-iii. A TRAILING comment mentioning $acct must not satisfy it either, and
+#         this is the row the token-SHAPE requirement exists for. Full-line
+#         comments are stripped, but trailing ones deliberately are NOT: `#`
+#         occurs inside this file's colour strings (fg = "#a9b1d6"), so a naive
+#         strip would cut real token rows in half. The shape is what covers that
+#         gap -- and without this row it is unpinned, which mutation testing
+#         proved twice (M12 survived both the comment-strip fix and the row
+#         above, because the strip alone already killed that one).
+H="$(new_home acct_trailing_comment)"; wire "$H" >/dev/null
+mkdir -p "$H/.config/herdr"
+# shellcheck disable=SC2016  # a literal token NAME inside fixture text
+{ printf '[ui.sidebar.agents]\nrows = [["state_icon"]]\n'
+  printf '[ui.sidebar.agents.rows_by_agent]\n'
+  printf 'claude = [\n  ["state_icon"],\n  ["tab"], # $acct goes here one day\n]\n'
+} >"$H/.config/herdr/config.toml"
+out="$(verify "$H" --herdr)"
+hasnt "$out" "sidebar account token wired" "a trailing comment naming \$acct is NOT wired"
+has   "$out" "no claude sidebar row consumes it" "...and is reported as the missing consumer"
+
+# 8a-ii. A COMMENTED-OUT publisher must not satisfy the publisher half. The
+#        checker's own comment claimed its anchor prevented this and it did
+#        not: a hook carrying `# disabled: --token "acct=$acct"` was reported
+#        as wired. Same story as above -- fixed, then M13 survived until this
+#        row existed.
+H="$(new_home acct_comment_pub)"; wire "$H" >/dev/null
+# shellcheck disable=SC2016  # a literal token NAME, not an expansion
+acct_conf "$H" '$acct'
+hookf="$H/.claude/hooks/session-statusline.sh"
+sed -i 's|^\( *\)--token "acct=|\1# disabled: --token "acct=|' "$hookf"
+out="$(verify "$H" --herdr)"
+hasnt "$out" "sidebar account token wired" "a commented-out publisher is NOT wired"
+has   "$out" "the hook never publishes it" "...and is reported as the missing publisher"
+
+# 8b. The suite's copy of the range must BE the checker's copy. Without this the
+#     two drift silently and every row above starts answering a different
+#     question than production asks -- which is exactly what happened once.
+if grep -qF -- "$ACCT_RANGE" "$DOTFILES/scripts/verify-tools.sh"
+then ok "the suite's claude-row range is the checker's range"
+else bad "the suite's claude-row range has drifted from verify-tools.sh"; fi
+
+# 8c. The range must not stop at an INNER row's close. The claude array is an
+#     array OF ARRAYS; an end pattern tolerating indentation stops at the first
+#     multi-line row (27 of 61 lines here), and a token below that reads as
+#     absent. Asserted against the SHIPPED file, where the block really is
+#     multi-line.
+shipped_range_lines="$(shipped_claude_rows | wc -l)"
+if [[ "$shipped_range_lines" -gt 40 ]]
+then ok "the range spans the whole claude block ($shipped_range_lines lines)"
+else bad "the range truncates the claude block — only $shipped_range_lines lines"; fi
+# ...and must not run past it into the next agent's rows.
+if ! grep -qE '^(codex|gemini|agy|copilot)[[:space:]]*=' <<<"$(shipped_claude_rows)"
+then ok "the range stops before the next agent's rows"
+else bad "the range over-matches into another agent's rows"; fi
 
 # 9. "Could not read the row" must NOT be reported as "the row does not want it".
 #    The first version shelled out to python3+tomllib and treated ANY non-zero
