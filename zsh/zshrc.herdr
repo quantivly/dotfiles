@@ -458,32 +458,74 @@ _claude_fallback_profile() {
 _claude_pick_profile() {
   zmodload -F zsh/stat b:zstat 2>/dev/null
   zmodload zsh/datetime 2>/dev/null
-  local p name load age why
-  local -a candidates
+  local p name load age why pass
+  local -a candidates try
   local max_age=${CLAUDE_ACCOUNT_CACHE_MAX_AGE:-3600}
 
-  for p in "$HOME"/.clauth/profiles/*(N/); do
-    name="${p:t}"
-    [[ -f "$p/credentials.json" ]] || continue
-    if (( ${#CLAUDE_ACCOUNT_POOL} )); then
-      (( ${CLAUDE_ACCOUNT_POOL[(Ie)$name]} )) || continue
+  # WHICH POOL. With a tenant, that tenant's; without one — no tenant table, or a
+  # caller that resolved no directory — the flat CLAUDE_ACCOUNT_POOL, whose
+  # meaning is unchanged. That fallback is what a modular adopter runs on, and a
+  # row asserts the output is byte-identical to before any of this existed.
+  local tenant="${1:-}"
+  local -a pool overflow
+  _claude_pick_overflow=0
+  if [[ -n "$tenant" ]]; then
+    # A tenant with no pool entry yields an EMPTY member list, and an empty list
+    # is indistinguishable from "no pool configured" — which this loop reads as
+    # EVERY profile. So the one thing a caller must never get here is a silent
+    # widening: `--tenant typo` would quietly become "any account on the
+    # machine", including the ones this whole layer exists to keep separate.
+    # The table check catches a tenant NAMED in the table; this catches one
+    # supplied by a caller (CLAUDE_ACCOUNT_TENANT, hspawn --tenant), which never
+    # passed through it.
+    if (( ! ${+CLAUDE_TENANT_POOL[$tenant]} )); then
+      _claude_pick_skipped+=("tenant '$tenant' has no CLAUDE_TENANT_POOL entry — refusing to widen the pool to every account")
+      return 1
     fi
-    if why="$(_claude_profile_excluded "$name")"; then
-      _claude_pick_skipped+=("$name ($why)")
-      continue
+    pool=( ${=CLAUDE_TENANT_POOL[$tenant]} )
+    overflow=( ${=CLAUDE_TENANT_OVERFLOW[$tenant]-} )
+  else
+    pool=( "${CLAUDE_ACCOUNT_POOL[@]}" )
+  fi
+
+  # Two passes at most. Overflow is consulted ONLY when the pool produced no
+  # candidate at all: borrowing another tenant's account bills work to the wrong
+  # place, so it is paid only when the alternative is no isolation at all.
+  for pass in pool overflow; do
+    if [[ "$pass" == overflow ]]; then
+      (( ${#candidates} )) && break
+      (( ${#overflow} )) || break
+      try=( "${overflow[@]}" ); _claude_pick_overflow=1
+    else
+      try=( "${pool[@]}" )
     fi
-    load="$(_claude_profile_load "$name")" || load=""
-    age="$(_claude_profile_cache_age "$name")" || age=""
-    # No reading, or one too old to believe, sorts last rather than first: it is
-    # "unknown", and unknown must never outrank a measured 0%.
-    if [[ -z "$load" ]] || [[ -n "$age" && "$age" -gt "$max_age" ]]; then
-      load=101
-    fi
-    # zsh sorts these as strings, so the numeric fields are zero-padded. Width 4,
-    # not 3: `${(l:3::0:)N}` TRUNCATES anything longer, so a bogus load of 1000
-    # became "100" — or worse "000", ranking a spent account as the most idle one.
-    candidates+=("${(l:4::0:)load} ${(l:4::0:)$(_claude_holder_count "$name")} $name")
+    for p in "$HOME"/.clauth/profiles/*(N/); do
+      name="${p:t}"
+      [[ -f "$p/credentials.json" ]] || continue
+      if (( ${#try} )); then
+        (( ${try[(Ie)$name]} )) || continue
+      fi
+      if why="$(_claude_profile_excluded "$name")"; then
+        _claude_pick_skipped+=("$name ($why)")
+        continue
+      fi
+      load="$(_claude_profile_load "$name")" || load=""
+      age="$(_claude_profile_cache_age "$name")" || age=""
+      # No reading, or one too old to believe, sorts last rather than first: it is
+      # "unknown", and unknown must never outrank a measured 0%.
+      if [[ -z "$load" ]] || [[ -n "$age" && "$age" -gt "$max_age" ]]; then
+        load=101
+      fi
+      # zsh sorts these as strings, so the numeric fields are zero-padded. Width 4,
+      # not 3: `${(l:3::0:)N}` TRUNCATES anything longer, so a bogus load of 1000
+      # became "100" — or worse "000", ranking a spent account as the most idle one.
+      candidates+=("${(l:4::0:)load} ${(l:4::0:)$(_claude_holder_count "$name")} $name")
+    done
   done
+  # A pass that found nothing must not leave the overflow flag set: the
+  # announcement would otherwise tell the reader a session is on a borrowed
+  # account when it is actually on the shared credential.
+  (( ${#candidates} )) || _claude_pick_overflow=0
 
   # Nothing in the pool is usable. Fall back to an ACCOUNT, not to the shared
   # file: the exclusions that empty the pool (quarantine, disabled) correlate
@@ -522,14 +564,16 @@ _claude_pick_profile() {
 claude() {
   # Reset per call: these carry the picker's explanation out to the announcement,
   # and a second launch in the same shell must not inherit the first's reasons.
-  local _claude_pick_load="" REPLY=""
+  local _claude_pick_load="" REPLY="" _claude_pick_overflow=0
   local -a _claude_pick_skipped=()
+  # The resolver reports through these too, and they are shell-wide names.
+  local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
 
   # local -x, never a bare export: an export here would leak the config dir into
   # the pane's shell and silently pin every LATER command in it to this account.
   # -x still exports to this function's children, which is all that is needed.
   local -x CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
-  local profile="" dir="" holder=""
+  local profile="" dir="" holder="" tenant=""
 
   # An inherited CLAUDE_CONFIG_DIR is never overridden: that is what keeps a
   # `clauth start` pane, a herdmates teammate, and hspawn's own launch intact.
@@ -537,10 +581,21 @@ claude() {
      && command -v clauth >/dev/null 2>&1 && [[ -x "$(_claude_account_builder)" ]]; then
     if [[ -n "${CLAUDE_ACCOUNT_PROFILE:-}" ]]; then
       profile="$CLAUDE_ACCOUNT_PROFILE"
-    elif _claude_pick_profile; then
-      profile="$REPLY"
     else
-      profile=""
+      # Precedence, highest first: an inherited CLAUDE_CONFIG_DIR (above) >
+      # CLAUDE_ACCOUNT_PROFILE / claude-as (above) > a pinned tenant > the
+      # resolver. A pinned tenant skips the resolver but NOT the ranking inside
+      # its pool — pinning says where to bill, not which account to burn.
+      if [[ -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
+        tenant="$CLAUDE_ACCOUNT_TENANT"
+      elif (( $+functions[_claude_tenant_for] )) && _claude_tenant_for "$PWD"; then
+        tenant="$_CLAUDE_TENANT"
+      fi
+      if _claude_pick_profile "$tenant"; then
+        profile="$REPLY"
+      else
+        profile=""
+      fi
     fi
     if [[ -z "$profile" ]]; then
       # NEVER SILENT in either direction: which credential a session burns decides
@@ -584,11 +639,25 @@ claude() {
         elif (( _claude_pick_load > 100 )); then detail=" — no usage reading"
         else detail=" — $(( 10#$_claude_pick_load ))% used"; fi
       fi
+      # Which tenant decided, and whether the account was BORROWED. A session on
+      # another tenant's account is billing work to the wrong place; that is
+      # sometimes the right trade, but it is never something to discover later.
+      [[ -n "$tenant" ]] && detail="$detail · tenant '$tenant'"
+      (( _claude_pick_overflow )) && detail="$detail (overflow)"
       print -u2 -- "claude: account '$profile'$detail (isolated: ${CLAUDE_CONFIG_DIR/#$HOME/~})"
       (( ${#_claude_pick_skipped} )) && \
         print -u2 -- "        skipped: ${(j:, :)_claude_pick_skipped}"
     fi
   fi
+
+  # Pin gh to THIS directory before Claude freezes its environment. gh's token
+  # and the GitHub MCP plugin's are both fixed for the life of the process, so
+  # this is the one moment the pin can still be made right — the DO-596 incident
+  # shape (a session started in a work workspace root carried the personal token
+  # for its whole life and 404'd every private work repo), closed here.
+  # Guarded: _update_gh_config lives in zshrc.company, which a modular adopter
+  # does not have.
+  (( $+functions[_update_gh_config] )) && _update_gh_config
 
   {
     if [[ -n "$HERDR_PANE_ID" ]] && command -v herdmates >/dev/null 2>&1; then
@@ -656,7 +725,7 @@ herdr-lazy() {
 #   herdr agent prompt     -> the first instruction, waited on
 #
 # Usage:
-#   hspawn [-p|--profile <clauth-profile>] [-m|--model <model>] [-e|--effort <level>]
+#   hspawn [-p|--profile <clauth-profile>] [--tenant <tenant>] [-m|--model <model>] [-e|--effort <level>]
 #          [--mode <auto|acceptEdits|plan|dontAsk|default>] [-b|--base <ref>] [-n|--name <agent-name>]
 #          [--] <repo-dir> <slug> [prompt...]
 #
@@ -841,6 +910,8 @@ _hspawn_usage() {
     '                                  unlocked ~/.claude/.credentials.json, which a profile switch' \
     '                                  overwrites under every holder at once. Needed only when there is' \
     '                                  no clauth profile to use. See `claude-doctor`.' \
+    '      --tenant <tenant>           bill this spawn to a named tenant pool, instead of the one' \
+    '                                  the spawn directory resolves to' \
     '  -m, --model <model>             claude --model (an alias like opus, or a full model name)' \
     '  -e, --effort <level>            claude --effort (low|medium|high|xhigh|max)' \
     '      --mode <mode>               claude --permission-mode: auto (default) | acceptEdits | plan |' \
@@ -969,11 +1040,13 @@ _hspawn_await_agent() {
 
 hspawn() {
   local profile="" profile_set=0 model="" effort="" mode="auto" base="" name_override=""
+  local tenant="" tenant_set=0
   local endopts=0 shared=0
   # REPLY is how _claude_pick_profile answers, and it is a shell-wide name: local
   # here so a spawn cannot leave its choice behind in the calling shell.
   local REPLY=""
-  local _claude_pick_load=""
+  local _claude_pick_load="" _claude_pick_overflow=0
+  local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
   local -a _claude_pick_skipped=()
   local -a rest=()
   while (( $# )); do
@@ -985,7 +1058,7 @@ hspawn() {
         shared=1
         shift
         continue ;;
-      --profile=*|--model=*|--effort=*|--mode=*|--base=*|--name=*)
+      --profile=*|--model=*|--effort=*|--mode=*|--base=*|--name=*|--tenant=*)
         set -- "${1%%=*}" "${1#*=}" "${(@)argv[2,-1]}"
         continue ;;
       -h|--help)
@@ -1002,7 +1075,7 @@ hspawn() {
         shift
         rest=("$@")
         break ;;
-      -p|--profile|-m|--model|-e|--effort|--mode|-b|--base|-n|--name)
+      -p|--profile|-m|--model|-e|--effort|--mode|-b|--base|-n|--name|--tenant)
         # Empty as well as missing: `-p ''` / `--profile=` would otherwise set
         # profile_set with an empty profile, silently taking the no-profile path
         # (burning whatever account holds the global credentials) AND disabling
@@ -1018,6 +1091,7 @@ hspawn() {
           --mode)       mode="$2" ;;
           -b|--base)    base="$2" ;;
           -n|--name)    name_override="$2" ;;
+          --tenant)     tenant="$2"; tenant_set=1 ;;
         esac
         shift 2 ;;
       -?*)
@@ -1119,7 +1193,18 @@ hspawn() {
       # Called DIRECTLY, never as `$(...)`: the picker reports through globals
       # (the load that won, and every account it refused) and a subshell would
       # discard them — and with them the reason a spawn landed where it did.
-      if _claude_pick_profile; then profile="$REPLY"; else profile=""; fi
+      # Resolve the tenant for the directory being SPAWNED INTO, not for the
+      # lead's $PWD: a lead standing in one tree routinely spawns workers into
+      # another, and billing the worker to the lead's tenant is the same
+      # wrong-account bug one level down.
+      if (( tenant_set )); then
+        :
+      elif [[ -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
+        tenant="$CLAUDE_ACCOUNT_TENANT"
+      elif (( $+functions[_claude_tenant_for] )) && _claude_tenant_for "$repo"; then
+        tenant="$_CLAUDE_TENANT"
+      fi
+      if _claude_pick_profile "$tenant"; then profile="$REPLY"; else profile=""; fi
       if [[ -z "$profile" ]]; then
         # Could not name an account. Falling through to the shared credential is
         # the right choice — it is the old behaviour, and inventing a profile

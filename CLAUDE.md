@@ -2081,6 +2081,96 @@ CLAUDE_SETTINGS_REQUIRE=( model statusLine.command )
 Operational half — the connector cleanup that has to be done at claude.ai, what each finding
 means, and how to revive a dead stdio server: [docs/CLAUDE_ACCOUNT_MCP.md](docs/CLAUDE_ACCOUNT_MCP.md).
 
+### Tenants and pools (DO-599)
+
+**The pool answered "which account", never "which account for THIS directory".** One flat
+`CLAUDE_ACCOUNT_POOL` is directory-blind, so the account a session billed had no relationship to the
+code it was working on: a session started in a personal repository could burn a work account, and a
+work repository could burn a personal one, with nothing reporting the mismatch. gh identity and git
+identity were *already* routed by repository remote (`_gh_route_for`; `hasconfig:remote.*.url` in
+`~/.gitconfig.local`), so Claude account selection was the one identity on this machine that ignored
+the directory — and the three could disagree about the same repository, silently.
+
+`_claude_tenant_for <dir>` closes that using **the same rule, not a second one**: remote owner first,
+a path prefix only for a directory with **no** GitHub remote, then a default. It **reuses**
+`_gh_repo_remotes` / `_gh_url_owner` rather than copying them — a second URL parser here would give
+the machine two answers to "who owns this repo", which is the drift this layer exists to remove. It
+therefore inherits #127's rules verbatim: an unparsable GitHub-looking URL **counts as a GitHub
+remote and blocks the path table** (guess nothing), `git-error` **stops** rather than falling through
+to the default, and `~user` in a prefix is `bad-table`.
+
+**Mechanism here, accounts as data outside.** The table is `~/.config/claude-tenants.zsh` (override
+`$CLAUDE_TENANTS_FILE`), sourced by `zshrc.herdr` itself — *not* from `~/.zshrc.local`, which holds
+secrets (the secret-emission hook refuses to read it) and is sourced later anyway:
+
+```zsh
+CLAUDE_TENANT_ROUTES=( "quantivly=work" )              # owner-glob=tenant, any remote
+CLAUDE_TENANT_PATH_ROUTES=( "$HOME/quantivly=work" )   # only for a dir with NO GitHub remote
+CLAUDE_TENANT_DEFAULT=personal                         # empty = indeterminate, state `none`
+CLAUDE_TENANT_POOL=( work "quantivly-1 quantivly-2 quantivly-3" personal "personal" )
+CLAUDE_TENANT_OVERFLOW=( )                             # used ONLY when a pool has no candidate
+CLAUDE_TENANT_GH_DIR=( work "$HOME/.config/gh-quantivly" )
+```
+
+**`CLAUDE_ACCOUNT_POOL` keeps its exact meaning.** No table loaded → the resolver is skipped and the
+flat pool decides, byte-identically; a row asserts that, because it is what a modular adopter runs
+on. `zsh/zshrc.herdr` also stays sourceable **alone**: `_gh_repo_remotes` lives in `github.sh`, which
+a modular adopter does not have, so the resolver gates on `(( $+functions[_gh_repo_remotes] ))`,
+reports state `unsupported`, warns **once per shell**, and falls back to path routes plus the
+default. `unsupported` survives a later path match *and* the default — a caller must be able to tell
+a complete answer from one computed with half the table unreadable.
+
+Overrides, highest first: an inherited `CLAUDE_CONFIG_DIR` (never overridden) → `CLAUDE_ACCOUNT_PROFILE`
+/ `claude-as` → `CLAUDE_ACCOUNT_TENANT` / `hspawn --tenant` → the resolver. A pinned tenant skips the
+resolver but **not** the ranking inside its pool: pinning says where to bill, not which account to burn.
+
+`claude-tenants-apply-gh` derives the gh tables from the same data, so adding a root is one edit
+rather than two that can disagree. It is **defined in `zshrc.herdr` and deliberately never called
+there**: load order is `zshrc.herdr` → `zshrc.company`, which **assigns** `GH_ACCOUNT_ROUTES=(…)`
+wholesale and would discard anything added first → `~/.zshrc.local` → the machine's own overlay,
+which calls it as its last line. Only that caller knows the order has ended. It is additive and
+idempotent, and never removes or reorders a team default.
+
+Traps this area has, each of which produced a **passing test** first:
+
+- **An unknown tenant WIDENS the pool.** A tenant with no `CLAUDE_TENANT_POOL` entry yields an empty
+  member list, and the membership test reads an empty list as "no filter" — i.e. *every* account on
+  the machine, which is exactly what this layer exists to prevent. The table check catches a tenant
+  named in the table; a caller-supplied one (`CLAUDE_ACCOUNT_TENANT`, `hspawn --tenant`) never passes
+  through it, so the picker **refuses** rather than falling back to a pool nobody asked for.
+- **A corrupt `.git` directory is not a `git-error` fixture.** git calls that *"not a repository"*, so
+  it resolves to `no-repo`, and the row asserting "git-error stops" passed while testing nothing. A
+  real one is a `HOME` whose `~/.gitconfig` does not parse — how `test-gh-routing.sh` makes one, and
+  reachable in production because `~/.gitconfig` is a managed symlink into this repo.
+- **A suite inherits `CLAUDE_CONFIG_DIR` from the developer's own isolated session**, and `claude()`'s
+  first act is to honour an inherited one and skip everything below it — so four of five integration
+  rows passed while asserting nothing. The same leak `test-hspawn.sh` already records for its spawn
+  rows. `claude()`'s isolation block is *also* gated on `clauth` being present and the account-dir
+  builder being executable, and a fixture lacking either never reaches the resolver — which matters
+  because "the resolver was not called" is precisely what those rows assert.
+- **`claude()` calls `_update_gh_config` before the exec** (guarded — it lives in `zshrc.company`).
+  gh's token and the GitHub MCP plugin's are both frozen for the life of the process, so that is the
+  one moment the pin can still be made right: the DO-596 incident shape, closed where it can be.
+
+**Both overflow rows were decoration on the first pass, and they failed differently** — worth more
+than the rows themselves, because neither reason is visible by reading the row:
+
+- *The fixture could not reach the branch.* "Overflow is NOT consulted while the pool still has one"
+  used a tenant with **no overflow list at all**, so the loop's second guard (*overflow is empty*)
+  ended the pass by itself and the row passed with the "pool still has candidates" check deleted.
+  It needs a tenant with a working pool **and** a non-empty overflow.
+- *The row's output was identical either way.* "A pool and overflow that are both empty do not claim
+  an overflow pick" left the pick failing, so it printed nothing whatever the flag held. A reset only
+  matters when the pick still SUCCEEDS by another route, so the fixture needs a working last-resort
+  account for the assertion to be about anything.
+
+Ask of every new row: **what single change to the code would make this fail?** If the answer is
+"none", it is decoration — and it will look exactly like a passing row until a mutant says otherwise.
+
+State tables: `scripts/test-hspawn.sh` (269 → 315) and `scripts/test-gh-routing.sh` (199 → 207).
+Every fix is pinned by a mutant that dies (19 mutants, 19 deaths), and every mutation is dry-run for
+applicability first — a mutation that no longer applies reads exactly like a surviving mutant.
+
 ## GNOME Desktop Configuration
 
 Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **bottom** dock, empty desktop, tmux-friendly keys) applied reproducibly via **stock GNOME/Yaru only** — no third-party extensions or themes.

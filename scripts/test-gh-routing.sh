@@ -1050,6 +1050,59 @@ check "no hand-rolled report glyphs" \
 check "no writer truncates a live cache file in place" \
       "$(grep -cE '> *"\$cache/\$\{(d|dir):t\}"' "$COMPANY_SH")" "0"
 
+echo "=== tenant-derived gh routes (claude-tenants-apply-gh, DO-599) ==="
+#
+# One table, two mechanisms. The helper is ADDITIVE ONLY, because zshrc.company
+# ASSIGNS GH_ACCOUNT_ROUTES=(…) wholesale and this runs after it — anything that
+# removed or reordered an entry would silently drop a team default, and a gh
+# route that quietly stops existing is the #127 incident over again.
+
+HERDR_RC="$DOTFILES/zsh/zshrc.herdr"
+apply() {   # $1 = extra prelude -> "ROUTES|PATH_ROUTES|DEFAULT"
+    zsh -f -c "
+      source '$GITHUB_SH' >/dev/null 2>&1
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDR_RC' >/dev/null 2>&1
+      CLAUDE_TENANT_ROUTES=( 'quantivly=work' 'Acme-LTD=client' )
+      CLAUDE_TENANT_PATH_ROUTES=( '/roots/work=work' )
+      CLAUDE_TENANT_DEFAULT=home
+      CLAUDE_TENANT_GH_DIR=( work /gh-work client /gh-personal home /gh-personal )
+      $1
+      claude-tenants-apply-gh
+      print -r -- \"\${(j:,:)GH_ACCOUNT_ROUTES}|\${(j:,:)GH_ACCOUNT_PATH_ROUTES}|\$GH_ACCOUNT_DEFAULT_DIR\"
+    " 2>/dev/null
+}
+
+check "it adds every entry the tenant table implies" \
+      "$(apply '')" \
+      "quantivly=/gh-work,Acme-LTD=/gh-personal|/roots/work=/gh-work|/gh-personal"
+
+check "an existing team default is left alone" \
+      "$(apply "GH_ACCOUNT_DEFAULT_DIR=/team-default" | cut -d'|' -f3)" "/team-default"
+
+check "an existing owner route is neither duplicated nor reordered" \
+      "$(apply "GH_ACCOUNT_ROUTES=( 'quantivly=/team-work' )" | cut -d'|' -f1)" \
+      "quantivly=/team-work,Acme-LTD=/gh-personal"
+
+check "an existing path route is neither duplicated nor reordered" \
+      "$(apply "GH_ACCOUNT_PATH_ROUTES=( '/roots/work=/team-work' )" | cut -d'|' -f2)" \
+      "/roots/work=/team-work"
+
+check "running it twice changes nothing (idempotent)" \
+      "$(apply 'claude-tenants-apply-gh')" \
+      "quantivly=/gh-work,Acme-LTD=/gh-personal|/roots/work=/gh-work|/gh-personal"
+
+check "a tenant with no gh dir contributes no entry" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work /gh-work )" | cut -d'|' -f1)" "quantivly=/gh-work"
+
+check "a default tenant with no gh dir leaves the default empty, not garbage" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work /gh-work )" | cut -d'|' -f3)" ""
+
+# The mechanism itself stays untouched: _gh_route_for is covered by the rows
+# above, and the tenant layer only ever feeds it data.
+check "the herdr layer neither defines nor edits _gh_route_for" \
+      "$(grep -c '^_gh_route_for()' "$HERDR_RC")" "0"
+
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
