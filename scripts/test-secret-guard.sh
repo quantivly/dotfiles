@@ -233,6 +233,45 @@ check "allows the redacted read — the remedy the deny message names" \
       "$(ask 'tail -8 ~/.zshrc.local | ~/.dotfiles/scripts/redact-secrets.sh')" "allow"
 
 echo
+echo "=== ...and the verb must be reading THE FILE, not merely present ==="
+# The rule's two conditions were independent existence tests over the WHOLE
+# command string, so nothing tied the verb to the file: any compound command
+# that named a credential file anywhere and read some OTHER file anywhere was
+# refused. Hit on 2026-09-09 while authoring documentation about
+# ~/.gitconfig.local and then grepping the draft to check the result. Group 2,
+# and the kind of row that decides whether the hook survives the week.
+check "allows: the verb reads a different file" \
+      "$(ask 'head -5 README.md && echo mentions ~/.zshrc.local')" "allow"
+check "allows: the verb is in an unrelated later segment" \
+      "$(ask 'echo ~/.zshrc.local > notes.txt; sed -n 1p README.md')" "allow"
+
+# A heredoc BODY is content being WRITTEN, not a file being read — even when the
+# prose inside it names a credential file next to a reading verb.
+authoring_prose="$(printf '%s\n' \
+  'python3 - <<PY' \
+  "s = 'the ~/.gitconfig.local file carries the work identity'" \
+  'PY' \
+  'grep -n hasconfig NOTES.md')"
+check "allows: authoring prose about the file, then grepping the draft" \
+      "$(ask "$authoring_prose")" "allow"
+
+heredoc_prose="$(printf '%s\n' \
+  "cat > doc.md <<'PY'" \
+  'never cat ~/.zshrc.local in a transcript' \
+  'PY')"
+check "allows: a reading verb inside heredoc prose" \
+      "$(ask "$heredoc_prose")" "allow"
+
+# ...while a read in ANY segment is still a read. Segmenting the command must not
+# become a way to smuggle one past the rule.
+check "refuses: the read is in the second segment" \
+      "$(ask 'cd /tmp && cat ~/.gitconfig.local')" "deny"
+check "refuses: redirected into a reader" \
+      "$(ask 'grep KEY < ~/.zshrc.local')" "deny"
+check "refuses: piped onward to another command" \
+      "$(ask 'cat ~/.zshrc.local | sort')" "deny"
+
+echo
 echo "=== the guard fails OPEN, always ==="
 # A hook that blocks the shell when it breaks gets disabled wholesale, taking
 # its protection with it. Every malformed input must allow.

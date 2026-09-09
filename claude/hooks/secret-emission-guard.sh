@@ -55,6 +55,54 @@ cmd="$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null
 # false positive that gets a hook turned off.
 probe="$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
 
+# --- credential-file reads -------------------------------------------------
+#
+# Deny only when ONE command segment both names a credential file and applies a
+# reading verb to it. The two conditions used to be independent existence tests
+# over the whole command string, which denied any compound command that merely
+# mentioned such a file somewhere and read some *other* file elsewhere -- e.g.
+# authoring documentation about ~/.gitconfig.local and then grepping the draft.
+# That is the false-positive class this file's header says costs the whole guard.
+#
+# Heredoc BODIES are dropped first: their content is data being written, not a
+# file being read, so prose that names a credential file is not a read of it.
+CFR_WHY=""
+credential_file_read() {
+  local src seg raw hit verb
+
+  # Drop heredoc bodies, keeping the line that carries the << operator.
+  src="$(printf '%s\n' "$cmd" | awk '
+    tag != "" { if ($0 == tag || $0 == tag";") tag = ""; next }
+    {
+      if (match($0, /<<-?[ \t]*'\''?[A-Za-z_][A-Za-z0-9_]*'\''?/)) {
+        t = substr($0, RSTART, RLENGTH)
+        gsub(/^<<-?[ \t]*|'\''/, "", t)
+        tag = t
+      }
+      print
+    }')"
+
+  # One segment per shell separator; a read cannot span them.
+  # `|| [[ -n $seg ]]` so a final segment with no trailing newline is still seen.
+  while IFS= read -r seg || [[ -n "$seg" ]]; do
+    [[ -n "$seg" ]] || continue
+
+    # Path on the RAW segment: `cat "$HOME/.zshrc.local"` must still match.
+    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json) ]] || continue
+    hit="${BASH_REMATCH[1]}"
+
+    # Verb on the QUOTE-STRIPPED segment: a message naming the file is not a read.
+    raw="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
+    [[ "$raw" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]] || continue
+    verb="${BASH_REMATCH[2]}"
+
+    CFR_WHY="\`$verb\` on \`$hit\`, which holds credentials"
+    return 0
+  done < <(printf '%s\n' "$src" | sed -E 's/(\|\||&&|[;|&])/\n/g')
+
+  return 1
+}
+
 why=""
 case "$probe" in
   # Prints a token to stdout. That is its entire purpose.
@@ -100,9 +148,8 @@ if [[ -z "$why" ]]; then
   # deliberately not verbs here. A python3 heredoc that opens the file is not
   # caught either: it prints nothing by default, and blocking it would refuse
   # ordinary edits to the very file people are told to put their secrets in.
-  elif [[ "$cmd" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json) ]] \
-     && [[ "$probe" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]]; then
-    why="\`${BASH_REMATCH[2]}\` on a file that holds credentials (CLAUDE.md sends every secret to ~/.zshrc.local)"
+  elif credential_file_read; then
+    why="$CFR_WHY"
   fi
 fi
 
