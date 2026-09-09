@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **gh routes a work-tree directory with no GitHub remote to the work account
+  (`GH_ACCOUNT_PATH_ROUTES`, DO-596).** `~/quantivly/qspace` holds two work repositories
+  and is itself none, so the remote rule had nothing to say and the personal default
+  answered — inside the work tree. On 2026-09-09 a Claude Code session started there
+  inherited the personal `GH_TOKEN` and `GITHUB_PERSONAL_ACCESS_TOKEN`; its Bash-tool
+  shells (`zsh -c`, no `.zshrc`) kept them and the GitHub MCP plugin's bearer header was
+  fixed to them at startup, so every private work repository 404'd for the life of the
+  session. A path route is consulted only for a directory with *no* GitHub remote — not a
+  repository, no remotes, or only non-GitHub ones — and never for one that has a remote,
+  matched or not: precedence is remote owner route → path route → default, so a
+  personal-remote repository under `~/quantivly` stays personal exactly as git identity
+  signs it, and work repositories outside the tree (`~/.dotfiles`) still route by remote.
+  `git-error` still stops before any of them. The table is validated whole (a relative
+  prefix is `bad-table`, not `$PWD` routing by typo), the match is by resolved path
+  component (`~/quantivly-other` is not under `~/quantivly`), `_gh_configured_dirs` lists
+  the route's dir so the refresher caches its token, and `gh-doctor` names the route.
+  A GitHub URL the parser rejects is a GitHub remote nobody can read, not "no GitHub
+  remote": it blocks the path table and the default answers, as before, and `gh-doctor`
+  lists it as a ⚠. A dir named by both tables keeps both reasons in the doctor's table
+  (`route 'quantivly' + path route '~/quantivly'`), and a prefix that does not exist on
+  disk is a ⚠ that can never fire — an independent review found the path table entirely
+  invisible to the doctor on the shipped configuration, since it shares the owner route's
+  dir. `~user` prefixes are `bad-table`. Forty-seven new checks in
+  `scripts/test-gh-routing.sh` (152 → 199), including the guard rows that pin the
+  precedence.
 - **`dotfiles-doctor` names a `safe.directory`-polluted gitconfig, and says which entries are
   dead (DO-589).** `~/.gitconfig` is a symlink into the checkout and `git config --global`
   writes through it, so a `safe.directory` entry added by anything lands in a tracked file in
@@ -122,6 +147,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The gh token cache is replaced, never truncated (`_gh_cache_write`, DO-596).** Both
+  writers — the refresher every interactive shell start spawns, and `gh-refresh-tokens` —
+  rewrote the live cache files with `printf > file`, which truncates before it writes, and
+  set mode 600 only afterwards. The hook reads those files at shell start, at the first
+  prompt and on every `cd`, so a shell starting while another shell's refresher was
+  mid-write read an *empty* token and started unpinned — and a Claude Code session
+  launched from it carried no GitHub credential at all, for its whole life. herdr's
+  `pane run` and Herdmates teammates start several panes at once, which is that state;
+  the files were rewritten twice in twenty minutes while this was being diagnosed. The
+  writer now creates a temp in the same directory and renames it into place: a reader
+  sees the old token or the new one, never nothing. The chmod before the rename guarantees
+  the live file's mode; `umask 077` only closes the moment before it, inside a 700
+  directory. The temp is named by the real PID (`sysparams[pid]`): `$$` and `$RANDOM` are
+  both inherited unchanged across a zsh fork, so the disowned shell-start refresher and a
+  foreground `gh-refresh-tokens` would otherwise share one temp name and the loser would
+  print a false ✗. A directory at the cache path is refused rather than having the token
+  `mv`'d *into* it with a ✓. It lives outside the opt-in gate, where `gh-refresh-tokens`
+  already is. Two state-table rows tell a replace from a truncate by the live file's inode,
+  a third refuses any truncating redirect onto a live cache file at the source, and three
+  more pin the PID source and the directory refusal — the inode rows needed one fixture HOME
+  each, since a leftover refresher from an earlier row can free the recorded inode and hand
+  it straight back to the new temp.
 - **A flaky row in `scripts/test-gh-routing.sh`** — "a config dir named like a legacy key
   survives the purge" failed roughly one run in five under load, which by that suite's own
   standard ("a flaky row in a suite about silent failures is worse than no row") makes the
