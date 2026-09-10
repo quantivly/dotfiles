@@ -27,3 +27,9 @@ Thumbs.db
 
 # Poetry auth tokens (contains PyPI credentials)
 config/pypoetry/auth.toml
+
+# Python bytecode. scripts/gha-yaml-shell.py is imported by the DO-608 workflow
+# guard, so running the guard or its state table leaves a __pycache__ beside it;
+# one such .pyc was committed and reached main in #134 before this rule existed.
+__pycache__/
+*.pyc
