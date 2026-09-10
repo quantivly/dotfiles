@@ -429,6 +429,163 @@ _claude_profile_cache_age() {
   print -r -- $(( EPOCHSECONDS - mtime ))
 }
 
+# One profile's usage numbers. Every field is either an integer or the literal
+# string `unknown` — there is no third answer, and no field silently becomes 0.
+#
+# Usage: _claude_profile_metrics <profile>
+# Sets:  _CPM_U5   5h utilization, 0-100
+#        _CPM_R5   seconds until the 5h window resets (negative = already rolled)
+#        _CPM_UW   worst of seven_day and every weekly_scoped window
+#        _CPM_AGE  seconds since the cache was written
+#        _CPM_TIER plan tier, informational only — NEVER a ranking input
+#
+# ABSENT IS ITS OWN STATE, and this is measured, not defensive: on 2026-09-10
+# three of five profiles here had `five_hour: {"utilization": 0.0}` with **no
+# resets_at key at all** — absent exactly where utilization is 0, i.e. a window
+# that has not started yet. Reading a missing reset as 0 would put every fresh
+# window at maximum "about to reset" urgency, which is the precise opposite of
+# the truth, and would hand it the largest use-it-or-lose-it bonus in the pool.
+_claude_profile_metrics() {
+  local f="$HOME/.clauth/profiles/$1/usage_cache.json" line u5 rs uw tier secs
+  _CPM_U5=unknown; _CPM_R5=unknown; _CPM_UW=unknown
+  _CPM_AGE=unknown; _CPM_TIER=unknown
+  [[ -r "$f" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  zmodload zsh/datetime 2>/dev/null
+
+  # One jq fork per profile, emitting a TSV line. Never `// 0`: a missing number
+  # and a measured zero are different answers, and this whole function exists to
+  # keep them apart.
+  #
+  # `// null`, NOT `// empty`, for the positional fields. Inside `[ ... ]` an
+  # `empty` produces NO element rather than a blank one, so every absent field
+  # SHIFTS the remaining ones left and they are read into the wrong variables.
+  # Measured while writing the rows: a profile with no `resets_at` put its weekly
+  # figure in the reset slot and left uW `unknown`; a profile with no `five_hour`
+  # block at all reported its seven_day number as the 5h utilization. `null`
+  # keeps the column and `@tsv` renders it as the empty string.
+  # (`empty` is still correct INSIDE the weekly array, where dropping a
+  # non-number is exactly what is wanted before `max`.)
+  #
+  # The tier is an OBJECT on a Max plan and a STRING on Team (measured:
+  # `{"Max":20}` vs `"Team"`), so it is normalised to its key rather than
+  # tostring'd into a JSON blob nobody can read.
+  line="$(jq -r '
+      [ (.five_hour.utilization // null | if . == null then null else floor end),
+        (.five_hour.resets_at   // null),
+        ([ (.seven_day.utilization // empty),
+           ((.weekly_scoped // []) | .[]? | .utilization // empty) ]
+           | map(select(type == "number"))
+           | if length > 0 then (max | floor) else null end),
+        (.plan.tier // null
+           | if type == "object" then (keys | .[0])
+             elif . == null then null
+             else tostring end)
+      ] | @tsv' "$f" 2>/dev/null)" || return 1
+  [[ -n "$line" ]] || return 1
+
+  # `${(@ps:\t:)line}`, NOT `IFS=$'\t' read`. TAB is an IFS *whitespace*
+  # character, so `read` folds a run of them into ONE delimiter and drops
+  # trailing empties — which shifts every field after an absent one into the
+  # wrong variable. That is the same defect as the `// empty` one above, one
+  # layer down, and fixing the jq alone left it fully intact: measured, a profile
+  # with no resets_at still read its weekly figure as the reset. This split
+  # preserves empty columns.
+  local -a _cpm
+  _cpm=( "${(@ps:\t:)line}" )
+  u5="${_cpm[1]}"; rs="${_cpm[2]}"; uw="${_cpm[3]}"; tier="${_cpm[4]}"
+  [[ -n "$u5"   ]] && _CPM_U5="$u5"
+  [[ -n "$uw"   ]] && _CPM_UW="$uw"
+  [[ -n "$tier" ]] && _CPM_TIER="$tier"
+
+  # RFC 3339 with microseconds. strftime -r parses to the second, so the
+  # fractional part is cut first. A parse failure leaves `unknown` — the one
+  # thing it must never leave is a number.
+  if [[ -n "$rs" ]]; then
+    if secs="$(strftime -r '%Y-%m-%dT%H:%M:%S' "${rs%%.*}" 2>/dev/null)" && [[ -n "$secs" ]]; then
+      _CPM_R5=$(( secs - EPOCHSECONDS ))
+    fi
+  fi
+  _CPM_AGE="$(_claude_profile_cache_age "$1")" || _CPM_AGE=unknown
+  return 0
+}
+
+# The score for one candidate, in centipoints. Higher is better; may be negative.
+#
+# Usage: _claude_pick_score <u5> <r5> <uW> <holders>
+#   r5 and uW accept the literal `unknown`.
+#
+# INTEGER ARITHMETIC ONLY — no zsh/mathfunc. The existing picker is integer-only,
+# the state tables compare exact strings, and the from-scratch test PATH cannot
+# vouch for a module.
+#
+#   base  = 5h headroom. The backbone: how much of this window is left.
+#   bonus = use-it-or-lose-it. Scales with BOTH headroom and closeness to the
+#           reset, so a nearly-spent window resetting soon earns little and a
+#           fresh window earns nothing extra.
+#   weekf = weekly headroom as a MULTIPLIER, never a gate. This is the deliberate
+#           departure from the spec, and it is measured rather than argued: two
+#           Team seats here read seven_day 100 with live sessions on them, there
+#           were ZERO weekly-reset refusals in 750 transcripts over 7 days, and
+#           the block a Team seat actually hits is "You've hit your individual
+#           spend limit — ask your admin", whose remedy is a person, not a window
+#           rolling over. Refusing locally never makes such an account usable
+#           sooner, and it would have taken out the entire work pool at once.
+#   crowd = holders, costing more as the account fills. W_HOLDER alone spreads
+#           sessions for rotation-race safety; u5*W_CROWD makes each additional
+#           holder dearer on an account that is already busy.
+_claude_pick_score() {
+  local u5="$1" r5="$2" uw="$3" h="${4:-0}"
+  local w_expire=${CLAUDE_PICK_W_EXPIRE:-50} w_holder=${CLAUDE_PICK_W_HOLDER:-3}
+  local w_crowd=${CLAUDE_PICK_W_CROWD:-15} week_low=${CLAUDE_PICK_WEEK_LOW:-15}
+  local h5 hw exp weekf base bonus crowd
+
+  # An unknown 5h reading ranks as fully spent HERE, but the caller has already
+  # classed it `unknown` and sorts it after every measured candidate — this is
+  # only so the arithmetic below has a number to work with.
+  [[ "$u5" == unknown ]] && u5=100
+  h5=$(( 100 - u5 ))
+  (( h5 < 0 )) && h5=0
+
+  if [[ "$uw" == unknown ]]; then
+    # Unknown must not outrank a measured value, but neither may it INVENT a
+    # penalty: an unread weekly window is not a spent one. Class handles rank.
+    weekf=100
+  else
+    hw=$(( 100 - uw ))
+    (( hw < 0 )) && hw=0
+    if (( hw >= week_low )); then weekf=100; else weekf=$(( hw * 100 / week_low )); fi
+  fi
+
+  # UNKNOWN r5 earns NO bonus — the same as a window nowhere near its reset.
+  # Measured: resets_at is absent exactly when the window has not started, so
+  # "no reset instant" means "the whole window is ahead", which is precisely the
+  # case with nothing to use or lose. It is also the conservative reading.
+  #
+  # A NEGATIVE r5 earns no bonus either, and this departs from §5.3's arithmetic
+  # deliberately. `100 - min(100, max(0,r5)*100/18000)` yields 100 — the MAXIMUM
+  # use-it-or-lose-it urgency — for a window that has already reset, which is
+  # backwards: there is nothing left to lose, the window is fresh. The spec
+  # reached that value only because it routed r5 < 0 through a "post-reset"
+  # class that re-fetched the cache first, and no such refresh exists (there is
+  # no fetch entry point in clauth outside the TUI and the daemon). Without it
+  # the cached u5 belongs to the PREVIOUS window and is therefore an upper bound
+  # on the true one — pessimistic, which is safe — so the reading is kept and
+  # only the bonus is dropped. Treating the whole profile as `unknown` instead
+  # would rank it after every measured candidate, and on this machine the
+  # account with the most headroom by far is one whose window had just rolled.
+  if [[ "$r5" == unknown ]] || (( r5 >= 18000 )) || (( r5 <= 0 )); then
+    exp=0
+  else
+    exp=$(( 100 - (r5 * 100 / 18000) ))
+  fi
+
+  base=$(( h5 * 100 ))
+  bonus=$(( h5 * exp * w_expire / 100 ))
+  crowd=$(( h * (w_holder * 100 + u5 * w_crowd) ))
+  print -r -- $(( (base + bonus) * weekf / 100 - crowd ))
+}
+
 # clauth's own active profile, when it has a credential and is not excluded.
 # This is the last-resort ACCOUNT: it keeps a session isolated when every pool
 # member is unusable, instead of dropping it onto the shared global file.
