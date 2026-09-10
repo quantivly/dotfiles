@@ -532,10 +532,15 @@ reconcile_credential() {
     # directories and skips any without one, deliberately needing no TOML parser),
     # so this adds no new notion of what a profile is.
     #
-    # `-f` OR `-L`: a dangling store credential is a state the locked function
-    # reports on (`the clauth store credential is itself a symlink`), so it must
-    # still be reached, and `-f` alone follows the link and calls it absent.
-    if [[ ! -f "$pdir/credentials.json" && ! -L "$pdir/credentials.json" ]]; then
+    # `-f` ALONE, and the `-L` this first carried was removed once a mutant proved
+    # it changed nothing observable. The claim was that `-L` had to be here so a
+    # DANGLING store credential still reached the diagnosis that names it — but
+    # this gate only decides whether to LOCK. `_reconcile_credential_locked` runs
+    # either way, and its first test is `[[ -L "$S" ]]`, which reports
+    # `the clauth store credential is itself a symlink` and returns 1 without
+    # writing anything. So the dangling case needs no lock either, and a branch
+    # whose only mutant cannot die is a branch that reads as coverage.
+    if [[ ! -f "$pdir/credentials.json" ]]; then
         lock_fd=""
     elif command -v flock >/dev/null 2>&1; then
         # `exec {fd}>file 2>/dev/null` has NO COMMAND, so BOTH redirections apply
@@ -756,10 +761,7 @@ reconcile_all() {
     shopt -s nullglob
     for d in "$ROOT"/*/; do
         profile="$(basename "$d")"
-        [[ -d "$PROFILES_DIR/$profile" ]] || {
-            warn "$profile: an account dir with no clauth profile — left alone"
-            continue
-        }
+        [[ -d "$PROFILES_DIR/$profile" ]] || warn "$profile: an account dir with no clauth profile — left alone"
         seen=1
         reconcile_credential "$profile" "$PROFILES_DIR/$profile" "${d%/}" || rc=1
     done

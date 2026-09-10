@@ -1830,10 +1830,14 @@ Design points that are load-bearing rather than preferences:
   side effect. During a profile rename the cost compounds — each stage leaves a compat symlink at the
   old account-dir path, the reconciler visits it, and the lock reappears at exactly the store name
   the NEXT stage needs free, so the migration stalls on the reconciler's own leftovers and has to
-  sweep them before every stage. The gate is `credentials.json` present (`-f` **or** `-L`, so a
-  dangling store credential still reaches the diagnosis that names it), which is the same
+  sweep them before every stage. The gate is `credentials.json` present, which is the same
   "is this a launchable profile" test `--all` already uses — no new notion of what a profile is, and
-  no TOML parser, both deliberate.
+  no TOML parser, both deliberate. **It was written as `-f` OR `-L`** on the reasoning that a
+  dangling store credential had to keep reaching the diagnosis that names it; a mutant proved that
+  false and the `-L` was removed. The gate only decides whether to LOCK:
+  `_reconcile_credential_locked` runs either way, and its first test reports
+  `the clauth store credential is itself a symlink` and returns without writing. A branch whose only
+  mutant cannot die reads as coverage, so it went.
   **The remedy text was part of the loop.** The refusal said `Run 'clauth login <p>'`, and following
   that during a rename is what *materialises* the store at a name the migration needs free. It now
   says so: `clauth login` if it should be a profile, otherwise remove the empty store dir, because
