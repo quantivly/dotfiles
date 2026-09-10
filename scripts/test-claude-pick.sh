@@ -426,5 +426,110 @@ check "a held lock does not block the pick past the timeout, and warns" \
          timeout 20 zsh -f "$TMPROOT/locktest.zsh" </dev/zero 2>/dev/null)" "warned"
 
 #-----------------------------------------------------------------------------
+echo
+echo "=== backpressure: measured, warned about, and NOT refused by default ==="
+#
+# D6 as amended: this laptop is deliberately oversubscribed and must keep
+# working, so the picker chooses an account rather than policing the box. A
+# refusal happens only when a *_MAX knob is explicitly set.
+
+mkproc() {   # $1 = loadavg first field, $2 = cpu online spec, $3 = SwapTotal kB, $4 = SwapFree kB
+    PROCR="$TMPROOT/proc.$RANDOM"
+    mkdir -p "$PROCR/proc" "$PROCR/sys/devices/system/cpu"
+    printf '%s 1.00 1.00 1/1 1\n' "$1" > "$PROCR/proc/loadavg"
+    printf '%s\n' "$2" > "$PROCR/sys/devices/system/cpu/online"
+    { printf 'MemTotal:       1 kB\n'
+      printf 'SwapTotal: %s kB\n' "$3"
+      printf 'SwapFree:  %s kB\n' "$4"; } > "$PROCR/proc/meminfo"
+}
+bp() {   # $1 = extra prelude -> "<rc>:<warning count>"
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID
+      export HOME='$FHOME'
+      CLAUDE_PICK_PROC_ROOT='$PROCR'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      typeset -ga _claude_pick_warnings=()
+      ${1:-}
+      _claude_pick_backpressure; rc=\$?
+      print -r -- \"\$rc:\${#_claude_pick_warnings}\"" 2>/dev/null
+}
+
+new_home bp1
+mkproc 1.00 0-7 8000000 8000000     # load 1.0 on 8 cpus = 12%, no swap used
+check "a quiet machine warns about nothing"              "$(bp)" "0:0"
+
+mkproc 24.00 0-7 8000000 4000000    # load 24 on 8 = 300%, swap 50%
+check "a loaded machine warns"                           "$(bp)" "0:1"
+check "...and does NOT refuse, because no MAX is set"    "$(bp | cut -d: -f1)" "0"
+check "...but refuses once LOAD_MAX is set and exceeded" \
+      "$(bp 'CLAUDE_PICK_LOAD_MAX=200' | cut -d: -f1)"   "3"
+check "...and not when LOAD_MAX is set above the load" \
+      "$(bp 'CLAUDE_PICK_LOAD_MAX=400' | cut -d: -f1)"   "0"
+
+mkproc 1.00 0-7 8000000 2000000     # swap 75%
+check "swap alone warns"                                 "$(bp)" "0:1"
+check "...and refuses only with SWAP_MAX set"            "$(bp 'CLAUDE_PICK_SWAP_MAX=70' | cut -d: -f1)" "3"
+
+# SwapTotal 0 is a machine with no swap, not a machine at 100% swap. Dividing by
+# it is a division by zero; reporting 100 would warn forever.
+mkproc 1.00 0-7 0 0
+check "SwapTotal 0 is skipped, not read as 100%"         "$(bp)" "0:0"
+
+# Counting ONLINE cpus, not the highest index: with cpus offline the load
+# threshold would otherwise be wrong in whichever direction the gap falls.
+mkproc 6.00 0-1,4-5 8000000 8000000  # 4 cpus, load 6 = 150% -> warns
+check "offline cpus are excluded from the thread count"  "$(bp)" "0:1"
+mkproc 6.00 0-7 8000000 8000000      # 8 cpus, load 6 = 75% -> quiet
+check "...and the same load on 8 threads is quiet"       "$(bp)" "0:0"
+
+# An unreadable /proc must not invent a number.
+PROCR="$TMPROOT/proc-empty"; mkdir -p "$PROCR"
+check "an unreadable /proc warns about nothing and does not refuse" "$(bp)" "0:0"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== exhaustion: name the soonest reset, and name NO time when none is known ==="
+#
+# resets_at is absent whenever the 5h window has not started — measured on three
+# of five profiles here — so "no reset instant" is the COMMON case, not an edge.
+
+# `|` as the separator, NOT `:`. The reset text is "%H:%M", so a colon separator
+# is split by the TIME's own colon — `cut -d: -f2` returned "Thu 01 Jan 00" and
+# the row failed against perfectly correct output.
+lb() {   # profiles... -> "<pick>|<reset text>"
+    zrun "_claude_pick_least_bad $* >/dev/null
+          print -r -- \"\$REPLY|\$(_claude_pick_reset_text \$_CLAUDE_PICK_LEASTBAD_R5)\""
+}
+
+new_home x1
+mkprof a1 '{"five_hour":{"utilization":99.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"}}'
+mkprof b2 '{"five_hour":{"utilization":99.0,"resets_at":"2098-01-01T00:00:00.000000+00:00"}}'
+check "the soonest reset wins"                  "$(lb a1 b2 | cut -d\| -f1)" "b2"
+check "...and its reset instant is named"       "$(lb a1 b2 | cut -d\| -f2 | grep -c '[0-9][0-9]:[0-9][0-9]')" "1"
+
+# A known reset beats an unknown one: an account that might free up in four
+# minutes is a better bet than one nobody can time.
+new_home x2
+mkprof a1 '{"five_hour":{"utilization":99.0}}'
+mkprof b2 '{"five_hour":{"utilization":99.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"}}'
+check "a KNOWN reset is preferred over an unknown one" "$(lb a1 b2 | cut -d\| -f1)" "b2"
+# ORDER MATTERS, and the row above cannot see it: with the unknown listed first
+# it is only ever a candidate for an empty slot, so a mutant that lets an unknown
+# overwrite a known one survives. Listing the known one FIRST is what exercises
+# the overwrite.
+check "...whatever the order they are considered in" "$(lb b2 a1 | cut -d\| -f1)" "b2"
+
+# The case the spec's message could not express.
+new_home x3
+mkprof a1 '{"five_hour":{"utilization":99.0}}'
+mkprof b2 '{"five_hour":{"utilization":98.0}}'
+check "with NO known reset an account is still named" \
+      "$(lb a1 b2 | cut -d\| -f1 | grep -cE '^(a1|b2)$')" "1"
+check "...and no time is invented"               "$(lb a1 b2 | cut -d\| -f2)" ""
+check "the reset formatter returns empty for unknown, not an epoch date" \
+      "$(zrun '_claude_pick_reset_text unknown')" ""
+
+#-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

@@ -855,6 +855,131 @@ _claude_pick_choose() {
   [[ -n "$pick" ]]
 }
 
+# --- machine backpressure -----------------------------------------------------
+#
+# Sets _CML_LOAD1 (x100, integer), _CML_NCPU, _CML_SWAPPCT. Any of them may be
+# the literal `unknown`; none is ever guessed.
+#
+# WARN-ONLY BY DEFAULT, and that is a decision rather than an oversight (D6 as
+# amended): this laptop is deliberately oversubscribed and must keep working, so
+# the picker's job is to choose an account, not to police the box. A refusal
+# happens only when a *_MAX knob is explicitly set. The measurement still ships
+# so claude-doctor, --explain and the herdr-draft row can show it.
+#
+# Forkless, and read under CLAUDE_PICK_PROC_ROOT so the rows can fixture it.
+_claude_machine_load() {
+  local root="${CLAUDE_PICK_PROC_ROOT:-}" line tot free
+  _CML_LOAD1=unknown; _CML_NCPU=unknown; _CML_SWAPPCT=unknown
+
+  if [[ -r "$root/proc/loadavg" ]]; then
+    line="$(<"$root/proc/loadavg")"
+    line="${line%% *}"
+    # x100 as an integer: no zsh/mathfunc anywhere in this file.
+    if [[ "$line" == <->.<-> ]]; then
+      _CML_LOAD1=$(( ${line%%.*} * 100 + 10#${${line#*.}[1,2]} ))
+    elif [[ "$line" == <-> ]]; then
+      _CML_LOAD1=$(( line * 100 ))
+    fi
+  fi
+
+  # "0-7" or "0-3,8-11". Counting the ONLINE cpus, not the highest index: a
+  # machine with cpus offline has fewer, and dividing load by the wrong count
+  # would warn either far too early or never.
+  if [[ -r "$root/sys/devices/system/cpu/online" ]]; then
+    local spec part n=0 lo hi
+    spec="$(<"$root/sys/devices/system/cpu/online")"
+    for part in ${(s:,:)spec}; do
+      if [[ "$part" == <->-<-> ]]; then
+        lo="${part%%-*}"; hi="${part##*-}"
+        (( n += hi - lo + 1 ))
+      elif [[ "$part" == <-> ]]; then
+        (( n++ ))
+      fi
+    done
+    (( n > 0 )) && _CML_NCPU=$n
+  fi
+
+  if [[ -r "$root/proc/meminfo" ]]; then
+    tot=""; free=""
+    while IFS= read -r line; do
+      case "$line" in
+        SwapTotal:*) tot="${${(z)line}[2]}" ;;
+        SwapFree:*)  free="${${(z)line}[2]}" ;;
+      esac
+    done < "$root/proc/meminfo"
+    # SwapTotal 0 is a machine with no swap, not 100% swap used. Dividing by it
+    # would be a division by zero; reporting 100 would warn forever.
+    if [[ "$tot" == <-> && "$free" == <-> ]] && (( tot > 0 )); then
+      _CML_SWAPPCT=$(( (tot - free) * 100 / tot ))
+    fi
+  fi
+  return 0
+}
+
+# Append machine warnings to _claude_pick_warnings, and report whether a MAX knob
+# was exceeded. Returns 0 normally, 3 when a refusal is warranted.
+_claude_pick_backpressure() {
+  local load_warn=${CLAUDE_PICK_LOAD_WARN:-150} swap_warn=${CLAUDE_PICK_SWAP_WARN:-60}
+  local load_max=${CLAUDE_PICK_LOAD_MAX:-0} swap_max=${CLAUDE_PICK_SWAP_MAX:-0}
+  local _CML_LOAD1 _CML_NCPU _CML_SWAPPCT pct=unknown rc=0
+  _claude_machine_load
+
+  if [[ "$_CML_LOAD1" != unknown && "$_CML_NCPU" != unknown ]] && (( _CML_NCPU > 0 )); then
+    pct=$(( _CML_LOAD1 / _CML_NCPU ))     # load1 x100 / ncpu == percent of ncpu
+  fi
+  if [[ "$pct" != unknown ]] && (( pct >= load_warn )); then
+    _claude_pick_warnings+=("machine: load $(( pct / 100 )).$(( (pct % 100) / 10 )) x ${_CML_NCPU} threads — a new session will thrash")
+    (( load_max > 0 && pct >= load_max )) && rc=3
+  fi
+  if [[ "$_CML_SWAPPCT" != unknown ]] && (( _CML_SWAPPCT >= swap_warn )); then
+    _claude_pick_warnings+=("machine: swap ${_CML_SWAPPCT}% used — a new session will thrash")
+    (( swap_max > 0 && _CML_SWAPPCT >= swap_max )) && rc=3
+  fi
+  return $rc
+}
+
+# --- exhaustion reporting -----------------------------------------------------
+#
+# When every member is exhausted, name the one whose blocking window resets
+# soonest — and NAME NO TIME when none is known.
+#
+# `resets_at` is absent whenever the 5h window has not started (measured: three
+# of five profiles here), so "no reset instant" is the COMMON case, not an edge.
+# A message that printed a time unconditionally would print an epoch-derived
+# nonsense date, or the same date for every account, in exactly the situation
+# where the reader is trying to decide how long to wait.
+#
+# Sets REPLY to the least-bad profile. Prints nothing; the caller reports.
+_claude_pick_least_bad() {
+  local e n best="" bestr="" r
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_AGE _CPM_TIER
+  for n in "$@"; do
+    _claude_profile_metrics "$n" >/dev/null 2>&1
+    r="$_CPM_R5"
+    if [[ "$r" == unknown ]]; then
+      # Unknown reset sorts AFTER any known one: an account that might reset in
+      # four minutes is a better bet than one nobody can time.
+      [[ -z "$best" ]] && { best="$n"; bestr=unknown; }
+      continue
+    fi
+    if [[ -z "$best" || "$bestr" == unknown ]] || (( r < bestr )); then
+      best="$n"; bestr="$r"
+    fi
+  done
+  REPLY="$best"
+  _CLAUDE_PICK_LEASTBAD_R5="$bestr"
+  [[ -n "$best" ]]
+}
+
+# "Thu 11 Sep 04:00 IDT", or the empty string when the instant is not known.
+# Every caller must handle the empty string — that is the point of the function.
+_claude_pick_reset_text() {
+  local r="$1"
+  [[ "$r" == unknown || -z "$r" ]] && { print -r -- ""; return 1 }
+  zmodload zsh/datetime 2>/dev/null || { print -r -- ""; return 1 }
+  print -r -- "$(strftime '%a %d %b %H:%M %Z' $(( EPOCHSECONDS + r )) 2>/dev/null)"
+}
+
 # clauth's own active profile, when it has a credential and is not excluded.
 # This is the last-resort ACCOUNT: it keeps a session isolated when every pool
 # member is unusable, instead of dropping it onto the shared global file.
