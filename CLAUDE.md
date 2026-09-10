@@ -1984,6 +1984,30 @@ Traps specific to the checker, each of which produced a green tick first:
   file".** It reported `not logged in — run /login` and sent the reader to
   re-authenticate instead of at the broken link; a deleted clauth profile leaving a
   live `clauth start` runtime dir behind is a real way to reach it.
+- **The account-dir glob `*(N/)` matched no symlink, so a symlinked account dir was
+  never checked at all — DO-604.** The `/` qualifier means "is a directory", and a
+  symlink *to* one is not, unless `-` makes the qualifiers follow links
+  (`mkdir real; ln -s real link` → `*(N/)` yields `real`, `*(N-/)` yields both).
+  Not skipped, not reported: the whole section behaved as though such a dir did not
+  exist, taking out its credential-mode, dangling-link, store-divergence,
+  points-at-another-profile's-store and shared-subtree checks. Two existed on this
+  machine (compat links from an in-progress profile rename), so `quantivly-1`'s
+  credential had never been checked once. **`-/` is still not enough**: it follows
+  the link, so a *dangling* one matches neither pattern — precisely the
+  half-finished rename worth reporting — hence `*(N-/)` plus `*(N@)`, deduplicated.
+  A symlinked dir is a **note** when it resolves to a registered profile and a ⚠
+  naming the target when it does not, because a rename in progress is an expected
+  state, not a fault; and the store is repointed at the target, or a compat link
+  reads as "an account dir with no clauth profile store" and sends the reader to
+  `clauth login` for a name that is deliberately no longer a profile.
+  **`${x:A}` cannot name a dangling link's target** — it resolves only as far as the
+  path exists and otherwise returns the link's own path, so the warning said
+  "p9 is a symlink to …/p9". `zstat +link` reads the target itself and is a zsh
+  *module*, not the `readlink` PATH dependency this file already records as having
+  silently produced nothing here. Two of the five rows were decoration first: one
+  asserted the output contained `p1`, which the backing dir `p1real` satisfies as a
+  substring, and one used a fixture whose link target was not a registered profile,
+  so the store-repoint branch it named never ran.
 - **A new external tool is a new way for a check to go quiet, twice in one day.**
   The `readlink -f` note below was written, and then an `awk`-based rewrite of the
   chain match reintroduced exactly the same failure — awk is not on the state

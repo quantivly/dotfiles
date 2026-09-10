@@ -1047,6 +1047,49 @@ run_doctor
 want_out "no account dirs is a note, not a finding" "nothing isolated yet"
 no_out   "and nothing claims a credential is broken" "credential is a real file that DIFFERS"
 
+# A SYMLINKED account dir. The enumeration used `*(N/)`, whose `/` qualifier
+# matches directories only — a symlink to one is not matched unless `-` makes the
+# qualifiers follow links. So such a dir was silently never checked: not skipped,
+# not reported, the section simply behaving as though it did not exist. Two exist
+# on the workstation today (compat links from an in-progress profile rename), and
+# a symlinked dir resolving to ANOTHER profile's store is the silent-wrong-account
+# shape this section exists to catch.
+# The backing dir is named so that it shares NO prefix with the symlink. An
+# earlier version backed `p1` with `p1real` and asserted the output contained
+# "p1" — which "p1real" satisfies as a substring, so the row passed with the
+# qualifier reverted to (N/) and proved nothing. The assertion below names the
+# symlink AND a message only reachable by processing it.
+new_home r11; write_cred '.'
+mk_account_dir p1 real-diff
+mv "$FHOME/.local/state/claude-account-dirs/p1" "$FHOME/.local/state/claude-account-dirs/backing"
+ln -s backing "$FHOME/.local/state/claude-account-dirs/p1"
+run_doctor
+want_out "a SYMLINKED account dir is checked at all" "p1: credential is a real file that DIFFERS"
+
+# The link target decides how it is reported: a rename in progress is expected,
+# so it is a note; a link to something that is not a profile is a ⚠ that NAMES
+# the target, because the reader cannot act without knowing where it points.
+#
+# This fixture also pins the STORE REPOINT: `p1` has no profile of its own, so
+# without repointing the store at the link target the section would report
+# "p1: an account dir with no clauth profile store" and send the reader to
+# `clauth login p1` for a name that is deliberately no longer a profile — the
+# false finding a rename would produce on every run.
+new_home r12; write_cred '.'
+mk_account_dir p2 real-diff
+ln -s p2 "$FHOME/.local/state/claude-account-dirs/p1"
+run_doctor
+want_out "a compat symlink to a registered profile is a note" "compat symlink"
+no_out   "...and it is not reported as a dir with no profile store" \
+         "p1: an account dir with no clauth profile store"
+
+new_home r13; write_cred '.'
+mk_account_dir p2 linked
+ln -s /nowhere-at-all "$FHOME/.local/state/claude-account-dirs/p9"
+run_doctor
+want_out "a symlink to a non-profile is a warning naming its target" "not a registered profile"
+want_out "...and the target is named"                               "nowhere-at-all"
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

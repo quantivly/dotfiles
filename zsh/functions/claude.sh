@@ -903,10 +903,67 @@ claude-doctor() {
       # not run an isolated session, legitimately has no account dirs.
       _doctor_note "no account dirs at ${adroot/#$HOME/~} — nothing isolated yet"
     else
-      for ad in "$adroot"/*(N/); do
+      # `(N-/)`, NOT `(N/)`. The `/` qualifier matches directories only, and a
+      # symlink TO a directory is not one unless `-` makes the qualifiers follow
+      # links. With the bare `/`, a symlinked account dir was silently never
+      # checked — not reported as skipped, not reported at all; the section
+      # simply behaved as though it did not exist.
+      #
+      #     mkdir real; ln -s real link
+      #     print -l -- *(N/)    -> real
+      #     print -l -- *(N-/)   -> link  real
+      #
+      # That took out every check below for such a dir: credential mode, dangling
+      # links, store divergence, "links to ANOTHER profile's store", and the
+      # shared-subtree assertions. The last is why it matters — a symlinked
+      # account dir resolving to a DIFFERENT profile's store is exactly the
+      # silent-wrong-account shape this section exists to catch, and the one
+      # checker that would notice could not see it.
+      # `(N-/)` covers real dirs and symlinks TO dirs; `(N@)` adds the symlinks
+      # `-/` drops — a DANGLING one, or one pointing at a non-directory. All three
+      # are account dirs as far as a reader is concerned, and a dangling one is
+      # precisely the half-finished rename this section should be reporting.
+      # Deduplicated, because a live symlink-to-dir matches both patterns.
+      local -a _ad_all
+      _ad_all=( "$adroot"/*(N-/) "$adroot"/*(N@) )
+      for ad in ${(u)_ad_all}; do
         name="${ad:t}"
         store="$HOME/.clauth/profiles/$name/credentials.json"
         seen=1
+
+        # A symlinked account dir is how a profile RENAME keeps old paths working
+        # while panes drain: an expected transitional state, not a fault. So it is
+        # a note when it resolves to a registered profile and a ⚠ naming the
+        # target when it does not. Reported BEFORE the store check below, which
+        # would otherwise call a compat link "an account dir with no clauth
+        # profile store" and send the reader to `clauth login` for a name that is
+        # deliberately no longer a profile.
+        if [[ -L "$ad" ]]; then
+          # `${ad:A}` resolves a symlink only as far as it EXISTS: on a dangling
+          # one it returns the link's own path, so the warning below would have
+          # read "p9 is a symlink to .../p9" — naming the link instead of the
+          # target, which is the one fact the reader needs. `zstat +link` reads
+          # the target itself, and unlike `readlink` it is a zsh module rather
+          # than a PATH dependency: CLAUDE.md records readlink silently producing
+          # NOTHING under the state table's from-scratch PATH, in this very file.
+          zmodload -F zsh/stat b:zstat 2>/dev/null
+          adlink="$(zstat +link -- "$ad" 2>/dev/null)" || adlink=""
+          [[ -n "$adlink" ]] || adlink="${ad:A}"
+          # A relative target is relative to the link's own directory.
+          [[ "$adlink" == /* ]] || adlink="${ad:h}/$adlink"
+          if [[ -d "$HOME/.clauth/profiles/${adlink:t}" ]]; then
+            _doctor_note "$name -> ${adlink:t} (compat symlink; resolves to a registered profile)"
+            store="$HOME/.clauth/profiles/${adlink:t}/credentials.json"
+          else
+            _doctor_warn "$name is a symlink to '${adlink/#$HOME/~}', which is not a registered profile"
+            echo "    A rename in progress looks like this. If it is not one, the link points nowhere useful."
+          fi
+          # A link whose target is not a directory has no account dir to check
+          # past this point; every test below would read through the dead link.
+          if [[ ! -d "$ad" ]]; then
+            continue
+          fi
+        fi
 
         if [[ ! -e "$store" && ! -L "$store" ]]; then
           _doctor_warn "$name: an account dir with no clauth profile store"
