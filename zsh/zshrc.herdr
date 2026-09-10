@@ -95,13 +95,81 @@ _claude_account_builder() { print -r -- "${DOTFILES_ROOT:-$HOME/.dotfiles}/scrip
 # the process table: this runs in an interactive shell, and reading other
 # processes' environments to answer a question a file can answer is the wrong
 # trade — see "Keeping secrets out of transcripts" in CLAUDE.md.
+# Live sessions clauth knows about, as "<profile>\t<pid>" lines.
+#
+# READ ONLY. These files belong to clauth and a dead entry is ITS to clean up:
+# pruning them from here would race clauth's own writer and delete records of
+# sessions it is still tracking. That is the opposite of the holders/ pidfiles
+# below, which this layer creates and therefore prunes.
+#
+# `current_member // start_profile`, in that order: a session launched with
+# --with-fallback moves between accounts, and start_profile is where it BEGAN,
+# not where it is burning now.
+_claude_holder_sessions() {
+  local d="$HOME/.clauth/live_sessions"
+  [[ -d "$d" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # The glob is collected FIRST and the empty case returns. An empty expansion
+  # gives jq no file operands, and jq then falls back to reading STDIN — where it
+  # blocks forever. `(N)` suppresses the "no matches" error but produces exactly
+  # that empty expansion, so it converts a missing file into a HANG, not a no-op.
+  #
+  # Neither hypothetical nor test-only: clauth creates ~/.clauth/live_sessions as
+  # a directory, so an empty one is an ordinary resting state — and this function
+  # runs on every `claude` launch, which would then never return. Measured:
+  # `jq -r . <empty glob>` with stdin open does not terminate (rc 124 under
+  # `timeout`). It surfaced as two hung suite processes, having passed earlier
+  # runs only because their stdin happened to be at EOF.
+  local -a files
+  files=( "$d"/*.json(N.) )
+  (( ${#files} )) || return 0
+  jq -r 'select(type == "object")
+         | [ ((.current_member // .start_profile) // empty), (.pid // empty) ]
+         | select(length == 2) | @tsv' "${files[@]}" 2>/dev/null
+}
+
+# How many live sessions hold this profile, counting BOTH launch paths.
+#
+# holders/ pidfiles see only claude()/hspawn launches; a `clauth start` session
+# — herdr-draft's pinned path — appears only in clauth's live_sessions. Neither
+# side alone counts both, and a picker that under-counts hands the next session
+# the account that is already busiest.
+#
+# When CLAUDE_TENANT_BUCKETS groups this profile with others, the count is the
+# SUM over the bucket: two logins sharing one rate-limit bucket crowd each other.
+# The per-name count still drives the round-robin ledger, so credential holders
+# keep spreading across the individual logins.
 _claude_holder_count() {
-  local dir f n=0
-  dir="$(_claude_account_root)/$1/holders"
-  [[ -d "$dir" ]] || { print -r -- 0; return 0 }
-  for f in "$dir"/*(N.); do
-    if kill -0 "${f:t}" 2>/dev/null; then (( n++ )); else command rm -f -- "$f"; fi
+  local name="$1" m
+  local -a bucket group
+  bucket=( "$name" )
+  for group in "${CLAUDE_TENANT_BUCKETS[@]}"; do
+    if (( ${${=group}[(Ie)$name]} )); then
+      bucket=( ${=group} )
+      break
+    fi
   done
+  local total=0
+  for m in "${bucket[@]}"; do
+    (( total += $(_claude_holder_count_one "$m") ))
+  done
+  print -r -- "$total"
+}
+
+_claude_holder_count_one() {
+  local dir f n=0 line lp lpid
+  dir="$(_claude_account_root)/$1/holders"
+  if [[ -d "$dir" ]]; then
+    for f in "$dir"/*(N.); do
+      # These pidfiles are ours, so a dead one is ours to remove.
+      if kill -0 "${f:t}" 2>/dev/null; then (( n++ )); else command rm -f -- "$f"; fi
+    done
+  fi
+  while IFS=$'\t' read -r lp lpid; do
+    [[ "$lp" == "$1" ]] || continue
+    [[ -n "$lpid" ]] || continue
+    kill -0 "$lpid" 2>/dev/null && (( n++ ))
+  done < <(_claude_holder_sessions)
   print -r -- "$n"
 }
 
@@ -135,8 +203,20 @@ _claude_holder_count() {
 #
 # No table loaded is the modular adopter's normal state: the resolver is skipped
 # entirely and CLAUDE_ACCOUNT_POOL keeps its exact meaning.
-typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_BUCKETS
+# CLAUDE_TENANT_BUCKETS is a LIST of whitespace-separated groups
+# (`( "a b" "c d" )`), not a map — so it is declared -ga with the other lists.
+# #129 declared it -gA, copying §5.1, which declares it associative and then
+# shows a one-element list as its example value. Those cannot both be right:
+#
+#     typeset -gA B; B=( "a1 b2" )
+#     zsh: bad set of key/value pairs for associative array
+#
+# The assignment simply fails. It was masked on the machine this was written on
+# only because the tenant data file happens to re-declare it -ga first; a tenant
+# file that just assigns — which is what §5.1's example does — gets an error and
+# an unusable table.
+typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR
 : "${CLAUDE_TENANT_DEFAULT=}"
 [[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
   source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"

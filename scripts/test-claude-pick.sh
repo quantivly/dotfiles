@@ -228,5 +228,87 @@ printf 'auth_broken = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
 check "a quarantined profile is excluded" "$(cls a1 | cut -d: -f1)" "excluded"
 
 #-----------------------------------------------------------------------------
+echo
+echo "=== holders: both launch paths, and buckets ==="
+#
+# holders/ pidfiles see only claude()/hspawn launches; a `clauth start` session
+# appears only in clauth's live_sessions. Neither side alone counts both, and a
+# picker that under-counts hands the next session the busiest account.
+
+holders() { zrun "_claude_holder_count '$1'"; }
+
+new_home o1
+mkdir -p "$FHOME/.local/state/claude-account-dirs/a1/holders" "$FHOME/.clauth/live_sessions"
+: > "$FHOME/.local/state/claude-account-dirs/a1/holders/$$"
+check "a pidfile alone counts"                  "$(holders a1)" "1"
+printf '{"pid":%d,"start_profile":"a1"}\n' "$$" > "$FHOME/.clauth/live_sessions/s1.json"
+check "pidfile and live_sessions are SUMMED"    "$(holders a1)" "2"
+
+printf '{"pid":999999,"start_profile":"a1"}\n' > "$FHOME/.clauth/live_sessions/dead.json"
+check "a dead live_sessions pid is not counted" "$(holders a1)" "2"
+# clauth owns those files. Pruning from here would race its writer.
+check "...and its file is NOT deleted" \
+      "$([[ -f "$FHOME/.clauth/live_sessions/dead.json" ]] && echo kept || echo REMOVED)" "kept"
+
+# A --with-fallback session moves accounts; start_profile is where it BEGAN.
+new_home o2
+mkdir -p "$FHOME/.clauth/live_sessions"
+printf '{"pid":%d,"start_profile":"a1","current_member":"b2"}\n' "$$" > "$FHOME/.clauth/live_sessions/s.json"
+check "current_member wins over start_profile"  "$(holders b2)" "1"
+check "...and the start profile is not counted" "$(holders a1)" "0"
+
+# A dead pidfile IS ours, so it is pruned as it is counted.
+new_home o3
+mkdir -p "$FHOME/.local/state/claude-account-dirs/a1/holders"
+: > "$FHOME/.local/state/claude-account-dirs/a1/holders/999999"
+check "a dead pidfile is not counted"           "$(holders a1)" "0"
+check "...and IS removed, because this layer owns it" \
+      "$([[ -f "$FHOME/.local/state/claude-account-dirs/a1/holders/999999" ]] && echo kept || echo removed)" "removed"
+
+# Buckets. CLAUDE_TENANT_BUCKETS is empty on this machine (the shared-bucket
+# verdict was withdrawn 2026-09-10 — two profiles read 7d 2% against 100% with no
+# reset due for days, and they resolve to different seats), so this is a fixture
+# row and deliberately does not depend on the machine's own grouping.
+new_home o4
+mkdir -p "$FHOME/.local/state/claude-account-dirs/a1/holders" \
+         "$FHOME/.local/state/claude-account-dirs/b2/holders" "$FHOME/.clauth/live_sessions"
+: > "$FHOME/.local/state/claude-account-dirs/a1/holders/$$"
+: > "$FHOME/.local/state/claude-account-dirs/b2/holders/$$"
+check "without a bucket each account counts only its own" "$(holders a1)" "1"
+check "bucket members are SUMMED when configured" \
+      "$(zrun "CLAUDE_TENANT_BUCKETS=( 'a1 b2' ); _claude_holder_count a1")" "2"
+check "...for every member of the bucket" \
+      "$(zrun "CLAUDE_TENANT_BUCKETS=( 'a1 b2' ); _claude_holder_count b2")" "2"
+check "...and an unrelated account is untouched by it" \
+      "$(zrun "CLAUDE_TENANT_BUCKETS=( 'a1 b2' ); _claude_holder_count c3")" "0"
+
+# CLAUDE_TENANT_BUCKETS is a LIST, not a map. #129 declared it -gA (copying
+# §5.1, which declares it associative and then shows a list as its example
+# value); assigning a one-element list to an associative array fails outright
+# with "bad set of key/value pairs". A tenant file that just assigns — exactly
+# what §5.1 shows — got an error and an unusable table.
+check "a bucket list assigns cleanly with NO re-declaration" \
+      "$(zrun "CLAUDE_TENANT_BUCKETS=( 'a1 b2' ) 2>&1
+               print -r -- \"\${(t)CLAUDE_TENANT_BUCKETS}:\${#CLAUDE_TENANT_BUCKETS}\"")" \
+      "array:1"
+
+# An EMPTY live_sessions directory is an ordinary resting state — clauth creates
+# the directory — and it must not hang. An empty file glob leaves jq with no file
+# operands, and jq then reads STDIN and blocks forever; `(N)` suppresses the
+# no-match error but produces exactly that empty expansion. This ran on every
+# `claude` launch. `timeout` is the assertion: without the guard the row never
+# returns rather than returning something wrong.
+new_home o6
+mkdir -p "$FHOME/.clauth/live_sessions"
+check "an EMPTY live_sessions dir returns 0 and does not hang" \
+      "$(timeout 10 zsh -f -c "
+           export HOME='$FHOME'
+           source '$HERDRRC' >/dev/null 2>&1
+           _claude_holder_count a1" < /dev/zero 2>/dev/null)" "0"
+
+new_home o5
+check "no holders anywhere is 0, not an error"  "$(holders a1)" "0"
+
+#-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
