@@ -35,6 +35,16 @@
     # PreToolUse hook in ~/.claude/settings.json, which is user-level and not in
     # this repo. See "Keeping secrets out of transcripts" in CLAUDE.md.
     ~/.claude/hooks/secret-emission-guard.sh: claude/hooks/secret-emission-guard.sh
+    # The account picker as a command, for callers that are not a zsh function —
+    # herdr-draft's create dialog reads its --json. It goes on ~/.local/bin
+    # rather than being invoked by path because the herdr SERVER's PATH is a
+    # snapshot taken when the server starts and includes ~/.local/bin, so a
+    # plugin or popup finds it without a server restart (CLAUDE.md, "The herdr
+    # server's PATH is a snapshot"). It decides nothing of its own: every answer
+    # comes from _claude_pick_for_dir in zsh/zshrc.herdr, which is what stops the
+    # CLI and an interactive `claude` from disagreeing about which account a
+    # directory should bill.
+    ~/.local/bin/claude-pick: scripts/claude-pick
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.list: config/herdr/plugins/plugins.list
     # NOTE: this is a symlink INTO the repo, so `herdr-lazy sync`/`update` write
     # straight through and leave your dotfiles working tree dirty. That is

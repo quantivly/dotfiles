@@ -1,0 +1,392 @@
+#!/usr/bin/env zsh
+#
+# claude-pick — which Claude account should this directory's next session bill?
+# =============================================================================
+#
+# The picker in zsh/zshrc.herdr, as a command, for callers that are not a zsh
+# function: herdr-draft's create dialog, a script, a human asking why. It makes
+# no decision of its own — every answer comes from `_claude_pick_for_dir`, so the
+# CLI and an interactive `claude` cannot disagree about which account a directory
+# should use. That is the whole point of it being a wrapper and not a
+# reimplementation.
+#
+#   claude-pick                          # the profile name, one line
+#   claude-pick --explain                # ...and the per-candidate table on stderr
+#   claude-pick --dir ~/work/api --json  # machine-readable, for herdr-draft
+#   claude-pick --strict --json          # headless: refuse rather than proceed
+#
+# EXIT CODES are the contract, and each one is a different action for the caller:
+#
+#   0   picked; stdout is the profile (or the JSON object)
+#   2   refused — every pool member's 5h window is spent, or nothing in the pool
+#       is usable at all. stderr names each member and its reset time.
+#   3   refused — a machine ceiling (CLAUDE_PICK_LOAD_MAX / _SWAP_MAX) was
+#       exceeded. Only reachable with --strict and without --force, and only when
+#       such a ceiling is explicitly set: warn-only is the default, because this
+#       box is deliberately oversubscribed and must keep working.
+#   4   the tenant table, or the tenant given, is unusable — a fix in
+#       ~/.config/claude-tenants.zsh, not something to retry.
+#   5   no clauth profile has a credential (clauth absent, or nothing
+#       registered). `clauth login <name>`.
+#   64  usage error. Conventional (EX_USAGE), and deliberately far away from the
+#       refusals so a caller cannot confuse "you called me wrong" with "the
+#       accounts are spent".
+#
+# --strict IS THE ONLY THING THAT SWITCHES SEMANTICS, and there is no TTY
+# sniffing. §5.4 defines interactive by "a TTY on stderr" for `claude`, where the
+# shell already knows; for a CLI, a command whose refusal behaviour changes
+# depending on whether its output happens to be a pipe is a command whose rows
+# and whose callers both become conditional. herdr-draft passes --strict itself
+# (§5.6), which is the spec's own arrangement.
+#
+# NEVER A CREDENTIAL. It reads usage_cache.json, profiles.toml (a bounded sed
+# range, for the quarantine list only), config.toml (`grep -q`, a boolean that is
+# never echoed) and clauth's live_sessions/*.json (profile and pid fields only).
+# The only cache-derived string it ever prints is the plan tier. A state-table
+# row plants a token-shaped canary in every one of those files and asserts it
+# reaches neither stdout nor stderr on ANY exit path — see
+# scripts/test-claude-pick.sh, "canary".
+#
+# IT DOES NOT SOURCE system.sh. --explain prints plain lines of its own rather
+# than borrowing the _doctor_* emitters: system.sh is the full install's, a
+# modular herdr adopter does not have it, and a CLI that dies on a missing module
+# is a CLI that fails at the one moment its answer is wanted.
+
+emulate -L zsh
+setopt no_aliases
+
+PROG=claude-pick
+
+usage() {
+  print -r -- "Usage: $PROG [--dir D] [--tenant T] [--profile P] [--strict] [--force]"
+  print -r -- "              [--json] [--explain] [--dry-run]"
+  print -r -- ""
+  print -r -- "  --dir D       the directory to route for (default: \$PWD)"
+  print -r -- "  --tenant T    pin the tenant; skips the resolver, not the ranking"
+  print -r -- "  --profile P   pin the account outright; no ranking at all"
+  print -r -- "  --strict      headless: refuse an exhausted pool instead of"
+  print -r -- "                proceeding on its least-bad member"
+  print -r -- "  --force       proceed past a machine ceiling that would refuse"
+  print -r -- "  --json        one object on stdout instead of the bare name"
+  print -r -- "  --explain     the per-candidate table, on stderr"
+  print -r -- "  --dry-run     do not write the ledger and do not build the"
+  print -r -- "                account dir (config_dir is then null)"
+  print -r -- ""
+  print -r -- "Exit: 0 picked · 2 refused (exhausted) · 3 refused (machine)"
+  print -r -- "      4 unusable tenant table · 5 no profiles · 64 usage"
+}
+
+die_usage() {
+  print -u2 -- "$PROG: $1"
+  usage >&2
+  exit 64
+}
+
+dir="$PWD" tenant="" pin="" strict=0 force=0 as_json=0 explain=0 dry=0
+
+while (( $# )); do
+  case "$1" in
+    --dir)      [[ -n "${2:-}" ]] || die_usage "--dir needs a directory"; dir="$2"; shift 2 ;;
+    --dir=*)    dir="${1#--dir=}";  [[ -n "$dir" ]]    || die_usage "--dir needs a directory"; shift ;;
+    --tenant)   [[ -n "${2:-}" ]] || die_usage "--tenant needs a non-empty value"; tenant="$2"; shift 2 ;;
+    --tenant=*) tenant="${1#--tenant=}"; [[ -n "$tenant" ]] || die_usage "--tenant needs a non-empty value"; shift ;;
+    --profile)  [[ -n "${2:-}" ]] || die_usage "--profile needs a non-empty value"; pin="$2"; shift 2 ;;
+    --profile=*) pin="${1#--profile=}"; [[ -n "$pin" ]] || die_usage "--profile needs a non-empty value"; shift ;;
+    --strict)   strict=1; shift ;;
+    --force)    force=1; shift ;;
+    --json)     as_json=1; shift ;;
+    --explain)  explain=1; shift ;;
+    --dry-run)  dry=1; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift; (( $# )) && die_usage "unexpected argument: $1"; break ;;
+    *)          die_usage "unknown option: $1" ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || {
+  print -u2 -- "$PROG: jq is required (every usage figure is read out of JSON)"
+  exit 5
+}
+
+# WHICH CHECKOUT. Resolved from this script's own path, so a worktree's copy uses
+# its own functions rather than whatever ~/.dotfiles happens to be pointing at —
+# in this repo a checkout IS the deployment, and a CLI that reached across to the
+# primary would report about code the caller is not running.
+_self="${${(%):-%x}:A}"
+DOTROOT="${_self:h:h}"
+[[ -r "$DOTROOT/zsh/zshrc.herdr" ]] || {
+  print -u2 -- "$PROG: cannot read $DOTROOT/zsh/zshrc.herdr"
+  exit 5
+}
+
+# The marker the herdr layer honours: source the picker, and nothing that has a
+# side effect. github.sh first and deliberately — _claude_tenant_for REUSES its
+# _gh_repo_remotes / _gh_url_owner rather than carrying a second URL parser, so
+# without it the owner half of the tenant table cannot be evaluated at all and
+# the resolver reports `unsupported`. Both files are declarations and function
+# definitions only.
+export CLAUDE_PICK_SOURCING=1
+[[ -r "$DOTROOT/zsh/functions/github.sh" ]] && source "$DOTROOT/zsh/functions/github.sh"
+source "$DOTROOT/zsh/zshrc.herdr" >/dev/null 2>&1
+
+(( $+functions[_claude_pick_for_dir] )) || {
+  print -u2 -- "$PROG: the picker is not defined after sourcing the herdr layer"
+  exit 5
+}
+
+# Every name the picker reports through, declared here so a stray global cannot
+# leak in from the environment and be reported as a measurement.
+typeset _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
+typeset _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
+typeset _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
+typeset _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
+typeset _claude_pick_holders=0 _claude_pick_load="" _claude_pick_overflow=0
+typeset _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+typeset _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
+typeset -a _claude_pick_skipped=() _claude_pick_warnings=()
+typeset -a _claude_pick_explain=() _claude_pick_exhausted=()
+typeset -a _claude_pick_cands=() _claude_pick_unknowns=()
+typeset -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
+typeset _claude_pick_dry_run="$dry"
+typeset _claude_pick_prog="$PROG"
+typeset REPLY=""
+# Loop and result scratch. `typeset`, not `local`: zsh tolerates `local` at a
+# script's top level, but this repo has already paid for `local` outside a
+# function once — in a backgrounded block, where it IS an error and the message
+# went to a subshell's stderr nobody reads. Declaring them here also keeps `local
+# NAME` out of a loop body, which in zsh is a DISPLAY command on a name already
+# local in that scope.
+typeset e config_dir builder rc pin_class
+typeset -a f skip_rows
+
+#-----------------------------------------------------------------------------
+# helpers
+
+# A JSON array of strings from the arguments, with NO fork per element and no
+# empty-array trap: `printf '%s\n' "${arr[@]}"` on an empty array still prints
+# one newline, which becomes [""] — an empty list reported as a list of one
+# blank. NUL-delimited, so a value containing a newline cannot forge an element.
+json_strings() {
+  (( $# )) || { print -r -- '[]'; return 0 }
+  printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]'
+}
+
+# A JSON number, or null for the literal `unknown` and for anything that is not
+# an integer. An UNKNOWN MUST NOT BECOME 0: the whole metrics layer exists to
+# keep "absent" and "measured zero" apart, and collapsing them here would undo it
+# at the last step, in the output a machine consumes.
+json_num() {
+  [[ "${1:-}" == (-|)<-> ]] && { print -r -- "$1"; return 0 }
+  print -r -- null
+}
+
+# RFC 3339 in UTC from a seconds-from-now delta, or null. JSON carries UTC and
+# the human lines carry local time (§5.4) — one instant, two renderings, and the
+# machine-readable one is the unambiguous one.
+json_instant() {
+  local d="${1:-}" TZ=UTC out
+  [[ "$d" == (-|)<-> ]] || { print -r -- null; return 0 }
+  zmodload zsh/datetime 2>/dev/null || { print -r -- null; return 0 }
+  strftime -s out '%Y-%m-%dT%H:%M:%SZ' $(( EPOCHSECONDS + d )) 2>/dev/null \
+    || { print -r -- null; return 0 }
+  printf '%s' "$out" | jq -Rs .
+}
+
+# load1 as a decimal, from the x100 integer the measurement publishes. Built as
+# text rather than divided, because this file is integer-only for the same reason
+# the picker is: no zsh/mathfunc, which the state table's from-scratch PATH
+# cannot vouch for.
+json_load1() {
+  [[ "$_CML_LOAD1" == <-> ]] || { print -r -- null; return 0 }
+  print -r -- "$(( _CML_LOAD1 / 100 )).${(l:2::0:)$(( _CML_LOAD1 % 100 ))}"
+}
+
+# The same number for a human. Two renderings of one unmeasured value,
+# deliberately: JSON must say `null` so a consumer can tell "not measured" from a
+# number, and the report must say `unknown`, which is the word every other
+# unmeasured field in this repo uses. Neither is ever 0.
+text_load1() {
+  [[ "$_CML_LOAD1" == <-> ]] || { print -r -- unknown; return 0 }
+  print -r -- "$(( _CML_LOAD1 / 100 )).${(l:2::0:)$(( _CML_LOAD1 % 100 ))}"
+}
+
+# `unknown`, never `unknown%`: a percent sign on a word that is not a number
+# reads as a measurement of nothing. Same rule the exhaustion report applies to
+# an unread weekly figure.
+text_pct() {
+  [[ "${1:-}" == <-> ]] || { print -r -- unknown; return 0 }
+  print -r -- "$1%"
+}
+
+#-----------------------------------------------------------------------------
+# the decision
+
+rc=0
+if [[ -n "$pin" ]]; then
+  # A PINNED PROFILE SKIPS THE RANKING ENTIRELY, and it is still checked for a
+  # credential: reporting a name nobody can authenticate as would hand the caller
+  # a config dir that Claude Code answers by writing a fresh independent login —
+  # manufacturing the very independent holder the account-dir design forbids.
+  if [[ ! -e "$HOME/.clauth/profiles/$pin/credentials.json" \
+     && ! -L "$HOME/.clauth/profiles/$pin/credentials.json" ]]; then
+    print -u2 -- "$PROG: no clauth profile '$pin' with a credential — 'clauth login $pin'"
+    exit 5
+  fi
+  REPLY="$pin"
+  _claude_pick_state=picked
+  _claude_pick_class=pinned
+  _claude_pick_reason="pinned with --profile"
+  # The numbers are still reported, because a caller that pinned an account still
+  # wants to know it is about to start on a spent window.
+  typeset _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER
+  _claude_profile_metrics "$pin" >/dev/null 2>&1
+  _claude_pick_u5="$_CPM_U5"; _claude_pick_uw="$_CPM_UW"; _claude_pick_r5="$_CPM_R5"
+  _claude_pick_rw="$_CPM_RW"; _claude_pick_age="$_CPM_AGE"; _claude_pick_tier="$_CPM_TIER"
+  _claude_pick_holders="$(_claude_holder_count "$pin")"
+  _claude_pick_explain=( "$pin"$'\t'pinned$'\t'""$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_AGE"$'\t'"$_claude_pick_holders"$'\t'""$'\t'"$_CPM_R5" )
+  # A PIN NEVER REFUSES ON THE ACCOUNT, but it does say when the account it was
+  # handed is spent or quarantined: the caller asked for this seat, and "it
+  # started and died twenty minutes in" is the outcome this line prevents. One
+  # stderr line and never an exit code — overriding the ranking is exactly what
+  # --profile is for.
+  pin_class="$(_claude_pick_class "$pin")"
+  if [[ "${pin_class%%:*}" == exhausted || "${pin_class%%:*}" == excluded ]]; then
+    print -u2 -- "$PROG: '$pin' is ${pin_class%%:*} (${pin_class#*:}) — pinned anyway, as asked"
+    _claude_pick_warnings+=("'$pin' is ${pin_class%%:*}: ${pin_class#*:}")
+  fi
+  # The machine is still measured and still reported — a pin says which account,
+  # not that the box has room.
+  _claude_pick_backpressure || {
+    if (( strict && ! force )); then
+      # REPLY is cleared, so `profile` is null on EVERY refusal rather than only
+      # on the ones _claude_pick_for_dir handles. A JSON object that names an
+      # account beside a non-zero exit is one a caller can act on by mistake, and
+      # this path sets REPLY before the machine has been measured at all.
+      REPLY=""
+      _claude_pick_state=backpressure
+      _claude_pick_reason="${_claude_pick_warnings[-1]:-a machine ceiling was exceeded}"
+      rc=3
+    fi
+  }
+else
+  _claude_pick_for_dir "$dir" "$tenant" "$strict" "$force"
+  rc=$?
+fi
+
+#-----------------------------------------------------------------------------
+# the account dir
+
+config_dir=""
+if (( rc == 0 )) && [[ -n "$REPLY" ]] && (( ! dry )); then
+  builder="$(_claude_account_builder)"
+  if [[ -x "$builder" ]]; then
+    config_dir="$(command "$builder" "$REPLY" 2>/dev/null)" || config_dir=""
+  fi
+  if [[ -z "$config_dir" ]]; then
+    # NOT a refusal: the account was chosen correctly and only the dir could not
+    # be built, so the caller can still act on the name (and `claude` itself
+    # reports the same state and shares the global credential). Saying nothing
+    # would be the failure — a null config_dir on a successful exit reads as
+    # --dry-run.
+    _claude_pick_warnings+=("could not build an account dir for '$REPLY' — config_dir is null on a successful pick")
+  fi
+fi
+
+#-----------------------------------------------------------------------------
+# --explain
+
+if (( explain )); then
+  {
+    print -r -- "$PROG: dir ${dir/#$HOME/~}"
+    print -r -- "  tenant: ${_claude_pick_tenant:-<none>}${_claude_pick_tenant_state:+ ($_claude_pick_tenant_state)}"
+    print -r -- "  pool:   ${_claude_pick_pool_members:-<every registered profile>}"
+    (( ${#_claude_pick_overflow_members} )) && \
+      print -r -- "  overflow: ${_claude_pick_overflow_members}"
+    printf '  %-14s %-9s %5s %5s %7s %5s %9s  %s\n' \
+           PROFILE CLASS 5H 7D AGE HOLD SCORE WHY
+    for e in "${_claude_pick_explain[@]}"; do
+      f=( "${(@ps:\t:)e}" )
+      printf '  %-14s %-9s %5s %5s %7s %5s %9s  %s\n' \
+             "${f[1]}" "${f[2]}" "${f[4]}" "${f[5]}" "${f[6]}" "${f[7]}" "${f[8]:--}" "${f[3]}"
+    done
+    for e in "${_claude_pick_skipped[@]}"; do print -r -- "  skipped: $e"; done
+    print -r -- "  machine: load $(text_load1) on ${_CML_NCPU} threads, swap $(text_pct "$_CML_SWAPPCT")"
+    for e in "${_claude_pick_warnings[@]}"; do print -r -- "  warning: $e"; done
+    if (( rc == 0 )); then
+      print -r -- "  picked:  $REPLY ($_claude_pick_class${_claude_pick_score:+, score $_claude_pick_score})"
+    else
+      print -r -- "  refused: $_claude_pick_state — $_claude_pick_reason"
+    fi
+  } >&2
+fi
+
+#-----------------------------------------------------------------------------
+# stdout
+
+if (( as_json )); then
+  # Everything the picker recorded, from the one set of globals it recorded it
+  # in. `skipped` carries every candidate that was NOT chosen, structured — the
+  # spec's {profile, why} plus the columns a caller would otherwise have to parse
+  # back out of --explain. Built by jq from typed pieces, never by string
+  # concatenation: a profile name or a reason is data, and a JSON document
+  # assembled with printf is one apostrophe away from being invalid.
+  skip_rows=()
+  for e in "${_claude_pick_explain[@]}"; do
+    [[ "${e%%$'\t'*}" == "$REPLY" ]] && continue
+    skip_rows+=( "$e" )
+  done
+  jq -n \
+    --arg    tenant       "$_claude_pick_tenant" \
+    --arg    tenant_state "$_claude_pick_tenant_state" \
+    --arg    profile      "$REPLY" \
+    --arg    tier         "$_claude_pick_tier" \
+    --arg    config_dir   "$config_dir" \
+    --arg    class        "$_claude_pick_class" \
+    --arg    state        "$_claude_pick_state" \
+    --arg    reason       "$_claude_pick_reason" \
+    --argjson score       "$(json_num "$_claude_pick_score")" \
+    --argjson overflow    "$(( _claude_pick_overflow ? 1 : 0 ))" \
+    --argjson five_hour   "$(json_num "$_claude_pick_u5")" \
+    --argjson weekly      "$(json_num "$_claude_pick_uw")" \
+    --argjson cache_age   "$(json_num "$_claude_pick_age")" \
+    --argjson r5          "$(json_instant "$_claude_pick_r5")" \
+    --argjson rw          "$(json_instant "$_claude_pick_rw")" \
+    --argjson load1       "$(json_load1)" \
+    --argjson ncpu        "$(json_num "$_CML_NCPU")" \
+    --argjson swap        "$(json_num "$_CML_SWAPPCT")" \
+    --argjson warnings    "$(json_strings "${_claude_pick_warnings[@]}")" \
+    --argjson notes       "$(json_strings "${_claude_pick_skipped[@]}")" \
+    --argjson skipped     "$(json_strings "${skip_rows[@]}")" \
+    --argjson exit_code   "$rc" \
+    '{
+       tenant:       (if $tenant       == "" then null else $tenant       end),
+       tenant_state: (if $tenant_state == "" then null else $tenant_state end),
+       profile:      (if $profile      == "" then null else $profile      end),
+       tier:         (if $tier == "" or $tier == "unknown" then null else $tier end),
+       config_dir:   (if $config_dir   == "" then null else $config_dir   end),
+       score:        $score,
+       class:        (if $class == "" then null else $class end),
+       state:        $state,
+       reason:       (if $reason == "" then null else $reason end),
+       exit_code:    $exit_code,
+       overflow:     ($overflow == 1),
+       usage:        { five_hour: $five_hour, weekly: $weekly, cache_age_s: $cache_age },
+       resets_at:    { five_hour: $r5, weekly: $rw },
+       machine:      { load1: $load1, ncpu: $ncpu, swap_used_pct: $swap },
+       warnings:     $warnings,
+       notes:        $notes,
+       skipped:      ($skipped | map(split("\t") | {
+                        profile:   .[0],
+                        class:     .[1],
+                        why:       (if .[2] == "" then null else .[2] end),
+                        five_hour: (.[3] | if test("^-?[0-9]+$") then tonumber else null end),
+                        weekly:    (.[4] | if test("^-?[0-9]+$") then tonumber else null end),
+                        holders:   (.[6] | if test("^-?[0-9]+$") then tonumber else null end),
+                        score:     (.[7] | if test("^-?[0-9]+$") then tonumber else null end)
+                      }))
+     }'
+elif (( rc == 0 )); then
+  print -r -- "$REPLY"
+fi
+
+exit $rc

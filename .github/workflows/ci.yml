@@ -57,9 +57,14 @@ jobs:
       # pre-commit's shellcheck excludes the directory outright because the
       # syntax is zsh, not bash. Without this line a syntax error there is
       # caught only if some test happens to source the file.
+      # scripts/claude-pick is named EXPLICITLY, and it is the only check that
+      # reads it: it is zsh, so pre-commit's ShellCheck excludes it and CI's
+      # ShellCheck job never selects it (that job globs *.sh/*.bash/*.zsh, and
+      # this is an extensionless command on ~/.local/bin). Without this line the
+      # repo's newest executable would have no syntax check at all.
       - name: Check zsh syntax for all modules
         run: |
-          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh; do
+          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh scripts/claude-pick; do
             if [ -f "$file" ]; then
               echo "Checking: $file"
               zsh -n "$file" || exit 1
@@ -218,6 +223,36 @@ jobs:
       # the machine this was written on hold four live Claude logins.
       - name: Run the claude-account-dirs state table
         run: ./scripts/test-claude-account-dirs.sh
+
+  claude-pick-test:
+    name: Claude Account Picker State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh and jq
+        run: sudo apt-get update && sudo apt-get install -y zsh jq
+
+      # The picker decides WHICH ACCOUNT IS BILLED, and nothing announces that
+      # afterwards: a wrong answer is not an error, it is a session quietly
+      # spending the wrong seat. So every row is written against a state that
+      # produces a plausible-looking pick rather than a failure — which is how
+      # its parts actually broke. An absent `resets_at` read as 0 put a fresh
+      # window at maximum "about to expire" urgency; a jq `// empty` inside an
+      # array shifted every column after an absent field into the wrong variable;
+      # the ledger was written with a literal backslash-t, so it looked written
+      # and read back empty; and `zsystem flock` opens without O_CREAT, so the
+      # pick lock had never once been acquired while the row covering it asserted
+      # the warning that state produces.
+      #
+      # Hermetic via a fixture $HOME with CLAUDE_CONFIG_DIR and HERDR_PANE_ID
+      # cleared, and a NON-UTC fixture TZ — the RFC 3339 rows are unfailable on a
+      # UTC machine, which is exactly what this runner is.
+      - name: Run the account picker state table
+        run: ./scripts/test-claude-pick.sh
 
   herdr-modular-test:
     name: Modular herdr Checks State Table

@@ -2290,18 +2290,20 @@ Design points that are load-bearing rather than preferences:
   because a husk is still valid JSON. An implausibly small seed is a hard error for that reason.
 - **The default profile is the pool member with the most HEADROOM, not `clauth which`.** That call
   answers from `$CLAUDE_CONFIG_DIR`, so **inside an isolated pane it returns the parent session's
-  profile** — measured, it says `quantivly-3` in an isolated shell and `unknown` in a bare one.
-  Defaulting to it puts every spawn in its parent's credential group, which is the concentration
-  being undone.
+  profile** — measured, it names the parent session's profile in an isolated shell and `unknown` in
+  a bare one. Defaulting to it puts every spawn in its parent's credential group, which is the
+  concentration being undone.
   **`CLAUDE_ACCOUNT_POOL` is the pool** (set it in `~/.zshrc.local`; empty = every registered
   profile, which is what a one-account adopter wants). A profile outside it is never chosen
   automatically — only by name with `claude-as` — which is how a personal account stops being spent
   by a work session that merely happened to start next.
-  Ranked by the **worse of the 5h and 7d** utilization from `~/.clauth/profiles/<p>/usage_cache.json`,
-  then by live holders, then alphabetically. 7d counts as much as 5h: an account at 3% of five hours
-  and 96% of its week has almost nothing left, and ranking on 5h alone sends every new session
-  straight to it. A reading that is missing or older than `CLAUDE_ACCOUNT_CACHE_MAX_AGE` (3600 s)
-  sorts **last**, never first — unknown must not outrank a measured 0%.
+  Ranked by a **score** over 5h headroom, use-it-or-lose-it timing, weekly headroom as a multiplier
+  and crowding, with eligibility classes and a round-robin ledger — see "The smart account picker"
+  below. It was the worse of the 5h and 7d utilization then live holders then name until DO-574,
+  which could not distinguish an account at 3% of a window resetting in four minutes from one at 20%
+  with the whole window ahead of it. A reading that is missing or older than
+  `CLAUDE_PICK_CACHE_MAX_AGE` (3600 s) is class `unknown` and ranks after **every** measured
+  candidate — unknown must not outrank a measured 0%.
   **Accounts clauth has excluded are skipped, and this is not cosmetic.** `disabled` comes from the
   profile's `config.toml`, `auth_broken` from clauth's own quarantine list. Until 2026-09-08 the
   picker ranked on holder count alone and chose `personal` — *because* it was quarantined and so had
@@ -2499,6 +2501,241 @@ CLAUDE_SETTINGS_REQUIRE=( model statusLine.command )
 Operational half — the connector cleanup that has to be done at claude.ai, what each finding
 means, and how to revive a dead stdio server: [docs/CLAUDE_ACCOUNT_MCP.md](docs/CLAUDE_ACCOUNT_MCP.md).
 
+### The smart account picker (DO-574)
+
+**The old ranking answered "which account is least used"; it could not answer "which account will
+still be usable in twenty minutes".** It sorted on the worse of the 5h and 7d utilization, then live
+holders, then name — so an account at 3% of a 5h window that resets in four minutes outranked one at
+20% with the whole window ahead of it, and every session in a quiet minute landed on the same seat
+because a deterministic sort has no memory. `_claude_pick_for_dir` replaces it with a score plus
+eligibility classes plus a round-robin ledger, and `scripts/claude-pick` exposes the same code path
+as a command so herdr-draft and a human can ask before launching.
+
+**One function, because the parts drift.** `claude()`, `hspawn` and `claude-pick` each used to
+resolve their own tenant and report their own reasons. Which account a session bills is exactly the
+thing nothing announces afterwards, so resolve → candidates → classify → score → exhaustion →
+backpressure → ledger is one function that also produces the explanation. `_claude_pick_profile`
+remains as a thin tenant-less alias for one release; the compatibility rows in
+`scripts/test-hspawn.sh` are written against it and pass unchanged, which is what proves the pool,
+overflow and refusal semantics of #129/#131 survived.
+
+The score, in centipoints, integer arithmetic only (no `zsh/mathfunc`, which the state table's
+from-scratch `PATH` cannot vouch for): `base` is 5h headroom; `bonus` is use-it-or-lose-it, scaled by
+**both** headroom and closeness to the reset, so a nearly-spent window resetting soon earns almost
+nothing and a fresh window earns nothing extra; `weekf` is weekly headroom as a **multiplier**; and
+`crowd` charges each live holder more on an account that is already busy. Knobs:
+`CLAUDE_PICK_W_EXPIRE`, `_W_HOLDER`, `_W_CROWD`, `_WEEK_LOW`, `_RR_BAND`, `_5H_EXHAUSTED`,
+`_WEEK_EXHAUSTED` (inert, 101 — see below), `_CACHE_MAX_AGE`, `_LOAD_WARN`, `_SWAP_WARN`,
+`_LOAD_MAX`, `_SWAP_MAX`, `_LOCK_WAIT`, `_PROC_ROOT` (a test hook).
+
+**Three departures from the approved spec, each measured rather than argued.**
+
+- **The weekly window DEMOTES; it never refuses.** §5.3 made `uW >= 100` an exhaustion class that
+  every headless caller refuses on. Measured 2026-09-10: two Team seats read `seven_day = 100` **with
+  live sessions on them**, their per-model `weekly_scoped` windows read 38 and 54 (so the block is
+  partial), and there were **zero** weekly-reset refusals across 750 transcripts in 7 days — the
+  refusal that class was modelled on has never fired. What a Team seat actually hits is *"You've hit
+  your individual spend limit · run /usage-credits to ask your admin for a higher limit"*, 34 times in
+  24 h, whose remedy is **a person raising a limit**, not a window rolling over; refusing locally
+  never makes such an account usable sooner. With all three work accounts at 100 that morning, a hard
+  block would have refused across the entire work tree while work was demonstrably possible.
+  `CLAUDE_PICK_WEEK_EXHAUSTED` stays as an **inert** knob defaulting to 101, and a mutant proves that
+  lowering it to 100 makes the "a spent week is still eligible" row fail.
+- **`CLAUDE_PICK_CACHE_MAX_AGE` stays 3600, not the spec's 900, and `claude-usage-refresh.timer` is
+  dropped.** There is no refresh entry point to build it on: clauth's only writer of
+  `usage_cache.json` is its scheduler, every fetch is gated on a lease acquired in exactly two places
+  — its TUI and its daemon — and no CLI subcommand takes it. Probed against caches already 207–282 s
+  old, `clauth which`, `status --json`, `list`, `sessions` and `jobs` left every mtime unchanged to
+  the second, and `clauth --help` has no `refresh`; a 15-minute sample at 10 s resolution recorded
+  **zero** writes while ~29 panes were open, the caches aging monotonically to 20m45s. At 900 s every
+  profile would read `unknown` for most of the day and the picker would rank on nothing. The honest
+  follow-up is an upstream request for a first-class `clauth refresh [profile]`.
+- **A negative `r5` earns no bonus.** `.five_hour.resets_at` **can be absent** — measured on three of
+  five profiles, absent exactly where utilization is `0.0`, i.e. an unstarted window — and §5.3's
+  `100 - min(100, max(0,r5)·100/18000)` yields **100**, the *maximum* urgency, for a window that has
+  already reset. The spec only reached that value because it routed `r5 < 0` through a post-reset
+  class that re-fetched the cache first, and no such refresh exists. Without it the cached `u5`
+  belongs to the previous window and is an **upper bound** on the true one — pessimistic, therefore
+  safe — so the reading is kept and only the bonus is dropped.
+
+**Classes are TIERS, not scores.** "Unknown never outranks a measurement" is a rule about rank, and
+expressing it as arithmetic puts it at the mercy of the weights: an eligible account at 96% of its 5h
+window with a spent week also scores 0, so as a score the rule reduces to whichever name sorts first.
+`excluded` is never chosen; `unknown` ranks after every measured candidate but is still chosen when
+nothing else remains; `exhausted` is the refusal class.
+
+**The callers deliberately disagree about an exhausted pool, and that asymmetry is the decision.**
+Interactive (`claude`, `claude-as`, `claude-pick`) proceeds on the least-bad member — the one whose
+blocking window resets soonest — and prints the loud §5.4 block. Headless (`hspawn`,
+`claude-pick --strict`, herdr-draft) **refuses**, naming every member's window and the earliest reset.
+A human blocked by a window that clears itself in minutes is the worse outcome; a worker started on a
+spent window burns the seat and dies mid-task unwatched. Both messages come from one reporter, because
+they are the same facts read two ways and a second copy is a second place to forget that **no time may
+be invented** — `resets_at` is absent whenever the window has not started, so "no reset instant" is the
+common case, not an edge.
+
+**An exhausted pool does NOT reach overflow, and that is not the same rule as an empty one.**
+Overflow is consulted only when the pool named nothing that exists at all — borrowing another
+tenant's account bills work to the wrong place, so it is paid only when the alternative is no
+isolation. An exhausted pool is a real wall that clears itself, with a reset time to quote; borrowing
+a seat to get past it would bill the wrong tenant permanently for a wait of minutes.
+
+**A pin overrides the ranking, so it never refuses on the account — but it says what it was handed.**
+`--profile <p>` / `CLAUDE_ACCOUNT_PROFILE` skips scoring entirely, and when the named account is
+`exhausted` or `excluded` (clauth's own quarantine) that is one stderr line and a `warnings[]` entry,
+never an exit code: "it started and died twenty minutes in" is the outcome the line prevents, and
+overriding the ranking is exactly what the flag is for. The credential is still checked — reporting a
+name nobody can authenticate as hands the caller a config dir that Claude Code answers by writing a
+fresh independent login, manufacturing the very independent holder the account-dir design forbids.
+Every refusal reports a **null** profile, including the pinned path, which had to be taught it
+separately because it sets `REPLY` before the machine is ever measured: a JSON object naming an
+account beside a non-zero exit is one a caller can act on by mistake.
+
+`scripts/claude-pick` is `#!/usr/bin/env zsh`, symlinked to `~/.local/bin/claude-pick` (on the herdr
+server's frozen `PATH`, so a plugin finds it without a server restart). It sources `github.sh` and
+`zshrc.herdr` under `CLAUDE_PICK_SOURCING=1` and **not** `system.sh` — `--explain` prints plain lines
+of its own, because `system.sh` is the full install's and a CLI that dies on a missing module fails at
+the one moment its answer is wanted. Exit codes are the contract: **0** picked · **2** refused,
+exhausted or nothing usable · **3** refused, a machine ceiling · **4** the tenant table is unusable ·
+**5** no profile has a credential · **64** usage. `--strict` is the only thing that switches semantics
+and there is **no TTY sniffing**: a command whose refusal behaviour depends on whether its output is a
+pipe makes both its rows and its callers conditional, and herdr-draft passes `--strict` itself.
+
+**Backpressure is warn-only by default (D6 as amended).** `load1` from `/proc/loadavg` (×100 integer),
+online cpus from `/sys/devices/system/cpu/online`, swap from `/proc/meminfo` — forkless, and skipped
+rather than divided by zero when `SwapTotal` is 0. Every caller warns past `CLAUDE_PICK_LOAD_WARN`
+(150% of threads) or `CLAUDE_PICK_SWAP_WARN` (60%); only a `*_MAX` knob, explicitly set, refuses, and
+only for a headless caller. This laptop is deliberately oversubscribed and must keep working: the
+picker's job is to choose an account, not to police the box. The measurement is **published** rather
+than localised so `--explain` and the JSON report the numbers the refusal was decided on — reading
+`/proc` a second time could legitimately differ, and then the report would not be about the decision.
+**Measured first, acted on last:** the read happens before the tenant table and the profile census,
+so *every* exit path reports the machine (herdr-draft's failure row shows these numbers), while the
+verdict is deferred so that an unusable table (4) and no credential at all (5) — faults a person must
+fix — outrank a transient ceiling (3). An earlier version read it after the census and its own comment
+claimed "every exit path", which was false for exactly those two.
+
+Defects found by writing the rows, every one of which had a **passing test** first:
+
+- **jq's `empty` inside `[ … ]` produces no element**, so every absent field shifted the remaining
+  ones left: a profile with no `resets_at` read its weekly figure as the reset instant, and one with
+  no `five_hour` block reported `seven_day` as the 5h utilization. `// null` keeps the column.
+- **Fixing that left it fully intact**, because `IFS=$'\t' read` collapses runs of tabs — tab is an
+  IFS *whitespace* character. The same defect in two layers. `${(@ps:\t:)line}` preserves empties.
+- **An empty file glob made `jq` read STDIN and hang.** `(N)` suppresses the no-match error but yields
+  an empty expansion, leaving jq with no file operands. clauth creates `~/.clauth/live_sessions` as a
+  directory, so an empty one is an ordinary resting state — and this runs on **every** `claude` launch,
+  which would then never return. It passed earlier runs only because their stdin happened to be at EOF.
+- **The ledger was written with a literal backslash-t.** `print -r` is precisely the flag that disables
+  escape expansion, so `"$p\t$v"` wrote `a1\t175…`; the reader found no tab and discarded every entry.
+  The file was the right size and got a new inode on every write, so the atomicity row passed
+  throughout while round-robin silently degraded to "always the top score".
+- **`zsystem flock` opens without `O_CREAT`, so the pick lock had NEVER been acquired.** A lock file
+  that does not exist is not an unlocked lock — it is an open failure, which lands in the
+  proceed-unlocked fallback, and since nothing else creates that path it lands there forever. The row
+  covering it asserted the **warning**, which the broken state produces too, so it passed from the
+  start; its own background holder failed to open the same missing file, so nothing was ever held. The
+  missing row was the one that asserts the *uncontended* case is silent. `: >>`, never `: >`, so a
+  create cannot truncate a lock somebody is holding.
+- **`strftime -r` parses through `mktime`, which reads a broken-down time as LOCAL and discards any
+  offset `strptime` parsed** — so cutting `…T00:00:00.000000+00:00` at its first `.` and parsing the
+  rest yields an instant wrong by the machine's own UTC offset. Measured here at UTC+2: two hours
+  early — and this zone is UTC+3 in summer, which is 60% of an 18000 s window. Not cosmetic: `r5`
+  drives the bonus over exactly that window, and it shifts every reset time the messages print —
+  the number a reader uses to decide
+  how long to wait. `local TZ=UTC` (function-scoped) plus the string's own zone applied arithmetically,
+  because `%z` would be discarded by the same `mktime`. **The rows that existed could not catch it:**
+  they asserted an absent reset is `unknown` and an unparseable one is `unknown`, and a wrong number
+  satisfies neither. **And a UTC machine cannot fail the fixed rows at all**, so the fixture timezone is
+  now explicitly non-UTC (`XXX-3`, the POSIX form, which needs no tzdata) — CI runners are UTC.
+- **The band's tie-break sorted by the score's TEXT, not by name.** Entries are `"<score>\t<name>"`
+  strings, so `${(o)}` over them ordered by score text; with an empty ledger every candidate's time is
+  0, `<` is never true, and the first in iteration order won — which inside the band handed it to the
+  **lowest-scoring** member and put any negative score ahead of every positive one. The rule was
+  documented as "then name" throughout.
+- **`CLAUDE_TENANT_BUCKETS` was declared `typeset -gA` in #129**, copying §5.1, which declares it
+  associative and then shows a one-element **list** as its example. `typeset -gA B; B=( "a b" )` fails
+  with *"bad set of key/value pairs"* and the assignment does not happen. Masked here only because the
+  tenant data file re-declares it `-ga` first.
+
+**Four rows were decoration, and no two failed for the same reason** — which is the useful part,
+because none of the four reasons is visible by reading the row:
+
+- *The fixture's answer was the same either way.* "An eligible account beats an unreadable one" used
+  a candidate at 10% against an unknown, and 9000 against 0 is far outside `RR_BAND` — so scoring the
+  unknowns alongside the eligible ones changed nothing. The tier is only observable where the score
+  would *not* have separated them, which is the case the rule exists for: an eligible account at 96%
+  with a spent week also scores 0.
+- *The fixture could not reach the branch.* "config_dir is null under `--dry-run`" ran with no
+  executable account-dir builder, so `null` was the answer on both paths. `null` is also what a
+  broken builder gives, which is why the row needed its pair — a real run reporting the dir it built.
+- *Both renderings agreed on that machine.* The JSON says `null` for an unmeasured load and the report
+  says `unknown`, and every fixture read the real `/proc`, where the two are identical. A mutant
+  swapping one for the other survived until a fixture with an unreadable `/proc` existed.
+- *The row asserted the wrong artefact.* The ledger lock's row asserted the **warning**, which the
+  never-once-acquired state produces too. Only "the uncontended case is silent" could fail.
+
+Two mutants are **retired rather than pinned**, each with its reason written beside the code it
+defends. Stripping a trailing `Z` before `strptime` is defence in depth: measured here, glibc's
+`strptime` ignores trailing input, so removing that arm is behaviourally identical and the mutant can
+never die — it stays because the function's contract is "split the instant from its zone, then apply
+the zone", and an implementation that works only because `strptime` is lax is one strict `strptime`
+away from returning `unknown` for every UTC instant. And quoting the `auth_broken` span was never a
+leak vector: the `sed` range is anchored at the assignment and quits at the first `]`, so the span is
+a list of profile names, and `profiles.toml` carries no credential at all. The class it was meant to
+pin — "a diagnostic gains a file dump" — is pinned instead by a mutant that makes `--explain` dump the
+pick ledger, which does die. **A mutant that can never die is worse than no mutant, because it reads
+as coverage.**
+
+Two things went away with the old ranking, and both were dead the moment nothing called them:
+`_claude_profile_load` (which answered "the worse of the 5h and 7d utilization" — the whole of the
+old ranking) and `CLAUDE_ACCOUNT_CACHE_MAX_AGE`. The threshold is `CLAUDE_PICK_CACHE_MAX_AGE`. A dead
+function beside a live one that reads the same file is an invitation to reintroduce the old ranking by
+accident, so it is removed rather than left.
+
+**`scripts/claude-pick` is checked by exactly one thing, and it took finding out to keep it that
+way.** It is extensionless on purpose — it is a command on `~/.local/bin`, so `claude-pick.zsh` would
+put the implementation language into the name a user types and into herdr-draft's config. CI's
+ShellCheck job globs `*.sh`/`*.bash`/`*.zsh`, so it never selects it; pre-commit's ShellCheck matches
+by `identify`, which types a `#!/usr/bin/env zsh` shebang as `shell` and WOULD have picked it up and
+failed, since ShellCheck cannot parse zsh; and `script-must-have-extension` would have rejected the
+name. Both hooks now exclude it by path, and CI's `zsh -n` loop names it explicitly — otherwise the
+repo's newest executable would have had no syntax check at all.
+
+State tables: `scripts/test-claude-pick.sh` (new, 192 checks, CI job `claude-pick-test`),
+`scripts/test-hspawn.sh` (319 → 328, the caller-wiring rows and the compatibility contract) and
+`scripts/test-claude-doctor.sh` (156 → 172, the usage-cache freshness line). **40 mutants, 40
+deaths**, every mutation dry-run for applicability first — and the two retirements above are comments
+in the harness rather than entries, so the count is of mutants that can actually die.
+
+**A mutation sweep on this box has to be CHUNKED, and the harness has to refuse to start.** A single
+40-mutant run takes over an hour at the load this machine normally carries, and it was killed for
+memory three times partway through — the same pressure that kills background jobs here. Each mutant
+is independent and the harness restores the source between them, so a chunked sweep measures exactly
+what one long run measures: `MUT_FROM=<file>` / `MUT_TAKE=<n>` select a chunk, and the driver
+recomputes what is left from its own log every pass, so a kill costs at most the chunk in flight. The
+run this section reports was finished one mutant per pass, launched `nohup`-detached — a
+harness-tracked background job is what the memory reaper takes first, and every watcher waiting on
+this one was reaped while the detached driver kept going. Three properties are load-bearing rather
+than tidy:
+
+- **The signal handler must `os._exit`, not `sys.exit`.** `sys.exit` raises `SystemExit`, so the
+  `finally` block runs too — and it restores from a backup the handler has just removed, which fails
+  with `FileNotFoundError` and buries the reason the run stopped. The handler has already done the
+  cleanup; nothing else should.
+- **A leftover `.mb7` backup is a REFUSAL, not a warning.** If one is on disk, a previous run died
+  mid-mutation and the source *is* a mutant — so every mutation measured after it is measured against
+  a mutant, and the sweep is meaningless while looking perfectly normal. Self-healing (restore, then
+  continue) is right for the harness; refusing outright is right for a driver that would otherwise
+  chunk straight across the damage.
+- **Do not edit the source between chunks.** That is the one thing a chunked sweep does not survive,
+  and it happened here: an edit landed mid-sweep, was overwritten by the next mutant's write, and then
+  by the final restore. The file looked hand-edited, and then did not.
+
+Verify the composition afterwards, too, rather than trusting the tally: this run's log was checked
+for 40 **distinct** names each appearing **once**, because a resumable driver that recomputed its
+to-do list wrongly would happily run one mutant twice and report 40.
+
 ### Tenants and pools (DO-599)
 
 **The pool answered "which account", never "which account for THIS directory".** One flat
@@ -2602,6 +2839,14 @@ than the rows themselves, because neither reason is visible by reading the row:
 Ask of every new row: **what single change to the code would make this fail?** If the answer is
 "none", it is decoration — and it will look exactly like a passing row until a mutant says otherwise.
 
+**A row that verifies a write HAPPENED is not a row that verifies the write is READABLE.** DO-574's
+round-robin ledger was written with `print -r -- "$p\t$v"`, and `-r` is precisely the flag that
+disables escape expansion — so every line got a literal backslash-t. The reader found no tab, split
+nothing, and discarded every entry. The file was the right size and got a **new inode on every
+write**, so the atomicity row passed throughout; the ledger simply read back empty and round-robin
+degraded to "always the top score" in silence. Assert the round trip — write, read back, compare —
+not the artefacts of writing.
+
 State tables: `scripts/test-hspawn.sh` (269 → 315) and `scripts/test-gh-routing.sh` (199 → 207).
 Every fix is pinned by a mutant that dies (19 mutants, 19 deaths), and every mutation is dry-run for
 applicability first — a mutation that no longer applies reads exactly like a surviving mutant.
@@ -2702,6 +2947,7 @@ gh-refresh-tokens    # Refresh GH CLI token cache
 gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offline)
 claude-doctor        # Claude auth + MCP health; run BEFORE 'clauth <profile>'
 claude-as <profile>  # claude on a named account: isolated AND still a team lead
+claude-pick          # which account would this directory bill? (--explain --json --strict)
 scripts/claude-account-dirs.sh --all   # (re)build every profile's persistent config dir
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 tool_status          # Check installed tools

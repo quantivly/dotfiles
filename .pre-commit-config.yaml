@@ -50,7 +50,16 @@ repos:
         # The only check that runs on zsh/zshrc.* is `zsh -n`, in CI's "Shell Syntax Check" job
         # (.github/workflows/ci.yml loops over zsh/zshrc.* zshrc p10k.zsh). CI's own ShellCheck
         # job is narrower still: *.sh/*.bash/*.zsh files that also carry a shebang.
-        exclude: '(dotbot/|p10k\.zsh|^zshrc$|zsh/functions/)'
+        #
+        # scripts/claude-pick is excluded for the same reason as the rest: it is
+        # zsh, and ShellCheck cannot parse zsh. It is NOT extensionless by
+        # accident — it is a command on ~/.local/bin, so an extension would be
+        # part of the name a user types. Unlike zsh/zshrc.*, it carries a shebang,
+        # so `identify` types it as `shell` and this hook WOULD pick it up. What
+        # checks it instead is `zsh -n`, in CI's "Shell Syntax Check" job, which
+        # names it explicitly — a file no linter and no syntax check reads is the
+        # gap this note exists to close.
+        exclude: '(dotbot/|p10k\.zsh|^zshrc$|zsh/functions/|^scripts/claude-pick$)'
 
   # Secret detection with gitleaks
   - repo: https://github.com/gitleaks/gitleaks
@@ -74,7 +83,11 @@ repos:
     hooks:
       - id: script-must-have-extension
         name: Check script extensions
-        exclude: '^(install|scripts/test-|dotbot/|p10k\.zsh)'  # Allow specific files without extension
+        # scripts/claude-pick is a COMMAND on ~/.local/bin — `claude-pick.zsh`
+        # would put the implementation language into the name a user types and
+        # into herdr-draft's config, which names the binary. Same reasoning as
+        # `install`.
+        exclude: '^(install|scripts/test-|scripts/claude-pick$|dotbot/|p10k\.zsh)'  # Allow specific files without extension
 
   # Security: Check for secrets patterns
   - repo: local

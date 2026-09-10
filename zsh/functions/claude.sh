@@ -184,6 +184,20 @@ _claude_fmt_delta() {
   if (( ms < 0 )); then print -r -- "${n}${unit} ago"; else print -r -- "in ${n}${unit}"; fi
 }
 
+# Seconds since a file was last written, or nothing. Loads its own modules: a
+# helper that depends on a module its CALLER happened to load returns nothing
+# when called any other way — and "no age" reads as "fresh", which is how a stale
+# reading comes to be believed.
+_claude_file_age_s() {
+  local mtime
+  [[ -r "$1" ]] || return 1
+  zmodload -F zsh/stat b:zstat 2>/dev/null || return 1
+  zmodload zsh/datetime 2>/dev/null || return 1
+  mtime=$(zstat +mtime -- "$1" 2>/dev/null) || return 1
+  [[ "$mtime" == <-> ]] || return 1
+  print -r -- $(( EPOCHSECONDS - mtime ))
+}
+
 # The success and failure markers Claude Code writes into every per-server log.
 # Verified against both a healthy remote server and a failing stdio one on
 # 2026-09-06; they are the only pair that distinguishes "connected" from
@@ -214,6 +228,7 @@ claude-doctor() {
   local i comm svc a b
   local gcred gcred_id link_target session_owner global_owner has_meta gsettings val
   local unknown_n cfgdir credpath ldir grp envblob n label procroot
+  local uc_max uc_age uc_oldest uc_oldest_p uc_seen uc_stale uc_missing ucf
   local -a date_prefixes files
   local -A group_n group_label
 
@@ -605,6 +620,71 @@ claude-doctor() {
     echo "    An untracked copy of a login, and an untracked participant in refresh"
     echo "    rotation. Remove it once nothing launches with CLAUDE_CONFIG_DIR=$ldir."
   done
+
+  # ---- 3c. Usage-cache freshness: what the picker is ranking on ------------
+  #
+  # WHY THIS IS A LINE AND NOT A TIMER. §5.7 of the tenant/pool spec called for a
+  # `claude-usage-refresh.timer` and a drop of the picker's staleness threshold
+  # from 3600 s to 900 s. Neither shipped, and the reason is measured rather than
+  # argued: THERE IS NO REFRESH ENTRY POINT. clauth's only writer of
+  # usage_cache.json is its scheduler, every fetch is gated on a lease acquired
+  # in exactly two places — its TUI and its daemon — and no CLI subcommand takes
+  # that lease. Probed 2026-09-09 against caches already 207–282 s old:
+  # `clauth which`, `clauth status --json`, `clauth list`, `clauth sessions` and
+  # `clauth jobs` refreshed nothing, mtimes unchanged to the second, and
+  # `clauth --help` has no `refresh`. A 15-minute sample at 10 s resolution
+  # recorded ZERO writes to any cache while ~29 panes were open.
+  #
+  # So the honest report is the age, said plainly, with no command to offer. A ✗
+  # would be the permanently-red checker this file's own rules forbid: on this
+  # machine a stale cache is the ordinary resting state, not a fault, and the
+  # only thing that clears it is a person opening clauth's TUI.
+  #
+  # The default repeated here (3600) is _claude_pick_class's. It is a literal in
+  # two files because zsh/functions/claude.sh must not depend on zshrc.herdr —
+  # claude-doctor is a full-install command and the picker is the portable herdr
+  # layer, which a modular adopter sources alone. A state-table row asserts the
+  # two literals are the same number, so they cannot drift apart in silence.
+  echo
+  uc_max="${CLAUDE_PICK_CACHE_MAX_AGE:-3600}"
+  [[ "$uc_max" == <-> ]] && (( uc_max > 0 )) || uc_max=3600
+  uc_seen=0; uc_stale=0; uc_missing=0; uc_oldest=-1; uc_oldest_p=""
+  for pdir in "$HOME"/.clauth/profiles/*(N-/); do
+    [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]] || continue
+    (( uc_seen++ ))
+    ucf="$pdir/usage_cache.json"
+    if [[ ! -r "$ucf" ]]; then
+      (( uc_missing++ )); continue
+    fi
+    uc_age="$(_claude_file_age_s "$ucf")" || uc_age=""
+    if [[ -z "$uc_age" ]]; then
+      (( uc_missing++ )); continue
+    fi
+    (( uc_age > uc_oldest )) && { uc_oldest="$uc_age"; uc_oldest_p="${pdir:t}" }
+    (( uc_age > uc_max )) && (( uc_stale++ ))
+  done
+  if (( ! uc_seen )); then
+    _doctor_note "no registered profile with a credential — nothing for the picker to rank"
+  else
+    # An UNREADABLE cache is its own state and is counted apart from a stale one:
+    # the picker classes both `unknown`, but the fixes differ (one is age, the
+    # other is a file that was never written).
+    if (( uc_oldest >= 0 )); then
+      if (( uc_stale )); then
+        # MILLISECONDS: _claude_fmt_delta's input is ms, and feeding it seconds
+        # renders a 20-minute-old cache as "1s ago" — a stale reading reported as
+        # a fresh one, by the line whose whole job is to say it is stale.
+        _doctor_warn "usage caches: oldest $(_claude_fmt_delta $(( - uc_oldest * 1000 ))) ('$uc_oldest_p') — $uc_stale of $uc_seen past the picker's ${uc_max}s threshold, so it ranks them as 'unknown'"
+      else
+        _doctor_ok "usage caches: oldest $(_claude_fmt_delta $(( - uc_oldest * 1000 ))) ('$uc_oldest_p'), all within the picker's ${uc_max}s threshold"
+      fi
+    fi
+    (( uc_missing )) &&       _doctor_note "$uc_missing of $uc_seen profiles have no readable usage cache at all — also 'unknown' to the picker"
+    # Said on EVERY run, stale or not, because the absence of a refresher is the
+    # standing fact a reader needs in order to act on the line above — and the
+    # thing they would otherwise go looking for a timer to fix.
+    _doctor_note "nothing refreshes these on a schedule: clauth's only usage writer is lease-gated to its TUI and its daemon, and there is no 'clauth refresh'"
+  fi
 
   # ---- 4. Concurrency on the shared file -----------------------------------
   # Claude Code does not lock .credentials.json. That is upstream's to fix, not

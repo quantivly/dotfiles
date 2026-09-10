@@ -235,9 +235,10 @@ member of the group that a single bad write destroys.
 
 - **`claude` isolates by default.** It runs in
   `~/.local/state/claude-account-dirs/<profile>/`, built on demand by
-  `scripts/claude-account-dirs.sh`, and prints which account it took. The profile
-  is the registered one with the fewest live sessions, so sessions spread rather
-  than piling onto whichever account happens to be active.
+  `scripts/claude-account-dirs.sh`, and prints which account it took. Which
+  account that is comes from the picker below — not from "whichever is active",
+  which inside an isolated pane means *this* session's own profile and would herd
+  every launch into its parent's credential group.
 - **`claude-as <profile>`** does the same on a named account.
 - **`hspawn` isolates by default** and, since 2026-09-06, its workers can also
   **lead a herdr team** — it launches `CLAUDE_CONFIG_DIR=<dir> claude` rather than
@@ -256,6 +257,75 @@ member of the group that a single bad write destroys.
 is the only thing that makes them smaller. `claude-doctor`'s concurrency section
 prints the current grouping, and the number to drive to zero is the one on
 **the SHARED global file** — it was 17 of 18 when this was written.
+
+### Which account a launch takes, and how to ask before launching
+
+The choice is a score, not a sort, and `claude-pick` is the same code path as a
+command — so you can ask what a directory would get without starting anything:
+
+```bash
+claude-pick                       # the profile name, one line
+claude-pick --explain             # ...and the per-candidate table, on stderr
+claude-pick --dir ~/work/api --json --dry-run   # what herdr-draft asks
+```
+
+`--dry-run` writes no round-robin ledger entry and builds no account dir, so it
+is safe to run repeatedly.
+
+**What the score is made of.** 5h headroom is the backbone; a window close to its
+reset earns a use-it-or-lose-it bonus *scaled by how much headroom is left*, so a
+nearly-spent window resetting soon earns almost nothing; weekly headroom is a
+**multiplier**, so a spent week sinks an account below anything with room while
+leaving it choosable when it is all there is; and each live holder costs more on
+an account that is already busy. Accounts within `CLAUDE_PICK_RR_BAND` of the top
+score are treated as tied and the **least recently picked** wins, which is what
+stops every session in a quiet minute landing on the same seat.
+
+**The classes matter more than the score.** `excluded` (disabled, or quarantined
+by clauth as `auth_broken`) is never chosen. `unknown` — no usage cache, or one
+older than `CLAUDE_PICK_CACHE_MAX_AGE` — ranks after *every* measured candidate
+but is still chosen when nothing else is left. `exhausted` means the 5h window is
+spent, and that is where the two callers deliberately differ:
+
+| caller | an exhausted pool |
+|---|---|
+| `claude`, `claude-as`, `claude-pick` | proceeds on the least-bad member and prints a loud block saying so |
+| `hspawn`, `claude-pick --strict`, herdr-draft | **refuses**, naming each member's window and the earliest reset |
+
+A human blocked by a window that clears itself in minutes is the worse outcome; a
+worker started on a spent window burns the seat and dies mid-task with nobody
+watching. The escape from the refusal is `-p <profile>` / `--profile <p>`, which
+skips the ranking entirely — it still warns on stderr when the account you named
+is spent or quarantined, but it never refuses, because overriding the ranking is
+what the flag is for.
+
+**A reset time it will not print.** Where a member's window has already rolled,
+the report says *"5h window already rolled — this reading is stale"* rather than
+naming a moment in the past — the usage figure beside it belongs to the previous
+window. That is the ordinary state of a cache nobody has refreshed, not an edge
+case. Where no reset instant is known at all (which is what an unstarted window
+looks like), it says so and offers no retry time, because the alternative is the
+same invented date for every account.
+
+**Exit codes**, which is how herdr-draft's `--on-failure` decides what to say:
+`0` picked · `2` refused, exhausted · `3` refused, a machine ceiling ·
+`4` the tenant table is unusable (a fix in `~/.config/claude-tenants.zsh`) ·
+`5` no profile has a credential (`clauth login <name>`) · `64` usage error.
+
+**Backpressure is warn-only.** `claude-pick --explain` prints the machine's load
+and swap, and every caller warns past `CLAUDE_PICK_LOAD_WARN` (150% of threads)
+or `CLAUDE_PICK_SWAP_WARN` (60%), but nothing refuses unless
+`CLAUDE_PICK_LOAD_MAX` / `CLAUDE_PICK_SWAP_MAX` is explicitly set. This box is
+deliberately oversubscribed; the picker's job is to choose an account, not to
+police the machine.
+
+**The usage numbers are as fresh as the last time somebody opened clauth's TUI.**
+There is no `clauth refresh`: clauth's only writer of `usage_cache.json` is
+lease-gated to its TUI and its daemon, and the daemon is disabled. So a profile
+whose cache has aged past the threshold silently stops being ranked, and
+`claude-doctor` reports the oldest age on every run precisely because nothing can
+be done about it from a script. If the picker's choices look arbitrary, check that
+line first.
 
 ### Adopting a new profile
 
