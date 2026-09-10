@@ -903,10 +903,67 @@ claude-doctor() {
       # not run an isolated session, legitimately has no account dirs.
       _doctor_note "no account dirs at ${adroot/#$HOME/~} — nothing isolated yet"
     else
-      for ad in "$adroot"/*(N/); do
+      # `(N-/)`, NOT `(N/)`. The `/` qualifier matches directories only, and a
+      # symlink TO a directory is not one unless `-` makes the qualifiers follow
+      # links. With the bare `/`, a symlinked account dir was silently never
+      # checked — not reported as skipped, not reported at all; the section
+      # simply behaved as though it did not exist.
+      #
+      #     mkdir real; ln -s real link
+      #     print -l -- *(N/)    -> real
+      #     print -l -- *(N-/)   -> link  real
+      #
+      # That took out every check below for such a dir: credential mode, dangling
+      # links, store divergence, "links to ANOTHER profile's store", and the
+      # shared-subtree assertions. The last is why it matters — a symlinked
+      # account dir resolving to a DIFFERENT profile's store is exactly the
+      # silent-wrong-account shape this section exists to catch, and the one
+      # checker that would notice could not see it.
+      # `(N-/)` covers real dirs and symlinks TO dirs; `(N@)` adds the symlinks
+      # `-/` drops — a DANGLING one, or one pointing at a non-directory. All three
+      # are account dirs as far as a reader is concerned, and a dangling one is
+      # precisely the half-finished rename this section should be reporting.
+      # Deduplicated, because a live symlink-to-dir matches both patterns.
+      local -a _ad_all
+      _ad_all=( "$adroot"/*(N-/) "$adroot"/*(N@) )
+      for ad in ${(u)_ad_all}; do
         name="${ad:t}"
         store="$HOME/.clauth/profiles/$name/credentials.json"
         seen=1
+
+        # A symlinked account dir is how a profile RENAME keeps old paths working
+        # while panes drain: an expected transitional state, not a fault. So it is
+        # a note when it resolves to a registered profile and a ⚠ naming the
+        # target when it does not. Reported BEFORE the store check below, which
+        # would otherwise call a compat link "an account dir with no clauth
+        # profile store" and send the reader to `clauth login` for a name that is
+        # deliberately no longer a profile.
+        if [[ -L "$ad" ]]; then
+          # `${ad:A}` resolves a symlink only as far as it EXISTS: on a dangling
+          # one it returns the link's own path, so the warning below would have
+          # read "p9 is a symlink to .../p9" — naming the link instead of the
+          # target, which is the one fact the reader needs. `zstat +link` reads
+          # the target itself, and unlike `readlink` it is a zsh module rather
+          # than a PATH dependency: CLAUDE.md records readlink silently producing
+          # NOTHING under the state table's from-scratch PATH, in this very file.
+          zmodload -F zsh/stat b:zstat 2>/dev/null
+          adlink="$(zstat +link -- "$ad" 2>/dev/null)" || adlink=""
+          [[ -n "$adlink" ]] || adlink="${ad:A}"
+          # A relative target is relative to the link's own directory.
+          [[ "$adlink" == /* ]] || adlink="${ad:h}/$adlink"
+          if [[ -d "$HOME/.clauth/profiles/${adlink:t}" ]]; then
+            _doctor_note "$name -> ${adlink:t} (compat symlink; resolves to a registered profile)"
+            store="$HOME/.clauth/profiles/${adlink:t}/credentials.json"
+          else
+            _doctor_warn "$name is a symlink to '${adlink/#$HOME/~}', which is not a registered profile"
+            echo "    A rename in progress looks like this. If it is not one, the link points nowhere useful."
+          fi
+          # A link whose target is not a directory has no account dir to check
+          # past this point; every test below would read through the dead link.
+          if [[ ! -d "$ad" ]]; then
+            continue
+          fi
+        fi
 
         if [[ ! -e "$store" && ! -L "$store" ]]; then
           _doctor_warn "$name: an account dir with no clauth profile store"
@@ -1069,6 +1126,41 @@ claude-doctor() {
         _doctor_note "$real_n account dir(s) hold a real credential file rather than a link"
         echo "    Expected after a token refresh. '--reconcile' adopts the live one and relinks."
       fi
+    fi
+
+    # A DIRECTORY under ~/.clauth/profiles is not a profile. clauth leaves runtime
+    # dirs and a .reconcile.lock behind under a name it no longer registers, and
+    # the result looks exactly like a profile to anything globbing that path —
+    # while having no credential and no entry in profiles.toml. Observed on this
+    # machine 2026-09-10: `profiles/personal/` holding only `runtime-*/` and
+    # `.reconcile.lock` after the profile was renamed away.
+    #
+    # The picker already skips it (it requires credentials.json), and the account
+    # dir builder refuses it with `refused-no-store`. Both are correct and silent,
+    # which is the reason to say it here: nothing else reports that a name which
+    # still LOOKS like a profile has stopped being one.
+    local pdir pname
+    local -a stray_profiles
+    for pdir in "$HOME"/.clauth/profiles/*(N-/); do
+      pname="${pdir:t}"
+      [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]] && continue
+      stray_profiles+=("$pname")
+    done
+    if (( ${#stray_profiles} )); then
+      _doctor_note "profile director$( (( ${#stray_profiles} == 1 )) && echo y || echo ies ) with no credential: ${(j:, :)stray_profiles}"
+      echo "    Leftover runtime state, not a profile: nothing can launch on it, and the"
+      echo "    picker and the account-dir builder both skip it. Remove when nothing is"
+      echo "    running under it, or 'clauth login <name>' if it should be real."
+    fi
+
+    # TWO sources of truth for the pool is a finding, not a merge (spec §5.1).
+    # CLAUDE_ACCOUNT_POOL is ignored the moment a tenant table is loaded, so a
+    # leftover flat pool is not wrong today — it is a line that silently stopped
+    # meaning anything, and the next person to edit it will believe it works.
+    if (( ${#CLAUDE_TENANT_POOL} )) && (( ${#CLAUDE_ACCOUNT_POOL} )); then
+      _doctor_note "both pool sources are set: CLAUDE_ACCOUNT_POOL (${#CLAUDE_ACCOUNT_POOL} entries) and a tenant table (${#CLAUDE_TENANT_POOL} tenants)"
+      echo "    The tenant table wins; CLAUDE_ACCOUNT_POOL is inert. Delete the flat pool so"
+      echo "    there is one source of truth — a stale one reads as configuration that works."
     fi
   }
 
