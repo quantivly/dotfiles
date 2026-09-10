@@ -9,6 +9,29 @@
 # Most rows assert what the checker must NOT flag. A false positive costs the
 # whole check — somebody deletes it — while a miss costs one CI outage, so the
 # comment-mentioning-the-rule row matters as much as the violation rows.
+#
+# Two rules learned the hard way, both about needles rather than fixtures:
+#
+#   - A `contains` needle must be UNIQUE TO THE RULE under test, not merely
+#     absent from the pass path. Three of this checker's rules print
+#     `<file>:<line>` in the same format, so any bare path or line-number
+#     needle is ambiguous by construction -- one such row passed with the verb
+#     rule's filename deleted, satisfied by the refresh rule's message instead.
+#     Anchor on the message prefix.
+#   - Check the needle against what the PASS path prints too. The
+#     interpolation rule's ok and bad messages both contain "env: assignment",
+#     so that needle asserted nothing.
+#
+# EXPECTED_TOTAL at the bottom was PROVEN non-decorative by deleting a row and
+# watching it report a vanished row rather than "all N passed" -- recorded
+# because the next reader cannot tell a proven total from an unproven one.
+#
+# NOTE FOR ANYONE TIDYING THIS FILE: the two rows at the end under "the tree we
+# ship" are the ONLY production callers of check-workflow-apt.sh anywhere in
+# the repository. It is not a CI step of its own and not a pre-commit hook, so
+# deleting those two rows removes DO-608 enforcement entirely, with CI fully
+# green and no file changed outside this one. Whether to add a separate gate is
+# a question about how the repo is gated, and is deliberately left open.
 set -uo pipefail
 
 # shellcheck disable=SC2016
@@ -158,7 +181,15 @@ mv "$d/.github/workflows/ci.yml" "$d/.github/workflows/ci.yaml"
 printf '      - run: sudo apt-get update\n' >> "$d/.github/workflows/ci.yaml"
 out=$("$CHECKER" "$d" 2>&1); rc=$?
 check "a bare 'apt-get update' in a .yaml workflow exits 1" 1 "$rc"
-contains "  and names the offending file" "$out" ".github/workflows/ci.yaml:"
+# Anchored to the rule's own message. A bare refresh trips TWO rules and both
+# print `<file>:<line>`, so a bare path needle passed with the verb rule's
+# filename deleted -- it was satisfied by the refresh rule instead.
+contains "  and the VERB rule names the file" "$out" \
+    "runs 'apt-get update' directly: .github/workflows/ci.yaml:"
+# For a workflow the refresh rule is always shadowed by the verb rule in
+# exit-code terms, so no `check` row can pin it -- only a message assertion
+# can, which is exactly where one earns its keep.
+contains "  and the REFRESH rule sees it too" "$out" "can fail its step at"
 contains "  over all six checks" "$out" "of 6 checks failed"
 
 d=$(mkfix bare_install); good_action "$d"; good_workflow "$d"
@@ -678,6 +709,42 @@ W
 out=$("$CHECKER" "$d" 2>&1); rc=$?
 check "a refresh after a balanced string is still caught" 1 "$rc"
 
+# Three shapes the previous hand-written parser got WRONG, kept as rows now
+# that a real parser makes them free.
+#
+# Be precise about what these two pin. A real parser hands over the COMPLETE
+# `run:` scalar -- measured: a block scalar's value is 'a\n\nb\n' and a folded
+# one's is 'a b\n' -- so there is no block-ending logic left to break and the
+# properties cannot regress WITHIN this design. They are regression insurance
+# against the parser being swapped back out, which is exactly what happened in
+# the other direction.
+#
+# The `contains` is what makes them able to fail at all, and that is not
+# theoretical: with the emitter mutated to collect no run scalars, the fixture
+# still exits 1 -- from the install-strict rule, an unrelated reason -- so an
+# rc-only row here would be decoration. The folded row shipped without a
+# `contains` for exactly that reason and was decoration until this line.
+d=$(mkfix parser_blank_line); good_workflow "$d"
+act2 "$d" "      run: |\n        set -euo pipefail\n\n        sudo apt-get update\n$inst2"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a BLANK LINE inside a run block does not end it" 1 "$rc"
+contains "  the refresh after it is still seen" "$out" "can fail its step"
+
+d=$(mkfix parser_folded); good_workflow "$d"
+act2 "$d" "      run: >\n        sudo apt-get update && sudo apt-get install -y x"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a FOLDED 'run: >' body is scanned as shell" 1 "$rc"
+contains "  and the gate in it is named" "$out" "can fail its step"
+
+# The excuse-path's BOUNDARY: `if` must be a word. Removing the excuse entirely
+# is well covered; broadening it to a substring was not, and `verify_sources`
+# contains `if`.
+d=$(mkfix fatal_if_in_word); good_workflow "$d"
+act2 "$d" "      run: |\n        sudo apt-get update; verify_sources\n$inst2"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "'if' inside a word does not excuse a fatal refresh" 1 "$rc"
+contains "  and is named as fatal" "$out" "can fail its step"
+
 printf '\n== the parser dependency cannot go quiet ==\n'
 # PyYAML missing, or YAML that does not parse, must be exit 2 -- never a silent
 # pass. "Could not read the shell" is not "there is no shell here".
@@ -710,7 +777,7 @@ contains "  over its real workflow set" "$out" "scanning"
 # number lives here, in the state table, deliberately: changing it is a visible
 # edit to the suite that a reviewer reads as "this expects fewer checks now,
 # why", where a literal beside the code gets updated by whoever removes a check.
-EXPECTED_TOTAL=88
+EXPECTED_TOTAL=95
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then

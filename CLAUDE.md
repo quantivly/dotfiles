@@ -638,7 +638,7 @@ already records, met at scale:
   file already records for `verify-tools.sh`: a new external tool in a checker is
   a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (88 checks, in CI as
+State table: `scripts/test-workflow-apt.sh` (95 checks, in CI as
 `workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
 builds its own fixture tree and is handed an explicit root; only the last rows
 read this repository, to assert the shipped tree passes. Most rows assert what it
@@ -720,6 +720,41 @@ update`, where ` #` opens a *YAML* comment — so the value is `echo "tag` and a
 never runs at all. The hand parser had been flagging a line GitHub would not
 execute, and the row encoded that mistake. It needs a block scalar to mean what
 it says.
+
+**The mutation figures across three rounds, with the set beside the ratio,
+because the ratio alone is what misled the first time.** An independent reviewer
+grew the set each round specifically into rules that had no rows — the only way
+the number means anything: **27 mutants / 8 survivors, then 31 / 12, then 36 /
+27 killed / 9 survivors.** The set covered the file finds, every branch of the
+shell scoping, all three copies of the quote stripper, `apt_re`, the
+refresh-fatality rule and its excuse-path, the interpolation rule, the count
+guards, and two mutations of `action.yml` itself.
+
+Two things about those numbers matter more than their size. **Every survivor of
+the last round kept the check count at exactly six**, which is the evidence for
+the honest label on the count guards above — a guard green over 9 of 9 of a
+round's real defects is worth having and must not be described as coverage. And
+**five of the nine clustered in the newest code**, the hand-written parser,
+which is what decided the rewrite rather than a fourth round of patching. The
+figures above are for the awk implementation; the parser rewrite came after
+them, so no re-run has yet measured what shipped — recorded as unmeasured rather
+than assumed to be better.
+
+Three lessons from that round that generalise past this guard:
+
+- **A `contains` needle must be unique to the RULE, not merely absent from the
+  pass path.** Three of this checker's rules print `<file>:<line>` in the same
+  format, so a bare path needle is ambiguous by construction: one row passed
+  with the verb rule's filename deleted, satisfied by the refresh rule's
+  message instead. Anchor on the message prefix.
+- **Check the needle against what the PASS path prints.** The interpolation
+  rule's ok and bad messages both contain "env: assignment", so that needle
+  asserted nothing at all.
+- **A row whose fixture fails for more than one reason is decoration however
+  carefully worded.** Two rows added for the parser exit 1 from the
+  install-strict rule whether or not the property under test holds; only a
+  rule-specific `contains` makes them able to fail, and one of them shipped
+  without one.
 
 **On the mutation numbers, which is the part worth carrying forward.** An earlier
 version of this section claimed "9 mutants, 9 deaths" for this guard. That was

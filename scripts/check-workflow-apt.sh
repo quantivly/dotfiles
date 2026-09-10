@@ -75,66 +75,6 @@ note() { printf '  %s\n' "$1"; }
 ok()   { checks=$((checks + 1)); printf '  %s✓%s %s\n' "$GRN" "$RST" "$1"; }
 bad()  { checks=$((checks + 1)); fail=$((fail + 1)); printf '  %s✗%s %s\n' "$RED" "$RST" "$1"; }
 
-# YAML comments are stripped before matching. A comment that EXPLAINS this rule
-# must not trip it — this repo has already shipped a row that matched the
-# comment describing the defect it was hunting.
-# strip_noise removes shell comments and the CONTENTS of quoted strings before
-# matching, so that a line which merely NAMES a forbidden command is not
-# refused: a comment explaining this rule, and a step running
-# `git commit -m "stop apt-get update failing CI"`, both have to pass. A false
-# positive costs the whole check -- somebody deletes it -- while a miss costs
-# one CI outage.
-#
-# It scans CHARACTER BY CHARACTER, tracking quote state, because the obvious
-# line-based `sed` version had two holes that each hid a real violation while
-# printing a green tick (found in review, both reproduced):
-#
-#   echo "don't skip" && sudo apt-get update && sudo apt-get install -y zsh
-#     -- the single-quote rule ran first, so the two apostrophes INSIDE
-#        separate double-quoted strings paired with each other and swallowed
-#        the command between them.
-#   echo "tag #1" && sudo apt-get update && sudo apt-get install -y zsh
-#     -- the comment rule ran first and did not know about quoting, so it
-#        truncated the line at a `#` that was ordinary quoted text.
-#
-# Neither is contrived; both are shapes people write. A `#` only opens a
-# comment at a word boundary (`foo#bar` is not one) and only outside quotes.
-strip_noise() {
-    awk '{
-        out = ""; n = length($0); i = 1; sq = 0; dq = 0
-        while (i <= n) {
-            c = substr($0, i, 1)
-            if (!sq && !dq && c == "#" && (i == 1 || substr($0, i-1, 1) ~ /[ \t]/)) break
-            if (!dq && c == "'"'"'") { sq = !sq; i++; continue }
-            if (!sq && c == "\"")   { dq = !dq; i++; continue }
-            if (sq || dq)          { i++; continue }
-            out = out c; i++
-        }
-        print out
-    }' "$1"
-}
-
-# strip_comments drops shell/YAML comments the same quote-aware way, but KEEPS
-# quoted content. The interpolation rule below needs this and not strip_noise:
-# `run: echo "${{ inputs.packages }}"` is still an injection surface, so
-# dropping quoted text would hide a real violation -- while a COMMENT that
-# merely names `${{ }}` must not count. That comment case is not theoretical:
-# this action's own doc comment explains why not to interpolate, and the first
-# version of the rule counted it and failed the shipped tree.
-strip_comments() {
-    awk '{
-        out = ""; n = length($0); i = 1; sq = 0; dq = 0
-        while (i <= n) {
-            c = substr($0, i, 1)
-            if (!sq && !dq && c == "#" && (i == 1 || substr($0, i-1, 1) ~ /[ \t]/)) break
-            if (!dq && c == "'"'"'") sq = !sq
-            else if (!sq && c == "\"") dq = !dq
-            out = out c; i++
-        }
-        print out
-    }' "$1"
-}
-
 # shell_code emits `<lineno>\t<shell>` via scripts/gha-yaml-shell.py, which
 # uses a real YAML parser.
 #
