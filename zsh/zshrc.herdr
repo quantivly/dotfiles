@@ -586,6 +586,85 @@ _claude_pick_score() {
   print -r -- $(( (base + bonus) * weekf / 100 - crowd ))
 }
 
+# Which class is this profile in, and why? Prints `eligible`, or `<class>:<why>`.
+#
+# Usage: _claude_pick_class <profile>
+# Classes: excluded  — disabled, auth_broken, or no credential. Never chosen.
+#          exhausted — the 5h window is spent. A real, self-clearing wall.
+#          unknown   — no cache, or one too old to believe. Ranks after every
+#                      measured candidate; unknown never outranks a measurement.
+#          eligible  — scored.
+#
+# THE WEEKLY WINDOW IS NOT AN EXHAUSTION CLASS, and that is a deliberate
+# departure from §5.3, measured rather than argued. §5.3 listed
+# `uW >= WEEK_EXHAUSTED (100)` as exhausted, which every headless caller refuses
+# on. Measured on this machine 2026-09-10:
+#
+#   * two Team seats read seven_day 100 WITH LIVE SESSIONS ON THEM;
+#   * ZERO "usage limit reached" / weekly-reset refusals across 750 transcripts
+#     over 7 days — the refusal that class was modelled on never fired once;
+#   * what a Team seat actually hits is "You've hit your individual spend limit ·
+#     run /usage-credits to ask your admin for a higher limit" (34 in 24 h),
+#     whose remedy is a PERSON, not a window rolling over, so refusing locally
+#     never makes such an account usable any sooner;
+#   * their per-model weekly_scoped windows read 38 and 54 — the block is
+#     partial, which is why work continues on them;
+#   * clauth itself calls its weekly line a SWITCH line (default 98, "aggregate
+#     and per-model"), governing auto-switching rather than availability.
+#
+# With all three work accounts at 100 that morning, a hard block would have made
+# hspawn and herdr-draft refuse across the whole work tree while work was
+# demonstrably possible. So the weekly window DEMOTES instead: `weekf` in the
+# score collapses such an account to ~0, ranking it below anything with headroom
+# while leaving it choosable when it is all there is.
+#
+# CLAUDE_PICK_WEEK_EXHAUSTED stays as an INERT knob, defaulting to 101 so it can
+# never fire, for whoever wants the strict behaviour back.
+_claude_pick_class() {
+  local name="$1" why
+  local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97}
+  local exw=${CLAUDE_PICK_WEEK_EXHAUSTED:-101}
+  local max_age=${CLAUDE_PICK_CACHE_MAX_AGE:-3600}
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_AGE _CPM_TIER
+
+  # A DIRECTORY under profiles/ is not a profile. clauth leaves runtime dirs and
+  # a .reconcile.lock behind under a name it no longer registers (observed
+  # 2026-09-10), and the result looks exactly like a profile to any glob.
+  if [[ ! -e "$HOME/.clauth/profiles/$name/credentials.json" \
+     && ! -L "$HOME/.clauth/profiles/$name/credentials.json" ]]; then
+    print -r -- "excluded:no credential"
+    return 0
+  fi
+  if why="$(_claude_profile_excluded "$name")"; then
+    print -r -- "excluded:$why"
+    return 0
+  fi
+
+  _claude_profile_metrics "$name" >/dev/null 2>&1
+  if [[ "$_CPM_U5" == unknown ]]; then
+    print -r -- "unknown:no usage reading"
+    return 0
+  fi
+  # Stale is unknown. The threshold is 3600 and STAYS there: there is no
+  # refresher to keep caches fresher than that — clauth's only usage writer is
+  # gated on a lease taken by the TUI and the daemon alone — so §5.3's proposed
+  # 900 would mark every profile unknown for most of the day and leave the picker
+  # ranking on nothing at all.
+  if [[ "$_CPM_AGE" != unknown ]] && (( _CPM_AGE > max_age )); then
+    print -r -- "unknown:usage reading is ${_CPM_AGE}s old"
+    return 0
+  fi
+  if (( _CPM_U5 >= ex5 )); then
+    print -r -- "exhausted:5h window ${_CPM_U5}% used"
+    return 0
+  fi
+  if [[ "$_CPM_UW" != unknown ]] && (( _CPM_UW >= exw )); then
+    print -r -- "exhausted:weekly window ${_CPM_UW}% used"
+    return 0
+  fi
+  print -r -- "eligible"
+}
+
 # clauth's own active profile, when it has a credential and is not excluded.
 # This is the last-resort ACCOUNT: it keeps a session isolated when every pool
 # member is unusable, instead of dropping it onto the shared global file.

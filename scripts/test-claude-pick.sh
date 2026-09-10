@@ -170,5 +170,63 @@ check "a fresh week outranks a spent one at equal 5h" \
       "$(cmp2 '0 unknown 2' '>' '0 unknown 100')" "yes"
 
 #-----------------------------------------------------------------------------
+echo
+echo "=== classes: what is eligible, exhausted, unknown, excluded ==="
+
+cls() { zrun "_claude_pick_class '$1'"; }
+
+new_home k1; mkprof a1 '{"five_hour":{"utilization":97.0}}'
+check "u5 at the 5h ceiling is exhausted"  "$(cls a1 | cut -d: -f1)" "exhausted"
+new_home k2; mkprof a1 '{"five_hour":{"utilization":96.0}}'
+check "one point below it is eligible"     "$(cls a1)"               "eligible"
+
+# THE DEPARTURE FROM §5.3, and the reason it is a departure. Measured 2026-09-10:
+# two Team seats read seven_day 100 with live sessions on them; ZERO weekly-reset
+# refusals in 750 transcripts over 7 days; the block a Team seat actually hits is
+# a spend limit whose remedy is an admin, not a window rolling over; and their
+# per-model windows read 38 and 54, so the block is partial. A hard class here
+# would have refused across the entire work tree that morning.
+new_home k3; mkprof a1 '{"five_hour":{"utilization":0.0},"seven_day":{"utilization":100.0}}'
+check "a fully spent WEEK is still eligible — it demotes, it does not refuse" \
+      "$(cls a1)" "eligible"
+check "...and it is demoted to the floor by the score, not by a class" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null
+               _claude_pick_score \$_CPM_U5 \$_CPM_R5 \$_CPM_UW 0")" "0"
+check "...unless the inert knob is armed" \
+      "$(zrun "CLAUDE_PICK_WEEK_EXHAUSTED=100 _claude_pick_class a1 | cut -d: -f1")" "exhausted"
+check "the knob's default is 101, i.e. unreachable" \
+      "$(zrun "print -r -- \${CLAUDE_PICK_WEEK_EXHAUSTED:-101}")" "101"
+
+new_home k4; mkprof a1 '-'
+check "no usage cache is unknown, not exhausted" "$(cls a1 | cut -d: -f1)" "unknown"
+
+# 30 minutes: stale under a tightened threshold, fresh under the default. One
+# fixture exercising BOTH sides of the boundary — an earlier version used 3 hours
+# and then asserted it was eligible by default, which 3h > 3600s is not.
+new_home k5; mkprof a1 '{"five_hour":{"utilization":0.0}}'
+touch -d '30 minutes ago' "$FHOME/.clauth/profiles/a1/usage_cache.json"
+check "a cache older than MAX_AGE is unknown" \
+      "$(zrun "CLAUDE_PICK_CACHE_MAX_AGE=60 _claude_pick_class a1 | cut -d: -f1")" "unknown"
+check "...and the DEFAULT max age is 3600, not the spec's 900" \
+      "$(zrun "print -r -- \${CLAUDE_PICK_CACHE_MAX_AGE:-3600}")" "3600"
+check "...so that same cache is eligible by default" "$(cls a1)" "eligible"
+# The 900 the spec asked for would have called it unknown — which is the whole
+# reason the default stayed at 3600 with no refresher to feed it.
+check "...and would have been unknown at the spec's 900" \
+      "$(zrun "CLAUDE_PICK_CACHE_MAX_AGE=900 _claude_pick_class a1 | cut -d: -f1")" "unknown"
+
+# A directory under profiles/ is not a profile (observed on this machine).
+new_home k6
+mkdir -p "$FHOME/.clauth/profiles/ghost/runtime-1-0"
+: > "$FHOME/.clauth/profiles/ghost/.reconcile.lock"
+check "a profile DIR with no credential is excluded" "$(cls ghost | cut -d: -f1)" "excluded"
+check "...and says why"                              "$(cls ghost | cut -d: -f2)" "no credential"
+
+new_home k7; mkprof a1 '{"five_hour":{"utilization":0.0}}'
+mkdir -p "$FHOME/.clauth"
+printf 'auth_broken = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a quarantined profile is excluded" "$(cls a1 | cut -d: -f1)" "excluded"
+
+#-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
