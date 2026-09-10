@@ -21,6 +21,39 @@ runs:
       run: |
         set -uo pipefail
 
+        # `read -ra` rather than an unquoted $PACKAGES, for two measured
+        # reasons (both found in independent review):
+        #
+        #   - An unquoted expansion GLOBS as well as splits, against the
+        #     checkout, since cwd is $GITHUB_WORKSPACE. Measured: with a file
+        #     named `zsh-real` present, `PACKAGES='zsh*'` expands to
+        #     `zsh-real`, and apt then fails with "Unable to locate package
+        #     zsh-real" -- an error naming a filename. A `*` is legal in apt's
+        #     own patterns (`apt-get install 'linux-headers-*'`), so this is
+        #     reachable by someone being reasonable. `read -ra` splits on IFS
+        #     and does not glob (measured: `zsh*` stays one element).
+        #   - `--` stops a package name beginning with `-` being read as an
+        #     apt option.
+        read -ra pkgs <<<"$PACKAGES"
+
+        # An EMPTY input made the "strict install" claim hollow: measured,
+        # `apt-get install -y` with no operands prints "0 newly installed" and
+        # exits 0, so the install silently does nothing and the step is green.
+        # `inputs.<id>.required` is advisory -- the runner does not fail a step
+        # for a missing input -- so an omitted `with:`, `packages: ""`, or a
+        # mistyped key (`package:`, which is only an "Unexpected input"
+        # warning) all reach here as an empty string. `set -u` does not help:
+        # PACKAGES is set, just empty. Worst case is a job whose only package
+        # is preinstalled (jq): it would stay green forever with the install
+        # switched off and nothing saying so.
+        #
+        # read -ra yields a zero-length array for both "" and whitespace-only.
+        if [ "${#pkgs[@]}" -eq 0 ]; then
+            printf '::error title=apt-install::no packages given; pass e.g. "packages: zsh jq"\n'
+            exit 1
+        fi
+
+
         # `apt-get update` exits non-zero when ANY configured source errors, and
         # the runner images ship third-party lists (Google Chrome, Microsoft
         # Edge) that no job in this repository reads. On 2026-09-09 Google's
@@ -44,7 +77,4 @@ runs:
             "Some apt sources failed to refresh. Continuing; installing '${PACKAGES}' is the real gate."
         fi
 
-        # Deliberately unquoted: PACKAGES is a space-separated package list and
-        # must word-split into separate arguments.
-        # shellcheck disable=SC2086
-        sudo apt-get install -y $PACKAGES
+        sudo apt-get install -y -- "${pkgs[@]}"

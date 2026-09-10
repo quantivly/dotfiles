@@ -561,35 +561,103 @@ Two alternatives were rejected for reasons this file already records elsewhere: 
 24.04, where it lives in `sources.list.d/ubuntu.sources` — a pathspec that matches
 nothing narrowing a check invisibly.
 
-Two traps in the guard written for it, both of which reported success:
+Traps in the guard written for it, every one of which reported success. They are
+listed because the guard was **29/29 green over all of them at once** — an
+independent review reproduced seven live defects against a fully passing suite,
+which is the "rows that check the plumbing and not the answer" case this file
+already records, met at scale:
 
-- **`… | grep -q PATTERN && var=…` under `set -o pipefail` is a RACE, and it loses most
-  often on the files you care about.** `grep -q` exits at its first match; if `sed`
-  still has output pending it dies of SIGPIPE, and pipefail then makes the **pipeline**
-  fail, so a matched pattern reads as *no match*. Measured: 27 KB returned 0 in 30/30
-  runs, 289 KB returned 141 in 30/30, and `ci.yml` at 29 KB sat on the boundary and
-  missed its own ten violations in **13 of 20 runs** — the checker printed a green tick
-  over the very tree it was written to reject. `[ -n "$(… | grep PATTERN || true)" ]`
-  instead. This is the SC2015 family this file records twice already, one layer down.
-- **A fixture too small to reach the branch makes the row unfailable.** The row pinning
-  that fix used a ~20-line fixture, which never triggers the race — so reinstating the
-  bug passed the suite, and mutation testing is what said so. The fixture is now
-  deliberately ~289 KB of *non-comment* padding (comment lines are stripped to empty
-  ones and produce almost no volume, so they would not fill the pipe), and the mutant
-  dies 5/5. The size is load-bearing and commented as such.
+- **The rule matched the literal string `apt-get <verb>`**, so `sudo apt update
+  && sudo apt install -y zsh` — the spelling people actually type — and
+  `sudo apt-get -qq update && …` were invisible to every rule. Program and verb
+  are matched separately now, with word boundaries so `aptitude` and `adapt` stay
+  out.
+- **Asking whether `&&` is absent asked about the MECHANISM.** Four regressions
+  *inside the composite action* — the one file that runs apt, and the one the
+  workflow-scoped rules never inspect — all printed `all 6 checks passed`:
+  `set -euo pipefail` plus a bare refresh (a complete restoration of the outage,
+  and what "hardening" looks like to the next person), `update -qq &&`,
+  `update || exit 1`, and `update; install`. Three contain no `&&` at all, so no
+  tightening of that token could ever reach them. The rule is now the positive
+  form — every refresh must sit in a construct that cannot fail its step (an
+  `if` condition, or an explicit `|| true`) — because GitHub runs a composite
+  `shell: bash` step as `bash --noprofile --norc -eo pipefail`, so a bare refresh
+  is fatal whether or not the script says `set -e`, which is also why scanning
+  for `set -e` would be the wrong test.
+- **`… | grep -q PAT && var=…` under `set -o pipefail` is a RACE**, and it loses
+  most often on the files you care about. `grep -q` exits at its first match; if
+  `sed` still has output pending it dies of SIGPIPE and pipefail fails the
+  *pipeline*, so a matched pattern reads as *no match*. Measured: 0 in 30/30 runs
+  at 27 KB, 141 in 30/30 at 289 KB, and `ci.yml` at 29 KB missing its own ten
+  violations in **13 of 20 runs**. This is the SC2015 family, one layer down.
+- **Line-based quote stripping hid real violations two ways.** Two apostrophes
+  inside *separate* double-quoted strings paired with each other and swallowed
+  the command between them; a `#` inside a quoted string truncated the line.
+  Both are ordinary shell. The stripper is character-by-character and
+  quote-aware now, and after the fix it removes exactly what a shell would treat
+  as quoted — so anything it hides was never going to run as a command.
+- **YAML prose is not shell.** A step whose `name:` named the forbidden shape was
+  reported as three violations *while correctly using the action*, with a remedy
+  telling the reader to do what they had already done; the action's own
+  `description:` failed the refresh rule the same way. Matching is scoped to
+  `run:` scalars now. A checker that refuses a correct workflow gets deleted —
+  the permanently-red failure this file records five times.
+- **An empty answer was agreement, twice.** The `${{ }}` rule extracted the run
+  block with `awk` and grepped it, so a one-line or folded `run:` yielded an
+  *empty* extraction that read as "no interpolation" — a tick over the exact
+  injection it forbids. It is a positive-form count now (every `${{` must be an
+  `env:` assignment) with no empty case. Separately, `ACTION_REL` hardcoded
+  `action.yml`, so renaming to the equally-valid `action.yaml` printed a false
+  "is missing" **and silently dropped the check count from 6 to 4** — two
+  assertions never ran and nothing said so. Both extensions resolve now, and a
+  fixed `EXPECTED_CHECKS` makes a run that performed fewer checks than expected
+  a failure in itself.
+- **`apt-get install -y` with no operands exits 0**, so the "strict install"
+  claim was hollow: `inputs.<id>.required` is advisory, the runner does not fail
+  a step for a missing input, and `set -u` does not help because `PACKAGES` is
+  set and merely empty. A job whose only package is preinstalled (`jq`) would
+  have stayed green forever with the install switched off. The action refuses an
+  empty or whitespace-only list now.
+- **An unquoted expansion globs as well as splits.** The step's cwd is the
+  checkout, so `packages: 'zsh*'` expanded against repository files — measured,
+  it became `zsh-real` and apt failed naming a filename. A `*` is legal in apt's
+  own patterns, so this needed no attacker. `read -ra` plus `-- "${pkgs[@]}"`
+  splits without globbing and stops a package name beginning with `-`.
+- **Two of the fixes were then unpinnable, and the fixture size was why.** The
+  row for the SIGPIPE race used a ~20-line fixture, far too small to trigger it,
+  so reinstating the bug passed the suite; and once the racing code was gone the
+  oversized replacement fixture cost **205 seconds per check**, because the first
+  version of the shell-scoping helper forked `awk` once per line. The helper is
+  one `awk` pass now (2.4 s on the same 560 KB input) and the race is pinned at
+  the source instead — the checker must never pipe into `grep -q`, which is
+  deterministic and free, where a behavioural row could only be probabilistic.
+- **A fixture built by a `python3` heredoc goes quiet when `python3` is absent.**
+  The row then asserted its expected exit code against an *unmodified* fixture
+  and passed for a reason unrelated to the rule — no error, no skip. Rebuilt
+  with `sed`, plus an assertion that the edit applied. This is the class this
+  file already records for `verify-tools.sh`: a new external tool in a checker is
+  a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (29 checks, in CI as `workflow-apt-test`) over
-`scripts/check-workflow-apt.sh`. Hermetic — every row builds its own fixture tree and is
-handed an explicit root; the only rows that read this repository assert that the tree we
-ship passes. Most rows assert what it must **not** flag, because a false positive costs
-the whole check while a miss costs one outage: a comment naming the forbidden line, and a
-step running `git commit -m "stop apt-get update failing CI"`, both have to pass — quoted
-strings are stripped, the same answer the secret-emission guard uses. One row then
-asserts a real gate *beside* a quoted string is still caught, so the stripping cannot
-become a hiding place. "Could not run" is exit 2 and never a pass: no `.github`, or a
-`.github` with no workflow files, are named rather than reported clean. 9 mutants, 9
-deaths, each dry-run for applicability first — a mutation that no longer applies reads
-exactly like a surviving mutant.
+State table: `scripts/test-workflow-apt.sh` (61 checks, in CI as
+`workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
+builds its own fixture tree and is handed an explicit root; only the last rows
+read this repository, to assert the shipped tree passes. Most rows assert what it
+must **not** flag, because a false positive costs the whole check while a miss
+costs one outage: a comment naming the forbidden line, a commit message
+mentioning it, an unquoted YAML `name:` describing it, `aptitude`/`adapt`, a
+quoted `env:` value, and a mid-word `#` all have to pass. "Could not run" is exit
+2, never a pass.
+
+**On the mutation numbers, which is the part worth carrying forward.** An earlier
+version of this section claimed "9 mutants, 9 deaths" for this guard. That was
+true and meaningless: the set only mutated rules that already had rows, so it
+measured nothing about the rules that had none — and the suite it certified was
+simultaneously green over seven reproduced defects. A mutation set assembled from
+the code you happen to have tested is a mirror, not a check. **Ask of the
+mutation set what you already ask of a row: what would it fail to notice?** The
+current set is rebuilt against the rewritten matching core, and the honest figure
+is whatever an independent re-run reports — recorded when it does, not asserted
+here in advance.
 
 ## Tool Dependencies & mise
 
