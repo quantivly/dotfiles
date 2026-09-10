@@ -2394,11 +2394,39 @@ failed, since ShellCheck cannot parse zsh; and `script-must-have-extension` woul
 name. Both hooks now exclude it by path, and CI's `zsh -n` loop names it explicitly — otherwise the
 repo's newest executable would have had no syntax check at all.
 
-State tables: `scripts/test-claude-pick.sh` (new, 191 checks, CI job `claude-pick-test`),
+State tables: `scripts/test-claude-pick.sh` (new, 192 checks, CI job `claude-pick-test`),
 `scripts/test-hspawn.sh` (319 → 328, the caller-wiring rows and the compatibility contract) and
-`scripts/test-claude-doctor.sh` (156 → 172, the usage-cache freshness line). **39 mutants, 39
+`scripts/test-claude-doctor.sh` (156 → 172, the usage-cache freshness line). **40 mutants, 40
 deaths**, every mutation dry-run for applicability first — and the two retirements above are comments
 in the harness rather than entries, so the count is of mutants that can actually die.
+
+**A mutation sweep on this box has to be CHUNKED, and the harness has to refuse to start.** A single
+40-mutant run takes over an hour at the load this machine normally carries, and it was killed for
+memory three times partway through — the same pressure that kills background jobs here. Each mutant
+is independent and the harness restores the source between them, so a chunked sweep measures exactly
+what one long run measures: `MUT_FROM=<file>` / `MUT_TAKE=<n>` select a chunk, and the driver
+recomputes what is left from its own log every pass, so a kill costs at most the chunk in flight. The
+run this section reports was finished one mutant per pass, launched `nohup`-detached — a
+harness-tracked background job is what the memory reaper takes first, and every watcher waiting on
+this one was reaped while the detached driver kept going. Three properties are load-bearing rather
+than tidy:
+
+- **The signal handler must `os._exit`, not `sys.exit`.** `sys.exit` raises `SystemExit`, so the
+  `finally` block runs too — and it restores from a backup the handler has just removed, which fails
+  with `FileNotFoundError` and buries the reason the run stopped. The handler has already done the
+  cleanup; nothing else should.
+- **A leftover `.mb7` backup is a REFUSAL, not a warning.** If one is on disk, a previous run died
+  mid-mutation and the source *is* a mutant — so every mutation measured after it is measured against
+  a mutant, and the sweep is meaningless while looking perfectly normal. Self-healing (restore, then
+  continue) is right for the harness; refusing outright is right for a driver that would otherwise
+  chunk straight across the damage.
+- **Do not edit the source between chunks.** That is the one thing a chunked sweep does not survive,
+  and it happened here: an edit landed mid-sweep, was overwritten by the next mutant's write, and then
+  by the final restore. The file looked hand-edited, and then did not.
+
+Verify the composition afterwards, too, rather than trusting the tally: this run's log was checked
+for 40 **distinct** names each appearing **once**, because a resumable driver that recomputed its
+to-do list wrongly would happily run one mutant twice and report 40.
 
 ### Tenants and pools (DO-599)
 
