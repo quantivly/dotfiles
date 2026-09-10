@@ -44,7 +44,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
 
       - name: Check bash syntax
         run: bash -n install
@@ -74,7 +76,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
 
       # The external-HDD steps decide, from a handful of disk/fstab states,
       # whether to write to /etc/fstab. Every bug found in them so far was a
@@ -116,7 +120,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
 
       # This repo installs itself with dotbot `link:`, so a checkout IS a deploy
       # and the guard's job is to notice when the running config is not the
@@ -138,7 +144,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh and jq
-        run: sudo apt-get update && sudo apt-get install -y zsh jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq
 
       # These three commands create worktrees, type into agent panes and DELETE
       # worktrees, and every failure found in them so far was silent: a spawn
@@ -163,7 +171,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh and jq
-        run: sudo apt-get update && sudo apt-get install -y zsh jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq
 
       # Every fault claude-doctor reports was, before it, reported by nothing:
       # plugin:desktop-commander connected 0 times in 509 attempts over 34 days,
@@ -190,7 +200,9 @@ jobs:
           submodules: recursive
 
       - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
 
       # scripts/claude-account-dirs.sh builds the persistent per-profile
       # CLAUDE_CONFIG_DIR that lets a session be isolated AND still lead a herdr
@@ -217,7 +229,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh and jq
-        run: sudo apt-get update && sudo apt-get install -y zsh jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq
 
       # The two commands a modular adopter actually runs -- `verify-tools.sh
       # --herdr` and `herdr-claude-wire.sh` -- plus the assertion that
@@ -244,7 +258,9 @@ jobs:
       # zsh so the ONLY required dependency missing on the runner is herdr
       # itself, which makes the exit-status assertion below exact.
       - name: Install jq and zsh
-        run: sudo apt-get update && sudo apt-get install -y jq zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq zsh
 
       # install.conf.herdr.yaml is asserted by nothing else. dotfiles-doctor's
       # link map hardcodes install.conf.yaml (_dotfiles_link_map), so its
@@ -454,7 +470,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
 
       # gh keys its tokens by HOST, not by config dir, so several config dirs
       # declaring different accounts can all resolve to one — while
@@ -484,6 +502,19 @@ jobs:
       # nothing. Needs bash, jq and sed; no network and no secrets.
       - name: Run the secret emission guard state table
         run: ./scripts/test-secret-guard.sh
+
+  workflow-apt-test:
+    name: Workflow apt Guard State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # No apt install: the checker and its state table are pure bash, and the
+      # runner already has bash. Installing packages here would make this job
+      # depend on the very mechanism it exists to check.
+      - name: Run the workflow-apt state table
+        run: ./scripts/test-workflow-apt.sh
 
   yaml-validation:
     name: YAML Validation
@@ -539,7 +570,9 @@ jobs:
           submodules: recursive
 
       - name: Install system packages
-        run: sudo apt-get update && sudo apt-get install -y zsh git curl build-essential
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh git curl build-essential
 
       - name: Run prerequisites installer
         run: ./scripts/install-prerequisites.sh

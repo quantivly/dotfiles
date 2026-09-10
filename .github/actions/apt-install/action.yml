@@ -1,0 +1,50 @@
+---
+name: apt-install
+description: >
+  Install Ubuntu packages without letting an unrelated third-party apt source
+  fail the job. Runs apt-get update tolerantly, then installs strictly.
+
+inputs:
+  packages:
+    description: Space-separated list of packages to install.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install packages
+      shell: bash
+      env:
+        # Via env, never interpolated into the run script below: a ${{ }} in a
+        # shell line is a script-injection surface.
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -uo pipefail
+
+        # `apt-get update` exits non-zero when ANY configured source errors, and
+        # the runner images ship third-party lists (Google Chrome, Microsoft
+        # Edge) that no job in this repository reads. On 2026-09-09 Google's
+        # repo served a Packages.gz that did not match its own Release file, and
+        # `apt-get update && apt-get install` took 11 of 20 jobs red for ~40
+        # minutes on every branch — then hid a real Pre-commit Hooks failure for
+        # a day underneath the noise.
+        #
+        # Measured against a fixture repository: a source whose Release
+        # advertises a Packages hash it does not serve gives `E: Hash Sum
+        # mismatch` and exit 100, while a healthy source configured alongside it
+        # STILL lands its index and its package stays a valid install candidate.
+        # (An unreachable source is only `W:` and exits 0 — a different class.)
+        #
+        # So the update's exit status is not evidence about whether this job can
+        # install what it needs. It is reported and moved past. The INSTALL is
+        # the real gate and stays strict, so a genuinely broken Ubuntu archive
+        # still fails the job — loudly, and naming the packages it wanted.
+        if ! sudo apt-get update; then
+          printf '::warning title=apt-get update reported errors::%s\n' \
+            "Some apt sources failed to refresh. Continuing; installing '${PACKAGES}' is the real gate."
+        fi
+
+        # Deliberately unquoted: PACKAGES is a space-separated package list and
+        # must word-split into separate arguments.
+        # shellcheck disable=SC2086
+        sudo apt-get install -y $PACKAGES

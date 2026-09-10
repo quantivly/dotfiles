@@ -539,6 +539,58 @@ act -j shellcheck             # Run specific CI job locally (requires act)
 
 See `.github/README.md` for details.
 
+**`apt-get update`'s exit status is not evidence about the job running it (DO-608).**
+It exits non-zero when **any** configured source errors, and the runner images ship
+third-party lists (Google Chrome, Microsoft Edge) that no job here reads. On 2026-09-09
+Google's repo served a `Packages.gz` that did not match its own `Release` file, and ten
+steps shaped `sudo apt-get update && sudo apt-get install -y …` took **11 of 20 jobs red
+for ~40 minutes on every branch** — then hid a genuine `Pre-commit Hooks` failure for a
+day underneath the noise. Measured against a fixture repository (root-free — `Dir::Etc`,
+`Dir::State` and `Dir::Cache` redirected into a temp tree): a source whose `Release`
+advertises a `Packages` hash it does not serve gives `E: … Hash Sum mismatch` and **exit
+100**, while a healthy source configured alongside it **still lands its index and its
+package stays a valid install candidate**. So the install was always possible; only the
+gate failed. An *unreachable* source is merely `W:` and exits **0** — a different class,
+and the reason "it exits non-zero on a broken repo" is too coarse a summary to reason
+from. All apt installs now go through `.github/actions/apt-install`, which holds that
+reasoning once, warns via `::warning::` when the refresh reports errors, and keeps the
+**install** strict — so a genuinely broken Ubuntu archive still fails the job, loudly.
+Two alternatives were rejected for reasons this file already records elsewhere: dropping
+`google-chrome.list` names one vendor and leaves the next third-party repo fatal, and
+`-o Dir::Etc::sourceparts=/dev/null` would silently drop the **main** archive on Ubuntu
+24.04, where it lives in `sources.list.d/ubuntu.sources` — a pathspec that matches
+nothing narrowing a check invisibly.
+
+Two traps in the guard written for it, both of which reported success:
+
+- **`… | grep -q PATTERN && var=…` under `set -o pipefail` is a RACE, and it loses most
+  often on the files you care about.** `grep -q` exits at its first match; if `sed`
+  still has output pending it dies of SIGPIPE, and pipefail then makes the **pipeline**
+  fail, so a matched pattern reads as *no match*. Measured: 27 KB returned 0 in 30/30
+  runs, 289 KB returned 141 in 30/30, and `ci.yml` at 29 KB sat on the boundary and
+  missed its own ten violations in **13 of 20 runs** — the checker printed a green tick
+  over the very tree it was written to reject. `[ -n "$(… | grep PATTERN || true)" ]`
+  instead. This is the SC2015 family this file records twice already, one layer down.
+- **A fixture too small to reach the branch makes the row unfailable.** The row pinning
+  that fix used a ~20-line fixture, which never triggers the race — so reinstating the
+  bug passed the suite, and mutation testing is what said so. The fixture is now
+  deliberately ~289 KB of *non-comment* padding (comment lines are stripped to empty
+  ones and produce almost no volume, so they would not fill the pipe), and the mutant
+  dies 5/5. The size is load-bearing and commented as such.
+
+State table: `scripts/test-workflow-apt.sh` (29 checks, in CI as `workflow-apt-test`) over
+`scripts/check-workflow-apt.sh`. Hermetic — every row builds its own fixture tree and is
+handed an explicit root; the only rows that read this repository assert that the tree we
+ship passes. Most rows assert what it must **not** flag, because a false positive costs
+the whole check while a miss costs one outage: a comment naming the forbidden line, and a
+step running `git commit -m "stop apt-get update failing CI"`, both have to pass — quoted
+strings are stripped, the same answer the secret-emission guard uses. One row then
+asserts a real gate *beside* a quoted string is still caught, so the stripping cannot
+become a hiding place. "Could not run" is exit 2 and never a pass: no `.github`, or a
+`.github` with no workflow files, are named rather than reported clean. 9 mutants, 9
+deaths, each dry-run for applicability first — a mutation that no longer applies reads
+exactly like a surviving mutant.
+
 ## Tool Dependencies & mise
 
 ### Required Tools
