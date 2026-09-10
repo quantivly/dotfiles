@@ -122,7 +122,19 @@ require_emitter() {
 declare -A _SHELL_CACHE=()
 shell_code() {
     if [ -z "${_SHELL_CACHE[$1]+set}" ]; then
-        _SHELL_CACHE[$1]=$("$EMITTER" --shell "$1") || return 2
+        # Assign to a local FIRST, and only populate the cache on success.
+        # `arr[k]=$(cmd)` creates the element even when cmd fails -- only the
+        # statement's status is non-zero -- so caching directly recorded a
+        # FAILED emitter run as a successful EMPTY result: the first call
+        # returned 2 and every later call for that file returned empty with
+        # status 0. "Could not read this file" became "this file has no
+        # shell", silently, in the helper whose own comment warns about
+        # exactly that. It was masked only because the first caller exits
+        # immediately -- a loaded gun rather than a live outage, and found by
+        # review reading the bash semantics rather than by any fixture.
+        local out
+        out=$("$EMITTER" --shell "$1") || return 2
+        _SHELL_CACHE[$1]=$out
     fi
     printf '%s\n' "${_SHELL_CACHE[$1]}"
 }

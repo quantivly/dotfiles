@@ -22,6 +22,14 @@
 #     interpolation rule's ok and bad messages both contain "env: assignment",
 #     so that needle asserted nothing.
 #
+# COST WARNING, FOR ANYONE MUTATION-TESTING THIS SUITE. The parser rewrite
+# changed the profile: ~15s at 72 checks became ~62s at 109, because each row
+# starts a python interpreter per uncached file. A 34-mutant sweep is therefore
+# an HOUR of sustained load. A reviewer running only 2-way parallel was
+# OOM-killed on this box at loadavg 42 with 13.7 GB of swap in use, which is
+# the state CLAUDE.md records as endangering unrelated sessions. Run sweeps
+# SERIALLY, `nice -n 19`, one tree at a time, removed immediately after.
+#
 # EXPECTED_TOTAL at the bottom was PROVEN non-decorative by deleting a row and
 # watching it report a vanished row rather than "all N passed" -- recorded
 # because the next reader cannot tell a proven total from an unproven one.
@@ -810,6 +818,92 @@ out=$(PATH="$d/bin:$PATH" "$CHECKER" "$d" 2>&1); rc=$?
 check "PyYAML unavailable exits 2, not 0" 2 "$rc"
 contains "  and names the package" "$out" "python3-yaml"
 
+printf '\n== each cannot-run guard, ISOLATED ==\n'
+# All four `|| die_unreadable` guards SHADOW each other: every fixture that can
+# reach one reaches an earlier one first, so whichever single guard you delete,
+# something upstream still exits 2 and the row passes. Review proved it --
+# deleting the verb and refresh guards TOGETHER gave `all 6 checks passed`,
+# rc=0, on an unparseable workflow: the empty-answer-is-agreement outcome,
+# reachable by two independent one-line deletions the suite could not see.
+#
+# Each row below therefore uses a broken file that ONE call site reads and the
+# others do not.
+
+# Refresh rule only: a broken YAML under .github that is not a workflow. The
+# verb rules scan .github/workflows; only the refresh rule's file set includes
+# this path.
+d=$(mkfix die_refresh); good_action "$d"; good_workflow "$d"
+mkdir -p "$d/.github/actions/other"
+printf 'a: [unclosed\n' > "$d/.github/actions/other/action.yml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a broken non-workflow action reaches the refresh guard" 2 "$rc"
+
+# Install + interp sites: the action file unreadable while the workflows parse
+# fine, so neither workflow loop fails first.
+d=$(mkfix die_action_unreadable); good_action "$d"; good_workflow "$d"
+chmod 000 "$d/.github/actions/apt-install/action.yml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+chmod 644 "$d/.github/actions/apt-install/action.yml"
+check "an unreadable ACTION reaches the install/interp guards" 2 "$rc"
+# The install and interp guards CANNOT be isolated by file state -- the refresh
+# rule reads every file under .github, including the action, before they run, so
+# it always fails first. Measured with all three guards dropped: the checker
+# does not pass silently (rc=1), but it prints THREE FALSE TICKS, among them
+# "every apt refresh is in a construct that cannot fail its step" about a file
+# it could not read -- and the non-zero exit is a coincidence of the install
+# rule failing for its own reason. So the assertion has to be on the MESSAGE:
+# no ✓ may be printed about content that was never read.
+lacks "  and claims nothing about a file it could not read" "$out" "cannot fail its step"
+
+# An UNREADABLE file is a different emitter branch from unparseable YAML -- an
+# OSError rather than a YAMLError -- and had no row at all.
+d=$(mkfix die_workflow_unreadable); good_action "$d"; good_workflow "$d"
+chmod 000 "$d/.github/workflows/ci.yml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+chmod 644 "$d/.github/workflows/ci.yml"
+check "an unreadable WORKFLOW exits 2, not 0" 2 "$rc"
+
+# require_emitter's first arm: the emitter absent. Unrowed until now.
+d=$(mkfix die_emitter_absent); good_action "$d"; good_workflow "$d"
+emitter_copy=$(mktemp -d)
+cp "$CHECKER" "$emitter_copy/check.sh"
+out=$("$emitter_copy/check.sh" "$d" 2>&1); rc=$?
+rm -rf "$emitter_copy"
+check "the emitter missing beside the checker exits 2" 2 "$rc"
+contains "  and says which file" "$out" "gha-yaml-shell.py"
+
+# The emitter's own argv guard.
+emitter_path="$(dirname "$CHECKER")/gha-yaml-shell.py"
+if [ -x "$emitter_path" ]; then
+    "$emitter_path" --bogus /dev/null >/dev/null 2>&1; rc=$?
+    check "the emitter refuses bad argv with 2" 2 "$rc"
+else
+    fail=$((fail + 1)); printf '  FAIL emitter not found beside the checker\n'
+fi
+
+# The cache must not record a FAILED emitter run as an empty success.
+# `arr[k]=$(cmd)` creates the element even when cmd fails, so the second call
+# for a file returned empty with status 0 -- masked only because the first
+# caller exits immediately. This is the behavioural row that would have caught
+# it, rather than review reading the bash semantics.
+twice=$(mktemp -d)
+cat > "$twice/probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -uo pipefail
+EMITTER=/nonexistent-emitter
+declare -A _SHELL_CACHE=()
+eval "$(sed -n '/^shell_code() {/,/^}/p' "$1")"
+shell_code /some/file >/dev/null 2>&1; first=$?
+shell_code /some/file >/dev/null 2>&1; second=$?
+printf '%s %s
+' "$first" "$second"
+PROBE
+chmod +x "$twice/probe.sh"
+read -r first second < <("$twice/probe.sh" "$CHECKER")
+rm -rf "$twice"
+check "a failed emitter run is not cached as a success (1st)" 2 "$first"
+check "a failed emitter run is not cached as a success (2nd)" 2 "$second"
+
 printf '\n== the tree we ship ==\n'
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=$("$CHECKER" "$repo" 2>&1); rc=$?
@@ -826,7 +920,7 @@ contains "  over its real workflow set" "$out" "scanning"
 # number lives here, in the state table, deliberately: changing it is a visible
 # edit to the suite that a reviewer reads as "this expects fewer checks now,
 # why", where a literal beside the code gets updated by whoever removes a check.
-EXPECTED_TOTAL=101
+EXPECTED_TOTAL=110
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then

@@ -638,7 +638,7 @@ already records, met at scale:
   file already records for `verify-tools.sh`: a new external tool in a checker is
   a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (101 checks, in CI as
+State table: `scripts/test-workflow-apt.sh` (109 checks, in CI as
 `workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
 builds its own fixture tree and is handed an explicit root; only the last rows
 read this repository, to assert the shipped tree passes. Most rows assert what it
@@ -760,6 +760,39 @@ reporting the lines before it as the whole script. The discriminating row is a
 real gate placed *after* the `EOF`, asserting that scanning **resumes** — the
 row that existed asserted only that the body was ignored, which the defect also
 satisfied.
+
+**Two more from the round after that, both in the dependency handling and both
+about caching or shadowing rather than logic.**
+
+**`arr[k]=$(cmd)` creates the element even when `cmd` fails** — only the
+statement's status is non-zero. So memoising the parser output cached a FAILED
+run as a successful EMPTY result: the first call returned 2 and every later call
+for that file returned empty with status 0, turning "could not read this file"
+into "this file has no shell" — in the helper whose own comment warns about
+exactly that. It was masked only because the first caller exits immediately, so
+it was a loaded gun rather than a live outage, and it was found by a reviewer
+reading the bash semantics rather than by any fixture. Assign to a local first
+and populate the cache only on success; the behavioural row calls the helper
+twice for a failing file and asserts 2 both times.
+
+**Guards that shadow each other are individually unpinnable.** All four
+`|| die_unreadable` call sites survived deletion, because every fixture that
+reaches one reaches an earlier one first — and deleting two of them *together*
+gave `all 6 checks passed` on an unparseable workflow. Each now has a fixture
+whose broken file only that call site reads: a malformed non-workflow YAML under
+`.github` for the refresh rule, and an unreadable action file (workflows intact)
+for the install and interpolation rules. **The general rule: a row that deletes
+one guard proves nothing while another guard upstream can answer for it — count
+how many independent deletions it takes to reach a silent pass, not how many
+guards exist.** An unreadable file is also a different emitter branch from
+unparseable YAML (`OSError`, not `YAMLError`) and had no row at all.
+
+Recorded and deliberately NOT acted on: the suite went from ~15s to ~62s idle as
+it grew to 109 checks, one python start per uncached file per fixture. Combining
+the emitter's two modes into one invocation would roughly halve it. It is left
+alone because every round of this change has introduced a defect of its own, and
+a performance edit is the one kind that cannot fix one — the measurement is here
+so the next person can decide with the number in front of them.
 
 Three lessons from that round that generalise past this guard:
 
