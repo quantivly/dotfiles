@@ -198,6 +198,29 @@ _claude_file_age_s() {
   print -r -- $(( EPOCHSECONDS - mtime ))
 }
 
+# Can this name be a clauth profile at all?
+#
+# Returns 0 when it CANNOT. One definition, used by both enumerations below —
+# the account dirs and the profile store dirs — because both had the same
+# fall-through: every name they could see was assumed to be a would-be profile,
+# and the remedy text sent the reader to `clauth login <name>`.
+#
+# THE TEST IS A LEADING DOT AND NOTHING WIDER, deliberately. `clauth login` can
+# never create such a name, and a leading dot is what this machine's own tooling
+# produces for archives and internal state (a profile rename left
+# `.personal.stray-20260910-112747`). A first cut used `[[ "$1" != [A-Za-z0-9]* ]]`
+# and that also rejects `_weird` and `-dash`, which are unusual rather than
+# impossible — and a checker that misfiles a real account dir as "not mine"
+# reintroduces the blind spot from the other side, which is the whole reason #132
+# widened these globs.
+#
+# NOT a glob-narrowing fix. `setopt GLOB_DOTS` is set repo-wide (`zshrc`), so
+# `*(N/)` in this codebase has NEVER excluded dotfiles — re-excluding them here
+# would make a dot-prefixed directory holding a REAL credential invisible again,
+# which is exactly the class #132 exists to close. The enumeration stays wide and
+# the classification gets wider.
+_claude_name_cannot_be_profile() { [[ "${1:-}" == .* ]] }
+
 # The success and failure markers Claude Code writes into every per-server log.
 # Verified against both a healthy remote server and a failing stdio one on
 # 2026-09-06; they are the only pair that distinguishes "connected" from
@@ -229,7 +252,8 @@ claude-doctor() {
   local gcred gcred_id link_target session_owner global_owner has_meta gsettings val
   local unknown_n cfgdir credpath ldir grp envblob n label procroot
   local uc_max uc_age uc_oldest uc_oldest_p uc_seen uc_stale uc_missing ucf
-  local -a date_prefixes files
+  local pname
+  local -a date_prefixes files stray_profiles unprofiled_dirs
   local -A group_n group_label
 
   while (( $# )); do
@@ -1005,7 +1029,16 @@ claude-doctor() {
       # precisely the half-finished rename this section should be reporting.
       # Deduplicated, because a live symlink-to-dir matches both patterns.
       local -a _ad_all
-      _ad_all=( "$adroot"/*(N-/) "$adroot"/*(N@) )
+      # `D` FORCES dotfile matching rather than inheriting it. `setopt GLOB_DOTS`
+      # is set by this repo's own `zshrc`, so in an interactive shell these globs
+      # already saw dot-directories — but claude-doctor is a function that can be
+      # sourced anywhere, and with the option off a dot-prefixed account dir
+      # HOLDING A CREDENTIAL was invisible to the one checker that would report it.
+      # That is the same blind spot #132 widened these globs to close, reachable
+      # through the caller's shell options instead of through the qualifiers.
+      # It is also why #132's own rows could not catch the defect above: the state
+      # table runs `zsh -c`, where GLOB_DOTS is off, so the branch was unreachable.
+      _ad_all=( "$adroot"/*(ND-/) "$adroot"/*(ND@) )
       for ad in ${(u)_ad_all}; do
         name="${ad:t}"
         store="$HOME/.clauth/profiles/$name/credentials.json"
@@ -1045,9 +1078,41 @@ claude-doctor() {
           fi
         fi
 
+        # A NAME CLAUTH CANNOT OWN IS NOT A BROKEN ACCOUNT DIR, and it must be
+        # classified before the store check below — which is the fall-through for
+        # every name and assumes each one is a would-be profile. Without this, a
+        # deliberately dot-prefixed archive directory read as
+        # "an account dir with no clauth profile store" and the reader was told to
+        # run `clauth login .personal.stray-20260910-112747`, which cannot succeed.
+        # Observed in live output 2026-09-10.
+        #
+        # This was NOT a #132 regression, and the correction matters because the
+        # obvious fix is wrong: `setopt GLOB_DOTS` is set repo-wide, so the old
+        # `*(N/)` had already been matching dot-directories for as long as it
+        # existed — #132 only added symlinks. Re-narrowing the glob would hide a
+        # dot-prefixed directory that HOLDS A CREDENTIAL, which is the blind spot
+        # #132 was written to close. So the enumeration stays wide, and the two
+        # cases are told apart: a credential under such a name is a finding
+        # (nothing manages it, nothing rotates it), and no credential is a note.
+        if _claude_name_cannot_be_profile "$name"; then
+          if [[ -e "$ad/.credentials.json" || -L "$ad/.credentials.json" ]]; then
+            _doctor_warn "$name: not a profile name, but it holds a credential"
+            echo "    Nothing reconciles it and nothing rotates it, because no profile can carry"
+            echo "    this name. Move the credential into a real profile or shred it — an"
+            echo "    unmanaged copy of a login is the thing this section exists to find."
+          else
+            _doctor_note "$name: archived or internal directory, not an account dir (a leading dot cannot be a profile name)"
+            echo "    Ignored by the picker, the builder and the reconciler. Remove it once it has"
+            echo "    served its purpose. NOT a 'clauth login' candidate."
+          fi
+          continue
+        fi
+
         if [[ ! -e "$store" && ! -L "$store" ]]; then
           _doctor_warn "$name: an account dir with no clauth profile store"
-          echo "    Nothing can reconcile it. 'clauth login $name', or remove the dir."
+          echo "    Nothing can reconcile it. 'clauth login $name' if it should be a profile;"
+          echo "    if the name was renamed away, remove the dir instead — 'clauth login'"
+          echo "    would make the name real again and a rename in progress needs it free."
           continue
         fi
 
@@ -1219,10 +1284,31 @@ claude-doctor() {
     # dir builder refuses it with `refused-no-store`. Both are correct and silent,
     # which is the reason to say it here: nothing else reports that a name which
     # still LOOKS like a profile has stopped being one.
-    local pdir pname
-    local -a stray_profiles
-    for pdir in "$HOME"/.clauth/profiles/*(N-/); do
+    # NO `local` HERE. `pdir` is already local to this function (declared at the
+    # top with every other loop variable), and in zsh `local NAME` with no
+    # assignment on a name that already exists in the same scope DISPLAYS it as
+    # `name=value` instead of re-declaring it. #132 added `local pdir pname` at
+    # this spot and the doctor then printed a bare
+    # `pdir=/home/…/.clauth/profiles/<last profile>` onto stdout, between two
+    # sections — loop residue from the `preferred` check 555 lines earlier,
+    # surfaced by the redundant re-declaration. Nothing in the repo echoes `pdir`.
+    #
+    # The convention this violated is stated at the top of this very function,
+    # three lines from its first `local`, and CLAUDE.md records the earlier run
+    # where forgetting it printed `du=zvi-quantivly` into the middle of a report.
+    # A ~950-line function with no block scope is the real hazard: every `local`
+    # in it shares one namespace. A state-table row now greps stdout for any bare
+    # `name=value` line, so the next one is caught whatever the variable is.
+    stray_profiles=(); unprofiled_dirs=()
+    for pdir in "$HOME"/.clauth/profiles/*(ND-/); do
       pname="${pdir:t}"
+      # A name clauth cannot own is not a half-finished profile. Same rule, same
+      # helper, as the account-dir enumeration above — see its comment for why
+      # the test is a leading dot and nothing wider.
+      if _claude_name_cannot_be_profile "$pname"; then
+        unprofiled_dirs+=("$pname")
+        continue
+      fi
       [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]] && continue
       stray_profiles+=("$pname")
     done
@@ -1230,7 +1316,14 @@ claude-doctor() {
       _doctor_note "profile director$( (( ${#stray_profiles} == 1 )) && echo y || echo ies ) with no credential: ${(j:, :)stray_profiles}"
       echo "    Leftover runtime state, not a profile: nothing can launch on it, and the"
       echo "    picker and the account-dir builder both skip it. Remove when nothing is"
-      echo "    running under it, or 'clauth login <name>' if it should be real."
+      echo "    running under it, or 'clauth login <name>' if it should be real —"
+      echo "    but NOT if the name was renamed away: that would make it real again."
+    fi
+    if (( ${#unprofiled_dirs} )); then
+      _doctor_note "under profiles/, not profile director$( (( ${#unprofiled_dirs} == 1 )) && echo y || echo ies ): ${(j:, :)unprofiled_dirs}"
+      echo "    A leading dot cannot be a clauth profile name, so these are internal or"
+      echo "    archived state rather than profiles missing a credential. Not a"
+      echo "    'clauth login' candidate."
     fi
 
     # TWO sources of truth for the pool is a finding, not a merge (spec §5.1).

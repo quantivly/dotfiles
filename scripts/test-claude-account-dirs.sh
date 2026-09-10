@@ -1131,6 +1131,99 @@ mk_cred "$(store_of p1)" bad storeside
 run_sut p1
 no_out "and neither does the refusal path"    "CANARY-"
 
+
+#-----------------------------------------------------------------------------
+section "L. A lock is a WRITE, so it may not land where nothing can be reconciled"
+#-----------------------------------------------------------------------------
+#
+# `exec {fd}>"$pdir/.reconcile.lock"` CREATES that file, and it was created before
+# anything established that $pdir is a real profile store — so every empty
+# directory under ~/.clauth/profiles/ collected a 0-byte `.reconcile.lock`, again
+# on every timer tick, two minutes apart, forever. There was never anything to
+# serialise there: the locked function's second test is `[[ ! -f "$S" ]]` and it
+# refuses immediately.
+#
+# The cost is not cosmetic during a profile rename. Each stage leaves a compat
+# symlink at the old account-dir path, the reconciler visits it, and the lock
+# re-appears at exactly the store name the NEXT stage needs free — so the
+# migration stalls on the reconciler's own leftovers.
+
+# A store directory that exists but is EMPTY: the phantom shape, measured twice on
+# this machine (2026-09-10, `personal` at 12:31 and `quantivly-2` at 20:25).
+new_home l1; mk_profile p1
+run_sut p1
+mkdir -p "$FHOME/.clauth/profiles/phantom" "$ACCOUNT_ROOT/phantom"
+run_sut --reconcile
+want_out "an empty store dir is still reported"        "no credential in the clauth store"
+if [[ -e "$FHOME/.clauth/profiles/phantom/.reconcile.lock" ]]; then
+    bad "no lock is written into a store that holds no credential"
+else
+    ok "no lock is written into a store that holds no credential"
+fi
+# THE PAIR, and without it the row above passes for a locker that never works at
+# all: a real profile must still be serialised.
+if [[ -e "$FHOME/.clauth/profiles/p1/.reconcile.lock" ]]; then
+    ok "...while a real profile still gets its lock"
+else
+    bad "...while a real profile still gets its lock — the locker stopped working entirely"
+fi
+
+# A DANGLING store credential must still reach the locked function, which reports
+# it as its own shape. `-f` alone follows the link and calls it absent, which would
+# have re-classified this state as "no credential in the store".
+new_home l2; mk_profile p1
+run_sut p1
+ln -sfn "$FHOME/.clauth/profiles/p1/gone.json" "$(store_of p1)"
+run_sut --reconcile
+want_out "a dangling store credential keeps its own diagnosis" \
+         "the clauth store credential is itself a symlink"
+
+# The remedy text. Following `clauth login <name>` is what MATERIALISES the phantom
+# during a rename, so the line has to say when not to.
+new_home l3; mk_profile p1
+run_sut p1
+rm -f "$(store_of p1)"
+run_sut --reconcile
+want_out "the refusal still names the fix for a genuinely new profile" "clauth login p1"
+want_out "...and warns that it re-creates a name a rename moved away from" \
+         "would make it real again"
+
+# THE ROW THE MIGRATION ASKED FOR: an account dir whose profile does not exist at
+# all must create NOTHING under ~/.clauth/profiles. This passes today — the guard
+# in reconcile_all is correct — and it is here so it stays correct: the phantom
+# directories on this machine were attributed to this path, and the only way to
+# keep that diagnosis honest is a row that would fail if it ever became true.
+new_home l4; mk_profile p1
+run_sut p1
+mkdir -p "$ACCOUNT_ROOT/orphan"
+BEFORE="$(cd "$FHOME/.clauth/profiles" && printf '%s\n' * | sort | tr '\n' ' ')"
+run_sut --reconcile
+AFTER="$(cd "$FHOME/.clauth/profiles" && printf '%s\n' * | sort | tr '\n' ' ')"
+want_out "an orphaned account dir is reported and left alone" \
+         "orphan: an account dir with no clauth profile"
+if [[ "$BEFORE" == "$AFTER" ]]; then
+    ok "...and creates no profile store directory of its own"
+else
+    bad "...and creates no profile store directory of its own — profiles went from '$BEFORE' to '$AFTER'"
+fi
+if [[ -e "$FHOME/.clauth/profiles/orphan" ]]; then
+    bad "...specifically, no store appears at the orphan's name"
+else
+    ok "...specifically, no store appears at the orphan's name"
+fi
+
+# A compat SYMLINK account dir is the shape a rename actually leaves, and it is the
+# one the migration tripped over — same assertion, different input.
+new_home l5; mk_profile p1
+run_sut p1
+ln -s "$ACCOUNT_ROOT/p1" "$ACCOUNT_ROOT/oldname"
+run_sut --reconcile
+if [[ -e "$FHOME/.clauth/profiles/oldname" ]]; then
+    bad "a compat symlink account dir creates no store at its old name"
+else
+    ok "a compat symlink account dir creates no store at its old name"
+fi
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

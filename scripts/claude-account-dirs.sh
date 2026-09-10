@@ -512,7 +512,32 @@ cred_same_account() {  # $1 = account dir, $2 = profile dir
 reconcile_credential() {
     local profile="$1" pdir="$2" account_dir="$3" rc=0 lock_fd=""
 
-    if command -v flock >/dev/null 2>&1; then
+    # A LOCK IS A WRITE, so it may not be taken until the thing being locked is
+    # known to be a profile. `exec {fd}>"$pdir/.reconcile.lock"` CREATES that file,
+    # and it was created before anything established that $pdir is a real profile
+    # store -- so every empty directory under ~/.clauth/profiles/ got a 0-byte
+    # `.reconcile.lock` written into it, again on every timer tick, two minutes
+    # apart, forever.
+    #
+    # There was never anything to serialise in that state:
+    # _reconcile_credential_locked's SECOND test is `[[ ! -f "$S" ]]` and it
+    # refuses immediately with `refused-no-store`. The lock was pure side effect.
+    #
+    # The cost is not cosmetic during a profile rename. Each stage leaves a compat
+    # symlink at the old account-dir path, the reconciler visits it, and the lock
+    # re-appears at exactly the store name the NEXT stage needs free -- so the
+    # migration stalls on the reconciler's own leftovers and has to sweep them
+    # before every stage. `credentials.json` is the same "is this a launchable
+    # profile" test the rest of this script already uses (`--all` iterates
+    # directories and skips any without one, deliberately needing no TOML parser),
+    # so this adds no new notion of what a profile is.
+    #
+    # `-f` OR `-L`: a dangling store credential is a state the locked function
+    # reports on (`the clauth store credential is itself a symlink`), so it must
+    # still be reached, and `-f` alone follows the link and calls it absent.
+    if [[ ! -f "$pdir/credentials.json" && ! -L "$pdir/credentials.json" ]]; then
+        lock_fd=""
+    elif command -v flock >/dev/null 2>&1; then
         # `exec {fd}>file 2>/dev/null` has NO COMMAND, so BOTH redirections apply
         # to the shell permanently -- that spelling sent this script's own stderr
         # to /dev/null for the rest of the run, silencing every later warn() and
@@ -548,7 +573,13 @@ _reconcile_credential_locked() {
     if [[ ! -f "$S" ]]; then
         cred_write_verdict "$account_dir" refused-no-store "clauth login $profile"
         warn "$profile: no credential in the clauth store (${S/#$HOME/\~}) — refusing to"
-        warn "        invent one. Run 'clauth login $profile'."
+        warn "        invent one. Run 'clauth login $profile' if it should be a profile."
+        # Said because following the line above is what MAKES the phantom: during a
+        # profile rename this account dir is a compat symlink whose profile has
+        # moved on, and `clauth login` at the old name recreates the store the next
+        # rename stage needs free.
+        warn "        If the name was renamed away, remove the empty store dir instead —"
+        warn "        'clauth login' would make it real again."
         return 1
     fi
 

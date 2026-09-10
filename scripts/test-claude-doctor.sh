@@ -1231,6 +1231,157 @@ else
     bad "the doctor's staleness default matches the picker's — doctor='$DOC_DEF' picker='$PICK_DEF'"
 fi
 
+
+#-----------------------------------------------------------------------------
+section "T. The report itself — no bare name=value line may reach it"
+#-----------------------------------------------------------------------------
+#
+# A GENERIC row, on purpose. `claude-doctor` is one ~950-line function and zsh has
+# no block scope, so every `local` in it shares one namespace — and `local NAME`
+# with no assignment, on a name that already exists in that scope, DISPLAYS it as
+# `name=value` instead of re-declaring it. #132 added a redundant `local pdir` and
+# the deployed doctor printed a bare
+# `pdir=/home/…/.clauth/profiles/<alphabetically last profile>` between two
+# sections: loop residue from the `preferred` check 555 lines earlier. There is no
+# `echo` of `pdir` anywhere in the repo.
+#
+# So this row does not name a variable. It asserts the SHAPE, which catches the
+# next one whatever it is called. CLAUDE.md already records the earlier instance
+# of the same trap printing `du=zvi-quantivly` into gh-doctor's report.
+#
+# The fixture has to make the residue exist: the `preferred` loop only runs inside
+# the clauth section, so the stub is on PATH and a profile carries
+# `preferred = true`.
+new_home t1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/zz-last"
+printf '{"claudeAiOauth":{"accessToken":"t","expiresAt":9}}\n' > "$FHOME/.clauth/profiles/zz-last/credentials.json"
+printf 'preferred = true\n' > "$FHOME/.clauth/profiles/zz-last/config.toml"
+# profiles.toml must exist: the `preferred` loop — the one whose variable leaked —
+# sits inside `if [[ -f ~/.clauth/profiles.toml ]]`, so without it the loop never
+# runs, no residue exists, and the leak row passes for the wrong reason.
+printf 'active_profile = "zz-last"\nauth_broken = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 CLAUTH_STUB_WHICH=zz-last run_doctor
+LEAKS="$(printf '%s' "$OUT" | grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' || true)"
+if [[ "$LEAKS" == 0 ]]; then
+    ok "no bare name=value line reaches the report"
+else
+    bad "no bare name=value line reaches the report — found $LEAKS: $(printf '%s' "$OUT" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | head -2 | tr '\n' ' ')"
+fi
+# ...and the residue really was there to leak, or the row above is satisfied by a
+# doctor that never ran the loop. `preferred` is reported from the same loop whose
+# variable leaked.
+want_out "...and the loop that produced the residue did run" \
+         "is preferred — the daemon walks the active account back to it"
+
+#-----------------------------------------------------------------------------
+section "U. A name clauth cannot own is not a broken account dir"
+#-----------------------------------------------------------------------------
+#
+# The account-dir enumeration's fall-through assumed every name it could see was a
+# would-be profile, so a deliberately dot-prefixed archive directory read as "an
+# account dir with no clauth profile store" and the reader was told to run
+# `clauth login .personal.stray-20260910-112747` — which cannot succeed.
+#
+# NOT a #132 regression, and the correction decides the fix: `setopt GLOB_DOTS` is
+# set by this repo's own zshrc, so the pre-#132 `*(N/)` had been matching
+# dot-directories all along. Re-narrowing the glob would hide a dot-prefixed
+# directory that HOLDS A CREDENTIAL — the blind spot #132 exists to close. So the
+# enumeration stays wide and the classification gets wider.
+
+# A dot-prefixed dir with NO credential: a note, and no impossible remedy.
+new_home u1; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.local/state/claude-account-dirs/.archive-20260910"
+run_doctor
+want_out "a dot-prefixed dir is classified, not called a broken account dir" \
+         ".archive-20260910: archived or internal directory, not an account dir"
+no_out   "...and is NOT reported as an account dir with no store" \
+         ".archive-20260910: an account dir with no clauth profile store"
+no_out   "...and the reader is never sent to 'clauth login' for a name that cannot exist" \
+         "clauth login .archive-20260910"
+want_rc  "...and a classified directory is not a failure" 0
+
+# THE ROW THAT DECIDES THE SHAPE OF THE FIX. A dot-prefixed dir holding a
+# credential is exactly what the wide enumeration is for: nothing reconciles it,
+# nothing rotates it, and no profile can carry the name. A classifier that simply
+# skipped every dot name would hide it.
+new_home u2; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.local/state/claude-account-dirs/.archive-20260910"
+printf '{"claudeAiOauth":{"accessToken":"orphaned","expiresAt":9}}\n' \
+    > "$FHOME/.local/state/claude-account-dirs/.archive-20260910/.credentials.json"
+run_doctor
+want_out "a dot-prefixed dir HOLDING a credential is a warning, not a note" \
+         ".archive-20260910: not a profile name, but it holds a credential"
+want_out "...and says why nothing manages it" "no profile can carry"
+
+# COVERAGE MUST NOT DEPEND ON THE CALLER'S SHELL OPTIONS. GLOB_DOTS comes from
+# this repo's zshrc, and this suite runs `zsh -c`, where it is OFF — which is why
+# #132's own rows could not reach the branch above at all. The `D` glob qualifier
+# forces dotfile matching, so the checker sees the same set either way: a modular
+# adopter without our zshrc gets the same coverage.
+if [[ "$OUT" == *".archive-20260910"* ]]; then
+    ok "a dot-prefixed dir is seen with GLOB_DOTS OFF (this suite's shell)"
+else
+    bad "a dot-prefixed dir is seen with GLOB_DOTS OFF (this suite's shell)"
+fi
+PRELUDE='setopt GLOB_DOTS'
+run_doctor
+PRELUDE=''
+want_out "...and the same with GLOB_DOTS ON (an interactive shell here)" \
+         ".archive-20260910: not a profile name, but it holds a credential"
+
+# A NORMAL name with no store keeps the existing warning — the classifier must not
+# swallow the case it was inserted in front of.
+new_home u3; write_cred
+mkdir -p "$FHOME/.local/state/claude-account-dirs/orphan"
+run_doctor
+want_out "a normal name with no store still gets the warning" \
+         "orphan: an account dir with no clauth profile store"
+want_out "...and its remedy now warns that 'clauth login' re-creates a renamed-away name" \
+         "would make the name real again"
+
+# The same classification in the profile-store enumeration, which had the identical
+# fall-through one block down: "profile directory with no credential: <name>" with
+# "'clauth login <name>' if it should be real".
+# THE TEST IS NARROW, and this is what holds it there. `_underscore` and `-dash`
+# are unusual profile names, not impossible ones, so a wider test
+# (`[[ "$name" != [A-Za-z0-9]* ]]`) would file a real account dir as "not mine" —
+# reintroducing #132's blind spot from the other side. A row using a name that
+# starts with a LETTER cannot see that: the first version of this row used
+# `realprofile` and the widening mutant survived it.
+new_home u4; write_cred
+mkdir -p "$FHOME/.clauth/profiles/.internal-state"
+mkdir -p "$FHOME/.clauth/profiles/_underscore"
+mkdir -p "$FHOME/.clauth/profiles/realprofile"
+run_doctor
+want_out "a dot-prefixed dir under profiles/ is classified apart" \
+         "under profiles/, not profile director"
+no_out   "...and not listed among the profile dirs missing a credential" \
+         "with no credential: .internal-state"
+# ORDER-INDEPENDENT: zsh sorts the glob by the current locale's collation, not by
+# ASCII, so `realprofile` precedes `_underscore` here — an assertion on the joined
+# string would pin the collation rather than the classification.
+want_out "...while a real profile dir with no credential still is" \
+         "no credential: realprofile"
+# NOT `want_out ... "_underscore"`: under the widening mutant that name still
+# appears in the report — in the impossible list instead — so the row could not
+# fail. The plural is what moves: one impossible name reads "directory", two read
+# "directories".
+no_out   "...and an underscore name is never filed as impossible" \
+         "not profile directories"
+want_out "...and the impossible list names ONLY the dot directory" \
+         "not profile directory: .internal-state"
+
+# The same narrowness on the account-dir side, which calls the same helper.
+new_home u5; write_cred
+mkdir -p "$FHOME/.local/state/claude-account-dirs/_underscore"
+run_doctor
+want_out "an account dir named _underscore keeps the ordinary store warning" \
+         "_underscore: an account dir with no clauth profile store"
+no_out   "...and is not classified as a name clauth cannot own" \
+         "_underscore: archived or internal directory"
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

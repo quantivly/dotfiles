@@ -1821,6 +1821,29 @@ Design points that are load-bearing rather than preferences:
   **The invariant, stated once: for each account there is exactly ONE credential file, and every
   process using that account reads it.** `claude-doctor`'s "Account dirs" section asserts it, along
   with the pooled-sharing one below.
+  **A LOCK IS A WRITE, and this one landed where nothing could be reconciled.**
+  `exec {fd}>"$pdir/.reconcile.lock"` *creates* that file, and it was created before anything
+  established that `$pdir` is a real profile store — so every empty directory under
+  `~/.clauth/profiles/` collected a 0-byte `.reconcile.lock`, again on every timer tick, two minutes
+  apart, forever. There was never anything to serialise in that state: the locked function's second
+  test is `[[ ! -f "$S" ]]` and it refuses immediately with `refused-no-store`. The lock was pure
+  side effect. During a profile rename the cost compounds — each stage leaves a compat symlink at the
+  old account-dir path, the reconciler visits it, and the lock reappears at exactly the store name
+  the NEXT stage needs free, so the migration stalls on the reconciler's own leftovers and has to
+  sweep them before every stage. The gate is `credentials.json` present (`-f` **or** `-L`, so a
+  dangling store credential still reaches the diagnosis that names it), which is the same
+  "is this a launchable profile" test `--all` already uses — no new notion of what a profile is, and
+  no TOML parser, both deliberate.
+  **The remedy text was part of the loop.** The refusal said `Run 'clauth login <p>'`, and following
+  that during a rename is what *materialises* the store at a name the migration needs free. It now
+  says so: `clauth login` if it should be a profile, otherwise remove the empty store dir, because
+  `clauth login` would make the name real again.
+  **And the stated cause was wrong, which is why it is written down.** The phantom directories were
+  attributed to `reconcile_all` creating them, and `reconcile_all` has always guarded on
+  `[[ -d "$PROFILES_DIR/$profile" ]]` — measured: an orphaned account dir, and a compat-symlink one,
+  each create nothing. What this code does is *write into* a phantom somebody else created, on every
+  tick. Rows now pin both halves, because the honest diagnosis is the one that stays true: the
+  "creates nothing" rows pass today and exist so they keep passing.
   Two bugs inside the fix, both of which reported success: `exec {fd}>file 2>/dev/null` has **no
   command**, so *both* redirections applied to the shell permanently and the script's own stderr
   went to `/dev/null` for the rest of the run — every later `warn()` and `die()` silently lost, in
@@ -2096,6 +2119,48 @@ Traps specific to the checker, each of which produced a green tick first:
   asserted the output contained `p1`, which the backing dir `p1real` satisfies as a
   substring, and one used a fixture whose link target was not a registered profile,
   so the store-repoint branch it named never ran.
+- **Widening an enumeration changes the checker's ADVICE, not just its coverage — and
+  #132 applied that lesson to one input class and stopped one short.** It added a
+  pre-classification branch so a *compat symlink* would not be told to
+  `clauth login` a name deliberately no longer a profile; the store check below it
+  remained the fall-through for **every** name, still assuming each one was a
+  would-be profile. So a deliberately dot-prefixed archive directory read as "an
+  account dir with no clauth profile store" and the reader was told to run
+  `clauth login .personal.stray-20260910-112747`, which cannot succeed. Every
+  enumeration needs a **total** classification: for each name it can see, either the
+  remedy is actionable or the name is explicitly classified as not the checker's.
+  Fixed with one shared `_claude_name_cannot_be_profile`, used by the account-dir
+  and the profile-store enumerations, which had the identical fall-through.
+  **The obvious fix is the wrong one.** Re-narrowing the glob would hide a
+  dot-prefixed directory that HOLDS A CREDENTIAL — the blind spot the widening
+  exists to close — so the enumeration stays wide and the classification gets
+  wider: a credential under such a name is a ⚠ (nothing manages it, nothing rotates
+  it), no credential is a note. The test is a **leading dot and nothing wider**;
+  `[[ "$name" != [A-Za-z0-9]* ]]` also rejects `_weird` and `-dash`, which are
+  unusual rather than impossible, and a checker that misfiles a real account dir as
+  "not mine" reintroduces the blind spot from the other side.
+- **DO NOT ASSUME A GLOB NARROWS, and do not let a checker's coverage depend on the
+  caller's shell options.** `setopt GLOB_DOTS` is set repo-wide in `zshrc`, so
+  `*(N/)` in this codebase has **never** excluded dotfiles — the first diagnosis of
+  the defect above blamed #132 for widening the glob into dotfiles, and #132 had
+  only added symlinks. The reverse also bit: because the state table runs `zsh -c`,
+  where GLOB_DOTS is **off**, the dot-directory branch was unreachable from the
+  suite, which is why #132's own rows could not catch any of this — and a modular
+  adopter without this repo's `zshrc` had a doctor that silently skipped a
+  dot-prefixed account dir holding a credential. Both globs now carry the `D`
+  qualifier, which forces dotfile matching regardless of the option, and a row
+  asserts the same directory is seen with GLOB_DOTS **off** and **on**.
+- **zsh's `local NAME` re-declaration display, second recurrence — three lines from
+  the comment forbidding it.** `claude-doctor` is one ~950-line function, zsh has no
+  block scope, and its top declaration block says so explicitly ("every loop-body
+  variable is declared once, here"). #132 then added `local pdir pname` 900 lines
+  down, and because `pdir` already held a value the deployed doctor printed a bare
+  `pdir=/home/…/.clauth/profiles/<alphabetically last profile>` onto stdout between
+  two sections — loop residue from the `preferred` check 555 lines earlier. Nothing
+  in the repo echoes `pdir`. The row added for it is **generic**: it greps the
+  report for `^[a-z_]*=` and fails on any bare `name=value` line, so it catches the
+  next one whatever the variable is called. A convention stated in a comment is not
+  enforcement; the row is.
 - **A new external tool is a new way for a check to go quiet, twice in one day.**
   The `readlink -f` note below was written, and then an `awk`-based rewrite of the
   chain match reintroduced exactly the same failure — awk is not on the state
