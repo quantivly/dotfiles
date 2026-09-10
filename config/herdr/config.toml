@@ -430,7 +430,20 @@ tab_bar_right = [
 #   $pr                       PR chip — wyattjoh/herdr-plugin-gh-pr
 #   $icon                     agent glyph (❖ ✦ ✜) — the local `sidebar-icons`
 #                             plugin, on pane.agent_detected; non-Claude panes
-#   $clauth                   which clauth account this pane burns — clauth plugin
+#   $acct                     which account this pane burns — OUR statusline hook
+#                             (source id "claude-context"). Read from the
+#                             session's own CLAUDE_CONFIG_DIR, so it names the
+#                             credential FILE the pane reads; `shared` means the
+#                             global one a profile switch overwrites. It is a
+#                             directory name, NOT a check of who that credential
+#                             authenticates as -- a /login as another account
+#                             inside the session leaves the name unchanged.
+#   $clauth                   which clauth account this pane burns — clauth plugin.
+#                             NO LONGER IN THE CLAUDE ROW (DO-590): the plugin
+#                             cannot see a foreign CLAUDE_CONFIG_DIR, so on an
+#                             isolated pane it reports the machine-wide active
+#                             profile, or the literal `unknown`. Still correct,
+#                             and still available, for a NON-isolated pane.
 #   $task $status             herdmates (its own report-metadata source).
 #                             $task = the team lead's current task (absent on
 #                             every pane today). $status = herdmates' five-state
@@ -481,8 +494,26 @@ rows = [
 # rows_by_agent REPLACES `rows` above for that agent kind (not merged). Keys are
 # strict canonical agent ids (claude, codex, gemini, agy, copilot, ...).
 [ui.sidebar.agents.rows_by_agent]
+# `$acct` REPLACED `$clauth` (DO-590). clauth's herdr plugin resolves the
+# account from the machine-wide active profile, so on an isolated pane — which
+# every session started by `claude()` now is — it is wrong or, measured
+# 2026-09-09 on a pane billing `quantivly-2`, the literal sentinel `unknown`.
+# `$acct` is published by claude/hooks/session-statusline.sh from inside the
+# session's own CLAUDE_CONFIG_DIR, so it names the credential FILE this pane
+# reads rather than a machine-wide setting. It is not proof of WHO that
+# credential authenticates as -- a /login as another account inside the session
+# would leave the name unchanged. Its value `shared` is a finding, not a
+# fallback: that session is on the global file a switch overwrites.
+#
+# Both were NOT kept. Two account fields disagreeing — one of them reading
+# `unknown` — is the surface this change exists to remove, not to double.
+#
+# ADOPTERS: `$acct` is empty unless that hook is wired as `statusLine` in
+# ~/.claude/settings.json (scripts/herdr-claude-wire.sh does it;
+# scripts/verify-tools.sh --herdr asserts it). An unpublished token renders as
+# nothing, silently — the same failure mode as every other token here.
 claude = [
-  ["state_icon", "workspace", "tab", { token = "$clauth", dim = false }, { token = "$pr", dim = false }],
+  ["state_icon", "workspace", "tab", { token = "$acct", dim = false }, { token = "$pr", dim = false }],
   [{ token = "terminal_title_stripped", fg = "#a9b1d6", dim = false }],
   # Model, effort and the context ramp share ONE row (merged 2026-08-30). There is
   # no alignment/right-edge/spacer support in this schema — a row is a token list

@@ -1400,6 +1400,92 @@ Gotchas, in the order they bite:
   arriving as a config file that still looked correct. Any migration that moves the marker
   variable has this shape: check what an unset gate falls back to before assuming the old
   name is merely dead. `build-limits` prints which tier is active.
+- **The sidebar's account tag named the wrong account on every isolated pane, and that
+  is the surface that hid the concentration (DO-590).** clauth's herdr plugin resolves
+  the account from the **machine-wide active profile**, and it cannot see a foreign
+  `CLAUDE_CONFIG_DIR` — so once `claude()` started isolating every session by default,
+  the one column that says which account a pane is spending stopped tracking it.
+  Measured 2026-09-09 on a pane billing `quantivly-2`: the published token was
+  `clauth: "unknown"`, the same literal sentinel `clauth which` returns from inside an
+  isolated shell. Not a wrong-but-plausible name — no name at all.
+  The fix belongs here rather than upstream because our own
+  `claude/hooks/session-statusline.sh` runs **inside** the session, so a token it
+  derives from that process's own `CLAUDE_CONFIG_DIR` names the credential **file**
+  the pane reads rather than a machine-wide setting. **It is not "correct by
+  construction"** — that phrasing shipped in the first draft and is the
+  declared-vs-effective overclaim this file records twice already. `$acct` is a
+  directory name, not an API answer: a `/login` as a different account inside an
+  isolated session leaves it unchanged and wrong. What it beats is the alternative,
+  which reports an account belonging to a different pane entirely. It publishes `acct`, and the claude
+  row in `config/herdr/config.toml` consumes `$acct` in place of `$clauth`. **Both were
+  not kept**: two account fields disagreeing, one of them reading `unknown`, is the
+  surface being removed, not one to double. `acct=shared` is a **finding, not a
+  formatting fallback** — it means the session is on the shared global credential, the
+  file a profile switch overwrites under every holder at once.
+  Three things the change turned up that outlast the change itself:
+  - **A publisher and a consumer that each fail silently can only be checked as a
+    PAIR.** An unpublished token renders as nothing; an unconsumed one is never drawn.
+    So a half-applied deploy — `./install` relinks `config.toml`, a checkout that moved
+    without it does not — looks exactly like a healthy sidebar from either side alone.
+    `verify-tools.sh --herdr` asserts the two together, against the **live**
+    `~/.config/herdr/config.toml` and never the repo copy: the repo copy always carries
+    `$acct` after this change, so reading it would print a green tick for precisely the
+    half-applied state the check exists to catch. A mutation that swapped the path
+    proved it.
+  - **Presence is not correctness, and the state table said otherwise for a while.**
+    Every row asserted that `acct` was published and consumed; none asserted its
+    VALUE. A hook hardcoded to `acct=shared` therefore passed the entire table while
+    showing every pane the same wrong account — the original bug, reintroduced, under
+    a green suite. Only mutation testing found it (M6 survived; six derivation rows
+    were added to kill it). The derivation *is* the feature: rows that check the
+    plumbing and not the answer are decoration.
+  - **The pair check itself shipped with two of this file's own recorded faults, and
+    CI was 20/20 green over both.** It read the claude row by shelling out to python3
+    and its stdlib TOML module. python3 had never been *invoked* in
+    `scripts/verify-tools.sh` — it appeared only as a NAME inside
+    `HERDR_SERVER_DEPS` — so that was a new dependency in a checker, "a new way for a
+    check to go quiet"; and that module is 3.11+, while Ubuntu 20.04, the first
+    outside adopter's box, ships 3.8. Worse, **every** non-zero exit (python3 absent,
+    module absent, file unreadable) was collapsed into `acct_con=0`, which printed a
+    confident `✗ the hook publishes $acct but no claude sidebar row consumes it` — a
+    FAIL naming a fault that does not exist, taking the exit code with it. On the one
+    machine class the herdr work exists to support, the new check would have been red
+    on arrival: the permanently-red checker, **sixth** recurrence, inside the check
+    written while citing the rule. Now a bounded `sed` range (the `fallback_chain`
+    technique) and a **tri-state**, where "could not read the row" is `NOT CHECKED`
+    and never a verdict.
+  - **Three of the new rows asserted an exit code against a fixture that was already
+    failing something else.** `new_home` does not write the agent-skill file, so
+    `verify-tools.sh --herdr` returned 1 regardless of what the account check did, and
+    "takes the exit code with it" passed without testing anything — green for no
+    reason, which this file already rates as badly as red for no reason. Build the
+    fixture with `wire`, which the suite's own end-to-end row proves exits 0, so the
+    thing under test is the only thing that can move the code.
+  - **A row that greps for a defect will match the comment explaining the defect.**
+    The row asserting the checker no longer imports the TOML module matched the
+    checker's own comment saying why it does not. Both were right; the pair was
+    circular. The comment now says so explicitly, so the next person does not
+    reintroduce the literal string.
+  - **`tr -d` deletes BYTES, so a multi-byte strip corrupts its neighbours.** The
+    guard against U+00B7 (herdr's own token separator) shipped as
+    `tr -d '\302\267'`, which removes those two bytes *individually* rather than the
+    character they spell — measured, it turns U+00B1 (`C2 B1`) into a lone `\xB1` and
+    U+04B7 (`D2 B7`) into a lone `\xD2`, i.e. **invalid UTF-8 published straight into
+    the sidebar**, which is worse than the separator it was guarding against. `sed
+    's/·//g'` matches the pair as a unit in a UTF-8 *and* a C locale (both checked;
+    `/bin/sh` here is dash and the locale is not guaranteed), and sed is already used
+    throughout that file so it adds no dependency. **The row that covered this passed
+    the entire time**, because it only ever fed in the exact character being stripped:
+    a guard needs a row for what it must LEAVE ALONE, not only for what it removes.
+    Found by asking what a reviewer would attack — after CI had gone 20/20 green over
+    it.
+  - **A fixture `$HOME` needs `.cache/`.** The hook redirects the publish call's stderr
+    into `$HOME/.cache/`, so without that directory the redirection itself fails,
+    `herdr` is never exec'd, and the stub records nothing — which reads identically to
+    "the hook published no token". The first draft of those rows failed for exactly
+    that reason, and had passed beforehand only because an ad-hoc run used the real
+    `$HOME`.
+
 - **The sidebar publisher needs THREE things wired, and `./install` only does one** —
   `scripts/herdr-claude-wire.sh` now does the other two, and `verify-tools.sh --herdr` fails when
   they are missing (before DO-563 nothing checked either, in either install path).
