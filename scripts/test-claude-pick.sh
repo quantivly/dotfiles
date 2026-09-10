@@ -482,6 +482,24 @@ check "a quiet machine warns about nothing"              "$(bp)" "0:0"
 
 mkproc 24.00 0-7 8000000 4000000    # load 24 on 8 = 300%, swap 50%
 check "a loaded machine warns"                           "$(bp)" "0:1"
+# THE WARNING'S NUMBERS, not just its existence. Every row here counted warnings
+# and none read one, so the text went unpinned — and it printed the ratio alone
+# ("load 3.0 x 8 threads"), a number that appears nowhere else, while
+# `claude-pick --explain` reported the load itself for the same machine. Found by
+# running it beside that line on the real box, not by a row.
+bpmsg() {
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID
+      export HOME='$FHOME'
+      CLAUDE_PICK_PROC_ROOT='$PROCR'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      typeset -ga _claude_pick_warnings=()
+      _claude_pick_backpressure >/dev/null 2>&1
+      print -r -- \"\${_claude_pick_warnings[1]}\"" 2>/dev/null
+}
+check "...naming the load itself, then the ratio" \
+      "$(bpmsg)" "machine: load 24.00 on 8 threads (3.0x) — a new session will thrash"
 check "...and does NOT refuse, because no MAX is set"    "$(bp | cut -d: -f1)" "0"
 check "...but refuses once LOAD_MAX is set and exceeded" \
       "$(bp 'CLAUDE_PICK_LOAD_MAX=200' | cut -d: -f1)"   "3"

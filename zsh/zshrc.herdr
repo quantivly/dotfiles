@@ -1020,7 +1020,14 @@ _claude_pick_backpressure() {
     pct=$(( _CML_LOAD1 / _CML_NCPU ))     # load1 x100 / ncpu == percent of ncpu
   fi
   if [[ "$pct" != unknown ]] && (( pct >= load_warn )); then
-    _claude_pick_warnings+=("machine: load $(( pct / 100 )).$(( (pct % 100) / 10 )) x ${_CML_NCPU} threads — a new session will thrash")
+    # THE LOAD ITSELF, then the ratio in brackets. This printed only the ratio
+    # ("load 3.4 x 8 threads") until it was run on the real machine beside
+    # `claude-pick --explain`, which reports "load 27.88 on 8 threads" — the same
+    # measurement in two shapes, one of them a number that appears nowhere else,
+    # so a reader comparing the two lines has to work out that 3.4 is 27.88/8.
+    # A state-table row pins both numbers now; before this, every row counted
+    # warnings and none read one.
+    _claude_pick_warnings+=("machine: load $(( _CML_LOAD1 / 100 )).${(l:2::0:)$(( _CML_LOAD1 % 100 ))} on ${_CML_NCPU} threads ($(( pct / 100 )).$(( (pct % 100) / 10 ))x) — a new session will thrash")
     (( load_max > 0 && pct >= load_max )) && rc=3
   fi
   if [[ "$_CML_SWAPPCT" != unknown ]] && (( _CML_SWAPPCT >= swap_warn )); then
