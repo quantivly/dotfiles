@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Claude account picker scores headroom instead of sorting on utilization, and
+  `claude-pick` exposes it as a command (DO-574).** The old ranking was the worse of the 5h
+  and 7d utilization, then live holders, then name — so an account at 3% of a 5h window that
+  resets in four minutes outranked one at 20% with the whole window ahead of it, and every
+  session starting in the same quiet minute landed on the same seat, because a deterministic
+  sort has no memory. `_claude_pick_for_dir` is now one code path — resolve → candidates →
+  classify → score → exhaustion → backpressure → ledger — shared by `claude()`, `hspawn` and
+  the new `scripts/claude-pick` (symlinked to `~/.local/bin/claude-pick`, so the herdr
+  server's frozen `PATH` finds it). The score is 5h headroom, plus a use-it-or-lose-it bonus
+  scaled by *both* headroom and closeness to the reset, times weekly headroom as a
+  multiplier, minus crowding that costs more on an account already busy; ties inside
+  `CLAUDE_PICK_RR_BAND` break by least-recently-picked under a lock, which is what stops the
+  pile-up. Classes are tiers rather than scores: `excluded` is never chosen, `unknown` (no
+  usage cache, or one past `CLAUDE_PICK_CACHE_MAX_AGE`) ranks after every measured candidate
+  but is still chosen when nothing else remains, and `exhausted` is where the callers
+  deliberately differ — an interactive `claude` proceeds on the least-bad member with a loud
+  block, while `hspawn`, `claude-pick --strict` and herdr-draft refuse and name each
+  member's reset time. `claude-pick`'s exit codes are the contract: 0 picked, 2 exhausted,
+  3 a machine ceiling, 4 an unusable tenant table, 5 no credential, 64 usage.
+  Machine backpressure is measured and warned about but **never refuses** unless
+  `CLAUDE_PICK_LOAD_MAX`/`_SWAP_MAX` is explicitly set. Three approved-spec items were
+  changed on measurement and the reasons are in CLAUDE.md: the weekly window demotes rather
+  than refusing (zero weekly-reset refusals in 750 transcripts, against 34 individual
+  spend-limit messages in 24 h, whose remedy is an admin and not a rollover);
+  `CLAUDE_PICK_CACHE_MAX_AGE` stays 3600 and the planned `claude-usage-refresh.timer` is
+  dropped, because clauth has no refresh entry point for it to call; and an already-reset
+  window earns no expiry bonus. `claude-doctor` gains a usage-cache freshness line, since a
+  stale cache silently removes a profile from the ranking and nothing else reported it.
+  Two bugs found on the way out are worth their own mention: `zsystem flock` opens without
+  `O_CREAT`, so the pick lock had never once been acquired while the row covering it
+  asserted the warning that broken state produces; and `strftime -r` parses through
+  `mktime`, which reads a broken-down time as local and discards the offset, so every reset
+  instant was wrong by the machine's UTC offset — up to 60% of a 5h window, and it shifted
+  every reset time the messages print. `CLAUDE_ACCOUNT_CACHE_MAX_AGE` is gone; the knob is
+  `CLAUDE_PICK_CACHE_MAX_AGE`. New `scripts/test-claude-pick.sh` (CI job
+  `claude-pick-test`), with rows added to `scripts/test-hspawn.sh` and
+  `scripts/test-claude-doctor.sh`.
 - **gh routes a work-tree directory with no GitHub remote to the work account
   (`GH_ACCOUNT_PATH_ROUTES`, DO-596).** `~/quantivly/qspace` holds two work repositories
   and is itself none, so the remote rule had nothing to say and the personal default

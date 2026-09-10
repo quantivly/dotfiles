@@ -1490,6 +1490,15 @@ done
 printf 'active_profile = "w1"\n' > "$PHOME/.clauth/profiles.toml"
 
 pick() {   # $1 = tenant file, $2 = tenant arg (may be empty), $3 = extra prelude
+    # THE LEDGER IS CLEARED FIRST, and it has to be. Since DO-574 the picker
+    # breaks a near-tie by LEAST RECENTLY PICKED, and the ledger is a file in the
+    # fixture HOME that every call here writes — so without this the rows below
+    # stop being independent, and the one that names an exact profile measures
+    # whichever account the PREVIOUS row happened to take. (Measured: it went
+    # from c1 to h1 the moment round-robin landed.) These rows are about which
+    # accounts are CANDIDATES, not about rotation, which test-claude-pick.sh
+    # covers with a ledger it controls.
+    rm -f "$PHOME/.local/state/claude-account-dirs/.pick-ledger"
     zsh -f -c "
       export HOME='$PHOME'
       CLAUDE_TENANTS_FILE='$1'
@@ -1678,6 +1687,66 @@ check "hspawn --tenant with an empty value is refused, not silently ignored" \
       "$(hspawn_opt "--tenant '' ~/x slug" | grep -c 'needs a non-empty value')" "1"
 check "hspawn --help documents --tenant" \
       "$(hspawn_opt '--help' | grep -c -- '--tenant <tenant>')" "1"
+
+echo
+echo "=== hspawn is a HEADLESS caller, and claude() is not (DO-574 §5.4) ==="
+#
+# The asymmetry IS the decision, so it is asserted rather than described. An
+# interactive `claude` proceeds on the least-bad member of an exhausted pool,
+# because a human blocked by a window that clears itself in minutes is the worse
+# outcome. An hspawn worker started on a spent window burns the seat and dies
+# mid-task with nobody watching, so hspawn refuses — and the escape is `-p`,
+# which the refusal names.
+#
+# These rows stub the PICKER, not the accounts: what is under test is the
+# argument each caller passes and what it does with a refusal, and stubbing the
+# decision is the only way to reach the refusal branch without a pool that
+# happens to be exhausted while the suite runs. They go through `run`, the same
+# fixture every other hspawn row uses — a lighter one of their own reached
+# hspawn's herdr preflight instead of the picker, and then the two rc=1 rows
+# passed for a reason that had nothing to do with the refusal.
+
+# A QUOTED HEREDOC, and PICKREC EXPORTED rather than interpolated. The stub below
+# is zsh source, so its `$1` and `$PICKREC` belong to the stub, not to this suite
+# — and inside a single-quoted bash string shellcheck reads them as expansions
+# that will not expand (SC2016), which `shellcheck -x` exits non-zero on. A quoted
+# heredoc says "this is data"; exporting the path is what lets the heredoc stay
+# quoted. The closing `};` matters: command substitution strips the trailing
+# newline, so without the `;` the concatenation below would read `}hspawn`.
+export PICKREC="$TMPROOT/pick-args"
+PICKSTUB="$(cat <<'STUB'
+_claude_pick_for_dir() {
+    print -r -- "$1|$2|$3|$4" >> "$PICKREC"
+    REPLY=""; _claude_pick_state=exhausted; _claude_pick_reason="fixture refusal"
+    return ${PICK_STUB_RC:-2}
+  };
+STUB
+)"
+
+: > "$PICKREC"
+run "${PICKSTUB}hspawn '$REPO' fixture-slug"
+check "hspawn asks the picker with strict=1" \
+      "$(cut -d'|' -f3 "$PICKREC" | head -1)" "1"
+check "...about the directory it is spawning INTO, not the lead's \$PWD" \
+      "$(cut -d'|' -f1 "$PICKREC" | head -1)" "$REPO"
+check "a refusing picker makes hspawn fail rather than share the credential" "$RC" "1"
+check "...saying plainly that nothing was created" "$(inout 'nothing was spawned')" "1"
+check "...and creating no worktree on the way out" "$(incmd 'worktree create')" "0"
+
+: > "$PICKREC"
+run "PICK_STUB_RC=3; ${PICKSTUB}hspawn '$REPO' fixture-slug"
+check "a machine-ceiling refusal stops the spawn too" "$RC" "1"
+check "...and names the machine rather than the accounts" \
+      "$(inout 'refused — fixture refusal')" "1"
+
+# claude() is the other half of the asymmetry. It has its own fixture above
+# (the resolver rows), so the strict flag is read there.
+: > "$PICKREC"
+run "${PICKSTUB}claude --version"
+check "claude() asks the picker with strict=0" \
+      "$(cut -d'|' -f3 "$PICKREC" | head -1)" "0"
+check "...about \$PWD" \
+      "$(cut -d'|' -f1 "$PICKREC" | head -1)" "$PWD"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

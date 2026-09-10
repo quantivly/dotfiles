@@ -480,7 +480,21 @@ the **daemon**. No CLI subcommand acquires it, and neither `clauth start` nor `c
 with the daemon off, the caches are refreshed **only while somebody has the clauth TUI open**, which
 is why they arrive in bursts across all four profiles and then age monotonically for tens of minutes.
 Anything that ranks accounts on those numbers has to treat a stale reading as *unknown* rather than
-as agreement — which the picker does.
+as agreement — which the picker does: past `CLAUDE_PICK_CACHE_MAX_AGE` (3600 s) a profile is class
+`unknown` and ranks after every measured candidate, still choosable when nothing else is left.
+`claude-doctor` prints the oldest cache age on every run for the same reason, and
+`claude-pick --explain` shows the age it ranked each candidate on. That is also why the threshold
+stayed at 3600 rather than dropping to the planned 900: with no refresher to call, 900 would mark
+every profile `unknown` for most of the day and the picker would rank on nothing at all.
+
+**Which account a launch takes, without launching:** `claude-pick` prints the profile a directory
+would bill, `--explain` adds the per-candidate table (class, 5h, 7d, cache age, holders, score,
+why), and `--json --dry-run` is what herdr-draft's create dialog reads. `--dry-run` writes no
+round-robin ledger entry and builds no account dir. Its exit codes are the contract: `0` picked,
+`2` every member's 5h window is spent, `3` a machine ceiling was exceeded, `4` the tenant table is
+unusable, `5` no profile has a credential, `64` a usage error. `hspawn` and `--strict` refuse where
+an interactive `claude` proceeds on the least-bad member — the escape from the refusal is
+`-p <profile>`.
 
 `max_auto_spend = 0` — no unattended pay-as-you-go spend. On macOS the rotation story is
 **UNVERIFIED** either way: `clauth start --help` says `--with-fallback` is "not available … on
