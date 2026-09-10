@@ -234,7 +234,9 @@ jobs:
           submodules: recursive
 
       - name: Install zsh and jq
-        run: sudo apt-get update && sudo apt-get install -y zsh jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq
 
       # The picker decides WHICH ACCOUNT IS BILLED, and nothing announces that
       # afterwards: a wrong answer is not an error, it is a session quietly
