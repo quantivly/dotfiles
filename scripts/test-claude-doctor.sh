@@ -246,7 +246,7 @@ run_doctor() {
               CLAUTH_STUB_LOG="$CLAUTH_LOG" CLAUTH_STUB_WHICH="${CLAUTH_STUB_WHICH:-}" \
               CLAUDE_SETTINGS_REQUIRE="${REQUIRE:-}" \
               "PATH=$p" \
-        "$SYSBIN/zsh" -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; claude-doctor $*" 2>&1)"
+        "$SYSBIN/zsh" -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; ${PRELUDE:-}; claude-doctor $*" 2>&1)"
     RC=$?
 }
 
@@ -1089,6 +1089,40 @@ ln -s /nowhere-at-all "$FHOME/.local/state/claude-account-dirs/p9"
 run_doctor
 want_out "a symlink to a non-profile is a warning naming its target" "not a registered profile"
 want_out "...and the target is named"                               "nowhere-at-all"
+
+# A DIRECTORY under ~/.clauth/profiles is not a profile. clauth leaves runtime
+# dirs and a .reconcile.lock behind under a name it no longer registers, so the
+# result looks exactly like a profile to any glob while having no credential and
+# no entry in profiles.toml. Observed on the workstation 2026-09-10 after a
+# rename. The picker and the builder both skip it correctly and silently — which
+# is the reason to report it: nothing else says a name that still LOOKS like a
+# profile has stopped being one.
+new_home r14; write_cred '.'
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.clauth/profiles/ghost/runtime-1234-0"
+: > "$FHOME/.clauth/profiles/ghost/.reconcile.lock"
+run_doctor
+want_out "a profile dir with no credential is reported" "profile directory with no credential"
+want_out "...and it is named"                           "ghost"
+want_rc  "...and it is a note, not a failure"           0
+
+# Two sources of truth for the pool is a finding, not a merge (spec §5.1). The
+# flat pool is inert once a tenant table loads, so a leftover is not wrong today
+# — it is a line that silently stopped meaning anything.
+new_home r15; write_cred '.'
+mk_account_dir p1 linked
+PRELUDE='typeset -gA CLAUDE_TENANT_POOL=(work "a b"); typeset -ga CLAUDE_ACCOUNT_POOL=(a b)'
+run_doctor
+PRELUDE=''
+want_out "both pool sources set is reported" "both pool sources are set"
+want_out "...and it says which one wins"     "tenant table wins"
+
+new_home r16; write_cred '.'
+mk_account_dir p1 linked
+PRELUDE='typeset -gA CLAUDE_TENANT_POOL=(work "a b")'
+run_doctor
+PRELUDE=''
+no_out "a tenant table alone is not a both-sources finding" "both pool sources are set"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

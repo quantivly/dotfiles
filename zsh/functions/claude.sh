@@ -1127,6 +1127,41 @@ claude-doctor() {
         echo "    Expected after a token refresh. '--reconcile' adopts the live one and relinks."
       fi
     fi
+
+    # A DIRECTORY under ~/.clauth/profiles is not a profile. clauth leaves runtime
+    # dirs and a .reconcile.lock behind under a name it no longer registers, and
+    # the result looks exactly like a profile to anything globbing that path —
+    # while having no credential and no entry in profiles.toml. Observed on this
+    # machine 2026-09-10: `profiles/personal/` holding only `runtime-*/` and
+    # `.reconcile.lock` after the profile was renamed away.
+    #
+    # The picker already skips it (it requires credentials.json), and the account
+    # dir builder refuses it with `refused-no-store`. Both are correct and silent,
+    # which is the reason to say it here: nothing else reports that a name which
+    # still LOOKS like a profile has stopped being one.
+    local pdir pname
+    local -a stray_profiles
+    for pdir in "$HOME"/.clauth/profiles/*(N-/); do
+      pname="${pdir:t}"
+      [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]] && continue
+      stray_profiles+=("$pname")
+    done
+    if (( ${#stray_profiles} )); then
+      _doctor_note "profile director$( (( ${#stray_profiles} == 1 )) && echo y || echo ies ) with no credential: ${(j:, :)stray_profiles}"
+      echo "    Leftover runtime state, not a profile: nothing can launch on it, and the"
+      echo "    picker and the account-dir builder both skip it. Remove when nothing is"
+      echo "    running under it, or 'clauth login <name>' if it should be real."
+    fi
+
+    # TWO sources of truth for the pool is a finding, not a merge (spec §5.1).
+    # CLAUDE_ACCOUNT_POOL is ignored the moment a tenant table is loaded, so a
+    # leftover flat pool is not wrong today — it is a line that silently stopped
+    # meaning anything, and the next person to edit it will believe it works.
+    if (( ${#CLAUDE_TENANT_POOL} )) && (( ${#CLAUDE_ACCOUNT_POOL} )); then
+      _doctor_note "both pool sources are set: CLAUDE_ACCOUNT_POOL (${#CLAUDE_ACCOUNT_POOL} entries) and a tenant table (${#CLAUDE_TENANT_POOL} tenants)"
+      echo "    The tenant table wins; CLAUDE_ACCOUNT_POOL is inert. Delete the flat pool so"
+      echo "    there is one source of truth — a stale one reads as configuration that works."
+    fi
   }
 
   _doctor_summary "Claude Code auth and MCP surface look healthy." \
