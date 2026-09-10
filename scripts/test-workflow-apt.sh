@@ -904,6 +904,52 @@ rm -rf "$twice"
 check "a failed emitter run is not cached as a success (1st)" 2 "$first"
 check "a failed emitter run is not cached as a success (2nd)" 2 "$second"
 
+printf '\n== two gaps a grep found, not a mutant ==\n'
+# These were confirmed absent by grepping the suite rather than by running a
+# mutation -- which is the cheaper half of review, and the half that survives a
+# stale tree, because it is a property of this file's text rather than of one
+# commit's behaviour. Both are handled by the emitter, so the rows pin real
+# behaviour rather than documenting an intention.
+
+# NO CRLF ROW, deliberately, and this is the reasoning rather than an omission.
+# CRLF broke the hand-written parser's block detection exactly as a header
+# comment did (`rest` became "|\r"), so a row looked obviously worth having.
+# Measured instead: with the emitter's `\r` strip REMOVED, a CRLF workflow
+# carrying a gate still exits 1, and a CRLF action with a tolerant refresh still
+# exits 0 -- because `[[:space:]]` and the negated classes in these patterns
+# accept a carriage return anyway. The property is protected twice over, so no
+# fixture can distinguish the strip being present from absent, and a row here
+# would pass whatever the code did. Recorded because "we have a CRLF row" would
+# be worth less than knowing why one is impossible.
+
+# A workflow may hold several YAML documents. The emitter walks all of them
+# (compose_all); a single-document walk would silently skip everything after
+# the first `---`.
+d=$(mkfix multidoc); good_action "$d"
+mkdir -p "$d/.github/workflows"
+cat > "$d/.github/workflows/ci.yml" <<'W'
+---
+name: CI
+on: [push]
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo fine
+---
+name: CI2
+on: [push]
+jobs:
+  dirty:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          sudo apt-get update && sudo apt-get install -y zsh
+W
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a gate in the SECOND YAML document is found" 1 "$rc"
+contains "  and it is named" "$out" "runs 'apt-get update' directly"
+
 printf '\n== the tree we ship ==\n'
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=$("$CHECKER" "$repo" 2>&1); rc=$?
@@ -920,7 +966,7 @@ contains "  over its real workflow set" "$out" "scanning"
 # number lives here, in the state table, deliberately: changing it is a visible
 # edit to the suite that a reviewer reads as "this expects fewer checks now,
 # why", where a literal beside the code gets updated by whoever removes a check.
-EXPECTED_TOTAL=110
+EXPECTED_TOTAL=112
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then

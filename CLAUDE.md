@@ -638,7 +638,7 @@ already records, met at scale:
   file already records for `verify-tools.sh`: a new external tool in a checker is
   a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (109 checks, in CI as
+State table: `scripts/test-workflow-apt.sh` (112 checks, in CI as
 `workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
 builds its own fixture tree and is handed an explicit root; only the last rows
 read this repository, to assert the shipped tree passes. Most rows assert what it
@@ -724,11 +724,22 @@ it says.
 **The mutation figures across three rounds, with the set beside the ratio,
 because the ratio alone is what misled the first time.** An independent reviewer
 grew the set each round specifically into rules that had no rows — the only way
-the number means anything: **27 mutants / 8 survivors, then 31 / 12, then 36 /
-27 killed / 9 survivors.** The set covered the file finds, every branch of the
-shell scoping, all three copies of the quote stripper, `apt_re`, the
-refresh-fatality rule and its excuse-path, the interpolation rule, the count
-guards, and two mutations of `action.yml` itself.
+the number means anything: **27/8 at `133cc91`, 31/12 at `e4bb8f3`, 36 mutants
+with 27 killed and 9 survivors at `e381571`.** The set covered the file finds,
+every branch of the shell scoping, all three copies of the quote stripper,
+`apt_re`, the refresh-fatality rule and its excuse-path, the interpolation rule,
+the count guards, and two mutations of `action.yml` itself.
+
+**Every figure carries the commit it measured, deliberately.** Each of those
+three trees is now several commits stale, and a ratio without its commit reads
+as the suite's current coverage to anyone who finds it later. The round after
+`e381571` was abandoned part-way — 16 of 34 measured, 10 killed, 6 survived, 18
+never run, after the OOM watchdog killed the sweep three times on a box at
+loadavg 66 and 21.6 GB of 23.7 GB swap. **That partial is deliberately not
+recorded as a coverage figure**: a partial denominator quoted as a result is the
+same shape as the "9 mutants, 9 deaths" claim this section exists to retract.
+The reviewer said so about their own number before I could, which is the right
+instinct to copy.
 
 Two things about those numbers matter more than their size. **Every survivor of
 the last round kept the check count at exactly six**, which is the evidence for
@@ -786,6 +797,21 @@ one guard proves nothing while another guard upstream can answer for it — coun
 how many independent deletions it takes to reach a silent pass, not how many
 guards exist.** An unreadable file is also a different emitter branch from
 unparseable YAML (`OSError`, not `YAMLError`) and had no row at all.
+
+**The cheap half of review outlives the expensive half.** Four gaps in that
+round were found by *grepping the suite* rather than by mutation — no CRLF
+fixture, no unreadable-file row, no row invoking the parser directly, no
+multi-document fixture — and those findings survived four commits of churn,
+because they are properties of the suite's text rather than of one tree's
+behaviour. Re-checking them at a later commit is a grep; re-running the mutants
+is an hour of load. Two were already closed by then and two were real: the
+multi-document row is pinned (a single-document walk drops the second document
+and the row dies), and **there is deliberately no CRLF row** — measured with the
+emitter's `\r` strip removed, a CRLF workflow carrying a gate still exits 1 and
+a CRLF action with a tolerant refresh still exits 0, because these patterns
+accept a carriage return anyway. The property is protected twice, so no fixture
+can distinguish the strip being present from absent. Knowing why a row is
+impossible is worth more than having one that always passes.
 
 Recorded and deliberately NOT acted on: the suite went from ~15s to ~62s idle as
 it grew to 109 checks, one python start per uncached file per fixture. Combining
