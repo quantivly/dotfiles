@@ -52,6 +52,15 @@ ACTION_REL="$ACTION_DIR/action.yml"
 # because two assertions never ran and nothing said so. That is this repo's
 # "an unparseable link map yields no paths, and no paths reads as no drift"
 # shape: the denominator moving is information the reader needs.
+#
+# WHAT IT CANNOT SEE, stated because the guard otherwise reads as more coverage
+# than it is: `checks` counts CALLS to ok()/bad(), so it detects a check that
+# was SKIPPED and never one that was HOLLOW. Every defect independent review
+# found in this checker kept the count at exactly 6 while printing six ticks
+# over a hidden violation -- a rule that stops being *reached* is invisible to
+# this. The state table asserts the same number independently, which is where
+# a deliberate change to it becomes visible in review; a literal here alone
+# would be updated by the same hand that deletes a check.
 EXPECTED_CHECKS=6
 fail=0
 checks=0
@@ -263,7 +272,24 @@ while IFS= read -r f; do
         esac
         fatal="${fatal}${rel}:${n} "
     done < <(shell_code "$f" | grep -E ":.*$(apt_re update)")
-done < <(find "$root/.github" -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | sort)
+    # The file set is what GITHUB actually executes, which is not the same as
+    # every YAML under .github:
+    #
+    #   - workflows: the TOP LEVEL of .github/workflows only. GitHub does not
+    #     read nested files there, so a `workflows/archive/old.yml` is a
+    #     fragment or a backup and flagging it would be a false positive on
+    #     dead code. That is why the workflow rules above use -maxdepth 1, and
+    #     this rule has to agree with them or the two disagree about the same
+    #     repository.
+    #   - everything else under .github at ANY depth, which is how composite
+    #     actions are reached: `uses: ./path/to/action` accepts any path, so
+    #     action files cannot be bounded by depth.
+    done < <({
+        find "$root/.github/workflows" -maxdepth 1 -type f \
+            \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null
+        find "$root/.github" -type f \( -name '*.yml' -o -name '*.yaml' \) \
+            -not -path "$root/.github/workflows/*" 2>/dev/null
+    } | sort -u)
 if [ -n "$fatal" ]; then
     bad "an apt refresh can fail its step at: ${fatal% }"
     note "  Fix: wrap it -- 'if ! sudo apt-get update; then <warn>; fi' -- or append '|| true'."

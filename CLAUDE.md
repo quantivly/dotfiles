@@ -638,7 +638,7 @@ already records, met at scale:
   file already records for `verify-tools.sh`: a new external tool in a checker is
   a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (61 checks, in CI as
+State table: `scripts/test-workflow-apt.sh` (72 checks, in CI as
 `workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
 builds its own fixture tree and is handed an explicit root; only the last rows
 read this repository, to assert the shipped tree passes. Most rows assert what it
@@ -646,7 +646,38 @@ must **not** flag, because a false positive costs the whole check while a miss
 costs one outage: a comment naming the forbidden line, a commit message
 mentioning it, an unquoted YAML `name:` describing it, `aptitude`/`adapt`, a
 quoted `env:` value, and a mid-word `#` all have to pass. "Could not run" is exit
-2, never a pass.
+2, never a pass, and the suite asserts its own total so a row that VANISHES —
+an emptied `for` list, an early exit in a fixture builder — fails rather than
+shrinking the denominator under a cheerful "all N passed".
+
+Be precise about what those count guards do and do not see: they count reported
+checks, so they detect a check that was **skipped** and never one that was
+**hollow**. Every defect listed above kept the count at exactly six while
+printing six ticks over a hidden violation. A rule that stops being *reached* is
+invisible to them, which is why the rows above are what actually hold this
+guard up.
+
+- **A file-extension clause no fixture exercised was decoration, twice.** Every
+  fixture wrote `ci.yml`, so `-o -name '*.yaml'` was unpinned in both finds —
+  and with it removed, a violating `release.yaml` was invisible while the suite
+  stayed green. GitHub accepts either extension; the only reason the repo was
+  safe is that nobody had named a workflow `.yaml` yet. Worse, a hardcoded
+  `action.yml` had been *accidentally* covering the same gap for the action
+  (it reported "is missing"), so accepting both extensions removed a fail-safe
+  nobody had chosen — which is exactly why the extension now has a row instead
+  of an accident. The narrowing that IS deliberate — `-maxdepth 1`, because
+  GitHub does not read nested workflow files — has its own row saying so, and
+  the refresh rule was rescoped to agree with it rather than scanning every
+  YAML under `.github` and disagreeing with the rules beside it.
+- **Both halves of a two-state stripper need both directions.** The rows
+  covered double quotes only, so deleting the single-quote branch survived
+  while false-positiving on `git commit -m 'stop apt-get update failing CI'` —
+  the more natural spelling of the two. Each state now has a must-pass row and
+  a must-catch mirror.
+- **The one path a human takes was executed by nothing.** Every row passed an
+  explicit root, so the default `git rev-parse --show-toplevel` branch — what
+  you get typing the script's name with no argument — had no coverage, and
+  making its exit code 0 survived the suite.
 
 **On the mutation numbers, which is the part worth carrying forward.** An earlier
 version of this section claimed "9 mutants, 9 deaths" for this guard. That was

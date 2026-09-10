@@ -146,10 +146,20 @@ else
     pass=$((pass + 1)); printf '  ok   the checker never pipes into grep -q (SIGPIPE race)\n'
 fi
 
+# Deliberately written as .yaml, not .yml: GitHub accepts either, and every
+# other fixture here uses .yml -- so the `-o -name '*.yaml'` clause in the
+# workflow find was decoration. Dropping it left a violating `release.yaml`
+# invisible, which is the "a pathspec that matches nothing narrows a check
+# invisibly" failure this repo records, reproduced inside the guard written to
+# prevent it. Renaming an existing violation row makes the extension
+# load-bearing without inflating the count.
 d=$(mkfix bare_update); good_action "$d"; good_workflow "$d"
-printf '      - run: sudo apt-get update\n' >> "$d/.github/workflows/ci.yml"
+mv "$d/.github/workflows/ci.yml" "$d/.github/workflows/ci.yaml"
+printf '      - run: sudo apt-get update\n' >> "$d/.github/workflows/ci.yaml"
 out=$("$CHECKER" "$d" 2>&1); rc=$?
-check "a workflow running a bare 'apt-get update' exits 1" 1 "$rc"
+check "a bare 'apt-get update' in a .yaml workflow exits 1" 1 "$rc"
+contains "  and names the offending file" "$out" ".github/workflows/ci.yaml:"
+contains "  over all six checks" "$out" "of 6 checks failed"
 
 d=$(mkfix bare_install); good_action "$d"; good_workflow "$d"
 printf '      - run: sudo apt-get install -y zsh\n' >> "$d/.github/workflows/ci.yml"
@@ -160,6 +170,7 @@ contains "  names the direct install" "$out" "runs 'apt-get install' directly"
 d=$(mkfix no_action); good_workflow "$d"
 out=$("$CHECKER" "$d" 2>&1); rc=$?
 check "a missing composite action exits 1" 1 "$rc"
+contains "  over all six checks" "$out" "of 6 checks failed"
 contains "  and says so" "$out" "is missing"
 
 d=$(mkfix action_no_install); good_action "$d"; good_workflow "$d"
@@ -168,6 +179,7 @@ sed -i 's|sudo apt-get install -y \$PACKAGES|echo "nothing installed"|' \
     "$d/.github/actions/apt-install/action.yml"
 out=$("$CHECKER" "$d" 2>&1); rc=$?
 check "an action that installs nothing exits 1" 1 "$rc"
+contains "  over all six checks" "$out" "of 6 checks failed"
 contains "  and calls the gate gone" "$out" "the real gate is gone"
 
 d=$(mkfix action_interp); good_action "$d"; good_workflow "$d"
@@ -390,6 +402,67 @@ for c in \
     check "in the action, ${c%%@@*} is accepted" 0 "$rc"
 done
 
+# The same clause in the .github-wide find, which is the half that reaches the
+# composite action. GitHub accepts action.yaml too, and this rule is the ONLY
+# protection for that file -- the two workflow-scoped rules never look at it.
+#
+# Until this change, a hardcoded `ACTION_REL` accidentally covered the gap by
+# reporting "action.yml is missing". Accepting both extensions removed that
+# fail-safe deliberately, which is exactly why the extension now needs a row of
+# its own rather than an accident protecting it.
+d=$(mkfix fatal_in_action_yaml); good_workflow "$d"
+mkdir -p "$d/.github/actions/apt-install"
+{
+    printf -- '---\nname: apt-install\ninputs:\n  packages:\n    required: true\n'
+    printf 'runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n'
+    printf '        set -euo pipefail\n        sudo apt-get update\n'
+    # shellcheck disable=SC2016  # literal fixture text, not an expansion
+    printf '        sudo apt-get install -y $PACKAGES\n'
+} > "$d/.github/actions/apt-install/action.yaml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a fatal refresh in action.yaml is caught" 1 "$rc"
+contains "  and names the .yaml action" "$out" "action.yaml"
+
+printf '\n== both quote states, both directions ==\n'
+# The stripper has TWO states that can hide something, and the suite covered
+# only the double-quoted half of each. Single quotes are the more natural
+# spelling for a shell commit message, so the covered half was the less likely
+# one: deleting the single-quote branch survived the whole suite while
+# false-positiving on this line.
+d=$(mkfix squote_prose); good_action "$d"; good_workflow "$d"
+printf "      - run: git commit -m 'stop apt-get update failing CI'\n" >> "$d/.github/workflows/ci.yml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a SINGLE-quoted commit message mentioning the shape exits 0" 0 "$rc"
+
+# ...and the mirror: a real gate beside a single-quoted string must still be
+# caught, so the single-quote branch cannot become a hiding place either.
+d=$(mkfix squote_gate); good_action "$d"; good_workflow "$d"
+printf "      - run: echo 'deps' && sudo apt-get update && sudo apt-get install -y zsh\n" \
+    >> "$d/.github/workflows/ci.yml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a real gate beside a single-quoted string is still caught" 1 "$rc"
+
+printf '\n== the third cannot-run state, and the human entry point ==\n'
+# Every other row passes an explicit root, so the default-root path -- what a
+# human gets typing `./scripts/check-workflow-apt.sh` with no argument -- was
+# executed by nothing, including CI. Making its exit 0 survived the suite.
+d=$(mkfix nonrepo)
+out=$(cd "$d" && "$CHECKER" 2>&1); rc=$?
+check "no argument outside a git repository exits 2, not 0" 2 "$rc"
+contains "  and says why" "$out" "not a git repository"
+
+# `-maxdepth 1` on the workflow find is a DELIBERATE narrowing -- GitHub itself
+# does not read nested workflow files, so a nested .yml there is a fragment or a
+# backup and scanning it would be wrong. This repo's rule is that a deliberate
+# narrowing needs a row saying so, or the next reader cannot tell it from an
+# oversight.
+d=$(mkfix nested_workflow); good_action "$d"; good_workflow "$d"
+mkdir -p "$d/.github/workflows/archive"
+printf -- '---\njobs:\n  b:\n    steps:\n      - run: sudo apt-get update && sudo apt-get install -y zsh\n' \
+    > "$d/.github/workflows/archive/old.yml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a NESTED workflow file is deliberately not scanned" 0 "$rc"
+
 printf '\n== YAML prose is not shell ==\n'
 # A step whose name NAMES the forbidden shape, while correctly using the
 # action, was reported as three violations with a remedy telling the reader to
@@ -499,7 +572,24 @@ out=$("$CHECKER" "$repo" 2>&1); rc=$?
 check "this repository passes its own check" 0 "$rc"
 contains "  over its real workflow set" "$out" "scanning"
 
+# The suite's own total. This catches a check that VANISHED rather than failed:
+# the interpolation rows run inside a `for form in …` loop, and emptying that
+# list would silently remove two of them under a cheerful "all N checks passed".
+# It also catches an early exit in a fixture builder.
+#
+# It does NOT catch a fixture that failed to BUILD -- such a row still runs and
+# still passes -- which is why the fixture edits assert that they applied. This
+# number lives here, in the state table, deliberately: changing it is a visible
+# edit to the suite that a reviewer reads as "this expects fewer checks now,
+# why", where a literal beside the code gets updated by whoever removes a check.
+EXPECTED_TOTAL=72
+
 printf '\n'
+if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then
+    printf 'test-workflow-apt: performed %d checks, expected %d — a row vanished\n' \
+        "$((pass + fail))" "$EXPECTED_TOTAL"
+    exit 1
+fi
 if [ "$fail" -gt 0 ]; then
     printf 'test-workflow-apt: %d passed, %d FAILED\n' "$pass" "$fail"
     exit 1
