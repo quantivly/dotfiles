@@ -638,7 +638,7 @@ already records, met at scale:
   file already records for `verify-tools.sh`: a new external tool in a checker is
   a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (72 checks, in CI as
+State table: `scripts/test-workflow-apt.sh` (88 checks, in CI as
 `workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
 builds its own fixture tree and is handed an explicit root; only the last rows
 read this repository, to assert the shipped tree passes. Most rows assert what it
@@ -678,6 +678,48 @@ guard up.
   explicit root, so the default `git rev-parse --show-toplevel` branch — what
   you get typing the script's name with no argument — had no coverage, and
   making its exit code 0 survived the suite.
+
+**The guard now parses YAML with a YAML parser, and that is the finding.** Three
+independent review rounds found **seventeen** defects in this one checker, every
+one of them under a fully green state table. Rounds one and two were fixed by
+patching. Round three found eight more, six of which were the same kind of thing:
+`run: |  # refresh, then install` is valid YAML but a comment after the block
+indicator meant the hand-written awk parser never opened the block, dropped the
+whole script and silenced **three rules at once**; a step's sibling keys are
+indented deeper than the `- ` of `- run: |`, so they were read as block body and
+a `name:` describing the forbidden shape became a false violation; a multi-line
+string's continuation lines were scanned as unquoted shell because quote state
+reset per line; CRLF broke block detection the same way; and the install-strict
+check read the whole file, so an unquoted `description:` mentioning
+`apt-get install -y` satisfied it while the action installed nothing.
+
+The pattern, not the bugs, is the lesson: **those are YAML questions, and each
+round of patching produced a new way to answer one wrongly.** `scripts/gha-yaml-shell.py`
+now hands the checker the shell of every `run:` scalar and the placement of every
+`${{ }}`, using PyYAML. Six defects stopped being reachable rather than being
+fixed. What remains is genuinely shell-level — operator position, apt's option
+forms, heredoc bodies — and lives where it belongs.
+
+The dependency is deliberate and it cannot go quiet: PyYAML missing, a file
+unreadable, or YAML that does not parse all exit **2**, and the CI job installs
+`python3-yaml` through this repo's own composite action. That matters because
+this repo already records what a quiet dependency costs a checker, and the first
+version of the very code enforcing it had the bug it was written against — the
+helpers ran inside `$(...)`, so their `exit 2` exited the *subshell* and the
+parent read zero records as "this file contains no shell", passing an
+unparseable workflow clean. Status is tested in the parent now. `require_emitter`
+was also **defined and never called** for a while, which no linter here catches.
+
+Two smaller things worth keeping from the same round. **`grep` is not GNU grep
+everywhere** — on this machine it resolves to a `ugrep` shim, which rejected a
+`grep -P` pattern the CI runner's GNU grep would have accepted; the matching is
+awk now, which this checker already depended on. And **a fixture can be wrong in
+a way only a real parser reveals**: a row asserting that a `#` inside a quoted
+string must not truncate the line used `- run: echo "tag #1" && sudo apt-get
+update`, where ` #` opens a *YAML* comment — so the value is `echo "tag` and apt
+never runs at all. The hand parser had been flagging a line GitHub would not
+execute, and the row encoded that mistake. It needs a block scalar to mean what
+it says.
 
 **On the mutation numbers, which is the part worth carrying forward.** An earlier
 version of this section claimed "9 mutants, 9 deaths" for this guard. That was

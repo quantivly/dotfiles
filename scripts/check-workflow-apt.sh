@@ -135,65 +135,105 @@ strip_comments() {
     }' "$1"
 }
 
-# shell_code emits `<lineno>:<shell>` for the lines of a YAML file that are
-# SHELL -- the inline value of a `run:` key, and the body of a `run:` block
-# scalar -- with comments and the contents of quoted strings removed.
+# shell_code emits `<lineno>\t<shell>` via scripts/gha-yaml-shell.py, which
+# uses a real YAML parser.
 #
-# ONE awk pass, deliberately. The first version composed a line-selector with a
-# per-line stripper through a shell `while read` loop, which forks awk once per
-# line: on a 560 KB fixture that was 20,000 forks and a single check took 205
-# SECONDS. A checker too slow to run is a checker that gets skipped.
+# It used to do this by hand in awk, and three rounds of independent review
+# found SIX ways that went quiet -- each printing a full row of green ticks over
+# a complete restoration of the outage. A comment after a block indicator
+# (`run: |  # refresh, then install`, valid YAML) dropped the whole script and
+# silenced three rules at once; a step's sibling keys were read as block body,
+# making a `name:` that described the forbidden shape a false violation; a
+# multi-line string's continuation lines were scanned as unquoted shell; CRLF
+# broke block detection the same way. Every one of those is a YAML question,
+# and the answer to a YAML question is a YAML parser. What is left below --
+# operator position and apt's option forms -- is genuinely shell-level.
 #
-# Scoping to shell is what stops YAML PROSE being read as a command. Two false
-# positives proved it necessary, both reproduced: a step whose `name:` names the
-# forbidden shape ("Install deps (replaces apt-get update && apt-get install
-# -y)") was reported as three violations while correctly USING the composite
-# action, with a remedy telling the reader to do what they had already done; and
-# this action's own `description:` ("Runs apt-get update tolerantly") failed the
-# refresh-fatality rule.
-#
-# Block detection is by indentation, which is what YAML itself uses: a `run:`
-# whose value is `|`/`>` (with any chomping/indent modifier) opens a block whose
-# body is every following line indented deeper than the key. The `- run:`
-# list-item form works because the key's own indent is measured, and a body is
-# always deeper than that.
-#
-# Stripping is character-by-character and quote-aware. The obvious line-based
-# sed version had two holes that each hid a real violation under a green tick:
-# two apostrophes inside SEPARATE double-quoted strings paired with each other
-# and swallowed the command between them, and a `#` inside a quoted string
-# truncated the line. A `#` opens a comment only at a word boundary (`foo#bar`
-# is not one) and only outside quotes. After the fix the strip matches what a
-# shell would treat as quoted, so anything it hides was never going to run as a
-# command anyway.
-shell_code() {
-    awk '
-    function strip(line,   out, n, i, c, sq, dq) {
-        out = ""; n = length(line); i = 1; sq = 0; dq = 0
-        while (i <= n) {
-            c = substr(line, i, 1)
-            if (!sq && !dq && c == "#" && (i == 1 || substr(line, i-1, 1) ~ /[ \t]/)) break
-            if (!dq && c == "'"'"'") { sq = !sq; i++; continue }
-            if (!sq && c == "\"")   { dq = !dq; i++; continue }
-            if (sq || dq)          { i++; continue }
-            out = out c; i++
-        }
-        return out
+# The dependency is deliberate and cannot go quiet: the helper exits 2 when
+# PyYAML is missing, the file is unreadable or the YAML does not parse, and
+# `require_emitter` below turns any of those into this script's own exit 2.
+# "Could not read the shell" is never "there is no shell here".
+EMITTER="$(dirname "${BASH_SOURCE[0]}")/gha-yaml-shell.py"
+
+require_emitter() {
+    [ -x "$EMITTER" ] || {
+        printf 'check-workflow-apt: %s is missing or not executable\n' "$EMITTER" >&2
+        exit 2
     }
+    python3 -c 'import yaml' 2>/dev/null || {
+        printf 'check-workflow-apt: PyYAML is required (Ubuntu: python3-yaml).\n' >&2
+        printf '  Refusing to fall back to hand-parsing YAML: that is where six\n' >&2
+        printf '  separate silent-pass defects came from.\n' >&2
+        exit 2
+    }
+}
+
+# These PRINT and return the emitter's status. They must never be used inside
+# `< <(...)` or `$(...)` with an `exit` of their own: that exits the SUBSHELL,
+# the parent reads zero records, and zero records read as "this file contains no
+# shell" -- so an unparseable workflow passed clean. That is the
+# empty-answer-is-agreement shape, inside the dependency handling written to
+# prevent it. Every call site captures into a variable and tests the status in
+# the parent.
+# Memoised per file: the rules ask for the same file's shell up to three times
+# (two verbs plus the refresh rule), and each miss is a python start. Without
+# this the state table took 76s instead of 20s -- and a checker slow enough to
+# be annoying is a checker people stop running.
+declare -A _SHELL_CACHE=()
+shell_code() {
+    if [ -z "${_SHELL_CACHE[$1]+set}" ]; then
+        _SHELL_CACHE[$1]=$("$EMITTER" --shell "$1") || return 2
+    fi
+    printf '%s\n' "${_SHELL_CACHE[$1]}"
+}
+interp_lines() { "$EMITTER" --interp "$1"; }
+
+die_unreadable() {
+    printf 'check-workflow-apt: could not read the %s of %s\n' "$2" "$1" >&2
+    printf '  Refusing to treat an unreadable file as one containing no shell.\n' >&2
+    exit 2
+}
+
+# fatal_refreshes reads `<lineno>\t<shell>` and prints the line numbers whose
+# apt refresh can FAIL ITS STEP.
+#
+# Position, not presence -- review broke the previous glob three ways, all
+# reproduced. `if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update; fi` passed
+# because the substring `if` appeared on the line, yet `set -e` does kill a
+# then-branch (verified). `sudo apt-get update ; if false; then :; fi` passed
+# for the same reason. And `sudo apt-get update || { echo ERR: x; exit 1; }`
+# passed because the `||`-then-colon glob matched the colon in `ERR:` -- a
+# refresh that is emphatically fatal.
+#
+# Non-fatal means exactly two things:
+#   - the refresh sits in a CONDITION: the line opens with if/elif/while/until
+#     and no `then`/`do` appears before the refresh. `while !`/`until` matter:
+#     a retry loop is the canonical answer to a flaky index, so refusing it
+#     would refuse the improvement this guard exists to encourage.
+#   - the tail after the LAST `||` is exactly `true` or `:`.
+fatal_refreshes() {
+    awk -F'\t' -v re="$1" '
     {
-        match($0, /^[ \t]*/); ind = RLENGTH
-        if (inrun) {
-            if ($0 ~ /^[ \t]*$/) next
-            if (ind > runind) { print NR ":" strip($0); next }
-            inrun = 0
+        n = $1; code = $2
+        where = match(code, re)
+        if (where == 0) next
+
+        # Condition position?
+        if (code ~ /^[[:space:]]*(if|elif|while|until)[[:space:]]/) {
+            t = match(code, /[[:space:]](then|do)([[:space:]]|;|$)/)
+            if (t == 0 || t > where) next
         }
-        if (match($0, /^[ \t]*-?[ \t]*run:[ \t]*/)) {
-            rest = substr($0, RSTART + RLENGTH)
-            match($0, /^[ \t]*/); runind = RLENGTH
-            if (rest ~ /^[|>][0-9+-]*[ \t]*$/) { inrun = 1; next }
-            print NR ":" strip(rest)
+
+        # Explicit tolerance after the last ||?
+        rest = code; tail = ""
+        while ((k = index(rest, "||")) > 0) {
+            tail = substr(rest, k + 2)
+            rest = tail
         }
-    }' "$1"
+        if (tail != "" && tail ~ /^[[:space:]]*(true|:)[[:space:]]*(;|$)/) next
+
+        print n
+    }'
 }
 
 # apt_re builds the pattern for one verb. Matching the literal string
@@ -205,7 +245,12 @@ shell_code() {
 # between them. The leading/trailing character classes are word boundaries
 # that `grep -E` lacks portably; they keep `aptitude` and `adapt` out.
 apt_re() {
-    printf '(^|[^A-Za-z0-9_-])apt(-get)?([[:space:]]+-[^[:space:]]+)*[[:space:]]+%s([^A-Za-z0-9_-]|$)' "$1"
+    # An option's value may be a SEPARATE word -- `-o Acquire::Retries=3`,
+    # `-t focal`, `-c file`, `--option K=V`. The previous class only consumed
+    # attached values, so `sudo apt-get -o Acquire::Retries=3 update` (the
+    # standard flaky-apt incantation, i.e. the likeliest future edit to this
+    # action) stopped the pattern before the verb and switched the guard off.
+    printf '(^|[^A-Za-z0-9_-])apt(-get)?([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+%s([^A-Za-z0-9_-]|$)' "$1"
 }
 
 mapfile -t workflows < <(find "$root/.github/workflows" -maxdepth 1 -type f \
@@ -214,14 +259,18 @@ if [ ${#workflows[@]} -eq 0 ]; then
     printf 'check-workflow-apt: no workflow files found under %s/.github/workflows\n' "$root" >&2
     exit 2
 fi
+# Called before any rule runs. It was DEFINED and never CALLED for a while --
+# a guard that exists and is not invoked, which no linter here catches.
+require_emitter
 note "scanning ${#workflows[@]} workflow file(s)"
 
 for verb in update install; do
     hits=''
     for wf in "${workflows[@]}"; do
+        code=$(shell_code "$wf") || die_unreadable "${wf#"$root"/}" "shell"
         while IFS= read -r n; do
             hits="${hits}${wf#"$root"/}:${n} "
-        done < <(shell_code "$wf" | grep -E ":.*$(apt_re "$verb")" | cut -d: -f1)
+        done < <(printf '%s\n' "$code" | awk -F'\t' -v re="$(apt_re "$verb")" '$2 ~ re {print $1}')
     done
     if [ -n "$hits" ]; then
         bad "a workflow runs 'apt-get ${verb}' directly: ${hits% }"
@@ -261,35 +310,28 @@ done
 fatal=''
 while IFS= read -r f; do
     rel="${f#"$root"/}"
-    while IFS= read -r rec; do
-        n="${rec%%:*}"; line="${rec#*:}"
-        case "$line" in
-            *'||'*true*|*'||'*':'*) continue ;;
-        esac
-        # An `if`/`elif` condition, or `&&`-chained inside one, is non-fatal.
-        case "$line" in
-            *if[[:space:]]*|*elif[[:space:]]*) continue ;;
-        esac
-        fatal="${fatal}${rel}:${n} "
-    done < <(shell_code "$f" | grep -E ":.*$(apt_re update)")
-    # The file set is what GITHUB actually executes, which is not the same as
-    # every YAML under .github:
+    code=$(shell_code "$f") || die_unreadable "$rel" "shell"
+    while IFS= read -r n; do
+        [ -n "$n" ] && fatal="${fatal}${rel}:${n} "
+    done < <(printf '%s\n' "$code" | fatal_refreshes "$(apt_re update)")
+    # The file set is what GITHUB actually executes, which is not every YAML
+    # under .github:
     #
     #   - workflows: the TOP LEVEL of .github/workflows only. GitHub does not
-    #     read nested files there, so a `workflows/archive/old.yml` is a
-    #     fragment or a backup and flagging it would be a false positive on
-    #     dead code. That is why the workflow rules above use -maxdepth 1, and
-    #     this rule has to agree with them or the two disagree about the same
-    #     repository.
+    #     read nested files there, so `workflows/archive/old.yml` is a fragment
+    #     or a backup and flagging it would be a false positive on dead code.
+    #     The workflow rules use -maxdepth 1 and this rule must agree with
+    #     them, or the two disagree about one repository.
     #   - everything else under .github at ANY depth, which is how composite
     #     actions are reached: `uses: ./path/to/action` accepts any path, so
     #     action files cannot be bounded by depth.
-    done < <({
-        find "$root/.github/workflows" -maxdepth 1 -type f \
-            \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null
-        find "$root/.github" -type f \( -name '*.yml' -o -name '*.yaml' \) \
-            -not -path "$root/.github/workflows/*" 2>/dev/null
-    } | sort -u)
+done < <({
+    find "$root/.github/workflows" -maxdepth 1 -type f \
+        \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null
+    find "$root/.github" -type f \( -name '*.yml' -o -name '*.yaml' \) \
+        -not -path "$root/.github/workflows/*" 2>/dev/null
+} | sort -u)
+
 if [ -n "$fatal" ]; then
     bad "an apt refresh can fail its step at: ${fatal% }"
     note "  Fix: wrap it -- 'if ! sudo apt-get update; then <warn>; fi' -- or append '|| true'."
@@ -305,7 +347,9 @@ if [ ! -f "$root/$ACTION_REL" ]; then
     bad "no action, so its \${{ }} placement cannot be checked"
 else
     ok "$ACTION_REL exists"
-    if [ -n "$(strip_noise "$root/$ACTION_REL" | grep 'apt-get install -y' || true)" ]; then
+    act_code=$(shell_code "$root/$ACTION_REL") || die_unreadable "$ACTION_REL" "shell"
+    if [ -n "$(printf '%s\n' "$act_code" \
+        | awk -F'\t' -v re="$(apt_re install)" '$2 ~ re {print $1}')" ]; then
         ok "the action installs strictly with 'apt-get install -y'"
     else
         bad "the action does not run 'apt-get install -y' — the real gate is gone"
@@ -326,24 +370,12 @@ else
     # placement -- a run line, a `with:`, anywhere -- makes them differ. No
     # YAML parsing, nothing to fail to find, and no new dependency in a
     # checker.
-    # The value may be quoted -- `PACKAGES: "${{ inputs.packages }}"` is ordinary
-    # YAML and arguably the better style -- so the quotes are optional here. The
-    # first version required a bare value and flagged that shape, which is the
     # false positive that gets a checker deleted.
     #
-    # `run` is itself a valid NAME, so `run: ${{ inputs.packages }}` would
-    # otherwise count as an env assignment -- the injection, laundered through
-    # the rule meant to catch it. Env-style lines whose key is `run` are
-    # subtracted back out.
     # shellcheck disable=SC2016  # the ${{ }} patterns are literal, not expansions
-    all_interp=$(strip_comments "$root/$ACTION_REL" | grep -c '\${{' || true)
-    # shellcheck disable=SC2016  # ditto
-    env_style=$(strip_comments "$root/$ACTION_REL" \
-        | grep -cE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*["'"'"']?\${{[^}]*}}["'"'"']?[[:space:]]*$' || true)
-    # shellcheck disable=SC2016  # ditto
-    run_style=$(strip_comments "$root/$ACTION_REL" \
-        | grep -cE '^[[:space:]]*run:[[:space:]]*["'"'"']?\${{' || true)
-    env_interp=$((env_style - run_style))
+    interp=$(interp_lines "$root/$ACTION_REL") || die_unreadable "$ACTION_REL" "interpolations"
+    all_interp=$(printf '%s\n' "$interp" | grep -c . || true)
+    env_interp=$(printf '%s\n' "$interp" | grep -c 'env$' || true)
     if [ "$all_interp" -ne "$env_interp" ]; then
         bad "the action has $all_interp \${{ }} but only $env_interp in an env: assignment — pass it via env:"
         note "  Fix: set 'env: {NAME: \${{ inputs.x }}}' and use \$NAME in the script."

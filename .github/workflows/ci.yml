@@ -510,9 +510,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # No apt install: the checker and its state table are pure bash, and the
-      # runner already has bash. Installing packages here would make this job
-      # depend on the very mechanism it exists to check.
+      # PyYAML, because the checker parses YAML with a real parser rather than
+      # by hand. Three review rounds found six ways a hand-written parser went
+      # QUIET -- each printing a full row of green ticks over a complete
+      # restoration of the outage this guard exists to prevent -- so the
+      # dependency is deliberate. It is installed through this repository's own
+      # composite action, which is the thing under test: if the action is
+      # broken, this job fails loudly, which is the correct outcome.
+      - name: Install PyYAML
+        uses: ./.github/actions/apt-install
+        with:
+          packages: python3-yaml
+
       - name: Run the workflow-apt state table
         run: ./scripts/test-workflow-apt.sh
 

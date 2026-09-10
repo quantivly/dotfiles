@@ -225,7 +225,8 @@ check "apostrophes inside double quotes do not swallow the command" 1 "$rc"
 
 d=$(mkfix strip_hash); good_action "$d"; good_workflow "$d"
 cat >> "$d/.github/workflows/ci.yml" <<'W'
-      - run: echo "tag #1" && sudo apt-get update && sudo apt-get install -y zsh
+      - run: |
+          echo "tag #1" && sudo apt-get update && sudo apt-get install -y zsh
 W
 out=$("$CHECKER" "$d" 2>&1); rc=$?
 check "a '#' inside a quoted string does not truncate the line" 1 "$rc"
@@ -561,10 +562,137 @@ printf '\n== a # only opens a comment at a word boundary ==\n'
 # gate that follows.
 d=$(mkfix hash_wordish); good_action "$d"; good_workflow "$d"
 cat >> "$d/.github/workflows/ci.yml" <<'W'
-      - run: echo ref#123 && sudo apt-get update && sudo apt-get install -y zsh
+      - run: |
+          echo ref#123 && sudo apt-get update && sudo apt-get install -y zsh
 W
 out=$("$CHECKER" "$d" 2>&1); rc=$?
 check "a mid-word '#' does not truncate the line" 1 "$rc"
+
+printf '\n== a real YAML parser, because six defects came from not having one ==\n'
+# Each of these printed a full row of green ticks under the hand-written awk
+# parser, at 61/61. They are grouped because they share one cause: YAML
+# questions answered by pattern-matching lines.
+act2() { # act2 <root> <run-key-and-body> [description]
+    mkdir -p "$1/.github/actions/apt-install"
+    {
+        printf -- '---\nname: apt-install\ndescription: %s\n' "${3:-x}"
+        printf 'inputs:\n  packages:\n    required: true\n'
+        printf 'runs:\n  using: composite\n  steps:\n    - shell: bash\n'
+        printf '%b\n' "$2"
+    } > "$1/.github/actions/apt-install/action.yaml"
+}
+# shellcheck disable=SC2016  # $PACKAGES is literal fixture text
+inst2='        sudo apt-get install -y $PACKAGES'
+
+# A comment after the block indicator is valid YAML (PyYAML parses it, the run
+# value is the whole script) but made the hand parser never open the block,
+# dropping the entire body and silencing THREE rules at once.
+d=$(mkfix hdr_comment); good_workflow "$d"
+act2 "$d" "      run: |  # refresh, then install\n        set -euo pipefail\n        sudo apt-get update\n$inst2"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a comment on the block indicator does not hide the script" 1 "$rc"
+contains "  and the refresh is still seen" "$out" "can fail its step"
+
+# `if <cond>; then sudo apt-get update; fi` -- set -e DOES kill a then-branch
+# (verified) -- and `update ; if false; then :; fi`, which merely MENTIONS if.
+for c in \
+    "a refresh in an if THEN-branch@@        if [ \"\$RUNNER_OS\" = Linux ]; then sudo apt-get update; fi\n$inst2" \
+    "a line that merely mentions if@@        sudo apt-get update  ; if false; then :; fi\n$inst2" \
+    "|| with a later colon (ERR:)@@        sudo apt-get update || { echo ERR: failed; exit 1; }\n$inst2"; do
+    # shellcheck disable=SC2018  # ASCII-only slug for a temp dir name, deliberate
+    d=$(mkfix "pos_$(printf '%s' "${c%%@@*}" | tr -cd 'a-z')"); good_workflow "$d"
+    act2 "$d" "      run: |\n${c#*@@}"
+    out=$("$CHECKER" "$d" 2>&1); rc=$?
+    check "position, not presence: ${c%%@@*} is fatal" 1 "$rc"
+done
+
+# The retry loop is the canonical answer to a flaky index -- refusing it would
+# refuse the improvement this guard exists to encourage -- and a backslash
+# continuation is legal.
+for c in \
+    "an until retry loop@@        until sudo apt-get update; do sleep 5; done\n$inst2" \
+    "a while ! retry loop@@        while ! sudo apt-get update; do sleep 5; done\n$inst2" \
+    "a backslash continuation@@        sudo apt-get update \\\\\n          || true\n$inst2"; do
+    # shellcheck disable=SC2018  # ASCII-only slug for a temp dir name, deliberate
+    d=$(mkfix "ok2_$(printf '%s' "${c%%@@*}" | tr -cd 'a-z')"); good_workflow "$d"
+    act2 "$d" "      run: |\n${c#*@@}"
+    out=$("$CHECKER" "$d" 2>&1); rc=$?
+    check "${c%%@@*} is accepted" 0 "$rc"
+done
+
+# An option whose value is a SEPARATE word: -o Acquire::Retries=3 is the
+# standard flaky-apt incantation, i.e. the likeliest future edit to this action,
+# and it stopped the old pattern before the verb.
+d=$(mkfix opt_sep_arg); good_workflow "$d"
+act2 "$d" "      run: |\n        sudo apt-get -o Acquire::Retries=3 update\n$inst2"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "an option with a separate argument does not hide the verb" 1 "$rc"
+
+# The install-strict check read the whole FILE, so prose satisfied it: an action
+# that installs nothing passed all six checks.
+d=$(mkfix inst_prose); good_workflow "$d"
+act2 "$d" "      run: |\n        if ! sudo apt-get update; then printf x; fi\n        echo would install" \
+    "Wraps apt-get install -y so a third-party source cannot fail the job."
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "prose in description: does not satisfy install-strict" 1 "$rc"
+
+# Sibling keys are indented deeper than the `- ` of `- run: |`, so the hand
+# parser read them as block body -- reintroducing the very false positive that
+# scoping to shell had fixed.
+d=$(mkfix sibling_keys); good_action "$d"; good_workflow "$d"
+cat >> "$d/.github/workflows/ci.yml" <<'W'
+      - run: |
+          echo building
+        name: Build (replaces apt-get update && apt-get install -y)
+        env:
+          FOO: bar
+W
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a step's sibling keys are not block body" 0 "$rc"
+
+# Heredoc bodies and multi-line strings are DATA. The heredoc case is the
+# likeliest way someone documents this rule inside a workflow, and this repo has
+# been bitten by a guard tripping on its own source quoted in a heredoc.
+d=$(mkfix heredoc_prose); good_action "$d"; good_workflow "$d"
+cat >> "$d/.github/workflows/ci.yml" <<'W'
+      - run: |
+          cat <<'EOF' > note.txt
+          sudo apt-get update && sudo apt-get install -y zsh
+          EOF
+      - run: |
+          echo "a message
+          mentioning apt-get update
+          across lines"
+W
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "heredoc prose and multi-line strings are data, not commands" 0 "$rc"
+
+# ...and carrying quote state across lines must not become a hiding place: a
+# real refresh AFTER a balanced string earlier in the same block is still code.
+d=$(mkfix quote_then_gate); good_action "$d"; good_workflow "$d"
+cat >> "$d/.github/workflows/ci.yml" <<'W'
+      - run: |
+          echo "a balanced string"
+          sudo apt-get update && sudo apt-get install -y zsh
+W
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "a refresh after a balanced string is still caught" 1 "$rc"
+
+printf '\n== the parser dependency cannot go quiet ==\n'
+# PyYAML missing, or YAML that does not parse, must be exit 2 -- never a silent
+# pass. "Could not read the shell" is not "there is no shell here".
+d=$(mkfix unparseable); good_action "$d"
+mkdir -p "$d/.github/workflows"
+printf 'this: is: not: valid: yaml:\n  - [unclosed\n' > "$d/.github/workflows/ci.yml"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "unparseable YAML exits 2, not 0" 2 "$rc"
+
+d=$(mkfix nopyyaml); good_action "$d"; good_workflow "$d"
+mkdir -p "$d/bin"
+printf '#!/bin/sh\nexit 1\n' > "$d/bin/python3"; chmod +x "$d/bin/python3"
+out=$(PATH="$d/bin:$PATH" "$CHECKER" "$d" 2>&1); rc=$?
+check "PyYAML unavailable exits 2, not 0" 2 "$rc"
+contains "  and names the package" "$out" "python3-yaml"
 
 printf '\n== the tree we ship ==\n'
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -582,7 +710,7 @@ contains "  over its real workflow set" "$out" "scanning"
 # number lives here, in the state table, deliberately: changing it is a visible
 # edit to the suite that a reviewer reads as "this expects fewer checks now,
 # why", where a literal beside the code gets updated by whoever removes a check.
-EXPECTED_TOTAL=72
+EXPECTED_TOTAL=88
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then
