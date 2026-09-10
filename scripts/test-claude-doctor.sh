@@ -1124,6 +1124,113 @@ run_doctor
 PRELUDE=''
 no_out "a tenant table alone is not a both-sources finding" "both pool sources are set"
 
+
+#-----------------------------------------------------------------------------
+section "S. Usage-cache freshness — what the picker is ranking on (DO-574)"
+#-----------------------------------------------------------------------------
+#
+# The account picker classes a profile `unknown` when its usage cache is older
+# than CLAUDE_PICK_CACHE_MAX_AGE, and an `unknown` never outranks a measured
+# figure — so a stale cache silently removes a profile from the ranking. Nothing
+# reported that, and nothing can FIX it: clauth's only usage writer is
+# lease-gated to its TUI and its daemon, and there is no `clauth refresh`
+# (probed 2026-09-09: `which`, `status --json`, `list`, `sessions` and `jobs` all
+# left every mtime unchanged to the second). So the line is a report, and a ⚠ at
+# worst — an unfixable condition reported as ✗ is how gh-doctor came to exit 1 on
+# every run.
+
+mk_usage_profile() {   # $1 = profile, $2 = cache age in seconds ('-' = no cache)
+    local pd="$FHOME/.clauth/profiles/$1"
+    mkdir -p "$pd"
+    printf '{"claudeAiOauth":{"accessToken":"t","expiresAt":9}}\n' > "$pd/credentials.json"
+    [[ "$2" == "-" ]] && return 0
+    printf '{"five_hour":{"utilization":10.0}}\n' > "$pd/usage_cache.json"
+    # `touch -d @<epoch>` is GNU coreutils, which is what this suite's CI image
+    # and the machine it was written on both have; BSD touch would need -t and a
+    # formatted stamp. Stated because the age is the whole subject of the rows
+    # below — a touch that silently did nothing would leave every cache fresh and
+    # make the stale rows unfailable.
+    touch -d "@$(( $(date +%s) - $2 ))" "$pd/usage_cache.json" \
+        || fatal "touch -d is unavailable; the usage-cache age rows cannot be set up"
+}
+
+new_home s1; write_cred
+mk_usage_profile p1 60
+mk_usage_profile p2 120
+run_doctor
+want_out "fresh caches are a ✓ naming the oldest and whose it is" \
+         "usage caches: oldest 2m ago ('p2')"
+want_out "...and say the threshold they were judged against" \
+         "within the picker's 3600s threshold"
+want_rc  "...and do not fail the doctor" 0
+
+# The whole reason the line exists: a cache past the threshold is a profile the
+# picker has stopped ranking, and nothing else on the machine says so.
+new_home s2; write_cred
+mk_usage_profile p1 60
+mk_usage_profile p2 7200
+run_doctor
+want_out "a cache past the threshold is a ⚠ that names the count" \
+         "1 of 2 past the picker's 3600s threshold"
+want_out "...and says what the picker does about it" "ranks them as 'unknown'"
+want_rc  "...but never a failure — nothing on this machine can refresh it" 0
+
+# Seconds are not milliseconds. _claude_fmt_delta's input is ms, and feeding it
+# seconds renders a two-hour-old cache as "7s ago" — a stale reading reported as
+# a fresh one, by the line whose only job is to say it is stale.
+want_out "the age is rendered from milliseconds, not seconds" "oldest 2h ago"
+
+# An unreadable cache and a stale one are both `unknown` to the picker, but the
+# fixes differ, so they are counted apart.
+new_home s3; write_cred
+mk_usage_profile p1 60
+mk_usage_profile p2 -
+run_doctor
+want_out "a profile with no cache at all is reported separately" \
+         "1 of 2 profiles have no readable usage cache at all"
+want_out "...and named as unknown to the picker too" "also 'unknown' to the picker"
+
+# Said on EVERY run, fresh or stale: it is the standing fact a reader needs in
+# order to act on the line above, and the thing they would otherwise go hunting
+# for a timer to fix. §5.7 of the spec asked for that timer; there is nothing for
+# it to call.
+new_home s4; write_cred
+mk_usage_profile p1 10
+run_doctor
+want_out "the absence of any refresher is stated even when everything is fresh" \
+         "nothing refreshes these on a schedule"
+want_out "...naming why, so nobody looks for a command that does not exist" \
+         "there is no 'clauth refresh'"
+
+# No profiles is a note, not a warning: a machine with no clauth has nothing for
+# the picker to rank and must not carry a permanently amber doctor.
+new_home s5; write_cred
+run_doctor
+want_out "no registered profile is a note" "nothing for the picker to rank"
+no_out   "...and not a usage-cache warning" "usage caches: oldest"
+want_rc  "...and exits 0" 0
+
+# The threshold is a literal in TWO files — zsh/functions/claude.sh must not
+# depend on zsh/zshrc.herdr, because claude-doctor is a full-install command and
+# the picker is the portable herdr layer a modular adopter sources alone. This
+# row is what stops them drifting apart in silence: a picker that ignored a cache
+# after 900 s while the doctor called it fresh until 3600 s would report a
+# ranking that was not happening.
+DOC_DEF="$(grep -oE 'CLAUDE_PICK_CACHE_MAX_AGE:-[0-9]+' "$CLAUDESH" | head -1)"
+PICK_DEF="$(grep -oE 'CLAUDE_PICK_CACHE_MAX_AGE:-[0-9]+' "$DOTFILES/zsh/zshrc.herdr" | head -1)"
+# Both halves are asserted PRESENT first: two empty strings compare equal, so
+# without this the row passes when the knob has been renamed out of either file.
+if [[ -n "$DOC_DEF" && -n "$PICK_DEF" ]]; then
+    ok "both files still carry a CLAUDE_PICK_CACHE_MAX_AGE default to compare"
+else
+    bad "both files still carry a CLAUDE_PICK_CACHE_MAX_AGE default to compare — doctor='$DOC_DEF' picker='$PICK_DEF'"
+fi
+if [[ "$DOC_DEF" == "$PICK_DEF" ]]; then
+    ok "the doctor's staleness default matches the picker's"
+else
+    bad "the doctor's staleness default matches the picker's — doctor='$DOC_DEF' picker='$PICK_DEF'"
+fi
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
