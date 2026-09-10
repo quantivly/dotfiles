@@ -761,7 +761,10 @@ reconcile_all() {
     shopt -s nullglob
     for d in "$ROOT"/*/; do
         profile="$(basename "$d")"
-        [[ -d "$PROFILES_DIR/$profile" ]] || warn "$profile: an account dir with no clauth profile — left alone"
+        [[ -d "$PROFILES_DIR/$profile" ]] || {
+            warn "$profile: an account dir with no clauth profile — left alone"
+            continue
+        }
         seen=1
         reconcile_credential "$profile" "$PROFILES_DIR/$profile" "${d%/}" || rc=1
     done
