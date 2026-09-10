@@ -2294,6 +2294,14 @@ than the rows themselves, because neither reason is visible by reading the row:
 Ask of every new row: **what single change to the code would make this fail?** If the answer is
 "none", it is decoration — and it will look exactly like a passing row until a mutant says otherwise.
 
+**A row that verifies a write HAPPENED is not a row that verifies the write is READABLE.** DO-574's
+round-robin ledger was written with `print -r -- "$p\t$v"`, and `-r` is precisely the flag that
+disables escape expansion — so every line got a literal backslash-t. The reader found no tab, split
+nothing, and discarded every entry. The file was the right size and got a **new inode on every
+write**, so the atomicity row passed throughout; the ledger simply read back empty and round-robin
+degraded to "always the top score" in silence. Assert the round trip — write, read back, compare —
+not the artefacts of writing.
+
 State tables: `scripts/test-hspawn.sh` (269 → 315) and `scripts/test-gh-routing.sh` (199 → 207).
 Every fix is pinned by a mutant that dies (19 mutants, 19 deaths), and every mutation is dry-run for
 applicability first — a mutation that no longer applies reads exactly like a surviving mutant.
