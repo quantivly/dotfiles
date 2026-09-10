@@ -1359,17 +1359,27 @@ want_out "a dot-prefixed dir under profiles/ is classified apart" \
          "under profiles/, not profile director"
 no_out   "...and not listed among the profile dirs missing a credential" \
          "with no credential: .internal-state"
-# ORDER-INDEPENDENT: zsh sorts the glob by the current locale's collation, not by
-# ASCII, so `realprofile` precedes `_underscore` here — an assertion on the joined
-# string would pin the collation rather than the classification.
-want_out "...while a real profile dir with no credential still is" \
-         "no credential: realprofile"
-# NOT `want_out ... "_underscore"`: under the widening mutant that name still
-# appears in the report — in the impossible list instead — so the row could not
-# fail. The plural is what moves: one impossible name reads "directory", two read
-# "directories".
-no_out   "...and an underscore name is never filed as impossible" \
-         "not profile directories"
+# ORDER-INDEPENDENT MEANS PER-LINE, not "anchored to whichever name happens to
+# come first". zsh sorts that glob by the current locale's collation: this box
+# (en_US.UTF-8) yields `realprofile, _underscore`, and CI's C locale yields
+# `_underscore, realprofile`, because `_` is 0x5F and `r` is 0x72. A first cut
+# asserted the substring `no credential: realphrase…` — green here, red on CI,
+# pinning the collation instead of the classification. So the LINE is extracted
+# and each name checked in it independently.
+STRAY_LINE="$(printf '%s' "$OUT" | grep 'with no credential:' || true)"
+if [[ "$STRAY_LINE" == *realprofile* ]]; then
+    ok "...while a real profile dir with no credential still is"
+else
+    bad "...while a real profile dir with no credential still is — line was '$STRAY_LINE'"
+fi
+# NOT `want_out ... "_underscore"` over the whole report: under the widening
+# mutant that name still appears — in the impossible list instead — so such a row
+# could not fail. Scoped to the stray line, it can.
+if [[ "$STRAY_LINE" == *_underscore* ]]; then
+    ok "...and so is one whose name merely starts with an underscore"
+else
+    bad "...and so is one whose name merely starts with an underscore — line was '$STRAY_LINE'"
+fi
 want_out "...and the impossible list names ONLY the dot directory" \
          "not profile directory: .internal-state"
 

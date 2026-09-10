@@ -2150,6 +2150,17 @@ Traps specific to the checker, each of which produced a green tick first:
   dot-prefixed account dir holding a credential. Both globs now carry the `D`
   qualifier, which forces dotfile matching regardless of the option, and a row
   asserts the same directory is seen with GLOB_DOTS **off** and **on**.
+- **"Order-independent" has to mean it, and locale collation differs between this box
+  and CI.** A row asserting two names in one report line was written as the substring
+  `no credential: realprofile` — which does not remove the ordering dependency, it
+  pins the other order. zsh sorts that glob by the current locale's collation:
+  `en_US.UTF-8` here yields `realprofile, _underscore`, and CI's `C` locale yields
+  `_underscore, realprofile`, because `_` is 0x5F and `r` is 0x72. So the row passed
+  locally and failed in CI, which is the "green here, red there" split the hspawn
+  suite already records in the other direction. The fix is to extract the LINE and
+  test each name in it independently; the verification is to run the suite once under
+  `LC_ALL=C`, which reproduces the runner's collation in about the time one CI round
+  trip costs.
 - **zsh's `local NAME` re-declaration display, second recurrence — three lines from
   the comment forbidding it.** `claude-doctor` is one ~950-line function, zsh has no
   block scope, and its top declaration block says so explicitly ("every loop-body
