@@ -638,7 +638,7 @@ already records, met at scale:
   file already records for `verify-tools.sh`: a new external tool in a checker is
   a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (95 checks, in CI as
+State table: `scripts/test-workflow-apt.sh` (101 checks, in CI as
 `workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
 builds its own fixture tree and is handed an explicit root; only the last rows
 read this repository, to assert the shipped tree passes. Most rows assert what it
@@ -739,6 +739,27 @@ which is what decided the rewrite rather than a fourth round of patching. The
 figures above are for the awk implementation; the parser rewrite came after
 them, so no re-run has yet measured what shipped — recorded as unmeasured rather
 than assumed to be better.
+
+**The parser rewrite then produced a defect of its own, and the row written for
+it was green BECAUSE of it.** `_heredoc_marker` read the delimiter from the
+already-quote-stripped line, so `cat <<'EOF' > note.txt` — the *more* common CI
+spelling — stripped to `cat << > note.txt`, whose "delimiter" was `>`. Nothing
+later matched it, the heredoc never closed, and **every remaining line of that
+run script was dropped**: `all 6 checks passed` over a complete restoration of
+the outage. `mask=$(( 1 << 3 ))` did the same on `3`. The single heredoc row
+asserted rc=0 and passed *in virtue of the defect* — it could not distinguish
+"bodies are data" from "everything after is silently gone", which is why a
+mutant making the end-marker never match survived it.
+
+Three things fixed it and are worth stating as rules: read the introducer from
+the **raw** line, inside the scan where quote state is known, so a quoted
+delimiter works and a `<<` inside a string is not one; require a delimiter to
+**look** like a delimiter (`[A-Za-z_]\w*`), which is what stops arithmetic
+opening one; and treat an **unterminated** heredoc as exit 2 rather than
+reporting the lines before it as the whole script. The discriminating row is a
+real gate placed *after* the `EOF`, asserting that scanning **resumes** — the
+row that existed asserted only that the body was ignored, which the defect also
+satisfied.
 
 Three lessons from that round that generalise past this guard:
 

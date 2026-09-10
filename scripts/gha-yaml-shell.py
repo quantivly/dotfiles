@@ -38,7 +38,12 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import sys
+
+
+class Unterminated(Exception):
+    """A run script whose heredoc never closes."""
 
 try:
     import yaml
@@ -82,11 +87,17 @@ def strip_shell(text: str) -> list[tuple[int, str]]:
             continue
 
         code_chars: list[str] = []
+        opens: str | None = None
         i, n = 0, len(line)
         while i < n:
             c = line[i]
             if not sq and not dq and c == "#" and (i == 0 or line[i - 1] in " \t"):
                 break
+            if not sq and not dq and c == "<" and line.startswith("<<", i):
+                # Checked here, outside quotes, so `echo "a << b"` cannot open
+                # one -- and read off the raw line, so a quoted delimiter works.
+                if opens is None:
+                    opens = _heredoc_at(line, i)
             if not dq and c == "'":
                 sq = not sq
                 i += 1
@@ -113,28 +124,44 @@ def strip_shell(text: str) -> list[tuple[int, str]]:
 
         # A heredoc introducer opens on the NEXT line; the introducer line is
         # still code (it may carry a command before the `<<`).
-        marker = _heredoc_marker(code)
-        if marker is not None:
-            heredoc = marker
+        if opens is not None:
+            heredoc = opens
         out.append((pending_off, code))
     if pending_line is not None:
         out.append((pending_off, pending_line))
+    if heredoc is not None:
+        # An unterminated heredoc is a real bug in the script, and reporting the
+        # file as containing only the lines before it is the
+        # empty-answer-is-agreement shape: everything after would silently stop
+        # being checked. Refuse instead.
+        raise Unterminated(heredoc)
     return out
 
 
-def _heredoc_marker(code: str) -> str | None:
-    """The delimiter word of a heredoc introducer on this line, or None."""
-    idx = code.rfind("<<")
-    if idx < 0:
+HEREDOC_DELIM = re.compile(r"""<<-?\s*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))""")
+
+
+def _heredoc_at(raw: str, i: int) -> str | None:
+    r"""The heredoc delimiter introduced at raw[i:], or None.
+
+    Read from the RAW line, not the stripped one. Reading it after
+    quote-stripping was a live defect: `cat <<'EOF' > note.txt` stripped to
+    `cat << > note.txt`, whose "delimiter" was `>`; nothing later equalled `>`,
+    so the heredoc never closed and EVERY remaining line of the run script was
+    dropped -- `all 6 checks passed` over a complete restoration of the outage.
+    `<<'EOF'` is the more common CI spelling, so the documented
+    heredoc-bodies-are-data property held only for the unquoted form.
+
+    The delimiter must LOOK like one (`[A-Za-z_]\w*`). That is what stops
+    `mask=$(( 1 << 3 ))` opening a heredoc on `3` -- the same swallow, from
+    ordinary arithmetic.
+    """
+    if raw.startswith("<<<", i):  # here-string, not a heredoc
         return None
-    rest = code[idx + 2 :]
-    if rest.startswith("<"):  # `<<<` is a here-STRING, not a heredoc
+    m = HEREDOC_DELIM.match(raw, i)
+    if not m:
         return None
-    rest = rest.lstrip("-").strip()
-    if not rest:
-        return None
-    word = rest.split()[0].strip("'\"")
-    return word or None
+    return m.group(1) or m.group(2) or m.group(3)
 
 
 def walk(node, path, runs, interps):
@@ -182,7 +209,16 @@ def main() -> int:
 
     if mode == "--shell":
         for start, scalar in runs:
-            for offset, code in strip_shell(scalar or ""):
+            try:
+                stripped = strip_shell(scalar or "")
+            except Unterminated as exc:
+                sys.stderr.write(
+                    f"gha-yaml-shell: {path}: a run script's heredoc "
+                    f"({exc.args[0]!r}) never closes; refusing to report the "
+                    "lines before it as the whole script.\n"
+                )
+                return 2
+            for offset, code in stripped:
                 if code.strip():
                     print(f"{start + offset + 1}\t{code}")
     else:

@@ -698,6 +698,55 @@ W
 out=$("$CHECKER" "$d" 2>&1); rc=$?
 check "heredoc prose and multi-line strings are data, not commands" 0 "$rc"
 
+# THIS row is what makes the one above mean anything. It asserted rc=0 and
+# passed BECAUSE OF a defect: reading the delimiter after quote-stripping made
+# `cat <<'EOF' > note.txt` yield `>`, which nothing ever matched, so the heredoc
+# never closed and every remaining line of the scalar was dropped. The row could
+# not tell "bodies are data" from "everything after is silently gone" -- and a
+# mutant making the end-marker never match therefore survived. A real gate AFTER
+# the EOF is the discriminator: it asserts scanning RESUMES.
+d=$(mkfix heredoc_resumes); good_action "$d"; good_workflow "$d"
+cat >> "$d/.github/workflows/ci.yml" <<'W'
+      - run: |
+          cat <<'EOF' > note.txt
+          just a note
+          EOF
+          sudo apt-get update && sudo apt-get install -y zsh
+W
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "scanning RESUMES after a quoted-delimiter heredoc" 1 "$rc"
+contains "  and the gate after it is named" "$out" "runs 'apt-get update' directly"
+
+# `<<` in ordinary arithmetic must not open a heredoc either: the delimiter has
+# to LOOK like one. `mask=$(( 1 << 3 ))` swallowed the rest of the action.
+d=$(mkfix heredoc_arith); good_workflow "$d"
+# shellcheck disable=SC2016  # literal fixture text, not an expansion
+act2 "$d" "      run: |\n        sudo apt-get install -y \$PACKAGES\n        mask=\$(( 1 << 3 ))\n        sudo apt-get update"
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "'<<' in arithmetic does not open a heredoc" 1 "$rc"
+contains "  and the refresh after it is seen" "$out" "can fail its step"
+
+# A `<<` inside a quoted string is not an introducer either.
+d=$(mkfix heredoc_in_quotes); good_action "$d"; good_workflow "$d"
+cat >> "$d/.github/workflows/ci.yml" <<'W'
+      - run: |
+          echo "a << b"
+          sudo apt-get update && sudo apt-get install -y zsh
+W
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "'<<' inside a quoted string does not open a heredoc" 1 "$rc"
+
+# An unterminated heredoc is a real bug in the script, and reporting only the
+# lines before it would silently stop checking everything after.
+d=$(mkfix heredoc_unterminated); good_action "$d"; good_workflow "$d"
+cat >> "$d/.github/workflows/ci.yml" <<'W'
+      - run: |
+          cat <<'EOF' > note.txt
+          never closed
+W
+out=$("$CHECKER" "$d" 2>&1); rc=$?
+check "an unterminated heredoc exits 2, not 0" 2 "$rc"
+
 # ...and carrying quote state across lines must not become a hiding place: a
 # real refresh AFTER a balanced string earlier in the same block is still code.
 d=$(mkfix quote_then_gate); good_action "$d"; good_workflow "$d"
@@ -777,7 +826,7 @@ contains "  over its real workflow set" "$out" "scanning"
 # number lives here, in the state table, deliberately: changing it is a visible
 # edit to the suite that a reviewer reads as "this expects fewer checks now,
 # why", where a literal beside the code gets updated by whoever removes a check.
-EXPECTED_TOTAL=95
+EXPECTED_TOTAL=101
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then
