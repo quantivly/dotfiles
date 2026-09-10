@@ -1211,6 +1211,15 @@ if [[ -e "$FHOME/.clauth/profiles/orphan" ]]; then
 else
     ok "...specifically, no store appears at the orphan's name"
 fi
+# AND IT IS REPORTED ONCE. Those two rows can no longer see the guard at all: the
+# lock gate above means an orphan creates nothing whether or not reconcile_all
+# skips it, so a mutant deleting the `continue` survived them — the fix made the
+# guard redundant for the outcome the guard was protecting. What the guard still
+# changes is whether the orphan ALSO falls through to reconcile_credential and
+# gets a second, contradictory line about a store credential it was just said to
+# have no profile for.
+no_out "...and reported ONCE, not also as a store missing its credential" \
+       "orphan: no credential in the clauth store"
 
 # A compat SYMLINK account dir is the shape a rename actually leaves, and it is the
 # one the migration tripped over — same assertion, different input.
