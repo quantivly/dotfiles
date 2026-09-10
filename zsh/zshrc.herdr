@@ -745,6 +745,116 @@ _claude_pick_class() {
   print -r -- "eligible"
 }
 
+# --- round-robin ledger -------------------------------------------------------
+#
+# Scores separate accounts that differ MEANINGFULLY. Within CLAUDE_PICK_RR_BAND
+# the difference is noise, and picking the same account every time would pile
+# every session onto it — the concentration this whole layer exists to undo. So
+# inside the band the tie breaks by LEAST RECENTLY PICKED, and the ledger is what
+# remembers that.
+#
+# One central file, not one per profile: the decision is "which of these", and a
+# single lock around read -> decide -> write closes the race two shells starting
+# in the same second would otherwise hit. A deterministic sort cannot: both would
+# read the same "least recent" and both would choose it.
+
+_claude_pick_ledger_file() { print -r -- "$(_claude_account_root)/.pick-ledger"; }
+_claude_pick_ledger_lock() { print -r -- "$(_claude_account_root)/.pick-ledger.lock"; }
+
+# profile -> epoch of its last pick, into the assoc _CLAUDE_LEDGER.
+_claude_pick_ledger_read() {
+  local f line p t
+  typeset -gA _CLAUDE_LEDGER
+  _CLAUDE_LEDGER=()
+  f="$(_claude_pick_ledger_file)"
+  [[ -r "$f" ]] || return 0
+  while IFS=$'\t' read -r p t; do
+    [[ -n "$p" && -n "$t" ]] || continue
+    _CLAUDE_LEDGER[$p]="$t"
+  done < "$f"
+  return 0
+}
+
+# Record a pick. Temp-and-rename IN THE SAME DIRECTORY, so a reader either sees
+# the old file or the new one and never a half-written one — a plain `>` would
+# truncate the ledger for as long as the write takes, and a concurrent reader
+# would see every account as never-picked and pile onto one.
+_claude_pick_ledger_write() {
+  local name="$1" f tmp p
+  f="$(_claude_pick_ledger_file)"
+  [[ -d "${f:h}" ]] || command mkdir -p "${f:h}" 2>/dev/null || return 1
+  _claude_pick_ledger_read
+  zmodload zsh/datetime 2>/dev/null
+  _CLAUDE_LEDGER[$name]="$EPOCHSECONDS"
+  tmp="${f:h}/.${f:t}.$$"
+  {
+    # `$'\t'` spliced in, NOT "\t" inside the string: `print -r` is precisely the
+    # flag that stops escape expansion, so "$p\t$v" writes a literal backslash-t.
+    # The reader then finds no tab, splits nothing, and every entry is discarded
+    # — the ledger looks written (right size, new inode) and reads back empty, so
+    # round-robin silently degrades to "always the top score".
+    for p in "${(@k)_CLAUDE_LEDGER}"; do
+      print -r -- "$p"$'\t'"${_CLAUDE_LEDGER[$p]}"
+    done
+  } > "$tmp" 2>/dev/null || { command rm -f -- "$tmp"; return 1 }
+  command mv -f -- "$tmp" "$f" 2>/dev/null || { command rm -f -- "$tmp"; return 1 }
+  return 0
+}
+
+# Run a snippet holding the ledger lock, or WITHOUT it after a bounded wait.
+#
+# A stuck lock must never block a launch: the worst case of proceeding unlocked
+# is two sessions choosing the same account in the same second, which is the
+# ordinary pre-ledger behaviour. The worst case of blocking is that `claude`
+# hangs. So the timeout is short, the fallback is to proceed, and it SAYS so —
+# an unlocked pick that stayed silent would make the ledger look reliable when
+# it is not.
+_claude_pick_with_ledger_lock() {
+  local fd lock
+  lock="$(_claude_pick_ledger_lock)"
+  [[ -d "${lock:h}" ]] || command mkdir -p "${lock:h}" 2>/dev/null
+  zmodload zsh/system 2>/dev/null || { "$@"; return $?; }
+  if zsystem flock -t "${CLAUDE_PICK_LOCK_WAIT:-2}" -f fd "$lock" 2>/dev/null; then
+    "$@"
+    local rc=$?
+    zsystem flock -u "$fd" 2>/dev/null
+    return $rc
+  fi
+  _claude_pick_warnings+=("could not take the pick ledger lock within ${CLAUDE_PICK_LOCK_WAIT:-2}s — proceeding unlocked, so two launches in the same second may choose the same account")
+  "$@"
+}
+
+# Choose from scored candidates. Input: the array _claude_pick_cands, each entry
+# "<score>\t<profile>". Sets REPLY.
+#
+# Best score wins, EXCEPT that everything within RR_BAND of it is treated as
+# tied, and among the tied the least recently picked wins — then name, so the
+# result is deterministic when the ledger says nothing.
+_claude_pick_choose() {
+  local band=${CLAUDE_PICK_RR_BAND:-800}
+  local e s n best="" bestscore="" cand_t cand_n pick="" pickt=""
+  (( ${#_claude_pick_cands} )) || return 1
+
+  for e in "${_claude_pick_cands[@]}"; do
+    s="${e%%$'\t'*}"
+    if [[ -z "$bestscore" ]] || (( s > bestscore )); then bestscore="$s"; fi
+  done
+
+  _claude_pick_ledger_read
+  # Sorted by name first, so "then name" falls out of iteration order and the
+  # answer is stable when no ledger entry exists for any tied candidate.
+  for e in "${(@o)_claude_pick_cands}"; do
+    s="${e%%$'\t'*}"; n="${e#*$'\t'}"
+    (( bestscore - s <= band )) || continue
+    cand_t="${_CLAUDE_LEDGER[$n]:-0}"
+    if [[ -z "$pick" ]] || (( cand_t < pickt )); then
+      pick="$n"; pickt="$cand_t"
+    fi
+  done
+  REPLY="$pick"
+  [[ -n "$pick" ]]
+}
+
 # clauth's own active profile, when it has a credential and is not excluded.
 # This is the last-resort ACCOUNT: it keeps a session isolated when every pool
 # member is unusable, instead of dropping it onto the shared global file.

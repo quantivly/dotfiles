@@ -310,5 +310,95 @@ new_home o5
 check "no holders anywhere is 0, not an error"  "$(holders a1)" "0"
 
 #-----------------------------------------------------------------------------
+echo
+echo "=== round-robin: within the band, least recently picked wins ==="
+#
+# Scores separate accounts that differ MEANINGFULLY. Inside RR_BAND the
+# difference is noise, and always taking the top would pile every session onto
+# one account — the concentration this layer exists to undo.
+
+LED="$TMPROOT/led"
+led_run() { mkdir -p "$LED"; zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID
+      export HOME='$FHOME'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$LED'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      local -a _claude_pick_warnings=()
+      $1" 2>/dev/null; }
+
+new_home r1; rm -rf "$LED"
+check "with an empty ledger the top score wins" \
+      "$(led_run '_claude_pick_cands=( $'"'"'9000\ta1'"'"' $'"'"'5000\tb2'"'"' ); _claude_pick_choose && print -r -- $REPLY')" "a1"
+
+# Inside the band the two are tied, so the ledger decides.
+check "inside RR_BAND the least recently picked wins" \
+      "$(led_run '_claude_pick_ledger_write a1
+                  _claude_pick_cands=( $'"'"'9000\ta1'"'"' $'"'"'8500\tb2'"'"' )
+                  _claude_pick_choose && print -r -- $REPLY')" "b2"
+
+# The row above cannot tell "consulted the ledger" from "took whatever sorted
+# first": entries sort as "<score>\t<name>" strings, so the lower-scored b2 leads
+# either way, and a mutant that ignores the ledger entirely survived it. With
+# EQUAL scores the sort falls back to the name, so the two answers diverge — sort
+# order says a1, the ledger says b2.
+rm -rf "$LED"
+check "...and that is the ledger deciding, not the sort order" \
+      "$(led_run '_claude_pick_ledger_write a1
+                  _claude_pick_cands=( $'"'"'9000\ta1'"'"' $'"'"'9000\tb2'"'"' )
+                  _claude_pick_choose && print -r -- $REPLY')" "b2"
+
+check "outside RR_BAND the score wins regardless of the ledger" \
+      "$(led_run '_claude_pick_ledger_write a1
+                  _claude_pick_cands=( $'"'"'9000\ta1'"'"' $'"'"'5000\tb2'"'"' )
+                  _claude_pick_choose && print -r -- $REPLY')" "a1"
+
+# The ledger PERSISTS across led_run calls, and the two rows above wrote `a1`
+# into it — so this row must start from an empty one or it is really testing
+# "least recently picked" again. It passed before the ledger was readable at all,
+# when every entry was silently discarded and everything looked never-picked.
+rm -rf "$LED"
+check "with no ledger entries a tie breaks by name, deterministically" \
+      "$(led_run '_claude_pick_cands=( $'"'"'9000\tb2'"'"' $'"'"'9000\ta1'"'"' ); _claude_pick_choose && print -r -- $REPLY')" "a1"
+
+# The ledger is a file, and a concurrent reader must never see it half-written.
+new_home r2; rm -rf "$LED"
+check "the ledger records the pick" \
+      "$(led_run '_claude_pick_ledger_write a1; _claude_pick_ledger_read; print -r -- ${+_CLAUDE_LEDGER[a1]}')" "1"
+check "a second pick does not lose the first" \
+      "$(led_run '_claude_pick_ledger_write a1; _claude_pick_ledger_write b2
+                  _claude_pick_ledger_read; print -r -- ${#_CLAUDE_LEDGER}')" "2"
+check "the replace is atomic — the inode changes, it is not truncated in place" \
+      "$(led_run '_claude_pick_ledger_write a1
+                  i1=$(zmodload -F zsh/stat b:zstat; zstat +inode $(_claude_pick_ledger_file))
+                  _claude_pick_ledger_write b2
+                  i2=$(zmodload -F zsh/stat b:zstat; zstat +inode $(_claude_pick_ledger_file))
+                  [[ $i1 != $i2 ]] && print changed || print same')" "changed"
+
+# A stuck lock must never block a launch: the worst case of proceeding unlocked
+# is the ordinary pre-ledger behaviour, while the worst case of blocking is that
+# `claude` hangs. The row bounds itself, because the failure mode is a hang.
+new_home r3; rm -rf "$LED"; mkdir -p "$LED"
+check "a held lock does not block the pick past the timeout, and warns" \
+      "$(timeout 20 zsh -f -c "
+           export HOME='$FHOME'
+           CLAUDE_ACCOUNT_DIRS_ROOT='$LED'
+           CLAUDE_TENANTS_FILE=/nonexistent
+           source '$HERDRRC' >/dev/null 2>&1
+           zmodload zsh/system
+           # Hold the lock in a background shell that SIGNALS once it has it —
+           # a sleep-based holder is a race, and it passes with the locking
+           # removed exactly when the machine is loaded, which is when a
+           # mutation sweep runs.
+           ( zsystem flock -f hfd '$LED/.pick-ledger.lock'
+             print ready > '$LED/held'
+             sleep 8 ) &
+           for i in {1..100}; do [[ -f '$LED/held' ]] && break; sleep 0.1; done
+           local -a _claude_pick_warnings=()
+           CLAUDE_PICK_LOCK_WAIT=1 _claude_pick_with_ledger_lock _claude_pick_ledger_write a1
+           (( \${#_claude_pick_warnings} )) && print -r -- warned || print -r -- silent
+         " </dev/zero 2>/dev/null)" "warned"
+
+#-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
