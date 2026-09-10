@@ -30,7 +30,14 @@
 # human's interactive shell.
 #==============================================================================
 
-if (( ! $+functions[build-limits] )); then
+# CLAUDE_PICK_SOURCING is set by scripts/claude-pick, which sources this file to
+# reach the picker and wants nothing else from it. Sourcing a SECOND module out
+# of a CLI is exactly the top-level side effect the marker exists to keep out —
+# and this file has only two such statements, this one and the tenant-file source
+# below (which is data the picker needs, so it stays). A state-table row asserts
+# that sourcing under the marker emits nothing on either stream and defines no
+# build-limits, so a future side effect trips a row rather than the CLI.
+if (( ! $+functions[build-limits] )) && [[ -z "${CLAUDE_PICK_SOURCING:-}" ]]; then
   _herdr_layer_dir="${${(%):-%x}:A:h}"
   [[ -f "$_herdr_layer_dir/zshrc.buildlimits" ]] && source "$_herdr_layer_dir/zshrc.buildlimits"
   unset _herdr_layer_dir
@@ -472,28 +479,15 @@ _claude_profile_excluded() {
   return 1
 }
 
-# The worse of a profile's 5h and 7d utilization, as an integer 0-100, from the
-# usage cache clauth already maintains. Prints nothing when it cannot be read.
-#
-# The 7d window counts as much as the 5h one: an account at 3% of five hours and
-# 96% of its week has almost nothing left to give, and ranking on 5h alone would
-# send every new session straight to it.
-_claude_profile_load() {
-  local f="$HOME/.clauth/profiles/$1/usage_cache.json"
-  [[ -r "$f" ]] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  # -e so the exit status decides, never the emptiness of the output.
-  # weekly_scoped (the per-model weeks, e.g. "7d fable") counts as well. Measured
-  # 2026-09-08: `personal` read 5h 6% / 7d 80% while its "7d fable" window was at
-  # 100% — an account with nothing left for that model would otherwise have
-  # ranked as comparatively idle. Same "emptiness reads as headroom" class as the
-  # quarantine exclusion above.
-  jq -e -r '[(.five_hour.utilization // empty),
-             (.seven_day.utilization // empty),
-             ((.weekly_scoped // []) | .[]? | .utilization // empty)]
-            | map(select(type == "number")) | select(length > 0) | max | floor' \
-      "$f" 2>/dev/null || return 1
-}
+# _claude_profile_load WAS HERE, and it is gone. It answered "the worse of this
+# profile's 5h and 7d utilization" — the whole of the pre-DO-574 ranking — and
+# _claude_pick_for_dir asks _claude_profile_metrics for the two figures
+# separately instead, because the score needs them apart (weekly headroom is a
+# multiplier, not a co-equal maximum) and because "the worse of the two" cannot
+# express a window that is about to reset. Nothing called it after the picker was
+# rewritten, and a dead function beside a live one that reads the same file is an
+# invitation to reintroduce the old ranking by accident. `CLAUDE_ACCOUNT_CACHE_MAX_AGE`
+# went with it; the threshold is `CLAUDE_PICK_CACHE_MAX_AGE`.
 
 # Seconds since a profile's usage cache was written, or nothing.
 #
@@ -509,6 +503,71 @@ _claude_profile_cache_age() {
   print -r -- $(( EPOCHSECONDS - mtime ))
 }
 
+# Seconds from now until an RFC 3339 instant, into _CLAUDE_TS_DELTA. `unknown`
+# for an absent or unparseable one, and NEVER a number — reading a missing reset
+# as 0 puts a fresh window at maximum "about to reset" urgency, the precise
+# opposite of the truth.
+#
+# `strftime -r -s VAR`, not `$(strftime -r ...)`: the -s form assigns without a
+# fork, and this runs twice per pool member on every `claude` launch.
+#
+# One parser for both the 5h and the weekly instant. Two copies would be two
+# places for the trimming, the zone and the parse-failure guard to be got wrong
+# independently, and the guard is the whole function: without it a failed parse
+# leaves a stale value that reads as a measurement.
+#
+# THE ZONE IS NOT DECORATION, and reading it as one cost three hours. `strftime
+# -r` goes through strptime and then mktime, and **mktime interprets a
+# broken-down time in LOCAL time and ignores any offset strptime parsed** — so
+# simply cutting `2099-01-01T00:00:00.000000+00:00` at its first `.` and parsing
+# the rest yields an instant wrong by this machine's own UTC offset. Measured
+# 2026-09-10 in IST (UTC+2): that input parsed to 4070901600, two hours before
+# the 4070908800 it names. The cost is not cosmetic — r5 drives the
+# use-it-or-lose-it bonus over an 18000 s window, so a 3 h summer offset is 60%
+# of the window, and it shifts every reset time the §5.4 messages print, which is
+# the number a reader uses to decide how long to wait. `local TZ=UTC` is scoped
+# to this function (checked: TZ is unset again on return), and the zone the
+# string carries is applied arithmetically afterwards rather than through
+# strptime's `%z`, which mktime would discard exactly as it discards the rest.
+#
+# A string with NO zone at all is read as UTC and said so here, because the only
+# other reading imports the reader's own timezone into a number that is then
+# compared against other machines' — clauth has always written an offset.
+_claude_ts_delta() {
+  local s="${1:-}" body="" zone="" secs off=0 TZ=UTC
+  _CLAUDE_TS_DELTA=unknown
+  [[ -n "$s" ]] || return 1
+  zmodload zsh/datetime 2>/dev/null || return 1
+
+  body="$s"
+  case "$s" in
+    *[Zz])
+      # DEFENCE IN DEPTH, AND UNPINNABLE — written down because a mutant that
+      # can never die reads as coverage. Measured here: glibc's strptime IGNORES
+      # trailing input, so leaving the `Z` on the string parses identically and a
+      # mutant removing this arm is behaviourally identical. It stays because the
+      # function's contract is "split the instant from its zone, then apply the
+      # zone", and an implementation that only works because strptime is lax is
+      # one strict strptime away from returning `unknown` for every UTC instant.
+      body="${s%?}" ;;
+    *[+-]<->:<->)
+      zone="${s: -6}"; body="${s%??????}" ;;
+    *[0-9][+-]<->)
+      zone="${s: -5}"; body="${s%?????}" ;;
+  esac
+  if [[ -n "$zone" ]]; then
+    # ±hh:mm or ±hhmm. Seconds EAST of UTC, so it is SUBTRACTED to get UTC.
+    local zh="${${zone:1}%%:*}" zm="${${zone:1}##*:}"
+    [[ "$zone" == ?<->:<-> ]] || zm="${${zone:1}: -2}"
+    off=$(( 10#$zh * 3600 + 10#$zm * 60 ))
+    [[ "${zone:0:1}" == - ]] && off=$(( - off ))
+  fi
+  strftime -r -s secs '%Y-%m-%dT%H:%M:%S' "${body%%.*}" 2>/dev/null || return 1
+  [[ -n "$secs" ]] || return 1
+  _CLAUDE_TS_DELTA=$(( secs - off - EPOCHSECONDS ))
+  return 0
+}
+
 # One profile's usage numbers. Every field is either an integer or the literal
 # string `unknown` — there is no third answer, and no field silently becomes 0.
 #
@@ -516,6 +575,7 @@ _claude_profile_cache_age() {
 # Sets:  _CPM_U5   5h utilization, 0-100
 #        _CPM_R5   seconds until the 5h window resets (negative = already rolled)
 #        _CPM_UW   worst of seven_day and every weekly_scoped window
+#        _CPM_RW   seconds until the AGGREGATE weekly window resets
 #        _CPM_AGE  seconds since the cache was written
 #        _CPM_TIER plan tier, informational only — NEVER a ranking input
 #
@@ -525,9 +585,16 @@ _claude_profile_cache_age() {
 # that has not started yet. Reading a missing reset as 0 would put every fresh
 # window at maximum "about to reset" urgency, which is the precise opposite of
 # the truth, and would hand it the largest use-it-or-lose-it bonus in the pool.
+#
+# _CPM_RW is the SEVEN_DAY window's own reset, and it is labelled that way rather
+# than as "the reset of the window uW names": uW may come from a per-model
+# weekly_scoped window, each of which carries its own instant, so claiming one
+# reset for the worst of them would be an invented answer. The aggregate week is
+# what clauth's own status line reports, and it is the one this publishes.
 _claude_profile_metrics() {
-  local f="$HOME/.clauth/profiles/$1/usage_cache.json" line u5 rs uw tier secs
-  _CPM_U5=unknown; _CPM_R5=unknown; _CPM_UW=unknown
+  local f="$HOME/.clauth/profiles/$1/usage_cache.json" line u5 rs uw rws tier
+  local _CLAUDE_TS_DELTA
+  _CPM_U5=unknown; _CPM_R5=unknown; _CPM_UW=unknown; _CPM_RW=unknown
   _CPM_AGE=unknown; _CPM_TIER=unknown
   [[ -r "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
@@ -557,6 +624,7 @@ _claude_profile_metrics() {
            ((.weekly_scoped // []) | .[]? | .utilization // empty) ]
            | map(select(type == "number"))
            | if length > 0 then (max | floor) else null end),
+        (.seven_day.resets_at // null),
         (.plan.tier // null
            | if type == "object" then (keys | .[0])
              elif . == null then null
@@ -573,19 +641,15 @@ _claude_profile_metrics() {
   # preserves empty columns.
   local -a _cpm
   _cpm=( "${(@ps:\t:)line}" )
-  u5="${_cpm[1]}"; rs="${_cpm[2]}"; uw="${_cpm[3]}"; tier="${_cpm[4]}"
+  u5="${_cpm[1]}"; rs="${_cpm[2]}"; uw="${_cpm[3]}"; rws="${_cpm[4]}"; tier="${_cpm[5]}"
   [[ -n "$u5"   ]] && _CPM_U5="$u5"
   [[ -n "$uw"   ]] && _CPM_UW="$uw"
   [[ -n "$tier" ]] && _CPM_TIER="$tier"
 
-  # RFC 3339 with microseconds. strftime -r parses to the second, so the
-  # fractional part is cut first. A parse failure leaves `unknown` — the one
-  # thing it must never leave is a number.
-  if [[ -n "$rs" ]]; then
-    if secs="$(strftime -r '%Y-%m-%dT%H:%M:%S' "${rs%%.*}" 2>/dev/null)" && [[ -n "$secs" ]]; then
-      _CPM_R5=$(( secs - EPOCHSECONDS ))
-    fi
-  fi
+  # Both instants through the one parser above, which leaves `unknown` on any
+  # failure. A parse failure must never leave a number.
+  _claude_ts_delta "$rs"  && _CPM_R5="$_CLAUDE_TS_DELTA"
+  _claude_ts_delta "$rws" && _CPM_RW="$_CLAUDE_TS_DELTA"
   _CPM_AGE="$(_claude_profile_cache_age "$1")" || _CPM_AGE=unknown
   return 0
 }
@@ -813,6 +877,17 @@ _claude_pick_with_ledger_lock() {
   local fd lock
   lock="$(_claude_pick_ledger_lock)"
   [[ -d "${lock:h}" ]] || command mkdir -p "${lock:h}" 2>/dev/null
+  # `zsystem flock` opens the file WITHOUT O_CREAT, so a lock file that does not
+  # exist yet is not an unlocked lock — it is an open failure
+  # ("failed to open ...: no such file or directory"), which lands in the
+  # proceed-unlocked fallback below. And since nothing else ever creates that
+  # path, it lands there FOREVER: measured 2026-09-10, every pick on a fresh
+  # machine warned "could not take the pick ledger lock" and serialised nothing.
+  # The row that covered this asserted the WARNING, which the broken state
+  # produces too, so it passed throughout — and its own background holder failed
+  # to open the same missing file, so nothing was ever actually held.
+  # `: >>` creates without truncating, so it cannot clear a lock in use.
+  [[ -e "$lock" ]] || : >>"$lock" 2>/dev/null
   zmodload zsh/system 2>/dev/null || { "$@"; return $?; }
   if zsystem flock -t "${CLAUDE_PICK_LOCK_WAIT:-2}" -f fd "$lock" 2>/dev/null; then
     "$@"
@@ -833,6 +908,7 @@ _claude_pick_with_ledger_lock() {
 _claude_pick_choose() {
   local band=${CLAUDE_PICK_RR_BAND:-800}
   local e s n best="" bestscore="" cand_t cand_n pick="" pickt=""
+  local -a byname
   (( ${#_claude_pick_cands} )) || return 1
 
   for e in "${_claude_pick_cands[@]}"; do
@@ -841,10 +917,19 @@ _claude_pick_choose() {
   done
 
   _claude_pick_ledger_read
-  # Sorted by name first, so "then name" falls out of iteration order and the
-  # answer is stable when no ledger entry exists for any tied candidate.
-  for e in "${(@o)_claude_pick_cands}"; do
-    s="${e%%$'\t'*}"; n="${e#*$'\t'}"
+  # "Then name" has to be built, not inherited from the input's own sort. The
+  # entries are "<score>\t<name>" strings, so `${(o)}` over them sorts by the
+  # SCORE TEXT: with an empty ledger every candidate's time is 0, `<` is never
+  # true, and the first in iteration order wins — which inside the band made the
+  # LOWEST-scoring member win (measured: 9000/a1 against 8500/b2 chose b2 with no
+  # ledger at all), and made a negative score sort ahead of every positive one.
+  # Flipping the fields for the sort alone makes the documented rule the real one
+  # and leaves the input format the rows are written against untouched.
+  for e in "${_claude_pick_cands[@]}"; do
+    byname+=( "${e#*$'\t'}"$'\t'"${e%%$'\t'*}" )
+  done
+  for e in "${(@o)byname}"; do
+    n="${e%%$'\t'*}"; s="${e#*$'\t'}"
     (( bestscore - s <= band )) || continue
     cand_t="${_CLAUDE_LEDGER[$n]:-0}"
     if [[ -z "$pick" ]] || (( cand_t < pickt )); then
@@ -918,10 +1003,17 @@ _claude_machine_load() {
 
 # Append machine warnings to _claude_pick_warnings, and report whether a MAX knob
 # was exceeded. Returns 0 normally, 3 when a refusal is warranted.
+#
+# It PUBLISHES _CML_LOAD1/_CML_NCPU/_CML_SWAPPCT rather than localising them, so
+# `--explain` and the JSON can report the numbers a refusal was decided on
+# without reading /proc a second time. One writer — _claude_machine_load — so
+# there is still exactly one answer to "what is this machine doing"; a second
+# read could legitimately differ from the one that decided, and then the report
+# would not be about the decision. A state-table row asserts they survive.
 _claude_pick_backpressure() {
   local load_warn=${CLAUDE_PICK_LOAD_WARN:-150} swap_warn=${CLAUDE_PICK_SWAP_WARN:-60}
   local load_max=${CLAUDE_PICK_LOAD_MAX:-0} swap_max=${CLAUDE_PICK_SWAP_MAX:-0}
-  local _CML_LOAD1 _CML_NCPU _CML_SWAPPCT pct=unknown rc=0
+  local pct=unknown rc=0
   _claude_machine_load
 
   if [[ "$_CML_LOAD1" != unknown && "$_CML_NCPU" != unknown ]] && (( _CML_NCPU > 0 )); then
@@ -994,155 +1086,445 @@ _claude_fallback_profile() {
   print -r -- "$ap"
 }
 
-# The pool member with the most headroom. `clauth which` cannot answer this — it
-# reads $CLAUDE_CONFIG_DIR and so returns the PARENT session's profile inside an
-# isolated pane (measured 2026-09-06: quantivly-3 in an isolated shell, `unknown`
-# in a bare one), which would herd every spawn into its parent's credential group.
+# --- the one code path --------------------------------------------------------
 #
-# Ranked by utilization, then by live holders, then alphabetically — so the
-# choice is deterministic and two shells starting together do not both pile onto
-# the same account.
+# WHICH POOL does a tenant name, and what may it borrow?
 #
-# A STALE cache is its own state, never silent agreement. A quarantined account
-# stops being polled, so its numbers freeze at whatever they were: trusting them
-# is how the picker would walk straight back onto a dead account.
-_claude_pick_profile() {
-  zmodload -F zsh/stat b:zstat 2>/dev/null
-  zmodload zsh/datetime 2>/dev/null
-  local p name load age why pass
-  local -a candidates try
-  local max_age=${CLAUDE_ACCOUNT_CACHE_MAX_AGE:-3600}
-
-  # WHICH POOL. With a tenant, that tenant's; without one — no tenant table, or a
-  # caller that resolved no directory — the flat CLAUDE_ACCOUNT_POOL, whose
-  # meaning is unchanged. That fallback is what a modular adopter runs on, and a
-  # row asserts the output is byte-identical to before any of this existed.
+# Split out so the picker asks the question in exactly one place. The two
+# refusals below are most of the reason this layer exists, and a second copy of
+# them is a second place for one of them to be forgotten.
+#
+# Sets  _claude_pick_pool_members, _claude_pick_overflow_members.
+# Returns 0 usable · 4 the table, or the caller's tenant, is unusable.
+_claude_pick_pool() {
   local tenant="${1:-}"
-  local -a pool overflow
-  _claude_pick_overflow=0
+  _claude_pick_pool_members=(); _claude_pick_overflow_members=()
   if [[ -n "$tenant" ]]; then
     # A tenant with no pool entry yields an EMPTY member list, and an empty list
-    # is indistinguishable from "no pool configured" — which this loop reads as
-    # EVERY profile. So the one thing a caller must never get here is a silent
-    # widening: `--tenant typo` would quietly become "any account on the
+    # is indistinguishable from "no pool configured" — which the candidate loop
+    # reads as EVERY profile. So the one thing a caller must never get here is a
+    # silent widening: `--tenant typo` would quietly become "any account on the
     # machine", including the ones this whole layer exists to keep separate.
     # The table check catches a tenant NAMED in the table; this catches one
-    # supplied by a caller (CLAUDE_ACCOUNT_TENANT, hspawn --tenant), which never
-    # passed through it.
+    # supplied by a caller (CLAUDE_ACCOUNT_TENANT, hspawn --tenant,
+    # claude-pick --tenant), which never passed through it.
     if (( ! ${+CLAUDE_TENANT_POOL[$tenant]} )); then
       _claude_pick_skipped+=("tenant '$tenant' has no CLAUDE_TENANT_POOL entry — refusing to widen the pool to every account")
-      return 1
+      return 4
     fi
-    pool=( ${=CLAUDE_TENANT_POOL[$tenant]} )
-    overflow=( ${=CLAUDE_TENANT_OVERFLOW[$tenant]-} )
-  else
-    # No tenant. Two very different situations reach here, and only one of them
-    # is safe to answer with CLAUDE_ACCOUNT_POOL:
-    #
-    #   1. No tenant table is configured at all — the modular adopter. The flat
-    #      pool is the whole mechanism, an empty one means "every registered
-    #      profile", and that is correct: they have one account. UNCHANGED.
-    #   2. A tenant table IS configured but the resolver could not answer —
-    #      `bad-table`, `git-error`, or an empty CLAUDE_TENANT_DEFAULT. The
-    #      caller leaves tenant empty and lands here, and if CLAUDE_ACCOUNT_POOL
-    #      is also empty this loop reads that as EVERY profile. So a single typo
-    #      in the tenant file silently bills personal work to a work account —
-    #      the exact failure this layer exists to remove, reintroduced through
-    #      the back door.
-    #
-    # Measured 2026-09-09, with a one-character error in the tenant file and no
-    # flat pool set: `~/Projects` picked `quantivly-3`. It read as an ordinary
-    # successful launch, because the reason lives in _CLAUDE_TENANT_WHY and the
-    # announcement never showed it.
-    #
-    # This is the same widening the per-tenant guard above refuses, one level up:
-    # there the empty list comes from an unknown tenant, here from an unusable
-    # table. Both must refuse rather than fall back to everything.
-    if (( ${#CLAUDE_TENANT_POOL} )) && (( ! ${#CLAUDE_ACCOUNT_POOL} )); then
-      _claude_pick_skipped+=("the tenant table is configured but resolved nothing (${_CLAUDE_TENANT_STATE:-no state}${_CLAUDE_TENANT_WHY:+: $_CLAUDE_TENANT_WHY}) — refusing to widen the pool to every account")
-      return 1
-    fi
-    pool=( "${CLAUDE_ACCOUNT_POOL[@]}" )
+    _claude_pick_pool_members=( ${=CLAUDE_TENANT_POOL[$tenant]} )
+    _claude_pick_overflow_members=( ${=CLAUDE_TENANT_OVERFLOW[$tenant]-} )
+    return 0
+  fi
+  # No tenant. Two very different situations reach here, and only one of them is
+  # safe to answer with CLAUDE_ACCOUNT_POOL:
+  #
+  #   1. No tenant table is configured at all — the modular adopter. The flat
+  #      pool is the whole mechanism, an empty one means "every registered
+  #      profile", and that is correct: they have one account. UNCHANGED.
+  #   2. A tenant table IS configured but the resolver could not answer —
+  #      `bad-table`, `git-error`, or an empty CLAUDE_TENANT_DEFAULT. The caller
+  #      leaves the tenant empty and lands here, and if CLAUDE_ACCOUNT_POOL is
+  #      also empty the candidate loop reads that as EVERY profile. So a single
+  #      typo in the tenant file silently bills personal work to a work account —
+  #      the exact failure this layer exists to remove, through the back door.
+  #
+  # Measured 2026-09-09, with a one-character error in the tenant file and no
+  # flat pool set: a personal tree picked a work account. It read as an ordinary
+  # successful launch, because the reason lives in _CLAUDE_TENANT_WHY and the
+  # announcement never showed it.
+  if (( ${#CLAUDE_TENANT_POOL} )) && (( ! ${#CLAUDE_ACCOUNT_POOL} )); then
+    _claude_pick_skipped+=("the tenant table is configured but resolved nothing (${_CLAUDE_TENANT_STATE:-no state}${_CLAUDE_TENANT_WHY:+: $_CLAUDE_TENANT_WHY}) — refusing to widen the pool to every account")
+    return 4
+  fi
+  _claude_pick_pool_members=( "${CLAUDE_ACCOUNT_POOL[@]}" )
+  return 0
+}
+
+# THE PICKER. resolve -> candidates -> classify -> score -> exhaustion ->
+# backpressure -> ledger, for one directory.
+#
+# Usage: _claude_pick_for_dir [dir] [tenant] [strict] [force]
+#   dir     resolved for a tenant when no tenant is pinned. Empty means "do not
+#           resolve" — which is what the legacy tenant-less entry point passes.
+#   tenant  a PIN: it skips the resolver, NOT the ranking inside that pool.
+#           Pinning says where to bill, not which account to burn.
+#   strict  1 for a headless caller (hspawn, claude-pick --strict, herdr-draft):
+#           an exhausted pool is a refusal rather than a least-bad pick.
+#   force   1 to proceed past a machine ceiling that would otherwise refuse.
+#
+# Sets, all of them shell-wide names the caller may declare `local`:
+#   REPLY                   the chosen profile, when it returns 0
+#   _claude_pick_state      picked | fallback | exhausted | backpressure
+#                           | bad-table | no-profiles | unusable
+#   _claude_pick_class      eligible | unknown | least-bad | fallback
+#   _claude_pick_reason     one line, safe to print
+#   _claude_pick_tenant     the tenant that decided, or empty
+#   _claude_pick_tenant_state
+#   _claude_pick_score      the winning score, or empty
+#   _claude_pick_u5 _claude_pick_uw _claude_pick_r5 _claude_pick_rw
+#   _claude_pick_age _claude_pick_tier _claude_pick_holders
+#   _claude_pick_load       kept for claude()'s existing one-line announcement
+#   _claude_pick_overflow   1 when the pick came from another tenant's overflow
+#   _claude_pick_leastbad _claude_pick_leastbad_r5
+#   _claude_pick_skipped[]  human-readable, one per refused thing
+#   _claude_pick_warnings[] machine backpressure and lock notes
+#   _claude_pick_explain[]  "<profile>\t<class>\t<why>\t<u5>\t<uW>\t<age>\t<holders>\t<score>\t<r5>"
+#   _claude_pick_exhausted[] "<profile>\t<u5>\t<uW>\t<r5>"  (for the §5.4 report)
+#   _CML_LOAD1 _CML_NCPU _CML_SWAPPCT   published by the backpressure read
+#
+# Returns 0 picked · 2 refused (exhausted, or nothing usable) · 3 refused
+#         (machine ceiling) · 4 unusable tenant table · 5 no profiles at all.
+#
+# WHY ONE FUNCTION. claude(), hspawn and claude-pick would otherwise each answer
+# parts of this for themselves, and the parts drift: the tenant a caller
+# resolves, the pool it consults and the reason it reports were three separate
+# pieces of code. Which account a session bills is exactly the thing nothing
+# announces afterwards, so the answer has to come from one place that also
+# produces the explanation.
+#
+# It reads the metrics for a candidate ONCE and calls _claude_pick_class, which
+# reads them again — two jq forks per pool member per launch, deliberately. The
+# alternative is a second copy of the classification rules here, and this repo
+# has paid for that shape more than once. _claude_pick_class stays the single
+# pinned oracle for "may this account be chosen".
+_claude_pick_for_dir() {
+  local dir="${1:-}" tenant="${2:-}" strict="${3:-0}" force="${4:-0}"
+  local p name cls why score holders pass_name fb bp_rc=0
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER
+  local -a registered pass_members exnames
+  zmodload -F zsh/stat b:zstat 2>/dev/null
+  zmodload zsh/datetime 2>/dev/null
+
+  REPLY=""
+  _claude_pick_state=""; _claude_pick_class=""; _claude_pick_reason=""
+  _claude_pick_score=""; _claude_pick_u5=unknown; _claude_pick_uw=unknown
+  _claude_pick_r5=unknown; _claude_pick_rw=unknown; _claude_pick_age=unknown
+  _claude_pick_tier=unknown; _claude_pick_holders=0
+  _claude_pick_load=""; _claude_pick_overflow=0
+  _claude_pick_tenant=""; _claude_pick_tenant_state=""
+  _claude_pick_leastbad=""; _claude_pick_leastbad_r5=unknown
+  # Reset per call, not appended to: a second pick in the same shell — the
+  # debounced --dry-run herdr-draft makes for a form row, say — must not report
+  # the first call's refusals as its own.
+  _claude_pick_skipped=(); _claude_pick_warnings=()
+  _claude_pick_explain=(); _claude_pick_exhausted=()
+  _claude_pick_cands=(); _claude_pick_unknowns=()
+
+  # WHICH TENANT. A pinned one skips the resolver; an empty `dir` says do not
+  # resolve at all, which is how the legacy entry point keeps its meaning. The
+  # _CLAUDE_TENANT_* globals are deliberately NOT localised here: a caller that
+  # resolved for itself and then called in has them set, and the pool refusal
+  # above quotes them.
+  if [[ -z "$tenant" && -n "$dir" ]] && (( $+functions[_claude_tenant_for] )); then
+    _claude_tenant_for "$dir" && tenant="$_CLAUDE_TENANT"
+    _claude_pick_tenant_state="${_CLAUDE_TENANT_STATE:-}"
+  fi
+  _claude_pick_tenant="$tenant"
+
+  # MACHINE BACKPRESSURE IS MEASURED FIRST, and acted on last. The measurement is
+  # independent of the tenant table and of the profile census, and every exit path
+  # reports it — a refusal that cannot say what the machine was doing is the empty
+  # answer this repo keeps paying for, and herdr-draft's failure row shows these
+  # numbers. An earlier version read it after the census and its own comment
+  # claimed "every exit path", which was false for exits 4 and 5.
+  #
+  # The VERDICT is deferred to below, because the precedence matters: an unusable
+  # table (4) and no credential at all (5) are faults a person must fix, while a
+  # machine ceiling (3) is transient — reporting the fixable one first is what a
+  # caller can act on. Warn-only unless a MAX knob is set, and only a headless
+  # caller refuses on it (D6 as amended: this box is deliberately oversubscribed
+  # and must keep working).
+  _claude_pick_backpressure; bp_rc=$?
+
+  _claude_pick_pool "$tenant" || {
+    _claude_pick_state=bad-table
+    _claude_pick_reason="${_claude_pick_skipped[-1]}"
+    return 4
+  }
+
+  # Every profile clauth has registered WITH a credential. `-e || -L` matches
+  # what _claude_pick_class tests, so the two cannot disagree about what counts
+  # as registered — a dangling credential symlink is a state the reconciler
+  # owns, and it lands in the `unknown` class rather than vanishing from the
+  # census.
+  for p in "$HOME"/.clauth/profiles/*(N/); do
+    [[ -e "$p/credentials.json" || -L "$p/credentials.json" ]] || continue
+    registered+=( "${p:t}" )
+  done
+  if (( ! ${#registered} )); then
+    _claude_pick_state=no-profiles
+    _claude_pick_reason="no clauth profile has a credential — 'clauth login <name>'"
+    return 5
   fi
 
-  # Two passes at most. Overflow is consulted ONLY when the pool produced no
-  # candidate at all: borrowing another tenant's account bills work to the wrong
-  # place, so it is paid only when the alternative is no isolation at all.
-  for pass in pool overflow; do
-    if [[ "$pass" == overflow ]]; then
-      (( ${#candidates} )) && break
-      (( ${#overflow} )) || break
-      try=( "${overflow[@]}" ); _claude_pick_overflow=1
+  # Two passes at most. Overflow is consulted ONLY when the pool named nothing
+  # that exists at all — borrowing another tenant's account bills work to the
+  # wrong place, so it is paid only when the alternative is no isolation. An
+  # EXHAUSTED pool is deliberately not that case: it is a real wall that clears
+  # itself, with a reset time to quote, and borrowing a seat to get past it would
+  # bill the wrong tenant permanently for a wait of minutes.
+  for pass_name in pool overflow; do
+    if [[ "$pass_name" == overflow ]]; then
+      (( ${#_claude_pick_cands} + ${#_claude_pick_unknowns} + ${#_claude_pick_exhausted} )) && break
+      (( ${#_claude_pick_overflow_members} )) || break
+      pass_members=( "${_claude_pick_overflow_members[@]}" )
+      _claude_pick_overflow=1
     else
-      try=( "${pool[@]}" )
+      pass_members=( "${_claude_pick_pool_members[@]}" )
     fi
-    for p in "$HOME"/.clauth/profiles/*(N/); do
-      name="${p:t}"
-      [[ -f "$p/credentials.json" ]] || continue
-      if (( ${#try} )); then
-        (( ${try[(Ie)$name]} )) || continue
+    for name in "${registered[@]}"; do
+      if (( ${#pass_members} )); then
+        (( ${pass_members[(Ie)$name]} )) || continue
       fi
-      if why="$(_claude_profile_excluded "$name")"; then
-        _claude_pick_skipped+=("$name ($why)")
-        continue
-      fi
-      load="$(_claude_profile_load "$name")" || load=""
-      age="$(_claude_profile_cache_age "$name")" || age=""
-      # No reading, or one too old to believe, sorts last rather than first: it is
-      # "unknown", and unknown must never outrank a measured 0%.
-      if [[ -z "$load" ]] || [[ -n "$age" && "$age" -gt "$max_age" ]]; then
-        load=101
-      fi
-      # zsh sorts these as strings, so the numeric fields are zero-padded. Width 4,
-      # not 3: `${(l:3::0:)N}` TRUNCATES anything longer, so a bogus load of 1000
-      # became "100" — or worse "000", ranking a spent account as the most idle one.
-      candidates+=("${(l:4::0:)load} ${(l:4::0:)$(_claude_holder_count "$name")} $name")
+      cls="$(_claude_pick_class "$name")"
+      if [[ "$cls" == *:* ]]; then why="${cls#*:}"; cls="${cls%%:*}"; else why=""; fi
+      _claude_profile_metrics "$name" >/dev/null 2>&1
+      holders="$(_claude_holder_count "$name")"
+      score=""
+      case "$cls" in
+        eligible)
+          score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders")"
+          _claude_pick_cands+=( "$score"$'\t'"$name" )
+          ;;
+        unknown)
+          # A TIER, not an arithmetic accident. "Unknown never outranks a
+          # measurement" is a rule about rank, and expressing it as a score would
+          # put it at the mercy of the weights: an eligible account at 96% with a
+          # spent week scores near zero too, and then a profile nobody can read
+          # would beat one that was measured and nearly empty.
+          _claude_pick_unknowns+=( "0"$'\t'"$name" )
+          ;;
+        exhausted)
+          _claude_pick_exhausted+=( "$name"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_R5" )
+          ;;
+        *)
+          _claude_pick_skipped+=("$name ($why)")
+          ;;
+      esac
+      _claude_pick_explain+=( "$name"$'\t'"$cls"$'\t'"$why"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_AGE"$'\t'"$holders"$'\t'"$score"$'\t'"$_CPM_R5" )
     done
   done
   # A pass that found nothing must not leave the overflow flag set: the
   # announcement would otherwise tell the reader a session is on a borrowed
   # account when it is actually on the shared credential.
-  (( ${#candidates} )) || _claude_pick_overflow=0
+  (( ${#_claude_pick_cands} + ${#_claude_pick_unknowns} + ${#_claude_pick_exhausted} )) \
+    || _claude_pick_overflow=0
 
-  # Nothing in the pool is usable. Fall back to an ACCOUNT, not to the shared
-  # file: the exclusions that empty the pool (quarantine, disabled) correlate
-  # with load, so this path is rare in calm weather and concentrated in bad
-  # weather — the opposite of a safe degradation. Dropping onto
-  # ~/.claude/.credentials.json there would put the session in the one group
-  # where a single bad write logs everybody out, at the moment most sessions are
-  # starting, controlled only by a stderr line nobody reads.
-  if (( ! ${#candidates} )); then
-    local fb
-    if fb="$(_claude_fallback_profile)"; then
-      _claude_pick_load=1001          # sorts as "unknown"; announced as such
-      REPLY="$fb"
-      _claude_pick_skipped+=("fell back to the active account '$fb'")
+  # The deferred machine verdict, from the measurement taken at the top.
+  if (( bp_rc == 3 && strict && ! force )); then
+    _claude_pick_state=backpressure
+    _claude_pick_reason="${_claude_pick_warnings[-1]:-a machine ceiling was exceeded}"
+    return 3
+  fi
+  (( bp_rc == 3 && force )) && \
+    _claude_pick_warnings+=("--force: proceeding past a machine ceiling that would otherwise refuse")
+
+  # ELIGIBLE first, then UNKNOWN, then the exhaustion path. The ledger decides
+  # inside each tier, under one lock around read -> decide -> write: a
+  # deterministic sort cannot close the two-shells-in-one-second race, because
+  # both would read the same "least recent" and both would choose it.
+  if (( ${#_claude_pick_cands} )); then
+    _claude_pick_class=eligible
+  elif (( ${#_claude_pick_unknowns} )); then
+    _claude_pick_cands=( "${_claude_pick_unknowns[@]}" )
+    _claude_pick_class=unknown
+  fi
+  if [[ -n "$_claude_pick_class" ]] && _claude_pick_with_ledger_lock _claude_pick_decide; then
+    _claude_pick_state=picked
+    _claude_pick_publish "$REPLY"
+    return 0
+  fi
+
+  # EVERY MEMBER EXHAUSTED. A headless caller refuses; an interactive one
+  # proceeds on the least-bad member and says so loudly, because the alternative
+  # is a human blocked by a window that clears itself.
+  if (( ${#_claude_pick_exhausted} )); then
+    for p in "${_claude_pick_exhausted[@]}"; do exnames+=( "${p%%$'\t'*}" ); done
+    _claude_pick_least_bad "${exnames[@]}"
+    _claude_pick_leastbad="$REPLY"
+    _claude_pick_leastbad_r5="$_CLAUDE_PICK_LEASTBAD_R5"
+    if (( strict )); then
+      REPLY=""
+      _claude_pick_state=exhausted
+      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant }${_claude_pick_tenant:+has}${_claude_pick_tenant:-the account pool has} a spent 5h window"
+      _claude_pick_report_exhausted strict
+      return 2
+    fi
+    _claude_pick_class=least-bad
+    _claude_pick_state=picked
+    _claude_pick_reason="every pool member's 5h window is spent — proceeding on the least-bad one"
+    _claude_pick_report_exhausted interactive
+    if [[ -n "$REPLY" ]]; then
+      (( ${_claude_pick_dry_run:-0} )) || _claude_pick_with_ledger_lock _claude_pick_ledger_write "$REPLY"
+      _claude_pick_publish "$REPLY"
       return 0
     fi
-    return 1
   fi
-  # Sort into an ARRAY. `${${(o)candidates}[1]}` joins the array into one scalar
-  # and then indexes its first CHARACTER — it returned "0" (from the zero-padded
-  # load) and the picker silently chose nothing.
-  local -a ranked=( "${(@o)candidates}" )
-  # Strip the two sort fields by prefix rather than word-splitting: `${=...}` cuts
-  # a profile name at its first space, and a directory name may contain one.
-  local best="${ranked[1]}"
-  _claude_pick_load="${best%% *}"
-  local rest="${best#* }"
-  # REPLY, not stdout: this must be called DIRECTLY. A `$(...)` call is a
-  # subshell, and the two globals above — the load that won, and every account
-  # the pool refused — would die with it, leaving the announcement silent in
-  # exactly the case it exists for.
-  REPLY="${rest#* }"
+
+  # NOTHING IN THE POOL IS USABLE. Fall back to an ACCOUNT, not to the shared
+  # file: the exclusions that empty a pool (quarantine, disabled) correlate with
+  # load, so this path is rare in calm weather and concentrated in bad weather —
+  # the opposite of a safe degradation. Dropping onto the shared global
+  # credential there would put the session in the one group where a single bad
+  # write logs everybody out, at the moment most sessions are starting,
+  # controlled only by a stderr line nobody reads.
+  if fb="$(_claude_fallback_profile)"; then
+    REPLY="$fb"
+    _claude_pick_class=fallback
+    _claude_pick_state=fallback
+    _claude_pick_skipped+=("fell back to the active account '$fb'")
+    _claude_pick_load=1001          # sorts as "unknown"; announced as such
+    _claude_pick_publish "$fb"
+    _claude_pick_reason="no pool member was usable — fell back to the active account '$fb'"
+    return 0
+  fi
+  REPLY=""
+  _claude_pick_state=unusable
+  _claude_pick_reason="no usable account${_claude_pick_skipped:+: ${(j:, :)_claude_pick_skipped}}"
+  return 2
+}
+
+# Choose and record, run under the ledger lock as ONE unit: read -> decide ->
+# write. Split out only because _claude_pick_with_ledger_lock takes a command,
+# and it must run in this shell rather than a subshell or REPLY dies with it.
+_claude_pick_decide() {
+  _claude_pick_choose || return 1
+  (( ${_claude_pick_dry_run:-0} )) || _claude_pick_ledger_write "$REPLY"
   return 0
+}
+
+# The winning profile's own numbers, for the announcement, --explain and the JSON.
+# Read out of _claude_pick_explain rather than measured again: a second read can
+# legitimately differ from the one the decision was made on, and then the report
+# is not about the decision.
+_claude_pick_publish() {
+  local e
+  local -a f
+  for e in "${_claude_pick_explain[@]}"; do
+    [[ "${e%%$'\t'*}" == "$1" ]] || continue
+    f=( "${(@ps:\t:)e}" )
+    _claude_pick_u5="${f[4]}"; _claude_pick_uw="${f[5]}"
+    _claude_pick_age="${f[6]}"; _claude_pick_holders="${f[7]}"
+    _claude_pick_score="${f[8]}"; _claude_pick_r5="${f[9]}"
+    break
+  done
+  # The tier and the weekly reset are informational and not in the explain row,
+  # which is a ranking record. `local` here so the caller's copies are untouched.
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER
+  _claude_profile_metrics "$1" >/dev/null 2>&1
+  _claude_pick_tier="$_CPM_TIER"; _claude_pick_rw="$_CPM_RW"
+  # claude()'s one-line announcement reads _claude_pick_load: <=100 is a measured
+  # 5h figure, 101 is "no reading", 1001 is the fallback. Unchanged, so the
+  # announcement is not a second thing to keep in step. Already set on the
+  # fallback path, which is why this does not overwrite it.
+  if [[ -z "$_claude_pick_load" ]]; then
+    if [[ "$_claude_pick_u5" == unknown ]]; then _claude_pick_load=101
+    else _claude_pick_load="$_claude_pick_u5"; fi
+  fi
+}
+
+# The §5.4 messages, in one place because both of them are the SAME facts read
+# two ways — one refuses, one proceeds — and a second copy would be a second
+# place to forget that no time may be invented.
+#
+# `resets_at` is absent whenever the 5h window has not started (measured: three
+# of five profiles here), so "no reset instant" is the COMMON case, not an edge.
+# A message that printed a time unconditionally would print the same
+# epoch-derived nonsense for every account, in exactly the situation where the
+# reader is trying to decide how long to wait.
+#
+# stderr, always, and never suppressed by CLAUDE_ACCOUNT_QUIET: quiet exists to
+# silence the routine one-line announcement, and this is the opposite of routine.
+# The parenthetical for one member's 5h window. Three states, and the third is
+# not an edge: a NON-POSITIVE r5 means the window named in the cache has already
+# rolled, so the ~100% figure beside it belongs to the PREVIOUS window and is
+# stale. Printing "resets <a date in the past>" there — which is what formatting
+# the delta unconditionally does — tells the reader to wait for a moment that has
+# been and gone. On this machine that state is common rather than rare, because
+# nothing refreshes the usage caches on a schedule (clauth's only writer is
+# gated on a lease taken by its TUI and its daemon, and the daemon is off).
+_claude_pick_window_text() {
+  local r="${1:-unknown}" txt
+  if [[ "$r" == (-|)<-> ]] && (( r <= 0 )); then
+    print -r -- "5h window already rolled — this reading is stale"
+    return 0
+  fi
+  txt="$(_claude_pick_reset_text "$r")"
+  if [[ -n "$txt" ]]; then print -r -- "resets $txt"; else print -r -- "reset time unknown"; fi
+}
+
+_claude_pick_report_exhausted() {
+  local mode="${1:-strict}" prog="${_claude_pick_prog:-claude}"
+  local e n u5 uw uwt r5 label soon lbr="$_claude_pick_leastbad_r5"
+  local -a f
+  label="the account pool"
+  [[ -n "$_claude_pick_tenant" ]] && label="pool '$_claude_pick_tenant'"
+  soon="$(_claude_pick_reset_text "$lbr")"
+  # A reset already in the past is not a time to quote back. Same reasoning as
+  # _claude_pick_window_text, at the header.
+  [[ "$lbr" == (-|)<-> ]] && (( lbr <= 0 )) && soon=""
+
+  if [[ "$mode" == interactive ]]; then
+    print -u2 -- "$prog: $label has NO usable account — proceeding on the least-bad one:"
+  elif [[ -n "$soon" ]]; then
+    print -u2 -- "$prog: refused — $label exhausted (earliest reset $soon, on $_claude_pick_leastbad)"
+  elif [[ "$lbr" == (-|)<-> ]]; then
+    print -u2 -- "$prog: refused — $label exhausted on stale readings (its soonest 5h window has already rolled)"
+  else
+    print -u2 -- "$prog: refused — $label exhausted (no reset time is known for any member)"
+  fi
+
+  for e in "${_claude_pick_exhausted[@]}"; do
+    f=( "${(@ps:\t:)e}" )
+    n="${f[1]}"; u5="${f[2]}"; uw="${f[3]}"; r5="${f[4]}"
+    # Only the least-bad member is listed on the interactive path: it is the one
+    # being proceeded on, and a human about to be told "this is going to be
+    # tight" does not need the other rows in order to act.
+    if [[ "$mode" == interactive && "$n" != "$_claude_pick_leastbad" ]]; then
+      continue
+    fi
+    # `7d unknown`, never `7d unknown%`: a percent sign on a word that is not a
+    # number reads as a measurement of nothing.
+    if [[ "$uw" == unknown ]]; then uwt="7d unknown"; else uwt="7d ${uw}%"; fi
+    print -u2 -- "        $n  5h ${u5}% · $uwt ($(_claude_pick_window_text "$r5"))"
+  done
+
+  if [[ "$mode" == interactive ]]; then
+    print -u2 -- "        Headless callers refuse here. Override: claude-as <profile> · CLAUDE_ACCOUNT_TENANT=<t> claude"
+  elif [[ -n "$soon" ]]; then
+    print -u2 -- "        --profile <p> to override, or retry after $soon."
+  else
+    print -u2 -- "        --profile <p> to override."
+  fi
+}
+
+# The tenant-less entry point, kept for one release so nothing outside this file
+# has to change in the same commit. It resolves NO directory — that is what the
+# empty first argument means — so a caller that resolved a tenant for itself and
+# passes it in gets exactly the pool it named, and a caller that passes nothing
+# gets the flat-pool semantics unchanged.
+_claude_pick_profile() {
+  _claude_pick_for_dir "" "${1:-}" 0 0 && return 0
+  return 1
 }
 
 claude() {
   # Reset per call: these carry the picker's explanation out to the announcement,
   # and a second launch in the same shell must not inherit the first's reasons.
   local _claude_pick_load="" REPLY="" _claude_pick_overflow=0
-  local -a _claude_pick_skipped=()
+  local -a _claude_pick_skipped=() _claude_pick_warnings=()
+  local -a _claude_pick_explain=() _claude_pick_exhausted=()
+  local -a _claude_pick_cands=() _claude_pick_unknowns=()
+  local -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
+  local _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
+  local _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
+  local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
+  local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
+  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+  local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
+  # Whose name the picker's own messages carry.
+  local _claude_pick_prog=claude
   # The resolver reports through these too, and they are shell-wide names.
   local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
 
@@ -1163,16 +1545,23 @@ claude() {
       # CLAUDE_ACCOUNT_PROFILE / claude-as (above) > a pinned tenant > the
       # resolver. A pinned tenant skips the resolver but NOT the ranking inside
       # its pool — pinning says where to bill, not which account to burn.
-      if [[ -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
-        tenant="$CLAUDE_ACCOUNT_TENANT"
-      elif (( $+functions[_claude_tenant_for] )) && _claude_tenant_for "$PWD"; then
-        tenant="$_CLAUDE_TENANT"
-      fi
-      if _claude_pick_profile "$tenant"; then
+      #
+      # $PWD, and the picker resolves it. INTERACTIVE (strict=0): an exhausted
+      # pool proceeds on the least-bad member with the loud §5.4 block, because
+      # a human blocked by a window that clears itself in minutes is a worse
+      # outcome than a tight session. hspawn and claude-pick --strict refuse in
+      # the same state; that asymmetry is the decision, not an oversight.
+      if _claude_pick_for_dir "$PWD" "${CLAUDE_ACCOUNT_TENANT:-}" 0 0; then
         profile="$REPLY"
       else
         profile=""
       fi
+      tenant="$_claude_pick_tenant"
+      # Machine backpressure is warn-only for an interactive launch, but it must
+      # still be SAID: this box is deliberately oversubscribed, and a session
+      # that is about to thrash should know before it starts, not after.
+      local _w
+      for _w in "${_claude_pick_warnings[@]}"; do print -u2 -- "claude: $_w"; done
     fi
     if [[ -z "$profile" ]]; then
       # NEVER SILENT in either direction: which credential a session burns decides
@@ -1214,8 +1603,14 @@ claude() {
       if [[ -n "${_claude_pick_load:-}" ]]; then
         if (( _claude_pick_load > 1000 )); then detail=" — fallback: the pool was unusable"
         elif (( _claude_pick_load > 100 )); then detail=" — no usage reading"
-        else detail=" — $(( 10#$_claude_pick_load ))% used"; fi
+        else detail=" — 5h $(( 10#$_claude_pick_load ))% used"; fi
       fi
+      # The class, when it is not the ordinary one. `least-bad` means every
+      # member was exhausted and this session is proceeding anyway — the loud
+      # block above already said so, and this keeps it on the line a reader
+      # scrolls back to.
+      [[ -n "$_claude_pick_class" && "$_claude_pick_class" != eligible ]] && \
+        detail="$detail · $_claude_pick_class"
       # Which tenant decided, and whether the account was BORROWED. A session on
       # another tenant's account is billing work to the wrong place; that is
       # sometimes the right trade, but it is never something to discover later.
@@ -1624,7 +2019,17 @@ hspawn() {
   local REPLY=""
   local _claude_pick_load="" _claude_pick_overflow=0
   local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
-  local -a _claude_pick_skipped=()
+  local -a _claude_pick_skipped=() _claude_pick_warnings=()
+  local -a _claude_pick_explain=() _claude_pick_exhausted=()
+  local -a _claude_pick_cands=() _claude_pick_unknowns=()
+  local -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
+  local _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
+  local _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
+  local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
+  local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
+  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+  local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
+  local _claude_pick_prog=hspawn
   local -a rest=()
   while (( $# )); do
     case "$1" in
@@ -1764,24 +2169,43 @@ hspawn() {
     if command -v clauth >/dev/null 2>&1; then
       # NOT `clauth which`. That answers from $CLAUDE_CONFIG_DIR, so inside an
       # isolated pane it returns THIS session's own profile — measured
-      # 2026-09-06, it says `quantivly-3` in an isolated shell and `unknown` in a
-      # bare one. Defaulting to it puts every spawn in the same credential group
-      # as its parent, which is the concentration this is meant to undo.
+      # 2026-09-06, it names the parent session's profile in an isolated shell
+      # and `unknown` in a bare one. Defaulting to it puts every spawn in the
+      # same credential group as its parent, which is the concentration this is
+      # meant to undo.
       # Called DIRECTLY, never as `$(...)`: the picker reports through globals
-      # (the load that won, and every account it refused) and a subshell would
-      # discard them — and with them the reason a spawn landed where it did.
+      # (the score that won, every account it refused, the machine's load) and a
+      # subshell would discard them — and with them the reason a spawn landed
+      # where it did.
       # Resolve the tenant for the directory being SPAWNED INTO, not for the
       # lead's $PWD: a lead standing in one tree routinely spawns workers into
       # another, and billing the worker to the lead's tenant is the same
-      # wrong-account bug one level down.
-      if (( tenant_set )); then
-        :
-      elif [[ -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
+      # wrong-account bug one level down. `$repo` is handed to the picker, which
+      # resolves it — unless --tenant or CLAUDE_ACCOUNT_TENANT pinned one.
+      if (( ! tenant_set )) && [[ -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
         tenant="$CLAUDE_ACCOUNT_TENANT"
-      elif (( $+functions[_claude_tenant_for] )) && _claude_tenant_for "$repo"; then
-        tenant="$_CLAUDE_TENANT"
       fi
-      if _claude_pick_profile "$tenant"; then profile="$REPLY"; else profile=""; fi
+      # STRICT. hspawn is a headless caller (§5.4): a worker starting on a spent
+      # 5h window burns the seat and dies mid-task with nobody watching, so an
+      # exhausted pool refuses here rather than proceeding on the least-bad
+      # member the way an interactive `claude` does. The escape is `-p <profile>`,
+      # which the refusal names, and the reset time it prints says how long the
+      # wait is.
+      _claude_pick_for_dir "$repo" "$tenant" 1 0
+      local pick_rc=$?
+      profile="$REPLY"
+      tenant="$_claude_pick_tenant"
+      local _w
+      for _w in "${_claude_pick_warnings[@]}"; do echo "hspawn: $_w" >&2; done
+      if (( pick_rc == 2 || pick_rc == 3 )); then
+        # The picker already printed the §5.4 block on stderr for rc 2. Say what
+        # it means for THIS command — that nothing was created — because an
+        # exhaustion report on its own reads like a warning.
+        (( pick_rc == 3 )) && echo "hspawn: refused — $_claude_pick_reason" >&2
+        echo "hspawn: nothing was spawned. Retry, or pass -p <profile> to choose an account" >&2
+        echo "        deliberately." >&2
+        return 1
+      fi
       if [[ -z "$profile" ]]; then
         # Could not name an account. Falling through to the shared credential is
         # the right choice — it is the old behaviour, and inventing a profile

@@ -72,11 +72,22 @@ mkprof() {     # $1 = profile, $2 = usage_cache.json body ('-' = no cache file)
     [[ "$2" == "-" ]] || printf '%s\n' "$2" > "$d/usage_cache.json"
 }
 
+# THE FIXTURE TIMEZONE IS DELIBERATELY NOT UTC, and this is what makes the RFC
+# 3339 rows mean anything. Every instant clauth writes is UTC, and the defect
+# those rows pin is that `strftime -r` parses through mktime, which reads a
+# broken-down time as LOCAL — so on a UTC machine a parser that ignores the zone
+# is indistinguishable from one that honours it, and the mutant survives. CI
+# runners are UTC. `XXX-3` is the POSIX form (the offset is what to ADD to local
+# to reach UTC, so this is UTC+3) and needs no tzdata, which a minimal container
+# may not have.
+FIXTZ='XXX-3'
+
 # Every fixture shell clears the two variables named in the header.
 zrun() {       # $1 = zsh snippet, run with the fixture HOME
     zsh -f -c "
       unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
       export HOME='$FHOME'
+      export TZ='$FIXTZ'
       CLAUDE_TENANTS_FILE=/nonexistent
       source '$HERDRRC' >/dev/null 2>&1
       $1" 2>/dev/null
@@ -408,14 +419,24 @@ check "the replace is atomic — the inode changes, it is not truncated in place
 # The background holder SIGNALS once it holds the lock. A sleep-based holder is a
 # race, and it passes with the locking removed exactly when the machine is
 # loaded — which is when a mutation sweep runs.
+#
+# It also has to CREATE the lock file and check that its own flock succeeded, and
+# both were missing until 2026-09-10. `zsystem flock` opens without O_CREAT, so
+# on a path nothing has created the holder's flock failed, the foreground call's
+# flock failed for the same reason, and the row read `warned` — the answer it
+# expects — while nothing was ever locked. A row that asserts a WARNING passes in
+# every state that warns, including "the mechanism has never once worked"; the
+# missing row is the one that asserts the uncontended case is SILENT.
 new_home r3; rm -rf "$LED"; mkdir -p "$LED"
 cat > "$TMPROOT/locktest.zsh" <<'EOS'
 source "$HERDRRC_P" >/dev/null 2>&1
 zmodload zsh/system
-( zsystem flock -f hfd "$LED_P/.pick-ledger.lock"
+: >> "$LED_P/.pick-ledger.lock"
+( zsystem flock -f hfd "$LED_P/.pick-ledger.lock" || exit 1
   print ready > "$LED_P/held"
   sleep 8 ) &
 for i in {1..100}; do [[ -f "$LED_P/held" ]] && break; sleep 0.1; done
+[[ -f "$LED_P/held" ]] || { print -r -- holder-never-acquired; exit 0 }
 local -a _claude_pick_warnings=()
 CLAUDE_PICK_LOCK_WAIT=1 _claude_pick_with_ledger_lock _claude_pick_ledger_write a1
 (( ${#_claude_pick_warnings} )) && print -r -- warned || print -r -- silent
@@ -529,6 +550,662 @@ check "with NO known reset an account is still named" \
 check "...and no time is invented"               "$(lb a1 b2 | cut -d\| -f2)" ""
 check "the reset formatter returns empty for unknown, not an epoch date" \
       "$(zrun '_claude_pick_reset_text unknown')" ""
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== the lock is actually TAKEN, not merely warned about ==="
+#
+# The row above asserts the contended case warns. Nothing asserted the
+# UNCONTENDED case is silent, and that is the whole difference between a lock
+# that works and one that has never once been acquired: `zsystem flock` opens
+# without O_CREAT, so on a lock path nothing created, every call failed to open,
+# fell into the proceed-unlocked fallback and warned — forever, since nothing
+# else ever creates that file.
+
+new_home lk1; rm -rf "$LED"
+snip <<'EOS'
+local -a _claude_pick_warnings=()
+_claude_pick_with_ledger_lock _claude_pick_ledger_write a1
+(( ${#_claude_pick_warnings} )) && print -r -- warned || print -r -- silent
+EOS
+check "an uncontended pick TAKES the lock and says nothing" "$(led_run "$SNIP")" "silent"
+
+snip <<'EOS'
+_claude_pick_with_ledger_lock _claude_pick_ledger_write a1
+[[ -e "$(_claude_pick_ledger_lock)" ]] && print exists || print absent
+EOS
+check "...having created the lock file it needs" "$(led_run "$SNIP")" "exists"
+
+# `: >>`, never `: >`. A truncating create would clear a lock file another
+# process is holding at the moment a third arrives.
+new_home lk2; rm -rf "$LED"; mkdir -p "$LED"
+printf 'sentinel\n' > "$LED/.pick-ledger.lock"
+snip <<'EOS'
+_claude_pick_with_ledger_lock _claude_pick_ledger_write a1
+print -r -- "$(< "$(_claude_pick_ledger_lock)")"
+EOS
+check "an existing lock file is not truncated" "$(led_run "$SNIP")" "sentinel"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== RFC 3339: the zone is part of the instant, not decoration ==="
+#
+# `strftime -r` is strptime followed by mktime, and mktime reads a broken-down
+# time as LOCAL and discards any offset strptime parsed. So cutting the string at
+# its first `.` and parsing the rest yields an instant wrong by this machine's
+# own UTC offset — measured 2026-09-10 at UTC+2, two hours early, and three in
+# summer. r5 drives the expiry bonus over an 18000 s window, so that is up to 60%
+# of the window, and it shifts every reset time the §5.4 messages print.
+#
+# These rows assert the VALUE, which is what the task-1 rows did not: they
+# checked that an absent reset is `unknown` and an unparseable one is `unknown`,
+# and a WRONG NUMBER satisfies neither.
+
+tsd() {   # $1 = instant -> the absolute epoch it names, or "rc1"
+    zrun "if _claude_ts_delta '$1'; then print -r -- \$(( EPOCHSECONDS + _CLAUDE_TS_DELTA )); else print -r -- rc1; fi"
+}
+# 2099-01-01T00:00:00Z is 4070908800; the same wall time at -03:00 is 4070919600.
+check "a +00:00 offset is read as UTC"      "$(tsd '2099-01-01T00:00:00.000000+00:00')" "4070908800"
+check "a Z designator is read as UTC"       "$(tsd '2099-01-01T00:00:00Z')"             "4070908800"
+check "a +hhmm offset is read as UTC"       "$(tsd '2099-01-01T00:00:00+0000')"         "4070908800"
+check "a NON-zero offset is applied"        "$(tsd '2099-01-01T00:00:00-03:00')"        "4070919600"
+check "no zone at all is read as UTC, not as local time" \
+      "$(tsd '2099-01-01T00:00:00')"        "4070908800"
+check "an unparseable instant is still rc1" "$(tsd 'not a timestamp')"                  "rc1"
+
+# ...and through the metrics function, which is where it matters.
+new_home tz1
+mkprof a1 '{"five_hour":{"utilization":5.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":9.0,"resets_at":"2099-02-01T00:00:00.000000+00:00"}}'
+snip <<'EOS'
+_claude_profile_metrics a1; print -r -- $(( EPOCHSECONDS + _CPM_R5 ))
+EOS
+check "_CPM_R5 names the instant the cache does"  "$(zrun "$SNIP")" "4070908800"
+snip <<'EOS'
+_claude_profile_metrics a1; print -r -- $(( EPOCHSECONDS + _CPM_RW ))
+EOS
+check "_CPM_RW is the aggregate weekly reset"     "$(zrun "$SNIP")" "4073587200"
+
+new_home tz2
+mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":9.0}}'
+snip <<'EOS'
+_claude_profile_metrics a1; print -r -- $_CPM_RW
+EOS
+check "an absent weekly reset is unknown, not zero" "$(zrun "$SNIP")" "unknown"
+snip <<'EOS'
+_claude_profile_metrics a1; print -r -- "$_CPM_U5 $_CPM_UW"
+EOS
+check "...and the extra column does not shift the ones beside it" \
+      "$(zrun "$SNIP")" "5 9"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== the tie inside RR_BAND breaks by NAME, not by the score's text ==="
+#
+# Entries are "<score>\t<name>" strings, so iterating `${(o)}` over them sorted
+# by the SCORE TEXT. With an empty ledger every candidate's time is 0, `<` is
+# never true, and the first in iteration order wins — which inside the band
+# handed it to the LOWEST-scoring member, and put any negative score ahead of
+# every positive one. The rule was documented as "then name" throughout.
+
+new_home nb1; rm -rf "$LED"
+snip <<'EOS'
+_claude_pick_cands=( $'9000\ta1' $'8500\tb2' ); _claude_pick_choose && print -r -- $REPLY
+EOS
+check "inside the band with no ledger, the tie breaks by name" "$(led_run "$SNIP")" "a1"
+
+rm -rf "$LED"
+snip <<'EOS'
+_claude_pick_cands=( $'-500\tz9' $'-400\ta1' ); _claude_pick_choose && print -r -- $REPLY
+EOS
+check "...and a negative score does not sort ahead of a better one" "$(led_run "$SNIP")" "a1"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== the machine numbers survive the call that decided on them ==="
+#
+# --explain and the JSON report the load a refusal was decided on. Reading /proc
+# a second time could legitimately give a different answer, and then the report
+# would not be about the decision — so the measurement is published, by one
+# writer, rather than localised and re-taken.
+
+new_home mp1
+mkproc 24.00 0-7 8000000 4000000
+check "_CML_* are set after _claude_pick_backpressure returns" \
+      "$(zsh -f -c "
+          export HOME='$FHOME'
+          CLAUDE_PICK_PROC_ROOT='$PROCR'
+          CLAUDE_TENANTS_FILE=/nonexistent
+          source '$HERDRRC' >/dev/null 2>&1
+          typeset -ga _claude_pick_warnings=()
+          _claude_pick_backpressure >/dev/null 2>&1
+          print -r -- \"\$_CML_LOAD1 \$_CML_NCPU \$_CML_SWAPPCT\"" 2>/dev/null)" \
+      "2400 8 50"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== sourcing under CLAUDE_PICK_SOURCING has no side effect ==="
+#
+# scripts/claude-pick sources this file to reach the picker and wants nothing
+# else from it. The marker exists so that a future top-level side effect trips
+# THIS row rather than the CLI — which is the only way the guard means anything,
+# since a side effect that is merely absent today needs no guard at all.
+
+check "sourcing under the marker prints nothing on either stream" \
+      "$(CLAUDE_PICK_SOURCING=1 CLAUDE_TENANTS_FILE=/nonexistent \
+         zsh -f -c "source '$HERDRRC'" 2>&1 | wc -c | tr -d ' ')" "0"
+check "...and does not pull in the build-limits module" \
+      "$(CLAUDE_PICK_SOURCING=1 CLAUDE_TENANTS_FILE=/nonexistent \
+         zsh -f -c "source '$HERDRRC' >/dev/null 2>&1; print -r -- \$+functions[build-limits]" 2>/dev/null)" "0"
+check "...while an ordinary source still provides it" \
+      "$(CLAUDE_TENANTS_FILE=/nonexistent \
+         zsh -f -c "source '$HERDRRC' >/dev/null 2>&1; print -r -- \$+functions[build-limits]" 2>/dev/null)" "1"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== _claude_pick_for_dir: the one code path, and its five exits ==="
+#
+# Every caller — claude(), hspawn, claude-pick — goes through this. The classes
+# are TIERS rather than scores: "unknown never outranks a measurement" is a rule
+# about rank, and as arithmetic it would be at the mercy of the weights, because
+# an eligible account at 96% with a spent week also scores near zero.
+
+# The account-dir root is pointed at the fixture so the ledger and the holder
+# pidfiles land there and not in the developer's own state directory.
+pfd() {   # $1 = prelude, $2 = dir, $3 = tenant, $4 = strict
+          #   -> "<rc>:<profile>:<state>:<class>"
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '${2:-}' '${3:-}' '${4:-0}' 0
+      print -r -- \"\$?:\$REPLY:\$_claude_pick_state:\$_claude_pick_class\"" 2>/dev/null
+}
+
+new_home fd1
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+mkprof b2 '-'
+check "an eligible account beats an unreadable one outright" \
+      "$(pfd '' '' '' 0)" "0:a1:picked:eligible"
+
+new_home fd2
+mkprof a1 '-'
+mkprof b2 '-'
+check "with only unreadable accounts one is still chosen, as class unknown" \
+      "$(pfd '' '' '' 0 | cut -d: -f1,3,4)" "0:picked:unknown"
+
+# THE TIER IS ONLY OBSERVABLE WHERE THE SCORE WOULD NOT HAVE SEPARATED THEM, and
+# the row above cannot see it: a1 at 10% scores 9000 against an unknown's 0, and
+# 9000 is far outside RR_BAND, so a mutant that scored the unknowns alongside the
+# eligible ones changed nothing and survived. This is the case the rule exists
+# for, and it is the one the code comment names: an eligible account at 96% of
+# its 5h window with a fully spent week scores 0 as well — h5 is 4, and weekf
+# collapses it — so as arithmetic "unknown never outranks a measurement" reduces
+# to whichever name happens to sort first, and `a1` sorts before `b2`.
+new_home fd2b
+mkprof a1 '-'
+mkprof b2 '{"five_hour":{"utilization":96.0},"seven_day":{"utilization":100.0}}'
+check "a measured near-spent account still beats an unreadable one" \
+      "$(pfd '' '' '' 0 | cut -d: -f2,4)" "b2:eligible"
+
+# An exhausted pool: a real, self-clearing wall.
+new_home fd3
+mkprof a1 '{"five_hour":{"utilization":99.0,"resets_at":"2099-02-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
+mkprof b2 '{"five_hour":{"utilization":98.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
+check "STRICT refuses an exhausted pool with exit 2 and names nothing chosen" \
+      "$(pfd '' '' '' 1)" "2::exhausted:"
+check "INTERACTIVE proceeds on the least-bad member, exit 0" \
+      "$(pfd '' '' '' 0)" "0:b2:picked:least-bad"
+
+# The §5.4 blocks. stderr only, because that is where a caller reads a reason.
+report() {   # $1 = strict -> the block, from stderr
+    { zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      _claude_pick_prog=claude-pick
+      _claude_pick_for_dir '' '' '${1:-0}' 0 >/dev/null" >/dev/null; } 2>&1
+}
+check "the strict header names the earliest reset and the account it is on" \
+      "$(report 1 | head -1 | grep -c 'refused — the account pool exhausted (earliest reset .*, on b2)')" "1"
+check "...it lists EVERY member with its window" \
+      "$(report 1 | grep -cE '^        (a1|b2)  5h [0-9]+% ')" "2"
+check "...and closes with the override and a retry time" \
+      "$(report 1 | tail -1 | grep -c -- '--profile <p> to override, or retry after ')" "1"
+check "the interactive header says it is proceeding anyway" \
+      "$(report 0 | head -1 | grep -c 'has NO usable account — proceeding on the least-bad one')" "1"
+check "...naming only the member it is proceeding on" \
+      "$(report 0 | grep -cE '^        (a1|b2)  5h ')" "1"
+check "...and pointing at the two overrides" \
+      "$(report 0 | tail -1 | grep -c 'claude-as <profile>')" "1"
+
+# NO TIME IS INVENTED. resets_at is absent exactly when the window has not
+# started, which is the common case, so this is the shape most refusals take.
+new_home fd4
+mkprof a1 '{"five_hour":{"utilization":99.0}}'
+mkprof b2 '{"five_hour":{"utilization":98.0}}'
+check "with no reset known the strict header says so instead of naming a time" \
+      "$(report 1 | head -1 | grep -c 'exhausted (no reset time is known for any member)')" "1"
+check "...the member line says the reset time is unknown" \
+      "$(report 1 | grep -c 'reset time unknown')" "2"
+check "...an unknown weekly figure carries no percent sign" \
+      "$(report 1 | grep -c '7d unknown%')" "0"
+check "...and the last line offers no retry time" \
+      "$(report 1 | tail -1)" "        --profile <p> to override."
+
+# A reset already in the PAST is not a time to quote back, and it is not rare:
+# nothing on this machine refreshes the usage caches on a schedule, so a spent
+# figure beside a rolled window is the ordinary stale reading. Formatting the
+# delta unconditionally told the reader to wait for a moment long gone.
+new_home fd5
+mkprof a1 '{"five_hour":{"utilization":99.0,"resets_at":"2000-01-01T00:00:00.000000+00:00"}}'
+check "a rolled window is reported as a stale reading, not as a past reset" \
+      "$(report 1 | grep -c 'already rolled — this reading is stale')" "1"
+check "...and the header says the same rather than quoting the date" \
+      "$(report 1 | head -1 | grep -c 'exhausted on stale readings')" "1"
+check "...so no reset time from the past is offered as a retry" \
+      "$(report 1 | tail -1)" "        --profile <p> to override."
+
+# Machine backpressure: warn-only unless a ceiling is set, and only a headless
+# caller refuses on it.
+new_home fd6
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+mkproc 24.00 0-7 8000000 4000000
+check "a loaded machine does not refuse a strict caller by default" \
+      "$(pfd "CLAUDE_PICK_PROC_ROOT='$PROCR'" '' '' 1 | cut -d: -f1,2)" "0:a1"
+check "...it refuses once LOAD_MAX is set and exceeded" \
+      "$(pfd "CLAUDE_PICK_PROC_ROOT='$PROCR' CLAUDE_PICK_LOAD_MAX=200" '' '' 1 | cut -d: -f1,3)" "3:backpressure"
+check "...but never refuses an interactive one" \
+      "$(pfd "CLAUDE_PICK_PROC_ROOT='$PROCR' CLAUDE_PICK_LOAD_MAX=200" '' '' 0 | cut -d: -f1,2)" "0:a1"
+check "--force overrides the ceiling and records that it did" \
+      "$(zsh -f -c "
+          unset CLAUDE_CONFIG_DIR HERDR_PANE_ID
+          export HOME='$FHOME'
+          CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+          CLAUDE_PICK_PROC_ROOT='$PROCR' CLAUDE_PICK_LOAD_MAX=200
+          CLAUDE_TENANTS_FILE=/nonexistent
+          source '$HERDRRC' >/dev/null 2>&1
+          _claude_pick_for_dir '' '' 1 1; rc=\$?
+          print -r -- \"\$rc:\$(print -l \"\$_claude_pick_warnings[@]\" | grep -c -- '--force')\"" 2>/dev/null)" \
+      "0:1"
+PROCR=""
+
+# No profiles at all, and an unusable table: different exits because they are
+# different fixes — one is `clauth login`, the other is an edit to a data file.
+new_home fd7
+check "no registered profile with a credential is exit 5" \
+      "$(pfd '' '' '' 0 | cut -d: -f1,3)" "5:no-profiles"
+
+new_home fd8
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+check "a tenant with no pool entry is exit 4, never a widened pool" \
+      "$(pfd '' '' 'nosuchtenant' 0 | cut -d: -f1,3)" "4:bad-table"
+
+# --dry-run leaves the ledger alone, and the second half of the pair is what
+# makes the first mean anything: "no file" is also what a broken write produces.
+new_home fd9
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+pfd 'typeset -g _claude_pick_dry_run=1' '' '' 0 >/dev/null
+if [[ -e "$FHOME/.local/state/claude-account-dirs/.pick-ledger" ]]; then r=written; else r=absent; fi
+check "a dry-run pick writes no ledger" "$r" "absent"
+pfd '' '' '' 0 >/dev/null
+if [[ -e "$FHOME/.local/state/claude-account-dirs/.pick-ledger" ]]; then r=written; else r=absent; fi
+check "...and a real one does" "$r" "written"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== scripts/claude-pick: the exit codes ARE the contract ==="
+#
+# The CLI decides nothing of its own — it serialises _claude_pick_for_dir — so
+# these rows are about the mapping and the output shape. A caller acts on the
+# code: 2 means wait, 3 means the box is full, 4 means fix a file, 5 means log
+# in, 64 means the call was wrong. Collapsing any two of those into one costs the
+# caller its only way to tell them apart.
+#
+# `cli` sets CLI_OUT / CLI_ERR / CLI_RC as GLOBALS and is called directly, never
+# inside `$( )`: a command substitution is a subshell, so an exit code assigned
+# in there dies with it — and reading a stale CLI_RC would make a row about exit
+# 64 pass while measuring the previous row's exit 0.
+
+PICK="$DOTFILES/scripts/claude-pick"
+JQBIN="$(command -v jq)"
+CLIPATH="$(dirname "$JQBIN"):/usr/bin:/bin"
+[[ -x "$PICK" ]] || fatal "$PICK is not executable"
+
+# AN ACCOUNT-DIR BUILDER STUB, and it is what makes the --dry-run row mean
+# anything. Without DOTFILES_ROOT the CLI resolves the builder to
+# $HOME/.dotfiles/scripts/claude-account-dirs.sh, which does not exist in a
+# fixture HOME — so config_dir came back null on the non-dry-run path too, and a
+# mutant that built the dir regardless of --dry-run survived. The real builder
+# reconciles a live credential; a stub is the only correct thing to point at.
+CLIDOT="$TMPROOT/clidot"; mkdir -p "$CLIDOT/scripts"
+cat > "$CLIDOT/scripts/claude-account-dirs.sh" <<'STUB'
+#!/bin/sh
+printf '%s' "/fixture/account-dirs/$1"
+STUB
+chmod +x "$CLIDOT/scripts/claude-account-dirs.sh"
+
+CLI_OUT=""; CLI_ERR=""; CLI_RC=0; CLI_ENV=""; PROCR=""
+cli() {   # $@ = claude-pick args; sets CLI_OUT, CLI_ERR, CLI_RC
+    # TZ is passed explicitly through `env -i`: the RFC 3339 rows below are
+    # unfailable on a UTC machine, and CI runners are UTC. See FIXTZ above.
+    env -i HOME="$FHOME" PATH="$CLIPATH" TZ="$FIXTZ" DOTFILES_ROOT="$CLIDOT" \
+        CLAUDE_ACCOUNT_DIRS_ROOT="$FHOME/.local/state/claude-account-dirs" \
+        CLAUDE_TENANTS_FILE=/nonexistent \
+        ${PROCR:+CLAUDE_PICK_PROC_ROOT="$PROCR"} \
+        ${CLI_ENV:+"$CLI_ENV"} \
+        zsh "$PICK" "$@" >"$TMPROOT/cli.out" 2>"$TMPROOT/cli.err"
+    CLI_RC=$?
+    CLI_OUT="$(cat "$TMPROOT/cli.out")"
+    CLI_ERR="$(cat "$TMPROOT/cli.err")"
+}
+
+new_home cli1
+mkprof a1 '{"plan":{"tier":"Team"},"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
+mkprof b2 '{"plan":{"tier":"Team"},"five_hour":{"utilization":60.0},"seven_day":{"utilization":40.0}}'
+
+cli --dry-run
+check "a plain run prints the profile and nothing else"  "$CLI_OUT"  "a1"
+check "...with exit 0"                                   "$CLI_RC"   "0"
+check "...and stderr stays empty"                        "$CLI_ERR"  ""
+
+cli --nope
+check "an unknown option is exit 64, not a refusal"      "$CLI_RC"   "64"
+check "...and the usage error names the option"          "$(printf '%s' "$CLI_ERR" | head -1)" \
+      "claude-pick: unknown option: --nope"
+check "...printing nothing on stdout"                    "$CLI_OUT"  ""
+cli --tenant ''
+check "--tenant with an empty value is exit 64"          "$CLI_RC"   "64"
+cli --help
+check "--help is exit 0 and touches no account"          "$CLI_RC"   "0"
+
+# --json: the shape herdr-draft consumes (§5.6).
+cli --dry-run --json
+check "--json is one valid object"                       "$(printf '%s' "$CLI_OUT" | jq -e 'type' 2>/dev/null)" '"object"'
+check "...naming the profile"                            "$(printf '%s' "$CLI_OUT" | jq -r .profile)" "a1"
+check "...with config_dir null under --dry-run"          "$(printf '%s' "$CLI_OUT" | jq -r '.config_dir // "null"')" "null"
+# The other half of the pair, and without it the row above is satisfied by a CLI
+# that can never build a dir at all: `null` is also what a broken builder gives.
+cli --json
+check "...and a REAL run reports the dir it built"      "$(printf '%s' "$CLI_OUT" | jq -r '.config_dir // "null"')" "/fixture/account-dirs/a1"
+cli --dry-run --json
+check "...the usage figures as numbers"                  "$(printf '%s' "$CLI_OUT" | jq -r '"\(.usage.five_hour)/\(.usage.weekly)"')" "10/40"
+check "...resets_at.five_hour in RFC 3339 UTC"           "$(printf '%s' "$CLI_OUT" | jq -r .resets_at.five_hour)" "2099-01-01T00:00:00Z"
+check "...an absent weekly reset as null, never an epoch date" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.resets_at.weekly // "null"')" "null"
+check "...every non-chosen candidate in skipped, structured" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.skipped | map(.profile) | join(",")')" "b2"
+check "...and the machine reading it decided on"         "$(printf '%s' "$CLI_OUT" | jq -r '.machine | has("load1")')" "true"
+
+# An UNKNOWN figure must be null, never 0: that distinction is the whole point of
+# the metrics layer, and this is the last place it can be thrown away.
+new_home cli2
+mkprof a1 '-'
+cli --dry-run --json
+check "an unreadable usage figure serialises as null, not 0" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.usage.five_hour // "null"')" "null"
+check "...and the class says why it was chosen anyway"    "$(printf '%s' "$CLI_OUT" | jq -r .class)" "unknown"
+
+# The refusals.
+new_home cli3
+mkprof a1 '{"five_hour":{"utilization":99.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"}}'
+cli --strict --dry-run
+check "--strict on an exhausted pool is exit 2"          "$CLI_RC"   "2"
+check "...and stderr carries the reason, for --on-failure" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused')" "1"
+check "...with nothing on stdout to mistake for a name"  "$CLI_OUT"  ""
+cli --dry-run
+check "...while without --strict it proceeds, exit 0"    "$CLI_RC"   "0"
+cli --strict --dry-run --json
+check "--strict --json still emits an object on the refusal" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.state')" "exhausted"
+check "...whose profile is null, not a name it did not choose" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.profile // "null"')" "null"
+check "...and whose exit_code matches the process's"     "$(printf '%s' "$CLI_OUT" | jq -r .exit_code)" "$CLI_RC"
+
+new_home cli4
+cli --dry-run
+check "no registered profile is exit 5"                  "$CLI_RC"   "5"
+
+new_home cli5
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+cli --dry-run --tenant nosuchtenant
+check "an unusable tenant is exit 4"                     "$CLI_RC"   "4"
+cli --dry-run --profile nope
+check "--profile naming an unregistered account is exit 5" "$CLI_RC" "5"
+cli --dry-run --profile a1 --json
+check "--profile naming a registered one pins it, class pinned" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '"\(.profile)/\(.class)"')" "a1/pinned"
+
+# A PIN NEVER REFUSES ON THE ACCOUNT — overriding the ranking is what --profile is
+# for — but it must say when the seat it was handed is spent, because "it started
+# and died twenty minutes in" is the outcome that warning prevents.
+new_home cli5b
+mkprof a1 '{"five_hour":{"utilization":99.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"}}'
+cli --dry-run --profile a1
+check "pinning a spent account still succeeds"           "$CLI_RC"   "0"
+check "...and names it on stdout regardless"             "$CLI_OUT"  "a1"
+check "...but says on stderr that it is exhausted"       "$(printf '%s' "$CLI_ERR" | grep -c "'a1' is exhausted")" "1"
+cli --dry-run --profile a1 --json
+check "...and records it in warnings, for a JSON caller" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '[.warnings[] | select(test("exhausted"))] | length')" "1"
+
+# A quarantined account is the sharper case: clauth has said the credential does
+# not work, and a pin overrides that too — so the line has to be there.
+new_home cli5c
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+printf 'active_profile = "a1"\nauth_broken = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+cli --dry-run --profile a1
+check "pinning a QUARANTINED account warns rather than refusing" \
+      "$(printf '%s' "$CLI_ERR" | grep -c "'a1' is excluded")" "1"
+check "...and still exits 0, because the pin is the override" "$CLI_RC" "0"
+
+# A FRESH FIXTURE, because the rows above leave a1 quarantined — and then a
+# machine-ceiling row measures exit 2 (nothing usable) instead of exit 3, or
+# passes for the wrong reason. A fixture that carries state forward from the
+# previous row is the same class of fault as a ledger that does.
+new_home cli5d
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+mkproc 24.00 0-7 8000000 4000000
+CLI_ENV='CLAUDE_PICK_LOAD_MAX=200'
+cli --strict --dry-run
+check "a machine ceiling refuses a strict CLI with exit 3" "$CLI_RC" "3"
+# EVERY refusal reports a null profile, not only the ones _claude_pick_for_dir
+# handles: a JSON object naming an account beside a non-zero exit is one a caller
+# can act on by mistake. The pinned path had to be taught this separately, since
+# it sets REPLY before the machine is ever measured.
+cli --strict --dry-run --profile a1 --json
+check "...and a PINNED refusal reports no profile either" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '"\(.state)/\(.profile // "null")"')" "backpressure/null"
+cli --strict --force --dry-run
+check "...and --force gets past it"                      "$CLI_RC"   "0"
+CLI_ENV=""; PROCR=""
+
+# --explain is stderr, so it can never corrupt the one line a caller reads.
+new_home cli6
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+mkprof b2 '{"five_hour":{"utilization":99.0}}'
+cli --dry-run --explain
+check "--explain leaves stdout as the bare profile name" "$CLI_OUT"  "a1"
+check "...and puts a row per candidate on stderr"        "$(printf '%s' "$CLI_ERR" | grep -cE '^  (a1|b2) ')" "2"
+check "...naming each one's class"                       "$(printf '%s' "$CLI_ERR" | grep -c 'exhausted')" "1"
+check "...and what it picked"                            "$(printf '%s' "$CLI_ERR" | grep -c 'picked:  a1')" "1"
+
+# THE TWO RENDERINGS OF AN UNMEASURED VALUE MUST DIFFER, and no row saw that
+# until a mutant swapped one for the other and survived: every fixture above
+# reads the real /proc, where both renderings agree. JSON says `null` so a
+# consumer can tell "not measured" from a number; the report says `unknown`,
+# which is the word every other unmeasured field in this repo uses. One renderer
+# gives one of them the other's answer, and `load null on unknown threads` reads
+# as a bug in the picker rather than as a machine it could not measure.
+new_home cli7
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+PROCR="$TMPROOT/proc-none"; mkdir -p "$PROCR"
+cli --dry-run --explain
+check "an unmeasured machine reads 'unknown' in the report" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'machine: load unknown on unknown threads, swap unknown$')" "1"
+cli --dry-run --json
+check "...and null in the JSON, never the word" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.machine.load1 // "null"')" "null"
+check "...for every machine field"       "$(printf '%s' "$CLI_OUT" | jq -r '[.machine[] | . == null] | all')" "true"
+PROCR=""
+
+# EVERY exit path reports the machine, including the two that give up before the
+# accounts are even looked at. herdr-draft's failure row shows these numbers, and
+# a refusal that cannot say what the machine was doing is the empty answer this
+# repo keeps paying for. The measurement is taken first and the VERDICT deferred,
+# so an unusable table still reports exit 4 rather than 3 — the fixable fault
+# outranks the transient one.
+# The fixture /proc is over the ceiling AND the tenant is unusable, both at once
+# — which is what makes the precedence assertion mean anything. With a quiet
+# machine, "exit 4, not 3" holds however the two are ordered, and a mutant that
+# refuses on the machine first survives.
+new_home cli8
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+mkproc 24.00 0-7 8000000 4000000
+CLI_ENV='CLAUDE_PICK_LOAD_MAX=200'
+cli --strict --dry-run --tenant nosuchtenant --json
+check "an exit-4 refusal still reports the machine it measured" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.machine.ncpu != null')" "true"
+check "...and an unusable table outranks a machine ceiling: exit 4, not 3" \
+      "$CLI_RC"   "4"
+new_home cli9
+cli --strict --dry-run --json
+check "an exit-5 refusal reports the machine too" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.machine.ncpu != null')" "true"
+check "...and no credential outranks the ceiling too: exit 5, not 3" \
+      "$CLI_RC"   "5"
+CLI_ENV=""; PROCR=""
+
+check "the CLI does not source system.sh" \
+      "$(grep -c 'functions/system.sh' "$PICK")" "0"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== canary: nothing the picker READS reaches either stream ==="
+#
+# A diagnostic that prints a credential is worse than no diagnostic. The picker
+# reads four clauth files plus status.json and its own ledger; a token-shaped
+# string and an `api_key = "..."` line are planted in every one of them, and no
+# exit path may echo either.
+#
+# The one field deliberately derived from a cache is the plan TIER, so the canary
+# is planted under keys the picker does not read rather than in that field —
+# asserting the tier is not printed would be asserting against the spec. A row
+# below checks the tier DID come out, so "clean" cannot be satisfied by a run
+# that read nothing at all.
+#
+# The tenant file is deliberately NOT canaried, and that is a decision rather
+# than an omission. Its entries are QUOTED BY DESIGN in the bad-table message
+# (_CLAUDE_TENANT_WHY names the offending entry, which is the entire job of that
+# diagnostic), so a canary there would be a row against a feature. It is also the
+# one file in the set that holds no credential: it is routing data, and this
+# repo's Security Rules send every secret to ~/.zshrc.local instead.
+
+# Assembled at runtime, so this file contains no string that would trip the
+# gitleaks pre-commit hook over its own test data.
+CANARY="gho_$(printf '%s' 'AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII')"
+CANARY_VAL="$(printf '%s' 'deadbeefcafef00dfeedfacedecafbad0badc0de')"
+CANARY2="api_key = \"$CANARY_VAL\""
+
+plant() {
+    local d="$FHOME/.clauth" prof
+    mkdir -p "$d/live_sessions"
+    # Valid JSON throughout: an invalid cache takes a path that reads nothing,
+    # and the rows would then pass because nothing was read.
+    for prof in "$d"/profiles/*/; do
+        [[ -d "$prof" ]] || continue
+        if [[ -r "$prof/usage_cache.json" ]]; then
+            jq --arg c "$CANARY" '. + {canary: $c}' "$prof/usage_cache.json" \
+               > "$prof/usage_cache.json.new" \
+               && mv "$prof/usage_cache.json.new" "$prof/usage_cache.json"
+        fi
+        printf 'disabled = false\n%s\n' "$CANARY2" > "$prof/config.toml"
+    done
+    printf 'active_profile = "a1"\nauth_broken = []\n%s\n' "$CANARY2" > "$d/profiles.toml"
+    printf '{"active_profile":"a1","canary":"%s"}\n' "$CANARY" > "$d/status.json"
+    printf '{"current_member":"a1","pid":1,"canary":"%s"}\n' "$CANARY" > "$d/live_sessions/s.json"
+    mkdir -p "$FHOME/.local/state/claude-account-dirs"
+    printf 'a1\t1\n%s\n' "$CANARY" > "$FHOME/.local/state/claude-account-dirs/.pick-ledger"
+}
+
+canary_run() {   # $@ = claude-pick args -> "clean" or "LEAKED"
+    local both
+    both="$(env -i HOME="$FHOME" PATH="$CLIPATH" TZ="$FIXTZ" \
+              CLAUDE_ACCOUNT_DIRS_ROOT="$FHOME/.local/state/claude-account-dirs" \
+              CLAUDE_TENANTS_FILE=/nonexistent \
+              ${PROCR:+CLAUDE_PICK_PROC_ROOT="$PROCR"} \
+              ${CLI_ENV:+"$CLI_ENV"} \
+              zsh "$PICK" "$@" 2>&1)"
+    if printf '%s' "$both" | grep -qF -e "$CANARY" -e "$CANARY_VAL"; then
+        printf 'LEAKED'
+    else
+        printf 'clean'
+    fi
+}
+
+# Exit 0 — an ordinary pick, plain, JSON, explained and pinned.
+new_home can1
+mkprof a1 '{"plan":{"tier":"Team"},"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
+mkprof b2 '{"plan":{"tier":"Team"},"five_hour":{"utilization":60.0},"seven_day":{"utilization":40.0}}'
+plant
+check "exit 0, plain"                 "$(canary_run --dry-run)"                     "clean"
+check "exit 0, --json"                "$(canary_run --dry-run --json)"              "clean"
+check "exit 0, --explain"             "$(canary_run --dry-run --explain)"           "clean"
+check "exit 0, --profile pinned"      "$(canary_run --dry-run --profile a1 --json)" "clean"
+# ...and the run really did read the planted files, or every row above is
+# satisfied by a picker that read nothing at all.
+cli --dry-run --json
+check "...and the planted cache WAS read (the tier came out of it)" \
+      "$(printf '%s' "$CLI_OUT" | jq -r .tier)" "Team"
+
+# Exit 2 — refused, exhausted. The loudest path: a line per member, built out of
+# the same files.
+new_home can2
+mkprof a1 '{"plan":{"tier":"Team"},"five_hour":{"utilization":99.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"}}'
+mkprof b2 '{"plan":{"tier":"Team"},"five_hour":{"utilization":98.0}}'
+plant
+check "exit 2, refused strict"        "$(canary_run --strict --dry-run)"            "clean"
+check "exit 2, refused with --json"   "$(canary_run --strict --dry-run --json)"     "clean"
+check "exit 0, least-bad interactive" "$(canary_run --dry-run --explain)"           "clean"
+
+# Exit 3 — a machine ceiling.
+mkproc 24.00 0-7 8000000 4000000
+CLI_ENV='CLAUDE_PICK_LOAD_MAX=200'
+check "exit 3, machine ceiling"       "$(canary_run --strict --dry-run)"            "clean"
+CLI_ENV=""; PROCR=""
+
+# Exit 4 — an unusable tenant. That message quotes the TENANT, which is caller
+# input, not file content.
+check "exit 4, unusable tenant"       "$(canary_run --dry-run --tenant nosuchtenant)" "clean"
+check "exit 4, with --explain"        "$(canary_run --dry-run --tenant nosuchtenant --explain)" "clean"
+
+# Exit 5 — nothing registered, with the other files still there to be read.
+new_home can3
+plant
+check "exit 5, no profiles"           "$(canary_run --dry-run)"                     "clean"
+
+# Exit 64 — a usage error, which prints the usage text.
+check "exit 64, usage error"          "$(canary_run --nope)"                        "clean"
+
+# A quarantined account is the one case where a profiles.toml SPAN is matched and
+# a reason is printed out of it, so it gets its own row.
+new_home can4
+mkprof a1 '{"plan":{"tier":"Team"},"five_hour":{"utilization":10.0}}'
+mkprof b2 '{"plan":{"tier":"Team"},"five_hour":{"utilization":10.0}}'
+plant
+printf 'active_profile = "b2"\nauth_broken = [\n  "a1",\n]\n%s\n' "$CANARY2" \
+    > "$FHOME/.clauth/profiles.toml"
+check "a quarantine reason printed out of profiles.toml carries nothing else" \
+      "$(canary_run --dry-run --explain)" "clean"
+cli --dry-run
+check "...and the quarantined account really was excluded" "$CLI_OUT" "b2"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
