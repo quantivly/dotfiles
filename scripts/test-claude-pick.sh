@@ -729,6 +729,25 @@ echo "=== _claude_pick_for_dir: the one code path, and its five exits ==="
 
 # The account-dir root is pointed at the fixture so the ledger and the holder
 # pidfiles land there and not in the developer's own state directory.
+# REAL pidfiles with LIVE pids, because _claude_holder_count prunes with `kill -0`
+# as it counts -- a fixture of invented pids counts zero and the crowding term
+# then contributes nothing, which is the difference between a row that pins the
+# tier and a row that passes either way.
+#
+# The COUNT is load-bearing too. With a1 at 5h=61%/7d=33% and b2 idle at 7d=100%,
+# the arithmetic alone gives a1 3900 - 1215h against b2's 0, so a1 wins on score
+# until h reaches 4. A fixture with fewer holders would pass with the tier
+# deleted; 11 mirrors what was measured on the real machine.
+HOLD_PIDS=()
+hold() {  # $1 = profile, $2 = how many live holders
+    local d="$FHOME/.local/state/claude-account-dirs/$1/holders" i
+    mkdir -p "$d"
+    for (( i=0; i<$2; i++ )); do
+        sleep 30 & : > "$d/$!"; HOLD_PIDS+=("$!")
+    done
+}
+unhold() { (( ${#HOLD_PIDS[@]} )) && kill "${HOLD_PIDS[@]}" 2>/dev/null; HOLD_PIDS=(); return 0; }
+
 pfd() {   # $1 = prelude, $2 = dir, $3 = tenant, $4 = strict
           #   -> "<rc>:<profile>:<state>:<class>"
     zsh -f -c "
@@ -766,8 +785,77 @@ check "with only unreadable accounts one is still chosen, as class unknown" \
 new_home fd2b
 mkprof a1 '-'
 mkprof b2 '{"five_hour":{"utilization":96.0},"seven_day":{"utilization":100.0}}'
+# DO-609: b2's week is fully spent, so it is now class `weekly-spent` rather than
+# `eligible` -- a TIER above `unknown`, since a measurement outranks the absence
+# of one. The claim this row makes is unchanged (b2 still wins) and the assertion
+# is strictly stronger: it pins the winner AND the demotion.
 check "a measured near-spent account still beats an unreadable one" \
-      "$(pfd '' '' '' 0 | cut -d: -f2,4)" "b2:eligible"
+      "$(pfd '' '' '' 0 | cut -d: -f2,4)" "b2:weekly-spent"
+
+# DO-609. THE BUG, REPRODUCED: an account at 100% of its weekly cap was picked
+# over one with two thirds of its week left, because the exhausted one was idle.
+#
+# weekf multiplies (base + bonus), but crowd is subtracted UNSCALED, so at
+# weekf=0 the score collapses to -crowd -- and crowd is near zero precisely
+# because an exhausted account has no holders. Measured on the real machine
+# 2026-09-10: quantivly-0/-3 at 7d=100% with 1 holder scored -300 and were
+# picked; quantivly-1 at 7d=33% with 11 holders scored -8334.
+#
+# THE HOLDERS ARE THE WHOLE FIXTURE. Without them b2 outscores a1 on the
+# arithmetic alone and the row passes with the tier deleted -- it would be
+# decoration. hold() puts real pidfiles under the busy account, so the ONLY
+# thing that can make a1 win is the tier.
+new_home fd2c
+mkprof a1 '{"five_hour":{"utilization":61.0},"seven_day":{"utilization":33.0}}'
+mkprof b2 '{"five_hour":{"utilization":0.0},"seven_day":{"utilization":100.0}}'
+hold a1 11
+check "an account with weekly headroom beats an idle, weekly-spent one" \
+      "$(pfd '' '' '' 0 | cut -d: -f2,4)" "a1:eligible"
+unhold
+
+# ...and the demotion must not become a refusal. DO-574 decided the weekly window
+# DEMOTES rather than refuses, on measurements that still hold: two Team seats
+# read 7d=100 with live sessions on them, and there were ZERO weekly-reset
+# refusals in 750 transcripts over 7 days. A tier is chosen when nothing above it
+# exists, so a pool that is entirely spent still yields an account.
+new_home fd2d
+mkprof a1 '{"five_hour":{"utilization":0.0},"seven_day":{"utilization":100.0}}'
+mkprof b2 '{"five_hour":{"utilization":20.0},"seven_day":{"utilization":100.0}}'
+check "a pool that is ENTIRELY weekly-spent still picks, and does not refuse" \
+      "$(pfd '' '' '' 0 | cut -d: -f1,3,4)" "0:picked:weekly-spent"
+check "...and refuses no harder for a headless caller either" \
+      "$(pfd '' '' '' 1 | cut -d: -f1,3)" "0:picked"
+
+# A spent week is MEASURED, so it outranks an unreadable account -- the same rule
+# that puts `unknown` after every measured candidate.
+new_home fd2e
+mkprof a1 '-'
+mkprof b2 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'
+check "weekly-spent outranks unknown, because a measurement outranks its absence" \
+      "$(pfd '' '' '' 0 | cut -d: -f2,4)" "b2:weekly-spent"
+
+# OVERFLOW MUST NOT BE REACHED BY A MERELY-CAPPED POOL. Overflow borrows another
+# tenant's account and bills work to the wrong place, so it is paid only when the
+# pool named nothing usable at all. A weekly-spent member IS usable -- that is the
+# whole point of demoting rather than refusing -- so the pass-found-something
+# guard has to count the weekly tier too.
+#
+# This row exists because the mutation survived without it: dropping
+# ${#_claude_pick_weekly} from that guard left all 197 other rows green while a
+# capped-but-usable pool silently borrowed someone else's seat.
+new_home fd2g
+mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":10.0}}'
+mkprof b2 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'
+check "a weekly-spent POOL member is used rather than borrowing from overflow" \
+      "$(pfd 'CLAUDE_TENANT_POOL=( t1 "b2" ); CLAUDE_TENANT_OVERFLOW=( t1 "a1" )' '' t1 0 | cut -d: -f2,4)" \
+      "b2:weekly-spent"
+
+# A 5h wall is still a 5h wall. The weekly tier must not rescue an account the
+# exhaustion class already caught, or DO-574's refusal path stops working.
+new_home fd2f
+mkprof a1 '{"five_hour":{"utilization":99.0},"seven_day":{"utilization":100.0}}'
+check "a 5h-exhausted account stays exhausted even with the weekly tier" \
+      "$(pfd '' '' '' 1 | cut -d: -f1,3)" "2:exhausted"
 
 # An exhausted pool: a real, self-clearing wall.
 new_home fd3
@@ -1052,7 +1140,13 @@ mkprof b2 '{"five_hour":{"utilization":99.0}}'
 cli --dry-run --explain
 check "--explain leaves stdout as the bare profile name" "$CLI_OUT"  "a1"
 check "...and puts a row per candidate on stderr"        "$(printf '%s' "$CLI_ERR" | grep -cE '^  (a1|b2) ')" "2"
-check "...naming each one's class"                       "$(printf '%s' "$CLI_ERR" | grep -c 'exhausted')" "1"
+# ANCHORED TO THE TABLE ROW, because the bare word was not unique to the rule:
+# --explain echoes the directory it was asked about, so any checkout whose path
+# contains "exhausted" counted twice. Measured -- this row failed in a worktree
+# named for DO-609's own Linear branch,
+# `zvi/do-609-stop-the-account-picker-preferring-an-exhausted-account`, and would
+# have passed in CI, which is the least useful way round.
+check "...naming each one's class"                       "$(printf '%s' "$CLI_ERR" | grep -cE '^  b2 +exhausted ')" "1"
 check "...and what it picked"                            "$(printf '%s' "$CLI_ERR" | grep -c 'picked:  a1')" "1"
 
 # THE TWO RENDERINGS OF AN UNMEASURED VALUE MUST DIFFER, and no row saw that

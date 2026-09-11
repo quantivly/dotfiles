@@ -302,11 +302,11 @@ if (( explain )); then
     print -r -- "  pool:   ${_claude_pick_pool_members:-<every registered profile>}"
     (( ${#_claude_pick_overflow_members} )) && \
       print -r -- "  overflow: ${_claude_pick_overflow_members}"
-    printf '  %-14s %-9s %5s %5s %7s %5s %9s  %s\n' \
+    printf '  %-14s %-12s %5s %5s %7s %5s %9s  %s\n' \
            PROFILE CLASS 5H 7D AGE HOLD SCORE WHY
     for e in "${_claude_pick_explain[@]}"; do
       f=( "${(@ps:\t:)e}" )
-      printf '  %-14s %-9s %5s %5s %7s %5s %9s  %s\n' \
+      printf '  %-14s %-12s %5s %5s %7s %5s %9s  %s\n' \
              "${f[1]}" "${f[2]}" "${f[4]}" "${f[5]}" "${f[6]}" "${f[7]}" "${f[8]:--}" "${f[3]}"
     done
     for e in "${_claude_pick_skipped[@]}"; do print -r -- "  skipped: $e"; done

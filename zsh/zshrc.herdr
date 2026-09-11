@@ -1198,6 +1198,7 @@ _claude_pick_pool() {
 _claude_pick_for_dir() {
   local dir="${1:-}" tenant="${2:-}" strict="${3:-0}" force="${4:-0}"
   local p name cls why score holders pass_name fb bp_rc=0
+  local week_spent=${CLAUDE_PICK_WEEK_SPENT:-100}
   local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER
   local -a registered pass_members exnames
   zmodload -F zsh/stat b:zstat 2>/dev/null
@@ -1216,7 +1217,7 @@ _claude_pick_for_dir() {
   # the first call's refusals as its own.
   _claude_pick_skipped=(); _claude_pick_warnings=()
   _claude_pick_explain=(); _claude_pick_exhausted=()
-  _claude_pick_cands=(); _claude_pick_unknowns=()
+  _claude_pick_cands=(); _claude_pick_unknowns=(); _claude_pick_weekly=()
 
   # WHICH TENANT. A pinned one skips the resolver; an empty `dir` says do not
   # resolve at all, which is how the legacy entry point keeps its meaning. The
@@ -1273,7 +1274,7 @@ _claude_pick_for_dir() {
   # bill the wrong tenant permanently for a wait of minutes.
   for pass_name in pool overflow; do
     if [[ "$pass_name" == overflow ]]; then
-      (( ${#_claude_pick_cands} + ${#_claude_pick_unknowns} + ${#_claude_pick_exhausted} )) && break
+      (( ${#_claude_pick_cands} + ${#_claude_pick_weekly} + ${#_claude_pick_unknowns} + ${#_claude_pick_exhausted} )) && break
       (( ${#_claude_pick_overflow_members} )) || break
       pass_members=( "${_claude_pick_overflow_members[@]}" )
       _claude_pick_overflow=1
@@ -1288,11 +1289,42 @@ _claude_pick_for_dir() {
       if [[ "$cls" == *:* ]]; then why="${cls#*:}"; cls="${cls%%:*}"; else why=""; fi
       _claude_profile_metrics "$name" >/dev/null 2>&1
       holders="$(_claude_holder_count "$name")"
+
+      # A SPENT WEEKLY WINDOW IS A TIER, NOT A WEIGHT -- and the `unknown` branch
+      # below already says why, for its own rule: "expressing it as a score would
+      # put it at the mercy of the weights". It then names this very case, "an
+      # eligible account at 96% with a spent week scores near zero too", and the
+      # weekly demotion was left as a weight anyway.
+      #
+      # It duly lost. weekf multiplies (base + bonus) but crowd is subtracted
+      # UNSCALED, so at weekf=0 the score collapses to -crowd -- and crowd is
+      # near zero precisely because an exhausted account is idle. Measured
+      # 2026-09-10: quantivly-0 and quantivly-3 at 7d=100% with one holder scored
+      # -300 each and were picked, while quantivly-1 at 7d=33% with real headroom
+      # and 11 holders scored -8334. The emptiness that exhaustion causes read as
+      # headroom -- the same shape CLAUDE.md records for the ranking DO-574
+      # replaced, where the emptiness came from a quarantine.
+      #
+      # This DEMOTES and never refuses, which is DO-574's measured decision kept
+      # intact: a tier is chosen when nothing above it exists, so a pool that is
+      # entirely spent still yields an account and still starts a session. What
+      # it cannot do any more is lose to a crowding term.
+      if [[ "$cls" == eligible && "$_CPM_UW" != unknown ]] && (( _CPM_UW >= week_spent )); then
+        cls=weekly-spent
+        why="7d window spent (${_CPM_UW}%)"
+      fi
+
       score=""
       case "$cls" in
         eligible)
           score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders")"
           _claude_pick_cands+=( "$score"$'\t'"$name" )
+          ;;
+        weekly-spent)
+          # Still SCORED, so the tier is ordered internally (least crowded
+          # first) rather than falling to whichever name sorts first.
+          score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders")"
+          _claude_pick_weekly+=( "$score"$'\t'"$name" )
           ;;
         unknown)
           # A TIER, not an arithmetic accident. "Unknown never outranks a
@@ -1315,7 +1347,7 @@ _claude_pick_for_dir() {
   # A pass that found nothing must not leave the overflow flag set: the
   # announcement would otherwise tell the reader a session is on a borrowed
   # account when it is actually on the shared credential.
-  (( ${#_claude_pick_cands} + ${#_claude_pick_unknowns} + ${#_claude_pick_exhausted} )) \
+  (( ${#_claude_pick_cands} + ${#_claude_pick_weekly} + ${#_claude_pick_unknowns} + ${#_claude_pick_exhausted} )) \
     || _claude_pick_overflow=0
 
   # The deferred machine verdict, from the measurement taken at the top.
@@ -1333,6 +1365,13 @@ _claude_pick_for_dir() {
   # both would read the same "least recent" and both would choose it.
   if (( ${#_claude_pick_cands} )); then
     _claude_pick_class=eligible
+  elif (( ${#_claude_pick_weekly} )); then
+    # Above `unknown`, because a measurement outranks the absence of one -- the
+    # same rule that puts `unknown` after every measured candidate. A spent week
+    # is a measured, still-usable account; an unreadable one is not known to be
+    # anything.
+    _claude_pick_cands=( "${_claude_pick_weekly[@]}" )
+    _claude_pick_class=weekly-spent
   elif (( ${#_claude_pick_unknowns} )); then
     _claude_pick_cands=( "${_claude_pick_unknowns[@]}" )
     _claude_pick_class=unknown
@@ -1522,7 +1561,7 @@ claude() {
   local _claude_pick_load="" REPLY="" _claude_pick_overflow=0
   local -a _claude_pick_skipped=() _claude_pick_warnings=()
   local -a _claude_pick_explain=() _claude_pick_exhausted=()
-  local -a _claude_pick_cands=() _claude_pick_unknowns=()
+  local -a _claude_pick_cands=() _claude_pick_unknowns=() _claude_pick_weekly=()
   local -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
   local _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
   local _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
@@ -2028,7 +2067,7 @@ hspawn() {
   local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
   local -a _claude_pick_skipped=() _claude_pick_warnings=()
   local -a _claude_pick_explain=() _claude_pick_exhausted=()
-  local -a _claude_pick_cands=() _claude_pick_unknowns=()
+  local -a _claude_pick_cands=() _claude_pick_unknowns=() _claude_pick_weekly=()
   local -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
   local _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
   local _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
