@@ -756,11 +756,51 @@ _reconcile_credential_locked() {
 # stored token it can no longer poll with -- which is how `personal` reached
 # auth_broken.
 reconcile_all() {
-    local d profile rc=0 seen=0
+    local d profile rc=0 seen=0 root_real tgt
     [[ -d "$ROOT" ]] || { warn "no account dirs at ${ROOT/#$HOME/\~} — nothing to reconcile"; return 0; }
+    # Physical, because the containment test below compares against it and $ROOT
+    # itself may be reached through a symlink.
+    root_real="$(cd "$ROOT" 2>/dev/null && pwd -P)" || root_real="$ROOT"
     shopt -s nullglob
     for d in "$ROOT"/*/; do
         profile="$(basename "$d")"
+
+        # `*/` matches a SYMLINK to a directory as well as a real one -- measured:
+        # with `real/`, `link -> real` and `dangle -> nowhere` present, `*/`
+        # yields the first TWO and a bare `*` yields all three. So a compat
+        # symlink left behind by a profile rename was walked as an account of its
+        # own while its target was walked again under its real name, and the
+        # RETIRED name was reconciled forever: 1,259 refusals in 24h on this box
+        # (2026-09-11), each telling the reader to `clauth login quantivly-2` for
+        # a profile that deliberately no longer exists. Advice that is worse than
+        # silence, since following it would recreate the retired profile.
+        #
+        # DO-604 is the exact mirror of this in claude-doctor, where zsh's
+        # `*(N/)` EXCLUDED symlinked account dirs and the whole section skipped
+        # them without a word. Same feature, two globs, opposite errors.
+        #
+        # Resolving INSIDE the root means the target is reconciled under its own
+        # name, so there is genuinely nothing to do here. Resolving OUTSIDE it is
+        # NOT a silent skip -- nothing else will reach that directory. A DANGLING
+        # link never gets here (the glob above excludes it); reporting that
+        # half-finished rename is claude-doctor's job, which DO-604 gave an
+        # `*(N@)` arm for. The empty-$tgt arm below therefore covers only a `cd`
+        # that fails for another reason, such as permissions.
+        if [[ -L "${d%/}" ]]; then
+            tgt="$(cd "${d%/}" 2>/dev/null && pwd -P)" || tgt=""
+            if [[ -n "$tgt" && "$tgt" == "$root_real"/* ]]; then
+                continue
+            fi
+            warn "$profile: an account dir symlinked outside ${ROOT/#$HOME/\~}${tgt:+ (-> $tgt)} — left alone"
+            continue
+        fi
+
+        # NOTE: this asks whether a DIRECTORY EXISTS, not whether clauth
+        # registers the profile -- an emptied, deregistered profile dir passes
+        # it. The symlink skip above closes the observed case (every stray dir
+        # here had a matching compat link); tightening this to a real
+        # registration test is DO-611's second half and costs a clauth fork per
+        # profile, so it is deliberately not done here.
         [[ -d "$PROFILES_DIR/$profile" ]] || {
             warn "$profile: an account dir with no clauth profile — left alone"
             continue

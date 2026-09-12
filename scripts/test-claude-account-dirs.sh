@@ -1104,6 +1104,65 @@ mkdir -p "$FHOME/.clauth/profiles"
 run_sut --reconcile
 want_rc "--reconcile with nothing to do is not an error" 0
 
+# A compat symlink left by a profile rename is NOT an account of its own. `*/`
+# matches a symlink to a directory as well as a real one, so the retired NAME was
+# walked too and reconciled forever -- 1,259 refusals in 24h on the machine this
+# was found on, every one of them advising `clauth login <retired-name>`.
+#
+# The needle is 'refusing to' and NOT 'no clauth profile': the stray PROFILE dir
+# that a rename also leaves behind means the loop got PAST the no-profile guard
+# and reached the credential refusal, which is the message that actually shipped.
+# Matching the no-profile string would pass against a fixture with no stray dir,
+# i.e. against a state that never occurred.
+new_home g6; mk_profile p1
+run_sut --all
+mkdir -p "$FHOME/.clauth/profiles/p1old"          # the emptied, deregistered dir
+ln -s p1 "$ACCOUNT_ROOT/p1old"                    # ...and its compat symlink
+run_sut --reconcile
+want_rc  "--reconcile with a compat symlink succeeds" 0
+if [[ "$OUT" == *"refusing to"* ]]; then
+    bad "a compat symlink was reconciled as its own account"
+else
+    ok "a compat symlink inside the root is skipped, not reconciled"
+fi
+if [[ "$OUT" == *"p1old"* ]]; then
+    bad "the retired name was named in the output"
+else
+    ok "and the retired name is not mentioned at all"
+fi
+# The skip must not cost the TARGET its reconciliation -- it is reconciled under
+# its own name, and this is the row that proves the skip did not swallow it.
+want_link "and the target is still reconciled under its real name" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+
+# Outside the root, nothing else will ever reach that directory, so a skip there
+# would be silent data loss rather than a tidy-up. An empty answer is not agreement.
+new_home g7; mk_profile p1
+run_sut --all
+mkdir -p "$TMPROOT/elsewhere.g7"
+ln -s "$TMPROOT/elsewhere.g7" "$ACCOUNT_ROOT/stray"
+run_sut --reconcile
+want_out "an account dir symlinked OUTSIDE the root is named" "symlinked outside"
+want_rc  "and that is reported, not fatal"                    0
+
+# A DANGLING compat link never reaches the loop at all: measured, `*/` matches a
+# symlink only when it resolves to a directory (`real/` and `link -> real` both
+# match; `dangle -> nowhere` does not), while a bare `*` matches all three. So the
+# glob choice is load-bearing, and this row exists to catch someone "tidying" it to
+# `*` -- which would start walking dangling links with nothing to handle them.
+# Reporting a half-finished rename is claude-doctor's job, which DO-604 gave the
+# `*(N@)` arm for exactly this; the reconciler correctly has nothing to say.
+new_home g8; mk_profile p1
+run_sut --all
+ln -s "$ACCOUNT_ROOT/gone-p9" "$ACCOUNT_ROOT/p9"
+run_sut --reconcile
+want_rc "a dangling account-dir symlink is not fatal" 0
+if [[ "$OUT" == *"p9"* ]]; then
+    bad "a dangling symlink reached the loop — the glob was widened to '*'"
+else
+    ok "and is invisible to the reconcile loop, as the '*/' glob intends"
+fi
+
 # It is a timer's ExecStart. A refusal only a human can resolve must be REPORTED,
 # not turned into a unit that fails 720 times a day forever — an alarm that is
 # always on is an alarm nobody reads.
