@@ -253,7 +253,7 @@ claude-doctor() {
   local unknown_n cfgdir credpath ldir grp envblob n label procroot
   local uc_max uc_age uc_oldest uc_oldest_p uc_seen uc_stale uc_missing ucf
   local pname
-  local -a date_prefixes files stray_profiles unprofiled_dirs
+  local -a date_prefixes files stray_profiles unprofiled_dirs unmanaged_stores
   local -A group_n group_label
 
   while (( $# )); do
@@ -1299,14 +1299,27 @@ claude-doctor() {
     # A ~950-line function with no block scope is the real hazard: every `local`
     # in it shares one namespace. A state-table row now greps stdout for any bare
     # `name=value` line, so the next one is caught whatever the variable is.
-    stray_profiles=(); unprofiled_dirs=()
+    stray_profiles=(); unprofiled_dirs=(); unmanaged_stores=()
     for pdir in "$HOME"/.clauth/profiles/*(ND-/); do
       pname="${pdir:t}"
       # A name clauth cannot own is not a half-finished profile. Same rule, same
       # helper, as the account-dir enumeration above — see its comment for why
       # the test is a leading dot and nothing wider.
+      #
+      # And the SAME TWO-WAY SPLIT, which this loop was missing: classifying on
+      # the name alone filed a dot-named store holding a LIVE CREDENTIAL as
+      # benign archived state, as a note. That is the one shape this wide
+      # enumeration exists to surface — a credential nothing rotates, under a
+      # name no profile can ever be created to adopt, so `clauth login` cannot
+      # even be offered as the remedy. A fix that is right on one side of a
+      # report and wrong on the other is worse than one that is wrong on both:
+      # the correct half is the reason nobody re-reads the other.
       if _claude_name_cannot_be_profile "$pname"; then
-        unprofiled_dirs+=("$pname")
+        if [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]]; then
+          unmanaged_stores+=("$pname")
+        else
+          unprofiled_dirs+=("$pname")
+        fi
         continue
       fi
       [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]] && continue
@@ -1318,6 +1331,13 @@ claude-doctor() {
       echo "    picker and the account-dir builder both skip it. Remove when nothing is"
       echo "    running under it, or 'clauth login <name>' if it should be real —"
       echo "    but NOT if the name was renamed away: that would make it real again."
+    fi
+    if (( ${#unmanaged_stores} )); then
+      _doctor_warn "under profiles/, not a profile name but holding a credential: ${(j:, :)unmanaged_stores}"
+      echo "    A leading dot cannot be a clauth profile name, so nothing reconciles these and"
+      echo "    nothing rotates them — and 'clauth login' cannot adopt them, because it refuses"
+      echo "    the name outright ('can't start with a dot'). Move the credential into a real"
+      echo "    profile or shred it; an unmanaged copy of a login is what this section is for."
     fi
     if (( ${#unprofiled_dirs} )); then
       _doctor_note "under profiles/, not profile director$( (( ${#unprofiled_dirs} == 1 )) && echo y || echo ies ): ${(j:, :)unprofiled_dirs}"

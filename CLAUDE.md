@@ -2479,11 +2479,43 @@ Traps specific to the checker, each of which produced a green tick first:
   variable is declared once, here"). #132 then added `local pdir pname` 900 lines
   down, and because `pdir` already held a value the deployed doctor printed a bare
   `pdir=/home/…/.clauth/profiles/<alphabetically last profile>` onto stdout between
-  two sections — loop residue from the `preferred` check 555 lines earlier. Nothing
+  two sections — loop residue from the `preferred` check 555 lines earlier. **And it
+  was never confined to machines that have profiles:** on a modular-adopter fixture
+  with no clauth, no `~/.clauth` and no credential at all, the same build prints
+  `pdir=''` — an empty residue is still a bare `name=value` line in a report, and it
+  is the machine class least likely to have anyone who would recognise it. Nothing
   in the repo echoes `pdir`. The row added for it is **generic**: it greps the
-  report for `^[a-z_]*=` and fails on any bare `name=value` line, so it catches the
-  next one whatever the variable is called. A convention stated in a comment is not
-  enforcement; the row is.
+  report with `^[A-Za-z_][A-Za-z0-9_]*=` and fails on any bare `name=value` line, so
+  it catches the next one whatever the variable is called — including the
+  capitalised and digit-bearing names `^[a-z_]*=` would miss, which is what an
+  earlier draft of this paragraph claimed it used. A convention stated in a comment
+  is not enforcement; the row is — and neither is a comment *about* the row, so the
+  pattern is quoted here exactly as the code spells it.
+- **A fix that is right on ONE SIDE of a report is worse than one that is wrong on
+  both.** The account-dir enumeration splits a name clauth cannot own into two cases
+  — holds a credential (a ✗, because nothing rotates it) and does not (a note). The
+  profile-store enumeration one block down tested the *name* and stopped, so a
+  dot-named store holding a **live credential** was filed as benign archived state,
+  as a note. That is the exact shape the wide enumeration exists to surface, caught
+  on one side and mislabelled on the other — and the correct half is precisely why
+  nobody re-reads the other. Found by independent review, not by the author.
+  **The premise underneath is now VERIFIED rather than assumed, and two people got
+  it wrong first.** Both a reviewer and the orchestrating session concluded clauth
+  has no profile-name validation — the reviewer could not test it because doing so
+  "means running a browser OAuth flow", and a source read found only `preserved`
+  matching `reserved`. Both are wrong. `actions::validate_profile_name` rejects a
+  leading dot outright, `cmd_login`'s `LoginRoute::New` arm calls it, and on the
+  **installed 0.15.1 binary** `clauth login .dottest` exits
+  `name: letters, digits and - _ . @ + only, and can't start with '.'` **before any
+  browser opens** — so the test is free, and the control (an ordinary name) goes
+  straight to the OAuth URL, which is what proves validation is the only thing in
+  between. The greps that missed it are instructive: the function is named
+  `validate_profile_name` but its message contains neither "profile" nor "invalid".
+  So `clauth login <name>` genuinely cannot be offered as the remedy, which is what
+  the new ✗ says. **The fix does not rest on the premise either way**, which is the
+  point: it keys on the observable shape — a credential is present, or it is not —
+  the same reasoning `2026-09-10`'s migration guard used, and it would still be
+  right if the naming question were ever settled the other way.
 - **A new external tool is a new way for a check to go quiet, twice in one day.**
   The `readlink -f` note below was written, and then an `awk`-based rewrite of the
   chain match reintroduced exactly the same failure — awk is not on the state

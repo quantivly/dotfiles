@@ -1383,6 +1383,68 @@ fi
 want_out "...and the impossible list names ONLY the dot directory" \
          "not profile directory: .internal-state"
 
+# THE SPLIT HAS TO EXIST ON BOTH SIDES. Classifying on the name alone filed a
+# dot-named store HOLDING A LIVE CREDENTIAL as benign archived state, as a note —
+# the one shape the wide enumeration exists to surface. The account-dir loop got
+# this right; this loop did not, and a fix that is correct on one side of a report
+# and wrong on the other is worse than one wrong on both, because the correct half
+# is why nobody re-reads the other.
+#
+# The premise underneath is VERIFIED, not assumed, and the verification is what
+# makes the remedy sayable: `clauth login .x` on the installed 0.15.1 exits with
+# "name: letters, digits and - _ . @ + only, and can't start with '.'" BEFORE any
+# browser opens (actions::validate_profile_name, called from cmd_login's
+# LoginRoute::New arm). So such a store can only have been made by hand, a
+# restore, or an older clauth — and `clauth login` genuinely cannot adopt it.
+new_home u4b; write_cred
+mkdir -p "$FHOME/.clauth/profiles/.archived-profile"
+printf '{"claudeAiOauth":{"accessToken":"x"}}\n' > "$FHOME/.clauth/profiles/.archived-profile/credentials.json"
+mkdir -p "$FHOME/.clauth/profiles/.empty-archive"
+run_doctor
+# PER-LINE MEMBERSHIP, not a substring of the whole report, and not a needle that
+# pins list position or pluralisation. Both lines are `<label>: a, b` joins whose
+# label inflects (director*y*/director*ies*), so `"not profile directory: .archived-profile"`
+# silently stops matching the moment a second name joins the list — which is
+# exactly what the reverting mutant does. Two of these rows were written that way
+# first and survived their own mutants. This is the same fix the collation rows
+# above already use.
+HOLD_LINE="$(printf '%s' "$OUT" | grep 'but holding a credential:' || true)"
+ARCH_LINE="$(printf '%s' "$OUT" | grep 'under profiles/, not profile director' || true)"
+if [[ "$HOLD_LINE" == *.archived-profile* ]]; then
+    ok "a dot-named store holding a credential is a FINDING, not a note"
+else
+    bad "a dot-named store holding a credential is a FINDING, not a note — line was '$HOLD_LINE'"
+fi
+if [[ "$ARCH_LINE" != *.archived-profile* ]]; then
+    ok "...and is not filed as archived state"
+else
+    bad "...and is not filed as archived state — line was '$ARCH_LINE'"
+fi
+want_out "...and the remedy does not offer a login that would be refused" \
+         "can't start with a dot"
+# SEVERITY IS PART OF THE FIX, and it is ⚠ rather than ✗ because that is what the
+# account-dir sibling emits for the identical shape — matching it is the whole
+# change. What must NOT happen is the `·` note, which is counted as neither and is
+# the classification being corrected. Asserting the text alone cannot see that:
+# every needle above still matches when the emitter is downgraded.
+if [[ "$HOLD_LINE" == *"⚠"* ]]; then
+    ok "...and it is a warning, not the note it used to be filed as"
+else
+    bad "...and it is a warning, not the note it used to be filed as — line was '$HOLD_LINE'"
+fi
+# WHAT IT MUST LEAVE ALONE: an EMPTY dot-named store is still a note, or the split
+# would just have moved the error to the other side.
+if [[ "$ARCH_LINE" == *.empty-archive* ]]; then
+    ok "...while an empty one is still an ordinary note"
+else
+    bad "...while an empty one is still an ordinary note — line was '$ARCH_LINE'"
+fi
+if [[ "$HOLD_LINE" != *.empty-archive* ]]; then
+    ok "...and is not called a credential holder"
+else
+    bad "...and is not called a credential holder — line was '$HOLD_LINE'"
+fi
+
 # The same narrowness on the account-dir side, which calls the same helper.
 new_home u5; write_cred
 mkdir -p "$FHOME/.local/state/claude-account-dirs/_underscore"
