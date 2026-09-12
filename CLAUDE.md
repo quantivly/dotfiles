@@ -2131,11 +2131,19 @@ Design points that are load-bearing rather than preferences:
   with the pooled-sharing one below.
   **A LOCK IS A WRITE, and this one landed where nothing could be reconciled.**
   `exec {fd}>"$pdir/.reconcile.lock"` *creates* that file, and it was created before anything
-  established that `$pdir` is a real profile store — so every empty directory under
+  established that `$pdir` is a real profile store — so an empty directory under
   `~/.clauth/profiles/` collected a 0-byte `.reconcile.lock`, again on every timer tick, two minutes
-  apart, forever. There was never anything to serialise in that state: the locked function's second
-  test is `[[ ! -f "$S" ]]` and it refuses immediately with `refused-no-store`. The lock was pure
-  side effect. During a profile rename the cost compounds — each stage leaves a compat symlink at the
+  apart, forever. **Not "every" such directory**, which this file claimed on first writing and no run
+  supports: `reconcile_all` iterates *account dirs* and reconciles a profile only where a matching one
+  exists, so a store with no account dir is never visited and never got a lock — measured against the
+  pre-fix script, and the tell is that the row covering it has to `mkdir` both to reach the path.
+  There is effectively nothing to serialise in that state: the locked function's second
+  test is `[[ ! -f "$S" ]]` and it refuses immediately with `refused-no-store`. **"Effectively", not
+  "pure side effect"** — that stronger claim is untrue, and a weak justification is how a correct
+  change gets reverted: the refusal path still calls `cred_write_verdict`, which truncates and
+  rewrites `.reconcile-status`, and the lock *was* serialising that. What makes dropping it safe is
+  the absence of a CONTENDER — the only concurrent writers are timer-vs-timer, and a systemd
+  `oneshot` does not overlap itself. During a profile rename the cost compounds — each stage leaves a compat symlink at the
   old account-dir path, the reconciler visits it, and the lock reappears at exactly the store name
   the NEXT stage needs free, so the migration stalls on the reconciler's own leftovers and has to
   sweep them before every stage. The gate is `credentials.json` present, which is the same
@@ -2461,7 +2469,40 @@ Traps specific to the checker, each of which produced a green tick first:
   adopter without this repo's `zshrc` had a doctor that silently skipped a
   dot-prefixed account dir holding a credential. Both globs now carry the `D`
   qualifier, which forces dotfile matching regardless of the option, and a row
-  asserts the same directory is seen with GLOB_DOTS **off** and **on**.
+  asserts the directory is seen with GLOB_DOTS **off** — the state the suite runs in.
+  **The matching GLOB_DOTS-ON row was decoration and is gone**: with `D` present both
+  states see it, and with `D` deleted the option itself still does, so the mutant
+  dropping `D` failed the OFF row and left the ON row green. Its replacement — assert
+  the entry is reported exactly ONCE, since `*(ND-/)` and `*(ND@)` overlap and only
+  `${(u)...}` dedupes — was decoration too, measured: a plain directory matches only
+  the first glob. The two overlap solely on a **symlink to a directory**, which `-`
+  makes match both, so the once-ness row needs that fixture and now has it.
+- **"IS THERE A CREDENTIAL HERE" CANNOT ANSWER WHAT TO SAY ABOUT ONE, and answering it
+  with `[[ -e || -L ]]` produced advice that destroyed the thing it reported.** The
+  designed shape of a per-account credential is a **symlink** into
+  `~/.clauth/profiles/<p>/credentials.json` — the invariant stated above as *"the
+  credential is a symlink, never a copy"* — so the presence test is true for the
+  managed case. A dot-named archive holding that link was reported as *"not a profile
+  name, but it holds a credential … an unmanaged copy of a login"* with the remedy
+  *"move it into a real profile or shred it"*. Both claims are false for that input,
+  and the remedy is destructive: **`shred` follows a symlink and overwrites the
+  TARGET in place** — measured, the target file survives and its contents do not — so
+  following the doctor's own advice logs out every session on that account, the
+  outcome the account-dir design exists to prevent. `-L` folded in a **dangling** link
+  as well, reporting "it holds a credential" about a link with no target, in the one
+  state (a half-finished rename) the section exists to describe.
+  `_claude_cred_shape` answers the real question in four states — `file` (the only
+  unmanaged copy), `managed <profile>`, `dangling <path>`, `foreign <path>` — and
+  **one helper serves both loops**, because the store-side comment already recorded
+  why: *a fix that is right on one side of a report and wrong on the other is worse
+  than one wrong on both, since the correct half is the reason nobody re-reads the
+  other.*
+  **CI was 22/22 green over all of it, and the reason is one grep:** every fixture in
+  the section built the credential with `printf >`, so there was **no `ln -s` anywhere
+  in it**. The rows exercised the exceptional shape and never the invariant one, in a
+  check whose entire subject is whether a credential is managed. Each of the four
+  shapes has a fixture now, on both sides. Found by an independent review pass, not by
+  the author — the same shape as every other entry in this list.
 - **"Order-independent" has to mean it, and locale collation differs between this box
   and CI.** A row asserting two names in one report line was written as the substring
   `no credential: realprofile` — which does not remove the ordering dependency, it

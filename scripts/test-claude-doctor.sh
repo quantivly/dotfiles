@@ -1328,8 +1328,147 @@ fi
 PRELUDE='setopt GLOB_DOTS'
 run_doctor
 PRELUDE=''
-want_out "...and the same with GLOB_DOTS ON (an interactive shell here)" \
-         ".archive-20260910: not a profile name, but it holds a credential"
+# THE GLOB_DOTS-ON ROW THAT USED TO SIT HERE WAS DECORATION, and it is removed
+# rather than reworded. It asserted that a dot-named dir is still seen with the
+# option ON — but with `D` present both states see it, and with `D` DELETED the
+# option itself still makes it visible, so the mutant dropping `D` failed the OFF
+# row above and left this one green. It could not fail for the property it named.
+#
+# Its replacement attempt was decoration too, which is worth recording because the
+# reasoning looked sound: assert the entry is reported exactly ONCE, since
+# `*(ND-/)` and `*(ND@)` overlap and only `${(u)...}` dedupes them. Measured — the
+# `(u)` mutant survived the whole suite. A plain directory matches only the first
+# glob; the two overlap solely on a SYMLINK to a directory, which `-` makes match
+# both. So the once-ness row needs that fixture, and here it is.
+new_home u2h; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.local/state/claude-account-dirs/.archive-real"
+printf '{"claudeAiOauth":{"accessToken":"orphaned","expiresAt":9}}\n' \
+    > "$FHOME/.local/state/claude-account-dirs/.archive-real/.credentials.json"
+ln -s "$FHOME/.local/state/claude-account-dirs/.archive-real" \
+      "$FHOME/.local/state/claude-account-dirs/.archive-link"
+run_doctor
+U_HITS="$(printf '%s' "$OUT" | grep -c '\.archive-link: not a profile name' || true)"
+if [[ "$U_HITS" == 1 ]]; then
+    ok "a symlinked dir matches both globs and is still reported exactly once"
+else
+    bad "a symlinked dir matches both globs and is still reported exactly once — saw $U_HITS"
+fi
+
+# THE SHAPE EVERY ROW ABOVE MISSED, and the reason CI was green over a remedy that
+# destroys a credential. Every fixture in this section builds the credential as a
+# REAL FILE (`printf >`), and a real file is the exceptional case: CLAUDE.md's
+# invariant is "the credential is a symlink, never a copy", so on a healthy machine
+# every account dir holds a LINK into the profile store. The presence test
+# `[[ -e || -L ]]` is true for that link, so the managed shape was reported as "an
+# unmanaged copy of a login" with the remedy "move it into a real profile or shred
+# it" — and `shred` follows a symlink and overwrites the TARGET in place, which is
+# the live credential every session on that profile reads. Measured here: the
+# target file survives and its contents do not.
+#
+# So: one fixture per shape, on both sides of the report, and each asserts the
+# thing the reader would ACT on rather than merely that some line was printed.
+new_home u2b; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.local/state/claude-account-dirs/.archive-managed"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
+      "$FHOME/.local/state/claude-account-dirs/.archive-managed/.credentials.json"
+run_doctor
+no_out   "a MANAGED credential link is never called an unmanaged copy" \
+         ".archive-managed: not a profile name, but it holds a credential"
+want_out "...it is named as sharing the profile whose store it links into" \
+         ".archive-managed: archived directory sharing profile 'p1's credential"
+want_out "...and the reader is told NOT to shred it" \
+         "Do NOT shred the link"
+want_rc  "...and a shared link is not a warning at all" 0
+
+# A DANGLING link holds nothing, and `-L` is true for one — so folding it in with
+# `-e` reported "it holds a credential" about a link with no target and offered a
+# remedy for a file that is not there. A rename that removed the profile leaves
+# exactly this, which is the state this section exists to describe accurately.
+new_home u2c; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.local/state/claude-account-dirs/.archive-dangling"
+ln -s "$FHOME/.clauth/profiles/gone-away/credentials.json" \
+      "$FHOME/.local/state/claude-account-dirs/.archive-dangling/.credentials.json"
+run_doctor
+no_out   "a DANGLING credential link is not reported as holding a credential" \
+         ".archive-dangling: not a profile name, but it holds a credential"
+want_out "...it is named as dangling, and the target is named" \
+         ".archive-dangling: archived directory whose credential link is dangling"
+want_out "...and says plainly that there is nothing here to move" \
+         "there is no credential here to move anywhere"
+
+# A link OUT of the store is neither managed nor dangling: it resolves, but not to
+# anything clauth rotates. Distinct remedy, because the target may belong to
+# something else entirely — so the advice is to look before removing.
+new_home u2d; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.local/state/claude-account-dirs/.archive-foreign" "$FHOME/elsewhere"
+printf '{"claudeAiOauth":{"accessToken":"x","expiresAt":9}}\n' > "$FHOME/elsewhere/cred.json"
+ln -s "$FHOME/elsewhere/cred.json" \
+      "$FHOME/.local/state/claude-account-dirs/.archive-foreign/.credentials.json"
+run_doctor
+want_out "a credential linking OUTSIDE the store is its own finding" \
+         ".archive-foreign: not a profile name, and its credential links outside the store"
+no_out   "...and is not confused with a managed link" \
+         ".archive-foreign: archived directory sharing profile"
+
+# The store side has the identical split, through the same helper. A fix that is
+# right on one side of a report and wrong on the other is worse than one wrong on
+# both — the correct half is the reason nobody re-reads the other. That sentence is
+# in the production comment; these are the rows that hold it.
+new_home u2e; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.clauth/profiles/.store-archived"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
+      "$FHOME/.clauth/profiles/.store-archived/credentials.json"
+run_doctor
+no_out   "a store-side MANAGED link is never called an unmanaged copy" \
+         "under profiles/, not a profile name but holding a credential of its own: .store-archived"
+want_out "...it is named as sharing the real profile's credential" \
+         "archived name sharing a real profile's credential: .store-archived -> p1"
+want_out "...and the store side also warns against shredding the link" \
+         "overwrite the live credential the real profile is using"
+
+new_home u2f; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.clauth/profiles/.store-dangling"
+ln -s "$FHOME/.clauth/profiles/gone-away/credentials.json" \
+      "$FHOME/.clauth/profiles/.store-dangling/credentials.json"
+run_doctor
+no_out   "a store-side DANGLING link is not reported as holding a credential" \
+         "under profiles/, not a profile name but holding a credential of its own: .store-dangling"
+want_out "...it is named as a link that goes nowhere" \
+         "archived name whose credential link goes nowhere: .store-dangling"
+
+# A REAL FILE under either name keeps the original warning and the shred remedy,
+# because that shape genuinely is an unmanaged copy. The split must not swallow the
+# case the whole section was written for.
+new_home u2g; write_cred
+mk_account_dir p1 linked
+mkdir -p "$FHOME/.clauth/profiles/.store-realfile"
+printf '{"claudeAiOauth":{"accessToken":"orphaned","expiresAt":9}}\n' \
+    > "$FHOME/.clauth/profiles/.store-realfile/credentials.json"
+run_doctor
+want_out "a store-side REAL FILE is still the unmanaged-copy warning" \
+         "under profiles/, not a profile name but holding a credential of its own: .store-realfile"
+want_out "...and still offers shred, which is correct for a real file" \
+         "Move the credential into a real profile or shred"
+
+# A MACHINE WITH NOTHING BUT ARCHIVES HAS NO ACCOUNT DIRS, and must say so. The
+# `seen` flag was set as soon as the enumeration produced an entry — before the
+# classification that calls a dot-named archive "not an account dir" — so such a
+# machine printed both that line AND suppressed "no account dirs built yet",
+# contradicting itself on exactly the mid-migration state this section describes.
+# The flag is set past the classification now.
+new_home u2i; write_cred
+mkdir -p "$FHOME/.local/state/claude-account-dirs/.archive-only"
+run_doctor
+want_out "a root holding only archives still says no account dirs were built" \
+         "no account dirs built yet"
+want_out "...while still classifying the archive itself" \
+         ".archive-only: archived or internal directory, not an account dir"
 
 # A NORMAL name with no store keeps the existing warning — the classifier must not
 # swallow the case it was inserted in front of.
@@ -1408,7 +1547,7 @@ run_doctor
 # exactly what the reverting mutant does. Two of these rows were written that way
 # first and survived their own mutants. This is the same fix the collation rows
 # above already use.
-HOLD_LINE="$(printf '%s' "$OUT" | grep 'but holding a credential:' || true)"
+HOLD_LINE="$(printf '%s' "$OUT" | grep 'but holding a credential' || true)"
 ARCH_LINE="$(printf '%s' "$OUT" | grep 'under profiles/, not profile director' || true)"
 if [[ "$HOLD_LINE" == *.archived-profile* ]]; then
     ok "a dot-named store holding a credential is a FINDING, not a note"

@@ -515,13 +515,29 @@ reconcile_credential() {
     # A LOCK IS A WRITE, so it may not be taken until the thing being locked is
     # known to be a profile. `exec {fd}>"$pdir/.reconcile.lock"` CREATES that file,
     # and it was created before anything established that $pdir is a real profile
-    # store -- so every empty directory under ~/.clauth/profiles/ got a 0-byte
+    # store -- so an empty directory under ~/.clauth/profiles/ got a 0-byte
     # `.reconcile.lock` written into it, again on every timer tick, two minutes
     # apart, forever.
     #
-    # There was never anything to serialise in that state:
+    # NOT "every" such directory, which an earlier wording claimed and no run
+    # supports: `reconcile_all` iterates ACCOUNT DIRS and reconciles a profile
+    # only where a matching one exists, so a store with no account dir is never
+    # visited and never got a lock. Measured against the pre-fix script: a
+    # fixture holding `profiles/phantom` with no account dir produces none. The
+    # tell is in the row below, which has to mkdir both to reach this path.
+    #
+    # There is effectively nothing to serialise in that state:
     # _reconcile_credential_locked's SECOND test is `[[ ! -f "$S" ]]` and it
-    # refuses immediately with `refused-no-store`. The lock was pure side effect.
+    # refuses immediately with `refused-no-store`.
+    #
+    # Be exact about "effectively", because the stronger claim -- that the lock
+    # was PURE side effect -- is untrue and a weak justification invites the
+    # change to be reverted. The refusal path still calls `cred_write_verdict`,
+    # which truncates and rewrites `.reconcile-status`, and the lock was
+    # serialising that write for this profile/account-dir pair. What makes
+    # dropping it safe is not that there is no write but that there is no
+    # CONTENDER: the only concurrent writers here are timer-vs-timer, and a
+    # systemd `oneshot` does not overlap itself.
     #
     # The cost is not cosmetic during a profile rename. Each stage leaves a compat
     # symlink at the old account-dir path, the reconciler visits it, and the lock

@@ -221,6 +221,65 @@ _claude_file_age_s() {
 # the classification gets wider.
 _claude_name_cannot_be_profile() { [[ "${1:-}" == .* ]] }
 
+# WHICH OF THE FOUR SHAPES a credential path is, because "is there a credential
+# here" cannot answer what to SAY about one — and answering it with
+# `[[ -e || -L ]]` produced advice that destroyed the thing it was reporting.
+#
+# The designed shape of a per-account credential is a SYMLINK into
+# `~/.clauth/profiles/<p>/credentials.json` — CLAUDE.md states the invariant as
+# "the credential is a symlink, never a copy", and every account dir on a healthy
+# machine is that. So the presence test is true for the managed case, and calling
+# that "an unmanaged copy of a login" and offering `shred` as the remedy is worse
+# than saying nothing: `shred` FOLLOWS the link and overwrites the TARGET in
+# place, which is the live credential every session on that profile is reading.
+# Measured: the target file survives and its contents do not. That logs out the
+# whole account — the outcome the account-dir design exists to prevent.
+#
+# A dangling link is its own answer too. `-L` is true for one, so folding it in
+# reported "it holds a credential" about a link that holds nothing, and offered a
+# remedy for a file that is not there. A half-finished rename is exactly the
+# state these sections are supposed to describe, not to misname.
+#
+# ONE helper for both the account-dir and the profile-store loop. The store-side
+# comment below already records why: a fix that is right on one side of a report
+# and wrong on the other is worse than one wrong on both, because the correct
+# half is the reason nobody re-reads the other.
+#
+# Echoes one word, and a second field where there is a target worth naming:
+#   absent              nothing there, and no link either
+#   file                a real file — the ONLY shape that is an unmanaged copy
+#   managed <profile>   a symlink resolving into that profile's store
+#   foreign <path>      a symlink resolving somewhere that is not a profile store
+#   dangling <path>     a symlink whose target does not exist
+_claude_cred_shape() {
+  local f="${1:-}" t=""
+  if [[ -L "$f" ]]; then
+    # `zstat +link`, not `${f:A}`: :A resolves only as far as the path EXISTS, so
+    # on a dangling link it hands back the link's own path and the report names
+    # the link instead of the target. Same reasoning, same module, as the
+    # symlinked-account-dir branch below — and a zsh module rather than
+    # `readlink`, which CLAUDE.md records silently producing nothing under the
+    # state table's from-scratch PATH, in this very file.
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    t="$(zstat +link -- "$f" 2>/dev/null)" || t=""
+    [[ -n "$t" ]] || t="${f:A}"
+    # A relative target is relative to the link's own directory.
+    [[ "$t" == /* ]] || t="${f:h}/$t"
+    if [[ ! -e "$t" ]]; then
+      print -r -- "dangling $t"
+      return 0
+    fi
+    if [[ "${t:h:h}" == "$HOME/.clauth/profiles" && -d "${t:h}" ]]; then
+      print -r -- "managed ${t:h:t}"
+      return 0
+    fi
+    print -r -- "foreign $t"
+    return 0
+  fi
+  [[ -e "$f" ]] && { print -r -- file; return 0 }
+  print -r -- absent
+}
+
 # The success and failure markers Claude Code writes into every per-server log.
 # Verified against both a healthy remote server and a failing stdio one on
 # 2026-09-06; they are the only pair that distinguishes "connected" from
@@ -254,6 +313,10 @@ claude-doctor() {
   local uc_max uc_age uc_oldest uc_oldest_p uc_seen uc_stale uc_missing ucf
   local pname
   local -a date_prefixes files stray_profiles unprofiled_dirs unmanaged_stores
+  # Declared here for the reason this PR exists: a ~950-line function with no
+  # block scope shares one namespace, and an undeclared assignment inside it
+  # leaks a global — which is the defect the `local pdir pname` fix above closed.
+  local -a _cshape shared_stores dangling_stores
   local -A group_n group_label
 
   while (( $# )); do
@@ -1042,7 +1105,11 @@ claude-doctor() {
       for ad in ${(u)_ad_all}; do
         name="${ad:t}"
         store="$HOME/.clauth/profiles/$name/credentials.json"
-        seen=1
+        # NOT `seen=1` here. This loop enumerates dot-named archives too, and the
+        # classification below calls those "not an account dir" — so setting the
+        # flag up front made a machine holding nothing BUT archives print that
+        # line and then suppress "no account dirs built yet", contradicting
+        # itself. It is set past the point where the name is known to be one.
 
         # A symlinked account dir is how a profile RENAME keeps old paths working
         # while panes drain: an expected transitional state, not a fault. So it is
@@ -1095,18 +1162,49 @@ claude-doctor() {
         # cases are told apart: a credential under such a name is a finding
         # (nothing manages it, nothing rotates it), and no credential is a note.
         if _claude_name_cannot_be_profile "$name"; then
-          if [[ -e "$ad/.credentials.json" || -L "$ad/.credentials.json" ]]; then
-            _doctor_warn "$name: not a profile name, but it holds a credential"
-            echo "    Nothing reconciles it and nothing rotates it, because no profile can carry"
-            echo "    this name. Move the credential into a real profile or shred it — an"
-            echo "    unmanaged copy of a login is the thing this section exists to find."
-          else
-            _doctor_note "$name: archived or internal directory, not an account dir (a leading dot cannot be a profile name)"
-            echo "    Ignored by the picker, the builder and the reconciler. Remove it once it has"
-            echo "    served its purpose. NOT a 'clauth login' candidate."
-          fi
+          # FOUR SHAPES, NOT TWO. `[[ -e || -L ]]` is true for the DESIGNED shape
+          # of an account-dir credential — a symlink into the profile store — so
+          # the one-line presence test called the managed case an unmanaged copy
+          # and told the reader to shred it, which destroys the live credential
+          # through the link. See _claude_cred_shape for the measurement.
+          _cshape=( ${=$(_claude_cred_shape "$ad/.credentials.json")} )
+          case "${_cshape[1]}" in
+            file)
+              _doctor_warn "$name: not a profile name, but it holds a credential of its own"
+              echo "    A real file, not a link into the store: nothing reconciles it and nothing"
+              echo "    rotates it, because no profile can carry this name. Move it into a real"
+              echo "    profile or shred it — an unmanaged copy of a login is what this is for."
+              ;;
+            managed)
+              _doctor_note "$name: archived directory sharing profile '${_cshape[2]}'s credential"
+              echo "    The credential here is a SYMLINK into profile '${_cshape[2]}', which is"
+              echo "    reconciled and rotated under that name — so this is a stale directory, not"
+              echo "    an unmanaged login. Remove the directory; that drops the link and touches"
+              echo "    nothing '${_cshape[2]}' relies on."
+              echo "    Do NOT shred the link: shred follows it and overwrites the live credential."
+              ;;
+            dangling)
+              _doctor_note "$name: archived directory whose credential link is dangling"
+              echo "    It holds nothing — the link points at '${_cshape[2]/#$HOME/~}', which does not"
+              echo "    exist. A rename that removed the profile leaves exactly this. Remove the"
+              echo "    directory; there is no credential here to move anywhere."
+              ;;
+            foreign)
+              _doctor_warn "$name: not a profile name, and its credential links outside the store"
+              echo "    The link resolves to '${_cshape[2]/#$HOME/~}', which is not a clauth profile"
+              echo "    store, so nothing reconciles or rotates it. Check what wrote it before"
+              echo "    removing anything — the target may be in use by something else."
+              ;;
+            *)
+              _doctor_note "$name: archived or internal directory, not an account dir (a leading dot cannot be a profile name)"
+              echo "    Ignored by the picker, the builder and the reconciler. Remove it once it has"
+              echo "    served its purpose. NOT a 'clauth login' candidate."
+              ;;
+          esac
           continue
         fi
+
+        seen=1
 
         if [[ ! -e "$store" && ! -L "$store" ]]; then
           _doctor_warn "$name: an account dir with no clauth profile store"
@@ -1300,6 +1398,7 @@ claude-doctor() {
     # in it shares one namespace. A state-table row now greps stdout for any bare
     # `name=value` line, so the next one is caught whatever the variable is.
     stray_profiles=(); unprofiled_dirs=(); unmanaged_stores=()
+    shared_stores=(); dangling_stores=()
     for pdir in "$HOME"/.clauth/profiles/*(ND-/); do
       pname="${pdir:t}"
       # A name clauth cannot own is not a half-finished profile. Same rule, same
@@ -1315,11 +1414,18 @@ claude-doctor() {
       # report and wrong on the other is worse than one that is wrong on both:
       # the correct half is the reason nobody re-reads the other.
       if _claude_name_cannot_be_profile "$pname"; then
-        if [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]]; then
-          unmanaged_stores+=("$pname")
-        else
-          unprofiled_dirs+=("$pname")
-        fi
+        # The same four-way split as the account-dir loop, through the same
+        # helper. A presence test here had the identical defect: a dot-named
+        # store whose credentials.json is a LINK into a real profile's store is
+        # managed under that profile's name, and telling the reader to shred it
+        # destroys that profile's live credential through the link.
+        _cshape=( ${=$(_claude_cred_shape "$pdir/credentials.json")} )
+        case "${_cshape[1]}" in
+          file)               unmanaged_stores+=("$pname") ;;
+          managed)            shared_stores+=("$pname -> ${_cshape[2]}") ;;
+          dangling|foreign)   dangling_stores+=("$pname") ;;
+          *)                  unprofiled_dirs+=("$pname") ;;
+        esac
         continue
       fi
       [[ -e "$pdir/credentials.json" || -L "$pdir/credentials.json" ]] && continue
@@ -1333,11 +1439,24 @@ claude-doctor() {
       echo "    but NOT if the name was renamed away: that would make it real again."
     fi
     if (( ${#unmanaged_stores} )); then
-      _doctor_warn "under profiles/, not a profile name but holding a credential: ${(j:, :)unmanaged_stores}"
-      echo "    A leading dot cannot be a clauth profile name, so nothing reconciles these and"
-      echo "    nothing rotates them — and 'clauth login' cannot adopt them, because it refuses"
-      echo "    the name outright ('can't start with a dot'). Move the credential into a real"
-      echo "    profile or shred it; an unmanaged copy of a login is what this section is for."
+      _doctor_warn "under profiles/, not a profile name but holding a credential of its own: ${(j:, :)unmanaged_stores}"
+      echo "    A real file, not a link into another store. A leading dot cannot be a clauth"
+      echo "    profile name, so nothing reconciles these and nothing rotates them — and"
+      echo "    'clauth login' cannot adopt them, because it refuses the name outright"
+      echo "    ('can't start with a dot'). Move the credential into a real profile or shred"
+      echo "    it; an unmanaged copy of a login is what this section is for."
+    fi
+    if (( ${#shared_stores} )); then
+      _doctor_note "under profiles/, archived name sharing a real profile's credential: ${(j:, :)shared_stores}"
+      echo "    The credential is a SYMLINK into the named profile's store, which is reconciled"
+      echo "    and rotated under that name — so what is stale here is the directory, not a"
+      echo "    login. Remove the directory; do NOT shred the link, which would follow it and"
+      echo "    overwrite the live credential the real profile is using."
+    fi
+    if (( ${#dangling_stores} )); then
+      _doctor_note "under profiles/, archived name whose credential link goes nowhere: ${(j:, :)dangling_stores}"
+      echo "    The link has no target, so there is no credential here to move or remove. A"
+      echo "    rename that took the profile away leaves exactly this. Remove the directory."
     fi
     if (( ${#unprofiled_dirs} )); then
       _doctor_note "under profiles/, not profile director$( (( ${#unprofiled_dirs} == 1 )) && echo y || echo ies ): ${(j:, :)unprofiled_dirs}"

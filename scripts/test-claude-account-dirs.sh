@@ -1230,6 +1230,14 @@ fi
 # A DANGLING store credential must still reach the locked function, which reports
 # it as its own shape. `-f` alone follows the link and calls it absent, which would
 # have re-classified this state as "no credential in the store".
+#
+# THIS ROW PINS THE PREMISE, NOT THE DIFF, and that is deliberate rather than
+# decoration. No change in the lock gate above can make it fail — the `-L` it was
+# first written for is gone, and it exercises pre-existing code in
+# `_reconcile_credential_locked`. What it holds up is the ARGUMENT for dropping
+# that `-L`: the gate may use `-f` alone only because the locked function reports
+# the dangling case on its own. If that ever stops being true the justification
+# above is wrong, and this is the row that says so.
 new_home l2; mk_profile p1
 run_sut p1
 ln -sfn "$FHOME/.clauth/profiles/p1/gone.json" "$(store_of p1)"
