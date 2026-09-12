@@ -1580,10 +1580,21 @@ claude() {
   local -x CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
   local profile="" dir="" holder="" tenant=""
 
+  # Resolved once, through $+functions, for the same reason the account root is
+  # below: in a Bash-tool shell this helper does not exist either, and calling it
+  # blind printed a raw `command not found: _claude_account_builder` into the
+  # output of whatever the caller was actually running. This one fails CLOSED —
+  # `[[ -x "" ]]` is false, so isolation is skipped rather than misdirected — so
+  # it was noise rather than a defect. It is fixed here anyway because the row
+  # below asserts the helper is never called blind, and an invariant that holds
+  # for one sibling and not the other is not an invariant.
+  local _builder=""
+  (( $+functions[_claude_account_builder] )) && _builder="$(_claude_account_builder)"
+
   # An inherited CLAUDE_CONFIG_DIR is never overridden: that is what keeps a
   # `clauth start` pane, a herdmates teammate, and hspawn's own launch intact.
   if [[ -z "$CLAUDE_CONFIG_DIR" && -z "${CLAUDE_ISOLATION_OFF:-}" ]] \
-     && command -v clauth >/dev/null 2>&1 && [[ -x "$(_claude_account_builder)" ]]; then
+     && command -v clauth >/dev/null 2>&1 && [[ -n "$_builder" && -x "$_builder" ]]; then
     if [[ -n "${CLAUDE_ACCOUNT_PROFILE:-}" ]]; then
       profile="$CLAUDE_ACCOUNT_PROFILE"
     else
@@ -1626,7 +1637,7 @@ claude() {
         print -u2 -- "claude: clauth is installed but no profile has a credential — this session shares"
         print -u2 -- "        ~/.claude/.credentials.json. 'clauth login <name>' to give it its own."
       fi
-    elif dir="$(command "$(_claude_account_builder)" "$profile")" && [[ -n "$dir" ]]; then
+    elif dir="$(command "$_builder" "$profile")" && [[ -n "$dir" ]]; then
       CLAUDE_CONFIG_DIR="$dir"
     else
       profile=""
@@ -1667,10 +1678,23 @@ claude() {
     # indistinguishable from an idle account, and since #135 the count feeds the
     # picker's crowding term, so the account this session is burning reads as the
     # emptiest one and the next session is sent there too.
+    #
+    # Two outcomes, and they must not share a sentence. With a config dir there IS
+    # an account and it goes uncounted, which is the crowding-term consequence.
+    # With none, isolation was skipped entirely a few lines up (the builder helper
+    # is missing for the same reason this one is) and there is no account to read
+    # as idle — asserting there is would be a confident wrong answer in the one
+    # message whose job is to say what actually happened.
     [[ -n "${CLAUDE_ISOLATION_OFF:-}" ]] || {
-      print -u2 -- "claude: account root UNKNOWN — no holder registered, so the picker will"
-      print -u2 -- "        read this session's account as idle (_claude_account_root is not"
-      print -u2 -- "        defined in this shell; a partial function snapshot does that)."
+      if [[ -n "$CLAUDE_CONFIG_DIR" ]]; then
+        print -u2 -- "claude: account root UNKNOWN — this session's account cannot be attributed,"
+        print -u2 -- "        so no holder is registered and the picker will read it as idle."
+      else
+        print -u2 -- "claude: account root UNKNOWN — this session was NOT isolated and shares"
+        print -u2 -- "        ~/.claude/.credentials.json with every other."
+      fi
+      print -u2 -- "        (_claude_account_root is not defined in this shell; a partial"
+      print -u2 -- "        function snapshot does that.)"
     }
   elif [[ "$CLAUDE_CONFIG_DIR" == "$_root/"* ]]; then
     profile="${${CLAUDE_CONFIG_DIR#$_root/}%%/*}"

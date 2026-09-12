@@ -617,6 +617,8 @@ CFGDIR="$ACCT/personal" run "unfunction _claude_account_root; claude"; CFGDIR=
 check "a missing helper names no account"        "$(outgrep "account '")"        "0"
 check "and the helper is never CALLED blind"     "$(outgrep "command not found: _claude_account_root")" "0"
 check "and the unresolvable root is reported"    "$(outgrep "account root UNKNOWN")" "1"
+check "and an attributable account is named as going uncounted" \
+      "$(outgrep "read it as idle")" "1"
 
 # 2. WHAT IT MUST LEAVE ALONE, and a correction to the write-up that prompted
 #    this fix: an explicitly EMPTY CLAUDE_ACCOUNT_DIRS_ROOT is NOT a second way
@@ -633,7 +635,19 @@ check "an empty override falls back to the default root, not to nothing" \
       "$(outgrep "account root UNKNOWN")" "0"
 check "and the account is still named from it"    "$(outgrep "account 'personal'")" "1"
 
-# 3. Under the root but naming no account dir. Pre-fix this MANUFACTURED the
+# 3. THE FULL BASH-TOOL SHAPE: both helpers gone and no config dir inherited, so
+#    isolation is skipped a few lines up as well. Nothing may be called blind —
+#    the invariant has to hold for the builder too, or it is not an invariant —
+#    and the message must not assert that an account is reading as idle when the
+#    session never got one.
+run "unfunction _claude_account_root _claude_account_builder; claude"
+check "the builder helper is never CALLED blind either" \
+      "$(outgrep "command not found: _claude_account_builder")" "0"
+check "an unisolated session is named as such"    "$(outgrep "was NOT isolated and shares")" "1"
+check "and no account is claimed to read as idle" "$(outgrep "read it as idle")" "0"
+check "and it does share the global credential"   "$(inclaude "CFG <unset>")"     "1"
+
+# 4. Under the root but naming no account dir. Pre-fix this MANUFACTURED the
 #    directory it was about to write into, so the pidfile landed in a profile
 #    nobody had ever built and the real account's count stayed one short.
 rm -rf "$ACCT/no-such-profile"
@@ -644,7 +658,7 @@ check "and the directory is not manufactured" \
       "$(test -d "$ACCT/no-such-profile" && echo made || echo none)" "none"
 check "and the refusal says which path it was"  "$(outgrep "names no account")" "1"
 
-# 4. `..` is a plausible-LOOKING name that passes a character-class test and a
+# 5. `..` is a plausible-LOOKING name that passes a character-class test and a
 #    -d test, and writes the pidfile OUTSIDE the root entirely. The classifier
 #    has to name it, not merely pattern-match the characters in it.
 rm -rf "$ACCT/../holders"
@@ -653,7 +667,7 @@ check "a traversal component is refused"        "$(outgrep "account '..'")" "0"
 check "and nothing is written above the root" \
       "$(test -d "$ACCT/../holders" && echo made || echo none)" "none"
 
-# 5. A directory that EXISTS under the root but cannot be a profile name. The
+# 6. A directory that EXISTS under the root but cannot be a profile name. The
 #    -d test alone would accept it, so this is the row that makes the character
 #    class do any work at all; without it the class is decoration.
 mkdir -p "$ACCT/bad;name/holders"
@@ -662,7 +676,7 @@ check "an existing dir with an impossible name is refused" \
       "$(outgrep "account 'bad;name'")" "0"
 rm -rf "$ACCT/bad;name"
 
-# 6. WHAT IT MUST LEAVE ALONE. A guard needs a row for what it accepts, or the
+# 7. WHAT IT MUST LEAVE ALONE. A guard needs a row for what it accepts, or the
 #    plausibility test can tighten until it refuses the real profile names —
 #    every account on this box is `<word>-<digit>`, which a bare [A-Za-z0-9_]
 #    class rejects.

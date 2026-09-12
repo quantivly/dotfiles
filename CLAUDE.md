@@ -2545,15 +2545,33 @@ Three findings from reproducing it, each of which corrects something that had be
   is why the fix resolves through `$+functions` rather than merely testing for emptiness,
   and why a row pins the `:-` fallback: switching it to `${VAR-default}` would manufacture
   the state the guard now refuses.
-- **The exposure is the public→private boundary, not this one line.** `claude` calls 27
-  private helpers and `hspawn` 35; all of them are absent in that shell. Only `claude`'s
-  holder guard *failed open* rather than erroring out, which is why it was the one that
-  announced a fabricated account and looked fine.
+- **The exposure is the public→private boundary, not this one line.** Stated as a figure
+  anyone can re-derive with two greps rather than as a call count: `zsh/zshrc.herdr` defines
+  **42** private functions and **8** public ones
+  (`grep -cE '^_[A-Za-z0-9_]+\(\) *\{' zsh/zshrc.herdr`, and the same without the leading
+  `_`), and in a Bash-tool shell **0 of the 42 are present and all 8 of the 8 are**. An
+  earlier draft said "`claude` calls 27 private helpers and `hspawn` 35"; an independent
+  review could not reproduce those under any methodology, and it was right — they came from
+  a script whose function-body parser silently swallowed everything after the first
+  **one-line** definition (`_claude_account_root() { … }` is one), so the bodies it counted
+  over were not those functions' bodies. A per-function call count needs a real shell parser
+  to be honest; the two greps do not, and they carry the whole point.
+- **Only `claude`'s holder guard *failed open*.** Everything else in that shell either errors
+  visibly (`hreap` prints three `command not found` lines and blank columns) or fails closed
+  (`hspawn`'s builder guard is `[[ ! -x "$(…)" ]]`, so an empty result refuses the spawn
+  loudly). This one matched everything, invented a name, and printed a confident line — which
+  is the generalisable half: **when auditing a public/private split, look first at the sites
+  whose failure mode is a *match* rather than an error.**
 
 The fix resolves the root once into a local, requires it to be non-empty before the pattern
 can match, and classifies the derived component before writing anything: rejected unless it
 is a plausible profile name, is not `.` or `..`, **and** is an existing directory under the
-root. `..` needs naming explicitly — it passes a character class *and* a `-d` test, and
+root. **One real behaviour change falls out of that last clause, and it is not only the
+refusal of invented names:** a config dir under the root whose profile directory has since
+been *deleted* — the `.personal.stray-*` shape DO-604 cleanup leaves behind — used to have
+that directory silently re-created by `mkdir -p` and a holder registered in it. It is now
+refused with a message and no holder. That is the right trade, and it is a state someone can
+meet in the field rather than a hypothetical. `..` needs naming explicitly — it passes a character class *and* a `-d` test, and
 writes the pidfile above the root entirely. "Cannot tell" is its own state and says so:
 registering nothing is right, doing it silently is not, since that trades a lying
 announcement for an invisible absence — the same failure the count feeds.
@@ -2577,8 +2595,20 @@ two broken paths. It is unreachable today because the right-hand side is a path 
 repo, which exists whenever the script does; recorded because that is one deleted directory
 away and neither site would say anything.
 
-State table: `scripts/test-hspawn.sh` (328 → 341). 6 mutants, 6 deaths, every mutation
-dry-run for applicability first.
+Two smaller things an independent review found, fixed here rather than deferred because both
+are about the same invariant. `_claude_account_builder` was still being called blind two
+lines above — it fails *closed* (`[[ -x "" ]]` is false, so isolation is skipped rather than
+misdirected), so it was noise and not a defect, but a row asserting "the helper is never
+called blind" while its sibling is called blind in the same function is an invariant held by
+half. And the refusal's second clause — "the picker will read this session's account as
+idle" — is untrue when `CLAUDE_CONFIG_DIR` is empty, because isolation was skipped entirely
+and there is no account to read; the two outcomes now get separate sentences.
+
+State table: `scripts/test-hspawn.sh` (328 → 346). 9 mutants, 9 deaths, every mutation
+dry-run for applicability first — and one of them, M5, **stopped matching** when the refusal
+was reworded, which the harness reported as an error rather than as a survivor. That is the
+rule this file already states one section up, working: a mutation that no longer applies
+reads exactly like a surviving mutant.
 
 ### The smart account picker (DO-574)
 
