@@ -638,6 +638,44 @@ snip <<'EOS'
 _claude_profile_metrics a1; print -r -- $(( EPOCHSECONDS + _CPM_R5 ))
 EOS
 check "_CPM_R5 names the instant the cache does"  "$(zrun "$SNIP")" "4070908800"
+
+# --- the absolute instant, which is what a RENDERER must use (DO-612) --------
+#
+# Every row above reconstructs the instant as `EPOCHSECONDS + <delta>`, and that
+# is precisely the arithmetic this section now exists to keep out of the
+# rendering path: it reads the clock a SECOND time, so a second boundary falling
+# between the two reads makes the answer one second late. Those rows survive it
+# only because their two reads are microseconds apart; `--json` had real work in
+# between and failed 1 run in 6, always by exactly +1s, never early.
+#
+# So these rows read the published epoch DIRECTLY and no row below adds
+# EPOCHSECONDS to anything. The delta rows above stay as they are — the delta is
+# still what scoring wants, and its zone arithmetic needs pinning too.
+tsa() {   # $1 = instant -> the absolute epoch published for rendering
+    zrun "_claude_ts_delta '$1' >/dev/null 2>&1; print -r -- \$_CLAUDE_TS_ABS"
+}
+check "_CLAUDE_TS_ABS is the instant itself, no clock read" \
+      "$(tsa '2099-01-01T00:00:00.000000+00:00')" "4070908800"
+check "...with a non-zero offset applied, exactly as the delta has it" \
+      "$(tsa '2099-01-01T00:00:00-03:00')"        "4070919600"
+# A PARSE FAILURE MUST NOT LEAVE A NUMBER, and this is the arm that decides it:
+# the pair is assigned only on the parser's success, so an earlier profile's
+# instant cannot survive into a later profile that has none. Without the reset at
+# the top of the function, the second call below reports the FIRST call's epoch.
+snip <<'EOS'
+_claude_ts_delta '2099-01-01T00:00:00.000000+00:00' >/dev/null 2>&1
+_claude_ts_delta 'not a timestamp' >/dev/null 2>&1
+print -r -- $_CLAUDE_TS_ABS
+EOS
+check "...and an unparseable instant leaves no STALE epoch behind" \
+      "$(zrun "$SNIP")" "unknown"
+
+snip <<'EOS'
+_claude_profile_metrics a1; print -r -- "$_CPM_R5_AT $_CPM_RW_AT"
+EOS
+check "_CPM_R5_AT and _CPM_RW_AT name both instants absolutely" \
+      "$(zrun "$SNIP")" "4070908800 4073587200"
+
 snip <<'EOS'
 _claude_profile_metrics a1; print -r -- $(( EPOCHSECONDS + _CPM_RW ))
 EOS
@@ -654,6 +692,24 @@ _claude_profile_metrics a1; print -r -- "$_CPM_U5 $_CPM_UW"
 EOS
 check "...and the extra column does not shift the ones beside it" \
       "$(zrun "$SNIP")" "5 9"
+
+# Absent and unparseable are the two states the whole metrics layer exists to
+# keep apart from a measured zero, and the _AT pair has to honour it too: an
+# epoch of 0 renders as 1970, which is a date, and a date reads as an answer.
+#
+# These are last in the section ON PURPOSE: new_home REPLACES the fixture, and
+# an earlier placement silently re-pointed the rows below at a profile with no
+# weekly reset — which is how the `_CPM_RW is the aggregate weekly reset` row
+# came to be asserting against the wrong cache while looking untouched.
+new_home tzat1
+mkprof a1 '{"five_hour":{"utilization":0.0},"seven_day":{"utilization":2.0}}'
+check "an ABSENT resets_at leaves _CPM_R5_AT unknown, never an epoch" \
+      "$(zrun "_claude_profile_metrics a1; print -r -- \$_CPM_R5_AT")" "unknown"
+new_home tzat2
+mkprof a1 '{"five_hour":{"utilization":5.0,"resets_at":"not a timestamp"}}'
+check "an UNPARSEABLE resets_at leaves _CPM_R5_AT unknown"  \
+      "$(zrun "_claude_profile_metrics a1; print -r -- \$_CPM_R5_AT")" "unknown"
+
 
 #-----------------------------------------------------------------------------
 echo
@@ -1101,6 +1157,13 @@ check "...but says on stderr that it is exhausted"       "$(printf '%s' "$CLI_ER
 cli --dry-run --profile a1 --json
 check "...and records it in warnings, for a JSON caller" \
       "$(printf '%s' "$CLI_OUT" | jq -r '[.warnings[] | select(test("exhausted"))] | length')" "1"
+# THE PINNED PATH BUILDS ITS OWN EXPLAIN ROW and never goes through
+# _claude_pick_publish, so it is a second place the reset can be dropped — and
+# dropping it there is invisible to every row above, which all take the ranked
+# path. A pin is exactly when a caller most wants this field: it has been handed
+# a spent seat and is deciding whether to wait.
+check "...and a PINNED account still reports its reset instant" \
+      "$(printf '%s' "$CLI_OUT" | jq -r .resets_at.five_hour)" "2099-01-01T00:00:00Z"
 
 # A quarantined account is the sharper case: clauth has said the credential does
 # not work, and a pin overrides that too — so the line has to be there.

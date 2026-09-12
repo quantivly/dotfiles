@@ -140,6 +140,7 @@ typeset _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
 typeset _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
 typeset _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
 typeset _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
+typeset _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
 typeset _claude_pick_holders=0 _claude_pick_load="" _claude_pick_overflow=0
 typeset _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
 typeset _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
@@ -180,14 +181,24 @@ json_num() {
   print -r -- null
 }
 
-# RFC 3339 in UTC from a seconds-from-now delta, or null. JSON carries UTC and
+# RFC 3339 in UTC from an ABSOLUTE epoch, or null. JSON carries UTC and
 # the human lines carry local time (§5.4) — one instant, two renderings, and the
 # machine-readable one is the unambiguous one.
+#
+# AN ABSOLUTE EPOCH, NOT A DELTA, and that is DO-612. This took `EPOCHSECONDS + d`
+# from the remaining-seconds figure the metrics layer publishes — so the instant
+# was rebuilt from two separate reads of the clock, the one that produced `d` and
+# this one, and any second boundary falling between them rendered it one second
+# late. Measured on this suite before the fix: the row asserting this field
+# failed 1 run in 6, always by exactly +1s, never early. A consumer quotes the
+# field back to a human as "your window resets at X", so it drifted later every
+# time it was re-rendered. The metrics layer publishes the parsed instant now and
+# nothing here reads the clock at all.
 json_instant() {
-  local d="${1:-}" TZ=UTC out
-  [[ "$d" == (-|)<-> ]] || { print -r -- null; return 0 }
+  local at="${1:-}" TZ=UTC out
+  [[ "$at" == (-|)<-> ]] || { print -r -- null; return 0 }
   zmodload zsh/datetime 2>/dev/null || { print -r -- null; return 0 }
-  strftime -s out '%Y-%m-%dT%H:%M:%SZ' $(( EPOCHSECONDS + d )) 2>/dev/null \
+  strftime -s out '%Y-%m-%dT%H:%M:%SZ' "$at" 2>/dev/null \
     || { print -r -- null; return 0 }
   printf '%s' "$out" | jq -Rs .
 }
@@ -238,12 +249,16 @@ if [[ -n "$pin" ]]; then
   _claude_pick_reason="pinned with --profile"
   # The numbers are still reported, because a caller that pinned an account still
   # wants to know it is about to start on a spent window.
-  typeset _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER
+  typeset _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT
   _claude_profile_metrics "$pin" >/dev/null 2>&1
   _claude_pick_u5="$_CPM_U5"; _claude_pick_uw="$_CPM_UW"; _claude_pick_r5="$_CPM_R5"
   _claude_pick_rw="$_CPM_RW"; _claude_pick_age="$_CPM_AGE"; _claude_pick_tier="$_CPM_TIER"
+  # The pin builds its own explain row below and never goes through
+  # _claude_pick_publish, so it must set these itself. Missed, --json --profile
+  # reports a null reset for an account whose reset is perfectly well known.
+  _claude_pick_r5_at="$_CPM_R5_AT"; _claude_pick_rw_at="$_CPM_RW_AT"
   _claude_pick_holders="$(_claude_holder_count "$pin")"
-  _claude_pick_explain=( "$pin"$'\t'pinned$'\t'""$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_AGE"$'\t'"$_claude_pick_holders"$'\t'""$'\t'"$_CPM_R5" )
+  _claude_pick_explain=( "$pin"$'\t'pinned$'\t'""$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_AGE"$'\t'"$_claude_pick_holders"$'\t'""$'\t'"$_CPM_R5"$'\t'"$_CPM_R5_AT" )
   # A PIN NEVER REFUSES ON THE ACCOUNT, but it does say when the account it was
   # handed is spent or quarantined: the caller asked for this seat, and "it
   # started and died twenty minutes in" is the outcome this line prevents. One
@@ -349,8 +364,8 @@ if (( as_json )); then
     --argjson five_hour   "$(json_num "$_claude_pick_u5")" \
     --argjson weekly      "$(json_num "$_claude_pick_uw")" \
     --argjson cache_age   "$(json_num "$_claude_pick_age")" \
-    --argjson r5          "$(json_instant "$_claude_pick_r5")" \
-    --argjson rw          "$(json_instant "$_claude_pick_rw")" \
+    --argjson r5          "$(json_instant "$_claude_pick_r5_at")" \
+    --argjson rw          "$(json_instant "$_claude_pick_rw_at")" \
     --argjson load1       "$(json_load1)" \
     --argjson ncpu        "$(json_num "$_CML_NCPU")" \
     --argjson swap        "$(json_num "$_CML_SWAPPCT")" \
