@@ -2501,6 +2501,85 @@ CLAUDE_SETTINGS_REQUIRE=( model statusLine.command )
 Operational half — the connector cleanup that has to be done at claude.ai, what each finding
 means, and how to revive a dead stdio server: [docs/CLAUDE_ACCOUNT_MCP.md](docs/CLAUDE_ACCOUNT_MCP.md).
 
+### Holder attribution, and the shell that has half this file's functions (DO-612)
+
+**`claude()` announced `account 'home'` — a profile that has never existed — and registered
+no holder, on every invocation from a Claude Code Bash-tool shell.** The guard was
+`[[ "$CLAUDE_CONFIG_DIR" == "$(_claude_account_root)/"* ]]`. With an empty root the pattern
+collapses to `/*`, which matches **every** absolute path; the strip then removes only the
+leading slash and `%%/*` yields the first path component. This is DO-603/#131 one level
+down — an empty pool filter meaning "every profile", here an empty path prefix meaning
+"every path" — and it fails in the same permissive direction. Since #135 the holder count
+feeds the picker's crowding term, so the account a session is actually burning reads as the
+emptiest one and the next session is sent there too: **a missing holder is indistinguishable
+from an idle account.**
+
+**The trigger, measured rather than assumed, is the part worth keeping.** Claude Code's Bash
+tool sources a shell snapshot (`~/.claude/shell-snapshots/snapshot-zsh-*.sh`) that captures
+every function **except those whose name begins with a single underscore** — the zsh
+completion convention. Measured 2026-09-12 on this box: the snapshot contains `claude ()`,
+`hspawn ()`, `hreap ()` and `dotfiles-doctor ()`, and **none** of `_claude_account_root`,
+`_claude_account_builder`, `_claude_pick_for_dir`, `_claude_holder_sessions`,
+`_claude_tenant_for` or `_gh_route_for`; double-underscore names (`__zoxide_cd`) survive.
+So in a Bash-tool shell every *public* function in `zsh/zshrc.herdr` is defined and its
+entire *private* helper layer is not, and `claude --version` there reproduced the live
+output exactly, first try:
+
+```
+zsh: command not found: _claude_account_root   (×3 — lines 1641, 1642, 1643)
+claude: account 'home' (isolated: ~/.local/state/claude-account-dirs/quantivly-1)
+```
+
+Three findings from reproducing it, each of which corrects something that had been asserted:
+
+- **The "no `<root>/home/` directory on disk" puzzle is not a puzzle.** With the root empty
+  the path is not `<root>/home/holders/$$` but literally `/home/holders/$$`, and `/home` is
+  root-owned — so `mkdir -p` fails EACCES, `2>/dev/null` swallows it, and `holder=""`. The
+  search had been made under the real root, which by definition is not where an empty root
+  puts anything. On a machine whose `$HOME` sits under a writable first component it would
+  litter instead.
+- **An empty `CLAUDE_ACCOUNT_DIRS_ROOT` is NOT a second way to reach the empty root**, which
+  had been stated as fact. `${VAR:-default}` substitutes the default for an empty value as
+  well as an unset one (measured), so the override falls back to
+  `$HOME/.local/state/claude-account-dirs`. Only an unreachable helper can empty it — which
+  is why the fix resolves through `$+functions` rather than merely testing for emptiness,
+  and why a row pins the `:-` fallback: switching it to `${VAR-default}` would manufacture
+  the state the guard now refuses.
+- **The exposure is the public→private boundary, not this one line.** `claude` calls 27
+  private helpers and `hspawn` 35; all of them are absent in that shell. Only `claude`'s
+  holder guard *failed open* rather than erroring out, which is why it was the one that
+  announced a fabricated account and looked fine.
+
+The fix resolves the root once into a local, requires it to be non-empty before the pattern
+can match, and classifies the derived component before writing anything: rejected unless it
+is a plausible profile name, is not `.` or `..`, **and** is an existing directory under the
+root. `..` needs naming explicitly — it passes a character class *and* a `-d` test, and
+writes the pidfile above the root entirely. "Cannot tell" is its own state and says so:
+registering nothing is right, doing it silently is not, since that trades a lying
+announcement for an invisible absence — the same failure the count feeds.
+
+Two things about the rows are worth more than the rows:
+
+- **The builder stub only printed the account-dir path; the real builder creates it.** The
+  new `-d` requirement therefore broke three *pre-existing* rows — correctly, because the
+  fixture differed from production in the one property the guard decides on, the `reenable`
+  shape this file already records. The stub `mkdir -p`s now.
+- **A row naming `home` is decoration on CI.** The invented name is the first component of
+  whatever `$TMPDIR` the fixture landed in, so `account 'home'` passes vacuously on a runner
+  whose temp dir is `/tmp`. The rows assert that *no* account is named.
+
+Surveyed for the same shape and **not** fixed, with the reason: `claude-account-dirs.sh:817`
+(`"$GLOBAL_DIR/"*`) cannot collapse — `GLOBAL_DIR="$HOME/.claude"`, so the literal `.claude`
+survives an empty `$HOME`. `verify-tools.sh:276` and `herdr-deps-check.sh:197` compare
+`"$(readlink -f a)" == "$(readlink -f b)"`, and **two unresolvable paths both yield empty and
+compare equal** (measured) — the hash-of-nothing class, reporting "correctly symlinked" over
+two broken paths. It is unreachable today because the right-hand side is a path inside this
+repo, which exists whenever the script does; recorded because that is one deleted directory
+away and neither site would say anything.
+
+State table: `scripts/test-hspawn.sh` (328 → 341). 6 mutants, 6 deaths, every mutation
+dry-run for applicability first.
+
 ### The smart account picker (DO-574)
 
 **The old ranking answered "which account is least used"; it could not answer "which account will

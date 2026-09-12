@@ -1638,33 +1638,81 @@ claude() {
   # Count as a holder however CLAUDE_CONFIG_DIR came to point at an account dir.
   # hspawn sets it itself, and a spawn that did not register would make the
   # chooser above hand the next session the busiest profile.
-  if [[ "$CLAUDE_CONFIG_DIR" == "$(_claude_account_root)/"* ]]; then
-    profile="${${CLAUDE_CONFIG_DIR#$(_claude_account_root)/}%%/*}"
-    holder="$(_claude_account_root)/$profile/holders/$$"
-    command mkdir -p "${holder:h}" 2>/dev/null && : > "$holder" 2>/dev/null || holder=""
-    if [[ -z "${CLAUDE_ACCOUNT_QUIET:-}" ]]; then
-      local detail=""
-      # The load that WON, and anything the pool refused — a session that lands on
-      # an unexpected account should say why without being asked.
-      if [[ -n "${_claude_pick_load:-}" ]]; then
-        if (( _claude_pick_load > 1000 )); then detail=" — fallback: the pool was unusable"
-        elif (( _claude_pick_load > 100 )); then detail=" — no usage reading"
-        else detail=" — 5h $(( 10#$_claude_pick_load ))% used"; fi
+  #
+  # A guard that NARROWS must treat "empty" and "matches everything" as different
+  # states. `"$(_claude_account_root)/"*` with an empty root collapses to `/*`,
+  # which matches EVERY absolute path: the strip then removes only the leading
+  # slash, `%%/*` yields the first path component, and the session announces
+  # `account 'home'` and files its pidfile outside the root. That is DO-603/#131
+  # one level down — an empty pool filter meaning "every profile" — and it fails
+  # in the same permissive direction, toward the thing the guard existed to stop.
+  #
+  # The trigger is neither hypothetical nor exotic, and it is the reason this is
+  # resolved through $+functions rather than merely tested for emptiness. Claude
+  # Code's Bash tool sources a shell snapshot that captures every function EXCEPT
+  # those whose name begins with a single underscore — the zsh completion
+  # convention — so in a Bash-tool shell `claude` is defined and this file's
+  # entire private helper layer is not. Measured 2026-09-12: `claude --version`
+  # there printed three "command not found: _claude_account_root" and then
+  # "claude: account 'home' (isolated: …/claude-account-dirs/quantivly-1)".
+  #
+  # NOT the other stated cause: an empty CLAUDE_ACCOUNT_DIRS_ROOT cannot produce
+  # an empty root, because `${VAR:-default}` substitutes the default for an empty
+  # value too. Only an unreachable helper can.
+  local _root=""
+  (( $+functions[_claude_account_root] )) && _root="$(_claude_account_root)"
+  if [[ -z "$_root" ]]; then
+    # Cannot tell — and an empty answer is never agreement. Registering nothing
+    # is right; doing it silently is not, because a missing holder is
+    # indistinguishable from an idle account, and since #135 the count feeds the
+    # picker's crowding term, so the account this session is burning reads as the
+    # emptiest one and the next session is sent there too.
+    [[ -n "${CLAUDE_ISOLATION_OFF:-}" ]] || {
+      print -u2 -- "claude: account root UNKNOWN — no holder registered, so the picker will"
+      print -u2 -- "        read this session's account as idle (_claude_account_root is not"
+      print -u2 -- "        defined in this shell; a partial function snapshot does that)."
+    }
+  elif [[ "$CLAUDE_CONFIG_DIR" == "$_root/"* ]]; then
+    profile="${${CLAUDE_CONFIG_DIR#$_root/}%%/*}"
+    # Being under the root is not being an account. A future strip bug must not
+    # be able to invent a name either, so the component is checked for what it
+    # IS: a plausible profile name, not `.`/`..` (both of which pass a character
+    # class AND a -d test, and `..` writes the pidfile above the root entirely),
+    # and an existing directory — which the real case always satisfies, since
+    # CLAUDE_CONFIG_DIR points inside it. `-d` follows symlinks on purpose: a
+    # compat-symlinked account dir (DO-604) is a real account.
+    if [[ -z "$profile" || "$profile" == (.|..) || "$profile" == *[^A-Za-z0-9_.-]* \
+          || ! -d "$_root/$profile" ]]; then
+      print -u2 -- "claude: CLAUDE_CONFIG_DIR is under the account root but names no account"
+      print -u2 -- "        ('$CLAUDE_CONFIG_DIR') — no holder registered for this session."
+      profile=""
+    else
+      holder="$_root/$profile/holders/$$"
+      command mkdir -p "${holder:h}" 2>/dev/null && : > "$holder" 2>/dev/null || holder=""
+      if [[ -z "${CLAUDE_ACCOUNT_QUIET:-}" ]]; then
+        local detail=""
+        # The load that WON, and anything the pool refused — a session that lands
+        # on an unexpected account should say why without being asked.
+        if [[ -n "${_claude_pick_load:-}" ]]; then
+          if (( _claude_pick_load > 1000 )); then detail=" — fallback: the pool was unusable"
+          elif (( _claude_pick_load > 100 )); then detail=" — no usage reading"
+          else detail=" — 5h $(( 10#$_claude_pick_load ))% used"; fi
+        fi
+        # The class, when it is not the ordinary one. `least-bad` means every
+        # member was exhausted and this session is proceeding anyway — the loud
+        # block above already said so, and this keeps it on the line a reader
+        # scrolls back to.
+        [[ -n "$_claude_pick_class" && "$_claude_pick_class" != eligible ]] && \
+          detail="$detail · $_claude_pick_class"
+        # Which tenant decided, and whether the account was BORROWED. A session on
+        # another tenant's account is billing work to the wrong place; that is
+        # sometimes the right trade, but it is never something to discover later.
+        [[ -n "$tenant" ]] && detail="$detail · tenant '$tenant'"
+        (( _claude_pick_overflow )) && detail="$detail (overflow)"
+        print -u2 -- "claude: account '$profile'$detail (isolated: ${CLAUDE_CONFIG_DIR/#$HOME/~})"
+        (( ${#_claude_pick_skipped} )) && \
+          print -u2 -- "        skipped: ${(j:, :)_claude_pick_skipped}"
       fi
-      # The class, when it is not the ordinary one. `least-bad` means every
-      # member was exhausted and this session is proceeding anyway — the loud
-      # block above already said so, and this keeps it on the line a reader
-      # scrolls back to.
-      [[ -n "$_claude_pick_class" && "$_claude_pick_class" != eligible ]] && \
-        detail="$detail · $_claude_pick_class"
-      # Which tenant decided, and whether the account was BORROWED. A session on
-      # another tenant's account is billing work to the wrong place; that is
-      # sometimes the right trade, but it is never something to discover later.
-      [[ -n "$tenant" ]] && detail="$detail · tenant '$tenant'"
-      (( _claude_pick_overflow )) && detail="$detail (overflow)"
-      print -u2 -- "claude: account '$profile'$detail (isolated: ${CLAUDE_CONFIG_DIR/#$HOME/~})"
-      (( ${#_claude_pick_skipped} )) && \
-        print -u2 -- "        skipped: ${(j:, :)_claude_pick_skipped}"
     fi
   fi
 
