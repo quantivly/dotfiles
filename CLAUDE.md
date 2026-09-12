@@ -2129,6 +2129,41 @@ Design points that are load-bearing rather than preferences:
   **The invariant, stated once: for each account there is exactly ONE credential file, and every
   process using that account reads it.** `claude-doctor`'s "Account dirs" section asserts it, along
   with the pooled-sharing one below.
+  **A LOCK IS A WRITE, and this one landed where nothing could be reconciled.**
+  `exec {fd}>"$pdir/.reconcile.lock"` *creates* that file, and it was created before anything
+  established that `$pdir` is a real profile store — so an empty directory under
+  `~/.clauth/profiles/` collected a 0-byte `.reconcile.lock`, again on every timer tick, two minutes
+  apart, forever. **Not "every" such directory**, which this file claimed on first writing and no run
+  supports: `reconcile_all` iterates *account dirs* and reconciles a profile only where a matching one
+  exists, so a store with no account dir is never visited and never got a lock — measured against the
+  pre-fix script, and the tell is that the row covering it has to `mkdir` both to reach the path.
+  There is effectively nothing to serialise in that state: the locked function's second
+  test is `[[ ! -f "$S" ]]` and it refuses immediately with `refused-no-store`. **"Effectively", not
+  "pure side effect"** — that stronger claim is untrue, and a weak justification is how a correct
+  change gets reverted: the refusal path still calls `cred_write_verdict`, which truncates and
+  rewrites `.reconcile-status`, and the lock *was* serialising that. What makes dropping it safe is
+  the absence of a CONTENDER — the only concurrent writers are timer-vs-timer, and a systemd
+  `oneshot` does not overlap itself. During a profile rename the cost compounds — each stage leaves a compat symlink at the
+  old account-dir path, the reconciler visits it, and the lock reappears at exactly the store name
+  the NEXT stage needs free, so the migration stalls on the reconciler's own leftovers and has to
+  sweep them before every stage. The gate is `credentials.json` present, which is the same
+  "is this a launchable profile" test `--all` already uses — no new notion of what a profile is, and
+  no TOML parser, both deliberate. **It was written as `-f` OR `-L`** on the reasoning that a
+  dangling store credential had to keep reaching the diagnosis that names it; a mutant proved that
+  false and the `-L` was removed. The gate only decides whether to LOCK:
+  `_reconcile_credential_locked` runs either way, and its first test reports
+  `the clauth store credential is itself a symlink` and returns without writing. A branch whose only
+  mutant cannot die reads as coverage, so it went.
+  **The remedy text was part of the loop.** The refusal said `Run 'clauth login <p>'`, and following
+  that during a rename is what *materialises* the store at a name the migration needs free. It now
+  says so: `clauth login` if it should be a profile, otherwise remove the empty store dir, because
+  `clauth login` would make the name real again.
+  **And the stated cause was wrong, which is why it is written down.** The phantom directories were
+  attributed to `reconcile_all` creating them, and `reconcile_all` has always guarded on
+  `[[ -d "$PROFILES_DIR/$profile" ]]` — measured: an orphaned account dir, and a compat-symlink one,
+  each create nothing. What this code does is *write into* a phantom somebody else created, on every
+  tick. Rows now pin both halves, because the honest diagnosis is the one that stays true: the
+  "creates nothing" rows pass today and exist so they keep passing.
   Two bugs inside the fix, both of which reported success: `exec {fd}>file 2>/dev/null` has **no
   command**, so *both* redirections applied to the shell permanently and the script's own stderr
   went to `/dev/null` for the rest of the run — every later `warn()` and `die()` silently lost, in
@@ -2404,6 +2439,124 @@ Traps specific to the checker, each of which produced a green tick first:
   asserted the output contained `p1`, which the backing dir `p1real` satisfies as a
   substring, and one used a fixture whose link target was not a registered profile,
   so the store-repoint branch it named never ran.
+- **Widening an enumeration changes the checker's ADVICE, not just its coverage — and
+  #132 applied that lesson to one input class and stopped one short.** It added a
+  pre-classification branch so a *compat symlink* would not be told to
+  `clauth login` a name deliberately no longer a profile; the store check below it
+  remained the fall-through for **every** name, still assuming each one was a
+  would-be profile. So a deliberately dot-prefixed archive directory read as "an
+  account dir with no clauth profile store" and the reader was told to run
+  `clauth login .personal.stray-20260910-112747`, which cannot succeed. Every
+  enumeration needs a **total** classification: for each name it can see, either the
+  remedy is actionable or the name is explicitly classified as not the checker's.
+  Fixed with one shared `_claude_name_cannot_be_profile`, used by the account-dir
+  and the profile-store enumerations, which had the identical fall-through.
+  **The obvious fix is the wrong one.** Re-narrowing the glob would hide a
+  dot-prefixed directory that HOLDS A CREDENTIAL — the blind spot the widening
+  exists to close — so the enumeration stays wide and the classification gets
+  wider: a credential under such a name is a ⚠ (nothing manages it, nothing rotates
+  it), no credential is a note. The test is a **leading dot and nothing wider**;
+  `[[ "$name" != [A-Za-z0-9]* ]]` also rejects `_weird` and `-dash`, which are
+  unusual rather than impossible, and a checker that misfiles a real account dir as
+  "not mine" reintroduces the blind spot from the other side.
+- **DO NOT ASSUME A GLOB NARROWS, and do not let a checker's coverage depend on the
+  caller's shell options.** `setopt GLOB_DOTS` is set repo-wide in `zshrc`, so
+  `*(N/)` in this codebase has **never** excluded dotfiles — the first diagnosis of
+  the defect above blamed #132 for widening the glob into dotfiles, and #132 had
+  only added symlinks. The reverse also bit: because the state table runs `zsh -c`,
+  where GLOB_DOTS is **off**, the dot-directory branch was unreachable from the
+  suite, which is why #132's own rows could not catch any of this — and a modular
+  adopter without this repo's `zshrc` had a doctor that silently skipped a
+  dot-prefixed account dir holding a credential. Both globs now carry the `D`
+  qualifier, which forces dotfile matching regardless of the option, and a row
+  asserts the directory is seen with GLOB_DOTS **off** — the state the suite runs in.
+  **The matching GLOB_DOTS-ON row was decoration and is gone**: with `D` present both
+  states see it, and with `D` deleted the option itself still does, so the mutant
+  dropping `D` failed the OFF row and left the ON row green. Its replacement — assert
+  the entry is reported exactly ONCE, since `*(ND-/)` and `*(ND@)` overlap and only
+  `${(u)...}` dedupes — was decoration too, measured: a plain directory matches only
+  the first glob. The two overlap solely on a **symlink to a directory**, which `-`
+  makes match both, so the once-ness row needs that fixture and now has it.
+- **"IS THERE A CREDENTIAL HERE" CANNOT ANSWER WHAT TO SAY ABOUT ONE, and answering it
+  with `[[ -e || -L ]]` produced advice that destroyed the thing it reported.** The
+  designed shape of a per-account credential is a **symlink** into
+  `~/.clauth/profiles/<p>/credentials.json` — the invariant stated above as *"the
+  credential is a symlink, never a copy"* — so the presence test is true for the
+  managed case. A dot-named archive holding that link was reported as *"not a profile
+  name, but it holds a credential … an unmanaged copy of a login"* with the remedy
+  *"move it into a real profile or shred it"*. Both claims are false for that input,
+  and the remedy is destructive: **`shred` follows a symlink and overwrites the
+  TARGET in place** — measured, the target file survives and its contents do not — so
+  following the doctor's own advice logs out every session on that account, the
+  outcome the account-dir design exists to prevent. `-L` folded in a **dangling** link
+  as well, reporting "it holds a credential" about a link with no target, in the one
+  state (a half-finished rename) the section exists to describe.
+  `_claude_cred_shape` answers the real question in four states — `file` (the only
+  unmanaged copy), `managed <profile>`, `dangling <path>`, `foreign <path>` — and
+  **one helper serves both loops**, because the store-side comment already recorded
+  why: *a fix that is right on one side of a report and wrong on the other is worse
+  than one wrong on both, since the correct half is the reason nobody re-reads the
+  other.*
+  **CI was 22/22 green over all of it, and the reason is one grep:** every fixture in
+  the section built the credential with `printf >`, so there was **no `ln -s` anywhere
+  in it**. The rows exercised the exceptional shape and never the invariant one, in a
+  check whose entire subject is whether a credential is managed. Each of the four
+  shapes has a fixture now, on both sides. Found by an independent review pass, not by
+  the author — the same shape as every other entry in this list.
+- **"Order-independent" has to mean it, and locale collation differs between this box
+  and CI.** A row asserting two names in one report line was written as the substring
+  `no credential: realprofile` — which does not remove the ordering dependency, it
+  pins the other order. zsh sorts that glob by the current locale's collation:
+  `en_US.UTF-8` here yields `realprofile, _underscore`, and CI's `C` locale yields
+  `_underscore, realprofile`, because `_` is 0x5F and `r` is 0x72. So the row passed
+  locally and failed in CI, which is the "green here, red there" split the hspawn
+  suite already records in the other direction. The fix is to extract the LINE and
+  test each name in it independently; the verification is to run the suite once under
+  `LC_ALL=C`, which reproduces the runner's collation in about the time one CI round
+  trip costs.
+- **zsh's `local NAME` re-declaration display, second recurrence — three lines from
+  the comment forbidding it.** `claude-doctor` is one ~950-line function, zsh has no
+  block scope, and its top declaration block says so explicitly ("every loop-body
+  variable is declared once, here"). #132 then added `local pdir pname` 900 lines
+  down, and because `pdir` already held a value the deployed doctor printed a bare
+  `pdir=/home/…/.clauth/profiles/<alphabetically last profile>` onto stdout between
+  two sections — loop residue from the `preferred` check 555 lines earlier. **And it
+  was never confined to machines that have profiles:** on a modular-adopter fixture
+  with no clauth, no `~/.clauth` and no credential at all, the same build prints
+  `pdir=''` — an empty residue is still a bare `name=value` line in a report, and it
+  is the machine class least likely to have anyone who would recognise it. Nothing
+  in the repo echoes `pdir`. The row added for it is **generic**: it greps the
+  report with `^[A-Za-z_][A-Za-z0-9_]*=` and fails on any bare `name=value` line, so
+  it catches the next one whatever the variable is called — including the
+  capitalised and digit-bearing names `^[a-z_]*=` would miss, which is what an
+  earlier draft of this paragraph claimed it used. A convention stated in a comment
+  is not enforcement; the row is — and neither is a comment *about* the row, so the
+  pattern is quoted here exactly as the code spells it.
+- **A fix that is right on ONE SIDE of a report is worse than one that is wrong on
+  both.** The account-dir enumeration splits a name clauth cannot own into two cases
+  — holds a credential (a ✗, because nothing rotates it) and does not (a note). The
+  profile-store enumeration one block down tested the *name* and stopped, so a
+  dot-named store holding a **live credential** was filed as benign archived state,
+  as a note. That is the exact shape the wide enumeration exists to surface, caught
+  on one side and mislabelled on the other — and the correct half is precisely why
+  nobody re-reads the other. Found by independent review, not by the author.
+  **The premise underneath is now VERIFIED rather than assumed, and two people got
+  it wrong first.** Both a reviewer and the orchestrating session concluded clauth
+  has no profile-name validation — the reviewer could not test it because doing so
+  "means running a browser OAuth flow", and a source read found only `preserved`
+  matching `reserved`. Both are wrong. `actions::validate_profile_name` rejects a
+  leading dot outright, `cmd_login`'s `LoginRoute::New` arm calls it, and on the
+  **installed 0.15.1 binary** `clauth login .dottest` exits
+  `name: letters, digits and - _ . @ + only, and can't start with '.'` **before any
+  browser opens** — so the test is free, and the control (an ordinary name) goes
+  straight to the OAuth URL, which is what proves validation is the only thing in
+  between. The greps that missed it are instructive: the function is named
+  `validate_profile_name` but its message contains neither "profile" nor "invalid".
+  So `clauth login <name>` genuinely cannot be offered as the remedy, which is what
+  the new ✗ says. **The fix does not rest on the premise either way**, which is the
+  point: it keys on the observable shape — a credential is present, or it is not —
+  the same reasoning `2026-09-10`'s migration guard used, and it would still be
+  right if the naming question were ever settled the other way.
 - **A new external tool is a new way for a check to go quiet, twice in one day.**
   The `readlink -f` note below was written, and then an `awk`-based rewrite of the
   chain match reintroduced exactly the same failure — awk is not on the state

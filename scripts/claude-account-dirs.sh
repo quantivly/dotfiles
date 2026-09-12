@@ -512,7 +512,53 @@ cred_same_account() {  # $1 = account dir, $2 = profile dir
 reconcile_credential() {
     local profile="$1" pdir="$2" account_dir="$3" rc=0 lock_fd=""
 
-    if command -v flock >/dev/null 2>&1; then
+    # A LOCK IS A WRITE, so it may not be taken until the thing being locked is
+    # known to be a profile. `exec {fd}>"$pdir/.reconcile.lock"` CREATES that file,
+    # and it was created before anything established that $pdir is a real profile
+    # store -- so an empty directory under ~/.clauth/profiles/ got a 0-byte
+    # `.reconcile.lock` written into it, again on every timer tick, two minutes
+    # apart, forever.
+    #
+    # NOT "every" such directory, which an earlier wording claimed and no run
+    # supports: `reconcile_all` iterates ACCOUNT DIRS and reconciles a profile
+    # only where a matching one exists, so a store with no account dir is never
+    # visited and never got a lock. Measured against the pre-fix script: a
+    # fixture holding `profiles/phantom` with no account dir produces none. The
+    # tell is in the row below, which has to mkdir both to reach this path.
+    #
+    # There is effectively nothing to serialise in that state:
+    # _reconcile_credential_locked's SECOND test is `[[ ! -f "$S" ]]` and it
+    # refuses immediately with `refused-no-store`.
+    #
+    # Be exact about "effectively", because the stronger claim -- that the lock
+    # was PURE side effect -- is untrue and a weak justification invites the
+    # change to be reverted. The refusal path still calls `cred_write_verdict`,
+    # which truncates and rewrites `.reconcile-status`, and the lock was
+    # serialising that write for this profile/account-dir pair. What makes
+    # dropping it safe is not that there is no write but that there is no
+    # CONTENDER: the only concurrent writers here are timer-vs-timer, and a
+    # systemd `oneshot` does not overlap itself.
+    #
+    # The cost is not cosmetic during a profile rename. Each stage leaves a compat
+    # symlink at the old account-dir path, the reconciler visits it, and the lock
+    # re-appears at exactly the store name the NEXT stage needs free -- so the
+    # migration stalls on the reconciler's own leftovers and has to sweep them
+    # before every stage. `credentials.json` is the same "is this a launchable
+    # profile" test the rest of this script already uses (`--all` iterates
+    # directories and skips any without one, deliberately needing no TOML parser),
+    # so this adds no new notion of what a profile is.
+    #
+    # `-f` ALONE, and the `-L` this first carried was removed once a mutant proved
+    # it changed nothing observable. The claim was that `-L` had to be here so a
+    # DANGLING store credential still reached the diagnosis that names it — but
+    # this gate only decides whether to LOCK. `_reconcile_credential_locked` runs
+    # either way, and its first test is `[[ -L "$S" ]]`, which reports
+    # `the clauth store credential is itself a symlink` and returns 1 without
+    # writing anything. So the dangling case needs no lock either, and a branch
+    # whose only mutant cannot die is a branch that reads as coverage.
+    if [[ ! -f "$pdir/credentials.json" ]]; then
+        lock_fd=""
+    elif command -v flock >/dev/null 2>&1; then
         # `exec {fd}>file 2>/dev/null` has NO COMMAND, so BOTH redirections apply
         # to the shell permanently -- that spelling sent this script's own stderr
         # to /dev/null for the rest of the run, silencing every later warn() and
@@ -548,7 +594,13 @@ _reconcile_credential_locked() {
     if [[ ! -f "$S" ]]; then
         cred_write_verdict "$account_dir" refused-no-store "clauth login $profile"
         warn "$profile: no credential in the clauth store (${S/#$HOME/\~}) — refusing to"
-        warn "        invent one. Run 'clauth login $profile'."
+        warn "        invent one. Run 'clauth login $profile' if it should be a profile."
+        # Said because following the line above is what MAKES the phantom: during a
+        # profile rename this account dir is a compat symlink whose profile has
+        # moved on, and `clauth login` at the old name recreates the store the next
+        # rename stage needs free.
+        warn "        If the name was renamed away, remove the empty store dir instead —"
+        warn "        'clauth login' would make it real again."
         return 1
     fi
 
