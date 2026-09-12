@@ -2730,11 +2730,78 @@ failed, since ShellCheck cannot parse zsh; and `script-must-have-extension` woul
 name. Both hooks now exclude it by path, and CI's `zsh -n` loop names it explicitly — otherwise the
 repo's newest executable would have had no syntax check at all.
 
-State tables: `scripts/test-claude-pick.sh` (new, 192 checks, CI job `claude-pick-test`),
+State tables: `scripts/test-claude-pick.sh` (192 at DO-574, 205 now — DO-609 and
+DO-612 since; CI job `claude-pick-test`),
 `scripts/test-hspawn.sh` (319 → 328, the caller-wiring rows and the compatibility contract) and
 `scripts/test-claude-doctor.sh` (156 → 172, the usage-cache freshness line). **40 mutants, 40
 deaths**, every mutation dry-run for applicability first — and the two retirements above are comments
 in the harness rather than entries, so the count is of mutants that can actually die.
+
+**An instant rebuilt from a delta reads the clock twice, and the second read is a
+bug (DO-612).** `json_instant` rendered `resets_at` for `--json` as
+`EPOCHSECONDS + d`, where `d` was the remaining-seconds figure the metrics layer
+had computed earlier — so any second boundary falling between the two reads made
+the rendered instant **one second late**, drifting later on every re-render and
+never earlier. Measured on the state table before the fix: the row asserting that
+field failed **1 run in 6**, always by exactly +1s. It arrived with DO-574 in
+`#135` and was deliberately left out of `#139` to keep that diff reviewable.
+
+Three things about it outlast the one-line fix:
+
+- **A freshness figure and a renderable instant are different values, even when
+  one is derived from the other.** `_claude_ts_delta` already computed the
+  absolute epoch as `secs - off` and then threw it away to return a delta. The
+  fix publishes what the function had rather than computing anything new, and
+  the delta stays the delta — **scoring genuinely wants "seconds from now"**, so
+  replacing it would have broken the use-it-or-lose-it bonus to fix a renderer.
+- **A flaky row cannot pin a fix, and it is worse than no row.** The existing row
+  was probabilistic, so reverting the fix passed it three runs in four — and a
+  row that fails one run in four on `main` trains everyone to re-run a red row,
+  which is how a real failure gets re-run away. The pin is deterministic instead:
+  `json_instant` now takes an absolute epoch, so a mutant restoring
+  `EPOCHSECONDS + at` renders **2155** where the fixture says 2099. Same rule as
+  the SIGPIPE race two sections up — pin at the source, where the answer is
+  deterministic and free, not at the behaviour, where it can only be statistical.
+- **The pinned path builds its own explain row**, so it is a second place the
+  field can be dropped, invisible to every row that takes the ranked path — and a
+  `--profile` caller is exactly who most wants the reset, having been handed a
+  spent seat and deciding whether to wait. It has its own row.
+
+The record is **10 fields wide now, appended and never inserted**: every reader
+indexes it positionally (`_claude_pick_publish` takes `f[4]`..`f[10]`), so a
+field added anywhere but the end shifts the ones after it and each reader
+silently returns its neighbour — the shape that already produced a false
+`CREDENTIAL STATE CHANGED` here.
+
+**7 mutants, 6 deaths and one retirement**, the retirement documented beside the
+code it defends: the `&&` on the metrics assignment is unpinnable **alone**,
+because the parser resets both outputs to `unknown` before any of its return
+paths, so assigning unconditionally is behaviourally identical. Deleting **both**
+that reset and the guard does die, on three rows. That is this file's own rule
+applied rather than restated — *count how many independent deletions it takes to
+reach a silent pass, not how many guards exist* — and the guard stays, because
+code that is correct only because a function it calls happens to pre-clear its
+outputs is one refactor away from carrying a stale epoch into a profile that has
+none.
+
+Two things found while writing the rows, both the familiar shapes. **A new row
+that calls `new_home` steals the fixture of every row below it** — three rows
+placed mid-section silently re-pointed `_CPM_RW is the aggregate weekly reset` at
+a profile with no weekly reset, and it failed for a reason that had nothing to do
+with it; the fixture-replacing rows go last, and say so. And **the rows that
+reconstruct an instant to check the zone arithmetic have the same defect they are
+now testing for** — they survive it only because their two clock reads are
+microseconds apart. They are left as they are, deliberately: the delta's zone
+handling still needs pinning, and the new rows read the published epoch directly,
+so no row added for this reads a clock at all.
+
+**Deliberately NOT fixed, and named so it is not mistaken for done:**
+`_claude_pick_reset_text` — the §5.4 human line — rebuilds its instant the same
+way. It renders at **minute** resolution, so the drift is visible only when the
+true instant's seconds component is 59, and closing it means widening two more
+positional records (`_claude_pick_exhausted`, `_claude_pick_leastbad_r5`). The
+measurement is here so the next person can decide with the number in front of
+them.
 
 **A mutation sweep on this box has to be CHUNKED, and the harness has to refuse to start.** A single
 40-mutant run takes over an hour at the load this machine normally carries, and it was killed for
