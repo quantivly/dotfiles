@@ -176,6 +176,11 @@ cat > "$FAKE_DOTFILES/scripts/claude-account-dirs.sh" <<STUB
 #!/bin/sh
 printf 'CMD %s\n' "\$*" >> "\$ACCOUNT_STUB_LOG"
 [ -n "\${ACCOUNT_STUB_FAIL:-}" ] && { echo "stub refuses" >&2; exit 1; }
+# It CREATES the directory it names, because the real builder does — and that is
+# the property claude()'s holder guard decides on. A stub that only prints the
+# path differs from production in exactly the thing under test, which is the
+# fixture-that-proves-nothing shape CLAUDE.md already records for reenable.
+mkdir -p "$ACCT/\$1"
 printf '%s/%s\n' "$ACCT" "\$1"
 STUB
 chmod +x "$FAKE_DOTFILES/scripts/claude-account-dirs.sh"
@@ -284,7 +289,7 @@ run() {
            HERDR_STUB_MODE="${MODE:-full}" CLAUDE_CODE_SESSION_ID="${SESS:-}" \
            HERDR_STUB_PANE_DIR="${PANEDIR:-}" CLAUTH_STUB_WHICH="${WHICH:-}" \
            CLAUTH_STUB_LOG="$TMPROOT/clauth.log" \
-           DOTFILES_ROOT="$FAKE_DOTFILES" CLAUDE_ACCOUNT_DIRS_ROOT="$ACCT" \
+           DOTFILES_ROOT="$FAKE_DOTFILES" CLAUDE_ACCOUNT_DIRS_ROOT="${ACCTROOT-$ACCT}" \
            ACCOUNT_STUB_LOG="$ACCOUNT_LOG" ACCOUNT_STUB_FAIL="${ACCTFAIL:-}" \
            zsh -c "source '$HERDRRC' >/dev/null 2>&1; $1" 2>&1)"
     RC=$?
@@ -585,6 +590,104 @@ mkdir -p "$ACCT/work/holders"; : > "$ACCT/work/holders/$DEADPID"
 run "claude"
 check "a dead holder is pruned, not counted" \
       "$(test -e "$ACCT/work/holders/$DEADPID" && echo present || echo pruned)" "pruned"
+echo
+echo "=== claude(): a root it cannot resolve is not a match ==="
+# A guard that NARROWS must treat "empty" and "matches everything" as different
+# states — the DO-603/#131 shape (an empty pool filter meaning "every profile"),
+# one level down and in a path prefix. `"$(_claude_account_root)/"*` with an
+# empty root collapses to `/*`, which matches every absolute path; the strip then
+# removes only the leading slash and `%%/*` yields the first path component, so
+# the session announces `account 'home'` and files its pidfile outside the root.
+#
+# The trigger is not hypothetical and not exotic. Claude Code's Bash tool sources
+# a shell snapshot that captures every function EXCEPT those whose name begins
+# with a single underscore (the zsh completion convention), so `claude` is
+# defined there and its entire private helper layer is not. Measured 2026-09-12:
+# `claude --version` in a Bash-tool shell prints three "command not found:
+# _claude_account_root" and then "account 'home'".
+mkdir -p "$ACCT/personal/holders" "$FHOME/.clauth/profiles/personal"
+printf '{"claudeAiOauth":{"accessToken":"t"}}\n' > "$FHOME/.clauth/profiles/personal/credentials.json"
+
+# 1. The measured context: the helper is gone, `claude` is not. The assertion is
+#    that NO account is named, not that `home` specifically is not — the invented
+#    name is the first component of whatever $TMPDIR the fixture landed in, so a
+#    row naming `home` passes vacuously on a runner whose temp dir is /tmp. That
+#    is decoration, and this suite has shipped some before.
+CFGDIR="$ACCT/personal" run "unfunction _claude_account_root; claude"; CFGDIR=
+check "a missing helper names no account"        "$(outgrep "account '")"        "0"
+check "and the helper is never CALLED blind"     "$(outgrep "command not found: _claude_account_root")" "0"
+check "and the unresolvable root is reported"    "$(outgrep "account root UNKNOWN")" "1"
+check "and an attributable account is named as going uncounted" \
+      "$(outgrep "read it as idle")" "1"
+
+# 2. WHAT IT MUST LEAVE ALONE, and a correction to the write-up that prompted
+#    this fix: an explicitly EMPTY CLAUDE_ACCOUNT_DIRS_ROOT is NOT a second way
+#    to reach the empty root. `${VAR:-default}` substitutes the default for an
+#    empty value as well as an unset one (measured), so the override falls back
+#    to $HOME/.local/state/claude-account-dirs and the config dir below simply
+#    does not match it. Pinned because the claim was stated as fact, and because
+#    a later switch to `${VAR-default}` — which does NOT rescue empty — would
+#    manufacture exactly the state the `-z` guard now refuses.
+#    The fixture's ACCT *is* that default, so the fallback is observable as the
+#    account being named normally rather than as a refusal.
+ACCTROOT='' CFGDIR="$ACCT/personal" run "claude"; unset ACCTROOT; CFGDIR=
+check "an empty override falls back to the default root, not to nothing" \
+      "$(outgrep "account root UNKNOWN")" "0"
+check "and the account is still named from it"    "$(outgrep "account 'personal'")" "1"
+
+# 3. THE FULL BASH-TOOL SHAPE: both helpers gone and no config dir inherited, so
+#    isolation is skipped a few lines up as well. Nothing may be called blind —
+#    the invariant has to hold for the builder too, or it is not an invariant —
+#    and the message must not assert that an account is reading as idle when the
+#    session never got one.
+run "unfunction _claude_account_root _claude_account_builder; claude"
+check "the builder helper is never CALLED blind either" \
+      "$(outgrep "command not found: _claude_account_builder")" "0"
+check "an unisolated session is named as such"    "$(outgrep "was NOT isolated and shares")" "1"
+check "and no account is claimed to read as idle" "$(outgrep "read it as idle")" "0"
+check "and it does share the global credential"   "$(inclaude "CFG <unset>")"     "1"
+
+# 4. Under the root but naming no account dir. Pre-fix this MANUFACTURED the
+#    directory it was about to write into, so the pidfile landed in a profile
+#    nobody had ever built and the real account's count stayed one short.
+rm -rf "$ACCT/no-such-profile"
+CFGDIR="$ACCT/no-such-profile" run "claude"; CFGDIR=
+check "a config dir naming no account dir is refused" \
+      "$(outgrep "account 'no-such-profile'")" "0"
+check "and the directory is not manufactured" \
+      "$(test -d "$ACCT/no-such-profile" && echo made || echo none)" "none"
+check "and the refusal says which path it was"  "$(outgrep "names no account")" "1"
+
+# 5. `..` is a plausible-LOOKING name that passes a character-class test and a
+#    -d test, and writes the pidfile OUTSIDE the root entirely. The classifier
+#    has to name it, not merely pattern-match the characters in it.
+rm -rf "$ACCT/../holders"
+CFGDIR="$ACCT/../evil" run "claude"; CFGDIR=
+check "a traversal component is refused"        "$(outgrep "account '..'")" "0"
+check "and nothing is written above the root" \
+      "$(test -d "$ACCT/../holders" && echo made || echo none)" "none"
+
+# 6. A directory that EXISTS under the root but cannot be a profile name. The
+#    -d test alone would accept it, so this is the row that makes the character
+#    class do any work at all; without it the class is decoration.
+mkdir -p "$ACCT/bad;name/holders"
+CFGDIR="$ACCT/bad;name" run "claude"; CFGDIR=
+check "an existing dir with an impossible name is refused" \
+      "$(outgrep "account 'bad;name'")" "0"
+rm -rf "$ACCT/bad;name"
+
+# 7. WHAT IT MUST LEAVE ALONE. A guard needs a row for what it accepts, or the
+#    plausibility test can tighten until it refuses the real profile names —
+#    every account on this box is `<word>-<digit>`, which a bare [A-Za-z0-9_]
+#    class rejects.
+mkdir -p "$ACCT/quantivly-1.b_c/holders"
+CFGDIR="$ACCT/quantivly-1.b_c" run "claude"; CFGDIR=
+check "a dashed, dotted, underscored name is still an account" \
+      "$(outgrep "account 'quantivly-1.b_c'")" "1"
+check "and it registers a holder" \
+      "$(grep -c '^HOLDER .*/quantivly-1.b_c/holders/' "$CLAUDE_LOG" || true)" "1"
+rm -rf "$ACCT/quantivly-1.b_c"
+
 rm -rf "$ACCT" "$FHOME/.clauth/profiles/work" "$FHOME/.clauth/profiles/personal/credentials.json"
 
 echo
