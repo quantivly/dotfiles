@@ -2773,7 +2773,7 @@ field added anywhere but the end shifts the ones after it and each reader
 silently returns its neighbour — the shape that already produced a false
 `CREDENTIAL STATE CHANGED` here.
 
-**7 mutants, 6 deaths and one retirement**, the retirement documented beside the
+**8 mutants, 7 deaths and one retirement**, the retirement documented beside the
 code it defends: the `&&` on the metrics assignment is unpinnable **alone**,
 because the parser resets both outputs to `unknown` before any of its return
 paths, so assigning unconditionally is behaviourally identical. Deleting **both**
@@ -2783,6 +2783,13 @@ reach a silent pass, not how many guards exist* — and the guard stays, because
 code that is correct only because a function it calls happens to pre-clear its
 outputs is one refactor away from carrying a stale epoch into a profile that has
 none.
+
+**The eighth mutant was missing until the sweep was audited row by row, and that
+is the cheap half of review working.** Dropping `- off` cannot kill the `+00:00`
+rows, because the offset is zero in them — so after seven mutants, nothing yet
+proved those rows could fail at all. Publishing the *delta* under the absolute's
+name kills twelve. Ask of a mutation SET what this file already asks of a row:
+which of these rows would still pass if the value were simply wrong?
 
 Two things found while writing the rows, both the familiar shapes. **A new row
 that calls `new_home` steals the fixture of every row below it** — three rows
