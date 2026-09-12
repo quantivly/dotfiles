@@ -2525,10 +2525,38 @@ from-scratch `PATH` cannot vouch for): `base` is 5h headroom; `bonus` is use-it-
 nothing and a fresh window earns nothing extra; `weekf` is weekly headroom as a **multiplier**; and
 `crowd` charges each live holder more on an account that is already busy. Knobs:
 `CLAUDE_PICK_W_EXPIRE`, `_W_HOLDER`, `_W_CROWD`, `_WEEK_LOW`, `_RR_BAND`, `_5H_EXHAUSTED`,
-`_WEEK_EXHAUSTED` (inert, 101 — see below), `_CACHE_MAX_AGE`, `_LOAD_WARN`, `_SWAP_WARN`,
+`_WEEK_EXHAUSTED` (inert, 101 — see below), `_WEEK_SPENT` (100 — the demotion tier, DO-609),
+`_CACHE_MAX_AGE`, `_LOAD_WARN`, `_SWAP_WARN`,
 `_LOAD_MAX`, `_SWAP_MAX`, `_LOCK_WAIT`, `_PROC_ROOT` (a test hook).
 
 **Three departures from the approved spec, each measured rather than argued.**
+
+**The demotion is a TIER, not a weight — DO-609, and the first version got this wrong.**
+`weekf` multiplies `(base + bonus)` while `crowd` is subtracted **unscaled**, so at `weekf=0`
+the score collapses to `-crowd` — and `crowd` is near zero precisely because an exhausted
+account is idle. Measured 2026-09-10 on the live machine: `quantivly-0` and `quantivly-3` at
+`7d=100%` with one holder scored **-300** and were picked, while `quantivly-1` at `7d=33%` with
+real headroom and 11 holders scored **-8334**. The emptiness that exhaustion causes read as
+headroom — the same shape this file already records for the ranking DO-574 replaced, where the
+emptiness came from a quarantine. `crowd = h*(300 + u5*15)` is also unbounded in holders, so it
+can sink a perfectly fresh account: 11 holders at `u5=61` costs 13,365 against a maximum `base`
+of 10,000.
+
+The fix is the one the `unknown` branch's own comment had already argued for, three lines from
+the defect: *"expressing it as a score would put it at the mercy of the weights"* — and it even
+names this case, *"an eligible account at 96% with a spent week scores near zero too"*. A spent
+week is now its own class, `weekly-spent`, ranked **below `eligible` and above `unknown`** (a
+measurement outranks the absence of one) and still scored internally so the tier is ordered
+rather than falling to whichever name sorts first. It **demotes and never refuses**: a tier is
+chosen when nothing above it exists, so an entirely-spent pool still yields an account and still
+starts a session — DO-574's measured decision kept intact, but no longer able to lose to a
+crowding term. `CLAUDE_PICK_WEEK_SPENT` (100) is the threshold.
+
+The tier also had to be added to the **overflow** guard, and that was the one unpinned edit:
+overflow borrows another tenant's account, so it is paid only when the pool named nothing usable
+at all, and a weekly-spent member *is* usable. Dropping it from that guard left all 197 other
+rows green while a capped-but-usable pool silently borrowed someone else's seat — a row now names
+it. **An unpinned fix is an unverified fix, and a surviving mutant is the only thing that says so.**
 
 - **The weekly window DEMOTES; it never refuses.** §5.3 made `uW >= 100` an exhaustion class that
   every headless caller refuses on. Measured 2026-09-10: two Team seats read `seven_day = 100` **with
