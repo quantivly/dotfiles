@@ -376,7 +376,7 @@ cmd_segments_ensure() {
 
 CFR_WHY=""
 credential_file_read() {
-  local seg stripped hit verb
+  local seg stripped hit verb redir_re
 
   # `|| [[ -n $seg ]]` so a final segment with no trailing newline is still seen.
   cmd_segments_ensure || return 1
@@ -390,7 +390,27 @@ credential_file_read() {
 
     # Verb on the QUOTE-STRIPPED segment: a message naming the file is not a read.
     stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
-    [[ "$stripped" =~ (^|[|;\&[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|\.)([[:space:]]|$) ]] || continue
+
+    # An input redirection feeds the file to whatever command is there, so it
+    # needs no verb list at all -- and it is what four of the shapes DO-597
+    # lists have in common: `tr -d x < <file>`, `tee < <file>`,
+    # `mapfile -t a < <file>` and `while read ...; done < <file>`. Enumerating a
+    # verb for each of those would be four entries that all mean "this file is
+    # being read", which is exactly the endless-verb-list problem the issue
+    # names. `<` and not `<<`: a heredoc is data being WRITTEN, and `<<` reads
+    # nothing from the named file.
+    # In a variable: an unquoted `<` inside [[ =~ ]] is parsed as a redirection
+    # before the regex is ever seen, and `\<` does not escape it.
+    redir_re='(^|[^<])[<][[:space:]]*[^<[:space:]]*(\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json)'
+    if [[ "$stripped" =~ $redir_re ]]; then
+      CFR_WHY="an input redirection from \`$hit\`, which holds credentials"
+      return 0
+    fi
+
+    # Verbs that print a file's contents. `wc`, `ls`, `stat` and `readlink` are
+    # deliberately absent: they report metadata, not content, and the suite has
+    # rows asserting they stay allowed.
+    [[ "$stripped" =~ (^|[|;\&\(\`[:space:]])(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|cut|base64|paste|sort|uniq|rev|fold|expand|column|jq|diff|\.)([[:space:]]|$) ]] || continue
     verb="${BASH_REMATCH[2]}"
 
     CFR_WHY="\`$verb\` on \`$hit\`, which holds credentials"
@@ -448,12 +468,33 @@ if [[ -z "$why" ]]; then
   # caught either: it prints nothing by default, and blocking it would refuse
   # ordinary edits to the very file people are told to put their secrets in.
   #
-  # Known-uncovered, tracked in DO-597. Two groups, and the difference matters:
+  # Known-uncovered. DO-597 chose option (a) -- add the reachable shapes and
+  # NAME the rest here -- because option (b), enforcing on output rather than on
+  # the command, is not available to a PreToolUse hook: it runs before the
+  # command does, and a PostToolUse hook sees the output only after it has been
+  # produced and recorded, which is too late to prevent the capture. The
+  # output-side tool already exists and is scripts/redact-secrets.sh.
   #
-  #   NEVER caught, by this rule or the whole-string one before it: verbs absent
-  #   from the list (cut, tr, base64, tee, paste, xargs, while read, mapfile),
-  #   an interpreter handed the path, command substitution, `eval`, and
-  #   glob-reached paths.
+  # So this list is the scope, stated rather than implied:
+  #
+  #   AN INTERPRETER HANDED THE PATH -- `python3 -c "print(open(F).read())"`,
+  #   `perl -ne print F`, `node -e`. The read happens inside a language this
+  #   hook does not parse. Matching the interpreter's NAME would refuse every
+  #   ordinary edit to the very file people are told to keep secrets in.
+  #
+  #   `eval` OF A STRING CONTAINING THE READ. The verb is inside quotes, and the
+  #   verb test runs on the quote-stripped segment precisely so that a message
+  #   naming a file is not a read. The two cannot both be had.
+  #
+  #   A GLOB-REACHED PATH -- `cat ~/.zshrc.loca*`. The filename test is a fixed
+  #   set of literals; making it a glob-matcher is how a filename test starts
+  #   matching things nobody meant.
+  #
+  #   `$(< <file>)`, bash's read-a-file substitution, which has no verb at all.
+  #
+  # Command substitution itself IS caught: `echo $(cat <file>)` and the backtick
+  # form differ from a plain read only in the character before the verb, so `(`
+  # and a backtick are word boundaries in the verb pattern above.
   #
   #   caught BEFORE segmenting and no longer caught -- a deliberate reduction,
   #   not an oversight. Segmenting cannot follow data from one segment into the

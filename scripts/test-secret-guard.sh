@@ -528,6 +528,113 @@ do
   check "allows: $c" "$(ask "$c")" "allow"
 done
 
+echo
+echo "=== other ways of printing the same file (DO-597) ==="
+# The rule matched a fixed list of reading verbs, and several ordinary ways of
+# printing a file were not on it. Two of these are not verb-list entries at all:
+# an input REDIRECTION feeds the file to whatever command is there, and command
+# substitution differs from a plain read only in the character before the verb.
+for c in \
+  'cut -d= -f2 ~/.zshrc.local' \
+  'base64 ~/.zshrc.local' \
+  'paste ~/.zshrc.local' \
+  'sort ~/.gitconfig.local' \
+  'rev ~/.backup.local' \
+  'jq . ~/.claude/.credentials.json' \
+  'diff ~/.zshrc.local ~/.zshrc'
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+# `< <file>` needs no verb list: it is what tr, tee, mapfile and a `while read`
+# loop all have in common, and enumerating a verb for each would be four
+# entries that all mean "this file is being read".
+for c in \
+  'tr -d x < ~/.zshrc.local' \
+  'tee < ~/.zshrc.local' \
+  'mapfile -t a < ~/.zshrc.local' \
+  'readarray -t a < ~/.zshrc.local' \
+  'grep KEY < ~/.zshrc.local'
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+# shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
+wr_loop='while read -r l; do echo "$l"; done < ~/.zshrc.local'
+check "refuses: a while-read loop fed by the file" "$(ask "$wr_loop")" "deny"
+# Command substitution. The verb is there in plain sight; only the `(` or the
+# backtick before it kept the old pattern from seeing it.
+# shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
+check "refuses: the read inside a command substitution" \
+      "$(ask 'echo $(cat ~/.zshrc.local)')" "deny"
+# shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
+check "refuses: ...and the backtick spelling" \
+      "$(ask 'echo `cat ~/.zshrc.local`')" "deny"
+
+echo
+echo "=== ...without letting the wider verb list catch metadata ==="
+# Group 2. A longer verb list is the easiest way to start refusing commands
+# that print nothing, and `wc`/`du`/`file`/`cp` are the ones nearest the line.
+for c in \
+  'du -h ~/.zshrc.local' \
+  'file ~/.zshrc.local' \
+  'cp ~/.zshrc.local ~/.zshrc.local.bak' \
+  'mv ~/.zshrc.local ~/.zshrc.local.old' \
+  'touch ~/.zshrc.local' \
+  'chmod 600 ~/.zshrc.local'
+do
+  check "allows: $c" "$(ask "$c")" "allow"
+done
+# The verb must still be reading THE FILE. Each of these runs a NEW verb over
+# some other file while naming the credential file in a different segment.
+check "allows: a new verb reading a different file" \
+      "$(ask 'echo see ~/.zshrc.local > n.txt; cut -d: -f1 /etc/passwd')" "allow"
+check "allows: ...and sort over an unrelated file" \
+      "$(ask 'echo see ~/.zshrc.local > n.txt; sort README.md | uniq')" "allow"
+# `(` became a word boundary so command substitution is seen. It must not fire
+# on ordinary array syntax, where there is no command at all.
+# shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
+check "allows: an array literal that happens to start with a verb name" \
+      "$(ask 'FILES=(~/.zshrc.local ~/.zshrc); echo ${#FILES[@]}')" "allow"
+# `<<` is a heredoc, which reads nothing from the named file.
+hd_named="$(printf '%s\n' 'cat <<EOF' 'see ~/.zshrc.local for the key' 'EOF')"
+check "allows: a heredoc whose body names the file" "$(ask "$hd_named")" "allow"
+# `<<<` is a HERESTRING: it feeds the literal path text to the command, and the
+# shell never opens the file. The command here is deliberately one the verb list
+# does not know, because every verb it DOES know denies the segment on its own
+# and so cannot tell the two rules apart -- which is what left the `<<`
+# exclusion unpinned until this row existed.
+check "allows: a herestring carrying the path, which opens nothing" \
+      "$(ask 'tr a b <<< ~/.zshrc.local')" "allow"
+# ...and the redirection rule has to check WHICH file is being redirected, not
+# merely that the segment has a `<` somewhere in it.
+check "allows: a redirection from something else, in a segment that names the file" \
+      "$(ask 'echo ~/.zshrc.local < /dev/null')" "allow"
+
+echo
+echo "=== ...and the shapes that stay uncovered, pinned so the scope is explicit ==="
+# DO-597 chose to add the reachable shapes and NAME the rest rather than grow
+# the pattern list until the guard merely LOOKS comprehensive. These rows are
+# the scope written down: each is a real read that this hook does not catch,
+# and a change that starts catching one should fail here and be a decision.
+# shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
+for c in \
+  "perl -ne 'print' ~/.zshrc.local" \
+  'eval "cat ~/.zshrc.local"' \
+  'cat ~/.zshrc.loca*' \
+  'cp ~/.zshrc.local /tmp/x && cat /tmp/x' \
+  'f=~/.zshrc.local && cat "$f"'
+do
+  check "uncovered (by decision): $c" "$(ask "$c")" "allow"
+done
+py_read='python3 -c "print(open(\"/home/zvi/.zshrc.local\").read())"'
+check "uncovered (by decision): an interpreter handed the path" \
+      "$(ask "$py_read")" "allow"
+# A known FALSE POSITIVE, pre-existing and pinned rather than fixed here: the
+# file is the TARGET of a redirection, so nothing is read from it, but the
+# segment carries both a reading verb and the path. Same treatment as the
+# heredoc-prose row above -- visible and tracked beats quietly wrong.
+check "refuses: writing TO the file (known, pre-existing FP)" \
+      "$(ask 'cat README.md > ~/.zshrc.local')" "deny"
+
 echo "=== the guard fails OPEN, always ==="
 # A hook that blocks the shell when it breaks gets disabled wholesale, taking
 # its protection with it. Every malformed input must allow.
