@@ -427,6 +427,107 @@ check "refuses: piped onward to another command" \
       "$(ask 'cat ~/.zshrc.local | sort')" "deny"
 
 echo
+echo
+echo "=== expanding a secret-bearing VARIABLE ==="
+# Every rule above matches a command SHAPE. None was keyed on the variable
+# being expanded, so `echo "$GH_TOKEN"` was allowed -- and on 2026-09-06 a line
+# of that family printed a live OAuth token into a session transcript, the
+# fourth such capture in six days.
+#
+# The names are assembled rather than written, for the same reason the fixture
+# tokens above are: a literal would trip this repo's own secret scanners.
+GHV="GH_""TOKEN"
+LKV="LINEAR_""API_KEY"
+for c in \
+  "echo \"\$$GHV\"" \
+  "echo \$$GHV" \
+  "printf '%s' \"\$$LKV\"" \
+  "echo \"\${$GHV}\"" \
+  "printf '%s' \"\${$GHV:-unset}\"" \
+  "printf '%s' \"\${$GHV:=fallback}\"" \
+  "echo \"\${$GHV:0:4}\"" \
+  "echo \"\${$GHV#gho_}\""
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+# The line that actually leaked. `${NAME:+...}` is safe, `${NAME:-...}` is not,
+# and the two sit side by side in it -- so a rule that stopped at the first
+# expansion it recognised as safe would have allowed the whole thing.
+check "refuses: the 2026-09-06 reporting line, whose :- half expands the value" \
+      "$(ask "echo \"$GHV: \${$GHV:+set (\${#$GHV} chars)}\${$GHV:-unset}\"")" "deny"
+# ...and the alternate text of a :+ is only safe while it does not itself
+# expand the value.
+check "refuses: a :+ whose alternate expands the variable" \
+      "$(ask "echo \"\${$GHV:+\${$GHV}}\"")" "deny"
+# `printenv NAME` prints one variable. The bare-dump rule requires env/printenv
+# with NO operand, so naming a credential walked past every rule in the file.
+check "refuses: printenv naming a credential variable" \
+      "$(ask "printenv $GHV")" "deny"
+# Two expansions with NOTHING between them. The scan consumes `$`, the brace and
+# the NAME -- and deliberately not the character after it, which is itself the
+# `$` that opens the next one. Eating one more character loses the second
+# expansion entirely, and the first here is an ordinary variable, so the whole
+# command reads as clean.
+check "refuses: a credential expansion butted against an ordinary one" \
+      "$(ask "echo \"\$USER\$$GHV\"")" "deny"
+# The name list is patterns as well as literals, or it covers only the five
+# variables someone happened to think of.
+# shellcheck disable=SC2016  # the expansion must reach the guard UNEXPANDED
+check "refuses: a name matched by the *_TOKEN pattern, not by literal" \
+      "$(ask 'echo "$DEPLOY_TOKEN"')" "deny"
+
+echo
+echo "=== ...without refusing the forms that report set/unset ==="
+# These are what CLAUDE.md and the rabota preflight PRESCRIBE. Denying them
+# would leave no way to report whether a variable is set at all, and a guard
+# with no permitted alternative is one people route around -- so they matter
+# more than the rows above.
+check "allows: the length only" \
+      "$(ask "echo \"len=\${#$GHV}\"")" "allow"
+check "allows: :+ with a literal alternate" \
+      "$(ask "echo \"$GHV is \${$GHV:+set}\"")" "allow"
+check "allows: :+ whose alternate reports only the length" \
+      "$(ask "echo \"$GHV: \${$GHV:+set (\${#$GHV} chars)}\"")" "allow"
+
+echo
+echo "=== ...and an expansion is not an EMISSION ==="
+# Group 2, and this is the group that decides the design. A rule keyed on the
+# expansion alone -- the obvious shape -- refuses every one of these. Each
+# expands a credential variable and prints nothing, and the first of them
+# appears in this repo's own zsh/zshrc.herdr, so that rule would refuse
+# ordinary work on the very tree the guard lives in.
+for c in \
+  "[[ -n \"\$$GHV\" ]] && echo pinned" \
+  "[[ -n \$$GHV ]] && echo pinned" \
+  "if [ -z \"\$$LKV\" ]; then echo unset; fi" \
+  "export $GHV=\"\$(gh auth token --user x)\"" \
+  "curl -H \"Authorization: Bearer \$$GHV\" https://api.github.com/user" \
+  "env -u $GHV gh api user" \
+  "git commit -m \"route \$$GHV properly\""
+do
+  check "allows: $c" "$(ask "$c")" "allow"
+done
+# SINGLE quotes suppress expansion, so these print the NAME, not the value.
+# Matching on the raw command would refuse them; matching on $probe, which
+# strips ALL quotes, would never have fired on the leak. Hence the third strip:
+# single-quoted spans out, double-quoted spans kept.
+check "allows: single quotes, which expand nothing" \
+      "$(ask "echo 'the variable \$$GHV holds it'")" "allow"
+check "allows: a backslash-escaped dollar inside double quotes" \
+      "$(ask "echo \"the variable is \\\$$GHV\"")" "allow"
+# ...and a variable whose name merely resembles a secret must be left alone.
+# shellcheck disable=SC2016  # the expansion must reach the guard UNEXPANDED
+for c in \
+  'echo "PATH is $PATH"' \
+  'echo "${PATTERN:-none}"' \
+  'echo "${COMPAT:-no}"' \
+  'echo "user=$USER"' \
+  'printenv GH_CONFIG_DIR' \
+  'echo "$TOKEN_COUNT tokens used"'
+do
+  check "allows: $c" "$(ask "$c")" "allow"
+done
+
 echo "=== the guard fails OPEN, always ==="
 # A hook that blocks the shell when it breaks gets disabled wholesale, taking
 # its protection with it. Every malformed input must allow.
@@ -463,6 +564,33 @@ import json; print(json.dumps({'tool_input':{'command':'env'}}))" | "$GUARD" \
       | jq -r '.hookSpecificOutput.permissionDecisionReason')"
 check "names the redactor"   "$(printf '%s' "$msg" | grep -c 'redact-secrets')" "1"
 check "says why it is a deny" "$(printf '%s' "$msg" | grep -c 'transcript')"    "1"
+
+# The variable rule's message has to name the SAFE form, because the generic
+# remedy above -- the redactor -- is the wrong tool for it: there is nothing to
+# redact when all you wanted was to say whether the variable is set, and the
+# redactor matches token shapes, so a variable caught here by its NAME alone
+# passes through it untouched. CLAUDE.md records a case where this guard's own
+# suggested remedy still printed the token; this row is against that.
+vmsg="$(python3 -c "
+import json; print(json.dumps({'tool_input':{'command':'echo \"\$$GHV\"'}}))" | "$GUARD" \
+      | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+# shellcheck disable=SC2016  # the expansion must reach the guard UNEXPANDED
+check "the variable rule names the length form as the remedy" \
+      "$(printf '%s' "$vmsg" | grep -c '\${#')" "1"
+check "...and says the redactor is not the remedy here" \
+      "$(printf '%s' "$vmsg" | grep -c 'not a reliable remedy')" "1"
+# ...and it must never print the VALUE. The guard runs with the real
+# environment, so the only thing stopping it is that it never expands the
+# command it was handed -- which is worth a canary rather than an assurance.
+# A diagnostic that prints a credential is worse than no diagnostic.
+CANARY="canary$(printf '9%.0s' {1..12})zz"
+vleak="$(GH_TOKEN="$CANARY" python3 -c "
+import json; print(json.dumps({'tool_input':{'command':'echo \"\$$GHV\"'}}))" \
+        | GH_TOKEN="$CANARY" "$GUARD")"
+check "the variable rule never expands the command it refuses" \
+      "$(printf '%s' "$vleak" | grep -c "$CANARY")" "0"
+check "...while still denying it" \
+      "$(printf '%s' "$vleak" | jq -r '.hookSpecificOutput.permissionDecision')" "deny"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

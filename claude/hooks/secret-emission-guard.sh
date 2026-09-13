@@ -225,11 +225,161 @@ cmd_segments() {
   printf '%s\n' "$out"
 }
 
+
+# --- secret-bearing variable expansions ------------------------------------
+#
+# Every rule above matches a command SHAPE. None is keyed on the variable being
+# expanded, so `echo "$GH_TOKEN"` was allowed -- and on 2026-09-06 a line of
+# exactly that family printed a live OAuth token into a session transcript. It
+# was the fourth such capture in six days.
+#
+# Two things have to be right, or the rule never fires and never stops firing:
+#
+#   MATCH ON THE RIGHT TEXT. $probe has ALL quoted strings stripped, and a leak
+#   is almost always inside quotes, so a case appended to the block above could
+#   never have matched. The raw command is wrong in the other direction: single
+#   quotes SUPPRESS expansion, so `echo 'see $GH_TOKEN'` prints the name rather
+#   than the value and refusing it is a false positive. The name is therefore
+#   looked for with single-quoted spans removed and double-quoted ones KEPT --
+#   neither $cmd nor $probe.
+#
+#   TELL THE REPORTING FORMS APART FROM THE LEAKING ONES. `${NAME:-unset}` and
+#   `${NAME-unset}` expand to the VALUE whenever the variable is set, which is
+#   the exact construction that leaked. `${#NAME}` and `${NAME:+<literal>}` do
+#   not, and they are what CLAUDE.md prescribes for reporting set/unset -- so
+#   denying them would leave no way to report it at all, and a guard with no
+#   permitted alternative is one people route around.
+#
+# Known-uncovered, deliberately: an interpreter handed the expansion as a
+# string. `bash -c 'echo $GH_TOKEN'` expands in the CHILD, where single quotes
+# no longer suppress anything -- and the same single-quote rule that stops the
+# false positive above is what hides it. Same class as the shapes DO-597 names.
+
+# 0 if $1 names a variable that holds a credential.
+secret_var_name() {
+  case "$1" in
+    GH_TOKEN|GITHUB_TOKEN|GITHUB_PERSONAL_ACCESS_TOKEN) return 0 ;;
+    ANTHROPIC_API_KEY|LINEAR_API_KEY|NOTION_PAT)        return 0 ;;
+    *_TOKEN|*_API_KEY|*_APIKEY|*_SECRET|*_PASSWORD|*_PASSWD|*_PAT) return 0 ;;
+  esac
+  return 1
+}
+
+SVE_NAME=""
+# 0 if $1 contains an expansion that yields the VALUE of such a variable.
+secret_expansion_in() {
+  local rest="$1" brace name consumed tail
+  while [[ "$rest" =~ \$(\{?)([A-Za-z_][A-Za-z0-9_]*) ]]; do
+    brace="${BASH_REMATCH[1]}"; name="${BASH_REMATCH[2]}"
+    # Consume `$`, the optional brace and the name -- NOT the character after
+    # it, which may itself open the next expansion: in `$A$B`, eating one more
+    # character would swallow the `$` of `$B`. This is exactly BASH_REMATCH[0],
+    # and it is never empty, so `rest` strictly shrinks and the loop ends.
+    consumed="\$${brace}${name}"
+    tail="${rest#*"$consumed"}"
+    rest="$tail"
+    secret_var_name "$name" || continue
+    # A bare `$NAME` expands to the value.
+    if [[ -z "$brace" ]]; then SVE_NAME="$name"; return 0; fi
+    case "$tail" in
+      '+'*|':+'*)
+        # ${NAME:+ALT} expands to ALT and never to the value, so it is safe.
+        # That is the form CLAUDE.md prescribes for reporting set/unset --
+        # `echo "tok: ${GH_TOKEN:+set (${#GH_TOKEN} chars)}"` -- and denying it
+        # would leave no way to report it at all.
+        #
+        # ALT needs no handling of its own, which is worth stating because the
+        # obvious implementation recurses into it. The scan continues through
+        # `rest`, and `rest` still CONTAINS ALT, so an expansion of the value
+        # inside the alternate is found by the next turn of this loop --
+        # `${NAME:+${NAME}}` denies on the inner one. A recursive call as well
+        # was redundant, and a mutant removing it could not be killed.
+        ;;
+      *)
+        # Everything else -- ${NAME}, ${NAME:-x}, ${NAME-x}, ${NAME:=x},
+        # ${NAME?x}, ${NAME#p}, ${NAME:0:4} -- yields the value or a FRAGMENT
+        # of it, and a fragment of a credential is a credential.
+        SVE_NAME="$name"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+SVE_WHY=""
+secret_var_expansion() {
+  local seg exp stripped verb safe
+
+  cmd_segments_ensure || return 1
+  while IFS= read -r seg || [[ -n "$seg" ]]; do
+    # No `$`, no expansion. The strip fork below is gated on this.
+    [[ "$seg" == *'$'* ]] || continue
+
+    # Condition one: the NAME, on the single-quote-stripped segment. A
+    # backslash-escaped `$` goes too: inside double quotes `\$NAME` prints the
+    # NAME, which is how you write about the variable rather than read it.
+    exp="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\\\\[$]//g")"
+    secret_expansion_in "$exp" || continue
+
+    # Condition two: a PRINTING verb, on the quote-stripped segment -- the same
+    # split the credential-file rule above uses, and for the same reason. An
+    # expansion is not an emission: `[[ -n "$GH_TOKEN" ]]`,
+    # `export GH_TOKEN="$(gh auth token --user x)"` and
+    # `curl -H "Authorization: Bearer $GH_TOKEN" ...` all expand the variable
+    # and print nothing. This repo's own zsh/zshrc.herdr contains the first of
+    # them, so a rule keyed on the expansion alone refuses ordinary work on the
+    # very tree the guard lives in -- the false positive that costs the whole
+    # guard.
+    stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
+    [[ "$stripped" =~ (^|[|;\&[:space:]])(echo|printf|print|cat|tee|logger)([[:space:]]|$) ]] || continue
+    verb="${BASH_REMATCH[2]}"
+
+    # Name the safe form in the message. The generic remedy below points at the
+    # redactor, which is the wrong tool here: there is nothing to redact when
+    # all you wanted was to say whether the variable is set.
+    # shellcheck disable=SC2016  # this is the literal text of the remedy,
+    # not an expansion to perform here
+    safe='${'"$SVE_NAME"':+set (${#'"$SVE_NAME"'} chars)}'
+    SVE_WHY="\`$verb\` expands \`\$$SVE_NAME\`, which holds a credential. Report it without printing it: \`echo \"$SVE_NAME: $safe\"\`. Note the redactor named below matches token SHAPES, so it is not a reliable remedy for an arbitrary variable"
+    return 0
+  done <<< "$CMD_SEGS"
+
+  return 1
+}
+
+# cmd_segments is a character loop, so it is the most expensive thing in this
+# file -- measured 0.33s of CPU on a 400-segment command. There are two rules
+# that need segments now, and calling it once per rule DOUBLED that (0.33s ->
+# 0.74s) for no change in what either rule sees. The hook's timeout is 5s and a
+# timeout FAILS OPEN, so this is a correctness margin, not tidiness.
+#
+# Assign to a local and set the flag only on success: `VAR=$(cmd)` creates the
+# variable even when cmd fails, so caching the assignment directly would record
+# a FAILED run as a successful EMPTY one -- and an empty segment list reads as
+# "this command has no segments", which allows everything.
+CMD_SEGS=""
+CMD_SEGS_CACHED=""
+# POPULATES; it does not print. A function that printed the segments would have
+# to be called as `< <(...)`, and process substitution runs it in a SUBSHELL --
+# so the assignment below would be made in the child and lost, the cache would
+# never be warm, and every rule would pay the full character loop again while
+# looking memoised. Callers read $CMD_SEGS with a herestring instead.
+cmd_segments_ensure() {
+  local out
+  [[ -n "$CMD_SEGS_CACHED" ]] && return 0
+  # Assign to a local and set the flag only on success: `VAR=$(cmd)` creates
+  # the variable even when cmd fails, so caching the assignment directly would
+  # record a FAILED run as a successful EMPTY one -- and an empty segment list
+  # reads as "this command has no segments", which allows everything.
+  out="$(cmd_segments "$cmd")" || return 1
+  CMD_SEGS="$out"; CMD_SEGS_CACHED=1
+}
+
 CFR_WHY=""
 credential_file_read() {
   local seg stripped hit verb
 
   # `|| [[ -n $seg ]]` so a final segment with no trailing newline is still seen.
+  cmd_segments_ensure || return 1
   while IFS= read -r seg || [[ -n "$seg" ]]; do
     [[ -n "$seg" ]] || continue
 
@@ -245,7 +395,7 @@ credential_file_read() {
 
     CFR_WHY="\`$verb\` on \`$hit\`, which holds credentials"
     return 0
-  done < <(cmd_segments "$cmd")
+  done <<< "$CMD_SEGS"
 
   return 1
 }
@@ -324,6 +474,14 @@ if [[ -z "$why" ]]; then
   #   have. Do not read the verb list as coverage.
   elif credential_file_read; then
     why="$CFR_WHY"
+  # `printenv NAME` prints one variable's value. The bare-dump rule above
+  # deliberately does not match it -- it requires `env`/`printenv` with no
+  # operand -- so naming a credential variable walked past every rule here.
+  elif [[ "$probe" =~ (^|[|;\&[:space:]])printenv[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)([[:space:]]|$) ]] \
+       && secret_var_name "${BASH_REMATCH[2]}"; then
+    why="\`printenv ${BASH_REMATCH[2]}\` prints a credential"
+  elif secret_var_expansion; then
+    why="$SVE_WHY"
   fi
 fi
 
