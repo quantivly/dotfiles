@@ -312,6 +312,29 @@ bs_nl_word="$(printf '%s\n' $'ca\\' 't ~/.zshrc.local')"
 check "refuses: a verb rejoined across a line continuation" \
       "$(ask "$bs_nl_word")" "deny"
 
+# ...and a backslash-newline INSIDE quotes is two different things depending on
+# WHICH quote, which is why the scan has a separate branch for it. Inside double
+# quotes bash removes both characters and joins; inside single quotes it does
+# neither, and both stay literal data.
+#
+# These two rows are a PAIR on purpose, and neither works alone. A "both must
+# deny" pair -- the obvious spelling -- cannot fail: nothing inside quotes ever
+# splits a segment, so every build denies both and the rows assert nothing.
+# What discriminates is a filename straddling the continuation, where the two
+# quotings name two different files: one that exists and one that does not.
+# shellcheck disable=SC1003  # a literal backslash-newline is the whole point of the row
+dq_bs_path="$(printf '%s\n' 'cat "~/.zshrc.loc\' 'al"')"
+check "refuses: a path rejoined across a continuation in DOUBLE quotes" \
+      "$(ask "$dq_bs_path")" "deny"
+# shellcheck disable=SC1003  # a literal backslash-newline is the whole point of the row
+sq_bs_path="$(printf '%s\n' 'cat '"'"'~/.zshrc.loc\' 'al'"'"'')"
+check "allows: single quotes do NOT join, so that is a different filename" \
+      "$(ask "$sq_bs_path")" "allow"
+# shellcheck disable=SC1003  # a literal backslash-newline is the whole point of the row
+dq_bs_pat="$(printf '%s\n' 'grep -e "foo\' 'bar" ~/.zshrc.local')"
+check "refuses: a double-quoted pattern rejoined across a continuation" \
+      "$(ask "$dq_bs_pat")" "deny"
+
 #   a newline INSIDE quotes is data -- a multi-line awk or sed script is one
 #   command, exactly as a quoted `;` is one command.
 multiline_awk="$(printf '%s\n' "awk '" '/PATH/ {print}' "' ~/.zshrc.local")"
@@ -325,6 +348,62 @@ check "refuses: quoted pattern spanning a newline" \
 # one stage is read by a verb in another.
 check "refuses: the path is piped into the reader" \
       "$(ask 'echo ~/.zshrc.local | xargs cat')" "deny"
+
+# A `;` or newline that merely introduces a compound-command KEYWORD is not a
+# command boundary. `for f in <file>; do cat $f; done` names the file in the
+# loop header and reads it in the body -- one command -- and splitting at the
+# `;` tore the two apart, so the read was allowed.
+#
+# A loop written over several lines has TWO such separators, one either side of
+# the keyword, and merging only the first still leaves the header and the body
+# in different segments. That is the same shape in the spelling people actually
+# write, so both are rows.
+# shellcheck disable=SC2016  # the loop variable must reach the guard UNEXPANDED
+loop_oneline='for f in ~/.zshrc.local; do cat $f; done'
+check "refuses: the loop header names the file, the body reads it" \
+      "$(ask "$loop_oneline")" "deny"
+# shellcheck disable=SC2016  # the loop variable must reach the guard UNEXPANDED
+loop_multiline="$(printf '%s\n' 'for f in ~/.zshrc.local' 'do' '  cat $f' 'done')"
+check "refuses: ...the same loop written over four lines" \
+      "$(ask "$loop_multiline")" "deny"
+# shellcheck disable=SC2016  # the loop variable must reach the guard UNEXPANDED
+loop_semi_nl="$(printf '%s\n' 'for f in ~/.zshrc.local;' 'do cat $f; done')"
+check "refuses: ...with both a semicolon and a newline before the keyword" \
+      "$(ask "$loop_semi_nl")" "deny"
+
+# Group 2, and these are the rows that decide whether the keyword list stays
+# narrow. Every one of them passes on a build that merges on EVERY
+# compound-command keyword, or on one that matches keywords by prefix -- so
+# each names the single change that would break it.
+#
+# `then` and `else` are deliberately NOT merge keywords. Merging them refuses
+# an ordinary existence test whose body reads some other file, which is the
+# `&&` spelling the suite already asserts is allowed a few rows above.
+check "allows: an existence test whose THEN branch reads another file" \
+      "$(ask 'if [ -f ~/.zshrc.local ]; then cat README.md; fi')" "allow"
+check "allows: ...and whose ELSE branch does" \
+      "$(ask 'if [ -f ~/.zshrc.local ]; then echo yes; else head -1 README.md; fi')" "allow"
+# The keyword is compared WHOLE. A prefix test merges `do_thing` and `docker`.
+# Each of these needs a reading VERB in the second half, or the row cannot
+# tell a prefix match from a whole-word one: merging a segment that contains
+# no verb changes no decision, so the obvious spelling (`; docker inspect x`)
+# passes on a prefix-matching build and pins nothing.
+check "allows: a later command merely STARTING with the keyword" \
+      "$(ask 'echo ~/.zshrc.local; do_thing README.md | head -3')" "allow"
+check "allows: ...including docker, which begins with do" \
+      "$(ask 'echo ~/.zshrc.local; docker logs web | grep error')" "allow"
+# The far-side merge is one-shot and fires only for a keyword this scan ALREADY
+# merged into -- i.e. one a separator introduced. A plain look-behind, which is
+# the obvious simplification, would merge the word `do` out of any command.
+check "allows: a command ending in the bare word do" \
+      "$(ask 'echo ~/.zshrc.local do; head -1 README.md')" "allow"
+# An ordinary loop over ordinary files stays ordinary.
+# shellcheck disable=SC2016  # the loop variable must reach the guard UNEXPANDED
+check "allows: a loop over unrelated files" \
+      "$(ask 'for f in *.md; do grep x $f; done')" "allow"
+# shellcheck disable=SC2016  # the loop variable must reach the guard UNEXPANDED
+check "allows: ...and one that mentions the file in a LATER segment" \
+      "$(ask 'for f in *.md; do grep x $f; done; echo see ~/.zshrc.local')" "allow"
 
 # Heredoc shapes that a body-stripper would have mis-terminated, each followed by
 # a real read that must still be seen.

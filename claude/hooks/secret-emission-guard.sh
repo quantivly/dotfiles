@@ -68,7 +68,7 @@ probe="$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
 # authoring documentation about ~/.gitconfig.local and then grepping the draft,
 # for instance. That is group 2, the false positive that gets a hook deleted.
 #
-# Three decisions in here are load-bearing, and each is a row in
+# Four decisions in here are load-bearing, and each is a row in
 # scripts/test-secret-guard.sh:
 #
 #   QUOTES. A `;` or `|` inside a quoted script argument is data, not a
@@ -83,6 +83,12 @@ probe="$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
 #   in one stage is read by a verb in another, as in `echo <file> | xargs cat`.
 #   Lone `&` is likewise left alone, so `2>&1` cannot break a segment apart.
 #
+#   COMPOUND KEYWORDS. A `;` or newline that merely introduces the `do` of a
+#   loop is not a command boundary: `for f in <file>; do cat $f; done` names
+#   the file in the header and reads it in the body, and splitting there tore
+#   the two apart. Merging can only over-deny, but the keyword list is still
+#   kept to `do` alone -- see SEG_MERGE_KEYWORDS below for what `then` costs.
+#
 #   NO HEREDOC STRIPPING. A heredoc body is data being written, and stripping it
 #   would drop prose that names a credential file next to a verb. But a stripper
 #   must guess where the body ends, and every wrong guess DELETES the rest of
@@ -93,6 +99,29 @@ probe="$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
 #   generating code or docs -- is already fine, because the verb test runs on
 #   the quote-stripped segment.
 #
+# Keywords that CONTINUE the command a `;` or a newline appears to end, so that
+# separator is not a segment boundary. Used by the `';'` branch of cmd_segments.
+#
+# Deliberately just `do`, not every compound-command keyword, and that is a
+# MEASURED narrowing rather than an oversight. The other candidates split three
+# ways:
+#
+#   `then`/`else` cost a real false positive. `if [ -f <file> ]; then cat
+#   README.md; fi` is an ordinary existence test whose body reads some OTHER
+#   file, and merging the halves refuses it. The suite already asserts that the
+#   `&&` spelling of that command is allowed (`test -f <file> && echo yes`); a
+#   guard that refuses the `; then` spelling of a command it allows with `&&`
+#   is the false positive this whole file is written against.
+#
+#   `fi`/`esac`/`done`/`in` buy nothing. An `if` or `case` BODY already denies
+#   without any merging, because the filename and the verb both land after the
+#   keyword and so already share a segment. Only a loop HEADER puts the
+#   filename before the separator and the verb after it.
+#
+# Both halves of that are rows in scripts/test-secret-guard.sh rather than
+# claims here, including the two that a wider list would break.
+SEG_MERGE_KEYWORDS="do"
+
 # Pure bash on purpose: no awk, no second dependency, and nothing that can fail
 # to empty output and silently switch the rule off.
 cmd_segments() {
@@ -100,7 +129,7 @@ cmd_segments() {
   # before s was assigned, leaving n empty -- the loop then never runs, every
   # segment vanishes and the rule silently allows everything. shellcheck SC2318.
   local s="$1"
-  local n=${#s} i=0 ch nxt q="" out=""
+  local n=${#s} i=0 ch nxt q="" out="" j w kw_end=-1
 
   # A pathological command is not worth a character loop. Emitting it whole
   # merges every segment, which can only over-deny. Newlines are flattened to
@@ -139,7 +168,52 @@ cmd_segments() {
         # than a space, or the rejoined verb would no longer match.
         if [[ "${s:i+1:1}" == $'\n' ]]; then (( i += 2 )); continue; fi
         out+="$ch"; (( i++ )); (( i < n )) && out+="${s:i:1}" ;;
-      ';'|$'\n') out+=$'\n' ;;
+      ';'|$'\n')
+        # A separator that merely introduces -- or merely follows -- a
+        # compound-command KEYWORD is not a command boundary in any useful
+        # sense. `for f in <file>; do cat $f; done` names the file in the loop
+        # header and reads it in the body: one command, one dataflow, and
+        # splitting at the `;` tore the verb away from the filename. Merging
+        # instead can only ever over-deny, which is the safe direction.
+        #
+        # The word is taken WHOLE, up to whitespace or a shell metacharacter,
+        # and compared whole. A prefix test would merge on `docker ps` and on
+        # `do_something README.md`.
+        j=$((i+1))
+        while (( j < n )) && [[ "${s:j:1}" == [[:space:]] ]]; do (( j++ )); done
+        # One BOUNDED substring, not a character loop. Scanning the next word
+        # a character at a time doubled the cost of every separator-heavy
+        # command -- measured 0.25s -> 0.61s of CPU on 400 separators -- and
+        # this hook's timeout is 5s, where a timeout FAILS OPEN. 16 is far past
+        # the longest keyword; a longer word is truncated, which can only fail
+        # to match, never match something it should not.
+        w="${s:j:16}"
+        w="${w%%[[:space:]]*}"
+        w="${w%%[;&|()<>]*}"
+        if [[ " $SEG_MERGE_KEYWORDS " == *" $w "* ]]; then
+          # Remember where the keyword ended, so the separator on its FAR side
+          # merges too. A loop written over several lines has two separators,
+          # not one --
+          #     for f in <file>
+          #     do
+          #       cat $f
+          #     done
+          # -- and merging only the first still leaves the header in one
+          # segment and the body in the next, which is the miss this change
+          # exists to close, in the spelling people actually write.
+          out+=' '; kw_end=$(( j + ${#w} ))
+        elif (( kw_end >= 0 && i >= kw_end )) \
+             && [[ "${s:kw_end:i-kw_end}" =~ ^[[:space:]]*$ ]]; then
+          # One-shot, and it fires only for a keyword we ALREADY merged into --
+          # i.e. one that was itself introduced by a separator, which is what
+          # makes it a loop keyword rather than the word `do` in somebody's
+          # prose. A plain look-behind would merge `echo do` with the next
+          # command.
+          out+=' '; kw_end=-1
+        else
+          out+=$'\n'; kw_end=-1
+        fi
+        ;;
       '&'|'|')
         nxt="${s:i+1:1}"
         # `&&` and `||` separate commands; a single `|` or `&` does not.
@@ -234,10 +308,15 @@ if [[ -z "$why" ]]; then
   #   caught BEFORE segmenting and no longer caught -- a deliberate reduction,
   #   not an oversight. Segmenting cannot follow data from one segment into the
   #   next, so indirection escapes it:
-  #     for f in <file>; do cat $f; done
   #     f=<file> && cat "$f"
   #     [ -f <file> ] && cat "$_"
   #     cp <file> /tmp/x && cat /tmp/x
+  #   Each carries the filename across a real command boundary in a variable,
+  #   in $_, or in a copy -- which needs dataflow, not a keyword. The fourth
+  #   member of this list, `for f in <file>; do cat $f; done`, was NOT one of
+  #   them: nothing there crosses a boundary, only the `;` that introduces the
+  #   `do` keyword stood between the filename and the verb. It is covered again
+  #   (DO-598); see SEG_MERGE_KEYWORDS.
   #   The whole-string rule caught these by the same accident that made it
   #   refuse `git commit -m "... <file>"` -- filename anywhere plus verb
   #   anywhere. Keeping them would mean keeping that false positive; telling
