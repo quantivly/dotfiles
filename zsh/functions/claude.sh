@@ -536,7 +536,28 @@ claude-doctor() {
     echo "clauth: ○ not installed — single-account machine, nothing to check"
   else
     echo "clauth (owns the profiles that get written OVER ~/.claude/.credentials.json):"
-    active=$(clauth which 2>/dev/null | tr -d '[:space:]')
+    # THE SAME MISTAKE AS THE LINE ABOVE, one axis over. `clauth which` answers
+    # from $CLAUDE_CONFIG_DIR, so inside an isolated session it returns THIS
+    # SESSION's profile rather than the machine-wide active one — and since #107
+    # made isolation the default, that is very nearly every session. Measured
+    # 2026-09-14 on this box: `personal-1` machine-wide, `quantivly-0` from a
+    # session isolated onto quantivly-0.
+    #
+    # It is not one wrong line: $active feeds the two comparisons below, so the
+    # doctor then reported `stored copy of '<this session>' DIFFERS from the live
+    # credential` and `the live credential belongs to '<X>', but the active
+    # profile is '<this session>'` — two confident warnings about a machine that
+    # is fine, in the section whose own header says it is about the GLOBAL file.
+    # CLAUDE.md already records this `clauth which` trap for the account picker
+    # (zsh/zshrc.herdr refuses to use it for exactly this reason); the doctor had
+    # it too.
+    #
+    # Ask the machine-wide question by asking it from a machine-wide environment.
+    # Subshell + `exec command`, never `env VAR=...` argv: the repo's own idiom
+    # (_gh_run in github.sh carries the reasoning), and `command` because zsh's
+    # `exec` resolves SHELL FUNCTIONS, so a clauth wrapper in ~/.zshrc.local would
+    # otherwise be run instead of the binary and its answer taken as authority.
+    active=$( (unset CLAUDE_CONFIG_DIR; exec command clauth which) 2>/dev/null | tr -d '[:space:]' )
     # `clauth which` answers the literal string "unknown" when the credential it
     # is looking at belongs to no profile — a sentinel, not a name. Taking it as
     # one produced "no stored credentials for 'unknown' to compare against",

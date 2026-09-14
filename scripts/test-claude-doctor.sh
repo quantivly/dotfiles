@@ -106,7 +106,16 @@ cat > "$STUBBIN/clauth" <<'STUB'
 # is the entire point of stubbing it.
 printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
 case "$1" in
-    which) [ -n "${CLAUTH_STUB_WHICH:-}" ] && printf '%s\n' "$CLAUTH_STUB_WHICH"; exit 0 ;;
+    which)
+        # Real clauth answers `which` from $CLAUDE_CONFIG_DIR, so an isolated
+        # session is told ITS OWN profile rather than the machine-wide one. The
+        # stub has to model that or no row can tell the two questions apart —
+        # before this, every row got the same answer either way and the defect
+        # was invisible to the whole table.
+        if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -n "${CLAUTH_STUB_WHICH_ISOLATED:-}" ]; then
+            printf '%s\n' "$CLAUTH_STUB_WHICH_ISOLATED"; exit 0
+        fi
+        [ -n "${CLAUTH_STUB_WHICH:-}" ] && printf '%s\n' "$CLAUTH_STUB_WHICH"; exit 0 ;;
 esac
 exit 0
 STUB
@@ -244,6 +253,7 @@ run_doctor() {
     OUT="$(env "${pre[@]}" HOME="$FHOME" \
               CLAUDE_DOCTOR_PROC_ROOT="${PROC_ROOT:-$FHOME/procfix}" \
               CLAUTH_STUB_LOG="$CLAUTH_LOG" CLAUTH_STUB_WHICH="${CLAUTH_STUB_WHICH:-}" \
+              CLAUTH_STUB_WHICH_ISOLATED="${CLAUTH_STUB_WHICH_ISOLATED:-}" \
               CLAUDE_SETTINGS_REQUIRE="${REQUIRE:-}" \
               "PATH=$p" \
         "$SYSBIN/zsh" -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; ${PRELUDE:-}; claude-doctor $*" 2>&1)"
@@ -539,6 +549,35 @@ ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$FHOME/iso/.credentials.jso
 CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor; CFGDIR=""
 want_out "an isolated session still reports a misattributed global credential" \
          "belongs to 'p2', but the active profile is 'p1'"
+
+# `clauth which` ANSWERS FROM $CLAUDE_CONFIG_DIR, so inside an isolated session it
+# names THIS SESSION's profile, not the machine-wide one — and isolation has been
+# the default for every session since #107, so that is very nearly always. The
+# doctor took it as the active profile and then built two confident warnings on
+# it, in the section whose own header says it is about the GLOBAL file. Measured
+# on the box it was found on: `personal-1` machine-wide, `quantivly-0` from a
+# session isolated onto quantivly-0.
+#
+# The fixture makes the two answers DIFFER (p1 machine-wide, p2 isolated) and puts
+# the global credential on p1 — the true active — so a correct report contains no
+# misattribution at all. `want_out "active profile: p1"` alone would be weak: it
+# passes on any doctor that prints p1 for some other reason. The two `no_out`s are
+# what make the row discriminating, and the third is the one that names the actual
+# user-visible damage.
+new_home h3b; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1" "$FHOME/.clauth/profiles/p2" "$FHOME/iso"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "other"' \
+    > "$FHOME/.clauth/profiles/p2/credentials.json"
+ln -s "$FHOME/.clauth/profiles/p2/credentials.json" "$FHOME/iso/.credentials.json"
+CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 CLAUTH_STUB_WHICH_ISOLATED=p2 \
+    run_doctor; CFGDIR=""
+want_out "the MACHINE-WIDE active profile is reported from an isolated session" \
+         "active profile: p1"
+no_out   "and never this session's own profile" \
+         "active profile: p2"
+no_out   "so a correctly-attributed machine raises no misattribution warning" \
+         "but the active profile is"
 
 # The un-isolated case has to be named too, or "isolated" carries no information.
 new_home h4; write_cred
