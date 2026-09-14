@@ -2275,14 +2275,31 @@ Design points that are load-bearing rather than preferences:
   file with no siblings can only be clauth's serializer. Recoverable from
   `~/.cache/cred-backup-*/account-dirs/*` and the `.superseded-*` copies.
 
-  **CORRECTED 2026-09-14: the daemon is NOT paused, and the loss is not reproducing.** This entry
-  said *"The clauth daemon is paused (`systemctl --user stop|disable clauth-daemon.service`)
-  pending an upstream fix"*. It has been running since **2026-09-10 16:13:52**, and after four days
-  of that all five stores still carry their three `mcpOAuth` entries. So on 0.15.1 as deployed the
-  serializer is not destroying them. **"Not reproducing", deliberately, not "fixed"**: the
-  serializer was not re-read, and the 09-08 measurement above stands as what was seen then.
-  Re-check with the shape test that paragraph already names — a ~509-byte five-key file with no
-  siblings can only be clauth's serializer.
+  **CORRECTED 2026-09-14, twice — and the second correction retracts the first, which had
+  retracted too much.** This entry said *"The clauth daemon is paused
+  (`systemctl --user stop|disable clauth-daemon.service`) pending an upstream fix"*. It has
+  been running since **2026-09-10 16:13:52**. A first correction then generalised from four
+  quiet days to "the loss is not reproducing", which is wrong in both directions:
+
+  - **The `mcpOAuth` half was a VERSION change, not a behaviour that stopped, and it was
+    already measured.** The binary at `~/.local/bin/clauth` was replaced **2026-09-08 20:58**,
+    *after* the 09-08 measurement window above (its `cred-backup` dirs are 10:35 and 20:44).
+    A hermetic fixture on 09-09 had already established the rule: `rateLimitTier`,
+    `refreshTokenExpiresAt` and `clientId` are dropped by **0.14.1 and 0.15.1 alike**, and
+    0.15.1 fixed only the SIBLING case (`mcpOAuth`, which 0.14.1 destroyed on every write).
+    So the 09-08 loss was 0.14.1's. "The serializer was not re-read" was itself false.
+  - **The subkey half never stopped, and is measurable right now.** No live credential on
+    this machine carries `rateLimitTier` or `refreshTokenExpiresAt` — all five clauth stores
+    and all seven account-dir credentials are the 5-key set
+    `{accessToken, expiresAt, refreshToken, scopes, subscriptionType}`. The last file
+    carrying the 7-key shape is `quantivly-3/credentials.json.superseded-20260910-094338`.
+
+  The one thing the four quiet days do support is narrow and worth keeping: the shape test
+  this paragraph names — a ~509-byte five-key file with no siblings — appears **exactly once**
+  across 25 superseded copies (`quantivly-3/…-20260909-101756`) and never after the upgrade.
+  **A window of no evidence is not evidence, unless you can say what would have shown up in
+  it**; here that shape is what would have, so the absence counts. Generalising past it to
+  "the loss" did not.
 
   **CORRECTED 2026-09-08, hours after it shipped: `rateLimitTier` does NOT cause the "Fable ·
   Requires usage credits" banner, and the commit message of #123 says it does.** That claim was
@@ -2387,9 +2404,9 @@ Design points that are load-bearing rather than preferences:
 
 Traps specific to the checker, each of which produced a green tick first:
 
-- **THE SECTION FIXED THIS ONE AXIS OVER AND LEFT THE OTHER, and the comment
-  explaining the first fix sits ten lines above the second bug.** The clauth block's
-  header says everything in it is about the GLOBAL file, and
+- **THE SECTION FIXED THIS ONE AXIS OVER AND LEFT THE OTHER — and then the fix for
+  THAT fixed one axis and left another, which is the part worth keeping.** The clauth
+  block's header says everything in it is about the GLOBAL file, and
   `_claude_global_cred_file` exists because writing these checks against
   `_claude_cred_file` made them silently stop working once #107 made isolation the
   default. The credential FILE was fixed then; the active PROFILE was not.
@@ -2399,15 +2416,48 @@ Traps specific to the checker, each of which produced a green tick first:
   It is not one wrong line, because `$active` feeds the two comparisons below it: the
   doctor then reported `stored copy of 'quantivly-0' DIFFERS from the live credential`
   and `the live credential belongs to 'personal-1', but the active profile is
-  'quantivly-0'` — two confident warnings about a healthy machine. Ask the
-  machine-wide question from a machine-wide environment: a subshell that unsets
-  `CLAUDE_CONFIG_DIR` and `exec command clauth`, never `env VAR=…` argv (`_gh_run`
-  carries that reasoning), and `command` because zsh's `exec` resolves shell
-  functions. **The 215-row state table could not see any of it**: the `clauth` stub
-  answered `which` identically whether or not `CLAUDE_CONFIG_DIR` was set, so every
-  isolated-session row got the right answer for the wrong reason. A stub that does not
-  model the one behaviour a bug depends on makes every row over it decoration — the
-  stub models it now, which is what lets the three new rows fail.
+  'quantivly-0'` — two confident warnings about a healthy machine.
+
+  **The first fix cleared the environment and was still wrong, because `clauth which`
+  answers a different question entirely.** Its own help says so — *"Print the profile
+  owning the loaded .credentials.json … CLAUDE_CONFIG_DIR-aware; prints `unknown` when
+  nothing matches"* — that is credential OWNERSHIP, not selection, and measured against
+  0.15.1 it matches on the **refreshToken alone**: with `active_profile = "B"`
+  configured and the global credential equal to A's store, it answers `A`
+  (`accessToken` and `expiresAt` varied independently, both irrelevant). So with the
+  environment cleared it returns exactly what `_claude_cred_owner` computes from the
+  same file, and the two consumers collapse: `the live credential belongs to X, but the
+  active profile is Y` **can never fire** (`which`=P ⟹ P's store shares the refresh
+  token; `_claude_cred_owner`=Q ⟹ the whole triple matches Q, so its refresh token does
+  too, so P=Q — and when `which` says `unknown`, no store's refresh token matches, so
+  the triple cannot either and the orphan branch runs instead), while
+  `stored copy of 'X' matches` compares a file with itself whenever the global path is a
+  symlink into a store, **which on this machine it now is**. Demonstrated end to end
+  against the real binary: declared active `p1`, global credential owned by `p2` → the
+  cleared-environment version prints `active profile: p2`, a ✓, and nothing else. Worse
+  than the bug it replaced in that one state, where the pre-fix isolated shell had been
+  right.
+
+  **The source is clauth's CONFIG, and which config file is not arbitrary.**
+  `active_profile` lives in `profiles.toml` as part of clauth's config state, written by
+  the switch primitive under the config lock (`profile.rs` `LockedSlot`,
+  `actions.rs` "switch primitive that can write `active_profile`"); `status.json` is the
+  **daemon's published feed** of the same value, and clauth's own TUI has a notion of it
+  being stale ("wedging / pre-abort / just booted"). So config first, feed second, and a
+  stopped daemon cannot make the doctor name the wrong account. It is also forkless, and
+  it retires the `unknown` sentinel along with the call that produced it.
+
+  **The state table could not see any of it, twice over, and the second blindness was
+  built by the first fix.** The `clauth` stub answered `which` identically with and
+  without `CLAUDE_CONFIG_DIR`, so every isolated-session row got the right answer for
+  the wrong reason. Teaching the stub that one behaviour let three new rows fail — and
+  left the stub answering a question the real command does not, so the row asserting the
+  misattribution warning passed against a report production could no longer emit. **A
+  stub is a claim about the real thing, and a row over a stub is only as true as that
+  claim.** There is no `which` handler now: the doctor must not shell out to clauth for
+  this at all, and the recording stub's log staying EMPTY is itself an assertion, because
+  no assertion on the report can tell "read the config" from "asked the binary and the
+  binary happened to agree".
 
 - **A HASH OF NOTHING IS A HASH, and it matches every other hash of nothing.**
   `_claude_cred_id` piped `jq` straight into `sha256sum`, so a parse failure hashed
@@ -2612,7 +2662,11 @@ Traps specific to the checker, each of which produced a green tick first:
   nothing, exited 1, and had never once printed. The suite's single-line fixture hid it exactly.
 - **`clauth which` answers the literal string `unknown`**, a sentinel and not a profile name.
   Taken as one it produced "no stored credentials for 'unknown'", which reads like a missing file,
-  and it skipped the `status.json` fallback that names the real active profile.
+  and it skipped the `status.json` fallback that names the real active profile. **RETIRED
+  2026-09-14 with the call that produced it** — the doctor reads `active_profile` out of clauth's
+  config now (see the entry above), so no sentinel can arrive and the two rows that pinned this
+  are gone rather than left passing over a branch nothing reaches. Recorded, not deleted: the
+  sentinel is still real, and anything else here that learns to call `clauth which` inherits it.
 - **Four legacy `~/.claude-*` config dirs still hold full credential files**, three written on
   2026-09-01 — four days after `zsh/zshrc.company` records that scheme as removed. Untracked
   logins and untracked rotation participants; nothing on the machine mentioned them until the
@@ -2640,12 +2694,16 @@ Traps specific to the checker, each of which produced a green tick first:
 
 State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `PATH`:
 
-- `scripts/test-claude-doctor.sh` (**218 checks at `62c83d3`, 2026-09-14**; was written here as
-  "103 checks" and had been stale for weeks — a figure without the commit it was measured at is
-  the thing this file warns about two sections down, so this one carries its commit)
+- `scripts/test-claude-doctor.sh` (**235 checks at the tip of `claude-doctor-active-profile`,
+  2026-09-14**; 215 at `c839d48`, 218 at `62c83d3`, and it was written here as "103 checks" and
+  had been stale for weeks — a figure without the commit it was measured at is the thing this
+  file warns about two sections down, so these carry theirs)
   — `claude-doctor-test`, recording `clauth` stub,
   and a fixture process tree (`CLAUDE_DOCTOR_PROC_ROOT`) so the concurrency grouping can be pinned
-  without depending on what happens to be running. 25 mutants, all died. Twelve of those rows
+  without depending on what happens to be running. 25 mutants, all died, plus **9 for the active
+  profile, all died** — the last only after its row was rewritten: `:A` on a store path with no
+  symlinked component is a no-op, so the fixture could not reach the branch it named and the
+  mutant survived a 233-check green. Twelve of those rows
   exist only because a review found the fixes unpinned: the first pass shipped 13 mutants and a
   false green underneath them.
 - `scripts/test-claude-account-dirs.sh` (36 checks, `claude-account-dirs-test`) — the builder.
@@ -2709,7 +2767,9 @@ copies the reconciler kept:
 | 09-12 11:27:48 → 18:39:19 (7.2 h) | 16:55:28 – 17:47:28 — during it | 4 accounts, 18:40:26/27 |
 | 09-14 00:04:19 → 08:27:19 (8.4 h) | 01:55:52 – 01:59:39 — during it | 4 accounts, 08:29:28 |
 
-The other eight suspends since the reconciler landed on 09-08 were all ≤ 1.5 h and produced none.
+The other eight suspends since the reconciler landed on 09-08 were all ≤ 1 h 32 m and produced
+none. (That bound is the measurement, not a round number: the longest of them, 09-09 10:45:57 →
+12:17:27, is 1 h 31 m 30 s — an earlier draft said "≤ 1.5 h", which it exceeds by ninety seconds.)
 Note what the 09-12 row shows: a **7.2 h suspend spanned an 8 h lifetime**, because those tokens
 were already ~2.5 h old when the machine went down. clauth refreshes near expiry, not continuously,
 so "suspend duration vs token lifetime" is not the rule and never was.
@@ -2732,17 +2792,39 @@ expiries across **1,431 transcripts and 868,562 records with 0 unparsable** for 
 genuine one: 2026-09-10T08:10:52Z) — the unparsable count is reported because an empty answer from
 a scanner that silently skipped half its input is not agreement — and
 `mark_auth_broken` logs every transition while `clauth.log` has never carried one. What actually
-degraded was clauth's per-profile polling: normal cadence ~59 s, and the three broken accounts
-fell to one success per **~1010 s** — which is exactly clauth's 90 s interval plus the 900 s
-(15-min) cap of `rate_limit_backoff_ms` (`src/usage/scheduler.rs:1379`, `10 s × 3^(n−1)`).
+degraded was clauth's per-profile polling: normal cadence ~59 s (mean gap; note that gaps of
+873–879 s occur in ordinary operation too, so one ~880 s gap is not by itself a fault signal),
+and the three broken accounts fell to one success per **~1010 s**.
+
+That figure reproduces exactly, and saying where the last 20 s come from matters, because
+otherwise the next reader computes 90 + 900 = 990, sees 1010, and concludes the mechanism is
+wrong. `poll_backoff_ms` (`scheduler.rs:285`) adds `min(10 s × 3^(n−1), 900 s)` — the
+`rate_limit_backoff_ms` ladder at `:1379`, capped **by its caller**, not inside itself — on top
+of the 90 s interval, and the deterministic per-profile spread at `:1430` adds `[0, interval/4)`
+= `[0, 22.5) s`. Predicted 990–1012.5 s; measured 992, 994, 999, 1009, 1010, 1011, 1012, 1013.
+Two things the section does not otherwise say: `quantivly-3` was NOT on that ladder and had a
+single **3,897 s** gap from 08:29:05 instead — a longer outage of a different shape — and the
+refresh-failure axis is its own streak (`update_streaks`, `:1455`), not the 429 one.
+
+**Every line number in this section is from clauth 0.14.1, commit `ff25762`, the tree at
+`~/.config/herdr/plugins/github/clauth-4596d4a41686` — and the binary that ran is 0.15.1,
+installed 2026-09-08 20:58. The 0.15.1 source was not read.** That is exactly the gap the
+`mcpOAuth` correction above turns on, so it is stated rather than left to be discovered. What
+makes the mechanism claims here more than a source read is that the timing above *reproduces*
+from that tree's constants; treat the line numbers as corroboration, not as provenance.
 
 **Three forensic techniques, because none of them is obvious and all three were needed:**
 
-- **`expiresAt − mtime` tells a `/login` from an adopt.** A fresh grant is written the instant it
-  is issued, so the difference is the full lifetime (28799–28800 s); a reconciler adopt writes a
-  token issued earlier, so it is less. That is how `quantivly-0`'s 09:39:41 store write was
-  identified as an adopt of an 08:29:41 token rather than a fourth re-authentication — the first
-  draft of the timeline had it as a login.
+- **`expiresAt − mtime` tells a NEWLY ISSUED token from an adopt** — not a `/login` from a
+  refresh, which is what an earlier draft claimed. A grant is written the instant it is issued,
+  so the difference is the full lifetime (28799–28800 s); a reconciler adopt writes a token
+  issued earlier, so it is less. That is how `quantivly-0`'s 09:39:41 store write was identified
+  as an adopt of an 08:29:41 token rather than a fourth re-authentication — the first draft of
+  the timeline had it as a login. But a successful *refresh* is also written at issuance, so the
+  test cannot separate those two: applied to the current disk it names **four** full-lifetime
+  09-14 writes, and `quantivly-3`'s (mtime 08:29:00, expiry 16:29:00, Δ 28800) is a refresh on
+  resume — quantivly-3 is not one of the three accounts that laddered. What identifies the three
+  logins is the ladder plus a new grant after it, not this difference alone.
 - **Gaps in `~/.clauth/profiles/*/usage_history.jsonl` are the per-account failure record.** Only
   a LIVE fetch appends a line, so a gap is a failed poll. It is the only per-profile history on
   disk and it survives restarts.
@@ -2757,10 +2839,12 @@ different and worth stating: **it compares exactly two files** and cannot know w
 holder has advanced the chain past both.
 
 **clauth's own double-spend guard is blind to this machine's architecture.** `fresher_disk_pair`
-(`src/usage/scheduler.rs:507`) decides whether a 400 is a benign double-spend or a real revocation
+(`src/usage/scheduler.rs:491`) decides whether a 400 is a benign double-spend or a real revocation
 by re-reading **the clauth profile store** and checking whether its refresh token moved past the
-one just spent. Its own comment names the racer it expects: *"CC writing THROUGH an intact
-symlink"*. Here Claude Code's write is atomic, so it REPLACES the account-dir symlink with a real
+one just spent. The comment naming the racer it expects — *"CC writing THROUGH an intact
+symlink"* — is at `:916`, on the CALL SITE (`carry_external_rotation`, `:507`, which wraps it),
+not in the function's own doc block; an earlier draft cited `:507` for `fresher_disk_pair` itself
+and attributed the caller's comment to it. Here Claude Code's write is atomic, so it REPLACES the account-dir symlink with a real
 file and the store does not advance — the guard sees "unchanged", concludes "real revocation", and
 can quarantine a healthy account. `try_adopt_live_rotation`, the fast path that would catch it,
 runs only `if is_active`, so four of five profiles never get it. This did not fire on 09-14 (no

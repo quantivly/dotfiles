@@ -66,7 +66,7 @@ done
 # exactly what a suite that loaded nothing produces.
 for fn in claude-doctor _claude_cred_file _claude_now_ms _claude_fmt_delta _claude_mcp_log_root \
           _claude_global_cred_file _claude_cred_id _claude_cred_owner \
-          _claude_legacy_cred_dirs _claude_proc_root; do
+          _claude_active_profile _claude_legacy_cred_dirs _claude_proc_root; do
     zsh -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $CLAUDESH — the suite would assert nothing"
 done
@@ -102,21 +102,18 @@ cp -a "$SYSBIN/." "$NOJQBIN/"; rm -f "$NOJQBIN/jq"
 cat > "$STUBBIN/clauth" <<'STUB'
 #!/bin/sh
 # Fake `clauth` for scripts/test-claude-doctor.sh. Records every invocation and
-# answers `which` from CLAUTH_STUB_WHICH. It never touches a credential, which
-# is the entire point of stubbing it.
+# answers nothing. It never touches a credential, which is the entire point of
+# stubbing it — this box has a real clauth wired to a daemon owning five live
+# accounts. The recording also pins a property: the doctor must not shell out to
+# clauth at all (section C), so CLAUTH_STUB_LOG staying empty is an assertion.
 printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
-case "$1" in
-    which)
-        # Real clauth answers `which` from $CLAUDE_CONFIG_DIR, so an isolated
-        # session is told ITS OWN profile rather than the machine-wide one. The
-        # stub has to model that or no row can tell the two questions apart —
-        # before this, every row got the same answer either way and the defect
-        # was invisible to the whole table.
-        if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -n "${CLAUTH_STUB_WHICH_ISOLATED:-}" ]; then
-            printf '%s\n' "$CLAUTH_STUB_WHICH_ISOLATED"; exit 0
-        fi
-        [ -n "${CLAUTH_STUB_WHICH:-}" ] && printf '%s\n' "$CLAUTH_STUB_WHICH"; exit 0 ;;
-esac
+# No `which` handler, deliberately, and the absence is load-bearing. The doctor
+# used to ask `clauth which` for the active profile; it asks clauth's CONFIG now,
+# because `which` reports credential OWNERSHIP (its own help: "Print the profile
+# owning the loaded .credentials.json ... CLAUDE_CONFIG_DIR-aware"). A stub that
+# still answered it would let a row pass against a doctor that had gone back to
+# asking the wrong question — so the stub records invocations and answers nothing.
+# `command -v clauth` is the only thing the doctor still needs it for.
 exit 0
 STUB
 chmod +x "$STUBBIN/clauth"
@@ -241,9 +238,17 @@ mk_verdict() {  # $1 = profile, $2 = verdict, $3 = detail, $4 = optional age in 
     printf '%s %s %s\n' "$(( $(date +%s) - ${4:-0} ))" "$2" "${3:-}" > "$ad/.reconcile-status"
 }
 
+# Declare the machine-wide active profile the way clauth publishes it, in the
+# fixture's own ~/.clauth/status.json. A row that needs the AUTHORITATIVE source
+# instead writes `active_profile` into ~/.clauth/profiles.toml itself — that is
+# the precedence the doctor implements and section C pins, so the harness must
+# not paper over it by writing both.
+mk_status() { mkdir -p "$FHOME/.clauth"; printf '{"active_profile":"%s","pending_switch":null}\n' "$1" > "$FHOME/.clauth/status.json"; }
+
 run_doctor() {
     local base="$SYSBIN" p
     [[ "${NO_JQ:-0}" == 1 ]] && base="$NOJQBIN"
+    [[ -n "${ACTIVE_PROFILE:-}" ]] && mk_status "$ACTIVE_PROFILE"
     # The clauth stub is prepended ONLY when a row asks for it. Without it there
     # is no clauth anywhere on this PATH — see the SYSBIN note above.
     p="$base"
@@ -252,8 +257,7 @@ run_doctor() {
     if [[ -n "${CFGDIR:-}" ]]; then pre=("CLAUDE_CONFIG_DIR=$CFGDIR"); else pre=(-u CLAUDE_CONFIG_DIR); fi
     OUT="$(env "${pre[@]}" HOME="$FHOME" \
               CLAUDE_DOCTOR_PROC_ROOT="${PROC_ROOT:-$FHOME/procfix}" \
-              CLAUTH_STUB_LOG="$CLAUTH_LOG" CLAUTH_STUB_WHICH="${CLAUTH_STUB_WHICH:-}" \
-              CLAUTH_STUB_WHICH_ISOLATED="${CLAUTH_STUB_WHICH_ISOLATED:-}" \
+              CLAUTH_STUB_LOG="$CLAUTH_LOG" \
               CLAUDE_SETTINGS_REQUIRE="${REQUIRE:-}" \
               "PATH=$p" \
         "$SYSBIN/zsh" -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; ${PRELUDE:-}; claude-doctor $*" 2>&1)"
@@ -355,7 +359,7 @@ no_out   "clauth absent adds no failure line"   "✗ clauth"
 new_home d2; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "stored copy matching live is safe to switch" "switching away and back is safe"
 
 new_home d3; write_cred
@@ -366,7 +370,7 @@ mkdir -p "$FHOME/.clauth/profiles/p1"
 # BEFORE a switch, not diagnosed after one.
 jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.refreshToken = "stale-superseded"' \
     > "$FHOME/.clauth/profiles/p1/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "stale stored copy is reported"        "DIFFERS from the live credential"
 want_out "and says what switching would cost"   "log out every"
 
@@ -374,12 +378,13 @@ new_home d4; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 printf 'fallback_chain = ["p1", "p2"]\n' > "$FHOME/.clauth/profiles.toml"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "armed auto-switch is surfaced" "auto-switch armed"
 
 new_home d5; write_cred
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH='' run_doctor
-want_out "clauth answering nothing is NOT read as healthy" "could not determine the active profile"
+WITH_CLAUTH=1 ACTIVE_PROFILE='' run_doctor
+want_out "a config that names no active profile is NOT read as healthy" \
+         "could not determine the active profile"
 
 # An ORPHANED live credential: it matches no registered profile, so clauth holds
 # no copy of it and the next switch overwrites it irrecoverably. Observed live on
@@ -389,7 +394,7 @@ new_home d6; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "belongs-to-nobody"' \
     > "$FHOME/.clauth/profiles/p1/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "an unrecognised live credential is a warning" "matches NO registered clauth profile"
 want_out "and says what a switch would cost"            "no way back"
 
@@ -400,14 +405,14 @@ mkdir -p "$FHOME/.clauth/profiles/p1" "$FHOME/.clauth/profiles/p2"
 jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "other"' \
     > "$FHOME/.clauth/profiles/p1/credentials.json"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p2/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a live credential owned by another profile is named" "belongs to 'p2', but the active profile is 'p1'"
 
 # The healthy case must stay quiet, or the two rows above are just noise.
 new_home d8; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 no_out "a recognised live credential raises nothing" "matches NO registered clauth profile"
 no_out "and no ownership mismatch is claimed"        "but the active profile is"
 
@@ -515,7 +520,7 @@ mkdir -p "$FHOME/.clauth/profiles/p1" "$FHOME/iso"
 jq '{claudeAiOauth,mcpOAuth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 chmod 600 "$FHOME/.clauth/profiles/p1/credentials.json"
 ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$FHOME/iso/.credentials.json"
-CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor; CFGDIR=""
+CFGDIR="$FHOME/iso" WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor; CFGDIR=""
 no_out   "a symlinked credential is NOT reported as mode 777" "mode 777"
 want_out "its mode is read from the target instead"           "✓ mode 600"
 want_out "and the session is named as isolated onto its profile" \
@@ -532,7 +537,7 @@ jq '{claudeAiOauth,mcpOAuth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.
 ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$FHOME/iso/.credentials.json"
 # ...now make the GLOBAL file belong to nobody.
 write_cred '.claudeAiOauth.accessToken = "global-belongs-to-nobody"'
-CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor; CFGDIR=""
+CFGDIR="$FHOME/iso" WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor; CFGDIR=""
 want_out "an isolated session still reports an orphaned GLOBAL credential" \
          "matches NO registered clauth profile"
 want_out "and names which file the clauth checks read" \
@@ -546,32 +551,38 @@ jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "other"' \
     > "$FHOME/.clauth/profiles/p1/credentials.json"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p2/credentials.json"
 ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$FHOME/iso/.credentials.json"
-CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor; CFGDIR=""
+CFGDIR="$FHOME/iso" WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor; CFGDIR=""
 want_out "an isolated session still reports a misattributed global credential" \
          "belongs to 'p2', but the active profile is 'p1'"
 
-# `clauth which` ANSWERS FROM $CLAUDE_CONFIG_DIR, so inside an isolated session it
-# names THIS SESSION's profile, not the machine-wide one — and isolation has been
-# the default for every session since #107, so that is very nearly always. The
-# doctor took it as the active profile and then built two confident warnings on
-# it, in the section whose own header says it is about the GLOBAL file. Measured
-# on the box it was found on: `personal-1` machine-wide, `quantivly-0` from a
-# session isolated onto quantivly-0.
+# THE ACTIVE PROFILE IS A PROPERTY OF THE MACHINE, so the same fixture has to
+# report it identically from an isolated shell and a shared one. Two defects
+# lived here in turn and the second was created by the fix for the first.
 #
-# The fixture makes the two answers DIFFER (p1 machine-wide, p2 isolated) and puts
-# the global credential on p1 — the true active — so a correct report contains no
-# misattribution at all. `want_out "active profile: p1"` alone would be weak: it
-# passes on any doctor that prints p1 for some other reason. The two `no_out`s are
-# what make the row discriminating, and the third is the one that names the actual
-# user-visible damage.
+#   1. `clauth which` answers from $CLAUDE_CONFIG_DIR, so an isolated session —
+#      the default for every session since #107 — was told ITS OWN profile.
+#      Measured: `personal-1` machine-wide, `quantivly-0` from a session isolated
+#      onto quantivly-0.
+#   2. Clearing the environment fixed that and left the deeper fault, because
+#      `clauth which` reports credential OWNERSHIP ("Print the profile owning the
+#      loaded .credentials.json", its own help) and not the active profile. With
+#      the environment cleared it returns exactly what `_claude_cred_owner`
+#      computes from the same file — so the misattribution warning below could
+#      never fire, and the row that asserted it fired only because the STUB
+#      answered a profile the real command would not have.
+#
+# So the fixture below is deliberately the shape that told those two apart: the
+# session is isolated onto p2 while the machine's active profile is p1. A doctor
+# reading $CLAUDE_CONFIG_DIR says p2; a doctor reading credential ownership says
+# p1 here only by coincidence, which is why the SECOND fixture — the one where
+# ownership and selection genuinely disagree — is the row that pins the fix.
 new_home h3b; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1" "$FHOME/.clauth/profiles/p2" "$FHOME/iso"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "other"' \
     > "$FHOME/.clauth/profiles/p2/credentials.json"
 ln -s "$FHOME/.clauth/profiles/p2/credentials.json" "$FHOME/iso/.credentials.json"
-CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 CLAUTH_STUB_WHICH_ISOLATED=p2 \
-    run_doctor; CFGDIR=""
+CFGDIR="$FHOME/iso" WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor; CFGDIR=""
 want_out "the MACHINE-WIDE active profile is reported from an isolated session" \
          "active profile: p1"
 no_out   "and never this session's own profile" \
@@ -579,22 +590,158 @@ no_out   "and never this session's own profile" \
 no_out   "so a correctly-attributed machine raises no misattribution warning" \
          "but the active profile is"
 
+# THE ROW THAT PINS THE SOURCE. Selection and ownership genuinely disagree: the
+# machine's active profile is p1, and the global credential is p2's. Any doctor
+# that derives the active profile from the credential — which is what
+# `clauth which` does, with or without the environment cleared — reports p2 here
+# and then stays silent, because its two sides are one number read twice. Both
+# the pre-2026-09-14 code and its first fix fail this row; it is also the one
+# state in which `clauth <profile>` restores a credential nobody is holding.
+new_home h3c; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1" "$FHOME/.clauth/profiles/p2"
+jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken = "other"' \
+    > "$FHOME/.clauth/profiles/p1/credentials.json"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p2/credentials.json"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "the active profile is the SELECTED one, not the credential's owner" \
+         "active profile: p1"
+want_out "so a global credential billing another account is still reported" \
+         "belongs to 'p2', but the active profile is 'p1'"
+
+# ...and identically from an isolated shell. A machine fact that changes with the
+# shell it is read from is the defect this section exists for, so both halves are
+# asserted against one fixture rather than trusting that one implies the other.
+mkdir -p "$FHOME/iso2"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$FHOME/iso2/.credentials.json"
+CFGDIR="$FHOME/iso2" WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor; CFGDIR=""
+want_out "...and an isolated shell reports the same active profile" \
+         "active profile: p1"
+want_out "...and the same misattribution" \
+         "belongs to 'p2', but the active profile is 'p1'"
+
+# THE DOCTOR MUST NOT SHELL OUT TO clauth AT ALL for this. The recording stub logs
+# every invocation, so an empty log is the assertion: a later "fix" that goes back
+# to asking the binary reintroduces both faults above at once, and no assertion on
+# the REPORT can see the difference while the stub happens to answer helpfully.
+if [[ ! -s "$CLAUTH_LOG" ]]; then
+    ok "the active profile is read from clauth's config, never from the clauth binary"
+else
+    bad "the active profile is read from clauth's config, never from the clauth binary — clauth was invoked: $(tr '\n' ' ' < "$CLAUTH_LOG")"
+fi
+
 # The un-isolated case has to be named too, or "isolated" carries no information.
 new_home h4; write_cred
 run_doctor
 want_out "a session with no config dir is named as SHARED" "SHARED: no \$CLAUDE_CONFIG_DIR"
 
-# `clauth which` answers the literal string "unknown" when it cannot attribute the
-# credential. Taken as a profile name it produced "no stored credentials for
-# 'unknown'", which reads like a missing file, and it skipped the status.json
-# fallback that names the real active profile.
+# PRECEDENCE. profiles.toml is clauth's config state, written by the switch
+# primitive under the config lock; status.json is the daemon's published feed of
+# the same value, and clauth's own TUI has a notion of it being stale. So when
+# they disagree the config wins, and a stopped daemon cannot make the doctor name
+# the wrong account. `mk_status` writes the loser here on purpose.
 new_home h5; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
-printf '{"active_profile":"p1"}\n' > "$FHOME/.clauth/status.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=unknown run_doctor
-want_out "the 'unknown' sentinel falls back to status.json" "active profile: p1"
-no_out   "and is never treated as a profile name"          "for 'unknown'"
+printf 'active_profile = "p1"\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=stale-daemon-value run_doctor
+want_out "profiles.toml outranks a stale status.json" "active profile: p1"
+no_out   "and the daemon's copy never wins"           "active profile: stale-daemon-value"
+
+# ...and status.json IS consulted when profiles.toml names nothing, or the arm
+# above is satisfied by a doctor that never reads status.json at all.
+new_home h5b; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'auth_broken = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "status.json answers when profiles.toml names no active profile" \
+         "active profile: p1"
+
+# BOUNDED PARSE. `active_profile` is a top-level key; a `[profile.x]` table may
+# carry one of its own, and reading that as the machine's would name an account
+# nobody selected. The scan quits at the first table header. Same reasoning as the
+# fallback_chain match, which this file already records as a defect when unbounded.
+new_home h5c; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'active_profile = "p1"\n\n[profile.other]\nactive_profile = "section-value"\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a top-level active_profile is read"        "active profile: p1"
+no_out   "and a section's key of the same name is not" "section-value"
+
+# ...and a key that appears ONLY inside a section names nothing at all, rather
+# than being picked up because no top-level one shadowed it.
+new_home h5d; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf '[profile.other]\nactive_profile = "section-value"\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+no_out   "a section-only active_profile is never taken as the machine's" "section-value"
+want_out "and the doctor says it could not determine one" \
+         "could not determine the active profile"
+
+# FIRST MATCH ONLY. A hand-edited or badly-merged profiles.toml can carry the key
+# twice; without the trim both lines land in $active, which then becomes a
+# two-line string used as a DIRECTORY COMPONENT ($HOME/.clauth/profiles/$active)
+# and printed into the report. Duplicate keys are invalid TOML, so this is about
+# what the doctor does with a file clauth would reject — it must degrade to one
+# plausible answer, not to a mangled one.
+new_home h5e; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'active_profile = "p1"\nactive_profile = "second"\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a duplicated active_profile key takes the first"  "active profile: p1"
+no_out   "and the second never reaches the report"          "second"
+
+# TOML literal strings are single-quoted and clauth writes double, so the second
+# sed branch exists for a hand-written file. It is pinned rather than assumed:
+# an unpinned branch is one nobody finds out is broken until the day it runs.
+new_home h5g; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf "active_profile = 'p1'  # hand-written\n" > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a single-quoted active_profile is read, and its trailing comment is not" \
+         "active profile: p1"
+
+# THE VACUOUS TICK. The global credential path is a symlink INTO the active
+# profile's store on this machine (relinked 2026-09-14 so the two Chrome native
+# hosts stopped being independent holders), so "stored copy matches the live
+# credential" compares a file with itself and the ✓ says nothing. CLAUDE.md
+# already records this exact shape for isolated sessions; it came back by a new
+# route, in the check whose own comment calls it "the one check that predicts a
+# mass logout before it happens".
+new_home h5f; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+mv "$CRED" "$FHOME/.clauth/profiles/p1/credentials.json"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$CRED"
+printf 'active_profile = "p1"\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a global credential that IS the store is named as one file" \
+         "IS the live credential (same file)"
+no_out   "and never gets the ✓ that claims a real comparison happened" \
+         "matches the live credential — switching away and back is safe"
+
+# ...and BOTH sides have to be resolved for that to hold. $gcred is physical, so
+# comparing an unresolved store path against it asks about spelling rather than
+# about the file, and the vacuous ✓ comes straight back. The fixture above cannot
+# tell the two apart — its store path has no symlinked component, so `:A` is a
+# no-op there and the mutant that drops it survived the whole table. This one
+# reaches the store through a symlinked `~/.clauth`, which is what an adopter with
+# profiles on another volume has.
+new_home h5h; write_cred
+mkdir -p "$FHOME/clauth-real/profiles/p1"
+ln -s "$FHOME/clauth-real" "$FHOME/.clauth"
+mv "$CRED" "$FHOME/clauth-real/profiles/p1/credentials.json"
+ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$CRED"
+printf 'active_profile = "p1"\n' > "$FHOME/clauth-real/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "one file reached through a symlinked ~/.clauth is still one file" \
+         "IS the live credential (same file)"
+no_out   "and still never gets the ✓" \
+         "matches the live credential — switching away and back is safe"
 
 #-----------------------------------------------------------------------------
 section "I. MCP entry shapes — never authorised is not the same as shredded"
@@ -640,7 +787,7 @@ mk_proc 101 claude ""                                                # shared
 mk_proc 102 2.1.259 ""                                               # shared, versioned binary
 mk_proc 103 claude "$FHOME/.clauth/profiles/p1/runtime-1-0"          # isolated onto p1
 mk_proc 104 sshd ""                                                  # not Claude at all
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "processes with no config dir land in the shared group" "2 on the SHARED global file"
 want_out "an isolated process is grouped under its profile BY NAME" "1 on clauth profile 'p1'"
 want_out "the total counts the versioned teammate binary too"       "3 Claude process(es) total"
@@ -673,13 +820,13 @@ section "K. Legacy pre-clauth config dirs"
 new_home k1; write_cred
 mkdir -p "$FHOME/.claude-work"
 cp "$CRED" "$FHOME/.claude-work/.credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a legacy dir holding a credential is reported" "legacy config dir still holds a credential"
 want_out "and it is named"                               ".claude-work/.credentials.json"
 
 new_home k2; write_cred
 mkdir -p "$FHOME/.claude-work"       # present, but empty of credentials
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 no_out "a legacy dir with no credential is not reported" "legacy config dir still holds a credential"
 
 #-----------------------------------------------------------------------------
@@ -694,7 +841,7 @@ new_home l1; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'fallback_chain = [\n    "p1",\n    "p2",\n]\n' > "$FHOME/.clauth/profiles.toml"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a multi-line fallback_chain is still surfaced" "auto-switch armed"
 want_out "and the chain members are named"               '"p1"'
 
@@ -705,7 +852,7 @@ mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'fallback_chain = ["p1"]\n' > "$FHOME/.clauth/profiles.toml"
 printf 'preferred = true\n' > "$FHOME/.clauth/profiles/p1/config.toml"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a preferred profile is named" "is preferred — the daemon walks the active account back"
 
 new_home l3; write_cred
@@ -713,7 +860,7 @@ mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'fallback_chain = ["p1"]\n' > "$FHOME/.clauth/profiles.toml"
 printf '# preferred = true\n' > "$FHOME/.clauth/profiles/p1/config.toml"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 no_out "a COMMENTED preferred is not read as set" "is preferred"
 
 #-----------------------------------------------------------------------------
@@ -730,7 +877,7 @@ new_home m1; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 printf '{"claudeAiOauth":{"accessTok\n' > "$CRED"                      # torn mid-write
 printf 'not json at all\n' > "$FHOME/.clauth/profiles/p1/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 no_out   "two unparseable credentials do NOT match"  "switching away and back is safe"
 
 # THE GLOBAL FILE, FROM AN ISOLATED SESSION. This row must be isolated or it
@@ -745,7 +892,7 @@ jq '{claudeAiOauth,mcpOAuth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.
 chmod 600 "$FHOME/.clauth/profiles/p1/credentials.json"
 ln -s "$FHOME/.clauth/profiles/p1/credentials.json" "$FHOME/iso/.credentials.json"
 printf '{"claudeAiOauth":{"accessTok\n' > "$CRED"                      # the GLOBAL is torn
-CFGDIR="$FHOME/iso" WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor; CFGDIR=""
+CFGDIR="$FHOME/iso" WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor; CFGDIR=""
 want_out "a torn GLOBAL file is reported from an isolated session" "NOT VALID JSON"
 want_out "and says who reads it"                                   "every non-isolated session reads it"
 want_rc  "and it fails the doctor"                                 1
@@ -757,7 +904,7 @@ new_home m2; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 printf '{"mcpOAuth":{}}\n'  > "$CRED"
 printf '{"other":1}\n'      > "$FHOME/.clauth/profiles/p1/credentials.json"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 no_out "two credential-less files do NOT match either" "switching away and back is safe"
 
 #-----------------------------------------------------------------------------
@@ -778,7 +925,7 @@ _k="oauth"; _k+="_token"
 { printf '# fallback_chain is intentionally DISABLED on this machine\n'
   printf '%s = "%s-IN-PROFILES-TOML"\n' "$_k" "$FAKE_TOKEN"
   printf '[profiles.p1]\n'; } > "$FHOME/.clauth/profiles.toml"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 no_out "a commented-out chain is not reported as armed" "auto-switch armed"
 no_out "and nothing from profiles.toml leaks into the report" "$FAKE_TOKEN"
 
@@ -786,18 +933,22 @@ new_home n2; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'fallback_chain = []\n' > "$FHOME/.clauth/profiles.toml"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 no_out "an empty chain is configured but not armed" "auto-switch armed"
 
-# The armed note must survive the orphaned state, where a switch is most
-# dangerous. It was gated on $active, and the `unknown` sentinel blanks $active.
+# The armed note must survive the state where the active profile is UNKNOWABLE,
+# which is where a switch is most dangerous: the credential belongs to nobody and
+# clauth's config names no active profile. Both notes were once gated on $active,
+# so the report said least about an armed, unlogged fallback chain exactly when it
+# mattered most. The profiles.toml here deliberately carries a chain and NO
+# active_profile, and no status.json is written, so $active is genuinely empty.
 new_home n3; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" | jq '.claudeAiOauth.accessToken="nobody"' \
     > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'fallback_chain = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
 printf 'preferred = true\n' > "$FHOME/.clauth/profiles/p1/config.toml"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=unknown run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE='' run_doctor
 want_out "an unattributable credential still reports the armed chain" "auto-switch armed"
 want_out "and still names the preferred profile"                      "is preferred"
 
@@ -817,7 +968,7 @@ want_out "a legacy credential dir is reported with no clauth installed" \
 # A clauth with no profiles registered must not warn forever about a credential
 # it could never attribute.
 new_home o2; write_cred
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH='' run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE='' run_doctor
 no_out   "no profiles yet is not an orphan warning" "matches NO registered clauth profile"
 want_out "it is a note saying so"                   "nothing to attribute the credential to"
 
@@ -836,7 +987,7 @@ ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
       "$FHOME/.clauth/profiles/p1/runtime-1-0/.credentials.json"
 mk_proc 201 claude ""
 mk_proc 202 claude "$FHOME/.clauth/profiles/p1/runtime-1-0"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "two processes on one physical file are ONE group" "2 on"
 no_out   "and not split across two"                         "1 on clauth profile 'p1'"
 
@@ -847,7 +998,7 @@ jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
       "$FHOME/.clauth/profiles/p1/runtime-1-0/.credentials.json"
 for i in 301 302 303; do mk_proc "$i" claude "$FHOME/.clauth/profiles/p1/runtime-1-0"; done
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a group of 3 warns — the smallest observed incident" "3 on clauth profile 'p1'"
 want_out "and it fails nothing, being a ⚠"                     "⚠ 3 on clauth profile 'p1'"
 
@@ -859,7 +1010,7 @@ jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 ln -s "$FHOME/.clauth/profiles/p1/credentials.json" \
       "$FHOME/.clauth/profiles/p1/runtime-1-0/.credentials.json"
 for i in $(seq 401 410); do mk_proc "$i" claude "$FHOME/.clauth/profiles/p1/runtime-1-0"; done
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=p1 run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a high TOTAL still warns even when grouped" "Claude processes in total"
 want_out "and still points at hreap"                  "hreap --close --mine"
 
@@ -1299,7 +1450,7 @@ printf 'preferred = true\n' > "$FHOME/.clauth/profiles/zz-last/config.toml"
 # sits inside `if [[ -f ~/.clauth/profiles.toml ]]`, so without it the loop never
 # runs, no residue exists, and the leak row passes for the wrong reason.
 printf 'active_profile = "zz-last"\nauth_broken = []\n' > "$FHOME/.clauth/profiles.toml"
-WITH_CLAUTH=1 CLAUTH_STUB_WHICH=zz-last run_doctor
+WITH_CLAUTH=1 ACTIVE_PROFILE=zz-last run_doctor
 LEAKS="$(printf '%s' "$OUT" | grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' || true)"
 if [[ "$LEAKS" == 0 ]]; then
     ok "no bare name=value line reaches the report"
