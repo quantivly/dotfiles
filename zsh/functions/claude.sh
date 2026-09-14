@@ -103,6 +103,52 @@ _claude_global_cred_file() { print -r -- "$HOME/.claude/.credentials.json"; }
 # this one. Section 7 is about that file and no other.
 _claude_global_settings_file() { print -r -- "$HOME/.claude/settings.json"; }
 
+# The machine-wide active clauth profile, from clauth's own config.
+#
+# NOT `clauth which`, which this asked until 2026-09-14 and which answers a
+# DIFFERENT QUESTION. Its own help says so: "Print the profile owning the loaded
+# .credentials.json ... CLAUDE_CONFIG_DIR-aware; prints `unknown` when nothing
+# matches." Ownership, not selection — and measured against clauth 0.15.1 the
+# match is on the refreshToken alone: with `active_profile = "B"` configured and
+# the global credential equal to A's store, it answers A.
+#
+# That cost two separate wrong answers, and fixing only the first is what made
+# the second visible. It answered from $CLAUDE_CONFIG_DIR, so an isolated
+# session — the default for every session since #107 — was told ITS OWN profile
+# (measured: `personal-1` machine-wide, `quantivly-0` from a session isolated
+# onto quantivly-0). Clearing the environment fixed that and left the deeper one:
+# with the environment cleared it answers the very quantity `_claude_cred_owner`
+# computes from the same file, so "the live credential belongs to X, but the
+# active profile is Y" could never fire — X and Y were one number read twice, and
+# `stored copy of 'X' matches` compared a file with itself whenever the global
+# credential is a symlink into a store, which on this box it is.
+#
+# `active_profile` in profiles.toml is the authority: it is part of clauth's
+# config state, written by the switch primitive under the config lock. status.json
+# is the DAEMON'S published feed of the same value — clauth's own TUI has a notion
+# of it being stale ("wedging / pre-abort / just booted") — so it is the fallback
+# and never the primary. Reading the config also means no fork, and no dependency
+# on a CLI whose documented meaning is not the one the label promises.
+#
+# Bounded sed, not a TOML parser: the value is a top-level scalar, and the scan
+# QUITS at the first table header so a `[profile.x]` section carrying the same key
+# can never be read as the global one. Matching requires the quotes TOML demands
+# of a string, so a comment after the value cannot be absorbed. The
+# `fallback_chain` match further down carries the full reasoning for why an
+# unbounded match here is a defect and not a style.
+_claude_active_profile() {
+  local v
+  v=$(sed -n -e '/^[[:space:]]*\[/q' \
+             -e 's/^[[:space:]]*active_profile[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+             -e "s/^[[:space:]]*active_profile[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
+         "$HOME/.clauth/profiles.toml" 2>/dev/null)
+  # First match only, and forklessly — `head` is one more binary in a function
+  # that runs on a PATH built from scratch.
+  v="${v%%$'\n'*}"
+  [[ -n "$v" ]] || v=$(jq -r '.active_profile // empty' "$HOME/.clauth/status.json" 2>/dev/null)
+  print -r -- "$v"
+}
+
 # The identity clauth's profiles are keyed on: a truncated hash of the login
 # triple. Never the tokens themselves — see "NEVER PRINTS A CREDENTIAL" above.
 # Empty output means "could not read it", which callers must not treat as a match.
@@ -305,7 +351,7 @@ claude-doctor() {
   # every loop-body variable is declared once, here. CLAUDE.md records the run
   # where forgetting that printed `du=zvi-quantivly` into the middle of a report.
   local cred now_ms mode exp delta nproc_claude sub scopes chain
-  local active stored_hash live_hash p pdir
+  local active stored_hash live_hash p pdir spath
   local root d srv ok_n fail_n unauth_n invalid_n key empty_tok no_refresh
   local i comm svc a b
   local gcred gcred_id link_target session_owner global_owner has_meta gsettings val
@@ -536,16 +582,17 @@ claude-doctor() {
     echo "clauth: ○ not installed — single-account machine, nothing to check"
   else
     echo "clauth (owns the profiles that get written OVER ~/.claude/.credentials.json):"
-    active=$(clauth which 2>/dev/null | tr -d '[:space:]')
-    # `clauth which` answers the literal string "unknown" when the credential it
-    # is looking at belongs to no profile — a sentinel, not a name. Taking it as
-    # one produced "no stored credentials for 'unknown' to compare against",
-    # which reads like a missing file rather than the orphan it is, and skipped
-    # the status.json fallback that would have named the real active profile.
-    [[ "$active" == "unknown" ]] && active=""
-    [[ -z "$active" ]] && active=$(jq -r '.active_profile // empty' "$HOME/.clauth/status.json" 2>/dev/null)
+    # THE SAME MISTAKE AS THE LINE ABOVE, one axis over — and one level deeper
+    # than the first fix for it reached. `_claude_active_profile` carries the
+    # whole reasoning; the short version is that this asked `clauth which`, which
+    # reports credential OWNERSHIP and not the active profile, so the answer was
+    # wrong in an isolated session and tautological in every other. It reads
+    # clauth's config now, which is both the right question and one fewer fork.
+    active=$(_claude_active_profile)
     if [[ -z "$active" ]]; then
-      _doctor_warn "could not determine the active profile — clauth answered nothing"
+      _doctor_warn "could not determine the active profile — clauth's config names none"
+      echo "    Neither 'active_profile' in ~/.clauth/profiles.toml nor ~/.clauth/status.json"
+      echo "    could be read. The comparisons below that need it are skipped, not passed."
     else
       _doctor_note "active profile: $active"
     fi
@@ -589,8 +636,24 @@ claude-doctor() {
       if [[ -n "$active" && -f "$pdir/credentials.json" ]]; then
         live_hash="$gcred_id"
         stored_hash="$(_claude_cred_id "$pdir/credentials.json")" || stored_hash=""
+        # Resolved, because $gcred is resolved: both sides have to be physical or
+        # the comparison below is about spelling rather than about the file.
+        spath="$pdir/credentials.json"; spath="${spath:A}"
         if [[ -z "$live_hash" || -z "$stored_hash" ]]; then
           _doctor_warn "could not compare stored and live credentials — NOT CHECKED (an unreadable file is not agreement)"
+        elif [[ "$spath" == "$gcred" ]]; then
+          # SAME FILE, so "they match" is a tautology, not a finding. The global
+          # path is a symlink into the store on this machine (relinked 2026-09-14
+          # so the two Chrome native hosts stopped being independent holders), and
+          # a comparison of a file with itself printing ✓ under the heading "the
+          # one check that predicts a mass logout" is the vacuous-tick trap this
+          # file already records for isolated sessions, back by a new route. It is
+          # a note rather than a warning: one file is the DESIGNED shape, and the
+          # only thing lost is this check, which has nothing left to compare.
+          _doctor_note "stored copy of '$active' IS the live credential (same file) — nothing to compare"
+          echo "    ~/.claude/.credentials.json resolves into that profile's store, so a switch"
+          echo "    away and back cannot restore a superseded token. clauth's own"
+          echo "    active_diverged_unsaved guard is blind here for the same reason."
         elif [[ "$live_hash" == "$stored_hash" ]]; then
           _doctor_ok "stored copy of '$active' matches the live credential — switching away and back is safe"
         else
