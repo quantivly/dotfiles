@@ -1610,10 +1610,20 @@ claude() {
   # The resolver reports through these too, and they are shell-wide names.
   local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
 
-  # local -x, never a bare export: an export here would leak the config dir into
+  # `local`, never a bare export: an export here would leak the config dir into
   # the pane's shell and silently pin every LATER command in it to this account.
-  # -x still exports to this function's children, which is all that is needed.
-  local -x CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
+  # The -x is applied BELOW, and only once this holds a real value.
+  #
+  # It used to be `local -x` here, and that broke Claude Code outright on every
+  # clauth-less machine. `-x` exports regardless of the value, and on such a box
+  # nothing below ever assigns this — so the binary was exec'd with
+  # CLAUDE_CONFIG_DIR set-and-EMPTY, and it resolves its config dir from that.
+  # Measured: every /login completed its OAuth handshake (the account profile
+  # reached ~/.claude.json each time) and then failed to persist the token, so
+  # the machine could not log in at all, with "Login successful" printed. That is
+  # the modular adopter DO-555/DO-566 exist to serve, and it is the DO-613 class
+  # — an empty value treated as meaningful — one level down.
+  local CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
   local profile="" dir="" holder="" tenant=""
 
   # Resolved once, through $+functions, for the same reason the account root is
@@ -1681,6 +1691,14 @@ claude() {
       print -u2 -- "        shares ~/.claude/.credentials.json with every other."
     fi
   fi
+
+  # Export ONLY a real value. An unset CLAUDE_CONFIG_DIR and an empty exported one
+  # are different things to Claude Code: unset means "use ~/.claude", empty means
+  # "resolve the config dir from an empty string". Every path that leaves this
+  # empty — no clauth, CLAUDE_ISOLATION_OFF=1, a builder that failed, no profile
+  # with a credential — must therefore export nothing at all, which is exactly
+  # the byte-for-byte fallback this file promises a modular adopter.
+  [[ -n "$CLAUDE_CONFIG_DIR" ]] && typeset -x CLAUDE_CONFIG_DIR
 
   # Count as a holder however CLAUDE_CONFIG_DIR came to point at an account dir.
   # hspawn sets it itself, and a spawn that did not register would make the

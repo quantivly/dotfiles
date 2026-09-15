@@ -2995,6 +2995,64 @@ was reworded, which the harness reported as an error rather than as a survivor. 
 rule this file already states one section up, working: a mutation that no longer applies
 reads exactly like a surviving mutant.
 
+### `claude()` exported an EMPTY `CLAUDE_CONFIG_DIR`, and no machine with clauth could see it
+
+**On a clauth-less machine this broke Claude Code outright: every `/login` printed "Login
+successful" and the box could never log in.** `claude()` opened with
+
+```zsh
+local -x CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
+```
+
+and `-x` exports **whatever the value is, including empty**. With clauth present the block below
+assigns a real account dir, so every machine we develop on was fine. Without clauth — the
+modular adopter DO-555 and DO-566 exist to serve — nothing ever assigns it, so the binary was
+exec'd with `CLAUDE_CONFIG_DIR` set-and-empty and resolved its config dir from an empty string.
+Unset and empty are **different things** to Claude Code: unset means `~/.claude`, empty does not.
+
+Measured on a real box (an EC2 dev machine, 2026-09-15): the OAuth handshake completed every
+time — `oauthAccount` with emailAddress, organizationName, seatTier and a fresh
+`profileFetchedAt` reached `~/.claude.json` at the exact login minute, repeatedly — and the token
+was never persisted. Proof, same machine, same minute, same valid credential on disk:
+
+| invocation | result |
+|---|---|
+| the binary directly, wrapper bypassed | `AUTH_OK` |
+| `claude`, through this function | `Not logged in · Please run /login` |
+
+`CLAUDE_ISOLATION_OFF=1` was broken the same way, which matters more than it looks: the
+documented escape hatch from isolation did not restore the previous behaviour, it exported an
+empty config dir instead. So did a failed builder and "no profile has a credential".
+
+The fix keeps the original intent — the comment arguing for `local -x` over a bare `export` was
+right, an export at the top would leak the dir into the pane's shell — and moves the `-x` to
+where a real value exists: `local` at the declaration, then
+`[[ -n "$CLAUDE_CONFIG_DIR" ]] && typeset -x CLAUDE_CONFIG_DIR` after the isolation block.
+Every path that leaves it empty now exports nothing at all, which is the byte-for-byte fallback
+this file already promises a modular adopter.
+
+**Three existing rows were decoration, and the reason is written down two sections above.** The
+claude and herdmates stubs both recorded `printf 'CFG %s\n' "${CLAUDE_CONFIG_DIR:-<unset>}"` —
+and `${VAR:-x}` substitutes for an **empty** value as well as an unset one, so the probe
+collapsed the defect into the expected answer. `with no clauth the launch is unchanged`,
+`CLAUDE_ISOLATION_OFF=1 restores the shared path` and `and it does share the global credential`
+all passed while the bug was live. This is **DO-612's own finding** (`${VAR:-default}`
+substitutes for empty too) reappearing inside the suite written to catch that class. The stubs
+now separate three states — `<unset>`, `<empty>`, and the value — and the honest probe failed all
+three rows immediately.
+
+**The diagnostic that ends this class of hunt: compare the credential file's mtime against the
+login instant.** A file that was never written cannot have been overwritten. Two earlier theories
+— a blanked credential diverting the write, and failing figma/linear MCP plugins clobbering it
+(both plausible; the plugins really do write `mcpOAuth` into the same unlocked file and had never
+connected on that box) — each survived a fix attempt because "Login successful" was being read as
+evidence of persistence. One `stat` killed both.
+
+Rows: `scripts/test-hspawn.sh` (343 → 347), including the explicit
+`and CLAUDE_CONFIG_DIR is not exported EMPTY`. 3 mutants, 3 deaths, each dry-run for
+applicability first: restoring `local -x`, deleting the conditional export, and exporting
+unconditionally.
+
 ### The smart account picker (DO-574)
 
 **The old ranking answered "which account is least used"; it could not answer "which account will
