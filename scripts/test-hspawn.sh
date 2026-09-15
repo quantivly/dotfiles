@@ -200,7 +200,14 @@ cat > "$STUBBIN/claude" <<'STUB'
 #!/bin/sh
 {
     printf 'CMD %s\n' "$*"
-    printf 'CFG %s\n' "${CLAUDE_CONFIG_DIR:-<unset>}"
+    # `${VAR:-x}` substitutes for an EMPTY value as well as an unset one, so it
+    # cannot tell "never exported" from "exported empty" — and claude() exporting
+    # an empty CLAUDE_CONFIG_DIR is precisely the defect this distinction exists
+    # to catch (it breaks Claude Code outright on a clauth-less machine). Three
+    # states, kept apart deliberately. Same class as DO-612's `${VAR:-default}`.
+    if [ -z "${CLAUDE_CONFIG_DIR+set}" ]; then printf 'CFG <unset>\n'
+    elif [ -z "$CLAUDE_CONFIG_DIR" ]; then printf 'CFG <empty>\n'
+    else printf 'CFG %s\n' "$CLAUDE_CONFIG_DIR"; fi
     printf 'TEAMS %s\n' "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-<unset>}"
     for h in "$CLAUDE_ACCOUNT_DIRS_ROOT"/*/holders/*; do
         [ -e "$h" ] && printf 'HOLDER %s\n' "$h"
@@ -212,7 +219,14 @@ cat > "$STUBBIN/herdmates" <<'STUB'
 #!/bin/sh
 {
     printf 'CMD herdmates %s\n' "$*"
-    printf 'CFG %s\n' "${CLAUDE_CONFIG_DIR:-<unset>}"
+    # `${VAR:-x}` substitutes for an EMPTY value as well as an unset one, so it
+    # cannot tell "never exported" from "exported empty" — and claude() exporting
+    # an empty CLAUDE_CONFIG_DIR is precisely the defect this distinction exists
+    # to catch (it breaks Claude Code outright on a clauth-less machine). Three
+    # states, kept apart deliberately. Same class as DO-612's `${VAR:-default}`.
+    if [ -z "${CLAUDE_CONFIG_DIR+set}" ]; then printf 'CFG <unset>\n'
+    elif [ -z "$CLAUDE_CONFIG_DIR" ]; then printf 'CFG <empty>\n'
+    else printf 'CFG %s\n' "$CLAUDE_CONFIG_DIR"; fi
     printf 'TEAMS %s\n' "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-<unset>}"
 } >> "$CLAUDE_STUB_LOG"
 exit 0
@@ -555,6 +569,14 @@ check "but still isolates"                        "$(inclaude "CFG $ACCT/persona
 NOCLAUTH=1 run "claude"; NOCLAUTH=
 check "with no clauth the launch is unchanged"  "$(inclaude "CFG <unset>")" "1"
 check "and nothing is said about accounts"      "$(outgrep "account '")"    "0"
+# The sharp one. `local -x CLAUDE_CONFIG_DIR=...` exports even when the value is
+# empty, and with no clauth nothing below ever assigns it — so claude() handed the
+# binary a set-but-empty CLAUDE_CONFIG_DIR, which Claude Code resolves its config
+# dir from. Measured on a real clauth-less box: every /login completed its OAuth
+# handshake and then failed to persist the token, so the machine could never log
+# in at all. "Unchanged" above cannot catch it while the probe collapses empty
+# into unset, which is why the stub distinguishes the two.
+check "and CLAUDE_CONFIG_DIR is not exported EMPTY" "$(inclaude "CFG <empty>")" "0"
 
 # Pinning: claude-as is the verb that replaces `clauth <profile>` for choosing an
 # account, without rewriting the global credential under every other session.
