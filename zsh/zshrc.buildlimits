@@ -34,13 +34,41 @@
 _bl_cores=$(command nproc 2>/dev/null || echo 4)
 
 if [ -n "${HERDR_PANE_ID:-}" ]; then
-    # Sharing the machine with sibling agent sessions.
-    _bl_jobs=2
+    # Sharing the machine with sibling agent sessions: a QUARTER of the cores.
+    #
+    # This was a hardcoded 2 until 2026-09-16, which is the right number for the
+    # 8-thread laptop it was tuned on and wrong the moment work moves anywhere
+    # bigger: a 16-core box with two or three sessions ran its test suites
+    # 2-way parallel while fourteen cores idled — the constraint travelling with
+    # the work instead of being left behind. cores/4 keeps 8 threads at exactly
+    # 2, so the machine this was written for does not move at all.
+    _bl_jobs=$(( _bl_cores / 4 ))
 else
-    # Solo interactive work: half the cores, floor of 2.
+    # Solo interactive work: half the cores.
     _bl_jobs=$(( _bl_cores / 2 ))
-    [ "$_bl_jobs" -lt 2 ] && _bl_jobs=2
 fi
+# One floor for both tiers. Below 2 there is no parallelism left to cap.
+[ "$_bl_jobs" -lt 2 ] && _bl_jobs=2
+_BUILD_LIMITS_SOURCE="tier"
+
+# An explicit override, for a box whose shape you actually know — a dedicated
+# 16-core dev box carrying two sessions wants more than a quarter, and saying so
+# should not need an edit to a tracked file. Set it in ~/.zshrc.local, which is
+# sourced AFTER this module.
+#
+# An unusable value leaves the computed tier alone rather than being taken
+# literally: 0 disables parallelism outright, and a negative, decimal or
+# non-numeric value lands in MAKEFLAGS as a malformed flag the tool rejects —
+# both worse than the default it was trying to improve on. It is not silent
+# either; `build-limits` names it, which is the one place anybody looks when a
+# build feels wrong.
+case "${BUILD_LIMITS_JOBS:-}" in
+    '')       : ;;
+    *[!0-9]*) _BUILD_LIMITS_SOURCE="tier — BUILD_LIMITS_JOBS='$BUILD_LIMITS_JOBS' ignored (not a positive integer)" ;;
+    0)        _BUILD_LIMITS_SOURCE="tier — BUILD_LIMITS_JOBS='0' ignored (not a positive integer)" ;;
+    *)        _bl_jobs="$BUILD_LIMITS_JOBS"
+              _BUILD_LIMITS_SOURCE="BUILD_LIMITS_JOBS=$BUILD_LIMITS_JOBS" ;;
+esac
 
 # --- JavaScript / TypeScript -------------------------------------------------
 # Vitest reads VITEST_MAX_WORKERS (verified present in vitest 4.x).
@@ -77,6 +105,7 @@ build-limits() {
     printf '%-34s %s\n' \
         "context" "$context" \
         "cores (nproc)" "$(command nproc 2>/dev/null || echo '?')" \
+        "source" "${_BUILD_LIMITS_SOURCE:-tier}" \
         "VITEST_MAX_WORKERS" "$VITEST_MAX_WORKERS" \
         "NPM_CONFIG_JOBS" "$NPM_CONFIG_JOBS" \
         "GOFLAGS" "$GOFLAGS" \
