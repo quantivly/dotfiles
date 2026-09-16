@@ -4,6 +4,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rabota import errors
+
 SCHEMA_VERSION = 1
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -40,9 +42,16 @@ class Store:
 
     @classmethod
     def open(cls, state_dir: Path) -> "Store":
-        """Create ``state_dir`` and ``rabota.db`` if needed, migrate, and return an open store."""
-        state_dir = Path(state_dir); state_dir.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(state_dir / "rabota.db", isolation_level=None)
+        """Create ``state_dir`` and ``rabota.db`` if needed, migrate, and return an open store.
+
+        An unusable ``state_dir`` is a ``RabotaError`` naming it (exit 5), not a traceback.
+        """
+        state_dir = Path(state_dir)
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(state_dir / "rabota.db", isolation_level=None)
+        except (OSError, sqlite3.Error) as e:
+            raise errors.RabotaError(f"cannot open state dir {state_dir}: {getattr(e, 'strerror', None) or e}") from None
         conn.execute("PRAGMA journal_mode=WAL"); conn.execute("PRAGMA busy_timeout=5000")
         s = cls(conn); s.migrate(); return s
 

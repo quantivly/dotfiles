@@ -106,22 +106,47 @@ def _tenant(name: str, d: dict) -> Tenant:
     )
 
 
+def _toml(path: Path) -> dict:
+    """Parse ``path``; a malformed file is a ``Usage`` error naming it, not a traceback."""
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise errors.Usage(f"malformed TOML in {path}: {e}") from None
+
+
 def load(base: Path | None = None) -> Config:
-    """Load ``config.toml`` and every ``tenants/*.toml`` under ``base`` (default ``~/.dotfiles-local/rabota``)."""
+    """Load ``config.toml`` and every ``tenants/*.toml`` under ``base`` (default ``~/.dotfiles-local/rabota``).
+
+    Every fault in the files themselves — malformed TOML, a tenant missing a required
+    key, a route or the default naming a tenant with no file — is a config problem the
+    operator can fix, so it is ``Usage`` (exit 2) with the file and the key in the message.
+    """
     base = Path(os.path.expanduser(str(base or DEFAULT_BASE)))
     main = base / "config.toml"
     if not main.exists():
         raise errors.RabotaError(f"missing config: {main}")
-    with main.open("rb") as f:
-        top = tomllib.load(f)
-    routes = [(_p(r["prefix"]), r["tenant"]) for r in top.get("route", [])]
+    top = _toml(main)
+    routes = []
+    for r in top.get("route", []):
+        try:
+            routes.append((_p(r["prefix"]), r["tenant"]))
+        except KeyError as e:
+            raise errors.Usage(f"{main}: a [[route]] entry is missing required key {e.args[0]!r}") from None
     tenants = {}
     for path in sorted((base / "tenants").glob("*.toml")):
-        with path.open("rb") as f:
-            tenants[path.stem] = _tenant(path.stem, tomllib.load(f))
+        try:
+            tenants[path.stem] = _tenant(path.stem, _toml(path))
+        except KeyError as e:
+            raise errors.Usage(f"{path}: missing required key {e.args[0]!r}") from None
+        except TypeError as e:   # a [machines.<name>] table missing a Machine field
+            raise errors.Usage(f"{path}: {e}") from None
+    for prefix, tenant in routes:
+        if tenant not in tenants:
+            raise errors.Usage(f"{main}: route {str(prefix)!r} names tenant {tenant!r}, which has no tenants/{tenant}.toml")
     default = top.get("default", "personal")
     if default not in tenants:
-        raise errors.RabotaError(f"default tenant {default!r} has no tenants/{default}.toml")
+        raise errors.Usage(f"{main}: default tenant {default!r} has no tenants/{default}.toml")
     return Config(routes=routes, default=default, tenants=tenants)
 
 

@@ -1,7 +1,11 @@
-import io, json, os, unittest
+import io, json, os, shutil, tempfile, unittest
+from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import patch
 from rabota import cli, errors
+from rabota.context import Context
+
+FIX = Path(__file__).parent / "fixtures" / "config"
 
 # Assembled at runtime so no literal in this file looks like a credential (see test_secrets.py).
 CANARY = "lin_api_" + "canary" + "0123456789"
@@ -95,3 +99,93 @@ class SecretGuardTests(unittest.TestCase):
             code, out, err = self.run_cli(["leakypartial"])
         self.assertEqual(code, 5)
         self.assertNotIn(CANARY, out + err)
+
+
+class ExitCodeTests(unittest.TestCase):
+    """Spec C1: nothing escapes as a traceback. Config faults are usage (2); the rest is error (5)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name) / "home"
+        self.base = self.home / ".dotfiles-local" / "rabota"
+        shutil.copytree(FIX, self.base)
+        home_patch = patch.dict(os.environ, {"HOME": str(self.home)})
+        home_patch.start(); self.addCleanup(home_patch.stop)
+
+    def run_cli(self, argv):
+        code, out, err = run_cli(argv)
+        self.assertNotIn("Traceback", err)
+        return code, out, err
+
+    def _usage(self, argv):
+        code, out, err = self.run_cli(argv)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error"]["code"], "usage")
+        return err
+
+    def test_malformed_config_toml_is_usage(self):
+        (self.base / "config.toml").write_text("default = \n")
+        err = self._usage(["--tenant", "quantivly", "doctor"])
+        self.assertIn("config.toml", err)
+
+    def test_tenant_toml_missing_root_is_usage(self):
+        path = self.base / "tenants" / "toysim.toml"
+        path.write_text("\n".join(l for l in path.read_text().splitlines() if not l.startswith("root")) + "\n")
+        err = self._usage(["--tenant", "quantivly", "doctor"])
+        self.assertIn("toysim.toml", err)
+        self.assertIn("root", err)
+
+    def test_route_to_tenant_without_toml_is_usage(self):
+        with (self.base / "config.toml").open("a") as f:
+            f.write('\n[[route]]\nprefix = "~/ghost"\ntenant = "ghost"\n')
+        err = self._usage(["--tenant", "quantivly", "doctor"])
+        self.assertIn("ghost", err)
+        self.assertIn("config.toml", err)
+
+    def test_default_tenant_without_toml_is_usage(self):
+        (self.base / "tenants" / "personal.toml").unlink()
+        err = self._usage(["--tenant", "quantivly", "doctor"])
+        self.assertIn("personal", err)
+
+    def test_unusable_state_dir_is_error_not_traceback(self):
+        def run(ns):
+            return {"schema": Context.from_namespace(ns).store.schema_version()}
+        cli.register("touchstore", lambda sub: sub.add_parser("touchstore"), run)
+        blocker = self.home / "not-a-dir"; blocker.write_text("")
+        code, out, err = self.run_cli(["--tenant", "quantivly", "--state-dir", str(blocker / "state"), "touchstore"])
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(err)["error"]["code"], "error")
+        self.assertIn("state dir", err)
+
+    def test_unexpected_exception_is_error_5(self):
+        def run(ns):
+            raise ValueError("unknown lane fields {'bogus'}")
+        cli.register("valueerror", lambda sub: sub.add_parser("valueerror"), run)
+        code, out, err = self.run_cli(["valueerror"])
+        self.assertEqual(code, 5)
+        self.assertEqual(json.loads(err)["error"]["code"], "error")
+        self.assertIn("ValueError", err)
+        self.assertEqual(out, "")
+
+    def test_unexpected_exception_message_is_guarded(self):
+        def run(ns):
+            raise ValueError("bad header " + CANARY)
+        cli.register("leakyvalueerror", lambda sub: sub.add_parser("leakyvalueerror"), run)
+        with patch.dict(os.environ, {"LINEAR_API_KEY": CANARY}):
+            code, out, err = self.run_cli(["leakyvalueerror"])
+        self.assertEqual(code, 5)
+        self.assertEqual(json.loads(err)["error"]["code"], "secret_leak")
+        self.assertNotIn(CANARY, out + err)
+
+    def test_system_exit_and_interrupt_keep_their_own_behaviour(self):
+        def exiting(ns):
+            raise SystemExit(7)
+        def interrupted(ns):
+            raise KeyboardInterrupt
+        cli.register("sysexit", lambda sub: sub.add_parser("sysexit"), exiting)
+        cli.register("interrupt", lambda sub: sub.add_parser("interrupt"), interrupted)
+        with self.assertRaises(SystemExit) as cm:
+            run_cli(["sysexit"])
+        self.assertEqual(cm.exception.code, 7)
+        with self.assertRaises(KeyboardInterrupt):
+            run_cli(["interrupt"])

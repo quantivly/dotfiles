@@ -107,3 +107,6 @@ def main(argv=None):
         return 0
     except errors.RabotaError as e:
         return _report(e)
+    except Exception as e:  # noqa: BLE001 — the last resort, spec C1: 5. SystemExit and
+        # KeyboardInterrupt are BaseException, so they keep their own behaviour.
+        return _report(errors.RabotaError(f"unexpected {type(e).__name__}: {e}"))
