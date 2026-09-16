@@ -474,6 +474,87 @@ cred_write_verdict() {  # $1 = account dir, $2 = verdict, $3.. = detail
     chmod 600 "$dir/.reconcile-status" 2>/dev/null || true
 }
 
+# Is clauth holding this profile in its `auth_broken` quarantine?
+#
+# WHY THIS SCRIPT ASKS AT ALL, when it can do nothing about the answer: the
+# ADOPT below is the one moment the two facts line up, and this is the only
+# process that sees it. `.reconcile-status` is overwritten on every run, so the
+# `adopted` verdict is gone within two minutes and claude-doctor — which reads
+# that file — can never learn that a rotation was adopted into a quarantined
+# profile's store. One sentence in the journal, stamped at the adopt, is the
+# forensic record the 2026-09-14 incident did not have: the flags are at
+# 08:29:13-27 and the adopt at 08:29:28, and nothing correlated them.
+#
+# ON THE ADOPT ONLY, deliberately. `kept-store` means the store's own login won,
+# so nothing about the chain changed and there is no new fact to report;
+# `linked` is the resting state and fires on most of the 720 runs a day this
+# timer makes. A line printed every two minutes is a line nobody reads, which is
+# this repo's most-repeated self-inflicted bug.
+#
+# "NO" AND "COULD NOT TELL" ARE THE SAME ANSWER HERE, and that is a decision
+# rather than sloppiness: the only consumer adds a sentence, and a warning about
+# an unreadable profiles.toml from an unattended two-minute timer is noise it
+# cannot act on. claude-doctor keeps the two apart — it is asked, and it says
+# NOT CHECKED.
+#
+# READ WITH BASH BUILTINS, not `sed`. This script's external tools are jq, cmp,
+# date, stat and the file utilities; adding one more is one more way for a check
+# to go quiet, which CLAUDE.md records for `readlink -f` and `awk` in exactly
+# these files.
+#
+# THE SPAN IS VALIDATED, NOT MERELY TERMINATED, and the difference is a row that
+# failed. The range runs past this assignment whenever the closing `]` does not
+# arrive on a line of its own, and it then swallows every quoted string below it
+# — including `profiles = [...]`, which holds the very profile this run is
+# reconciling. So a malformed file becomes a confident, specific, wrong finding.
+#
+# Checking for a `]` somewhere is not enough: `auth_broken = [` with no members,
+# followed by `profiles = [ "p1", ]`, HAS one — the other array's — and named p1.
+# The INTERIOR is checked instead: between the first `[` and the first `]`, an
+# array of names holds nothing but quoted strings, commas and whitespace. Split
+# on `"` and the even-indexed fields are exactly what sits between the names;
+# anything else there means the range left this assignment. A missing bracket of
+# either kind fails the same test, so truncation needs no separate arm.
+#
+# TWO OTHER READERS of this key exist and a change belongs in all three:
+# `_claude_quarantined_profiles` in zsh/functions/claude.sh (which ENUMERATES,
+# because the doctor does not know the names in advance) and
+# `_claude_profile_excluded` in zsh/zshrc.herdr (the picker's exclusion).
+profile_is_quarantined() {
+    local name="$1" toml="$HOME/.clauth/profiles.toml"
+    local line span="" inside=0 closed=0
+    [[ -r "$toml" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if (( ! inside )); then
+            [[ "$line" =~ ^[[:space:]]*auth_broken[[:space:]]*= ]] || continue
+            inside=1
+        fi
+        span+="$line"
+        if [[ "$line" == *']'* ]]; then closed=1; break; fi
+    done < "$toml"
+    (( inside && closed )) || return 1
+    [[ "$span" == *'['* ]] || return 1
+    local body="${span#*[}"
+    [[ "$body" == *']'* ]] || return 1
+    body="${body%%]*}"
+    # Split on the quote character. clauth validates profile names to letters,
+    # digits and - _ . @ + (`validate_profile_name`, which also refuses a leading
+    # dot), so no name can carry a quote of its own and the fields cannot shift.
+    local -a fields
+    IFS='"' read -r -a fields <<< "$body"
+    local i
+    for (( i = 0; i < ${#fields[@]}; i += 2 )); do
+        [[ -z "${fields[i]//[[:space:],]/}" ]] || return 1
+    done
+    # An exact comparison, not a substring one: `p1` must not be answered by a
+    # list holding `p10`, or the remedy tells the reader to re-login an account
+    # that is perfectly healthy.
+    for (( i = 1; i < ${#fields[@]}; i += 2 )); do
+        [[ "${fields[i]}" == "$name" ]] && return 0
+    done
+    return 1
+}
+
 # Is the account dir PROVABLY the same account as the profile store?
 #
 # clauth's own anchor (account_id.json, a bare JSON string it backfills on login
@@ -743,6 +824,17 @@ _reconcile_credential_locked() {
                     cred_write_verdict "$account_dir" adopted
                     warn "$profile: adopted the live session's rotated credential into the clauth"
                     warn "        store (superseded store copy kept as ${backup##*/})."
+                    # The store is healthy again and clauth may still be refusing
+                    # it. See profile_is_quarantined for why this line exists and
+                    # why it is on this branch alone.
+                    if profile_is_quarantined "$profile"; then
+                        warn "$profile: ...AND clauth still holds it in auth_broken. That flag does not"
+                        warn "        clear on a successful usage fetch — only 'clauth login', or clauth"
+                        warn "        itself adopting or carrying a rotation it can prove. Adopting the"
+                        warn "        live token here removes the failing poll it would have recovered"
+                        warn "        through, so the flag can stand until someone logs in."
+                        warn "        Fix: clauth login $profile"
+                    fi
                 else
                     cred_write_verdict "$account_dir" kept-store
                     warn "$profile: kept the stored credential and merged in the account dir's"
