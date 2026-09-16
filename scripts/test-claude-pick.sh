@@ -1502,6 +1502,62 @@ check "gate (ranked path): ...as gate-unmeasured"                         "$(jq 
 check "gate (ranked path): ...with the age in the gate object"            "$(jq -r '.gate.cache_age_s | . >= 1000 and . <= 1010' <<<"$out")" "true"
 H="$SAVED_H"
 
+# --- gate: a tuning value that does not parse REFUSES (defect 2) ------------
+# Reproduced by the review gate at a 90% seat: RATE_DEFAULT=abc allowed with
+# projected 90 (the rate parsed as 0), RATE_DEFAULT=-100 allowed with projected
+# 40 (a negative rate SUBTRACTS), GATE_MAX=1x printed an unparseable object and
+# no refusal. Every one is an operator's typo hiding behind an allow. Now: exit
+# 2, state gate-misconfigured, a reason naming the variable and the value it
+# got — never a silent 0, and never a fallback to the default, which would hide
+# the typo. THE FIXTURES ARE CHOSEN SO THAT A FALLBACK WOULD ALLOW: v10 with the
+# default rate projects to 67, v30 with the default cap is 87 < 95. A row at
+# 90% would refuse as gate-projected under a fallback and pin nothing.
+gate_profile v10 10
+gate_profile v30 30
+CLAUDE_PICK_RATE_DEFAULT=abc gate_run v10
+check "gate: CLAUDE_PICK_RATE_DEFAULT=abc refuses"        "$rc" "2"
+check "gate: ...as gate-misconfigured, not a projection"  "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming the variable and the value"        "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_RATE_DEFAULT abc)" "yes"
+check "gate: ...with a null profile"                      "$(jq -r .profile <<<"$out")" "null"
+check "gate: ...verdict refuse"                           "$(jq -r .gate.verdict <<<"$out")" "refuse"
+check "gate: ...and no rate is reported as measured"      "$(jq -r .gate.rate <<<"$out")" "null"
+CLAUDE_PICK_RATE_DEFAULT=-100 gate_run v10
+check "gate: a NEGATIVE default rate refuses"             "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming -100"                              "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_RATE_DEFAULT -100)" "yes"
+CLAUDE_PICK_RATE_DEFAULT=0 gate_run v10
+check "gate: a ZERO default rate refuses (must be > 0)"   "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+CLAUDE_PICK_GATE_MAX=1x gate_run v30
+check "gate: CLAUDE_PICK_GATE_MAX=1x refuses"             "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...and the output is still ONE valid JSON object" "$(jq -e . <<<"$out" >/dev/null 2>&1; echo $?)" "0"
+check "gate: ...naming the variable and the value"        "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_GATE_MAX 1x)" "yes"
+check "gate: ...and max is null, not a guess"             "$(jq -r .gate.max <<<"$out")" "null"
+CLAUDE_PICK_GATE_MAX=0 gate_run v30
+check "gate: CLAUDE_PICK_GATE_MAX=0 refuses (must be > 0)" "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+CLAUDE_PICK_GATE_MAX=150 gate_run v30
+check "gate: a VALID CLAUDE_PICK_GATE_MAX is honoured"    "$rc" "0"
+check "gate: ...and reported"                             "$(jq -r .gate.max <<<"$out")" "150"
+CLAUDE_PICK_CACHE_MAX_AGE=abc gate_run v30
+check "gate: CLAUDE_PICK_CACHE_MAX_AGE=abc refuses"       "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming the variable and the value"        "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_CACHE_MAX_AGE abc)" "yes"
+# A rate table entry is validated the same way, and named by its KEY.
+mkdir -p "$H/.config"
+printf 'typeset -gA CLAUDE_PICK_RATES\nCLAUDE_PICK_RATES[claude-sonnet-5:medium]=fast\n' > "$H/.config/claude-tenants.zsh"
+out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
+check "gate: CLAUDE_PICK_RATES[claude-sonnet-5:medium]=fast refuses" "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming the entry and the value"           "$(has_words "$(jq -r .reason <<<"$out")" 'CLAUDE_PICK_RATES[claude-sonnet-5:medium]' fast)" "yes"
+rm -f "$H/.config/claude-tenants.zsh"
+# A zero-length lane is not a request: the same usage error a non-integer gets.
+HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --gate --model a --effort b --est-minutes 0 2>/dev/null
+check "gate: --est-minutes 0 is a usage error (64)"       "$?" "64"
+HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --gate --model a --effort b --est-minutes=0 2>/dev/null
+check "gate: ...in the --est-minutes=0 spelling too"      "$?" "64"
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
