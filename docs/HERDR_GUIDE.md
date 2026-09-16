@@ -564,6 +564,7 @@ not survive. `f12 ?` shows both bindings per action.
 | rename / close workspace · reload config · help · settings | — | `f12 shift+w` / `f12 shift+d` · `f12 shift+r` · `f12 ?` · `f12 s` | prefix only — rare or destructive. Stock defaults, left untouched in `config.toml` (checked against `herdr --default-config`; not re-probed at the keyboard) |
 | remove worktree | — | `f12 shift+k` | bound 2026-08-30 for tearing down `hspawn` worktrees; opens herdr's confirmation. Prefix-only because it is destructive. Not yet probed at the keyboard — `config.toml` is the source of truth |
 | previous / next workspace | `alt+shift+↑` / `alt+shift+↓` | `f12 shift+↑` / `f12 shift+↓` | bound 2026-08-30 (same family as move-tab on `alt+shift+←→`); cycling between many live workspaces. Not yet probed at the keyboard — `config.toml` is the source of truth |
+| **space 1–9** | — | `f12 shift+1..9` | bound 2026-09-16 (`switch_workspace`); indexed jump in the sidebar's order, skipping whatever sits between. Prefix-only because `alt+1..9` is agents and `ctrl+1..9` is tabs. Not yet probed at the keyboard — `config.toml` is the source of truth |
 | lazygit · yazi popups | `alt+g` · `alt+y` | — | tmux `M-g` / `M-y` |
 
 An earlier version of this table listed "swap panes" and "copy mode" as prefix-only actions.
@@ -604,6 +605,30 @@ It was, and it closed a live agent session by accident. `ctrl+shift+w` is a deca
 herdr has **no pane-level close confirmation** — `[ui] confirm_close` covers *workspaces* only —
 so there is nothing to switch on. The mitigation is to not offer the accident-prone chord:
 `close_pane` is `["prefix+x", "ctrl+alt+x"]`. Worth copying if you value your sessions.
+
+### Spaces
+
+Every repo you fan out from keeps a **parent space** alive (`worktree create` groups each
+worktree under the workspace of its parent checkout), and the parent's only content is usually a
+root shell. On 2026-09-16 that was 4 of 14 spaces with no agent in them, and `alt+shift+↓` walked
+through every one. Four habits keep that from costing attention:
+
+- **Pick, don't cycle.** `alt+s` (`goto`) is a searchable picker: type a few letters of the space
+  you want and the agentless parents never come up. `alt+shift+↑/↓` is for two or three spaces,
+  not fourteen.
+- **Jump by number.** `f12 shift+N` (`switch_workspace`) goes straight to the Nth space in the
+  sidebar's order — the same order the spaces list shows, so the number is on screen.
+- **Open attended work as a tab in the repo's space, not a new space.** herdr-draft (`alt+n`)
+  defaults its `placement` row to `tab in <space>` whenever the target repo already has one, and
+  `herdr-draft create --placement tab-in` does the same headlessly. `new space` stays for a repo
+  with none. Headless lanes (`rabota lane`) create no space at all.
+- **Close a finished worktree group whole.** Closing the parent alone is refused while its
+  worktrees are open (`workspace_group_close_required`); `herdr workspace close --group <id>`
+  takes the parent and every grouped worktree space together. `rabota reap --spaces` lists the
+  agentless parents so you can see which groups are done, and `--apply --spaces` closes them.
+
+Nothing in herdr hides a space from cycling or auto-closes a group parent — these are the
+knobs that exist, not a fix for the model.
 
 ---
 

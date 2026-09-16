@@ -182,6 +182,16 @@ new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
 # xkb-options` FIRST — it is a one-line answer, where the keyprobe is a ritual.
 previous_workspace = ["prefix+shift+up", "alt+shift+up"]
 next_workspace     = ["prefix+shift+down", "alt+shift+down"]
+# Indexed jump straight to the Nth space in the sidebar's order (added
+# 2026-09-16, rabota-v2 C10): the herdr audit found it unbound while
+# alt+shift+up/down walked through every space, agentless worktree parents
+# included (4 of 14 that day). Stock default is "" so nothing is lost; the
+# spelling is the one `herdr --default-config` documents for the key. Prefix
+# only, deliberately: alt+1..9 is agents, ctrl+1..9 is tabs, and a third
+# digit family on a direct chord would collide with Claude Code's own alt
+# bindings or the terminal's. For spaces past 9, and for skipping the parents
+# by name, `alt+s` (goto) is the searchable picker.
+switch_workspace = "prefix+shift+1..9"
 # remove_worktree opens herdr's own confirmation before removing a worktree
 # (`herdr --default-config`: "opens confirmation"). It was unbound, so the
 # cleanup rule in CLAUDE.md had no key behind it (eval F2/F9). Prefix-only on
