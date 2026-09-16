@@ -2694,10 +2694,14 @@ Traps specific to the checker, each of which produced a green tick first:
 
 State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `PATH`:
 
-- `scripts/test-claude-doctor.sh` (**235 checks at the tip of `claude-doctor-active-profile`,
-  2026-09-14**; 215 at `c839d48`, 218 at `62c83d3`, and it was written here as "103 checks" and
+- `scripts/test-claude-doctor.sh` (**235 checks at `f07faae`**, re-measured on `main` 2026-09-16;
+  215 at `c839d48`, 218 at `62c83d3`, and it was written here as "103 checks" and
   had been stale for weeks — a figure without the commit it was measured at is the thing this
-  file warns about two sections down, so these carry theirs)
+  file warns about two sections down, so these carry theirs. This one read "at the tip of
+  `claude-doctor-active-profile`" for two days, which is the same defect wearing a branch name:
+  the branch auto-deleted on merge and took the anchor with it. **A branch is not an anchor** —
+  only a commit is, and a squash sha does not exist until after the body that would have cited
+  it. So cite the merge commit in a follow-up rather than the branch in the original.)
   — `claude-doctor-test`, recording `clauth` stub,
   and a fixture process tree (`CLAUDE_DOCTOR_PROC_ROOT`) so the concurrency grouping can be pinned
   without depending on what happens to be running. 25 mutants, all died, plus **9 for the active
