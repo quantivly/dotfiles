@@ -1601,6 +1601,29 @@ Gotchas, in the order they bite:
   executing **zero times** across a 44/44 pass — the read-only decision layer pinned completely,
   the layer that DELETES SYMLINKS not at all. Making `do_reconcile` also `rm -f` the unit symlink,
   i.e. reproducing the incident the file exists to prevent, passed 44/44.
+- **The reconciler read the unit FILE and called systemd's own extension mechanism drift.**
+  `declared_targets` parsed `WantedBy=` out of one file's `[Install]` and never looked at
+  `<unit>.d/*.conf`. A drop-in is exactly how you add an `[Install]` target without editing a
+  reviewed unit, and this repo already ships one for `ExecStart` (DO-564) — so the checker
+  reported the correct fix as a fault. It bites on a headless box: `herdr-server.service` is
+  `WantedBy=graphical-session.target`, which never activates without a graphical session, so an
+  EC2 dev box needs a `default.target` drop-in to start the server at boot. Measured on that box,
+  the drop-in gave `✗ enabled under default.target graphical-session.target, but its unit file
+  declares graphical-session.target` and a permanently red `verify-tools.sh` — the failure this
+  file names five times, produced by the checker rather than by the machine. **No drop-in
+  spelling avoids it**: clearing and re-setting `WantedBy=` still leaves the unit file declaring
+  something else, so the choice was a red checker or no boot autostart. It is now the merged
+  value — unit file, then `<unit>.d/*.conf` in filename order, an empty assignment clearing the
+  list, which is systemd's own rule for a list-valued `[Install]` key. Scope deliberately matches
+  `herdr-unit-dropin.sh`: only the drop-in directory NEXT TO THE UNIT, because a hand-placed one
+  in `/etc/systemd/user` cannot be told from an administrator's decision. **DO-564 wrote the
+  lesson and the sibling checker did not inherit it** — ask the OUTCOME, never the mechanism.
+  Three messages saying "its unit file declares" became "it declares", since the targets no
+  longer come from one file. Rows: `scripts/test-systemd-reconcile.sh` (130 → 142). 5 mutants,
+  5 deaths — and the fifth only after a row was added: **deleting the reset rule from the
+  UNIT-FILE half survived the whole suite**, because every reset fixture put the empty
+  assignment in a drop-in. The merge has two halves and only one of them was pinned.
+
 - **Four more ways the reconciler answered "nothing to look at" over real drift**, all fixed and
   each pinned by a row that fails without the fix: `[[ -e ]]` follows symlinks, so a **dangling**
   unit symlink (rename a source, don't re-run `./install`) was skipped and reported

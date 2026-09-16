@@ -133,11 +133,14 @@ managed_units() {
     done
 }
 
-# Every target named by a WantedBy= inside the [Install] section, space
-# separated. Only [Install] is read: a WantedBy in a comment or another section
-# is not an enablement instruction. systemd allows several WantedBy= lines and a
-# space-separated list on each, so both are flattened.
-declared_targets() {
+# Every WantedBy= ASSIGNMENT inside [Install], one per line, in file order and
+# with its value raw. An assignment with an empty value prints an empty line and
+# is meaningful: it is systemd's list reset, and the only way a drop-in can take
+# a target away rather than add one. Only [Install] is read: a WantedBy in a
+# comment or another section is not an enablement instruction. systemd allows
+# several WantedBy= lines and a space-separated list on each, so both are
+# flattened by the caller.
+wantedby_assignments() {
     local file="$1"
     [[ -r "$file" ]] || return 0
     awk '
@@ -152,7 +155,42 @@ declared_targets() {
             gsub(/,/, " ")
             print
         }
-    ' "$file" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ $//'
+    ' "$file"
+}
+
+# The targets this unit effectively declares: the unit file, then its drop-ins in
+# filename order, with an empty assignment clearing everything accumulated so far
+# — systemd's own merge for a list-valued [Install] key.
+#
+# Reading the unit FILE alone reported systemd's own extension mechanism as
+# drift. A drop-in is how you add an [Install] target without editing a reviewed
+# unit, and this repo already ships one for ExecStart (DO-564); on a headless box
+# the shipped WantedBy=graphical-session.target never activates, so a
+# default.target drop-in is the correct fix — and it made verify-tools.sh
+# permanently red, which is the failure this repo names five times, produced by
+# the checker rather than by the machine. Same lesson DO-564 wrote for its own
+# --check: ask the OUTCOME (unit merged with its drop-ins), never the mechanism
+# (what this one file happens to say).
+#
+# Scope matches herdr-unit-dropin.sh deliberately: only the drop-in directory
+# NEXT TO THE UNIT is read. A drop-in placed by hand in /etc/systemd/user would
+# also apply, and a check cannot tell that from an administrator's decision.
+declared_targets() {
+    local unit_path="$1" dir="${1}.d" f line acc=""
+    while IFS= read -r line; do
+        if [[ -z "${line//[[:space:]]/}" ]]; then acc=""; else acc="$acc $line"; fi
+    done < <(wantedby_assignments "$unit_path")
+    if [[ -d "$dir" ]]; then
+        # Plain glob: bash sorts it, and the names that matter here are digit
+        # prefixed (10-, 20-), which order identically under every collation.
+        for f in "$dir"/*.conf; do
+            [[ -f "$f" ]] || continue
+            while IFS= read -r line; do
+                if [[ -z "${line//[[:space:]]/}" ]]; then acc=""; else acc="$acc $line"; fi
+            done < <(wantedby_assignments "$f")
+        done
+    fi
+    printf '%s\n' "$acc" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
 # The targets whose .wants/ directory currently holds a link for this unit.
@@ -254,7 +292,7 @@ do_check() {
         declared="$(declared_targets "$SYSTEMD_USER_DIR/$unit")"
         actual="$(actual_targets "$unit")"
         case "$state" in
-            ok)          printf '  ✓ %s: enabled under %s, as its unit file declares\n' "$unit" "$declared" ;;
+            ok)          printf '  ✓ %s: enabled under %s, as it declares\n' "$unit" "$declared" ;;
             static)      printf '  · %s: no WantedBy= — nothing to reconcile\n' "$unit" ;;
             not-enabled) printf '  · %s: not enabled (declares %s) — enable it if you want it\n' "$unit" "$declared" ;;
             broken)
@@ -267,7 +305,7 @@ do_check() {
                 ;;
             orphan-wants)
                 drifted=1
-                printf '  ✗ %s: enabled under %s, but its unit file declares no [Install]\n' "$unit" "$actual"
+                printf '  ✗ %s: enabled under %s, but it declares no [Install] WantedBy=\n' "$unit" "$actual"
                 printf '      WantedBy= at all. The file says it should not start on its own;\n'
                 printf '      the leftover .wants link starts it anyway, at every login.\n'
                 printf '      Fix: ./install — NOT systemctl disable, which deletes the unit\n'
@@ -275,7 +313,7 @@ do_check() {
                 ;;
             drifted)
                 drifted=1
-                printf '  ✗ %s: enabled under %s, but its unit file declares %s\n' "$unit" "${actual:-nothing}" "$declared"
+                printf '  ✗ %s: enabled under %s, but it declares %s\n' "$unit" "${actual:-nothing}" "$declared"
                 printf '      The file changed and the enablement did not follow, so what starts is\n'
                 printf '      still the OLD target. Fix: ./install — NOT systemctl reenable,\n'
                 printf '      whose disable half deletes the unit symlink this repo installs.\n'
