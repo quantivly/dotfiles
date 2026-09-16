@@ -3,6 +3,7 @@ from pathlib import Path
 
 from rabota import cli, emit, errors
 from rabota.context import Context
+from rabota.store import SCHEMA_VERSION
 
 EXPECTED_LINK = Path.home() / ".dotfiles" / "scripts" / "rabota"
 
@@ -18,7 +19,15 @@ def run_doctor(ctx: Context) -> dict:
     timer_state = timer.out.strip() if timer.ok else "missing"
     if timer_state != "enabled":
         problems.append(f"rabota-precompute.timer is {timer_state} (WS5 installs it)")
-    schema = ctx.store.schema_version()
+    try:
+        schema = ctx.store.schema_version()
+    except errors.Refused as e:      # a newer DB: the store refuses to open it (both numbers in the text)
+        schema = None
+        problems.append(str(e))
+    else:
+        if schema != SCHEMA_VERSION:
+            problems.append(f"rabota.db schema is {schema}, this rabota expects {SCHEMA_VERSION} "
+                            "(no migration is defined for it yet)")
     return {"tenant": ctx.tenant.name, "state_dir": str(ctx.state_dir), "config_ok": True,
             "db_schema": schema, "links": {"rabota": link_ok}, "timer": {"state": timer_state},
             "ok": not problems, "problems": problems}

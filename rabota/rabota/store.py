@@ -58,7 +58,20 @@ class Store:
     def close(self): self.conn.close()
 
     def migrate(self):
-        """Apply the schema idempotently and stamp the version on first creation."""
+        """Apply the schema idempotently and stamp the version on first creation.
+
+        A database stamped NEWER than ``SCHEMA_VERSION`` was written by a future rabota;
+        this code cannot know its semantics, so it refuses before touching anything. An
+        OLDER stamp is left as it is — there are no migration steps yet, and restamping
+        would claim one had run — and ``doctor`` reports the drift.
+        """
+        has_version = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
+        if has_version:
+            row = self.conn.execute("SELECT version FROM schema_version").fetchone()
+            if row and row[0] > SCHEMA_VERSION:
+                raise errors.Refused(f"rabota.db schema is {row[0]}, newer than this rabota's {SCHEMA_VERSION}; "
+                                     "upgrade rabota rather than letting an older one write to it")
         self.conn.executescript(SCHEMA)
         if self.conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
             self.conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))

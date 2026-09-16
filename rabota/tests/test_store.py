@@ -1,5 +1,6 @@
-import tempfile, unittest
+import sqlite3, tempfile, unittest
 from pathlib import Path
+from rabota import errors
 from rabota.store import Store, SCHEMA_VERSION
 
 class StoreTests(unittest.TestCase):
@@ -53,3 +54,24 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.pins("quantivly")[0]["bucket"], 1)
         self.store.clear_pin("quantivly", "HUB-1")
         self.assertEqual(self.store.pins("quantivly"), [])
+
+    def test_newer_on_disk_schema_is_refused_and_left_alone(self):
+        # A DB written by a future rabota: this code cannot know its semantics, so it must not write.
+        self.store.conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION + 1,))
+        self.store.close()
+        state_dir = Path(self.tmp.name) / "handoffs" / "rabota"
+        with self.assertRaises(errors.Refused) as cm:
+            Store.open(state_dir)
+        self.assertIn(str(SCHEMA_VERSION + 1), str(cm.exception))
+        self.assertIn(str(SCHEMA_VERSION), str(cm.exception))
+        conn = sqlite3.connect(state_dir / "rabota.db")
+        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchall(), [(SCHEMA_VERSION + 1,)])
+        conn.close()
+        self.store = Store(sqlite3.connect(":memory:"))   # tearDown closes something
+
+    def test_older_on_disk_schema_opens_without_restamping(self):
+        # No migration steps exist yet, so an old version is reported (by doctor), never silently bumped.
+        self.store.conn.execute("UPDATE schema_version SET version=0")
+        self.store.close()
+        self.store = Store.open(Path(self.tmp.name) / "handoffs" / "rabota")
+        self.assertEqual(self.store.schema_version(), 0)
