@@ -549,8 +549,13 @@ profile_is_quarantined() {
     # An exact comparison, not a substring one: `p1` must not be answered by a
     # list holding `p10`, or the remedy tells the reader to re-login an account
     # that is perfectly healthy.
+    # An `if`, not `[[ ... ]] && return 0`: as a loop body's last statement that is
+    # a FAILING command on every non-match, and under this script's `set -e` it
+    # would exit silently the moment this function were called anywhere but inside
+    # an `if` (which suspends `set -e` and is the only reason the bare form works
+    # today). CLAUDE.md records that class twice already.
     for (( i = 1; i < ${#fields[@]}; i += 2 )); do
-        [[ "${fields[i]}" == "$name" ]] && return 0
+        if [[ "${fields[i]}" == "$name" ]]; then return 0; fi
     done
     return 1
 }
