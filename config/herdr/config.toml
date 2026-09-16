@@ -182,6 +182,16 @@ new_worktree     = ["prefix+shift+g", "ctrl+shift+g"]
 # xkb-options` FIRST — it is a one-line answer, where the keyprobe is a ritual.
 previous_workspace = ["prefix+shift+up", "alt+shift+up"]
 next_workspace     = ["prefix+shift+down", "alt+shift+down"]
+# Indexed jump straight to the Nth space in the sidebar's order (added
+# 2026-09-16, rabota-v2 C10): the herdr audit found it unbound while
+# alt+shift+up/down walked through every space, agentless worktree parents
+# included (4 of 14 that day). Stock default is "" so nothing is lost; the
+# spelling is the one `herdr --default-config` documents for the key. Prefix
+# only, deliberately: alt+1..9 is agents, ctrl+1..9 is tabs, and a third
+# digit family on a direct chord would collide with Claude Code's own alt
+# bindings or the terminal's. For spaces past 9, and for skipping the parents
+# by name, `alt+s` (goto) is the searchable picker.
+switch_workspace = "prefix+shift+1..9"
 # remove_worktree opens herdr's own confirmation before removing a worktree
 # (`herdr --default-config`: "opens confirmation"). It was unbound, so the
 # cleanup rule in CLAUDE.md had no key behind it (eval F2/F9). Prefix-only on
@@ -365,40 +375,40 @@ status_indicators = "symbols"
 # the border label is faster to read than the sidebar.
 show_agent_labels_on_pane_borders = true
 
-# LINUX-ONLY: the first entry reads /proc directly, so it renders nothing on
+# LINUX-ONLY: this entry reads /proc directly, so it renders nothing on
 # macOS. It fails silently (no /proc, no output, no error) — this file is
 # symlinked to every teammate, so anyone adopting on macOS should drop or
-# rewrite it. The second entry's process-name rules were verified on Linux only.
+# rewrite it.
 #
-# Two entries at the right edge of the tab bar, off the agent rows entirely.
-# Both run on the herdr SERVER via /bin/sh -lc; herdr keeps each command's last
-# stdout line, capped at 80 chars. The tab bar has to stay visible for these to
+# One entry at the right edge of the tab bar, off the agent rows entirely.
+# It runs on the herdr SERVER via /bin/sh -lc; herdr keeps the command's last
+# stdout line, capped at 80 chars. The tab bar has to stay visible for it to
 # render, so hide_tab_bar_when_single_tab is deliberately NOT set — it would
-# hide the right-hand entries too.
+# hide the right-hand entry too.
 #
-# 1. Host load / memory. Reads /proc instead of shelling out to uptime/free, so
-#    it costs one awk per tick.
-# 2. "agents <detected>/<claude procs>" (added 2026-08-30, eval F2): Claude Code
-#    processes on the box vs agents herdr has detected. The gap is what nothing
-#    else shows — herdmates teammates (process name 2.1.251, eval F3), panes
-#    parked on the trust dialog, Atrium's tmux sessions — and it is the number
-#    that read 33/14 when the machine hit load 27 / 96% swap. Counting rule,
-#    one `ps` + one awk: comm is `claude` (the ~/.local/bin/claude symlink,
-#    also what `clauth start` forks) OR argv[0] contains /claude/versions/
-#    (teammates), EXCLUDING `--chrome-native-host` (the Chrome extension's
-#    helper is the same binary and would sit in the count forever — 2 here).
-#    `clauth` (comm clauth) and herdmates never match. The awk text contains
-#    "claude", so the sh -lc wrapper's cmdline does too, but its comm and
-#    argv[0] are `sh`: it cannot count itself. Detected = `herdr agent list`;
-#    herdr AND jq must be on the server's PATH (HERDR_BIN_PATH is not
-#    guaranteed in that shell) and the CLI must find the socket without
-#    HERDR_SOCKET_PATH — it does from a clean `env -i … /bin/sh -lc` (printed
-#    "agents 12/20" on 2026-08-30). UNVERIFIED until the next reload: that the
-#    server answers its own command runner's client. A jq/herdr failure prints
-#    "agents ?/N" rather than a silently wrong number.
+# Host load / memory. Reads /proc instead of shelling out to uptime/free, so
+# it costs one awk per tick.
+#
+# REMOVED 2026-09-16 (rabota-v2 C11): a second entry, "agents <detected>/<claude
+# procs>", ran `herdr agent list | jq` plus a full `ps -eo comm=,args=` every 30 s.
+# At ~21 agents on a swapping 8-thread box it timed out more often than it
+# rendered, and each timeout was itself a forked herdr client, a jq and a ps
+# under load. COUNT THE ATTRIBUTION, not the total: of the 290 "tab bar status
+# command failed" warnings in the server log between 2026-09-10 and 2026-09-16,
+# 149 are this removed entry and 141 are the awk entry BELOW, which stays. So
+# this removal takes out about half of them; the rest are the load/mem command
+# exceeding its own 2 s timeout on a loaded box, and if they keep appearing the
+# answer is that entry's timeout or interval, not another deletion.
+# (`grep 'tab bar status command failed' ~/.config/herdr/herdr-server.log |
+#   grep -c 'herdr agent list'` — and `grep -c 'command=awk'` for the other.)
+# The number it showed (herdr's detected agents vs Claude processes on the box)
+# is now the census's job:
+# `hreap` and `rabota census` count the same processes on demand, and the
+# sidebar publishers ($status, $acct, $mdl) carry per-pane state with no
+# polling shell-out. Nothing in plugins.json publishes a whole-box count, so
+# there is no publisher to swap in; the widget is gone rather than replaced.
 tab_bar_right = [
   { type = "command", command = '''awk 'NR==FNR{l=$1;next}/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf "load %.1f · mem %d%%\n",l,(t-a)*100/t}' /proc/loadavg /proc/meminfo''', interval_seconds = 30, timeout_seconds = 2 },
-  { type = "command", command = '''d=$(herdr agent list 2>/dev/null | jq -r '(.result.agents//empty)|length' 2>/dev/null); p=$(ps -eo comm=,args= | awk '($1=="claude"||$2~/\/claude\/versions\//)&&$0!~/--chrome-native-host/{n++}END{print n+0}'); printf 'agents %s/%s\n' "${d:-?}" "$p"''', interval_seconds = 30, timeout_seconds = 3 },
 ]
 
 # Sidebar agent rows.
