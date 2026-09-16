@@ -45,6 +45,7 @@
     # CLI and an interactive `claude` from disagreeing about which account a
     # directory should bill.
     ~/.local/bin/claude-pick: scripts/claude-pick
+    ~/.local/bin/rabota: scripts/rabota
     ~/.config/herdr/plugins/config/herdr-lazy/plugins.list: config/herdr/plugins/plugins.list
     # NOTE: this is a symlink INTO the repo, so `herdr-lazy sync`/`update` write
     # straight through and leave your dotfiles working tree dirty. That is

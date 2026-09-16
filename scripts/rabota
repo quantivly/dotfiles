@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Entry point for the rabota CLI. Lives in dotfiles; linked to ~/.local/bin/rabota.
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PYTHONPATH="$here/rabota${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m rabota "$@"
