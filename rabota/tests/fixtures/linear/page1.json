@@ -1,0 +1,2 @@
+{"data": {"notifications": {"nodes": [{"id": "n1", "type": "issueDue"}, {"id": "n2", "type": "issueNewComment"}],
+ "pageInfo": {"hasNextPage": true, "endCursor": "c1"}}}}
