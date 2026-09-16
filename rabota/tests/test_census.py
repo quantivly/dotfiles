@@ -45,12 +45,14 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(census.owner_of(self.proc, 333), "user")
         self.assertEqual(census.owner_of(self.proc, 444), "rabota")
         self.assertEqual(census.owner_of(self.proc, 111), "user")
-        self.assertEqual(census.owner_of(self.proc, 999), "user")   # no such pid: not an error
+        # No such pid: not an error, and NOT a guess either — a process whose cgroup could not be
+        # read has no owner this function can name (fix brief ws4p-fix, defect 3).
+        self.assertEqual(census.owner_of(self.proc, 999), "unknown")
 
     def test_gather_shape_counts_seats_unavailable(self):
         c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
         self.assertEqual(c["schema"], 1)
-        self.assertEqual(c["counts"], {"sessions": 5, "user": 2, "sol": 1, "rabota": 2, "units_active": 1})
+        self.assertEqual(c["counts"], {"sessions": 5, "user": 2, "sol": 1, "rabota": 2, "unknown": 0, "units_active": 1})
         self.assertEqual({s["pid"] for s in c["sessions"]}, {111, 222, 333, 444, 666})   # 555/777 are not claude
         by_pid = {s["pid"]: s for s in c["sessions"]}
         self.assertEqual(by_pid[444]["unit"], "rabota-lane-quantivly-smoke-9b221b43.service")
@@ -72,6 +74,60 @@ class CensusTests(unittest.TestCase):
         self.assertTrue((Path(self.tmp.name) / "s" / "census.json").exists())
         self.assertEqual(json.loads((Path(self.tmp.name) / "s" / "census.json").read_text())["counts"], c["counts"])
         for s in c["sessions"]: self.assertNotIn("argv", s); self.assertNotIn("env", s)
+
+    # A failing per-pid reader must never GUESS (fix brief ws4p-fix, defect 3; review attack a5).
+    # The evaluator reached these with chmod 000 on a fixture; on this box they are latent (no
+    # hidepid), but "an unmeasured dimension is a refusal, never a zero" (design §4.2) applies to
+    # a session's owner as much as to a seat's window. The shape is one count per reader:
+    # `sessions:<n>:<reader>` — per-pid entries would flood unavailable[] on a hidepid=1 box,
+    # where every other user's process is an unreadable comm.
+    def _gather(self):
+        return census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file; the fixture cannot fail")
+    def test_unreadable_cgroup_is_unknown_and_named_not_user(self):
+        fake_proc(self.proc, 888, "claude", "/home/zvi/z", "/user.slice/user-1000.slice/user@1000.service/app.slice/rabota-lane-quantivly-z-1.service")
+        cg = self.proc / "888" / "cgroup"
+        cg.chmod(0); self.addCleanup(cg.chmod, 0o644)
+        self.assertEqual(census.owner_of(self.proc, 888), "unknown")
+        c = self._gather()
+        by_pid = {s["pid"]: s for s in c["sessions"]}
+        self.assertIn(888, by_pid)                                    # carried, not dropped
+        self.assertEqual((by_pid[888]["owner"], by_pid[888]["unit"]), ("unknown", None))
+        self.assertIn("sessions:1:cgroup", c["unavailable"])
+        self.assertEqual(c["counts"]["unknown"], 1)
+        self.assertEqual(c["counts"]["sessions"], 6)
+        self.assertEqual((c["counts"]["user"], c["counts"]["rabota"]), (2, 2))   # the guess is not counted anywhere
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 directory; the fixture cannot fail")
+    def test_unreadable_proc_dir_is_counted_not_silently_dropped(self):
+        fake_proc(self.proc, 889, "claude", "/home/zvi/z", "/user.slice/x")
+        d = self.proc / "889"
+        d.chmod(0); self.addCleanup(d.chmod, 0o755)
+        c = self._gather()
+        self.assertNotIn(889, {s["pid"] for s in c["sessions"]})     # its comm could not be read, so it is not known to be claude
+        self.assertIn("sessions:1:comm", c["unavailable"])
+        self.assertEqual(c["counts"]["sessions"], 5)
+
+    def test_unreadable_cwd_is_counted_not_silently_dropped(self):
+        fake_proc(self.proc, 890, "claude", "/home/zvi/z", "/user.slice/x")
+        (self.proc / "890" / "cwd").unlink(); (self.proc / "890" / "cwd").write_text("not a link\n")   # readlink -> EINVAL
+        c = self._gather()
+        self.assertNotIn(890, {s["pid"] for s in c["sessions"]})
+        self.assertIn("sessions:1:cwd", c["unavailable"])
+
+    def test_a_vanished_pid_is_not_a_failure(self):
+        # Between listing and reading, a process may exit: that is a vanish, not an unmeasured
+        # dimension, and must not put a phantom entry into unavailable[].
+        real = census._stat
+        def stat_then_vanish(proc, pid):
+            if pid == 111:
+                raise FileNotFoundError(f"{proc}/{pid}/stat")
+            return real(proc, pid)
+        census._stat = stat_then_vanish; self.addCleanup(setattr, census, "_stat", real)
+        c = self._gather()
+        self.assertNotIn(111, {s["pid"] for s in c["sessions"]})
+        self.assertEqual([u for u in c["unavailable"] if u.startswith("sessions:")], [])
 
     def test_seats_unavailable_when_clauth_fails(self):
         runner = FakeRunner([(["clauth", "status", "--json"], Result(127, "", "not found"))])

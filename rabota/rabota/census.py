@@ -23,14 +23,16 @@ DEFERRED = ["deferred:sol", "deferred:machines"]   # design §4.2: shipped at S1
 # lane's own process was `2.1.273` inside rabota-impl-ws4p.service, and a comm == "claude" filter
 # reported `rabota 0` while it ran. herdmates teammates carry the same shape (CLAUDE.md).
 CLAUDE_COMM = re.compile(r"^(claude|\d+\.\d+\.\d+)$")
+# A process that exits between two reads raises one of these. That is a VANISH, not a reader
+# failure: the design drops it and records nothing, because there is no session left to be
+# unmeasured about. Every other OSError (EACCES under hidepid, EINVAL on a cwd that is not a link,
+# EIO) is a session the census could not measure, and is named in ``unavailable[]`` — never
+# guessed, never silently dropped (fix brief ws4p-fix, defect 3; design §4.2).
+_GONE = (FileNotFoundError, ProcessLookupError)
+READERS = ("comm", "stat", "cwd", "cgroup")
 
 
-def owner_of(proc: Path, pid: int) -> str:
-    """``sol`` inside Sol's unit cgroup, ``rabota`` inside a ``rabota-*`` unit, else ``user``."""
-    try:
-        cg = (proc / str(pid) / "cgroup").read_text()
-    except OSError:
-        return "user"
+def _owner_from(cg: str) -> str:
     if SOL_UNIT in cg:
         return "sol"
     if RABOTA_PREFIX in cg:
@@ -38,13 +40,22 @@ def owner_of(proc: Path, pid: int) -> str:
     return "user"
 
 
-def _unit_of(proc: Path, pid: int) -> str | None:
-    """The lane or Sol unit the process runs in, or None for anything else (herdr, a session scope)."""
+def owner_of(proc: Path, pid: int) -> str:
+    """``sol`` inside Sol's unit cgroup, ``rabota`` inside a ``rabota-*`` unit, ``user`` otherwise.
+
+    ``unknown`` when the cgroup file cannot be read — not ``user``: a reader that fails must not
+    answer with the most common value, because that is exactly the answer that hides the failure.
+    """
     try:
-        cg = (proc / str(pid) / "cgroup").read_text().strip()
+        cg = (proc / str(pid) / "cgroup").read_text()
     except OSError:
-        return None
-    leaf = cg.rsplit("/", 1)[-1]
+        return "unknown"
+    return _owner_from(cg)
+
+
+def _unit_from(cg: str) -> str | None:
+    """The lane or Sol unit named by a cgroup path, or None for anything else (herdr, a session scope)."""
+    leaf = cg.strip().rsplit("/", 1)[-1]
     if not leaf.endswith((".service", ".scope")):
         return None
     return leaf if leaf.startswith(UNIT_PREFIXES) or leaf == SOL_UNIT else None
@@ -57,8 +68,12 @@ def _stat(proc: Path, pid: int):
     return int(rest[11]) + int(rest[12]), int(rest[19])   # fields 14+15, field 22
 
 
-def _claude_pids(proc: Path) -> list[int]:
-    """PIDs whose comm names Claude Code: `claude`, or a bare version triple (the versioned binary)."""
+def _claude_pids(proc: Path, failed: dict) -> list[int]:
+    """PIDs whose comm names Claude Code: `claude`, or a bare version triple (the versioned binary).
+
+    A comm that cannot be read is a process the census cannot rule in OR out; it is counted in
+    ``failed["comm"]`` rather than assumed to be something else.
+    """
     pids = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
@@ -66,24 +81,39 @@ def _claude_pids(proc: Path) -> list[int]:
         try:
             if CLAUDE_COMM.match((entry / "comm").read_text().strip()):
                 pids.append(int(entry.name))
-        except OSError:
+        except _GONE:
             continue
+        except OSError:
+            failed["comm"] += 1
     return pids
 
 
-def sessions(proc: Path, sample_seconds: float, sleeper=time.sleep) -> list[dict]:
+def sessions(proc: Path, sample_seconds: float, sleeper=time.sleep) -> tuple[list[dict], list[str]]:
     """Every ``claude`` process: pid, cwd, owner, age and a CPU sample over ``sample_seconds``.
 
-    A process that vanishes between the two samples is dropped; one whose cwd cannot be read
-    (another user's) is skipped. Nothing here opens ``environ`` or ``cmdline``.
+    Returns ``(rows, unavailable)``. A process that vanishes between reads is dropped and nothing
+    is recorded. A process a reader FAILS on is never guessed about: an unreadable ``cgroup``
+    carries the row with ``owner: "unknown"``; an unreadable ``comm``, ``stat`` or ``cwd`` drops
+    the row, since nothing else about it can be measured — and each is counted in ``unavailable``
+    as ``sessions:<n>:<reader>``. Nothing here opens ``environ`` or ``cmdline``.
     """
+    failed = dict.fromkeys(READERS, 0)
     uptime = float((proc / "uptime").read_text().split()[0])
     first = {}
-    for pid in _claude_pids(proc):
+    for pid in _claude_pids(proc, failed):
         try:
             ticks, start = _stat(proc, pid)
-            cwd = os.readlink(proc / str(pid) / "cwd")
+        except _GONE:
+            continue
         except OSError:
+            failed["stat"] += 1
+            continue
+        try:
+            cwd = os.readlink(proc / str(pid) / "cwd")
+        except _GONE:
+            continue
+        except OSError:
+            failed["cwd"] += 1
             continue
         first[pid] = (ticks, int(uptime - start / CLK_TCK), cwd.replace(" (deleted)", ""))
     sleeper(sample_seconds)
@@ -91,12 +121,24 @@ def sessions(proc: Path, sample_seconds: float, sleeper=time.sleep) -> list[dict
     for pid, (ticks, age, cwd) in first.items():
         try:
             ticks2, _ = _stat(proc, pid)
-        except OSError:
+        except _GONE:
             continue
+        except OSError:
+            failed["stat"] += 1
+            continue
+        try:
+            cg = (proc / str(pid) / "cgroup").read_text()
+        except _GONE:
+            continue
+        except OSError:
+            failed["cgroup"] += 1
+            owner, unit = "unknown", None
+        else:
+            owner, unit = _owner_from(cg), _unit_from(cg)
         cpu = 100.0 * (ticks2 - ticks) / CLK_TCK / max(sample_seconds, 0.001)
-        out.append({"pid": pid, "cwd": cwd, "owner": owner_of(proc, pid), "age_s": age,
-                    "cpu_pct_5s": round(cpu, 1), "unit": _unit_of(proc, pid)})
-    return out
+        out.append({"pid": pid, "cwd": cwd, "owner": owner, "age_s": age,
+                    "cpu_pct_5s": round(cpu, 1), "unit": unit})
+    return out, [f"sessions:{n}:{reader}" for reader in READERS if (n := failed[reader])]
 
 
 def units(runner) -> tuple[list[dict], list[str]]:
@@ -190,13 +232,16 @@ def settle_finished(ctx, units: list[dict], seats: list[dict]) -> list[str]:
 def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper=time.sleep) -> dict:
     """Measure everything, settle finished lanes, write ``<state_dir>/census.json`` and return it."""
     unavailable = list(DEFERRED)
-    sess = sessions(proc, sample_seconds, sleeper)
+    sess, u0 = sessions(proc, sample_seconds, sleeper)
     us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner); wt, u3 = worktrees(ctx.runner)
-    unavailable += u1 + u2 + u3
+    unavailable += u0 + u1 + u2 + u3
     settle_finished(ctx, us, st)
     si = sysinfo.read(proc)
+    # ``unknown`` is its own count, so user + sol + rabota do not silently sum to fewer than
+    # sessions — the counts must not imply a certainty the readers did not have.
     counts = {"sessions": len(sess), "user": sum(s["owner"] == "user" for s in sess),
               "sol": sum(s["owner"] == "sol" for s in sess), "rabota": sum(s["owner"] == "rabota" for s in sess),
+              "unknown": sum(s["owner"] == "unknown" for s in sess),
               "units_active": sum(u.get("state") == "active" for u in us)}
     out = {"schema": 1, "at": now(),
            "machine": {"load1": si.load1, "ncpu": si.ncpu, "mem_available_gib": round(si.mem_available_gib, 1),
