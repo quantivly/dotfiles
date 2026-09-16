@@ -1662,6 +1662,18 @@ Gotchas, in the order they bite:
   fails `agent_not_found`; it cannot wait *for* detection. Poll separately.
 - **herdmates leaks plugin env into lead sessions** (upstream). Prefix plugin CLIs with
   `env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR`.
+  **Stripping is only half the rule, and the other half bites (2026-09-14).** A plugin CLI that
+  reads its OWN config needs those variables SET, not absent — `herdr-draft create` refused with
+  `--account auto needs an account picker: set [clauth] picker in config.toml` on a machine where
+  that picker is configured and on PATH, because it had inherited herdmates' `HERDR_PLUGIN_CONFIG_DIR`
+  and `HERDR_PLUGIN_STATE_DIR` with no `HERDR_PLUGIN_ID` to say whose they were, so it declined them
+  and resolved from built-in defaults. It said so rather than guessing, which is the only reason this
+  was five minutes and not an afternoon. Export all three for the plugin you are actually invoking:
+  `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir <id>)"`, and
+  `HERDR_PLUGIN_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/<id>"` (herdr has a
+  CLI for the config dir and none for the state dir). **`HERDR_PLUGIN_ID` is the load-bearing one**:
+  it is what says whose the other two are, and a plugin that checks it is protected from this leak
+  while one that does not silently uses another plugin's configuration.
 - **`clauth start <profile>` bypasses the `claude()` shell function**, so it lacks what that function
   adds: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and a launch via `herdmates teammux-launch`, which
   passes `--settings '{"teammateMode":"tmux"}'` so teammates become herdr panes. Whether teams are
@@ -2947,10 +2959,17 @@ ownership, not a reason for this repo's reconciler to reach in.
 and Chromium native-messaging manifests point at one four-line wrapper,
 `~/.claude-personal/chrome/chrome-native-host`, which ran the binary with no `CLAUDE_CONFIG_DIR`;
 two such processes had been holding whatever credential sat at the global path since 09-08. The
-wrapper now execs with `CLAUDE_CONFIG_DIR=…/claude-account-dirs/personal-1`. **That pin was made
-on the wrong model** — the path was believed unowned — and it moves the extension from nanoclaw's
-credential onto a clauth account, changing which account it bills. A decision to revisit, not a
-settled fix.
+wrapper now execs with `CLAUDE_CONFIG_DIR=…/claude-account-dirs/personal-1`. **That pin was made on the
+wrong model** — the path was believed unowned — **but the evidence says it lands in the right place
+for a different reason, and an earlier draft of this paragraph overstated what it does.** That draft
+said the pin "changes which account it bills". It does not: across the ~6 days those two hosts ran
+unpinned, `~/.claude/.credentials.json` stayed a SYMLINK, and an access token lives 8 h, so any
+authenticated traffic would have forced a refresh — an atomic write that replaces a symlink with a
+real file. It never happened, through roughly seventeen expiries. **The host spends nothing**; it
+reads a credential at startup and acts as the browser extension's transport, while the session that
+drives the browser spends on its own account dir. What the pin actually does is take a Claude Code
+helper off a file nanoclaw owns and put it on the account-dir scheme every other Claude Code process
+here already uses.
 
 Two traps that creates, neither of which anything checks:
 
