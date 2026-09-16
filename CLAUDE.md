@@ -1731,6 +1731,30 @@ Gotchas, in the order they bite:
   arriving as a config file that still looked correct. Any migration that moves the marker
   variable has this shape: check what an unset gate falls back to before assuming the old
   name is merely dead. `build-limits` prints which tier is active.
+- **The agent tier was a hardcoded 2 and so did not survive leaving the laptop (2026-09-16).**
+  `zshrc.buildlimits` capped any pane with `$HERDR_PANE_ID` at 2 workers regardless of
+  hardware — right for the 8-thread box it was tuned on, where a dozen agents compete, and
+  wrong the moment work moves to a bigger machine. Measured on the 16-core EC2 dev box the
+  day it was set up to absorb work: an agent pane got `-j2` while fourteen cores idled, so
+  the constraint had travelled with the work instead of being left behind. The tier is
+  `cores/4` now, which yields **exactly 2 on 8 threads** — the machine it was written for
+  does not move at all — 4 on 16, 16 on 64, with one floor of 2 shared by both tiers.
+  `BUILD_LIMITS_JOBS` overrides either tier for a box whose shape you actually know; set it
+  in `~/.zshrc.local`, which is sourced after this module. An unusable value (0, negative,
+  decimal, non-numeric) leaves the computed tier alone rather than being taken literally —
+  `0` disables parallelism outright and the rest land in `MAKEFLAGS` as a malformed flag,
+  both worse than the default they were meant to improve. It is not silent: `build-limits`
+  gained a `source` line naming the tier, the override, or the override it ignored and why.
+  State table: `scripts/test-buildlimits.sh` (35 checks, in CI as `buildlimits-test`) — the
+  module's first, since `zsh -n` was all it ever had. Hermetic via an **`nproc` stub on a
+  from-scratch PATH**: the whole subject is what the module derives from a core count, and
+  the row that matters most ("8 cores is still exactly 2") cannot be written at all without
+  choosing the hardware. Two harness defects worth keeping: leaving `/usr/bin` on PATH let
+  the "nproc missing" rows find the REAL nproc and measure the host, and the first
+  before/after comparison inherited `MAKEFLAGS` from the herdr pane the suite was run in,
+  so both modules reported the pane's own `-j2` — the same env-leak this file records for
+  `CLAUDE_CONFIG_DIR` in `test-hspawn.sh`, in the one variable being measured. 7 mutants,
+  7 deaths.
 - **The sidebar's account tag named the wrong account on every isolated pane, and that
   is the surface that hid the concentration (DO-590).** clauth's herdr plugin resolves
   the account from the **machine-wide active profile**, and it cannot see a foreign

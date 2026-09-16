@@ -115,6 +115,28 @@ jobs:
       - name: Run the unit-enablement state table
         run: ./scripts/test-systemd-reconcile.sh
 
+  buildlimits-test:
+    name: Build/Test Parallelism Caps State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
+      # nproc is STUBBED on a from-scratch PATH. The module's whole job is what
+      # it derives from the core count, so a suite reading the runner's would
+      # assert a different thing on every machine — and the agent tier is the
+      # one number that must stay exactly 2 on an 8-thread box while rising on
+      # a bigger one, which cannot be checked at all without choosing the cores.
+      - name: Run the build-limits state table
+        run: ./scripts/test-buildlimits.sh
+
   dotfiles-guard-test:
     name: Dotfiles Live-Config Guard State Table
     runs-on: ubuntu-latest
