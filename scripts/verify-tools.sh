@@ -454,7 +454,7 @@ else
 fi
 
 echo ""
-echo -e "${BLUE}=== systemd user unit enablement vs the linked unit files ===${NC}"
+echo -e "${BLUE}=== systemd user unit enablement vs what the units declare (drop-ins included) ===${NC}"
 # Also an ASSERTION (see EXIT CODE in the header). systemd records [Install] at
 # `enable` time, so editing WantedBy= in a unit file moves nothing until the
 # enablement is redone — and ./install is not in this repo's deploy path, because

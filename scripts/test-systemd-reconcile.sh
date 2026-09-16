@@ -79,6 +79,15 @@ add_unit() {
     ln -sf "$TMPROOT/$n/repo/systemd/$unit" "$TMPROOT/$n/sysd/$unit"
 }
 
+# $1 fixture, $2 unit, $3 drop-in filename, $4 the [Install] body.
+# The drop-in goes NEXT TO THE UNIT in the systemd dir, which is where systemd
+# looks and where ./install writes the ExecStart one.
+add_dropin() {
+    local n="$1" unit="$2" fname="$3" body="$4"
+    mkdir -p "$TMPROOT/$n/sysd/${unit}.d"
+    printf '[Install]\n%s\n' "$body" > "$TMPROOT/$n/sysd/${unit}.d/$fname"
+}
+
 # $1 fixture, $2 unit, $3 target  — pretend `systemctl enable` ran for <target>
 enable_under() {
     local n="$1" unit="$2" target="$3"
@@ -210,7 +219,7 @@ check "drifted fixture exits 1"  "$(rc_sut harness --check)"                    
 # and 'graphical-session.target' contains 'default.target' nowhere, so an
 # unanchored count of either one proves nothing about the other.
 check "and names both targets"   \
-      "$(run_sut harness --check | grep -c '✗ a.service: enabled under default.target, but its unit file declares graphical-session.target')" "1"
+      "$(run_sut harness --check | grep -c '✗ a.service: enabled under default.target, but it declares graphical-session.target')" "1"
 [[ "$(rc_sut harness --check)" == "1" ]] || fatal "the harness cannot produce a failing fixture; every row below is meaningless"
 
 # The stub must be the systemctl any --apply row reaches. Asserted with a hard
@@ -331,6 +340,84 @@ check "commented WantedBy ignored"   "$(run_sut comment --check | grep -c 'comme
 check "WantedBy in [Unit] ignored"   "$(run_sut comment --check | grep -c 'wrong.target')"  "0"
 check "the real one is honoured"     "$(run_sut comment --check | grep -c '✓ c.service')"   "1"
 check "so it exits 0"                "$(rc_sut comment --check)"                            "0"
+
+# DROP-INS DECLARE TOO. A drop-in is systemd's own mechanism for adding an
+# [Install] target without editing a reviewed unit file, and this repo already
+# uses one for ExecStart (DO-564). Reading only the unit file reported the
+# documented mechanism as drift: on a headless box the shipped
+# WantedBy=graphical-session.target never activates, so a default.target drop-in
+# is the correct fix, and it made verify-tools.sh permanently red -- the failure
+# this repo names five times, produced by the checker rather than the machine.
+# Same class as DO-564's own lesson: ask the OUTCOME (unit merged with its
+# drop-ins), never the mechanism (what this one file happens to say).
+new_fixture dropin >/dev/null
+add_unit   dropin d.service "WantedBy=graphical-session.target"
+add_dropin dropin d.service 20-wantedby.conf "WantedBy=default.target"
+enable_under dropin d.service graphical-session.target
+enable_under dropin d.service default.target
+check "a drop-in target counts as declared" "$(run_sut dropin --check | grep -c '✓ d.service')" "1"
+check "...so it exits 0"                    "$(rc_sut dropin --check)"                          "0"
+
+# The negative half, or the merge would just swallow everything: a target the
+# drop-in adds and nothing enabled is still drift.
+new_fixture dropin_partial >/dev/null
+add_unit   dropin_partial d.service "WantedBy=graphical-session.target"
+add_dropin dropin_partial d.service 20-wantedby.conf "WantedBy=default.target"
+enable_under dropin_partial d.service graphical-session.target
+check "a drop-in target not enabled: ✗"  "$(run_sut dropin_partial --check | grep -c '✗ d.service')" "1"
+check "...and that exits 1"              "$(rc_sut dropin_partial --check)"                          "1"
+
+# An EMPTY assignment clears what was accumulated -- systemd's list-reset rule,
+# and the only way a drop-in can REMOVE a target rather than add one. Without it
+# a drop-in written to replace the shipped target reads as declaring both.
+new_fixture dropin_reset >/dev/null
+add_unit   dropin_reset d.service "WantedBy=graphical-session.target"
+add_dropin dropin_reset d.service 20-wantedby.conf "WantedBy=
+WantedBy=only.target"
+enable_under dropin_reset d.service only.target
+check "an empty WantedBy= clears the list" "$(run_sut dropin_reset --check | grep -c '✓ d.service')" "1"
+check "...and the cleared target is gone"  "$(run_sut dropin_reset --check | grep -c 'graphical-session')" "0"
+
+# The same reset rule inside the UNIT FILE. systemd applies it per assignment,
+# not per file, so a unit that clears its own earlier WantedBy= must be read that
+# way too -- without this row the unit-file half of the merge was unpinned and a
+# mutant deleting it survived the whole suite.
+new_fixture selfreset >/dev/null
+add_unit selfreset d.service "WantedBy=cleared.target
+WantedBy=
+WantedBy=real.target"
+enable_under selfreset d.service real.target
+check "a unit file can clear its own list"  "$(run_sut selfreset --check | grep -c '✓ d.service')" "1"
+check "...and the cleared target is gone"   "$(run_sut selfreset --check | grep -c 'cleared.target')" "0"
+
+# Drop-ins apply in filename order, so a later one resets a target an earlier one
+# added. Ordering by readdir instead would make this depend on inode order.
+new_fixture dropin_order >/dev/null
+add_unit   dropin_order d.service "WantedBy=a.target"
+add_dropin dropin_order d.service 10-first.conf "WantedBy=b.target"
+add_dropin dropin_order d.service 20-second.conf "WantedBy=
+WantedBy=c.target"
+enable_under dropin_order d.service c.target
+check "drop-ins merge in filename order" "$(run_sut dropin_order --check | grep -c '✓ d.service')" "1"
+
+# A unit with no drop-in directory at all must behave exactly as before.
+new_fixture dropin_none >/dev/null
+add_unit dropin_none d.service "WantedBy=default.target"
+enable_under dropin_none d.service default.target
+mkdir -p "$TMPROOT/dropin_none/sysd/d.service.d"   # present but EMPTY
+check "an empty drop-in dir changes nothing" "$(run_sut dropin_none --check | grep -c '✓ d.service')" "1"
+
+# systemd reads only *.conf in a drop-in directory. A vim .swp, a .bak from an
+# edit, or a README must not declare anything -- reading them would let an
+# editor artefact decide what the machine starts.
+new_fixture dropin_ext >/dev/null
+add_unit dropin_ext d.service "WantedBy=default.target"
+mkdir -p "$TMPROOT/dropin_ext/sysd/d.service.d"
+printf '[Install]\nWantedBy=ignored.target\n' > "$TMPROOT/dropin_ext/sysd/d.service.d/notes.bak"
+printf '[Install]\nWantedBy=ignored.target\n' > "$TMPROOT/dropin_ext/sysd/d.service.d/README"
+enable_under dropin_ext d.service default.target
+check "only *.conf drop-ins are read" "$(run_sut dropin_ext --check | grep -c '✓ d.service')" "1"
+check "...so a .bak declares nothing" "$(run_sut dropin_ext --check | grep -c 'ignored.target')" "0"
 
 echo
 echo "=== nothing to look at is not a failure ==="
