@@ -1,0 +1,7 @@
+default = "personal"
+[[route]]
+prefix = "~/quantivly"
+tenant = "quantivly"
+[[route]]
+prefix = "~/toysim"
+tenant = "toysim"

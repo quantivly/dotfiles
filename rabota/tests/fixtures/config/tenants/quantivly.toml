@@ -1,0 +1,35 @@
+root           = "~/quantivly"
+state_dir      = "~/quantivly/handoffs/rabota"
+gh_config_dir  = "~/.config/gh-quantivly"
+gh_login       = "work-login"
+gh_pin_repo    = "org/pin-repo"
+linear_key_env = "LINEAR_API_KEY"
+linear_viewer  = "00000000-0000-0000-0000-000000000001"
+slack_user_id  = "U000000"
+sources        = ["linear", "github", "slack", "calendar", "fireflies"]
+[review_routing]
+team_owned   = { "hub-backend" = "alex" }
+bucket_teams = ["devops", "core-platform", "qspace"]
+[linear]
+own_only_actions = true
+confirm_teams    = ["SEC"]
+dead_state_types = ["completed", "canceled", "duplicate"]
+[budget]
+max_local_sessions = 8
+max_lanes_local    = 3
+load1_per_cpu      = 1.25
+swap_pct_max       = 40
+mem_available_min_gib = 6
+profile_5h_pct_max = 70
+[lanes]
+default_model   = "claude-sonnet-5"
+default_effort  = "medium"
+evaluate_model  = "claude-fable-5-1"
+permission_mode = "auto"
+max_verdict_bytes = 4096
+machines        = ["local", "dev"]
+[machines.dev]
+ssh       = "dev"
+tenants   = ["quantivly"]
+repos     = { hub = "~/quantivly/hub" }
+state_dir = "~/.local/state/rabota"
