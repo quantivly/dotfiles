@@ -2911,15 +2911,46 @@ where `gate_under_guard` has one, and `PollStreaks`/`StreakCounts` are in-memory
 line upstream would close it. **An empty log is not evidence of a quiet machine when the code
 path has no log statement in it.**
 
-**The global credential path is reconciled by nothing.** `reconcile_all` walks only
-`~/.local/state/claude-account-dirs/*`, so `~/.claude/.credentials.json` — which clauth rewrites
-whenever it installs an active profile, atomically, replacing any symlink — forks silently and
-stays forked. On 09-14 its only readers were **two `claude --chrome-native-host` processes**,
-running since 09-08 and holding whichever grant clauth last put there. Both Chrome and Chromium
-native-messaging manifests point at the same four-line wrapper,
-`~/.claude-personal/chrome/chrome-native-host`, which is now pinned with
-`CLAUDE_CONFIG_DIR=…/claude-account-dirs/personal-1` so the host joins a reconciled credential
-group instead.
+**CORRECTED 2026-09-16: `~/.claude/.credentials.json` IS owned — by nanoclaw — and this file
+did not know it.** This paragraph read *"The global credential path is reconciled by nothing"*, and
+everything under it was reasoned from that. `~/Projects/nanoclaw/src/oauth-refresh.ts` names that
+exact path as its `default` profile (personal Claude Max), alongside
+`~/.claude-work-home/.claude/.credentials.json` for Teams, and it **deliberately refuses
+`CLAUDE_CONFIG_DIR`** — its IMP-2521 exemption selects an account by overriding `HOME`, "not by
+config dir", and declines to "repoint a live credential read on the strength of a variable
+production never sets". The nanoclaw repository mentions clauth zero times; this one mentioned
+nanoclaw zero times until this edit. **Two tools owned one file and neither's documentation knew
+the other existed.**
+
+**What that makes of `claude-doctor`'s warning.** `⚠ the live credential matches NO registered
+clauth profile` is the EXPECTED answer here, not a fault: it is not a clauth profile, it is
+nanoclaw's. The doctor reasons from a model of this machine with no nanoclaw in it, and the remedy
+it offers — capture it into clauth before a switch destroys it — would take a file another owner
+maintains. Recorded as a finding rather than fixed, because what that check should say depends on
+reconciling the two owners, which is not a rewording.
+
+**How the mistake was made, which is the part worth carrying.** The brief this section came from
+said the symlink shape at that path was "undocumented", and that was read as evidence the path had
+no owner. The search behind it covered this repository and clauth's source, and stopped there.
+**"Nothing I searched owns this" is not "nothing owns this"**, and the distance between them was
+one `grep` over `~/Projects`. A relink was made on 09-14 on the strength of it, pointing nanoclaw's
+refresh target into a clauth profile store; an ordinary atomic write replaced it on 09-15 13:39
+before it cost anything. The outcome was luck; the reasoning was wrong when it was made.
+
+**What survives from the old paragraph:** `reconcile_all` does walk only
+`~/.local/state/claude-account-dirs/*`, so nothing here reconciles that path — correct behaviour
+once it is known to be someone else's. And clauth does still rewrite it whenever it installs an
+active profile, so two writers can collide there. That is a question for whoever reconciles the
+ownership, not a reason for this repo's reconciler to reach in.
+
+**The Chrome native host was reading that path, and was pinned off it on 09-14.** Both the Chrome
+and Chromium native-messaging manifests point at one four-line wrapper,
+`~/.claude-personal/chrome/chrome-native-host`, which ran the binary with no `CLAUDE_CONFIG_DIR`;
+two such processes had been holding whatever credential sat at the global path since 09-08. The
+wrapper now execs with `CLAUDE_CONFIG_DIR=…/claude-account-dirs/personal-1`. **That pin was made
+on the wrong model** — the path was believed unowned — and it moves the extension from nanoclaw's
+credential onto a clauth account, changing which account it bills. A decision to revisit, not a
+settled fix.
 
 Two traps that creates, neither of which anything checks:
 
@@ -2934,7 +2965,10 @@ Two traps that creates, neither of which anything checks:
 symlinked into a store makes clauth's `active_diverged_unsaved` guard — which refuses a switch when
 the outgoing active profile has an uncaptured re-login, by comparing the live file against the
 store — compare a file with itself, so it can never fire. Removing the readers instead costs one
-`env` assignment in a wrapper and leaves both tools' invariants intact. Full analysis:
+`env` assignment in a wrapper and leaves both tools' invariants intact. **The stronger reason
+arrived two days later and is the one to keep: that path is not this repository's to reconcile.**
+Had the arm been built on the original reasoning, this repo would now be fighting nanoclaw for a
+file nanoclaw refreshes. Full analysis:
 `~/handoffs/credential-breakage-2026-09-14-FINDINGS.md`.
 
 ### Holder attribution, and the shell that has half this file's functions (DO-612)
