@@ -9,6 +9,7 @@
 !scripts/redact-secrets.sh
 !scripts/test-secret-guard.sh
 !claude/hooks/secret-emission-guard.sh
+!rabota/**/*secret*.py
 **/*password*
 
 # OS files
