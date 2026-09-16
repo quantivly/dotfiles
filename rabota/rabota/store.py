@@ -6,7 +6,17 @@ from pathlib import Path
 
 from rabota import errors
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# v(N) → v(N+1) steps, keyed by the version they upgrade FROM. Each list runs in one
+# transaction and restamps. A fresh database gets the final shape from SCHEMA directly.
+MIGRATIONS = {
+    1: [  # v1 → v2 (design §4.3): lane accounting columns; escalation kind/subject
+        "ALTER TABLE lanes ADD COLUMN seat TEXT", "ALTER TABLE lanes ADD COLUMN effort TEXT",
+        "ALTER TABLE lanes ADD COLUMN cost_usd REAL", "ALTER TABLE lanes ADD COLUMN five_h_pct_at_start INTEGER",
+        "ALTER TABLE lanes ADD COLUMN five_h_pct_at_end INTEGER", "ALTER TABLE lanes ADD COLUMN abandoned_at TEXT",
+        "ALTER TABLE escalations ADD COLUMN kind TEXT", "ALTER TABLE escalations ADD COLUMN subject TEXT",
+    ],
+}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY, tenant TEXT, started_at TEXT, mode TEXT,
@@ -15,9 +25,12 @@ CREATE TABLE IF NOT EXISTS source_syncs(tenant TEXT, source TEXT, fetched_at TEX
   error TEXT, path TEXT, PRIMARY KEY(tenant, source));
 CREATE TABLE IF NOT EXISTS lanes(id TEXT PRIMARY KEY, tenant TEXT, kind TEXT, brief TEXT, repo TEXT,
   worktree TEXT, out_dir TEXT, machine TEXT, unit TEXT, session_id TEXT, model TEXT, status TEXT,
-  started_at TEXT, ended_at TEXT, held_reason TEXT, of_lane TEXT, attached INTEGER DEFAULT 0);
+  started_at TEXT, ended_at TEXT, held_reason TEXT, of_lane TEXT, attached INTEGER DEFAULT 0,
+  seat TEXT, effort TEXT, cost_usd REAL, five_h_pct_at_start INTEGER, five_h_pct_at_end INTEGER,
+  abandoned_at TEXT);
 CREATE TABLE IF NOT EXISTS escalations(id INTEGER PRIMARY KEY, tenant TEXT, first_seen TEXT NOT NULL,
-  ts TEXT, question TEXT, evidence TEXT, options TEXT, disposition TEXT, resolved_at TEXT, resolution TEXT);
+  ts TEXT, question TEXT, evidence TEXT, options TEXT, disposition TEXT, resolved_at TEXT, resolution TEXT,
+  kind TEXT, subject TEXT);
 CREATE TABLE IF NOT EXISTS gate_answers(id INTEGER PRIMARY KEY, tenant TEXT, ts TEXT, subject TEXT, label TEXT);
 CREATE TABLE IF NOT EXISTS inbox_decisions(batch_id TEXT, tenant TEXT, ts TEXT, tier TEXT, bucket TEXT,
   entity_type TEXT, entity_id TEXT, action TEXT, prior TEXT, verified INTEGER DEFAULT 0, rolled_back_at TEXT);
@@ -25,7 +38,8 @@ CREATE TABLE IF NOT EXISTS pins(tenant TEXT, item_key TEXT, bucket INTEGER, rati
   PRIMARY KEY(tenant, item_key));
 """
 LANE_FIELDS = ("id", "tenant", "kind", "brief", "repo", "worktree", "out_dir", "machine", "unit",
-               "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached")
+               "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached",
+               "seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at")
 
 
 def now() -> str:
@@ -58,23 +72,40 @@ class Store:
     def close(self): self.conn.close()
 
     def migrate(self):
-        """Apply the schema idempotently and stamp the version on first creation.
+        """Create the schema on a fresh DB; walk MIGRATIONS from the stamped version on an older one.
 
-        A database stamped NEWER than ``SCHEMA_VERSION`` was written by a future rabota;
-        this code cannot know its semantics, so it refuses before touching anything. An
-        OLDER stamp is left as it is — there are no migration steps yet, and restamping
-        would claim one had run — and ``doctor`` reports the drift.
+        A database stamped NEWER than ``SCHEMA_VERSION`` was written by a future rabota and is
+        refused before anything is touched. Each migration step runs inside one transaction and
+        restamps, so a crash mid-step leaves the old stamp and the old columns together. A stamp
+        this code has NO step for (e.g. 0) is left exactly as it is — restamping would claim a
+        migration had run — and ``doctor`` reports the drift.
         """
         has_version = self.conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
+        current = None
         if has_version:
             row = self.conn.execute("SELECT version FROM schema_version").fetchone()
-            if row and row[0] > SCHEMA_VERSION:
-                raise errors.Refused(f"rabota.db schema is {row[0]}, newer than this rabota's {SCHEMA_VERSION}; "
+            current = row[0] if row else None
+            if current is not None and current > SCHEMA_VERSION:
+                raise errors.Refused(f"rabota.db schema is {current}, newer than this rabota's {SCHEMA_VERSION}; "
                                      "upgrade rabota rather than letting an older one write to it")
-        self.conn.executescript(SCHEMA)
-        if self.conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
-            self.conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+        if current is None:
+            self.conn.executescript(SCHEMA)
+            if self.conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
+                self.conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+            return
+        while current < SCHEMA_VERSION and current in MIGRATIONS:
+            self.conn.execute("BEGIN")
+            try:
+                for stmt in MIGRATIONS[current]:
+                    self.conn.execute(stmt)
+                self.conn.execute("UPDATE schema_version SET version=?", (current + 1,))
+                self.conn.execute("COMMIT")
+            except sqlite3.Error:
+                self.conn.execute("ROLLBACK")
+                raise
+            current += 1
+        self.conn.executescript(SCHEMA)   # idempotent CREATE IF NOT EXISTS for any table added later
 
     def schema_version(self) -> int:
         return self.conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -117,12 +148,17 @@ class Store:
         return self._rows(sql + " ORDER BY started_at", args)
 
     # escalations / gates
-    def add_escalation(self, tenant, question, evidence, options, first_seen=None) -> int:
-        """Insert an escalation; ``first_seen`` is preserved when given so re-raising never resets it."""
+    def add_escalation(self, tenant, question, evidence, options, first_seen=None, kind=None, subject=None) -> int:
+        """Insert an escalation; ``first_seen`` is preserved when given so re-raising never resets it.
+
+        ``kind`` and ``subject`` (schema 2) are written from the first row — design §4.2 wants them
+        present from the first write, never back-filled.
+        """
         ts = now()
         cur = self.conn.execute(
-            "INSERT INTO escalations(tenant, first_seen, ts, question, evidence, options) VALUES (?,?,?,?,?,?)",
-            (tenant, first_seen or ts, ts, question, evidence, json.dumps(list(options))))
+            "INSERT INTO escalations(tenant, first_seen, ts, question, evidence, options, kind, subject) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (tenant, first_seen or ts, ts, question, evidence, json.dumps(list(options)), kind, subject))
         return cur.lastrowid
     def escalation(self, esc_id):
         r = self._rows("SELECT * FROM escalations WHERE id=?", (esc_id,))

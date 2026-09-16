@@ -33,7 +33,7 @@ class DoctorTests(unittest.TestCase):
         ])
         report = doctor.run_doctor(self.make_ctx(runner))
         self.assertEqual(report["tenant"], "toysim")
-        self.assertEqual(report["db_schema"], 1)
+        self.assertEqual(report["db_schema"], SCHEMA_VERSION)
         self.assertTrue(report["ok"], report["problems"])
 
     def test_schema_drift_is_a_problem(self):

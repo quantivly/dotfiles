@@ -28,8 +28,11 @@ evaluate_model  = "claude-fable-5-1"
 permission_mode = "auto"
 max_verdict_bytes = 4096
 machines        = ["local", "dev"]
+[seats]
+local = "quantivly-1"
 [machines.dev]
 ssh       = "dev"
 tenants   = ["quantivly"]
 repos     = { hub = "~/quantivly/hub" }
 state_dir = "~/.local/state/rabota"
+profile   = "quantivly-0"

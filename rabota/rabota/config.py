@@ -54,6 +54,7 @@ class Machine:
     tenants: list[str]
     repos: dict[str, str] = field(default_factory=dict)
     state_dir: str = "~/.local/state/rabota"
+    profile: str | None = None      # the clauth seat a headless lane on this machine bills
 
 
 @dataclass
@@ -73,6 +74,7 @@ class Tenant:
     budget: BudgetThresholds = field(default_factory=BudgetThresholds)
     lanes: LaneDefaults = field(default_factory=LaneDefaults)
     machines: dict[str, Machine] = field(default_factory=dict)
+    seats: dict[str, str] = field(default_factory=dict)   # {"local": "<clauth profile>"}; dev seats are [machines.<m>].profile
     excludes: list[Path] = field(default_factory=list)
 
 
@@ -102,6 +104,7 @@ def _tenant(name: str, d: dict) -> Tenant:
         budget=_dc(BudgetThresholds, d.get("budget", {})),
         lanes=_dc(LaneDefaults, d.get("lanes", {})),
         machines=machines,
+        seats=dict(d.get("seats", {})),
         excludes=[_p(x) for x in d.get("excludes", [])],
     )
 
