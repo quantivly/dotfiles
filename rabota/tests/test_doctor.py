@@ -1,4 +1,4 @@
-import argparse, tempfile, unittest
+import argparse, json, os, shutil, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from rabota import context
 from rabota.commands import doctor
@@ -30,3 +30,30 @@ class DoctorTests(unittest.TestCase):
         report = doctor.run_doctor(self.make_ctx(runner))
         self.assertFalse(report["ok"])
         self.assertTrue(any("timer" in p for p in report["problems"]))
+
+
+class DoctorEndToEndTests(unittest.TestCase):
+    """The real CLI, real subprocess children: a child that prints a protected value must not
+    get that value onto either of rabota's streams (the WS1 review gate's reproduced leak)."""
+
+    def test_child_output_carrying_a_protected_value_never_reaches_either_stream(self):
+        canary = "lin_api_" + "canary" + "0123456789"   # assembled at runtime; not a real key
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name) / "home"
+        shutil.copytree(FIX, home / ".dotfiles-local" / "rabota")
+        fakebin = Path(tmp.name) / "bin"; fakebin.mkdir()
+        fake = fakebin / "systemctl"
+        fake.write_text(f"#!{sys.executable}\nimport os, sys\n"
+                        "sys.stdout.write(os.environ.get('LINEAR_API_KEY', '') + '\\n')\n")
+        fake.chmod(0o755)
+        env = {"HOME": str(home), "PATH": f"{fakebin}:/usr/bin:/bin", "LINEAR_API_KEY": canary}
+        p = subprocess.run([sys.executable, "-m", "rabota", "--tenant", "quantivly",
+                            "--state-dir", str(Path(tmp.name) / "state"), "doctor"],
+                           cwd=Path(__file__).resolve().parents[1], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertNotIn(canary, p.stdout)
+        self.assertNotIn(canary, p.stderr)
+        self.assertEqual(p.returncode, 5, p.stderr)
+        self.assertEqual(json.loads(p.stderr)["error"]["code"], "secret_leak")
+        self.assertIn("LINEAR_API_KEY", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)

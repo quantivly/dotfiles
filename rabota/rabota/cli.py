@@ -55,8 +55,32 @@ def build_parser():
     return p
 
 
+# Written only if even the leak report would itself contain a protected value. It
+# interpolates nothing, so it cannot.
+_LEAK_FALLBACK = '{"error": {"code": "secret_leak", "message": "output would contain a protected value"}}\n'
+
+
+def _report(e):
+    """Emit ``e`` as the error JSON and return its exit code.
+
+    ``emit.json_err`` guards its own output, so a message that would leak a protected
+    value raises ``SecretLeak`` here; that leak (which names only the variable) is
+    reported in its place and its exit code wins.
+    """
+    extra = {"failed": e.failed} if isinstance(e, errors.Partial) else {}
+    try:
+        emit.json_err(e.name, str(e), **extra)
+    except errors.SecretLeak as leak:
+        try:
+            emit.json_err(leak.name, str(leak))
+        except errors.SecretLeak:
+            sys.stderr.write(_LEAK_FALLBACK)
+        return leak.code
+    return e.code
+
+
 def main(argv=None):
-    """Parse ``argv``, run the chosen command, and return its exit code (never raises RabotaError)."""
+    """Parse ``argv``, run the chosen command, and return its exit code (never raises an Exception)."""
     _load_command_modules()
     parser = build_parser()
 
@@ -74,14 +98,12 @@ def main(argv=None):
     _build, run = COMMANDS[ns.command]
     try:
         result = run(ns)
-    except errors.RabotaError as e:
-        extra = {"failed": e.failed} if isinstance(e, errors.Partial) else {}
-        emit.json_err(e.name, str(e), **extra)
-        return e.code
-    if result is None:
+        if result is None:
+            return 0
+        if ns.text:
+            emit.text_out(result if isinstance(result, list) else [str(result)])
+        else:
+            emit.json_out(result)
         return 0
-    if ns.text:
-        emit.text_out(result if isinstance(result, list) else [str(result)])
-    else:
-        emit.json_out(result)
-    return 0
+    except errors.RabotaError as e:
+        return _report(e)

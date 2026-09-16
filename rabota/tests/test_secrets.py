@@ -27,3 +27,10 @@ class SecretsTests(unittest.TestCase):
     def test_short_or_empty_values_are_not_protected(self):
         # an empty or 1-char value would match everything; ignore it
         self.assertEqual(secrets.protected_values({"LINEAR_API_KEY": ""}), set())
+
+    def test_leak_message_names_the_variable_never_the_value(self):
+        env = {"LINEAR_API_KEY": LEAKED}
+        with self.assertRaises(errors.SecretLeak) as cm:
+            secrets.assert_clean("x " + LEAKED, env)
+        self.assertIn("LINEAR_API_KEY", str(cm.exception))
+        self.assertNotIn(LEAKED, str(cm.exception))
