@@ -392,10 +392,17 @@ show_agent_labels_on_pane_borders = true
 # REMOVED 2026-09-16 (rabota-v2 C11): a second entry, "agents <detected>/<claude
 # procs>", ran `herdr agent list | jq` plus a full `ps -eo comm=,args=` every 30 s.
 # At ~21 agents on a swapping 8-thread box it timed out more often than it
-# rendered — 225 "tab bar status command failed" warnings in six days by the
-# 09-16 audit, 288 by the time it was removed — and each timeout was itself a
-# forked herdr client, a jq and a ps under load. The number it showed (herdr's
-# detected agents vs Claude processes on the box) is now the census's job:
+# rendered, and each timeout was itself a forked herdr client, a jq and a ps
+# under load. COUNT THE ATTRIBUTION, not the total: of the 290 "tab bar status
+# command failed" warnings in the server log between 2026-09-10 and 2026-09-16,
+# 149 are this removed entry and 141 are the awk entry BELOW, which stays. So
+# this removal takes out about half of them; the rest are the load/mem command
+# exceeding its own 2 s timeout on a loaded box, and if they keep appearing the
+# answer is that entry's timeout or interval, not another deletion.
+# (`grep 'tab bar status command failed' ~/.config/herdr/herdr-server.log |
+#   grep -c 'herdr agent list'` — and `grep -c 'command=awk'` for the other.)
+# The number it showed (herdr's detected agents vs Claude processes on the box)
+# is now the census's job:
 # `hreap` and `rabota census` count the same processes on demand, and the
 # sidebar publishers ($status, $acct, $mdl) carry per-pane state with no
 # polling shell-out. Nothing in plugins.json publishes a whole-box count, so
