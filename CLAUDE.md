@@ -2854,7 +2854,9 @@ credential disaster and reads like nothing in the transcripts. Zero `isApiErrorM
 expiries across **1,431 transcripts and 868,562 records with 0 unparsable** for 09-11..09-14 (last
 genuine one: 2026-09-10T08:10:52Z) — the unparsable count is reported because an empty answer from
 a scanner that silently skipped half its input is not agreement — and
-`mark_auth_broken` logs every transition while `clauth.log` has never carried one. What actually
+no session ever reported one. **clauth, however, DID quarantine all three accounts — see
+"CORRECTED 2026-09-16 (second)" below, which retracts this paragraph's original claim that
+`clauth.log` proved it had not.** What actually
 degraded was clauth's per-profile polling: normal cadence ~59 s (mean gap; note that gaps of
 873–879 s occur in ordinary operation too, so one ~880 s gap is not by itself a fault signal),
 and the three broken accounts fell to one success per **~1010 s**.
@@ -2910,18 +2912,52 @@ not in the function's own doc block; an earlier draft cited `:507` for `fresher_
 and attributed the caller's comment to it. Here Claude Code's write is atomic, so it REPLACES the account-dir symlink with a real
 file and the store does not advance — the guard sees "unchanged", concludes "real revocation", and
 can quarantine a healthy account. `try_adopt_live_rotation`, the fast path that would catch it,
-runs only `if is_active`, so four of five profiles never get it. This did not fire on 09-14 (no
-`auth_broken` was ever logged), so it is recorded as the mechanism most likely to cause the NEXT
-one, not as this one's cause.
+runs only `if is_active`, so four of five profiles never get it. **This DID fire on 09-14, and it
+is this incident's cause** — see the correction immediately below.
 
-**The rejection class could not be recovered, and naming why is the useful part.** The ladder
-clauth entered is fed only by `RefreshError::Transient` — by `refresh_rejection_is_terminal`
-(`src/oauth.rs:416`) that means not 401 and not 400/403 carrying `invalid_grant`, so it was *not*
-a plain double-spend. Beyond that the evidence is gone: the scheduler's refresh leg
-(`src/usage/scheduler.rs:931`, `bail_unrotated().with_refresh_failed()`) has **no `logline!`**
-where `gate_under_guard` has one, and `PollStreaks`/`StreakCounts` are in-memory only. One log
-line upstream would close it. **An empty log is not evidence of a quiet machine when the code
-path has no log statement in it.**
+**CORRECTED 2026-09-16 (second): clauth quarantined all three accounts, it said so at the time,
+and the original search grepped the wrong log.** This section claimed *"no `auth_broken` was ever
+logged"* and built a whole paragraph on the rejection class being unrecoverable. Both are false.
+`journalctl --user -u clauth-daemon.service` carries it verbatim:
+
+```
+08:29:13  clauth: login for 'quantivly-1' has expired: refresh token revoked or invalid … (flagged auth_broken)
+08:29:17  clauth: login for 'personal-1'  …
+08:29:27  clauth: login for 'personal-0'  …
+```
+
+— exactly the three accounts that were re-authenticated, 114–128 s after resume. **The daemon's
+`logline!` output goes to the JOURNAL, not to `~/.clauth/clauth.log`**, which carries only TUI and
+CLI lines: measured, `clauth.log` contains **0** lines mentioning `daemon` while the journal
+contains **511**. The original search grepped `clauth.log`, found nothing, and reported absence.
+**That is the same error as the nanoclaw one below, made twice in one investigation: absence in
+the one place you looked is not absence.** Ask where a process's output actually goes before
+reading its silence.
+
+What the corrected evidence settles, which the original left open:
+
+- **The rejection was terminal, not transient.** "refresh token revoked or invalid" is
+  `RefreshError::Invalid` — a 401, or a 400/403 carrying `invalid_grant`. So it WAS a plain
+  double-spend, and the paragraph claiming otherwise is withdrawn along with its conclusion that
+  "one log line upstream would close it". The upstream observability gap is real but was never
+  what this incident hit.
+- **The ~1010 s is `auth_broken`'s own widen, not a `refresh_fail` ladder.** `poll_backoff_ms`
+  returns `AUTH_BROKEN_BACKOFF_MS` — the same 900 s ceiling — *before* it consults any streak, and
+  90 s + 900 s is the observed spacing. The accounts stayed flagged ~70 minutes until
+  `clauth login`, so nothing in the ordinary poll path cleared it.
+- **The blind spot is ours, not upstream's, and it is the cause.** A session refreshed first and
+  its rotation landed in the ACCOUNT DIR; `fresher_disk_pair` re-read the STORE, which had not
+  advanced, and concluded a real revocation. clauth's own watchdog (`runtime.rs`
+  `sync_credentials_unlocked`) would have advanced it — but only for `clauth start` runtime dirs,
+  and `claude-account-dirs` dirs are not those. Our reconciler adopted the fresh credentials into
+  those three stores at 08:29:28: **1–15 s too late.**
+
+**The actionable consequence is local.** After the reconciler adopts a rotation into a store,
+nothing tells clauth the chain is alive again. `claude-account-dirs.sh --reconcile` or
+`claude-doctor` should at least REPORT a standing `auth_broken` on a profile whose store it has
+just refreshed. Not built, and deliberately not designed here: whether clauth's reload re-reads
+`credentials.json`, and whether clearing that flag out of band is supported at all, are both
+unanswered.
 
 **CORRECTED 2026-09-16: `~/.claude/.credentials.json` IS owned — by nanoclaw — and this file
 did not know it.** This paragraph read *"The global credential path is reconciled by nothing"*, and
