@@ -1,0 +1,7 @@
+root          = "~/toysim"
+state_dir     = "~/toysim/handoffs/rabota"
+gh_config_dir = "~/.config/gh-personal"
+gh_login      = "personal-login"
+sources       = ["github"]
+[lanes]
+machines = ["local"]
