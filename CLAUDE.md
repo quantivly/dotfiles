@@ -2969,7 +2969,7 @@ store — compare a file with itself, so it can never fire. Removing the readers
 arrived two days later and is the one to keep: that path is not this repository's to reconcile.**
 Had the arm been built on the original reasoning, this repo would now be fighting nanoclaw for a
 file nanoclaw refreshes. Full analysis:
-`~/handoffs/credential-breakage-2026-09-14-FINDINGS.md`.
+`~/Projects/handoffs/credential-breakage-2026-09-14-FINDINGS.md`.
 
 ### Holder attribution, and the shell that has half this file's functions (DO-612)
 
