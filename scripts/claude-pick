@@ -19,7 +19,10 @@
 #
 #   0   picked; stdout is the profile (or the JSON object)
 #   2   refused — every pool member's 5h window is spent, or nothing in the pool
-#       is usable at all. stderr names each member and its reset time.
+#       is usable at all. stderr names each member and its reset time. Or, with
+#       --gate, the picked seat's PROJECTED end-utilisation exceeds the cap
+#       (state gate-projected) or its 5h window is unmeasured (state
+#       gate-unmeasured) — see THE SEAT GATE below.
 #   3   refused — a machine ceiling (CLAUDE_PICK_LOAD_MAX / _SWAP_MAX) was
 #       exceeded. Only reachable with --strict and without --force, and only when
 #       such a ceiling is explicitly set: warn-only is the default, because this
@@ -31,6 +34,31 @@
 #   64  usage error. Conventional (EX_USAGE), and deliberately far away from the
 #       refusals so a caller cannot confuse "you called me wrong" with "the
 #       accounts are spent".
+#
+# THE SEAT GATE (--gate --model M --effort E [--est-minutes N], WS4' Task 0).
+# The one implementation of "may a headless lane start on this seat" that
+# `rabota budget`, `hspawn`, herdr-draft and Sol all call, so two thresholds
+# cannot disagree. After a successful pick it computes
+#
+#   projected = u5 + rate(model, effort) × est_minutes / 60      (integer points)
+#
+# and refuses (exit 2) when projected > CLAUDE_PICK_GATE_MAX (95), or when u5 is
+# unmeasured — "unknown" must never read as room. The rate is points of the 5h
+# window per lane-hour, read from the zsh associative array CLAUDE_PICK_RATES in
+# ~/.config/claude-tenants.zsh, keyed "<model>:<effort>":
+#
+#   typeset -gA CLAUDE_PICK_RATES
+#   CLAUDE_PICK_RATES[claude-fable-5-1:high]=115
+#
+# An unlisted pair uses CLAUDE_PICK_RATE_DEFAULT (115: the WORST rate measured on
+# 2026-09-16, the WS1 fix lane, 19 points in 10 minutes). Sonnet has no measured
+# rate and deliberately uses Fable's until census has recorded five Sonnet lanes.
+# The default est_minutes is 30, so a Fable-high lane starts only at u5 <= 37%.
+# Environment strings are NOT a rate source: only the array, and only that file.
+# A pinned seat (--profile) still goes through the gate — it is the one thing a
+# pin does not override, because the gate is about the window, not the choice.
+# The JSON object carries "gate": {model, effort, est_minutes, rate, projected,
+# max, verdict: allow|refuse}, or null when --gate was not given.
 #
 # --strict IS THE ONLY THING THAT SWITCHES SEMANTICS, and there is no TTY
 # sniffing. §5.4 defines interactive by "a TTY on stderr" for `claude`, where the
@@ -60,6 +88,7 @@ PROG=claude-pick
 usage() {
   print -r -- "Usage: $PROG [--dir D] [--tenant T] [--profile P] [--strict] [--force]"
   print -r -- "              [--json] [--explain] [--dry-run]"
+  print -r -- "              [--gate --model M --effort E [--est-minutes N]]"
   print -r -- ""
   print -r -- "  --dir D       the directory to route for (default: \$PWD)"
   print -r -- "  --tenant T    pin the tenant; skips the resolver, not the ranking"
@@ -71,8 +100,11 @@ usage() {
   print -r -- "  --explain     the per-candidate table, on stderr"
   print -r -- "  --dry-run     do not write the ledger and do not build the"
   print -r -- "                account dir (config_dir is then null)"
+  print -r -- "  --gate --model M --effort E [--est-minutes N]"
+  print -r -- "                refuse (exit 2) when the picked seat's projected 5h"
+  print -r -- "                use exceeds 95% (CLAUDE_PICK_GATE_MAX), or is unmeasured"
   print -r -- ""
-  print -r -- "Exit: 0 picked · 2 refused (exhausted) · 3 refused (machine)"
+  print -r -- "Exit: 0 picked · 2 refused (exhausted, or the gate) · 3 refused (machine)"
   print -r -- "      4 unusable tenant table · 5 no profiles · 64 usage"
 }
 
@@ -83,6 +115,7 @@ die_usage() {
 }
 
 dir="$PWD" tenant="" pin="" strict=0 force=0 as_json=0 explain=0 dry=0
+gate=0 gate_model="" gate_effort="" gate_minutes=30 gate_rate="" gate_projected="" gate_verdict=""
 
 while (( $# )); do
   case "$1" in
@@ -97,11 +130,22 @@ while (( $# )); do
     --json)     as_json=1; shift ;;
     --explain)  explain=1; shift ;;
     --dry-run)  dry=1; shift ;;
+    --gate)         gate=1; shift ;;
+    --model)        [[ -n "${2:-}" ]] || die_usage "--model needs a value";  gate_model="$2";  shift 2 ;;
+    --model=*)      gate_model="${1#--model=}";   [[ -n "$gate_model" ]]  || die_usage "--model needs a value";  shift ;;
+    --effort)       [[ -n "${2:-}" ]] || die_usage "--effort needs a value"; gate_effort="$2"; shift 2 ;;
+    --effort=*)     gate_effort="${1#--effort=}"; [[ -n "$gate_effort" ]] || die_usage "--effort needs a value"; shift ;;
+    --est-minutes)  [[ "${2:-}" == <-> ]] || die_usage "--est-minutes needs an integer"; gate_minutes="$2"; shift 2 ;;
+    --est-minutes=*) gate_minutes="${1#--est-minutes=}"; [[ "$gate_minutes" == <-> ]] || die_usage "--est-minutes needs an integer"; shift ;;
     -h|--help)  usage; exit 0 ;;
     --)         shift; (( $# )) && die_usage "unexpected argument: $1"; break ;;
     *)          die_usage "unknown option: $1" ;;
   esac
 done
+
+if (( gate )); then
+  [[ -n "$gate_model" && -n "$gate_effort" ]] || die_usage "--gate needs --model and --effort"
+fi
 
 command -v jq >/dev/null 2>&1 || {
   print -u2 -- "$PROG: jq is required (every usage figure is read out of JSON)"
@@ -289,6 +333,45 @@ else
 fi
 
 #-----------------------------------------------------------------------------
+# --gate: projected end-utilisation of the picked seat (design §4.2)
+#
+# projected = u5 + rate(model, effort) × est_minutes / 60, integer points of the
+# 5-hour window. rate comes from CLAUDE_PICK_RATES["<model>:<effort>"] in
+# ~/.config/claude-tenants.zsh when defined, else CLAUDE_PICK_RATE_DEFAULT (115:
+# the worst rate measured on 2026-09-16, the WS1 fix lane, 19 points in 10 min).
+# Refuses at projected > CLAUDE_PICK_GATE_MAX (95). An UNMEASURED window refuses
+# too: "unknown" must never read as room. Both refusals are exit 2 with a state
+# a caller can switch on; a pinned seat still refuses here, because the gate is
+# the one thing --profile does not override.
+#
+# It runs BEFORE the account dir is built: the builder reconciles the profile's
+# credential store as a side effect, and a seat the gate is about to refuse
+# should leave nothing behind but the answer.
+
+if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
+  typeset -gA CLAUDE_PICK_RATES
+  gate_rate="${CLAUDE_PICK_RATES[${gate_model}:${gate_effort}]:-${CLAUDE_PICK_RATE_DEFAULT:-115}}"
+  [[ "$gate_rate" == <-> ]] || gate_rate="${CLAUDE_PICK_RATE_DEFAULT:-115}"
+  if [[ "$_claude_pick_u5" == <-> ]]; then
+    gate_projected=$(( _claude_pick_u5 + (gate_rate * gate_minutes) / 60 ))
+    if (( gate_projected > ${CLAUDE_PICK_GATE_MAX:-95} )); then
+      gate_verdict=refuse; _claude_pick_state=gate-projected
+      _claude_pick_reason="$REPLY projects to ${gate_projected}% of its 5h window (${_claude_pick_u5}% now + ${gate_rate} pts/h × ${gate_minutes} min) > ${CLAUDE_PICK_GATE_MAX:-95}%"
+      REPLY=""; rc=2
+    else
+      gate_verdict=allow
+    fi
+  else
+    gate_verdict=refuse; _claude_pick_state=gate-unmeasured
+    _claude_pick_reason="$REPLY has no measured 5h window; refusing rather than guessing"
+    REPLY=""; rc=2
+  fi
+  # The plain (non-JSON) caller gets the reason on stderr, the way every other
+  # exit-2 refusal names what it refused.
+  (( rc == 2 )) && print -u2 -- "$PROG: refused ($_claude_pick_state) — $_claude_pick_reason"
+fi
+
+#-----------------------------------------------------------------------------
 # the account dir
 
 config_dir=""
@@ -373,6 +456,14 @@ if (( as_json )); then
     --argjson notes       "$(json_strings "${_claude_pick_skipped[@]}")" \
     --argjson skipped     "$(json_strings "${skip_rows[@]}")" \
     --argjson exit_code   "$rc" \
+    --arg    gate_model   "$gate_model" \
+    --arg    gate_effort  "$gate_effort" \
+    --argjson gate_on     "$gate" \
+    --argjson gate_min    "$(json_num "$gate_minutes")" \
+    --argjson gate_rate   "$(json_num "$gate_rate")" \
+    --argjson gate_proj   "$(json_num "$gate_projected")" \
+    --argjson gate_max    "$(json_num "${CLAUDE_PICK_GATE_MAX:-95}")" \
+    --arg    gate_verdict "$gate_verdict" \
     '{
        tenant:       (if $tenant       == "" then null else $tenant       end),
        tenant_state: (if $tenant_state == "" then null else $tenant_state end),
@@ -388,6 +479,10 @@ if (( as_json )); then
        usage:        { five_hour: $five_hour, weekly: $weekly, cache_age_s: $cache_age },
        resets_at:    { five_hour: $r5, weekly: $rw },
        machine:      { load1: $load1, ncpu: $ncpu, swap_used_pct: $swap },
+       gate:         (if $gate_on == 1 then {model: $gate_model, effort: $gate_effort, est_minutes: $gate_min, rate: $gate_rate,
+                                             projected: $gate_proj, max: $gate_max,
+                                             verdict: (if $gate_verdict == "" then null else $gate_verdict end)}
+                      else null end),
        warnings:     $warnings,
        notes:        $notes,
        skipped:      ($skipped | map(split("\t") | {
