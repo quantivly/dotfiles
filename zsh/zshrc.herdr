@@ -461,22 +461,80 @@ _claude_profile_excluded() {
     print -r -- "disabled"; return 0
   fi
   # auth_broken = ["a", "b"] — clauth's quarantine list, which it writes itself.
+  # The parse is _claude_quarantine_scan; see there for why the span is
+  # VALIDATED rather than merely terminated.
   #
-  # A sed RANGE, not a single line: clauth already writes `profiles = [` across
-  # several lines in this same file, with the same writer and the same array
-  # type, so a line-based match is one quarantined account away from silently
-  # seeing nothing — and then the quarantined profile reads as maximum headroom,
-  # which is the bug this exclusion exists to prevent. Same shape CLAUDE.md
-  # records for `fallback_chain` in claude-doctor. Bounded by construction:
-  # anchored at the assignment, quits at the first `]`.
-  if [[ -r "$toml" ]]; then
-    local span
-    span="$(command sed -n '/^[[:space:]]*auth_broken[[:space:]]*=/,/]/{p; /]/q}' "$toml" 2>/dev/null)"
-    if [[ -n "$span" && "$span" == *"\"$name\""* ]]; then
+  # AN UNREADABLE LIST EXCLUDES NOBODY. It is not evidence of quarantine, and
+  # treating it as such is how this function collapsed the entire pool: the
+  # runaway span swallowed `profiles = [...]`, every registered name appeared
+  # inside it, and `claude-pick` refused with "no usable account" — exit 2, so
+  # every headless caller (`hspawn`, `--strict`, herdr-draft) started nothing at
+  # all, each healthy account labelled `auth broken — clauth login <name>`.
+  # Measured 2026-09-17 against a fixture with two good credentials. The two
+  # directions are not symmetric: failing to exclude a quarantined account costs
+  # ONE session, which then says why and names `clauth login`; excluding
+  # everybody costs all work on the machine and blames accounts that are fine.
+  # `_claude_pick_for_dir` scans once itself and warns, so this is quiet-safe
+  # rather than silent.
+  if _claude_quarantine_scan; then
+    # Membership in the PARSED, validated name list rather than a text search
+    # over the raw span. That is what makes the runaway unreachable — not any
+    # difference in matching precision: the old `*"\"$name\""*` was already
+    # exact for well-formed input (measured — `"p10"` does not contain `"p1"`,
+    # the quotes see to it), and its only defect was searching a span that
+    # should never have been trusted in the first place.
+    if (( ${_CQ_NAMES[(Ie)$name]} )); then
       print -r -- "auth broken — clauth login $name"; return 0
     fi
   fi
   return 1
+}
+
+# clauth's `auth_broken` list, parsed once. Sets `_CQ_NAMES` and returns 1 when
+# the question COULD NOT BE ASKED — an unreadable file, a sed that never ran, or
+# a span that does not hold an array of names. Empty `_CQ_NAMES` with a 0 return
+# is the ordinary "nothing is quarantined": clauth omits the key entirely for an
+# empty list.
+#
+# THE THIRD READER OF THIS KEY, and deliberately a copy rather than a call.
+# `_claude_quarantined_profiles` (zsh/functions/claude.sh) enumerates for the
+# doctor and `profile_is_quarantined` (scripts/claude-account-dirs.sh) tests
+# membership for the reconciler — but this file is sourceable ALONE by a modular
+# adopter who has neither, so it cannot depend on them. The shape is theirs
+# exactly, and a change belongs in all three; the cross-check row in
+# test-claude-doctor.sh exists to catch them drifting apart.
+#
+# A sed RANGE, not a single line: clauth writes `profiles = [` across several
+# lines in this same file, with the same writer and the same array type, so a
+# line-based match is one quarantined account away from silently seeing nothing.
+# But a range is not enough on its own — `auth_broken = [` with no members
+# followed by `profiles = [ "p1", ]` closes on the OTHER array's bracket, and
+# every name in it then reads as quarantined. So the span's INTERIOR is checked:
+# between the first `[` and the first `]`, an array of names holds nothing but
+# quoted strings, commas and whitespace.
+_claude_quarantine_scan() {
+  local toml="$HOME/.clauth/profiles.toml" span body dq='"' i
+  local -a parts
+  typeset -ga _CQ_NAMES=()
+  [[ -r "$toml" ]] || return 1
+  # sed's STATUS, not merely its output: a sed that never ran yields an empty
+  # span, and an empty span read as "nothing is quarantined" hands a quarantined
+  # account to the picker as maximum headroom — the exact bug this exclusion
+  # exists to prevent, arriving through the tool meant to detect it.
+  span="$(command sed -n '/^[[:space:]]*auth_broken[[:space:]]*=/,/]/{p; /]/q}' "$toml" 2>/dev/null)" || return 1
+  [[ -n "$span" ]] || return 0
+  [[ "$span" == *'['* ]] || return 1
+  body="${span#*\[}"
+  [[ "$body" == *']'* ]] || return 1
+  body="${body%%\]*}"
+  parts=( "${(@ps:$dq:)body}" )
+  for (( i = 1; i <= ${#parts}; i += 2 )); do
+    [[ -z "${parts[i]//[$' \t\n,']/}" ]] || return 1
+  done
+  for (( i = 2; i <= ${#parts}; i += 2 )); do
+    [[ -n "${parts[i]}" ]] && _CQ_NAMES+=( "${parts[i]}" )
+  done
+  return 0
 }
 
 # _claude_profile_load WAS HERE, and it is gone. It answered "the worse of this
@@ -1283,6 +1341,18 @@ _claude_pick_for_dir() {
     _claude_pick_reason="${_claude_pick_skipped[-1]}"
     return 4
   }
+
+  # THE QUARANTINE LIST, SCANNED ONCE HERE PURELY SO A FAILURE CAN BE SEEN.
+  # `_claude_pick_class` runs inside `$(...)`, so anything _claude_profile_excluded
+  # learns about an unusable list dies with that subshell — the same rule this
+  # file already records for the picker's own REPLY. The classifier's answer is
+  # unaffected either way (an unreadable list excludes nobody); without this
+  # line, a malformed profiles.toml would silently stop quarantines being
+  # honoured, which is the failure the exclusion exists to prevent, wearing the
+  # opposite sign from the pool collapse it used to cause.
+  _claude_quarantine_scan || _claude_pick_warnings+=(
+    "clauth's auth_broken list in ~/.clauth/profiles.toml could not be read — no account is being excluded for quarantine, so a quarantined one may be picked; 'claude-doctor' reports the file's state"
+  )
 
   # Every profile clauth has registered WITH a credential. `-e || -L` matches
   # what _claude_pick_class tests, so the two cannot disagree about what counts
