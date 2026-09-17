@@ -160,31 +160,16 @@ _claude_active_profile() {
 # reporting. Same precedence #145 settled for the active profile, same reason.
 #
 # Returns 1 when the question could not be ASKED, so empty output never carries
-# two meanings. An ABSENT key is not that case: clauth serialises the list with
-# serde's `skip_serializing_if = "Vec::is_empty"`, so an empty quarantine means
-# the key is simply not written — verified against the live file, 13 lines with
-# no `auth_broken` among them. Empty output at status 0 is "nothing quarantined".
+# two meanings: at status 0 it means "nothing quarantined", including the case
+# where clauth has written no `auth_broken` key at all. The contract and the
+# reasoning behind it are stated once, on the helper.
 #
-# THE SPAN IS VALIDATED, NOT MERELY TERMINATED, and the difference is a row that
-# failed. sed's range runs past this assignment whenever the closing `]` does not
-# arrive on a line of its own, so the span can swallow every quoted string below
-# it — turning a malformed file into confident, specific, wrong findings. That is
-# the runaway match the fallback_chain reader below carries a comment about,
-# pointed the other way: there it printed a neighbouring line, here it would
-# invent quarantined accounts.
-#
-# Checking for a `]` is not enough, which is what the row caught: an
-# `auth_broken = [` with no members, followed by `profiles = [ "p1", ]`, has a
-# `]` — the OTHER array's — and reported p1. So the INTERIOR is checked instead:
-# after the first `[` and before the first `]`, an array of names is nothing but
-# quoted strings, commas and whitespace. Split on `"` and the odd fields are
-# exactly what sits between the names; anything else there means the range ran
-# into another assignment. A missing bracket of either kind fails the same test,
-# so truncation needs no separate arm.
-#
-# Splitting on `"` and taking the EVEN fields reads clauth's multi-line array and
-# a single-line one identically. `s/.*"\([^"]*\)".*/\1/p` does not: it is greedy,
-# so `auth_broken = ["a", "b"]` yields only `b`.
+# The parse is in `_claude_toml_name_array` below, which this and the
+# `fallback_chain` reader share: two keys in this file, one array-of-names shape,
+# and CLAUDE.md's rule about the pair is that a fix right on one side of a report
+# and wrong on the other is worse than one wrong on both, "since the correct half
+# is the reason nobody re-reads the other". The other two readers of auth_broken
+# stay separate copies for reasons that do not apply here — see the helper.
 #
 # THREE READERS OF THIS ONE KEY, and a change belongs in all of them:
 # `_claude_profile_excluded` in zsh/zshrc.herdr (the picker's exclusion — this
@@ -192,21 +177,89 @@ _claude_active_profile() {
 # scripts/claude-account-dirs.sh (bash, and a membership test rather than an
 # enumeration, because the reconciler already knows the name it is asking about).
 _claude_quarantined_profiles() {
-  local toml="$HOME/.clauth/profiles.toml" span body dq='"' i
+  _claude_toml_name_array auth_broken
+}
+
+# The chain clauth walks when a quota fills — `fallback_chain` in
+# ~/.clauth/profiles.toml, one name per line, same contract as the quarantine
+# reader above: empty output at status 0 means no chain is configured, status 1
+# means the question could not be ASKED.
+#
+# THIS ONE IS A DISPLAY, NOT A DECISION, and that is why it was fixed last and
+# separately. The other readers of this array shape answer "is this profile
+# quarantined" and a wrong answer picks the wrong account; this one prints what
+# the chain holds, so its failure mode was a false alarm plus a leak of adjacent
+# file content. Both halves were live until 2026-09-17: measured on
+# `fallback_chain = [` followed by `profiles = [ "p1", "p2", ]`, the doctor
+# printed `auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]` —
+# the neighbouring assignment quoted verbatim into a report that lands in
+# transcripts, in the function whose own header says NEVER PRINTS A CREDENTIAL,
+# while claiming an auto-switch was armed on a box whose chain is deliberately
+# empty.
+#
+# The caller prints the NAMES THIS RETURNS and never a span, which is the rule
+# with no trade-off: a validated member is the value of the key being reported,
+# where a span is whatever the range happened to swallow.
+_claude_fallback_chain() {
+  _claude_toml_name_array fallback_chain
+}
+
+# An array-of-quoted-names under a top-level key in ~/.clauth/profiles.toml, one
+# name per line. $1 is the key, and must be a literal identifier: it is
+# interpolated into a sed address, and both call sites in this file pass a
+# constant. No guard for that, deliberately — no row could reach it, and
+# CLAUDE.md's rule is that a branch whose mutant cannot die reads as coverage.
+#
+# Returns 1 when the question could not be ASKED, so empty output never carries
+# two meanings. An ABSENT key is not that case: clauth serialises these lists
+# with serde's `skip_serializing_if = "Vec::is_empty"`, so an empty list means
+# the key is simply not written — verified against the live file, 13 lines with
+# no `auth_broken` among them. Empty output at status 0 is "the list is empty".
+#
+# ONE COPY IN THIS FILE, TWO KEYS. The other two readers of `auth_broken` are
+# deliberate duplicates — `zsh/zshrc.herdr` must be sourceable ALONE by a modular
+# adopter who has neither this file nor the reconciler, and
+# scripts/claude-account-dirs.sh is bash — but no such constraint separates
+# `auth_broken` from `fallback_chain`, which sit forty lines apart in one file.
+# A verbatim copy differing by one word is the drift this repo keeps paying for.
+#
+# THE SPAN IS VALIDATED, NOT MERELY TERMINATED, and the difference is a row that
+# failed in each of the two keys in turn. sed's range ends at the first line
+# carrying `]`, which bounds it to a line range and NOT to one assignment: the
+# span can swallow every quoted string below it whenever the closing bracket
+# never arrives — turning a malformed file into confident, specific, wrong
+# findings. For `auth_broken` that invents quarantined accounts; for
+# `fallback_chain` it printed a neighbouring line into the report.
+#
+# Checking for a `]` is not enough, which is what both rows caught: a
+# `<key> = [` with no members, followed by `profiles = [ "p1", ]`, has a `]` —
+# the OTHER array's. So the INTERIOR is checked instead: after the first `[` and
+# before the first `]`, an array of names is nothing but quoted strings, commas
+# and whitespace. Split on `"` and the odd fields are exactly what sits between
+# the names; anything else there means the range ran into another assignment. A
+# missing bracket of either kind fails the same test, so truncation needs no
+# separate arm.
+#
+# Splitting on `"` and taking the EVEN fields reads clauth's multi-line array and
+# a single-line one identically. `s/.*"\([^"]*\)".*/\1/p` does not: it is greedy,
+# so `auth_broken = ["a", "b"]` yields only `b`.
+_claude_toml_name_array() {
+  local key="${1:-}" toml="$HOME/.clauth/profiles.toml" span body dq='"' i
   local -a parts
   [[ -r "$toml" ]] || return 1
   # THE STATUS IS THE POINT, not the output. `sed` is an external tool and an
   # external tool is a way for a check to go quiet — CLAUDE.md records that for
-  # `readlink -f` and `awk` in these same files, and the bash twin below avoids
-  # the class entirely with a `while read` loop. Without this test a sed that
-  # never ran (absent from PATH, exec failure) yields an EMPTY span, which the
-  # next line reads as "nothing is quarantined": the doctor then prints a
-  # confident ✓ for a question it could not ask, in the one checker written to
-  # report a standing quarantine. sed still exits 0 when it matches nothing, so
-  # the ordinary empty-list case is unaffected.
-  span="$(sed -n '/^[[:space:]]*auth_broken[[:space:]]*=/,/]/{p; /]/q}' "$toml" 2>/dev/null)" || return 1
+  # `readlink -f` and `awk` in these same files, and the bash twin in the
+  # reconciler avoids the class entirely with a `while read` loop. Without this
+  # test a sed that never ran (absent from PATH, exec failure) yields an EMPTY
+  # span, which the next line reads as "the list is empty": the doctor then
+  # prints a confident ✓ for a question it could not ask — over a standing
+  # quarantine, or over an ARMED fallback chain, which is the state that rewrites
+  # the global credential under every running session. sed still exits 0 when it
+  # matches nothing, so the ordinary empty-list case is unaffected.
+  span="$(sed -n "/^[[:space:]]*${key}[[:space:]]*=/,/]/{p; /]/q}" "$toml" 2>/dev/null)" || return 1
   # No assignment found. clauth omits the key entirely for an empty list, so this
-  # is the ordinary "nothing is quarantined" and not a failure to read.
+  # is the ordinary "the list is empty" and not a failure to read.
   [[ -n "$span" ]] || return 0
   [[ "$span" == *'['* ]] || return 1
   body="${span#*\[}"
@@ -470,7 +523,7 @@ claude-doctor() {
   # zsh's `local` on a name already local in this scope is a DISPLAY command, so
   # every loop-body variable is declared once, here. CLAUDE.md records the run
   # where forgetting that printed `du=zvi-quantivly` into the middle of a report.
-  local cred now_ms mode exp delta nproc_claude sub scopes chain
+  local cred now_ms mode exp delta nproc_claude sub scopes crc cspan
   local active stored_hash live_hash p pdir spath
   local root d srv ok_n fail_n unauth_n invalid_n key empty_tok no_refresh
   local i comm svc a b
@@ -488,7 +541,7 @@ claude-doctor() {
   # block scope shares one namespace, and an undeclared assignment inside it
   # leaks a global — which is the defect the `local pdir pname` fix above closed.
   local -a _cshape shared_stores dangling_stores
-  local -a quarantined
+  local -a quarantined chain_walk
   local -A group_n group_label
 
   while (( $# )); do
@@ -842,32 +895,54 @@ claude-doctor() {
       # quiet log is not a quiet mechanism, and a reader who does not know that
       # will draw the same wrong conclusion.
       if [[ -f "$HOME/.clauth/profiles.toml" ]]; then
-        # BOUNDED, and anchored to a real assignment. The first fix for this
-        # was `tr '\n' ' '` + the old pattern, which removed the very line
-        # boundary that limited the match: `fallback_chain[^]]*\]` then ran from
-        # anywhere the words appear to the next `]` ANYWHERE in the file. Review
-        # reproduced both halves of that — "auto-switch armed" reported for a
-        # machine whose chain was commented out, and a token from a neighbouring
-        # line printed verbatim into a report that lands in transcripts, in the
-        # file whose own header says NEVER PRINTS A CREDENTIAL.
+        # PARSED, NOT QUOTED — and that is the whole of this block's history.
+        # The first version matched `fallback_chain[^]]*\]` with a line-based
+        # `grep -oE`, which never fired against clauth's multi-line array, so the
+        # note had never once printed on the box it was written for. Flattening
+        # the file with `tr` to fix that removed the very line boundary that
+        # bounded the match, and it then ran from anywhere those words appear to
+        # the next `]` ANYWHERE in the file. A sed RANGE replaced it — and a
+        # range still ends at the first line carrying `]`, which bounds it to a
+        # LINE RANGE and not to one assignment, so on
+        # `fallback_chain = [` + `profiles = [ "p1", "p2", ]` it printed
+        # `auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]`:
+        # a false alarm about the most disruptive thing clauth can do, over a
+        # neighbouring line of profiles.toml quoted verbatim into a report that
+        # lands in transcripts, in the file whose own header says NEVER PRINTS A
+        # CREDENTIAL. Measured 2026-09-17, three fixes in.
         #
-        # A sed RANGE from a line that actually assigns fallback_chain to the
-        # first line carrying `]`, quitting there so a second assignment cannot
-        # extend it. The span can never leave the assignment.
+        # So the span is never printed and never trusted: `_claude_fallback_chain`
+        # validates the array's interior and returns the member NAMES, and what
+        # goes into the report is this function's own prose around them. A
+        # validated member is the value of the key being reported; a span is
+        # whatever the range happened to swallow.
         #
-        # sed rather than awk for one reason, and it is the second time today:
-        # the state table builds a PATH from scratch holding only what the doctor
-        # uses, awk is not on it, and an awk-based version silently produced
-        # nothing — the same shape as the `readlink -f` dependency this file
-        # already carries a note about. sed and tr are both already in use here.
-        chain=$(sed -n '/^[[:space:]]*fallback_chain[[:space:]]*=/,/]/{p; /]/q}' \
-                    "$HOME/.clauth/profiles.toml" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
-        # `fallback_chain = []` is a configured-but-empty chain: it parses, it is
-        # not armed, and reporting it as armed is the same false positive by a
-        # shorter route. A member is a quoted string.
-        [[ "$chain" == *'"'* ]] || chain=""
-        if [[ -n "$chain" ]]; then
-          _doctor_note "auto-switch armed: $chain"
+        # Scalar first, then split — the shape the quarantine consumer forty
+        # lines below uses, so a reader comparing the two blocks sees one idiom.
+        # `cspan=$(...)` makes it unambiguous that $? is the READER's status and
+        # not an array assignment's, and unquoted `${(f)cspan}` yields an empty
+        # array rather than one empty element when there is no chain.
+        cspan="$(_claude_fallback_chain)"; crc=$?
+        chain_walk=( ${(f)cspan} )
+        if (( crc != 0 )); then
+          # A ⚠, and NOT CHECKED rather than silence. An empty answer from a
+          # question we could not ask is never agreement — and the thing not
+          # answered here is whether clauth will rewrite the shared credential
+          # under every running session when a quota fills. Not a ✗: the file is
+          # clauth's, the repair is a hand-edit of another tool's config, and a
+          # doctor that exits non-zero over that is the permanently-red checker
+          # this repo has now produced seven times. Same severity the quarantine
+          # reader below gives the same file being malformed, deliberately: two
+          # readers of one file must not disagree about what unreadable costs.
+          _doctor_warn "could not read clauth's fallback_chain — NOT CHECKED"
+          echo "    ~/.clauth/profiles.toml is there but unreadable, or that array is unterminated"
+          echo "    (a truncated write). Whether an auto-switch is armed is therefore UNKNOWN, and"
+          echo "    an armed switch rewrites the global credential under every running session."
+        elif (( ${#chain_walk} )); then
+          # Armed auto-switch is a loaded landmine, not a fault — hence a note.
+          # `fallback_chain = []` reaches here with no members and is correctly
+          # silent: it parses, it is configured, and it is not armed.
+          _doctor_note "auto-switch armed: the chain walks ${(j:, :)chain_walk}"
           _doctor_note "a switch rewrites the global credential under running sessions AND IS NOT LOGGED —"
           _doctor_note "  compare the active profile above against what you last saw; clauth.log will not say"
         fi

@@ -851,7 +851,10 @@ jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'fallback_chain = [\n    "p1",\n    "p2",\n]\n' > "$FHOME/.clauth/profiles.toml"
 WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a multi-line fallback_chain is still surfaced" "auto-switch armed"
-want_out "and the chain members are named"               '"p1"'
+# The members, in order, as the doctor's OWN prose. The assertion used to be the
+# bare `"p1"` — satisfiable by the raw span, so it could not tell a parsed chain
+# from a quoted line of profiles.toml, which is the defect section N now pins.
+want_out "and the chain members are named, in order"     "the chain walks p1, p2"
 
 # `preferred` is why a hand-made switch away does not stay made: the daemon walks
 # the active account back, unlogged.
@@ -959,6 +962,77 @@ printf 'preferred = true\n' > "$FHOME/.clauth/profiles/p1/config.toml"
 WITH_CLAUTH=1 ACTIVE_PROFILE='' run_doctor
 want_out "an unattributable credential still reports the armed chain" "auto-switch armed"
 want_out "and still names the preferred profile"                      "is preferred"
+
+# THE RUNAWAY, WHICH THE BOUNDED sed DID NOT CLOSE. Terminating the range at the
+# first `]` bounds it to one LINE RANGE, not to one assignment: `fallback_chain =
+# [` whose closing bracket never arrives takes the next array's bracket instead,
+# and the `*'"'*` armed test then passed on THAT array's quoted names. Measured
+# 2026-09-17 on this exact fixture, the doctor printed
+# `auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]` — a
+# neighbouring line of profiles.toml quoted verbatim into a report that lands in
+# transcripts, in the function whose own header says NEVER PRINTS A CREDENTIAL,
+# and a false alarm about the single most disruptive thing clauth can do on a box
+# whose chain is deliberately empty.
+#
+# Three assertions, because the two halves of the defect fail independently: the
+# claim, the raw file content, and a member of the OTHER array.
+new_home n4; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'fallback_chain = [\nprofiles = [\n    "p1",\n    "p2",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "a chain span that closes on ANOTHER array's bracket is NOT CHECKED" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as armed"                    "auto-switch armed"
+no_out   "...and no raw assignment from profiles.toml is printed" "profiles = ["
+no_out   "...and no member of the other array is named"       "p2"
+
+# THE RESTING STATE OF THIS MACHINE, and the reason the NOT CHECKED line above
+# is a ⚠ rather than something that fires all the time: clauth omits the key
+# entirely when no chain is configured, so an absent assignment must be silence
+# on BOTH counts. Reading "no key" as "could not read" would make every box
+# without a fallback chain carry a permanent warning about a setting it has
+# deliberately not set — the permanently-red checker this repo has now produced
+# seven times, and the one failure mode a new ⚠ path can introduce.
+new_home n5; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'active_profile = "p1"\nprofiles = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+no_out "an absent fallback_chain is not reported as armed"   "auto-switch armed"
+no_out "...nor as a chain that could not be read"            "could not read clauth's fallback_chain"
+
+# THE READER'S ONE EXTERNAL TOOL, REMOVED — the same row the quarantine reader
+# has, for the same reason, one key over. `sed` is staged unconditionally by
+# SYSBIN, so without this nothing distinguishes "asked, and there is no chain"
+# from "could not ask": the pre-fix code discarded sed's status, so a sed that
+# never ran yielded an empty span and the doctor said nothing at all about an
+# ARMED chain. A new external tool in a checker is a new way for a check to go
+# quiet, and this one had been quiet since it was written.
+new_home n6; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'fallback_chain = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+NO_SED=1 WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "sed missing is reported, not read as an unarmed chain" \
+         "could not read clauth's fallback_chain"
+no_out   "...and does not silently drop the armed note"  "auto-switch armed"
+
+# The truncation that lands right after the opening bracket: the one shape the
+# interior check cannot object to, because there is nothing between the brackets
+# to be wrong about. Without the closing-bracket test the answer is "no members",
+# which reads as "not armed" over a chain that was never read. It is also what
+# isolates that test — every other malformed fixture is caught by the interior
+# first, so a mutant deleting it survives them all.
+new_home n7; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nfallback_chain = [\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "a chain truncated at its opening bracket is NOT CHECKED" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not silently unarmed"                 "auto-switch armed"
 
 #-----------------------------------------------------------------------------
 section "O. Checks that must not depend on clauth, or on there being profiles"
