@@ -2171,7 +2171,7 @@ Design points that are load-bearing rather than preferences:
   side is live from the `expiresAt` inside each file (falling back to mtime with no `jq`), adopts a
   session's rotation *into* the store, copies the loser aside first, and **refuses** when it cannot
   tell. A discovery stub — empty `accessToken`, no `expiresAt` — never counts as live. State table:
-  `scripts/test-claude-account-dirs.sh` (156 checks at `f3358d9`, 9 mutants, all died), and
+  `scripts/test-claude-account-dirs.sh` (156 checks at `6661472`, 9 mutants, all died), and
   `scripts/claude-account-dirs.sh --reconcile` is the same code path on a 2-minute
   `systemd --user` timer, because launch-time alone leaves the store stale between a rotation and
   the next launch — which is precisely how `personal` got quarantined.
@@ -2741,7 +2741,7 @@ Traps specific to the checker, each of which produced a green tick first:
 
 State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `PATH`:
 
-- `scripts/test-claude-doctor.sh` (**273 checks at `f3358d9`** after DO-613's quarantine rows; 235 at `f07faae`;
+- `scripts/test-claude-doctor.sh` (**279 checks at `6661472`** after DO-613's quarantine rows and the review fixes; 235 at `f07faae`;
   215 at `c839d48`, 218 at `62c83d3`, and it was written here as "103 checks" and
   had been stale for weeks — a figure without the commit it was measured at is the thing this
   file warns about two sections down, so these carry theirs. This one read "at the tip of
@@ -2757,7 +2757,7 @@ State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `
   mutant survived a 233-check green. Twelve of those rows
   exist only because a review found the fixes unpinned: the first pass shipped 13 mutants and a
   false green underneath them.
-- `scripts/test-claude-account-dirs.sh` (**156 checks at `f3358d9`**; this line read 36, and 70 one
+- `scripts/test-claude-account-dirs.sh` (**156 checks at `6661472`**; this line read 36, and 70 one
   section up, and both had been stale for weeks — `claude-account-dirs-test`) — the builder.
   10 mutants, all died, including "seed `.claude.json` from the husk" and "copy the credential
   instead of symlinking it".
@@ -3040,14 +3040,28 @@ the closing-bracket test stays because it is the only thing that catches a trunc
 right after the `[`, where the interior has nothing to object to and the answer would be a
 confident all-clear over a list never read.
 
-Recorded and deliberately **not** fixed: `_claude_profile_excluded` (the picker) and the
-doctor's own `fallback_chain` reader use the older shape and would take the foreign-bracket
-runaway. Both fail *safe* on it in their own direction — the picker excludes an account it
-cannot vouch for, the doctor prints NOT CHECKED — so they disagree only about a malformed file,
-and neither invents a finding. Tightening the picker is a change to the path every session
-launch takes, in a PR about reporting.
+Recorded and deliberately **not** fixed here: `_claude_profile_excluded` (the picker) and the
+doctor's own `fallback_chain` reader use the older shape and take the foreign-bracket runaway.
+**An earlier version of this paragraph called that safe on the grounds that "the picker excludes
+an account it cannot vouch for … neither invents a finding". Both clauses are false, and an
+independent review measured it.** On `auth_broken = [` followed by `profiles = ["p1","p2"]` the
+runaway span swallows the profile list, so `claude-pick --explain` marks **every registered
+profile** `excluded`, each with the specific and wrong reason `auth broken — clauth login p1`,
+and then `refused: unusable — no usable account`, **exit 2** — reproduced here 2026-09-17 against
+a fixture `$HOME` with two healthy credentials. That is not a disagreement about a malformed
+file: the pool collapses, so every headless caller (`hspawn`, `claude-pick --strict`,
+herdr-draft) refuses to start anything at all, and the picker invents a per-profile finding
+naming healthy accounts. The doctor meanwhile says NOT CHECKED and never points at the picker,
+so nothing on the machine connects the two.
 
-State tables: `scripts/test-claude-doctor.sh` (235 → 273 at `f3358d9`) and
+What stays true is the *reason for deferring*: tightening `_claude_profile_excluded` changes the
+path every session launch takes, and it needs its own rows and its own mutants rather than
+riding a PR about reporting. **The cross-check row does not cover this** — it pins the one
+well-formed shape on which the two readers cannot disagree, which is precisely the shape that
+proves nothing. Fix the picker or delete this deferral; do not leave the next reader believing
+there is nothing here.
+
+State tables: `scripts/test-claude-doctor.sh` (235 → 279 at `6661472`) and
 `scripts/test-claude-account-dirs.sh` (137 → 156; CLAUDE.md said 70, then 36, and both were
 stale — a count without its commit is the thing this file warns about). The cross-check row is
 worth more than its size: it sources `zshrc.herdr` and `claude.sh` into one shell and asserts
@@ -3058,6 +3072,23 @@ was DEAD-ELSEWHERE until its expectation was corrected: the closing-bracket test
 by the truncation landing AT the bracket, because the interior check already answers every other
 shape — count how many independent deletions it takes to reach a silent pass, not how many guards
 there are.
+
+**That figure does not cover the guard it appears to, and saying so is the point of writing it
+down.** An independent review measured a twentieth mutant: in `profile_is_quarantined`,
+`(( inside && closed ))` → `(( inside ))` **survives 156/156**. It is redundant by construction
+— `closed=0` means no line in the span held a `]`, so `body` holds none either and the very next
+test returns 1 — and the paragraph above defends it with an argument that is true of the **zsh**
+reader's `[[ "$body" == *']'* ]]` (mutant D4 kills that one) and was carried across to the bash
+`closed` where it does not apply. The clause stays as defence in depth, **labelled unkillable
+rather than counted**, because a mutant that can never die reads as coverage — this file's own
+rule, applied to its own figure. So: 19 mutants killed by rows, 1 known survivor that is
+documented instead.
+
+**The review that found it also found two defects in the shipped code of this PR**, both under
+273 green checks: a discarded `sed` exit status that turned "could not ask" into a confident
+all-clear, and a classification that told the reader NOT to run the one command that repairs a
+registered profile. Both are fixed at `6661472` and each is now pinned by a mutant that dies.
+Full report: `~/Projects/handoffs/2026-09-17-pr153-adversarial-review.md`.
 
 ### Holder attribution, and the shell that has half this file's functions (DO-612)
 

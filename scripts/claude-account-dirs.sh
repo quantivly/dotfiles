@@ -532,6 +532,13 @@ profile_is_quarantined() {
         span+="$line"
         if [[ "$line" == *']'* ]]; then closed=1; break; fi
     done < "$toml"
+    # `closed` is UNKILLABLE here and is kept as defence in depth, not as coverage:
+    # `(( inside ))` alone passes 156/156, because closed=0 means no line in the
+    # span held a `]`, so `body` below holds none either and the `*']'*` test two
+    # lines down already returns 1. The zsh reader's equivalent bracket test IS
+    # killable (mutant D4) and an earlier comment carried that argument across to
+    # here, where it does not hold. Labelled rather than counted — a mutant that
+    # can never die reads as coverage. Found by review, 2026-09-17.
     (( inside && closed )) || return 1
     [[ "$span" == *'['* ]] || return 1
     local body="${span#*[}"
