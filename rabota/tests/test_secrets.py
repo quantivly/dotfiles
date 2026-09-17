@@ -34,3 +34,24 @@ class SecretsTests(unittest.TestCase):
             secrets.assert_clean("x " + LEAKED, env)
         self.assertIn("LINEAR_API_KEY", str(cm.exception))
         self.assertNotIn(LEAKED, str(cm.exception))
+
+
+class RegisteredValueTests(unittest.TestCase):
+    """Runtime-minted secrets never sit in an environment, so they are registered instead."""
+
+    def setUp(self):
+        self._saved = set(secrets.REGISTERED_VALUES)
+        secrets.REGISTERED_VALUES.clear()
+        self.addCleanup(lambda: (secrets.REGISTERED_VALUES.clear(), secrets.REGISTERED_VALUES.update(self._saved)))
+
+    def test_registered_value_is_caught_even_with_an_empty_env(self):
+        minted = "ghp_" + "n" * 36
+        secrets.register_value(minted)
+        with self.assertRaises(errors.SecretLeak) as cm:
+            secrets.assert_clean("token=" + minted, {})
+        self.assertNotIn(minted, str(cm.exception))
+
+    def test_short_or_empty_values_are_not_registered(self):
+        secrets.register_value(""); secrets.register_value("abc")
+        self.assertEqual(secrets.REGISTERED_VALUES, set())
+        self.assertEqual(secrets.assert_clean("abc", {}), "abc")

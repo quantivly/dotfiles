@@ -1,11 +1,12 @@
 """SQLite state. Human prose stays in YYYY-MM-DD/*.md; structure lives here."""
 import contextlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rabota import errors
+from rabota import errors, secrets
 
 SCHEMA_VERSION = 2
 # v(N) → v(N+1) steps, keyed by the version they upgrade FROM. Each list runs in one
@@ -125,15 +126,24 @@ class Store:
     def _rows(self, sql, args=()):
         return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
+    def _exec(self, sql, args=()):
+        """Every INSERT/UPDATE runs through here: a protected value in any text parameter is redacted first.
+
+        ``rabota.db`` is a file, and a token in it outlives the process that wrote it (k2, the store
+        route: gh's stderr echoed the minted token into ``source_syncs.error``). The row is kept and
+        the value replaced — see ``secrets.redact`` for why not refuse.
+        """
+        return self.conn.execute(sql, tuple(secrets.redact(a, os.environ) if isinstance(a, str) else a for a in args))
+
     # runs / syncs
     def begin_run(self, tenant, mode) -> int:
-        cur = self.conn.execute("INSERT INTO runs(tenant, started_at, mode) VALUES (?,?,?)", (tenant, now(), mode))
+        cur = self._exec("INSERT INTO runs(tenant, started_at, mode) VALUES (?,?,?)", (tenant, now(), mode))
         return cur.lastrowid
     def finish_run(self, run_id, preflight_ok, notes=""):
-        self.conn.execute("UPDATE runs SET preflight_ok=?, notes=?, finished_at=? WHERE id=?",
+        self._exec("UPDATE runs SET preflight_ok=?, notes=?, finished_at=? WHERE id=?",
                           (int(preflight_ok), notes, now(), run_id))
     def record_sync(self, tenant, source, ok, error, path):
-        self.conn.execute("INSERT OR REPLACE INTO source_syncs VALUES (?,?,?,?,?,?)",
+        self._exec("INSERT OR REPLACE INTO source_syncs VALUES (?,?,?,?,?,?)",
                           (tenant, source, now(), int(ok), error, path))
     def last_sync(self, tenant, source):
         r = self._rows("SELECT * FROM source_syncs WHERE tenant=? AND source=?", (tenant, source))
@@ -144,13 +154,13 @@ class Store:
         row = {k: lane.get(k) for k in LANE_FIELDS}
         row["attached"] = int(row["attached"] or 0)
         cols = ",".join(LANE_FIELDS); qs = ",".join("?" for _ in LANE_FIELDS)
-        self.conn.execute(f"INSERT INTO lanes({cols}) VALUES ({qs})", tuple(row[k] for k in LANE_FIELDS))
+        self._exec(f"INSERT INTO lanes({cols}) VALUES ({qs})", tuple(row[k] for k in LANE_FIELDS))
     def update_lane(self, lane_id, **fields):
         """Update named lane columns; an unknown field name is a ``ValueError``, never a silent no-op."""
         bad = set(fields) - set(LANE_FIELDS)
         if bad: raise ValueError(f"unknown lane fields {bad}")
         sets = ",".join(f"{k}=?" for k in fields)
-        self.conn.execute(f"UPDATE lanes SET {sets} WHERE id=?", (*fields.values(), lane_id))
+        self._exec(f"UPDATE lanes SET {sets} WHERE id=?", (*fields.values(), lane_id))
     def get_lane(self, lane_id):
         r = self._rows("SELECT * FROM lanes WHERE id=?", (lane_id,)); return r[0] if r else None
     def list_lanes(self, tenant=None, status=None):
@@ -167,7 +177,7 @@ class Store:
         present from the first write, never back-filled.
         """
         ts = now()
-        cur = self.conn.execute(
+        cur = self._exec(
             "INSERT INTO escalations(tenant, first_seen, ts, question, evidence, options, kind, subject) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (tenant, first_seen or ts, ts, question, evidence, json.dumps(list(options)), kind, subject))
@@ -181,11 +191,11 @@ class Store:
         for r in rows: r["options"] = json.loads(r["options"] or "[]")
         return rows
     def answer_escalation(self, esc_id, label, resolution=None):
-        self.conn.execute("UPDATE escalations SET disposition=?, resolved_at=?, resolution=? WHERE id=?",
+        self._exec("UPDATE escalations SET disposition=?, resolved_at=?, resolution=? WHERE id=?",
                           (label, now(), resolution, esc_id))
     def record_gate(self, tenant, subject, label):
         """Record a gate answer as a label only — never who answered (Rule 0)."""
-        self.conn.execute("INSERT INTO gate_answers(tenant, ts, subject, label) VALUES (?,?,?,?)",
+        self._exec("INSERT INTO gate_answers(tenant, ts, subject, label) VALUES (?,?,?,?)",
                           (tenant, now(), subject, label))
     def gates(self, tenant):
         return self._rows("SELECT * FROM gate_answers WHERE tenant=? ORDER BY ts", (tenant,))
@@ -193,21 +203,21 @@ class Store:
     # inbox decisions
     def record_decision(self, batch_id, tenant, tier, bucket, entity_type, entity_id, action, prior: dict):
         """Record one applied inbox action with the prior values needed to roll it back."""
-        self.conn.execute("INSERT INTO inbox_decisions VALUES (?,?,?,?,?,?,?,?,?,0,NULL)",
+        self._exec("INSERT INTO inbox_decisions VALUES (?,?,?,?,?,?,?,?,?,0,NULL)",
                           (batch_id, tenant, now(), tier, bucket, entity_type, entity_id, action, json.dumps(prior)))
     def decisions(self, batch_id):
         rows = self._rows("SELECT * FROM inbox_decisions WHERE batch_id=? ORDER BY ts", (batch_id,))
         for r in rows: r["prior"] = json.loads(r["prior"] or "{}")
         return rows
     def mark_verified(self, batch_id, entity_id):
-        self.conn.execute("UPDATE inbox_decisions SET verified=1 WHERE batch_id=? AND entity_id=?", (batch_id, entity_id))
+        self._exec("UPDATE inbox_decisions SET verified=1 WHERE batch_id=? AND entity_id=?", (batch_id, entity_id))
     def mark_rolled_back(self, batch_id):
-        self.conn.execute("UPDATE inbox_decisions SET rolled_back_at=? WHERE batch_id=?", (now(), batch_id))
+        self._exec("UPDATE inbox_decisions SET rolled_back_at=? WHERE batch_id=?", (now(), batch_id))
 
     # pins
     def set_pin(self, tenant, item_key, bucket, rationale):
-        self.conn.execute("INSERT OR REPLACE INTO pins VALUES (?,?,?,?,?)", (tenant, item_key, bucket, rationale, now()))
+        self._exec("INSERT OR REPLACE INTO pins VALUES (?,?,?,?,?)", (tenant, item_key, bucket, rationale, now()))
     def pins(self, tenant):
         return self._rows("SELECT * FROM pins WHERE tenant=? ORDER BY bucket, ts", (tenant,))
     def clear_pin(self, tenant, item_key):
-        self.conn.execute("DELETE FROM pins WHERE tenant=? AND item_key=?", (tenant, item_key))
+        self._exec("DELETE FROM pins WHERE tenant=? AND item_key=?", (tenant, item_key))
