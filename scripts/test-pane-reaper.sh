@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+#
+# scripts/test-pane-reaper.sh
+# ===========================
+#
+# State table for the pane-reaper herdr plugin
+# (config/herdr/plugins/local/pane-reaper). The plugin CLOSES PANES, so every
+# run puts a recording `herdr` stub on HERDR_BIN_PATH: this machine has a real
+# herdr talking to a live server, and a suite that fell through to it would
+# close real agents. Timers are recorded via PANE_REAPER_LAUNCH_LOG instead of
+# spawned, except in the one row that proves the detach itself.
+#
+# Requires: bash, sh, jq, awk, timeout. No herdr, no network, no real panes.
+#
+# Usage: scripts/test-pane-reaper.sh
+
+set -uo pipefail
+
+DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLUGIN="$DOTFILES/config/herdr/plugins/local/pane-reaper"
+TMPROOT="$(mktemp -d)"
+trap 'rm -rf "$TMPROOT"' EXIT
+
+PASS=0; FAIL=0
+ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
+bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
+check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
+fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 1; }
+
+for tool in sh jq awk timeout; do
+    command -v "$tool" >/dev/null || fatal "$tool is required"
+done
+
+STUBBIN="$TMPROOT/bin"; SD="$TMPROOT/sd"
+mkdir -p "$STUBBIN" "$SD"
+cat > "$STUBBIN/herdr" <<'SH'
+#!/bin/sh
+d="$PANE_REAPER_STUB_DIR"
+printf '%s\n' "$*" >> "$d/calls"
+case "$1 $2" in
+  "agent get")
+    if [ -f "$d/agent.json" ]; then cat "$d/agent.json"; exit 0; fi
+    printf '{"error":{"code":"agent_not_found","message":"not found"}}\n'; exit 1 ;;
+  "workspace get")     cat "$d/workspace.json" ;;
+  "pane process-info")
+    # A test-supplied side effect, run at the last herdr call before a close.
+    if [ -f "$d/procinfo-hook" ]; then sh "$d/procinfo-hook"; fi
+    cat "$d/procinfo.json" ;;
+  "pane close")
+    if [ -f "$d/close-fails" ]; then cat "$d/close-fails"; exit 1; fi ;;
+  "pane report-metadata")
+    if [ -f "$d/metadata-fails" ]; then cat "$d/metadata-fails"; exit 1; fi ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$STUBBIN/herdr"
+
+# A `chmod` that always fails, put ahead of the real one on PATH for exactly one
+# row: pr_slot_write() re-asserts 0700 on the slot dir before it writes, which
+# would silently undo a plain `chmod 500` before the write is even attempted.
+# Shadowing `chmod` is what makes that dir genuinely stay unwritable.
+# An awk that dies with a runtime-error status (2), for the row proving that
+# the Bash-children gate reads anything but a clean "no" as busy.
+AWKFAILBIN="$TMPROOT/awkfailbin"
+mkdir -p "$AWKFAILBIN"
+printf '#!/bin/sh\nexit 2\n' > "$AWKFAILBIN/awk"
+chmod +x "$AWKFAILBIN/awk"
+
+FAKEBIN="$TMPROOT/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/chmod" <<'SH'
+#!/bin/sh
+exit 1
+SH
+chmod +x "$FAKEBIN/chmod"
+
+reset() {
+    rm -rf "$SD" "$TMPROOT/slots" "$TMPROOT/xdg" "$TMPROOT/run" "$TMPROOT/launch"
+    mkdir -p "$SD"; : > "$SD/calls"; : > "$SD/ps.txt"
+}
+# agent <status> <pane_reaper> <focused> <seq> <terminal_id> <pane_reaper_min>
+agent() {
+    jq -n --arg s "$1" --arg r "$2" --argjson f "$3" --argjson q "$4" --arg t "$5" --arg m "$6" \
+      '{result:{agent:{pane_id:"w1:p1", workspace_id:"w1", terminal_id:$t,
+        state_change_seq:$q, agent_status:$s, focused:$f,
+        tokens:((if $r == "" then {} else {pane_reaper:$r} end)
+              + (if $m == "" then {} else {pane_reaper_min:$m} end))}}}' > "$SD/agent.json"
+}
+# workspace <pane_count> <is_linked_worktree: true|false|null>
+workspace() {
+    local wt=null
+    [[ "$2" != null ]] && wt="{\"is_linked_worktree\":$2}"
+    printf '{"result":{"workspace":{"workspace_id":"w1","pane_count":%s,"worktree":%s}}}\n' "$1" "$wt" > "$SD/workspace.json"
+}
+# procinfo [foreground_processes JSON array]: default is claude as pid 100.
+procinfo() {
+    local fg='[{"pid":100,"name":"claude"}]'
+    [[ $# -gt 0 ]] && fg=$1
+    printf '{"result":{"process_info":{"pane_id":"w1:p1","foreground_processes":%s}}}\n' "$fg" > "$SD/procinfo.json"
+}
+# pstable: stdin lines "pid ppid args"
+pstable() { cat > "$SD/ps.txt"; }
+envrun() {
+    env HERDR_BIN_PATH="$STUBBIN/herdr" HERDR_PLUGIN_ROOT="$PLUGIN" \
+        PANE_REAPER_STUB_DIR="$SD" PANE_REAPER_SLOT_DIR="$TMPROOT/slots" \
+        XDG_STATE_HOME="$TMPROOT/xdg" PANE_REAPER_PS_FILE="$SD/ps.txt" "$@"
+}
+event() { printf '{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1","agent_status":"%s"}}' "$1"; }
+hook() { hook_raw "$(event "$1")"; }
+hook_raw() {
+    envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" HERDR_PLUGIN_EVENT_JSON="$1" \
+        sh "$PLUGIN/on-status-changed.sh"
+}
+# hook_flap <seconds> <status>: the hook with an explicit flap tolerance, so a
+# slot's age is deterministically "young" (3600) or "old" (0).
+hook_flap() {
+    envrun PANE_REAPER_FLAP_SECONDS="$1" PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+        HERDR_PLUGIN_EVENT_JSON="$(event "$2")" sh "$PLUGIN/on-status-changed.sh"
+}
+recheck() { envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" sh "$PLUGIN/recheck.sh" "$@"; }
+recheck_spm() { local spm=$1; shift; envrun PANE_REAPER_SECONDS_PER_MIN="$spm" PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" sh "$PLUGIN/recheck.sh" "$@"; }
+recheck_write_denied() { envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PATH="$FAKEBIN:$PATH" sh "$PLUGIN/recheck.sh" "$@"; }
+# seed_slot <gen> <nonce> [epoch]: no epoch writes the legacy two-field form.
+seed_slot() { mkdir -p "$TMPROOT/slots"; printf '%s %s%s\n' "$1" "$2" "${3:+ $3}" > "$TMPROOT/slots/w1_p1"; }
+slot()     { cat "$TMPROOT/slots/w1_p1" 2>/dev/null; }
+lastlog()  { tail -n1 "$TMPROOT/xdg/pane-reaper/log" 2>/dev/null | cut -d' ' -f3-; }
+closes()   { grep -c '^pane close' "$SD/calls" || true; }
+clears()   { grep -c -- '--clear-token pane_reaper' "$SD/calls" || true; }
+ncalls()   { wc -l < "$SD/calls" | tr -d ' '; }
+launches() { if [[ -f "$TMPROOT/launch" ]]; then wc -l < "$TMPROOT/launch" | tr -d ' '; else echo 0; fi; }
+lastlaunch_min() { tail -n1 "$TMPROOT/launch" 2>/dev/null | awk '{print $NF}'; }
+
+echo "=== hook: filter and arm ==="
+reset; agent "done" ready false 7 T ""
+hook unknown
+check "unknown status: herdr is not called"      "$(ncalls)"    "0"
+reset; agent "done" "" false 7 T ""
+hook "done"
+check "done, not ready: no timer"                "$(launches)"  "0"
+reset; agent "done" ready false 7 T ""
+hook "done"
+check "done + ready: one timer"                  "$(launches)"  "1"
+check "done + ready: logged armed:5m"            "$(lastlog)"   "armed:5m"
+check "slot holds the generation"                "$(slot | cut -d' ' -f1)" "T:7"
+check "slot holds a numeric arm time"            "$([[ "$(slot | cut -d' ' -f3)" =~ ^[0-9]+$ ]] && echo yes)" "yes"
+hook idle
+check "same generation again: no second timer"   "$(launches)"  "1"
+# A newer seq on the same terminal means a turn ran in between (done->idle
+# keeps the seq), so the arm path disarms rather than re-arming. Flap tolerance
+# 0: the slot was armed a moment ago and would otherwise read as settling.
+agent idle ready false 8 T ""
+hook_flap 0 idle
+check "new seq: no second timer"                 "$(launches)"  "1"
+check "new seq: disarmed instead"                "$(lastlog)"   "disarmed:new-turn"
+# shellcheck disable=SC2016 # must stay unexpanded: it's a raw pane_reaper_min value under test, not an eval'd command
+for raw in "" abc '5;$(id)'; do
+    reset; agent "done" ready false 7 T "$raw"
+    hook "done"
+    check "pane_reaper_min='$raw' falls back to 5"  "$(lastlaunch_min)" "5"
+done
+reset; agent "done" ready false 7 T 2
+hook "done"
+check "pane_reaper_min=2 is honoured"            "$(lastlaunch_min)" "2"
+reset; agent "done" ready false 7 T "08"
+hook "done"
+check "pane_reaper_min=08 normalizes to 8"       "$(lastlaunch_min)" "8"
+reset; agent "done" ready false 7 T "00"
+hook "done"
+check "pane_reaper_min=00 normalizes to 0"       "$(lastlaunch_min)" "0"
+reset; agent "done" ready false 7 T "12345"
+hook "done"
+check "pane_reaper_min=12345 (too long) falls back to default 5" "$(lastlaunch_min)" "5"
+
+# Where the slot lives without PANE_REAPER_SLOT_DIR: XDG_RUNTIME_DIR first,
+# then a per-user state dir, never a shared /tmp path.
+reset; agent "done" ready false 7 T ""
+envrun env -u PANE_REAPER_SLOT_DIR XDG_RUNTIME_DIR="$TMPROOT/run" PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+    HERDR_PLUGIN_EVENT_JSON="$(event "done")" sh "$PLUGIN/on-status-changed.sh"
+check "slot dir: XDG_RUNTIME_DIR is used"        "$([[ -f "$TMPROOT/run/pane-reaper/w1_p1" ]] && echo yes)" "yes"
+reset; agent "done" ready false 7 T ""
+envrun env -u PANE_REAPER_SLOT_DIR -u XDG_RUNTIME_DIR PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+    HERDR_PLUGIN_EVENT_JSON="$(event "done")" sh "$PLUGIN/on-status-changed.sh"
+check "slot dir: falls back to XDG_STATE_HOME"   "$([[ -f "$TMPROOT/xdg/pane-reaper/slots/w1_p1" ]] && echo yes)" "yes"
+# An unwritable log (here: a directory in its place) must stay silent, or the
+# hook's stderr fills herdr's plugin output on every decision.
+reset; agent "done" ready false 7 T ""; mkdir -p "$TMPROOT/xdg/pane-reaper/log"
+check "unwritable log: nothing on stderr"        "$(hook "done" 2>&1 >/dev/null)" ""
+check "unwritable log: still armed"              "$(launches)"  "1"
+
+echo
+echo "=== hook: disarm on a new turn ==="
+reset; agent working ready false 9 T ""
+hook working
+check "working, never armed: herdr is not called" "$(ncalls)"   "0"
+reset; agent working ready false 7 T ""; seed_slot T:7 N1
+hook working
+check "same seq (presentation-only): token kept" "$(clears)"    "0"
+check "same seq: slot kept"                      "$(slot)"      "T:7 N1"
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+hook working
+check "new turn on an armed pane: token cleared" "$(clears)"    "1"
+check "new turn: slot removed"                   "$(slot)"      ""
+check "new turn: logged"                         "$(lastlog)"   "disarmed:new-turn"
+reset; agent blocked ready false 9 T ""; seed_slot T:7 N1
+hook blocked
+check "blocked counts as a new turn"             "$(clears)"    "1"
+# The real payload carries state_labels, whose keys are free-form. Keys named
+# like the real ones, placed after them, must not win.
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+hook_raw '{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"working","agent":"claude","title":"t","display_agent":"Claude","state_labels":{"agent_status":"done","pane_id":"w9:p9"}}}'
+check "state_labels keys: the real pane is read" "$(grep -c '^agent get w1:p1$' "$SD/calls")" "1"
+check "state_labels keys: handled as working"    "$(clears)"    "1"
+check "state_labels keys: no timer"              "$(launches)"  "0"
+
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+printf '%s\n' '{"error":{"code":"server_unavailable","message":"x"}}' > "$SD/metadata-fails"
+hook working
+check "failed clear: logged"                     "$(lastlog)"   "disarm-failed:server_unavailable"
+check "failed clear: slot marked disarmed"       "$(slot | cut -d' ' -f1)" "disarmed"
+agent "done" ready false 10 T ""
+hook "done"
+check "failed clear: refuses to re-arm"          "$(launches)"  "0"
+rm -f "$SD/metadata-fails"
+agent working ready false 11 T ""
+hook working
+check "retry after clear works: logged"          "$(lastlog)"   "disarmed:new-turn"
+check "retry after clear works: slot removed"    "$(slot)"      ""
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+printf 'boom\n' > "$SD/metadata-fails"
+hook working
+check "failed clear, non-JSON reply: code unknown" "$(lastlog)" "disarm-failed:unknown"
+check "failed clear, non-JSON reply: slot disarmed" "$(slot | cut -d' ' -f1)" "disarmed"
+
+echo
+echo "=== hook: the arm path disarms a pane whose working event was missed ==="
+# done with a newer seq than the armed slot, on the same terminal: a whole turn
+# ran in between (its working hook dropped, failed, or ran after this one).
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1
+hook "done"
+check "missed turn: token cleared"               "$(clears)"    "1"
+check "missed turn: logged"                      "$(lastlog)"   "disarmed:new-turn"
+check "missed turn: no timer"                    "$(launches)"  "0"
+check "missed turn: slot removed"                "$(slot)"      ""
+reset; agent idle ready false 9 T ""; seed_slot T:7 N1
+printf '%s\n' '{"error":{"code":"server_unavailable","message":"x"}}' > "$SD/metadata-fails"
+hook idle
+check "missed turn, failed clear: logged"        "$(lastlog)"   "disarm-failed:server_unavailable"
+check "missed turn, failed clear: slot disarmed" "$(slot | cut -d' ' -f1)" "disarmed"
+check "missed turn, failed clear: no timer"      "$(launches)"  "0"
+reset; agent "done" ready false 3 T2 ""; seed_slot T:7 N1
+hook "done"
+check "slot from another terminal: token kept"   "$(clears)"    "0"
+check "slot from another terminal: armed"        "$(launches)"  "1"
+check "slot from another terminal: overwritten"  "$(slot | cut -d' ' -f1)" "T2:3"
+
+echo
+echo "=== hook: flap tolerance (a state change soon after arming is settling) ==="
+# The live sequence: done@28 arms, working@29 (+0.3 s), done@30 (+0.9 s).
+reset; agent "done" ready false 28 T ""
+hook_flap 3600 "done"
+armed=$(slot)
+agent working ready false 29 T ""
+hook_flap 3600 working
+check "flap: working soon after arming keeps the token" "$(clears)" "0"
+check "flap: working soon after arming keeps the slot"  "$(slot)"   "$armed"
+agent "done" ready false 30 T ""
+hook_flap 3600 "done"
+check "flap: done@30 re-arms at the new generation" "$(slot | cut -d' ' -f1)" "T:30"
+check "flap: done@30 launches one more timer"    "$(launches)"  "2"
+check "flap: done@30 logged armed"               "$(lastlog)"   "armed:5m"
+check "flap: token never cleared"                "$(clears)"    "0"
+check "flap: re-arm has a fresh nonce"           "$([[ "$(slot | cut -d' ' -f2)" != "$(printf '%s' "$armed" | cut -d' ' -f2)" ]] && echo yes)" "yes"
+check "flap: re-arm keeps the first arm time"    "$(slot | cut -d' ' -f3)" "$(printf '%s' "$armed" | cut -d' ' -f3)"
+reset; agent "done" ready false 28 T ""
+hook_flap 0 "done"
+agent working ready false 29 T ""
+hook_flap 0 working
+check "no tolerance: working@29 clears the token" "$(clears)"   "1"
+check "no tolerance: working@29 removes the slot" "$(slot)"     ""
+# The arm path directly: same terminal, newer seq.
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$(date +%s)"
+armed=$(slot)
+hook_flap 3600 "done"
+check "young slot, newer seq: re-armed, not disarmed" "$(clears)" "0"
+check "young slot, newer seq: one timer"         "$(launches)"  "1"
+check "young slot, newer seq: new generation"    "$(slot | cut -d' ' -f1)" "T:9"
+check "young slot, newer seq: arm time kept"     "$(slot | cut -d' ' -f3)" "$(printf '%s' "$armed" | cut -d' ' -f3)"
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$(date +%s)"
+hook_flap 0 "done"
+check "old slot, newer seq: disarmed"            "$(lastlog)"   "disarmed:new-turn"
+check "old slot, newer seq: no timer"            "$(launches)"  "0"
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$(date +%s)"
+envrun PANE_REAPER_FLAP_SECONDS=abc PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+    HERDR_PLUGIN_EVENT_JSON="$(event "done")" sh "$PLUGIN/on-status-changed.sh"
+check "non-numeric flap setting: default 10 s, re-armed" "$(slot | cut -d' ' -f1)" "T:9"
+# Slots whose arm time can't be trusted read as old: the pre-flap behaviour.
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1
+hook_flap 3600 "done"
+check "legacy slot (no arm time), done: disarmed" "$(lastlog)"  "disarmed:new-turn"
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+hook_flap 3600 working
+check "legacy slot (no arm time), working: disarmed" "$(clears)" "1"
+# shellcheck disable=SC2016 # must stay unexpanded: a raw slot field under test
+for epoch in 12ab '$(id)' 99999999999999999999 9999999999 08; do
+    reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$epoch"
+    check "arm time '$epoch', done: nothing on stderr" "$(hook_flap 3600 "done" 2>&1 >/dev/null)" ""
+    check "arm time '$epoch', done: read as old, disarmed" "$(lastlog)" "disarmed:new-turn"
+    reset; agent working ready false 9 T ""; seed_slot T:7 N1 "$epoch"
+    check "arm time '$epoch', working: nothing on stderr" "$(hook_flap 3600 working 2>&1 >/dev/null)" ""
+    check "arm time '$epoch', working: read as old, cleared" "$(clears)" "1"
+done
+# A failed-clear marker is never "young", whatever arm time it carries.
+reset; agent working ready false 9 T ""; seed_slot disarmed N1 "$(date +%s)"
+hook_flap 3600 working
+check "disarmed marker with a fresh arm time: clear retried" "$(clears)" "1"
+
+echo
+echo "=== recheck: gates ==="
+# The standard ready pane: done, ready, unfocused, seq 7, terminal T, in a
+# 2-pane linked-worktree workspace, running claude as pid 100 with no children.
+base() { reset; agent "done" ready false 7 T ""; workspace 2 true; procinfo; seed_slot T:7 N1; }
+
+base; recheck w1:p1 T 7 N1 0
+check "happy path: closed"                       "$(closes)"    "1"
+check "happy path: logged"                       "$(lastlog)"   "closed"
+check "happy path: slot cleared"                 "$(slot)"      ""
+base; seed_slot T:7 OTHER; recheck w1:p1 T 7 N1 0
+check "superseded timer: herdr not called"       "$(ncalls)"    "0"
+check "superseded timer: slot untouched"         "$(slot)"      "T:7 OTHER"
+base; rm -f "$SD/agent.json"; recheck w1:p1 T 7 N1 0
+check "agent gone: skip"                         "$(lastlog)"   "skip:agent-gone"
+check "agent gone: no close"                     "$(closes)"    "0"
+base; agent "done" ready false 7 T2 ""; recheck w1:p1 T 7 N1 0
+check "terminal changed: skip"                   "$(lastlog)"   "skip:terminal-changed"
+base; agent "done" "" false 7 T ""; recheck w1:p1 T 7 N1 0
+check "token removed: skip"                      "$(lastlog)"   "skip:not-ready"
+base; agent working ready false 7 T ""; recheck w1:p1 T 7 N1 0
+check "working: skip"                            "$(lastlog)"   "skip:status"
+# The slot stays armed so the working hook that follows still finds it.
+check "working: slot kept"                       "$(slot)"      "T:7 N1"
+agent working ready false 8 T ""
+hook working
+check "working hook after the skip: token cleared" "$(clears)" "1"
+check "working hook after the skip: slot removed" "$(slot)"    ""
+base; agent idle ready false 8 T ""; recheck w1:p1 T 7 N1 0
+check "seq changed: skip"                        "$(lastlog)"   "skip:seq-changed"
+check "seq changed: no close"                    "$(closes)"    "0"
+check "seq changed: slot kept"                   "$(slot)"      "T:7 N1"
+base; agent "done" "" false 7 T ""; recheck w1:p1 T 7 N1 0
+check "other skips still drop the slot"          "$(slot)"      ""
+
+base
+pstable <<'PS'
+100 1 claude --settings {}
+200 100 /usr/bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-1.sh && gh pr checks --watch
+300 200 gh pr checks --watch
+PS
+recheck w1:p1 T 7 N1 0
+check "bash job alive: rearm"                    "$(lastlog)"   "rearm:bash-children"
+check "bash job alive: no close"                 "$(closes)"    "0"
+check "bash job alive: a new timer"              "$(launches)"  "1"
+check "bash job alive: slot has a new nonce"     "$([[ "$(slot)" == "T:7 "* && "$(slot | cut -d' ' -f2)" != "N1" ]] && echo yes)" "yes"
+check "rearm of a legacy slot: arm time reads old" "$(slot | cut -d' ' -f3)" "0"
+base; seed_slot T:7 N1 1234567890; agent "done" ready true 7 T ""; recheck w1:p1 T 7 N1 0
+check "rearm keeps the original arm time"        "$(slot | cut -d' ' -f3)" "1234567890"
+base
+pstable <<'PS'
+100 1 claude --settings {}
+210 100 node /opt/mcp/server.js
+900 1 /usr/bin/zsh -c source /x/shell-snapshots/snapshot-zsh-9.sh
+PS
+recheck w1:p1 T 7 N1 0
+check "only MCP children (and someone else's job): closed" "$(closes)" "1"
+base; procinfo '[{"pid":100,"name":"claude"},{"pid":150,"name":"node"}]'
+pstable <<'PS'
+100 1 claude --settings {}
+150 1 node helper.js
+250 150 /usr/bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-2.sh && make
+PS
+recheck w1:p1 T 7 N1 0
+check "bash job under the second root: rearm"    "$(lastlog)"   "rearm:bash-children"
+check "bash job under the second root: no close" "$(closes)"    "0"
+base; procinfo '[]'; recheck w1:p1 T 7 N1 0
+check "no foreground processes: rearm"           "$(lastlog)"   "rearm:bash-children"
+check "no foreground processes: no close"        "$(closes)"    "0"
+base; rm -f "$SD/procinfo.json"; recheck w1:p1 T 7 N1 0
+check "process-info unreadable: rearm"           "$(lastlog)"   "rearm:bash-children"
+check "process-info unreadable: no close"        "$(closes)"    "0"
+base; envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PATH="$AWKFAILBIN:$PATH" sh "$PLUGIN/recheck.sh" w1:p1 T 7 N1 0
+check "awk runtime error: rearm"                 "$(lastlog)"   "rearm:bash-children"
+check "awk runtime error: no close"              "$(closes)"    "0"
+base; envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PANE_REAPER_PS_FILE="$SD/no-such-ps.txt" sh "$PLUGIN/recheck.sh" w1:p1 T 7 N1 0
+check "ps source unreadable: rearm"              "$(lastlog)"   "rearm:bash-children"
+check "ps source unreadable: no close"           "$(closes)"    "0"
+base; agent "done" ready true 7 T ""; recheck w1:p1 T 7 N1 0
+check "focused: rearm"                           "$(lastlog)"   "rearm:focused"
+check "focused: no close"                        "$(closes)"    "0"
+base; workspace 1 null; recheck w1:p1 T 7 N1 0
+check "last pane of a plain workspace: skip"     "$(lastlog)"   "skip:primary-workspace-last-pane"
+base; workspace 1 false; recheck w1:p1 T 7 N1 0
+check "last pane of a primary checkout: skip"    "$(lastlog)"   "skip:primary-workspace-last-pane"
+base; workspace 1 true; recheck w1:p1 T 7 N1 0
+check "last pane of a linked worktree: closed"   "$(closes)"    "1"
+base; rm -f "$SD/workspace.json"; recheck w1:p1 T 7 N1 0
+check "workspace unreadable: skip"               "$(lastlog)"   "skip:workspace-unreadable"
+check "workspace unreadable: no close"           "$(closes)"    "0"
+base; printf '{"error":{"code":"confirmation_required","message":"x"}}\n' > "$SD/close-fails"
+recheck w1:p1 T 7 N1 0
+check "close refused: logged with its code"      "$(lastlog)"   "close-failed:confirmation_required"
+check "close refused: tried once"                "$(closes)"    "1"
+# The slot is re-read just before the close: a hook that disarmed or re-armed
+# the pane while the gates ran (staged at process-info, the last herdr call)
+# wins.
+base
+# shellcheck disable=SC2016 # expanded by the stub's shell, which has the slot dir
+printf '%s\n' 'printf "T:7 N2\n" > "$PANE_REAPER_SLOT_DIR/w1_p1"' > "$SD/procinfo-hook"
+recheck w1:p1 T 7 N1 0
+check "slot changed during the gates: no close"  "$(closes)"    "0"
+check "slot changed during the gates: silent"    "$(lastlog)"   ""
+check "slot changed during the gates: slot kept" "$(slot)"      "T:7 N2"
+base; recheck w1:p1 T 7 N1 'x;1'
+check "non-numeric minutes: herdr not called"    "$(ncalls)"    "0"
+
+base; recheck_spm 0 w1:p1 T 7 N1 08
+check "minutes '08' (leading zero): no crash, closed" "$(closes)" "1"
+base; recheck_spm 09 w1:p1 T 7 N1 0
+check "seconds-per-min '09' (leading zero): no crash, closed" "$(closes)" "1"
+
+base; agent "done" ready true 7 T ""
+chmod 500 "$TMPROOT/slots"
+recheck_write_denied w1:p1 T 7 N1 0
+chmod 700 "$TMPROOT/slots"
+check "unwritable slot dir: rearm-failed logged" "$(lastlog)"   "rearm-failed:focused"
+check "unwritable slot dir: no new timer"        "$(launches)"  "0"
+check "unwritable slot dir: slot unchanged"      "$(slot)"      "T:7 N1"
+
+echo
+echo "=== the hook returns at once and its timer still fires ==="
+# No PANE_REAPER_LAUNCH_LOG: a real detached recheck.sh. The command
+# substitution waits for EOF on the hook's stdout, exactly as herdr's plugin
+# runner does, so a timer that inherited the pipe would hold this for the whole
+# grace (3 s here) instead of returning at once.
+reset; agent "done" ready false 7 T 1; workspace 2 true; procinfo
+start=$(date +%s)
+_=$(envrun PANE_REAPER_SECONDS_PER_MIN=3 HERDR_PLUGIN_EVENT_JSON="$(event "done")" \
+    timeout 10 sh "$PLUGIN/on-status-changed.sh")
+elapsed=$(( $(date +%s) - start ))
+check "hook released its output before the grace" "$(( elapsed < 2 ? 1 : 0 ))" "1"
+for _ in $(seq 1 20); do
+    [[ "$(closes)" == 1 ]] && break
+    sleep 0.5
+done
+check "the detached timer closed the pane"       "$(closes)"    "1"
+
+echo
+echo "passed: $PASS  failed: $FAIL"
+(( FAIL == 0 ))

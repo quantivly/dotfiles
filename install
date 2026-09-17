@@ -116,6 +116,7 @@ if (( HERDR_ONLY )); then
        herdr plugin install natori-hrj/herdr-lazy
        herdr-lazy install
        herdr plugin link ${BASEDIR}/config/herdr/plugins/local/sidebar-icons
+       herdr plugin link ${BASEDIR}/config/herdr/plugins/local/pane-reaper
        systemctl --user daemon-reload
        systemctl --user enable --now herdr-server.service
 

@@ -2128,6 +2128,8 @@ _hspawn_usage() {
     '                                  unlocked ~/.claude/.credentials.json, which a profile switch' \
     '                                  overwrites under every holder at once. Needed only when there is' \
     '                                  no clauth profile to use. See `claude-doctor`.' \
+    '      --keep                      do not ask the worker to mark its pane for pane-reaper;' \
+    '                                  by default a finished worker closes its own pane.' \
     '      --tenant <tenant>           bill this spawn to a named tenant pool, instead of the one' \
     '                                  the spawn directory resolves to' \
     '  -m, --model <model>             claude --model (an alias like opus, or a full model name)' \
@@ -2256,10 +2258,24 @@ _hspawn_await_agent() {
   return 1
 }
 
+#------------------------------------------------------------------------------
+# _hspawn_reap_instruction — the pane-reaper contract, as told to a worker
+#------------------------------------------------------------------------------
+# hspawn appends this to every prompt it sends (`--keep` opts out), so a worker
+# that finishes closes its own pane through config/herdr/plugins/local/pane-reaper
+# instead of lingering until someone runs hreap. One line: `herdr agent prompt`
+# types it into the agent. $HERDR_PANE_ID stays literal and is expanded by the
+# worker's own shell. A prompt starting with `/` is a slash command, which takes
+# the rest of the line as its arguments, so it gets no instruction: the
+# paragraph would reach the command (e.g. /loop) as arguments.
+_hspawn_reap_instruction() {
+  print -r -- 'When your task is completely finished and its results are saved (committed, pushed, or written to a file), run this as the last command of your final turn so this pane closes itself: herdr pane report-metadata "$HERDR_PANE_ID" --source pane-reaper --token pane_reaper=ready — never while you are still waiting on a background job, a review, or a reply.'
+}
+
 hspawn() {
   local profile="" profile_set=0 model="" effort="" mode="auto" base="" name_override=""
   local tenant="" tenant_set=0
-  local endopts=0 shared=0
+  local endopts=0 shared=0 keep=0
   # REPLY is how _claude_pick_profile answers, and it is a shell-wide name: local
   # here so a spawn cannot leave its choice behind in the calling shell.
   local REPLY=""
@@ -2285,6 +2301,12 @@ hspawn() {
         # ISOLATED BY DEFAULT" in the header: this is the flag for a worker that
         # has to LEAD a team, and it is the only way to get the old behaviour.
         shared=1
+        shift
+        continue ;;
+      --keep)
+        # The worker is not asked to mark itself for pane-reaper: its pane
+        # stays until someone closes it.
+        keep=1
         shift
         continue ;;
       --profile=*|--model=*|--effort=*|--mode=*|--base=*|--name=*|--tenant=*)
@@ -2357,6 +2379,11 @@ hspawn() {
     fi
   fi
   local prompt="${(j: :)prompt_words}"
+  # Only a prompted worker can be told; an unprompted spawn is left as before,
+  # and so is a slash command (see _hspawn_reap_instruction).
+  if [[ -n "$prompt" && "$prompt" != /* ]] && (( ! keep )); then
+    prompt+=" $(_hspawn_reap_instruction)"
+  fi
 
   if [[ ! -d "$repo" ]]; then
     echo "Error: '$repo' is not a directory" >&2
@@ -3077,10 +3104,10 @@ hreap() {
   # census then read lower than the truth with nothing saying why — the same
   # shape of silent undercount that made hreap necessary in the first place.
   local total=0 unqueried=0
-  local pane ws detected astatus sid disp aname wslabel wpath
+  local pane ws detected astatus sid disp aname wslabel wpath reap
   local pinfo pid pname pcwd dashed tfile mtime idle_s idle_src et
   local rss_kb swap_kb mem_kb k v registry reg_vals tagged creator rname rslug rbranch rclosed name
-  while IFS="$sep" read -r pane ws detected astatus sid disp aname wslabel wpath; do
+  while IFS="$sep" read -r pane ws detected astatus sid disp aname wslabel wpath reap; do
     pinfo="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || { (( unqueried++ )); continue; }
     while IFS="$sep" read -r pid pname pcwd; do
       [[ -n "$pid" ]] || continue
@@ -3172,7 +3199,7 @@ hreap() {
         --arg pane "$pane" --arg workspace "$ws" --arg workspace_label "$wslabel" \
         --arg worktree_path "$wpath" --arg name "$name" --arg status "$astatus" \
         --argjson detected "$([[ "$detected" == yes ]] && echo true || echo false)" \
-        --argjson idle_s "${idle_s:-null}" --arg idle_src "$idle_src" --arg transcript "$tfile" \
+        --argjson idle_s "${idle_s:-null}" --arg idle_src "$idle_src" --arg reap "$reap" --arg transcript "$tfile" \
         --argjson pid "$pid" --arg process "$pname" --arg cwd "$pcwd" --arg session "$sid" \
         --argjson rss_kb "$rss_kb" --argjson swap_kb "$swap_kb" --argjson mem_kb "${mem_kb:-null}" \
         --argjson tagged "$tagged" --arg creator "$creator" --arg slug "$rslug" --arg branch "$rbranch" \
@@ -3196,7 +3223,8 @@ hreap() {
         (.terminal_title_stripped // ""),
         ($names[.pane_id] // ""),
         ($wsi[.workspace_id].label // ""),
-        ($wsi[.workspace_id].path // "") ]
+        ($wsi[.workspace_id].path // ""),
+        (.tokens.pane_reaper // "") ]
     | map(tostring | gsub("[\n\r]"; " ")) | join("\u001f")')
 
   local sorted shown
@@ -3217,8 +3245,8 @@ hreap() {
   fi
 
   local idle_h mem_h tag_h wsh starred=0
-  printf '%-8s %-18s %-22s %-4s %-8s %-8s %-8s %s\n' PANE WORKSPACE NAME DET STATUS IDLE MEM TAGGED
-  while IFS="$sep" read -r pane ws wslabel name detected astatus idle_s idle_src mem_kb tagged creator; do
+  printf '%-8s %-18s %-22s %-4s %-8s %-8s %-8s %-6s %s\n' PANE WORKSPACE NAME DET STATUS IDLE MEM REAP TAGGED
+  while IFS="$sep" read -r pane ws wslabel name detected astatus idle_s idle_src mem_kb reap tagged creator; do
     idle_h="$(_hreap_fmt_dur "$idle_s")"
     if [[ "$idle_src" == process ]]; then
       idle_h="${idle_h}*"
@@ -3233,11 +3261,11 @@ hreap() {
     fi
     wsh="$ws"
     [[ -n "$wslabel" ]] && wsh="$ws ($wslabel)"
-    printf '%-8s %-18.18s %-22.22s %-4s %-8s %-8s %-8s %s\n' \
-      "$pane" "$wsh" "$name" "$detected" "$astatus" "$idle_h" "$mem_h" "$tag_h"
+    printf '%-8s %-18.18s %-22.22s %-4s %-8s %-8s %-8s %-6s %s\n' \
+      "$pane" "$wsh" "$name" "$detected" "$astatus" "$idle_h" "$mem_h" "${reap:--}" "$tag_h"
   done < <(printf '%s' "$sorted" | jq -r '.[]
     | [ .pane, .workspace, .workspace_label, .name, (if .detected then "yes" else "no" end),
-        .status, (.idle_s // ""), .idle_src, (.mem_kb // ""), .tagged, .creator ]
+        .status, (.idle_s // ""), .idle_src, (.mem_kb // ""), .reap, .tagged, .creator ]
     | map(tostring) | join("\u001f")')
   local sum_kb
   sum_kb="$(printf '%s' "$sorted" | jq '[.[] | .mem_kb // 0] | add // 0')"

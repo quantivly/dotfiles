@@ -188,6 +188,27 @@ jobs:
       - name: Run the hspawn state table
         run: ./scripts/test-hspawn.sh
 
+  pane-reaper-test:
+    name: pane-reaper Plugin State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
+
+      # The plugin closes agent panes. Every row runs against a recording herdr
+      # stub on HERDR_BIN_PATH, and timers are recorded rather than spawned
+      # except in the one row that proves a real timer detaches with its stdio
+      # released (herdr holds a shared plugin slot until a hook's pipes close).
+      - name: Run the pane-reaper state table
+        run: ./scripts/test-pane-reaper.sh
+
   claude-doctor-test:
     name: Claude Account & MCP Doctor State Table
     runs-on: ubuntu-latest
