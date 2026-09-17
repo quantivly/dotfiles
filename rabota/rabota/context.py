@@ -1,11 +1,29 @@
 """Per-invocation context every command builds first: config, tenant, store, runner, scrubbed env."""
 import os
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
 from rabota import config, secrets
 from rabota.runner import SubprocessRunner
 from rabota.store import Store
+
+# Innermost-last stack of lists; ``Context.__init__`` appends itself to the top one. A command
+# builds its own Context inside ``run(ns)``, so ``cli.main`` cannot hold it directly: it opens a
+# collector around the run instead and closes whatever landed in it. A Context built outside any
+# collector (a test's helper, say) is tracked by nobody and is its builder's to close.
+_collectors = []
+
+
+@contextmanager
+def track_contexts():
+    """Collect every ``Context`` built inside the block, so the caller can close them all."""
+    opened = []
+    _collectors.append(opened)
+    try:
+        yield opened
+    finally:
+        _collectors.remove(opened)
 
 
 class Context:
@@ -16,6 +34,8 @@ class Context:
         self.runner, self.env, self.dry_run = runner, env, dry_run
         self.today = today or date.today()
         self._store = None
+        if _collectors:
+            _collectors[-1].append(self)
 
     @property
     def store(self) -> Store:
@@ -23,6 +43,18 @@ class Context:
         if self._store is None:
             self._store = Store.open(self.state_dir)
         return self._store
+
+    def close(self):
+        """Close the store if this context opened one. Idempotent; a no-op if it never did."""
+        store, self._store = self._store, None
+        if store is not None:
+            store.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()   # returns None: never suppresses the body's exception
 
     @classmethod
     def from_namespace(cls, ns, cfg_base=None, runner=None, env=None, cwd=None, today=None):

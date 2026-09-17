@@ -1,9 +1,10 @@
-import io, json, os, shutil, tempfile, unittest
+import io, json, os, shutil, sqlite3, tempfile, unittest
 from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import patch
 from rabota import cli, errors
 from rabota.context import Context
+from rabota.store import Store
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -16,6 +17,19 @@ def run_cli(argv):
     with redirect_stdout(out), redirect_stderr(err):
         code = cli.main(argv)
     return code, out.getvalue(), err.getvalue()
+
+
+def install_fixture_home(test):
+    """Point ``$HOME`` at a throwaway copy of the config fixture for the life of ``test``.
+
+    Sets ``test.home`` and ``test.base`` (the ``~/.dotfiles-local/rabota`` inside it).
+    """
+    tmp = tempfile.TemporaryDirectory(); test.addCleanup(tmp.cleanup)
+    test.home = Path(tmp.name) / "home"
+    test.base = test.home / ".dotfiles-local" / "rabota"
+    shutil.copytree(FIX, test.base)
+    home_patch = patch.dict(os.environ, {"HOME": str(test.home)})
+    home_patch.start(); test.addCleanup(home_patch.stop)
 
 
 class CliTests(unittest.TestCase):
@@ -105,12 +119,7 @@ class ExitCodeTests(unittest.TestCase):
     """Spec C1: nothing escapes as a traceback. Config faults are usage (2); the rest is error (5)."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
-        self.home = Path(tmp.name) / "home"
-        self.base = self.home / ".dotfiles-local" / "rabota"
-        shutil.copytree(FIX, self.base)
-        home_patch = patch.dict(os.environ, {"HOME": str(self.home)})
-        home_patch.start(); self.addCleanup(home_patch.stop)
+        install_fixture_home(self)
 
     def run_cli(self, argv):
         code, out, err = run_cli(argv)
@@ -189,3 +198,65 @@ class ExitCodeTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, 7)
         with self.assertRaises(KeyboardInterrupt):
             run_cli(["interrupt"])
+
+
+class StoreLifecycleTests(unittest.TestCase):
+    """``cli.main`` closes every store connection the command opened, however the command ended.
+
+    Every connection the run creates is recorded through ``sqlite3.connect`` and then asked to
+    work: sqlite3 raises ``ProgrammingError`` on a closed connection. This needs no
+    ``ResourceWarning`` (python 3.12+ only) and no look at ``/proc``.
+    """
+
+    def setUp(self):
+        install_fixture_home(self)
+        self.connections = []
+        real_connect = sqlite3.connect
+
+        def recording_connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            self.connections.append(conn)
+            return conn
+        connect_patch = patch("rabota.store.sqlite3.connect", recording_connect)
+        connect_patch.start(); self.addCleanup(connect_patch.stop)
+        # The test must not itself leak what it recorded (closing a closed connection is a no-op).
+        self.addCleanup(lambda: [c.close() for c in self.connections])
+
+    def _register_store_command(self, name, after):
+        """Register ``name``: builds a Context, touches its store, then returns ``after(ctx)``."""
+        def run(ns):
+            ctx = Context.from_namespace(ns)
+            ctx.store.schema_version()
+            return after(ctx)
+        cli.register(name, lambda sub: sub.add_parser(name), run)
+        return ["--tenant", "quantivly", "--state-dir", str(self.home / "state"), name]
+
+    def assertAllClosed(self):
+        self.assertTrue(self.connections, "the command opened no connection, so nothing was measured")
+        for conn in self.connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute("SELECT 1")
+
+    def test_main_closes_the_store_on_the_success_path(self):
+        argv = self._register_store_command("storeok", lambda ctx: {"ok": True})
+        code, _out, err = run_cli(argv)
+        self.assertEqual(code, 0, err)
+        self.assertAllClosed()
+
+    def test_main_closes_the_store_on_the_error_path(self):
+        def fail(ctx):
+            raise errors.Refused("after opening the store")
+        argv = self._register_store_command("storefail", fail)
+        code, _out, err = run_cli(argv)
+        self.assertEqual(code, 3, err)
+        self.assertAllClosed()
+
+    def test_a_teardown_error_does_not_mask_the_exit_code(self):
+        def fail(ctx):
+            raise errors.Refused("the real failure")
+        argv = self._register_store_command("storeteardown", fail)
+        with patch.object(Store, "close", side_effect=sqlite3.OperationalError("close failed")):
+            code, _out, err = run_cli(argv)
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(err)["error"]["code"], "refused")
+        self.assertIn("the real failure", err)
