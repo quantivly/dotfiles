@@ -136,18 +136,52 @@ def _guard_dominates(fn, guard, write_call):
     return block.index(guard) < block.index(lead)
 
 
+def _bindings_of(fn, name):
+    """Every AST node under ``fn`` that binds ``name`` — the constructs, not the statement types
+    that usually carry them (eval-5 k8: counting ``Assign`` nodes with a plain ``Name`` target let
+    ``text, _n = json.dumps(out), 1`` rebind the guarded name invisibly). A ``Name`` in Store context
+    covers an assignment target at any nesting (tuple, list, starred), ``for``/``async for``, ``with … as``
+    (bare or tuple), comprehension targets, ``:=`` and augmented/annotated assignment; the rest bind
+    without a ``Name`` node: ``except … as``, ``import``/``from … import`` with or without ``as``, the
+    ``match`` capture forms (``MatchAs``, ``MatchStar``, ``MatchMapping``'s ``**rest`` — sub-patterns of
+    ``MatchSequence``/``MatchClass``/``MatchOr`` are reached by the walk), a nested ``def``/``class`` of
+    that name, and a ``global``/``nonlocal`` declaration, which makes the guard bind a name some other
+    scope can rebind. Parameters are not counted: the guard rebinding its own parameter is the shape
+    ``_guard_dominates`` judges."""
+    out = []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id == name:
+            out.append(n)
+        elif isinstance(n, ast.ExceptHandler) and n.name == name:
+            out.append(n)
+        elif isinstance(n, ast.alias) and (n.asname or n.name.split(".", 1)[0]) == name:
+            out.append(n)
+        elif isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name == name:
+            out.append(n)
+        elif isinstance(n, ast.MatchMapping) and n.rest == name:
+            out.append(n)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n is not fn and n.name == name:
+            out.append(n)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            out.append(n)
+    return out
+
+
 def _guarded_write(path, lineno):
     """True iff the ``.write_text``/``.write_bytes`` call on ``lineno`` writes one bare name, that name
-    is bound exactly once in the innermost enclosing function, by ``x = secrets.assert_clean(...)``,
-    and that binding dominates the write (``_guard_dominates``): the write cannot be reached without it.
+    is bound exactly once in the innermost enclosing function — by any construct that binds a name
+    (``_bindings_of``) — that one binding is ``x = secrets.assert_clean(...)`` with ``x`` its whole
+    target, and it dominates the write (``_guard_dominates``): the write cannot be reached without it.
 
     Anything the AST cannot vouch for — no enclosing function, an expression argument, a name
     with no binding in the function (a parameter, a global), a second binding anywhere in the
-    function (a rebinding after the guard is a new value; a guard on one branch only is one), or a
-    single guard binding the write can bypass (eval-4 mutant A: the written name is a parameter and
-    the one binding sits under an ``if``, so counting bindings saw exactly one and it was the guard) —
-    is False, and the line falls through to "unexplained". False on a doubt, never True. Keyword
-    arguments (``encoding=``, ``newline=``) are ignored: the content is the one positional argument.
+    function however it is spelled (a rebinding after the guard is a new value; a guard on one
+    branch only is one; ``text, _n = …``, ``except E as text``, ``import x as text`` and a ``match``
+    capture are all rebindings — eval-5 k8), or a single guard binding the write can bypass (eval-4
+    mutant A: the written name is a parameter and the one binding sits under an ``if``, so counting
+    bindings saw exactly one and it was the guard) — is False, and the line falls through to
+    "unexplained". False on a doubt, never True. Keyword arguments (``encoding=``, ``newline=``) are
+    ignored: the content is the one positional argument.
     """
     tree = ast.parse(path.read_text())
     fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.lineno <= lineno <= n.end_lineno]
@@ -159,19 +193,14 @@ def _guarded_write(path, lineno):
     if len(writes) != 1 or len(writes[0].args) != 1 or not isinstance(writes[0].args[0], ast.Name):
         return False
     name = writes[0].args[0].id
-    bindings = []
-    for n in ast.walk(fn):
-        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets):
-            bindings.append(n)
-        elif isinstance(n, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and isinstance(n.target, ast.Name) and n.target.id == name:
-            return False
-        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)) and isinstance(n.target, ast.Name) and n.target.id == name:
-            return False
-        elif isinstance(n, ast.withitem) and isinstance(n.optional_vars, ast.Name) and n.optional_vars.id == name:
-            return False
-    return (len(bindings) == 1 and len(bindings[0].targets) == 1
-            and isinstance(bindings[0].value, ast.Call) and _is_assert_clean(bindings[0].value)
-            and _guard_dominates(fn, bindings[0], writes[0]))
+    bound = _bindings_of(fn, name)
+    if len(bound) != 1 or not isinstance(bound[0], ast.Name):
+        return False
+    # the one binding must be the WHOLE target of a plain assignment whose value is the guard call —
+    # ``text, _n = assert_clean(...), 1`` binds ``text`` once too, to a tuple element
+    guard = next((s for s in ast.walk(fn) if isinstance(s, ast.Assign) and len(s.targets) == 1 and s.targets[0] is bound[0]), None)
+    return (guard is not None and isinstance(guard.value, ast.Call) and _is_assert_clean(guard.value)
+            and _guard_dominates(fn, guard, writes[0]))
 
 
 def _classify(pkg=PKG):
@@ -322,6 +351,73 @@ class WriteGuardTests(unittest.TestCase):
                 pkg = self._fixture("m.py", body); path = pkg / "m.py"
                 lineno = next(i for i, l in enumerate(path.read_text().splitlines(), 1) if "p.write_text(" in l)
                 self.assertIs(_guarded_write(path, lineno), want, label)
+
+    def test_guarded_write_sees_every_construct_that_binds_the_written_name(self):
+        # eval-5 k8: "bound exactly once" counted only ``ast.Assign`` nodes with a plain ``ast.Name``
+        # target, so a rebinding spelled any other way was invisible and the write stayed excused —
+        # ``text, _n = json.dumps(out), 1`` after the guard reported True, 0 unexplained, against the
+        # REAL census.py. Every construct Python has for binding a name is a second binding here,
+        # and any one of them beside the guard must refuse the write the way a second ``Assign`` does.
+        head = "def write(ctx, out):\n    text = secrets.assert_clean(json.dumps(out), os.environ)\n"
+        ahead = "async def write(ctx, out):\n    text = secrets.assert_clean(json.dumps(out), os.environ)\n"
+        write = '    p.write_text(text)\n'
+        cases = {
+            "tuple target":                  head + "    text, _n = json.dumps(out), 1\n",
+            "list target":                   head + "    [text, _n] = [json.dumps(out), 1]\n",
+            "starred target":                head + "    _h, *text = [1, 2]\n",
+            "name nested in a tuple target": head + "    (_a, text), _b = (1, 2), 3\n",
+            "for tuple target":              head + "    for text, _i in ctx.items:\n        pass\n",
+            "async for target":              ahead + "    async for text in ctx.items:\n        pass\n",
+            "with as":                       head + "    with ctx.lock() as text:\n        pass\n",
+            "with as tuple":                 head + "    with ctx.lock() as (text, _fh):\n        pass\n",
+            "async with as":                 ahead + "    async with ctx.lock() as text:\n        pass\n",
+            "except as":                     head + "    try:\n        pass\n    except Exception as text:\n        pass\n",
+            "import as":                     head + "    import json as text\n",
+            "from import as":                head + "    from os import environ as text\n",
+            "bare import":                   head + "    import text\n",
+            "from import, no alias":         head + "    from os import text\n",
+            "match capture":                 head + "    match ctx.mode:\n        case text:\n            pass\n",
+            "match as":                      head + "    match ctx.mode:\n        case [1, 2] as text:\n            pass\n",
+            "match star":                    head + "    match ctx.mode:\n        case [_first, *text]:\n            pass\n",
+            "match mapping rest":            head + "    match ctx.mode:\n        case {'k': 1, **text}:\n            pass\n",
+            "match sequence sub-pattern":    head + "    match ctx.mode:\n        case [text, _second]:\n            pass\n",
+            "match class sub-pattern":       head + "    match ctx.mode:\n        case Point(x=text):\n            pass\n",
+            "match or sub-patterns":         head + "    match ctx.mode:\n        case [text] | [text, _]:\n            pass\n",
+            "nested def of that name":       head + "    def text():\n        pass\n",
+            "nested class of that name":     head + "    class text:\n        pass\n",
+            "global declaration":            "def write(ctx, out):\n    global text\n    text = secrets.assert_clean(json.dumps(out), os.environ)\n",
+            # the guard's result bound to the name UNPACKED — the one binding is the Name, the whole target
+            # is not: ``text`` holds a list of characters, not what assert_clean returned
+            "starred unpack of the guard call": "def write(ctx, out):\n    *text, = secrets.assert_clean(json.dumps(out), os.environ)\n",
+            "nonlocal declaration":          "def outer():\n    text = 1\n    def write(ctx, out):\n        nonlocal text\n"
+                                             "        text = secrets.assert_clean(json.dumps(out), os.environ)\n        p.write_text(text)\n",
+        }
+        for label, body in cases.items():
+            if not body.rstrip().endswith("p.write_text(text)"):
+                body += write
+            with self.subTest(label):
+                pkg = self._fixture("m.py", body); path = pkg / "m.py"
+                lineno = next(i for i, l in enumerate(path.read_text().splitlines(), 1) if "p.write_text(" in l)
+                self.assertIs(_guarded_write(path, lineno), False, label)
+        # the control: the same head and write with no second binding is the one accepted shape
+        pkg = self._fixture("m.py", head + write); path = pkg / "m.py"
+        lineno = next(i for i, l in enumerate(path.read_text().splitlines(), 1) if "p.write_text(" in l)
+        self.assertIs(_guarded_write(path, lineno), True)
+
+    def test_a_tuple_rebinding_in_the_real_census_write_is_unexplained(self):
+        # The report's own repro (eval-5 k8), against a COPY of the real census.py: the guard line
+        # stays, a tuple assignment rebinds ``text`` between it and the write, and the write must be
+        # unexplained. The edit is asserted to have applied, so a fixture whose hook line has moved
+        # fails here rather than passing against the unmodified module.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "rabota"
+            import shutil; shutil.copytree(PKG, pkg, ignore=shutil.ignore_patterns("__pycache__"))
+            census = pkg / "census.py"; src = census.read_text()
+            hook = 'json.dumps(out, indent=1, sort_keys=True) + "\\n", os.environ)\n'
+            self.assertEqual(src.count(hook), 1, "census.py no longer has the guard line this fixture hooks; update the fixture")
+            census.write_text(src.replace(hook, hook + "    text, _n = json.dumps(out), 1\n"))
+            un = self._unexplained(pkg)
+            self.assertEqual(len(un), 1, un); self.assertIn("census.py:", un[0]); self.assertIn("write_text(text)", un[0])
 
     def test_guarded_entries_name_a_real_line_and_the_scan_uses_them(self):
         # Both shipped entries must match a live line (stale exemptions are failures, as for
