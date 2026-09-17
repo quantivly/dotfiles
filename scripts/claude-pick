@@ -74,6 +74,22 @@
 # profile clauth has marked stale is refused here only by its file's mtime.
 # `rabota census` reads clauth's verdict directly and names it in unavailable[].
 #
+# A ROLLED WINDOW IS AN UNMEASURED ONE TOO, AND THE MTIME CANNOT SEE IT. The
+# mtime test alone let a `touch`ed three-hour-old cache pass, and ignored a
+# five_hour.resets_at already in the past — the window the number describes
+# has ended, so the number is about nothing, however new the file is. A real
+# clauth write rewrites content and mtime together, which makes this low-risk,
+# not absent, and this is a safety gate. So after the mtime test the gate reads
+# the parsed reset: an instant in the past refuses (state gate-unmeasured, the
+# same sentence the mtime refusal says), and an ABSENT or UNPARSEABLE reset
+# refuses as well — unmeasured, never optimistic. Note what that second rule
+# costs: clauth omits resets_at for a window that has not started (measured
+# 2026-09-10, absent exactly where utilization is 0.0), so a seat on a fresh,
+# unstarted window is refused here until its first request stamps a reset. The
+# ranker (zshrc.herdr) still scores such a seat; only the headless gate declines
+# to start a lane on a window it cannot date. The instant is reported in the
+# gate object as resets_at (RFC 3339 UTC, or null) beside cache_age_s.
+#
 # EVERY TUNING VALUE IS VALIDATED BEFORE IT IS USED, AND A BAD ONE REFUSES.
 # CLAUDE_PICK_GATE_MAX, CLAUDE_PICK_RATE_DEFAULT and the CLAUDE_PICK_RATES entry
 # in use must be positive integers; CLAUDE_PICK_CACHE_MAX_AGE a non-negative
@@ -90,11 +106,12 @@
 # A pinned seat (--profile) still goes through the gate — it is the one thing a
 # pin does not override, because the gate is about the window, not the choice.
 # The JSON object carries "gate": {model, effort, est_minutes, rate, projected,
-# max, cache_age_s, cache_max_age_s, verdict: allow|refuse}, or null when --gate
-# was not given. cache_age_s is the age the decision was made on (null only when
-# there is no usage cache at all) and cache_max_age_s the threshold applied — so
-# a consumer can tell "refused as stale" from "refused as absent" without
-# parsing the reason.
+# max, cache_age_s, cache_max_age_s, resets_at, verdict: allow|refuse}, or null
+# when --gate was not given. cache_age_s is the age the decision was made on
+# (null only when there is no usage cache at all), cache_max_age_s the
+# threshold applied, and resets_at the parsed 5h reset the decision was made on
+# (null when absent or unparseable) — so a consumer can tell "refused as stale"
+# from "refused as absent" from "refused as rolled" without parsing the reason.
 #
 # --strict IS THE ONLY THING THAT SWITCHES SEMANTICS, and there is no TTY
 # sniffing. §5.4 defines interactive by "a TTY on stderr" for `claude`, where the
@@ -140,8 +157,9 @@ usage() {
   print -r -- "                refuse (exit 2) when the picked seat's projected 5h"
   print -r -- "                use exceeds 95% (CLAUDE_PICK_GATE_MAX), or is unmeasured,"
   print -r -- "                or its usage reading is older than 600 s"
-  print -r -- "                (CLAUDE_PICK_CACHE_MAX_AGE), or a tuning value does"
-  print -r -- "                not parse (never a silent default)"
+  print -r -- "                (CLAUDE_PICK_CACHE_MAX_AGE), or its 5h reset is"
+  print -r -- "                already past, absent or unreadable, or a tuning"
+  print -r -- "                value does not parse (never a silent default)"
   print -r -- ""
   print -r -- "Exit: 0 picked · 2 refused (exhausted, or the gate) · 3 refused (machine)"
   print -r -- "      4 unusable tenant table · 5 no profiles · 64 usage"
@@ -290,6 +308,19 @@ json_instant() {
   printf '%s' "$out" | jq -Rs .
 }
 
+# The same instant for a REASON string: the bare RFC 3339 UTC text, or the
+# literal `unknown`. Not json_instant, whose output is JSON-quoted and would put
+# a pair of double quotes into a sentence; not a local-time rendering, because a
+# reason lands in a log read from other machines and the JSON beside it is UTC.
+text_instant() {
+  local at="${1:-}" TZ=UTC out
+  [[ "$at" == (-|)<-> ]] || { print -r -- unknown; return 0 }
+  zmodload zsh/datetime 2>/dev/null || { print -r -- unknown; return 0 }
+  strftime -s out '%Y-%m-%dT%H:%M:%SZ' "$at" 2>/dev/null \
+    || { print -r -- unknown; return 0 }
+  print -r -- "$out"
+}
+
 # load1 as a decimal, from the x100 integer the measurement publishes. Built as
 # text rather than divided, because this file is integer-only for the same reason
 # the picker is: no zsh/mathfunc, which the state table's from-scratch PATH
@@ -435,6 +466,21 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
     gate_verdict=refuse; _claude_pick_state=gate-unmeasured
     _claude_pick_reason="$REPLY's 5h reading (${_claude_pick_u5}%) is ${_claude_pick_age}s old, past CLAUDE_PICK_CACHE_MAX_AGE=${gate_max_age}s; a stale reading is an unmeasured one"
     REPLY=""; rc=2
+  elif [[ "$_claude_pick_r5" != (-|)<-> ]]; then
+    # No reset instant — absent (an unstarted window, the way clauth writes
+    # one) or unparseable. The mtime cannot date the WINDOW, only the file, so a
+    # reading with no reset is a reading of unknown currency: unmeasured, never
+    # optimistic. See A ROLLED WINDOW IS AN UNMEASURED ONE TOO, above.
+    gate_verdict=refuse; _claude_pick_state=gate-unmeasured
+    _claude_pick_reason="$REPLY has a 5h reading (${_claude_pick_u5}%) with no readable reset instant (five_hour.resets_at absent or unparseable); refusing rather than assuming the window is current"
+    REPLY=""; rc=2
+  elif (( _claude_pick_r5 < 0 )); then
+    # The window the number describes has ended. The file may be brand new — a
+    # `touch`, or a writer that kept a rolled reading — and the mtime test above
+    # passed it; the reset is the value and "now" is the threshold.
+    gate_verdict=refuse; _claude_pick_state=gate-unmeasured
+    _claude_pick_reason="$REPLY's 5h reading (${_claude_pick_u5}%) is for a window that reset at $(text_instant "$_claude_pick_r5_at") ($(( - _claude_pick_r5 ))s ago; the threshold is now); a rolled window is an unmeasured one"
+    REPLY=""; rc=2
   else
     gate_projected=$(( _claude_pick_u5 + (gate_rate * gate_minutes) / 60 ))
     if (( gate_projected > gate_max )); then
@@ -562,6 +608,7 @@ if (( as_json )); then
        gate:         (if $gate_on == 1 then {model: $gate_model, effort: $gate_effort, est_minutes: $gate_min, rate: $gate_rate,
                                              projected: $gate_proj, max: $gate_max,
                                              cache_age_s: $cache_age, cache_max_age_s: $gate_max_age,
+                                             resets_at: $r5,
                                              verdict: (if $gate_verdict == "" then null else $gate_verdict end)}
                       else null end),
        warnings:     $warnings,

@@ -1392,11 +1392,23 @@ check "...and the quarantined account really was excluded" "$CLI_OUT" "b2"
 # refusal has a state a caller can switch on and a null profile.
 new_home gate
 H="$FHOME"
-gate_profile() {   # gate_profile NAME U5 [AGE_S]  → a registered fixture profile at U5 % of its 5h window,
-                   # whose usage_cache.json was written AGE_S seconds ago (default: just now)
+# The fixture's 5h reset is the same far-future literal every other section
+# uses (2099), NOT a date near the day the rows were written: the first version
+# said 2026-09-16T20:00:00Z, which was already in the past by the time the gate
+# learned to read it — a fixture describing a rolled window while every row
+# treated it as live. Past is the matching far-past literal (2000). A fourth
+# argument overrides the instant; `-` omits the key altogether, which is how
+# clauth writes a window that has not started.
+GATE_FUTURE='2099-01-01T00:00:00Z'
+GATE_PAST='2000-01-01T00:00:00Z'
+gate_profile() {   # gate_profile NAME U5 [AGE_S] [RESETS_AT|-]  → a registered fixture profile at U5 % of its
+                   # 5h window, whose usage_cache.json was written AGE_S seconds ago (default: just now)
+                   # and whose five_hour.resets_at is RESETS_AT (default GATE_FUTURE; `-` = no key)
+  local r="${4:-$GATE_FUTURE}" fh
+  if [[ "$r" == - ]]; then fh="{\"utilization\":$2}"; else fh="{\"utilization\":$2,\"resets_at\":\"$r\"}"; fi
   mkdir -p "$H/.clauth/profiles/$1"
   : > "$H/.clauth/profiles/$1/credentials.json"
-  printf '{"five_hour":{"utilization":%s,"resets_at":"2026-09-16T20:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2026-09-21T00:00:00Z"},"plan":{"tier":"Team"}}\n' "$2" \
+  printf '{"five_hour":%s,"seven_day":{"utilization":10,"resets_at":"2099-01-06T00:00:00Z"},"plan":{"tier":"Team"}}\n' "$fh" \
     > "$H/.clauth/profiles/$1/usage_cache.json"
   if [[ -n "${3:-}" ]]; then
     touch -d "$3 seconds ago" "$H/.clauth/profiles/$1/usage_cache.json"
@@ -1557,6 +1569,50 @@ HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --gate --m
 check "gate: --est-minutes 0 is a usage error (64)"       "$?" "64"
 HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --gate --model a --effort b --est-minutes=0 2>/dev/null
 check "gate: ...in the --est-minutes=0 spelling too"      "$?" "64"
+
+# --- gate: a window that has ROLLED is unmeasured (cleanup brief ws4p-cleanup, defect 2)
+# The staleness test above reads only the file's mtime, so `touch` on a
+# three-hour-old cache made a stale reading pass, and a five_hour.resets_at
+# already in the past — the window has rolled, so the number describes a window
+# that no longer exists — was ignored while the file was new. A real clauth
+# write rewrites content and mtime together, which makes this low-risk, not
+# absent, and this is a safety gate. A reset in the past is the same refusal
+# the mtime one already makes — exit 2, gate-unmeasured — and an ABSENT or
+# UNPARSEABLE reset refuses too: unmeasured, never optimistic. The parsed
+# instant is reported in the gate object beside cache_age_s so the refusal can
+# be read without guessing.
+gate_profile rp 30 "" "$GATE_PAST"                       # fresh mtime, rolled window
+gate_run rp
+check "gate: a FRESH file whose 5h reset is in the past refuses" "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate: ...naming the reset instant and that it has rolled" "$(has_words "$(jq -r .reason <<<"$out")" "$GATE_PAST" rolled)" "yes"
+check "gate: ...profile is null on the refusal"                  "$(jq -r .profile <<<"$out")" "null"
+check "gate: ...and the gate object reports the parsed resets_at" "$(jq -r .gate.resets_at <<<"$out")" "$GATE_PAST"
+check "gate: ...beside cache_age_s"  "$(jq -r '.gate | has("resets_at") and has("cache_age_s") and (.cache_age_s|type == "number")' <<<"$out")" "true"
+gate_profile rf 30 "" "$GATE_FUTURE"                     # the same fixture, window still open
+gate_run rf
+check "gate: the same fixture with a FUTURE reset allows"        "$rc" "0"
+check "gate: ...verdict allow"                                   "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "gate: ...and reports the reset it allowed on"             "$(jq -r .gate.resets_at <<<"$out")" "$GATE_FUTURE"
+gate_profile rn 30 "" -                                  # no resets_at key at all
+gate_run rn
+check "gate: a MISSING resets_at refuses rather than allows"     "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate: ...and resets_at is null in the gate object"        "$(jq -r .gate.resets_at <<<"$out")" "null"
+gate_profile ru 30 "" "not a timestamp"                  # unparseable
+gate_run ru
+check "gate: an UNPARSEABLE resets_at refuses rather than allows" "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate: ...and resets_at is null, never an epoch"           "$(jq -r .gate.resets_at <<<"$out")" "null"
+# The mtime test runs FIRST, so a file that is both stale and rolled is
+# reported as stale — the message the rows above this section already pin.
+gate_profile rb 30 10800 "$GATE_PAST"
+gate_run rb
+check "gate: stale AND rolled is reported as stale"              "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_CACHE_MAX_AGE)" "yes"
+# A rolled window is not a projection: nothing is computed on a number the gate
+# refused to trust, so `projected` is null.
+gate_run rp
+check "gate: a rolled window has no projection"                  "$(jq -r .gate.projected <<<"$out")" "null"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
