@@ -2863,10 +2863,17 @@ and the three broken accounts fell to one success per **~1010 s**.
 
 That figure reproduces exactly, and saying where the last 20 s come from matters, because
 otherwise the next reader computes 90 + 900 = 990, sees 1010, and concludes the mechanism is
-wrong. `poll_backoff_ms` (`scheduler.rs:285`) adds `min(10 s × 3^(n−1), 900 s)` — the
-`rate_limit_backoff_ms` ladder at `:1379`, capped **by its caller**, not inside itself — on top
-of the 90 s interval, and the deterministic per-profile spread at `:1430` adds `[0, interval/4)`
-= `[0, 22.5) s`. Predicted 990–1012.5 s; measured 992, 994, 999, 1009, 1010, 1011, 1012, 1013.
+wrong. **The 900 s is `auth_broken`'s flat widen, NOT the `rate_limit_backoff_ms` ladder** — this
+paragraph said the ladder until 2026-09-17, and that was refuted by reading v0.15.1 rather than the
+0.14.1 checkout: `poll_backoff_ms` (`scheduler.rs:304` at v0.15.1) returns
+`AUTH_BROKEN_BACKOFF_MS` on its FIRST line when the flag is set, so for a quarantined profile the
+ladder branch below it is unreachable. Both constants happen to be 900 s, which is why the
+arithmetic never looked wrong. The **shape** is what separates them: the ladder climbs
+(10 → 30 → 90 → 270 → 810 → 900 s, so gaps of ~100, 120, 180, 360, 900, 990), while the measured
+gaps are flat from the first one — 992, 994, 999, 1009, 1010, 1011, 1012, 1013, all within 23 s of
+each other. On top of the 90 s interval, the deterministic per-profile spread (`:1430`) adds
+`[0, interval/4)` = `[0, 22.5) s`, which survives under either mechanism and is where the last
+~20 s come from. Predicted 990–1012.5 s from the `auth_broken` widen; measured as above.
 Two things the section does not otherwise say: `quantivly-3` was NOT on that ladder and had a
 single **3,897 s** gap from 08:29:05 instead — a longer outage of a different shape — and the
 refresh-failure axis is its own streak (`update_streaks`, `:1455`), not the 429 one.
@@ -2959,23 +2966,38 @@ just refreshed. Not built, and deliberately not designed here: whether clauth's 
 `credentials.json`, and whether clearing that flag out of band is supported at all, are both
 unanswered.
 
-**CORRECTED 2026-09-16: `~/.claude/.credentials.json` IS owned — by nanoclaw — and this file
-did not know it.** This paragraph read *"The global credential path is reconciled by nothing"*, and
-everything under it was reasoned from that. `~/Projects/nanoclaw/src/oauth-refresh.ts` names that
-exact path as its `default` profile (personal Claude Max), alongside
-`~/.claude-work-home/.claude/.credentials.json` for Teams, and it **deliberately refuses
-`CLAUDE_CONFIG_DIR`** — its IMP-2521 exemption selects an account by overriding `HOME`, "not by
-config dir", and declines to "repoint a live credential read on the strength of a variable
-production never sets". The nanoclaw repository mentions clauth zero times; this one mentioned
-nanoclaw zero times until this edit. **Two tools owned one file and neither's documentation knew
-the other existed.**
+**A NOTE ON NANOCLAW, AND A TILDE — corrected twice, 2026-09-16 then 2026-09-17.** nanoclaw's
+`src/oauth-refresh.ts` names `~/.claude/.credentials.json` as its `default` profile (personal
+Claude Max), alongside `~/.claude-work-home/.claude/.credentials.json` for Teams, and it
+**deliberately refuses `CLAUDE_CONFIG_DIR`** — its IMP-2521 exemption selects an account by
+overriding `HOME`, "not by config dir", and declines to "repoint a live credential read on the
+strength of a variable production never sets".
 
-**What that makes of `claude-doctor`'s warning.** `⚠ the live credential matches NO registered
-clauth profile` is the EXPECTED answer here, not a fault: it is not a clauth profile, it is
-nanoclaw's. The doctor reasons from a model of this machine with no nanoclaw in it, and the remedy
-it offers — capture it into clauth before a switch destroys it — would take a file another owner
-maintains. Recorded as a finding rather than fixed, because what that check should say depends on
-reconciling the two owners, which is not a rewording.
+**That `~` is nanoclaw's, not this machine's, and a 09-16 edit to this file conflated them.** That
+edit declared the path "IS owned — by nanoclaw", retracted the sentence above it, and told readers
+`claude-doctor`'s orphan warning was expected noise. All three were wrong **on cilantro**, and the
+measurements are one-liners: `getent passwd nanoclaw` → no such user; `/home/nanoclaw` → does not
+exist; `/home` contains only `zvi`; no system `nanoclaw.service`; and
+`HOME_DIR = process.env.HOME || '/home/nanoclaw'` (`oauth-refresh.ts:94`), with
+`nanoclaw.service` declaring `Environment=HOME=/home/nanoclaw`. `~/.claude-work-home/` does not
+exist here either. The writer cannot run here at all: `persistRotatedCredentials` is reached only
+through `initOAuthRefresh`, whose sole non-test caller is the daemon entry point, and the three
+nanoclaw units that DO run here as `zvi` (`nanoclaw-orchestrate`, `-fleet-agent`,
+`-memory-curator`) import none of those modules.
+
+So **on this machine the original sentence stands: nothing reconciles that path**, and
+`claude-doctor`'s `⚠ the live credential matches NO registered clauth profile` is a **real
+signal, not expected noise** — treating it as noise would retire a working orphan-detector. The
+09-14 relink did not touch "nanoclaw's refresh target"; it repointed a path nanoclaw does not
+maintain here. Where nanoclaw's claim IS true is the **nanoclaw server**, under
+`/home/nanoclaw`, which this checkout cannot see.
+
+**The lesson, which is why this is kept rather than deleted: a path read out of another
+project's source arrives in that project's frame.** `~` is whoever's `HOME` the process has, and
+a service unit can set it to a user that does not exist on your box. Before importing a path from
+a neighbouring repo, resolve the `~` — `getent passwd`, the unit's `Environment=HOME`, and
+whether the writing code path runs here at all. Found by an independent review, not by the author,
+which is also the pattern.
 
 **How the mistake was made, which is the part worth carrying.** The brief this section came from
 said the symlink shape at that path was "undocumented", and that was read as evidence the path had
@@ -2985,11 +3007,11 @@ one `grep` over `~/Projects`. A relink was made on 09-14 on the strength of it, 
 refresh target into a clauth profile store; an ordinary atomic write replaced it on 09-15 13:39
 before it cost anything. The outcome was luck; the reasoning was wrong when it was made.
 
-**What survives from the old paragraph:** `reconcile_all` does walk only
-`~/.local/state/claude-account-dirs/*`, so nothing here reconciles that path — correct behaviour
-once it is known to be someone else's. And clauth does still rewrite it whenever it installs an
-active profile, so two writers can collide there. That is a question for whoever reconciles the
-ownership, not a reason for this repo's reconciler to reach in.
+**So the statement above stands as written:** `reconcile_all` walks only
+`~/.local/state/claude-account-dirs/*`, and on this machine nothing reconciles the global path.
+clauth rewrites it whenever it installs an active profile, and Claude Code replaces it on any
+unisolated session's refresh — two writers, no reconciler, which is exactly what the orphan
+warning is detecting.
 
 **The Chrome native host was reading that path, and was pinned off it on 09-14.** Both the Chrome
 and Chromium native-messaging manifests point at one four-line wrapper,
@@ -2998,10 +3020,19 @@ two such processes had been holding whatever credential sat at the global path s
 wrapper now execs with `CLAUDE_CONFIG_DIR=…/claude-account-dirs/personal-1`. **That pin was made on the
 wrong model** — the path was believed unowned — **but the evidence says it lands in the right place
 for a different reason, and an earlier draft of this paragraph overstated what it does.** That draft
-said the pin "changes which account it bills". It does not: across the ~6 days those two hosts ran
-unpinned, `~/.claude/.credentials.json` stayed a SYMLINK, and an access token lives 8 h, so any
-authenticated traffic would have forced a refresh — an atomic write that replaces a symlink with a
-real file. It never happened, through roughly seventeen expiries. **The host spends nothing**; it
+said the pin "changes which account it bills", and a second draft replaced that with
+**"the host spends nothing"**, which is also wrong and was refuted by this file's own companion
+document. The symlink-survival argument behind it fails three ways: the link WAS replaced, at
+11:00:33 on 09-14, recorded to the nanosecond in
+`~/Projects/handoffs/credential-breakage-2026-09-14-FINDINGS.md`; the six days of continuity were
+extrapolated from a single observation at 10:53 on 09-14 and never measured; and **link shape is
+not a refresh detector once a second writer exists** — that 11:00:33 replacement was clauth
+installing an active profile, not a refresh. Nor does "no refresh" imply "no spend": a process
+that read a credential at startup can spend against that access token for up to its 8 h life and
+only then 401. **What is actually established:** the host reads a credential at startup and acts
+as the extension's transport; no refresh by it was ever observed; the global path's shape changed
+at least three times on 09-14, at least once by clauth rather than by a refresh; so its spend is
+**bounded but not zero, and was never measured**. It
 reads a credential at startup and acts as the browser extension's transport, while the session that
 drives the browser spends on its own account dir. What the pin actually does is take a Claude Code
 helper off a file nanoclaw owns and put it on the account-dir scheme every other Claude Code process
@@ -3020,10 +3051,11 @@ Two traps that creates, neither of which anything checks:
 symlinked into a store makes clauth's `active_diverged_unsaved` guard — which refuses a switch when
 the outgoing active profile has an uncaptured re-login, by comparing the live file against the
 store — compare a file with itself, so it can never fire. Removing the readers instead costs one
-`env` assignment in a wrapper and leaves both tools' invariants intact. **The stronger reason
-arrived two days later and is the one to keep: that path is not this repository's to reconcile.**
-Had the arm been built on the original reasoning, this repo would now be fighting nanoclaw for a
-file nanoclaw refreshes. Full analysis:
+`env` assignment in a wrapper and leaves both tools' invariants intact. **A 09-16 edit claimed a
+second, stronger reason — "that path is not this repository's to reconcile, and the arm would be
+fighting nanoclaw for a file nanoclaw refreshes" — and that is withdrawn: nanoclaw does not run
+here (see the tilde note above).** The guard argument is the only reason, and it is enough on its
+own; an arm remains defensible if someone wants one. Full analysis:
 `~/Projects/handoffs/credential-breakage-2026-09-14-FINDINGS.md`.
 
 ### Holder attribution, and the shell that has half this file's functions (DO-612)
