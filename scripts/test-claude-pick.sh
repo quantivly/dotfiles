@@ -1404,7 +1404,7 @@ gate_profile() {   # gate_profile NAME U5 [AGE_S]  → a registered fixture prof
 }
 gate_run() {       # gate_run PROFILE [extra args]  → $out (JSON) and $rc, Fable-high, 30 min, dry-run
   local p="$1"; shift
-  out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= CLAUDE_TENANTS_FILE=/nonexistent \
+  out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" CLAUDE_TENANTS_FILE=/nonexistent \
           zsh "$DOTFILES/scripts/claude-pick" --profile "$p" --dry-run --json \
           --gate --model claude-fable-5-1 --effort high --est-minutes 30 "$@" 2>/dev/null)"; rc=$?
 }
@@ -1414,14 +1414,14 @@ has_words() {      # has_words TEXT WORD...  → yes when TEXT contains every WO
   echo yes
 }
 gate_profile g1 40
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= zsh "$DOTFILES/scripts/claude-pick" --profile g1 --dry-run --json \
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g1 --dry-run --json \
         --gate --model claude-fable-5-1 --effort high --est-minutes 30 2>/dev/null)"; rc=$?
 check "gate: 40% + 115×0.5h = 97 refuses" "$rc" "2"
 check "gate: state names the projection"  "$(jq -r .state <<<"$out")" "gate-projected"
 check "gate: projected is 97"             "$(jq -r .gate.projected <<<"$out")" "97"
 check "gate: profile is null on refusal"  "$(jq -r .profile <<<"$out")" "null"
 gate_profile g2 30
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= zsh "$DOTFILES/scripts/claude-pick" --profile g2 --dry-run --json \
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g2 --dry-run --json \
         --gate --model claude-fable-5-1 --effort high --est-minutes 30 2>/dev/null)"; rc=$?
 check "gate: 30% projects to 87 and allows" "$rc" "0"
 check "gate: verdict allow"                  "$(jq -r .gate.verdict <<<"$out")" "allow"
@@ -1429,14 +1429,14 @@ gate_profile g3 50
 # CLAUDE_PICK_RATES_OVERRIDE is deliberately IGNORED by the implementation — the
 # rate table is the zsh associative array from claude-tenants.zsh, not an env
 # string — so this row proves an unlisted model:effort pair falls back to 115.
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= CLAUDE_PICK_RATES_OVERRIDE='claude-sonnet-5:medium=20' \
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" CLAUDE_PICK_RATES_OVERRIDE='claude-sonnet-5:medium=20' \
         zsh "$DOTFILES/scripts/claude-pick" --profile g3 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
 check "gate: an unlisted model/effort uses the default rate 115 (50+57=107 refuses)" "$rc" "2"
 mkdir -p "$H/.clauth/profiles/g4"; : > "$H/.clauth/profiles/g4/credentials.json"   # registered, no usage cache
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= zsh "$DOTFILES/scripts/claude-pick" --profile g4 --dry-run --json --gate --model x --effort y 2>/dev/null)"; rc=$?
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g4 --dry-run --json --gate --model x --effort y 2>/dev/null)"; rc=$?
 check "gate: unmeasured window refuses"  "$rc" "2"
 check "gate: state names unmeasured"     "$(jq -r .state <<<"$out")" "gate-unmeasured"
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= zsh "$DOTFILES/scripts/claude-pick" --profile g2 --dry-run --json 2>/dev/null)"
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g2 --dry-run --json 2>/dev/null)"
 check "no --gate: gate field is null"    "$(jq -r .gate <<<"$out")" "null"
 check "...and the key is present, not absent" "$(jq -r 'has("gate")' <<<"$out")" "true"
 HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --gate --model a 2>/dev/null; check "gate without --effort is usage (64)" "$?" "64"
@@ -1445,7 +1445,7 @@ HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --gate --model a 2>/dev/null; chec
 # entirely would pass every row above.
 mkdir -p "$H/.config"
 printf 'typeset -gA CLAUDE_PICK_RATES\nCLAUDE_PICK_RATES[claude-sonnet-5:medium]=20\n' > "$H/.config/claude-tenants.zsh"
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= zsh "$DOTFILES/scripts/claude-pick" --profile g3 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g3 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
 check "gate: a rate listed in claude-tenants.zsh is used (50+20×0.5h=60 allows)" "$rc" "0"
 check "gate: ...and the JSON reports that rate" "$(jq -r .gate.rate <<<"$out")" "20"
 rm -f "$H/.config/claude-tenants.zsh"
@@ -1491,7 +1491,7 @@ check "gate: ...which the default 600 admits" "$rc" "0"
 # stays there — see zshrc.herdr) but stale to the gate.
 SAVED_H="$H"; new_home gate-ranked; H="$FHOME"
 gate_profile r1 30 1000
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= CLAUDE_TENANTS_FILE=/nonexistent zsh "$DOTFILES/scripts/claude-pick" --dir "$H" --dry-run --json \
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" CLAUDE_TENANTS_FILE=/nonexistent zsh "$DOTFILES/scripts/claude-pick" --dir "$H" --dry-run --json \
         --gate --model claude-fable-5-1 --effort high 2>/dev/null)"; rc=$?
 # On a refusal the picked row is reported under `skipped` (REPLY is cleared), so
 # the ranker's own classification of it is readable there: `eligible`, not
@@ -1547,7 +1547,7 @@ check "gate: ...naming the variable and the value"        "$(has_words "$(jq -r 
 # A rate table entry is validated the same way, and named by its KEY.
 mkdir -p "$H/.config"
 printf 'typeset -gA CLAUDE_PICK_RATES\nCLAUDE_PICK_RATES[claude-sonnet-5:medium]=fast\n' > "$H/.config/claude-tenants.zsh"
-out="$(HOME="$H" CLAUDE_CONFIG_DIR= HERDR_PANE_ID= zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
 check "gate: CLAUDE_PICK_RATES[claude-sonnet-5:medium]=fast refuses" "$rc" "2"
 check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
 check "gate: ...naming the entry and the value"           "$(has_words "$(jq -r .reason <<<"$out")" 'CLAUDE_PICK_RATES[claude-sonnet-5:medium]' fast)" "yes"
