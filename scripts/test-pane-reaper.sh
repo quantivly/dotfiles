@@ -45,7 +45,8 @@ case "$1 $2" in
   "pane process-info") cat "$d/procinfo.json" ;;
   "pane close")
     if [ -f "$d/close-fails" ]; then cat "$d/close-fails"; exit 1; fi ;;
-  "pane report-metadata") ;;
+  "pane report-metadata")
+    if [ -f "$d/metadata-fails" ]; then cat "$d/metadata-fails"; exit 1; fi ;;
   *) exit 2 ;;
 esac
 SH
@@ -139,6 +140,20 @@ check "new turn: logged"                         "$(lastlog)"   "disarmed:new-tu
 reset; agent blocked ready false 9 T ""; seed_slot T:7 N1
 hook blocked
 check "blocked counts as a new turn"             "$(clears)"    "1"
+
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+printf '%s\n' '{"error":{"code":"server_unavailable","message":"x"}}' > "$SD/metadata-fails"
+hook working
+check "failed clear: logged"                     "$(lastlog)"   "disarm-failed:server_unavailable"
+check "failed clear: slot marked disarmed"       "$(slot | cut -d' ' -f1)" "disarmed"
+agent "done" ready false 10 T ""
+hook "done"
+check "failed clear: refuses to re-arm"          "$(launches)"  "0"
+rm -f "$SD/metadata-fails"
+agent working ready false 11 T ""
+hook working
+check "retry after clear works: logged"          "$(lastlog)"   "disarmed:new-turn"
+check "retry after clear works: slot removed"    "$(slot)"      ""
 
 # Task 2 appends recheck rows here; Task 3 appends the detach row.
 

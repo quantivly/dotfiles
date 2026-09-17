@@ -28,11 +28,26 @@ case "$status" in
         gen="$(pr_field "$json" "$a.terminal_id"):$(pr_field "$json" "$a.state_change_seq")"
         # Same generation: a presentation-only event, not a new turn.
         [ "$(pr_slot_gen "$pane")" != "$gen" ] || exit 0
-        rm -f "$(pr_slot_file "$pane")"
-        if [ "$(pr_field "$json" "$a.tokens.pane_reaper")" = ready ]; then
-            "$PR_HERDR" pane report-metadata "$pane" --source pane-reaper \
-                --clear-token pane_reaper > /dev/null 2>&1 || :
+        if [ "$(pr_field "$json" "$a.tokens.pane_reaper")" != ready ]; then
+            # Someone else already cleared the token: nothing left to disarm.
+            rm -f "$(pr_slot_file "$pane")"
+            exit 0
+        fi
+        # Clear the token before dropping the slot. A failed clear must not
+        # lose the slot: the next done/idle would otherwise re-arm from the
+        # stale `ready` token. Mark the slot "disarmed" instead — it can
+        # never equal a real "<terminal_id>:<seq>" generation, so it blocks
+        # a re-arm (see the arm path below) and a later working/blocked event
+        # naturally retries the clear.
+        if clear_out=$("$PR_HERDR" pane report-metadata "$pane" --source pane-reaper \
+                --clear-token pane_reaper 2>&1); then
+            rm -f "$(pr_slot_file "$pane")"
             pr_log "$pane" "disarmed:new-turn"
+        else
+            code=$(pr_field "$clear_out" '.error.code')
+            [ -n "$code" ] || code=unknown
+            pr_slot_write "$pane" disarmed "$(pr_nonce)"
+            pr_log "$pane" "disarm-failed:$code"
         fi
         exit 0 ;;
     done|idle) ;;
@@ -42,6 +57,9 @@ esac
 json=$(pr_agent_json "$pane") || exit 0
 a='.result.agent'
 [ "$(pr_field "$json" "$a.tokens.pane_reaper")" = ready ] || exit 0
+# A failed disarm left the slot marked "disarmed": don't re-arm from a token
+# we're still trying to clear.
+[ "$(pr_slot_gen "$pane")" != disarmed ] || exit 0
 term=$(pr_field "$json" "$a.terminal_id")
 seq=$(pr_field "$json" "$a.state_change_seq")
 [ -n "$term" ] || exit 0
