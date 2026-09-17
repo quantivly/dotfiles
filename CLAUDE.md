@@ -1662,6 +1662,18 @@ Gotchas, in the order they bite:
   fails `agent_not_found`; it cannot wait *for* detection. Poll separately.
 - **herdmates leaks plugin env into lead sessions** (upstream). Prefix plugin CLIs with
   `env -u HERDR_PLUGIN_STATE_DIR -u HERDR_PLUGIN_CONFIG_DIR`.
+  **Stripping is only half the rule, and the other half bites (2026-09-14).** A plugin CLI that
+  reads its OWN config needs those variables SET, not absent — `herdr-draft create` refused with
+  `--account auto needs an account picker: set [clauth] picker in config.toml` on a machine where
+  that picker is configured and on PATH, because it had inherited herdmates' `HERDR_PLUGIN_CONFIG_DIR`
+  and `HERDR_PLUGIN_STATE_DIR` with no `HERDR_PLUGIN_ID` to say whose they were, so it declined them
+  and resolved from built-in defaults. It said so rather than guessing, which is the only reason this
+  was five minutes and not an afternoon. Export all three for the plugin you are actually invoking:
+  `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir <id>)"`, and
+  `HERDR_PLUGIN_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/<id>"` (herdr has a
+  CLI for the config dir and none for the state dir). **`HERDR_PLUGIN_ID` is the load-bearing one**:
+  it is what says whose the other two are, and a plugin that checks it is protected from this leak
+  while one that does not silently uses another plugin's configuration.
 - **`clauth start <profile>` bypasses the `claude()` shell function**, so it lacks what that function
   adds: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and a launch via `herdmates teammux-launch`, which
   passes `--settings '{"teammateMode":"tmux"}'` so teammates become herdr panes. Whether teams are
@@ -2842,27 +2854,45 @@ credential disaster and reads like nothing in the transcripts. Zero `isApiErrorM
 expiries across **1,431 transcripts and 868,562 records with 0 unparsable** for 09-11..09-14 (last
 genuine one: 2026-09-10T08:10:52Z) — the unparsable count is reported because an empty answer from
 a scanner that silently skipped half its input is not agreement — and
-`mark_auth_broken` logs every transition while `clauth.log` has never carried one. What actually
+no session ever reported one. **clauth, however, DID quarantine all three accounts — see
+"CORRECTED 2026-09-16 (second)" below, which retracts this paragraph's original claim that
+`clauth.log` proved it had not.** What actually
 degraded was clauth's per-profile polling: normal cadence ~59 s (mean gap; note that gaps of
 873–879 s occur in ordinary operation too, so one ~880 s gap is not by itself a fault signal),
 and the three broken accounts fell to one success per **~1010 s**.
 
 That figure reproduces exactly, and saying where the last 20 s come from matters, because
 otherwise the next reader computes 90 + 900 = 990, sees 1010, and concludes the mechanism is
-wrong. `poll_backoff_ms` (`scheduler.rs:285`) adds `min(10 s × 3^(n−1), 900 s)` — the
-`rate_limit_backoff_ms` ladder at `:1379`, capped **by its caller**, not inside itself — on top
-of the 90 s interval, and the deterministic per-profile spread at `:1430` adds `[0, interval/4)`
-= `[0, 22.5) s`. Predicted 990–1012.5 s; measured 992, 994, 999, 1009, 1010, 1011, 1012, 1013.
+wrong. **The 900 s is `auth_broken`'s flat widen, NOT the `rate_limit_backoff_ms` ladder** — this
+paragraph said the ladder until 2026-09-17, and that was refuted by reading v0.15.1 rather than the
+0.14.1 checkout: `poll_backoff_ms` (`scheduler.rs:304` at v0.15.1) returns
+`AUTH_BROKEN_BACKOFF_MS` on its FIRST line when the flag is set, so for a quarantined profile the
+ladder branch below it is unreachable. Both constants happen to be 900 s, which is why the
+arithmetic never looked wrong. The **shape** is what separates them: the ladder climbs
+(10 → 30 → 90 → 270 → 810 → 900 s, so gaps of ~100, 120, 180, 360, 900, 990), while the measured
+gaps are flat from the first one — 992, 994, 999, 1009, 1010, 1011, 1012, 1013, all within 23 s of
+each other. On top of the 90 s interval, the deterministic per-profile spread (`:1430`) adds
+`[0, interval/4)` = `[0, 22.5) s`, which survives under either mechanism and is where the last
+~20 s come from. Predicted 990–1012.5 s from the `auth_broken` widen; measured as above.
 Two things the section does not otherwise say: `quantivly-3` was NOT on that ladder and had a
 single **3,897 s** gap from 08:29:05 instead — a longer outage of a different shape — and the
 refresh-failure axis is its own streak (`update_streaks`, `:1455`), not the 429 one.
 
-**Every line number in this section is from clauth 0.14.1, commit `ff25762`, the tree at
-`~/.config/herdr/plugins/github/clauth-4596d4a41686` — and the binary that ran is 0.15.1,
-installed 2026-09-08 20:58. The 0.15.1 source was not read.** That is exactly the gap the
-`mcpOAuth` correction above turns on, so it is stated rather than left to be discovered. What
-makes the mechanism claims here more than a source read is that the timing above *reproduces*
-from that tree's constants; treat the line numbers as corroboration, not as provenance.
+**Every line number in this section is from commit `ff25762` — the tree at
+`~/.config/herdr/plugins/github/clauth-4596d4a41686`, which sits BETWEEN releases: 318 commits
+after `v0.14.1` and 122 before `v0.15.1` — while the binary that ran is 0.15.1, installed
+2026-09-08 20:58.** Name the commit and its position, never a release: an earlier version of
+this line called that tree "clauth 0.14.1", which its own `Cargo.toml` says only because the
+version string was never bumped, and a release label invites the reader to look a line up in a
+release that does not contain it. Measured with
+`gh api repos/uwuclxdy/clauth/compare/v0.14.1...ff25762` and the mirror against `v0.15.1`; the
+drift is real and small — `if is_active` is at 859/895 in `ff25762` and 878/914 in v0.15.1. The
+installed source has since been read wherever a claim turned on it (`poll_backoff_ms` above,
+`RefreshError` in the correction below, both fetched with `?ref=v0.15.1`), never in whole — so
+the gap stays, and it is exactly the one the `mcpOAuth` correction above turns on, stated rather
+than left to be discovered. What makes the mechanism claims here more than a source read is that
+the timing above *reproduces* from that tree's constants; treat the line numbers as
+corroboration, not as provenance.
 
 **Three forensic techniques, because none of them is obvious and all three were needed:**
 
@@ -2898,28 +2928,138 @@ not in the function's own doc block; an earlier draft cited `:507` for `fresher_
 and attributed the caller's comment to it. Here Claude Code's write is atomic, so it REPLACES the account-dir symlink with a real
 file and the store does not advance — the guard sees "unchanged", concludes "real revocation", and
 can quarantine a healthy account. `try_adopt_live_rotation`, the fast path that would catch it,
-runs only `if is_active`, so four of five profiles never get it. This did not fire on 09-14 (no
-`auth_broken` was ever logged), so it is recorded as the mechanism most likely to cause the NEXT
-one, not as this one's cause.
+runs only `if is_active`, so four of five profiles never get it. **This DID fire on 09-14, and it
+is this incident's cause** — see the correction immediately below.
 
-**The rejection class could not be recovered, and naming why is the useful part.** The ladder
-clauth entered is fed only by `RefreshError::Transient` — by `refresh_rejection_is_terminal`
-(`src/oauth.rs:416`) that means not 401 and not 400/403 carrying `invalid_grant`, so it was *not*
-a plain double-spend. Beyond that the evidence is gone: the scheduler's refresh leg
-(`src/usage/scheduler.rs:931`, `bail_unrotated().with_refresh_failed()`) has **no `logline!`**
-where `gate_under_guard` has one, and `PollStreaks`/`StreakCounts` are in-memory only. One log
-line upstream would close it. **An empty log is not evidence of a quiet machine when the code
-path has no log statement in it.**
+**CORRECTED 2026-09-16 (second — these corrections are numbered by order of DISCOVERY, not by
+position, so "(second)" is met before the first, which is the nanoclaw note below): clauth
+quarantined all three accounts, it said so at the time, and the original search grepped the
+wrong log.** This section claimed *"no `auth_broken` was ever logged"* and built a whole
+paragraph on the rejection class being unrecoverable. Both are false.
+`journalctl --user -u clauth-daemon.service` carries it verbatim:
 
-**The global credential path is reconciled by nothing.** `reconcile_all` walks only
-`~/.local/state/claude-account-dirs/*`, so `~/.claude/.credentials.json` — which clauth rewrites
-whenever it installs an active profile, atomically, replacing any symlink — forks silently and
-stays forked. On 09-14 its only readers were **two `claude --chrome-native-host` processes**,
-running since 09-08 and holding whichever grant clauth last put there. Both Chrome and Chromium
-native-messaging manifests point at the same four-line wrapper,
-`~/.claude-personal/chrome/chrome-native-host`, which is now pinned with
-`CLAUDE_CONFIG_DIR=…/claude-account-dirs/personal-1` so the host joins a reconciled credential
-group instead.
+```
+08:29:13  clauth: login for 'quantivly-1' has expired: refresh token revoked or invalid … (flagged auth_broken)
+08:29:17  clauth: login for 'personal-1'  …
+08:29:27  clauth: login for 'personal-0'  …
+```
+
+— exactly the three accounts that were re-authenticated, 114–128 s after resume. **The daemon's
+`logline!` output goes to the JOURNAL, not to `~/.clauth/clauth.log`**, which carries only TUI and
+CLI lines: measured, `clauth.log` contains **0** lines mentioning `daemon` while the journal
+contains **511**. The original search grepped `clauth.log`, found nothing, and reported absence.
+**That is the same error as the nanoclaw one below, made twice in one investigation: absence in
+the one place you looked is not absence.** Ask where a process's output actually goes before
+reading its silence.
+
+What the corrected evidence settles, which the original left open:
+
+- **The rejection was terminal, not transient.** "refresh token revoked or invalid" is
+  `RefreshError::Invalid`, whose own doc comment reads *"The endpoint confirmed the refresh token
+  itself is dead"* — a 401, or a 400/403 carrying `invalid_grant`. The paragraph claiming
+  otherwise is withdrawn, along with its conclusion that "one log line upstream would close it";
+  the upstream observability gap is real but was never what this incident hit. **Terminal is not
+  the same as double-spent, though.** The class establishes only that the endpoint confirmed the
+  token is dead, which a genuine server-side revocation produces just as well — so it cannot
+  distinguish the two, and a double-spend is the **live hypothesis** rather than a settled fact.
+  What makes it the live one is the third bullet's account-dir/store divergence, not this
+  bullet's error class. An earlier version of this line read "So it WAS a plain double-spend":
+  an inference rendered as an entailment, inside a correction whose stated purpose is to stop
+  doing that.
+- **The ~1010 s is `auth_broken`'s own widen, not a `refresh_fail` ladder.** `poll_backoff_ms`
+  returns `AUTH_BROKEN_BACKOFF_MS` — the same 900 s ceiling — *before* it consults any streak, and
+  90 s + 900 s is the observed spacing. The accounts stayed flagged ~70 minutes until
+  `clauth login`, so nothing in the ordinary poll path cleared it.
+- **The blind spot is ours, not upstream's, and it is the cause — and this is the bullet that
+  carries the double-spend evidence.** A session refreshed first and its rotation landed in the
+  ACCOUNT DIR; `fresher_disk_pair` re-read the STORE, which had not
+  advanced, and concluded a real revocation. That divergence is what says the dead token was one
+  *we* had already spent rather than one the server withdrew. clauth's own watchdog (`runtime.rs`
+  `sync_credentials_unlocked`) would have advanced it — but only for `clauth start` runtime dirs,
+  and `claude-account-dirs` dirs are not those. Our reconciler adopted the fresh credentials into
+  those three stores at 08:29:28: **1–15 s too late.**
+
+**The actionable consequence is local.** After the reconciler adopts a rotation into a store,
+nothing tells clauth the chain is alive again. `claude-account-dirs.sh --reconcile` or
+`claude-doctor` should at least REPORT a standing `auth_broken` on a profile whose store it has
+just refreshed. Not built, and deliberately not designed here: whether clauth's reload re-reads
+`credentials.json`, and whether clearing that flag out of band is supported at all, are both
+unanswered.
+
+**A NOTE ON NANOCLAW, AND A TILDE — corrected twice, 2026-09-16 then 2026-09-17.** nanoclaw's
+`src/oauth-refresh.ts` names `~/.claude/.credentials.json` as its `default` profile (personal
+Claude Max), alongside `~/.claude-work-home/.claude/.credentials.json` for Teams, and it
+**deliberately refuses `CLAUDE_CONFIG_DIR`** — its IMP-2521 exemption selects an account by
+overriding `HOME`, "not by config dir", and declines to "repoint a live credential read on the
+strength of a variable production never sets".
+
+**That `~` is nanoclaw's, not this machine's, and a 09-16 edit to this file conflated them.** That
+edit declared the path "IS owned — by nanoclaw", retracted the sentence above it, and told readers
+`claude-doctor`'s orphan warning was expected noise. All three were wrong **on cilantro**, and the
+measurements are one-liners: `getent passwd nanoclaw` → no such user; `/home/nanoclaw` → does not
+exist; `/home` contains only `zvi`; no system `nanoclaw.service`; and
+`HOME_DIR = process.env.HOME || '/home/nanoclaw'` (`oauth-refresh.ts:94`), with
+`nanoclaw.service` declaring `Environment=HOME=/home/nanoclaw`. `~/.claude-work-home/` does not
+exist here either. The writer cannot run here at all: `persistRotatedCredentials` is reached only
+through `initOAuthRefresh`, whose sole non-test caller is the daemon entry point, and the three
+nanoclaw units that DO run here as `zvi` (`nanoclaw-orchestrate`, `-fleet-agent`,
+`-memory-curator`) import none of those modules.
+
+So **on this machine the original sentence stands: nothing reconciles that path**, and
+`claude-doctor`'s `⚠ the live credential matches NO registered clauth profile` is a **real
+signal, not expected noise** — treating it as noise would retire a working orphan-detector. The
+09-14 relink did not touch "nanoclaw's refresh target"; it repointed a path nanoclaw does not
+maintain here. Where nanoclaw's claim IS true is the **nanoclaw server**, under
+`/home/nanoclaw`, which this checkout cannot see.
+
+**The lesson, which is why this is kept rather than deleted: a path read out of another
+project's source arrives in that project's frame.** `~` is whoever's `HOME` the process has, and
+a service unit can set it to a user that does not exist on your box. Before importing a path from
+a neighbouring repo, resolve the `~` — `getent passwd`, the unit's `Environment=HOME`, and
+whether the writing code path runs here at all. Found by an independent review, not by the author,
+which is also the pattern.
+
+**How the mistake was made, which is the part worth carrying.** The brief this section came from
+said the symlink shape at that path was "undocumented", and that was read as evidence the path had
+no owner. The search behind it covered this repository and clauth's source, and stopped there.
+**"Nothing I searched owns this" is not "nothing owns this"**, and the distance between them was
+one `grep` over `~/Projects`. A relink was made on 09-14 on the strength of it, pointing nanoclaw's
+refresh target into a clauth profile store; an ordinary atomic write replaced it on 09-15 13:39
+before it cost anything. The outcome was luck; the reasoning was wrong when it was made.
+
+**So the statement above stands as written:** `reconcile_all` walks only
+`~/.local/state/claude-account-dirs/*`, and on this machine nothing reconciles the global path.
+clauth rewrites it whenever it installs an active profile, and Claude Code replaces it on any
+unisolated session's refresh — two writers, no reconciler, which is exactly what the orphan
+warning is detecting.
+
+**The Chrome native host was reading that path, and was pinned off it on 09-14.** Both the Chrome
+and Chromium native-messaging manifests point at one four-line wrapper,
+`~/.claude-personal/chrome/chrome-native-host`, which ran the binary with no `CLAUDE_CONFIG_DIR`;
+two such processes had been holding whatever credential sat at the global path since 09-08. The
+wrapper now execs with `CLAUDE_CONFIG_DIR=…/claude-account-dirs/personal-1`. **That pin was made on the
+wrong model** — the path was believed unowned — **but the evidence says it lands in the right place
+for a different reason, and an earlier draft of this paragraph overstated what it does.** That draft
+said the pin "changes which account it bills", and a second draft replaced that with
+**"the host spends nothing"**, which is also wrong and was refuted by this file's own companion
+document. The symlink-survival argument behind it fails three ways: the link WAS replaced, at
+11:00:33 on 09-14, recorded to the nanosecond in
+`~/Projects/handoffs/credential-breakage-2026-09-14-FINDINGS.md`; the six days of continuity were
+extrapolated from a single observation at 10:53 on 09-14 and never measured; and **link shape is
+not a refresh detector once a second writer exists** — that 11:00:33 replacement was clauth
+installing an active profile, not a refresh. Nor does "no refresh" imply "no spend": a process
+that read a credential at startup can spend against that access token for up to its 8 h life and
+only then 401. **What is actually established:** the host reads a credential at startup and acts
+as the extension's transport; no refresh by it was ever observed; the global path's shape changed
+at least three times on 09-14, at least once by clauth rather than by a refresh; so its spend is
+**bounded but not zero, and was never measured**. It
+reads a credential at startup and acts as the browser extension's transport, while the session that
+drives the browser spends on its own account dir. What the pin actually does is take a Claude Code
+helper off the **unreconciled global path** — the one clauth and Claude Code both replace and
+nothing here reconciles — and put it on the account-dir scheme every other Claude Code process
+here already uses. That sentence read "off a file nanoclaw owns" until 2026-09-17: a residue of
+the retracted claim, left standing forty lines below its own retraction, which is the
+carry-the-correction-all-the-way-through failure this section already names twice.
 
 Two traps that creates, neither of which anything checks:
 
@@ -2934,8 +3074,12 @@ Two traps that creates, neither of which anything checks:
 symlinked into a store makes clauth's `active_diverged_unsaved` guard — which refuses a switch when
 the outgoing active profile has an uncaptured re-login, by comparing the live file against the
 store — compare a file with itself, so it can never fire. Removing the readers instead costs one
-`env` assignment in a wrapper and leaves both tools' invariants intact. Full analysis:
-`~/handoffs/credential-breakage-2026-09-14-FINDINGS.md`.
+`env` assignment in a wrapper and leaves both tools' invariants intact. **A 09-16 edit claimed a
+second, stronger reason — "that path is not this repository's to reconcile, and the arm would be
+fighting nanoclaw for a file nanoclaw refreshes" — and that is withdrawn: nanoclaw does not run
+here (see the tilde note above).** The guard argument is the only reason, and it is enough on its
+own; an arm remains defensible if someone wants one. Full analysis:
+`~/Projects/handoffs/credential-breakage-2026-09-14-FINDINGS.md`.
 
 ### Holder attribution, and the shell that has half this file's functions (DO-612)
 
