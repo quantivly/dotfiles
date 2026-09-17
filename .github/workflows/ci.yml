@@ -784,8 +784,13 @@ jobs:
       - name: Run the rabota unit tests
         run: ./scripts/test-rabota.sh
 
-      # The closest a test run gets to the symptom: an unclosed sqlite3 connection
-      # collected during the run is an error here, not a line on stderr.
+      # What this step catches is narrower than it looks: only an unclosed sqlite3
+      # connection that the garbage collector reaches WHILE a test is running becomes
+      # an error here. One collected at interpreter shutdown prints "Exception
+      # ignored" to stderr and the run still exits 0, so this step cannot fail on
+      # its own for that case (F17 gate, a1). The real check for the product leak
+      # is tests/test_store.py::StoreOpenFailurePathTests, which records every
+      # connection sqlite3.connect hands out and asserts each one is closed.
       - name: Run the rabota unit tests with ResourceWarning as an error
         run: |
           cd rabota

@@ -1,5 +1,6 @@
 """Helpers shared by the rabota tests. Not a test module: nothing in here is collected."""
 import json
+import sqlite3
 
 
 def last_json(stream: str):
@@ -28,3 +29,17 @@ def last_json(stream: str):
                 return obj
         start = text.rfind("{", 0, start)
     raise AssertionError(f"no JSON object at the end of the captured stream:\n{stream}")
+
+
+def connection_is_closed(conn) -> bool:
+    """True when ``conn`` refuses work: sqlite3 raises ProgrammingError on a closed connection.
+
+    This is the leak test the F17 gate used, and it is stricter than counting
+    ``ResourceWarning``: a warning fires only when the object is collected, which a test
+    run may never do, while a held reference can be asked directly.
+    """
+    try:
+        conn.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        return True
+    return False
