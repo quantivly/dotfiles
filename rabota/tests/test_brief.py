@@ -1,4 +1,5 @@
-import argparse, json, tempfile, unittest
+import argparse, io, json, os, shutil, tempfile, unittest, unittest.mock
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import date, datetime, timezone
 from pathlib import Path
 from rabota import cli, context, errors, secrets, snapshots
@@ -60,6 +61,37 @@ class BriefTests(unittest.TestCase):
     def test_max_lines_is_honoured(self):
         lines = brief.terminal_lines(seq([f"K-{i}" for i in range(30)]), "inbox: 0", None, max_lines=11)
         self.assertEqual(len(lines), 11)
+
+    def test_no_change_path_honours_the_cap(self):
+        # k4: the no-change return was never sliced, so --max-lines 1 still printed two lines.
+        prev = {"keys": ["K-1"], "generated_at": "2026-09-16T07:00:00Z"}
+        s = seq(["K-1"]); s["failed_sources"] = ["calendar"]
+        stale = datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc)
+        for m in (1, 2):
+            lines = brief.terminal_lines(s, "inbox: 0", prev, max_lines=m, brief_path="/p/brief.md", now=stale)
+            self.assertEqual(len(lines), m, lines)
+        self.assertTrue(brief.terminal_lines(s, None, prev, max_lines=1, now=stale)[0].startswith("! brief is"))
+        self.assertTrue(brief.terminal_lines(s, None, prev, max_lines=1)[0].startswith("no change since"))
+
+    def test_zero_or_negative_max_lines_is_usage(self):
+        # A zero-line brief is not a brief: 0 is a usage error, as is any negative cap, on every path.
+        prev = {"keys": ["K-1"], "generated_at": "2026-09-16T07:00:00Z"}
+        for m in (0, -1, -12):
+            for previous in (None, prev):
+                with self.assertRaises(errors.Usage, msg=f"max_lines={m} previous={previous is not None}") as cm:
+                    brief.terminal_lines(seq(["K-1"]), None, previous, max_lines=m)
+                self.assertIn("max-lines", str(cm.exception))
+
+    def test_malformed_generated_at_is_usage_not_a_traceback(self):
+        for bad in ("yesterday-ish", "2026-09-16 08:00:00", "", None):
+            s = seq(["K-1"], generated_at=bad)
+            with self.assertRaises(errors.Usage, msg=repr(bad)) as cm:
+                brief.staleness_line(s, datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc))
+            self.assertIn("generated_at", str(cm.exception))
+            with self.assertRaises(errors.Usage, msg=repr(bad)):
+                brief.terminal_lines(s, None, None, now=datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc))
+        with self.assertRaises(errors.Usage):
+            brief.staleness_line({"tenant": "quantivly", "items": []}, datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc))
 
     def test_compose_markdown_lists_sources_items_and_inbox(self):
         s = seq(["K-1"]); s["decisions"] = [{"key": "DO-9", "why": "Urgent in Backlog", "url": "u9"}]
@@ -126,6 +158,36 @@ class BriefCommandTests(unittest.TestCase):
             snapshots.write(ctx.state_dir, "github", {"ok": False, "error": f"gh said {minted}", "items": []})
         self.assertIsNone(snapshots.read(ctx.state_dir, "github"))
         self.assertFalse(list((ctx.state_dir / "sources").glob(".*")) if (ctx.state_dir / "sources").exists() else [])
+
+    def _main(self, argv, home):
+        env = dict(os.environ); env["HOME"] = str(home)
+        out, err = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.dict(os.environ, env, clear=True), redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cli_refuses_max_lines_zero_and_negative_and_a_malformed_generated_at(self):
+        # k4 at the CLI: exit 2 with a usage error, never 5 with an unhandled ValueError.
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name) / "home"; shutil.copytree(FIX, home / ".dotfiles-local" / "rabota")
+        state = Path(tmp.name) / "state"
+        base = ["--tenant", "quantivly", "--state-dir", str(state), "--text", "brief"]
+        for extra in (["--max-lines", "0"], ["--max-lines", "-1"]):
+            code, out, err = self._main(base + extra, home)
+            self.assertEqual(code, 2, err); self.assertEqual(out, "")
+            self.assertEqual(json.loads(err)["error"]["code"], "usage")
+            self.assertIn("max-lines", json.loads(err)["error"]["message"])
+        self.assertFalse(list(state.glob("*/brief.md")), "a usage error must not leave a brief.md behind")
+        code, out, err = self._main(base + ["--max-lines", "1"], home)                  # first run ranks
+        self.assertEqual((code, len(out.splitlines())), (0, 1), (out, err))
+        code, out, err = self._main(base + ["--max-lines", "1"], home)                  # no-change path, still capped
+        self.assertEqual((code, len(out.splitlines())), (0, 1), (out, err))
+        day = state / date.today().isoformat()
+        seq_doc = json.loads((day / "sequence.json").read_text()); seq_doc["generated_at"] = "yesterday-ish"
+        (day / "sequence.json").write_text(json.dumps(seq_doc))
+        code, out, err = self._main(base, home)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error"]["code"], "usage"); self.assertIn("generated_at", err)
 
     def test_cli_exposes_max_lines_with_default_twelve(self):
         ns = cli.build_parser().parse_args(["brief"])

@@ -5,12 +5,17 @@ Line order: a staleness warning when the sequence is older than ``STALE_AFTER_MI
 failed source, the inbox summary, and ``brief: <path>``. Everything counts toward the cap,
 and ``--max-lines`` lets a wrapper such as ``sol brief`` prepend its own line and still show
 twelve. On a same-day rerun only ``+``/``-`` deltas print, or ``no change since HH:MM``.
+
+The cap applies on EVERY path, the no-change one included (review finding k4: it was never
+sliced, so ``--max-lines 1`` printed two lines). ``--max-lines 0`` is a usage error, not an
+empty brief — a zero-line brief is not a brief — and so is a negative cap. A ``generated_at``
+that does not parse is a usage error naming the file, never an unhandled ``ValueError``.
 """
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rabota import cli, emit, snapshots
+from rabota import cli, emit, errors, snapshots
 from rabota.commands.rank import run_rank
 from rabota.context import Context
 
@@ -29,17 +34,32 @@ def _fmt(n: int, item: dict) -> str:
 
 
 def staleness_line(seq: dict, now: datetime, max_age_min: int = STALE_AFTER_MIN) -> str | None:
-    """``! brief is N min old …`` when ``seq["generated_at"]`` is older than ``max_age_min`` minutes, else ``None``."""
-    generated = snapshots.parse_fetched_at(seq["generated_at"])
+    """``! brief is N min old …`` when ``seq["generated_at"]`` is older than ``max_age_min`` minutes, else ``None``.
+
+    An absent or unparseable ``generated_at`` is ``Usage`` naming the field (exit 2), not a traceback.
+    """
+    value = seq.get("generated_at")
+    try:
+        generated = snapshots.parse_fetched_at(value)
+    except (ValueError, TypeError):
+        raise errors.Usage(f"sequence.json: generated_at must be UTC like 2026-09-16T08:00:00Z, got {value!r}") from None
     age_min = int((now - generated).total_seconds() // 60)
     if age_min <= max_age_min:
         return None
     return f"! brief is {age_min} min old — timer failed? run: rabota --tenant {seq['tenant']} precompute"
 
 
+def check_max_lines(max_lines) -> int:
+    """``max_lines`` if it is a positive int, else ``Usage``; called before anything is written or printed."""
+    if not isinstance(max_lines, int) or max_lines < 1:
+        raise errors.Usage(f"--max-lines must be at least 1 (a zero-line brief is not a brief), got {max_lines!r}")
+    return max_lines
+
+
 def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, max_lines: int = MAX_LINES,
                    brief_path: str | None = None, now: datetime | None = None) -> list[str]:
     """The ≤``max_lines`` terminal lines; with ``previous`` (last-brief.json) only the deltas print."""
+    check_max_lines(max_lines)
     head = []
     if now is not None:
         stale = staleness_line(seq, now)
@@ -55,7 +75,7 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
         added = [k for k in keys if k not in previous["keys"]]
         removed = [k for k in previous["keys"] if k not in keys]
         if not added and not removed:
-            return head + [f"no change since {previous['generated_at'][11:16]}"] + footer[-1:]
+            return (head + [f"no change since {previous['generated_at'][11:16]}"] + footer[-1:])[:max_lines]
         body = [f"+ {k}" for k in added] + [f"- {k}" for k in removed]
         return (head + body + footer)[:max_lines]
     room = max(0, max_lines - len(head) - len(footer))
@@ -95,6 +115,7 @@ def _syncs(ctx: Context) -> list[dict]:
 
 def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetime | None = None):
     """Write today's ``brief.md`` and ``last-brief.json``; return the lines (``--text``) or ``{"lines", "brief_path"}``."""
+    check_max_lines(max_lines)                  # a usage error must not leave a brief.md behind
     day = ctx.state_dir / ctx.today.isoformat()
     day.mkdir(parents=True, exist_ok=True)
     seq_path = day / "sequence.json"
@@ -117,7 +138,7 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
 def _build(sub):
     p = sub.add_parser("brief", help="≤12 next actions; narrative to brief.md")
     p.add_argument("--max-lines", type=int, default=MAX_LINES,
-                   help=f"cap on printed lines (default {MAX_LINES}); a wrapper that prepends a line passes one fewer")
+                   help=f"cap on printed lines, at least 1 (default {MAX_LINES}); a wrapper that prepends a line passes one fewer")
 
 
 cli.register("brief", _build, lambda ns: run_brief(Context.from_namespace(ns), ns.text, ns.max_lines))
