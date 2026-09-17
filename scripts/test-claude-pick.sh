@@ -284,6 +284,14 @@ check "the scan reports a readable list"  "$(zrun '_claude_quarantine_scan; echo
 check "...and finds its member"           "$(zrun '_claude_quarantine_scan && print -r -- "${_CQ_NAMES[*]}"')" "a1"
 printf 'auth_broken = [\nprofiles = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
 check "a runaway span is rc=1, not an empty answer" "$(zrun '_claude_quarantine_scan; echo $?')" "1"
+# CRLF. This reader was copied from the doctor's BEFORE the carriage return was
+# added to that character class, so it inherited the divergence — two of the
+# three readers accepted CRLF and this one did not.
+new_home k7f; mkprof a1 '{"five_hour":{"utilization":0.0}}'
+printf 'profiles = [\r\n  "a1",\r\n]\r\nauth_broken = [\r\n  "a1",\r\n]\r\n' \
+    > "$FHOME/.clauth/profiles.toml"
+check "a CRLF list still excludes its member" "$(cls a1 | cut -d: -f1)" "excluded"
+
 # THE SCAN'S ONE EXTERNAL TOOL, REMOVED. Without this row the `|| return 1` on
 # the sed call is unpinned — mutation proved it: deleting that test passed the
 # whole suite, because every other fixture has a working sed. `echo` and `[[`

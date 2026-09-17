@@ -1879,7 +1879,14 @@ mkdir -p "$FHOME/.clauth/profiles/p1"
 printf '{"claudeAiOauth":{\n' > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
 WITH_CLAUTH=1 run_doctor
-want_out "an unreadable store is NOT CHECKED, not a verdict" "could not be read"
+# The needle is anchored on THIS rule's own wording. The bare substring
+# "could not be read" is printed by two other lines in claude.sh (the config-dir
+# census and the credential-side comparison), so it is ambiguous by construction
+# — a needle must be unique to the RULE, not merely absent from the pass path.
+# Latent rather than live: neither of those can fire in this fixture. Anchored so
+# that a later fixture change cannot make the row vacuous without anyone noticing.
+want_out "an unreadable store is NOT CHECKED, not a verdict" \
+         "its stored credential could not be read"
 no_out   "...and is not reported as USABLE"                   "USABLE"
 
 # TOTAL CLASSIFICATION. A quarantined name with no profile store must NOT be sent
@@ -1933,6 +1940,21 @@ want_out "a span that closes on ANOTHER array's bracket is NOT CHECKED" \
          "could not read clauth's quarantine list"
 no_out   "...and invents no quarantined account"      "quarantined (auth_broken)"
 no_out   "...and does not print an all-clear over it" "no profile is quarantined"
+
+# CRLF, WHERE THE TWO READERS USED TO DISAGREE. The bash twin strips separators
+# with `[[:space:],]`, which includes `\r`; this one used `[$' \t\n,']`, which did
+# not — so the same file was `YES` to the reconciler and NOT CHECKED to the
+# doctor. Measured before the fix. clauth writes LF on Linux, so reachability is
+# low; the row exists because the two are documented as one rule in two languages
+# and a divergence between them is what the cross-check row is for.
+new_home v8f; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\r\n    "p1",\r\n]\r\nauth_broken = [\r\n    "p1",\r\n]\r\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a CRLF profiles.toml is still read"     "quarantined (auth_broken)"
+no_out   "...and is not reported as unreadable"   "could not read clauth's quarantine list"
 
 # THE READER'S ONE EXTERNAL TOOL, REMOVED. `sed` is staged unconditionally by
 # SYSBIN, so with this row absent nothing could tell "the question was asked and
