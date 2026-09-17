@@ -33,22 +33,7 @@ case "$status" in
             rm -f "$(pr_slot_file "$pane")"
             exit 0
         fi
-        # Clear the token before dropping the slot. A failed clear must not
-        # lose the slot: the next done/idle would otherwise re-arm from the
-        # stale `ready` token. Mark the slot "disarmed" instead — it can
-        # never equal a real "<terminal_id>:<seq>" generation, so it blocks
-        # a re-arm (see the arm path below) and a later working/blocked event
-        # naturally retries the clear.
-        if clear_out=$("$PR_HERDR" pane report-metadata "$pane" --source pane-reaper \
-                --clear-token pane_reaper 2>&1); then
-            rm -f "$(pr_slot_file "$pane")"
-            pr_log "$pane" "disarmed:new-turn"
-        else
-            code=$(pr_field "$clear_out" '.error.code')
-            [ -n "$code" ] || code=unknown
-            pr_slot_write "$pane" disarmed "$(pr_nonce)"
-            pr_log "$pane" "disarm-failed:$code"
-        fi
+        pr_disarm "$pane"
         exit 0 ;;
     done|idle) ;;
     *) exit 0 ;;
@@ -66,8 +51,19 @@ seq=$(pr_field "$json" "$a.state_change_seq")
 case "$seq" in ''|*[!0-9]*) exit 0 ;; esac
 
 gen="$term:$seq"
+sgen=$(pr_slot_gen "$pane")
 # Already armed for exactly this state: keep that timer's deadline.
-[ "$(pr_slot_gen "$pane")" = "$gen" ] && exit 0
+[ "$sgen" = "$gen" ] && exit 0
+# Armed on this same terminal at an older seq: a whole turn ran since (seq
+# moves only on a real state change; done->idle keeps it), and its working
+# event never disarmed us — herdr dropped that hook, its `agent get` failed, or
+# it simply runs after this one in a short turn. Disarm now instead of arming.
+# A slot from another terminal is stale (server restart, pane-id reuse): it is
+# overwritten below.
+if [ -n "$sgen" ] && [ "${sgen%:*}" = "$term" ]; then
+    pr_disarm "$pane"
+    exit 0
+fi
 
 min=$(pr_minutes "$(pr_field "$json" "$a.tokens.pane_reaper_min")")
 nonce=$(pr_nonce)

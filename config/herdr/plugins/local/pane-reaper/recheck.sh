@@ -53,11 +53,18 @@ json=$(pr_agent_json "$pane") || skip agent-gone
 [ "$(pr_field "$json" "$a.pane_id")" = "$pane" ] || skip agent-gone
 [ "$(pr_field "$json" "$a.terminal_id")" = "$term" ] || skip terminal-changed
 [ "$(pr_field "$json" "$a.tokens.pane_reaper")" = ready ] || skip not-ready
+# A new turn: log it but leave the slot armed. The working hook (or, if herdr
+# dropped that, the next done/idle hook) must still find the slot to clear the
+# `ready` token; removing it here would let the next done re-arm from that token.
+keep_slot() {
+    pr_log "$pane" "skip:$1"
+    exit 0
+}
 case "$(pr_field "$json" "$a.agent_status")" in
     done|idle) ;;
-    *) skip status ;;
+    *) keep_slot status ;;
 esac
-[ "$(pr_field "$json" "$a.state_change_seq")" = "$seq" ] || skip seq-changed
+[ "$(pr_field "$json" "$a.state_change_seq")" = "$seq" ] || keep_slot seq-changed
 
 # Closing a workspace's last pane closes the workspace. Only a linked worktree's
 # workspace may go that way; a primary checkout or plain folder stays.
@@ -71,6 +78,9 @@ linked=$(printf '%s' "$wjson" | jq -r '.result.workspace.worktree.is_linked_work
 pr_has_bash_children "$pane" && rearm bash-children
 [ "$(pr_field "$json" "$a.focused")" = true ] && rearm focused
 
+# Re-read the slot last: a hook that disarmed or re-armed this pane while the
+# gates ran has taken it over. This narrows, not closes, the residual race.
+[ "$(pr_slot_nonce "$pane")" = "$nonce" ] || exit 0
 if out=$("$PR_HERDR" pane close "$pane" 2>/dev/null); then
     pr_log "$pane" closed
 else

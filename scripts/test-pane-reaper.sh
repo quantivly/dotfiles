@@ -42,7 +42,10 @@ case "$1 $2" in
     if [ -f "$d/agent.json" ]; then cat "$d/agent.json"; exit 0; fi
     printf '{"error":{"code":"agent_not_found","message":"not found"}}\n'; exit 1 ;;
   "workspace get")     cat "$d/workspace.json" ;;
-  "pane process-info") cat "$d/procinfo.json" ;;
+  "pane process-info")
+    # A test-supplied side effect, run at the last herdr call before a close.
+    if [ -f "$d/procinfo-hook" ]; then sh "$d/procinfo-hook"; fi
+    cat "$d/procinfo.json" ;;
   "pane close")
     if [ -f "$d/close-fails" ]; then cat "$d/close-fails"; exit 1; fi ;;
   "pane report-metadata")
@@ -123,10 +126,12 @@ check "done + ready: logged armed:5m"            "$(lastlog)"   "armed:5m"
 check "slot holds the generation"                "$(slot | cut -d' ' -f1)" "T:7"
 hook idle
 check "same generation again: no second timer"   "$(launches)"  "1"
+# A newer seq on the same terminal means a turn ran in between (done->idle
+# keeps the seq), so the arm path disarms rather than re-arming.
 agent idle ready false 8 T ""
 hook idle
-check "new seq: a second timer"                  "$(launches)"  "2"
-check "slot moved to the new generation"         "$(slot | cut -d' ' -f1)" "T:8"
+check "new seq: no second timer"                 "$(launches)"  "1"
+check "new seq: disarmed instead"                "$(lastlog)"   "disarmed:new-turn"
 # shellcheck disable=SC2016 # must stay unexpanded: it's a raw pane_reaper_min value under test, not an eval'd command
 for raw in "" abc '5;$(id)'; do
     reset; agent "done" ready false 7 T "$raw"
@@ -177,6 +182,33 @@ agent working ready false 11 T ""
 hook working
 check "retry after clear works: logged"          "$(lastlog)"   "disarmed:new-turn"
 check "retry after clear works: slot removed"    "$(slot)"      ""
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+printf 'boom\n' > "$SD/metadata-fails"
+hook working
+check "failed clear, non-JSON reply: code unknown" "$(lastlog)" "disarm-failed:unknown"
+check "failed clear, non-JSON reply: slot disarmed" "$(slot | cut -d' ' -f1)" "disarmed"
+
+echo
+echo "=== hook: the arm path disarms a pane whose working event was missed ==="
+# done with a newer seq than the armed slot, on the same terminal: a whole turn
+# ran in between (its working hook dropped, failed, or ran after this one).
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1
+hook "done"
+check "missed turn: token cleared"               "$(clears)"    "1"
+check "missed turn: logged"                      "$(lastlog)"   "disarmed:new-turn"
+check "missed turn: no timer"                    "$(launches)"  "0"
+check "missed turn: slot removed"                "$(slot)"      ""
+reset; agent idle ready false 9 T ""; seed_slot T:7 N1
+printf '%s\n' '{"error":{"code":"server_unavailable","message":"x"}}' > "$SD/metadata-fails"
+hook idle
+check "missed turn, failed clear: logged"        "$(lastlog)"   "disarm-failed:server_unavailable"
+check "missed turn, failed clear: slot disarmed" "$(slot | cut -d' ' -f1)" "disarmed"
+check "missed turn, failed clear: no timer"      "$(launches)"  "0"
+reset; agent "done" ready false 3 T2 ""; seed_slot T:7 N1
+hook "done"
+check "slot from another terminal: token kept"   "$(clears)"    "0"
+check "slot from another terminal: armed"        "$(launches)"  "1"
+check "slot from another terminal: overwritten"  "$(slot | cut -d' ' -f1)" "T2:3"
 
 echo
 echo "=== recheck: gates ==="
@@ -200,9 +232,18 @@ base; agent "done" "" false 7 T ""; recheck w1:p1 T 7 N1 0
 check "token removed: skip"                      "$(lastlog)"   "skip:not-ready"
 base; agent working ready false 7 T ""; recheck w1:p1 T 7 N1 0
 check "working: skip"                            "$(lastlog)"   "skip:status"
+# The slot stays armed so the working hook that follows still finds it.
+check "working: slot kept"                       "$(slot)"      "T:7 N1"
+agent working ready false 8 T ""
+hook working
+check "working hook after the skip: token cleared" "$(clears)" "1"
+check "working hook after the skip: slot removed" "$(slot)"    ""
 base; agent idle ready false 8 T ""; recheck w1:p1 T 7 N1 0
 check "seq changed: skip"                        "$(lastlog)"   "skip:seq-changed"
 check "seq changed: no close"                    "$(closes)"    "0"
+check "seq changed: slot kept"                   "$(slot)"      "T:7 N1"
+base; agent "done" "" false 7 T ""; recheck w1:p1 T 7 N1 0
+check "other skips still drop the slot"          "$(slot)"      ""
 
 base
 pstable <<'PS'
@@ -239,6 +280,16 @@ base; printf '{"error":{"code":"confirmation_required","message":"x"}}\n' > "$SD
 recheck w1:p1 T 7 N1 0
 check "close refused: logged with its code"      "$(lastlog)"   "close-failed:confirmation_required"
 check "close refused: tried once"                "$(closes)"    "1"
+# The slot is re-read just before the close: a hook that disarmed or re-armed
+# the pane while the gates ran (staged at process-info, the last herdr call)
+# wins.
+base
+# shellcheck disable=SC2016 # expanded by the stub's shell, which has the slot dir
+printf '%s\n' 'printf "T:7 N2\n" > "$PANE_REAPER_SLOT_DIR/w1_p1"' > "$SD/procinfo-hook"
+recheck w1:p1 T 7 N1 0
+check "slot changed during the gates: no close"  "$(closes)"    "0"
+check "slot changed during the gates: silent"    "$(lastlog)"   ""
+check "slot changed during the gates: slot kept" "$(slot)"      "T:7 N2"
 base; recheck w1:p1 T 7 N1 'x;1'
 check "non-numeric minutes: herdr not called"    "$(ncalls)"    "0"
 

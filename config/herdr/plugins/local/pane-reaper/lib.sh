@@ -50,6 +50,25 @@ pr_log() {
     printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$_d/log" 2>/dev/null || :
 }
 
+# pr_disarm <pane>: cancel an armed pane that started a new turn. The token is
+# cleared BEFORE the slot is dropped: a failed clear must not lose the slot, or
+# the next done/idle would re-arm from the stale `ready` token. A failed clear
+# marks the slot "disarmed" instead. That can never equal a real
+# "<terminal_id>:<seq>" generation, so the arm path refuses it, and the next
+# working/blocked event retries the clear. Fails safe: a pane whose clear keeps
+# failing is never reaped.
+pr_disarm() {
+    if _out=$("$PR_HERDR" pane report-metadata "$1" --source pane-reaper \
+            --clear-token pane_reaper 2>&1); then
+        rm -f "$(pr_slot_file "$1")" 2>/dev/null
+        pr_log "$1" "disarmed:new-turn"
+    else
+        _code=$(pr_field "$_out" '.error.code')
+        pr_slot_write "$1" disarmed "$(pr_nonce)"
+        pr_log "$1" "disarm-failed:${_code:-unknown}"
+    fi
+}
+
 pr_agent_json() {
     "$PR_HERDR" agent get "$1" 2>/dev/null
 }
