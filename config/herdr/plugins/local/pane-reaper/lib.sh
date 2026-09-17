@@ -1,0 +1,114 @@
+# shellcheck shell=sh
+#
+# Shared by on-status-changed.sh (the hook) and recheck.sh (the timer).
+# Callers set PR_ROOT before sourcing. Design and every gate:
+# ~/Projects/handoffs/2026-09-17-pane-reaper-design.md, mirrored in
+# docs/HERDR_GUIDE.md.
+
+PR_HERDR="${HERDR_BIN_PATH:-herdr}"
+PR_DEFAULT_MIN=5
+
+pr_slot_dir() {
+    if [ -n "${PANE_REAPER_SLOT_DIR:-}" ]; then
+        printf '%s\n' "$PANE_REAPER_SLOT_DIR"
+    elif [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        printf '%s\n' "$XDG_RUNTIME_DIR/pane-reaper"
+    else
+        printf '%s\n' "/tmp/pane-reaper-$(id -u)"
+    fi
+}
+
+pr_slot_file() {
+    printf '%s/%s\n' "$(pr_slot_dir)" "$(printf '%s' "$1" | tr ':/' '__')"
+}
+
+# One slot per pane: "<terminal_id>:<seq> <nonce>". Written atomically, because
+# hook invocations run concurrently and a timer reads it on wake.
+pr_slot_write() {
+    _dir=$(pr_slot_dir)
+    _f=$(pr_slot_file "$1")
+    mkdir -p "$_dir" 2>/dev/null && chmod 700 "$_dir" 2>/dev/null
+    printf '%s %s\n' "$2" "$3" > "$_f.tmp.$$" 2>/dev/null && mv -f "$_f.tmp.$$" "$_f"
+}
+
+pr_slot_gen() {
+    _f=$(pr_slot_file "$1")
+    [ -f "$_f" ] && cut -d' ' -f1 < "$_f"
+}
+
+pr_slot_nonce() {
+    _f=$(pr_slot_file "$1")
+    [ -f "$_f" ] && cut -d' ' -f2 < "$_f"
+}
+
+pr_log() {
+    _d="${XDG_STATE_HOME:-$HOME/.local/state}/pane-reaper"
+    mkdir -p "$_d" 2>/dev/null || return 0
+    printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$_d/log" 2>/dev/null || :
+}
+
+pr_agent_json() {
+    "$PR_HERDR" agent get "$1" 2>/dev/null
+}
+
+# pr_field <json> <jq path>: the value, or nothing. `// empty` also blanks a
+# JSON false, so compare booleans against "true" only.
+pr_field() {
+    printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null
+}
+
+# Token values are arbitrary strings: only an all-digit value is a grace.
+pr_minutes() {
+    case "$1" in
+        ''|*[!0-9]*) printf '%s\n' "$PR_DEFAULT_MIN" ;;
+        *)           printf '%s\n' "$1" ;;
+    esac
+}
+
+pr_nonce() {
+    printf '%s-%s-%s\n' "$$" "$(date +%s)" "$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
+}
+
+pr_ps() {
+    if [ -n "${PANE_REAPER_PS_FILE:-}" ]; then
+        cat "$PANE_REAPER_PS_FILE"
+    else
+        ps -e -o pid= -o ppid= -o args=
+    fi
+}
+
+# True when any descendant of the pane's foreground process is a Claude Code
+# Bash-tool shell: every Bash call, background ones included, runs as
+# `zsh -c source …/shell-snapshots/snapshot-…`. MCP servers never match.
+# If herdr cannot say what runs in the pane, answer "busy": a re-arm is cheap
+# and a wrong close is not.
+pr_has_bash_children() {
+    _info=$("$PR_HERDR" pane process-info --pane "$1" 2>/dev/null) || return 0
+    _roots=$(printf '%s' "$_info" | jq -r '.result.process_info.foreground_processes[]?.pid' 2>/dev/null) || return 0
+    [ -n "$_roots" ] || return 1
+    pr_ps | awk -v roots="$_roots" '
+        BEGIN { n = split(roots, r, /[ \n]+/); for (i = 1; i <= n; i++) if (r[i] != "") root[r[i]] = 1 }
+        { pid = $1; ppid = $2; $1 = ""; $2 = ""; parent[pid] = ppid; args[pid] = $0 }
+        END {
+            for (p in args) {
+                if (index(args[p], "/shell-snapshots/snapshot-") == 0) continue
+                q = parent[p]; hops = 0
+                while (q != "" && hops++ < 64) {
+                    if (q in root) exit 0
+                    q = parent[q]
+                }
+            }
+            exit 1
+        }'
+}
+
+# The redirect is load-bearing: herdr reads a hook's stdout/stderr to EOF and
+# only then frees its in-flight slot (32, shared by every plugin). A timer that
+# held a pipe open would occupy one for its whole grace.
+pr_launch_timer() {
+    if [ -n "${PANE_REAPER_LAUNCH_LOG:-}" ]; then
+        printf 'launch %s\n' "$*" >> "$PANE_REAPER_LAUNCH_LOG"
+        return 0
+    fi
+    nohup sh "$PR_ROOT/recheck.sh" "$@" < /dev/null > /dev/null 2>&1 &
+}
