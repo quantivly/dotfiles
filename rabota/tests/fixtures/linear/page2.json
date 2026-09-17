@@ -1,2 +1,0 @@
-{"data": {"notifications": {"nodes": [{"id": "n3", "type": "issueMention"}, {"id": "n4", "type": "pullRequestApproved"}],
- "pageInfo": {"hasNextPage": false, "endCursor": null}}}}

@@ -4,6 +4,8 @@ from pathlib import Path
 from rabota import context, errors, secrets, snapshots
 from rabota.commands import sync, ingest
 from rabota.runner import FakeRunner
+from rabota.sources import linear
+from tests.test_linear import COPIED, FakePost, Recording, _parse_selection, node_from_selection, tree_paths
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -52,6 +54,25 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1})
         self.assertTrue(ctx.store.last_sync("quantivly", "linear")["ok"])
         self.assertEqual(ctx.store.last_sync("quantivly", "github")["path"], rep["github"]["path"])
+
+    def test_sync_linear_reads_only_requested_notification_fields_wherever_the_read_happens(self):
+        # k7: a read in sync.py is as much a read as one in linear.py. Route generated Recording
+        # nodes through a REAL LinearClient into sync_linear and check what was read on the way.
+        tree, owners = _parse_selection(linear.NOTIFICATION_FIELDS)
+        seen: set[str] = set()
+        nodes = [Recording(node_from_selection(tree, tn, owners, id=nid, type=t, archivedAt=None), seen)
+                 for nid, t, tn in (("n1", "issueDue", "IssueNotification"), ("n2", "pullRequestApproved", "PullRequestNotification"))]
+        empty = {"data": {"issues": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        pages = [{"data": {"viewer": {"id": "v", "name": "z"}}}, empty, empty,
+                 {"data": {"notifications": {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}]
+        ctx = self.ctx()
+        rep = sync.sync_linear(ctx, linear.LinearClient("k" * 20, post=FakePost(pages)))
+        self.assertEqual(rep, {"issues": 0, "notifications": 2})
+        self.assertFalse([k for k in seen if k.endswith(COPIED)], f"a notification was copied to a plain dict: {sorted(seen)}")
+        unrequested = sorted(k for k in seen if k not in tree_paths(tree))
+        self.assertFalse(unrequested, f"sync reads notification fields the query never asks for: {unrequested}")
+        snap = snapshots.read(ctx.state_dir, "linear")
+        self.assertEqual([n["pullRequestUrl"] for n in snap["notifications"]], [None, "<url>"])
 
     def test_partial_failure_keeps_good_snapshot_and_raises_partial(self):
         ctx = self.ctx()
