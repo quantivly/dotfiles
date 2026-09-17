@@ -2128,6 +2128,8 @@ _hspawn_usage() {
     '                                  unlocked ~/.claude/.credentials.json, which a profile switch' \
     '                                  overwrites under every holder at once. Needed only when there is' \
     '                                  no clauth profile to use. See `claude-doctor`.' \
+    '      --keep                      do not ask the worker to mark its pane for pane-reaper;' \
+    '                                  by default a finished worker closes its own pane.' \
     '      --tenant <tenant>           bill this spawn to a named tenant pool, instead of the one' \
     '                                  the spawn directory resolves to' \
     '  -m, --model <model>             claude --model (an alias like opus, or a full model name)' \
@@ -2256,10 +2258,22 @@ _hspawn_await_agent() {
   return 1
 }
 
+#------------------------------------------------------------------------------
+# _hspawn_reap_instruction — the pane-reaper contract, as told to a worker
+#------------------------------------------------------------------------------
+# hspawn appends this to every prompt it sends (`--keep` opts out), so a worker
+# that finishes closes its own pane through config/herdr/plugins/local/pane-reaper
+# instead of lingering until someone runs hreap. One line: `herdr agent prompt`
+# types it into the agent. $HERDR_PANE_ID stays literal and is expanded by the
+# worker's own shell.
+_hspawn_reap_instruction() {
+  print -r -- 'When your task is completely finished and its results are saved (committed, pushed, or written to a file), run this as the last command of your final turn so this pane closes itself: herdr pane report-metadata "$HERDR_PANE_ID" --source pane-reaper --token pane_reaper=ready — never while you are still waiting on a background job, a review, or a reply.'
+}
+
 hspawn() {
   local profile="" profile_set=0 model="" effort="" mode="auto" base="" name_override=""
   local tenant="" tenant_set=0
-  local endopts=0 shared=0
+  local endopts=0 shared=0 keep=0
   # REPLY is how _claude_pick_profile answers, and it is a shell-wide name: local
   # here so a spawn cannot leave its choice behind in the calling shell.
   local REPLY=""
@@ -2285,6 +2299,12 @@ hspawn() {
         # ISOLATED BY DEFAULT" in the header: this is the flag for a worker that
         # has to LEAD a team, and it is the only way to get the old behaviour.
         shared=1
+        shift
+        continue ;;
+      --keep)
+        # The worker is not asked to mark itself for pane-reaper: its pane
+        # stays until someone closes it.
+        keep=1
         shift
         continue ;;
       --profile=*|--model=*|--effort=*|--mode=*|--base=*|--name=*|--tenant=*)
@@ -2357,6 +2377,10 @@ hspawn() {
     fi
   fi
   local prompt="${(j: :)prompt_words}"
+  # Only a prompted worker can be told; an unprompted spawn is left as before.
+  if [[ -n "$prompt" ]] && (( ! keep )); then
+    prompt+=" $(_hspawn_reap_instruction)"
+  fi
 
   if [[ ! -d "$repo" ]]; then
     echo "Error: '$repo' is not a directory" >&2

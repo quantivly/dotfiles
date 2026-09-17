@@ -54,11 +54,17 @@ done
 # behaviour. Most rows below are "nothing was created / nothing was removed",
 # which is also exactly what a suite that loaded nothing produces.
 for fn in hspawn hdespawn hreap _hspawn_shell_ready _hspawn_preserve_stale_registry \
-          _hspawn_registry_file _hreap_fmt_dur _hreap_fmt_kb \
+          _hspawn_registry_file _hreap_fmt_dur _hreap_fmt_kb _hspawn_reap_instruction \
           _claude_tenant_table_ok _claude_tenant_for claude-tenants-apply-gh; do
     zsh -c "source '$HERDRRC' >/dev/null 2>&1; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $HERDRRC — the suite would assert nothing"
 done
+
+# The ready instruction hspawn appends to every prompt (pane-reaper). Read from
+# the function rather than copied, so the rows below fail if the append breaks,
+# not if the wording changes.
+REAPSFX="$(zsh -c "source '$HERDRRC' >/dev/null 2>&1; _hspawn_reap_instruction")"
+[[ "$REAPSFX" == *"pane_reaper=ready"* ]] || fatal "_hspawn_reap_instruction does not name the token"
 
 FHOME="$TMPROOT/home";    mkdir -p "$FHOME/.clauth/profiles/personal"
 STUBBIN="$TMPROOT/bin";   mkdir -p "$STUBBIN"
@@ -401,29 +407,34 @@ MODE=full
 run "hspawn '$REPO' slug personal a prompt"
 check "legacy profile is taken"      "$(inout "deprecated: the positional")"  "1"
 check "legacy profile isolates"      "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto")" "1"
-check "legacy profile drops the slot" "$(inargs "a prompt")"                 "1"
+check "legacy profile drops the slot" "$(inargs "a prompt $REAPSFX")"        "1"
 run "hspawn '$REPO' slug - a prompt"
 check "legacy - is taken"            "$(inout "deprecated: the positional")"  "1"
 check "legacy - starts no pane run"  "$(incmd "pane run")"                    "0"
-check "legacy - drops the slot"      "$(inargs "a prompt")"                   "1"
+check "legacy - drops the slot"      "$(inargs "a prompt $REAPSFX")"          "1"
 # `--` has to switch the slot OFF. It did not: the slot triggers on a literal
 # "-", which is exactly the argument `--` exists to protect, so `--` printed a
 # deprecation note the user had just opted out of and ate the dash.
 run "hspawn -- '$REPO' slug - a prompt"
 check "after --: no deprecation"     "$(inout "deprecated: the positional")"  "0"
-check "after --: the dash survives"  "$(inargs "- a prompt")"                 "1"
+check "after --: the dash survives"  "$(inargs "- a prompt $REAPSFX")"        "1"
 run "hspawn -- '$REPO' slug personal a prompt"
 check "after --: no legacy profile"  "$(incmd "pane run")"                    "0"
-check "after --: profile word kept"  "$(inargs "personal a prompt")"          "1"
+check "after --: profile word kept"  "$(inargs "personal a prompt $REAPSFX")" "1"
 # Option parsing stops at the first positional, so a dash inside the prompt is
 # prompt text and not an option.
 run "hspawn '$REPO' slug Fix the -v flag"
-check "a -v inside the prompt"       "$(inargs "Fix the -v flag")"            "1"
+check "a -v inside the prompt"       "$(inargs "Fix the -v flag $REAPSFX")"   "1"
 check "a -v is not an option"        "$(inout "unknown option")"              "0"
+run "hspawn --keep '$REPO' slug a prompt"
+check "--keep: the prompt goes out bare"        "$(inargs "a prompt")"                  "1"
+check "--keep: no ready instruction"            "$(grep -cF -- "pane_reaper=ready" "$LOG" || true)" "0"
+run "hspawn '$REPO' slug"
+check "no prompt: no ready instruction either"  "$(grep -cF -- "pane_reaper=ready" "$LOG" || true)" "0"
 # --opt=value re-splits through `set -- ... \"\${(@)argv[2,-1]}\"`; the rows after
 # the option have to survive that.
 run "hspawn --profile=personal '$REPO' slug word1 word2"
-check "--opt=value keeps later args" "$(inargs "word1 word2")"                "1"
+check "--opt=value keeps later args" "$(inargs "word1 word2 $REAPSFX")"       "1"
 check "--opt=value sets the profile" "$(inargs "CLAUDE_CONFIG_DIR=$ACCT/personal claude --permission-mode auto")" "1"
 check "--opt=value: no deprecation"  "$(inout "deprecated: the positional")"  "0"
 
