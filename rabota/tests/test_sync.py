@@ -42,7 +42,9 @@ class SyncTests(unittest.TestCase):
     def ctx(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
-        return context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        return ctx
 
     def test_sync_writes_snapshots_and_dedupes_issues(self):
         ctx = self.ctx()
@@ -103,7 +105,8 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(row["ok"], 0)
         self.assertNotIn(MINTED, row["error"])
         self.assertIn("HTTP 401", row["error"]); self.assertIn("[redacted:", row["error"])   # shape kept, value gone
-        fresh = sqlite3.connect(ctx.state_dir / "rabota.db").execute("SELECT error FROM source_syncs WHERE source='github'").fetchone()[0]
+        conn = sqlite3.connect(ctx.state_dir / "rabota.db"); self.addCleanup(conn.close)
+        fresh = conn.execute("SELECT error FROM source_syncs WHERE source='github'").fetchone()[0]
         self.assertNotIn(MINTED, fresh)
         self.assertFalse(MINTED.encode() in db_bytes(ctx.state_dir), "rabota.db* carries the value in the clear")
         self.assertNotIn(MINTED, str(cm.exception))

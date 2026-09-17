@@ -103,7 +103,9 @@ class RankCommandTests(unittest.TestCase):
     def ctx(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
-        return context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        self.addCleanup(ctx.close)
+        return ctx
 
     def test_run_rank_writes_sequence_files_and_failed_sources(self):
         ctx = self.ctx()

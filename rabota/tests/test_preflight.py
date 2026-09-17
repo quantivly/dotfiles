@@ -24,7 +24,9 @@ class PreflightTests(unittest.TestCase):
         ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
         ssh = Result(0, "256 SHA256:abc key (ED25519)\n", "") if ssh_ok else Result(1, "", "The agent has no identities.")
         runner = FakeRunner([(["ssh-add", "-l"], ssh)])
-        return context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env=env, cwd=Path("/"))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env=env, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        return ctx
 
     def test_all_pins_positive(self):
         ctx = self.ctx("quantivly", {"PATH": "/bin", "HERDR_ENV": "1", "CLAUDE_CONFIG_DIR": "/x/quantivly-1"})
