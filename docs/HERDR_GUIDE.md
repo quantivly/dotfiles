@@ -966,6 +966,9 @@ split but not focused can still close. Prompting a finished worker again clears 
 - It leaves the worktree on disk (`hdespawn` finishes an hspawn one).
 - Marks do not survive a herdr server restart.
 - herdr's token map is flat: any plugin could overwrite `pane_reaper`.
+- Rarely, a re-prompted worker's pane is not reaped and is left for `hreap`, because herdr can
+  deliver its turn events out of order or drop one, and the reaper then errs toward keeping the
+  pane.
 
 **Fire-and-forget workers need none of this:**
 `herdr pane run <pane> 'claude -p "…"; exit'` closes its pane when the run ends.
