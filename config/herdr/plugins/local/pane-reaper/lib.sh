@@ -25,8 +25,10 @@ pr_slot_file() {
     printf '%s/%s\n' "$(pr_slot_dir)" "$(printf '%s' "$1" | tr ':/' '__')"
 }
 
-# One slot per pane: "<terminal_id>:<seq> <nonce>". Written atomically, because
-# hook invocations run concurrently and a timer reads it on wake.
+# One slot per pane: "<terminal_id>:<seq> <nonce> <epoch>", the epoch being
+# when the pane was first armed (pr_slot_write <pane> <gen> <nonce> [epoch];
+# now when omitted). Written atomically, because hook invocations run
+# concurrently and a timer reads it on wake.
 pr_slot_write() {
     _dir=$(pr_slot_dir)
     _f=$(pr_slot_file "$1")
@@ -34,7 +36,7 @@ pr_slot_write() {
     # Grouped so a failed `>` open (unwritable slot dir) is silenced too: that
     # redirect failure is reported before this command's own `2>/dev/null`
     # would otherwise apply, and would leak the shell's diagnostic to stderr.
-    { printf '%s %s\n' "$2" "$3" > "$_f.tmp.$$" && mv -f "$_f.tmp.$$" "$_f"; } 2>/dev/null
+    { printf '%s %s %s\n' "$2" "$3" "${4:-$(date +%s)}" > "$_f.tmp.$$" && mv -f "$_f.tmp.$$" "$_f"; } 2>/dev/null
 }
 
 pr_slot_gen() {
@@ -45,6 +47,42 @@ pr_slot_gen() {
 pr_slot_nonce() {
     _f=$(pr_slot_file "$1")
     [ -f "$_f" ] && cut -d' ' -f2 < "$_f"
+}
+
+# pr_slot_epoch <pane>: the slot's arm time, normalized for `$(( ))`, or 0 when
+# it can't be trusted: no slot, a slot written before arm times existed, the
+# failed-clear "disarmed" marker, or anything but 1-12 digits. pr_uint caps at 4
+# digits, so an epoch gets its own check; leading zeros are stripped for the
+# same octal reason.
+pr_slot_epoch() {
+    _f=$(pr_slot_file "$1")
+    _g='' _n='' _e=''
+    # Grouped so a failed `<` open (slot removed meanwhile) is silenced too.
+    [ -f "$_f" ] && { read -r _g _n _e < "$_f"; } 2>/dev/null
+    case "$_g" in disarmed) _e='' ;; esac
+    case "$_e" in
+        ''|*[!0-9]*) printf '0\n'; return 0 ;;
+    esac
+    [ "${#_e}" -le 12 ] || { printf '0\n'; return 0; }
+    _e=$(printf '%s' "$_e" | sed 's/^0*//')
+    printf '%s\n' "${_e:-0}"
+}
+
+# pr_epoch_age <epoch>: seconds since <epoch> (a pr_slot_epoch value). An
+# untrusted (0) or future epoch, or an unreadable clock, reads as long ago: the
+# pre-flap behaviour, which treats any state change as a new turn.
+pr_epoch_age() {
+    _now=$(date +%s)
+    case "$_now" in ''|*[!0-9]*) printf '999999\n'; return 0 ;; esac
+    if [ "$1" -eq 0 ] || [ "$1" -gt "$_now" ]; then
+        printf '999999\n'
+    else
+        printf '%s\n' "$((_now - $1))"
+    fi
+}
+
+pr_slot_age() {
+    pr_epoch_age "$(pr_slot_epoch "$1")"
 }
 
 pr_log() {
@@ -98,6 +136,12 @@ pr_uint() {
         *) printf '%s\n' "$2" ;;
     esac
 }
+
+# An agent can flap right after it finishes (live: done, working +0.3 s, done
+# +0.9 s, all in one turn). A state change within this many seconds of arming
+# is the agent settling, not a new turn.
+# shellcheck disable=SC2034 # read by on-status-changed.sh, which sources this
+PR_FLAP_SECONDS=$(pr_uint "${PANE_REAPER_FLAP_SECONDS:-10}" 10)
 
 # Token values are arbitrary strings: only a short all-digit value is a grace.
 pr_minutes() {

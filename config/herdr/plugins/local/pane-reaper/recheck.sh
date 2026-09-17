@@ -39,7 +39,9 @@ skip() {
 }
 rearm() {
     _n=$(pr_nonce)
-    if pr_slot_write "$pane" "$term:$seq" "$_n"; then
+    # Keeps the slot's original arm time: a re-arm is not a fresh finish, so
+    # it must not reopen the flap window (see on-status-changed.sh).
+    if pr_slot_write "$pane" "$term:$seq" "$_n" "$(pr_slot_epoch "$pane")"; then
         pr_log "$pane" "rearm:$1"
         pr_launch_timer "$pane" "$term" "$seq" "$_n" "$min"
         exit 0

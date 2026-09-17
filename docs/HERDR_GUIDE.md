@@ -959,6 +959,7 @@ only if all of these still hold:
 
 A busy or focused pane re-arms instead. "Focused" means the active pane: a pane visible in a
 split but not focused can still close. Prompting a finished worker again clears its mark.
+A state change within 10 s of arming is treated as the agent settling, not a new turn.
 
 **What it does not do.**
 - It ignores unmarked panes.

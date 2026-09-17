@@ -111,10 +111,17 @@ hook_raw() {
     envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" HERDR_PLUGIN_EVENT_JSON="$1" \
         sh "$PLUGIN/on-status-changed.sh"
 }
+# hook_flap <seconds> <status>: the hook with an explicit flap tolerance, so a
+# slot's age is deterministically "young" (3600) or "old" (0).
+hook_flap() {
+    envrun PANE_REAPER_FLAP_SECONDS="$1" PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+        HERDR_PLUGIN_EVENT_JSON="$(event "$2")" sh "$PLUGIN/on-status-changed.sh"
+}
 recheck() { envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" sh "$PLUGIN/recheck.sh" "$@"; }
 recheck_spm() { local spm=$1; shift; envrun PANE_REAPER_SECONDS_PER_MIN="$spm" PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" sh "$PLUGIN/recheck.sh" "$@"; }
 recheck_write_denied() { envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PATH="$FAKEBIN:$PATH" sh "$PLUGIN/recheck.sh" "$@"; }
-seed_slot() { mkdir -p "$TMPROOT/slots"; printf '%s %s\n' "$1" "$2" > "$TMPROOT/slots/w1_p1"; }
+# seed_slot <gen> <nonce> [epoch]: no epoch writes the legacy two-field form.
+seed_slot() { mkdir -p "$TMPROOT/slots"; printf '%s %s%s\n' "$1" "$2" "${3:+ $3}" > "$TMPROOT/slots/w1_p1"; }
 slot()     { cat "$TMPROOT/slots/w1_p1" 2>/dev/null; }
 lastlog()  { tail -n1 "$TMPROOT/xdg/pane-reaper/log" 2>/dev/null | cut -d' ' -f3-; }
 closes()   { grep -c '^pane close' "$SD/calls" || true; }
@@ -135,12 +142,14 @@ hook "done"
 check "done + ready: one timer"                  "$(launches)"  "1"
 check "done + ready: logged armed:5m"            "$(lastlog)"   "armed:5m"
 check "slot holds the generation"                "$(slot | cut -d' ' -f1)" "T:7"
+check "slot holds a numeric arm time"            "$([[ "$(slot | cut -d' ' -f3)" =~ ^[0-9]+$ ]] && echo yes)" "yes"
 hook idle
 check "same generation again: no second timer"   "$(launches)"  "1"
 # A newer seq on the same terminal means a turn ran in between (done->idle
-# keeps the seq), so the arm path disarms rather than re-arming.
+# keeps the seq), so the arm path disarms rather than re-arming. Flap tolerance
+# 0: the slot was armed a moment ago and would otherwise read as settling.
 agent idle ready false 8 T ""
-hook idle
+hook_flap 0 idle
 check "new seq: no second timer"                 "$(launches)"  "1"
 check "new seq: disarmed instead"                "$(lastlog)"   "disarmed:new-turn"
 # shellcheck disable=SC2016 # must stay unexpanded: it's a raw pane_reaper_min value under test, not an eval'd command
@@ -245,6 +254,67 @@ check "slot from another terminal: armed"        "$(launches)"  "1"
 check "slot from another terminal: overwritten"  "$(slot | cut -d' ' -f1)" "T2:3"
 
 echo
+echo "=== hook: flap tolerance (a state change soon after arming is settling) ==="
+# The live sequence: done@28 arms, working@29 (+0.3 s), done@30 (+0.9 s).
+reset; agent "done" ready false 28 T ""
+hook_flap 3600 "done"
+armed=$(slot)
+agent working ready false 29 T ""
+hook_flap 3600 working
+check "flap: working soon after arming keeps the token" "$(clears)" "0"
+check "flap: working soon after arming keeps the slot"  "$(slot)"   "$armed"
+agent "done" ready false 30 T ""
+hook_flap 3600 "done"
+check "flap: done@30 re-arms at the new generation" "$(slot | cut -d' ' -f1)" "T:30"
+check "flap: done@30 launches one more timer"    "$(launches)"  "2"
+check "flap: done@30 logged armed"               "$(lastlog)"   "armed:5m"
+check "flap: token never cleared"                "$(clears)"    "0"
+check "flap: re-arm has a fresh nonce"           "$([[ "$(slot | cut -d' ' -f2)" != "$(printf '%s' "$armed" | cut -d' ' -f2)" ]] && echo yes)" "yes"
+check "flap: re-arm keeps the first arm time"    "$(slot | cut -d' ' -f3)" "$(printf '%s' "$armed" | cut -d' ' -f3)"
+reset; agent "done" ready false 28 T ""
+hook_flap 0 "done"
+agent working ready false 29 T ""
+hook_flap 0 working
+check "no tolerance: working@29 clears the token" "$(clears)"   "1"
+check "no tolerance: working@29 removes the slot" "$(slot)"     ""
+# The arm path directly: same terminal, newer seq.
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$(date +%s)"
+armed=$(slot)
+hook_flap 3600 "done"
+check "young slot, newer seq: re-armed, not disarmed" "$(clears)" "0"
+check "young slot, newer seq: one timer"         "$(launches)"  "1"
+check "young slot, newer seq: new generation"    "$(slot | cut -d' ' -f1)" "T:9"
+check "young slot, newer seq: arm time kept"     "$(slot | cut -d' ' -f3)" "$(printf '%s' "$armed" | cut -d' ' -f3)"
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$(date +%s)"
+hook_flap 0 "done"
+check "old slot, newer seq: disarmed"            "$(lastlog)"   "disarmed:new-turn"
+check "old slot, newer seq: no timer"            "$(launches)"  "0"
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$(date +%s)"
+envrun PANE_REAPER_FLAP_SECONDS=abc PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+    HERDR_PLUGIN_EVENT_JSON="$(event "done")" sh "$PLUGIN/on-status-changed.sh"
+check "non-numeric flap setting: default 10 s, re-armed" "$(slot | cut -d' ' -f1)" "T:9"
+# Slots whose arm time can't be trusted read as old: the pre-flap behaviour.
+reset; agent "done" ready false 9 T ""; seed_slot T:7 N1
+hook_flap 3600 "done"
+check "legacy slot (no arm time), done: disarmed" "$(lastlog)"  "disarmed:new-turn"
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+hook_flap 3600 working
+check "legacy slot (no arm time), working: disarmed" "$(clears)" "1"
+# shellcheck disable=SC2016 # must stay unexpanded: a raw slot field under test
+for epoch in 12ab '$(id)' 99999999999999999999 9999999999 08; do
+    reset; agent "done" ready false 9 T ""; seed_slot T:7 N1 "$epoch"
+    check "arm time '$epoch', done: nothing on stderr" "$(hook_flap 3600 "done" 2>&1 >/dev/null)" ""
+    check "arm time '$epoch', done: read as old, disarmed" "$(lastlog)" "disarmed:new-turn"
+    reset; agent working ready false 9 T ""; seed_slot T:7 N1 "$epoch"
+    check "arm time '$epoch', working: nothing on stderr" "$(hook_flap 3600 working 2>&1 >/dev/null)" ""
+    check "arm time '$epoch', working: read as old, cleared" "$(clears)" "1"
+done
+# A failed-clear marker is never "young", whatever arm time it carries.
+reset; agent working ready false 9 T ""; seed_slot disarmed N1 "$(date +%s)"
+hook_flap 3600 working
+check "disarmed marker with a fresh arm time: clear retried" "$(clears)" "1"
+
+echo
 echo "=== recheck: gates ==="
 # The standard ready pane: done, ready, unfocused, seq 7, terminal T, in a
 # 2-pane linked-worktree workspace, running claude as pid 100 with no children.
@@ -289,7 +359,10 @@ recheck w1:p1 T 7 N1 0
 check "bash job alive: rearm"                    "$(lastlog)"   "rearm:bash-children"
 check "bash job alive: no close"                 "$(closes)"    "0"
 check "bash job alive: a new timer"              "$(launches)"  "1"
-check "bash job alive: slot has a new nonce"     "$([[ "$(slot)" == "T:7 "* && "$(slot)" != "T:7 N1" ]] && echo yes)" "yes"
+check "bash job alive: slot has a new nonce"     "$([[ "$(slot)" == "T:7 "* && "$(slot | cut -d' ' -f2)" != "N1" ]] && echo yes)" "yes"
+check "rearm of a legacy slot: arm time reads old" "$(slot | cut -d' ' -f3)" "0"
+base; seed_slot T:7 N1 1234567890; agent "done" ready true 7 T ""; recheck w1:p1 T 7 N1 0
+check "rearm keeps the original arm time"        "$(slot | cut -d' ' -f3)" "1234567890"
 base
 pstable <<'PS'
 100 1 claude --settings {}

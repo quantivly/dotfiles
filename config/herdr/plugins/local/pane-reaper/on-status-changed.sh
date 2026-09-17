@@ -27,6 +27,11 @@ case "$status" in
         # Never armed (e.g. the worker's own final turn, during which it set
         # `ready`): nothing to disarm, and no socket call.
         [ -f "$(pr_slot_file "$pane")" ] || exit 0
+        # Armed moments ago: the agent settling (it can flap done -> working ->
+        # done within a second of finishing), not a new turn. Keep the slot and
+        # the token; if a real turn did start, the done/idle that ends it past
+        # the window disarms on the arm path. A "disarmed" marker is never young.
+        [ "$(pr_slot_age "$pane")" -ge "$PR_FLAP_SECONDS" ] || exit 0
         json=$(pr_agent_json "$pane") || exit 0
         a='.result.agent'
         gen="$(pr_field "$json" "$a.terminal_id"):$(pr_field "$json" "$a.state_change_seq")"
@@ -62,16 +67,23 @@ sgen=$(pr_slot_gen "$pane")
 # moves only on a real state change; done->idle keeps it), and its working
 # event never disarmed us — herdr dropped that hook, its `agent get` failed, or
 # it simply runs after this one in a short turn. Disarm now instead of arming.
+# Unless that arm is still young: then the seq moved because the agent flapped
+# while settling, so re-arm at the new generation. The re-arm keeps the FIRST
+# arm time, so a pane that keeps flapping can't stretch the window forever.
 # A slot from another terminal is stale (server restart, pane-id reuse): it is
-# overwritten below.
+# overwritten below, with a fresh arm time.
+epoch=''
 if [ -n "$sgen" ] && [ "${sgen%:*}" = "$term" ]; then
-    pr_disarm "$pane"
-    exit 0
+    epoch=$(pr_slot_epoch "$pane")
+    if [ "$(pr_epoch_age "$epoch")" -ge "$PR_FLAP_SECONDS" ]; then
+        pr_disarm "$pane"
+        exit 0
+    fi
 fi
 
 min=$(pr_minutes "$(pr_field "$json" "$a.tokens.pane_reaper_min")")
 nonce=$(pr_nonce)
-pr_slot_write "$pane" "$gen" "$nonce" || exit 0
+pr_slot_write "$pane" "$gen" "$nonce" "$epoch" || exit 0
 pr_log "$pane" "armed:${min}m"
 pr_launch_timer "$pane" "$term" "$seq" "$nonce" "$min"
 exit 0
