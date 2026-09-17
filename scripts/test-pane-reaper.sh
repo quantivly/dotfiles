@@ -155,7 +155,68 @@ hook working
 check "retry after clear works: logged"          "$(lastlog)"   "disarmed:new-turn"
 check "retry after clear works: slot removed"    "$(slot)"      ""
 
-# Task 2 appends recheck rows here; Task 3 appends the detach row.
+echo
+echo "=== recheck: gates ==="
+# The standard ready pane: done, ready, unfocused, seq 7, terminal T, in a
+# 2-pane linked-worktree workspace, running claude as pid 100 with no children.
+base() { reset; agent "done" ready false 7 T ""; workspace 2 true; procinfo; seed_slot T:7 N1; }
+
+base; recheck w1:p1 T 7 N1 0
+check "happy path: closed"                       "$(closes)"    "1"
+check "happy path: logged"                       "$(lastlog)"   "closed"
+check "happy path: slot cleared"                 "$(slot)"      ""
+base; seed_slot T:7 OTHER; recheck w1:p1 T 7 N1 0
+check "superseded timer: herdr not called"       "$(ncalls)"    "0"
+check "superseded timer: slot untouched"         "$(slot)"      "T:7 OTHER"
+base; rm -f "$SD/agent.json"; recheck w1:p1 T 7 N1 0
+check "agent gone: skip"                         "$(lastlog)"   "skip:agent-gone"
+check "agent gone: no close"                     "$(closes)"    "0"
+base; agent "done" ready false 7 T2 ""; recheck w1:p1 T 7 N1 0
+check "terminal changed: skip"                   "$(lastlog)"   "skip:terminal-changed"
+base; agent "done" "" false 7 T ""; recheck w1:p1 T 7 N1 0
+check "token removed: skip"                      "$(lastlog)"   "skip:not-ready"
+base; agent working ready false 7 T ""; recheck w1:p1 T 7 N1 0
+check "working: skip"                            "$(lastlog)"   "skip:status"
+base; agent idle ready false 8 T ""; recheck w1:p1 T 7 N1 0
+check "seq changed: skip"                        "$(lastlog)"   "skip:seq-changed"
+check "seq changed: no close"                    "$(closes)"    "0"
+
+base
+pstable <<'PS'
+100 1 claude --settings {}
+200 100 /usr/bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-1.sh && gh pr checks --watch
+300 200 gh pr checks --watch
+PS
+recheck w1:p1 T 7 N1 0
+check "bash job alive: rearm"                    "$(lastlog)"   "rearm:bash-children"
+check "bash job alive: no close"                 "$(closes)"    "0"
+check "bash job alive: a new timer"              "$(launches)"  "1"
+check "bash job alive: slot has a new nonce"     "$([[ "$(slot)" == "T:7 "* && "$(slot)" != "T:7 N1" ]] && echo yes)" "yes"
+base
+pstable <<'PS'
+100 1 claude --settings {}
+210 100 node /opt/mcp/server.js
+900 1 /usr/bin/zsh -c source /x/shell-snapshots/snapshot-zsh-9.sh
+PS
+recheck w1:p1 T 7 N1 0
+check "only MCP children (and someone else's job): closed" "$(closes)" "1"
+base; agent "done" ready true 7 T ""; recheck w1:p1 T 7 N1 0
+check "focused: rearm"                           "$(lastlog)"   "rearm:focused"
+check "focused: no close"                        "$(closes)"    "0"
+base; workspace 1 null; recheck w1:p1 T 7 N1 0
+check "last pane of a plain workspace: skip"     "$(lastlog)"   "skip:primary-workspace-last-pane"
+base; workspace 1 false; recheck w1:p1 T 7 N1 0
+check "last pane of a primary checkout: skip"    "$(lastlog)"   "skip:primary-workspace-last-pane"
+base; workspace 1 true; recheck w1:p1 T 7 N1 0
+check "last pane of a linked worktree: closed"   "$(closes)"    "1"
+base; printf '{"error":{"code":"confirmation_required","message":"x"}}\n' > "$SD/close-fails"
+recheck w1:p1 T 7 N1 0
+check "close refused: logged with its code"      "$(lastlog)"   "close-failed:confirmation_required"
+check "close refused: tried once"                "$(closes)"    "1"
+base; recheck w1:p1 T 7 N1 'x;1'
+check "non-numeric minutes: herdr not called"    "$(ncalls)"    "0"
+
+# Task 3 appends the detach row here.
 
 echo
 echo "passed: $PASS  failed: $FAIL"
