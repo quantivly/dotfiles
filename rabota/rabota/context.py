@@ -23,7 +23,14 @@ def track_contexts():
     try:
         yield opened
     finally:
-        _collectors.remove(opened)
+        # Drop THIS list, found by identity. ``list.remove`` compares with ``==``, and two
+        # empty collectors are equal — so an inner block exiting empty would take the OUTER
+        # list off the stack, the next Context would land in a list nobody closes, and the
+        # outer exit would raise ValueError.
+        for i in range(len(_collectors) - 1, -1, -1):
+            if _collectors[i] is opened:
+                del _collectors[i]
+                break
 
 
 class Context:
