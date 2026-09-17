@@ -2377,6 +2377,24 @@ Design points that are load-bearing rather than preferences:
   merge makes it the permanent record — this one had to be corrected by a follow-up commit rather
   than an amend, since #123 had already landed.
 
+  **SECOND RECURRENCE, 2026-09-17, and this time the commit message WAS the payload (#152).**
+  That PR existed to retract a claim about who owns `~/.claude/.credentials.json`, spent six
+  commits doing it, and then merged as `23d588e` carrying the retracted claim as its **title** —
+  over a body that calls the restored, true sentence "wrong". Nobody wrote that message:
+  **`gh pr merge --squash` composes the commit from the PR's title and body**, and neither had
+  been touched since the first commit, so the squash published the PR's opening position as the
+  permanent record of its conclusion. `git log --grep nanoclaw` on `main` now shows a false claim
+  as the headline of the commit that disproves it. The rule is mechanical rather than a matter of
+  care: **before a squash merge, read the PR title and body as the commit message they are about
+  to become**, and on any PR whose content changed during review, rewrite them first —
+  `gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -F body=@file -f title='…'`, because `gh pr
+  edit` is refused here by a Projects-classic GraphQL error. Afterwards there is no good remedy:
+  the commit is on a protected branch, so it is a correction header on the PR page (where a
+  reader arriving from `(#152)` lands) plus a follow-up like this one. **Reviewing the diff is
+  not reviewing the merge** — this one was merged by a session that had read the #123 lesson
+  above in the same sitting, and checked the file content on `main` afterwards but not the
+  message.
+
   **A sixth survivor was a row that passed because the TEST raced, not because the fix was missing.**
   Both lock rows started a background holder and then `sleep 0.4` before measuring — and on a loaded
   machine, which a mutation run guarantees, the holder had sometimes not acquired yet, so the
