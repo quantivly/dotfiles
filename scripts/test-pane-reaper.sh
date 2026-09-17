@@ -255,7 +255,23 @@ check "unwritable slot dir: rearm-failed logged" "$(lastlog)"   "rearm-failed:fo
 check "unwritable slot dir: no new timer"        "$(launches)"  "0"
 check "unwritable slot dir: slot unchanged"      "$(slot)"      "T:7 N1"
 
-# Task 3 appends the detach row here.
+echo
+echo "=== the hook returns at once and its timer still fires ==="
+# No PANE_REAPER_LAUNCH_LOG: a real detached recheck.sh. The command
+# substitution waits for EOF on the hook's stdout, exactly as herdr's plugin
+# runner does, so a timer that inherited the pipe would hold this for the whole
+# grace (3 s here) instead of returning at once.
+reset; agent "done" ready false 7 T 1; workspace 2 true; procinfo
+start=$(date +%s)
+_=$(envrun PANE_REAPER_SECONDS_PER_MIN=3 HERDR_PLUGIN_EVENT_JSON="$(event "done")" \
+    timeout 10 sh "$PLUGIN/on-status-changed.sh")
+elapsed=$(( $(date +%s) - start ))
+check "hook released its output before the grace" "$(( elapsed < 2 ? 1 : 0 ))" "1"
+for _ in $(seq 1 20); do
+    [[ "$(closes)" == 1 ]] && break
+    sleep 0.5
+done
+check "the detached timer closed the pane"       "$(closes)"    "1"
 
 echo
 echo "passed: $PASS  failed: $FAIL"
