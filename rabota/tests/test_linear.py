@@ -183,25 +183,28 @@ SOURCE_FUNCTION = "inbox_notifications"  # the one function that builds them
 ENVELOPE_KEYS = {SNAPSHOT_KEY, "issues", "viewer", "data", "nodes", "edges", "pageInfo"}
 
 
-def _literal_key_reads(func_or_module) -> list[tuple[int, str, str]]:
-    """``(lineno, key, spelling)`` for every string-literal key read in the AST node: ``x["k"]``, ``x.get("k")``,
-    ``x.setdefault("k")``, ``x.pop("k")``, ``dict.get(x, "k")``, ``"k" in x`` — whatever the receiver is
-    (``dict(n).get`` included)."""
+def _literal_key_reads(func_or_module) -> list[tuple[int, str, str, ast.AST]]:
+    """``(lineno, key, spelling, receiver)`` for every string-literal key read in the AST node: ``x["k"]``,
+    ``x.get("k")``, ``x.setdefault("k")``, ``x.pop("k")``, ``dict.get(x, "k")``, ``"k" in x`` — whatever the
+    receiver is (``dict(n).get`` included). The receiver is the expression the key is read OFF, so a caller
+    can ask whether it holds a notification at all (``gh.get("own_prs")`` in a function that also holds one is
+    not the guard's business)."""
     out = []
     for node in ast.walk(func_or_module):
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str) \
                 and isinstance(node.ctx, ast.Load):
-            out.append((node.lineno, node.slice.value, "[]"))
+            out.append((node.lineno, node.slice.value, "[]", node.value))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "setdefault", "pop"):
             # the key is args[0] in ``n.get("k")`` and args[1] in the unbound ``dict.get(n, "k")`` (E-C): take the
             # first string literal among the first two positionals — a bound call's string default is only
-            # reached when there is no literal key before it, which is exactly the unbound shape.
-            key = next((a.value for a in node.args[:2] if isinstance(a, ast.Constant) and isinstance(a.value, str)), None)
-            if key is not None:
-                out.append((node.lineno, key, f".{node.func.attr}()"))
+            # reached when there is no literal key before it, which is exactly the unbound shape. The receiver
+            # follows the same split: the bound object for args[0], the first positional for args[1].
+            i = next((i for i, a in enumerate(node.args[:2]) if isinstance(a, ast.Constant) and isinstance(a.value, str)), None)
+            if i is not None:
+                out.append((node.lineno, node.args[i].value, f".{node.func.attr}()", node.func.value if i == 0 else node.args[0]))
         elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str) \
                 and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
-            out.append((node.lineno, node.left.value, "in"))
+            out.append((node.lineno, node.left.value, "in", node.comparators[0]))
     return out
 
 
@@ -224,12 +227,17 @@ def _callee(call: ast.Call) -> str | None:
     return call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", None)
 
 
+def _derived(expr: ast.AST, names: set[str], in_scope: set[str]) -> bool:
+    """Can ``expr`` hold a notification? It names the key, calls an in-scope function, or uses a tainted name."""
+    return any((isinstance(n, ast.Name) and n.id in names)
+               or (isinstance(n, ast.Call) and _callee(n) in in_scope) for n in ast.walk(expr)) or _mentions_notifications(expr)
+
+
 def _tainted_names(func: ast.AST, in_scope: set[str], params_tainted: bool) -> set[str]:
     """Names in ``func`` bound from a notification source: a ``"notifications"`` read, a call to an
     in-scope function, or another such name — through assignment, ``for`` and comprehension targets."""
     def tainted(expr: ast.AST) -> bool:
-        return any((isinstance(n, ast.Name) and n.id in names)
-                   or (isinstance(n, ast.Call) and _callee(n) in in_scope) for n in ast.walk(expr)) or _mentions_notifications(expr)
+        return _derived(expr, names, in_scope)
     def targets(t: ast.AST) -> set[str]:
         return {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
     names = {a.arg for a in ast.walk(func) if isinstance(a, ast.arg)} if params_tainted else set()
@@ -244,19 +252,25 @@ def _tainted_names(func: ast.AST, in_scope: set[str], params_tainted: bool) -> s
             return names
 
 
-def _notification_scopes(module: ast.Module) -> list[ast.AST]:
+Scope = tuple[ast.AST, "set[str] | None", set[str]]     # (node, tainted names — None = judge every read, in-scope callees)
+
+
+def _notification_scopes(module: ast.Module) -> list[Scope]:
     """The AST nodes that can hold a notification node, so the only ones whose literal key reads are
-    the guard's business. Entries are the functions that name the notifications (the snapshot key or
-    the source function); the scope grows upward to every function that calls one, transitively, and
-    downward to every function handed a name bound from such a source. A function that never holds a
-    notification — a renderer reading ``plan.get("totals")`` — is left alone, which is what makes the
-    scan runnable over every command module without a list of exceptions. A module whose top-level
-    code names the key is scanned whole."""
+    the guard's business — each with the names in it that hold one. Entries are the functions that
+    name the notifications (the snapshot key or the source function); the scope grows upward to every
+    function that calls one, transitively, and downward to every function handed an expression that
+    can hold one (a tainted name, or the key itself: ``_peek(lin.get("notifications", []))`` — eval-4 R).
+    A function that never holds a notification — a renderer reading ``plan.get("totals")`` — is left
+    alone, and inside a scoped function only reads OFF a tainted expression are judged, so ``rank()``
+    reading the GitHub snapshot beside the notifications is not refused for it. Both are what make the
+    scan runnable over every module without a list of exceptions. A module whose top-level code names
+    the key is scanned whole, every read judged."""
     defs = {n.name: n for n in ast.walk(module) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     top_level = [s for s in ast.walk(module) if isinstance(s, (ast.Module, ast.ClassDef))
                  for s in s.body if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
     if any(_mentions_notifications(s) for s in top_level):
-        return [module]
+        return [(module, None, set())]
     entries = {name for name, d in defs.items() if name not in ENVELOPE_FUNCTIONS and _mentions_notifications(d)}
     up, down = set(entries), set()
     while True:
@@ -264,33 +278,40 @@ def _notification_scopes(module: ast.Module) -> list[ast.AST]:
         for name, d in defs.items():                                  # callers of an entry or of a caller
             if name not in up and name not in ENVELOPE_FUNCTIONS and any(_callee(c) in up for c in ast.walk(d) if isinstance(c, ast.Call)):
                 up.add(name)
-        for name in list(up | down):                                  # callees handed a notification-derived name
+        for name in list(up | down):                                  # callees handed a notification-derived expression
             tainted = _tainted_names(defs[name], up | down, params_tainted=name in down)
             for c in ast.walk(defs[name]):
                 if isinstance(c, ast.Call) and _callee(c) in defs and _callee(c) not in ENVELOPE_FUNCTIONS \
-                        and any(isinstance(n, ast.Name) and n.id in tainted for a in c.args for n in ast.walk(a)):
+                        and any(_derived(a, tainted, up | down) for a in c.args):
                     down.add(_callee(c))
         if (len(up), len(down)) == before:
-            return [defs[n] for n in sorted(up | down, key=lambda n: defs[n].lineno)]
+            return [(defs[n], _tainted_names(defs[n], up | down, params_tainted=n in down), up | down)
+                    for n in sorted(up | down, key=lambda n: defs[n].lineno)]
 
 
-def scanned_consumers(pkg: Path = PKG) -> list[tuple[Path, list[ast.AST]]]:
-    """``(module path, scopes)`` for every module that may hold a notification: the source that builds
-    them and every command module on disk — discovered, never listed, so a new consumer cannot be
-    missed by omission (k7 round 4). The registry is a subset of the disk by construction; a test pins it."""
-    paths = [pkg / "sources" / "linear.py", *sorted(p for p in (pkg / "commands").glob("*.py") if p.name != "__init__.py")]
+def scanned_consumers(pkg: Path = PKG) -> list[tuple[Path, list[Scope]]]:
+    """``(module path, scopes)`` for every module in the package — discovered, never listed, so a new
+    consumer cannot be missed by omission (k7 round 4), and not a directory either: this repo keeps the
+    logic in a top-level module behind a thin ``commands/`` wrapper, so a ``commands/`` glob left
+    ``rank.py`` unscanned (eval-4, T/R). The test tree, byte-compiled caches and an EMPTY ``__init__.py``
+    are the only exclusions; a module that holds no notification simply yields no scopes."""
+    paths = sorted(p for p in pkg.rglob("*.py") if "tests" not in p.parts and "__pycache__" not in p.parts
+                   and not (p.name == "__init__.py" and not p.read_text().strip()))
     return [(path, _notification_scopes(ast.parse(path.read_text(), str(path)))) for path in paths]
 
 
 def notification_field_reads_outside_selection(tree: dict, pkg: Path = PKG) -> list[str]:
-    """Every literal key read in a consumer that is neither requested, an envelope key, nor assigned by that consumer."""
+    """Every literal key read OFF a notification-derived expression in a consumer that is neither requested,
+    an envelope key, nor assigned by that consumer."""
     allowed = tree_names(tree) | ENVELOPE_KEYS
     bad = []
     for path, scopes in scanned_consumers(pkg):
-        derived = set().union(*(_literal_key_writes(s) for s in scopes)) if scopes else set()
-        for scope in scopes:
-            for lineno, key, spelling in _literal_key_reads(scope):
-                if key not in allowed and key not in derived:
+        written = set().union(*(_literal_key_writes(s) for s, _t, _c in scopes)) if scopes else set()
+        for scope, tainted, in_scope in scopes:
+            for lineno, key, spelling, receiver in _literal_key_reads(scope):
+                if tainted is not None and not _derived(receiver, tainted, in_scope):
+                    continue                                      # a read of some other shape, in a function that also holds a notification
+                if key not in allowed and key not in written:
                     bad.append(f"{path.relative_to(pkg)}:{lineno}: {spelling} reads {key!r}")
     return bad
 
@@ -344,6 +365,54 @@ def run_inboxlist(ctx):
 
 
 cli.register("inboxlist", lambda sub: sub.add_parser("inboxlist"), lambda ns: run_inboxlist(Context.from_namespace(ns)))
+'''
+# The same correct consumer in the two shapes where the envelope read IS judged — its receiver is derived
+# — so these are the variants that reach the envelope allowance at all: a module whose top-level code
+# names the key (scanned whole, every read judged), and a re-read of the key off a payload built from
+# the nodes (``sync_linear``'s own shape).
+INBOXLIST_MODULE_LEVEL = '''\
+"""Module-level consumer: the key is named at top level, so the whole module is scanned."""
+from rabota import snapshots
+
+STATE = "/var/lib/rabota"
+NOTES = snapshots.read(STATE, "linear").get("notifications", [])
+TITLES = [n["title"] for n in NOTES]
+'''
+INBOXLIST_PAYLOAD = '''\
+"""Re-reads the envelope off a payload built from the nodes: the receiver is derived, so the read is judged."""
+from rabota import snapshots
+
+
+def rows(state_dir):
+    snap = snapshots.read(state_dir, "linear")
+    payload = {"issues": snap["issues"], "notifications": snap["notifications"]}
+    return [(n["id"], n.get("title")) for n in payload["notifications"]] + [len(payload["issues"])]
+'''
+
+
+# The round-4 gate's T mutant: this repo's own layout puts the logic in a TOP-LEVEL module and a thin
+# wrapper in commands/ (rank.py / commands/rank.py). The reads live in the top-level half.
+INBOXPEEK_TOP = '''\
+"""Top-level half of a peek command: holds the reads (the guard's T control, not a command)."""
+
+
+def peek(snap):
+    out = []
+    for n in snap["notifications"]:
+        out.append((n.get("inboxUrl"), "unsnoozedAt" in n, n["unsnoozedAt"]))
+    return out
+'''
+INBOXPEEK_WRAPPER = '''\
+"""Thin wrapper: loads the snapshot and hands it to the top-level module, the commands/rank.py shape."""
+from rabota import cli, snapshots, inboxpeek
+from rabota.context import Context
+
+
+def run_inboxpeek(ctx):
+    return {"peek": inboxpeek.peek(snapshots.read(ctx.state_dir, "linear"))}
+
+
+cli.register("inboxpeek", lambda sub: sub.add_parser("inboxpeek"), lambda ns: run_inboxpeek(Context.from_namespace(ns)))
 '''
 
 
@@ -485,7 +554,7 @@ class LinearClientTests(unittest.TestCase):
         on_disk = {p for p in (PKG / "commands").glob("*.py") if p.name != "__init__.py"}
         self.assertLessEqual(on_disk, set(scanned), "a command module on disk is not scanned")
         # and the scan reaches the code it must: not a vacuous scope over the two real consumers
-        names = lambda path: {getattr(s, "name", "<module>") for s in scanned[path]}
+        names = lambda path: {getattr(s, "name", "<module>") for s, _t, _c in scanned[path]}
         self.assertEqual(names(PKG / "sources" / "linear.py"), {"inbox_notifications"})
         self.assertLessEqual({"sync_linear", "_sync_one", "run_sync"}, names(PKG / "commands" / "sync.py"))
 
@@ -512,14 +581,30 @@ class LinearClientTests(unittest.TestCase):
         # node, and the first correct consumer in the package was reported for it — the checker-refuses-
         # correct-code shape CLAUDE.md records. A consumer that reaches the nodes through the envelope
         # (``[]``, ``.get`` and ``in`` spellings alike) and reads only requested fields is clean.
+        # Three shapes, because only two of them reach the allowance: off a plain snapshot name the
+        # receiver is not derived and the read is never judged, so that row alone would pass with the
+        # allowance deleted (measured — mutant M3 survived it).
+        for label, module, scoped in (("off the snapshot (the gate's L)", INBOXLIST, ["run_inboxlist"]),
+                                      ("module-level consumer, scanned whole", INBOXLIST_MODULE_LEVEL, ["<module>"]),
+                                      ("re-read off a derived payload", INBOXLIST_PAYLOAD, ["rows"])):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                pkg = self._package_copy(tmp)
+                (pkg / "commands" / "inboxlist.py").write_text(module)
+                scanned = {path.relative_to(pkg): scopes for path, scopes in scanned_consumers(pkg)}
+                self.assertEqual([getattr(s, "name", "<module>") for s, _t, _c in scanned.get(Path("commands/inboxlist.py"), [])], scoped,
+                                 "the control module's consumer was not scoped — a clean result would be vacuous")
+                bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
+                self.assertEqual(bad, [], "a correct consumer was refused")
+
+    def test_a_module_level_consumer_reading_an_unrequested_field_fails_the_guard(self):
+        # A module whose top-level code names the key is scanned whole with EVERY read judged (no taint
+        # set to filter on — there is no function to bind names in). Pinned because emptying that set
+        # instead of leaving it unbounded passed the whole file (mutant M5).
         with tempfile.TemporaryDirectory() as tmp:
-            pkg = Path(tmp) / "rabota"
-            shutil.copytree(PKG, pkg, ignore=shutil.ignore_patterns("__pycache__"))
-            (pkg / "commands" / "inboxlist.py").write_text(INBOXLIST)
-            scanned = {path.relative_to(pkg): scopes for path, scopes in scanned_consumers(pkg)}
-            self.assertTrue(scanned.get(Path("commands/inboxlist.py")), "the control module was not scanned — a clean result would be vacuous")
+            pkg = self._package_copy(tmp)
+            (pkg / "commands" / "inboxlist.py").write_text(INBOXLIST_MODULE_LEVEL.replace('n["title"]', 'n["inboxUrl"]'))
             bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
-            self.assertEqual(bad, [], "a correct consumer was refused")
+            self.assertEqual([b.split(": ", 1)[1] for b in bad], ["[] reads 'inboxUrl'"], bad)
 
     def test_envelope_keys_name_no_selected_field(self):
         # The envelope allowance is a named set, and this is what keeps it from widening the guard: an
@@ -528,6 +613,55 @@ class LinearClientTests(unittest.TestCase):
         self.assertIn(SNAPSHOT_KEY, ENVELOPE_KEYS)
         overlap = ENVELOPE_KEYS & tree_names(selection_tree(linear.NOTIFICATION_FIELDS))
         self.assertEqual(overlap, set(), "an envelope key is also a selected field: the allowance would swallow a real read")
+
+    def _package_copy(self, tmp):
+        pkg = Path(tmp) / "rabota"
+        shutil.copytree(PKG, pkg, ignore=shutil.ignore_patterns("__pycache__"))
+        return pkg
+
+    def test_static_scan_discovers_every_module_in_the_package(self):
+        # eval-4, items T and R: the scan globbed commands/ and this repo's convention is logic in a
+        # top-level module with a thin commands/ wrapper — so rank.py, a consumer of the Linear snapshot
+        # today, was invisible by construction. Every module under the package is scanned now; only the
+        # test tree, byte-compiled caches and an EMPTY __init__.py are left out.
+        scanned = {path for path, _scopes in scanned_consumers()}
+        on_disk = {p for p in PKG.rglob("*.py") if "tests" not in p.parts and "__pycache__" not in p.parts
+                   and not (p.name == "__init__.py" and not p.read_text().strip())}
+        self.assertIn(PKG / "rank.py", on_disk)                       # the module the gate found missing
+        self.assertEqual(on_disk - scanned, set(), "modules on disk the scan does not reach")
+        self.assertEqual(scanned - on_disk, set(), "the scan names a module that is not a package module")
+
+    def test_a_top_level_module_behind_a_thin_wrapper_fails_the_guard(self):
+        # T: the reads sit in rabota/inboxpeek.py; commands/inboxpeek.py only loads the snapshot and
+        # calls it. The top-level half is where the guard must fire, and the wrapper stays clean.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._package_copy(tmp)
+            (pkg / "inboxpeek.py").write_text(INBOXPEEK_TOP)
+            (pkg / "commands" / "inboxpeek.py").write_text(INBOXPEEK_WRAPPER)
+            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
+            top = [b for b in bad if b.startswith("inboxpeek.py:")]
+            self.assertEqual(bad, top, f"only the top-level module's reads may be named: {bad}")
+            self.assertEqual({b.split(": ", 1)[1] for b in top},
+                             {".get() reads 'inboxUrl'", "in reads 'unsnoozedAt'", "[] reads 'unsnoozedAt'"}, top)
+
+    def test_logic_added_to_rank_py_fails_the_guard(self):
+        # R: rank.py gains a helper reading an unrequested field, called from rank() on the snapshot's
+        # notifications. The edit is asserted to have applied — a fixture whose edit silently missed
+        # would pass this row against the unmodified module. Two halves: the helper's read IS named
+        # (the hand-off is an expression naming the key, not a tainted name — the first version of the
+        # scope rule missed it), and rank()'s reads of OTHER shapes — the GitHub snapshot, its own
+        # items — are NOT, or the first real consumer in rank() is refused for correct code.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._package_copy(tmp)
+            rank_py = pkg / "rank.py"; src = rank_py.read_text()
+            hook = '    lin = inp.linear or {"issues": [], "viewer": {}}\n'
+            self.assertEqual(src.count(hook), 1, "rank() no longer opens with the line this fixture hooks; update the fixture")
+            src = src.replace(hook, hook + '    _peek(lin.get("notifications", []))\n')
+            src += "\n\ndef _peek(notes):\n    return [n.get(\"inboxUrl\") for n in notes]\n"
+            rank_py.write_text(src)
+            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
+            self.assertEqual([b.split(": ", 1)[1] for b in bad], [".get() reads 'inboxUrl'"], bad)
+            self.assertTrue(bad[0].startswith("rank.py:"), bad)
 
     def test_static_scan_sees_the_unbound_method_spelling(self):
         # k7 round 4 (E-C): ``dict.get(n, "inboxUrl")`` is the same read as ``n.get("inboxUrl")`` with
@@ -540,7 +674,7 @@ class LinearClientTests(unittest.TestCase):
             'c = dict.pop(n, "unsnoozedAt", None)\n'
             'd = n.get("type", "unknown")\n'
             'e = n.get(k, "fallback")\n')
-        reads = {(k, sp) for _, k, sp in _literal_key_reads(src)}
+        reads = {(k, sp) for _, k, sp, _r in _literal_key_reads(src)}
         self.assertLessEqual({("inboxUrl", ".get()"), ("emailedAt", ".setdefault()"), ("unsnoozedAt", ".pop()"), ("type", ".get()")}, reads)
         self.assertNotIn(("unknown", ".get()"), reads, "a bound call's string default is not a key")
         self.assertIn(("fallback", ".get()"), reads, "with no literal key, the second literal is reported: it may be the unbound form")
@@ -590,11 +724,11 @@ class LinearClientTests(unittest.TestCase):
     def test_static_scan_reaches_the_code_it_claims_to(self):
         # A scan over an empty scope passes vacuously; pin that it sees the real reads.
         module = ast.parse((PKG / "sources" / "linear.py").read_text())
-        keys = {k for scope in _notification_scopes(module) for _, k, _ in _literal_key_reads(scope)}
+        keys = {k for scope, _t, _c in _notification_scopes(module) for _, k, _, _ in _literal_key_reads(scope)}
         self.assertTrue({"archivedAt", "issue", "project", "pullRequest", "url"} <= keys, keys)
         self.assertNotIn("nodes", keys)       # paginate is an envelope handler, not a consumer
         sync_mod = ast.parse((PKG / "commands" / "sync.py").read_text())
-        self.assertIn("id", {k for _, k, _ in _literal_key_reads(sync_mod)})
+        self.assertIn("id", {k for _, k, _, _ in _literal_key_reads(sync_mod)})
         rec = Recording({"a": {"b": 1}}, s := set())
         rec.setdefault("a", {}).get("b"); dict(rec).get("zz"); rec["new"] = 1; rec["new"]
         self.assertEqual(s, {"a", "a.b", COPIED})
