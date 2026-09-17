@@ -195,7 +195,16 @@ _claude_quarantined_profiles() {
   local toml="$HOME/.clauth/profiles.toml" span body dq='"' i
   local -a parts
   [[ -r "$toml" ]] || return 1
-  span="$(sed -n '/^[[:space:]]*auth_broken[[:space:]]*=/,/]/{p; /]/q}' "$toml" 2>/dev/null)"
+  # THE STATUS IS THE POINT, not the output. `sed` is an external tool and an
+  # external tool is a way for a check to go quiet — CLAUDE.md records that for
+  # `readlink -f` and `awk` in these same files, and the bash twin below avoids
+  # the class entirely with a `while read` loop. Without this test a sed that
+  # never ran (absent from PATH, exec failure) yields an EMPTY span, which the
+  # next line reads as "nothing is quarantined": the doctor then prints a
+  # confident ✓ for a question it could not ask, in the one checker written to
+  # report a standing quarantine. sed still exits 0 when it matches nothing, so
+  # the ordinary empty-list case is unaffected.
+  span="$(sed -n '/^[[:space:]]*auth_broken[[:space:]]*=/,/]/{p; /]/q}' "$toml" 2>/dev/null)" || return 1
   # No assignment found. clauth omits the key entirely for an empty list, so this
   # is the ordinary "nothing is quarantined" and not a failure to read.
   [[ -n "$span" ]] || return 0
@@ -924,14 +933,30 @@ claude-doctor() {
             # refuses to ADD a name the profile list does not carry, and `remove`
             # takes it back out, so the two lists agree unless something else
             # wrote one of them.
-            if [[ ! -f "$qstore" ]]; then
-              _doctor_note "clauth's quarantine list names '$pname', which has no profile store — inert"
+            # THE DISCRIMINATOR IS THE PROFILE DIRECTORY, NOT THE CREDENTIAL.
+            # Keying "inert" on `credentials.json` misfiles a REGISTERED profile
+            # whose credential is merely missing — a rename in flight (the
+            # reconciler's own `refused-no-store` path), a crash between
+            # `clauth login`'s registration and the credential write, or a
+            # credential removed to force a re-login. For those `clauth login`
+            # REPAIRS rather than creates, and the Account-dirs enumeration below
+            # already tells the reader so about the same name: two sections of one
+            # report must not print opposite remedies.
+            if [[ ! -d "${qstore:h}" ]]; then
+              _doctor_note "clauth's quarantine list names '$pname', which is not a registered profile — inert"
               echo "    Nothing can be launched or polled under that name, so the entry costs"
               echo "    nothing. Do NOT run 'clauth login $pname' to clear it — that would create"
               echo "    the profile rather than repair one. 'clauth list' shows what is registered."
               continue
             fi
             qreal=$(( qreal + 1 ))
+            if [[ ! -f "$qstore" ]]; then
+              _doctor_warn "clauth has '$pname' quarantined (auth_broken), and its profile store holds NO credential"
+              echo "    The profile IS registered, so this is a store to repair rather than a name"
+              echo "    that cannot be launched."
+              echo "    Fix: clauth login $pname"
+              continue
+            fi
             qstate="$(_claude_store_auth_state "$qstore")"
             qexp="${qstate#* }"; qstate="${qstate%% *}"
             case "$qstate" in
@@ -941,7 +966,9 @@ claude-doctor() {
                 echo "    still works. A rotation clauth could not attribute leaves exactly this." ;;
               expired)
                 _doctor_warn "clauth has '$pname' quarantined (auth_broken); its stored access token expired $(_claude_fmt_delta $(( qexp - now_ms )))"
-                echo "    Renewing it needs a refresh, and the quarantine is clauth refusing to try." ;;
+                echo "    Renewing it needs a refresh. The flag WIDENS that profile's poll rather than"
+                echo "    stopping it — poll_backoff_ms returns AUTH_BROKEN_BACKOFF_MS (~15 min) before"
+                echo "    it consults any streak — so recovery is slow, not absent." ;;
               dead)
                 _doctor_warn "clauth has '$pname' quarantined (auth_broken), and its stored credential cannot authenticate"
                 echo "    There is no usable access token in the store either, so the flag agrees"
@@ -957,9 +984,17 @@ claude-doctor() {
             # real profile: on the inert-entry path every sentence here is wrong.
             echo "    What lifts an auth_broken flag on clauth 0.15.1: 'clauth login', or clauth"
             echo "    itself adopting or carrying a rotation it can prove. A later successful usage"
-            echo "    FETCH does not, so a flag can stand for hours after the store is healthy"
-            echo "    again — and our own reconciler adopting the live token is what removes the"
-            echo "    failing poll clauth would have recovered through."
+            echo "    FETCH does not, so a flag can stand for hours after the store is healthy again."
+            # ATTRIBUTED ONLY WHERE THE RECONCILER CAN RUN. `reconcile_all` walks
+            # this root and nothing else, so on a machine with no account dirs —
+            # a modular adopter with clauth and no timer, or any box before the
+            # first build — blaming "our own reconciler" names a mechanism that
+            # has never executed there. The general sentence above is true
+            # everywhere; this one is not.
+            if [[ -d "${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}" ]]; then
+              echo "    On this machine our own reconciler adopting the live token is also what removes"
+              echo "    the failing poll clauth would otherwise have recovered through."
+            fi
           elif (( ${#quarantined} == 0 )); then
             _doctor_ok "no profile is quarantined by clauth (auth_broken)"
           fi

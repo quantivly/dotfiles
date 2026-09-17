@@ -66,7 +66,8 @@ done
 # exactly what a suite that loaded nothing produces.
 for fn in claude-doctor _claude_cred_file _claude_now_ms _claude_fmt_delta _claude_mcp_log_root \
           _claude_global_cred_file _claude_cred_id _claude_cred_owner \
-          _claude_active_profile _claude_legacy_cred_dirs _claude_proc_root; do
+          _claude_active_profile _claude_legacy_cred_dirs _claude_proc_root \
+          _claude_quarantined_profiles _claude_store_auth_state; do
     zsh -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $CLAUDESH — the suite would assert nothing"
 done
@@ -95,6 +96,12 @@ ln -sf "$JQ_BIN" "$SYSBIN/jq"
 # The same set minus jq, for the jq-missing row.
 NOJQBIN="$TMPROOT/nojqbin"; mkdir -p "$NOJQBIN"
 cp -a "$SYSBIN/." "$NOJQBIN/"; rm -f "$NOJQBIN/jq"
+# ...and minus sed, for the sed-missing row. Without this the quarantine reader's
+# only external tool is staged unconditionally, so nothing could distinguish "the
+# question was asked and the answer was no" from "the question could not be
+# asked" — the defect that shipped in this PR's first revision.
+NOSEDBIN="$TMPROOT/nosedbin"; mkdir -p "$NOSEDBIN"
+cp -a "$SYSBIN/." "$NOSEDBIN/"; rm -f "$NOSEDBIN/sed"
 
 #-----------------------------------------------------------------------------
 # The clauth stub
@@ -248,6 +255,7 @@ mk_status() { mkdir -p "$FHOME/.clauth"; printf '{"active_profile":"%s","pending
 run_doctor() {
     local base="$SYSBIN" p
     [[ "${NO_JQ:-0}" == 1 ]] && base="$NOJQBIN"
+    [[ "${NO_SED:-0}" == 1 ]] && base="$NOSEDBIN"
     [[ -n "${ACTIVE_PROFILE:-}" ]] && mk_status "$ACTIVE_PROFILE"
     # The clauth stub is prepended ONLY when a row asks for it. Without it there
     # is no clauth anywhere on this PATH — see the SYSBIN note above.
@@ -1883,11 +1891,31 @@ mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "gone",\n]\n' > "$FHOME/.clauth/profiles.toml"
 WITH_CLAUTH=1 run_doctor
-want_out "a quarantined name with no store is classified, not reported as an account" \
-         "has no profile store"
+want_out "a quarantined name that is not a registered profile is classified, not reported as an account" \
+         "is not a registered profile"
 no_out   "...and the reader is NOT told to log in under that name" "Fix: clauth login gone"
 no_out   "...and the shared remedy paragraph is withheld too"      "FETCH does not"
 want_rc  "...and it is a note, so the exit code is untouched"      0
+
+# THE OTHER HALF OF THAT CLASSIFICATION, and the reason the discriminator is the
+# profile DIRECTORY rather than the credential. A REGISTERED profile can lack a
+# credential — a rename in flight (the reconciler's own refused-no-store path), a
+# crash between `clauth login`'s registration and the credential write, or a
+# credential removed to force a re-login. Keying "inert" on credentials.json
+# filed all of those as "not a profile" and warned the reader OFF the one command
+# that repairs them, six lines after naming p1 the ACTIVE profile — while the
+# Account-dirs section of the same report told them to run it. Two sections, one
+# name, opposite remedies.
+new_home v7b; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"          # registered, but no credentials.json
+printf 'active_profile = "p1"\nprofiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a registered profile with no credential is a store to REPAIR" \
+         "profile store holds NO credential"
+want_out "...and the reader IS sent to the command that repairs it" "Fix: clauth login p1"
+no_out   "...and is never called inert"                  "is not a registered profile"
+no_out   "...and is never warned off its own remedy"     "Do NOT run 'clauth login p1'"
 
 # THE RUNAWAY MATCH, and the reason the guard checks the span's INTERIOR rather
 # than merely looking for a `]`. This fixture is the one that broke the first
@@ -1905,6 +1933,22 @@ want_out "a span that closes on ANOTHER array's bracket is NOT CHECKED" \
          "could not read clauth's quarantine list"
 no_out   "...and invents no quarantined account"      "quarantined (auth_broken)"
 no_out   "...and does not print an all-clear over it" "no profile is quarantined"
+
+# THE READER'S ONE EXTERNAL TOOL, REMOVED. `sed` is staged unconditionally by
+# SYSBIN, so with this row absent nothing could tell "the question was asked and
+# the answer was no" from "the question could not be asked" — and the first
+# revision of this PR discarded sed's exit status, printing a confident all-clear
+# over a genuinely quarantined profile. A new external tool in a checker is a new
+# way for a check to go quiet; this is the row that says so out loud.
+new_home v8d; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+NO_SED=1 WITH_CLAUTH=1 run_doctor
+no_out   "sed missing does NOT become an all-clear over a real quarantine" \
+         "no profile is quarantined"
+want_out "...it is reported as unreadable instead" \
+         "could not read clauth's quarantine list"
 
 # The plain truncation, which is the shape an interrupted write actually leaves:
 # no closing bracket at all, so the range runs to EOF. `theme` sits below the
