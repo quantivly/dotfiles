@@ -3312,10 +3312,65 @@ the harness that checks them. It reads the `=== N passed, M failed ===` summary 
 score a mutant whose find-string is absent, whose replacement is a byte-for-byte no-op, or that
 does not parse — all three as harness errors, never as results.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 291 at `a159bd9`). **8 mutants, 8 deaths**, every one
-dry-run for applicability first — and one of them (sed's exit status) came back
-`find-string occurs 0 times` and was reported as a harness error rather than a survivor, which is
-the trap this file records costing two full sweeps.
+**AND THE FIX DID NOT ESTABLISH ITS OWN INVARIANT. An independent review found that under a
+291-check green suite and an 8-of-8 mutation sweep** — which is the fifth attempt at this one
+match, and the entry that earns the section. **Validating the interior validated only the ODD
+fields of the `"`-split: what sits BETWEEN the names, and never a name.** A span truncated
+MID-MEMBER flips quote parity, so the neighbouring assignment lands in an EVEN field and is
+emitted as a member. Measured against the fix, `fallback_chain = ["` over `profiles = ["` printed
+`auto-switch armed: the chain walks profiles = [` — both halves of the defect the PR existed to
+remove, reproduced by it — and on `auth_broken` the same span reached a **remedy**:
+`Do NOT run 'clauth login profiles = ['`, advice built out of raw file content. All four readers
+of this shape shared the hole.
+
+**The general rule, which is the thing to carry: a parity-based parse is only as validated as its
+UNCHECKED fields.** Splitting on a delimiter and checking alternate fields feels total and is
+half a check — an unterminated delimiter renumbers every field after it, so the half you did not
+check becomes the half that corruption controls. The fix is one more pass: every member must
+match clauth's own name class (`validate_profile_name`: letters, digits and `- _ . @ +`), as
+**its own loop before the emit loop**, because folding it into the emit loop would print the good
+members before refusing — a partial emission *and* a `return 1`.
+
+Four more from the same review, each now a row and a dead mutant:
+
+- **The severity was defended in four sentences and pinned by nothing.** `_doctor_warn` →
+  `_doctor_bad` survived all 291 checks, and measured, it flips `claude-doctor` to rc 1
+  permanently on any malformed `profiles.toml` — the permanently-red checker, self-inflicted by
+  the arm written to avoid it. **If a comment defends a choice by name, a row must measure the
+  choice**; no `want_rc` in the suite touched a malformed `profiles.toml`. The row needs a
+  fixture carrying no ✗ of its own, or it cannot fail.
+- **A copied comment is a copied CLAIM, and factoring the code does not factor the claims.**
+  "clauth omits the key entirely when the list is empty" is verified for `auth_broken` (serde
+  `skip_serializing_if`) and **false for `fallback_chain`**, which has no such attribute and sits
+  in the live file as `fallback_chain = []` — measured 2026-09-17, one such assignment present
+  and zero `auth_broken`. It was copied from the quarantine reader along with the parse, so the
+  drift the sharing removed from the code reappeared in the prose, and it was the stated
+  rationale for a row labelled "THE RESTING STATE OF THIS MACHINE" whose fixture is a state this
+  machine is not in.
+- **Two guards are genuinely unkillable and are now labelled as such**: the `-r` test (sed's own
+  status already returns 1 for an unreadable file) and the opening-bracket test (with no `[` to
+  strip, the key name itself lands in odd field 1, which is never clean). The author had labelled
+  exactly one such site and left these two reading as coverage.
+- **The remedy named two causes out of four.** On the `sed`-missing path — which this PR gave its
+  own row — the file is fine and `PATH` is not, so the reader was sent to inspect another tool's
+  config over a `PATH` fault: the "the remedy the guard names did not remedy" class. A comment
+  inside the array and TOML literal `'single-quoted'` strings are legal and are refused, so the
+  message says so rather than letting a hand-edit look like a truncation.
+
+**And one the review did not find, caught while writing the mutant for the fix: the new check was
+WIDER than any fixture reached.** The member class allows `- _ . @ +` and every row in the suite
+named its profiles `p1`/`p2`, so narrowing it to `[A-Za-z0-9]` would have survived everything
+while refusing this machine's own file — the live profiles are `quantivly-3`, `personal-1`, a
+hyphen in every one. **Ask of a new guard not only "what does it reject" but "what does it accept
+that nothing here exercises".** A permissive branch with no fixture is as unpinned as a missing
+one, and it fails in the direction that breaks working machines.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 304 at `3a3c662`; it was 291 at `a159bd9`, before
+the review). **13 mutants, 13 deaths**, every one dry-run for applicability first — one (sed's
+exit status) came back `find-string occurs 0 times` and was reported as a harness error rather
+than a survivor, which is the trap this file records costing two full sweeps, and the first eight
+were **re-run against the changed tree** rather than carried over, since a mutant measured
+against a previous version of the code proves nothing about this one.
 
 State tables: `scripts/test-claude-doctor.sh` (235 → 279 at `6661472`) and
 `scripts/test-claude-account-dirs.sh` (137 → 156; CLAUDE.md said 70, then 36, and both were
