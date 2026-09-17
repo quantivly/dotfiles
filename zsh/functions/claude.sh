@@ -246,6 +246,12 @@ _claude_fallback_chain() {
 _claude_toml_name_array() {
   local key="${1:-}" toml="$HOME/.clauth/profiles.toml" span body dq='"' i
   local -a parts
+  # DEFENCE IN DEPTH, and unkillable through either consumer: sed's own status
+  # below already returns 1 for an unreadable file (measured with `chmod 000` —
+  # identical rc and output with this line removed). It is kept because the
+  # contract is "no file, no answer" and a future reader of `$span` should not
+  # have to know that sed happens to cover it, and it is LABELLED because
+  # CLAUDE.md's rule is that a branch whose mutant cannot die reads as coverage.
   [[ -r "$toml" ]] || return 1
   # THE STATUS IS THE POINT, not the output. `sed` is an external tool and an
   # external tool is a way for a check to go quiet — CLAUDE.md records that for
@@ -258,9 +264,23 @@ _claude_toml_name_array() {
   # the global credential under every running session. sed still exits 0 when it
   # matches nothing, so the ordinary empty-list case is unaffected.
   span="$(sed -n "/^[[:space:]]*${key}[[:space:]]*=/,/]/{p; /]/q}" "$toml" 2>/dev/null)" || return 1
-  # No assignment found. clauth omits the key entirely for an empty list, so this
-  # is the ordinary "the list is empty" and not a failure to read.
+  # No assignment found — the ordinary "the list is empty", not a failure to read.
+  # DO NOT restate this as "clauth omits the key when the list is empty": that is
+  # true of `auth_broken` (serde `skip_serializing_if = "Vec::is_empty"`, and the
+  # live file carries no such key) and FALSE of `fallback_chain`, which has no
+  # such attribute and sits in the live file as `fallback_chain = []`. Measured
+  # 2026-09-17: one `fallback_chain` assignment present, zero `auth_broken`. The
+  # first version of this comment carried the claim for both keys, having been
+  # copied from the quarantine reader — the drift the sharing was meant to stop,
+  # arriving in the comment layer instead. So this path is reached by an absent
+  # key whoever omitted it, and the EMPTY-LIST case reaches the checks below.
   [[ -n "$span" ]] || return 0
+  # Also unkillable, for a reason worth stating rather than discovering: the span
+  # always begins with the unquoted key name, so when there is no `[` to strip
+  # the key itself lands in odd field 1, which is never clean. Four fixtures
+  # (`= "a]b"`, `= ]`, a multi-line bracketless form, `= "a" , ]`) give identical
+  # rc and output with this line removed. Same label as the `-r` test above, same
+  # reason: it states the contract, and it is not coverage.
   [[ "$span" == *'['* ]] || return 1
   body="${span#*\[}"
   [[ "$body" == *']'* ]] || return 1
@@ -279,7 +299,41 @@ _claude_toml_name_array() {
     # which is why this is one character rather than a new state.
     [[ -z "${parts[i]//[$' \t\r\n,']/}" ]] || return 1
   done
+  # A MEMBER MUST LOOK LIKE A NAME, and checking the odd fields does NOT
+  # establish that — it validates what sits BETWEEN the names and never the
+  # names. Found by an independent review of #160, measured against the first
+  # version of this very function: a span truncated MID-MEMBER (`<key> = ["`)
+  # leaves odd field 1 empty, which passes, and flips quote parity, so the
+  # neighbouring assignment lands in an EVEN field and was emitted as a member.
+  # `fallback_chain = ["` over `profiles = ["` printed
+  # `auto-switch armed: the chain walks profiles = [` — both halves of the
+  # defect this function exists to remove, reproduced against the fix, and on
+  # `auth_broken` the same span reached a REMEDY as
+  # `Do NOT run 'clauth login profiles = ['`.
+  #
+  # The class is clauth's own, from `validate_profile_name`'s refusal on the
+  # installed 0.15.1 binary: "letters, digits and - _ . @ + only, and can't
+  # start with '.'". Anything outside it is the range having run into another
+  # assignment. The leading-dot half is deliberately NOT enforced: it is
+  # clauth's rule for CREATING a profile, not a lexical fact about the array, a
+  # `.name` member is no evidence of a runaway, and the class alone closes the
+  # leak — a second rule with no observed producer would be a branch whose
+  # mutant cannot die.
+  #
+  # ITS OWN PASS, BEFORE THE EMIT LOOP, because the emit loop prints as it goes:
+  # folded in there, a bad member late in the list would be caught only after
+  # the good ones had already been printed, so a caller would get a partial
+  # emission AND a `return 1`.
   for (( i = 2; i <= ${#parts}; i += 2 )); do
+    [[ -z "${parts[i]//[A-Za-z0-9._@+-]/}" ]] || return 1
+  done
+  for (( i = 2; i <= ${#parts}; i += 2 )); do
+    # An EMPTY member is skipped rather than refused: `["", "p1"]` is legal TOML
+    # and an empty name is no evidence of a runaway, where the class check above
+    # is. Both consumers split with an unquoted `${(f)...}`, which drops an empty
+    # field anyway, so this guard is only observable at the helper's own
+    # contract — which is why the suite calls it directly rather than always
+    # through a consumer that papers over it.
     [[ -n "${parts[i]}" ]] && print -r -- "${parts[i]}"
   done
   return 0
@@ -935,9 +989,20 @@ claude-doctor() {
           # reader below gives the same file being malformed, deliberately: two
           # readers of one file must not disagree about what unreadable costs.
           _doctor_warn "could not read clauth's fallback_chain — NOT CHECKED"
-          echo "    ~/.clauth/profiles.toml is there but unreadable, or that array is unterminated"
-          echo "    (a truncated write). Whether an auto-switch is armed is therefore UNKNOWN, and"
-          echo "    an armed switch rewrites the global credential under every running session."
+          # EVERY CAUSE THIS ARM CAN HAVE, because the first version named two and
+          # the suite has a dedicated row for a third: on the `sed`-missing path
+          # the file is fine and PATH is not, and a reader sent to inspect
+          # another tool's config over a PATH fault is the "the remedy the guard
+          # names did not remedy" class this repo already records. The last
+          # clause is the honest limit: a comment inside the array, or TOML
+          # literal ('single-quoted') strings, are legal and are refused here —
+          # clauth writes neither, so only a hand-edit reaches it, and guessing
+          # at a span we cannot validate would be worse than saying so.
+          echo "    ~/.clauth/profiles.toml is unreadable, or that array is unterminated (a truncated"
+          echo "    write), or 'sed' is not on PATH, or the array holds a comment or 'literal' strings,"
+          echo "    which are legal TOML that this deliberately refuses rather than guess at."
+          echo "    Whether an auto-switch is armed is therefore UNKNOWN, and an armed switch"
+          echo "    rewrites the global credential under every running session."
         elif (( ${#chain_walk} )); then
           # Armed auto-switch is a loaded landmine, not a fault — hence a note.
           # `fallback_chain = []` reaches here with no members and is correctly
