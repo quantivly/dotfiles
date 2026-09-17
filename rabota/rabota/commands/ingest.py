@@ -1,6 +1,10 @@
 """``rabota ingest <source> --file``: store connector results the skill fetched in-session.
 
 The file is ``{"fetched_at": "<UTC Z>", "ok": true|false, "error": str|null, "items": [...]}``.
+``ok`` must be a JSON boolean: a string ``"false"`` is truthy, so coercing it recorded a failed
+source as a success and ``brief`` stayed silent (review finding k5). Anything that is not
+``true``/``false`` — a string, a number, ``null``, absent — is ``Usage`` naming the type it got;
+a file that cannot state success or failure unambiguously has not stated it.
 A failed fetch (``ok: false``) is still recorded — the snapshot is written with ``items: []``
 and ``source_syncs`` gets ``ok=0`` with the error — so ``brief`` can say
 ``! <source> failed — list is partial`` instead of silently ranking without it.
@@ -26,7 +30,11 @@ def _load(file: Path) -> dict:
         snapshots.parse_fetched_at(str(data["fetched_at"]))
     except ValueError:
         raise errors.Usage(f"{file}: fetched_at must be UTC like 2026-09-16T07:00:00Z") from None
-    if data.get("ok", True) and not isinstance(data.get("items"), list):
+    ok = data.get("ok")
+    if not isinstance(ok, bool):
+        got = "absent" if "ok" not in data else f"{type(ok).__name__} {ok!r}"
+        raise errors.Usage(f"{file}: 'ok' must be a JSON boolean (true or false), got {got}")
+    if ok and not isinstance(data.get("items"), list):
         raise errors.Usage(f"{file}: a successful ingest file needs an 'items' list")
     return data
 
@@ -36,7 +44,7 @@ def run_ingest(ctx: Context, source: str, file: Path) -> dict:
     if source not in ALLOWED:
         raise errors.Usage(f"ingest accepts {ALLOWED}")
     data = _load(file)
-    ok = bool(data.get("ok", True))
+    ok = data["ok"]                       # a bool, or _load raised
     error = None if ok else str(data.get("error") or "unknown error")
     items = data["items"] if ok else []
     payload = {"ok": ok, "error": error, "fetched_at": data["fetched_at"], "items": items}

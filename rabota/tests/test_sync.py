@@ -58,7 +58,7 @@ class SyncTests(unittest.TestCase):
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()
         f = ctx.state_dir / "slack.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "items": [{"text": "hi", "from": "benoit"}]}))
+        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": [{"text": "hi", "from": "benoit"}]}))
         rep = ingest.run_ingest(ctx, "slack", f)
         snap = snapshots.read(ctx.state_dir, "slack")
         self.assertEqual(snap["items"][0]["from"], "benoit")
@@ -86,6 +86,7 @@ class SyncTests(unittest.TestCase):
         f.write_text(json.dumps({"ok": True, "items": []}))
         with self.assertRaises(errors.Usage):
             ingest.run_ingest(ctx, "slack", f)
+        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": []}))
         with self.assertRaises(errors.Usage):
             ingest.run_ingest(ctx, "linear", f)
         with self.assertRaises(errors.Usage):
@@ -93,9 +94,27 @@ class SyncTests(unittest.TestCase):
         f.write_text("not json")
         with self.assertRaises(errors.Usage):
             ingest.run_ingest(ctx, "slack", f)
-        f.write_text(json.dumps({"fetched_at": "yesterday", "items": []}))
+        f.write_text(json.dumps({"fetched_at": "yesterday", "ok": True, "items": []}))
         with self.assertRaises(errors.Usage):                        # must parse, or age_seconds dies later
             ingest.run_ingest(ctx, "slack", f)
+
+    def test_ingest_ok_must_be_a_json_boolean(self):
+        # k5: {"ok": "false"} is a truthy string, so a failed source was recorded as a success and
+        # brief stayed silent. A file that cannot state success or failure unambiguously has not
+        # stated it: no coercion, every non-boolean is Usage naming the field and the type it got.
+        ctx = self.ctx(); ctx.state_dir.mkdir(parents=True, exist_ok=True)
+        f = ctx.state_dir / "slack.json"
+        for bad, typename in (("false", "str"), ("true", "str"), (1, "int"), (0, "int"), (None, "NoneType")):
+            f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": bad, "error": "boom", "items": []}))
+            with self.assertRaises(errors.Usage, msg=f"ok={bad!r}") as cm:
+                ingest.run_ingest(ctx, "slack", f)
+            self.assertIn("'ok'", str(cm.exception)); self.assertIn(typename, str(cm.exception))
+        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "items": []}))      # absent is not "true"
+        with self.assertRaises(errors.Usage) as cm:
+            ingest.run_ingest(ctx, "slack", f)
+        self.assertIn("'ok'", str(cm.exception))
+        self.assertIsNone(snapshots.read(ctx.state_dir, "slack"))                          # nothing was recorded
+        self.assertIsNone(ctx.store.last_sync("quantivly", "slack"))
 
 
 class SnapshotTests(unittest.TestCase):
