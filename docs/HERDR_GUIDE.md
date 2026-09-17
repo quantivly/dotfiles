@@ -778,8 +778,9 @@ the **server** environment — §2.4), and herdr-lazy itself. `0xGosu/herdr-auto
 from the list on 2026-08-30: it had been installed-but-disabled since 2026-08-28 because it runs
 a live auto-prompting daemon, and a teammate running `herdr-lazy install` would have built a
 daemon they never enable. (Its `pause/resume/status` actions still show in `plugin action list`
-wherever it remains installed — see the third bullet below.) The local `sidebar-icons` plugin is
-**not** in the list: it is linked (`herdr plugin link`, §3 step 4), not installed.
+wherever it remains installed — see the third bullet below.) The local plugins (`sidebar-icons`,
+`pane-reaper`) are **not** in the list: they are linked (`herdr plugin link`, §3 step 4), not
+installed.
 
 - `herdr plugin link` state is **herdr-local and is not restored by herdr-lazy after a
   rebuild.** Re-link local plugins after a refresh; nothing will report an error.
@@ -945,7 +946,8 @@ herdr pane report-metadata "$HERDR_PANE_ID" --source pane-reaper --token pane_re
 The spawner may set the grace per pane with `--token pane_reaper_min=<minutes>`; the
 default is 5. A grace value is 1–4 digits with leading zeros ignored (`08` means 8); anything
 else falls back to 5. `hspawn` appends this instruction to every prompt it sends (`--keep`
-opts out).
+opts out). A prompt that starts with `/` is a slash command, which would read the paragraph as
+its arguments, so it goes out without the instruction.
 
 **When it closes.** Once the pane goes done/idle, a timer waits the grace, then closes the pane
 only if all of these still hold:
@@ -955,7 +957,8 @@ only if all of these still hold:
 - the pane is not focused
 - it is not the last pane of a primary or plain workspace
 
-A busy or focused pane re-arms instead. Prompting a finished worker again clears its mark.
+A busy or focused pane re-arms instead. "Focused" means the active pane: a pane visible in a
+split but not focused can still close. Prompting a finished worker again clears its mark.
 
 **What it does not do.**
 - It ignores unmarked panes.
