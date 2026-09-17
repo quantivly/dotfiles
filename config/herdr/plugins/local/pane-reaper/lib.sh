@@ -120,15 +120,21 @@ pr_ps() {
 # Claude Code Bash-tool shell: every Bash call, background ones included, runs
 # as `zsh -c source …/shell-snapshots/snapshot-…`. MCP servers never match.
 # Only a clean "no" (awk exit 1) is free. Everything else answers busy: herdr
-# cannot say what runs in the pane, it lists no foreground process, or awk
-# fails (exit 2+). A re-arm is cheap and a wrong close is not. The roots go to
-# awk as ONE space-separated line: BWK awk (macOS) rejects a newline in `-v`.
+# cannot say what runs in the pane, it lists no foreground process, the process
+# table source fails, or awk fails (exit 2+). A re-arm is cheap and a wrong
+# close is not. The roots go to awk as ONE space-separated line: BWK awk
+# (macOS) rejects a newline in `-v`.
 pr_has_bash_children() {
     _info=$("$PR_HERDR" pane process-info --pane "$1" 2>/dev/null) || return 0
     _roots=$(printf '%s' "$_info" | jq -r '.result.process_info.foreground_processes[]?.pid' 2>/dev/null) || return 0
     _roots=$(printf '%s' "$_roots" | tr '\n' ' ')
     case "$_roots" in *[!\ ]*) ;; *) return 0 ;; esac
-    pr_ps | awk -v roots="$_roots" '
+    # Captured before awk runs: a bare `pr_ps | awk …` pipe reports awk's exit
+    # status, not pr_ps's, so a failed process table (e.g. `ps` unavailable)
+    # would hand awk an empty stdin, which reads as a clean "no" and frees the
+    # pane instead of re-arming it.
+    _table=$(pr_ps 2>/dev/null) || return 0
+    printf '%s\n' "$_table" | awk -v roots="$_roots" '
         BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) root[r[i]] = 1 }
         { pid = $1; ppid = $2; $1 = ""; $2 = ""; parent[pid] = ppid; args[pid] = $0 }
         END {

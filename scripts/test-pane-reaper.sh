@@ -316,6 +316,9 @@ check "process-info unreadable: no close"        "$(closes)"    "0"
 base; envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PATH="$AWKFAILBIN:$PATH" sh "$PLUGIN/recheck.sh" w1:p1 T 7 N1 0
 check "awk runtime error: rearm"                 "$(lastlog)"   "rearm:bash-children"
 check "awk runtime error: no close"              "$(closes)"    "0"
+base; envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PANE_REAPER_PS_FILE="$SD/no-such-ps.txt" sh "$PLUGIN/recheck.sh" w1:p1 T 7 N1 0
+check "ps source unreadable: rearm"              "$(lastlog)"   "rearm:bash-children"
+check "ps source unreadable: no close"           "$(closes)"    "0"
 base; agent "done" ready true 7 T ""; recheck w1:p1 T 7 N1 0
 check "focused: rearm"                           "$(lastlog)"   "rearm:focused"
 check "focused: no close"                        "$(closes)"    "0"
