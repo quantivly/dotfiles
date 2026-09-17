@@ -1,19 +1,22 @@
 """Linear over raw GraphQL, with an injectable ``post`` so tests use fixtures.
 
-Schema notes (WS2 task 2.1 step 1). The plan asks for a live introspection probe of
-``IssueNotification`` / ``PullRequestNotification`` / ``ProjectNotification`` and for a
-check of relation direction against one known pair. **Neither ran when this module was
-written**: the lane executed on ``dev``, which has no ``LINEAR_API_KEY`` and no tenant
-config (lane brief, constraint 4), and inventing a probe result is worse than none. The
-selection sets below are therefore the plan's, unverified against the live schema:
+Schema notes (WS2 task 2.1 step 1). The notification selection set was checked against
+Linear's live schema on 2026-09-17 with ``__type`` introspection, which answers HTTP 200
+with no Authorization header at all (output in ``out/ws2/FIX-ACCEPTANCE.md``):
 
-- ``IssueNotification`` exposes ``issue``; PR mirrors are plain notifications whose
-  ``type`` starts with ``pullRequest`` and carry a GitHub ``url``, so ``pullRequestUrl``
-  is set from ``url`` rather than from a ``pullRequest`` object.
-- Relation direction: an ``IssueRelation`` of type ``blocks`` on issue A with
-  ``relatedIssue`` B is read as "A blocks B", so A's ``relations`` are what A blocks and
-  A's ``inverseRelations`` are what blocks A. If the live probe says otherwise, swap the two
-  comprehensions in ``relations`` and record the probe output here.
+- ``url``, ``title``, ``subtitle`` and ``groupingKey`` are fields of the ``Notification``
+  interface, so every concrete type carries them. The first version of this module never
+  selected them, and a fixture that supplied them kept the suite green while every live
+  notification came back with ``pullRequestUrl``/``url``/``title`` null (review finding k7).
+- ``PullRequestNotification`` exposes ``pullRequest { url title number }``;
+  ``IssueNotification`` exposes ``issue`` and ``ProjectNotification`` exposes ``project``.
+  ``pullRequestUrl`` is the PR object's ``url`` and nothing else: measured live, every
+  ``pullRequest*`` notification carries the object, and the notification's own ``url`` is
+  Linear's inbox link (``linear.app/…/review/…``), not the GitHub PR.
+- Relation direction is still the plan's reading, unverified against a known pair: an
+  ``IssueRelation`` of type ``blocks`` on issue A with ``relatedIssue`` B is read as "A blocks
+  B", so A's ``relations`` are what A blocks and A's ``inverseRelations`` are what blocks A.
+  If a live check says otherwise, swap the two comprehensions in ``relations``.
 
 The key is passed only as an HTTP header. It is never logged, never formatted into an
 exception, and never part of a reply; ``query`` raises with Linear's own messages only.
@@ -35,11 +38,13 @@ ISSUE_FIELDS = """
   labels { nodes { name } }
 """
 NOTIFICATION_FIELDS = """
-  id type createdAt readAt archivedAt snoozedUntilAt actor { id displayName }
+  id type createdAt readAt archivedAt snoozedUntilAt url title subtitle groupingKey
+  actor { id displayName }
   ... on IssueNotification {
     issue { id identifier dueDate assignee { id } state { name type } team { key } }
   }
   ... on ProjectNotification { project { id name } }
+  ... on PullRequestNotification { pullRequest { url title number } }
 """
 Q_ASSIGNED = """query($after: String, $dead: [String!]) {
   issues(first: %d, after: $after, orderBy: updatedAt,
@@ -149,8 +154,7 @@ class LinearClient:
                 continue
             n.setdefault("issue", None)
             n.setdefault("project", None)
-            is_pr = str(n.get("type", "")).startswith("pullRequest")
-            n["pullRequestUrl"] = n.get("url") if is_pr else None
+            n["pullRequestUrl"] = (n.setdefault("pullRequest", None) or {}).get("url")
             out.append(n)
         return out
 
