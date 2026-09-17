@@ -2265,7 +2265,9 @@ _hspawn_await_agent() {
 # that finishes closes its own pane through config/herdr/plugins/local/pane-reaper
 # instead of lingering until someone runs hreap. One line: `herdr agent prompt`
 # types it into the agent. $HERDR_PANE_ID stays literal and is expanded by the
-# worker's own shell.
+# worker's own shell. A prompt starting with `/` is a slash command, which takes
+# the rest of the line as its arguments, so it gets no instruction: the
+# paragraph would reach the command (e.g. /loop) as arguments.
 _hspawn_reap_instruction() {
   print -r -- 'When your task is completely finished and its results are saved (committed, pushed, or written to a file), run this as the last command of your final turn so this pane closes itself: herdr pane report-metadata "$HERDR_PANE_ID" --source pane-reaper --token pane_reaper=ready — never while you are still waiting on a background job, a review, or a reply.'
 }
@@ -2377,8 +2379,9 @@ hspawn() {
     fi
   fi
   local prompt="${(j: :)prompt_words}"
-  # Only a prompted worker can be told; an unprompted spawn is left as before.
-  if [[ -n "$prompt" ]] && (( ! keep )); then
+  # Only a prompted worker can be told; an unprompted spawn is left as before,
+  # and so is a slash command (see _hspawn_reap_instruction).
+  if [[ -n "$prompt" && "$prompt" != /* ]] && (( ! keep )); then
     prompt+=" $(_hspawn_reap_instruction)"
   fi
 

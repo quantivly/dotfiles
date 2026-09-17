@@ -431,6 +431,11 @@ check "--keep: the prompt goes out bare"        "$(inargs "a prompt")"          
 check "--keep: no ready instruction"            "$(grep -cF -- "pane_reaper=ready" "$LOG" || true)" "0"
 run "hspawn '$REPO' slug"
 check "no prompt: no ready instruction either"  "$(grep -cF -- "pane_reaper=ready" "$LOG" || true)" "0"
+# A slash command takes the rest of the line as its arguments: an appended
+# paragraph would become arguments to /loop, not an instruction.
+run "hspawn '$REPO' slug /loop 5m /babysit"
+check "slash command: sent bare"                "$(inargs "/loop 5m /babysit")"         "1"
+check "slash command: no ready instruction"     "$(grep -cF -- "pane_reaper=ready" "$LOG" || true)" "0"
 # --opt=value re-splits through `set -- ... \"\${(@)argv[2,-1]}\"`; the rows after
 # the option have to survive that.
 run "hspawn --profile=personal '$REPO' slug word1 word2"
