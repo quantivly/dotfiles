@@ -59,6 +59,13 @@ chmod +x "$STUBBIN/herdr"
 # row: pr_slot_write() re-asserts 0700 on the slot dir before it writes, which
 # would silently undo a plain `chmod 500` before the write is even attempted.
 # Shadowing `chmod` is what makes that dir genuinely stay unwritable.
+# An awk that dies with a runtime-error status (2), for the row proving that
+# the Bash-children gate reads anything but a clean "no" as busy.
+AWKFAILBIN="$TMPROOT/awkfailbin"
+mkdir -p "$AWKFAILBIN"
+printf '#!/bin/sh\nexit 2\n' > "$AWKFAILBIN/awk"
+chmod +x "$AWKFAILBIN/awk"
+
 FAKEBIN="$TMPROOT/fakebin"
 mkdir -p "$FAKEBIN"
 cat > "$FAKEBIN/chmod" <<'SH'
@@ -85,8 +92,11 @@ workspace() {
     [[ "$2" != null ]] && wt="{\"is_linked_worktree\":$2}"
     printf '{"result":{"workspace":{"workspace_id":"w1","pane_count":%s,"worktree":%s}}}\n' "$1" "$wt" > "$SD/workspace.json"
 }
+# procinfo [foreground_processes JSON array]: default is claude as pid 100.
 procinfo() {
-    printf '{"result":{"process_info":{"pane_id":"w1:p1","foreground_processes":[{"pid":100,"name":"claude"}]}}}\n' > "$SD/procinfo.json"
+    local fg='[{"pid":100,"name":"claude"}]'
+    [[ $# -gt 0 ]] && fg=$1
+    printf '{"result":{"process_info":{"pane_id":"w1:p1","foreground_processes":%s}}}\n' "$fg" > "$SD/procinfo.json"
 }
 # pstable: stdin lines "pid ppid args"
 pstable() { cat > "$SD/ps.txt"; }
@@ -264,6 +274,24 @@ pstable <<'PS'
 PS
 recheck w1:p1 T 7 N1 0
 check "only MCP children (and someone else's job): closed" "$(closes)" "1"
+base; procinfo '[{"pid":100,"name":"claude"},{"pid":150,"name":"node"}]'
+pstable <<'PS'
+100 1 claude --settings {}
+150 1 node helper.js
+250 150 /usr/bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-2.sh && make
+PS
+recheck w1:p1 T 7 N1 0
+check "bash job under the second root: rearm"    "$(lastlog)"   "rearm:bash-children"
+check "bash job under the second root: no close" "$(closes)"    "0"
+base; procinfo '[]'; recheck w1:p1 T 7 N1 0
+check "no foreground processes: rearm"           "$(lastlog)"   "rearm:bash-children"
+check "no foreground processes: no close"        "$(closes)"    "0"
+base; rm -f "$SD/procinfo.json"; recheck w1:p1 T 7 N1 0
+check "process-info unreadable: rearm"           "$(lastlog)"   "rearm:bash-children"
+check "process-info unreadable: no close"        "$(closes)"    "0"
+base; envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PATH="$AWKFAILBIN:$PATH" sh "$PLUGIN/recheck.sh" w1:p1 T 7 N1 0
+check "awk runtime error: rearm"                 "$(lastlog)"   "rearm:bash-children"
+check "awk runtime error: no close"              "$(closes)"    "0"
 base; agent "done" ready true 7 T ""; recheck w1:p1 T 7 N1 0
 check "focused: rearm"                           "$(lastlog)"   "rearm:focused"
 check "focused: no close"                        "$(closes)"    "0"

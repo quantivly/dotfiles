@@ -111,17 +111,20 @@ pr_ps() {
     fi
 }
 
-# True when any descendant of the pane's foreground process is a Claude Code
-# Bash-tool shell: every Bash call, background ones included, runs as
-# `zsh -c source …/shell-snapshots/snapshot-…`. MCP servers never match.
-# If herdr cannot say what runs in the pane, answer "busy": a re-arm is cheap
-# and a wrong close is not.
+# True ("busy") when any descendant of the pane's foreground processes is a
+# Claude Code Bash-tool shell: every Bash call, background ones included, runs
+# as `zsh -c source …/shell-snapshots/snapshot-…`. MCP servers never match.
+# Only a clean "no" (awk exit 1) is free. Everything else answers busy: herdr
+# cannot say what runs in the pane, it lists no foreground process, or awk
+# fails (exit 2+). A re-arm is cheap and a wrong close is not. The roots go to
+# awk as ONE space-separated line: BWK awk (macOS) rejects a newline in `-v`.
 pr_has_bash_children() {
     _info=$("$PR_HERDR" pane process-info --pane "$1" 2>/dev/null) || return 0
     _roots=$(printf '%s' "$_info" | jq -r '.result.process_info.foreground_processes[]?.pid' 2>/dev/null) || return 0
-    [ -n "$_roots" ] || return 1
+    _roots=$(printf '%s' "$_roots" | tr '\n' ' ')
+    case "$_roots" in *[!\ ]*) ;; *) return 0 ;; esac
     pr_ps | awk -v roots="$_roots" '
-        BEGIN { n = split(roots, r, /[ \n]+/); for (i = 1; i <= n; i++) if (r[i] != "") root[r[i]] = 1 }
+        BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) root[r[i]] = 1 }
         { pid = $1; ppid = $2; $1 = ""; $2 = ""; parent[pid] = ppid; args[pid] = $0 }
         END {
             for (p in args) {
@@ -134,6 +137,7 @@ pr_has_bash_children() {
             }
             exit 1
         }'
+    [ $? -ne 1 ]
 }
 
 # The redirect is load-bearing: herdr reads a hook's stdout/stderr to EOF and
