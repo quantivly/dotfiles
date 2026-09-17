@@ -4,9 +4,13 @@ Three times in this epic a write path skipped ``secrets.assert_clean`` — WS1 D
 ``write_text`` deviation, and WS2 k2 (``brief.py``, then ``rank.py`` a round later). Each was
 patched at the site; this test is what stops a fourth round. It greps the package for every
 spelling of "write a file" and fails on any hit that is not on the allow-list below, where each
-exemption names the line it excuses and why that line is safe.
+exemption names the line it excuses and why that line is safe. A second list, ``GUARDED_LINES``,
+excuses a write that calls ``secrets.assert_clean`` itself — and only while the module's AST shows
+the written name is that call's result and nothing else.
 """
+import ast
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -50,12 +54,29 @@ ALLOWED_LINES = [
      "followup rather than rerouted here"),
 ]
 
+# Writes that guard the text THEMSELVES rather than through ``emit.write_file``: the module calls
+# ``secrets.assert_clean`` and writes its result, and nothing else. An entry here is an allow-list
+# entry with a precondition — the excused line is accepted only while ``_guarded_write`` can prove,
+# from the module's AST, that the written name is bound exactly once in its function and that the
+# binding IS the ``assert_clean`` call. Delete the guard line above the write and the write goes red
+# again; a third module using the same shape is unexplained until it is named here and its reason
+# given. Both entries are #154's, merged after this branch was cut; their pattern predates this
+# gate and is deliberate ("Written through the same guard emit applies to stdout"), so the test
+# learned the shape rather than the files learning the test.
+GUARDED_LINES = [
+    ("census.py", re.compile(r'\(ctx\.state_dir / "census\.json"\)\.write_text\(text\)'),
+     "census.json is a contract file written through assert_clean directly; the guarded ``text`` "
+     "is the only thing written"),
+    ("budget.py", re.compile(r'\(ctx\.state_dir / "budget\.json"\)\.write_text\(text\)'),
+     "budget.json, same shape: assert_clean binds ``text`` on the line above and ``text`` alone is written"),
+]
 
-def _hits():
+
+def _hits(pkg=PKG):
     """``(module, lineno, line, pattern name)`` for every write-shaped line outside the exempt module."""
     out = []
-    for path in sorted(PKG.rglob("*.py")):
-        rel = str(path.relative_to(PKG))
+    for path in sorted(pkg.rglob("*.py")):
+        rel = str(path.relative_to(pkg))
         if path.name in EXEMPT_MODULES:
             continue
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
@@ -66,6 +87,62 @@ def _hits():
     return out
 
 
+def _is_assert_clean(call):
+    f = call.func
+    return (isinstance(f, ast.Attribute) and f.attr == "assert_clean") or (isinstance(f, ast.Name) and f.id == "assert_clean")
+
+
+def _guarded_write(path, lineno):
+    """True iff the ``.write_text``/``.write_bytes`` call on ``lineno`` writes one bare name, and that
+    name is bound exactly once in the innermost enclosing function, by ``x = secrets.assert_clean(...)``.
+
+    Anything the AST cannot vouch for — no enclosing function, an expression argument, a name
+    with no binding in the function (a parameter, a global), a second binding anywhere in the
+    function (a rebinding after the guard is a new value; a guard on one branch only is one) — is
+    False, and the line falls through to "unexplained". False on a doubt, never True. Keyword
+    arguments (``encoding=``, ``newline=``) are ignored: the content is the one positional argument.
+    """
+    tree = ast.parse(path.read_text())
+    fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.lineno <= lineno <= n.end_lineno]
+    if not fns:
+        return False
+    fn = min(fns, key=lambda n: n.end_lineno - n.lineno)          # innermost
+    writes = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and n.lineno == lineno
+              and isinstance(n.func, ast.Attribute) and n.func.attr in ("write_text", "write_bytes")]
+    if len(writes) != 1 or len(writes[0].args) != 1 or not isinstance(writes[0].args[0], ast.Name):
+        return False
+    name = writes[0].args[0].id
+    bindings = []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets):
+            bindings.append(n)
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and isinstance(n.target, ast.Name) and n.target.id == name:
+            return False
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)) and isinstance(n.target, ast.Name) and n.target.id == name:
+            return False
+        elif isinstance(n, ast.withitem) and isinstance(n.optional_vars, ast.Name) and n.optional_vars.id == name:
+            return False
+    return (len(bindings) == 1 and len(bindings[0].targets) == 1
+            and isinstance(bindings[0].value, ast.Call) and _is_assert_clean(bindings[0].value))
+
+
+def _classify(pkg=PKG):
+    """``(unexplained, used ALLOWED_LINES indexes, used GUARDED_LINES indexes)`` for every hit under ``pkg``."""
+    unexplained, used_allowed, used_guarded = [], set(), set()
+    for rel, lineno, line, name in _hits(pkg):
+        base = Path(rel).name
+        for i, (mod, rx, _why) in enumerate(ALLOWED_LINES):
+            if base == mod and rx.search(line):
+                used_allowed.add(i); break
+        else:
+            for i, (mod, rx, _why) in enumerate(GUARDED_LINES):
+                if base == mod and rx.search(line) and _guarded_write(pkg / rel, lineno):
+                    used_guarded.add(i); break
+            else:
+                unexplained.append(f"{rel}:{lineno}: {line}    [{name}]")
+    return unexplained, used_allowed, used_guarded
+
+
 class WriteGuardTests(unittest.TestCase):
     def test_package_is_where_this_test_thinks_it_is(self):
         # An empty scan would pass every assertion below; make sure the scan saw the package.
@@ -73,18 +150,106 @@ class WriteGuardTests(unittest.TestCase):
         self.assertTrue({"emit.py", "snapshots.py", "cli.py", "rank.py", "brief.py", "sync.py"} <= modules, modules)
 
     def test_only_emit_writes_files(self):
-        unexplained, used = [], set()
-        for rel, lineno, line, name in _hits():
-            for i, (mod, rx, _why) in enumerate(ALLOWED_LINES):
-                if Path(rel).name == mod and rx.search(line):
-                    used.add(i); break
-            else:
-                unexplained.append(f"{rel}:{lineno}: {line}    [{name}]")
+        unexplained, used_allowed, used_guarded = _classify(PKG)
         self.assertFalse(unexplained,
                          "file writes outside emit.py — route them through emit.write_file (which calls "
-                         "secrets.assert_clean and writes nothing on a leak):\n  " + "\n  ".join(unexplained))
-        stale = [f"{mod}: {rx.pattern}" for i, (mod, rx, _) in enumerate(ALLOWED_LINES) if i not in used]
+                         "secrets.assert_clean and writes nothing on a leak), or write the result of "
+                         "secrets.assert_clean and nothing else and name the line in GUARDED_LINES:\n  " + "\n  ".join(unexplained))
+        stale = [f"{mod}: {rx.pattern}" for i, (mod, rx, _) in enumerate(ALLOWED_LINES) if i not in used_allowed]
+        stale += [f"{mod}: {rx.pattern} (guarded)" for i, (mod, rx, _) in enumerate(GUARDED_LINES) if i not in used_guarded]
         self.assertFalse(stale, "allow-list entries that no longer match any line (remove them):\n  " + "\n  ".join(stale))
+
+    # --- the guarded-write exemption (GUARDED_LINES) -------------------------------------------
+    # A fixture package with one module; ``_classify`` runs the same rules the real scan does.
+    CENSUS_WRITE = '    (ctx.state_dir / "census.json").write_text(text)\n'
+
+    def _fixture(self, module, body):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        pkg = Path(tmp.name) / "rabota"; (pkg / "commands").mkdir(parents=True)
+        (pkg / module).write_text("import json, os\nfrom rabota import secrets\n\n" + body)
+        return pkg
+
+    def _unexplained(self, pkg):
+        return _classify(pkg)[0]
+
+    def test_guarded_exemption_holds_only_for_an_assert_clean_binding(self):
+        # The excused shape, exactly as census.py spells it: assert_clean binds ``text``, ``text``
+        # is the only thing written. This is the one case the exemption may accept.
+        guarded = ("def write(ctx, out):\n"
+                   "    text = secrets.assert_clean(json.dumps(out) + '\\n', os.environ)\n" + self.CENSUS_WRITE)
+        self.assertEqual(self._unexplained(self._fixture("census.py", guarded)), [])
+
+    def test_guarded_exemption_fails_a_write_with_no_assert_clean_in_its_function(self):
+        # The bypass this exemption must never excuse: same line, same module, and the value never
+        # went through the guard. Removing the assert_clean line must turn the write red again.
+        bare = "def write(ctx, out):\n    text = json.dumps(out) + '\\n'\n" + self.CENSUS_WRITE
+        un = self._unexplained(self._fixture("census.py", bare))
+        self.assertEqual(len(un), 1, un); self.assertIn("census.py:", un[0]); self.assertIn("write_text", un[0])
+
+    def test_guarded_exemption_fails_when_the_guarded_name_is_rebound_or_not_what_is_written(self):
+        head = "def write(ctx, out):\n    text = secrets.assert_clean(json.dumps(out), os.environ)\n"
+        cases = {
+            "rebound after the guard":   head + "    text = text + os.environ.get('X', '')\n" + self.CENSUS_WRITE,
+            "guard result not written":  head + '    (ctx.state_dir / "census.json").write_text(text + "\\n")\n',
+            "guard in another function": "def guard(out):\n    text = secrets.assert_clean(json.dumps(out), os.environ)\n"
+                                         "def write(ctx, out):\n    text = json.dumps(out)\n" + self.CENSUS_WRITE,
+            "written name is a parameter, never bound by the guard":
+                                         "def write(ctx, text):\n    text2 = secrets.assert_clean(text, os.environ)\n" + self.CENSUS_WRITE,
+            # Two bindings, the guard LAST in source order and on one branch only: at run time the
+            # other branch writes the unguarded value. "Last binding wins" would excuse it.
+            "guard on one branch only":  "def write(ctx, out):\n    text = json.dumps(out)\n    if ctx.dry_run:\n"
+                                         "        text = secrets.assert_clean(text, os.environ)\n" + self.CENSUS_WRITE,
+            # The guard binds a module global and the function writes it with no binding of its own:
+            # the rule is per function, and a module-level binding is not in the function.
+            "guarded name bound at module level": "text = secrets.assert_clean('x', os.environ)\n"
+                                         "def write(ctx, out):\n" + self.CENSUS_WRITE,
+        }
+        for label, body in cases.items():
+            with self.subTest(label):
+                un = self._unexplained(self._fixture("census.py", body))
+                self.assertEqual(len(un), 1, (label, un)); self.assertIn("census.py:", un[0])
+
+    def test_a_third_module_using_the_guarded_shape_must_still_be_listed(self):
+        # The exemption is an allow-LIST, not a pattern: a correctly guarded write is still
+        # unexplained until someone names it and says why. An entry is a (module, line) pair and
+        # each half is tested alone — the excused LINE in another module, and another line in the
+        # excused MODULE — so neither half can be dropped without a row noticing.
+        head = "def write(ctx, out):\n    text = secrets.assert_clean(json.dumps(out), os.environ)\n"
+        other_line = '    (ctx.state_dir / "other.json").write_text(text)\n'
+        for label, module, body in (("new module, new file", "other.py", head + other_line),
+                                    ("new module, the excused line", "other.py", head + self.CENSUS_WRITE),
+                                    ("excused module, another line", "census.py", head + other_line)):
+            with self.subTest(label):
+                un = self._unexplained(self._fixture(module, body))
+                self.assertEqual(len(un), 1, (label, un)); self.assertIn(f"{module}:", un[0])
+
+    def test_guarded_write_judges_the_call_not_the_line(self):
+        # ``_guarded_write`` is the precondition behind every GUARDED_LINES entry, including a
+        # future one whose regex is looser than the two shipped — so its own verdicts are pinned
+        # directly, not only through regexes that happen to end in ``(text)``.
+        head = "def write(ctx, out):\n    text = secrets.assert_clean(json.dumps(out), os.environ)\n"
+        for label, body, want in (
+                ("one bare guarded name",            head + '    p.write_text(text)\n', True),
+                ("keyword arguments carry no content", head + '    p.write_text(text, encoding="utf-8")\n', True),
+                ("an expression, not the name",      head + '    p.write_text(text + "\\n")\n', False),
+                ("two writes on the line",           head + '    p.write_text(text); q.write_text(text)\n', False),
+                ("no enclosing function",            "text = secrets.assert_clean('x', os.environ)\np.write_text(text)\n", False),
+                # The innermost function is the scope: the closure's own single binding is the guard,
+                # and the outer function's plain binding of the same name is not its.
+                ("innermost scope decides",          "def outer(ctx, out):\n    text = json.dumps(out)\n    def inner():\n"
+                                                     "        text = secrets.assert_clean(json.dumps(out), os.environ)\n"
+                                                     "        p.write_text(text)\n    inner()\n", True)):
+            with self.subTest(label):
+                pkg = self._fixture("m.py", body); path = pkg / "m.py"
+                lineno = next(i for i, l in enumerate(path.read_text().splitlines(), 1) if "p.write_text(" in l)
+                self.assertIs(_guarded_write(path, lineno), want, label)
+
+    def test_guarded_entries_name_a_real_line_and_the_scan_uses_them(self):
+        # Both shipped entries must match a live line (stale exemptions are failures, as for
+        # ALLOWED_LINES) and each excused line must satisfy the binding rule on the real package.
+        _un, used_allowed, used_guarded = _classify(PKG)
+        self.assertEqual(sorted(used_guarded), list(range(len(GUARDED_LINES))))
+        self.assertEqual({mod for mod, _rx, _why in GUARDED_LINES}, {"census.py", "budget.py"})
 
     def test_patterns_catch_each_spelling(self):
         # The regexes are the guard; pin what each must catch and what it must leave alone.
