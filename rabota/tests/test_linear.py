@@ -162,15 +162,20 @@ SOURCE_FUNCTION = "inbox_notifications"  # the one function that builds them
 
 def _literal_key_reads(func_or_module) -> list[tuple[int, str, str]]:
     """``(lineno, key, spelling)`` for every string-literal key read in the AST node: ``x["k"]``, ``x.get("k")``,
-    ``x.setdefault("k")``, ``x.pop("k")``, ``"k" in x`` — whatever the receiver is (``dict(n).get`` included)."""
+    ``x.setdefault("k")``, ``x.pop("k")``, ``dict.get(x, "k")``, ``"k" in x`` — whatever the receiver is
+    (``dict(n).get`` included)."""
     out = []
     for node in ast.walk(func_or_module):
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str) \
                 and isinstance(node.ctx, ast.Load):
             out.append((node.lineno, node.slice.value, "[]"))
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "setdefault", "pop") \
-                and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-            out.append((node.lineno, node.args[0].value, f".{node.func.attr}()"))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "setdefault", "pop"):
+            # the key is args[0] in ``n.get("k")`` and args[1] in the unbound ``dict.get(n, "k")`` (E-C): take the
+            # first string literal among the first two positionals — a bound call's string default is only
+            # reached when there is no literal key before it, which is exactly the unbound shape.
+            key = next((a.value for a in node.args[:2] if isinstance(a, ast.Constant) and isinstance(a.value, str)), None)
+            if key is not None:
+                out.append((node.lineno, key, f".{node.func.attr}()"))
         elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str) \
                 and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
             out.append((node.lineno, node.left.value, "in"))
@@ -455,6 +460,22 @@ class LinearClientTests(unittest.TestCase):
             self.assertTrue(any("[] reads 'unsnoozedAt'" in b for b in peek), peek)       # same function, [] spelling
             self.assertTrue(any("[] reads 'emailedAt'" in b for b in peek), peek)         # E-I, helper handed the node
             self.assertFalse([b for b in peek if "totals" in b], f"a function holding no notification was scanned: {peek}")
+
+    def test_static_scan_sees_the_unbound_method_spelling(self):
+        # k7 round 4 (E-C): ``dict.get(n, "inboxUrl")`` is the same read as ``n.get("inboxUrl")`` with
+        # the receiver moved into the argument list, so the key is ``args[1]``; the matcher assumed
+        # ``args[0]`` and let it through. Whichever positional argument is the string literal is the
+        # key — but a bound call's string DEFAULT is not: ``n.get("type", "unknown")`` reads ``type``.
+        src = ast.parse(
+            'a = dict.get(n, "inboxUrl")\n'
+            'b = Recording.setdefault(n, "emailedAt", {})\n'
+            'c = dict.pop(n, "unsnoozedAt", None)\n'
+            'd = n.get("type", "unknown")\n'
+            'e = n.get(k, "fallback")\n')
+        reads = {(k, sp) for _, k, sp in _literal_key_reads(src)}
+        self.assertLessEqual({("inboxUrl", ".get()"), ("emailedAt", ".setdefault()"), ("unsnoozedAt", ".pop()"), ("type", ".get()")}, reads)
+        self.assertNotIn(("unknown", ".get()"), reads, "a bound call's string default is not a key")
+        self.assertIn(("fallback", ".get()"), reads, "with no literal key, the second literal is reported: it may be the unbound form")
 
     def test_static_scan_reaches_the_code_it_claims_to(self):
         # A scan over an empty scope passes vacuously; pin that it sees the real reads.
