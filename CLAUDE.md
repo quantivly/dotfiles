@@ -2878,12 +2878,21 @@ Two things the section does not otherwise say: `quantivly-3` was NOT on that lad
 single **3,897 s** gap from 08:29:05 instead — a longer outage of a different shape — and the
 refresh-failure axis is its own streak (`update_streaks`, `:1455`), not the 429 one.
 
-**Every line number in this section is from clauth 0.14.1, commit `ff25762`, the tree at
-`~/.config/herdr/plugins/github/clauth-4596d4a41686` — and the binary that ran is 0.15.1,
-installed 2026-09-08 20:58. The 0.15.1 source was not read.** That is exactly the gap the
-`mcpOAuth` correction above turns on, so it is stated rather than left to be discovered. What
-makes the mechanism claims here more than a source read is that the timing above *reproduces*
-from that tree's constants; treat the line numbers as corroboration, not as provenance.
+**Every line number in this section is from commit `ff25762` — the tree at
+`~/.config/herdr/plugins/github/clauth-4596d4a41686`, which sits BETWEEN releases: 318 commits
+after `v0.14.1` and 122 before `v0.15.1` — while the binary that ran is 0.15.1, installed
+2026-09-08 20:58.** Name the commit and its position, never a release: an earlier version of
+this line called that tree "clauth 0.14.1", which its own `Cargo.toml` says only because the
+version string was never bumped, and a release label invites the reader to look a line up in a
+release that does not contain it. Measured with
+`gh api repos/uwuclxdy/clauth/compare/v0.14.1...ff25762` and the mirror against `v0.15.1`; the
+drift is real and small — `if is_active` is at 859/895 in `ff25762` and 878/914 in v0.15.1. The
+installed source has since been read wherever a claim turned on it (`poll_backoff_ms` above,
+`RefreshError` in the correction below, both fetched with `?ref=v0.15.1`), never in whole — so
+the gap stays, and it is exactly the one the `mcpOAuth` correction above turns on, stated rather
+than left to be discovered. What makes the mechanism claims here more than a source read is that
+the timing above *reproduces* from that tree's constants; treat the line numbers as
+corroboration, not as provenance.
 
 **Three forensic techniques, because none of them is obvious and all three were needed:**
 
@@ -2922,9 +2931,11 @@ can quarantine a healthy account. `try_adopt_live_rotation`, the fast path that 
 runs only `if is_active`, so four of five profiles never get it. **This DID fire on 09-14, and it
 is this incident's cause** — see the correction immediately below.
 
-**CORRECTED 2026-09-16 (second): clauth quarantined all three accounts, it said so at the time,
-and the original search grepped the wrong log.** This section claimed *"no `auth_broken` was ever
-logged"* and built a whole paragraph on the rejection class being unrecoverable. Both are false.
+**CORRECTED 2026-09-16 (second — these corrections are numbered by order of DISCOVERY, not by
+position, so "(second)" is met before the first, which is the nanoclaw note below): clauth
+quarantined all three accounts, it said so at the time, and the original search grepped the
+wrong log.** This section claimed *"no `auth_broken` was ever logged"* and built a whole
+paragraph on the rejection class being unrecoverable. Both are false.
 `journalctl --user -u clauth-daemon.service` carries it verbatim:
 
 ```
@@ -2944,17 +2955,26 @@ reading its silence.
 What the corrected evidence settles, which the original left open:
 
 - **The rejection was terminal, not transient.** "refresh token revoked or invalid" is
-  `RefreshError::Invalid` — a 401, or a 400/403 carrying `invalid_grant`. So it WAS a plain
-  double-spend, and the paragraph claiming otherwise is withdrawn along with its conclusion that
-  "one log line upstream would close it". The upstream observability gap is real but was never
-  what this incident hit.
+  `RefreshError::Invalid`, whose own doc comment reads *"The endpoint confirmed the refresh token
+  itself is dead"* — a 401, or a 400/403 carrying `invalid_grant`. The paragraph claiming
+  otherwise is withdrawn, along with its conclusion that "one log line upstream would close it";
+  the upstream observability gap is real but was never what this incident hit. **Terminal is not
+  the same as double-spent, though.** The class establishes only that the endpoint confirmed the
+  token is dead, which a genuine server-side revocation produces just as well — so it cannot
+  distinguish the two, and a double-spend is the **live hypothesis** rather than a settled fact.
+  What makes it the live one is the third bullet's account-dir/store divergence, not this
+  bullet's error class. An earlier version of this line read "So it WAS a plain double-spend":
+  an inference rendered as an entailment, inside a correction whose stated purpose is to stop
+  doing that.
 - **The ~1010 s is `auth_broken`'s own widen, not a `refresh_fail` ladder.** `poll_backoff_ms`
   returns `AUTH_BROKEN_BACKOFF_MS` — the same 900 s ceiling — *before* it consults any streak, and
   90 s + 900 s is the observed spacing. The accounts stayed flagged ~70 minutes until
   `clauth login`, so nothing in the ordinary poll path cleared it.
-- **The blind spot is ours, not upstream's, and it is the cause.** A session refreshed first and
-  its rotation landed in the ACCOUNT DIR; `fresher_disk_pair` re-read the STORE, which had not
-  advanced, and concluded a real revocation. clauth's own watchdog (`runtime.rs`
+- **The blind spot is ours, not upstream's, and it is the cause — and this is the bullet that
+  carries the double-spend evidence.** A session refreshed first and its rotation landed in the
+  ACCOUNT DIR; `fresher_disk_pair` re-read the STORE, which had not
+  advanced, and concluded a real revocation. That divergence is what says the dead token was one
+  *we* had already spent rather than one the server withdrew. clauth's own watchdog (`runtime.rs`
   `sync_credentials_unlocked`) would have advanced it — but only for `clauth start` runtime dirs,
   and `claude-account-dirs` dirs are not those. Our reconciler adopted the fresh credentials into
   those three stores at 08:29:28: **1–15 s too late.**
@@ -3035,8 +3055,11 @@ at least three times on 09-14, at least once by clauth rather than by a refresh;
 **bounded but not zero, and was never measured**. It
 reads a credential at startup and acts as the browser extension's transport, while the session that
 drives the browser spends on its own account dir. What the pin actually does is take a Claude Code
-helper off a file nanoclaw owns and put it on the account-dir scheme every other Claude Code process
-here already uses.
+helper off the **unreconciled global path** — the one clauth and Claude Code both replace and
+nothing here reconciles — and put it on the account-dir scheme every other Claude Code process
+here already uses. That sentence read "off a file nanoclaw owns" until 2026-09-17: a residue of
+the retracted claim, left standing forty lines below its own retraction, which is the
+carry-the-correction-all-the-way-through failure this section already names twice.
 
 Two traps that creates, neither of which anything checks:
 
