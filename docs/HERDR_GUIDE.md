@@ -336,6 +336,7 @@ herdr-lazy install       # install what is missing, restore drifted pins (herdma
 
 #    The LOCAL sidebar-icons plugin is not in the list — it is linked, not installed:
 herdr plugin link ~/.dotfiles/config/herdr/plugins/local/sidebar-icons
+herdr plugin link ~/.dotfiles/config/herdr/plugins/local/pane-reaper
 #    Link state is herdr-local and is NOT restored by herdr-lazy after a rebuild.
 
 # 5. Start the server from a clean, declared environment — never from inside a pane or a
@@ -930,6 +931,46 @@ lets it tell your spawns from everyone else's. The tab bar's second right-hand w
 Reuse a pane only when you have a concrete next task for it. Do not close panes you did not
 create.
 
+### Closing finished workers: pane-reaper
+
+A worker pane closes itself once the worker says it is finished. Nothing closes on idle
+alone: Claude reads idle while it waits on a background job, a Monitor or a reply.
+
+**The contract.** As the last command of its final turn, the worker runs:
+
+```bash
+herdr pane report-metadata "$HERDR_PANE_ID" --source pane-reaper --token pane_reaper=ready
+```
+
+The spawner may set the grace per pane with `--token pane_reaper_min=<minutes>`; the
+default is 5. A grace value is 1–4 digits with leading zeros ignored (`08` means 8); anything
+else falls back to 5. `hspawn` appends this instruction to every prompt it sends (`--keep`
+opts out).
+
+**When it closes.** Once the pane goes done/idle, a timer waits the grace, then closes the pane
+only if all of these still hold:
+- same terminal and state (no new turn)
+- still `ready`
+- no Bash-tool process alive under the agent
+- the pane is not focused
+- it is not the last pane of a primary or plain workspace
+
+A busy or focused pane re-arms instead. Prompting a finished worker again clears its mark.
+
+**What it does not do.**
+- It ignores unmarked panes.
+- It does not stop Agent-tool teammates (use `TaskStop`).
+- It leaves the worktree on disk (`hdespawn` finishes an hspawn one).
+- Marks do not survive a herdr server restart.
+- herdr's token map is flat: any plugin could overwrite `pane_reaper`.
+
+**Fire-and-forget workers need none of this:**
+`herdr pane run <pane> 'claude -p "…"; exit'` closes its pane when the run ends.
+
+Every decision is one line in `~/.local/state/pane-reaper/log`. It also records
+`disarm-failed:<code>` and `rearm-failed:<gate>` entries when either step comes up short.
+`hreap` shows the mark in its `REAP` column.
+
 ### Orchestrating from an agent
 
 `~/.claude/skills/herdr/SKILL.md` teaches a lead Claude `herdr agent list/read/prompt/wait`.
@@ -1109,7 +1150,7 @@ but treat the conflict as expected rather than proven.
 | Detection diagnosis | `herdr agent explain <pane>` · `herdr pane process-info --pane <pane>` |
 | Upstream issues | Drafted, not yet filed — herdr: teammate detection; herdmates: report-agent bridge (§9) |
 | Plugin list | `config/herdr/plugins/plugins.list` |
-| Local plugin | `config/herdr/plugins/local/sidebar-icons` |
+| Local plugins | `config/herdr/plugins/local/sidebar-icons`, `config/herdr/plugins/local/pane-reaper` (log: `~/.local/state/pane-reaper/log`; CI: `pane-reaper-test`) |
 | Tool check | `scripts/verify-tools.sh` (`--herdr` for a modular install) |
 | Claude wiring | `scripts/herdr-claude-wire.sh` (statusLine + agent skill file) |
 | State table | `scripts/test-herdr-modular.sh` (CI: `herdr-modular-test`) |

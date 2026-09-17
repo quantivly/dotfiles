@@ -1,0 +1,15 @@
+id = "pane-reaper"
+name = "Pane Reaper"
+version = "0.1.0"
+# pane.agent_status_changed carrying tokens, terminal_id and state_change_seq
+# on `agent get` was verified against 0.9.0; nothing older was checked.
+min_herdr_version = "0.9.0"
+description = "Closes an agent pane after its worker marks itself pane_reaper=ready and stays done/idle for a grace period"
+platforms = ["linux", "macos"]
+
+# The only event. Arming and disarming both hang off status changes; writing a
+# metadata token emits nothing, so the worker's own ready mark is picked up at
+# the turn-end transition that follows it.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "on-status-changed.sh"]
