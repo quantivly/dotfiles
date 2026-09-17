@@ -1215,7 +1215,7 @@ cat > "$STUBDIR/snapshot.json" <<'JSON'
            {"pane_id":"wF:p1","name":"closedone"},{"pane_id":"wG:p1","name":"other"},
            {"pane_id":"wI:p1","name":"notrans"}],
  "panes":[
-  {"pane_id":"wA:p1","workspace_id":"wA","agent":"alpha","agent_status":"idle",
+  {"pane_id":"wA:p1","workspace_id":"wA","agent":"alpha","agent_status":"idle","tokens":{"pane_reaper":"ready"},
    "agent_session":{"value":"sess-A"},"terminal_title_stripped":"alpha-title"},
   {"pane_id":"wB:p1","workspace_id":"wB","agent":"","agent_status":"unknown",
    "agent_session":{"value":"sess-B"},"terminal_title_stripped":"teammate-b"},
@@ -1259,15 +1259,15 @@ check "a below-threshold pane is not"       "$(inout "wH:p1")"                  
 # The full row for the ordinary case: workspace label, agent name winning over
 # the terminal title, detected, idle bucket, unknown memory, creator tag.
 check "wA: the whole row" \
-      "$(rowre '^wA:p1 +wA \(alpha\) +alpha +yes +idle +2h[0-9][0-9]m +\? +sess-1$')" "1"
+      "$(rowre '^wA:p1 +wA \(alpha\) +alpha +yes +idle +2h[0-9][0-9]m +\? +ready +sess-1$')" "1"
 check "wB: undetected, named by its title" \
-      "$(rowre '^wB:p1 +wB +teammate-b +no +unknown +4h[0-9][0-9]m +\? +-$')"      "1"
+      "$(rowre '^wB:p1 +wB +teammate-b +no +unknown +4h[0-9][0-9]m +\? +- +-$')"      "1"
 check "wF: closed_at un-tags the entry" \
-      "$(rowre '^wF:p1 +wF +closedone +yes +idle +1h5[0-9]m +\? +-$')"             "1"
+      "$(rowre '^wF:p1 +wF +closedone +yes +idle +1h5[0-9]m +\? +- +-$')"             "1"
 check "wG: another session's tag is shown" \
-      "$(rowre '^wG:p1 +wG +other +yes +idle +1h5[0-9]m +\? +sess-2$')"            "1"
+      "$(rowre '^wG:p1 +wG +other +yes +idle +1h5[0-9]m +\? +- +sess-2$')"            "1"
 check "the clauth glob finds a transcript" \
-      "$(rowre '^wK:p1 +wK +kay-pane +no +idle +3h[0-9][0-9]m +\? +-$')"           "1"
+      "$(rowre '^wK:p1 +wK +kay-pane +no +idle +3h[0-9][0-9]m +\? +- +-$')"           "1"
 check "rows are oldest-idle first" \
       "$(grep -oE '^w[A-K]:p1' <<<"$OUT" | tr '\n' ' ')" "wB:p1 wK:p1 wA:p1 wG:p1 wF:p1 wC:p1 "
 # Read-only means read-only.
@@ -1277,9 +1277,9 @@ check "and does not even re-read a pane"    "$(incmd "pane get")"               
 run "hreap --older 0"
 check "--older 0 shows everything"          "$(inout "totals:    9 Claude process(es) shown")" "1"
 check "unknown idle: both columns are ?" \
-      "$(rowre '^wJ:p1 +wJ +- +no +idle +\? +\? +-$')"                             "1"
+      "$(rowre '^wJ:p1 +wJ +- +no +idle +\? +\? +- +-$')"                             "1"
 check "the registry supplies the name" \
-      "$(rowre '^wH:p1 +wH +freshname +no +idle +5m +\? +sess-1$')"                "1"
+      "$(rowre '^wH:p1 +wH +freshname +no +idle +5m +\? +- +sess-1$')"                "1"
 check "process age is marked with a star"   "$(rowre '^wI:p1 .* [0-9?<][^ ]*\* ')" "1"
 check "and the star is explained"           "$(inout "* no transcript found")"     "1"
 
@@ -1302,6 +1302,8 @@ check "--json: the slug"                    "$(ojq '.[]|select(.pane=="wA:p1")|.
 check "--json: the branch"                  "$(ojq '.[]|select(.pane=="wA:p1")|.branch')"  "tester/alpha"
 check "--json: the worktree path"           "$(ojq '.[]|select(.pane=="wA:p1")|.worktree_path')" "/tmp/wt-alpha"
 check "--json: idle came from a transcript" "$(ojq '.[]|select(.pane=="wA:p1")|.idle_src')" "transcript"
+check "--json: the pane_reaper mark"        "$(ojq '.[]|select(.pane=="wA:p1")|.reap')"  "ready"
+check "--json: no mark reads empty"         "$(ojq '.[]|select(.pane=="wB:p1")|.reap')"  ""
 check "--json: the versioned binary"        "$(ojq '.[]|select(.pane=="wB:p1")|.process')" "2.1.251"
 check "--json: it is not detected"          "$(ojq '.[]|select(.pane=="wB:p1")|.detected')" "false"
 check "--json: closed_at leaves untagged"   "$(ojq '.[]|select(.pane=="wF:p1")|.tagged')"  "false"

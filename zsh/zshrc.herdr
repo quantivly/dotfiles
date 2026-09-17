@@ -3101,10 +3101,10 @@ hreap() {
   # census then read lower than the truth with nothing saying why — the same
   # shape of silent undercount that made hreap necessary in the first place.
   local total=0 unqueried=0
-  local pane ws detected astatus sid disp aname wslabel wpath
+  local pane ws detected astatus sid disp aname wslabel wpath reap
   local pinfo pid pname pcwd dashed tfile mtime idle_s idle_src et
   local rss_kb swap_kb mem_kb k v registry reg_vals tagged creator rname rslug rbranch rclosed name
-  while IFS="$sep" read -r pane ws detected astatus sid disp aname wslabel wpath; do
+  while IFS="$sep" read -r pane ws detected astatus sid disp aname wslabel wpath reap; do
     pinfo="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || { (( unqueried++ )); continue; }
     while IFS="$sep" read -r pid pname pcwd; do
       [[ -n "$pid" ]] || continue
@@ -3196,7 +3196,7 @@ hreap() {
         --arg pane "$pane" --arg workspace "$ws" --arg workspace_label "$wslabel" \
         --arg worktree_path "$wpath" --arg name "$name" --arg status "$astatus" \
         --argjson detected "$([[ "$detected" == yes ]] && echo true || echo false)" \
-        --argjson idle_s "${idle_s:-null}" --arg idle_src "$idle_src" --arg transcript "$tfile" \
+        --argjson idle_s "${idle_s:-null}" --arg idle_src "$idle_src" --arg reap "$reap" --arg transcript "$tfile" \
         --argjson pid "$pid" --arg process "$pname" --arg cwd "$pcwd" --arg session "$sid" \
         --argjson rss_kb "$rss_kb" --argjson swap_kb "$swap_kb" --argjson mem_kb "${mem_kb:-null}" \
         --argjson tagged "$tagged" --arg creator "$creator" --arg slug "$rslug" --arg branch "$rbranch" \
@@ -3220,7 +3220,8 @@ hreap() {
         (.terminal_title_stripped // ""),
         ($names[.pane_id] // ""),
         ($wsi[.workspace_id].label // ""),
-        ($wsi[.workspace_id].path // "") ]
+        ($wsi[.workspace_id].path // ""),
+        (.tokens.pane_reaper // "") ]
     | map(tostring | gsub("[\n\r]"; " ")) | join("\u001f")')
 
   local sorted shown
@@ -3241,8 +3242,8 @@ hreap() {
   fi
 
   local idle_h mem_h tag_h wsh starred=0
-  printf '%-8s %-18s %-22s %-4s %-8s %-8s %-8s %s\n' PANE WORKSPACE NAME DET STATUS IDLE MEM TAGGED
-  while IFS="$sep" read -r pane ws wslabel name detected astatus idle_s idle_src mem_kb tagged creator; do
+  printf '%-8s %-18s %-22s %-4s %-8s %-8s %-8s %-6s %s\n' PANE WORKSPACE NAME DET STATUS IDLE MEM REAP TAGGED
+  while IFS="$sep" read -r pane ws wslabel name detected astatus idle_s idle_src mem_kb reap tagged creator; do
     idle_h="$(_hreap_fmt_dur "$idle_s")"
     if [[ "$idle_src" == process ]]; then
       idle_h="${idle_h}*"
@@ -3257,11 +3258,11 @@ hreap() {
     fi
     wsh="$ws"
     [[ -n "$wslabel" ]] && wsh="$ws ($wslabel)"
-    printf '%-8s %-18.18s %-22.22s %-4s %-8s %-8s %-8s %s\n' \
-      "$pane" "$wsh" "$name" "$detected" "$astatus" "$idle_h" "$mem_h" "$tag_h"
+    printf '%-8s %-18.18s %-22.22s %-4s %-8s %-8s %-8s %-6s %s\n' \
+      "$pane" "$wsh" "$name" "$detected" "$astatus" "$idle_h" "$mem_h" "${reap:--}" "$tag_h"
   done < <(printf '%s' "$sorted" | jq -r '.[]
     | [ .pane, .workspace, .workspace_label, .name, (if .detected then "yes" else "no" end),
-        .status, (.idle_s // ""), .idle_src, (.mem_kb // ""), .tagged, .creator ]
+        .status, (.idle_s // ""), .idle_src, (.mem_kb // ""), .reap, .tagged, .creator ]
     | map(tostring) | join("\u001f")')
   local sum_kb
   sum_kb="$(printf '%s' "$sorted" | jq '[.[] | .mem_kb // 0] | add // 0')"
