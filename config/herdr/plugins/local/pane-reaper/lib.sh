@@ -8,13 +8,16 @@
 PR_HERDR="${HERDR_BIN_PATH:-herdr}"
 PR_DEFAULT_MIN=5
 
+# Per-user and never world-writable: a runtime dir if the session has one,
+# otherwise the user's state dir. Not /tmp, where another user could pre-create
+# the path.
 pr_slot_dir() {
     if [ -n "${PANE_REAPER_SLOT_DIR:-}" ]; then
         printf '%s\n' "$PANE_REAPER_SLOT_DIR"
     elif [ -n "${XDG_RUNTIME_DIR:-}" ]; then
         printf '%s\n' "$XDG_RUNTIME_DIR/pane-reaper"
     else
-        printf '%s\n' "/tmp/pane-reaper-$(id -u)"
+        printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/pane-reaper/slots"
     fi
 }
 
@@ -47,7 +50,9 @@ pr_slot_nonce() {
 pr_log() {
     _d="${XDG_STATE_HOME:-$HOME/.local/state}/pane-reaper"
     mkdir -p "$_d" 2>/dev/null || return 0
-    printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$_d/log" 2>/dev/null || :
+    # Grouped for the same reason as in pr_slot_write: a failed `>>` open is
+    # reported before a trailing `2>/dev/null` would apply.
+    { printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$_d/log"; } 2>/dev/null || :
 }
 
 # pr_disarm <pane>: cancel an armed pane that started a new turn. The token is

@@ -75,7 +75,7 @@ SH
 chmod +x "$FAKEBIN/chmod"
 
 reset() {
-    rm -rf "$SD" "$TMPROOT/slots" "$TMPROOT/xdg" "$TMPROOT/launch"
+    rm -rf "$SD" "$TMPROOT/slots" "$TMPROOT/xdg" "$TMPROOT/run" "$TMPROOT/launch"
     mkdir -p "$SD"; : > "$SD/calls"; : > "$SD/ps.txt"
 }
 # agent <status> <pane_reaper> <focused> <seq> <terminal_id> <pane_reaper_min>
@@ -161,6 +161,22 @@ check "pane_reaper_min=00 normalizes to 0"       "$(lastlaunch_min)" "0"
 reset; agent "done" ready false 7 T "12345"
 hook "done"
 check "pane_reaper_min=12345 (too long) falls back to default 5" "$(lastlaunch_min)" "5"
+
+# Where the slot lives without PANE_REAPER_SLOT_DIR: XDG_RUNTIME_DIR first,
+# then a per-user state dir, never a shared /tmp path.
+reset; agent "done" ready false 7 T ""
+envrun env -u PANE_REAPER_SLOT_DIR XDG_RUNTIME_DIR="$TMPROOT/run" PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+    HERDR_PLUGIN_EVENT_JSON="$(event "done")" sh "$PLUGIN/on-status-changed.sh"
+check "slot dir: XDG_RUNTIME_DIR is used"        "$([[ -f "$TMPROOT/run/pane-reaper/w1_p1" ]] && echo yes)" "yes"
+reset; agent "done" ready false 7 T ""
+envrun env -u PANE_REAPER_SLOT_DIR -u XDG_RUNTIME_DIR PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" \
+    HERDR_PLUGIN_EVENT_JSON="$(event "done")" sh "$PLUGIN/on-status-changed.sh"
+check "slot dir: falls back to XDG_STATE_HOME"   "$([[ -f "$TMPROOT/xdg/pane-reaper/slots/w1_p1" ]] && echo yes)" "yes"
+# An unwritable log (here: a directory in its place) must stay silent, or the
+# hook's stderr fills herdr's plugin output on every decision.
+reset; agent "done" ready false 7 T ""; mkdir -p "$TMPROOT/xdg/pane-reaper/log"
+check "unwritable log: nothing on stderr"        "$(hook "done" 2>&1 >/dev/null)" ""
+check "unwritable log: still armed"              "$(launches)"  "1"
 
 echo
 echo "=== hook: disarm on a new turn ==="
