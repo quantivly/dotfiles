@@ -185,15 +185,25 @@ ENVELOPE_KEYS = {SNAPSHOT_KEY, "issues", "viewer", "data", "nodes", "edges", "pa
 
 def _literal_key_reads(func_or_module) -> list[tuple[int, str, str, ast.AST]]:
     """``(lineno, key, spelling, receiver)`` for every string-literal key read in the AST node: ``x["k"]``,
-    ``x.get("k")``, ``x.setdefault("k")``, ``x.pop("k")``, ``dict.get(x, "k")``, ``"k" in x`` — whatever the
-    receiver is (``dict(n).get`` included). The receiver is the expression the key is read OFF, so a caller
-    can ask whether it holds a notification at all (``gh.get("own_prs")`` in a function that also holds one is
-    not the guard's business)."""
+    ``x.get("k")``, ``x.setdefault("k")``, ``x.pop("k")``, ``dict.get(x, "k")``, ``"k" in x``,
+    ``x.__getitem__("k")``, ``itemgetter("k")(x)`` — whatever the receiver is (``dict(n).get`` included).
+    The receiver is the expression the key is read OFF, so a caller can ask whether it holds a notification
+    at all (``gh.get("own_prs")`` in a function that also holds one is not the guard's business). It is
+    ``None`` when the read has no receiver in the source — an ``itemgetter`` built but not applied here."""
     out = []
+    applied = {id(c.func): c for c in ast.walk(func_or_module) if isinstance(c, ast.Call) and c.args}   # inner call -> the call applying it
     for node in ast.walk(func_or_module):
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str) \
                 and isinstance(node.ctx, ast.Load):
             out.append((node.lineno, node.slice.value, "[]", node.value))
+        elif isinstance(node, ast.Call) and _callee(node) == "itemgetter":
+            outer = applied.get(id(node))
+            for a in node.args:
+                if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    out.append((node.lineno, a.value, "itemgetter()", outer.args[0] if outer else None))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "__getitem__" \
+                and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            out.append((node.lineno, node.args[0].value, ".__getitem__()", node.func.value))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "setdefault", "pop"):
             # the key is args[0] in ``n.get("k")`` and args[1] in the unbound ``dict.get(n, "k")`` (E-C): take the
             # first string literal among the first two positionals — a bound call's string default is only
@@ -309,8 +319,8 @@ def notification_field_reads_outside_selection(tree: dict, pkg: Path = PKG) -> l
         written = set().union(*(_literal_key_writes(s) for s, _t, _c in scopes)) if scopes else set()
         for scope, tainted, in_scope in scopes:
             for lineno, key, spelling, receiver in _literal_key_reads(scope):
-                if tainted is not None and not _derived(receiver, tainted, in_scope):
-                    continue                                      # a read of some other shape, in a function that also holds a notification
+                if tainted is not None and (receiver is None or not _derived(receiver, tainted, in_scope)):
+                    continue                                      # a read of some other shape (or of nothing visible), in a function that also holds a notification
                 if key not in allowed and key not in written:
                     bad.append(f"{path.relative_to(pkg)}:{lineno}: {spelling} reads {key!r}")
     return bad
@@ -678,6 +688,32 @@ class LinearClientTests(unittest.TestCase):
         self.assertLessEqual({("inboxUrl", ".get()"), ("emailedAt", ".setdefault()"), ("unsnoozedAt", ".pop()"), ("type", ".get()")}, reads)
         self.assertNotIn(("unknown", ".get()"), reads, "a bound call's string default is not a key")
         self.assertIn(("fallback", ".get()"), reads, "with no literal key, the second literal is reported: it may be the unbound form")
+
+    def test_static_scan_sees_itemgetter_and_dunder_getitem_spellings(self):
+        # eval-4 mutant G, the two mechanical halves: ``operator.itemgetter("k")(n)`` and
+        # ``n.__getitem__("k")`` are ``n["k"]`` spelled differently. The receiver is the object the
+        # getter is applied to; an itemgetter that is only BUILT here (``key=itemgetter("k")``) has
+        # no receiver, and under a function scope such a read is not judged — it may well be sorting
+        # something that is not a notification. ``*args`` and ``getattr(n, "get")`` stay evasions the
+        # dynamic half owns.
+        src = ast.parse('a = operator.itemgetter("inboxUrl")(n)\n'
+                        'b = itemgetter("emailedAt", "unsnoozedAt")(n)\n'
+                        'c = n.__getitem__("readAt")\n'
+                        'rows.sort(key=itemgetter("createdAt"))\n')
+        reads = {(k, sp, getattr(r, "id", r)) for _, k, sp, r in _literal_key_reads(src)}
+        self.assertLessEqual({("inboxUrl", "itemgetter()", "n"), ("emailedAt", "itemgetter()", "n"),
+                              ("unsnoozedAt", "itemgetter()", "n"), ("readAt", ".__getitem__()", "n"),
+                              ("createdAt", "itemgetter()", None)}, reads, reads)
+        # and end to end, off a tainted node in a scanned consumer: both are named, the keyed sort is not
+        peek = INBOXPEEK_TOP.replace('out.append((n.get("inboxUrl"), "unsnoozedAt" in n, n["unsnoozedAt"]))',
+                                     'out.append((operator.itemgetter("inboxUrl")(n), n.__getitem__("emailedAt")))\n'
+                                     '    out.sort(key=operator.itemgetter("bucket"))').replace('\n\n\ndef peek', '\nimport operator\n\n\ndef peek')
+        self.assertIn("import operator", peek); self.assertIn('itemgetter("bucket")', peek)
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._package_copy(tmp)
+            (pkg / "inboxpeek.py").write_text(peek)
+            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
+            self.assertEqual(sorted(b.split(": ", 1)[1] for b in bad), sorted(["itemgetter() reads 'inboxUrl'", ".__getitem__() reads 'emailedAt'"]), bad)
 
     def test_recording_notes_enumeration_as_a_copy(self):
         # k7 round 4 (E-B/E-D): ``keys()`` and iteration were noted as a copy, ``items()`` and
