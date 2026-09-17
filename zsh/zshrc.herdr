@@ -529,7 +529,11 @@ _claude_quarantine_scan() {
   body="${body%%\]*}"
   parts=( "${(@ps:$dq:)body}" )
   for (( i = 1; i <= ${#parts}; i += 2 )); do
-    [[ -z "${parts[i]//[$' \t\n,']/}" ]] || return 1
+    # `\r` deliberately in the class — see the twin in zsh/functions/claude.sh.
+    # This reader was copied from that one BEFORE the carriage return was added,
+    # so it inherited the divergence: two of the three readers accepted CRLF and
+    # this one did not.
+    [[ -z "${parts[i]//[$' \t\r\n,']/}" ]] || return 1
   done
   for (( i = 2; i <= ${#parts}; i += 2 )); do
     [[ -n "${parts[i]}" ]] && _CQ_NAMES+=( "${parts[i]}" )

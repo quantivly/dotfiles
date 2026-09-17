@@ -3130,14 +3130,27 @@ premise they were asked under.**
   the daemon does not update its own `last_reload_fp` when it writes, so the next tick sees a
   changed fingerprint. Nothing was watching credentials. The journal shows the pairs in the
   same second, three times.
-- **Is clearing it out of band supported?** No. The flag has exactly **seven** mutation sites
-  and they are all internal (`grep -rn 'set_auth_broken(\|mark_auth_broken('`). It is
+- **Is clearing it out of band supported?** No — and **the number that used to head this bullet
+  did not come from the grep beside it.** It read "exactly **seven** mutation sites … (`grep -rn
+  'set_auth_broken(\|mark_auth_broken('`)". Seven is the count of `mark_auth_broken(` **call**
+  sites alone (`oauth.rs:2602, 2663, 2676, 2686`; `scheduler.rs:533, 943, 967`); that grep also
+  matches `oauth.rs:1802`, `actions.rs:1084` and `actions.rs:1309` — three of the **five clearing
+  paths this same bullet lists** — plus the definitions in `profile.rs`. So "seven" and "five"
+  cannot both be derived from it and seven is not a superset of five. Checked at tag `v0.15.1` by
+  an independent review, 2026-09-17. What is true, and is what the bullet was for: **every
+  mutation site is internal to clauth** — there is no out-of-band clear. It is
   persisted only by `set_auth_broken_persisted` under clauth's state flock; `clauth --help`
   has no subcommand for it, the TUI only *renders* it (`src/tui/` has reads and no writes),
   the MCP surface only publishes it, and `clauth enable` touches `disabled` alone — upstream's
   own comment says that is "never `auth_broken`'s". Every refusal string prescribes
-  `clauth login <name>`, and upstream's own test says the quiet part out loud: *"which only a
-  login, a carry, or an adopt lifts."*
+  `clauth login <name>`. **A sentence attributed to upstream's own tests here — *"which only a
+  login, a carry, or an adopt lifts"* — is UNVERIFIED and is kept only as a paraphrase of the
+  five clearing paths above, not as a quotation.** Searched 2026-09-17 at tag `v0.15.1`:
+  absent from `profile.rs`, `oauth.rs`, `actions.rs`, `scheduler.rs`, `tests/inline/actions.rs`
+  and `tests/inline/claude.rs`, and GitHub code search over the repo returns 0. That is not
+  proof of absence — code search does not index everything and `tests/inline/` has ~30 more
+  files — which is exactly why it is labelled rather than deleted or defended. The claim it
+  decorates stands on the call sites, which were checked.
 - **Does a later successful fetch clear it on 0.15.1?** **No, and the distinction is the
   whole finding: a successful *refresh* clears it, a successful *fetch* does not.** The five
   clearing paths are `clauth login`/capture (`actions.rs:1084`, `:1309`), an adopt from the

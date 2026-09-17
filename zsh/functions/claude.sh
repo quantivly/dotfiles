@@ -218,7 +218,13 @@ _claude_quarantined_profiles() {
   # because claude-doctor is sourced into whatever shell asks for it and
   # EXTENDED_GLOB is not guaranteed there.
   for (( i = 1; i <= ${#parts}; i += 2 )); do
-    [[ -z "${parts[i]//[$' \t\n,']/}" ]] || return 1
+    # `\r` is in the class because the bash twin's `[[:space:],]` includes it and
+    # the two are presented as one rule in two languages. Without it a CRLF
+    # profiles.toml is `YES` to the reconciler and NOT CHECKED to the doctor —
+    # measured, and the exact divergence the cross-check row exists to prevent.
+    # Reachability is low (clauth writes LF via toml::to_string_pretty on Linux),
+    # which is why this is one character rather than a new state.
+    [[ -z "${parts[i]//[$' \t\r\n,']/}" ]] || return 1
   done
   for (( i = 2; i <= ${#parts}; i += 2 )); do
     [[ -n "${parts[i]}" ]] && print -r -- "${parts[i]}"
