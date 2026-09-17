@@ -577,7 +577,7 @@ claude-doctor() {
   # zsh's `local` on a name already local in this scope is a DISPLAY command, so
   # every loop-body variable is declared once, here. CLAUDE.md records the run
   # where forgetting that printed `du=zvi-quantivly` into the middle of a report.
-  local cred now_ms mode exp delta nproc_claude sub scopes crc cspan
+  local cred now_ms mode exp delta nproc_claude sub scopes crc cnames
   local active stored_hash live_hash p pdir spath
   local root d srv ok_n fail_n unauth_n invalid_n key empty_tok no_refresh
   local i comm svc a b
@@ -973,11 +973,22 @@ claude-doctor() {
         #
         # Scalar first, then split — the shape the quarantine consumer forty
         # lines below uses, so a reader comparing the two blocks sees one idiom.
-        # `cspan=$(...)` makes it unambiguous that $? is the READER's status and
-        # not an array assignment's, and unquoted `${(f)cspan}` yields an empty
+        # The scalar makes it unambiguous that $? is the READER's status and not
+        # an array assignment's, and unquoted `${(f)cnames}` yields an empty
         # array rather than one empty element when there is no chain.
-        cspan="$(_claude_fallback_chain)"; crc=$?
-        chain_walk=( ${(f)cspan} )
+        #
+        # NAMED FOR WHAT IT HOLDS, AND THE RENAME IS THE POINT. It holds the
+        # reader's OUTPUT — validated member names, `p1` and `p2`, one per line —
+        # and never the sed span. It was first called `c`+`span`, and that name
+        # misled the author of the mutant written to prove the armed note cannot
+        # leak file content: the mutant dumped this variable, leaked nothing, and
+        # SURVIVED, which read as a missing row when the truth is that **no raw
+        # span is in scope on this path at all**. That is the structural
+        # guarantee, stated once: nothing between here and the report holds
+        # anything but names the member class has already approved, so a leak
+        # here needs a NEW file read and not a slip with an existing variable.
+        cnames="$(_claude_fallback_chain)"; crc=$?
+        chain_walk=( ${(f)cnames} )
         if (( crc != 0 )); then
           # A ⚠, and NOT CHECKED rather than silence. An empty answer from a
           # question we could not ask is never agreement — and the thing not
