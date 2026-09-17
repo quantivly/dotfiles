@@ -421,14 +421,16 @@ class LinearClientTests(unittest.TestCase):
         for n in node_from_selection(tree), node_from_selection(tree, "IssueNotification", owners, archivedAt=None):
             assert_within_selection(self, n, tree)
 
-    def test_json_fixtures_stay_within_the_selection(self):
-        # No notification page ships as a JSON file any more (they are generated), and one that is
-        # re-added must still contain nothing the query does not request.
-        tree = selection_tree(linear.NOTIFICATION_FIELDS)
-        for path in sorted(FIX.glob("*.json")):
-            data = json.loads(path.read_text())
-            for node in (((data.get("data") or {}).get("notifications") or {}).get("nodes") or []):
-                assert_within_selection(self, node, tree, f"{path.name}:{node.get('id')}")
+    def test_no_notification_page_ships_as_a_json_fixture(self):
+        # k7 round 4: the JSON pages were deleted in round 3 and the row that checked them kept
+        # globbing the absent directory — a check with nothing to check, passing on zero files. The
+        # design decision it was standing in for is pinned directly instead: notification pages are
+        # GENERATED from the selection set (``node_from_selection`` / ``notification_pages``), so a
+        # fixture physically cannot carry a key the query never requests. A JSON page re-added here
+        # fails this row, whatever it contains — a fixture richer than the API is how k7 hid.
+        shipped = sorted(str(p.relative_to(FIX.parent)) for p in FIX.rglob("*.json")) if FIX.exists() else []
+        self.assertEqual(shipped, [], "notification pages are generated from the selection set, never shipped as JSON: "
+                                      f"remove {shipped} and build the page with notification_pages()")
 
     def test_selection_parser_sees_fragment_owners(self):
         tree, owners = _parse_selection(linear.NOTIFICATION_FIELDS)
