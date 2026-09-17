@@ -1,9 +1,10 @@
-import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
+import argparse, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from rabota import context
 from rabota.commands import doctor
 from rabota.runner import FakeRunner, Result
 from rabota.store import SCHEMA_VERSION
+from tests.support import last_json
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -92,6 +93,6 @@ class DoctorEndToEndTests(unittest.TestCase):
         self.assertNotIn(canary, p.stdout)
         self.assertNotIn(canary, p.stderr)
         self.assertEqual(p.returncode, 5, p.stderr)
-        self.assertEqual(json.loads(p.stderr)["error"]["code"], "secret_leak")
+        self.assertEqual(last_json(p.stderr)["error"]["code"], "secret_leak")
         self.assertIn("LINEAR_API_KEY", p.stderr)
         self.assertNotIn("Traceback", p.stderr)

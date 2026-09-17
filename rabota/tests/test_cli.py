@@ -5,6 +5,7 @@ from unittest.mock import patch
 from rabota import cli, errors
 from rabota.context import Context
 from rabota.store import Store
+from tests.support import last_json
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -54,7 +55,7 @@ class CliTests(unittest.TestCase):
         cli.register("boom", build, run)
         code, _, err = self.run_cli(["boom"])
         self.assertEqual(code, 3)
-        self.assertEqual(json.loads(err)["error"]["code"], "refused")
+        self.assertEqual(last_json(err)["error"]["code"], "refused")
         self.assertIn("identity not pinned", err)
 
     def test_text_flag_uses_text_out(self):
@@ -82,7 +83,7 @@ class SecretGuardTests(unittest.TestCase):
             code, out, err = self.run_cli(["leaky"])
         self.assertEqual(code, 5)
         self.assertEqual(out, "")                       # nothing partial reached stdout
-        self.assertEqual(json.loads(err)["error"]["code"], "secret_leak")
+        self.assertEqual(last_json(err)["error"]["code"], "secret_leak")
         self.assertIn("LINEAR_API_KEY", err)            # the NAME is what the operator needs
         self.assertNotIn(CANARY, out + err)
 
@@ -101,7 +102,7 @@ class SecretGuardTests(unittest.TestCase):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": CANARY}):
             code, out, err = self.run_cli(["leakyerr"])
         self.assertEqual(code, 5)
-        self.assertEqual(json.loads(err)["error"]["code"], "secret_leak")
+        self.assertEqual(last_json(err)["error"]["code"], "secret_leak")
         self.assertIn("ANTHROPIC_API_KEY", err)
         self.assertNotIn(CANARY, out + err)
 
@@ -129,7 +130,7 @@ class ExitCodeTests(unittest.TestCase):
     def _usage(self, argv):
         code, out, err = self.run_cli(argv)
         self.assertEqual(code, 2, err)
-        self.assertEqual(json.loads(err)["error"]["code"], "usage")
+        self.assertEqual(last_json(err)["error"]["code"], "usage")
         return err
 
     def test_malformed_config_toml_is_usage(self):
@@ -163,7 +164,7 @@ class ExitCodeTests(unittest.TestCase):
         blocker = self.home / "not-a-dir"; blocker.write_text("")
         code, out, err = self.run_cli(["--tenant", "quantivly", "--state-dir", str(blocker / "state"), "touchstore"])
         self.assertEqual(code, 5, err)
-        self.assertEqual(json.loads(err)["error"]["code"], "error")
+        self.assertEqual(last_json(err)["error"]["code"], "error")
         self.assertIn("state dir", err)
 
     def test_unexpected_exception_is_error_5(self):
@@ -172,7 +173,7 @@ class ExitCodeTests(unittest.TestCase):
         cli.register("valueerror", lambda sub: sub.add_parser("valueerror"), run)
         code, out, err = self.run_cli(["valueerror"])
         self.assertEqual(code, 5)
-        self.assertEqual(json.loads(err)["error"]["code"], "error")
+        self.assertEqual(last_json(err)["error"]["code"], "error")
         self.assertIn("ValueError", err)
         self.assertEqual(out, "")
 
@@ -183,7 +184,7 @@ class ExitCodeTests(unittest.TestCase):
         with patch.dict(os.environ, {"LINEAR_API_KEY": CANARY}):
             code, out, err = self.run_cli(["leakyvalueerror"])
         self.assertEqual(code, 5)
-        self.assertEqual(json.loads(err)["error"]["code"], "secret_leak")
+        self.assertEqual(last_json(err)["error"]["code"], "secret_leak")
         self.assertNotIn(CANARY, out + err)
 
     def test_system_exit_and_interrupt_keep_their_own_behaviour(self):
@@ -258,5 +259,35 @@ class StoreLifecycleTests(unittest.TestCase):
         with patch.object(Store, "close", side_effect=sqlite3.OperationalError("close failed")):
             code, _out, err = run_cli(argv)
         self.assertEqual(code, 3, err)
-        self.assertEqual(json.loads(err)["error"]["code"], "refused")
+        self.assertEqual(last_json(err)["error"]["code"], "refused")
         self.assertIn("the real failure", err)
+
+
+class LastJsonTests(unittest.TestCase):
+    """The helper every stderr assertion reads through: a line ahead of the JSON is not a product failure.
+
+    On python 3.12+ a collected, unclosed sqlite3 connection writes ``ResourceWarning: unclosed
+    database`` to stderr; ``json.loads`` over the whole stream then dies with a JSONDecodeError
+    that names no cause. The helper reads the LAST JSON object and fails loudly when there is none.
+    """
+    ERR = '{"error": {"code": "usage", "message": "bad flag"}}\n'
+
+    def test_reads_the_json_after_a_leading_warning_line(self):
+        warning = ("/x/rabota/rabota/store.py:52: ResourceWarning: unclosed database in "
+                   "<sqlite3.Connection object at 0x7f3a9c1b2c40>\n")
+        self.assertEqual(last_json(warning + self.ERR)["error"]["code"], "usage")
+
+    def test_reads_a_bare_json_object(self):
+        self.assertEqual(last_json(self.ERR)["error"]["code"], "usage")
+
+    def test_no_json_at_all_fails_with_a_clear_message(self):
+        stream = "usage: rabota: error: unrecognized arguments: --bogus\n"
+        with self.assertRaises(AssertionError) as cm:
+            last_json(stream)
+        self.assertIn("no JSON object", str(cm.exception))
+        self.assertIn("unrecognized arguments", str(cm.exception))   # the stream is quoted back
+
+    def test_json_followed_by_a_traceback_is_not_read_as_a_pass(self):
+        trailing = "Traceback (most recent call last):\n  File x, line 1\nValueError: boom\n"
+        with self.assertRaises(AssertionError):
+            last_json(self.ERR + trailing)
