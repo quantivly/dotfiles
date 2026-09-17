@@ -1382,6 +1382,238 @@ check "a quarantine reason printed out of profiles.toml carries nothing else" \
 cli --dry-run
 check "...and the quarantined account really was excluded" "$CLI_OUT" "b2"
 
+# --- gate rows (WS4' Task 0) --------------------------------------------------
+# `claude-pick --gate --model M --effort E [--est-minutes N]` refuses (exit 2)
+# when the picked seat's PROJECTED end-utilisation — u5 now + rate(model,
+# effort) × minutes / 60 — exceeds CLAUDE_PICK_GATE_MAX (95). The rate is
+# CLAUDE_PICK_RATES["<model>:<effort>"] from ~/.config/claude-tenants.zsh, else
+# CLAUDE_PICK_RATE_DEFAULT (115, the worst rate measured 2026-09-16). An
+# unmeasured window refuses too: "unknown" must never read as room. Every
+# refusal has a state a caller can switch on and a null profile.
+new_home gate
+H="$FHOME"
+# The fixture's 5h reset is the same far-future literal every other section
+# uses (2099), NOT a date near the day the rows were written: the first version
+# said 2026-09-16T20:00:00Z, which was already in the past by the time the gate
+# learned to read it — a fixture describing a rolled window while every row
+# treated it as live. Past is the matching far-past literal (2000). A fourth
+# argument overrides the instant; `-` omits the key altogether, which is how
+# clauth writes a window that has not started.
+GATE_FUTURE='2099-01-01T00:00:00Z'
+GATE_PAST='2000-01-01T00:00:00Z'
+gate_profile() {   # gate_profile NAME U5 [AGE_S] [RESETS_AT|-]  → a registered fixture profile at U5 % of its
+                   # 5h window, whose usage_cache.json was written AGE_S seconds ago (default: just now)
+                   # and whose five_hour.resets_at is RESETS_AT (default GATE_FUTURE; `-` = no key)
+  local r="${4:-$GATE_FUTURE}" fh
+  if [[ "$r" == - ]]; then fh="{\"utilization\":$2}"; else fh="{\"utilization\":$2,\"resets_at\":\"$r\"}"; fi
+  mkdir -p "$H/.clauth/profiles/$1"
+  : > "$H/.clauth/profiles/$1/credentials.json"
+  printf '{"five_hour":%s,"seven_day":{"utilization":10,"resets_at":"2099-01-06T00:00:00Z"},"plan":{"tier":"Team"}}\n' "$fh" \
+    > "$H/.clauth/profiles/$1/usage_cache.json"
+  if [[ -n "${3:-}" ]]; then
+    touch -d "$3 seconds ago" "$H/.clauth/profiles/$1/usage_cache.json"
+  fi
+}
+gate_run() {       # gate_run PROFILE [extra args]  → $out (JSON) and $rc, Fable-high, 30 min, dry-run
+  local p="$1"; shift
+  out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" CLAUDE_TENANTS_FILE=/nonexistent \
+          zsh "$DOTFILES/scripts/claude-pick" --profile "$p" --dry-run --json \
+          --gate --model claude-fable-5-1 --effort high --est-minutes 30 "$@" 2>/dev/null)"; rc=$?
+}
+has_words() {      # has_words TEXT WORD...  → yes when TEXT contains every WORD
+  local t="$1" w; shift
+  for w in "$@"; do [[ "$t" == *"$w"* ]] || { echo no; return 0; }; done
+  echo yes
+}
+gate_profile g1 40
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g1 --dry-run --json \
+        --gate --model claude-fable-5-1 --effort high --est-minutes 30 2>/dev/null)"; rc=$?
+check "gate: 40% + 115×0.5h = 97 refuses" "$rc" "2"
+check "gate: state names the projection"  "$(jq -r .state <<<"$out")" "gate-projected"
+check "gate: projected is 97"             "$(jq -r .gate.projected <<<"$out")" "97"
+check "gate: profile is null on refusal"  "$(jq -r .profile <<<"$out")" "null"
+gate_profile g2 30
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g2 --dry-run --json \
+        --gate --model claude-fable-5-1 --effort high --est-minutes 30 2>/dev/null)"; rc=$?
+check "gate: 30% projects to 87 and allows" "$rc" "0"
+check "gate: verdict allow"                  "$(jq -r .gate.verdict <<<"$out")" "allow"
+gate_profile g3 50
+# CLAUDE_PICK_RATES_OVERRIDE is deliberately IGNORED by the implementation — the
+# rate table is the zsh associative array from claude-tenants.zsh, not an env
+# string — so this row proves an unlisted model:effort pair falls back to 115.
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" CLAUDE_PICK_RATES_OVERRIDE='claude-sonnet-5:medium=20' \
+        zsh "$DOTFILES/scripts/claude-pick" --profile g3 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
+check "gate: an unlisted model/effort uses the default rate 115 (50+57=107 refuses)" "$rc" "2"
+mkdir -p "$H/.clauth/profiles/g4"; : > "$H/.clauth/profiles/g4/credentials.json"   # registered, no usage cache
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g4 --dry-run --json --gate --model x --effort y 2>/dev/null)"; rc=$?
+check "gate: unmeasured window refuses"  "$rc" "2"
+check "gate: state names unmeasured"     "$(jq -r .state <<<"$out")" "gate-unmeasured"
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g2 --dry-run --json 2>/dev/null)"
+check "no --gate: gate field is null"    "$(jq -r .gate <<<"$out")" "null"
+check "...and the key is present, not absent" "$(jq -r 'has("gate")' <<<"$out")" "true"
+HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --gate --model a 2>/dev/null; check "gate without --effort is usage (64)" "$?" "64"
+# The positive half of the rate table: a pair listed in claude-tenants.zsh is
+# used instead of the default. Without this row a gate that ignored the array
+# entirely would pass every row above.
+mkdir -p "$H/.config"
+printf 'typeset -gA CLAUDE_PICK_RATES\nCLAUDE_PICK_RATES[claude-sonnet-5:medium]=20\n' > "$H/.config/claude-tenants.zsh"
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile g3 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
+check "gate: a rate listed in claude-tenants.zsh is used (50+20×0.5h=60 allows)" "$rc" "0"
+check "gate: ...and the JSON reports that rate" "$(jq -r .gate.rate <<<"$out")" "20"
+rm -f "$H/.config/claude-tenants.zsh"
+
+# --- gate: a STALE reading is unmeasured (fix brief ws4p-fix, defect 1) -----
+# The gate trusted whatever number usage_cache.json held, however old. A seat
+# at 30% three hours ago can be at 100% now (F13: two profiles went 7% -> 100%
+# in forty minutes), so a reading older than CLAUDE_PICK_CACHE_MAX_AGE (600 s
+# for the gate) is UNMEASURED and refuses — design §4.2, an unmeasured dimension
+# is a refusal, never a zero. Reproduced by the orchestrator: rc 0, allow,
+# projected 87, from a 3-hour-old file.
+gate_profile s30 30 10800
+gate_run s30
+check "gate: a 3h-old usage cache refuses"          "$rc" "2"
+check "gate: ...as gate-unmeasured"                 "$(jq -r .state <<<"$out")" "gate-unmeasured"
+# The age is asserted as a RANGE, and the reason is checked against the age the
+# JSON itself reports: the fixture's mtime and the run are two clock reads, and a
+# second boundary between them makes 10800 read 10801. A row that fails one run
+# in N on main is worse than no row (CLAUDE.md, DO-612).
+check "gate: ...naming the age and the threshold"   "$(has_words "$(jq -r .reason <<<"$out")" "$(jq -r .gate.cache_age_s <<<"$out")s" 600 CLAUDE_PICK_CACHE_MAX_AGE)" "yes"
+check "gate: ...with a null profile"                "$(jq -r .profile <<<"$out")" "null"
+check "gate: ...and the gate object carries the age it decided on" "$(jq -r '.gate.cache_age_s | . >= 10800 and . <= 10810' <<<"$out")" "true"
+check "gate: ...and the threshold it applied"       "$(jq -r .gate.cache_max_age_s <<<"$out")" "600"
+check "gate: ...and no verdict allow anywhere"      "$(jq -r .gate.verdict <<<"$out")" "refuse"
+gate_profile s30f 30
+gate_run s30f
+check "gate: the same seat with a fresh cache allows"        "$rc" "0"
+check "gate: ...and cache_age_s is a NUMBER on an allow too" "$(jq -r '.gate.cache_age_s | type' <<<"$out")" "number"
+check "gate: ...usage.cache_age_s agrees"                    "$(jq -r '.usage.cache_age_s | type' <<<"$out")" "number"
+# The knob is read, in both directions: a wider one admits the 3h-old reading, a
+# narrower one refuses a 5-minute-old one that the default would have allowed.
+CLAUDE_PICK_CACHE_MAX_AGE=20000 gate_run s30
+check "gate: CLAUDE_PICK_CACHE_MAX_AGE=20000 admits the 3h-old reading" "$rc" "0"
+check "gate: ...and the JSON reports the threshold used"              "$(jq -r .gate.cache_max_age_s <<<"$out")" "20000"
+gate_profile s30m 30 300
+CLAUDE_PICK_CACHE_MAX_AGE=100 gate_run s30m
+check "gate: CLAUDE_PICK_CACHE_MAX_AGE=100 refuses a 300s-old reading" "$rc" "2"
+check "gate: ...as gate-unmeasured"                                    "$(jq -r .state <<<"$out")" "gate-unmeasured"
+gate_run s30m
+check "gate: ...which the default 600 admits" "$rc" "0"
+# THE RANKED PATH FAILS THE SAME WAY and must be covered by the same check: a
+# 1000s-old reading is `eligible` to the ranker (its threshold is 3600, and
+# stays there — see zshrc.herdr) but stale to the gate.
+SAVED_H="$H"; new_home gate-ranked; H="$FHOME"
+gate_profile r1 30 1000
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" CLAUDE_TENANTS_FILE=/nonexistent zsh "$DOTFILES/scripts/claude-pick" --dir "$H" --dry-run --json \
+        --gate --model claude-fable-5-1 --effort high 2>/dev/null)"; rc=$?
+# On a refusal the picked row is reported under `skipped` (REPLY is cleared), so
+# the ranker's own classification of it is readable there: `eligible`, not
+# `unknown` — the ranker admitted what the gate refused.
+check "gate (ranked path): a 1000s-old reading is ELIGIBLE to the ranker..." "$(jq -r '.skipped[0].class' <<<"$out")" "eligible"
+check "gate (ranked path): ...and refused by the gate"                    "$rc" "2"
+check "gate (ranked path): ...as gate-unmeasured"                         "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate (ranked path): ...with the age in the gate object"            "$(jq -r '.gate.cache_age_s | . >= 1000 and . <= 1010' <<<"$out")" "true"
+H="$SAVED_H"
+
+# --- gate: a tuning value that does not parse REFUSES (defect 2) ------------
+# Reproduced by the review gate at a 90% seat: RATE_DEFAULT=abc allowed with
+# projected 90 (the rate parsed as 0), RATE_DEFAULT=-100 allowed with projected
+# 40 (a negative rate SUBTRACTS), GATE_MAX=1x printed an unparseable object and
+# no refusal. Every one is an operator's typo hiding behind an allow. Now: exit
+# 2, state gate-misconfigured, a reason naming the variable and the value it
+# got — never a silent 0, and never a fallback to the default, which would hide
+# the typo. THE FIXTURES ARE CHOSEN SO THAT A FALLBACK WOULD ALLOW: v10 with the
+# default rate projects to 67, v30 with the default cap is 87 < 95. A row at
+# 90% would refuse as gate-projected under a fallback and pin nothing.
+gate_profile v10 10
+gate_profile v30 30
+CLAUDE_PICK_RATE_DEFAULT=abc gate_run v10
+check "gate: CLAUDE_PICK_RATE_DEFAULT=abc refuses"        "$rc" "2"
+check "gate: ...as gate-misconfigured, not a projection"  "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming the variable and the value"        "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_RATE_DEFAULT abc)" "yes"
+check "gate: ...with a null profile"                      "$(jq -r .profile <<<"$out")" "null"
+check "gate: ...verdict refuse"                           "$(jq -r .gate.verdict <<<"$out")" "refuse"
+check "gate: ...and no rate is reported as measured"      "$(jq -r .gate.rate <<<"$out")" "null"
+CLAUDE_PICK_RATE_DEFAULT=-100 gate_run v10
+check "gate: a NEGATIVE default rate refuses"             "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming -100"                              "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_RATE_DEFAULT -100)" "yes"
+CLAUDE_PICK_RATE_DEFAULT=0 gate_run v10
+check "gate: a ZERO default rate refuses (must be > 0)"   "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+CLAUDE_PICK_GATE_MAX=1x gate_run v30
+check "gate: CLAUDE_PICK_GATE_MAX=1x refuses"             "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...and the output is still ONE valid JSON object" "$(jq -e . <<<"$out" >/dev/null 2>&1; echo $?)" "0"
+check "gate: ...naming the variable and the value"        "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_GATE_MAX 1x)" "yes"
+check "gate: ...and max is null, not a guess"             "$(jq -r .gate.max <<<"$out")" "null"
+CLAUDE_PICK_GATE_MAX=0 gate_run v30
+check "gate: CLAUDE_PICK_GATE_MAX=0 refuses (must be > 0)" "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+CLAUDE_PICK_GATE_MAX=150 gate_run v30
+check "gate: a VALID CLAUDE_PICK_GATE_MAX is honoured"    "$rc" "0"
+check "gate: ...and reported"                             "$(jq -r .gate.max <<<"$out")" "150"
+CLAUDE_PICK_CACHE_MAX_AGE=abc gate_run v30
+check "gate: CLAUDE_PICK_CACHE_MAX_AGE=abc refuses"       "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming the variable and the value"        "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_CACHE_MAX_AGE abc)" "yes"
+# A rate table entry is validated the same way, and named by its KEY.
+mkdir -p "$H/.config"
+printf 'typeset -gA CLAUDE_PICK_RATES\nCLAUDE_PICK_RATES[claude-sonnet-5:medium]=fast\n' > "$H/.config/claude-tenants.zsh"
+out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --json --gate --model claude-sonnet-5 --effort medium 2>/dev/null)"; rc=$?
+check "gate: CLAUDE_PICK_RATES[claude-sonnet-5:medium]=fast refuses" "$rc" "2"
+check "gate: ...as gate-misconfigured"                    "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "gate: ...naming the entry and the value"           "$(has_words "$(jq -r .reason <<<"$out")" 'CLAUDE_PICK_RATES[claude-sonnet-5:medium]' fast)" "yes"
+rm -f "$H/.config/claude-tenants.zsh"
+# A zero-length lane is not a request: the same usage error a non-integer gets.
+HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --gate --model a --effort b --est-minutes 0 2>/dev/null
+check "gate: --est-minutes 0 is a usage error (64)"       "$?" "64"
+HOME="$H" zsh "$DOTFILES/scripts/claude-pick" --profile v10 --dry-run --gate --model a --effort b --est-minutes=0 2>/dev/null
+check "gate: ...in the --est-minutes=0 spelling too"      "$?" "64"
+
+# --- gate: a window that has ROLLED is unmeasured (cleanup brief ws4p-cleanup, defect 2)
+# The staleness test above reads only the file's mtime, so `touch` on a
+# three-hour-old cache made a stale reading pass, and a five_hour.resets_at
+# already in the past — the window has rolled, so the number describes a window
+# that no longer exists — was ignored while the file was new. A real clauth
+# write rewrites content and mtime together, which makes this low-risk, not
+# absent, and this is a safety gate. A reset in the past is the same refusal
+# the mtime one already makes — exit 2, gate-unmeasured — and an ABSENT or
+# UNPARSEABLE reset refuses too: unmeasured, never optimistic. The parsed
+# instant is reported in the gate object beside cache_age_s so the refusal can
+# be read without guessing.
+gate_profile rp 30 "" "$GATE_PAST"                       # fresh mtime, rolled window
+gate_run rp
+check "gate: a FRESH file whose 5h reset is in the past refuses" "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate: ...naming the reset instant and that it has rolled" "$(has_words "$(jq -r .reason <<<"$out")" "$GATE_PAST" rolled)" "yes"
+check "gate: ...profile is null on the refusal"                  "$(jq -r .profile <<<"$out")" "null"
+check "gate: ...and the gate object reports the parsed resets_at" "$(jq -r .gate.resets_at <<<"$out")" "$GATE_PAST"
+check "gate: ...beside cache_age_s"  "$(jq -r '.gate | has("resets_at") and has("cache_age_s") and (.cache_age_s|type == "number")' <<<"$out")" "true"
+gate_profile rf 30 "" "$GATE_FUTURE"                     # the same fixture, window still open
+gate_run rf
+check "gate: the same fixture with a FUTURE reset allows"        "$rc" "0"
+check "gate: ...verdict allow"                                   "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "gate: ...and reports the reset it allowed on"             "$(jq -r .gate.resets_at <<<"$out")" "$GATE_FUTURE"
+gate_profile rn 30 "" -                                  # no resets_at key at all
+gate_run rn
+check "gate: a MISSING resets_at refuses rather than allows"     "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate: ...and resets_at is null in the gate object"        "$(jq -r .gate.resets_at <<<"$out")" "null"
+gate_profile ru 30 "" "not a timestamp"                  # unparseable
+gate_run ru
+check "gate: an UNPARSEABLE resets_at refuses rather than allows" "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate: ...and resets_at is null, never an epoch"           "$(jq -r .gate.resets_at <<<"$out")" "null"
+# The mtime test runs FIRST, so a file that is both stale and rolled is
+# reported as stale — the message the rows above this section already pin.
+gate_profile rb 30 10800 "$GATE_PAST"
+gate_run rb
+check "gate: stale AND rolled is reported as stale"              "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_CACHE_MAX_AGE)" "yes"
+# A rolled window is not a projection: nothing is computed on a number the gate
+# refused to trust, so `projected` is null.
+gate_run rp
+check "gate: a rolled window has no projection"                  "$(jq -r .gate.projected <<<"$out")" "null"
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

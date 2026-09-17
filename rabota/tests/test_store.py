@@ -75,3 +75,26 @@ class StoreTests(unittest.TestCase):
         self.store.close()
         self.store = Store.open(Path(self.tmp.name) / "handoffs" / "rabota")
         self.assertEqual(self.store.schema_version(), 0)
+
+    def test_migrate_v1_to_v2_adds_columns_and_restamps(self):
+        from rabota.store import Store, SCHEMA_VERSION
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "rabota.db"
+        conn = sqlite3.connect(db, isolation_level=None)
+        conn.executescript("""CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES (1);
+            CREATE TABLE lanes(id TEXT PRIMARY KEY, tenant TEXT, kind TEXT, brief TEXT, repo TEXT, worktree TEXT, out_dir TEXT,
+              machine TEXT, unit TEXT, session_id TEXT, model TEXT, status TEXT, started_at TEXT, ended_at TEXT, held_reason TEXT,
+              of_lane TEXT, attached INTEGER DEFAULT 0);
+            CREATE TABLE escalations(id INTEGER PRIMARY KEY, tenant TEXT, first_seen TEXT NOT NULL, ts TEXT, question TEXT,
+              evidence TEXT, options TEXT, disposition TEXT, resolved_at TEXT, resolution TEXT);"""); conn.close()
+        s = Store.open(Path(tmp.name))
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
+        cols = {r[1] for r in s.conn.execute("PRAGMA table_info(lanes)")}
+        self.assertTrue({"seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at"} <= cols)
+        ecols = {r[1] for r in s.conn.execute("PRAGMA table_info(escalations)")}
+        self.assertTrue({"kind", "subject"} <= ecols)
+        s.close()
+        s2 = Store.open(Path(tmp.name)); self.assertEqual(s2.schema_version(), 2)   # idempotent
+        eid = s2.add_escalation("quantivly", "q", "e", ["a"], kind="decision", subject="PR #1")
+        self.assertEqual((s2.escalation(eid)["kind"], s2.escalation(eid)["subject"]), ("decision", "PR #1"))
+        s2.close()
