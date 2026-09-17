@@ -179,15 +179,27 @@ def _guarded_write(path, lineno):
     branch only is one; ``text, _n = …``, ``except E as text``, ``import x as text`` and a ``match``
     capture are all rebindings — eval-5 k8), or a single guard binding the write can bypass (eval-4
     mutant A: the written name is a parameter and the one binding sits under an ``if``, so counting
-    bindings saw exactly one and it was the guard) — is False, and the line falls through to
-    "unexplained". False on a doubt, never True. Keyword arguments (``encoding=``, ``newline=``) are
-    ignored: the content is the one positional argument.
+    bindings saw exactly one and it was the guard), or the write's innermost enclosing scope is a
+    ``lambda`` rather than a ``def`` (eval-6 k8: a lambda body is one expression and can bind no
+    guard of its own, and its own parameter can shadow the outer name by nothing more than sharing
+    a spelling, which this AST match cannot tell apart from real lexical scoping) — is False, and
+    the line falls through to "unexplained". False on a doubt, never True. Keyword arguments
+    (``encoding=``, ``newline=``) are ignored: the content is the one positional argument.
     """
     tree = ast.parse(path.read_text())
-    fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.lineno <= lineno <= n.end_lineno]
-    if not fns:
+    scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+              and n.lineno <= lineno <= n.end_lineno]
+    if not scopes:
         return False
-    fn = min(fns, key=lambda n: n.end_lineno - n.lineno)          # innermost
+    scope = min(scopes, key=lambda n: n.end_lineno - n.lineno)    # innermost
+    if isinstance(scope, ast.Lambda):
+        # eval-6 k8: a lambda body is one expression, so it cannot itself contain an
+        # `assert_clean` assignment, and a name inside one may be the lambda's own
+        # (unguarded) parameter rather than the outer scope's guarded variable — the AST
+        # match is by name only, not real lexical scoping, so it cannot tell the two apart.
+        # False on a doubt, never True.
+        return False
+    fn = scope
     writes = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and n.lineno == lineno
               and isinstance(n.func, ast.Attribute) and n.func.attr in ("write_text", "write_bytes")]
     if len(writes) != 1 or len(writes[0].args) != 1 or not isinstance(writes[0].args[0], ast.Name):
@@ -280,6 +292,12 @@ class WriteGuardTests(unittest.TestCase):
             # the rule is per function, and a module-level binding is not in the function.
             "guarded name bound at module level": "text = secrets.assert_clean('x', os.environ)\n"
                                          "def write(ctx, out):\n" + self.CENSUS_WRITE,
+            # eval-6 k8: the write sits inside a lambda whose own parameter is spelled the same as
+            # the guarded name. The AST match is by name only, so without lambda handling this
+            # credits the outer guard for a value the lambda's caller supplies directly.
+            "write is inside a lambda whose own parameter shadows the guarded name":
+                                         head + '    cb = lambda text: (ctx.state_dir / "census.json").write_text(text)\n'
+                                         "    cb(str(out))\n",
         }
         for label, body in cases.items():
             with self.subTest(label):
