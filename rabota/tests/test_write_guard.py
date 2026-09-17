@@ -57,8 +57,9 @@ ALLOWED_LINES = [
 # Writes that guard the text THEMSELVES rather than through ``emit.write_file``: the module calls
 # ``secrets.assert_clean`` and writes its result, and nothing else. An entry here is an allow-list
 # entry with a precondition — the excused line is accepted only while ``_guarded_write`` can prove,
-# from the module's AST, that the written name is bound exactly once in its function and that the
-# binding IS the ``assert_clean`` call. Delete the guard line above the write and the write goes red
+# from the module's AST, that the written name is bound exactly once in its function, that the
+# binding IS the ``assert_clean`` call, and that the write cannot be reached without passing it
+# (same block or an enclosing one, earlier). Delete the guard line above the write and the write goes red
 # again; a third module using the same shape is unexplained until it is named here and its reason
 # given. Both entries are #154's, merged after this branch was cut; their pattern predates this
 # gate and is deliberate ("Written through the same guard emit applies to stdout"), so the test
@@ -92,14 +93,60 @@ def _is_assert_clean(call):
     return (isinstance(f, ast.Attribute) and f.attr == "assert_clean") or (isinstance(f, ast.Name) and f.id == "assert_clean")
 
 
+def _block_chains(fn):
+    """``{id(stmt): chain}`` for every statement under ``fn``: the tuple of ``(compound node, field)`` blocks
+    from the function body down to the block that holds the statement (``()`` for the body itself).
+    ``except`` handlers and ``match`` cases are blocks too, so a statement in one has the handler in
+    its chain. Statement identity, not line numbers: two statements on one line are still two."""
+    chains = {}
+    def visit(stmts, chain):
+        for s in stmts:
+            chains[id(s)] = chain
+            for field, value in ast.iter_fields(s):
+                if not isinstance(value, list) or not value:
+                    continue
+                if all(isinstance(v, ast.stmt) for v in value):
+                    visit(value, chain + ((s, field),))
+                elif all(isinstance(v, (ast.ExceptHandler, ast.match_case)) for v in value):
+                    for h in value:
+                        visit(h.body, chain + ((s, field), (h, "body")))
+    visit(fn.body, ())
+    return chains
+
+
+def _guard_dominates(fn, guard, write_call):
+    """Is ``guard`` (a statement) on every path from the function's entry to ``write_call``, in the
+    brief's syntactic sense? Its block must be the write's block or an enclosing one — the chain of
+    blocks holding the guard is a prefix of the chain holding the write — and within that shared block
+    the guard must come before the statement that leads to the write. A guard under an ``if``, in a
+    ``try`` the write follows, in a sibling branch, or in a loop body the write sits outside all fail
+    the prefix test; a guard after the write in one block fails the order test. Not a CFG: ``return``,
+    ``break`` and raised exceptions are not modelled, in the direction of refusing (a guard that only
+    LOOKS skippable is refused, never one that IS skippable accepted)."""
+    chains = _block_chains(fn)
+    holders = [s for s in ast.walk(fn) if isinstance(s, ast.stmt) and id(s) in chains and any(n is write_call for n in ast.walk(s))]
+    if not holders or id(guard) not in chains:
+        return False
+    write_stmt = max(holders, key=lambda s: len(chains[id(s)]))      # the innermost statement holding the call
+    gchain, wchain = chains[id(guard)], chains[id(write_stmt)]
+    if wchain[:len(gchain)] != gchain:
+        return False
+    lead = write_stmt if len(wchain) == len(gchain) else wchain[len(gchain)][0]   # the write's ancestor in the guard's block
+    block = getattr(*gchain[-1]) if gchain else fn.body
+    return block.index(guard) < block.index(lead)
+
+
 def _guarded_write(path, lineno):
-    """True iff the ``.write_text``/``.write_bytes`` call on ``lineno`` writes one bare name, and that
-    name is bound exactly once in the innermost enclosing function, by ``x = secrets.assert_clean(...)``.
+    """True iff the ``.write_text``/``.write_bytes`` call on ``lineno`` writes one bare name, that name
+    is bound exactly once in the innermost enclosing function, by ``x = secrets.assert_clean(...)``,
+    and that binding dominates the write (``_guard_dominates``): the write cannot be reached without it.
 
     Anything the AST cannot vouch for — no enclosing function, an expression argument, a name
     with no binding in the function (a parameter, a global), a second binding anywhere in the
-    function (a rebinding after the guard is a new value; a guard on one branch only is one) — is
-    False, and the line falls through to "unexplained". False on a doubt, never True. Keyword
+    function (a rebinding after the guard is a new value; a guard on one branch only is one), or a
+    single guard binding the write can bypass (eval-4 mutant A: the written name is a parameter and
+    the one binding sits under an ``if``, so counting bindings saw exactly one and it was the guard) —
+    is False, and the line falls through to "unexplained". False on a doubt, never True. Keyword
     arguments (``encoding=``, ``newline=``) are ignored: the content is the one positional argument.
     """
     tree = ast.parse(path.read_text())
@@ -123,7 +170,8 @@ def _guarded_write(path, lineno):
         elif isinstance(n, ast.withitem) and isinstance(n.optional_vars, ast.Name) and n.optional_vars.id == name:
             return False
     return (len(bindings) == 1 and len(bindings[0].targets) == 1
-            and isinstance(bindings[0].value, ast.Call) and _is_assert_clean(bindings[0].value))
+            and isinstance(bindings[0].value, ast.Call) and _is_assert_clean(bindings[0].value)
+            and _guard_dominates(fn, bindings[0], writes[0]))
 
 
 def _classify(pkg=PKG):
@@ -239,6 +287,37 @@ class WriteGuardTests(unittest.TestCase):
                 ("innermost scope decides",          "def outer(ctx, out):\n    text = json.dumps(out)\n    def inner():\n"
                                                      "        text = secrets.assert_clean(json.dumps(out), os.environ)\n"
                                                      "        p.write_text(text)\n    inner()\n", True)):
+            with self.subTest(label):
+                pkg = self._fixture("m.py", body); path = pkg / "m.py"
+                lineno = next(i for i, l in enumerate(path.read_text().splitlines(), 1) if "p.write_text(" in l)
+                self.assertIs(_guarded_write(path, lineno), want, label)
+
+    def test_guarded_write_requires_the_guard_to_dominate_the_write(self):
+        # eval-4 mutant A: the written name is a PARAMETER and the guard binds it on one branch —
+        # exactly one binding, and it is the guard call, so "bound exactly once by assert_clean" was
+        # True while the other branch wrote the raw parameter. Counting bindings cannot see this;
+        # the guard's statement has to sit in a block the write cannot be reached without passing
+        # through — the write's own block or an enclosing one — and come before it. Not sibling
+        # branches, not the ``try`` when the write follows it, not a loop body that may run no times.
+        top = '    text = secrets.assert_clean(text, os.environ)\n'
+        write = '    p.write_text(text)\n'
+        for label, body, want in (
+                ("A: guard under if, write after it",       "def write(ctx, text):\n    if ctx.dry_run:\n    " + top + write, False),
+                ("A2: guard under try/except pass",         "def write(ctx, text):\n    try:\n    " + top + "    except Exception:\n        pass\n" + write, False),
+                ("A3: guard in a for that may not run",     "def write(ctx, text):\n    for _ in ctx.items:\n    " + top + write, False),
+                ("guard in if, write in its else",          "def write(ctx, text):\n    if ctx.dry_run:\n    " + top + "    else:\n    " + write, False),
+                ("guard in try, write in its finally",      "def write(ctx, text):\n    try:\n    " + top + "    finally:\n    " + write, False),
+                ("write before the guard in one block",     "def write(ctx, text):\n" + write + top, False),
+                ("guard at top level, write under if",      "def write(ctx, text):\n" + top + "    if ctx.dry_run:\n    " + write, True),
+                ("guard and write in the same if body",     "def write(ctx, text):\n    if ctx.dry_run:\n    " + top + "    " + write, True),
+                ("guard at top level, write in an except",  "def write(ctx, text):\n" + top + "    try:\n        pass\n    except Exception:\n    " + write, True),
+                # a handler body and a case body are blocks of their own: both statements inside one is
+                # the same-block shape, accepted — without that, the enclosing try/match stands in as the
+                # write's holder and a legitimate guard in the handler is refused (mutant D4 survived)
+                ("guard and write in the same except body", "def write(ctx, text):\n    try:\n        pass\n    except Exception:\n    " + top + "    " + write, True),
+                ("guard and write in the same case body",   "def write(ctx, text):\n    match ctx.mode:\n        case 'x':\n        " + top + "        " + write, True),
+                ("guard in one case, write in another",     "def write(ctx, text):\n    match ctx.mode:\n        case 'x':\n        " + top + "        case _:\n        " + write, False),
+                ("C: assert_clean(...).upper() is not the guard", "def write(ctx, out):\n    text = secrets.assert_clean(json.dumps(out), os.environ).upper()\n" + write, False)):
             with self.subTest(label):
                 pkg = self._fixture("m.py", body); path = pkg / "m.py"
                 lineno = next(i for i, l in enumerate(path.read_text().splitlines(), 1) if "p.write_text(" in l)
