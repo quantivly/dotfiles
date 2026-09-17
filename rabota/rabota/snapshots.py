@@ -1,10 +1,11 @@
-"""Source snapshots: ``<state_dir>/sources/<source>.json``, written atomically, read back as dicts."""
+"""Source snapshots: ``<state_dir>/sources/<source>.json``, written atomically and guarded, read back as dicts."""
 import json
 import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rabota import secrets
 from rabota.store import now
 
 FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -22,15 +23,18 @@ def parse_fetched_at(value: str) -> datetime:
 def write(state_dir: Path, source: str, payload: dict) -> Path:
     """Write ``payload`` (stamped with ``fetched_at`` if it has none) via a temp file and ``os.replace``.
 
-    A reader therefore sees the previous snapshot or the new one, never a partial file.
+    A reader therefore sees the previous snapshot or the new one, never a partial file. The
+    serialised text is checked with ``secrets.assert_clean`` BEFORE anything is created on
+    disk — a connector error that echoes a token must not land in the state dir (k2).
     """
+    payload = {**payload, "fetched_at": payload.get("fetched_at") or now()}
+    text = secrets.assert_clean(json.dumps(payload, indent=1, default=str), os.environ)
     path = _path(state_dir, source)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {**payload, "fetched_at": payload.get("fetched_at") or now()}
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{source}.", suffix=".json")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=1, default=str)
+            f.write(text)
         os.replace(tmp, path)
     except OSError:
         if os.path.exists(tmp):

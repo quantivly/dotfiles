@@ -1,7 +1,7 @@
 import argparse, json, tempfile, unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
-from rabota import cli, context
+from rabota import cli, context, errors, secrets, snapshots
 from rabota.commands import brief
 from rabota.runner import FakeRunner
 
@@ -103,6 +103,29 @@ class BriefCommandTests(unittest.TestCase):
         lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc))
         self.assertTrue((ctx.state_dir / "2026-09-16" / "sequence.json").exists())
         self.assertTrue(lines[-1].startswith("brief: "))
+
+    def test_registered_value_in_a_sync_error_never_reaches_brief_md(self):
+        # k2: gh stderr can echo the minted token; it flows into source_syncs.error and from there
+        # into brief.md through a file write that skipped the guard. A secret on disk is worse than
+        # one on a terminal, so the write must not happen at all.
+        minted = "minted-gho-token-0123456789abcdef"
+        secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
+        ctx = self.ctx(); day = self._write_seq(ctx, ["K-1"])
+        ctx.store.record_sync("quantivly", "github", False, f"gh: HTTP 401 — token {minted} rejected", "")
+        with self.assertRaises(errors.SecretLeak) as cm:
+            brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc))
+        self.assertNotIn(minted, str(cm.exception))
+        self.assertFalse((day / "brief.md").exists(), "brief.md was written with a protected value in it")
+        self.assertFalse((day / "last-brief.json").exists())
+
+    def test_snapshot_write_is_guarded_too(self):
+        minted = "minted-gho-token-fedcba9876543210"
+        secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
+        ctx = self.ctx()
+        with self.assertRaises(errors.SecretLeak):
+            snapshots.write(ctx.state_dir, "github", {"ok": False, "error": f"gh said {minted}", "items": []})
+        self.assertIsNone(snapshots.read(ctx.state_dir, "github"))
+        self.assertFalse(list((ctx.state_dir / "sources").glob(".*")) if (ctx.state_dir / "sources").exists() else [])
 
     def test_cli_exposes_max_lines_with_default_twelve(self):
         ns = cli.build_parser().parse_args(["brief"])

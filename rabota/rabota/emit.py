@@ -1,14 +1,22 @@
-"""Output helpers: JSON on stdout, JSON errors on stderr, ``--text`` lines.
+"""Output helpers: JSON on stdout, JSON errors on stderr, ``--text`` lines, and files.
 
 This module is the one choke point for anything that leaves the process. Each
 helper renders its whole output to a string, checks it with
 ``secrets.assert_clean`` against the REAL environment, and only then writes —
 so a protected value raises ``errors.SecretLeak`` and nothing partial is
 printed. Write through here, never to ``sys.stdout``/``sys.stderr`` directly.
+
+Files count as leaving the process. A secret on disk is worse than one on a
+terminal — nothing downstream can catch it — so ``write_file`` is the sanctioned
+way to write any text the state dir keeps (``brief.md``, ``last-brief.json``),
+and ``snapshots.write`` guards its payload the same way. The third "write path
+that skipped the guard" in this epic (WS1 D1, WS4′ ``write_text``, WS2 k2) is
+why this exists; a ``Path.write_text`` in a command module is a defect.
 """
 import json
 import os
 import sys
+from pathlib import Path
 
 from rabota import secrets
 
@@ -33,3 +41,11 @@ def json_err(code_name, message, **extra):
     """Write ``{"error": {"code": ..., "message": ..., **extra}}`` to stderr."""
     text = _guard(json.dumps({"error": {"code": code_name, "message": message, **extra}}, default=str) + "\n")
     sys.stderr.write(text)
+
+
+def write_file(path, text: str) -> Path:
+    """Guard ``text`` with ``assert_clean`` and only then write it to ``path``; nothing is written on a leak."""
+    text = _guard(text)
+    path = Path(path)
+    path.write_text(text)
+    return path

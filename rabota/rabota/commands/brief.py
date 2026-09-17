@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rabota import cli, snapshots
+from rabota import cli, emit, snapshots
 from rabota.commands.rank import run_rank
 from rabota.context import Context
 
@@ -105,12 +105,12 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     summary_path = ctx.state_dir / "inbox-summary.txt"
     inbox_summary = summary_path.read_text().strip() if summary_path.exists() else None
     brief_path = day / "brief.md"
-    brief_path.write_text(compose_markdown(seq, plan, _syncs(ctx)))
+    emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
     last_path = day / "last-brief.json"
     previous = _read_json(last_path)
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
                            now=now or datetime.now(timezone.utc))
-    last_path.write_text(json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
+    emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
     return lines if text else {"lines": lines, "brief_path": str(brief_path)}
 
 
