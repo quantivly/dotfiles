@@ -66,7 +66,8 @@ done
 # exactly what a suite that loaded nothing produces.
 for fn in claude-doctor _claude_cred_file _claude_now_ms _claude_fmt_delta _claude_mcp_log_root \
           _claude_global_cred_file _claude_cred_id _claude_cred_owner \
-          _claude_active_profile _claude_legacy_cred_dirs _claude_proc_root; do
+          _claude_active_profile _claude_legacy_cred_dirs _claude_proc_root \
+          _claude_quarantined_profiles _claude_store_auth_state; do
     zsh -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $CLAUDESH — the suite would assert nothing"
 done
@@ -95,6 +96,12 @@ ln -sf "$JQ_BIN" "$SYSBIN/jq"
 # The same set minus jq, for the jq-missing row.
 NOJQBIN="$TMPROOT/nojqbin"; mkdir -p "$NOJQBIN"
 cp -a "$SYSBIN/." "$NOJQBIN/"; rm -f "$NOJQBIN/jq"
+# ...and minus sed, for the sed-missing row. Without this the quarantine reader's
+# only external tool is staged unconditionally, so nothing could distinguish "the
+# question was asked and the answer was no" from "the question could not be
+# asked" — the defect that shipped in this PR's first revision.
+NOSEDBIN="$TMPROOT/nosedbin"; mkdir -p "$NOSEDBIN"
+cp -a "$SYSBIN/." "$NOSEDBIN/"; rm -f "$NOSEDBIN/sed"
 
 #-----------------------------------------------------------------------------
 # The clauth stub
@@ -248,6 +255,7 @@ mk_status() { mkdir -p "$FHOME/.clauth"; printf '{"active_profile":"%s","pending
 run_doctor() {
     local base="$SYSBIN" p
     [[ "${NO_JQ:-0}" == 1 ]] && base="$NOJQBIN"
+    [[ "${NO_SED:-0}" == 1 ]] && base="$NOSEDBIN"
     [[ -n "${ACTIVE_PROFILE:-}" ]] && mk_status "$ACTIVE_PROFILE"
     # The clauth stub is prepended ONLY when a row asks for it. Without it there
     # is no clauth anywhere on this PATH — see the SYSBIN note above.
@@ -1782,6 +1790,272 @@ want_out "an account dir named _underscore keeps the ordinary store warning" \
          "_underscore: an account dir with no clauth profile store"
 no_out   "...and is not classified as a name clauth cannot own" \
          "_underscore: archived or internal directory"
+
+#-----------------------------------------------------------------------------
+section "V. clauth's auth_broken quarantine — the state nothing here reported"
+#-----------------------------------------------------------------------------
+# WHAT THIS IS FOR. On 2026-09-14 clauth quarantined three profiles at
+# 08:29:13-27; the credential reconciler adopted their live tokens into those
+# stores at 08:29:28; the flag stood for 70 minutes until `clauth login`. Every
+# check on the machine was green throughout, and the picker's response to the
+# flag — dropping those accounts — is what hid it: a quarantined account is never
+# chosen, so no session launches on it and nothing the reader sees says why.
+#
+# The flag is read from ~/.clauth/profiles.toml, so these rows are about a parse
+# as much as about a report, and the parse has the two failure directions this
+# repo keeps meeting: a runaway match that invents findings, and an empty answer
+# that reads as agreement.
+
+# A quarantined profile whose store is a PERFECTLY GOOD credential. This is the
+# 09-14 shape and the row the whole feature rests on.
+new_home v1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq --argjson fut "$FUTURE" '{claudeAiOauth} | .claudeAiOauth.expiresAt = $fut' "$CRED" \
+    > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'active_profile = "p1"\nprofiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a standing quarantine is reported at all"      "quarantined (auth_broken)"
+want_out "and names the profile"                         "'p1' quarantined"
+want_out "and says the stored credential still works"    "USABLE"
+want_out "and gives the one command that clears it"      "Fix: clauth login p1"
+want_out "and says a successful fetch does NOT clear it" "FETCH does not"
+# A ⚠ and not a ✗: clearing the flag needs a human and a browser, and a
+# retired-but-registered account would otherwise make claude-doctor exit
+# non-zero forever — the permanently-red checker, seventh recurrence.
+want_rc  "a quarantine is a warning, not a failure"      0
+no_out   "and the store credential never reaches the report" "$FAKE_TOKEN"
+
+# The all-clear. An absent key is what clauth writes for an empty list
+# (serde `skip_serializing_if = "Vec::is_empty"`), so this is the ordinary shape.
+new_home v2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'active_profile = "p1"\nprofiles = [\n    "p1",\n]\nfallback_chain = []\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "no auth_broken key at all is an explicit all-clear" "no profile is quarantined"
+no_out   "...and does not claim a quarantine"                 "quarantined (auth_broken)"
+
+# `auth_broken = []` is configured and empty — a different file shape that must
+# give the same answer.
+new_home v3; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "an empty array is also an all-clear" "no profile is quarantined"
+no_out   "...and names nobody"                 "quarantined (auth_broken)"
+
+# THE STORE CANNOT AUTHENTICATE EITHER — an EMPTY accessToken with its expiry and
+# scope intact, which is CLAUDE.md's own discriminator for the victim of an
+# interleaved write. Ranking on the expiry alone calls this live, which is the
+# credential-destroying bug scripts/claude-account-dirs.sh already carries rows
+# for. Here it would tell the reader clauth is refusing a working account when it
+# is not.
+new_home v4; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf '{"claudeAiOauth":{"accessToken":"","refreshToken":"r","expiresAt":%s,"scopes":["s"]}}\n' \
+    "$FUTURE" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "an empty access token in the store is not a usable credential" "cannot authenticate"
+no_out   "...and is not reported as USABLE"                              "USABLE"
+
+# A stored token whose clock has run out is its own state: the account is not
+# being wasted, it needs the refresh clauth is refusing to attempt.
+new_home v5; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf '{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":%s}}\n' \
+    "$PAST" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "an expired stored token is named as expired" "access token expired"
+no_out   "...and is not reported as USABLE"            "USABLE"
+
+# A store that does not parse is NOT agreement in either direction.
+new_home v6; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf '{"claudeAiOauth":{\n' > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "an unreadable store is NOT CHECKED, not a verdict" "could not be read"
+no_out   "...and is not reported as USABLE"                   "USABLE"
+
+# TOTAL CLASSIFICATION. A quarantined name with no profile store must NOT be sent
+# to `clauth login`, which would CREATE that profile rather than repair one — the
+# trap the reconciler's refused-no-store path carries four lines about, and #132's
+# lesson that every enumeration must classify every name it can see.
+new_home v7; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "gone",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a quarantined name that is not a registered profile is classified, not reported as an account" \
+         "is not a registered profile"
+no_out   "...and the reader is NOT told to log in under that name" "Fix: clauth login gone"
+no_out   "...and the shared remedy paragraph is withheld too"      "FETCH does not"
+want_rc  "...and it is a note, so the exit code is untouched"      0
+
+# THE OTHER HALF OF THAT CLASSIFICATION, and the reason the discriminator is the
+# profile DIRECTORY rather than the credential. A REGISTERED profile can lack a
+# credential — a rename in flight (the reconciler's own refused-no-store path), a
+# crash between `clauth login`'s registration and the credential write, or a
+# credential removed to force a re-login. Keying "inert" on credentials.json
+# filed all of those as "not a profile" and warned the reader OFF the one command
+# that repairs them, six lines after naming p1 the ACTIVE profile — while the
+# Account-dirs section of the same report told them to run it. Two sections, one
+# name, opposite remedies.
+new_home v7b; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"          # registered, but no credentials.json
+printf 'active_profile = "p1"\nprofiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a registered profile with no credential is a store to REPAIR" \
+         "profile store holds NO credential"
+want_out "...and the reader IS sent to the command that repairs it" "Fix: clauth login p1"
+no_out   "...and is never called inert"                  "is not a registered profile"
+no_out   "...and is never warned off its own remedy"     "Do NOT run 'clauth login p1'"
+
+# THE RUNAWAY MATCH, and the reason the guard checks the span's INTERIOR rather
+# than merely looking for a `]`. This fixture is the one that broke the first
+# version: `auth_broken = [` with no members, followed by another array, has a
+# closing bracket — the OTHER array's — so a termination test passes and the
+# names in `profiles = [...]` get reported as quarantined accounts. A malformed
+# file turned into a confident, specific, wrong finding, which is the
+# fallback_chain failure of section N pointed the other way.
+new_home v8; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'auth_broken = [\nprofiles = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a span that closes on ANOTHER array's bracket is NOT CHECKED" \
+         "could not read clauth's quarantine list"
+no_out   "...and invents no quarantined account"      "quarantined (auth_broken)"
+no_out   "...and does not print an all-clear over it" "no profile is quarantined"
+
+# THE READER'S ONE EXTERNAL TOOL, REMOVED. `sed` is staged unconditionally by
+# SYSBIN, so with this row absent nothing could tell "the question was asked and
+# the answer was no" from "the question could not be asked" — and the first
+# revision of this PR discarded sed's exit status, printing a confident all-clear
+# over a genuinely quarantined profile. A new external tool in a checker is a new
+# way for a check to go quiet; this is the row that says so out loud.
+new_home v8d; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+NO_SED=1 WITH_CLAUTH=1 run_doctor
+no_out   "sed missing does NOT become an all-clear over a real quarantine" \
+         "no profile is quarantined"
+want_out "...it is reported as unreadable instead" \
+         "could not read clauth's quarantine list"
+
+# The plain truncation, which is the shape an interrupted write actually leaves:
+# no closing bracket at all, so the range runs to EOF. `theme` sits below the
+# assignment so a runaway would have something to name.
+new_home v8b; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\ntheme = "full"\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a truncated array is NOT CHECKED"            "could not read clauth's quarantine list"
+no_out   "...and invents no quarantined account"       "quarantined (auth_broken)"
+no_out   "...and does not print an all-clear over it"  "no profile is quarantined"
+
+# The truncation that lands right after the opening bracket, which is the one
+# shape the interior check CANNOT object to: there is nothing between the
+# brackets to be wrong about, so without the closing-bracket test the answer is
+# "no names" and the report prints a confident all-clear over a list it never
+# read. An empty answer is never agreement — this repo's oldest rule, and the
+# only reason that one line is not dead code.
+new_home v8c; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "an array truncated at its opening bracket is NOT CHECKED" \
+         "could not read clauth's quarantine list"
+no_out   "...and is NOT an all-clear" "no profile is quarantined"
+
+# The other direction of the same rule: a file that exists and cannot be read.
+# Refused rather than passed vacuously under a uid that ignores the mode bits.
+new_home v9; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+chmod 000 "$FHOME/.clauth/profiles.toml"
+if [[ -r "$FHOME/.clauth/profiles.toml" ]]; then
+    bad "an unreadable profiles.toml is NOT CHECKED — fixture unusable (running as root?)"
+else
+    WITH_CLAUTH=1 run_doctor
+    want_out "an unreadable profiles.toml is NOT CHECKED" "could not read clauth's quarantine list"
+    no_out   "...and is not an all-clear"                 "no profile is quarantined"
+fi
+chmod 600 "$FHOME/.clauth/profiles.toml"
+
+# BOTH ARRAY SPELLINGS, and the single-line one is what kills a greedy extract:
+# `s/.*"\([^"]*\)".*/\1/p` keeps only the LAST name on a line, so `a1` would
+# vanish from `auth_broken = ["a1", "a2"]` while `a2` was reported and the row
+# still looked like it worked.
+new_home v10; write_cred
+mkdir -p "$FHOME/.clauth/profiles/a1" "$FHOME/.clauth/profiles/a2"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/a1/credentials.json"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/a2/credentials.json"
+printf 'profiles = [\n    "a1",\n    "a2",\n]\nauth_broken = ["a1", "a2"]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a single-line array reports its FIRST name" "'a1' quarantined"
+want_out "...and its second"                          "'a2' quarantined"
+
+new_home v11; write_cred
+mkdir -p "$FHOME/.clauth/profiles/a1" "$FHOME/.clauth/profiles/a2"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/a1/credentials.json"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/a2/credentials.json"
+printf 'auth_broken = [\n    "a1",\n    "a2",\n]\nprofiles = [\n    "a1",\n    "a2",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a multi-line array reports both names (1/2)" "'a1' quarantined"
+want_out "a multi-line array reports both names (2/2)" "'a2' quarantined"
+
+# THE THREE READERS MUST AGREE. `_claude_profile_excluded` in zsh/zshrc.herdr is
+# what ACTS on this flag — it is why a quarantined account is never picked — and
+# claude.sh may not depend on that file (§3c), so the parse exists twice on
+# purpose. A row that only checked the doctor would let the two drift until the
+# picker excluded an account the doctor called healthy, or the reverse. The
+# fixture is the single-line two-name shape, because that is the one a greedy
+# extract gets wrong.
+HERDRRC="$DOTFILES/zsh/zshrc.herdr"
+[[ -r "$HERDRRC" ]] || fatal "cannot read $HERDRRC — the cross-check row would assert nothing"
+AGREE="$(env -u CLAUDE_CONFIG_DIR HOME="$FHOME" CLAUDE_PICK_SOURCING=1 \
+             CLAUDE_TENANTS_FILE=/nonexistent "PATH=$SYSBIN" \
+         "$SYSBIN/zsh" -f -c "
+            source '$HERDRRC' >/dev/null 2>&1
+            source '$CLAUDESH' >/dev/null 2>&1
+            for n in a1 a2; do
+              _claude_profile_excluded \$n >/dev/null && print -rn -- 'X' || print -rn -- '-'
+            done
+            print -rn -- ' '
+            print -rn -- \"\$(_claude_quarantined_profiles | tr -d '\n')\"" 2>&1)"
+if [[ "$AGREE" == "XX a1a2" ]]; then
+    ok "the picker's exclusion and the doctor's enumeration agree on one file"
+else
+    bad "the picker and the doctor disagree about auth_broken — got '$AGREE', want 'XX a1a2'"
+fi
+
+# The quarantine check must not depend on there being any account dirs: the
+# Account dirs section is skipped wholesale when none exist, and a machine that
+# has never run an isolated session can still have a quarantined profile. A check
+# that cannot fire is indistinguishable from a healthy machine.
+new_home v12; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq --argjson fut "$FUTURE" '{claudeAiOauth} | .claudeAiOauth.expiresAt = $fut' "$CRED" \
+    > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nauth_broken = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+rm -rf "$FHOME/.local/state/claude-account-dirs"
+WITH_CLAUTH=1 run_doctor
+want_out "a quarantine is reported with no account dirs at all" "'p1' quarantined"
+want_out "...on a machine the account-dir section skips"        "nothing isolated yet"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

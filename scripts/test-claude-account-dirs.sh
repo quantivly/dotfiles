@@ -1301,5 +1301,130 @@ else
 fi
 
 #-----------------------------------------------------------------------------
+section "M. An adopt into a profile clauth has quarantined says so"
+#-----------------------------------------------------------------------------
+# THE 2026-09-14 SHAPE. A long suspend expired every access token; sessions
+# refreshed on resume and their atomic writes replaced the account dirs'
+# symlinks; clauth's poll spent the now-superseded refresh tokens, got terminal
+# rejections, and quarantined three profiles at 08:29:13-27. This script adopted
+# their live credentials at 08:29:28 — 1 to 15 seconds too late — and the flag
+# then stood for 70 minutes, because on clauth 0.15.1 nothing but a login, an
+# adopt or a carry lifts it and a successful usage FETCH does not. Adopting the
+# live token is itself what removes the failing poll clauth would have recovered
+# through, so this script's own fix is what makes the flag permanent.
+#
+# It cannot clear the flag — profiles.toml is clauth's, and there is no
+# out-of-band clear in the CLI, the TUI or the MCP surface — so it says so, once,
+# at the adopt. That moment is the only place the two facts meet: the verdict
+# file is overwritten every two minutes, so claude-doctor (which reads it) can
+# never learn that an adopt happened here.
+
+mk_quarantine() {  # $1.. = quarantined profile names, multi-line array
+    local n
+    { printf 'active_profile = "p1"\nprofiles = [\n'
+      for n in "$@"; do printf '    "%s",\n' "$n"; done
+      printf ']\nauth_broken = [\n'
+      for n in "$@"; do printf '    "%s",\n' "$n"; done
+      printf ']\n'; } > "$FHOME/.clauth/profiles.toml"
+}
+
+new_home m1; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+mk_quarantine p1
+run_sut p1
+want_out "the adopt still happens"                     "adopted the live session"
+want_out "and the standing quarantine is reported"     "still holds it in auth_broken"
+want_out "and it names the one command that lifts it"  "Fix: clauth login p1"
+want_out "and says a successful fetch will not"        "clear on a successful usage fetch"
+# The report must change no behaviour: this is a timer's ExecStart, and a
+# non-zero exit for a state only a human can fix is 720 failed units a day.
+want_rc  "and the exit code is untouched"              0
+if grep -q 'CANARY-rotated' "$(store_of p1)" 2>/dev/null; then
+    ok "and the rotated credential still reached the store"
+else
+    bad "the report broke the adopt itself"
+fi
+
+# WHAT IT MUST LEAVE ALONE, and this is the row that makes the one above mean
+# something: with no quarantine the adopt says nothing extra. A membership test
+# that always answers yes passes every row above.
+new_home m2; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+mk_quarantine other
+run_sut p1
+want_out "an adopt for an unquarantined profile still adopts" "adopted the live session"
+no_out   "...and says nothing about auth_broken"              "auth_broken"
+
+# A quarantine list is matched on the QUOTED name. `p1` must not match `p10`:
+# without the quotes a substring test reports a quarantine that does not exist,
+# and the remedy tells the reader to re-login an account that is fine.
+new_home m3; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+mk_quarantine p10
+run_sut p1
+want_out "a longer name that CONTAINS this one still adopts" "adopted the live session"
+no_out   "...and is not read as this profile's quarantine"   "auth_broken"
+
+# THE RUNAWAY MATCH, this script's half. Without the termination check the span
+# runs to the end of the file and swallows every quoted string below it —
+# including `profiles = [...]`, which holds the very profile being reconciled. A
+# truncated write would then produce a confident, specific, wrong finding.
+new_home m4; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+printf 'auth_broken = [\nprofiles = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+run_sut p1
+want_out "an unterminated array still adopts"                    "adopted the live session"
+no_out   "...and claims no quarantine it cannot actually read"   "auth_broken"
+
+# No profiles.toml at all — every row in every other section, so this is also
+# the assertion that the check added nothing to the ordinary path.
+new_home m5; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+rm -f "$FHOME/.clauth/profiles.toml"
+run_sut p1
+want_out "no clauth state file still adopts" "adopted the live session"
+no_out   "...and says nothing"               "auth_broken"
+
+# A single-line array is a hand-written shape and must read the same.
+new_home m6; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+printf 'auth_broken = ["p1"]\n' > "$FHOME/.clauth/profiles.toml"
+run_sut p1
+want_out "a single-line array is read too" "still holds it in auth_broken"
+
+# ON THE ADOPT BRANCH ALONE. `kept-store` means the store's own login won, so
+# nothing about the chain changed and there is no new fact; `linked` is the
+# resting state and fires on most of the 720 runs a day the timer makes. A line
+# printed every two minutes is a line nobody reads — this repo's most-repeated
+# self-inflicted bug — and claude-doctor is the surface for the standing state.
+new_home m7; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 9999 fresh
+as_rotated_real_file p1 1000 stale
+mk_quarantine p1
+run_sut p1
+want_out "keeping the stored credential is still reported" "kept the stored credential"
+no_out   "...and does NOT carry the quarantine line"       "auth_broken"
+
+new_home m8; mk_profile p1
+mk_quarantine p1
+run_sut p1
+want_link "a healthy first build still links the credential" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+no_out    "...and the resting state says nothing about auth_broken" "auth_broken"
+
+#-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -2183,7 +2183,7 @@ Design points that are load-bearing rather than preferences:
   side is live from the `expiresAt` inside each file (falling back to mtime with no `jq`), adopts a
   session's rotation *into* the store, copies the loser aside first, and **refuses** when it cannot
   tell. A discovery stub — empty `accessToken`, no `expiresAt` — never counts as live. State table:
-  `scripts/test-claude-account-dirs.sh` (70 checks, 9 mutants, all died), and
+  `scripts/test-claude-account-dirs.sh` (156 checks at `6661472`, 9 mutants, all died), and
   `scripts/claude-account-dirs.sh --reconcile` is the same code path on a 2-minute
   `systemd --user` timer, because launch-time alone leaves the store stale between a rotation and
   the next launch — which is precisely how `personal` got quarantined.
@@ -2771,7 +2771,7 @@ Traps specific to the checker, each of which produced a green tick first:
 
 State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `PATH`:
 
-- `scripts/test-claude-doctor.sh` (**235 checks at `f07faae`**, re-measured on `main` 2026-09-16;
+- `scripts/test-claude-doctor.sh` (**279 checks at `6661472`** after DO-613's quarantine rows and the review fixes; 235 at `f07faae`;
   215 at `c839d48`, 218 at `62c83d3`, and it was written here as "103 checks" and
   had been stale for weeks — a figure without the commit it was measured at is the thing this
   file warns about two sections down, so these carry theirs. This one read "at the tip of
@@ -2787,7 +2787,8 @@ State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `
   mutant survived a 233-check green. Twelve of those rows
   exist only because a review found the fixes unpinned: the first pass shipped 13 mutants and a
   false green underneath them.
-- `scripts/test-claude-account-dirs.sh` (36 checks, `claude-account-dirs-test`) — the builder.
+- `scripts/test-claude-account-dirs.sh` (**156 checks at `6661472`**; this line read 36, and 70 one
+  section up, and both had been stale for weeks — `claude-account-dirs-test`) — the builder.
   10 mutants, all died, including "seed `.claude.json` from the husk" and "copy the credential
   instead of symlinking it".
 - `scripts/test-hspawn.sh` (269 checks, `hspawn-test`) — now also covers `claude()`/`claude-as`.
@@ -3098,6 +3099,158 @@ fighting nanoclaw for a file nanoclaw refreshes" — and that is withdrawn: nano
 here (see the tilde note above).** The guard argument is the only reason, and it is enough on its
 own; an arm remains defensible if someone wants one. Full analysis:
 `~/Projects/handoffs/credential-breakage-2026-09-14-FINDINGS.md`.
+
+### A standing `auth_broken` is reported, not cleared (DO-613)
+
+**On 2026-09-14 clauth quarantined three accounts, our reconciler fixed the cause 1–15
+seconds later, and the flag stood for 70 minutes with every check on the machine green.**
+The flags are at 08:29:13/17/27 (`login for 'X' has expired: refresh token revoked or
+invalid … (flagged auth_broken)`), the adopt at 08:29:28, and the next clauth line of any
+kind is at **09:39:37** — 70 minutes of silence, ended by `clauth login`. `claude-doctor`
+now reports the state; nothing in this repo had ever printed the word `auth_broken` outside
+a comment.
+
+**The binary's identity is proven rather than assumed, which is the one thing the previous
+investigation could not say.** `sha256sum ~/.local/bin/clauth` is
+`3d7a06aec6c81a8d4ddd0bc7dc1d5f7b2a689624b74ee9de0798061a49d8b928` at 12,348,208 bytes, and
+that is byte-for-byte the `clauth-linux-x86_64` asset of GitHub release **v0.15.1**. So the
+source at tag `v0.15.1` *is* the code that runs here, and the line numbers below are the
+running version's — not the 0.14.1 plugin checkout's, which this file already warns about.
+
+**Three questions were answered before anything was designed. Two of them refuted the
+premise they were asked under.**
+
+- **Does the config reload re-read `credentials.json`?** The *trigger* does not:
+  `reload_fingerprint` (`src/profile.rs:1391`) is the mtime of `profiles.toml`, of every
+  `profiles/<p>/config.toml`, and of every `profiles/<p>/session-token.json` — and
+  **`credentials.json` is in none of them**, so writing a store credential does not wake the
+  daemon. The *effect* does: once triggered, `load_config` → `load_profile` (`:2220`) reads
+  each store. **The `reloaded config after an external change` line seconds after each flag
+  was clauth reacting to its OWN write** — `mark_auth_broken` persists `profiles.toml` and
+  the daemon does not update its own `last_reload_fp` when it writes, so the next tick sees a
+  changed fingerprint. Nothing was watching credentials. The journal shows the pairs in the
+  same second, three times.
+- **Is clearing it out of band supported?** No. The flag has exactly **seven** mutation sites
+  and they are all internal (`grep -rn 'set_auth_broken(\|mark_auth_broken('`). It is
+  persisted only by `set_auth_broken_persisted` under clauth's state flock; `clauth --help`
+  has no subcommand for it, the TUI only *renders* it (`src/tui/` has reads and no writes),
+  the MCP surface only publishes it, and `clauth enable` touches `disabled` alone — upstream's
+  own comment says that is "never `auth_broken`'s". Every refusal string prescribes
+  `clauth login <name>`, and upstream's own test says the quiet part out loud: *"which only a
+  login, a carry, or an adopt lifts."*
+- **Does a later successful fetch clear it on 0.15.1?** **No, and the distinction is the
+  whole finding: a successful *refresh* clears it, a successful *fetch* does not.** The five
+  clearing paths are `clauth login`/capture (`actions.rs:1084`, `:1309`), an adopt from the
+  live mirror (`oauth.rs:1802`), an adopt from disk at switch time (`:2602`), a carry after a
+  terminal 400 (`scheduler.rs:533`), and a successful refresh (`:967`, `oauth.rs:2676`). None
+  is on the plain-fetch path.
+
+**So our own fix is what makes the flag permanent, and that is the part worth carrying
+forward.** Upstream's design assumes the quarantined poll keeps failing — the comment on
+`AUTH_BROKEN_BACKOFF_MS` (`scheduler.rs:39`) says each such poll "spends a guaranteed-dead
+401 → refresh → 400 pair", which is what reaches `carry_external_rotation` and lifts the flag.
+The reconciler adopting the live token removes that 401. The poll then succeeds, the rotation
+leg is never entered, and nothing clears anything until the access token nears expiry hours
+later. **A repair that removes another tool's recovery trigger is a repair that has to
+announce itself.**
+
+Be exact about what is measured and what is inferred. Measured: the flag stood 70 minutes,
+and no `auth_broken cleared` line exists in that window — `mark_auth_broken` logs on every
+*transition*, so that absence is evidence. Inferred: that the polls in those 70 minutes
+*succeeded*. It cannot be confirmed, because `usage_history.jsonl` has been pruned back to
+09-14 16:12 (after the window) and the scheduler's poll path has **no `logline!`** on either
+a success or a refresh failure — the gap this file already records. What the absent `cleared`
+line does establish is that neither the carry nor a successful refresh ran, which leaves the
+successful-fetch path as the only one left.
+
+**REPORT ONLY, and the ceiling is upstream's, not ours.** Clearing the flag means writing
+`profiles.toml`, which clauth owns and serialises under its own flock — the third-writer
+problem this whole area exists to remove. Answer 2 means there is no sanctioned out-of-band
+clear to call instead. So:
+
+- **`claude-doctor` is the surface**, in §3, and it is a **⚠ never a ✗**: the remedy needs a
+  human and a browser, so a retired-but-still-registered quarantined account would otherwise
+  make the doctor exit non-zero forever — the permanently-red checker, **seventh** recurrence.
+  It reports, per profile, whether the *store* credential is `usable` / `expired` / `dead` /
+  unreadable, because that is the difference between clauth refusing an account that works and
+  clauth agreeing with what is on disk. The check is deliberately **outside** the Account dirs
+  section: that section is skipped wholesale when no account dir exists, and a machine that has
+  never run an isolated session can still have a quarantined profile.
+- **`claude-account-dirs.sh` adds one sentence at the ADOPT**, and only there. That moment is
+  the only place the two facts meet, and this process is the only thing that sees it:
+  `.reconcile-status` is overwritten every two minutes, so the `adopted` verdict — which
+  `claude-doctor` reads — is gone before anyone runs the doctor. `kept-store` gets no line (the
+  store's own login won, so nothing about the chain changed) and `linked` gets none (it is the
+  resting state, on most of the 720 runs a day the timer makes). The exit code is untouched: a
+  timer's `ExecStart` must not start failing for a state only a human can fix.
+- **Acting on the flag is what conceals it**, which is the argument for reporting at all.
+  `_claude_profile_excluded` already drops a quarantined account from the picker, correctly — so
+  no session ever launches on it, nobody sees a launch-time message about it, and work silently
+  concentrates on the accounts that are left. The one repair the reconciler *could* announce at
+  launch is on the account nobody is launching.
+
+**The parse has three readers and two failure directions, and the row that mattered failed
+first.** `auth_broken` is a multi-line TOML array (`toml::to_string_pretty`), and serde's
+`skip_serializing_if = "Vec::is_empty"` means an **empty list is an ABSENT key** — verified
+against the live file, 13 lines with no `auth_broken` among them — so "no key" must read as
+"none" and only an unreadable file as NOT CHECKED. In the other direction, **checking that the
+span contains a `]` is not enough**: an `auth_broken = [` with no members followed by
+`profiles = [ "p1", ]` closes on the *other* array's bracket, and the first version reported p1
+as quarantined. Both readers now validate the span's **interior** — between the first `[` and
+the first `]`, an array of names holds nothing but quoted strings, commas and whitespace — and
+the closing-bracket test stays because it is the only thing that catches a truncation landing
+right after the `[`, where the interior has nothing to object to and the answer would be a
+confident all-clear over a list never read.
+
+Recorded and deliberately **not** fixed here: `_claude_profile_excluded` (the picker) and the
+doctor's own `fallback_chain` reader use the older shape and take the foreign-bracket runaway.
+**An earlier version of this paragraph called that safe on the grounds that "the picker excludes
+an account it cannot vouch for … neither invents a finding". Both clauses are false, and an
+independent review measured it.** On `auth_broken = [` followed by `profiles = ["p1","p2"]` the
+runaway span swallows the profile list, so `claude-pick --explain` marks **every registered
+profile** `excluded`, each with the specific and wrong reason `auth broken — clauth login p1`,
+and then `refused: unusable — no usable account`, **exit 2** — reproduced here 2026-09-17 against
+a fixture `$HOME` with two healthy credentials. That is not a disagreement about a malformed
+file: the pool collapses, so every headless caller (`hspawn`, `claude-pick --strict`,
+herdr-draft) refuses to start anything at all, and the picker invents a per-profile finding
+naming healthy accounts. The doctor meanwhile says NOT CHECKED and never points at the picker,
+so nothing on the machine connects the two.
+
+What stays true is the *reason for deferring*: tightening `_claude_profile_excluded` changes the
+path every session launch takes, and it needs its own rows and its own mutants rather than
+riding a PR about reporting. **The cross-check row does not cover this** — it pins the one
+well-formed shape on which the two readers cannot disagree, which is precisely the shape that
+proves nothing. Fix the picker or delete this deferral; do not leave the next reader believing
+there is nothing here.
+
+State tables: `scripts/test-claude-doctor.sh` (235 → 279 at `6661472`) and
+`scripts/test-claude-account-dirs.sh` (137 → 156; CLAUDE.md said 70, then 36, and both were
+stale — a count without its commit is the thing this file warns about). The cross-check row is
+worth more than its size: it sources `zshrc.herdr` and `claude.sh` into one shell and asserts
+the picker's exclusion and the doctor's enumeration answer the same for the same file, on the
+single-line two-name fixture — the shape a greedy extract gets wrong. **19 mutants, 19 deaths**,
+each killed by the row that names it, every mutation dry-run for applicability first. One of them
+was DEAD-ELSEWHERE until its expectation was corrected: the closing-bracket test is isolated only
+by the truncation landing AT the bracket, because the interior check already answers every other
+shape — count how many independent deletions it takes to reach a silent pass, not how many guards
+there are.
+
+**That figure does not cover the guard it appears to, and saying so is the point of writing it
+down.** An independent review measured a twentieth mutant: in `profile_is_quarantined`,
+`(( inside && closed ))` → `(( inside ))` **survives 156/156**. It is redundant by construction
+— `closed=0` means no line in the span held a `]`, so `body` holds none either and the very next
+test returns 1 — and the paragraph above defends it with an argument that is true of the **zsh**
+reader's `[[ "$body" == *']'* ]]` (mutant D4 kills that one) and was carried across to the bash
+`closed` where it does not apply. The clause stays as defence in depth, **labelled unkillable
+rather than counted**, because a mutant that can never die reads as coverage — this file's own
+rule, applied to its own figure. So: 19 mutants killed by rows, 1 known survivor that is
+documented instead.
+
+**The review that found it also found two defects in the shipped code of this PR**, both under
+273 green checks: a discarded `sed` exit status that turned "could not ask" into a confident
+all-clear, and a classification that told the reader NOT to run the one command that repairs a
+registered profile. Both are fixed at `6661472` and each is now pinned by a mutant that dies.
+Full report: `~/Projects/handoffs/2026-09-17-pr153-adversarial-review.md`.
 
 ### Holder attribution, and the shell that has half this file's functions (DO-612)
 

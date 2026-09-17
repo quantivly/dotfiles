@@ -149,6 +149,120 @@ _claude_active_profile() {
   print -r -- "$v"
 }
 
+# The profiles clauth has QUARANTINED — `auth_broken` in ~/.clauth/profiles.toml,
+# one name per line.
+#
+# THE AUTHORITY IS profiles.toml, NOT status.json. clauth writes the flag there
+# under its own state flock (`set_auth_broken_persisted` -> `save_app_state`);
+# status.json only republishes it as `profiles[].auth = "broken"`, and that feed
+# is the daemon's, so a reader of it goes quiet exactly when the daemon is
+# stopped — a state this machine has been in deliberately, and the one most worth
+# reporting. Same precedence #145 settled for the active profile, same reason.
+#
+# Returns 1 when the question could not be ASKED, so empty output never carries
+# two meanings. An ABSENT key is not that case: clauth serialises the list with
+# serde's `skip_serializing_if = "Vec::is_empty"`, so an empty quarantine means
+# the key is simply not written — verified against the live file, 13 lines with
+# no `auth_broken` among them. Empty output at status 0 is "nothing quarantined".
+#
+# THE SPAN IS VALIDATED, NOT MERELY TERMINATED, and the difference is a row that
+# failed. sed's range runs past this assignment whenever the closing `]` does not
+# arrive on a line of its own, so the span can swallow every quoted string below
+# it — turning a malformed file into confident, specific, wrong findings. That is
+# the runaway match the fallback_chain reader below carries a comment about,
+# pointed the other way: there it printed a neighbouring line, here it would
+# invent quarantined accounts.
+#
+# Checking for a `]` is not enough, which is what the row caught: an
+# `auth_broken = [` with no members, followed by `profiles = [ "p1", ]`, has a
+# `]` — the OTHER array's — and reported p1. So the INTERIOR is checked instead:
+# after the first `[` and before the first `]`, an array of names is nothing but
+# quoted strings, commas and whitespace. Split on `"` and the odd fields are
+# exactly what sits between the names; anything else there means the range ran
+# into another assignment. A missing bracket of either kind fails the same test,
+# so truncation needs no separate arm.
+#
+# Splitting on `"` and taking the EVEN fields reads clauth's multi-line array and
+# a single-line one identically. `s/.*"\([^"]*\)".*/\1/p` does not: it is greedy,
+# so `auth_broken = ["a", "b"]` yields only `b`.
+#
+# THREE READERS OF THIS ONE KEY, and a change belongs in all of them:
+# `_claude_profile_excluded` in zsh/zshrc.herdr (the picker's exclusion — this
+# file must not depend on that one, see §3c) and `profile_is_quarantined` in
+# scripts/claude-account-dirs.sh (bash, and a membership test rather than an
+# enumeration, because the reconciler already knows the name it is asking about).
+_claude_quarantined_profiles() {
+  local toml="$HOME/.clauth/profiles.toml" span body dq='"' i
+  local -a parts
+  [[ -r "$toml" ]] || return 1
+  # THE STATUS IS THE POINT, not the output. `sed` is an external tool and an
+  # external tool is a way for a check to go quiet — CLAUDE.md records that for
+  # `readlink -f` and `awk` in these same files, and the bash twin below avoids
+  # the class entirely with a `while read` loop. Without this test a sed that
+  # never ran (absent from PATH, exec failure) yields an EMPTY span, which the
+  # next line reads as "nothing is quarantined": the doctor then prints a
+  # confident ✓ for a question it could not ask, in the one checker written to
+  # report a standing quarantine. sed still exits 0 when it matches nothing, so
+  # the ordinary empty-list case is unaffected.
+  span="$(sed -n '/^[[:space:]]*auth_broken[[:space:]]*=/,/]/{p; /]/q}' "$toml" 2>/dev/null)" || return 1
+  # No assignment found. clauth omits the key entirely for an empty list, so this
+  # is the ordinary "nothing is quarantined" and not a failure to read.
+  [[ -n "$span" ]] || return 0
+  [[ "$span" == *'['* ]] || return 1
+  body="${span#*\[}"
+  [[ "$body" == *']'* ]] || return 1
+  body="${body%%\]*}"
+  parts=( "${(@ps:$dq:)body}" )
+  # Odd fields sit BETWEEN the quoted names; in an array they hold nothing but
+  # commas and whitespace. `${x//[...]/}` rather than an extended-glob pattern,
+  # because claude-doctor is sourced into whatever shell asks for it and
+  # EXTENDED_GLOB is not guaranteed there.
+  for (( i = 1; i <= ${#parts}; i += 2 )); do
+    [[ -z "${parts[i]//[$' \t\n,']/}" ]] || return 1
+  done
+  for (( i = 2; i <= ${#parts}; i += 2 )); do
+    [[ -n "${parts[i]}" ]] && print -r -- "${parts[i]}"
+  done
+  return 0
+}
+
+# Whether a clauth profile store's credential can still authenticate. One word,
+# plus the expiry in ms for the two states that have one:
+#
+#   usable <expiresAt>    a non-empty accessToken and a numeric expiresAt ahead
+#   expired <expiresAt>   the same, with that expiry already past
+#   dead                  parses, but cannot authenticate — no claudeAiOauth, an
+#                         EMPTY accessToken, or no numeric expiry. The OAuth
+#                         discovery stub and the victim of an interleaved write
+#                         are both this shape.
+#   unreadable            no file, or it does not parse
+#
+# THE EMPTY-accessToken TEST IS THE WHOLE POINT, and it is the same discriminator
+# scripts/claude-account-dirs.sh's `cred_state` uses: a freshness signal is not an
+# aliveness signal. CLAUDE.md records the credential-destroying bug that came of
+# ranking on expiry while meaning alive — the victim of a lost race KEEPS its
+# expiresAt and loses its accessToken, so it outranked a credential that worked.
+#
+# NEVER PRINTS A TOKEN: a word and an integer are the only things that leave here.
+_claude_store_auth_state() {
+  local f="${1:-}" exp
+  [[ -f "$f" ]] || { print -r -- unreadable; return 0 }
+  jq -e . "$f" >/dev/null 2>&1 || { print -r -- unreadable; return 0 }
+  # jq's EXIT STATUS decides, never the emptiness of its output — the
+  # hash-of-nothing class this file already carries two notes about. `-e` plus
+  # the selects means a missing block produces no output AND a non-zero status.
+  exp="$(jq -e -r '.claudeAiOauth
+                   | select(type == "object")
+                   | select((.accessToken // "") != "")
+                   | .expiresAt | select(type == "number")' "$f" 2>/dev/null)" \
+    || { print -r -- dead; return 0 }
+  if (( exp > $(_claude_now_ms) )); then
+    print -r -- "usable $exp"
+  else
+    print -r -- "expired $exp"
+  fi
+}
+
 # The identity clauth's profiles are keyed on: a truncated hash of the login
 # triple. Never the tokens themselves — see "NEVER PRINTS A CREDENTIAL" above.
 # Empty output means "could not read it", which callers must not treat as a match.
@@ -358,11 +472,17 @@ claude-doctor() {
   local unknown_n cfgdir credpath ldir grp envblob n label procroot
   local uc_max uc_age uc_oldest uc_oldest_p uc_seen uc_stale uc_missing ucf
   local pname
+  # The quarantine block in §3. Declared HERE with everything else: zsh has no
+  # block scope and `local` on a name already local in this scope is a DISPLAY
+  # command, which CLAUDE.md records printing `pdir=/home/...` into the middle of
+  # a report.
+  local qspan qrc qstate qexp qstore qreal
   local -a date_prefixes files stray_profiles unprofiled_dirs unmanaged_stores
   # Declared here for the reason this PR exists: a ~950-line function with no
   # block scope shares one namespace, and an undeclared assignment inside it
   # leaks a global — which is the defect the `local pdir pname` fix above closed.
   local -a _cshape shared_stores dangling_stores
+  local -a quarantined
   local -A group_n group_label
 
   while (( $# )); do
@@ -754,6 +874,131 @@ claude-doctor() {
           grep -qE '^[[:space:]]*preferred[[:space:]]*=[[:space:]]*true' "$pdir/config.toml" 2>/dev/null \
             && _doctor_note "profile '${pdir:t}' is preferred — the daemon walks the active account back to it, unlogged"
         done
+
+        # ---- the quarantine: the one clauth state nothing here reported -----
+        #
+        # `auth_broken` is clauth's own quarantine — the profile's last token
+        # refresh came back revoked/invalid — and it drops the account from the
+        # fallback walk, refuses it as a switch target, and, because
+        # `_claude_profile_excluded` reads this same key, excludes it from this
+        # repo's account picker.
+        #
+        # WHY IT NEEDS REPORTING, given the picker already acts on it: acting on
+        # it is what CONCEALS it. A quarantined account is never chosen, so no
+        # session launches on it, so nothing the reader sees at launch mentions
+        # it — work silently concentrates on the accounts that are left, which is
+        # the concentration the account-dir design exists to undo. Before this
+        # block nothing in this repo printed the word outside a comment.
+        #
+        # AND IT DOES NOT HEAL ITSELF. Measured against the INSTALLED clauth —
+        # 0.15.1, and that is proven rather than assumed: sha256 of
+        # ~/.local/bin/clauth equals the clauth-linux-x86_64 asset of the v0.15.1
+        # release, so the source read below is the code that runs. The flag has
+        # exactly seven mutation sites and five clearing paths: `clauth login` /
+        # capture, an adopt from the live mirror, an adopt from disk at switch
+        # time, a carry after a terminal 400, and a successful REFRESH. A
+        # successful usage FETCH is not one of them. So once anything else has
+        # put a live token in the store the poll stops 401ing, the rotation leg
+        # is never entered, and the flag outlives the rejection that set it.
+        # Observed: on 2026-09-14 three profiles were flagged at 08:29:13-27, the
+        # reconciler adopted their live credentials at 08:29:28, and the flag
+        # stood 70 minutes until `clauth login` — with no `auth_broken cleared`
+        # line in the journal, which clauth emits on every transition.
+        #
+        # A ⚠, NEVER A ✗. Clearing it is a write to profiles.toml, which clauth
+        # owns, and there is no out-of-band clear: no CLI subcommand, no TUI
+        # action, no MCP tool (`clauth enable` restores a USER-disabled profile,
+        # and upstream's own comment says that is "never auth_broken's"). The
+        # remedy therefore needs a human and a browser, and a retired-but-still-
+        # registered account would make claude-doctor exit non-zero forever — the
+        # permanently-red checker this repo has now produced six times.
+        qspan="$(_claude_quarantined_profiles)"; qrc=$?
+        if (( qrc != 0 )); then
+          _doctor_warn "could not read clauth's quarantine list — NOT CHECKED"
+          echo "    ~/.clauth/profiles.toml is there but unreadable, or its auth_broken array is"
+          echo "    unterminated (a truncated write). An empty answer from a file we could not"
+          echo "    read is not agreement: a quarantined account is dropped from the picker with"
+          echo "    nothing else on the machine saying so."
+        else
+          quarantined=( ${(f)qspan} )
+          qreal=0
+          for pname in $quarantined; do
+            qstore="$HOME/.clauth/profiles/$pname/credentials.json"
+            # TOTAL CLASSIFICATION, not a fall-through. `clauth login <name>` for
+            # a name that is not a profile CREATES one — the trap the reconciler
+            # carries four lines about ("clauth login would make it real again"),
+            # and #132's lesson that an enumeration must classify every name it
+            # can see or its remedy is unrunnable for one of them. Reachable by a
+            # hand-edit or a crash between writes: `set_auth_broken_persisted`
+            # refuses to ADD a name the profile list does not carry, and `remove`
+            # takes it back out, so the two lists agree unless something else
+            # wrote one of them.
+            # THE DISCRIMINATOR IS THE PROFILE DIRECTORY, NOT THE CREDENTIAL.
+            # Keying "inert" on `credentials.json` misfiles a REGISTERED profile
+            # whose credential is merely missing — a rename in flight (the
+            # reconciler's own `refused-no-store` path), a crash between
+            # `clauth login`'s registration and the credential write, or a
+            # credential removed to force a re-login. For those `clauth login`
+            # REPAIRS rather than creates, and the Account-dirs enumeration below
+            # already tells the reader so about the same name: two sections of one
+            # report must not print opposite remedies.
+            if [[ ! -d "${qstore:h}" ]]; then
+              _doctor_note "clauth's quarantine list names '$pname', which is not a registered profile — inert"
+              echo "    Nothing can be launched or polled under that name, so the entry costs"
+              echo "    nothing. Do NOT run 'clauth login $pname' to clear it — that would create"
+              echo "    the profile rather than repair one. 'clauth list' shows what is registered."
+              continue
+            fi
+            qreal=$(( qreal + 1 ))
+            if [[ ! -f "$qstore" ]]; then
+              _doctor_warn "clauth has '$pname' quarantined (auth_broken), and its profile store holds NO credential"
+              echo "    The profile IS registered, so this is a store to repair rather than a name"
+              echo "    that cannot be launched."
+              echo "    Fix: clauth login $pname"
+              continue
+            fi
+            qstate="$(_claude_store_auth_state "$qstore")"
+            qexp="${qstate#* }"; qstate="${qstate%% *}"
+            case "$qstate" in
+              usable)
+                _doctor_warn "clauth has '$pname' quarantined (auth_broken) — but its stored credential is USABLE"
+                echo "    That token expires $(_claude_fmt_delta $(( qexp - now_ms ))), so clauth is refusing an account that"
+                echo "    still works. A rotation clauth could not attribute leaves exactly this." ;;
+              expired)
+                _doctor_warn "clauth has '$pname' quarantined (auth_broken); its stored access token expired $(_claude_fmt_delta $(( qexp - now_ms )))"
+                echo "    Renewing it needs a refresh. The flag WIDENS that profile's poll rather than"
+                echo "    stopping it — poll_backoff_ms returns AUTH_BROKEN_BACKOFF_MS (~15 min) before"
+                echo "    it consults any streak — so recovery is slow, not absent." ;;
+              dead)
+                _doctor_warn "clauth has '$pname' quarantined (auth_broken), and its stored credential cannot authenticate"
+                echo "    There is no usable access token in the store either, so the flag agrees"
+                echo "    with what is on disk." ;;
+              *)
+                _doctor_warn "clauth has '$pname' quarantined (auth_broken); its stored credential could not be read"
+                echo "    Whether the flag is stale is NOT CHECKED — an unreadable file is not agreement." ;;
+            esac
+            echo "    Fix: clauth login $pname"
+          done
+          if (( qreal )); then
+            # Said ONCE, after the rows, and only when at least one entry names a
+            # real profile: on the inert-entry path every sentence here is wrong.
+            echo "    What lifts an auth_broken flag on clauth 0.15.1: 'clauth login', or clauth"
+            echo "    itself adopting or carrying a rotation it can prove. A later successful usage"
+            echo "    FETCH does not, so a flag can stand for hours after the store is healthy again."
+            # ATTRIBUTED ONLY WHERE THE RECONCILER CAN RUN. `reconcile_all` walks
+            # this root and nothing else, so on a machine with no account dirs —
+            # a modular adopter with clauth and no timer, or any box before the
+            # first build — blaming "our own reconciler" names a mechanism that
+            # has never executed there. The general sentence above is true
+            # everywhere; this one is not.
+            if [[ -d "${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}" ]]; then
+              echo "    On this machine our own reconciler adopting the live token is also what removes"
+              echo "    the failing poll clauth would otherwise have recovered through."
+            fi
+          elif (( ${#quarantined} == 0 )); then
+            _doctor_ok "no profile is quarantined by clauth (auth_broken)"
+          fi
+        fi
       fi
     }
   fi
