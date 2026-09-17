@@ -15,10 +15,10 @@ PKG = Path(__file__).resolve().parent.parent / "rabota"
 # Every spelling of "bytes leave the process onto disk". ``json.dumps`` is deliberately NOT here:
 # it returns a string, and a string is harmless until something in this list writes it.
 WRITE_PATTERNS = {
-    "Path.write_text":          re.compile(r"\.write_text\("),
-    "Path.write_bytes":         re.compile(r"\.write_bytes\("),
+    "Path.write_text":          re.compile(r"\.write_text\b"),      # the attribute, not the call: `_wt = p.write_text; _wt(x)` is a write too
+    "Path.write_bytes":         re.compile(r"\.write_bytes\b"),
     "json.dump(obj, fp)":       re.compile(r"\bjson\.dump\("),
-    "open(..., 'w'|'a'|'x')":   re.compile(r"\bopen\([^)\n]*['\"][rbt+]*[wax]"),
+    "open(..., 'w'|'a'|'x')":   re.compile(r"\bopen\((?:[^()\n]|\([^()\n]*\))*['\"][rbt+]*[wax]"),   # one level of ( ) in the path: open(str(p), "w")
     "os.fdopen":                re.compile(r"\bos\.fdopen\("),
     "file.write":               re.compile(r"(?<!snapshots)\.write\("),   # snapshots.write guards its payload; its own lines are allow-listed below
     "os.replace/os.rename":     re.compile(r"\bos\.(replace|rename)\("),
@@ -92,6 +92,9 @@ class WriteGuardTests(unittest.TestCase):
         for name, sample in (("Path.write_text", 'p.write_text(json.dumps(x))'), ("json.dump(obj, fp)", "json.dump(seq, fh)"),
                              ("open(..., 'w'|'a'|'x')", 'with open(p, "w") as f:'), ("open(..., 'w'|'a'|'x')", 'path.open("wb")'),
                              ("open(..., 'w'|'a'|'x')", 'open(p, mode="a+")'), ("file.write", "fh.write(text)"),
+                             # round-4 gate: a call inside the path argument, and an aliased bound method — both evaded
+                             ("open(..., 'w'|'a'|'x')", 'open(str(p), "w")'), ("open(..., 'w'|'a'|'x')", 'open(os.path.join(d, n), "wb")'),
+                             ("Path.write_text", "_wt = p.write_text"), ("Path.write_bytes", "w = out.write_bytes"),
                              ("os.replace/os.rename", "os.replace(tmp, p)")):
             self.assertTrue(rx[name].search(sample), f"{name} misses {sample!r}")
         for sample in ('with path.open("rb") as f:', "json.dumps(body).encode()", 'open(p, "r")', "json.loads(path.read_text())"):
