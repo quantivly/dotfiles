@@ -29,7 +29,8 @@ sleep $((min * spm))
 [ "$(pr_slot_nonce "$pane")" = "$nonce" ] || exit 0
 
 finish() {
-    [ "$(pr_slot_nonce "$pane")" = "$nonce" ] && rm -f "$(pr_slot_file "$pane")"
+    # 2>/dev/null: an unwritable slot dir makes this rm fail too; stay silent.
+    [ "$(pr_slot_nonce "$pane")" = "$nonce" ] && rm -f "$(pr_slot_file "$pane")" 2>/dev/null
     exit 0
 }
 skip() {

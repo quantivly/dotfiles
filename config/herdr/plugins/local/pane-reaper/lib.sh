@@ -28,7 +28,10 @@ pr_slot_write() {
     _dir=$(pr_slot_dir)
     _f=$(pr_slot_file "$1")
     mkdir -p "$_dir" 2>/dev/null && chmod 700 "$_dir" 2>/dev/null
-    printf '%s %s\n' "$2" "$3" > "$_f.tmp.$$" 2>/dev/null && mv -f "$_f.tmp.$$" "$_f"
+    # Grouped so a failed `>` open (unwritable slot dir) is silenced too: that
+    # redirect failure is reported before this command's own `2>/dev/null`
+    # would otherwise apply, and would leak the shell's diagnostic to stderr.
+    { printf '%s %s\n' "$2" "$3" > "$_f.tmp.$$" && mv -f "$_f.tmp.$$" "$_f"; } 2>/dev/null
 }
 
 pr_slot_gen() {
