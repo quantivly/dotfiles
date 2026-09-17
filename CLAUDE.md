@@ -3216,12 +3216,40 @@ herdr-draft) refuses to start anything at all, and the picker invents a per-prof
 naming healthy accounts. The doctor meanwhile says NOT CHECKED and never points at the picker,
 so nothing on the machine connects the two.
 
-What stays true is the *reason for deferring*: tightening `_claude_profile_excluded` changes the
-path every session launch takes, and it needs its own rows and its own mutants rather than
-riding a PR about reporting. **The cross-check row does not cover this** — it pins the one
-well-formed shape on which the two readers cannot disagree, which is precisely the shape that
-proves nothing. Fix the picker or delete this deferral; do not leave the next reader believing
-there is nothing here.
+**FIXED for the picker, same day.** The parse is `_claude_quarantine_scan` in `zsh/zshrc.herdr`
+— the canonical validated shape, copied from `_claude_quarantined_profiles` rather than called,
+because that file is sourceable ALONE by a modular adopter who has neither `claude.sh` nor the
+reconciler. That makes **three readers of this one key and a change belongs in all three**; the
+cross-check row exists to catch them drifting.
+
+**The asymmetry is the design, and it is the part to carry.** An unreadable or malformed
+`auth_broken` list now excludes **nobody**, where it used to exclude everybody. Neither is
+"safe" in the abstract, so the question is which error costs more: failing to exclude a
+quarantined account costs ONE session, which then fails at auth and names `clauth login`;
+excluding every account costs all work on the machine and blames accounts that are fine. The
+same reasoning already decided the pool-exhaustion fallback above — *exclusions correlate with
+load, so a path that is rare in calm weather and concentrated in bad is the opposite of a safe
+degradation.* Silence is not part of the trade: `_claude_pick_for_dir` scans once itself and
+warns, because `_claude_pick_class` runs inside `$(...)` and anything the classifier learns
+about an unusable list dies with that subshell — the same rule this file already records for the
+picker's own `REPLY`.
+
+**One overclaim caught while writing it**, worth keeping because the correction is the lesson:
+the new membership test was first justified as "exact, so `p1` cannot match `p10`". Measured, the
+OLD `*"\"$name\""*` was already exact — `"p10"` does not contain `"p1"`, the quotes see to it.
+Testing membership against the parsed name list is what makes the runaway unreachable; it buys
+no precision the old test lacked, and saying otherwise would have shipped a defect that does not
+exist alongside a fix for one that does.
+
+**The remaining instance is `fallback_chain` in `claude-doctor`, and it is NOT fixed.** Measured
+2026-09-17 on `fallback_chain = [` followed by `profiles = [...]`: the span runs into the other
+array, the `*'"'*` test passes on ITS quoted names, and the doctor prints
+`auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]` — a neighbouring line quoted
+verbatim into a report that lands in transcripts, in the function whose own comment says that is
+the thing it must never do, while claiming an auto-switch is armed on a machine whose chain is
+empty. It is a NOTE rather than a decision, which is why it is recorded rather than bundled
+here: a different key, a different consumer, and it wants its own rows in
+`test-claude-doctor.sh`. Interior validation is the same four lines.
 
 State tables: `scripts/test-claude-doctor.sh` (235 → 279 at `6661472`) and
 `scripts/test-claude-account-dirs.sh` (137 → 156; CLAUDE.md said 70, then 36, and both were
@@ -3648,8 +3676,9 @@ failed, since ShellCheck cannot parse zsh; and `script-must-have-extension` woul
 name. Both hooks now exclude it by path, and CI's `zsh -n` loop names it explicitly — otherwise the
 repo's newest executable would have had no syntax check at all.
 
-State tables: `scripts/test-claude-pick.sh` (192 at DO-574, 205 now — DO-609 and
-DO-612 since; CI job `claude-pick-test`),
+State tables: `scripts/test-claude-pick.sh` (192 at DO-574; **283 at `0b0f8c0`, 293 after the
+runaway-span rows** — the "205" this line carried was stale by 78, which is what a count without
+its commit decays into; CI job `claude-pick-test`),
 `scripts/test-hspawn.sh` (319 → 328, the caller-wiring rows and the compatibility contract) and
 `scripts/test-claude-doctor.sh` (156 → 172, the usage-cache freshness line). **40 mutants, 40
 deaths**, every mutation dry-run for applicability first — and the two retirements above are comments

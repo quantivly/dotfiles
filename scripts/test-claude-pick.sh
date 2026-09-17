@@ -54,7 +54,8 @@ done
 # rows below are "this number, not that one", and a suite that loaded nothing
 # produces empty output for every one of them — which `check` would report as a
 # plain mismatch rather than as the harness failure it is.
-for fn in _claude_profile_metrics _claude_pick_score; do
+for fn in _claude_profile_metrics _claude_pick_score \
+          _claude_profile_excluded _claude_quarantine_scan; do
     zsh -c "source '$HERDRRC' >/dev/null 2>&1; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $HERDRRC — the suite would assert nothing"
 done
@@ -237,6 +238,61 @@ new_home k7; mkprof a1 '{"five_hour":{"utilization":0.0}}'
 mkdir -p "$FHOME/.clauth"
 printf 'auth_broken = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
 check "a quarantined profile is excluded" "$(cls a1 | cut -d: -f1)" "excluded"
+
+# THE RUNAWAY SPAN, AND THE POOL IT USED TO COLLAPSE. `auth_broken = [` with no
+# members followed by `profiles = [...]` closes on the OTHER array's bracket, so
+# the unvalidated span held every registered name and EVERY profile came back
+# `excluded: auth broken`. Measured 2026-09-17 before the fix: claude-pick
+# refused with "no usable account", exit 2, in plain and --strict form, naming
+# two healthy accounts — so every headless caller started nothing at all. The
+# two error directions are not symmetric, which is why an unreadable list now
+# excludes nobody: missing a quarantine costs one session that says why, while
+# excluding everybody costs all work on the machine.
+new_home k7b; mkprof a1 '{"five_hour":{"utilization":0.0}}'
+mkprof a2 '{"five_hour":{"utilization":0.0}}'
+printf 'auth_broken = [\nprofiles = [\n  "a1",\n  "a2",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a runaway span excludes NOBODY (1/2)" "$(cls a1 | cut -d: -f1)" "eligible"
+check "a runaway span excludes NOBODY (2/2)" "$(cls a2 | cut -d: -f1)" "eligible"
+
+# ...and it is not silent. The classifier runs inside $(...), so the scan that
+# can see the failure has to happen in _claude_pick_for_dir itself.
+new_home k7c; mkprof a1 '{"five_hour":{"utilization":0.0}}'
+printf 'auth_broken = [\nprofiles = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+# SC2016 is the point, not an oversight: the snippet is evaluated by the inner
+# zsh with the fixture HOME, so $HOME and the array must NOT expand in bash here.
+# shellcheck disable=SC2016
+check "...and an unreadable quarantine list is warned about" \
+      "$(zrun '_claude_pick_for_dir "$HOME" >/dev/null 2>&1; print -rl -- "${_claude_pick_warnings[@]}"' | grep -c 'auth_broken list')" "1"
+
+# A well-formed list must still exclude, or the fix above is just a deletion.
+new_home k7d; mkprof a1 '{"five_hour":{"utilization":0.0}}'
+mkprof a2 '{"five_hour":{"utilization":0.0}}'
+printf 'profiles = [\n  "a1",\n  "a2",\n]\nauth_broken = [\n  "a1",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+check "a well-formed list still excludes its member"  "$(cls a1 | cut -d: -f1)" "excluded"
+check "...and leaves the others alone"                "$(cls a2 | cut -d: -f1)" "eligible"
+
+# The scan's own contract: rc=1 means the question could not be ASKED. Without
+# testing sed's status an absent sed yields an empty span, which reads as
+# "nothing is quarantined" — and a quarantined account then reads as maximum
+# headroom, the bug this exclusion exists to prevent, arriving through the tool
+# meant to detect it.
+new_home k7e; mkprof a1 '{"five_hour":{"utilization":0.0}}'
+printf 'auth_broken = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "the scan reports a readable list"  "$(zrun '_claude_quarantine_scan; echo $?')" "0"
+# shellcheck disable=SC2016  # expanded by the inner zsh, not by bash
+check "...and finds its member"           "$(zrun '_claude_quarantine_scan && print -r -- "${_CQ_NAMES[*]}"')" "a1"
+printf 'auth_broken = [\nprofiles = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a runaway span is rc=1, not an empty answer" "$(zrun '_claude_quarantine_scan; echo $?')" "1"
+# THE SCAN'S ONE EXTERNAL TOOL, REMOVED. Without this row the `|| return 1` on
+# the sed call is unpinned — mutation proved it: deleting that test passed the
+# whole suite, because every other fixture has a working sed. `echo` and `[[`
+# are builtins, so an empty PATH reaches the scan and nothing else.
+printf 'auth_broken = [\n  "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "sed missing is rc=1, never an empty all-clear" \
+      "$(zrun 'PATH=/nonexistent; _claude_quarantine_scan; echo $?')" "1"
+rm -f "$FHOME/.clauth/profiles.toml"
+check "an absent profiles.toml is rc=1 too"         "$(zrun '_claude_quarantine_scan; echo $?')" "1"
 
 #-----------------------------------------------------------------------------
 echo
