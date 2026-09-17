@@ -1,7 +1,9 @@
 import sqlite3, tempfile, unittest
+from unittest import mock
 from pathlib import Path
 from rabota import errors
 from rabota.store import Store, SCHEMA_VERSION
+from tests.support import connection_is_closed
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
@@ -98,3 +100,62 @@ class StoreTests(unittest.TestCase):
         eid = s2.add_escalation("quantivly", "q", "e", ["a"], kind="decision", subject="PR #1")
         self.assertEqual((s2.escalation(eid)["kind"], s2.escalation(eid)["subject"]), ("decision", "PR #1"))
         s2.close()
+
+
+class StoreOpenFailurePathTests(unittest.TestCase):
+    """``Store.open`` must not leak the connection it just opened when a later step fails.
+
+    Counted by recording every connection ``sqlite3.connect`` hands out, never by
+    ``ResourceWarning``; see ``support.connection_is_closed``.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        self.state_dir = Path(tmp.name) / "state"
+        self.opened, self.factory = [], None
+        real_connect = sqlite3.connect
+
+        def recording_connect(*args, **kwargs):
+            if self.factory is not None:
+                kwargs["factory"] = self.factory
+            conn = real_connect(*args, **kwargs)
+            self.opened.append(conn)
+            return conn
+        patcher = mock.patch("sqlite3.connect", recording_connect)
+        patcher.start(); self.addCleanup(patcher.stop)
+        self.addCleanup(lambda: [c.close() for c in self.opened])   # never leak from the test itself
+
+    def unclosed(self):
+        return [c for c in self.opened if not connection_is_closed(c)]
+
+    def test_success_path_returns_a_usable_store_over_one_open_connection(self):
+        store = Store.open(self.state_dir)
+        self.assertEqual(store.schema_version(), SCHEMA_VERSION)
+        self.assertEqual(len(self.opened), 1)
+        self.assertEqual(len(self.unclosed()), 1)   # open() hands the connection to the caller
+        store.close()
+        self.assertEqual(self.unclosed(), [])
+
+    def test_a_refused_migration_closes_the_connection_and_keeps_its_message(self):
+        # A real newer-schema database, so the refusal is the production one, not a mock's.
+        store = Store.open(self.state_dir)
+        store.conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION + 1,))
+        store.close()
+        with self.assertRaises(errors.Refused) as cm:
+            Store.open(self.state_dir)
+        self.assertIn(f"schema is {SCHEMA_VERSION + 1}, newer than this rabota's {SCHEMA_VERSION}", str(cm.exception))
+        self.assertEqual(len(self.opened), 2)
+        self.assertEqual(self.unclosed(), [])
+
+    def test_a_failing_pragma_closes_the_connection_and_keeps_its_exception(self):
+        class PragmaRefusing(sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql.startswith("PRAGMA"):
+                    raise sqlite3.OperationalError("pragma refused")
+                return super().execute(sql, *args)
+        self.factory = PragmaRefusing
+        with self.assertRaises(sqlite3.OperationalError) as cm:
+            Store.open(self.state_dir)
+        self.assertEqual(str(cm.exception), "pragma refused")   # not wrapped, not replaced by a close error
+        self.assertEqual(len(self.opened), 1)
+        self.assertEqual(self.unclosed(), [])

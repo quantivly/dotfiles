@@ -1,9 +1,10 @@
-import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
+import argparse, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from rabota import context
 from rabota.commands import doctor
 from rabota.runner import FakeRunner, Result
 from rabota.store import SCHEMA_VERSION
+from tests.support import last_json
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -19,7 +20,9 @@ class DoctorTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         self.state_dir = Path(tmp.name) / "state"
         ns = argparse.Namespace(tenant="toysim", state_dir=str(self.state_dir), text=False, dry_run=False, command="doctor")
-        return context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)   # nothing else owns it: the test builds it, so the test closes it
+        return ctx
 
     def _stamp(self, version):
         """Write ``version`` into an existing rabota.db under the fixture state dir."""
@@ -90,6 +93,6 @@ class DoctorEndToEndTests(unittest.TestCase):
         self.assertNotIn(canary, p.stdout)
         self.assertNotIn(canary, p.stderr)
         self.assertEqual(p.returncode, 5, p.stderr)
-        self.assertEqual(json.loads(p.stderr)["error"]["code"], "secret_leak")
+        self.assertEqual(last_json(p.stderr)["error"]["code"], "secret_leak")
         self.assertIn("LINEAR_API_KEY", p.stderr)
         self.assertNotIn("Traceback", p.stderr)

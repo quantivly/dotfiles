@@ -760,3 +760,53 @@ jobs:
         run: |
           chmod +x scripts/sync-version-docs.sh
           scripts/sync-version-docs.sh --check
+
+  rabota-test:
+    name: rabota Unit Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Every interpreter reports, so a 3.14-only failure is seen next to a 3.11 pass.
+      fail-fast: false
+      matrix:
+        # 3.11 because `dev` runs it. 3.13+ because sqlite3 emits
+        # "ResourceWarning: unclosed database" for a leaked connection only on
+        # 3.12+, and a 3.11-only job stayed green over exactly that leak (F17).
+        python-version: ['3.11', '3.13', '3.14']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run the rabota unit tests
+        run: ./scripts/test-rabota.sh
+
+      # What this step catches is narrower than it looks: only an unclosed sqlite3
+      # connection that the garbage collector reaches WHILE a test is running becomes
+      # an error here. One collected at interpreter shutdown prints "Exception
+      # ignored" to stderr and the run still exits 0, so this step cannot fail on
+      # its own for that case (F17 gate, a1). The real check for the product leak
+      # is tests/test_store.py::StoreOpenFailurePathTests, which records every
+      # connection sqlite3.connect hands out and asserts each one is closed.
+      - name: Run the rabota unit tests with ResourceWarning as an error
+        run: |
+          cd rabota
+          python3 -W error::ResourceWarning -m unittest discover -s tests -t .
+
+      # scripts/rabota is extensionless, so the ShellCheck job's *.sh glob never
+      # selects it; only pre-commit's identify-based hook does. Named here so the
+      # entry point is linted by the job that runs it.
+      - name: ShellCheck the rabota entry point and test runner
+        run: shellcheck -x scripts/rabota scripts/test-rabota.sh
+
+      - name: Check zsh syntax of scripts/claude-pick
+        run: |
+          if command -v zsh >/dev/null 2>&1; then
+            zsh -n scripts/claude-pick
+          else
+            printf '::warning title=rabota-test::zsh is not on this runner; %s\n' \
+              "scripts/claude-pick was not syntax-checked here (the Shell Syntax Check job installs zsh and covers it)"
+          fi

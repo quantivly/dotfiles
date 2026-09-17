@@ -1,4 +1,5 @@
 """SQLite state. Human prose stays in YYYY-MM-DD/*.md; structure lives here."""
+import contextlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -66,8 +67,19 @@ class Store:
             conn = sqlite3.connect(state_dir / "rabota.db", isolation_level=None)
         except (OSError, sqlite3.Error) as e:
             raise errors.RabotaError(f"cannot open state dir {state_dir}: {getattr(e, 'strerror', None) or e}") from None
-        conn.execute("PRAGMA journal_mode=WAL"); conn.execute("PRAGMA busy_timeout=5000")
-        s = cls(conn); s.migrate(); return s
+        # From here the connection exists and is ours until it is handed to the caller. Any
+        # failure on the way — a PRAGMA, ``migrate()`` refusing a newer schema — must close it
+        # before the exception leaves, or it is leaked (F17: two of these in the suite, on the
+        # ``Refused`` path). The exception itself is part of the exit-code contract, so a close
+        # that fails on the way out is suppressed rather than allowed to replace it.
+        try:
+            conn.execute("PRAGMA journal_mode=WAL"); conn.execute("PRAGMA busy_timeout=5000")
+            store = cls(conn); store.migrate()
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+            raise
+        return store
 
     def close(self): self.conn.close()
 

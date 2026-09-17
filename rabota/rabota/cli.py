@@ -1,9 +1,10 @@
 """Argument parsing, command registry, and exception → exit-code mapping."""
 import argparse
 import importlib
+import sqlite3
 import sys
 
-from rabota import __version__, emit, errors
+from rabota import __version__, context, emit, errors
 
 COMMANDS = {}   # name -> (build, run)
 
@@ -79,6 +80,20 @@ def _report(e):
     return e.code
 
 
+def _close_contexts(opened):
+    """Close every context the command built; a failing close must never mask the run's outcome.
+
+    This runs in ``main``'s ``finally``, where a raised exception would replace the command's
+    exit code (or its own exception). The connection is being abandoned at process exit either
+    way, so a close that fails is swallowed rather than reported.
+    """
+    for ctx in opened:
+        try:
+            ctx.close()
+        except sqlite3.Error:
+            pass
+
+
 def main(argv=None):
     """Parse ``argv``, run the chosen command, and return its exit code (never raises an Exception)."""
     _load_command_modules()
@@ -96,17 +111,20 @@ def main(argv=None):
         parser.print_usage(sys.stderr)
         return errors.Usage.code
     _build, run = COMMANDS[ns.command]
-    try:
-        result = run(ns)
-        if result is None:
+    with context.track_contexts() as opened:
+        try:
+            result = run(ns)
+            if result is None:
+                return 0
+            if ns.text:
+                emit.text_out(result if isinstance(result, list) else [str(result)])
+            else:
+                emit.json_out(result)
             return 0
-        if ns.text:
-            emit.text_out(result if isinstance(result, list) else [str(result)])
-        else:
-            emit.json_out(result)
-        return 0
-    except errors.RabotaError as e:
-        return _report(e)
-    except Exception as e:  # noqa: BLE001 — the last resort, spec C1: 5. SystemExit and
-        # KeyboardInterrupt are BaseException, so they keep their own behaviour.
-        return _report(errors.RabotaError(f"unexpected {type(e).__name__}: {e}"))
+        except errors.RabotaError as e:
+            return _report(e)
+        except Exception as e:  # noqa: BLE001 — the last resort, spec C1: 5. SystemExit and
+            # KeyboardInterrupt are BaseException, so they keep their own behaviour.
+            return _report(errors.RabotaError(f"unexpected {type(e).__name__}: {e}"))
+        finally:
+            _close_contexts(opened)   # success, error, SystemExit and KeyboardInterrupt alike
