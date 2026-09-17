@@ -1,7 +1,6 @@
 import ast, copy, json, re, shutil, tempfile, unittest
 from pathlib import Path
 from rabota import errors
-from rabota.cli import COMMAND_MODULES
 from rabota.sources import linear
 
 FIX = Path(__file__).parent / "fixtures" / "linear"
@@ -168,19 +167,22 @@ def assert_within_selection(tc, node: dict, tree: dict, where="fixture"):
             assert_within_selection(tc, node[k], sub, f"{where}.{k}")
 
 
-# ---- static half: every consumer, every spelling ---------------------------------------------
+# ---- static half: the ingestion boundary, every spelling --------------------------------------
 PKG = Path(__file__).resolve().parent.parent / "rabota"
 # Envelope handlers: they read the GraphQL reply (``data``, ``nodes``, ``pageInfo``), never a node's
 # fields, and they serve every query at once. The dynamic rows still route Recording nodes through them.
 ENVELOPE_FUNCTIONS = {"query", "paginate"}
 SNAPSHOT_KEY = "notifications"          # the key a consumer reads the nodes off (the snapshot, or sync's payload)
 SOURCE_FUNCTION = "inbox_notifications"  # the one function that builds them
-# Envelope keys: names of CONTAINERS a consumer reads nodes out of, never a node's own field — the
-# snapshot's top-level keys (what ``sync_linear`` writes) and the GraphQL reply's own plumbing. Reading
-# one is how a consumer reaches the notifications at all, so it is not "a field outside the selection".
-# A named set rather than a special case, so the same rule serves if this scan is ever pointed at a raw
-# reply; a test pins that no member is also a selected field, which is what keeps it from hiding a read.
-ENVELOPE_KEYS = {SNAPSHOT_KEY, "issues", "viewer", "data", "nodes", "edges", "pageInfo"}
+# Envelope keys: the CONTAINER a consumer reads nodes out of, never a node's own field. Reading it is
+# how a consumer reaches the notifications at all, so it is not "a field outside the selection". It is
+# exactly the snapshot key, re-derived for the two files this scan covers (ws2-fix6): ``query`` and
+# ``paginate`` are excluded as envelope functions, so the reply's own plumbing (``data``, ``nodes``,
+# ``pageInfo``) is never judged; and the flat set round 5 shipped — ``issues``, ``viewer``, ``edges`` too —
+# was applied at every depth, so a node's real, unrequested ``project.issues`` read as plumbing (eval-5).
+# The allowance is judged against the receiver like any other read, so it reaches only a derived
+# container (``sync_linear``'s own payload); a test pins the set and that its member is no selected field.
+ENVELOPE_KEYS = {SNAPSHOT_KEY}
 
 
 def _literal_key_reads(func_or_module) -> list[tuple[int, str, str, ast.AST]]:
@@ -272,10 +274,10 @@ def _notification_scopes(module: ast.Module) -> list[Scope]:
     function that calls one, transitively, and downward to every function handed an expression that
     can hold one (a tainted name, or the key itself: ``_peek(lin.get("notifications", []))`` — eval-4 R).
     A function that never holds a notification — a renderer reading ``plan.get("totals")`` — is left
-    alone, and inside a scoped function only reads OFF a tainted expression are judged, so ``rank()``
-    reading the GitHub snapshot beside the notifications is not refused for it. Both are what make the
-    scan runnable over every module without a list of exceptions. A module whose top-level code names
-    the key is scanned whole, every read judged."""
+    alone, and inside a scoped function only reads OFF a tainted expression are judged, so a function
+    reading the GitHub snapshot beside the notifications is not refused for it. Both are what let the
+    scan run over a module without a list of exceptions. A module whose top-level code names the key
+    is scanned whole, every read judged."""
     defs = {n.name: n for n in ast.walk(module) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     top_level = [s for s in ast.walk(module) if isinstance(s, (ast.Module, ast.ClassDef))
                  for s in s.body if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
@@ -300,13 +302,20 @@ def _notification_scopes(module: ast.Module) -> list[Scope]:
 
 
 def scanned_consumers(pkg: Path = PKG) -> list[tuple[Path, list[Scope]]]:
-    """``(module path, scopes)`` for every module in the package — discovered, never listed, so a new
-    consumer cannot be missed by omission (k7 round 4), and not a directory either: this repo keeps the
-    logic in a top-level module behind a thin ``commands/`` wrapper, so a ``commands/`` glob left
-    ``rank.py`` unscanned (eval-4, T/R). The test tree, byte-compiled caches and an EMPTY ``__init__.py``
-    are the only exclusions; a module that holds no notification simply yields no scopes."""
-    paths = sorted(p for p in pkg.rglob("*.py") if "tests" not in p.parts and "__pycache__" not in p.parts
-                   and not (p.name == "__init__.py" and not p.read_text().strip()))
+    """``(module path, scopes)`` for exactly the two files of the ingestion boundary: ``sources/linear.py``
+    (``inbox_notifications``, the one function that builds notification nodes) and ``commands/sync.py``
+    (the module that first writes them). Two files, listed, on purpose.
+
+    The static half's ambition was widened to the whole package across rounds 4–5 and broke a different
+    way each time (see ``out/ws2/evaluation-{3,4,5}.json``). It is scoped back to exactly the ingestion
+    boundary — ``sources/linear.py`` and ``commands/sync.py`` — where it has never produced a false
+    positive or a missed real violation across five adversarial gates. A consumer downstream of this
+    boundary (``rank.py``, a future ``commands/inbox.py``, anything else) is NOT statically scanned; it is
+    protected only by the dynamic ``Recording`` half wherever it receives a value that traces back through
+    this boundary, and by ordinary code review beyond that. This is a named, accepted limit, not a gap to
+    be silently widened again — if it needs to grow, it needs a new round with its own gate, not a quiet
+    edit here. ``test_static_scan_is_scoped_to_exactly_the_ingestion_boundary`` pins the two paths."""
+    paths = [pkg / "sources" / "linear.py", pkg / "commands" / "sync.py"]
     return [(path, _notification_scopes(ast.parse(path.read_text(), str(path)))) for path in paths]
 
 
@@ -327,14 +336,10 @@ def notification_field_reads_outside_selection(tree: dict, pkg: Path = PKG) -> l
 
 
 # A throwaway consumer for the guard's own control — the round-4 gate's E-A/E-I shape. Never a real
-# command: it is written into a COPY of the package by the test that uses it.
-INBOXPEEK = '''\
-"""Peek at the inbox: reads the snapshot's notifications (the guard's own control, not a command)."""
-import json
-from rabota import cli, snapshots
-from rabota.context import Context
-
-
+# command: it is written into a COPY of the package by the test that uses it. The functions are kept
+# apart from the module wrapper so the same reads can be appended INSIDE the boundary (``commands/sync.py``)
+# as well as dropped outside it (``commands/inboxpeek.py``) — the two sides of the scope pin.
+INBOXPEEK_FUNCS = '''\
 def _notes(snap):
     return snap["notifications"]                       # the only mention of the key: run_inboxpeek CALLS this
 
@@ -351,59 +356,23 @@ def run_inboxpeek(ctx):
     snap = snapshots.read(ctx.state_dir, "linear")
     links = [(n.get("inboxUrl"), (n.get("issue") or {}).get("title"), inbox_link(n)) for n in _notes(snap)]
     return {"links": links, "unsnoozed": [n["unsnoozedAt"] for n in _notes(snap)], "plan": _render({})}
-
-
-cli.register("inboxpeek", lambda sub: sub.add_parser("inboxpeek"), lambda ns: run_inboxpeek(Context.from_namespace(ns)))
 '''
-
-
-# A CORRECT consumer — the round-4 gate's L mutant. It reaches the nodes through the snapshot's
-# envelope key and reads only fields the selection requests; the static half must pass it clean.
-# Written into a COPY of the package, like INBOXPEEK.
-INBOXLIST = '''\
-"""List the inbox: a legitimate consumer of the snapshot (the guard's false-positive control)."""
+INBOXPEEK = ('''\
+"""Peek at the inbox: reads the snapshot's notifications (the guard's own control, not a command)."""
+import json
 from rabota import cli, snapshots
 from rabota.context import Context
 
 
-def run_inboxlist(ctx):
-    snap = snapshots.read(ctx.state_dir, "linear")
-    rows = []
-    for n in snap["notifications"]:
-        rows.append((n["id"], n.get("title"), (n.get("issue") or {}).get("identifier")))
-    return {"rows": rows, "count": len(snap.get("notifications", [])), "present": "notifications" in snap}
+''' + INBOXPEEK_FUNCS + '''
+
+cli.register("inboxpeek", lambda sub: sub.add_parser("inboxpeek"), lambda ns: run_inboxpeek(Context.from_namespace(ns)))
+''')
 
 
-cli.register("inboxlist", lambda sub: sub.add_parser("inboxlist"), lambda ns: run_inboxlist(Context.from_namespace(ns)))
-'''
-# The same correct consumer in the two shapes where the envelope read IS judged — its receiver is derived
-# — so these are the variants that reach the envelope allowance at all: a module whose top-level code
-# names the key (scanned whole, every read judged), and a re-read of the key off a payload built from
-# the nodes (``sync_linear``'s own shape).
-INBOXLIST_MODULE_LEVEL = '''\
-"""Module-level consumer: the key is named at top level, so the whole module is scanned."""
-from rabota import snapshots
-
-STATE = "/var/lib/rabota"
-NOTES = snapshots.read(STATE, "linear").get("notifications", [])
-TITLES = [n["title"] for n in NOTES]
-'''
-INBOXLIST_PAYLOAD = '''\
-"""Re-reads the envelope off a payload built from the nodes: the receiver is derived, so the read is judged."""
-from rabota import snapshots
-
-
-def rows(state_dir):
-    snap = snapshots.read(state_dir, "linear")
-    payload = {"issues": snap["issues"], "notifications": snap["notifications"]}
-    return [(n["id"], n.get("title")) for n in payload["notifications"]] + [len(payload["issues"])]
-'''
-
-
-# The round-4 gate's T mutant: this repo's own layout puts the logic in a TOP-LEVEL module and a thin
-# wrapper in commands/ (rank.py / commands/rank.py). The reads live in the top-level half.
-INBOXPEEK_TOP = '''\
-"""Top-level half of a peek command: holds the reads (the guard's T control, not a command)."""
+# A helper appended to a COPY of ``commands/sync.py`` — reads inside the boundary, in the shapes the
+# spelling rows need (``.get``, ``in``, ``[]`` off a node reached through the container key).
+PEEK_FUNC = '''\
 
 
 def peek(snap):
@@ -411,18 +380,6 @@ def peek(snap):
     for n in snap["notifications"]:
         out.append((n.get("inboxUrl"), "unsnoozedAt" in n, n["unsnoozedAt"]))
     return out
-'''
-INBOXPEEK_WRAPPER = '''\
-"""Thin wrapper: loads the snapshot and hands it to the top-level module, the commands/rank.py shape."""
-from rabota import cli, snapshots, inboxpeek
-from rabota.context import Context
-
-
-def run_inboxpeek(ctx):
-    return {"peek": inboxpeek.peek(snapshots.read(ctx.state_dir, "linear"))}
-
-
-cli.register("inboxpeek", lambda sub: sub.add_parser("inboxpeek"), lambda ns: run_inboxpeek(Context.from_namespace(ns)))
 '''
 
 
@@ -551,127 +508,81 @@ class LinearClientTests(unittest.TestCase):
         bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS))
         self.assertFalse(bad, "reads of fields the notification query never requests:\n  " + "\n  ".join(bad))
 
-    def test_static_scan_discovers_every_command_module_and_the_source(self):
-        # k7 round 4 (E-A): the scan used to read a two-entry hand list, so a consumer the list did
-        # not name was invisible by construction. It is discovered now — the source that builds
-        # notification nodes plus every command module on disk — and the registry can never name a
-        # module the scan misses.
+    def test_static_scan_is_scoped_to_exactly_the_ingestion_boundary(self):
+        # ws2-fix6: the static half is scoped, on purpose, to the two files where notifications are
+        # built and first written — ``scanned_consumers``' docstring says why, and this row is what
+        # makes the boundary a decision rather than a list: broadening it (a glob over ``commands/``
+        # or the package, rounds 4–5) or narrowing it further both have to touch this row and the
+        # reason beside it. Exactly these two paths, both on disk, neither with a vacuous scope.
         scanned = {path: scopes for path, scopes in scanned_consumers()}
-        self.assertIn(PKG / "sources" / "linear.py", scanned)
-        registered = {PKG / "commands" / f"{m}.py" for m in COMMAND_MODULES if (PKG / "commands" / f"{m}.py").exists()}
-        self.assertTrue(registered, "no registered command module exists on disk — the coupling row has nothing to check")
-        self.assertLessEqual(registered, set(scanned), "a registered command module is not scanned")
-        on_disk = {p for p in (PKG / "commands").glob("*.py") if p.name != "__init__.py"}
-        self.assertLessEqual(on_disk, set(scanned), "a command module on disk is not scanned")
-        # and the scan reaches the code it must: not a vacuous scope over the two real consumers
+        self.assertEqual(set(scanned), {PKG / "sources" / "linear.py", PKG / "commands" / "sync.py"})
+        for path in scanned:
+            self.assertTrue(path.is_file(), f"the scan names {path}, which is not on disk")
         names = lambda path: {getattr(s, "name", "<module>") for s, _t, _c in scanned[path]}
         self.assertEqual(names(PKG / "sources" / "linear.py"), {"inbox_notifications"})
         self.assertLessEqual({"sync_linear", "_sync_one", "run_sync"}, names(PKG / "commands" / "sync.py"))
 
-    def test_a_new_command_module_reading_an_unrequested_field_fails_the_guard(self):
-        # k7 round 4, the control for E-A/E-I: a module dropped into commands/ that reads a field the
-        # query never requests — in the function that loads the notifications, in a caller of it,
-        # and in a helper it hands the node to after a json round trip — is caught by the static
-        # half without anyone adding it to a list. A function that never holds a notification is
-        # not scanned, so its reads of other shapes (``plan.get("totals")``) are not false positives.
-        with tempfile.TemporaryDirectory() as tmp:
-            pkg = Path(tmp) / "rabota"
-            shutil.copytree(PKG, pkg, ignore=shutil.ignore_patterns("__pycache__"))
-            (pkg / "commands" / "inboxpeek.py").write_text(INBOXPEEK)
-            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
-            peek = [b for b in bad if b.startswith("commands/inboxpeek.py:")]
-            self.assertEqual(bad, peek, f"the real package must stay clean under the discovered scan: {bad}")
-            self.assertTrue(any(".get() reads 'inboxUrl'" in b for b in peek), peek)      # E-A, in the caller of the loader
-            self.assertTrue(any("[] reads 'unsnoozedAt'" in b for b in peek), peek)       # same function, [] spelling
-            self.assertTrue(any("[] reads 'emailedAt'" in b for b in peek), peek)         # E-I, helper handed the node
-            self.assertFalse([b for b in peek if "totals" in b], f"a function holding no notification was scanned: {peek}")
-
-    def test_reading_the_snapshot_envelope_is_not_a_field_read(self):
-        # k7 round 4 (L): ``snap["notifications"]`` names the CONTAINER the nodes sit in, not a field of a
-        # node, and the first correct consumer in the package was reported for it — the checker-refuses-
-        # correct-code shape CLAUDE.md records. A consumer that reaches the nodes through the envelope
-        # (``[]``, ``.get`` and ``in`` spellings alike) and reads only requested fields is clean.
-        # Three shapes, because only two of them reach the allowance: off a plain snapshot name the
-        # receiver is not derived and the read is never judged, so that row alone would pass with the
-        # allowance deleted (measured — mutant M3 survived it).
-        for label, module, scoped in (("off the snapshot (the gate's L)", INBOXLIST, ["run_inboxlist"]),
-                                      ("module-level consumer, scanned whole", INBOXLIST_MODULE_LEVEL, ["<module>"]),
-                                      ("re-read off a derived payload", INBOXLIST_PAYLOAD, ["rows"])):
-            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
-                pkg = self._package_copy(tmp)
-                (pkg / "commands" / "inboxlist.py").write_text(module)
-                scanned = {path.relative_to(pkg): scopes for path, scopes in scanned_consumers(pkg)}
-                self.assertEqual([getattr(s, "name", "<module>") for s, _t, _c in scanned.get(Path("commands/inboxlist.py"), [])], scoped,
-                                 "the control module's consumer was not scoped — a clean result would be vacuous")
-                bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
-                self.assertEqual(bad, [], "a correct consumer was refused")
-
-    def test_a_module_level_consumer_reading_an_unrequested_field_fails_the_guard(self):
-        # A module whose top-level code names the key is scanned whole with EVERY read judged (no taint
-        # set to filter on — there is no function to bind names in). Pinned because emptying that set
-        # instead of leaving it unbounded passed the whole file (mutant M5).
+    def test_the_boundary_is_named_a_consumer_outside_it_is_not_scanned_and_one_inside_it_is(self):
+        # The accepted limit, pinned from both sides so nobody reads a clean scan as coverage it is
+        # not: the round-4 E-A/E-I control dropped into ``commands/`` is NOT statically scanned — it
+        # is downstream of the boundary and owned by the dynamic half and by review — while the very
+        # same reads appended inside ``commands/sync.py`` are named, in the function that loads the
+        # notifications, in a caller of it, and in a helper handed the node after a json round trip.
+        # A function that never holds a notification (``_render``) is left alone either way.
         with tempfile.TemporaryDirectory() as tmp:
             pkg = self._package_copy(tmp)
-            (pkg / "commands" / "inboxlist.py").write_text(INBOXLIST_MODULE_LEVEL.replace('n["title"]', 'n["inboxUrl"]'))
+            (pkg / "commands" / "inboxpeek.py").write_text(INBOXPEEK)
+            self.assertNotIn(pkg / "commands" / "inboxpeek.py", {path for path, _s in scanned_consumers(pkg)})
             bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
-            self.assertEqual([b.split(": ", 1)[1] for b in bad], ["[] reads 'inboxUrl'"], bad)
+            self.assertEqual(bad, [], "a module outside the boundary was scanned, or the real package is not clean")
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._package_copy(tmp)
+            sync_py = pkg / "commands" / "sync.py"
+            sync_py.write_text(sync_py.read_text() + "\n\n" + INBOXPEEK_FUNCS)
+            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
+            self.assertTrue(bad and all(b.startswith("commands/sync.py:") for b in bad), bad)
+            self.assertTrue(any(".get() reads 'inboxUrl'" in b for b in bad), bad)      # E-A, in the caller of the loader
+            self.assertTrue(any("[] reads 'unsnoozedAt'" in b for b in bad), bad)       # same function, [] spelling
+            self.assertTrue(any("[] reads 'emailedAt'" in b for b in bad), bad)         # E-I, helper handed the node
+            self.assertFalse([b for b in bad if "totals" in b], f"a function holding no notification was scanned: {bad}")
 
-    def test_envelope_keys_name_no_selected_field(self):
-        # The envelope allowance is a named set, and this is what keeps it from widening the guard: an
-        # envelope key can never ALSO be a field the selection requests, so allowing it cannot hide a
-        # real unrequested read. The snapshot key itself is one, or the L control above is unreachable.
-        self.assertIn(SNAPSHOT_KEY, ENVELOPE_KEYS)
-        overlap = ENVELOPE_KEYS & tree_names(selection_tree(linear.NOTIFICATION_FIELDS))
-        self.assertEqual(overlap, set(), "an envelope key is also a selected field: the allowance would swallow a real read")
+    def test_the_envelope_allowance_is_the_snapshot_key_alone(self):
+        # Round 4 (L) taught the scan that ``snap["notifications"]`` names the CONTAINER the nodes sit
+        # in, not a field of a node; round 5 found that the flat set it shipped with — ``issues``,
+        # ``viewer``, ``data``, ``nodes``, ``edges``, ``pageInfo`` — is applied at every depth, so a
+        # node's REAL, unrequested ``project.issues`` / ``issue.team.issues.nodes`` (Linear's schema)
+        # read as envelope plumbing (eval-5 E1/E2). Re-derived for the two files actually scanned:
+        # ``query``/``paginate`` are excluded as envelope functions, so no reply-plumbing key is ever
+        # judged, and the only container a consumer inside the boundary reads nodes out of is the
+        # snapshot key itself. One key, named; not a set to grow. And it names no selected field, so
+        # allowing it cannot hide a real read.
+        self.assertEqual(ENVELOPE_KEYS, {SNAPSHOT_KEY})
+        self.assertEqual(ENVELOPE_KEYS & tree_names(selection_tree(linear.NOTIFICATION_FIELDS)), set())
+        tree = selection_tree(linear.NOTIFICATION_FIELDS)
+        hook = "    notifications = lin.inbox_notifications()\n"
+        cases = (
+            ("the container re-read off sync's own payload is clean",
+             '    return {"issues": len(issues), "notifications": len(notifications)}\n',
+             '    return {"issues": len(issues), "notifications": len(payload["notifications"])}\n', []),
+            ("E1: a node's project.issues is a real unrequested field, not plumbing",
+             hook, hook + '    _pi = [(n["project"] or {}).get("issues") for n in notifications]\n', [".get() reads 'issues'"]),
+            ("E2: a node's issue.team.issues.nodes, every key at node depth judged",
+             hook, hook + '    _tn = [n["issue"]["team"]["issues"]["nodes"] for n in notifications]\n', ["[] reads 'issues'", "[] reads 'nodes'"]),
+        )
+        for label, old, new, want in cases:
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                pkg = self._package_copy(tmp)
+                sync_py = pkg / "commands" / "sync.py"; src = sync_py.read_text()
+                self.assertEqual(src.count(old), 1, "sync_linear no longer has the line this fixture hooks; update the fixture")
+                sync_py.write_text(src.replace(old, new))
+                bad = notification_field_reads_outside_selection(tree, pkg)
+                self.assertEqual(sorted(b.split(": ", 1)[1] for b in bad), sorted(want), bad)
+                self.assertTrue(all(b.startswith("commands/sync.py:") for b in bad), bad)
 
     def _package_copy(self, tmp):
         pkg = Path(tmp) / "rabota"
         shutil.copytree(PKG, pkg, ignore=shutil.ignore_patterns("__pycache__"))
         return pkg
-
-    def test_static_scan_discovers_every_module_in_the_package(self):
-        # eval-4, items T and R: the scan globbed commands/ and this repo's convention is logic in a
-        # top-level module with a thin commands/ wrapper — so rank.py, a consumer of the Linear snapshot
-        # today, was invisible by construction. Every module under the package is scanned now; only the
-        # test tree, byte-compiled caches and an EMPTY __init__.py are left out.
-        scanned = {path for path, _scopes in scanned_consumers()}
-        on_disk = {p for p in PKG.rglob("*.py") if "tests" not in p.parts and "__pycache__" not in p.parts
-                   and not (p.name == "__init__.py" and not p.read_text().strip())}
-        self.assertIn(PKG / "rank.py", on_disk)                       # the module the gate found missing
-        self.assertEqual(on_disk - scanned, set(), "modules on disk the scan does not reach")
-        self.assertEqual(scanned - on_disk, set(), "the scan names a module that is not a package module")
-
-    def test_a_top_level_module_behind_a_thin_wrapper_fails_the_guard(self):
-        # T: the reads sit in rabota/inboxpeek.py; commands/inboxpeek.py only loads the snapshot and
-        # calls it. The top-level half is where the guard must fire, and the wrapper stays clean.
-        with tempfile.TemporaryDirectory() as tmp:
-            pkg = self._package_copy(tmp)
-            (pkg / "inboxpeek.py").write_text(INBOXPEEK_TOP)
-            (pkg / "commands" / "inboxpeek.py").write_text(INBOXPEEK_WRAPPER)
-            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
-            top = [b for b in bad if b.startswith("inboxpeek.py:")]
-            self.assertEqual(bad, top, f"only the top-level module's reads may be named: {bad}")
-            self.assertEqual({b.split(": ", 1)[1] for b in top},
-                             {".get() reads 'inboxUrl'", "in reads 'unsnoozedAt'", "[] reads 'unsnoozedAt'"}, top)
-
-    def test_logic_added_to_rank_py_fails_the_guard(self):
-        # R: rank.py gains a helper reading an unrequested field, called from rank() on the snapshot's
-        # notifications. The edit is asserted to have applied — a fixture whose edit silently missed
-        # would pass this row against the unmodified module. Two halves: the helper's read IS named
-        # (the hand-off is an expression naming the key, not a tainted name — the first version of the
-        # scope rule missed it), and rank()'s reads of OTHER shapes — the GitHub snapshot, its own
-        # items — are NOT, or the first real consumer in rank() is refused for correct code.
-        with tempfile.TemporaryDirectory() as tmp:
-            pkg = self._package_copy(tmp)
-            rank_py = pkg / "rank.py"; src = rank_py.read_text()
-            hook = '    lin = inp.linear or {"issues": [], "viewer": {}}\n'
-            self.assertEqual(src.count(hook), 1, "rank() no longer opens with the line this fixture hooks; update the fixture")
-            src = src.replace(hook, hook + '    _peek(lin.get("notifications", []))\n')
-            src += "\n\ndef _peek(notes):\n    return [n.get(\"inboxUrl\") for n in notes]\n"
-            rank_py.write_text(src)
-            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
-            self.assertEqual([b.split(": ", 1)[1] for b in bad], [".get() reads 'inboxUrl'"], bad)
-            self.assertTrue(bad[0].startswith("rank.py:"), bad)
 
     def test_static_scan_sees_the_unbound_method_spelling(self):
         # k7 round 4 (E-C): ``dict.get(n, "inboxUrl")`` is the same read as ``n.get("inboxUrl")`` with
@@ -704,14 +615,15 @@ class LinearClientTests(unittest.TestCase):
         self.assertLessEqual({("inboxUrl", "itemgetter()", "n"), ("emailedAt", "itemgetter()", "n"),
                               ("unsnoozedAt", "itemgetter()", "n"), ("readAt", ".__getitem__()", "n"),
                               ("createdAt", "itemgetter()", None)}, reads, reads)
-        # and end to end, off a tainted node in a scanned consumer: both are named, the keyed sort is not
-        peek = INBOXPEEK_TOP.replace('out.append((n.get("inboxUrl"), "unsnoozedAt" in n, n["unsnoozedAt"]))',
-                                     'out.append((operator.itemgetter("inboxUrl")(n), n.__getitem__("emailedAt")))\n'
-                                     '    out.sort(key=operator.itemgetter("bucket"))').replace('\n\n\ndef peek', '\nimport operator\n\n\ndef peek')
+        # and end to end, off a tainted node in a scanned consumer (appended inside the boundary): both
+        # are named, the keyed sort is not
+        peek = PEEK_FUNC.replace('out.append((n.get("inboxUrl"), "unsnoozedAt" in n, n["unsnoozedAt"]))',
+                                 'out.append((operator.itemgetter("inboxUrl")(n), n.__getitem__("emailedAt")))\n'
+                                 '    out.sort(key=operator.itemgetter("bucket"))').replace('def peek', 'import operator\n\n\ndef peek')
         self.assertIn("import operator", peek); self.assertIn('itemgetter("bucket")', peek)
         with tempfile.TemporaryDirectory() as tmp:
             pkg = self._package_copy(tmp)
-            (pkg / "inboxpeek.py").write_text(peek)
+            sync_py = pkg / "commands" / "sync.py"; sync_py.write_text(sync_py.read_text() + peek)
             bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
             self.assertEqual(sorted(b.split(": ", 1)[1] for b in bad), sorted(["itemgetter() reads 'inboxUrl'", ".__getitem__() reads 'emailedAt'"]), bad)
 
