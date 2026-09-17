@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from rabota import cli, rank as rank_mod, snapshots
+from rabota import cli, emit, rank as rank_mod, snapshots
 from rabota.context import Context
 
 
@@ -23,8 +23,8 @@ def run_rank(ctx: Context) -> dict:
     seq = rank_mod.rank(inp)
     seq["failed_sources"] = [s for s in ctx.tenant.sources
                              if (ctx.store.last_sync(ctx.tenant.name, s) or {}).get("ok") == 0]
-    (day / "sequence.json").write_text(json.dumps(seq, indent=1))
-    (day / "sequence.md").write_text(rank_mod.to_markdown(seq))
+    emit.write_file(day / "sequence.json", json.dumps(seq, indent=1))    # guarded: nothing lands on a leak (k2)
+    emit.write_file(day / "sequence.md", rank_mod.to_markdown(seq))
     return {"path": str(day / "sequence.json"), "items": len(seq["items"]),
             "decisions": len(seq["decisions"]), "triage": len(seq["triage"])}
 

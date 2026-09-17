@@ -136,19 +136,33 @@ class BriefCommandTests(unittest.TestCase):
         self.assertTrue((ctx.state_dir / "2026-09-16" / "sequence.json").exists())
         self.assertTrue(lines[-1].startswith("brief: "))
 
-    def test_registered_value_in_a_sync_error_never_reaches_brief_md(self):
-        # k2: gh stderr can echo the minted token; it flows into source_syncs.error and from there
-        # into brief.md through a file write that skipped the guard. A secret on disk is worse than
-        # one on a terminal, so the write must not happen at all.
+    def test_registered_value_in_the_sequence_never_reaches_brief_md(self):
+        # k2: a protected value in the ranked data used to reach brief.md through a file write that
+        # skipped the guard. A secret on disk is worse than one on a terminal, so the write must not
+        # happen at all. The carrier is a sequence.json written outside rabota (an older rabota, a
+        # hand edit): the sync-error route this test first used is now redacted at the store, below.
         minted = "minted-gho-token-0123456789abcdef"
         secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
-        ctx = self.ctx(); day = self._write_seq(ctx, ["K-1"])
-        ctx.store.record_sync("quantivly", "github", False, f"gh: HTTP 401 — token {minted} rejected", "")
+        ctx = self.ctx(); day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
+        s = seq(["K-1"]); s["items"][0]["title"] = f"gh said: token {minted} rejected"
+        (day / "sequence.json").write_text(json.dumps(s))
         with self.assertRaises(errors.SecretLeak) as cm:
             brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc))
         self.assertNotIn(minted, str(cm.exception))
         self.assertFalse((day / "brief.md").exists(), "brief.md was written with a protected value in it")
         self.assertFalse((day / "last-brief.json").exists())
+
+    def test_sync_error_carrying_a_registered_value_reaches_brief_as_a_marker(self):
+        # The store route (k2, second round): the row keeps its shape, so brief still says the
+        # source failed, and what it prints and writes carries the marker and never the value.
+        minted = "minted-gho-token-0123456789abcdef"
+        secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
+        ctx = self.ctx(); day = self._write_seq(ctx, ["K-1"])
+        ctx.store.record_sync("quantivly", "github", False, f"gh: HTTP 401 — token {minted} rejected", "")
+        lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc))
+        text = "\n".join(lines) + (day / "brief.md").read_text()
+        self.assertNotIn(minted, text)
+        self.assertIn("token [redacted:minted-token] rejected", text)
 
     def test_snapshot_write_is_guarded_too(self):
         minted = "minted-gho-token-fedcba9876543210"

@@ -51,6 +51,22 @@ def protected_values(env: Mapping[str, str], names: Iterable[str] = PROTECTED_NA
     return {v for _, v in protected_items(env, names)}
 
 
+def redact(text: str, env: Mapping[str, str], names: Iterable[str] = PROTECTED_NAMES) -> str:
+    """Return ``text`` with every protected value replaced by ``[redacted:<NAME>]`` (``minted-token`` for a registered one).
+
+    For what is PERSISTED rather than printed. Output is refused outright (``assert_clean``)
+    because a caller can rephrase it; a row in ``rabota.db`` is a record — ``source_syncs``
+    with ``ok=0`` is how ``brief`` learns a source failed — so dropping it would turn a leak into
+    a silent success (the k5 shape). The marker keeps the row's shape and says what was removed.
+    Longest values first, so a value that contains another is replaced whole.
+    """
+    values = [(v, f"[redacted:{n}]") for n, v in protected_items(env, names)]
+    values += [(v, "[redacted:minted-token]") for v in REGISTERED_VALUES]
+    for value, marker in sorted(values, key=lambda pair: -len(pair[0])):
+        text = text.replace(value, marker)
+    return text
+
+
 def assert_clean(text: str, env: Mapping[str, str], names: Iterable[str] = PROTECTED_NAMES) -> str:
     """Return ``text`` unchanged, or raise ``SecretLeak`` naming the VARIABLE (never its value)."""
     for name, value in protected_items(env, names):

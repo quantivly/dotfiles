@@ -8,10 +8,14 @@ printed. Write through here, never to ``sys.stdout``/``sys.stderr`` directly.
 
 Files count as leaving the process. A secret on disk is worse than one on a
 terminal — nothing downstream can catch it — so ``write_file`` is the sanctioned
-way to write any text the state dir keeps (``brief.md``, ``last-brief.json``),
-and ``snapshots.write`` guards its payload the same way. The third "write path
-that skipped the guard" in this epic (WS1 D1, WS4′ ``write_text``, WS2 k2) is
-why this exists; a ``Path.write_text`` in a command module is a defect.
+way to write any text the state dir keeps (``brief.md``, ``last-brief.json``,
+``sequence.json``, ``sequence.md``), and ``snapshots.write`` guards its payload
+the same way. The third "write path that skipped the guard" in this epic (WS1
+D1, WS4′ ``write_text``, WS2 k2 — twice) is why this exists; a ``Path.write_text``
+in a command module is a defect, and ``tests/test_write_guard.py`` greps the
+package for every spelling of one so the fourth round cannot happen. What is
+PERSISTED into ``rabota.db`` is redacted rather than refused (``secrets.redact``,
+``Store._exec``), because a row is a record and dropping it hides the failure.
 """
 import json
 import os

@@ -1,7 +1,7 @@
 import argparse, json, tempfile, unittest
 from datetime import date
 from pathlib import Path
-from rabota import config, context, rank, snapshots
+from rabota import config, context, errors, rank, secrets, snapshots
 from rabota.commands import rank as rank_cmd
 from rabota.runner import FakeRunner
 
@@ -120,3 +120,33 @@ class RankCommandTests(unittest.TestCase):
         self.assertEqual(seq["failed_sources"], ["calendar"])
         self.assertEqual([i["key"] for i in seq["items"]], ["PROMISE-1", "HUB-7"])
         self.assertIn("HUB-7", (day / "sequence.md").read_text())
+
+    def test_registered_value_in_ranked_data_never_reaches_sequence_files(self):
+        # k2, third route: ranked data carrying a protected value used to land in sequence.json and
+        # sequence.md through two Path.write_text calls that skipped the guard emit.write_file exists
+        # for. inbox-plan.json is written by the skill in-session, outside every guard rabota has, so
+        # it is the input that can still carry one. Nothing may be written; the leak names no value.
+        minted = "minted-gho-token-0123456789abcdef"
+        secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
+        ctx = self.ctx()
+        snapshots.write(ctx.state_dir, "linear", {"ok": True, "viewer": {"id": "me"}, "notifications": [], "issues": []})
+        plan = {"buckets": {"reply_queue": [{"issue_identifier": "HUB-1", "actor": "benoit", "created_at": "2026-09-15T00:00:00Z",
+                                             "url": "u", "title": f"gh said: token {minted} rejected"}]}}
+        (ctx.state_dir / "inbox-plan.json").write_text(json.dumps(plan))
+        day = ctx.state_dir / "2026-09-16"
+        with self.assertRaises(errors.SecretLeak) as cm:
+            rank_cmd.run_rank(ctx)
+        self.assertNotIn(minted, str(cm.exception))
+        self.assertFalse((day / "sequence.json").exists(), "sequence.json was written with a protected value in it")
+        self.assertFalse((day / "sequence.md").exists(), "sequence.md was written with a protected value in it")
+
+    def test_pin_rationale_with_a_protected_value_is_redacted_at_the_store(self):
+        # The pin route is closed one layer earlier: the store redacts, so the rationale that reaches
+        # sequence.json is the marker, and the rank still completes.
+        minted = "minted-gho-token-0123456789abcdef"
+        secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
+        ctx = self.ctx()
+        ctx.store.set_pin("quantivly", "PROMISE-1", 2, f"spoken promise; token {minted}")
+        rank_cmd.run_rank(ctx)
+        text = (ctx.state_dir / "2026-09-16" / "sequence.json").read_text()
+        self.assertNotIn(minted, text); self.assertIn("spoken promise; token [redacted:minted-token]", text)

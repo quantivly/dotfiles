@@ -1,5 +1,7 @@
 """``rabota sync``: fetch Linear and GitHub into ``sources/*.json`` and record each outcome in ``source_syncs``."""
-from rabota import cli, errors, snapshots
+import os
+
+from rabota import cli, errors, secrets, snapshots
 from rabota.context import Context
 from rabota.sources.github import GhClient
 from rabota.sources.linear import LinearClient
@@ -54,8 +56,12 @@ def run_sync(ctx: Context, sources: list[str], lin=None, gh=None) -> dict:
         except errors.Usage:
             raise
         except errors.RabotaError as e:
-            ctx.store.record_sync(ctx.tenant.name, source, False, str(e), "")
-            report[source] = {"ok": False, "error": str(e), "path": "", "counts": {}}
+            # gh's stderr is folded into the error text and can echo the minted token (k2). The
+            # store redacts again on its own; redacting here too keeps the terminal report
+            # printable, so the caller gets `partial` naming the source instead of `secret_leak`.
+            msg = secrets.redact(str(e), os.environ)
+            ctx.store.record_sync(ctx.tenant.name, source, False, msg, "")
+            report[source] = {"ok": False, "error": msg, "path": "", "counts": {}}
             failed.append(source)
             continue
         ctx.store.record_sync(ctx.tenant.name, source, True, None, path)

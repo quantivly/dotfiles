@@ -1,7 +1,7 @@
-import argparse, json, tempfile, unittest
+import argparse, json, sqlite3, tempfile, unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rabota import context, errors, snapshots
+from rabota import context, errors, secrets, snapshots
 from rabota.commands import sync, ingest
 from rabota.runner import FakeRunner
 
@@ -23,6 +23,17 @@ class FakeGh:
 
 class BoomGh(FakeGh):
     def review_requests(self): raise errors.RabotaError("gh down")
+
+MINTED = "minted-gho-token-0123456789abcdef"
+
+class LeakyGh(FakeGh):
+    """gh's stderr echoed the minted token; the wrapper folds stderr into the error text."""
+    def review_requests(self): raise errors.RabotaError(f"gh api search/issues failed: HTTP 401 — token {MINTED} rejected")
+
+
+def db_bytes(state_dir):
+    """Every byte sqlite has on disk for rabota.db, WAL included — a fresh reader's view is not enough."""
+    return b"".join(p.read_bytes() for p in Path(state_dir).glob("rabota.db*"))
 
 class SyncTests(unittest.TestCase):
     def ctx(self):
@@ -50,6 +61,45 @@ class SyncTests(unittest.TestCase):
         self.assertIsNotNone(snapshots.read(ctx.state_dir, "linear"))
         row = ctx.store.last_sync("quantivly", "github")
         self.assertFalse(row["ok"]); self.assertIn("gh down", row["error"])
+
+    def test_registered_value_in_a_gh_error_is_redacted_before_it_reaches_rabota_db(self):
+        # k2, the store route: a gh stderr carrying the minted token flows into source_syncs.error.
+        # The row must survive — brief reads ok=0 to say "! github failed — list is partial" — so
+        # the value is REPLACED with a marker, not refused; refusing would drop the failure record
+        # and brief would rank as if github were fine (the k5 shape by another door).
+        secrets.register_value(MINTED); self.addCleanup(secrets.REGISTERED_VALUES.discard, MINTED)
+        ctx = self.ctx()
+        with self.assertRaises(errors.Partial) as cm:
+            sync.run_sync(ctx, ["linear", "github"], lin=FakeLin(), gh=LeakyGh())
+        self.assertEqual(cm.exception.failed, ["github"])
+        row = ctx.store.last_sync("quantivly", "github")
+        self.assertEqual(row["ok"], 0)
+        self.assertNotIn(MINTED, row["error"])
+        self.assertIn("HTTP 401", row["error"]); self.assertIn("[redacted:", row["error"])   # shape kept, value gone
+        fresh = sqlite3.connect(ctx.state_dir / "rabota.db").execute("SELECT error FROM source_syncs WHERE source='github'").fetchone()[0]
+        self.assertNotIn(MINTED, fresh)
+        self.assertFalse(MINTED.encode() in db_bytes(ctx.state_dir), "rabota.db* carries the value in the clear")
+        self.assertNotIn(MINTED, str(cm.exception))
+
+    def test_every_store_write_redacts_protected_values(self):
+        # "or any other row": every text column a store method writes goes through the same scrub,
+        # so the invariant is on rabota.db as a whole, not on one column.
+        secrets.register_value(MINTED); self.addCleanup(secrets.REGISTERED_VALUES.discard, MINTED)
+        ctx = self.ctx(); st = ctx.store; t = "quantivly"
+        st.record_sync(t, "github", False, f"e {MINTED}", "")
+        run = st.begin_run(t, f"mode {MINTED}"); st.finish_run(run, True, notes=f"notes {MINTED}")
+        st.insert_lane({"id": "L1", "tenant": t, "kind": "work", "brief": f"brief {MINTED}", "status": "running"})
+        st.update_lane("L1", held_reason=f"held {MINTED}")
+        esc = st.add_escalation(t, f"q {MINTED}", f"ev {MINTED}", [f"opt {MINTED}"])
+        st.answer_escalation(esc, f"label {MINTED}", resolution=f"res {MINTED}")
+        st.record_gate(t, f"subj {MINTED}", f"label {MINTED}")
+        st.record_decision("b1", t, "T1", "reply", "issue", "i1", "archive", {"prior": MINTED})
+        st.set_pin(t, "K-1", 2, f"rationale {MINTED}")
+        self.assertFalse(MINTED.encode() in db_bytes(ctx.state_dir), "rabota.db* carries the value in the clear")
+        self.assertEqual(st.pins(t)[0]["rationale"], "rationale [redacted:minted-token]")
+        self.assertEqual(st.get_lane("L1")["held_reason"], "held [redacted:minted-token]")
+        self.assertEqual(st.escalation(esc)["options"], ["opt [redacted:minted-token]"])
+        self.assertEqual(st.decisions("b1")[0]["prior"], {"prior": "[redacted:minted-token]"})
 
     def test_unknown_source_is_usage(self):
         with self.assertRaises(errors.Usage):
