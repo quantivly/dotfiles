@@ -1,4 +1,5 @@
 import argparse, json, sqlite3, tempfile, unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 from rabota import context, errors, secrets, snapshots
@@ -66,7 +67,12 @@ class SyncTests(unittest.TestCase):
         pages = [{"data": {"viewer": {"id": "v", "name": "z"}}}, empty, empty,
                  {"data": {"notifications": {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}]
         ctx = self.ctx()
-        rep = sync.sync_linear(ctx, linear.LinearClient("k" * 20, post=FakePost(pages)))
+        # The snapshot write is where the tracked region ENDS: serialising walks the node through
+        # items(), which Recording notes as a copy (E-B/E-D). The boundary is explicit — the real
+        # writer is wrapped with Recording.plain — so a copy anywhere BEFORE the write still fails.
+        real_write = snapshots.write
+        with mock.patch.object(snapshots, "write", lambda sd, src, payload: real_write(sd, src, Recording.plain(payload))):
+            rep = sync.sync_linear(ctx, linear.LinearClient("k" * 20, post=FakePost(pages)))
         self.assertEqual(rep, {"issues": 0, "notifications": 2})
         self.assertFalse([k for k in seen if k.endswith(COPIED)], f"a notification was copied to a plain dict: {sorted(seen)}")
         unrequested = sorted(k for k in seen if k not in tree_paths(tree))

@@ -1,4 +1,4 @@
-import ast, json, re, shutil, tempfile, unittest
+import ast, copy, json, re, shutil, tempfile, unittest
 from pathlib import Path
 from rabota import errors
 from rabota.cli import COMMAND_MODULES
@@ -82,8 +82,12 @@ class Recording(dict):
     too. Copying the node — ``dict(n)``, ``{**n}``, ``n.copy()`` — is noted as ``COPIED``, because a
     read off a plain copy is invisible and the test must fail rather than not know. A key the code
     itself assigned is not a raw read when read back (that is how ``pullRequestUrl`` is legitimate
-    after the assignment and the k7 bug before it). ``items()`` is deliberately NOT overridden:
-    ``json.dumps`` walks a dict subclass through it, and a snapshot write is not a read.
+    after the assignment and the k7 bug before it). Enumerating the node — ``keys()``, ``items()``,
+    ``values()``, iteration — is noted as ``COPIED`` too: it hands the code every key, including ones
+    the fixture does not carry, so nothing about it can be checked. ``json.dumps``, ``copy.copy`` and
+    ``copy.deepcopy`` all walk a dict subclass through ``items()`` and are therefore copies (E-B/E-D).
+    The one legitimate serialiser in the tracked region is the snapshot write, and it is a boundary,
+    not a read: a test that routes nodes through it wraps the writer with ``plain``.
     """
     def __init__(self, data, seen: set, prefix=""):
         super().__init__(data); self._seen, self._prefix, self._written = seen, prefix, set()
@@ -111,8 +115,21 @@ class Recording(dict):
         self._seen.add(self._prefix + COPIED); return super().keys()
     def __iter__(self):
         self._seen.add(self._prefix + COPIED); return super().__iter__()
+    def items(self):
+        self._seen.add(self._prefix + COPIED); return super().items()
+    def values(self):
+        self._seen.add(self._prefix + COPIED); return super().values()
     def copy(self):
         self._seen.add(self._prefix + COPIED); return dict(super().items())
+
+    @classmethod
+    def plain(cls, value):
+        """``value`` with every Recording node replaced by a plain dict, noting nothing — the serialiser boundary."""
+        if isinstance(value, dict):
+            return {k: cls.plain(v) for k, v in dict.items(value)}
+        if isinstance(value, list):
+            return [cls.plain(v) for v in value]
+        return value
 
 
 def node_from_selection(tree: dict, typename: str | None = None, owners: dict | None = None, **override) -> dict:
@@ -476,6 +493,48 @@ class LinearClientTests(unittest.TestCase):
         self.assertLessEqual({("inboxUrl", ".get()"), ("emailedAt", ".setdefault()"), ("unsnoozedAt", ".pop()"), ("type", ".get()")}, reads)
         self.assertNotIn(("unknown", ".get()"), reads, "a bound call's string default is not a key")
         self.assertIn(("fallback", ".get()"), reads, "with no literal key, the second literal is reported: it may be the unbound form")
+
+    def test_recording_notes_enumeration_as_a_copy(self):
+        # k7 round 4 (E-B/E-D): ``keys()`` and iteration were noted as a copy, ``items()`` and
+        # ``values()`` were not — and ``json.dumps``, ``copy.copy`` and ``copy.deepcopy`` all walk a
+        # dict subclass through ``items()``, so a round trip to a plain dict and a read off THAT was
+        # invisible. Enumerating the node hands the code every key, including ones the fixture does
+        # not carry, so it is noted as COPIED — the same verdict as ``keys()`` — and the dynamic
+        # assertion fails rather than not know. Recording the iterated keys instead would be
+        # vacuous: every key a generated node carries is requested, so nothing would ever be noted.
+        tree, owners = _parse_selection(linear.NOTIFICATION_FIELDS)
+        evasions = {
+            "items": lambda n: [v for k, v in n.items() if k == "inboxUrl"],
+            "next(iter(items))": lambda n: next(iter(n.items())),
+            "values": lambda n: list(n.values()),
+            "json round trip, computed key": lambda n: json.loads(json.dumps(n)).get("inbox" + "Url"),
+            "copy.copy": lambda n: copy.copy(n).get("inboxUrl"),
+            "copy.deepcopy": lambda n: copy.deepcopy(n).get("inboxUrl"),
+        }
+        for name, read in evasions.items():
+            seen: set[str] = set()
+            read(Recording(node_from_selection(tree, "IssueNotification", owners, id="n1"), seen))
+            self.assertIn(COPIED, seen, f"{name}: enumerating the node was not noted as a copy")
+            with self.assertRaises(AssertionError, msg=f"{name} passed the dynamic assertion"):
+                self._assert_reads_within(seen, tree)
+        # the nested wrapper reports its own path
+        seen = set()
+        list(Recording({"issue": {"id": 1}}, seen)["issue"].items())
+        self.assertEqual(seen, {"issue", "issue." + COPIED})
+
+    def test_recording_plain_is_the_serialiser_boundary_and_notes_nothing(self):
+        # A snapshot write serialises the node, which is where the tracked region ENDS by design —
+        # everything downstream reads plain dicts and is the static half's business. The boundary
+        # is explicit: ``plain`` converts without noting a read, and a test that routes Recording
+        # nodes through a real snapshot write wraps the writer with it. Nothing else may bypass the
+        # wrapper: ``plain`` is the only way to enumerate a Recording node silently.
+        seen: set[str] = set()
+        node = Recording({"id": "n1", "issue": {"id": "i1", "state": {"type": "x"}}, "n": [{"k": 1}]}, seen)
+        node["issue"]                                       # wrap the child first, so a nested Recording is exercised
+        out = Recording.plain({"ok": True, "notifications": [node]})
+        self.assertEqual(out, {"ok": True, "notifications": [{"id": "n1", "issue": {"id": "i1", "state": {"type": "x"}}, "n": [{"k": 1}]}]})
+        self.assertEqual(seen, {"issue"})
+        self.assertIs(type(out["notifications"][0]), dict); self.assertIs(type(out["notifications"][0]["issue"]), dict)
 
     def test_static_scan_reaches_the_code_it_claims_to(self):
         # A scan over an empty scope passes vacuously; pin that it sees the real reads.
