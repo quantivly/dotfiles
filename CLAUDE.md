@@ -3365,12 +3365,97 @@ hyphen in every one. **Ask of a new guard not only "what does it reject" but "wh
 that nothing here exercises".** A permissive branch with no fixture is as unpinned as a missing
 one, and it fails in the direction that breaks working machines.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 304 at `3a3c662`; it was 291 at `a159bd9`, before
-the review). **13 mutants, 13 deaths**, every one dry-run for applicability first — one (sed's
-exit status) came back `find-string occurs 0 times` and was reported as a harness error rather
-than a survivor, which is the trap this file records costing two full sweeps, and the first eight
-were **re-run against the changed tree** rather than carried over, since a mutant measured
-against a previous version of the code proves nothing about this one.
+**A SECOND, INDEPENDENT PASS ASKED ONLY "WHICH OF THESE ROWS CANNOT FAIL?" AND FOUND TWO MORE
+SURVIVORS UNDER 304/0 — BOTH ON THE ARMED PATH.** Every raw-content negative in the suite sat on
+the NOT CHECKED arm, so a note that kept its prose and dumped the span *beside* it was invisible,
+and `_doctor_note` → `_doctor_bad` on the armed note was invisible too — that one makes
+`claude-doctor` exit 1 forever on every machine that has a chain configured. **When a block has
+two output arms, an assertion on one arm is not an assertion on the rule.** "Never print raw file
+content" was this change's one rule with no trade-off and it was enforced on one of the two paths
+that can print; the severity was pinned on the arm whose ⚠ had a row and not on the arm whose `·`
+did not. Enumerate the arms that can print, not the failure you happened to be thinking about.
+
+- **Two rows could not fail, and the REASON is the useful part.** The paired
+  `no_out "auto-switch armed"` on the sed-missing and truncated-at-bracket fixtures survived every
+  applicable mutant: the chain's unarmed state is **silence**, so there is no positive string to
+  forbid and no single mutation on those fixtures can produce one. The quarantine twin's
+  equivalent works only because its all-clear is a printed LINE. Both are deleted with that
+  reasoning in their place rather than labelled — a row that always passes reads as coverage. The
+  two that LOOK identical on the runaway and mid-member fixtures are kept, because those spans do
+  hold text and deleting the member class really does print `auto-switch armed`.
+- **A needle that CAN fail may still not be unique to the rule.** `p2` was measured failable here
+  and is printed by **nine other fixtures on their own pass paths**, so it was sound only because
+  this one fixture happens to create no `p2` profile. A `zzcanary` member that appears nowhere else
+  now sits beside it. The comment claiming "the two halves of the defect fail independently" was
+  also measured half-true and is corrected: the member needle subsumes the raw-assignment one.
+- **A MUTANT THAT DIES FOR THE WRONG REASON IS WORSE THAN ONE THAT CANNOT APPLY.** A mutation
+  written `_doctor_warn` → `_doctor_fail` was scored DIED on three rows. There is no
+  `_doctor_fail` in this repo — the emitter is `_doctor_bad`, and the counter `_DOCTOR_FAIL` is
+  what makes the wrong name plausible — so it replaced the emitter with an **undefined command**,
+  the line printed nothing, and the rows that failed were the ones asserting the message is
+  PRESENT. **An inapplicable mutation survives, which is expensive but sends you looking; this one
+  read as already covered, and a false all-clear is never investigated.** No gate this file had
+  sees it: find-string present ✓, bytes changed ✓, `zsh -n` ✓, because an undefined function is a
+  runtime failure and not a parse error. Two cheap gates do: assert `(( $+functions[<name>] ))`
+  for every function name the REPLACEMENT introduces (measured over all 15 mutants here, 0
+  offenders), and **attribute a death to a row whose SUBJECT is the mutated property** — all three
+  dead rows there were about message text and none about an exit code, which is this file's
+  "a needle must be unique to the RULE" applied to the mutation side.
+- **A row built on a false premise, withdrawn rather than shipped.** The second pass built a
+  cross-key independence row and then measured that the mutation which would justify it *cannot
+  change behaviour*: both readers run inside `$( … )`, so globals set there die with the subshell.
+  Recording the withdrawal, because a row resting on a false premise is exactly what such an audit
+  is for.
+
+**THE ROW WRITTEN FOR THAT GAP WAS DECORATION, AND A MISLEADING VARIABLE NAME IS WHY.** The
+mutant meant to prove the armed note cannot leak file content dumped `$cspan` — a variable whose
+name says span and whose contents are the reader's **validated member names**, `p1` and `p2`. It
+leaked nothing and **SURVIVED**, which reads as a missing row when the truth is the opposite:
+**no raw span is in scope on that path at all**, because the reader returns approved names only.
+So the paired `no_out` could not have failed either way. Three things came out of it, and the
+first is the one that generalises:
+
+- **A variable named for the wrong thing is a defect, not a style point.** It misled the person
+  who wrote both the mutant and the row — the same person who had just written the comment
+  explaining the invariant. Renamed to say what it holds, with the structural guarantee stated
+  once beside it: a leak there now needs a NEW file read, not a slip with an existing variable.
+  The mutant that reproduces *that* (`sed` re-read, dump the real span) dies on exactly one row,
+  by name.
+- **An adjacent-content canary was written and removed as unfailable, and the reason is worth
+  more than the row.** On a well-formed chain the span stops at the first `]`, so no neighbouring
+  line is in it; on a malformed one the odd-field and member checks refuse before anything
+  prints. For adjacent content to reach the *armed* note it must pass the member class — i.e. be
+  a bare name-shaped token, indistinguishable from a legitimate member, so no assertion could
+  tell them apart.
+- **Two mutants were misnamed in the same way**, and a misnamed mutant is a small lie in the
+  record: one "prints the raw span" actually dropped the prose and the join (it died, for that
+  reason), and the retired one could never die. Both are relabelled rather than deleted, because
+  a retired mutant with its reason is evidence and a silently dropped one is not.
+
+**The harness lesson got a PRODUCTION row, which is where it belonged.** The typo'd-emitter
+mutant is not just a harness hazard: the same typo in `claude.sh` makes that finding print
+**nothing**, never increments `_DOCTOR_FAIL`, and so gets the doctor's **exit code** wrong too —
+a silent failure inside the checker whose entire subject is silent failures, invisible to
+`zsh -n` and to the suite's own `$+functions` preflight, which lists the names the SUITE knows
+and not the ones `claude.sh` calls. A row now reads every `_doctor_*` call out of the file and
+asserts each resolves. It fires by name under the mutant (`calls undefined emitter(s):
+_doctor_fail`) while four message-text rows fail beside it — which is the fake-death shape, now
+with something in the output that names the real cause instead of leaving four rows to imply it.
+The applicability gate gained the same rule plus **one allowlisted exception**, declared by name
+with its reason, since the mutant proving the row works must introduce an undefined emitter on
+purpose.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 306 at `60d973c`; 304 at `3a3c662` before the row
+audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
+so the count went up by four and down by two, which a bare delta would hide). **16 mutants, 16 deaths, 0 survivors, 0 harness errors at `60d973c`** — and the
+whole set was re-run against that tree rather than carried over, three times, because a mutant
+measured against a previous version of the code proves nothing about this one. Twice that
+re-running paid: a rename left one mutant's find-string matching nothing (`find-string occurs 0
+times`, reported as a harness error and not a survivor), and the mutant written for the armed
+path's leak rule **survived**, which is what exposed the misleading variable name above. A
+seventeenth is **retired with its reason** rather than dropped — it dumped the names variable, so
+it could never die, and a retired mutant with a reason is evidence where a silently dropped one
+is a gap nobody can see.
 
 State tables: `scripts/test-claude-doctor.sh` (235 → 279 at `6661472`) and
 `scripts/test-claude-account-dirs.sh` (137 → 156; CLAUDE.md said 70, then 36, and both were
