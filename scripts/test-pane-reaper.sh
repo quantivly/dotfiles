@@ -106,8 +106,9 @@ envrun() {
         XDG_STATE_HOME="$TMPROOT/xdg" PANE_REAPER_PS_FILE="$SD/ps.txt" "$@"
 }
 event() { printf '{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1","agent_status":"%s"}}' "$1"; }
-hook() {
-    envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" HERDR_PLUGIN_EVENT_JSON="$(event "$1")" \
+hook() { hook_raw "$(event "$1")"; }
+hook_raw() {
+    envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" HERDR_PLUGIN_EVENT_JSON="$1" \
         sh "$PLUGIN/on-status-changed.sh"
 }
 recheck() { envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" sh "$PLUGIN/recheck.sh" "$@"; }
@@ -178,6 +179,13 @@ check "new turn: logged"                         "$(lastlog)"   "disarmed:new-tu
 reset; agent blocked ready false 9 T ""; seed_slot T:7 N1
 hook blocked
 check "blocked counts as a new turn"             "$(clears)"    "1"
+# The real payload carries state_labels, whose keys are free-form. Keys named
+# like the real ones, placed after them, must not win.
+reset; agent working ready false 9 T ""; seed_slot T:7 N1
+hook_raw '{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"working","agent":"claude","title":"t","display_agent":"Claude","state_labels":{"agent_status":"done","pane_id":"w9:p9"}}}'
+check "state_labels keys: the real pane is read" "$(grep -c '^agent get w1:p1$' "$SD/calls")" "1"
+check "state_labels keys: handled as working"    "$(clears)"    "1"
+check "state_labels keys: no timer"              "$(launches)"  "0"
 
 reset; agent working ready false 9 T ""; seed_slot T:7 N1
 printf '%s\n' '{"error":{"code":"server_unavailable","message":"x"}}' > "$SD/metadata-fails"

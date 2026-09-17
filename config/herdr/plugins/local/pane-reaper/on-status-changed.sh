@@ -11,12 +11,16 @@ PR_ROOT="${HERDR_PLUGIN_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)}"
 # shellcheck source=config/herdr/plugins/local/pane-reaper/lib.sh
 . "$PR_ROOT/lib.sh"
 
-ev="${HERDR_PLUGIN_EVENT_JSON:-}"
-# herdr JSON-escapes every string value, so these keys cannot be spoofed by a
-# terminal title.
-pane=$(printf '%s' "$ev" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p')
-status=$(printf '%s' "$ev" | sed -n 's/.*"agent_status":"\([^"]*\)".*/\1/p')
-[ -n "$pane" ] || exit 0
+# One jq call reads exactly .data.pane_id and .data.agent_status. The payload
+# also carries free-form fields (title, state_labels) whose keys a text match
+# could mistake for these; at ~2 events/min machine-wide one jq per event is
+# negligible. @tsv escapes any tab inside a value, so the split is exact.
+tab=$(printf '\t')
+parsed=$(printf '%s' "${HERDR_PLUGIN_EVENT_JSON:-}" |
+    jq -r '[.data.pane_id // "", .data.agent_status // ""] | @tsv' 2>/dev/null)
+pane=${parsed%%"$tab"*}
+status=${parsed#*"$tab"}
+[ -n "$pane" ] && [ -n "$status" ] || exit 0
 
 case "$status" in
     working|blocked)
