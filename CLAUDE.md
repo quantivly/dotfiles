@@ -2554,9 +2554,17 @@ Traps specific to the checker, each of which produced a green tick first:
   from anywhere those words appear to the next `]` **anywhere in the file**. It
   reported an armed chain on a machine whose chain was commented out, and printed a
   neighbouring line verbatim into a report that lands in transcripts, in the file
-  whose own header says NEVER PRINTS A CREDENTIAL. A `sed` *range* from an anchored
-  assignment to the first `]`, quitting there, is bounded by construction. Also
-  `fallback_chain = []` is configured, not armed.
+  whose own header says NEVER PRINTS A CREDENTIAL. Also `fallback_chain = []` is
+  configured, not armed.
+  **CORRECTED 2026-09-17 — this entry used to end "A `sed` *range* from an anchored
+  assignment to the first `]`, quitting there, is bounded by construction", and that
+  is FALSE.** A range ends at the first LINE carrying `]`, so it is bounded to a line
+  range and not to an assignment: on `fallback_chain = [` followed by
+  `profiles = [ "p1", "p2", ]` it takes the other array's bracket and the `*'"'*`
+  armed test passes on the other array's names. Measured, and it left the third fix to
+  this one match printing the neighbouring line anyway. The fix that does hold is the
+  interior check, recorded in "A standing `auth_broken` is reported" below; "bounded by
+  construction" was the sentence that made a fourth attempt necessary.
   **And do not read that as a description of this machine.** The chain here was
   `["quantivly-3","quantivly-1","quantivly-2"]` with a live daemon until 2026-09-08, while 15 of 21
   Claude processes had no `CLAUDE_CONFIG_DIR` at all and so read the very file the chain repoints —
@@ -3254,15 +3262,60 @@ Testing membership against the parsed name list is what makes the runaway unreac
 no precision the old test lacked, and saying otherwise would have shipped a defect that does not
 exist alongside a fix for one that does.
 
-**The remaining instance is `fallback_chain` in `claude-doctor`, and it is NOT fixed.** Measured
-2026-09-17 on `fallback_chain = [` followed by `profiles = [...]`: the span runs into the other
-array, the `*'"'*` test passes on ITS quoted names, and the doctor prints
+**The remaining instance was `fallback_chain` in `claude-doctor`. FIXED 2026-09-17, and it took
+a FOURTH attempt at one match.** Measured before the fix on `fallback_chain = [` followed by
+`profiles = [...]`: the span ran into the other array, the `*'"'*` test passed on ITS quoted
+names, and the doctor printed
 `auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]` — a neighbouring line quoted
 verbatim into a report that lands in transcripts, in the function whose own comment says that is
 the thing it must never do, while claiming an auto-switch is armed on a machine whose chain is
-empty. It is a NOTE rather than a decision, which is why it is recorded rather than bundled
-here: a different key, a different consumer, and it wants its own rows in
-`test-claude-doctor.sh`. Interior validation is the same four lines.
+deliberately empty. `_claude_fallback_chain` validates the interior and returns the member
+NAMES; the report is the doctor's own prose around them
+(`auto-switch armed: the chain walks p1, p2`), so no span reaches it at all.
+
+**The history is worth more than the fix.** A line-based `grep -oE` that never once fired against
+clauth's multi-line array; a `tr`-flattened file, which removed the only boundary the match had;
+then a bounded `sed` RANGE — and **a range ends at the first line carrying `]`, so it is bounded
+to a LINE RANGE and not to one assignment.** Each of the three was reported as closing the
+runaway, and the third carried a comment describing the runaway as a hazard it had already closed.
+**Terminating a span is not validating one**, and the interior is the only test that has ever told
+the two apart.
+
+**An unusable span is a ⚠ `NOT CHECKED`, not silence.** Saying nothing would let a genuinely armed
+chain go unreported in precisely the file state that hides it — an empty answer is never
+agreement. A ✗ would exit non-zero over a hand-edit of another tool's config, which is the
+permanently-red checker this file has now recorded seven times; it is avoided here by choosing the
+severity deliberately rather than by remembering to. It is the same severity the quarantine reader
+gives the same file being malformed, on purpose: two readers of one file must not disagree about
+what unreadable costs. **The row that had to ship with it runs the other way** — clauth omits the
+key entirely when no chain is configured, so an absent assignment must be silent on BOTH counts,
+or every machine without a fallback chain carries a permanent warning about a setting it has
+deliberately not set. That is the failure mode any new ⚠ path can introduce, and the reason the
+new arm has a row for the resting state and not only for the broken one.
+
+**`claude.sh` now holds ONE copy of the parse for TWO keys** — `_claude_toml_name_array`, called
+by `_claude_quarantined_profiles` and `_claude_fallback_chain`. That is the reverse of the
+decision made for the other two readers, for the reason those decisions were made: `zsh/zshrc.herdr`
+must be sourceable ALONE by a modular adopter and `scripts/claude-account-dirs.sh` is bash, but
+nothing separates `auth_broken` from `fallback_chain`, which sit forty lines apart in one file, and
+a verbatim copy differing by one word is the drift this file keeps paying for. The evidence it was
+worth doing is in the sweep rather than the argument: four of the eight mutants — the interior
+check, the closing-bracket test, sed's exit status and the absent-key return — each killed rows for
+**both** keys.
+
+**The mutation driver had the defect it was built to measure.** It scored a mutant `DIED` by
+grepping the suite's output for `✗`, and one row's own LABEL contains that character — "absent
+credential file is not a ✗" — so a mutant could have been recorded as killed by a row that passed.
+It was caught before it scored anything, by a `DIED` verdict whose failing-row list began with a
+`✓`. **A needle must be unique to the thing it measures**: this file's rule for checkers, met in
+the harness that checks them. It reads the `=== N passed, M failed ===` summary now, and refuses to
+score a mutant whose find-string is absent, whose replacement is a byte-for-byte no-op, or that
+does not parse — all three as harness errors, never as results.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 291 at `a159bd9`). **8 mutants, 8 deaths**, every one
+dry-run for applicability first — and one of them (sed's exit status) came back
+`find-string occurs 0 times` and was reported as a harness error rather than a survivor, which is
+the trap this file records costing two full sweeps.
 
 State tables: `scripts/test-claude-doctor.sh` (235 → 279 at `6661472`) and
 `scripts/test-claude-account-dirs.sh` (137 → 156; CLAUDE.md said 70, then 36, and both were
