@@ -52,6 +52,18 @@ esac
 SH
 chmod +x "$STUBBIN/herdr"
 
+# A `chmod` that always fails, put ahead of the real one on PATH for exactly one
+# row: pr_slot_write() re-asserts 0700 on the slot dir before it writes, which
+# would silently undo a plain `chmod 500` before the write is even attempted.
+# Shadowing `chmod` is what makes that dir genuinely stay unwritable.
+FAKEBIN="$TMPROOT/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/chmod" <<'SH'
+#!/bin/sh
+exit 1
+SH
+chmod +x "$FAKEBIN/chmod"
+
 reset() {
     rm -rf "$SD" "$TMPROOT/slots" "$TMPROOT/xdg" "$TMPROOT/launch"
     mkdir -p "$SD"; : > "$SD/calls"; : > "$SD/ps.txt"
@@ -86,6 +98,8 @@ hook() {
         sh "$PLUGIN/on-status-changed.sh"
 }
 recheck() { envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" sh "$PLUGIN/recheck.sh" "$@"; }
+recheck_spm() { local spm=$1; shift; envrun PANE_REAPER_SECONDS_PER_MIN="$spm" PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" sh "$PLUGIN/recheck.sh" "$@"; }
+recheck_write_denied() { envrun PANE_REAPER_LAUNCH_LOG="$TMPROOT/launch" PATH="$FAKEBIN:$PATH" sh "$PLUGIN/recheck.sh" "$@"; }
 seed_slot() { mkdir -p "$TMPROOT/slots"; printf '%s %s\n' "$1" "$2" > "$TMPROOT/slots/w1_p1"; }
 slot()     { cat "$TMPROOT/slots/w1_p1" 2>/dev/null; }
 lastlog()  { tail -n1 "$TMPROOT/xdg/pane-reaper/log" 2>/dev/null | cut -d' ' -f3-; }
@@ -122,6 +136,15 @@ done
 reset; agent "done" ready false 7 T 2
 hook "done"
 check "pane_reaper_min=2 is honoured"            "$(lastlaunch_min)" "2"
+reset; agent "done" ready false 7 T "08"
+hook "done"
+check "pane_reaper_min=08 normalizes to 8"       "$(lastlaunch_min)" "8"
+reset; agent "done" ready false 7 T "00"
+hook "done"
+check "pane_reaper_min=00 normalizes to 0"       "$(lastlaunch_min)" "0"
+reset; agent "done" ready false 7 T "12345"
+hook "done"
+check "pane_reaper_min=12345 (too long) falls back to default 5" "$(lastlaunch_min)" "5"
 
 echo
 echo "=== hook: disarm on a new turn ==="
@@ -209,12 +232,28 @@ base; workspace 1 false; recheck w1:p1 T 7 N1 0
 check "last pane of a primary checkout: skip"    "$(lastlog)"   "skip:primary-workspace-last-pane"
 base; workspace 1 true; recheck w1:p1 T 7 N1 0
 check "last pane of a linked worktree: closed"   "$(closes)"    "1"
+base; rm -f "$SD/workspace.json"; recheck w1:p1 T 7 N1 0
+check "workspace unreadable: skip"               "$(lastlog)"   "skip:workspace-unreadable"
+check "workspace unreadable: no close"           "$(closes)"    "0"
 base; printf '{"error":{"code":"confirmation_required","message":"x"}}\n' > "$SD/close-fails"
 recheck w1:p1 T 7 N1 0
 check "close refused: logged with its code"      "$(lastlog)"   "close-failed:confirmation_required"
 check "close refused: tried once"                "$(closes)"    "1"
 base; recheck w1:p1 T 7 N1 'x;1'
 check "non-numeric minutes: herdr not called"    "$(ncalls)"    "0"
+
+base; recheck_spm 0 w1:p1 T 7 N1 08
+check "minutes '08' (leading zero): no crash, closed" "$(closes)" "1"
+base; recheck_spm 09 w1:p1 T 7 N1 0
+check "seconds-per-min '09' (leading zero): no crash, closed" "$(closes)" "1"
+
+base; agent "done" ready true 7 T ""
+chmod 500 "$TMPROOT/slots"
+recheck_write_denied w1:p1 T 7 N1 0
+chmod 700 "$TMPROOT/slots"
+check "unwritable slot dir: rearm-failed logged" "$(lastlog)"   "rearm-failed:focused"
+check "unwritable slot dir: no new timer"        "$(launches)"  "0"
+check "unwritable slot dir: slot unchanged"      "$(slot)"      "T:7 N1"
 
 # Task 3 appends the detach row here.
 

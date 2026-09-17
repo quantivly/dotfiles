@@ -12,9 +12,16 @@ PR_ROOT="${HERDR_PLUGIN_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)}"
 
 [ $# -eq 5 ] || exit 0
 pane=$1 term=$2 seq=$3 nonce=$4 min=$5
-case "$min" in ''|*[!0-9]*) exit 0 ;; esac
-spm="${PANE_REAPER_SECONDS_PER_MIN:-60}"
-case "$spm" in ''|*[!0-9]*) spm=60 ;; esac
+# 1-4 decimal digits only, then normalized (leading zeros stripped) before
+# either value reaches `$(( ))`: dash reads a leading-zero numeral as octal and
+# aborts on an invalid digit (e.g. "08"), which would crash this script before
+# it could log or reach the nonce/finish machinery.
+case "$min" in
+    [0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]) ;;
+    *) exit 0 ;;
+esac
+min=$(pr_uint "$min" 0)
+spm=$(pr_uint "${PANE_REAPER_SECONDS_PER_MIN:-60}" 60)
 
 sleep $((min * spm))
 
@@ -31,10 +38,13 @@ skip() {
 }
 rearm() {
     _n=$(pr_nonce)
-    pr_slot_write "$pane" "$term:$seq" "$_n" || finish
-    pr_log "$pane" "rearm:$1"
-    pr_launch_timer "$pane" "$term" "$seq" "$_n" "$min"
-    exit 0
+    if pr_slot_write "$pane" "$term:$seq" "$_n"; then
+        pr_log "$pane" "rearm:$1"
+        pr_launch_timer "$pane" "$term" "$seq" "$_n" "$min"
+        exit 0
+    fi
+    pr_log "$pane" "rearm-failed:$1"
+    finish
 }
 
 a='.result.agent'
@@ -60,7 +70,7 @@ linked=$(printf '%s' "$wjson" | jq -r '.result.workspace.worktree.is_linked_work
 pr_has_bash_children "$pane" && rearm bash-children
 [ "$(pr_field "$json" "$a.focused")" = true ] && rearm focused
 
-if out=$("$PR_HERDR" pane close "$pane" 2>&1); then
+if out=$("$PR_HERDR" pane close "$pane" 2>/dev/null); then
     pr_log "$pane" closed
 else
     code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)

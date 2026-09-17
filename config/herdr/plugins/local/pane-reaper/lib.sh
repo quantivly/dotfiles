@@ -57,12 +57,24 @@ pr_field() {
     printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null
 }
 
-# Token values are arbitrary strings: only an all-digit value is a grace.
-pr_minutes() {
+# pr_uint <raw> <default>: <raw> normalized to a decimal literal safe for `$(( ))`
+# when it is 1-4 decimal digits (leading zeros stripped: "08" -> "8", "00" ->
+# "0"), otherwise <default> verbatim. A leading-zero numeral left unstripped
+# makes dash's arithmetic parser read it as octal and abort on an invalid digit
+# (e.g. "08"), which would crash the caller before it could log anything.
+pr_uint() {
     case "$1" in
-        ''|*[!0-9]*) printf '%s\n' "$PR_DEFAULT_MIN" ;;
-        *)           printf '%s\n' "$1" ;;
+        [0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])
+            _v=$(printf '%s' "$1" | sed 's/^0*//')
+            printf '%s\n' "${_v:-0}"
+            ;;
+        *) printf '%s\n' "$2" ;;
     esac
+}
+
+# Token values are arbitrary strings: only a short all-digit value is a grace.
+pr_minutes() {
+    pr_uint "$1" "$PR_DEFAULT_MIN"
 }
 
 pr_nonce() {
