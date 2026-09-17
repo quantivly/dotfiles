@@ -175,6 +175,12 @@ PKG = Path(__file__).resolve().parent.parent / "rabota"
 ENVELOPE_FUNCTIONS = {"query", "paginate"}
 SNAPSHOT_KEY = "notifications"          # the key a consumer reads the nodes off (the snapshot, or sync's payload)
 SOURCE_FUNCTION = "inbox_notifications"  # the one function that builds them
+# Envelope keys: names of CONTAINERS a consumer reads nodes out of, never a node's own field — the
+# snapshot's top-level keys (what ``sync_linear`` writes) and the GraphQL reply's own plumbing. Reading
+# one is how a consumer reaches the notifications at all, so it is not "a field outside the selection".
+# A named set rather than a special case, so the same rule serves if this scan is ever pointed at a raw
+# reply; a test pins that no member is also a selected field, which is what keeps it from hiding a read.
+ENVELOPE_KEYS = {SNAPSHOT_KEY, "issues", "viewer", "data", "nodes", "edges", "pageInfo"}
 
 
 def _literal_key_reads(func_or_module) -> list[tuple[int, str, str]]:
@@ -277,8 +283,8 @@ def scanned_consumers(pkg: Path = PKG) -> list[tuple[Path, list[ast.AST]]]:
 
 
 def notification_field_reads_outside_selection(tree: dict, pkg: Path = PKG) -> list[str]:
-    """Every literal key read in a consumer that is neither requested nor assigned by that consumer."""
-    allowed = tree_names(tree)
+    """Every literal key read in a consumer that is neither requested, an envelope key, nor assigned by that consumer."""
+    allowed = tree_names(tree) | ENVELOPE_KEYS
     bad = []
     for path, scopes in scanned_consumers(pkg):
         derived = set().union(*(_literal_key_writes(s) for s in scopes)) if scopes else set()
@@ -317,6 +323,27 @@ def run_inboxpeek(ctx):
 
 
 cli.register("inboxpeek", lambda sub: sub.add_parser("inboxpeek"), lambda ns: run_inboxpeek(Context.from_namespace(ns)))
+'''
+
+
+# A CORRECT consumer — the round-4 gate's L mutant. It reaches the nodes through the snapshot's
+# envelope key and reads only fields the selection requests; the static half must pass it clean.
+# Written into a COPY of the package, like INBOXPEEK.
+INBOXLIST = '''\
+"""List the inbox: a legitimate consumer of the snapshot (the guard's false-positive control)."""
+from rabota import cli, snapshots
+from rabota.context import Context
+
+
+def run_inboxlist(ctx):
+    snap = snapshots.read(ctx.state_dir, "linear")
+    rows = []
+    for n in snap["notifications"]:
+        rows.append((n["id"], n.get("title"), (n.get("issue") or {}).get("identifier")))
+    return {"rows": rows, "count": len(snap.get("notifications", [])), "present": "notifications" in snap}
+
+
+cli.register("inboxlist", lambda sub: sub.add_parser("inboxlist"), lambda ns: run_inboxlist(Context.from_namespace(ns)))
 '''
 
 
@@ -479,6 +506,28 @@ class LinearClientTests(unittest.TestCase):
             self.assertTrue(any("[] reads 'unsnoozedAt'" in b for b in peek), peek)       # same function, [] spelling
             self.assertTrue(any("[] reads 'emailedAt'" in b for b in peek), peek)         # E-I, helper handed the node
             self.assertFalse([b for b in peek if "totals" in b], f"a function holding no notification was scanned: {peek}")
+
+    def test_reading_the_snapshot_envelope_is_not_a_field_read(self):
+        # k7 round 4 (L): ``snap["notifications"]`` names the CONTAINER the nodes sit in, not a field of a
+        # node, and the first correct consumer in the package was reported for it — the checker-refuses-
+        # correct-code shape CLAUDE.md records. A consumer that reaches the nodes through the envelope
+        # (``[]``, ``.get`` and ``in`` spellings alike) and reads only requested fields is clean.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "rabota"
+            shutil.copytree(PKG, pkg, ignore=shutil.ignore_patterns("__pycache__"))
+            (pkg / "commands" / "inboxlist.py").write_text(INBOXLIST)
+            scanned = {path.relative_to(pkg): scopes for path, scopes in scanned_consumers(pkg)}
+            self.assertTrue(scanned.get(Path("commands/inboxlist.py")), "the control module was not scanned — a clean result would be vacuous")
+            bad = notification_field_reads_outside_selection(selection_tree(linear.NOTIFICATION_FIELDS), pkg)
+            self.assertEqual(bad, [], "a correct consumer was refused")
+
+    def test_envelope_keys_name_no_selected_field(self):
+        # The envelope allowance is a named set, and this is what keeps it from widening the guard: an
+        # envelope key can never ALSO be a field the selection requests, so allowing it cannot hide a
+        # real unrequested read. The snapshot key itself is one, or the L control above is unreachable.
+        self.assertIn(SNAPSHOT_KEY, ENVELOPE_KEYS)
+        overlap = ENVELOPE_KEYS & tree_names(selection_tree(linear.NOTIFICATION_FIELDS))
+        self.assertEqual(overlap, set(), "an envelope key is also a selected field: the allowance would swallow a real read")
 
     def test_static_scan_sees_the_unbound_method_spelling(self):
         # k7 round 4 (E-C): ``dict.get(n, "inboxUrl")`` is the same read as ``n.get("inboxUrl")`` with
