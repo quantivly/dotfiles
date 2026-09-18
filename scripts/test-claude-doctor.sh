@@ -2351,6 +2351,45 @@ else
     bad "claude.sh calls undefined emitter(s):$EMIT_BAD — those findings print nothing"
 fi
 
+# LEGAL TOML THIS READER DELIBERATELY REFUSES, pinned so the refusal is a
+# DECISION and not an accident. All three shapes below are valid TOML that a
+# hand-edit can produce and that clauth never writes, and all three come back
+# rc=1 -> ⚠ NOT CHECKED. Nothing asserted that until now, so a future edit could
+# start accepting a comment-bearing array and no row would notice — and the
+# direction that matters is the other one: silently ACCEPTING a shape the parse
+# was never designed for is how a runaway span gets read as a member list.
+#
+# Refusing is cheap HERE and the asymmetry is the whole argument: this consumer
+# is a DISPLAY, so a conservative refusal costs one sentence of report and moves
+# no account, changes no exit code. The same refusal in the picker would cost
+# account selection, which is why that reader's malformed-list rule is the
+# opposite way round (exclude nobody).
+new_home t1; write_cred
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = [ # note\n    "a",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a comment inside the array is NOT CHECKED, not read" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as armed"                      "auto-switch armed"
+want_out "...and the message names a comment as a cause"        "holds a comment"
+
+new_home t2; write_cred
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = [\n#   "a",\n    "b",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a commented-out member is NOT CHECKED" \
+         "could not read clauth's fallback_chain"
+no_out   "...and the surviving member is not reported as the chain" "the chain walks b"
+
+new_home t3; write_cred
+mkdir -p "$FHOME/.clauth"
+printf "fallback_chain = ['a', 'b']\n" > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "TOML literal strings are NOT CHECKED, never silently empty" \
+         "could not read clauth's fallback_chain"
+no_out   "...and are not read as an unconfigured chain"          "auto-switch armed"
+want_out "...and the message names a literal string as a cause"  "'literal' strings"
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
