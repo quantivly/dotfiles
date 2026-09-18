@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The deploy, `safe.directory` and CI/CD evidence left CLAUDE.md, verbatim (DO-626).** 48,031
+  chars moved: "The checkout IS the deployment" and the DO-589 `safe.directory` write-up to
+  `docs/DOTFILES_DEPLOY.md`, and "CI/CD Testing" — the DO-608 apt outage, the seventeen defects
+  three review rounds found in one checker under a green suite, the YAML-parser rewrite and the
+  mutation rounds — to `docs/REPO_CHECKS.md`. CLAUDE.md is now 85,140 characters. Both sections are
+  proven identical to `main`'s once the one link rewrite and the heading promotions are undone;
+  `check-doc-tokens.sh`: 85 tokens, 0 lost. What stayed inline is what an agent *runs*: the deploy
+  procedure as a command block (fetch, check the incoming diff against dirty paths,
+  `merge --ff-only`, `./install` — never `git pull`, never `git stash`), the worktree convention,
+  "the merge record decides whether a branch landed", the run-locally block, the apt-install rule,
+  and the row-quality rules that recur across every guard. The heading "The checkout IS the
+  deployment" stays in CLAUDE.md because the only inbound anchor in the repo points at it.
+
 - **CLAUDE.md is under Claude Code's 150k warning: the herdr section moved to its own maintainer
   doc, verbatim (DO-625).** 47,594 chars went to `docs/HERDR_INTERNALS.md` — install paths, the unit
   and its drop-in, the sidebar publisher, every trap with its evidence — and CLAUDE.md is now
