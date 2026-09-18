@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CLAUDE.md is under Claude Code's 150k warning: the herdr section moved to its own maintainer
+  doc, verbatim (DO-625).** 47,594 chars went to `docs/HERDR_INTERNALS.md` — install paths, the unit
+  and its drop-in, the sidebar publisher, every trap with its evidence — and CLAUDE.md is now
+  129,299 characters (from 353,845 two PRs ago). The plan said to *merge* this into
+  `docs/HERDR_GUIDE.md` to avoid a third copy; **measured first, that premise was false**: only
+  1.6% of the section's 8-word runs (119 of 7,358) and 4 of its 100 bold claims appear in the
+  guide. They are two documents for two readers — the guide for a teammate adopting herdr, the
+  section a maintainer's record of traps — and merging would have buried 48k of forensics in the
+  adopter guide. So it moved to its own page, linked from CLAUDE.md and from the guide, and the copy
+  count is unchanged. Proven identical to `main`'s section once the one link rewrite is undone;
+  `check-doc-tokens.sh`: 100 tokens, 0 lost. Thirteen operative rules stay inline (never run bare
+  `herdr`, never restart the server from a pane, never `reenable` a dotbot unit, close what you
+  spawn but never a teammate's pane, and so on).
+
 - **The Claude Code accounts section left CLAUDE.md for `docs/`, verbatim, and its rules stayed
   (DO-622).** 180,896 of CLAUDE.md's 353,845 chars moved to `docs/CLAUDE_ACCOUNTS.md` (the
   credential mechanism and its incidents) and `docs/CLAUDE_ACCOUNT_PICKER.md` (the picker and the
