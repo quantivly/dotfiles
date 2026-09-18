@@ -535,6 +535,22 @@ _claude_quarantine_scan() {
     # this one did not.
     [[ -z "${parts[i]//[$' \t\r\n,']/}" ]] || return 1
   done
+  # A MEMBER MUST LOOK LIKE A NAME. Checking the odd fields validates what sits
+  # BETWEEN the names and never a name: a span truncated MID-MEMBER flips quote
+  # parity, so a neighbouring assignment lands in an EVEN field and is collected.
+  # The class is clauth's own (`validate_profile_name`: letters, digits and
+  # - _ . @ +). Its own pass BEFORE the collect loop, so a refusal never leaves a
+  # partial list behind.
+  #
+  # ADDED WITH THE claude.sh TWIN, not after it. The doctor's reader was fixed
+  # first and this one was not, which made three readers give three answers for
+  # one file — measured, the doctor said NOT CHECKED while this returned 0 and
+  # the picker's malformed-list warning therefore never fired. The `<=` bound is
+  # deliberate: with an odd number of quotes the runaway lands in the LAST even
+  # field, and `<` drops exactly that one (measured against the twin).
+  for (( i = 2; i <= ${#parts}; i += 2 )); do
+    [[ -z "${parts[i]//[A-Za-z0-9._@+-]/}" ]] || return 1
+  done
   for (( i = 2; i <= ${#parts}; i += 2 )); do
     [[ -n "${parts[i]}" ]] && _CQ_NAMES+=( "${parts[i]}" )
   done

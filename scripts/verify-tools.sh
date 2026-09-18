@@ -794,8 +794,19 @@ else
     # appeared only as a NAME in HERDR_SERVER_DEPS -- so it was a new dependency
     # in a checker, "a new way for a check to go quiet"; and that module is
     # 3.11+, while Ubuntu 20.04 (the first outside adopter's box, named in
-    # CLAUDE.md) ships 3.8. sed is already used throughout, and the range is the
-    # same bounded technique claude-doctor uses for `fallback_chain`.
+    # CLAUDE.md) ships 3.8. sed is already used throughout.
+    #
+    # This comment used to add "the same bounded technique claude-doctor uses
+    # for `fallback_chain`". DO NOT reinstate that: claude-doctor no longer uses
+    # it, because a range ending at the first line carrying `]` is bounded to a
+    # LINE RANGE and not to one assignment, and it took the other array's
+    # bracket. A range is the right tool HERE for a reason that does not
+    # transfer -- this is a presence test over a file whose shape we control,
+    # with a column-0 end anchor (see below), not an attempt to trust a span's
+    # contents. Where the contents matter, validate the interior AND every
+    # member: `_claude_toml_name_array` in zsh/functions/claude.sh. Both halves,
+    # deliberately — the interior check alone shipped first and did NOT hold, so
+    # naming only it here would point at the same half-technique again.
     #
     # The state-table row for this greps for the import, so do not name it
     # literally here -- the row would then match this very comment.

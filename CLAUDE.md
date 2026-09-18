@@ -2554,9 +2554,20 @@ Traps specific to the checker, each of which produced a green tick first:
   from anywhere those words appear to the next `]` **anywhere in the file**. It
   reported an armed chain on a machine whose chain was commented out, and printed a
   neighbouring line verbatim into a report that lands in transcripts, in the file
-  whose own header says NEVER PRINTS A CREDENTIAL. A `sed` *range* from an anchored
-  assignment to the first `]`, quitting there, is bounded by construction. Also
-  `fallback_chain = []` is configured, not armed.
+  whose own header says NEVER PRINTS A CREDENTIAL. Also `fallback_chain = []` is
+  configured, not armed.
+  **CORRECTED 2026-09-17 — this entry used to end "A `sed` *range* from an anchored
+  assignment to the first `]`, quitting there, is bounded by construction", and that
+  is FALSE.** A range ends at the first LINE carrying `]`, so it is bounded to a line
+  range and not to an assignment: on `fallback_chain = [` followed by
+  `profiles = [ "p1", "p2", ]` it takes the other array's bracket and the `*'"'*`
+  armed test passes on the other array's names. Measured, and it left the third fix to
+  this one match printing the neighbouring line anyway. "Bounded by construction" was the
+  sentence that made a fourth attempt necessary — and the fourth, interior validation, did
+  not hold either: it checked the separators BETWEEN the names and never a name. What holds
+  is the interior check PLUS a member class, the fifth attempt, recorded in "A standing
+  `auth_broken` is reported" below. Naming only the interior check here, as this paragraph
+  did until 2026-09-18, points the next reader at the same half-technique.
   **And do not read that as a description of this machine.** The chain here was
   `["quantivly-3","quantivly-1","quantivly-2"]` with a live daemon until 2026-09-08, while 15 of 21
   Claude processes had no `CLAUDE_CONFIG_DIR` at all and so read the very file the chain repoints —
@@ -3254,15 +3265,325 @@ Testing membership against the parsed name list is what makes the runaway unreac
 no precision the old test lacked, and saying otherwise would have shipped a defect that does not
 exist alongside a fix for one that does.
 
-**The remaining instance is `fallback_chain` in `claude-doctor`, and it is NOT fixed.** Measured
-2026-09-17 on `fallback_chain = [` followed by `profiles = [...]`: the span runs into the other
-array, the `*'"'*` test passes on ITS quoted names, and the doctor prints
+**The remaining instance was `fallback_chain` in `claude-doctor`. FIXED 2026-09-17, and it took
+a FIFTH attempt at one match.** Measured before the fix on `fallback_chain = [` followed by
+`profiles = [...]`: the span ran into the other array, the `*'"'*` test passed on ITS quoted
+names, and the doctor printed
 `auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]` — a neighbouring line quoted
 verbatim into a report that lands in transcripts, in the function whose own comment says that is
 the thing it must never do, while claiming an auto-switch is armed on a machine whose chain is
-empty. It is a NOTE rather than a decision, which is why it is recorded rather than bundled
-here: a different key, a different consumer, and it wants its own rows in
-`test-claude-doctor.sh`. Interior validation is the same four lines.
+deliberately empty. `_claude_fallback_chain` validates the interior AND every member, then
+returns the member NAMES; the report is the doctor's own prose around them
+(`auto-switch armed: the chain walks p1, p2`), so no span reaches it at all.
+
+**The history is worth more than the fix.** A line-based `grep -oE` that never once fired against
+clauth's multi-line array; a `tr`-flattened file, which removed the only boundary the match had;
+then a bounded `sed` RANGE — and **a range ends at the first line carrying `]`, so it is bounded
+to a LINE RANGE and not to one assignment.** Each of the three was reported as closing the
+runaway, and the third carried a comment describing the runaway as a hazard it had already closed.
+**Terminating a span is not validating one**, and the interior is the only test that has ever told
+the two apart.
+
+**An unusable span is a ⚠ `NOT CHECKED`, not silence.** Saying nothing would let a genuinely armed
+chain go unreported in precisely the file state that hides it — an empty answer is never
+agreement. A ✗ would exit non-zero over a hand-edit of another tool's config, which is the
+permanently-red checker this file has now recorded seven times; it is avoided here by choosing the
+severity deliberately rather than by remembering to. It is the same severity the quarantine reader
+gives the same file being malformed, on purpose: two readers of one file must not disagree about
+what unreadable costs. **The row that had to ship with it runs the other way** — an absent assignment must be silent on BOTH counts,
+or every machine without a fallback chain carries a permanent warning about a setting it has
+deliberately not set. That is the failure mode any new ⚠ path can introduce, and the reason the
+new arm has a row for the resting state and not only for the broken one.
+
+**`claude.sh` now holds ONE copy of the parse for TWO keys** — `_claude_toml_name_array`, called
+by `_claude_quarantined_profiles` and `_claude_fallback_chain`. That is the reverse of the
+decision made for the other two readers, for the reason those decisions were made: `zsh/zshrc.herdr`
+must be sourceable ALONE by a modular adopter and `scripts/claude-account-dirs.sh` is bash, but
+nothing separates `auth_broken` from `fallback_chain`, which sit forty lines apart in one file, and
+a verbatim copy differing by one word is the drift this file keeps paying for. The evidence it was
+worth doing is in the sweep rather than the argument: four of the eight mutants — the interior
+check, the closing-bracket test, sed's exit status and the absent-key return — each killed rows for
+**both** keys.
+
+**The mutation driver had the defect it was built to measure.** It scored a mutant `DIED` by
+grepping the suite's output for `✗`, and one row's own LABEL contains that character — "absent
+credential file is not a ✗" — so a mutant could have been recorded as killed by a row that passed.
+It was caught before it scored anything, by a `DIED` verdict whose failing-row list began with a
+`✓`. **A needle must be unique to the thing it measures**: this file's rule for checkers, met in
+the harness that checks them. It reads the `=== N passed, M failed ===` summary now, and refuses to
+score a mutant whose find-string is absent, whose replacement is a byte-for-byte no-op, or that
+does not parse — all three as harness errors, never as results.
+
+**AND THE FIX DID NOT ESTABLISH ITS OWN INVARIANT. An independent review found that under a
+291-check green suite and an 8-of-8 mutation sweep** — which is the fifth attempt at this one
+match, and the entry that earns the section. **Validating the interior validated only the ODD
+fields of the `"`-split: what sits BETWEEN the names, and never a name.** A span truncated
+MID-MEMBER flips quote parity, so the neighbouring assignment lands in an EVEN field and is
+emitted as a member. Measured against the fix, `fallback_chain = ["` over `profiles = ["` printed
+`auto-switch armed: the chain walks profiles = [` — both halves of the defect the PR existed to
+remove, reproduced by it — and on `auth_broken` the same span reached a **remedy**:
+`Do NOT run 'clauth login profiles = ['`, advice built out of raw file content. All four readers
+of this shape shared the hole, and **all three that parse it now carry the member class** —
+`claude.sh` (both keys), `_claude_quarantine_scan` in `zsh/zshrc.herdr` and
+`profile_is_quarantined` in `scripts/claude-account-dirs.sh`, in one change. Fixing only the
+doctor is what a third pass caught: for one round the three gave **three answers to one file**,
+the doctor saying NOT CHECKED while the picker returned 0 over a list it could not validate and
+its malformed-list warning therefore never fired. The catastrophic direction was never reachable
+— a bogus member matches no registered profile, confirmed independently over thousands of
+randomised malformed files — so what the divergence cost was LOUDNESS, which is the entire
+purpose of the NOT CHECKED state. **The PR that fixes one reader owns the divergence it creates**,
+so this belonged here and not in a follow-up.
+
+The bash reader's copy is **unkillable through its call site and is labelled rather than
+counted**: measured, `profile_is_quarantined <real name>` answers 1 with the class and without
+it, because the only query whose answer moves is the bogus member itself, and no caller passes
+that. It is kept for the reason the file gives for having three copies at all — one rule in three
+languages — and because a future caller that ENUMERATES rather than tests membership would
+inherit the hole in silence. Its row therefore probes the FUNCTION'S CONTRACT directly rather
+than its behaviour, which is the only thing that can fail.
+
+**The general rule, which is the thing to carry: a parity-based parse is only as validated as its
+UNCHECKED fields.** Splitting on a delimiter and checking alternate fields feels total and is
+half a check — an unterminated delimiter renumbers every field after it, so the half you did not
+check becomes the half that corruption controls. The fix is one more pass: every member must
+match clauth's own name class (`validate_profile_name`: letters, digits and `- _ . @ +`), as
+**its own loop before the emit loop**, because folding it into the emit loop would print the good
+members before refusing — a partial emission *and* a `return 1`.
+
+Four more from the same review, each now a row and a dead mutant:
+
+- **The severity was defended in four sentences and pinned by nothing.** `_doctor_warn` →
+  `_doctor_bad` survived all 291 checks, and measured, it flips `claude-doctor` to rc 1
+  permanently on any malformed `profiles.toml` — the permanently-red checker, self-inflicted by
+  the arm written to avoid it. **If a comment defends a choice by name, a row must measure the
+  choice**; no `want_rc` in the suite touched a malformed `profiles.toml`. The row needs a
+  fixture carrying no ✗ of its own, or it cannot fail.
+- **A copied comment is a copied CLAIM, and factoring the code does not factor the claims.**
+  "clauth omits the key entirely when the list is empty" is verified for `auth_broken` (serde
+  `skip_serializing_if`) and **false for `fallback_chain`**, which has no such attribute and sits
+  in the live file as `fallback_chain = []` — measured 2026-09-17, one such assignment present
+  and zero `auth_broken`. It was copied from the quarantine reader along with the parse, so the
+  drift the sharing removed from the code reappeared in the prose, and it was the stated
+  rationale for a row labelled "THE RESTING STATE OF THIS MACHINE" whose fixture is a state this
+  machine is not in.
+- **Two guards are genuinely unkillable and are now labelled as such**: the `-r` test (sed's own
+  status already returns 1 for an unreadable file) and the opening-bracket test (with no `[` to
+  strip, the key name itself lands in odd field 1, which is never clean). The author had labelled
+  exactly one such site and left these two reading as coverage.
+- **The remedy named two causes out of four.** On the `sed`-missing path — which this PR gave its
+  own row — the file is fine and `PATH` is not, so the reader was sent to inspect another tool's
+  config over a `PATH` fault: the "the remedy the guard names did not remedy" class. A comment
+  inside the array and TOML literal `'single-quoted'` strings are legal and are refused, so the
+  message says so rather than letting a hand-edit look like a truncation.
+
+**And one the review did not find, caught while writing the mutant for the fix: the new check was
+WIDER than any fixture reached.** The member class allows `- _ . @ +` and every row in the suite
+named its profiles `p1`/`p2`, so narrowing it to `[A-Za-z0-9]` would have survived everything
+while refusing this machine's own file — the live profiles are `quantivly-3`, `personal-1`, a
+hyphen in every one. **Ask of a new guard not only "what does it reject" but "what does it accept
+that nothing here exercises".** A permissive branch with no fixture is as unpinned as a missing
+one, and it fails in the direction that breaks working machines.
+
+**A SECOND, INDEPENDENT PASS ASKED ONLY "WHICH OF THESE ROWS CANNOT FAIL?" AND FOUND TWO MORE
+SURVIVORS UNDER 304/0 — BOTH ON THE ARMED PATH.** Every raw-content negative in the suite sat on
+the NOT CHECKED arm, so a note that kept its prose and dumped the span *beside* it was invisible,
+and `_doctor_note` → `_doctor_bad` on the armed note was invisible too — that one makes
+`claude-doctor` exit 1 forever on every machine that has a chain configured. **When a block has
+two output arms, an assertion on one arm is not an assertion on the rule.** "Never print raw file
+content" was this change's one rule with no trade-off and it was enforced on one of the two paths
+that can print; the severity was pinned on the arm whose ⚠ had a row and not on the arm whose `·`
+did not. Enumerate the arms that can print, not the failure you happened to be thinking about.
+
+- **Two rows could not fail, and the REASON is the useful part.** The paired
+  `no_out "auto-switch armed"` on the sed-missing and truncated-at-bracket fixtures survived every
+  applicable mutant: the chain's unarmed state is **silence**, so there is no positive string to
+  forbid and no single mutation on those fixtures can produce one. The quarantine twin's
+  equivalent works only because its all-clear is a printed LINE. Both are deleted with that
+  reasoning in their place rather than labelled — a row that always passes reads as coverage. The
+  two that LOOK identical on the runaway and mid-member fixtures are kept, because those spans do
+  hold text and deleting the member class really does print `auto-switch armed`.
+- **A needle that CAN fail may still not be unique to the rule.** `p2` was measured failable here
+  and is a generic fixture name this suite reuses throughout, on many other fixtures' own pass
+  paths, so it was sound only because this one fixture happens to create no `p2` profile. **No
+  count is given deliberately**: two independent measurements disagreed (10 vs 13) because
+  "mentions `p2`" and "prints `p2` on its pass path" are different questions, and a figure whose
+  method is ambiguous decays faster than the claim it decorates. A `zzcanary` member that appears nowhere else
+  now sits beside it. The comment claiming "the two halves of the defect fail independently" was
+  also measured half-true and is corrected: the member needle subsumes the raw-assignment one.
+- **A MUTANT THAT DIES FOR THE WRONG REASON IS WORSE THAN ONE THAT CANNOT APPLY.** A mutation
+  written `_doctor_warn` → `_doctor_fail` was scored DIED on three rows. There is no
+  `_doctor_fail` in this repo — the emitter is `_doctor_bad`, and the counter `_DOCTOR_FAIL` is
+  what makes the wrong name plausible — so it replaced the emitter with an **undefined command**,
+  the line printed nothing, and the rows that failed were the ones asserting the message is
+  PRESENT. **An inapplicable mutation survives, which is expensive but sends you looking; this one
+  read as already covered, and a false all-clear is never investigated.** No gate this file had
+  sees it: find-string present ✓, bytes changed ✓, `zsh -n` ✓, because an undefined function is a
+  runtime failure and not a parse error. Two cheap gates do: assert `(( $+functions[<name>] ))`
+  for every function name the REPLACEMENT introduces (measured over all **18** entries in the
+  driver, 0 offenders), and **attribute a death to a row whose SUBJECT is the mutated property** — all three
+  dead rows there were about message text and none about an exit code, which is this file's
+  "a needle must be unique to the RULE" applied to the mutation side.
+- **A row built on a false premise, withdrawn rather than shipped.** The second pass built a
+  cross-key independence row and then measured that the mutation which would justify it *cannot
+  change behaviour*: both readers run inside `$( … )`, so globals set there die with the subshell.
+  Recording the withdrawal, because a row resting on a false premise is exactly what such an audit
+  is for.
+
+**THE ROW WRITTEN FOR THAT GAP WAS DECORATION, AND A MISLEADING VARIABLE NAME IS WHY.** The
+mutant meant to prove the armed note cannot leak file content dumped `$cspan` — a variable whose
+name says span and whose contents are the reader's **validated member names**, `p1` and `p2`. It
+leaked nothing and **SURVIVED**, which reads as a missing row when the truth is the opposite:
+**no raw span is in scope on that path at all**, because the reader returns approved names only.
+So the paired `no_out` could not have failed either way. Three things came out of it, and the
+first is the one that generalises:
+
+- **A variable named for the wrong thing is a defect, not a style point.** It misled the person
+  who wrote both the mutant and the row — the same person who had just written the comment
+  explaining the invariant. Renamed to say what it holds, with the structural guarantee stated
+  once beside it: a leak there now needs a NEW file read, not a slip with an existing variable.
+  The mutant that reproduces *that* (`sed` re-read, dump the real span) dies on exactly one row,
+  by name.
+- **An adjacent-content canary was written and removed as unfailable, and the reason is worth
+  more than the row.** On a well-formed chain the span stops at the first `]`, so no neighbouring
+  line is in it; on a malformed one the odd-field and member checks refuse before anything
+  prints. For adjacent content to reach the *armed* note it must pass the member class — i.e. be
+  a bare name-shaped token, indistinguishable from a legitimate member, so no assertion could
+  tell them apart.
+- **Two mutants were misnamed in the same way**, and a misnamed mutant is a small lie in the
+  record: one "prints the raw span" actually dropped the prose and the join (it died, for that
+  reason), and the retired one could never die. Both are relabelled rather than deleted, because
+  a retired mutant with its reason is evidence and a silently dropped one is not.
+
+**The harness lesson got a PRODUCTION row, which is where it belonged.** The typo'd-emitter
+mutant is not just a harness hazard: the same typo in `claude.sh` makes that finding print
+**nothing**, never increments `_DOCTOR_FAIL`, and so gets the doctor's **exit code** wrong too —
+a silent failure inside the checker whose entire subject is silent failures, invisible to
+`zsh -n` and to the suite's own `$+functions` preflight, which lists the names the SUITE knows
+and not the ones `claude.sh` calls. A row now reads every `_doctor_*` call out of the file and
+asserts each resolves. It fires by name under the mutant (`calls undefined emitter(s):
+_doctor_fail`) while **seven** message-text rows fail beside it — which is the fake-death shape,
+now with something in the output naming the real cause instead of leaving seven rows to imply it.
+The applicability gate gained the same rule plus **one allowlisted exception**, declared by name
+with its reason, since the mutant proving the row works must introduce an undefined emitter on
+purpose.
+
+**THE LEGAL-TOML REFUSALS ARE NOW A DECISION RATHER THAN AN ACCIDENT, AND THE PARSER IS
+DELIBERATELY NOT BUILT.** Three shapes that are valid TOML and that clauth never writes — a
+comment after the opening bracket, a commented-out member, and literal `'single-quoted'` strings
+— come back as ⚠ NOT CHECKED. Nothing asserted that, so an edit could have started accepting a
+comment-bearing array in silence. What decided the shape of the fix is the direction of the
+danger, measured: with the odd-field check removed, `fallback_chain = ['a', 'b']` returns **rc=0
+with no members**, so an armed chain reads as *unarmed* — the report goes quiet on exactly the
+state it exists to announce. Refusing is loud; accepting a shape the parse was never designed for
+is not. Hence "never silently empty" as the assertion.
+
+Two fixes were considered and declined, and the second is the tempting one:
+
+- **A real TOML parser** is what the workflow guard's history argues for ("those are YAML
+  questions, and each round of patching produced a new way to answer one wrongly"). Here it means
+  python3 + `tomllib`, which is **3.11+** — the exact dependency `verify-tools.sh` was corrected
+  for, on the Ubuntu 20.04 box (python 3.8) that is the first outside adopter's. A new external
+  tool in a checker is a new way for a check to go quiet.
+- **Stripping whole-line comments only** — a line whose first non-whitespace character is `#`
+  cannot be inside a string, *unless* it is inside a multi-line basic string, which cannot
+  plausibly hold a profile name, and which the member class would refuse anyway. That chain of
+  three corner-case arguments about TOML is precisely how the previous four fixes to this one
+  match were justified. Declined for the shape of the reasoning, not for a defect anybody found
+  in it.
+
+**The asymmetry is what makes refusing cheap here, and it is worth stating because the same
+refusal is wrong one file over.** This consumer is a DISPLAY: a conservative refusal costs one
+sentence of report, moves no account and changes no exit code. In the picker the identical rule
+is inverted — a malformed list excludes **nobody** — because there a refusal costs account
+selection. Same parse, opposite safe direction, decided by what the caller does with the answer.
+
+What would change the decision: clauth starting to write comments, or somebody actually meeting
+the ⚠ and being misled by it. The message names all four causes, so the reader who just
+commented out a member is told what happened.
+
+**A THIRD PASS AUDITED THE PROSE ITSELF, AND THE WORST FINDING WAS THAT A RETRACTION IS NOT A
+CORRECTION.** The `skip_serializing_if` claim above was retracted at the code site — and left
+standing, asserted, in the header of the very function that retracts it, fifty-five lines apart
+in one body. The same claim also survived in this file as a row's stated rationale. **When you
+retract a claim, grep for every instance of it, starting with the file you are editing**; the
+retraction is the easy half and it is the half that feels like the work.
+
+Four more from the same pass, each verified before acting on it:
+
+- **"A fix that is right on ONE SIDE of a report is worse than one wrong on both" — met on the
+  MESSAGE side, one round after being quoted in the comment that fixed the other side.** The
+  chain arm's remedy was corrected to name all four causes; the quarantine arm was left naming
+  two, for a full round, while both missing causes reach it (measured: a comment and a literal
+  string each give rc=1 there, and `sed` missing does too). Both arms name four now, and **both
+  have rows**, so the next divergence fails instead of waiting for a reviewer.
+- **A document contradicted itself about its own history**: "a FOURTH attempt" in one paragraph,
+  "the fifth attempt" and "the previous four fixes" in two others. Five is right, and the count
+  is now the same everywhere.
+- **A pointer written by one of these corrections pointed at the retracted technique.** The 2026-09-17
+  entry ended "the fix that does hold is the interior check" — which is precisely what did not
+  hold, as the round after it established. A correction is a claim like any other and goes stale
+  like any other.
+- **A precise count whose measurement method is ambiguous decays faster than the claim it
+  decorates.** "Nine other fixtures print `p2`" was re-measured as 10 by one method and 13 by
+  another, because "mentions it" and "prints it on its pass path" are different questions. The
+  claim needed no number at all, so it no longer carries one — and that is the better fix than
+  picking whichever figure was defensible.
+
+**THREE MORE FROM THE SAME PASS, AND TWO OF THEM WERE UNPINNED FIXES IN THE FIX.**
+
+- **A loop's upper BOUND was unpinned, and the reason is a property of every fixture at once.**
+  Changing the member loop's `i <= ${#parts}` to `i < ${#parts}` survived all 320 rows *and*
+  reproduced the defect. Every malformed fixture in the suite had an **even** number of quotes,
+  so the runaway sat at index 2 where `<` still reaches it; a **one-quote** span puts it in the
+  LAST even field — exactly the one `<` drops — and one stray quote is the likelier torn write.
+  **A fixture family can share a property that makes a whole class of mutation unreachable**, and
+  no amount of adding more fixtures of the same shape reveals it; ask what every fixture has in
+  common, not how many there are.
+- **A row that greps for a defect matches the comment explaining the defect — THIRD time in one
+  change.** The `_doctor_*` emitter row grepped the bare name, so it matched PROSE: `claude.sh`
+  carries three such mentions in comments and the row was green only because all three happen to
+  name real functions. One comment naming `_doctor_fail` turned the suite red asserting a call
+  that does not exist — a permanently-red checker armed by a comment. Matched as a **call** now
+  (line-start, `&&`, `||`, `;`, `{`), and deliberately **not** by stripping comments first: a `#`
+  inside a quoted string would drop a real call, which is the direction that makes the row go
+  quiet rather than loud.
+- **The rename lesson applied to one of two identical siblings.** `qspan` held names, not a span,
+  forty lines from the `cspan` it was renamed with. One-side-only fixes are this file's most
+  repeated shape and they are hardest to see when the two sides are adjacent.
+
+**And two row-quality findings that are worth more than the rows they fixed.** Four assertions
+labelled "the message names a comment as a cause" and "names a literal string as a cause" were
+**two halves of one constant echo block**, printed on every NOT CHECKED — so each was satisfied by
+any input reaching that arm, and four rows pinned one fact while reading as per-cause coverage.
+**A needle taken from a constant block measures the block, not the case that produced it**; one
+row per arm now, labelled for what it measures. Separately, the class's width was pinned only
+DOWNWARD (`n9` refuses a narrowing that would reject this machine's hyphenated profiles) — adding
+a single space to it survived the whole suite, so a row over `["a b"]` now pins it upward too. A
+space cannot be in a clauth profile name, so that row is honest rather than invented to kill a
+mutant, which is the distinction to keep when closing a surviving-mutant gap.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 325 at `9c47a49`; 326 at `0a1d557` before four
+duplicated assertions were consolidated into two — the count went DOWN by one while coverage went
+up, which is the clearest case there is for never reading a row count as a quality measure; 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
+audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
+so the count went up by four and down by two, which a bare delta would hide). **21 live mutants, 21 deaths, 0 survivors, 0 harness errors**, plus one retired
+by design. Two of the last three were written by an independent pass against fixes this file had
+already called pinned, and one of those (the bash reader's class) killed nothing until its row
+was rewritten to probe the FUNCTION'S CONTRACT instead of its behaviour — a surviving mutant is
+what said the first row was decoration. After the last edits every entry was **dry-run for applicability against
+the current tree — 19 entries, 0 stale, 0 no-ops** — and the three whose subject touches the
+changed lines were re-run and re-died; the rest are untouched by a comment-only edit, and no row
+was ever deleted, so their kills stand. That last step is reasoning and is labelled as such
+rather than presented as a fresh sweep. The whole set was re-run against the tree rather than carried
+over, three times, because a mutant measured against a previous version of the code proves
+nothing about this one. Twice that
+re-running paid: a rename left one mutant's find-string matching nothing (`find-string occurs 0
+times`, reported as a harness error and not a survivor), and the mutant written for the armed
+path's leak rule **survived**, which is what exposed the misleading variable name above. An
+EIGHTEENTH — `M14` in the driver's numbering, which does not renumber — is **retired with its
+reason** rather than dropped — it dumped the names variable, so
+it could never die, and a retired mutant with a reason is evidence where a silently dropped one
+is a gap nobody can see.
 
 State tables: `scripts/test-claude-doctor.sh` (235 → 279 at `6661472`) and
 `scripts/test-claude-account-dirs.sh` (137 → 156; CLAUDE.md said 70, then 36, and both were
@@ -3689,8 +4010,9 @@ failed, since ShellCheck cannot parse zsh; and `script-must-have-extension` woul
 name. Both hooks now exclude it by path, and CI's `zsh -n` loop names it explicitly — otherwise the
 repo's newest executable would have had no syntax check at all.
 
-State tables: `scripts/test-claude-pick.sh` (192 at DO-574; **283 at `0b0f8c0`, 293 after the
-runaway-span rows** — the "205" this line carried was stale by 78, which is what a count without
+State tables: `scripts/test-claude-pick.sh` (192 at DO-574; **283 at `0b0f8c0`, 294 after the
+runaway-span rows** (this read 293 until 2026-09-18; measured twice, deterministic — a
+one-digit error in the very sentence whose point is that a count carries its commit) — the "205" this line carried was stale by 78, which is what a count without
 its commit decays into; CI job `claude-pick-test`),
 `scripts/test-hspawn.sh` (319 → 328, the caller-wiring rows and the compatibility contract) and
 `scripts/test-claude-doctor.sh` (156 → 172, the usage-cache freshness line). **40 mutants, 40

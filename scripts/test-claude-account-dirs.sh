@@ -1384,6 +1384,45 @@ run_sut p1
 want_out "an unterminated array still adopts"                    "adopted the live session"
 no_out   "...and claims no quarantine it cannot actually read"   "auth_broken"
 
+# THE MID-MEMBER TRUNCATION, which the odd-field check alone does NOT catch and
+# which this reader shared with its two zsh twins until the member class landed
+# in all three at once. Checking the even fields validates the separators
+# BETWEEN the names and never a name: one stray quote flips parity, so the
+# neighbouring assignment lands in an ODD field — the very field this function
+# compares against $name. A one-quote span is the likelier torn write and puts
+# the runaway in the LAST odd field, so it also pins the loop's bound.
+new_home m4b; mk_profile p1
+run_sut p1
+mk_cred "$(store_of p1)" 1000 old
+as_rotated_real_file p1 9999 rotated
+printf 'auth_broken = ["\nprofiles = []\n' > "$FHOME/.clauth/profiles.toml"
+run_sut p1
+want_out "a mid-member truncation still adopts"                  "adopted the live session"
+no_out   "...and invents no quarantine from the next assignment" "auth_broken"
+
+# THE FUNCTION'S OWN CONTRACT, probed directly, because its BEHAVIOUR cannot
+# pin the member class and a row that cannot fail is decoration. Measured: with
+# the class removed, `profile_is_quarantined p1` is rc=1 either way — the bogus
+# member matches no real profile, which is exactly the "inert" property two
+# independent reviews confirmed over thousands of randomised files. The only
+# query whose answer moves is the bogus string ITSELF: rc=0 without the class
+# (it "is quarantined"), rc=1 with it (the list is refused). No caller passes
+# that, so this row tests the contract rather than the call — the same reason
+# the doctor suite calls its shared parse directly.
+#
+# The class stays in all three readers even though this one is unobservable
+# through its call site: one rule, three languages, and a future caller that
+# ENUMERATES rather than tests membership would inherit the hole silently.
+FNSRC="$TMPROOT/pq.sh"
+sed -n '/^profile_is_quarantined()/,/^}/p' "$SUT" > "$FNSRC"
+[[ -s "$FNSRC" ]] || fatal "could not extract profile_is_quarantined from $SUT"
+PQ="$(HOME="$FHOME" bash -c "source '$FNSRC'; profile_is_quarantined 'profiles = ['; echo rc=\$?" 2>&1)"
+if [[ "$PQ" == "rc=1" ]]; then
+    ok "the bash reader REFUSES a list whose member cannot be a name"
+else
+    bad "the bash reader accepted a non-name member — got '$PQ', want 'rc=1'"
+fi
+
 # No profiles.toml at all — every row in every other section, so this is also
 # the assertion that the check added nothing to the ordinary path.
 new_home m5; mk_profile p1

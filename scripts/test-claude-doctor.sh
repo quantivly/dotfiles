@@ -67,7 +67,8 @@ done
 for fn in claude-doctor _claude_cred_file _claude_now_ms _claude_fmt_delta _claude_mcp_log_root \
           _claude_global_cred_file _claude_cred_id _claude_cred_owner \
           _claude_active_profile _claude_legacy_cred_dirs _claude_proc_root \
-          _claude_quarantined_profiles _claude_store_auth_state; do
+          _claude_quarantined_profiles _claude_store_auth_state \
+          _claude_toml_name_array _claude_fallback_chain; do
     zsh -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH'; (( \$+functions[$fn] ))" \
         || fatal "$fn is not defined after sourcing $CLAUDESH — the suite would assert nothing"
 done
@@ -851,7 +852,42 @@ jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
 printf 'fallback_chain = [\n    "p1",\n    "p2",\n]\n' > "$FHOME/.clauth/profiles.toml"
 WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
 want_out "a multi-line fallback_chain is still surfaced" "auto-switch armed"
-want_out "and the chain members are named"               '"p1"'
+# The members, in order, as the doctor's OWN prose. The assertion used to be the
+# bare `"p1"` — satisfiable by the raw span, so it could not tell a parsed chain
+# from a quoted line of profiles.toml, which is the defect section N now pins.
+want_out "and the chain members are named, in order"     "the chain walks p1, p2"
+# THE ARMED PATH NEEDED ITS OWN NEGATIVE, and an independent row audit is what
+# said so: every raw-content assertion in this file sat on the NOT CHECKED path,
+# so a note that kept its prose and printed file content BESIDE it was invisible.
+# "Never print raw file content" is this change's one rule with no trade-off, and
+# it was enforced on one of the two paths that can print.
+#
+# WHAT THIS ROW CAN AND CANNOT CATCH, measured, because the first attempt at it
+# was decoration. It catches a NEW file read on this path — which is exactly the
+# regression to fear, since printing the span beside the prose is what the
+# pre-fix code did. It CANNOT catch a slip with an existing variable, because
+# there is no longer a variable holding a span: the reader returns approved names
+# only. The mutant written against that misunderstanding dumped the names
+# variable, leaked nothing and SURVIVED — the row it was meant to validate could
+# not have failed either way, and the variable's misleading name is what caused
+# both. See the rename in zsh/functions/claude.sh.
+#
+# AND THERE IS DELIBERATELY NO ADJACENT-CONTENT CANARY. One was written (a
+# neighbouring `theme = "..."` line, asserted absent) and removed as unfailable:
+# on a well-formed chain the span stops at the first `]`, so no adjacent line is
+# in it, and on a malformed one the odd-field and member checks refuse the whole
+# list before anything prints. For adjacent content to reach the ARMED note it
+# would have to pass the member class, i.e. be a bare name-shaped token — which
+# is indistinguishable from a legitimate member, so no assertion could tell them
+# apart. Knowing why a row is impossible beats having one that always passes.
+no_out   "...and no raw assignment reaches the armed note" "fallback_chain = ["
+# AND THE ARMED NOTE'S SEVERITY. `_doctor_note` -> `_doctor_bad` also survived
+# 304/304: the NOT CHECKED arm's ⚠ is pinned (by section N) and the note's `·`
+# was not, so the mutation made claude-doctor exit 1 forever on every machine
+# that has a chain configured — an armed chain is a deliberate setting, which is
+# the whole reason it is a note. This fixture carries no ✗ of its own, so the
+# exit code can only move for this reason.
+want_rc  "...and an armed chain is a note, so the doctor still exits 0"  0
 
 # `preferred` is why a hand-made switch away does not stay made: the daemon walks
 # the active account back, unlogged.
@@ -959,6 +995,154 @@ printf 'preferred = true\n' > "$FHOME/.clauth/profiles/p1/config.toml"
 WITH_CLAUTH=1 ACTIVE_PROFILE='' run_doctor
 want_out "an unattributable credential still reports the armed chain" "auto-switch armed"
 want_out "and still names the preferred profile"                      "is preferred"
+
+# THE RUNAWAY, WHICH THE BOUNDED sed DID NOT CLOSE. Terminating the range at the
+# first `]` bounds it to one LINE RANGE, not to one assignment: `fallback_chain =
+# [` whose closing bracket never arrives takes the next array's bracket instead,
+# and the `*'"'*` armed test then passed on THAT array's quoted names. Measured
+# 2026-09-17 on this exact fixture, the doctor printed
+# `auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]` — a
+# neighbouring line of profiles.toml quoted verbatim into a report that lands in
+# transcripts, in the function whose own header says NEVER PRINTS A CREDENTIAL,
+# and a false alarm about the single most disruptive thing clauth can do on a box
+# whose chain is deliberately empty.
+#
+# Assertions for the claim, the raw file content, and a member of the other
+# array. CORRECTED by a row audit: this comment said "the two halves of the
+# defect fail independently", and that is measurably half-true — every mutation
+# that kills the `profiles = [` needle also kills the member needle, while at
+# least one kills the member needle alone. So the member needle subsumes the
+# raw-assignment one rather than being independent of it; both are kept because
+# they name different failures to a reader, but only one is load-bearing.
+new_home n4; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'fallback_chain = [\nprofiles = [\n    "p1",\n    "p2",\n    "zzcanary",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "a chain span that closes on ANOTHER array's bracket is NOT CHECKED" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as armed"                    "auto-switch armed"
+no_out   "...and no raw assignment from profiles.toml is printed" "profiles = ["
+# `zzcanary` rather than `p2` alone. A row audit measured that `p2` CAN fail here
+# but is not unique to the RULE: nine other fixtures in this file print `p2` on
+# their own PASS paths, so the needle is sound only because THIS fixture happens
+# to create no p2 profile and no p2 account dir. A name that appears nowhere else
+# cannot be satisfied by a neighbouring section. `p2` is kept beside it because
+# it is the handoff's documented reproduction.
+no_out   "...and no member of the other array is named"       "p2"
+no_out   "...not even one whose name appears nowhere else"    "zzcanary"
+
+# AN ABSENT ASSIGNMENT MUST BE SILENT ON BOTH COUNTS. Reading "no key" as "could
+# not read" would make a box with no fallback chain carry a permanent warning
+# about a setting it has deliberately not set — the permanently-red checker this
+# repo has now produced seven times, and the one failure mode a new ⚠ path can
+# introduce.
+#
+# CORRECTED after an independent review: this row was labelled "THE RESTING STATE
+# OF THIS MACHINE" and justified by "clauth omits the key entirely when no chain
+# is configured". That is true of `auth_broken` and FALSE of `fallback_chain`,
+# which has no `skip_serializing_if` and sits in the live file as
+# `fallback_chain = []` — measured 2026-09-17, one such assignment present and
+# zero `auth_broken`. So THIS MACHINE's resting state is the row below
+# (`= []`, section N's empty-chain row), and this row covers the other absent-key
+# producers: a hand-written file, a modular adopter's, or a clauth that stops
+# writing it. The claim was copied from the quarantine reader, which is the drift
+# the shared parse was meant to stop arriving in the comment layer instead.
+new_home n5; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'active_profile = "p1"\nprofiles = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+no_out "an absent fallback_chain is not reported as armed"   "auto-switch armed"
+no_out "...nor as a chain that could not be read"            "could not read clauth's fallback_chain"
+
+# THE READER'S ONE EXTERNAL TOOL, REMOVED — the same row the quarantine reader
+# has, for the same reason, one key over. `sed` is staged unconditionally by
+# SYSBIN, so without this nothing distinguishes "asked, and there is no chain"
+# from "could not ask": the pre-fix code discarded sed's status, so a sed that
+# never ran yielded an empty span and the doctor said nothing at all about an
+# ARMED chain. A new external tool in a checker is a new way for a check to go
+# quiet, and this one had been quiet since it was written.
+new_home n6; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'fallback_chain = [\n    "p1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+NO_SED=1 WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "sed missing is reported, not read as an unarmed chain" \
+         "could not read clauth's fallback_chain"
+# NO PAIRED `no_out "auto-switch armed"` HERE, DELIBERATELY, and knowing why is
+# worth more than a row that always passes. The quarantine twin below can forbid
+# `no profile is quarantined` because its all-clear is a printed LINE; the
+# chain's unarmed state is SILENCE, so there is no positive string to forbid and
+# no single mutation on this fixture can produce one. A row audit measured the
+# assertion that used to sit here surviving every applicable mutant, failing only
+# under a compound whose first half the `want_out` above already kills. It read
+# as coverage, so it is gone rather than labelled.
+
+# The truncation that lands right after the opening bracket: the one shape the
+# interior check cannot object to, because there is nothing between the brackets
+# to be wrong about. Without the closing-bracket test the answer is "no members",
+# which reads as "not armed" over a chain that was never read. It is also what
+# isolates that test — every other malformed fixture is caught by the interior
+# first, so a mutant deleting it survives them all.
+new_home n7; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'profiles = [\n    "p1",\n]\nfallback_chain = [\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "a chain truncated at its opening bracket is NOT CHECKED" \
+         "could not read clauth's fallback_chain"
+# Same deliberate absence as the row above, and for a sharper reason here: the
+# interior between `[` and the end of the span is EMPTY, so there is no member
+# for any mutation to produce and the negative could never have failed. The
+# `want_out` is the whole discriminator. (n8 and n4 keep theirs: their spans do
+# hold text, so deleting the member class or the interior check really does make
+# the doctor print `auto-switch armed` — measured, both die.)
+
+# THE TRUNCATION MID-MEMBER, which the interior check alone did NOT catch — found
+# by an independent review of this PR, against the fix. Validating the odd fields
+# validates what sits BETWEEN the names and never a name: `fallback_chain = ["`
+# leaves odd field 1 empty, which passes, and flips quote parity, so the
+# neighbouring assignment lands in an EVEN field and was emitted as a member.
+# Measured, the report read `auto-switch armed: the chain walks profiles = [` —
+# both halves of the defect this PR exists to remove, reproduced against it. The
+# member class closes it; these rows are what say so.
+new_home n8; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'fallback_chain = ["\nprofiles = ["\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "a chain span truncated MID-MEMBER is NOT CHECKED" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as armed"                       "auto-switch armed"
+no_out   "...and the neighbouring assignment is not emitted as a member" "profiles = ["
+# THE SEVERITY, PINNED. `_doctor_warn` -> `_doctor_bad` survived the whole suite
+# before this row: the comment defends ⚠-over-✗ in four sentences and nothing
+# measured it, while the mutation flips claude-doctor to rc 1 permanently on any
+# malformed profiles.toml — the permanently-red checker, self-inflicted by the
+# arm added to avoid it. This fixture carries no ✗ of its own (measured: 0
+# failures, 6 warnings), so the exit code can only move for this reason.
+want_rc  "...and a malformed chain is a ⚠, so the doctor still exits 0"  0
+
+# THE MEMBER CLASS IS WIDER THAN `[A-Za-z0-9]`, AND NOTHING EXERCISED THAT. Every
+# other row here names profiles `p1`/`p2`, so narrowing the class to letters and
+# digits would have survived the whole suite while refusing this machine's own
+# file: the live profiles are `quantivly-3`, `personal-1` — a hyphen in every
+# one. clauth's `validate_profile_name` accepts letters, digits and `- _ . @ +`,
+# so a class narrower than that turns a perfectly ordinary chain into a
+# permanent "could not read". Found while writing the mutant for the class, not
+# by a review: the check was wider than any fixture reached.
+new_home n9; write_cred
+mkdir -p "$FHOME/.clauth/profiles/quantivly-3"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/quantivly-3/credentials.json"
+printf 'fallback_chain = [\n    "quantivly-3",\n    "p.a_b",\n    "x+y@z",\n]\n' \
+    > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=quantivly-3 run_doctor
+want_out "a chain of REAL-SHAPED profile names is read, not refused" "auto-switch armed"
+want_out "...and every member clauth's own name class allows survives" \
+         "the chain walks quantivly-3, p.a_b, x+y@z"
+no_out   "...and it is not reported as unreadable" "could not read clauth's fallback_chain"
 
 #-----------------------------------------------------------------------------
 section "O. Checks that must not depend on clauth, or on there being profiles"
@@ -1941,6 +2125,23 @@ want_out "a span that closes on ANOTHER array's bracket is NOT CHECKED" \
 no_out   "...and invents no quarantined account"      "quarantined (auth_broken)"
 no_out   "...and does not print an all-clear over it" "no profile is quarantined"
 
+# THE SAME MID-MEMBER TRUNCATION, ON THIS KEY — because the parse is shared, so a
+# hole in it is a hole in both reports, and the two must be pinned separately or
+# one consumer's rows stand in for the other's. Here it was worse than a false
+# note: the span reached a REMEDY, printing
+# `Do NOT run 'clauth login profiles = ['` — advice built out of raw file
+# content, in the report this file's header says must never carry any.
+new_home v8e; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf 'auth_broken = ["\nprofiles = ["\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a quarantine span truncated MID-MEMBER is NOT CHECKED" \
+         "could not read clauth's quarantine list"
+no_out   "...and invents no quarantined account"        "quarantined (auth_broken)"
+no_out   "...and no raw assignment reaches the report"  "profiles = ["
+no_out   "...and none reaches a remedy the reader would run" "clauth login profiles"
+
 # CRLF, WHERE THE TWO READERS USED TO DISAGREE. The bash twin strips separators
 # with `[[:space:],]`, which includes `\r`; this one used `[$' \t\n,']`, which did
 # not — so the same file was `YES` to the reconciler and NOT CHECKED to the
@@ -2065,6 +2266,31 @@ else
     bad "the picker and the doctor disagree about auth_broken — got '$AGREE', want 'XX a1a2'"
 fi
 
+# ...AND THEY MUST AGREE ON A FILE NEITHER CAN READ, which is where they stopped
+# agreeing. The member class landed in claude.sh first and in the picker a round
+# later, and in between the doctor said NOT CHECKED while the picker returned 0
+# with a member of `$'\nprofiles = ['` and said nothing — three readers, three
+# answers, one file, with the picker's malformed-list warning never firing. The
+# catastrophic direction was never reachable (a bogus member matches no profile,
+# measured over thousands of randomised files by two independent reviews), so
+# what was lost was loudness, which is the whole point of the NOT CHECKED state.
+new_home v13
+mkdir -p "$FHOME/.clauth/profiles/a1"
+printf 'auth_broken = ["\nprofiles = []\n' > "$FHOME/.clauth/profiles.toml"
+AGREE2="$(env -u CLAUDE_CONFIG_DIR HOME="$FHOME" CLAUDE_PICK_SOURCING=1 \
+              CLAUDE_TENANTS_FILE=/nonexistent "PATH=$SYSBIN" \
+          "$SYSBIN/zsh" -f -c "
+            source '$HERDRRC' >/dev/null 2>&1
+            source '$CLAUDESH' >/dev/null 2>&1
+            _claude_quarantine_scan >/dev/null 2>&1;      pk=\$?
+            _claude_quarantined_profiles >/dev/null 2>&1; dr=\$?
+            print -rn -- \"picker=\$pk doctor=\$dr\"" 2>&1)"
+if [[ "$AGREE2" == "picker=1 doctor=1" ]]; then
+    ok "both readers REFUSE a mid-member span, so neither goes quiet"
+else
+    bad "the picker and the doctor disagree on an unreadable list — got '$AGREE2', want 'picker=1 doctor=1'"
+fi
+
 # The quarantine check must not depend on there being any account dirs: the
 # Account dirs section is skipped wholesale when none exist, and a machine that
 # has never run an isolated session can still have a quarantined profile. A check
@@ -2078,6 +2304,206 @@ rm -rf "$FHOME/.local/state/claude-account-dirs"
 WITH_CLAUTH=1 run_doctor
 want_out "a quarantine is reported with no account dirs at all" "'p1' quarantined"
 want_out "...on a machine the account-dir section skips"        "nothing isolated yet"
+
+# THE HELPER'S OWN CONTRACT, called DIRECTLY. Until this row the shared parse
+# appeared nowhere in the suite by name and was exercised only through two
+# consumers that both split its output with an unquoted `${(f)...}` — which drops
+# an empty field, so the emit loop's `-n` guard was invisible to every row and
+# survived deletion. A function presented as a shared API for two keys needs a
+# row on the API, not only on what happens to consume it today.
+#
+# `["", "p1"]` is legal TOML: the empty member is SKIPPED (an empty name is no
+# evidence of a runaway) while the class check refuses a member that cannot be a
+# name at all. Both halves are asserted here, on one fixture, with rc captured
+# before the pipe so it is the reader's status and not `tr`'s.
+new_home w1
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = ["", "p1"]\n' > "$FHOME/.clauth/profiles.toml"
+HELPER="$(env -u CLAUDE_CONFIG_DIR HOME="$FHOME" "PATH=$SYSBIN" "$SYSBIN/zsh" -c "
+            source '$SYSTEMSH' >/dev/null 2>&1
+            source '$CLAUDESH' >/dev/null 2>&1
+            out=\"\$(_claude_toml_name_array fallback_chain)\"; rc=\$?
+            print -rn -- \"rc=\$rc out=[\${out//\$'\\n'/|}]\"" 2>&1)"
+if [[ "$HELPER" == "rc=0 out=[p1]" ]]; then
+    ok "the helper skips an empty member and emits no blank line"
+else
+    bad "the helper's contract on an empty member — got '$HELPER', want 'rc=0 out=[p1]'"
+fi
+
+new_home w2
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = ["p1", "not a name = ["\n]\n' > "$FHOME/.clauth/profiles.toml"
+HELPER="$(env -u CLAUDE_CONFIG_DIR HOME="$FHOME" "PATH=$SYSBIN" "$SYSBIN/zsh" -c "
+            source '$SYSTEMSH' >/dev/null 2>&1
+            source '$CLAUDESH' >/dev/null 2>&1
+            out=\"\$(_claude_toml_name_array fallback_chain)\"; rc=\$?
+            print -rn -- \"rc=\$rc out=[\${out//\$'\\n'/|}]\"" 2>&1)"
+if [[ "$HELPER" == "rc=1 out=[]" ]]; then
+    ok "a member that cannot be a name refuses the whole list, emitting nothing"
+else
+    bad "the helper's member class — got '$HELPER', want 'rc=1 out=[]'"
+fi
+
+# EVERY `_doctor_*` CALL IN THIS FILE MUST RESOLVE, and nothing asserted that.
+# This row comes from a mutation-harness error found by an independent row audit:
+# a mutant written `_doctor_warn` -> `_doctor_fail` was scored DIED, because
+# there is no `_doctor_fail` in this repo — the emitter is `_doctor_bad`, and the
+# `_DOCTOR_FAIL` counter it increments is what makes the wrong name plausible. It
+# replaced the emitter with an UNDEFINED COMMAND, so the line printed nothing and
+# the rows that failed were the ones asserting the message is PRESENT.
+#
+# The same typo in PRODUCTION is the hazard this row exists for, and it is this
+# repo's oldest shape: the finding prints NOTHING, the counter is never
+# incremented, so the doctor's exit code is wrong too, and a checker written
+# entirely about silent failures fails silently. `zsh -n` cannot see it (an
+# undefined function is a runtime failure, not a parse error) and neither can the
+# $+functions preflight above, which checks the names the SUITE knows about and
+# not the ones claude.sh calls.
+#
+# Read off the file rather than from a fixed list, so a new emitter is covered
+# the day it is used; `_doctor_summary` is included because it decides the
+# closing verdict and the exit status.
+# MATCHED AS A CALL, NOT AS A WORD. The first version grepped the bare name and
+# so matched PROSE: `claude.sh` already carries three `_doctor_*` mentions in
+# comments, and the row was green only because all three happen to name real
+# functions. Measured — adding one comment line naming `_doctor_fail` turned the
+# suite red with "claude.sh calls undefined emitter(s)" about a call that does
+# not exist. That is a permanently-red checker armed by a comment, and it is
+# this repo's own "a row that greps for a defect will match the comment
+# explaining the defect", met for the third time in one change.
+#
+# A call starts a command, so it is anchored to line-start, `&&`, `||`, `;` or
+# `{`. NOT `sed 's/#.*//'`: a `#` inside a quoted string would silently drop a
+# REAL call, and that is the direction that makes the row go quiet rather than
+# loud.
+EMITTERS="$(grep -oE '(^[[:space:]]*|&&[[:space:]]+|\|\|[[:space:]]+|;[[:space:]]+|\{[[:space:]]+)_doctor_[a-z_]+' \
+              "$CLAUDESH" | grep -oE '_doctor_[a-z_]+' | sort -u)"
+[[ -n "$EMITTERS" ]] || fatal "no _doctor_* calls found in $CLAUDESH — this row would assert nothing"
+EMIT_BAD=""
+for fn in ${EMITTERS}; do
+    zsh -c "source '$SYSTEMSH' >/dev/null 2>&1; source '$CLAUDESH' >/dev/null 2>&1; (( \$+functions[$fn] ))" \
+        || EMIT_BAD="$EMIT_BAD $fn"
+done
+if [[ -z "$EMIT_BAD" ]]; then
+    ok "every _doctor_* emitter claude.sh calls is actually defined"
+else
+    bad "claude.sh calls undefined emitter(s):$EMIT_BAD — those findings print nothing"
+fi
+
+# LEGAL TOML THIS READER DELIBERATELY REFUSES, pinned so the refusal is a
+# DECISION and not an accident. All three shapes below are valid TOML that a
+# hand-edit can produce and that clauth never writes, and all three come back
+# rc=1 -> ⚠ NOT CHECKED. Nothing asserted that until now, so a future edit could
+# start accepting a comment-bearing array and no row would notice — and the
+# direction that matters is the other one: silently ACCEPTING a shape the parse
+# was never designed for is how a runaway span gets read as a member list.
+#
+# Refusing is cheap HERE and the asymmetry is the whole argument: this consumer
+# is a DISPLAY, so a conservative refusal costs one sentence of report and moves
+# no account, changes no exit code. The same refusal in the picker would cost
+# account selection, which is why that reader's malformed-list rule is the
+# opposite way round (exclude nobody).
+new_home t1; write_cred
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = [ # note\n    "a",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a comment inside the array is NOT CHECKED, not read" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as armed"                      "auto-switch armed"
+# ONE assertion for the message, labelled for what it MEASURES. This needle and
+# the "'literal' strings" one below are two halves of a single constant two-line
+# echo block printed on every NOT CHECKED, so each is satisfied by ANY input that
+# reaches this arm. Asserting them once per fixture read as per-cause coverage
+# and was not: it pins "the four-cause message exists", which is worth exactly
+# one row per arm.
+want_out "...and that arm enumerates every cause, not two of four" \
+         "or 'sed' is not on PATH, or the array holds a comment or"
+
+new_home t2; write_cred
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = [\n#   "a",\n    "b",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a commented-out member is NOT CHECKED" \
+         "could not read clauth's fallback_chain"
+# NO PAIRED no_out HERE. The obvious one — "the surviving member is not reported"
+# with needle "the chain walks b" — CANNOT fail in the way it names: with the
+# interior check deleted the output is "the chain walks a, b", which does not
+# contain that needle. The want_out above carries the row.
+
+new_home t3; write_cred
+mkdir -p "$FHOME/.clauth"
+printf "fallback_chain = ['a', 'b']\n" > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "TOML literal strings are NOT CHECKED, never silently empty" \
+         "could not read clauth's fallback_chain"
+no_out   "...and are not read as an unconfigured chain"          "auto-switch armed"
+
+# THE SAME TWO REFUSALS ON THE QUARANTINE ARM, because the parse is shared and a
+# message fixed on one arm only is this repo's "a fix that is right on ONE SIDE
+# of a report is worse than one wrong on both" — which is exactly how it went:
+# the chain arm was corrected to name all four causes and this arm was left
+# naming two, for a full round, while both missing causes reach it. Rows on both
+# sides now, so the next divergence fails instead of being noticed by a reviewer.
+new_home u1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/a1"
+printf 'auth_broken = [ # note\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a comment in the quarantine array is NOT CHECKED" \
+         "could not read clauth's quarantine list"
+no_out   "...and invents no quarantined account"           "quarantined (auth_broken)"
+# The quarantine arm's one message row, same reasoning as the chain arm's.
+want_out "...and this arm enumerates every cause too" \
+         "or 'sed' is not on PATH, or the array holds a comment or"
+
+new_home u2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/a1"
+printf "auth_broken = ['a1']\n" > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "TOML literal strings in the quarantine array are NOT CHECKED" \
+         "could not read clauth's quarantine list"
+no_out   "...and are not read as an empty quarantine"      "no profile is quarantined"
+
+# THE MEMBER LOOP'S UPPER BOUND, which 320 rows did not pin. Changing
+# `i <= ${#parts}` to `i < ${#parts}` SURVIVED the whole suite and reproduced the
+# defect exactly: `· auto-switch armed: the chain walks profiles = [`. The reason
+# is that every other malformed fixture here has an EVEN number of quotes, so the
+# runaway lands at index 2 and `<` still reaches it. This one has a SINGLE quote,
+# which puts the runaway in the LAST even field — precisely the field `<` drops.
+#
+# It is also the likelier torn write: one stray quote, not two. Both keys get a
+# row, because the loop is shared and a bound is exactly the kind of off-by-one
+# that gets "tidied" later.
+new_home v1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf 'fallback_chain = ["\nprofiles = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "a one-quote chain span is NOT CHECKED (the loop's LAST even field)" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as armed"                 "auto-switch armed"
+no_out   "...and the trailing field is not emitted"        "profiles = ["
+
+new_home v2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf 'auth_broken = ["\nprofiles = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a one-quote quarantine span is NOT CHECKED too" \
+         "could not read clauth's quarantine list"
+no_out   "...and invents no quarantined account"           "quarantined (auth_broken)"
+
+# THE CLASS WIDTH, PINNED UPWARD. `n9` pins it downward — narrowing to
+# `[A-Za-z0-9]` refuses this machine's own hyphenated profiles. Nothing pinned
+# the other direction: adding a single space to the class survived the suite.
+# A space cannot be in a clauth profile name (`validate_profile_name`: letters,
+# digits and - _ . @ + only), and a member containing one is therefore a span
+# that ran somewhere it should not, so refusing is right and this row is honest
+# rather than a guard invented to kill a mutant.
+new_home v3; write_cred
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = ["a b"]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a member containing a space is NOT CHECKED (the class does not widen)" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as an armed chain"  "auto-switch armed"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
