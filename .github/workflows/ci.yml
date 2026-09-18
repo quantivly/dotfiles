@@ -605,6 +605,28 @@ jobs:
       - name: Run the workflow-apt state table
         run: ./scripts/test-workflow-apt.sh
 
+  claude-md-test:
+    name: CLAUDE.md Guard State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # The ratchet takes the MINIMUM size of CLAUDE.md over the commits that
+          # also carry the guard, so it needs history. actions/checkout@v4
+          # defaults to fetch-depth: 1, and with one commit that minimum is
+          # today's size -- the ceiling becomes today+slack and the guard reports
+          # success while enforcing nothing. check-claude-md.sh exits 2 on a
+          # shallow repository rather than pass, so this is fail-loud rather than
+          # fail-open, but the fetch still has to be right here.
+          fetch-depth: 0
+
+      - name: Run the CLAUDE.md guard state table
+        run: ./scripts/test-claude-md.sh
+
+      - name: Run the guard against the tree we ship
+        run: ./scripts/check-claude-md.sh
+
   yaml-validation:
     name: YAML Validation
     runs-on: ubuntu-latest

@@ -9,6 +9,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CLAUDE.md now has a context budget that can only tighten, and a written rule for what
+  may go in it.** The file is loaded in full into every request of every session. It held
+  14k–36k chars for eight months and then went **35,682 → 350,324 in the nineteen days from
+  2026-08-30 to 2026-09-18** — every PR appending its own review narrative (+26,499 for #160,
+  +21,404 for #134, +20,758 for #135) — which is ~87k tokens per request, and the documented
+  reason for Claude Code's 150k warning is that longer files *reduce adherence*, i.e. the file
+  stops producing the behaviour it was written to produce. The one-off cut has already been
+  tried here (2026-01-07, `Streamlined CLAUDE.md to reduce size by 62%`, 32.6k → 14.2k) and it
+  **regrew 25×**, so the ratchet is the deliverable and the cut is secondary — this change
+  deliberately clears nothing. `scripts/check-claude-md.sh` (CI job `CLAUDE.md Guard State
+  Table`, plus a pre-commit hook) enforces eight rules: the CLAUDE.md ceiling, the aggregate
+  over every always-loaded surface, per-file caps on rule cards and `SKILL.md`, frontmatter
+  validity, relative-link resolution, reachability, and that no rule card carries `paths:`.
+  **The ceiling is derived, not written down** — `max(FLOOR, min(size over
+  base-branch commits that also carry the guard) + SLACK)` — because every design where a human
+  types the ceiling into a file has the same hole: the PR that breaks the rule edits the number
+  in the same diff. There is no value to raise; the only way to raise the ceiling is to lower
+  CLAUDE.md and merge. It is a ratchet rather than a rate limit because a minimum cannot be
+  lowered by a larger commit, so SLACK is a one-time buffer (parent-size + slack at ~1 PR/day is
+  ~550k/year, i.e. the pathology slightly slowed). The anchor is self-referential — only commits
+  carrying the guard count — so it needs no date, tag or SHA, none of which the introducing PR
+  could name. `FLOOR` exists because a ratchet with no floor eventually forbids all edits and one
+  accidental truncation would pin the minimum near zero, and a permanently-red checker gets
+  deleted, which this repo has now recorded seven times.
+
+  Three findings from building it, each of which reported success first. **`awk` is mawk here
+  and on Ubuntu**, where gawk's three-argument `match()` is a syntax error — paired with the
+  `2>/dev/null || true` the first draft had, the link extractor produced **zero links** and the
+  link and reachability rules reported a clean tree they had never read. It is POSIX
+  `index()`/`substr()` now, errors are not suppressed, and `links_selftest` asserts the extractor
+  against known answers before any rule trusts it, because a checker that silently extracts
+  nothing reports a perfect tree. **The aggregate cannot share the CLAUDE.md ceiling**: doing so
+  leaves the whole rule-card layer `SLACK` (1,500 bytes) — one card, ever — so the first card
+  spends the budget and every later area has nowhere to put its trigger rules except back in
+  CLAUDE.md; `AGGREGATE_EXTRA_BYTES` (18,000, nine cards at the cap) is its own allowance, and
+  counting cards is not pessimism but accuracy, as the measurement below shows. And **a
+  5,000-byte `SKILL.md` cap, which an earlier
+  draft proposed, would have failed every skill on this machine** (measured: herdr 10,553,
+  rabota 17,539, zvi-voice 11,883, `quantivly-conventions:linear` 29,335, `:prs` 26,696) — it is
+  30,000, with `references/`, `scripts/` and `assets/` under a skill deliberately uncapped,
+  because capping them punishes the progressive disclosure the house style already uses.
+
+  **A `paths:`-scoped `.claude/rules/` card never loads, measured rather than assumed, and the
+  first version of this guard REQUIRED one.** The plan leaned on path-scoped cards as a cheap
+  on-demand layer — documented, and present in the installed 2.1.277 binary (`.claude/rules` ×10,
+  a `rulesDir` symbol, `"paths"` ×19). So it was measured in a throwaway herdr pane before anything
+  depended on it, with unique probe phrases and a fresh session per round: a card **without**
+  `paths:` loaded at project and at user scope; a card **with** it did not load at session start,
+  did not load after the session read a matching file, and did not load in any spelling tried —
+  block list, inline array, or a literal file path instead of a glob. `/context` agreed: "Memory
+  files: 3" before and after the matching read. A guard that requires `paths:` therefore
+  guarantees every card is inert, which is a rule silently switching off the thing it polices.
+  The rule is inverted: a card may not carry `paths:`, cards are unconditional, and the aggregate
+  rule counts them because they are always loaded. The one card this PR shipped is gone — scoped,
+  it was dead; unscoped, it was always-loaded text restating CLAUDE.md, which the single-home rule
+  forbids. The same probe put CLAUDE.md at **130.4k tokens**, not the ~87k a chars/4 estimate gave;
+  at ~2.7 chars/token this file is costlier than it looked. Every probe card was removed and the
+  pane closed; an unconditional user-level card loads into every session on the machine.
+
+  The governing rule for what moves, taken from nanoclaw's IMP-2778 rather than invented: **this
+  discipline governs where elaboration lives, not where the rule lives.** nanoclaw measured a
+  22-file extracted reference corpus at **zero production reads over 30 days and 102 runs**,
+  including a file cited with "You MUST read", and measured that relocating 181 lines behind a
+  pointer improved every budget number while leaving the session's loaded context unchanged and
+  137 tests green. So the threshold, the decision and the emitted line stay in CLAUDE.md and only
+  the evidence moves; a rule whose condition can no longer fire is **retired, not extracted**;
+  and the reachability rule exists because an unrouted file is an unread file — it immediately
+  found `docs/CLAUDE_SETUP.md`, which had zero inbound links and is now routed. The pre-commit
+  hook **warns and passes** when it cannot evaluate the budget rather than failing, because
+  nanoclaw measured that a gate failing in an unevaluable state teaches `--no-verify`, which
+  disables every other hook.
+
+  State table: `scripts/test-claude-md.sh` (**77 checks**, CI job `claude-md-test`), hermetic —
+  every row builds its own git repository with real commits, because the ratchet reads real
+  history and a mocked one would pin nothing about the only rule that cannot be checked another
+  way. **18 mutants, 18 deaths, 0 survivors, 0 harness errors** (plus one retired: its target was
+  removed as a duplicate guard, since two guards for one property are individually unkillable),
+  every mutation dry-run for
+  applicability first since a mutation that no longer applies reads exactly like a surviving
+  mutant. Three survived the first sweep: two were badly-constructed mutants that changed no
+  behaviour (`m=$2` unconditionally still yields the minimum, because `rev-list` is newest-first),
+  and the third was real — `exit` and `next` on the history scan are indistinguishable unless the
+  guard is deleted and re-added, a shape no fixture had, so row B10 now pins it. The `CLAUDE.md
+  unreadable` row uses a **directory** named `CLAUDE.md` rather than `chmod 000`, because CI
+  often runs as root and reads mode-000 files, so a chmod fixture cannot reach the branch it
+  names. The suite's own total catches a row that vanished; it does **not** catch a hollow rule —
+  one still called, still counted, always returning ok — and only review does.
+
 - **The Claude account picker scores headroom instead of sorting on utilization, and
   `claude-pick` exposes it as a command (DO-574).** The old ranking was the worse of the 5h
   and 7d utilization, then live holders, then name — so an account at 3% of a 5h window that
