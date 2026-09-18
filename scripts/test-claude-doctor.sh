@@ -2410,7 +2410,14 @@ WITH_CLAUTH=1 run_doctor
 want_out "a comment inside the array is NOT CHECKED, not read" \
          "could not read clauth's fallback_chain"
 no_out   "...and is not reported as armed"                      "auto-switch armed"
-want_out "...and the message names a comment as a cause"        "holds a comment"
+# ONE assertion for the message, labelled for what it MEASURES. This needle and
+# the "'literal' strings" one below are two halves of a single constant two-line
+# echo block printed on every NOT CHECKED, so each is satisfied by ANY input that
+# reaches this arm. Asserting them once per fixture read as per-cause coverage
+# and was not: it pins "the four-cause message exists", which is worth exactly
+# one row per arm.
+want_out "...and that arm enumerates every cause, not two of four" \
+         "or 'sed' is not on PATH, or the array holds a comment or"
 
 new_home t2; write_cred
 mkdir -p "$FHOME/.clauth"
@@ -2418,7 +2425,10 @@ printf 'fallback_chain = [\n#   "a",\n    "b",\n]\n' > "$FHOME/.clauth/profiles.
 WITH_CLAUTH=1 run_doctor
 want_out "a commented-out member is NOT CHECKED" \
          "could not read clauth's fallback_chain"
-no_out   "...and the surviving member is not reported as the chain" "the chain walks b"
+# NO PAIRED no_out HERE. The obvious one — "the surviving member is not reported"
+# with needle "the chain walks b" — CANNOT fail in the way it names: with the
+# interior check deleted the output is "the chain walks a, b", which does not
+# contain that needle. The want_out above carries the row.
 
 new_home t3; write_cred
 mkdir -p "$FHOME/.clauth"
@@ -2427,7 +2437,6 @@ WITH_CLAUTH=1 run_doctor
 want_out "TOML literal strings are NOT CHECKED, never silently empty" \
          "could not read clauth's fallback_chain"
 no_out   "...and are not read as an unconfigured chain"          "auto-switch armed"
-want_out "...and the message names a literal string as a cause"  "'literal' strings"
 
 # THE SAME TWO REFUSALS ON THE QUARANTINE ARM, because the parse is shared and a
 # message fixed on one arm only is this repo's "a fix that is right on ONE SIDE
@@ -2442,7 +2451,9 @@ WITH_CLAUTH=1 run_doctor
 want_out "a comment in the quarantine array is NOT CHECKED" \
          "could not read clauth's quarantine list"
 no_out   "...and invents no quarantined account"           "quarantined (auth_broken)"
-want_out "...and that message names a comment as a cause"  "holds a comment"
+# The quarantine arm's one message row, same reasoning as the chain arm's.
+want_out "...and this arm enumerates every cause too" \
+         "or 'sed' is not on PATH, or the array holds a comment or"
 
 new_home u2; write_cred
 mkdir -p "$FHOME/.clauth/profiles/a1"
@@ -2451,7 +2462,6 @@ WITH_CLAUTH=1 run_doctor
 want_out "TOML literal strings in the quarantine array are NOT CHECKED" \
          "could not read clauth's quarantine list"
 no_out   "...and are not read as an empty quarantine"      "no profile is quarantined"
-want_out "...and that message names a literal string too"  "'literal' strings"
 
 # THE MEMBER LOOP'S UPPER BOUND, which 320 rows did not pin. Changing
 # `i <= ${#parts}` to `i < ${#parts}` SURVIVED the whole suite and reproduced the
@@ -2479,6 +2489,21 @@ WITH_CLAUTH=1 run_doctor
 want_out "a one-quote quarantine span is NOT CHECKED too" \
          "could not read clauth's quarantine list"
 no_out   "...and invents no quarantined account"           "quarantined (auth_broken)"
+
+# THE CLASS WIDTH, PINNED UPWARD. `n9` pins it downward — narrowing to
+# `[A-Za-z0-9]` refuses this machine's own hyphenated profiles. Nothing pinned
+# the other direction: adding a single space to the class survived the suite.
+# A space cannot be in a clauth profile name (`validate_profile_name`: letters,
+# digits and - _ . @ + only), and a member containing one is therefore a span
+# that ran somewhere it should not, so refusing is right and this row is honest
+# rather than a guard invented to kill a mutant.
+new_home v3; write_cred
+mkdir -p "$FHOME/.clauth"
+printf 'fallback_chain = ["a b"]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a member containing a space is NOT CHECKED (the class does not widen)" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as an armed chain"  "auto-switch armed"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
