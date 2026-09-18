@@ -75,6 +75,24 @@ class BucketTests(unittest.TestCase):
         self.assertEqual(sorted(i["notification_id"] for i in plan["buckets"]["own_pr_merged"]), ["n4"])
         self.assertEqual(sorted(i["notification_id"] for i in plan["buckets"]["own_pr_approved_open"]), ["n5"])
 
+    def test_empty_string_url_does_not_match_empty_pull_request_url(self):
+        # WS3 fix-brief round 2, item 3: round 1 dropped only `None` urls (`is not None`), so an
+        # empty-string url in a merged_recent/own_prs entry still matched an empty-string
+        # pullRequestUrl on a notification ('' == '') -- over-archiving, the one direction this
+        # workstream must never fail in. Falsy urls (not just None) must be dropped from both sets.
+        lin = json.loads(json.dumps(LIN))
+        lin["notifications"].append({"id": "n14", "type": "pullRequestApproved", "issue": None, "readAt": None,
+                                      "archivedAt": None, "actor": {"displayName": "x"}, "createdAt": "2026-09-16T00:00:00Z",
+                                      "url": None, "title": None, "pullRequestUrl": ""})
+        gh = {"own_prs": GH["own_prs"] + [{"repo": "o/r", "number": 99, "url": ""}],
+              "merged_recent": GH["merged_recent"] + [{"repo": "o/r", "number": 98, "url": ""}]}
+        plan = buckets.classify(lin, gh, T, date(2026, 9, 16))
+        approved_open = [i["notification_id"] for i in plan["buckets"].get("own_pr_approved_open", [])]
+        merged = [i["notification_id"] for i in plan["buckets"].get("own_pr_merged", [])]
+        self.assertNotIn("n14", approved_open)
+        self.assertNotIn("n14", merged)
+        self.assertIn("n14", [i["notification_id"] for i in plan["buckets"]["other"]])
+
     def test_issue_due_with_null_issue_is_hold_not_auto(self):
         # b1: "no date to check" must not read as "date already passed" and auto-archive.
         lin = json.loads(json.dumps(LIN))

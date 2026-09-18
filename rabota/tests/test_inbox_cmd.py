@@ -4,6 +4,7 @@ from pathlib import Path
 from rabota import context, errors, snapshots
 from rabota.commands import inbox as cmd
 from rabota.runner import FakeRunner
+from tests.test_inbox_apply import FakeClient
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -72,6 +73,39 @@ class InboxCmdTests(unittest.TestCase):
         with self.assertRaises(errors.Refused):
             cmd.run_plan(ctx)
 
+    def test_corrupt_snapshot_is_not_reported_as_a_fetched_at_problem(self):
+        # n2: round 1 wrapped the whole snapshots.age_seconds(...) call in
+        # `except (KeyError, TypeError, ValueError)` and re-raised as "unusable fetched_at".
+        # age_seconds re-reads the snapshot file, and json.JSONDecodeError is a ValueError
+        # subclass -- so a snapshot that becomes corrupt on disk between the two reads was
+        # reported as a bad fetched_at, naming a value that was never the problem. A valid
+        # fetched_at must be accepted even when age_seconds (which re-reads the file) would
+        # blow up -- i.e. freshness must be computed from the snapshot dict already in hand,
+        # not by re-reading the file and guessing at the failure's cause. A real fetched_at
+        # parse failure must still refuse.
+        ctx = self.ctx()
+        lin = snapshots.read(ctx.state_dir, "linear")
+        lin["fetched_at"] = datetime.now(timezone.utc).strftime(snapshots.FETCHED_AT_FORMAT)
+        (ctx.state_dir / "sources" / "linear.json").write_text(json.dumps(lin))
+        orig = snapshots.age_seconds
+
+        def boom(*a, **k):
+            raise json.JSONDecodeError("corrupt snapshot", "", 0)
+        snapshots.age_seconds = boom
+        try:
+            try:
+                cmd.run_plan(ctx)  # a corrupt re-read of age_seconds must not surface at all
+            except errors.Refused as e:
+                self.fail(f"a file-corruption fault must not be relabelled as a fetched_at problem: {e}")
+        finally:
+            snapshots.age_seconds = orig
+
+        # a genuine bad fetched_at must still refuse
+        lin["fetched_at"] = "not-a-date"
+        (ctx.state_dir / "sources" / "linear.json").write_text(json.dumps(lin))
+        with self.assertRaises(errors.Refused):
+            cmd.run_plan(ctx)
+
     def test_dry_run_apply_needs_no_credentials(self):
         ctx = self.ctx(); cmd.run_plan(ctx)  # ctx.env carries no Linear key
         rep = cmd.run_apply(ctx, tier="auto", batch=None, confirmed=False, dry_run=True)
@@ -81,3 +115,21 @@ class InboxCmdTests(unittest.TestCase):
         ctx = self.ctx(); cmd.run_plan(ctx)
         rep = cmd.run_apply(ctx, tier="propose", batch="due_policy", confirmed=True, dry_run=True)
         self.assertIn("would_clear", rep)
+
+    def test_due_policy_confirmed_must_be_true_at_the_real_entry_point(self):
+        # n1: round 1 strengthened apply_due_policy's guard to `confirmed is True`, but run_apply
+        # never forwarded the caller's value — it hardcoded confirmed=True below its own truthiness
+        # check. A truthy-but-not-True value (e.g. the string "false") sailed through run_apply's
+        # `if not confirmed` and then satisfied the strengthened guard it never reached. Test at the
+        # entry point WS5 will actually call, not at the helper round 1 tested against directly.
+        ctx = self.ctx(); cmd.run_plan(ctx)
+        lin = json.loads((FIX / "inbox" / "linear.json").read_text())
+        for bad in ("false", "true", 1, 0, None, False):
+            client = FakeClient(lin["notifications"], lin["issues"])
+            with self.assertRaises(errors.Refused):
+                cmd.run_apply(ctx, tier="propose", batch="due_policy", confirmed=bad, client=client)
+            self.assertEqual(client.calls, [], f"confirmed={bad!r} must not mutate anything")
+
+        client = FakeClient(lin["notifications"], lin["issues"])
+        rep = cmd.run_apply(ctx, tier="propose", batch="due_policy", confirmed=True, client=client)
+        self.assertEqual(rep["cleared"], 5)

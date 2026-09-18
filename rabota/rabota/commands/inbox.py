@@ -27,11 +27,13 @@ def _fresh_linear(ctx, allow_stale):
     # ctx.today (b6 — combining ctx.today's date with the UTC clock's time-of-day put "now" up
     # to 24h off whenever the two disagreed about what day it is).
     now_dt = datetime.now(timezone.utc)
+    fetched_at = lin.get("fetched_at")
     try:
-        age = snapshots.age_seconds(ctx.state_dir, "linear", now_dt)
-    except (KeyError, TypeError, ValueError) as e:
-        raise errors.Refused(f"sources/linear.json has an unusable fetched_at ({lin.get('fetched_at')!r}): {e}")
-    if age is not None and age > MAX_AGE_S and not allow_stale:
+        fetched = snapshots.parse_fetched_at(fetched_at)
+    except (TypeError, ValueError) as e:
+        raise errors.Refused(f"sources/linear.json has an unusable fetched_at ({fetched_at!r}): {e}")
+    age = (now_dt - fetched).total_seconds()
+    if age > MAX_AGE_S and not allow_stale:
         raise errors.Refused(f"sources/linear.json is {int(age // 3600)} h old; run `rabota sync` or pass --allow-stale")
     return lin
 
@@ -55,10 +57,10 @@ def run_apply(ctx: Context, tier: str, batch: str | None, confirmed: bool, clien
         return rep
     if tier == "propose":
         if batch == "due_policy":
-            if not confirmed:
+            if confirmed is not True:
                 raise errors.Refused("due_policy needs --confirmed after the user's typed OK")
             if client is None and not dry_run: client = LinearClient.from_context(ctx)
-            return apply.apply_due_policy(plan, client, ctx.store, ctx.tenant, confirmed=True, dry_run=dry_run)
+            return apply.apply_due_policy(plan, client, ctx.store, ctx.tenant, confirmed=confirmed, dry_run=dry_run)
         if batch == "stale_backlog":
             ids = [i["identifier"] for i in plan["batches"]["stale_backlog"]["issues"]]
             raise errors.Refused("stale_backlog: cancel is not automated in v2.0; identifiers: " + " ".join(ids))

@@ -53,8 +53,8 @@ def classify(linear: dict, github: dict | None, tenant, today: date) -> dict:
     me = (linear.get("viewer") or {}).get("id")
     rules = tenant.linear
     gh = github or {"own_prs": [], "merged_recent": []}
-    merged_urls = {u for p in gh.get("merged_recent", []) if (u := p.get("url")) is not None}
-    open_own_urls = {u for p in gh.get("own_prs", []) if (u := p.get("url")) is not None}
+    merged_urls = {u for p in gh.get("merged_recent", []) if (u := p.get("url"))}
+    open_own_urls = {u for p in gh.get("own_prs", []) if (u := p.get("url"))}
     issues_by_id = {i["id"]: i for i in linear.get("issues", [])}
     out = {b: [] for b in BUCKET_ORDER}
     unread = [n for n in linear.get("notifications", []) if not n.get("readAt") and not n.get("archivedAt")]
