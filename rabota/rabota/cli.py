@@ -27,7 +27,7 @@ register("version", _version_build, _version_run)
 # Command modules register themselves on import. Missing modules are fine
 # while workstreams land; each module is imported by name and skipped if absent.
 COMMAND_MODULES = ["doctor", "preflight", "sync", "ingest", "inbox", "rank", "brief",
-                   "close", "escalate", "census", "budget", "lane", "reap", "db"]
+                   "close", "escalate", "census", "budget", "lane", "reap", "db", "precompute"]
 
 
 def _load_command_modules():
