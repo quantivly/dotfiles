@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Claude Code accounts section left CLAUDE.md for `docs/`, verbatim, and its rules stayed
+  (DO-622).** 180,896 of CLAUDE.md's 353,845 chars moved to `docs/CLAUDE_ACCOUNTS.md` (the
+  credential mechanism and its incidents) and `docs/CLAUDE_ACCOUNT_PICKER.md` (the picker and the
+  tenant table); CLAUDE.md is now 174,761. **Verbatim was the decision that mattered**: a rewrite
+  quietly shortens arguments, and no mechanical check can see that loss — so the moved text was
+  proven identical to `main`'s, modulo two link rewrites, two heading promotions and two boundary
+  blank lines, by rebuilding the section from the docs and diffing. What stayed inline is the ten
+  operative rules an agent needs *before* acting (run `claude-doctor` first, never
+  `clauth <profile>` while the stored copy differs, never relink a credential, name the account
+  from `CLAUDE_CONFIG_DIR`, …), because nanoclaw's IMP-2778 measured an extracted reference corpus
+  at zero reads over 102 runs. A `claude-accounts` project skill carries the diagnostic procedure —
+  read-only until the last step — and routes into the docs by section name; skill bodies load on
+  demand, which the DO-620 probe measured (87 skills, 9.1k tokens, descriptions only).
+  `scripts/check-doc-tokens.sh` (CI) asserts every ticket, date, script path, PR reference and
+  heading in the base CLAUDE.md still resolves in `CLAUDE.md`/`docs/`/`.claude/` — **not**
+  `CHANGELOG.md`, where a token survives only by being cited — plus a 10% bound on total doc
+  volume; deliberate retirement is a line in `docs/RETIRED.md`, not a bypass flag. It says what it
+  cannot see: ~one anchor per 36 lines, and nothing at all about a paraphrase. State table:
+  `scripts/test-doc-tokens.sh`, 33 checks; 9 mutants, 9 deaths — one only after a row was added,
+  because a *demoted* heading still contains the original as a substring, so only a *promoted*
+  one can tell "level ignored" from "level must match". The ~50 code comments citing "CLAUDE.md
+  records X" are left for one pass once every section has moved, rather than repointed twice.
+
 - **CLAUDE.md now has a context budget that can only tighten, and a written rule for what
   may go in it.** The file is loaded in full into every request of every session. It held
   14k–36k chars for eight months and then went **35,682 → 350,324 in the nineteen days from
