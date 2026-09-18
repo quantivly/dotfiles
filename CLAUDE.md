@@ -2562,9 +2562,12 @@ Traps specific to the checker, each of which produced a green tick first:
   range and not to an assignment: on `fallback_chain = [` followed by
   `profiles = [ "p1", "p2", ]` it takes the other array's bracket and the `*'"'*`
   armed test passes on the other array's names. Measured, and it left the third fix to
-  this one match printing the neighbouring line anyway. The fix that does hold is the
-  interior check, recorded in "A standing `auth_broken` is reported" below; "bounded by
-  construction" was the sentence that made a fourth attempt necessary.
+  this one match printing the neighbouring line anyway. "Bounded by construction" was the
+  sentence that made a fourth attempt necessary — and the fourth, interior validation, did
+  not hold either: it checked the separators BETWEEN the names and never a name. What holds
+  is the interior check PLUS a member class, the fifth attempt, recorded in "A standing
+  `auth_broken` is reported" below. Naming only the interior check here, as this paragraph
+  did until 2026-09-18, points the next reader at the same half-technique.
   **And do not read that as a description of this machine.** The chain here was
   `["quantivly-3","quantivly-1","quantivly-2"]` with a live daemon until 2026-09-08, while 15 of 21
   Claude processes had no `CLAUDE_CONFIG_DIR` at all and so read the very file the chain repoints —
@@ -3263,14 +3266,14 @@ no precision the old test lacked, and saying otherwise would have shipped a defe
 exist alongside a fix for one that does.
 
 **The remaining instance was `fallback_chain` in `claude-doctor`. FIXED 2026-09-17, and it took
-a FOURTH attempt at one match.** Measured before the fix on `fallback_chain = [` followed by
+a FIFTH attempt at one match.** Measured before the fix on `fallback_chain = [` followed by
 `profiles = [...]`: the span ran into the other array, the `*'"'*` test passed on ITS quoted
 names, and the doctor printed
 `auto-switch armed: fallback_chain = [ profiles = [ "p1", "p2", ]` — a neighbouring line quoted
 verbatim into a report that lands in transcripts, in the function whose own comment says that is
 the thing it must never do, while claiming an auto-switch is armed on a machine whose chain is
-deliberately empty. `_claude_fallback_chain` validates the interior and returns the member
-NAMES; the report is the doctor's own prose around them
+deliberately empty. `_claude_fallback_chain` validates the interior AND every member, then
+returns the member NAMES; the report is the doctor's own prose around them
 (`auto-switch armed: the chain walks p1, p2`), so no span reaches it at all.
 
 **The history is worth more than the fix.** A line-based `grep -oE` that never once fired against
@@ -3287,8 +3290,7 @@ agreement. A ✗ would exit non-zero over a hand-edit of another tool's config, 
 permanently-red checker this file has now recorded seven times; it is avoided here by choosing the
 severity deliberately rather than by remembering to. It is the same severity the quarantine reader
 gives the same file being malformed, on purpose: two readers of one file must not disagree about
-what unreadable costs. **The row that had to ship with it runs the other way** — clauth omits the
-key entirely when no chain is configured, so an absent assignment must be silent on BOTH counts,
+what unreadable costs. **The row that had to ship with it runs the other way** — an absent assignment must be silent on BOTH counts,
 or every machine without a fallback chain carries a permanent warning about a setting it has
 deliberately not set. That is the failure mode any new ⚠ path can introduce, and the reason the
 new arm has a row for the resting state and not only for the broken one.
@@ -3384,8 +3386,11 @@ did not. Enumerate the arms that can print, not the failure you happened to be t
   two that LOOK identical on the runaway and mid-member fixtures are kept, because those spans do
   hold text and deleting the member class really does print `auto-switch armed`.
 - **A needle that CAN fail may still not be unique to the rule.** `p2` was measured failable here
-  and is printed by **nine other fixtures on their own pass paths**, so it was sound only because
-  this one fixture happens to create no `p2` profile. A `zzcanary` member that appears nowhere else
+  and is a generic fixture name this suite reuses throughout, on many other fixtures' own pass
+  paths, so it was sound only because this one fixture happens to create no `p2` profile. **No
+  count is given deliberately**: two independent measurements disagreed (10 vs 13) because
+  "mentions `p2`" and "prints `p2` on its pass path" are different questions, and a figure whose
+  method is ambiguous decays faster than the claim it decorates. A `zzcanary` member that appears nowhere else
   now sits beside it. The comment claiming "the two halves of the defect fail independently" was
   also measured half-true and is corrected: the member needle subsumes the raw-assignment one.
 - **A MUTANT THAT DIES FOR THE WRONG REASON IS WORSE THAN ONE THAT CANNOT APPLY.** A mutation
@@ -3397,8 +3402,8 @@ did not. Enumerate the arms that can print, not the failure you happened to be t
   read as already covered, and a false all-clear is never investigated.** No gate this file had
   sees it: find-string present ✓, bytes changed ✓, `zsh -n` ✓, because an undefined function is a
   runtime failure and not a parse error. Two cheap gates do: assert `(( $+functions[<name>] ))`
-  for every function name the REPLACEMENT introduces (measured over all 15 mutants here, 0
-  offenders), and **attribute a death to a row whose SUBJECT is the mutated property** — all three
+  for every function name the REPLACEMENT introduces (measured over all **18** entries in the
+  driver, 0 offenders), and **attribute a death to a row whose SUBJECT is the mutated property** — all three
   dead rows there were about message text and none about an exit code, which is this file's
   "a needle must be unique to the RULE" applied to the mutation side.
 - **A row built on a false premise, withdrawn rather than shipped.** The second pass built a
@@ -3439,8 +3444,8 @@ a silent failure inside the checker whose entire subject is silent failures, inv
 `zsh -n` and to the suite's own `$+functions` preflight, which lists the names the SUITE knows
 and not the ones `claude.sh` calls. A row now reads every `_doctor_*` call out of the file and
 asserts each resolves. It fires by name under the mutant (`calls undefined emitter(s):
-_doctor_fail`) while four message-text rows fail beside it — which is the fake-death shape, now
-with something in the output that names the real cause instead of leaving four rows to imply it.
+_doctor_fail`) while **seven** message-text rows fail beside it — which is the fake-death shape,
+now with something in the output naming the real cause instead of leaving seven rows to imply it.
 The applicability gate gained the same rule plus **one allowlisted exception**, declared by name
 with its reason, since the mutant proving the row works must introduce an undefined emitter on
 purpose.
@@ -3479,20 +3484,49 @@ What would change the decision: clauth starting to write comments, or somebody a
 the ⚠ and being misled by it. The message names all four causes, so the reader who just
 commented out a member is told what happened.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
+**A THIRD PASS AUDITED THE PROSE ITSELF, AND THE WORST FINDING WAS THAT A RETRACTION IS NOT A
+CORRECTION.** The `skip_serializing_if` claim above was retracted at the code site — and left
+standing, asserted, in the header of the very function that retracts it, fifty-five lines apart
+in one body. The same claim also survived in this file as a row's stated rationale. **When you
+retract a claim, grep for every instance of it, starting with the file you are editing**; the
+retraction is the easy half and it is the half that feels like the work.
+
+Four more from the same pass, each verified before acting on it:
+
+- **"A fix that is right on ONE SIDE of a report is worse than one wrong on both" — met on the
+  MESSAGE side, one round after being quoted in the comment that fixed the other side.** The
+  chain arm's remedy was corrected to name all four causes; the quarantine arm was left naming
+  two, for a full round, while both missing causes reach it (measured: a comment and a literal
+  string each give rc=1 there, and `sed` missing does too). Both arms name four now, and **both
+  have rows**, so the next divergence fails instead of waiting for a reviewer.
+- **A document contradicted itself about its own history**: "a FOURTH attempt" in one paragraph,
+  "the fifth attempt" and "the previous four fixes" in two others. Five is right, and the count
+  is now the same everywhere.
+- **A pointer written by one of these corrections pointed at the retracted technique.** The 2026-09-17
+  entry ended "the fix that does hold is the interior check" — which is precisely what did not
+  hold, as the round after it established. A correction is a claim like any other and goes stale
+  like any other.
+- **A precise count whose measurement method is ambiguous decays faster than the claim it
+  decorates.** "Nine other fixtures print `p2`" was re-measured as 10 by one method and 13 by
+  another, because "mentions it" and "prints it on its pass path" are different questions. The
+  claim needed no number at all, so it no longer carries one — and that is the better fix than
+  picking whichever figure was defensible.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
 audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
-so the count went up by four and down by two, which a bare delta would hide). **17 mutants, 17 deaths, 0 survivors, 0 harness errors** (16 at `60d973c`, plus the
-comment-accepting mutant for the refusal rows; those rows added no code change, and no row was
-deleted, so a kill measured at `60d973c` cannot have been resurrected — reasoning, not a fourth
-re-run, and labelled as such). The set was re-run against the tree rather than carried over
-three times, because a mutant measured against a previous version of the code proves nothing
-about this one. And the
-whole set was re-run against that tree rather than carried over, three times, because a mutant
-measured against a previous version of the code proves nothing about this one. Twice that
+so the count went up by four and down by two, which a bare delta would hide). **18 live mutants, 18 deaths, 0 survivors, 0 harness errors**, plus one retired
+by design (19 entries). After the last edits every entry was **dry-run for applicability against
+the current tree — 19 entries, 0 stale, 0 no-ops** — and the three whose subject touches the
+changed lines were re-run and re-died; the rest are untouched by a comment-only edit, and no row
+was ever deleted, so their kills stand. That last step is reasoning and is labelled as such
+rather than presented as a fresh sweep. The whole set was re-run against the tree rather than carried
+over, three times, because a mutant measured against a previous version of the code proves
+nothing about this one. Twice that
 re-running paid: a rename left one mutant's find-string matching nothing (`find-string occurs 0
 times`, reported as a harness error and not a survivor), and the mutant written for the armed
-path's leak rule **survived**, which is what exposed the misleading variable name above. A
-seventeenth is **retired with its reason** rather than dropped — it dumped the names variable, so
+path's leak rule **survived**, which is what exposed the misleading variable name above. An
+EIGHTEENTH — `M14` in the driver's numbering, which does not renumber — is **retired with its
+reason** rather than dropped — it dumped the names variable, so
 it could never die, and a retired mutant with a reason is evidence where a silently dropped one
 is a gap nobody can see.
 
