@@ -9,6 +9,10 @@ explains how to adopt it, why each piece is the way it is, and how it fails.
 (Ubuntu / GNOME / Wayland + Alacritty). Everything marked *verified* below was tested at the
 keyboard; anything not marked is inherited from documentation and should be treated as such.
 
+
+**Maintaining this integration rather than adopting it?** The traps, the evidence behind them
+and the tests that pin them are in [HERDR_INTERNALS.md](HERDR_INTERNALS.md).
+
 ---
 
 ## 0. Read this first: every layer here fails silently
