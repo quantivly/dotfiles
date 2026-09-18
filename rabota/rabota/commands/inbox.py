@@ -23,8 +23,14 @@ def _summary_path(ctx): return ctx.state_dir / "inbox-summary.txt"
 def _fresh_linear(ctx, allow_stale):
     lin = snapshots.read(ctx.state_dir, "linear")
     if not lin: raise errors.Refused("no sources/linear.json — run `rabota sync` first")
-    now_dt = datetime.combine(ctx.today, datetime.now(timezone.utc).time(), tzinfo=timezone.utc)
-    age = snapshots.age_seconds(ctx.state_dir, "linear", now_dt)
+    # Staleness is a question about instants, not calendar dates: use the real clock, never
+    # ctx.today (b6 — combining ctx.today's date with the UTC clock's time-of-day put "now" up
+    # to 24h off whenever the two disagreed about what day it is).
+    now_dt = datetime.now(timezone.utc)
+    try:
+        age = snapshots.age_seconds(ctx.state_dir, "linear", now_dt)
+    except (KeyError, TypeError, ValueError) as e:
+        raise errors.Refused(f"sources/linear.json has an unusable fetched_at ({lin.get('fetched_at')!r}): {e}")
     if age is not None and age > MAX_AGE_S and not allow_stale:
         raise errors.Refused(f"sources/linear.json is {int(age // 3600)} h old; run `rabota sync` or pass --allow-stale")
     return lin
@@ -43,7 +49,7 @@ def run_apply(ctx: Context, tier: str, batch: str | None, confirmed: bool, clien
     if not _plan_path(ctx).exists(): run_plan(ctx)
     plan = json.loads(_plan_path(ctx).read_text())
     if tier == "auto":
-        client = client or LinearClient.from_context(ctx)
+        if client is None and not dry_run: client = LinearClient.from_context(ctx)
         rep = apply.apply_auto(plan, client, ctx.store, ctx.tenant, dry_run=dry_run)
         emit.write_file(_summary_path(ctx), buckets.summary_line(plan, rep) + "\n")
         return rep
@@ -51,7 +57,7 @@ def run_apply(ctx: Context, tier: str, batch: str | None, confirmed: bool, clien
         if batch == "due_policy":
             if not confirmed:
                 raise errors.Refused("due_policy needs --confirmed after the user's typed OK")
-            client = client or LinearClient.from_context(ctx)
+            if client is None and not dry_run: client = LinearClient.from_context(ctx)
             return apply.apply_due_policy(plan, client, ctx.store, ctx.tenant, confirmed=True, dry_run=dry_run)
         if batch == "stale_backlog":
             ids = [i["identifier"] for i in plan["batches"]["stale_backlog"]["issues"]]

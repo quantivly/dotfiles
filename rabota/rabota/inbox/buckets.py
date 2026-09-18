@@ -53,8 +53,8 @@ def classify(linear: dict, github: dict | None, tenant, today: date) -> dict:
     me = (linear.get("viewer") or {}).get("id")
     rules = tenant.linear
     gh = github or {"own_prs": [], "merged_recent": []}
-    merged_urls = {p["url"] for p in gh.get("merged_recent", [])}
-    open_own_urls = {p["url"] for p in gh.get("own_prs", [])}
+    merged_urls = {u for p in gh.get("merged_recent", []) if (u := p.get("url")) is not None}
+    open_own_urls = {u for p in gh.get("own_prs", []) if (u := p.get("url")) is not None}
     issues_by_id = {i["id"]: i for i in linear.get("issues", [])}
     out = {b: [] for b in BUCKET_ORDER}
     unread = [n for n in linear.get("notifications", []) if not n.get("readAt") and not n.get("archivedAt")]
@@ -78,7 +78,11 @@ def classify(linear: dict, github: dict | None, tenant, today: date) -> dict:
         if t == "issueAssignedToYou":
             out["assignment_new"].append(_item(n, "assignment_new", "rank", "new assignment")); continue
         if t == "issueDue":
-            live = issues_by_id.get((iss or {}).get("id"), iss or {})
+            if iss is None:
+                # No issue to look the date up on: absent data must never read as "date already
+                # passed" and auto-archive (b1).
+                out["due_reminder"].append(_item(n, "due_reminder", "hold", "no issue to check due date")); continue
+            live = issues_by_id.get(iss.get("id"), iss)
             due = live.get("dueDate")
             past = due is None or date.fromisoformat(due) < today
             out["due_reminder"].append(_item(n, "due_reminder", "auto" if past else "hold",

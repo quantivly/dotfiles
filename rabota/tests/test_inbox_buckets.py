@@ -68,6 +68,23 @@ class BucketTests(unittest.TestCase):
         self.assertEqual(items["n12"]["tier"], "auto")
         self.assertEqual(items["n12"]["issue_team"], "SEC")
 
+    def test_pr_entries_missing_url_are_dropped_not_crashed(self):
+        gh = {"own_prs": GH["own_prs"] + [{"repo": "o/r", "number": 99}],
+              "merged_recent": GH["merged_recent"] + [{"repo": "o/r", "number": 98}]}
+        plan = buckets.classify(LIN, gh, T, date(2026, 9, 16))  # must not raise KeyError
+        self.assertEqual(sorted(i["notification_id"] for i in plan["buckets"]["own_pr_merged"]), ["n4"])
+        self.assertEqual(sorted(i["notification_id"] for i in plan["buckets"]["own_pr_approved_open"]), ["n5"])
+
+    def test_issue_due_with_null_issue_is_hold_not_auto(self):
+        # b1: "no date to check" must not read as "date already passed" and auto-archive.
+        lin = json.loads(json.dumps(LIN))
+        lin["notifications"].append({"id": "n13", "type": "issueDue", "issue": None, "readAt": None,
+                                      "archivedAt": None, "actor": None, "createdAt": "2026-09-16T00:00:00Z",
+                                      "url": None, "title": None, "pullRequestUrl": None})
+        plan = buckets.classify(lin, GH, T, date(2026, 9, 16))
+        items = {i["notification_id"]: i for i in plan["buckets"]["due_reminder"]}
+        self.assertEqual(items["n13"]["tier"], "hold")
+
     def test_fixture_notification_nodes_carry_no_key_outside_the_selection_set(self):
         # L2 in the WS3 brief: a fixture richer than the real API payload is how review finding k7
         # hid for four rounds. Every key on a notification node must be one the query actually asks

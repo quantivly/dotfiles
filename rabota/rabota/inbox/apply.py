@@ -31,7 +31,7 @@ def apply_auto(plan: dict, client, store, tenant, dry_run: bool = False) -> dict
 
 
 def apply_due_policy(plan: dict, client, store, tenant, confirmed: bool, dry_run: bool = False) -> dict:
-    if not confirmed:
+    if confirmed is not True:
         raise errors.Refused("due_policy is a propose-tier batch; pass --confirmed after the user's typed OK")
     batch = new_batch_id("due")
     issues = plan["batches"]["due_policy"]["issues"]

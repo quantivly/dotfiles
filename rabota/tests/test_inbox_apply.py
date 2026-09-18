@@ -46,6 +46,13 @@ class ApplyTests(unittest.TestCase):
         self.assertIsNone(self.client.n["n1"]["archivedAt"])
         self.assertIsNotNone(self.store.decisions(rep["batch_id"])[0]["rolled_back_at"])
 
+    def test_due_policy_requires_confirmed_is_true_not_truthy(self):
+        # k5's shape: a truthy-but-not-True confirmed must not pass. The CLI path is safe (argparse
+        # produces a real bool); this guards the Python API a future caller (WS5) will use directly.
+        for bad in ("false", "true", 1, 0, None):
+            with self.assertRaises(errors.Refused):
+                apply.apply_due_policy(self.plan, self.client, self.store, T, confirmed=bad)
+
     def test_due_policy_requires_confirmation_and_rolls_back_byte_for_byte(self):
         with self.assertRaises(errors.Refused):
             apply.apply_due_policy(self.plan, self.client, self.store, T, confirmed=False)
