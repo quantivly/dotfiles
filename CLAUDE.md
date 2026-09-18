@@ -3529,10 +3529,35 @@ Four more from the same pass, each verified before acting on it:
   claim needed no number at all, so it no longer carries one — and that is the better fix than
   picking whichever figure was defensible.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
+**THREE MORE FROM THE SAME PASS, AND TWO OF THEM WERE UNPINNED FIXES IN THE FIX.**
+
+- **A loop's upper BOUND was unpinned, and the reason is a property of every fixture at once.**
+  Changing the member loop's `i <= ${#parts}` to `i < ${#parts}` survived all 320 rows *and*
+  reproduced the defect. Every malformed fixture in the suite had an **even** number of quotes,
+  so the runaway sat at index 2 where `<` still reaches it; a **one-quote** span puts it in the
+  LAST even field — exactly the one `<` drops — and one stray quote is the likelier torn write.
+  **A fixture family can share a property that makes a whole class of mutation unreachable**, and
+  no amount of adding more fixtures of the same shape reveals it; ask what every fixture has in
+  common, not how many there are.
+- **A row that greps for a defect matches the comment explaining the defect — THIRD time in one
+  change.** The `_doctor_*` emitter row grepped the bare name, so it matched PROSE: `claude.sh`
+  carries three such mentions in comments and the row was green only because all three happen to
+  name real functions. One comment naming `_doctor_fail` turned the suite red asserting a call
+  that does not exist — a permanently-red checker armed by a comment. Matched as a **call** now
+  (line-start, `&&`, `||`, `;`, `{`), and deliberately **not** by stripping comments first: a `#`
+  inside a quoted string would drop a real call, which is the direction that makes the row go
+  quiet rather than loud.
+- **The rename lesson applied to one of two identical siblings.** `qspan` held names, not a span,
+  forty lines from the `cspan` it was renamed with. One-side-only fixes are this file's most
+  repeated shape and they are hardest to see when the two sides are adjacent.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 326 at `dfb6254`; 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
 audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
-so the count went up by four and down by two, which a bare delta would hide). **18 live mutants, 18 deaths, 0 survivors, 0 harness errors**, plus one retired
-by design (19 entries). After the last edits every entry was **dry-run for applicability against
+so the count went up by four and down by two, which a bare delta would hide). **21 live mutants, 21 deaths, 0 survivors, 0 harness errors**, plus one retired
+by design. Two of the last three were written by an independent pass against fixes this file had
+already called pinned, and one of those (the bash reader's class) killed nothing until its row
+was rewritten to probe the FUNCTION'S CONTRACT instead of its behaviour — a surviving mutant is
+what said the first row was decoration. After the last edits every entry was **dry-run for applicability against
 the current tree — 19 entries, 0 stale, 0 no-ops** — and the three whose subject touches the
 changed lines were re-run and re-died; the rest are untouched by a comment-only edit, and no row
 was ever deleted, so their kills stand. That last step is reasoning and is labelled as such
