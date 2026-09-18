@@ -1,7 +1,7 @@
 # Weekly windows in the account picker: rank on the aggregate, respect the spend wall, gate on the model
 
 **Date:** 2026-09-18
-**Status:** Revised after adversarial review (pending spec review)
+**Status:** Approved 2026-09-18 (revised after adversarial review)
 **Issues:** DO-621 (Part A: ranker), DO-623 (Part B: gate, blocked by DO-621).
 Follow-ups out of scope: DO-624 (`hspawn -m` through the gate) and
 ZviBaratz/herdr-draft#185 (herdr-draft passing the model to its picker).
