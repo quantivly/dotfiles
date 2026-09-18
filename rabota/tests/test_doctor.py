@@ -11,7 +11,7 @@ FIX = Path(__file__).parent / "fixtures" / "config"
 def healthy_runner():
     return FakeRunner([
         (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
-        (["systemctl", "--user", "is-enabled", "rabota-precompute.timer"], Result(0, "enabled\n", "")),
+        (["systemctl", "--user", "is-enabled"], Result(0, "enabled\n", "")),
     ])
 
 
@@ -32,12 +32,28 @@ class DoctorTests(unittest.TestCase):
     def test_reports_ok_when_links_and_timer_fine(self):
         runner = FakeRunner([
             (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
-            (["systemctl", "--user", "is-enabled", "rabota-precompute.timer"], Result(0, "enabled\n", "")),
+            (["systemctl", "--user", "is-enabled"], Result(0, "enabled\n", "")),
         ])
         report = doctor.run_doctor(self.make_ctx(runner))
         self.assertEqual(report["tenant"], "toysim")
         self.assertEqual(report["db_schema"], SCHEMA_VERSION)
         self.assertTrue(report["ok"], report["problems"])
+
+    def test_timer_name_is_scoped_to_the_tenant(self):
+        # §3.3 Step 1b: the unit is per-tenant (rabota-precompute@<tenant>.timer), not the
+        # single shared name doctor.py used to check.
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        runner = FakeRunner([
+            (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
+            (["systemctl", "--user", "is-enabled"], Result(0, "enabled\n", "")),
+        ])
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name) / "state"),
+                                text=False, dry_run=False, command="doctor")
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        doctor.run_doctor(ctx)
+        timer_call = next(c for c in runner.calls if c[:3] == ["systemctl", "--user", "is-enabled"])
+        self.assertEqual(timer_call[-1], "rabota-precompute@quantivly.timer")
 
     def test_schema_drift_is_a_problem(self):
         ctx = self.make_ctx(healthy_runner())
@@ -64,7 +80,7 @@ class DoctorTests(unittest.TestCase):
     def test_missing_timer_is_a_problem_not_a_crash(self):
         runner = FakeRunner([
             (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
-            (["systemctl", "--user", "is-enabled", "rabota-precompute.timer"], Result(1, "", "Failed to get unit file state")),
+            (["systemctl", "--user", "is-enabled"], Result(1, "", "Failed to get unit file state")),
         ])
         report = doctor.run_doctor(self.make_ctx(runner))
         self.assertFalse(report["ok"])

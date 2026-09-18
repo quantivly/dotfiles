@@ -73,6 +73,14 @@
     # token the server already invalidated (which quarantines the account).
     ~/.config/systemd/user/claude-cred-reconcile.service: systemd/claude-cred-reconcile.service
     ~/.config/systemd/user/claude-cred-reconcile.timer: systemd/claude-cred-reconcile.timer
+    # rabota pre-compute timer (WS5): a systemd USER TEMPLATE unit, instantiated per tenant
+    # (rabota-precompute@quantivly.timer). Linking does NOT enable or start it — that is a
+    # gate Zvi runs by hand (scripts/rabota-env-write.sh, then `systemctl --user enable --now
+    # rabota-precompute@<tenant>.timer`), because the unit's only secret comes from
+    # ~/.config/rabota/env (mode 600), which no agent may write or read. Follows the same
+    # link + reconcile pattern as herdr-server.service above.
+    ~/.config/systemd/user/rabota-precompute@.service: systemd/rabota-precompute@.service
+    ~/.config/systemd/user/rabota-precompute@.timer: systemd/rabota-precompute@.timer
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme
