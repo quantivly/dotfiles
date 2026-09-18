@@ -2,6 +2,50 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## How to extend this file
+
+**This is an instruction file, not a journal.** It is loaded in full into every request of
+every session, so every paragraph here is paid for on every turn — and past ~150k chars
+Claude Code warns that length *reduces adherence*, i.e. the file stops producing the
+behaviour it was written to produce. It held 14k–36k for eight months and then went
+35,682 → 350,324 in nineteen days, because each PR appended its own review narrative. A
+one-off cut was already tried (2026-01-07, −62%) and it regrew 25×, so the budget is now
+enforced: `scripts/check-claude-md.sh`, run in CI and by pre-commit, against a ceiling
+derived from history that can only tighten. **Remove as much as you add.**
+
+Before adding anything, route it:
+
+| what you have | where it goes |
+|---|---|
+| Changes what an agent **does**, everywhere in this repo | here, as **one imperative line** |
+| Changes what it does in **one area** of the code | `.claude/rules/<area>.md` (a trigger card: imperative lines and links, ≤2,000 bytes) |
+| A procedure for a recurring task | `.claude/skills/<task>/SKILL.md` (+ uncapped `references/`) |
+| Evidence, a measurement, a date, a postmortem, a mutation tally | `docs/<AREA>.md` |
+| What changed in this release | `CHANGELOG.md` |
+| True of the **tools or harness** regardless of repo | the agent memory store |
+| True of **every Quantivly repo**, not just this one | the `quantivly-conventions` plugin |
+| A rule whose condition can no longer fire | **retire it — do not extract it** |
+
+Two rules about *how* to move something, both measured rather than assumed:
+
+- **Extract the elaboration; keep the operative rule here.** The threshold, the decision and
+  the emitted line stay inline. nanoclaw measured a 22-file extracted reference corpus at
+  **zero reads across 102 runs** — including a file cited with "You MUST read" — so moving a
+  rule out and leaving a pointer improves every number and loses the rule.
+- **One prose home per fact.** A one-line imperative here and a short memory hook are
+  *pointers*; what is forbidden is the same *explanation* written twice. `CLAUDE.md` and
+  `docs/HERDR_GUIDE.md` already drifted that way once (commit `69d815d`).
+
+Anything you add under `docs/`, `.claude/rules/` or `.claude/skills/` **must be linked from
+here or from `README.md`** — the guard enforces reachability, because an unrouted file is an
+unread file. `docs/CLAUDE_SETUP.md` sat unlinked and therefore unread until this guard named
+it; that is the failure mode, and it is silent from every other angle.
+
+The same rules are repeated as a trigger card at [.claude/rules/docs.md](.claude/rules/docs.md),
+scoped so they load when you open one of these files rather than only when you think to look.
+Budget knobs and their rationale: [scripts/context-budget.conf](scripts/context-budget.conf).
+Run `./scripts/check-claude-md.sh` before you commit.
+
 ## Repository Overview
 
 This is a personal dotfiles repository that manages zsh, git, and development tool configurations using [dotbot](https://github.com/anishathalye/dotbot). The configuration is modular, portable across machines, and security-focused with secrets separated from version control.
@@ -2841,6 +2885,10 @@ CLAUDE_SETTINGS_REQUIRE=( model statusLine.command )
 
 Operational half — the connector cleanup that has to be done at claude.ai, what each finding
 means, and how to revive a dead stdio server: [docs/CLAUDE_ACCOUNT_MCP.md](docs/CLAUDE_ACCOUNT_MCP.md).
+
+Which plugins are enabled at user scope and which are per-project — the two stdio MCP
+servers cost a forked process per session, and neither settings file is in this repo, so that
+page is the only record: [docs/CLAUDE_SETUP.md](docs/CLAUDE_SETUP.md).
 
 ### A long suspend expires every account at once (2026-09-14)
 
