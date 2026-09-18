@@ -3445,9 +3445,48 @@ The applicability gate gained the same rule plus **one allowlisted exception**, 
 with its reason, since the mutant proving the row works must introduce an undefined emitter on
 purpose.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 306 at `60d973c`; 304 at `3a3c662` before the row
+**THE LEGAL-TOML REFUSALS ARE NOW A DECISION RATHER THAN AN ACCIDENT, AND THE PARSER IS
+DELIBERATELY NOT BUILT.** Three shapes that are valid TOML and that clauth never writes — a
+comment after the opening bracket, a commented-out member, and literal `'single-quoted'` strings
+— come back as ⚠ NOT CHECKED. Nothing asserted that, so an edit could have started accepting a
+comment-bearing array in silence. What decided the shape of the fix is the direction of the
+danger, measured: with the odd-field check removed, `fallback_chain = ['a', 'b']` returns **rc=0
+with no members**, so an armed chain reads as *unarmed* — the report goes quiet on exactly the
+state it exists to announce. Refusing is loud; accepting a shape the parse was never designed for
+is not. Hence "never silently empty" as the assertion.
+
+Two fixes were considered and declined, and the second is the tempting one:
+
+- **A real TOML parser** is what the workflow guard's history argues for ("those are YAML
+  questions, and each round of patching produced a new way to answer one wrongly"). Here it means
+  python3 + `tomllib`, which is **3.11+** — the exact dependency `verify-tools.sh` was corrected
+  for, on the Ubuntu 20.04 box (python 3.8) that is the first outside adopter's. A new external
+  tool in a checker is a new way for a check to go quiet.
+- **Stripping whole-line comments only** — a line whose first non-whitespace character is `#`
+  cannot be inside a string, *unless* it is inside a multi-line basic string, which cannot
+  plausibly hold a profile name, and which the member class would refuse anyway. That chain of
+  three corner-case arguments about TOML is precisely how the previous four fixes to this one
+  match were justified. Declined for the shape of the reasoning, not for a defect anybody found
+  in it.
+
+**The asymmetry is what makes refusing cheap here, and it is worth stating because the same
+refusal is wrong one file over.** This consumer is a DISPLAY: a conservative refusal costs one
+sentence of report, moves no account and changes no exit code. In the picker the identical rule
+is inverted — a malformed list excludes **nobody** — because there a refusal costs account
+selection. Same parse, opposite safe direction, decided by what the caller does with the answer.
+
+What would change the decision: clauth starting to write comments, or somebody actually meeting
+the ⚠ and being misled by it. The message names all four causes, so the reader who just
+commented out a member is told what happened.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
 audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
-so the count went up by four and down by two, which a bare delta would hide). **16 mutants, 16 deaths, 0 survivors, 0 harness errors at `60d973c`** — and the
+so the count went up by four and down by two, which a bare delta would hide). **17 mutants, 17 deaths, 0 survivors, 0 harness errors** (16 at `60d973c`, plus the
+comment-accepting mutant for the refusal rows; those rows added no code change, and no row was
+deleted, so a kill measured at `60d973c` cannot have been resurrected — reasoning, not a fourth
+re-run, and labelled as such). The set was re-run against the tree rather than carried over
+three times, because a mutant measured against a previous version of the code proves nothing
+about this one. And the
 whole set was re-run against that tree rather than carried over, three times, because a mutant
 measured against a previous version of the code proves nothing about this one. Twice that
 re-running paid: a rename left one mutant's find-string matching nothing (`find-string occurs 0
