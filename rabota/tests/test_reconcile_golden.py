@@ -48,3 +48,19 @@ class ReconcileGoldenTests(unittest.TestCase):
 
     def test_classes_field_is_self_describing(self):
         self.assertEqual(set(self.data.get("classes", [])), SIX_CLASSES)
+
+    def test_every_class_is_covered_or_declared_missing_never_both(self):
+        classes = set(self.data.get("classes", []))
+        missing = set(self.data.get("missing_classes", []))
+        present = {e["class"] for e in self.data["entries"]}
+        for name in classes:
+            in_entries = name in present
+            in_missing = name in missing
+            self.assertTrue(
+                in_entries or in_missing,
+                f"{name} is neither covered by an entry nor listed in missing_classes",
+            )
+            self.assertFalse(
+                in_entries and in_missing,
+                f"{name} is both covered by an entry and listed in missing_classes",
+            )

@@ -7,7 +7,7 @@
     "state-contradiction",
     "stale-blocked"
   ],
-  "missing_classes": ["spoken-already-done", "stale-blocked"],
+  "missing_classes": [],
   "entries": [
     {
       "id": "g01",
@@ -88,6 +88,22 @@
       "class": "tracked-satisfied",
       "outcome": "confirmed landed and removed from the active queue",
       "evidence": "origin/main on auto-conf is 05dd732 — run 1's recorded squash sha"
+    },
+    {
+      "id": "g11",
+      "source": "2026-09-03/brief.md#Already done — say this as confidently as \"overdue\"",
+      "text": "The @benoit ELK reply is SENT. Verified in Slack, not from the handoff: group DM `C0BBASUBJMC`, @zvi at `ts=1788373549.343679` (2026-09-02 ~21:25 IDT), text matches the drafted version. Closes item 1 of yesterday's sequence and discharges the 09-01 \"will look into this tomorrow\" promise. Do not re-send or follow up unprompted.",
+      "class": "spoken-already-done",
+      "outcome": "recorded as already discharged; not re-sent or followed up on",
+      "evidence": "Slack group DM C0BBASUBJMC, ts=1788373549.343679, 2026-09-02 ~21:25 IDT"
+    },
+    {
+      "id": "g12",
+      "source": "2026-09-08/sequence.md#3 · ENG-1958 — due today, promoted: VPN confirmed, prior archive found in progress",
+      "text": "Correction, from @zvi: the AWS VPN is connected, so SSH to `staging`/`demo` should resolve — the \"needs SSH\" caveat that was holding this back no longer applies. Dispatched.",
+      "class": "stale-blocked",
+      "outcome": "unblocked and dispatched same run; lane `eng-1958-cleanup` delivered all 4 units, retired and spot-checked",
+      "evidence": "ENG-1958; AWS VPN connectivity confirmed; lane deliverables out/eng-1958/{unit1-archive,unit2-inventory,unit3-provenance,unit4-removal-plan,SUMMARY}.md"
     }
   ]
 }
