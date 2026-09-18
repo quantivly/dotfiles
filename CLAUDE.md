@@ -3551,7 +3551,20 @@ Four more from the same pass, each verified before acting on it:
   forty lines from the `cspan` it was renamed with. One-side-only fixes are this file's most
   repeated shape and they are hardest to see when the two sides are adjacent.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 326 at `0a1d557`; 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
+**And two row-quality findings that are worth more than the rows they fixed.** Four assertions
+labelled "the message names a comment as a cause" and "names a literal string as a cause" were
+**two halves of one constant echo block**, printed on every NOT CHECKED — so each was satisfied by
+any input reaching that arm, and four rows pinned one fact while reading as per-cause coverage.
+**A needle taken from a constant block measures the block, not the case that produced it**; one
+row per arm now, labelled for what it measures. Separately, the class's width was pinned only
+DOWNWARD (`n9` refuses a narrowing that would reject this machine's hyphenated profiles) — adding
+a single space to it survived the whole suite, so a row over `["a b"]` now pins it upward too. A
+space cannot be in a clauth profile name, so that row is honest rather than invented to kill a
+mutant, which is the distinction to keep when closing a surviving-mutant gap.
+
+Rows: `scripts/test-claude-doctor.sh` (281 → 325 at `9c47a49`; 326 at `0a1d557` before four
+duplicated assertions were consolidated into two — the count went DOWN by one while coverage went
+up, which is the clearest case there is for never reading a row count as a quality measure; 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
 audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
 so the count went up by four and down by two, which a bare delta would hide). **21 live mutants, 21 deaths, 0 survivors, 0 harness errors**, plus one retired
 by design. Two of the last three were written by an independent pass against fixes this file had
@@ -3997,8 +4010,9 @@ failed, since ShellCheck cannot parse zsh; and `script-must-have-extension` woul
 name. Both hooks now exclude it by path, and CI's `zsh -n` loop names it explicitly — otherwise the
 repo's newest executable would have had no syntax check at all.
 
-State tables: `scripts/test-claude-pick.sh` (192 at DO-574; **283 at `0b0f8c0`, 293 after the
-runaway-span rows** — the "205" this line carried was stale by 78, which is what a count without
+State tables: `scripts/test-claude-pick.sh` (192 at DO-574; **283 at `0b0f8c0`, 294 after the
+runaway-span rows** (this read 293 until 2026-09-18; measured twice, deterministic — a
+one-digit error in the very sentence whose point is that a count carries its commit) — the "205" this line carried was stale by 78, which is what a count without
 its commit decays into; CI job `claude-pick-test`),
 `scripts/test-hspawn.sh` (319 → 328, the caller-wiring rows and the compatibility contract) and
 `scripts/test-claude-doctor.sh` (156 → 172, the usage-cache freshness line). **40 mutants, 40
