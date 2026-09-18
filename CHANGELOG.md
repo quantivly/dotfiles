@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The last six evidence sections left CLAUDE.md, verbatim, and a `docs/` index was added
+  (DO-627).** 55,033 chars moved in ten slices: GitHub account routing to
+  `docs/GH_ACCOUNT_ROUTING.md`, the backup guards to `docs/BACKUP_INTERNALS.md`, the transcript
+  secret-emission guard to `docs/SECRET_EMISSION.md`, the broadcast-kill tripwire to
+  `docs/AUDIT_TRIPWIRE.md`, the Alacritty and `$TERM` gotchas (two fragments, one subject) to
+  `docs/TERMINAL_AND_KEYS.md`, and the shell-layer elaboration to `docs/SHELL_LAYOUT.md`; the GNOME
+  and mise records were appended to the guides that already own their subject. CLAUDE.md is now
+  **44,165 characters**, from 85,140 at DO-626 and 353,845 at the start — a 48% cut here and 87.5%
+  overall. Every slice is proven identical to `main`'s by reconstruction (10 of 10, modulo two link
+  rewrites and the six end-of-file blank lines `pre-commit`'s `end-of-file-fixer` normalises);
+  `check-doc-tokens.sh`: 70 tokens, 0 lost.
+
+  **Measured before merging, as DO-625 required.** Backup, GNOME, mise, the secrets guard, the
+  tripwire and the terminal gotchas each share 0–2.4% of their 8-word runs with the existing guide
+  nearest them — so nothing was already duplicated, and the split is by *audience*: a guide is for
+  someone adopting or operating a thing, a maintainer's record is the evidence behind a rule that
+  stays in CLAUDE.md. `docs/README.md` now indexes all 25 pages under that distinction, names which
+  skills are project- versus user-scope, and is linked from CLAUDE.md so the reachability guard can
+  see it.
+
+  **It did not reach the ~20k target, deliberately.** What is left is 44k of operative rules and
+  routing, not evidence: no section over 3.3k remains, and the four largest are residues from this
+  and the previous three PRs. Cutting further would have meant deleting rules to hit a number, which
+  the budget's own `FLOOR` of 20,000 exists to make unnecessary.
+
+  **Non-verbatim, and therefore the part a human must read:** the "Modular Configuration System"
+  numbered list became a table (and its stale "4 modules" is now the correct 5), and each residue is
+  newly written rather than excerpted. Three stale facts were corrected in passing:
+  `scripts/test-gh-routing.sh` reports 207 checks and `scripts/test-secret-guard.sh` 182, not the
+  199 and 79 CLAUDE.md claimed, and `docs/TOOL_VERSION_UPDATES.md` still said the mise config is
+  *copied* to `~/.config/mise/config.toml` — the very claim the record appended beneath it exists to
+  correct.
+
 - **The deploy, `safe.directory` and CI/CD evidence left CLAUDE.md, verbatim (DO-626).** 48,031
   chars moved: "The checkout IS the deployment" and the DO-589 `safe.directory` write-up to
   `docs/DOTFILES_DEPLOY.md`, and "CI/CD Testing" — the DO-608 apt outage, the seventeen defects
