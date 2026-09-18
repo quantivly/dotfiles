@@ -1,0 +1,4 @@
+{"fetched_at": "2026-09-16T07:00:00Z", "ok": true, "error": null, "login": "work-login",
+ "review_requests": [],
+ "own_prs": [{"repo": "o/r", "number": 2, "url": "https://github.com/o/r/pull/2", "title": "open", "isDraft": false, "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "approved_by": ["alex"], "headRefName": "h", "baseRefName": "main"}],
+ "merged_recent": [{"repo": "o/r", "number": 1, "url": "https://github.com/o/r/pull/1", "mergedAt": "2026-09-14T00:00:00Z"}]}
