@@ -3551,7 +3551,7 @@ Four more from the same pass, each verified before acting on it:
   forty lines from the `cspan` it was renamed with. One-side-only fixes are this file's most
   repeated shape and they are hardest to see when the two sides are adjacent.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 326 at `dfb6254`; 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
+Rows: `scripts/test-claude-doctor.sh` (281 → 326 at `0a1d557`; 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
 audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
 so the count went up by four and down by two, which a bare delta would hide). **21 live mutants, 21 deaths, 0 survivors, 0 harness errors**, plus one retired
 by design. Two of the last three were written by an independent pass against fixes this file had
