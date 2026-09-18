@@ -1056,10 +1056,18 @@ claude-doctor() {
         # 0.15.1, and that is proven rather than assumed: sha256 of
         # ~/.local/bin/clauth equals the clauth-linux-x86_64 asset of the v0.15.1
         # release, so the source read below is the code that runs. The flag has
-        # exactly seven mutation sites and five clearing paths: `clauth login` /
+        # five clearing paths: `clauth login` /
         # capture, an adopt from the live mirror, an adopt from disk at switch
         # time, a carry after a terminal 400, and a successful REFRESH. A
-        # successful usage FETCH is not one of them. So once anything else has
+        # successful usage FETCH is not one of them. (This said "exactly seven
+        # mutation sites and five clearing paths" until 2026-09-18. CLAUDE.md
+        # retracted the seven — it is the `mark_auth_broken(` CALL count, not
+        # what the grep quoted beside it produces — and the retraction did not
+        # carry through to here, which is the same defect this PR fixed for the
+        # `skip_serializing_if` claim: a retraction is not a correction until
+        # every instance is found. The five clearing paths were checked and
+        # stand; the mutation-site count is dropped rather than re-derived,
+        # because nothing here needs it.) So once anything else has
         # put a live token in the store the poll stops 401ing, the rotation leg
         # is never entered, and the flag outlives the rejection that set it.
         # Observed: on 2026-09-14 three profiles were flagged at 08:29:13-27, the
