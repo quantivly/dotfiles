@@ -1,8 +1,9 @@
 # Claude Code accounts & MCP: runbook
 
-Companion to the **Claude Code accounts & MCP (`claude-doctor`)** section of
-[CLAUDE.md](../CLAUDE.md), which carries the mechanisms and the traps. This file
-is the operational half: what to run, what to click, and what to do when
+Companion to the **Claude Code accounts & MCP (`claude-doctor`)** rules in
+[CLAUDE.md](../CLAUDE.md). The mechanisms and the traps behind them are in
+[CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md) and [CLAUDE_ACCOUNT_PICKER.md](CLAUDE_ACCOUNT_PICKER.md).
+This file is the operational half: what to run, what to click, and what to do when
 something drops.
 
 `claude-doctor` is the entry point. It is read-only — it switches no profile,

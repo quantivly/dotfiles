@@ -627,6 +627,15 @@ jobs:
       - name: Run the guard against the tree we ship
         run: ./scripts/check-claude-md.sh
 
+      - name: Run the migration-safety state table
+        run: ./scripts/test-doc-tokens.sh
+
+      # Nothing that left CLAUDE.md may have been deleted on the way. Compared
+      # against the base branch, so on a push to main (where HEAD IS origin/main)
+      # it is a no-op by construction and on a PR it checks exactly the PR's diff.
+      - name: Check nothing was lost from CLAUDE.md
+        run: ./scripts/check-doc-tokens.sh . origin/main
+
   yaml-validation:
     name: YAML Validation
     runs-on: ubuntu-latest
