@@ -211,10 +211,15 @@ _claude_fallback_chain() {
 # CLAUDE.md's rule is that a branch whose mutant cannot die reads as coverage.
 #
 # Returns 1 when the question could not be ASKED, so empty output never carries
-# two meanings. An ABSENT key is not that case: clauth serialises these lists
-# with serde's `skip_serializing_if = "Vec::is_empty"`, so an empty list means
-# the key is simply not written — verified against the live file, 13 lines with
-# no `auth_broken` among them. Empty output at status 0 is "the list is empty".
+# two meanings. Empty output at status 0 is "the list is empty", which an absent
+# key also produces.
+#
+# THE TWO KEYS DIFFER IN HOW AN EMPTY LIST IS WRITTEN — an absent key for one, an
+# empty array for the other — and this function deliberately does not care, since
+# both reach a status-0 answer. Anything WRITTEN about it must say which key it
+# means; an earlier version of this comment asserted one rule for both and was
+# wrong. The measured per-key statement is at the no-assignment branch below,
+# stated ONCE so a change in clauth cannot leave two copies disagreeing.
 #
 # ONE COPY IN THIS FILE, TWO KEYS. The other two readers of `auth_broken` are
 # deliberate duplicates — `zsh/zshrc.herdr` must be sourceable ALONE by a modular
@@ -1072,10 +1077,19 @@ claude-doctor() {
         qspan="$(_claude_quarantined_profiles)"; qrc=$?
         if (( qrc != 0 )); then
           _doctor_warn "could not read clauth's quarantine list — NOT CHECKED"
-          echo "    ~/.clauth/profiles.toml is there but unreadable, or its auth_broken array is"
-          echo "    unterminated (a truncated write). An empty answer from a file we could not"
-          echo "    read is not agreement: a quarantined account is dropped from the picker with"
-          echo "    nothing else on the machine saying so."
+          # EVERY CAUSE, the same four the chain arm names, because they are one
+          # parse and both arms can be reached by all of them — measured: a
+          # comment inside the array and TOML literal strings each give rc=1
+          # here, and `sed` missing from PATH does too. Naming two of four was
+          # this repo's "a fix that is right on ONE SIDE of a report is worse
+          # than one wrong on both" rule, met on the message side: the chain arm
+          # was corrected and this one was not, so the correct half was the
+          # reason nobody re-read the other.
+          echo "    ~/.clauth/profiles.toml is unreadable, or its auth_broken array is unterminated"
+          echo "    (a truncated write), or 'sed' is not on PATH, or the array holds a comment or"
+          echo "    'literal' strings, which are legal TOML that this deliberately refuses rather"
+          echo "    than guess at. An empty answer from a file we could not read is not agreement:"
+          echo "    a quarantined account is dropped from the picker with nothing else saying so."
         else
           quarantined=( ${(f)qspan} )
           qreal=0

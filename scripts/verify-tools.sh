@@ -803,8 +803,10 @@ else
     # bracket. A range is the right tool HERE for a reason that does not
     # transfer -- this is a presence test over a file whose shape we control,
     # with a column-0 end anchor (see below), not an attempt to trust a span's
-    # contents. Where the contents matter, validate the interior:
-    # `_claude_toml_name_array` in zsh/functions/claude.sh.
+    # contents. Where the contents matter, validate the interior AND every
+    # member: `_claude_toml_name_array` in zsh/functions/claude.sh. Both halves,
+    # deliberately — the interior check alone shipped first and did NOT hold, so
+    # naming only it here would point at the same half-technique again.
     #
     # The state-table row for this greps for the import, so do not name it
     # literally here -- the row would then match this very comment.

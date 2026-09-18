@@ -2390,6 +2390,30 @@ want_out "TOML literal strings are NOT CHECKED, never silently empty" \
 no_out   "...and are not read as an unconfigured chain"          "auto-switch armed"
 want_out "...and the message names a literal string as a cause"  "'literal' strings"
 
+# THE SAME TWO REFUSALS ON THE QUARANTINE ARM, because the parse is shared and a
+# message fixed on one arm only is this repo's "a fix that is right on ONE SIDE
+# of a report is worse than one wrong on both" — which is exactly how it went:
+# the chain arm was corrected to name all four causes and this arm was left
+# naming two, for a full round, while both missing causes reach it. Rows on both
+# sides now, so the next divergence fails instead of being noticed by a reviewer.
+new_home u1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/a1"
+printf 'auth_broken = [ # note\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a comment in the quarantine array is NOT CHECKED" \
+         "could not read clauth's quarantine list"
+no_out   "...and invents no quarantined account"           "quarantined (auth_broken)"
+want_out "...and that message names a comment as a cause"  "holds a comment"
+
+new_home u2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/a1"
+printf "auth_broken = ['a1']\n" > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "TOML literal strings in the quarantine array are NOT CHECKED" \
+         "could not read clauth's quarantine list"
+no_out   "...and are not read as an empty quarantine"      "no profile is quarantined"
+want_out "...and that message names a literal string too"  "'literal' strings"
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
