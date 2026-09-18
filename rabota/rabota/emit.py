@@ -53,3 +53,12 @@ def write_file(path, text: str) -> Path:
     path = Path(path)
     path.write_text(text)
     return path
+
+
+def append_file(path, text: str) -> Path:
+    """Guard ``text`` with ``assert_clean`` and only then append it to ``path``; nothing is appended on a leak."""
+    text = _guard(text)
+    path = Path(path)
+    with path.open("a") as f:
+        f.write(text)
+    return path

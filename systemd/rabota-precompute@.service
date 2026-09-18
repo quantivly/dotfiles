@@ -1,0 +1,13 @@
+# systemd/rabota-precompute@.service
+[Unit]
+Description=rabota pre-compute for tenant %i (sync, inbox auto tier, rank, census)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Secrets only from this file, written by hand with scripts/rabota-env-write.sh (mode 600).
+EnvironmentFile=-%h/.config/rabota/env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/rabota --tenant %i precompute
+TimeoutStartSec=15min
+Nice=10

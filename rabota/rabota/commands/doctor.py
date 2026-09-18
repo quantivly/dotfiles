@@ -15,10 +15,10 @@ def run_doctor(ctx: Context) -> dict:
     link_ok = link.ok and link.out.strip() == str(EXPECTED_LINK)
     if not link_ok:
         problems.append("~/.local/bin/rabota is not linked to ~/.dotfiles/scripts/rabota (run dotfiles install)")
-    timer = ctx.runner.run(["systemctl", "--user", "is-enabled", "rabota-precompute.timer"])
+    timer = ctx.runner.run(["systemctl", "--user", "is-enabled", f"rabota-precompute@{ctx.tenant.name}.timer"])
     timer_state = timer.out.strip() if timer.ok else "missing"
     if timer_state != "enabled":
-        problems.append(f"rabota-precompute.timer is {timer_state} (WS5 installs it)")
+        problems.append(f"rabota-precompute@{ctx.tenant.name}.timer is {timer_state} (WS5 installs it)")
     try:
         schema = ctx.store.schema_version()
     except errors.Refused as e:      # a newer DB: the store refuses to open it (both numbers in the text)
