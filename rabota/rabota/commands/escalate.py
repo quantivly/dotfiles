@@ -7,7 +7,13 @@ user pasted, which is exactly the shape the write guard exists to check. Routing
 title *positionally* (``herdr notification show [OPTIONS] <TITLE>``, confirmed against
 ``herdr notification show --help`` before this module was written), so the call is
 ``["herdr", "notification", "show", f"rabota {kind}: {question[:100]}"]`` with no other flags. A
-failed or missing ``herdr`` binary is not an error here; nothing about the escalation depends on it.
+failed or missing ``herdr`` binary is not an error here, and neither is one that raises instead of
+returning a bad exit code — ``run_escalate`` catches ``Exception`` (not ``BaseException``) around
+the call so the escalation's id always comes back once the rows are committed. The outcome rides
+along as ``notified`` in the returned dict (``True``/``False``/``None`` when ``notify=False``
+skipped it) so the failure is visible to the caller without being fatal; ``notified`` is
+deliberately never projected into ``escalations.jsonl``, whose field set is fixed by design §4.2 /
+acceptance 9.8.
 """
 import json
 
@@ -31,9 +37,15 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
     _project(ctx, {"ts": row["ts"], "firstSeen": row["first_seen"], "kind": kind, "subject": subject,
                    "tenant": ctx.tenant.name, "question": question, "evidence": evidence,
                    "options": options, "disposition": None})
+    notified = None
     if notify:
-        ctx.runner.run(["herdr", "notification", "show", f"rabota {kind}: {question[:100]}"], timeout=5)
-    return {"id": eid}
+        try:
+            result = ctx.runner.run(["herdr", "notification", "show", f"rabota {kind}: {question[:100]}"],
+                                     timeout=5)
+            notified = result.ok
+        except Exception:
+            notified = False
+    return {"id": eid, "notified": notified}
 
 
 def run_answer(ctx: Context, esc_id: int, label: str, resolution: str | None = None) -> dict:
@@ -43,9 +55,11 @@ def run_answer(ctx: Context, esc_id: int, label: str, resolution: str | None = N
     if row["options"] and label not in row["options"]:
         raise errors.Refused(f"label {label!r} is not one of {row['options']}")
     ctx.store.answer_escalation(esc_id, label, resolution)
+    stored = ctx.store.escalation(esc_id)
     _project(ctx, {"ts": now(), "firstSeen": row["first_seen"], "kind": row["kind"], "subject": row["subject"],
                    "tenant": ctx.tenant.name, "question": row["question"], "evidence": row["evidence"],
-                   "options": row["options"], "disposition": label, "resolution": resolution})
+                   "options": row["options"], "disposition": label, "resolvedAt": stored["resolved_at"],
+                   "resolution": resolution})
     return {"id": esc_id, "disposition": label}
 
 

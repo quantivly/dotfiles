@@ -12,6 +12,18 @@ from rabota import cli, emit, errors
 from rabota.context import Context
 
 
+def _index_cell(note: str) -> str:
+    """Collapse a free-text ``--note`` onto one line for the INDEX.md table cell.
+
+    Newlines (bare or ``\\r\\n``) become spaces and ``|`` is replaced outright — not
+    backslash-escaped — because the row is read back by counting ``|`` characters, and an escaped
+    pipe is still a pipe. ``carry-forward.md`` keeps the note's original text; only this cell is
+    constrained.
+    """
+    note = note.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return note.replace("|", "/")
+
+
 def run_close(ctx: Context, notes: list[str] | None = None) -> dict:
     held = ctx.store.list_lanes(ctx.tenant.name, status="held")
     if held:
@@ -45,7 +57,8 @@ def run_close(ctx: Context, notes: list[str] | None = None) -> dict:
     index = ctx.state_dir / "INDEX.md"
     if not index.exists():
         emit.write_file(index, "| Date | Mode | Items | Lanes running | Open escalations | Notes |\n|---|---|---|---|---|---|\n")
-    row = f"| {ctx.today.isoformat()} | close | - | {len(running)} | {len(open_esc)} | {'; '.join(notes or [])} |"
+    notes_cell = "; ".join(_index_cell(n) for n in (notes or []))
+    row = f"| {ctx.today.isoformat()} | close | - | {len(running)} | {len(open_esc)} | {notes_cell} |"
     emit.append_file(index, row + "\n")
     return {"carry_forward": str(cf), "index_row": row}
 

@@ -64,6 +64,60 @@ class CloseTests(unittest.TestCase):
         self.assertEqual(rows[1]["kind"], "incident")
         self.assertEqual(rows[1]["subject"], "HUB-9")
 
+    # --- item 1: a raising notification runner must not lose the id --------
+
+    def test_escalate_notify_raising_oserror_still_returns_id_and_persists(self):
+        class Raiser:
+            def run(self, argv, **kw):
+                raise OSError("herdr not installed")
+        ctx = self.ctx(Raiser())
+        out = escalate.run_escalate(ctx, "q", "e", [])
+        self.assertIn("id", out)
+        self.assertIsNotNone(ctx.store.escalation(out["id"]))
+        rows = [json.loads(l) for l in (ctx.state_dir / "escalations.jsonl").read_text().splitlines()]
+        self.assertEqual(len(rows), 1)
+
+    def test_escalate_notify_raising_bare_exception_still_returns_id_and_persists(self):
+        class Raiser:
+            def run(self, argv, **kw):
+                raise Exception("boom")
+        ctx = self.ctx(Raiser())
+        out = escalate.run_escalate(ctx, "q", "e", [])
+        self.assertIn("id", out)
+        self.assertIsNotNone(ctx.store.escalation(out["id"]))
+        rows = [json.loads(l) for l in (ctx.state_dir / "escalations.jsonl").read_text().splitlines()]
+        self.assertEqual(len(rows), 1)
+
+    def test_escalate_notify_nonzero_exit_still_returns_id_and_persists(self):
+        runner = FakeRunner([(["herdr"], Result(1, "", "no herdr"))])
+        ctx = self.ctx(runner)
+        out = escalate.run_escalate(ctx, "q", "e", [])
+        self.assertIn("id", out)
+        self.assertIsNotNone(ctx.store.escalation(out["id"]))
+        rows = [json.loads(l) for l in (ctx.state_dir / "escalations.jsonl").read_text().splitlines()]
+        self.assertEqual(len(rows), 1)
+
+    def test_escalate_notify_timeout_still_returns_id_and_persists(self):
+        runner = FakeRunner([(["herdr"], Result(124, "", "timeout after 5s"))])
+        ctx = self.ctx(runner)
+        out = escalate.run_escalate(ctx, "q", "e", [])
+        self.assertIn("id", out)
+        self.assertIsNotNone(ctx.store.escalation(out["id"]))
+        rows = [json.loads(l) for l in (ctx.state_dir / "escalations.jsonl").read_text().splitlines()]
+        self.assertEqual(len(rows), 1)
+
+    # --- item 2: the answer projection must carry resolvedAt ---------------
+
+    def test_answer_projects_resolvedAt_from_the_stored_row(self):
+        ctx = self.ctx()
+        eid = escalate.run_escalate(ctx, "q", "e", ["a", "b"], notify=False)["id"]
+        escalate.run_answer(ctx, eid, "a")
+        stored = ctx.store.escalation(eid)
+        rows = [json.loads(l) for l in (ctx.state_dir / "escalations.jsonl").read_text().splitlines()]
+        self.assertIn("resolvedAt", rows[1])
+        self.assertEqual(rows[1]["resolvedAt"], stored["resolved_at"])
+        self.assertNotIn("resolvedAt", rows[0])
+
     # --- close ---------------------------------------------------------
 
     def test_close_refuses_with_held_lane_and_writes_carry_forward(self):
@@ -82,6 +136,20 @@ class CloseTests(unittest.TestCase):
         self.assertIn("SEC-211", cf)
         self.assertNotIn("Zvi approved", cf)
         self.assertTrue((ctx.state_dir / "INDEX.md").read_text().count("| close |") == 1)
+
+    def test_close_sanitizes_newlines_and_pipes_in_the_index_row(self):
+        ctx = self.ctx()
+        out = close.run_close(ctx, notes=["line one\nline two", "has | a pipe", "crlf\r\nhere"])
+        index_lines = [l for l in (ctx.state_dir / "INDEX.md").read_text().splitlines() if l]
+        self.assertEqual(len(index_lines), 3)
+        header_pipes = index_lines[0].count("|")
+        data_row = index_lines[2]
+        self.assertEqual(data_row.count("|"), header_pipes)
+        self.assertNotIn("\n", data_row)
+        self.assertNotIn("\r", data_row)
+        cf = Path(out["carry_forward"]).read_text()
+        self.assertIn("line one\nline two", cf)
+        self.assertIn("has | a pipe", cf)
 
     def test_close_lists_open_corrections_separately(self):
         ctx = self.ctx()
