@@ -1,0 +1,93 @@
+{
+  "classes": [
+    "promised-untracked",
+    "tracked-satisfied",
+    "spoken-already-done",
+    "question-owed",
+    "state-contradiction",
+    "stale-blocked"
+  ],
+  "missing_classes": ["spoken-already-done", "stale-blocked"],
+  "entries": [
+    {
+      "id": "g01",
+      "source": "2026-09-02/brief.md#Reconcile",
+      "text": "@benoit's qspace SHA-vs-version question is ALREADY ANSWERED. Not owed.",
+      "class": "question-owed",
+      "outcome": "carrying it forward would have been a false alarm; not raised again",
+      "evidence": "POPS-5026 comment 153b69e3"
+    },
+    {
+      "id": "g02",
+      "source": "2026-09-03/brief.md#Question owed / promised",
+      "text": "@connor is directly waiting on @zvi. Group DM `C0A2FRLPA58` (@benoit, @connor, @zvi), 2026-09-02 23:08 — he listed all six PRs with cost estimates and a proposed landing order, asking they \"ride along in this round of platform updates\". @benoit replied within 8 minutes. @zvi has not.",
+      "class": "question-owed",
+      "outcome": "ranked #1 in 2026-09-03/sequence.md (\"He asked by name in a 3-person DM ... One person unblocked six times over, on a clock\")",
+      "evidence": "Slack group DM C0A2FRLPA58, 2026-09-02 23:08"
+    },
+    {
+      "id": "g03",
+      "source": "2026-09-02/brief.md#Reconcile",
+      "text": "sre-customers-library#369 needs no action. `reviewDecision: APPROVED`, `mergeStateStatus: CLEAN`, and my own review is `none` — someone else approved it. @benoit is the author and authors merge their own PRs, so he is not blocked on me.",
+      "class": "tracked-satisfied",
+      "outcome": "no action taken; reconfirmed still needing nothing on 2026-09-03 and 2026-09-06",
+      "evidence": "sre-customers-library#369"
+    },
+    {
+      "id": "g04",
+      "source": "2026-09-02/brief.md#Reconcile",
+      "text": "Overdue: ENG-1939 P1, due 09-01, In Review. Live check: no failing checks on auto-conf#461 — the \"lint FAILED\" note is stale. It is `BEHIND` and `REVIEW_REQUIRED`: needs a branch update and a reviewer, not a lint fix.",
+      "class": "tracked-satisfied",
+      "outcome": "reclassified from \"lint FAILED\" to needing a branch update and a reviewer; the reviewer gap itself closed 2026-09-02 per 2026-09-03/brief.md item 4",
+      "evidence": "auto-conf#461"
+    },
+    {
+      "id": "g05",
+      "source": "2026-09-02/brief.md#Reconcile",
+      "text": "State contradiction: CORE-561 / 562 / 563 are P0 in Backlog. Decide, don't schedule.",
+      "class": "state-contradiction",
+      "outcome": "corrected 2026-09-03: `priority=0` means \"No priority\", not P0 — priorityLabel on all three reads \"No priority\", so this was not a contradiction at all; escalation marked resolved-invalid in escalations.jsonl",
+      "evidence": "CORE-561, CORE-562, CORE-563; correction at 2026-09-03/brief.md#A misread that has been propagating since yesterday — corrected here"
+    },
+    {
+      "id": "g06",
+      "source": "2026-09-03/brief.md#State contradictions — decisions, not tasks",
+      "text": "HUB-5812 is In Review with nothing in review. P2, due 2026-09-04 (tomorrow, Sprint 19 close), assigned @zvi, `updatedAt` 2026-08-29 — six days untouched. ... No sre-ui PR exists. Either the status is wrong or the work has not started.",
+      "class": "state-contradiction",
+      "outcome": "surfaced as a decision, not scheduled; still open and 4 days past due as of 2026-09-08 (\"Carried forward, still open\")",
+      "evidence": "branchName zvi/hub-5812-gate-the-sre-ui-view-header-editor-on-view-ownership (404 on sre-ui branches); cross-org PR search finds only sre-core#1473 (HUB-5693, merged) and closed sre-core#1480"
+    },
+    {
+      "id": "g07",
+      "source": "2026-09-06/brief.md#Reconcile — what changed, and what was already true",
+      "text": "HUB-5812's \"no PR\" needs sharpening, and the issue is worse than recorded. It carries exactly one attachment, `sre-core#1473` — which is titled HUB-5693, authored by @zvi, and merged 2026-08-31. Different issue, different repo (sre-core vs the sre-ui change HUB-5812 describes). The branch `zvi/hub-5812-…` 404s on both sre-ui and sre-core.",
+      "class": "state-contradiction",
+      "outcome": "recorded as worse than previously known (a misleading attachment, not merely a missing PR); issue stays open, carried forward",
+      "evidence": "sre-core#1473 (titled HUB-5693, merged 2026-08-31); branch 404 on sre-ui and sre-core"
+    },
+    {
+      "id": "g08",
+      "source": "2026-09-03/brief.md#Question owed / promised",
+      "text": "Spoken commitment, untracked. Fireflies transcript `01M1H28CHBVMJXBSDKF1ZHN32D` (\"Trenser sync review\", 2026-09-02 12:42Z), action items attributed by speaker: \"Zvi Baratz — Suggest and recommend UI visual improvements on slot optimization tickets, specifically color-coded direction cues for changes (16:52)\". No Linear issue, no PR.",
+      "class": "promised-untracked",
+      "outcome": "scheduled as one of \"two small promises (~15 min)\" in 2026-09-03/sequence.md rank 7 (targets HUB-5327 and CUS-2325)",
+      "evidence": "Fireflies transcript 01M1H28CHBVMJXBSDKF1ZHN32D"
+    },
+    {
+      "id": "g09",
+      "source": "2026-09-03/brief.md#Question owed / promised",
+      "text": "Promise to @benoit, untracked. Group DM `C0ATF4WBQCQ`, 2026-09-02 ~17:49 IDT, @zvi: \"Yeah, I generally choose explicitly (`/code-review medium 123`), but I'll make a note to add an instruction for that\" — @benoit had proposed a CLAUDE.md rule after burning a session's tokens on three high-effort review rounds over a 40-line diff.",
+      "class": "promised-untracked",
+      "outcome": "scheduled as the other of \"two small promises (~15 min)\" in 2026-09-03/sequence.md rank 7 (add the review-effort-by-diff-size instruction to CLAUDE.md)",
+      "evidence": "Slack group DM C0ATF4WBQCQ, 2026-09-02 ~17:49 IDT"
+    },
+    {
+      "id": "g10",
+      "source": "2026-09-06/brief.md#Reconcile — what changed, and what was already true",
+      "text": "The nine PR reviews and the #461 merge from run 1 are real and off the queue.",
+      "class": "tracked-satisfied",
+      "outcome": "confirmed landed and removed from the active queue",
+      "evidence": "origin/main on auto-conf is 05dd732 — run 1's recorded squash sha"
+    }
+  ]
+}
