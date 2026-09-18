@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately clears nothing. `scripts/check-claude-md.sh` (CI job `CLAUDE.md Guard State
   Table`, plus a pre-commit hook) enforces eight rules: the CLAUDE.md ceiling, the aggregate
   over every always-loaded surface, per-file caps on rule cards and `SKILL.md`, frontmatter
-  validity, relative-link resolution, reachability, and that every `paths:` glob matches
-  something. **The ceiling is derived, not written down** — `max(FLOOR, min(size over
+  validity, relative-link resolution, reachability, and that no rule card carries `paths:`.
+  **The ceiling is derived, not written down** — `max(FLOOR, min(size over
   base-branch commits that also carry the guard) + SLACK)` — because every design where a human
   types the ceiling into a file has the same hole: the PR that breaks the rule edits the number
   in the same diff. There is no value to raise; the only way to raise the ceiling is to lower
@@ -44,12 +44,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves the whole rule-card layer `SLACK` (1,500 bytes) — one card, ever — so the first card
   spends the budget and every later area has nowhere to put its trigger rules except back in
   CLAUDE.md; `AGGREGATE_EXTRA_BYTES` (18,000, nine cards at the cap) is its own allowance, and
-  counting cards at all is the pessimistic choice pending a `/context` measurement of whether
-  `paths:`-scoped cards are always-loaded. And **a 5,000-byte `SKILL.md` cap, which an earlier
+  counting cards is not pessimism but accuracy, as the measurement below shows. And **a
+  5,000-byte `SKILL.md` cap, which an earlier
   draft proposed, would have failed every skill on this machine** (measured: herdr 10,553,
   rabota 17,539, zvi-voice 11,883, `quantivly-conventions:linear` 29,335, `:prs` 26,696) — it is
   30,000, with `references/`, `scripts/` and `assets/` under a skill deliberately uncapped,
   because capping them punishes the progressive disclosure the house style already uses.
+
+  **A `paths:`-scoped `.claude/rules/` card never loads, measured rather than assumed, and the
+  first version of this guard REQUIRED one.** The plan leaned on path-scoped cards as a cheap
+  on-demand layer — documented, and present in the installed 2.1.277 binary (`.claude/rules` ×10,
+  a `rulesDir` symbol, `"paths"` ×19). So it was measured in a throwaway herdr pane before anything
+  depended on it, with unique probe phrases and a fresh session per round: a card **without**
+  `paths:` loaded at project and at user scope; a card **with** it did not load at session start,
+  did not load after the session read a matching file, and did not load in any spelling tried —
+  block list, inline array, or a literal file path instead of a glob. `/context` agreed: "Memory
+  files: 3" before and after the matching read. A guard that requires `paths:` therefore
+  guarantees every card is inert, which is a rule silently switching off the thing it polices.
+  The rule is inverted: a card may not carry `paths:`, cards are unconditional, and the aggregate
+  rule counts them because they are always loaded. The one card this PR shipped is gone — scoped,
+  it was dead; unscoped, it was always-loaded text restating CLAUDE.md, which the single-home rule
+  forbids. The same probe put CLAUDE.md at **130.4k tokens**, not the ~87k a chars/4 estimate gave;
+  at ~2.7 chars/token this file is costlier than it looked. Every probe card was removed and the
+  pane closed; an unconditional user-level card loads into every session on the machine.
 
   The governing rule for what moves, taken from nanoclaw's IMP-2778 rather than invented: **this
   discipline governs where elaboration lives, not where the rule lives.** nanoclaw measured a
@@ -64,10 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nanoclaw measured that a gate failing in an unevaluable state teaches `--no-verify`, which
   disables every other hook.
 
-  State table: `scripts/test-claude-md.sh` (**72 checks**, CI job `claude-md-test`), hermetic —
+  State table: `scripts/test-claude-md.sh` (**77 checks**, CI job `claude-md-test`), hermetic —
   every row builds its own git repository with real commits, because the ratchet reads real
   history and a mocked one would pin nothing about the only rule that cannot be checked another
-  way. **18 mutants, 18 deaths, 0 survivors, 0 harness errors**, every mutation dry-run for
+  way. **18 mutants, 18 deaths, 0 survivors, 0 harness errors** (plus one retired: its target was
+  removed as a duplicate guard, since two guards for one property are individually unkillable),
+  every mutation dry-run for
   applicability first since a mutation that no longer applies reads exactly like a surviving
   mutant. Three survived the first sweep: two were badly-constructed mutants that changed no
   behaviour (`m=$2` unconditionally still yields the minimum, because `rev-list` is newest-first),

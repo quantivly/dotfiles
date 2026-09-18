@@ -41,10 +41,15 @@ here or from `README.md`** — the guard enforces reachability, because an unrou
 unread file. `docs/CLAUDE_SETUP.md` sat unlinked and therefore unread until this guard named
 it; that is the failure mode, and it is silent from every other angle.
 
-The same rules are repeated as a trigger card at [.claude/rules/docs.md](.claude/rules/docs.md),
-scoped so they load when you open one of these files rather than only when you think to look.
 Budget knobs and their rationale: [scripts/context-budget.conf](scripts/context-budget.conf).
 Run `./scripts/check-claude-md.sh` before you commit.
+
+**`.claude/rules/` cards cannot be scoped, measured rather than assumed.** On Claude Code
+2.1.277 a card carrying `paths:` **never loads** — not at session start, not after reading a
+matching file, at project or user scope, in every spelling tried (block list, inline array,
+literal path); an identical card *without* `paths:` loads every time. So a card is not a
+cheap on-demand layer, it is more always-loaded text, and the guard forbids `paths:` rather
+than requiring it. Until that changes, a rule that must reach an agent belongs **here**.
 
 ## Repository Overview
 

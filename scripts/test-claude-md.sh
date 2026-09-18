@@ -13,7 +13,7 @@
 #   - A `contains` needle must be UNIQUE TO THE RULE. This checker has eight
 #     rules and several print a path in the same shape, so a bare filename is
 #     ambiguous by construction. Anchor on the message prefix (SIZE:/AGGR:/
-#     CAP-CARD:/CAP-SKILL:/FM:/LINK:/ORPH:/GLOB:).
+#     CAP-CARD:/CAP-SKILL:/FM:/LINK:/ORPH:/SCOPE:).
 #   - Check the needle against what the PASS path prints too. Every rule here
 #     prints its prefix on both paths for the counters, so rc is asserted
 #     alongside, and the fail-only wording is what the needle matches.
@@ -171,18 +171,18 @@ contains "B9 fails on the link rule" "$out" "LINK:"
 printf '\n== C. the aggregate: prose moved to another always-loaded surface ==\n'
 d=$(mkrepo c1); seed "$d/CLAUDE.md" 10000; guard_in "$d"; snap "$d"
 mkdir -p "$d/.claude/rules"
-printf -- '---\npaths:\n  - CLAUDE.md\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/a.md"
+printf -- '# card\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/a.md"
 printf '\n[card](.claude/rules/a.md)\n' >> "$d/CLAUDE.md"
 out=$("$CHECKER" "$d" 2>&1); check "C1 one small card is within the allowance" 0 "$?"
 
 d=$(mkrepo c2); seed "$d/CLAUDE.md" 10000; guard_in "$d"; snap "$d"
 mkdir -p "$d/.claude/rules"
-for i in $(seq 1 15); do
-    { printf -- '---\npaths:\n  - CLAUDE.md\n---\n[c](../../CLAUDE.md)\n'
+for i in $(seq 1 20); do
+    { printf -- '# card\n[c](../../CLAUDE.md)\n'
       head -c 1800 /dev/zero | tr '\0' 'y'; printf '\n'; } > "$d/.claude/rules/c$i.md"
     printf '\n[card](.claude/rules/c%s.md)\n' "$i" >> "$d/CLAUDE.md"
 done
-out=$("$CHECKER" "$d" 2>&1); check "C2 15 cards under the per-card cap still bust the aggregate" 1 "$?"
+out=$("$CHECKER" "$d" 2>&1); check "C2 20 cards under the per-card cap still bust the aggregate" 1 "$?"
 contains "C2 is the AGGR rule" "$out" "AGGR: always-loaded total"
 
 # @-imports are inlined into context, so they are counted.
@@ -203,7 +203,7 @@ out=$("$CHECKER" "$d" 2>&1); check "C4 a skill's references/ are uncapped and un
 printf '\n== D. per-file caps ==\n'
 mkcard() { # mkcard <root> <name> <bytes>
     mkdir -p "$1/.claude/rules"
-    { printf -- '---\npaths:\n  - CLAUDE.md\n---\n[c](../../CLAUDE.md)\n'
+    { printf -- '# card\n[c](../../CLAUDE.md)\n'
       head -c "$3" /dev/zero | tr '\0' 'y'; printf '\n'; } > "$1/.claude/rules/$2.md"
     printf '\n[card](.claude/rules/%s.md)\n' "$2" >> "$1/CLAUDE.md"
 }
@@ -222,42 +222,59 @@ printf '\n[skill](.claude/skills/s/SKILL.md)\n' >> "$d/CLAUDE.md"
 out=$("$CHECKER" "$d" 2>&1); check "D3 a SKILL.md over the cap fails" 1 "$?"
 contains "D3 is the skill cap, not the card cap" "$out" "CAP-SKILL:"
 
-printf '\n== E. frontmatter ==\n'
+printf '\n== E. frontmatter, and why a card must NOT be scoped ==\n'
 d=$(mkrepo e1); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkcard "$d" good 100
-out=$("$CHECKER" "$d" 2>&1); check "E1 a valid card passes" 0 "$?"
+out=$("$CHECKER" "$d" 2>&1); check "E1 an unconditional card passes" 0 "$?"
 
 d=$(mkrepo e2); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
-printf 'no frontmatter here\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
-printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "E2 a card with no frontmatter fails" 1 "$?"
-contains "E2 is the FM rule" "$out" "FM:"
-
-d=$(mkrepo e3); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
 printf -- '---\ndescription: x\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
 printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "E3 a card with no paths: fails" 1 "$?"
+out=$("$CHECKER" "$d" 2>&1); check "E2 frontmatter without paths: is fine" 0 "$?"
 
-# An empty answer is never agreement: a card scoped to nothing never fires.
+# MEASURED 2026-09-18 on Claude Code 2.1.277: a card carrying `paths:` never
+# loads, at session start or after reading a matching file, at project or user
+# scope, in every spelling tried. An earlier draft REQUIRED paths:, which
+# guaranteed every card was inert -- a rule that silently switched off the thing
+# it was policing. These three rows are what stop that being reintroduced.
+d=$(mkrepo e3); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
+printf -- '---\npaths:\n  - CLAUDE.md\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
+printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
+out=$("$CHECKER" "$d" 2>&1); check "E3 a block-list paths: card fails -- it would never load" 1 "$?"
+contains "E3 is the scope finding, not a generic FM complaint" "$out" "SCOPE:"
+
 d=$(mkrepo e4); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
+printf -- '---\npaths: ["docs/**/*.md"]\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
+printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
+out=$("$CHECKER" "$d" 2>&1); check "E4 an inline-array paths: card fails too" 1 "$?"
+
+d=$(mkrepo e5); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
 printf -- '---\npaths: []\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
 printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "E4 paths: [] fails -- it would never fire" 1 "$?"
-
-d=$(mkrepo e5); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/skills/s"
-printf -- '---\ndescription: d\n---\n[c](../../../CLAUDE.md)\n' > "$d/.claude/skills/s/SKILL.md"
-printf '\n[skill](.claude/skills/s/SKILL.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "E5 a SKILL.md with no name: fails" 1 "$?"
+out=$("$CHECKER" "$d" 2>&1); check "E5 an empty paths: list fails -- any paths: is inert" 1 "$?"
 
 d=$(mkrepo e6); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/skills/s"
+printf -- '---\ndescription: d\n---\n[c](../../../CLAUDE.md)\n' > "$d/.claude/skills/s/SKILL.md"
+printf '\n[skill](.claude/skills/s/SKILL.md)\n' >> "$d/CLAUDE.md"
+out=$("$CHECKER" "$d" 2>&1); check "E6 a SKILL.md with no name: fails" 1 "$?"
+contains "E6 is the FM rule" "$out" "FM:"
+
+d=$(mkrepo e7); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/skills/s"
 printf -- '---\nname: s\ndescription:\n---\n[c](../../../CLAUDE.md)\n' > "$d/.claude/skills/s/SKILL.md"
 printf '\n[skill](.claude/skills/s/SKILL.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "E6 an empty description: fails" 1 "$?"
+out=$("$CHECKER" "$d" 2>&1); check "E7 an empty description: fails" 1 "$?"
 
-# CRLF frontmatter must still parse: this repo has already shipped a CRLF disagreement.
-d=$(mkrepo e7); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
+# CRLF: without the \r strip the paths: line would not match and an inert card
+# would sail through. This repo has already shipped one CRLF disagreement.
+d=$(mkrepo e8); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
 printf -- '---\r\npaths:\r\n  - CLAUDE.md\r\n---\r\n[c](../../CLAUDE.md)\r\n' > "$d/.claude/rules/x.md"
 printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "E7 CRLF frontmatter still parses" 0 "$?"
+out=$("$CHECKER" "$d" 2>&1); check "E8 a CRLF paths: card is still caught" 1 "$?"
+
+d=$(mkrepo e9); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/skills/s"
+printf -- '---\r\nname: s\r\ndescription:\r\n---\r\n[c](../../../CLAUDE.md)\r\n' > "$d/.claude/skills/s/SKILL.md"
+printf '\n[skill](.claude/skills/s/SKILL.md)\n' >> "$d/CLAUDE.md"
+out=$("$CHECKER" "$d" 2>&1); check "E9 a CRLF empty description: is still empty" 1 "$?"
+contains "E9 is the FM rule" "$out" "FM:"
 
 printf '\n== F. links ==\n'
 d=$(mkrepo f1); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"
@@ -277,7 +294,7 @@ out=$("$CHECKER" "$d" 2>&1); check "F3 a 900-byte CLAUDE.md is still link-checke
 # Resolution is relative to the CONTAINING file, not the repo root.
 d=$(mkrepo f4); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"
 mkdir -p "$d/docs" "$d/.claude/rules"; printf '# real\n' > "$d/docs/REAL.md"
-printf -- '---\npaths:\n  - CLAUDE.md\n---\n[up](../../docs/REAL.md)\n' > "$d/.claude/rules/x.md"
+printf -- '# card\n[up](../../docs/REAL.md)\n' > "$d/.claude/rules/x.md"
 printf '\n[card](.claude/rules/x.md)\n[r](docs/REAL.md)\n' >> "$d/CLAUDE.md"
 out=$("$CHECKER" "$d" 2>&1); check "F4 a card link resolves relative to the card" 0 "$?"
 
@@ -335,17 +352,16 @@ mkdir -p "$d/docs"; printf '# a\n' > "$d/docs/A.md"
 printf '# changelog\n\n[a](docs/A.md)\n' > "$d/CHANGELOG.md"
 out=$("$CHECKER" "$d" 2>&1); check "G7 CHANGELOG.md is not a reachability root" 1 "$?"
 
-printf '\n== H. paths: globs ==\n'
-d=$(mkrepo h1); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
-printf -- '---\npaths:\n  - CLAUDE.md\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
-printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "H1 a glob that matches passes" 0 "$?"
+printf '\n== H. scope: a card that loads is a card that costs ==\n'
+d=$(mkrepo h1); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkcard "$d" x 100
+out=$("$CHECKER" "$d" 2>&1); check "H1 an unconditional card passes the scope rule" 0 "$?"
+contains "H1 says the card is counted, not merely present" "$out" "so all are counted by AGGR"
 
 d=$(mkrepo h2); seed "$d/CLAUDE.md" 5000; guard_in "$d"; snap "$d"; mkdir -p "$d/.claude/rules"
-printf -- '---\npaths:\n  - src/**/*.rs\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
+printf -- '---\npaths:\n  - CLAUDE.md\n---\n[c](../../CLAUDE.md)\n' > "$d/.claude/rules/x.md"
 printf '\n[card](.claude/rules/x.md)\n' >> "$d/CLAUDE.md"
-out=$("$CHECKER" "$d" 2>&1); check "H2 a glob matching nothing fails -- that card can never fire" 1 "$?"
-contains "H2 is the GLOB rule" "$out" "GLOB:"
+out=$("$CHECKER" "$d" 2>&1); check "H2 a scoped card fails the scope rule" 1 "$?"
+contains "H2 names it as dead weight the aggregate cannot see" "$out" "SCOPE: a card is scoped"
 
 printf '\n== I. the tree we ship ==\n'
 repo=$(cd "$here/.." && pwd)
@@ -354,7 +370,16 @@ check "I1 this repository passes" 0 "$rc"
 contains "I1 prints a summary line" "$out" "SUMMARY: size="
 # Not decoration: recomputed here by a differently-written loop, so a checker
 # that printed a ceiling it did not use fails this even while I1 passes.
-want_min=$(git -C "$repo" rev-list --first-parent HEAD | while read -r c; do
+# Independently recomputed, mirroring the checker's base resolution rather than
+# assuming HEAD: the guard prefers origin/HEAD, then origin/main, then main, and
+# falls back to the working tree when no commit on that base carries the guard.
+# Getting this wrong is what this row is for -- it caught exactly that mismatch.
+want_base=''
+for cand in refs/remotes/origin/HEAD refs/remotes/origin/main refs/heads/main; do
+    if git -C "$repo" rev-parse --verify --quiet "$cand" >/dev/null 2>&1; then want_base=$cand; break; fi
+done
+[ -n "$want_base" ] || want_base=HEAD
+want_min=$(git -C "$repo" rev-list --first-parent "$want_base" | while read -r c; do
         if git -C "$repo" cat-file -e "$c:scripts/check-claude-md.sh" 2>/dev/null; then
             git -C "$repo" cat-file -s "$c:CLAUDE.md" 2>/dev/null
         else break; fi
@@ -371,7 +396,7 @@ contains "I4 CI invokes the checker against the shipped tree" \
 # early exit in a fixture builder) rather than one that failed. It does NOT
 # catch a hollow rule -- one still called, still counted, always returning ok.
 # Only review catches that; do not claim otherwise.
-EXPECTED_TOTAL=72
+EXPECTED_TOTAL=77
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then

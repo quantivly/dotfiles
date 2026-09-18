@@ -51,8 +51,8 @@
 # skipped check means the guard is broken and a violation means the tree is
 # broken, and a state-table row can only pin the difference if the codes differ.
 #
-# Every rule prints a prefix unique to itself (SIZE:/AGGR:/CAP:/FM:/LINK:/ORPH:/
-# GLOB:) so a state-table needle is unambiguous, and no pass-path message
+# Every rule prints a prefix unique to itself (SIZE:/AGGR:/CAP-CARD:/CAP-SKILL:/
+# FM:/LINK:/ORPH:/SCOPE:) so a state-table needle is unambiguous, and no pass-path message
 # contains a fail-path prefix. Colour only when stdout is a terminal: an
 # unconditional escape puts control characters into every redirect and makes a
 # tick un-greppable, which has already let a row in this repo pass whatever was
@@ -223,22 +223,11 @@ fi
 # flat lists are recognised. This repo has recorded six ways a hand-written
 # parser went quiet; the mitigation is not a better parser, it is a grammar
 # small enough that anything it cannot read is a card too complex to be a card.
-fm_block() { sed -n '1{/^---[[:space:]]*$/!q}; 1d; /^---[[:space:]]*$/q; p' "$1" | tr -d '\r'; }
+# CRLF needs no strip: every pattern that reads this block matches `[[:space:]]`,
+# which includes \r. A `tr -d '\r'` here was unkillable by mutation for exactly
+# that reason, so it went; rows E8/E9 pin the tolerance at the patterns instead.
+fm_block() { sed -n '1{/^---[[:space:]]*$/!q}; 1d; /^---[[:space:]]*$/q; p' "$1"; }
 fmfail=0
-for f in "${rules[@]}"; do
-    b=$(fm_block "$f")
-    if [ -z "$b" ]; then
-        fmfail=1; printf '%s  ..%s   FM: %s has no frontmatter (needs --- on line 1 and a paths: list)\n' "$RED" "$RST" "${f#"$root"/}"; continue
-    fi
-    p=$(printf '%s\n' "$b" | sed -n 's/^paths:[[:space:]]*//p' | head -1)
-    inline=$(printf '%s\n' "$b" | sed -n '/^paths:/,/^[A-Za-z_]/{/^[[:space:]]*-[[:space:]]*[^[:space:]]/p}')
-    if ! printf '%s\n' "$b" | grep -q '^paths:'; then
-        fmfail=1; printf '%s  ..%s   FM: %s has no paths: key\n' "$RED" "$RST" "${f#"$root"/}"
-    elif { [ -z "$p" ] || [ "$p" = "[]" ]; } && [ -z "$inline" ]; then
-        # An empty answer is never agreement: a card scoped to nothing never fires.
-        fmfail=1; printf '%s  ..%s   FM: %s has an empty paths: list — it would never fire\n' "$RED" "$RST" "${f#"$root"/}"
-    fi
-done
 for f in "${skills[@]}"; do
     b=$(fm_block "$f")
     for key in name description; do
@@ -252,9 +241,9 @@ for f in "${skills[@]}"; do
     done
 done
 if [ "$fmfail" -eq 0 ]; then
-    ok "FM: frontmatter valid on ${#rules[@]} card(s) and ${#skills[@]} skill(s)"
+    ok "FM: frontmatter valid on ${#skills[@]} skill(s)"
 else
-    bad "FM: a rule card or SKILL.md has missing or empty frontmatter"
+    bad "FM: a SKILL.md has a missing or empty name: or description:"
 fi
 
 # --- link extraction (shared by R6 and R7) -------------------------------
@@ -370,34 +359,21 @@ else
     bad "ORPH: a file is unreachable — an unrouted file is an unread file. Link it from CLAUDE.md or README.md."
 fi
 
-# --- R9 GLOB -------------------------------------------------------------
-# A paths: glob that matches nothing never fires, and this repo has recorded
-# that a pathspec matching nothing narrows a check invisibly. A pattern carrying
-# anything outside the allowlist is reported as NOT CHECKED rather than guessed
-# at -- refusing to answer is not the same as answering no.
-globfail=0; globskipped=0
+# --- R9 SCOPE ------------------------------------------------------------
+# A card that loads is a card that costs. Since `paths:` scoping does not work
+# (see FM above), every card here is unconditional and therefore ALWAYS loaded,
+# which is exactly what the aggregate rule budgets. This check states that
+# relationship out loud rather than leaving it implied, so the day scoping starts
+# working somebody has to come and change this line deliberately.
+scopefail=0
 for f in "${rules[@]}"; do
     b=$(fm_block "$f")
-    pats=$(printf '%s\n' "$b" |
-        sed -n -e 's/^paths:[[:space:]]*\[\(.*\)\]/\1/p' -e 's/^[[:space:]]*-[[:space:]]*//p' |
-        tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^["'"'"']//; s/["'"'"']$//' | grep -v '^$')
-    while IFS= read -r pat; do
-        [ -n "$pat" ] || continue
-        case "$pat" in
-            *[!A-Za-z0-9_./*{},-]*) globskipped=$((globskipped+1))
-                printf '  ..   GLOB: %s pattern %s NOT CHECKED (outside the allowlist)\n' "${f#"$root"/}" "$pat"
-                continue ;;
-        esac
-        # shellcheck disable=SC2154  # m is assigned by the eval on the same line.
-        n=$( cd "$root" && m=(); eval "m=( $pat )" 2>/dev/null; printf '%s' "${#m[@]}" )
-        [ "${n:-0}" -gt 0 ] || { globfail=1
-            printf '%s  ..%s   GLOB: %s pattern %s matches no file\n' "$RED" "$RST" "${f#"$root"/}" "$pat"; }
-    done <<< "$pats"
+    if [ -n "$b" ] && printf '%s\n' "$b" | grep -q '^[[:space:]]*paths:'; then scopefail=1; fi
 done
-if [ "$globfail" -eq 0 ]; then
-    ok "GLOB: every paths: pattern matches at least one file ($globskipped not checked)"
+if [ "$scopefail" -eq 0 ]; then
+    ok "SCOPE: all ${#rules[@]} card(s) are unconditional, so all are counted by AGGR"
 else
-    bad "GLOB: a paths: pattern matches no file — that card can never fire"
+    bad "SCOPE: a card is scoped with paths: and so never loads — it is dead weight the aggregate cannot see"
 fi
 
 # --- summary -------------------------------------------------------------
