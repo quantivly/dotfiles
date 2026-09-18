@@ -1,9 +1,12 @@
-import argparse, json, tempfile, unittest
+import argparse, io, json, os, tempfile, unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
-from rabota import context, errors
+from rabota import cli, context, errors
 from rabota.commands import precompute
 from rabota.runner import FakeRunner
+from tests.support import last_json
+from tests.test_cli import install_fixture_home
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -53,3 +56,97 @@ class PrecomputeTests(unittest.TestCase):
             steps = precompute._default_steps()
             steps["auto"](ctx)
         fake_apply.assert_called_once_with(ctx, tier="auto", batch=None, confirmed=False, dry_run=True)
+
+    def test_middle_step_non_rabota_exception_does_not_abort_the_chain(self):
+        # Item 1: run_precompute used to catch only errors.RabotaError, so a plain
+        # KeyError/OSError/Exception from any step took the whole tick down uncaught —
+        # auto/rank/census never ran and precompute.log was never written.
+        for exc_cls, msg in [(KeyError, "boom"), (OSError, "disk full"), (Exception, "generic failure")]:
+            with self.subTest(exc_cls=exc_cls):
+                ctx = self.ctx()
+                calls = []
+
+                def boom(*a, **k):
+                    raise exc_cls(msg)
+
+                fake = {
+                    "sync": lambda *a, **k: calls.append("sync") or {},
+                    "plan": boom,
+                    "auto": lambda *a, **k: calls.append("auto") or {},
+                    "rank": lambda *a, **k: calls.append("rank") or {},
+                    "census": lambda *a, **k: calls.append("census") or {},
+                }
+                with self.assertRaises(errors.Partial) as cm:
+                    precompute.run_precompute(ctx, steps=fake)
+                self.assertEqual(cm.exception.failed, ["plan"])
+                self.assertEqual(calls, ["sync", "auto", "rank", "census"])
+                log_lines = (ctx.state_dir / "precompute.log").read_text().splitlines()
+                self.assertEqual(len(log_lines), 1)
+                rep = json.loads(log_lines[0])
+                self.assertFalse(rep["steps"]["plan"]["ok"])
+                self.assertIn(exc_cls.__name__, rep["steps"]["plan"]["error"])
+                self.assertIn(msg, rep["steps"]["plan"]["error"])
+
+    def test_two_step_failures_are_both_recorded_in_order(self):
+        ctx = self.ctx()
+
+        def boom_key(*a, **k):
+            raise KeyError("missing")
+
+        def boom_os(*a, **k):
+            raise OSError("disk")
+
+        fake = {
+            "sync": lambda *a, **k: {},
+            "plan": boom_key,
+            "auto": lambda *a, **k: {},
+            "rank": boom_os,
+            "census": lambda *a, **k: {},
+        }
+        with self.assertRaises(errors.Partial) as cm:
+            precompute.run_precompute(ctx, steps=fake)
+        self.assertEqual(cm.exception.failed, ["plan", "rank"])
+        log_lines = (ctx.state_dir / "precompute.log").read_text().splitlines()
+        self.assertEqual(len(log_lines), 1)
+        rep = json.loads(log_lines[0])
+        self.assertFalse(rep["steps"]["plan"]["ok"])
+        self.assertFalse(rep["steps"]["rank"]["ok"])
+        self.assertTrue(rep["steps"]["auto"]["ok"])
+        self.assertTrue(rep["steps"]["census"]["ok"])
+
+    def test_partial_failure_exits_4_through_cli_main(self):
+        # Drives the real registered command, not run_precompute directly (WS3 round 1's
+        # lesson): patches the actual step functions _default_steps() imports, so wiring
+        # from `rabota precompute` through cli.main to a caught non-RabotaError is proven.
+        install_fixture_home(self)
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        with mock.patch("rabota.commands.sync.run_sync", return_value={}), \
+             mock.patch("rabota.commands.inbox.run_plan", side_effect=KeyError("boom")), \
+             mock.patch("rabota.commands.inbox.run_apply", return_value={}), \
+             mock.patch("rabota.commands.rank.run_rank", return_value={}), \
+             mock.patch("rabota.census.gather", return_value={}):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = cli.main(["--tenant", "quantivly", "--state-dir", tmp.name, "precompute"])
+        self.assertEqual(code, 4, err.getvalue())
+        payload = last_json(err.getvalue())
+        self.assertEqual(payload["error"]["code"], "partial")
+        self.assertEqual(payload["error"]["failed"], ["plan"])
+        log = Path(tmp.name) / "precompute.log"
+        self.assertTrue(log.exists())
+        rep = json.loads(log.read_text().splitlines()[-1])
+        self.assertFalse(rep["steps"]["plan"]["ok"])
+        self.assertIn("KeyError", rep["steps"]["plan"]["error"])
+        self.assertTrue(rep["steps"]["auto"]["ok"])
+        self.assertTrue(rep["steps"]["rank"]["ok"])
+        self.assertTrue(rep["steps"]["census"]["ok"])
+
+    def test_secret_leak_from_log_write_still_propagates(self):
+        # The write happens after the per-step loop, so a SecretLeak from it must escape
+        # run_precompute unswallowed. Pinned so a later refactor cannot move the write
+        # inside the per-step try/except.
+        ctx = self.ctx()
+        fake = {name: (lambda *a, **k: {}) for name in ("sync", "plan", "auto", "rank", "census")}
+        with mock.patch("rabota.commands.precompute.emit.append_file", side_effect=errors.SecretLeak("nope")):
+            with self.assertRaises(errors.SecretLeak):
+                precompute.run_precompute(ctx, steps=fake)

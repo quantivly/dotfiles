@@ -1,8 +1,22 @@
-"""The timer's entry point: sync → inbox plan → inbox apply auto → rank → census. Each step isolated."""
+"""The timer's entry point: sync → inbox plan → inbox apply auto → rank → census. Each step isolated.
+
+``--dry-run`` here means "do not mutate anything outward," not "do not write local state." It
+suppresses only the Linear-mutating ``auto`` step (``run_apply`` is called with
+``dry_run=ctx.dry_run``, so it plans but does not apply). ``sync``, ``plan``, ``rank`` and
+``census`` write only local files under the tenant's own state dir — ``sources/*.json``,
+``sequence.json``/``.md``, ``census.json``, and ``precompute.log`` itself — and always do,
+dry-run or not: ``run_sync``, ``run_plan``, ``run_rank`` and ``census.gather`` take no
+``dry_run`` parameter at all. Making ``--dry-run`` suppress those writes too would be a
+CLI-wide semantics change affecting every subcommand, not a ``precompute``-local decision.
+"""
 import json, time
 from rabota import cli, emit, errors
 from rabota.context import Context
 from rabota.store import now
+
+DRY_RUN_NOTE = ("--dry-run suppresses only the Linear-mutating 'auto' step; sync, plan, rank and "
+                 "census always write local state (sources/*.json, sequence.json/.md, census.json, "
+                 "precompute.log) whether or not --dry-run is set.")
 
 
 def _default_steps():
@@ -26,8 +40,9 @@ def run_precompute(ctx: Context, steps=None) -> dict:
         t0 = time.time()
         try:
             steps[name](ctx); rep["steps"][name] = {"ok": True, "error": None, "seconds": round(time.time() - t0, 1)}
-        except errors.RabotaError as e:
-            rep["steps"][name] = {"ok": False, "error": str(e), "seconds": round(time.time() - t0, 1)}; failed.append(name)
+        except Exception as e:
+            err = str(e) if isinstance(e, errors.RabotaError) else f"{type(e).__name__}: {e}"
+            rep["steps"][name] = {"ok": False, "error": err, "seconds": round(time.time() - t0, 1)}; failed.append(name)
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     emit.append_file(ctx.state_dir / "precompute.log", json.dumps(rep) + "\n")
     if failed: raise errors.Partial(f"precompute steps failed: {', '.join(failed)}", failed=failed)
@@ -35,7 +50,8 @@ def run_precompute(ctx: Context, steps=None) -> dict:
 
 
 def _build(sub):
-    sub.add_parser("precompute", help="timer entry: sync, inbox plan+auto, rank, census")
+    sub.add_parser("precompute", help="timer entry: sync, inbox plan+auto, rank, census",
+                    description="timer entry: sync, inbox plan+auto, rank, census", epilog=DRY_RUN_NOTE)
 
 
 cli.register("precompute", _build, lambda ns: run_precompute(Context.from_namespace(ns)))

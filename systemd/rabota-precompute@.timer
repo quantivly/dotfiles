@@ -1,6 +1,6 @@
 # systemd/rabota-precompute@.timer
 [Unit]
-Description=Run rabota pre-compute for tenant %i every 30 minutes on weekdays, 07:00-19:00
+Description=Run rabota pre-compute for tenant %i every 30 minutes on weekdays, 07:00-18:30
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 07..18:00,30:00
