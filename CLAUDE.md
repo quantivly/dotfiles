@@ -3323,7 +3323,24 @@ emitted as a member. Measured against the fix, `fallback_chain = ["` over `profi
 `auto-switch armed: the chain walks profiles = [` — both halves of the defect the PR existed to
 remove, reproduced by it — and on `auth_broken` the same span reached a **remedy**:
 `Do NOT run 'clauth login profiles = ['`, advice built out of raw file content. All four readers
-of this shape shared the hole.
+of this shape shared the hole, and **all three that parse it now carry the member class** —
+`claude.sh` (both keys), `_claude_quarantine_scan` in `zsh/zshrc.herdr` and
+`profile_is_quarantined` in `scripts/claude-account-dirs.sh`, in one change. Fixing only the
+doctor is what a third pass caught: for one round the three gave **three answers to one file**,
+the doctor saying NOT CHECKED while the picker returned 0 over a list it could not validate and
+its malformed-list warning therefore never fired. The catastrophic direction was never reachable
+— a bogus member matches no registered profile, confirmed independently over thousands of
+randomised malformed files — so what the divergence cost was LOUDNESS, which is the entire
+purpose of the NOT CHECKED state. **The PR that fixes one reader owns the divergence it creates**,
+so this belonged here and not in a follow-up.
+
+The bash reader's copy is **unkillable through its call site and is labelled rather than
+counted**: measured, `profile_is_quarantined <real name>` answers 1 with the class and without
+it, because the only query whose answer moves is the bogus member itself, and no caller passes
+that. It is kept for the reason the file gives for having three copies at all — one rule in three
+languages — and because a future caller that ENUMERATES rather than tests membership would
+inherit the hole in silence. Its row therefore probes the FUNCTION'S CONTRACT directly rather
+than its behaviour, which is the only thing that can fail.
 
 **The general rule, which is the thing to carry: a parity-based parse is only as validated as its
 UNCHECKED fields.** Splitting on a delimiter and checking alternate fields feels total and is

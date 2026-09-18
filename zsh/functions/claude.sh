@@ -594,7 +594,7 @@ claude-doctor() {
   # block scope and `local` on a name already local in this scope is a DISPLAY
   # command, which CLAUDE.md records printing `pdir=/home/...` into the middle of
   # a report.
-  local qspan qrc qstate qexp qstore qreal
+  local qnames qrc qstate qexp qstore qreal
   local -a date_prefixes files stray_profiles unprofiled_dirs unmanaged_stores
   # Declared here for the reason this PR exists: a ~950-line function with no
   # block scope shares one namespace, and an undeclared assignment inside it
@@ -1074,7 +1074,11 @@ claude-doctor() {
         # remedy therefore needs a human and a browser, and a retired-but-still-
         # registered account would make claude-doctor exit non-zero forever — the
         # permanently-red checker this repo has now produced six times.
-        qspan="$(_claude_quarantined_profiles)"; qrc=$?
+        # NAMED FOR WHAT IT HOLDS — validated profile names, not a span. Its twin
+        # forty lines up was renamed for this reason and this one was not, which
+        # is the one-side-only fix this file keeps recording: the correct half is
+        # why nobody re-reads the other. No raw span is in scope on either path.
+        qnames="$(_claude_quarantined_profiles)"; qrc=$?
         if (( qrc != 0 )); then
           _doctor_warn "could not read clauth's quarantine list — NOT CHECKED"
           # EVERY CAUSE, the same four the chain arm names, because they are one
@@ -1091,7 +1095,7 @@ claude-doctor() {
           echo "    than guess at. An empty answer from a file we could not read is not agreement:"
           echo "    a quarantined account is dropped from the picker with nothing else saying so."
         else
-          quarantined=( ${(f)qspan} )
+          quarantined=( ${(f)qnames} )
           qreal=0
           for pname in $quarantined; do
             qstore="$HOME/.clauth/profiles/$pname/credentials.json"

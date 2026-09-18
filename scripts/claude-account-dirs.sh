@@ -561,6 +561,17 @@ profile_is_quarantined() {
     # would exit silently the moment this function were called anywhere but inside
     # an `if` (which suspends `set -e` and is the only reason the bare form works
     # today). CLAUDE.md records that class twice already.
+    # A MEMBER MUST LOOK LIKE A NAME -- the same rule and the same class as the
+    # two zsh readers, added in the same change so the three cannot answer one
+    # file three ways. Checking the even fields validates the separators BETWEEN
+    # the names and never a name, so a span truncated MID-MEMBER flips quote
+    # parity and a neighbouring assignment lands in an ODD field, where this
+    # loop would compare it against $name. Refusing the whole list is the safe
+    # answer here for the reason the zsh twin records: a list we cannot validate
+    # must quarantine nobody.
+    for (( i = 1; i < ${#fields[@]}; i += 2 )); do
+        [[ -z "${fields[i]//[A-Za-z0-9._@+-]/}" ]] || return 1
+    done
     for (( i = 1; i < ${#fields[@]}; i += 2 )); do
         if [[ "${fields[i]}" == "$name" ]]; then return 0; fi
     done

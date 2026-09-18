@@ -2266,6 +2266,31 @@ else
     bad "the picker and the doctor disagree about auth_broken — got '$AGREE', want 'XX a1a2'"
 fi
 
+# ...AND THEY MUST AGREE ON A FILE NEITHER CAN READ, which is where they stopped
+# agreeing. The member class landed in claude.sh first and in the picker a round
+# later, and in between the doctor said NOT CHECKED while the picker returned 0
+# with a member of `$'\nprofiles = ['` and said nothing — three readers, three
+# answers, one file, with the picker's malformed-list warning never firing. The
+# catastrophic direction was never reachable (a bogus member matches no profile,
+# measured over thousands of randomised files by two independent reviews), so
+# what was lost was loudness, which is the whole point of the NOT CHECKED state.
+new_home v13
+mkdir -p "$FHOME/.clauth/profiles/a1"
+printf 'auth_broken = ["\nprofiles = []\n' > "$FHOME/.clauth/profiles.toml"
+AGREE2="$(env -u CLAUDE_CONFIG_DIR HOME="$FHOME" CLAUDE_PICK_SOURCING=1 \
+              CLAUDE_TENANTS_FILE=/nonexistent "PATH=$SYSBIN" \
+          "$SYSBIN/zsh" -f -c "
+            source '$HERDRRC' >/dev/null 2>&1
+            source '$CLAUDESH' >/dev/null 2>&1
+            _claude_quarantine_scan >/dev/null 2>&1;      pk=\$?
+            _claude_quarantined_profiles >/dev/null 2>&1; dr=\$?
+            print -rn -- \"picker=\$pk doctor=\$dr\"" 2>&1)"
+if [[ "$AGREE2" == "picker=1 doctor=1" ]]; then
+    ok "both readers REFUSE a mid-member span, so neither goes quiet"
+else
+    bad "the picker and the doctor disagree on an unreadable list — got '$AGREE2', want 'picker=1 doctor=1'"
+fi
+
 # The quarantine check must not depend on there being any account dirs: the
 # Account dirs section is skipped wholesale when none exist, and a machine that
 # has never run an isolated session can still have a quarantined profile. A check
@@ -2338,7 +2363,21 @@ fi
 # Read off the file rather than from a fixed list, so a new emitter is covered
 # the day it is used; `_doctor_summary` is included because it decides the
 # closing verdict and the exit status.
-EMITTERS="$(grep -oE '_doctor_[a-z_]+' "$CLAUDESH" | sort -u)"
+# MATCHED AS A CALL, NOT AS A WORD. The first version grepped the bare name and
+# so matched PROSE: `claude.sh` already carries three `_doctor_*` mentions in
+# comments, and the row was green only because all three happen to name real
+# functions. Measured — adding one comment line naming `_doctor_fail` turned the
+# suite red with "claude.sh calls undefined emitter(s)" about a call that does
+# not exist. That is a permanently-red checker armed by a comment, and it is
+# this repo's own "a row that greps for a defect will match the comment
+# explaining the defect", met for the third time in one change.
+#
+# A call starts a command, so it is anchored to line-start, `&&`, `||`, `;` or
+# `{`. NOT `sed 's/#.*//'`: a `#` inside a quoted string would silently drop a
+# REAL call, and that is the direction that makes the row go quiet rather than
+# loud.
+EMITTERS="$(grep -oE '(^[[:space:]]*|&&[[:space:]]+|\|\|[[:space:]]+|;[[:space:]]+|\{[[:space:]]+)_doctor_[a-z_]+' \
+              "$CLAUDESH" | grep -oE '_doctor_[a-z_]+' | sort -u)"
 [[ -n "$EMITTERS" ]] || fatal "no _doctor_* calls found in $CLAUDESH — this row would assert nothing"
 EMIT_BAD=""
 for fn in ${EMITTERS}; do
@@ -2413,6 +2452,33 @@ want_out "TOML literal strings in the quarantine array are NOT CHECKED" \
          "could not read clauth's quarantine list"
 no_out   "...and are not read as an empty quarantine"      "no profile is quarantined"
 want_out "...and that message names a literal string too"  "'literal' strings"
+
+# THE MEMBER LOOP'S UPPER BOUND, which 320 rows did not pin. Changing
+# `i <= ${#parts}` to `i < ${#parts}` SURVIVED the whole suite and reproduced the
+# defect exactly: `· auto-switch armed: the chain walks profiles = [`. The reason
+# is that every other malformed fixture here has an EVEN number of quotes, so the
+# runaway lands at index 2 and `<` still reaches it. This one has a SINGLE quote,
+# which puts the runaway in the LAST even field — precisely the field `<` drops.
+#
+# It is also the likelier torn write: one stray quote, not two. Both keys get a
+# row, because the loop is shared and a bound is exactly the kind of off-by-one
+# that gets "tidied" later.
+new_home v1; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf 'fallback_chain = ["\nprofiles = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 ACTIVE_PROFILE=p1 run_doctor
+want_out "a one-quote chain span is NOT CHECKED (the loop's LAST even field)" \
+         "could not read clauth's fallback_chain"
+no_out   "...and is not reported as armed"                 "auto-switch armed"
+no_out   "...and the trailing field is not emitted"        "profiles = ["
+
+new_home v2; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf 'auth_broken = ["\nprofiles = []\n' > "$FHOME/.clauth/profiles.toml"
+WITH_CLAUTH=1 run_doctor
+want_out "a one-quote quarantine span is NOT CHECKED too" \
+         "could not read clauth's quarantine list"
+no_out   "...and invents no quarantined account"           "quarantined (auth_broken)"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
