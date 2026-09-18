@@ -3562,11 +3562,25 @@ a single space to it survived the whole suite, so a row over `["a b"]` now pins 
 space cannot be in a clauth profile name, so that row is honest rather than invented to kill a
 mutant, which is the distinction to keep when closing a surviving-mutant gap.
 
-Rows: `scripts/test-claude-doctor.sh` (281 → 325 at `9c47a49`; 326 at `0a1d557` before four
-duplicated assertions were consolidated into two — the count went DOWN by one while coverage went
-up, which is the clearest case there is for never reading a row count as a quality measure; 320 at `bc51404`; 314 at `b24f30b`; 306 at `60d973c`; 304 at `3a3c662` before the row
-audit, 291 at `a159bd9` before the code review, and two of those 304 were deleted as unfailable —
-so the count went up by four and down by two, which a bare delta would hide). **21 live mutants, 21 deaths, 0 survivors, 0 harness errors**, plus one retired
+Rows: `scripts/test-claude-doctor.sh` **281 → 325 at `d2848f6`** (#160's squash), and
+`scripts/test-claude-account-dirs.sh` 156 → 159 in the same commit.
+
+**The intermediate figures deliberately carry no shas, and that is the lesson of this
+follow-up.** Inside #160 the count moved 291 → 304 → 306 → 314 → 320 → 326 → 325 across six
+review rounds, and the first version of this paragraph anchored each number to the branch commit
+it was measured at — all seven of which **ceased to exist the moment the PR was squashed and the
+branch deleted**. `git merge-base --is-ancestor` puts every one of them off `origin/main`. So the
+rule this file already states for branch NAMES — "a branch is not an anchor" — applies to the
+COMMITS on that branch too, and it is sharper: a branch name is visibly a branch, where a
+seven-character sha looks exactly like a durable anchor and fails silently.
+
+**For work that lands as a squash, the only durable anchors are the squash sha and the PR
+number.** Everything measured during review collapses into one commit, so the honest record is
+the final figure against that commit plus the progression in prose. Two of the movements are
+worth keeping precisely because a bare delta hides them: two rows were **deleted as unfailable**
+in one round, and four duplicated assertions were **consolidated into two** in another, so the
+count went DOWN by one while coverage went UP — the clearest case there is for never reading a
+row count as a quality measure. **21 live mutants, 21 deaths, 0 survivors, 0 harness errors**, plus one retired
 by design. Two of the last three were written by an independent pass against fixes this file had
 already called pinned, and one of those (the bash reader's class) killed nothing until its row
 was rewritten to probe the FUNCTION'S CONTRACT instead of its behaviour — a surviving mutant is
