@@ -2170,5 +2170,234 @@ check "gate: a fresh mtime over a 700 s-old fetch refuses"     "$rc" "2"
 check "gate: ...as gate-unmeasured"                             "$(jq -r .state <<<"$out")" "gate-unmeasured"
 
 #-----------------------------------------------------------------------------
+echo
+echo "=== gate: the weekly spend wall, aggregate and per-model (DO-623) ==="
+#
+# The gate refuses a lane that would be BLOCKED — a live weekly window (the
+# aggregate, or one governing the lane's model) at or past CLAUDE_PICK_WEEK_SPENT
+# on a seat with no spend headroom — and allows one that would only BILL. Each
+# row differs from its neighbours in ONE field, so every fixture comes from one
+# builder: a hand-written blob per row is how a row comes to fail for a second
+# reason and stop pinning what it names.
+
+# The suite's own environment must not decide the threshold for every row below;
+# the one row about it passes it explicitly.
+unset CLAUDE_PICK_WEEK_SPENT
+
+fetched_now_ms() { printf '%s\n' "$(( $(date +%s) * 1000 ))"; }
+
+# One gate fixture. $1 profile, $2 the weekly_scoped array, $3 the spend block,
+# $4 seven_day ("" or absent = a healthy 40), $5 fetched_at ("" OMITS the key —
+# the undated case; absent stamps it now). The 5h window is constant and healthy
+# (5 + 115×30/60 = 62 <= 95), so no row here can fail on a 5h arm.
+#
+# NOT `${4:-{...}}`: bash closes that expansion at the FIRST `}`, so a passed $4
+# comes back with a stray `}` appended — measured, "X" became "X}".
+mk_gate_prof() {
+    local ws="${2:-[]}" sp="${3:-null}" sd="${4:-}" fa
+    [[ -n "$sd" ]] || sd="{\"utilization\":40.0,\"resets_at\":\"$(iso_in 216000)\"}"
+    fa="${5-$(fetched_now_ms)}"
+    mkprof "$1" "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"}${fa:+,\"fetched_at\":$fa},\"seven_day\":$sd,\"weekly_scoped\":$ws,\"spend\":$sp}"
+}
+
+SP_NONE='{"enabled":true,"used":275.23,"limit":275.0}'
+SP_ROOM='{"enabled":true,"used":190.77,"limit":250.0}'
+SP_OFF='{"enabled":false,"used":134.43,"limit":125.0}'
+SP_NADA='null'
+WS_FABLE_SPENT="[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]"
+
+# Pinned, dry-run, JSON — the way rabota runs it. Hermetic on gate_run's pattern
+# (fixture HOME and TZ, no tenants file, the two session variables cleared).
+# Sets $out and $rc; called directly, never inside $( ), so $rc is this run's.
+gw() {   # gw PROFILE MODEL
+    out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$FHOME" TZ="$FIXTZ" CLAUDE_TENANTS_FILE=/nonexistent \
+            zsh "$PICK" --profile "$1" --dry-run --json --gate --model "$2" --effort high 2>/dev/null)"; rc=$?
+}
+
+# ---- the model wall: the measured blocking case ------------------------------
+new_home gw_model_none
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate/model: a spent model window with no headroom refuses" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...with exit 2"                                "$rc" "2"
+check "...naming the window that is spent"            "$(jq -r '.reason | test("7d fable") and test("100%")' <<<"$out")" "true"
+check "...and quoting the spend that walled it"       "$(jq -r '.reason | test("275.23")' <<<"$out")" "true"
+check "...and no profile is named beside the refusal" "$(jq -r .profile <<<"$out")" "null"
+check "...reporting the model window"                 "$(jq -r '.gate.model_window | [.label,(.utilization|tostring),.state] | join("/")' <<<"$out")" "7d fable/100/live"
+check "...with its reset as RFC 3339 UTC"             "$(jq -r '(.gate.model_window.resets_at // "") | test("^[0-9-]+T[0-9:]+Z$")' <<<"$out")" "true"
+check "...and the spend state that decided it"        "$(jq -r .gate.spend <<<"$out")" "none"
+check "...and bills_credits is null on a refusal, never false" "$(jq -r .gate.bills_credits <<<"$out")" "null"
+
+# ---- the RANKED path reaches the same wall -----------------------------------
+# The per-model windows reach the gate by two assignments, one per path; every
+# other row here is pinned. The ranker is model-blind by design (seven_day 40,
+# so the seat is eligible), which is what lets the gate see this seat at all.
+cli --dry-run --json --gate --model claude-fable-5-1 --effort high
+check "gate/model (ranked path): the ranker picks the seat, the gate walls it" "$(jq -r .state <<<"$CLI_OUT")" "gate-spend-wall"
+check "...with exit 2"                                                        "$CLI_RC" "2"
+check "...the ranker having classed it eligible"                              "$(jq -r '.skipped[0] | [.profile,.class] | join("/")' <<<"$CLI_OUT")" "a1/eligible"
+
+# The CANARY on the new path. The refusal quotes a label, a percentage, an
+# instant and the spend figures; plant a token-shaped string beside each of those
+# fields (inside the window object and the spend block, which is where a careless
+# `tojson` of either would pick it up) and on --explain and --json it must not
+# come out. The second row proves the planted fixture really reached the wall.
+new_home gw_canary
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\",\"token\":\"$CANARY\"}]" \
+    "{\"enabled\":true,\"used\":275.23,\"limit\":275.0,\"token\":\"$CANARY\"}"
+plant
+check "canary: a gate-spend-wall refusal (--json --explain) carries no credential" \
+      "$(canary_run --profile a1 --dry-run --json --explain --gate --model claude-fable-5-1 --effort high)" "clean"
+cli --profile a1 --dry-run --json --gate --model claude-fable-5-1 --effort high
+check "...and that run really was the wall" "$(jq -r .state <<<"$CLI_OUT")" "gate-spend-wall"
+
+# ---- billing is allowed, not refused ----------------------------------------
+new_home gw_model_headroom
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate/model: headroom left ALLOWS"       "$(jq -r .gate.verdict <<<"$out")"        "allow"
+check "...with exit 0"                         "$rc"                                    "0"
+check "...and says the lane will bill credits" "$(jq -r .gate.bills_credits <<<"$out")" "true"
+check "...still reporting the window it billed on" "$(jq -r .gate.model_window.label <<<"$out")" "7d fable"
+
+# ---- the drift: a Max seat ---------------------------------------------------
+new_home gw_model_disabled
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_OFF"
+gw a1 claude-fable-5-1
+check "gate/model: a Max seat (spend disabled) ALLOWS"  "$(jq -r .gate.verdict <<<"$out")"        "allow"
+check "...with exit 0"                                  "$rc"                                    "0"
+check "...and does not claim to know whether it bills"  "$(jq -r .gate.bills_credits <<<"$out")" "null"
+check "...reporting the spend state that decided it"    "$(jq -r .gate.spend <<<"$out")"         "disabled"
+
+# ---- nothing spent: the lane is free -----------------------------------------
+new_home gw_free
+mk_gate_prof a1 '[]' "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate: nothing spent allows, billing nothing" "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring), (.gate.model_window|tostring)] | join("/")' <<<"$out")" "allow/false/null"
+
+# ---- the drift: genuinely missing data still refuses -------------------------
+new_home gw_model_unknown
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NADA"
+gw a1 claude-fable-5-1
+check "gate/model: a spent window with NO spend block refuses" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...for the spend reason, not a 5h one"                  "$(jq -r '.reason | test("spend headroom cannot be read")' <<<"$out")" "true"
+
+# ---- the aggregate wall, and the pin -----------------------------------------
+new_home gw_agg_none
+mk_gate_prof a1 '[]' "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+gw a1 claude-opus-5
+check "gate/aggregate: a pinned seat does not bypass the wall" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...naming the aggregate, not a label"                   "$(jq -r '.reason | test("aggregate")' <<<"$out")" "true"
+check "...and model_window is null"                            "$(jq -r .gate.model_window <<<"$out")" "null"
+# Both spent at 100: the tie reports the lane's own window, not the aggregate.
+new_home gw_agg_and_model
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+gw a1 claude-fable-5-1
+check "gate: aggregate and model both spent — the model window is the one reported" \
+      "$(jq -r '[.state, .gate.model_window.label] | join("/")' <<<"$out")" "gate-spend-wall/7d fable"
+
+# ---- model scoping: the same seat, a different lane --------------------------
+new_home gw_scoping
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+gw a1 claude-opus-5
+check "gate: an Opus lane on a Fable-spent seat is allowed" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
+# ---- attribution: one fixture, one label, one lane, one expectation ----------
+# Each label sits at 100 with spend `none`, so GOVERNS is observable as a refusal
+# and "does not govern" as an allow — `state` for the refusals and `verdict` for
+# the allows, so neither reads as the other.
+for row in \
+  '7d fable:claude-fable-5-1:refuse'   \
+  '7d fable:fable:refuse'              \
+  '7d fable:fablex:allow'              \
+  '7d sonnet 5:claude-sonnet-5:refuse' \
+  '7d opus:opus[1m]:refuse'            \
+  '7d claude:claude-fable-5-1:allow'   \
+  '7d fable:claude-opus-5:allow'       ; do
+  lbl="${row%%:*}"; rest="${row#*:}"; mdl="${rest%:*}"; want="${rest##*:}"
+  new_home "gw_attr_${lbl// /_}_${mdl//[^a-z0-9]/_}"
+  mk_gate_prof a1 "[{\"label\":\"$lbl\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+  gw a1 "$mdl"
+  if [[ "$want" == refuse ]]; then
+    check "attribution: '$lbl' governs '$mdl'"         "$(jq -r .state <<<"$out")"        "gate-spend-wall"
+  else
+    check "attribution: '$lbl' does NOT govern '$mdl'" "$(jq -r .gate.verdict <<<"$out")" "allow"
+  fi
+done
+
+# ---- worst-of-matches --------------------------------------------------------
+# Both labels govern `claude-fable-5`: `7d fable` on the token `fable`, `7d 5` on
+# the token `5`, and both are at 100. `7d fable` is LAPSED (with a real clock, so
+# it allows) and listed first; `7d 5` is live and walled. Best-of-matches, or
+# highest-utilization-alone (a tie, so the first held wins), would allow.
+new_home gw_worst
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"},\
+{\"label\":\"7d 5\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5
+check "gate: when two labels govern, the WORST decides" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...and the worst one is the one reported"        "$(jq -r .gate.model_window.label <<<"$out")" "7d 5"
+# A governing window below the threshold is not a candidate at all.
+new_home gw_below
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":99.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5
+check "gate: a governing window at 99 (< 100) does not refuse" "$(jq -r '[.gate.verdict, (.gate.model_window|tostring)] | join("/")' <<<"$out")" "allow/null"
+
+# ---- a lapse needs a real clock ---------------------------------------------
+WS_FABLE_LAPSED="[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"}]"
+new_home gw_lapsed_dated
+mk_gate_prof a1 "$WS_FABLE_LAPSED" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate: a lapsed model window WITH fetched_at is allowed" "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "...and is reported as lapsed"   "$(jq -r .gate.model_window.state <<<"$out")" "lapsed"
+
+new_home gw_lapsed_undated
+mk_gate_prof a1 "$WS_FABLE_LAPSED" "$SP_NONE" "" ""     # fifth arg "" OMITS fetched_at
+gw a1 claude-fable-5-1
+check "gate: a lapsed model window WITHOUT fetched_at is undated" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...and says so in model_window.state" "$(jq -r .gate.model_window.state <<<"$out")" "undated"
+
+# ---- precedence: a 5h refusal keeps its own state ----------------------------
+# u5 at 90 projects to 90 + 115/2 = 147 > 95, so the 5h arm fires; the Fable
+# window is ALSO spent with spend `none`, so without the ordering this reports
+# gate-spend-wall instead.
+new_home gw_precedence
+mkprof a1 "{\"five_hour\":{\"utilization\":90.0,\"resets_at\":\"$(iso_in 3600)\"},\"fetched_at\":$(fetched_now_ms),\
+\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$(iso_in 216000)\"},\"weekly_scoped\":$WS_FABLE_SPENT,\"spend\":$SP_NONE}"
+gw a1 claude-fable-5-1
+check "gate: a 5h refusal keeps its state when a window is also spent" "$(jq -r .state <<<"$out")" "gate-projected"
+
+# ---- the aggregate we cannot read -------------------------------------------
+new_home gw_agg_unknown
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"fetched_at\":$(fetched_now_ms),\"spend\":$SP_NONE}"
+gw a1 claude-opus-5
+check "gate: an unreadable aggregate does not refuse (the 5h arms still apply)" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
+# ---- a lapsed aggregate, which reaches the gate as `unknown` too ------------
+new_home gw_agg_lapsed
+mk_gate_prof a1 '[]' "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"}"
+gw a1 claude-opus-5
+check "gate: a lapsed aggregate does not refuse" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
+# ---- the threshold is a tuning value, and a bad one refuses -----------------
+new_home gw_badthreshold
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM"
+CLAUDE_PICK_WEEK_SPENT=oops gw a1 claude-fable-5-1
+check "gate: CLAUDE_PICK_WEEK_SPENT=oops refuses rather than defaulting to 100" "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "...naming the variable and the value"  "$(jq -r '.reason | test("CLAUDE_PICK_WEEK_SPENT") and test("oops")' <<<"$out")" "true"
+# ...and a GOOD one is honoured: at 50 the healthy 40% aggregate is still not
+# spent, while a model window at 60 now is.
+new_home gw_goodthreshold
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":60.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+CLAUDE_PICK_WEEK_SPENT=50 gw a1 claude-fable-5-1
+check "gate: CLAUDE_PICK_WEEK_SPENT=50 walls a model window at 60" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+
+# ---- no --gate is still no gate object --------------------------------------
+new_home gw_off
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+cli --profile a1 --dry-run --json
+check "gate: without --gate the spent window changes nothing" \
+      "$(jq -r '[.gate, .profile, (.exit_code|tostring)] | map(tostring) | join("/")' <<<"$CLI_OUT")" "null/a1/0"
+
+#-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
