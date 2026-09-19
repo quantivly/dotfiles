@@ -58,9 +58,9 @@
 # Environment strings are NOT a rate source: only the array, and only that file.
 #
 # A STALE READING IS AN UNMEASURED ONE. u5 comes from the profile's
-# usage_cache.json, and the gate refuses (state gate-unmeasured) when that file
-# is older than CLAUDE_PICK_CACHE_MAX_AGE seconds — default 600 HERE, against
-# 3600 in the ranker (zshrc.herdr), which deliberately tolerates an older
+# usage_cache.json, and the gate refuses (state gate-unmeasured) when that
+# reading is older than CLAUDE_PICK_CACHE_MAX_AGE seconds — default 600 HERE,
+# against 3600 in the ranker (zshrc.herdr), which deliberately tolerates an older
 # reading because it only ORDERS candidates and there is no refresher that keeps
 # caches fresher than that. The gate decides whether a headless lane may burn a
 # seat unwatched: a seat at 30% three hours ago can be at 100% now (F13 — two
@@ -75,21 +75,22 @@
 # stamp is absent (clauth 0.15.1) or implausibly far in the future.
 # `rabota census` reads clauth's verdict directly and names it in unavailable[].
 #
-# A ROLLED WINDOW IS AN UNMEASURED ONE TOO, AND THE MTIME CANNOT SEE IT. The
-# mtime test alone let a `touch`ed three-hour-old cache pass, and ignored a
+# A ROLLED WINDOW IS AN UNMEASURED ONE TOO, AND NEITHER CLOCK CAN SEE IT. The
+# age test alone let a `touch`ed three-hour-old cache pass, and ignored a
 # five_hour.resets_at already in the past — the window the number describes
-# has ended, so the number is about nothing, however new the file is. A real
-# clauth write rewrites content and mtime together, which makes this low-risk,
-# not absent, and this is a safety gate. So after the mtime test the gate reads
-# the parsed reset: an instant in the past refuses (state gate-unmeasured, the
-# same sentence the mtime refusal says), and an ABSENT or UNPARSEABLE reset
-# refuses as well — unmeasured, never optimistic. Note what that second rule
-# costs: clauth omits resets_at for a window that has not started (measured
-# 2026-09-10, absent exactly where utilization is 0.0), so a seat on a fresh,
-# unstarted window is refused here until its first request stamps a reset. The
-# ranker (zshrc.herdr) still scores such a seat; only the headless gate declines
-# to start a lane on a window it cannot date. The instant is reported in the
-# gate object as resets_at (RFC 3339 UTC, or null) beside cache_age_s.
+# has ended, so the number is about nothing, however fresh the reading reads.
+# A real clauth write rewrites content and mtime together, which makes this
+# low-risk, not absent, and this is a safety gate. So after the age test the
+# gate reads the parsed reset: an instant in the past refuses (state
+# gate-unmeasured, the same sentence the age refusal says), and an ABSENT or
+# UNPARSEABLE reset refuses as well — unmeasured, never optimistic. Note what
+# that second rule costs: clauth omits resets_at for a window that has not
+# started (measured 2026-09-10, absent exactly where utilization is 0.0), so a
+# seat on a fresh, unstarted window is refused here until its first request
+# stamps a reset. The ranker (zshrc.herdr) still scores such a seat; only the
+# headless gate declines to start a lane on a window it cannot date. The
+# instant is reported in the gate object as resets_at (RFC 3339 UTC, or null)
+# beside cache_age_s.
 #
 # EVERY TUNING VALUE IS VALIDATED BEFORE IT IS USED, AND A BAD ONE REFUSES.
 # CLAUDE_PICK_GATE_MAX, CLAUDE_PICK_RATE_DEFAULT and the CLAUDE_PICK_RATES entry
@@ -469,16 +470,17 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
     REPLY=""; rc=2
   elif [[ "$_claude_pick_r5" != (-|)<-> ]]; then
     # No reset instant — absent (an unstarted window, the way clauth writes
-    # one) or unparseable. The mtime cannot date the WINDOW, only the file, so a
-    # reading with no reset is a reading of unknown currency: unmeasured, never
-    # optimistic. See A ROLLED WINDOW IS AN UNMEASURED ONE TOO, above.
+    # one) or unparseable. The age test dates the READING, never the WINDOW it
+    # describes, so a reading with no reset is a reading of unknown currency:
+    # unmeasured, never optimistic. See A ROLLED WINDOW IS AN UNMEASURED ONE
+    # TOO, above.
     gate_verdict=refuse; _claude_pick_state=gate-unmeasured
     _claude_pick_reason="$REPLY has a 5h reading (${_claude_pick_u5}%) with no readable reset instant (five_hour.resets_at absent or unparseable); refusing rather than assuming the window is current"
     REPLY=""; rc=2
   elif (( _claude_pick_r5 < 0 )); then
-    # The window the number describes has ended. The file may be brand new — a
-    # `touch`, or a writer that kept a rolled reading — and the mtime test above
-    # passed it; the reset is the value and "now" is the threshold.
+    # The window the number describes has ended. The reading may look fresh —
+    # a `touch`, or a writer that kept a rolled reading — and the age test
+    # above passed it; the reset is the value and "now" is the threshold.
     gate_verdict=refuse; _claude_pick_state=gate-unmeasured
     _claude_pick_reason="$REPLY's 5h reading (${_claude_pick_u5}%) is for a window that reset at $(text_instant "$_claude_pick_r5_at") ($(( - _claude_pick_r5 ))s ago; the threshold is now); a rolled window is an unmeasured one"
     REPLY=""; rc=2

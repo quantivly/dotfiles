@@ -585,18 +585,25 @@ _claude_quarantine_scan() {
 _claude_profile_cache_age() {
   local f="$HOME/.clauth/profiles/$1/usage_cache.json" fa="${2:-}" mtime s
   zmodload zsh/datetime 2>/dev/null || return 1
+  # ONE CLOCK READ, not four: this function used to read EPOCHSECONDS separately
+  # for the ahead test, the clamp test, the clamp assignment and the final
+  # subtraction, so a second boundary falling between any two of them could turn
+  # an exact answer into an off-by-one — the same class of bug DO-612 fixed for a
+  # rendered reset instant, one function away. A stale `now` across the whole
+  # call is fine: this is a point-in-time measurement, not a live poll.
+  local now=$EPOCHSECONDS
   if [[ "$fa" == <-> ]]; then
     s=$(( fa / 1000 ))
-    if (( s <= EPOCHSECONDS + 60 )); then
-      (( s > EPOCHSECONDS )) && s=$EPOCHSECONDS
-      print -r -- $(( EPOCHSECONDS - s ))
+    if (( s <= now + 60 )); then
+      (( s > now )) && s=$now
+      print -r -- $(( now - s ))
       return 0
     fi
   fi
   [[ -r "$f" ]] || return 1
   zmodload -F zsh/stat b:zstat 2>/dev/null || return 1
   mtime=$(zstat +mtime "$f" 2>/dev/null) || return 1
-  print -r -- $(( EPOCHSECONDS - mtime ))
+  print -r -- $(( now - mtime ))
 }
 
 # Seconds from now until an RFC 3339 instant, into _CLAUDE_TS_DELTA, AND the
