@@ -18,8 +18,9 @@
 # EXIT CODES are the contract, and each one is a different action for the caller:
 #
 #   0   picked; stdout is the profile (or the JSON object)
-#   2   refused — every pool member's 5h window is spent, or nothing in the pool
-#       is usable at all. stderr names each member and its reset time. Or, with
+#   2   refused — every pool member is exhausted (a spent 5h window, or a spent
+#       week with no spend headroom left — DO-621), or nothing in the pool is
+#       usable at all. stderr names each member and its reset time. Or, with
 #       --gate, the picked seat's PROJECTED end-utilisation exceeds the cap
 #       (state gate-projected), its 5h window is unmeasured or stale (state
 #       gate-unmeasured), or a tuning value does not parse (state

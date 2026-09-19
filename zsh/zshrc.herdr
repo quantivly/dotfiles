@@ -921,7 +921,8 @@ _claude_pick_score() {
 #
 # Usage: _claude_pick_class <profile>
 # Classes: excluded  — disabled, auth_broken, or no credential. Never chosen.
-#          exhausted — the 5h window is spent. A real, self-clearing wall.
+#          exhausted — the 5h window is spent, OR (DO-621) a live spent week
+#                      with no spend headroom. Real, self-clearing walls.
 #          unknown   — no cache, or one too old to believe. Ranks after every
 #                      measured candidate; unknown never outranks a measurement.
 #          eligible  — scored.
@@ -953,12 +954,18 @@ _claude_pick_score() {
 # zero via `weekf_eff`/`bonus_w` (consume-first) -- but that reordering happens
 # entirely inside the tier and can never let it outrank an eligible account.
 #
+# DO-621 REFINES THIS, it does not reverse it. The 2026-09-10 seats were
+# billing: a spent week with spend headroom bills usage credits and keeps
+# working, so it still only demotes. A spent week with NO spend headroom blocks
+# (measured 2026-09-18), and that one state is `exhausted` above.
+#
 # CLAUDE_PICK_WEEK_EXHAUSTED stays as an INERT knob, defaulting to 101 so it can
 # never fire, for whoever wants the strict behaviour back.
 _claude_pick_class() {
   local name="$1" why
   local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97}
   local exw=${CLAUDE_PICK_WEEK_EXHAUSTED:-101}
+  local spent=${CLAUDE_PICK_WEEK_SPENT:-100}
   local max_age=${CLAUDE_PICK_CACHE_MAX_AGE:-3600}
   local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
 
@@ -995,6 +1002,17 @@ _claude_pick_class() {
   fi
   if [[ "$_CPM_UW" != unknown ]] && (( _CPM_UW >= exw )); then
     print -r -- "exhausted:weekly window ${_CPM_UW}% used"
+    return 0
+  fi
+  # THE SPEND WALL (DO-621). A spent week is not a wall WHILE SPEND HEADROOM
+  # LASTS — it bills usage credits, which is DO-574's 2026-09-10 measurement
+  # (live sessions on 100% seats). Once headroom is gone it blocks: 2026-09-18,
+  # six "You've hit your individual spend limit" errors on a seat at 100% with
+  # $275.23 of $275 spent, each quoting that seat's own weekly reset. `none`
+  # only: spend `unknown` never escalates to a refusal (missing data is not a
+  # wall), and a LAPSED week has uW `unknown` so it never reaches this line.
+  if [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == none ]] && (( _CPM_UW >= spent )); then
+    print -r -- "exhausted:weekly window ${_CPM_UW}% used and no spend headroom"
     return 0
   fi
   print -r -- "eligible"
@@ -1239,13 +1257,29 @@ _claude_pick_backpressure() {
 # nonsense date, or the same date for every account, in exactly the situation
 # where the reader is trying to decide how long to wait.
 #
+# Seconds until THIS seat stops being blocked, from the current _CPM_* values, or
+# `unknown`. The 5h reset for a 5h wall; the WEEKLY reset for the spend wall
+# (DO-621), because that is the window that has to roll; the later of the two
+# when both apply. Prints; callers that need no fork read _CPM_* themselves.
+_claude_pick_block_reset() {
+  local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97} spent=${CLAUDE_PICK_WEEK_SPENT:-100}
+  local r="$_CPM_R5"
+  if [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == none && "$_CPM_RW" == (-|)<-> ]] \
+     && (( _CPM_UW >= spent )); then
+    if [[ "$r" != (-|)<-> || "$_CPM_U5" != <-> ]] || (( _CPM_U5 < ex5 || _CPM_RW > r )); then
+      r="$_CPM_RW"
+    fi
+  fi
+  print -r -- "$r"
+}
+
 # Sets REPLY to the least-bad profile. Prints nothing; the caller reports.
 _claude_pick_least_bad() {
   local e n best="" bestr="" r
   local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
   for n in "$@"; do
     _claude_profile_metrics "$n" >/dev/null 2>&1
-    r="$_CPM_R5"
+    r="$(_claude_pick_block_reset)"
     if [[ "$r" == unknown ]]; then
       # Unknown reset sorts AFTER any known one: an account that might reset in
       # four minutes is a better bet than one nobody can time.
@@ -1371,7 +1405,10 @@ _claude_pick_pool() {
 #   _claude_pick_skipped[]  human-readable, one per refused thing
 #   _claude_pick_warnings[] machine backpressure and lock notes
 #   _claude_pick_explain[]  "<profile>\t<class>\t<why>\t<u5>\t<uW>\t<age>\t<holders>\t<score>\t<r5>\t<r5_at>"
-#   _claude_pick_exhausted[] "<profile>\t<u5>\t<uW>\t<r5>"  (for the §5.4 report)
+#   _claude_pick_exhausted[] "<profile>\t<u5>\t<uW>\t<r5>\t<block_reset>"  (for the
+#                            §5.4 report — field 5 is DO-621's, the reset that
+#                            actually ends the wall: r5 for a 5h one, the weekly
+#                            reset for a spend one)
 #   _CML_LOAD1 _CML_NCPU _CML_SWAPPCT   published by the backpressure read
 #
 # Returns 0 picked · 2 refused (exhausted, or nothing usable) · 3 refused
@@ -1557,7 +1594,8 @@ _claude_pick_for_dir() {
           _claude_pick_unknowns+=( "0"$'\t'"$name" )
           ;;
         exhausted)
-          _claude_pick_exhausted+=( "$name"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_R5" )
+          # Field 5 (appended, never inserted): the reset that ends THIS wall.
+          _claude_pick_exhausted+=( "$name"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_R5"$'\t'"$(_claude_pick_block_reset)" )
           ;;
         *)
           _claude_pick_skipped+=("$name ($why)")
@@ -1615,13 +1653,13 @@ _claude_pick_for_dir() {
     if (( strict )); then
       REPLY=""
       _claude_pick_state=exhausted
-      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant }${_claude_pick_tenant:+has}${_claude_pick_tenant:-the account pool has} a spent 5h window"
+      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant}${_claude_pick_tenant:-the account pool} is exhausted — a spent 5h window, or a spent week with no spend headroom"
       _claude_pick_report_exhausted strict
       return 2
     fi
     _claude_pick_class=least-bad
     _claude_pick_state=picked
-    _claude_pick_reason="every pool member's 5h window is spent — proceeding on the least-bad one"
+    _claude_pick_reason="every pool member is exhausted — proceeding on the least-bad one"
     _claude_pick_report_exhausted interactive
     if [[ -n "$REPLY" ]]; then
       (( ${_claude_pick_dry_run:-0} )) || _claude_pick_with_ledger_lock _claude_pick_ledger_write "$REPLY"
@@ -1706,18 +1744,22 @@ _claude_pick_publish() {
 #
 # stderr, always, and never suppressed by CLAUDE_ACCOUNT_QUIET: quiet exists to
 # silence the routine one-line announcement, and this is the opposite of routine.
-# The parenthetical for one member's 5h window. Three states, and the third is
-# not an edge: a NON-POSITIVE r5 means the window named in the cache has already
-# rolled, so the ~100% figure beside it belongs to the PREVIOUS window and is
-# stale. Printing "resets <a date in the past>" there — which is what formatting
-# the delta unconditionally does — tells the reader to wait for a moment that has
-# been and gone. On this machine that state is common rather than rare, because
-# nothing refreshes the usage caches on a schedule (clauth's only writer is
-# gated on a lease taken by its TUI and its daemon, and the daemon is off).
+# The parenthetical for one member's BLOCKING window — the 5h window, or (DO-621)
+# the week, when field 5 has substituted the weekly reset for a seat exhausted by
+# the spend wall. Three states, and the third is not an edge: a NON-POSITIVE r5
+# means the window named in the cache has already rolled, so the ~100% figure
+# beside it belongs to the PREVIOUS window and is stale. Printing "resets <a date
+# in the past>" there — which is what formatting the delta unconditionally does
+# — tells the reader to wait for a moment that has been and gone. For the 5h
+# window this state is common rather than rare on this machine, because nothing
+# refreshes the usage caches on a schedule (clauth's only writer is gated on a
+# lease taken by its TUI and its daemon, and the daemon is off); for the weekly
+# reset it is a narrow edge (exactly at the reset instant), since a week that has
+# actually lapsed is `unknown`, not a spent one, before this is ever called.
 _claude_pick_window_text() {
   local r="${1:-unknown}" txt
   if [[ "$r" == (-|)<-> ]] && (( r <= 0 )); then
-    print -r -- "5h window already rolled — this reading is stale"
+    print -r -- "blocking window already rolled — this reading is stale"
     return 0
   fi
   txt="$(_claude_pick_reset_text "$r")"
@@ -1740,7 +1782,7 @@ _claude_pick_report_exhausted() {
   elif [[ -n "$soon" ]]; then
     print -u2 -- "$prog: refused — $label exhausted (earliest reset $soon, on $_claude_pick_leastbad)"
   elif [[ "$lbr" == (-|)<-> ]]; then
-    print -u2 -- "$prog: refused — $label exhausted on stale readings (its soonest 5h window has already rolled)"
+    print -u2 -- "$prog: refused — $label exhausted on stale readings (its soonest blocking window has already rolled)"
   else
     print -u2 -- "$prog: refused — $label exhausted (no reset time is known for any member)"
   fi
@@ -1748,6 +1790,9 @@ _claude_pick_report_exhausted() {
   for e in "${_claude_pick_exhausted[@]}"; do
     f=( "${(@ps:\t:)e}" )
     n="${f[1]}"; u5="${f[2]}"; uw="${f[3]}"; r5="${f[4]}"
+    # DO-621: quote the reset that ends THIS seat's wall (field 5) — for the
+    # spend wall that is the week, not the 5h window.
+    [[ -n "${f[5]:-}" ]] && r5="${f[5]}"
     # Only the least-bad member is listed on the interactive path: it is the one
     # being proceeded on, and a human about to be told "this is going to be
     # tight" does not need the other rows in order to act.
@@ -2574,12 +2619,13 @@ hspawn() {
       if (( ! tenant_set )) && [[ -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
         tenant="$CLAUDE_ACCOUNT_TENANT"
       fi
-      # STRICT. hspawn is a headless caller (§5.4): a worker starting on a spent
-      # 5h window burns the seat and dies mid-task with nobody watching, so an
-      # exhausted pool refuses here rather than proceeding on the least-bad
-      # member the way an interactive `claude` does. The escape is `-p <profile>`,
-      # which the refusal names, and the reset time it prints says how long the
-      # wait is.
+      # STRICT. hspawn is a headless caller (§5.4): a worker starting on an
+      # exhausted seat — a spent 5h window, or (DO-621) a spent week with no
+      # spend headroom left — burns the seat and dies mid-task with nobody
+      # watching, so an exhausted pool refuses here rather than proceeding on
+      # the least-bad member the way an interactive `claude` does. The escape is
+      # `-p <profile>`, which the refusal names, and the reset time it prints
+      # says how long the wait is.
       _claude_pick_for_dir "$repo" "$tenant" 1 0
       local pick_rc=$?
       profile="$REPLY"

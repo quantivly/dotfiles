@@ -290,6 +290,61 @@ check "the knob's default is 101, i.e. unreachable" \
 new_home k4; mkprof a1 '-'
 check "no usage cache is unknown, not exhausted" "$(cls a1 | cut -d: -f1)" "unknown"
 
+# DO-621 — THE SPEND WALL, measured 2026-09-18: a spent window with spend
+# headroom BILLS usage credits; with none it BLOCKS ("You've hit your individual
+# spend limit"). Only the second is a wall, and missing data is never one.
+new_home sw1
+WEEK_SPENT_LIVE="\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"}"
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+mkprof b2 "{$FIVE,$WEEK_SPENT_LIVE}"
+mkprof c3 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+mkprof d4 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":0.0}}"
+check "spent week + spend headroom: eligible (it bills; the tier demotes)" "$(cls a1)" "eligible"
+check "spent week + spend unknown: eligible — missing data never refuses"   "$(cls b2)" "eligible"
+check "spent week + spend at its limit: exhausted"                          "$(cls c3 | cut -d: -f1)" "exhausted"
+check "spent week + spend disabled (a Max seat): exhausted"                 "$(cls d4 | cut -d: -f1)" "exhausted"
+check "...and the reason names the spend wall"                              "$(cls c3 | grep -c 'no spend headroom')" "1"
+
+# pfd() is documented in full at its house-convention spot below (the
+# `_claude_pick_for_dir` section, next to `hold`/`unhold`) — defined here first
+# because these DO-621 rows need a PICK, not just a class, and bash functions
+# are not hoisted: calling it before this point is "command not found". Defined
+# once; the later spot is unchanged and simply stops re-defining it.
+pfd() {   # $1 = prelude, $2 = dir, $3 = tenant, $4 = strict
+          #   -> "<rc>:<profile>:<state>:<class>"
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '${2:-}' '${3:-}' '${4:-0}' 0
+      print -r -- \"\$?:\$REPLY:\$_claude_pick_state:\$_claude_pick_class\"" 2>/dev/null
+}
+
+new_home sw2
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+check "a billing seat is picked in the weekly-spent tier"   "$(pfd '' '' '' 0 | cut -d: -f1,4)" "0:weekly-spent"
+
+new_home sw3
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"2000-01-01T00:00:00Z\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "a LAPSED spent week behind a spend wall is not exhausted" "$(cls a1)" "eligible"
+check "...and is picked as eligible, not weekly-spent"            "$(pfd '' '' '' 0 | cut -d: -f4)" "eligible"
+
+# The pair that motivated DO-621, as measured on 2026-09-18.
+new_home sw4
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":86.0,\"resets_at\":\"$(iso_in 216000)\"},\"weekly_scoped\":[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}],\"spend\":{\"enabled\":true,\"used\":190.77,\"limit\":250.0}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"},\"weekly_scoped\":[{\"label\":\"7d fable\",\"utilization\":63.0,\"resets_at\":\"$(iso_in 194400)\"}],\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "the 2026-09-18 pair: the Fable-spent seat is eligible"        "$(cls a1)" "eligible"
+check "...the aggregate-spent seat at its spend limit is exhausted"   "$(cls b2 | cut -d: -f1)" "exhausted"
+check "...and the pick is the eligible one"                          "$(pfd '' '' '' 0 | cut -d: -f2,4)" "a1:eligible"
+
+new_home sw5
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "a headless caller refuses a pool behind the spend wall"       "$(pfd '' '' '' 1 | cut -d: -f1,3)" "2:exhausted"
+
 # 30 minutes: stale under a tightened threshold, fresh under the default. One
 # fixture exercising BOTH sides of the boundary — an earlier version used 3 hours
 # and then asserted it was eligible by default, which 3h > 3600s is not.
@@ -743,6 +798,14 @@ check "...and no time is invented"               "$(lb a1 b2 | cut -d\| -f2)" ""
 check "the reset formatter returns empty for unknown, not an epoch date" \
       "$(zrun '_claude_pick_reset_text unknown')" ""
 
+# Behind the spend wall it is the WEEK that has to reset, so that is the wait to
+# quote. Both 5h windows below reset at the same far instant, so the old
+# r5-only choice ties and keeps the first name — the row dies on it.
+new_home x5
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 172800)\"},\"spend\":{\"enabled\":false}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false}}"
+check "behind the spend wall, the soonest WEEKLY reset is least bad" "$(lb a1 b2 | cut -d\| -f1)" "b2"
+
 #-----------------------------------------------------------------------------
 echo
 echo "=== the lock is actually TAKEN, not merely warned about ==="
@@ -978,19 +1041,8 @@ hold() {  # $1 = profile, $2 = how many live holders
 }
 unhold() { (( ${#HOLD_PIDS[@]} )) && kill "${HOLD_PIDS[@]}" 2>/dev/null; HOLD_PIDS=(); return 0; }
 
-pfd() {   # $1 = prelude, $2 = dir, $3 = tenant, $4 = strict
-          #   -> "<rc>:<profile>:<state>:<class>"
-    zsh -f -c "
-      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
-      export HOME='$FHOME'
-      export TZ='$FIXTZ'
-      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
-      CLAUDE_TENANTS_FILE=/nonexistent
-      source '$HERDRRC' >/dev/null 2>&1
-      ${1:-}
-      _claude_pick_for_dir '${2:-}' '${3:-}' '${4:-0}' 0
-      print -r -- \"\$?:\$REPLY:\$_claude_pick_state:\$_claude_pick_class\"" 2>/dev/null
-}
+# pfd() itself is defined earlier (DO-621's spend-wall rows need it first); this
+# is its house-convention spot, documented above, right before its main section.
 
 new_home fd1
 mkprof a1 '{"five_hour":{"utilization":10.0}}'
