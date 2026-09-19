@@ -945,9 +945,13 @@ _claude_pick_score() {
 #
 # With all three work accounts at 100 that morning, a hard block would have made
 # hspawn and herdr-draft refuse across the whole work tree while work was
-# demonstrably possible. So the weekly window DEMOTES instead: `weekf` in the
-# score collapses such an account to ~0, ranking it below anything with headroom
-# while leaving it choosable when it is all there is.
+# demonstrably possible. So the weekly window DEMOTES instead: such an account
+# drops into its own tier (`weekly-spent`, assigned in _claude_pick_for_dir),
+# ranked below anything eligible and above `unknown`, never refused outright.
+# DO-621: the score that orders candidates WITHIN that tier is no longer a flat
+# collapse to ~0 -- a spent week whose reset is imminent can score well above
+# zero via `weekf_eff`/`bonus_w` (consume-first) -- but that reordering happens
+# entirely inside the tier and can never let it outrank an eligible account.
 #
 # CLAUDE_PICK_WEEK_EXHAUSTED stays as an INERT knob, defaulting to 101 so it can
 # never fire, for whoever wants the strict behaviour back.
@@ -1496,17 +1500,24 @@ _claude_pick_for_dir() {
       # A SPENT WEEKLY WINDOW IS A TIER, NOT A WEIGHT -- and the `unknown` branch
       # below already says why, for its own rule: "expressing it as a score would
       # put it at the mercy of the weights". It then names this very case, "an
-      # eligible account at 96% with a spent week scores near zero too", and the
-      # weekly demotion was left as a weight anyway.
+      # eligible account at 96% with a spent week and a far-off or unknown reset
+      # scores near zero too", and the weekly demotion was left as a weight
+      # anyway.
       #
-      # It duly lost. weekf multiplies (base + bonus) but crowd is subtracted
-      # UNSCALED, so at weekf=0 the score collapses to -crowd -- and crowd is
+      # It duly lost. weekf (weekf_eff, since DO-621 folds in the weekly reset)
+      # multiplies (base + bonus + bonus_w) but crowd is subtracted UNSCALED, so
+      # whenever the reset is far off or unknown -- weekf_eff then equals weekf
+      # exactly -- the score still collapses to -crowd at weekf=0, and crowd is
       # near zero precisely because an exhausted account is idle. Measured
       # 2026-09-10: quantivly-0 and quantivly-3 at 7d=100% with one holder scored
       # -300 each and were picked, while quantivly-1 at 7d=33% with real headroom
       # and 11 holders scored -8334. The emptiness that exhaustion causes read as
       # headroom -- the same shape CLAUDE.md records for the ranking DO-574
-      # replaced, where the emptiness came from a quarantine.
+      # replaced, where the emptiness came from a quarantine. DO-621 makes that
+      # collapse CONDITIONAL rather than absolute: a spent week whose reset is
+      # imminent scores well above -crowd instead (consume-first) -- but that
+      # only reorders members WITHIN this tier, per the `weekly-spent)` case
+      # below, and never lets one escape it.
       #
       # This DEMOTES and never refuses, which is DO-574's measured decision kept
       # intact: a tier is chosen when nothing above it exists, so a pool that is
@@ -1524,8 +1535,14 @@ _claude_pick_for_dir() {
           _claude_pick_cands+=( "$score"$'\t'"$name" )
           ;;
         weekly-spent)
-          # Still SCORED, so the tier is ordered internally (least crowded
-          # first) rather than falling to whichever name sorts first.
+          # Still SCORED, so the tier is ordered internally rather than falling
+          # to whichever name sorts first. At the default WEEK_SPENT=100 every
+          # member here has hw=0, so bonus_w is always 0 -- but weekf_eff still
+          # rises toward 100 as the reset nears (DO-621), so a member whose week
+          # resets sooner, scaled by its 5h headroom and reset proximity, is now
+          # preferred first. Crowd alone decides the order only when the reset
+          # is far off or unknown, where weekf_eff is 0 and the score is exactly
+          # -crowd -- which was the ONLY ordering before DO-621.
           score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders" "$_CPM_RW")"
           _claude_pick_weekly+=( "$score"$'\t'"$name" )
           ;;
@@ -1533,8 +1550,10 @@ _claude_pick_for_dir() {
           # A TIER, not an arithmetic accident. "Unknown never outranks a
           # measurement" is a rule about rank, and expressing it as a score would
           # put it at the mercy of the weights: an eligible account at 96% with a
-          # spent week scores near zero too, and then a profile nobody can read
-          # would beat one that was measured and nearly empty.
+          # spent week and a far-off or unknown reset scores near zero too
+          # (DO-621: an imminent reset lifts that floor via weekf_eff -- but a
+          # far-off or unknown one still zeroes it out), and then a profile
+          # nobody can read would beat one that was measured and nearly empty.
           _claude_pick_unknowns+=( "0"$'\t'"$name" )
           ;;
         exhausted)
