@@ -51,6 +51,33 @@ class BudgetTests(unittest.TestCase):
         missing = FakeRunner([(["claude-pick"], Result(127, "", "not found"))])
         self.assertEqual(budget.credential_gate(missing, "quantivly-1", "m", "e", 30)["code"], "credential:unmeasured")
 
+    def test_gate_spend_wall_is_a_measured_window_refusal(self):
+        j = {
+            "profile": None, "state": "gate-spend-wall",
+            "reason": "q1's 7d fable window is 100% used (resets 2026-09-21T09:00:00Z) "
+                      "and the seat has no spend headroom left ($252.17 of $250)",
+            "usage": {"five_hour": 12, "weekly": 100, "cache_age_s": 4},
+            "resets_at": {"five_hour": "2026-09-19T20:00:00Z", "weekly": "2026-09-21T09:00:00Z"},
+            "gate": {"verdict": "refuse", "spend": "none", "bills_credits": None,
+                     "model_window": {"label": "7d fable", "utilization": 100,
+                                      "resets_at": "2026-09-21T09:00:00Z", "state": "live"}},
+        }
+        runner = FakeRunner([(["claude-pick"], Result(2, json.dumps(j), ""))])
+        out = budget.credential_gate(runner, "q1", "claude-fable-5-1", "high", 30)
+        self.assertEqual(out["ok"], False)
+        self.assertEqual(out["code"], "credential:window")      # not "credential:unmeasured"
+        self.assertIn("7d fable", out["detail"])
+
+    def test_gate_spend_wall_detail_does_not_fall_back_to_the_5h_sentence(self):
+        # The gate always sets a reason; if a future one does not, the fallback must
+        # still name the wall that fired rather than a projection that never ran.
+        j = {"state": "gate-spend-wall", "reason": "",
+             "usage": {"five_hour": 12}, "gate": {"verdict": "refuse", "spend": "none"}}
+        runner = FakeRunner([(["claude-pick"], Result(2, json.dumps(j), ""))])
+        out = budget.credential_gate(runner, "q1", "claude-fable-5-1", "high", 30)
+        self.assertNotIn("projected", out["detail"])
+        self.assertIn("spend", out["detail"])
+
     def test_gate_never_reads_a_zero_exit_without_an_allow_as_ok(self):
         # exit 0 but no gate verdict (an older claude-pick without --gate, or --gate dropped): unmeasured, not ok
         r = pick_json("picked", "quantivly-1", 30, None, None, 0)

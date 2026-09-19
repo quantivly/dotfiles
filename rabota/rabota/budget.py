@@ -44,7 +44,8 @@ def seat_for(tenant, machine: str, override: str | None = None) -> str:
 def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int) -> dict:
     """Ask ``claude-pick --gate`` about ``seat``. Any answer that is not a measured allow is a refusal with a code.
 
-    ``credential:window`` — the seat exists and is measured, and the projection (or the pool) says no;
+    ``credential:window`` — the seat exists and is measured, and the 5h projection, the pool, or the
+    model's weekly spend wall says no (``gate-projected``, ``exhausted``, or ``gate-spend-wall``);
     ``credential:unmeasured`` — everything else: claude-pick absent (127) or without profiles (5), a
     window it could not read, non-JSON, or an exit 0 that carries no gate verdict (an older
     claude-pick, or ``--gate`` silently dropped). Never ok on exit code alone.
@@ -70,10 +71,14 @@ def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int
     if res.code == 0 and gate.get("verdict") == "allow":
         out["ok"] = True
         return out
-    if state in ("gate-projected", "exhausted"):
+    if state in ("gate-projected", "exhausted", "gate-spend-wall"):
         out["code"] = "credential:window"
-        out["detail"] = out["detail"] or f"{seat} 5h window: {usage.get('five_hour')}% now, projected {gate.get('projected')}%"
-    else:  # gate-unmeasured, no-profiles, bad-table, backpressure, or exit 0 without a verdict
+        fallback = (f"{seat} weekly window spent, spend {gate.get('spend')}"
+                    if state == "gate-spend-wall"
+                    else f"{seat} 5h window: {usage.get('five_hour')}% now, projected {gate.get('projected')}%")
+        out["detail"] = out["detail"] or fallback
+    else:  # gate-unmeasured, gate-misconfigured, no-profiles, bad-table, backpressure,
+           # or exit 0 without a verdict
         out["code"] = "credential:unmeasured"
         out["detail"] = out["detail"] or f"claude-pick state {state!r} with no gate verdict"
     return out
