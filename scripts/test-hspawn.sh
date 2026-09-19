@@ -568,6 +568,8 @@ EOF
 run "claude"
 check "a disabled Max seat's pick names no spend limit, not the headroom wording" \
       "$(outgrep "no spend limit configured")" "1"
+check "...and the headroom-unknown wording is absent" \
+      "$(outgrep "spend headroom unknown")" "0"
 rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
 
 # THE WHOLE POINT. Isolation used to cost the teammux launch, because the only

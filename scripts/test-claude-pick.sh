@@ -2266,20 +2266,67 @@ check "...with exit 0"                         "$rc"                            
 check "...and says the lane will bill credits" "$(jq -r .gate.bills_credits <<<"$out")" "true"
 check "...still reporting the window it billed on" "$(jq -r .gate.model_window.label <<<"$out")" "7d fable"
 
-# ---- the drift: a Max seat ---------------------------------------------------
+# ---- a Max seat on a spent window REFUSES (user's decision, 2026-09-19) ------
+# `disabled` (enabled:false, a Max seat) is a measured absence of a spend
+# mechanism, and nobody has watched such a seat run past a spent window. The
+# gate is never optimistic, so it refuses as UNMEASURED — not as a wall (that
+# would claim the block was measured), and not as an allow (that would claim the
+# lane runs). The ranker still only demotes it; see bill4 and sp_disabled.
 new_home gw_model_disabled
 mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_OFF"
 gw a1 claude-fable-5-1
-check "gate/model: a Max seat (spend disabled) ALLOWS"  "$(jq -r .gate.verdict <<<"$out")"        "allow"
-check "...with exit 0"                                  "$rc"                                    "0"
-check "...and does not claim to know whether it bills"  "$(jq -r .gate.bills_credits <<<"$out")" "null"
+check "gate/model: a Max seat (spend disabled) on a live spent window REFUSES as unmeasured" \
+      "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...with exit 2"                                  "$rc"                                    "2"
+check "...and no profile is named beside the refusal"   "$(jq -r .profile <<<"$out")"            "null"
+check "...the reason naming the Max-seat case"          "$(jq -r '.reason | test("no spend limit configured")' <<<"$out")" "true"
+check "...and the spent window"                         "$(jq -r '.reason | test("7d fable") and test("100%")' <<<"$out")" "true"
+check "...and bills_credits is null on the refusal"     "$(jq -r .gate.bills_credits <<<"$out")" "null"
 check "...reporting the spend state that decided it"    "$(jq -r .gate.spend <<<"$out")"         "disabled"
+check "...on a LIVE window"                             "$(jq -r .gate.model_window.state <<<"$out")" "live"
+# The aggregate is the same rule: a live spent seven_day on a Max seat refuses.
+new_home gw_agg_disabled
+mk_gate_prof a1 '[]' "$SP_OFF" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+gw a1 claude-opus-5
+check "gate/aggregate: a Max seat on a live spent aggregate REFUSES as unmeasured" \
+      "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...naming the aggregate and the Max-seat case" \
+      "$(jq -r '.reason | test("aggregate weekly") and test("no spend limit configured")' <<<"$out")" "true"
+# ...but a LAPSED window has rolled, whatever the spend state: it allows.
+new_home gw_lapsed_disabled
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"}]" "$SP_OFF"
+gw a1 claude-fable-5-1
+check "gate: a Max seat on a LAPSED model window still allows" \
+      "$(jq -r '[.gate.verdict, .gate.model_window.state] | join("/")' <<<"$out")" "allow/lapsed"
 
 # ---- nothing spent: the lane is free -----------------------------------------
 new_home gw_free
 mk_gate_prof a1 '[]' "$SP_ROOM"
 gw a1 claude-fable-5-1
 check "gate: nothing spent allows, billing nothing" "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring), (.gate.model_window|tostring)] | join("/")' <<<"$out")" "allow/false/null"
+
+# ---- bills_credits is `false` only on a MEASURED weekly figure ---------------
+# `false` says "this lane is free". With no aggregate read and no per-model
+# window governing the lane, nothing was measured, so it is null — while the
+# verdict stays allow (the 5h arms passed; an unreadable aggregate is not a
+# candidate, see gw_agg_unknown).
+new_home gw_bills_unmeasured
+mk_gate_prof a1 '[]' "$SP_ROOM" 'null'
+gw a1 claude-fable-5-1
+check "gate: no weekly figure read at all — allow, bills_credits null, never false" \
+      "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring)] | join("/")' <<<"$out")" "allow/null"
+# A window that does NOT govern the lane is not a measurement of it either.
+new_home gw_bills_unmeasured_other
+mk_gate_prof a1 "[{\"label\":\"7d opus\",\"utilization\":50.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM" 'null'
+gw a1 claude-fable-5-1
+check "gate: only a non-governing window read — bills_credits null" \
+      "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring)] | join("/")' <<<"$out")" "allow/null"
+# The other side: the lane's own window WAS read, below the threshold — false.
+new_home gw_bills_model_only
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":50.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM" 'null'
+gw a1 claude-fable-5-1
+check "gate: a governing window read below the threshold, no aggregate — bills_credits false" \
+      "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring)] | join("/")' <<<"$out")" "allow/false"
 
 # ---- the drift: genuinely missing data still refuses -------------------------
 new_home gw_model_unknown
@@ -2343,6 +2390,19 @@ new_home gw_decode_shim_idle
 mk_gate_prof a1 '[]' "$SP_ROOM"
 PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
 check "gate/model: the failing-decode shim alone refuses nothing" "$(jq -r .gate.verdict <<<"$out")" "allow"
+# A FAILED DECODE MUST NOT HIDE A MEASURED WALL. The aggregate is read by the
+# metrics layer, not the decode, so a live aggregate at 100 with spend `none` is
+# a measured wall however the per-model windows fared.
+new_home gw_decode_fails_agg_wall
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate: a failed decode does not hide a live aggregate wall" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...naming the aggregate"                                   "$(jq -r '.reason | test("aggregate weekly")' <<<"$out")" "true"
+# ...and the same failed decode on a seat WITH headroom still refuses unmeasured.
+new_home gw_decode_fails_agg_room
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate: a failed decode beside a billing aggregate still refuses unmeasured" "$(jq -r .state <<<"$out")" "gate-unmeasured"
 
 # ---- the aggregate wall, and the pin -----------------------------------------
 new_home gw_agg_none
@@ -2386,6 +2446,12 @@ for row in \
     check "attribution: '$lbl' does NOT govern '$mdl'" "$(jq -r .gate.verdict <<<"$out")" "allow"
   fi
 done
+# The model id is matched CASE-INSENSITIVELY: clauth lowercases the label, so a
+# lane passed as `Fable` must not slip past a spent `7d fable`.
+new_home gw_attr_case
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+gw a1 Fable
+check "attribution: '7d fable' governs 'Fable' (case-insensitive)" "$(jq -r .state <<<"$out")" "gate-spend-wall"
 
 # ---- worst-of-matches --------------------------------------------------------
 # Both labels govern `claude-fable-5`: `7d fable` on the token `fable`, `7d 5` on
@@ -2427,6 +2493,26 @@ gw a1 claude-fable-5-1
 check "gate: a lapsed model window WITHOUT fetched_at is undated" "$(jq -r .state <<<"$out")" "gate-unmeasured"
 check "...and says so in model_window.state" "$(jq -r .gate.model_window.state <<<"$out")" "undated"
 
+# ---- a spent window with NO reset at all is undated, never lapsed -----------
+# The reset is absent, so its delta is not a number; that arm must read
+# `undated` (refuse), never `lapsed` (allow). gw_lapsed_undated reaches undated
+# by the OTHER arm (a past reset with no fetched_at), and gw_worst_undated's
+# undated window is outranked by a live one, so neither pins this arm.
+new_home gw_noreset_model
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0}]" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate: a spent model window with NO resets_at refuses as unmeasured" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...reported as undated"                     "$(jq -r .gate.model_window.state <<<"$out")" "undated"
+# The aggregate reaches the gate through the metrics layer, which keeps a
+# seven_day with no resets_at at its number (uW 100) and its reset `unknown`
+# (an absent reset is not a lapse): so it IS a candidate, and undated.
+new_home gw_noreset_agg
+mk_gate_prof a1 '[]' "$SP_NONE" '{"utilization":100.0}'
+gw a1 claude-opus-5
+check "gate: a spent aggregate with NO resets_at refuses as unmeasured" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...for the reset, naming the aggregate" \
+      "$(jq -r '.reason | test("aggregate weekly") and test("cannot be dated")' <<<"$out")" "true"
+
 # ---- precedence: a 5h refusal keeps its own state ----------------------------
 # u5 at 90 projects to 90 + 115/2 = 147 > 95, so the 5h arm fires; the Fable
 # window is ALSO spent with spend `none`, so without the ordering this reports
@@ -2442,6 +2528,7 @@ new_home gw_agg_unknown
 mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"fetched_at\":$(fetched_now_ms),\"spend\":$SP_NONE}"
 gw a1 claude-opus-5
 check "gate: an unreadable aggregate does not refuse (the 5h arms still apply)" "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "...and does not claim the lane is free"  "$(jq -r .gate.bills_credits <<<"$out")" "null"
 
 # ---- a lapsed aggregate, which reaches the gate as `unknown` too ------------
 new_home gw_agg_lapsed
