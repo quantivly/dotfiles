@@ -593,6 +593,12 @@ check "but still isolates"                        "$(inclaude "CFG $ACCT/persona
 NOCLAUTH=1 run "claude"; NOCLAUTH=
 check "with no clauth the launch is unchanged"  "$(inclaude "CFG <unset>")" "1"
 check "and nothing is said about accounts"      "$(outgrep "account '")"    "0"
+# hspawn asks the same question. The clauth wrapper (DO-641) is a FUNCTION, so
+# `command -v clauth` answers yes on this PATH; only `$+commands[clauth]` sees
+# that the binary is absent. Asked wrongly, hspawn runs the picker and isolates.
+NOCLAUTH=1 run "hspawn '$REPO' slug"; NOCLAUTH=
+check "hspawn with no clauth shares the credential, unpicked" \
+      "$(inout "account:   SHARED global credential")" "1"
 # The sharp one. `local -x CLAUDE_CONFIG_DIR=...` exports even when the value is
 # empty, and with no clauth nothing below ever assigns it — so claude() handed the
 # binary a set-but-empty CLAUDE_CONFIG_DIR, which Claude Code resolves its config
@@ -1898,6 +1904,52 @@ check "claude() asks the picker with strict=0" \
       "$(cut -d'|' -f3 "$PICKREC" | head -1)" "0"
 check "...about \$PWD" \
       "$(cut -d'|' -f1 "$PICKREC" | head -1)" "$PWD"
+
+#-----------------------------------------------------------------------------
+# Machine-owned profiles (DO-641)
+#-----------------------------------------------------------------------------
+# The pool keeps a profile another machine owns out of AUTOMATIC selection. These
+# rows pin the EXPLICIT doors that went past it: on 2026-09-19 two sessions were
+# spending dev's seat from the laptop via `clauth start quantivly-0`, typed into
+# panes by herdr-draft's account row. `run` does not truncate the clauth log, so
+# every row here does it itself.
+echo "=== machine-owned profiles: the explicit doors ==="
+FOREIGN_TENANTS="$TMPROOT/tenants-foreign.zsh"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+mkdir -p "$FHOME/.clauth/profiles/fz"
+export CLAUDE_TENANTS_FILE="$FOREIGN_TENANTS"
+crun()   { : > "$TMPROOT/clauth.log"; run "$1"; }
+clog()   { grep -cF -- "CMD $1" "$TMPROOT/clauth.log" || true; }
+
+crun "clauth start fz --effort high"
+check "foreign: clauth start <owned> is refused"                    "$RC" "3"
+check "foreign: ...before the binary runs"                          "$(clog 'start')" "0"
+check "foreign: ...naming the machine that owns it"                 "$(inout 'owned by box-z')" "1"
+crun "clauth start --isolated fz"
+check "foreign: a flag before the profile does not hide it"         "$RC" "3"
+crun "clauth start --theme full fz"
+check "foreign: --theme's VALUE is not read as the profile"         "$RC" "3"
+crun "clauth fz"
+check "foreign: the bare machine-wide switch is refused"            "$RC" "3"
+check "foreign: ...before the binary runs"                          "$(clog 'fz')" "0"
+crun "clauth start personal"
+check "foreign: an unowned profile passes through"                  "$(clog 'start personal')" "1"
+crun "clauth login fz"
+check "foreign: login passes (it is how this box SEES that window)" "$(clog 'login fz')" "1"
+crun "CLAUDE_FOREIGN_PROFILE_OK=1 clauth start fz"
+check "foreign: the per-command override passes through"            "$(clog 'start fz')" "1"
+crun "unset -f _claude_profile_foreign; clauth start fz"
+check "foreign: helpers absent (a Bash-tool shell) fails OPEN"      "$(clog 'start fz')" "1"
+crun "claude-as fz"
+check "foreign: claude-as <owned> is refused"                       "$RC" "3"
+check "foreign: ...and claude never ran"                            "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" "0"
+crun "hspawn -p fz -m opus -e high '$REPO' slug"
+check "foreign: hspawn -p <owned> is refused"                       "$RC" "3"
+check "foreign: ...reaching herdr zero times"                       "$(herdrcmds)" ""
+unset CLAUDE_TENANTS_FILE
+crun "clauth start fz"
+check "foreign: no tenant table (modular adopter) guards nothing"   "$(clog 'start fz')" "1"
+rm -rf "$FHOME/.clauth/profiles/fz"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
