@@ -398,7 +398,8 @@ ranking as the refusal class that a live spent week with spend `none` now joins.
 says "may bill" rather than "bills".
 
 **What the Max-seat inference costs, since it is an arm nobody has watched fire.**
-`_claude_profile_metrics` maps `spend.enabled == false` to **`unknown`**, not to `none`, so a
+`_claude_profile_metrics` maps `spend.enabled == false` to **`disabled`** (DO-623 split it out of
+`unknown`, which it shared until then), not to `none`, so a
 Max seat at 100% of its week is DEMOTED to `weekly-spent` and stays choosable. The blocking
 arm fires only where it was measured: a Team seat whose spend has reached its limit. Both
 non-work tenants are composed entirely of Max seats with no overflow, so refusing on the
@@ -431,6 +432,112 @@ billing warning, which wall a refusal quotes, and the `CLAUDE_PICK_WEEK_SPENT` g
 `scripts/test-claude-doctor.sh` (the doctor dates caches the same way, and one row runs
 both age readers over one fixture). Spec:
 `docs/superpowers/specs/2026-09-18-do-621-weekly-picker-design.md`.
+
+## The gate and the model's own window (DO-623)
+
+**The gate asked only about the 5h window, so a lane could pass it and die at its first
+weekly check.** The 2026-09-18 blocking episode above is exactly that: six "You've hit your
+individual spend limit" errors on a seat the gate would have passed. `claude-pick --gate`
+now runs a weekly arm **after** every 5h arm — so a 5h refusal keeps its own state — over
+the aggregate `seven_day` and every per-model window whose label governs the lane's
+`--model`. A window is a candidate only at or past `CLAUDE_PICK_WEEK_SPENT` (100), and a
+spent window is a wall only where the seat cannot bill past it:
+
+| `_CPM_SPEND` | means | gate, on a live spent window |
+|---|---|---|
+| `none` | `enabled:true`, `used >= limit` | **refuse** `gate-spend-wall` |
+| `headroom` | `enabled:true`, `used < limit` | allow, `bills_credits: true` |
+| `disabled` | `enabled:false` — a Max seat | allow, `bills_credits: null` |
+| `unknown` | no spend block, or a non-numeric `used`/`limit` | **refuse** `gate-unmeasured` |
+
+A lapsed window (dated by `fetched_at`) allows whatever the spend; an undated one refuses
+as `gate-unmeasured`. rabota maps `gate-spend-wall` to `credential:window`, because
+unlisted states fall to `credential:unmeasured` and a measured refusal would then read as
+"could not measure".
+
+**Why `disabled` allows, since it is the arm that reads as inconsistent.** The DO-621 spec
+said a spent window with spend `unknown` refuses — "the gate is never optimistic". That was
+written when `unknown` meant "no spend block on disk"; Part A's final revision then mapped
+every Max seat there too, so the table as written would have refused every Max-seat lane
+with a spent model window. The split, decided 2026-09-19:
+
+- **The number is fine; only its consequence is unknown.** Every other `gate-unmeasured`
+  refusal is about a figure that describes nothing — stale, rolled, undated. Here the
+  utilization is freshly fetched with a live reset. "Never optimistic" was written about
+  measurements, not about a good measurement of unknown effect.
+- **Nobody has watched a Max seat block on a spent window.** personal-0 reads `used 134.43`
+  against `limit 125.0` with `enabled:false`, which is not the shape "no credits" predicts.
+  Refusing on the field name is the #123 failure again — a plausible mechanism standing in
+  for an observation.
+- **It is the asymmetry Part A already resolved.** `personal` and `toysim` are composed
+  entirely of Max seats with no overflow. Once DO-624 routes `hspawn` through the gate,
+  refusing would empty both tenants for up to a week; Part A chose to demote for this seat
+  class, and the gate refusing outright where the ranker only demotes is strictly worse.
+- **A truly blocked Max seat fails at the first request**, not twenty minutes in — and the
+  mid-lane death is what the gate exists to prevent.
+
+`unknown` keeps the refusal, now applying only to the missing data it was written about.
+
+**Which window governs a lane.** clauth 0.15.2 builds a label as `"7d " + name.lowercase()`
+from the scope's model `display_name`. The lane's model id loses a trailing `[…]`
+(`opus[1m]` → `opus`) and is split on `-`; a label governs when its first word after `7d `
+**equals** one of those tokens — whole tokens, so `fablex` does not match `7d fable`, and
+`7d sonnet 5` matches `claude-sonnet-5`. **`7d claude` governs nothing**: every model id
+begins `claude-`, so it would turn one spent surface window into a refusal for the whole
+seat. With no governing label there is no per-model check. When several windows govern,
+the **worst** decides — a refusal outranks an allow, then the higher utilization wins —
+because highest-utilization alone lets a lapsed 100 (allow) mask a live 100 with no
+headroom (refuse). The aggregate is evaluated **after** the model windows, so on a tie the
+lane's own window is the one reported.
+
+**A lapse needs a real clock.** A per-model window whose reset is past counts as `lapsed`
+only when the cache carries `fetched_at`; with only the file mtime it is `undated` and
+refuses, because a plan-only rewrite keeps a cache "fresh" while the window lapsed and
+refilled (F13: two profiles went 7% → 100% in forty minutes).
+
+**The unreadable aggregate is not a candidate.** Part A maps a lapsed week to
+`_CPM_UW = unknown`, so the gate cannot tell a lapsed aggregate from an absent one. When
+`uW` is `unknown` the aggregate arm does not run: lapsed already allows, and refusing on the
+absent half would invent a refusal on seats the gate passes today. The per-model arm is
+unaffected, and the 5h arms still demand a live, fresh, dated window, so a cache that broken
+fails there anyway.
+
+**What the gate object reports**, as built — the spec predicted less precise rules:
+
+- `spend` — the `_CPM_SPEND` state that decided.
+- `model_window` — `{label, utilization, resets_at, state: live|lapsed|undated}` for the
+  governing **candidate** window, i.e. one at or past the threshold. `null` when the
+  governing window is below the threshold, and `null` when the aggregate decided.
+- `bills_credits` — `true` when a live spent window is allowed on headroom; `null` when a
+  `disabled` seat is allowed, **and on any refusal** (a refused lane bills nothing and was
+  not asked to); `false` when no spent window governs.
+- A `CLAUDE_PICK_WEEK_SPENT` that is not a non-negative integer refuses as
+  `gate-misconfigured`, naming the variable and the value — beyond the spec, on the gate's
+  existing rule that a bad tuning value is never a silent default.
+
+**Measured on the real cache, 2026-09-19** (read-only, `--dry-run`). quantivly-1 was at
+spend $252.17 of $250 (`none`) with `seven_day` 100: a Fable lane refused as
+`gate-spend-wall` on `7d fable` (`live`), and an Opus lane refused on the aggregate with
+`model_window` null. personal-0, `disabled` with a 30% week, allowed a Fable lane. The
+plan's verification expected quantivly-1 to still have headroom and a Fable lane to be
+allowed on it; by the time the arm ran, the seat had spent through its limit.
+
+**Open edges, not decisions:**
+
+- A per-model block that fails to decode, or a non-numeric utilization, yields **no
+  candidate**, and the gate then allows. That is optimistic, against the gate's own rule;
+  the 5h arms are the only backstop.
+- Among refusals the higher utilization wins **regardless of state**, so an `undated`
+  window at a higher percentage can be reported instead of a live spend wall. The verdict is
+  the same, but the state is `gate-unmeasured` rather than `gate-spend-wall`, and rabota maps
+  the two differently.
+
+Rows: `scripts/test-claude-pick.sh` (the "gate: the weekly spend wall" block — the four
+spend states, the pin, scoping, attribution, worst-of-matches, lapse and precedence, the
+aggregate cases and the threshold guard; plus the `disabled` metrics rows),
+`scripts/test-hspawn.sh` (a `disabled` seat's wording reaches `claude()`),
+`rabota/tests/test_budget.py` (`gate-spend-wall` → `credential:window`). Plan:
+`docs/superpowers/plans/2026-09-19-do-623-gate-model-window.md`.
 
 ## Tenants and pools (DO-599)
 

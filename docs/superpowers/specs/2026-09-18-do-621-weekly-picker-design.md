@@ -208,10 +208,35 @@ itself.
 | aggregate `seven_day` live and spent | `none` | refuse: `gate-spend-wall` |
 | lane's model window live and spent | `none` | refuse: `gate-spend-wall` |
 | either live and spent | `headroom` | allow; `gate.bills_credits = true` |
-| either live and spent | `unknown` | refuse: `gate-unmeasured` (decision 6's gate half) |
+| either live and spent | `disabled` (a Max seat) | allow; `gate.bills_credits = null` |
+| either live and spent | `unknown` (no spend block, or non-numeric figures) | refuse: `gate-unmeasured` (decision 6's gate half) |
 | lapsed | any | allow |
 | no readable reset at or above threshold | any | refuse: `gate-unmeasured` |
 | below threshold | any | allow |
+
+**Drift resolved 2026-09-19 (DO-623).** The `unknown` row above was written when
+`unknown` meant "no spend block on disk". Part A's final revision also mapped
+`spend.enabled == false` — every Max seat — to `unknown`, so the table as first
+written would have refused every Max-seat lane whose model window is spent.
+`_CPM_SPEND` therefore gains a fourth state, `disabled`, and the gate allows it:
+the utilization is measured and only its consequence is not, nobody has watched a
+Max seat block on a spent window, and `personal` and `toysim` are composed
+entirely of Max seats with no overflow — the same asymmetry Part A resolved by
+demoting rather than refusing. `unknown` keeps the original rule, now applying
+only to the missing data it was written about.
+
+**A second gap, decided here rather than left open.** Part A maps a lapsed week to
+`_CPM_UW = unknown`, so the gate cannot tell a lapsed aggregate from an absent one.
+The aggregate arm therefore does not run at all when `uW` is `unknown`: the table's
+`lapsed -> allow` row already covers half of it, and refusing on the other half
+would invent a refusal that fires on seats the gate passes today. The per-model arm
+is unaffected, and the 5h arms still require a live, fresh, dated window.
+
+What was built differs from this section in a few places — `bills_credits` is `null`
+on any refusal, `model_window` names only a window at or past the threshold, and a
+bad `CLAUDE_PICK_WEEK_SPENT` refuses as `gate-misconfigured`. The as-built contract
+and its open edges are recorded in
+[CLAUDE_ACCOUNT_PICKER.md](../../CLAUDE_ACCOUNT_PICKER.md#the-gate-and-the-models-own-window-do-623).
 
 The refusal reason names which window is spent (`aggregate` or the label), its
 percentage, its reset time, and the seat's spend.
@@ -306,7 +331,8 @@ Part A mutants:
 |---|---|
 | Fable lane, live `7d fable` at 100, spend `none`: `gate-spend-wall` | model wall |
 | same, spend `headroom`: allow, `bills_credits: true` | billing is not refused |
-| same, spend `unknown`: `gate-unmeasured` | gate never optimistic |
+| same, spend `disabled` (a Max seat): allow, `bills_credits: null` | a measured absence is not missing data |
+| same, spend `unknown` (no spend block): `gate-unmeasured` | gate never optimistic |
 | pinned seat, aggregate spent, spend `none`: `gate-spend-wall` | the pin does not bypass the wall |
 | Opus lane on the Fable-spent seat: allow | model scoping |
 | `opus[1m]` normalises; `7d sonnet 5` matches `claude-sonnet-5`; `fablex` does not match; `7d claude` ignored | attribution |
@@ -322,6 +348,8 @@ Part B mutants:
 - best-of-matches instead of worst
 - refuse on `headroom`
 - allow on `unknown`
+- treat `disabled` as `none`
+- treat `unknown` as `disabled`
 - rabota falling back to `unmeasured`
 
 ## Not in scope

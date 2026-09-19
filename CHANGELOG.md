@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`claude-pick --gate` refuses a lane whose weekly window is spent with no spend headroom
+  (DO-623).** After every 5h arm, the gate checks the aggregate `seven_day` and each per-model
+  window whose label governs `--model`. At or past `CLAUDE_PICK_WEEK_SPENT` (100) a live window
+  refuses as the new state **`gate-spend-wall`** when spend is `none`, allows when it is
+  `headroom` (the lane bills credits) or `disabled` (a Max seat), and refuses as
+  `gate-unmeasured` when spend is `unknown`. The `gate` JSON object gains three keys:
+  `model_window` (`{label, utilization, resets_at, state}` or `null`), `bills_credits`
+  (`true`/`false`/`null`) and `spend`. rabota maps `gate-spend-wall` to `credential:window`.
+  **The one change a consumer could notice:** `usage.spend` has a new value, `disabled`, for
+  `spend.enabled == false`, which read `unknown` before. This resolves drift in the DO-621
+  spec, whose Part B table would otherwise have refused every Max-seat lane. The reasoning and
+  the open edges are in `docs/CLAUDE_ACCOUNT_PICKER.md`.
+
 - **The last six evidence sections left CLAUDE.md, verbatim, and a `docs/` index was added
   (DO-627).** 55,033 chars moved in ten slices: GitHub account routing to
   `docs/GH_ACCOUNT_ROUTING.md`, the backup guards to `docs/BACKUP_INTERNALS.md`, the transcript
