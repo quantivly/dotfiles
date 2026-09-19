@@ -2210,7 +2210,13 @@ WS_FABLE_SPENT="[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$
 # (fixture HOME and TZ, no tenants file, the two session variables cleared).
 # Sets $out and $rc; called directly, never inside $( ), so $rc is this run's.
 gw() {   # gw PROFILE MODEL
-    out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID; HOME="$FHOME" TZ="$FIXTZ" CLAUDE_TENANTS_FILE=/nonexistent \
+    # The 5h tuning values are unset INSIDE the subshell, so an ambient one (a
+    # developer's CLAUDE_PICK_GATE_MAX, say) cannot decide a row. No row passes
+    # one of these; CLAUDE_PICK_WEEK_SPENT, which rows DO pass as `VAR=x gw …`,
+    # is unset once at the top of the section instead.
+    out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID \
+                 CLAUDE_PICK_GATE_MAX CLAUDE_PICK_RATE_DEFAULT CLAUDE_PICK_RATES CLAUDE_PICK_CACHE_MAX_AGE
+           HOME="$FHOME" TZ="$FIXTZ" CLAUDE_TENANTS_FILE=/nonexistent \
             zsh "$PICK" --profile "$1" --dry-run --json --gate --model "$2" --effort high 2>/dev/null)"; rc=$?
 }
 
@@ -2282,6 +2288,62 @@ gw a1 claude-fable-5-1
 check "gate/model: a spent window with NO spend block refuses" "$(jq -r .state <<<"$out")" "gate-unmeasured"
 check "...for the spend reason, not a 5h one"                  "$(jq -r '.reason | test("spend headroom cannot be read")' <<<"$out")" "true"
 
+# ---- a malformed window must not hide a spent one ---------------------------
+# jq's @tsv ABORTS on a non-scalar field ("not valid in a csv row"), and inside
+# `< <(…)` its exit status was lost: every element after the odd one vanished,
+# so a malformed element listed BEFORE a spent `7d fable` removed the wall and
+# the lane was allowed. Each field is now coerced, so one bad element is one row.
+new_home gw_malformed_reset
+mk_gate_prof a1 "[{\"label\":\"7d opus\",\"utilization\":100.0,\"resets_at\":{\"x\":1}},\
+{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate/model: a malformed resets_at listed first does not hide a spent window" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...and it is the spent window that is reported" "$(jq -r .gate.model_window.label <<<"$out")" "7d fable"
+new_home gw_malformed_label
+mk_gate_prof a1 "[{\"label\":[\"7d fable\"],\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\
+{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate/model: a malformed label listed first does not hide a spent window" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+
+# A GOVERNING window whose utilization is not a number is unmeasured, not absent.
+new_home gw_util_unreadable
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":\"x\",\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate/model: a governing window with no readable utilization refuses" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...reported as unreadable, with a null utilization, never a made-up one" \
+      "$(jq -r '.gate.model_window | [.label, .state, (.utilization|tostring)] | join("/")' <<<"$out")" "7d fable/unreadable/null"
+check "...and the reason says the utilization cannot be read" "$(jq -r '.reason | test("utilization cannot be read")' <<<"$out")" "true"
+# ...but one that does NOT govern the lane is still none of its business.
+new_home gw_util_unreadable_other
+mk_gate_prof a1 "[{\"label\":\"7d opus\",\"utilization\":\"x\",\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate/model: an unreadable window that does not govern the lane allows" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
+# A FAILED DECODE REFUSES. After the coercion above no value the metrics layer
+# can carry makes this jq fail (it re-encodes a filtered array of objects), so
+# the arm is reached through a jq on PATH that fails the decode — and only the
+# decode: every other jq call goes to the real one. What it claims about the real
+# tool is exit 5 with no output, which is what @tsv's abort was.
+JQSHIM="$TMPROOT/jqshim"; mkdir -p "$JQSHIM"
+cat > "$JQSHIM/jq" <<SHIM
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *'@base64d'*) cat >/dev/null; exit 5 ;; esac; done
+exec "$JQBIN" "\$@"
+SHIM
+chmod +x "$JQSHIM/jq"
+new_home gw_decode_fails
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate/model: per-model windows that cannot be decoded refuse" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...saying the windows cannot be read"  "$(jq -r '.reason | test("per-model weekly windows cannot be read")' <<<"$out")" "true"
+check "...with exit 2"                        "$rc" "2"
+# The shim is a fixture, not a false alarm: with no windows to decode it is
+# never consulted for that, and the same seat allows.
+new_home gw_decode_shim_idle
+mk_gate_prof a1 '[]' "$SP_ROOM"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate/model: the failing-decode shim alone refuses nothing" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
 # ---- the aggregate wall, and the pin -----------------------------------------
 new_home gw_agg_none
 mk_gate_prof a1 '[]' "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
@@ -2336,6 +2398,15 @@ mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"
 gw a1 claude-fable-5
 check "gate: when two labels govern, the WORST decides" "$(jq -r .state <<<"$out")" "gate-spend-wall"
 check "...and the worst one is the one reported"        "$(jq -r .gate.model_window.label <<<"$out")" "7d 5"
+# A LIVE WALL OUTRANKS AN UNDATED REFUSAL. Both refuse, but only the live one
+# says why the lane is blocked; ranking by utilization alone (a tie at 100, so
+# the first held wins) reported gate-unmeasured for a seat that is walled.
+new_home gw_worst_undated
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0},\
+{\"label\":\"7d 5\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5
+check "gate: a live spend wall outranks an undated refusal" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...and the live window is the one reported"        "$(jq -r .gate.model_window.label <<<"$out")" "7d 5"
 # A governing window below the threshold is not a candidate at all.
 new_home gw_below
 mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":99.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"

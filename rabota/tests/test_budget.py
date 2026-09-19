@@ -75,8 +75,9 @@ class BudgetTests(unittest.TestCase):
              "usage": {"five_hour": 12}, "gate": {"verdict": "refuse", "spend": "none"}}
         runner = FakeRunner([(["claude-pick"], Result(2, json.dumps(j), ""))])
         out = budget.credential_gate(runner, "q1", "claude-fable-5-1", "high", 30)
+        self.assertEqual(out["code"], "credential:window")
         self.assertNotIn("projected", out["detail"])
-        self.assertIn("spend", out["detail"])
+        self.assertIn("weekly window spent", out["detail"])   # only the fallback prints this
 
     def test_gate_never_reads_a_zero_exit_without_an_allow_as_ok(self):
         # exit 0 but no gate verdict (an older claude-pick without --gate, or --gate dropped): unmeasured, not ok

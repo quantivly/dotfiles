@@ -100,7 +100,8 @@
 # per-model window whose label governs the lane's --model. A window at or past
 # CLAUDE_PICK_WEEK_SPENT (100) is a wall only when the seat cannot bill past it —
 # a spent window BILLS while spend headroom lasts and BLOCKS once it is gone
-# (both measured 2026-09-18). The worst governing window decides:
+# (both measured 2026-09-18). The worst governing window decides — a live
+# refusal, then any other refusal, then an allow, then the higher utilization:
 #
 #   window state            spend       verdict
 #   live                    headroom    allow, bills_credits true
@@ -109,6 +110,10 @@
 #   live                    unknown     refuse  gate-unmeasured
 #   lapsed (fetched_at)     any         allow   (the window has rolled)
 #   undated                 any         refuse  gate-unmeasured
+#   unreadable (utilization not a number)  any   refuse  gate-unmeasured
+#
+# Per-model windows that cannot be decoded at all refuse as gate-unmeasured;
+# the gate is never optimistic about data it could not read.
 #
 # `disabled` is a MEASURED absence of a spend mechanism, not missing data, and
 # nobody has watched such a seat block; `unknown` is the missing data. A label
@@ -190,9 +195,10 @@ usage() {
   print -r -- "                (CLAUDE_PICK_CACHE_MAX_AGE), or its 5h reset is"
   print -r -- "                already past, absent or unreadable, or a live weekly"
   print -r -- "                window governing the lane (the aggregate, or the"
-  print -r -- "                model's own) is at CLAUDE_PICK_WEEK_SPENT (100%) with"
-  print -r -- "                no spend headroom left (gate-spend-wall), or a tuning"
-  print -r -- "                value does not parse (never a silent default)"
+  print -r -- "                model's own) is at or past CLAUDE_PICK_WEEK_SPENT"
+  print -r -- "                (100%) with no spend headroom left (gate-spend-wall),"
+  print -r -- "                or a tuning value does not parse (never a silent"
+  print -r -- "                default)"
   print -r -- ""
   print -r -- "Exit: 0 picked · 2 refused (exhausted, or the gate) · 3 refused (machine)"
   print -r -- "      4 unusable tenant table · 5 no profiles · 64 usage"
@@ -210,7 +216,7 @@ gate_max="" gate_max_age="" gate_rate_src="" gate_fault=""
 # The weekly arm's scratch (DO-623). gate_bills starts EMPTY, which renders as
 # null: a lane refused before the weekly arm ran was never asked whether it
 # bills, and `false` would say it was, and that it would not.
-typeset gate_week_spent="" gate_bills="" gate_line=""
+typeset gate_week_spent="" gate_bills="" gate_line="" gate_dec="" gate_dec_ok=1
 typeset gate_w_label="" gate_w_util="" gate_w_delta="" gate_w_at=""
 typeset gate_w_state="" gate_w_verdict="" gate_w_state_reason=""
 # gate_mw_util starts at 0, not empty: _gate_keep_worst compares it
@@ -435,17 +441,27 @@ _gate_label_governs() {   # <label> <model-id>
   return 1
 }
 
-# THE WORST CANDIDATE GOVERNS: a refusal first, then the higher utilization.
-# Highest-utilization alone would let a lapsed 100 (which allows) mask a live
-# 100 that is out of headroom (which refuses). Promotes gate_w_* into gate_mw_*
-# and returns 0 when the current candidate is worse than the one held.
+# THE WORST CANDIDATE GOVERNS: a LIVE refusal first (the one that says why the
+# lane is blocked), then any other refusal (undated, unreadable), then an allow,
+# and within a rank the higher utilization. Highest-utilization alone would let
+# a lapsed 100 (which allows) mask a live 100 that is out of headroom (which
+# refuses), and an undated 100 listed first mask a live wall — reported as
+# gate-unmeasured for a seat that is walled. An unreadable utilization ranks as
+# 0 within its rank: it is never compared raw, and never reported as a number.
+# Promotes gate_w_* into gate_mw_* and returns 0 when the current candidate is
+# worse than the one held.
+_gate_rank() {   # <verdict> <state> <label>
+  if [[ "$1" == refuse ]]; then [[ "$2" == live ]] && REPLY=3 || REPLY=2
+  elif [[ -n "$3" ]]; then REPLY=1
+  else REPLY=0; fi
+}
 _gate_keep_worst() {
-  local rank held
-  [[ "$gate_w_verdict" == refuse ]] && rank=2 || rank=1
-  if [[ "$gate_mw_verdict" == refuse ]]; then held=2
-  elif [[ -n "$gate_mw_label" ]]; then held=1
-  else held=0; fi
-  (( rank > held || ( rank == held && gate_w_util > gate_mw_util ) )) || return 1
+  local REPLY rank held wu=0 hu=0
+  _gate_rank "$gate_w_verdict" "$gate_w_state" "$gate_w_label"; rank=$REPLY
+  _gate_rank "$gate_mw_verdict" "$gate_mw_state" "$gate_mw_label"; held=$REPLY
+  [[ "$gate_w_util" == <-> ]] && wu=$gate_w_util
+  [[ "$gate_mw_util" == <-> ]] && hu=$gate_mw_util
+  (( rank > held || ( rank == held && wu > hu ) )) || return 1
   gate_mw_label="$gate_w_label"; gate_mw_util="$gate_w_util"; gate_mw_at="$gate_w_at"
   gate_mw_state="$gate_w_state"; gate_mw_verdict="$gate_w_verdict"
   gate_mw_reason="$gate_w_state_reason"
@@ -617,21 +633,31 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
         gate_bills=false
         # One TAB-separated candidate per row: label, utilization, reset delta,
         # reset epoch.
-        gate_rows=()
+        gate_rows=(); gate_dec=""; gate_dec_ok=1
         if [[ -n "$_claude_pick_windows" ]]; then
           # `jq -R`: the value is base64 TEXT, and without raw input jq parses it
           # as JSON and dies ("Invalid numeric literal", measured 2026-09-19).
-          while IFS= read -r gate_line; do
+          #
+          # CAPTURED, AND ITS EXIT STATUS TESTED. This was `while read … done <
+          # <(jq …)`, where jq's status is lost: @tsv ABORTS on a non-scalar field
+          # (rc 5, "not valid in a csv row"), every element after it vanished,
+          # and a malformed element listed before a spent `7d fable` removed the
+          # wall. Each field is now COERCED to a scalar ("" when it is not one),
+          # so one bad element is one row; a decode that still fails refuses.
+          if ! gate_dec="$(print -r -- "$_claude_pick_windows" | jq -Rr '
+                 @base64d | fromjson | .[]
+                 | [ (.label | if type == "string" then . else "" end),
+                     (.utilization | if type == "number" then floor else "" end),
+                     (.resets_at | if type == "string" then . else "" end) ] | @tsv' 2>/dev/null)"; then
+            gate_dec_ok=0
+          fi
+          for gate_line in "${(@f)gate_dec}"; do
             [[ -n "$gate_line" ]] || continue
             gate_f=( "${(@ps:\t:)gate_line}" )
             _gate_label_governs "${gate_f[1]}" "$gate_model" || continue
             _claude_ts_delta "${gate_f[3]}"
             gate_rows+=( "${gate_f[1]}"$'\t'"${gate_f[2]}"$'\t'"$_CLAUDE_TS_DELTA"$'\t'"$_CLAUDE_TS_ABS" )
-          done < <(print -r -- "$_claude_pick_windows" | jq -Rr '
-                     @base64d | fromjson | .[]
-                     | [ (.label // ""),
-                         (.utilization | if type == "number" then floor else "" end),
-                         (.resets_at // "") ] | @tsv' 2>/dev/null)
+          done
         fi
         # The aggregate goes in LAST, under `aggregate` — not a `7d ` label, so
         # never taken for a per-model one — so that on a tie the lane's own model
@@ -643,7 +669,15 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
           gate_w_label="${gate_f[1]}"; gate_w_util="${gate_f[2]}"
           gate_w_delta="${gate_f[3]}"; gate_w_at="${gate_f[4]}"
           gate_w_state_reason=""
-          [[ "$gate_w_util" == <-> ]] || continue
+          # Every row here GOVERNS the lane (the rest were dropped above), so a
+          # utilization that is not a number is an unmeasured window, never an
+          # absent one: skipping it would read "cannot tell" as "not spent".
+          if [[ "$gate_w_util" != <-> ]]; then
+            gate_w_util=""; gate_w_state=unreadable; gate_w_verdict=refuse
+            gate_w_state_reason="its utilization cannot be read"
+            _gate_keep_worst
+            continue
+          fi
           (( gate_w_util >= gate_week_spent )) || continue
           if [[ "$gate_w_delta" != (-|)<-> ]]; then
             gate_w_state=undated
@@ -668,7 +702,11 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
           esac
           _gate_keep_worst
         done
-        if [[ "$gate_mw_verdict" == refuse ]]; then
+        if (( ! gate_dec_ok )); then
+          gate_verdict=refuse; gate_bills=""; _claude_pick_state=gate-unmeasured
+          _claude_pick_reason="$REPLY's per-model weekly windows cannot be read (the decode failed); refusing rather than assuming none of them is spent"
+          REPLY=""; rc=2
+        elif [[ "$gate_mw_verdict" == refuse ]]; then
           # A refused lane bills nothing and was not asked to: null, not false.
           gate_verdict=refuse; gate_bills=""
           if [[ "$gate_mw_state" == live && "$_claude_pick_spend" == none ]]; then
@@ -676,7 +714,11 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
           else
             _claude_pick_state=gate-unmeasured
           fi
-          _claude_pick_reason="$REPLY's ${gate_mw_label/#aggregate/aggregate weekly} window is ${gate_mw_util}% used (resets $(text_instant "$gate_mw_at")), at or past CLAUDE_PICK_WEEK_SPENT=${gate_week_spent}%, and ${gate_mw_reason}${_claude_pick_spend_txt:+ ($_claude_pick_spend_txt)}"
+          if [[ "$gate_mw_state" == unreadable ]]; then
+            _claude_pick_reason="$REPLY's ${gate_mw_label} window governs the lane and ${gate_mw_reason} (resets $(text_instant "$gate_mw_at")); refusing rather than assuming it is below CLAUDE_PICK_WEEK_SPENT=${gate_week_spent}%"
+          else
+            _claude_pick_reason="$REPLY's ${gate_mw_label/#aggregate/aggregate weekly} window is ${gate_mw_util}% used (resets $(text_instant "$gate_mw_at")), at or past CLAUDE_PICK_WEEK_SPENT=${gate_week_spent}%, and ${gate_mw_reason}${_claude_pick_spend_txt:+ ($_claude_pick_spend_txt)}"
+          fi
           REPLY=""; rc=2
         else
           gate_verdict=allow
