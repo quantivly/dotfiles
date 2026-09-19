@@ -259,6 +259,29 @@ check "an empty week earns no consume-first bonus"             "$(score 0 18000 
 check "A: 40% of the week left, resetting in 6 d"              "$(score 0 18000 60 0 518400)"  "11200"
 check "B: 20% of the week left, resetting in 12 h"             "$(score 0 18000 80 0 43200)"   "13720"
 
+# THE CROSS-AXIS ORDERING — RECORDED, NOT ENDORSED. bonus_w tops out at 20000
+# against base's maximum of 10000, so since DO-621 the weekly axis can outweigh
+# the 5h axis outright. Both seats below have a week resetting in 3.5 d:
+#
+#   P  5h 0% used, week 90% used    6600 before DO-621, 9130 now
+#   Q  5h 85% used, week 10% used   1500 before DO-621, 10500 now
+#
+# The ordering FLIPS, and by 1370 — outside CLAUDE_PICK_RR_BAND (800), so it is a
+# preference the ledger cannot break rather than a coin flip: an interactive
+# `claude` now prefers a seat with 15% of its 5h window left over one with all of
+# it, because the loser's WEEK is nearly spent. This may well be the right
+# long-horizon call and nothing here says it is wrong — the spec never compares
+# the two axes against each other at all. What this row does is make the choice
+# EXAMINED: every other score row passes u5 = 0 (FIVE is `utilization 0.0`), so
+# without it there is no row anywhere in this suite where 5h headroom and weekly
+# headroom point in opposite directions, and a future change to either weight
+# would move the ordering in silence. The two scores are asserted as well as
+# narrated, so the numbers in this comment cannot rot away from the code.
+check "cross-axis: weekly headroom now outranks 5h headroom (recorded, not endorsed)" \
+      "$(cmp2 '85 18000 10 0 302400' '>' '0 18000 90 0 302400')" "yes"
+check "...P: 5h fresh, week 90% used, resetting in 3.5 d"  "$(score 0 18000 90 0 302400)"  "9130"
+check "...Q: 5h 85% used, week 10% used, the same reset"   "$(score 85 18000 10 0 302400)" "10500"
+
 #-----------------------------------------------------------------------------
 echo
 echo "=== classes: what is eligible, exhausted, unknown, excluded ==="
@@ -1214,6 +1237,80 @@ check "...and the header says the same rather than quoting the date" \
       "$(report 1 | head -1 | grep -c 'exhausted on stale readings')" "1"
 check "...so no reset time from the past is offered as a retry" \
       "$(report 1 | tail -1)" "        --profile <p> to override."
+
+# DO-621 — THE REPORT QUOTES THE WALL THAT ACTUALLY BLOCKS THIS SEAT. Behind the
+# spend wall it is the WEEK that has to roll, so the exhausted record carries
+# that reset in field 5 (appended, never inserted) and the member line reads it.
+# NOT ONE fixture above can reach the weekly substitution: fd3's week reads 40%,
+# fd4's and fd5's have no weekly reading at all, and none of the three carries a
+# spend block, so _CPM_SPEND is `unknown` where the substitution needs `none`.
+# Field 5 therefore EQUALS field 4 throughout and the substitution is a no-op —
+# so none of them can tell the two apart, and either half of the mechanism (the
+# append in _claude_pick_for_dir, the ${f[5]:-} read in
+# _claude_pick_report_exhausted) could be deleted with all three suites green. What that costs is not a missing
+# detail: the header goes on reading _claude_pick_leastbad_r5, which stays
+# right, so the refusal becomes INTERNALLY CONTRADICTORY — "retry in a day" on
+# one line and a 2099 date on the next. Both lines are therefore asserted, since
+# "they name the same instant" is the property, and each is pinned by a
+# different mutant (field 5 for the member line, "least-bad ignores the block
+# reset" for the header).
+#
+# TWO FIXED INSTANTS, far apart and NEITHER on a minute boundary. An instant
+# makes a round trip through "seconds from now" and is re-rendered against a
+# second read of the clock, so one whose seconds component is 00 can print a
+# minute early when a second ticks in between; at :30 a one-second drift can
+# never move the minute it renders. That is what makes these rows exact rather
+# than probabilistic, and it is why the expected text is computed here — with
+# the same GNU date `iso_in` already requires — instead of matched by pattern.
+ISO_LATE='2099-01-01T00:00:30.000000+00:00'
+ISO_EARLY='2098-06-15T12:34:30.000000+00:00'
+TXT_LATE="$(TZ="$FIXTZ" date -d "$ISO_LATE" '+%a %d %b %H:%M %Z')"
+TXT_EARLY="$(TZ="$FIXTZ" date -d "$ISO_EARLY" '+%a %d %b %H:%M %Z')"
+
+# Which wall's reset does _claude_pick_block_reset quote? Compared against the
+# seat's OWN two instants inside one process, so there is no tolerance to choose
+# and no clock to race. `both-equal` is the degenerate fixture that would make
+# the answer mean nothing, and it is reported rather than passing as either.
+blockwall() {   # $1 = profile -> 5h | weekly | both-equal | neither:<value>
+    zrun "_claude_profile_metrics '$1' >/dev/null
+          r=\$(_claude_pick_block_reset)
+          if   [[ \$r == \$_CPM_R5 && \$r == \$_CPM_RW ]]; then print -r -- both-equal
+          elif [[ \$r == \$_CPM_RW ]]; then print -r -- weekly
+          elif [[ \$r == \$_CPM_R5 ]]; then print -r -- 5h
+          else print -r -- \"neither:\$r\"; fi"
+}
+
+# The spend wall alone: the 5h window is FRESH (0% used), so only the week blocks
+# and the 5h reset below is there purely as the wrong answer to catch.
+new_home fd5b
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":false}}"
+blk="$(report 1)"
+mem="$(printf '%s\n' "$blk" | sed -n 's/^ *e1  .*(resets \(.*\))$/\1/p')"
+hdr="$(printf '%s\n' "$blk" | sed -n 's/.*earliest reset \(.*\), on e1)$/\1/p')"
+check "behind the spend wall the member line quotes the WEEKLY reset, not the 5h one" \
+      "$mem" "$TXT_EARLY"
+check "...and the header names that same instant, so the refusal cannot contradict itself" \
+      "$hdr" "$TXT_EARLY"
+
+# BOTH WALLS AT ONCE, the week clearing last. _claude_pick_block_reset takes the
+# later of the two, because both have to clear before the seat is usable again.
+new_home fd5c
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":false}}"
+check "both walls up and the WEEK later: that is the reset the seat reports" \
+      "$(blockwall e1)" "weekly"
+blk="$(report 1)"
+mem="$(printf '%s\n' "$blk" | sed -n 's/^ *e1  .*(resets \(.*\))$/\1/p')"
+check "...and the report quotes it, not the 5h reset that clears first" \
+      "$mem" "$TXT_LATE"
+
+# The other direction, which the REPORT cannot see: with the 5h wall clearing
+# last, field 5 equals field 4 and the member line reads the same either way. So
+# it is pinned on the function instead — a row that cannot distinguish the two
+# answers is decoration however carefully it is worded.
+new_home fd5d
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":false}}"
+check "both walls up and the 5H later: that is the reset the seat reports" \
+      "$(blockwall e1)" "5h"
 
 # Machine backpressure: warn-only unless a ceiling is set, and only a headless
 # caller refuses on it.
