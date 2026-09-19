@@ -716,8 +716,13 @@ _claude_profile_metrics() {
   # figure in the reset slot and left uW `unknown`; a profile with no `five_hour`
   # block at all reported its seven_day number as the 5h utilization. `null`
   # keeps the column and `@tsv` renders it as the empty string.
-  # (`empty` is still correct INSIDE the weekly array, where dropping a
-  # non-number is exactly what is wanted before `max`.)
+  # (The per-model window branch is unrelated to this rule now: DO-621 removed
+  # the old "worst utilization of every window" reduction entirely — no `max`,
+  # no `empty` — and replaced it with `select(type == "object")`, which drops a
+  # non-object member of `weekly_scoped` before `{label, utilization,
+  # resets_at}` tries to index it. Indexing a number or string that way is a jq
+  # RUNTIME ERROR, which `2>/dev/null` would turn into a lost profile rather
+  # than one dropped window.)
   #
   # The tier is an OBJECT on a Max plan and a STRING on Team (measured:
   # `{"Max":20}` vs `"Team"`), so it is normalised to its key rather than
