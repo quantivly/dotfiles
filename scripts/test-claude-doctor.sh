@@ -1557,6 +1557,113 @@ printf '{"five_hour":{"utilization":10.0},"fetched_at":%s}\n' "$(( ($(date +%s) 
 run_doctor
 want_out "the doctor dates a cache from fetched_at, not its fresh mtime" "oldest 2h ago"
 
+# THREE MORE RULES OF _claude_usage_cache_age_s, PINNED DIRECTLY. Until here the
+# only rule with a row on this side was "fetched_at beats the mtime" (above) and
+# "no fetched_at at all falls back to it" (every mk_usage_profile fixture). The
+# 60-second clamp, the far-future fallback and the rejection of a non-numeric
+# stamp had none — while the picker's twin has had rows for its equivalents since
+# DO-621 (test-claude-pick.sh, ag1–ag4). Two deliberately duplicated
+# implementations of one rule, pinned on one side only, is the drift this repo
+# keeps paying for.
+#
+# The doctor's rendering is why these cannot go through claude-doctor: it rounds
+# to "2h ago", which is enough to see WHICH clock was used and useless for a
+# 60-second clamp. The subject here is the seconds, and only the function
+# returns them.
+age_s() {   # $1 = usage_cache.json contents, $2 = mtime age in seconds
+    local f="$FHOME/.clauth/profiles/p1/usage_cache.json"
+    mkdir -p "${f%/*}"
+    printf '%s\n' "$1" > "$f"
+    touch -d "@$(( $(date +%s) - $2 ))" "$f" \
+        || fatal "touch -d is unavailable; the cache-age rows cannot be set up"
+    env -u CLAUDE_CONFIG_DIR HOME="$FHOME" "PATH=$SYSBIN" "$SYSBIN/zsh" -f -c "
+        source '$CLAUDESH' >/dev/null 2>&1
+        _claude_usage_cache_age_s '$f'" 2>/dev/null
+}
+# A window, not an equality: the fixture's mtime is set relative to a `date`
+# read here and the function reads its own clock, so a second boundary between
+# the two is ordinary. The window is far narrower than any rule difference it
+# could hide.
+in_window() {   # $1 = label, $2 = value, $3 = low, $4 = high
+    # `=~ ^[0-9]+$`, not zsh's `<->`: this suite is bash, where `<->` is not a
+    # pattern and the test would be a string compare that never matches.
+    if [[ "$2" =~ ^[0-9]+$ ]] && (( $2 >= $3 && $2 <= $4 )); then
+        ok "$1"
+    else
+        bad "$1 — expected $3..$4, got '$2'"
+    fi
+}
+
+new_home ufa2; write_cred
+check_age="$(age_s "{\"five_hour\":{\"utilization\":10.0},\"fetched_at\":$(( ($(date +%s) + 30) * 1000 ))}" 2000)"
+if [[ "$check_age" == 0 ]]; then
+    ok "a fetched_at up to 60 s ahead clamps to 0, as the picker's does"
+else
+    bad "a fetched_at up to 60 s ahead clamps to 0, as the picker's does — got '$check_age'"
+fi
+
+# Far ahead is corruption, and `unknown` would be the wrong answer: the doctor
+# counts a profile it cannot age as `missing`, so mapping it there would drop the
+# cache out of the oldest-cache line entirely. clauth's own scheduler filters
+# `at <= now` and falls back to the mtime; so does this.
+new_home ufa3; write_cred
+in_window "a fetched_at far in the future falls back to the mtime" \
+          "$(age_s "{\"five_hour\":{\"utilization\":10.0},\"fetched_at\":$(( ($(date +%s) + 3600) * 1000 ))}" 2000)" \
+          1995 2100
+
+# `"fetched_at": "soon"` is not a stamp. jq's `floor` on a string is a runtime
+# error, so the capture comes back empty and the `<->` test rejects it — the
+# mtime answers instead. A rule that took the word literally would put it
+# through arithmetic, where zsh reads a non-numeric word as 0 and the cache
+# would date from the epoch.
+#
+# UNKILLABLE BY ANY SINGLE MUTATION, and labelled rather than left to read as
+# coverage. Two guards shadow each other here: jq's `floor` fails on a string
+# before the `<->` test is reached, so weakening that test to `[[ -n "$fa" ]]`
+# leaves this row green (measured). It is kept because it asserts the OUTCOME
+# rather than either guard — a rewrite that made the jq laxer would land on it —
+# and because the repo's own rule is to count how many independent deletions it
+# takes to reach a silent pass, not how many guards there are.
+new_home ufa4; write_cred
+in_window "a non-numeric fetched_at is rejected, not taken as 0" \
+          "$(age_s '{"five_hour":{"utilization":10.0},"fetched_at":"soon"}' 2000)" \
+          1995 2100
+
+# THE TWO READERS, ON ONE FILE, IN ONE SHELL. `_claude_usage_cache_age_s` here
+# and `_claude_profile_cache_age` in zsh/zshrc.herdr are the same rule written
+# twice on purpose — claude.sh must not depend on the portable herdr layer a
+# modular adopter sources alone (§3c) — and the rows above pin each copy against
+# its own expectations, which is exactly how two copies drift while both suites
+# stay green. This is the DO-613 shape: that change gave the `auth_broken`
+# readers a row that runs them side by side, and this one needs the same.
+#
+# The fixture is the DISCRIMINATING one: a fresh mtime with a fetched_at two
+# hours old, so a copy that reverted to the mtime answers ~0 against ~7200. A
+# 1-second tolerance absorbs a clock tick between the two calls and cannot hide
+# that.
+HERDRRC="$DOTFILES/zsh/zshrc.herdr"
+[[ -r "$HERDRRC" ]] || fatal "cannot read $HERDRRC — the cache-age cross-check row would assert nothing"
+new_home ufa5; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf '{"claudeAiOauth":{"accessToken":"t","expiresAt":9}}\n' > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf '{"five_hour":{"utilization":10.0},"fetched_at":%s}\n' "$(( ($(date +%s) - 7200) * 1000 ))" \
+    > "$FHOME/.clauth/profiles/p1/usage_cache.json"
+AGES="$(env -u CLAUDE_CONFIG_DIR HOME="$FHOME" CLAUDE_PICK_SOURCING=1 \
+            CLAUDE_TENANTS_FILE=/nonexistent "PATH=$SYSBIN" \
+        "$SYSBIN/zsh" -f -c "
+           source '$HERDRRC' >/dev/null 2>&1
+           source '$CLAUDESH' >/dev/null 2>&1
+           _claude_profile_metrics p1 >/dev/null 2>&1
+           print -rn -- \"\$_CPM_AGE \$(_claude_usage_cache_age_s '$FHOME/.clauth/profiles/p1/usage_cache.json')\"" 2>&1)"
+PICK_AGE="${AGES%% *}"; DOC_AGE="${AGES##* }"
+if [[ "$PICK_AGE" =~ ^[0-9]+$ && "$DOC_AGE" =~ ^[0-9]+$ ]] \
+   && (( PICK_AGE >= 7190 && PICK_AGE <= 7400 )) \
+   && (( (PICK_AGE > DOC_AGE ? PICK_AGE - DOC_AGE : DOC_AGE - PICK_AGE) <= 1 )); then
+    ok "the picker and the doctor age one readable cache the same"
+else
+    bad "the picker and the doctor age one readable cache the same — picker='$PICK_AGE' doctor='$DOC_AGE'"
+fi
+
 # The whole reason the line exists: a cache past the threshold is a profile the
 # picker has stopped ranking, and nothing else on the machine says so.
 new_home s2; write_cred

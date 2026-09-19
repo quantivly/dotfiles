@@ -328,6 +328,55 @@ check "spent week + spend at its limit: exhausted"                          "$(c
 check "spent week + spend disabled (a Max seat): exhausted"                 "$(cls d4 | cut -d: -f1)" "exhausted"
 check "...and the reason names the spend wall"                              "$(cls c3 | grep -c 'no spend headroom')" "1"
 
+# CLAUDE_PICK_WEEK_SPENT IS VALIDATED BEFORE ANY ARITHMETIC. zsh reads a
+# non-numeric word in `(( ))` as 0, so an unusable value makes every measured
+# week `>= 0` — and since DO-621 that is the spend wall, i.e. a HEADLESS
+# REFUSAL, not only the demotion tier it used to be. Measured without the guard:
+# a seat at 17% of its week came back `exhausted:weekly window 17% used and no
+# spend headroom`, so one typo in ~/.zshrc.local refused every headless launch on
+# the machine. THE BRANCH ESCALATED THE CONSEQUENCE, which is why the guard ships
+# with it. The fallback is the default, never a refusal — the ranker's own rule
+# is that broken data must not escalate.
+new_home k8
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":17.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false}}"
+check "an unusable CLAUDE_PICK_WEEK_SPENT falls back to 100, not to 0" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=oops _claude_pick_class a1")" "eligible"
+check "...and a negative one, which would wall every measured week as well" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=-1 _claude_pick_class a1")" "eligible"
+# An EMPTY value deliberately has no row of its own: `${VAR:-100}` substitutes for
+# empty as well as unset, so the validator never sees one — and if that `:-` were
+# ever weakened to `-`, the validator would catch the empty string instead. The
+# two guards shadow each other, so no single deletion reaches a wrong answer and
+# a row over it would pass either way. Written down rather than left out, because
+# a missing row and an unfailable one look identical from the summary line.
+#
+# The block reset is the knob's second reader and runs the same arithmetic, so an
+# unvalidated value there would wall a seat's reported WAIT independently of its
+# class. A PLAIN assignment, not a `VAR=x cmd` prefix: a prefix lasts for that one
+# command, so the first draft set the knob for _claude_profile_metrics — which
+# never reads it — and left _claude_pick_block_reset on the default. The row
+# passed under the mutant that deletes the guard, i.e. it asserted nothing.
+# And an `if`, not `cond && print || print`: the bare form prints both when the
+# first `print` fails, which is the SC2015 class this file exists to catch.
+check "...and the block reset reads the same validated value" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=oops
+               _claude_profile_metrics a1 >/dev/null
+               r=\$(_claude_pick_block_reset)
+               if [[ \$r == \$_CPM_R5 ]]; then print same5h; else print -r -- \$r; fi")" "same5h"
+# A USABLE value must still be honoured, or the guard is just a deletion.
+check "a usable CLAUDE_PICK_WEEK_SPENT still arms the tier where it says" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=10 _claude_pick_class a1 | cut -d: -f1")" "exhausted"
+# ...and it is NOT SILENT. Only _claude_pick_for_dir can say so: the other two
+# readers run inside `$(...)`, where anything they learn dies with the subshell.
+# shellcheck disable=SC2016
+check "...and an unusable value is warned about, once, by the one reader that can" \
+      "$(zrun 'CLAUDE_PICK_WEEK_SPENT=oops _claude_pick_for_dir "$HOME" >/dev/null 2>&1
+               print -rl -- "${_claude_pick_warnings[@]}"' | grep -c 'CLAUDE_PICK_WEEK_SPENT must be')" "1"
+# shellcheck disable=SC2016
+check "...and a usable one raises nothing" \
+      "$(zrun 'CLAUDE_PICK_WEEK_SPENT=100 _claude_pick_for_dir "$HOME" >/dev/null 2>&1
+               print -rl -- "${_claude_pick_warnings[@]}"' | grep -c 'CLAUDE_PICK_WEEK_SPENT must be')" "0"
+
 # pfd() is documented in full at its house-convention spot below (the
 # `_claude_pick_for_dir` section, next to `hold`/`unhold`) — defined here first
 # because these DO-621 rows need a PICK, not just a class, and bash functions
@@ -463,7 +512,16 @@ echo
 echo "=== cache age: fetched_at first, mtime as the fallback (DO-621) ==="
 
 age_of()  { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \$_CPM_AGE"; }
-between() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= $2 && $1 <= $3 )) && echo yes || echo "no ($1)"; }
+# An `if`, not `cond && echo yes || echo no`: that shape prints BOTH when the
+# `echo yes` itself fails (SC2015), which in this file would report a failure for
+# a row that passed — the exact class this suite exists to catch.
+between() {
+  if [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= $2 && $1 <= $3 )); then
+    echo yes
+  else
+    echo "no ($1)"
+  fi
+}
 
 # clauth 0.15.2 stamps fetched_at only on a LIVE fetch, so a plan-only rewrite
 # advances the mtime while the reading stays old — the case upstream fixed
@@ -790,7 +848,7 @@ echo "=== exhaustion: name the soonest reset, and name NO time when none is know
 # the row failed against perfectly correct output.
 lb() {   # profiles... -> "<pick>|<reset text>"
     zrun "_claude_pick_least_bad $* >/dev/null
-          print -r -- \"\$REPLY|\$(_claude_pick_reset_text \$_CLAUDE_PICK_LEASTBAD_R5)\""
+          print -r -- \"\$REPLY|\$(_claude_pick_reset_text \$_CLAUDE_PICK_LEASTBAD_RESET)\""
 }
 
 new_home x1
@@ -1088,7 +1146,11 @@ check "consume-first: B is picked with an empty ledger"        "$(pfd '' '' '' 0
 printf 'a1\t1\nb2\t%s\n' "$(date +%s)" > "$FHOME/.local/state/claude-account-dirs/.pick-ledger"
 check "...and still B when the ledger just picked B"           "$(pfd '' '' '' 0 | cut -d: -f2)" "b2"
 
-# weekf kept: at equal reset distance, a nearly-spent week loses to a fresh one.
+# At equal reset distance, a nearly-spent week loses to a fresh one — the PICK,
+# which is what this row asserts. It does NOT pin `weekf`: with weekf removed the
+# two score 10058 and 14640 and b2 still wins, so the row survives that mutation.
+# What pins weekf is the score row above asserting 3300 for an unknown reset,
+# where weekf is the only term that can move the number.
 new_home wk2
 mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":99.0,\"resets_at\":\"$(iso_in 432000)\"}}"
 mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":20.0,\"resets_at\":\"$(iso_in 432000)\"}}"
@@ -1248,7 +1310,7 @@ check "...so no reset time from the past is offered as a retry" \
 # so none of them can tell the two apart, and either half of the mechanism (the
 # append in _claude_pick_for_dir, the ${f[5]:-} read in
 # _claude_pick_report_exhausted) could be deleted with all three suites green. What that costs is not a missing
-# detail: the header goes on reading _claude_pick_leastbad_r5, which stays
+# detail: the header goes on reading _claude_pick_leastbad_reset, which stays
 # right, so the refusal becomes INTERNALLY CONTRADICTORY — "retry in a day" on
 # one line and a 2099 date on the next. Both lines are therefore asserted, since
 # "they name the same instant" is the property, and each is pinned by a
@@ -1310,6 +1372,59 @@ check "...and the report quotes it, not the 5h reset that clears first" \
 new_home fd5d
 mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":false}}"
 check "both walls up and the 5H later: that is the reset the seat reports" \
+      "$(blockwall e1)" "5h"
+
+# AN UNDATEABLE WEEK IS `unknown`, NOT THE 5H RESET. Whether the spend wall
+# APPLIES and whether its reset can be DATED are two questions, and they used to
+# share one `&&` chain, so the second answered the first: the substitution was
+# skipped and `r` fell back to _CPM_R5, putting the FIVE-HOUR reset on a refusal
+# the WEEK has to clear. Restore that chain and this fixture's refusal quotes
+# $TXT_LATE — the 2099 five-hour instant, rendered without a year, offered as the
+# moment to retry — on the header AND on the member line, which is what made it
+# invisible: uniformly wrong reads as right.
+#
+# `blockwall` cannot see this: _CPM_RW is the literal `unknown` here, so a
+# returned `unknown` compares equal to it and the helper answers `weekly` either
+# way. The value itself is what these rows assert.
+blockraw() { zrun "_claude_profile_metrics '$1' >/dev/null; _claude_pick_block_reset"; }
+
+new_home fd5e
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"garbage\"},\"spend\":{\"enabled\":false}}"
+check "an UNPARSEABLE weekly reset behind the spend wall is unknown, not the 5h one" \
+      "$(blockraw e1)" "unknown"
+blk="$(report 1)"
+check "...so the member line says the time is unknown" \
+      "$(printf '%s\n' "$blk" | grep -c 'reset time unknown')" "1"
+check "...and the header offers no retry instant at all" \
+      "$(printf '%s\n' "$blk" | head -1 | grep -c 'no reset time is known for any member')" "1"
+check "...and no 5h instant reaches the report" \
+      "$(printf '%s\n' "$blk" | grep -c "$TXT_LATE")" "0"
+
+# REACHABLE AT THE DEFAULT CONFIGURATION, which is why this is a fix and not a
+# noted gap: `dw3` above exists precisely to keep a 100% week with no resets_at
+# rankable (clauth omits the key on an unstarted window), and such a seat with
+# spend `none` lands here. No knob is armed in this fixture.
+new_home fd5f
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0},\"spend\":{\"enabled\":false}}"
+check "an ABSENT weekly reset behind the spend wall is unknown too" \
+      "$(blockraw e1)" "unknown"
+
+# BOTH WALLS, ONE INSTANT UNREADABLE. The wait is the LATER of the two, so half
+# an answer is no answer: quoting the readable half would present a lower bound
+# as the moment to retry.
+new_home fd5g
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"garbage\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":false}}"
+check "both walls up with the 5h instant unreadable: the combined wait is unknown" \
+      "$(blockraw e1)" "unknown"
+
+# ...and a seat the spend wall does NOT reach still reports its 5h reset, with a
+# readable weekly one sitting there as the wrong answer to catch. Every fixture
+# above is behind the wall — fd5d declines the substitution because the weekly
+# reset is EARLIER, which is the arithmetic, not the gate — so on their own they
+# cannot tell "the gate is right" from "the gate was widened".
+new_home fd5h
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":false}}"
+check "a seat blocked by the 5h window alone still quotes the 5h reset" \
       "$(blockwall e1)" "5h"
 
 # Machine backpressure: warn-only unless a ceiling is set, and only a headless

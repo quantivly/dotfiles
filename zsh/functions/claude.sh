@@ -480,8 +480,24 @@ _claude_file_age_s() {
 # has one, else the file mtime. THE SAME RULE AS _claude_profile_cache_age in
 # zsh/zshrc.herdr, deliberately duplicated rather than shared: this file must
 # work without zshrc.herdr (a modular adopter has only one of them), and two
-# readers of one file must agree on its age — the same fixture shape is pinned
-# in both suites (DO-621).
+# readers of one file must agree on its age — the same fixture shapes are pinned
+# in both suites, and one cross-check row runs BOTH functions over one fixture
+# and asserts they answer the same (DO-621).
+#
+# THEY AGREE ON THE AGE OF A READABLE CACHE, WHICH IS THE WHOLE CLAIM — the
+# first version of this comment said "agree on its age" flat, and that is false
+# in one direction. Measured over 13 fetched_at shapes: identical to the second
+# on all twelve well-formed ones, and divergent on a cache that is not valid
+# JSON. There this function still answers — jq fails, `fa` comes back empty, and
+# it falls through to the mtime — while the PICKER has no reading at all, since
+# _claude_profile_metrics' own jq fails first and the profile classes
+# `unknown:no usage reading`. So claude-doctor can report such a cache as
+# comfortably inside the picker's threshold while the picker is ranking on
+# nothing for that profile. Pre-existing on both sides and deliberately NOT
+# closed here: `jq -e . "$f" >/dev/null || return 1` would close it, and that
+# changes what a reporting line says on a machine nobody has looked at yet,
+# which is a decision and not a comment fix. Narrow the claim rather than widen
+# the code.
 _claude_usage_cache_age_s() {
   local f="$1" fa s
   zmodload zsh/datetime 2>/dev/null || return 1
