@@ -6,6 +6,7 @@ from rabota.context import Context
 def _build(sub):
     p = sub.add_parser("census", help="one fleet view: sessions by owner, units, seats, worktrees")
     p.add_argument("--sample-seconds", type=float, default=3.0, help="CPU sampling window (default 3)")
+    p.add_argument("--no-worktrees", action="store_true", help="skip the worktree scan (no wt-gc call)")
 
 
 def text_lines(c: dict) -> list[str]:
@@ -21,7 +22,7 @@ def text_lines(c: dict) -> list[str]:
 
 def _run(ns, **ctx_kw):
     ctx = Context.from_namespace(ns, **ctx_kw)
-    c = census.gather(ctx, sample_seconds=ns.sample_seconds)
+    c = census.gather(ctx, sample_seconds=ns.sample_seconds, include_worktrees=not ns.no_worktrees)
     return text_lines(c) if ns.text else c
 
 
