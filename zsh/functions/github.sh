@@ -169,8 +169,8 @@ _gh_repo_remotes() {
   # managed symlink in THIS repo, so a bad branch can cause it. Treating 128 as
   # "not a git repository" sends a quantivly clone down the no-repo path, which
   # falls through to the personal account and, by design, does not warn. Exactly
-  # the failure CLAUDE.md already records for dotfiles-doctor: "A git that
-  # cannot read the repo answers every question with silence."
+  # the failure docs/DOTFILES_DEPLOY.md already records for dotfiles-doctor: "A
+  # git that cannot read the repo answers every question with silence."
   # stderr is folded into the capture rather than parked in a temp file: the
   # cleanup would need `rm`, and one of the states being diagnosed is a broken
   # PATH, where `command rm` is itself not found. The fold is safe because the
@@ -819,8 +819,8 @@ gh-doctor() {
   # reason the section is worth reading. The collapse is a property of gh —
   # tokens keyed by host, not by config dir — and no configuration on this
   # machine can repair it. Reporting an unfixable condition as a failure made
-  # gh-doctor exit 1 on EVERY run, which is the state CLAUDE.md already warns
-  # about in this repo ("reporting it as one made the doctor exit non-zero
+  # gh-doctor exit 1 on EVERY run, which is the state docs/GH_ACCOUNT_ROUTING.md
+  # already records ("reporting it as one made the doctor exit non-zero
   # forever") and which this command exists to avoid: a checker that always
   # fails cannot be wired into anything, and people stop reading it.
   #

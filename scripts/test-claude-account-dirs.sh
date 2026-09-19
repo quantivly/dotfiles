@@ -91,7 +91,8 @@ mk_cred() {  # $1 = path, $2 = shape, $3 = optional marker
     case "$kind" in
         # Discovery record: written after OAuth discovery, before authorisation.
         stub)   printf '{"claudeAiOauth":{"accessToken":"","clientId":"c","serverName":"s"}}\n' > "$path" ;;
-        # THE INTERLEAVED-WRITE VICTIM. CLAUDE.md's own discriminator: it KEEPS
+        # THE INTERLEAVED-WRITE VICTIM. docs/CLAUDE_ACCOUNTS.md's own discriminator:
+        # it KEEPS
         # expiresAt and scope and LOSES accessToken. Ranking on expiry alone made
         # this shape outrank a working credential.
         victim) printf '{"claudeAiOauth":{"accessToken":"","refreshToken":"rt","expiresAt":99999,"scopes":["s"],"subscriptionType":"team"}}\n' > "$path" ;;
@@ -288,7 +289,7 @@ want_out "and the refresh is reported, not silent" "settings.json refreshed"
 
 # [[ -e ]] follows symlinks, so a dangling link is invisible to any check that
 # only asks whether something is there — the trap that hid a dangling systemd
-# unit link for a whole reboot (CLAUDE.md).
+# unit link for a whole reboot (docs/HERDR_INTERNALS.md).
 new_home d2; mk_profile p1
 mkdir -p "$FHOME/.claude/goingaway"
 run_sut p1

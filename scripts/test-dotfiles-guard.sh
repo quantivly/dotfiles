@@ -912,8 +912,9 @@ check "--fetch exits 1"          "$(doctor_rc main '' '--fetch')" "1"
 echo
 echo "=== install's own symlinks are live too (~/.config/mise/config.toml) ==="
 # .mise.toml is symlinked by `install` itself, not by dotbot, so it appears in no
-# link: block — and was therefore in nothing the doctor checked. CLAUDE.md
-# records the bill for that going unnoticed: the live config declared 10 tools
+# link: block — and was therefore in nothing the doctor checked.
+# docs/TOOL_VERSION_UPDATES.md records the bill for that going unnoticed: the
+# live config declared 10 tools
 # against the repo's 23, ~11 binaries never reached PATH, and `git diff` died
 # with "unable to execute pager 'delta'", for months, with nothing reporting it.
 MISEREPO="$TMPROOT/miserepo"; MISEHOME="$TMPROOT/misehome"

@@ -185,7 +185,7 @@ printf 'CMD %s\n' "\$*" >> "\$ACCOUNT_STUB_LOG"
 # It CREATES the directory it names, because the real builder does — and that is
 # the property claude()'s holder guard decides on. A stub that only prints the
 # path differs from production in exactly the thing under test, which is the
-# fixture-that-proves-nothing shape CLAUDE.md already records for reenable.
+# fixture-that-proves-nothing shape docs/HERDR_INTERNALS.md records for reenable.
 mkdir -p "$ACCT/\$1"
 printf '%s/%s\n' "$ACCT" "\$1"
 STUB
@@ -296,8 +296,8 @@ run() {
     # NOCLAUTH replaces the PATH rather than prepending to it. Prepending a
     # directory that merely LACKS clauth proves nothing: ~/.local/bin/clauth is
     # still on the tail, `command -v clauth` still finds it, and the row passes
-    # or fails for reasons unrelated to the code. CLAUDE.md is explicit that this
-    # box has a real one wired to four live accounts.
+    # or fails for reasons unrelated to the code. docs/CLAUDE_ACCOUNTS.md is
+    # explicit that this box has a real one wired to four live accounts.
     local pathspec="$STUBBIN:$PATH"
     [[ -n "${NOCLAUTH:-}" ]] && pathspec="$NOCLAUTHBIN"
     OUT="$(HOME="$FHOME" PATH="$pathspec" HSPAWN_STATE_DIR="$STATE" \

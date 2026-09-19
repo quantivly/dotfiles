@@ -35,9 +35,9 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYSTEMSH="$DOTFILES/zsh/functions/system.sh"
 # Overridable so the fix can be reverted in a COPY of the file and the row that
 # names it re-run against the mutant. A row that passes with the fix and without
-# it pins nothing, however carefully it is worded — CLAUDE.md records the row in
-# test-herdr-modular.sh that was decorative for exactly this reason.
-#     CLAUDE_DOCTOR_SH=/tmp/mutant.sh scripts/test-claude-doctor.sh
+# it pins nothing, however carefully it is worded — docs/HERDR_INTERNALS.md
+# records the row in test-herdr-modular.sh that was decorative for exactly this
+# reason. CLAUDE_DOCTOR_SH=/tmp/mutant.sh scripts/test-claude-doctor.sh
 CLAUDESH="${CLAUDE_DOCTOR_SH:-$DOTFILES/zsh/functions/claude.sh}"
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -277,10 +277,11 @@ echo "=== claude-doctor state table ==="
 
 #-----------------------------------------------------------------------------
 section "A. Preflight — a machine without Claude Code is not a broken machine"
-#-----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # The permanently-red checker is this repo's most-repeated self-inflicted bug —
-# CLAUDE.md records it three times (gh-doctor, backup-doctor, the herdr wiring).
-# A doctor that fails on a machine with nothing to check is useless twice over.
+# docs/GH_ACCOUNT_ROUTING.md, docs/BACKUP_INTERNALS.md and docs/HERDR_INTERNALS.md
+# record it for gh-doctor, backup-doctor and the herdr wiring. A doctor that fails
+# on a machine with nothing to check is useless twice over.
 new_home a1; rm -rf "$FHOME/.claude"
 run_doctor
 want_out "no ~/.claude reports skipped, not a failure" "○ skipped"
@@ -302,7 +303,8 @@ want_rc  "absent credential file is not a ✗"   0
 new_home b2; printf '{"claudeAiOauth": {' > "$CRED"; chmod 600 "$CRED"
 run_doctor
 # "Unparseable yields nothing, and nothing reads as no findings" is the exact
-# shape of the install.conf.yaml and gh routing-table bugs in CLAUDE.md.
+# shape of the install.conf.yaml bug (docs/DOTFILES_DEPLOY.md) and the gh
+# routing-table bug (docs/GH_ACCOUNT_ROUTING.md).
 want_out "invalid JSON is its own state" "NOT VALID JSON"
 want_rc  "invalid JSON fails"            1
 
@@ -447,8 +449,9 @@ want_out "--all shows the healthy server too"   "plugin-good-good"
 
 new_home e4; write_cred; rm -rf "$FHOME/.cache/claude-cli-nodejs"
 run_doctor
-# "An empty answer is never agreement" — CLAUDE.md, twice. No log store means
-# unchecked, and must never render as a clean bill of health.
+# "An empty answer is never agreement" — docs/GH_ACCOUNT_ROUTING.md and
+# docs/HERDR_INTERNALS.md, once each. No log store means unchecked, and must never
+# render as a clean bill of health.
 #
 # Asserted on the SERVER section's own wording, not on the bare string
 # "NOT CHECKED": the duplicated-services section below emits that phrase too, so
@@ -514,13 +517,14 @@ no_out "no credential value even on the failure paths" "$FAKE_TOKEN"
 
 #-----------------------------------------------------------------------------
 section "H. Isolation — the configuration hspawn has defaulted to since #107"
-#-----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Every row here failed before 2026-09-06, and every one of them failed by
 # printing something confident. `clauth start` gives a session a config dir whose
 # .credentials.json is a SYMLINK into the profile store; the doctor read that link
 # as if it were the global file and got three findings wrong and one missing. This
-# is the permanently-green half of the permanently-red checker CLAUDE.md warns
-# about — worse, because a red one gets investigated.
+# is the permanently-green half of the permanently-red checker
+# docs/CLAUDE_ACCOUNTS.md warns about — worse, because a red one gets
+# investigated.
 
 # A symlinked credential: `stat -c %a` reports the LINK (777 on every Linux there
 # is), not the target. Six weeks of ✗ on a file that is correctly 600.
@@ -718,10 +722,10 @@ want_out "a single-quoted active_profile is read, and its trailing comment is no
 # THE VACUOUS TICK. The global credential path is a symlink INTO the active
 # profile's store on this machine (relinked 2026-09-14 so the two Chrome native
 # hosts stopped being independent holders), so "stored copy matches the live
-# credential" compares a file with itself and the ✓ says nothing. CLAUDE.md
-# already records this exact shape for isolated sessions; it came back by a new
-# route, in the check whose own comment calls it "the one check that predicts a
-# mass logout before it happens".
+# credential" compares a file with itself and the ✓ says nothing.
+# docs/CLAUDE_ACCOUNTS.md already records this exact shape for isolated sessions;
+# it came back by a new route, in the check whose own comment calls it "the one
+# check that predicts a mass logout before it happens".
 new_home h5f; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 mv "$CRED" "$FHOME/.clauth/profiles/p1/credentials.json"
@@ -1628,8 +1632,9 @@ section "T. The report itself — no bare name=value line may reach it"
 # `echo` of `pdir` anywhere in the repo.
 #
 # So this row does not name a variable. It asserts the SHAPE, which catches the
-# next one whatever it is called. CLAUDE.md already records the earlier instance
-# of the same trap printing `du=zvi-quantivly` into gh-doctor's report.
+# next one whatever it is called. docs/GH_ACCOUNT_ROUTING.md already records the
+# earlier instance of the same trap printing `du=zvi-quantivly` into gh-doctor's
+# report.
 #
 # The fixture has to make the residue exist: the `preferred` loop only runs inside
 # the clauth section, so the stub is on PATH and a profile carries
@@ -2032,11 +2037,11 @@ want_out "an empty array is also an all-clear" "no profile is quarantined"
 no_out   "...and names nobody"                 "quarantined (auth_broken)"
 
 # THE STORE CANNOT AUTHENTICATE EITHER — an EMPTY accessToken with its expiry and
-# scope intact, which is CLAUDE.md's own discriminator for the victim of an
-# interleaved write. Ranking on the expiry alone calls this live, which is the
-# credential-destroying bug scripts/claude-account-dirs.sh already carries rows
-# for. Here it would tell the reader clauth is refusing a working account when it
-# is not.
+# scope intact, which is docs/CLAUDE_ACCOUNTS.md's own discriminator for the
+# victim of an interleaved write. Ranking on the expiry alone calls this live,
+# which is the credential-destroying bug scripts/claude-account-dirs.sh already
+# carries rows for. Here it would tell the reader clauth is refusing a working
+# account when it is not.
 new_home v4; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 printf '{"claudeAiOauth":{"accessToken":"","refreshToken":"r","expiresAt":%s,"scopes":["s"]}}\n' \

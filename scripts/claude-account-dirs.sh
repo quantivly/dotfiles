@@ -134,12 +134,13 @@ has_jq() { command -v jq >/dev/null 2>&1; }
 #   2 = UNKNOWN -- does not parse, or there is no jq to ask with
 #
 # THE accessToken CHECK IS THE WHOLE POINT, and leaving it out was a
-# credential-destroying bug (found in review, 2026-09-08). CLAUDE.md's own
-# discriminator for an interleaved write is that the victim "keeps its expiresAt
-# and scope" while losing its accessToken -- so ranking on expiry ALONE makes the
-# victim of a lost race outrank the credential that still works, and adopting it
-# copies an empty token over a good one. clauth then polls with nothing and
-# quarantines the account, which is the exact outcome this file exists to prevent.
+# credential-destroying bug (found in review, 2026-09-08).
+# docs/CLAUDE_ACCOUNTS.md's own discriminator for an interleaved write is that the
+# victim "keeps its expiresAt and scope" while losing its accessToken -- so
+# ranking on expiry ALONE makes the victim of a lost race outrank the credential
+# that still works, and adopting it copies an empty token over a good one. clauth
+# then polls with nothing and quarantines the account, which is the exact outcome
+# this file exists to prevent.
 #
 # DEAD and UNKNOWN must stay apart: "this credential cannot work" is a decision,
 # "I could not read it" is a refusal, and collapsing them lets one unreadable side
@@ -153,7 +154,8 @@ cred_state() {
     jq -e . "$f" >/dev/null 2>&1 || return 2
     # -e so the EXIT STATUS decides, never the emptiness of the output. A capture
     # of nothing is indistinguishable from a legitimate answer, which is a bug
-    # this repo has already shipped once (CLAUDE.md, _claude_cred_id).
+    # this repo has already shipped once (docs/CLAUDE_ACCOUNTS.md,
+    # _claude_cred_id).
     jq -e -r '.claudeAiOauth
               | select(type == "object")
               | select((.accessToken // "") != "")
@@ -424,9 +426,9 @@ cred_backup() {
     shopt -u nullglob
     if (( ${#victims[@]} > CRED_BACKUPS_KEPT )); then
         # `stat | sort -rn`, not `ls -t` (SC2012) and not awk. awk is not on the
-        # from-scratch PATH the state tables build, and CLAUDE.md records two
-        # checks that silently produced nothing for exactly that reason. These
-        # names are generated here, so a plain `read` split is safe.
+        # from-scratch PATH the state tables build, and docs/CLAUDE_ACCOUNTS.md
+        # records two checks that silently produced nothing for exactly that
+        # reason. These names are generated here, so a plain `read` split is safe.
         local _mtime path kept=0
         while read -r _mtime path; do
             kept=$(( kept + 1 ))
@@ -499,8 +501,8 @@ cred_write_verdict() {  # $1 = account dir, $2 = verdict, $3.. = detail
 #
 # READ WITH BASH BUILTINS, not `sed`. This script's external tools are jq, cmp,
 # date, stat and the file utilities; adding one more is one more way for a check
-# to go quiet, which CLAUDE.md records for `readlink -f` and `awk` in exactly
-# these files.
+# to go quiet, which docs/CLAUDE_ACCOUNTS.md records for `readlink -f` and `awk`
+# in exactly these files.
 #
 # THE SPAN IS VALIDATED, NOT MERELY TERMINATED, and the difference is a row that
 # failed. The range runs past this assignment whenever the closing `]` does not
@@ -555,20 +557,19 @@ profile_is_quarantined() {
     done
     # An exact comparison, not a substring one: `p1` must not be answered by a
     # list holding `p10`, or the remedy tells the reader to re-login an account
-    # that is perfectly healthy.
-    # An `if`, not `[[ ... ]] && return 0`: as a loop body's last statement that is
-    # a FAILING command on every non-match, and under this script's `set -e` it
-    # would exit silently the moment this function were called anywhere but inside
-    # an `if` (which suspends `set -e` and is the only reason the bare form works
-    # today). CLAUDE.md records that class twice already.
-    # A MEMBER MUST LOOK LIKE A NAME -- the same rule and the same class as the
-    # two zsh readers, added in the same change so the three cannot answer one
-    # file three ways. Checking the even fields validates the separators BETWEEN
-    # the names and never a name, so a span truncated MID-MEMBER flips quote
-    # parity and a neighbouring assignment lands in an ODD field, where this
-    # loop would compare it against $name. Refusing the whole list is the safe
-    # answer here for the reason the zsh twin records: a list we cannot validate
-    # must quarantine nobody.
+    # that is perfectly healthy. An `if`, not `[[ ... ]] && return 0`: as a loop
+    # body's last statement that is a FAILING command on every non-match, and
+    # under this script's `set -e` it would exit silently the moment this function
+    # were called anywhere but inside an `if` (which suspends `set -e` and is the
+    # only reason the bare form works today). docs/CLAUDE_ACCOUNTS.md records that
+    # class twice already. A MEMBER MUST LOOK LIKE A NAME -- the same rule and the
+    # same class as the two zsh readers, added in the same change so the three
+    # cannot answer one file three ways. Checking the even fields validates the
+    # separators BETWEEN the names and never a name, so a span truncated
+    # MID-MEMBER flips quote parity and a neighbouring assignment lands in an ODD
+    # field, where this loop would compare it against $name. Refusing the whole
+    # list is the safe answer here for the reason the zsh twin records: a list we
+    # cannot validate must quarantine nobody.
     for (( i = 1; i < ${#fields[@]}; i += 2 )); do
         [[ -z "${fields[i]//[A-Za-z0-9._@+-]/}" ]] || return 1
     done
@@ -973,9 +974,9 @@ build_one() {
     done
 
     # 2. Prune links whose source has since disappeared. A renamed source
-    #    otherwise leaves a dangling link here forever, and [[ -e ]] follows
-    #    symlinks, so nothing that merely checks existence would ever see it —
-    #    the same trap the systemd reconciler was caught by (CLAUDE.md).
+    # otherwise leaves a dangling link here forever, and [[ -e ]] follows
+    # symlinks, so nothing that merely checks existence would ever see it — the
+    # same trap the systemd reconciler was caught by (docs/HERDR_INTERNALS.md).
     for entry in "$account_dir"/*; do
         name="${entry##*/}"
         is_special "$name" && continue

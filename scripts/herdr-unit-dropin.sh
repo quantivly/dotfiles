@@ -28,8 +28,9 @@
 # --check asks about the OUTCOME, not about this file. "The drop-in exists" is
 # the wrong question: the base unit's own ExecStart is correct at ~/.dotfiles, so
 # a machine there is healthy with or without a drop-in, and demanding one would
-# be a permanently-red check on a correct machine — the failure CLAUDE.md warns
-# about three times. "The launcher that will actually run lives in the checkout
+# be a permanently-red check on a correct machine — the failure
+# docs/HERDR_INTERNALS.md records. "The launcher that will actually run lives in
+# the checkout
 # systemd is pointed at" is right everywhere, needs no severity branch, and
 # catches the states that matter: a foreign checkout with no drop-in, and a
 # drop-in left behind by a checkout that has since moved.
