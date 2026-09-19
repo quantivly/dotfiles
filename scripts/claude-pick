@@ -378,6 +378,7 @@ if [[ -n "$pin" ]]; then
   # _claude_pick_publish, so it must set these itself. Missed, --json --profile
   # reports a null reset for an account whose reset is perfectly well known.
   _claude_pick_r5_at="$_CPM_R5_AT"; _claude_pick_rw_at="$_CPM_RW_AT"
+  _claude_pick_spend="$_CPM_SPEND"
   _claude_pick_holders="$(_claude_holder_count "$pin")"
   _claude_pick_explain=( "$pin"$'\t'pinned$'\t'""$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_AGE"$'\t'"$_claude_pick_holders"$'\t'""$'\t'"$_CPM_R5"$'\t'"$_CPM_R5_AT" )
   # A PIN NEVER REFUSES ON THE ACCOUNT, but it does say when the account it was
@@ -576,6 +577,7 @@ if (( as_json )); then
     --argjson five_hour   "$(json_num "$_claude_pick_u5")" \
     --argjson weekly      "$(json_num "$_claude_pick_uw")" \
     --argjson cache_age   "$(json_num "$_claude_pick_age")" \
+    --arg    spend        "${_claude_pick_spend:-}" \
     --argjson r5          "$(json_instant "$_claude_pick_r5_at")" \
     --argjson rw          "$(json_instant "$_claude_pick_rw_at")" \
     --argjson load1       "$(json_load1)" \
@@ -606,7 +608,8 @@ if (( as_json )); then
        reason:       (if $reason == "" then null else $reason end),
        exit_code:    $exit_code,
        overflow:     ($overflow == 1),
-       usage:        { five_hour: $five_hour, weekly: $weekly, cache_age_s: $cache_age },
+       usage:        { five_hour: $five_hour, weekly: $weekly, cache_age_s: $cache_age,
+                       spend: (if $spend == "" then null else $spend end) },
        resets_at:    { five_hour: $r5, weekly: $rw },
        machine:      { load1: $load1, ncpu: $ncpu, swap_used_pct: $swap },
        gate:         (if $gate_on == 1 then {model: $gate_model, effort: $gate_effort, est_minutes: $gate_min, rate: $gate_rate,

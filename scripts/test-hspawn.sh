@@ -552,6 +552,14 @@ check "an unqualified claude is isolated"  "$(inclaude "CFG $ACCT/personal")"  "
 check "and its args are passed through"    "$(inclaude "CMD --dangerously-nothing")" "1"
 check "and it says which account it took"  "$(outgrep "account 'personal'")"   "1"
 
+# DO-621: a pick that will bill usage credits is SAID on the interactive path.
+cat > "$FHOME/.clauth/profiles/personal/usage_cache.json" <<EOF
+{"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100.0,"resets_at":"$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"},"spend":{"enabled":true,"used":10.0,"limit":250.0}}
+EOF
+run "claude"
+check "a billing pick is announced as billing"   "$(outgrep "usage bills credits")" "1"
+rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
+
 # THE WHOLE POINT. Isolation used to cost the teammux launch, because the only
 # isolated path was `clauth start`, which execs the claude BINARY. Inside a herdr
 # pane the wrapper must still take the herdmates path AND carry the config dir.

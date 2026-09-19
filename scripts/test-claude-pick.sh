@@ -1502,6 +1502,25 @@ CLI_ENV=""; PROCR=""
 check "the CLI does not source system.sh" \
       "$(grep -c 'functions/system.sh' "$PICK")" "0"
 
+# DO-621: a pick that will bill usage credits says so. claude() prints every
+# _claude_pick_warnings entry on an interactive launch (zshrc.herdr), so this is
+# the channel an interactive user actually sees.
+new_home bill1
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+cli --dry-run --json
+check "--json reports the chosen seat's spend state"          "$(jq -r .usage.spend <<<"$CLI_OUT")" "headroom"
+check "a billing pick carries the billing warning" \
+      "$(jq -r '[.warnings[] | select(contains("usage bills credits"))] | length' <<<"$CLI_OUT")" "1"
+# shellcheck disable=SC2016  # the literal $ amounts are the expected value, not an expansion
+check "...naming the amounts" \
+      "$(jq -r '.warnings[] | select(contains("usage bills credits"))' <<<"$CLI_OUT" | grep -c '\$10 of \$250')" "1"
+
+new_home bill2
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":20.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+cli --dry-run --json
+check "an eligible pick carries no billing warning" \
+      "$(jq -r '[.warnings[] | select(contains("bills credits"))] | length' <<<"$CLI_OUT")" "0"
+
 #-----------------------------------------------------------------------------
 echo
 echo "=== canary: nothing the picker READS reaches either stream ==="

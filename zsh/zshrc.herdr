@@ -1390,6 +1390,7 @@ _claude_pick_pool() {
 #   _claude_pick_state      picked | fallback | exhausted | backpressure
 #                           | bad-table | no-profiles | unusable
 #   _claude_pick_class      eligible | unknown | least-bad | fallback
+#                           | weekly-spent | pinned
 #   _claude_pick_reason     one line, safe to print
 #   _claude_pick_tenant     the tenant that decided, or empty
 #   _claude_pick_tenant_state
@@ -1402,8 +1403,13 @@ _claude_pick_pool() {
 #   _claude_pick_load       kept for claude()'s existing one-line announcement
 #   _claude_pick_overflow   1 when the pick came from another tenant's overflow
 #   _claude_pick_leastbad _claude_pick_leastbad_r5
+#   _claude_pick_spend      headroom | none | unknown — the WINNER's spend state
+#                           (DO-621); a weekly-spent pick with headroom also gets
+#                           a _claude_pick_warnings[] entry, since that seat bills
+#                           usage credits
 #   _claude_pick_skipped[]  human-readable, one per refused thing
-#   _claude_pick_warnings[] machine backpressure and lock notes
+#   _claude_pick_warnings[] machine backpressure and lock notes, plus a
+#                           weekly-spent pick's billing notice (DO-621)
 #   _claude_pick_explain[]  "<profile>\t<class>\t<why>\t<u5>\t<uW>\t<age>\t<holders>\t<score>\t<r5>\t<r5_at>"
 #   _claude_pick_exhausted[] "<profile>\t<u5>\t<uW>\t<r5>\t<block_reset>"  (for the
 #                            §5.4 report — field 5 is DO-621's, the reset that
@@ -1443,7 +1449,7 @@ _claude_pick_for_dir() {
   _claude_pick_tier=unknown; _claude_pick_holders=0
   _claude_pick_load=""; _claude_pick_overflow=0
   _claude_pick_tenant=""; _claude_pick_tenant_state=""
-  _claude_pick_leastbad=""; _claude_pick_leastbad_r5=unknown
+  _claude_pick_leastbad=""; _claude_pick_leastbad_r5=unknown; _claude_pick_spend=unknown
   # Reset per call, not appended to: a second pick in the same shell — the
   # debounced --dry-run herdr-draft makes for a form row, say — must not report
   # the first call's refusals as its own.
@@ -1722,6 +1728,18 @@ _claude_pick_publish() {
   _claude_profile_metrics "$1" >/dev/null 2>&1
   _claude_pick_tier="$_CPM_TIER"; _claude_pick_rw="$_CPM_RW"
   _claude_pick_rw_at="$_CPM_RW_AT"
+  _claude_pick_spend="$_CPM_SPEND"
+  # DO-621 — SAY WHEN A PICK WILL COST MONEY. weekly-spent means the aggregate
+  # week is spent and the seat is not blocked, i.e. usage bills credits
+  # (measured 2026-09-18). claude() prints every warning on an interactive
+  # launch, and --json/--explain carry the same entry.
+  if [[ "$_claude_pick_class" == weekly-spent ]]; then
+    if [[ "$_CPM_SPEND" == headroom ]]; then
+      _claude_pick_warnings+=("$1: weekly window spent — usage bills credits${_CPM_SPEND_TXT:+ ($_CPM_SPEND_TXT)}")
+    else
+      _claude_pick_warnings+=("$1: weekly window spent — usage may bill credits (spend headroom unknown)")
+    fi
+  fi
   # claude()'s one-line announcement reads _claude_pick_load: <=100 is a measured
   # 5h figure, 101 is "no reading", 1001 is the fallback. Unchanged, so the
   # announcement is not a second thing to keep in step. Already set on the
@@ -1837,7 +1855,7 @@ claude() {
   local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
-  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown _claude_pick_spend=unknown
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   # Whose name the picker's own messages carry.
   local _claude_pick_prog=claude
@@ -2450,7 +2468,7 @@ hspawn() {
   local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
-  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown _claude_pick_spend=unknown
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   local _claude_pick_prog=hspawn
   local -a rest=()
