@@ -1590,6 +1590,10 @@ _claude_pick_for_dir() {
   _claude_pick_load=""; _claude_pick_overflow=0
   _claude_pick_tenant=""; _claude_pick_tenant_state=""
   _claude_pick_leastbad=""; _claude_pick_leastbad_reset=unknown; _claude_pick_spend=unknown
+  # DO-623: reset for the same reason _claude_pick_spend is above -- an
+  # early-return path (unusable, backpressure) never reaches
+  # _claude_pick_publish, and must not report the PREVIOUS call's windows.
+  _claude_pick_windows=""; _claude_pick_fetched=unknown; _claude_pick_spend_txt=""
   # Reset per call, not appended to: a second pick in the same shell — the
   # debounced --dry-run herdr-draft makes for a form row, say — must not report
   # the first call's refusals as its own.
@@ -1889,6 +1893,11 @@ _claude_pick_publish() {
   _claude_pick_tier="$_CPM_TIER"; _claude_pick_rw="$_CPM_RW"
   _claude_pick_rw_at="$_CPM_RW_AT"
   _claude_pick_spend="$_CPM_SPEND"
+  # DO-623: the gate's per-model windows. Published here rather than read from
+  # the explain row, which is a RANKING record and deliberately model-blind.
+  _claude_pick_windows="$_CPM_WINDOWS"
+  _claude_pick_fetched="$_CPM_FETCHED"
+  _claude_pick_spend_txt="$_CPM_SPEND_TXT"
   # DO-621 — SAY WHEN A PICK WILL COST MONEY. weekly-spent means the aggregate
   # week is spent and the seat is not blocked, i.e. usage bills credits
   # (measured 2026-09-18). claude() prints every warning on an interactive
@@ -2019,6 +2028,10 @@ claude() {
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
   local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
+  # DO-623: published by _claude_pick_publish exactly like _claude_pick_spend
+  # above -- declared here, in the entry point, or the bare assignment there
+  # creates a stray shell-wide global instead of setting this local.
+  local _claude_pick_windows="" _claude_pick_fetched=unknown _claude_pick_spend_txt=""
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   # Whose name the picker's own messages carry.
   local _claude_pick_prog=claude
@@ -2632,6 +2645,10 @@ hspawn() {
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
   local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
+  # DO-623: published by _claude_pick_publish exactly like _claude_pick_spend
+  # above -- declared here, in the entry point, or the bare assignment there
+  # creates a stray shell-wide global instead of setting this local.
+  local _claude_pick_windows="" _claude_pick_fetched=unknown _claude_pick_spend_txt=""
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   local _claude_pick_prog=hspawn
   local -a rest=()

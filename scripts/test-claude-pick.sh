@@ -106,6 +106,11 @@ iso_in() { date -u -d "@$(( $(date +%s) + $1 ))" '+%Y-%m-%dT%H:%M:%S.000000+00:0
 # never decides a row that is about the WEEK.
 FIVE='"five_hour":{"utilization":0.0,"resets_at":"2099-01-01T00:00:00Z"}'
 spend_of() { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \"\$_CPM_SPEND|\$_CPM_SPEND_TXT\""; }
+# DO-623 Task 2: modelled on spend_of() above. metrics() prints a fixed 4-field
+# TSV ("u5 r5 uW tier") that nothing may grow positionally (DO-612), so a
+# dedicated helper -- not a 5th metrics() field -- is the assertion point for
+# the claude-pick-layer windows plumbing.
+windows_of() { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \"\$_CPM_WINDOWS\""; }
 
 #-----------------------------------------------------------------------------
 echo "=== metrics: absent is its own state, never zero ==="
@@ -210,6 +215,20 @@ new_home dw6
 mkprof a1 '{"five_hour":{"utilization":5.0}}'
 check "no per-model windows is the empty string, not base64 of []" \
       "$(zrun "_claude_profile_metrics a1 >/dev/null; print -r -- \"[\$_CPM_WINDOWS]\"")" "[]"
+
+# DO-623 Task 2: the same two facts (a spaced label and a colon-bearing reset
+# round-trip; no weekly_scoped is the empty string, not '[]'), pinned again
+# through windows_of() -- the helper the claude-pick plumbing rows use, so it
+# is proven correct before Task 3 builds on it.
+new_home win_plumb
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$(iso_in 216000)\"},\"weekly_scoped\":[{\"label\":\"7d sonnet 5\",\"utilization\":63.7,\"resets_at\":\"$(iso_in 216000)\"}]}"
+check "windows: a spaced label and a colon-bearing reset round-trip" \
+      "$(windows_of a1 | jq -Rr '@base64d | fromjson | .[] | [.label, (.utilization|floor)] | @tsv')" \
+      "$(printf '7d sonnet 5\t63')"
+
+new_home win_none
+mkprof a1 '{"five_hour":{"utilization":5.0}}'
+check "windows: no weekly_scoped is the empty string, not '[]'" "$(windows_of a1)" ""
 
 new_home m4
 mkprof a1 '-'

@@ -251,7 +251,12 @@ typeset _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unkno
 typeset _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
 typeset _claude_pick_holders=0 _claude_pick_load="" _claude_pick_overflow=0
 typeset _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
+typeset _claude_pick_windows="" _claude_pick_fetched=unknown _claude_pick_spend_txt=""
 typeset _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
+# _claude_ts_delta's two outputs, declared for the same reason every other name
+# here is: a stray global must not leak in from the environment and be reported
+# as a measurement.
+typeset _CLAUDE_TS_DELTA=unknown _CLAUDE_TS_ABS=unknown
 typeset -a _claude_pick_skipped=() _claude_pick_warnings=()
 typeset -a _claude_pick_explain=() _claude_pick_exhausted=()
 typeset -a _claude_pick_cands=() _claude_pick_unknowns=()
@@ -379,6 +384,11 @@ if [[ -n "$pin" ]]; then
   # reports a null reset for an account whose reset is perfectly well known.
   _claude_pick_r5_at="$_CPM_R5_AT"; _claude_pick_rw_at="$_CPM_RW_AT"
   _claude_pick_spend="$_CPM_SPEND"
+  # DO-623: the pin never goes through _claude_pick_publish (see above), so the
+  # gate's per-model windows must be set here too or --profile is dead for the
+  # gate on the one path rabota uses.
+  _claude_pick_windows="$_CPM_WINDOWS"; _claude_pick_fetched="$_CPM_FETCHED"
+  _claude_pick_spend_txt="$_CPM_SPEND_TXT"
   _claude_pick_holders="$(_claude_holder_count "$pin")"
   _claude_pick_explain=( "$pin"$'\t'pinned$'\t'""$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_AGE"$'\t'"$_claude_pick_holders"$'\t'""$'\t'"$_CPM_R5"$'\t'"$_CPM_R5_AT" )
   # A PIN NEVER REFUSES ON THE ACCOUNT, but it does say when the account it was
