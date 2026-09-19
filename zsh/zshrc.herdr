@@ -696,7 +696,7 @@ _claude_ts_delta() {
 #        _CPM_RW_AT the same instant as an absolute epoch, for RENDERING
 #        _CPM_AGE  seconds since the cache was written
 #        _CPM_TIER plan tier, informational only — NEVER a ranking input
-#        _CPM_SPEND     headroom | none | unknown  (spend.enabled/used/limit)
+#        _CPM_SPEND     headroom | none | disabled | unknown  (spend.enabled/used/limit)
 #        _CPM_SPEND_TXT "$used of $limit" for messages, or empty
 #        _CPM_FETCHED   clauth 0.15.2's fetched_at (epoch ms), or `unknown`
 #        _CPM_WINDOWS   base64 JSON [{label,utilization,resets_at}] for Part B
@@ -762,6 +762,7 @@ _claude_profile_metrics() {
              elif . == null then null
              else tostring end),
         (.spend | if type != "object" then null
+                  elif .enabled == false then "disabled"
                   elif .enabled == true and (.used | type) == "number" and (.limit | type) == "number"
                     then (if .used < .limit then "headroom" else "none" end)
                   else null end),
@@ -1075,14 +1076,19 @@ _claude_pick_class() {
   # only: spend `unknown` never escalates to a refusal (missing data is not a
   # wall), and a LAPSED week has uW `unknown` so it never reaches this line.
   #
-  # A MAX SEAT DEMOTES, IT DOES NOT REFUSE, and that is the whole reason
-  # `spend.enabled == false` maps to `unknown` rather than to `none`. The
-  # blocking arm above is MEASURED for a Team seat: six "individual spend limit"
-  # errors on 2026-09-18. For a Max seat there is no measurement at all — only
-  # the field name, and the reasoning "no usage-credit overflow, therefore
-  # blocked". Plausible, and not enough: personal-0 reads used 134.43 against a
-  # limit of 125.0 with enabled:false, so a Max seat does carry a spend counter
-  # that has passed a limit, which is not the shape "no credits" predicts.
+  # A MAX SEAT DEMOTES HERE, IT DOES NOT REFUSE. `spend.enabled == false` maps
+  # to its OWN state `disabled` (DO-623 split it out of `unknown`) so each
+  # consumer can say what is actually known. This line tests `none` alone, so
+  # `disabled` reaches it and does not fire. The GATE (`claude-pick --gate`,
+  # headless, nobody watching) deliberately differs: it refuses a Max seat on a
+  # live spent window as gate-unmeasured (decided 2026-09-19; the reasoning is in
+  # docs/CLAUDE_ACCOUNT_PICKER.md). The blocking arm above is MEASURED for a Team
+  # seat: six "individual spend limit" errors on 2026-09-18. For a Max seat there
+  # is no measurement at all — only the field name, and the reasoning "no
+  # usage-credit overflow, therefore blocked". Plausible, and not enough:
+  # personal-0 reads used 134.43 against a limit of 125.0 with enabled:false, so a
+  # Max seat does carry a spend counter that has passed a limit, which is not the
+  # shape "no credits" predicts.
   #
   # The asymmetry decides it. ~/.config/claude-tenants.zsh composes both
   # non-work tenants entirely out of Max seats (`personal` = personal-0 alone,
@@ -1537,7 +1543,7 @@ _claude_pick_pool() {
 #   _claude_pick_load       kept for claude()'s existing one-line announcement
 #   _claude_pick_overflow   1 when the pick came from another tenant's overflow
 #   _claude_pick_leastbad _claude_pick_leastbad_reset
-#   _claude_pick_spend      headroom | none | unknown — the WINNER's spend state
+#   _claude_pick_spend      headroom | none | disabled | unknown — the WINNER's spend state
 #                           (DO-621); a weekly-spent pick with headroom also gets
 #                           a _claude_pick_warnings[] entry, since that seat bills
 #                           usage credits
@@ -1586,6 +1592,10 @@ _claude_pick_for_dir() {
   _claude_pick_load=""; _claude_pick_overflow=0
   _claude_pick_tenant=""; _claude_pick_tenant_state=""
   _claude_pick_leastbad=""; _claude_pick_leastbad_reset=unknown; _claude_pick_spend=unknown
+  # DO-623: reset for the same reason _claude_pick_spend is above -- an
+  # early-return path (unusable, backpressure) never reaches
+  # _claude_pick_publish, and must not report the PREVIOUS call's windows.
+  _claude_pick_windows=""; _claude_pick_fetched=unknown; _claude_pick_spend_txt=""
   # Reset per call, not appended to: a second pick in the same shell — the
   # debounced --dry-run herdr-draft makes for a form row, say — must not report
   # the first call's refusals as its own.
@@ -1885,16 +1895,24 @@ _claude_pick_publish() {
   _claude_pick_tier="$_CPM_TIER"; _claude_pick_rw="$_CPM_RW"
   _claude_pick_rw_at="$_CPM_RW_AT"
   _claude_pick_spend="$_CPM_SPEND"
+  # DO-623: the gate's per-model windows. Published here rather than read from
+  # the explain row, which is a RANKING record and deliberately model-blind.
+  _claude_pick_windows="$_CPM_WINDOWS"
+  _claude_pick_fetched="$_CPM_FETCHED"
+  _claude_pick_spend_txt="$_CPM_SPEND_TXT"
   # DO-621 — SAY WHEN A PICK WILL COST MONEY. weekly-spent means the aggregate
   # week is spent and the seat is not blocked, i.e. usage bills credits
   # (measured 2026-09-18). claude() prints every warning on an interactive
   # launch, and --json/--explain carry the same entry.
   if [[ "$_claude_pick_class" == weekly-spent ]]; then
-    if [[ "$_CPM_SPEND" == headroom ]]; then
-      _claude_pick_warnings+=("$1: weekly window spent — usage bills credits${_CPM_SPEND_TXT:+ ($_CPM_SPEND_TXT)}")
-    else
-      _claude_pick_warnings+=("$1: weekly window spent — usage may bill credits (spend headroom unknown)")
-    fi
+    case "$_CPM_SPEND" in
+      headroom) _claude_pick_warnings+=("$1: weekly window spent — usage bills credits${_CPM_SPEND_TXT:+ ($_CPM_SPEND_TXT)}") ;;
+      # A Max seat has no spend limit configured, which is not the same as a
+      # spend limit nobody could read. Nobody has watched such a seat block, so
+      # the warning says what is known and claims nothing more.
+      disabled) _claude_pick_warnings+=("$1: weekly window spent — this seat has no spend limit configured, so what it bills is unmeasured") ;;
+      *)        _claude_pick_warnings+=("$1: weekly window spent — usage may bill credits (spend headroom unknown)") ;;
+    esac
   fi
   # claude()'s one-line announcement reads _claude_pick_load: <=100 is a measured
   # 5h figure, 101 is "no reading", 1001 is the fallback. Unchanged, so the
@@ -2012,6 +2030,10 @@ claude() {
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
   local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
+  # DO-623: published by _claude_pick_publish exactly like _claude_pick_spend
+  # above -- declared here, in the entry point, or the bare assignment there
+  # creates a stray shell-wide global instead of setting this local.
+  local _claude_pick_windows="" _claude_pick_fetched=unknown _claude_pick_spend_txt=""
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   # Whose name the picker's own messages carry.
   local _claude_pick_prog=claude
@@ -2625,6 +2647,10 @@ hspawn() {
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
   local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
+  # DO-623: published by _claude_pick_publish exactly like _claude_pick_spend
+  # above -- declared here, in the entry point, or the bare assignment there
+  # creates a stray shell-wide global instead of setting this local.
+  local _claude_pick_windows="" _claude_pick_fetched=unknown _claude_pick_spend_txt=""
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   local _claude_pick_prog=hspawn
   local -a rest=()
