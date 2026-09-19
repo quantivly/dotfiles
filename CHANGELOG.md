@@ -13,14 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (DO-623).** After every 5h arm, the gate checks the aggregate `seven_day` and each per-model
   window whose label governs `--model`. At or past `CLAUDE_PICK_WEEK_SPENT` (100) a live window
   refuses as the new state **`gate-spend-wall`** when spend is `none`, allows when it is
-  `headroom` (the lane bills credits) or `disabled` (a Max seat), and refuses as
-  `gate-unmeasured` when spend is `unknown`. The `gate` JSON object gains three keys:
-  `model_window` (`{label, utilization, resets_at, state}` or `null`), `bills_credits`
-  (`true`/`false`/`null`) and `spend`. rabota maps `gate-spend-wall` to `credential:window`.
+  `headroom` (the lane bills credits), and refuses as `gate-unmeasured` when spend is
+  `unknown` or `disabled` (a Max seat: nobody has watched one run past a spent window, so the
+  gate does not assume it will — the user's decision of 2026-09-19, reversing the DO-623
+  plan's proposal to allow it; the ranker still only demotes such a seat). An undated or
+  unreadable governing window refuses as `gate-unmeasured` too. The `gate` JSON object gains
+  three keys: `model_window` (`{label, utilization, resets_at, state}` or `null`),
+  `bills_credits` (`true`/`false`/`null` — `null` when no governing weekly figure was read)
+  and `spend`. rabota maps `gate-spend-wall` to `credential:window`.
   **The one change a consumer could notice:** `usage.spend` has a new value, `disabled`, for
-  `spend.enabled == false`, which read `unknown` before. This resolves drift in the DO-621
-  spec, whose Part B table would otherwise have refused every Max-seat lane. The reasoning and
-  the open edges are in `docs/CLAUDE_ACCOUNT_PICKER.md`.
+  `spend.enabled == false`, which read `unknown` before. The reasoning and the open edges are
+  in `docs/CLAUDE_ACCOUNT_PICKER.md`.
 
 - **The last six evidence sections left CLAUDE.md, verbatim, and a `docs/` index was added
   (DO-627).** 55,033 chars moved in ten slices: GitHub account routing to

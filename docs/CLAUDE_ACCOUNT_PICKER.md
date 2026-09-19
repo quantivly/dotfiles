@@ -404,7 +404,8 @@ Max seat at 100% of its week is DEMOTED to `weekly-spent` and stays choosable. T
 arm fires only where it was measured: a Team seat whose spend has reached its limit. Both
 non-work tenants are composed entirely of Max seats with no overflow, so refusing on the
 inference would empty them for up to a week; demoting costs one session that fails at auth
-and names the reason.
+and names the reason. The headless gate, which has no one watching, refuses it instead — see
+the DO-623 section below.
 
 **Consume-first on the week, without switching the week off.** `weekf` stays, its penalty
 fading as the weekly reset nears (`weekf_eff`), plus a consume-first bonus scaled by
@@ -447,7 +448,7 @@ spent window is a wall only where the seat cannot bill past it:
 |---|---|---|
 | `none` | `enabled:true`, `used >= limit` | **refuse** `gate-spend-wall` |
 | `headroom` | `enabled:true`, `used < limit` | allow, `bills_credits: true` |
-| `disabled` | `enabled:false` — a Max seat | allow, `bills_credits: null` |
+| `disabled` | `enabled:false` — a Max seat | **refuse** `gate-unmeasured` |
 | `unknown` | no spend block, or a non-numeric `used`/`limit` | **refuse** `gate-unmeasured` |
 
 A lapsed window (dated by `fetched_at`) allows whatever the spend; an undated one refuses
@@ -455,28 +456,35 @@ as `gate-unmeasured`. rabota maps `gate-spend-wall` to `credential:window`, beca
 unlisted states fall to `credential:unmeasured` and a measured refusal would then read as
 "could not measure".
 
-**Why `disabled` allows, since it is the arm that reads as inconsistent.** The DO-621 spec
-said a spent window with spend `unknown` refuses — "the gate is never optimistic". That was
-written when `unknown` meant "no spend block on disk"; Part A's final revision then mapped
-every Max seat there too, so the table as written would have refused every Max-seat lane
-with a spent model window. The split, decided 2026-09-19:
+**Why `disabled` refuses, while the ranker only demotes it.** The DO-623 plan proposed
+allowing a Max seat on a spent window, and the branch first shipped that (`bills_credits:
+null`), arguing that the utilization is a good measurement whose *consequence* is unknown and
+that refusing would empty the all-Max `personal` and `toysim` tenants once DO-624 routes
+`hspawn` through the gate. **The user decided on 2026-09-19 to keep the approved spec's rule
+instead: refuse, reported as `gate-unmeasured`** (the reason says "no spend limit configured
+(a Max seat)" and quotes the seat's own spend figures). The evidence behind the decision:
 
-- **The number is fine; only its consequence is unknown.** Every other `gate-unmeasured`
-  refusal is about a figure that describes nothing — stale, rolled, undated. Here the
-  utilization is freshly fetched with a live reset. "Never optimistic" was written about
-  measurements, not about a good measurement of unknown effect.
-- **Nobody has watched a Max seat block on a spent window.** personal-0 reads `used 134.43`
-  against `limit 125.0` with `enabled:false`, which is not the shape "no credits" predicts.
-  Refusing on the field name is the #123 failure again — a plausible mechanism standing in
-  for an observation.
-- **It is the asymmetry Part A already resolved.** `personal` and `toysim` are composed
-  entirely of Max seats with no overflow. Once DO-624 routes `hspawn` through the gate,
-  refusing would empty both tenants for up to a week; Part A chose to demote for this seat
-  class, and the gate refusing outright where the ranker only demotes is strictly worse.
-- **A truly blocked Max seat fails at the first request**, not twenty minutes in — and the
-  mid-lane death is what the gate exists to prevent.
+- **The gate is never optimistic, and nobody has watched a Max seat run past a spent
+  window.** "Unknown whether it bills or blocks" is an unmeasured consequence; the gate's
+  rule for every unmeasured thing is to refuse.
+- **The on-disk API error records (2026-09-05..09) hold many real "You've hit your
+  individual spend limit · run /usage-credits to raise it" and "monthly spend limit"
+  errors.** The *raise it* wording (not "ask your admin") is consistent with individual
+  seats. This is suggestive, not proof: the records could not be attributed to a seat.
+- **personal-0's `used 134.43` against `limit 125` with `enabled:false`** fits "extra usage
+  was on, overran, and was switched off". Either way the seat has no overflow.
+- **It is the cheaper error.** If such a seat would block, refusing loses nothing; if it
+  would run, the cost is a refused lane until the window resets — against a lane that dies
+  mid-task, which is what the gate exists to prevent.
 
-`unknown` keeps the refusal, now applying only to the missing data it was written about.
+It is `gate-unmeasured`, not `gate-spend-wall`: the block was never measured, and rabota maps
+the two differently. **The ranker and the gate now deliberately differ** (the approved
+spec's decision 6): `_claude_pick_class` still only *demotes* a spent Max seat to
+`weekly-spent`, because an interactive session that fails at auth names its reason, while
+the headless gate refuses. The `disabled` state stays split out of `unknown` — it is what
+lets the gate give an accurate reason and the ranker's warning say "no spend limit
+configured" rather than "spend headroom unknown". A **lapsed** window still allows on a Max
+seat, as on any seat.
 
 **Which window governs a lane.** clauth 0.15.2 builds a label as `"7d " + name.lowercase()`
 from the scope's model `display_name`. The lane's model id loses a trailing `[…]`
@@ -511,9 +519,11 @@ fails there anyway.
   for the governing **candidate** window, i.e. one at or past the threshold, or one whose
   utilization is not a number (`unreadable`, with `utilization: null`). `null` when the
   governing window is below the threshold, and `null` when the aggregate decided.
-- `bills_credits` — `true` when a live spent window is allowed on headroom; `null` when a
-  `disabled` seat is allowed, **and on any refusal** (a refused lane bills nothing and was
-  not asked to); `false` when no spent window governs.
+- `bills_credits` — `true` when a live spent window is allowed on headroom; `null` **on any
+  refusal** (a refused lane bills nothing and was not asked to) and when **no weekly figure
+  governing the lane was read at all** (the aggregate unreadable and no per-model window for
+  the model — `false` would claim a free lane on no measurement); `false` only when at least
+  one governing figure was read and none is spent.
 - A `CLAUDE_PICK_WEEK_SPENT` that is not a non-negative integer refuses as
   `gate-misconfigured`, naming the variable and the value — beyond the spec, on the gate's
   existing rule that a bad tuning value is never a silent default.
@@ -521,14 +531,20 @@ fails there anyway.
 **Measured on the real cache, 2026-09-19** (read-only, `--dry-run`). quantivly-1 was at
 spend $252.17 of $250 (`none`) with `seven_day` 100: a Fable lane refused as
 `gate-spend-wall` on `7d fable` (`live`), and an Opus lane refused on the aggregate with
-`model_window` null. personal-0, `disabled` with a 30% week, allowed a Fable lane. The
+`model_window` null. personal-0, `disabled` with a 30% week, allowed a Fable lane (no
+window spent, so the `disabled` rule never came into play). The
 plan's verification expected quantivly-1 to still have headroom and a Fable lane to be
 allowed on it; by the time the arm ran, the seat had spent through its limit.
 
 **Unreadable data refuses.** A governing window whose utilization is not a number refuses
-as `gate-unmeasured` (state `unreadable`), and per-model windows that cannot be decoded at
-all refuse as `gate-unmeasured`; a malformed element (a non-string label or reset) is
-coerced to one row rather than aborting the decode and taking every later window with it.
+as `gate-unmeasured` (state `unreadable`); so does a spent window with **no `resets_at` at
+all** (state `undated` — for the aggregate too, which the metrics layer keeps at its number
+when the reset is absent, since an absent reset is not a lapse). Per-model windows that
+cannot be decoded at all refuse as `gate-unmeasured` — **unless the aggregate is a measured
+live wall** (spend `none`), which the metrics layer read without the decode and which is then
+reported as `gate-spend-wall`. A malformed element (a non-string label or reset) is coerced
+to one row rather than aborting the decode and taking every later window with it. The lane's
+model id is matched **case-insensitively** (`--model Fable` is governed by `7d fable`).
 
 Rows: `scripts/test-claude-pick.sh` (the "gate: the weekly spend wall" block — the four
 spend states, the pin, scoping, attribution, worst-of-matches, malformed and unreadable

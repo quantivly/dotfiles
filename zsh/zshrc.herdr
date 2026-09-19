@@ -1076,11 +1076,13 @@ _claude_pick_class() {
   # only: spend `unknown` never escalates to a refusal (missing data is not a
   # wall), and a LAPSED week has uW `unknown` so it never reaches this line.
   #
-  # A MAX SEAT DEMOTES, IT DOES NOT REFUSE, and that is the whole reason
-  # `spend.enabled == false` maps to its OWN state `disabled` (DO-623 split it
-  # out of `unknown`; before that split, refusing on `unknown` in the gate would
-  # have refused every Max seat). This line tests `none` alone, so `disabled`
-  # reaches it and does not fire. The blocking arm above is MEASURED for a Team
+  # A MAX SEAT DEMOTES HERE, IT DOES NOT REFUSE. `spend.enabled == false` maps
+  # to its OWN state `disabled` (DO-623 split it out of `unknown`) so each
+  # consumer can say what is actually known. This line tests `none` alone, so
+  # `disabled` reaches it and does not fire. The GATE (`claude-pick --gate`,
+  # headless, nobody watching) deliberately differs: it refuses a Max seat on a
+  # live spent window as gate-unmeasured (decided 2026-09-19; the reasoning is in
+  # docs/CLAUDE_ACCOUNT_PICKER.md). The blocking arm above is MEASURED for a Team
   # seat: six "individual spend limit" errors on 2026-09-18. For a Max seat there
   # is no measurement at all — only the field name, and the reasoning "no
   # usage-credit overflow, therefore blocked". Plausible, and not enough:
