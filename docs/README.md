@@ -73,7 +73,7 @@ skill rather than reading the records end to end.
 |---|---|---|
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | quick fixes: slow startup, missing functions, alias conflicts, git identity and account routing | guide |
 | [DOTFILES_DEPLOY.md](DOTFILES_DEPLOY.md) | why `git checkout` here *is* a deploy, how that failed in both directions, and the live-config, worktree and umask guards | record |
-| [REPO_CHECKS.md](REPO_CHECKS.md) | the CI guards and what reviewing them taught: the apt outage, seventeen defects in one checker under a green suite, the mutation rounds | record |
+| [REPO_CHECKS.md](REPO_CHECKS.md) | the CI guards and what reviewing them taught: the apt outage, seventeen defects in one checker under a green suite, the version-sync line window, the mutation rounds | record |
 
 ## Skills
 

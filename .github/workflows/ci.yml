@@ -808,6 +808,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # The state table first: it proves the checker can still fail. The step
+      # below proves the tree we ship passes it, which a broken checker also
+      # reports. DO-631.
+      - name: Run the version-sync state table
+        run: ./scripts/test-sync-version-docs.sh
+
       - name: Check version sync
         run: |
           chmod +x scripts/sync-version-docs.sh
