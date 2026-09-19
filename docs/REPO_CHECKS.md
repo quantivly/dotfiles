@@ -333,3 +333,97 @@ mutation set what you already ask of a row: what would it fail to notice?** The
 current set is rebuilt against the rewritten matching core, and the honest figure
 is whatever an independent re-run reports — recorded when it does, not asserted
 here in advance.
+
+---
+
+## The version-sync checker's line window (DO-631)
+
+`scripts/sync-version-docs.sh` read the tool-version table out of
+`docs/TOOL_VERSION_UPDATES.md` as `sed -n '48,61p'`, and rewrote it — under
+`--update` — between a hardcoded 48 and 61. A fixed window is coupled to two
+things at once: every line above the table, and the table's own length.
+
+Measured on copies of the real tree, before any fix:
+
+| tree | before |
+|---|---|
+| unchanged | exit 0, `All tool versions are in sync!` |
+| one blank line inserted at the top | exit 1, `fastfetch: missing from docs` |
+| a 15th tool added to `.mise.toml`, `TOOL_ORDER` **and** the table | exit 1, `ripgrep2: missing from docs` |
+| a row added to the table that `TOOL_ORDER` does not name | **exit 0**, `All tool versions are in sync!` |
+| `--update` on an unchanged tree | one-line diff: a new blank line, every run |
+| `--update` on a tree shifted down one line | deletes the `\|---\|` separator row, duplicates the last row below the table |
+
+Row two is DO-627, hit for real in CI: a one-line correction on line 12 became
+two lines and the table's last row moved from 61 to 62. The workaround at the
+time was to keep the correction to one line — writing around the checker, which
+is what this issue undoes.
+
+**The issue's own analysis of the silent case was wrong, and the fix is right
+anyway.** DO-631 predicted that a 15th tool in `TOOL_ORDER` would fall outside
+the window, never be compared, and leave the job printing `in sync`. It does
+fall outside the window — and `parse_doc_version` then returns empty, which the
+checker reports as `missing from docs` and exits 1. Loud, and a false positive
+on a tree that is correct. The genuinely silent case is row four: a row in the
+table that `TOOL_ORDER` does not name is compared by nothing, and nothing says
+so. Both are fixed by what the issue prescribed — an anchored slice plus a
+row-count assertion — so the remedy survived its rationale being wrong. Worth
+recording because the wrong story is the more plausible one: it is the shape
+the rest of `CLAUDE.md` warns about, and it reads as true until you run it.
+
+The two `--update` defects were not in the issue at all. They were found by
+writing a row for the write path on the grounds that `--update` carried the
+same two hardcoded numbers — and `--update` is the remedy the failing `--check`
+tells you to run, so a `--check` that survives a shifted file while `--update`
+still corrupts one is half a fix. The blank lines under the table in the
+tracked doc are the first defect's fossil record; `echo -e "$new_rows"` on a
+string that already ended in a newline appended one more, every run, for as
+long as the script has existed.
+
+**What the fix turns on.** The table is located by matching its header row in
+full and read to the first line that is not a table row. Matching the header in
+full is what keeps the `Known Compatibility Issues` table lower in the same
+file — `| Tool | Version | Issue | Workaround |`, and it carries a `bat` row
+with a *different* version — from being read by mistake, which is what the
+`48,61` window was really defending against. A header that cannot be found is
+**exit 2**, never 0 and never 1: a checker that cannot find its input must not
+report a clean tree, and "could not run" must not read as "out of sync".
+
+**A third defect, found by the state table rather than by review.** `awk` here
+is mawk, and an awk that fails prints nothing and exits non-zero. The bounds
+were read straight into `read` from a process substitution, so that empty
+output looked like a legitimate parse, `read` returned 1, and `set -e` exited
+the script — **status 1, with no output whatsoever**. A CI job failing as "out
+of sync" over a tool that never ran, with an empty log to debug it from. It is
+the `CLAUDE.md` rule about external tools going quiet, reproduced inside the
+change written to obey that rule's sibling. Measured with a stub `awk` on
+`PATH`; now exit 2 with a message naming awk, and a row that uses the same stub.
+
+**State table:** `scripts/test-sync-version-docs.sh`, 80 checks, hermetic, run
+in CI. Every row builds its own tree — a copy of the script under test, a
+synthetic `.mise.toml` and a synthetic doc — so nothing depends on what this
+repo happens to pin today. The tool list is read out of the script's own
+`TOOL_ORDER` rather than duplicated, and the extraction is asserted rather than
+trusted: one that quietly produced nothing would build an empty table, and the
+rows expecting a clean run would fail for a reason that has nothing to do with
+what they name.
+
+Two needle rules from the earlier rounds paid off directly here. `missing from
+docs` is printed both by the window bug and by a genuinely absent row, so the
+position-independence rows assert the *absence* of that string and an exit
+status, never its presence. And the fixture that duplicates a table row first
+duplicated two — the compatibility table's row starts `| bat |` as well — so
+fixtures address a row by its whole line, and each fixture edit asserts that it
+applied.
+
+**Mutation sweep: 11 mutants, 11 deaths**, each killed by rows that name the
+rule it removed. Both halves of the silent-direction guard were mutated
+separately, because they catch different things and either alone leaves a gap:
+dropping the set check leaves a stray row unnamed while the count still fails
+the run, and dropping the count check lets a *duplicated* row through entirely —
+the name sets stay equal and only the lengths differ. Every mutation was
+dry-run for applicability first — one that no longer matches reads exactly like
+a survivor, and one of these did stop matching after a later edit and had to be
+re-pinned. `EXPECTED_TOTAL` was
+proven non-decorative by deleting a row and watching it report a vanished row
+rather than `all 80 checks passed`.
