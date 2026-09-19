@@ -1546,6 +1546,17 @@ want_out "...and say the threshold they were judged against" \
          "within the picker's 3600s threshold"
 want_rc  "...and do not fail the doctor" 0
 
+# DO-621: the doctor must agree with the picker about a cache's age. A plan-only
+# rewrite leaves the mtime fresh while clauth 0.15.2's fetched_at says the
+# reading is two hours old; the picker (test-claude-pick.sh, "cache age" ag1)
+# calls that stale, so the doctor must too.
+new_home ufa1; write_cred
+mk_usage_profile p1 60
+printf '{"five_hour":{"utilization":10.0},"fetched_at":%s}\n' "$(( ($(date +%s) - 7200) * 1000 ))" \
+    > "$FHOME/.clauth/profiles/p1/usage_cache.json"
+run_doctor
+want_out "the doctor dates a cache from fetched_at, not its fresh mtime" "oldest 2h ago"
+
 # The whole reason the line exists: a cache past the threshold is a profile the
 # picker has stopped ranking, and nothing else on the machine says so.
 new_home s2; write_cred

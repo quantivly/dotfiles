@@ -476,6 +476,35 @@ _claude_file_age_s() {
   print -r -- $(( EPOCHSECONDS - mtime ))
 }
 
+# Age of a usage cache's READING, in seconds: clauth 0.15.2's fetched_at when it
+# has one, else the file mtime. THE SAME RULE AS _claude_profile_cache_age in
+# zsh/zshrc.herdr, deliberately duplicated rather than shared: this file must
+# work without zshrc.herdr (a modular adopter has only one of them), and two
+# readers of one file must agree on its age — the same fixture shape is pinned
+# in both suites (DO-621).
+_claude_usage_cache_age_s() {
+  local f="$1" fa s
+  zmodload zsh/datetime 2>/dev/null || return 1
+  # ONE CLOCK READ, not four: reading EPOCHSECONDS separately for the ahead
+  # test, the clamp test, the clamp assignment and the final subtraction would
+  # let a second boundary falling between any two of them turn an exact answer
+  # into an off-by-one — the same class DO-612 fixed for a rendered reset
+  # instant, and already fixed once in this rule's twin,
+  # _claude_profile_cache_age (zsh/zshrc.herdr). This copies that fix rather
+  # than repeating the bug it was fixed for.
+  local now=$EPOCHSECONDS
+  fa="$(jq -r '.fetched_at // empty | floor' "$f" 2>/dev/null)"
+  if [[ "$fa" == <-> ]]; then
+    s=$(( fa / 1000 ))
+    if (( s <= now + 60 )); then
+      (( s > now )) && s=$now
+      print -r -- $(( now - s ))
+      return 0
+    fi
+  fi
+  _claude_file_age_s "$f"
+}
+
 # Can this name be a clauth profile at all?
 #
 # Returns 0 when it CANNOT. One definition, used by both enumerations below —
@@ -1234,7 +1263,7 @@ claude-doctor() {
     if [[ ! -r "$ucf" ]]; then
       (( uc_missing++ )); continue
     fi
-    uc_age="$(_claude_file_age_s "$ucf")" || uc_age=""
+    uc_age="$(_claude_usage_cache_age_s "$ucf")" || uc_age=""
     if [[ -z "$uc_age" ]]; then
       (( uc_missing++ )); continue
     fi
