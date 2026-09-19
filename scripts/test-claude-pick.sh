@@ -99,13 +99,25 @@ metrics() {    # $1 = profile -> "u5 r5 uW tier"
           print -r -- \"\$_CPM_U5 \$_CPM_R5 \$_CPM_UW \$_CPM_TIER\""
 }
 
+# An RFC 3339 instant N seconds from now (negative = past), in clauth's own shape.
+# GNU date, as the suite's `touch -d` already requires.
+iso_in() { date -u -d "@$(( $(date +%s) + $1 ))" '+%Y-%m-%dT%H:%M:%S.000000+00:00'; }
+# A 5h window that is fresh and whose reset is far away, so its bonus is 0 and it
+# never decides a row that is about the WEEK.
+# shellcheck disable=SC2034  # unused by Task 1's own rows; provisioned here for later tasks in this plan
+FIVE='"five_hour":{"utilization":0.0,"resets_at":"2099-01-01T00:00:00Z"}'
+spend_of() { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \"\$_CPM_SPEND|\$_CPM_SPEND_TXT\""; }
+
 #-----------------------------------------------------------------------------
 echo "=== metrics: absent is its own state, never zero ==="
 
 new_home m1
 mkprof a1 '{"plan":{"tier":"Team"},"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0},"weekly_scoped":[{"label":"7d x","utilization":55.0}]}'
 check "u5 floors to an integer"            "$(metrics a1 | cut -d' ' -f1)" "10"
-check "uW is the WORST of 7d and scoped"   "$(metrics a1 | cut -d' ' -f3)" "55"
+# DO-621: uW is the AGGREGATE week alone. A per-model window (here 55) is the
+# gate's business; folding it in with max() is what made two seats spent on
+# OPPOSITE axes (2026-09-18: 83%/fable 100 vs 100%/fable 63) read identically.
+check "uW is seven_day alone — a per-model window does not raise it" "$(metrics a1 | cut -d' ' -f3)" "40"
 check "tier is carried through"            "$(metrics a1 | cut -d' ' -f4)" "Team"
 
 # A Max plan writes the tier as an OBJECT ({"Max":20}); a Team plan as a string.
@@ -124,6 +136,63 @@ new_home m3
 mkprof a1 '{"five_hour":{"utilization":5.0,"resets_at":"not a timestamp"}}'
 check "an UNPARSEABLE resets_at is 'unknown'"   "$(metrics a1 | cut -d' ' -f2)" "unknown"
 check "...and does not poison u5"               "$(metrics a1 | cut -d' ' -f1)" "5"
+
+# uW and rW must describe ONE window. The live instants coincide to the second,
+# so without a fixture whose per-model reset DIFFERS this split is unfalsifiable.
+# (Fixture group renamed dw1 — the brief's own "m4" collides with the
+# pre-existing "no usage cache" group of that name a few lines below, and
+# new_home never clears a reused directory, so reusing it would leave this
+# group's usage_cache.json behind for that unrelated row to read.)
+new_home dw1
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$(iso_in 518400)\"},\"weekly_scoped\":[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 3600)\"}]}"
+check "a spent per-model window does not reach uW"               "$(metrics a1 | cut -d' ' -f3)" "40"
+check "...and rW is seven_day's reset, not the per-model one" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; (( _CPM_RW > 500000 )) && print yes || print no")" "yes"
+
+# A LAPSED week is unmeasured: the figure describes a window that has ended.
+new_home dw2
+mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0,"resets_at":"2000-01-01T00:00:00Z"}}'
+check "a LAPSED week is unmeasured: uW is unknown"                "$(metrics a1 | cut -d' ' -f3)" "unknown"
+# ...but ABSENT is not lapsed: clauth omits resets_at on an unstarted window, and
+# un-demoting on missing data is optimism.
+new_home dw3
+mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'
+check "an ABSENT weekly reset is not a lapse: uW still counts"    "$(metrics a1 | cut -d' ' -f3)" "100"
+
+# Spend headroom: the signal that separates free, billed and blocked usage.
+new_home dw4
+mkprof a1 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":190.77,"limit":250.0}}'
+mkprof b2 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":275.23,"limit":275.0}}'
+mkprof c3 '{"five_hour":{"utilization":5.0},"spend":{"enabled":false,"used":0.0}}'
+mkprof d4 '{"five_hour":{"utilization":5.0}}'
+mkprof e5 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":10.0}}'
+# shellcheck disable=SC2016  # the literal $ amounts are the expected value, not an expansion
+check "spend under its limit is headroom, with the amounts"       "$(spend_of a1)" 'headroom|$190.77 of $250'
+check "spend at its limit is none"                                "$(spend_of b2 | cut -d'|' -f1)" "none"
+check "spend disabled (a Max seat) is none"                       "$(spend_of c3 | cut -d'|' -f1)" "none"
+check "no spend block is unknown, never none"                     "$(spend_of d4)" "unknown|"
+check "a spend block with no limit is unknown"                    "$(spend_of e5 | cut -d'|' -f1)" "unknown"
+# The reset at the top of the function is load-bearing: a profile with no spend
+# block must not inherit the previous profile's value.
+check "one profile's spend never leaks into the next one measured" \
+      "$(zrun "_claude_profile_metrics b2 >/dev/null; _claude_profile_metrics d4 >/dev/null; print -r -- \$_CPM_SPEND")" "unknown"
+
+# fetched_at and the per-model windows ride along for Task 2 and Part B.
+new_home dw5
+mkprof a1 '{"five_hour":{"utilization":5.0},"fetched_at":1789759993962,"weekly_scoped":[{"label":"7d sonnet 5","utilization":38.0,"resets_at":"2026-09-21T08:59:59.512214+00:00"}]}'
+check "fetched_at is carried as an integer" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; print -r -- \$_CPM_FETCHED")" "1789759993962"
+# Compared field by field, NOT as a JSON string: jq 1.7+ preserves the literal
+# `38.0` and 1.6 prints `38`, and CI runs both (Ubuntu 22.04 and 24.04). A row
+# that hardcodes either form is red on the other runner.
+check "per-model windows round-trip: a spaced label and a colon-bearing reset survive" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; print -r -- \$_CPM_WINDOWS" \
+         | jq -Rc '@base64d | fromjson | .[0] | [.label, .resets_at, (.utilization == 38)]')" \
+      '["7d sonnet 5","2026-09-21T08:59:59.512214+00:00",true]'
+new_home dw6
+mkprof a1 '{"five_hour":{"utilization":5.0}}'
+check "no per-model windows is the empty string, not base64 of []" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; print -r -- \"[\$_CPM_WINDOWS]\"")" "[]"
 
 new_home m4
 mkprof a1 '-'

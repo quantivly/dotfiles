@@ -367,7 +367,7 @@ if [[ -n "$pin" ]]; then
   _claude_pick_reason="pinned with --profile"
   # The numbers are still reported, because a caller that pinned an account still
   # wants to know it is about to start on a spent window.
-  typeset _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT
+  typeset _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
   _claude_profile_metrics "$pin" >/dev/null 2>&1
   _claude_pick_u5="$_CPM_U5"; _claude_pick_uw="$_CPM_UW"; _claude_pick_r5="$_CPM_R5"
   _claude_pick_rw="$_CPM_RW"; _claude_pick_age="$_CPM_AGE"; _claude_pick_tier="$_CPM_TIER"
