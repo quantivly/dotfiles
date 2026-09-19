@@ -51,6 +51,11 @@ would be **inferred from a field and never observed**, so it is deliberately NOT
 acted on: `enabled == false` maps to `unknown`, and a Max seat demotes rather than
 refusing. (Revised 2026-09-19, before merge.)
 
+> **Superseded by DO-623 (2026-09-19).** `enabled == false` is now its own state,
+> `disabled`, split out of `unknown` so the gate can tell a Max seat from missing data.
+> The ranker's behaviour is unchanged: a spent Max seat demotes (`weekly-spent`), never
+> `exhausted`.
+
 These readings refine DO-574 rather than contradict it. DO-574's 2026-09-10
 measurement, live sessions on 100% seats, is the billing row: a spent week is not a
 wall while spend headroom lasts. It becomes a wall once headroom is gone.
@@ -94,6 +99,8 @@ not a block. An earlier draft of this spec claimed otherwise; that claim is retr
   - `headroom`: `spend.enabled == true`, and `used` and `limit` are both numeric with `used < limit`
   - `none`: `enabled == true` and `used >= limit` (the measured blocking case)
   - `unknown`: anything else, including no spend block, a missing `limit`, or a non-numeric value
+  - *(Superseded by DO-623, 2026-09-19: `enabled == false` is now `disabled`, not
+    `unknown`; a Max seat still demotes as `weekly-spent`, never `exhausted`.)*
 - **Appended fields.** Add `_CPM_SPEND`, `fetched_at`, and the per-model windows for
   Part B. The per-model windows travel as one `@json` array of
   `{label, utilization, resets_at}`, not colon-separated triples: `resets_at` itself
@@ -304,7 +311,7 @@ exactly like a survivor.
 | lapsed `seven_day` at 100: not demoted, no bonus | the lapse |
 | `weekly_scoped` reset differs from `seven_day` reset | `uW` and `rW` are one window. The live instants coincide, so without this the split is unfalsifiable |
 | the complementary pair: 1 `eligible`, 3 `exhausted` | aggregate-only tier plus the spend wall |
-| aggregate spent with spend `headroom` / `unknown` / `none` / `enabled:false` | `weekly-spent` / `weekly-spent` / `exhausted` / `exhausted` |
+| aggregate spent with spend `headroom` / `unknown` / `none` / `enabled:false` | `weekly-spent` / `weekly-spent` / `exhausted` / `weekly-spent` (the last cell read `exhausted`, wrong before DO-623: a Max seat demotes, never exhausts) |
 | an exhausted spend-wall seat reports `rW` as its reset | the exhaustion report names the right wait |
 | `fetched_at` old with a new mtime: stale; absent: mtime; 30 s ahead: clamps to 0; 1 h ahead: mtime | `fetched_at` |
 | the doctor's freshness agrees with the picker on a `fetched_at` fixture | two readers, one answer |

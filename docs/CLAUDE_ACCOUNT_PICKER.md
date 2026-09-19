@@ -485,9 +485,11 @@ from the scope's model `display_name`. The lane's model id loses a trailing `[�
 `7d sonnet 5` matches `claude-sonnet-5`. **`7d claude` governs nothing**: every model id
 begins `claude-`, so it would turn one spent surface window into a refusal for the whole
 seat. With no governing label there is no per-model check. When several windows govern,
-the **worst** decides — a refusal outranks an allow, then the higher utilization wins —
-because highest-utilization alone lets a lapsed 100 (allow) mask a live 100 with no
-headroom (refuse). The aggregate is evaluated **after** the model windows, so on a tie the
+the **worst** decides — a live refusal outranks any other refusal (`undated`,
+`unreadable`), a refusal outranks an allow, then the higher utilization wins — because
+highest-utilization alone lets a lapsed 100 (allow) mask a live 100 with no headroom
+(refuse), and lets an undated 100 listed first report a walled seat as `gate-unmeasured`
+rather than `gate-spend-wall`, which rabota maps differently. The aggregate is evaluated **after** the model windows, so on a tie the
 lane's own window is the one reported.
 
 **A lapse needs a real clock.** A per-model window whose reset is past counts as `lapsed`
@@ -505,8 +507,9 @@ fails there anyway.
 **What the gate object reports**, as built — the spec predicted less precise rules:
 
 - `spend` — the `_CPM_SPEND` state that decided.
-- `model_window` — `{label, utilization, resets_at, state: live|lapsed|undated}` for the
-  governing **candidate** window, i.e. one at or past the threshold. `null` when the
+- `model_window` — `{label, utilization, resets_at, state: live|lapsed|undated|unreadable}`
+  for the governing **candidate** window, i.e. one at or past the threshold, or one whose
+  utilization is not a number (`unreadable`, with `utilization: null`). `null` when the
   governing window is below the threshold, and `null` when the aggregate decided.
 - `bills_credits` — `true` when a live spent window is allowed on headroom; `null` when a
   `disabled` seat is allowed, **and on any refusal** (a refused lane bills nothing and was
@@ -522,18 +525,14 @@ spend $252.17 of $250 (`none`) with `seven_day` 100: a Fable lane refused as
 plan's verification expected quantivly-1 to still have headroom and a Fable lane to be
 allowed on it; by the time the arm ran, the seat had spent through its limit.
 
-**Open edges, not decisions:**
-
-- A per-model block that fails to decode, or a non-numeric utilization, yields **no
-  candidate**, and the gate then allows. That is optimistic, against the gate's own rule;
-  the 5h arms are the only backstop.
-- Among refusals the higher utilization wins **regardless of state**, so an `undated`
-  window at a higher percentage can be reported instead of a live spend wall. The verdict is
-  the same, but the state is `gate-unmeasured` rather than `gate-spend-wall`, and rabota maps
-  the two differently.
+**Unreadable data refuses.** A governing window whose utilization is not a number refuses
+as `gate-unmeasured` (state `unreadable`), and per-model windows that cannot be decoded at
+all refuse as `gate-unmeasured`; a malformed element (a non-string label or reset) is
+coerced to one row rather than aborting the decode and taking every later window with it.
 
 Rows: `scripts/test-claude-pick.sh` (the "gate: the weekly spend wall" block — the four
-spend states, the pin, scoping, attribution, worst-of-matches, lapse and precedence, the
+spend states, the pin, scoping, attribution, worst-of-matches, malformed and unreadable
+windows, a failed decode (through a jq shim), lapse and precedence, the
 aggregate cases and the threshold guard; plus the `disabled` metrics rows),
 `scripts/test-hspawn.sh` (a `disabled` seat's wording reaches `claude()`),
 `rabota/tests/test_budget.py` (`gate-spend-wall` → `credential:window`). Plan:
