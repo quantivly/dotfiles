@@ -1543,7 +1543,7 @@ _claude_pick_pool() {
 #   _claude_pick_load       kept for claude()'s existing one-line announcement
 #   _claude_pick_overflow   1 when the pick came from another tenant's overflow
 #   _claude_pick_leastbad _claude_pick_leastbad_reset
-#   _claude_pick_spend      headroom | none | unknown — the WINNER's spend state
+#   _claude_pick_spend      headroom | none | disabled | unknown — the WINNER's spend state
 #                           (DO-621); a weekly-spent pick with headroom also gets
 #                           a _claude_pick_warnings[] entry, since that seat bills
 #                           usage credits

@@ -72,7 +72,8 @@ at all, and a weekly-spent member *is* usable. Dropping it from that guard left 
 rows green while a capped-but-usable pool silently borrowed someone else's seat — a row now names
 it. **An unpinned fix is an unverified fix, and a surviving mutant is the only thing that says so.**
 
-- **The weekly window DEMOTES; it never refuses.** §5.3 made `uW >= 100` an exhaustion class that
+- **In the ranker, the weekly window DEMOTES; it never refuses** (the gate is another matter —
+  see the DO-623 section). §5.3 made `uW >= 100` an exhaustion class that
   every headless caller refuses on. Measured 2026-09-10: two Team seats read `seven_day = 100` **with
   live sessions on them**, their per-model `weekly_scoped` windows read 38 and 54 (so the block is
   partial), and there were **zero** weekly-reset refusals across 750 transcripts in 7 days — the

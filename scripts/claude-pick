@@ -24,8 +24,9 @@
 #       --gate, the picked seat's PROJECTED end-utilisation exceeds the cap
 #       (state gate-projected), its 5h window is unmeasured or stale (state
 #       gate-unmeasured), a live weekly window governing the lane is spent with
-#       no spend headroom left (state gate-spend-wall, DO-623) or with spend
-#       unknown, disabled, undated or unreadable (gate-unmeasured), or a tuning
+#       no spend headroom left (state gate-spend-wall, DO-623), or with spend
+#       unknown or disabled, or the window undated or unreadable
+#       (gate-unmeasured), or a tuning
 #       value does not parse (state gate-misconfigured) — see THE SEAT GATE
 #       below.
 #   3   refused — a machine ceiling (CLAUDE_PICK_LOAD_MAX / _SWAP_MAX) was

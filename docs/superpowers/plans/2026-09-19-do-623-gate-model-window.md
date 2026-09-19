@@ -46,6 +46,13 @@ seats on an inference was taken back (`zsh/zshrc.herdr:1078-1097`,
 Implemented verbatim, the table would refuse every Max-seat lane whose model window is spent.
 **Decision (2026-09-19): split `disabled` out of `unknown`, and allow it.**
 
+> **Superseded 2026-09-19, before merge.** An independent review of PR #177 challenged
+> this, and the user decided to keep the approved spec's rule: on a live spent window the
+> gate **refuses** `disabled` as `gate-unmeasured`. The `disabled` state stays. Everything
+> below that argues for *allowing* it is the plan's original position, kept as history.
+> The as-built rule and its evidence: `docs/CLAUDE_ACCOUNT_PICKER.md`, "The gate and the
+> model's own window (DO-623)".
+
 | `_CPM_SPEND` | means | gate, on a live spent window |
 |---|---|---|
 | `none` | `enabled:true`, `used >= limit` | **refuse** `gate-spend-wall` |
