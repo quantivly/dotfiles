@@ -168,13 +168,31 @@ mkprof e5 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":10.0}
 # shellcheck disable=SC2016  # the literal $ amounts are the expected value, not an expansion
 check "spend under its limit is headroom, with the amounts"       "$(spend_of a1)" 'headroom|$190.77 of $250'
 check "spend at its limit is none"                                "$(spend_of b2 | cut -d'|' -f1)" "none"
-check "spend disabled (a Max seat) is unknown, never none"        "$(spend_of c3 | cut -d'|' -f1)" "unknown"
+check "spend disabled (a Max seat) is 'disabled', never none"     "$(spend_of c3 | cut -d'|' -f1)" "disabled"
 check "no spend block is unknown, never none"                     "$(spend_of d4)" "unknown|"
 check "a spend block with no limit is unknown"                    "$(spend_of e5 | cut -d'|' -f1)" "unknown"
 # The reset at the top of the function is load-bearing: a profile with no spend
 # block must not inherit the previous profile's value.
 check "one profile's spend never leaks into the next one measured" \
       "$(zrun "_claude_profile_metrics b2 >/dev/null; _claude_profile_metrics d4 >/dev/null; print -r -- \$_CPM_SPEND")" "unknown"
+
+# DO-623: `disabled` is its own state, split out of `unknown` -- a Max seat with
+# enabled:false is a measured fact ("no spend limit configured"), not an
+# unmeasured one. The fixture is the real shape (personal-0 reads 134.43 against
+# 125.0 with enabled:false), which is why "no credits" is not what enabled:false
+# means. (The companion assertion that it still only DEMOTES the pick to
+# weekly-spent -- not exhausted -- lives below with sw2/sw3, once `pfd` exists.)
+new_home sp_disabled
+mkprof a1 "{\"plan\":{\"tier\":{\"Max\":20}},\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+check "spend: enabled:false is 'disabled', not 'unknown'" "$(spend_of a1 | cut -d'|' -f1)" "disabled"
+
+new_home sp_absent_enabled
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"spend\":{\"used\":1.0,\"limit\":2.0}}"
+check "spend: an ABSENT enabled is still 'unknown'" "$(spend_of a1 | cut -d'|' -f1)" "unknown"
+
+new_home sp_nonnumeric
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"spend\":{\"enabled\":true,\"used\":\"x\",\"limit\":2.0}}"
+check "spend: a non-numeric used is 'unknown', not 'disabled'" "$(spend_of a1 | cut -d'|' -f1)" "unknown"
 
 # fetched_at and the per-model windows ride along for Task 2 and Part B.
 new_home dw5
@@ -402,6 +420,14 @@ pfd() {   # $1 = prelude, $2 = dir, $3 = tenant, $4 = strict
 new_home sw2
 mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
 check "a billing seat is picked in the weekly-spent tier"   "$(pfd '' '' '' 0 | cut -d: -f1,4)" "0:weekly-spent"
+
+# DO-623 companion to sp_disabled above: `disabled` still only DEMOTES the pick
+# (to weekly-spent), it never refuses it -- _claude_pick_class's `== none` test
+# is unchanged, so `disabled` never reaches the exhaustion arm.
+new_home sw2b
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+check "a disabled Max seat still only DEMOTES, to weekly-spent" \
+      "$(pfd '' '' '' 0 | cut -d: -f4)" "weekly-spent"
 
 new_home sw3
 mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"2000-01-01T00:00:00Z\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
@@ -1751,6 +1777,16 @@ mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 
 cli --dry-run --json
 check "an unknown-spend weekly-spent pick warns with the UNKNOWN wording, never the headroom one" \
       "$(jq -r '[.warnings[] | select(contains("spend headroom unknown"))] | length' <<<"$CLI_OUT")" "1"
+
+# DO-623: a disabled Max seat's warning must not claim spend headroom is
+# unknown -- it is a measured fact (no spend limit configured), not a gap.
+new_home bill4
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+cli --dry-run --json
+check "a disabled Max seat's warning does not claim headroom is unknown" \
+      "$(jq -r '[.warnings[] | select(contains("no spend limit configured"))] | length' <<<"$CLI_OUT")" "1"
+check "...and does not use the headroom wording" \
+      "$(jq -r '[.warnings[] | select(contains("spend headroom unknown"))] | length' <<<"$CLI_OUT")" "0"
 
 #-----------------------------------------------------------------------------
 echo

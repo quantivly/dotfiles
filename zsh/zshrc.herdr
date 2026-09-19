@@ -696,7 +696,7 @@ _claude_ts_delta() {
 #        _CPM_RW_AT the same instant as an absolute epoch, for RENDERING
 #        _CPM_AGE  seconds since the cache was written
 #        _CPM_TIER plan tier, informational only — NEVER a ranking input
-#        _CPM_SPEND     headroom | none | unknown  (spend.enabled/used/limit)
+#        _CPM_SPEND     headroom | none | disabled | unknown  (spend.enabled/used/limit)
 #        _CPM_SPEND_TXT "$used of $limit" for messages, or empty
 #        _CPM_FETCHED   clauth 0.15.2's fetched_at (epoch ms), or `unknown`
 #        _CPM_WINDOWS   base64 JSON [{label,utilization,resets_at}] for Part B
@@ -762,6 +762,7 @@ _claude_profile_metrics() {
              elif . == null then null
              else tostring end),
         (.spend | if type != "object" then null
+                  elif .enabled == false then "disabled"
                   elif .enabled == true and (.used | type) == "number" and (.limit | type) == "number"
                     then (if .used < .limit then "headroom" else "none" end)
                   else null end),
@@ -1076,13 +1077,16 @@ _claude_pick_class() {
   # wall), and a LAPSED week has uW `unknown` so it never reaches this line.
   #
   # A MAX SEAT DEMOTES, IT DOES NOT REFUSE, and that is the whole reason
-  # `spend.enabled == false` maps to `unknown` rather than to `none`. The
-  # blocking arm above is MEASURED for a Team seat: six "individual spend limit"
-  # errors on 2026-09-18. For a Max seat there is no measurement at all — only
-  # the field name, and the reasoning "no usage-credit overflow, therefore
-  # blocked". Plausible, and not enough: personal-0 reads used 134.43 against a
-  # limit of 125.0 with enabled:false, so a Max seat does carry a spend counter
-  # that has passed a limit, which is not the shape "no credits" predicts.
+  # `spend.enabled == false` maps to its OWN state `disabled` (DO-623 split it
+  # out of `unknown`; before that split, refusing on `unknown` in the gate would
+  # have refused every Max seat). This line tests `none` alone, so `disabled`
+  # reaches it and does not fire. The blocking arm above is MEASURED for a Team
+  # seat: six "individual spend limit" errors on 2026-09-18. For a Max seat there
+  # is no measurement at all — only the field name, and the reasoning "no
+  # usage-credit overflow, therefore blocked". Plausible, and not enough:
+  # personal-0 reads used 134.43 against a limit of 125.0 with enabled:false, so a
+  # Max seat does carry a spend counter that has passed a limit, which is not the
+  # shape "no credits" predicts.
   #
   # The asymmetry decides it. ~/.config/claude-tenants.zsh composes both
   # non-work tenants entirely out of Max seats (`personal` = personal-0 alone,
@@ -1890,11 +1894,14 @@ _claude_pick_publish() {
   # (measured 2026-09-18). claude() prints every warning on an interactive
   # launch, and --json/--explain carry the same entry.
   if [[ "$_claude_pick_class" == weekly-spent ]]; then
-    if [[ "$_CPM_SPEND" == headroom ]]; then
-      _claude_pick_warnings+=("$1: weekly window spent — usage bills credits${_CPM_SPEND_TXT:+ ($_CPM_SPEND_TXT)}")
-    else
-      _claude_pick_warnings+=("$1: weekly window spent — usage may bill credits (spend headroom unknown)")
-    fi
+    case "$_CPM_SPEND" in
+      headroom) _claude_pick_warnings+=("$1: weekly window spent — usage bills credits${_CPM_SPEND_TXT:+ ($_CPM_SPEND_TXT)}") ;;
+      # A Max seat has no spend limit configured, which is not the same as a
+      # spend limit nobody could read. Nobody has watched such a seat block, so
+      # the warning says what is known and claims nothing more.
+      disabled) _claude_pick_warnings+=("$1: weekly window spent — this seat has no spend limit configured, so what it bills is unmeasured") ;;
+      *)        _claude_pick_warnings+=("$1: weekly window spent — usage may bill credits (spend headroom unknown)") ;;
+    esac
   fi
   # claude()'s one-line announcement reads _claude_pick_load: <=100 is a measured
   # 5h figure, 101 is "no reading", 1001 is the fallback. Unchanged, so the

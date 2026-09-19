@@ -560,6 +560,16 @@ run "claude"
 check "a billing pick is announced as billing"   "$(outgrep "usage bills credits")" "1"
 rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
 
+# DO-623: a disabled Max seat (enabled:false) gets its own wording, not the
+# headroom-unknown one -- it is a measured fact, not a gap.
+cat > "$FHOME/.clauth/profiles/personal/usage_cache.json" <<EOF
+{"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100.0,"resets_at":"$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"},"spend":{"enabled":false,"used":134.43,"limit":125.0}}
+EOF
+run "claude"
+check "a disabled Max seat's pick names no spend limit, not the headroom wording" \
+      "$(outgrep "no spend limit configured")" "1"
+rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
+
 # THE WHOLE POINT. Isolation used to cost the teammux launch, because the only
 # isolated path was `clauth start`, which execs the claude BINARY. Inside a herdr
 # pane the wrapper must still take the herdmates path AND carry the config dir.
