@@ -1521,6 +1521,19 @@ cli --dry-run --json
 check "an eligible pick carries no billing warning" \
       "$(jq -r '[.warnings[] | select(contains("bills credits"))] | length' <<<"$CLI_OUT")" "0"
 
+# DO-621 review finding: no row covered the `_CPM_SPEND == unknown` wording
+# branch. `spend.enabled:false` would give `_CPM_SPEND=none`, which the
+# exhausted check (_claude_pick_class) claims first, so it never reaches the
+# weekly-spent tier at all -- omitting the spend block entirely is what lands
+# on `unknown` AND weekly-spent together. The needle is "spend headroom
+# unknown", which the headroom branch's "usage bills credits (...)" text never
+# contains.
+new_home bill3
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"}}"
+cli --dry-run --json
+check "an unknown-spend weekly-spent pick warns with the UNKNOWN wording, never the headroom one" \
+      "$(jq -r '[.warnings[] | select(contains("spend headroom unknown"))] | length' <<<"$CLI_OUT")" "1"
+
 #-----------------------------------------------------------------------------
 echo
 echo "=== canary: nothing the picker READS reaches either stream ==="
