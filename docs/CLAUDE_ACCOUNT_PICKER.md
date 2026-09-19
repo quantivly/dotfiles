@@ -398,21 +398,12 @@ ranking as the refusal class that a live spent week with spend `none` now joins.
 says "may bill" rather than "bills".
 
 **What the Max-seat inference costs, since it is an arm nobody has watched fire.**
-`_claude_profile_metrics` maps `spend.enabled == false` to `none` unconditionally, and every
-Max seat has `enabled:false` — there is no usage-credit overflow on that plan. So a Max seat
-**never reaches the `weekly-spent` demotion tier at all**: it goes straight from `eligible`
-to `exhausted` the moment its aggregate week reads 100, which for a headless caller is a
-refusal. That is very likely right, and it is still an inference from a field rather than an
-observation; what was measured is the Team spend limit in the table above. On this machine
-(2026-09-19) three of six registered profiles are Max and all three read `none`, and
-`~/.config/claude-tenants.zsh` composes both non-work tenants entirely out of them —
-`personal` is `personal-0` alone, `toysim` is `toysim-0 personal-0` — with
-`CLAUDE_TENANT_OVERFLOW` empty. So the day one of those weeks reads 100, that whole tenant
-refuses for every headless caller with nothing to borrow. The only knob that disarms it is
-`CLAUDE_PICK_WEEK_SPENT=101`, and that is a **side effect** of switching the demotion tier
-off rather than a purpose-built escape hatch — unlike `CLAUDE_PICK_WEEK_EXHAUSTED`, which
-exists to be armed. Widening the arm is a spec decision, not an implementation one, so it is
-recorded here and left alone.
+`_claude_profile_metrics` maps `spend.enabled == false` to **`unknown`**, not to `none`, so a
+Max seat at 100% of its week is DEMOTED to `weekly-spent` and stays choosable. The blocking
+arm fires only where it was measured: a Team seat whose spend has reached its limit. Both
+non-work tenants are composed entirely of Max seats with no overflow, so refusing on the
+inference would empty them for up to a week; demoting costs one session that fails at auth
+and names the reason.
 
 **Consume-first on the week, without switching the week off.** `weekf` stays, its penalty
 fading as the weekly reset nears (`weekf_eff`), plus a consume-first bonus scaled by

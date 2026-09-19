@@ -168,7 +168,7 @@ mkprof e5 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":10.0}
 # shellcheck disable=SC2016  # the literal $ amounts are the expected value, not an expansion
 check "spend under its limit is headroom, with the amounts"       "$(spend_of a1)" 'headroom|$190.77 of $250'
 check "spend at its limit is none"                                "$(spend_of b2 | cut -d'|' -f1)" "none"
-check "spend disabled (a Max seat) is none"                       "$(spend_of c3 | cut -d'|' -f1)" "none"
+check "spend disabled (a Max seat) is unknown, never none"        "$(spend_of c3 | cut -d'|' -f1)" "unknown"
 check "no spend block is unknown, never none"                     "$(spend_of d4)" "unknown|"
 check "a spend block with no limit is unknown"                    "$(spend_of e5 | cut -d'|' -f1)" "unknown"
 # The reset at the top of the function is load-bearing: a profile with no spend
@@ -325,7 +325,10 @@ mkprof d4 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":0.0}}"
 check "spent week + spend headroom: eligible (it bills; the tier demotes)" "$(cls a1)" "eligible"
 check "spent week + spend unknown: eligible — missing data never refuses"   "$(cls b2)" "eligible"
 check "spent week + spend at its limit: exhausted"                          "$(cls c3 | cut -d: -f1)" "exhausted"
-check "spent week + spend disabled (a Max seat): exhausted"                 "$(cls d4 | cut -d: -f1)" "exhausted"
+# A Max seat is DEMOTED, never refused: the blocking arm is measured for a Team
+# seat only, and both non-work tenants are composed entirely of Max seats with no
+# overflow — refusing on an inference would empty them for a week.
+check "spent week + spend disabled (a Max seat): eligible, not exhausted"   "$(cls d4)" "eligible"
 check "...and the reason names the spend wall"                              "$(cls c3 | grep -c 'no spend headroom')" "1"
 
 # CLAUDE_PICK_WEEK_SPENT IS VALIDATED BEFORE ANY ARITHMETIC. zsh reads a
@@ -338,7 +341,7 @@ check "...and the reason names the spend wall"                              "$(c
 # with it. The fallback is the default, never a refusal — the ranker's own rule
 # is that broken data must not escalate.
 new_home k8
-mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":17.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false}}"
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":17.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "an unusable CLAUDE_PICK_WEEK_SPENT falls back to 100, not to 0" \
       "$(zrun "CLAUDE_PICK_WEEK_SPENT=oops _claude_pick_class a1")" "eligible"
 check "...and a negative one, which would wall every measured week as well" \
@@ -883,8 +886,11 @@ check "the reset formatter returns empty for unknown, not an epoch date" \
 # quote. Both 5h windows below reset at the same far instant, so the old
 # r5-only choice ties and keeps the first name — the row dies on it.
 new_home x5
-mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 172800)\"},\"spend\":{\"enabled\":false}}"
-mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false}}"
+# THE WALL FIXTURES ARE A TEAM SEAT AT ITS SPEND LIMIT, not a Max seat with
+# spend disabled. Only the Team shape was measured to block (2026-09-18); a Max
+# seat maps to spend `unknown` and DEMOTES, which the classes section pins.
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 172800)\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "behind the spend wall, the soonest WEEKLY reset is least bad" "$(lb a1 b2 | cut -d\| -f1)" "b2"
 
 #-----------------------------------------------------------------------------
@@ -1345,7 +1351,7 @@ blockwall() {   # $1 = profile -> 5h | weekly | both-equal | neither:<value>
 # The spend wall alone: the 5h window is FRESH (0% used), so only the week blocks
 # and the 5h reset below is there purely as the wrong answer to catch.
 new_home fd5b
-mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":false}}"
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 blk="$(report 1)"
 mem="$(printf '%s\n' "$blk" | sed -n 's/^ *e1  .*(resets \(.*\))$/\1/p')"
 hdr="$(printf '%s\n' "$blk" | sed -n 's/.*earliest reset \(.*\), on e1)$/\1/p')"
@@ -1357,7 +1363,7 @@ check "...and the header names that same instant, so the refusal cannot contradi
 # BOTH WALLS AT ONCE, the week clearing last. _claude_pick_block_reset takes the
 # later of the two, because both have to clear before the seat is usable again.
 new_home fd5c
-mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":false}}"
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "both walls up and the WEEK later: that is the reset the seat reports" \
       "$(blockwall e1)" "weekly"
 blk="$(report 1)"
@@ -1370,7 +1376,7 @@ check "...and the report quotes it, not the 5h reset that clears first" \
 # it is pinned on the function instead — a row that cannot distinguish the two
 # answers is decoration however carefully it is worded.
 new_home fd5d
-mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":false}}"
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "both walls up and the 5H later: that is the reset the seat reports" \
       "$(blockwall e1)" "5h"
 
@@ -1389,7 +1395,7 @@ check "both walls up and the 5H later: that is the reset the seat reports" \
 blockraw() { zrun "_claude_profile_metrics '$1' >/dev/null; _claude_pick_block_reset"; }
 
 new_home fd5e
-mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"garbage\"},\"spend\":{\"enabled\":false}}"
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"garbage\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "an UNPARSEABLE weekly reset behind the spend wall is unknown, not the 5h one" \
       "$(blockraw e1)" "unknown"
 blk="$(report 1)"
@@ -1405,7 +1411,7 @@ check "...and no 5h instant reaches the report" \
 # rankable (clauth omits the key on an unstarted window), and such a seat with
 # spend `none` lands here. No knob is armed in this fixture.
 new_home fd5f
-mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0},\"spend\":{\"enabled\":false}}"
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "an ABSENT weekly reset behind the spend wall is unknown too" \
       "$(blockraw e1)" "unknown"
 
@@ -1413,7 +1419,7 @@ check "an ABSENT weekly reset behind the spend wall is unknown too" \
 # an answer is no answer: quoting the readable half would present a lower bound
 # as the moment to retry.
 new_home fd5g
-mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"garbage\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":false}}"
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"garbage\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "both walls up with the 5h instant unreadable: the combined wait is unknown" \
       "$(blockraw e1)" "unknown"
 
@@ -1423,7 +1429,7 @@ check "both walls up with the 5h instant unreadable: the combined wait is unknow
 # reset is EARLIER, which is the arithmetic, not the gate — so on their own they
 # cannot tell "the gate is right" from "the gate was widened".
 new_home fd5h
-mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":false}}"
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
 check "a seat blocked by the 5h window alone still quotes the 5h reset" \
       "$(blockwall e1)" "5h"
 

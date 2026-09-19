@@ -762,7 +762,6 @@ _claude_profile_metrics() {
              elif . == null then null
              else tostring end),
         (.spend | if type != "object" then null
-                  elif .enabled == false then "none"
                   elif .enabled == true and (.used | type) == "number" and (.limit | type) == "number"
                     then (if .used < .limit then "headroom" else "none" end)
                   else null end),
@@ -1076,24 +1075,26 @@ _claude_pick_class() {
   # only: spend `unknown` never escalates to a refusal (missing data is not a
   # wall), and a LAPSED week has uW `unknown` so it never reaches this line.
   #
-  # WHAT THIS COSTS A MAX SEAT, stated because the arm is INFERRED FROM A FIELD
-  # AND NEVER OBSERVED. _claude_profile_metrics maps `spend.enabled == false` to
-  # `none` unconditionally, and every Max seat has `enabled:false` — there is no
-  # usage-credit overflow on that plan — so a Max seat never reaches the
-  # `weekly-spent` demotion tier at all: it goes straight from `eligible` to
-  # `exhausted` the moment its aggregate week reads 100, which for a headless
-  # caller is a refusal. That is very likely right (a Max seat at 100% really is
-  # blocked), but nobody has watched one hit it; what was measured is the Team
-  # spend limit above. Measured on this machine 2026-09-19, three of six
-  # registered profiles are Max and all three read `none`, and
-  # ~/.config/claude-tenants.zsh composes both non-work tenants entirely out of
-  # them (`personal` = personal-0 alone, `toysim` = toysim-0 personal-0) with
-  # CLAUDE_TENANT_OVERFLOW empty — so the day one of those weeks reads 100 the
-  # whole tenant refuses for every headless caller, with nothing to borrow.
-  # The only knob that disarms it is CLAUDE_PICK_WEEK_SPENT=101, and that is a
-  # SIDE EFFECT of switching the demotion tier off rather than a purpose-built
-  # escape hatch — unlike CLAUDE_PICK_WEEK_EXHAUSTED, which exists to be armed.
-  # Changing any of this is a spec decision, not an implementation one.
+  # A MAX SEAT DEMOTES, IT DOES NOT REFUSE, and that is the whole reason
+  # `spend.enabled == false` maps to `unknown` rather than to `none`. The
+  # blocking arm above is MEASURED for a Team seat: six "individual spend limit"
+  # errors on 2026-09-18. For a Max seat there is no measurement at all — only
+  # the field name, and the reasoning "no usage-credit overflow, therefore
+  # blocked". Plausible, and not enough: personal-0 reads used 134.43 against a
+  # limit of 125.0 with enabled:false, so a Max seat does carry a spend counter
+  # that has passed a limit, which is not the shape "no credits" predicts.
+  #
+  # The asymmetry decides it. ~/.config/claude-tenants.zsh composes both
+  # non-work tenants entirely out of Max seats (`personal` = personal-0 alone,
+  # `toysim` = toysim-0 personal-0) with CLAUDE_TENANT_OVERFLOW empty. Refusing
+  # on the inference costs EVERY headless caller on both tenants for up to a
+  # week, with nothing to borrow; demoting costs ONE session, which fails at
+  # auth and names the reason. That is the same trade DO-574 made when a hard
+  # weekly block would have refused across the whole work tree.
+  #
+  # So this line fires only where it was measured: a Team seat whose spend has
+  # reached its limit. If a Max seat at 100% is ever WATCHED to block, that is
+  # the measurement this arm is waiting for, and it is a one-line change back.
   if [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == none ]] && (( _CPM_UW >= spent )); then
     print -r -- "exhausted:weekly window ${_CPM_UW}% used and no spend headroom"
     return 0
