@@ -567,18 +567,43 @@ _claude_quarantine_scan() {
 # invitation to reintroduce the old ranking by accident. `CLAUDE_ACCOUNT_CACHE_MAX_AGE`
 # went with it; the threshold is `CLAUDE_PICK_CACHE_MAX_AGE`.
 
-# Seconds since a profile's usage cache was written, or nothing.
+# Seconds since this profile's usage reading was TAKEN, or nothing.
+#
+# DO-621: clauth 0.15.2 writes `fetched_at` (epoch ms) on every live fetch and
+# never on a plan-only rewrite, so it is the honest clock and the file mtime is
+# not — a rewrite that produced no new reading advances the mtime and read as
+# fresh. The caller passes the value it already extracted, so this adds no fork.
+#   * a stamp at most 60 s ahead clamps to 0 (one clock; that is jitter);
+#   * a stamp further ahead is corruption, and falls back to the mtime, which is
+#     what clauth's own scheduler does (oauth_seed_clock filters at <= now).
+#     `unknown` would be the wrong answer: the ranker never calls it stale;
+#   * no stamp at all (clauth 0.15.1) is the mtime, as before.
 #
 # Loads its own modules. A helper that depends on a module its CALLER happened to
 # load returns nothing when called any other way — and "no age" reads as "fresh",
 # so a stale reading would have been believed.
 _claude_profile_cache_age() {
-  local f="$HOME/.clauth/profiles/$1/usage_cache.json" mtime
+  local f="$HOME/.clauth/profiles/$1/usage_cache.json" fa="${2:-}" mtime s
+  zmodload zsh/datetime 2>/dev/null || return 1
+  # ONE CLOCK READ, not four: this function used to read EPOCHSECONDS separately
+  # for the ahead test, the clamp test, the clamp assignment and the final
+  # subtraction, so a second boundary falling between any two of them could turn
+  # an exact answer into an off-by-one — the same class of bug DO-612 fixed for a
+  # rendered reset instant, one function away. A stale `now` across the whole
+  # call is fine: this is a point-in-time measurement, not a live poll.
+  local now=$EPOCHSECONDS
+  if [[ "$fa" == <-> ]]; then
+    s=$(( fa / 1000 ))
+    if (( s <= now + 60 )); then
+      (( s > now )) && s=$now
+      print -r -- $(( now - s ))
+      return 0
+    fi
+  fi
   [[ -r "$f" ]] || return 1
   zmodload -F zsh/stat b:zstat 2>/dev/null || return 1
-  zmodload zsh/datetime 2>/dev/null || return 1
   mtime=$(zstat +mtime "$f" 2>/dev/null) || return 1
-  print -r -- $(( EPOCHSECONDS - mtime ))
+  print -r -- $(( now - mtime ))
 }
 
 # Seconds from now until an RFC 3339 instant, into _CLAUDE_TS_DELTA, AND the
@@ -665,11 +690,16 @@ _claude_ts_delta() {
 # Sets:  _CPM_U5   5h utilization, 0-100
 #        _CPM_R5   seconds until the 5h window resets (negative = already rolled)
 #        _CPM_R5_AT the same instant as an absolute epoch, for RENDERING
-#        _CPM_UW   worst of seven_day and every weekly_scoped window
+#        _CPM_UW   seven_day utilization ALONE (DO-621), or `unknown` when absent
+#                  or LAPSED. Per-model windows are the gate's, never the ranker's.
 #        _CPM_RW   seconds until the AGGREGATE weekly window resets
 #        _CPM_RW_AT the same instant as an absolute epoch, for RENDERING
 #        _CPM_AGE  seconds since the cache was written
 #        _CPM_TIER plan tier, informational only — NEVER a ranking input
+#        _CPM_SPEND     headroom | none | unknown  (spend.enabled/used/limit)
+#        _CPM_SPEND_TXT "$used of $limit" for messages, or empty
+#        _CPM_FETCHED   clauth 0.15.2's fetched_at (epoch ms), or `unknown`
+#        _CPM_WINDOWS   base64 JSON [{label,utilization,resets_at}] for Part B
 #
 # ABSENT IS ITS OWN STATE, and this is measured, not defensive: on 2026-09-10
 # three of five profiles here had `five_hour: {"utilization": 0.0}` with **no
@@ -678,16 +708,20 @@ _claude_ts_delta() {
 # window at maximum "about to reset" urgency, which is the precise opposite of
 # the truth, and would hand it the largest use-it-or-lose-it bonus in the pool.
 #
-# _CPM_RW is the SEVEN_DAY window's own reset, and it is labelled that way rather
-# than as "the reset of the window uW names": uW may come from a per-model
-# weekly_scoped window, each of which carries its own instant, so claiming one
-# reset for the worst of them would be an invented answer. The aggregate week is
-# what clauth's own status line reports, and it is the one this publishes.
+# _CPM_RW is the SEVEN_DAY window's own reset, and since DO-621 _CPM_UW is that
+# same window's utilization, so the two finally describe one window. Until then
+# uW was max(seven_day, every weekly_scoped window) while rW was seven_day's
+# reset — and on 2026-09-18 two seats spent on OPPOSITE axes (83% with fable 100,
+# 100% with fable 63) both read "100, weekly-spent".
 _claude_profile_metrics() {
-  local f="$HOME/.clauth/profiles/$1/usage_cache.json" line u5 rs uw rws tier
+  local f="$HOME/.clauth/profiles/$1/usage_cache.json" line u5 rs uw rws tier sp spt fa wins
   local _CLAUDE_TS_DELTA _CLAUDE_TS_ABS
   _CPM_U5=unknown; _CPM_R5=unknown; _CPM_UW=unknown; _CPM_RW=unknown
   _CPM_AGE=unknown; _CPM_TIER=unknown
+  # DO-621. Reset HERE, because each field below is assigned only when jq
+  # emitted it — a profile with no spend block must not inherit the previous
+  # profile's value, which is exactly what a missing reset does.
+  _CPM_SPEND=unknown; _CPM_SPEND_TXT=""; _CPM_FETCHED=unknown; _CPM_WINDOWS=""
   # An UNRENDERABLE instant is `unknown` exactly as an unmeasured one is. The
   # _AT pair is set only on the parser's success arm below, so a parse failure
   # cannot leave a stale epoch that renders as a measurement.
@@ -707,8 +741,13 @@ _claude_profile_metrics() {
   # figure in the reset slot and left uW `unknown`; a profile with no `five_hour`
   # block at all reported its seven_day number as the 5h utilization. `null`
   # keeps the column and `@tsv` renders it as the empty string.
-  # (`empty` is still correct INSIDE the weekly array, where dropping a
-  # non-number is exactly what is wanted before `max`.)
+  # (The per-model window branch is unrelated to this rule now: DO-621 removed
+  # the old "worst utilization of every window" reduction entirely — no `max`,
+  # no `empty` — and replaced it with `select(type == "object")`, which drops a
+  # non-object member of `weekly_scoped` before `{label, utilization,
+  # resets_at}` tries to index it. Indexing a number or string that way is a jq
+  # RUNTIME ERROR, which `2>/dev/null` would turn into a lost profile rather
+  # than one dropped window.)
   #
   # The tier is an OBJECT on a Max plan and a STRING on Team (measured:
   # `{"Max":20}` vs `"Team"`), so it is normalised to its key rather than
@@ -716,15 +755,22 @@ _claude_profile_metrics() {
   line="$(jq -r '
       [ (.five_hour.utilization // null | if . == null then null else floor end),
         (.five_hour.resets_at   // null),
-        ([ (.seven_day.utilization // empty),
-           ((.weekly_scoped // []) | .[]? | .utilization // empty) ]
-           | map(select(type == "number"))
-           | if length > 0 then (max | floor) else null end),
+        (.seven_day.utilization // null | if type == "number" then floor else null end),
         (.seven_day.resets_at // null),
         (.plan.tier // null
            | if type == "object" then (keys | .[0])
              elif . == null then null
-             else tostring end)
+             else tostring end),
+        (.spend | if type != "object" then null
+                  elif .enabled == true and (.used | type) == "number" and (.limit | type) == "number"
+                    then (if .used < .limit then "headroom" else "none" end)
+                  else null end),
+        (.spend | if type == "object" and (.used | type) == "number" and (.limit | type) == "number"
+                  then "$\(.used * 100 | round / 100) of $\(.limit * 100 | round / 100)" else null end),
+        (.fetched_at | if type == "number" then floor else null end),
+        ((.weekly_scoped // []) | if type == "array" then map(select(type == "object")
+             | {label, utilization, resets_at}) else [] end
+           | if length == 0 then null else (tojson | @base64) end)
       ] | @tsv' "$f" 2>/dev/null)" || return 1
   [[ -n "$line" ]] || return 1
 
@@ -738,9 +784,14 @@ _claude_profile_metrics() {
   local -a _cpm
   _cpm=( "${(@ps:\t:)line}" )
   u5="${_cpm[1]}"; rs="${_cpm[2]}"; uw="${_cpm[3]}"; rws="${_cpm[4]}"; tier="${_cpm[5]}"
+  sp="${_cpm[6]:-}"; spt="${_cpm[7]:-}"; fa="${_cpm[8]:-}"; wins="${_cpm[9]:-}"
   [[ -n "$u5"   ]] && _CPM_U5="$u5"
   [[ -n "$uw"   ]] && _CPM_UW="$uw"
   [[ -n "$tier" ]] && _CPM_TIER="$tier"
+  [[ -n "$sp"   ]] && _CPM_SPEND="$sp"
+  [[ -n "$spt"  ]] && _CPM_SPEND_TXT="$spt"
+  [[ "$fa" == <-> ]] && _CPM_FETCHED="$fa"
+  [[ -n "$wins" ]] && _CPM_WINDOWS="$wins"
 
   # Both instants through the one parser above, which leaves `unknown` on any
   # failure. A parse failure must never leave a number.
@@ -757,14 +808,34 @@ _claude_profile_metrics() {
   # has none.
   _claude_ts_delta "$rs"  && { _CPM_R5="$_CLAUDE_TS_DELTA"; _CPM_R5_AT="$_CLAUDE_TS_ABS" }
   _claude_ts_delta "$rws" && { _CPM_RW="$_CLAUDE_TS_DELTA"; _CPM_RW_AT="$_CLAUDE_TS_ABS" }
-  _CPM_AGE="$(_claude_profile_cache_age "$1")" || _CPM_AGE=unknown
+  # A LAPSED WEEK IS AN UNMEASURED ONE (DO-621). The figure describes a window
+  # that has ended, so it can neither demote nor bill. `unknown` here is the
+  # VALUE, not the class: the seat stays rankable. An ABSENT reset is not a
+  # lapse — clauth omits resets_at only on an unstarted window, and un-demoting
+  # a seat on missing data would be optimism.
+  #
+  # THE `(-|)<->` TEST IS DEFENCE IN DEPTH AND UNPINNABLE, exactly like the `&&`
+  # guard on the two _claude_ts_delta calls above — written down because a
+  # mutant that can never die
+  # reads as coverage. _CPM_RW holds one of two shapes and no third: the literal
+  # `unknown` from the reset at the top of this function, or an integer from the
+  # parser's success arm, which assigns an arithmetic result. Delete the test and
+  # the `unknown` case becomes `(( unknown < 0 ))`, which zsh evaluates as an
+  # unset parameter — 0 — so the arm still does not fire and `dw3` stays green.
+  # It stays because the contract is "only compare a MEASURED reset", and code
+  # that is correct only because a word happens to evaluate to 0 in arithmetic is
+  # one refactor away from being wrong.
+  if [[ "$_CPM_UW" != unknown && "$_CPM_RW" == (-|)<-> ]] && (( _CPM_RW < 0 )); then
+    _CPM_UW=unknown
+  fi
+  _CPM_AGE="$(_claude_profile_cache_age "$1" "$fa")" || _CPM_AGE=unknown
   return 0
 }
 
 # The score for one candidate, in centipoints. Higher is better; may be negative.
 #
-# Usage: _claude_pick_score <u5> <r5> <uW> <holders>
-#   r5 and uW accept the literal `unknown`.
+# Usage: _claude_pick_score <u5> <r5> <uW> <holders> [rw]
+#   r5, uW and rw accept the literal `unknown`.
 #
 # INTEGER ARITHMETIC ONLY — no zsh/mathfunc. The existing picker is integer-only,
 # the state tables compare exact strings, and the from-scratch test PATH cannot
@@ -782,14 +853,17 @@ _claude_profile_metrics() {
 #           spend limit — ask your admin", whose remedy is a person, not a window
 #           rolling over. Refusing locally never makes such an account usable
 #           sooner, and it would have taken out the entire work pool at once.
+#   weekf_eff / bonus_w = DO-621: the week's reset. weekf's penalty fades as it
+#           nears, and a consume-first bonus scaled by weekly headroom is added.
 #   crowd = holders, costing more as the account fills. W_HOLDER alone spreads
 #           sessions for rotation-race safety; u5*W_CROWD makes each additional
 #           holder dearer on an account that is already busy.
 _claude_pick_score() {
-  local u5="$1" r5="$2" uw="$3" h="${4:-0}"
+  local u5="$1" r5="$2" uw="$3" h="${4:-0}" rw="${5:-unknown}"
   local w_expire=${CLAUDE_PICK_W_EXPIRE:-50} w_holder=${CLAUDE_PICK_W_HOLDER:-3}
   local w_crowd=${CLAUDE_PICK_W_CROWD:-15} week_low=${CLAUDE_PICK_WEEK_LOW:-15}
-  local h5 hw exp weekf base bonus crowd
+  local w_wexp=${CLAUDE_PICK_W_WEEK_EXPIRE:-200}
+  local h5 hw exp exp_w weekf weekf_eff base bonus bonus_w crowd
 
   # An unknown 5h reading ranks as fully spent HERE, but the caller has already
   # classed it `unknown` and sorts it after every measured candidate — this is
@@ -801,7 +875,8 @@ _claude_pick_score() {
   if [[ "$uw" == unknown ]]; then
     # Unknown must not outrank a measured value, but neither may it INVENT a
     # penalty: an unread weekly window is not a spent one. Class handles rank.
-    weekf=100
+    # hw=0: nothing is known to be left, so nothing earns a consume-first bonus.
+    weekf=100; hw=0
   else
     hw=$(( 100 - uw ))
     (( hw < 0 )) && hw=0
@@ -831,17 +906,76 @@ _claude_pick_score() {
     exp=$(( 100 - (r5 * 100 / 18000) ))
   fi
 
+  # DO-621 — CONSUME-FIRST ON THE WEEK. exp_w is how close the aggregate week is
+  # to resetting (0 unknown/rolled/a week away, 100 imminent). Two uses:
+  #   weekf_eff — weekf's near-spent penalty FADES as the reset nears: 5% left
+  #               that resets in an hour is exactly what should be spent. With
+  #               rw unknown, exp_w = 0 and this is the old arithmetic exactly.
+  #   bonus_w   — scaled by weekly headroom, so an EMPTY week earns nothing for
+  #               resetting soon. 200 so that a real preference clears RR_BAND
+  #               (800): at 50, the spec's example — 40% of the week LEFT
+  #               resetting in 6 d against 20% LEFT resetting in 12 h — scored
+  #               300 and 930, a 630-point gap, i.e. a coin flip inside the
+  #               band. Those two figures are HEADROOM, not utilization like
+  #               every other percentage here; read the other way the gap is
+  #               3,270 and the weight looks five times more decisive than it is.
+  if [[ "$rw" != (-|)<-> ]] || (( rw <= 0 || rw >= 604800 )); then
+    exp_w=0
+  else
+    exp_w=$(( 100 - rw * 100 / 604800 ))
+  fi
+  weekf_eff=$(( weekf + (100 - weekf) * exp_w / 100 ))
+
   base=$(( h5 * 100 ))
   bonus=$(( h5 * exp * w_expire / 100 ))
+  bonus_w=$(( hw * exp_w * w_wexp / 100 ))
   crowd=$(( h * (w_holder * 100 + u5 * w_crowd) ))
-  print -r -- $(( (base + bonus) * weekf / 100 - crowd ))
+  print -r -- $(( (base + bonus + bonus_w) * weekf_eff / 100 - crowd ))
+}
+
+# CLAUDE_PICK_WEEK_SPENT, VALIDATED BEFORE ANY ARITHMETIC, into
+# _CLAUDE_PICK_WEEK_SPENT. Returns non-zero when it had to fall back, so the one
+# caller that can speak says so.
+#
+# zsh reads a non-numeric word in `(( ))` as 0, so an unusable value makes every
+# measured week `>= 0` — and since DO-621 that is not only the demotion tier but
+# the spend wall, which is a HEADLESS REFUSAL. Measured without this guard:
+# `CLAUDE_PICK_WEEK_SPENT=oops` on a seat at 17% of its week gave
+# `exhausted:weekly window 17% used and no spend headroom`, so one typo in
+# ~/.zshrc.local became a machine-wide refusal. Before this branch the same typo
+# only mis-tiered a seat to `weekly-spent`, which still picked — the branch
+# escalated the consequence, so the guard belongs with it.
+#
+# AN UNUSABLE VALUE FALLS BACK TO THE DEFAULT rather than refusing, and never
+# takes the word literally. That is the ranker's own binding rule — missing or
+# broken data must not escalate to a refusal — and the same choice
+# zsh/zshrc.buildlimits makes for BUILD_LIMITS_JOBS and claude-doctor makes for
+# CLAUDE_PICK_CACHE_MAX_AGE. `claude-pick`'s Part-B gate refuses instead, which
+# is right there and wrong here: refusing one launch that cannot be sized is not
+# the same as refusing every launch on the machine.
+#
+# It is not silent: _claude_pick_for_dir raises a warning naming the value it
+# ignored, because that is the only one of the three readers that can — the
+# other two run inside `$(...)`, where anything they learn dies with the
+# subshell.
+#
+# SCOPED TO THIS KNOB deliberately. CLAUDE_PICK_5H_EXHAUSTED and
+# CLAUDE_PICK_WEEK_EXHAUSTED are unvalidated in the same way and fail just as
+# widely, but they are DO-574's and this branch did not change what they cost;
+# recorded here rather than fixed, so the next person meets a decision.
+_claude_pick_week_spent() {
+  _CLAUDE_PICK_WEEK_SPENT="${CLAUDE_PICK_WEEK_SPENT:-100}"
+  [[ "$_CLAUDE_PICK_WEEK_SPENT" == <-> ]] && return 0
+  _CLAUDE_PICK_WEEK_SPENT=100
+  return 1
 }
 
 # Which class is this profile in, and why? Prints `eligible`, or `<class>:<why>`.
 #
 # Usage: _claude_pick_class <profile>
 # Classes: excluded  — disabled, auth_broken, or no credential. Never chosen.
-#          exhausted — the 5h window is spent. A real, self-clearing wall.
+#          exhausted — the 5h window is spent, OR (DO-621) a live spent week
+#                      with no spend headroom. Real, self-clearing walls.
 #          unknown   — no cache, or one too old to believe. Ranks after every
 #                      measured candidate; unknown never outranks a measurement.
 #          eligible  — scored.
@@ -865,9 +999,22 @@ _claude_pick_score() {
 #
 # With all three work accounts at 100 that morning, a hard block would have made
 # hspawn and herdr-draft refuse across the whole work tree while work was
-# demonstrably possible. So the weekly window DEMOTES instead: `weekf` in the
-# score collapses such an account to ~0, ranking it below anything with headroom
-# while leaving it choosable when it is all there is.
+# demonstrably possible. So the weekly window DEMOTES instead: such an account
+# drops into its own tier (`weekly-spent`, assigned in _claude_pick_for_dir),
+# ranked below anything eligible and above `unknown`, never refused outright.
+# DO-621: the score that orders candidates WITHIN that tier is no longer a flat
+# collapse to ~0 -- a spent week whose reset is imminent can score well above
+# zero via `weekf_eff`/`bonus_w` (consume-first) -- but that reordering happens
+# entirely inside the tier and can never let it outrank an eligible account.
+#
+# DO-621 REFINES THIS, it does not reverse it. Be exact about what 2026-09-10
+# established, because it is one easy step too far to read: those seats were NOT
+# BLOCKED — live sessions ran on them — and nobody measured their spend that
+# day, so "they were billing" is an inference drawn afterwards and never the
+# finding. What IS measured (2026-09-18) is that a spent window with spend
+# headroom left bills usage credits and keeps working, so a spent week still
+# only demotes; and that a spent week with NO spend headroom blocks, which is
+# the one state `exhausted` above claims. THE SPEND WALL below carries both.
 #
 # CLAUDE_PICK_WEEK_EXHAUSTED stays as an INERT knob, defaulting to 101 so it can
 # never fire, for whoever wants the strict behaviour back.
@@ -875,8 +1022,9 @@ _claude_pick_class() {
   local name="$1" why
   local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97}
   local exw=${CLAUDE_PICK_WEEK_EXHAUSTED:-101}
+  local spent; _claude_pick_week_spent; spent=$_CLAUDE_PICK_WEEK_SPENT
   local max_age=${CLAUDE_PICK_CACHE_MAX_AGE:-3600}
-  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
 
   # A DIRECTORY under profiles/ is not a profile. clauth leaves runtime dirs and
   # a .reconcile.lock behind under a name it no longer registers (observed
@@ -911,6 +1059,44 @@ _claude_pick_class() {
   fi
   if [[ "$_CPM_UW" != unknown ]] && (( _CPM_UW >= exw )); then
     print -r -- "exhausted:weekly window ${_CPM_UW}% used"
+    return 0
+  fi
+  # THE SPEND WALL (DO-621). A spent week is not a wall WHILE SPEND HEADROOM
+  # LASTS — the seat keeps working, which is DO-574's 2026-09-10 measurement
+  # (live sessions on 100% seats; nobody measured their spend that day, so this
+  # says nothing about whether they billed). That it BILLS is 2026-09-18's:
+  # +$0.31 and +$0.28 within four minutes of a window reaching 100, the only
+  # spend increases in the retained history — measured on a PER-MODEL window
+  # while this line reads the AGGREGATE, so "a spent aggregate bills" is an
+  # inference from it rather than a second finding. Once headroom is gone it
+  # blocks: 2026-09-18,
+  # six "You've hit your individual spend limit" errors on a seat at 100% with
+  # $275.23 of $275 spent, each quoting that seat's own weekly reset. `none`
+  # only: spend `unknown` never escalates to a refusal (missing data is not a
+  # wall), and a LAPSED week has uW `unknown` so it never reaches this line.
+  #
+  # A MAX SEAT DEMOTES, IT DOES NOT REFUSE, and that is the whole reason
+  # `spend.enabled == false` maps to `unknown` rather than to `none`. The
+  # blocking arm above is MEASURED for a Team seat: six "individual spend limit"
+  # errors on 2026-09-18. For a Max seat there is no measurement at all — only
+  # the field name, and the reasoning "no usage-credit overflow, therefore
+  # blocked". Plausible, and not enough: personal-0 reads used 134.43 against a
+  # limit of 125.0 with enabled:false, so a Max seat does carry a spend counter
+  # that has passed a limit, which is not the shape "no credits" predicts.
+  #
+  # The asymmetry decides it. ~/.config/claude-tenants.zsh composes both
+  # non-work tenants entirely out of Max seats (`personal` = personal-0 alone,
+  # `toysim` = toysim-0 personal-0) with CLAUDE_TENANT_OVERFLOW empty. Refusing
+  # on the inference costs EVERY headless caller on both tenants for up to a
+  # week, with nothing to borrow; demoting costs ONE session, which fails at
+  # auth and names the reason. That is the same trade DO-574 made when a hard
+  # weekly block would have refused across the whole work tree.
+  #
+  # So this line fires only where it was measured: a Team seat whose spend has
+  # reached its limit. If a Max seat at 100% is ever WATCHED to block, that is
+  # the measurement this arm is waiting for, and it is a one-line change back.
+  if [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == none ]] && (( _CPM_UW >= spent )); then
+    print -r -- "exhausted:weekly window ${_CPM_UW}% used and no spend headroom"
     return 0
   fi
   print -r -- "eligible"
@@ -1155,13 +1341,79 @@ _claude_pick_backpressure() {
 # nonsense date, or the same date for every account, in exactly the situation
 # where the reader is trying to decide how long to wait.
 #
+# Seconds until THIS seat stops being blocked, from the current _CPM_* values, or
+# `unknown`. The 5h reset for a 5h wall; the WEEKLY reset for the spend wall
+# (DO-621), because that is the window that has to roll; the later of the two
+# when both apply. Prints; callers that need no fork read _CPM_* themselves.
+#
+# THE WAYS THIS CAN QUOTE THE WRONG WALL, ENUMERATED — every one of them, because
+# an enumeration that names one and presents it as THE gap is how the other one
+# ships. That is exactly what happened here: the list below used to hold only the
+# first entry, and the second was reachable at the DEFAULT configuration.
+#
+#   1. THE ARMED `CLAUDE_PICK_WEEK_EXHAUSTED` KNOB IS DELIBERATELY OUTSIDE THE
+#      WEEKLY SUBSTITUTION BELOW. _claude_pick_class has two weekly exhaustion
+#      paths: the spend wall (`... and no spend headroom`, which needs
+#      _CPM_SPEND == none) — what the test below keys on, condition for condition,
+#      so the two cannot disagree about when the week is the wall — and `weekly
+#      window N% used`, reachable only when somebody arms that knob, which is the
+#      documented escape hatch for §5.3's strict behaviour (DO-574 departed from
+#      it, so it has never shipped armed). A seat exhausted by the second path
+#      with spend `headroom` or `unknown` therefore reports its 5H reset as the
+#      wait — or no time at all, when that window has not started — which is
+#      either way not the wall the reader is waiting on. It is left that way
+#      because the knob is INERT at its default 101, so nothing on a stock
+#      machine can reach that path, and re-keying the substitution on "the
+#      blocking class is weekly" is a behaviour change the spec did not ask for.
+#      The cost, for whoever arms it: one refusal quoting a 5h reset for a block
+#      the week has to clear.
+#
+#   2. AN UNDATEABLE WEEK IS `unknown`, NOT THE 5H RESET — FIXED, and it is the
+#      reason entry 1 is no longer the whole list. Whether the wall APPLIES and
+#      whether its reset can be DATED are two questions, and the parseability
+#      test used to sit inside the same `&&` chain as the wall test, so the
+#      second answered the first: a seat walled by the week whose
+#      seven_day.resets_at is absent or unparseable fell through to _CPM_R5 and
+#      the refusal quoted the 5h window. Measured on a seat with
+#      `seven_day:{utilization:100, resets_at:"garbage"}` and
+#      `spend.enabled:false`: `retry after Thu 01 Jan 02:00 IST` — a 2099 five-hour
+#      reset, rendered without a year, offered as the moment to retry a weekly
+#      block. Header and member line AGREED, so it read as uniformly right rather
+#      than visibly self-contradictory. Reachable at the default configuration,
+#      not only under the armed knob: row `dw3` exists precisely to keep a 100%
+#      week with no `resets_at` rankable, and such a seat with spend `none` lands
+#      here. `unknown` already has an honest rendering downstream (`reset time
+#      unknown`); a time that answers a question the reader did not ask does not.
+#
+# When BOTH walls apply the wait is the LATER of the two, so an unreadable half
+# makes the whole undateable — quoting the readable one would present a lower
+# bound as the answer.
+_claude_pick_block_reset() {
+  local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97} spent
+  local r="$_CPM_R5" wall5=0
+  _claude_pick_week_spent; spent=$_CLAUDE_PICK_WEEK_SPENT
+  if [[ "$_CPM_U5" == <-> ]] && (( _CPM_U5 >= ex5 )); then wall5=1; fi
+  # Does the spend wall apply? Decided WITHOUT reference to whether its reset can
+  # be dated — entry 2 above is what folding the two together cost.
+  if [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == none ]] && (( _CPM_UW >= spent )); then
+    if [[ "$_CPM_RW" != (-|)<-> ]]; then
+      r=unknown
+    elif (( wall5 )) && [[ "$r" != (-|)<-> ]]; then
+      r=unknown
+    elif (( ! wall5 )) || (( _CPM_RW > r )); then
+      r="$_CPM_RW"
+    fi
+  fi
+  print -r -- "$r"
+}
+
 # Sets REPLY to the least-bad profile. Prints nothing; the caller reports.
 _claude_pick_least_bad() {
   local e n best="" bestr="" r
-  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
   for n in "$@"; do
     _claude_profile_metrics "$n" >/dev/null 2>&1
-    r="$_CPM_R5"
+    r="$(_claude_pick_block_reset)"
     if [[ "$r" == unknown ]]; then
       # Unknown reset sorts AFTER any known one: an account that might reset in
       # four minutes is a better bet than one nobody can time.
@@ -1173,7 +1425,7 @@ _claude_pick_least_bad() {
     fi
   done
   REPLY="$best"
-  _CLAUDE_PICK_LEASTBAD_R5="$bestr"
+  _CLAUDE_PICK_LEASTBAD_RESET="$bestr"
   [[ -n "$best" ]]
 }
 
@@ -1272,6 +1524,7 @@ _claude_pick_pool() {
 #   _claude_pick_state      picked | fallback | exhausted | backpressure
 #                           | bad-table | no-profiles | unusable
 #   _claude_pick_class      eligible | unknown | least-bad | fallback
+#                           | weekly-spent | pinned
 #   _claude_pick_reason     one line, safe to print
 #   _claude_pick_tenant     the tenant that decided, or empty
 #   _claude_pick_tenant_state
@@ -1283,11 +1536,19 @@ _claude_pick_pool() {
 #   _claude_pick_age _claude_pick_tier _claude_pick_holders
 #   _claude_pick_load       kept for claude()'s existing one-line announcement
 #   _claude_pick_overflow   1 when the pick came from another tenant's overflow
-#   _claude_pick_leastbad _claude_pick_leastbad_r5
+#   _claude_pick_leastbad _claude_pick_leastbad_reset
+#   _claude_pick_spend      headroom | none | unknown — the WINNER's spend state
+#                           (DO-621); a weekly-spent pick with headroom also gets
+#                           a _claude_pick_warnings[] entry, since that seat bills
+#                           usage credits
 #   _claude_pick_skipped[]  human-readable, one per refused thing
-#   _claude_pick_warnings[] machine backpressure and lock notes
+#   _claude_pick_warnings[] machine backpressure and lock notes, plus a
+#                           weekly-spent pick's billing notice (DO-621)
 #   _claude_pick_explain[]  "<profile>\t<class>\t<why>\t<u5>\t<uW>\t<age>\t<holders>\t<score>\t<r5>\t<r5_at>"
-#   _claude_pick_exhausted[] "<profile>\t<u5>\t<uW>\t<r5>"  (for the §5.4 report)
+#   _claude_pick_exhausted[] "<profile>\t<u5>\t<uW>\t<r5>\t<block_reset>"  (for the
+#                            §5.4 report — field 5 is DO-621's, the reset that
+#                            actually ends the wall: r5 for a 5h one, the weekly
+#                            reset for a spend one)
 #   _CML_LOAD1 _CML_NCPU _CML_SWAPPCT   published by the backpressure read
 #
 # Returns 0 picked · 2 refused (exhausted, or nothing usable) · 3 refused
@@ -1308,8 +1569,10 @@ _claude_pick_pool() {
 _claude_pick_for_dir() {
   local dir="${1:-}" tenant="${2:-}" strict="${3:-0}" force="${4:-0}"
   local p name cls why score holders pass_name fb bp_rc=0
-  local week_spent=${CLAUDE_PICK_WEEK_SPENT:-100}
-  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT
+  local week_spent week_spent_bad=0
+  _claude_pick_week_spent || week_spent_bad=1
+  week_spent=$_CLAUDE_PICK_WEEK_SPENT
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
   local -a registered pass_members exnames
   zmodload -F zsh/stat b:zstat 2>/dev/null
   zmodload zsh/datetime 2>/dev/null
@@ -1322,13 +1585,23 @@ _claude_pick_for_dir() {
   _claude_pick_tier=unknown; _claude_pick_holders=0
   _claude_pick_load=""; _claude_pick_overflow=0
   _claude_pick_tenant=""; _claude_pick_tenant_state=""
-  _claude_pick_leastbad=""; _claude_pick_leastbad_r5=unknown
+  _claude_pick_leastbad=""; _claude_pick_leastbad_reset=unknown; _claude_pick_spend=unknown
   # Reset per call, not appended to: a second pick in the same shell — the
   # debounced --dry-run herdr-draft makes for a form row, say — must not report
   # the first call's refusals as its own.
   _claude_pick_skipped=(); _claude_pick_warnings=()
   _claude_pick_explain=(); _claude_pick_exhausted=()
   _claude_pick_cands=(); _claude_pick_unknowns=(); _claude_pick_weekly=()
+
+  # Raised HERE and nowhere else: this is the only one of the knob's three
+  # readers that can speak — _claude_pick_class and _claude_pick_block_reset both
+  # run inside `$(...)`, so a warning either of them raised would die with the
+  # subshell. It is raised after the reset above, or the reset would wipe it.
+  # An `if`, not `cond && cmd`: the bare form is a FAILING command when the
+  # condition is false, which is the SC2015 family this repo has paid for twice.
+  if (( week_spent_bad )); then
+    _claude_pick_warnings+=("CLAUDE_PICK_WEEK_SPENT must be a non-negative integer (percent of the weekly window), got '$CLAUDE_PICK_WEEK_SPENT' — using the default 100")
+  fi
 
   # WHICH TENANT. A pinned one skips the resolver; an empty `dir` says do not
   # resolve at all, which is how the legacy entry point keeps its meaning. The
@@ -1416,22 +1689,39 @@ _claude_pick_for_dir() {
       # A SPENT WEEKLY WINDOW IS A TIER, NOT A WEIGHT -- and the `unknown` branch
       # below already says why, for its own rule: "expressing it as a score would
       # put it at the mercy of the weights". It then names this very case, "an
-      # eligible account at 96% with a spent week scores near zero too", and the
-      # weekly demotion was left as a weight anyway.
+      # eligible account at 96% with a spent week and a far-off or unknown reset
+      # scores near zero too", and the weekly demotion was left as a weight
+      # anyway.
       #
-      # It duly lost. weekf multiplies (base + bonus) but crowd is subtracted
-      # UNSCALED, so at weekf=0 the score collapses to -crowd -- and crowd is
+      # It duly lost. weekf (weekf_eff, since DO-621 folds in the weekly reset)
+      # multiplies (base + bonus + bonus_w) but crowd is subtracted UNSCALED, so
+      # whenever the reset is far off or unknown -- weekf_eff then equals weekf
+      # exactly -- the score still collapses to -crowd at weekf=0, and crowd is
       # near zero precisely because an exhausted account is idle. Measured
       # 2026-09-10: quantivly-0 and quantivly-3 at 7d=100% with one holder scored
       # -300 each and were picked, while quantivly-1 at 7d=33% with real headroom
       # and 11 holders scored -8334. The emptiness that exhaustion causes read as
       # headroom -- the same shape CLAUDE.md records for the ranking DO-574
-      # replaced, where the emptiness came from a quarantine.
+      # replaced, where the emptiness came from a quarantine. DO-621 makes that
+      # collapse CONDITIONAL rather than absolute: a spent week whose reset is
+      # imminent scores well above -crowd instead (consume-first) -- but that
+      # only reorders members WITHIN this tier, per the `weekly-spent)` case
+      # below, and never lets one escape it.
       #
       # This DEMOTES and never refuses, which is DO-574's measured decision kept
       # intact: a tier is chosen when nothing above it exists, so a pool that is
       # entirely spent still yields an account and still starts a session. What
       # it cannot do any more is lose to a crowding term.
+      #
+      # WHICH week, and WHICH spent seats reach this line (DO-621). The figure is
+      # the AGGREGATE seven_day alone -- a per-model window belongs to the gate,
+      # which knows the model, and the ranker does not. A LAPSED week never
+      # demotes: _claude_profile_metrics has already made uW `unknown` by here.
+      # And a spent week with NO spend headroom never arrives at all --
+      # _claude_pick_class made that seat `exhausted`, because that one is
+      # blocked rather than billed. What is left is the seat that BILLS usage
+      # credits, or may when spend is unmeasured, and _claude_pick_publish says
+      # which.
       if [[ "$cls" == eligible && "$_CPM_UW" != unknown ]] && (( _CPM_UW >= week_spent )); then
         cls=weekly-spent
         why="7d window spent (${_CPM_UW}%)"
@@ -1440,25 +1730,34 @@ _claude_pick_for_dir() {
       score=""
       case "$cls" in
         eligible)
-          score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders")"
+          score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders" "$_CPM_RW")"
           _claude_pick_cands+=( "$score"$'\t'"$name" )
           ;;
         weekly-spent)
-          # Still SCORED, so the tier is ordered internally (least crowded
-          # first) rather than falling to whichever name sorts first.
-          score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders")"
+          # Still SCORED, so the tier is ordered internally rather than falling
+          # to whichever name sorts first. At the default WEEK_SPENT=100 every
+          # member here has hw=0, so bonus_w is always 0 -- but weekf_eff still
+          # rises toward 100 as the reset nears (DO-621), so a member whose week
+          # resets sooner, scaled by its 5h headroom and reset proximity, is now
+          # preferred first. Crowd alone decides the order only when the reset
+          # is far off or unknown, where weekf_eff is 0 and the score is exactly
+          # -crowd -- which was the ONLY ordering before DO-621.
+          score="$(_claude_pick_score "$_CPM_U5" "$_CPM_R5" "$_CPM_UW" "$holders" "$_CPM_RW")"
           _claude_pick_weekly+=( "$score"$'\t'"$name" )
           ;;
         unknown)
           # A TIER, not an arithmetic accident. "Unknown never outranks a
           # measurement" is a rule about rank, and expressing it as a score would
           # put it at the mercy of the weights: an eligible account at 96% with a
-          # spent week scores near zero too, and then a profile nobody can read
-          # would beat one that was measured and nearly empty.
+          # spent week and a far-off or unknown reset scores near zero too
+          # (DO-621: an imminent reset lifts that floor via weekf_eff -- but a
+          # far-off or unknown one still zeroes it out), and then a profile
+          # nobody can read would beat one that was measured and nearly empty.
           _claude_pick_unknowns+=( "0"$'\t'"$name" )
           ;;
         exhausted)
-          _claude_pick_exhausted+=( "$name"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_R5" )
+          # Field 5 (appended, never inserted): the reset that ends THIS wall.
+          _claude_pick_exhausted+=( "$name"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_R5"$'\t'"$(_claude_pick_block_reset)" )
           ;;
         *)
           _claude_pick_skipped+=("$name ($why)")
@@ -1512,17 +1811,17 @@ _claude_pick_for_dir() {
     for p in "${_claude_pick_exhausted[@]}"; do exnames+=( "${p%%$'\t'*}" ); done
     _claude_pick_least_bad "${exnames[@]}"
     _claude_pick_leastbad="$REPLY"
-    _claude_pick_leastbad_r5="$_CLAUDE_PICK_LEASTBAD_R5"
+    _claude_pick_leastbad_reset="$_CLAUDE_PICK_LEASTBAD_RESET"
     if (( strict )); then
       REPLY=""
       _claude_pick_state=exhausted
-      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant }${_claude_pick_tenant:+has}${_claude_pick_tenant:-the account pool has} a spent 5h window"
+      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant}${_claude_pick_tenant:-the account pool} is exhausted — a spent 5h window, or a spent week with no spend headroom"
       _claude_pick_report_exhausted strict
       return 2
     fi
     _claude_pick_class=least-bad
     _claude_pick_state=picked
-    _claude_pick_reason="every pool member's 5h window is spent — proceeding on the least-bad one"
+    _claude_pick_reason="every pool member is exhausted — proceeding on the least-bad one"
     _claude_pick_report_exhausted interactive
     if [[ -n "$REPLY" ]]; then
       (( ${_claude_pick_dry_run:-0} )) || _claude_pick_with_ledger_lock _claude_pick_ledger_write "$REPLY"
@@ -1581,10 +1880,22 @@ _claude_pick_publish() {
   done
   # The tier and the weekly reset are informational and not in the explain row,
   # which is a ranking record. `local` here so the caller's copies are untouched.
-  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT
+  local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
   _claude_profile_metrics "$1" >/dev/null 2>&1
   _claude_pick_tier="$_CPM_TIER"; _claude_pick_rw="$_CPM_RW"
   _claude_pick_rw_at="$_CPM_RW_AT"
+  _claude_pick_spend="$_CPM_SPEND"
+  # DO-621 — SAY WHEN A PICK WILL COST MONEY. weekly-spent means the aggregate
+  # week is spent and the seat is not blocked, i.e. usage bills credits
+  # (measured 2026-09-18). claude() prints every warning on an interactive
+  # launch, and --json/--explain carry the same entry.
+  if [[ "$_claude_pick_class" == weekly-spent ]]; then
+    if [[ "$_CPM_SPEND" == headroom ]]; then
+      _claude_pick_warnings+=("$1: weekly window spent — usage bills credits${_CPM_SPEND_TXT:+ ($_CPM_SPEND_TXT)}")
+    else
+      _claude_pick_warnings+=("$1: weekly window spent — usage may bill credits (spend headroom unknown)")
+    fi
+  fi
   # claude()'s one-line announcement reads _claude_pick_load: <=100 is a measured
   # 5h figure, 101 is "no reading", 1001 is the fallback. Unchanged, so the
   # announcement is not a second thing to keep in step. Already set on the
@@ -1607,18 +1918,22 @@ _claude_pick_publish() {
 #
 # stderr, always, and never suppressed by CLAUDE_ACCOUNT_QUIET: quiet exists to
 # silence the routine one-line announcement, and this is the opposite of routine.
-# The parenthetical for one member's 5h window. Three states, and the third is
-# not an edge: a NON-POSITIVE r5 means the window named in the cache has already
-# rolled, so the ~100% figure beside it belongs to the PREVIOUS window and is
-# stale. Printing "resets <a date in the past>" there — which is what formatting
-# the delta unconditionally does — tells the reader to wait for a moment that has
-# been and gone. On this machine that state is common rather than rare, because
-# nothing refreshes the usage caches on a schedule (clauth's only writer is
-# gated on a lease taken by its TUI and its daemon, and the daemon is off).
+# The parenthetical for one member's BLOCKING window — the 5h window, or (DO-621)
+# the week, when field 5 has substituted the weekly reset for a seat exhausted by
+# the spend wall. Three states, and the third is not an edge: a NON-POSITIVE r5
+# means the window named in the cache has already rolled, so the ~100% figure
+# beside it belongs to the PREVIOUS window and is stale. Printing "resets <a date
+# in the past>" there — which is what formatting the delta unconditionally does
+# — tells the reader to wait for a moment that has been and gone. For the 5h
+# window this state is common rather than rare on this machine, because nothing
+# refreshes the usage caches on a schedule (clauth's only writer is gated on a
+# lease taken by its TUI and its daemon, and the daemon is off); for the weekly
+# reset it is a narrow edge (exactly at the reset instant), since a week that has
+# actually lapsed is `unknown`, not a spent one, before this is ever called.
 _claude_pick_window_text() {
   local r="${1:-unknown}" txt
   if [[ "$r" == (-|)<-> ]] && (( r <= 0 )); then
-    print -r -- "5h window already rolled — this reading is stale"
+    print -r -- "blocking window already rolled — this reading is stale"
     return 0
   fi
   txt="$(_claude_pick_reset_text "$r")"
@@ -1627,7 +1942,7 @@ _claude_pick_window_text() {
 
 _claude_pick_report_exhausted() {
   local mode="${1:-strict}" prog="${_claude_pick_prog:-claude}"
-  local e n u5 uw uwt r5 label soon lbr="$_claude_pick_leastbad_r5"
+  local e n u5 uw uwt r5 label soon lbr="$_claude_pick_leastbad_reset"
   local -a f
   label="the account pool"
   [[ -n "$_claude_pick_tenant" ]] && label="pool '$_claude_pick_tenant'"
@@ -1641,7 +1956,7 @@ _claude_pick_report_exhausted() {
   elif [[ -n "$soon" ]]; then
     print -u2 -- "$prog: refused — $label exhausted (earliest reset $soon, on $_claude_pick_leastbad)"
   elif [[ "$lbr" == (-|)<-> ]]; then
-    print -u2 -- "$prog: refused — $label exhausted on stale readings (its soonest 5h window has already rolled)"
+    print -u2 -- "$prog: refused — $label exhausted on stale readings (its soonest blocking window has already rolled)"
   else
     print -u2 -- "$prog: refused — $label exhausted (no reset time is known for any member)"
   fi
@@ -1649,6 +1964,9 @@ _claude_pick_report_exhausted() {
   for e in "${_claude_pick_exhausted[@]}"; do
     f=( "${(@ps:\t:)e}" )
     n="${f[1]}"; u5="${f[2]}"; uw="${f[3]}"; r5="${f[4]}"
+    # DO-621: quote the reset that ends THIS seat's wall (field 5) — for the
+    # spend wall that is the week, not the 5h window.
+    [[ -n "${f[5]:-}" ]] && r5="${f[5]}"
     # Only the least-bad member is listed on the interactive path: it is the one
     # being proceeded on, and a human about to be told "this is going to be
     # tight" does not need the other rows in order to act.
@@ -1693,7 +2011,7 @@ claude() {
   local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
-  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   # Whose name the picker's own messages carry.
   local _claude_pick_prog=claude
@@ -2306,7 +2624,7 @@ hspawn() {
   local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
   local _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
   local _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
-  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+  local _claude_pick_holders=0 _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   local _claude_pick_prog=hspawn
   local -a rest=()
@@ -2475,12 +2793,13 @@ hspawn() {
       if (( ! tenant_set )) && [[ -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
         tenant="$CLAUDE_ACCOUNT_TENANT"
       fi
-      # STRICT. hspawn is a headless caller (§5.4): a worker starting on a spent
-      # 5h window burns the seat and dies mid-task with nobody watching, so an
-      # exhausted pool refuses here rather than proceeding on the least-bad
-      # member the way an interactive `claude` does. The escape is `-p <profile>`,
-      # which the refusal names, and the reset time it prints says how long the
-      # wait is.
+      # STRICT. hspawn is a headless caller (§5.4): a worker starting on an
+      # exhausted seat — a spent 5h window, or (DO-621) a spent week with no
+      # spend headroom left — burns the seat and dies mid-task with nobody
+      # watching, so an exhausted pool refuses here rather than proceeding on
+      # the least-bad member the way an interactive `claude` does. The escape is
+      # `-p <profile>`, which the refusal names, and the reset time it prints
+      # says how long the wait is.
       _claude_pick_for_dir "$repo" "$tenant" 1 0
       local pick_rc=$?
       profile="$REPLY"

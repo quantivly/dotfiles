@@ -18,8 +18,9 @@
 # EXIT CODES are the contract, and each one is a different action for the caller:
 #
 #   0   picked; stdout is the profile (or the JSON object)
-#   2   refused — every pool member's 5h window is spent, or nothing in the pool
-#       is usable at all. stderr names each member and its reset time. Or, with
+#   2   refused — every pool member is exhausted (a spent 5h window, or a spent
+#       week with no spend headroom left — DO-621), or nothing in the pool is
+#       usable at all. stderr names each member and its reset time. Or, with
 #       --gate, the picked seat's PROJECTED end-utilisation exceeds the cap
 #       (state gate-projected), its 5h window is unmeasured or stale (state
 #       gate-unmeasured), or a tuning value does not parse (state
@@ -58,37 +59,39 @@
 # Environment strings are NOT a rate source: only the array, and only that file.
 #
 # A STALE READING IS AN UNMEASURED ONE. u5 comes from the profile's
-# usage_cache.json, and the gate refuses (state gate-unmeasured) when that file
-# is older than CLAUDE_PICK_CACHE_MAX_AGE seconds — default 600 HERE, against
-# 3600 in the ranker (zshrc.herdr), which deliberately tolerates an older
+# usage_cache.json, and the gate refuses (state gate-unmeasured) when that
+# reading is older than CLAUDE_PICK_CACHE_MAX_AGE seconds — default 600 HERE,
+# against 3600 in the ranker (zshrc.herdr), which deliberately tolerates an older
 # reading because it only ORDERS candidates and there is no refresher that keeps
 # caches fresher than that. The gate decides whether a headless lane may burn a
 # seat unwatched: a seat at 30% three hours ago can be at 100% now (F13 — two
 # profiles went 7% → 100% in forty minutes), so the number is not evidence past
 # ten minutes. Setting the variable sets BOTH thresholds; that is the trade the
-# fix brief asked for, stated rather than hidden. What the gate CANNOT see is
-# clauth's own freshness verdict: `clauth status` reports `stale` and
-# `fetch_status` per profile, but neither reaches usage_cache.json (measured
-# 2026-09-17: its keys are five_hour, seven_day, weekly_scoped, plan, spend,
-# extra_usage — no freshness field), and this script reads only that file. So a
-# profile clauth has marked stale is refused here only by its file's mtime.
+# fix brief asked for, stated rather than hidden.
+# clauth's own freshness verdict (`clauth status` reports `stale` and
+# `fetch_status`) does not reach usage_cache.json, but since clauth 0.15.2 its
+# clock does: `fetched_at` (epoch ms) is stamped on every live fetch and never on
+# a plan-only rewrite. The age this gate compares against CLAUDE_PICK_CACHE_MAX_AGE
+# is measured from it (DO-621), falling back to the file mtime only when the
+# stamp is absent (clauth 0.15.1) or implausibly far in the future.
 # `rabota census` reads clauth's verdict directly and names it in unavailable[].
 #
-# A ROLLED WINDOW IS AN UNMEASURED ONE TOO, AND THE MTIME CANNOT SEE IT. The
-# mtime test alone let a `touch`ed three-hour-old cache pass, and ignored a
+# A ROLLED WINDOW IS AN UNMEASURED ONE TOO, AND NEITHER CLOCK CAN SEE IT. The
+# age test alone let a `touch`ed three-hour-old cache pass, and ignored a
 # five_hour.resets_at already in the past — the window the number describes
-# has ended, so the number is about nothing, however new the file is. A real
-# clauth write rewrites content and mtime together, which makes this low-risk,
-# not absent, and this is a safety gate. So after the mtime test the gate reads
-# the parsed reset: an instant in the past refuses (state gate-unmeasured, the
-# same sentence the mtime refusal says), and an ABSENT or UNPARSEABLE reset
-# refuses as well — unmeasured, never optimistic. Note what that second rule
-# costs: clauth omits resets_at for a window that has not started (measured
-# 2026-09-10, absent exactly where utilization is 0.0), so a seat on a fresh,
-# unstarted window is refused here until its first request stamps a reset. The
-# ranker (zshrc.herdr) still scores such a seat; only the headless gate declines
-# to start a lane on a window it cannot date. The instant is reported in the
-# gate object as resets_at (RFC 3339 UTC, or null) beside cache_age_s.
+# has ended, so the number is about nothing, however fresh the reading reads.
+# A real clauth write rewrites content and mtime together, which makes this
+# low-risk, not absent, and this is a safety gate. So after the age test the
+# gate reads the parsed reset: an instant in the past refuses (state
+# gate-unmeasured, the same sentence the age refusal says), and an ABSENT or
+# UNPARSEABLE reset refuses as well — unmeasured, never optimistic. Note what
+# that second rule costs: clauth omits resets_at for a window that has not
+# started (measured 2026-09-10, absent exactly where utilization is 0.0), so a
+# seat on a fresh, unstarted window is refused here until its first request
+# stamps a reset. The ranker (zshrc.herdr) still scores such a seat; only the
+# headless gate declines to start a lane on a window it cannot date. The
+# instant is reported in the gate object as resets_at (RFC 3339 UTC, or null)
+# beside cache_age_s.
 #
 # EVERY TUNING VALUE IS VALIDATED BEFORE IT IS USED, AND A BAD ONE REFUSES.
 # CLAUDE_PICK_GATE_MAX, CLAUDE_PICK_RATE_DEFAULT and the CLAUDE_PICK_RATES entry
@@ -247,7 +250,7 @@ typeset _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
 typeset _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
 typeset _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
 typeset _claude_pick_holders=0 _claude_pick_load="" _claude_pick_overflow=0
-typeset _claude_pick_leastbad="" _claude_pick_leastbad_r5=unknown
+typeset _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
 typeset _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
 typeset -a _claude_pick_skipped=() _claude_pick_warnings=()
 typeset -a _claude_pick_explain=() _claude_pick_exhausted=()
@@ -367,7 +370,7 @@ if [[ -n "$pin" ]]; then
   _claude_pick_reason="pinned with --profile"
   # The numbers are still reported, because a caller that pinned an account still
   # wants to know it is about to start on a spent window.
-  typeset _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT
+  typeset _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
   _claude_profile_metrics "$pin" >/dev/null 2>&1
   _claude_pick_u5="$_CPM_U5"; _claude_pick_uw="$_CPM_UW"; _claude_pick_r5="$_CPM_R5"
   _claude_pick_rw="$_CPM_RW"; _claude_pick_age="$_CPM_AGE"; _claude_pick_tier="$_CPM_TIER"
@@ -375,6 +378,7 @@ if [[ -n "$pin" ]]; then
   # _claude_pick_publish, so it must set these itself. Missed, --json --profile
   # reports a null reset for an account whose reset is perfectly well known.
   _claude_pick_r5_at="$_CPM_R5_AT"; _claude_pick_rw_at="$_CPM_RW_AT"
+  _claude_pick_spend="$_CPM_SPEND"
   _claude_pick_holders="$(_claude_holder_count "$pin")"
   _claude_pick_explain=( "$pin"$'\t'pinned$'\t'""$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_AGE"$'\t'"$_claude_pick_holders"$'\t'""$'\t'"$_CPM_R5"$'\t'"$_CPM_R5_AT" )
   # A PIN NEVER REFUSES ON THE ACCOUNT, but it does say when the account it was
@@ -468,16 +472,17 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
     REPLY=""; rc=2
   elif [[ "$_claude_pick_r5" != (-|)<-> ]]; then
     # No reset instant — absent (an unstarted window, the way clauth writes
-    # one) or unparseable. The mtime cannot date the WINDOW, only the file, so a
-    # reading with no reset is a reading of unknown currency: unmeasured, never
-    # optimistic. See A ROLLED WINDOW IS AN UNMEASURED ONE TOO, above.
+    # one) or unparseable. The age test dates the READING, never the WINDOW it
+    # describes, so a reading with no reset is a reading of unknown currency:
+    # unmeasured, never optimistic. See A ROLLED WINDOW IS AN UNMEASURED ONE
+    # TOO, above.
     gate_verdict=refuse; _claude_pick_state=gate-unmeasured
     _claude_pick_reason="$REPLY has a 5h reading (${_claude_pick_u5}%) with no readable reset instant (five_hour.resets_at absent or unparseable); refusing rather than assuming the window is current"
     REPLY=""; rc=2
   elif (( _claude_pick_r5 < 0 )); then
-    # The window the number describes has ended. The file may be brand new — a
-    # `touch`, or a writer that kept a rolled reading — and the mtime test above
-    # passed it; the reset is the value and "now" is the threshold.
+    # The window the number describes has ended. The reading may look fresh —
+    # a `touch`, or a writer that kept a rolled reading — and the age test
+    # above passed it; the reset is the value and "now" is the threshold.
     gate_verdict=refuse; _claude_pick_state=gate-unmeasured
     _claude_pick_reason="$REPLY's 5h reading (${_claude_pick_u5}%) is for a window that reset at $(text_instant "$_claude_pick_r5_at") ($(( - _claude_pick_r5 ))s ago; the threshold is now); a rolled window is an unmeasured one"
     REPLY=""; rc=2
@@ -553,6 +558,20 @@ if (( as_json )); then
   # back out of --explain. Built by jq from typed pieces, never by string
   # concatenation: a profile name or a reason is data, and a JSON document
   # assembled with printf is one apostrophe away from being invalid.
+  #
+  # `usage.spend` HAS TWO ROUGH EDGES (DO-621), recorded here because nothing in
+  # this repo reads the key yet and Part B's per-model gate (DO-623) will, so it
+  # should meet them written down rather than discover them. It is NOT
+  # LAPSE-AWARE: on a lapsed week the RANKER is right — `usage.weekly` is null,
+  # the class is `eligible`, and the spend wall cannot fire on an unknown uW —
+  # but `spend` is read off the same cache unconditionally, so it still reports
+  # that window's spend state (measured: `"none"`, with the weekly reset an hour
+  # in the past), a spend counter belonging to a window that has ended.
+  #
+  # And ON A REFUSAL it is the string `"unknown"` while its siblings
+  # `five_hour`, `weekly` and `cache_age_s` are all null, so nothing in the
+  # object itself separates "measured, and the measurement was unknown" from
+  # "no pick was made" — a consumer has to read `profile` or `exit_code`.
   skip_rows=()
   for e in "${_claude_pick_explain[@]}"; do
     [[ "${e%%$'\t'*}" == "$REPLY" ]] && continue
@@ -572,6 +591,7 @@ if (( as_json )); then
     --argjson five_hour   "$(json_num "$_claude_pick_u5")" \
     --argjson weekly      "$(json_num "$_claude_pick_uw")" \
     --argjson cache_age   "$(json_num "$_claude_pick_age")" \
+    --arg    spend        "${_claude_pick_spend:-}" \
     --argjson r5          "$(json_instant "$_claude_pick_r5_at")" \
     --argjson rw          "$(json_instant "$_claude_pick_rw_at")" \
     --argjson load1       "$(json_load1)" \
@@ -602,7 +622,8 @@ if (( as_json )); then
        reason:       (if $reason == "" then null else $reason end),
        exit_code:    $exit_code,
        overflow:     ($overflow == 1),
-       usage:        { five_hour: $five_hour, weekly: $weekly, cache_age_s: $cache_age },
+       usage:        { five_hour: $five_hour, weekly: $weekly, cache_age_s: $cache_age,
+                       spend: (if $spend == "" then null else $spend end) },
        resets_at:    { five_hour: $r5, weekly: $rw },
        machine:      { load1: $load1, ncpu: $ncpu, swap_used_pct: $swap },
        gate:         (if $gate_on == 1 then {model: $gate_model, effort: $gate_effort, est_minutes: $gate_min, rate: $gate_rate,

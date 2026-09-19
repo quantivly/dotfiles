@@ -46,9 +46,10 @@ Claude Code transcripts.
 | window spent, spend at its limit | **hard block**: "You've hit your individual spend limit" | 6 errors between 18:03 and 19:15Z today. Each quotes a weekly reset of Sep 21 06:00 IDT (03:00Z), which is quantivly-3's `seven_day` reset. quantivly-3 hit 100 at 17:40Z with spend at $275.23 of $275 |
 
 The sample is small: one billing episode and one blocking episode. Both are direct
-readings of clauth's spend counter and of the error text. Max seats have
-`spend.enabled = false`; that a spent window therefore blocks them is **inferred from
-the field**, not observed.
+readings of clauth's spend counter and of the error text. Max seats have `spend.enabled = false`. That a spent window therefore blocks them
+would be **inferred from a field and never observed**, so it is deliberately NOT
+acted on: `enabled == false` maps to `unknown`, and a Max seat demotes rather than
+refusing. (Revised 2026-09-19, before merge.)
 
 These readings refine DO-574 rather than contradict it. DO-574's 2026-09-10
 measurement, live sessions on 100% seats, is the billing row: a spent week is not a
@@ -91,7 +92,7 @@ not a block. An earlier draft of this spec claimed otherwise; that claim is retr
   unparseable reset is not a lapse; the reading still counts, as today.
 - **Spend headroom** becomes `_CPM_SPEND`, one of:
   - `headroom`: `spend.enabled == true`, and `used` and `limit` are both numeric with `used < limit`
-  - `none`: `enabled == false`, or `used >= limit`
+  - `none`: `enabled == true` and `used >= limit` (the measured blocking case)
   - `unknown`: anything else, including no spend block, a missing `limit`, or a non-numeric value
 - **Appended fields.** Add `_CPM_SPEND`, `fetched_at`, and the per-model windows for
   Part B. The per-model windows travel as one `@json` array of
