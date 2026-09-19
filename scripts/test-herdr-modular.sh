@@ -14,8 +14,9 @@
 # WHY THIS EXISTS. The team-facing write-up had to tell readers to *ignore* a ✗
 # that verify-tools.sh prints, and specifically not to paste the `ln -sfn`
 # command it offers — pasting it pins ~25 tools globally. A checker whose output
-# needs a prose disclaimer is the permanently-red-checker failure CLAUDE.md
-# warns about twice, and prose is not a fix. The rows below pin the scope of
+# needs a prose disclaimer is the permanently-red-checker failure
+# docs/HERDR_INTERNALS.md and docs/GH_ACCOUNT_ROUTING.md record, and prose is not
+# a fix. The rows below pin the scope of
 # `--herdr` in BOTH directions: what it must report, and what it must never
 # mention.
 #
@@ -175,7 +176,7 @@ hasnt "$OUT_HERDR" "ln -sfn"           "never offers the ln -sfn that pins ~25 t
 hasnt "$OUT_HERDR" "Oh-My-Zsh"         "no oh-my-zsh plugin inventory"
 hasnt "$OUT_HERDR" "Forgit"            "no forgit section"
 hasnt "$OUT_HERDR" "mise install"      "summary does not tell a modular adopter to run mise install"
-hasnt "$OUT_HERDR" "CLAUDE.md"         "summary does not point at the full-repo guide"
+hasnt "$OUT_HERDR" "README.md"         "summary does not point at the full-repo guide"
 
 echo
 echo "=== verify-tools --herdr: what it must report ==="
@@ -1276,8 +1277,9 @@ ACCT_PAYLOAD='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tm
 # A SUBSHELL, never `env VAR=x ... cmd`: env's options must precede its
 # assignments, so an `--unset` appended after them is read as the COMMAND name
 # and the hook never runs -- which reads as "the token was not published",
-# i.e. exactly what these rows are trying to measure. CLAUDE.md already records
-# two bugs from this same `env`-argv shape; a subshell retires the class.
+# i.e. exactly what these rows are trying to measure. docs/GH_ACCOUNT_ROUTING.md
+# already records two bugs from this same `env`-argv shape; a subshell retires
+# the class.
 acct_value() { # $1 = CLAUDE_CONFIG_DIR, or the literal UNSET
     local h="$WORK/home.acctval"
     # `.cache` is REQUIRED, not tidiness: the hook redirects the publish call's
@@ -1411,8 +1413,8 @@ else bad "the range over-matches into another agent's rows"; fi
 #    The first version shelled out to python3+tomllib and treated ANY non-zero
 #    exit -- python3 absent, tomllib absent (3.11+, and Ubuntu 20.04 ships 3.8),
 #    file unreadable -- as a confident FAIL naming a fault that does not exist,
-#    and took the exit code with it. On the adopter machine CLAUDE.md names, the
-#    new check would have been red on arrival.
+#    and took the exit code with it. On the adopter machine
+#    docs/HERDR_INTERNALS.md names, the new check would have been red on arrival.
 H="$(new_home acct_unreadable)"; wire "$H" >/dev/null
 mkdir -p "$H/.config/herdr"
 printf '[ui.sidebar.agents]\nrows = [["state_icon"]]\n' >"$H/.config/herdr/config.toml"

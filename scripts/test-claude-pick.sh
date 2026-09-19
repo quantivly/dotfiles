@@ -1967,7 +1967,7 @@ check "gate: ...as gate-unmeasured"                 "$(jq -r .state <<<"$out")" 
 # The age is asserted as a RANGE, and the reason is checked against the age the
 # JSON itself reports: the fixture's mtime and the run are two clock reads, and a
 # second boundary between them makes 10800 read 10801. A row that fails one run
-# in N on main is worse than no row (CLAUDE.md, DO-612).
+# in N on main is worse than no row (docs/CLAUDE_ACCOUNT_PICKER.md, DO-612).
 check "gate: ...naming the age and the threshold"   "$(has_words "$(jq -r .reason <<<"$out")" "$(jq -r .gate.cache_age_s <<<"$out")s" 600 CLAUDE_PICK_CACHE_MAX_AGE)" "yes"
 check "gate: ...with a null profile"                "$(jq -r .profile <<<"$out")" "null"
 check "gate: ...and the gate object carries the age it decided on" "$(jq -r '.gate.cache_age_s | . >= 10800 and . <= 10810' <<<"$out")" "true"

@@ -246,7 +246,7 @@ cmd_segments() {
 #   TELL THE REPORTING FORMS APART FROM THE LEAKING ONES. `${NAME:-unset}` and
 #   `${NAME-unset}` expand to the VALUE whenever the variable is set, which is
 #   the exact construction that leaked. `${#NAME}` and `${NAME:+<literal>}` do
-#   not, and they are what CLAUDE.md prescribes for reporting set/unset -- so
+#   not, and only they report set/unset without expanding the value -- so
 #   denying them would leave no way to report it at all, and a guard with no
 #   permitted alternative is one people route around.
 #
@@ -284,7 +284,7 @@ secret_expansion_in() {
     case "$tail" in
       '+'*|':+'*)
         # ${NAME:+ALT} expands to ALT and never to the value, so it is safe.
-        # That is the form CLAUDE.md prescribes for reporting set/unset --
+        # That is the only form that reports set/unset without expanding it --
         # `echo "tok: ${GH_TOKEN:+set (${#GH_TOKEN} chars)}"` -- and denying it
         # would leave no way to report it at all.
         #

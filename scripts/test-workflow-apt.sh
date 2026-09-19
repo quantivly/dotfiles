@@ -27,8 +27,8 @@
 # starts a python interpreter per uncached file. A 34-mutant sweep is therefore
 # an HOUR of sustained load. A reviewer running only 2-way parallel was
 # OOM-killed on this box at loadavg 42 with 13.7 GB of swap in use, which is
-# the state CLAUDE.md records as endangering unrelated sessions. Run sweeps
-# SERIALLY, `nice -n 19`, one tree at a time, removed immediately after.
+# the state docs/REPO_CHECKS.md records as endangering unrelated sessions. Run
+# sweeps SERIALLY, `nice -n 19`, one tree at a time, removed immediately after.
 #
 # EXPECTED_TOTAL at the bottom was PROVEN non-decorative by deleting a row and
 # watching it report a vanished row rather than "all N passed" -- recorded

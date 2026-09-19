@@ -67,13 +67,13 @@
 # _doctor_ok in system.sh for why that convention is not optional.
 # =============================================================================
 
-# Where the live credential lives. CLAUDE_CONFIG_DIR *does* isolate credentials
-# in Claude Code — the file moves under that directory, and on macOS the Keychain
+# Where the live credential lives. CLAUDE_CONFIG_DIR *does* isolate credentials in
+# Claude Code — the file moves under that directory, and on macOS the Keychain
 # entry is keyed to it too. That is the opposite of GH_CONFIG_DIR, which isolates
-# hosts.yml and NOT the credential (the keyring is keyed by host); CLAUDE.md
-# documents that trap at length under "GitHub Account Routing". Do not carry the
-# gh intuition over to Claude: here, isolation works, and it is the mechanism
-# `clauth start` uses to keep a session off the shared file.
+# hosts.yml and NOT the credential (the keyring is keyed by host);
+# docs/GH_ACCOUNT_ROUTING.md documents that trap at length. Do not carry the gh
+# intuition over to Claude: here, isolation works, and it is the mechanism `clauth
+# start` uses to keep a session off the shared file.
 _claude_cred_file() {
   print -r -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 }
@@ -166,10 +166,11 @@ _claude_active_profile() {
 #
 # The parse is in `_claude_toml_name_array` below, which this and the
 # `fallback_chain` reader share: two keys in this file, one array-of-names shape,
-# and CLAUDE.md's rule about the pair is that a fix right on one side of a report
-# and wrong on the other is worse than one wrong on both, "since the correct half
-# is the reason nobody re-reads the other". The other two readers of auth_broken
-# stay separate copies for reasons that do not apply here — see the helper.
+# and docs/CLAUDE_ACCOUNTS.md's rule about the pair is that a fix right on one
+# side of a report and wrong on the other is worse than one wrong on both, "since
+# the correct half is the reason nobody re-reads the other". The other two readers
+# of auth_broken stay separate copies for reasons that do not apply here — see the
+# helper.
 #
 # THREE READERS OF THIS ONE KEY, and a change belongs in all of them:
 # `_claude_profile_excluded` in zsh/zshrc.herdr (the picker's exclusion — this
@@ -208,7 +209,8 @@ _claude_fallback_chain() {
 # name per line. $1 is the key, and must be a literal identifier: it is
 # interpolated into a sed address, and both call sites in this file pass a
 # constant. No guard for that, deliberately — no row could reach it, and
-# CLAUDE.md's rule is that a branch whose mutant cannot die reads as coverage.
+# docs/CLAUDE_ACCOUNTS.md's rule is that a branch whose mutant cannot die reads as
+# coverage.
 #
 # Returns 1 when the question could not be ASKED, so empty output never carries
 # two meanings. Empty output at status 0 is "the list is empty", which an absent
@@ -256,15 +258,16 @@ _claude_toml_name_array() {
   # identical rc and output with this line removed). It is kept because the
   # contract is "no file, no answer" and a future reader of `$span` should not
   # have to know that sed happens to cover it, and it is LABELLED because
-  # CLAUDE.md's rule is that a branch whose mutant cannot die reads as coverage.
+  # docs/CLAUDE_ACCOUNTS.md's rule is that a branch whose mutant cannot die reads
+  # as coverage.
   [[ -r "$toml" ]] || return 1
   # THE STATUS IS THE POINT, not the output. `sed` is an external tool and an
-  # external tool is a way for a check to go quiet — CLAUDE.md records that for
-  # `readlink -f` and `awk` in these same files, and the bash twin in the
-  # reconciler avoids the class entirely with a `while read` loop. Without this
-  # test a sed that never ran (absent from PATH, exec failure) yields an EMPTY
-  # span, which the next line reads as "the list is empty": the doctor then
-  # prints a confident ✓ for a question it could not ask — over a standing
+  # external tool is a way for a check to go quiet — docs/CLAUDE_ACCOUNTS.md
+  # records that for `readlink -f` and `awk` in these same files, and the bash
+  # twin in the reconciler avoids the class entirely with a `while read` loop.
+  # Without this test a sed that never ran (absent from PATH, exec failure) yields
+  # an EMPTY span, which the next line reads as "the list is empty": the doctor
+  # then prints a confident ✓ for a question it could not ask — over a standing
   # quarantine, or over an ARMED fallback chain, which is the state that rewrites
   # the global credential under every running session. sed still exits 0 when it
   # matches nothing, so the ordinary empty-list case is unaffected.
@@ -357,9 +360,10 @@ _claude_toml_name_array() {
 #
 # THE EMPTY-accessToken TEST IS THE WHOLE POINT, and it is the same discriminator
 # scripts/claude-account-dirs.sh's `cred_state` uses: a freshness signal is not an
-# aliveness signal. CLAUDE.md records the credential-destroying bug that came of
-# ranking on expiry while meaning alive — the victim of a lost race KEEPS its
-# expiresAt and loses its accessToken, so it outranked a credential that worked.
+# aliveness signal. docs/CLAUDE_ACCOUNTS.md records the credential-destroying bug
+# that came of ranking on expiry while meaning alive — the victim of a lost race
+# KEEPS its expiresAt and loses its accessToken, so it outranked a credential that
+# worked.
 #
 # NEVER PRINTS A TOKEN: a word and an integer are the only things that leave here.
 _claude_store_auth_state() {
@@ -581,8 +585,8 @@ _claude_cred_shape() {
     # on a dangling link it hands back the link's own path and the report names
     # the link instead of the target. Same reasoning, same module, as the
     # symlinked-account-dir branch below — and a zsh module rather than
-    # `readlink`, which CLAUDE.md records silently producing nothing under the
-    # state table's from-scratch PATH, in this very file.
+    # `readlink`, which docs/CLAUDE_ACCOUNTS.md records silently producing nothing
+    # under the state table's from-scratch PATH, in this very file.
     zmodload -F zsh/stat b:zstat 2>/dev/null
     t="$(zstat +link -- "$f" 2>/dev/null)" || t=""
     [[ -n "$t" ]] || t="${f:A}"
@@ -625,8 +629,9 @@ claude-doctor() {
   local _DOCTOR_FAIL=0 _DOCTOR_WARN=0
   local days=7 show_all=0
   # zsh's `local` on a name already local in this scope is a DISPLAY command, so
-  # every loop-body variable is declared once, here. CLAUDE.md records the run
-  # where forgetting that printed `du=zvi-quantivly` into the middle of a report.
+  # every loop-body variable is declared once, here. docs/GH_ACCOUNT_ROUTING.md
+  # records the run where forgetting that printed `du=zvi-quantivly` into the
+  # middle of a report.
   local cred now_ms mode exp delta nproc_claude sub scopes crc cnames
   local active stored_hash live_hash p pdir spath
   local root d srv ok_n fail_n unauth_n invalid_n key empty_tok no_refresh
@@ -637,8 +642,8 @@ claude-doctor() {
   local pname
   # The quarantine block in §3. Declared HERE with everything else: zsh has no
   # block scope and `local` on a name already local in this scope is a DISPLAY
-  # command, which CLAUDE.md records printing `pdir=/home/...` into the middle of
-  # a report.
+  # command, which docs/CLAUDE_ACCOUNTS.md records printing `pdir=/home/...` into
+  # the middle of a report.
   local qnames qrc qstate qexp qstore qreal
   local -a date_prefixes files stray_profiles unprofiled_dirs unmanaged_stores
   # Declared here for the reason this PR exists: a ~950-line function with no
@@ -661,9 +666,9 @@ claude-doctor() {
 
   echo "=== Claude Code Account & MCP Doctor ==="
 
-  # ---- 0. Preflight -------------------------------------------------------
-  # A machine with no Claude Code is not a broken machine. Reporting ✗ here is
-  # the permanently-red checker CLAUDE.md warns about three times over; the
+  # ---- 0. Preflight ------------------------------------------------------- A
+  # machine with no Claude Code is not a broken machine. Reporting ✗ here is the
+  # permanently-red checker docs/CLAUDE_ACCOUNTS.md records seven times; the
   # answer is "there is nothing here to check", at exit 0.
   if [[ ! -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]]; then
     echo "  ○ skipped — no Claude Code config dir (${CLAUDE_CONFIG_DIR:-~/.claude})"
@@ -698,7 +703,8 @@ claude-doctor() {
   elif ! jq -e . "$cred" >/dev/null 2>&1; then
     # Unparseable is its own state and must never fall through to "no findings".
     # An unreadable map yielding nothing, read as nothing-wrong, is the exact
-    # shape of the install.conf.yaml and gh-routing-table bugs in CLAUDE.md.
+    # shape of the install.conf.yaml bug (docs/DOTFILES_DEPLOY.md) and the
+    # gh-routing-table bug (docs/GH_ACCOUNT_ROUTING.md).
     _doctor_bad "credential file is present but NOT VALID JSON — every check below is UNKNOWN"
     echo "    A partial write does this. Fix: /login (or 'clauth login') to rewrite it."
     echo
@@ -708,9 +714,9 @@ claude-doctor() {
     # -L, because under `clauth start` this path is a SYMLINK into the profile
     # store and `stat -c %a` reports the mode of the LINK — 777 on every Linux
     # there is. That produced a permanent ✗ on the isolated path the repo made
-    # default in #107: "mode 777 — expected 600" against a target that was 600.
-    # A checker that cannot pass in a supported configuration is the
-    # permanently-red checker CLAUDE.md warns about three times over.
+    # default in #107: "mode 777 — expected 600" against a target that was 600. A
+    # checker that cannot pass in a supported configuration is the permanently-red
+    # checker docs/CLAUDE_ACCOUNTS.md records seven times.
     mode=$(stat -Lc %a "$cred" 2>/dev/null)
     if [[ -z "$mode" ]]; then
       _doctor_bad "cannot stat the credential file"
@@ -800,12 +806,12 @@ claude-doctor() {
     echo "MCP OAuth entries (in the same unlocked file as the login):"
     for key in ${(f)"$(jq -r '.mcpOAuth | keys[]' "$cred" 2>/dev/null)"}; do
       [[ -n "$key" ]] || continue
-      # READ THE TYPE FIRST, once, before anything indexes the entry. An
-      # mcpOAuth value that is a string or null is a plausible product of the
-      # very interleaved write this section hunts, and every `.mcpOAuth[$k].x`
-      # below then fails with "Cannot index string with string" — four parser
-      # errors printed into the middle of the report, after which the empty
-      # captures read as a benign shape and the entry was excused. CLAUDE.md
+      # READ THE TYPE FIRST, once, before anything indexes the entry. An mcpOAuth
+      # value that is a string or null is a plausible product of the very
+      # interleaved write this section hunts, and every `.mcpOAuth[$k].x` below
+      # then fails with "Cannot index string with string" — four parser errors
+      # printed into the middle of the report, after which the empty captures read
+      # as a benign shape and the entry was excused. docs/HERDR_INTERNALS.md
       # records the same lesson from herdr-claude-wire.sh: `//` substitutes for
       # null, never for a type error.
       if [[ "$(jq -r --arg k "$key" '.mcpOAuth[$k] | type' "$cred" 2>/dev/null)" != "object" ]]; then
@@ -1101,24 +1107,24 @@ claude-doctor() {
         # 0.15.1, and that is proven rather than assumed: sha256 of
         # ~/.local/bin/clauth equals the clauth-linux-x86_64 asset of the v0.15.1
         # release, so the source read below is the code that runs. The flag has
-        # five clearing paths: `clauth login` /
-        # capture, an adopt from the live mirror, an adopt from disk at switch
-        # time, a carry after a terminal 400, and a successful REFRESH. A
-        # successful usage FETCH is not one of them. (This said "exactly seven
-        # mutation sites and five clearing paths" until 2026-09-18. CLAUDE.md
-        # retracted the seven — it is the `mark_auth_broken(` CALL count, not
-        # what the grep quoted beside it produces — and the retraction did not
-        # carry through to here, which is the same defect this PR fixed for the
-        # `skip_serializing_if` claim: a retraction is not a correction until
-        # every instance is found. The five clearing paths were checked and
-        # stand; the mutation-site count is dropped rather than re-derived,
-        # because nothing here needs it.) So once anything else has
-        # put a live token in the store the poll stops 401ing, the rotation leg
-        # is never entered, and the flag outlives the rejection that set it.
-        # Observed: on 2026-09-14 three profiles were flagged at 08:29:13-27, the
-        # reconciler adopted their live credentials at 08:29:28, and the flag
-        # stood 70 minutes until `clauth login` — with no `auth_broken cleared`
-        # line in the journal, which clauth emits on every transition.
+        # five clearing paths: `clauth login` / capture, an adopt from the live
+        # mirror, an adopt from disk at switch time, a carry after a terminal 400,
+        # and a successful REFRESH. A successful usage FETCH is not one of them.
+        # (This said "exactly seven mutation sites and five clearing paths" until
+        # 2026-09-18. docs/CLAUDE_ACCOUNTS.md retracted the seven — it is the
+        # `mark_auth_broken(` CALL count, not what the grep quoted beside it
+        # produces — and the retraction did not carry through to here, which is
+        # the same defect this PR fixed for the `skip_serializing_if` claim: a
+        # retraction is not a correction until every instance is found. The five
+        # clearing paths were checked and stand; the mutation-site count is
+        # dropped rather than re-derived, because nothing here needs it.) So once
+        # anything else has put a live token in the store the poll stops 401ing,
+        # the rotation leg is never entered, and the flag outlives the rejection
+        # that set it. Observed: on 2026-09-14 three profiles were flagged at
+        # 08:29:13-27, the reconciler adopted their live credentials at 08:29:28,
+        # and the flag stood 70 minutes until `clauth login` — with no
+        # `auth_broken cleared` line in the journal, which clauth emits on every
+        # transition.
         #
         # A ⚠, NEVER A ✗. Clearing it is a write to profiles.toml, which clauth
         # owns, and there is no out-of-band clear: no CLI subcommand, no TUI
@@ -1312,8 +1318,8 @@ claude-doctor() {
   # ---- 4. Concurrency on the shared file -----------------------------------
   # Claude Code does not lock .credentials.json. That is upstream's to fix, not
   # ours, so it is a ⚠ at worst and only when the count makes a race likely — an
-  # unfixable condition reported as ✗ is how gh-doctor came to exit 1 on every
-  # run (CLAUDE.md, "GitHub Account Routing").
+  # unfixable condition reported as ✗ is how gh-doctor came to exit 1 on every run
+  # (docs/GH_ACCOUNT_ROUTING.md).
   #
   # Counts by /proc comm, because Claude Code teammates exec the VERSIONED
   # binary and so appear as "2.1.259" rather than "claude" — the same blind spot
@@ -1395,9 +1401,9 @@ claude-doctor() {
     (( unknown_n > 0 )) && _doctor_note "$unknown_n process(es) whose config dir could not be read — NOT CHECKED"
     # The TOTAL still matters and the grouping does not capture it. Replacing the
     # old flat count outright meant forty processes spread over eight groups of
-    # five reported eight ✓ and no warning — while CLAUDE.md records 33 Claude
-    # processes driving this box to load 27 and 96% swap. Memory, not the
-    # credential file, is the binding constraint here.
+    # five reported eight ✓ and no warning — while docs/HERDR_INTERNALS.md records
+    # 33 Claude processes driving this box to load 27 and 96% swap. Memory, not
+    # the credential file, is the binding constraint here.
     if (( nproc_claude > 8 )); then
       _doctor_warn "$nproc_claude Claude processes in total — memory is the binding constraint on this box"
       echo "    Reduce with 'hreap --close --mine'; an idle agent still holds its memory"
@@ -1554,9 +1560,9 @@ claude-doctor() {
     # Accepts a zsh array (the documented form, for ~/.zshrc.local) OR a plain
     # space-separated scalar, which is all an exported environment variable can
     # be. Joining then splitting normalises both. Safe here in a way it would NOT
-    # be for DOTFILES_EXPECTED_DIRTY — CLAUDE.md records that word-splitting a
-    # scalar makes a PATH containing a space impossible to express; these are jq
-    # key paths, which cannot contain spaces.
+    # be for DOTFILES_EXPECTED_DIRTY — docs/DOTFILES_DEPLOY.md records that
+    # word-splitting a scalar makes a PATH containing a space impossible to
+    # express; these are jq key paths, which cannot contain spaces.
     local -a req
     req=( ${=${(j: :)CLAUDE_SETTINGS_REQUIRE}} )
     if (( ${#req} == 0 )); then
@@ -1660,8 +1666,9 @@ claude-doctor() {
           # read "p9 is a symlink to .../p9" — naming the link instead of the
           # target, which is the one fact the reader needs. `zstat +link` reads
           # the target itself, and unlike `readlink` it is a zsh module rather
-          # than a PATH dependency: CLAUDE.md records readlink silently producing
-          # NOTHING under the state table's from-scratch PATH, in this very file.
+          # than a PATH dependency: docs/CLAUDE_ACCOUNTS.md records readlink
+          # silently producing NOTHING under the state table's from-scratch PATH,
+          # in this very file.
           zmodload -F zsh/stat b:zstat 2>/dev/null
           adlink="$(zstat +link -- "$ad" 2>/dev/null)" || adlink=""
           [[ -n "$adlink" ]] || adlink="${ad:A}"
@@ -1750,18 +1757,19 @@ claude-doctor() {
           continue
         fi
 
-        # -L before -e: [[ -e ]] FOLLOWS symlinks, so a dangling link reads as
-        # "no file" and would be reported as "not logged in" — sending the reader
-        # to /login instead of at the broken link. CLAUDE.md records this exact
-        # trap for the credential check one section up.
+        # -L before -e: [[ -e ]] FOLLOWS symlinks, so a dangling link reads as "no
+        # file" and would be reported as "not logged in" — sending the reader to
+        # /login instead of at the broken link. docs/CLAUDE_ACCOUNTS.md records
+        # this exact trap for the credential check.
         #
-        # `${x:A}`, NOT `readlink`. CLAUDE.md records readlink as a DEPENDENCY the
-        # state table's from-scratch PATH does not carry, and this section shipped
-        # in #116 using it anyway — so under that PATH readlink produced NOTHING,
-        # every comparison failed, and a perfectly healthy link was reported as
-        # "links to ANOTHER profile's store". Found the moment this section finally
-        # got rows, which it shipped without. `:A` is a zsh modifier: no fork, no
-        # dependency, and it is what the credential check above already uses.
+        # `${x:A}`, NOT `readlink`. docs/CLAUDE_ACCOUNTS.md records readlink as a
+        # DEPENDENCY the state table's from-scratch PATH does not carry, and this
+        # section shipped in #116 using it anyway — so under that PATH readlink
+        # produced NOTHING, every comparison failed, and a perfectly healthy link
+        # was reported as "links to ANOTHER profile's store". Found the moment
+        # this section finally got rows, which it shipped without. `:A` is a zsh
+        # modifier: no fork, no dependency, and it is what the credential check
+        # above already uses.
         if [[ -L "$ad/.credentials.json" ]]; then
           if [[ ! -e "$ad/.credentials.json" ]]; then
             _doctor_bad "$name: credential link DANGLES — its target is gone"
@@ -1928,11 +1936,12 @@ claude-doctor() {
     # surfaced by the redundant re-declaration. Nothing in the repo echoes `pdir`.
     #
     # The convention this violated is stated at the top of this very function,
-    # three lines from its first `local`, and CLAUDE.md records the earlier run
-    # where forgetting it printed `du=zvi-quantivly` into the middle of a report.
-    # A ~950-line function with no block scope is the real hazard: every `local`
-    # in it shares one namespace. A state-table row now greps stdout for any bare
-    # `name=value` line, so the next one is caught whatever the variable is.
+    # three lines from its first `local`, and docs/GH_ACCOUNT_ROUTING.md records
+    # the earlier run where forgetting it printed `du=zvi-quantivly` into the
+    # middle of a report. A ~950-line function with no block scope is the real
+    # hazard: every `local` in it shares one namespace. A state-table row now
+    # greps stdout for any bare `name=value` line, so the next one is caught
+    # whatever the variable is.
     stray_profiles=(); unprofiled_dirs=(); unmanaged_stores=()
     shared_stores=(); dangling_stores=()
     for pdir in "$HOME"/.clauth/profiles/*(ND-/); do

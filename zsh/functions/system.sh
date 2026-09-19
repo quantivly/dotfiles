@@ -1054,8 +1054,9 @@ _dotfiles_link_map() {
 # being invisible to the doctor is worse for these than for the declared ones,
 # because no manifest lists them at all.
 #
-#   ~/.config/mise/config.toml — `install` symlinks it to .mise.toml. CLAUDE.md
-#     records the bill for that one drifting: the live config declared 10 tools
+#   ~/.config/mise/config.toml — `install` symlinks it to .mise.toml.
+#     docs/TOOL_VERSION_UPDATES.md records the bill for that one drifting: the
+#     live config declared 10 tools
 #     against the repo's 23, ~11 binaries never reached PATH, and `git diff`
 #     died with "unable to execute pager 'delta'" — for months, silently.
 #
@@ -1138,7 +1139,7 @@ _dotfiles_fetch_age_hours() {
 # in a tracked file — auto-conf's configure.py adds one per workspace it builds.
 # The generic "uncommitted changes" line cannot say what the edit is or whether
 # git ever needed it; this section does both. History and the upstream fix:
-# CLAUDE.md "safe.directory in the tracked gitconfig".
+# docs/DOTFILES_DEPLOY.md, "safe.directory in the tracked gitconfig".
 #
 # Split out of dotfiles-doctor (the _backup_doctor_external shape) so the state
 # table can drive it directly; it reports through _doctor_* by dynamic scope and

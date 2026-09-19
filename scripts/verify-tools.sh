@@ -46,22 +46,23 @@
 
 # --herdr: report ONLY what a modular herdr adopter installed (DO-563).
 #
-# Why this flag exists. `./install --herdr` links five files and deliberately
-# does NOT link ~/.config/mise/config.toml, so on such a machine the eleven
-# full-install sections below are all noise -- and the mise-drift check is
-# worse than noise: it prints a FAIL and offers a pasteable `ln -sfn` that
-# would pin ~25 tools globally and override whatever node/python the machine
-# already runs. The team write-up had to carry a callout telling readers to
-# ignore both. A checker that needs a prose disclaimer is the permanently-red
-# checker this repo's own CLAUDE.md warns about twice; the fix is scope, not
-# prose.
+# Why this flag exists. `./install --herdr` links five files and deliberately does
+# NOT link ~/.config/mise/config.toml, so on such a machine the eleven
+# full-install sections below are all noise -- and the mise-drift check is worse
+# than noise: it prints a FAIL and offers a pasteable `ln -sfn` that would pin ~25
+# tools globally and override whatever node/python the machine already runs. The
+# team write-up had to carry a callout telling readers to ignore both. A checker
+# that needs a prose disclaimer is the permanently-red checker this repo's own
+# records warn about twice (docs/CLAUDE_ACCOUNTS.md, docs/GH_ACCOUNT_ROUTING.md);
+# the fix is scope, not prose.
+#
 # This checkout, resolved from THIS script rather than from $HOME/.dotfiles.
-# Two reasons, and the first one bit during DO-563: the old definition lived
-# inside the full-install report, so --herdr left it empty and the enablement
-# assertion failed with "/scripts/reconcile-systemd-units.sh missing" — a FAIL
-# reporting the checker's absence, in a section whose whole point is that a
-# missing checker is not a pass. The second is that a checkout is not
-# necessarily at ~/.dotfiles (see DO-564), and a verifier that can only verify
+# Two reasons, and the first one bit during DO-563: the
+# old definition lived inside the full-install report, so --herdr left it empty
+# and the enablement assertion failed with "/scripts/reconcile-systemd-units.sh
+# missing" — a FAIL reporting the checker's absence, in a section whose whole
+# point is that a missing checker is not a pass. The second is that a checkout is
+# not necessarily at ~/.dotfiles (see DO-564), and a verifier that can only verify
 # one path is one more thing to be wrong somewhere else.
 DOTFILES_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 
@@ -788,13 +789,13 @@ else
     # file (the generic `rows`, or a comment) draws nothing on a claude pane. So
     # this needs the row, not a bare grep of the file.
     #
-    # A sed RANGE, not a TOML parser. The first version shelled out to python3
-    # and its stdlib TOML module, which is TWO faults this repo has already
-    # written down. python3 was not invoked anywhere in this file before -- it
-    # appeared only as a NAME in HERDR_SERVER_DEPS -- so it was a new dependency
-    # in a checker, "a new way for a check to go quiet"; and that module is
-    # 3.11+, while Ubuntu 20.04 (the first outside adopter's box, named in
-    # CLAUDE.md) ships 3.8. sed is already used throughout.
+    # A sed RANGE, not a TOML parser. The first version shelled out to python3 and
+    # its stdlib TOML module, which is TWO faults this repo has already written
+    # down. python3 was not invoked anywhere in this file before -- it appeared
+    # only as a NAME in HERDR_SERVER_DEPS -- so it was a new dependency in a
+    # checker, "a new way for a check to go quiet"; and that module is 3.11+,
+    # while Ubuntu 20.04 (the first outside adopter's box, named in
+    # docs/HERDR_INTERNALS.md) ships 3.8. sed is already used throughout.
     #
     # This comment used to add "the same bounded technique claude-doctor uses
     # for `fallback_chain`". DO NOT reinstate that: claude-doctor no longer uses
@@ -953,7 +954,7 @@ if [[ "$HERDR_ONLY" == true ]]; then
     echo "  Full guide:           $DOTFILES_ROOT/docs/HERDR_GUIDE.md"
 else
     echo "For installation instructions, see:"
-    echo "  - ~/.dotfiles/CLAUDE.md (comprehensive guide)"
+    echo "  - ~/.dotfiles/README.md (comprehensive guide)"
     echo "  - ~/.dotfiles/scripts/install-modern-tools.sh (automated installer)"
     echo ""
     echo "To install missing tools via mise:"
