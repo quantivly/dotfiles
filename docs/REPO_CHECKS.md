@@ -389,7 +389,17 @@ with a *different* version — from being read by mistake, which is what the
 **exit 2**, never 0 and never 1: a checker that cannot find its input must not
 report a clean tree, and "could not run" must not read as "out of sync".
 
-**State table:** `scripts/test-sync-version-docs.sh`, 77 checks, hermetic, run
+**A third defect, found by the state table rather than by review.** `awk` here
+is mawk, and an awk that fails prints nothing and exits non-zero. The bounds
+were read straight into `read` from a process substitution, so that empty
+output looked like a legitimate parse, `read` returned 1, and `set -e` exited
+the script — **status 1, with no output whatsoever**. A CI job failing as "out
+of sync" over a tool that never ran, with an empty log to debug it from. It is
+the `CLAUDE.md` rule about external tools going quiet, reproduced inside the
+change written to obey that rule's sibling. Measured with a stub `awk` on
+`PATH`; now exit 2 with a message naming awk, and a row that uses the same stub.
+
+**State table:** `scripts/test-sync-version-docs.sh`, 80 checks, hermetic, run
 in CI. Every row builds its own tree — a copy of the script under test, a
 synthetic `.mise.toml` and a synthetic doc — so nothing depends on what this
 repo happens to pin today. The tool list is read out of the script's own
@@ -406,11 +416,14 @@ duplicated two — the compatibility table's row starts `| bat |` as well — so
 fixtures address a row by its whole line, and each fixture edit asserts that it
 applied.
 
-**Mutation sweep: 10 mutants, 10 deaths**, each killed by rows that name the
+**Mutation sweep: 11 mutants, 11 deaths**, each killed by rows that name the
 rule it removed. Both halves of the silent-direction guard were mutated
 separately, because they catch different things and either alone leaves a gap:
 dropping the set check leaves a stray row unnamed while the count still fails
 the run, and dropping the count check lets a *duplicated* row through entirely —
-the name sets stay equal and only the lengths differ. `EXPECTED_TOTAL` was
+the name sets stay equal and only the lengths differ. Every mutation was
+dry-run for applicability first — one that no longer matches reads exactly like
+a survivor, and one of these did stop matching after a later edit and had to be
+re-pinned. `EXPECTED_TOTAL` was
 proven non-decorative by deleting a row and watching it report a vanished row
-rather than `all 77 checks passed`.
+rather than `all 80 checks passed`.

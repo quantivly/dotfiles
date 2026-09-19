@@ -156,8 +156,20 @@ doc_table_bounds() {
 # clean tree, and "could not run" must not read as "out of sync" -- so this
 # exits 2, distinct from the 1 that means drift.
 load_doc_table() {
-    local header_line
-    read -r header_line DOC_TABLE_START DOC_TABLE_END < <(doc_table_bounds)
+    local bounds header_line
+
+    # Checked by STATUS, not by whether anything came out. awk here is mawk, and
+    # an awk that fails prints nothing and exits non-zero: reading the bounds
+    # straight into `read` made that empty output look like a legitimate parse
+    # and the script exited 1, with no output at all, from `set -e` -- a CI job
+    # failing as "out of sync" over a tool that never ran. Measured with a stub
+    # awk on PATH; test-sync-version-docs.sh keeps a row on it.
+    if ! bounds=$(doc_table_bounds) || [[ -z "$bounds" ]]; then
+        echo -e "${RED}Error: could not read the table out of ${VERSION_DOC}${NC}" >&2
+        echo -e "${RED}       (awk produced no bounds -- is awk working?)${NC}" >&2
+        exit 2
+    fi
+    read -r header_line DOC_TABLE_START DOC_TABLE_END <<< "$bounds"
 
     if [[ "$header_line" -eq 0 ]]; then
         echo -e "${RED}Error: could not find the Core Tools table in ${VERSION_DOC}${NC}" >&2

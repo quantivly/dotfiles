@@ -255,6 +255,17 @@ invoke "$d"
 check "header with no data rows: exit 2" 2 "$RC"
 contains "  and says the table is empty" "$OUT" "no data rows"
 
+# An external tool that goes quiet must not read as a clean tree either, and
+# must not read as drift. Before this was guarded, a stub awk made the whole
+# script exit 1 printing NOTHING -- a CI job failing as "out of sync" over a
+# tool that never ran, which is the worst of the three outcomes to debug.
+d=$(mkfix awkgone)
+mkdir -p "$d/bin"; printf '#!/bin/sh\nexit 3\n' > "$d/bin/awk"; chmod +x "$d/bin/awk"
+check "  fixture: the stub awk really fails" 3 "$(PATH="$d/bin:$PATH" awk 'BEGIN{print 1}' >/dev/null 2>&1; printf '%s' "$?")"
+OUT=$(PATH="$d/bin:$PATH" "$d/scripts/sync-version-docs.sh" 2>&1) && RC=0 || RC=$?
+check "an awk that fails: exit 2, not a pass and not drift" 2 "$RC"
+contains "  and it says awk produced nothing" "$OUT" "is awk working?"
+
 # --- real drift is still detected --------------------------------------------
 printf '\n== real drift still fails ==\n'
 d=$(mkfix drift)
@@ -375,7 +386,7 @@ check "the shipped doc still has the anchor header" 1 \
 # several rows are emitted from `for` loops, and emptying one would remove them
 # under a cheerful "all N checks passed". It does NOT catch a hollow row, which
 # is what the fixture-applied assertions above are for.
-EXPECTED_TOTAL=77
+EXPECTED_TOTAL=80
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then
