@@ -1,7 +1,7 @@
 import argparse, json, tempfile, unittest
 from pathlib import Path
 
-from rabota import context, errors
+from rabota import context, errors, secrets
 from rabota.commands import escalate, close, db
 from rabota.runner import FakeRunner, Result
 
@@ -105,6 +105,24 @@ class CloseTests(unittest.TestCase):
         self.assertIsNotNone(ctx.store.escalation(out["id"]))
         rows = [json.loads(l) for l in (ctx.state_dir / "escalations.jsonl").read_text().splitlines()]
         self.assertEqual(len(rows), 1)
+
+    def test_a_secret_in_evidence_still_raises_even_though_notify_is_on(self):
+        """The ``except Exception`` around the herdr call must not reach ``_project``.
+
+        Gate 2 (WS2 2.7, 2026-09-18) found that widening that ``try`` by one line to also wrap
+        ``_project`` left the whole suite green — so nothing pinned its scope. A secret in
+        ``evidence`` would then be swallowed into ``notified: False`` and the call would report
+        success, which is the write guard's entire failure class re-entered through the handler
+        that round added. ``notify=True`` and a runner that WOULD succeed are both load-bearing
+        here: they are what makes the widened form look healthy.
+        """
+        value = "sk-test-secret-value-not-real-0000"
+        secrets.register_value(value)
+        self.addCleanup(secrets.REGISTERED_VALUES.discard, value)
+        ctx = self.ctx()                                   # FakeRunner([HERDR_OK]) — the call succeeds
+        with self.assertRaises(errors.SecretLeak):
+            escalate.run_escalate(ctx, "q", f"token is {value}", ["a"], notify=True)
+        self.assertFalse((ctx.state_dir / "escalations.jsonl").exists())
 
     # --- item 2: the answer projection must carry resolvedAt ---------------
 
