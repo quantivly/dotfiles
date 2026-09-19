@@ -141,6 +141,16 @@ class PrecomputeTests(unittest.TestCase):
         self.assertTrue(rep["steps"]["rank"]["ok"])
         self.assertTrue(rep["steps"]["census"]["ok"])
 
+    def test_census_step_calls_gather_with_include_worktrees_false(self):
+        # F24: the timer's census step must ask for the cheap shape — drive this through the real
+        # `_default_steps()` wiring (not by inspecting the lambda's source) so a future refactor of
+        # the step's argument order or name is still caught.
+        ctx = self.ctx()
+        with mock.patch("rabota.census.gather", return_value={}) as fake_gather:
+            steps = precompute._default_steps()
+            steps["census"](ctx)
+        fake_gather.assert_called_once_with(ctx, sample_seconds=2.0, include_worktrees=False)
+
     def test_secret_leak_from_log_write_still_propagates(self):
         # The write happens after the per-step loop, so a SecretLeak from it must escape
         # run_precompute unswallowed. Pinned so a later refactor cannot move the write
