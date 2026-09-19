@@ -3816,12 +3816,14 @@ overflow and refusal semantics of #129/#131 survived.
 The score, in centipoints, integer arithmetic only (no `zsh/mathfunc`, which the state table's
 from-scratch `PATH` cannot vouch for): `base` is 5h headroom; `bonus` is use-it-or-lose-it, scaled by
 **both** headroom and closeness to the reset, so a nearly-spent window resetting soon earns almost
-nothing and a fresh window earns nothing extra; `weekf` is weekly headroom as a **multiplier**; and
+nothing and a fresh window earns nothing extra; `weekf` is weekly headroom as a **multiplier**;
+`weekf_eff` and `bonus_w` are DO-621's two weekly-reset terms — `weekf`'s penalty fades as the week's
+own reset nears, and a consume-first bonus scaled by weekly headroom is added (see that section); and
 `crowd` charges each live holder more on an account that is already busy. Knobs:
-`CLAUDE_PICK_W_EXPIRE`, `_W_HOLDER`, `_W_CROWD`, `_WEEK_LOW`, `_RR_BAND`, `_5H_EXHAUSTED`,
-`_WEEK_EXHAUSTED` (inert, 101 — see below), `_WEEK_SPENT` (100 — the demotion tier, DO-609),
-`_CACHE_MAX_AGE`, `_LOAD_WARN`, `_SWAP_WARN`,
-`_LOAD_MAX`, `_SWAP_MAX`, `_LOCK_WAIT`, `_PROC_ROOT` (a test hook).
+`CLAUDE_PICK_W_EXPIRE`, `_W_WEEK_EXPIRE` (200 — DO-621), `_W_HOLDER`, `_W_CROWD`, `_WEEK_LOW`,
+`_RR_BAND`, `_5H_EXHAUSTED`, `_WEEK_EXHAUSTED` (inert, 101 — see below), `_WEEK_SPENT` (100 — the
+demotion tier, DO-609), `_CACHE_MAX_AGE`, `_LOAD_WARN`, `_SWAP_WARN`, `_LOAD_MAX`, `_SWAP_MAX`,
+`_LOCK_WAIT`, `_PROC_ROOT` (a test hook).
 
 **Three departures from the approved spec, each measured rather than argued.**
 
@@ -4160,8 +4162,10 @@ is measured and *a spent AGGREGATE bills* is an inference from it. Max seats hav
 `spend.enabled = false`; that a spent window blocks them is inferred from the field, not
 observed.
 
-This refines DO-574 rather than reversing it: its 2026-09-10 seats were billing, not
-blocked. The ranking tiers are therefore `eligible` (free) > `weekly-spent` (bills — and
+This refines DO-574 rather than reversing it: its 2026-09-10 seats were **not blocked** —
+live sessions ran on them — and nobody measured their spend that day, so "they were billing"
+is the inference drawn from the table above, not something anyone observed then. The ranking
+tiers are therefore `eligible` (free) > `weekly-spent` (bills — and
 the pick says so in a warning `claude()` prints) > `unknown`, with `exhausted` outside the
 ranking as the refusal class that a live spent week with spend `none` now joins. Spend
 `unknown` never escalates to `exhausted` — missing data is not a wall — and its warning

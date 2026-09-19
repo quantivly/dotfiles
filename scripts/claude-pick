@@ -558,6 +558,20 @@ if (( as_json )); then
   # back out of --explain. Built by jq from typed pieces, never by string
   # concatenation: a profile name or a reason is data, and a JSON document
   # assembled with printf is one apostrophe away from being invalid.
+  #
+  # `usage.spend` HAS TWO ROUGH EDGES (DO-621), recorded here because nothing in
+  # this repo reads the key yet and Part B's per-model gate (DO-623) will, so it
+  # should meet them written down rather than discover them. It is NOT
+  # LAPSE-AWARE: on a lapsed week the RANKER is right — `usage.weekly` is null,
+  # the class is `eligible`, and the spend wall cannot fire on an unknown uW —
+  # but `spend` is read off the same cache unconditionally, so it still reports
+  # that window's spend state (measured: `"none"`, with the weekly reset an hour
+  # in the past), a spend counter belonging to a window that has ended.
+  #
+  # And ON A REFUSAL it is the string `"unknown"` while its siblings
+  # `five_hour`, `weekly` and `cache_age_s` are all null, so nothing in the
+  # object itself separates "measured, and the measurement was unknown" from
+  # "no pick was made" — a consumer has to read `profile` or `exit_code`.
   skip_rows=()
   for e in "${_claude_pick_explain[@]}"; do
     [[ "${e%%$'\t'*}" == "$REPLY" ]] && continue

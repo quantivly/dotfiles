@@ -814,6 +814,18 @@ _claude_profile_metrics() {
   # VALUE, not the class: the seat stays rankable. An ABSENT reset is not a
   # lapse — clauth omits resets_at only on an unstarted window, and un-demoting
   # a seat on missing data would be optimism.
+  #
+  # THE `(-|)<->` TEST IS DEFENCE IN DEPTH AND UNPINNABLE, exactly like the `&&`
+  # guard on the two _claude_ts_delta calls above — written down because a
+  # mutant that can never die
+  # reads as coverage. _CPM_RW holds one of two shapes and no third: the literal
+  # `unknown` from the reset at the top of this function, or an integer from the
+  # parser's success arm, which assigns an arithmetic result. Delete the test and
+  # the `unknown` case becomes `(( unknown < 0 ))`, which zsh evaluates as an
+  # unset parameter — 0 — so the arm still does not fire and `dw3` stays green.
+  # It stays because the contract is "only compare a MEASURED reset", and code
+  # that is correct only because a word happens to evaluate to 0 in arithmetic is
+  # one refactor away from being wrong.
   if [[ "$_CPM_UW" != unknown && "$_CPM_RW" == (-|)<-> ]] && (( _CPM_RW < 0 )); then
     _CPM_UW=unknown
   fi
@@ -954,10 +966,14 @@ _claude_pick_score() {
 # zero via `weekf_eff`/`bonus_w` (consume-first) -- but that reordering happens
 # entirely inside the tier and can never let it outrank an eligible account.
 #
-# DO-621 REFINES THIS, it does not reverse it. The 2026-09-10 seats were
-# billing: a spent week with spend headroom bills usage credits and keeps
-# working, so it still only demotes. A spent week with NO spend headroom blocks
-# (measured 2026-09-18), and that one state is `exhausted` above.
+# DO-621 REFINES THIS, it does not reverse it. Be exact about what 2026-09-10
+# established, because it is one easy step too far to read: those seats were NOT
+# BLOCKED — live sessions ran on them — and nobody measured their spend that
+# day, so "they were billing" is an inference drawn afterwards and never the
+# finding. What IS measured (2026-09-18) is that a spent window with spend
+# headroom left bills usage credits and keeps working, so a spent week still
+# only demotes; and that a spent week with NO spend headroom blocks, which is
+# the one state `exhausted` above claims. THE SPEND WALL below carries both.
 #
 # CLAUDE_PICK_WEEK_EXHAUSTED stays as an INERT knob, defaulting to 101 so it can
 # never fire, for whoever wants the strict behaviour back.
@@ -1005,8 +1021,14 @@ _claude_pick_class() {
     return 0
   fi
   # THE SPEND WALL (DO-621). A spent week is not a wall WHILE SPEND HEADROOM
-  # LASTS — it bills usage credits, which is DO-574's 2026-09-10 measurement
-  # (live sessions on 100% seats). Once headroom is gone it blocks: 2026-09-18,
+  # LASTS — the seat keeps working, which is DO-574's 2026-09-10 measurement
+  # (live sessions on 100% seats; nobody measured their spend that day, so this
+  # says nothing about whether they billed). That it BILLS is 2026-09-18's:
+  # +$0.31 and +$0.28 within four minutes of a window reaching 100, the only
+  # spend increases in the retained history — measured on a PER-MODEL window
+  # while this line reads the AGGREGATE, so "a spent aggregate bills" is an
+  # inference from it rather than a second finding. Once headroom is gone it
+  # blocks: 2026-09-18,
   # six "You've hit your individual spend limit" errors on a seat at 100% with
   # $275.23 of $275 spent, each quoting that seat's own weekly reset. `none`
   # only: spend `unknown` never escalates to a refusal (missing data is not a
@@ -1261,6 +1283,21 @@ _claude_pick_backpressure() {
 # `unknown`. The 5h reset for a 5h wall; the WEEKLY reset for the spend wall
 # (DO-621), because that is the window that has to roll; the later of the two
 # when both apply. Prints; callers that need no fork read _CPM_* themselves.
+#
+# THE ARMED `CLAUDE_PICK_WEEK_EXHAUSTED` KNOB IS DELIBERATELY OUTSIDE THE WEEKLY
+# SUBSTITUTION BELOW, so the next reader meets a decision rather than a gap.
+# _claude_pick_class has TWO weekly exhaustion paths: the spend wall (`... and
+# no spend headroom`, which needs _CPM_SPEND == none) — what the test below keys
+# on — and `weekly window N% used`, reachable only when somebody arms that knob,
+# which is the documented escape hatch for §5.3's strict behaviour (DO-574
+# departed from it, so it has never shipped armed). A seat exhausted by the
+# second path with spend `headroom` or `unknown` therefore reports its 5H reset
+# as the wait — or no time at all, when that window has not started — which is
+# either way not the wall the reader is waiting on. It is left that way
+# because the knob is INERT at its default 101, so nothing on a stock machine
+# can reach that path, and re-keying the substitution on "the blocking class is
+# weekly" is a behaviour change the spec did not ask for. The cost, for whoever
+# arms it: one refusal quoting a 5h reset for a block the week has to clear.
 _claude_pick_block_reset() {
   local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97} spent=${CLAUDE_PICK_WEEK_SPENT:-100}
   local r="$_CPM_R5"
