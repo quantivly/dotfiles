@@ -470,8 +470,6 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
 **Popup windows:** Alt+o (file finder), Alt+s (live grep), Alt+w (session picker), Alt+g (lazygit), Alt+y (yazi popup), Ctrl+b (yazi side pane toggle), Ctrl+Shift+F (tmux-thumbs quick-copy)
 
-**Nested tmux (remote servers):** F12 toggles outer tmux off, passing all keys to inner tmux. Outer status bar turns grey with `[INNER]` label. Inner tmux auto-detects nesting and uses gold bar at top. For manual SSH-into-remote-tmux usage (e.g., `ssh -t server 'tmux a'`).
-
 **Key notes:**
 - No auto-start — launch manually with `tmn <session>`
 - Alacritty coupling — Ctrl+Shift+letter bindings require CSI u entries in `~/.config/alacritty/alacritty.toml` (template: `examples/alacritty.toml.template`, install with `alacritty-init`)
@@ -479,7 +477,7 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 - Plugins: tmux-resurrect, tmux-continuum, tmux-thumbs, tmux-open, tmux-dispatch
 - Claude Code runs in fullscreen rendering (alt-screen) to avoid scrollback corruption — its output isn't in tmux copy-mode; scroll/search inside Claude (`Ctrl+o`, then `[` to dump to scrollback). See [docs/CLAUDE_CODE_TMUX.md](docs/CLAUDE_CODE_TMUX.md)
 
-See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) and [examples/tmux-workflows.md](examples/tmux-workflows.md) for comprehensive guides.
+See [docs/TMUX_LEARNING_GUIDE.md](docs/TMUX_LEARNING_GUIDE.md) (nested tmux: F12) and [examples/tmux-workflows.md](examples/tmux-workflows.md) for comprehensive guides.
 
 ## Herdr (agent workspace manager)
 
@@ -517,8 +515,8 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
   sessions, and `HERDR_PLUGIN_ID` is what says whose the other two are.
 - **The server's `PATH` is a snapshot taken when it started.** Link a tool into `~/.local/bin` to make
   it visible without a restart.
-- **`clauth start <profile>` bypasses `claude()`**, so it is not a team lead: `clauth <profile>` then
-  `claude`.
+- **`clauth start <profile>` bypasses `claude()`**, so it is not a team lead (`clauth <profile>` then
+  `claude`); it is refused for a profile another machine owns (`CLAUDE_TENANT_MACHINE_OWNED`).
 - **A modular adopter** runs `./install --herdr` (five links, nothing else),
   `scripts/herdr-claude-wire.sh`, and `scripts/verify-tools.sh --herdr` as the one check.
 
