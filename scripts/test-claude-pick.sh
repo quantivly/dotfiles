@@ -104,7 +104,6 @@ metrics() {    # $1 = profile -> "u5 r5 uW tier"
 iso_in() { date -u -d "@$(( $(date +%s) + $1 ))" '+%Y-%m-%dT%H:%M:%S.000000+00:00'; }
 # A 5h window that is fresh and whose reset is far away, so its bonus is 0 and it
 # never decides a row that is about the WEEK.
-# shellcheck disable=SC2034  # unused by Task 1's own rows; provisioned here for later tasks in this plan
 FIVE='"five_hour":{"utilization":0.0,"resets_at":"2099-01-01T00:00:00Z"}'
 spend_of() { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \"\$_CPM_SPEND|\$_CPM_SPEND_TXT\""; }
 
@@ -211,7 +210,7 @@ check "a missing five_hour block leaves u5 unknown, not 0" "$(metrics a1 | cut -
 echo
 echo "=== scoring: one row per term, each isolating that term ==="
 
-score() { zsh -f -c "source '$HERDRRC' >/dev/null 2>&1; _claude_pick_score $1 $2 $3 ${4:-0}" 2>/dev/null; }
+score() { zsh -f -c "source '$HERDRRC' >/dev/null 2>&1; _claude_pick_score $1 $2 $3 ${4:-0} ${5:-unknown}" 2>/dev/null; }
 cmp2()  { zsh -f -c "source '$HERDRRC' >/dev/null 2>&1
                      (( \$(_claude_pick_score $1) $2 \$(_claude_pick_score $3) )) && print yes || print no" 2>/dev/null; }
 
@@ -249,6 +248,16 @@ check "a holder costs more on a fuller account" \
 # The ordering that matters on this machine: a fresh seat beats two spent ones.
 check "a fresh week outranks a spent one at equal 5h" \
       "$(cmp2 '0 unknown 2' '>' '0 unknown 100')" "yes"
+
+# DO-621 — the weekly axis. weekf STAYS (removing it switched weekly headroom
+# off below 100%: an idle 99% seat tied an idle 20% one), but its penalty fades as
+# the week's reset nears, and a consume-first bonus scaled by what is LEFT is
+# added. W_WEEK_EXPIRE = 200 so a real preference clears the 800-point RR band.
+check "no weekly reset known: exactly the old arithmetic"      "$(score 0 18000 95 0 unknown)" "3300"
+check "a reset 1 h out lifts the near-spent penalty"           "$(score 0 18000 95 0 3600)"    "11000"
+check "an empty week earns no consume-first bonus"             "$(score 0 18000 100 0 3600)"   "10000"
+check "A: 40% of the week left, resetting in 6 d"              "$(score 0 18000 60 0 518400)"  "11200"
+check "B: 20% of the week left, resetting in 12 h"             "$(score 0 18000 80 0 43200)"   "13720"
 
 #-----------------------------------------------------------------------------
 echo
@@ -994,6 +1003,21 @@ mkprof a1 '-'
 mkprof b2 '-'
 check "with only unreadable accounts one is still chosen, as class unknown" \
       "$(pfd '' '' '' 0 | cut -d: -f1,3,4)" "0:picked:unknown"
+
+# Consume-first must hold for the PICK, not just the scores: inside RR_BAND the
+# least-recently-picked seat wins, so a gap under 800 is a coin flip.
+new_home wk1
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":60.0,\"resets_at\":\"$(iso_in 518400)\"}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":80.0,\"resets_at\":\"$(iso_in 43200)\"}}"
+check "consume-first: B is picked with an empty ledger"        "$(pfd '' '' '' 0 | cut -d: -f2)" "b2"
+printf 'a1\t1\nb2\t%s\n' "$(date +%s)" > "$FHOME/.local/state/claude-account-dirs/.pick-ledger"
+check "...and still B when the ledger just picked B"           "$(pfd '' '' '' 0 | cut -d: -f2)" "b2"
+
+# weekf kept: at equal reset distance, a nearly-spent week loses to a fresh one.
+new_home wk2
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":99.0,\"resets_at\":\"$(iso_in 432000)\"}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":20.0,\"resets_at\":\"$(iso_in 432000)\"}}"
+check "an idle seat at 99% of its week loses to one at 20%"   "$(pfd '' '' '' 0 | cut -d: -f2)" "b2"
 
 # THE TIER IS ONLY OBSERVABLE WHERE THE SCORE WOULD NOT HAVE SEPARATED THEM, and
 # the row above cannot see it: a1 at 10% scores 9000 against an unknown's 0, and
