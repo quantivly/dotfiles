@@ -66,12 +66,13 @@
 # seat unwatched: a seat at 30% three hours ago can be at 100% now (F13 — two
 # profiles went 7% → 100% in forty minutes), so the number is not evidence past
 # ten minutes. Setting the variable sets BOTH thresholds; that is the trade the
-# fix brief asked for, stated rather than hidden. What the gate CANNOT see is
-# clauth's own freshness verdict: `clauth status` reports `stale` and
-# `fetch_status` per profile, but neither reaches usage_cache.json (measured
-# 2026-09-17: its keys are five_hour, seven_day, weekly_scoped, plan, spend,
-# extra_usage — no freshness field), and this script reads only that file. So a
-# profile clauth has marked stale is refused here only by its file's mtime.
+# fix brief asked for, stated rather than hidden.
+# clauth's own freshness verdict (`clauth status` reports `stale` and
+# `fetch_status`) does not reach usage_cache.json, but since clauth 0.15.2 its
+# clock does: `fetched_at` (epoch ms) is stamped on every live fetch and never on
+# a plan-only rewrite. The age this gate compares against CLAUDE_PICK_CACHE_MAX_AGE
+# is measured from it (DO-621), falling back to the file mtime only when the
+# stamp is absent (clauth 0.15.1) or implausibly far in the future.
 # `rabota census` reads clauth's verdict directly and names it in unavailable[].
 #
 # A ROLLED WINDOW IS AN UNMEASURED ONE TOO, AND THE MTIME CANNOT SEE IT. The

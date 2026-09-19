@@ -567,16 +567,34 @@ _claude_quarantine_scan() {
 # invitation to reintroduce the old ranking by accident. `CLAUDE_ACCOUNT_CACHE_MAX_AGE`
 # went with it; the threshold is `CLAUDE_PICK_CACHE_MAX_AGE`.
 
-# Seconds since a profile's usage cache was written, or nothing.
+# Seconds since this profile's usage reading was TAKEN, or nothing.
+#
+# DO-621: clauth 0.15.2 writes `fetched_at` (epoch ms) on every live fetch and
+# never on a plan-only rewrite, so it is the honest clock and the file mtime is
+# not — a rewrite that produced no new reading advances the mtime and read as
+# fresh. The caller passes the value it already extracted, so this adds no fork.
+#   * a stamp at most 60 s ahead clamps to 0 (one clock; that is jitter);
+#   * a stamp further ahead is corruption, and falls back to the mtime, which is
+#     what clauth's own scheduler does (oauth_seed_clock filters at <= now).
+#     `unknown` would be the wrong answer: the ranker never calls it stale;
+#   * no stamp at all (clauth 0.15.1) is the mtime, as before.
 #
 # Loads its own modules. A helper that depends on a module its CALLER happened to
 # load returns nothing when called any other way — and "no age" reads as "fresh",
 # so a stale reading would have been believed.
 _claude_profile_cache_age() {
-  local f="$HOME/.clauth/profiles/$1/usage_cache.json" mtime
+  local f="$HOME/.clauth/profiles/$1/usage_cache.json" fa="${2:-}" mtime s
+  zmodload zsh/datetime 2>/dev/null || return 1
+  if [[ "$fa" == <-> ]]; then
+    s=$(( fa / 1000 ))
+    if (( s <= EPOCHSECONDS + 60 )); then
+      (( s > EPOCHSECONDS )) && s=$EPOCHSECONDS
+      print -r -- $(( EPOCHSECONDS - s ))
+      return 0
+    fi
+  fi
   [[ -r "$f" ]] || return 1
   zmodload -F zsh/stat b:zstat 2>/dev/null || return 1
-  zmodload zsh/datetime 2>/dev/null || return 1
   mtime=$(zstat +mtime "$f" 2>/dev/null) || return 1
   print -r -- $(( EPOCHSECONDS - mtime ))
 }
@@ -792,7 +810,7 @@ _claude_profile_metrics() {
   if [[ "$_CPM_UW" != unknown && "$_CPM_RW" == (-|)<-> ]] && (( _CPM_RW < 0 )); then
     _CPM_UW=unknown
   fi
-  _CPM_AGE="$(_claude_profile_cache_age "$1")" || _CPM_AGE=unknown
+  _CPM_AGE="$(_claude_profile_cache_age "$1" "$fa")" || _CPM_AGE=unknown
   return 0
 }
 

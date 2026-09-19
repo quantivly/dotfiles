@@ -373,6 +373,38 @@ check "an absent profiles.toml is rc=1 too"         "$(zrun '_claude_quarantine_
 
 #-----------------------------------------------------------------------------
 echo
+echo "=== cache age: fetched_at first, mtime as the fallback (DO-621) ==="
+
+age_of()  { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \$_CPM_AGE"; }
+between() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= $2 && $1 <= $3 )) && echo yes || echo "no ($1)"; }
+
+# clauth 0.15.2 stamps fetched_at only on a LIVE fetch, so a plan-only rewrite
+# advances the mtime while the reading stays old — the case upstream fixed
+# alongside #74, and the one an mtime clock reads as fresh.
+new_home ag1
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"fetched_at\":$(( ($(date +%s) - 7200) * 1000 ))}"
+check "age comes from fetched_at, not the fresh mtime"       "$(between "$(age_of a1)" 7190 7400)" "yes"
+check "...so a plan-only rewrite is stale to the picker"      "$(cls a1 | cut -d: -f1)" "unknown"
+
+new_home ag2
+mkprof a1 '{"five_hour":{"utilization":5.0}}'
+touch -d "@$(( $(date +%s) - 100 ))" "$FHOME/.clauth/profiles/a1/usage_cache.json"
+check "with no fetched_at the mtime still decides (0.15.1)"   "$(between "$(age_of a1)" 95 200)" "yes"
+
+new_home ag3
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"fetched_at\":$(( ($(date +%s) + 30) * 1000 ))}"
+check "a stamp up to 60 s ahead clamps to 0"                  "$(age_of a1)" "0"
+
+# Far ahead is corruption. clauth's own scheduler (oauth_seed_clock) filters
+# `at <= now` and falls back to the mtime; mapping it to `unknown` instead would
+# read as FRESH, because the ranker never calls an unknown age stale.
+new_home ag4
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"fetched_at\":$(( ($(date +%s) + 3600) * 1000 ))}"
+touch -d "@$(( $(date +%s) - 2000 ))" "$FHOME/.clauth/profiles/a1/usage_cache.json"
+check "a stamp far in the future falls back to the mtime"     "$(between "$(age_of a1)" 1995 2100)" "yes"
+
+#-----------------------------------------------------------------------------
+echo
 echo "=== holders: both launch paths, and buckets ==="
 #
 # holders/ pidfiles see only claude()/hspawn launches; a `clauth start` session
@@ -1746,6 +1778,15 @@ check "gate: stale AND rolled is reported as stale"              "$(has_words "$
 # refused to trust, so `projected` is null.
 gate_run rp
 check "gate: a rolled window has no projection"                  "$(jq -r .gate.projected <<<"$out")" "null"
+
+# DO-621: the gate reads the same age, so its 600 s threshold is now measured
+# against fetched_at. A fresh mtime over a 700 s-old fetch used to pass.
+mkdir -p "$H/.clauth/profiles/gf"; : > "$H/.clauth/profiles/gf/credentials.json"
+printf '{"five_hour":{"utilization":10,"resets_at":"%s"},"seven_day":{"utilization":10,"resets_at":"2099-01-06T00:00:00Z"},"fetched_at":%s,"plan":{"tier":"Team"}}\n' \
+    "$GATE_FUTURE" "$(( ($(date +%s) - 700) * 1000 ))" > "$H/.clauth/profiles/gf/usage_cache.json"
+gate_run gf
+check "gate: a fresh mtime over a 700 s-old fetch refuses"     "$rc" "2"
+check "gate: ...as gate-unmeasured"                             "$(jq -r .state <<<"$out")" "gate-unmeasured"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
