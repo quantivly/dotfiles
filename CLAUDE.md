@@ -4134,6 +4134,60 @@ Verify the composition afterwards, too, rather than trusting the tally: this run
 for 40 **distinct** names each appearing **once**, because a resumable driver that recomputed its
 to-do list wrongly would happily run one mutant twice and report 40.
 
+### Weekly windows and the spend wall (DO-621)
+
+**`max()` over heterogeneous windows reported two seats spent on opposite axes as the
+same state.** On 2026-09-18 quantivly-1 read `seven_day` 83 with `7d fable` 100, and
+quantivly-3 read `seven_day` 100 with `7d fable` 63; both came out `weekly-spent (100%)`.
+The ranker now reads the aggregate `seven_day` alone (per-model windows belong to the
+gate, which knows the model — DO-623), a lapsed week is unmeasured rather than spent, and
+a cache is dated from clauth 0.15.2's `fetched_at` where it has one — the file mtime
+otherwise, so a 0.15.1 clauth still works and a plan-only rewrite stops reading as fresh.
+
+**Spend headroom is the signal that separates free, billed and blocked**, measured the
+same day from clauth's `usage_history.jsonl` (about two days retained) and transcripts:
+
+| Seat state | What happens |
+|---|---|
+| window not spent | free — quantivly-1's aggregate rose 77 → 86 over 27 h with spend flat at $190.77 |
+| window spent, spend headroom left | usage **bills usage credits** — +$0.31 and +$0.28 within 4 min of a window reaching 100, the only spend increases in the retained history across all three work seats |
+| window spent, spend at its limit | **blocked** — "You've hit your individual spend limit", 6 errors, each quoting that seat's own weekly reset |
+
+**One episode each way, and they are not on the same axis.** The blocking row is
+aggregate (quantivly-3 at `seven_day` 100 with $275.23 of $275). The billing row is not:
+what reached 100 was `7d fable` while the aggregate sat at 77, so *a spent window bills*
+is measured and *a spent AGGREGATE bills* is an inference from it. Max seats have
+`spend.enabled = false`; that a spent window blocks them is inferred from the field, not
+observed.
+
+This refines DO-574 rather than reversing it: its 2026-09-10 seats were billing, not
+blocked. The ranking tiers are therefore `eligible` (free) > `weekly-spent` (bills — and
+the pick says so in a warning `claude()` prints) > `unknown`, with `exhausted` outside the
+ranking as the refusal class that a live spent week with spend `none` now joins. Spend
+`unknown` never escalates to `exhausted` — missing data is not a wall — and its warning
+says "may bill" rather than "bills".
+
+**Consume-first on the week, without switching the week off.** `weekf` stays, its penalty
+fading as the weekly reset nears (`weekf_eff`), plus a consume-first bonus scaled by
+weekly headroom (`CLAUDE_PICK_W_WEEK_EXPIRE`, 200). The weight is set against
+`CLAUDE_PICK_RR_BAND` (800), not in isolation: inside the band the least-recently-picked
+seat wins, so at 50 the spec's own 40%/6 d vs 20%/12 h example was a 630-point coin flip.
+An adversarial review caught that, and caught that removing `weekf` outright switches
+weekly headroom off entirely below 100% — with no weekly reset to read, an idle 99% seat
+then scores exactly as an idle 20% one. **A weight is only meaningful relative to the band
+that decides ties** — check it against the band, and assert the PICK, not the score.
+
+**The "Fable · Requires usage credits" banner is not evidence about windows** (a
+server-side flag on every Team profile; a notice, not a block). The first draft of this
+design called a spent `7d fable` window "worth a refusal" on the strength of it. That is
+the #123 failure — a correlation plus a plausible mechanism — recurring in the same file
+that already records #123, and it was caught in review rather than by any measurement.
+
+Rows: `scripts/test-claude-pick.sh` (metrics, cache age, scoring, the spend wall, the
+billing warning), `scripts/test-hspawn.sh` (the warning reaches `claude()`),
+`scripts/test-claude-doctor.sh` (the doctor dates caches the same way). Spec:
+`docs/superpowers/specs/2026-09-18-do-621-weekly-picker-design.md`.
+
 ### Tenants and pools (DO-599)
 
 **The pool answered "which account", never "which account for THIS directory".** One flat

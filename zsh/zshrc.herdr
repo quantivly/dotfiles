@@ -1566,6 +1566,16 @@ _claude_pick_for_dir() {
       # intact: a tier is chosen when nothing above it exists, so a pool that is
       # entirely spent still yields an account and still starts a session. What
       # it cannot do any more is lose to a crowding term.
+      #
+      # WHICH week, and WHICH spent seats reach this line (DO-621). The figure is
+      # the AGGREGATE seven_day alone -- a per-model window belongs to the gate,
+      # which knows the model, and the ranker does not. A LAPSED week never
+      # demotes: _claude_profile_metrics has already made uW `unknown` by here.
+      # And a spent week with NO spend headroom never arrives at all --
+      # _claude_pick_class made that seat `exhausted`, because that one is
+      # blocked rather than billed. What is left is the seat that BILLS usage
+      # credits, or may when spend is unmeasured, and _claude_pick_publish says
+      # which.
       if [[ "$cls" == eligible && "$_CPM_UW" != unknown ]] && (( _CPM_UW >= week_spent )); then
         cls=weekly-spent
         why="7d window spent (${_CPM_UW}%)"
