@@ -359,6 +359,10 @@ Your setup has these tmux integrations built in:
 | tmux-open | Open URLs (`o`) or files (`Ctrl+o`) directly from copy mode |
 | Popup windows | Floating overlays for lazygit (`Alt+g`), shell, git status, session switching |
 
+### Nested tmux (remote servers)
+
+F12 toggles outer tmux off, passing all keys to inner tmux. Outer status bar turns grey with `[INNER]` label. Inner tmux auto-detects nesting and uses gold bar at top. For manual SSH-into-remote-tmux usage (e.g., `ssh -t server 'tmux a'`).
+
 ## Keybinding Cheat Sheet
 
 ### No prefix needed (instant)
