@@ -1,9 +1,12 @@
-"""One ssh call per machine: load, memory, lane units, and each lane's last result line.
+"""Census's own remote reading, plus the ssh mechanics every caller shares: load, memory, lane
+units, and each lane's last result line.
 
-The ONLY module that knows a remote shell exists. Everything it sends is either a literal
-this file wrote or a path single-quoted by ``shquote`` — dev's login shell is zsh, and bash's
-``printf %q`` is not zsh-safe (a leading ``=`` undergoes equals expansion there), so POSIX
-single-quoting is used rather than any shell's own quoter.
+The ONLY module that knows an ssh invocation's shape (``ssh_argv``) or single-quotes a path for
+one (``shquote``) — dev's login shell is zsh, and bash's ``printf %q`` is not zsh-safe (a leading
+``=`` undergoes equals expansion there), so POSIX single-quoting is used rather than any shell's
+own quoter. Every other module that talks to a remote machine (``commands/lane.py``) builds its
+own SCRIPT text but never its own ssh flags — it calls ``ssh_argv`` for those, so the batch mode,
+timeout and ``--`` separator live in exactly one place.
 
 Unreachable is a measurement, never a zero: a caller that reads a missing key as room is the
 bug this module's shape exists to prevent.
@@ -29,6 +32,15 @@ def shquote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+def ssh_argv(machine, script: str) -> list[str]:
+    """The one shared ssh invocation shape: batch mode, a short connect timeout, ``--`` before the
+    host so a hostname that starts with ``-`` can never be read as another ssh option.
+
+    ``script`` is the caller's problem to quote — this only wraps it, it inspects nothing.
+    """
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", machine.ssh, script]
+
+
 def build_argv(machine, lane_out_dirs: list[str], marker: str = MARKER) -> list[str]:
     """The one ssh invocation. Sections are separated by ``marker``, in parse()'s order."""
     script = [
@@ -46,8 +58,7 @@ def build_argv(machine, lane_out_dirs: list[str], marker: str = MARKER) -> list[
         q = shquote(d)
         script += [f"printf %s {shquote(marker)}", f"printf '%s\\n' {q}",
                    f"grep -h '\"type\":\"result\"' {q}/stream.jsonl 2>/dev/null | tail -1 || true"]
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--",
-            machine.ssh, "; ".join(script)]
+    return ssh_argv(machine, "; ".join(script))
 
 
 def parse(name: str, out: str, expected_sections: int | None = None, marker: str = MARKER) -> dict:

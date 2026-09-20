@@ -30,26 +30,34 @@ def unit_name(tenant: str, slug: str) -> str:
     return f"rabota-lane-{tenant}-{s}-{uuid.uuid4().hex[:8]}.service"
 
 
-def seat_config_dir(seat: str) -> str:
-    """The account dir a lane bills. One per seat, as claude() builds them."""
-    return str(Path.home() / f".claude-{seat}")
+def seat_config_dir(seat: str, home: str | None = None) -> str:
+    """The account dir a lane bills, on the machine whose ``$HOME`` this is. One per seat, as
+    ``claude()`` builds them.
+
+    ``home`` defaults to THIS process's home, which is correct only for a lane that will run on
+    this machine. A remote lane must pass the REMOTE ``$HOME`` (``resolve_remote``'s ``home``) —
+    this is the exact defect class corrections 6/10 fixed for ``claude_bin``/``state_dir``/
+    ``repos``, on the value that decides which account a lane bills.
+    """
+    return f"{home or Path.home()}/.claude-{seat}"
 
 
 def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, unit,
-                session_id: str | None = None, claude_bin: str | None = None) -> list[str]:
+                session_id: str | None = None, claude_bin: str | None = None,
+                home: str | None = None) -> list[str]:
     """The systemd-run argv for a lane on this machine. Every value is an argv element, never a string.
 
     ``claude_bin`` overrides ``ctx.tenant.lanes.claude_bin``; either way the value is expanded with
     ``Path.expanduser()`` HERE, at call time, never earlier — the config default is home-relative,
     and only the machine this argv will actually run on may resolve what ``~`` means. A remote lane
     passes an already-resolved absolute path (``resolve_remote``), for which expansion is a
-    no-op.
+    no-op. ``home`` is threaded to ``seat_config_dir`` the same way, for the same reason.
     """
     bin_path = str(Path(claude_bin if claude_bin is not None else ctx.tenant.lanes.claude_bin).expanduser())
     return [
         "systemd-run", "--user", "--collect", f"--unit={unit}",
         f"--working-directory={worktree}",
-        f"--setenv=CLAUDE_CONFIG_DIR={seat_config_dir(seat)}",
+        f"--setenv=CLAUDE_CONFIG_DIR={seat_config_dir(seat, home)}",
         "-p", f"StandardOutput=append:{out_dir}/stream.jsonl",
         "-p", f"StandardError=append:{out_dir}/stream.err",
         "-p", f"MemoryMax={ctx.tenant.lanes.memory_max}",
@@ -76,7 +84,7 @@ def build_remote(ctx, machine, local_argv: list[str]) -> list[str]:
     argv = list(local_argv)
     argv.insert(1, "--slice=agents.slice")
     cmd = " ".join(remote.shquote(a) for a in argv)
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", machine.ssh, cmd]
+    return remote.ssh_argv(machine, cmd)
 
 
 def send_brief(ctx, machine, remote_path: str, text: str) -> None:
@@ -85,49 +93,93 @@ def send_brief(ctx, machine, remote_path: str, text: str) -> None:
     Nothing but a path rabota generated crosses the remote command line. A failure raises rather
     than returning, because a lane whose brief never arrived starts and then reads nothing.
     """
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", machine.ssh,
-            f"cat > {remote.shquote(remote_path)}"]
+    argv = remote.ssh_argv(machine, f"cat > {remote.shquote(remote_path)}")
     res = ctx.runner.run(argv, input=text)
     if not res.ok:
         raise errors.RabotaError(f"could not write the brief to {machine.name}: {(res.err or res.out).strip()}")
 
 
-def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, base: str | None) -> None:
-    """``git worktree add`` on ``machine``. Every value is single-quoted for the remote shell."""
-    parts = ["git", "-C", repo_path, "worktree", "add", worktree]
+REMOTE_WORKTREE_TIMEOUT = 300  # seconds; git worktree add on a large repo can run well past 60s
+
+
+def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, out_dir: str,
+                           base: str | None, *, timeout: float = REMOTE_WORKTREE_TIMEOUT) -> None:
+    """``mkdir -p`` the lane's ``out_dir`` and ``git worktree add`` the worktree, in ONE ssh call.
+
+    ``out_dir`` must exist before the brief is sent (a shell ``>`` redirection does not create
+    parent directories) and before the unit starts (its ``StandardOutput``/``StandardError``
+    targets live under it) — ``systemd-run`` returns 0 once the transient unit is CREATED, so a
+    unit that then fails to open its own log files would otherwise be recorded as ``started``
+    anyway. ``timeout`` defaults well above the runner's own 60s default: a timeout maps to the
+    same ``Result`` shape as a real failure, and git on a large repo can legitimately run long.
+    """
+    mkdir = ["mkdir", "-p", out_dir]
+    worktree_add = ["git", "-C", repo_path, "worktree", "add", worktree]
     if base:
-        parts.append(base)
-    cmd = " ".join(remote.shquote(p) for p in parts)
-    res = ctx.runner.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--",
-                          machine.ssh, cmd])
+        worktree_add.append(base)
+    cmd = " && ".join(" ".join(remote.shquote(p) for p in parts) for parts in (mkdir, worktree_add))
+    res = ctx.runner.run(remote.ssh_argv(machine, cmd), timeout=timeout)
     if not res.ok:
         raise errors.RabotaError(f"could not create the worktree on {machine.name}: "
                                  f"{(res.err or res.out).strip()}")
 
 
-def resolve_remote(ctx, machine) -> dict:
-    """``$HOME`` and the absolute claude path ON ``machine``, both proven, in one ssh call.
+def _remove_worktree_remote(ctx, machine, repo_path: str, worktree: str) -> None:
+    """Best-effort ``git worktree remove --force`` after a failed brief send or unit start.
+
+    Never raises: the caller's ``except`` re-raises the ORIGINAL error, and a cleanup failure here
+    must not replace it. Without this, a worktree created just before a brief-send or unit-start
+    failure is invisible to every rabota command (``census`` and ``reap`` both work from lane
+    rows, and this worktree never gets one) and accumulates in the remote repo's
+    ``git worktree list`` forever.
+    """
+    cmd = " ".join(remote.shquote(p) for p in ["git", "-C", repo_path, "worktree", "remove",
+                                                "--force", worktree])
+    try:
+        ctx.runner.run(remote.ssh_argv(machine, cmd))
+    except Exception:  # noqa: BLE001 — deliberately swallowed; see docstring
+        pass
+
+
+def resolve_remote(ctx, machine, seat: str) -> dict:
+    """``$HOME``, the absolute claude path, and ``seat``'s account dir ON ``machine`` — each
+    proven, in one ssh call. Never a guess.
 
     Every path rabota stores for a machine is home-relative (``~/.local/state/rabota``,
     ``~/quantivly/hub``) and this process's home is not the remote's. ``shquote`` single-quotes
     every element and POSIX single quotes suppress tilde expansion, so a ``~`` sent as-is becomes
     a literal directory named ``~`` on the target. The remote expands its own home once and every
-    path is built from that answer (see ``expand_remote``). A machine that cannot answer refuses,
-    like any unmeasured dimension — dispatching a lane to a guessed path fails at exec time inside
-    a unit whose error nobody reads.
+    other path is built from that answer (see ``expand_remote``, ``seat_config_dir``).
+
+    The seat's account dir is resolved AND its existence is checked here too — not just
+    constructed as a string — because ``CLAUDE_CONFIG_DIR`` decides which account a lane bills,
+    and a lane started against a directory nobody provisioned either fails at exec time inside a
+    unit whose error nobody reads, or silently falls back to whatever ``claude`` finds on its own.
+    A machine that cannot answer any of the three refuses, like any other unmeasured dimension —
+    dispatching a lane to a guessed path is worse than refusing outright.
     """
+    config_dir_suffix = remote.shquote(f"/.claude-{seat}")
     script = ('printf "%s\\n" "$HOME"; '
-              'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf %s "$p"')
-    res = ctx.runner.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--",
-                          machine.ssh, script])
+              'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf "%s\\n" "$p" || printf "\\n"; '
+              f'd="$HOME"{config_dir_suffix}; [ -d "$d" ] && printf %s "$d"')
+    res = ctx.runner.run(remote.ssh_argv(machine, script))
     lines = (res.out or "").splitlines()
-    home = lines[0].strip() if lines else ""
+    home = lines[0].strip() if len(lines) > 0 else ""
     claude_bin = lines[1].strip() if len(lines) > 1 else ""
-    if not res.ok or not home.startswith("/") or not claude_bin.startswith("/"):
+    config_dir = lines[2].strip() if len(lines) > 2 else ""
+    if not res.ok or not home.startswith("/") or not claude_bin.startswith("/") or not config_dir.startswith("/"):
+        missing = []
+        if not home.startswith("/"):
+            missing.append("$HOME")
+        if not claude_bin.startswith("/"):
+            missing.append("an executable claude")
+        if not config_dir.startswith("/"):
+            expected = f"{home}/.claude-{seat}" if home.startswith("/") else f"$HOME/.claude-{seat}"
+            missing.append(f"the account dir {expected!r}")
         raise errors.Refused(
-            f"could not resolve $HOME and an executable claude on {machine.name}: "
+            f"could not resolve {', '.join(missing)} on {machine.name}: "
             f"{(res.err or res.out or 'no paths returned').strip()}")
-    return {"home": home, "claude_bin": claude_bin}
+    return {"home": home, "claude_bin": claude_bin, "config_dir": config_dir}
 
 
 def expand_remote(path: str, home: str) -> str:
@@ -182,6 +234,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     lane_id = unit.rsplit("-", 1)[-1].removesuffix(".service")
     session_id = str(uuid.uuid4())
     claude_bin = None
+    home = None
     if machine == "local":
         root = Path(ctx.tenant.state_dir).expanduser()
         repo_path = str(Path(ctx.tenant.root).expanduser() / repo)
@@ -189,9 +242,10 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         if repo not in m.repos:
             raise errors.Refused(f"machine {machine!r} declares no repo {repo!r} "
                                  f"([machines.{machine}].repos)")
-        info = resolve_remote(ctx, m)
-        root = Path(expand_remote(m.state_dir, info["home"]))
-        repo_path = expand_remote(m.repos[repo], info["home"])
+        info = resolve_remote(ctx, m, seat_pick)
+        home = info["home"]
+        root = Path(expand_remote(m.state_dir, home))
+        repo_path = expand_remote(m.repos[repo], home)
         claude_bin = info["claude_bin"]
     worktree = str(root / "worktrees" / ctx.tenant.name / lane_id)
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
@@ -199,7 +253,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
 
     argv = build_local(ctx, seat=seat_pick, repo=repo, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,
-                       session_id=session_id, claude_bin=claude_bin)
+                       session_id=session_id, claude_bin=claude_bin, home=home)
     if machine != "local":
         argv = build_remote(ctx, m, argv)
     out = {"argv": argv, "shell": " ".join(argv), "unit": unit, "session_id": session_id,
@@ -210,11 +264,18 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
 
     if machine == "local":
         raise errors.Refused("the local --run form is not implemented; use --machine dev")
-    create_worktree_remote(ctx, m, repo_path, worktree, base)
-    send_brief(ctx, m, remote_brief, Path(brief).read_text())
-    res = ctx.runner.run(argv)
-    if not res.ok:
-        raise errors.RabotaError(f"could not start {unit} on {machine}: {(res.err or res.out).strip()}")
+    create_worktree_remote(ctx, m, repo_path, worktree, out_dir, base)
+    try:
+        send_brief(ctx, m, remote_brief, Path(brief).read_text())
+        res = ctx.runner.run(argv)
+        if not res.ok:
+            raise errors.RabotaError(f"could not start {unit} on {machine}: {(res.err or res.out).strip()}")
+    except Exception:
+        # A worktree created just above and then orphaned by a brief-send or unit-start failure
+        # is invisible to every rabota command from here on (census/reap both work from lane
+        # rows, and none exists for it) — best-effort cleanup, then re-raise the ORIGINAL error.
+        _remove_worktree_remote(ctx, m, repo_path, worktree)
+        raise
     ctx.store.insert_lane({"id": lane_id, "tenant": ctx.tenant.name, "kind": "work", "brief": brief,
                         "repo": repo, "worktree": worktree, "out_dir": out_dir, "machine": machine,
                         "unit": unit, "session_id": session_id, "status": "started", "seat": seat_pick,
