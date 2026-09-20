@@ -209,15 +209,19 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
     nothing: not knowing is not the same as finished.
     """
     by_name = {m["name"]: m for m in (machines or [])}
-    live = {u["name"] for u in units if u.get("state") in ("active", "activating")}
+    # Keyed by (machine, unit) rather than unit alone: unit names are only unique per machine,
+    # and a flat set lets an active unit on one machine suppress a finished lane's settle on
+    # another — losing that lane's cost with no error anywhere.
+    live = {("local", u["name"]) for u in units if u.get("state") in ("active", "activating")}
     for m in by_name.values():
-        live |= {u["name"] for u in m.get("units", []) if u.get("state") in ("active", "activating")}
+        live |= {(m["name"], u["name"]) for u in m.get("units", [])
+                 if u.get("state") in ("active", "activating")}
     pct = {s["name"]: s.get("five_h_pct") for s in seats}
     settled = []
     for lane in ctx.store.list_lanes(ctx.tenant.name, status="started"):
-        if lane.get("unit") in live:
-            continue
         machine = lane.get("machine") or "local"
+        if (machine, lane.get("unit")) in live:
+            continue
         if machine == "local":
             stream = Path(lane["out_dir"]) / "stream.jsonl"
             if not stream.exists():

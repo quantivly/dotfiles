@@ -289,3 +289,17 @@ class SettleRemoteTests(unittest.TestCase):
                  "units": [{"name": "rabota-lane-x.service", "state": "active", "machine": "dev"}],
                  "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":1.0}'}}]
         self.assertEqual(census.settle_finished(ctx, [], [], machines=rows), [])
+
+    def test_a_same_named_unit_on_another_machine_does_not_block_a_settle(self):
+        # Unit names are unique per machine, not globally. A flat live-set would see this lane's
+        # name still active locally and skip it forever, and reap would later abandon a lane that
+        # had in fact finished — losing its cost with no error anywhere.
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
+        local_units = [{"name": "rabota-lane-x.service", "state": "active", "machine": "local"}]
+        rows = [{"name": "dev", "reachable": True, "units": [],
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'}}]
+        settled = census.settle_finished(ctx, local_units,
+                                         [{"name": "quantivly-0", "five_h_pct": 12}], machines=rows)
+        self.assertEqual(settled, ["L1"])
+        self.assertEqual(ctx.store.get_lane("L1")["cost_usd"], 0.42)
