@@ -56,6 +56,15 @@ class RemoteArgvTests(unittest.TestCase):
         argv = remote.build_argv(MACHINE, ["/home/ubuntu/o ne"])
         self.assertIn("'/home/ubuntu/o ne'", argv[-1])
 
+    def test_units_section_only_prints_the_sentinel_on_success(self):
+        # `|| true` would let a failed `systemctl --user` look like an empty (but successful)
+        # unit list; the sentinel must only print via `&&`, after systemctl succeeded. This is a
+        # structural check on the SCRIPT TEXT itself — a FakeRunner never executes it, so no
+        # behavioral read() test can see a regression here.
+        script = remote.build_argv(MACHINE, [])[-1]
+        self.assertIn(f"&& printf %s {remote.shquote(remote.UNITS_OK)}", script)
+        self.assertNotIn('no-legend "rabota-lane-*" 2>/dev/null || true', script)
+
     def test_a_quote_in_an_out_dir_cannot_break_out(self):
         # The property is "a shell sees exactly one token, identical to the input". Assert it with
         # a real POSIX lexer; un-escaping the string by hand tests the un-escaping, not the quoting.
