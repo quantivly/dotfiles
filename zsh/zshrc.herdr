@@ -494,8 +494,11 @@ _claude_profile_excluded() {
 # Is this profile OWNED BY ANOTHER MACHINE? Prints that machine's label, rc 0;
 # otherwise prints nothing, rc 1.
 #
-# The pool already keeps such a profile out of AUTOMATIC selection. This is for
-# the explicit doors, every one of which went straight past the pool: on
+# This is for the EXPLICIT doors, every one of which goes straight past the
+# picker. It does not reach the automatic path: the pool keeps a foreign profile
+# out only where the out-of-repo table omits it by hand, and the picker's
+# last-resort fallback hands out clauth's active profile without consulting this
+# table at all (DO-632 owns that door). On
 # 2026-09-19 two `clauth start quantivly-0` sessions, typed into panes by
 # herdr-draft's account row, were spending dev's seat from the laptop while dev
 # sat idle. Holding the LOGIN stays allowed: this machine's own grant is how it
@@ -504,7 +507,13 @@ _claude_profile_excluded() {
 # machines, each invisible to the other's picker. DO-641.
 #
 # No table, or no entry, means "not foreign": a modular adopter has no machines.
-_claude_profile_foreign() {
+#
+# PUBLICLY NAMED, deliberately. A Claude Code Bash-tool shell snapshot keeps
+# public functions and drops single-underscore ones, so an underscore name here
+# would make the guard fail open in exactly the population that caused the
+# incident — agent sessions — while stopping a human at a prompt. Dashed, it is
+# in the snapshot, and fail-open then means the code is genuinely absent.
+claude-profile-foreign() {
   [[ -n "$1" && -z "${CLAUDE_FOREIGN_PROFILE_OK:-}" ]] || return 1
   local owner="${CLAUDE_TENANT_MACHINE_OWNED[$1]:-}"
   [[ -n "$owner" ]] || return 1
@@ -512,7 +521,7 @@ _claude_profile_foreign() {
 }
 
 # The one refusal every door prints, so the doors cannot drift apart.
-_claude_foreign_refuse() {   # $1 = refusing command, $2 = profile, $3 = owner
+claude-foreign-refuse() {   # $1 = refusing command, $2 = profile, $3 = owner
   print -u2 -- "$1: refused — '$2' is owned by $3 (CLAUDE_TENANT_MACHINE_OWNED)."
   print -u2 -- "    Run this work on $3 instead: its machine in herdr's sidebar."
   print -u2 -- "    To borrow it on purpose, for one command: CLAUDE_FOREIGN_PROFILE_OK=1 $1 …"
@@ -2069,11 +2078,13 @@ claude() {
   # explicit door past the pool, so it gets the same machine-ownership refusal.
   local _foreign_owner=""
   if [[ -n "${CLAUDE_ACCOUNT_PROFILE:-}" ]] \
-     && (( $+functions[_claude_profile_foreign] && $+functions[_claude_foreign_refuse] )) \
-     && _foreign_owner="$(_claude_profile_foreign "$CLAUDE_ACCOUNT_PROFILE")"; then
-    _claude_foreign_refuse claude "$CLAUDE_ACCOUNT_PROFILE" "$_foreign_owner"
+     && (( $+functions[claude-profile-foreign] && $+functions[claude-foreign-refuse] )) \
+     && _foreign_owner="$(claude-profile-foreign "$CLAUDE_ACCOUNT_PROFILE")"; then
+    claude-foreign-refuse claude "$CLAUDE_ACCOUNT_PROFILE" "$_foreign_owner"
     return 3
   fi
+  # Not inherited by the session this launches — see the clauth wrapper.
+  local -x CLAUDE_FOREIGN_PROFILE_OK=""
   # The resolver reports through these too, and they are shell-wide names.
   local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
 
@@ -2107,7 +2118,7 @@ claude() {
   # An inherited CLAUDE_CONFIG_DIR is never overridden: that is what keeps a
   # `clauth start` pane, a herdmates teammate, and hspawn's own launch intact.
   if [[ -z "$CLAUDE_CONFIG_DIR" && -z "${CLAUDE_ISOLATION_OFF:-}" ]] \
-     && (( $+commands[clauth] )) && [[ -n "$_builder" && -x "$_builder" ]]; then
+     && whence -p clauth >/dev/null 2>&1 && [[ -n "$_builder" && -x "$_builder" ]]; then
     if [[ -n "${CLAUDE_ACCOUNT_PROFILE:-}" ]]; then
       profile="$CLAUDE_ACCOUNT_PROFILE"
     else
@@ -2283,7 +2294,7 @@ claude() {
 
 # `clauth` as a function, for the two forms that NAME a profile outright —
 # `clauth start [opts] <profile>` and `clauth <profile>` (a machine-wide switch).
-# A profile another machine owns is refused (_claude_profile_foreign); everything
+# A profile another machine owns is refused (claude-profile-foreign); everything
 # else reaches the binary untouched. herdr-draft's account row TYPES
 # `clauth start <p> --` into a pane's interactive shell, so this is the door the
 # 2026-09-19 sessions came through.
@@ -2293,10 +2304,16 @@ claude() {
 # breaks `clauth` when it breaks gets removed wholesale.
 #
 # Being a function, it makes `command -v clauth` true on a machine WITHOUT the
-# binary, so "is clauth installed?" is asked as `(( $+commands[clauth] ))`, which
-# sees only PATH. Measured: the no-clauth rows in scripts/test-hspawn.sh failed.
+# binary, so "is clauth installed?" is asked as `whence -p clauth`, which sees
+# only PATH. Measured: the no-clauth rows in scripts/test-hspawn.sh failed. NOT
+# `$+commands[clauth]` — that is the hash table and does not re-search PATH, so a
+# shell open since before clauth was installed would call it absent forever.
+#
+# rc 3 is the refusal. `clauth start` otherwise PROPAGATES the exit status of the
+# claude it spawned, so a 3 from this function and a 3 from a session that itself
+# exited 3 are indistinguishable to a caller. Nothing branches on it today.
 clauth() {
-  local p="" owner="" a skip=0
+  local p="" owner="" a skip=0 want=0
   if [[ "${1:-}" == start ]]; then
     for a in "${@:2}"; do
       if (( skip )); then skip=0; continue; fi
@@ -2306,15 +2323,30 @@ clauth() {
         *) p="$a"; break ;;
       esac
     done
+  elif [[ "${1:-}" == resume ]]; then
+    # `clauth resume --profile <p> <target>` is a launch too (clauth 0.15.2:
+    # "Resume a session under a chosen profile"). The profile is only ever that
+    # flag's value — TARGET is a session id — so nothing else here is read.
+    for a in "${@:2}"; do
+      if (( want )); then p="$a"; break; fi
+      case "$a" in
+        --profile=*) p="${a#--profile=}"; break ;;
+        --profile) want=1 ;;
+      esac
+    done
   elif [[ -n "${1:-}" && "$1" != -* && -d "$HOME/.clauth/profiles/$1" ]]; then
     p="$1"
   fi
-  if [[ -n "$p" ]] && (( $+functions[_claude_profile_foreign] && $+functions[_claude_foreign_refuse] )) \
-     && owner="$(_claude_profile_foreign "$p")"; then
-    _claude_foreign_refuse clauth "$p" "$owner"
+  if [[ -n "$p" ]] && (( $+functions[claude-profile-foreign] && $+functions[claude-foreign-refuse] )) \
+     && owner="$(claude-profile-foreign "$p")"; then
+    claude-foreign-refuse clauth "$p" "$owner"
     return 3
   fi
-  command clauth "$@"
+  # CLEARED for the child, so "for one command" is true. A prefix assignment is
+  # exported, so a borrowed launch would otherwise hand the unlocked state to the
+  # session it starts — and to every command inside it, which is the shape the
+  # guard exists to stop, reproduced from inside its own escape hatch.
+  CLAUDE_FOREIGN_PROFILE_OK= command clauth "$@"
 }
 
 # Run claude under a NAMED account, isolated, still able to lead a team.
@@ -2876,13 +2908,13 @@ hspawn() {
   # before any resolution or herdr call, so a rejected spawn reaches nothing.
   local _foreign_owner=""
   if [[ -n "$profile" ]] \
-     && (( $+functions[_claude_profile_foreign] && $+functions[_claude_foreign_refuse] )) \
-     && _foreign_owner="$(_claude_profile_foreign "$profile")"; then
-    _claude_foreign_refuse hspawn "$profile" "$_foreign_owner"
+     && (( $+functions[claude-profile-foreign] && $+functions[claude-foreign-refuse] )) \
+     && _foreign_owner="$(claude-profile-foreign "$profile")"; then
+    claude-foreign-refuse hspawn "$profile" "$_foreign_owner"
     return 3
   fi
   if (( ! profile_set )) && [[ -z "$profile" ]] && (( ! shared )); then
-    if (( $+commands[clauth] )); then
+    if whence -p clauth >/dev/null 2>&1; then
       # NOT `clauth which`. That answers from $CLAUDE_CONFIG_DIR, so inside an
       # isolated pane it returns THIS session's own profile — measured
       # 2026-09-06, it names the parent session's profile in an isolated shell

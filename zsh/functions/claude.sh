@@ -867,7 +867,7 @@ claude-doctor() {
   # was on a process a write to that store would log out, under a heading that
   # promises one file is one group.
   gcred="$(_claude_global_cred_file)"; gcred="${gcred:A}"
-  if (( ! $+commands[clauth] )); then
+  if ! whence -p clauth >/dev/null 2>&1; then
     echo "clauth: ○ not installed — single-account machine, nothing to check"
   else
     echo "clauth (owns the profiles that get written OVER ~/.claude/.credentials.json):"
@@ -1381,7 +1381,7 @@ claude-doctor() {
         # A finding only where isolation is actually available. On a machine with
         # no clauth there is one credential and nothing to do about it, and a ⚠
         # nobody can act on is a ⚠ nobody reads.
-        if [[ -d "$HOME/.clauth/profiles" ]] && (( $+commands[clauth] )); then
+        if [[ -d "$HOME/.clauth/profiles" ]] && whence -p clauth >/dev/null 2>&1; then
           _doctor_warn "$n on $label — the one a profile switch overwrites"
           echo "    Give them their own CLAUDE_CONFIG_DIR (hspawn, or 'clauth start <profile>')."
         else

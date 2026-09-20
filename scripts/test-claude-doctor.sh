@@ -121,7 +121,8 @@ printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
 # owning the loaded .credentials.json ... CLAUDE_CONFIG_DIR-aware"). A stub that
 # still answered it would let a row pass against a doctor that had gone back to
 # asking the wrong question — so the stub records invocations and answers nothing.
-# `command -v clauth` is the only thing the doctor still needs it for.
+# `whence -p clauth` (the doctor asks PATH, never the function) is the only
+# thing it still needs the binary itself for.
 exit 0
 STUB
 chmod +x "$STUBBIN/clauth"

@@ -157,6 +157,10 @@ chmod +x "$STUBBIN/herdr"
 cat > "$STUBBIN/clauth" <<'STUB'
 #!/bin/sh
 printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
+# The override is a PREFIX ASSIGNMENT, so it is exported: recorded here because
+# whether it reaches this child is the whole question of "for one command".
+[ -n "${CLAUDE_FOREIGN_PROFILE_OK:-}" ] && \
+    printf 'FOREIGN_OK=[%s]\n' "$CLAUDE_FOREIGN_PROFILE_OK" >> "$CLAUTH_STUB_LOG"
 case "$1" in
     which) [ -n "${CLAUTH_STUB_WHICH:-}" ] && printf '%s\n' "$CLAUTH_STUB_WHICH"; exit 0 ;;
 esac
@@ -606,7 +610,7 @@ NOCLAUTH=1 run "claude"; NOCLAUTH=
 check "with no clauth the launch is unchanged"  "$(inclaude "CFG <unset>")" "1"
 check "and nothing is said about accounts"      "$(outgrep "account '")"    "0"
 # hspawn asks the same question. The clauth wrapper (DO-641) is a FUNCTION, so
-# `command -v clauth` answers yes on this PATH; only `$+commands[clauth]` sees
+# `command -v clauth` answers yes on this PATH; only a PATH-only probe sees
 # that the binary is absent. Asked wrongly, hspawn runs the picker and isolates.
 NOCLAUTH=1 run "hspawn '$REPO' slug"; NOCLAUTH=
 check "hspawn with no clauth shares the credential, unpicked" \
@@ -1950,8 +1954,27 @@ crun "clauth login fz"
 check "foreign: login passes (it is how this box SEES that window)" "$(clog 'login fz')" "1"
 crun "CLAUDE_FOREIGN_PROFILE_OK=1 clauth start fz"
 check "foreign: the per-command override passes through"            "$(clog 'start fz')" "1"
-crun "unset -f _claude_profile_foreign; clauth start fz"
-check "foreign: helpers absent (a Bash-tool shell) fails OPEN"      "$(clog 'start fz')" "1"
+# ONE command, as the refusal promises. A prefix assignment is exported, so
+# without clearing it the borrowed session keeps the guard off for its whole life.
+check "foreign: ...and does not reach the launched session"         "$(grep -cF 'FOREIGN_OK=[1]' "$TMPROOT/clauth.log" || true)" "0"
+crun "unset -f claude-profile-foreign; clauth start fz"
+check "foreign: helpers absent fails OPEN"                          "$(clog 'start fz')" "1"
+# ...and SILENTLY. Without the $+functions test the command substitution still
+# fails, so the pass-through happens either way and only stderr differs — which
+# is the defect class this file records for _claude_account_builder.
+check "foreign: ...with no 'command not found' in the output"       "$(inout 'command not found')" "0"
+crun "unset -f claude-profile-foreign; claude-as fz --version"
+check "foreign: claude-as with no helpers launches"                 "$(inclaude 'CMD --version')" "1"
+check "foreign: ...silently too"                                    "$(inout 'command not found')" "0"
+crun "clauth resume --profile fz latest"
+check "foreign: clauth resume --profile <owned> is refused"         "$RC" "3"
+check "foreign: ...before the binary runs"                          "$(clog 'resume')" "0"
+crun "clauth resume --profile=fz latest"
+check "foreign: ...in its --profile=<p> spelling too"               "$RC" "3"
+crun "clauth resume --profile personal latest"
+check "foreign: an unowned resume passes through"                   "$(clog 'resume --profile personal latest')" "1"
+crun "clauth resume fz"
+check "foreign: a resume TARGET is not read as a profile"           "$(clog 'resume fz')" "1"
 crun "claude-as fz"
 check "foreign: claude-as <owned> is refused"                       "$RC" "3"
 check "foreign: ...and claude never ran"                            "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" "0"
