@@ -37,11 +37,20 @@ def build_argv(machine, lane_out_dirs: list[str]) -> list[str]:
             machine.ssh, "; ".join(script)]
 
 
-def parse(name: str, out: str) -> dict:
-    """Split the payload into a machines[] row. Raises ValueError on anything unexpected."""
+def parse(name: str, out: str, expected_sections: int | None = None) -> dict:
+    """Split the payload into a machines[] row. Raises ValueError on anything unexpected.
+
+    ``expected_sections``, when given, is the exact number of sections the caller asked for. The
+    separator is a literal string and the stream sections carry a lane's own result line — content
+    rabota does not control — so a lane that emits MARKER would otherwise reframe the payload into
+    a reading that looks fine and is wrong. Refusing on a count mismatch turns that into a
+    measurement of "unreachable", which the caller already handles.
+    """
     parts = out.split(MARKER)
     if len(parts) < 4:
         raise ValueError(f"expected at least 4 sections, got {len(parts)}")
+    if expected_sections is not None and len(parts) != expected_sections:
+        raise ValueError(f"expected exactly {expected_sections} sections, got {len(parts)}")
     loadavg, meminfo, ncpu_s, units_s = parts[0], parts[1], parts[2], parts[3]
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -70,6 +79,13 @@ def read(runner, machine, lane_out_dirs: list[str], timeout: float = 30) -> dict
         return {"name": machine.name, "reachable": False,
                 "error": (res.err or res.out or f"exit {res.code}").strip()}
     try:
-        return parse(machine.name, res.out)
-    except (ValueError, KeyError) as e:
-        return {"name": machine.name, "reachable": False, "error": f"unparseable reading: {e}"}
+        return parse(machine.name, res.out, expected_sections=4 + len(lane_out_dirs))
+    except Exception as e:  # noqa: BLE001
+        # Deliberately broad. Everything parse() touches is output from another host, and the
+        # contract above this line is that any shape it cannot read becomes a measurement of
+        # "unreachable" rather than an exception in the caller. A narrow tuple has already been
+        # wrong once here: sysinfo.read raises IndexError on an empty loadavg section, which the
+        # original (ValueError, KeyError) let through. The type name is kept in the message so a
+        # genuine bug in parse() is still diagnosable from the row.
+        return {"name": machine.name, "reachable": False,
+                "error": f"unparseable reading: {type(e).__name__}: {e}"}

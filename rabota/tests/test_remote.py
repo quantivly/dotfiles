@@ -79,3 +79,23 @@ class RemoteReadTests(unittest.TestCase):
         runner = FakeRunner([(["ssh"], Result(0, "not a payload", ""))])
         r = remote.read(runner, MACHINE, [])
         self.assertFalse(r["reachable"])
+
+    def test_an_empty_loadavg_section_is_unreachable_not_a_crash(self):
+        # The script joins with `;`, so a failed `cat /proc/loadavg` still emits every marker and
+        # still exits 0 — the section is just empty. sysinfo.read indexes split()[0] and raises
+        # IndexError; uncaught, that takes down the whole census instead of one machine's row.
+        broken = remote.MARKER.join(["", MEMINFO, "16\n", UNITS])
+        r = remote.read(FakeRunner([(["ssh"], Result(0, broken, ""))]), MACHINE, [])
+        self.assertFalse(r["reachable"])
+        self.assertIn("IndexError", r["error"])
+
+    def test_a_marker_inside_a_result_line_refuses_rather_than_reframing(self):
+        # A lane's result line is arbitrary agent-transcript JSON, and a lane working on rabota
+        # itself can emit the literal MARKER. With a bare separator that silently reframes the
+        # payload into a plausible-looking wrong reading; the exact section count makes it loud.
+        poisoned = payload(streams=(("/home/ubuntu/out/smoke",
+                                     '{"type":"result","note":"' + remote.MARKER + '"}'),))
+        r = remote.read(FakeRunner([(["ssh"], Result(0, poisoned, ""))]), MACHINE,
+                        ["/home/ubuntu/out/smoke"])
+        self.assertFalse(r["reachable"])
+        self.assertIn("sections", r["error"])
