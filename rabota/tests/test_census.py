@@ -2,7 +2,7 @@ import argparse, json, os, tempfile, unittest
 from pathlib import Path
 from rabota import census, context
 from rabota.runner import FakeRunner, Result
-from tests.test_remote import payload
+from tests.test_remote import FIXED_MARKER, patch_uuid, payload
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -16,6 +16,9 @@ def fake_proc(root: Path, pid: int, comm: str, cwd: str, cgroup: str, utime: int
 
 class CensusTests(unittest.TestCase):
     def setUp(self):
+        # read() mints a fresh per-call marker; pin it so the "ssh" fixture below (built with
+        # FIXED_MARKER) matches what remote.read() actually sends, for the whole test method.
+        patcher = patch_uuid(); patcher.start(); self.addCleanup(patcher.stop)
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.proc = Path(self.tmp.name) / "proc"
         (self.proc).mkdir()
@@ -37,7 +40,7 @@ class CensusTests(unittest.TestCase):
             # No lane is registered as "started" on the quantivly.toml fixture's "dev" machine in
             # this setUp, so census.machines() asks remote.read for zero out_dirs and no stream
             # section — streams=() keeps the reply's section count matching that request.
-            (["ssh"], Result(0, payload(streams=()), "")),
+            (["ssh"], Result(0, payload(marker=FIXED_MARKER, streams=()), "")),
         ])
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(self.tmp.name) / "s"), text=False, dry_run=False)
         self.ctx = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=self.runner, env={"PATH": "/bin"}, cwd=Path("/"))
@@ -199,7 +202,7 @@ class CensusTests(unittest.TestCase):
         # Overrides setUp's zero-out_dirs ssh reply: this store now has one started lane on "dev",
         # so machines() requests one out_dir, and payload()'s default carries exactly one stream
         # section for it, with a result line distinct from the lane's own (non-matching) unit name.
-        self.runner.responses.insert(0, (["ssh"], Result(0, payload(), "")))
+        self.runner.responses.insert(0, (["ssh"], Result(0, payload(marker=FIXED_MARKER), "")))
         self._gather()
         row = self.ctx.store.get_lane("remote1")
         self.assertEqual(row["status"], "done")
@@ -222,9 +225,11 @@ class MachinesTests(unittest.TestCase):
         # out_dirs and remote.parse (Task 2) now enforces an EXACT section count — payload()'s
         # own default carries one stream section for a different caller's fixture and would
         # trip that check here, reading as unreachable. streams=() matches what this call
-        # actually requests.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, payload(streams=()), ""))]))
-        rows, unavailable = census.machines(ctx)
+        # actually requests. read() also mints a fresh per-call marker, so this fixture is built
+        # with FIXED_MARKER under the same patch that pins what read() will generate.
+        with patch_uuid():
+            ctx = self.ctx(FakeRunner([(["ssh"], Result(0, payload(marker=FIXED_MARKER, streams=()), ""))]))
+            rows, unavailable = census.machines(ctx)
         self.assertEqual([r["name"] for r in rows], ["dev"])
         self.assertTrue(rows[0]["reachable"])
         self.assertEqual(unavailable, [])
