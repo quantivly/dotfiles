@@ -1,4 +1,4 @@
-import argparse, json, tempfile, unittest
+import argparse, datetime, json, tempfile, unittest
 from pathlib import Path
 from rabota import budget, context, errors
 from rabota.config import BudgetThresholds
@@ -219,3 +219,33 @@ class CensusFreshnessTests(MachineDimensionTests):
         self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
         for expected in ("machine", "counts", "deferred:sol", "seat:quantivly-0:stale"):
             self.assertIn(expected, b["unavailable"])
+
+    def test_a_naive_timestamp_refuses_rather_than_raising(self):
+        # fromisoformat happily parses a string with no offset into a NAIVE datetime; subtracting
+        # that from an aware "now" raises TypeError, not ValueError. Must return, not raise.
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01T00:00:00"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_bare_date_refuses_rather_than_raising(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_an_unparseable_timestamp_refuses(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "not-a-timestamp"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_future_timestamp_refuses(self):
+        # Clock skew, not staleness: a census claiming to be from the future is exactly as
+        # unusable as one from too far in the past, and the 0 <= lower bound is what catches it.
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1)
+        c = census_with(dev=DEV_IDLE)
+        c["at"] = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
