@@ -1,3 +1,4 @@
+import shlex
 import unittest
 from rabota import remote
 from rabota.config import Machine
@@ -31,8 +32,11 @@ class RemoteArgvTests(unittest.TestCase):
         self.assertIn("'/home/ubuntu/o ne'", argv[-1])
 
     def test_a_quote_in_an_out_dir_cannot_break_out(self):
-        argv = remote.build_argv(MACHINE, ["/tmp/a'; touch PWNED; '"])
-        self.assertNotIn("touch PWNED;", argv[-1].replace("'\\''", ""))
+        # The property is "a shell sees exactly one token, identical to the input". Assert it with
+        # a real POSIX lexer; un-escaping the string by hand tests the un-escaping, not the quoting.
+        evil = "/tmp/a'; touch PWNED; '"
+        self.assertEqual(shlex.split(remote.shquote(evil)), [evil])
+        self.assertIn(remote.shquote(evil), remote.build_argv(MACHINE, [evil])[-1])
 
 
 class RemoteParseTests(unittest.TestCase):
