@@ -221,3 +221,49 @@ class MachinesTests(unittest.TestCase):
 
     def test_deferred_no_longer_claims_machines(self):
         self.assertNotIn("deferred:machines", census.DEFERRED)
+
+
+class SettleRemoteTests(unittest.TestCase):
+    def ctx(self, runner):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner,
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def lane(self, ctx, machine, out_dir):
+        ctx.store.insert_lane({"id": "L1", "tenant": "quantivly", "kind": "work", "brief": "b",
+                               "repo": "hub", "worktree": "/w", "out_dir": out_dir, "machine": machine,
+                               "unit": "rabota-lane-x.service", "status": "started", "seat": "quantivly-0"})
+
+    def test_a_remote_lane_settles_from_the_machines_reading(self):
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
+        rows = [{"name": "dev", "reachable": True,
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'}}]
+        settled = census.settle_finished(ctx, units=[], seats=[{"name": "quantivly-0", "five_h_pct": 12}],
+                                         machines=rows)
+        self.assertEqual(settled, ["L1"])
+        row = ctx.store.list_lanes("quantivly")[0]
+        self.assertEqual((row["status"], row["cost_usd"], row["five_h_pct_at_end"]), ("done", 0.42, 12))
+
+    def test_a_remote_lane_with_no_result_yet_is_left_alone(self):
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
+        rows = [{"name": "dev", "reachable": True, "streams": {"/home/ubuntu/out/smoke": ""}}]
+        self.assertEqual(census.settle_finished(ctx, [], [], machines=rows), [])
+
+    def test_an_unreachable_machine_settles_nothing(self):
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
+        rows = [{"name": "dev", "reachable": False, "error": "no route"}]
+        self.assertEqual(census.settle_finished(ctx, [], [], machines=rows), [])
+
+    def test_a_still_running_remote_unit_is_left_alone(self):
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
+        rows = [{"name": "dev", "reachable": True,
+                 "units": [{"name": "rabota-lane-x.service", "state": "active", "machine": "dev"}],
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":1.0}'}}]
+        self.assertEqual(census.settle_finished(ctx, [], [], machines=rows), [])

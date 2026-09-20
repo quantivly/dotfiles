@@ -196,25 +196,40 @@ def worktrees(runner) -> tuple[list[dict], list[str]]:
     return rows, []
 
 
-def settle_finished(ctx, units: list[dict], seats: list[dict]) -> list[str]:
+def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None) -> list[str]:
     """A ``started`` row whose unit is gone and whose stream has a result line is settled from that line.
 
     ``ended_at``, ``cost_usd`` (``result.total_cost_usd``) and ``five_h_pct_at_end`` (the seat's
     current reading) are written; ``status`` becomes ``done`` or ``failed`` per ``is_error``. A row
     whose unit is still active, or whose stream has no result yet, is left alone (``reap`` handles
     abandonment). Returns the ids settled.
+
+    A lane on another machine is settled from that machine's ``machines[]`` row — its stream lives
+    there, so the local filesystem read below can never see it. An unreachable machine settles
+    nothing: not knowing is not the same as finished.
     """
+    by_name = {m["name"]: m for m in (machines or [])}
     live = {u["name"] for u in units if u.get("state") in ("active", "activating")}
+    for m in by_name.values():
+        live |= {u["name"] for u in m.get("units", []) if u.get("state") in ("active", "activating")}
     pct = {s["name"]: s.get("five_h_pct") for s in seats}
     settled = []
     for lane in ctx.store.list_lanes(ctx.tenant.name, status="started"):
         if lane.get("unit") in live:
             continue
-        stream = Path(lane["out_dir"]) / "stream.jsonl"
-        if not stream.exists():
-            continue
+        machine = lane.get("machine") or "local"
+        if machine == "local":
+            stream = Path(lane["out_dir"]) / "stream.jsonl"
+            if not stream.exists():
+                continue
+            text = stream.read_text()
+        else:
+            row = by_name.get(machine)
+            if not row or not row.get("reachable"):
+                continue
+            text = row.get("streams", {}).get(lane["out_dir"], "")
         result = None
-        for line in stream.read_text().splitlines():
+        for line in text.splitlines():
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -254,7 +269,7 @@ def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper
     us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner); wt, u3 = worktrees(ctx.runner)
     ms, u4 = machines(ctx)
     unavailable += u0 + u1 + u2 + u3 + u4
-    settle_finished(ctx, us, st)
+    settle_finished(ctx, us, st, machines=ms)
     si = sysinfo.read(proc)
     # ``unknown`` is its own count, so user + sol + rabota do not silently sum to fewer than
     # sessions — the counts must not imply a certainty the readers did not have.
