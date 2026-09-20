@@ -52,6 +52,14 @@ ALLOWED_LINES = [
      "argparse's own message about argv; it can echo a bad argument, which is argv the caller "
      "typed and never a value rabota holds. cli.py is outside the ws2-fix2 fence — recorded as a "
      "followup rather than rerouted here"),
+    ("remote.py", re.compile(r'\(root / "loadavg"\)\.write_text\(loadavg\)'),
+     "the remote /proc/loadavg section, written into a tempfile.TemporaryDirectory purely so "
+     "sysinfo.read can parse it through the same code path that serves the local and fixture "
+     "trees. The bytes are kernel counters read from the remote host, the directory is removed "
+     "when parse() returns, and nothing here reaches a contract file or stdout — the parsed "
+     "result is guarded downstream, where census.py writes census.json through assert_clean"),
+    ("remote.py", re.compile(r'\(root / "meminfo"\)\.write_text\(meminfo\)'),
+     "the /proc/meminfo half of the same temporary tree; same lifetime, same reasoning"),
 ]
 
 # Writes that guard the text THEMSELVES rather than through ``emit.write_file``: the module calls

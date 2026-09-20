@@ -17,7 +17,7 @@ def run_budget(ctx: Context, machine: str, model: str, effort: str, est_minutes:
     cred = budget_mod.credential_gate(ctx.runner, seat, model, effort, est_minutes)
     census_path = ctx.state_dir / "census.json"
     census = json.loads(census_path.read_text()) if census_path.exists() else None
-    b = budget_mod.compute(census, cred, ctx.tenant.budget, ctx.tenant.budget.max_lanes_local)
+    b = budget_mod.compute(census, cred, ctx.tenant.budget, ctx.tenant.budget.max_lanes_local, machine=machine)
     b["seat_pick"] = seat
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     # Written through the same guard emit applies to stdout: a contract file is output too.

@@ -1,9 +1,8 @@
 """Lane budget. Credential dimension first (F13), through claude-pick --gate — the one gate every
-spawner shares. An unmeasured dimension refuses; nothing here is ever read as zero.
-
-Task 1 ships the credential slice and the ``budget.json`` shape. The machine and count dimensions
-(``_machine_reasons`` / ``_count_reasons``) are filled in by WS4' Task 4; until then a missing
-census is reported as ``machine:unmeasured`` and refuses, never as room.
+spawner shares; then the machine dimension (load/memory/swap) for the machine the lane would
+actually run on; then that machine's running-lane count against the cap. An unmeasured
+dimension refuses — a missing census, an absent or unreachable machine row — never as room, and
+never by falling back to the local reading.
 """
 import json
 from rabota import errors
@@ -84,33 +83,71 @@ def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int
     return out
 
 
-def compute(census: dict | None, cred: dict, t, max_lanes_local: int) -> dict:
-    """Order: credential → machine → counts. Task 4 fills the machine and count dimensions from ``census``."""
+def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: str = "local") -> dict:
+    """Order: credential → machine → counts, for the machine the lane would run on."""
     reasons, unavailable = [], []
     if not cred["ok"]:
         reasons.append({"code": cred["code"], "detail": cred["detail"]})
+    running = 0
     if census is None:
-        unavailable.append("machine"); unavailable.append("counts")
+        unavailable.extend(["machine", "counts"])
         if not reasons:
             reasons.append({"code": "machine:unmeasured", "detail": "no census; run rabota census first"})
     else:
-        reasons.extend(_machine_reasons(census, t))          # Task 4
-        reasons.extend(_count_reasons(census, t))            # Task 4
+        m = _reading_for(census, machine)
+        if m is None:
+            reasons.append({"code": "machine:unmeasured",
+                            "detail": f"census has no usable reading for machine {machine!r}"})
+            unavailable.append("machine")
+        else:
+            reasons.extend(_machine_reasons(m, t))
+            running = _running_lanes(census, machine)
         unavailable.extend(census.get("unavailable", []))
-    counts = (census or {}).get("counts", {})
-    running = counts.get("rabota", 0) + counts.get("sol", 0)
     allowed = 0 if reasons else max(0, max_lanes_local - running)
     return {"schema": 1, "at": now(), "allowed_new_lanes": allowed, "reasons": reasons,
             "seat_pick": None, "five_h_pct_now": cred.get("five_h_pct_now"), "resets_at": cred.get("resets_at"),
             "tier": cred.get("tier"), "unavailable": unavailable}
 
 
-def _machine_reasons(census, t):   # replaced in Task 4
-    return []
+def _reading_for(census: dict, machine: str) -> dict | None:
+    """The load/memory reading for ``machine``, or None when it was not measured.
+
+    None and a zeroed row are the two ways an unmeasured machine becomes "room"; the caller
+    turns None into a refusal, so neither can.
+    """
+    if machine == "local":
+        return census.get("machine")
+    for row in census.get("machines", []):
+        if row.get("name") == machine:
+            return row if row.get("reachable") else None
+    return None
 
 
-def _count_reasons(census, t):     # replaced in Task 4
-    return []
+def _machine_reasons(m: dict, t) -> list[dict]:
+    """Load, memory and swap against the tenant's thresholds. One named reason per breach."""
+    out = []
+    ncpu = m.get("ncpu") or 1
+    if m["load1"] > t.load1_per_cpu * ncpu:
+        out.append({"code": "machine:load",
+                    "detail": f"load1 {m['load1']} over {t.load1_per_cpu}×{ncpu} cpus"})
+    if m["mem_available_gib"] < t.mem_available_min_gib:
+        out.append({"code": "machine:memory",
+                    "detail": f"{m['mem_available_gib']} GiB available, floor {t.mem_available_min_gib}"})
+    if m["swap_used_pct"] > t.swap_pct_max:
+        out.append({"code": "machine:swap",
+                    "detail": f"swap {m['swap_used_pct']}% over {t.swap_pct_max}%"})
+    return out
+
+
+def _running_lanes(census: dict, machine: str) -> int:
+    """Lanes already running on ``machine`` — local counts owners, remote counts its units."""
+    if machine == "local":
+        c = census.get("counts", {})
+        return c.get("rabota", 0) + c.get("sol", 0)
+    for row in census.get("machines", []):
+        if row.get("name") == machine:
+            return sum(u.get("state") in ("active", "activating") for u in row.get("units", []))
+    return 0
 
 
 def text_line(b: dict) -> str:

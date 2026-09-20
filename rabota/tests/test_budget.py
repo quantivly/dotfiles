@@ -124,3 +124,73 @@ class BudgetTests(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             with self.assertRaises(errors.Refused):
                 cmd._run(ns, cfg_base=FIX / "config", runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+
+
+from rabota import store
+from rabota.config import BudgetThresholds as BT
+
+OK_CRED = {"ok": True, "code": None, "detail": "", "five_h_pct_now": 5, "resets_at": None, "tier": "Team"}
+
+def census_with(*, local_load=1.0, dev=None, counts=None):
+    # "at" is always present and fresh: Task 8 makes a census without one stale, and every row
+    # here is about the MACHINE dimension, not freshness.
+    c = {"at": store.now(),
+         "machine": {"load1": local_load, "ncpu": 8, "mem_available_gib": 20.0, "swap_used_pct": 0},
+         "counts": counts or {"rabota": 0, "sol": 0}, "unavailable": [], "machines": []}
+    if dev is not None:
+        c["machines"] = [dev]
+    return c
+
+DEV_IDLE = {"name": "dev", "reachable": True, "load1": 5.0, "ncpu": 16,
+            "mem_available_gib": 13.0, "swap_used_pct": 0, "units": [], "streams": {}}
+# load1=5.0 is comfortably under 16 cpus' threshold (1.25×16=20) but well over a 1-cpu
+# threshold (1.25) — chosen so a mutation that drops the ncpu multiplier is caught by
+# test_a_saturated_laptop_does_not_refuse_a_dev_lane rather than passing unnoticed.
+
+
+class MachineDimensionTests(unittest.TestCase):
+    def t(self):
+        return BT(max_local_sessions=8, max_lanes_local=3, load1_per_cpu=1.25,
+                  swap_pct_max=40, mem_available_min_gib=6, profile_5h_pct_max=70)
+
+    def test_a_saturated_laptop_does_not_refuse_a_dev_lane(self):
+        c = census_with(local_load=99.0, dev=DEV_IDLE)
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual(b["reasons"], [])
+        self.assertEqual(b["allowed_new_lanes"], 3)
+
+    def test_a_saturated_laptop_does_refuse_a_local_lane(self):
+        c = census_with(local_load=99.0, dev=DEV_IDLE)
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="local")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:load"])
+
+    def test_a_loaded_dev_refuses_a_dev_lane(self):
+        busy = dict(DEV_IDLE, load1=40.0)
+        b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:load"])
+
+    def test_low_memory_on_dev_refuses(self):
+        tight = dict(DEV_IDLE, mem_available_gib=1.0)
+        b = budget.compute(census_with(dev=tight), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:memory"])
+
+    def test_swap_on_dev_refuses(self):
+        swapping = dict(DEV_IDLE, swap_used_pct=80)
+        b = budget.compute(census_with(dev=swapping), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:swap"])
+
+    def test_an_unreachable_dev_refuses_and_is_not_room(self):
+        b = budget.compute(census_with(dev={"name": "dev", "reachable": False, "error": "no route"}),
+                           OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:unmeasured"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_missing_dev_row_refuses_rather_than_falling_back_to_local(self):
+        b = budget.compute(census_with(dev=None), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:unmeasured"])
+
+    def test_running_lanes_on_dev_consume_the_cap(self):
+        busy = dict(DEV_IDLE, units=[{"name": "rabota-lane-a.service", "state": "active", "machine": "dev"},
+                                     {"name": "rabota-lane-b.service", "state": "active", "machine": "dev"}])
+        b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual(b["allowed_new_lanes"], 1)
