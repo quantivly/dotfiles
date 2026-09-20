@@ -1026,8 +1026,10 @@ outage.
   symptom of the budget biting is every pane and the dev UI going slow, not a lane dying. At
   `MemoryMax` the largest process is killed and the unit continues — `OOMPolicy=continue` in
   `systemd/herdr-server.service` is what makes that survivable, so do not "fix" it. Swap is
-  **not** capped by these two settings (`MemorySwapMax=infinity`), so a runaway can hold 10 GiB
-  resident plus whatever swap dev has. The high-water mark is what to revisit the numbers against:
+  bounded **separately** — neither setting above touches it — so the slice also carries
+  `MemorySwapMax=4G`: without it a runaway holds 10 GiB resident *plus* every page of dev's 15 GiB
+  of swap, and the thrash lands on the platform stack dev runs for the team, not just on the agent.
+  The high-water mark is what to revisit the numbers against:
   ```bash
   ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
   ```

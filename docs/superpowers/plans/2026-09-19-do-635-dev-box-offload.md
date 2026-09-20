@@ -243,6 +243,7 @@ Description=herdr panes on this host (DO-635)
 [Slice]
 MemoryHigh=8G
 MemoryMax=10G
+MemorySwapMax=4G
 EOF
 mkdir -p "$d/herdr-server.service.d"
 cat > "$d/herdr-server.service.d/30-slice.conf" <<'EOF'
