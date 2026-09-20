@@ -46,7 +46,11 @@ class LaneDefaults:
     max_verdict_bytes: int = 4096
     machines: list[str] = field(default_factory=lambda: ["local"])
     memory_max: str = "6G"
-    claude_bin: str = str(Path.home() / ".local/bin/claude")
+    # Unexpanded: a remote machine's $HOME is not this process's, so a home-relative default must
+    # not be resolved at import time on whichever machine happens to import this module (DO-652
+    # correction 6). ``build_local`` expands it with ``Path.expanduser()`` at call time, and a
+    # remote lane instead passes an absolute path proven to exist there (``resolve_claude_bin``).
+    claude_bin: str = "~/.local/bin/claude"
 
 
 @dataclass

@@ -1,4 +1,4 @@
-import argparse, json, tempfile, unittest
+import argparse, json, shutil, tempfile, unittest
 from pathlib import Path
 from rabota import context, errors
 from rabota.commands import lane
@@ -28,8 +28,12 @@ class LocalRecipeTests(unittest.TestCase):
     def ctx(self, runner):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
-        return context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner,
-                                              env={"PATH": "/bin"}, cwd=Path("/"))
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner,
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        # RunRecipeTests (below) opens ctx.store; matches the pattern in test_census.py etc. so a
+        # lazily-opened sqlite connection is not left for the garbage collector to close.
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
 
     def argv(self, ctx=None, **overrides):
         """Build the local argv; ``**overrides`` replaces any ``build_local`` kwarg, ``ctx`` an
@@ -42,7 +46,9 @@ class LocalRecipeTests(unittest.TestCase):
         return lane.build_local(ctx, **kwargs)
 
     def claude_bin(self):
-        return self.ctx(FakeRunner([])).tenant.lanes.claude_bin
+        # build_local expands the configured claude_bin (DO-652 correction 6: the config default
+        # is home-relative, expanded only at call time), so the argv holds the EXPANDED path.
+        return str(Path(self.ctx(FakeRunner([])).tenant.lanes.claude_bin).expanduser())
 
     def assert_pair(self, argv, flag, value):
         """The flag is present AND its value is the very next element."""
@@ -132,3 +138,197 @@ class LocalRecipeTests(unittest.TestCase):
         for flag in ("--output-format", "--session-id", "--model", "--effort",
                      "--permission-mode", "--add-dir"):
             self.assertGreater(a.index(flag), binary, flag)
+
+
+class RemoteRecipeTests(LocalRecipeTests):
+    def remote_argv(self):
+        ctx = self.ctx(FakeRunner([]))
+        local = lane.build_local(ctx, seat="quantivly-0", repo="hub", worktree="/w/t", out_dir="/o/d",
+                                 brief="/o/d/brief.md", model="claude-sonnet-5", effort="medium",
+                                 unit="rabota-lane-x.service")
+        return lane.build_remote(ctx, ctx.tenant.machines["dev"], local)
+
+    def test_it_wraps_the_local_argv_in_one_ssh_call(self):
+        a = self.remote_argv()
+        self.assertEqual(a[0], "ssh")
+        self.assertIn("BatchMode=yes", a)
+        self.assertIn("dev", a)
+
+    def test_a_remote_lane_joins_the_agents_slice(self):
+        self.assertIn("--slice=agents.slice", self.remote_argv()[-1])
+
+    def test_every_element_is_single_quoted_for_the_remote_shell(self):
+        cmd = self.remote_argv()[-1]
+        self.assertIn("'Read /o/d/brief.md and execute.'", cmd)
+
+    def test_an_equals_leading_value_cannot_be_expanded_by_zsh(self):
+        ctx = self.ctx(FakeRunner([]))
+        local = lane.build_local(ctx, seat="quantivly-0", repo="hub", worktree="/w/t", out_dir="/o/d",
+                                 brief="=ls", model="claude-sonnet-5", effort="medium",
+                                 unit="rabota-lane-x.service")
+        self.assertIn("'Read =ls and execute.'", lane.build_remote(ctx, ctx.tenant.machines["dev"], local)[-1])
+
+    def test_the_brief_travels_on_stdin_never_on_a_command_line(self):
+        runner = FakeRunner([(["ssh"], Result(0, "", ""))])
+        ctx = self.ctx(runner)
+        lane.send_brief(ctx, ctx.tenant.machines["dev"], "/o/d/brief.md", "BRIEF-SENTINEL-9f")
+        self.assertNotIn("BRIEF-SENTINEL-9f", " ".join(runner.calls[0]))
+        self.assertIn("cat > '/o/d/brief.md'", runner.calls[0][-1])
+
+    def test_a_failed_brief_send_is_an_error_not_a_silent_skip(self):
+        # NOTE (DO-652 task-7 dispatch, correction not explicitly numbered but required): the
+        # brief's own text names ``errors.Error``, which does not exist anywhere in this package
+        # (rabota/errors.py has RabotaError/Usage/Refused/Partial/SecretLeak). ``RabotaError`` is
+        # the base "exit 5, unexpected failure" class and is what every other subprocess-failure
+        # site in this codebase raises (see rabota/sources/github.py) — used here instead.
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
+        with self.assertRaises(errors.RabotaError):
+            lane.send_brief(ctx, ctx.tenant.machines["dev"], "/o/d/brief.md", "x")
+
+
+class ResolveClaudeBinTests(LocalRecipeTests):
+    """The remote resolver (DO-652 dispatch correction 6): proven absolute path or a refusal."""
+
+    def test_it_returns_the_absolute_path_ssh_prints(self):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu/.local/bin/claude\n", ""))]))
+        self.assertEqual(lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"]),
+                         "/home/ubuntu/.local/bin/claude")
+
+    def test_a_failed_ssh_refuses_rather_than_guessing(self):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"])
+
+    def test_an_empty_answer_refuses_rather_than_guessing(self):
+        # A successful ssh that finds no executable claude prints nothing (the script's own
+        # ``[ -x "$p" ] &&`` guard) — that is not room for a fallback, it is an unmeasured machine.
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "", ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_relative_answer_refuses(self):
+        # A path not starting with "/" cannot be the proof this resolver promises; refuse rather
+        # than trust an unexpected shell reply verbatim.
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "claude", ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"])
+
+
+class SequencedRunner:
+    """Answers calls in order, so a row can fail the Nth ssh and only the Nth.
+
+    ``FakeRunner`` matches by argv *prefix*, first match wins — which is exactly why the brief's
+    own "a failed unit start records no started row" row was hollow (task-7 dispatch correction
+    7): a canned response meant for the LAST call matched every earlier call too, so nothing ever
+    reached the point it claimed to be testing. This double stands in wherever a row needs
+    call N to behave differently from call N+1.
+    """
+    def __init__(self, results):
+        self.results, self.calls = list(results), []
+
+    def run(self, argv, *, env=None, input=None, timeout=60, cwd=None):
+        self.calls.append(list(argv))
+        return self.results.pop(0) if self.results else Result(0, "", "")
+
+
+class RunRecipeTests(LocalRecipeTests):
+    def brief(self):
+        p = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, p, ignore_errors=True)
+        f = p / "brief.md"; f.write_text("# Brief\nDo the thing.\n")
+        return str(f)
+
+    def kw(self, **over):
+        base = dict(brief=self.brief(), repo="hub", machine="dev", base=None, seat=None,
+                    model="claude-sonnet-5", effort="medium", est_minutes=30, run=False)
+        base.update(over); return base
+
+    def ok_budget(self):
+        return {"allowed_new_lanes": 2, "reasons": [], "seat_pick": "quantivly-0"}
+
+    RESOLVED_BIN = "/home/ubuntu/.local/bin/claude"
+
+    def test_a_dry_recipe_resolves_the_remote_claude_bin_and_runs_nothing_else(self):
+        # DO-652 task-7 dispatch correction 6: a non-local recipe resolves the remote claude
+        # binary BEFORE rendering, even on the dry (non ``--run``) path — Task 9's verification
+        # reads an absolute, resolved path out of a dry run's printed argv. This replaces the
+        # brief's own "runs nothing" row, which asserted zero runner calls; that assertion is
+        # exactly what correction 6 says is no longer true.
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVED_BIN, ""))])
+        ctx = self.ctx(runner)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(out["machine"], "dev")
+        self.assertEqual(out["seat"], "quantivly-0")
+        self.assertTrue(out["unit"].startswith("rabota-lane-quantivly-"))
+        self.assertIn("--slice=agents.slice", out["shell"])
+        # Mutation 7 (skip the resolver, use the tenant's configured claude_bin instead): the
+        # config default expands to THIS machine's home, never the resolved dev path, so this
+        # assertion only holds when the resolver's answer is actually used.
+        self.assertIn(self.RESOLVED_BIN, out["shell"])
+
+    def test_a_dry_recipe_records_no_row(self):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, self.RESOLVED_BIN, ""))]))
+        lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
+
+    def test_zero_budget_refuses_and_records_no_row(self):
+        runner = FakeRunner([])
+        ctx = self.ctx(runner)
+        zero = {"allowed_new_lanes": 0, "reasons": [{"code": "machine:load", "detail": "busy"}],
+                "seat_pick": "quantivly-0"}
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: zero, **self.kw(run=True))
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
+        # The budget gate is BEFORE anything else — a refusal here touches no machine at all.
+        self.assertEqual(runner.calls, [])
+
+    def test_an_unknown_repo_for_the_machine_refuses(self):
+        ctx = self.ctx(FakeRunner([]))
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(repo="nosuch"))
+
+    def test_run_creates_the_worktree_sends_the_brief_then_starts_the_unit(self):
+        # DO-652 task-7 dispatch correction 6: a remote --run makes FOUR runner calls now
+        # (resolve, worktree, brief, unit), not three — the brief's own count is stale.
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVED_BIN, ""))])
+        ctx = self.ctx(runner)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+        joined = [" ".join(c) for c in runner.calls]
+        self.assertEqual(len(runner.calls), 4)
+        # DO-652 task-7 dispatch, an additional bug found in the brief's own row (same class as
+        # its already-flagged correction 7): once every argv element is POSIX single-quoted, a
+        # phrase spanning two elements ("git -C", "worktree add") is never a contiguous substring
+        # of the joined command — only a check against ONE quoted element survives shquote.
+        self.assertIn("'git'", joined[1]); self.assertIn("'worktree'", joined[1]); self.assertIn("'add'", joined[1])
+        self.assertIn("cat > ", joined[2])
+        self.assertIn("systemd-run", joined[3])
+        # Mutation 7: the resolved bin (not the locally-expanded config default) must be what
+        # actually starts the unit.
+        self.assertIn(self.RESOLVED_BIN, joined[3])
+        row = ctx.store.list_lanes("quantivly")[0]
+        self.assertEqual(row["status"], "started")
+        self.assertEqual(row["unit"], out["unit"])
+        # Mutation 9: started_at must be written (list_lanes orders by it; census's abandonment
+        # rule is an age test against it).
+        self.assertIsNotNone(row["started_at"])
+        # Mutation 10: session_id must reach both the returned dict and the stored row, and they
+        # must be the SAME id (task-7 dispatch correction 3 — generated once, in run_recipe).
+        self.assertTrue(out["session_id"])
+        self.assertEqual(row["session_id"], out["session_id"])
+
+    def test_a_failed_unit_start_records_no_started_row(self):
+        # DO-652 task-7 dispatch correction 7: the brief's own row here is hollow. FakeRunner
+        # matches by argv PREFIX, first match wins, and its response for "the failing call" ended
+        # with the literal element "cat > " — which never equals the generated command string
+        # "cat > '/o/d/brief.md'", so it never matched; every ssh call fell through to the bare
+        # ["ssh"] response instead, and the WORKTREE call (not the unit start) failed first. A
+        # SequencedRunner replaces it: success for resolve/worktree/brief, failure only on the
+        # unit start — the exact call this row claims to be testing.
+        ok = Result(0, self.RESOLVED_BIN, "")
+        runner = SequencedRunner([ok, ok, ok, Result(1, "", "Failed to start")])
+        ctx = self.ctx(runner)
+        with self.assertRaises(errors.RabotaError):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
+        self.assertEqual(len(runner.calls), 4)
