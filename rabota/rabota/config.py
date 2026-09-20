@@ -45,6 +45,8 @@ class LaneDefaults:
     permission_mode: str = "auto"
     max_verdict_bytes: int = 4096
     machines: list[str] = field(default_factory=lambda: ["local"])
+    memory_max: str = "6G"
+    claude_bin: str = str(Path.home() / ".local/bin/claude")
 
 
 @dataclass
