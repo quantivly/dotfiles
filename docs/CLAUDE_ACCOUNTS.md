@@ -513,17 +513,19 @@ Design points that are load-bearing rather than preferences:
   first, and did. Also `${${(o)arr}[1]}` **joins the array into one scalar and indexes its first
   CHARACTER**: it returned `0` from the zero-padded sort key, and the picker silently chose nothing.
 - **Credential groups can only equal logins.** Four profiles against 18–30 sessions gives groups
-  of five to seven; `clauth login <name>` is what makes them smaller. Whether two logins can
-  hold *the same* account independently has one piece of evidence — **a natural experiment, not a
-  controlled test** (DO-635 survey, 2026-09-19). `quantivly-0` holds one login on the laptop and
-  another on dev: on 2026-09-18 the laptop's grant polled continuously (944 polls) while dev's own
-  grant refreshed at 05:54Z, so dev's refresh did not visibly revoke the laptop's grant. That is two
-  machines, not two profiles on one, and the direct test (DO-640 Task B3) has **not** run. If it
-  holds, each `/login` is an independent grant and groups shrink without new accounts; if not, the
-  second authorisation may revoke the first and log out every holder. Test it on a non-preferred
-  profile, when nothing is in flight. It is also why `CLAUDE_TENANT_MACHINE_OWNED` (DO-641) refuses
-  only LAUNCHES on another machine's profile, never the login: the laptop's grant is how it sees
-  that seat's window.
+  of five to seven; `clauth login <name>` is what makes them smaller. Two logins **can** hold the
+  same account independently — tested 2026-09-20 (DO-640 Task B3, PR #181), not merely observed.
+  `quantivly-0` holds one login on the laptop and another on dev. Dev refreshed its own grant at
+  09:13:26Z, the first use of that seat from dev since 09-18; this laptop's separate grant for the
+  same account went on authenticating afterwards — `auth_status=ok`, `fetch_status=Fresh`,
+  `fetched_at=2026-09-20T10:44:19Z` in `~/.clauth/status.json`, and no `auth_broken` entry in
+  `profiles.toml`. (The dev-side timestamp is DO-640's measurement on dev; the laptop side was read
+  here.) The 09-18 natural experiment corroborates it: the laptop's grant polled continuously (944
+  polls) while dev's grant refreshed at 05:54Z. So each `/login` yields an independent grant, and
+  groups shrink without new accounts.
+  What this does **not** make safe is window ACCOUNTING: each machine's spend stays invisible to the
+  other's picker. That is why `CLAUDE_TENANT_MACHINE_OWNED` (DO-641) refuses only LAUNCHES on another
+  machine's profile, never the login — the laptop's grant is how it sees that seat's window.
 - **`preferred = true` on `quantivly-3` should be REMOVED — corrected 2026-09-09.** This line
   previously read "stays", on the reasoning that once nothing reads the global credential the
   daemon's walk-back rewrites a file with no readers. That argument only holds while **both** halves

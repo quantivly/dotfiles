@@ -368,6 +368,15 @@ run_doctor    # WITH_CLAUTH unset: clauth absent
 want_out "clauth absent is a note, not a fault" "○ not installed"
 no_out   "clauth absent adds no failure line"   "✗ clauth"
 
+# zsh/zshrc.herdr defines clauth as a FUNCTION (the machine-ownership guard,
+# DO-641), and `command -v clauth` is true for a function. On a clauth-less box
+# an interactive shell therefore has the name but not the binary, and a doctor
+# asking `command -v` would print a whole clauth section about nothing. The probe
+# asks `whence -p`, which searches PATH only; this row is what holds it there.
+new_home d1b; write_cred
+PRELUDE='clauth() { :; }' run_doctor
+want_out "a clauth FUNCTION is not a clauth binary" "○ not installed"
+
 new_home d2; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 jq '{claudeAiOauth}' "$CRED" > "$FHOME/.clauth/profiles/p1/credentials.json"

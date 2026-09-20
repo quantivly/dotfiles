@@ -157,12 +157,21 @@ chmod +x "$STUBBIN/herdr"
 cat > "$STUBBIN/clauth" <<'STUB'
 #!/bin/sh
 printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
-# The override is a PREFIX ASSIGNMENT, so it is exported: recorded here because
-# whether it reaches this child is the whole question of "for one command".
-[ -n "${CLAUDE_FOREIGN_PROFILE_OK:-}" ] && \
-    printf 'FOREIGN_OK=[%s]\n' "$CLAUDE_FOREIGN_PROFILE_OK" >> "$CLAUTH_STUB_LOG"
+# THREE STATES, unconditionally. The override is a prefix assignment, so it is
+# exported, and whether it reaches this child is the whole question of "for one
+# command" — but the reader is `[[ -z ... ]]`, so ANY non-empty value unlocks the
+# guard. Recording only when non-empty, and asserting the absence of the literal
+# `1`, would pass against a wrapper that cleared it to `0`. Same distinction the
+# claude stub already draws for CLAUDE_CONFIG_DIR, and for the same reason.
+if [ -z "${CLAUDE_FOREIGN_PROFILE_OK+set}" ]; then printf 'FOREIGN_OK <unset>\n' >> "$CLAUTH_STUB_LOG"
+elif [ -z "$CLAUDE_FOREIGN_PROFILE_OK" ]; then printf 'FOREIGN_OK <empty>\n' >> "$CLAUTH_STUB_LOG"
+else printf 'FOREIGN_OK %s\n' "$CLAUDE_FOREIGN_PROFILE_OK" >> "$CLAUTH_STUB_LOG"; fi
 case "$1" in
     which) [ -n "${CLAUTH_STUB_WHICH:-}" ] && printf '%s\n' "$CLAUTH_STUB_WHICH"; exit 0 ;;
+    # `clauth info <target>` is how `latest` becomes a session id. Its real
+    # output is three labelled lines; only the first is parsed.
+    info) printf 'resume:    clauth resume %s\n' "${CLAUTH_STUB_LATEST:-none}"
+          printf 'workspace: /nowhere\n'; exit 0 ;;
 esac
 exit 0
 STUB
@@ -219,10 +228,12 @@ cat > "$STUBBIN/claude" <<'STUB'
     elif [ -z "$CLAUDE_CONFIG_DIR" ]; then printf 'CFG <empty>\n'
     else printf 'CFG %s\n' "$CLAUDE_CONFIG_DIR"; fi
     printf 'TEAMS %s\n' "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-<unset>}"
-    # Whether the machine-ownership override reached this child: claude() clears
-    # it, so a borrowed session does not inherit the unlocked state.
-    [ -n "${CLAUDE_FOREIGN_PROFILE_OK:-}" ] && \
-        printf 'FOREIGN_OK=[%s]\n' "$CLAUDE_FOREIGN_PROFILE_OK"
+    # Three states, as for CLAUDE_CONFIG_DIR above: claude() clears the override
+    # so a borrowed session does not inherit the unlocked state, and ANY non-empty
+    # value would unlock it, so "not the literal 1" is not the property.
+    if [ -z "${CLAUDE_FOREIGN_PROFILE_OK+set}" ]; then printf 'FOREIGN_OK <unset>\n'
+    elif [ -z "$CLAUDE_FOREIGN_PROFILE_OK" ]; then printf 'FOREIGN_OK <empty>\n'
+    else printf 'FOREIGN_OK %s\n' "$CLAUDE_FOREIGN_PROFILE_OK"; fi
     for h in "$CLAUDE_ACCOUNT_DIRS_ROOT"/*/holders/*; do
         [ -e "$h" ] && printf 'HOLDER %s\n' "$h"
     done
@@ -233,6 +244,9 @@ cat > "$STUBBIN/herdmates" <<'STUB'
 #!/bin/sh
 {
     printf 'CMD herdmates %s\n' "$*"
+    if [ -z "${CLAUDE_FOREIGN_PROFILE_OK+set}" ]; then printf 'FOREIGN_OK <unset>\n'
+    elif [ -z "$CLAUDE_FOREIGN_PROFILE_OK" ]; then printf 'FOREIGN_OK <empty>\n'
+    else printf 'FOREIGN_OK %s\n' "$CLAUDE_FOREIGN_PROFILE_OK"; fi
     # `${VAR:-x}` substitutes for an EMPTY value as well as an unset one, so it
     # cannot tell "never exported" from "exported empty" — and claude() exporting
     # an empty CLAUDE_CONFIG_DIR is precisely the defect this distinction exists
@@ -1960,10 +1974,12 @@ crun "CLAUDE_FOREIGN_PROFILE_OK=1 clauth start fz"
 check "foreign: the per-command override passes through"            "$(clog 'start fz')" "1"
 # ONE command, as the refusal promises. A prefix assignment is exported, so
 # without clearing it the borrowed session keeps the guard off for its whole life.
-check "foreign: ...and does not reach the launched session"         "$(grep -cF 'FOREIGN_OK=[1]' "$TMPROOT/clauth.log" || true)" "0"
+check "foreign: ...and does not reach the launched session"         "$(grep -cFx 'FOREIGN_OK <unset>' "$TMPROOT/clauth.log" || true)" "1"
 crun "CLAUDE_FOREIGN_PROFILE_OK=1 claude-as fz --version"
 check "foreign: the override lets claude-as through too"            "$(inclaude 'CMD --version')" "1"
-check "foreign: ...and claude() clears it for the session it starts" "$(grep -cF 'FOREIGN_OK=[1]' "$CLAUDE_LOG" || true)" "0"
+check "foreign: ...and claude() clears it for the session it starts" "$(grep -cFx 'FOREIGN_OK <unset>' "$CLAUDE_LOG" || true)" "1"
+PANEID=wZ:p1 crun "CLAUDE_FOREIGN_PROFILE_OK=1 claude-as fz --version"; PANEID=
+check "foreign: ...on the herdmates branch a pane really takes, too"  "$(grep -cFx 'FOREIGN_OK <unset>' "$CLAUDE_LOG" || true)" "1"
 crun "unset -f claude-profile-foreign; clauth start fz"
 check "foreign: helpers absent fails OPEN"                          "$(clog 'start fz')" "1"
 # ...and SILENTLY. Without the $+functions test the command substitution still
@@ -1982,12 +1998,46 @@ crun "clauth resume --profile personal latest"
 check "foreign: an unowned resume passes through"                   "$(clog 'resume --profile personal latest')" "1"
 crun "clauth resume fz"
 check "foreign: a resume TARGET is not read as a profile"           "$(clog 'resume fz')" "1"
+# WITHOUT --profile, clauth resumes on the session's own last-ran profile, which
+# no argument names. Resolved from clauth's record; `latest` through `clauth
+# info`, which never launches anything.
+cat > "$FHOME/.clauth/session_profiles.json" <<'JSON'
+{"sessions":{"s-owned":{"known":"fz"},"s-free":{"known":"personal"},"s-contested":"contested"}}
+JSON
+crun "clauth resume s-owned"
+check "foreign: an unflagged resume onto an owned session is refused" "$RC" "3"
+check "foreign: ...without the resume reaching the binary"           "$(clog 'resume')" "0"
+crun "clauth resume s-free"
+check "foreign: ...an unowned session still resumes"                 "$(clog 'resume s-free')" "1"
+crun "clauth resume s-contested"
+check "foreign: ...clauth's own 'contested' passes through"          "$(clog 'resume s-contested')" "1"
+crun "clauth resume s-unheard-of"
+check "foreign: ...and so does a session it has no record of"        "$(clog 'resume s-unheard-of')" "1"
+CLAUTH_STUB_LATEST=s-owned crun "clauth resume latest"
+check "foreign: 'latest' is resolved through clauth info, then refused" "$RC" "3"
+check "foreign: ...having asked info, never resume"                  "$(clog 'info latest')" "1"
+# A top-level option BEFORE the subcommand is a real spelling of every door.
+crun "clauth --theme compatible start fz"
+check "foreign: a top-level option before 'start' does not hide it"  "$RC" "3"
+crun "clauth --theme compatible resume --profile fz latest"
+check "foreign: ...nor before 'resume'"                              "$RC" "3"
+crun "clauth --theme compatible start personal"
+check "foreign: ...and an unowned profile still passes"              "$(clog '--theme compatible start personal')" "1"
 crun "claude-as fz"
 check "foreign: claude-as <owned> is refused"                       "$RC" "3"
 check "foreign: ...and claude never ran"                            "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" "0"
 crun "hspawn -p fz -m opus -e high '$REPO' slug"
 check "foreign: hspawn -p <owned> is refused"                       "$RC" "3"
 check "foreign: ...reaching herdr zero times"                       "$(herdrcmds)" ""
+# A Claude Code shell snapshot carries FUNCTIONS but no VARIABLES (measured: one
+# `export PATH=` line and 9k lines of functions), so in an agent's shell this
+# table is empty while the code that reads it is present. An empty table must
+# therefore mean "not loaded yet", not "no table" — or the guard is off in
+# exactly the population that caused the incident. Emulated by emptying it.
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: an empty table is RELOADED, not read as 'no table'"  "$RC" "3"
+check "foreign: ...reaching the binary zero times"                   "$(clog 'start fz')" "0"
+
 unset CLAUDE_TENANTS_FILE
 crun "clauth start fz"
 check "foreign: no tenant table (modular adopter) guards nothing"   "$(clog 'start fz')" "1"

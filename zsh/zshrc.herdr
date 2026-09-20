@@ -223,11 +223,22 @@ _claude_holder_count_one() {
 # only because the tenant data file happens to re-declare it -ga first; a tenant
 # file that just assigns — which is what §5.1's example does — gets an error and
 # an unusable table.
-typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
-: "${CLAUDE_TENANT_DEFAULT=}"
-[[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
-  source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+# A FUNCTION, and publicly named, because a Claude Code Bash-tool shell snapshot
+# carries functions but NOT variables: measured 2026-09-20, a live snapshot holds
+# 9,148 lines of function definitions and exactly one variable line, `export
+# PATH=…`. So in an agent's shell every table here is empty even though the code
+# that reads them is present — and a guard that reads an empty table is off.
+# claude-profile-foreign calls this when its table is empty, which is what makes
+# the refusal reach agent sessions, the population that caused the incident.
+claude-tenants-load() {
+  typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+  typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+  : "${CLAUDE_TENANT_DEFAULT=}"
+  local f="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+  [[ -r "$f" ]] && source "$f"
+  return 0
+}
+claude-tenants-load
 
 # Is the WHOLE tenant table usable? Checked before any lookup, so a typo in entry
 # three cannot be masked by entry one happening to match — the rule _gh_route_for
@@ -511,13 +522,45 @@ _claude_profile_excluded() {
 # PUBLICLY NAMED, deliberately. A Claude Code Bash-tool shell snapshot keeps
 # public functions and drops single-underscore ones, so an underscore name here
 # would make the guard fail open in exactly the population that caused the
-# incident — agent sessions — while stopping a human at a prompt. Dashed, it is
-# in the snapshot, and fail-open then means the code is genuinely absent.
+# incident — agent sessions — while stopping a human at a prompt. The name alone
+# is not enough: the snapshot carries no VARIABLES either, so the table has to be
+# loaded on demand (claude-tenants-load) or the function is present and blind.
 claude-profile-foreign() {
   [[ -n "$1" && -z "${CLAUDE_FOREIGN_PROFILE_OK:-}" ]] || return 1
+  # An EMPTY table is not evidence of "no table": in a shell snapshot the data
+  # never loaded, because a snapshot carries no variables. Load it, once, rather
+  # than reading "off" out of an artefact of where this function is running.
+  (( ${#CLAUDE_TENANT_MACHINE_OWNED} )) || claude-tenants-load
   local owner="${CLAUDE_TENANT_MACHINE_OWNED[$1]:-}"
   [[ -n "$owner" ]] || return 1
   print -r -- "$owner"
+}
+
+# Which profile would `clauth resume <target>` land on when no --profile names
+# one? clauth "defaults to the session's last-ran profile" (its --help), recorded
+# in ~/.clauth/session_profiles.json. `clauth info` resolves `latest` to an id and
+# "Never launches anything" (its --help), so it is safe to ask from here.
+#
+# Prints the profile, or nothing. UNKNOWN and clauth's own "contested" print
+# nothing, so the resume passes through: refusing a session nobody can attribute
+# would break ordinary work to guess at a rare case. What this cannot see is a
+# profile picked at clauth's own interactive prompt — that one is clauth's.
+claude-resume-profile() {
+  local target="$1" id db
+  [[ -n "$target" ]] || return 1
+  db="$HOME/.clauth/session_profiles.json"
+  [[ -r "$db" ]] || return 1
+  whence -p jq >/dev/null 2>&1 || return 1
+  id="$target"
+  if [[ "$id" == latest ]]; then
+    id="$(command clauth info latest 2>/dev/null | sed -n 's/^resume:[[:space:]]*clauth resume //p')"
+    [[ -n "$id" ]] || return 1
+  fi
+  # The type test is the point: an entry is EITHER an object with .known or the
+  # bare string "contested", and indexing the string would be a silent nothing.
+  jq -e -r --arg s "$id" \
+     '.sessions[$s] | select(type == "object") | .known
+      | select(type == "string") | select(. != "")' "$db" 2>/dev/null
 }
 
 # The one refusal every door prints, so the doors cannot drift apart.
@@ -2083,8 +2126,9 @@ claude() {
     claude-foreign-refuse claude "$CLAUDE_ACCOUNT_PROFILE" "$_foreign_owner"
     return 3
   fi
-  # Not inherited by the session this launches — see the clauth wrapper.
-  local -x CLAUDE_FOREIGN_PROFILE_OK=""
+  # Not inherited by the session this launches — see the clauth wrapper for why
+  # this is `local` and not `local -x`.
+  local CLAUDE_FOREIGN_PROFILE_OK
   # The resolver reports through these too, and they are shell-wide names.
   local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
 
@@ -2306,16 +2350,28 @@ claude() {
 # Being a function, it makes `command -v clauth` true on a machine WITHOUT the
 # binary, so "is clauth installed?" is asked as `whence -p clauth`, which sees
 # only PATH. Measured: the no-clauth rows in scripts/test-hspawn.sh failed. NOT
-# `$+commands[clauth]` — that is the hash table and does not re-search PATH, so a
-# shell open since before clauth was installed would call it absent forever.
+# `$+commands[clauth]` — that reads the hash table, which CACHES A NEGATIVE: once
+# it has answered 0 for a name it keeps answering 0 in that shell, while `whence
+# -p` starts answering yes the moment the binary appears (measured 2026-09-20).
 #
 # rc 3 is the refusal. `clauth start` otherwise PROPAGATES the exit status of the
 # claude it spawned, so a 3 from this function and a 3 from a session that itself
 # exited 3 are indistinguishable to a caller. Nothing branches on it today.
 clauth() {
-  local p="" owner="" a skip=0 want=0
-  if [[ "${1:-}" == start ]]; then
-    for a in "${@:2}"; do
+  local p="" owner="" a cmd="" target="" skip=0 want=0 i=1
+  # The SUBCOMMAND is the first word that is not a top-level option, because
+  # `clauth --theme compatible start <p>` is accepted by the real CLI and a
+  # wrapper dispatching on "$1" alone would hand that spelling straight to the
+  # binary. --theme is the only top-level option taking a separate value.
+  while (( i <= $# )); do
+    case "${@[i]}" in
+      --theme) (( i += 2 )) ;;
+      -*)      (( i++ )) ;;
+      *)       cmd="${@[i]}"; break ;;
+    esac
+  done
+  if [[ "$cmd" == start ]]; then
+    for a in "${@[i+1,-1]}"; do
       if (( skip )); then skip=0; continue; fi
       case "$a" in
         --theme) skip=1 ;;        # the one `clauth start` option that takes a value
@@ -2323,30 +2379,39 @@ clauth() {
         *) p="$a"; break ;;
       esac
     done
-  elif [[ "${1:-}" == resume ]]; then
+  elif [[ "$cmd" == resume ]]; then
     # `clauth resume --profile <p> <target>` is a launch too (clauth 0.15.2:
-    # "Resume a session under a chosen profile"). The profile is only ever that
-    # flag's value — TARGET is a session id — so nothing else here is read.
-    for a in "${@:2}"; do
+    # "Resume a session under a chosen profile"). WITHOUT that flag it still
+    # launches — on the session's own last-ran profile, which no argument names,
+    # so the target is resolved through clauth's record (claude-resume-profile).
+    for a in "${@[i+1,-1]}"; do
       if (( want )); then p="$a"; break; fi
+      if (( skip )); then skip=0; continue; fi
       case "$a" in
         --profile=*) p="${a#--profile=}"; break ;;
         --profile) want=1 ;;
+        --theme) skip=1 ;;
+        -*) ;;
+        *) [[ -n "$target" ]] || target="$a" ;;
       esac
     done
-  elif [[ -n "${1:-}" && "$1" != -* && -d "$HOME/.clauth/profiles/$1" ]]; then
-    p="$1"
+    [[ -n "$p" || -z "$target" ]] || p="$(claude-resume-profile "$target")"
+  elif [[ -n "$cmd" && -d "$HOME/.clauth/profiles/$cmd" ]]; then
+    p="$cmd"
   fi
   if [[ -n "$p" ]] && (( $+functions[claude-profile-foreign] && $+functions[claude-foreign-refuse] )) \
      && owner="$(claude-profile-foreign "$p")"; then
     claude-foreign-refuse clauth "$p" "$owner"
     return 3
   fi
-  # CLEARED for the child, so "for one command" is true. A prefix assignment is
+  # UNSET for the child, so "for one command" is true. A prefix assignment is
   # exported, so a borrowed launch would otherwise hand the unlocked state to the
   # session it starts — and to every command inside it, which is the shape the
-  # guard exists to stop, reproduced from inside its own escape hatch.
-  CLAUDE_FOREIGN_PROFILE_OK= command clauth "$@"
+  # guard exists to stop, reproduced from inside its own escape hatch. `local`,
+  # never `local -x`: an exported EMPTY value is a third state, and this file
+  # records an incident caused by exactly that distinction (DO-613).
+  local CLAUDE_FOREIGN_PROFILE_OK
+  command clauth "$@"
 }
 
 # Run claude under a NAMED account, isolated, still able to lead a team.
