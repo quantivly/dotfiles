@@ -186,32 +186,63 @@ class RemoteRecipeTests(LocalRecipeTests):
             lane.send_brief(ctx, ctx.tenant.machines["dev"], "/o/d/brief.md", "x")
 
 
-class ResolveClaudeBinTests(LocalRecipeTests):
-    """The remote resolver (DO-652 dispatch correction 6): proven absolute path or a refusal."""
+class ResolveRemoteTests(LocalRecipeTests):
+    """resolve_remote (DO-652 task-7 fix round 1): $HOME and claude, one ssh call, or a refusal.
 
-    def test_it_returns_the_absolute_path_ssh_prints(self):
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu/.local/bin/claude\n", ""))]))
-        self.assertEqual(lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"]),
-                         "/home/ubuntu/.local/bin/claude")
+    Folded from the original ``resolve_claude_bin`` after the controller found that every OTHER
+    remote path (``machine.state_dir``, ``machine.repos[...]``) was still being used unexpanded
+    and then single-quoted — the exact ``~``-suppression bug correction 6 fixed for the claude
+    binary alone. One round-trip now resolves both the home and the binary.
+    """
+
+    def test_it_returns_home_and_the_absolute_claude_path(self):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude", ""))]))
+        self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"]),
+                         {"home": "/home/ubuntu", "claude_bin": "/home/ubuntu/.local/bin/claude"})
 
     def test_a_failed_ssh_refuses_rather_than_guessing(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"])
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
-    def test_an_empty_answer_refuses_rather_than_guessing(self):
-        # A successful ssh that finds no executable claude prints nothing (the script's own
-        # ``[ -x "$p" ] &&`` guard) — that is not room for a fallback, it is an unmeasured machine.
+    def test_a_reply_missing_the_claude_line_refuses(self):
+        # The script's own `[ -x "$p" ] &&` guard prints nothing for claude_bin when no
+        # executable is found — a resolved home alone is not enough to proceed on.
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu\n", ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_an_empty_reply_refuses(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "", ""))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"])
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
-    def test_a_relative_answer_refuses(self):
-        # A path not starting with "/" cannot be the proof this resolver promises; refuse rather
-        # than trust an unexpected shell reply verbatim.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "claude", ""))]))
+    def test_a_relative_home_refuses(self):
+        # A first line not starting with "/" cannot be the proof this resolver promises; refuse
+        # rather than trust an unexpected shell reply verbatim.
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "home\n/home/ubuntu/.local/bin/claude", ""))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_claude_bin(ctx, ctx.tenant.machines["dev"])
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+
+class ExpandRemoteTests(unittest.TestCase):
+    """expand_remote (DO-652 task-7 fix round 1): expand ``~`` against the REMOTE home only."""
+
+    def test_bare_tilde_expands_to_home(self):
+        self.assertEqual(lane.expand_remote("~", "/home/ubuntu"), "/home/ubuntu")
+
+    def test_tilde_slash_expands_against_the_given_home(self):
+        self.assertEqual(lane.expand_remote("~/quantivly/hub", "/home/ubuntu"),
+                         "/home/ubuntu/quantivly/hub")
+
+    def test_an_absolute_path_passes_through_unchanged(self):
+        self.assertEqual(lane.expand_remote("/opt/x", "/home/ubuntu"), "/opt/x")
+
+    def test_a_tilde_user_form_refuses_rather_than_passing_through(self):
+        # Passing it through is exactly how a path silently becomes a literal directory named
+        # "~otheruser" on the target instead of expanding — refuse instead of guessing.
+        with self.assertRaises(errors.Refused):
+            lane.expand_remote("~otheruser/x", "/home/ubuntu")
 
 
 class SequencedRunner:
@@ -246,15 +277,17 @@ class RunRecipeTests(LocalRecipeTests):
     def ok_budget(self):
         return {"allowed_new_lanes": 2, "reasons": [], "seat_pick": "quantivly-0"}
 
+    RESOLVED_HOME = "/home/ubuntu"
     RESOLVED_BIN = "/home/ubuntu/.local/bin/claude"
+    RESOLVE_OUT = f"{RESOLVED_HOME}\n{RESOLVED_BIN}"
 
     def test_a_dry_recipe_resolves_the_remote_claude_bin_and_runs_nothing_else(self):
-        # DO-652 task-7 dispatch correction 6: a non-local recipe resolves the remote claude
-        # binary BEFORE rendering, even on the dry (non ``--run``) path — Task 9's verification
-        # reads an absolute, resolved path out of a dry run's printed argv. This replaces the
-        # brief's own "runs nothing" row, which asserted zero runner calls; that assertion is
-        # exactly what correction 6 says is no longer true.
-        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVED_BIN, ""))])
+        # DO-652 task-7 dispatch correction 6: a non-local recipe resolves the remote home and
+        # claude binary BEFORE rendering, even on the dry (non ``--run``) path — Task 9's
+        # verification reads an absolute, resolved path out of a dry run's printed argv. This
+        # replaces the brief's own "runs nothing" row, which asserted zero runner calls; that
+        # assertion is exactly what correction 6 says is no longer true.
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
         self.assertEqual(len(runner.calls), 1)
@@ -268,7 +301,7 @@ class RunRecipeTests(LocalRecipeTests):
         self.assertIn(self.RESOLVED_BIN, out["shell"])
 
     def test_a_dry_recipe_records_no_row(self):
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, self.RESOLVED_BIN, ""))]))
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))]))
         lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
         self.assertEqual(ctx.store.list_lanes("quantivly"), [])
 
@@ -300,7 +333,7 @@ class RunRecipeTests(LocalRecipeTests):
     def test_run_creates_the_worktree_sends_the_brief_then_starts_the_unit(self):
         # DO-652 task-7 dispatch correction 6: a remote --run makes FOUR runner calls now
         # (resolve, worktree, brief, unit), not three — the brief's own count is stale.
-        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVED_BIN, ""))])
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         joined = [" ".join(c) for c in runner.calls]
@@ -326,6 +359,25 @@ class RunRecipeTests(LocalRecipeTests):
         self.assertTrue(out["session_id"])
         self.assertEqual(row["session_id"], out["session_id"])
 
+    def test_remote_paths_use_the_resolved_home_never_a_literal_tilde(self):
+        # DO-652 task-7 fix round 1: the dev fixture's state_dir and repos.hub are both
+        # ~-prefixed ("~/.local/state/rabota", "~/quantivly/hub" —
+        # tests/fixtures/config/tenants/quantivly.toml, unchanged; it already matches the live
+        # config's shape). build_remote single-quotes every argv element and POSIX single quotes
+        # suppress tilde expansion, so a "~" sent as-is becomes a literal directory named "~" on
+        # the remote. This proves the RESOLVED $HOME is what actually reaches both the returned
+        # paths and the `git -C` argv, not the raw config value.
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
+        ctx = self.ctx(runner)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+        self.assertNotIn("~", out["worktree"])
+        self.assertNotIn("~", out["out_dir"])
+        self.assertTrue(out["worktree"].startswith(self.RESOLVED_HOME + "/"), out["worktree"])
+        self.assertTrue(out["out_dir"].startswith(self.RESOLVED_HOME + "/"), out["out_dir"])
+        worktree_call = " ".join(runner.calls[1])
+        self.assertNotIn("~", worktree_call)
+        self.assertIn(f"'-C' '{self.RESOLVED_HOME}/quantivly/hub'", worktree_call)
+
     def test_a_failed_unit_start_records_no_started_row(self):
         # DO-652 task-7 dispatch correction 7: the brief's own row here is hollow. FakeRunner
         # matches by argv PREFIX, first match wins, and its response for "the failing call" ended
@@ -334,7 +386,7 @@ class RunRecipeTests(LocalRecipeTests):
         # ["ssh"] response instead, and the WORKTREE call (not the unit start) failed first. A
         # SequencedRunner replaces it: success for resolve/worktree/brief, failure only on the
         # unit start — the exact call this row claims to be testing.
-        ok = Result(0, self.RESOLVED_BIN, "")
+        ok = Result(0, self.RESOLVE_OUT, "")
         runner = SequencedRunner([ok, ok, ok, Result(1, "", "Failed to start")])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.RabotaError):

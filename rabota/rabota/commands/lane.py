@@ -8,8 +8,9 @@ It is the ONE door a headless lane comes through, which is why every spawner sha
 a window gets spent unmetered.
 
 This module supplies both the local form (``unit_name``, ``build_local``) and the remote/dev form
-(``build_remote``, ``send_brief``, ``create_worktree_remote``, ``resolve_claude_bin``) plus the
-entry point that ties them together, ``run_recipe``, and its ``rabota lane recipe`` registration.
+(``build_remote``, ``send_brief``, ``create_worktree_remote``, ``resolve_remote``,
+``expand_remote``) plus the entry point that ties them together, ``run_recipe``, and its
+``rabota lane recipe`` registration.
 """
 import re
 import uuid
@@ -41,7 +42,7 @@ def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, uni
     ``claude_bin`` overrides ``ctx.tenant.lanes.claude_bin``; either way the value is expanded with
     ``Path.expanduser()`` HERE, at call time, never earlier — the config default is home-relative,
     and only the machine this argv will actually run on may resolve what ``~`` means. A remote lane
-    passes an already-resolved absolute path (``resolve_claude_bin``), for which expansion is a
+    passes an already-resolved absolute path (``resolve_remote``), for which expansion is a
     no-op.
     """
     bin_path = str(Path(claude_bin if claude_bin is not None else ctx.tenant.lanes.claude_bin).expanduser())
@@ -104,22 +105,44 @@ def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, base: st
                                  f"{(res.err or res.out).strip()}")
 
 
-def resolve_claude_bin(ctx, machine) -> str:
-    """The absolute claude path ON ``machine``, proven to exist. Never a guess.
+def resolve_remote(ctx, machine) -> dict:
+    """``$HOME`` and the absolute claude path ON ``machine``, both proven, in one ssh call.
 
-    The configured value is home-relative and this process's home is not the remote's, so the
-    remote shell expands it and hands the answer back. A path that cannot be resolved is an
-    unmeasured dimension like any other: it refuses, rather than dispatching a lane that will
-    fail at exec time inside a unit whose error nobody reads.
+    Every path rabota stores for a machine is home-relative (``~/.local/state/rabota``,
+    ``~/quantivly/hub``) and this process's home is not the remote's. ``shquote`` single-quotes
+    every element and POSIX single quotes suppress tilde expansion, so a ``~`` sent as-is becomes
+    a literal directory named ``~`` on the target. The remote expands its own home once and every
+    path is built from that answer (see ``expand_remote``). A machine that cannot answer refuses,
+    like any unmeasured dimension — dispatching a lane to a guessed path fails at exec time inside
+    a unit whose error nobody reads.
     """
-    script = 'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf %s "$p"'
+    script = ('printf "%s\\n" "$HOME"; '
+              'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf %s "$p"')
     res = ctx.runner.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--",
                           machine.ssh, script])
-    path = (res.out or "").strip()
-    if not res.ok or not path.startswith("/"):
+    lines = (res.out or "").splitlines()
+    home = lines[0].strip() if lines else ""
+    claude_bin = lines[1].strip() if len(lines) > 1 else ""
+    if not res.ok or not home.startswith("/") or not claude_bin.startswith("/"):
         raise errors.Refused(
-            f"could not resolve an executable claude on {machine.name}: "
-            f"{(res.err or res.out or 'no path returned').strip()}")
+            f"could not resolve $HOME and an executable claude on {machine.name}: "
+            f"{(res.err or res.out or 'no paths returned').strip()}")
+    return {"home": home, "claude_bin": claude_bin}
+
+
+def expand_remote(path: str, home: str) -> str:
+    """Expand a leading ``~`` against the REMOTE ``home``; never this process's.
+
+    Only bare ``~`` and ``~/…`` are understood. A ``~user`` form refuses rather than passing
+    through as a literal, because passing it through is how a path silently becomes a directory
+    named ``~user`` on the target.
+    """
+    if path == "~":
+        return home
+    if path.startswith("~/"):
+        return home + path[1:]
+    if path.startswith("~"):
+        raise errors.Refused(f"cannot expand {path!r} for a remote machine: only ~ and ~/ are supported")
     return path
 
 
@@ -132,8 +155,8 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     only after the unit actually started — a ``started`` row for a unit that never started is a
     lie ``census`` would later try to settle.
 
-    For a non-local machine, ``resolve_claude_bin`` runs before the argv is even rendered (so the
-    DRY form prints an absolute, resolved path too) — a config default is home-relative and this
+    For a non-local machine, ``resolve_remote`` runs before the argv is even rendered (so the DRY
+    form prints an absolute, resolved path too) — every configured path is home-relative and this
     process's home is never the remote's.
 
     ``budget_fn`` exists so the tests can drive the gate without a clauth on the test machine; in
@@ -166,9 +189,10 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         if repo not in m.repos:
             raise errors.Refused(f"machine {machine!r} declares no repo {repo!r} "
                                  f"([machines.{machine}].repos)")
-        root = Path(m.state_dir)
-        repo_path = m.repos[repo]
-        claude_bin = resolve_claude_bin(ctx, m)
+        info = resolve_remote(ctx, m)
+        root = Path(expand_remote(m.state_dir, info["home"]))
+        repo_path = expand_remote(m.repos[repo], info["home"])
+        claude_bin = info["claude_bin"]
     worktree = str(root / "worktrees" / ctx.tenant.name / lane_id)
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
     remote_brief = f"{out_dir}/brief.md"
