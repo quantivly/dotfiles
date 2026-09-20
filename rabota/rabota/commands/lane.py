@@ -30,7 +30,7 @@ def unit_name(tenant: str, slug: str) -> str:
     return f"rabota-lane-{tenant}-{s}-{uuid.uuid4().hex[:8]}.service"
 
 
-def seat_config_dir(seat: str, home: str | None = None) -> str:
+def seat_config_dir(seat: str) -> str:
     """The account dir a LOCAL lane bills. One per seat, so several accounts can run side by side
     on this laptop.
 
@@ -47,14 +47,11 @@ def seat_config_dir(seat: str, home: str | None = None) -> str:
     This is deliberately NOT used for a remote lane (see ``resolve_remote``'s docstring) — a
     remote machine like dev is single-account, and using this function's per-seat scheme there
     would build a path that machine never has and never will.
-
-    ``home`` defaults to THIS process's home; a caller for a genuinely different LOCAL home may
-    still pass it, but no current caller does.
     """
-    return f"{home or Path.home()}/.local/state/claude-account-dirs/{seat}"
+    return f"{Path.home()}/.local/state/claude-account-dirs/{seat}"
 
 
-def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, unit,
+def build_local(ctx, *, worktree, out_dir, brief, model, effort, unit,
                 session_id: str | None = None, claude_bin: str | None = None,
                 config_dir: str | None = None) -> list[str]:
     """The systemd-run argv for a lane on this machine. Every value is an argv element, never a string.
@@ -101,7 +98,7 @@ def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, uni
     return argv
 
 
-def build_remote(ctx, machine, local_argv: list[str]) -> list[str]:
+def build_remote(machine, local_argv: list[str]) -> list[str]:
     """Wrap a local lane argv in one ssh call.
 
     Every element is POSIX single-quoted, not ``printf %q``: dev's login shell is zsh, where an
@@ -246,6 +243,11 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     form prints an absolute, resolved path too) — every configured path is home-relative and this
     process's home is never the remote's.
 
+    A remote machine authenticates with its OWN login; ``[machines.<m>].profile`` only declares
+    which seat that bills, for the laptop's budget gate. So a ``--seat`` override that disagrees
+    with the declared profile is refused here, before any ssh call — passing it through would
+    meter and record a seat that is not the one actually billing the work.
+
     ``budget_fn`` exists so the tests can drive the gate without a clauth on the test machine; in
     production it is ``rabota budget``'s own ``run_budget``.
     """
@@ -254,6 +256,10 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     m = ctx.tenant.machines.get(machine) if machine != "local" else None
     if machine != "local" and m is None:
         raise errors.Refused(f"tenant {ctx.tenant.name!r} declares no machine {machine!r}")
+    if machine != "local" and seat and seat != m.profile:
+        raise errors.Refused(
+            f"--seat {seat!r} does not match {machine!r}'s declared profile {m.profile!r}: "
+            f"a remote machine bills its own login, so the seat cannot be overridden there")
 
     seat_pick = budget_mod.seat_for(ctx.tenant, machine, override=seat)
     fn = budget_fn or (lambda **kw: budget_cmd.run_budget(ctx, **kw))
@@ -290,11 +296,11 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
     remote_brief = f"{out_dir}/brief.md"
 
-    argv = build_local(ctx, seat=seat_pick, repo=repo, worktree=worktree, out_dir=out_dir,
+    argv = build_local(ctx, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,
                        session_id=session_id, claude_bin=claude_bin, config_dir=config_dir)
     if machine != "local":
-        argv = build_remote(ctx, m, argv)
+        argv = build_remote(m, argv)
     out = {"argv": argv, "shell": " ".join(argv), "unit": unit, "session_id": session_id,
            "seat": seat_pick, "machine": machine, "est_minutes": est_minutes,
            "worktree": worktree, "out_dir": out_dir}
@@ -329,7 +335,7 @@ def _build(sub):
     r = s.add_parser("recipe", help="print the lane argv; --run starts it")
     r.add_argument("--brief", required=True)
     r.add_argument("--repo", required=True)
-    r.add_argument("--machine", default="local", choices=["local", "dev"])
+    r.add_argument("--machine", default="local")
     r.add_argument("--base", default=None)
     r.add_argument("--seat", default=None)
     r.add_argument("--model", default=None)

@@ -49,7 +49,7 @@ class LaneDefaults:
     # Unexpanded: a remote machine's $HOME is not this process's, so a home-relative default must
     # not be resolved at import time on whichever machine happens to import this module (DO-652
     # correction 6). ``build_local`` expands it with ``Path.expanduser()`` at call time, and a
-    # remote lane instead passes an absolute path proven to exist there (``resolve_claude_bin``).
+    # remote lane instead passes an absolute path proven to exist there (``resolve_remote``).
     claude_bin: str = "~/.local/bin/claude"
 
 

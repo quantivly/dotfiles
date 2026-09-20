@@ -3,6 +3,8 @@ from pathlib import Path
 from rabota import context, errors
 from rabota.commands import lane
 from rabota.runner import FakeRunner, Result
+from tests.support import last_json
+from tests.test_cli import install_fixture_home, run_cli
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -39,7 +41,7 @@ class LocalRecipeTests(unittest.TestCase):
         """Build the local argv; ``**overrides`` replaces any ``build_local`` kwarg, ``ctx`` an
         already-built context (e.g. one with a field poked for a single test)."""
         ctx = ctx or self.ctx(FakeRunner([]))
-        kwargs = dict(seat="quantivly-1", repo="hub", worktree="/w/t", out_dir="/o/d",
+        kwargs = dict(worktree="/w/t", out_dir="/o/d",
                       brief="/o/d/brief.md", model="claude-sonnet-5", effort="medium",
                       unit="rabota-lane-x.service")
         kwargs.update(overrides)
@@ -99,7 +101,7 @@ class LocalRecipeTests(unittest.TestCase):
         # whose layout differs from this one's.
         ctx = self.ctx(FakeRunner([]))
         ctx.tenant.lanes.claude_bin = "/opt/claude/2.1.278/claude"
-        argv = lane.build_local(ctx, seat="quantivly-1", repo="hub", worktree="/w/t",
+        argv = lane.build_local(ctx, worktree="/w/t",
                                 out_dir="/o/d", brief="/o/d/brief.md", model="claude-sonnet-5",
                                 effort="medium", unit="rabota-lane-x.service")
         self.assertIn("/opt/claude/2.1.278/claude", argv)
@@ -151,10 +153,10 @@ class LocalRecipeTests(unittest.TestCase):
 class RemoteRecipeTests(LocalRecipeTests):
     def remote_argv(self):
         ctx = self.ctx(FakeRunner([]))
-        local = lane.build_local(ctx, seat="quantivly-0", repo="hub", worktree="/w/t", out_dir="/o/d",
+        local = lane.build_local(ctx, worktree="/w/t", out_dir="/o/d",
                                  brief="/o/d/brief.md", model="claude-sonnet-5", effort="medium",
                                  unit="rabota-lane-x.service")
-        return lane.build_remote(ctx, ctx.tenant.machines["dev"], local)
+        return lane.build_remote(ctx.tenant.machines["dev"], local)
 
     def test_it_wraps_the_local_argv_in_one_ssh_call(self):
         a = self.remote_argv()
@@ -171,10 +173,10 @@ class RemoteRecipeTests(LocalRecipeTests):
 
     def test_an_equals_leading_value_cannot_be_expanded_by_zsh(self):
         ctx = self.ctx(FakeRunner([]))
-        local = lane.build_local(ctx, seat="quantivly-0", repo="hub", worktree="/w/t", out_dir="/o/d",
+        local = lane.build_local(ctx, worktree="/w/t", out_dir="/o/d",
                                  brief="=ls", model="claude-sonnet-5", effort="medium",
                                  unit="rabota-lane-x.service")
-        self.assertIn("'Read =ls and execute.'", lane.build_remote(ctx, ctx.tenant.machines["dev"], local)[-1])
+        self.assertIn("'Read =ls and execute.'", lane.build_remote(ctx.tenant.machines["dev"], local)[-1])
 
     def test_the_brief_travels_on_stdin_never_on_a_command_line(self):
         runner = FakeRunner([(["ssh"], Result(0, "", ""))])
@@ -202,11 +204,11 @@ class RemoteRecipeTests(LocalRecipeTests):
         # branch passes nothing at all, see test_a_remote_recipe_never_sets_claude_config_dir),
         # but the mechanism itself — "trust the given value, don't re-derive it" — still matters.
         ctx = self.ctx(FakeRunner([]))
-        local = lane.build_local(ctx, seat="quantivly-0", repo="hub", worktree="/w/t", out_dir="/o/d",
+        local = lane.build_local(ctx, worktree="/w/t", out_dir="/o/d",
                                  brief="/o/d/brief.md", model="claude-sonnet-5", effort="medium",
                                  unit="rabota-lane-x.service", config_dir="/home/ubuntu/.claude",
                                  claude_bin="/home/ubuntu/.local/bin/claude")
-        cmd = lane.build_remote(ctx, ctx.tenant.machines["dev"], local)[-1]
+        cmd = lane.build_remote(ctx.tenant.machines["dev"], local)[-1]
         self.assertIn("'--setenv=CLAUDE_CONFIG_DIR=/home/ubuntu/.claude'", cmd)
         self.assertNotIn(str(Path.home()), cmd)
 
@@ -384,6 +386,32 @@ class RunRecipeTests(LocalRecipeTests):
         # The budget gate is BEFORE anything else — a refusal here touches no machine at all.
         self.assertEqual(runner.calls, [])
 
+    def test_a_seat_mismatched_with_the_machines_declared_profile_refuses(self):
+        # Finding 1 (final whole-branch review): --seat was validated against the tenant
+        # family rule but nothing tied it to [machines.<m>].profile, so a lane on dev could
+        # be told to bill quantivly-1 (a valid PERSONAL... no, a valid quantivly-family seat)
+        # on the laptop's gate while dev's own login (the fixture's dev profile,
+        # "quantivly-0") actually bills the work — two numbers wrong at once, silently. The
+        # fixture's dev profile is "quantivly-0" (tests/fixtures/config/tenants/quantivly.toml).
+        runner = FakeRunner([])
+        ctx = self.ctx(runner)
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                            **self.kw(seat="quantivly-1"))
+        # The refusal must touch NO machine — it fires before resolve_remote's ssh call, and
+        # before the budget gate. If this check ever moves after either, this row must fail.
+        self.assertEqual(runner.calls, [])
+
+    def test_a_seat_equal_to_the_declared_profile_is_harmless(self):
+        # The companion case: an explicit --seat that agrees with the machine's declared
+        # profile is not an override in spirit, and must still be allowed through.
+        ok = Result(0, self.RESOLVE_OUT, "")
+        runner = SequencedRunner([ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                              **self.kw(run=True, seat="quantivly-0"))
+        self.assertEqual(out["seat"], "quantivly-0")
+
     def test_an_unknown_repo_for_the_machine_refuses(self):
         ctx = self.ctx(FakeRunner([]))
         with self.assertRaises(errors.Refused):
@@ -535,3 +563,39 @@ class RunRecipeTests(LocalRecipeTests):
         self.assertEqual(len(runner.calls), 4)
         cleanup = " ".join(runner.calls[3])
         self.assertIn("'remove'", cleanup); self.assertIn("'--force'", cleanup)
+
+
+class MachineArgvCliTests(unittest.TestCase):
+    """Finding 4 (final whole-branch review): ``--machine`` used to hardcode
+    ``choices=["local", "dev"]`` in ``lane._build``, while the declared source of truth is the
+    tenant config and ``run_recipe`` already validates against it and raises a named
+    ``errors.Refused``. Under the hardcoded choices, an undeclared machine name never reached
+    that check at all — argparse itself refused it first, as a plain usage error (exit 2)
+    rather than the informative, named refusal (exit 3). This exercises the real argv parser
+    (``cli.main``), not ``run_recipe`` directly, because the defect lived in the parser layer.
+    """
+
+    def setUp(self):
+        install_fixture_home(self)
+        self.brief = self.home / "brief.md"
+        self.brief.write_text("do the thing")
+
+    def test_an_undeclared_machine_is_a_named_refusal_not_an_argparse_usage_error(self):
+        code, out, err = run_cli(["--tenant", "quantivly", "lane", "recipe",
+                                  "--brief", str(self.brief), "--repo", "hub",
+                                  "--machine", "nosuchmachine"])
+        self.assertEqual(code, 3, err)
+        payload = last_json(err)
+        self.assertEqual(payload["error"]["code"], "refused")
+        self.assertIn("nosuchmachine", payload["error"]["message"])
+
+    def test_the_empty_machine_usage_guard_is_reachable_from_argv(self):
+        # Finding 4 also names a second casualty of the hardcoded choices: run_recipe's own
+        # empty-machine errors.Usage guard (see test_an_empty_machine_is_rejected_rather_than_
+        # written_to_a_row above) was unreachable from real argv, since choices=[...] rejected
+        # "" before run_recipe ever saw it. This proves it is reachable now.
+        code, out, err = run_cli(["--tenant", "quantivly", "lane", "recipe",
+                                  "--brief", str(self.brief), "--repo", "hub",
+                                  "--machine", ""])
+        self.assertEqual(code, 2, err)
+        self.assertEqual(last_json(err)["error"]["code"], "usage")
