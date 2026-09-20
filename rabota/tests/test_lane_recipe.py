@@ -55,3 +55,19 @@ class LocalRecipeTests(unittest.TestCase):
 
     def test_the_prompt_never_carries_the_brief_contents(self):
         self.assertNotIn("brief body", " ".join(self.argv()))
+
+    def test_the_lane_carries_a_memory_cap(self):
+        # Without MemoryMax the unit runs uncapped, outside the host's memory budget — which is
+        # the reason a lane is a systemd unit rather than a bare process.
+        self.assertIn(f"MemoryMax={self.ctx(FakeRunner([])).tenant.lanes.memory_max}", self.argv())
+
+    def test_the_claude_binary_comes_from_config_not_a_literal(self):
+        # Spec §4.4: resolve the binary rather than hardcoding it — dev's path is version-pinned,
+        # so a literal breaks every stored recipe at the next upgrade and is wrong on any machine
+        # whose layout differs from this one's.
+        ctx = self.ctx(FakeRunner([]))
+        ctx.tenant.lanes.claude_bin = "/opt/claude/2.1.278/claude"
+        argv = lane.build_local(ctx, seat="quantivly-1", repo="hub", worktree="/w/t",
+                                out_dir="/o/d", brief="/o/d/brief.md", model="claude-sonnet-5",
+                                effort="medium", unit="rabota-lane-x.service")
+        self.assertIn("/opt/claude/2.1.278/claude", argv)
