@@ -69,7 +69,11 @@ class LocalRecipeTests(unittest.TestCase):
         self.assertIn("StandardError=append:/o/d/stream.err", a)
 
     def test_the_seat_is_pinned_by_config_dir(self):
-        self.assertIn("--setenv=CLAUDE_CONFIG_DIR=" + str(Path.home() / ".claude-quantivly-1"), self.argv())
+        # Fix round 4: measured 2026-09-20 — ~/.claude-quantivly-1 does not exist on this
+        # machine. scripts/claude-account-dirs.sh (ROOT ~/.local/state/claude-account-dirs) is
+        # what actually builds these dirs, one per seat, and that path is what this pins.
+        self.assertIn("--setenv=CLAUDE_CONFIG_DIR=" +
+                      str(Path.home() / ".local/state/claude-account-dirs/quantivly-1"), self.argv())
 
     def test_the_agent_is_told_to_read_the_brief(self):
         a = self.argv()

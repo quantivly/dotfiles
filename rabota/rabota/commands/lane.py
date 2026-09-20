@@ -31,17 +31,27 @@ def unit_name(tenant: str, slug: str) -> str:
 
 
 def seat_config_dir(seat: str, home: str | None = None) -> str:
-    """The account dir a LOCAL lane bills. One per seat, as ``claude()`` builds them on this
-    laptop, so several accounts can run side by side here.
+    """The account dir a LOCAL lane bills. One per seat, so several accounts can run side by side
+    on this laptop.
+
+    Built by ``scripts/claude-account-dirs.sh`` (a dotfiles reconciler, not ``claude()`` itself —
+    an earlier docstring here claimed otherwise and was wrong), which mirrors its own ``ROOT``:
+    ``${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}/<profile>`` (that
+    script's line ~101). This function renders a recipe for a lane the reconciler will already
+    have prepared at the DEFAULT root — it does not read ``CLAUDE_ACCOUNT_DIRS_ROOT`` itself, and
+    a non-default root is unsupported here; that limitation is deliberate, so it stays visible
+    rather than being silently wrong the way the previous path was (measured 2026-09-20:
+    ``~/.claude-quantivly-1`` does not exist; ``~/.local/state/claude-account-dirs/quantivly-1``
+    does).
 
     This is deliberately NOT used for a remote lane (see ``resolve_remote``'s docstring) — a
     remote machine like dev is single-account, and using this function's per-seat scheme there
-    would build a path (``$HOME/.claude-<seat>``) that machine never has and never will.
+    would build a path that machine never has and never will.
 
     ``home`` defaults to THIS process's home; a caller for a genuinely different LOCAL home may
     still pass it, but no current caller does.
     """
-    return f"{home or Path.home()}/.claude-{seat}"
+    return f"{home or Path.home()}/.local/state/claude-account-dirs/{seat}"
 
 
 def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, unit,
