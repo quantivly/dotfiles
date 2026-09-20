@@ -2,6 +2,7 @@ import argparse, json, os, tempfile, unittest
 from pathlib import Path
 from rabota import census, context
 from rabota.runner import FakeRunner, Result
+from tests.test_remote import payload
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -33,6 +34,10 @@ class CensusTests(unittest.TestCase):
             (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
             (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
             (["wt-gc", "--tsv"], Result(0, (FIX / "census" / "wt_gc.tsv").read_text(), "")),
+            # No lane is registered as "started" on the quantivly.toml fixture's "dev" machine in
+            # this setUp, so census.machines() asks remote.read for zero out_dirs and no stream
+            # section — streams=() keeps the reply's section count matching that request.
+            (["ssh"], Result(0, payload(streams=()), "")),
         ])
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(self.tmp.name) / "s"), text=False, dry_run=False)
         self.ctx = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=self.runner, env={"PATH": "/bin"}, cwd=Path("/"))
@@ -67,7 +72,7 @@ class CensusTests(unittest.TestCase):
         q0 = next(s for s in c["seats"] if s["name"] == "quantivly-0")
         self.assertEqual((q0["stale"], q0["seven_d_pct"]), (True, None))
         self.assertIn("seat:quantivly-0:stale", c["unavailable"])
-        self.assertIn("deferred:sol", c["unavailable"]); self.assertIn("deferred:machines", c["unavailable"])
+        self.assertIn("deferred:sol", c["unavailable"]); self.assertNotIn("deferred:machines", c["unavailable"])
         self.assertEqual(c["machine"]["ncpu"] > 0, True)
         self.assertEqual(c["machine"]["swap_used_pct"], 25)
         self.assertEqual(c["worktrees"][0]["verdict"], "KEEP")
@@ -166,3 +171,36 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(settled, [])
         self.assertEqual(self.ctx.store.get_lane("live")["status"], "started")
         self.assertEqual(self.ctx.store.get_lane("norun")["status"], "started")
+
+
+class MachinesTests(unittest.TestCase):
+    def ctx(self, runner):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner,
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        # Same hygiene as CensusTests.setUp: an unclosed sqlite connection is a ResourceWarning
+        # that lands in whichever test happens to run next.
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def test_a_reachable_machine_becomes_a_row(self):
+        # This ctx has no started lanes on "dev", so machines() asks remote.read for zero
+        # out_dirs and remote.parse (Task 2) now enforces an EXACT section count — payload()'s
+        # own default carries one stream section for a different caller's fixture and would
+        # trip that check here, reading as unreachable. streams=() matches what this call
+        # actually requests.
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, payload(streams=()), ""))]))
+        rows, unavailable = census.machines(ctx)
+        self.assertEqual([r["name"] for r in rows], ["dev"])
+        self.assertTrue(rows[0]["reachable"])
+        self.assertEqual(unavailable, [])
+
+    def test_an_unreachable_machine_is_named_unavailable(self):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
+        rows, unavailable = census.machines(ctx)
+        self.assertFalse(rows[0]["reachable"])
+        self.assertIn("machine:dev", unavailable)
+
+    def test_deferred_no_longer_claims_machines(self):
+        self.assertNotIn("deferred:machines", census.DEFERRED)

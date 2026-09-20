@@ -10,13 +10,13 @@ import re
 import time
 from pathlib import Path
 
-from rabota import secrets, sysinfo
+from rabota import remote, secrets, sysinfo
 from rabota.store import now
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 SOL_UNIT, RABOTA_PREFIX = "nanoclaw-orchestrate.service", "/rabota-"
 UNIT_PREFIXES = ("rabota-", "orch-lane-")
-DEFERRED = ["deferred:sol", "deferred:machines"]   # design §4.2: shipped at S1
+DEFERRED = ["deferred:sol"]   # design §4.2: machines[] shipped by the remote-lanes plan
 # A Claude Code process is named `claude` when started through the wrapper and by its VERSION when a
 # headless lane execs the versioned binary directly (`.../claude/versions/2.1.273 -p …`) — which is
 # exactly what `lane recipe` and the orchestrator's manual recipe do. Measured 2026-09-16: this
@@ -229,12 +229,31 @@ def settle_finished(ctx, units: list[dict], seats: list[dict]) -> list[str]:
     return settled
 
 
+def machines(ctx) -> tuple[list[dict], list[str]]:
+    """One row per machine this tenant declares, each measured in one ssh call.
+
+    An unreachable machine still gets a row — with ``reachable: False`` — and its name in
+    ``unavailable``. Readers must refuse on it; a missing row and a zeroed row are the two
+    ways this becomes "plenty of room" by accident.
+    """
+    rows, unavailable = [], []
+    for name, m in sorted(ctx.tenant.machines.items()):
+        out_dirs = [l["out_dir"] for l in ctx.store.list_lanes(ctx.tenant.name, status="started")
+                    if l.get("machine") == name and l.get("out_dir")]
+        row = remote.read(ctx.runner, m, out_dirs)
+        if not row.get("reachable"):
+            unavailable.append(f"machine:{name}")
+        rows.append(row)
+    return rows, unavailable
+
+
 def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper=time.sleep) -> dict:
     """Measure everything, settle finished lanes, write ``<state_dir>/census.json`` and return it."""
     unavailable = list(DEFERRED)
     sess, u0 = sessions(proc, sample_seconds, sleeper)
     us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner); wt, u3 = worktrees(ctx.runner)
-    unavailable += u0 + u1 + u2 + u3
+    ms, u4 = machines(ctx)
+    unavailable += u0 + u1 + u2 + u3 + u4
     settle_finished(ctx, us, st)
     si = sysinfo.read(proc)
     # ``unknown`` is its own count, so user + sol + rabota do not silently sum to fewer than
@@ -246,7 +265,8 @@ def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper
     out = {"schema": 1, "at": now(),
            "machine": {"load1": si.load1, "ncpu": si.ncpu, "mem_available_gib": round(si.mem_available_gib, 1),
                        "swap_used_pct": si.swap_used_pct},
-           "sessions": sess, "units": us, "seats": st, "worktrees": wt, "counts": counts, "unavailable": unavailable}
+           "sessions": sess, "units": us, "seats": st, "worktrees": wt, "machines": ms, "counts": counts,
+           "unavailable": unavailable}
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     # Written through the same guard emit applies to stdout: a contract file is output too.
     text = secrets.assert_clean(json.dumps(out, indent=1, sort_keys=True) + "\n", os.environ)
