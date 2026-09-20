@@ -263,6 +263,20 @@ class ResolveRemoteTests(LocalRecipeTests):
         with self.assertRaises(errors.Refused):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
+    def test_the_sent_script_actually_checks_the_account_dir_exists(self):
+        # FakeRunner never EXECUTES the script — it answers with a canned Result regardless of
+        # what the script says — so no row driven only by that Result can ever catch a mutation
+        # that strips the "[ -d ... ] &&" guard out of the script text itself; every other
+        # refusal row here would still pass unchanged even with the guard gone, because they
+        # control the ANSWER, not what produced it. This row pins the literal script instead.
+        runner = FakeRunner([(["ssh"], Result(
+            0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude", ""))])
+        ctx = self.ctx(runner)
+        lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+        script = runner.calls[0][-1]
+        self.assertIn('[ -d "$d" ]', script)
+        self.assertIn(".claude", script)
+
 
 class ExpandRemoteTests(unittest.TestCase):
     """expand_remote (DO-652 task-7 fix round 1): expand ``~`` against the REMOTE home only."""
@@ -351,6 +365,12 @@ class RunRecipeTests(LocalRecipeTests):
         # config default expands to THIS machine's home, never the resolved dev path, so this
         # assertion only holds when the resolver's answer is actually used.
         self.assertIn(self.RESOLVED_BIN, out["shell"])
+        # Fix round 3: run_recipe must actually PASS the resolved config_dir through to
+        # build_local — this row was missing until a mutation sweep found that dropping
+        # run_recipe's config_dir=config_dir kwarg (falling back to build_local's own
+        # seat_config_dir(seat), a per-seat LOCAL path) survived the whole suite undetected.
+        self.assertIn(f"CLAUDE_CONFIG_DIR={self.RESOLVED_CONFIG_DIR}", out["shell"])
+        self.assertNotIn(str(Path.home()), out["shell"])
 
     def test_a_dry_recipe_records_no_row(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))]))
