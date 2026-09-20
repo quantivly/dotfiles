@@ -219,6 +219,10 @@ cat > "$STUBBIN/claude" <<'STUB'
     elif [ -z "$CLAUDE_CONFIG_DIR" ]; then printf 'CFG <empty>\n'
     else printf 'CFG %s\n' "$CLAUDE_CONFIG_DIR"; fi
     printf 'TEAMS %s\n' "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-<unset>}"
+    # Whether the machine-ownership override reached this child: claude() clears
+    # it, so a borrowed session does not inherit the unlocked state.
+    [ -n "${CLAUDE_FOREIGN_PROFILE_OK:-}" ] && \
+        printf 'FOREIGN_OK=[%s]\n' "$CLAUDE_FOREIGN_PROFILE_OK"
     for h in "$CLAUDE_ACCOUNT_DIRS_ROOT"/*/holders/*; do
         [ -e "$h" ] && printf 'HOLDER %s\n' "$h"
     done
@@ -1957,6 +1961,9 @@ check "foreign: the per-command override passes through"            "$(clog 'sta
 # ONE command, as the refusal promises. A prefix assignment is exported, so
 # without clearing it the borrowed session keeps the guard off for its whole life.
 check "foreign: ...and does not reach the launched session"         "$(grep -cF 'FOREIGN_OK=[1]' "$TMPROOT/clauth.log" || true)" "0"
+crun "CLAUDE_FOREIGN_PROFILE_OK=1 claude-as fz --version"
+check "foreign: the override lets claude-as through too"            "$(inclaude 'CMD --version')" "1"
+check "foreign: ...and claude() clears it for the session it starts" "$(grep -cF 'FOREIGN_OK=[1]' "$CLAUDE_LOG" || true)" "0"
 crun "unset -f claude-profile-foreign; clauth start fz"
 check "foreign: helpers absent fails OPEN"                          "$(clog 'start fz')" "1"
 # ...and SILENTLY. Without the $+functions test the command substitution still
