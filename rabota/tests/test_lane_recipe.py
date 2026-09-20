@@ -466,6 +466,17 @@ class RunRecipeTests(LocalRecipeTests):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
                             **self.kw(machine="local", run=True))
 
+    def test_a_local_recipe_sets_claude_config_dir_to_the_seat_path(self):
+        # Fix round 5: mutation 3 (make the local branch pass None) turned out to be HOLLOW —
+        # no row exercised run_recipe's LOCAL branch and inspected the resulting
+        # CLAUDE_CONFIG_DIR value; test_the_seat_is_pinned_by_config_dir only calls build_local
+        # directly. This row closes that gap.
+        ctx = self.ctx(FakeRunner([]))
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                              **self.kw(machine="local", repo="hub"))
+        expected = lane.seat_config_dir(out["seat"])
+        self.assertIn(f"CLAUDE_CONFIG_DIR={expected}", out["shell"])
+
     def test_remote_paths_use_the_resolved_home_never_a_literal_tilde(self):
         # DO-652 task-7 fix round 1: the dev fixture's state_dir and repos.hub are both
         # ~-prefixed ("~/.local/state/rabota", "~/quantivly/hub" —
