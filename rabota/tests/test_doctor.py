@@ -173,6 +173,18 @@ class SeatCacheAgeTests(unittest.TestCase):
         self.assertIn("quantivly-0", detail)
         self.assertIn("NOT VERIFIED", detail)
 
+    def test_a_machine_with_no_profile_produces_no_row_and_no_claude_pick_call(self):
+        # Review Minor 1: every fixture tenant has either no machines or one WITH a profile, so
+        # `if not m.profile: continue` is unexercised. Add an unseated machine in the test rather
+        # than editing the shared fixture.
+        from rabota.config import Machine
+        ctx = self.ctx(FakeRunner([(["claude-pick"], self.pick(30))]))
+        ctx.tenant.machines["staging"] = Machine(name="staging", ssh="staging", tenants=["quantivly"])
+        rows = doctor.seat_cache_age(ctx)
+        self.assertEqual([n for n, _, _ in rows], ["dev"])
+        claude_pick_calls = [c for c in ctx.runner.calls if c[:1] == ["claude-pick"]]
+        self.assertEqual(len(claude_pick_calls), 1)
+
 
 class SeatCacheDoctorWiringTests(unittest.TestCase):
     """run_doctor wires seat_cache_age's rows into its report and its exit status."""

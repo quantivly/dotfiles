@@ -128,7 +128,12 @@ def _census_fresh(census: dict, max_age_s: int) -> bool:
         return False
     try:
         ts = datetime.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, TypeError):
+        return False
+    if ts.tzinfo is None:
+        # fromisoformat accepts a string with no offset and returns a NAIVE datetime; subtracting
+        # that from an aware "now" raises TypeError, not ValueError. A timestamp whose timezone we
+        # do not know is not a timestamp we can age, and an unmeasured dimension refuses.
         return False
     age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
     return 0 <= age <= max_age_s
