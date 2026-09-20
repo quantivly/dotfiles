@@ -1,4 +1,4 @@
-import argparse, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
+import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from rabota import context
 from rabota.commands import doctor
@@ -53,6 +53,9 @@ class DoctorTests(unittest.TestCase):
                 runner = FakeRunner([
                     (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
                     (["systemctl", "--user", "is-enabled"], Result(0, "enabled\n", "")),
+                    # quantivly is the only fixture tenant with a seated machine (dev); the
+                    # others never call claude-pick, so this response is simply unused for them.
+                    (["claude-pick"], Result(0, json.dumps({"usage": {"cache_age_s": 30}}), "")),
                 ])
                 ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name) / "state"),
                                         text=False, dry_run=False, command="doctor")
@@ -119,3 +122,92 @@ class DoctorEndToEndTests(unittest.TestCase):
         self.assertEqual(last_json(p.stderr)["error"]["code"], "secret_leak")
         self.assertIn("LINEAR_API_KEY", p.stderr)
         self.assertNotIn("Traceback", p.stderr)
+
+
+class SeatCacheAgeTests(unittest.TestCase):
+    def ctx(self, runner):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner,
+                                             env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    def pick(self, age):
+        return Result(0, json.dumps({"usage": {"five_hour": 5, "cache_age_s": age}}), "")
+
+    def test_a_fresh_cache_passes(self):
+        rows = doctor.seat_cache_age(self.ctx(FakeRunner([(["claude-pick"], self.pick(30))])))
+        self.assertEqual([(n, ok) for n, ok, _ in rows], [("dev", True)])
+
+    def test_a_stale_cache_fails_and_names_the_consequence(self):
+        rows = doctor.seat_cache_age(self.ctx(FakeRunner([(["claude-pick"], self.pick(4000))])))
+        self.assertFalse(rows[0][1])
+        self.assertIn("credential:unmeasured", rows[0][2])
+
+    def test_claude_pick_failing_is_a_fail_not_a_pass(self):
+        rows = doctor.seat_cache_age(self.ctx(FakeRunner([(["claude-pick"], Result(5, "", "no clauth"))])))
+        self.assertFalse(rows[0][1])
+
+    def test_missing_cache_age_is_a_fail_not_a_zero(self):
+        runner = FakeRunner([(["claude-pick"], Result(0, json.dumps({"usage": {}}), ""))])
+        rows = doctor.seat_cache_age(self.ctx(runner))
+        self.assertFalse(rows[0][1])
+
+    def test_null_cache_age_is_a_fail_not_a_crash(self):
+        # Task 8 correction 1: the brief's own version extracts `age` inside the try and
+        # compares it OUTSIDE, so a refusal's null cache_age_s (documented in claude-pick's own
+        # source) raises an uncaught TypeError instead of failing cleanly. The comparison must
+        # live inside the guard.
+        runner = FakeRunner([(["claude-pick"], Result(0, json.dumps({"usage": {"cache_age_s": None}}), ""))])
+        rows = doctor.seat_cache_age(self.ctx(runner))
+        self.assertFalse(rows[0][1])
+
+    def test_the_report_names_the_declared_seat_and_marks_the_remote_login_unverified(self):
+        # Task 8 correction 3: [machines.<m>].profile is a trusted DECLARATION, never enforced —
+        # nothing here reads the remote machine's own login, so doctor must say so plainly rather
+        # than imply a check that was never made.
+        rows = doctor.seat_cache_age(self.ctx(FakeRunner([(["claude-pick"], self.pick(30))])))
+        name, ok, detail = rows[0]
+        self.assertTrue(ok)
+        self.assertIn("quantivly-0", detail)
+        self.assertIn("NOT VERIFIED", detail)
+
+
+class SeatCacheDoctorWiringTests(unittest.TestCase):
+    """run_doctor wires seat_cache_age's rows into its report and its exit status."""
+
+    def make_ctx(self, runner, tenant="quantivly"):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name) / "state"),
+                                text=False, dry_run=False, command="doctor")
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    def healthy_base(self):
+        return [
+            (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
+            (["systemctl", "--user", "is-enabled"], Result(0, "enabled\n", "")),
+        ]
+
+    def test_a_stale_seat_cache_fails_the_whole_report(self):
+        runner = FakeRunner(self.healthy_base() + [
+            (["claude-pick"], Result(0, json.dumps({"usage": {"cache_age_s": 4000}}), "")),
+        ])
+        report = doctor.run_doctor(self.make_ctx(runner))
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("dev" in p for p in report["problems"]), report["problems"])
+
+    def test_a_fresh_seat_cache_does_not_fail_the_report_on_its_own(self):
+        runner = FakeRunner(self.healthy_base() + [
+            (["claude-pick"], Result(0, json.dumps({"usage": {"cache_age_s": 30}}), "")),
+        ])
+        report = doctor.run_doctor(self.make_ctx(runner))
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual([(r["machine"], r["ok"]) for r in report["seat_cache"]], [("dev", True)])
+
+    def test_a_tenant_with_no_seated_machines_reports_no_seat_cache_rows(self):
+        runner = FakeRunner(self.healthy_base())
+        report = doctor.run_doctor(self.make_ctx(runner, tenant="toysim"))
+        self.assertEqual(report["seat_cache"], [])

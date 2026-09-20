@@ -194,3 +194,16 @@ class MachineDimensionTests(unittest.TestCase):
                                      {"name": "rabota-lane-b.service", "state": "active", "machine": "dev"}])
         b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
         self.assertEqual(b["allowed_new_lanes"], 1)
+
+
+class CensusFreshnessTests(MachineDimensionTests):
+    def test_a_stale_census_refuses_rather_than_granting_room(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01T00:00:00Z"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev", max_census_age_s=900)
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_census_with_no_timestamp_refuses(self):
+        c = census_with(dev=DEV_IDLE); c.pop("at", None)
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])

@@ -4,6 +4,7 @@ actually run on; then that machine's running-lane count against the cap. An unme
 dimension refuses — a missing census, an absent or unreachable machine row — never as room, and
 never by falling back to the local reading.
 """
+import datetime
 import json
 from rabota import errors
 from rabota.store import now
@@ -83,7 +84,8 @@ def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int
     return out
 
 
-def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: str = "local") -> dict:
+def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: str = "local",
+           max_census_age_s: int = 900) -> dict:
     """Order: credential → machine → counts, for the machine the lane would run on."""
     reasons, unavailable = [], []
     if not cred["ok"]:
@@ -93,6 +95,11 @@ def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: s
         unavailable.extend(["machine", "counts"])
         if not reasons:
             reasons.append({"code": "machine:unmeasured", "detail": "no census; run rabota census first"})
+    elif not _census_fresh(census, max_census_age_s):
+        reasons.append({"code": "census:stale",
+                        "detail": f"census.json is missing 'at' or older than {max_census_age_s}s; "
+                                  "run rabota census"})
+        unavailable.extend(["machine", "counts"])
     else:
         m = _reading_for(census, machine)
         if m is None:
@@ -107,6 +114,23 @@ def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: s
     return {"schema": 1, "at": now(), "allowed_new_lanes": allowed, "reasons": reasons,
             "seat_pick": None, "five_h_pct_now": cred.get("five_h_pct_now"), "resets_at": cred.get("resets_at"),
             "tier": cred.get("tier"), "unavailable": unavailable}
+
+
+def _census_fresh(census: dict, max_age_s: int) -> bool:
+    """A census with no timestamp, or an unparseable one, is stale — never fresh by default.
+
+    ``--state-dir`` lets a caller point ``budget`` at any directory, so the file's own age is the
+    only thing standing between a hand-written census and manufactured room.
+    """
+    at = census.get("at")
+    if not at:
+        return False
+    try:
+        ts = datetime.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+    return 0 <= age <= max_age_s
 
 
 def _reading_for(census: dict, machine: str) -> dict | None:
