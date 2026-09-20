@@ -189,6 +189,22 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(self.ctx.store.get_lane("live")["status"], "started")
         self.assertEqual(self.ctx.store.get_lane("norun")["status"], "started")
 
+    def test_gather_settles_a_remote_lane_end_to_end(self):
+        # gather() must pass its OWN machines() reading into settle_finished — not call it bare —
+        # or a lane that ran on "dev" never settles even though gather() just fetched its stream.
+        self.ctx.store.insert_lane({"id": "remote1", "tenant": "quantivly", "kind": "work", "brief": "b",
+                                    "repo": "hub", "worktree": "/w", "out_dir": "/home/ubuntu/out/smoke",
+                                    "machine": "dev", "unit": "rabota-lane-quantivly-remote-dead.service",
+                                    "status": "started", "seat": "quantivly-1"})
+        # Overrides setUp's zero-out_dirs ssh reply: this store now has one started lane on "dev",
+        # so machines() requests one out_dir, and payload()'s default carries exactly one stream
+        # section for it, with a result line distinct from the lane's own (non-matching) unit name.
+        self.runner.responses.insert(0, (["ssh"], Result(0, payload(), "")))
+        self._gather()
+        row = self.ctx.store.get_lane("remote1")
+        self.assertEqual(row["status"], "done")
+        self.assertAlmostEqual(row["cost_usd"], 0.42)
+
 
 class MachinesTests(unittest.TestCase):
     def ctx(self, runner):
