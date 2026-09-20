@@ -273,8 +273,14 @@ class SettleRemoteTests(unittest.TestCase):
     def test_an_unreachable_machine_settles_nothing(self):
         ctx = self.ctx(FakeRunner([]))
         self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
-        rows = [{"name": "dev", "reachable": False, "error": "no route"}]
+        # A real unreachable row never carries "streams" (remote.py), so this also plants one with
+        # a result line that WOULD settle if read: the row must be rejected on ``reachable`` alone,
+        # not merely because a stream happens to be absent — otherwise this row is hollow against a
+        # guard that reads unconditionally off a dict lacking the key it never sets.
+        rows = [{"name": "dev", "reachable": False, "error": "no route",
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":9.9}'}}]
         self.assertEqual(census.settle_finished(ctx, [], [], machines=rows), [])
+        self.assertEqual(ctx.store.get_lane("L1")["status"], "started")
 
     def test_a_still_running_remote_unit_is_left_alone(self):
         ctx = self.ctx(FakeRunner([]))
