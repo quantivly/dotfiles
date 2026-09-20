@@ -996,11 +996,14 @@ outage.
 - **Policy: quantivly only.** Nothing personal or toysim goes on dev. Its seat is **quantivly-0**,
   held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* that
   window, but launching on that seat belongs on dev.
-- **Opening it.** Pick `dev (EC2)` in the machine sidebar and spawn with herdr-draft's popup in
-  that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the popup finds its own
-  binary, but a shell invocation needs
-  `~/.config/herdr/plugins/github/zvibaratz.draft-*/bin/herdr-draft`. Agents get one door,
-  `dev-spawn`, once DO-635 Part D lands; until then, spawn from the popup by hand.
+- **Two doors, not one.** **Attended:** pick `dev (EC2)` in the machine sidebar and spawn with
+  herdr-draft's popup in that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the
+  popup finds its own binary, but a shell invocation needs
+  `~/.config/herdr/plugins/github/zvibaratz.draft-*/bin/herdr-draft`. **Headless:**
+  `rabota lane recipe --brief <path> --repo <name> --machine dev --run` — it renders the recipe on
+  the laptop and dispatches one `systemd-run` unit over ssh; watch it with `rabota census`, read
+  `verdict.json` when it settles. **Not `dev-spawn`** — herdr-draft does not run headless lanes,
+  and a lane's cgroup, `MemoryMax`, journal and clean stop all come from systemd, not from a pane.
 - **Inspect dev over ssh, always.** On herdr 0.9.0 the local CLI talks only to the local socket,
   and `--machine` is a 0.9.1 flag that here just prints `unknown option`.
   ```bash
@@ -1017,10 +1020,11 @@ outage.
   `MemoryMax=10G`) contains `herdr-server.service`, so every pane shell inherits the cap — and
   that is its whole reach. A command started over a plain `ssh dev` lands in a session scope under
   `user-<uid>.slice`, a *sibling* of `user@<uid>.service`, so the slice can never account it;
-  docker is outside too (`system.slice`). That is why work reaches dev as a herdr session
-  (`dev-spawn`) rather than over bare ssh. A future bare-ssh lane door would have to join
-  explicitly — `systemd-run --user --slice=agents.slice` — and re-test the auto-mode classifier,
-  which refused exactly that shape on 2026-09-18.
+  docker is outside too (`system.slice`). That is why an attended session reaches dev as a herdr
+  pane (`dev-spawn`) rather than over bare ssh — and why a headless lane instead joins the slice
+  **explicitly**, `systemd-run --user --slice=agents.slice`, since it has no pane to inherit the
+  cap from (`rabota lane recipe --machine dev --run`; measured landing under
+  `agents.slice/rabota-lane-…` with `MemoryMax=6442450944`, 2026-09-20).
 - **Know the degraded mode before you meet it.** `MemoryHigh` throttles everything in the slice
   **including the herdr server**, since the server is in it and panes inherit from it: the first
   symptom of the budget biting is every pane and the dev UI going slow, not a lane dying. At
