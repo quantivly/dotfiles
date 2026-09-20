@@ -223,22 +223,18 @@ _claude_holder_count_one() {
 # only because the tenant data file happens to re-declare it -ga first; a tenant
 # file that just assigns — which is what §5.1's example does — gets an error and
 # an unusable table.
-# A FUNCTION, and publicly named, because a Claude Code Bash-tool shell snapshot
-# carries functions but NOT variables: measured 2026-09-20, a live snapshot holds
-# 9,148 lines of function definitions and exactly one variable line, `export
-# PATH=…`. So in an agent's shell every table here is empty even though the code
-# that reads them is present — and a guard that reads an empty table is off.
-# claude-profile-foreign calls this when its table is empty, which is what makes
-# the refusal reach agent sessions, the population that caused the incident.
-claude-tenants-load() {
-  typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-  typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
-  : "${CLAUDE_TENANT_DEFAULT=}"
-  local f="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
-  [[ -r "$f" ]] && source "$f"
-  return 0
-}
-claude-tenants-load
+# SOURCED AT TOP LEVEL, and it has to stay that way. Inside a function, a tenants
+# file's own `typeset -A NAME` (without -g) creates a FUNCTION-LOCAL that dies at
+# return, so every table reads empty — and an unusable table does not narrow the
+# pool, it widens it to every registered profile (docs/CLAUDE_ACCOUNT_PICKER.md).
+# Measured 2026-09-20: sourced from a function, the `typeset -A` spelling left the
+# DO-641 guard silently off. The on-demand path for shells that never ran this
+# (claude-tenants-owner) therefore forks a shell rather than sourcing in place.
+typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+: "${CLAUDE_TENANT_DEFAULT=}"
+[[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
+  source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
 
 # Is the WHOLE tenant table usable? Checked before any lookup, so a typo in entry
 # three cannot be masked by entry one happening to match — the rule _gh_route_for
@@ -525,13 +521,43 @@ _claude_profile_excluded() {
 # incident — agent sessions — while stopping a human at a prompt. The name alone
 # is not enough: the snapshot carries no VARIABLES either, so the table has to be
 # loaded on demand (claude-tenants-load) or the function is present and blind.
+# Who owns this profile according to the tenants FILE, read in a shell of its own?
+#
+# The fork is the point. A Claude Code Bash-tool shell snapshot carries functions
+# but no variables (measured: 9,148 lines of functions beside a single `export
+# PATH=` line), so in an agent's shell the table is empty while the code that
+# reads it is present. Sourcing the file from inside a function would not fix
+# that — a `typeset -A` in the user's file would become function-local and the
+# table would read empty anyway — so the read happens at the TOP LEVEL of a
+# `zsh -f` that exists only to answer this one question. Every spelling a tenants
+# file uses (plain assignment, `typeset -A`, `typeset -gA`) then behaves alike,
+# and nothing the file does leaks into the caller's shell.
+#
+# Only reached when the table is empty, i.e. never in an interactive shell.
+claude-tenants-owner() {   # $1 = profile
+  local f="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+  [[ -r "$f" ]] || return 1
+  # The declarations mirror the top-level ones above: a tenants file may assign
+  # any of these as a bare `name=( … )`, and an associative table assigned into
+  # an undeclared name is a normal array whose lookup silently answers nothing.
+  command zsh -f -c '
+    typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+    source "$1" || exit 1
+    print -r -- "${CLAUDE_TENANT_MACHINE_OWNED[$2]:-}"' tenants-owner "$f" "$1" 2>/dev/null
+}
+
 claude-profile-foreign() {
   [[ -n "$1" && -z "${CLAUDE_FOREIGN_PROFILE_OK:-}" ]] || return 1
   # An EMPTY table is not evidence of "no table": in a shell snapshot the data
-  # never loaded, because a snapshot carries no variables. Load it, once, rather
-  # than reading "off" out of an artefact of where this function is running.
-  (( ${#CLAUDE_TENANT_MACHINE_OWNED} )) || claude-tenants-load
-  local owner="${CLAUDE_TENANT_MACHINE_OWNED[$1]:-}"
+  # never loaded, because a snapshot carries no variables. Ask the file itself
+  # rather than reading "off" out of an artefact of where this is running.
+  local owner
+  if (( ${#CLAUDE_TENANT_MACHINE_OWNED} )); then
+    owner="${CLAUDE_TENANT_MACHINE_OWNED[$1]:-}"
+  else
+    owner="$(claude-tenants-owner "$1")"
+  fi
   [[ -n "$owner" ]] || return 1
   print -r -- "$owner"
 }
@@ -542,9 +568,13 @@ claude-profile-foreign() {
 # "Never launches anything" (its --help), so it is safe to ask from here.
 #
 # Prints the profile, or nothing. UNKNOWN and clauth's own "contested" print
-# nothing, so the resume passes through: refusing a session nobody can attribute
-# would break ordinary work to guess at a rare case. What this cannot see is a
-# profile picked at clauth's own interactive prompt — that one is clauth's.
+# nothing, and the resume then passes through. That is a CHOICE, not a blind
+# spot: clauth's documented fallback for such a session is its active profile,
+# which is readable here, and "contested" is not rare — 235 of 689 entries on
+# this machine, 34%, measured 2026-09-20. Refusing a third of all resumes to
+# catch the rare foreign one would trade a real cost for a speculative save, and
+# clauth prompts on a TTY anyway. What no wrapper can see is the profile chosen
+# at that prompt, after this function has returned.
 claude-resume-profile() {
   local target="$1" id db
   [[ -n "$target" ]] || return 1
@@ -564,8 +594,13 @@ claude-resume-profile() {
 }
 
 # The one refusal every door prints, so the doors cannot drift apart.
-claude-foreign-refuse() {   # $1 = refusing command, $2 = profile, $3 = owner
+# $4 is the door's OWN way out, and it matters: for `clauth resume` the right
+# answer is to resume under a profile you own, and a refusal whose only remedy is
+# "borrow the seat anyway" would hand the user the thing the guard exists to
+# prevent. The borrow line stays last, as the deliberate option it is.
+claude-foreign-refuse() {   # $1 = refusing command, $2 = profile, $3 = owner, $4 = remedy
   print -u2 -- "$1: refused — '$2' is owned by $3 (CLAUDE_TENANT_MACHINE_OWNED)."
+  [[ -n "${4:-}" ]] && print -u2 -- "    $4"
   print -u2 -- "    Run this work on $3 instead: its machine in herdr's sidebar."
   print -u2 -- "    To borrow it on purpose, for one command: CLAUDE_FOREIGN_PROFILE_OK=1 $1 …"
 }
@@ -2358,7 +2393,7 @@ claude() {
 # claude it spawned, so a 3 from this function and a 3 from a session that itself
 # exited 3 are indistinguishable to a caller. Nothing branches on it today.
 clauth() {
-  local p="" owner="" a cmd="" target="" skip=0 want=0 i=1
+  local p="" owner="" a cmd="" target="" resume_remedy="" skip=0 want=0 i=1
   # The SUBCOMMAND is the first word that is not a top-level option, because
   # `clauth --theme compatible start <p>` is accepted by the real CLI and a
   # wrapper dispatching on "$1" alone would hand that spelling straight to the
@@ -2395,13 +2430,19 @@ clauth() {
         *) [[ -n "$target" ]] || target="$a" ;;
       esac
     done
-    [[ -n "$p" || -z "$target" ]] || p="$(claude-resume-profile "$target")"
+    if [[ -z "$p" && -n "$target" ]]; then
+      p="$(claude-resume-profile "$target")"
+      # Resolved rather than typed, so the way out is to name a profile you own —
+      # which clauth would also have offered at its own TTY prompt, after this
+      # wrapper has already returned.
+      [[ -z "$p" ]] || resume_remedy="Resume it elsewhere: clauth resume --profile <a profile you own> $target"
+    fi
   elif [[ -n "$cmd" && -d "$HOME/.clauth/profiles/$cmd" ]]; then
     p="$cmd"
   fi
   if [[ -n "$p" ]] && (( $+functions[claude-profile-foreign] && $+functions[claude-foreign-refuse] )) \
      && owner="$(claude-profile-foreign "$p")"; then
-    claude-foreign-refuse clauth "$p" "$owner"
+    claude-foreign-refuse clauth "$p" "$owner" "${resume_remedy:-}"
     return 3
   fi
   # UNSET for the child, so "for one command" is true. A prefix assignment is

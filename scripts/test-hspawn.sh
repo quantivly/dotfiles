@@ -1980,6 +1980,10 @@ check "foreign: the override lets claude-as through too"            "$(inclaude 
 check "foreign: ...and claude() clears it for the session it starts" "$(grep -cFx 'FOREIGN_OK <unset>' "$CLAUDE_LOG" || true)" "1"
 PANEID=wZ:p1 crun "CLAUDE_FOREIGN_PROFILE_OK=1 claude-as fz --version"; PANEID=
 check "foreign: ...on the herdmates branch a pane really takes, too"  "$(grep -cFx 'FOREIGN_OK <unset>' "$CLAUDE_LOG" || true)" "1"
+# ...and that it REALLY is that branch: the claude stub prints the same line, so
+# without this the row silently becomes a duplicate of the one above it if
+# claude() ever stops taking the herdmates path with HERDR_PANE_ID set.
+check "foreign: ...which is the herdmates branch, not plain claude"  "$(inclaude 'CMD herdmates teammux-launch --version')" "1"
 crun "unset -f claude-profile-foreign; clauth start fz"
 check "foreign: helpers absent fails OPEN"                          "$(clog 'start fz')" "1"
 # ...and SILENTLY. Without the $+functions test the command substitution still
@@ -2006,6 +2010,12 @@ cat > "$FHOME/.clauth/session_profiles.json" <<'JSON'
 JSON
 crun "clauth resume s-owned"
 check "foreign: an unflagged resume onto an owned session is refused" "$RC" "3"
+# The remedy a REFUSED RESUME needs is a profile you own, not "borrow the seat" —
+# that one is the thing the guard exists to prevent, so it must not be the only
+# way out on offer.
+check "foreign: ...naming --profile as the way out, not the borrow"   "$(inout 'clauth resume --profile <a profile you own> s-owned')" "1"
+crun "clauth start fz"
+check "foreign: ...and that remedy appears on no other door"          "$(inout 'Resume it elsewhere')" "0"
 check "foreign: ...without the resume reaching the binary"           "$(clog 'resume')" "0"
 crun "clauth resume s-free"
 check "foreign: ...an unowned session still resumes"                 "$(clog 'resume s-free')" "1"
@@ -2016,11 +2026,16 @@ check "foreign: ...and so does a session it has no record of"        "$(clog 're
 CLAUTH_STUB_LATEST=s-owned crun "clauth resume latest"
 check "foreign: 'latest' is resolved through clauth info, then refused" "$RC" "3"
 check "foreign: ...having asked info, never resume"                  "$(clog 'info latest')" "1"
+check "foreign: ...with the resume itself never reaching the binary" "$(clog 'resume latest')" "0"
 # A top-level option BEFORE the subcommand is a real spelling of every door.
 crun "clauth --theme compatible start fz"
 check "foreign: a top-level option before 'start' does not hide it"  "$RC" "3"
 crun "clauth --theme compatible resume --profile fz latest"
 check "foreign: ...nor before 'resume'"                              "$RC" "3"
+crun "clauth --theme=compatible start fz"
+check "foreign: ...in its inline --theme=<v> spelling either"        "$RC" "3"
+crun "clauth resume --theme compatible s-owned"
+check "foreign: a --theme VALUE inside resume is not the target"     "$RC" "3"
 crun "clauth --theme compatible start personal"
 check "foreign: ...and an unowned profile still passes"              "$(clog '--theme compatible start personal')" "1"
 crun "claude-as fz"
@@ -2037,6 +2052,21 @@ check "foreign: ...reaching herdr zero times"                       "$(herdrcmds
 crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
 check "foreign: an empty table is RELOADED, not read as 'no table'"  "$RC" "3"
 check "foreign: ...reaching the binary zero times"                   "$(clog 'start fz')" "0"
+
+# WHICH SPELLING the tenants file uses must not decide whether the guard runs.
+# A `typeset -A` (no -g) read from inside a function becomes a function-local and
+# dies at return, leaving every table empty — and an unusable table WIDENS the
+# pool to every registered profile (docs/CLAUDE_ACCOUNT_PICKER.md). That is why
+# the on-demand read forks a shell and reads at top level instead.
+for spelling in \
+    'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' \
+    'typeset -A CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' \
+    'typeset -gA CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )'; do
+    printf '%s\n' "$spelling" > "$FOREIGN_TENANTS"
+    crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+    check "foreign: a snapshot shell reads '${spelling%%;*}...' too" "$RC" "3"
+done
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
 
 unset CLAUDE_TENANTS_FILE
 crun "clauth start fz"

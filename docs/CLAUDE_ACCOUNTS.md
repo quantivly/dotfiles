@@ -513,17 +513,23 @@ Design points that are load-bearing rather than preferences:
   first, and did. Also `${${(o)arr}[1]}` **joins the array into one scalar and indexes its first
   CHARACTER**: it returned `0` from the zero-padded sort key, and the picker silently chose nothing.
 - **Credential groups can only equal logins.** Four profiles against 18–30 sessions gives groups
-  of five to seven; `clauth login <name>` is what makes them smaller. Two logins **can** hold the
-  same account independently — tested 2026-09-20 (DO-640 Task B3, PR #181), not merely observed.
-  `quantivly-0` holds one login on the laptop and another on dev. Dev refreshed its own grant at
-  09:13:26Z, the first use of that seat from dev since 09-18; this laptop's separate grant for the
-  same account went on authenticating afterwards — `auth_status=ok`, `fetch_status=Fresh`,
-  `fetched_at=2026-09-20T10:44:19Z` in `~/.clauth/status.json`, and no `auth_broken` entry in
-  `profiles.toml`. (The dev-side timestamp is DO-640's measurement on dev; the laptop side was read
-  here.) The 09-18 natural experiment corroborates it: the laptop's grant polled continuously (944
-  polls) while dev's grant refreshed at 05:54Z. So each `/login` yields an independent grant, and
-  groups shrink without new accounts.
-  What this does **not** make safe is window ACCOUNTING: each machine's spend stays invisible to the
+  of five to seven; `clauth login <name>` is what makes them smaller. Whether two logins can hold
+  *the same* account independently is **observed, not yet tested**: everything below happened to
+  two grants that already existed, and no `/login` was performed to see what a *new* authorisation
+  does to an old one. That is the experiment still owed, and it wants a non-preferred profile and
+  nothing in flight.
+  What is observed, both directions, on `quantivly-0` (one login on the laptop, one on dev):
+  dev's login is from 09-15 and the laptop's grant **re-issued on 09-19 12:02Z** without it
+  breaking; the laptop's grant polled continuously on 09-18 (944 polls) while dev's refreshed at
+  05:54Z; and on 09-20 dev served a live `claude -p` from its own grant at 09:13:26Z (DO-640 Task
+  B3, PR #181) while this laptop's `~/.clauth/status.json` still reported `auth_status=ok` for the
+  same account, with no `auth_broken` entry in `profiles.toml`. Neither side has knocked the other
+  out in five days of overlap. Note what that evidence is NOT: `fetch_status`/`fetched_at` are
+  clauth's usage-poll state, not proof of a live credential, and an access token minted before a
+  refresh stays valid for its 8 h regardless — so read `auth_status` and the re-issue, not the poll.
+  If it holds, each `/login` is an independent grant and groups shrink without new accounts; if it
+  does not, a second authorisation may revoke the first and log out every holder.
+  Either way this says nothing about window ACCOUNTING: each machine's spend stays invisible to the
   other's picker. That is why `CLAUDE_TENANT_MACHINE_OWNED` (DO-641) refuses only LAUNCHES on another
   machine's profile, never the login — the laptop's grant is how it sees that seat's window.
 - **`preferred = true` on `quantivly-3` should be REMOVED — corrected 2026-09-09.** This line
