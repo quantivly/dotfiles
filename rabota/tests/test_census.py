@@ -186,6 +186,7 @@ class CensusTests(unittest.TestCase):
             (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
             (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
             (["wt-gc", "--tsv"], Result(127, "", "not found")),
+            (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
         ])
         ctx = self.ctx
         ctx.runner = runner
@@ -220,6 +221,7 @@ class CensusTests(unittest.TestCase):
         runner = FakeRunner([
             (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
             (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+            (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
         ])
         with context.track_contexts() as opened:
             c = cmd._run(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
@@ -239,6 +241,7 @@ class CensusTests(unittest.TestCase):
             (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
             (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
             (["wt-gc", "--tsv"], Result(0, (FIX / "census" / "wt_gc.tsv").read_text(), "")),
+            (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
         ])
         with context.track_contexts() as opened:
             c = cmd._run(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
