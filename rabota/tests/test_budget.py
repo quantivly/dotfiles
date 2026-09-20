@@ -207,3 +207,15 @@ class CensusFreshnessTests(MachineDimensionTests):
         c = census_with(dev=DEV_IDLE); c.pop("at", None)
         b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
         self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+
+    def test_a_stale_census_still_surfaces_what_it_could_not_measure(self):
+        # The stale path must not report LESS than the fresh path for the same file: a dimension
+        # the census itself declared unmeasured has to stay named, or a reader concludes it was
+        # fine when nothing ever looked.
+        c = census_with(dev=DEV_IDLE)
+        c["at"] = "2020-01-01T00:00:00Z"
+        c["unavailable"] = ["deferred:sol", "seat:quantivly-0:stale"]
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        for expected in ("machine", "counts", "deferred:sol", "seat:quantivly-0:stale"):
+            self.assertIn(expected, b["unavailable"])
