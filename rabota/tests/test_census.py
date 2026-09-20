@@ -80,6 +80,23 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(json.loads((Path(self.tmp.name) / "s" / "census.json").read_text())["counts"], c["counts"])
         for s in c["sessions"]: self.assertNotIn("argv", s); self.assertNotIn("env", s)
 
+    def test_gather_writes_machines_into_the_contract_file(self):
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertEqual([m["name"] for m in c["machines"]], ["dev"])
+        self.assertTrue(c["machines"][0]["reachable"])
+        # budget reads census.json, not gather()'s return value, so the key must survive the write.
+        written = json.loads((Path(self.tmp.name) / "s" / "census.json").read_text())
+        self.assertEqual(written["machines"], c["machines"])
+
+    def test_an_unreachable_machine_reaches_the_contract_files_unavailable(self):
+        # Prepended so it wins FakeRunner's prefix match over setUp's successful ssh reply.
+        self.runner.responses.insert(0, (["ssh"], Result(255, "", "no route to host")))
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertFalse(c["machines"][0]["reachable"])
+        self.assertIn("machine:dev", c["unavailable"])
+        written = json.loads((Path(self.tmp.name) / "s" / "census.json").read_text())
+        self.assertIn("machine:dev", written["unavailable"])
+
     # A failing per-pid reader must never GUESS (fix brief ws4p-fix, defect 3; review attack a5).
     # The evaluator reached these with chmod 000 on a fixture; on this box they are latent (no
     # hidepid), but "an unmeasured dimension is a refusal, never a zero" (design §4.2) applies to
