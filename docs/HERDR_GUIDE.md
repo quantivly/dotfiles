@@ -987,6 +987,42 @@ Every decision is one line in `~/.local/state/pane-reaper/log`. It also records
 `~/.claude/skills/herdr/SKILL.md` teaches a lead Claude `herdr agent list/read/prompt/wait`.
 Regenerate it after every `herdr update`.
 
+### Working on dev
+
+`dev (EC2)` is a second agent host — 16 cores, 61 GiB — and it also runs the team's platform
+stack. Treat it as **shared, not disposable**: an OOM or an unasked-for restart there is a team
+outage.
+
+- **Policy: quantivly only.** Nothing personal or toysim goes on dev. Its seat is **quantivly-0**,
+  held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* the window,
+  but work on it belongs here, not there.
+- **Opening it.** Pick `dev (EC2)` in the machine sidebar and spawn with herdr-draft's popup in
+  that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the popup finds its own
+  binary, but a shell invocation needs
+  `~/.config/herdr/plugins/github/zvibaratz.draft-*/bin/herdr-draft`.
+- **Inspect dev over ssh, always.** On herdr 0.9.0 the local CLI talks only to the local socket,
+  and `--machine` is a 0.9.1 flag that here just prints `unknown option`.
+  ```bash
+  ssh dev 'PATH=$HOME/.local/bin:$PATH herdr agent list'
+  ssh dev 'PATH=$HOME/.local/bin:$PATH herdr pane close <id>'
+  ```
+  A non-interactive `ssh dev` has **no `~/.local/bin`**, so set `PATH` or use an absolute path.
+  Never `zsh -ic` there: dev's interactive startup repoints `~/.ssh/ssh_auth_sock`.
+- **Git is HTTPS-only.** `~/.gitconfig.local` rewrites `git@github.com:` to HTTPS so gh's
+  credential helper authenticates, and pushes then work with **no forwarded agent** — which a
+  session left running after you disconnect does not have. Never `git config --global` on dev:
+  `~/.gitconfig` there is a symlink into the tracked, public `gitconfig`.
+- **One memory budget covers all agent work.** `agents.slice` (`MemoryHigh=8G`, `MemoryMax=10G`)
+  contains `herdr-server.service`, so every pane shell inherits the cap. A headless lane started
+  from a plain ssh does **not** — launch it with `systemd-run --user --slice=agents.slice`. The
+  high-water mark, which is what to revisit the numbers against:
+  ```bash
+  ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
+  ```
+- **Disconnects leave dev's agents running.** The health-check timeouts in the log are this
+  laptop's own suspends, not dev going away; reconnect and the panes are still there.
+- **Close what you spawn, and only that** — `herdr pane close <id>` over ssh, as above.
+
 ---
 
 ## 10. Troubleshooting
