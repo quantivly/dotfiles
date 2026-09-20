@@ -215,10 +215,14 @@ Host *
 #
 # Optimizations for GitHub SSH connections (both laptop and remote server).
 #
-# MULTI-ACCOUNT SETUP (e.g., personal + work GitHub accounts):
-# Each Host block gets its own ControlPath to prevent multiplexing collision.
-# Without this, the first connection's identity wins for ALL github.com connections.
-# Combine with url.insteadOf in .gitconfig.work for transparent identity switching.
+# WORK DEVELOPMENT INSTANCE: route git to GitHub over HTTPS, not SSH.
+# In ~/.gitconfig.local (NEVER --global: ~/.gitconfig is a symlink into dotfiles):
+#   git config --file ~/.gitconfig.local --add url.https://github.com/.insteadOf git@github.com:
+# gh's credential helper then authenticates as the one account in gh's hosts.yml,
+# with no forwarded agent — which a session left running after you disconnect
+# does not have. A core.sshCommand key pin is NOT enough: with ControlMaster on,
+# a pinned ssh reuses whatever identity an earlier unpinned `ssh git@github.com`
+# opened the master with, for ControlPersist (measured on dev, 2026-09-19, DO-635).
 
 # Personal GitHub (default identity)
 # Host github.com
