@@ -21,6 +21,18 @@ def seat_cache_age(ctx, max_age_s: int = 600) -> list[tuple[str, bool, str]]:
     the remote machine's own login, so a mismatch between the declared seat and the account
     actually signed in there bills the wrong window silently. Every row says NOT VERIFIED, naming
     that consequence, rather than implying a check this machine cannot make.
+
+    ``--dry-run`` is load-bearing, not cosmetic. Without it, this call reaches claude-pick's
+    account-dir builder (``scripts/claude-account-dirs.sh``, reachable because claude-pick sources
+    ``zsh/zshrc.herdr``) and reconciles ``.credentials.json`` out of band from that reconciler's own
+    2-minute timer — a command documented as "check install, config, store, timer" must not write
+    credential state as a side effect of running. The explicit ``timeout=30`` (matching
+    ``budget.py``'s credential-gate call) avoids inheriting the runner's 60s default for a call that
+    now drags a shell layer into a subprocess.
+
+    NOT YET PROVEN in production: ``usage.cache_age_s`` was confirmed to exist by hand-running
+    claude-pick in an interactive shell, a different environment from this scrubbed-env subprocess
+    call — the key is confirmed, this call's shape against the real binary is not.
     """
     rows = []
     for name, m in sorted(ctx.tenant.machines.items()):
@@ -28,7 +40,7 @@ def seat_cache_age(ctx, max_age_s: int = 600) -> list[tuple[str, bool, str]]:
             continue
         unverified = (f"remote login on {name!r} is NOT VERIFIED against declared seat {m.profile!r}; "
                      "a mismatch bills the wrong account silently")
-        res = ctx.runner.run(["claude-pick", "--json", "--profile", m.profile])
+        res = ctx.runner.run(["claude-pick", "--profile", m.profile, "--dry-run", "--json"], timeout=30)
         if not res.ok:
             rows.append((name, False, f"claude-pick exited {res.code} for {m.profile}; {unverified}"))
             continue

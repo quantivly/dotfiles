@@ -173,6 +173,15 @@ class SeatCacheAgeTests(unittest.TestCase):
         self.assertIn("quantivly-0", detail)
         self.assertIn("NOT VERIFIED", detail)
 
+    def test_claude_pick_is_called_with_dry_run(self):
+        # Final review Finding 1: a health check must not build or reconcile an account dir as a
+        # side effect of running. claude-pick's account-dir builder only runs when --dry-run is
+        # absent, so its presence in the argv is the whole guarantee — assert it directly.
+        runner = FakeRunner([(["claude-pick"], self.pick(30))])
+        doctor.seat_cache_age(self.ctx(runner))
+        call = next(c for c in runner.calls if c[:1] == ["claude-pick"])
+        self.assertIn("--dry-run", call)
+
     def test_a_machine_with_no_profile_produces_no_row_and_no_claude_pick_call(self):
         # Review Minor 1: every fixture tenant has either no machines or one WITH a profile, so
         # `if not m.profile: continue` is unexercised. Add an unseated machine in the test rather
