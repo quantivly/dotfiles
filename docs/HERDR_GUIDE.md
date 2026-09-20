@@ -994,12 +994,13 @@ stack. Treat it as **shared, not disposable**: an OOM or an unasked-for restart 
 outage.
 
 - **Policy: quantivly only.** Nothing personal or toysim goes on dev. Its seat is **quantivly-0**,
-  held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* the window,
-  but work on it belongs here, not there.
+  held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* that
+  window, but launching on that seat belongs on dev.
 - **Opening it.** Pick `dev (EC2)` in the machine sidebar and spawn with herdr-draft's popup in
   that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the popup finds its own
   binary, but a shell invocation needs
-  `~/.config/herdr/plugins/github/zvibaratz.draft-*/bin/herdr-draft`.
+  `~/.config/herdr/plugins/github/zvibaratz.draft-*/bin/herdr-draft`. Agents get one door,
+  `dev-spawn`, once DO-635 Part D lands; until then, spawn from the popup by hand.
 - **Inspect dev over ssh, always.** On herdr 0.9.0 the local CLI talks only to the local socket,
   and `--machine` is a 0.9.1 flag that here just prints `unknown option`.
   ```bash
