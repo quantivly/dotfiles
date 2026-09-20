@@ -996,6 +996,13 @@ outage.
 - **Policy: quantivly only.** Nothing personal or toysim goes on dev. Its seat is **quantivly-0**,
   held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* that
   window, but launching on that seat belongs on dev.
+- **Concurrent remote lanes on dev share one credential file.** The headless door bills dev's own
+  login rather than a per-seat account dir, so every simultaneous lane there — up to
+  `max_lanes_local` (3 by default) — reads and refreshes the same `~/.claude` on dev. That is the
+  trade of using the machine's own login instead of per-seat dirs, not a bug to fix here. The
+  symptom if it bites is the one CLAUDE.md documents for a superseded refresh token: every session
+  on that account logs out **at once**, not a gradual degradation — so a sudden multi-lane logout
+  on dev is this, not a new fault.
 - **Two doors, not one.** **Attended:** pick `dev (EC2)` in the machine sidebar and spawn with
   herdr-draft's popup in that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the
   popup finds its own binary, but a shell invocation needs
@@ -1011,6 +1018,11 @@ outage.
   **Not `dev-spawn`** — that script was never built (DO-642 was rescoped away from it); herdr-draft
   does not run headless lanes regardless, and a lane's cgroup, `MemoryMax`, journal and clean stop
   all come from systemd, not from a pane.
+- **`rabota census` also runs unattended, from `rabota-precompute@<tenant>.timer`, and it ssh's to
+  every declared machine including dev.** That timer's environment is not an interactive one; if it
+  cannot reach dev, it writes a census with dev unreachable, and dev lanes then correctly refuse.
+  Read that refusal as "the timer couldn't reach dev," not "dev is down" — check the timer's own
+  reachability before dev's.
 - **Inspect dev over ssh, always.** On herdr 0.9.0 the local CLI talks only to the local socket,
   and `--machine` is a 0.9.1 flag that here just prints `unknown option`.
   ```bash
@@ -1032,6 +1044,13 @@ outage.
   **explicitly**, `systemd-run --user --slice=agents.slice`, since it has no pane to inherit the
   cap from (`rabota lane recipe --machine dev --run`; measured landing under
   `agents.slice/rabota-lane-…` with `MemoryMax=6442450944`, 2026-09-20).
+- **The admission cap and the cgroup cap have never been checked against each other.** `budget`
+  admits up to `max_lanes_local` lanes (default 3) by reading the *host's* load, MemAvailable and
+  swap; it never reads the slice. Each lane separately requests its own `MemoryMax` (default `6G`)
+  into `agents.slice`, which also holds the herdr server and every attended pane. Keep
+  `max_lanes_local × memory_max ≤ agents.slice's MemoryMax` true by hand whenever either number
+  changes — `budget` does not check it, so three admitted lanes can request more than the slice
+  can hold.
 - **Know the degraded mode before you meet it.** `MemoryHigh` throttles everything in the slice
   **including the herdr server**, since the server is in it and panes inherit from it: the first
   symptom of the budget biting is every pane and the dev UI going slow, not a lane dying. At

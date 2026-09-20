@@ -98,7 +98,7 @@ Laptop side: `herdr machine list` has **`dev (EC2)` enabled**. `herdr --machine 
     `agents.slice/rabota-lane-…` with `MemoryMax=6442450944`.
   - **Stay:** toysim and personal; the quantivly-3 console; anything needing the local browser/GUI (chrome-devtools MCP) or laptop files (`~/.dotfiles-local`, `~/toysim`); work that tests this laptop's live herdr, systemd, GNOME or backup config.
 - **Repo, worktree and PRs:** dev's own `~/quantivly/<repo>` checkouts; worktrees cut there by herdr-draft (or rabota). Missing repos cloned over HTTPS. Push and `gh pr create` go through gh as `zvi-quantivly`, with commits signed by dev's registered key. No deploy key, no agent.
-- **How the laptop drives dev:** herdr's native machine view, not nested tmux (F12 loses the laptop's agent detection and notifications). Agents use `dev-spawn` (Part D), and `ssh dev herdr …` to inspect.
+- **How the laptop drives dev:** herdr's native machine view, not nested tmux (F12 loses the laptop's agent detection and notifications). **Not `dev-spawn`** — corrected 2026-09-20: that script was never built (DO-642 was rescoped away from it). Attended sessions go through herdr-draft's popup in dev's machine workspace; headless lanes through `rabota lane recipe --machine dev --run`. `ssh dev herdr …` to inspect either. `docs/HERDR_GUIDE.md` §9 covers both doors as built.
 - **quantivly-0 and the pool:** stays pinned to dev. An exhausted laptop quantivly pool keeps its designed behaviour: interactive sessions proceed on the least-bad member, `hspawn`/`--strict` refuse. The remedy is to run the work on dev, never to widen the pool. Part C closes the leak.
 
 ## 5. Issues to file (DO team; after approval, with Zvi's OK)
