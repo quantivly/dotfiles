@@ -59,10 +59,10 @@ already decided most of this, and that dev's seat is being spent **from the lapt
 | Question | Command | Result |
 |---|---|---|
 | Size / load | `nproc; free -h; df -h /; uptime` | 16 cores · 61 GiB, **13 GiB available** · 192 G disk free · load `0.20, 0.29, 0.30` |
-| RAM owner | `docker ps`/`docker stats` | ~40 swarm services: **dev is the shared platform stack**, so an agent OOM here is a team outage |
+| RAM owner | `docker ps`/`docker stats` | **47 swarm services / 70 containers** (re-counted 2026-09-20; "~40" was low): **dev is the shared platform stack**, so an agent OOM here is a team outage |
 | Tools | `zsh -lic 'whence -p …'` | claude 2.1.272 (laptop 2.1.278) · herdr 0.9.0 (= laptop) · mise 2025.12.12 · tmux 3.2a · gh 2.83.2 · Go 1.26.4 via mise · **no clauth** |
 | Non-interactive `PATH` | plain `ssh dev 'command -v claude'` | `MISSING` (rabota F-finding confirmed) |
-| Dotfiles | `git -C ~/.dotfiles …` | `main` @ `5905f7a` (09-16), **23 behind**, clean; config symlinked into it; has #146 (`claude()` safe without clauth) |
+| Dotfiles | `git -C ~/.dotfiles …` | `main` @ `5905f7a` (09-16), **23 behind `origin/main` as it stood on 2026-09-19** (the count moves as `main` does; re-measure rather than expect 23), clean; config symlinked into it; has #146 (`claude()` safe without clauth) |
 | herdr | `systemctl --user show herdr-server` | active since 09-15, `default.target` drop-in, `Linger=yes`, idle; pane shells run **inside `herdr-server.service`'s cgroup**, `MemoryMax=infinity`; user manager delegates `memory pids` |
 | herdr-draft | `herdr plugin list` | installed at `baae1b4` (laptop checkout `4734e67`, which adds `create --dry-run`) |
 | Claude login | `jq .oauthAccount ~/.claude.json` | quantivly-0 (`zvi.baratz@quantivly.com`, Team) from dev's **own** `/login` (5× on 09-15); last refresh **09-18 05:54Z**; last session 09-18 (rabota ws3); idle since |
@@ -88,7 +88,7 @@ Laptop side: `herdr machine list` has **`dev (EC2)` enabled**. `herdr --machine 
 
 - **What dev has:** §2. Do not run the bootstrap; do Parts A–B.
 - **Which lanes move:**
-  - **Move** (decision 3): quantivly headless `claude -p` lanes, long builds and tests (hub, sre-core, platform), review/evaluate lanes, and attended sessions that mostly run on their own.
+  - **Move** (decision 3): quantivly long builds and tests (hub, sre-core, platform), review/evaluate lanes, and attended sessions that mostly run on their own. **All of it arrives as a herdr session** (`dev-spawn`, Part D), never as a bare-ssh `claude -p` lane — corrected 2026-09-20 (DO-649), because `agents.slice` can only account pane-descended processes, so a bare-ssh lane would run outside the budget this plan gives dev.
   - **Stay:** toysim and personal; the quantivly-3 console; anything needing the local browser/GUI (chrome-devtools MCP) or laptop files (`~/.dotfiles-local`, `~/toysim`); work that tests this laptop's live herdr, systemd, GNOME or backup config.
 - **Repo, worktree and PRs:** dev's own `~/quantivly/<repo>` checkouts; worktrees cut there by herdr-draft (or rabota). Missing repos cloned over HTTPS. Push and `gh pr create` go through gh as `zvi-quantivly`, with commits signed by dev's registered key. No deploy key, no agent.
 - **How the laptop drives dev:** herdr's native machine view, not nested tmux (F12 loses the laptop's agent detection and notifications). Agents use `dev-spawn` (Part D), and `ssh dev herdr …` to inspect.
@@ -239,7 +239,7 @@ set -euo pipefail
 d="$HOME/.config/systemd/user"
 cat > "$d/agents.slice" <<'EOF'
 [Unit]
-Description=All agent work on this host (DO-635): herdr panes and headless lanes
+Description=herdr panes on this host (DO-635)
 [Slice]
 MemoryHigh=8G
 MemoryMax=10G

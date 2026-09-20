@@ -1013,10 +1013,21 @@ outage.
   credential helper authenticates, and pushes then work with **no forwarded agent** — which a
   session left running after you disconnect does not have. Never `git config --global` on dev:
   `~/.gitconfig` there is a symlink into the tracked, public `gitconfig`.
-- **One memory budget covers all agent work.** `agents.slice` (`MemoryHigh=8G`, `MemoryMax=10G`)
-  contains `herdr-server.service`, so every pane shell inherits the cap. A headless lane started
-  from a plain ssh does **not** — launch it with `systemd-run --user --slice=agents.slice`. The
-  high-water mark, which is what to revisit the numbers against:
+- **The memory budget covers PANES, and nothing else.** `agents.slice` (`MemoryHigh=8G`,
+  `MemoryMax=10G`) contains `herdr-server.service`, so every pane shell inherits the cap — and
+  that is its whole reach. A command started over a plain `ssh dev` lands in a session scope under
+  `user-<uid>.slice`, a *sibling* of `user@<uid>.service`, so the slice can never account it;
+  docker is outside too (`system.slice`). That is why work reaches dev as a herdr session
+  (`dev-spawn`) rather than over bare ssh. A future bare-ssh lane door would have to join
+  explicitly — `systemd-run --user --slice=agents.slice` — and re-test the auto-mode classifier,
+  which refused exactly that shape on 2026-09-18.
+- **Know the degraded mode before you meet it.** `MemoryHigh` throttles everything in the slice
+  **including the herdr server**, since the server is in it and panes inherit from it: the first
+  symptom of the budget biting is every pane and the dev UI going slow, not a lane dying. At
+  `MemoryMax` the largest process is killed and the unit continues — `OOMPolicy=continue` in
+  `systemd/herdr-server.service` is what makes that survivable, so do not "fix" it. Swap is
+  **not** capped by these two settings (`MemorySwapMax=infinity`), so a runaway can hold 10 GiB
+  resident plus whatever swap dev has. The high-water mark is what to revisit the numbers against:
   ```bash
   ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
   ```
