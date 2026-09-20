@@ -64,18 +64,29 @@ def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, uni
     and only the machine this argv will actually run on may resolve what ``~`` means. A remote lane
     passes an already-resolved absolute path (``resolve_remote``), for which expansion is a no-op.
 
-    ``config_dir`` overrides ``seat_config_dir(seat)`` for ``CLAUDE_CONFIG_DIR`` the same way, and
-    for the same reason — but the remote value is NOT ``seat_config_dir`` computed with a remote
-    ``home``; see ``resolve_remote``'s docstring for why a remote lane's account dir is not a
-    per-seat path at all. Passing it through explicitly (rather than reconstructing it here) keeps
-    this argv self-describing: the remote value that was actually proven to exist is the one
-    pinned, not a value this function re-derives and might get wrong.
+    ``config_dir``, when given, emits ``--setenv=CLAUDE_CONFIG_DIR=<config_dir>``. When it is
+    ``None`` (the default) the flag is OMITTED entirely — never emitted empty, never guessed.
+
+    This is deliberately asymmetric between the two callers (fix round 5, the first live smoke
+    this plan ever ran, 2026-09-20): ``run_recipe``'s LOCAL branch passes ``seat_config_dir(seat)``
+    explicitly, because this laptop genuinely has a per-seat account-dir scheme. Its REMOTE branch
+    passes nothing. Measured on dev: with ``CLAUDE_CONFIG_DIR`` set to a DIRECTORY, Claude Code
+    looks for ``<dir>/.claude.json``; dev keeps that file at ``$HOME/.claude.json`` — HOME level,
+    not inside ``.claude`` — so an earlier round's ``CLAUDE_CONFIG_DIR=$HOME/.claude`` made the
+    lane authenticate (the credential resolved) but run WITHOUT the account's ``.claude.json``
+    state, and Claude Code printed "Claude configuration file not found at:
+    /home/ubuntu/.claude/.claude.json" on stderr, twice. Reading A — "a remote lane uses the
+    machine's own login" — means the machine's own DEFAULTS too, and the faithful way to use dev's
+    defaults is to not override the variable that points away from them at all.
     """
     bin_path = str(Path(claude_bin if claude_bin is not None else ctx.tenant.lanes.claude_bin).expanduser())
-    return [
+    argv = [
         "systemd-run", "--user", "--collect", f"--unit={unit}",
         f"--working-directory={worktree}",
-        f"--setenv=CLAUDE_CONFIG_DIR={config_dir if config_dir is not None else seat_config_dir(seat)}",
+    ]
+    if config_dir is not None:
+        argv.append(f"--setenv=CLAUDE_CONFIG_DIR={config_dir}")
+    argv += [
         "-p", f"StandardOutput=append:{out_dir}/stream.jsonl",
         "-p", f"StandardError=append:{out_dir}/stream.err",
         "-p", f"MemoryMax={ctx.tenant.lanes.memory_max}",
@@ -87,6 +98,7 @@ def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, uni
         "--permission-mode", ctx.tenant.lanes.permission_mode,
         "--add-dir", out_dir,
     ]
+    return argv
 
 
 def build_remote(ctx, machine, local_argv: list[str]) -> list[str]:
@@ -160,8 +172,8 @@ def _remove_worktree_remote(ctx, machine, repo_path: str, worktree: str) -> None
 
 
 def resolve_remote(ctx, machine) -> dict:
-    """``$HOME``, the absolute claude path, and the machine's OWN account dir ON ``machine`` —
-    each proven, in one ssh call. Never a guess.
+    """``$HOME`` and the absolute claude path ON ``machine`` — both proven, in one ssh call.
+    Never a guess.
 
     Every path rabota stores for a machine is home-relative (``~/.local/state/rabota``,
     ``~/quantivly/hub``) and this process's home is not the remote's. ``shquote`` single-quotes
@@ -169,45 +181,40 @@ def resolve_remote(ctx, machine) -> dict:
     a literal directory named ``~`` on the target. The remote expands its own home once and every
     other path is built from that answer (see ``expand_remote``).
 
-    Decision (2026-09-20, Zvi): the account dir here is ``$HOME/.claude``, NOT
-    ``$HOME/.claude-<seat>`` — no ``seat`` parameter, deliberately. ``[machines.<m>].profile`` is
-    a DECLARATION of the seat a machine's usage bills, consumed by the budget gate on the laptop;
-    the lane itself authenticates with the TARGET MACHINE'S OWN login (spec §4.2: "the laptop's
-    monitoring grant reports what dev's own login would… dev never needs clauth"). This laptop
-    gives each seat its own account dir so several accounts can run side by side HERE; a remote
-    machine like dev is single-account — its login IS the seat — and clauth's per-seat scheme
-    does not exist there and is not going to. Concretely: dev has exactly one account dir,
-    ``/home/ubuntu/.claude``, and no per-seat dirs. This also means the seat is TRUSTED rather
-    than ENFORCED on a remote machine (nothing here checks that ``.claude``'s logged-in account
-    actually matches ``profile``) — ``rabota doctor`` is where that gets asserted (a later task).
+    Decision (2026-09-20, Zvi): a remote lane authenticates with the TARGET MACHINE'S OWN login
+    (spec §4.2: "the laptop's monitoring grant reports what dev's own login would… dev never
+    needs clauth"), never a per-seat account dir — ``[machines.<m>].profile`` only DECLARES the
+    seat a machine's usage bills, for the laptop's own budget gate. This means the seat is
+    TRUSTED rather than ENFORCED on a remote machine — ``rabota doctor`` is where that gets
+    asserted (a later task).
 
-    The account dir's existence is checked here too — not just constructed as a string — because
-    ``CLAUDE_CONFIG_DIR`` decides which account a lane bills, and a lane started against a
-    directory that doesn't exist starts logged out and burns a unit doing nothing until ``reap``
-    abandons it. A machine that cannot answer any of the three refuses, like any other unmeasured
-    dimension — dispatching a lane to a guessed path is worse than refusing outright.
+    This function used to also resolve and prove the machine's account dir
+    (``$HOME/.claude``, checked with ``[ -d ... ]``) so it could be passed to
+    ``CLAUDE_CONFIG_DIR``. Fix round 5 removed that: the live smoke on dev showed that setting
+    ``CLAUDE_CONFIG_DIR`` to a DIRECTORY makes Claude Code look for ``<dir>/.claude.json``, while
+    dev keeps that file at ``$HOME/.claude.json`` (HOME level, not inside ``.claude``) — so the
+    lane authenticated but ran without its ``.claude.json`` state ("Claude configuration file not
+    found", printed twice). The fix is to not set the variable for a remote lane at all (see
+    ``build_local``'s docstring) — nothing consumes an account dir here anymore, so nothing here
+    proves one. Proving a directory nobody references is exactly the dead check this repo's own
+    guard (a mutation surviving with no row to kill it) would flag as due for retirement.
     """
     script = ('printf "%s\\n" "$HOME"; '
-              'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf "%s\\n" "$p" || printf "\\n"; '
-              'd="$HOME"/.claude; [ -d "$d" ] && printf %s "$d"')
+              'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf %s "$p"')
     res = ctx.runner.run(remote.ssh_argv(machine, script))
     lines = (res.out or "").splitlines()
     home = lines[0].strip() if len(lines) > 0 else ""
     claude_bin = lines[1].strip() if len(lines) > 1 else ""
-    config_dir = lines[2].strip() if len(lines) > 2 else ""
-    if not res.ok or not home.startswith("/") or not claude_bin.startswith("/") or not config_dir.startswith("/"):
+    if not res.ok or not home.startswith("/") or not claude_bin.startswith("/"):
         missing = []
         if not home.startswith("/"):
             missing.append("$HOME")
         if not claude_bin.startswith("/"):
             missing.append("an executable claude")
-        if not config_dir.startswith("/"):
-            expected = f"{home}/.claude" if home.startswith("/") else "$HOME/.claude"
-            missing.append(f"the account dir {expected!r}")
         raise errors.Refused(
             f"could not resolve {', '.join(missing)} on {machine.name}: "
             f"{(res.err or res.out or 'no paths returned').strip()}")
-    return {"home": home, "claude_bin": claude_bin, "config_dir": config_dir}
+    return {"home": home, "claude_bin": claude_bin}
 
 
 def expand_remote(path: str, home: str) -> str:
@@ -266,6 +273,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     if machine == "local":
         root = Path(ctx.tenant.state_dir).expanduser()
         repo_path = str(Path(ctx.tenant.root).expanduser() / repo)
+        config_dir = seat_config_dir(seat_pick)
     else:
         if repo not in m.repos:
             raise errors.Refused(f"machine {machine!r} declares no repo {repo!r} "
@@ -275,7 +283,9 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         root = Path(expand_remote(m.state_dir, home))
         repo_path = expand_remote(m.repos[repo], home)
         claude_bin = info["claude_bin"]
-        config_dir = info["config_dir"]
+        # config_dir stays None: dev uses its own login's defaults (fix round 5 — see
+        # build_local's docstring for the measured evidence that setting it to a directory
+        # relocates where Claude Code looks for .claude.json).
     worktree = str(root / "worktrees" / ctx.tenant.name / lane_id)
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
     remote_brief = f"{out_dir}/brief.md"

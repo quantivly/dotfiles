@@ -72,8 +72,12 @@ class LocalRecipeTests(unittest.TestCase):
         # Fix round 4: measured 2026-09-20 — ~/.claude-quantivly-1 does not exist on this
         # machine. scripts/claude-account-dirs.sh (ROOT ~/.local/state/claude-account-dirs) is
         # what actually builds these dirs, one per seat, and that path is what this pins.
-        self.assertIn("--setenv=CLAUDE_CONFIG_DIR=" +
-                      str(Path.home() / ".local/state/claude-account-dirs/quantivly-1"), self.argv())
+        #
+        # Fix round 5: build_local no longer defaults config_dir to seat_config_dir(seat) — a
+        # caller (run_recipe's LOCAL branch) must now say so explicitly, which is what this row
+        # does. A row asserting CLAUDE_CONFIG_DIR should name which value it means.
+        config_dir = lane.seat_config_dir("quantivly-1")
+        self.assertIn(f"--setenv=CLAUDE_CONFIG_DIR={config_dir}", self.argv(config_dir=config_dir))
 
     def test_the_agent_is_told_to_read_the_brief(self):
         a = self.argv()
@@ -189,12 +193,14 @@ class RemoteRecipeTests(LocalRecipeTests):
         with self.assertRaises(errors.RabotaError):
             lane.send_brief(ctx, ctx.tenant.machines["dev"], "/o/d/brief.md", "x")
 
-    def test_the_config_dir_is_the_remote_machines_own_not_a_per_seat_path(self):
-        # Fix round 2, Critical 2, then fix round 3 (Zvi's decision): CLAUDE_CONFIG_DIR decides
-        # which account a lane BILLS. It was first built from THIS process's Path.home()
-        # (/home/zvi/.claude-quantivly-0 for a dev lane, wrong machine); round 3 replaced the
-        # per-seat scheme entirely for the remote form — dev is single-account, its login IS the
-        # seat, and CLAUDE_CONFIG_DIR is the resolved $HOME/.claude passed straight through.
+    def test_an_explicit_config_dir_is_passed_through_verbatim_not_reconstructed(self):
+        # Fix round 2, Critical 2, then fix round 3 (Zvi's decision), then fix round 5: this
+        # exercises build_local's raw mechanism in isolation — when GIVEN a config_dir, it emits
+        # that value verbatim rather than reconstructing it via seat_config_dir(seat) (which
+        # would use THIS process's Path.home(), wrong for any other machine). No production
+        # caller passes config_dir="/home/ubuntu/.claude" any more (round 5: run_recipe's remote
+        # branch passes nothing at all, see test_a_remote_recipe_never_sets_claude_config_dir),
+        # but the mechanism itself — "trust the given value, don't re-derive it" — still matters.
         ctx = self.ctx(FakeRunner([]))
         local = lane.build_local(ctx, seat="quantivly-0", repo="hub", worktree="/w/t", out_dir="/o/d",
                                  brief="/o/d/brief.md", model="claude-sonnet-5", effort="medium",
@@ -206,27 +212,34 @@ class RemoteRecipeTests(LocalRecipeTests):
 
 
 class ResolveRemoteTests(LocalRecipeTests):
-    """resolve_remote (fix rounds 1-3): $HOME, claude, and the MACHINE'S OWN account dir — all
-    three proven in one ssh call, or a refusal.
+    """resolve_remote (fix rounds 1-5): $HOME and the claude binary — proven in one ssh call, or
+    a refusal.
 
     Folded from the original ``resolve_claude_bin`` after the controller found that every OTHER
     remote path (``machine.state_dir``, ``machine.repos[...]``) was still being used unexpanded
     and then single-quoted — the exact ``~``-suppression bug correction 6 fixed for the claude
     binary alone.
 
-    Round 3 (2026-09-20, Zvi's decision): the account dir is ``$HOME/.claude``, not
-    ``$HOME/.claude-<seat>`` — no ``seat`` parameter. ``[machines.<m>].profile`` only DECLARES the
-    seat a machine's usage bills, for the laptop's own budget gate; the lane on the remote machine
-    authenticates with the REMOTE's own login (spec §4.2), and dev is single-account with no
-    per-seat dirs and no clauth. See ``resolve_remote``'s docstring for the full reasoning.
+    Round 3 (2026-09-20, Zvi's decision): a remote lane authenticates with the TARGET MACHINE'S
+    OWN login (spec §4.2) — never a per-seat account dir; ``[machines.<m>].profile`` only
+    DECLARES the seat a machine's usage bills, for the laptop's own budget gate.
+
+    Round 5 (the first live smoke this plan ever ran): this used to also resolve and prove the
+    account dir (``$HOME/.claude``) so it could be passed to ``CLAUDE_CONFIG_DIR``. The smoke
+    showed that setting that variable to a DIRECTORY makes Claude Code look for
+    ``<dir>/.claude.json``, while dev keeps that file at ``$HOME/.claude.json`` — so the lane
+    authenticated but ran without its ``.claude.json`` state. The fix is to not set the variable
+    for a remote lane at all (see ``build_local``'s docstring), so nothing here proves an account
+    dir any more — proving a value nobody consumes is exactly the dead check this repo's own
+    guard (a mutation surviving with no row to kill it) flags for retirement. See
+    ``resolve_remote``'s docstring for the full reasoning.
     """
 
-    def test_it_returns_home_claude_and_the_account_dir(self):
+    def test_it_returns_home_and_the_claude_binary(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude", ""))]))
+            0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude", ""))]))
         self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"]),
-                         {"home": "/home/ubuntu", "claude_bin": "/home/ubuntu/.local/bin/claude",
-                          "config_dir": "/home/ubuntu/.claude"})
+                         {"home": "/home/ubuntu", "claude_bin": "/home/ubuntu/.local/bin/claude"})
 
     def test_a_failed_ssh_refuses_rather_than_guessing(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
@@ -234,25 +247,11 @@ class ResolveRemoteTests(LocalRecipeTests):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
     def test_a_reply_missing_the_claude_line_refuses(self):
-        # The script's own `[ -x "$p" ] &&`/`|| printf "\n"` guard always emits a (possibly empty)
-        # claude line — a bare home with NOTHING after it is a malformed reply, not a "not found".
+        # A successful ssh that finds no executable claude prints nothing for that field (the
+        # script's own `[ -x "$p" ] &&` guard) — not room for a fallback, an unmeasured machine.
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu", ""))]))
         with self.assertRaises(errors.Refused):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
-
-    def test_a_reply_missing_the_config_dir_line_refuses(self):
-        # A machine with a login but no ~/.claude yet — a real, expected state on a fresh box.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n", ""))]))
-        with self.assertRaises(errors.Refused):
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
-
-    def test_a_missing_config_dir_names_the_directory_and_the_machine(self):
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n", ""))]))
-        with self.assertRaises(errors.Refused) as cm:
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
-        message = str(cm.exception)
-        self.assertIn("dev", message)
-        self.assertIn("/home/ubuntu/.claude", message)
 
     def test_an_empty_reply_refuses(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "", ""))]))
@@ -262,24 +261,9 @@ class ResolveRemoteTests(LocalRecipeTests):
     def test_a_relative_home_refuses(self):
         # A first line not starting with "/" cannot be the proof this resolver promises; refuse
         # rather than trust an unexpected shell reply verbatim.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "home\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude", ""))]))
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "home\n/home/ubuntu/.local/bin/claude", ""))]))
         with self.assertRaises(errors.Refused):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
-
-    def test_the_sent_script_actually_checks_the_account_dir_exists(self):
-        # FakeRunner never EXECUTES the script — it answers with a canned Result regardless of
-        # what the script says — so no row driven only by that Result can ever catch a mutation
-        # that strips the "[ -d ... ] &&" guard out of the script text itself; every other
-        # refusal row here would still pass unchanged even with the guard gone, because they
-        # control the ANSWER, not what produced it. This row pins the literal script instead.
-        runner = FakeRunner([(["ssh"], Result(
-            0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude", ""))])
-        ctx = self.ctx(runner)
-        lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
-        script = runner.calls[0][-1]
-        self.assertIn('[ -d "$d" ]', script)
-        self.assertIn(".claude", script)
 
 
 class ExpandRemoteTests(unittest.TestCase):
@@ -347,9 +331,9 @@ class RunRecipeTests(LocalRecipeTests):
 
     RESOLVED_HOME = "/home/ubuntu"
     RESOLVED_BIN = "/home/ubuntu/.local/bin/claude"
-    # Fix round 3: the account dir is the MACHINE's own $HOME/.claude, not a per-seat path.
-    RESOLVED_CONFIG_DIR = "/home/ubuntu/.claude"
-    RESOLVE_OUT = f"{RESOLVED_HOME}\n{RESOLVED_BIN}\n{RESOLVED_CONFIG_DIR}"
+    # Fix round 5: resolve_remote no longer resolves or proves an account dir (nothing consumes
+    # one for a remote lane any more), so its reply is back to two lines.
+    RESOLVE_OUT = f"{RESOLVED_HOME}\n{RESOLVED_BIN}"
 
     def test_a_dry_recipe_resolves_the_remote_claude_bin_and_runs_nothing_else(self):
         # DO-652 task-7 dispatch correction 6: a non-local recipe resolves the remote home and
@@ -369,11 +353,19 @@ class RunRecipeTests(LocalRecipeTests):
         # config default expands to THIS machine's home, never the resolved dev path, so this
         # assertion only holds when the resolver's answer is actually used.
         self.assertIn(self.RESOLVED_BIN, out["shell"])
-        # Fix round 3: run_recipe must actually PASS the resolved config_dir through to
-        # build_local — this row was missing until a mutation sweep found that dropping
-        # run_recipe's config_dir=config_dir kwarg (falling back to build_local's own
-        # seat_config_dir(seat), a per-seat LOCAL path) survived the whole suite undetected.
-        self.assertIn(f"CLAUDE_CONFIG_DIR={self.RESOLVED_CONFIG_DIR}", out["shell"])
+
+    def test_a_remote_recipe_never_sets_claude_config_dir(self):
+        # Fix round 5, Critical: the first live smoke this plan ever ran showed that setting
+        # CLAUDE_CONFIG_DIR to a DIRECTORY (an earlier round's $HOME/.claude) makes Claude Code
+        # look for <dir>/.claude.json, while dev keeps that file at $HOME/.claude.json — so the
+        # lane authenticated but ran without its .claude.json state ("Claude configuration file
+        # not found", printed twice on stderr). The fix is to not set the variable for a remote
+        # lane AT ALL, so dev falls back to its own login's defaults. This asserts the substring
+        # is absent from the WHOLE rendered command — not present-but-empty, not a local value.
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
+        ctx = self.ctx(runner)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        self.assertNotIn("CLAUDE_CONFIG_DIR", out["shell"])
         self.assertNotIn(str(Path.home()), out["shell"])
 
     def test_a_dry_recipe_records_no_row(self):
