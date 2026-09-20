@@ -31,33 +31,41 @@ def unit_name(tenant: str, slug: str) -> str:
 
 
 def seat_config_dir(seat: str, home: str | None = None) -> str:
-    """The account dir a lane bills, on the machine whose ``$HOME`` this is. One per seat, as
-    ``claude()`` builds them.
+    """The account dir a LOCAL lane bills. One per seat, as ``claude()`` builds them on this
+    laptop, so several accounts can run side by side here.
 
-    ``home`` defaults to THIS process's home, which is correct only for a lane that will run on
-    this machine. A remote lane must pass the REMOTE ``$HOME`` (``resolve_remote``'s ``home``) —
-    this is the exact defect class corrections 6/10 fixed for ``claude_bin``/``state_dir``/
-    ``repos``, on the value that decides which account a lane bills.
+    This is deliberately NOT used for a remote lane (see ``resolve_remote``'s docstring) — a
+    remote machine like dev is single-account, and using this function's per-seat scheme there
+    would build a path (``$HOME/.claude-<seat>``) that machine never has and never will.
+
+    ``home`` defaults to THIS process's home; a caller for a genuinely different LOCAL home may
+    still pass it, but no current caller does.
     """
     return f"{home or Path.home()}/.claude-{seat}"
 
 
 def build_local(ctx, *, seat, repo, worktree, out_dir, brief, model, effort, unit,
                 session_id: str | None = None, claude_bin: str | None = None,
-                home: str | None = None) -> list[str]:
+                config_dir: str | None = None) -> list[str]:
     """The systemd-run argv for a lane on this machine. Every value is an argv element, never a string.
 
     ``claude_bin`` overrides ``ctx.tenant.lanes.claude_bin``; either way the value is expanded with
     ``Path.expanduser()`` HERE, at call time, never earlier — the config default is home-relative,
     and only the machine this argv will actually run on may resolve what ``~`` means. A remote lane
-    passes an already-resolved absolute path (``resolve_remote``), for which expansion is a
-    no-op. ``home`` is threaded to ``seat_config_dir`` the same way, for the same reason.
+    passes an already-resolved absolute path (``resolve_remote``), for which expansion is a no-op.
+
+    ``config_dir`` overrides ``seat_config_dir(seat)`` for ``CLAUDE_CONFIG_DIR`` the same way, and
+    for the same reason — but the remote value is NOT ``seat_config_dir`` computed with a remote
+    ``home``; see ``resolve_remote``'s docstring for why a remote lane's account dir is not a
+    per-seat path at all. Passing it through explicitly (rather than reconstructing it here) keeps
+    this argv self-describing: the remote value that was actually proven to exist is the one
+    pinned, not a value this function re-derives and might get wrong.
     """
     bin_path = str(Path(claude_bin if claude_bin is not None else ctx.tenant.lanes.claude_bin).expanduser())
     return [
         "systemd-run", "--user", "--collect", f"--unit={unit}",
         f"--working-directory={worktree}",
-        f"--setenv=CLAUDE_CONFIG_DIR={seat_config_dir(seat, home)}",
+        f"--setenv=CLAUDE_CONFIG_DIR={config_dir if config_dir is not None else seat_config_dir(seat)}",
         "-p", f"StandardOutput=append:{out_dir}/stream.jsonl",
         "-p", f"StandardError=append:{out_dir}/stream.err",
         "-p", f"MemoryMax={ctx.tenant.lanes.memory_max}",
@@ -141,27 +149,37 @@ def _remove_worktree_remote(ctx, machine, repo_path: str, worktree: str) -> None
         pass
 
 
-def resolve_remote(ctx, machine, seat: str) -> dict:
-    """``$HOME``, the absolute claude path, and ``seat``'s account dir ON ``machine`` — each
-    proven, in one ssh call. Never a guess.
+def resolve_remote(ctx, machine) -> dict:
+    """``$HOME``, the absolute claude path, and the machine's OWN account dir ON ``machine`` —
+    each proven, in one ssh call. Never a guess.
 
     Every path rabota stores for a machine is home-relative (``~/.local/state/rabota``,
     ``~/quantivly/hub``) and this process's home is not the remote's. ``shquote`` single-quotes
     every element and POSIX single quotes suppress tilde expansion, so a ``~`` sent as-is becomes
     a literal directory named ``~`` on the target. The remote expands its own home once and every
-    other path is built from that answer (see ``expand_remote``, ``seat_config_dir``).
+    other path is built from that answer (see ``expand_remote``).
 
-    The seat's account dir is resolved AND its existence is checked here too — not just
-    constructed as a string — because ``CLAUDE_CONFIG_DIR`` decides which account a lane bills,
-    and a lane started against a directory nobody provisioned either fails at exec time inside a
-    unit whose error nobody reads, or silently falls back to whatever ``claude`` finds on its own.
-    A machine that cannot answer any of the three refuses, like any other unmeasured dimension —
-    dispatching a lane to a guessed path is worse than refusing outright.
+    Decision (2026-09-20, Zvi): the account dir here is ``$HOME/.claude``, NOT
+    ``$HOME/.claude-<seat>`` — no ``seat`` parameter, deliberately. ``[machines.<m>].profile`` is
+    a DECLARATION of the seat a machine's usage bills, consumed by the budget gate on the laptop;
+    the lane itself authenticates with the TARGET MACHINE'S OWN login (spec §4.2: "the laptop's
+    monitoring grant reports what dev's own login would… dev never needs clauth"). This laptop
+    gives each seat its own account dir so several accounts can run side by side HERE; a remote
+    machine like dev is single-account — its login IS the seat — and clauth's per-seat scheme
+    does not exist there and is not going to. Concretely: dev has exactly one account dir,
+    ``/home/ubuntu/.claude``, and no per-seat dirs. This also means the seat is TRUSTED rather
+    than ENFORCED on a remote machine (nothing here checks that ``.claude``'s logged-in account
+    actually matches ``profile``) — ``rabota doctor`` is where that gets asserted (a later task).
+
+    The account dir's existence is checked here too — not just constructed as a string — because
+    ``CLAUDE_CONFIG_DIR`` decides which account a lane bills, and a lane started against a
+    directory that doesn't exist starts logged out and burns a unit doing nothing until ``reap``
+    abandons it. A machine that cannot answer any of the three refuses, like any other unmeasured
+    dimension — dispatching a lane to a guessed path is worse than refusing outright.
     """
-    config_dir_suffix = remote.shquote(f"/.claude-{seat}")
     script = ('printf "%s\\n" "$HOME"; '
               'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf "%s\\n" "$p" || printf "\\n"; '
-              f'd="$HOME"{config_dir_suffix}; [ -d "$d" ] && printf %s "$d"')
+              'd="$HOME"/.claude; [ -d "$d" ] && printf %s "$d"')
     res = ctx.runner.run(remote.ssh_argv(machine, script))
     lines = (res.out or "").splitlines()
     home = lines[0].strip() if len(lines) > 0 else ""
@@ -174,7 +192,7 @@ def resolve_remote(ctx, machine, seat: str) -> dict:
         if not claude_bin.startswith("/"):
             missing.append("an executable claude")
         if not config_dir.startswith("/"):
-            expected = f"{home}/.claude-{seat}" if home.startswith("/") else f"$HOME/.claude-{seat}"
+            expected = f"{home}/.claude" if home.startswith("/") else "$HOME/.claude"
             missing.append(f"the account dir {expected!r}")
         raise errors.Refused(
             f"could not resolve {', '.join(missing)} on {machine.name}: "
@@ -234,7 +252,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     lane_id = unit.rsplit("-", 1)[-1].removesuffix(".service")
     session_id = str(uuid.uuid4())
     claude_bin = None
-    home = None
+    config_dir = None
     if machine == "local":
         root = Path(ctx.tenant.state_dir).expanduser()
         repo_path = str(Path(ctx.tenant.root).expanduser() / repo)
@@ -242,18 +260,19 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         if repo not in m.repos:
             raise errors.Refused(f"machine {machine!r} declares no repo {repo!r} "
                                  f"([machines.{machine}].repos)")
-        info = resolve_remote(ctx, m, seat_pick)
+        info = resolve_remote(ctx, m)
         home = info["home"]
         root = Path(expand_remote(m.state_dir, home))
         repo_path = expand_remote(m.repos[repo], home)
         claude_bin = info["claude_bin"]
+        config_dir = info["config_dir"]
     worktree = str(root / "worktrees" / ctx.tenant.name / lane_id)
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
     remote_brief = f"{out_dir}/brief.md"
 
     argv = build_local(ctx, seat=seat_pick, repo=repo, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,
-                       session_id=session_id, claude_bin=claude_bin, home=home)
+                       session_id=session_id, claude_bin=claude_bin, config_dir=config_dir)
     if machine != "local":
         argv = build_remote(ctx, m, argv)
     out = {"argv": argv, "shell": " ".join(argv), "unit": unit, "session_id": session_id,

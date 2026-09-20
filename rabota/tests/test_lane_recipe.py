@@ -185,80 +185,83 @@ class RemoteRecipeTests(LocalRecipeTests):
         with self.assertRaises(errors.RabotaError):
             lane.send_brief(ctx, ctx.tenant.machines["dev"], "/o/d/brief.md", "x")
 
-    def test_the_seat_config_dir_uses_the_remote_home_not_this_machine(self):
-        # Fix round 2, Critical 2: CLAUDE_CONFIG_DIR decides which account a lane BILLS.
-        # seat_config_dir defaulted to THIS process's Path.home(), so a dev lane was told
-        # /home/zvi/.claude-quantivly-0 while dev's $HOME is /home/ubuntu — same defect class as
-        # the state_dir/repos ~-suppression bug, on the value that matters most.
+    def test_the_config_dir_is_the_remote_machines_own_not_a_per_seat_path(self):
+        # Fix round 2, Critical 2, then fix round 3 (Zvi's decision): CLAUDE_CONFIG_DIR decides
+        # which account a lane BILLS. It was first built from THIS process's Path.home()
+        # (/home/zvi/.claude-quantivly-0 for a dev lane, wrong machine); round 3 replaced the
+        # per-seat scheme entirely for the remote form — dev is single-account, its login IS the
+        # seat, and CLAUDE_CONFIG_DIR is the resolved $HOME/.claude passed straight through.
         ctx = self.ctx(FakeRunner([]))
         local = lane.build_local(ctx, seat="quantivly-0", repo="hub", worktree="/w/t", out_dir="/o/d",
                                  brief="/o/d/brief.md", model="claude-sonnet-5", effort="medium",
-                                 unit="rabota-lane-x.service", home="/home/ubuntu",
+                                 unit="rabota-lane-x.service", config_dir="/home/ubuntu/.claude",
                                  claude_bin="/home/ubuntu/.local/bin/claude")
         cmd = lane.build_remote(ctx, ctx.tenant.machines["dev"], local)[-1]
-        self.assertIn("'--setenv=CLAUDE_CONFIG_DIR=/home/ubuntu/.claude-quantivly-0'", cmd)
+        self.assertIn("'--setenv=CLAUDE_CONFIG_DIR=/home/ubuntu/.claude'", cmd)
         self.assertNotIn(str(Path.home()), cmd)
 
 
 class ResolveRemoteTests(LocalRecipeTests):
-    """resolve_remote (fix rounds 1 and 2): $HOME, claude, and the seat's account dir — all three
-    proven in one ssh call, or a refusal.
+    """resolve_remote (fix rounds 1-3): $HOME, claude, and the MACHINE'S OWN account dir — all
+    three proven in one ssh call, or a refusal.
 
     Folded from the original ``resolve_claude_bin`` after the controller found that every OTHER
     remote path (``machine.state_dir``, ``machine.repos[...]``) was still being used unexpanded
     and then single-quoted — the exact ``~``-suppression bug correction 6 fixed for the claude
-    binary alone. Round 2 added the seat's ``CLAUDE_CONFIG_DIR``: it decides which account a lane
-    BILLS, dev has no per-seat account dirs today, and an existence check here is what turns that
-    into a refusal instead of a lane that silently bills (or fails inside) the wrong account.
+    binary alone.
+
+    Round 3 (2026-09-20, Zvi's decision): the account dir is ``$HOME/.claude``, not
+    ``$HOME/.claude-<seat>`` — no ``seat`` parameter. ``[machines.<m>].profile`` only DECLARES the
+    seat a machine's usage bills, for the laptop's own budget gate; the lane on the remote machine
+    authenticates with the REMOTE's own login (spec §4.2), and dev is single-account with no
+    per-seat dirs and no clauth. See ``resolve_remote``'s docstring for the full reasoning.
     """
-    SEAT = "quantivly-0"
 
     def test_it_returns_home_claude_and_the_account_dir(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude-quantivly-0", ""))]))
-        self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"], self.SEAT),
+            0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude", ""))]))
+        self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"]),
                          {"home": "/home/ubuntu", "claude_bin": "/home/ubuntu/.local/bin/claude",
-                          "config_dir": "/home/ubuntu/.claude-quantivly-0"})
+                          "config_dir": "/home/ubuntu/.claude"})
 
     def test_a_failed_ssh_refuses_rather_than_guessing(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"], self.SEAT)
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
     def test_a_reply_missing_the_claude_line_refuses(self):
         # The script's own `[ -x "$p" ] &&`/`|| printf "\n"` guard always emits a (possibly empty)
         # claude line — a bare home with NOTHING after it is a malformed reply, not a "not found".
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu", ""))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"], self.SEAT)
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
     def test_a_reply_missing_the_config_dir_line_refuses(self):
-        # Round 2: the seat's account dir doesn't exist yet on dev, so this is the row that
-        # actually fires against the real machine today — that is the intended, deliberate state.
+        # A machine with a login but no ~/.claude yet — a real, expected state on a fresh box.
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n", ""))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"], self.SEAT)
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
     def test_a_missing_config_dir_names_the_directory_and_the_machine(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude\n", ""))]))
         with self.assertRaises(errors.Refused) as cm:
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"], self.SEAT)
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
         message = str(cm.exception)
         self.assertIn("dev", message)
-        self.assertIn("/home/ubuntu/.claude-quantivly-0", message)
+        self.assertIn("/home/ubuntu/.claude", message)
 
     def test_an_empty_reply_refuses(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "", ""))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"], self.SEAT)
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
     def test_a_relative_home_refuses(self):
         # A first line not starting with "/" cannot be the proof this resolver promises; refuse
         # rather than trust an unexpected shell reply verbatim.
         ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "home\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude-quantivly-0", ""))]))
+            0, "home\n/home/ubuntu/.local/bin/claude\n/home/ubuntu/.claude", ""))]))
         with self.assertRaises(errors.Refused):
-            lane.resolve_remote(ctx, ctx.tenant.machines["dev"], self.SEAT)
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
 
 class ExpandRemoteTests(unittest.TestCase):
@@ -326,7 +329,8 @@ class RunRecipeTests(LocalRecipeTests):
 
     RESOLVED_HOME = "/home/ubuntu"
     RESOLVED_BIN = "/home/ubuntu/.local/bin/claude"
-    RESOLVED_CONFIG_DIR = "/home/ubuntu/.claude-quantivly-0"
+    # Fix round 3: the account dir is the MACHINE's own $HOME/.claude, not a per-seat path.
+    RESOLVED_CONFIG_DIR = "/home/ubuntu/.claude"
     RESOLVE_OUT = f"{RESOLVED_HOME}\n{RESOLVED_BIN}\n{RESOLVED_CONFIG_DIR}"
 
     def test_a_dry_recipe_resolves_the_remote_claude_bin_and_runs_nothing_else(self):
