@@ -100,6 +100,7 @@ def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: s
                         "detail": f"census.json is missing 'at' or older than {max_census_age_s}s; "
                                   "run rabota census"})
         unavailable.extend(["machine", "counts"])
+        unavailable.extend(census.get("unavailable", []))
     else:
         m = _reading_for(census, machine)
         if m is None:
