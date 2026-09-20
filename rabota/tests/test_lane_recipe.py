@@ -288,6 +288,15 @@ class RunRecipeTests(LocalRecipeTests):
         with self.assertRaises(errors.Refused):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(repo="nosuch"))
 
+    def test_an_empty_machine_is_rejected_rather_than_written_to_a_row(self):
+        # DO-652 task-7 dispatch correction 8: census's settle path reads an empty/missing
+        # ``machine`` column as "local" (``lane.get("machine") or "local"``), so a blank value
+        # here would silently route a dev lane's settle to the wrong filesystem. run_recipe is
+        # the only writer of that column, so it is the one place this can be caught.
+        ctx = self.ctx(FakeRunner([]))
+        with self.assertRaises(errors.Usage):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(machine=""))
+
     def test_run_creates_the_worktree_sends_the_brief_then_starts_the_unit(self):
         # DO-652 task-7 dispatch correction 6: a remote --run makes FOUR runner calls now
         # (resolve, worktree, brief, unit), not three — the brief's own count is stale.
