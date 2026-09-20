@@ -121,7 +121,8 @@ printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
 # owning the loaded .credentials.json ... CLAUDE_CONFIG_DIR-aware"). A stub that
 # still answered it would let a row pass against a doctor that had gone back to
 # asking the wrong question — so the stub records invocations and answers nothing.
-# `command -v clauth` is the only thing the doctor still needs it for.
+# `whence -p clauth` (the doctor asks PATH, never the function) is the only
+# thing it still needs the binary itself for.
 exit 0
 STUB
 chmod +x "$STUBBIN/clauth"
@@ -366,6 +367,15 @@ new_home d1; write_cred
 run_doctor    # WITH_CLAUTH unset: clauth absent
 want_out "clauth absent is a note, not a fault" "○ not installed"
 no_out   "clauth absent adds no failure line"   "✗ clauth"
+
+# zsh/zshrc.herdr defines clauth as a FUNCTION (the machine-ownership guard,
+# DO-641), and `command -v clauth` is true for a function. On a clauth-less box
+# an interactive shell therefore has the name but not the binary, and a doctor
+# asking `command -v` would print a whole clauth section about nothing. The probe
+# asks `whence -p`, which searches PATH only; this row is what holds it there.
+new_home d1b; write_cred
+PRELUDE='clauth() { :; }' run_doctor
+want_out "a clauth FUNCTION is not a clauth binary" "○ not installed"
 
 new_home d2; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"

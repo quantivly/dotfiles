@@ -513,11 +513,28 @@ Design points that are load-bearing rather than preferences:
   first, and did. Also `${${(o)arr}[1]}` **joins the array into one scalar and indexes its first
   CHARACTER**: it returned `0` from the zero-padded sort key, and the picker silently chose nothing.
 - **Credential groups can only equal logins.** Four profiles against 18–30 sessions gives groups
-  of five to seven; `clauth login <name>` is what makes them smaller. Whether two profiles can
-  hold *the same* account independently is **untested** — if each `/login` yields an independent
-  grant it would shrink groups without new accounts, and if it does not, the second authorisation
-  may revoke the first and log out every holder. Test it on a non-preferred profile, when nothing
-  is in flight.
+  of five to seven; `clauth login <name>` is what makes them smaller. Whether two logins can hold
+  *the same* account independently is **observed, not yet tested**: everything below happened to
+  two grants that already existed, and no `/login` was performed to see what a *new* authorisation
+  does to an old one. That is the experiment still owed, and it wants a non-preferred profile and
+  nothing in flight.
+  What is observed, both directions, on `quantivly-0` (one login on the laptop, one on dev):
+  dev's login is from 09-15 and the laptop's grant **re-issued on 09-19 12:02Z** without it
+  breaking; the laptop's grant polled continuously on 09-18 (944 polls) while dev's refreshed at
+  05:54Z; and on 09-20 dev served a live `claude -p` from its own grant at 09:13:26Z (DO-640 Task
+  B3, PR #181) while this laptop's `~/.clauth/status.json` still reported `auth_status=ok` for the
+  same account, with no `auth_broken` entry in `profiles.toml`. Neither side has knocked the other
+  out in five days of overlap. Note what that evidence is NOT: `fetch_status`/`fetched_at` are
+  clauth's usage-poll state, not proof of a live credential, and an access token minted before a
+  refresh stays valid for its 8 h regardless. `auth_status` is firmer but is poll-derived too — a
+  401 on a poll is what sets `auth_broken` — so it means "no poll has failed", not "the credential
+  is live". The load-bearing observation is the RE-ISSUE: a grant that rotated after the other
+  machine's login is one the other login did not revoke.
+  If it holds, each `/login` is an independent grant and groups shrink without new accounts; if it
+  does not, a second authorisation may revoke the first and log out every holder.
+  Either way this says nothing about window ACCOUNTING: each machine's spend stays invisible to the
+  other's picker. That is why `CLAUDE_TENANT_MACHINE_OWNED` (DO-641) refuses only LAUNCHES on another
+  machine's profile, never the login — the laptop's grant is how it sees that seat's window.
 - **`preferred = true` on `quantivly-3` should be REMOVED — corrected 2026-09-09.** This line
   previously read "stays", on the reasoning that once nothing reads the global credential the
   daemon's walk-back rewrites a file with no readers. That argument only holds while **both** halves
