@@ -526,7 +526,10 @@ Design points that are load-bearing rather than preferences:
   same account, with no `auth_broken` entry in `profiles.toml`. Neither side has knocked the other
   out in five days of overlap. Note what that evidence is NOT: `fetch_status`/`fetched_at` are
   clauth's usage-poll state, not proof of a live credential, and an access token minted before a
-  refresh stays valid for its 8 h regardless — so read `auth_status` and the re-issue, not the poll.
+  refresh stays valid for its 8 h regardless. `auth_status` is firmer but is poll-derived too — a
+  401 on a poll is what sets `auth_broken` — so it means "no poll has failed", not "the credential
+  is live". The load-bearing observation is the RE-ISSUE: a grant that rotated after the other
+  machine's login is one the other login did not revoke.
   If it holds, each `/login` is an independent grant and groups shrink without new accounts; if it
   does not, a second authorisation may revoke the first and log out every holder.
   Either way this says nothing about window ACCOUNTING: each machine's spend stays invisible to the

@@ -209,6 +209,10 @@ _claude_holder_count_one() {
 #   CLAUDE_TENANT_POOL=( work "quantivly-1 quantivly-2" personal "personal" )
 #   CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )   # profile=the machine that owns it
 #
+# Keep this file SELF-CONTAINED: plain assignments, no shell functions, nothing
+# printed. An agent's shell re-reads it in a bare `zsh -f` (claude-tenants-owner),
+# where a function is undefined and anything printed is mistaken for data.
+#
 # No table loaded is the modular adopter's normal state: the resolver is skipped
 # entirely and CLAUDE_ACCOUNT_POOL keeps its exact meaning.
 # CLAUDE_TENANT_BUCKETS is a LIST of whitespace-separated groups
@@ -498,6 +502,55 @@ _claude_profile_excluded() {
   return 1
 }
 
+# Who owns this profile according to the tenants FILE, read in a shell of its own?
+#
+# The fork is the point. A Claude Code Bash-tool shell snapshot carries functions
+# but no variables (measured: 9,148 lines of functions beside a single `export
+# PATH=` line), so in an agent's shell the table is empty while the code that
+# reads it is present. Sourcing the file from inside a function would not fix
+# that — a `typeset -A` in the user's file would become function-local and the
+# table would read empty anyway — so the read happens at the TOP LEVEL of a
+# `zsh -f` that exists only to answer this one question. Every spelling a tenants
+# file uses (plain assignment, `typeset -A`, `typeset -gA`) then behaves alike,
+# and nothing the file does leaks into the caller's shell.
+#
+# WHAT THIS PATH CANNOT SEE, and the constraint it puts on a tenants file: that
+# fork has no functions and no unexported variables, so an assignment guarded by
+# one — `has_command jq && CLAUDE_TENANT_MACHINE_OWNED=( … )`, `$HOSTNAME` — works
+# in an interactive shell and reads EMPTY here, which is a fail-open the fork's
+# discarded stderr will not show you. A tenants file must be self-contained.
+#
+# Reached whenever the table is EMPTY — which is the snapshot case, but also an
+# ordinary shell whose tenants file owns no profile at all. Measured 1.7 ms a
+# call, so the cost is nothing; what matters is that the file is re-read once per
+# guarded command there, which is why it has to be silent and side-effect-free.
+claude-tenants-owner() {   # $1 = profile
+  local f="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+  [[ -r "$f" ]] || return 1
+  # The declarations mirror the top-level ones above: a tenants file may assign
+  # any of these as a bare `name=( … )`, and an associative table assigned into
+  # an undeclared name is a normal array whose lookup silently answers nothing.
+  whence -p zsh >/dev/null 2>&1 || return 1
+  # MARKED output, and the source's status ignored. Both are failure modes found
+  # by review, 2026-09-20: a tenants file ending in a false command (`[[ -n "$X" ]]`)
+  # made `|| exit 1` answer "no owner" and the guard passed a foreign profile
+  # through; a stray `print` in that file BECAME the owner, refusing every
+  # profile on the machine and naming the printed line as the owning machine.
+  # The top-level read at the head of this file ignores the status too, so the
+  # two paths now agree. stdin is closed: a file that reads would eat the
+  # caller's.
+  local line
+  line="$(command zsh -f -c '
+    typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+    source "$1"
+    print -r -- "__OWNER__${CLAUDE_TENANT_MACHINE_OWNED[$2]:-}"' \
+    tenants-owner "$f" "$1" </dev/null 2>/dev/null \
+    | command sed -n 's/^__OWNER__//p' | command tail -1)"
+  [[ -n "$line" ]] || return 1
+  print -r -- "$line"
+}
+
 # Is this profile OWNED BY ANOTHER MACHINE? Prints that machine's label, rc 0;
 # otherwise prints nothing, rc 1.
 #
@@ -519,34 +572,8 @@ _claude_profile_excluded() {
 # public functions and drops single-underscore ones, so an underscore name here
 # would make the guard fail open in exactly the population that caused the
 # incident — agent sessions — while stopping a human at a prompt. The name alone
-# is not enough: the snapshot carries no VARIABLES either, so the table has to be
-# loaded on demand (claude-tenants-load) or the function is present and blind.
-# Who owns this profile according to the tenants FILE, read in a shell of its own?
-#
-# The fork is the point. A Claude Code Bash-tool shell snapshot carries functions
-# but no variables (measured: 9,148 lines of functions beside a single `export
-# PATH=` line), so in an agent's shell the table is empty while the code that
-# reads it is present. Sourcing the file from inside a function would not fix
-# that — a `typeset -A` in the user's file would become function-local and the
-# table would read empty anyway — so the read happens at the TOP LEVEL of a
-# `zsh -f` that exists only to answer this one question. Every spelling a tenants
-# file uses (plain assignment, `typeset -A`, `typeset -gA`) then behaves alike,
-# and nothing the file does leaks into the caller's shell.
-#
-# Only reached when the table is empty, i.e. never in an interactive shell.
-claude-tenants-owner() {   # $1 = profile
-  local f="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
-  [[ -r "$f" ]] || return 1
-  # The declarations mirror the top-level ones above: a tenants file may assign
-  # any of these as a bare `name=( … )`, and an associative table assigned into
-  # an undeclared name is a normal array whose lookup silently answers nothing.
-  command zsh -f -c '
-    typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
-    source "$1" || exit 1
-    print -r -- "${CLAUDE_TENANT_MACHINE_OWNED[$2]:-}"' tenants-owner "$f" "$1" 2>/dev/null
-}
-
+# is not enough: the snapshot carries no VARIABLES either, so the table is read
+# from the file on demand (claude-tenants-owner, above) or this is present and blind.
 claude-profile-foreign() {
   [[ -n "$1" && -z "${CLAUDE_FOREIGN_PROFILE_OK:-}" ]] || return 1
   # An EMPTY table is not evidence of "no table": in a shell snapshot the data
@@ -572,9 +599,15 @@ claude-profile-foreign() {
 # spot: clauth's documented fallback for such a session is its active profile,
 # which is readable here, and "contested" is not rare — 235 of 689 entries on
 # this machine, 34%, measured 2026-09-20. Refusing a third of all resumes to
-# catch the rare foreign one would trade a real cost for a speculative save, and
-# clauth prompts on a TTY anyway. What no wrapper can see is the profile chosen
-# at that prompt, after this function has returned.
+# catch the rare foreign one would trade a real cost for a speculative save.
+#
+# KNOWN GAP, stated rather than papered over: on a TTY clauth prompts, so a human
+# still gets a say; in an agent's shell there is no TTY and no prompt, so an
+# unattributable resume proceeds on whatever clauth picks. Closing it means
+# reading clauth's active profile here and refusing on that — cheap, and a third
+# of all resumes wide. Left open deliberately; revisit if a foreign resume ever
+# actually happens. What no wrapper can see either way is the profile chosen at
+# that prompt, after this function has returned.
 claude-resume-profile() {
   local target="$1" id db
   [[ -n "$target" ]] || return 1

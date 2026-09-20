@@ -2014,9 +2014,9 @@ check "foreign: an unflagged resume onto an owned session is refused" "$RC" "3"
 # that one is the thing the guard exists to prevent, so it must not be the only
 # way out on offer.
 check "foreign: ...naming --profile as the way out, not the borrow"   "$(inout 'clauth resume --profile <a profile you own> s-owned')" "1"
+check "foreign: ...without the resume reaching the binary"           "$(clog 'resume')" "0"
 crun "clauth start fz"
 check "foreign: ...and that remedy appears on no other door"          "$(inout 'Resume it elsewhere')" "0"
-check "foreign: ...without the resume reaching the binary"           "$(clog 'resume')" "0"
 crun "clauth resume s-free"
 check "foreign: ...an unowned session still resumes"                 "$(clog 'resume s-free')" "1"
 crun "clauth resume s-contested"
@@ -2066,6 +2066,33 @@ for spelling in \
     crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
     check "foreign: a snapshot shell reads '${spelling%%;*}...' too" "$RC" "3"
 done
+# THE TABLE ITSELF, not a refusal. Under the regression this replaced — the file
+# sourced from inside a function, where a `typeset -A` becomes function-local —
+# every tenant table reads empty, and an unusable table WIDENS the pool to every
+# registered profile. No refusal row can see it: the empty table sends the guard
+# down the fork path, which refuses anyway. So this asserts the loaded table.
+printf '%s\n' 'typeset -A CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+run "print -r -- \"TABLE=\${#CLAUDE_TENANT_MACHINE_OWNED}\""
+check "foreign: the tenants file is sourced at TOP LEVEL, so it fills the table" "$(inout 'TABLE=1')" "1"
+
+# What the fork must tolerate in a tenants file, both found by review 2026-09-20.
+cat > "$FOREIGN_TENANTS" <<'ZTENANTS'
+CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" ); [[ -n "$UNSET_ON_PURPOSE" ]]
+ZTENANTS
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: a tenants file ENDING non-zero still answers"        "$RC" "3"
+printf '%s\n' 'print -r -- "tenants: loaded"; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start personal"
+check "foreign: and what it PRINTS is not mistaken for an owner"     "$(clog 'start personal')" "1"
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: ...while the real entry still refuses"               "$RC" "3"
+# DOCUMENTED LIMIT, pinned so it cannot change unnoticed: the fork is a bare
+# `zsh -f`, so an assignment guarded by a shell function reads empty there. The
+# file must be self-contained; this row is what says so out loud.
+printf '%s\n' 'has_command jq && CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: a file needing shell FUNCTIONS reads empty in the fork" "$(clog 'start fz')" "1"
+
 printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
 
 unset CLAUDE_TENANTS_FILE
