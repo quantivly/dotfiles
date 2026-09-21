@@ -266,11 +266,22 @@ def machines(ctx) -> tuple[list[dict], list[str]]:
     return rows, unavailable
 
 
-def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper=time.sleep) -> dict:
-    """Measure everything, settle finished lanes, write ``<state_dir>/census.json`` and return it."""
+def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper=time.sleep,
+           include_worktrees: bool = True) -> dict:
+    """Measure everything, settle finished lanes, write ``<state_dir>/census.json`` and return it.
+
+    ``include_worktrees=False`` skips the ``wt-gc`` subprocess entirely (it is the slow dimension —
+    a `gh` call per worktree) and reports ``"skipped:worktrees"`` in ``unavailable[]``, distinct from
+    the ``"worktrees"`` marker a failed call still uses: a reader must be able to tell "we asked and
+    it broke" from "we chose not to ask" (design §4.2).
+    """
     unavailable = list(DEFERRED)
     sess, u0 = sessions(proc, sample_seconds, sleeper)
-    us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner); wt, u3 = worktrees(ctx.runner)
+    us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner)
+    if include_worktrees:
+        wt, u3 = worktrees(ctx.runner)
+    else:
+        wt, u3 = [], ["skipped:worktrees"]
     ms, u4 = machines(ctx)
     unavailable += u0 + u1 + u2 + u3 + u4
     settle_finished(ctx, us, st, machines=ms)

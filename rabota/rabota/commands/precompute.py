@@ -28,7 +28,7 @@ def _default_steps():
             "plan": lambda ctx: run_plan(ctx),
             "auto": lambda ctx: run_apply(ctx, tier="auto", batch=None, confirmed=False, dry_run=ctx.dry_run),
             "rank": lambda ctx: run_rank(ctx),
-            "census": lambda ctx: gather(ctx, sample_seconds=2.0)}
+            "census": lambda ctx: gather(ctx, sample_seconds=2.0, include_worktrees=False)}
 
 
 def run_precompute(ctx: Context, steps=None) -> dict:

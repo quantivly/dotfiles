@@ -3,6 +3,7 @@ from pathlib import Path
 from rabota import census, context
 from rabota.runner import FakeRunner, Result
 from tests.test_remote import payload
+from tests.support import connection_is_closed
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -162,6 +163,38 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(census.units(FakeRunner([(["systemctl"], Result(1, "", "Failed to connect to bus"))])), ([], ["units"]))
         self.assertEqual(census.worktrees(FakeRunner([(["wt-gc"], Result(127, "", "not found"))])), ([], ["worktrees"]))
 
+    # F24: a cheap mode that skips the worktree dimension entirely — that is where the minute goes
+    # in the pre-compute chain (wt-gc shells out to `gh` per worktree).
+    def test_cheap_mode_makes_no_wt_gc_call(self):
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None, include_worktrees=False)
+        self.assertFalse(any(argv[0] == "wt-gc" for argv in self.runner.calls), self.runner.calls)
+
+    def test_cheap_mode_returns_empty_worktrees_with_skip_marker(self):
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None, include_worktrees=False)
+        self.assertEqual(c["worktrees"], [])
+        self.assertIn("skipped:worktrees", c["unavailable"])
+        self.assertNotIn("worktrees", c["unavailable"])   # the skip marker, never the failure marker
+
+    def test_default_mode_is_unchanged_still_calls_wt_gc_and_populates_worktrees(self):
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertTrue(any(argv[0] == "wt-gc" for argv in self.runner.calls), self.runner.calls)
+        self.assertEqual(c["worktrees"][0]["verdict"], "KEEP")
+        self.assertNotIn("skipped:worktrees", c["unavailable"])
+
+    def test_failed_wt_gc_in_default_mode_keeps_the_failure_marker_distinct_from_skip(self):
+        runner = FakeRunner([
+            (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
+            (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+            (["wt-gc", "--tsv"], Result(127, "", "not found")),
+            (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
+        ])
+        ctx = self.ctx
+        ctx.runner = runner
+        c = census.gather(ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertEqual(c["worktrees"], [])
+        self.assertIn("worktrees", c["unavailable"])
+        self.assertNotIn("skipped:worktrees", c["unavailable"])
+
     def test_settle_finished_reads_result_line(self):
         out = Path(self.tmp.name) / "out" / "smoke"; out.mkdir(parents=True)
         (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
@@ -174,6 +207,49 @@ class CensusTests(unittest.TestCase):
         row = self.ctx.store.get_lane("smoke")
         self.assertEqual((row["status"], row["cost_usd"], row["five_h_pct_at_end"]), ("done", 1.23, 41))
         self.assertIsNotNone(row["ended_at"])
+
+    def test_cli_no_worktrees_flag_produces_the_cheap_shape(self):
+        # F17: commands/census.py's _run() builds its own Context and returns only the result
+        # dict, never the context — so a caller outside cli.main's track_contexts() (this test)
+        # is the one who has to close whatever it opens, or the Store's sqlite3 connection leaks
+        # until GC finalizes it, which is exactly the ResourceWarning-under-CI race this epic has
+        # already paid a round for. track_contexts() catches it here; the store never fully opens
+        # in this particular case (no lane rows to settle), so closing is a formality made explicit.
+        from rabota.commands import census as cmd
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(self.tmp.name) / "s2"), text=False,
+                                dry_run=False, sample_seconds=0.01, no_worktrees=True)
+        runner = FakeRunner([
+            (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
+            (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+            (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
+        ])
+        with context.track_contexts() as opened:
+            c = cmd._run(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        for c2 in opened:
+            c2.close()
+        self.assertTrue(opened, "the test must actually observe a Context to prove the close matters")
+        self.assertTrue(all(connection_is_closed(c2._store.conn) for c2 in opened if c2._store is not None))
+        self.assertEqual(c["worktrees"], [])
+        self.assertIn("skipped:worktrees", c["unavailable"])
+        self.assertFalse(any(argv[0] == "wt-gc" for argv in runner.calls), runner.calls)
+
+    def test_cli_plain_census_still_calls_wt_gc(self):
+        from rabota.commands import census as cmd
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(self.tmp.name) / "s3"), text=False,
+                                dry_run=False, sample_seconds=0.01, no_worktrees=False)
+        runner = FakeRunner([
+            (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
+            (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+            (["wt-gc", "--tsv"], Result(0, (FIX / "census" / "wt_gc.tsv").read_text(), "")),
+            (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
+        ])
+        with context.track_contexts() as opened:
+            c = cmd._run(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        for c2 in opened:
+            c2.close()
+        self.assertTrue(all(connection_is_closed(c2._store.conn) for c2 in opened if c2._store is not None))
+        self.assertNotIn("skipped:worktrees", c["unavailable"])
+        self.assertTrue(any(argv[0] == "wt-gc" for argv in runner.calls), runner.calls)
 
     def test_settle_leaves_live_units_and_streams_without_a_result_alone(self):
         out = Path(self.tmp.name) / "out" / "live"; out.mkdir(parents=True)
