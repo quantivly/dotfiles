@@ -604,3 +604,35 @@ class CrossMachineWiringTests(unittest.TestCase):
         report = doctor.run_doctor(self.make_ctx(self.base(), tenant="toysim"))
         self.assertEqual(report["slice_headroom"], [])
         self.assertEqual(report["remote_seat"], [])
+
+
+class FetchedAtTests(unittest.TestCase):
+    """profileFetchedAt is a millisecond epoch, not the ISO string its name implies."""
+
+    def test_the_measured_millisecond_epoch_renders_as_a_date(self):
+        # Read off dev 2026-09-21. Every hermetic row here fed an ISO string, because that is the
+        # shape the field NAME implies — the live run is what showed "fetched 1789895607090".
+        self.assertEqual(doctor._fetched_at("1789895607090"), "2026-09-20T09:13:27Z")
+        self.assertEqual(doctor._fetched_at(1789895607090), "2026-09-20T09:13:27Z")
+
+    def test_a_seconds_epoch_is_not_scaled(self):
+        self.assertEqual(doctor._fetched_at("1789895607"), "2026-09-20T09:13:27Z")
+
+    def test_an_iso_string_passes_through(self):
+        self.assertEqual(doctor._fetched_at("2026-09-20T15:00:00Z"), "2026-09-20T15:00:00Z")
+
+    def test_anything_unrenderable_is_unknown_not_a_raw_number(self):
+        for value in (None, "", "   ", [], {}, "9" * 40):
+            with self.subTest(value=value):
+                self.assertIn(doctor._fetched_at(value), ("unknown",))
+
+    def test_the_row_carries_the_rendered_date_not_the_epoch(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        runner = FakeRunner([(["ssh"], account_result(fetched="1789895607090"))])
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner,
+                                             env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        detail = doctor.remote_seat_identity(ctx, clauth_tree(self))[0][2]
+        self.assertIn("2026-09-20T09:13:27Z", detail)
+        self.assertNotIn("1789895607090", detail)

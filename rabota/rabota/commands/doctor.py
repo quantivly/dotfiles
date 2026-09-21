@@ -13,6 +13,7 @@ hand" before they were checks:
 * ``remote_seat_identity`` — the seat ``[machines.<m>].profile`` DECLARES against the account that
   machine's own login actually bills. A mismatch spends a window the gate never metered.
 """
+import datetime
 import hashlib
 import json
 import re
@@ -256,6 +257,33 @@ _ACCOUNT_PY = (
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _fetched_at(value) -> str:
+    """``profileFetchedAt`` rendered as something a reader can act on.
+
+    Claude Code writes that field as a MILLISECOND EPOCH, not the ISO string its name suggests:
+    measured on dev 2026-09-21 as ``1789895607090`` (= 2026-09-20T09:13:27Z). Found only by
+    running the check against the real machine — every hermetic row fed it an ISO string, because
+    that is the shape the field name implies, and the live row read "fetched 1789895607090".
+
+    Seconds and milliseconds are told apart by magnitude: a seconds epoch would have to be in the
+    year 5138 to pass 1e11. Anything unrenderable becomes "unknown" rather than a number nobody
+    can read — a timestamp this cannot parse is not a timestamp, and it is only ever context on a
+    row whose verdict was already decided.
+    """
+    if isinstance(value, str) and not value.strip().isdigit():
+        return value.strip() or "unknown"
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if n > 1e11:
+        n /= 1000.0
+    try:
+        return datetime.datetime.fromtimestamp(n, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return "unknown"
+
+
 def _declared_account_digest(root: Path, profile: str) -> str:
     """sha256 of the account uuid clauth records for ``profile``. Raises on anything unreadable."""
     value = json.loads((root / profile / "account_id.json").read_text())
@@ -308,7 +336,7 @@ def remote_seat_identity(ctx, clauth_profiles=None) -> list[tuple[str, bool, str
                              timeout=REMOTE_TIMEOUT)
         lines = (res.out or "").splitlines()
         got = lines[0].strip() if lines else ""
-        fetched = lines[1].strip() if len(lines) > 1 else "unknown"
+        fetched = _fetched_at(lines[1].strip() if len(lines) > 1 else "unknown")
         if not res.ok or not _HEX64.match(got):
             rows.append((name, False, f"could not read which account {name!r}'s own login records "
                                       f"(exit {res.code}: {(res.err or res.out).strip()[:160] or 'no digest'}), "
