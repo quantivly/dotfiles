@@ -737,9 +737,8 @@ be present and blind in precisely the sessions that spent the seat.
   exclusion has a row, since "prints twice" and "prints once" are indistinguishable from an exit
   code. The broader lesson is the one this file keeps paying for: **a comment describing what a
   line does is not evidence the line is reachable.**
-- **Known duplication, out of scope:** rabota's Python reads a second copy of the same fact,
-  `[machines.dev].profile` in `~/.dotfiles-local/rabota/tenants/quantivly.toml`. The
-  remote-lanes design already calls that a reliability risk; unifying it is its own change.
+- **The duplication this named is now closed (DO-665).** rabota kept a second copy of the same
+  fact as `[machines.<m>].profile`; it asks instead. See below.
 
 State table: `scripts/test-claude-pick.sh` (452 → 476). **19 mutants, 18 deaths**, each dry-run
 for applicability first. What the sweep cost, written down because it is the part worth reusing:
@@ -764,3 +763,136 @@ for applicability first. What the sweep cost, written down because it is the par
   and every `return 1` path either sets both globals or leaves both empty — which is true only
   *because* the per-call reset is there. Two independent analyses failed to construct a
   divergence. Recorded rather than papered over with a row that would assert nothing.
+
+
+## The machine registry (DO-665)
+
+**"Which machine owns which clauth seat" was written down twice**, in two files, two formats and
+two languages: `CLAUDE_TENANT_MACHINE_OWNED` in the tenants file (profile → a human label) and
+`[machines.<m>].profile` in rabota's tenant TOML (machine id → profile). Nothing checked they
+agreed, and divergence is silent in both directions — reassign a seat in one and the other goes
+on gating the seat that machine no longer bills.
+
+**They were not redundant copies, they were inverse mappings in different vocabularies.** Nothing
+connected the label `"dev (EC2)"` to the machine id `dev` except a person reading both files, so
+neither could be derived from the other. That is why the fix adds `CLAUDE_TENANT_MACHINE_ID`
+(profile → machine id) beside the existing table rather than deleting one side: the missing link
+was the machine id, and once it is written down the tenants file can answer both questions.
+
+**Which copy survived, and why that direction is the whole decision.** A stale copy on the
+dotfiles side fails **open and silently**: `claude-profile-foreign` reads an empty table as "no
+machine owns anything", and the DO-632 / DO-641 guards simply stop refusing with nothing said.
+rabota fails **loudly** — a missing seat is a `Refused` naming the file. So the hand-edited copy
+stays where staleness would not be noticed, and the loud side asks. Choosing the direction by
+"which file feels canonical" would have put the generated artefact on the silent side.
+
+**And nothing is generated.** A rendered file is the same defect one level down, so
+`scripts/machines-render` prints on demand and rabota shells out to it at config load — the
+same boundary `rabota doctor` already crosses to reach `claude-pick`. One `zsh -f` fork per load.
+The fork is `claude-tenants-owner`'s exactly: a bare shell that declares the arrays, sources the
+tenants file **at top level** and prints, so a plain assignment, `typeset -A` and `typeset -gA`
+all behave alike.
+
+- **A fault is never an empty registry.** An empty registry is a *real* answer — a modular
+  adopter owns no machine, and so does a file declaring owners but no machine ids — while every
+  other way of ending up with nothing exits non-zero. Conflating the two turns "the renderer is
+  missing" into "no machine has a seat", which reads as a configuration choice and disables every
+  seat gate without a word. **This took three cuts to get right, and the honest summary is that
+  enumerating causes did not work; only a class-wide guard did.**
+- **The renderer cross-checks the two halves against each other**: a profile owned but unnamed, a
+  machine id for a seat nobody owns, or two profiles claiming one machine are each exit 1 naming
+  the offender. `--check` validates and prints nothing, so it is usable from a hook.
+- **A leftover `profile` key in a `[machines.<m>]` table is refused, not ignored.** A second copy
+  that merely loses is still a second copy, and the losing one is what somebody edits.
+- **A label is data.** The document is built by `jq` from typed pieces, never by concatenation:
+  one apostrophe in `"Zvi's box"` is the difference between a document and a syntax error, and a
+  `printf` implementation passes every other row.
+- **Deliberately not moved:** `ssh`, `repos`, `state_dir`. They are machine-ish but they are not
+  *duplicated*, so moving them buys tidiness and costs a migration across `remote.py`, `lane.py`
+  and `census.py`. Robustness here comes from closing divergence, and there is none there.
+
+**What a cold review found in the first cut, because it is the failure this file keeps paying
+for.** The renderer forked `zsh -f`, sourced the tenants file and ignored the fork's status — and
+a file that could not be sourced returned `{}` with **exit 0**, which `--check` passed. One
+unbalanced quote in the canonical file would have disabled rabota's seat gate while the *other*
+reader of that same file stopped refusing, silently: both halves of the pair this change exists
+to prevent, at once. Three separate causes, each now its own row:
+
+- **A parse error.** The discriminator is `zsh -n` before sourcing, and it has to be — a `source`
+  that fails to parse *returns* to the forked shell, which then runs the loops over empty tables
+  and prints any completion sentinel quite happily (measured; the first proposed fix was a
+  sentinel and it did not work). The source's *status* cannot serve either: it is the status of
+  the file's last command, which is why `claude-tenants-owner` ignores it.
+- **A path that is not a regular file.** A directory passes both `-e` and `-r`; `-f` is the test.
+- **A subscript assignment to another table.** The fork declared only the two machine tables, so
+  `CLAUDE_TENANT_POOL[work]=…` — valid everywhere else, because `zshrc.herdr` declares that name
+  `-gA` before sourcing — raised *"assignment to invalid subscript range"* and aborted the source
+  at that line. The fork now declares every table `zshrc.herdr` does, and `CLAUDE_TENANT_MACHINE_ID`
+  was added to both `-gA` declarations there for the same reason.
+
+**A second review found the first fix covered only the PARSE subset**, and three more shapes
+reached `{}` with exit 0 — each of which `zsh -n` passes, the sentinel survives, and the source's
+status cannot distinguish:
+
+- **CRLF line endings.** Every line becomes `ARR=( … ) ^M`: a *command-local* assignment for a
+  command named `^M` that does not exist. Valid syntax, and no editor shows it.
+- **A UTF-8 BOM**, which makes line 1 a command with an invisible name.
+- **A subscript assignment to a table the fork does not pre-declare** — the original defect again,
+  for any `CLAUDE_TENANT_*` name added after the list was written.
+
+So the guard is the **class**, not a fourth special case: the fork does nothing but declare,
+source and print, so **any** byte on its stderr came from the tenants file and is a fault.
+Measured 0 bytes for the real file, for a file ending in a false command (which must keep
+working), and for every fixture in the state table. The pre-declaration list survives as a
+convenience that avoids refusing a file that is fine, and a row cross-checks it against
+`zshrc.herdr`'s in both directions — it is a third copy of that list, in a change whose thesis is
+that an uncross-checked copy is the defect.
+
+**What still cannot be detected, stated rather than implied:** a tenants file that ends early
+*silently* — a `return`, or a guard like `has_command jq && TABLE=( … )` — parses, runs cleanly,
+prints nothing, and declares nothing. That is what the file's self-contained contract forbids in
+prose, and no reader can tell it from an honestly empty file.
+
+**And declaring no machine ids at all is "not adopted", not drift** — it is every pre-DO-665
+tenants file. Refusing it would make every rabota command exit 2, including `rabota doctor`, the
+tool you would reach for to find out why. A *partial* pair is still refused.
+
+State tables: `scripts/test-machines-render.sh` (65, new CI job `machines-render-test`) and
+`rabota/tests/test_machines.py` (15 of the suite's 422 → 437). **28 mutants, 27 deaths**, each
+dry-run for applicability — including the stderr guard discarded, the parse check removed, `-f`
+weakened to `-e`, the dangling-symlink test removed, the fork declaring only the two machine
+tables again, an empty `_MACHINE_ID` treated as drift, a tab accepted in a label and in a profile
+name, each cross-check dropped, faults computed but never refusing, the label concatenated rather
+than typed, and a Python-side failure returning an empty registry.
+
+**Two mutants survived the first sweep**, both because the rows asserted an exit code where two
+different guards produce the same one: a directory fails `zsh -n` as well as `-f`, and a rejected
+label is dropped from the tables so the cross-check refuses it anyway. Asserting the *message*
+killed both. A row that cannot distinguish the two answers is decoration however carefully it is
+worded.
+
+**A third pass, this one adversarial about the ROWS rather than the code, found 34 surviving
+mutants — none of them a wrong answer, all of them unasserted behaviour.** Two were worth the
+whole exercise:
+
+- **`config.load` could swallow a renderer failure into `{}` and pass all 436 rabota rows.** Every
+  row proving the guarantee lived *inside* `machines.registry`; none sat at the seam where such a
+  fallback would actually be written, and `except errors.RabotaError: seats_by_machine = {}` is
+  exactly what a well-meaning later edit looks like. A row now asserts the exception reaches the
+  caller.
+- **The `__DONE__` sentinel looked like dead weight** — four mutants could delete or neuter it
+  with the suite green — because every input the suite offered was intercepted by an earlier
+  guard. It is not dead: a tenants file that kills its own shell produces no stderr and no
+  sentinel, and with the check disabled that fixture renders `{}` and exits 0. The guard was
+  unfixtured, not useless, and its message was describing causes that now fail earlier.
+
+The rest were promises without rows: "a tab **or a newline**" with only a tab fixtured, an
+identical check in the second table exercised in neither, a pre-declaration list where one of
+seven names was covered, refusals carrying `$TENANTS` that no row read, and a two-argument
+invocation. Each now has a row. **A row that names a behaviour is not a row that tests it.**
+
+**One mutant is EQUIVALENT and is left alive deliberately:** restoring `val="${key#*\t}"` for a
+marker line with no tab. It is unreachable while the key and value checks stand, since a marker
+line then always carries exactly one tab — but it is kept as the second line of defence for the
+day someone removes the key check, which is the change that made that branch reachable in the
+first place.

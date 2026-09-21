@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from rabota import errors
+from rabota import machines as machines_mod
 
 DEFAULT_BASE = Path("~/.dotfiles-local/rabota")
 
@@ -60,7 +61,12 @@ class Machine:
     tenants: list[str]
     repos: dict[str, str] = field(default_factory=dict)
     state_dir: str = "~/.local/state/rabota"
-    profile: str | None = None      # the clauth seat a headless lane on this machine bills
+    # FILLED FROM THE REGISTRY, never from this file (DO-665). The seat a machine bills is
+    # declared once, in the tenants file's CLAUDE_TENANT_MACHINE_OWNED / _MACHINE_ID pair, and
+    # read through scripts/machines-render. A `profile` key left in a [machines.<m>] table is
+    # a REFUSAL rather than an override -- see _tenant -- because a second copy that merely loses
+    # is still a second copy, and the losing one is the one somebody will edit.
+    profile: str | None = None
 
 
 @dataclass
@@ -80,7 +86,7 @@ class Tenant:
     budget: BudgetThresholds = field(default_factory=BudgetThresholds)
     lanes: LaneDefaults = field(default_factory=LaneDefaults)
     machines: dict[str, Machine] = field(default_factory=dict)
-    seats: dict[str, str] = field(default_factory=dict)   # {"local": "<clauth profile>"}; dev seats are [machines.<m>].profile
+    seats: dict[str, str] = field(default_factory=dict)   # {"local": "<clauth profile>"}; a REMOTE machine's seat comes from the registry (DO-665), not from here
     excludes: list[Path] = field(default_factory=list)
 
 
@@ -97,8 +103,20 @@ def _dc(cls, data: dict):
     return cls(**{k: v for k, v in data.items() if k in known})
 
 
-def _tenant(name: str, d: dict) -> Tenant:
-    machines = {m: Machine(name=m, **v) for m, v in d.get("machines", {}).items()}
+def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
+            path: Path | None = None) -> Tenant:
+    seats_by_machine = seats_by_machine or {}
+    machines = {}
+    for m, v in d.get("machines", {}).items():
+        if "profile" in v:
+            raise errors.Usage(
+                f"{path or f'tenants/{name}.toml'}: "
+                f"[machines.{m}] declares profile = {v['profile']!r}, which moved to the tenants "
+                f"file in DO-665: set CLAUDE_TENANT_MACHINE_OWNED and CLAUDE_TENANT_MACHINE_ID "
+                f"there and delete this key. Two copies of which seat a machine bills is the "
+                f"defect, and a losing copy is still the one somebody edits")
+        machines[m] = Machine(name=m, **v)
+        machines[m].profile = seats_by_machine.get(m)
     return Tenant(
         name=name, root=_p(d["root"]), state_dir=_p(d["state_dir"]),
         gh_config_dir=_p(d.get("gh_config_dir")), gh_login=d.get("gh_login"),
@@ -124,7 +142,7 @@ def _toml(path: Path) -> dict:
         raise errors.Usage(f"malformed TOML in {path}: {e}") from None
 
 
-def load(base: Path | None = None) -> Config:
+def load(base: Path | None = None, seats_by_machine: dict[str, str] | None = None) -> Config:
     """Load ``config.toml`` and every ``tenants/*.toml`` under ``base`` (default ``~/.dotfiles-local/rabota``).
 
     Every fault in the files themselves — malformed TOML, a tenant missing a required
@@ -136,6 +154,12 @@ def load(base: Path | None = None) -> Config:
     if not main.exists():
         raise errors.RabotaError(f"missing config: {main}")
     top = _toml(main)
+    # ASKED ONCE PER LOAD, and never cached to disk: a rendered copy is the duplication this
+    # replaced, one level down. A fault raises out of machines.registry rather than yielding an
+    # empty mapping, so "the renderer is missing" can never arrive as "no machine has a seat".
+    # The parameter is the test seam, the same shape config.load already uses for `base`.
+    if seats_by_machine is None:
+        seats_by_machine = machines_mod.seats()
     routes = []
     for r in top.get("route", []):
         try:
@@ -145,7 +169,7 @@ def load(base: Path | None = None) -> Config:
     tenants = {}
     for path in sorted((base / "tenants").glob("*.toml")):
         try:
-            tenants[path.stem] = _tenant(path.stem, _toml(path))
+            tenants[path.stem] = _tenant(path.stem, _toml(path), seats_by_machine, path)
         except KeyError as e:
             raise errors.Usage(f"{path}: missing required key {e.args[0]!r}") from None
         except TypeError as e:   # a [machines.<name>] table missing a Machine field

@@ -17,7 +17,9 @@ WORK_TENANT = "quantivly"
 def seat_for(tenant, machine: str, override: str | None = None) -> str:
     """The seat a lane for ``tenant`` on ``machine`` must use; refuses a seat the tenant rule forbids.
 
-    ``local`` reads ``[seats] local``; any other machine reads ``[machines.<m>].profile``. An
+    ``local`` reads ``[seats] local``; any other machine reads the MACHINE REGISTRY, which
+    ``config.load`` fills from the tenants file through ``scripts/machines-render`` (DO-665) —
+    not from this tenant's TOML, where a leftover ``profile`` key is now refused outright. An
     ``override`` (``--seat``) replaces the lookup but is still checked against the rule.
     """
     if override:
@@ -28,8 +30,10 @@ def seat_for(tenant, machine: str, override: str | None = None) -> str:
         m = tenant.machines.get(machine)
         seat = m.profile if m else None
     if not seat:
-        raise errors.Refused(f"no seat configured for tenant {tenant.name!r} on machine {machine!r} "
-                             f"([seats] local / [machines.{machine}].profile in tenants/{tenant.name}.toml)")
+        where = (f"[seats] local in tenants/{tenant.name}.toml" if machine == "local" else
+                 f"CLAUDE_TENANT_MACHINE_OWNED + CLAUDE_TENANT_MACHINE_ID for machine "
+                 f"{machine!r} in the tenants file (see scripts/machines-render)")
+        raise errors.Refused(f"no seat configured for tenant {tenant.name!r} on machine {machine!r} ({where})")
     if seat in CONSOLE_SEATS:
         raise errors.Refused(f"seat {seat} is the interactive console and is never used headless")
     is_work = tenant.name == WORK_TENANT

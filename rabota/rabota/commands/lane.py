@@ -186,7 +186,7 @@ def resolve_remote(ctx, machine) -> dict:
 
     Decision (2026-09-20, Zvi): a remote lane authenticates with the TARGET MACHINE'S OWN login
     (spec §4.2: "the laptop's monitoring grant reports what dev's own login would… dev never
-    needs clauth"), never a per-seat account dir — ``[machines.<m>].profile`` only DECLARES the
+    needs clauth"), never a per-seat account dir — the machine registry only DECLARES the
     seat a machine's usage bills, for the laptop's own budget gate. This means the seat is
     TRUSTED rather than ENFORCED on a remote machine — ``rabota doctor`` is where that gets
     asserted (a later task).
@@ -249,7 +249,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     form prints an absolute, resolved path too) — every configured path is home-relative and this
     process's home is never the remote's.
 
-    A remote machine authenticates with its OWN login; ``[machines.<m>].profile`` only declares
+    A remote machine authenticates with its OWN login; the machine registry only declares
     which seat that bills, for the laptop's budget gate. So a ``--seat`` override that disagrees
     with the declared profile is refused here, before any ssh call — passing it through would
     meter and record a seat that is not the one actually billing the work.

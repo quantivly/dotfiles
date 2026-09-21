@@ -10,7 +10,7 @@ hand" before they were checks:
 * ``slice_headroom`` — the admission cap (``budget.max_lanes_local`` x ``lanes.memory_max``, both
   on the laptop) against the cgroup cap (``agents.slice``'s ``MemoryMax``, on the machine).
   Nothing else compares them, and ``budget`` never reads the slice.
-* ``remote_seat_identity`` — the seat ``[machines.<m>].profile`` DECLARES against the account that
+* ``remote_seat_identity`` — the seat the MACHINE REGISTRY declares against the account that
   machine's own login actually bills. A mismatch spends a window the gate never metered.
 """
 import datetime
@@ -48,7 +48,7 @@ def seat_cache_age(ctx, max_age_s: int = 600) -> list[tuple[str, bool, str]]:
     stops polling, the gate goes unmeasured and dev lanes refuse even though dev is fine. That
     coupling is invisible from either machine, so it is asserted rather than assumed.
 
-    This row is about CACHE FRESHNESS only. Whether the seat ``[machines.<m>].profile`` declares
+    This row is about CACHE FRESHNESS only. Whether the seat the machine registry declares
     is the account that machine actually bills is a different question, answered by
     ``remote_seat_identity`` — which emits a row per seated machine unconditionally, pass or fail,
     so the question is never silently unanswered. Until 2026-09-21 every row here carried a "NOT
@@ -293,7 +293,7 @@ def _declared_account_digest(root: Path, profile: str) -> str:
 
 
 def remote_seat_identity(ctx, clauth_profiles=None) -> list[tuple[str, bool, str]]:
-    """Per machine with a seat: is ``[machines.<m>].profile`` the account that machine really bills?
+    """Per machine with a seat: is the seat the registry declares the account that machine really bills?
 
     The gate meters the DECLARED seat from this laptop's clauth grant, and the lane authenticates
     with the TARGET machine's own login (ruling F-P, 2026-09-20). Nothing connected the two, so a
@@ -344,7 +344,7 @@ def remote_seat_identity(ctx, clauth_profiles=None) -> list[tuple[str, bool, str
             continue
         if got != want:
             rows.append((name, False, f"MISMATCH: {name!r}'s own login is NOT declared seat "
-                                      f"{m.profile!r}; {leak}. Either fix [machines.{name}].profile "
+                                      f"{m.profile!r}; {leak}. Either fix the tenants file's entry for {name!r} "
                                       f"in tenants/{ctx.tenant.name}.toml or log {name!r} into the "
                                       f"declared account. (Record fetched {fetched}.)"))
             continue
