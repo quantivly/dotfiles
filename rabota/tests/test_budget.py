@@ -1,4 +1,4 @@
-import argparse, json, tempfile, unittest
+import argparse, datetime, json, tempfile, unittest
 from pathlib import Path
 from rabota import budget, context, errors
 from rabota.config import BudgetThresholds
@@ -194,3 +194,58 @@ class MachineDimensionTests(unittest.TestCase):
                                      {"name": "rabota-lane-b.service", "state": "active", "machine": "dev"}])
         b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
         self.assertEqual(b["allowed_new_lanes"], 1)
+
+
+class CensusFreshnessTests(MachineDimensionTests):
+    def test_a_stale_census_refuses_rather_than_granting_room(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01T00:00:00Z"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev", max_census_age_s=900)
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_census_with_no_timestamp_refuses(self):
+        c = census_with(dev=DEV_IDLE); c.pop("at", None)
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+
+    def test_a_stale_census_still_surfaces_what_it_could_not_measure(self):
+        # The stale path must not report LESS than the fresh path for the same file: a dimension
+        # the census itself declared unmeasured has to stay named, or a reader concludes it was
+        # fine when nothing ever looked.
+        c = census_with(dev=DEV_IDLE)
+        c["at"] = "2020-01-01T00:00:00Z"
+        c["unavailable"] = ["deferred:sol", "seat:quantivly-0:stale"]
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        for expected in ("machine", "counts", "deferred:sol", "seat:quantivly-0:stale"):
+            self.assertIn(expected, b["unavailable"])
+
+    def test_a_naive_timestamp_refuses_rather_than_raising(self):
+        # fromisoformat happily parses a string with no offset into a NAIVE datetime; subtracting
+        # that from an aware "now" raises TypeError, not ValueError. Must return, not raise.
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01T00:00:00"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_bare_date_refuses_rather_than_raising(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_an_unparseable_timestamp_refuses(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "not-a-timestamp"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_future_timestamp_refuses(self):
+        # Clock skew, not staleness: a census claiming to be from the future is exactly as
+        # unusable as one from too far in the past, and the 0 <= lower bound is what catches it.
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1)
+        c = census_with(dev=DEV_IDLE)
+        c["at"] = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)

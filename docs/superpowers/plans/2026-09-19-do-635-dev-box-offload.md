@@ -88,10 +88,17 @@ Laptop side: `herdr machine list` has **`dev (EC2)` enabled**. `herdr --machine 
 
 - **What dev has:** §2. Do not run the bootstrap; do Parts A–B.
 - **Which lanes move:**
-  - **Move** (decision 3): quantivly long builds and tests (hub, sre-core, platform), review/evaluate lanes, and attended sessions that mostly run on their own. **All of it arrives as a herdr session** (`dev-spawn`, Part D), never as a bare-ssh `claude -p` lane — corrected 2026-09-20 (DO-649), because `agents.slice` can only account pane-descended processes, so a bare-ssh lane would run outside the budget this plan gives dev.
+  - **Move** (decision 3): quantivly long builds and tests (hub, sre-core, platform), review/evaluate lanes, and attended sessions that mostly run on their own. Attended work arrives as a herdr
+    session (`dev-spawn`, Part D), never as a bare-ssh `claude -p` lane outside any budget —
+    corrected 2026-09-20 (DO-649). **Superseded in turn, same day:** headless work now also
+    reaches dev, through a door DO-649 did not anticipate — `rabota lane recipe --machine dev
+    --run` (`docs/superpowers/plans/2026-09-20-remote-lanes.md`), whose `ssh … systemd-run` joins
+    `agents.slice` with an explicit `--slice=agents.slice`, so it is accounted without going
+    through a herdr pane at all. Measured 2026-09-20: two lanes landed under
+    `agents.slice/rabota-lane-…` with `MemoryMax=6442450944`.
   - **Stay:** toysim and personal; the quantivly-3 console; anything needing the local browser/GUI (chrome-devtools MCP) or laptop files (`~/.dotfiles-local`, `~/toysim`); work that tests this laptop's live herdr, systemd, GNOME or backup config.
 - **Repo, worktree and PRs:** dev's own `~/quantivly/<repo>` checkouts; worktrees cut there by herdr-draft (or rabota). Missing repos cloned over HTTPS. Push and `gh pr create` go through gh as `zvi-quantivly`, with commits signed by dev's registered key. No deploy key, no agent.
-- **How the laptop drives dev:** herdr's native machine view, not nested tmux (F12 loses the laptop's agent detection and notifications). Agents use `dev-spawn` (Part D), and `ssh dev herdr …` to inspect.
+- **How the laptop drives dev:** herdr's native machine view, not nested tmux (F12 loses the laptop's agent detection and notifications). **Not `dev-spawn`** — corrected 2026-09-20: that script was never built (DO-642 was rescoped away from it). Attended sessions go through herdr-draft's popup in dev's machine workspace; headless lanes through `rabota lane recipe --machine dev --run`. `ssh dev herdr …` to inspect either. `docs/HERDR_GUIDE.md` §9 covers both doors as built.
 - **quantivly-0 and the pool:** stays pinned to dev. An exhausted laptop quantivly pool keeps its designed behaviour: interactive sessions proceed on the least-bad member, `hspawn`/`--strict` refuse. The remedy is to run the work on dev, never to widen the pool. Part C closes the leak.
 
 ## 5. Issues to file (DO team; after approval, with Zvi's OK)
@@ -239,7 +246,7 @@ set -euo pipefail
 d="$HOME/.config/systemd/user"
 cat > "$d/agents.slice" <<'EOF'
 [Unit]
-Description=herdr panes on this host (DO-635)
+Description=herdr panes and rabota lanes on this host (DO-635)
 [Slice]
 MemoryHigh=8G
 MemoryMax=10G
@@ -476,6 +483,15 @@ Then remove at least the added bytes elsewhere. Proposed: **move** the Tmux sect
 ---
 
 ## Part D — `dev-spawn`: the one door agents use to start sessions on dev
+
+> **Superseded in part, 2026-09-20, by
+> [`docs/superpowers/plans/2026-09-20-remote-lanes.md`](2026-09-20-remote-lanes.md).** This Part
+> was written when "the one door" had to cover headless work too, because nothing else could join
+> `agents.slice`. It no longer does: headless lanes go through `rabota lane recipe --machine dev
+> --run`, whose `systemd-run` joins the slice directly with an explicit `--slice=agents.slice`
+> (measured working, two lanes, 2026-09-20) — not through `dev-spawn` or a herdr pane at all.
+> `dev-spawn` stays the door for **attended** sessions only (Task D2's `herdr-draft create`); its
+> tasks below are unaffected. `docs/HERDR_GUIDE.md` §9 documents both doors.
 
 A raw allow rule on `ssh dev herdr-draft create:*` is not narrow: the remote shell re-parses its
 arguments, so `\;` in an argument becomes a second remote command. `dev-spawn` validates
