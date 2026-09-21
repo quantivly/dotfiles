@@ -1526,6 +1526,247 @@ check "...and a real one does" "$r" "written"
 
 #-----------------------------------------------------------------------------
 echo
+echo "=== the last resort must not take a seat another machine owns (DO-632) ==="
+#
+# The fallback exists so a session gets an ACCOUNT rather than the shared global
+# credential, and it hands out clauth's active profile — which until DO-632
+# consulted nothing. On 2026-09-19 that gave this laptop `personal-1`, a seat
+# nanoclaw owns, because the work pool was unusable; the two machines are two
+# independent holders of one grant, and they log each other out.
+#
+# REACHING THE FALLBACK AT ALL is the fixture's whole difficulty: a1 must be
+# REGISTERED (or the pick is exit 5, no-profiles) while nothing in the pool is
+# usable (or the pick never gets this far). A pool naming a profile that does
+# not exist is the smallest way to be in both states at once.
+fb_home() {   # $1 = label, $2 = active profile
+    new_home "$1"
+    mkprof a1 '{"five_hour":{"utilization":10.0}}'
+    printf '{"active_profile":"%s"}\n' "$2" > "$FHOME/.clauth/status.json"
+}
+FB_POOL='CLAUDE_TENANT_POOL=( t1 "zz" )'
+FB_OWNED='CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )'
+
+# One of the picker's arrays, after a pick that was allowed to fail.
+pickarr() {   # $1 = prelude, $2 = tenant, $3 = array name -> one entry per line
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' 0 0 >/dev/null 2>&1
+      print -rl -- \"\${${3}[@]}\"" 2>/dev/null
+}
+
+# Everything a pick wrote to STDERR. Separate from pickarr() because the two
+# answer different questions: an array is what a caller may PRINT, stderr is what
+# the picker printed for itself, and a guard that fails by emitting a shell error
+# is only visible in the second.
+pickerr() {   # $1 = prelude, $2 = tenant -> stderr
+    { zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' 0 0" >/dev/null; } 2>&1
+}
+
+# One of the picker's SCALARS. pickarr() cannot serve here: `${name[@]}` on a
+# scalar subscripts its characters in zsh, so a reason would come back as a
+# stream of letters and the row would be about nothing.
+pickvar() {   # $1 = prelude, $2 = tenant, $3 = variable name -> its value
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' 0 0 >/dev/null 2>&1
+      print -r -- \"\${${3}}\"" 2>/dev/null
+}
+
+# THE CONTROL COMES FIRST, and it is the row that makes the next one mean
+# something: the fix must be a skip, not a deletion. Without this, "the fallback
+# no longer hands out a1" passes just as well for a fallback that hands out
+# nothing at all, which is the one outcome DO-632 must not produce.
+fb_home fb1 a1
+check "the last resort still takes clauth's active account this machine may use" \
+      "$(pfd "$FB_POOL" '' t1 0)" "0:a1:fallback:fallback"
+
+fb_home fb2 a1
+check "...but never one another machine owns" \
+      "$(pfd "$FB_POOL; $FB_OWNED" '' t1 0)" "2::unusable:"
+
+# LOUD, or the skip trades a visible wrong account for an invisible one. The
+# session lands on the shared global credential (claude()) or is refused
+# (hspawn, --strict), and both callers print every warning.
+fbw="$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings)"
+check "...saying so exactly once"      "$(printf '%s\n' "$fbw" | grep -c 'last resort declined')" "1"
+check "...naming the seat"             "$(printf '%s\n' "$fbw" | grep -c "'a1'")" "1"
+check "...naming the machine that owns it" "$(printf '%s\n' "$fbw" | grep -c 'box-z')" "1"
+check "...and what happened instead"   "$(printf '%s\n' "$fbw" | grep -c 'no account of its own')" "1"
+check "the refusal list carries it too, so claude()'s block prints a reason" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_skipped | grep -c '^a1 (owned by box-z')" "1"
+
+# The escape hatch is the same one every explicit door has (DO-641). A door that
+# refuses with no way through is a door people route around.
+fb_home fb3 a1
+check "CLAUDE_FOREIGN_PROFILE_OK=1 borrows the seat on purpose, as at every other door" \
+      "$(pfd "$FB_POOL; $FB_OWNED; CLAUDE_FOREIGN_PROFILE_OK=1" '' t1 0)" "0:a1:fallback:fallback"
+
+# THE POPULATION THE INCIDENT CAME FROM. A Claude Code Bash-tool shell snapshot
+# carries functions but no VARIABLES, so there the table is empty while the code
+# that reads it is present — and an in-memory-only check would be present and
+# blind in exactly the sessions that spent the seat. pfd sources the file with
+# CLAUDE_TENANTS_FILE=/nonexistent and the prelude repoints it afterwards, which
+# is that shape precisely: no table in memory, a readable file on disk.
+FB_OWNED_FILE="$TMPROOT/tenants-owned.zsh"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )' > "$FB_OWNED_FILE"
+fb_home fb4 a1
+check "an owner known only to the FILE is honoured too (an agent's shell)" \
+      "$(pfd "CLAUDE_TENANTS_FILE='$FB_OWNED_FILE'; $FB_POOL" '' t1 0)" "2::unusable:"
+
+# The report is about the LAST RESORT, not about foreignness: every reason the
+# active account was declined used to be silent, and a session on the shared
+# credential was left to guess which. This row also holds the warning in place
+# independently of the row above — deleting the foreign check leaves this one
+# green, and deleting the warning leaves neither.
+fb_home fb5 a1
+printf 'auth_broken = [\n    "a1",\n]\nprofiles = [\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a quarantined active account is declined, and now says why" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_warnings | grep -c "declined clauth's active account 'a1': auth broken")" "1"
+
+# A SECOND PICK IN ONE SHELL MUST NOT REPORT THE FIRST'S DECLINE. Both resets
+# below are invisible to every other row by construction — nothing outside the
+# twelve lines between the call and the read consults these globals today — so
+# without these two the fix for that is unpinned, and the next reader of
+# _CLAUDE_FALLBACK_WHY (an --explain row, a statusline field) gets a previous
+# pick's reason with no way to tell. That is the DO-623 shape exactly.
+#
+# The early return has to be one that never CALLS the last resort, or the
+# function's own reset would clear the globals and the row would pass either way:
+# `bad-table` returns before the pool is even walked.
+fb_home fb9 a1
+check "the picker clears a decline before the next pick, even on an early return" \
+      "$(zsh -f -c "
+          unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+          export HOME='$FHOME'
+          CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+          CLAUDE_TENANTS_FILE=/nonexistent
+          source '$HERDRRC' >/dev/null 2>&1
+          $FB_POOL; $FB_OWNED
+          _claude_pick_for_dir '' t1 0 0 >/dev/null 2>&1
+          _claude_pick_for_dir '' nosuchtenant 0 0 >/dev/null 2>&1
+          print -r -- \"\$_claude_pick_state|\$_CLAUDE_FALLBACK_WHY\"" 2>/dev/null)" \
+      "bad-table|"
+# ...and the last resort clears its own, for a caller that reaches it directly
+# rather than through the picker. A second call that cannot even read
+# status.json must not still be holding the first call's seat name.
+check "the last resort clears its own answer when the next call reads nothing" \
+      "$(zsh -f -c "
+          unset CLAUDE_CONFIG_DIR HERDR_PANE_ID
+          export HOME='$FHOME'
+          CLAUDE_TENANTS_FILE=/nonexistent
+          source '$HERDRRC' >/dev/null 2>&1
+          $FB_OWNED
+          _claude_fallback_profile
+          HOME=/nonexistent _claude_fallback_profile
+          print -r -- \"\$_CLAUDE_FALLBACK_PROFILE|\$_CLAUDE_FALLBACK_WHY\"" 2>/dev/null)" \
+      "|"
+
+# WHICH REASON WINS WHEN A SEAT IS BOTH. The two checks in the last resort are
+# ordered, and nothing above can see the order: every fixture so far triggers
+# exactly one of them. Swap them and the suite stays green while a seat that is
+# owned AND quarantined reports `auth broken — clauth login a1` — which tells the
+# operator to log in to the one seat they must not touch, and drops the only fact
+# DO-632 exists to surface. Ownership is the stronger statement (it is about this
+# MACHINE, not about the credential), so it is answered first.
+fb_home fb10 a1
+printf 'auth_broken = [\n    "a1",\n]\nprofiles = [\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a seat that is BOTH owned and quarantined reports the ownership" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'owned by box-z')" "1"
+check "...and not the quarantine, whose remedy is the wrong thing to do here" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'clauth login')" "0"
+
+# THE MESSAGE NAMES THE TABLE TO EDIT. Drop the knob name and the seat and owner
+# survive, so every row above still passes while the one pointer telling a reader
+# WHERE this decision lives disappears.
+fb_home fb11 a1
+check "the decline names the table that made it" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'CLAUDE_TENANT_MACHINE_OWNED')" "1"
+
+# THE REASON CARRIES THE SEAT TOO, not just the warning. `_claude_pick_reason` is
+# what --json and --explain report and what a caller quotes back; compose it
+# before the decline is recorded and it collapses to a bare "no usable account"
+# with both arrays still correct, which is the shape that reads as fine.
+check "the refusal REASON names the seat, not just the warning" \
+      "$(pickvar "$FB_POOL; $FB_OWNED" t1 _claude_pick_reason | grep -c 'a1 (owned by box-z')" "1"
+
+# A NON-FOREIGN DECLINE REACHES THE REFUSAL LIST TOO. Row 7 above only ever reads
+# the foreign case, so gating the _claude_pick_skipped line alone on `owned by *`
+# leaves every row green while a quarantined decline vanishes from claude()'s
+# "refused:" line and from the reason — the silence this change exists to end,
+# restored for the commoner of the two causes.
+fb_home fb12 a1
+printf 'auth_broken = [\n    "a1",\n]\nprofiles = [\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a quarantined decline reaches the refusal list, not only the warnings" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_skipped | grep -c '^a1 (auth broken')" "1"
+
+# ...AND A PICK THAT SUCCEEDED SAYS NOTHING. The report is guarded on the reason
+# being set; raise it unguarded and a session running happily on a1 announces, on
+# every launch, that the last resort declined a1 — with an empty reason. Nothing
+# else in the suite reads either array on the success path.
+fb_home fb13 a1
+check "a last resort that was TAKEN raises no decline warning" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_warnings | grep -c 'last resort declined')" "0"
+check "...and puts nothing in the refusal list either" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_skipped | grep -c '^a1 (')" "0"
+
+# THE BOUNDARY, pinned so that moving it is a decision rather than a drift. A
+# pool that LISTS an owned profile is a table contradicting itself, and this
+# change does not arbitrate: the candidate loop is unchanged, so the pool still
+# wins for a ranked pick. Only the last resort — the path that consults no pool
+# at all — is closed here. Named as a follow-up on the PR.
+fb_home fb6 a1
+check "a pool that LISTS an owned profile still ranks it — unchanged, and known" \
+      "$(pfd "CLAUDE_TENANT_POOL=( t1 \"a1\" ); $FB_OWNED" '' t1 0)" "0:a1:picked:eligible"
+
+# THE FAIL-OPEN BRANCH, which is the one new behaviour with no other row. The
+# guard is `(( $+functions[claude-profile-foreign] ))`, and with the predicate
+# absent the seat is taken — deliberately: the predicate is public and dashed
+# (a shell snapshot keeps it) while this function is single-underscore (a
+# snapshot drops it first), so no realistic shell holds one without the other.
+# The row exists so that a rename which made the guard droppable shows up HERE
+# as a fail-open, instead of as nothing at all. test-hspawn.sh:1987 pins the
+# same shape for the explicit doors.
+fb_home fb8 a1
+check "with the predicate absent the last resort fails OPEN, as the doors do" \
+      "$(pfd "$FB_POOL; $FB_OWNED; unset -f claude-profile-foreign" '' t1 0)" "0:a1:fallback:fallback"
+# STDERR, not the warnings array — and that distinction is the row. A bare call
+# would put `command not found` on the caller's stderr while the `$( )` captured
+# only stdout, so a version of this row that grepped _claude_pick_warnings saw
+# nothing either way and the missing `$+functions` guard survived it.
+check "...and says nothing about a command it could not find" \
+      "$(pickerr "$FB_POOL; $FB_OWNED; unset -f claude-profile-foreign" t1 | grep -c 'command not found')" "0"
+
+# An active profile with no credential was never a candidate for the last resort
+# and still is not: the foreign check must not become the only thing standing
+# between a session and a profile clauth cannot open.
+fb_home fb7 nosuch
+check "an active profile with no credential is no last resort either" \
+      "$(pfd "$FB_POOL" '' t1 0)" "2::unusable:"
+check "...and that one is not reported as declined, because nothing was read" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_warnings | grep -c 'last resort declined')" "0"
+
+#-----------------------------------------------------------------------------
+echo
 echo "=== scripts/claude-pick: the exit codes ARE the contract ==="
 #
 # The CLI decides nothing of its own — it serialises _claude_pick_for_dir — so

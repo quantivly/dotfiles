@@ -669,3 +669,95 @@ not the artefacts of writing.
 State tables: `scripts/test-hspawn.sh` (269 → 315) and `scripts/test-gh-routing.sh` (199 → 207).
 Every fix is pinned by a mutant that dies (19 mutants, 19 deaths), and every mutation is dry-run for
 applicability first — a mutation that no longer applies reads exactly like a surviving mutant.
+
+## The last resort, and the seat another machine owns (DO-632)
+
+**`_claude_fallback_profile` is the one selection path that consults no pool** — by
+construction, since the pool is what has just come up empty. It hands out clauth's *active*
+profile so that a session still gets an account of its own rather than the shared global
+`~/.claude/.credentials.json`, where one bad write logs every session on the box out. That
+much is right and is unchanged.
+
+What was wrong is that a profile is absent from every pool on this machine **for exactly one
+reason: another machine owns that seat**. `~/.config/claude-tenants.zsh` says so in its own
+words — refresh-token rotation is server-side, so a profile this laptop hands out *and* a
+server logs in as are two independent holders of one grant, and they log each other out. The
+last resort walked straight past the only place that rule lived.
+
+**Measured, 2026-09-19**: a session in this repo ran on `personal-1`, nanoclaw's seat — the work
+pool was unusable (one seat at 100%, one behind the spend wall), so the fallback took clauth's
+active profile. That is the part this change stops, and it is the part that was observed.
+
+**The cost is a correlation, and is written as one.** 2026-09-18 22:16:03: `clauth: login for
+'quantivly-0' has expired: refresh token revoked or invalid`, then a human `/login`; two laptop
+sessions were found on that seat on 09-19, through `clauth start` (a door DO-641 has since
+closed), and `quantivly-0` is the EC2 box's, in no pool here. But that rejection is
+`RefreshError::Invalid`, which **cannot distinguish a double-spend from a genuine server-side
+revocation** — [CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md) settles that, inside a correction whose
+stated purpose is to stop this inference being rendered as an entailment. A double-spend is
+therefore the live hypothesis, not a finding, and the next revocation on this box still has to be
+diagnosed from the daemon journal rather than attributed from here. The mechanism the rule rests
+on is not in doubt: refresh-token rotation is server-side, so two machines logged in to one
+account are two independent holders of one grant.
+
+The fix is DO-641's own predicate, `claude-profile-foreign`, not a second reading of the same
+table: it honours `CLAUDE_FOREIGN_PROFILE_OK` for a deliberate borrow, and it **re-reads the
+tenants file when the table is not in memory**, which is the shell an agent gets — a Claude
+Code Bash-tool snapshot carries functions but no variables, so an in-memory-only check would
+be present and blind in precisely the sessions that spent the seat.
+
+- **Where the fallthrough lands matters more than the skip.** Skipping alone would trade a
+  visible wrong account for an invisible one: the caller then drops onto the shared credential
+  (`claude()`) or refuses (`hspawn`, `--strict`), and a silent decline reads as *"clauth's
+  active account did not exist"*. So `_claude_fallback_profile` **sets** rather than prints —
+  a global cannot be read out of a `$( )`, the rule this file already records for `REPLY` —
+  and publishes `_CLAUDE_FALLBACK_PROFILE` / `_CLAUDE_FALLBACK_WHY`. The picker turns those
+  into a `_claude_pick_warnings` entry naming the seat, its owner and what happened instead,
+  plus the terse `_claude_pick_skipped` phrase `claude()` joins into its `refused:` list.
+  **Which surfaces print it, exactly:** `claude()` and `hspawn` loop over the warnings on every
+  launch — those are the two that actually start a session — and `claude-pick --explain` /
+  `--json` carry both arrays. The **bare** `claude-pick` prints nothing: its one refusal line
+  (`scripts/claude-pick:751`) sits inside the `(( gate && rc == 0 ))` block, so it fires only
+  for a *gate* refusal, never for a picker-level `unusable`. That predates this change and is
+  general to the state, not to DO-632 — but it is the one surface where "never silent" is false,
+  and a script doing `p=$(claude-pick --strict)` gets an empty string, exit 2 and no reason. Its existing block already reads correctly for
+  this case: *"NO usable account — not the pool, and not clauth's active one."*
+- **Nothing is invented in its place.** Falling through to some other locally-owned profile
+  was considered and rejected: `claude()`'s own comment is that *"inventing a profile would
+  bill an account nobody picked"*. clauth's active profile is a seat a human chose; the next
+  name down is not.
+- **Every other decline is now reported too** — quarantined, disabled — because all of them
+  were silent, and a session on the shared credential was left to guess which.
+- **The boundary, pinned rather than papered over:** a pool that *lists* an owned profile
+  still ranks it. That is a table contradicting itself, not a door; closing it would put a
+  tenants-file read on every candidate of every pick. A row asserts the current answer, so
+  moving it is a decision.
+- **Follow-up, named here so it is not lost:** move that refusal line out of the gate block so a
+  plain `claude-pick` exit 2 names its reason, the way its own comment already claims it does.
+- **Known duplication, out of scope:** rabota's Python reads a second copy of the same fact,
+  `[machines.dev].profile` in `~/.dotfiles-local/rabota/tenants/quantivly.toml`. The
+  remote-lanes design already calls that a reliability risk; unifying it is its own change.
+
+State table: `scripts/test-claude-pick.sh` (452 → 476). **19 mutants, 18 deaths**, each dry-run
+for applicability first. What the sweep cost, written down because it is the part worth reusing:
+
+- **A malformed mutation reads as a strong result.** The first sweep's "check order swapped" did
+  not swap the two checks, it *nested* them — syntactically valid, semantically a different
+  mutant — and recorded 7 kills for a mutation nobody ran. The true swap **survived**, and it is
+  not cosmetic: a seat that is both machine-owned and quarantined then reports `auth broken —
+  clauth login a1`, telling the operator to log in to the one seat they must not touch. Ownership
+  is answered first because it is the stronger statement — about this *machine*, not about the
+  credential — and two rows now pin it. Dry-running for applicability catches a mutation that does
+  not apply; it does not catch one that applies and means something else. Diff the mutant.
+- **Four more survivors, all of them silent drops of the seat's name:** the report raised on the
+  *success* path (a session happily running on a seat announces that the last resort declined it);
+  the `_claude_pick_skipped` entry gated on `owned by *` alone, which restores the silence for the
+  *commoner* quarantine case while every row stays green; the report composed after
+  `_claude_pick_reason`, collapsing it to a bare "no usable account" with both arrays still
+  correct; and the knob name dropped from the message, leaving seat and owner intact and removing
+  the only pointer to the table that decided. Each has a row now.
+- **One mutant is EQUIVALENT, not uncovered:** testing `_CLAUDE_FALLBACK_PROFILE` instead of
+  `_CLAUDE_FALLBACK_WHY` at the call site. That line is reached only when the function returned 1,
+  and every `return 1` path either sets both globals or leaves both empty — which is true only
+  *because* the per-call reset is there. Two independent analyses failed to construct a
+  divergence. Recorded rather than papered over with a row that would assert nothing.

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The account picker's last-resort fallback no longer takes a seat another machine owns
+  (DO-632).** When no pool member was usable, `_claude_fallback_profile` handed out clauth's
+  *active* profile and consulted nothing — and a profile is absent from every pool on this
+  machine for exactly one reason: another machine owns it. It fired on 2026-09-19, putting a
+  session in this repo on `personal-1`, nanoclaw's seat. The motivating correlation, stated as
+  one: `quantivly-0`'s login was revoked 2026-09-18 22:16 and two laptop sessions were found on
+  that seat on 09-19 through a door DO-641 has since closed — but that rejection class cannot
+  distinguish a double-spend from a server-side revocation, so the cost is the live hypothesis
+  and not a finding. The last resort now asks `claude-profile-foreign`, the same
+  five explicit doors use — so `CLAUDE_FOREIGN_PROFILE_OK=1` still borrows on purpose, and the
+  tenants file is re-read when the table is not in memory, which is the shell an agent gets.
+  **The skip is never silent:** a declined last resort raises a `_claude_pick_warnings` entry
+  naming the seat, its owner and what happened instead, and a `_claude_pick_skipped` entry so
+  `claude()`'s refusal block prints a reason. Every *other* decline (quarantined, disabled) is
+  now reported the same way, where all of them used to be silent. The one change a caller could
+  notice: a pick that used to return clauth's active profile can now refuse, and the session
+  lands on the shared credential loudly (`claude()`) or is refused (`hspawn`, `--strict`).
+  `scripts/test-claude-pick.sh` 452 → 476; 19 mutants, 18 deaths, one equivalent. Reasoning, the
+  pinned boundary and what the mutation sweep cost: `docs/CLAUDE_ACCOUNT_PICKER.md`.
+
 ### Added
 
 - **`claude-pick --gate` refuses a lane whose weekly window is spent with no spend headroom
