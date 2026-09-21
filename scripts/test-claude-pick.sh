@@ -2448,6 +2448,35 @@ gate_run ru
 check "gate: an UNPARSEABLE resets_at refuses rather than allows" "$rc" "2"
 check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
 check "gate: ...and resets_at is null, never an epoch"           "$(jq -r .gate.resets_at <<<"$out")" "null"
+# --- gate: an undatable window at EXACTLY ZERO is not unmeasured (DO-671) ----
+# clauth omits resets_at precisely where utilization is 0.0, so the two rows
+# above fired on every FRESH seat and on no other kind. That was survivable while
+# the ranker could choose another seat; it became a hard block once a dev lane
+# had exactly one seat ([machines.dev].profile) and run_recipe refused a --seat
+# that disagreed with it. A 0 reading needs no instant to be safe: the staleness
+# arms refuse first, and the instant never enters the projection.
+gate_profile z0 0 "" -                                   # fresh, unstarted window
+gate_run z0
+check "gate: a 0% reading with NO resets_at allows"              "$rc" "0"
+check "gate: ...verdict allow"                                   "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "gate: ...and still reports a null resets_at"              "$(jq -r .gate.resets_at <<<"$out")" "null"
+gate_profile z0u 0 "" "not a timestamp"                  # zero, undatable for the other reason
+gate_run z0u
+check "gate: a 0% reading with an UNPARSEABLE resets_at allows"  "$rc" "0"
+# The three things the widening must NOT do. Each is a different arm, and each
+# would be silently re-broken by widening the test from `!= 0` to a floor.
+gate_profile z1 1 "" -
+gate_run z1
+check "gate: 1% with no resets_at still refuses"                 "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+gate_profile z0s 0 10800 -                               # zero, but the READING is 3h old
+gate_run z0s
+check "gate: a STALE 0% reading still refuses"                   "$rc" "2"
+check "gate: ...naming the age threshold, not the reset"         "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_CACHE_MAX_AGE)" "yes"
+gate_profile z0p 0 "" "$GATE_PAST"                       # zero, but the window has ROLLED
+gate_run z0p
+check "gate: a 0% reading for a ROLLED window still refuses"     "$rc" "2"
+check "gate: ...naming that it rolled"                           "$(has_words "$(jq -r .reason <<<"$out")" rolled)" "yes"
 # The mtime test runs FIRST, so a file that is both stale and rolled is
 # reported as stale — the message the rows above this section already pin.
 gate_profile rb 30 10800 "$GATE_PAST"
