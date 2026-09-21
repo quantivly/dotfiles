@@ -76,8 +76,9 @@ Linear issue filed before the message that mentions it (`quantivly-conventions:l
 
 ## Output contract
 
-The screen is ≤12 lines: `rabota brief --text --max-lines 12`; when you append a
-reconcile delta, call `--max-lines 11` instead. `sol brief` handles its own line.
+The screen is ≤12 lines: `rabota --text brief --max-lines 12`; when you append a
+reconcile delta, call `--max-lines 11` instead. `--text` is a GLOBAL flag and must
+precede the subcommand — `rabota brief --text` exits `unrecognized arguments`. `sol brief` handles its own line.
 Narrative lives in `brief.md`; print its path once. On a rerun the same day the
 CLI prints the delta. A source that failed gets its one `!` line from the CLI.
 
