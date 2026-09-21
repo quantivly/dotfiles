@@ -23,6 +23,12 @@ from rabota.context import Context
 
 SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# The cgroup slice every remote lane joins explicitly (``--slice=``), and therefore the slice
+# whose memory cap bounds it. Shared rather than written twice: ``rabota doctor`` asserts the
+# admission cap fits inside THIS slice's MemoryMax on the machine, and a doctor that measured a
+# different slice than the lane joins would report a budget nothing is subject to.
+LANE_SLICE = "agents.slice"
+
 
 def unit_name(tenant: str, slug: str) -> str:
     """``rabota-lane-<tenant>-<slug>-<uuid8>.service``, with the slug reduced to safe characters."""
@@ -109,7 +115,7 @@ def build_remote(machine, local_argv: list[str]) -> list[str]:
     the lane runs in the ssh session scope, outside every cap.
     """
     argv = list(local_argv)
-    argv.insert(1, "--slice=agents.slice")
+    argv.insert(1, f"--slice={LANE_SLICE}")
     cmd = " ".join(remote.shquote(a) for a in argv)
     return remote.ssh_argv(machine, cmd)
 
