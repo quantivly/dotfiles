@@ -1052,10 +1052,21 @@ outage.
   file, not a keyring, which is why a headless unit can read it. Commits there **are signed**:
   `commit.gpgsign = true`, `gpg.format = ssh`, `user.signingkey = ~/.ssh/signing_key.pub`, and the
   private key carries **no passphrase**, so signing needs no agent either.
-  **Whether a push actually succeeds from inside a lane is still unproven.** `ls-remote` was
-  verified 2026-09-20 with no agent and no mux; the push path a lane's PR depends on has never
-  been run, and a `systemd-run --user` unit's environment is the user manager's, not a login
-  shell's. Until that is measured, assume nothing from the configuration above.
+- **A lane can push — measured 2026-09-21, from inside the unit and not merely over ssh.** This is
+  what makes a lane able to open a PR, and until this date only `ls-remote` had ever been tried.
+  A `systemd-run --user --slice=agents.slice` unit on dev, with **no tty, no `SSH_AUTH_SOCK` and
+  the user manager's `PATH`** (`/usr/local/sbin:…:/snap/bin` — no `~/.local/bin`), created a git
+  worktree, made an **SSH-signed** commit and pushed a new branch to `quantivly/dotfiles`. Nothing
+  extra was needed: no credential helper change, no env var in the unit, no agent forwarding.
+  Three properties are what make it work, and each is the thing to check first if it ever stops:
+  `gh` is at `/usr/bin/gh` so the user manager's PATH finds it; its token is in a **file**
+  (`~/.config/gh/hosts.yml`) rather than a keyring no headless unit could unlock; and the signing
+  key has **no passphrase**, so `commit.gpgsign = true` needs no agent either. The probe that
+  proved it, cleanup included, is `~/quantivly/handoffs/2026-09-21-do654-push-probe.sh`.
+  One thing it is NOT evidence of: the auto-mode classifier refused a `ssh dev … git push` shape
+  as `[Remote Shell Writes]` on the way here. A lane pushes as itself, inside a unit, so this does
+  not touch it — but an *agent session* driving a push over ssh needs an approval or a
+  `permissions.allow` rule, the same answer §4.6 reached for `rabota lane recipe`.
 - **The memory budget covers panes by inheritance, and lanes only by joining.** `agents.slice`
   (`MemoryHigh=8G`, `MemoryMax=10G`) contains `herdr-server.service`, so every pane shell inherits
   the cap — that much is automatic. A command started over a plain `ssh dev` lands in a session scope under
@@ -1068,16 +1079,21 @@ outage.
 - **The admission cap and the cgroup cap are asserted against each other — by `rabota doctor`,
   not by `budget`.** `budget` admits up to `max_lanes_local` lanes (default 3) by reading the
   *host's* load, MemAvailable and swap; it never reads the slice, and deliberately still doesn't.
-  Each lane separately requests its own `MemoryMax` (default `6G`) into `agents.slice`, which also
-  holds the herdr server and every attended pane. `max_lanes_local × memory_max ≤ the slice's
-  MemoryMax` is a **configuration** invariant — true or false regardless of what is running, and
-  set in two files on two machines — so it belongs where the other cross-machine couplings are
-  asserted, not in the runtime gate. A static misconfiguration surfacing as a `machine:…` refusal
-  would report the wrong thing at the wrong time: the lane you wanted refuses, and the cause is a
-  TOML edit from three weeks ago. **Measured 2026-09-21: 3 × 6G = 18 GiB admissible into dev's
-  10 GiB slice, so `doctor` fails today.** The fix is a number in
-  `~/.dotfiles-local/rabota/tenants/quantivly.toml` or a larger slice on dev; nothing is broken
-  until lanes actually grow (the whole slice's high-water mark is 323 MiB).
+  Each lane separately requests its own `MemoryMax` into `agents.slice`, which also holds the
+  herdr server and every attended pane. `max_lanes_local × memory_max ≤ the slice's MemoryMax` is
+  a **configuration** invariant — true or false regardless of what is running, and set in two
+  files on two machines — so it belongs where the other cross-machine couplings are asserted, not
+  in the runtime gate. A static misconfiguration surfacing as a `machine:…` refusal would report
+  the wrong thing at the wrong time: the lane you wanted refuses, and the cause is a TOML edit
+  from three weeks ago.
+  The check found this broken on its first run: at the `6G` default, 3 × 6 = **18 GiB admissible
+  into dev's 10 GiB slice**. Settled 2026-09-21 by putting `memory_max = "3G"` in
+  `~/.dotfiles-local/rabota/tenants/quantivly.toml` — 3 × 3 = 9 GiB fits, and 3 GiB per lane is
+  still ~10× the highest agent memory ever measured there (whole-slice peak 323 MiB). Raising
+  dev's slice instead was rejected: dev has 13 GiB available of 61, the rest held by the platform
+  stack it runs for the team, so a bigger agent slice buys headroom by taking it from them.
+  **Whichever number you change, change it knowing `budget` still does not read the slice** — it
+  admits on the host's load, memory and swap, and `doctor` is the only thing comparing the two.
 - **Read `FragmentPath`, never `MemoryMax` alone.** `systemctl --user show agents.slice -p
   MemoryMax` prints `MemoryMax=infinity` with `LoadState=loaded` for a slice that **has no unit
   file** — measured on the laptop, which has no `agents.slice` at all. `MemoryMax` alone reads
