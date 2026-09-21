@@ -20,6 +20,8 @@ from rabota import budget as budget_mod
 from rabota import cli, errors, remote, store
 from rabota.commands import budget as budget_cmd
 from rabota.context import Context
+from rabota.lanes import brief as lanes_brief
+from rabota.lanes import verdict as lanes_verdict
 
 SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -275,7 +277,7 @@ def expand_remote(path: str, home: str) -> str:
 
 
 def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minutes, run,
-               budget_fn=None) -> dict:
+               kind="work", of=None, budget_fn=None) -> dict:
     """Render one lane; with ``run``, create the worktree, send the brief and start the unit.
 
     Order matters and is asserted: budget BEFORE anything is created (a refusal writes no row and
@@ -292,9 +294,58 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     with the declared profile is refused here, before any ssh call — passing it through would
     meter and record a seat that is not the one actually billing the work.
 
+    ``kind="evaluate"`` builds an evaluate lane for the lane named by ``of`` instead of a work
+    lane: ``brief`` is ignored (the evaluate template supplies it — DO-670), ``machine`` is
+    forced to match ``of``'s own lane (remote-lanes design §4.5: the evaluated lane's
+    ``verdict.json`` never crosses machines), and the row records ``kind`` and ``of_lane``. An
+    evaluate lane of an evaluate lane is refused (see below) rather than silently chained.
+
     ``budget_fn`` exists so the tests can drive the gate without a clauth on the test machine; in
     production it is ``rabota budget``'s own ``run_budget``.
     """
+    if kind not in ("work", "evaluate"):
+        raise errors.Usage(f"--kind must be work or evaluate, got {kind!r}")
+    if kind == "evaluate" and not of:
+        raise errors.Usage("--kind evaluate requires --of <lane_id>")
+    if kind != "evaluate" and of:
+        raise errors.Usage("--of requires --kind evaluate")
+    if kind == "evaluate" and brief:
+        raise errors.Usage(
+            "--brief and --kind evaluate together are a usage error: the evaluate template is the brief")
+    if kind == "work" and not brief:
+        raise errors.Usage("--brief is required for --kind work")
+    if machine == "":
+        raise errors.Usage("--machine must not be empty")
+
+    of_lane = None
+    verdict_path = None
+    if kind == "evaluate":
+        of_lane = ctx.store.get_lane(of)
+        if of_lane is None:
+            raise errors.Refused(f"no lane {of!r}: --of must name an existing lane row")
+        if of_lane.get("kind") == "evaluate":
+            # Decision (DO-670, Zvi): refused rather than allowed. The spec does not say either
+            # way; an evaluate lane's own verdict is about the THOROUGHNESS of its evaluation, not
+            # a claim about the original work, so a further evaluate lane would have nothing
+            # meaningful to re-derive against — and nothing here bounds how deep such a chain
+            # could go. Refusing keeps "evaluate" one level deep, which is all remote-lanes design
+            # §4.5 and the evaluate template (``rabota/briefs/evaluate.md.tmpl``) describe.
+            raise errors.Refused(
+                f"lane {of!r} is itself an evaluate lane: evaluating an evaluate lane is not supported")
+        if machine is not None and machine != of_lane["machine"]:
+            raise errors.Refused(
+                f"--machine {machine!r} disagrees with lane {of!r}'s machine {of_lane['machine']!r}: "
+                "an evaluate lane must run on the same machine as the lane it evaluates "
+                "(remote-lanes design §4.5)")
+        machine = of_lane["machine"]
+        verdict_path = Path(of_lane["out_dir"]) / "verdict.json"
+        try:
+            lanes_verdict.validate(verdict_path, ctx.tenant.lanes.max_verdict_bytes)
+        except lanes_verdict.VerdictError as e:
+            raise errors.Refused(f"lane {of!r} has no readable verdict: {e}") from e
+    elif machine is None:
+        machine = "local"
+
     if not machine:
         raise errors.Usage("--machine must not be empty")
     m = ctx.tenant.machines.get(machine) if machine != "local" else None
@@ -314,7 +365,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         e.budget = b
         raise e
 
-    slug = Path(brief).stem
+    slug = Path(brief).stem if kind == "work" else f"evaluate-{of}"
     unit = unit_name(ctx.tenant.name, slug)
     lane_id = unit.rsplit("-", 1)[-1].removesuffix(".service")
     session_id = str(uuid.uuid4())
@@ -339,6 +390,8 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     worktree = str(root / "worktrees" / ctx.tenant.name / lane_id)
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
     remote_brief = f"{out_dir}/brief.md"
+    brief_text = (lanes_brief.render_evaluate(of_lane, verdict_path, out_dir)
+                  if kind == "evaluate" else None)
 
     argv = build_local(ctx, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,
@@ -355,7 +408,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         raise errors.Refused("the local --run form is not implemented; use --machine dev")
     create_worktree_remote(ctx, m, repo_path, worktree, out_dir, base)
     try:
-        send_brief(ctx, m, remote_brief, Path(brief).read_text())
+        send_brief(ctx, m, remote_brief, brief_text if kind == "evaluate" else Path(brief).read_text())
         res = ctx.runner.run(argv)
         if not res.ok:
             raise errors.RabotaError(f"could not start {unit} on {machine}: {(res.err or res.out).strip()}")
@@ -365,11 +418,12 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         # rows, and none exists for it) — best-effort cleanup, then re-raise the ORIGINAL error.
         _remove_worktree_remote(ctx, m, repo_path, worktree)
         raise
-    ctx.store.insert_lane({"id": lane_id, "tenant": ctx.tenant.name, "kind": "work", "brief": brief,
+    ctx.store.insert_lane({"id": lane_id, "tenant": ctx.tenant.name, "kind": kind,
+                        "brief": brief if kind == "work" else remote_brief,
                         "repo": repo, "worktree": worktree, "out_dir": out_dir, "machine": machine,
                         "unit": unit, "session_id": session_id, "status": "started", "seat": seat_pick,
                         "model": model, "effort": effort, "started_at": store.now(),
-                        "five_h_pct_at_start": b.get("five_h_pct_now")})
+                        "of_lane": of, "five_h_pct_at_start": b.get("five_h_pct_now")})
     return out
 
 
@@ -377,23 +431,27 @@ def _build(sub):
     p = sub.add_parser("lane", help="render or run exactly one lane unit")
     s = p.add_subparsers(dest="lane_cmd", required=True)
     r = s.add_parser("recipe", help="print the lane argv; --run starts it")
-    r.add_argument("--brief", required=True)
+    r.add_argument("--brief", default=None)
     r.add_argument("--repo", required=True)
-    r.add_argument("--machine", default="local")
+    r.add_argument("--machine", default=None)
     r.add_argument("--base", default=None)
     r.add_argument("--seat", default=None)
     r.add_argument("--model", default=None)
     r.add_argument("--effort", default=None)
     r.add_argument("--est-minutes", type=int, default=30)
     r.add_argument("--run", action="store_true")
+    r.add_argument("--kind", choices=["work", "evaluate"], default="work")
+    r.add_argument("--of", default=None)
 
 
 def _run(ns, **ctx_kw):
     ctx = Context.from_namespace(ns, **ctx_kw)
+    default_model = (ctx.tenant.lanes.evaluate_model if ns.kind == "evaluate"
+                     else ctx.tenant.lanes.default_model)
     out = run_recipe(ctx, brief=ns.brief, repo=ns.repo, machine=ns.machine, base=ns.base,
-                     seat=ns.seat, model=ns.model or ctx.tenant.lanes.default_model,
+                     seat=ns.seat, model=ns.model or default_model,
                      effort=ns.effort or ctx.tenant.lanes.default_effort,
-                     est_minutes=ns.est_minutes, run=ns.run)
+                     est_minutes=ns.est_minutes, run=ns.run, kind=ns.kind, of=ns.of)
     return [out["unit"], out["shell"]] if ns.text else out
 
 

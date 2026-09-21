@@ -1,7 +1,9 @@
 import argparse, json, shutil, tempfile, unittest
 from pathlib import Path
+from unittest.mock import patch
 from rabota import context, errors
 from rabota.commands import lane
+from rabota.lanes import brief as lanes_brief
 from rabota.runner import FakeRunner, Result
 from tests.support import last_json
 from tests.test_cli import install_fixture_home, run_cli
@@ -632,6 +634,204 @@ class RunRecipeTests(LocalRecipeTests):
         self.assertEqual(len(runner.calls), 5)
         cleanup = " ".join(runner.calls[4])
         self.assertIn("'remove'", cleanup); self.assertIn("'--force'", cleanup)
+
+
+class EvaluateRecipeTests(LocalRecipeTests):
+    """DO-670: ``--kind evaluate --of <lane_id>``. Reuses ``LocalRecipeTests.ctx()`` only — the
+    inherited ``argv()``-based rows exist to exercise ``build_local`` directly and have nothing to
+    do with the evaluate form, so (unlike ``RemoteRecipeTests`` et al.) this class does not
+    subclass ``RunRecipeTests`` and rerun its whole work-lane suite a second time.
+    """
+
+    OF_ID = "of000001"
+    VALID_VERDICT = {"lane": OF_ID, "status": "done",
+                      "claims": [{"id": "c1", "text": "t",
+                                  "evidence": {"cmd": "true", "expected": "0", "observed": "0"},
+                                  "confidence": "high"}],
+                      "deliverables": [], "followups": []}
+
+    def of_out_dir(self):
+        p = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, p, ignore_errors=True)
+        return p
+
+    def insert_of_lane(self, ctx, *, machine="dev", kind="work", out_dir=None, lane_id=None):
+        lane_id = lane_id or self.OF_ID
+        out_dir = out_dir if out_dir is not None else self.of_out_dir()
+        ctx.store.insert_lane({
+            "id": lane_id, "tenant": "quantivly", "kind": kind, "brief": "/b/brief.md",
+            "repo": "hub", "worktree": "/w/t", "out_dir": str(out_dir), "machine": machine,
+            "unit": f"rabota-lane-quantivly-{lane_id}.service", "session_id": "sess-of",
+            "model": "claude-sonnet-5", "effort": "medium", "status": "done",
+            "started_at": "2026-09-20T00:00:00Z",
+        })
+        return lane_id, out_dir
+
+    def write_verdict(self, out_dir, payload=None, *, raw=None):
+        p = Path(out_dir) / "verdict.json"
+        p.write_text(raw if raw is not None else json.dumps(payload or self.VALID_VERDICT))
+        return p
+
+    def kw(self, **over):
+        base = dict(brief=None, repo="hub", machine=None, base=None, seat=None,
+                    model="claude-fable-5-1", effort="medium", est_minutes=30, run=False,
+                    kind="evaluate", of=self.OF_ID)
+        base.update(over); return base
+
+    def ok_budget(self):
+        return {"allowed_new_lanes": 2, "reasons": [], "seat_pick": "quantivly-0", "five_h_pct_now": 42}
+
+    RESOLVE_OUT = "/home/ubuntu\n/home/ubuntu/.local/bin/claude"
+
+    def test_an_unknown_of_lane_refuses(self):
+        ctx = self.ctx(FakeRunner([]))
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(of="nosuchlane"))
+
+    def test_of_without_kind_evaluate_is_a_usage_error(self):
+        ctx = self.ctx(FakeRunner([]))
+        self.insert_of_lane(ctx)
+        with self.assertRaises(errors.Usage):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                            **self.kw(kind="work", brief="/b/brief.md"))
+
+    def test_kind_evaluate_without_of_is_a_usage_error(self):
+        ctx = self.ctx(FakeRunner([]))
+        with self.assertRaises(errors.Usage):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(of=None))
+
+    def test_a_brief_with_kind_evaluate_is_a_usage_error(self):
+        # The template IS the brief (DO-670 assignment step 3) — a caller passing both means
+        # something contradictory, not a preference to be silently overridden.
+        ctx = self.ctx(FakeRunner([]))
+        self.insert_of_lane(ctx)
+        with self.assertRaises(errors.Usage):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(brief="/b/other.md"))
+
+    def test_a_missing_verdict_refuses(self):
+        ctx = self.ctx(FakeRunner([]))
+        _, out_dir = self.insert_of_lane(ctx)  # no verdict.json written
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+
+    def test_an_oversized_verdict_refuses(self):
+        ctx = self.ctx(FakeRunner([]))
+        _, out_dir = self.insert_of_lane(ctx)
+        self.write_verdict(out_dir, raw="x" * (ctx.tenant.lanes.max_verdict_bytes + 1))
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+
+    def test_an_invalid_verdict_shape_refuses(self):
+        ctx = self.ctx(FakeRunner([]))
+        _, out_dir = self.insert_of_lane(ctx)
+        self.write_verdict(out_dir, raw='{"lane": "x"}')  # missing required keys
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+
+    def test_a_disagreeing_machine_refuses_before_touching_anything(self):
+        runner = FakeRunner([])
+        ctx = self.ctx(runner)
+        _, out_dir = self.insert_of_lane(ctx, machine="dev")
+        self.write_verdict(out_dir)
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(machine="local"))
+        self.assertEqual(runner.calls, [])
+
+    def test_an_evaluate_lane_of_an_evaluate_lane_refuses(self):
+        # Decision (DO-670): an evaluate lane may not itself be evaluated — see run_recipe's
+        # docstring for why. This is the row that pins the decision.
+        ctx = self.ctx(FakeRunner([]))
+        _, out_dir = self.insert_of_lane(ctx, kind="evaluate")
+        self.write_verdict(out_dir)
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+
+    def test_the_rendered_brief_is_the_templates_output(self):
+        ok = Result(0, self.RESOLVE_OUT, "")
+        runner = SequencedRunner([ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        _, out_dir = self.insert_of_lane(ctx)
+        self.write_verdict(out_dir)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                              **self.kw(run=True, base="origin/main"))
+        sent = runner.inputs[2]  # resolve, fetch+worktree, brief send, unit start
+        of_lane = ctx.store.get_lane(self.OF_ID)
+        expected = lanes_brief.render_evaluate(of_lane, Path(out_dir) / "verdict.json", out["out_dir"])
+        self.assertEqual(sent, expected)
+
+    def test_the_row_carries_kind_evaluate_and_of_lane(self):
+        ok = Result(0, self.RESOLVE_OUT, "")
+        runner = SequencedRunner([ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        _, out_dir = self.insert_of_lane(ctx)
+        self.write_verdict(out_dir)
+        lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                        **self.kw(run=True, base="origin/main"))
+        rows = ctx.store.list_lanes("quantivly")
+        new_row = next(r for r in rows if r["id"] != self.OF_ID)
+        self.assertEqual(new_row["kind"], "evaluate")
+        self.assertEqual(new_row["of_lane"], self.OF_ID)
+
+    def test_the_machine_is_inherited_from_the_evaluated_lane_when_not_given(self):
+        ok = Result(0, self.RESOLVE_OUT, "")
+        runner = SequencedRunner([ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        _, out_dir = self.insert_of_lane(ctx, machine="dev")
+        self.write_verdict(out_dir)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                              **self.kw(run=True, base="origin/main", machine=None))
+        self.assertEqual(out["machine"], "dev")
+
+    def test_a_machine_agreeing_with_the_evaluated_lane_is_harmless(self):
+        ok = Result(0, self.RESOLVE_OUT, "")
+        runner = SequencedRunner([ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        _, out_dir = self.insert_of_lane(ctx, machine="dev")
+        self.write_verdict(out_dir)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                              **self.kw(run=True, base="origin/main", machine="dev"))
+        self.assertEqual(out["machine"], "dev")
+
+
+class EvaluateModelDefaultTests(LocalRecipeTests):
+    """DO-670 step 6: an evaluate lane defaults to ``ctx.tenant.lanes.evaluate_model``, not
+    ``default_model`` — asserted at the ``_run`` (CLI-argument-defaulting) layer, since
+    ``run_recipe`` itself always takes an already-resolved ``model``.
+    """
+
+    def ns(self, **over):
+        base = dict(brief=None, repo="hub", machine=None, base=None, seat=None, model=None,
+                    effort=None, est_minutes=30, run=False, kind="evaluate", of="of1",
+                    text=False, tenant="quantivly", state_dir=None, dry_run=False)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def call(self, ns):
+        # Never a real tenant state_dir (finding F23) — the fixture's own state_dir is
+        # home-relative, so an explicit tempdir is pinned here even though run_recipe (which
+        # would actually open the store) is patched out below and never touches it.
+        captured = {}
+        def fake_run_recipe(ctx, **kw):
+            captured.update(kw)
+            return {"unit": "u", "shell": "s"}
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns.state_dir = tmp.name
+        with patch.object(lane, "run_recipe", fake_run_recipe):
+            lane._run(ns, cfg_base=FIX / "config", runner=FakeRunner([]),
+                      env={"PATH": "/bin"}, cwd=Path("/"))
+        return captured
+
+    def test_the_evaluate_model_default_applies_when_no_model_is_given(self):
+        captured = self.call(self.ns())
+        self.assertEqual(captured["model"], "claude-fable-5-1")
+
+    def test_an_explicit_model_still_overrides_the_evaluate_default(self):
+        captured = self.call(self.ns(model="claude-opus-5"))
+        self.assertEqual(captured["model"], "claude-opus-5")
+
+    def test_a_work_lane_still_defaults_to_default_model_not_evaluate_model(self):
+        captured = self.call(self.ns(kind="work", of=None, brief="/b/brief.md"))
+        self.assertEqual(captured["model"], "claude-sonnet-5")
 
 
 class MachineArgvCliTests(unittest.TestCase):
