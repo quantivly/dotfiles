@@ -124,10 +124,15 @@ fi
 # was read" is again `{}` versus an error.
 #
 # WHAT NEITHER CATCHES, stated rather than implied: a tenants file that ends
-# early on purpose (`return`, or a guard like `has_command jq && TABLE=( … )`)
-# parses, completes, and declares nothing. That is the fail-open the tenants-file
+# early SILENTLY — a `return`, or a guard like `[[ -n "$UNSET" ]] && TABLE=( … )`
+# — parses, completes, and declares nothing. That is the fail-open the tenants-file
 # contract in zsh/zshrc.herdr already forbids in prose — self-contained, plain
 # assignments — and no reader here can distinguish it from an honestly empty file.
+#
+# `has_command jq && TABLE=( … )` USED TO BE LISTED HERE and does not belong: it
+# is a command not found in a bare `zsh -f`, so it writes to the fork's stderr and
+# the guard below catches it (measured, exit 2, DO-674). The undetectable set is
+# only the shapes that are SILENT.
 fork_err="$(command mktemp)" || { print -u2 -- "machines-render: could not create a temp file"; exit 2 }
 raw="$(command zsh -f -c '
   typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
@@ -181,7 +186,9 @@ command rm -f "$fork_err"
 # contained, nothing printed — is what makes that true.
 if [[ -n "$fork_err_text" ]]; then
   print -u2 -- "machines-render: $TENANTS did not run cleanly, so the registry it declares is not trustworthy:"
-  print -u2 -- "${fork_err_text}" | command sed 's/^/    /'
+  # fd 1, not fd 2, into the pipe: `print -u2 … | sed` hands sed an empty stdin
+  # and the indent silently does nothing (DO-674).
+  print -r -- "${fork_err_text}" | command sed 's/^/    /' >&2
   print -u2 -- "    A tenants file must be self-contained and silent. Check for CRLF line endings"
   print -u2 -- "    (file \"$TENANTS\"), a byte-order mark, or an assignment to a table this renderer"
   print -u2 -- "    does not declare."

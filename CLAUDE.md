@@ -543,6 +543,9 @@ session on the wrong account, use the [claude-accounts](.claude/skills/claude-ac
   (which reports credential ownership, answered from `$CLAUDE_CONFIG_DIR`, not the active profile).
 - **Never put MCP or auth env vars in `~/.claude/settings.json`'s `env`**: clauth clears it on every
   profile switch. Put them in `zsh/zshrc.herdr`.
+- **A tenants file that exists and cannot be read refuses every launch** — it used to read as
+  "no machine owns anything" and silently disable the seat guard. Keep it self-contained and
+  silent (`zsh -n` it); `CLAUDE_FOREIGN_PROFILE_OK=1` is the one-command way past.
 - **A standing `auth_broken` is reported, never cleared out of band.** The remedy is
   `clauth login <profile>`; a later successful *fetch* does not clear it on clauth 0.15.1.
 - **Access tokens live 8 h.** A suspend that outlasts the validity a token had *left* expires every

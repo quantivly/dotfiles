@@ -896,3 +896,87 @@ marker line with no tab. It is unreachable while the key and value checks stand,
 line then always carries exactly one tab — but it is kept as the second line of defence for the
 day someone removes the key check, which is the change that made that branch reachable in the
 first place.
+
+
+## The other reader of that same file (DO-674)
+
+**DO-665 hardened the renderer and left the guard exactly as it was**, and the section above says
+why that mattered without noticing it had happened: `claude-tenants-owner` forked a bare `zsh -f`,
+**ignored its exit status and discarded its stderr**, so any tenants file that ran without
+populating the table answered *"nobody owns anything"* and every DO-641 door stopped refusing,
+silently. Measured on the live machine on 2026-09-21, after DO-665 had deployed — five files, one
+guard off, the other reader refusing all five:
+
+| tenants file | `claude-profile-foreign fz` | `machines-render` |
+|---|---|---|
+| CRLF line endings | rc 1 — **not foreign, guard OFF** | exit 2 |
+| an unterminated quote | rc 1 — **not foreign** | exit 2 |
+| a subscript assign to an undeclared table | rc 1 — **not foreign** | exit 2 |
+| a UTF-8 BOM | rc 1 — **not foreign** | exit 2 |
+| `has_command jq && TABLE=( … )` | rc 1 — **not foreign** | exit 2 |
+
+**The direction is the decision, and it is refuse.** The renderer's consumer is rabota, which
+refuses loudly; this function's consumers are `clauth start`, `clauth <p>`, `claude-as`, `hspawn -p`
+and the picker's last resort — things a person runs all day — so the obvious reading is that a
+stray CR must not stop every launch. The asymmetry says otherwise. Wrongly *allowing* is the DO-641
+incident reproduced exactly: a seat spent silently, invisible to both machines, which is how two
+sessions came to be billing dev's seat from the laptop. Wrongly *refusing* is a named error
+carrying zsh's own complaint, it lands only on someone who has just edited the file, and
+`CLAUDE_FOREIGN_PROFILE_OK=1` — which the refusal prints, and which short-circuits the fault check
+as well as the ownership one — is one command away.
+
+**DO-665's precedent supports that direction rather than cutting against it**, and the distinction
+is worth keeping straight: the renderer is lenient about an **unadopted** registry (an empty
+`_MACHINE_ID` is exit 0, so `rabota doctor` still runs) and strict about a **broken** file. Same
+split here. No tenants file, and a file that owns nothing, stay rc 1; a file that exists and cannot
+be trusted is rc 2 and every door refuses.
+
+**The accepted cost, stated rather than discovered later:** on this machine the tenants file is
+also the pool source, so a broken file leaves `claude` with no last resort and it reports no
+account until the file is fixed or the escape hatch is used.
+
+**`command claude` bypasses all of this, and is the wrong reach.** It skips the `claude()` wrapper
+outright, so there is no ownership guard — but also no picker, no tenant routing and no per-session
+account dir: it runs on whatever `CLAUDE_CONFIG_DIR` already holds, which in a fresh shell is the
+shared global one, i.e. the many-holders-of-one-grant state this file opens by describing.
+`CLAUDE_FOREIGN_PROFILE_OK=1 claude` is the escape to use, and the one the refusal prints: it turns
+off *this* guard for one command and leaves every other layer standing.
+
+- **The predicate has three answers now** — 0 + the owning machine, 1 not foreign, 2 + a fault
+  description — and the fault text rides on **stdout** beside the owner, because every caller reads
+  it through `$( )` and a global cannot cross a command substitution.
+- **`claude-foreign-door` is new, and dashed.** Three doors repeated the same presence test and
+  command substitution; a third answer would have made that three near-identical `case` statements,
+  and the argument for one emitter is the argument for one door. It absorbs the `$+functions` test,
+  so the existing fail-open-when-the-predicate-is-absent rows keep their exact meaning.
+- **The last resort declines rather than refuses**, reporting through `_CLAUDE_FALLBACK_WHY` with
+  its own wording — naming the *file*, never a machine, since none was identified.
+- **`has_command jq && TABLE=( … )` was recorded as undetectable in three places and is not.** It
+  is a command not found in a bare `zsh -f`, so it writes to the fork's stderr and the class guard
+  catches it; `machines-render` had been refusing it since DO-665 while this file's prose said it
+  could not be seen. Only the genuinely **silent** early exit — a `return`, `[[ -n "$UNSET" ]] &&
+  TABLE=( … )` — remains undetectable, and those three claims now say so.
+- **`print -u2 -- "$x" | sed 's/^/    /'` does not indent anything.** The pipe reads fd 1, so
+  writing to fd 2 first hands `sed` an empty stdin: the tenants file's own complaint came out flush
+  left, reading as a second message rather than as this one's evidence. DO-665's copy had the
+  defect; both are fixed and both now have a row, counted as *no line escaped the indent* rather
+  than *N lines got it*, so the row is not about the fixture's length.
+
+State tables: `scripts/test-hspawn.sh` (412 → 464), `scripts/test-claude-pick.sh` (497 → 503) and
+`scripts/test-machines-render.sh` (65 → 66). **15 mutants, 15 deaths**, each dry-run for
+applicability and the mutated region diffed before a kill was booked.
+
+**Two survived the first sweep, and both were real gaps rather than wording.** Trimming the fork's
+pre-declaration list survived everything, because every fixture in the suite used a table name that
+is undeclared either way — the row that kills it asserts the *mirror* of the undeclared-table row,
+that a subscript assignment to a table the list **does** declare is not a fault. And `mktemp`
+failing was treated as a clean read, disabling the class guard silently; it is reachable only by
+fault injection, so the row puts a failing `mktemp` on `PATH` ahead of the real one for one command.
+Note that `test-machines-render.sh`'s list cross-check cannot see the first of those: it compares
+the two files' *declaration lines*, and `zshrc.herdr`'s top-level declaration still names every
+table however the fork's copy inside it is trimmed.
+
+**The sweep itself destroyed the first attempt**, which is worth recording because the mistake is
+invisible in its own output: restoring each mutant with `git checkout --` reverted the *uncommitted
+implementation* along with it, so every later mutant reported `NOT APPLICABLE` and two reported
+kills against the pre-change file. Back the files up and restore from the copy, or commit first.
