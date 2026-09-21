@@ -268,6 +268,63 @@ class ResolveRemoteTests(LocalRecipeTests):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
 
+class CreateWorktreeRemoteTests(LocalRecipeTests):
+    """DO-657: ``create_worktree_remote`` fetches before ``worktree add``, in the same ssh call, and
+    a caller that passes no ``--base`` gets the remote's own ``origin/HEAD`` rather than whatever
+    the clone's local ``HEAD`` happened to be left at.
+    """
+
+    def machine(self, ctx):
+        return ctx.tenant.machines["dev"]
+
+    def test_the_fetch_is_present_and_ordered_before_worktree_add_in_the_same_command(self):
+        runner = FakeRunner([(["ssh"], Result(0, "", ""))])
+        ctx = self.ctx(runner)
+        lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", "origin/main")
+        self.assertEqual(len(runner.calls), 1)  # one ssh call, not two
+        cmd = runner.calls[0][-1]
+        self.assertLess(cmd.index("'fetch'"), cmd.index("'worktree'"))
+        self.assertIn("'origin'", cmd)
+
+    def test_a_failing_fetch_refuses_and_creates_nothing(self):
+        runner = FakeRunner([(["ssh"], Result(1, "", "fatal: unable to access repo"))])
+        ctx = self.ctx(runner)
+        with self.assertRaises(errors.Refused):
+            lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", "origin/main")
+        # The one ssh call made is the fetch+worktree batch itself — no separate worktree-add
+        # call was ever attempted after it.
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_no_base_resolves_origin_head_and_uses_it_for_worktree_add(self):
+        runner = SequencedRunner([Result(0, "main", ""), Result(0, "", "")])
+        ctx = self.ctx(runner)
+        lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", None)
+        self.assertEqual(len(runner.calls), 2)
+        resolve_cmd = runner.calls[0][-1]
+        self.assertIn("symbolic-ref", resolve_cmd)
+        self.assertIn("refs/remotes/origin/HEAD", resolve_cmd)
+        worktree_cmd = runner.calls[1][-1]
+        self.assertIn("'main'", worktree_cmd)
+        self.assertLess(worktree_cmd.index("'add'"), worktree_cmd.index("'main'"))
+
+    def test_a_missing_origin_head_refuses_naming_the_repo(self):
+        runner = FakeRunner([(["ssh"], Result(0, "", ""))])  # symbolic-ref found nothing
+        ctx = self.ctx(runner)
+        with self.assertRaises(errors.Refused) as cm:
+            lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", None)
+        self.assertIn("/repo", str(cm.exception))
+        self.assertIn("--base", str(cm.exception))
+        # Refused before ever attempting the fetch+worktree-add call.
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_a_failed_origin_head_lookup_refuses_naming_the_repo(self):
+        runner = FakeRunner([(["ssh"], Result(255, "", "no route to host"))])
+        ctx = self.ctx(runner)
+        with self.assertRaises(errors.Refused) as cm:
+            lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", None)
+        self.assertIn("/repo", str(cm.exception))
+
+
 class ExpandRemoteTests(unittest.TestCase):
     """expand_remote (DO-652 task-7 fix round 1): expand ``~`` against the REMOTE home only."""
 
@@ -427,39 +484,45 @@ class RunRecipeTests(LocalRecipeTests):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(machine=""))
 
     def test_run_creates_the_worktree_sends_the_brief_then_starts_the_unit(self):
-        # DO-652 task-7 dispatch correction 6: a remote --run makes FOUR runner calls
-        # (resolve, worktree, brief, unit), not three — the brief's own count is stale.
-        # SequencedRunner (not FakeRunner) so ``.inputs`` is available for the brief-content check.
+        # DO-657: a remote --run with no --base now makes FIVE runner calls (resolve,
+        # resolve-default-branch, fetch+worktree, brief, unit) — one more than DO-652's four,
+        # because resolving `origin/HEAD` for an unspecified --base is a real extra round trip
+        # (see create_worktree_remote's docstring). SequencedRunner (not FakeRunner) so
+        # ``.inputs`` is available for the brief-content check.
         ok = Result(0, self.RESOLVE_OUT, "")
-        runner = SequencedRunner([ok, ok, ok, ok])
+        branch = Result(0, "main", "")
+        runner = SequencedRunner([ok, branch, ok, ok, ok])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         joined = [" ".join(c) for c in runner.calls]
-        self.assertEqual(len(runner.calls), 4)
-        # Fix round 2, Critical 1: out_dir is created (mkdir -p) in the SAME call as the worktree
-        # add, so the call count stays four — a shell `>` redirection does not create parent
-        # directories, and systemd-run returns 0 once the transient unit is CREATED, so a missing
-        # out_dir would otherwise fail invisibly AFTER a "started" row was already written.
-        self.assertIn("'mkdir'", joined[1]); self.assertIn("'-p'", joined[1])
-        self.assertIn(f"'{out['out_dir']}'", joined[1])
+        self.assertEqual(len(runner.calls), 5)
+        self.assertIn("symbolic-ref", joined[1]); self.assertIn("origin/HEAD", joined[1])
+        # Fix round 2, Critical 1: out_dir is created (mkdir -p) in the SAME call as the fetch and
+        # the worktree add — a shell `>` redirection does not create parent directories, and
+        # systemd-run returns 0 once the transient unit is CREATED, so a missing out_dir would
+        # otherwise fail invisibly AFTER a "started" row was already written.
+        self.assertIn("'mkdir'", joined[2]); self.assertIn("'-p'", joined[2])
+        self.assertIn(f"'{out['out_dir']}'", joined[2])
+        # DO-657: the fetch is ordered before the worktree add, in the same command.
+        self.assertLess(joined[2].index("'fetch'"), joined[2].index("'worktree'"))
         # DO-652 task-7 dispatch, an additional bug found in the brief's own row (same class as
         # its already-flagged correction 7): once every argv element is POSIX single-quoted, a
         # phrase spanning two elements ("git -C", "worktree add") is never a contiguous substring
         # of the joined command — only a check against ONE quoted element survives shquote.
-        self.assertIn("'git'", joined[1]); self.assertIn("'worktree'", joined[1]); self.assertIn("'add'", joined[1])
-        self.assertIn("cat > ", joined[2])
-        self.assertIn("systemd-run", joined[3])
+        self.assertIn("'git'", joined[2]); self.assertIn("'worktree'", joined[2]); self.assertIn("'add'", joined[2])
+        self.assertIn("cat > ", joined[3])
+        self.assertIn("systemd-run", joined[4])
         # Mutation 7: the resolved bin (not the locally-expanded config default) must be what
         # actually starts the unit.
-        self.assertIn(self.RESOLVED_BIN, joined[3])
+        self.assertIn(self.RESOLVED_BIN, joined[4])
         # Fix round 2, Important 2: the brief's CONTENT (not just its path) must actually reach
-        # call #3 — neither FakeRunner nor the old SequencedRunner recorded `input=`, so a
-        # mutation that emptied the brief before sending it survived the whole suite.
-        self.assertEqual(runner.inputs[2], self.BRIEF_TEXT)
+        # the brief-send call — neither FakeRunner nor the old SequencedRunner recorded `input=`,
+        # so a mutation that emptied the brief before sending it survived the whole suite.
+        self.assertEqual(runner.inputs[3], self.BRIEF_TEXT)
         # ...and the path used to SEND the brief must be the exact path the agent is told to READ.
         remote_brief_path = f"{out['out_dir']}/brief.md"
-        self.assertIn(f"cat > '{remote_brief_path}'", joined[2])
-        self.assertIn(f"'Read {remote_brief_path} and execute.'", joined[3])
+        self.assertIn(f"cat > '{remote_brief_path}'", joined[3])
+        self.assertIn(f"'Read {remote_brief_path} and execute.'", joined[4])
         row = ctx.store.list_lanes("quantivly")[0]
         self.assertEqual(row["status"], "started")
         self.assertEqual(row["unit"], out["unit"])
@@ -514,14 +577,18 @@ class RunRecipeTests(LocalRecipeTests):
         # the remote. This proves the RESOLVED $HOME is what actually reaches both the returned
         # paths and the `git -C` argv, not the raw config value.
         ok = Result(0, self.RESOLVE_OUT, "")
-        runner = SequencedRunner([ok, ok, ok, ok])
+        branch = Result(0, "main", "")
+        runner = SequencedRunner([ok, branch, ok, ok, ok])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         self.assertNotIn("~", out["worktree"])
         self.assertNotIn("~", out["out_dir"])
         self.assertTrue(out["worktree"].startswith(self.RESOLVED_HOME + "/"), out["worktree"])
         self.assertTrue(out["out_dir"].startswith(self.RESOLVED_HOME + "/"), out["out_dir"])
-        worktree_call = " ".join(runner.calls[1])
+        # calls[1] is the origin/HEAD resolution, itself against the resolved (not tilde) repo
+        # path — proven separately below; calls[2] is the fetch+worktree-add batch.
+        self.assertNotIn("~", " ".join(runner.calls[1]))
+        worktree_call = " ".join(runner.calls[2])
         self.assertNotIn("~", worktree_call)
         self.assertIn(f"'-C' '{self.RESOLVED_HOME}/quantivly/hub'", worktree_call)
 
@@ -534,34 +601,36 @@ class RunRecipeTests(LocalRecipeTests):
         # SequencedRunner replaces it: success for resolve/worktree/brief, failure only on the
         # unit start — the exact call this row claims to be testing.
         #
-        # Fix round 2, Important 1: a worktree created in call #2 and orphaned by this failure is
-        # invisible to every rabota command from then on (census/reap both work from lane rows),
-        # so the fifth call here is best-effort cleanup — the call count is five, not four, and
-        # that is the correct, INTENDED count for this exact failure path (a review round asked
-        # for out_dir's mkdir to keep the SUCCESS-path count at four, which it does; it did not
-        # ask for a failure path to skip cleanup just to keep matching that number).
+        # Fix round 2, Important 1: a worktree created in the fetch+worktree call and orphaned by
+        # this failure is invisible to every rabota command from then on (census/reap both work
+        # from lane rows), so the LAST call here is best-effort cleanup. DO-657 adds the
+        # origin/HEAD resolution ahead of it, so the failure path is now six calls, not five —
+        # resolve, resolve-default-branch, fetch+worktree, brief, the failing unit start, cleanup.
         ok = Result(0, self.RESOLVE_OUT, "")
-        runner = SequencedRunner([ok, ok, ok, Result(1, "", "Failed to start")])
+        branch = Result(0, "main", "")
+        runner = SequencedRunner([ok, branch, ok, ok, Result(1, "", "Failed to start")])
+        ctx = self.ctx(runner)
+        with self.assertRaises(errors.RabotaError):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
+        self.assertEqual(len(runner.calls), 6)
+        cleanup = " ".join(runner.calls[5])
+        self.assertIn("'remove'", cleanup); self.assertIn("'--force'", cleanup)
+
+    def test_a_failed_brief_send_removes_the_orphaned_worktree_and_still_raises(self):
+        # Fix round 2, Important 1: the SAME cleanup, on the OTHER failure path (brief send
+        # fails rather than unit start) — and the ORIGINAL error (RabotaError from send_brief)
+        # must still be what's raised, never masked by a cleanup outcome. DO-657: resolve,
+        # resolve-default-branch and fetch+worktree must all succeed before the brief send is
+        # even attempted, so this is five calls, not three.
+        runner = SequencedRunner([Result(0, self.RESOLVE_OUT, ""), Result(0, "main", ""),
+                                  Result(0, "", ""), Result(1, "", "no space left on device")])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.RabotaError):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         self.assertEqual(ctx.store.list_lanes("quantivly"), [])
         self.assertEqual(len(runner.calls), 5)
         cleanup = " ".join(runner.calls[4])
-        self.assertIn("'remove'", cleanup); self.assertIn("'--force'", cleanup)
-
-    def test_a_failed_brief_send_removes_the_orphaned_worktree_and_still_raises(self):
-        # Fix round 2, Important 1: the SAME cleanup, on the OTHER failure path (brief send,
-        # call #3, rather than unit start, call #4) — and the ORIGINAL error (RabotaError from
-        # send_brief) must still be what's raised, never masked by a cleanup outcome.
-        runner = SequencedRunner([Result(0, self.RESOLVE_OUT, ""), Result(0, "", ""),
-                                  Result(1, "", "no space left on device")])
-        ctx = self.ctx(runner)
-        with self.assertRaises(errors.RabotaError):
-            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
-        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
-        self.assertEqual(len(runner.calls), 4)
-        cleanup = " ".join(runner.calls[3])
         self.assertIn("'remove'", cleanup); self.assertIn("'--force'", cleanup)
 
 
