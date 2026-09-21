@@ -715,12 +715,8 @@ be present and blind in precisely the sessions that spent the seat.
   into a `_claude_pick_warnings` entry naming the seat, its owner and what happened instead,
   plus the terse `_claude_pick_skipped` phrase `claude()` joins into its `refused:` list.
   **Which surfaces print it, exactly:** `claude()` and `hspawn` loop over the warnings on every
-  launch — those are the two that actually start a session — and `claude-pick --explain` /
-  `--json` carry both arrays. The **bare** `claude-pick` prints nothing: its one refusal line
-  (`scripts/claude-pick:751`) sits inside the `(( gate && rc == 0 ))` block, so it fires only
-  for a *gate* refusal, never for a picker-level `unusable`. That predates this change and is
-  general to the state, not to DO-632 — but it is the one surface where "never silent" is false,
-  and a script doing `p=$(claude-pick --strict)` gets an empty string, exit 2 and no reason. Its existing block already reads correctly for
+  launch — those are the two that actually start a session — `claude-pick --explain` / `--json`
+  carry both arrays, and since DO-664 the bare `claude-pick` names every refusal on stderr. Its existing block already reads correctly for
   this case: *"NO usable account — not the pool, and not clauth's active one."*
 - **Nothing is invented in its place.** Falling through to some other locally-owned profile
   was considered and rejected: `claude()`'s own comment is that *"inventing a profile would
@@ -732,8 +728,15 @@ be present and blind in precisely the sessions that spent the seat.
   still ranks it. That is a table contradicting itself, not a door; closing it would put a
   tenants-file read on every candidate of every pick. A row asserts the current answer, so
   moving it is a decision.
-- **Follow-up, named here so it is not lost:** move that refusal line out of the gate block so a
-  plain `claude-pick` exit 2 names its reason, the way its own comment already claims it does.
+- **DO-664, found by review of this change:** the CLI's one refusal line lived inside the gate
+  block (`if (( gate && rc == 0 ))`), so it fired only for a *gate* refusal on an otherwise
+  successful pick — while its own comment claimed it served "every other exit-2 refusal".
+  Measured: `unusable` (2), `bad-table` (4) and `no-profiles` (5) all exited with **no output on
+  either stream**. It now fires for every `rc != 0`, and three states are excluded because
+  something else already spoke: `exhausted` (the §5.4 block), `--explain` and `--json`. Each
+  exclusion has a row, since "prints twice" and "prints once" are indistinguishable from an exit
+  code. The broader lesson is the one this file keeps paying for: **a comment describing what a
+  line does is not evidence the line is reachable.**
 - **Known duplication, out of scope:** rabota's Python reads a second copy of the same fact,
   `[machines.dev].profile` in `~/.dotfiles-local/rabota/tenants/quantivly.toml`. The
   remote-lanes design already calls that a reliability risk; unifying it is its own change.

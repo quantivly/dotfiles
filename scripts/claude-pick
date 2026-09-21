@@ -746,9 +746,6 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
       fi
     fi
   fi
-  # The plain (non-JSON) caller gets the reason on stderr, the way every other
-  # exit-2 refusal names what it refused.
-  (( rc == 2 )) && print -u2 -- "$PROG: refused ($_claude_pick_state) — $_claude_pick_reason"
 fi
 
 #-----------------------------------------------------------------------------
@@ -768,6 +765,33 @@ if (( rc == 0 )) && [[ -n "$REPLY" ]] && (( ! dry )); then
     # --dry-run.
     _claude_pick_warnings+=("could not build an account dir for '$REPLY' — config_dir is null on a successful pick")
   fi
+fi
+
+#-----------------------------------------------------------------------------
+# the refusal line
+#
+# EVERY refusal names itself on stderr. The line that used to do this lived
+# inside the gate block above — `if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]` —
+# so it fired only for a GATE refusal on an otherwise successful pick, while its
+# own comment claimed it served "every other exit-2 refusal". Measured before the
+# move (DO-664): `unusable` (2), `bad-table` (4) and `no-profiles` (5) each
+# printed NOTHING on either stream, so `p=$(claude-pick --strict)` handed a
+# script an empty string, an exit code, and nowhere to look for the reason.
+#
+# `rc != 0` rather than `rc == 2`: 4 and 5 are refusals a person must FIX, so
+# they are the ones least affordable to leave unexplained, and the gate's own
+# exit 2 is covered by the same line rather than by a second copy of it.
+#
+# THREE STATES DELIBERATELY DO NOT REACH IT, each because something else already
+# said it and a second line would be noise rather than information:
+#   * `exhausted` — _claude_pick_report_exhausted prints the §5.4 block from
+#     inside the picker, and its header already names the wall and the reset.
+#   * --explain — prints "refused: <state> — <reason>" in its own block below.
+#   * --json — carries `state` and `reason` as fields of the object.
+# Each of those exclusions is a row in test-claude-pick.sh, because "prints
+# twice" and "prints once" are indistinguishable from the exit code.
+if (( rc != 0 && ! explain && ! as_json )) && [[ "$_claude_pick_state" != exhausted ]]; then
+  print -u2 -- "$PROG: refused (${_claude_pick_state:-unknown}) — ${_claude_pick_reason:-no reason was recorded}"
 fi
 
 #-----------------------------------------------------------------------------

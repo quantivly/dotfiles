@@ -1880,6 +1880,63 @@ new_home cli4
 cli --dry-run
 check "no registered profile is exit 5"                  "$CLI_RC"   "5"
 
+# DO-664 — AN EXIT CODE IS NOT A REASON. The CLI's one refusal line sat inside
+# the gate block (`if (( gate && rc == 0 ))`), so it fired only for a GATE
+# refusal on an otherwise successful pick, and every picker-level refusal exited
+# silently. Measured before the fix: no-profiles (5), bad-table (4) and unusable
+# (2) each printed NOTHING on either stream, so `p=$(claude-pick --strict)` gave
+# a caller an empty string, a number, and nowhere to look.
+#
+# Asserted on stderr for every refusing state, because a refusal that names
+# itself on ONE of them is the shape that reads as fixed while a script still
+# gets nothing.
+check "...and says so on stderr rather than exiting silently" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (no-profiles)')" "1"
+check "...naming the remedy the picker recorded" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'clauth login')" "1"
+
+new_home cli4b
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+cli --dry-run --tenant nosuchtenant
+check "an unusable tenant names itself too (exit 4)" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (bad-table)')" "1"
+
+# THE ONE STATE THAT MUST NOT GAIN A LINE. `exhausted` is already reported from
+# inside the picker by _claude_pick_report_exhausted, whose header names the wall
+# AND the reset; a one-line summary after it is noise, and this row is what stops
+# the fix being written as a blanket `rc != 0` print.
+new_home cli4c
+mkprof a1 '{"five_hour":{"utilization":99.0}}'
+# --strict, or this is not a refusal at all: an interactive caller proceeds on
+# the least-bad member and exits 0, and the row would assert the absence of a
+# line from a run that never refused.
+cli --dry-run --strict
+check "an exhausted pool keeps its block and gains no second line" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (exhausted)')" "0"
+check "...the block itself is still there" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused — the account pool exhausted')" "1"
+
+# ...and the two surfaces that already carry state and reason do not repeat it.
+new_home cli4d
+cli --dry-run --explain
+check "--explain carries the refusal itself, so no duplicate line" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (no-profiles)')" "0"
+check "...and still explains the refusal" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused: no-profiles')" "1"
+cli --dry-run --json
+check "--json carries it in the object, so no stderr line either" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (no-profiles)')" "0"
+check "...and the object still carries the reason" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.reason | test("clauth login")')" "true"
+
+# A SUCCESSFUL PICK SAYS NOTHING ON STDERR. The guard is `rc != 0`; drop it and
+# every ordinary launch grows a refusal line for a pick that succeeded.
+new_home cli4e
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+cli --dry-run
+check "a successful pick prints no refusal line"        "$(printf '%s' "$CLI_ERR" | grep -c 'refused (')" "0"
+check "...and still prints the profile on stdout"       "$CLI_OUT" "a1"
+
 new_home cli5
 mkprof a1 '{"five_hour":{"utilization":10.0}}'
 cli --dry-run --tenant nosuchtenant
