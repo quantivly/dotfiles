@@ -8,9 +8,9 @@ It is the ONE door a headless lane comes through, which is why every spawner sha
 a window gets spent unmetered.
 
 This module supplies both the local form (``unit_name``, ``build_local``) and the remote/dev form
-(``build_remote``, ``send_brief``, ``create_worktree_remote``, ``resolve_remote``,
-``expand_remote``) plus the entry point that ties them together, ``run_recipe``, and its
-``rabota lane recipe`` registration.
+(``build_remote``, ``send_brief``, ``create_worktree_remote``, ``resolve_default_branch_remote``,
+``resolve_remote``, ``expand_remote``) plus the entry point that ties them together,
+``run_recipe``, and its ``rabota lane recipe`` registration.
 """
 import re
 import uuid
@@ -132,12 +132,48 @@ def send_brief(ctx, machine, remote_path: str, text: str) -> None:
         raise errors.RabotaError(f"could not write the brief to {machine.name}: {(res.err or res.out).strip()}")
 
 
-REMOTE_WORKTREE_TIMEOUT = 300  # seconds; git worktree add on a large repo can run well past 60s
+REMOTE_WORKTREE_TIMEOUT = 300  # seconds; git fetch + worktree add on a large repo can run well past 60s
+
+REMOTE = "origin"  # every repo under [machines.dev].repos uses this remote name today; hardcoded
+# rather than read from config because nothing in the schema declares a per-repo remote name, and
+# adding one would be a config-shape change this defect does not call for.
+
+
+def resolve_default_branch_remote(ctx, machine, repo_path: str) -> str:
+    """The repo's default branch on ``machine``, read from ``origin/HEAD`` — never a guess.
+
+    Called only when the caller passed no ``--base``. ``origin/HEAD`` is a symbolic ref set by
+    ``git clone`` or ``git remote set-head``, not by ``fetch`` — a clone made without either (or
+    one where it was pruned) has none, and falling back to the remote's local ``HEAD`` in that
+    case is exactly the bug this function exists to refuse instead of committing: local ``HEAD``
+    on a bare or freshly-cloned mirror is whatever branch happened to be checked out last, not
+    necessarily the project's default.
+    """
+    script = f"git -C {remote.shquote(repo_path)} symbolic-ref -q --short refs/remotes/{REMOTE}/HEAD"
+    res = ctx.runner.run(remote.ssh_argv(machine, script))
+    branch = (res.out or "").strip()
+    if not res.ok or not branch:
+        raise errors.Refused(
+            f"{repo_path} on {machine.name} has no {REMOTE}/HEAD set: pass --base explicitly")
+    return branch
 
 
 def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, out_dir: str,
                            base: str | None, *, timeout: float = REMOTE_WORKTREE_TIMEOUT) -> None:
-    """``mkdir -p`` the lane's ``out_dir`` and ``git worktree add`` the worktree, in ONE ssh call.
+    """``mkdir -p`` the lane's ``out_dir``, fetch, and ``git worktree add`` the worktree — fetch
+    and the add in ONE ssh call, ahead of the add, so refreshing the clone costs no extra round
+    trip beyond the call this docstring already batches.
+
+    A fetch failure REFUSES the lane rather than falling through to ``worktree add`` against
+    whatever the clone last had — the same "an unmeasured dimension refuses, never as room" rule
+    ``budget.py`` holds for its own gate: a stale clone that failed to refresh is not evidence the
+    tree is current, so it must not be treated as room to proceed.
+
+    When the caller passed no ``--base``, one resolves first (see
+    ``resolve_default_branch_remote``) — a real extra round trip, since which branch is default is
+    remote-only information this process cannot know in advance; it is not folded into this call
+    because a refusal here must name the repo on its own, not share an exit code with an unrelated
+    fetch failure.
 
     ``out_dir`` must exist before the brief is sent (a shell ``>`` redirection does not create
     parent directories) and before the unit starts (its ``StandardOutput``/``StandardError``
@@ -146,15 +182,17 @@ def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, out_dir:
     anyway. ``timeout`` defaults well above the runner's own 60s default: a timeout maps to the
     same ``Result`` shape as a real failure, and git on a large repo can legitimately run long.
     """
+    if not base:
+        base = resolve_default_branch_remote(ctx, machine, repo_path)
     mkdir = ["mkdir", "-p", out_dir]
-    worktree_add = ["git", "-C", repo_path, "worktree", "add", worktree]
-    if base:
-        worktree_add.append(base)
-    cmd = " && ".join(" ".join(remote.shquote(p) for p in parts) for parts in (mkdir, worktree_add))
+    fetch = ["git", "-C", repo_path, "fetch", REMOTE]
+    worktree_add = ["git", "-C", repo_path, "worktree", "add", worktree, base]
+    cmd = " && ".join(" ".join(remote.shquote(p) for p in parts)
+                      for parts in (mkdir, fetch, worktree_add))
     res = ctx.runner.run(remote.ssh_argv(machine, cmd), timeout=timeout)
     if not res.ok:
-        raise errors.RabotaError(f"could not create the worktree on {machine.name}: "
-                                 f"{(res.err or res.out).strip()}")
+        raise errors.Refused(f"could not fetch or create the worktree on {machine.name}: "
+                             f"{(res.err or res.out).strip()}")
 
 
 def _remove_worktree_remote(ctx, machine, repo_path: str, worktree: str) -> None:
