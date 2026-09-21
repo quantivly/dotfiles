@@ -88,14 +88,17 @@
 # low-risk, not absent, and this is a safety gate. So after the age test the
 # gate reads the parsed reset: an instant in the past refuses (state
 # gate-unmeasured, the same sentence the age refusal says), and an ABSENT or
-# UNPARSEABLE reset refuses as well — unmeasured, never optimistic. Note what
-# that second rule costs: clauth omits resets_at for a window that has not
-# started (measured 2026-09-10, absent exactly where utilization is 0.0), so a
-# seat on a fresh, unstarted window is refused here until its first request
-# stamps a reset. The ranker (zshrc.herdr) still scores such a seat; only the
-# headless gate declines to start a lane on a window it cannot date. The
-# instant is reported in the gate object as resets_at (RFC 3339 UTC, or null)
-# beside cache_age_s.
+# UNPARSEABLE reset refuses as well — unmeasured, never optimistic — UNLESS the
+# reading is exactly 0 (DO-671). clauth omits resets_at for a window that has not
+# started (measured 2026-09-10, absent exactly where utilization is 0.0), so the
+# undatable-reset rule fired on every fresh seat and on no other kind. A 0
+# reading needs no instant to be safe: the age arms above refuse an unreadable or
+# too-old reading first, the instant never enters the projection, and 0 means the
+# same in an unstarted, current or rolled window. Every NON-zero reading with an
+# undatable window still refuses. Until 2026-09-21 the zero case refused too,
+# which was survivable while the ranker could choose another seat and a hard block
+# once a dev lane had one seat and no fallback. The instant is reported in the
+# gate object as resets_at (RFC 3339 UTC, or null) beside cache_age_s.
 #
 # THE WEEKLY SPEND WALL (DO-623). Once every 5h arm has passed, the gate asks the
 # same question of the weekly windows: the aggregate (seven_day) and every
@@ -601,16 +604,36 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
     gate_verdict=refuse; _claude_pick_state=gate-unmeasured
     _claude_pick_reason="$REPLY's 5h reading (${_claude_pick_u5}%) is ${_claude_pick_age}s old, past CLAUDE_PICK_CACHE_MAX_AGE=${gate_max_age}s; a stale reading is an unmeasured one"
     REPLY=""; rc=2
-  elif [[ "$_claude_pick_r5" != (-|)<-> ]]; then
+  elif [[ "$_claude_pick_r5" != (-|)<-> ]] && (( _claude_pick_u5 != 0 )); then
     # No reset instant — absent (an unstarted window, the way clauth writes
     # one) or unparseable. The age test dates the READING, never the WINDOW it
     # describes, so a reading with no reset is a reading of unknown currency:
     # unmeasured, never optimistic. See A ROLLED WINDOW IS AN UNMEASURED ONE
     # TOO, above.
+    #
+    # EXCEPT AT EXACTLY ZERO (DO-671). A reading of 0 needs no reset instant to
+    # be safe, and the arms above have already established the only thing that
+    # could make it lie: an unreadable or too-old reading refuses before here, so
+    # reaching this line with u5 == 0 means the seat had spent NOTHING as of at
+    # most CLAUDE_PICK_CACHE_MAX_AGE ago. The instant is not used in the
+    # projection — that is `u5 + rate * est/60`, and it does not appear — so it
+    # decides currency alone, and 0 reads the same in any window: an unstarted
+    # one, a current one, a rolled one. Refusing it bought nothing and cost the
+    # seat with the most room.
+    #
+    # It cost exactly that. clauth omits resets_at precisely where utilization is
+    # 0.0, so this arm fired on every FRESH seat and on no other kind. Survivable
+    # while the ranker could pick a different seat; a hard block once a dev lane
+    # got one seat and no fallback ([machines.dev].profile, and run_recipe
+    # refusing a --seat that disagrees with it), which is how it was found.
+    #
+    # The zero test is deliberately `!= 0` and not `< some floor`: this widens the
+    # gate only for the one value that cannot be wrong, and every non-zero reading
+    # with an undatable window still refuses exactly as before.
     gate_verdict=refuse; _claude_pick_state=gate-unmeasured
     _claude_pick_reason="$REPLY has a 5h reading (${_claude_pick_u5}%) with no readable reset instant (five_hour.resets_at absent or unparseable); refusing rather than assuming the window is current"
     REPLY=""; rc=2
-  elif (( _claude_pick_r5 < 0 )); then
+  elif [[ "$_claude_pick_r5" == (-|)<-> ]] && (( _claude_pick_r5 < 0 )); then
     # The window the number describes has ended. The reading may look fresh —
     # a `touch`, or a writer that kept a rolled reading — and the age test
     # above passed it; the reset is the value and "now" is the threshold.
