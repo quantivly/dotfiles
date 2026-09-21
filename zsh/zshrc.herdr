@@ -208,6 +208,12 @@ _claude_holder_count_one() {
 #   CLAUDE_TENANT_DEFAULT=personal
 #   CLAUDE_TENANT_POOL=( work "quantivly-1 quantivly-2" personal "personal" )
 #   CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )   # profile=the machine that owns it
+#   CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )               # profile=that machine's ID
+#
+# The last two are ONE fact keyed two ways, and are edited together: the label is
+# prose for a human reading a refusal, the id is what rabota dispatches on
+# (DO-665). `scripts/machines-render --check` refuses a partial pair; declaring
+# NEITHER is fine and means this machine registers no remote machines.
 #
 # Keep this file SELF-CONTAINED: plain assignments, no shell functions, nothing
 # printed. An agent's shell re-reads it in a bare `zsh -f` (claude-tenants-owner),
@@ -235,7 +241,7 @@ _claude_holder_count_one() {
 # DO-641 guard silently off. The on-demand path for shells that never ran this
 # (claude-tenants-owner) therefore forks a shell rather than sourcing in place.
 typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID
 : "${CLAUDE_TENANT_DEFAULT=}"
 [[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
   source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
@@ -542,7 +548,7 @@ claude-tenants-owner() {   # $1 = profile
   local line
   line="$(command zsh -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID
     source "$1"
     print -r -- "__OWNER__${CLAUDE_TENANT_MACHINE_OWNED[$2]:-}"' \
     tenants-owner "$f" "$1" </dev/null 2>/dev/null \

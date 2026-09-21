@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Which machine owns which clauth seat is declared once (DO-665).** It used to live in two
+  files — `CLAUDE_TENANT_MACHINE_OWNED` in the tenants file (profile → label) and
+  `[machines.<m>].profile` in rabota's tenant TOML (machine id → profile) — with nothing checking
+  they agreed. They were inverse mappings in different vocabularies, so neither could be derived
+  from the other; the tenants file gains `CLAUDE_TENANT_MACHINE_ID`, which is the missing link,
+  and `scripts/machines-render` renders the registry on demand for rabota. **The direction is
+  the decision:** a stale copy on the dotfiles side fails open and silently (the DO-632 / DO-641
+  guards just stop refusing), while rabota fails loudly, so the hand-edited copy stays on the
+  silent side and the loud side asks. Nothing is generated to disk — a rendered file is the same
+  defect one level down. A fault never arrives as an empty registry, and a leftover `profile` key
+  in a `[machines.<m>]` table is refused rather than ignored.
+  **Migration, and the order matters.** Add `CLAUDE_TENANT_MACHINE_ID` to the tenants file (safe
+  at any time — nothing reads it until this lands), then **delete `[machines.<m>].profile` BEFORE
+  deploying**, not after. On the old code a missing key degrades only to "no seat configured" for
+  that machine, and only if a remote lane is started; on the new code a *present* key raises at
+  config load, so every rabota command — including `rabota doctor` — would exit 2 until the file
+  is edited. Reasoning: `docs/CLAUDE_ACCOUNT_PICKER.md`.
+
 ### Fixed
 
 - **The account picker's last-resort fallback no longer takes a seat another machine owns

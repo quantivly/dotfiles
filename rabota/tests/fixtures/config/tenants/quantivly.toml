@@ -35,4 +35,3 @@ ssh       = "dev"
 tenants   = ["quantivly"]
 repos     = { hub = "~/quantivly/hub" }
 state_dir = "~/.local/state/rabota"
-profile   = "quantivly-0"
