@@ -555,10 +555,14 @@ claude-tenants-owner() {   # $1 = profile
 # otherwise prints nothing, rc 1.
 #
 # This is for the EXPLICIT doors, every one of which goes straight past the
-# picker. It does not reach the automatic path: the pool keeps a foreign profile
-# out only where the out-of-repo table omits it by hand, and the picker's
-# last-resort fallback hands out clauth's active profile without consulting this
-# table at all (DO-632 owns that door). On
+# picker — and, since DO-632, for the picker's LAST RESORT too: that path
+# consults no pool by construction, so it was the one automatic selection this
+# table never reached (_claude_fallback_profile). What is still outside it is
+# the RANKED pick, where the pool remains the only enforcement — a pool that
+# LISTS an owned profile therefore still hands it out. That is a table
+# contradicting itself rather than a door left open, and closing it would put a
+# tenants-file read on every candidate of every pick; it is pinned by a row in
+# test-claude-pick.sh, so moving it is a decision rather than a drift. On
 # 2026-09-19 two `clauth start quantivly-0` sessions, typed into panes by
 # herdr-draft's account row, were spending dev's seat from the laptop while dev
 # sat idle. Holding the LOGIN stays allowed: this machine's own grant is how it
@@ -1592,18 +1596,75 @@ _claude_pick_reset_text() {
   print -r -- "$(strftime '%a %d %b %H:%M %Z' $(( EPOCHSECONDS + r )) 2>/dev/null)"
 }
 
-# clauth's own active profile, when it has a credential and is not excluded.
-# This is the last-resort ACCOUNT: it keeps a session isolated when every pool
-# member is unusable, instead of dropping it onto the shared global file.
+# clauth's own active profile, when it has a credential and this machine may
+# use it. This is the last-resort ACCOUNT: it keeps a session isolated when
+# every pool member is unusable, instead of dropping it onto the shared global
+# file.
+#
+# IT CONSULTS NO POOL, and that is the point — the pool is what just came up
+# empty. So it is also the one selection path the tenant table's exclusions
+# never reached: until DO-632 it handed out clauth's active profile whatever the
+# table said about it, and a profile is absent from every pool on this machine
+# for exactly one reason — ANOTHER MACHINE OWNS THAT SEAT. MEASURED, 2026-09-19:
+# the work pool was unusable (one seat at 100%, one behind the spend wall), so a
+# session in this repo took `personal-1`, nanoclaw's seat.
+#
+# THE COST IS A CORRELATION, and it is written as one on purpose.
+# `quantivly-0`'s login was revoked 2026-09-18 22:16:03 and needed a human
+# `/login`; two laptop sessions were found on that seat on 09-19, through
+# `clauth start` (a door DO-641 has since closed). But that rejection is
+# `RefreshError::Invalid`, which CANNOT distinguish a double-spend from a
+# genuine server-side revocation — docs/CLAUDE_ACCOUNTS.md settles that, inside
+# a correction whose stated purpose is to stop this very inference being
+# rendered as an entailment. So a double-spend is the live hypothesis, not a
+# finding, and the next revocation here still has to be diagnosed rather than
+# attributed from this comment. What is NOT in doubt is the mechanism the rule
+# rests on: refresh-token rotation is server-side, so two machines logged in to
+# one account are two independent holders of one grant.
+#
+# SETS RATHER THAN PRINTS, because the caller cannot read a global out of a
+# `$( )` — the rule this file records for the picker's own REPLY — and the
+# decline has to be REPORTABLE or the skip merely trades a visible wrong account
+# for an invisible one:
+#
+#   _CLAUDE_FALLBACK_PROFILE  clauth's active profile, whenever one was readable
+#   _CLAUDE_FALLBACK_WHY      why it was declined, empty when it was taken
+#
+# Returns 0 when _CLAUDE_FALLBACK_PROFILE may be taken.
+#
+# The foreign test is `claude-profile-foreign`, the SAME predicate the five
+# explicit doors use (DO-641), and not a second reading of the same table: it
+# honours `CLAUDE_FOREIGN_PROFILE_OK` for a deliberate borrow, and it re-reads
+# the tenants FILE when the table is not in memory — which is the shell an agent
+# gets, where a snapshot carries functions but no variables. An in-memory-only
+# check would be present and blind in precisely the sessions that spent the seat.
 _claude_fallback_profile() {
-  local ap
+  local ap why owner
+  _CLAUDE_FALLBACK_PROFILE=""; _CLAUDE_FALLBACK_WHY=""
   [[ -r "$HOME/.clauth/status.json" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   ap="$(jq -e -r '.active_profile | select(type == "string") | select(. != "")' \
         "$HOME/.clauth/status.json" 2>/dev/null)" || return 1
   [[ -f "$HOME/.clauth/profiles/$ap/credentials.json" ]] || return 1
-  _claude_profile_excluded "$ap" >/dev/null && return 1
-  print -r -- "$ap"
+  _CLAUDE_FALLBACK_PROFILE="$ap"
+  # Guarded, and it FAILS OPEN when the predicate is missing — but not for the
+  # reason DO-641's doors do. The argument that survives here is about which
+  # shells can hold which halves: `claude-profile-foreign` is public and dashed,
+  # so a Claude Code Bash-tool snapshot KEEPS it, while `_claude_fallback_profile`
+  # is single-underscore and is dropped from that snapshot first. There is no
+  # realistic shell holding this function without that one, so the open branch is
+  # reachable only by a deliberate `unset -f` — which is the shape the row in
+  # test-claude-pick.sh pins, so a future rename that made the guard droppable
+  # would show up as a fail-open rather than as nothing.
+  if (( $+functions[claude-profile-foreign] )) && owner="$(claude-profile-foreign "$ap")"; then
+    _CLAUDE_FALLBACK_WHY="owned by $owner (CLAUDE_TENANT_MACHINE_OWNED)"
+    return 1
+  fi
+  if why="$(_claude_profile_excluded "$ap")"; then
+    _CLAUDE_FALLBACK_WHY="$why"
+    return 1
+  fi
+  return 0
 }
 
 # --- the one code path --------------------------------------------------------
@@ -1744,6 +1805,13 @@ _claude_pick_for_dir() {
   # early-return path (unusable, backpressure) never reaches
   # _claude_pick_publish, and must not report the PREVIOUS call's windows.
   _claude_pick_windows=""; _claude_pick_fetched=unknown; _claude_pick_spend_txt=""
+  # DO-632, for that same reason: `_claude_fallback_profile` resets these itself,
+  # but the picker returns from `bad-table`, `no-profiles` and `backpressure`
+  # without ever calling it — so without this line the next reader of a decline
+  # reason gets the PREVIOUS pick's, with nothing to tell it apart. Nothing reads
+  # them outside this function today; this is the line that keeps that true for
+  # whoever adds an --explain row or a statusline field to them.
+  _CLAUDE_FALLBACK_PROFILE=""; _CLAUDE_FALLBACK_WHY=""
   # Reset per call, not appended to: a second pick in the same shell — the
   # debounced --dry-run herdr-draft makes for a form row, say — must not report
   # the first call's refusals as its own.
@@ -1995,7 +2063,8 @@ _claude_pick_for_dir() {
   # credential there would put the session in the one group where a single bad
   # write logs everybody out, at the moment most sessions are starting,
   # controlled only by a stderr line nobody reads.
-  if fb="$(_claude_fallback_profile)"; then
+  if _claude_fallback_profile; then
+    fb="$_CLAUDE_FALLBACK_PROFILE"
     REPLY="$fb"
     _claude_pick_class=fallback
     _claude_pick_state=fallback
@@ -2004,6 +2073,18 @@ _claude_pick_for_dir() {
     _claude_pick_publish "$fb"
     _claude_pick_reason="no pool member was usable — fell back to the active account '$fb'"
     return 0
+  fi
+  # DO-632 — AND WHEN THE LAST RESORT DECLINES, SAY SO AND NAME THE SEAT. What
+  # follows this line is the shared global credential (claude(), loudly) or a
+  # refusal (hspawn, --strict), so a silent decline reads as "clauth's active
+  # account did not exist" — which is how a machine-owned seat being borrowed,
+  # and a quarantined one being skipped, both looked from the outside.
+  # Two arrays, two jobs and no repeated sentence: the WARNING is printed by
+  # every caller on every launch, the skipped entry is the terse phrase
+  # claude() joins into its "refused:" list.
+  if [[ -n "$_CLAUDE_FALLBACK_WHY" ]]; then
+    _claude_pick_warnings+=("the last resort declined clauth's active account '$_CLAUDE_FALLBACK_PROFILE': ${_CLAUDE_FALLBACK_WHY} — this session gets no account of its own rather than a seat this machine may not take")
+    _claude_pick_skipped+=("$_CLAUDE_FALLBACK_PROFILE (${_CLAUDE_FALLBACK_WHY})")
   fi
   REPLY=""
   _claude_pick_state=unusable
