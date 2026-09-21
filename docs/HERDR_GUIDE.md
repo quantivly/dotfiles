@@ -1035,9 +1035,9 @@ outage.
   credential helper authenticates, and pushes then work with **no forwarded agent** — which a
   session left running after you disconnect does not have. Never `git config --global` on dev:
   `~/.gitconfig` there is a symlink into the tracked, public `gitconfig`.
-- **The memory budget covers PANES, and nothing else.** `agents.slice` (`MemoryHigh=8G`,
-  `MemoryMax=10G`) contains `herdr-server.service`, so every pane shell inherits the cap — and
-  that is its whole reach. A command started over a plain `ssh dev` lands in a session scope under
+- **The memory budget covers panes by inheritance, and lanes only by joining.** `agents.slice`
+  (`MemoryHigh=8G`, `MemoryMax=10G`) contains `herdr-server.service`, so every pane shell inherits
+  the cap — that much is automatic. A command started over a plain `ssh dev` lands in a session scope under
   `user-<uid>.slice`, a *sibling* of `user@<uid>.service`, so the slice can never account it;
   docker is outside too (`system.slice`). That is why an attended session reaches dev as a herdr
   pane (herdr-draft's popup) rather than over bare ssh — and why a headless lane instead joins the slice
