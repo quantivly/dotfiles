@@ -1,109 +1,109 @@
 {
-  "classes": [
-    "promised-untracked",
-    "tracked-satisfied",
-    "spoken-already-done",
-    "question-owed",
-    "state-contradiction",
-    "stale-blocked"
-  ],
-  "missing_classes": [],
-  "entries": [
-    {
-      "id": "g01",
-      "source": "2026-09-02/brief.md#Reconcile",
-      "text": "@benoit's qspace SHA-vs-version question is ALREADY ANSWERED. Not owed.",
-      "class": "question-owed",
-      "outcome": "carrying it forward would have been a false alarm; not raised again",
-      "evidence": "POPS-5026 comment 153b69e3"
-    },
-    {
-      "id": "g02",
-      "source": "2026-09-03/brief.md#Question owed / promised",
-      "text": "@connor is directly waiting on @zvi. Group DM `C0A2FRLPA58` (@benoit, @connor, @zvi), 2026-09-02 23:08 — he listed all six PRs with cost estimates and a proposed landing order, asking they \"ride along in this round of platform updates\". @benoit replied within 8 minutes. @zvi has not.",
-      "class": "question-owed",
-      "outcome": "ranked #1 in 2026-09-03/sequence.md (\"He asked by name in a 3-person DM ... One person unblocked six times over, on a clock\")",
-      "evidence": "Slack group DM C0A2FRLPA58, 2026-09-02 23:08"
-    },
-    {
-      "id": "g03",
-      "source": "2026-09-02/brief.md#Reconcile",
-      "text": "sre-customers-library#369 needs no action. `reviewDecision: APPROVED`, `mergeStateStatus: CLEAN`, and my own review is `none` — someone else approved it. @benoit is the author and authors merge their own PRs, so he is not blocked on me.",
-      "class": "tracked-satisfied",
-      "outcome": "no action taken; reconfirmed still needing nothing on 2026-09-03 and 2026-09-06",
-      "evidence": "sre-customers-library#369"
-    },
-    {
-      "id": "g04",
-      "source": "2026-09-02/brief.md#Reconcile",
-      "text": "Overdue: ENG-1939 P1, due 09-01, In Review. Live check: no failing checks on auto-conf#461 — the \"lint FAILED\" note is stale. It is `BEHIND` and `REVIEW_REQUIRED`: needs a branch update and a reviewer, not a lint fix.",
-      "class": "tracked-satisfied",
-      "outcome": "reclassified from \"lint FAILED\" to needing a branch update and a reviewer; the reviewer gap itself closed 2026-09-02 per 2026-09-03/brief.md item 4",
-      "evidence": "auto-conf#461"
-    },
-    {
-      "id": "g05",
-      "source": "2026-09-02/brief.md#Reconcile",
-      "text": "State contradiction: CORE-561 / 562 / 563 are P0 in Backlog. Decide, don't schedule.",
-      "class": "state-contradiction",
-      "outcome": "corrected 2026-09-03: `priority=0` means \"No priority\", not P0 — priorityLabel on all three reads \"No priority\", so this was not a contradiction at all; escalation marked resolved-invalid in escalations.jsonl",
-      "evidence": "CORE-561, CORE-562, CORE-563; correction at 2026-09-03/brief.md#A misread that has been propagating since yesterday — corrected here"
-    },
-    {
-      "id": "g06",
-      "source": "2026-09-03/brief.md#State contradictions — decisions, not tasks",
-      "text": "HUB-5812 is In Review with nothing in review. P2, due 2026-09-04 (tomorrow, Sprint 19 close), assigned @zvi, `updatedAt` 2026-08-29 — six days untouched. ... No sre-ui PR exists. Either the status is wrong or the work has not started.",
-      "class": "state-contradiction",
-      "outcome": "surfaced as a decision, not scheduled; still open and 4 days past due as of 2026-09-08 (\"Carried forward, still open\")",
-      "evidence": "branchName zvi/hub-5812-gate-the-sre-ui-view-header-editor-on-view-ownership (404 on sre-ui branches); cross-org PR search finds only sre-core#1473 (HUB-5693, merged) and closed sre-core#1480"
-    },
-    {
-      "id": "g07",
-      "source": "2026-09-06/brief.md#Reconcile — what changed, and what was already true",
-      "text": "HUB-5812's \"no PR\" needs sharpening, and the issue is worse than recorded. It carries exactly one attachment, `sre-core#1473` — which is titled HUB-5693, authored by @zvi, and merged 2026-08-31. Different issue, different repo (sre-core vs the sre-ui change HUB-5812 describes). The branch `zvi/hub-5812-…` 404s on both sre-ui and sre-core.",
-      "class": "state-contradiction",
-      "outcome": "recorded as worse than previously known (a misleading attachment, not merely a missing PR); issue stays open, carried forward",
-      "evidence": "sre-core#1473 (titled HUB-5693, merged 2026-08-31); branch 404 on sre-ui and sre-core"
-    },
-    {
-      "id": "g08",
-      "source": "2026-09-03/brief.md#Question owed / promised",
-      "text": "Spoken commitment, untracked. Fireflies transcript `01M1H28CHBVMJXBSDKF1ZHN32D` (\"Trenser sync review\", 2026-09-02 12:42Z), action items attributed by speaker: \"Zvi Baratz — Suggest and recommend UI visual improvements on slot optimization tickets, specifically color-coded direction cues for changes (16:52)\". No Linear issue, no PR.",
-      "class": "promised-untracked",
-      "outcome": "scheduled as one of \"two small promises (~15 min)\" in 2026-09-03/sequence.md rank 7 (targets HUB-5327 and CUS-2325)",
-      "evidence": "Fireflies transcript 01M1H28CHBVMJXBSDKF1ZHN32D"
-    },
-    {
-      "id": "g09",
-      "source": "2026-09-03/brief.md#Question owed / promised",
-      "text": "Promise to @benoit, untracked. Group DM `C0ATF4WBQCQ`, 2026-09-02 ~17:49 IDT, @zvi: \"Yeah, I generally choose explicitly (`/code-review medium 123`), but I'll make a note to add an instruction for that\" — @benoit had proposed a CLAUDE.md rule after burning a session's tokens on three high-effort review rounds over a 40-line diff.",
-      "class": "promised-untracked",
-      "outcome": "scheduled as the other of \"two small promises (~15 min)\" in 2026-09-03/sequence.md rank 7 (add the review-effort-by-diff-size instruction to CLAUDE.md)",
-      "evidence": "Slack group DM C0ATF4WBQCQ, 2026-09-02 ~17:49 IDT"
-    },
-    {
-      "id": "g10",
-      "source": "2026-09-06/brief.md#Reconcile — what changed, and what was already true",
-      "text": "The nine PR reviews and the #461 merge from run 1 are real and off the queue.",
-      "class": "tracked-satisfied",
-      "outcome": "confirmed landed and removed from the active queue",
-      "evidence": "origin/main on auto-conf is 05dd732 — run 1's recorded squash sha"
-    },
-    {
-      "id": "g11",
-      "source": "2026-09-03/brief.md#Already done — say this as confidently as \"overdue\"",
-      "text": "The @benoit ELK reply is SENT. Verified in Slack, not from the handoff: group DM `C0BBASUBJMC`, @zvi at `ts=1788373549.343679` (2026-09-02 ~21:25 IDT), text matches the drafted version. Closes item 1 of yesterday's sequence and discharges the 09-01 \"will look into this tomorrow\" promise. Do not re-send or follow up unprompted.",
-      "class": "spoken-already-done",
-      "outcome": "recorded as already discharged; not re-sent or followed up on",
-      "evidence": "Slack group DM C0BBASUBJMC, ts=1788373549.343679, 2026-09-02 ~21:25 IDT"
-    },
-    {
-      "id": "g12",
-      "source": "2026-09-08/sequence.md#3 · ENG-1958 — due today, promoted: VPN confirmed, prior archive found in progress",
-      "text": "Correction, from @zvi: the AWS VPN is connected, so SSH to `staging`/`demo` should resolve — the \"needs SSH\" caveat that was holding this back no longer applies. Dispatched.",
-      "class": "stale-blocked",
-      "outcome": "unblocked and dispatched same run; lane `eng-1958-cleanup` delivered all 4 units, retired and spot-checked",
-      "evidence": "ENG-1958; AWS VPN connectivity confirmed; lane deliverables out/eng-1958/{unit1-archive,unit2-inventory,unit3-provenance,unit4-removal-plan,SUMMARY}.md"
-    }
-  ]
+ "classes": [
+  "promised-untracked",
+  "tracked-satisfied",
+  "spoken-already-done",
+  "question-owed",
+  "state-contradiction",
+  "stale-blocked"
+ ],
+ "missing_classes": [],
+ "entries": [
+  {
+   "id": "g01",
+   "source": "2026-09-02/brief.md#Reconcile",
+   "text": "@benoit's qspace SHA-vs-version question is ALREADY ANSWERED. Not owed.",
+   "class": "question-owed",
+   "outcome": "carrying it forward would have been a false alarm; not raised again",
+   "evidence": "POPS-5026 comment 153b69e3"
+  },
+  {
+   "id": "g02",
+   "source": "2026-09-03/brief.md#Question owed / promised",
+   "text": "@connor is directly waiting on @zvi. Group DM `C0A2FRLPA58` (@benoit, @connor, @zvi), 2026-09-02 23:08 \u2014 he listed all six PRs with cost estimates and a proposed landing order, asking they \"ride along in this round of platform updates\". @benoit replied within 8 minutes. @zvi has not.",
+   "class": "question-owed",
+   "outcome": "ranked #1 in 2026-09-03/sequence.md (\"He asked by name in a 3-person DM ... One person unblocked six times over, on a clock\")",
+   "evidence": "Slack group DM C0A2FRLPA58, 2026-09-02 23:08"
+  },
+  {
+   "id": "g03",
+   "source": "2026-09-02/brief.md#Reconcile",
+   "text": "sre-customers-library#369 needs no action. `reviewDecision: APPROVED`, `mergeStateStatus: CLEAN`, and my own review is `none` \u2014 someone else approved it. @benoit is the author and authors merge their own PRs, so he is not blocked on me.",
+   "class": "tracked-satisfied",
+   "outcome": "no action taken; reconfirmed still needing nothing on 2026-09-03 and 2026-09-06",
+   "evidence": "sre-customers-library#369"
+  },
+  {
+   "id": "g04",
+   "source": "2026-09-02/brief.md#Reconcile",
+   "text": "Overdue: ENG-1939 P1, due 09-01, In Review. Live check: no failing checks on auto-conf#461 \u2014 the \"lint FAILED\" note is stale. It is `BEHIND` and `REVIEW_REQUIRED`: needs a branch update and a reviewer, not a lint fix.",
+   "class": "stale-blocked",
+   "outcome": "reclassified from \"lint FAILED\" to needing a branch update and a reviewer; the reviewer gap itself closed 2026-09-02 per 2026-09-03/brief.md item 4",
+   "evidence": "auto-conf#461"
+  },
+  {
+   "id": "g05",
+   "source": "2026-09-02/brief.md#Reconcile",
+   "text": "State contradiction: CORE-561 / 562 / 563 are P0 in Backlog. Decide, don't schedule.",
+   "class": "state-contradiction",
+   "outcome": "corrected 2026-09-03: `priority=0` means \"No priority\", not P0 \u2014 priorityLabel on all three reads \"No priority\", so this was not a contradiction at all; escalation marked resolved-invalid in escalations.jsonl",
+   "evidence": "CORE-561, CORE-562, CORE-563; correction at 2026-09-03/brief.md#A misread that has been propagating since yesterday \u2014 corrected here"
+  },
+  {
+   "id": "g06",
+   "source": "2026-09-03/brief.md#State contradictions \u2014 decisions, not tasks",
+   "text": "HUB-5812 is In Review with nothing in review. P2, due 2026-09-04 (tomorrow, Sprint 19 close), assigned @zvi, `updatedAt` 2026-08-29 \u2014 six days untouched. ... No sre-ui PR exists. Either the status is wrong or the work has not started.",
+   "class": "state-contradiction",
+   "outcome": "surfaced as a decision, not scheduled; still open and 4 days past due as of 2026-09-08 (\"Carried forward, still open\")",
+   "evidence": "branchName zvi/hub-5812-gate-the-sre-ui-view-header-editor-on-view-ownership (404 on sre-ui branches); cross-org PR search finds only sre-core#1473 (HUB-5693, merged) and closed sre-core#1480"
+  },
+  {
+   "id": "g07",
+   "source": "2026-09-06/brief.md#Reconcile \u2014 what changed, and what was already true",
+   "text": "HUB-5812's \"no PR\" needs sharpening, and the issue is worse than recorded. It carries exactly one attachment, `sre-core#1473` \u2014 which is titled HUB-5693, authored by @zvi, and merged 2026-08-31. Different issue, different repo (sre-core vs the sre-ui change HUB-5812 describes). The branch `zvi/hub-5812-\u2026` 404s on both sre-ui and sre-core.",
+   "class": "state-contradiction",
+   "outcome": "recorded as worse than previously known (a misleading attachment, not merely a missing PR); issue stays open, carried forward",
+   "evidence": "sre-core#1473 (titled HUB-5693, merged 2026-08-31); branch 404 on sre-ui and sre-core"
+  },
+  {
+   "id": "g08",
+   "source": "2026-09-03/brief.md#Question owed / promised",
+   "text": "Spoken commitment, untracked. Fireflies transcript `01M1H28CHBVMJXBSDKF1ZHN32D` (\"Trenser sync review\", 2026-09-02 12:42Z), action items attributed by speaker: \"Zvi Baratz \u2014 Suggest and recommend UI visual improvements on slot optimization tickets, specifically color-coded direction cues for changes (16:52)\". No Linear issue, no PR.",
+   "class": "promised-untracked",
+   "outcome": "scheduled as one of \"two small promises (~15 min)\" in 2026-09-03/sequence.md rank 7 (targets HUB-5327 and CUS-2325)",
+   "evidence": "Fireflies transcript 01M1H28CHBVMJXBSDKF1ZHN32D"
+  },
+  {
+   "id": "g09",
+   "source": "2026-09-03/brief.md#Question owed / promised",
+   "text": "Promise to @benoit, untracked. Group DM `C0ATF4WBQCQ`, 2026-09-02 ~17:49 IDT, @zvi: \"Yeah, I generally choose explicitly (`/code-review medium 123`), but I'll make a note to add an instruction for that\" \u2014 @benoit had proposed a CLAUDE.md rule after burning a session's tokens on three high-effort review rounds over a 40-line diff.",
+   "class": "promised-untracked",
+   "outcome": "scheduled as the other of \"two small promises (~15 min)\" in 2026-09-03/sequence.md rank 7 (add the review-effort-by-diff-size instruction to CLAUDE.md)",
+   "evidence": "Slack group DM C0ATF4WBQCQ, 2026-09-02 ~17:49 IDT"
+  },
+  {
+   "id": "g10",
+   "source": "2026-09-06/brief.md#Reconcile \u2014 what changed, and what was already true",
+   "text": "The nine PR reviews and the #461 merge from run 1 are real and off the queue.",
+   "class": "tracked-satisfied",
+   "outcome": "confirmed landed and removed from the active queue",
+   "evidence": "origin/main on auto-conf is 05dd732 \u2014 run 1's recorded squash sha"
+  },
+  {
+   "id": "g11",
+   "source": "2026-09-03/brief.md#Already done \u2014 say this as confidently as \"overdue\"",
+   "text": "The @benoit ELK reply is SENT. Verified in Slack, not from the handoff: group DM `C0BBASUBJMC`, @zvi at `ts=1788373549.343679` (2026-09-02 ~21:25 IDT), text matches the drafted version. Closes item 1 of yesterday's sequence and discharges the 09-01 \"will look into this tomorrow\" promise. Do not re-send or follow up unprompted.",
+   "class": "spoken-already-done",
+   "outcome": "recorded as already discharged; not re-sent or followed up on",
+   "evidence": "Slack group DM C0BBASUBJMC, ts=1788373549.343679, 2026-09-02 ~21:25 IDT"
+  },
+  {
+   "id": "g12",
+   "source": "2026-09-08/sequence.md#3 \u00b7 ENG-1958 \u2014 due today, promoted: VPN confirmed, prior archive found in progress",
+   "text": "Correction, from @zvi: the AWS VPN is connected, so SSH to `staging`/`demo` should resolve \u2014 the \"needs SSH\" caveat that was holding this back no longer applies. Dispatched.",
+   "class": "stale-blocked",
+   "outcome": "unblocked and dispatched same run; lane `eng-1958-cleanup` delivered all 4 units, retired and spot-checked",
+   "evidence": "ENG-1958; AWS VPN connectivity confirmed; lane deliverables out/eng-1958/{unit1-archive,unit2-inventory,unit3-provenance,unit4-removal-plan,SUMMARY}.md"
+  }
+ ]
 }
