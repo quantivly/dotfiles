@@ -584,7 +584,18 @@ stale value silently killed every SSH host at once, and the error it produced (`
 a `.pub` file) named the wrong cause entirely.
 
 The single source of truth is a systemd `environment.d` drop-in, read by both the user manager and
-the graphical session at login:
+the graphical session at login. `~/.config/environment.d/` holds two kinds of file, owned
+differently on purpose:
+
+- **Static files** (no packaging to detect) are dotfiles-owned and symlinked by `./install` —
+  `tmpdir.conf` is the existing example (`config/environment.d/tmpdir.conf` in this repo).
+- **`10-bitwarden-ssh-agent.conf` is deliberately *not* linked by dotfiles.** Its value depends on
+  which Bitwarden package is installed (snap/deb/flatpak), and Quantivly's `dev-setup` is the side
+  that detects that and writes the file (tracked in DO-675). If dotbot also linked it, dev-setup's
+  write would go *through* the symlink into this repo's tracked copy — two writers for one fact,
+  which is the same defect class DO-675 traces one directory over, where a write meant for
+  `~/.gitconfig` landed in the tracked `gitconfig` through its symlink. So: create it by hand (or
+  let dev-setup do it), and don't add it to `install.conf.yaml`.
 
 ```bash
 mkdir -p ~/.config/environment.d
