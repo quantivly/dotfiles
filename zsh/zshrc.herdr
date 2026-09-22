@@ -548,9 +548,16 @@ _claude_profile_excluded() {
 # it from an honestly empty file; only the self-contained contract forbids it.
 #
 # Reached whenever the table is EMPTY — which is the snapshot case, but also an
-# ordinary shell whose tenants file owns no profile at all. Measured 1.7 ms a
-# call, so the cost is nothing; what matters is that the file is re-read once per
-# guarded command there, which is why it has to be silent and side-effect-free.
+# ordinary shell whose tenants file owns no profile at all. The file is re-read
+# once per guarded command there, which is why it has to be silent and
+# side-effect-free.
+#
+# COST, re-measured after DO-674 added the guards: **9.9 ms** a call, up from the
+# 1.7 ms this comment used to claim — a second fork for `zsh -n` and an `mktemp`
+# for the stderr. Still nothing against a command whose next act is to start
+# Claude Code, and it is reached once per launch, never in a loop or a prompt
+# hook. The path that an ordinary interactive shell takes is unchanged and
+# short-circuits before any fork: 0.03 ms, measured the same way.
 claude-tenants-owner() {   # $1 = profile
   local f="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
   # A DANGLING SYMLINK IS NOT "NO TENANTS FILE". `-e` follows the link, so a
@@ -2668,7 +2675,7 @@ claude() {
 # claude it spawned, so a 3 from this function and a 3 from a session that itself
 # exited 3 are indistinguishable to a caller. Nothing branches on it today.
 clauth() {
-  local p="" owner="" a cmd="" target="" resume_remedy="" skip=0 want=0 i=1
+  local p="" a cmd="" target="" resume_remedy="" skip=0 want=0 i=1
   # The SUBCOMMAND is the first word that is not a top-level option, because
   # `clauth --theme compatible start <p>` is accepted by the real CLI and a
   # wrapper dispatching on "$1" alone would hand that spelling straight to the
