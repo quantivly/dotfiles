@@ -211,6 +211,22 @@ jobs:
       - name: Run the pane-reaper state table
         run: ./scripts/test-pane-reaper.sh
 
+  wt-gc-sweep-test:
+    name: Worktree Sweep State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The wrapper drives `wt-gc --apply`, which deletes worktrees and local
+      # branches. Every row runs against a recording wt-gc stub at the front of
+      # PATH — never against wt-gc being absent, which is what a runner would
+      # give for free and a developer's machine would not.
+      - name: Run the wt-gc-sweep state table
+        run: ./scripts/test-wt-gc-sweep.sh
+
   claude-doctor-test:
     name: Claude Account & MCP Doctor State Table
     runs-on: ubuntu-latest

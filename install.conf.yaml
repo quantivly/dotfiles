@@ -99,6 +99,14 @@
     # directory over, where auto-conf kept writing safe.directory entries through
     # the ~/.gitconfig symlink into this repo's tracked gitconfig. Do not add it
     # "for completeness"; see README.md's "Using Bitwarden SSH Agent".
+    # Daily sweep of landed agent worktrees and their local branches. Linking does
+    # NOT enable it, and that is the point: it deletes checkouts and refs
+    # unattended, so arming it is a gate Zvi runs by hand after reading one real
+    # dry run (`scripts/wt-gc-sweep.sh --dry-run`). Its engine, `wt-gc`, lives in
+    # the private ~/.dotfiles-local; the unit's ConditionPathExists makes systemd
+    # SKIP it on a machine that has no such thing, which is not a failure.
+    ~/.config/systemd/user/wt-gc-sweep.service: systemd/wt-gc-sweep.service
+    ~/.config/systemd/user/wt-gc-sweep.timer: systemd/wt-gc-sweep.timer
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme

@@ -1,0 +1,37 @@
+# systemd/wt-gc-sweep.timer
+# =========================
+# Runs wt-gc-sweep.service once a day. See that unit's header for what it does
+# and why it is a timer at all.
+#
+# WHY DAILY, AND NOT FASTER. The thing being contained accumulates at roughly a
+# worktree per merged PR: measured 2026-09-21, herdr-draft went from 0 to 29
+# reapable worktrees in the six days after a manual sweep. A daily run keeps that
+# at a day's worth. Faster buys nothing and costs a `gh pr list` per candidate
+# branch every time — the run is the most network-expensive thing on this
+# machine's timer list, which is also why it is the only one that is not
+# sub-hourly.
+#
+# WHY 04:00 AND A HALF-HOUR JITTER. Nothing should be reading a worktree at 4am,
+# and the in-use check refuses one that is. RandomizedDelaySec keeps the run off
+# the exact instant every other daily job picks, which on a resume is a real
+# pile-up: Persistent=true means a desktop that was asleep at 04:00 runs this on
+# the next resume, alongside everything else that was missed.
+#
+# A run held back by the scope or the grace period is not a skipped run — it is
+# the sweep declining, and it says so per worktree in the journal.
+
+[Unit]
+Description=Daily sweep of landed agent worktrees and their local branches
+Documentation=file://%h/.dotfiles/scripts/wt-gc-sweep.sh
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30min
+Persistent=true
+AccuracySec=5min
+
+[Install]
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK — run ./install, never
+# `systemctl --user reenable`, which would delete the dotbot symlink that IS the
+# unit. See systemd/herdr-server.service's [Install] note for the full account.
+WantedBy=default.target
