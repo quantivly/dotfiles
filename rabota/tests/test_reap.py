@@ -25,10 +25,10 @@ def patch_uuid():
 
 
 class ReapTestCase(unittest.TestCase):
-    def ctx(self, runner=None, tenant="quantivly"):
+    def ctx(self, runner=None, tenant="quantivly", dry_run=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
         c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner or FakeRunner([]),
                                            env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(lambda: c._store and c._store.close())
@@ -81,6 +81,31 @@ class PlanReapTests(ReapTestCase):
         ctx.store.insert_lane(self.lane_row(started_at=reap.now()))
         reap.plan_reap(ctx, self.census(), abandoned_hours=6)
         self.assertEqual(ctx.store.get_lane("old")["status"], "started")
+
+    def test_a_malformed_started_at_is_named_unavailable_not_a_crash_for_the_whole_tenant(self):
+        """A single row with an unparseable started_at used to raise ValueError out of
+        plan_reap, failing every other row's bookkeeping too. It must instead be named as an
+        unmeasured dimension while the rest of the tenant's rows are still processed."""
+        ctx = self.ctx()
+        ctx.store.insert_lane(self.lane_row(id="bad", unit="rabota-lane-quantivly-bad-1.service",
+                                            started_at="not-a-date"))
+        ctx.store.insert_lane(self.lane_row(id="old", unit="rabota-lane-quantivly-old-2.service",
+                                            started_at="2026-09-16T00:00:00Z"))
+        plan = reap.plan_reap(ctx, self.census())
+        self.assertEqual(ctx.store.get_lane("bad")["status"], "started")
+        self.assertEqual(ctx.store.get_lane("old")["status"], "abandoned")
+        self.assertIn("reap:started_at:bad:unmeasured", plan["unavailable"])
+
+    def test_an_absent_started_at_is_never_immortal(self):
+        """An empty/absent started_at used to return 0.0 hours, so such a row could never age
+        past abandoned_hours no matter how long it ran. It must be named unavailable instead of
+        silently treated as always-fresh."""
+        ctx = self.ctx()
+        ctx.store.insert_lane(self.lane_row(id="noage", unit="rabota-lane-quantivly-noage-1.service",
+                                            started_at=""))
+        plan = reap.plan_reap(ctx, self.census(), abandoned_hours=0)
+        self.assertEqual(ctx.store.get_lane("noage")["status"], "started")
+        self.assertIn("reap:started_at:noage:unmeasured", plan["unavailable"])
 
     def test_a_live_remote_unit_is_never_marked_abandoned(self):
         """A remote lane's unit shows up under census["machines"][i]["units"], never under the
@@ -175,7 +200,8 @@ class ApplyReapTests(ReapTestCase):
 
     def test_apply_removes_remote_worktree_in_one_ssh_call(self):
         marker = reap.REAP_MARKER + FIXED_UUID.hex
-        out = (f"\n{marker}\n/home/ubuntu/wt/old\n0\n"
+        path = "/home/ubuntu/wt/old"
+        out = (f"\n{marker}\n{len(path)}\n{path}\n0\n"
               f"Removing worktrees/quantivly/old: gone\n")
         runner = FakeRunner([(["wt-gc", "--apply"], Result(0, "", "")),
                              (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", "dev"], Result(0, out, ""))])
@@ -190,8 +216,8 @@ class ApplyReapTests(ReapTestCase):
 
     def test_apply_reports_a_per_worktree_failure_without_losing_the_rest(self):
         marker = reap.REAP_MARKER + FIXED_UUID.hex
-        out = (f"\n{marker}\n/w/ok\n0\nremoved\n"
-              f"{marker}\n/w/bad\n1\nfatal: '/w/bad' is dirty, use --force to override\n")
+        out = (f"\n{marker}\n5\n/w/ok\n0\nremoved\n"
+              f"{marker}\n6\n/w/bad\n1\nfatal: '/w/bad' is dirty, use --force to override\n")
         runner = FakeRunner([(["wt-gc", "--apply"], Result(0, "", "")),
                              (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", "dev"], Result(0, out, ""))])
         ctx = self.ctx(runner)
@@ -225,6 +251,54 @@ class ApplyReapTests(ReapTestCase):
         self.assertIsNone(rep["worktrees"])
         self.assertEqual(rep["remote_worktrees"], {"removed": [], "failed": []})
         self.assertEqual(ctx.runner.calls, [])
+
+    def test_dry_run_removes_nothing_local_or_remote(self):
+        """ctx.dry_run used to be read nowhere in this module: apply_reap still ran wt-gc --apply
+        and still issued remote removals with --dry-run set. FakeRunner([]) raises loudly if
+        either is attempted, so this fails without the fix rather than passing vacuously."""
+        ctx = self.ctx(FakeRunner([]), dry_run=True)
+        ctx.store.insert_lane(self.lane_row(machine="dev", repo="hub", worktree="/w/old", status="done"))
+        rep = reap.apply_reap(ctx, reap.plan_reap(ctx, self.census()), {"worktrees"})
+        self.assertTrue(rep["dry_run"])
+        self.assertIsNone(rep["worktrees"])
+        self.assertEqual(rep["remote_worktrees"], {"removed": [], "failed": []})
+        self.assertEqual(ctx.runner.calls, [])
+
+
+class RemovalFramingTests(unittest.TestCase):
+    """Runs ``_removal_script`` through a REAL shell (a stub ``git`` on ``PATH``) rather than
+    hand-building canned output — the newline-delimited framing this replaces parsed fine against
+    a hand-written string but broke against what a real shell actually prints for a path
+    containing a literal newline; only a real round trip catches that.
+    """
+
+    def _run_script(self, items):
+        import os
+        import subprocess
+        import sys
+
+        marker = "---TEST-MARKER---"
+        script = reap._removal_script(items, marker)
+        with tempfile.TemporaryDirectory() as td:
+            stub = Path(td) / "git"
+            stub.write_text("#!/bin/sh\necho stub-git-ran\nexit 0\n")
+            stub.chmod(0o755)
+            env = dict(os.environ, PATH=f"{td}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, f"stub script failed: {r.stderr}")
+        return reap._parse_removal_output(r.stdout, marker)
+
+    def test_a_newline_in_a_worktree_path_does_not_lose_its_outcome(self):
+        """Confirmed regression: of ['/tmp/wt\\nnl', '/tmp/plain'], the newline-delimited framing
+        recovered only /tmp/plain — the newline inside the first path shifted every field after
+        it, and int(code_s) then raised inside _parse_removal_output, dropping that item
+        entirely."""
+        items = [{"path": "/tmp/wt\nnl", "repo_path": "/tmp/repo", "lane_id": "a"},
+                 {"path": "/tmp/plain", "repo_path": "/tmp/repo", "lane_id": "b"}]
+        by_path = self._run_script(items)
+        self.assertEqual(set(by_path), {"/tmp/wt\nnl", "/tmp/plain"})
+        self.assertEqual(by_path["/tmp/wt\nnl"]["code"], 0)
+        self.assertEqual(by_path["/tmp/plain"]["code"], 0)
 
 
 class ReapCliWiringTests(unittest.TestCase):

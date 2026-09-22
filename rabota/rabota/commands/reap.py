@@ -1,15 +1,25 @@
 """``rabota reap``: mark abandoned lane rows, list idle user sessions, delegate laptop worktrees
 to ``wt-gc``, and remove the REMOTE lane worktrees of settled lanes.
 
-Dry-run by default. Never kills a user session (locked decision, spec §... — a session is only
-ever *listed* with a ``close_hint`` the human runs themselves). Spaces wait on the herdr snapshot
-dimension and are deferred here: listed as ``[]`` and named in ``unavailable``.
+Dry-run by default (``--apply`` is required to act). Never kills a user session (locked decision,
+spec §... — a session is only ever *listed* with a ``close_hint`` the human runs themselves).
+Spaces wait on the herdr snapshot dimension and are deferred here: listed as ``[]`` and named in
+``unavailable``.
 
 A lane worktree on a REMOTE machine (``machines.dev`` and friends) is a full checkout that
 accumulates on the machine a lane ran on — ``wt-gc`` only ever looks at the laptop. This module
 removes those too, once their lane row is SETTLED (``done``/``failed``/``abandoned``/``retired``):
 a ``started`` row's worktree is still in use. The lane's ``out_dir`` is never touched here — it
 holds ``verdict.json``, the durable evidence, while the worktree is just a reproducible checkout.
+
+``ctx.dry_run`` (the CLI-wide ``rabota --dry-run`` flag, distinct from this command's own
+``--apply``) is honoured by ``apply_reap``: with it set, no ``wt-gc --apply`` call and no remote
+removal ssh call are ever made, and the report says so (``{"dry_run": True}``). Marking a
+``started`` row ``abandoned`` in ``plan_reap`` is local bookkeeping, not an action on a machine —
+the same distinction ``precompute.py`` draws between its Linear-mutating ``auto`` step and its
+local-state-writing steps — so ``ctx.dry_run`` does NOT suppress it; it already never runs without
+independent evidence (the unit is gone) and already happens on every ``plan_reap`` call, apply or
+not (see ``test_abandoned_marking_happens_without_apply``).
 """
 import uuid
 from datetime import datetime, timezone
@@ -26,10 +36,17 @@ REAP_MARKER = "---RABOTA-REAP---"
 REMOTE_REMOVE_TIMEOUT = 120  # seconds; one ssh call removing several worktrees on one machine
 
 
-def _hours_since(ts: str | None) -> float:
+def _hours_since(ts: str | None) -> float | None:
+    """``None`` means unmeasured — absent, empty, or unparseable — never a guess. A caller that
+    read either case as ``0.0`` would make such a row immortal (never old enough to abandon); one
+    that let ``strptime`` raise would kill ``plan_reap`` for the whole tenant over one bad row.
+    """
     if not ts:
-        return 0.0
-    then = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return None
+    try:
+        then = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
     return (datetime.now(timezone.utc) - then).total_seconds() / 3600
 
 
@@ -81,7 +98,7 @@ def _remote_worktree_candidates(ctx) -> tuple[list[dict], list[str]]:
 def plan_reap(ctx: Context, census: dict, idle_hours: float = 24, abandoned_hours: float = 6) -> dict:
     live = _live_units(census)
     unreachable = {m["name"] for m in (census.get("machines") or []) if not m.get("reachable")}
-    abandoned = []
+    abandoned, ts_unavailable = [], []
     for lane in ctx.store.list_lanes(ctx.tenant.name, status="started"):
         machine = lane.get("machine") or "local"
         if machine in unreachable:
@@ -90,10 +107,16 @@ def plan_reap(ctx: Context, census: dict, idle_hours: float = 24, abandoned_hour
             continue
         if (machine, lane.get("unit")) in live:
             continue
-        if _hours_since(lane.get("started_at")) > abandoned_hours:
+        hours = _hours_since(lane.get("started_at"))
+        if hours is None:
+            # An absent or unparseable started_at is an unmeasured dimension, not room to act
+            # (never immortal) and not a reason to fail every other row (never a crash) — it is
+            # named here so it is visible rather than silently skipped.
+            ts_unavailable.append(f"reap:started_at:{lane['id']}:unmeasured")
+            continue
+        if hours > abandoned_hours:
             ctx.store.update_lane(lane["id"], status="abandoned", abandoned_at=now())
-            abandoned.append({"id": lane["id"], "unit": lane.get("unit"),
-                              "reason": f"no unit for {_hours_since(lane.get('started_at')):.0f} h"})
+            abandoned.append({"id": lane["id"], "unit": lane.get("unit"), "reason": f"no unit for {hours:.0f} h"})
     sessions = [{"pid": s["pid"], "cwd": s["cwd"], "reason": f"idle, {s['age_s'] // 3600} h old",
                  "close_hint": f"kill -INT {s['pid']}  # only if you own it; rabota never does"}
                 for s in census.get("sessions", []) if s.get("owner") == "user" and (s.get("cpu_pct_5s") or 0) < 1.0
@@ -102,7 +125,8 @@ def plan_reap(ctx: Context, census: dict, idle_hours: float = 24, abandoned_hour
     remote_worktrees, wt_unavailable = _remote_worktree_candidates(ctx)
     worktrees += remote_worktrees
     return {"abandoned": abandoned, "sessions": sessions, "spaces": [], "worktrees": worktrees,
-            "unavailable": ["deferred:spaces"] + list(census.get("unavailable", [])) + wt_unavailable}
+            "unavailable": ["deferred:spaces"] + list(census.get("unavailable", []))
+                          + wt_unavailable + ts_unavailable}
 
 
 def _repo_path_expr(config_value: str) -> str:
@@ -123,33 +147,52 @@ def _repo_path_expr(config_value: str) -> str:
 def _removal_script(items: list[dict], marker: str) -> str:
     """One shell script removing every worktree in ``items``, framed so ONE ssh call reports a
     result per item: each block starts with the (per-call, nonced) ``marker``, then the item's own
-    path on its own line, then the removal's exit code on its own line, then its combined
-    stdout+stderr. Chaining with ``&&`` would hide every failure after the first; ``;`` alone
-    would still leave one exit code covering the whole call. This is the same per-item framing
-    idiom ``remote.build_argv``/``remote.parse`` use for census's own multi-section ssh call.
+    path LENGTH on its own line, then exactly that many bytes of the path (no trailing newline of
+    its own), then the removal's exit code on its own line, then its combined stdout+stderr. The
+    length prefix is what makes the path field safe to contain a literal newline — a newline is
+    just more path bytes, never a field separator, so nothing after it can be shifted the way a
+    newline-delimited framing would shift it. Chaining with ``&&`` would hide every failure after
+    the first; ``;`` alone would still leave one exit code covering the whole call. This is the
+    same per-item framing idiom ``remote.build_argv``/``remote.parse`` use for census's own
+    multi-section ssh call.
     """
     parts = []
     for it in items:
+        path = it["path"]
         parts.append(f"printf '%s\\n' {remote.shquote(marker)}")
-        parts.append(f"printf '%s\\n' {remote.shquote(it['path'])}")
+        parts.append(f"printf '%s\\n' {len(path)}")
+        parts.append(f"printf '%s' {remote.shquote(path)}")
         repo_expr = _repo_path_expr(it["repo_path"])
         parts.append(
-            f"out=$(git -C {repo_expr} worktree remove --force {remote.shquote(it['path'])} 2>&1); "
-            f"code=$?; printf '%s\\n' \"$code\"; printf '%s' \"$out\"")
+            f"out=$(git -C {repo_expr} worktree remove --force {remote.shquote(path)} 2>&1); "
+            f"code=$?; printf '\\n%s\\n' \"$code\"; printf '%s' \"$out\"")
     return "; ".join(parts)
 
 
 def _parse_removal_output(out: str, marker: str) -> dict[str, dict]:
-    """``{path: {"code": int, "output": str}}`` from ``_removal_script``'s framing."""
+    """``{path: {"code": int, "output": str}}`` from ``_removal_script``'s framing.
+
+    The path is recovered by LENGTH, not by splitting on ``\\n`` — the length was computed in
+    Python (character count of the same ``str`` this module sent to the shell) and is re-applied
+    here against the decoded ``str`` the ssh call returned, so a path containing a literal newline
+    is sliced out whole rather than truncated at its first line.
+    """
     by_path = {}
     for chunk in out.split(marker)[1:]:
         body = chunk[1:] if chunk.startswith("\n") else chunk
         if "\n" not in body:
             continue
-        path, rest = body.split("\n", 1)
-        if "\n" not in rest:
+        len_s, rest = body.split("\n", 1)
+        try:
+            length = int(len_s.strip())
+        except ValueError:
             continue
-        code_s, output = rest.split("\n", 1)
+        if length < 0 or len(rest) < length + 1 or rest[length] != "\n":
+            continue
+        path, after = rest[:length], rest[length + 1:]
+        if "\n" not in after:
+            continue
+        code_s, output = after.split("\n", 1)
         try:
             code = int(code_s.strip())
         except ValueError:
@@ -190,6 +233,12 @@ def apply_reap(ctx: Context, plan: dict, targets: set[str]) -> dict:
         raise errors.Usage("rabota never kills user sessions; use the close hints yourself")
     rep = {"worktrees": None, "remote_worktrees": {"removed": [], "failed": []}, "failed": []}
     if "worktrees" in targets:
+        if ctx.dry_run:
+            # --dry-run on the most destructive command in the CLI: neither wt-gc nor a remote
+            # removal ssh call is ever invoked. See the module docstring for what --dry-run does
+            # and does not suppress here.
+            rep["dry_run"] = True
+            return rep
         res = ctx.runner.run(["wt-gc", "--apply"], timeout=600)
         rep["worktrees"] = res.out[-2000:] if res.ok else None
         if not res.ok:
