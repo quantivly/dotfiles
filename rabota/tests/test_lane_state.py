@@ -163,6 +163,10 @@ class LaneCliWiringTests(unittest.TestCase):
         self.state = str(Path(self.tmp.name))
         from rabota import store as store_mod
         s = store_mod.Store.open(Path(self.state))
+        # CLOSED, not left to the GC. CI's 3.13 job runs with ResourceWarning as an error, so an
+        # unclosed sqlite connection is a failure there and invisible everywhere else — which is
+        # exactly how this row first went red (F17 class).
+        self.addCleanup(s.close)
         for lid, st in (("A1", "started"), ("B2", "done")):
             s.insert_lane({"id": lid, "tenant": "quantivly", "kind": "work", "brief": "/b",
                            "repo": "hub", "worktree": "/w", "out_dir": "/o", "machine": "dev",
