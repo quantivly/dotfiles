@@ -71,7 +71,7 @@ This SSH configuration is used in **two distinct contexts**. Understanding your 
 | **SSH Agent Source** | Bitwarden desktop app or system agent | Forwarded agent from laptop or system agent |
 | **ForwardAgent** | Yes (for trusted servers) | Usually no (already remote) |
 | **Host Definitions** | Many (dev, staging, VPS, etc.) | Minimal (GitHub, internal servers) |
-| **IdentityAgent** | Bitwarden socket path | Not configured (uses forwarded/system) |
+| **IdentityAgent** | `SSH_AUTH_SOCK` (never a hardcoded path) | Not configured (uses forwarded/system) |
 | **ControlMaster** | Yes (speeds up connections) | Yes (speeds up outbound connections) |
 | **Typical Use Cases** | Daily dev work, deployments | Git operations, internal API calls |
 
@@ -93,8 +93,8 @@ Host *
     ServerAliveInterval 60
     ServerAliveCountMax 3
 
-    # Bitwarden SSH agent (choose your install method)
-    IdentityAgent ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
+    # Bitwarden SSH agent — follow $SSH_AUTH_SOCK, don't hardcode the install path
+    IdentityAgent SSH_AUTH_SOCK
 
 # Enable agent forwarding for work servers
 Host dev staging demo2 qspace
@@ -348,21 +348,20 @@ Host *
    - Open Bitwarden → Settings → Preferences
    - Enable "SSH Agent" option
 
-2. **Find your socket path:**
-   ```bash
-   # Snap install
-   ls ~/.var/app/com.bitwarden.desktop/config/Bitwarden/.bitwarden-ssh-agent.sock
+2. **Set `SSH_AUTH_SOCK` to your socket, once, via a systemd `environment.d` drop-in** — not
+   `~/.zshenv`, which a shell rc-blind systemd user unit or graphical login never reads. See
+   [README.md's "Using Bitwarden SSH Agent"](../README.md#using-bitwarden-ssh-agent) for the drop-in
+   and how to find the socket path (it depends on install method and changes on reinstall).
 
-   # Deb/AppImage install
-   ls ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
-   ```
-
-3. **Configure SSH:**
+3. **Configure SSH to follow the variable, not a baked path:**
    ```ssh
    Host *
-       # Choose based on your Bitwarden install method
-       IdentityAgent ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
+       IdentityAgent SSH_AUTH_SOCK
    ```
+   This is the literal ssh_config token meaning "use `$SSH_AUTH_SOCK`" — it survives a
+   snap/deb/flatpak reinstall without editing `~/.ssh/config` again. A hardcoded absolute path here
+   is a stale-socket trap: it fails silently until the next reboot, because an already-authenticated
+   `ControlMaster` session keeps working on the old socket.
 
 4. **Test:**
    ```bash
@@ -1343,30 +1342,39 @@ ssh -A -v hostname 2>&1 | grep -i "agent"
 
 **Debug steps:**
 ```bash
-# Check socket exists
-ls -l ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
-# Or for snap: ~/.var/app/com.bitwarden.desktop/config/Bitwarden/
-
 # Check Bitwarden running
 ps aux | grep -i bitwarden
 
 # Check SSH agent enabled in Bitwarden
 # Open Bitwarden → Settings → Preferences → SSH Agent (should be checked)
 
+# Find your actual socket, then check it exists
+find ~ -name ".bitwarden-ssh-agent.sock" 2>/dev/null
+ls -l "$SSH_AUTH_SOCK"
+
 # Test socket directly
-SSH_AUTH_SOCK=~/.config/Bitwarden/.bitwarden-ssh-agent.sock ssh-add -l
+ssh-add -l
 ```
 
-**Symptom:** Wrong socket path
+**Symptom:** Wrong socket path (usually after a snap/deb/flatpak reinstall)
+
+If `~/.ssh/config` has `IdentityAgent SSH_AUTH_SOCK` (see [Bitwarden SSH Agent](#option-1-bitwarden-ssh-agent-laptop-only)
+above), the fix is to correct the `environment.d` drop-in, not the ssh config:
 
 ```bash
-# Find your Bitwarden socket
-find ~ -name ".bitwarden-ssh-agent.sock" 2>/dev/null
+find ~ -name ".bitwarden-ssh-agent.sock" 2>/dev/null   # find the real path
+$EDITOR ~/.config/environment.d/10-bitwarden-ssh-agent.conf   # use ${HOME}, not %h — see README.md
+systemctl --user set-environment SSH_AUTH_SOCK="<the real path>"  # apply without re-login
+export SSH_AUTH_SOCK="<the real path>"   # set-environment does NOT update your current shell
 
-# Common paths:
-ls ~/.config/Bitwarden/.bitwarden-ssh-agent.sock  # Deb/AppImage
-ls ~/.var/app/com.bitwarden.desktop/config/Bitwarden/.bitwarden-ssh-agent.sock  # Snap/Flatpak
+# Confirm ssh actually resolved the fixed value — a live ControlMaster hides a stale
+# socket for hours, so always test without multiplexing:
+ssh -G <host> | grep identityagent
+ssh -o ControlPath=none -T <host>
 ```
+
+If `~/.ssh/config` still has a hardcoded `IdentityAgent` path instead, that's the bug — replace it
+with `IdentityAgent SSH_AUTH_SOCK` so this can't recur on the next reinstall.
 
 ### Connection Stability Issues
 
@@ -1648,7 +1656,7 @@ Host *
 **Laptop additions:**
 ```ssh
 Host *
-    IdentityAgent ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
+    IdentityAgent SSH_AUTH_SOCK
 
 Host dev staging trusted-servers
     ForwardAgent yes
