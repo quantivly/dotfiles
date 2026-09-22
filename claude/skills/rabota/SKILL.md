@@ -36,9 +36,13 @@ pane, never re-derive state the CLI already measured. Design and provenance:
 2. **Connector delta.** Read `rabota --tenant <t> inbox summary` and the newest
    `sources/*.json` `fetched_at`. Fetch only what the CLI cannot: Slack
    `to:me after:<last fetched_at date>`, Calendar free blocks for today, Fireflies
-   action items since then. Write each as `{"fetched_at": "<UTC Z>", "items": [...]}`
-   to `<state_dir>/ingest-<source>.json` and run `rabota ingest <source> --file …`.
-   A connector that fails gets one line in the brief; do not retry more than once.
+   action items since then. Write each as
+   `{"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}` to
+   `<state_dir>/ingest-<source>.json` and run `rabota ingest <source> --file …`.
+   **`ok` must be a JSON boolean and is required** — omit it and `ingest` exits 2.
+   A connector that FAILED is still ingested, as `"ok": false` with `"error": "<why>"`
+   and `"items": []`; that is what puts its one `!` line in the brief. Do not retry
+   more than once, and never drop a failed source silently.
 3. **Reconcile** (`references/reconcile.md`). Classify every commitment in the
    connector items against `sources/linear.json` and `sources/github.json`.
    Record: `rabota escalate --question … --evidence … --option …` for questions;
@@ -46,13 +50,16 @@ pane, never re-derive state the CLI already measured. Design and provenance:
    Say "already done" as confidently as "overdue"; cite the artifact.
 4. **Brief.** `rabota rank && rabota --text brief`. Print its output verbatim. You
    may append ≤2 lines of reconcile deltas. Nothing else goes to the terminal.
-5. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> [--machine dev] --run` — one call, one unit,
-   seat-gated; the CLI refuses with the seat's `resets_at` when the window is spent. Watch with
-   `rabota --text census`; read `out/<lane>/verdict.json` only (≤4 KB); evaluate with
-   `rabota lane recipe --kind evaluate --of <lane> --run` and read `evaluation.json` only.
+5. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> --machine dev --run` — one call, one unit,
+   seat-gated; the CLI refuses with the seat's `resets_at` when the window is spent. `--machine dev`
+   is **required** with `--run`: the local form is not implemented and refuses. Watch with
+   `rabota --text census`; read only the lane's `verdict.json` (≤4 KB), which lives at
+   `<machine state_dir>/out/<tenant>/<lane_id>/verdict.json` **on the lane's machine** — no command
+   prints it, so fetch that one file. Evaluate with
+   `rabota lane recipe --kind evaluate --of <lane> --run` (DO-670) and read `evaluation.json` only.
    Never read a pane, never send a keystroke, never `journalctl` a lane into this context.
-6. **Monitor and evaluate.** `rabota lane status <id>` when you need it — never
-   poll on a clock, never read a pane. Read only `verdict.json` (the CLI returns it).
+6. **Monitor and evaluate.** `rabota --text census` settles a finished lane's row — never
+   poll on a clock, never read a pane. Read only `verdict.json`, fetched from the path in step 5.
    For anything going to a critical reader, evaluate as in step 5 and read only
    `evaluation.json`. `rabota lane retire <id>` as soon as evaluated.
 7. **Close.** `rabota close [--note …]`. Then `rabota --text reap`; apply only
@@ -60,8 +67,8 @@ pane, never re-derive state the CLI already measured. Design and provenance:
 
 ## Inbox session (`/rabota inbox`, and offered on the first run of a Monday)
 
-`rabota inbox plan` then print ≤12 decision lines from `batches` and
-`buckets.confirm_required`: one line per batch (`due_policy: clear N dates — ok?`,
+`rabota inbox plan` prints `{path, totals, batches}`; `buckets.confirm_required` is **not** in
+that output — read it from the file at `path`. Then print ≤12 decision lines: one line per batch (`due_policy: clear N dates — ok?`,
 `stale_backlog: N candidates — list?`), one per `confirm_required` item naming who
 to confirm with (SEC → @benoit), one per `project_prompt`. On a typed OK:
 `rabota inbox apply --tier propose --batch due_policy --confirmed`. Never apply

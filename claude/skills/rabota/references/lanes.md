@@ -5,17 +5,21 @@ Enumerate. Never hand a lane a live query — a lane gets a brief, not a socket 
 ## Dispatch (exists today)
 
 ```
-rabota lane recipe --brief <path> --repo <path> [--machine dev] [--base <ref>] \
+rabota lane recipe --brief <path> --repo <path> --machine dev [--base <ref>] \
   [--seat <name>] [--model <name>] [--effort <level>] [--est-minutes <n>] [--run]
 ```
 
-Without `--run` this only prints the argv (a dry-run recipe). With `--run` it is one call, one
-unit: `rabota budget` gates the seat before anything starts, and the CLI refuses with the seat's
+Without `--run` this only prints the argv (a dry-run recipe), and `--machine` may be omitted.
+With `--run`, `--machine dev` is **required** — the local `--run` form is not implemented and
+refuses. With `--run` it is one call, one unit: `rabota budget` gates the seat before anything starts, and the CLI refuses with the seat's
 `resets_at` when the window is spent — do not retry around a refusal, print it and continue.
 
 Watch with `rabota --text census`, which is also what settles a lane row from `started` to a
 terminal status once the unit exits — you never poll a unit or a pane directly. When a lane is
-settled, read only `out/<lane>/verdict.json` (≤4 KB) — never a pane, never `journalctl`.
+settled, read only its `verdict.json` (≤4 KB) — never a pane, never `journalctl`. That file is
+at `<machine state_dir>/out/<tenant>/<lane_id>/verdict.json` **on the machine the lane ran on**
+(for `dev`, `~/.local/state/rabota/out/<tenant>/<lane_id>/`); no subcommand prints it, so fetch
+that one file and nothing else from the out dir.
 
 **Pending DO-670:** `rabota lane recipe --kind evaluate --of <lane> --run`, for a second lane that
 judges the first lane's verdict before it reaches a critical reader, is not implemented on `main`
