@@ -1,0 +1,5 @@
+{"ts": "2026-09-03T10:00:00Z", "firstSeen": "2026-09-03T10:00:00Z", "question": "HUB-5812: retarget?", "evidence": "base branch deleted", "disposition": null}
+{"ts": "2026-09-06T10:00:00Z", "firstSeen": "2026-09-06T10:00:00Z", "question": "revoke token?", "evidence": "still live", "disposition": null}
+{"ts": "2026-09-08T10:00:00Z", "firstSeen": "2026-09-06T10:00:00Z", "question": "revoke token?", "evidence": "still live", "disposition": "resolved", "resolution": "revoked"}
+{"ts": "2026-09-09T10:02:34+03:00", "firstSeen": "2026-09-09T10:02:34+03:00", "question": "merge SEC-211?", "evidence": "ci green", "kind": "decision", "disposition": null}
+{"ts": "2026-09-10T08:20:33+03:00", "firstSeen": "2026-09-10T08:20:33+03:00", "question": "clauth banner root cause?", "evidence": "experiments inconclusive", "kind": "correction", "disposition": null}

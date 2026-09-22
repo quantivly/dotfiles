@@ -84,6 +84,23 @@ class Store:
 
     def close(self): self.conn.close()
 
+    @contextlib.contextmanager
+    def transaction(self):
+        """Run the enclosed writes atomically: one ``COMMIT`` on success, ``ROLLBACK`` and re-raise on failure.
+
+        ``isolation_level=None`` means every ``_exec`` call is otherwise its own autocommitted
+        statement; this is the one place multiple writes are made all-or-nothing (import-v1, F2:
+        a damaged row used to leave the rows before it committed).
+        """
+        self.conn.execute("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+        else:
+            self.conn.execute("COMMIT")
+
     def migrate(self):
         """Create the schema on a fresh DB; walk MIGRATIONS from the stamped version on an older one.
 
@@ -193,6 +210,17 @@ class Store:
     def answer_escalation(self, esc_id, label, resolution=None):
         self._exec("UPDATE escalations SET disposition=?, resolved_at=?, resolution=? WHERE id=?",
                           (label, now(), resolution, esc_id))
+    def unresolve_escalation(self, esc_id):
+        """Undo ``answer_escalation`` — used to roll an answer back when its jsonl projection fails."""
+        self._exec("UPDATE escalations SET disposition=NULL, resolved_at=NULL, resolution=NULL WHERE id=?",
+                          (esc_id,))
+    def delete_escalation(self, esc_id):
+        """Remove an escalation outright — used to roll back a create whose jsonl projection failed."""
+        self._exec("DELETE FROM escalations WHERE id=?", (esc_id,))
+    def escalations_by_first_seen(self, tenant):
+        """Every escalation for ``tenant`` keyed by ``first_seen`` (import-v1's identity for a record)."""
+        rows = self._rows("SELECT * FROM escalations WHERE tenant=?", (tenant,))
+        return {r["first_seen"]: r for r in rows}
     def record_gate(self, tenant, subject, label):
         """Record a gate answer as a label only — never who answered (Rule 0)."""
         self._exec("INSERT INTO gate_answers(tenant, ts, subject, label) VALUES (?,?,?,?)",

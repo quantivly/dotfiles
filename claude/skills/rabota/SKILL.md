@@ -24,7 +24,7 @@ pane, never re-derive state the CLI already measured. Design and provenance:
 | Invocation | Steps |
 |---|---|
 | `/rabota brief` | 1–4 (read-only) |
-| `/rabota status` | `rabota --text census`, `rabota lane list --status running`, open escalations (`rabota --text brief` shows the delta) |
+| `/rabota status` | `rabota --text census`, `rabota lane list --status started`, open escalations (`rabota --text brief` shows the delta) |
 | `/rabota` | 1–7 |
 | `/rabota inbox` | 1, then §Inbox session |
 | `/rabota close` | 7 |

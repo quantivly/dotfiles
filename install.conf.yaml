@@ -86,6 +86,27 @@
     # link + reconcile pattern as herdr-server.service above.
     ~/.config/systemd/user/rabota-precompute@.service: systemd/rabota-precompute@.service
     ~/.config/systemd/user/rabota-precompute@.timer: systemd/rabota-precompute@.timer
+    # Static, dotfiles-owned: no packaging variant to detect, so nothing else
+    # needs to write it. `environment.d` is read by the systemd user manager and
+    # the graphical session, neither of which reads a shell rc — see the
+    # SSH_AUTH_SOCK entry below for why that distinction matters (DO-675).
+    ~/.config/environment.d/tmpdir.conf: config/environment.d/tmpdir.conf
+    # DELIBERATELY NOT LINKED: ~/.config/environment.d/10-bitwarden-ssh-agent.conf
+    # is written by dev-setup (DO-675), which is the side that can detect the
+    # install flavor (snap/deb/flatpak). Linking it here would make dotbot's
+    # symlink the target of dev-setup's write, turning "one drop-in, one writer"
+    # into two writers for the same fact — the exact defect DO-675 found one
+    # directory over, where auto-conf kept writing safe.directory entries through
+    # the ~/.gitconfig symlink into this repo's tracked gitconfig. Do not add it
+    # "for completeness"; see README.md's "Using Bitwarden SSH Agent".
+    # Daily sweep of landed agent worktrees and their local branches. Linking does
+    # NOT enable it, and that is the point: it deletes checkouts and refs
+    # unattended, so arming it is a gate Zvi runs by hand after reading one real
+    # dry run (`scripts/wt-gc-sweep.sh --dry-run`). Its engine, `wt-gc`, lives in
+    # the private ~/.dotfiles-local; the unit's ConditionPathExists makes systemd
+    # SKIP it on a machine that has no such thing, which is not a failure.
+    ~/.config/systemd/user/wt-gc-sweep.service: systemd/wt-gc-sweep.service
+    ~/.config/systemd/user/wt-gc-sweep.timer: systemd/wt-gc-sweep.timer
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme
