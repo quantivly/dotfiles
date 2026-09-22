@@ -152,6 +152,12 @@ class LaneCliWiringTests(unittest.TestCase):
     """
 
     def setUp(self):
+        # `cli.main` resolves the tenant config from $HOME/.dotfiles-local/rabota, NOT from a
+        # cfg_base the caller passes — so unlike the rows above, these need a fixture $HOME or
+        # they read the developer's real config and pass only on a machine that has one. They
+        # did exactly that: green locally, exit 5 on every CI runner (DO-680b, caught by CI).
+        from tests.test_cli import install_fixture_home
+        install_fixture_home(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state = str(Path(self.tmp.name))
