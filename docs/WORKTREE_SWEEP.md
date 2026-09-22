@@ -88,10 +88,15 @@ Every other shape was tried or measured first:
   covers everything, with a human reading the list first. The report stays machine-wide
   and an out-of-scope REAP is reported `SKIPPED`, because a sweep that silently does less
   than its own report promised is the one nobody notices has stopped working.
-- **`--scope` governs worktree paths only.** A branch has no path, so a scoped run still
-  deletes every dangling branch its own predicate allows, in any repository. That is
-  deliberate and the dry-run footer says so; if it ever needs narrowing, the narrowing
-  belongs in the predicate, not in a path prefix that cannot express it.
+- **`--scope` reaches a branch through its host.** A branch has no path, so the first cut
+  of this let a scoped run delete dangling branches in *any* repository. The first real dry
+  run priced that at **236 branches across 25 repositories** — image-quality-app, fresco,
+  ci-measurements, platform, submodule gitdirs under hub and platform, and eighteen more
+  that have never hosted an agent session. Every one passes the predicate and loses
+  nothing, but "landed agent worktrees" is not that. Under `--scope` a dangling branch is
+  now deleted only in a repository that has a worktree under the prefix — the same notion
+  of *agent-made* the flag already carried, needing no second flag. **129 branches across
+  11 repositories** here.
 - **`--min-age 2`, counted from the merge.** A PR that merged in the last two days keeps
   its checkout, so a merge nobody has looked at yet survives. The grace is read off
   `mergedAt`, not the last commit — `wt-gc`'s `age` column is days since HEAD's commit,
@@ -146,10 +151,24 @@ silently covers less every week is the failure mode this page exists to prevent.
 Every run appends a line to `~/.local/state/wt-gc-sweep/log` and leaves the full TSV in
 `last-run.tsv`. An unattended deleter nobody can audit afterwards is one nobody should run.
 
+## A dry run shows what an apply would do
+
+The gates originally lived inside the apply path, so `--dry-run` listed everything that had
+landed rather than what the run would touch. It never *under*-reported, so nothing could be
+deleted unexpectedly — but the grace period was invisible in it, and "the sweep removed
+fewer things than the list I approved" is how a list stops being read.
+
+Each gate is one function now, and the plan asks exactly the functions the apply asks. With
+any gate set, a run without `--apply` prints `WOULD-REMOVE` / `WOULD-DELETE` / `WOULD-SKIP`
+with the reason. A reaped worktree's branch gets its own `WOULD-DELETE` line rather than a
+note on the removal line, so the two lists compare as sets — and three rows do compare
+them, which is the only thing that keeps it true. The report itself is unchanged and stays
+machine-wide, so every existing consumer simply skips the new tokens.
+
 ## Tests and the mutation sweep
 
-- `~/.dotfiles-local/scripts/test-wt-gc.sh` — 51 → **100 rows**, real repositories
-  throughout, and it asserts its own row total. Thirteen mutants, **thirteen killed**, each
+- `~/.dotfiles-local/scripts/test-wt-gc.sh` — 51 → **113 rows**, real repositories
+  throughout, and it asserts its own row total. Eighteen mutants, **eighteen killed**, each
   by a row that names the guard it removed.
 - `scripts/test-wt-gc-sweep.sh` — **21 rows**, hermetic via a recording `wt-gc` stub at the
   front of `PATH`. Five mutants, five killed. CI job `wt-gc-sweep-test`.

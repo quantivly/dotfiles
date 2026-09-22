@@ -23,8 +23,11 @@
 #       checkout, so a merge nobody has looked at yet survives the sweep. The
 #       grace is counted from the MERGE, not the last commit.
 #   --branches                   Deletes each reaped worktree's branch and every
-#       dangling local branch that passes wt-gc's landed test. Never a remote
-#       branch: `gh pr merge --delete-branch` owns those.
+#       dangling local branch that passes wt-gc's landed test. Combined with
+#       --scope that is bounded to repositories which HOST a worktree under the
+#       scope — 129 branches across 11 repos here rather than 236 across 25, the
+#       difference being repositories that have never seen an agent session.
+#       Never a remote branch: `gh pr merge --delete-branch` owns those.
 #
 # EXIT STATUS is the part with a trap in it. `wt-gc` exits 1 for a removal
 # failure AND for a warning — and a warning here is routine (a repository whose
@@ -41,6 +44,10 @@
 # Every run appends one line to $XDG_STATE_HOME/wt-gc-sweep/log and leaves the
 # full TSV in last-run.tsv, because an unattended deleter nobody can audit
 # afterwards is one nobody should run.
+#
+# --dry-run passes everything except --apply, and wt-gc then prints the plan the
+# apply would follow — WOULD-REMOVE / WOULD-DELETE / WOULD-SKIP with a reason —
+# rather than only what has landed. Read that in full before arming the timer.
 #
 # Usage: scripts/wt-gc-sweep.sh [--dry-run]
 #

@@ -521,9 +521,10 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
   `scripts/herdr-claude-wire.sh`, and `scripts/verify-tools.sh --herdr` as the one check.
 - **A spawned session cannot tear down its own worktree** — removing it closes the space it
   runs in — so `wt-gc-sweep` does it daily: `~/.herdr/worktrees` only, two-day grace from the
-  MERGE, landed local branches too, never a remote one. `./install` links the unit and
-  deliberately does **not** enable it; arm it after one `scripts/wt-gc-sweep.sh --dry-run`.
-  Evidence and every safety rule: [docs/WORKTREE_SWEEP.md](docs/WORKTREE_SWEEP.md).
+  MERGE, plus landed local branches in the repos that host those worktrees, never a remote
+  one. `./install` links the unit and deliberately does **not** enable it; arm it after
+  reading one `scripts/wt-gc-sweep.sh --dry-run`, which prints exactly what an apply would
+  do. Evidence: [docs/WORKTREE_SWEEP.md](docs/WORKTREE_SWEEP.md).
 
 ## Claude Code accounts & MCP (`claude-doctor`)
 

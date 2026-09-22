@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   herdr-draft carried 70 local branches against 27 on origin, only ~24 of which had a worktree.
   `scripts/wt-gc-sweep.sh` plus `systemd/wt-gc-sweep.{service,timer}` run `wt-gc --apply` daily,
   scoped to `~/.herdr/worktrees`, after a two-day grace counted from the **merge** rather than
-  the last commit, deleting landed local branches and **never** a remote one.
+  the last commit, deleting landed local branches in the repositories that host those
+  worktrees and **never** a remote one. `--dry-run` prints exactly what an apply would do —
+  `WOULD-REMOVE` / `WOULD-DELETE` / `WOULD-SKIP` with the reason — rather than only what has
+  landed, so the list that is approved is the list that runs.
   **It is linked but not enabled**, deliberately: arm it with
   `systemctl --user enable --now wt-gc-sweep.timer` after reading one
   `scripts/wt-gc-sweep.sh --dry-run` in full. On a machine without the private
