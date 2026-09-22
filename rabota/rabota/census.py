@@ -182,17 +182,34 @@ def seats(runner) -> tuple[list[dict], list[str]]:
     return out, unavailable
 
 
+#: The leading token of a worktree row. wt-gc emits other row types in the same
+#: stream — ``STRAY`` with two fields, ``DANGLING`` with five — so a row is
+#: selected by this token and anything else is skipped.
+WT_GC_VERDICTS = ("REAP", "REVIEW", "PRUNE", "HSPAWN", "KEEP")
+
+
 def worktrees(runner) -> tuple[list[dict], list[str]]:
-    """``wt-gc --tsv`` rows; a failed call is ``unavailable: worktrees``."""
+    """``wt-gc --tsv`` worktree rows; a failed call is ``unavailable: worktrees``.
+
+    The schema is ``verdict path branch pr dirty unpushed age reason``, eight
+    fields, with **no header line**. This function read it as
+    ``path repo branch verdict reason`` until 2026-09-22, so every row recorded
+    the verdict as the path and the path as the repo — and the fixture encoded
+    that same wrong schema, which is why the tests passed the whole time. Select
+    rows by their first field, never by position or column count: positioning
+    mislabels every row silently the day a new row type appears, and this stream
+    now has three.
+    """
     res = runner.run(["wt-gc", "--tsv"], timeout=120)
     if not res.ok:
         return [], ["worktrees"]
     rows = []
     for line in res.out.splitlines():
         parts = line.split("\t")
-        if len(parts) >= 4 and parts[0] != "path":
-            rows.append({"path": parts[0], "repo": parts[1], "branch": parts[2], "verdict": parts[3],
-                         "reason": parts[4] if len(parts) > 4 else ""})
+        if len(parts) < 8 or parts[0] not in WT_GC_VERDICTS:
+            continue
+        rows.append({"verdict": parts[0], "path": parts[1], "branch": parts[2], "pr": parts[3],
+                     "dirty": parts[4], "unpushed": parts[5], "age": parts[6], "reason": parts[7]})
     return rows, []
 
 

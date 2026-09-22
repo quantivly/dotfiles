@@ -1,2 +1,5 @@
-path	repo	branch	verdict	reason
-/home/zvi/.herdr/worktrees/.dotfiles/x	/home/zvi/.dotfiles	zvi/x	KEEP	uncommitted changes
+REAP	/home/zvi/.herdr/worktrees/herdr-draft/zvi-fix-202	zvi/fix-202	MERGED	0	0	1	PR merged; clean, every commit on a remote
+KEEP	/home/zvi/.herdr/worktrees/.dotfiles/x	zvi/x	none	3	0	0	in use by 2 process(es)
+REVIEW	/home/zvi/quantivly/platform-rs-bake	zvi/rs-bake	MERGED	3	27	4	PR merged, but 3 uncommitted,27 commit(s) on no remote
+DANGLING	/home/zvi/Projects/herdr-draft	zvi/fix-194	REAP	PR merged; every commit on a remote
+STRAY	/home/zvi/nanoclaw-wt-clone-p2b
