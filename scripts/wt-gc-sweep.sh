@@ -104,11 +104,19 @@ RC=$?
 printf '%s\n' "$OUT" > "$STATE/last-run.tsv"
 
 count() { awk -F'\t' -v k="$1" '$1 == k' <<< "$OUT" | grep -c '' ; }
-REMOVED="$(count REMOVED)"
-DELETED="$(count DELETED)"
-PRUNED="$(count PRUNED)"
-SKIPPED="$(count SKIPPED)"
-FAILED="$(count FAILED)"
+# A dry run emits WOULD-* rather than the action rows, so counting only the
+# action rows logged `removed=0 branches=0` for a run that had just planned 201
+# of them — a line indistinguishable from a real sweep that found nothing to do.
+# `mode=` is what tells the two apart in the log afterwards.
+if (( DRY )); then
+  MODE=dry
+  REMOVED="$(count WOULD-REMOVE)"; DELETED="$(count WOULD-DELETE)"
+  SKIPPED="$(count WOULD-SKIP)";   PRUNED=0; FAILED=0
+else
+  MODE=apply
+  REMOVED="$(count REMOVED)"; DELETED="$(count DELETED)"
+  SKIPPED="$(count SKIPPED)";  PRUNED="$(count PRUNED)"; FAILED="$(count FAILED)"
+fi
 WARNINGS="$(grep -c '' < "$ERRFILE")"
 
 # Warnings are echoed rather than swallowed: they are not a failure, but a
@@ -119,8 +127,8 @@ if (( WARNINGS )); then
   sed 's/^/  /' "$ERRFILE" >&2
 fi
 
-printf '%s removed=%s branches=%s pruned=%s skipped=%s failed=%s warnings=%s\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+printf '%s mode=%s removed=%s branches=%s pruned=%s skipped=%s failed=%s warnings=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MODE" \
   "$REMOVED" "$DELETED" "$PRUNED" "$SKIPPED" "$FAILED" "$WARNINGS" \
   | tee -a "$STATE/log"
 

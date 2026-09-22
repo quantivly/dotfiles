@@ -59,6 +59,16 @@ printf '%s\n' \
   "PRUNED	/home/zvi/Projects/x" \
   "REMOVED	/home/zvi/.herdr/worktrees/x/FAILED-DELETED-PRUNED	1M" \
   > "$T/report.tsv"
+# %b, not %s: printf interprets escapes in the FORMAT, never in an argument, so
+# %s here writes literal backslash-t and the fixture silently has no columns.
+printf '%b\n' \
+  "WOULD-REMOVE\t/home/zvi/.herdr/worktrees/x/a\t12M" \
+  "WOULD-DELETE\tzvi/a\t~/Projects/x" \
+  "WOULD-REMOVE\t/home/zvi/.herdr/worktrees/x/c\t4M" \
+  "WOULD-DELETE\tzvi/c\t~/Projects/x" \
+  "WOULD-DELETE\tzvi/d\t~/Projects/x" \
+  "WOULD-SKIP\t/home/zvi/.herdr/worktrees/x/b\tlanded 0d ago, under the 2-day grace" \
+  > "$T/plan.tsv"
 printf 'wt-gc: warning: could not list the worktrees of /home/zvi/quantivly/ci: fatal\n' > "$T/warn.txt"
 printf 'FAILED	/home/zvi/.herdr/worktrees/x/a	is not a working tree\n' > "$T/failed.tsv"
 
@@ -86,6 +96,13 @@ rc="$(run --dry-run)"
 check "--dry-run drops --apply and changes nothing else" "$(args)" \
   "--tsv|--branches|--scope|$T/scope|--min-age|2"
 check "--dry-run still exits 0" "$rc" 0
+# Counting only the action rows logged all zeros for a dry run that had just
+# planned 201 removals — a line indistinguishable from a real sweep that found
+# nothing, which is the one thing the audit trail must never be.
+rc="$(OUT_OVERRIDE="$T/plan.tsv" run --dry-run)"
+check "a dry run logs what it PLANNED, and says it was a dry run" \
+  "$(sed -n '$s/^[^ ]* //p' "$T/state/log")" \
+  "mode=dry removed=2 branches=3 pruned=0 skipped=1 failed=0 warnings=0"
 
 rc="$(MIN_AGE_OVERRIDE=7 run)"
 check "the grace period is configurable" "$(args)" \
@@ -111,7 +128,7 @@ printf '\nthe audit trail\n'
 rc="$(run)"
 check "the log line counts what the run reported" \
   "$(sed -n '$s/^[^ ]* //p' "$T/state/log")" \
-  "removed=2 branches=1 pruned=1 skipped=1 failed=0 warnings=0"
+  "mode=apply removed=2 branches=1 pruned=1 skipped=1 failed=0 warnings=0"
 check "the full report is kept for later" \
   "$(grep -c '^DANGLING' "$T/state/last-run.tsv")" 1
 check "the log line is timestamped in UTC" \
@@ -133,7 +150,7 @@ check "... and it names ~/.dotfiles-local rather than just failing" \
   "$(grep -c 'dotfiles-local' "$T/err")" 1
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-EXPECTED_ROWS=21
+EXPECTED_ROWS=22
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
     "$EXPECTED_ROWS" "$((PASS + FAIL))"
