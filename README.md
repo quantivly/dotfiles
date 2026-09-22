@@ -583,9 +583,10 @@ copy that drifts from whatever a login unit or `ssh_config` resolves, and an ins
 stale value silently killed every SSH host at once, and the error it produced (`bad permissions` on
 a `.pub` file) named the wrong cause entirely.
 
-The single source of truth is a systemd `environment.d` drop-in, read by both the user manager and
-the graphical session at login. `~/.config/environment.d/` holds two kinds of file, owned
-differently on purpose:
+The intended single source of truth is a systemd `environment.d` drop-in, read by both the user
+manager and the graphical session at login — though see the `gcr-ssh-agent.socket` caveat below,
+which can override it on a stock GNOME desktop. `~/.config/environment.d/` holds two kinds of
+file, owned differently on purpose:
 
 - **Static files** (no packaging to detect) are dotfiles-owned and symlinked by `./install` —
   `tmpdir.conf` is the existing example (`config/environment.d/tmpdir.conf` in this repo).
@@ -597,24 +598,40 @@ differently on purpose:
   `~/.gitconfig` landed in the tracked `gitconfig` through its symlink. So: create it by hand (or
   let dev-setup do it), and don't add it to `install.conf.yaml`.
 
-```bash
-mkdir -p ~/.config/environment.d
-cat << 'EOF' > ~/.config/environment.d/10-bitwarden-ssh-agent.conf
-# For processes started by the graphical session, which never reads a shell rc.
-SSH_AUTH_SOCK=%h/.bitwarden-ssh-agent.sock
-EOF
-# Apply to the current session without a re-login:
-systemctl --user set-environment SSH_AUTH_SOCK="$HOME/.bitwarden-ssh-agent.sock"
-```
-
-`%h/.bitwarden-ssh-agent.sock` is the current desktop (`.deb`/`/opt`) install's socket. Find yours
-rather than assuming it:
+Find your actual socket rather than assuming it — it depends on the install method and changes on
+reinstall:
 
 ```bash
 # Check if Bitwarden's SSH agent is running, and its actual socket path
 ps aux | grep -i bitwarden | grep ssh
 find ~ -name '.bitwarden-ssh-agent.sock' 2>/dev/null
 ```
+
+`$HOME/.bitwarden-ssh-agent.sock` is the current desktop (`.deb`/`/opt`) install's socket. Use
+`${HOME}`, not `%h`: `environment.d(5)` supports only `$VAR`/`${VAR}` shell-style expansion —
+`%h` is a *unit-file* specifier (it works in `.service` files and `user-tmpfiles.d`, not here) and
+is passed through **literally**, silently yielding a socket path that doesn't exist.
+
+```bash
+mkdir -p ~/.config/environment.d
+cat << 'EOF' > ~/.config/environment.d/10-bitwarden-ssh-agent.conf
+# For processes started by the graphical session, which never reads a shell rc.
+SSH_AUTH_SOCK=${HOME}/.bitwarden-ssh-agent.sock
+EOF
+# Apply to the current session's systemd user manager without a re-login. This does NOT update
+# your current shell's own SSH_AUTH_SOCK — export it there too if you'll use ssh/git immediately:
+systemctl --user set-environment SSH_AUTH_SOCK="$HOME/.bitwarden-ssh-agent.sock"
+export SSH_AUTH_SOCK="$HOME/.bitwarden-ssh-agent.sock"
+```
+
+**If a stock GNOME desktop's `gcr-ssh-agent.socket` is enabled**, its `ExecStartPost` runs
+`systemctl --user set-environment SSH_AUTH_SOCK=...` pointing at *its own* socket whenever it
+activates (`WantedBy=sockets.target`, which starts after the `environment.d` generators run) — so
+it can silently overwrite the drop-in's value for anything started afterward. Check
+`systemctl --user list-units 'gcr-ssh-agent*'`; if it's active and you want Bitwarden's agent
+instead, either mask it (`systemctl --user mask gcr-ssh-agent.socket gcr-ssh-agent.service`) or
+re-run the `set-environment` line above after login and verify with `systemctl --user
+show-environment | grep SSH_AUTH_SOCK`.
 
 `~/.ssh/config` should point at the variable, not duplicate the path:
 
@@ -636,9 +653,14 @@ rollout, set both by hand as above.
 4. The private key file on disk can be deleted after importing to Bitwarden
 5. Keys are available automatically when Bitwarden is unlocked
 
-**Why this works**: dotfiles checks `if [ -z "$SSH_AUTH_SOCK" ]` before starting its own ssh-agent,
-so once the environment.d drop-in is in place, dotfiles detects it and skips starting a separate
-agent.
+**Why this works**: `zsh/zshrc.conditionals.plugins` only starts its own ssh-agent when
+`[[ -n "$SSH_AUTH_SOCK" && -S "$SSH_AUTH_SOCK" ]]` fails — a *live socket*, not merely a non-empty
+variable — so once the environment.d drop-in resolves to a real socket, dotfiles detects it and
+skips starting a separate one. That's also why a dead value from the `%h` mistake above is
+dangerous rather than merely wrong: it fails that check, and dotfiles quietly spawns a fresh
+keyless agent and re-links `~/.ssh/ssh_auth_sock` onto it — including in every tmux pane, which
+gets its own socket through that symlink (`tmux.conf`'s `set-environment`), not through
+`environment.d` directly.
 
 **Diagnosing a stale socket**: a live control-master masks a stale `SSH_AUTH_SOCK` for hours (the
 already-authenticated session keeps working), so always disable multiplexing when checking:
@@ -648,10 +670,10 @@ ssh -G <host> | grep identityagent      # resolves the *token*, not whether the 
 ssh -o ControlPath=none -T <host>       # forces a fresh auth attempt against the real socket
 ```
 
-If the second command fails but the first shows `identityagent ssh_auth_sock` (correct), the
-socket the variable currently points to is dead — re-check it with `find ~ -name
-'.bitwarden-ssh-agent.sock'` and confirm `systemctl --user show-environment | grep SSH_AUTH_SOCK`
-agrees with your shell's value.
+If the second command fails but the first shows `identityagent SSH_AUTH_SOCK` (correct — `ssh -G`
+lowercases the keyword, not the value), the socket the variable currently points to is dead —
+re-check it with `find ~ -name '.bitwarden-ssh-agent.sock'` and confirm `systemctl --user
+show-environment | grep SSH_AUTH_SOCK` agrees with your shell's value.
 
 #### Other SSH Agents
 
@@ -661,8 +683,8 @@ a literal path. `environment.d` is systemd-specific, so it doesn't apply on macO
 is still the least-bad option, but keep the same `IdentityAgent SSH_AUTH_SOCK` indirection in
 `~/.ssh/config` so a Bitwarden/1Password/Secretive reinstall doesn't require re-editing it:
 
-- **1Password** (macOS): `SSH_AUTH_SOCK=$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`
-- **Secretive** (macOS): `SSH_AUTH_SOCK=$HOME/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh`
+- **1Password** (macOS): `export SSH_AUTH_SOCK="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"`
+- **Secretive** (macOS): `export SSH_AUTH_SOCK="$HOME/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh"`
 - **System ssh-agent**: dotfiles will auto-detect if already running
 
 ### Forking for Personal Use
