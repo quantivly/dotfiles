@@ -474,6 +474,65 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     return out
 
 
+TERMINAL_STATUSES = ("done", "failed", "abandoned")  # set by census.settle_finished / reap;
+# a lane in one of these is settled and safe to retire. "started" is not: retiring it would
+# discard the row a later `census` call still needs to settle from the unit's own stream.
+RETIRED_STATUS = "retired"
+
+
+def run_list(ctx, status: str | None = None) -> dict:
+    """``{"lanes": [...]}``, tenant-scoped, optionally filtered to one ``status``.
+
+    A pure read over ``ctx.store`` — no ssh, no unit inspection, no polling. With no ``status``
+    this returns every row regardless of state: a live lane, a settled one and a retired one are
+    all "a lane that exists", and narrowing that by default would hide exactly the settled rows a
+    caller needs in order to decide what to retire. Filtering is opt-in via ``--status``, matching
+    ``rabota lane list --status running`` in the v2 skill — though the vocabulary this store
+    actually writes is ``started`` (``run_recipe``, ``census.settle_finished``), never
+    ``running``; ``--status`` is a plain passthrough to the stored column, not an alias table, so
+    a caller after live lanes wants ``--status started``.
+    """
+    return {"lanes": ctx.store.list_lanes(ctx.tenant.name, status=status)}
+
+
+def _get_tenant_lane(ctx, lane_id: str) -> dict:
+    """One row by id, scoped to ``ctx.tenant`` — an unknown id, or one belonging to another
+    tenant, refuses by name rather than returning ``None`` or another tenant's row.
+    """
+    row = ctx.store.get_lane(lane_id)
+    if row is None or row.get("tenant") != ctx.tenant.name:
+        raise errors.Refused(f"no lane {lane_id!r}")
+    return row
+
+
+def run_status(ctx, lane_id: str) -> dict:
+    """The one row for ``lane_id`` — the row itself, never a lane's prose. The skill reads only
+    ``verdict.json``/``evaluation.json`` for content; this is the small, tenant-scoped projection
+    of what the table already knows.
+    """
+    return _get_tenant_lane(ctx, lane_id)
+
+
+def run_retire(ctx, lane_id: str) -> dict:
+    """Transition a settled lane to ``status="retired"``; return the row as it ends up.
+
+    Only a lane already in ``TERMINAL_STATUSES`` may retire — a still-``started`` lane refuses,
+    because retiring it would throw away the row ``census`` still needs in order to settle it from
+    the unit's own stream (there is no unit inspection here to re-derive that). Retiring an
+    already-``retired`` lane is a defined no-op: it returns the row unchanged rather than refusing,
+    so the skill's "as soon as evaluated" call site never has to check first.
+    """
+    row = _get_tenant_lane(ctx, lane_id)
+    if row["status"] == RETIRED_STATUS:
+        return row
+    if row["status"] not in TERMINAL_STATUSES:
+        raise errors.Refused(
+            f"lane {lane_id!r} has status {row['status']!r}, not one of {TERMINAL_STATUSES}: "
+            "only a settled lane may be retired")
+    ctx.store.update_lane(lane_id, status=RETIRED_STATUS)
+    return _get_tenant_lane(ctx, lane_id)
+
+
 def _build(sub):
     p = sub.add_parser("lane", help="render or run exactly one lane unit")
     s = p.add_subparsers(dest="lane_cmd", required=True)
@@ -489,10 +548,30 @@ def _build(sub):
     r.add_argument("--run", action="store_true")
     r.add_argument("--kind", choices=["work", "evaluate"], default="work")
     r.add_argument("--of", default=None)
+    l = s.add_parser("list", help="list lane rows, tenant-scoped")
+    l.add_argument("--status", default=None)
+    st = s.add_parser("status", help="print one lane row")
+    st.add_argument("lane_id")
+    rt = s.add_parser("retire", help="mark a settled lane retired")
+    rt.add_argument("lane_id")
 
 
 def _run(ns, **ctx_kw):
     ctx = Context.from_namespace(ns, **ctx_kw)
+    # `getattr` with a "recipe" default, not `ns.lane_cmd` directly: several existing tests
+    # (test_lane_recipe.py) build the Namespace by hand for the recipe path only and never set
+    # this field, since `recipe` was the sole subcommand before this one grew siblings.
+    lane_cmd = getattr(ns, "lane_cmd", "recipe")
+    if lane_cmd == "list":
+        out = run_list(ctx, status=ns.status)
+        return ([f"{l['id']} {l['status']} {l['kind']} {l['machine']}" for l in out["lanes"]]
+                if ns.text else out)
+    if lane_cmd == "status":
+        row = run_status(ctx, ns.lane_id)
+        return [f"{row['id']} {row['status']}"] if ns.text else row
+    if lane_cmd == "retire":
+        row = run_retire(ctx, ns.lane_id)
+        return [f"{row['id']} {row['status']}"] if ns.text else row
     default_model = (ctx.tenant.lanes.evaluate_model if ns.kind == "evaluate"
                      else ctx.tenant.lanes.default_model)
     out = run_recipe(ctx, brief=ns.brief, repo=ns.repo, machine=ns.machine, base=ns.base,
