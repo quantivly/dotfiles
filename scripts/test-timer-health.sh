@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+#
+# scripts/test-timer-health.sh
+# ============================
+#
+# State table for scripts/check-timer-health.sh.
+#
+# HERMETIC via a recording `systemctl` STUB at the front of PATH — never by
+# relying on systemctl being absent. This box has a real one wired to a live user
+# manager that holds the herdr server every agent session on the machine depends
+# on, plus an armed wt-gc-sweep.timer that DELETES worktrees. A suite that
+# assumed absence would pass on a CI runner and tell you nothing here, which is
+# exactly the shape scripts/test-systemd-reconcile.sh's header warns about after
+# its own --apply rows turned out to have executed zero times.
+#
+# The stub answers the four things the checker asks — show-environment,
+# `show --timestamp=unix`, `is-enabled`, and `list-timers --all -o json` — from
+# per-unit fixture files, and records its argv so a row can assert what was NOT
+# asked (a bare template must never be queried; an unenabled unit must not be
+# inspected).
+#
+# The OWNERSHIP half is deliberately NOT stubbed: the fake checkout holds a real
+# COPY of scripts/reconcile-systemd-units.sh, so every row also exercises
+# --list-managed and the physical-path containment behind it. Faking that would
+# have left the one piece of cross-script wiring in this feature unpinned. A copy
+# and not a symlink — see reset().
+#
+# "Could not run" is exit 2, never a pass. The suite asserts its own row total.
+#
+# Requires: bash, awk, sed, jq. No sudo, no systemd, no network.
+#
+# Usage: scripts/test-timer-health.sh
+
+set -uo pipefail
+
+DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SUT="$DOTFILES/scripts/check-timer-health.sh"
+RECONCILER="$DOTFILES/scripts/reconcile-systemd-units.sh"
+
+PASS=0; FAIL=0
+ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
+bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
+check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
+grep_ok()   { if grep -q -- "$2" <<<"$1"; then ok "$3"; else bad "$3 — output did not contain '$2'"; fi; }
+grep_none() { if grep -q -- "$2" <<<"$1"; then bad "$3 — output unexpectedly contained '$2'"; else ok "$3"; fi; }
+fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
+
+[[ -x "$SUT" ]]         || fatal "cannot execute $SUT"
+[[ -x "$RECONCILER" ]]  || fatal "cannot execute $RECONCILER"
+command -v awk >/dev/null || fatal "awk is required"
+command -v jq  >/dev/null || fatal "jq is required"
+
+T="$(mktemp -d)" || fatal "no temp dir"
+trap 'rm -rf "$T"' EXIT
+STUBBIN="$T/bin"
+mkdir -p "$STUBBIN" || fatal "setup"
+
+# A frozen clock, so "stale" and "fresh" are properties of the fixture and not of
+# when the suite happens to run.
+NOW=1790000000
+US=1000000
+
+# ---------------------------------------------------------------------------
+# The systemctl stub
+# ---------------------------------------------------------------------------
+cat > "$STUBBIN/systemctl" <<'STUB'
+#!/usr/bin/env bash
+# Fake `systemctl --user` for scripts/test-timer-health.sh.
+[ -n "${SCTL_STATE:-}" ] || { echo "systemctl stub: no SCTL_STATE" >&2; exit 99; }
+printf '%s\n' "$*" >> "$SCTL_STATE/calls.log"
+
+[ "${1:-}" = "--user" ] || { echo "systemctl stub: refusing a non---user call: $*" >&2; exit 99; }
+shift
+
+case "${1:-}" in
+  show-environment)
+    [ -e "$SCTL_STATE/no-manager" ] && exit 1
+    echo "LANG=C"; exit 0 ;;
+  is-enabled)
+    f="$SCTL_STATE/enabled/${2}"
+    if [ -r "$f" ]; then cat "$f"; exit 0; fi
+    echo "linked"; exit 0 ;;
+  list-timers)
+    if [ -r "$SCTL_STATE/timers.json" ]; then cat "$SCTL_STATE/timers.json"; else echo '[]'; fi
+    exit 0 ;;
+  show)
+    shift
+    unit=""
+    for a in "$@"; do
+      case "$a" in
+        --*|-p) continue ;;
+        LoadState|ActiveState|UnitFileState|Result|ExecMainStatus|ConditionResult|ConditionTimestamp|ActiveEnterTimestamp) continue ;;
+        *) [ -z "$unit" ] && unit="$a" ;;
+      esac
+    done
+    case "$unit" in
+      # The real systemctl ERRORS on a bare template. Reproduced, so a row can
+      # prove the checker never asks.
+      *@.*) echo "Unit name $unit is neither a valid invocation ID nor unit name." >&2; exit 1 ;;
+    esac
+    f="$SCTL_STATE/props/$unit"
+    if [ -r "$f" ]; then cat "$f"; exit 0; fi
+    # Measured on systemd 259: an unknown unit exits 0 and claims success.
+    printf 'LoadState=not-found\nActiveState=inactive\nUnitFileState=\nResult=success\nExecMainStatus=0\nConditionResult=no\nConditionTimestamp=\nActiveEnterTimestamp=\n'
+    exit 0 ;;
+esac
+echo "systemctl stub: unhandled: $*" >&2
+exit 99
+STUB
+chmod +x "$STUBBIN/systemctl" || fatal "setup"
+
+STUB_RESOLVED="$(PATH="$STUBBIN:$PATH" bash -c 'command -v systemctl')"
+check "systemctl resolves to the stub" "$STUB_RESOLVED" "$STUBBIN/systemctl"
+[[ "$STUB_RESOLVED" == "$STUBBIN/systemctl" ]] || \
+  fatal "the stub is not first on PATH; rows would query the REAL user manager"
+
+# A PATH with every tool the checker and the reconciler need EXCEPT jq, for the
+# "could not run" row. Built by symlink, so jq is genuinely absent rather than
+# mocked into absence.
+NOJQ="$T/nojq"
+mkdir -p "$NOJQ" || fatal "setup"
+for t in bash sh awk sed grep tr sort head cat date readlink rm ls mkdir dirname basename; do
+    p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$NOJQ/$t"
+done
+[[ ! -e "$NOJQ/jq" ]] || fatal "setup: jq leaked into the no-jq PATH"
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+CHECKOUT="$T/checkout"      # a fake dotfiles checkout
+SUDIR="$T/systemd-user"     # a fake ~/.config/systemd/user
+STATE="$T/state"            # what the stub answers from
+
+reset() {
+    rm -rf "$CHECKOUT" "$SUDIR" "$STATE"
+    mkdir -p "$CHECKOUT/systemd" "$CHECKOUT/scripts" "$SUDIR" \
+             "$STATE/props" "$STATE/enabled" || fatal "setup"
+    # A REAL reconciler, so --list-managed and its containment logic run for real
+    # — but a COPY, never a symlink. A row below replaces this file with a stub
+    # that cannot answer --list-managed, and `>` follows a symlink: the first
+    # draft of this suite truncated scripts/reconcile-systemd-units.sh in the
+    # working tree, from inside a test whose subject is a script that must never
+    # delete the wrong file. A copy also keeps the fixture honest, because
+    # readlink -f containment then resolves inside the fake checkout.
+    cp -f "$RECONCILER" "$CHECKOUT/scripts/reconcile-systemd-units.sh" || fatal "setup"
+    chmod +x "$CHECKOUT/scripts/reconcile-systemd-units.sh" || fatal "setup"
+    : > "$STATE/calls.log"
+}
+
+# link_unit <unit> [extra unit-file line ...]
+link_unit() {
+    local unit="$1" l; shift
+    { printf '[Unit]\nDescription=%s\n' "$unit"
+      for l in "$@"; do printf '%s\n' "$l"; done
+      printf '[Install]\nWantedBy=default.target\n'; } > "$CHECKOUT/systemd/$unit"
+    ln -sf "$CHECKOUT/systemd/$unit" "$SUDIR/$unit"
+}
+
+set_enabled() { printf '%s\n' "$2" > "$STATE/enabled/$1"; }
+
+# props <unit> <LoadState> <ActiveState> <Result> <ExecMainStatus> <ConditionResult> <ConditionTimestamp> <ActiveEnterTimestamp>
+props() {
+    printf 'LoadState=%s\nActiveState=%s\nUnitFileState=enabled\nResult=%s\nExecMainStatus=%s\nConditionResult=%s\nConditionTimestamp=%s\nActiveEnterTimestamp=%s\n' \
+        "$2" "$3" "$4" "$5" "$6" "$7" "$8" > "$STATE/props/$1"
+}
+
+timers_json() { printf '%s\n' "$1" > "$STATE/timers.json"; }
+
+# A timer JSON row helper: row <unit> <svc> <next_sec> <last_sec>
+row() { printf '{"next":%d,"last":%d,"unit":"%s","activates":"%s"}' \
+        $(( $3 * US )) $(( $4 * US )) "$1" "$2"; }
+
+run() {
+    PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" \
+    SYSTEMD_USER_DIR="$SUDIR" TIMER_HEALTH_NOW="$NOW" \
+    XDG_RUNTIME_DIR="$T/run" \
+    "$SUT" "$@" 2>&1
+}
+asked() { grep -c -- "$1" "$STATE/calls.log" 2>/dev/null || true; }
+
+# The steady state every fault row is a single change away from: a 30-minute
+# timer that fired 10 minutes ago, and a healthy service.
+healthy() {
+    reset
+    link_unit precompute.timer
+    link_unit precompute.service 'ConditionPathExists=/nonexistent/wt-gc'
+    set_enabled precompute.timer enabled
+    props precompute.timer loaded active success 0 yes "@$((NOW-600))" "@$((NOW-6000))"
+    props precompute.service loaded inactive success 0 yes "@$((NOW-600))" ""
+    timers_json "[$(row precompute.timer precompute.service $((NOW+1200)) $((NOW-600)))]"
+}
+
+# ---------------------------------------------------------------------------
+printf '\nownership and discovery\n'
+
+reset
+OUT="$(run)"; RC=$?
+check "nothing linked: exit 0" "$RC" 0
+grep_ok "$OUT" 'no managed systemd user units linked' "nothing linked: says skipped, not clean"
+
+healthy
+rm -f "$CHECKOUT/scripts/reconcile-systemd-units.sh"
+printf '#!/bin/sh\nexit 2\n' > "$CHECKOUT/scripts/reconcile-systemd-units.sh"
+chmod +x "$CHECKOUT/scripts/reconcile-systemd-units.sh"
+OUT="$(run)"; RC=$?
+check "reconciler cannot answer --list-managed: exit 2" "$RC" 2
+
+# Links exist, and the checkout they point into cannot be asked about them. This
+# must NOT collapse into "nothing is linked" — that was a real hole, found by
+# this row: it exited 0 with a ○ while ownership was unknown.
+healthy
+rm -f "$CHECKOUT/scripts/reconcile-systemd-units.sh"
+OUT="$(run)"; RC=$?
+check "linked, but the owning checkout has no reconciler: exit 2" "$RC" 2
+grep_ok "$OUT" 'OWNERSHIP is unknown' "no reconciler in the owning checkout: says ownership is unknown"
+grep_none "$OUT" 'no managed systemd user units linked' "no reconciler: not reported as an empty machine"
+
+# A checkout that is reachable and answers, but owns no UNITS: everything it has
+# linked here has a suffix systemd does not treat as a unit.
+healthy
+rm -f "$SUDIR"/*.timer "$SUDIR"/*.service
+mkdir -p "$T/other/systemd" "$T/other/scripts"
+cp -f "$RECONCILER" "$T/other/scripts/reconcile-systemd-units.sh"
+chmod +x "$T/other/scripts/reconcile-systemd-units.sh"
+printf 'x\n' > "$T/other/systemd/notes.conf"
+ln -sf "$T/other/systemd/notes.conf" "$SUDIR/notes.conf"
+OUT="$(run)"; RC=$?
+check "a checkout that owns no units here: exit 0" "$RC" 0
+grep_ok "$OUT" 'owns no systemd user units' "owns nothing: says so"
+
+# A bare template is linked by dotbot and MUST NOT be queried — the real
+# systemctl errors on one.
+healthy
+link_unit 'rabota-precompute@.timer'
+link_unit 'rabota-precompute@.service'
+OUT="$(run)"; RC=$?
+check "a bare template does not break the run" "$RC" 0
+check "the bare template is never passed to systemctl" "$(asked 'rabota-precompute@\.')" 0
+
+printf '\nthe manager, and the tools needed to ask it\n'
+
+healthy
+OUT="$( unset XDG_RUNTIME_DIR
+        PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+        TIMER_HEALTH_NOW="$NOW" "$SUT" 2>&1 )"; RC=$?
+check "no user manager reachable: exit 0" "$RC" 0
+grep_ok "$OUT" 'no systemd user manager reachable' "no manager: says skipped"
+
+healthy
+touch "$STATE/no-manager"
+OUT="$(run)"; RC=$?
+check "show-environment fails: exit 0, skipped" "$RC" 0
+grep_ok "$OUT" 'skipped' "manager unreachable: says skipped"
+rm -f "$STATE/no-manager"
+
+healthy
+OUT="$(PATH="$STUBBIN:$NOJQ" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+        TIMER_HEALTH_NOW="$NOW" XDG_RUNTIME_DIR="$T/run" "$SUT" 2>&1)"; RC=$?
+check "jq missing: exit 2, not 0" "$RC" 2
+grep_ok "$OUT" 'UNCHECKED' "jq missing: names it UNCHECKED"
+
+printf '\nthe healthy steady state\n'
+
+healthy
+OUT="$(run)"; RC=$?
+check "healthy timer + service: exit 0" "$RC" 0
+grep_ok "$OUT" '✓ precompute.timer' "healthy: a tick for the timer"
+grep_ok "$OUT" '(precompute.service ok)' "healthy: the service is named as CHECKED, not silent"
+
+healthy
+set_enabled precompute.timer linked
+OUT="$(run)"; RC=$?
+check "linked but not enabled is a DECISION: exit 0" "$RC" 0
+grep_ok "$OUT" 'linked, not enabled' "not enabled: says so rather than passing silently"
+check "not enabled: its properties are never read" "$(asked 'show .*precompute.timer')" 0
+
+printf '\ntimer faults\n'
+
+healthy
+timers_json '[]'
+OUT="$(run)"; RC=$?
+check "enabled but absent from list-timers: exit 1" "$RC" 1
+grep_ok "$OUT" 'does not list it as a timer' "absent from list-timers: named"
+
+healthy
+props precompute.timer loaded inactive success 0 yes "@$((NOW-600))" "@$((NOW-6000))"
+OUT="$(run)"; RC=$?
+check "timer not active: exit 1" "$RC" 1
+grep_ok "$OUT" 'will not fire' "inactive timer: named"
+
+healthy
+timers_json "[$(row precompute.timer precompute.service 0 $((NOW-600)))]"
+OUT="$(run)"; RC=$?
+check "active with no next elapse: exit 1" "$RC" 1
+grep_ok "$OUT" 'NO next run scheduled' "no next elapse: named"
+
+healthy
+timers_json "[$(row precompute.timer precompute.service $((NOW+20*86400)) $((NOW-600)))]"
+OUT="$(run)"; RC=$?
+check "next run beyond the horizon: exit 1" "$RC" 1
+grep_ok "$OUT" 'OnCalendar' "beyond horizon: points at the calendar spec"
+# The horizon is NOT redundant with staleness: this same fixture is not stale,
+# because the derived cycle is as wide as the mistake.
+grep_none "$OUT" 'STALE' "beyond horizon: staleness alone could never catch it"
+
+healthy
+timers_json "[$(row precompute.timer precompute.service $((NOW+13*86400)) $((NOW-600)))]"
+OUT="$(run)"; RC=$?
+check "13 days away is inside the 14-day horizon" "$RC" 0
+
+printf '\nfreshness, derived from the timer schedule\n'
+
+# Never fired, armed recently — wt-gc-sweep.timer was in exactly this state on
+# the day this was written, and must not read as infinitely stale.
+healthy
+props precompute.timer loaded active success 0 yes "@$((NOW-600))" "@$((NOW-3600))"
+timers_json "[$(row precompute.timer precompute.service $((NOW+40000)) 0)]"
+OUT="$(run)"; RC=$?
+check "never fired, armed an hour ago: exit 0" "$RC" 0
+grep_ok "$OUT" 'last run never' "never fired: reported as never, not as 1970"
+
+# Never fired, and its first run is long overdue.
+healthy
+props precompute.timer loaded active success 0 yes "@$((NOW-600))" "@$((NOW-100000))"
+timers_json "[$(row precompute.timer precompute.service $((NOW-60000)) 0)]"
+OUT="$(run)"; RC=$?
+check "never fired and a full cycle overdue: exit 1" "$RC" 1
+grep_ok "$OUT" 'STALE' "never fired + overdue: STALE"
+
+healthy
+timers_json "[$(row precompute.timer precompute.service $((NOW+1200)) $((NOW-1800)))]"
+OUT="$(run)"; RC=$?
+check "fired within its cycle: exit 0" "$RC" 0
+
+# cycle = next - last = 1800; the limit is next + cycle.
+healthy
+timers_json "[$(row precompute.timer precompute.service $((NOW-1801)) $((NOW-3601)))]"
+OUT="$(run)"; RC=$?
+check "one second past next + cycle: exit 1" "$RC" 1
+grep_ok "$OUT" 'STALE' "past the limit: STALE"
+
+healthy
+timers_json "[$(row precompute.timer precompute.service $((NOW-1800)) $((NOW-3600)))]"
+OUT="$(run)"; RC=$?
+check "exactly AT next + cycle is not yet stale (> not >=)" "$RC" 0
+
+printf '\nservice faults\n'
+
+# The measured trap: an unknown unit exits 0 and answers Result=success to
+# everything. LoadState is the only question that tells the truth.
+healthy
+rm -f "$STATE/props/precompute.service"
+OUT="$(run)"; RC=$?
+check "the service systemd cannot load: exit 1" "$RC" 1
+grep_ok "$OUT" 'LoadState=not-found' "not-found service: named by LoadState"
+grep_none "$OUT" 'SKIPPED' "not-found service: not misreported as skipped"
+
+healthy
+props precompute.service loaded failed exit-code 1 yes "@$((NOW-600))" ""
+OUT="$(run)"; RC=$?
+check "last run failed: exit 1" "$RC" 1
+grep_ok "$OUT" 'last run FAILED' "failed run: named"
+grep_ok "$OUT" 'journalctl --user -u precompute.service' "failed run: gives the journal command"
+
+healthy
+props precompute.service loaded inactive success 1 yes "@$((NOW-600))" ""
+OUT="$(run)"; RC=$?
+check "Result=success but ExecMainStatus=1: exit 1" "$RC" 1
+
+healthy
+props precompute.service loaded failed success 0 yes "@$((NOW-600))" ""
+OUT="$(run)"; RC=$?
+check "ActiveState=failed alone: exit 1" "$RC" 1
+
+# The silent one this whole file exists for.
+healthy
+props precompute.service loaded inactive success 0 no "@$((NOW-600))" ""
+OUT="$(run)"; RC=$?
+check "armed but SKIPPED by a condition: exit 1" "$RC" 1
+grep_ok "$OUT" 'armed but SKIPPED' "skipped unit: named"
+grep_ok "$OUT" 'ConditionPathExists=/nonexistent/wt-gc' "skipped unit: names the condition from the unit file"
+
+# ... but the same value on a unit that has simply never started is not a fault.
+healthy
+props precompute.service loaded inactive success 0 no "" ""
+OUT="$(run)"; RC=$?
+check "ConditionResult=no with no ConditionTimestamp: exit 0" "$RC" 0
+grep_none "$OUT" 'SKIPPED' "never-started service: not reported as skipped"
+
+printf '\nstandalone (non-timer) managed services\n'
+
+healthy
+link_unit server.service
+set_enabled server.service enabled
+props server.service loaded active success 0 yes "@$((NOW-9000))" "@$((NOW-9000))"
+OUT="$(run)"; RC=$?
+check "a long-running managed service that is up: exit 0" "$RC" 0
+grep_ok "$OUT" '✓ server.service: active' "standalone service: reported"
+
+healthy
+link_unit server.service
+set_enabled server.service enabled
+props server.service loaded inactive success 0 yes "@$((NOW-9000))" ""
+OUT="$(run)"; RC=$?
+check "an enabled long-running service that is down: exit 1" "$RC" 1
+
+healthy
+link_unit server.service
+set_enabled server.service enabled
+rm -f "$STATE/props/server.service"
+OUT="$(run)"; RC=$?
+check "a standalone service systemd cannot load: exit 1" "$RC" 1
+grep_ok "$OUT" 'LoadState=not-found' "standalone not-found: named by LoadState"
+
+# A service a managed timer activates must not ALSO be judged as a standalone
+# daemon — a oneshot is inactive between runs, which would read as "down".
+healthy
+set_enabled precompute.service linked
+OUT="$(run)"; RC=$?
+check "the activated oneshot is not judged as a daemon: exit 0" "$RC" 0
+grep_none "$OUT" 'precompute.service: linked, not enabled' "activated service: not re-reported standalone"
+
+printf '\nforeign units are not this repos business\n'
+
+healthy
+timers_json "[$(row precompute.timer precompute.service $((NOW+1200)) $((NOW-600))),$(row snap.firmware.timer snap.firmware.service $((NOW-99999)) $((NOW-99999)))]"
+OUT="$(run)"; RC=$?
+check "a failing foreign timer does not fail this check" "$RC" 0
+grep_none "$OUT" 'snap.firmware' "foreign timer: not reported at all"
+
+printf '\ninputs and CLI\n'
+
+healthy
+OUT="$(PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+        TIMER_HEALTH_NOW="$NOW" XDG_RUNTIME_DIR="$T/run" \
+        TIMER_HEALTH_MAX_HORIZON_DAYS=abc "$SUT" 2>&1)"; RC=$?
+check "a non-numeric horizon: exit 2, not a silent 0" "$RC" 2
+
+healthy
+OUT="$(PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+        XDG_RUNTIME_DIR="$T/run" TIMER_HEALTH_NOW=abc "$SUT" 2>&1)"; RC=$?
+check "a non-numeric clock: exit 2" "$RC" 2
+
+healthy
+OUT="$(run --nope)"; RC=$?
+check "an unknown flag: exit 2" "$RC" 2
+
+healthy
+OUT="$(run --help)"; RC=$?
+check "--help: exit 0" "$RC" 0
+grep_ok "$OUT" 'check-timer-health.sh' "--help prints the header"
+grep_ok "$OUT" 'EXIT CODE' "--help reaches the exit-code paragraph"
+
+healthy
+OUT="$(run --check)"; RC=$?
+check "--check is the same as no argument" "$RC" 0
+
+# ---------------------------------------------------------------------------
+TOTAL=$(( PASS + FAIL ))
+printf '\n'
+# The suite asserts its own size: a row silently deleted (or a fixture helper
+# that stopped emitting one) is otherwise indistinguishable from a clean run.
+EXPECTED_ROWS=70
+if (( TOTAL != EXPECTED_ROWS )); then
+    printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
+        "$TOTAL" "$EXPECTED_ROWS" >&2
+    printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
+    exit 2
+fi
+printf 'timer-health state table: %d/%d checks passed\n' "$PASS" "$TOTAL"
+(( FAIL == 0 )) || exit 1
+exit 0

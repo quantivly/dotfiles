@@ -520,11 +520,14 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
 - **A modular adopter** runs `./install --herdr` (five links, nothing else),
   `scripts/herdr-claude-wire.sh`, and `scripts/verify-tools.sh --herdr` as the one check.
 - **A spawned session cannot tear down its own worktree** — removing it closes the space it
-  runs in — so `wt-gc-sweep` does it daily: `~/.herdr/worktrees` only, two-day grace from the
-  MERGE, plus landed local branches in the repos that host those worktrees, never a remote
-  one. `./install` links the unit and deliberately does **not** enable it; arm it after
-  reading one `scripts/wt-gc-sweep.sh --dry-run`, which prints exactly what an apply would
-  do. Evidence: [docs/WORKTREE_SWEEP.md](docs/WORKTREE_SWEEP.md).
+  runs in — so `wt-gc-sweep` does it daily, linked but not enabled until armed by hand after
+  one `scripts/wt-gc-sweep.sh --dry-run`. Scope, grace and blast radius:
+  [docs/WORKTREE_SWEEP.md](docs/WORKTREE_SWEEP.md).
+- **Never judge a unit from one `systemctl` field.** A unit that does not exist answers
+  `LoadState=not-found` and `Result=success` — read `LoadState` first. A SKIPPED unit (unmet
+  `ConditionPathExists`) is not a FAILED one either: `Result=success`, nothing in
+  `--state=failed`. `verify-tools.sh` asserts every repo-owned user timer ran, succeeded and
+  is still firing. [docs/TIMER_HEALTH.md](docs/TIMER_HEALTH.md).
 
 ## Claude Code accounts & MCP (`claude-doctor`)
 
@@ -591,8 +594,7 @@ utility — the system commands are all `backup-*`.
 - **`resticprofile/profiles.toml` and `udev/99-backup-external.rules` are COPIED root-owned to `/etc/`
   by `backup-setup`, never symlinked** (root runs them). Editing the repo copy alone changes nothing.
 - **Order the run `After=` the mount unit, never `Requires=`/`RequiresMountsFor=`** — those make an
-  undocked disk a *failed* unit every 6h. An unmet `ConditionPathExists` makes systemd **skip** the
-  unit, and a skipped unit is not a failed one: no error, no ping, nothing in `--state=failed`.
+  undocked disk a *failed* unit every 6h; a `ConditionPathExists` makes it a silently skipped one.
 - **Never `render … | sudo tee /etc/…`** — `tee` truncates before the renderer's exit status is known,
   so a failed render installs a zero-byte unit that "succeeds". Use `render_install`. An unresolved
   `__BACKUP_*__` placeholder is a hard error, never a blank.

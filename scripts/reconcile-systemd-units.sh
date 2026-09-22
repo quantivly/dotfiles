@@ -52,6 +52,18 @@
 #   reconcile-systemd-units.sh --plan-stale
 #                                        list the .wants symlinks --apply would
 #                                        REMOVE — never the unit symlink itself
+#   reconcile-systemd-units.sh --list-managed
+#                                        list the units this checkout owns, one
+#                                        per line, and exit. Enablement is not
+#                                        consulted: the answer is "whose unit is
+#                                        this", which is the question every other
+#                                        checker over these units has to ask
+#                                        first. scripts/check-timer-health.sh is
+#                                        the caller — it asks here rather than
+#                                        re-deriving ownership, because two
+#                                        derivations of "ours" drift and only one
+#                                        of them knows about the physical-path
+#                                        trap in DOTFILES_DIR above.
 #
 # States a managed unit can be in (--check reports each one differently, and
 # only the last three are drift):
@@ -373,6 +385,15 @@ do_plan() {
     return 0
 }
 
+# Every unit this checkout owns, enabled or not, drifted or not. Exit 0 even when
+# there are none: "this machine links none of our units" is an answer, not a
+# failure, and a caller that cannot tell those apart is the failure mode this
+# repo keeps finding. Callers that need more than the name go on to ask systemd.
+do_list_managed() {
+    managed_units
+    return 0
+}
+
 # Remove the .wants links stale_wants_links() names. Returns non-zero if ANY
 # removal failed, so the caller does not print a ✓ over it: `rm -f` succeeds
 # loudly and fails quietly, and an unwritable <target>.wants/ (or an entry that
@@ -447,6 +468,7 @@ case "${1:-}" in
     --check)      do_check ;;
     --plan)       do_plan ;;
     --plan-stale) do_plan_stale ;;
+    --list-managed) do_list_managed ;;
     ""|--apply)   do_reconcile ;;
     # Print the WHOLE leading comment block, not a hardcoded line range. The
     # range was `3,50p`, and the header outgrew it: help stopped mid-sentence
@@ -454,5 +476,5 @@ case "${1:-}" in
     # were never printed by the flag whose only job is to print them.
     --help|-h)    awk 'NR < 3 { next } /^#/ { sub(/^#[[:space:]]?/, ""); print; next } { exit }' \
                       "${BASH_SOURCE[0]}"; exit 0 ;;
-    *)            printf 'usage: %s [--check|--plan|--plan-stale|--apply]\n' "${0##*/}" >&2; exit 2 ;;
+    *)            printf 'usage: %s [--check|--plan|--plan-stale|--list-managed|--apply]\n' "${0##*/}" >&2; exit 2 ;;
 esac

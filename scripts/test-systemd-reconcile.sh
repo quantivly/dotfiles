@@ -457,6 +457,35 @@ check "plan: moved no symlink"         "$([[ -e "$TMPROOT/states/sysd/graphical-
 check "plan: left the old one alone"   "$([[ -e "$TMPROOT/states/sysd/default.target.wants/drifted.service" ]] && echo kept || echo gone)"       "kept"
 
 echo
+echo "=== --list-managed: who owns a unit, asked without asking systemd ==="
+# scripts/check-timer-health.sh asks this instead of re-deriving ownership, so
+# "ours" has one definition rather than two that drift. It is therefore about
+# OWNERSHIP only, never enablement: a unit nobody enabled is still ours, and a
+# checker that filtered by enablement here would go blind to exactly the unit
+# somebody forgot to enable.
+LM_OUT="$(run_sut states --list-managed)"
+check "list-managed: the enabled one"     "$(grep -cx 'ok.service' <<<"$LM_OUT")"          "1"
+check "list-managed: the drifted one"     "$(grep -cx 'drifted.service' <<<"$LM_OUT")"     "1"
+check "list-managed: the not-enabled one" "$(grep -cx 'notenabled.service' <<<"$LM_OUT")"  "1"
+check "list-managed: the static one"      "$(grep -cx 'static.service' <<<"$LM_OUT")"      "1"
+check "list-managed: those four and no more" "$(wc -l <<<"$LM_OUT" | tr -d ' ')"           "4"
+check "list-managed: exits 0"             "$(rc_sut states --list-managed)"                "0"
+# Same containment as --check: a plain file and a link out of the tree are not
+# ours. Asserted here too, because this is now a SECOND consumer of that rule.
+LM_SCOPE="$(run_sut scope --list-managed)"
+check "list-managed: our symlinked unit"  "$(grep -cx 'mine.service' <<<"$LM_SCOPE")"      "1"
+check "list-managed: not a plain file"    "$(grep -cx 'theirs.service' <<<"$LM_SCOPE")"    "0"
+check "list-managed: not a link outside"  "$(grep -cx 'foreign.service' <<<"$LM_SCOPE")"   "0"
+# An empty machine is an ANSWER, not a failure: a caller that cannot tell "we own
+# nothing here" from "the question could not be asked" is the shape this repo
+# keeps finding.
+check "list-managed: nothing linked -> empty" "$(run_sut empty --list-managed | wc -l | tr -d ' ')" "0"
+check "list-managed: nothing linked -> 0"     "$(rc_sut empty --list-managed)"                      "0"
+check "list-managed: moved no symlink" \
+      "$([[ -e "$TMPROOT/states/sysd/default.target.wants/drifted.service" ]] && echo kept || echo gone)" "kept"
+check "list-managed: needs no systemd"    "$(RECONCILE_NO_SYSTEMCTL=1 rc_sut states --list-managed)" "0"
+
+echo
 echo "=== --plan-stale: what --apply removes, and what it must never remove ==="
 # The bug this pins cost a real machine its unit. `systemctl disable` (and so
 # `reenable`) removes EVERY symlink in the unit search path pointing at the unit
@@ -783,6 +812,7 @@ echo "=== F-F: --help prints the whole header, not a hardcoded line range ==="
 # reader opens --help for — were never printed by it.
 HELP_OUT="$(run_sut empty --help)"
 check "--help reaches --plan-stale"      "$(grep -c -- '--plan-stale' <<<"$HELP_OUT")"          "1"
+check "--help reaches --list-managed"   "$(grep -c -- '--list-managed' <<<"$HELP_OUT")"        "1"
 check "--help reaches the exit codes"    "$(grep -c 'Exit code:' <<<"$HELP_OUT")"               "1"
 check "--help reaches the last line"     "$(grep -c 'RECONCILE_NO_SYSTEMCTL' <<<"$HELP_OUT")"   "1"
 check "--help stops at the code"         "$(grep -c 'set -uo pipefail' <<<"$HELP_OUT")"         "0"

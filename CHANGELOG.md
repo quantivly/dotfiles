@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`verify-tools.sh` now asserts that repo-owned systemd user timers actually RUN.** Unit
+  *enablement* was already checked; nothing checked whether an enabled unit ever ran or what
+  happened when it did. Measured 2026-09-22, a grep for `state=failed|--failed|is-failed` across
+  `scripts/` and `zsh/` returned exactly one line — `backup-doctor`'s, scoped to `*restic*` and to
+  the **system** manager. So a failed `claude-cred-reconcile`, `rabota-precompute@` or
+  `wt-gc-sweep` sat failed indefinitely. `wt-gc-sweep.timer` had been armed that same day and
+  deletes worktrees and branches unattended at 04:00.
+  `scripts/check-timer-health.sh` asserts three things per unit, each of which can be false while
+  the other two look fine: the last run **succeeded**, the timer is **still firing** on its own
+  schedule, and it is not being silently **skipped** — an unmet `ConditionPathExists` makes
+  systemd skip a unit with `Result=success` and nothing in `--state=failed`, which
+  `wt-gc-sweep.service` is one missing `~/.local/bin/wt-gc` away from. Freshness is derived from
+  systemd's own `list-timers -o json` (`now > next + (next - anchor)`) rather than from a
+  per-unit table of expected periods that would drift from the unit files, plus a horizon check
+  for a mis-specified `OnCalendar` that the staleness rule alone can never catch. Scope is
+  repo-owned user units only, via a new `reconcile-systemd-units.sh --list-managed` so "ours" has
+  one definition rather than two. Report-only: it fires when someone runs `verify-tools.sh`, and
+  a healthchecks-style dead-man's switch is deliberately left as a follow-up.
+  State table: `scripts/test-timer-health.sh` (70 checks, hermetic behind a recording `systemctl`
+  stub, run in CI; 15/15 mutants killed). Evidence, including what `systemctl` reports wrongly
+  about a unit that does not exist: [docs/TIMER_HEALTH.md](docs/TIMER_HEALTH.md).
+
 - **Landed agent worktrees and their local branches are swept on a timer (DO-677).** A session
   spawned by `herdr-draft create --worktree` cannot tear itself down — removing its own worktree
   closes the herdr space it runs in — so its checkout, branch and remote branch were all left
