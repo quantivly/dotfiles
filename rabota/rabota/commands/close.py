@@ -1,7 +1,13 @@
 """``rabota close``: write ``YYYY-MM-DD/carry-forward.md`` and append the ``INDEX.md`` row.
 
 Refuses (``errors.Refused``) while any lane is ``held`` — a held lane is something a human still
-needs to look at, and closing the day would bury it. ``carry-forward.md`` and ``INDEX.md`` are
+needs to look at, and closing the day would bury it. Nothing in this codebase sets
+``status="held"`` today (no lane-hold command exists yet; ``held_reason`` is schema-only) — the
+query is left on the real column and value the schema already defines, ready for that command,
+rather than deleted. "Running lanes" reads ``status="started"`` (F1) — the value every writer
+(``commands/lane.py``, ``census.py``) actually sets; ``"running"`` matched nothing any writer ever
+wrote, so the section and the INDEX lanes column were always empty/zero regardless of what was
+actually running. ``carry-forward.md`` and ``INDEX.md`` are
 written through ``emit.write_file``/``emit.append_file`` rather than a direct file handle: both
 files quote escalation questions and gate subjects verbatim, which is free text a user (or
 evidence pasted from a leaked log) could have put anything in — exactly what the write guard
@@ -30,7 +36,7 @@ def run_close(ctx: Context, notes: list[str] | None = None) -> dict:
         raise errors.Refused("lanes held: " + ", ".join(f"{l['id']} ({l['held_reason']})" for l in held))
     day = ctx.state_dir / ctx.today.isoformat()
     day.mkdir(parents=True, exist_ok=True)
-    running = ctx.store.list_lanes(ctx.tenant.name, status="running")
+    running = ctx.store.list_lanes(ctx.tenant.name, status="started")
     open_esc = ctx.store.open_escalations(ctx.tenant.name)
     corrections = [e for e in open_esc if e.get("kind") == "correction"]
     gates = ctx.store.gates(ctx.tenant.name)

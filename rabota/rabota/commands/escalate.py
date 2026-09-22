@@ -14,6 +14,14 @@ along as ``notified`` in the returned dict (``True``/``False``/``None`` when ``n
 skipped it) so the failure is visible to the caller without being fatal; ``notified`` is
 deliberately never projected into ``escalations.jsonl``, whose field set is fixed by design §4.2 /
 acceptance 9.8.
+
+The store write and the jsonl projection are not one transaction — sqlite and a text file cannot
+share one — so each direction picks a side to roll back on the other's failure (F3): a fresh
+``escalate`` deletes the row it just inserted if ``_project`` raises ``SecretLeak``, since deleting
+an escalation nobody has seen yet is safe; an ``answer`` instead undoes the resolution back to
+"open" on the same failure, since the escalation itself may already be visible (its id already
+returned to a prior caller) and must not vanish. Either way the store and the jsonl file agree again
+before the exception leaves, so ``close`` never lists an escalation Sol cannot see in the projection.
 """
 import json
 
@@ -34,9 +42,13 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
         raise errors.Usage(f"kind must be one of {KINDS}")
     eid = ctx.store.add_escalation(ctx.tenant.name, question, evidence, options, kind=kind, subject=subject)
     row = ctx.store.escalation(eid)
-    _project(ctx, {"ts": row["ts"], "firstSeen": row["first_seen"], "kind": kind, "subject": subject,
-                   "tenant": ctx.tenant.name, "question": question, "evidence": evidence,
-                   "options": options, "disposition": None})
+    try:
+        _project(ctx, {"ts": row["ts"], "firstSeen": row["first_seen"], "kind": kind, "subject": subject,
+                       "tenant": ctx.tenant.name, "question": question, "evidence": evidence,
+                       "options": options, "disposition": None})
+    except errors.SecretLeak:
+        ctx.store.delete_escalation(eid)
+        raise
     notified = None
     if notify:
         try:
@@ -52,14 +64,23 @@ def run_answer(ctx: Context, esc_id: int, label: str, resolution: str | None = N
     row = ctx.store.escalation(esc_id)
     if not row:
         raise errors.Usage(f"no escalation {esc_id}")
+    if row["resolved_at"]:
+        # F4: without this an already-resolved escalation could be answered again, overwriting its
+        # disposition, wiping the first resolution to NULL, and appending a second resolution row
+        # to the jsonl projection with no record the first ever happened.
+        raise errors.Refused(f"escalation {esc_id} is already resolved as {row['disposition']!r}")
     if row["options"] and label not in row["options"]:
         raise errors.Refused(f"label {label!r} is not one of {row['options']}")
     ctx.store.answer_escalation(esc_id, label, resolution)
     stored = ctx.store.escalation(esc_id)
-    _project(ctx, {"ts": now(), "firstSeen": row["first_seen"], "kind": row["kind"], "subject": row["subject"],
-                   "tenant": ctx.tenant.name, "question": row["question"], "evidence": row["evidence"],
-                   "options": row["options"], "disposition": label, "resolvedAt": stored["resolved_at"],
-                   "resolution": resolution})
+    try:
+        _project(ctx, {"ts": now(), "firstSeen": row["first_seen"], "kind": row["kind"], "subject": row["subject"],
+                       "tenant": ctx.tenant.name, "question": row["question"], "evidence": row["evidence"],
+                       "options": row["options"], "disposition": label, "resolvedAt": stored["resolved_at"],
+                       "resolution": resolution})
+    except errors.SecretLeak:
+        ctx.store.unresolve_escalation(esc_id)
+        raise
     return {"id": esc_id, "disposition": label}
 
 
