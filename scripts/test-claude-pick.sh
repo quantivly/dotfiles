@@ -99,13 +99,29 @@ metrics() {    # $1 = profile -> "u5 r5 uW tier"
           print -r -- \"\$_CPM_U5 \$_CPM_R5 \$_CPM_UW \$_CPM_TIER\""
 }
 
+# An RFC 3339 instant N seconds from now (negative = past), in clauth's own shape.
+# GNU date, as the suite's `touch -d` already requires.
+iso_in() { date -u -d "@$(( $(date +%s) + $1 ))" '+%Y-%m-%dT%H:%M:%S.000000+00:00'; }
+# A 5h window that is fresh and whose reset is far away, so its bonus is 0 and it
+# never decides a row that is about the WEEK.
+FIVE='"five_hour":{"utilization":0.0,"resets_at":"2099-01-01T00:00:00Z"}'
+spend_of() { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \"\$_CPM_SPEND|\$_CPM_SPEND_TXT\""; }
+# DO-623 Task 2: modelled on spend_of() above. metrics() prints a fixed 4-field
+# TSV ("u5 r5 uW tier") that nothing may grow positionally (DO-612), so a
+# dedicated helper -- not a 5th metrics() field -- is the assertion point for
+# the claude-pick-layer windows plumbing.
+windows_of() { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \"\$_CPM_WINDOWS\""; }
+
 #-----------------------------------------------------------------------------
 echo "=== metrics: absent is its own state, never zero ==="
 
 new_home m1
 mkprof a1 '{"plan":{"tier":"Team"},"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0},"weekly_scoped":[{"label":"7d x","utilization":55.0}]}'
 check "u5 floors to an integer"            "$(metrics a1 | cut -d' ' -f1)" "10"
-check "uW is the WORST of 7d and scoped"   "$(metrics a1 | cut -d' ' -f3)" "55"
+# DO-621: uW is the AGGREGATE week alone. A per-model window (here 55) is the
+# gate's business; folding it in with max() is what made two seats spent on
+# OPPOSITE axes (2026-09-18: 83%/fable 100 vs 100%/fable 63) read identically.
+check "uW is seven_day alone — a per-model window does not raise it" "$(metrics a1 | cut -d' ' -f3)" "40"
 check "tier is carried through"            "$(metrics a1 | cut -d' ' -f4)" "Team"
 
 # A Max plan writes the tier as an OBJECT ({"Max":20}); a Team plan as a string.
@@ -125,6 +141,95 @@ mkprof a1 '{"five_hour":{"utilization":5.0,"resets_at":"not a timestamp"}}'
 check "an UNPARSEABLE resets_at is 'unknown'"   "$(metrics a1 | cut -d' ' -f2)" "unknown"
 check "...and does not poison u5"               "$(metrics a1 | cut -d' ' -f1)" "5"
 
+# uW and rW must describe ONE window. The live instants coincide to the second,
+# so without a fixture whose per-model reset DIFFERS this split is unfalsifiable.
+# (Fixture group renamed dw1 — the brief's own "m4" collides with the
+# pre-existing "no usage cache" group of that name a few lines below, and
+# new_home never clears a reused directory, so reusing it would leave this
+# group's usage_cache.json behind for that unrelated row to read.)
+new_home dw1
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$(iso_in 518400)\"},\"weekly_scoped\":[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 3600)\"}]}"
+check "a spent per-model window does not reach uW"               "$(metrics a1 | cut -d' ' -f3)" "40"
+check "...and rW is seven_day's reset, not the per-model one" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; (( _CPM_RW > 500000 )) && print yes || print no")" "yes"
+
+# A LAPSED week is unmeasured: the figure describes a window that has ended.
+new_home dw2
+mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0,"resets_at":"2000-01-01T00:00:00Z"}}'
+check "a LAPSED week is unmeasured: uW is unknown"                "$(metrics a1 | cut -d' ' -f3)" "unknown"
+# ...but ABSENT is not lapsed: clauth omits resets_at on an unstarted window, and
+# un-demoting on missing data is optimism.
+new_home dw3
+mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'
+check "an ABSENT weekly reset is not a lapse: uW still counts"    "$(metrics a1 | cut -d' ' -f3)" "100"
+
+# Spend headroom: the signal that separates free, billed and blocked usage.
+new_home dw4
+mkprof a1 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":190.77,"limit":250.0}}'
+mkprof b2 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":275.23,"limit":275.0}}'
+mkprof c3 '{"five_hour":{"utilization":5.0},"spend":{"enabled":false,"used":0.0}}'
+mkprof d4 '{"five_hour":{"utilization":5.0}}'
+mkprof e5 '{"five_hour":{"utilization":5.0},"spend":{"enabled":true,"used":10.0}}'
+# shellcheck disable=SC2016  # the literal $ amounts are the expected value, not an expansion
+check "spend under its limit is headroom, with the amounts"       "$(spend_of a1)" 'headroom|$190.77 of $250'
+check "spend at its limit is none"                                "$(spend_of b2 | cut -d'|' -f1)" "none"
+check "spend disabled (a Max seat) is 'disabled', never none"     "$(spend_of c3 | cut -d'|' -f1)" "disabled"
+check "no spend block is unknown, never none"                     "$(spend_of d4)" "unknown|"
+check "a spend block with no limit is unknown"                    "$(spend_of e5 | cut -d'|' -f1)" "unknown"
+# The reset at the top of the function is load-bearing: a profile with no spend
+# block must not inherit the previous profile's value.
+check "one profile's spend never leaks into the next one measured" \
+      "$(zrun "_claude_profile_metrics b2 >/dev/null; _claude_profile_metrics d4 >/dev/null; print -r -- \$_CPM_SPEND")" "unknown"
+
+# DO-623: `disabled` is its own state, split out of `unknown` -- a Max seat with
+# enabled:false is a measured fact ("no spend limit configured"), not an
+# unmeasured one. The fixture is the real shape (personal-0 reads 134.43 against
+# 125.0 with enabled:false), which is why "no credits" is not what enabled:false
+# means. (The companion assertion that it still only DEMOTES the pick to
+# weekly-spent -- not exhausted -- lives below with sw2/sw3, once `pfd` exists.)
+new_home sp_disabled
+mkprof a1 "{\"plan\":{\"tier\":{\"Max\":20}},\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+check "spend: enabled:false is 'disabled', not 'unknown'" "$(spend_of a1 | cut -d'|' -f1)" "disabled"
+
+new_home sp_absent_enabled
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"spend\":{\"used\":1.0,\"limit\":2.0}}"
+check "spend: an ABSENT enabled is still 'unknown'" "$(spend_of a1 | cut -d'|' -f1)" "unknown"
+
+new_home sp_nonnumeric
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"spend\":{\"enabled\":true,\"used\":\"x\",\"limit\":2.0}}"
+check "spend: a non-numeric used is 'unknown', not 'disabled'" "$(spend_of a1 | cut -d'|' -f1)" "unknown"
+
+# fetched_at and the per-model windows ride along for Task 2 and Part B.
+new_home dw5
+mkprof a1 '{"five_hour":{"utilization":5.0},"fetched_at":1789759993962,"weekly_scoped":[{"label":"7d sonnet 5","utilization":38.0,"resets_at":"2026-09-21T08:59:59.512214+00:00"}]}'
+check "fetched_at is carried as an integer" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; print -r -- \$_CPM_FETCHED")" "1789759993962"
+# Compared field by field, NOT as a JSON string: jq 1.7+ preserves the literal
+# `38.0` and 1.6 prints `38`, and CI runs both (Ubuntu 22.04 and 24.04). A row
+# that hardcodes either form is red on the other runner.
+check "per-model windows round-trip: a spaced label and a colon-bearing reset survive" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; print -r -- \$_CPM_WINDOWS" \
+         | jq -Rc '@base64d | fromjson | .[0] | [.label, .resets_at, (.utilization == 38)]')" \
+      '["7d sonnet 5","2026-09-21T08:59:59.512214+00:00",true]'
+new_home dw6
+mkprof a1 '{"five_hour":{"utilization":5.0}}'
+check "no per-model windows is the empty string, not base64 of []" \
+      "$(zrun "_claude_profile_metrics a1 >/dev/null; print -r -- \"[\$_CPM_WINDOWS]\"")" "[]"
+
+# DO-623 Task 2: the same two facts (a spaced label and a colon-bearing reset
+# round-trip; no weekly_scoped is the empty string, not '[]'), pinned again
+# through windows_of() -- the helper the claude-pick plumbing rows use, so it
+# is proven correct before Task 3 builds on it.
+new_home win_plumb
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$(iso_in 216000)\"},\"weekly_scoped\":[{\"label\":\"7d sonnet 5\",\"utilization\":63.7,\"resets_at\":\"$(iso_in 216000)\"}]}"
+check "windows: a spaced label and a colon-bearing reset round-trip" \
+      "$(windows_of a1 | jq -Rr '@base64d | fromjson | .[] | [.label, (.utilization|floor)] | @tsv')" \
+      "$(printf '7d sonnet 5\t63')"
+
+new_home win_none
+mkprof a1 '{"five_hour":{"utilization":5.0}}'
+check "windows: no weekly_scoped is the empty string, not '[]'" "$(windows_of a1)" ""
+
 new_home m4
 mkprof a1 '-'
 check "no usage cache is unknown throughout"    "$(metrics a1 | cut -d' ' -f1,3)" "unknown unknown"
@@ -142,7 +247,7 @@ check "a missing five_hour block leaves u5 unknown, not 0" "$(metrics a1 | cut -
 echo
 echo "=== scoring: one row per term, each isolating that term ==="
 
-score() { zsh -f -c "source '$HERDRRC' >/dev/null 2>&1; _claude_pick_score $1 $2 $3 ${4:-0}" 2>/dev/null; }
+score() { zsh -f -c "source '$HERDRRC' >/dev/null 2>&1; _claude_pick_score $1 $2 $3 ${4:-0} ${5:-unknown}" 2>/dev/null; }
 cmp2()  { zsh -f -c "source '$HERDRRC' >/dev/null 2>&1
                      (( \$(_claude_pick_score $1) $2 \$(_claude_pick_score $3) )) && print yes || print no" 2>/dev/null; }
 
@@ -181,6 +286,39 @@ check "a holder costs more on a fuller account" \
 check "a fresh week outranks a spent one at equal 5h" \
       "$(cmp2 '0 unknown 2' '>' '0 unknown 100')" "yes"
 
+# DO-621 — the weekly axis. weekf STAYS (removing it switched weekly headroom
+# off below 100%: an idle 99% seat tied an idle 20% one), but its penalty fades as
+# the week's reset nears, and a consume-first bonus scaled by what is LEFT is
+# added. W_WEEK_EXPIRE = 200 so a real preference clears the 800-point RR band.
+check "no weekly reset known: exactly the old arithmetic"      "$(score 0 18000 95 0 unknown)" "3300"
+check "a reset 1 h out lifts the near-spent penalty"           "$(score 0 18000 95 0 3600)"    "11000"
+check "an empty week earns no consume-first bonus"             "$(score 0 18000 100 0 3600)"   "10000"
+check "A: 40% of the week left, resetting in 6 d"              "$(score 0 18000 60 0 518400)"  "11200"
+check "B: 20% of the week left, resetting in 12 h"             "$(score 0 18000 80 0 43200)"   "13720"
+
+# THE CROSS-AXIS ORDERING — RECORDED, NOT ENDORSED. bonus_w tops out at 20000
+# against base's maximum of 10000, so since DO-621 the weekly axis can outweigh
+# the 5h axis outright. Both seats below have a week resetting in 3.5 d:
+#
+#   P  5h 0% used, week 90% used    6600 before DO-621, 9130 now
+#   Q  5h 85% used, week 10% used   1500 before DO-621, 10500 now
+#
+# The ordering FLIPS, and by 1370 — outside CLAUDE_PICK_RR_BAND (800), so it is a
+# preference the ledger cannot break rather than a coin flip: an interactive
+# `claude` now prefers a seat with 15% of its 5h window left over one with all of
+# it, because the loser's WEEK is nearly spent. This may well be the right
+# long-horizon call and nothing here says it is wrong — the spec never compares
+# the two axes against each other at all. What this row does is make the choice
+# EXAMINED: every other score row passes u5 = 0 (FIVE is `utilization 0.0`), so
+# without it there is no row anywhere in this suite where 5h headroom and weekly
+# headroom point in opposite directions, and a future change to either weight
+# would move the ordering in silence. The two scores are asserted as well as
+# narrated, so the numbers in this comment cannot rot away from the code.
+check "cross-axis: weekly headroom now outranks 5h headroom (recorded, not endorsed)" \
+      "$(cmp2 '85 18000 10 0 302400' '>' '0 18000 90 0 302400')" "yes"
+check "...P: 5h fresh, week 90% used, resetting in 3.5 d"  "$(score 0 18000 90 0 302400)"  "9130"
+check "...Q: 5h 85% used, week 10% used, the same reset"   "$(score 85 18000 10 0 302400)" "10500"
+
 #-----------------------------------------------------------------------------
 echo
 echo "=== classes: what is eligible, exhausted, unknown, excluded ==="
@@ -211,6 +349,121 @@ check "the knob's default is 101, i.e. unreachable" \
 
 new_home k4; mkprof a1 '-'
 check "no usage cache is unknown, not exhausted" "$(cls a1 | cut -d: -f1)" "unknown"
+
+# DO-621 — THE SPEND WALL, measured 2026-09-18: a spent window with spend
+# headroom BILLS usage credits; with none it BLOCKS ("You've hit your individual
+# spend limit"). Only the second is a wall, and missing data is never one.
+new_home sw1
+WEEK_SPENT_LIVE="\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"}"
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+mkprof b2 "{$FIVE,$WEEK_SPENT_LIVE}"
+mkprof c3 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+mkprof d4 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":0.0}}"
+check "spent week + spend headroom: eligible (it bills; the tier demotes)" "$(cls a1)" "eligible"
+check "spent week + spend unknown: eligible — missing data never refuses"   "$(cls b2)" "eligible"
+check "spent week + spend at its limit: exhausted"                          "$(cls c3 | cut -d: -f1)" "exhausted"
+# A Max seat is DEMOTED, never refused: the blocking arm is measured for a Team
+# seat only, and both non-work tenants are composed entirely of Max seats with no
+# overflow — refusing on an inference would empty them for a week.
+check "spent week + spend disabled (a Max seat): eligible, not exhausted"   "$(cls d4)" "eligible"
+check "...and the reason names the spend wall"                              "$(cls c3 | grep -c 'no spend headroom')" "1"
+
+# CLAUDE_PICK_WEEK_SPENT IS VALIDATED BEFORE ANY ARITHMETIC. zsh reads a
+# non-numeric word in `(( ))` as 0, so an unusable value makes every measured
+# week `>= 0` — and since DO-621 that is the spend wall, i.e. a HEADLESS
+# REFUSAL, not only the demotion tier it used to be. Measured without the guard:
+# a seat at 17% of its week came back `exhausted:weekly window 17% used and no
+# spend headroom`, so one typo in ~/.zshrc.local refused every headless launch on
+# the machine. THE BRANCH ESCALATED THE CONSEQUENCE, which is why the guard ships
+# with it. The fallback is the default, never a refusal — the ranker's own rule
+# is that broken data must not escalate.
+new_home k8
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":17.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "an unusable CLAUDE_PICK_WEEK_SPENT falls back to 100, not to 0" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=oops _claude_pick_class a1")" "eligible"
+check "...and a negative one, which would wall every measured week as well" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=-1 _claude_pick_class a1")" "eligible"
+# An EMPTY value deliberately has no row of its own: `${VAR:-100}` substitutes for
+# empty as well as unset, so the validator never sees one — and if that `:-` were
+# ever weakened to `-`, the validator would catch the empty string instead. The
+# two guards shadow each other, so no single deletion reaches a wrong answer and
+# a row over it would pass either way. Written down rather than left out, because
+# a missing row and an unfailable one look identical from the summary line.
+#
+# The block reset is the knob's second reader and runs the same arithmetic, so an
+# unvalidated value there would wall a seat's reported WAIT independently of its
+# class. A PLAIN assignment, not a `VAR=x cmd` prefix: a prefix lasts for that one
+# command, so the first draft set the knob for _claude_profile_metrics — which
+# never reads it — and left _claude_pick_block_reset on the default. The row
+# passed under the mutant that deletes the guard, i.e. it asserted nothing.
+# And an `if`, not `cond && print || print`: the bare form prints both when the
+# first `print` fails, which is the SC2015 class this file exists to catch.
+check "...and the block reset reads the same validated value" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=oops
+               _claude_profile_metrics a1 >/dev/null
+               r=\$(_claude_pick_block_reset)
+               if [[ \$r == \$_CPM_R5 ]]; then print same5h; else print -r -- \$r; fi")" "same5h"
+# A USABLE value must still be honoured, or the guard is just a deletion.
+check "a usable CLAUDE_PICK_WEEK_SPENT still arms the tier where it says" \
+      "$(zrun "CLAUDE_PICK_WEEK_SPENT=10 _claude_pick_class a1 | cut -d: -f1")" "exhausted"
+# ...and it is NOT SILENT. Only _claude_pick_for_dir can say so: the other two
+# readers run inside `$(...)`, where anything they learn dies with the subshell.
+# shellcheck disable=SC2016
+check "...and an unusable value is warned about, once, by the one reader that can" \
+      "$(zrun 'CLAUDE_PICK_WEEK_SPENT=oops _claude_pick_for_dir "$HOME" >/dev/null 2>&1
+               print -rl -- "${_claude_pick_warnings[@]}"' | grep -c 'CLAUDE_PICK_WEEK_SPENT must be')" "1"
+# shellcheck disable=SC2016
+check "...and a usable one raises nothing" \
+      "$(zrun 'CLAUDE_PICK_WEEK_SPENT=100 _claude_pick_for_dir "$HOME" >/dev/null 2>&1
+               print -rl -- "${_claude_pick_warnings[@]}"' | grep -c 'CLAUDE_PICK_WEEK_SPENT must be')" "0"
+
+# pfd() is documented in full at its house-convention spot below (the
+# `_claude_pick_for_dir` section, next to `hold`/`unhold`) — defined here first
+# because these DO-621 rows need a PICK, not just a class, and bash functions
+# are not hoisted: calling it before this point is "command not found". Defined
+# once; the later spot is unchanged and simply stops re-defining it.
+pfd() {   # $1 = prelude, $2 = dir, $3 = tenant, $4 = strict
+          #   -> "<rc>:<profile>:<state>:<class>"
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '${2:-}' '${3:-}' '${4:-0}' 0
+      print -r -- \"\$?:\$REPLY:\$_claude_pick_state:\$_claude_pick_class\"" 2>/dev/null
+}
+
+new_home sw2
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+check "a billing seat is picked in the weekly-spent tier"   "$(pfd '' '' '' 0 | cut -d: -f1,4)" "0:weekly-spent"
+
+# DO-623 companion to sp_disabled above: `disabled` still only DEMOTES the pick
+# (to weekly-spent), it never refuses it -- _claude_pick_class's `== none` test
+# is unchanged, so `disabled` never reaches the exhaustion arm.
+new_home sw2b
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+check "a disabled Max seat still only DEMOTES, to weekly-spent" \
+      "$(pfd '' '' '' 0 | cut -d: -f4)" "weekly-spent"
+
+new_home sw3
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"2000-01-01T00:00:00Z\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "a LAPSED spent week behind a spend wall is not exhausted" "$(cls a1)" "eligible"
+check "...and is picked as eligible, not weekly-spent"            "$(pfd '' '' '' 0 | cut -d: -f4)" "eligible"
+
+# The pair that motivated DO-621, as measured on 2026-09-18.
+new_home sw4
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":86.0,\"resets_at\":\"$(iso_in 216000)\"},\"weekly_scoped\":[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}],\"spend\":{\"enabled\":true,\"used\":190.77,\"limit\":250.0}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"},\"weekly_scoped\":[{\"label\":\"7d fable\",\"utilization\":63.0,\"resets_at\":\"$(iso_in 194400)\"}],\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "the 2026-09-18 pair: the Fable-spent seat is eligible"        "$(cls a1)" "eligible"
+check "...the aggregate-spent seat at its spend limit is exhausted"   "$(cls b2 | cut -d: -f1)" "exhausted"
+check "...and the pick is the eligible one"                          "$(pfd '' '' '' 0 | cut -d: -f2,4)" "a1:eligible"
+
+new_home sw5
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "a headless caller refuses a pool behind the spend wall"       "$(pfd '' '' '' 1 | cut -d: -f1,3)" "2:exhausted"
 
 # 30 minutes: stale under a tightened threshold, fresh under the default. One
 # fixture exercising BOTH sides of the boundary — an earlier version used 3 hours
@@ -301,6 +554,47 @@ check "sed missing is rc=1, never an empty all-clear" \
       "$(zrun 'PATH=/nonexistent; _claude_quarantine_scan; echo $?')" "1"
 rm -f "$FHOME/.clauth/profiles.toml"
 check "an absent profiles.toml is rc=1 too"         "$(zrun '_claude_quarantine_scan; echo $?')" "1"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== cache age: fetched_at first, mtime as the fallback (DO-621) ==="
+
+age_of()  { zrun "_claude_profile_metrics '$1' >/dev/null; print -r -- \$_CPM_AGE"; }
+# An `if`, not `cond && echo yes || echo no`: that shape prints BOTH when the
+# `echo yes` itself fails (SC2015), which in this file would report a failure for
+# a row that passed — the exact class this suite exists to catch.
+between() {
+  if [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= $2 && $1 <= $3 )); then
+    echo yes
+  else
+    echo "no ($1)"
+  fi
+}
+
+# clauth 0.15.2 stamps fetched_at only on a LIVE fetch, so a plan-only rewrite
+# advances the mtime while the reading stays old — the case upstream fixed
+# alongside #74, and the one an mtime clock reads as fresh.
+new_home ag1
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"fetched_at\":$(( ($(date +%s) - 7200) * 1000 ))}"
+check "age comes from fetched_at, not the fresh mtime"       "$(between "$(age_of a1)" 7190 7400)" "yes"
+check "...so a plan-only rewrite is stale to the picker"      "$(cls a1 | cut -d: -f1)" "unknown"
+
+new_home ag2
+mkprof a1 '{"five_hour":{"utilization":5.0}}'
+touch -d "@$(( $(date +%s) - 100 ))" "$FHOME/.clauth/profiles/a1/usage_cache.json"
+check "with no fetched_at the mtime still decides (0.15.1)"   "$(between "$(age_of a1)" 95 200)" "yes"
+
+new_home ag3
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"fetched_at\":$(( ($(date +%s) + 30) * 1000 ))}"
+check "a stamp up to 60 s ahead clamps to 0"                  "$(age_of a1)" "0"
+
+# Far ahead is corruption. clauth's own scheduler (oauth_seed_clock) filters
+# `at <= now` and falls back to the mtime; mapping it to `unknown` instead would
+# read as FRESH, because the ranker never calls an unknown age stale.
+new_home ag4
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0},\"fetched_at\":$(( ($(date +%s) + 3600) * 1000 ))}"
+touch -d "@$(( $(date +%s) - 2000 ))" "$FHOME/.clauth/profiles/a1/usage_cache.json"
+check "a stamp far in the future falls back to the mtime"     "$(between "$(age_of a1)" 1995 2100)" "yes"
 
 #-----------------------------------------------------------------------------
 echo
@@ -602,7 +896,7 @@ echo "=== exhaustion: name the soonest reset, and name NO time when none is know
 # the row failed against perfectly correct output.
 lb() {   # profiles... -> "<pick>|<reset text>"
     zrun "_claude_pick_least_bad $* >/dev/null
-          print -r -- \"\$REPLY|\$(_claude_pick_reset_text \$_CLAUDE_PICK_LEASTBAD_R5)\""
+          print -r -- \"\$REPLY|\$(_claude_pick_reset_text \$_CLAUDE_PICK_LEASTBAD_RESET)\""
 }
 
 new_home x1
@@ -632,6 +926,17 @@ check "with NO known reset an account is still named" \
 check "...and no time is invented"               "$(lb a1 b2 | cut -d\| -f2)" ""
 check "the reset formatter returns empty for unknown, not an epoch date" \
       "$(zrun '_claude_pick_reset_text unknown')" ""
+
+# Behind the spend wall it is the WEEK that has to reset, so that is the wait to
+# quote. Both 5h windows below reset at the same far instant, so the old
+# r5-only choice ties and keeps the first name — the row dies on it.
+new_home x5
+# THE WALL FIXTURES ARE A TEAM SEAT AT ITS SPEND LIMIT, not a Max seat with
+# spend disabled. Only the Team shape was measured to block (2026-09-18); a Max
+# seat maps to spend `unknown` and DEMOTES, which the classes section pins.
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 172800)\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "behind the spend wall, the soonest WEEKLY reset is least bad" "$(lb a1 b2 | cut -d\| -f1)" "b2"
 
 #-----------------------------------------------------------------------------
 echo
@@ -868,19 +1173,8 @@ hold() {  # $1 = profile, $2 = how many live holders
 }
 unhold() { (( ${#HOLD_PIDS[@]} )) && kill "${HOLD_PIDS[@]}" 2>/dev/null; HOLD_PIDS=(); return 0; }
 
-pfd() {   # $1 = prelude, $2 = dir, $3 = tenant, $4 = strict
-          #   -> "<rc>:<profile>:<state>:<class>"
-    zsh -f -c "
-      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
-      export HOME='$FHOME'
-      export TZ='$FIXTZ'
-      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
-      CLAUDE_TENANTS_FILE=/nonexistent
-      source '$HERDRRC' >/dev/null 2>&1
-      ${1:-}
-      _claude_pick_for_dir '${2:-}' '${3:-}' '${4:-0}' 0
-      print -r -- \"\$?:\$REPLY:\$_claude_pick_state:\$_claude_pick_class\"" 2>/dev/null
-}
+# pfd() itself is defined earlier (DO-621's spend-wall rows need it first); this
+# is its house-convention spot, documented above, right before its main section.
 
 new_home fd1
 mkprof a1 '{"five_hour":{"utilization":10.0}}'
@@ -893,6 +1187,25 @@ mkprof a1 '-'
 mkprof b2 '-'
 check "with only unreadable accounts one is still chosen, as class unknown" \
       "$(pfd '' '' '' 0 | cut -d: -f1,3,4)" "0:picked:unknown"
+
+# Consume-first must hold for the PICK, not just the scores: inside RR_BAND the
+# least-recently-picked seat wins, so a gap under 800 is a coin flip.
+new_home wk1
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":60.0,\"resets_at\":\"$(iso_in 518400)\"}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":80.0,\"resets_at\":\"$(iso_in 43200)\"}}"
+check "consume-first: B is picked with an empty ledger"        "$(pfd '' '' '' 0 | cut -d: -f2)" "b2"
+printf 'a1\t1\nb2\t%s\n' "$(date +%s)" > "$FHOME/.local/state/claude-account-dirs/.pick-ledger"
+check "...and still B when the ledger just picked B"           "$(pfd '' '' '' 0 | cut -d: -f2)" "b2"
+
+# At equal reset distance, a nearly-spent week loses to a fresh one — the PICK,
+# which is what this row asserts. It does NOT pin `weekf`: with weekf removed the
+# two score 10058 and 14640 and b2 still wins, so the row survives that mutation.
+# What pins weekf is the score row above asserting 3300 for an unknown reset,
+# where weekf is the only term that can move the number.
+new_home wk2
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":99.0,\"resets_at\":\"$(iso_in 432000)\"}}"
+mkprof b2 "{$FIVE,\"seven_day\":{\"utilization\":20.0,\"resets_at\":\"$(iso_in 432000)\"}}"
+check "an idle seat at 99% of its week loses to one at 20%"   "$(pfd '' '' '' 0 | cut -d: -f2)" "b2"
 
 # THE TIER IS ONLY OBSERVABLE WHERE THE SCORE WOULD NOT HAVE SEPARATED THEM, and
 # the row above cannot see it: a1 at 10% scores 9000 against an unknown's 0, and
@@ -1038,6 +1351,133 @@ check "...and the header says the same rather than quoting the date" \
 check "...so no reset time from the past is offered as a retry" \
       "$(report 1 | tail -1)" "        --profile <p> to override."
 
+# DO-621 — THE REPORT QUOTES THE WALL THAT ACTUALLY BLOCKS THIS SEAT. Behind the
+# spend wall it is the WEEK that has to roll, so the exhausted record carries
+# that reset in field 5 (appended, never inserted) and the member line reads it.
+# NOT ONE fixture above can reach the weekly substitution: fd3's week reads 40%,
+# fd4's and fd5's have no weekly reading at all, and none of the three carries a
+# spend block, so _CPM_SPEND is `unknown` where the substitution needs `none`.
+# Field 5 therefore EQUALS field 4 throughout and the substitution is a no-op —
+# so none of them can tell the two apart, and either half of the mechanism (the
+# append in _claude_pick_for_dir, the ${f[5]:-} read in
+# _claude_pick_report_exhausted) could be deleted with all three suites green. What that costs is not a missing
+# detail: the header goes on reading _claude_pick_leastbad_reset, which stays
+# right, so the refusal becomes INTERNALLY CONTRADICTORY — "retry in a day" on
+# one line and a 2099 date on the next. Both lines are therefore asserted, since
+# "they name the same instant" is the property, and each is pinned by a
+# different mutant (field 5 for the member line, "least-bad ignores the block
+# reset" for the header).
+#
+# TWO FIXED INSTANTS, far apart and NEITHER on a minute boundary. An instant
+# makes a round trip through "seconds from now" and is re-rendered against a
+# second read of the clock, so one whose seconds component is 00 can print a
+# minute early when a second ticks in between; at :30 a one-second drift can
+# never move the minute it renders. That is what makes these rows exact rather
+# than probabilistic, and it is why the expected text is computed here — with
+# the same GNU date `iso_in` already requires — instead of matched by pattern.
+ISO_LATE='2099-01-01T00:00:30.000000+00:00'
+ISO_EARLY='2098-06-15T12:34:30.000000+00:00'
+TXT_LATE="$(TZ="$FIXTZ" date -d "$ISO_LATE" '+%a %d %b %H:%M %Z')"
+TXT_EARLY="$(TZ="$FIXTZ" date -d "$ISO_EARLY" '+%a %d %b %H:%M %Z')"
+
+# Which wall's reset does _claude_pick_block_reset quote? Compared against the
+# seat's OWN two instants inside one process, so there is no tolerance to choose
+# and no clock to race. `both-equal` is the degenerate fixture that would make
+# the answer mean nothing, and it is reported rather than passing as either.
+blockwall() {   # $1 = profile -> 5h | weekly | both-equal | neither:<value>
+    zrun "_claude_profile_metrics '$1' >/dev/null
+          r=\$(_claude_pick_block_reset)
+          if   [[ \$r == \$_CPM_R5 && \$r == \$_CPM_RW ]]; then print -r -- both-equal
+          elif [[ \$r == \$_CPM_RW ]]; then print -r -- weekly
+          elif [[ \$r == \$_CPM_R5 ]]; then print -r -- 5h
+          else print -r -- \"neither:\$r\"; fi"
+}
+
+# The spend wall alone: the 5h window is FRESH (0% used), so only the week blocks
+# and the 5h reset below is there purely as the wrong answer to catch.
+new_home fd5b
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+blk="$(report 1)"
+mem="$(printf '%s\n' "$blk" | sed -n 's/^ *e1  .*(resets \(.*\))$/\1/p')"
+hdr="$(printf '%s\n' "$blk" | sed -n 's/.*earliest reset \(.*\), on e1)$/\1/p')"
+check "behind the spend wall the member line quotes the WEEKLY reset, not the 5h one" \
+      "$mem" "$TXT_EARLY"
+check "...and the header names that same instant, so the refusal cannot contradict itself" \
+      "$hdr" "$TXT_EARLY"
+
+# BOTH WALLS AT ONCE, the week clearing last. _claude_pick_block_reset takes the
+# later of the two, because both have to clear before the seat is usable again.
+new_home fd5c
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "both walls up and the WEEK later: that is the reset the seat reports" \
+      "$(blockwall e1)" "weekly"
+blk="$(report 1)"
+mem="$(printf '%s\n' "$blk" | sed -n 's/^ *e1  .*(resets \(.*\))$/\1/p')"
+check "...and the report quotes it, not the 5h reset that clears first" \
+      "$mem" "$TXT_LATE"
+
+# The other direction, which the REPORT cannot see: with the 5h wall clearing
+# last, field 5 equals field 4 and the member line reads the same either way. So
+# it is pinned on the function instead — a row that cannot distinguish the two
+# answers is decoration however carefully it is worded.
+new_home fd5d
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "both walls up and the 5H later: that is the reset the seat reports" \
+      "$(blockwall e1)" "5h"
+
+# AN UNDATEABLE WEEK IS `unknown`, NOT THE 5H RESET. Whether the spend wall
+# APPLIES and whether its reset can be DATED are two questions, and they used to
+# share one `&&` chain, so the second answered the first: the substitution was
+# skipped and `r` fell back to _CPM_R5, putting the FIVE-HOUR reset on a refusal
+# the WEEK has to clear. Restore that chain and this fixture's refusal quotes
+# $TXT_LATE — the 2099 five-hour instant, rendered without a year, offered as the
+# moment to retry — on the header AND on the member line, which is what made it
+# invisible: uniformly wrong reads as right.
+#
+# `blockwall` cannot see this: _CPM_RW is the literal `unknown` here, so a
+# returned `unknown` compares equal to it and the helper answers `weekly` either
+# way. The value itself is what these rows assert.
+blockraw() { zrun "_claude_profile_metrics '$1' >/dev/null; _claude_pick_block_reset"; }
+
+new_home fd5e
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"garbage\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "an UNPARSEABLE weekly reset behind the spend wall is unknown, not the 5h one" \
+      "$(blockraw e1)" "unknown"
+blk="$(report 1)"
+check "...so the member line says the time is unknown" \
+      "$(printf '%s\n' "$blk" | grep -c 'reset time unknown')" "1"
+check "...and the header offers no retry instant at all" \
+      "$(printf '%s\n' "$blk" | head -1 | grep -c 'no reset time is known for any member')" "1"
+check "...and no 5h instant reaches the report" \
+      "$(printf '%s\n' "$blk" | grep -c "$TXT_LATE")" "0"
+
+# REACHABLE AT THE DEFAULT CONFIGURATION, which is why this is a fix and not a
+# noted gap: `dw3` above exists precisely to keep a 100% week with no resets_at
+# rankable (clauth omits the key on an unstarted window), and such a seat with
+# spend `none` lands here. No knob is armed in this fixture.
+new_home fd5f
+mkprof e1 "{\"five_hour\":{\"utilization\":0.0,\"resets_at\":\"$ISO_LATE\"},\"seven_day\":{\"utilization\":100.0},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "an ABSENT weekly reset behind the spend wall is unknown too" \
+      "$(blockraw e1)" "unknown"
+
+# BOTH WALLS, ONE INSTANT UNREADABLE. The wait is the LATER of the two, so half
+# an answer is no answer: quoting the readable half would present a lower bound
+# as the moment to retry.
+new_home fd5g
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"garbage\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$ISO_EARLY\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "both walls up with the 5h instant unreadable: the combined wait is unknown" \
+      "$(blockraw e1)" "unknown"
+
+# ...and a seat the spend wall does NOT reach still reports its 5h reset, with a
+# readable weekly one sitting there as the wrong answer to catch. Every fixture
+# above is behind the wall — fd5d declines the substitution because the weekly
+# reset is EARLIER, which is the arithmetic, not the gate — so on their own they
+# cannot tell "the gate is right" from "the gate was widened".
+new_home fd5h
+mkprof e1 "{\"five_hour\":{\"utilization\":99.0,\"resets_at\":\"$ISO_EARLY\"},\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$ISO_LATE\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
+check "a seat blocked by the 5h window alone still quotes the 5h reset" \
+      "$(blockwall e1)" "5h"
+
 # Machine backpressure: warn-only unless a ceiling is set, and only a headless
 # caller refuses on it.
 new_home fd6
@@ -1083,6 +1523,283 @@ check "a dry-run pick writes no ledger" "$r" "absent"
 pfd '' '' '' 0 >/dev/null
 if [[ -e "$FHOME/.local/state/claude-account-dirs/.pick-ledger" ]]; then r=written; else r=absent; fi
 check "...and a real one does" "$r" "written"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== the last resort must not take a seat another machine owns (DO-632) ==="
+#
+# The fallback exists so a session gets an ACCOUNT rather than the shared global
+# credential, and it hands out clauth's active profile — which until DO-632
+# consulted nothing. On 2026-09-19 that gave this laptop `personal-1`, a seat
+# nanoclaw owns, because the work pool was unusable; the two machines are two
+# independent holders of one grant, and they log each other out.
+#
+# REACHING THE FALLBACK AT ALL is the fixture's whole difficulty: a1 must be
+# REGISTERED (or the pick is exit 5, no-profiles) while nothing in the pool is
+# usable (or the pick never gets this far). A pool naming a profile that does
+# not exist is the smallest way to be in both states at once.
+fb_home() {   # $1 = label, $2 = active profile
+    new_home "$1"
+    mkprof a1 '{"five_hour":{"utilization":10.0}}'
+    printf '{"active_profile":"%s"}\n' "$2" > "$FHOME/.clauth/status.json"
+}
+FB_POOL='CLAUDE_TENANT_POOL=( t1 "zz" )'
+FB_OWNED='CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )'
+
+# One of the picker's arrays, after a pick that was allowed to fail.
+pickarr() {   # $1 = prelude, $2 = tenant, $3 = array name -> one entry per line
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' 0 0 >/dev/null 2>&1
+      print -rl -- \"\${${3}[@]}\"" 2>/dev/null
+}
+
+# Everything a pick wrote to STDERR. Separate from pickarr() because the two
+# answer different questions: an array is what a caller may PRINT, stderr is what
+# the picker printed for itself, and a guard that fails by emitting a shell error
+# is only visible in the second.
+pickerr() {   # $1 = prelude, $2 = tenant -> stderr
+    { zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' 0 0" >/dev/null; } 2>&1
+}
+
+# One of the picker's SCALARS. pickarr() cannot serve here: `${name[@]}` on a
+# scalar subscripts its characters in zsh, so a reason would come back as a
+# stream of letters and the row would be about nothing.
+pickvar() {   # $1 = prelude, $2 = tenant, $3 = variable name -> its value
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' 0 0 >/dev/null 2>&1
+      print -r -- \"\${${3}}\"" 2>/dev/null
+}
+
+# THE CONTROL COMES FIRST, and it is the row that makes the next one mean
+# something: the fix must be a skip, not a deletion. Without this, "the fallback
+# no longer hands out a1" passes just as well for a fallback that hands out
+# nothing at all, which is the one outcome DO-632 must not produce.
+fb_home fb1 a1
+check "the last resort still takes clauth's active account this machine may use" \
+      "$(pfd "$FB_POOL" '' t1 0)" "0:a1:fallback:fallback"
+
+fb_home fb2 a1
+check "...but never one another machine owns" \
+      "$(pfd "$FB_POOL; $FB_OWNED" '' t1 0)" "2::unusable:"
+
+# LOUD, or the skip trades a visible wrong account for an invisible one. The
+# session lands on the shared global credential (claude()) or is refused
+# (hspawn, --strict), and both callers print every warning.
+fbw="$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings)"
+check "...saying so exactly once"      "$(printf '%s\n' "$fbw" | grep -c 'last resort declined')" "1"
+check "...naming the seat"             "$(printf '%s\n' "$fbw" | grep -c "'a1'")" "1"
+check "...naming the machine that owns it" "$(printf '%s\n' "$fbw" | grep -c 'box-z')" "1"
+check "...and what happened instead"   "$(printf '%s\n' "$fbw" | grep -c 'no account of its own')" "1"
+check "the refusal list carries it too, so claude()'s block prints a reason" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_skipped | grep -c '^a1 (owned by box-z')" "1"
+
+# The escape hatch is the same one every explicit door has (DO-641). A door that
+# refuses with no way through is a door people route around.
+fb_home fb3 a1
+check "CLAUDE_FOREIGN_PROFILE_OK=1 borrows the seat on purpose, as at every other door" \
+      "$(pfd "$FB_POOL; $FB_OWNED; CLAUDE_FOREIGN_PROFILE_OK=1" '' t1 0)" "0:a1:fallback:fallback"
+
+# THE POPULATION THE INCIDENT CAME FROM. A Claude Code Bash-tool shell snapshot
+# carries functions but no VARIABLES, so there the table is empty while the code
+# that reads it is present — and an in-memory-only check would be present and
+# blind in exactly the sessions that spent the seat. pfd sources the file with
+# CLAUDE_TENANTS_FILE=/nonexistent and the prelude repoints it afterwards, which
+# is that shape precisely: no table in memory, a readable file on disk.
+FB_OWNED_FILE="$TMPROOT/tenants-owned.zsh"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )' > "$FB_OWNED_FILE"
+fb_home fb4 a1
+check "an owner known only to the FILE is honoured too (an agent's shell)" \
+      "$(pfd "CLAUDE_TENANTS_FILE='$FB_OWNED_FILE'; $FB_POOL" '' t1 0)" "2::unusable:"
+
+# The report is about the LAST RESORT, not about foreignness: every reason the
+# active account was declined used to be silent, and a session on the shared
+# credential was left to guess which. This row also holds the warning in place
+# independently of the row above — deleting the foreign check leaves this one
+# green, and deleting the warning leaves neither.
+fb_home fb5 a1
+printf 'auth_broken = [\n    "a1",\n]\nprofiles = [\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a quarantined active account is declined, and now says why" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_warnings | grep -c "declined clauth's active account 'a1': auth broken")" "1"
+
+# A SECOND PICK IN ONE SHELL MUST NOT REPORT THE FIRST'S DECLINE. Both resets
+# below are invisible to every other row by construction — nothing outside the
+# twelve lines between the call and the read consults these globals today — so
+# without these two the fix for that is unpinned, and the next reader of
+# _CLAUDE_FALLBACK_WHY (an --explain row, a statusline field) gets a previous
+# pick's reason with no way to tell. That is the DO-623 shape exactly.
+#
+# The early return has to be one that never CALLS the last resort, or the
+# function's own reset would clear the globals and the row would pass either way:
+# `bad-table` returns before the pool is even walked.
+fb_home fb9 a1
+check "the picker clears a decline before the next pick, even on an early return" \
+      "$(zsh -f -c "
+          unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+          export HOME='$FHOME'
+          CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+          CLAUDE_TENANTS_FILE=/nonexistent
+          source '$HERDRRC' >/dev/null 2>&1
+          $FB_POOL; $FB_OWNED
+          _claude_pick_for_dir '' t1 0 0 >/dev/null 2>&1
+          _claude_pick_for_dir '' nosuchtenant 0 0 >/dev/null 2>&1
+          print -r -- \"\$_claude_pick_state|\$_CLAUDE_FALLBACK_WHY\"" 2>/dev/null)" \
+      "bad-table|"
+# ...and the last resort clears its own, for a caller that reaches it directly
+# rather than through the picker. A second call that cannot even read
+# status.json must not still be holding the first call's seat name.
+check "the last resort clears its own answer when the next call reads nothing" \
+      "$(zsh -f -c "
+          unset CLAUDE_CONFIG_DIR HERDR_PANE_ID
+          export HOME='$FHOME'
+          CLAUDE_TENANTS_FILE=/nonexistent
+          source '$HERDRRC' >/dev/null 2>&1
+          $FB_OWNED
+          _claude_fallback_profile
+          HOME=/nonexistent _claude_fallback_profile
+          print -r -- \"\$_CLAUDE_FALLBACK_PROFILE|\$_CLAUDE_FALLBACK_WHY\"" 2>/dev/null)" \
+      "|"
+
+# WHICH REASON WINS WHEN A SEAT IS BOTH. The two checks in the last resort are
+# ordered, and nothing above can see the order: every fixture so far triggers
+# exactly one of them. Swap them and the suite stays green while a seat that is
+# owned AND quarantined reports `auth broken — clauth login a1` — which tells the
+# operator to log in to the one seat they must not touch, and drops the only fact
+# DO-632 exists to surface. Ownership is the stronger statement (it is about this
+# MACHINE, not about the credential), so it is answered first.
+fb_home fb10 a1
+printf 'auth_broken = [\n    "a1",\n]\nprofiles = [\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a seat that is BOTH owned and quarantined reports the ownership" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'owned by box-z')" "1"
+check "...and not the quarantine, whose remedy is the wrong thing to do here" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'clauth login')" "0"
+
+# THE MESSAGE NAMES THE TABLE TO EDIT. Drop the knob name and the seat and owner
+# survive, so every row above still passes while the one pointer telling a reader
+# WHERE this decision lives disappears.
+fb_home fb11 a1
+check "the decline names the table that made it" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'CLAUDE_TENANT_MACHINE_OWNED')" "1"
+
+# THE REASON CARRIES THE SEAT TOO, not just the warning. `_claude_pick_reason` is
+# what --json and --explain report and what a caller quotes back; compose it
+# before the decline is recorded and it collapses to a bare "no usable account"
+# with both arrays still correct, which is the shape that reads as fine.
+check "the refusal REASON names the seat, not just the warning" \
+      "$(pickvar "$FB_POOL; $FB_OWNED" t1 _claude_pick_reason | grep -c 'a1 (owned by box-z')" "1"
+
+# A NON-FOREIGN DECLINE REACHES THE REFUSAL LIST TOO. Row 7 above only ever reads
+# the foreign case, so gating the _claude_pick_skipped line alone on `owned by *`
+# leaves every row green while a quarantined decline vanishes from claude()'s
+# "refused:" line and from the reason — the silence this change exists to end,
+# restored for the commoner of the two causes.
+fb_home fb12 a1
+printf 'auth_broken = [\n    "a1",\n]\nprofiles = [\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a quarantined decline reaches the refusal list, not only the warnings" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_skipped | grep -c '^a1 (auth broken')" "1"
+
+# ...AND A PICK THAT SUCCEEDED SAYS NOTHING. The report is guarded on the reason
+# being set; raise it unguarded and a session running happily on a1 announces, on
+# every launch, that the last resort declined a1 — with an empty reason. Nothing
+# else in the suite reads either array on the success path.
+fb_home fb13 a1
+check "a last resort that was TAKEN raises no decline warning" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_warnings | grep -c 'last resort declined')" "0"
+check "...and puts nothing in the refusal list either" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_skipped | grep -c '^a1 (')" "0"
+
+# THE BOUNDARY, pinned so that moving it is a decision rather than a drift. A
+# pool that LISTS an owned profile is a table contradicting itself, and this
+# change does not arbitrate: the candidate loop is unchanged, so the pool still
+# wins for a ranked pick. Only the last resort — the path that consults no pool
+# at all — is closed here. Named as a follow-up on the PR.
+fb_home fb6 a1
+check "a pool that LISTS an owned profile still ranks it — unchanged, and known" \
+      "$(pfd "CLAUDE_TENANT_POOL=( t1 \"a1\" ); $FB_OWNED" '' t1 0)" "0:a1:picked:eligible"
+
+# THE FAIL-OPEN BRANCH, which is the one new behaviour with no other row. The
+# guard is `(( $+functions[claude-profile-foreign] ))`, and with the predicate
+# absent the seat is taken — deliberately: the predicate is public and dashed
+# (a shell snapshot keeps it) while this function is single-underscore (a
+# snapshot drops it first), so no realistic shell holds one without the other.
+# The row exists so that a rename which made the guard droppable shows up HERE
+# as a fail-open, instead of as nothing at all. test-hspawn.sh:1987 pins the
+# same shape for the explicit doors.
+fb_home fb8 a1
+check "with the predicate absent the last resort fails OPEN, as the doors do" \
+      "$(pfd "$FB_POOL; $FB_OWNED; unset -f claude-profile-foreign" '' t1 0)" "0:a1:fallback:fallback"
+# STDERR, not the warnings array — and that distinction is the row. A bare call
+# would put `command not found` on the caller's stderr while the `$( )` captured
+# only stdout, so a version of this row that grepped _claude_pick_warnings saw
+# nothing either way and the missing `$+functions` guard survived it.
+check "...and says nothing about a command it could not find" \
+      "$(pickerr "$FB_POOL; $FB_OWNED; unset -f claude-profile-foreign" t1 | grep -c 'command not found')" "0"
+
+# A TENANTS FILE THAT CANNOT BE READ (DO-674). The predicate answers 0 foreign,
+# 1 not foreign and 2 "the file exists and could not be trusted" — and under the
+# `&&` this branch used to live in, a 2 read as "not foreign" and the seat was
+# TAKEN. That is the fail-open the whole change is about, arriving at the one
+# path that consults no pool by construction, so nothing else would have caught
+# it. The file is named in the PRELUDE: the helpers source zshrc.herdr with
+# CLAUDE_TENANTS_FILE=/nonexistent, which is what leaves the table empty and
+# sends the predicate down the fork path this row is about.
+BADT="$TMPROOT/tenants-crlf.zsh"
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )\r\n' > "$BADT"
+fb_home fbu1 a1
+check "an unreadable tenants file DECLINES the last resort, it does not take it" \
+      "$(pfd "CLAUDE_TENANTS_FILE=$BADT; $FB_POOL" '' t1 0)" "2::unusable:"
+# THE REASON, and it must not be the ownership one: no machine was identified,
+# so a warning naming one would send the operator to a box this guard has just
+# failed to name. The two are separate strings for that reason, and a row that
+# only counted `last resort declined` would pass with either.
+fbu="$(pickarr "CLAUDE_TENANTS_FILE=$BADT; $FB_POOL" t1 _claude_pick_warnings)"
+check "...saying so exactly once"                "$(printf '%s\n' "$fbu" | grep -c 'last resort declined')" "1"
+check "...naming the file as the thing to fix"   "$(printf '%s\n' "$fbu" | grep -c 'tenants file could not be read')" "1"
+check "...and not claiming a machine owns it"    "$(printf '%s\n' "$fbu" | grep -c 'box-z')" "0"
+# The escape hatch reaches this path too, exactly as it does the explicit doors —
+# the refusal at those doors prints it as the way through, and a remedy that
+# works at one door and not another is worse than no remedy.
+fb_home fbu2 a1
+check "CLAUDE_FOREIGN_PROFILE_OK=1 takes the seat even on an unreadable file" \
+      "$(pfd "CLAUDE_TENANTS_FILE=$BADT; $FB_POOL; CLAUDE_FOREIGN_PROFILE_OK=1" '' t1 0)" "0:a1:fallback:fallback"
+# AND THE CONTROL: a tenants file that is merely SILENT about this profile is not
+# a fault, so the seat is still taken. Without this the three rows above pass
+# just as well for a last resort that declines everything.
+GOODT="$TMPROOT/tenants-clean.zsh"
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( b2 "some other box" )\n' > "$GOODT"
+fb_home fbu3 a1
+check "a clean tenants file naming some OTHER profile still yields the seat" \
+      "$(pfd "CLAUDE_TENANTS_FILE=$GOODT; $FB_POOL" '' t1 0)" "0:a1:fallback:fallback"
+
+# An active profile with no credential was never a candidate for the last resort
+# and still is not: the foreign check must not become the only thing standing
+# between a session and a profile clauth cannot open.
+fb_home fb7 nosuch
+check "an active profile with no credential is no last resort either" \
+      "$(pfd "$FB_POOL" '' t1 0)" "2::unusable:"
+check "...and that one is not reported as declined, because nothing was read" \
+      "$(pickarr "$FB_POOL" t1 _claude_pick_warnings | grep -c 'last resort declined')" "0"
 
 #-----------------------------------------------------------------------------
 echo
@@ -1198,6 +1915,63 @@ check "...and whose exit_code matches the process's"     "$(printf '%s' "$CLI_OU
 new_home cli4
 cli --dry-run
 check "no registered profile is exit 5"                  "$CLI_RC"   "5"
+
+# DO-664 — AN EXIT CODE IS NOT A REASON. The CLI's one refusal line sat inside
+# the gate block (`if (( gate && rc == 0 ))`), so it fired only for a GATE
+# refusal on an otherwise successful pick, and every picker-level refusal exited
+# silently. Measured before the fix: no-profiles (5), bad-table (4) and unusable
+# (2) each printed NOTHING on either stream, so `p=$(claude-pick --strict)` gave
+# a caller an empty string, a number, and nowhere to look.
+#
+# Asserted on stderr for every refusing state, because a refusal that names
+# itself on ONE of them is the shape that reads as fixed while a script still
+# gets nothing.
+check "...and says so on stderr rather than exiting silently" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (no-profiles)')" "1"
+check "...naming the remedy the picker recorded" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'clauth login')" "1"
+
+new_home cli4b
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+cli --dry-run --tenant nosuchtenant
+check "an unusable tenant names itself too (exit 4)" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (bad-table)')" "1"
+
+# THE ONE STATE THAT MUST NOT GAIN A LINE. `exhausted` is already reported from
+# inside the picker by _claude_pick_report_exhausted, whose header names the wall
+# AND the reset; a one-line summary after it is noise, and this row is what stops
+# the fix being written as a blanket `rc != 0` print.
+new_home cli4c
+mkprof a1 '{"five_hour":{"utilization":99.0}}'
+# --strict, or this is not a refusal at all: an interactive caller proceeds on
+# the least-bad member and exits 0, and the row would assert the absence of a
+# line from a run that never refused.
+cli --dry-run --strict
+check "an exhausted pool keeps its block and gains no second line" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (exhausted)')" "0"
+check "...the block itself is still there" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused — the account pool exhausted')" "1"
+
+# ...and the two surfaces that already carry state and reason do not repeat it.
+new_home cli4d
+cli --dry-run --explain
+check "--explain carries the refusal itself, so no duplicate line" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (no-profiles)')" "0"
+check "...and still explains the refusal" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused: no-profiles')" "1"
+cli --dry-run --json
+check "--json carries it in the object, so no stderr line either" \
+      "$(printf '%s' "$CLI_ERR" | grep -c 'refused (no-profiles)')" "0"
+check "...and the object still carries the reason" \
+      "$(printf '%s' "$CLI_OUT" | jq -r '.reason | test("clauth login")')" "true"
+
+# A SUCCESSFUL PICK SAYS NOTHING ON STDERR. The guard is `rc != 0`; drop it and
+# every ordinary launch grows a refusal line for a pick that succeeded.
+new_home cli4e
+mkprof a1 '{"five_hour":{"utilization":10.0}}'
+cli --dry-run
+check "a successful pick prints no refusal line"        "$(printf '%s' "$CLI_ERR" | grep -c 'refused (')" "0"
+check "...and still prints the profile on stdout"       "$CLI_OUT" "a1"
 
 new_home cli5
 mkprof a1 '{"five_hour":{"utilization":10.0}}'
@@ -1324,6 +2098,48 @@ CLI_ENV=""; PROCR=""
 
 check "the CLI does not source system.sh" \
       "$(grep -c 'functions/system.sh' "$PICK")" "0"
+
+# DO-621: a pick that will bill usage credits says so. claude() prints every
+# _claude_pick_warnings entry on an interactive launch (zshrc.herdr), so this is
+# the channel an interactive user actually sees.
+new_home bill1
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+cli --dry-run --json
+check "--json reports the chosen seat's spend state"          "$(jq -r .usage.spend <<<"$CLI_OUT")" "headroom"
+check "a billing pick carries the billing warning" \
+      "$(jq -r '[.warnings[] | select(contains("usage bills credits"))] | length' <<<"$CLI_OUT")" "1"
+# shellcheck disable=SC2016  # the literal $ amounts are the expected value, not an expansion
+check "...naming the amounts" \
+      "$(jq -r '.warnings[] | select(contains("usage bills credits"))' <<<"$CLI_OUT" | grep -c '\$10 of \$250')" "1"
+
+new_home bill2
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":20.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
+cli --dry-run --json
+check "an eligible pick carries no billing warning" \
+      "$(jq -r '[.warnings[] | select(contains("bills credits"))] | length' <<<"$CLI_OUT")" "0"
+
+# DO-621 review finding: no row covered the `_CPM_SPEND == unknown` wording
+# branch. `spend.enabled:false` would give `_CPM_SPEND=none`, which the
+# exhausted check (_claude_pick_class) claims first, so it never reaches the
+# weekly-spent tier at all -- omitting the spend block entirely is what lands
+# on `unknown` AND weekly-spent together. The needle is "spend headroom
+# unknown", which the headroom branch's "usage bills credits (...)" text never
+# contains.
+new_home bill3
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"}}"
+cli --dry-run --json
+check "an unknown-spend weekly-spent pick warns with the UNKNOWN wording, never the headroom one" \
+      "$(jq -r '[.warnings[] | select(contains("spend headroom unknown"))] | length' <<<"$CLI_OUT")" "1"
+
+# DO-623: a disabled Max seat's warning must not claim spend headroom is
+# unknown -- it is a measured fact (no spend limit configured), not a gap.
+new_home bill4
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+cli --dry-run --json
+check "a disabled Max seat's warning does not claim headroom is unknown" \
+      "$(jq -r '[.warnings[] | select(contains("no spend limit configured"))] | length' <<<"$CLI_OUT")" "1"
+check "...and does not use the headroom wording" \
+      "$(jq -r '[.warnings[] | select(contains("spend headroom unknown"))] | length' <<<"$CLI_OUT")" "0"
 
 #-----------------------------------------------------------------------------
 echo
@@ -1540,7 +2356,7 @@ check "gate: ...as gate-unmeasured"                 "$(jq -r .state <<<"$out")" 
 # The age is asserted as a RANGE, and the reason is checked against the age the
 # JSON itself reports: the fixture's mtime and the run are two clock reads, and a
 # second boundary between them makes 10800 read 10801. A row that fails one run
-# in N on main is worse than no row (CLAUDE.md, DO-612).
+# in N on main is worse than no row (docs/CLAUDE_ACCOUNT_PICKER.md, DO-612).
 check "gate: ...naming the age and the threshold"   "$(has_words "$(jq -r .reason <<<"$out")" "$(jq -r .gate.cache_age_s <<<"$out")s" 600 CLAUDE_PICK_CACHE_MAX_AGE)" "yes"
 check "gate: ...with a null profile"                "$(jq -r .profile <<<"$out")" "null"
 check "gate: ...and the gate object carries the age it decided on" "$(jq -r '.gate.cache_age_s | . >= 10800 and . <= 10810' <<<"$out")" "true"
@@ -1668,6 +2484,35 @@ gate_run ru
 check "gate: an UNPARSEABLE resets_at refuses rather than allows" "$rc" "2"
 check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
 check "gate: ...and resets_at is null, never an epoch"           "$(jq -r .gate.resets_at <<<"$out")" "null"
+# --- gate: an undatable window at EXACTLY ZERO is not unmeasured (DO-671) ----
+# clauth omits resets_at precisely where utilization is 0.0, so the two rows
+# above fired on every FRESH seat and on no other kind. That was survivable while
+# the ranker could choose another seat; it became a hard block once a dev lane
+# had exactly one seat ([machines.dev].profile) and run_recipe refused a --seat
+# that disagreed with it. A 0 reading needs no instant to be safe: the staleness
+# arms refuse first, and the instant never enters the projection.
+gate_profile z0 0 "" -                                   # fresh, unstarted window
+gate_run z0
+check "gate: a 0% reading with NO resets_at allows"              "$rc" "0"
+check "gate: ...verdict allow"                                   "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "gate: ...and still reports a null resets_at"              "$(jq -r .gate.resets_at <<<"$out")" "null"
+gate_profile z0u 0 "" "not a timestamp"                  # zero, undatable for the other reason
+gate_run z0u
+check "gate: a 0% reading with an UNPARSEABLE resets_at allows"  "$rc" "0"
+# The three things the widening must NOT do. Each is a different arm, and each
+# would be silently re-broken by widening the test from `!= 0` to a floor.
+gate_profile z1 1 "" -
+gate_run z1
+check "gate: 1% with no resets_at still refuses"                 "$rc" "2"
+check "gate: ...as gate-unmeasured"                              "$(jq -r .state <<<"$out")" "gate-unmeasured"
+gate_profile z0s 0 10800 -                               # zero, but the READING is 3h old
+gate_run z0s
+check "gate: a STALE 0% reading still refuses"                   "$rc" "2"
+check "gate: ...naming the age threshold, not the reset"         "$(has_words "$(jq -r .reason <<<"$out")" CLAUDE_PICK_CACHE_MAX_AGE)" "yes"
+gate_profile z0p 0 "" "$GATE_PAST"                       # zero, but the window has ROLLED
+gate_run z0p
+check "gate: a 0% reading for a ROLLED window still refuses"     "$rc" "2"
+check "gate: ...naming that it rolled"                           "$(has_words "$(jq -r .reason <<<"$out")" rolled)" "yes"
 # The mtime test runs FIRST, so a file that is both stale and rolled is
 # reported as stale — the message the rows above this section already pin.
 gate_profile rb 30 10800 "$GATE_PAST"
@@ -1677,6 +2522,402 @@ check "gate: stale AND rolled is reported as stale"              "$(has_words "$
 # refused to trust, so `projected` is null.
 gate_run rp
 check "gate: a rolled window has no projection"                  "$(jq -r .gate.projected <<<"$out")" "null"
+
+# DO-621: the gate reads the same age, so its 600 s threshold is now measured
+# against fetched_at. A fresh mtime over a 700 s-old fetch used to pass.
+mkdir -p "$H/.clauth/profiles/gf"; : > "$H/.clauth/profiles/gf/credentials.json"
+printf '{"five_hour":{"utilization":10,"resets_at":"%s"},"seven_day":{"utilization":10,"resets_at":"2099-01-06T00:00:00Z"},"fetched_at":%s,"plan":{"tier":"Team"}}\n' \
+    "$GATE_FUTURE" "$(( ($(date +%s) - 700) * 1000 ))" > "$H/.clauth/profiles/gf/usage_cache.json"
+gate_run gf
+check "gate: a fresh mtime over a 700 s-old fetch refuses"     "$rc" "2"
+check "gate: ...as gate-unmeasured"                             "$(jq -r .state <<<"$out")" "gate-unmeasured"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== gate: the weekly spend wall, aggregate and per-model (DO-623) ==="
+#
+# The gate refuses a lane that would be BLOCKED — a live weekly window (the
+# aggregate, or one governing the lane's model) at or past CLAUDE_PICK_WEEK_SPENT
+# on a seat with no spend headroom — and allows one that would only BILL. Each
+# row differs from its neighbours in ONE field, so every fixture comes from one
+# builder: a hand-written blob per row is how a row comes to fail for a second
+# reason and stop pinning what it names.
+
+# The suite's own environment must not decide the threshold for every row below;
+# the one row about it passes it explicitly.
+unset CLAUDE_PICK_WEEK_SPENT
+
+fetched_now_ms() { printf '%s\n' "$(( $(date +%s) * 1000 ))"; }
+
+# One gate fixture. $1 profile, $2 the weekly_scoped array, $3 the spend block,
+# $4 seven_day ("" or absent = a healthy 40), $5 fetched_at ("" OMITS the key —
+# the undated case; absent stamps it now). The 5h window is constant and healthy
+# (5 + 115×30/60 = 62 <= 95), so no row here can fail on a 5h arm.
+#
+# NOT `${4:-{...}}`: bash closes that expansion at the FIRST `}`, so a passed $4
+# comes back with a stray `}` appended — measured, "X" became "X}".
+mk_gate_prof() {
+    local ws="${2:-[]}" sp="${3:-null}" sd="${4:-}" fa
+    [[ -n "$sd" ]] || sd="{\"utilization\":40.0,\"resets_at\":\"$(iso_in 216000)\"}"
+    fa="${5-$(fetched_now_ms)}"
+    mkprof "$1" "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"}${fa:+,\"fetched_at\":$fa},\"seven_day\":$sd,\"weekly_scoped\":$ws,\"spend\":$sp}"
+}
+
+SP_NONE='{"enabled":true,"used":275.23,"limit":275.0}'
+SP_ROOM='{"enabled":true,"used":190.77,"limit":250.0}'
+SP_OFF='{"enabled":false,"used":134.43,"limit":125.0}'
+SP_NADA='null'
+WS_FABLE_SPENT="[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]"
+
+# Pinned, dry-run, JSON — the way rabota runs it. Hermetic on gate_run's pattern
+# (fixture HOME and TZ, no tenants file, the two session variables cleared).
+# Sets $out and $rc; called directly, never inside $( ), so $rc is this run's.
+gw() {   # gw PROFILE MODEL
+    # The 5h tuning values are unset INSIDE the subshell, so an ambient one (a
+    # developer's CLAUDE_PICK_GATE_MAX, say) cannot decide a row. No row passes
+    # one of these; CLAUDE_PICK_WEEK_SPENT, which rows DO pass as `VAR=x gw …`,
+    # is unset once at the top of the section instead.
+    out="$(unset CLAUDE_CONFIG_DIR HERDR_PANE_ID \
+                 CLAUDE_PICK_GATE_MAX CLAUDE_PICK_RATE_DEFAULT CLAUDE_PICK_RATES CLAUDE_PICK_CACHE_MAX_AGE
+           HOME="$FHOME" TZ="$FIXTZ" CLAUDE_TENANTS_FILE=/nonexistent \
+            zsh "$PICK" --profile "$1" --dry-run --json --gate --model "$2" --effort high 2>/dev/null)"; rc=$?
+}
+
+# ---- the model wall: the measured blocking case ------------------------------
+new_home gw_model_none
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate/model: a spent model window with no headroom refuses" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...with exit 2"                                "$rc" "2"
+check "...naming the window that is spent"            "$(jq -r '.reason | test("7d fable") and test("100%")' <<<"$out")" "true"
+check "...and quoting the spend that walled it"       "$(jq -r '.reason | test("275.23")' <<<"$out")" "true"
+check "...and no profile is named beside the refusal" "$(jq -r .profile <<<"$out")" "null"
+check "...reporting the model window"                 "$(jq -r '.gate.model_window | [.label,(.utilization|tostring),.state] | join("/")' <<<"$out")" "7d fable/100/live"
+check "...with its reset as RFC 3339 UTC"             "$(jq -r '(.gate.model_window.resets_at // "") | test("^[0-9-]+T[0-9:]+Z$")' <<<"$out")" "true"
+check "...and the spend state that decided it"        "$(jq -r .gate.spend <<<"$out")" "none"
+check "...and bills_credits is null on a refusal, never false" "$(jq -r .gate.bills_credits <<<"$out")" "null"
+
+# ---- the RANKED path reaches the same wall -----------------------------------
+# The per-model windows reach the gate by two assignments, one per path; every
+# other row here is pinned. The ranker is model-blind by design (seven_day 40,
+# so the seat is eligible), which is what lets the gate see this seat at all.
+cli --dry-run --json --gate --model claude-fable-5-1 --effort high
+check "gate/model (ranked path): the ranker picks the seat, the gate walls it" "$(jq -r .state <<<"$CLI_OUT")" "gate-spend-wall"
+check "...with exit 2"                                                        "$CLI_RC" "2"
+check "...the ranker having classed it eligible"                              "$(jq -r '.skipped[0] | [.profile,.class] | join("/")' <<<"$CLI_OUT")" "a1/eligible"
+
+# The CANARY on the new path. The refusal quotes a label, a percentage, an
+# instant and the spend figures; plant a token-shaped string beside each of those
+# fields (inside the window object and the spend block, which is where a careless
+# `tojson` of either would pick it up) and on --explain and --json it must not
+# come out. The second row proves the planted fixture really reached the wall.
+new_home gw_canary
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\",\"token\":\"$CANARY\"}]" \
+    "{\"enabled\":true,\"used\":275.23,\"limit\":275.0,\"token\":\"$CANARY\"}"
+plant
+check "canary: a gate-spend-wall refusal (--json --explain) carries no credential" \
+      "$(canary_run --profile a1 --dry-run --json --explain --gate --model claude-fable-5-1 --effort high)" "clean"
+cli --profile a1 --dry-run --json --gate --model claude-fable-5-1 --effort high
+check "...and that run really was the wall" "$(jq -r .state <<<"$CLI_OUT")" "gate-spend-wall"
+
+# ---- billing is allowed, not refused ----------------------------------------
+new_home gw_model_headroom
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate/model: headroom left ALLOWS"       "$(jq -r .gate.verdict <<<"$out")"        "allow"
+check "...with exit 0"                         "$rc"                                    "0"
+check "...and says the lane will bill credits" "$(jq -r .gate.bills_credits <<<"$out")" "true"
+check "...still reporting the window it billed on" "$(jq -r .gate.model_window.label <<<"$out")" "7d fable"
+
+# ---- a Max seat on a spent window REFUSES (user's decision, 2026-09-19) ------
+# `disabled` (enabled:false, a Max seat) is a measured absence of a spend
+# mechanism, and nobody has watched such a seat run past a spent window. The
+# gate is never optimistic, so it refuses as UNMEASURED — not as a wall (that
+# would claim the block was measured), and not as an allow (that would claim the
+# lane runs). The ranker still only demotes it; see bill4 and sp_disabled.
+new_home gw_model_disabled
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_OFF"
+gw a1 claude-fable-5-1
+check "gate/model: a Max seat (spend disabled) on a live spent window REFUSES as unmeasured" \
+      "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...with exit 2"                                  "$rc"                                    "2"
+check "...and no profile is named beside the refusal"   "$(jq -r .profile <<<"$out")"            "null"
+check "...the reason naming the Max-seat case"          "$(jq -r '.reason | test("no spend limit configured")' <<<"$out")" "true"
+check "...and the spent window"                         "$(jq -r '.reason | test("7d fable") and test("100%")' <<<"$out")" "true"
+check "...and bills_credits is null on the refusal"     "$(jq -r .gate.bills_credits <<<"$out")" "null"
+check "...reporting the spend state that decided it"    "$(jq -r .gate.spend <<<"$out")"         "disabled"
+check "...on a LIVE window"                             "$(jq -r .gate.model_window.state <<<"$out")" "live"
+# The aggregate is the same rule: a live spent seven_day on a Max seat refuses.
+new_home gw_agg_disabled
+mk_gate_prof a1 '[]' "$SP_OFF" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+gw a1 claude-opus-5
+check "gate/aggregate: a Max seat on a live spent aggregate REFUSES as unmeasured" \
+      "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...naming the aggregate and the Max-seat case" \
+      "$(jq -r '.reason | test("aggregate weekly") and test("no spend limit configured")' <<<"$out")" "true"
+# ...but a LAPSED window has rolled, whatever the spend state: it allows.
+new_home gw_lapsed_disabled
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"}]" "$SP_OFF"
+gw a1 claude-fable-5-1
+check "gate: a Max seat on a LAPSED model window still allows" \
+      "$(jq -r '[.gate.verdict, .gate.model_window.state] | join("/")' <<<"$out")" "allow/lapsed"
+
+# ---- nothing spent: the lane is free -----------------------------------------
+new_home gw_free
+mk_gate_prof a1 '[]' "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate: nothing spent allows, billing nothing" "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring), (.gate.model_window|tostring)] | join("/")' <<<"$out")" "allow/false/null"
+
+# ---- bills_credits is `false` only on a MEASURED weekly figure ---------------
+# `false` says "this lane is free". With no aggregate read and no per-model
+# window governing the lane, nothing was measured, so it is null — while the
+# verdict stays allow (the 5h arms passed; an unreadable aggregate is not a
+# candidate, see gw_agg_unknown).
+new_home gw_bills_unmeasured
+mk_gate_prof a1 '[]' "$SP_ROOM" 'null'
+gw a1 claude-fable-5-1
+check "gate: no weekly figure read at all — allow, bills_credits null, never false" \
+      "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring)] | join("/")' <<<"$out")" "allow/null"
+# A window that does NOT govern the lane is not a measurement of it either.
+new_home gw_bills_unmeasured_other
+mk_gate_prof a1 "[{\"label\":\"7d opus\",\"utilization\":50.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM" 'null'
+gw a1 claude-fable-5-1
+check "gate: only a non-governing window read — bills_credits null" \
+      "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring)] | join("/")' <<<"$out")" "allow/null"
+# The other side: the lane's own window WAS read, below the threshold — false.
+new_home gw_bills_model_only
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":50.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM" 'null'
+gw a1 claude-fable-5-1
+check "gate: a governing window read below the threshold, no aggregate — bills_credits false" \
+      "$(jq -r '[.gate.verdict, (.gate.bills_credits|tostring)] | join("/")' <<<"$out")" "allow/false"
+
+# ---- the drift: genuinely missing data still refuses -------------------------
+new_home gw_model_unknown
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NADA"
+gw a1 claude-fable-5-1
+check "gate/model: a spent window with NO spend block refuses" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...for the spend reason, not a 5h one"                  "$(jq -r '.reason | test("spend headroom cannot be read")' <<<"$out")" "true"
+
+# ---- a malformed window must not hide a spent one ---------------------------
+# jq's @tsv ABORTS on a non-scalar field ("not valid in a csv row"), and inside
+# `< <(…)` its exit status was lost: every element after the odd one vanished,
+# so a malformed element listed BEFORE a spent `7d fable` removed the wall and
+# the lane was allowed. Each field is now coerced, so one bad element is one row.
+new_home gw_malformed_reset
+mk_gate_prof a1 "[{\"label\":\"7d opus\",\"utilization\":100.0,\"resets_at\":{\"x\":1}},\
+{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate/model: a malformed resets_at listed first does not hide a spent window" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...and it is the spent window that is reported" "$(jq -r .gate.model_window.label <<<"$out")" "7d fable"
+new_home gw_malformed_label
+mk_gate_prof a1 "[{\"label\":[\"7d fable\"],\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\
+{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate/model: a malformed label listed first does not hide a spent window" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+
+# A GOVERNING window whose utilization is not a number is unmeasured, not absent.
+new_home gw_util_unreadable
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":\"x\",\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate/model: a governing window with no readable utilization refuses" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...reported as unreadable, with a null utilization, never a made-up one" \
+      "$(jq -r '.gate.model_window | [.label, .state, (.utilization|tostring)] | join("/")' <<<"$out")" "7d fable/unreadable/null"
+check "...and the reason says the utilization cannot be read" "$(jq -r '.reason | test("utilization cannot be read")' <<<"$out")" "true"
+# ...but one that does NOT govern the lane is still none of its business.
+new_home gw_util_unreadable_other
+mk_gate_prof a1 "[{\"label\":\"7d opus\",\"utilization\":\"x\",\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_ROOM"
+gw a1 claude-fable-5-1
+check "gate/model: an unreadable window that does not govern the lane allows" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
+# A FAILED DECODE REFUSES. After the coercion above no value the metrics layer
+# can carry makes this jq fail (it re-encodes a filtered array of objects), so
+# the arm is reached through a jq on PATH that fails the decode — and only the
+# decode: every other jq call goes to the real one. What it claims about the real
+# tool is exit 5 with no output, which is what @tsv's abort was.
+JQSHIM="$TMPROOT/jqshim"; mkdir -p "$JQSHIM"
+cat > "$JQSHIM/jq" <<SHIM
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *'@base64d'*) cat >/dev/null; exit 5 ;; esac; done
+exec "$JQBIN" "\$@"
+SHIM
+chmod +x "$JQSHIM/jq"
+new_home gw_decode_fails
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate/model: per-model windows that cannot be decoded refuse" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...saying the windows cannot be read"  "$(jq -r '.reason | test("per-model weekly windows cannot be read")' <<<"$out")" "true"
+check "...with exit 2"                        "$rc" "2"
+# The shim is a fixture, not a false alarm: with no windows to decode it is
+# never consulted for that, and the same seat allows.
+new_home gw_decode_shim_idle
+mk_gate_prof a1 '[]' "$SP_ROOM"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate/model: the failing-decode shim alone refuses nothing" "$(jq -r .gate.verdict <<<"$out")" "allow"
+# A FAILED DECODE MUST NOT HIDE A MEASURED WALL. The aggregate is read by the
+# metrics layer, not the decode, so a live aggregate at 100 with spend `none` is
+# a measured wall however the per-model windows fared.
+new_home gw_decode_fails_agg_wall
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate: a failed decode does not hide a live aggregate wall" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...naming the aggregate"                                   "$(jq -r '.reason | test("aggregate weekly")' <<<"$out")" "true"
+# ...and the same failed decode on a seat WITH headroom still refuses unmeasured.
+new_home gw_decode_fails_agg_room
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+PATH="$JQSHIM:$PATH" gw a1 claude-fable-5-1
+check "gate: a failed decode beside a billing aggregate still refuses unmeasured" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+
+# ---- the aggregate wall, and the pin -----------------------------------------
+new_home gw_agg_none
+mk_gate_prof a1 '[]' "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+gw a1 claude-opus-5
+check "gate/aggregate: a pinned seat does not bypass the wall" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...naming the aggregate, not a label"                   "$(jq -r '.reason | test("aggregate")' <<<"$out")" "true"
+check "...and model_window is null"                            "$(jq -r .gate.model_window <<<"$out")" "null"
+# Both spent at 100: the tie reports the lane's own window, not the aggregate.
+new_home gw_agg_and_model
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
+gw a1 claude-fable-5-1
+check "gate: aggregate and model both spent — the model window is the one reported" \
+      "$(jq -r '[.state, .gate.model_window.label] | join("/")' <<<"$out")" "gate-spend-wall/7d fable"
+
+# ---- model scoping: the same seat, a different lane --------------------------
+new_home gw_scoping
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+gw a1 claude-opus-5
+check "gate: an Opus lane on a Fable-spent seat is allowed" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
+# ---- attribution: one fixture, one label, one lane, one expectation ----------
+# Each label sits at 100 with spend `none`, so GOVERNS is observable as a refusal
+# and "does not govern" as an allow — `state` for the refusals and `verdict` for
+# the allows, so neither reads as the other.
+for row in \
+  '7d fable:claude-fable-5-1:refuse'   \
+  '7d fable:fable:refuse'              \
+  '7d fable:fablex:allow'              \
+  '7d sonnet 5:claude-sonnet-5:refuse' \
+  '7d opus:opus[1m]:refuse'            \
+  '7d claude:claude-fable-5-1:allow'   \
+  '7d fable:claude-opus-5:allow'       ; do
+  lbl="${row%%:*}"; rest="${row#*:}"; mdl="${rest%:*}"; want="${rest##*:}"
+  new_home "gw_attr_${lbl// /_}_${mdl//[^a-z0-9]/_}"
+  mk_gate_prof a1 "[{\"label\":\"$lbl\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+  gw a1 "$mdl"
+  if [[ "$want" == refuse ]]; then
+    check "attribution: '$lbl' governs '$mdl'"         "$(jq -r .state <<<"$out")"        "gate-spend-wall"
+  else
+    check "attribution: '$lbl' does NOT govern '$mdl'" "$(jq -r .gate.verdict <<<"$out")" "allow"
+  fi
+done
+# The model id is matched CASE-INSENSITIVELY: clauth lowercases the label, so a
+# lane passed as `Fable` must not slip past a spent `7d fable`.
+new_home gw_attr_case
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+gw a1 Fable
+check "attribution: '7d fable' governs 'Fable' (case-insensitive)" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+
+# ---- worst-of-matches --------------------------------------------------------
+# Both labels govern `claude-fable-5`: `7d fable` on the token `fable`, `7d 5` on
+# the token `5`, and both are at 100. `7d fable` is LAPSED (with a real clock, so
+# it allows) and listed first; `7d 5` is live and walled. Best-of-matches, or
+# highest-utilization-alone (a tie, so the first held wins), would allow.
+new_home gw_worst
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"},\
+{\"label\":\"7d 5\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5
+check "gate: when two labels govern, the WORST decides" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...and the worst one is the one reported"        "$(jq -r .gate.model_window.label <<<"$out")" "7d 5"
+# A LIVE WALL OUTRANKS AN UNDATED REFUSAL. Both refuse, but only the live one
+# says why the lane is blocked; ranking by utilization alone (a tie at 100, so
+# the first held wins) reported gate-unmeasured for a seat that is walled.
+new_home gw_worst_undated
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0},\
+{\"label\":\"7d 5\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5
+check "gate: a live spend wall outranks an undated refusal" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+check "...and the live window is the one reported"        "$(jq -r .gate.model_window.label <<<"$out")" "7d 5"
+# A governing window below the threshold is not a candidate at all.
+new_home gw_below
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":99.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+gw a1 claude-fable-5
+check "gate: a governing window at 99 (< 100) does not refuse" "$(jq -r '[.gate.verdict, (.gate.model_window|tostring)] | join("/")' <<<"$out")" "allow/null"
+
+# ---- a lapse needs a real clock ---------------------------------------------
+WS_FABLE_LAPSED="[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"}]"
+new_home gw_lapsed_dated
+mk_gate_prof a1 "$WS_FABLE_LAPSED" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate: a lapsed model window WITH fetched_at is allowed" "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "...and is reported as lapsed"   "$(jq -r .gate.model_window.state <<<"$out")" "lapsed"
+
+new_home gw_lapsed_undated
+mk_gate_prof a1 "$WS_FABLE_LAPSED" "$SP_NONE" "" ""     # fifth arg "" OMITS fetched_at
+gw a1 claude-fable-5-1
+check "gate: a lapsed model window WITHOUT fetched_at is undated" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...and says so in model_window.state" "$(jq -r .gate.model_window.state <<<"$out")" "undated"
+
+# ---- a spent window with NO reset at all is undated, never lapsed -----------
+# The reset is absent, so its delta is not a number; that arm must read
+# `undated` (refuse), never `lapsed` (allow). gw_lapsed_undated reaches undated
+# by the OTHER arm (a past reset with no fetched_at), and gw_worst_undated's
+# undated window is outranked by a live one, so neither pins this arm.
+new_home gw_noreset_model
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":100.0}]" "$SP_NONE"
+gw a1 claude-fable-5-1
+check "gate: a spent model window with NO resets_at refuses as unmeasured" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...reported as undated"                     "$(jq -r .gate.model_window.state <<<"$out")" "undated"
+# The aggregate reaches the gate through the metrics layer, which keeps a
+# seven_day with no resets_at at its number (uW 100) and its reset `unknown`
+# (an absent reset is not a lapse): so it IS a candidate, and undated.
+new_home gw_noreset_agg
+mk_gate_prof a1 '[]' "$SP_NONE" '{"utilization":100.0}'
+gw a1 claude-opus-5
+check "gate: a spent aggregate with NO resets_at refuses as unmeasured" "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "...for the reset, naming the aggregate" \
+      "$(jq -r '.reason | test("aggregate weekly") and test("cannot be dated")' <<<"$out")" "true"
+
+# ---- precedence: a 5h refusal keeps its own state ----------------------------
+# u5 at 90 projects to 90 + 115/2 = 147 > 95, so the 5h arm fires; the Fable
+# window is ALSO spent with spend `none`, so without the ordering this reports
+# gate-spend-wall instead.
+new_home gw_precedence
+mkprof a1 "{\"five_hour\":{\"utilization\":90.0,\"resets_at\":\"$(iso_in 3600)\"},\"fetched_at\":$(fetched_now_ms),\
+\"seven_day\":{\"utilization\":40.0,\"resets_at\":\"$(iso_in 216000)\"},\"weekly_scoped\":$WS_FABLE_SPENT,\"spend\":$SP_NONE}"
+gw a1 claude-fable-5-1
+check "gate: a 5h refusal keeps its state when a window is also spent" "$(jq -r .state <<<"$out")" "gate-projected"
+
+# ---- the aggregate we cannot read -------------------------------------------
+new_home gw_agg_unknown
+mkprof a1 "{\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"fetched_at\":$(fetched_now_ms),\"spend\":$SP_NONE}"
+gw a1 claude-opus-5
+check "gate: an unreadable aggregate does not refuse (the 5h arms still apply)" "$(jq -r .gate.verdict <<<"$out")" "allow"
+check "...and does not claim the lane is free"  "$(jq -r .gate.bills_credits <<<"$out")" "null"
+
+# ---- a lapsed aggregate, which reaches the gate as `unknown` too ------------
+new_home gw_agg_lapsed
+mk_gate_prof a1 '[]' "$SP_NONE" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in -3600)\"}"
+gw a1 claude-opus-5
+check "gate: a lapsed aggregate does not refuse" "$(jq -r .gate.verdict <<<"$out")" "allow"
+
+# ---- the threshold is a tuning value, and a bad one refuses -----------------
+new_home gw_badthreshold
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_ROOM"
+CLAUDE_PICK_WEEK_SPENT=oops gw a1 claude-fable-5-1
+check "gate: CLAUDE_PICK_WEEK_SPENT=oops refuses rather than defaulting to 100" "$(jq -r .state <<<"$out")" "gate-misconfigured"
+check "...naming the variable and the value"  "$(jq -r '.reason | test("CLAUDE_PICK_WEEK_SPENT") and test("oops")' <<<"$out")" "true"
+# ...and a GOOD one is honoured: at 50 the healthy 40% aggregate is still not
+# spent, while a model window at 60 now is.
+new_home gw_goodthreshold
+mk_gate_prof a1 "[{\"label\":\"7d fable\",\"utilization\":60.0,\"resets_at\":\"$(iso_in 216000)\"}]" "$SP_NONE"
+CLAUDE_PICK_WEEK_SPENT=50 gw a1 claude-fable-5-1
+check "gate: CLAUDE_PICK_WEEK_SPENT=50 walls a model window at 60" "$(jq -r .state <<<"$out")" "gate-spend-wall"
+
+# ---- no --gate is still no gate object --------------------------------------
+new_home gw_off
+mk_gate_prof a1 "$WS_FABLE_SPENT" "$SP_NONE"
+cli --profile a1 --dry-run --json
+check "gate: without --gate the spent window changes nothing" \
+      "$(jq -r '[.gate, .profile, (.exit_code|tostring)] | map(tostring) | join("/")' <<<"$CLI_OUT")" "null/a1/0"
 
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

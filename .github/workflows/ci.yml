@@ -62,9 +62,11 @@ jobs:
       # ShellCheck job never selects it (that job globs *.sh/*.bash/*.zsh, and
       # this is an extensionless command on ~/.local/bin). Without this line the
       # repo's newest executable would have no syntax check at all.
+      # scripts/machines-render is the same case and named for the same reason
+      # (DO-665): zsh, extensionless, excluded from both ShellCheck paths.
       - name: Check zsh syntax for all modules
         run: |
-          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh scripts/claude-pick; do
+          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh scripts/claude-pick scripts/machines-render; do
             if [ -f "$file" ]; then
               echo "Checking: $file"
               zsh -n "$file" || exit 1
@@ -266,6 +268,31 @@ jobs:
       # the machine this was written on hold four live Claude logins.
       - name: Run the claude-account-dirs state table
         run: ./scripts/test-claude-account-dirs.sh
+
+  machines-render-test:
+    name: Machine Registry State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh and jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq
+
+      # The registry decides WHICH SEAT A REMOTE LANE BILLS, and the other reader
+      # of the same file -- claude-profile-foreign, the DO-632/DO-641 guard --
+      # fails OPEN and SILENTLY when its table reads empty. So the rows are all
+      # really one question: can a misconfiguration come back as "this machine
+      # owns nothing" rather than as an error? An empty registry (a modular
+      # adopter owns no machine) and an unreadable one must never be the same
+      # answer, which is why the suite asserts the exit codes and not just the
+      # output.
+      - name: Run the machine registry state table
+        run: ./scripts/test-machines-render.sh
 
   claude-pick-test:
     name: Claude Account Picker State Table
@@ -605,6 +632,37 @@ jobs:
       - name: Run the workflow-apt state table
         run: ./scripts/test-workflow-apt.sh
 
+  claude-md-test:
+    name: CLAUDE.md Guard State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # The ratchet takes the MINIMUM size of CLAUDE.md over the commits that
+          # also carry the guard, so it needs history. actions/checkout@v4
+          # defaults to fetch-depth: 1, and with one commit that minimum is
+          # today's size -- the ceiling becomes today+slack and the guard reports
+          # success while enforcing nothing. check-claude-md.sh exits 2 on a
+          # shallow repository rather than pass, so this is fail-loud rather than
+          # fail-open, but the fetch still has to be right here.
+          fetch-depth: 0
+
+      - name: Run the CLAUDE.md guard state table
+        run: ./scripts/test-claude-md.sh
+
+      - name: Run the guard against the tree we ship
+        run: ./scripts/check-claude-md.sh
+
+      - name: Run the migration-safety state table
+        run: ./scripts/test-doc-tokens.sh
+
+      # Nothing that left CLAUDE.md may have been deleted on the way. Compared
+      # against the base branch, so on a push to main (where HEAD IS origin/main)
+      # it is a no-op by construction and on a PR it checks exactly the PR's diff.
+      - name: Check nothing was lost from CLAUDE.md
+        run: ./scripts/check-doc-tokens.sh . origin/main
+
   yaml-validation:
     name: YAML Validation
     runs-on: ubuntu-latest
@@ -777,6 +835,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # The state table first: it proves the checker can still fail. The step
+      # below proves the tree we ship passes it, which a broken checker also
+      # reports. DO-631.
+      - name: Run the version-sync state table
+        run: ./scripts/test-sync-version-docs.sh
+
       - name: Check version sync
         run: |
           chmod +x scripts/sync-version-docs.sh
@@ -801,6 +865,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      # zsh and jq, because config.load asks scripts/machines-render which seat each
+      # machine bills (DO-665) and the suite runs the REAL renderer against a fixture
+      # tenants file rather than a stub — a stub would be a claim about the tool.
+      - name: Install zsh and jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq
 
       - name: Run the rabota unit tests
         run: ./scripts/test-rabota.sh

@@ -478,7 +478,7 @@ check "refuses: a name matched by the *_TOKEN pattern, not by literal" \
 
 echo
 echo "=== ...without refusing the forms that report set/unset ==="
-# These are what CLAUDE.md and the rabota preflight PRESCRIBE. Denying them
+# These are the only forms that report set/unset without expanding it. Denying them
 # would leave no way to report whether a variable is set at all, and a guard
 # with no permitted alternative is one people route around -- so they matter
 # more than the rows above.

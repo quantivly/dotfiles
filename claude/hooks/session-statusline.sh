@@ -248,13 +248,14 @@ idle_val=$(printf '%s\n' "$fields" | sed -n '13p')
 # What it names is the credential FILE this process reads. It does NOT ask the
 # API who that credential authenticates as, so a `/login` as a different
 # account inside an isolated session leaves the directory name unchanged and
-# the token wrong -- a case CLAUDE.md already documents (8 upstream refusals).
+# the token wrong -- a case docs/CLAUDE_ACCOUNTS.md already documents (8 upstream
+# refusals).
 # What it is strictly better than is the alternative: clauth's plugin reports
 # the machine-wide active profile, which is unrelated to this pane. clauth's herdr plugin cannot see a foreign CLAUDE_CONFIG_DIR and so
 # publishes the machine-wide active profile, or the literal sentinel
 # `unknown`; measured 2026-09-09, a pane billing `quantivly-2` carried
 # `clauth: "unknown"`. That is the surface that hid the account concentration
-# CLAUDE.md counts (17 of 18 processes on one credential).
+# docs/CLAUDE_ACCOUNT_MCP.md counts (17 of 18 processes on one credential).
 #
 # "shared" is NOT a formatting fallback — it is the finding. An unset
 # CLAUDE_CONFIG_DIR means this session is on ~/.claude/.credentials.json, the

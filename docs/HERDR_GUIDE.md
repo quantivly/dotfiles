@@ -9,6 +9,10 @@ explains how to adopt it, why each piece is the way it is, and how it fails.
 (Ubuntu / GNOME / Wayland + Alacritty). Everything marked *verified* below was tested at the
 keyboard; anything not marked is inherited from documentation and should be treated as such.
 
+
+**Maintaining this integration rather than adopting it?** The traps, the evidence behind them
+and the tests that pin them are in [HERDR_INTERNALS.md](HERDR_INTERNALS.md).
+
 ---
 
 ## 0. Read this first: every layer here fails silently
@@ -982,6 +986,135 @@ Every decision is one line in `~/.local/state/pane-reaper/log`. It also records
 
 `~/.claude/skills/herdr/SKILL.md` teaches a lead Claude `herdr agent list/read/prompt/wait`.
 Regenerate it after every `herdr update`.
+
+### Working on dev
+
+`dev (EC2)` is a second agent host — 16 cores, 61 GiB — and it also runs the team's platform
+stack. Treat it as **shared, not disposable**: an OOM or an unasked-for restart there is a team
+outage.
+
+- **Policy: quantivly only.** Nothing personal or toysim goes on dev. Its seat is **quantivly-0**,
+  held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* that
+  window, but launching on that seat belongs on dev.
+- **The declared seat is checked, by `rabota doctor`, without reading a credential.**
+  `[machines.<m>].profile` only *declares* which seat a machine's lanes bill; the lane
+  authenticates with that machine's own login, so a machine sitting on a different account would
+  spend a window the gate never metered. `doctor` now compares clauth's own `account_id.json` for
+  the declared profile against `oauthAccount.accountUuid` in that machine's `$HOME/.claude.json`
+  — the same file a lane there resolves, since a remote lane deliberately does not set
+  `CLAUDE_CONFIG_DIR`. Both sides are hashed before either travels, and **no row prints the
+  account id, its digest, or anything else identifying**: the verdict is the whole actionable
+  content. Verified matching on dev 2026-09-21. What it proves is the account that machine
+  **last recorded**, not a live check of its token, so every row carries that record's age.
+- **Concurrent remote lanes on dev share one credential file.** The headless door bills dev's own
+  login rather than a per-seat account dir, so every simultaneous lane there — up to
+  `max_lanes_local` (3 by default) — reads and refreshes the same `~/.claude` on dev. That is the
+  trade of using the machine's own login instead of per-seat dirs, not a bug to fix here. The
+  symptom if it bites is the one CLAUDE.md documents for a superseded refresh token: every session
+  on that account logs out **at once**, not a gradual degradation — so a sudden multi-lane logout
+  on dev is this, not a new fault.
+- **Two doors, not one.** **Attended:** pick `dev (EC2)` in the machine sidebar and spawn with
+  herdr-draft's popup in that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the
+  popup finds its own binary, but a shell invocation needs
+  `~/.config/herdr/plugins/github/zvibaratz.draft-*/bin/herdr-draft`. **Headless:**
+  `rabota lane recipe --brief <path> --repo <name> --machine dev --run` — it renders the recipe on
+  the laptop and dispatches one `systemd-run` unit over ssh, joining `agents.slice` explicitly
+  (`--slice=agents.slice`); watch it with `rabota census`, read `verdict.json` when it settles.
+  This door needs `"Bash(rabota lane recipe:*)"` in `permissions.allow`
+  (`~/.claude/settings.json`) to be **reliable**: the auto-mode classifier refused this exact
+  command shape on 2026-09-18 and is non-deterministic — it refused, then allowed, an identical
+  Linear write on retry on 2026-09-20 — so the allow rule is the durable answer, not the shape of
+  the command; without it, expect an occasional denial with nothing here to explain it.
+  **Not `dev-spawn`** — that script was never built (DO-642 was rescoped away from it); herdr-draft
+  does not run headless lanes regardless, and a lane's cgroup, `MemoryMax`, journal and clean stop
+  all come from systemd, not from a pane.
+- **`rabota census` also runs unattended, from `rabota-precompute@<tenant>.timer`, and it ssh's to
+  every declared machine including dev.** That timer's environment is not an interactive one; if it
+  cannot reach dev, it writes a census with dev unreachable, and dev lanes then correctly refuse.
+  Read that refusal as "the timer couldn't reach dev," not "dev is down" — check the timer's own
+  reachability before dev's.
+- **Inspect dev over ssh, always.** On herdr 0.9.0 the local CLI talks only to the local socket,
+  and `--machine` is a 0.9.1 flag that here just prints `unknown option`.
+  ```bash
+  ssh dev 'PATH=$HOME/.local/bin:$PATH herdr agent list'
+  ssh dev 'PATH=$HOME/.local/bin:$PATH herdr pane close <id>'
+  ```
+  A non-interactive `ssh dev` has **no `~/.local/bin`**, so set `PATH` or use an absolute path.
+  Never `zsh -ic` there: dev's interactive startup repoints `~/.ssh/ssh_auth_sock`.
+- **Git is HTTPS-only.** `~/.gitconfig.local` rewrites both `git@github.com:` and
+  `ssh://git@github.com/` to HTTPS so gh's credential helper (`!gh auth git-credential`, from the
+  tracked `gitconfig`) authenticates, and pushes then need **no forwarded agent** — which a
+  session left running after you disconnect does not have. Never `git config --global` on dev:
+  `~/.gitconfig` there is a symlink into the tracked, public `gitconfig`.
+  Measured 2026-09-21, all of it on the non-interactive path: `gh` is at `/usr/bin/gh` (so it is
+  on a plain `ssh dev` PATH, unlike `herdr-draft` and `claude`), logged in as `zvi-quantivly` with
+  scopes `gist, read:org, repo, workflow`, and its token lives in `~/.config/gh/hosts.yml` — a
+  file, not a keyring, which is why a headless unit can read it. Commits there **are signed**:
+  `commit.gpgsign = true`, `gpg.format = ssh`, `user.signingkey = ~/.ssh/signing_key.pub`, and the
+  private key carries **no passphrase**, so signing needs no agent either.
+- **A lane can push — measured 2026-09-21, from inside the unit and not merely over ssh.** This is
+  what makes a lane able to open a PR, and until this date only `ls-remote` had ever been tried.
+  A `systemd-run --user --slice=agents.slice` unit on dev, with **no tty, no `SSH_AUTH_SOCK` and
+  the user manager's `PATH`** (`/usr/local/sbin:…:/snap/bin` — no `~/.local/bin`), created a git
+  worktree, made an **SSH-signed** commit and pushed a new branch to `quantivly/dotfiles`. Nothing
+  extra was needed: no credential helper change, no env var in the unit, no agent forwarding.
+  Three properties are what make it work, and each is the thing to check first if it ever stops:
+  `gh` is at `/usr/bin/gh` so the user manager's PATH finds it; its token is in a **file**
+  (`~/.config/gh/hosts.yml`) rather than a keyring no headless unit could unlock; and the signing
+  key has **no passphrase**, so `commit.gpgsign = true` needs no agent either. The probe that
+  proved it, cleanup included, is `~/quantivly/handoffs/2026-09-21-do654-push-probe.sh`.
+  One thing it is NOT evidence of: the auto-mode classifier refused a `ssh dev … git push` shape
+  as `[Remote Shell Writes]` on the way here. A lane pushes as itself, inside a unit, so this does
+  not touch it — but an *agent session* driving a push over ssh needs an approval or a
+  `permissions.allow` rule, the same answer §4.6 reached for `rabota lane recipe`.
+- **The memory budget covers panes by inheritance, and lanes only by joining.** `agents.slice`
+  (`MemoryHigh=8G`, `MemoryMax=10G`) contains `herdr-server.service`, so every pane shell inherits
+  the cap — that much is automatic. A command started over a plain `ssh dev` lands in a session scope under
+  `user-<uid>.slice`, a *sibling* of `user@<uid>.service`, so the slice can never account it;
+  docker is outside too (`system.slice`). That is why an attended session reaches dev as a herdr
+  pane (herdr-draft's popup) rather than over bare ssh — and why a headless lane instead joins the slice
+  **explicitly**, `systemd-run --user --slice=agents.slice`, since it has no pane to inherit the
+  cap from (`rabota lane recipe --machine dev --run`; measured landing under
+  `agents.slice/rabota-lane-…` with `MemoryMax=6442450944`, 2026-09-20).
+- **The admission cap and the cgroup cap are asserted against each other — by `rabota doctor`,
+  not by `budget`.** `budget` admits up to `max_lanes_local` lanes (default 3) by reading the
+  *host's* load, MemAvailable and swap; it never reads the slice, and deliberately still doesn't.
+  Each lane separately requests its own `MemoryMax` into `agents.slice`, which also holds the
+  herdr server and every attended pane. `max_lanes_local × memory_max ≤ the slice's MemoryMax` is
+  a **configuration** invariant — true or false regardless of what is running, and set in two
+  files on two machines — so it belongs where the other cross-machine couplings are asserted, not
+  in the runtime gate. A static misconfiguration surfacing as a `machine:…` refusal would report
+  the wrong thing at the wrong time: the lane you wanted refuses, and the cause is a TOML edit
+  from three weeks ago.
+  The check found this broken on its first run: at the `6G` default, 3 × 6 = **18 GiB admissible
+  into dev's 10 GiB slice**. Settled 2026-09-21 by putting `memory_max = "3G"` in
+  `~/.dotfiles-local/rabota/tenants/quantivly.toml` — 3 × 3 = 9 GiB fits, and 3 GiB per lane is
+  still ~10× the highest agent memory ever measured there (whole-slice peak 323 MiB). Raising
+  dev's slice instead was rejected: dev has 13 GiB available of 61, the rest held by the platform
+  stack it runs for the team, so a bigger agent slice buys headroom by taking it from them.
+  **Whichever number you change, change it knowing `budget` still does not read the slice** — it
+  admits on the host's load, memory and swap, and `doctor` is the only thing comparing the two.
+- **Read `FragmentPath`, never `MemoryMax` alone.** `systemctl --user show agents.slice -p
+  MemoryMax` prints `MemoryMax=infinity` with `LoadState=loaded` for a slice that **has no unit
+  file** — measured on the laptop, which has no `agents.slice` at all. `MemoryMax` alone reads
+  that as "unbounded, fine"; the empty `FragmentPath` is the only thing telling "no cap" from
+  "no slice", and a lane joining `--slice=agents.slice` on such a machine is inside no budget
+  while the design says it is.
+- **Know the degraded mode before you meet it.** `MemoryHigh` throttles everything in the slice
+  **including the herdr server**, since the server is in it and panes inherit from it: the first
+  symptom of the budget biting is every pane and the dev UI going slow, not a lane dying. At
+  `MemoryMax` the largest process is killed and the unit continues — `OOMPolicy=continue` in
+  `systemd/herdr-server.service` is what makes that survivable, so do not "fix" it. Swap is
+  bounded **separately** — neither setting above touches it — so the slice also carries
+  `MemorySwapMax=4G`: without it a runaway holds 10 GiB resident *plus* every page of dev's 15 GiB
+  of swap, and the thrash lands on the platform stack dev runs for the team, not just on the agent.
+  The high-water mark is what to revisit the numbers against:
+  ```bash
+  ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
+  ```
+- **Disconnects leave dev's agents running.** The health-check timeouts in the log are this
+  laptop's own suspends, not dev going away; reconnect and the panes are still there.
+- **Close what you spawn, and only that** — `herdr pane close <id>` over ssh, as above.
 
 ---
 

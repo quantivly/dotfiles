@@ -194,7 +194,7 @@ else
                 # if/else, NOT `mv && good || bad`: `good` is a printf, printf
                 # returns non-zero on ENOSPC, and the || arm would then report a
                 # failure for a write that succeeded. That exact inversion is
-                # logged in CLAUDE.md against five checks in this repo.
+                # logged in docs/DOTFILES_DEPLOY.md against five checks in this repo.
                 if mv "$tmp" "$SETTINGS"; then
                     tmp=""
                     good "statusLine set (refreshInterval ${REFRESH})"

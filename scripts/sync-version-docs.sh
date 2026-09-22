@@ -112,12 +112,92 @@ parse_mise_versions() {
     grep "^${tool_name} = " "$MISE_CONFIG" | sed 's/.*= "\(.*\)".*/\1/' || echo ""
 }
 
-# Extract version from documentation table (Core Tools section only)
+# --- Locating the Core Tools table -------------------------------------------
+#
+# The table is found by its HEADER ROW and read to the first line that is not a
+# table row. It used to be read as `sed -n '48,61p'`, which coupled it both to
+# every line above it in the file and to its own length. Both directions bit
+# (DO-631):
+#
+#   - Loudly, on any line added above the table. DO-627: a one-line correction
+#     on line 12 became two lines, the last row fell out of the window, and CI
+#     failed with `fastfetch: missing from docs`. The workaround at the time was
+#     to keep the correction to one line -- writing around the checker.
+#   - Silently, when the table gains a row TOOL_ORDER does not name: the window
+#     never saw it, nothing compared it, and the run still ended
+#     `All tool versions are in sync!`. Measured rather than assumed --
+#     scripts/test-sync-version-docs.sh keeps a row on it.
+#
+# The header is matched in FULL, so the "Known Compatibility Issues" table lower
+# in the same file (`| Tool | Version | Issue | Workaround |`) cannot be read by
+# mistake -- which is what the old window's 48,61 was really defending against.
+TABLE_HEADER='| Tool | Purpose | Current Version |'
+
+# Populated by load_doc_table(). DOC_ROW_NAMES preserves order and duplicates,
+# so it -- not the associative array -- is what the row count is taken from.
+DOC_TABLE_START=0
+DOC_TABLE_END=0
+DOC_ROW_NAMES=()
+declare -A DOC_VERSIONS
+
+# Print "<header line> <first data line> <last data line>", each 0 if absent.
+# `exit` still runs END, so the bounds survive the stop at the first non-row.
+doc_table_bounds() {
+    awk -v header="$TABLE_HEADER" '
+        !found { if ($0 == header) { found = NR } ; next }
+        /^\|[-: |]*\|[ \t]*$/ { next }
+        /^\|/ { if (!start) { start = NR } ; end = NR ; next }
+        { exit }
+        END { print found + 0, start + 0, end + 0 }
+    ' "$VERSION_DOC"
+}
+
+# Read the table once. A checker that cannot find its input must never report a
+# clean tree, and "could not run" must not read as "out of sync" -- so this
+# exits 2, distinct from the 1 that means drift.
+load_doc_table() {
+    local bounds header_line
+
+    # Checked by STATUS, not by whether anything came out. awk here is mawk, and
+    # an awk that fails prints nothing and exits non-zero: reading the bounds
+    # straight into `read` made that empty output look like a legitimate parse
+    # and the script exited 1, with no output at all, from `set -e` -- a CI job
+    # failing as "out of sync" over a tool that never ran. Measured with a stub
+    # awk on PATH; test-sync-version-docs.sh keeps a row on it.
+    if ! bounds=$(doc_table_bounds) || [[ -z "$bounds" ]]; then
+        echo -e "${RED}Error: could not read the table out of ${VERSION_DOC}${NC}" >&2
+        echo -e "${RED}       (awk produced no bounds -- is awk working?)${NC}" >&2
+        exit 2
+    fi
+    read -r header_line DOC_TABLE_START DOC_TABLE_END <<< "$bounds"
+
+    if [[ "$header_line" -eq 0 ]]; then
+        echo -e "${RED}Error: could not find the Core Tools table in ${VERSION_DOC}${NC}" >&2
+        echo -e "${RED}       expected a header row reading exactly:${NC}" >&2
+        echo -e "${RED}       ${TABLE_HEADER}${NC}" >&2
+        exit 2
+    fi
+    if [[ "$DOC_TABLE_START" -eq 0 ]]; then
+        echo -e "${RED}Error: the Core Tools table at ${VERSION_DOC}:${header_line} has no data rows${NC}" >&2
+        exit 2
+    fi
+
+    local name version
+    while IFS=$'\t' read -r name version; do
+        [[ -z "$name" ]] && continue
+        DOC_ROW_NAMES+=("$name")
+        DOC_VERSIONS["$name"]="$version"
+    done < <(sed -n "${DOC_TABLE_START},${DOC_TABLE_END}p" "$VERSION_DOC" |
+             awk -F'|' 'BEGIN { OFS = "\t" }
+                        { n = $2 ; v = $4
+                          gsub(/^[ \t]+|[ \t]+$/, "", n)
+                          gsub(/^[ \t]+|[ \t]+$/, "", v)
+                          print n, v }')
+}
+
+# Version for a tool as the documentation table records it, empty if absent.
 parse_doc_version() {
-    local tool_name="$1"
-    # Extract version from markdown table in Core Tools section (lines 48-61)
-    # This avoids matching other tables like "Known Compatibility Issues"
-    sed -n '48,61p' "$VERSION_DOC" | grep "^| ${tool_name} |" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}' || echo ""
+    printf '%s' "${DOC_VERSIONS[$1]:-}"
 }
 
 # Check if versions are in sync
@@ -127,6 +207,40 @@ check_sync() {
 
     echo -e "${BLUE}Checking version synchronization...${NC}"
     echo ""
+
+    # A row TOOL_ORDER does not name is a row nothing compares. That is the
+    # silent direction this checker was blind to: it read a fixed 14-line
+    # window, so an extra row was invisible and the run still ended
+    # "All tool versions are in sync!".
+    local doc_only=()
+    local name known ordered_tool
+    for name in "${DOC_ROW_NAMES[@]}"; do
+        known=0
+        for ordered_tool in "${TOOL_ORDER[@]}"; do
+            if [[ "$ordered_tool" == "$name" ]]; then
+                known=1
+                break
+            fi
+        done
+        if [[ $known -eq 0 ]]; then
+            doc_only+=("$name")
+        fi
+    done
+
+    for name in "${doc_only[@]}"; do
+        echo -e "${RED}✗ ${name}: in the docs table but not in TOOL_ORDER (never checked)${NC}"
+        out_of_sync=1
+        changes+=("${name}: row in docs is not in TOOL_ORDER, so nothing verifies it")
+    done
+
+    # Independently of the above, the two must be the same LENGTH. A duplicated
+    # row leaves the sets equal and the counts unequal, and would otherwise be
+    # checked twice and reported once.
+    if [[ ${#DOC_ROW_NAMES[@]} -ne ${#TOOL_ORDER[@]} ]]; then
+        echo -e "${RED}✗ docs table has ${#DOC_ROW_NAMES[@]} rows, TOOL_ORDER has ${#TOOL_ORDER[@]}${NC}"
+        out_of_sync=1
+        changes+=("row count: docs table has ${#DOC_ROW_NAMES[@]}, TOOL_ORDER has ${#TOOL_ORDER[@]}")
+    fi
 
     for tool in "${TOOL_ORDER[@]}"; do
         local mise_version
@@ -191,25 +305,23 @@ update_docs() {
         fi
 
         local description="${TOOL_DESCRIPTIONS[$tool]}"
-        new_rows+="| ${tool} | ${description} | ${version} |\n"
+        new_rows+="| ${tool} | ${description} | ${version} |"$'\n'
         echo -e "${GREEN}✓ ${tool}: ${version}${NC}"
     done
 
-    # Find table boundaries in documentation (lines 46-61)
-    # Table header is at line 46, separator at 47, data starts at 48
-    local table_start=48  # First data row
-    local table_end=61    # Last data row
-
-    # Create temporary file with updated table
+    # The data rows are replaced in place, between the bounds load_doc_table
+    # found. These bounds were hardcoded 48 and 61 alongside the read path's
+    # window, and on a shifted file that rewrite ate the |---| separator row --
+    # so the table stopped rendering -- and left a duplicate last row below the
+    # table. All while being the remedy the failing --check tells you to run.
+    #
+    # printf, not `echo -e "$new_rows"`: new_rows already ends in a newline, so
+    # echo added one more on EVERY run. The blank lines that accumulated under
+    # the table in the tracked doc are that bug's fossil record.
     {
-        # Copy lines before table
-        sed -n "1,$((table_start - 1))p" "$VERSION_DOC"
-
-        # Insert new table rows
-        echo -e "$new_rows"
-
-        # Copy lines after table
-        sed -n "$((table_end + 1)),\$p" "$VERSION_DOC"
+        sed -n "1,$((DOC_TABLE_START - 1))p" "$VERSION_DOC"
+        printf '%s' "$new_rows"
+        sed -n "$((DOC_TABLE_END + 1)),\$p" "$VERSION_DOC"
     } > "${VERSION_DOC}.tmp"
 
     # Replace original file
@@ -263,6 +375,10 @@ main() {
         echo -e "${RED}Error: TOOL_VERSION_UPDATES.md not found at: $VERSION_DOC${NC}"
         exit 1
     fi
+
+    # Locate and read the documentation table. Exits 2 if it cannot be found:
+    # that is "could not run", which is neither a pass nor "out of sync".
+    load_doc_table
 
     # Validate tool coverage
     validate_tool_coverage

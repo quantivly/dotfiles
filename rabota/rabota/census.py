@@ -10,13 +10,13 @@ import re
 import time
 from pathlib import Path
 
-from rabota import secrets, sysinfo
+from rabota import remote, secrets, sysinfo
 from rabota.store import now
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 SOL_UNIT, RABOTA_PREFIX = "nanoclaw-orchestrate.service", "/rabota-"
 UNIT_PREFIXES = ("rabota-", "orch-lane-")
-DEFERRED = ["deferred:sol", "deferred:machines"]   # design §4.2: shipped at S1
+DEFERRED = ["deferred:sol"]   # design §4.2: machines[] shipped by the remote-lanes plan
 # A Claude Code process is named `claude` when started through the wrapper and by its VERSION when a
 # headless lane execs the versioned binary directly (`.../claude/versions/2.1.273 -p …`) — which is
 # exactly what `lane recipe` and the orchestrator's manual recipe do. Measured 2026-09-16: this
@@ -196,25 +196,44 @@ def worktrees(runner) -> tuple[list[dict], list[str]]:
     return rows, []
 
 
-def settle_finished(ctx, units: list[dict], seats: list[dict]) -> list[str]:
+def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None) -> list[str]:
     """A ``started`` row whose unit is gone and whose stream has a result line is settled from that line.
 
     ``ended_at``, ``cost_usd`` (``result.total_cost_usd``) and ``five_h_pct_at_end`` (the seat's
     current reading) are written; ``status`` becomes ``done`` or ``failed`` per ``is_error``. A row
     whose unit is still active, or whose stream has no result yet, is left alone (``reap`` handles
     abandonment). Returns the ids settled.
+
+    A lane on another machine is settled from that machine's ``machines[]`` row — its stream lives
+    there, so the local filesystem read below can never see it. An unreachable machine settles
+    nothing: not knowing is not the same as finished.
     """
-    live = {u["name"] for u in units if u.get("state") in ("active", "activating")}
+    by_name = {m["name"]: m for m in (machines or [])}
+    # Keyed by (machine, unit) rather than unit alone: unit names are only unique per machine,
+    # and a flat set lets an active unit on one machine suppress a finished lane's settle on
+    # another — losing that lane's cost with no error anywhere.
+    live = {("local", u["name"]) for u in units if u.get("state") in ("active", "activating")}
+    for m in by_name.values():
+        live |= {(m["name"], u["name"]) for u in m.get("units", [])
+                 if u.get("state") in ("active", "activating")}
     pct = {s["name"]: s.get("five_h_pct") for s in seats}
     settled = []
     for lane in ctx.store.list_lanes(ctx.tenant.name, status="started"):
-        if lane.get("unit") in live:
+        machine = lane.get("machine") or "local"
+        if (machine, lane.get("unit")) in live:
             continue
-        stream = Path(lane["out_dir"]) / "stream.jsonl"
-        if not stream.exists():
-            continue
+        if machine == "local":
+            stream = Path(lane["out_dir"]) / "stream.jsonl"
+            if not stream.exists():
+                continue
+            text = stream.read_text()
+        else:
+            row = by_name.get(machine)
+            if not row or not row.get("reachable"):
+                continue
+            text = row.get("streams", {}).get(lane["out_dir"], "")
         result = None
-        for line in stream.read_text().splitlines():
+        for line in text.splitlines():
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -229,13 +248,43 @@ def settle_finished(ctx, units: list[dict], seats: list[dict]) -> list[str]:
     return settled
 
 
-def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper=time.sleep) -> dict:
-    """Measure everything, settle finished lanes, write ``<state_dir>/census.json`` and return it."""
+def machines(ctx) -> tuple[list[dict], list[str]]:
+    """One row per machine this tenant declares, each measured in one ssh call.
+
+    An unreachable machine still gets a row — with ``reachable: False`` — and its name in
+    ``unavailable``. Readers must refuse on it; a missing row and a zeroed row are the two
+    ways this becomes "plenty of room" by accident.
+    """
+    rows, unavailable = [], []
+    for name, m in sorted(ctx.tenant.machines.items()):
+        out_dirs = [l["out_dir"] for l in ctx.store.list_lanes(ctx.tenant.name, status="started")
+                    if l.get("machine") == name and l.get("out_dir")]
+        row = remote.read(ctx.runner, m, out_dirs)
+        if not row.get("reachable"):
+            unavailable.append(f"machine:{name}")
+        rows.append(row)
+    return rows, unavailable
+
+
+def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper=time.sleep,
+           include_worktrees: bool = True) -> dict:
+    """Measure everything, settle finished lanes, write ``<state_dir>/census.json`` and return it.
+
+    ``include_worktrees=False`` skips the ``wt-gc`` subprocess entirely (it is the slow dimension —
+    a `gh` call per worktree) and reports ``"skipped:worktrees"`` in ``unavailable[]``, distinct from
+    the ``"worktrees"`` marker a failed call still uses: a reader must be able to tell "we asked and
+    it broke" from "we chose not to ask" (design §4.2).
+    """
     unavailable = list(DEFERRED)
     sess, u0 = sessions(proc, sample_seconds, sleeper)
-    us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner); wt, u3 = worktrees(ctx.runner)
-    unavailable += u0 + u1 + u2 + u3
-    settle_finished(ctx, us, st)
+    us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner)
+    if include_worktrees:
+        wt, u3 = worktrees(ctx.runner)
+    else:
+        wt, u3 = [], ["skipped:worktrees"]
+    ms, u4 = machines(ctx)
+    unavailable += u0 + u1 + u2 + u3 + u4
+    settle_finished(ctx, us, st, machines=ms)
     si = sysinfo.read(proc)
     # ``unknown`` is its own count, so user + sol + rabota do not silently sum to fewer than
     # sessions — the counts must not imply a certainty the readers did not have.
@@ -246,7 +295,8 @@ def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper
     out = {"schema": 1, "at": now(),
            "machine": {"load1": si.load1, "ncpu": si.ncpu, "mem_available_gib": round(si.mem_available_gib, 1),
                        "swap_used_pct": si.swap_used_pct},
-           "sessions": sess, "units": us, "seats": st, "worktrees": wt, "counts": counts, "unavailable": unavailable}
+           "sessions": sess, "units": us, "seats": st, "worktrees": wt, "machines": ms, "counts": counts,
+           "unavailable": unavailable}
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     # Written through the same guard emit applies to stdout: a contract file is output too.
     text = secrets.assert_clean(json.dumps(out, indent=1, sort_keys=True) + "\n", os.environ)

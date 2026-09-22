@@ -35,9 +35,9 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYSTEMSH="$DOTFILES/zsh/functions/system.sh"
 # Overridable so the fix can be reverted in a COPY of the file and the row that
 # names it re-run against the mutant. A row that passes with the fix and without
-# it pins nothing, however carefully it is worded — CLAUDE.md records the row in
-# test-herdr-modular.sh that was decorative for exactly this reason.
-#     CLAUDE_DOCTOR_SH=/tmp/mutant.sh scripts/test-claude-doctor.sh
+# it pins nothing, however carefully it is worded — docs/HERDR_INTERNALS.md
+# records the row in test-herdr-modular.sh that was decorative for exactly this
+# reason. CLAUDE_DOCTOR_SH=/tmp/mutant.sh scripts/test-claude-doctor.sh
 CLAUDESH="${CLAUDE_DOCTOR_SH:-$DOTFILES/zsh/functions/claude.sh}"
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -121,7 +121,8 @@ printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
 # owning the loaded .credentials.json ... CLAUDE_CONFIG_DIR-aware"). A stub that
 # still answered it would let a row pass against a doctor that had gone back to
 # asking the wrong question — so the stub records invocations and answers nothing.
-# `command -v clauth` is the only thing the doctor still needs it for.
+# `whence -p clauth` (the doctor asks PATH, never the function) is the only
+# thing it still needs the binary itself for.
 exit 0
 STUB
 chmod +x "$STUBBIN/clauth"
@@ -277,10 +278,11 @@ echo "=== claude-doctor state table ==="
 
 #-----------------------------------------------------------------------------
 section "A. Preflight — a machine without Claude Code is not a broken machine"
-#-----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # The permanently-red checker is this repo's most-repeated self-inflicted bug —
-# CLAUDE.md records it three times (gh-doctor, backup-doctor, the herdr wiring).
-# A doctor that fails on a machine with nothing to check is useless twice over.
+# docs/GH_ACCOUNT_ROUTING.md, docs/BACKUP_INTERNALS.md and docs/HERDR_INTERNALS.md
+# record it for gh-doctor, backup-doctor and the herdr wiring. A doctor that fails
+# on a machine with nothing to check is useless twice over.
 new_home a1; rm -rf "$FHOME/.claude"
 run_doctor
 want_out "no ~/.claude reports skipped, not a failure" "○ skipped"
@@ -302,7 +304,8 @@ want_rc  "absent credential file is not a ✗"   0
 new_home b2; printf '{"claudeAiOauth": {' > "$CRED"; chmod 600 "$CRED"
 run_doctor
 # "Unparseable yields nothing, and nothing reads as no findings" is the exact
-# shape of the install.conf.yaml and gh routing-table bugs in CLAUDE.md.
+# shape of the install.conf.yaml bug (docs/DOTFILES_DEPLOY.md) and the gh
+# routing-table bug (docs/GH_ACCOUNT_ROUTING.md).
 want_out "invalid JSON is its own state" "NOT VALID JSON"
 want_rc  "invalid JSON fails"            1
 
@@ -364,6 +367,15 @@ new_home d1; write_cred
 run_doctor    # WITH_CLAUTH unset: clauth absent
 want_out "clauth absent is a note, not a fault" "○ not installed"
 no_out   "clauth absent adds no failure line"   "✗ clauth"
+
+# zsh/zshrc.herdr defines clauth as a FUNCTION (the machine-ownership guard,
+# DO-641), and `command -v clauth` is true for a function. On a clauth-less box
+# an interactive shell therefore has the name but not the binary, and a doctor
+# asking `command -v` would print a whole clauth section about nothing. The probe
+# asks `whence -p`, which searches PATH only; this row is what holds it there.
+new_home d1b; write_cred
+PRELUDE='clauth() { :; }' run_doctor
+want_out "a clauth FUNCTION is not a clauth binary" "○ not installed"
 
 new_home d2; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
@@ -447,8 +459,9 @@ want_out "--all shows the healthy server too"   "plugin-good-good"
 
 new_home e4; write_cred; rm -rf "$FHOME/.cache/claude-cli-nodejs"
 run_doctor
-# "An empty answer is never agreement" — CLAUDE.md, twice. No log store means
-# unchecked, and must never render as a clean bill of health.
+# "An empty answer is never agreement" — docs/GH_ACCOUNT_ROUTING.md and
+# docs/HERDR_INTERNALS.md, once each. No log store means unchecked, and must never
+# render as a clean bill of health.
 #
 # Asserted on the SERVER section's own wording, not on the bare string
 # "NOT CHECKED": the duplicated-services section below emits that phrase too, so
@@ -514,13 +527,14 @@ no_out "no credential value even on the failure paths" "$FAKE_TOKEN"
 
 #-----------------------------------------------------------------------------
 section "H. Isolation — the configuration hspawn has defaulted to since #107"
-#-----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Every row here failed before 2026-09-06, and every one of them failed by
 # printing something confident. `clauth start` gives a session a config dir whose
 # .credentials.json is a SYMLINK into the profile store; the doctor read that link
 # as if it were the global file and got three findings wrong and one missing. This
-# is the permanently-green half of the permanently-red checker CLAUDE.md warns
-# about — worse, because a red one gets investigated.
+# is the permanently-green half of the permanently-red checker
+# docs/CLAUDE_ACCOUNTS.md warns about — worse, because a red one gets
+# investigated.
 
 # A symlinked credential: `stat -c %a` reports the LINK (777 on every Linux there
 # is), not the target. Six weeks of ✗ on a file that is correctly 600.
@@ -718,10 +732,10 @@ want_out "a single-quoted active_profile is read, and its trailing comment is no
 # THE VACUOUS TICK. The global credential path is a symlink INTO the active
 # profile's store on this machine (relinked 2026-09-14 so the two Chrome native
 # hosts stopped being independent holders), so "stored copy matches the live
-# credential" compares a file with itself and the ✓ says nothing. CLAUDE.md
-# already records this exact shape for isolated sessions; it came back by a new
-# route, in the check whose own comment calls it "the one check that predicts a
-# mass logout before it happens".
+# credential" compares a file with itself and the ✓ says nothing.
+# docs/CLAUDE_ACCOUNTS.md already records this exact shape for isolated sessions;
+# it came back by a new route, in the check whose own comment calls it "the one
+# check that predicts a mass logout before it happens".
 new_home h5f; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 mv "$CRED" "$FHOME/.clauth/profiles/p1/credentials.json"
@@ -1546,6 +1560,124 @@ want_out "...and say the threshold they were judged against" \
          "within the picker's 3600s threshold"
 want_rc  "...and do not fail the doctor" 0
 
+# DO-621: the doctor must agree with the picker about a cache's age. A plan-only
+# rewrite leaves the mtime fresh while clauth 0.15.2's fetched_at says the
+# reading is two hours old; the picker (test-claude-pick.sh, "cache age" ag1)
+# calls that stale, so the doctor must too.
+new_home ufa1; write_cred
+mk_usage_profile p1 60
+printf '{"five_hour":{"utilization":10.0},"fetched_at":%s}\n' "$(( ($(date +%s) - 7200) * 1000 ))" \
+    > "$FHOME/.clauth/profiles/p1/usage_cache.json"
+run_doctor
+want_out "the doctor dates a cache from fetched_at, not its fresh mtime" "oldest 2h ago"
+
+# THREE MORE RULES OF _claude_usage_cache_age_s, PINNED DIRECTLY. Until here the
+# only rule with a row on this side was "fetched_at beats the mtime" (above) and
+# "no fetched_at at all falls back to it" (every mk_usage_profile fixture). The
+# 60-second clamp, the far-future fallback and the rejection of a non-numeric
+# stamp had none — while the picker's twin has had rows for its equivalents since
+# DO-621 (test-claude-pick.sh, ag1–ag4). Two deliberately duplicated
+# implementations of one rule, pinned on one side only, is the drift this repo
+# keeps paying for.
+#
+# The doctor's rendering is why these cannot go through claude-doctor: it rounds
+# to "2h ago", which is enough to see WHICH clock was used and useless for a
+# 60-second clamp. The subject here is the seconds, and only the function
+# returns them.
+age_s() {   # $1 = usage_cache.json contents, $2 = mtime age in seconds
+    local f="$FHOME/.clauth/profiles/p1/usage_cache.json"
+    mkdir -p "${f%/*}"
+    printf '%s\n' "$1" > "$f"
+    touch -d "@$(( $(date +%s) - $2 ))" "$f" \
+        || fatal "touch -d is unavailable; the cache-age rows cannot be set up"
+    env -u CLAUDE_CONFIG_DIR HOME="$FHOME" "PATH=$SYSBIN" "$SYSBIN/zsh" -f -c "
+        source '$CLAUDESH' >/dev/null 2>&1
+        _claude_usage_cache_age_s '$f'" 2>/dev/null
+}
+# A window, not an equality: the fixture's mtime is set relative to a `date`
+# read here and the function reads its own clock, so a second boundary between
+# the two is ordinary. The window is far narrower than any rule difference it
+# could hide.
+in_window() {   # $1 = label, $2 = value, $3 = low, $4 = high
+    # `=~ ^[0-9]+$`, not zsh's `<->`: this suite is bash, where `<->` is not a
+    # pattern and the test would be a string compare that never matches.
+    if [[ "$2" =~ ^[0-9]+$ ]] && (( $2 >= $3 && $2 <= $4 )); then
+        ok "$1"
+    else
+        bad "$1 — expected $3..$4, got '$2'"
+    fi
+}
+
+new_home ufa2; write_cred
+check_age="$(age_s "{\"five_hour\":{\"utilization\":10.0},\"fetched_at\":$(( ($(date +%s) + 30) * 1000 ))}" 2000)"
+if [[ "$check_age" == 0 ]]; then
+    ok "a fetched_at up to 60 s ahead clamps to 0, as the picker's does"
+else
+    bad "a fetched_at up to 60 s ahead clamps to 0, as the picker's does — got '$check_age'"
+fi
+
+# Far ahead is corruption, and `unknown` would be the wrong answer: the doctor
+# counts a profile it cannot age as `missing`, so mapping it there would drop the
+# cache out of the oldest-cache line entirely. clauth's own scheduler filters
+# `at <= now` and falls back to the mtime; so does this.
+new_home ufa3; write_cred
+in_window "a fetched_at far in the future falls back to the mtime" \
+          "$(age_s "{\"five_hour\":{\"utilization\":10.0},\"fetched_at\":$(( ($(date +%s) + 3600) * 1000 ))}" 2000)" \
+          1995 2100
+
+# `"fetched_at": "soon"` is not a stamp. jq's `floor` on a string is a runtime
+# error, so the capture comes back empty and the `<->` test rejects it — the
+# mtime answers instead. A rule that took the word literally would put it
+# through arithmetic, where zsh reads a non-numeric word as 0 and the cache
+# would date from the epoch.
+#
+# UNKILLABLE BY ANY SINGLE MUTATION, and labelled rather than left to read as
+# coverage. Two guards shadow each other here: jq's `floor` fails on a string
+# before the `<->` test is reached, so weakening that test to `[[ -n "$fa" ]]`
+# leaves this row green (measured). It is kept because it asserts the OUTCOME
+# rather than either guard — a rewrite that made the jq laxer would land on it —
+# and because the repo's own rule is to count how many independent deletions it
+# takes to reach a silent pass, not how many guards there are.
+new_home ufa4; write_cred
+in_window "a non-numeric fetched_at is rejected, not taken as 0" \
+          "$(age_s '{"five_hour":{"utilization":10.0},"fetched_at":"soon"}' 2000)" \
+          1995 2100
+
+# THE TWO READERS, ON ONE FILE, IN ONE SHELL. `_claude_usage_cache_age_s` here
+# and `_claude_profile_cache_age` in zsh/zshrc.herdr are the same rule written
+# twice on purpose — claude.sh must not depend on the portable herdr layer a
+# modular adopter sources alone (§3c) — and the rows above pin each copy against
+# its own expectations, which is exactly how two copies drift while both suites
+# stay green. This is the DO-613 shape: that change gave the `auth_broken`
+# readers a row that runs them side by side, and this one needs the same.
+#
+# The fixture is the DISCRIMINATING one: a fresh mtime with a fetched_at two
+# hours old, so a copy that reverted to the mtime answers ~0 against ~7200. A
+# 1-second tolerance absorbs a clock tick between the two calls and cannot hide
+# that.
+HERDRRC="$DOTFILES/zsh/zshrc.herdr"
+[[ -r "$HERDRRC" ]] || fatal "cannot read $HERDRRC — the cache-age cross-check row would assert nothing"
+new_home ufa5; write_cred
+mkdir -p "$FHOME/.clauth/profiles/p1"
+printf '{"claudeAiOauth":{"accessToken":"t","expiresAt":9}}\n' > "$FHOME/.clauth/profiles/p1/credentials.json"
+printf '{"five_hour":{"utilization":10.0},"fetched_at":%s}\n' "$(( ($(date +%s) - 7200) * 1000 ))" \
+    > "$FHOME/.clauth/profiles/p1/usage_cache.json"
+AGES="$(env -u CLAUDE_CONFIG_DIR HOME="$FHOME" CLAUDE_PICK_SOURCING=1 \
+            CLAUDE_TENANTS_FILE=/nonexistent "PATH=$SYSBIN" \
+        "$SYSBIN/zsh" -f -c "
+           source '$HERDRRC' >/dev/null 2>&1
+           source '$CLAUDESH' >/dev/null 2>&1
+           _claude_profile_metrics p1 >/dev/null 2>&1
+           print -rn -- \"\$_CPM_AGE \$(_claude_usage_cache_age_s '$FHOME/.clauth/profiles/p1/usage_cache.json')\"" 2>&1)"
+PICK_AGE="${AGES%% *}"; DOC_AGE="${AGES##* }"
+if [[ "$PICK_AGE" =~ ^[0-9]+$ && "$DOC_AGE" =~ ^[0-9]+$ ]] \
+   && (( PICK_AGE >= 7190 && PICK_AGE <= 7400 )) \
+   && (( (PICK_AGE > DOC_AGE ? PICK_AGE - DOC_AGE : DOC_AGE - PICK_AGE) <= 1 )); then
+    ok "the picker and the doctor age one readable cache the same"
+else
+    bad "the picker and the doctor age one readable cache the same — picker='$PICK_AGE' doctor='$DOC_AGE'"
+fi
+
 # The whole reason the line exists: a cache past the threshold is a profile the
 # picker has stopped ranking, and nothing else on the machine says so.
 new_home s2; write_cred
@@ -1628,8 +1760,9 @@ section "T. The report itself — no bare name=value line may reach it"
 # `echo` of `pdir` anywhere in the repo.
 #
 # So this row does not name a variable. It asserts the SHAPE, which catches the
-# next one whatever it is called. CLAUDE.md already records the earlier instance
-# of the same trap printing `du=zvi-quantivly` into gh-doctor's report.
+# next one whatever it is called. docs/GH_ACCOUNT_ROUTING.md already records the
+# earlier instance of the same trap printing `du=zvi-quantivly` into gh-doctor's
+# report.
 #
 # The fixture has to make the residue exist: the `preferred` loop only runs inside
 # the clauth section, so the stub is on PATH and a profile carries
@@ -2032,11 +2165,11 @@ want_out "an empty array is also an all-clear" "no profile is quarantined"
 no_out   "...and names nobody"                 "quarantined (auth_broken)"
 
 # THE STORE CANNOT AUTHENTICATE EITHER — an EMPTY accessToken with its expiry and
-# scope intact, which is CLAUDE.md's own discriminator for the victim of an
-# interleaved write. Ranking on the expiry alone calls this live, which is the
-# credential-destroying bug scripts/claude-account-dirs.sh already carries rows
-# for. Here it would tell the reader clauth is refusing a working account when it
-# is not.
+# scope intact, which is docs/CLAUDE_ACCOUNTS.md's own discriminator for the
+# victim of an interleaved write. Ranking on the expiry alone calls this live,
+# which is the credential-destroying bug scripts/claude-account-dirs.sh already
+# carries rows for. Here it would tell the reader clauth is refusing a working
+# account when it is not.
 new_home v4; write_cred
 mkdir -p "$FHOME/.clauth/profiles/p1"
 printf '{"claudeAiOauth":{"accessToken":"","refreshToken":"r","expiresAt":%s,"scopes":["s"]}}\n' \

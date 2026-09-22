@@ -1,4 +1,4 @@
-import argparse, json, tempfile, unittest
+import argparse, datetime, json, tempfile, unittest
 from pathlib import Path
 from rabota import budget, context, errors
 from rabota.config import BudgetThresholds
@@ -51,6 +51,34 @@ class BudgetTests(unittest.TestCase):
         missing = FakeRunner([(["claude-pick"], Result(127, "", "not found"))])
         self.assertEqual(budget.credential_gate(missing, "quantivly-1", "m", "e", 30)["code"], "credential:unmeasured")
 
+    def test_gate_spend_wall_is_a_measured_window_refusal(self):
+        j = {
+            "profile": None, "state": "gate-spend-wall",
+            "reason": "q1's 7d fable window is 100% used (resets 2026-09-21T09:00:00Z) "
+                      "and the seat has no spend headroom left ($252.17 of $250)",
+            "usage": {"five_hour": 12, "weekly": 100, "cache_age_s": 4},
+            "resets_at": {"five_hour": "2026-09-19T20:00:00Z", "weekly": "2026-09-21T09:00:00Z"},
+            "gate": {"verdict": "refuse", "spend": "none", "bills_credits": None,
+                     "model_window": {"label": "7d fable", "utilization": 100,
+                                      "resets_at": "2026-09-21T09:00:00Z", "state": "live"}},
+        }
+        runner = FakeRunner([(["claude-pick"], Result(2, json.dumps(j), ""))])
+        out = budget.credential_gate(runner, "q1", "claude-fable-5-1", "high", 30)
+        self.assertEqual(out["ok"], False)
+        self.assertEqual(out["code"], "credential:window")      # not "credential:unmeasured"
+        self.assertIn("7d fable", out["detail"])
+
+    def test_gate_spend_wall_detail_does_not_fall_back_to_the_5h_sentence(self):
+        # The gate always sets a reason; if a future one does not, the fallback must
+        # still name the wall that fired rather than a projection that never ran.
+        j = {"state": "gate-spend-wall", "reason": "",
+             "usage": {"five_hour": 12}, "gate": {"verdict": "refuse", "spend": "none"}}
+        runner = FakeRunner([(["claude-pick"], Result(2, json.dumps(j), ""))])
+        out = budget.credential_gate(runner, "q1", "claude-fable-5-1", "high", 30)
+        self.assertEqual(out["code"], "credential:window")
+        self.assertNotIn("projected", out["detail"])
+        self.assertIn("weekly window spent", out["detail"])   # only the fallback prints this
+
     def test_gate_never_reads_a_zero_exit_without_an_allow_as_ok(self):
         # exit 0 but no gate verdict (an older claude-pick without --gate, or --gate dropped): unmeasured, not ok
         r = pick_json("picked", "quantivly-1", 30, None, None, 0)
@@ -96,3 +124,128 @@ class BudgetTests(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             with self.assertRaises(errors.Refused):
                 cmd._run(ns, cfg_base=FIX / "config", runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+
+
+from rabota import store
+from rabota.config import BudgetThresholds as BT
+
+OK_CRED = {"ok": True, "code": None, "detail": "", "five_h_pct_now": 5, "resets_at": None, "tier": "Team"}
+
+def census_with(*, local_load=1.0, dev=None, counts=None):
+    # "at" is always present and fresh: Task 8 makes a census without one stale, and every row
+    # here is about the MACHINE dimension, not freshness.
+    c = {"at": store.now(),
+         "machine": {"load1": local_load, "ncpu": 8, "mem_available_gib": 20.0, "swap_used_pct": 0},
+         "counts": counts or {"rabota": 0, "sol": 0}, "unavailable": [], "machines": []}
+    if dev is not None:
+        c["machines"] = [dev]
+    return c
+
+DEV_IDLE = {"name": "dev", "reachable": True, "load1": 5.0, "ncpu": 16,
+            "mem_available_gib": 13.0, "swap_used_pct": 0, "units": [], "streams": {}}
+# load1=5.0 is comfortably under 16 cpus' threshold (1.25×16=20) but well over a 1-cpu
+# threshold (1.25) — chosen so a mutation that drops the ncpu multiplier is caught by
+# test_a_saturated_laptop_does_not_refuse_a_dev_lane rather than passing unnoticed.
+
+
+class MachineDimensionTests(unittest.TestCase):
+    def t(self):
+        return BT(max_local_sessions=8, max_lanes_local=3, load1_per_cpu=1.25,
+                  swap_pct_max=40, mem_available_min_gib=6, profile_5h_pct_max=70)
+
+    def test_a_saturated_laptop_does_not_refuse_a_dev_lane(self):
+        c = census_with(local_load=99.0, dev=DEV_IDLE)
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual(b["reasons"], [])
+        self.assertEqual(b["allowed_new_lanes"], 3)
+
+    def test_a_saturated_laptop_does_refuse_a_local_lane(self):
+        c = census_with(local_load=99.0, dev=DEV_IDLE)
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="local")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:load"])
+
+    def test_a_loaded_dev_refuses_a_dev_lane(self):
+        busy = dict(DEV_IDLE, load1=40.0)
+        b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:load"])
+
+    def test_low_memory_on_dev_refuses(self):
+        tight = dict(DEV_IDLE, mem_available_gib=1.0)
+        b = budget.compute(census_with(dev=tight), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:memory"])
+
+    def test_swap_on_dev_refuses(self):
+        swapping = dict(DEV_IDLE, swap_used_pct=80)
+        b = budget.compute(census_with(dev=swapping), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:swap"])
+
+    def test_an_unreachable_dev_refuses_and_is_not_room(self):
+        b = budget.compute(census_with(dev={"name": "dev", "reachable": False, "error": "no route"}),
+                           OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:unmeasured"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_missing_dev_row_refuses_rather_than_falling_back_to_local(self):
+        b = budget.compute(census_with(dev=None), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["machine:unmeasured"])
+
+    def test_running_lanes_on_dev_consume_the_cap(self):
+        busy = dict(DEV_IDLE, units=[{"name": "rabota-lane-a.service", "state": "active", "machine": "dev"},
+                                     {"name": "rabota-lane-b.service", "state": "active", "machine": "dev"}])
+        b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual(b["allowed_new_lanes"], 1)
+
+
+class CensusFreshnessTests(MachineDimensionTests):
+    def test_a_stale_census_refuses_rather_than_granting_room(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01T00:00:00Z"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev", max_census_age_s=900)
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_census_with_no_timestamp_refuses(self):
+        c = census_with(dev=DEV_IDLE); c.pop("at", None)
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+
+    def test_a_stale_census_still_surfaces_what_it_could_not_measure(self):
+        # The stale path must not report LESS than the fresh path for the same file: a dimension
+        # the census itself declared unmeasured has to stay named, or a reader concludes it was
+        # fine when nothing ever looked.
+        c = census_with(dev=DEV_IDLE)
+        c["at"] = "2020-01-01T00:00:00Z"
+        c["unavailable"] = ["deferred:sol", "seat:quantivly-0:stale"]
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        for expected in ("machine", "counts", "deferred:sol", "seat:quantivly-0:stale"):
+            self.assertIn(expected, b["unavailable"])
+
+    def test_a_naive_timestamp_refuses_rather_than_raising(self):
+        # fromisoformat happily parses a string with no offset into a NAIVE datetime; subtracting
+        # that from an aware "now" raises TypeError, not ValueError. Must return, not raise.
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01T00:00:00"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_bare_date_refuses_rather_than_raising(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "2020-01-01"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_an_unparseable_timestamp_refuses(self):
+        c = census_with(dev=DEV_IDLE); c["at"] = "not-a-timestamp"
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_a_future_timestamp_refuses(self):
+        # Clock skew, not staleness: a census claiming to be from the future is exactly as
+        # unusable as one from too far in the past, and the 0 <= lower bound is what catches it.
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1)
+        c = census_with(dev=DEV_IDLE)
+        c["at"] = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+        b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
+        self.assertEqual(b["allowed_new_lanes"], 0)

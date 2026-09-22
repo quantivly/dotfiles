@@ -157,8 +157,21 @@ chmod +x "$STUBBIN/herdr"
 cat > "$STUBBIN/clauth" <<'STUB'
 #!/bin/sh
 printf 'CMD %s\n' "$*" >> "$CLAUTH_STUB_LOG"
+# THREE STATES, unconditionally. The override is a prefix assignment, so it is
+# exported, and whether it reaches this child is the whole question of "for one
+# command" — but the reader is `[[ -z ... ]]`, so ANY non-empty value unlocks the
+# guard. Recording only when non-empty, and asserting the absence of the literal
+# `1`, would pass against a wrapper that cleared it to `0`. Same distinction the
+# claude stub already draws for CLAUDE_CONFIG_DIR, and for the same reason.
+if [ -z "${CLAUDE_FOREIGN_PROFILE_OK+set}" ]; then printf 'FOREIGN_OK <unset>\n' >> "$CLAUTH_STUB_LOG"
+elif [ -z "$CLAUDE_FOREIGN_PROFILE_OK" ]; then printf 'FOREIGN_OK <empty>\n' >> "$CLAUTH_STUB_LOG"
+else printf 'FOREIGN_OK %s\n' "$CLAUDE_FOREIGN_PROFILE_OK" >> "$CLAUTH_STUB_LOG"; fi
 case "$1" in
     which) [ -n "${CLAUTH_STUB_WHICH:-}" ] && printf '%s\n' "$CLAUTH_STUB_WHICH"; exit 0 ;;
+    # `clauth info <target>` is how `latest` becomes a session id. Its real
+    # output is three labelled lines; only the first is parsed.
+    info) printf 'resume:    clauth resume %s\n' "${CLAUTH_STUB_LATEST:-none}"
+          printf 'workspace: /nowhere\n'; exit 0 ;;
 esac
 exit 0
 STUB
@@ -185,7 +198,7 @@ printf 'CMD %s\n' "\$*" >> "\$ACCOUNT_STUB_LOG"
 # It CREATES the directory it names, because the real builder does — and that is
 # the property claude()'s holder guard decides on. A stub that only prints the
 # path differs from production in exactly the thing under test, which is the
-# fixture-that-proves-nothing shape CLAUDE.md already records for reenable.
+# fixture-that-proves-nothing shape docs/HERDR_INTERNALS.md records for reenable.
 mkdir -p "$ACCT/\$1"
 printf '%s/%s\n' "$ACCT" "\$1"
 STUB
@@ -215,6 +228,12 @@ cat > "$STUBBIN/claude" <<'STUB'
     elif [ -z "$CLAUDE_CONFIG_DIR" ]; then printf 'CFG <empty>\n'
     else printf 'CFG %s\n' "$CLAUDE_CONFIG_DIR"; fi
     printf 'TEAMS %s\n' "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-<unset>}"
+    # Three states, as for CLAUDE_CONFIG_DIR above: claude() clears the override
+    # so a borrowed session does not inherit the unlocked state, and ANY non-empty
+    # value would unlock it, so "not the literal 1" is not the property.
+    if [ -z "${CLAUDE_FOREIGN_PROFILE_OK+set}" ]; then printf 'FOREIGN_OK <unset>\n'
+    elif [ -z "$CLAUDE_FOREIGN_PROFILE_OK" ]; then printf 'FOREIGN_OK <empty>\n'
+    else printf 'FOREIGN_OK %s\n' "$CLAUDE_FOREIGN_PROFILE_OK"; fi
     for h in "$CLAUDE_ACCOUNT_DIRS_ROOT"/*/holders/*; do
         [ -e "$h" ] && printf 'HOLDER %s\n' "$h"
     done
@@ -225,6 +244,9 @@ cat > "$STUBBIN/herdmates" <<'STUB'
 #!/bin/sh
 {
     printf 'CMD herdmates %s\n' "$*"
+    if [ -z "${CLAUDE_FOREIGN_PROFILE_OK+set}" ]; then printf 'FOREIGN_OK <unset>\n'
+    elif [ -z "$CLAUDE_FOREIGN_PROFILE_OK" ]; then printf 'FOREIGN_OK <empty>\n'
+    else printf 'FOREIGN_OK %s\n' "$CLAUDE_FOREIGN_PROFILE_OK"; fi
     # `${VAR:-x}` substitutes for an EMPTY value as well as an unset one, so it
     # cannot tell "never exported" from "exported empty" — and claude() exporting
     # an empty CLAUDE_CONFIG_DIR is precisely the defect this distinction exists
@@ -296,8 +318,8 @@ run() {
     # NOCLAUTH replaces the PATH rather than prepending to it. Prepending a
     # directory that merely LACKS clauth proves nothing: ~/.local/bin/clauth is
     # still on the tail, `command -v clauth` still finds it, and the row passes
-    # or fails for reasons unrelated to the code. CLAUDE.md is explicit that this
-    # box has a real one wired to four live accounts.
+    # or fails for reasons unrelated to the code. docs/CLAUDE_ACCOUNTS.md is
+    # explicit that this box has a real one wired to four live accounts.
     local pathspec="$STUBBIN:$PATH"
     [[ -n "${NOCLAUTH:-}" ]] && pathspec="$NOCLAUTHBIN"
     OUT="$(HOME="$FHOME" PATH="$pathspec" HSPAWN_STATE_DIR="$STATE" \
@@ -552,6 +574,26 @@ check "an unqualified claude is isolated"  "$(inclaude "CFG $ACCT/personal")"  "
 check "and its args are passed through"    "$(inclaude "CMD --dangerously-nothing")" "1"
 check "and it says which account it took"  "$(outgrep "account 'personal'")"   "1"
 
+# DO-621: a pick that will bill usage credits is SAID on the interactive path.
+cat > "$FHOME/.clauth/profiles/personal/usage_cache.json" <<EOF
+{"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100.0,"resets_at":"$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"},"spend":{"enabled":true,"used":10.0,"limit":250.0}}
+EOF
+run "claude"
+check "a billing pick is announced as billing"   "$(outgrep "usage bills credits")" "1"
+rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
+
+# DO-623: a disabled Max seat (enabled:false) gets its own wording, not the
+# headroom-unknown one -- it is a measured fact, not a gap.
+cat > "$FHOME/.clauth/profiles/personal/usage_cache.json" <<EOF
+{"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100.0,"resets_at":"$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"},"spend":{"enabled":false,"used":134.43,"limit":125.0}}
+EOF
+run "claude"
+check "a disabled Max seat's pick names no spend limit, not the headroom wording" \
+      "$(outgrep "no spend limit configured")" "1"
+check "...and the headroom-unknown wording is absent" \
+      "$(outgrep "spend headroom unknown")" "0"
+rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
+
 # THE WHOLE POINT. Isolation used to cost the teammux launch, because the only
 # isolated path was `clauth start`, which execs the claude BINARY. Inside a herdr
 # pane the wrapper must still take the herdmates path AND carry the config dir.
@@ -585,6 +627,12 @@ check "but still isolates"                        "$(inclaude "CFG $ACCT/persona
 NOCLAUTH=1 run "claude"; NOCLAUTH=
 check "with no clauth the launch is unchanged"  "$(inclaude "CFG <unset>")" "1"
 check "and nothing is said about accounts"      "$(outgrep "account '")"    "0"
+# hspawn asks the same question. The clauth wrapper (DO-641) is a FUNCTION, so
+# `command -v clauth` answers yes on this PATH; only a PATH-only probe sees
+# that the binary is absent. Asked wrongly, hspawn runs the picker and isolates.
+NOCLAUTH=1 run "hspawn '$REPO' slug"; NOCLAUTH=
+check "hspawn with no clauth shares the credential, unpicked" \
+      "$(inout "account:   SHARED global credential")" "1"
 # The sharp one. `local -x CLAUDE_CONFIG_DIR=...` exports even when the value is
 # empty, and with no clauth nothing below ever assigns it — so claude() handed the
 # binary a set-but-empty CLAUDE_CONFIG_DIR, which Claude Code resolves its config
@@ -1890,6 +1938,386 @@ check "claude() asks the picker with strict=0" \
       "$(cut -d'|' -f3 "$PICKREC" | head -1)" "0"
 check "...about \$PWD" \
       "$(cut -d'|' -f1 "$PICKREC" | head -1)" "$PWD"
+
+#-----------------------------------------------------------------------------
+# Machine-owned profiles (DO-641)
+#-----------------------------------------------------------------------------
+# The pool keeps a profile another machine owns out of AUTOMATIC selection. These
+# rows pin the EXPLICIT doors that went past it: on 2026-09-19 two sessions were
+# spending dev's seat from the laptop via `clauth start quantivly-0`, typed into
+# panes by herdr-draft's account row. `run` does not truncate the clauth log, so
+# every row here does it itself.
+echo "=== machine-owned profiles: the explicit doors ==="
+FOREIGN_TENANTS="$TMPROOT/tenants-foreign.zsh"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+mkdir -p "$FHOME/.clauth/profiles/fz"
+export CLAUDE_TENANTS_FILE="$FOREIGN_TENANTS"
+crun()   { : > "$TMPROOT/clauth.log"; run "$1"; }
+clog()   { grep -cF -- "CMD $1" "$TMPROOT/clauth.log" || true; }
+
+crun "clauth start fz --effort high"
+check "foreign: clauth start <owned> is refused"                    "$RC" "3"
+check "foreign: ...before the binary runs"                          "$(clog 'start')" "0"
+check "foreign: ...naming the machine that owns it"                 "$(inout 'owned by box-z')" "1"
+crun "clauth start --isolated fz"
+check "foreign: a flag before the profile does not hide it"         "$RC" "3"
+crun "clauth start --theme full fz"
+check "foreign: --theme's VALUE is not read as the profile"         "$RC" "3"
+crun "clauth fz"
+check "foreign: the bare machine-wide switch is refused"            "$RC" "3"
+check "foreign: ...before the binary runs"                          "$(clog 'fz')" "0"
+crun "clauth start personal"
+check "foreign: an unowned profile passes through"                  "$(clog 'start personal')" "1"
+crun "clauth login fz"
+check "foreign: login passes (it is how this box SEES that window)" "$(clog 'login fz')" "1"
+crun "CLAUDE_FOREIGN_PROFILE_OK=1 clauth start fz"
+check "foreign: the per-command override passes through"            "$(clog 'start fz')" "1"
+# ONE command, as the refusal promises. A prefix assignment is exported, so
+# without clearing it the borrowed session keeps the guard off for its whole life.
+check "foreign: ...and does not reach the launched session"         "$(grep -cFx 'FOREIGN_OK <unset>' "$TMPROOT/clauth.log" || true)" "1"
+crun "CLAUDE_FOREIGN_PROFILE_OK=1 claude-as fz --version"
+check "foreign: the override lets claude-as through too"            "$(inclaude 'CMD --version')" "1"
+check "foreign: ...and claude() clears it for the session it starts" "$(grep -cFx 'FOREIGN_OK <unset>' "$CLAUDE_LOG" || true)" "1"
+PANEID=wZ:p1 crun "CLAUDE_FOREIGN_PROFILE_OK=1 claude-as fz --version"; PANEID=
+check "foreign: ...on the herdmates branch a pane really takes, too"  "$(grep -cFx 'FOREIGN_OK <unset>' "$CLAUDE_LOG" || true)" "1"
+# ...and that it REALLY is that branch: the claude stub prints the same line, so
+# without this the row silently becomes a duplicate of the one above it if
+# claude() ever stops taking the herdmates path with HERDR_PANE_ID set.
+check "foreign: ...which is the herdmates branch, not plain claude"  "$(inclaude 'CMD herdmates teammux-launch --version')" "1"
+crun "unset -f claude-profile-foreign; clauth start fz"
+check "foreign: helpers absent fails OPEN"                          "$(clog 'start fz')" "1"
+# ...and SILENTLY. Without the $+functions test the command substitution still
+# fails, so the pass-through happens either way and only stderr differs — which
+# is the defect class this file records for _claude_account_builder.
+check "foreign: ...with no 'command not found' in the output"       "$(inout 'command not found')" "0"
+crun "unset -f claude-profile-foreign; claude-as fz --version"
+check "foreign: claude-as with no helpers launches"                 "$(inclaude 'CMD --version')" "1"
+check "foreign: ...silently too"                                    "$(inout 'command not found')" "0"
+crun "clauth resume --profile fz latest"
+check "foreign: clauth resume --profile <owned> is refused"         "$RC" "3"
+check "foreign: ...before the binary runs"                          "$(clog 'resume')" "0"
+crun "clauth resume --profile=fz latest"
+check "foreign: ...in its --profile=<p> spelling too"               "$RC" "3"
+crun "clauth resume --profile personal latest"
+check "foreign: an unowned resume passes through"                   "$(clog 'resume --profile personal latest')" "1"
+crun "clauth resume fz"
+check "foreign: a resume TARGET is not read as a profile"           "$(clog 'resume fz')" "1"
+# WITHOUT --profile, clauth resumes on the session's own last-ran profile, which
+# no argument names. Resolved from clauth's record; `latest` through `clauth
+# info`, which never launches anything.
+cat > "$FHOME/.clauth/session_profiles.json" <<'JSON'
+{"sessions":{"s-owned":{"known":"fz"},"s-free":{"known":"personal"},"s-contested":"contested"}}
+JSON
+crun "clauth resume s-owned"
+check "foreign: an unflagged resume onto an owned session is refused" "$RC" "3"
+# The remedy a REFUSED RESUME needs is a profile you own, not "borrow the seat" —
+# that one is the thing the guard exists to prevent, so it must not be the only
+# way out on offer.
+check "foreign: ...naming --profile as the way out, not the borrow"   "$(inout 'clauth resume --profile <a profile you own> s-owned')" "1"
+check "foreign: ...without the resume reaching the binary"           "$(clog 'resume')" "0"
+crun "clauth start fz"
+check "foreign: ...and that remedy appears on no other door"          "$(inout 'Resume it elsewhere')" "0"
+crun "clauth resume s-free"
+check "foreign: ...an unowned session still resumes"                 "$(clog 'resume s-free')" "1"
+crun "clauth resume s-contested"
+check "foreign: ...clauth's own 'contested' passes through"          "$(clog 'resume s-contested')" "1"
+crun "clauth resume s-unheard-of"
+check "foreign: ...and so does a session it has no record of"        "$(clog 'resume s-unheard-of')" "1"
+CLAUTH_STUB_LATEST=s-owned crun "clauth resume latest"
+check "foreign: 'latest' is resolved through clauth info, then refused" "$RC" "3"
+check "foreign: ...having asked info, never resume"                  "$(clog 'info latest')" "1"
+check "foreign: ...with the resume itself never reaching the binary" "$(clog 'resume latest')" "0"
+# A top-level option BEFORE the subcommand is a real spelling of every door.
+crun "clauth --theme compatible start fz"
+check "foreign: a top-level option before 'start' does not hide it"  "$RC" "3"
+crun "clauth --theme compatible resume --profile fz latest"
+check "foreign: ...nor before 'resume'"                              "$RC" "3"
+crun "clauth --theme=compatible start fz"
+check "foreign: ...in its inline --theme=<v> spelling either"        "$RC" "3"
+crun "clauth resume --theme compatible s-owned"
+check "foreign: a --theme VALUE inside resume is not the target"     "$RC" "3"
+crun "clauth --theme compatible start personal"
+check "foreign: ...and an unowned profile still passes"              "$(clog '--theme compatible start personal')" "1"
+crun "claude-as fz"
+check "foreign: claude-as <owned> is refused"                       "$RC" "3"
+check "foreign: ...and claude never ran"                            "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" "0"
+crun "hspawn -p fz -m opus -e high '$REPO' slug"
+check "foreign: hspawn -p <owned> is refused"                       "$RC" "3"
+check "foreign: ...reaching herdr zero times"                       "$(herdrcmds)" ""
+# A Claude Code shell snapshot carries FUNCTIONS but no VARIABLES (measured: one
+# `export PATH=` line and 9k lines of functions), so in an agent's shell this
+# table is empty while the code that reads it is present. An empty table must
+# therefore mean "not loaded yet", not "no table" — or the guard is off in
+# exactly the population that caused the incident. Emulated by emptying it.
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: an empty table is RELOADED, not read as 'no table'"  "$RC" "3"
+check "foreign: ...reaching the binary zero times"                   "$(clog 'start fz')" "0"
+
+# WHICH SPELLING the tenants file uses must not decide whether the guard runs.
+# A `typeset -A` (no -g) read from inside a function becomes a function-local and
+# dies at return, leaving every table empty — and an unusable table WIDENS the
+# pool to every registered profile (docs/CLAUDE_ACCOUNT_PICKER.md). That is why
+# the on-demand read forks a shell and reads at top level instead.
+for spelling in \
+    'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' \
+    'typeset -A CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' \
+    'typeset -gA CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )'; do
+    printf '%s\n' "$spelling" > "$FOREIGN_TENANTS"
+    crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+    check "foreign: a snapshot shell reads '${spelling%%;*}...' too" "$RC" "3"
+done
+# THE TABLE ITSELF, not a refusal. Under the regression this replaced — the file
+# sourced from inside a function, where a `typeset -A` becomes function-local —
+# every tenant table reads empty, and an unusable table WIDENS the pool to every
+# registered profile. No refusal row can see it: the empty table sends the guard
+# down the fork path, which refuses anyway. So this asserts the loaded table.
+printf '%s\n' 'typeset -A CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+run "print -r -- \"TABLE=\${#CLAUDE_TENANT_MACHINE_OWNED}\""
+check "foreign: the tenants file is sourced at TOP LEVEL, so it fills the table" "$(inout 'TABLE=1')" "1"
+
+# What the fork must tolerate in a tenants file, both found by review 2026-09-20.
+cat > "$FOREIGN_TENANTS" <<'ZTENANTS'
+CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" ); [[ -n "$UNSET_ON_PURPOSE" ]]
+ZTENANTS
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: a tenants file ENDING non-zero still answers"        "$RC" "3"
+printf '%s\n' 'print -r -- "tenants: loaded"; CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start personal"
+check "foreign: and what it PRINTS is not mistaken for an owner"     "$(clog 'start personal')" "1"
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: ...while the real entry still refuses"               "$RC" "3"
+# THE LIMIT THAT TURNED OUT NOT TO BE ONE (DO-674). The fork is a bare `zsh -f`,
+# so an assignment guarded by a shell function declares nothing there — and this
+# row used to pin that as an accepted, undetectable fail-open, because the fork
+# discarded its stderr. It is not undetectable: `has_command` is a command not
+# found, so it WRITES to that stderr, and the class guard catches it like any
+# other file that ran without populating the table. `scripts/machines-render` had
+# refused this same file with exit 2 since DO-665, which is how the two readers
+# of one file were found disagreeing. The file must still be self-contained; what
+# changed is that failing to be so is now said out loud.
+printf '%s\n' 'has_command jq && CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
+check "foreign: a file needing shell FUNCTIONS is REFUSED, not read as empty" "$RC" "3"
+check "foreign: ...without reaching the binary"                     "$(clog 'start fz')" "0"
+check "foreign: ...carrying zsh's own complaint about the function"  "$(inout 'command not found: has_command')" "1"
+
+#-----------------------------------------------------------------------------
+# A tenants file that cannot be TRUSTED (DO-674)
+#-----------------------------------------------------------------------------
+# The guard read this file in a fork whose exit status it ignored and whose
+# stderr it discarded, so any file that RAN without populating the table
+# answered "nobody owns anything" and every door above stopped refusing, with
+# nothing said. Measured on the live machine 2026-09-21, all five reading
+# `not foreign`: CRLF, an unterminated quote, a subscript assignment to an
+# undeclared table, a UTF-8 BOM, and a function-guarded assignment.
+# `scripts/machines-render` — the OTHER reader of this same file — refused all
+# five with exit 2 since DO-665, so the two readers of one canonical file
+# disagreed about whether a broken file was fatal.
+#
+# THE DIRECTION IS THE DECISION, and it is refuse. Wrongly allowing is the
+# DO-641 incident itself: a seat spent silently, invisible to both machines.
+# Wrongly refusing is a named error carrying zsh's own complaint, landing only
+# on someone who has just edited the file, with `CLAUDE_FOREIGN_PROFILE_OK=1`
+# printed as the way past it. The leniency is DO-665's and is asserted below:
+# NO tenants file, and a file that owns nothing, stay real answers.
+#
+# EVERY ROW ASSERTS THE MESSAGE, not just rc 3. Four guards share that code — a
+# parse error, a run-time fault, a path that is not a regular file and a read
+# cut short — so a row that read only the code would pass for whichever guard
+# happened to fire, and a mutation swapping two of them would survive.
+echo
+echo "=== a tenants file that cannot be trusted is refused, not read as empty (DO-674) ==="
+BADROOT="$TMPROOT/bad"; mkdir -p "$BADROOT"
+# THE BAD FILE IS NAMED INSIDE THE RUN, never in the environment around it, and
+# that is load-bearing twice over. `run` sources zshrc.herdr, which sources the
+# tenants file AT TOP LEVEL (line ~246) before anything below is reached — so
+# with CLAUDE_TENANTS_FILE already pointing at the fixture:
+#   * the `kill -9 $$` fixture kills the HARNESS SHELL, and the row measures a
+#     dead test rather than the sentinel (measured: rc 137, no refusal printed);
+#   * every other fixture writes its zsh complaint to the harness's own stderr,
+#     which `run` folds into $OUT — so a row grepping for `command not found`
+#     passes on the top-level source's error whether or not the refusal ever
+#     said anything. A green row for the wrong reason.
+# Sourcing a benign file first and switching per command keeps the only stderr
+# in $OUT the refusal's, and leaves the fork the only reader of the bad file.
+badrun() {   # $1 = the bad tenants file, $2 = the command under test
+    crun "unset CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANTS_FILE='$1'; $2"
+}
+
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\r\n' > "$BADROOT/crlf.zsh"
+badrun "$BADROOT/crlf.zsh" "clauth start fz"
+check "unreadable: CRLF is refused, not read as 'nobody owns anything'" "$RC" "3"
+check "unreadable: ...reaching the binary zero times"                   "$(clog 'start fz')" "0"
+check "unreadable: ...naming the tenants file in the remedy it prints"  "$(inout "zsh -n $BADROOT/crlf.zsh")" "1"
+check "unreadable: ...saying it RAN badly, not that it fails to parse"  "$(inout 'did not run cleanly')" "1"
+check "unreadable: ...carrying zsh's own complaint, which no editor shows" "$(inout 'command not found')" "1"
+# The OTHER emitter's lines must not appear: there is no owning machine to
+# name, so "Run this work on <machine> instead" would send the reader to a
+# machine this guard has just failed to identify.
+check "unreadable: ...and not sending the reader to a machine it cannot name" "$(inout 'Run this work on')" "0"
+check "unreadable: ...offering the escape hatch as the way past"        "$(inout 'CLAUDE_FOREIGN_PROFILE_OK=1 clauth')" "1"
+# THE INDENTATION, because `print -u2 ... | sed` pipes fd 1 — an empty stdin —
+# so the indent silently does nothing and the fault runs flush against the
+# message. DO-665's copy of that line had exactly this defect.
+check "unreadable: ...with the fault indented under the message"        "$(grep -cE '^    .*command not found' <<<"$OUT")" "1"
+
+printf '\xef\xbb\xbfCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/bom.zsh"
+badrun "$BADROOT/bom.zsh" "clauth start fz"
+check "unreadable: a UTF-8 BOM is refused too"                          "$RC" "3"
+check "unreadable: ...reaching the binary zero times"                   "$(clog 'start fz')" "0"
+
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z\n' > "$BADROOT/quote.zsh"
+badrun "$BADROOT/quote.zsh" "clauth start fz"
+check "unreadable: an unterminated quote is refused"                    "$RC" "3"
+# THE OTHER MESSAGE. `zsh -n` is the only guard that can see this one — a source
+# that fails to parse returns to the forked shell, which prints the sentinel
+# quite happily — so the row that distinguishes it from the stderr guard is what
+# stops the two being swapped.
+check "unreadable: ...saying nothing in it RAN, not that it ran badly"  "$(inout 'does not parse, so nothing in it ran')" "1"
+check "unreadable: ...naming the check that would show it"              "$(inout 'zsh -n')" "1"
+
+printf 'CLAUDE_TENANT_FUTURE[work]="x"\nCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/undeclared.zsh"
+badrun "$BADROOT/undeclared.zsh" "clauth start fz"
+check "unreadable: a subscript assign to an UNDECLARED table is refused" "$RC" "3"
+check "unreadable: ...carrying zsh's complaint, which names the table"   "$(inout 'CLAUDE_TENANT_FUTURE')" "1"
+
+# A DIRECTORY passes -e and -r, and `source` fails on it.
+badrun "$BADROOT" "clauth start fz"
+check "unreadable: a path that is not a regular file is refused"        "$RC" "3"
+check "unreadable: ...saying so, not that it fails to parse"            "$(inout 'is not a regular file')" "1"
+
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/noperm.zsh"; chmod 000 "$BADROOT/noperm.zsh"
+badrun "$BADROOT/noperm.zsh" "clauth start fz"
+# Skipped for root, which reads anything: the row would assert nothing and would
+# fail for a reason that has nothing to do with the guard.
+if [[ "$(id -u)" != "0" ]]; then
+    check "unreadable: a file that exists and cannot be READ is refused" "$RC" "3"
+    check "unreadable: ...saying it cannot be read"                      "$(inout 'cannot be read')" "1"
+else
+    ok "unreadable: a file that exists and cannot be READ is refused (skipped: running as root)"
+    ok "unreadable: ...saying it cannot be read (skipped: running as root)"
+fi
+chmod 644 "$BADROOT/noperm.zsh"
+
+ln -sfn /nonexistent/nope "$BADROOT/dangling.zsh"
+badrun "$BADROOT/dangling.zsh" "clauth start fz"
+check "unreadable: a dangling symlink is refused, not 'no tenants file'" "$RC" "3"
+check "unreadable: ...saying the target is missing"                      "$(inout 'target does not exist')" "1"
+
+# THE SENTINEL, and the only input that reaches it: a file that kills its own
+# shell produces no stderr, parses, and is a regular readable file, so every
+# other guard passes it. Without __DONE__ this is a silent "no owner".
+printf 'kill -9 $$\nCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/killed.zsh"
+badrun "$BADROOT/killed.zsh" "clauth start fz"
+check "unreadable: a fork killed mid-read is refused"                    "$RC" "3"
+check "unreadable: ...saying the read did not finish, not that the file is wrong" "$(inout 'did not finish')" "1"
+
+# ...AND THE ESCAPE HATCH, which the refusal itself offers. A remedy that does
+# not work is worse than no remedy, and the fault is checked before the owner
+# lookup, so this is the row that says the hatch short-circuits it.
+badrun "$BADROOT/crlf.zsh" "CLAUDE_FOREIGN_PROFILE_OK=1 clauth start fz"
+check "unreadable: the escape hatch the refusal prints really works"     "$(clog 'start fz')" "1"
+
+# THE FAIL-OPEN BRANCH for the new door, matching the one the predicate already
+# has: with the door absent every caller proceeds, silently, so a rename that
+# made the guard droppable shows up HERE rather than as nothing.
+badrun "$BADROOT/crlf.zsh" "unset -f claude-foreign-door; clauth start fz"
+check "unreadable: the door absent fails OPEN"                           "$(clog 'start fz')" "1"
+check "unreadable: ...and silently"                                      "$(inout 'command not found')" "0"
+
+# EVERY OTHER DOOR, because the fault is answered by the shared predicate and a
+# door that forgot to ask would be invisible in the rows above. EACH ASSERTS THE
+# UNREADABLE MESSAGE, not just rc 3: `fz` is owned by box-z in this suite's
+# ordinary fixture, so a row that checked only the code would go green on the
+# DO-641 refusal and say nothing at all about DO-674.
+badrun "$BADROOT/crlf.zsh" "claude-as fz"
+check "unreadable: claude-as is refused too"                             "$RC" "3"
+check "unreadable: ...with the unreadable refusal, not the foreign one"  "$(inout 'cannot tell whether')" "1"
+check "unreadable: ...and claude never ran"                              "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" "0"
+badrun "$BADROOT/crlf.zsh" "hspawn -p fz -m opus -e high '$REPO' slug"
+check "unreadable: hspawn -p is refused too"                             "$RC" "3"
+check "unreadable: ...with the unreadable refusal"                       "$(inout 'cannot tell whether')" "1"
+check "unreadable: ...reaching herdr zero times"                         "$(herdrcmds)" ""
+badrun "$BADROOT/crlf.zsh" "clauth resume --profile fz latest"
+check "unreadable: clauth resume --profile is refused too"               "$RC" "3"
+check "unreadable: ...with the unreadable refusal"                       "$(inout 'cannot tell whether')" "1"
+check "unreadable: ...before the binary runs"                            "$(clog 'resume')" "0"
+
+# THE LENIENCY, asserted so "refuse a fault" cannot quietly become "refuse
+# everything". These are REAL answers, not faults: DO-665's argument that an
+# over-strict reader would break the tool you reach for to find out why.
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( b2 "box-b" )\n' > "$BADROOT/other.zsh"
+badrun "$BADROOT/other.zsh" "clauth start fz"
+check "unreadable: a clean file owning some OTHER profile still passes"  "$(clog 'start fz')" "1"
+badrun "$BADROOT/nosuchfile.zsh" "clauth start fz"
+check "unreadable: no tenants file at all is still not a fault"          "$(clog 'start fz')" "1"
+# shellcheck disable=SC2016  # fixture text written INTO a zsh file, not an
+# expression for this shell to expand.
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n[[ -n "$UNSET_ON_PURPOSE" ]]\n' > "$BADROOT/falseend.zsh"
+badrun "$BADROOT/falseend.zsh" "clauth start fz"
+check "unreadable: a file ending in a false command still ANSWERS"       "$RC" "3"
+check "unreadable: ...as a real refusal, naming the machine"             "$(inout 'owned by box-z')" "1"
+printf 'print -r -- "tenants: loaded"\nCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/stdout.zsh"
+badrun "$BADROOT/stdout.zsh" "clauth start fz"
+check "unreadable: a stray STDOUT print is still tolerated, not a fault" "$(inout 'owned by box-z')" "1"
+
+# THE PRE-DECLARATION LIST EARNS ITS KEEP, and only this row says so. The fork
+# declares every CLAUDE_TENANT_* table, not just the one it reads, because a
+# subscript assignment to an UNDECLARED name raises "assignment to invalid
+# subscript range" and aborts the source at that line — and a real tenants file
+# writes `CLAUDE_TENANT_POOL[work]=…`, which is valid everywhere else precisely
+# because zshrc.herdr declares that name -gA before sourcing. Trim the list and
+# a correct file becomes a fault: measured, this mutation SURVIVED the whole
+# suite until this row, because every other fixture here uses a name that is
+# undeclared either way. It is the mirror of the undeclared-table row above:
+# that one says a missing name must be loud, this one says a present name must
+# not be.
+#
+# Note that test-machines-render.sh's list cross-check cannot see this: it
+# compares the DECLARATION LINES of the two files, and zshrc.herdr's top-level
+# declaration still names everything however the fork's copy is trimmed.
+printf '%s\n' 'CLAUDE_TENANT_POOL[work]="a1 b2"' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' \
+    > "$BADROOT/subscript.zsh"
+badrun "$BADROOT/subscript.zsh" "clauth start fz"
+check "unreadable: a subscript assign to a DECLARED table is not a fault"  "$(inout 'cannot tell whether')" "0"
+check "unreadable: ...and the owner is still read out of it"               "$(inout 'owned by box-z')" "1"
+
+# THE TEMP FILE IS HOW THE STDERR IS CAPTURED, so failing to create one is
+# failing to ask the question — and answering "clean" there disables the
+# class-wide guard silently, which is this change's own defect one level down.
+# Reached only by fault injection: `command mktemp` bypasses a shell function,
+# so the stub goes on PATH ahead of the real one, for this command only.
+mkdir -p "$TMPROOT/nomktemp"
+printf '#!/bin/sh\nexit 1\n' > "$TMPROOT/nomktemp/mktemp"; chmod +x "$TMPROOT/nomktemp/mktemp"
+# PREPENDED, and in DOUBLE quotes: single quotes keep `$PATH` literal inside the
+# run's zsh, which replaces PATH outright — then `sed` is missing too and the row
+# passes on a different failure entirely.
+badrun "$BADROOT/crlf.zsh" "PATH=\"$TMPROOT/nomktemp:\$PATH\"; clauth start fz"
+check "unreadable: mktemp failing is a fault, not a clean read"            "$RC" "3"
+check "unreadable: ...saying it could not create the temp file"            "$(inout 'could not create a temp file')" "1"
+check "unreadable: ...reaching the binary zero times"                      "$(clog 'start fz')" "0"
+
+# THE CROSS-CHECK. zshrc.herdr cannot call scripts/machines-render — it must
+# stay sourceable alone by a modular adopter who has no scripts/ at all — so the
+# two readers of one canonical file are a deliberate COPY, and this repo's rule
+# for a copy is that something checks it. Each fixture goes to both, and both
+# must refuse: that is the disagreement DO-674 was, stated as a row.
+for bad in crlf bom quote undeclared killed; do
+    badrun "$BADROOT/$bad.zsh" "clauth start fz"
+    door_rc="$RC"
+    CLAUDE_TENANTS_FILE="$BADROOT/$bad.zsh" "$DOTFILES/scripts/machines-render" >/dev/null 2>&1
+    check "cross-check: '$bad' is refused by BOTH readers of the tenants file" \
+          "door=$door_rc render=$?" "door=3 render=2"
+done
+
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+
+unset CLAUDE_TENANTS_FILE
+crun "clauth start fz"
+check "foreign: no tenant table (modular adopter) guards nothing"   "$(clog 'start fz')" "1"
+rm -rf "$FHOME/.clauth/profiles/fz"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

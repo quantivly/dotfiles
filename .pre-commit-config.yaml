@@ -59,7 +59,13 @@ repos:
         # checks it instead is `zsh -n`, in CI's "Shell Syntax Check" job, which
         # names it explicitly — a file no linter and no syntax check reads is the
         # gap this note exists to close.
-        exclude: '(dotbot/|p10k\.zsh|^zshrc$|zsh/functions/|^scripts/claude-pick$)'
+        # scripts/machines-render is claude-pick's case exactly: zsh, extensionless
+        # because it is a command, carrying a shebang so `identify` WOULD hand it to
+        # this hook. `zsh -n` in CI's Shell Syntax Check job reads it instead, and that
+        # job names it — the note above exists precisely so a file nothing checks does
+        # not appear here. The rabota fixture is a tenants FILE, not a script: zsh
+        # assignments with no shebang, sourced by the renderer's `zsh -f` fork.
+        exclude: '(dotbot/|p10k\.zsh|^zshrc$|zsh/functions/|^scripts/claude-pick$|^scripts/machines-render$|^rabota/tests/fixtures/config/tenants\.zsh$)'
 
   # Secret detection with gitleaks
   - repo: https://github.com/gitleaks/gitleaks
@@ -87,11 +93,34 @@ repos:
         # would put the implementation language into the name a user types and
         # into herdr-draft's config, which names the binary. Same reasoning as
         # `install`.
-        exclude: '^(install|scripts/test-|scripts/claude-pick$|dotbot/|p10k\.zsh)'  # Allow specific files without extension
+        # scripts/machines-render is zsh for the same reason claude-pick is — it forks
+        # `zsh -f` to source a tenants file — and shellcheck cannot read zsh (SC1071),
+        # so a .sh suffix would put it in the ShellCheck job's glob and fail the build.
+        # The rabota fixture keeps the .zsh suffix its REAL counterpart has
+        # (~/.config/claude-tenants.zsh). A fixture renamed to fit a lint rule is a
+        # fixture that no longer resembles the thing under test.
+        exclude: '^(install|scripts/test-|scripts/claude-pick$|scripts/machines-render$|dotbot/|p10k\.zsh|rabota/tests/fixtures/config/tenants\.zsh$)'  # Allow specific files without extension
 
   # Security: Check for secrets patterns
   - repo: local
     hooks:
+      # Keep the always-loaded prose surfaces inside a budget that can only
+      # tighten. Exit 2 from the checker means "could not evaluate" (shallow
+      # clone, unreadable config); that WARNS and passes here rather than
+      # failing. nanoclaw measured the alternative: a gate that fails in a state
+      # it cannot evaluate teaches `git commit --no-verify`, which disables every
+      # other hook in this file too. A real violation (1) or a self-inconsistent
+      # checker (3) still fails.
+      - id: check-claude-md
+        name: CLAUDE.md context budget
+        entry: >-
+          bash -c './scripts/check-claude-md.sh; rc=$?;
+          if [ "$rc" -eq 2 ]; then printf "check-claude-md: could not evaluate
+          the budget here - skipping, not failing\n"; exit 0; fi; exit "$rc"'
+        language: system
+        pass_filenames: false
+        files: '^(CLAUDE\.md|README\.md|\.claude/(rules|skills)/.*\.md|docs/.*\.md|scripts/context-budget\.conf)$'
+
       - id: check-secrets-patterns
         name: Check for secret patterns
         entry: bash -c 'if grep -rn -E "(password|secret|token|api[_-]?key)\\s*=\\s*[\"'"'"'][^\"'"'"']{8,}" --include="*.sh" --include="*.bash" --include="*.zsh" --exclude-dir=".git" --exclude-dir="dotbot" . 2>/dev/null; then echo "Found potential secrets in files above"; exit 1; fi'

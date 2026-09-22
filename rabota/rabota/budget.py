@@ -1,10 +1,10 @@
 """Lane budget. Credential dimension first (F13), through claude-pick --gate — the one gate every
-spawner shares. An unmeasured dimension refuses; nothing here is ever read as zero.
-
-Task 1 ships the credential slice and the ``budget.json`` shape. The machine and count dimensions
-(``_machine_reasons`` / ``_count_reasons``) are filled in by WS4' Task 4; until then a missing
-census is reported as ``machine:unmeasured`` and refuses, never as room.
+spawner shares; then the machine dimension (load/memory/swap) for the machine the lane would
+actually run on; then that machine's running-lane count against the cap. An unmeasured
+dimension refuses — a missing census, an absent or unreachable machine row — never as room, and
+never by falling back to the local reading.
 """
+import datetime
 import json
 from rabota import errors
 from rabota.store import now
@@ -17,7 +17,9 @@ WORK_TENANT = "quantivly"
 def seat_for(tenant, machine: str, override: str | None = None) -> str:
     """The seat a lane for ``tenant`` on ``machine`` must use; refuses a seat the tenant rule forbids.
 
-    ``local`` reads ``[seats] local``; any other machine reads ``[machines.<m>].profile``. An
+    ``local`` reads ``[seats] local``; any other machine reads the MACHINE REGISTRY, which
+    ``config.load`` fills from the tenants file through ``scripts/machines-render`` (DO-665) —
+    not from this tenant's TOML, where a leftover ``profile`` key is now refused outright. An
     ``override`` (``--seat``) replaces the lookup but is still checked against the rule.
     """
     if override:
@@ -28,8 +30,10 @@ def seat_for(tenant, machine: str, override: str | None = None) -> str:
         m = tenant.machines.get(machine)
         seat = m.profile if m else None
     if not seat:
-        raise errors.Refused(f"no seat configured for tenant {tenant.name!r} on machine {machine!r} "
-                             f"([seats] local / [machines.{machine}].profile in tenants/{tenant.name}.toml)")
+        where = (f"[seats] local in tenants/{tenant.name}.toml" if machine == "local" else
+                 f"CLAUDE_TENANT_MACHINE_OWNED + CLAUDE_TENANT_MACHINE_ID for machine "
+                 f"{machine!r} in the tenants file (see scripts/machines-render)")
+        raise errors.Refused(f"no seat configured for tenant {tenant.name!r} on machine {machine!r} ({where})")
     if seat in CONSOLE_SEATS:
         raise errors.Refused(f"seat {seat} is the interactive console and is never used headless")
     is_work = tenant.name == WORK_TENANT
@@ -44,7 +48,8 @@ def seat_for(tenant, machine: str, override: str | None = None) -> str:
 def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int) -> dict:
     """Ask ``claude-pick --gate`` about ``seat``. Any answer that is not a measured allow is a refusal with a code.
 
-    ``credential:window`` — the seat exists and is measured, and the projection (or the pool) says no;
+    ``credential:window`` — the seat exists and is measured, and the 5h projection, the pool, or the
+    model's weekly spend wall says no (``gate-projected``, ``exhausted``, or ``gate-spend-wall``);
     ``credential:unmeasured`` — everything else: claude-pick absent (127) or without profiles (5), a
     window it could not read, non-JSON, or an exit 0 that carries no gate verdict (an older
     claude-pick, or ``--gate`` silently dropped). Never ok on exit code alone.
@@ -70,42 +75,115 @@ def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int
     if res.code == 0 and gate.get("verdict") == "allow":
         out["ok"] = True
         return out
-    if state in ("gate-projected", "exhausted"):
+    if state in ("gate-projected", "exhausted", "gate-spend-wall"):
         out["code"] = "credential:window"
-        out["detail"] = out["detail"] or f"{seat} 5h window: {usage.get('five_hour')}% now, projected {gate.get('projected')}%"
-    else:  # gate-unmeasured, no-profiles, bad-table, backpressure, or exit 0 without a verdict
+        fallback = (f"{seat} weekly window spent, spend {gate.get('spend')}"
+                    if state == "gate-spend-wall"
+                    else f"{seat} 5h window: {usage.get('five_hour')}% now, projected {gate.get('projected')}%")
+        out["detail"] = out["detail"] or fallback
+    else:  # gate-unmeasured, gate-misconfigured, no-profiles, bad-table, backpressure,
+           # or exit 0 without a verdict
         out["code"] = "credential:unmeasured"
         out["detail"] = out["detail"] or f"claude-pick state {state!r} with no gate verdict"
     return out
 
 
-def compute(census: dict | None, cred: dict, t, max_lanes_local: int) -> dict:
-    """Order: credential → machine → counts. Task 4 fills the machine and count dimensions from ``census``."""
+def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: str = "local",
+           max_census_age_s: int = 900) -> dict:
+    """Order: credential → machine → counts, for the machine the lane would run on."""
     reasons, unavailable = [], []
     if not cred["ok"]:
         reasons.append({"code": cred["code"], "detail": cred["detail"]})
+    running = 0
     if census is None:
-        unavailable.append("machine"); unavailable.append("counts")
+        unavailable.extend(["machine", "counts"])
         if not reasons:
             reasons.append({"code": "machine:unmeasured", "detail": "no census; run rabota census first"})
-    else:
-        reasons.extend(_machine_reasons(census, t))          # Task 4
-        reasons.extend(_count_reasons(census, t))            # Task 4
+    elif not _census_fresh(census, max_census_age_s):
+        reasons.append({"code": "census:stale",
+                        "detail": f"census.json is missing 'at' or older than {max_census_age_s}s; "
+                                  "run rabota census"})
+        unavailable.extend(["machine", "counts"])
         unavailable.extend(census.get("unavailable", []))
-    counts = (census or {}).get("counts", {})
-    running = counts.get("rabota", 0) + counts.get("sol", 0)
+    else:
+        m = _reading_for(census, machine)
+        if m is None:
+            reasons.append({"code": "machine:unmeasured",
+                            "detail": f"census has no usable reading for machine {machine!r}"})
+            unavailable.append("machine")
+        else:
+            reasons.extend(_machine_reasons(m, t))
+            running = _running_lanes(census, machine)
+        unavailable.extend(census.get("unavailable", []))
     allowed = 0 if reasons else max(0, max_lanes_local - running)
     return {"schema": 1, "at": now(), "allowed_new_lanes": allowed, "reasons": reasons,
             "seat_pick": None, "five_h_pct_now": cred.get("five_h_pct_now"), "resets_at": cred.get("resets_at"),
             "tier": cred.get("tier"), "unavailable": unavailable}
 
 
-def _machine_reasons(census, t):   # replaced in Task 4
-    return []
+def _census_fresh(census: dict, max_age_s: int) -> bool:
+    """A census with no timestamp, or an unparseable one, is stale — never fresh by default.
+
+    ``--state-dir`` lets a caller point ``budget`` at any directory, so the file's own age is the
+    only thing standing between a hand-written census and manufactured room.
+    """
+    at = census.get("at")
+    if not at:
+        return False
+    try:
+        ts = datetime.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        # fromisoformat accepts a string with no UTC offset and parses it WITHOUT raising,
+        # into a naive datetime -- the except above never fires for this case. Subtracting a
+        # naive timestamp from the aware "now" below would raise TypeError instead, uncaught,
+        # so this check catches it explicitly: a timestamp whose timezone we do not know is
+        # not a timestamp we can age, and an unmeasured dimension refuses.
+        return False
+    age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+    return 0 <= age <= max_age_s
 
 
-def _count_reasons(census, t):     # replaced in Task 4
-    return []
+def _reading_for(census: dict, machine: str) -> dict | None:
+    """The load/memory reading for ``machine``, or None when it was not measured.
+
+    None and a zeroed row are the two ways an unmeasured machine becomes "room"; the caller
+    turns None into a refusal, so neither can.
+    """
+    if machine == "local":
+        return census.get("machine")
+    for row in census.get("machines", []):
+        if row.get("name") == machine:
+            return row if row.get("reachable") else None
+    return None
+
+
+def _machine_reasons(m: dict, t) -> list[dict]:
+    """Load, memory and swap against the tenant's thresholds. One named reason per breach."""
+    out = []
+    ncpu = m.get("ncpu") or 1
+    if m["load1"] > t.load1_per_cpu * ncpu:
+        out.append({"code": "machine:load",
+                    "detail": f"load1 {m['load1']} over {t.load1_per_cpu}×{ncpu} cpus"})
+    if m["mem_available_gib"] < t.mem_available_min_gib:
+        out.append({"code": "machine:memory",
+                    "detail": f"{m['mem_available_gib']} GiB available, floor {t.mem_available_min_gib}"})
+    if m["swap_used_pct"] > t.swap_pct_max:
+        out.append({"code": "machine:swap",
+                    "detail": f"swap {m['swap_used_pct']}% over {t.swap_pct_max}%"})
+    return out
+
+
+def _running_lanes(census: dict, machine: str) -> int:
+    """Lanes already running on ``machine`` — local counts owners, remote counts its units."""
+    if machine == "local":
+        c = census.get("counts", {})
+        return c.get("rabota", 0) + c.get("sol", 0)
+    for row in census.get("machines", []):
+        if row.get("name") == machine:
+            return sum(u.get("state") in ("active", "activating") for u in row.get("units", []))
+    return 0
 
 
 def text_line(b: dict) -> str:
