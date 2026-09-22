@@ -1363,8 +1363,9 @@ above), the fix is to correct the `environment.d` drop-in, not the ssh config:
 
 ```bash
 find ~ -name ".bitwarden-ssh-agent.sock" 2>/dev/null   # find the real path
-$EDITOR ~/.config/environment.d/10-bitwarden-ssh-agent.conf
+$EDITOR ~/.config/environment.d/10-bitwarden-ssh-agent.conf   # use ${HOME}, not %h — see README.md
 systemctl --user set-environment SSH_AUTH_SOCK="<the real path>"  # apply without re-login
+export SSH_AUTH_SOCK="<the real path>"   # set-environment does NOT update your current shell
 
 # Confirm ssh actually resolved the fixed value — a live ControlMaster hides a stale
 # socket for hours, so always test without multiplexing:
