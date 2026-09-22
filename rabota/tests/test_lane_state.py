@@ -141,3 +141,59 @@ class LaneStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaneCliWiringTests(unittest.TestCase):
+    """The argparse -> run_* wiring, which the behaviour rows above cannot see.
+
+    Those rows call ``run_list``/``run_status``/``run_retire`` directly, so the dispatch in
+    ``_run`` is untested: hardcoding ``status=None`` there left all 553 tests passing (DO-680b
+    review). These drive ``cli.main`` end to end, which is the only path a user takes.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = str(Path(self.tmp.name))
+        from rabota import store as store_mod
+        s = store_mod.Store.open(Path(self.state))
+        for lid, st in (("A1", "started"), ("B2", "done")):
+            s.insert_lane({"id": lid, "tenant": "quantivly", "kind": "work", "brief": "/b",
+                           "repo": "hub", "worktree": "/w", "out_dir": "/o", "machine": "dev",
+                           "unit": f"{lid}.service", "session_id": "s", "status": st,
+                           "started_at": "2026-09-22T00:00:00Z"})
+
+    def run_cli(self, *args):
+        """``(code, parsed)`` — both streams captured, since a refusal prints to stderr."""
+        import contextlib, io, json as _json
+        from rabota import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--tenant", "quantivly", "--state-dir", self.state, *args])
+        raw = out.getvalue().strip() or err.getvalue().strip()
+        return code, (_json.loads(raw) if raw.startswith(("{", "[")) else raw)
+
+    def test_status_flag_reaches_the_query(self):
+        """Pins the dispatch: with --status hardcoded away, this row is what fails."""
+        code, body = self.run_cli("lane", "list", "--status", "started")
+        self.assertEqual(code, 0)
+        self.assertEqual([l["id"] for l in body["lanes"]], ["A1"])
+
+    def test_no_status_flag_lists_every_lane(self):
+        code, body = self.run_cli("lane", "list")
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(l["id"] for l in body["lanes"]), ["A1", "B2"])
+
+    def test_an_empty_status_is_a_usage_error_not_no_filter(self):
+        """`--status "$WANT"` with WANT unset must not quietly list everything."""
+        code, body = self.run_cli("lane", "list", "--status", "")
+        self.assertEqual(code, 2)
+        self.assertIn("must not be empty", body["error"]["message"])
+
+    def test_the_id_reaches_status_and_retire(self):
+        code, body = self.run_cli("lane", "status", "B2")
+        self.assertEqual((code, body["id"]), (0, "B2"))
+        code, _ = self.run_cli("lane", "retire", "B2")
+        self.assertEqual(code, 0)
+        code, body = self.run_cli("lane", "status", "B2")
+        self.assertEqual(body["status"], "retired")

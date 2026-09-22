@@ -563,6 +563,12 @@ def _run(ns, **ctx_kw):
     # this field, since `recipe` was the sole subcommand before this one grew siblings.
     lane_cmd = getattr(ns, "lane_cmd", "recipe")
     if lane_cmd == "list":
+        # An EMPTY --status is a usage error, not "no filter". `store.list_lanes` tests
+        # `if status:`, so "" is indistinguishable from None and lists every row — which is
+        # exactly what `--status "$WANT"` expands to when WANT is unset. Silently listing
+        # everything is the wrong answer to a filter the caller believed they set.
+        if ns.status is not None and not ns.status.strip():
+            raise errors.Usage("--status must not be empty; omit it to list every lane")
         out = run_list(ctx, status=ns.status)
         return ([f"{l['id']} {l['status']} {l['kind']} {l['machine']}" for l in out["lanes"]]
                 if ns.text else out)
