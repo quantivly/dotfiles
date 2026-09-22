@@ -148,11 +148,18 @@ Every run appends a line to `~/.local/state/wt-gc-sweep/log` and leaves the full
 
 ## Tests and the mutation sweep
 
-- `~/.dotfiles-local/scripts/test-wt-gc.sh` — 51 → **98 rows**, real repositories
-  throughout, and it asserts its own row total. Twelve mutants, **twelve killed**, each by
-  a row that names the guard it removed.
+- `~/.dotfiles-local/scripts/test-wt-gc.sh` — 51 → **100 rows**, real repositories
+  throughout, and it asserts its own row total. Thirteen mutants, **thirteen killed**, each
+  by a row that names the guard it removed.
 - `scripts/test-wt-gc-sweep.sh` — **21 rows**, hermetic via a recording `wt-gc` stub at the
   front of `PATH`. Five mutants, five killed. CI job `wt-gc-sweep-test`.
+
+One more refinement came out of reading the delete path again: a branch someone checked
+out between the scan and the delete is a **race**, not a failure. git refuses, nothing is
+lost, and there is nothing to fix — but `FAILED` is what makes the wrapper exit non-zero,
+so a benign race would have put a red light on the nightly unit. It is `SKIPPED` now. Both
+of git's spellings are matched (2.53 says *"used by worktree at"*, older versions *"checked
+out at"*), which the new row caught because it was written against the wrong one first.
 
 Three guards survived the first sweep, and the reason each survived is worth keeping:
 
