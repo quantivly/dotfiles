@@ -88,19 +88,14 @@ Host *
 # Use keys stored in Bitwarden vault. Enable on LAPTOPS running Bitwarden.
 # Remote servers should NOT use this - they receive forwarded agent instead.
 #
-# Choose your Bitwarden installation method:
+# Point at $SSH_AUTH_SOCK rather than a hardcoded path: the socket location
+# depends on install method (snap/deb/flatpak) and changes if you reinstall.
+# Set SSH_AUTH_SOCK once via a systemd environment.d drop-in (README.md,
+# "Using Bitwarden SSH Agent") and this line then follows whichever agent
+# is actually running.
 
-# Snap install (most common on Ubuntu)
 # Host *
-#     IdentityAgent ~/.var/app/com.bitwarden.desktop/config/Bitwarden/.bitwarden-ssh-agent.sock
-
-# Deb/AppImage install
-# Host *
-#     IdentityAgent ~/.config/Bitwarden/.bitwarden-ssh-agent.sock
-
-# Flatpak install
-# Host *
-#     IdentityAgent ~/.var/app/com.bitwarden.desktop/config/Bitwarden/.bitwarden-ssh-agent.sock
+#     IdentityAgent SSH_AUTH_SOCK
 
 # Option 2: System SSH Agent (BOTH CONTEXTS)
 # -------------------------------------------
