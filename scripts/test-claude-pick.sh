@@ -1756,6 +1756,42 @@ check "with the predicate absent the last resort fails OPEN, as the doors do" \
 check "...and says nothing about a command it could not find" \
       "$(pickerr "$FB_POOL; $FB_OWNED; unset -f claude-profile-foreign" t1 | grep -c 'command not found')" "0"
 
+# A TENANTS FILE THAT CANNOT BE READ (DO-674). The predicate answers 0 foreign,
+# 1 not foreign and 2 "the file exists and could not be trusted" — and under the
+# `&&` this branch used to live in, a 2 read as "not foreign" and the seat was
+# TAKEN. That is the fail-open the whole change is about, arriving at the one
+# path that consults no pool by construction, so nothing else would have caught
+# it. The file is named in the PRELUDE: the helpers source zshrc.herdr with
+# CLAUDE_TENANTS_FILE=/nonexistent, which is what leaves the table empty and
+# sends the predicate down the fork path this row is about.
+BADT="$TMPROOT/tenants-crlf.zsh"
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )\r\n' > "$BADT"
+fb_home fbu1 a1
+check "an unreadable tenants file DECLINES the last resort, it does not take it" \
+      "$(pfd "CLAUDE_TENANTS_FILE=$BADT; $FB_POOL" '' t1 0)" "2::unusable:"
+# THE REASON, and it must not be the ownership one: no machine was identified,
+# so a warning naming one would send the operator to a box this guard has just
+# failed to name. The two are separate strings for that reason, and a row that
+# only counted `last resort declined` would pass with either.
+fbu="$(pickarr "CLAUDE_TENANTS_FILE=$BADT; $FB_POOL" t1 _claude_pick_warnings)"
+check "...saying so exactly once"                "$(printf '%s\n' "$fbu" | grep -c 'last resort declined')" "1"
+check "...naming the file as the thing to fix"   "$(printf '%s\n' "$fbu" | grep -c 'tenants file could not be read')" "1"
+check "...and not claiming a machine owns it"    "$(printf '%s\n' "$fbu" | grep -c 'box-z')" "0"
+# The escape hatch reaches this path too, exactly as it does the explicit doors —
+# the refusal at those doors prints it as the way through, and a remedy that
+# works at one door and not another is worse than no remedy.
+fb_home fbu2 a1
+check "CLAUDE_FOREIGN_PROFILE_OK=1 takes the seat even on an unreadable file" \
+      "$(pfd "CLAUDE_TENANTS_FILE=$BADT; $FB_POOL; CLAUDE_FOREIGN_PROFILE_OK=1" '' t1 0)" "0:a1:fallback:fallback"
+# AND THE CONTROL: a tenants file that is merely SILENT about this profile is not
+# a fault, so the seat is still taken. Without this the three rows above pass
+# just as well for a last resort that declines everything.
+GOODT="$TMPROOT/tenants-clean.zsh"
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( b2 "some other box" )\n' > "$GOODT"
+fb_home fbu3 a1
+check "a clean tenants file naming some OTHER profile still yields the seat" \
+      "$(pfd "CLAUDE_TENANTS_FILE=$GOODT; $FB_POOL" '' t1 0)" "0:a1:fallback:fallback"
+
 # An active profile with no credential was never a candidate for the last resort
 # and still is not: the foreign check must not become the only thing standing
 # between a session and a profile clauth cannot open.

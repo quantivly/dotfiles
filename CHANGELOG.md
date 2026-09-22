@@ -29,6 +29,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tenants file that cannot be read no longer means "nobody owns anything" (DO-674).**
+  `claude-tenants-owner` forked a bare `zsh -f`, **ignored its exit status and discarded its
+  stderr**, so any file that ran without populating the table read as "not foreign" and every
+  DO-641 door stopped refusing, silently. Measured live after DO-665 deployed: CRLF line endings,
+  an unterminated quote, a subscript assignment to an undeclared table, a UTF-8 BOM and a
+  function-guarded assignment all failed open here while `scripts/machines-render` — the other
+  reader of the same file — refused all five with exit 2. **The direction is refuse:** wrongly
+  allowing is the DO-641 incident itself, a seat spent silently and invisibly to both machines,
+  while wrongly refusing is a named error carrying zsh's own complaint, with
+  `CLAUDE_FOREIGN_PROFILE_OK=1` (printed by the refusal, and honoured for the fault too) one
+  command away. **No tenants file, and a file that owns nothing, are still real answers** — the
+  same split DO-665 made between an unadopted registry and a broken one. Note the cost: on a
+  machine whose tenants file is also the pool source, a broken file leaves `claude` with no last
+  resort until it is fixed. Also corrects three places that recorded
+  `has_command jq && TABLE=( … )` as undetectable — it writes to the fork's stderr, and
+  `machines-render` had been refusing it all along — and a `print -u2 … | sed` in both readers
+  that indented nothing, because the pipe reads fd 1. Reasoning:
+  `docs/CLAUDE_ACCOUNT_PICKER.md`.
+
 - **The account picker's last-resort fallback no longer takes a seat another machine owns
   (DO-632).** When no pool member was usable, `_claude_fallback_profile` handed out clauth's
   *active* profile and consulted nothing — and a profile is absent from every pool on this

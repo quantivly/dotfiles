@@ -169,6 +169,16 @@ run "$TMPROOT/crlf.zsh"
 check "CRLF line endings are exit 2, not an empty registry" "$RC" "2"
 check "...and print no registry"                            "$OUT" ""
 check "...naming CRLF, since no editor shows it"            "$(grep -c 'CRLF' <<<"$ERR")" "1"
+# THE INDENT, which was not happening: `print -u2 -- "$x" | sed 's/^/    /'`
+# pipes fd 1 — an empty stdin — so sed indented nothing and the tenants file's
+# own complaint ran flush against the message, reading as a second message
+# rather than as this one's evidence. Found writing the same line for
+# claude-tenants-owner (DO-674). No other row here reads the shape of the
+# output, only its words, so without this the fix is deletable. Counted as
+# "no line escaped the indent" rather than "N lines got it": the fixture is
+# two CRLF lines, so an exact count would be a row about its length.
+check "...with the file's own complaint indented under it, not flush left" \
+      "$(grep -cE '^[^ ].*command not found' <<<"$ERR")" "0"
 
 printf '\xef\xbb\xbfCLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )\nCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\n' \
     > "$TMPROOT/bom.zsh"

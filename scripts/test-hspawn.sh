@@ -2086,12 +2086,231 @@ crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start personal"
 check "foreign: and what it PRINTS is not mistaken for an owner"     "$(clog 'start personal')" "1"
 crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
 check "foreign: ...while the real entry still refuses"               "$RC" "3"
-# DOCUMENTED LIMIT, pinned so it cannot change unnoticed: the fork is a bare
-# `zsh -f`, so an assignment guarded by a shell function reads empty there. The
-# file must be self-contained; this row is what says so out loud.
+# THE LIMIT THAT TURNED OUT NOT TO BE ONE (DO-674). The fork is a bare `zsh -f`,
+# so an assignment guarded by a shell function declares nothing there — and this
+# row used to pin that as an accepted, undetectable fail-open, because the fork
+# discarded its stderr. It is not undetectable: `has_command` is a command not
+# found, so it WRITES to that stderr, and the class guard catches it like any
+# other file that ran without populating the table. `scripts/machines-render` had
+# refused this same file with exit 2 since DO-665, which is how the two readers
+# of one file were found disagreeing. The file must still be self-contained; what
+# changed is that failing to be so is now said out loud.
 printf '%s\n' 'has_command jq && CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
 crun "unset CLAUDE_TENANT_MACHINE_OWNED; clauth start fz"
-check "foreign: a file needing shell FUNCTIONS reads empty in the fork" "$(clog 'start fz')" "1"
+check "foreign: a file needing shell FUNCTIONS is REFUSED, not read as empty" "$RC" "3"
+check "foreign: ...without reaching the binary"                     "$(clog 'start fz')" "0"
+check "foreign: ...carrying zsh's own complaint about the function"  "$(inout 'command not found: has_command')" "1"
+
+#-----------------------------------------------------------------------------
+# A tenants file that cannot be TRUSTED (DO-674)
+#-----------------------------------------------------------------------------
+# The guard read this file in a fork whose exit status it ignored and whose
+# stderr it discarded, so any file that RAN without populating the table
+# answered "nobody owns anything" and every door above stopped refusing, with
+# nothing said. Measured on the live machine 2026-09-21, all five reading
+# `not foreign`: CRLF, an unterminated quote, a subscript assignment to an
+# undeclared table, a UTF-8 BOM, and a function-guarded assignment.
+# `scripts/machines-render` — the OTHER reader of this same file — refused all
+# five with exit 2 since DO-665, so the two readers of one canonical file
+# disagreed about whether a broken file was fatal.
+#
+# THE DIRECTION IS THE DECISION, and it is refuse. Wrongly allowing is the
+# DO-641 incident itself: a seat spent silently, invisible to both machines.
+# Wrongly refusing is a named error carrying zsh's own complaint, landing only
+# on someone who has just edited the file, with `CLAUDE_FOREIGN_PROFILE_OK=1`
+# printed as the way past it. The leniency is DO-665's and is asserted below:
+# NO tenants file, and a file that owns nothing, stay real answers.
+#
+# EVERY ROW ASSERTS THE MESSAGE, not just rc 3. Four guards share that code — a
+# parse error, a run-time fault, a path that is not a regular file and a read
+# cut short — so a row that read only the code would pass for whichever guard
+# happened to fire, and a mutation swapping two of them would survive.
+echo
+echo "=== a tenants file that cannot be trusted is refused, not read as empty (DO-674) ==="
+BADROOT="$TMPROOT/bad"; mkdir -p "$BADROOT"
+# THE BAD FILE IS NAMED INSIDE THE RUN, never in the environment around it, and
+# that is load-bearing twice over. `run` sources zshrc.herdr, which sources the
+# tenants file AT TOP LEVEL (line ~246) before anything below is reached — so
+# with CLAUDE_TENANTS_FILE already pointing at the fixture:
+#   * the `kill -9 $$` fixture kills the HARNESS SHELL, and the row measures a
+#     dead test rather than the sentinel (measured: rc 137, no refusal printed);
+#   * every other fixture writes its zsh complaint to the harness's own stderr,
+#     which `run` folds into $OUT — so a row grepping for `command not found`
+#     passes on the top-level source's error whether or not the refusal ever
+#     said anything. A green row for the wrong reason.
+# Sourcing a benign file first and switching per command keeps the only stderr
+# in $OUT the refusal's, and leaves the fork the only reader of the bad file.
+badrun() {   # $1 = the bad tenants file, $2 = the command under test
+    crun "unset CLAUDE_TENANT_MACHINE_OWNED; CLAUDE_TENANTS_FILE='$1'; $2"
+}
+
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\r\n' > "$BADROOT/crlf.zsh"
+badrun "$BADROOT/crlf.zsh" "clauth start fz"
+check "unreadable: CRLF is refused, not read as 'nobody owns anything'" "$RC" "3"
+check "unreadable: ...reaching the binary zero times"                   "$(clog 'start fz')" "0"
+check "unreadable: ...naming the tenants file in the remedy it prints"  "$(inout "zsh -n $BADROOT/crlf.zsh")" "1"
+check "unreadable: ...saying it RAN badly, not that it fails to parse"  "$(inout 'did not run cleanly')" "1"
+check "unreadable: ...carrying zsh's own complaint, which no editor shows" "$(inout 'command not found')" "1"
+# The OTHER emitter's lines must not appear: there is no owning machine to
+# name, so "Run this work on <machine> instead" would send the reader to a
+# machine this guard has just failed to identify.
+check "unreadable: ...and not sending the reader to a machine it cannot name" "$(inout 'Run this work on')" "0"
+check "unreadable: ...offering the escape hatch as the way past"        "$(inout 'CLAUDE_FOREIGN_PROFILE_OK=1 clauth')" "1"
+# THE INDENTATION, because `print -u2 ... | sed` pipes fd 1 — an empty stdin —
+# so the indent silently does nothing and the fault runs flush against the
+# message. DO-665's copy of that line had exactly this defect.
+check "unreadable: ...with the fault indented under the message"        "$(grep -cE '^    .*command not found' <<<"$OUT")" "1"
+
+printf '\xef\xbb\xbfCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/bom.zsh"
+badrun "$BADROOT/bom.zsh" "clauth start fz"
+check "unreadable: a UTF-8 BOM is refused too"                          "$RC" "3"
+check "unreadable: ...reaching the binary zero times"                   "$(clog 'start fz')" "0"
+
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z\n' > "$BADROOT/quote.zsh"
+badrun "$BADROOT/quote.zsh" "clauth start fz"
+check "unreadable: an unterminated quote is refused"                    "$RC" "3"
+# THE OTHER MESSAGE. `zsh -n` is the only guard that can see this one — a source
+# that fails to parse returns to the forked shell, which prints the sentinel
+# quite happily — so the row that distinguishes it from the stderr guard is what
+# stops the two being swapped.
+check "unreadable: ...saying nothing in it RAN, not that it ran badly"  "$(inout 'does not parse, so nothing in it ran')" "1"
+check "unreadable: ...naming the check that would show it"              "$(inout 'zsh -n')" "1"
+
+printf 'CLAUDE_TENANT_FUTURE[work]="x"\nCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/undeclared.zsh"
+badrun "$BADROOT/undeclared.zsh" "clauth start fz"
+check "unreadable: a subscript assign to an UNDECLARED table is refused" "$RC" "3"
+check "unreadable: ...carrying zsh's complaint, which names the table"   "$(inout 'CLAUDE_TENANT_FUTURE')" "1"
+
+# A DIRECTORY passes -e and -r, and `source` fails on it.
+badrun "$BADROOT" "clauth start fz"
+check "unreadable: a path that is not a regular file is refused"        "$RC" "3"
+check "unreadable: ...saying so, not that it fails to parse"            "$(inout 'is not a regular file')" "1"
+
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/noperm.zsh"; chmod 000 "$BADROOT/noperm.zsh"
+badrun "$BADROOT/noperm.zsh" "clauth start fz"
+# Skipped for root, which reads anything: the row would assert nothing and would
+# fail for a reason that has nothing to do with the guard.
+if [[ "$(id -u)" != "0" ]]; then
+    check "unreadable: a file that exists and cannot be READ is refused" "$RC" "3"
+    check "unreadable: ...saying it cannot be read"                      "$(inout 'cannot be read')" "1"
+else
+    ok "unreadable: a file that exists and cannot be READ is refused (skipped: running as root)"
+    ok "unreadable: ...saying it cannot be read (skipped: running as root)"
+fi
+chmod 644 "$BADROOT/noperm.zsh"
+
+ln -sfn /nonexistent/nope "$BADROOT/dangling.zsh"
+badrun "$BADROOT/dangling.zsh" "clauth start fz"
+check "unreadable: a dangling symlink is refused, not 'no tenants file'" "$RC" "3"
+check "unreadable: ...saying the target is missing"                      "$(inout 'target does not exist')" "1"
+
+# THE SENTINEL, and the only input that reaches it: a file that kills its own
+# shell produces no stderr, parses, and is a regular readable file, so every
+# other guard passes it. Without __DONE__ this is a silent "no owner".
+printf 'kill -9 $$\nCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/killed.zsh"
+badrun "$BADROOT/killed.zsh" "clauth start fz"
+check "unreadable: a fork killed mid-read is refused"                    "$RC" "3"
+check "unreadable: ...saying the read did not finish, not that the file is wrong" "$(inout 'did not finish')" "1"
+
+# ...AND THE ESCAPE HATCH, which the refusal itself offers. A remedy that does
+# not work is worse than no remedy, and the fault is checked before the owner
+# lookup, so this is the row that says the hatch short-circuits it.
+badrun "$BADROOT/crlf.zsh" "CLAUDE_FOREIGN_PROFILE_OK=1 clauth start fz"
+check "unreadable: the escape hatch the refusal prints really works"     "$(clog 'start fz')" "1"
+
+# THE FAIL-OPEN BRANCH for the new door, matching the one the predicate already
+# has: with the door absent every caller proceeds, silently, so a rename that
+# made the guard droppable shows up HERE rather than as nothing.
+badrun "$BADROOT/crlf.zsh" "unset -f claude-foreign-door; clauth start fz"
+check "unreadable: the door absent fails OPEN"                           "$(clog 'start fz')" "1"
+check "unreadable: ...and silently"                                      "$(inout 'command not found')" "0"
+
+# EVERY OTHER DOOR, because the fault is answered by the shared predicate and a
+# door that forgot to ask would be invisible in the rows above. EACH ASSERTS THE
+# UNREADABLE MESSAGE, not just rc 3: `fz` is owned by box-z in this suite's
+# ordinary fixture, so a row that checked only the code would go green on the
+# DO-641 refusal and say nothing at all about DO-674.
+badrun "$BADROOT/crlf.zsh" "claude-as fz"
+check "unreadable: claude-as is refused too"                             "$RC" "3"
+check "unreadable: ...with the unreadable refusal, not the foreign one"  "$(inout 'cannot tell whether')" "1"
+check "unreadable: ...and claude never ran"                              "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" "0"
+badrun "$BADROOT/crlf.zsh" "hspawn -p fz -m opus -e high '$REPO' slug"
+check "unreadable: hspawn -p is refused too"                             "$RC" "3"
+check "unreadable: ...with the unreadable refusal"                       "$(inout 'cannot tell whether')" "1"
+check "unreadable: ...reaching herdr zero times"                         "$(herdrcmds)" ""
+badrun "$BADROOT/crlf.zsh" "clauth resume --profile fz latest"
+check "unreadable: clauth resume --profile is refused too"               "$RC" "3"
+check "unreadable: ...with the unreadable refusal"                       "$(inout 'cannot tell whether')" "1"
+check "unreadable: ...before the binary runs"                            "$(clog 'resume')" "0"
+
+# THE LENIENCY, asserted so "refuse a fault" cannot quietly become "refuse
+# everything". These are REAL answers, not faults: DO-665's argument that an
+# over-strict reader would break the tool you reach for to find out why.
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( b2 "box-b" )\n' > "$BADROOT/other.zsh"
+badrun "$BADROOT/other.zsh" "clauth start fz"
+check "unreadable: a clean file owning some OTHER profile still passes"  "$(clog 'start fz')" "1"
+badrun "$BADROOT/nosuchfile.zsh" "clauth start fz"
+check "unreadable: no tenants file at all is still not a fault"          "$(clog 'start fz')" "1"
+# shellcheck disable=SC2016  # fixture text written INTO a zsh file, not an
+# expression for this shell to expand.
+printf 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n[[ -n "$UNSET_ON_PURPOSE" ]]\n' > "$BADROOT/falseend.zsh"
+badrun "$BADROOT/falseend.zsh" "clauth start fz"
+check "unreadable: a file ending in a false command still ANSWERS"       "$RC" "3"
+check "unreadable: ...as a real refusal, naming the machine"             "$(inout 'owned by box-z')" "1"
+printf 'print -r -- "tenants: loaded"\nCLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )\n' > "$BADROOT/stdout.zsh"
+badrun "$BADROOT/stdout.zsh" "clauth start fz"
+check "unreadable: a stray STDOUT print is still tolerated, not a fault" "$(inout 'owned by box-z')" "1"
+
+# THE PRE-DECLARATION LIST EARNS ITS KEEP, and only this row says so. The fork
+# declares every CLAUDE_TENANT_* table, not just the one it reads, because a
+# subscript assignment to an UNDECLARED name raises "assignment to invalid
+# subscript range" and aborts the source at that line — and a real tenants file
+# writes `CLAUDE_TENANT_POOL[work]=…`, which is valid everywhere else precisely
+# because zshrc.herdr declares that name -gA before sourcing. Trim the list and
+# a correct file becomes a fault: measured, this mutation SURVIVED the whole
+# suite until this row, because every other fixture here uses a name that is
+# undeclared either way. It is the mirror of the undeclared-table row above:
+# that one says a missing name must be loud, this one says a present name must
+# not be.
+#
+# Note that test-machines-render.sh's list cross-check cannot see this: it
+# compares the DECLARATION LINES of the two files, and zshrc.herdr's top-level
+# declaration still names everything however the fork's copy is trimmed.
+printf '%s\n' 'CLAUDE_TENANT_POOL[work]="a1 b2"' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' \
+    > "$BADROOT/subscript.zsh"
+badrun "$BADROOT/subscript.zsh" "clauth start fz"
+check "unreadable: a subscript assign to a DECLARED table is not a fault"  "$(inout 'cannot tell whether')" "0"
+check "unreadable: ...and the owner is still read out of it"               "$(inout 'owned by box-z')" "1"
+
+# THE TEMP FILE IS HOW THE STDERR IS CAPTURED, so failing to create one is
+# failing to ask the question — and answering "clean" there disables the
+# class-wide guard silently, which is this change's own defect one level down.
+# Reached only by fault injection: `command mktemp` bypasses a shell function,
+# so the stub goes on PATH ahead of the real one, for this command only.
+mkdir -p "$TMPROOT/nomktemp"
+printf '#!/bin/sh\nexit 1\n' > "$TMPROOT/nomktemp/mktemp"; chmod +x "$TMPROOT/nomktemp/mktemp"
+# PREPENDED, and in DOUBLE quotes: single quotes keep `$PATH` literal inside the
+# run's zsh, which replaces PATH outright — then `sed` is missing too and the row
+# passes on a different failure entirely.
+badrun "$BADROOT/crlf.zsh" "PATH=\"$TMPROOT/nomktemp:\$PATH\"; clauth start fz"
+check "unreadable: mktemp failing is a fault, not a clean read"            "$RC" "3"
+check "unreadable: ...saying it could not create the temp file"            "$(inout 'could not create a temp file')" "1"
+check "unreadable: ...reaching the binary zero times"                      "$(clog 'start fz')" "0"
+
+# THE CROSS-CHECK. zshrc.herdr cannot call scripts/machines-render — it must
+# stay sourceable alone by a modular adopter who has no scripts/ at all — so the
+# two readers of one canonical file are a deliberate COPY, and this repo's rule
+# for a copy is that something checks it. Each fixture goes to both, and both
+# must refuse: that is the disagreement DO-674 was, stated as a row.
+for bad in crlf bom quote undeclared killed; do
+    badrun "$BADROOT/$bad.zsh" "clauth start fz"
+    door_rc="$RC"
+    CLAUDE_TENANTS_FILE="$BADROOT/$bad.zsh" "$DOTFILES/scripts/machines-render" >/dev/null 2>&1
+    check "cross-check: '$bad' is refused by BOTH readers of the tenants file" \
+          "door=$door_rc render=$?" "door=3 render=2"
+done
+
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
 
 printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
 
