@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Landed agent worktrees and their local branches are swept on a timer (DO-677).** A session
+  spawned by `herdr-draft create --worktree` cannot tear itself down — removing its own worktree
+  closes the herdr space it runs in — so its checkout, branch and remote branch were all left
+  behind. Measured 2026-09-21: 56 worktrees machine-wide were reapable (~3.3 GB), 41 of them
+  under `~/.herdr/worktrees`; a manual sweep on 2026-09-15 removed 27 and herdr-draft alone was
+  back to 29 six days later. Branch clutter was the larger half and had no tool at all —
+  herdr-draft carried 70 local branches against 27 on origin, only ~24 of which had a worktree.
+  `scripts/wt-gc-sweep.sh` plus `systemd/wt-gc-sweep.{service,timer}` run `wt-gc --apply` daily,
+  scoped to `~/.herdr/worktrees`, after a two-day grace counted from the **merge** rather than
+  the last commit, deleting landed local branches in the repositories that host those
+  worktrees and **never** a remote one. `--dry-run` prints exactly what an apply would do —
+  `WOULD-REMOVE` / `WOULD-DELETE` / `WOULD-SKIP` with the reason — rather than only what has
+  landed, so the list that is approved is the list that runs.
+  **It is linked but not enabled**, deliberately: arm it with
+  `systemctl --user enable --now wt-gc-sweep.timer` after reading one
+  `scripts/wt-gc-sweep.sh --dry-run` in full. On a machine without the private
+  `~/.dotfiles-local` the unit's `ConditionPathExists` makes systemd *skip* it, which is not a
+  failure. The engine changes are in `~/.dotfiles-local` (`wt-gc` gains `--branches`, `--scope`
+  and `--min-age`). Evidence, the branch predicate and the mutation sweep:
+  `docs/WORKTREE_SWEEP.md`. State table: `scripts/test-wt-gc-sweep.sh` (21 checks, in CI as
+  `wt-gc-sweep-test`).
+
 ### Changed
 
 - **Which machine owns which clauth seat is declared once (DO-665).** It used to live in two
@@ -28,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is edited. Reasoning: `docs/CLAUDE_ACCOUNT_PICKER.md`.
 
 ### Fixed
+
+- **`rabota census` parsed `wt-gc --tsv` in the wrong column order (DO-677).** The schema is
+  `verdict path branch pr dirty unpushed age reason`, eight fields with no header; it was read as
+  `path repo branch verdict reason`, so every row recorded the verdict as the path and the path
+  as the repo. The fixture encoded the same wrong schema, which is why the tests passed the whole
+  time. Rows are now selected by their leading token rather than by position, because the stream
+  carries three row types (`STRAY` has two fields, `DANGLING` five). Only an on-demand
+  `rabota census` reached it — `rabota precompute` passes `include_worktrees=False`.
 
 - **A tenants file that cannot be read no longer means "nobody owns anything" (DO-674).**
   `claude-tenants-owner` forked a bare `zsh -f`, **ignored its exit status and discarded its

@@ -519,6 +519,12 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
   `claude`); it is refused for a profile another machine owns (`CLAUDE_TENANT_MACHINE_OWNED`).
 - **A modular adopter** runs `./install --herdr` (five links, nothing else),
   `scripts/herdr-claude-wire.sh`, and `scripts/verify-tools.sh --herdr` as the one check.
+- **A spawned session cannot tear down its own worktree** — removing it closes the space it
+  runs in — so `wt-gc-sweep` does it daily: `~/.herdr/worktrees` only, two-day grace from the
+  MERGE, plus landed local branches in the repos that host those worktrees, never a remote
+  one. `./install` links the unit and deliberately does **not** enable it; arm it after
+  reading one `scripts/wt-gc-sweep.sh --dry-run`, which prints exactly what an apply would
+  do. Evidence: [docs/WORKTREE_SWEEP.md](docs/WORKTREE_SWEEP.md).
 
 ## Claude Code accounts & MCP (`claude-doctor`)
 
@@ -643,6 +649,7 @@ scripts/claude-account-dirs.sh --all   # (re)build every profile's persistent co
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 tool_status          # Check installed tools
 herdr-help           # In-shell herdr cheat sheet (hspawn/hreap/clauth)
+scripts/wt-gc-sweep.sh --dry-run  # What the daily worktree sweep would remove
 build-limits         # Show active build/test worker caps (see zshrc.buildlimits)
 alacritty-init       # Set up Alacritty config (new machine)
 qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to switch)

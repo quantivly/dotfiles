@@ -79,7 +79,7 @@ class CensusTests(unittest.TestCase):
         self.assertIn("deferred:sol", c["unavailable"]); self.assertNotIn("deferred:machines", c["unavailable"])
         self.assertEqual(c["machine"]["ncpu"] > 0, True)
         self.assertEqual(c["machine"]["swap_used_pct"], 25)
-        self.assertEqual(c["worktrees"][0]["verdict"], "KEEP")
+        self.assertEqual(c["worktrees"][0]["verdict"], "REAP")
         self.assertTrue((Path(self.tmp.name) / "s" / "census.json").exists())
         self.assertEqual(json.loads((Path(self.tmp.name) / "s" / "census.json").read_text())["counts"], c["counts"])
         for s in c["sessions"]: self.assertNotIn("argv", s); self.assertNotIn("env", s)
@@ -181,8 +181,30 @@ class CensusTests(unittest.TestCase):
     def test_default_mode_is_unchanged_still_calls_wt_gc_and_populates_worktrees(self):
         c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
         self.assertTrue(any(argv[0] == "wt-gc" for argv in self.runner.calls), self.runner.calls)
-        self.assertEqual(c["worktrees"][0]["verdict"], "KEEP")
+        self.assertEqual(c["worktrees"][0]["verdict"], "REAP")
         self.assertNotIn("skipped:worktrees", c["unavailable"])
+
+    # wt-gc --tsv is `verdict path branch pr dirty unpushed age reason`, no header.
+    # Read as `path repo branch verdict reason` — which is what this did until
+    # 2026-09-22, and what its fixture encoded — every assertion below is wrong:
+    # the path reads as the verdict, and the PR state reads as the path.
+    def test_worktree_rows_are_parsed_in_wt_gcs_real_column_order(self):
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        row = c["worktrees"][0]
+        self.assertEqual(row["verdict"], "REAP")
+        self.assertEqual(row["path"], "/home/zvi/.herdr/worktrees/herdr-draft/zvi-fix-202")
+        self.assertEqual(row["branch"], "zvi/fix-202")
+        self.assertEqual(row["pr"], "MERGED")
+        self.assertEqual(row["reason"], "PR merged; clean, every commit on a remote")
+        self.assertTrue(row["path"].startswith("/"), row)
+
+    # The same stream carries DANGLING (five fields) and STRAY (two). Selecting
+    # rows by column count rather than by the leading token would take the
+    # DANGLING row in as a worktree the day --branches is passed.
+    def test_non_worktree_row_types_are_skipped(self):
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertEqual([r["verdict"] for r in c["worktrees"]], ["REAP", "KEEP", "REVIEW"])
+        self.assertEqual([r["path"] for r in c["worktrees"] if "Projects" in r["path"]], [])
 
     def test_failed_wt_gc_in_default_mode_keeps_the_failure_marker_distinct_from_skip(self):
         runner = FakeRunner([

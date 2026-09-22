@@ -1,0 +1,64 @@
+# systemd/wt-gc-sweep.service
+# ===========================
+# Removes landed agent worktrees and their local branches, unattended.
+#
+# WHY A TIMER AND NOT A SESSION'S OWN CLEANUP. A session spawned with
+# `herdr-draft create --worktree` cannot tear itself down: removing its own
+# worktree closes the herdr space it is running in. Every other shape was tried
+# or measured and does not carry the load — pane-reaper is enabled on this
+# machine and has never once fired, because its precondition is the agent marking
+# its own pane (herdr-draft #266 says an agent will never pass it unprompted);
+# a per-session convention was measured not to work on 2026-09-17; and a
+# machine-wide Claude hook was added and reverted the same day. What is left is
+# something ambient, and this is it.
+#
+# WHAT IT ACTUALLY RUNS is scripts/wt-gc-sweep.sh, which holds the policy — the
+# scope, the grace period and the exit-status mapping — and whose header explains
+# each. The engine is `wt-gc`, in ~/.dotfiles-local.
+#
+# CONDITIONPATHEXISTS, NOT A FAILURE. `wt-gc` lives in the private
+# ~/.dotfiles-local, which most machines running these dotfiles do not have. An
+# unmet ConditionPathExists makes systemd SKIP the unit, and a skipped unit is
+# not a failed one — no error, no entry in `--state=failed`. That is the right
+# answer for a machine this feature does not apply to.
+#
+# LINKED BUT NOT ENABLED, deliberately. ./install symlinks this unit; it does not
+# start it. An unattended deleter is a gate Zvi arms by hand, after reading one
+# real dry run:
+#   scripts/wt-gc-sweep.sh --dry-run
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now wt-gc-sweep.timer
+# Never `systemctl --user reenable` — its disable half deletes the dotbot symlink
+# that IS the unit. See systemd/herdr-server.service's [Install] note.
+#
+# Watch it:  journalctl --user -u wt-gc-sweep.service -e
+# Audit it:  ~/.local/state/wt-gc-sweep/log, and last-run.tsv for the full report
+
+[Unit]
+Description=Remove landed agent worktrees and their local branches
+Documentation=file://%h/.dotfiles/scripts/wt-gc-sweep.sh
+ConditionPathExists=%h/.local/bin/wt-gc
+
+[Service]
+Type=oneshot
+# A user unit has no login shell, so PATH is systemd's own and does NOT include
+# ~/.local/bin, which is the one directory that matters here: every other tool
+# wt-gc needs (git, gh, jq, awk, date, realpath) is in /usr/bin already.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.dotfiles/scripts/wt-gc-sweep.sh
+Nice=10
+IOSchedulingClass=idle
+# The run is dominated by one `gh pr list` per candidate branch, so its duration
+# scales with how much has accumulated and how slow GitHub is today. A cap that
+# is too tight turns a slow night into a failed unit; one that is absent lets a
+# hung network call block every later run, since Type=oneshot has no start
+# timeout by default and the timer will not fire while the last run is active.
+TimeoutStartSec=30min
+
+[Install]
+# default.target, not graphical-session.target: this needs no session environment
+# — only files under $HOME and a network call. Linger=yes on this account brings
+# the user manager up at boot, so it runs across logout.
+#
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK — run ./install.
+WantedBy=default.target
