@@ -12,6 +12,14 @@ FIX = Path(__file__).parent / "fixtures" / "config"
 
 
 class PinGateCmdTests(unittest.TestCase):
+    def setUp(self):
+        # The usage-error rows below drive `run_cli` and are safe ONLY while argparse rejects
+        # before `Context.from_namespace` runs. Remove that guard and they write rabota.db into
+        # the tenant's CONFIGURED state dir — the real one (finding F23, DO-680a review, which
+        # measured exactly that). A fixture $HOME makes them safe by construction instead.
+        from tests.test_cli import install_fixture_home
+        install_fixture_home(self)
+
     def ctx(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
@@ -47,12 +55,14 @@ class PinGateCmdTests(unittest.TestCase):
         # interpreter — a subparser's ``error()`` is never routed through ``cli.py``'s
         # ``parser.error`` override, so missing ``--file`` on ``ingest`` behaves the same way.
         with self.assertRaises(SystemExit) as cm:
-            run_cli(["--tenant", "quantivly", "pin", "HUB-1", "--rationale", "why"])
+            run_cli(["--tenant", "quantivly", "--state-dir", str(self.home / "s"),
+                     "pin", "HUB-1", "--rationale", "why"])
         self.assertEqual(cm.exception.code, 2)
 
     def test_bad_bucket_refuses_rather_than_coercing(self):
         with self.assertRaises(SystemExit) as cm:
-            run_cli(["--tenant", "quantivly", "pin", "HUB-1", "--bucket", "not-an-int", "--rationale", "why"])
+            run_cli(["--tenant", "quantivly", "--state-dir", str(self.home / "s"),
+                     "pin", "HUB-1", "--bucket", "not-an-int", "--rationale", "why"])
         self.assertEqual(cm.exception.code, 2)
 
     # gate
@@ -88,3 +98,78 @@ class PinGateCmdTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PinGateCliWiringTests(unittest.TestCase):
+    """The registration line and the argparse -> run_* dispatch, which the rows above cannot see.
+
+    Those rows call ``run_pin``/``run_gate`` directly and import the command modules, which
+    registers them regardless of ``cli.COMMAND_MODULES`` — so deleting both names from that list
+    left the whole suite green while the CLI answered ``invalid choice: 'pin'`` (DO-680a review).
+    Hardcoding ``bucket=2`` in ``pin._run``, or swapping subject and label in ``gate._run``,
+    survived just as quietly. These drive ``cli.main``, the only path a user takes.
+    """
+
+    def setUp(self):
+        from tests.test_cli import install_fixture_home
+        install_fixture_home(self)
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        self.state = str(Path(tmp.name))
+
+    def run_cli(self, *args):
+        """``(code, parsed)`` — both streams, since a refusal prints to stderr, and a strict
+        interpreter may print a warning ahead of the JSON."""
+        import contextlib, io, json as _json, re as _re
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--tenant", "quantivly", "--state-dir", self.state, *args])
+        raw = out.getvalue() + err.getvalue()
+        m = _re.search(r"\{[\s\S]*\}", raw)
+        return code, (_json.loads(m.group(0)) if m else raw)
+
+    def test_the_command_modules_entry_is_what_registers_them(self):
+        """A SUBPROCESS, deliberately — this is the only row that can see the registration line.
+
+        Every in-process row imports ``rabota.commands.pin``/``gate``, and importing a command
+        module calls ``cli.register`` on it, so the subcommand exists whether or not
+        ``cli.COMMAND_MODULES`` names it. Dropping both names left all 571 tests green while
+        ``rabota pin`` answered ``invalid choice`` (DO-680a review). A fresh interpreter imports
+        only what ``_load_command_modules`` walks, which is the thing under test.
+        """
+        import os, subprocess, sys
+        for cmd in ("pin", "gate"):
+            with self.subTest(cmd=cmd):
+                r = subprocess.run([sys.executable, "-m", "rabota", "--tenant", "quantivly",
+                                    "--state-dir", self.state, cmd, "--help"],
+                                   capture_output=True, text=True,
+                                   cwd=str(Path(__file__).resolve().parents[1]),
+                                   env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])})
+                self.assertEqual(r.returncode, 0, f"{cmd}: {r.stderr[:200]}")
+                self.assertNotIn("invalid choice", r.stderr)
+
+    def test_pin_is_registered_and_its_flags_reach_the_command(self):
+        """The dispatch: hardcode `bucket=2` in `pin._run` and this row is what fails."""
+        code, body = self.run_cli("pin", "ENG-7", "--bucket", "2", "--rationale", "promised Thursday")
+        self.assertEqual(code, 0)
+        self.assertEqual((body["item_key"], body["bucket"], body["rationale"]),
+                         ("ENG-7", 2, "promised Thursday"))
+
+    def test_gate_is_registered_and_subject_and_label_are_not_swapped(self):
+        code, body = self.run_cli("gate", "--subject", "merge #202", "--label", "yes")
+        self.assertEqual(code, 0)
+        self.assertEqual((body["subject"], body["label"]), ("merge #202", "yes"))
+
+    def test_a_bucket_rank_never_reads_is_refused(self):
+        """A pin in bucket 3 is stored and never scheduled — a silent no-op, so refuse it."""
+        code, body = self.run_cli("pin", "ENG-8", "--bucket", "3", "--rationale", "why")
+        self.assertEqual(code, 2)
+        self.assertIn("not read by rank", body["error"]["message"])
+
+    def test_empty_values_are_refused(self):
+        for args in (("pin", "  ", "--bucket", "2", "--rationale", "why"),
+                     ("pin", "ENG-9", "--bucket", "2", "--rationale", "  "),
+                     ("gate", "--subject", " ", "--label", "yes"),
+                     ("gate", "--subject", "s", "--label", " ")):
+            with self.subTest(args=args):
+                code, _ = self.run_cli(*args)
+                self.assertEqual(code, 2)

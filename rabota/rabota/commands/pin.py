@@ -7,7 +7,7 @@
 key is an upsert: the newest bucket/rationale/ts wins and there is never more than one open pin per
 key — the shape a re-run of the same promise wants, not a growing log of restatements.
 """
-from rabota import cli
+from rabota import cli, errors
 from rabota.context import Context
 
 
@@ -24,7 +24,21 @@ def _build(sub):
     p.add_argument("--rationale", required=True)
 
 
+#: The only bucket `rank` reads a pin into. Buckets 3-5 exist in `rank`, but they are built from
+#: issues and PRs, not from pins — a pin in one is stored and never scheduled, which is a silent
+#: no-op the caller has no way to notice.
+PINNABLE_BUCKETS = (2,)
+
+
 def _run(ns):
+    if ns.bucket not in PINNABLE_BUCKETS:
+        raise errors.Usage(
+            f"--bucket {ns.bucket} is not read by rank; only {', '.join(map(str, PINNABLE_BUCKETS))} "
+            "schedules a pin, and a pin in any other bucket would be stored and silently ignored")
+    if not ns.key.strip():
+        raise errors.Usage("the pin key must not be empty")
+    if not ns.rationale.strip():
+        raise errors.Usage("--rationale must not be empty; it is what the brief shows for the pin")
     return run_pin(Context.from_namespace(ns), ns.key, ns.bucket, ns.rationale)
 
 

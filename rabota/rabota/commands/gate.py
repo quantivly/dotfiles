@@ -5,7 +5,7 @@ person through. A plain ``INSERT`` (no upsert): each answered gate is its own ev
 append-only log, so re-running the same ``--subject``/``--label`` records a second, independent
 answer rather than overwriting the first.
 """
-from rabota import cli
+from rabota import cli, errors
 from rabota.context import Context
 
 
@@ -22,6 +22,11 @@ def _build(sub):
 
 
 def _run(ns):
+    # A blank subject or label makes a durable record that says nothing: "the gate was answered: ".
+    if not ns.subject.strip():
+        raise errors.Usage("--subject must not be empty; it is what the record says was gated")
+    if not ns.label.strip():
+        raise errors.Usage("--label must not be empty; it is the answer the record preserves")
     return run_gate(Context.from_namespace(ns), ns.subject, ns.label)
 
 
