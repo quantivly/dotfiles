@@ -12,7 +12,7 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 #
-# EXIT CODE: non-zero if and only if one of the four ASSERTION sections FAILs:
+# EXIT CODE: non-zero if and only if one of the five ASSERTION sections FAILs:
 # "herdr server environment hygiene" — forbidden variables in the running
 # server's environment, a teammux shim dir on its PATH, or session variables the
 # session provides that the server does not have — or "systemd user unit
@@ -31,6 +31,12 @@
 # ./install renders, and without it the unit fails at start with 203/EXEC. It
 # cannot be caught live — a running server keeps its old ExecStart until a
 # restart that ends every agent session — so it is asserted from the files.
+# The FIFTH is "repo-owned timer health": enablement says a unit is wired up, not
+# that it ever ran. Until this existed, a failed claude-cred-reconcile,
+# rabota-precompute@ or wt-gc-sweep sat failed indefinitely — and a SKIPPED one
+# (an unmet ConditionPathExists) is not even failed: Result stays success and
+# nothing appears in --state=failed. wt-gc-sweep deletes worktrees unattended, so
+# it was armed into a system with nothing listening.
 # Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
@@ -75,13 +81,13 @@ case "$#:${1:-}" in
 Usage: verify-tools.sh [--herdr]
   (no args)  full report: every tool this repo declares, plus the herdr checks
   --herdr    ONLY the herdr checks -- server env, unit enablement, unit
-             ExecStart, plugin deps under the server PATH, and Claude Code
-             wiring. For a machine that ran `./install --herdr` and linked five
-             files, not eighteen.
+             ExecStart, timer health, plugin deps under the server PATH, and
+             Claude Code wiring. For a machine that ran `./install --herdr` and
+             linked five files, not eighteen.
 
 EXIT: non-zero if a herdr assertion FAILs (server env, unit enablement, unit
-ExecStart, Claude Code wiring). Missing optional tools and mise drift stay
-informational.
+ExecStart, timer health, Claude Code wiring). Missing optional tools and mise
+drift stay informational.
 USAGE
         exit 0 ;;
     *)
@@ -559,6 +565,33 @@ else
     # A FAIL, not a note: this is one of the assertions the exit code is built
     # on, and "the checker is missing" is not a pass.
     echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/herdr-unit-dropin.sh missing — ExecStart UNCHECKED"
+    herdr_hygiene_failed=1
+fi
+
+echo ""
+echo -e "${BLUE}=== Repo-owned systemd user timer health ===${NC}"
+# Also an ASSERTION (see EXIT CODE in the header). The section above asks whether
+# a unit is ENABLED; this one asks whether it RAN, whether it SUCCEEDED, and
+# whether it is still firing on its own schedule — three things that can each be
+# false while the other two look fine.
+#
+# The third is the one nothing here had: an unmet ConditionPathExists makes
+# systemd SKIP a unit, and a skipped unit is not a failed one — no error, nothing
+# in `--state=failed`, and Result STAYS success. wt-gc-sweep.service has exactly
+# such a condition and deletes worktrees and branches unattended at 04:00.
+#
+# Delegated, like the two sections above it, so the logic is testable on its own
+# (scripts/test-timer-health.sh, hermetic behind a systemctl stub) rather than
+# only through this 700-line report. Exit 2 from it means "could not run", which
+# is a FAIL here and never a pass.
+if [[ -x "$DOTFILES_ROOT/scripts/check-timer-health.sh" ]]; then
+    if ! "$DOTFILES_ROOT/scripts/check-timer-health.sh" --check; then
+        herdr_hygiene_failed=1
+    fi
+else
+    # A FAIL, not a note: this is one of the assertions the exit code is built
+    # on, and "the checker is missing" is not a pass.
+    echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/check-timer-health.sh missing — timer health UNCHECKED"
     herdr_hygiene_failed=1
 fi
 

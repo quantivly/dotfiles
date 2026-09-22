@@ -227,6 +227,28 @@ jobs:
       - name: Run the wt-gc-sweep state table
         run: ./scripts/test-wt-gc-sweep.sh
 
+  timer-health-test:
+    name: Repo-Owned Timer Health State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
+
+      # Every row runs against a recording systemctl stub at the front of PATH —
+      # never against a runner that happens to have no user manager. A suite
+      # built on that absence passes here and tells a developer's machine, which
+      # has a live manager holding the herdr server and an armed wt-gc-sweep,
+      # nothing at all.
+      - name: Run the timer-health state table
+        run: ./scripts/test-timer-health.sh
+
   claude-doctor-test:
     name: Claude Account & MCP Doctor State Table
     runs-on: ubuntu-latest

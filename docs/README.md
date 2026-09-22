@@ -51,6 +51,7 @@ skill rather than reading the records end to end.
 | [HERDR_GUIDE.md](HERDR_GUIDE.md) | adopting herdr: workspaces, tabs, panes, agent detection | guide |
 | [HERDR_INTERNALS.md](HERDR_INTERNALS.md) | this repo's herdr integration: both install paths, the systemd unit and drop-in, the sidebar publisher, every trap and its state table | record |
 | [WORKTREE_SWEEP.md](WORKTREE_SWEEP.md) | why landed agent worktrees and their local branches are swept on a timer, the blast radius, the branch predicate and the mutation sweep | record |
+| [TIMER_HEALTH.md](TIMER_HEALTH.md) | why nothing noticed a failed or silently SKIPPED repo-owned user timer, what `systemctl` reports wrongly about one, and how freshness is derived from the schedule rather than tabulated | record |
 
 ## Security
 
