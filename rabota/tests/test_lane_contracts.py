@@ -38,6 +38,29 @@ class ContractTests(unittest.TestCase):
         smoke = Path(__file__).parent.parent / "briefs" / "smoke.md"
         self.assertEqual(brief.validate(smoke)["title"], "Smoke: prove the lane substrate")
 
+    def test_an_unreadable_verdict_is_a_verdict_error_not_an_oserror(self):
+        """DO-670 review: a mode-0 verdict escaped as PermissionError, which `lane recipe` does
+        not catch — the CLI exited 5 with a traceback instead of refusing. Unreadable is a
+        refusal like absent is."""
+        import os
+        if os.geteuid() == 0:
+            self.skipTest("root reads a mode-0 file, so this row cannot hold")
+        p = self.tmpfile(json.dumps({"lane": "l1", "status": "done", "claims": [],
+                                     "deliverables": [], "followups": []}))
+        p.chmod(0o000)
+        self.addCleanup(p.chmod, 0o600)
+        with self.assertRaises(verdict.VerdictError):
+            verdict.validate(p, 4096)
+
+    def test_verdict_text_and_file_apply_the_same_rules(self):
+        """The remote path validates content someone else fetched; it must not be a second,
+        laxer implementation of the shape rules."""
+        bad = '{"lane": "x"}'
+        with self.assertRaises(verdict.VerdictError):
+            verdict.validate_text(bad, 4096, where="dev:/o/verdict.json")
+        with self.assertRaises(verdict.VerdictError):
+            verdict.validate(self.tmpfile(bad), 4096)
+
     def test_verdict_ok_and_oversize(self):
         v = {"lane": "l1", "status": "done", "claims": [{"id": "c1", "text": "t", "evidence": {"cmd": "true", "expected": "", "observed": ""}, "confidence": "high"}],
              "deliverables": [], "followups": []}
