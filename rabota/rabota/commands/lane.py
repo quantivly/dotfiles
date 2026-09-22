@@ -134,6 +134,7 @@ def send_brief(ctx, machine, remote_path: str, text: str) -> None:
         raise errors.RabotaError(f"could not write the brief to {machine.name}: {(res.err or res.out).strip()}")
 
 
+REMOTE_VERDICT_TIMEOUT = 60  # seconds; one `head -c` of at most a few KB over ssh
 REMOTE_WORKTREE_TIMEOUT = 300  # seconds; git fetch + worktree add on a large repo can run well past 60s
 
 REMOTE = "origin"  # every repo under [machines.dev].repos uses this remote name today; hardcoded
@@ -212,6 +213,22 @@ def _remove_worktree_remote(ctx, machine, repo_path: str, worktree: str) -> None
         ctx.runner.run(remote.ssh_argv(machine, cmd))
     except Exception:  # noqa: BLE001 — deliberately swallowed; see docstring
         pass
+
+
+def read_remote_verdict(ctx, machine, path: str, max_bytes: int) -> dict:
+    """Fetch and validate a verdict that lives on ``machine``, in one ssh call.
+
+    ``head -c max_bytes+1`` bounds the transfer at the source: an oversized verdict is refused on
+    the byte after the limit rather than streamed across and measured here. A non-zero exit covers
+    absent, unreadable and unreachable alike — all of which are "no verdict we can trust", which is
+    a refusal, never room (the rule ``budget`` holds for an unmeasured dimension).
+    """
+    cmd = " ".join(remote.shquote(p) for p in ["head", "-c", str(max_bytes + 1), "--", path])
+    res = ctx.runner.run(remote.ssh_argv(machine, cmd), timeout=REMOTE_VERDICT_TIMEOUT)
+    if not res.ok:
+        raise lanes_verdict.VerdictError(
+            f"no readable verdict at {path} on {machine.name}: {(res.err or res.out).strip()[:160]}")
+    return lanes_verdict.validate_text(res.out, max_bytes, where=f"{path} on {machine.name}")
 
 
 def resolve_remote(ctx, machine) -> dict:
@@ -323,6 +340,11 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         of_lane = ctx.store.get_lane(of)
         if of_lane is None:
             raise errors.Refused(f"no lane {of!r}: --of must name an existing lane row")
+        if of_lane.get("tenant") != ctx.tenant.name:
+            # `--state-dir` is overridable, so one tenant's store can be pointed at another's rows.
+            # Evaluating across that line would bill THIS tenant's seat for another's work.
+            raise errors.Refused(
+                f"lane {of!r} belongs to tenant {of_lane.get('tenant')!r}, not {ctx.tenant.name!r}")
         if of_lane.get("kind") == "evaluate":
             # Decision (DO-670), taken by the implementing lane because the spec does not say
             # either way, and recorded here rather than left implicit: refused rather than allowed.
@@ -340,10 +362,10 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
                 "(remote-lanes design §4.5)")
         machine = of_lane["machine"]
         verdict_path = Path(of_lane["out_dir"]) / "verdict.json"
-        try:
-            lanes_verdict.validate(verdict_path, ctx.tenant.lanes.max_verdict_bytes)
-        except lanes_verdict.VerdictError as e:
-            raise errors.Refused(f"lane {of!r} has no readable verdict: {e}") from e
+        # NOT validated here. `out_dir` is a path on `of_lane`'s OWN machine, so for a remote lane
+        # this process cannot stat it — checking it locally refused every real dev lane and passed
+        # only because a fixture paired machine="dev" with a local tmpdir (DO-670 review). The
+        # check moved below, after the budget gate, where it may spend an ssh round trip.
     elif machine is None:
         machine = "local"
 
@@ -365,6 +387,21 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
                            or "no lane capacity")
         e.budget = b
         raise e
+
+    if kind == "evaluate":
+        # AFTER the gate on purpose: a remote check is an ssh call, and nothing touches a machine
+        # until the budget has allowed the lane. It runs for a DRY render too — `resolve_remote`
+        # already ssh's on that path to print a resolved claude path, so withholding this one
+        # would buy no quiet and would let `--kind evaluate` render a recipe for a verdict that
+        # is not there.
+        max_v = ctx.tenant.lanes.max_verdict_bytes
+        try:
+            if of_lane["machine"] == "local":
+                lanes_verdict.validate(verdict_path, max_v)
+            else:
+                read_remote_verdict(ctx, m, str(verdict_path), max_v)
+        except lanes_verdict.VerdictError as e:
+            raise errors.Refused(f"lane {of!r} has no readable verdict: {e}") from e
 
     slug = Path(brief).stem if kind == "work" else f"evaluate-{of}"
     unit = unit_name(ctx.tenant.name, slug)
@@ -391,8 +428,17 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     worktree = str(root / "worktrees" / ctx.tenant.name / lane_id)
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
     remote_brief = f"{out_dir}/brief.md"
-    brief_text = (lanes_brief.render_evaluate(of_lane, verdict_path, out_dir)
-                  if kind == "evaluate" else None)
+    if kind == "evaluate":
+        # `of_lane["brief"]` is the path the ORIGINAL --brief named, which for a dev lane is a file
+        # on the laptop. The evaluate lane runs on dev and cannot open it, so the template would
+        # have pointed a reader at a path that does not exist there. Point it instead at the copy
+        # `send_brief` wrote into the evaluated lane's own out_dir, which is on the same machine as
+        # the evaluate lane by §4.5 and is the exact text that lane was given.
+        of_for_template = dict(of_lane)
+        of_for_template["brief"] = f"{of_lane['out_dir']}/brief.md"
+        brief_text = lanes_brief.render_evaluate(of_for_template, verdict_path, out_dir)
+    else:
+        brief_text = None
 
     argv = build_local(ctx, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,

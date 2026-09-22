@@ -644,22 +644,37 @@ class EvaluateRecipeTests(LocalRecipeTests):
     """
 
     OF_ID = "of000001"
+    MAX_VERDICT = 4096   # config.LaneDefaults.max_verdict_bytes; the fixture config does not override it
     VALID_VERDICT = {"lane": OF_ID, "status": "done",
                       "claims": [{"id": "c1", "text": "t",
                                   "evidence": {"cmd": "true", "expected": "0", "observed": "0"},
                                   "confidence": "high"}],
                       "deliverables": [], "followups": []}
 
+    # A path on DEV. It must NOT exist on the box running these tests: the bug this class now
+    # pins (DO-670 review) was a local Path.exists() against a remote out_dir, which every real
+    # dev lane failed and every test passed — because the fixture paired machine="dev" with a
+    # local tmpdir, so the file was there. A remote verdict is reached over ssh or not at all.
+    REMOTE_OUT_ROOT = "/home/ubuntu/.local/state/rabota/out/quantivly"
+
     def of_out_dir(self):
         p = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, p, ignore_errors=True)
         return p
 
-    def insert_of_lane(self, ctx, *, machine="dev", kind="work", out_dir=None, lane_id=None):
+    def verdict_response(self, payload=None, *, raw=None):
+        """What `head -c` on the evaluated lane's machine returns for a readable verdict."""
+        return Result(0, raw if raw is not None else json.dumps(payload or self.VALID_VERDICT), "")
+
+    NO_VERDICT = Result(1, "", "head: cannot open '.../verdict.json' for reading: No such file")
+
+    def insert_of_lane(self, ctx, *, machine="dev", kind="work", out_dir=None, lane_id=None,
+                       tenant="quantivly"):
         lane_id = lane_id or self.OF_ID
-        out_dir = out_dir if out_dir is not None else self.of_out_dir()
+        if out_dir is None:
+            out_dir = self.of_out_dir() if machine == "local" else f"{self.REMOTE_OUT_ROOT}/{lane_id}"
         ctx.store.insert_lane({
-            "id": lane_id, "tenant": "quantivly", "kind": kind, "brief": "/b/brief.md",
+            "id": lane_id, "tenant": tenant, "kind": kind, "brief": "/b/brief.md",
             "repo": "hub", "worktree": "/w/t", "out_dir": str(out_dir), "machine": machine,
             "unit": f"rabota-lane-quantivly-{lane_id}.service", "session_id": "sess-of",
             "model": "claude-sonnet-5", "effort": "medium", "status": "done",
@@ -685,7 +700,7 @@ class EvaluateRecipeTests(LocalRecipeTests):
 
     def test_an_unknown_of_lane_refuses(self):
         ctx = self.ctx(FakeRunner([]))
-        with self.assertRaises(errors.Refused):
+        with self.assertRaisesRegex(errors.Refused, "nosuchlane"):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(of="nosuchlane"))
 
     def test_of_without_kind_evaluate_is_a_usage_error(self):
@@ -709,31 +724,69 @@ class EvaluateRecipeTests(LocalRecipeTests):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(brief="/b/other.md"))
 
     def test_a_missing_verdict_refuses(self):
-        ctx = self.ctx(FakeRunner([]))
-        _, out_dir = self.insert_of_lane(ctx)  # no verdict.json written
-        with self.assertRaises(errors.Refused):
-            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        runner = SequencedRunner([self.NO_VERDICT])
+        ctx = self.ctx(runner)
+        of_id, out_dir = self.insert_of_lane(ctx)
+        with self.assertRaisesRegex(errors.Refused, of_id):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
 
     def test_an_oversized_verdict_refuses(self):
-        ctx = self.ctx(FakeRunner([]))
-        _, out_dir = self.insert_of_lane(ctx)
-        self.write_verdict(out_dir, raw="x" * (ctx.tenant.lanes.max_verdict_bytes + 1))
-        with self.assertRaises(errors.Refused):
-            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        ctx = self.ctx(SequencedRunner([self.verdict_response(
+            raw="x" * (self.MAX_VERDICT + 1))]))
+        self.insert_of_lane(ctx)
+        with self.assertRaisesRegex(errors.Refused, "bytes"):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
 
     def test_an_invalid_verdict_shape_refuses(self):
+        ctx = self.ctx(SequencedRunner([self.verdict_response(raw='{"lane": "x"}')]))
+        self.insert_of_lane(ctx)
+        with self.assertRaisesRegex(errors.Refused, "missing keys"):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+
+    def test_the_verdict_is_read_from_the_evaluated_lanes_machine(self):
+        """The row that would have caught the original defect: the verdict is fetched over ssh,
+        bounded at the source, from the path on the machine that wrote it."""
+        runner = SequencedRunner([self.verdict_response()] + [Result(0, self.RESOLVE_OUT, "")] * 4)
+        ctx = self.ctx(runner)
+        of_id, out_dir = self.insert_of_lane(ctx)
+        lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                        **self.kw(run=True, base="origin/main"))
+        first = " ".join(runner.calls[0])
+        self.assertIn("ssh", first)
+        self.assertIn(f"{out_dir}/verdict.json", first)
+        self.assertIn(str(self.MAX_VERDICT + 1), first)   # head -c bounds it at the source
+
+    def test_a_dry_render_still_refuses_a_missing_remote_verdict(self):
+        """The dry form checks it too. `resolve_remote` already ssh's on this path to resolve the
+        claude binary, so there is no quiet to preserve — and rendering a recipe for a verdict
+        that is not there would print a command guaranteed to fail."""
+        ctx = self.ctx(SequencedRunner([self.NO_VERDICT]))
+        of_id, _ = self.insert_of_lane(ctx)
+        with self.assertRaisesRegex(errors.Refused, of_id):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=False))
+
+    def test_a_local_evaluated_lanes_verdict_is_read_on_this_machine(self):
+        """The local path still validates from the filesystem, with no ssh at all."""
+        runner = FakeRunner([])
+        ctx = self.ctx(runner)
+        _, out_dir = self.insert_of_lane(ctx, machine="local")
+        self.write_verdict(out_dir, raw='{"lane": "x"}')
+        with self.assertRaisesRegex(errors.Refused, "missing keys"):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=False))
+        self.assertEqual(runner.calls, [])
+
+    def test_an_of_lane_from_another_tenant_refuses(self):
         ctx = self.ctx(FakeRunner([]))
-        _, out_dir = self.insert_of_lane(ctx)
-        self.write_verdict(out_dir, raw='{"lane": "x"}')  # missing required keys
-        with self.assertRaises(errors.Refused):
-            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        self.insert_of_lane(ctx, tenant="toysim")
+        with self.assertRaisesRegex(errors.Refused, "toysim"):
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
 
     def test_a_disagreeing_machine_refuses_before_touching_anything(self):
         runner = FakeRunner([])
         ctx = self.ctx(runner)
-        _, out_dir = self.insert_of_lane(ctx, machine="dev")
-        self.write_verdict(out_dir)
-        with self.assertRaises(errors.Refused):
+        self.insert_of_lane(ctx, machine="dev")
+        # No verdict is staged at all: this refusal must land BEFORE anything reads one.
+        with self.assertRaisesRegex(errors.Refused, "same machine"):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(machine="local"))
         self.assertEqual(runner.calls, [])
 
@@ -741,30 +794,32 @@ class EvaluateRecipeTests(LocalRecipeTests):
         # Decision (DO-670): an evaluate lane may not itself be evaluated — see run_recipe's
         # docstring for why. This is the row that pins the decision.
         ctx = self.ctx(FakeRunner([]))
-        _, out_dir = self.insert_of_lane(ctx, kind="evaluate")
-        self.write_verdict(out_dir)
-        with self.assertRaises(errors.Refused):
+        self.insert_of_lane(ctx, kind="evaluate")
+        with self.assertRaisesRegex(errors.Refused, "itself an evaluate lane"):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
 
     def test_the_rendered_brief_is_the_templates_output(self):
         ok = Result(0, self.RESOLVE_OUT, "")
-        runner = SequencedRunner([ok, ok, ok, ok])
+        runner = SequencedRunner([self.verdict_response(), ok, ok, ok, ok])
         ctx = self.ctx(runner)
         _, out_dir = self.insert_of_lane(ctx)
-        self.write_verdict(out_dir)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
                               **self.kw(run=True, base="origin/main"))
-        sent = runner.inputs[2]  # resolve, fetch+worktree, brief send, unit start
-        of_lane = ctx.store.get_lane(self.OF_ID)
+        sent = runner.inputs[3]  # verdict read, resolve, fetch+worktree, brief send, unit start
+        of_lane = dict(ctx.store.get_lane(self.OF_ID))
+        # The evaluate lane runs on dev and can only open the brief COPY in the evaluated lane's
+        # out_dir — never the laptop path the original --brief named.
+        of_lane["brief"] = f"{out_dir}/brief.md"
         expected = lanes_brief.render_evaluate(of_lane, Path(out_dir) / "verdict.json", out["out_dir"])
         self.assertEqual(sent, expected)
+        self.assertIn(f"{out_dir}/brief.md", sent)
+        self.assertNotIn("/b/brief.md", sent)
 
     def test_the_row_carries_kind_evaluate_and_of_lane(self):
         ok = Result(0, self.RESOLVE_OUT, "")
-        runner = SequencedRunner([ok, ok, ok, ok])
+        runner = SequencedRunner([self.verdict_response(), ok, ok, ok, ok])
         ctx = self.ctx(runner)
         _, out_dir = self.insert_of_lane(ctx)
-        self.write_verdict(out_dir)
         lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
                         **self.kw(run=True, base="origin/main"))
         rows = ctx.store.list_lanes("quantivly")
@@ -774,20 +829,18 @@ class EvaluateRecipeTests(LocalRecipeTests):
 
     def test_the_machine_is_inherited_from_the_evaluated_lane_when_not_given(self):
         ok = Result(0, self.RESOLVE_OUT, "")
-        runner = SequencedRunner([ok, ok, ok, ok])
+        runner = SequencedRunner([self.verdict_response(), ok, ok, ok, ok])
         ctx = self.ctx(runner)
         _, out_dir = self.insert_of_lane(ctx, machine="dev")
-        self.write_verdict(out_dir)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
                               **self.kw(run=True, base="origin/main", machine=None))
         self.assertEqual(out["machine"], "dev")
 
     def test_a_machine_agreeing_with_the_evaluated_lane_is_harmless(self):
         ok = Result(0, self.RESOLVE_OUT, "")
-        runner = SequencedRunner([ok, ok, ok, ok])
+        runner = SequencedRunner([self.verdict_response(), ok, ok, ok, ok])
         ctx = self.ctx(runner)
         _, out_dir = self.insert_of_lane(ctx, machine="dev")
-        self.write_verdict(out_dir)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
                               **self.kw(run=True, base="origin/main", machine="dev"))
         self.assertEqual(out["machine"], "dev")
