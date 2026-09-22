@@ -324,8 +324,9 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         if of_lane is None:
             raise errors.Refused(f"no lane {of!r}: --of must name an existing lane row")
         if of_lane.get("kind") == "evaluate":
-            # Decision (DO-670, Zvi): refused rather than allowed. The spec does not say either
-            # way; an evaluate lane's own verdict is about the THOROUGHNESS of its evaluation, not
+            # Decision (DO-670), taken by the implementing lane because the spec does not say
+            # either way, and recorded here rather than left implicit: refused rather than allowed.
+            # An evaluate lane's own verdict is about the THOROUGHNESS of its evaluation, not
             # a claim about the original work, so a further evaluate lane would have nothing
             # meaningful to re-derive against — and nothing here bounds how deep such a chain
             # could go. Refusing keeps "evaluate" one level deep, which is all remote-lanes design
