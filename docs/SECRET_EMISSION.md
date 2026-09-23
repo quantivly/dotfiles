@@ -104,6 +104,16 @@ Design decisions that are load-bearing, not preferences:
   source* trips the `/proc/*cmdline*` rule — which happened while editing the guard, and the
   workaround is the documented one (pipe through the redactor). Worth knowing before assuming
   a refusal means the command really would have leaked.
+- **A credential with no distinctive shape is invisible to the redactor AT REST, and that is
+  not a bug in it.** Its name rules are anchored on real whitespace and terminated on real
+  whitespace; inside a `.jsonl` transcript the newlines are escaped `\n` within a JSON string,
+  so the anchor never matches — and the terminator would swallow the rest of the line, so
+  loosening the anchor alone would mangle transcripts rather than redact them. Both ends are
+  wrong for that grammar, which is why the file-at-rest job is a separate tool
+  (`scripts/scrub-transcript-secrets.py`, on a nightly timer) rather than another `-e` here.
+  Found 2026-09-23, when a `SONIOX_API_KEY` survived in a transcript while the GitHub and
+  Linear keys beside it were caught by shape. The audit, the scrub and the cadence:
+  [TRANSCRIPT_SCRUB.md](TRANSCRIPT_SCRUB.md).
 
 **`.gitignore`'s `**/*secret*` rule excluded all three of these files**, whose entire job
 is secrets — and `git add -A` skips ignored paths **silently**, so `git commit`, `git push`
@@ -118,6 +128,6 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (79 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (192 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data).

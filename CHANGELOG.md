@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Credentials left in Claude Code transcripts are now scrubbed on a schedule.** An audit on
+  2026-09-23 found **154 of 2,344 transcripts carrying live credentials — 521 occurrences**, put
+  there by a program logging its own environment. `claude/hooks/secret-emission-guard.sh` is a
+  `PreToolUse` hook on `Bash` and cannot observe a program's own file write, so prevention cannot
+  close this and periodic scrubbing is what is left. `scripts/scrub-transcript-secrets.py` is the
+  file-at-rest half of the pair whose other half is `scripts/redact-secrets.sh`; a daily
+  `scrub-transcript-secrets.timer` runs it. **Linked, not enabled** — it rewrites session
+  transcripts unattended, which is the exact act the Claude Code permission classifier refuses an
+  agent, so arming it is a typed command after one real dry run. Its roots are **derived**, not
+  hardcoded: every session gets its own account dir here, and 58 transcripts under
+  `~/.local/state/claude-account-dirs/*/projects` had never been scanned by anything. State table:
+  `scripts/test-scrub-transcript-secrets.sh` (54 checks, hermetic, run in CI).
+  [docs/TRANSCRIPT_SCRUB.md](docs/TRANSCRIPT_SCRUB.md).
+
 - **A failed or skipped repo-owned timer now reaches you without being asked (DO-687).**
   `check-timer-health.sh` asserted that user timers ran and succeeded, but only when someone ran
   `verify-tools.sh` — so a `wt-gc-sweep` that started failing at 04:00, or fell silent under an

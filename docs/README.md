@@ -66,6 +66,7 @@ skill rather than reading the records end to end.
 |---|---|---|
 | [SECURITY_INCIDENTS.md](SECURITY_INCIDENTS.md) | step-by-step response when a secret **has already been committed** | guide |
 | [SECRET_EMISSION.md](SECRET_EMISSION.md) | **preventing** an emission: the 2026-09-01 transcript audit, the redactor, the `PreToolUse` guard, and every hole since found in them | record |
+| [TRANSCRIPT_SCRUB.md](TRANSCRIPT_SCRUB.md) | **removing** a credential already on disk: the 2026-09-23 transcript audit, why the pipe redactor cannot see a credential at rest, and the nightly scrub | record |
 | [AUDIT_TRIPWIRE.md](AUDIT_TRIPWIRE.md) | the `kill(-1, sig)` auditd rule: why the `a0` constant must stay 32 bits, and each way "armed" can be silently false | record |
 | [GH_ACCOUNT_ROUTING.md](GH_ACCOUNT_ROUTING.md) | how `gh` picks a GitHub account and how it gets it wrong: the measured keyring collapse, the routing table, and every trap in `gh-doctor` and the `chpwd` hook | record |
 

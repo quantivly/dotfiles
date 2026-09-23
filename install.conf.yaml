@@ -107,6 +107,15 @@
     # SKIP it on a machine that has no such thing, which is not a failure.
     ~/.config/systemd/user/wt-gc-sweep.service: systemd/wt-gc-sweep.service
     ~/.config/systemd/user/wt-gc-sweep.timer: systemd/wt-gc-sweep.timer
+    # Daily scrub of credentials out of Claude Code transcripts. Linked, NOT
+    # enabled, for the same reason as wt-gc-sweep above and one of its own: it
+    # rewrites session transcripts unattended, which is the exact act the Claude
+    # Code permission classifier refuses an agent outright. Arming is a typed
+    # command after one real dry run (`scripts/scrub-transcript-secrets.py
+    # --dry-run`). Its ConditionPathExists=%h/.claude/projects makes systemd SKIP
+    # it on a machine with no Claude Code, which is not a failure.
+    ~/.config/systemd/user/scrub-transcript-secrets.service: systemd/scrub-transcript-secrets.service
+    ~/.config/systemd/user/scrub-transcript-secrets.timer: systemd/scrub-transcript-secrets.timer
     # VPN tunnel-down notifier (DO-692). Linked, NOT enabled — arming it is a
     # typed command, like wt-gc-sweep above, because a notifier that cries wolf
     # is one people learn to dismiss and the threshold wants tuning from real

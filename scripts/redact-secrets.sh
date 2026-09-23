@@ -31,6 +31,25 @@
 # false-positiving on arbitrary hex. Neither is sufficient; the gap was found by
 # running the pair against a real `printenv` and noticing what survived.
 #
+# A THIRD CASE THAT PARAGRAPH DOES NOT COVER: THE SAME CREDENTIAL AT REST. Both
+# name rules are anchored `(^|[[:space:]])` and terminated `[^[:space:]]+`, and
+# inside a JSON string BOTH ends are wrong — which is not a bug here, because in
+# a pipe the whitespace is real. In a `.jsonl` transcript the newlines are
+# escaped `\n` WITHIN the string, so the leading boundary never matches; and the
+# terminator would run to the next REAL space, i.e. swallow the rest of the JSON
+# line, so loosening the anchor alone would mangle transcripts rather than
+# redact them. The consequence, measured: a credential with no distinctive shape
+# is invisible to this filter at rest, which is exactly how a SONIOX_API_KEY
+# survived in a transcript while the GitHub and Linear keys beside it were
+# caught by shape.
+#
+# That is a different value grammar, not a missing `-e`, so the file-at-rest job
+# is a separate tool: scripts/scrub-transcript-secrets.py, whose name rules end
+# a value at a quote, a backslash, whitespace or a separator. Its shape rules
+# are these ones verbatim. Do not merge the two — this script is named as the
+# remedy by claude/hooks/secret-emission-guard.sh's deny message, and a false
+# positive here costs the whole pipeline. See docs/TRANSCRIPT_SCRUB.md.
+#
 # It is deliberately NOT a general secret scanner. `gitleaks` already runs in
 # pre-commit for the repository; this covers the credential shapes that actually
 # reach a terminal here, and matches on shape alone so it needs no wordlist and
