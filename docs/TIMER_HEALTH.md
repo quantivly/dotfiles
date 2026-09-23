@@ -307,6 +307,151 @@ For the record, that first run was otherwise clean:
 `mode=apply removed=6 branches=16 pruned=0 skipped=120 failed=0 warnings=0`,
 `Result=success`, 3m31s wall.
 
+## The ambient half: a warning at the first prompt (DO-687)
+
+Everything above fires only when someone runs `verify-tools.sh`. This is what closes that.
+
+### Why not the obvious mechanisms
+
+Measured before choosing, 2026-09-23:
+
+- **`OnFailure=`** activates a unit "when this unit enters the **failed** state"
+  (`man systemd.unit`). A condition-skipped unit never enters `failed`, so it is structurally
+  blind to the case this whole feature exists for.
+- **`notify-send` on a timer** would probably work — the user manager does hold `DISPLAY`,
+  `WAYLAND_DISPLAY` and `DBUS_SESSION_BUS_ADDRESS` — but a notification fired at 04:00 is missed,
+  and nothing notices if the notifier dies.
+- **healthchecks.io**, the shape the backups use, needs URLs created by hand, a config key, and a
+  pinger that is itself a timer needing to be watched.
+
+### The mechanism, and the one part that is not a compromise
+
+`check-timer-health.sh --write-state` records the verdict; `_dotfiles_live_config_warn` reads it
+at the first prompt of each interactive shell. **There is no new systemd unit.** The prompt also
+refreshes the file in the background, at most every 30 minutes, so the reader and the writer are
+the same event — which is why there is no watcher here that itself needs watching.
+
+The accepted cost is stated plainly: **it is not real-time.** A 04:00 failure reaches a human at
+their next terminal.
+
+### The prompt is a place with no timeout
+
+Every line of the reader is shaped by that. Each of these was measured on this box (zsh 5.9), and
+each is a row in `scripts/test-dotfiles-guard.sh`:
+
+```
+$ mkfifo f && zsh -fc '[[ -r f ]] && echo readable=yes'   → readable=yes
+$ timeout 3 zsh -fc 'c=$(<f)'; echo $?                     → 124      # HUNG
+```
+
+A FIFO at the state path tests **readable** and then blocks a new terminal **forever** — no
+output, no timeout, nothing to reason about. This is not exotic here:
+`systemd/claude-cred-reconcile.service` carries a paragraph about a `cmp -s` on a FIFO left where
+a credential should be, and got `TimeoutStartSec=60` for it. A prompt has no such escape. The
+read therefore matches **regular files only**, via the glob qualifier `(N.)`.
+
+```
+$ zsh -fc 'foo=bar; bar=99; print $(( foo > 10 ))'         → 1
+$ zsh -fc 'ts=1790000000; print $(( EPOCHSECONDS - ts > 10800 ))'  → 0
+```
+
+zsh arithmetic is **not** bash's silent 0: a non-numeric operand is resolved *recursively as a
+parameter name*, and a malformed one prints `bad math expression` at the prompt. And
+`EPOCHSECONDS` is **empty** without `zmodload zsh/datetime`, so any freshness comparison silently
+never fires — invisible on this box, where p10k loads the module, and broken for a modular
+`--herdr` adopter.
+
+So the reader has **no clock at all** and **no staleness rule**. A threshold there would have been
+a second copy of a schedule that lives in a unit file — the very thing the freshness section above
+rejects by name, reintroduced one layer up. The refresh gate is a glob qualifier (`Nmm+30`),
+which needs neither a module nor arithmetic.
+
+### Two exit-code decisions
+
+**`--write-state` exits 0 even when timers are unhealthy.** The state file is the channel; the
+exit status reports only whether the verdict could be recorded. Carrying `--check`'s semantics
+over would make whatever runs it fail for as long as any watched unit is unhealthy — polluting the
+`--state=failed` signal this feature reads, and foreclosing any future `OnFailure=` on the writer.
+`systemd/claude-cred-reconcile.service` already argues the same point about itself: *"an alarm
+that is always on is an alarm nobody reads."*
+
+**`rc=2` is silent at the prompt.** "The checker could not run" is most often a worktree ahead of
+the deployed checkout, which `dotfiles-work` makes normal. `verify-tools.sh` reports it with the
+ff-merge that fixes it; warning about it at every prompt is the permanently-red checker.
+
+### `TIMER_HEALTH_QUIET`, and why it is not `DOTFILES_GUARD_QUIET`
+
+The existing switch is documented narrowly — *"a deliberate opt-out for knowingly dogfooding a
+branch"*. Inheriting it would mean a week on a feature branch silently takes timer health with it.
+So timer health has its own switch, and its call sits **before** the `DOTFILES_GUARD_QUIET` return
+inside `_dotfiles_live_config_warn`. That ordering *is* the decision, which is why the row for it
+drives the real entry point rather than the helper.
+
+### What two adversarial reviews changed
+
+The design was reviewed twice before implementation — once for silent-failure paths, once from a
+YAGNI position — and both changed it materially. It went from **five components to three**: the
+new `timer-health.{service,timer}` pair, the staleness rule, a standalone `_timer_health_warn`
+arm in `zshrc`, and a sixth `verify-tools.sh` assertion were all cut. Dropping the unit dissolved
+four further findings outright (`TimeoutStartSec`, `PATH` pinning, `StateDirectory`, and a blind
+spot where a oneshot writer can never judge itself, because DO-686's mid-run branch matches on
+every one of its own runs).
+
+One recommendation was **rejected**: deleting `ConditionPathExists` from `wt-gc-sweep.service` so
+the skip case "ceases to exist". The observation behind it is correct — `scripts/wt-gc-sweep.sh`
+checks for `wt-gc` itself — but the script exits **1**, so dropping the condition gives every
+machine without `~/.dotfiles-local` a failed unit nightly; and making that path exit 0 instead
+means a machine that *loses* `wt-gc` reports success. Today it is a skip, which this checker
+detects and names. The trade deletes observability to simplify the observer.
+
+Also rejected: distinguishing `rc=2` at the prompt (correct that the remedy differs; wrong that
+it is worth a warning on every terminal in a worktree-heavy workflow).
+
+### The claim that was dropped
+
+The first draft said the design "watches itself", because the state file's age would reveal a
+writer that had stopped. That is **false for the case it was invented for**: the file's *absence*
+is what every real inertness produces, and absence is silent. It is not claimed any more.
+`verify-tools.sh` reports when no verdict has ever been written, or when one is over a day old —
+which is hand-run, the same tier as everything else here, and is stated as a limit rather than
+sold as a property.
+
+### Mutation sweep, 2026-09-23 — and the five that survived the first pass
+
+15 mutants over both halves; final tally **15 killed, 0 survived**. That number is the least
+interesting part of it. The first pass killed 8 and **five survived**, and the survivors are what
+made the suite worth anything:
+
+| survivor | why | verdict |
+|---|---|---|
+| drop the summary sanitiser | the fixture put the escape in an `X-Evil=` line, which `condition_lines()` never greps | **fixture described a state the machine cannot produce** — the DO-686 defect again, one week old |
+| temp file in `$TMPDIR` | "no temp files left behind" passes either way; it pinned nothing | row rewritten to make `$TMPDIR` unwritable |
+| unwritable state dir | `mkdir` failing is caught downstream by `mktemp` failing | **equivalent mutant**; replaced with one that changes behaviour |
+| non-numeric count | `faults` never reaches `(( ))`, only string interpolation | row now pins the contract (the *displayed* count is a number) |
+| quiet-var ordering | the row called the helper directly, so the ordering inside the guard was never exercised | row now drives `_dotfiles_live_config_warn` |
+
+The replacement rows found two real defects in passing.
+
+**With `$TMPDIR` unusable the whole write failed**, because the captured-output temp file still
+used it. Every temp file now lives in the state directory, so the mode depends on exactly one
+writable location.
+
+**`mv` without `-T` turned a directory at the state path into a silent success.** A non-empty
+directory where `status` should be makes plain `mv -f` move the temp file *inside* it and exit 0:
+the writer believes it wrote, the reader sees a directory and correctly stays silent, and the
+channel is dead with **both halves reporting health**. That is this feature's own failure mode,
+reproduced inside the thing built to prevent it. `mv -fT` makes it an error.
+
+It also took three attempts to write a row that could kill "a failed state write is swallowed",
+and the two failures are worth recording: the first made `mkdir` fail, the second made the capture
+file's `mktemp` fail, and both exited non-zero *before* `write_state` was ever called. A row can
+reach the right exit status by a path that never executes the code it claims to pin.
+
+One more thing the rows caught: before the arity check existed, `--write-state --extra` fell
+through to a real write with the tester's own `$HOME` and wrote to the **live** state file the
+prompt reads. `run()` in the suite now pins `XDG_STATE_HOME` as well. A fixture that can reach
+live state is not hermetic, whatever it asserts.
+
 ## What this does not do
 
 **It only fires when someone runs it.** That is the honest limitation of the report-only decision

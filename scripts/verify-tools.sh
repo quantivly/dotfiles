@@ -588,6 +588,27 @@ if [[ -x "$DOTFILES_ROOT/scripts/check-timer-health.sh" ]]; then
     if ! "$DOTFILES_ROOT/scripts/check-timer-health.sh" --check; then
         herdr_hygiene_failed=1
     fi
+    # DO-687: the AMBIENT half. A timer failing at 04:00 reaches nobody unless
+    # something says so without being asked, so the first prompt of an
+    # interactive shell reads a verdict recorded by --write-state. That channel
+    # can be inert -- the state file never written, or written once and never
+    # again -- and inert looks exactly like healthy. Reported, never asserted:
+    # a machine that has simply not opened a shell since installing is not
+    # broken, and this section's exit code is about the TIMERS.
+    _th_state="${XDG_STATE_HOME:-$HOME/.local/state}/timer-health/status"
+    if [[ -f "$_th_state" ]]; then
+        if [[ -n "$(find "$_th_state" -mmin +1440 2>/dev/null)" ]]; then
+            echo -e "  ${YELLOW}⚠${NC} the prompt-side verdict ($_th_state) is over a day old —"
+            echo "    the shell guard is showing stale news. Open a new shell, or run:"
+            echo "    $DOTFILES_ROOT/scripts/check-timer-health.sh --write-state"
+        else
+            echo -e "  ${GREEN}✓${NC} prompt-side verdict is current ($_th_state)"
+        fi
+    else
+        echo -e "  ${YELLOW}⚠${NC} no prompt-side verdict yet ($_th_state) — the shell guard is"
+        echo "    INERT until one interactive shell has started. Not an error on a fresh"
+        echo "    machine; it is one if you have opened a terminal since installing."
+    fi
 else
     # A FAIL, not a note: this is one of the assertions the exit code is built
     # on, and "the checker is missing" is not a pass.

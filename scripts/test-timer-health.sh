@@ -171,9 +171,15 @@ row() { printf '{"next":%d,"last":%d,"unit":"%s","activates":"%s"}' \
         $(( $3 * US )) $(( $4 * US )) "$1" "$2"; }
 
 run() {
+    # XDG_STATE_HOME is pinned here too, not only in ws(): before the arity check
+    # existed, the row `run --write-state --extra` fell through to a real
+    # --write-state and wrote to the TESTER'S OWN ~/.local/state/timer-health,
+    # which is the file the live shell prompt reads. Found by noticing a state
+    # file this session never meant to create. A fixture that can reach live
+    # state is not hermetic, whatever it asserts.
     PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" \
     SYSTEMD_USER_DIR="$SUDIR" TIMER_HEALTH_NOW="$NOW" \
-    XDG_RUNTIME_DIR="$T/run" \
+    XDG_RUNTIME_DIR="$T/run" XDG_STATE_HOME="$T/xdg-run" \
     "$SUT" "$@" 2>&1
 }
 asked() { grep -c -- "$1" "$STATE/calls.log" 2>/dev/null || true; }
@@ -486,12 +492,133 @@ healthy
 OUT="$(run --check)"; RC=$?
 check "--check is the same as no argument" "$RC" 0
 
+printf '\n--write-state: the state file is the channel (DO-687)\n'
+
+# A fixture XDG_STATE_HOME, so no row can touch the real one the prompt reads.
+WS="$T/xdgstate"
+ws() {   # ws -- run --write-state, echo its exit status
+  rm -rf "$WS"; mkdir -p "$WS"
+  PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+  TIMER_HEALTH_NOW="$NOW" XDG_RUNTIME_DIR="$T/run" XDG_STATE_HOME="$WS" \
+    "$SUT" --write-state >"$T/wsout" 2>&1
+  echo $?
+}
+wskey() { sed -n "s/^$1=//p" "$WS/timer-health/status"; }
+
+healthy
+check "healthy: exit 0"                "$(ws)"        0
+check "healthy: rc recorded as 0"      "$(wskey rc)"  0
+check "healthy: no faults"             "$(wskey faults)" 0
+check "healthy: detail file written"   "$([[ -s "$WS/timer-health/detail" ]] && echo yes)" yes
+
+# The exit code DIVERGES from --check here, deliberately: an unhealthy timer must
+# not make the writer itself a failed unit, or the instrument pollutes the very
+# --state=failed signal this feature is built on.
+healthy
+props precompute.service loaded failed exit-code 1 yes "@$((NOW-600))" ""
+check "a failing timer still exits 0"  "$(ws)"           0
+check "... but rc=1 is recorded"       "$(wskey rc)"     1
+check "... and the fault is counted"   "$(wskey faults)" 1
+check "... and summarised"             "$(wskey summary | grep -c 'precompute.service')" 1
+
+# rc=2 ("could not run") must survive into the file, because the prompt
+# deliberately stays silent for it while verify-tools.sh does not.
+healthy
+rm -f "$CHECKOUT/scripts/reconcile-systemd-units.sh"
+check "could-not-run still exits 0"    "$(ws)"        0
+check "... and records rc=2"           "$(wskey rc)"  2
+
+# summary carries text grepped out of unit FILES, so it is whatever is in
+# ~/.config/systemd/user/*. A newline would forge a later key; an ESC would let a
+# unit file paint the reader's terminal. Sanitised at WRITE time -- atomicity
+# does nothing about content.
+# The producible vector is a UNIT FILENAME: anything in ~/.config/systemd/user is
+# a name this script will print. An earlier version of this row put the escape in
+# an `X-Evil=` line, which condition_lines() never greps -- a fixture describing a
+# state the machine cannot produce, which is the DO-686 defect exactly, and it let
+# the "drop the sanitiser" mutant survive.
+healthy
+EVIL="$(printf 'ev\033[31mil.timer')"
+link_unit "$EVIL"
+set_enabled "$EVIL" enabled
+ws >/dev/null
+check "summary is a single line"       "$(wskey summary | wc -l | tr -d ' ')" 1
+check "an ESC in a unit NAME is stripped" "$(wskey summary | grep -c $'\033')" 0
+check "status file has exactly 4 keys" "$(grep -c '^[a-z]*=' "$WS/timer-health/status")" 4
+
+# A newline in the same place would forge a later key=value record and could set
+# rc=0, silencing the prompt from inside a unit filename.
+healthy
+NL="$(printf 'nl\nrc=0\nx.timer')"
+link_unit "$NL" 2>/dev/null || true
+set_enabled "$NL" enabled 2>/dev/null || true
+ws >/dev/null
+check "rc is never forged by injected content" "$(grep -c '^rc=' "$WS/timer-health/status")" 1
+
+# The temp file must be created INSIDE the target dir: this box sets TMPDIR via
+# config/environment.d/tmpdir.conf, and a cross-filesystem mv is copy-then-rename,
+# which a reader can catch half-written.
+healthy
+ws >/dev/null
+check "no temp files left behind"      "$(find "$WS/timer-health" -name '.status.*' | wc -l | tr -d ' ')" 0
+
+# ... and the temp file is created INSIDE the target dir. Asserted by making
+# $TMPDIR unusable: a writer that reaches for $TMPDIR fails, one that uses
+# `mktemp -p "$dir"` does not. The previous row passed for either implementation.
+healthy
+RO="$T/readonly-tmp"; rm -rf "$RO"; mkdir -p "$RO"; chmod 500 "$RO"
+rm -rf "$WS"; mkdir -p "$WS"
+rc="$(PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+      TIMER_HEALTH_NOW="$NOW" XDG_RUNTIME_DIR="$T/run" XDG_STATE_HOME="$WS" \
+      TMPDIR="$RO" "$SUT" --write-state >/dev/null 2>&1; echo $?)"
+chmod 700 "$RO"
+check "an unusable TMPDIR does not stop the write" "$rc" 0
+check "... and the state file is there anyway" "$([[ -s "$WS/timer-health/status" ]] && echo yes)" yes
+
+# An unwritable state dir must be the ONE thing that makes this exit non-zero.
+healthy
+rm -rf "$WS"; mkdir -p "$WS"; chmod 500 "$WS"
+rc="$(PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+      TIMER_HEALTH_NOW="$NOW" XDG_RUNTIME_DIR="$T/run" XDG_STATE_HOME="$WS" \
+      "$SUT" --write-state >/dev/null 2>&1; echo $?)"
+chmod 700 "$WS"
+check "an unwritable state dir exits non-zero" "$rc" 1
+
+# ... and the case where the DIRECTORY is fine but the WRITE is not, which is
+# the only one that reaches write_state's own return value. The row above makes
+# `mkdir -p` fail first, so a mutant that swallows write_state's status survived
+# it: the two failures need separate rows to be told apart.
+healthy
+rm -rf "$WS"; mkdir -p "$WS/timer-health"; chmod 500 "$WS/timer-health"
+rc="$(PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+      TIMER_HEALTH_NOW="$NOW" XDG_RUNTIME_DIR="$T/run" XDG_STATE_HOME="$WS" \
+      "$SUT" --write-state >/dev/null 2>&1; echo $?)"
+chmod 700 "$WS/timer-health"
+check "an unwritable state dir (mktemp path) exits non-zero" "$rc" 1
+
+# ... and the case that reaches write_state's OWN return value. Both rows above
+# fail earlier -- at mkdir, then at the mktemp for the capture file -- so a
+# mutant that swallowed write_state's status survived them BOTH. A non-empty
+# directory where `status` should be makes the final `mv` fail with everything
+# else working, which is the only way to exercise that return.
+healthy
+rm -rf "$WS"; mkdir -p "$WS/timer-health/status"
+: > "$WS/timer-health/status/occupied"
+rc="$(PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" SYSTEMD_USER_DIR="$SUDIR" \
+      TIMER_HEALTH_NOW="$NOW" XDG_RUNTIME_DIR="$T/run" XDG_STATE_HOME="$WS" \
+      "$SUT" --write-state >/dev/null 2>&1; echo $?)"
+check "a failed state write is reported, not swallowed" "$rc" 1
+
+healthy
+OUT="$(run --write-state --extra 2>&1)"; RC=$?
+check "--write-state takes no second argument" "$RC" 2
+
 # ---------------------------------------------------------------------------
 TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=77
+EXPECTED_ROWS=98
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
