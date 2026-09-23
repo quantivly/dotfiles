@@ -1,7 +1,17 @@
 # systemd/rabota-precompute@.service
 [Unit]
 Description=rabota pre-compute for tenant %i (sync, inbox auto tier, rank, census)
+# Ordering only, and it does NOT cover the case that actually fails here.
+# network-online.target is a BOOT-ordering target; it is not re-evaluated on
+# resume from suspend. See the Restart= note below.
 After=network-online.target
+# Window for the Restart= burst below: three retries 90s apart, then the unit is
+# allowed to stay failed. Without a widened interval the manager default (5
+# starts in 10s) would never be reached by 90s-spaced retries, so the burst
+# would never stop -- the limit has to be expressed in the same timescale as
+# RestartSec or it is not a limit at all.
+StartLimitIntervalSec=600
+StartLimitBurst=4
 
 [Service]
 Type=oneshot
@@ -11,3 +21,27 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/rabota --tenant %i precompute
 TimeoutStartSec=15min
 Nice=10
+
+# DO-691. `Persistent=true` on the timer makes a missed run fire at the instant
+# of thaw, and at that instant the network is not usable yet: measured here, all
+# three failures in seven days were `precompute steps failed: sync`, two of them
+# in the SAME SECOND as `systemd-sleep` logging "System returned from sleep", the
+# third at a boot. After=network-online.target does not help, because it is not
+# re-evaluated on resume.
+#
+# The cost was never mainly the failed unit. A resumed laptop got NO precompute
+# at all until the next 30-minute tick, so the ranked list, the inbox plan and
+# the census were stale for up to half an hour after every resume -- which is
+# exactly when the day starts and the brief is read.
+#
+# So retry rather than suppress: a transient network failure succeeds ~90s later
+# and the unit is clean, while a REAL failure (a rejected token, an API refusing
+# us) exhausts the burst above and stays `failed`, where check-timer-health.sh
+# and the shell prompt report it. Deliberately not the alternatives:
+# making sync swallow a network error hides a genuine partial precompute, and a
+# connectivity ExecStartPre fails the unit, which is the state being avoided.
+#
+# Restart= is legal for Type=oneshot; `man systemd.service` rejects only
+# `always` and `on-success` for it.
+Restart=on-failure
+RestartSec=90s
