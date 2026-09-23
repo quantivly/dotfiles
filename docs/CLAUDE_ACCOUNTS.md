@@ -876,7 +876,9 @@ State tables, all in CI, all hermetic via a fixture `$HOME` and a from-scratch `
   section up, and both had been stale for weeks — `claude-account-dirs-test`) — the builder.
   10 mutants, all died, including "seed `.claude.json` from the husk" and "copy the credential
   instead of symlinking it".
-- `scripts/test-hspawn.sh` (269 checks, `hspawn-test`) — now also covers `claude()`/`claude-as`.
+- `scripts/test-hspawn.sh` (`hspawn-test`) — now also covers `claude()`/`claude-as`. Its count is
+  owned by [HERDR_INTERNALS.md](HERDR_INTERNALS.md), not repeated here: this line said 269 while the
+  suite ran 464, and two other pages carried two further wrong numbers (DO-701).
   Two leaks found while writing those rows, both the same class and both worth remembering: the
   suite inherited **`CLAUDE_CONFIG_DIR`** from the developer's own isolated session, so every
   isolation row took the "already placed" branch and asserted nothing; and it inherited

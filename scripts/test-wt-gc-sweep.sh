@@ -149,8 +149,32 @@ check "no wt-gc on PATH -> 1" "$rc" 1
 check "... and it names ~/.dotfiles-local rather than just failing" \
   "$(grep -c 'dotfiles-local' "$T/err")" 1
 
+EXPECTED_ROWS=24
+
+# --- the count this suite is documented as running ---------------------------
+# docs_claim pins the number the prose quotes to EXPECTED_ROWS: it greps for a
+# FIXED needle built from that number rather than parsing a count out of
+# markdown, because a regex has to guess the shape of an English sentence and
+# fails by matching nothing, which reads exactly like a pass. Whitespace is
+# squashed because the sentence wraps. Which page owns this count and why:
+# docs/REPO_CHECKS.md, "Where a check count lives".
+docs_claim() {
+  local f="$HERE/../$1"
+  [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
+  tr -s '[:space:]' ' ' <"$f" \
+    | grep -c -F "\`scripts/test-wt-gc-sweep.sh\` ($EXPECTED_ROWS checks"
+}
+
+printf '\nthe count this suite is documented as running\n'
+check "docs/WORKTREE_SWEEP.md says $EXPECTED_ROWS checks" \
+      "$(docs_claim docs/WORKTREE_SWEEP.md)" 1
+# The unreadable branch needs a row of its own or nothing ever takes it, and an
+# untaken branch is free to be wrong: in DO-698 a sweep caught this branch
+# reporting "could not run" as a PASS, with every other row still green.
+check "a documented file that cannot be read is not a pass" \
+      "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-EXPECTED_ROWS=22
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
     "$EXPECTED_ROWS" "$((PASS + FAIL))"

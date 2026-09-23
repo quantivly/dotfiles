@@ -206,8 +206,8 @@ decision before it starts running nightly.
 
 ## State table
 
-`scripts/test-scrub-transcript-secrets.sh` — 54 rows, hermetic, run in CI as
-**Transcript Scrub State Table**. Every row runs against a throwaway `mktemp` tree reached
+`scripts/test-scrub-transcript-secrets.sh` (60 checks, hermetic, run in CI as
+**Transcript Scrub State Table**). Every row runs against a throwaway `mktemp` tree reached
 through `SCRUB_TRANSCRIPT_ROOTS`; nothing in the file names `~/.claude/projects`. Fixture
 credentials are assembled at runtime so the file contains no literal that `gitleaks` or
 `detect-private-key` would flag over its own test data — the same trick

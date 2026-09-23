@@ -412,7 +412,7 @@ single-quoted `$HOME` is a literal, and the route then silently never fires.
 
 The keyring measurements and every trap found here, each of which produced a green tick or a confident
 wrong answer: [docs/GH_ACCOUNT_ROUTING.md](docs/GH_ACCOUNT_ROUTING.md). State table:
-`scripts/test-gh-routing.sh` (207 checks, hermetic, run in CI).
+`scripts/test-gh-routing.sh` (hermetic, run in CI).
 
 ## Keeping secrets out of transcripts
 
@@ -445,7 +445,7 @@ ordinary diagnostics. Rotation is the wrong loop to optimise; the emission is.
 The audit, the reasoning behind each rule and every hole since found in them:
 [docs/SECRET_EMISSION.md](docs/SECRET_EMISSION.md). A secret already committed:
 [docs/SECURITY_INCIDENTS.md](docs/SECURITY_INCIDENTS.md). State table: `scripts/test-secret-guard.sh`
-(195 checks, hermetic, run in CI).
+(hermetic, run in CI).
 
 ## Tmux Configuration
 
@@ -598,7 +598,7 @@ each is for, is in the guide below.
 Setup, the DR runbook and the verification regimen:
 [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md). Why each guard exists and every
 trap found in them: [docs/BACKUP_INTERNALS.md](docs/BACKUP_INTERNALS.md). State table:
-`scripts/test-backup-external.sh` (99 checks, root-free, run in CI).
+`scripts/test-backup-external.sh` (root-free, run in CI).
 
 ## Audit Tripwire (broadcast kills)
 

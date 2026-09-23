@@ -966,7 +966,30 @@ contains "  over its real workflow set" "$out" "scanning"
 # number lives here, in the state table, deliberately: changing it is a visible
 # edit to the suite that a reviewer reads as "this expects fewer checks now,
 # why", where a literal beside the code gets updated by whoever removes a check.
-EXPECTED_TOTAL=112
+EXPECTED_TOTAL=114
+
+# --- the count this suite is documented as running ---------------------------
+# docs_claim pins the number the prose quotes to EXPECTED_ROWS above: it greps
+# for a FIXED needle built from that number rather than parsing a count out of
+# markdown, because a regex has to guess the shape of an English sentence and
+# fails by matching nothing, which reads exactly like a pass. Whitespace is
+# squashed because the sentence wraps between the script name and the count.
+# Which page owns this count and why: docs/REPO_CHECKS.md, "Where a check count
+# lives".
+docs_claim() {
+  local f="$repo/$1"
+  [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
+  tr -s '[:space:]' ' ' <"$f" \
+    | grep -c -F "\`scripts/test-workflow-apt.sh\` ($EXPECTED_TOTAL checks"
+}
+
+printf '\nthe count this suite is documented as running\n'
+check "docs/REPO_CHECKS.md says $EXPECTED_TOTAL checks" 1 "$(docs_claim docs/REPO_CHECKS.md)"
+# The unreadable branch needs a row of its own or nothing ever takes it, and an
+# untaken branch is free to be wrong: in DO-698 a sweep caught this branch
+# reporting "could not run" as a PASS, with every other row still green.
+check "a documented file that cannot be read is not a pass" \
+      "cannot read no/such/file.md" "$(docs_claim no/such/file.md)"
 
 printf '\n'
 if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then
