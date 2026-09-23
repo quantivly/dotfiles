@@ -577,6 +577,16 @@ check "a non-numeric NRestarts: exit 0, treated as no restarts" "$RC" 0
                    || ok "NRestarts is never evaluated as an arithmetic expression"
 grep_ok "$OUT" '✓ server.service: active' "non-numeric NRestarts: still a tick"
 
+# The stub's own -p filter, asserted directly. It is the thing that makes the
+# row below able to fail, so a sweep that mutates the filter must not read as a
+# clean tree: measured, disabling it leaves every other row green.
+healthy
+props server.service loaded active success 0 yes "@$((NOW-9000))" "@$((NOW-9000))" 7
+STUBOUT="$(PATH="$STUBBIN:$PATH" SCTL_STATE="$STATE" \
+           systemctl --user show --timestamp=unix server.service -p ActiveState -p NRestarts)"
+check "the stub returns only the properties asked for" \
+      "$(printf '%s\n' "$STUBOUT" | sort | tr '\n' ' ')" "ActiveState=active NRestarts=7 "
+
 # The checker must ASK for NRestarts, not merely handle it when offered. The
 # stub filters its answer to the -p list exactly as systemctl does, so this row
 # fails if unit_props stops requesting the property -- which against the real
@@ -759,7 +769,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=124
+EXPECTED_ROWS=125
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

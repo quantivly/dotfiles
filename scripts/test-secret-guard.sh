@@ -59,7 +59,11 @@ AWS="AKIA$(printf 'D%.0s' {1..16})"
 # live SAML re-auth URL. Written with the Write tool rather than a heredoc --
 # claude/hooks/secret-emission-guard.sh matches the SHELL STRING, so a heredoc
 # carrying a SAML auth URL is refused before it ever reaches disk.
-SAMLBLOB="$(printf 'fVNdb5swFP0r%.0s' {1..6})"
+# The blob carries percent-encoding, because a real one does: the value is
+# deflate+base64 then URL-encoded, so +, / and = arrive as %2B, %2F and %3D. A
+# fixture of plain base64 let a mutant that dropped % from the character class
+# survive a sweep -- the rule still matched, just not to the end of the value.
+SAMLBLOB="$(printf 'fVNdb5swFP0r%%2Bx%%2Fy%%3D%.0s' {1..4})"
 SAMLHOST="accounts.google"".""com"
 SAMLURL="https://${SAMLHOST}/o/saml2/idp?idpid=C02zy1e8o&SAMLRequest=${SAMLBLOB}"
 
@@ -168,6 +172,11 @@ check "the assertion line is untouched" \
       "$(red 'Succesfully retrieved and validated assertion')" \
       'Succesfully retrieved and validated assertion'
 check "a bare AUTH_FAILED is prose"   "$(red 'AUTH_FAILED')"    'AUTH_FAILED'
+# The CRV1 rule takes one-or-more, not zero-or-more: with `*` the marker is
+# appended to a prefix carrying no value at all, which mangles prose for no gain.
+# Nothing else in this file exercises that distinction.
+check "an empty CRV1 challenge is prose" \
+      "$(red 'AUTH_FAILED,CRV1:')" 'AUTH_FAILED,CRV1:'
 check "an empty SAMLRequest is prose" "$(red 'SAMLRequest=')"   'SAMLRequest='
 check "the word SAMLRequest in prose" \
       "$(red 'the SAMLRequest parameter is described in the SAML 2.0 spec')" \
