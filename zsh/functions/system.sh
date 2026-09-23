@@ -3283,6 +3283,31 @@ _VPN_SYSCTL_ETC="/etc/sysctl.d/99-vpn-acs-port.conf"
 _VPN_SCRIPT_ETC="/usr/local/bin/vpn-failfast.sh"
 _VPN_ACS_PORT=35001
 
+# Drift on a file whose comments outnumber its directives is compared on the
+# DIRECTIVES, never byte-for-byte. This repo already worked that out once, in
+# systemd/herdr-server.service.d/10-execstart.conf: "a checker that cries wolf
+# over a comment is one people stop reading". It bit here anyway — a docs commit
+# that edited only the unit's header made vpn-doctor demand a sudo re-install
+# that would have changed nothing. A comment-only difference is still SAID, as a
+# note, so a reader who diffs the files themselves is not surprised.
+_vpn_directives() { grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$1" 2>/dev/null; }
+
+# _vpn_drift <label> <checkout-file> <installed-file> <fix-hint>
+_vpn_drift() {
+  local label="$1" a="$2" b="$3" hint="$4"
+  if [[ ! -r "$b" ]]; then
+    _doctor_bad "$label not installed — $hint"
+    return
+  fi
+  if diff -q "$a" "$b" >/dev/null 2>&1; then
+    _doctor_ok "$label matches this checkout"
+  elif diff -q <(_vpn_directives "$a") <(_vpn_directives "$b") >/dev/null 2>&1; then
+    _doctor_note "$label differs from this checkout in COMMENTS ONLY — nothing to do"
+  else
+    _doctor_warn "$label DIFFERS from this checkout — $hint"
+  fi
+}
+
 # Quick read-only health. No sudo: every question here is answerable
 # unprivileged, including "which unreachable routes are installed", because
 # `ip route show proto N` needs no privilege.
@@ -3359,12 +3384,8 @@ vpn-doctor() {
     # DRIFT. The live config is a COPY, so nothing keeps it in step with the
     # checkout; backup-doctor checks exactly this and for the same reason.
     if [[ -r "$_VPN_CONF_LOCAL" ]]; then
-      if diff -q "$_VPN_CONF_LOCAL" "$_VPN_CONF_ETC" >/dev/null 2>&1; then
-        _doctor_ok "live config matches $_VPN_CONF_LOCAL"
-      else
-        _doctor_warn "live config DIFFERS from $_VPN_CONF_LOCAL — re-run vpn-setup to resync"
-        _doctor_warn "  diff $_VPN_CONF_LOCAL $_VPN_CONF_ETC"
-      fi
+      _vpn_drift "live config" "$_VPN_CONF_LOCAL" "$_VPN_CONF_ETC" \
+                 "re-run vpn-setup to resync"
     else
       _doctor_note "no $_VPN_CONF_LOCAL — nothing to compare the live config against (vpn-init)"
     fi
@@ -3387,14 +3408,9 @@ vpn-doctor() {
       active|activating) _doctor_ok "vpn-failfast.service is $as_" ;;
       *) _doctor_bad "vpn-failfast.service is ${as_:-unknown} (Result=${res:-?}) — journalctl -u vpn-failfast -e" ;;
     esac
-    # DRIFT of the installed unit against this checkout. A plain diff now: the
-    # unit is static, so there is no render step that could report a difference
-    # it created itself.
-    if [[ -r "$_VPN_UNIT_ETC" ]] && diff -q "${root}/systemd/vpn-failfast.service" "$_VPN_UNIT_ETC" >/dev/null 2>&1; then
-      _doctor_ok "installed unit matches this checkout"
-    else
-      _doctor_warn "installed unit DIFFERS from this checkout — re-run vpn-setup"
-    fi
+    # DRIFT of the installed unit against this checkout, on its DIRECTIVES.
+    _vpn_drift "installed unit" "${root}/systemd/vpn-failfast.service" \
+               "$_VPN_UNIT_ETC" "re-run vpn-setup"
   fi
 
   # THE DAEMON ITSELF. root executes this copy, and nothing keeps it in step with
@@ -3442,10 +3458,9 @@ vpn-doctor() {
   # installed and never applied — which looks exactly like success.
   if [[ ! -r "$_VPN_SYSCTL_ETC" ]]; then
     _doctor_warn "$_VPN_SYSCTL_ETC not installed — run: vpn-setup"
-  elif ! diff -q "${root}/sysctl/99-vpn-acs-port.conf" "$_VPN_SYSCTL_ETC" >/dev/null 2>&1; then
-    _doctor_warn "$_VPN_SYSCTL_ETC DIFFERS from this checkout — re-run vpn-setup"
   else
-    _doctor_ok "$_VPN_SYSCTL_ETC matches this checkout"
+    _vpn_drift "$_VPN_SYSCTL_ETC" "${root}/sysctl/99-vpn-acs-port.conf" \
+               "$_VPN_SYSCTL_ETC" "re-run vpn-setup"
   fi
   local live
   live="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports 2>/dev/null)"
