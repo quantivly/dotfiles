@@ -253,7 +253,7 @@ class CloseTests(unittest.TestCase):
         return p
 
     def test_import_v1_is_idempotent_on_rerun(self):
-        """F2: re-importing the same file must add nothing — the identity is ``firstSeen``."""
+        """F2: re-importing the same file must add nothing — the identity is ``(firstSeen, question)``."""
         ctx = self.ctx()
         db.run_import_v1(ctx, FIX / "v1" / "escalations.jsonl")
         rep = db.run_import_v1(ctx, FIX / "v1" / "escalations.jsonl")
@@ -301,6 +301,69 @@ class CloseTests(unittest.TestCase):
         after = {k: (v["disposition"], v["resolved_at"]) for k, v in ctx.store.escalations_by_identity("quantivly").items()}
         self.assertEqual(before, after)
         self.assertEqual(len(after), 7)
+
+    # --- DO-694 follow-up: whitespace drift and case in the identity/disposition -------
+
+    def test_import_v1_do694_followup_whitespace_drift_does_not_split_an_escalation(self):
+        """F1: a resolving row whose question differs from its open row's only by a trailing
+        space must resolve the SAME escalation, not create a second one that leaves the
+        original open forever."""
+        ctx = self.ctx()
+        p = self._jsonl(
+            '{"ts": "T1", "firstSeen": "T1", "question": "foo?", "evidence": "e", "disposition": null}',
+            '{"ts": "T2", "firstSeen": "T1", "question": "foo? ", "evidence": "e", '
+            '"disposition": "resolved", "resolution": "r"}',
+        )
+        rep = db.run_import_v1(ctx, p)
+        self.assertEqual((rep["imported"], rep["resolved"]), (1, 1))
+        all_esc = ctx.store.escalations_by_identity("quantivly")
+        self.assertEqual(len(all_esc), 1)
+        self.assertEqual(ctx.store.open_escalations("quantivly"), [])
+        # the stored question is the creating row's own verbatim text, never the normalized key
+        ((_, question), esc), = all_esc.items()
+        self.assertEqual(question, "foo?")
+        self.assertEqual(esc["resolution"], "r")
+
+    def test_import_v1_do694_followup_open_case_and_whitespace_variants_stay_open(self):
+        """F2: `_is_open` must recognise "Open" and " open", not just the exact literal
+        "open" — a case-sensitive match let these fall through as terminal dispositions and
+        land with resolved_at set and no resolution text, which is DO-694's original bug
+        reached by a different spelling."""
+        ctx = self.ctx()
+        p = self._jsonl(
+            '{"ts": "T1", "firstSeen": "T1", "question": "A?", "evidence": "a", "disposition": "Open"}',
+            '{"ts": "T2", "firstSeen": "T2", "question": "B?", "evidence": "b", "disposition": " open"}',
+        )
+        rep = db.run_import_v1(ctx, p)
+        self.assertEqual((rep["imported"], rep["resolved"]), (2, 0))
+        open_esc = ctx.store.open_escalations("quantivly")
+        self.assertEqual({e["question"] for e in open_esc}, {"A?", "B?"})
+        for e in open_esc:
+            self.assertIsNone(e["resolved_at"])
+
+    def test_import_v1_do694_followup_fixture_still_imports_seven_with_four_open(self):
+        """The whitespace/case normalisation must not merge any of the real DO-694 fixture's
+        seven distinct escalations — none of them differ only by whitespace or disposition
+        case, so the counts from the original DO-694 fix must be unchanged."""
+        ctx = self.ctx()
+        rep = db.run_import_v1(ctx, FIX / "v1" / "escalations-do694.jsonl")
+        self.assertEqual(rep["imported"], 7)
+        self.assertEqual(len(ctx.store.escalations_by_identity("quantivly")), 7)
+        self.assertEqual(len(ctx.store.open_escalations("quantivly")), 4)
+
+    def test_import_v1_allows_reopen_after_resolve_within_one_file(self):
+        """The duplicate-open guard must not fire on a legitimate open -> resolved -> reopen
+        sequence sharing one identity within a single file — only a true duplicate (two open
+        rows with no resolving row between them) is a duplicate."""
+        ctx = self.ctx()
+        p = self._jsonl(
+            '{"ts": "T1", "firstSeen": "T1", "question": "A?", "evidence": "a", "disposition": null}',
+            '{"ts": "T2", "firstSeen": "T1", "question": "A?", "evidence": "a", '
+            '"disposition": "resolved", "resolution": "r"}',
+            '{"ts": "T3", "firstSeen": "T1", "question": "A?", "evidence": "a", "disposition": null}',
+        )
+        rep = db.run_import_v1(ctx, p)  # must not raise errors.Usage
+        self.assertEqual((rep["imported"], rep["resolved"]), (1, 1))
 
     def test_import_v1_is_atomic_on_a_damaged_file(self):
         """F2: a bad line must not leave the rows before it committed."""

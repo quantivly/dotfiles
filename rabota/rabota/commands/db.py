@@ -6,18 +6,25 @@ session, and keying on ``firstSeen`` alone folded them into one record and dropp
 ``question`` text entirely. The pair is stable across re-imports (it depends on content, never on a
 row's position in the file) and still ties a two-row question-then-answer pair together when v1
 writes one (the "revoke token?" fixture shape: an open row and a later row sharing both the same
-``firstSeen`` and the same ``question`` resolve the same escalation). ``kind`` is carried through
+``firstSeen`` and the same ``question`` resolve the same escalation). ``question`` is normalized
+(see ``_normalize_question``) for the **key** only, so a resolving row that reproduces its open
+row's question with a whitespace difference still resolves the same escalation instead of
+splitting into a second one; the stored ``question`` is always the row's own verbatim text.
+``kind`` is carried through
 when the v1 row has one and defaults to ``"finding"`` (§3.1's own default) when it does not — v1 rows
 never had a ``kind`` column, so most real rows lack it; dropping it instead of defaulting it would be
 silent data loss (design §4.2 requires ``kind`` in the field set). ``kind`` is only ever set from the
 row that *creates* the escalation; a later resolving row's own kind (if any) is not consulted,
 matching ``store.add_escalation``'s "never back-filled" rule.
 
-**A disposition is open iff it is falsy or the literal string ``"open"``** (DO-694) — that is the
-only spelling v1 writes for an open row (measured on the real file); every other value (``"resolved"``,
-``"resolved-invalid"``, and any other v1 spelling not yet seen) is treated as a terminal disposition
-and stored verbatim, never guessed at or rejected. The previous falsy-only check read a v1 ``"open"``
-row as resolved, because the string itself is truthy.
+**A disposition is open iff it is falsy or, case- and surrounding-whitespace-insensitively, the
+string ``"open"``** (DO-694, follow-up) — that is the only spelling family v1 writes for an open
+row (measured on the real file, plus ``"Open"``/``" open"`` variants seen since); every other value
+(``"resolved"``, ``"resolved-invalid"``, and any other v1 spelling not yet seen) is treated as a
+terminal disposition and stored verbatim, never guessed at or rejected — the row's own disposition
+string is the record of what happened, so a reader is never left to guess. The original falsy-only
+check read a v1 ``"open"`` row as resolved, because the string itself is truthy; the follow-up
+case-sensitive exact match then let ``"Open"`` fall through the same way.
 
 Counters, defined precisely because they are not disjoint: ``imported`` counts every row that
 creates a NEW escalation (one per distinct ``(firstSeen, question)`` never seen before, in this file
@@ -46,10 +53,31 @@ from rabota import cli, errors
 from rabota.context import Context
 
 
+def _normalize_question(question: str) -> str:
+    """Fold whitespace drift out of a question for **keying only** (DO-694 follow-up).
+
+    v1 has re-emitted the same question with a trailing space, or otherwise perturbed run text,
+    on the resolving row of a pair that must still identify the same escalation as its open row —
+    a byte-for-byte key treats that as two different escalations and leaves the original open
+    forever. Both surrounding AND internal whitespace runs are collapsed (``"foo  bar"`` and
+    ``"foo bar"`` key alike), because v1's drift has shown up as both. The stored ``question`` is
+    always the row's own verbatim text; only the derived key is normalized.
+    """
+    return " ".join(question.split())
+
+
 def _is_open(disposition) -> bool:
-    """v1's only spelling for "still open" is a falsy value or the literal string ``"open"``;
-    every other disposition is a terminal one and is never silently treated as open."""
-    return not disposition or disposition == "open"
+    """v1's only spelling for "still open" is a falsy value or the literal string ``"open"``,
+    case- and surrounding-whitespace-insensitive (``"Open"``, ``" open"``) — DO-694 follow-up:
+    a case-sensitive exact match let ``"Open"`` fall through as a terminal disposition and land
+    with ``resolved_at`` set, silently, which is the original DO-694 bug reached by a different
+    spelling. Every other disposition (``"resolved"``, ``"resolved-invalid"``, an unrecognised
+    spelling not yet seen) is still treated as terminal and stored verbatim rather than guessed
+    at or refused — the disposition string itself is the record of what happened, so a reader
+    inspecting the row can always tell; nothing here invents an answer the row didn't give."""
+    if not disposition:
+        return True
+    return isinstance(disposition, str) and disposition.strip().lower() == "open"
 
 
 def run_import_v1(ctx: Context, jsonl: Path) -> dict:
@@ -73,18 +101,27 @@ def run_import_v1(ctx: Context, jsonl: Path) -> dict:
             raise errors.Usage(f"{path}:{lineno}: row has neither firstSeen nor ts")
         if "question" not in row:
             raise errors.Usage(f"{path}:{lineno}: row has no question")
-        key = (fs, row["question"])
-        if key in open_keys_in_file and _is_open(row.get("disposition")):
-            # F6/F5: a second OPEN row sharing an earlier open row's identity used to be dropped,
-            # uncounted, by the old elif chain — refuse instead of guessing which one was meant.
-            raise errors.Usage(f"{path}:{lineno}: duplicate open firstSeen/question {key!r}")
-        if _is_open(row.get("disposition")):
+        key = (fs, _normalize_question(row["question"]))
+        is_open = _is_open(row.get("disposition"))
+        if is_open:
+            if key in open_keys_in_file:
+                # F6/F5: a second OPEN row sharing an earlier open row's identity used to be
+                # dropped, uncounted, by the old elif chain — refuse instead of guessing which
+                # one was meant.
+                raise errors.Usage(f"{path}:{lineno}: duplicate open firstSeen/question {key!r}")
             open_keys_in_file.add(key)
+        else:
+            # DO-694 follow-up: a resolving row closes out this identity's "open" slot, so a
+            # later open row reopening the same (firstSeen, question) within the file is a
+            # legitimate open->resolved->reopen sequence, not the true duplicate the guard above
+            # exists to catch — leaving the key behind mislabelled that sequence as a duplicate.
+            open_keys_in_file.discard(key)
         rows.append((key, fs, row))
 
     existing = ctx.store.escalations_by_identity(ctx.tenant.name)
-    ids = {key: e["id"] for key, e in existing.items()}
-    resolved_already = {key for key, e in existing.items() if e["resolved_at"]}
+    by_key = {(fs, _normalize_question(q)): e for (fs, q), e in existing.items()}
+    ids = {key: e["id"] for key, e in by_key.items()}
+    resolved_already = {key for key, e in by_key.items() if e["resolved_at"]}
     imported = resolved = 0
     with ctx.store.transaction():
         for key, fs, row in rows:
