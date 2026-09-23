@@ -645,7 +645,7 @@ limitation itself — asserting what the guard *does*, so that whoever later
 teaches it about heredocs finds out there that the fixtures depended on the old
 behaviour.
 
-State table: `scripts/test-state-table-totals.sh` (61 checks, in CI as
+State table: `scripts/test-state-table-totals.sh` (65 checks, in CI as
 `state-table-totals-test`, and in pre-commit) over
 `scripts/check-state-table-totals.sh`. Hermetic — every row builds its own
 fixture tree under a temp dir and is handed an explicit root; only the rows at

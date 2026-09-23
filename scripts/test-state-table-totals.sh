@@ -260,6 +260,34 @@ emit '#!/usr/bin/env bash' \
 run "$d"
 check "an indented assignment with a trailing comment is accepted" 0 "$rc"
 
+printf '\n== a suite that declares TWO row-total constants ==\n'
+# THE ROW THAT WOULD HAVE CAUGHT THE `tr` DEFECT, added because a mutation sweep
+# showed nothing here did. `declared_names` once trimmed its matches with
+# `tr -d '[:space:]='`, and `[:space:]` includes the NEWLINE -- so two matches
+# welded into the single token `EXPECTED_ROWSEXPECTED_TOTAL`, which then matched
+# no assignment and no comparison, and the file was reported as having a
+# computed, uncompared total.
+#
+# Every suite in this repository assigns the constant exactly ONCE, so no
+# fixture and no integration row had two until this one. The defect was found by
+# accident during development rather than by a row, and re-introducing it
+# SURVIVED the whole suite. That is the gap this fixture closes, and the shape is
+# realistic rather than contrived: a state table whose fixtures are themselves
+# state tables is exactly what a suite for this guard is.
+d=$(mkfix)
+emit '#!/usr/bin/env bash' \
+     'pass=0; fail=0' \
+     'cat > fixture.sh <<FIX' \
+     'EXPECTED_ROWS=3' \
+     'FIX' \
+     'EXPECTED_TOTAL=5' \
+     'if [ "$((pass + fail))" -ne "$EXPECTED_TOTAL" ]; then exit 1; fi' \
+     > "$d/scripts/test-a.sh"
+run "$d"
+check    "a file declaring two row-total constants is accepted" 0 "$rc"
+lacks    "  neither is read as computed"  "$out" "LITERAL: row total computed at run time in:"
+lacks    "  nor as never compared"        "$out" "ASSERT: row total declared and never compared in:"
+
 printf '\n== only scripts/test-*.sh is in scope ==\n'
 d=$(mkfix); good_suite "$d" test-a.sh
 printf '#!/usr/bin/env bash\necho hi\n' > "$d/scripts/check-something.sh"
@@ -368,7 +396,7 @@ contains "  including this suite, which is in scope"   "$(printf '%s\n' "$repo"/
 # This number lives here, in the state table, deliberately. Changing it is a
 # visible edit a reviewer reads as "this expects fewer checks now, why", where a
 # literal beside the code gets updated by whoever removes the check.
-EXPECTED_TOTAL=61
+EXPECTED_TOTAL=65
 
 # --- the count this suite is documented as running ---------------------------
 # docs_claim pins the number the prose quotes to EXPECTED_TOTAL above: it greps
@@ -387,6 +415,16 @@ docs_claim() {
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/REPO_CHECKS.md says $EXPECTED_TOTAL checks" 1 "$(docs_claim docs/REPO_CHECKS.md)"
+# A readable file that does NOT carry the claim must come back 0, or docs_claim
+# is not reading anything. Without this row a docs_claim hard-coded to `printf 1`
+# survives the whole suite: the positive row gets its 1 and the unreadable row
+# short-circuits before the hard-coded value, so both pass over a check that has
+# stopped looking at the file. A mutation sweep found exactly that. The target is
+# install.conf.yaml because it is a symlink map -- it cannot acquire a markdown
+# sentence about a check count, so this row cannot go stale the way a prose file
+# could.
+check "a readable file WITHOUT the claim comes back 0, so the file is really read" \
+      0 "$(docs_claim install.conf.yaml)"
 # The unreadable branch needs a row of its own or nothing ever takes it, and an
 # untaken branch is free to be wrong: in DO-698 a sweep caught this branch
 # reporting "could not run" as a PASS, with every other row still green.

@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suites containing totals. A rule correct only on inputs of length one, over a corpus that
   happens to be all length one.
 
-  State table: `scripts/test-state-table-totals.sh` (61 checks, hermetic, in CI as
+  State table: `scripts/test-state-table-totals.sh` (65 checks, hermetic, in CI as
   `state-table-totals-test` and in pre-commit), which also pins the guard's stated limitation —
   it reads the file, not the shell, so fixture text containing a total counts as a declaration.
   Four of its rows are `lacks` assertions that each rule's fail needle does not occur on the pass
