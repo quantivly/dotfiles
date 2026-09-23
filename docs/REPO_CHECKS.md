@@ -554,6 +554,159 @@ That compound is only testable where there is no `docs_claim` row, which is
 is **killed** by the total (M15), and deleting it with `EXPECTED_ROWS` lowered to
 match **survives** (M16) — which is the proof M13 was meant to give.
 
+### The guard that makes the audit unnecessary (DO-705)
+
+DO-701 landed fourteen row totals and left six suites without one, and its own
+close-out called fourteen "the state tables" as though that were the population.
+It was fourteen of twenty. That is the **third** consecutive change to miscount
+this same set:
+
+| change | what it claimed | what was true |
+|---|---|---|
+| DO-698 | `test-secret-guard.sh` was "the last state table without a row total" — in a code comment, a `CHANGELOG.md` entry **and** the merged commit message | seven others had none |
+| DO-701 | scoped itself to "seven of the nine suites the repo labels `State table:`" | six more existed |
+| DO-701's close-out | "fourteen state tables" | fourteen of twenty |
+
+Every one of those was reached the same way: by enumerating the files that **do**
+have the property and assuming the rest were covered. Nobody enumerated the
+complement, and the complement is one line of shell:
+
+```bash
+for f in scripts/test-*.sh; do grep -qE 'EXPECTED_(ROWS|TOTAL)' "$f" || echo "$f"; done
+```
+
+That line being one line is the entire argument for making it a guard rather
+than a habit. `scripts/check-state-table-totals.sh` enumerates
+`scripts/test-*.sh` and **fails naming every file** with no row total — every
+file, not the first, because stopping at the first hit reproduces exactly the
+partial-list defect it exists to prevent. Four rules, each with a prefix unique
+to itself:
+
+- **TOTAL** — the suite declares `EXPECTED_ROWS=<n>` or `EXPECTED_TOTAL=<n>`.
+- **LITERAL** — that number is *written down*, not computed. `EXPECTED_ROWS=$((PASS + FAIL))`
+  parses, runs, goes green forever and asserts that the rows that ran equal the
+  rows that ran. It is the obvious way to silence a red total under time
+  pressure, and it is **worse** than no total because it looks like one.
+- **ASSERT** — the constant is read back in a comparison, so a number nobody
+  compares is not a total. The operator requirement is what stops the explanatory
+  comment every one of these suites carries from satisfying the rule by naming
+  the constant.
+- **ALLOW** — every allow-list entry names a file that exists. A stale exemption
+  is a rule whose condition can no longer fire, and worse, it is an exemption
+  waiting for the next file to take that name.
+
+"Could not run" is **exit 2** — an unreadable suite, a missing `scripts/`, a glob
+matching nothing — and never a pass. That matters more here than in most
+checkers: narrowing into silence while reporting a clean tree *is* the failure
+mode this guard exists to prevent, so it is the one it must not have. Exit 3 is
+reserved for the checker being self-inconsistent, distinct from exit 1 for the
+tree being wrong, copying `scripts/check-claude-md.sh`.
+
+**The allow-list has one entry and it is argued in the file, never implied by
+absence.** `scripts/test-rabota.sh` is a 21-line wrapper around
+`python3 -m unittest discover`: its 595 tests are counted, named and reported by
+unittest, which fails on a collection error rather than silently discovering
+fewer tests, so a shell row total would be a second and weaker copy of a count
+Python already owns.
+
+**`scripts/test-gpg-installation.sh` was retired rather than backfilled.** It was
+the fifth file the guard named on its first run, and it tests three scripts
+DO-264 (#51) deleted in January 2026 when this repo migrated to SSH commit
+signing. Nothing referenced it — no CI job, no page, no script — and run by hand
+it exits at its first assertion, which it had been doing unnoticed for eight
+months because nothing ran it. Giving it a row total would have been the guard's
+first false green, written by the person who built the guard.
+[RETIRED.md](RETIRED.md) carries the record.
+
+#### The defect the guard had, and what found it
+
+`declared_names` trimmed its matches with `tr -d '[:space:]='`, and `[:space:]`
+**includes the newline** — so with more than one match `tr` welded them into a
+single token, `EXPECTED_ROWSEXPECTED_TOTAL`, which then matched no assignment and
+no comparison. The file was reported as having a computed, uncompared total.
+
+It was invisible across all 21 suites in the repository, because **each of them
+assigns the constant exactly once**, so there was nothing to weld. The first
+input with two assignments was the guard's own state table, which builds fixture
+suites that contain totals. A rule that is correct only on inputs of length one,
+over a corpus that happens to be all length one, is this file's "green over the
+thing it exists to catch" shape again — and no amount of running it against this
+repository would ever have shown it.
+
+That same fixture shape is a **stated limitation**: the guard reads the file, not
+the shell, so a state table whose fixtures contain `EXPECTED_ROWS=<n>` has that
+text counted as its own declaration, and could satisfy all three rules with no
+total of its own. Telling the difference means knowing where a heredoc begins,
+i.e. parsing shell, which this page already records costing six silent-pass
+defects in `check-workflow-apt.sh`. So `scripts/test-state-table-totals.sh`
+writes every fixture total through `printf` instead, one row asserts that the
+file declares exactly one row-total constant, and another row pins the
+limitation itself — asserting what the guard *does*, so that whoever later
+teaches it about heredocs finds out there that the fixtures depended on the old
+behaviour.
+
+#### The sweep: 23 mutants, 23 matching their written-down verdict
+
+Each mutant carried an expected verdict recorded **before** it ran and compared by
+the driver rather than read by eye, and each was dry-run for applicability with
+its mutated region diffed — one that collapses into something other than its name
+reads exactly like a survivor. The first pass had **four** mismatches, and three
+of them were worth more than the twenty that matched.
+
+- **M3 re-introduced the `tr` defect above and SURVIVED.** Rewriting the fixtures
+  through `printf` had left *no* file in the suite declaring two row-total
+  constants, so there was nothing to weld and the bug was invisible again — this
+  time to the suite rather than to the repository. The defect had been found by
+  accident during development, never by a row. A fixture that declares two
+  constants (a heredoc'd `EXPECTED_ROWS` plus its own `EXPECTED_TOTAL`, which is
+  exactly the shape of a state table whose fixtures are state tables) now kills it.
+- **M23 collapsed into a different mutation than its name.** It hard-coded
+  `docs_claim`'s *readable* path to `printf 1`, and survived — because the
+  positive row got its 1 and the unreadable row short-circuits at the `[[ -r ]]`
+  guard **before** reaching the constant. Both rows passed over a check that had
+  stopped reading the file entirely. Neither existing row could see it, and the
+  fix is a third row: a readable file that does **not** carry the claim must come
+  back 0. It targets `install.conf.yaml`, a symlink map, precisely because that
+  file cannot acquire a prose sentence about a check count and so the row cannot
+  go stale.
+- **M19 and M20's first verdicts were meaningless** — the driver ran
+  `test-state-table-totals.sh` as the kill criterion for mutants planted in
+  `test-machines-render.sh`. A mutant judged by a suite that never reads it is an
+  unkillable mutant dressed as a survivor. The driver now picks the criterion from
+  the mutated file.
+
+**M20 is the one mutant expected to SURVIVE, and it did.** It deletes a row from
+`test-machines-render.sh` *and* lowers `EXPECTED_ROWS` from 66 to 65 to absorb it
+— the compound form, because a mutant that merely disables a detector on a
+healthy tree is unkillable by construction. M19 (the deleted row alone) is
+**killed** by the new total and by nothing else, which is what makes backfilling
+that total worth doing. The compound survives there only because that suite
+deliberately has no `docs_claim` row. Where one exists the same compound is
+**killed**: M22 deletes a row from `test-state-table-totals.sh` and lowers its
+total to match, and the lowered total re-points the `docs_claim` needle at
+"(64 checks", which `docs/REPO_CHECKS.md` does not say. Absorbing a vanished row
+quietly therefore takes two coordinated edits, one of them to prose a reviewer
+reads — the stronger property DO-701's M13 discovered by being wrong about it.
+
+The rest: the four rules inverted or disabled (M1, M7, M8, M11), TOTAL reporting
+only the first offending file (M2), `declared_names` and `literal_assign`
+loosened (M4, M5), `compared_somewhere` losing its assignment-line filter (M9 —
+killed only by the row added for it, having survived before that row existed) and
+its operator requirement (M10), the allow-list exempting nothing and everything
+(M12, M13), the glob narrowed (M14), the zero-suite and unreadable-file guards
+removed (M15, M16), `die_cannot_run` exiting 0 (M17), the denominator moved
+(M18), and `docs_claim`'s unreadable branch reporting a pass (M23 in its
+corrected form) — all killed.
+
+State table: `scripts/test-state-table-totals.sh` (65 checks, in CI as
+`state-table-totals-test`, and in pre-commit) over
+`scripts/check-state-table-totals.sh`. Hermetic — every row builds its own
+fixture tree under a temp dir and is handed an explicit root; only the rows at
+the end read this repository, to assert the shipped tree passes its own guard.
+Four of the rows are `lacks` assertions that each rule's *fail* needle does not
+occur on the *pass* path, which is the only thing standing between the suite and
+four needles that match whatever is printed.
+
 ### What a row total does not do
 
 A row total detects a **skipped** check, never a **hollow** one. If an early

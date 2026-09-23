@@ -716,6 +716,26 @@ jobs:
       - name: Run the workflow-apt state table
         run: ./scripts/test-workflow-apt.sh
 
+  state-table-totals-test:
+    name: State-Table Row-Total Guard State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # No extra packages: the checker is grep and sed over scripts/test-*.sh,
+      # and the suite builds its fixture trees with printf. A new external tool
+      # in a checker is a new way for it to go quiet, so this one has none.
+      - name: Run the state-table row-total state table
+        run: ./scripts/test-state-table-totals.sh
+
+      # The guard itself, over the tree we actually ship. The suite above covers
+      # this too, in its integration rows, but a failure there reads as "the
+      # state table is broken" while a failure here reads as "a suite has no row
+      # total" -- and the second is the one a contributor needs to see named.
+      - name: Run the state-table row-total guard
+        run: ./scripts/check-state-table-totals.sh
+
   claude-md-test:
     name: CLAUDE.md Guard State Table
     runs-on: ubuntu-latest

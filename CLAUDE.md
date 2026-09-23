@@ -240,7 +240,8 @@ act -j shellcheck             # Run specific CI job locally (requires act)
   non-zero when *any* configured source errors, including third-party lists no job reads.
   `scripts/check-workflow-apt.sh` enforces it.
 - **A new guard ships with a hermetic state table and a mutation sweep.** "Could not run" is
-  exit 2, never a pass, and the suite asserts its own row total.
+  exit 2, never a pass, and the suite asserts its own row total
+  (`scripts/check-state-table-totals.sh` enforces that; never allow-list your way past it).
 - **Rows fail by looking green.** A needle must be unique to the rule, and checked against what
   the pass path prints; a row whose fixture fails for more than one reason is decoration; ask of
   every row what single change to the code would make it fail. Dry-run every mutation for

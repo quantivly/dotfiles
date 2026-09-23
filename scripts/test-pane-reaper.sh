@@ -452,6 +452,28 @@ for _ in $(seq 1 20); do
 done
 check "the detached timer closed the pane"       "$(closes)"    "1"
 
+# --- the row total -----------------------------------------------------------
+# Catches a row that VANISHED -- an early exit, a deleted block, an emptied
+# loop, an unset variable under `set -u`. Every row that still ran would pass
+# and this suite would print a green summary over half its coverage. The full
+# argument is at the tail of scripts/test-secret-guard.sh; which page owns a
+# count is docs/REPO_CHECKS.md, "Where a check count lives".
+#
+# There is deliberately NO docs_claim row here, for a different reason from the
+# other suites backfilled with it: no page in this repository quotes a count for
+# this one at all, neither live nor commit-anchored. That was checked rather
+# than assumed. So there is nothing to pin, and inventing a sentence in order to
+# assert it would be writing the claim and the check in the same hand, which is
+# the shape of drift DO-705 exists to stop. If a live count is ever written for
+# this suite, it takes a docs_claim row -- see scripts/test-secret-guard.sh.
+EXPECTED_ROWS=141
+
+if (( PASS + FAIL != EXPECTED_ROWS )); then
+  printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
+    "$EXPECTED_ROWS" "$((PASS + FAIL))"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 (( FAIL == 0 ))

@@ -387,5 +387,26 @@ check "a label with a quote and an apostrophe survives intact" \
       "$(jq -r '.boxy.label' <<<"$OUT")" "Zvi's box, \"the loud one\""
 check "...and the document is still valid JSON" "$(jq -e . <<<"$OUT" >/dev/null && echo valid)" "valid"
 
+# --- the row total -----------------------------------------------------------
+# Catches a row that VANISHED -- an early exit, a deleted block, an emptied
+# loop, an unset variable under `set -u`. Every row that still ran would pass
+# and this suite would print a green summary over half its coverage. The full
+# argument is at the tail of scripts/test-secret-guard.sh; which page owns a
+# count is docs/REPO_CHECKS.md, "Where a check count lives".
+#
+# There is deliberately NO docs_claim row here. Both numbers written about this
+# suite are deltas inside dated entries in docs/CLAUDE_ACCOUNT_PICKER.md --
+# "(65, new CI job `machines-render-test`)" and "(65 -> 66)" -- which is to say
+# they are RECORDS of what a change did, true where they stand, not claims about
+# today. Asserting one would force a historical entry to be rewritten every time
+# a row lands. scripts/test-claude-pick.sh is the same case, argued there first.
+EXPECTED_ROWS=66
+
+if (( PASS + FAIL != EXPECTED_ROWS )); then
+  printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
+    "$EXPECTED_ROWS" "$((PASS + FAIL))"
+  FAIL=$((FAIL + 1))
+fi
+
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
