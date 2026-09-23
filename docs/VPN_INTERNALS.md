@@ -107,6 +107,55 @@ Measured during that outage:
 So the hang is gone, the failure is immediate and correctly typed, and the internet is untouched
 — which is the whole design in one table. The routes were withdrawn when the tunnel returned.
 
+### The outage that was not a drop: the client PROCESS died
+
+Three hours after the first one, on **2026-09-23**, a second real outage arrived — and it was a
+harder case than anything the plan anticipated. The design was built for *"the tunnel drops and
+the client sits Disconnected without retrying"*. This was **the client not being there at all**:
+
+```
+14:09:08  tunnel CONNECTED
+16:47:13  the AWS VPN Client APPLICATION EXITED
+          (app-gnome-awsvpnclient-3157043.scope: consumed 7h15m, then gone)
+16:47:31  tun0 activated -> unmanaged (removed); vpn-failfast installs 4 routes THE SAME SECOND
+          ... 30 minutes of nothing: no client, no GUI, no log lines, no AUTH_FAILED ...
+17:17:44  vpn-notify enabled (it had not been armed until then)
+17:19:18  NOTIFICATION FIRES, 94s after it could first observe anything
+17:23:22  a new awsvpnclient launched by gnome-shell
+17:23:47  CONNECTED
+17:23:51  all 4 routes withdrawn
+```
+
+**36 minutes 15 seconds of dead tunnel, in total silence.** The operator's own report was "VPN
+was connected" — which is exactly right from where he was sitting, because there was no client
+left to say otherwise.
+
+**This is the strongest argument for the kernel-state invariant, and it is not the security one.**
+§4 rejects log reading because both log directories are attacker-writable. This outage rejects it
+for a simpler reason: *there were no logs*. A log-tailing watcher — the first design, killed
+during planning — would have seen **nothing at all**, because there was no process writing. It
+would not have been wrong; it would have been silent, which is worse. `ip -j link` and
+`ip -j route` do not care whether the vendor's process still exists, and the fail-fast unit
+reacted in the same second the interface disappeared.
+
+**A prediction this page got wrong, corrected by checking.** The expectation was that
+`vpn-sweeps` would MISS this outage: it walks `>STATE` transitions out of the client log, and the
+client was dead, so there should have been none to walk. It counts it correctly —
+`16:47:31 → 17:23:46, 2175s`, the longest span of the day. The reason is the two-stream join in
+§"THE JOIN": `>STATE` also lands in `/var/log/aws-vpn-client/<user>/`, written by the **root**
+service, which outlived the GUI. That join was built to fix a 1 ms timestamp mismatch; what it
+actually bought was an instrument that survives the thing it measures.
+
+**What it cost, and what it would have cost.** The notifier was only armed 30 minutes into the
+outage, so it fired 94 s after it could first see anything. Had it been running at 16:47:31 it
+would have fired at about 16:49 — turning a 36-minute silent outage into a two-minute one. That
+is the 8.8-hour tail of §3, caught live, on the day it was armed.
+
+One incidental confirmation: the notification body — a compile-time constant reading *"Reconnect
+the AWS VPN Client"* — happens to be correct advice for this case too, where the fix is to
+relaunch the application rather than wait for a retry. It was written that way because nothing
+derived from anything may go in it, not because anyone foresaw this.
+
 ---
 
 ## 4. The invariant: no runtime component reads a client log
