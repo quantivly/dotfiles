@@ -197,6 +197,15 @@ check "no fixture credential appears in stdout or stderr" "$leaked" "0"
 check "...while the run really did replace them" \
       "$(logline | grep -o 'replacements=[0-9]*')" "replacements=4"
 
+fresh
+line "env\\nGH_TOKEN=$SHAPELESS\\ntoken $GHO and $ANT" > "$ROOT/proj/s.jsonl"
+OUT="$(run --dry-run)"
+leaked=0
+for cred in "$GHO" "$ANT" "$SHAPELESS"; do
+    grep -qF "$cred" <<< "$OUT" && leaked=$((leaked+1))
+done
+check "...nor in the DRY RUN, which prints a line per file" "$leaked" "0"
+
 echo
 echo "=== discretion: refuse, roll back, skip ==="
 
@@ -335,11 +344,31 @@ check "...and nothing is reported as a phantom skip" \
       "$(logline | grep -o 'skipped=[0-9]*')" "skipped=0"
 
 echo
+echo "=== discovery: the roots nobody had been looking at ==="
+
+# The only rows that exercise discover_roots(). Everything above overrides the
+# roots outright, so without these the function that motivated this whole change
+# is never executed. HOME is redirected because that is exactly what it reads.
+FAKE="$T/home"
+fresh
+rm -rf "$FAKE"
+mkdir -p "$FAKE/.claude/projects/p" "$FAKE/.local/state/claude-account-dirs/acct-0/projects/q"
+line "env\\nGH_TOKEN=$SHAPELESS\\nend" > "$FAKE/.claude/projects/p/a.jsonl"
+line "env\\nLINEAR_API_KEY=$SHAPELESS\\nend" \
+    > "$FAKE/.local/state/claude-account-dirs/acct-0/projects/q/b.jsonl"
+HOME="$FAKE" SCRUB_TRANSCRIPT_STATE="$STATE" "$PY" "$SCRUB" --apply >/dev/null 2>&1
+check "discovery finds ~/.claude/projects with no override" \
+      "$(grep -c 'REDACTED:by-name' "$FAKE/.claude/projects/p/a.jsonl")" "1"
+check "...and every account dir's projects/ too (the 58 nobody had scanned)" \
+      "$(grep -c 'REDACTED:by-name' "$FAKE/.local/state/claude-account-dirs/acct-0/projects/q/b.jsonl")" "1"
+check "...counting both as roots" "$(logline | grep -o 'roots=[0-9]*')" "roots=2"
+
+echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 
 # A row total, the house norm. `grep -c ✗` counts row NAMES, not outcomes; only
 # this catches a check that silently stopped running.
-EXPECTED_ROWS=54
+EXPECTED_ROWS=58
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
