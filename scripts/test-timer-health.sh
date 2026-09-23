@@ -294,6 +294,37 @@ OUT="$(run)"; RC=$?
 check "active with no next elapse: exit 1" "$RC" 1
 grep_ok "$OUT" 'NO next run scheduled' "no next elapse: named"
 
+# THE REGRESSION, 2026-09-23. A timer whose triggered unit is RUNNING has no
+# next elapse -- systemd schedules one only when the run finishes -- and
+# list-timers reports "next": null, which jq's `// 0` makes indistinguishable
+# from a stopped timer's 0. Shipped calling wt-gc-sweep.timer "it has stopped
+# firing" on its own first unattended run, while the sweep was mid-flight.
+#
+# The row above this one pinned the branch but asserted the WRONG rule: its
+# fixture had the service inactive, so it never described the state the real
+# machine produced. Both readings of next=0 are now rows.
+healthy
+props precompute.service loaded activating success 0 yes "@$((NOW-600))" "@$((NOW-60))"
+timers_json "[$(row precompute.timer precompute.service 0 $((NOW-60)))]"
+OUT="$(run)"; RC=$?
+check "a timer whose service is RUNNING is not 'stopped': exit 0" "$RC" 0
+grep_ok "$OUT" 'is running now' "mid-run: says the service is running"
+grep_none "$OUT" 'stopped firing' "mid-run: not reported as stopped"
+grep_none "$OUT" 'STALE' "mid-run: freshness is not judged on a run in progress"
+
+healthy
+props precompute.service loaded active success 0 yes "@$((NOW-600))" "@$((NOW-60))"
+timers_json "[$(row precompute.timer precompute.service 0 $((NOW-60)))]"
+check "the same for ActiveState=active, not just activating: exit 0" "$(run >/dev/null 2>&1; echo $?)" 0
+
+# ... and the fault is still a fault when nothing is running.
+healthy
+props precompute.service loaded inactive success 0 yes "@$((NOW-600))" ""
+timers_json "[$(row precompute.timer precompute.service 0 $((NOW-600)))]"
+OUT="$(run)"; RC=$?
+check "next=0 with the service NOT running is still a fault: exit 1" "$RC" 1
+grep_ok "$OUT" 'stopped firing' "not running + no next: named as stopped"
+
 healthy
 timers_json "[$(row precompute.timer precompute.service $((NOW+20*86400)) $((NOW-600)))]"
 OUT="$(run)"; RC=$?
@@ -460,7 +491,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=70
+EXPECTED_ROWS=77
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
