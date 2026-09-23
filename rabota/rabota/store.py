@@ -217,10 +217,12 @@ class Store:
     def delete_escalation(self, esc_id):
         """Remove an escalation outright — used to roll back a create whose jsonl projection failed."""
         self._exec("DELETE FROM escalations WHERE id=?", (esc_id,))
-    def escalations_by_first_seen(self, tenant):
-        """Every escalation for ``tenant`` keyed by ``first_seen`` (import-v1's identity for a record)."""
+    def escalations_by_identity(self, tenant):
+        """Every escalation for ``tenant`` keyed by ``(first_seen, question)`` — import-v1's identity
+        for a record. ``first_seen`` alone collides: v1 can log several distinct questions under one
+        shared ``firstSeen``, so the pair is what is stable and unique across re-imports."""
         rows = self._rows("SELECT * FROM escalations WHERE tenant=?", (tenant,))
-        return {r["first_seen"]: r for r in rows}
+        return {(r["first_seen"], r["question"]): r for r in rows}
     def record_gate(self, tenant, subject, label):
         """Record a gate answer as a label only — never who answered (Rule 0)."""
         self._exec("INSERT INTO gate_answers(tenant, ts, subject, label) VALUES (?,?,?,?)",
