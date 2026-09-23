@@ -869,7 +869,87 @@ _dotfiles_guard_verdict() {
 # "unknown" is silent by design: a machine without this repo, a fresh clone
 # mid-install, and a shell inside a worktree are all normal states, and a guard
 # that cries wolf in normal states is one people learn to ignore.
+# DO-687: the ambient half of timer health. scripts/check-timer-health.sh asserts
+# that repo-owned systemd USER timers ran, succeeded and are still firing -- but
+# only when someone runs verify-tools.sh. This reads the verdict that script
+# records and says one line at the first prompt, so a wt-gc-sweep that started
+# failing at 04:00 (it DELETES worktrees and branches) reaches a human without
+# anyone having gone looking.
+#
+# Runs on EVERY interactive shell's first prompt, so every line here is chosen to
+# be forkless and unable to wedge or spew. Measured on this box, zsh 5.9:
+#
+#   * `[[ -r $f ]]` is TRUE for a FIFO and the read then BLOCKS FOREVER -- a new
+#     terminal hangs at its first prompt with no output and no timeout. `(N.)`
+#     below matches regular files only. This is not exotic here:
+#     systemd/claude-cred-reconcile.service carries a paragraph about a `cmp -s`
+#     on a FIFO left where a credential should be, and got TimeoutStartSec=60 for
+#     it. A prompt has no such timeout.
+#   * zsh arithmetic is not bash's silent 0: `foo=bar; bar=99; (( foo > 10 ))` is
+#     TRUE (a non-numeric operand is resolved recursively as a parameter name),
+#     and a malformed one prints `bad math expression` at the prompt. Hence the
+#     `<->` guards before anything reaches (( )).
+#   * EPOCHSECONDS is EMPTY without `zmodload zsh/datetime`, so any freshness
+#     comparison silently never fires. This function deliberately has no clock:
+#     the refresh gate below is a glob qualifier, and there is NO staleness
+#     warning at all -- a threshold here would be a second copy of a schedule
+#     that lives somewhere else, which docs/TIMER_HEALTH.md rejects by name.
+#
+# It writes to stderr: `zsh -ic 'cmd'` does not fire precmd, but `zsh -i` with
+# piped stdin does, and a stdout warning would land inside a captured value.
+#
+# TIMER_HEALTH_QUIET=1 silences it. Deliberately NOT sharing DOTFILES_GUARD_QUIET,
+# whose documented meaning is narrower -- "knowingly dogfooding a branch" -- so a
+# week on a feature branch would otherwise take timer health down with it,
+# silently, which is the failure this whole feature exists to prevent.
+_timer_health_warn() {
+  [[ -n "${TIMER_HEALTH_QUIET:-}" ]] && return 0
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/timer-health"
+  local f rc faults summary
+  # (N.) -- regular files only, and no error if absent. The FIFO guard.
+  local -a st=( "$dir/status"(N.) )
+  if (( ${#st} )); then
+    # ${(f)...} splits on newlines; a `summary` containing one cannot forge a
+    # later key because the writer strips CR/LF. Read forklessly with $(<...).
+    local line
+    for line in ${(f)"$(<$dir/status)"}; do
+      case "$line" in
+        rc=*)      rc="${line#rc=}" ;;
+        faults=*)  faults="${line#faults=}" ;;
+        summary=*) summary="${line#summary=}" ;;
+      esac
+    done
+    # Only rc=1 speaks. rc=2 is "the checker could not run", whose commonest
+    # cause here is a worktree ahead of the deployed checkout -- normal, and
+    # already reported by verify-tools.sh with the ff-merge to fix it. Warning
+    # about it at every prompt is the permanently-red checker this repo names.
+    if [[ "$rc" == 1 ]]; then
+      [[ "$faults" == <-> ]] || faults=1
+      # Both halves need the $'...' form: a plain '...' leaves \033 literal, which
+      # printed a trailing "\033[0m" at the prompt. Introduced while replacing
+      # raw ESC bytes in this file with escapes, and invisible to every row that
+      # greps for the message text rather than for a stray escape.
+      print -ru2 -- $'\033[0;33m⚠ timer health: '"${faults}"$' repo-owned timer(s) unhealthy\033[0m'
+      [[ -n "$summary" ]] && print -ru2 -- "  ${summary}"
+      print -ru2 -- '  scripts/verify-tools.sh for the full report; TIMER_HEALTH_QUIET=1 to silence.'
+    fi
+  fi
+  # Refresh in the background for the NEXT shell, at most every 30 minutes.
+  # (Nmm+30) matches only a file last modified more than 30 minutes ago, so this
+  # costs ~2 runs an hour rather than one per shell -- on a box that has had 24
+  # panes open at once, and where memory is the binding constraint. An absent
+  # file does not match the qualifier, so that case is handled separately.
+  local -a stale=( "$dir/status"(Nmm+30) )
+  if (( ${#stale} || ${#st} == 0 )) && [[ -x "${DOTFILES_ROOT}/scripts/check-timer-health.sh" ]]; then
+    ( "${DOTFILES_ROOT}/scripts/check-timer-health.sh" --write-state >/dev/null 2>&1 & ) &!
+  fi
+  return 0
+}
+
 _dotfiles_live_config_warn() {
+  # Before the DOTFILES_GUARD_QUIET return, so that switch -- whose documented
+  # purpose is branch dogfooding -- cannot silently take timer health with it.
+  _timer_health_warn
   [[ -n "${DOTFILES_GUARD_QUIET:-}" ]] && return 0
   # Locals, so the helpers' results reach this function by dynamic scope and
   # then vanish, instead of parking four _D* variables in every shell.

@@ -527,7 +527,8 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
   `LoadState=not-found` and `Result=success` — read `LoadState` first. A SKIPPED unit (unmet
   `ConditionPathExists`) is not a FAILED one either: `Result=success`, nothing in
   `--state=failed`. `verify-tools.sh` asserts every repo-owned user timer ran, succeeded and
-  is still firing. [docs/TIMER_HEALTH.md](docs/TIMER_HEALTH.md).
+  is still firing, and a shell's first prompt says so when one has not
+  (`TIMER_HEALTH_QUIET=1`). [docs/TIMER_HEALTH.md](docs/TIMER_HEALTH.md).
 
 ## Claude Code accounts & MCP (`claude-doctor`)
 

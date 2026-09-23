@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A failed or skipped repo-owned timer now reaches you without being asked (DO-687).**
+  `check-timer-health.sh` asserted that user timers ran and succeeded, but only when someone ran
+  `verify-tools.sh` — so a `wt-gc-sweep` that started failing at 04:00, or fell silent under an
+  unmet `ConditionPathExists`, was noticed only if a human went looking. A new `--write-state`
+  mode records the verdict to `${XDG_STATE_HOME:-~/.local/state}/timer-health/status`, and
+  `_dotfiles_live_config_warn` reads it at the first prompt of each interactive shell, printing
+  one line to stderr when a timer is unhealthy. **No new systemd unit**: the prompt refreshes the
+  file in the background at most every 30 minutes, so the reader and the writer are the same
+  event and there is no watcher needing its own watcher. `TIMER_HEALTH_QUIET=1` silences it —
+  deliberately *not* `DOTFILES_GUARD_QUIET`, whose documented meaning is "knowingly dogfooding a
+  branch" and which would otherwise take timer health down for the length of a feature branch.
+  The prompt path is built for a place with no timeout: a FIFO at the state path tests
+  `-r`-readable and then blocks a new terminal forever, so the read matches regular files only;
+  zsh arithmetic resolves a non-numeric operand *recursively* rather than as 0; and
+  `EPOCHSECONDS` is empty without `zmodload zsh/datetime`, so the reader has no clock at all and
+  no staleness rule — a threshold there would be a second copy of a schedule that lives
+  elsewhere. `--write-state` exits 0 even when timers are unhealthy, because the file is the
+  channel and a watcher that fails whenever the watched thing fails pollutes the very
+  `--state=failed` signal this feature reads. Evidence, the two adversarial reviews and the
+  mutants that survived the first sweep: [docs/TIMER_HEALTH.md](docs/TIMER_HEALTH.md).
+
 ### Fixed
 
 - **Timer health no longer reports a mid-run timer as stopped (DO-686).** A timer whose

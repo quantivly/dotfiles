@@ -95,7 +95,37 @@
 # -----
 #   check-timer-health.sh            report; exit 1 if a managed unit is unhealthy
 #   check-timer-health.sh --check    the same (the name the callers use)
+#   check-timer-health.sh --write-state
+#                                    run the check and record the verdict for the
+#                                    shell prompt to read (DO-687). See below.
 #   check-timer-health.sh --help     this header
+#
+# --write-state, and why it EXITS 0 WHEN TIMERS ARE UNHEALTHY
+# -----------------------------------------------------------
+# In this mode the STATE FILE is the channel, so the exit status reports only
+# whether this run could record its verdict. Carrying the --check semantics over
+# would make whatever runs it fail for as long as any watched unit is unhealthy —
+# and systemd/claude-cred-reconcile.service already argues that exact point about
+# itself: "an alarm that is always on is an alarm nobody reads". It would also
+# foreclose ever putting an OnFailure= or a healthchecks ping on the writer,
+# since the writer would be failing for reasons that are not its own.
+#
+# Writes ${XDG_STATE_HOME:-$HOME/.local/state}/timer-health/{status,detail}:
+#
+#   rc=0|1|2     what --check would have exited
+#   faults=<n>   how many ✗ lines this run produced
+#   summary=<s>  the first fault's headline, SANITISED (see below)
+#   detail=<p>   path to this run's full output
+#
+# `summary` is carried to a PROMPT, and part of it is text this script greps out
+# of unit files (condition_lines()), i.e. whatever is in ~/.config/systemd/user/*.
+# So it is stripped of CR, LF and ESC and capped at 200 chars at WRITE time:
+# a newline would break the key=value parse, and an ESC would let a unit file
+# paint a terminal. Atomicity does nothing about content.
+#
+# The temp file is created INSIDE the target directory, never in $TMPDIR — this
+# machine sets TMPDIR via config/environment.d/tmpdir.conf, and a cross-filesystem
+# `mv` is copy-then-rename, which a reader can catch half-written.
 #
 # EXIT CODE
 #   0  everything healthy, or there is nothing here to look at
@@ -138,12 +168,22 @@ if [[ -n "${TIMER_HEALTH_NOW:-}" && ! "${TIMER_HEALTH_NOW}" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 
+WRITE_STATE=0
+# Arity checked before the flag: `case "${1:-}"` alone reads only the FIRST word,
+# so `--write-state --oops` silently ran a normal write-state. verify-tools.sh
+# keys its case on "$#:$1" for the same reason, and its comment records blaming
+# the valid flag when the real fault was a second word.
+if (( $# > 1 )); then
+    printf '%s: too many arguments (expected at most one, got %d: %s)\n' "${0##*/}" "$#" "$*" >&2
+    exit 2
+fi
 case "${1:-}" in
     ""|--check) ;;
+    --write-state) WRITE_STATE=1 ;;
     --help|-h)
         awk 'NR < 3 { next } /^#/ { sub(/^#[[:space:]]?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
         exit 0 ;;
-    *)  printf 'usage: %s [--check]\n' "${0##*/}" >&2; exit 2 ;;
+    *)  printf 'usage: %s [--check|--write-state]\n' "${0##*/}" >&2; exit 2 ;;
 esac
 
 fail=0
@@ -524,7 +564,64 @@ main() {
     return 0
 }
 
+# One spelling of the state path, shared with the reader in zsh/functions/system.sh.
+# The systemd user manager has no XDG_STATE_HOME while an interactive shell may
+# have acquired one from ~/.zshrc.local, so writer and reader must resolve it the
+# same way or they silently use different files.
+state_dir() { printf '%s/timer-health\n' "${XDG_STATE_HOME:-$HOME/.local/state}"; }
+
+# Strip the three characters that break a consumer: CR and LF end a key=value
+# record early, ESC repaints the reader's terminal. Cap the length so one long
+# unit-file line cannot fill a prompt.
+sanitise_line() { tr -d '\r\n\033' | cut -c1-200; }
+
+write_state() {
+    local out="$1" rc_main="$2" dir tmp faults summary rc_final
+    dir="$(state_dir)"
+    mkdir -p "$dir" || { printf 'check-timer-health: cannot create %s\n' "$dir" >&2; return 1; }
+
+    rc_final="$fail"
+    (( rc_main == 2 )) && rc_final=2
+    faults="$(grep -c '✗' "$out" 2>/dev/null || true)"
+    [[ "$faults" =~ ^[0-9]+$ ]] || faults=0
+    summary="$(grep -m1 '✗' "$out" 2>/dev/null | sed 's/^[[:space:]]*✗[[:space:]]*//' | sanitise_line)"
+
+    cp -f "$out" "$dir/detail" 2>/dev/null || true
+    tmp="$(mktemp -p "$dir" .status.XXXXXX)" || {
+        printf 'check-timer-health: cannot write state in %s\n' "$dir" >&2; return 1; }
+    printf 'rc=%s\nfaults=%s\nsummary=%s\ndetail=%s\n' \
+        "$rc_final" "$faults" "$summary" "$dir/detail" > "$tmp" || { rm -f "$tmp"; return 1; }
+    # -T (no-target-directory): without it, a DIRECTORY at $dir/status makes `mv`
+    # move the temp file INSIDE it and report success -- the writer believes it
+    # wrote, the reader sees a directory and correctly stays silent, and the
+    # channel is dead with both halves reporting health. Found by a mutation row.
+    mv -fT "$tmp" "$dir/status" || { rm -f "$tmp"; return 1; }
+    return 0
+}
+
 NOW="${TIMER_HEALTH_NOW:-$(date +%s)}"
+
+if (( WRITE_STATE )); then
+    # Create the state dir FIRST and keep every temp file in it, so this mode
+    # depends on exactly one writable location. `mktemp` with no -p uses $TMPDIR,
+    # which this box points elsewhere (config/environment.d/tmpdir.conf) -- a
+    # test row with an unwritable TMPDIR proved the whole write then failed,
+    # even though the state file itself was being written correctly.
+    ws_dir="$(state_dir)"
+    mkdir -p "$ws_dir" || {
+        printf 'check-timer-health: cannot create %s\n' "$ws_dir" >&2; exit 1; }
+    # main() sets the global `fail`, so it must run in THIS shell -- a $(...)
+    # capture is a subshell and `fail` would come back 0 every time, which is
+    # the silent pass this repo keeps finding. Redirect to a file instead.
+    out_tmp="$(mktemp -p "$ws_dir" .out.XXXXXX)" || exit 1
+    main >"$out_tmp" 2>&1
+    rc=$?
+    write_state "$out_tmp" "$rc"; wrote=$?
+    rm -f "$out_tmp"
+    # Exit status reports only whether the verdict was recorded -- see the header.
+    exit "$wrote"
+fi
+
 main
 rc=$?
 (( rc == 2 )) && exit 2

@@ -138,6 +138,130 @@ check "separate-git-dir HEAD read"    "$(head_state "$SEP")"            "branch 
 check "linked worktree stays unknown" "$(head_state "$TMPROOT/realwt")" "unknown"
 
 echo
+echo "=== _timer_health_warn: the prompt half of timer health (DO-687) ==="
+# Runs at EVERY interactive shell's first prompt, so the rows that matter are
+# the ones where it must NOT speak and must NOT wedge. XDG_STATE_HOME points at
+# a fixture, and DOTFILES_ROOT at a directory with no check-timer-health.sh, so
+# no row can reach the real state file or spawn the real checker.
+THSTATE="$TMPROOT/thstate"; mkdir -p "$THSTATE/timer-health"
+THROOT="$TMPROOT/throot";   mkdir -p "$THROOT"
+THENV=""
+th() {  # th  -- prints whatever the function emits (zrun folds 2>&1). Extra env
+        # goes in $THENV, set by the caller, so no quoting survives two shells.
+  zrun "HOME='$WARNHOME_TH' XDG_STATE_HOME='$THSTATE' DOTFILES_ROOT='$THROOT' $THENV _timer_health_warn"
+}
+th_stdout_only() {  # stderr DISCARDED, so a row can prove the warning is not on stdout
+  zsh -c "source '$SYSTEM_SH'; HOME='$WARNHOME_TH' XDG_STATE_HOME='$THSTATE' DOTFILES_ROOT='$THROOT' _timer_health_warn" 2>/dev/null
+}
+th_leak() {  # what the function leaves behind in the calling shell
+  zsh -c "source '$SYSTEM_SH'; HOME='$WARNHOME_TH' XDG_STATE_HOME='$THSTATE' DOTFILES_ROOT='$THROOT' _timer_health_warn >/dev/null 2>&1; print -r -- \"\${rc-unset}/\${faults-unset}/\${summary-unset}\"" 2>&1
+}
+WARNHOME_TH="$TMPROOT/thhome"; mkdir -p "$WARNHOME_TH"
+thstatus() { printf '%s\n' "$1" > "$THSTATE/timer-health/status"; }
+
+[[ -x "$THROOT/scripts/check-timer-health.sh" ]] && \
+  fatal "the fixture root must NOT hold a real checker; rows would spawn it"
+
+rm -f "$THSTATE/timer-health/status"
+check "no state file yet: silent"      "$(th)"  ""
+
+thstatus 'rc=0
+faults=0
+summary=
+detail=/x'
+check "rc=0: silent"                   "$(th)"  ""
+
+thstatus 'rc=1
+faults=2
+summary=wt-gc-sweep.service armed but SKIPPED since 2026-09-23
+detail=/x'
+check "rc=1: warns"                    "$(th | grep -c 'timer health')"           "1"
+check "rc=1: names the count"          "$(th | grep -c '2 repo-owned')"           "1"
+check "rc=1: carries the summary"      "$(th | grep -c 'wt-gc-sweep.service')"    "1"
+check "rc=1: names the mute switch"    "$(th | grep -c 'TIMER_HEALTH_QUIET')"     "1"
+# A literal backslash-033 in the output means a colour escape landed in a plain
+# '...' instead of $'...'. Every other row greps for message TEXT and so passed
+# while the prompt printed a trailing \033[0m.
+check "rc=1: no literal escape sequence" "$(th | grep -c '\\033')"                  "0"
+# stderr, not stdout: `zsh -i` with piped stdin DOES fire precmd, and a stdout
+# warning would land inside a captured value.
+# Not merely "stdout is empty": the SAME fixture must warn on stderr, or this
+# row would pass for any reason that produces no output at all.
+check "rc=1: warns (stderr folded in)" "$(th | grep -c 'timer health')"  "1"
+check "rc=1: nothing on stdout"        "$(th_stdout_only)"               ""
+
+# rc=2 is "the checker could not run", whose commonest cause here is a worktree
+# ahead of the deployed checkout — normal. Warning about it at every prompt is
+# the permanently-red checker this repo names three times.
+thstatus 'rc=2
+faults=1
+summary=ownership unknown
+detail=/x'
+check "rc=2: silent at the prompt"     "$(th)"  ""
+
+thstatus 'rc=1
+faults=1
+summary=x
+detail=/x'
+THENV="TIMER_HEALTH_QUIET=1"
+check "TIMER_HEALTH_QUIET silences it" "$(th)"  ""
+THENV=""
+# The coupling decision: DOTFILES_GUARD_QUIET means "I am knowingly dogfooding a
+# branch", which must not take timer health down with it for a week.
+# Through the real entry point, because the decision IS the order of two lines
+# inside it: _timer_health_warn must run BEFORE the DOTFILES_GUARD_QUIET return.
+# A row calling the helper directly cannot see that ordering, and a mutant that
+# swapped the two survived a full green suite.
+th_via_guard() {
+  zrun "HOME='$WARNHOME_TH' XDG_STATE_HOME='$THSTATE' DOTFILES_ROOT='$THROOT' ${1:-} _dotfiles_live_config_warn"
+}
+check "DOTFILES_GUARD_QUIET does NOT silence timer health" \
+      "$(th_via_guard "DOTFILES_GUARD_QUIET=1" | grep -c 'timer health')"  "1"
+check "... while still silencing the dotfiles guard itself" \
+      "$(th_via_guard "DOTFILES_GUARD_QUIET=1" | grep -c 'dotfiles:')"     "0"
+check "TIMER_HEALTH_QUIET through the guard too" \
+      "$(th_via_guard "TIMER_HEALTH_QUIET=1" | grep -c 'timer health')"    "0"
+
+# THE BLOCKER. `[[ -r $f ]]` is TRUE for a FIFO and the read then blocks forever:
+# a new terminal hangs at its first prompt, no output, no timeout. Measured on
+# this box before the guard was written. (N.) matches regular files only.
+rm -f "$THSTATE/timer-health/status"; mkfifo "$THSTATE/timer-health/status"
+check "a FIFO does not hang the prompt" \
+      "$(timeout 5 zsh -c "source '$SYSTEM_SH'; HOME='$WARNHOME_TH' XDG_STATE_HOME='$THSTATE' DOTFILES_ROOT='$THROOT' _timer_health_warn" 2>&1; echo "rc=$?")" "rc=0"
+rm -f "$THSTATE/timer-health/status"
+
+ln -sf "$THSTATE/timer-health/nothing-here" "$THSTATE/timer-health/status"
+check "a dangling symlink: silent"     "$(th)"  ""
+rm -f "$THSTATE/timer-health/status"
+
+mkdir -p "$THSTATE/timer-health/status"
+check "a directory at the path: silent" "$(th)" ""
+rmdir "$THSTATE/timer-health/status"
+
+thstatus 'this is not key=value at all'
+check "garbage content: silent"        "$(th)"  ""
+
+# A non-numeric count must not reach zsh arithmetic: `foo=bar; bar=99` makes
+# (( foo > 10 )) TRUE by recursive resolution, and a malformed one prints
+# `bad math expression` at the prompt.
+thstatus 'rc=1
+faults=notanumber
+summary=s
+detail=/x'
+check "non-numeric count: still warns" "$(th | grep -c 'timer health')"      "1"
+check "non-numeric count: no math error" "$(th | grep -c 'bad math')"        "0"
+# The contract is that the DISPLAYED count is a number. Asserting only "it still
+# warns" passed whether or not the guard existed, which let the mutant live.
+check "non-numeric count: shown as a number" \
+      "$(th | sed -n 's/.*health: \([^ ]*\) repo-owned.*/\1/p' | grep -c '^[0-9][0-9]*$')" "1"
+
+thstatus 'rc=0
+faults=0
+summary=
+detail=/x'
+check "leaks no variables into the shell" "$(th_leak)"  "unset/unset/unset"
+
+echo
 echo "=== _dotfiles_live_config_warn: what the user sees at shell startup ==="
 # Its own HOME, containing no ~/.zshrc: the warning also checks where the
 # running shell was sourced FROM (see the foreign-source rows at the end of this
