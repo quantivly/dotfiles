@@ -711,10 +711,30 @@ cp -f "$DOTFILES/systemd/vpn-notify.service" "$UNITDIR/" || fatal setup
 # Any output at all is a finding: systemd-analyze is silent on a clean unit.
 SA_SYS="$(systemd-analyze verify "$UNITDIR/vpn-failfast.service" 2>&1)"
 check "vpn-failfast.service: systemd-analyze is silent" "$SA_SYS" ""
-# --user pulls in the whole user unit path, so unrelated system-shipped units
-# (spice-vdagent here) report their own pre-existing faults. Scope to ours.
-SA_USR="$(systemd-analyze --user verify "$UNITDIR/vpn-notify.service" 2>&1 | grep 'vpn-notify' || true)"
+# The user unit needs a fake HOME, because `%h` expands from $HOME and
+# systemd-analyze ALSO checks that ExecStart exists. Without this the row passed
+# on a machine that happens to have ~/.dotfiles and failed on a CI runner that
+# does not -- green for an environmental reason, which is not green.
+#
+# --user also pulls in the whole user unit path, so unrelated system-shipped
+# units (spice-vdagent here) report their own pre-existing faults. Scope to ours.
+FAKEHOME="$T/fakehome"
+mkdir -p "$FAKEHOME/.dotfiles/scripts" || fatal setup
+cp -f "$DOTFILES/scripts/vpn-notify.sh" "$FAKEHOME/.dotfiles/scripts/" || fatal setup
+SA_USR="$(HOME="$FAKEHOME" systemd-analyze --user verify "$UNITDIR/vpn-notify.service" 2>&1 | grep 'vpn-notify' || true)"
 check "vpn-notify.service: systemd-analyze is silent about it" "$SA_USR" ""
+
+# ... and the row above is only worth having if the verifier would have spoken.
+# Remove the script from that fake HOME and it must complain about ExecStart --
+# otherwise "silent" proves nothing about the unit and everything about the tool
+# having given up.
+rm -f "$FAKEHOME/.dotfiles/scripts/vpn-notify.sh"
+SA_GONE="$(HOME="$FAKEHOME" systemd-analyze --user verify "$UNITDIR/vpn-notify.service" 2>&1 | grep -c 'is not executable' || true)"
+if [[ "${SA_GONE:-0}" -ge 1 ]]; then
+    ok "systemd-analyze really is checking ExecStart (it objects when it is absent)"
+else
+    bad "systemd-analyze did NOT object to a missing ExecStart — the silence above proves nothing"
+fi
 
 # The specific directive, named, because a silent `systemd-analyze` is not the
 # same as the key being in the right place -- it is only the same as systemd
@@ -796,7 +816,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=124
+EXPECTED_ROWS=125
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
