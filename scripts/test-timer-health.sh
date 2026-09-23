@@ -89,7 +89,7 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         --*|-p) continue ;;
-        LoadState|ActiveState|UnitFileState|Result|ExecMainStatus|ConditionResult|ConditionTimestamp|ActiveEnterTimestamp) continue ;;
+        LoadState|ActiveState|UnitFileState|Result|ExecMainStatus|ConditionResult|ConditionTimestamp|ActiveEnterTimestamp|NRestarts) continue ;;
         *) [ -z "$unit" ] && unit="$a" ;;
       esac
     done
@@ -101,7 +101,7 @@ case "${1:-}" in
     f="$SCTL_STATE/props/$unit"
     if [ -r "$f" ]; then cat "$f"; exit 0; fi
     # Measured on systemd 259: an unknown unit exits 0 and claims success.
-    printf 'LoadState=not-found\nActiveState=inactive\nUnitFileState=\nResult=success\nExecMainStatus=0\nConditionResult=no\nConditionTimestamp=\nActiveEnterTimestamp=\n'
+    printf 'LoadState=not-found\nActiveState=inactive\nUnitFileState=\nResult=success\nExecMainStatus=0\nConditionResult=no\nConditionTimestamp=\nActiveEnterTimestamp=\nNRestarts=0\n'
     exit 0 ;;
 esac
 echo "systemctl stub: unhandled: $*" >&2
@@ -158,10 +158,12 @@ link_unit() {
 
 set_enabled() { printf '%s\n' "$2" > "$STATE/enabled/$1"; }
 
-# props <unit> <LoadState> <ActiveState> <Result> <ExecMainStatus> <ConditionResult> <ConditionTimestamp> <ActiveEnterTimestamp>
+# props <unit> <LoadState> <ActiveState> <Result> <ExecMainStatus> <ConditionResult> <ConditionTimestamp> <ActiveEnterTimestamp> [NRestarts]
+# NRestarts is optional and defaults to 0, so every row written before it existed
+# still describes exactly the machine it described then.
 props() {
-    printf 'LoadState=%s\nActiveState=%s\nUnitFileState=enabled\nResult=%s\nExecMainStatus=%s\nConditionResult=%s\nConditionTimestamp=%s\nActiveEnterTimestamp=%s\n' \
-        "$2" "$3" "$4" "$5" "$6" "$7" "$8" > "$STATE/props/$1"
+    printf 'LoadState=%s\nActiveState=%s\nUnitFileState=enabled\nResult=%s\nExecMainStatus=%s\nConditionResult=%s\nConditionTimestamp=%s\nActiveEnterTimestamp=%s\nNRestarts=%s\n' \
+        "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-0}" > "$STATE/props/$1"
 }
 
 timers_json() { printf '%s\n' "$1" > "$STATE/timers.json"; }
@@ -449,6 +451,114 @@ OUT="$(run)"; RC=$?
 check "a standalone service systemd cannot load: exit 1" "$RC" 1
 grep_ok "$OUT" 'LoadState=not-found' "standalone not-found: named by LoadState"
 
+# SKIPPED, not down. A standalone unit held back by an unmet Condition* is
+# inactive with Result=success — which this function reported as a FAIL until
+# DO-692, making any unit gated on hardware or a vendor client permanently red on
+# every machine that lacks it. The needle is the word SKIPPED on the unit's own
+# line; asserting exit 0 alone would also pass if the branch vanished and the
+# unit happened to be up.
+healthy
+link_unit server.service 'ConditionPathExists=/nonexistent/vpn-client'
+set_enabled server.service enabled
+props server.service loaded inactive success 0 no "@$((NOW-9000))" ""
+OUT="$(run)"; RC=$?
+check "a standalone service skipped by a condition: exit 0" "$RC" 0
+grep_ok "$OUT" '· server.service: SKIPPED by a condition' "standalone skipped: reported as a decision"
+grep_ok "$OUT" 'ConditionPathExists=/nonexistent/vpn-client' "standalone skipped: names the condition holding it back"
+grep_none "$OUT" '✗ server.service' "standalone skipped: NOT reported as a fault"
+
+# The same ConditionResult=no on a unit that has never been reached is not a
+# skip — it is the default systemd reports for a unit it has not looked at. The
+# timestamp is what separates them, exactly as in check_service().
+healthy
+link_unit server.service 'ConditionPathExists=/nonexistent/vpn-client'
+set_enabled server.service enabled
+props server.service loaded inactive success 0 no "" ""
+OUT="$(run)"; RC=$?
+check "standalone, ConditionResult=no with no timestamp: exit 1" "$RC" 1
+grep_none "$OUT" 'SKIPPED' "standalone never reached: not reported as skipped"
+
+# ... and a unit that is UP is judged on that, whatever an earlier start attempt
+# declined to do. Without the ActiveState gate this row reports a running daemon
+# as skipped.
+healthy
+link_unit server.service 'ConditionPathExists=/nonexistent/vpn-client'
+set_enabled server.service enabled
+props server.service loaded active success 0 no "@$((NOW-9000))" "@$((NOW-9000))"
+OUT="$(run)"; RC=$?
+check "standalone up, stale ConditionResult=no: exit 0" "$RC" 0
+grep_ok "$OUT" '✓ server.service: active' "standalone up: judged on ActiveState, not on a stale condition"
+grep_none "$OUT" 'SKIPPED' "standalone up: not reported as skipped"
+
+# CRASH-LOOPING. `activating` was accepted as a tick, so a daemon restarting
+# forever read green — and because each run outlives StartLimitIntervalSec the
+# rate limiter never trips, so nothing else reports it either.
+healthy
+link_unit server.service
+set_enabled server.service enabled
+props server.service loaded activating success 0 yes "@$((NOW-9000))" "@$((NOW-30))" 9
+OUT="$(run)"; RC=$?
+check "a standalone daemon in a restart loop: exit 1" "$RC" 1
+grep_ok "$OUT" 'CRASH-LOOPING' "restart loop: named"
+grep_ok "$OUT" 'NRestarts=9' "restart loop: reports the count it judged on"
+grep_none "$OUT" '✓ server.service' "restart loop: no tick"
+
+# Sampled in the UP half of the same cycle. This is the row that makes the guard
+# worth having: ActiveState=active is what a healthy daemon reports too, so a
+# check that only looked at `activating` would pass here every other poll.
+healthy
+link_unit server.service
+set_enabled server.service enabled
+props server.service loaded active success 0 yes "@$((NOW-9000))" "@$((NOW-30))" 9
+OUT="$(run)"; RC=$?
+check "a restart loop sampled while active: exit 1" "$RC" 1
+grep_ok "$OUT" 'CRASH-LOOPING' "restart loop while active: still named"
+
+# Below the limit is a blip, not a loop: a resume or a network hiccup restarts a
+# daemon once or twice and it must not turn the checker red.
+healthy
+link_unit server.service
+set_enabled server.service enabled
+props server.service loaded active success 0 yes "@$((NOW-9000))" "@$((NOW-9000))" 3
+OUT="$(run)"; RC=$?
+check "restarts at the limit are not a loop: exit 0" "$RC" 0
+grep_ok "$OUT" '✓ server.service: active' "at the limit: still a tick"
+
+# The limit is a threshold, not a constant this suite happens to agree with.
+healthy
+link_unit server.service
+set_enabled server.service enabled
+props server.service loaded active success 0 yes "@$((NOW-9000))" "@$((NOW-9000))" 3
+OUT="$(TIMER_HEALTH_RESTART_LIMIT=2 run)"; RC=$?
+check "a lowered restart limit is honoured: exit 1" "$RC" 1
+grep_ok "$OUT" '(limit 2)' "lowered limit: reported"
+
+# A non-numeric limit must not silently become 0 inside (( )), which would fail
+# every healthy daemon on the machine.
+healthy
+OUT="$(TIMER_HEALTH_RESTART_LIMIT=soon run)"; RC=$?
+check "a non-numeric restart limit: exit 2, not a pass" "$RC" 2
+grep_ok "$OUT" 'TIMER_HEALTH_RESTART_LIMIT' "bad restart limit: names the variable"
+
+# NRestarts is read into an arithmetic context, and bash EXECUTES command
+# substitution there: `(( r > 3 ))` with r='x[$(touch /tmp/f)]' creates the file
+# and evaluates to false, silently. Measured, not recalled. systemctl is a
+# trusted source, so this pins a property rather than a live attack path — the
+# same defensive shape as epoch_of() and the HORIZON_DAYS validation in this
+# file, both of which exist because a non-numeric value inside (( )) is a silent
+# 0 rather than an error.
+healthy
+link_unit server.service
+set_enabled server.service enabled
+CANARY="$T/nrestarts-canary"
+printf 'LoadState=loaded\nActiveState=active\nUnitFileState=enabled\nResult=success\nExecMainStatus=0\nConditionResult=yes\nConditionTimestamp=@%s\nActiveEnterTimestamp=@%s\nNRestarts=x[$(touch %s)]\n' \
+    "$((NOW-9000))" "$((NOW-9000))" "$CANARY" > "$STATE/props/server.service"
+OUT="$(run)"; RC=$?
+check "a non-numeric NRestarts: exit 0, treated as no restarts" "$RC" 0
+[[ -e "$CANARY" ]] && bad "NRestarts is evaluated as an arithmetic expression — command substitution RAN" \
+                   || ok "NRestarts is never evaluated as an arithmetic expression"
+grep_ok "$OUT" '✓ server.service: active' "non-numeric NRestarts: still a tick"
+
 # A service a managed timer activates must not ALSO be judged as a standalone
 # daemon — a oneshot is inactive between runs, which would read as "down".
 healthy
@@ -618,7 +728,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=98
+EXPECTED_ROWS=122
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
