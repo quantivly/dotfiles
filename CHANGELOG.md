@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **rabota's pre-compute no longer fails at every resume (DO-691).** `Persistent=true` makes a
+  missed run fire at the instant of thaw, and at that instant the network is not usable yet:
+  measured here, all three failures in seven days were `precompute steps failed: sync`, two of
+  them in the **same second** as `systemd-sleep` logging "System returned from sleep", the third
+  at a boot. `After=network-online.target` does not help — it is a boot-ordering target and is not
+  re-evaluated on resume. The cost was never mainly the failed unit: a resumed laptop got **no
+  pre-compute at all** until the next 30-minute tick, so the ranked list, inbox plan and census
+  were stale for up to half an hour after every resume. `Restart=on-failure` with
+  `RestartSec=90s` and a bounded burst retries the transient case into success while leaving a
+  real failure (a rejected token, an API refusing us) `failed` where `check-timer-health.sh` and
+  the shell prompt report it.
+
 ### Added
 
 - **A failed or skipped repo-owned timer now reaches you without being asked (DO-687).**
