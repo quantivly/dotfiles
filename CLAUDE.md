@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **This is an instruction file, not a journal.** It is loaded in full into every request of
 every session, so every paragraph is paid for on every turn, and length *reduces adherence* — the
-file stops producing the behaviour it was written to produce. One −62% cut was tried here and it
+file stops producing the behaviour it was written to produce. One −62% cut was tried here (2026-01-07) and it
 regrew 25×, so the budget is enforced, not intended: `scripts/check-claude-md.sh`, in CI and
 pre-commit, against a ceiling derived from history that can only tighten. The growth history and
 every number behind it: [scripts/context-budget.conf](scripts/context-budget.conf).
