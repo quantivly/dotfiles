@@ -140,7 +140,7 @@ already records, met at scale:
   file already records for `verify-tools.sh`: a new external tool in a checker is
   a new way for a check to go quiet.
 
-State table: `scripts/test-workflow-apt.sh` (112 checks, in CI as
+State table: `scripts/test-workflow-apt.sh` (114 checks, in CI as
 `workflow-apt-test`) over `scripts/check-workflow-apt.sh`. Hermetic — every row
 builds its own fixture tree and is handed an explicit root; only the last rows
 read this repository, to assert the shipped tree passes. Most rows assert what it
@@ -414,8 +414,8 @@ the `CLAUDE.md` rule about external tools going quiet, reproduced inside the
 change written to obey that rule's sibling. Measured with a stub `awk` on
 `PATH`; now exit 2 with a message naming awk, and a row that uses the same stub.
 
-**State table:** `scripts/test-sync-version-docs.sh`, 80 checks, hermetic, run
-in CI. Every row builds its own tree — a copy of the script under test, a
+**State table:** `scripts/test-sync-version-docs.sh` (82 checks, hermetic, run
+in CI). Every row builds its own tree — a copy of the script under test, a
 synthetic `.mise.toml` and a synthetic doc — so nothing depends on what this
 repo happens to pin today. The tool list is read out of the script's own
 `TOOL_ORDER` rather than duplicated, and the extraction is asserted rather than
@@ -442,3 +442,123 @@ a survivor, and one of these did stop matching after a later edit and had to be
 re-pinned. `EXPECTED_TOTAL` was
 proven non-decorative by deleting a row and watching it report a vanished row
 rather than `all 80 checks passed`.
+
+## Where a check count lives, and what holds it right (DO-701)
+
+Every state table in this repo prints how many checks it ran, and eighteen prose
+sentences quote that number. **Measured 2026-09-23 at `a94325e`, ten of those
+eighteen live claims were wrong**, four of them badly:
+
+| suite | ran | was documented as |
+|---|---|---|
+| `scripts/test-hspawn.sh` | 464 | 269 (`docs/CLAUDE_ACCOUNTS.md`), 235 (`docs/HERDR_INTERNALS.md`), 126 (`docs/HERDR_GUIDE.md`) |
+| `scripts/test-herdr-modular.sh` | 247 | 170 (`docs/HERDR_INTERNALS.md`) |
+| `scripts/test-timer-health.sh` | 125 | 77 (`docs/TIMER_HEALTH.md`) |
+| `scripts/test-dotfiles-guard.sh` | 394 | 371 (`docs/DOTFILES_DEPLOY.md`) |
+| `scripts/test-systemd-reconcile.sh` | 156 | 130 (`docs/HERDR_INTERNALS.md`) |
+| `scripts/test-gh-routing.sh` | 207 | 207 (`CLAUDE.md`), 199 (`docs/GH_ACCOUNT_ROUTING.md`) |
+| `scripts/test-scrub-transcript-secrets.sh` | 58 | 54 (`docs/TRANSCRIPT_SCRUB.md`) |
+| `scripts/test-wt-gc-sweep.sh` | 22 | 21 (`docs/WORKTREE_SWEEP.md`) |
+
+The eight that happened to be right were right by luck — nothing was comparing
+them to anything, so they were simply the suites whose row counts had not moved
+since someone last wrote the number down. A count nobody checks is worse than no
+count, because it is quoted with confidence: it reads as a measurement and a
+reader uses it to judge whether a guard is thorough.
+
+**The last two rows were found by the shape of the sentence, not the shape of the
+suite.** They say "**21 rows**" and "— 54 rows" rather than "(N checks)", so a
+survey for `(N checks` — which is how this work was scoped, and how DO-701 was
+written — reported them as having no claim at all rather than as having a wrong
+one. Both were stale. That is why the needle's sentence form is now uniform: the
+alternative is a class of claim that no audit of the claims can see.
+
+### One prose home per count, and it is a maintainer's record
+
+`test-hspawn.sh`'s count was quoted in three pages that disagreed with each other
+and with reality. Three assertions would have kept three copies correct, and that
+is the wrong answer. CLAUDE.md's routing table already decides this: **"Evidence,
+a measurement, a date, a postmortem, a mutation tally" goes to `docs/<AREA>.md`**,
+and a check count is a measurement. Its sibling rule is **one prose home per
+fact**. So:
+
+- **A live count lives in exactly one page, the maintainer's record for the area
+  the suite tests.** `docs/HERDR_INTERNALS.md` owns the four herdr suites,
+  including `test-hspawn.sh` — `hspawn` lives in `zsh/zshrc.herdr` and that page
+  is where its testedness is argued.
+- **`CLAUDE.md` carries no counts at all.** It is loaded into every request and a
+  count changes nothing an agent *does*; by its own routing table it is the wrong
+  home. The three it carried (`test-gh-routing.sh`, `test-secret-guard.sh`,
+  `test-backup-external.sh`) now name the suite and leave the number to the
+  record. DO-698 asserted CLAUDE.md's copy rather than removing it, which is the
+  decision this reverses — the three-way `hspawn` drift is what forced the
+  question of how many homes a count should have.
+- **Guides carry no counts either.** `docs/HERDR_GUIDE.md` is for someone
+  adopting herdr; a row count is of no use to them and is one more copy to keep
+  right. It names the suite and links to the record.
+- **A count anchored to a commit is a record, not a claim, and is never
+  rewritten.** `docs/CLAUDE_ACCOUNTS.md`'s "156 checks at `6661472`" and
+  `docs/CLAUDE_ACCOUNT_PICKER.md`'s "283 at `0b0f8c0`" were true at those commits
+  and still are. They are therefore also unassertable, which is why
+  `scripts/test-claude-pick.sh` gains a row total but no prose row: every count
+  written about it carries its commit, so there is nothing live to pin.
+
+### The mechanism, and the one thing it must not do
+
+Each suite ends with `EXPECTED_ROWS` and a `docs_claim()` that **builds a fixed
+needle out of that number and greps for it**. The full argument is in the comment
+at the tail of `scripts/test-secret-guard.sh`, where DO-698 wrote it; the two
+parts worth repeating, because both are ways of failing silently:
+
+- **It must never parse the number out of markdown.** A regex would have to guess
+  the shape of an English sentence, and it breaks on a rewording by matching
+  nothing — which reads exactly like a pass. Going the other way round means a
+  reword that moves the count away from the script name fails loudly and names
+  the file, and a human re-points the needle. That is the right outcome and not a
+  cost: these sentences are load-bearing and should not be reworded silently.
+- **Whitespace is squashed before matching**, because several of these sentences
+  wrap *between* the script name and the count, so a line-oriented grep would
+  miss them for that reason alone and report drift that does not exist.
+
+The needle is `` `scripts/test-<name>.sh` (<N> checks ``, so the count must sit
+immediately after the script name in a parenthesis. `docs/TIMER_HEALTH.md`,
+`docs/BACKUP_INTERNALS.md` and this page's `test-sync-version-docs.sh` entry were
+reworded into that shape; one sentence form across all of them is what lets the
+needle be the same construction everywhere.
+
+**Every error branch gets a row of its own.** The unreadable-file branch is one
+line and it is the branch most likely to be wrong, because no row ever reaches
+it: in DO-698 a mutation sweep caught it reporting "could not run" as a **pass**
+with every other row green. That is the defect class this whole change is about,
+so it is pinned in all thirteen suites rather than in the one where it was found.
+
+### `EXPECTED_ROWS` turned out to be load-bearing twice, which a mutant found
+
+The sweep for this change ran **16 mutants, each with an expected verdict written
+down before it ran and compared by the driver rather than read by eye**, each
+dry-run for applicability with its diff printed — a mutant that collapsed into
+something other than its name reads exactly like a survivor, and DO-698 had one do
+precisely that. Fifteen matched. The sixteenth is the useful one.
+
+**M13** deleted a row from `test-buildlimits.sh` *and* lowered `EXPECTED_ROWS` from
+37 to 36 to match, and was expected to **survive** — the compound form that proves
+the row total is the only thing catching a vanished row. It was **killed**, and not
+by the total: by the `docs_claim` row. Lowering `EXPECTED_ROWS` also re-points the
+needle at "36 checks", which `docs/HERDR_INTERNALS.md` does not say. So in any suite
+carrying a documented count, **quietly absorbing a deleted row takes two coordinated
+edits, one of them to prose a reviewer reads** — a stronger property than the one the
+mutant was written to test, and the expected verdict was simply wrong.
+
+That compound is only testable where there is no `docs_claim` row, which is
+`scripts/test-claude-pick.sh` and only that one. Re-run there: deleting a row alone
+is **killed** by the total (M15), and deleting it with `EXPECTED_ROWS` lowered to
+match **survives** (M16) — which is the proof M13 was meant to give.
+
+### What a row total does not do
+
+A row total detects a **skipped** check, never a **hollow** one. If an early
+`exit`, an unset variable under `set -u` or a deleted block stops rows from
+running, every row that did run still passes and the suite still prints a green
+total; that is what the count catches. A row whose fixture cannot reach the
+branch it names still runs, still passes, and is invisible to it — which is what
+the mutation sweeps are for.

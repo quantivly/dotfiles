@@ -761,16 +761,29 @@ check "...while still denying it" \
 # A row count detects a SKIPPED check, never a hollow one: if an early `exit`,
 # an unset variable under `set -u` or a deleted block stops rows from running,
 # every row that DID run still passes and the suite still prints a green total.
-# Every other state table here guards that; this one was the last without it
-# (test-wt-gc-sweep.sh, test-claude-md.sh, test-scrub-transcript-secrets.sh).
+#
+# CORRECTION (DO-701). This block said "this one was the last without it", which
+# was false when it shipped: SEVEN state tables had no row total at the time --
+# test-buildlimits, test-claude-pick, test-dotfiles-guard, test-gh-routing,
+# test-herdr-modular, test-hspawn, test-systemd-reconcile. They all have one now.
+# The claim reached the merged commit message too, where it cannot be corrected.
+# It was reached by listing the suites that DID have a total and not checking the
+# complement -- the same shape as the drift this guard exists to stop.
 #
 # WHY THE PROSE IS ASSERTED TOO, which is a judgement call and not obviously
-# right. Two files tell a reader how many checks this suite runs -- CLAUDE.md
+# right. Two files told a reader how many checks this suite runs -- CLAUDE.md
 # and docs/SECRET_EMISSION.md -- and both were wrong when this guard was
 # written: they claimed 182 and 79 against an actual 192. Nothing had ever
 # compared them to anything, so they drifted from the first row added after
 # each was written and would have gone on drifting. A number nobody checks is
 # worse than no number, because it is quoted with confidence.
+#
+# DO-701 then answered the half this left open: how many files should carry the
+# number at all. One. CLAUDE.md's own routing table sends "a measurement" to
+# docs/<AREA>.md, and a check count is a measurement that changes nothing an
+# agent does -- so CLAUDE.md now names this suite and carries no count, and the
+# row that asserted its copy is gone. docs/REPO_CHECKS.md, "Where a check count
+# lives", has the argument and the drift that forced it.
 #
 # The fragile way to do this is to PARSE a count out of markdown: a regex then
 # has to guess the shape of an English sentence, and it breaks on a rewording
@@ -785,7 +798,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=195
+EXPECTED_ROWS=194
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.
@@ -797,7 +810,6 @@ docs_claim() {
 }
 
 printf '\nthe count this suite is documented as running\n'
-check "CLAUDE.md says $EXPECTED_ROWS checks"              "$(docs_claim CLAUDE.md)" 1
 check "docs/SECRET_EMISSION.md says $EXPECTED_ROWS checks" \
       "$(docs_claim docs/SECRET_EMISSION.md)" 1
 # The unreadable branch needs a row of its own or it is never taken, and an
@@ -807,11 +819,12 @@ check "docs/SECRET_EMISSION.md says $EXPECTED_ROWS checks" \
 check "a documented file that cannot be read is not a pass" \
       "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
 
-echo
-printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
     "$EXPECTED_ROWS" "$((PASS + FAIL))"
   FAIL=$((FAIL + 1))
 fi
+
+echo
+printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

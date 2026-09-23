@@ -2919,6 +2919,28 @@ cli --profile a1 --dry-run --json
 check "gate: without --gate the spent window changes nothing" \
       "$(jq -r '[.gate, .profile, (.exit_code|tostring)] | map(tostring) | join("/")' <<<"$CLI_OUT")" "null/a1/0"
 
+# --- the row total ------------------------------------------------------------
+# The total catches a row that VANISHED (an early exit, a deleted block, an unset
+# variable under `set -u`) -- every row that still ran would pass in silence and
+# the suite would print a green total.
+#
+# There is deliberately NO docs_claim row here, and that is the interesting half.
+# Every number written about this suite carries the commit it was measured at
+# ("192 at DO-574", "283 at `0b0f8c0`", "497 -> 503"), and
+# docs/CLAUDE_ACCOUNT_PICKER.md argues that convention at length -- correctly. A
+# count anchored to a commit is a RECORD: it was true there, it is not a claim
+# about today, and asserting it would force a historical entry to be rewritten
+# every time a row lands, which is the one thing that would make the record
+# worthless. So this suite gets a total and no prose row.
+# docs/REPO_CHECKS.md, "Where a check count lives".
+EXPECTED_ROWS=503
+
+if (( PASS + FAIL != EXPECTED_ROWS )); then
+  printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
+    "$EXPECTED_ROWS" "$((PASS + FAIL))"
+  FAIL=$((FAIL + 1))
+fi
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

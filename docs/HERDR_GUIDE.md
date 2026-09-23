@@ -851,7 +851,9 @@ rather than deletes so `hdespawn` can finish the teardown later. Three consequen
 `--` means what it says: after it, nothing is parsed as an option *or* as the deprecated
 positional `[profile|-]` slot, so `hspawn -- <repo> <slug> - "prompt"` keeps the literal `-`.
 
-State table: `scripts/test-hspawn.sh` (126 checks, in CI as `hspawn-test`). It is hermetic in a
+State table: `scripts/test-hspawn.sh`, in CI as `hspawn-test` — the count it runs lives in
+[HERDR_INTERNALS.md](HERDR_INTERNALS.md#herdr-agent-workspace-manager) and only there, because
+three pages quoting it drifted to three different wrong numbers. It is hermetic in a
 specific way — a recording `herdr` **stub** goes at the front of `PATH` for every run, rather than
 relying on `herdr` being absent, because the machine this was written on has a real one talking to
 a live server and hdespawn's job is to remove workspaces.

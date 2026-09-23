@@ -822,6 +822,40 @@ echo "=== usage ==="
 check "a bogus argument exits 2" "$(rc_sut empty --nonsense)" "2"
 check "--help exits 0"           "$(rc_sut empty --help)"     "0"
 
+# --- the row total, and the count this suite is documented as running --------
+# The total catches a row that VANISHED (an early exit, a deleted block, an unset
+# variable under `set -u`) -- every row that still ran would pass in silence and
+# the suite would print a green total. docs_claim then pins the number the prose
+# quotes to that same total: it greps for a FIXED needle built from EXPECTED_ROWS
+# rather than parsing a number out of markdown, because a regex has to guess the
+# shape of an English sentence and fails by matching nothing, which reads exactly
+# like a pass. Whitespace is squashed because the sentence wraps between the
+# script name and the count. Which page owns this count and why, and the measured
+# drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
+EXPECTED_ROWS=158
+
+docs_claim() {
+  local f="$DOTFILES/$1"
+  [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
+  tr -s '[:space:]' ' ' <"$f" \
+    | grep -c -F "\`scripts/test-systemd-reconcile.sh\` ($EXPECTED_ROWS checks"
+}
+
+printf '\nthe count this suite is documented as running\n'
+check "docs/HERDR_INTERNALS.md says $EXPECTED_ROWS checks" \
+      "$(docs_claim docs/HERDR_INTERNALS.md)" 1
+# The unreadable branch needs a row of its own or nothing ever takes it, and an
+# untaken branch is free to be wrong: in DO-698 a sweep caught this branch
+# reporting "could not run" as a PASS, with every other row still green.
+check "a documented file that cannot be read is not a pass" \
+      "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
+
+if (( PASS + FAIL != EXPECTED_ROWS )); then
+  printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
+    "$EXPECTED_ROWS" "$((PASS + FAIL))"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

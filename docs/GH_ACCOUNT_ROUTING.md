@@ -266,7 +266,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   records the parse state per remote; `unparsable` counts as a GitHub remote, blocks the path
   table, and the doctor lists it as a ⚠.
 
-State table: `scripts/test-gh-routing.sh` (199 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (209 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

@@ -170,7 +170,7 @@ machine-wide, so every existing consumer simply skips the new tokens.
 - `~/.dotfiles-local/scripts/test-wt-gc.sh` — 51 → **113 rows**, real repositories
   throughout, and it asserts its own row total. Eighteen mutants, **eighteen killed**, each
   by a row that names the guard it removed.
-- `scripts/test-wt-gc-sweep.sh` — **21 rows**, hermetic via a recording `wt-gc` stub at the
+- `scripts/test-wt-gc-sweep.sh` (24 checks) — hermetic via a recording `wt-gc` stub at the
   front of `PATH`. Five mutants, five killed. CI job `wt-gc-sweep-test`.
 
 One more refinement came out of reading the delete path again: a branch someone checked

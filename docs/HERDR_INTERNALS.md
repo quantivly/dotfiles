@@ -203,7 +203,7 @@ Gotchas, in the order they bite:
   only a unit that is *already* enabled, so it reconciles a decision rather than making one), and
   `scripts/verify-tools.sh` **fails** when the enablement has drifted. `--check` reports,
   `--plan` lists what `--apply` would touch. State table: `scripts/test-systemd-reconcile.sh`
-  (130 checks, in CI as `systemd-reconcile-test`) — hermetic via a recording **`systemctl` stub**
+  (158 checks, in CI as `systemd-reconcile-test`) — hermetic via a recording **`systemctl` stub**
   at the front of `PATH`, never via systemctl's absence: this box has a real one wired to the live
   user manager that holds the herdr server. Reading "the comparison is filesystem state, so no
   manager is needed" as "set `RECONCILE_NO_SYSTEMCTL=1` on every row" left `do_reconcile`'s body
@@ -321,7 +321,7 @@ Gotchas, in the order they bite:
   <slug>` scans and REFUSES when two entries share a slug, which `--close` makes likely by
   design), and an entry whose workspace id now holds someone else's worktree is finished from the
   recorded path with herdr's live workspace left untouched, rather than refused forever. State
-  table: `scripts/test-hspawn.sh` (235 checks, in CI as `hspawn-test`) — hermetic via a recording
+  table: `scripts/test-hspawn.sh` (466 checks, in CI as `hspawn-test`) — hermetic via a recording
   `herdr` **stub** at the front of `PATH`, never via herdr's absence: the box this was written on
   has a real one wired to a live server, and a suite that assumed absence would pass in CI and
   remove a real workspace here.
@@ -366,7 +366,7 @@ Gotchas, in the order they bite:
   `0` disables parallelism outright and the rest land in `MAKEFLAGS` as a malformed flag,
   both worse than the default they were meant to improve. It is not silent: `build-limits`
   gained a `source` line naming the tier, the override, or the override it ignored and why.
-  State table: `scripts/test-buildlimits.sh` (35 checks, in CI as `buildlimits-test`) — the
+  State table: `scripts/test-buildlimits.sh` (37 checks, in CI as `buildlimits-test`) — the
   module's first, since `zsh -n` was all it ever had. Hermetic via an **`nproc` stub on a
   from-scratch PATH**: the whole subject is what the module derives from a core count, and
   the row that matters most ("8 cores is still exactly 2") cannot be written at all without
@@ -550,7 +550,7 @@ Gotchas, in the order they bite:
   wirer writes the statusLine into that same file a few lines earlier. The wirer re-reads the
   status afterwards rather than trusting exit 0, and an older herdr with no `integration`
   subcommand is a ⚠, not a ✗: upgrading herdr is not a fix a report can ask for.
-- **State table: `scripts/test-herdr-modular.sh`** (170 checks, in CI as `herdr-modular-test`) —
+- **State table:** `scripts/test-herdr-modular.sh` (249 checks, in CI as `herdr-modular-test`) —
   the two commands a modular adopter runs, hermetic via a recording `herdr` stub and fake `$HOME`.
   Two defects in the suite itself are worth more than most of its rows:
   - **A row that cannot reach the branch it names is unfailable.** The row asserting `--herdr`

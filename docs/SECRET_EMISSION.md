@@ -155,7 +155,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (195 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (194 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this

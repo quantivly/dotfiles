@@ -9,9 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every state table now asserts its own row total, and every live check count in the prose is
+  now pinned to one (DO-701).** Seven suites had no `EXPECTED_ROWS` guard —
+  `test-buildlimits.sh`, `test-claude-pick.sh`, `test-dotfiles-guard.sh`, `test-gh-routing.sh`,
+  `test-herdr-modular.sh`, `test-hspawn.sh`, `test-systemd-reconcile.sh` — and
+  `test-backup-external.sh` had none either. Measured on `main` at `a94325e`, **ten of the
+  eighteen documented claims were wrong**, four of them badly: `test-hspawn.sh` ran **464** while
+  three pages claimed 269, 235 and 126; `test-herdr-modular.sh` ran **247** against a documented
+  170; `test-timer-health.sh` ran **125** against 77; `test-dotfiles-guard.sh` **394** against 371.
+  The eight that were right were right by luck — nothing was comparing them to anything, so they
+  were simply the counts that had not moved since someone last wrote them down. A count nobody
+  checks is worse than no count, because it is quoted with confidence. Two of the ten were found
+  only by the shape of the sentence: `docs/WORKTREE_SWEEP.md` and `docs/TRANSCRIPT_SCRUB.md` say
+  "N **rows**" rather than "(N checks)", so the survey that scoped this work reported them as
+  carrying no claim rather than a stale one — and both were stale.
+
+  **The judgement call was how many copies to keep, not how many to assert.** `test-hspawn.sh`'s
+  count was in three pages that disagreed with each other and with reality; three assertions
+  would have kept three copies correct, which is the wrong shape. `CLAUDE.md`'s own routing table
+  sends "a measurement" to `docs/<AREA>.md`, and its sibling rule is one prose home per fact — so
+  a live count now lives in exactly one page, the maintainer's record for the area the suite
+  tests, and nowhere else. `CLAUDE.md` carries **no** counts at all (it is loaded into every
+  request and a count changes nothing an agent does); `docs/HERDR_GUIDE.md`, an adopter's guide,
+  carries none either. That reverses DO-698's decision to assert `CLAUDE.md`'s copy rather than
+  remove it, and it frees 35 bytes against a ceiling with 2 to spare. A count anchored to a
+  commit — `docs/CLAUDE_ACCOUNT_PICKER.md`'s "283 at `0b0f8c0`" — is a record rather than a
+  claim, is never rewritten, and is therefore not assertable: that is why `test-claude-pick.sh`
+  gains a row total and no prose row.
+
+  Thirteen suites now carry a `docs_claim()` row built on DO-698's mechanism (a fixed needle from
+  `EXPECTED_ROWS`, never a regex parsing markdown, whitespace squashed because the sentence
+  wraps), plus a row of its own for the unreadable-file branch — the branch a DO-698 sweep caught
+  reporting "could not run" as a **pass** with every other row green. `docs/TIMER_HEALTH.md`,
+  `docs/BACKUP_INTERNALS.md` and `docs/REPO_CHECKS.md`'s `test-sync-version-docs.sh` entry were
+  reworded so the count follows the script name in a parenthesis, which is what lets the needle be
+  the same construction everywhere.
+
+  **16 mutants, each with its expected verdict written down before it ran; 15 matched.** The one
+  that did not is the useful one: deleting a row *and* lowering `EXPECTED_ROWS` to match was
+  expected to survive, and was killed — by the `docs_claim` row, because lowering the number also
+  re-points the needle at a count the documentation does not carry. In any suite with a documented
+  count, absorbing a deleted row therefore takes two coordinated edits, one of them to prose a
+  reviewer reads. The compound it was meant to test is only possible in `test-claude-pick.sh`,
+  the one suite with a total and no prose row, where it does survive. The reasoning, the measured
+  drift table and what a row total cannot see: `docs/REPO_CHECKS.md`, "Where a check count lives".
+
 - **The secret-guard state table now asserts its own row total, and the two prose copies of it
-  (DO-698).** `scripts/test-secret-guard.sh` was the last state table here without an
-  `EXPECTED_ROWS` guard, and a row count is what catches a check that silently stopped running:
+  (DO-698).** `scripts/test-secret-guard.sh` had no `EXPECTED_ROWS` guard, and a row count is
+  what catches a check that silently stopped running:
   every row that still runs passes, and the suite still prints a green total. The drift it was
   missing was already visible in prose — `CLAUDE.md` claimed **182** checks and
   `docs/SECRET_EMISSION.md` claimed **79** against an actual **192**, each wrong since the first
@@ -23,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name and the count. A mutation sweep over nine mutants found the first draft reporting "could
   not run" as a **pass** for an unreadable file — an error branch no row had ever taken — which
   is now a row of its own. 192 → 195 checks.
+  **Correction (DO-701):** this entry said the suite was "the last state table without one". It
+  was not — seven others had no row total when it shipped, and they are the subject of DO-701
+  below. The claim is also in the merged commit message, where it cannot be corrected.
 
 - **rabota's pre-compute no longer fails at every resume (DO-691).** `Persistent=true` makes a
   missed run fire at the instant of thaw, and at that instant the network is not usable yet:

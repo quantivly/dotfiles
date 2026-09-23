@@ -771,11 +771,36 @@ OUT="$(run --write-state --extra 2>&1)"; RC=$?
 check "--write-state takes no second argument" "$RC" 2
 
 # ---------------------------------------------------------------------------
-TOTAL=$(( PASS + FAIL ))
-printf '\n'
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=125
+EXPECTED_ROWS=127
+
+# --- the count this suite is documented as running ---------------------------
+# docs_claim pins the number the prose quotes to EXPECTED_ROWS above: it greps
+# for a FIXED needle built from that number rather than parsing a count out of
+# markdown, because a regex has to guess the shape of an English sentence and
+# fails by matching nothing, which reads exactly like a pass. Whitespace is
+# squashed because the sentence wraps between the script name and the count.
+# Which page owns this count and why: docs/REPO_CHECKS.md, "Where a check count
+# lives".
+docs_claim() {
+  local f="$DOTFILES/$1"
+  [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
+  tr -s '[:space:]' ' ' <"$f" \
+    | grep -c -F "\`scripts/test-timer-health.sh\` ($EXPECTED_ROWS checks"
+}
+
+printf '\nthe count this suite is documented as running\n'
+check "docs/TIMER_HEALTH.md says $EXPECTED_ROWS checks" \
+      "$(docs_claim docs/TIMER_HEALTH.md)" 1
+# The unreadable branch needs a row of its own or nothing ever takes it, and an
+# untaken branch is free to be wrong: in DO-698 a sweep caught this branch
+# reporting "could not run" as a PASS, with every other row still green.
+check "a documented file that cannot be read is not a pass" \
+      "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
+
+TOTAL=$(( PASS + FAIL ))
+printf '\n'
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

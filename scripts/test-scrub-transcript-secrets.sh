@@ -363,12 +363,35 @@ check "...and every account dir's projects/ too (the 58 nobody had scanned)" \
       "$(grep -c 'REDACTED:by-name' "$FAKE/.local/state/claude-account-dirs/acct-0/projects/q/b.jsonl")" "1"
 check "...counting both as roots" "$(logline | grep -o 'roots=[0-9]*')" "roots=2"
 
-echo
-printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
-
 # A row total, the house norm. `grep -c ✗` counts row NAMES, not outcomes; only
 # this catches a check that silently stopped running.
-EXPECTED_ROWS=58
+EXPECTED_ROWS=60
+
+# --- the count this suite is documented as running ---------------------------
+# docs_claim pins the number the prose quotes to EXPECTED_ROWS: it greps for a
+# FIXED needle built from that number rather than parsing a count out of
+# markdown, because a regex has to guess the shape of an English sentence and
+# fails by matching nothing, which reads exactly like a pass. Whitespace is
+# squashed because the sentence wraps. Which page owns this count and why:
+# docs/REPO_CHECKS.md, "Where a check count lives".
+docs_claim() {
+  local f="$DOTFILES/$1"
+  [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
+  tr -s '[:space:]' ' ' <"$f" \
+    | grep -c -F "\`scripts/test-scrub-transcript-secrets.sh\` ($EXPECTED_ROWS checks"
+}
+
+printf '\nthe count this suite is documented as running\n'
+check "docs/TRANSCRIPT_SCRUB.md says $EXPECTED_ROWS checks" \
+      "$(docs_claim docs/TRANSCRIPT_SCRUB.md)" 1
+# The unreadable branch needs a row of its own or nothing ever takes it, and an
+# untaken branch is free to be wrong: in DO-698 a sweep caught this branch
+# reporting "could not run" as a PASS, with every other row still green.
+check "a documented file that cannot be read is not a pass" \
+      "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
+
+echo
+printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
