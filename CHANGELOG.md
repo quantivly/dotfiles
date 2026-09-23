@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The secret-guard state table now asserts its own row total, and the two prose copies of it
+  (DO-698).** `scripts/test-secret-guard.sh` was the last state table here without an
+  `EXPECTED_ROWS` guard, and a row count is what catches a check that silently stopped running:
+  every row that still runs passes, and the suite still prints a green total. The drift it was
+  missing was already visible in prose — `CLAUDE.md` claimed **182** checks and
+  `docs/SECRET_EMISSION.md` claimed **79** against an actual **192**, each wrong since the first
+  row added after it was written, and #215 had just corrected both *by hand*. So the guard also
+  asserts the documented number, and deliberately does **not** parse it: a regex reading a count
+  out of markdown has to guess the shape of an English sentence and fails by matching nothing,
+  which reads exactly like a pass. It builds a fixed needle from `EXPECTED_ROWS` instead and
+  greps for it, squashing whitespace because `CLAUDE.md` wraps the sentence between the script
+  name and the count. A mutation sweep over nine mutants found the first draft reporting "could
+  not run" as a **pass** for an unreadable file — an error branch no row had ever taken — which
+  is now a row of its own. 192 → 195 checks.
+
 - **rabota's pre-compute no longer fails at every resume (DO-691).** `Persistent=true` makes a
   missed run fire at the instant of thaw, and at that instant the network is not usable yet:
   measured here, all three failures in seven days were `precompute steps failed: sync`, two of

@@ -755,6 +755,63 @@ check "the variable rule never expands the command it refuses" \
 check "...while still denying it" \
       "$(printf '%s' "$vleak" | jq -r '.hookSpecificOutput.permissionDecision')" "deny"
 
+# ---------------------------------------------------------------------------
+# The row total, and the two prose copies of it.
+#
+# A row count detects a SKIPPED check, never a hollow one: if an early `exit`,
+# an unset variable under `set -u` or a deleted block stops rows from running,
+# every row that DID run still passes and the suite still prints a green total.
+# Every other state table here guards that; this one was the last without it
+# (test-wt-gc-sweep.sh, test-claude-md.sh, test-scrub-transcript-secrets.sh).
+#
+# WHY THE PROSE IS ASSERTED TOO, which is a judgement call and not obviously
+# right. Two files tell a reader how many checks this suite runs -- CLAUDE.md
+# and docs/SECRET_EMISSION.md -- and both were wrong when this guard was
+# written: they claimed 182 and 79 against an actual 192. Nothing had ever
+# compared them to anything, so they drifted from the first row added after
+# each was written and would have gone on drifting. A number nobody checks is
+# worse than no number, because it is quoted with confidence.
+#
+# The fragile way to do this is to PARSE a count out of markdown: a regex then
+# has to guess the shape of an English sentence, and it breaks on a rewording
+# by silently matching nothing, which reads exactly like a pass. So this goes
+# the other way round and never parses anything -- it builds a fixed needle
+# from EXPECTED_ROWS and asserts that string occurs. A reword that moves the
+# count away from the script name fails loudly and names the file, and a human
+# re-points the needle. That is the right outcome rather than a cost: the
+# sentence carrying this count is the one CLAUDE.md sends readers to, so it is
+# load-bearing, and it should not be reworded silently either.
+#
+# Whitespace is squashed before matching because CLAUDE.md wraps the sentence
+# BETWEEN the script name and the count, so a line-oriented grep would miss it
+# for that reason alone -- and would then report drift that does not exist.
+EXPECTED_ROWS=195
+
+# 1 = the documented sentence says exactly this many checks. Anything else --
+# a stale number, a reword, an unreadable or missing file -- is not a pass.
+docs_claim() {
+  local f="$DOTFILES/$1"
+  [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
+  tr -s '[:space:]' ' ' <"$f" \
+    | grep -c -F "\`scripts/test-secret-guard.sh\` ($EXPECTED_ROWS checks"
+}
+
+printf '\nthe count this suite is documented as running\n'
+check "CLAUDE.md says $EXPECTED_ROWS checks"              "$(docs_claim CLAUDE.md)" 1
+check "docs/SECRET_EMISSION.md says $EXPECTED_ROWS checks" \
+      "$(docs_claim docs/SECRET_EMISSION.md)" 1
+# The unreadable branch needs a row of its own or it is never taken, and an
+# untaken branch is free to be wrong: a mutation sweep caught this one
+# returning a hard-coded 1 -- "could not run" reporting itself as a pass --
+# with every other row still green, because no row had ever reached it.
+check "a documented file that cannot be read is not a pass" \
+      "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
+
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
+if (( PASS + FAIL != EXPECTED_ROWS )); then
+  printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
+    "$EXPECTED_ROWS" "$((PASS + FAIL))"
+  FAIL=$((FAIL + 1))
+fi
 (( FAIL == 0 )) || exit 1

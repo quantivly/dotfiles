@@ -445,7 +445,7 @@ ordinary diagnostics. Rotation is the wrong loop to optimise; the emission is.
 The audit, the reasoning behind each rule and every hole since found in them:
 [docs/SECRET_EMISSION.md](docs/SECRET_EMISSION.md). A secret already committed:
 [docs/SECURITY_INCIDENTS.md](docs/SECURITY_INCIDENTS.md). State table: `scripts/test-secret-guard.sh`
-(192 checks, hermetic, run in CI).
+(195 checks, hermetic, run in CI).
 
 ## Tmux Configuration
 
