@@ -580,7 +580,7 @@ utility — the system commands are all `backup-*`.
 - **`resticprofile/profiles.toml` and `udev/99-backup-external.rules` are COPIED root-owned to `/etc/`
   by `backup-setup`, never symlinked** (root runs them). Editing the repo copy alone changes nothing.
 - **Order the run `After=` the mount unit, never `Requires=`/`RequiresMountsFor=`** — those make an
-  undocked disk a *failed* unit every 6h; a `ConditionPathExists` makes it a silently skipped one.
+  undocked disk a *failed* unit every 6h.
 - **Never `render … | sudo tee /etc/…`** — `tee` truncates before the renderer's exit status is known,
   so a failed render installs a zero-byte unit that "succeeds". Use `render_install`. An unresolved
   `__BACKUP_*__` placeholder is a hard error, never a blank.
@@ -663,25 +663,13 @@ qmux                 # Per-server tmux sessions for dev/staging/demo (Alt+w to s
 dotfiles-doctor      # Is the live config the reviewed config? (--fetch to check the real remote)
 dotfiles-work <br>   # Create/enter a worktree so the primary checkout stays on main
 git -C ~/.dotfiles merge --ff-only origin/main   # DEPLOY (after a fetch). NOT `git pull`
-gnome-apply          # Apply curated GNOME desktop config (idempotent)
+gnome-apply          # Apply GNOME config. Every gnome-* : see GNOME Desktop Configuration
 xdg-repair           # Fix/guard ~/Desktop, ~/Documents, ... XDG dirs (idempotent)
-gnome-init           # Create ~/.gnome-settings.local (dock favorites, launch keys)
-gnome-status         # Summary of GNOME version, theme, dock, extensions
 scripts/herdr-claude-wire.sh    # Wire Claude Code to herdr (statusLine + agent skill file)
 scripts/verify-tools.sh --herdr # The one check a modular herdr adopter runs
-backup-init          # Create ~/.backup.local (repo paths, B2 keys)
-backup-setup         # One-time guided backup install (restic, repos, timers, kit)
-backup-now           # Run a backup now (external HDD + Backblaze B2)
-backup-status        # Backup health: targets reachable, timers, latest snapshot
-backup-doctor        # Full-chain health assertion (perms, drift, alerting, freshness)
-backup-drill         # Prove the backup is complete + restorable (content + restore canary)
-backup-restore       # Guided restore of a snapshot to ~/restore-<ts>/
-backup-restore-system # Guarded /etc-slice restore (never clobbers fstab/crypttab/machine-id/ssh_host_*)
-audit-setup          # Install/refresh the broadcast-kill audit tripwire (idempotent)
-audit-status         # Armed, switched on, recording to disk, in sync? (non-zero on fail)
-audit-sweeps         # Show broadcast kill(-1) events (default: last 24h)
-vpn-doctor           # VPN chain: orphans, drift, ACS port. vpn-status/-init/-setup alongside
-vpn-sweeps           # Offline VPN outage/re-auth report (--days N, --json)
+backup-doctor        # START HERE for backups. Every backup-* : see Backup & Restore
+audit-status         # Tripwire armed, on, recording? Every audit-* : see Audit Tripwire
+vpn-doctor           # VPN chain health. Every vpn-* : see the VPN section
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)
