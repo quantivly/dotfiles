@@ -58,6 +58,11 @@ for f in "$FAILFAST" "$NOTIFY" "$RENDER" "$REPORT"; do
 done
 [[ -r "$FIXTURES/aws_vpn_client_dst.log" ]] || fatal "missing DST fixture in $FIXTURES"
 command -v python3 >/dev/null || fatal "python3 is required"
+# Required, not optional. The unit rows below are the only thing standing between
+# a misplaced directive and a unit that cannot start, and "systemd-analyze is
+# missing so we skipped them" is the could-not-run-reads-as-a-pass shape this
+# repo keeps finding. Present on ubuntu-latest and on every machine with systemd.
+command -v systemd-analyze >/dev/null || fatal "systemd-analyze is required to verify the units"
 
 T="$(mktemp -d)" || fatal "no temp dir"
 trap 'rm -rf "$T"' EXIT
@@ -681,6 +686,80 @@ grep_ok "$OUT" '/opt/x/scripts/vpn-failfast.sh' "the shipped unit's ExecStart is
 grep_none "$OUT" '__VPN_' "the rendered unit carries no placeholder"
 grep_ok "$OUT" 'ExecStopPost' "the rendered unit keeps its withdraw-on-stop hook"
 
+printf '\nthe units systemd will actually load\n'
+
+# BOTH of the defects these rows exist for shipped in DO-692 and were caught by
+# hand, one command before the first `vpn-setup`. Neither is visible in a diff.
+#
+# 1. StartLimitIntervalSec in [Service] is IGNORED -- systemd moved it to [Unit]
+#    in v229 and only the legacy StartLimitBurst spelling still parses there. The
+#    burst then applied against the default 10s interval, and with RestartSec=5
+#    five restarts span 20s, so the limiter could never trip: a broken unit would
+#    restart forever without ever reaching `failed`. That is precisely the
+#    crash-loop check-timer-health.sh's NRestarts guard was written for, shipped
+#    inside the unit that guard was written for.
+# 2. ProtectHome=yes with an ExecStart under /home -- 203/EXEC on every start.
+#
+# systemd-analyze catches (1) and NOT (2), which is why there are two kinds of
+# row here rather than one.
+UNITDIR="$T/units"
+mkdir -p "$UNITDIR" || fatal setup
+"$RENDER" "$DOTFILES/systemd/vpn-failfast.service" > "$UNITDIR/vpn-failfast.service" \
+    || fatal "could not render vpn-failfast.service"
+cp -f "$DOTFILES/systemd/vpn-notify.service" "$UNITDIR/" || fatal setup
+
+# Any output at all is a finding: systemd-analyze is silent on a clean unit.
+SA_SYS="$(systemd-analyze verify "$UNITDIR/vpn-failfast.service" 2>&1)"
+check "vpn-failfast.service: systemd-analyze is silent" "$SA_SYS" ""
+# The user unit needs a fake HOME, because `%h` expands from $HOME and
+# systemd-analyze ALSO checks that ExecStart exists. Without this the row passed
+# on a machine that happens to have ~/.dotfiles and failed on a CI runner that
+# does not -- green for an environmental reason, which is not green.
+#
+# --user also pulls in the whole user unit path, so unrelated system-shipped
+# units (spice-vdagent here) report their own pre-existing faults. Scope to ours.
+FAKEHOME="$T/fakehome"
+mkdir -p "$FAKEHOME/.dotfiles/scripts" || fatal setup
+cp -f "$DOTFILES/scripts/vpn-notify.sh" "$FAKEHOME/.dotfiles/scripts/" || fatal setup
+SA_USR="$(HOME="$FAKEHOME" systemd-analyze --user verify "$UNITDIR/vpn-notify.service" 2>&1 | grep 'vpn-notify' || true)"
+check "vpn-notify.service: systemd-analyze is silent about it" "$SA_USR" ""
+
+# ... and the row above is only worth having if the verifier would have spoken.
+# Remove the script from that fake HOME and it must complain about ExecStart --
+# otherwise "silent" proves nothing about the unit and everything about the tool
+# having given up.
+rm -f "$FAKEHOME/.dotfiles/scripts/vpn-notify.sh"
+SA_GONE="$(HOME="$FAKEHOME" systemd-analyze --user verify "$UNITDIR/vpn-notify.service" 2>&1 | grep -c 'is not executable' || true)"
+if [[ "${SA_GONE:-0}" -ge 1 ]]; then
+    ok "systemd-analyze really is checking ExecStart (it objects when it is absent)"
+else
+    bad "systemd-analyze did NOT object to a missing ExecStart — the silence above proves nothing"
+fi
+
+# The specific directive, named, because a silent `systemd-analyze` is not the
+# same as the key being in the right place -- it is only the same as systemd
+# having heard of the key in that section.
+for u in vpn-failfast vpn-notify; do
+    unit_src="$DOTFILES/systemd/$u.service"
+    before_service="$(awk '/^\[Service\]/{exit} /^StartLimitIntervalSec=/{found=1} END{print found+0}' "$unit_src")"
+    check "$u.service: StartLimitIntervalSec is in [Unit], above [Service]" "$before_service" "1"
+done
+
+# ProtectHome=yes makes /home "inaccessible and empty" (systemd.exec), and the
+# checkout IS the deployment here, so ExecStart lives under /home. systemd-analyze
+# does NOT flag the combination -- verified, it stayed silent about it while
+# complaining about the StartLimit key on the same file.
+FF_EXEC="$(sed -n 's/^ExecStart=//p' "$UNITDIR/vpn-failfast.service" | head -1 | tr -d '"')"
+FF_PH="$(sed -n 's/^ProtectHome=//p' "$UNITDIR/vpn-failfast.service" | head -1)"
+case "$FF_EXEC" in
+    /home/*) if [[ "$FF_PH" == "yes" || "$FF_PH" == "true" ]]; then
+                 bad "ProtectHome=$FF_PH hides the ExecStart under /home — the unit cannot start"
+             else
+                 ok "ExecStart is under /home, and ProtectHome=${FF_PH:-unset} does not hide it"
+             fi ;;
+    *)       ok "ExecStart is outside /home (ProtectHome=${FF_PH:-unset} cannot hide it)" ;;
+esac
+
 printf '\nthe reporter — DST, the join, and refusing to invent a clean week\n'
 
 rep() { "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" "$@" 2>&1; }
@@ -737,7 +816,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=119
+EXPECTED_ROWS=125
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

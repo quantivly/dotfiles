@@ -32,6 +32,14 @@ ConditionPathExists=/opt/awsvpnclient
 PartOf=graphical-session.target
 After=graphical-session.target
 
+# IN [Unit], NOT [Service] -- see the note in vpn-failfast.service. In [Service]
+# `StartLimitIntervalSec` is silently ignored, leaving the burst to apply against
+# the default 10s interval, which with RestartSec=10 below can never be reached:
+# the unit would restart forever without entering `failed`, which is exactly what
+# the comment beside Restart=on-failure claims this pair prevents.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
 # A user unit has no login shell, so PATH is systemd's own. notify-send lives in
@@ -52,8 +60,6 @@ ExecStopPost=%h/.dotfiles/scripts/vpn-notify.sh --withdraw
 # rate limit means a genuine loop ends in `failed` where something is watching.
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # It reads two kernel interfaces and runs notify-send. Nothing else.
 NoNewPrivileges=yes
