@@ -624,7 +624,7 @@ Commands are `audit-setup` / `audit-status` / `audit-sweeps`, listed below. Why 
 ## VPN Resilience
 
 `vpn-failfast.service` (system, root) makes VPN-only destinations FAIL instead of hanging ~127s
-while the tunnel is down; `vpn-notify.service` (user, linked not enabled) notifies past a
+while the tunnel is down; `vpn-notify.service` (user; arm it by hand) notifies past a
 threshold. Root pieces come from `vpn-setup`, **copied never symlinked**; `./install` links only
 the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
 [docs/VPN_INTERNALS.md](docs/VPN_INTERNALS.md) · `scripts/test-vpn-failfast.sh`.
