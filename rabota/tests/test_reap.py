@@ -265,6 +265,46 @@ class ApplyReapTests(ReapTestCase):
         self.assertEqual(ctx.runner.calls, [])
 
 
+class RunTargetTests(ReapTestCase):
+    """``_run`` is the only place the ``--apply`` no-target default lived; ``apply_reap`` itself
+    is never handed an empty target set by the CLI in practice, so these drive ``_run`` directly
+    with ``gather``/``Context.from_namespace`` patched rather than duplicating plan/apply coverage.
+    """
+
+    def _ns(self, **over):
+        base = dict(tenant="quantivly", state_dir="/unused", text=False, dry_run=False,
+                    apply=False, sessions=False, spaces=False, worktrees=False,
+                    idle_hours=24, abandoned_hours=6)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def test_apply_with_no_target_refuses_and_touches_nothing(self):
+        ctx = self.ctx(FakeRunner([]))
+        with mock.patch("rabota.commands.reap.Context.from_namespace", return_value=ctx), \
+             mock.patch("rabota.commands.reap.gather", return_value=self.census()):
+            with self.assertRaises(errors.Usage) as cm:
+                reap._run(self._ns(apply=True))
+        self.assertIn("--worktrees", str(cm.exception))
+        self.assertIn("1 worktree", str(cm.exception))
+        self.assertEqual(ctx.runner.calls, [])
+
+    def test_apply_with_worktrees_target_still_acts(self):
+        runner = FakeRunner([(["wt-gc", "--apply"], Result(0, "reaped /w1\n", ""))])
+        ctx = self.ctx(runner)
+        with mock.patch("rabota.commands.reap.Context.from_namespace", return_value=ctx), \
+             mock.patch("rabota.commands.reap.gather", return_value=self.census()):
+            rep = reap._run(self._ns(apply=True, worktrees=True))
+        self.assertIn("reaped /w1", rep["worktrees"])
+
+    def test_dry_run_with_no_target_still_prints_the_full_plan(self):
+        ctx = self.ctx(FakeRunner([]))
+        with mock.patch("rabota.commands.reap.Context.from_namespace", return_value=ctx), \
+             mock.patch("rabota.commands.reap.gather", return_value=self.census()):
+            plan = reap._run(self._ns())
+        self.assertEqual(len(plan["worktrees"]), 1)
+        self.assertEqual(ctx.runner.calls, [])
+
+
 class RemovalFramingTests(unittest.TestCase):
     """Runs ``_removal_script`` through a REAL shell (a stub ``git`` on ``PATH``) rather than
     hand-building canned output — the newline-delimited framing this replaces parsed fine against

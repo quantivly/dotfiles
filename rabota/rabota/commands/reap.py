@@ -276,11 +276,24 @@ def _build(sub):
     p.add_argument("--abandoned-hours", type=float, default=6)
 
 
+def _no_target_message(plan: dict) -> str:
+    """Names what ``--apply`` with no target flag would have done, not just the flag it wants —
+    an operator who nearly reaped the wrong thing needs to see what they nearly did, not just be
+    told the syntax.
+    """
+    n = len(plan["worktrees"])
+    if n:
+        machines = sorted({w.get("machine", "local") for w in plan["worktrees"]})
+        return (f"--apply requires an explicit target: would have removed {n} "
+                f"worktree{'s' if n != 1 else ''} ({', '.join(machines)}); pass --worktrees to do it")
+    return "--apply requires an explicit target: nothing to reap right now; pass --worktrees to act anyway"
+
+
 def _run(ns):
     ctx = Context.from_namespace(ns)
     census = gather(ctx, sample_seconds=2.0)
     plan = plan_reap(ctx, census, ns.idle_hours, ns.abandoned_hours)
-    targets = {t for t in ("sessions", "spaces", "worktrees") if getattr(ns, t)} or {"worktrees"}
+    targets = {t for t in ("sessions", "spaces", "worktrees") if getattr(ns, t)}
     if not ns.apply:
         if ns.text:
             lines = [f"abandoned {a['id']}: {a['reason']}" for a in plan["abandoned"]]
@@ -290,6 +303,8 @@ def _run(ns):
                      for w in plan["worktrees"]]
             return lines or ["nothing to reap"]
         return plan
+    if not targets:
+        raise errors.Usage(_no_target_message(plan))
     return apply_reap(ctx, plan, targets)
 
 
