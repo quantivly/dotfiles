@@ -227,6 +227,23 @@ jobs:
       - name: Run the wt-gc-sweep state table
         run: ./scripts/test-wt-gc-sweep.sh
 
+  scrub-transcript-secrets-test:
+    name: Transcript Scrub State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The subject rewrites Claude Code transcripts in place, so every row runs
+      # against a throwaway mktemp tree reached through SCRUB_TRANSCRIPT_ROOTS.
+      # A runner has no ~/.claude/projects, but that is not what makes the suite
+      # safe — it never names one. python3 and shred are both stock here; the
+      # suite exits 2 rather than passing if either is missing.
+      - name: Run the transcript scrub state table
+        run: ./scripts/test-scrub-transcript-secrets.sh
+
   timer-health-test:
     name: Repo-Owned Timer Health State Table
     runs-on: ubuntu-latest

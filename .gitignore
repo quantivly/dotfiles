@@ -10,6 +10,10 @@
 !scripts/test-secret-guard.sh
 !claude/hooks/secret-emission-guard.sh
 !rabota/**/*secret*.py
+!scripts/scrub-transcript-secrets.py
+!scripts/test-scrub-transcript-secrets.sh
+!systemd/scrub-transcript-secrets.service
+!systemd/scrub-transcript-secrets.timer
 # `**/*token*` did the same to the migration-safety check (DO-622), whose
 # "tokens" are ticket ids and dates, not credentials. Caught by `git add
 # --dry-run` before the first commit this time, not by CI.

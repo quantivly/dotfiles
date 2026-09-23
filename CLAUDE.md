@@ -418,33 +418,34 @@ wrong answer: [docs/GH_ACCOUNT_ROUTING.md](docs/GH_ACCOUNT_ROUTING.md). State ta
 
 **Everything a command prints is recorded, and that is where the credentials went** — an audit found
 both of this machine's live GitHub tokens in plaintext in five session transcripts, put there by
-ordinary diagnostics. Rotation is the wrong loop to optimise; the emission is. The audit, the
-commands that did it, and why rotation does not help: [docs/SECRET_EMISSION.md](docs/SECRET_EMISSION.md).
+ordinary diagnostics. Rotation is the wrong loop to optimise; the emission is.
 
 - **Pipe anything that might print a credential through `scripts/redact-secrets.sh`.** It needs **two**
   rule sets because either alone leaks: shapes find a credential anywhere, including bare in prose;
   names (`…TOKEN=`, `…SECRET=`, `_PAT=`) catch the ones no shape describes.
+- **A shapeless credential is invisible to the redactor AT REST** — its name rules need real
+  whitespace, and a transcript's newlines are escaped inside a JSON string.
+  `scripts/scrub-transcript-secrets.py` is that half, nightly, linked **not enabled**:
+  [docs/TRANSCRIPT_SCRUB.md](docs/TRANSCRIPT_SCRUB.md).
 - **`claude/hooks/secret-emission-guard.sh` (`PreToolUse`, `Bash`) refuses** the shapes that print
   credentials unless piped through the redactor: `gh auth token`, `gh auth status --show-token`, `ps`
   with full command lines, `pgrep -a`, a bare `env`/`printenv`, reads of `/proc/*/cmdline|environ`, and
   reads of the files this file sends every secret to (`~/.zshrc.local`, `~/.gitconfig.local`,
   `~/.backup.local`, `~/.claude/.credentials.json`). It **denies** rather than asks, and **fails open**
   — a hook that breaks the shell when it breaks gets disabled wholesale.
-- **A refusal is not proof the command would have leaked, and passing is not proof nothing did.** It
-  knows a handful of shapes, and the remedy it names once printed a `NOTION_PAT` in full. Papercut
-  guard, not a boundary.
-- **`./install` only does half** — dotbot places the hook file; it does nothing until it is registered
-  in `~/.claude/settings.json` (user-level, not in this repo), with its own `[ -r "$f" ]` guard, or a
-  mid-deploy checkout puts `exit 127` on **every** Bash call on the box.
-- **`.gitignore`'s `**/*token*`, `**/*secret*` and `**/*password*` rules exclude the very files whose
-  job is secrets**, and `git add -A` skips ignored paths **silently** — commit, push and PR all report
-  success with the content absent. Check new files with `git add --dry-run`, never `git check-ignore -v`
-  (it exits 0 for a negated path too, reading as the opposite of the truth).
+- **A refusal is not proof it would have leaked; passing is not proof nothing did.** It knows a
+  handful of shapes. Papercut guard, not a boundary.
+- **`./install` only does half** — dotbot places the hook; it does nothing until registered in
+  `~/.claude/settings.json` (not in this repo), with an `[ -r "$f" ]` guard, or a mid-deploy checkout
+  puts `exit 127` on **every** Bash call on the box.
+- **`git add -A` skips ignored paths silently**, and `.gitignore` excludes the very files whose job
+  is secrets. Check new files with `git add --dry-run`, never `git check-ignore -v` (it exits 0 for
+  a negated path too, reading as the opposite of the truth).
 
 The audit, the reasoning behind each rule and every hole since found in them:
 [docs/SECRET_EMISSION.md](docs/SECRET_EMISSION.md). A secret already committed:
 [docs/SECURITY_INCIDENTS.md](docs/SECURITY_INCIDENTS.md). State table: `scripts/test-secret-guard.sh`
-(182 checks, hermetic, run in CI).
+(192 checks, hermetic, run in CI).
 
 ## Tmux Configuration
 
@@ -652,6 +653,7 @@ claude-as <profile>  # claude on a named account: isolated AND still a team lead
 claude-pick          # which account would this directory bill? (--explain --json --strict)
 scripts/claude-account-dirs.sh --all   # (re)build every profile's persistent config dir
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
+scripts/scrub-transcript-secrets.py --dry-run  # Credentials sitting in transcripts at rest
 tool_status          # Check installed tools
 herdr-help           # In-shell herdr cheat sheet (hspawn/hreap/clauth)
 scripts/wt-gc-sweep.sh --dry-run  # What the daily worktree sweep would remove
