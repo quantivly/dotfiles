@@ -1,35 +1,45 @@
 # systemd/vpn-failfast.service
 # ============================
-# TEMPLATE. Rendered and installed root-owned to /etc/systemd/system/ by
-# `vpn-setup`, never by ./install — ./install never uses sudo, the same rule
-# backup-setup and audit-setup follow. __VPN_DOTFILES__ becomes the absolute path
-# of the checkout that installed it, substituted by scripts/vpn-render.sh.
+# Installed root-owned to /etc/systemd/system/ by `vpn-setup`, never by
+# ./install — ./install never uses sudo, the same rule backup-setup and
+# audit-setup follow.
 #
-# WHY A SYSTEM UNIT. Installing and removing routes needs CAP_NET_ADMIN, which a
-# user unit does not have. That is also why this unit is held to a much tighter
-# standard than the user-session notifier: it is root, and the one thing it must
-# never do is act on input an unprivileged process can write. It reads `ip -j
-# link` and `ip -j route` and nothing else. See the script's header.
+# STATIC. No placeholders, nothing rendered. The first version of this file
+# carried a rendered-path ExecStart pointing into the checkout, and that was
+# wrong twice over:
 #
-# COPIED, NEVER SYMLINKED, for the same reason CLAUDE.md gives for
-# resticprofile/profiles.toml and audit/99-logout-catch.rules: ROOT runs this,
-# and a symlink into a working tree means a rebase, a bisect or a half-finished
-# checkout changes what root executes. vpn-doctor reports drift between the
-# installed copy and this checkout, which is the backup-doctor shape.
+#   * `vpn-setup` resolves its checkout from $PWD when that looks like one, so
+#     running it from a WORKTREE baked a worktree path into a root unit. Measured
+#     on the first real install:
+#       ExecStart="/home/zvi/.herdr/worktrees/.dotfiles/zvi-do-692-.../vpn-failfast.sh"
+#     `wt-gc-sweep` DELETES landed worktrees daily, so that unit was one sweep
+#     away from a root service pointing at nothing — and it is the same class as
+#     CLAUDE.md's "never run ./install from a worktree", which this repo already
+#     knows about and which this reproduced anyway.
+#   * An ExecStart under /home forces ProtectHome down to `read-only`, because
+#     `yes` makes /home inaccessible and the unit then cannot run its own script.
 #
-# NOT YET LOADED BY A SYSTEM MANAGER on this machine -- that needs sudo, which
-# does not work from an agent tool here. What IS verified, by
-# scripts/test-vpn-failfast.sh: the script it starts (hermetically), that this
-# file renders with no placeholder left, that `systemd-analyze verify` is silent
-# on the rendered result, and that ProtectHome does not hide the ExecStart.
+# The house pattern for a repo script that ROOT runs is to COPY it into
+# /usr/local/bin, exactly as backup-verify.sh, backup-manifest.sh and
+# restic-notify already are — and restic-verify.service proves it works here:
+# same `#!/usr/bin/env bash` shebang, root system unit, Result=success.
+# vpn-doctor reports drift between the installed copy and this checkout, which is
+# the backup-doctor shape.
 #
-# Those last two exist because BOTH of the defects they catch shipped here and
-# were found by hand, one command before the first install. Neither shows up in a
-# diff, and systemd-analyze catches only one of them.
+# NOT YET CONFIRMED STARTING under a system manager. The first install failed
+# with `coreutils: unknown program 'vpn-failfast'` from the /home path above —
+# uutils is the system coreutils here and its multicall strips the extension from
+# argv[0], so that message means something re-entered the dispatcher as
+# `vpn-failfast.sh`. The precise trigger was NOT isolated: reproducing it needs
+# root, which an agent tool does not have here, and a `systemd-run --user` bisect
+# proves nothing because the user manager ignores several of these directives.
+# What this file does is remove the whole class by not executing out of /home at
+# all. If it recurs from /usr/local/bin, that is a NEW finding and belongs in
+# docs/VPN_INTERNALS.md rather than another guess.
 
 [Unit]
 Description=Fail fast for VPN-only destinations while the tunnel is down
-Documentation=file://__VPN_DOTFILES__/docs/VPN_RESILIENCE.md
+Documentation=file:///usr/local/share/doc/vpn-failfast/VPN_RESILIENCE.md
 # After=, never Requires=/BindsTo=: this must run whether or not the VPN client
 # is installed, running or connected — its entire job is to react to the tunnel
 # NOT being there. A dependency on the client would make "the client is not
@@ -43,27 +53,26 @@ After=network.target
 # moved these in v229; `StartLimitBurst` in [Service] still parses as a legacy
 # alias but `StartLimitIntervalSec` does NOT, and systemd IGNORES it with only
 # a log line. The burst then applies against the DEFAULT 10s interval, and with
-# RestartSec=5 five restarts span 20s -- so the limiter never trips and a broken
+# RestartSec=5 five restarts span 20s — so the limiter never trips and a broken
 # unit restarts FOREVER without ever reaching `failed`. That is the exact
-# crash-loop the NRestarts guard in check-timer-health.sh was added for, and it
-# shipped inside the unit that guard was added for. `systemd-analyze verify` is
-# what says so; scripts/test-vpn-failfast.sh now runs it on both units.
+# crash-loop the NRestarts guard in check-timer-health.sh was added for.
 #
-# A bad /etc/vpn-failfast.conf makes the script exit 2 at once, so this is the
-# difference between a unit that gives up loudly and one that spins silently.
+# It earned its place on the first real install: the unit failed, restarted five
+# times, and then STOPPED with Result=exit-code instead of spinning. Loud, and
+# over in 25 seconds.
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart="__VPN_DOTFILES__/scripts/vpn-failfast.sh" --watch
+ExecStart=/usr/local/bin/vpn-failfast.sh --watch
 # The withdraw path, and it runs on EVERY stop — clean, failed, killed or
 # reloaded. A leftover `unreachable` route blackholes a host permanently and
 # looks exactly like a server outage, so this is the single most important line
 # in the file. It is belt to the script's own SIGTERM trap, and braces to the
 # --watch path's "remove orphans before adding anything" at start, because the
 # case that strands routes is precisely the one where the stop path did not run.
-ExecStopPost="__VPN_DOTFILES__/scripts/vpn-failfast.sh" --clear
+ExecStopPost=/usr/local/bin/vpn-failfast.sh --clear
 
 # on-failure, not always: `systemctl stop vpn-failfast` must stay stopped, and
 # an operator stopping this is the documented way to clear the routes by hand.
@@ -78,18 +87,10 @@ AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=yes
 ProtectSystem=full
-# read-only, NOT yes. `ProtectHome=yes` makes /home "inaccessible and empty"
-# (systemd.exec), and the ExecStart above lives under /home because in this repo
-# THE CHECKOUT IS THE DEPLOYMENT -- so `yes` stops the unit executing its own
-# script, 203/EXEC, on every single start. Caught before the first install by
-# reading the man page; a `systemd-run --user` probe of the same setting proved
-# NOTHING, because the user manager ignores ProtectHome entirely (measured:
-# /home held the same 115 entries with and without it).
-#
-# read-only suffices: this writes nothing under /home, and it is root, so this
-# was always defence-in-depth rather than a boundary. The real hardening is
-# CAP_NET_ADMIN-only plus NoNewPrivileges and the syscall filter below.
-ProtectHome=read-only
+# `yes` is correct again now that ExecStart is /usr/local/bin rather than a path
+# under /home. It had to be weakened to read-only while the script ran out of the
+# checkout; moving the script is what buys the stronger setting back.
+ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes

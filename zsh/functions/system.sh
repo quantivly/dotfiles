@@ -3267,7 +3267,7 @@ audit-sweeps() {
 # running this from a worktree exercises THAT branch rather than whatever
 # ~/.dotfiles happens to be checked out at. Same rule as audit-setup.
 _vpn_root() {
-  if [[ -x "${PWD}/scripts/vpn-failfast.sh" && -f "${PWD}/scripts/vpn-render.sh" ]]; then
+  if [[ -x "${PWD}/scripts/vpn-failfast.sh" && -f "${PWD}/systemd/vpn-failfast.service" ]]; then
     printf '%s\n' "$PWD"
   else
     printf '%s\n' "${HOME}/.dotfiles"
@@ -3278,6 +3278,9 @@ _VPN_CONF_LOCAL="${HOME}/.vpn-failfast.conf"
 _VPN_CONF_ETC="/etc/vpn-failfast.conf"
 _VPN_UNIT_ETC="/etc/systemd/system/vpn-failfast.service"
 _VPN_SYSCTL_ETC="/etc/sysctl.d/99-vpn-acs-port.conf"
+# root EXECUTES this one, so it is a copy under /usr/local/bin rather than a path
+# in the checkout -- see the unit header. vpn-doctor drift-checks it like the rest.
+_VPN_SCRIPT_ETC="/usr/local/bin/vpn-failfast.sh"
 _VPN_ACS_PORT=35001
 
 # Quick read-only health. No sudo: every question here is answerable
@@ -3384,19 +3387,34 @@ vpn-doctor() {
       active|activating) _doctor_ok "vpn-failfast.service is $as_" ;;
       *) _doctor_bad "vpn-failfast.service is ${as_:-unknown} (Result=${res:-?}) — journalctl -u vpn-failfast -e" ;;
     esac
-    # DRIFT of the installed unit against a fresh render of the checkout. It
-    # must render the SAME WAY the install did or this reports a difference it
-    # created itself, which is why both go through scripts/vpn-render.sh.
-    local rendered
-    if rendered="$("${root}/scripts/vpn-render.sh" "${root}/systemd/vpn-failfast.service" 2>/dev/null)"; then
-      if [[ -r "$_VPN_UNIT_ETC" ]] && diff -q <(printf '%s\n' "$rendered") "$_VPN_UNIT_ETC" >/dev/null 2>&1; then
-        _doctor_ok "installed unit matches this checkout"
-      else
-        _doctor_warn "installed unit DIFFERS from this checkout — re-run vpn-setup"
-      fi
+    # DRIFT of the installed unit against this checkout. A plain diff now: the
+    # unit is static, so there is no render step that could report a difference
+    # it created itself.
+    if [[ -r "$_VPN_UNIT_ETC" ]] && diff -q "${root}/systemd/vpn-failfast.service" "$_VPN_UNIT_ETC" >/dev/null 2>&1; then
+      _doctor_ok "installed unit matches this checkout"
     else
-      _doctor_bad "systemd/vpn-failfast.service does not render (unresolved placeholder?)"
+      _doctor_warn "installed unit DIFFERS from this checkout — re-run vpn-setup"
     fi
+  fi
+
+  # THE DAEMON ITSELF. root executes this copy, and nothing keeps it in step with
+  # the checkout, so it is drift-checked like every other copied file. It is also
+  # where the first install went wrong: ExecStart pointed into a WORKTREE, which
+  # wt-gc-sweep deletes daily.
+  local execstart
+  execstart="$(sed -n 's/^ExecStart=//p' "$_VPN_UNIT_ETC" 2>/dev/null | head -1 | tr -d '"' | awk '{print $1}')"
+  if [[ -n "$execstart" && "$execstart" != "$_VPN_SCRIPT_ETC" ]]; then
+    _doctor_bad "the installed unit runs $execstart, not $_VPN_SCRIPT_ETC"
+    case "$execstart" in
+      "$HOME"/*) _doctor_bad "  that is a path in \$HOME — if it is a worktree, wt-gc-sweep deletes it daily. Re-run vpn-setup from ~/.dotfiles." ;;
+    esac
+  fi
+  if [[ ! -x "$_VPN_SCRIPT_ETC" ]]; then
+    _doctor_bad "$_VPN_SCRIPT_ETC missing or not executable — run: vpn-setup"
+  elif diff -q "${root}/scripts/vpn-failfast.sh" "$_VPN_SCRIPT_ETC" >/dev/null 2>&1; then
+    _doctor_ok "the installed daemon matches this checkout"
+  else
+    _doctor_warn "the installed daemon DIFFERS from this checkout — re-run vpn-setup"
   fi
 
   # --- the notifier (user unit; linked-not-enabled is a DECISION) -----------
