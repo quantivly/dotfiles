@@ -3234,3 +3234,259 @@ audit-sweeps() {
   echo "Each line names the sender (pid/ppid/comm/exe). A burst from pid 1"
   echo "(systemd-shutdown) at a reboot is normal; anything else is not."
 }
+
+# =============================================================================
+# VPN Resilience Functions (DO-692)
+# =============================================================================
+# Thin wrappers over scripts/vpn-failfast.sh, scripts/vpn-notify.sh and
+# scripts/vpn-log-report.py. Deliberately NOT a new zsh/functions/vpn.sh: that
+# would cost a row in CLAUDE.md's Function Modules table and a line in its
+# loading order, and the context budget cannot pay for either.
+#
+# The AWS Client VPN here is a full tunnel. When it drops, the client deletes
+# 0.0.0.0/1 and 128.0.0.0/1 and the LAN default silently takes over, so traffic
+# to a Quantivly server leaves from an unauthorised address and is dropped with
+# no RST and no ICMP — a ~127 second hang, not an error. That is also why a dead
+# tunnel went unnoticed for up to 8.8 hours: nothing fails, it hangs.
+#
+# Functions:
+#   - vpn-status: is the tunnel up, and what is installed right now?
+#   - vpn-doctor: assert the WHOLE chain; non-zero on FAIL
+#   - vpn-init:   create ~/.vpn-failfast.conf from the repo template
+#   - vpn-setup:  one-time guided root install (needs sudo)
+#   - vpn-sweeps: the offline report the whole feature is measured by
+#
+# THE INVARIANT none of these may break: no runtime component reads a client
+# log. Both log directories are writable by any process running as this user,
+# and one of the components runs as root. vpn-sweeps is the deliberate
+# exception — a human runs it, on demand, and it only counts.
+# See docs/VPN_RESILIENCE.md and docs/VPN_INTERNALS.md.
+# =============================================================================
+
+# Resolve the checkout to run from: prefer the one you are sitting in, so
+# running this from a worktree exercises THAT branch rather than whatever
+# ~/.dotfiles happens to be checked out at. Same rule as audit-setup.
+_vpn_root() {
+  if [[ -x "${PWD}/scripts/vpn-failfast.sh" && -f "${PWD}/scripts/vpn-render.sh" ]]; then
+    printf '%s\n' "$PWD"
+  else
+    printf '%s\n' "${HOME}/.dotfiles"
+  fi
+}
+
+_VPN_CONF_LOCAL="${HOME}/.vpn-failfast.conf"
+_VPN_CONF_ETC="/etc/vpn-failfast.conf"
+_VPN_UNIT_ETC="/etc/systemd/system/vpn-failfast.service"
+_VPN_SYSCTL_ETC="/etc/sysctl.d/99-vpn-acs-port.conf"
+_VPN_ACS_PORT=35001
+
+# Quick read-only health. No sudo: every question here is answerable
+# unprivileged, including "which unreachable routes are installed", because
+# `ip route show proto N` needs no privilege.
+vpn-status() {
+  local root; root="$(_vpn_root)"
+  VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "${root}/scripts/vpn-failfast.sh" --status
+  echo
+  local ls_
+  ls_="$(systemctl show -p LoadState --value vpn-failfast.service 2>/dev/null)"
+  if [[ "$ls_" != "loaded" ]]; then
+    echo "unit:    vpn-failfast.service NOT INSTALLED (LoadState=${ls_:-unknown}) — run: vpn-setup"
+  else
+    printf 'unit:    vpn-failfast.service %s (%s)\n' \
+      "$(systemctl show -p ActiveState --value vpn-failfast.service 2>/dev/null)" \
+      "$(systemctl is-enabled vpn-failfast.service 2>/dev/null)"
+  fi
+  local nls
+  nls="$(systemctl --user show -p LoadState --value vpn-notify.service 2>/dev/null)"
+  if [[ "$nls" != "loaded" ]]; then
+    echo "notify:  vpn-notify.service not linked — run: ./install"
+  else
+    printf 'notify:  vpn-notify.service %s (%s)\n' \
+      "$(systemctl --user show -p ActiveState --value vpn-notify.service 2>/dev/null)" \
+      "$(systemctl --user is-enabled vpn-notify.service 2>/dev/null)"
+  fi
+}
+
+# Assert the whole chain, and exit non-zero if any of it is wrong.
+#
+# The one thing this exists for above all others: an ORPHANED unreachable route.
+# A stale one blackholes a host permanently and looks exactly like a server
+# outage, so it is checked first, reported as a FAIL, and given the one-line
+# manual removal.
+vpn-doctor() {
+  # NOTE: no local named `status` — that is read-only in zsh.
+  local _DOCTOR_FAIL=0 _DOCTOR_WARN=0
+  local root; root="$(_vpn_root)"
+  local ff="${root}/scripts/vpn-failfast.sh"
+  local proto="${VPN_FAILFAST_PROTO:-66}"
+
+  echo "VPN resilience"
+  echo
+
+  # --- the tunnel itself ----------------------------------------------------
+  if VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null | grep -q 'tunnel:  UP'; then
+    _doctor_ok "tunnel is UP (tun0 has a gateway route)"
+  else
+    _doctor_note "tunnel is DOWN — every route finding below is expected, not a fault"
+  fi
+
+  # --- ORPHANS: the one real risk in this design ----------------------------
+  local owned tunnel_up_now
+  owned="$(ip -j route show proto "$proto" 2>/dev/null \
+           | grep -oE '"dst"[[:space:]]*:[[:space:]]*"[^"]*"' \
+           | sed 's/^"dst"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+  tunnel_up_now=1
+  VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null | grep -q 'tunnel:  UP' || tunnel_up_now=0
+  if [[ -n "$owned" && "$tunnel_up_now" == "1" ]]; then
+    _doctor_bad "ORPHANED unreachable route(s) while the tunnel is UP — these BLACKHOLE the host:"
+    printf '      %s\n' ${=owned}
+    _doctor_bad "  Remove now:  sudo systemctl restart vpn-failfast   (it clears them at start)"
+    _doctor_bad "  Or by hand:  sudo ip route del unreachable <dst> proto ${proto}"
+  elif [[ -n "$owned" ]]; then
+    _doctor_ok "fail-fast routes installed while the tunnel is down ($(printf '%s\n' ${=owned} | wc -l) destination(s))"
+  else
+    _doctor_ok "no unreachable routes owned by this tool (proto ${proto})"
+  fi
+
+  # --- config ---------------------------------------------------------------
+  if [[ ! -r "$_VPN_CONF_ETC" ]]; then
+    _doctor_bad "$_VPN_CONF_ETC missing or unreadable — run: vpn-setup"
+  elif VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --check >/dev/null 2>&1; then
+    _doctor_ok "$_VPN_CONF_ETC parses"
+    # DRIFT. The live config is a COPY, so nothing keeps it in step with the
+    # checkout; backup-doctor checks exactly this and for the same reason.
+    if [[ -r "$_VPN_CONF_LOCAL" ]]; then
+      if diff -q "$_VPN_CONF_LOCAL" "$_VPN_CONF_ETC" >/dev/null 2>&1; then
+        _doctor_ok "live config matches $_VPN_CONF_LOCAL"
+      else
+        _doctor_warn "live config DIFFERS from $_VPN_CONF_LOCAL — re-run vpn-setup to resync"
+        _doctor_warn "  diff $_VPN_CONF_LOCAL $_VPN_CONF_ETC"
+      fi
+    else
+      _doctor_note "no $_VPN_CONF_LOCAL — nothing to compare the live config against (vpn-init)"
+    fi
+  else
+    _doctor_bad "$_VPN_CONF_ETC does NOT parse — the unit will refuse to start:"
+    VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --check 2>&1 | sed 's/^/      /'
+  fi
+
+  # --- the system unit ------------------------------------------------------
+  # LoadState FIRST and on its own: a unit systemd cannot load answers
+  # Result=success to every other question asked of it.
+  local ls_ as_ res
+  ls_="$(systemctl show -p LoadState --value vpn-failfast.service 2>/dev/null)"
+  if [[ "$ls_" != "loaded" ]]; then
+    _doctor_bad "vpn-failfast.service LoadState=${ls_:-unknown} — run: vpn-setup"
+  else
+    as_="$(systemctl show -p ActiveState --value vpn-failfast.service 2>/dev/null)"
+    res="$(systemctl show -p Result --value vpn-failfast.service 2>/dev/null)"
+    case "$as_" in
+      active|activating) _doctor_ok "vpn-failfast.service is $as_" ;;
+      *) _doctor_bad "vpn-failfast.service is ${as_:-unknown} (Result=${res:-?}) — journalctl -u vpn-failfast -e" ;;
+    esac
+    # DRIFT of the installed unit against a fresh render of the checkout. It
+    # must render the SAME WAY the install did or this reports a difference it
+    # created itself, which is why both go through scripts/vpn-render.sh.
+    local rendered
+    if rendered="$("${root}/scripts/vpn-render.sh" "${root}/systemd/vpn-failfast.service" 2>/dev/null)"; then
+      if [[ -r "$_VPN_UNIT_ETC" ]] && diff -q <(printf '%s\n' "$rendered") "$_VPN_UNIT_ETC" >/dev/null 2>&1; then
+        _doctor_ok "installed unit matches this checkout"
+      else
+        _doctor_warn "installed unit DIFFERS from this checkout — re-run vpn-setup"
+      fi
+    else
+      _doctor_bad "systemd/vpn-failfast.service does not render (unresolved placeholder?)"
+    fi
+  fi
+
+  # --- the notifier (user unit; linked-not-enabled is a DECISION) -----------
+  local nls nen
+  nls="$(systemctl --user show -p LoadState --value vpn-notify.service 2>/dev/null)"
+  if [[ "$nls" != "loaded" ]]; then
+    _doctor_warn "vpn-notify.service is not linked — run ./install"
+  else
+    nen="$(systemctl --user is-enabled vpn-notify.service 2>/dev/null)"
+    if [[ "$nen" == "enabled" ]]; then
+      local nas
+      nas="$(systemctl --user show -p ActiveState --value vpn-notify.service 2>/dev/null)"
+      case "$nas" in
+        active|activating) _doctor_ok "vpn-notify.service is $nas" ;;
+        *) _doctor_bad "vpn-notify.service is enabled but ${nas:-unknown}" ;;
+      esac
+    else
+      _doctor_note "vpn-notify.service linked, not enabled — arming it is a decision:"
+      _doctor_note "  systemctl --user enable --now vpn-notify.service"
+    fi
+  fi
+
+  # --- the ACS port reservation --------------------------------------------
+  # Three separate things, and the third is the one that catches a file that was
+  # installed and never applied — which looks exactly like success.
+  if [[ ! -r "$_VPN_SYSCTL_ETC" ]]; then
+    _doctor_warn "$_VPN_SYSCTL_ETC not installed — run: vpn-setup"
+  elif ! diff -q "${root}/sysctl/99-vpn-acs-port.conf" "$_VPN_SYSCTL_ETC" >/dev/null 2>&1; then
+    _doctor_warn "$_VPN_SYSCTL_ETC DIFFERS from this checkout — re-run vpn-setup"
+  else
+    _doctor_ok "$_VPN_SYSCTL_ETC matches this checkout"
+  fi
+  local live
+  live="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports 2>/dev/null)"
+  if [[ ",${live}," == *",${_VPN_ACS_PORT},"* || "$live" == "$_VPN_ACS_PORT" ]]; then
+    _doctor_ok "port ${_VPN_ACS_PORT} is reserved from the ephemeral range (live: ${live})"
+  else
+    _doctor_warn "port ${_VPN_ACS_PORT} is NOT reserved (live: ${live:-empty}) — the kernel can hand"
+    _doctor_warn "  the client's SAML ACS port to an unrelated bind(). Fix: sudo sysctl -p $_VPN_SYSCTL_ETC"
+  fi
+
+  # --- the redactor covers the shapes these logs carry ----------------------
+  if printf 'AUTH_FAILED,CRV1:R:instance-test:abcdefghijklmnopqrstuvwxyz\n' \
+     | "${root}/scripts/redact-secrets.sh" 2>/dev/null | grep -q 'REDACTED'; then
+    _doctor_ok "redact-secrets.sh masks the VPN re-auth challenge"
+  else
+    _doctor_bad "redact-secrets.sh does NOT mask the VPN re-auth challenge"
+  fi
+
+  echo
+  _doctor_summary "VPN resilience chain is healthy." \
+                  "Start with: vpn-status, then journalctl -u vpn-failfast -e"
+}
+
+# Create the machine-local destination list. Never overwrites — same contract as
+# backup-init and gnome-init. This file, not the repo template, is what
+# vpn-setup installs, so a machine can carry extra destinations without editing
+# anything tracked.
+vpn-init() {
+  local root; root="$(_vpn_root)"
+  local tpl="${root}/examples/vpn-failfast.conf.template"
+  if [[ ! -r "$tpl" ]]; then
+    echo "✗ missing $tpl" >&2; return 1
+  fi
+  if [[ -e "$_VPN_CONF_LOCAL" ]]; then
+    echo "· $_VPN_CONF_LOCAL already exists — not overwritten."
+    echo "  Edit it, then re-run vpn-setup to install it to /etc."
+    return 0
+  fi
+  cp "$tpl" "$_VPN_CONF_LOCAL" || return 1
+  chmod 644 "$_VPN_CONF_LOCAL"
+  echo "✓ Created $_VPN_CONF_LOCAL"
+  echo "  REVIEW IT before installing: every destination listed there will fail"
+  echo "  instantly while the tunnel is down. Then run: vpn-setup"
+}
+
+# One-time guided root install. Needs sudo; ./install never does.
+vpn-setup() {
+  local root; root="$(_vpn_root)"
+  bash "${root}/scripts/setup-vpn-failfast.sh" "$@"
+}
+
+# The offline report. THE only way to know whether any of this worked, and the
+# number it targets is "SAML timeout -> next attempt".
+#
+# Piped through the redactor unconditionally. The reporter is written not to
+# print a credential, but everything a command prints is recorded, and a filter
+# that costs nothing is cheaper than being right about that.
+vpn-sweeps() {
+  local root; root="$(_vpn_root)"
+  "${root}/scripts/vpn-log-report.py" "$@" 2>&1 | "${root}/scripts/redact-secrets.sh"
+  return "${pipestatus[1]}"
+}

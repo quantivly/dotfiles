@@ -569,12 +569,18 @@ healthy
 link_unit server.service
 set_enabled server.service enabled
 CANARY="$T/nrestarts-canary"
+# shellcheck disable=SC2016  # the $(...) must reach the SUT UNEXPANDED -- that is the fixture
 printf 'LoadState=loaded\nActiveState=active\nUnitFileState=enabled\nResult=success\nExecMainStatus=0\nConditionResult=yes\nConditionTimestamp=@%s\nActiveEnterTimestamp=@%s\nNRestarts=x[$(touch %s)]\n' \
     "$((NOW-9000))" "$((NOW-9000))" "$CANARY" > "$STATE/props/server.service"
 OUT="$(run)"; RC=$?
 check "a non-numeric NRestarts: exit 0, treated as no restarts" "$RC" 0
-[[ -e "$CANARY" ]] && bad "NRestarts is evaluated as an arithmetic expression — command substitution RAN" \
-                   || ok "NRestarts is never evaluated as an arithmetic expression"
+# if/else, not A && B || C: `bad` returning non-zero would silently run `ok` too
+# and record a pass for a row that had just failed.
+if [[ -e "$CANARY" ]]; then
+    bad "NRestarts is evaluated as an arithmetic expression — command substitution RAN"
+else
+    ok "NRestarts is never evaluated as an arithmetic expression"
+fi
 grep_ok "$OUT" '✓ server.service: active' "non-numeric NRestarts: still a tick"
 
 # The stub's own -p filter, asserted directly. It is the thing that makes the

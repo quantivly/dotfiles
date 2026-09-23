@@ -447,6 +447,16 @@ OUT="$(ff --once)"; RC=$?
 check "comments and whitespace are stripped: exit 0" "$RC" 0
 check "...and the destination is installed" "$(installed)" "54.166.22.221 "
 
+# THE SHIPPED TEMPLATE must itself be a valid config. It is the seed vpn-init
+# copies and vpn-setup installs, so a typo in it is a unit that restart-loops to
+# its StartLimitBurst and then sits failed -- and every row above uses a fixture,
+# so not one of them would notice.
+reset; tunnel_down_lingering
+OUT="$(VPN_FAILFAST_CONF="$DOTFILES/examples/vpn-failfast.conf.template" \
+       PATH="$STUBBIN:$PATH" "$FAILFAST" --check 2>&1)"; RC=$?
+check "the shipped config template is valid: exit 0" "$RC" 0
+grep_ok "$OUT" 'destination(s), all valid' "the template's destinations all parse"
+
 printf '\nthe numeric knobs are validated, never trusted\n'
 
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
@@ -643,7 +653,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=110
+EXPECTED_ROWS=112
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
