@@ -258,7 +258,49 @@ class CloseTests(unittest.TestCase):
         db.run_import_v1(ctx, FIX / "v1" / "escalations.jsonl")
         rep = db.run_import_v1(ctx, FIX / "v1" / "escalations.jsonl")
         self.assertEqual((rep["imported"], rep["resolved"]), (0, 0))
-        self.assertEqual(len(ctx.store.escalations_by_first_seen("quantivly")), 4)
+        self.assertEqual(len(ctx.store.escalations_by_identity("quantivly")), 4)
+
+    # --- DO-694: firstSeen is not unique, and v1's "open" is a truthy disposition -------
+
+    def test_import_v1_do694_keeps_distinct_escalations_sharing_a_firstseen(self):
+        """Defect 1: the real file has three distinct escalations sharing one firstSeen, twice
+        over. Keying on firstSeen alone folds the later ones into the first and drops their
+        question text; each of the 7 rows must land as its own escalation."""
+        ctx = self.ctx()
+        rep = db.run_import_v1(ctx, FIX / "v1" / "escalations-do694.jsonl")
+        self.assertEqual(rep["imported"], 7)
+        all_esc = ctx.store.escalations_by_identity("quantivly")
+        self.assertEqual(len(all_esc), 7)
+        questions = {q for (_, q) in all_esc}
+        self.assertEqual(len(questions), 7)  # every question preserved, none merged away
+
+    def test_import_v1_do694_open_literal_stays_open(self):
+        """Defect 2: v1 writes the literal string "open", which is truthy — a falsy-only check
+        reads it as resolved. The 4 rows disposition="open" must stay open with resolved_at NULL,
+        and the 3 rows with a resolved-family disposition must be resolved."""
+        ctx = self.ctx()
+        rep = db.run_import_v1(ctx, FIX / "v1" / "escalations-do694.jsonl")
+        self.assertEqual(rep["resolved"], 3)
+        open_esc = ctx.store.open_escalations("quantivly")
+        self.assertEqual(len(open_esc), 4)
+        for e in open_esc:
+            self.assertIsNone(e["resolved_at"])
+        open_questions = {e["question"] for e in open_esc}
+        self.assertEqual(open_questions, {
+            "row1 revoke token?", "row3 deploy window?", "row5 escalate SLA?", "row6 hotfix branch?",
+        })
+
+    def test_import_v1_do694_is_idempotent_on_rerun(self):
+        """A second import of the same DO-694 file must change nothing: no new rows, no
+        re-resolution, no resolved_at churn on the still-open rows."""
+        ctx = self.ctx()
+        db.run_import_v1(ctx, FIX / "v1" / "escalations-do694.jsonl")
+        before = {k: (v["disposition"], v["resolved_at"]) for k, v in ctx.store.escalations_by_identity("quantivly").items()}
+        rep = db.run_import_v1(ctx, FIX / "v1" / "escalations-do694.jsonl")
+        self.assertEqual((rep["imported"], rep["resolved"]), (0, 0))
+        after = {k: (v["disposition"], v["resolved_at"]) for k, v in ctx.store.escalations_by_identity("quantivly").items()}
+        self.assertEqual(before, after)
+        self.assertEqual(len(after), 7)
 
     def test_import_v1_is_atomic_on_a_damaged_file(self):
         """F2: a bad line must not leave the rows before it committed."""
@@ -285,16 +327,30 @@ class CloseTests(unittest.TestCase):
         with self.assertRaises(errors.Usage):
             db.run_import_v1(ctx, p)
 
-    def test_import_v1_refuses_a_duplicate_open_firstseen(self):
-        """F5/F6 guard-kill row: a second open row sharing an earlier open row's firstSeen used to
-        be dropped uncounted; it must now be refused instead."""
+    def test_import_v1_refuses_a_duplicate_open_firstseen_and_question(self):
+        """F5/F6 guard-kill row, updated for DO-694: identity is ``(firstSeen, question)``, so the
+        guard must fire on a true duplicate — same firstSeen AND same question, both open with no
+        resolving row in between — not merely two rows that happen to share a firstSeen."""
+        ctx = self.ctx()
+        p = self._jsonl(
+            '{"ts": "T1", "firstSeen": "T1", "question": "C?", "evidence": "c", "disposition": null}',
+            '{"ts": "T2", "firstSeen": "T1", "question": "C?", "evidence": "c2", "disposition": null}',
+        )
+        with self.assertRaises(errors.Usage):
+            db.run_import_v1(ctx, p)
+
+    def test_import_v1_allows_distinct_questions_sharing_a_firstseen(self):
+        """DO-694: v1 logs several distinct questions under one shared ``firstSeen`` within a
+        session; this must no longer collapse into one escalation or trip the duplicate-open guard."""
         ctx = self.ctx()
         p = self._jsonl(
             '{"ts": "T1", "firstSeen": "T1", "question": "C?", "evidence": "c", "disposition": null}',
             '{"ts": "T2", "firstSeen": "T1", "question": "D?", "evidence": "d", "disposition": null}',
         )
-        with self.assertRaises(errors.Usage):
-            db.run_import_v1(ctx, p)
+        rep = db.run_import_v1(ctx, p)
+        self.assertEqual((rep["imported"], rep["resolved"]), (2, 0))
+        open_esc = ctx.store.open_escalations("quantivly")
+        self.assertEqual({e["question"] for e in open_esc}, {"C?", "D?"})
 
     def test_import_v1_missing_file_is_usage_not_internal_error(self):
         """F9 (low, optional — fixed because it was cheap): a bad --jsonl path is bad input."""

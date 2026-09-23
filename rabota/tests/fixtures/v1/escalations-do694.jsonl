@@ -1,0 +1,7 @@
+{"ts": "2026-09-02T10:02:34+03:00", "firstSeen": "2026-09-02T10:02:34+03:00", "question": "row0 invalid merge?", "evidence": "e0", "disposition": "resolved-invalid", "resolution": "r0"}
+{"ts": "2026-09-02T10:02:35+03:00", "firstSeen": "2026-09-02T10:02:34+03:00", "question": "row1 revoke token?", "evidence": "e1", "disposition": "open"}
+{"ts": "2026-09-03T09:35:31+03:00", "firstSeen": "2026-09-03T09:35:31+03:00", "question": "row2 retarget PR?", "evidence": "e2", "disposition": "resolved", "resolution": "r2"}
+{"ts": "2026-09-03T09:35:32+03:00", "firstSeen": "2026-09-03T09:35:31+03:00", "question": "row3 deploy window?", "evidence": "e3", "disposition": "open"}
+{"ts": "2026-09-02T10:02:36+03:00", "firstSeen": "2026-09-02T10:02:34+03:00", "question": "row4 rotate key?", "evidence": "e4", "disposition": "resolved", "resolution": "r4"}
+{"ts": "2026-09-03T09:35:33+03:00", "firstSeen": "2026-09-03T09:35:31+03:00", "question": "row5 escalate SLA?", "evidence": "e5", "disposition": "open"}
+{"ts": "2026-09-08T23:20:33+03:00", "firstSeen": "2026-09-08T23:20:33+03:00", "question": "row6 hotfix branch?", "evidence": "e6", "disposition": "open"}
