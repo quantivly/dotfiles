@@ -85,12 +85,23 @@ case "${1:-}" in
     exit 0 ;;
   show)
     shift
-    unit=""
+    # The property list is read from the -p flags rather than matched against a
+    # hardcoded set of names, and the output is FILTERED to it. Real systemctl
+    # returns only what was asked for and silently OMITS a property the unit does
+    # not have -- measured: `show wt-gc-sweep.timer -p NRestarts` prints no
+    # NRestarts line at all, because timers have none.
+    #
+    # A stub that answered the whole fixture regardless made "the checker stopped
+    # asking for a property" invisible: dropping `-p NRestarts` from unit_props
+    # survived a mutation sweep here, while against the real manager it silently
+    # restores exactly the crash-loop blindness the guard was added to remove.
+    unit=""; want=""; prev=""
     for a in "$@"; do
+      if [ "$prev" = "-p" ]; then want="$want $a"; prev=""; continue; fi
       case "$a" in
-        --*|-p) continue ;;
-        LoadState|ActiveState|UnitFileState|Result|ExecMainStatus|ConditionResult|ConditionTimestamp|ActiveEnterTimestamp|NRestarts) continue ;;
-        *) [ -z "$unit" ] && unit="$a" ;;
+        -p)  prev="-p"; continue ;;
+        --*) continue ;;
+        *)   [ -z "$unit" ] && unit="$a" ;;
       esac
     done
     case "$unit" in
@@ -98,10 +109,17 @@ case "${1:-}" in
       # prove the checker never asks.
       *@.*) echo "Unit name $unit is neither a valid invocation ID nor unit name." >&2; exit 1 ;;
     esac
+    emit() {
+      if [ -z "$want" ]; then cat; return 0; fi
+      while IFS= read -r line; do
+        case " $want " in *" ${line%%=*} "*) printf '%s\n' "$line" ;; esac
+      done
+      return 0
+    }
     f="$SCTL_STATE/props/$unit"
-    if [ -r "$f" ]; then cat "$f"; exit 0; fi
+    if [ -r "$f" ]; then emit < "$f"; exit 0; fi
     # Measured on systemd 259: an unknown unit exits 0 and claims success.
-    printf 'LoadState=not-found\nActiveState=inactive\nUnitFileState=\nResult=success\nExecMainStatus=0\nConditionResult=no\nConditionTimestamp=\nActiveEnterTimestamp=\nNRestarts=0\n'
+    printf 'LoadState=not-found\nActiveState=inactive\nUnitFileState=\nResult=success\nExecMainStatus=0\nConditionResult=no\nConditionTimestamp=\nActiveEnterTimestamp=\nNRestarts=0\n' | emit
     exit 0 ;;
 esac
 echo "systemctl stub: unhandled: $*" >&2
@@ -559,6 +577,19 @@ check "a non-numeric NRestarts: exit 0, treated as no restarts" "$RC" 0
                    || ok "NRestarts is never evaluated as an arithmetic expression"
 grep_ok "$OUT" '✓ server.service: active' "non-numeric NRestarts: still a tick"
 
+# The checker must ASK for NRestarts, not merely handle it when offered. The
+# stub filters its answer to the -p list exactly as systemctl does, so this row
+# fails if unit_props stops requesting the property -- which against the real
+# manager silently restores the crash-loop blindness above, with every fixture
+# still supplying the value.
+healthy
+link_unit server.service
+set_enabled server.service enabled
+props server.service loaded active success 0 yes "@$((NOW-9000))" "@$((NOW-30))" 9
+OUT="$(run)"; RC=$?
+check "the checker asks systemctl for NRestarts" "$RC" 1
+grep_ok "$(grep 'show ' "$STATE/calls.log")" 'NRestarts' "NRestarts is in the property list actually sent"
+
 # A service a managed timer activates must not ALSO be judged as a standalone
 # daemon — a oneshot is inactive between runs, which would read as "down".
 healthy
@@ -728,7 +759,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=122
+EXPECTED_ROWS=124
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
