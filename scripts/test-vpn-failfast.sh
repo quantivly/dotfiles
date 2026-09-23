@@ -244,6 +244,41 @@ ff() {
     "$FAILFAST" "$@" 2>&1
 }
 
+# --watch, backgrounded. POLL=1 so a converge cycle is fast; `ip monitor` is
+# stubbed to exit 1, so the loop falls to its poll -- which is the CORRECTNESS
+# path and the one worth testing anyway.
+watch_start() {
+    PATH="$STUBBIN:$PATH" \
+    VPN_FAILFAST_CONF="$CONF" VPN_FAILFAST_PROTO="$PROTO" \
+    VPN_FAILFAST_METRIC="$METRIC" VPN_FAILFAST_IFACE="$IFACE" \
+    VPN_FAILFAST_POLL=1 \
+    "$FAILFAST" --watch >"$IPSTATE/watch.out" 2>&1 &
+    WATCH_PID=$!
+}
+watch_stop() {
+    [[ -n "${WATCH_PID:-}" ]] || return 0
+    kill "$WATCH_PID" 2>/dev/null
+    wait "$WATCH_PID" 2>/dev/null
+    WATCH_PID=""
+}
+# Bounded wait on a predicate, never a fixed sleep: a row that sleeps long enough
+# today is a row that flakes on a loaded CI runner, and this repo has already
+# shipped one of those.
+wait_for() {
+    local budget="$1"; shift
+    local deadline=$(( SECONDS + budget ))
+    while (( SECONDS < deadline )); do
+        if "$@"; then return 0; fi
+        sleep 0.2
+    done
+    return 1
+}
+# Invoked INDIRECTLY, as `wait_for 15 has_route <dst>`, which shellcheck cannot see.
+# shellcheck disable=SC2329
+has_route()  { awk -F'\t' -v d="$1" '$1==d{f=1} END{exit !f}' "$IPSTATE/routes" 2>/dev/null; }
+# shellcheck disable=SC2329
+lacks_route() { ! has_route "$1"; }
+
 installed() { awk -F'\t' '{print $1}' "$IPSTATE/routes" 2>/dev/null | sort | tr '\n' ' '; }
 # awk, not `grep -c . || printf 0`: grep -c prints 0 AND exits 1 on an empty
 # file, so the `||` fires too and the helper returns "0\n0" -- which compares
@@ -363,6 +398,52 @@ touch "$IPSTATE/fail-add"
 OUT="$(ff --once)"; RC=$?
 check "a route that cannot be added: exit 1, not 0" "$RC" 1
 grep_ok "$OUT" 'could not add' "failed add: named"
+
+printf '\nthe --watch path, which is what the unit actually runs\n'
+
+# A link that EXISTS but is not UP, with its routes still listed. Real: the
+# kernel keeps routes over a carrier-down interface and marks them `linkdown`
+# (docker0 is in exactly that state on this box right now). Without this row the
+# UP-flag test is unreachable, because every other fixture either has the flag or
+# has no interface at all — measured: a mutant deleting the check SURVIVED.
+reset; write_conf "${GOOD_CONF[@]}"
+printf '[{"ifindex":186,"ifname":"tun0","flags":["POINTOPOINT","MULTICAST","NOARP"],"operstate":"DOWN"}]\n' \
+    > "$IPSTATE/link-$IFACE"
+printf '%s\n' '[{"dst":"0.0.0.0/1","gateway":"172.31.80.1","flags":["linkdown"]}]' \
+    > "$IPSTATE/route-dev-$IFACE"
+OUT="$(ff --status)"
+grep_ok "$OUT" 'tunnel:  DOWN' "an interface that is present but NOT UP: reported DOWN"
+OUT="$(ff --once)"
+check "...and the fail-fast routes are installed" "$(installed)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
+
+# Orphan-clear-at-start, through --watch rather than --once. The unit runs
+# --watch; a mutant removing clear_owned from THAT branch alone survived every
+# row above, because all of them go through --once.
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
+watch_start
+if wait_for 15 has_route 54.166.22.221; then ok "--watch converges"; else bad "--watch converges — timed out"; fi
+FIRST_DEL="$(grep -n 'route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+FIRST_ADD="$(grep -n 'route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+if [[ -n "$FIRST_DEL" && -n "$FIRST_ADD" && "$FIRST_DEL" -lt "$FIRST_ADD" ]]; then
+    ok "--watch removes an orphan BEFORE its first add"
+else
+    bad "--watch removes an orphan BEFORE its first add — del '$FIRST_DEL', add '$FIRST_ADD'"
+fi
+watch_stop
+
+# A route carrying OUR proto that appears while the daemon is running -- another
+# instance, or an operator's hand -- is reclaimed by the next converge. This is
+# the only path on which converge's own removal loop can fire: --once clears
+# everything up front, so that loop is dead code there, which is exactly why a
+# mutant gutting it survived.
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+watch_start
+if wait_for 15 has_route 54.166.22.221; then ok "--watch installs the configured destination"; else bad "--watch installs the configured destination — timed out"; fi
+printf '8.8.4.4\t%s\t%s\n' "$PROTO" "$METRIC" >> "$IPSTATE/routes"
+if wait_for 15 lacks_route 8.8.4.4; then ok "a route appearing under our proto mid-run is reclaimed"; else bad "a route appearing under our proto mid-run is reclaimed — timed out"; fi
+check "...and the configured destination is untouched" "$(installed)" "54.166.22.221 "
+watch_stop
 
 printf '\nconfig validation — nothing is installed until ALL of it parses\n'
 
@@ -653,7 +734,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=112
+EXPECTED_ROWS=119
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
