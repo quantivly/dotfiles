@@ -452,6 +452,74 @@ through to a real write with the tester's own `$HOME` and wrote to the **live** 
 prompt reads. `run()` in the suite now pins `XDG_STATE_HOME` as well. A fixture that can reach
 live state is not hermetic, whatever it asserts.
 
+## A standalone service is judged differently from a timer-activated one (DO-692)
+
+Added when DO-692 went to register a second standalone unit (`vpn-notify.service`) and had to
+look at `check_standalone_service()` properly. It got **two** things backwards, both in code
+written for DO-685, and both only reachable once a second standalone unit existed.
+
+### A SKIPPED standalone unit was reported as a fault
+
+A unit held back by an unmet `Condition*` is `ActiveState=inactive`, `Result=success`,
+`ConditionResult=no` — and the standalone path reported
+`✗ enabled but ActiveState=inactive`. That is the exact inverse of this repo's own rule that a
+skipped unit is not a failed one, which `check_service()` had implemented correctly all along.
+Any unit gated on hardware, a dock or a vendor client would have been permanently red on every
+machine lacking it.
+
+**The two questions genuinely differ, and that is why the same branch gets opposite verdicts:**
+
+| | a **timer-activated** unit stops matching its condition | a **standalone** unit never matches |
+|---|---|---|
+| means | scheduled work silently stopped | this machine is not one it runs on |
+| verdict | **fault** | **decision**, same class as "linked, not enabled" |
+
+The skip branch is gated on the unit **not** being up, because `ConditionResult` describes the
+most recent start attempt: a unit that failed a condition once and is running now is judged on
+what it is doing now.
+
+### A crash-looping daemon read as a tick
+
+`ActiveState` reads `activating` between automatic restarts, and `activating` was accepted as
+✓ — a consequence of DO-686's mid-run fix carried into a path where its reasoning does not
+hold. The failure mode is specific and nasty: **a daemon whose every run outlives
+`StartLimitIntervalSec` never exhausts `StartLimitBurst`, so the rate limiter never trips.**
+The unit never enters `failed`, never appears in `--state=failed`, and DO-687's prompt warning
+never fires. It restarts forever, silently, and every check on the machine is green.
+
+Sampling `ActiveState` cannot tell "starting" from "starting again for the ninth time".
+`NRestarts` is the only property that can, and it counts **automatic** restarts only. It is
+checked while `active` too, so a sample landing in the up half of the cycle does not read as
+health.
+
+`TIMER_HEALTH_RESTART_LIMIT` defaults to **3**: above a one-off blip (a network hiccup, a
+resume) and below systemd's default `StartLimitBurst` of 5, so it speaks *before* the rate
+limiter would — which matters precisely because in the loop this catches, the limiter never
+speaks at all.
+
+### Mutation sweep, 2026-09-23 (the standalone branches)
+
+**8 mutants, 8 killed, 0 survived, 0 not applicable.** Run after the fact, because the change
+shipped without one recorded — the rows were there and strong, but nothing on record said so,
+and a reader cannot tell a swept guard from an unswept one.
+
+| # | mutation | killed by |
+|---|---|---|
+| S1 | a skipped standalone unit is a fault again (the inverted rule) | reported as a decision, not `✗` |
+| S2 | drop the `ConditionTimestamp` gate | a never-started unit reads as skipped |
+| S3 | a unit that is UP but once failed a condition reads as skipped | judged on `ActiveState`, not a stale condition |
+| S4 | drop the `NRestarts` crash-loop check | a restart loop reads as a tick |
+| S5 | crash-loop checked only while `activating` | a loop sampled while `active` still named |
+| S6 | a non-numeric `NRestarts` reaches arithmetic | still a tick, treated as no restarts |
+| S7 | the limit is off by one (`>=` for `>`) | restarts *at* the limit are not a loop |
+| S8 | a non-numeric `TIMER_HEALTH_RESTART_LIMIT` accepted | exit 2, not a silent default |
+
+The suite is 125 rows (up from 98). Both defects were invisible while `herdr-server.service`
+was the only standalone unit — neither is gated on a condition and it does not crash-loop. **A
+branch with one instance is a branch with one shape**, which is the same lesson as the fixture
+that described a state the machine could not produce: the rows existed, and the machine had
+never been in the state they were written for.
+
 ## What this does not do
 
 **It only fires when someone runs it.** That is the honest limitation of the report-only decision
