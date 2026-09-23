@@ -246,8 +246,8 @@ root system unit, `Result=success`. The unit is now static (no placeholder, no r
 Moving the script out of `/home` also bought back `ProtectHome=yes`, which had to be weakened to
 `read-only` while `ExecStart` lived in the checkout.
 
-**One thing was NOT isolated, and is recorded as open rather than guessed at.** That first install
-also failed with:
+**Resolved by removal, not by diagnosis — and the distinction matters.** That first install also
+failed with:
 
 ```
 vpn-failfast.sh[1109118]: coreutils: unknown program 'vpn-failfast'
@@ -260,8 +260,13 @@ its multicall **strips the extension from `argv[0]`** — verified: a symlink na
 trigger was is unknown: the script runs fine from that same path under systemd's PATH with a clean
 environment, and a `systemd-run --user` bisect of every hardening directive reproduced nothing —
 which proves little, because the user manager ignores several of them (see below). Reproducing it
-needs root, which an agent tool does not have here. Moving the daemon to `/usr/local/bin` removes
-the class; if it ever recurs from there, that is a **new** finding.
+needs root, which an agent tool does not have here.
+
+Moving the daemon to `/usr/local/bin` fixed it: the very next install started clean
+(**2026-09-23 16:27**, `ActiveState=active`, `NRestarts=0`, empty journal, and `ProtectHome=yes`
+in force). So the class is gone and the specific trigger is now moot — but it was never
+identified, and this is deliberately not written up as though it was. **A recurrence from
+`/usr/local/bin` would be new information.**
 
 ### Two directives that would have made the unit unstartable
 
