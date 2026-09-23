@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A guard that enumerates the state tables with no row total, so the audit never has to be done
+  by hand again (DO-705).** DO-701 landed fourteen row totals and missed six suites; its own
+  close-out then called fourteen "the state tables" when it was fourteen of twenty. That was the
+  **third** consecutive change to miscount the same set — DO-698 shipped a code comment, a
+  `CHANGELOG.md` entry *and* a merged commit message calling `test-secret-guard.sh` "the last
+  state table without a row total" while seven others had none, and DO-701 scoped itself to
+  "seven of the nine suites the repo labels `State table:`". Every one of those was reached by
+  enumerating the files that **do** have the property and assuming the rest were covered. Nobody
+  enumerated the complement, and the complement is one line of shell — which is the whole
+  argument for a guard rather than a habit.
+
+  `scripts/check-state-table-totals.sh` enumerates `scripts/test-*.sh` and fails naming **every**
+  file with no row total, not the first, because stopping at the first hit reproduces the
+  partial-list defect it exists to prevent. Four rules: **TOTAL** (the suite declares
+  `EXPECTED_ROWS`/`EXPECTED_TOTAL`), **LITERAL** (the number is written down, not computed —
+  `EXPECTED_ROWS=$((PASS + FAIL))` parses, goes green forever, and asserts that the rows that ran
+  equal the rows that ran, which is worse than no total because it looks like one), **ASSERT**
+  (the constant is read back in a comparison, so the explanatory comment every suite carries
+  cannot satisfy the rule by naming it), and **ALLOW** (an allow-list entry naming no file fails,
+  so an exemption cannot rot into one waiting for the next file to take that name). "Could not
+  run" is exit 2 and never a pass; exit 3 is the checker being self-inconsistent, distinct from
+  exit 1 for the tree being wrong. The one allow-list entry, `scripts/test-rabota.sh`, is argued
+  in the file: it is a wrapper around `python3 -m unittest discover`, whose 595 tests unittest
+  already counts and which fails on a collection error rather than silently discovering fewer.
+
+  **The guard had a defect that no run against this repository could have found.**
+  `declared_names` trimmed with `tr -d '[:space:]='`, and `[:space:]` includes the newline — so
+  with more than one match `tr` welded them into `EXPECTED_ROWSEXPECTED_TOTAL`, matching no
+  assignment and no comparison, and the file was reported as having a computed, uncompared total.
+  It was invisible over all 21 existing suites because each assigns the constant exactly once.
+  The first input with two assignments was the guard's own state table, which builds fixture
+  suites containing totals. A rule correct only on inputs of length one, over a corpus that
+  happens to be all length one.
+
+  State table: `scripts/test-state-table-totals.sh` (61 checks, hermetic, in CI as
+  `state-table-totals-test` and in pre-commit), which also pins the guard's stated limitation —
+  it reads the file, not the shell, so fixture text containing a total counts as a declaration.
+  Four of its rows are `lacks` assertions that each rule's fail needle does not occur on the pass
+  path.
+
 ### Fixed
+
+- **The six state tables DO-701 missed now assert their own row totals (DO-705).**
+  `scripts/test-claude-doctor.sh` (331), `scripts/test-claude-account-dirs.sh` (159),
+  `scripts/test-pane-reaper.sh` (141) and `scripts/test-machines-render.sh` (66) gained
+  `EXPECTED_ROWS`. None gained a `docs_claim()` row, and that was checked rather than assumed:
+  every number written about them is commit-anchored (`docs/CLAUDE_ACCOUNTS.md`'s "156 checks at
+  `6661472`") or a delta inside a dated entry, which is a **record** — true where it stands, not
+  a claim about today. Asserting one would force a historical entry to be rewritten every time a
+  row lands, destroying the record to satisfy the guard. `scripts/test-pane-reaper.sh` has no
+  documented count at all, so there is nothing to pin. `scripts/test-claude-pick.sh` is the
+  worked example of that outcome.
+
+- **`scripts/test-gpg-installation.sh` retired rather than repaired (DO-705).** It was the fifth
+  file the new guard named, and it tests three scripts DO-264 (#51) deleted in January 2026 when
+  this repo migrated from GPG to SSH commit signing. Nothing referenced it — no CI job, no page,
+  no script — and run by hand it exits at its first assertion, `✗ gpg-prime-cache missing`, which
+  it had been doing unnoticed for eight months because nothing ran it. Repairing it would mean
+  restoring three deleted scripts to satisfy a test, and wiring it into CI would mean wiring in a
+  permanently red job, which this repo has recorded getting deleted along with whatever it
+  protected. Giving it a row total would have been the guard's first false green, written by the
+  person who built the guard. `docs/RETIRED.md` is new and carries the record; it is the
+  mechanism `scripts/check-doc-tokens.sh` already expects and nothing had used yet.
 
 - **Every state table now asserts its own row total, and every live check count in the prose is
   now pinned to one (DO-701).** Seven suites had no `EXPECTED_ROWS` guard —

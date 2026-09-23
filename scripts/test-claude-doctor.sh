@@ -2638,6 +2638,32 @@ want_out "a member containing a space is NOT CHECKED (the class does not widen)"
          "could not read clauth's fallback_chain"
 no_out   "...and is not reported as an armed chain"  "auto-switch armed"
 
+# --- the row total -----------------------------------------------------------
+# Catches a row that VANISHED -- an early exit, a deleted block, an emptied
+# loop, an unset variable under `set -u`. Every row that still ran would pass
+# and this suite would print a green summary over half its coverage. The full
+# argument is at the tail of scripts/test-secret-guard.sh; which page owns a
+# count is docs/REPO_CHECKS.md, "Where a check count lives".
+#
+# There is deliberately NO docs_claim row here, and checking before assuming
+# either way is the point. Every number written about this suite carries the
+# commit it was measured at -- "279 checks at `6661472`" and "281 -> 325 at
+# `d2848f6`" in docs/CLAUDE_ACCOUNTS.md, "156 -> 172" in
+# docs/CLAUDE_ACCOUNT_PICKER.md -- and that page argues the convention at length
+# and is right. A commit-anchored count is a RECORD: true at that commit, not a
+# claim about today. Asserting one would force a historical entry to be
+# rewritten every time a row lands, which is the one thing that would make the
+# record worthless. The trap is live rather than hypothetical: the needle would
+# be "(331 checks" and those sentences are already in exactly the shape it
+# greps for. scripts/test-claude-pick.sh is the same case, argued there first.
+EXPECTED_ROWS=331
+
+if (( PASS + FAIL != EXPECTED_ROWS )); then
+  printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
+    "$EXPECTED_ROWS" "$((PASS + FAIL))"
+  FAIL=$((FAIL + 1))
+fi
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

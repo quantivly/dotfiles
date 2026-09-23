@@ -121,6 +121,27 @@ repos:
         pass_filenames: false
         files: '^(CLAUDE\.md|README\.md|\.claude/(rules|skills)/.*\.md|docs/.*\.md|scripts/context-budget\.conf)$'
 
+      # Every state table under scripts/ must assert its own row total, which
+      # catches a check that VANISHED -- an early exit, an emptied loop, an
+      # unset variable under `set -u` -- where every row that still ran passes
+      # and the suite prints a green summary. Three consecutive changes
+      # miscounted this set by listing the files that HAD a total and assuming
+      # the rest; the complement is one line of shell, so it is a guard rather
+      # than a habit. ~0.15s, so it runs on any change under scripts/.
+      #
+      # Unlike check-claude-md above, exit 2 FAILS here rather than warning. Its
+      # "could not evaluate" states -- no scripts/ directory, no test-*.sh at
+      # all, an unreadable suite -- cannot arise from an ordinary commit the way
+      # a shallow clone can, and every one of them is a tree a contributor needs
+      # stopped rather than skipped. Narrowing into silence is the exact failure
+      # this guard exists to prevent.
+      - id: check-state-table-totals
+        name: State tables assert their row totals
+        entry: ./scripts/check-state-table-totals.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/'
+
       - id: check-secrets-patterns
         name: Check for secret patterns
         entry: bash -c 'if grep -rn -E "(password|secret|token|api[_-]?key)\\s*=\\s*[\"'"'"'][^\"'"'"']{8,}" --include="*.sh" --include="*.bash" --include="*.zsh" --exclude-dir=".git" --exclude-dir="dotbot" . 2>/dev/null; then echo "Found potential secrets in files above"; exit 1; fi'

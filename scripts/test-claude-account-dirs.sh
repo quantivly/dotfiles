@@ -1465,6 +1465,29 @@ want_link "a healthy first build still links the credential" \
           "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
 no_out    "...and the resting state says nothing about auth_broken" "auth_broken"
 
+# --- the row total -----------------------------------------------------------
+# Catches a row that VANISHED -- an early exit, a deleted block, an emptied
+# loop, an unset variable under `set -u`. Every row that still ran would pass
+# and this suite would print a green summary over half its coverage. The full
+# argument is at the tail of scripts/test-secret-guard.sh; which page owns a
+# count is docs/REPO_CHECKS.md, "Where a check count lives".
+#
+# There is deliberately NO docs_claim row here, and this suite is the clearest
+# demonstration of why. docs/CLAUDE_ACCOUNTS.md says "`scripts/test-claude-
+# account-dirs.sh` (156 checks at `6661472`)" -- which is already the exact
+# shape the needle greps for, and 156 is already not 159. That sentence is not
+# stale: it is a RECORD, true at the commit it names, and the anchor is the
+# whole point of it. A docs_claim row would demand it be rewritten to 159 today
+# and to something else next month, destroying the record to satisfy the guard.
+# scripts/test-claude-pick.sh is the same case, argued there first.
+EXPECTED_ROWS=159
+
+if (( PASS + FAIL != EXPECTED_ROWS )); then
+  printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
+    "$EXPECTED_ROWS" "$((PASS + FAIL))"
+  FAIL=$((FAIL + 1))
+fi
+
 #-----------------------------------------------------------------------------
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
