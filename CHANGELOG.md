@@ -49,6 +49,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Four of its rows are `lacks` assertions that each rule's fail needle does not occur on the pass
   path.
 
+  **23 mutants, 23 matching a verdict written down before the run and compared by the driver**,
+  each dry-run for applicability with its mutated region diffed. The first pass had four
+  mismatches and three taught something: M3 re-introduced the `tr` defect and *survived*, because
+  rewriting the fixtures through `printf` had left no file in the suite declaring two constants —
+  so a fixture that declares two was added; M23 hard-coded `docs_claim`'s readable path and
+  survived, because the unreadable row short-circuits before the constant, so both rows passed
+  over a check that had stopped reading the file — so a third row was added asserting a readable
+  file *without* the claim comes back 0; and M19/M20's first verdicts were meaningless because the
+  driver used the wrong suite as the kill criterion. M20 is the one mutant expected to **survive**
+  — a deleted row plus the total lowered to absorb it, the compound form — and M22 shows the same
+  compound is *killed* wherever a `docs_claim` row exists, because lowering the total also
+  re-points its needle.
+
 ### Fixed
 
 - **The six state tables DO-701 missed now assert their own row totals (DO-705).**

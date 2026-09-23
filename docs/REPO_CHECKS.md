@@ -645,6 +645,59 @@ limitation itself — asserting what the guard *does*, so that whoever later
 teaches it about heredocs finds out there that the fixtures depended on the old
 behaviour.
 
+#### The sweep: 23 mutants, 23 matching their written-down verdict
+
+Each mutant carried an expected verdict recorded **before** it ran and compared by
+the driver rather than read by eye, and each was dry-run for applicability with
+its mutated region diffed — one that collapses into something other than its name
+reads exactly like a survivor. The first pass had **four** mismatches, and three
+of them were worth more than the twenty that matched.
+
+- **M3 re-introduced the `tr` defect above and SURVIVED.** Rewriting the fixtures
+  through `printf` had left *no* file in the suite declaring two row-total
+  constants, so there was nothing to weld and the bug was invisible again — this
+  time to the suite rather than to the repository. The defect had been found by
+  accident during development, never by a row. A fixture that declares two
+  constants (a heredoc'd `EXPECTED_ROWS` plus its own `EXPECTED_TOTAL`, which is
+  exactly the shape of a state table whose fixtures are state tables) now kills it.
+- **M23 collapsed into a different mutation than its name.** It hard-coded
+  `docs_claim`'s *readable* path to `printf 1`, and survived — because the
+  positive row got its 1 and the unreadable row short-circuits at the `[[ -r ]]`
+  guard **before** reaching the constant. Both rows passed over a check that had
+  stopped reading the file entirely. Neither existing row could see it, and the
+  fix is a third row: a readable file that does **not** carry the claim must come
+  back 0. It targets `install.conf.yaml`, a symlink map, precisely because that
+  file cannot acquire a prose sentence about a check count and so the row cannot
+  go stale.
+- **M19 and M20's first verdicts were meaningless** — the driver ran
+  `test-state-table-totals.sh` as the kill criterion for mutants planted in
+  `test-machines-render.sh`. A mutant judged by a suite that never reads it is an
+  unkillable mutant dressed as a survivor. The driver now picks the criterion from
+  the mutated file.
+
+**M20 is the one mutant expected to SURVIVE, and it did.** It deletes a row from
+`test-machines-render.sh` *and* lowers `EXPECTED_ROWS` from 66 to 65 to absorb it
+— the compound form, because a mutant that merely disables a detector on a
+healthy tree is unkillable by construction. M19 (the deleted row alone) is
+**killed** by the new total and by nothing else, which is what makes backfilling
+that total worth doing. The compound survives there only because that suite
+deliberately has no `docs_claim` row. Where one exists the same compound is
+**killed**: M22 deletes a row from `test-state-table-totals.sh` and lowers its
+total to match, and the lowered total re-points the `docs_claim` needle at
+"(64 checks", which `docs/REPO_CHECKS.md` does not say. Absorbing a vanished row
+quietly therefore takes two coordinated edits, one of them to prose a reviewer
+reads — the stronger property DO-701's M13 discovered by being wrong about it.
+
+The rest: the four rules inverted or disabled (M1, M7, M8, M11), TOTAL reporting
+only the first offending file (M2), `declared_names` and `literal_assign`
+loosened (M4, M5), `compared_somewhere` losing its assignment-line filter (M9 —
+killed only by the row added for it, having survived before that row existed) and
+its operator requirement (M10), the allow-list exempting nothing and everything
+(M12, M13), the glob narrowed (M14), the zero-suite and unreadable-file guards
+removed (M15, M16), `die_cannot_run` exiting 0 (M17), the denominator moved
+(M18), and `docs_claim`'s unreadable branch reporting a pass (M23 in its
+corrected form) — all killed.
+
 State table: `scripts/test-state-table-totals.sh` (65 checks, in CI as
 `state-table-totals-test`, and in pre-commit) over
 `scripts/check-state-table-totals.sh`. Hermetic — every row builds its own
