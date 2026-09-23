@@ -53,6 +53,13 @@ skill rather than reading the records end to end.
 | [WORKTREE_SWEEP.md](WORKTREE_SWEEP.md) | why landed agent worktrees and their local branches are swept on a timer, the blast radius, the branch predicate and the mutation sweep | record |
 | [TIMER_HEALTH.md](TIMER_HEALTH.md) | why nothing noticed a failed or silently SKIPPED repo-owned user timer, what `systemctl` reports wrongly about one, and how freshness is derived from the schedule rather than tabulated | record |
 
+## Networking
+
+| page | what it is | for |
+|---|---|---|
+| [VPN_RESILIENCE.md](VPN_RESILIENCE.md) | setting up and operating the VPN fail-fast unit, the tunnel-down notifier and `vpn-sweeps`; what to do about a stale `unreachable` route | guide |
+| [VPN_INTERNALS.md](VPN_INTERNALS.md) | 33 days of measurements, the three designs killed by evidence, why no runtime component may read a client log, and the silent-zero traps in the reporter | record |
+
 ## Security
 
 | page | what it is | for |

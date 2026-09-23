@@ -5,13 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## How to extend this file
 
 **This is an instruction file, not a journal.** It is loaded in full into every request of
-every session, so every paragraph here is paid for on every turn — and past ~150k chars
-Claude Code warns that length *reduces adherence*, i.e. the file stops producing the
-behaviour it was written to produce. It held 14k–36k for eight months and then went
-35,682 → 350,324 in nineteen days, because each PR appended its own review narrative. A
-one-off cut was already tried (2026-01-07, −62%) and it regrew 25×, so the budget is now
-enforced: `scripts/check-claude-md.sh`, run in CI and by pre-commit, against a ceiling
-derived from history that can only tighten. **Remove as much as you add.**
+every session, so every paragraph is paid for on every turn, and length *reduces adherence* — the
+file stops producing the behaviour it was written to produce. One −62% cut was tried here and it
+regrew 25×, so the budget is enforced, not intended: `scripts/check-claude-md.sh`, in CI and
+pre-commit, against a ceiling derived from history that can only tighten. The growth history and
+every number behind it: [scripts/context-budget.conf](scripts/context-budget.conf).
+**Remove as much as you add.**
 
 Before adding anything, route it:
 
@@ -47,12 +46,10 @@ rule that stays here). New evidence goes to a record, never back into this file.
 Budget knobs and their rationale: [scripts/context-budget.conf](scripts/context-budget.conf).
 Run `./scripts/check-claude-md.sh` before you commit.
 
-**`.claude/rules/` cards cannot be scoped, measured rather than assumed.** On Claude Code
-2.1.277 a card carrying `paths:` **never loads** — not at session start, not after reading a
-matching file, at project or user scope, in every spelling tried (block list, inline array,
-literal path); an identical card *without* `paths:` loads every time. So a card is not a
-cheap on-demand layer, it is more always-loaded text, and the guard forbids `paths:` rather
-than requiring it. Until that changes, a rule that must reach an agent belongs **here**.
+**`.claude/rules/` cards cannot be scoped, measured rather than assumed** — a card carrying
+`paths:` never loads, so the guard FORBIDS `paths:` rather than requiring it and a card is more
+always-loaded text, not a cheap on-demand layer. A rule that must reach an agent belongs
+**here**. The measurement: [docs/REPO_CHECKS.md](docs/REPO_CHECKS.md).
 
 ## Repository Overview
 
@@ -353,11 +350,9 @@ pathadd "${HOME}/.local/bin"  # Checks existence, prevents duplicates
 Use `command -v tool` directly in `zshrc.conditionals` and standalone scripts, and the
 `has_command()` wrapper inside functions for readability. Both cost ~1-2ms, so nothing is cached.
 
-- **One name per call.** `command -v a b c` takes a single operand in POSIX sh, and the shells
-  disagree about the rest: measured here, `command -v bash nosuchtool` prints only `/usr/bin/bash`
-  and exits **0** in bash and dash, and **1** in zsh — so the same line is a silent pass with two
-  tools missing in one shell, and an unexplained failure naming none of them in the other. Loop, or
-  call it once per tool.
+- **One name per call.** `command -v a b c` takes one operand in POSIX sh and the shells disagree
+  about the rest — measured, it is a silent pass with tools missing in bash and dash, and an
+  unexplained failure naming none of them in zsh. Loop, or call it once per tool.
 
 The two patterns with examples, the naming convention and the benchmark that removed the tool cache:
 [docs/SHELL_LAYOUT.md](docs/SHELL_LAYOUT.md).
@@ -388,12 +383,8 @@ Template at `examples/ssh-config.template`. Run `ssh-init` to install. See [docs
 
 ## GitHub CLI Aliases
 
-35+ `gh` aliases in `gh/config.yml`:
-- `gh mypr` - Your open PRs
-- `gh prs` - All open non-draft PRs
-- `gh review` - PRs where you're requested as reviewer
-- `gh prmerge` - Squash merge and delete branch
-- `gh runs` - Recent workflow runs for current branch
+35+ `gh` aliases in `gh/config.yml` — `mypr`, `prs`, `review`, `prmerge`, `runs` and more.
+Read that file; it is the source of truth and this list only ever went stale against it.
 
 ## GitHub Account Routing (`gh-doctor`)
 
@@ -419,23 +410,16 @@ Configuration is data in `zsh/zshrc.company` — `GH_ACCOUNT_ROUTES` (owner-glob
 `GH_ACCOUNT_PATH_ROUTES` (absolute-prefix=config-dir), `GH_ACCOUNT_DEFAULT_DIR`. **Double** quotes: a
 single-quoted `$HOME` is a literal, and the route then silently never fires.
 
-```bash
-gh-doctor                 # this directory: declared vs EFFECTIVE account, and what decided
-gh-doctor --offline       # config only — every network answer marked NOT CHECKED
-gh-refresh-tokens         # refresh the per-account token cache
-```
-
 The keyring measurements and every trap found here, each of which produced a green tick or a confident
 wrong answer: [docs/GH_ACCOUNT_ROUTING.md](docs/GH_ACCOUNT_ROUTING.md). State table:
 `scripts/test-gh-routing.sh` (207 checks, hermetic, run in CI).
 
 ## Keeping secrets out of transcripts
 
-**Everything a command prints is recorded, and that is where the credentials went.** An audit on
-2026-09-01 found both of this machine's live GitHub tokens in plaintext in five Claude Code session
-transcripts, put there by ordinary diagnostics — `ps` showing a `-e GH_TOKEN=…` launch, a `printf` of
-`$GH_TOKEN`, a bare `gh auth token`. Rotation is the wrong loop to optimise: for GitHub it is
-browser-only, `gh auth logout` leaves the leaked value valid, and none of it touches the next capture.
+**Everything a command prints is recorded, and that is where the credentials went** — an audit found
+both of this machine's live GitHub tokens in plaintext in five session transcripts, put there by
+ordinary diagnostics. Rotation is the wrong loop to optimise; the emission is. The audit, the
+commands that did it, and why rotation does not help: [docs/SECRET_EMISSION.md](docs/SECRET_EMISSION.md).
 
 - **Pipe anything that might print a credential through `scripts/redact-secrets.sh`.** It needs **two**
   rule sets because either alone leaks: shapes find a credential anywhere, including bare in prose;
@@ -607,9 +591,8 @@ utility — the system commands are all `backup-*`.
   `ssh_host_*`.** `backup-restore-system` bakes those four excludes in so an `/etc` restore can't
   break boot.
 
-Commands: `backup-init`, `backup-setup`, `backup-now`, `backup-status`, `backup-doctor`,
-`backup-drill`, `backup-snapshots`, `backup-check`, `backup-restore`, `backup-restore-system`,
-`backup-mount`, `backup-unlock`, `backup-prune`, `backup-luks-header`, `backup-kit`.
+Commands are all `backup-*` and tab-complete; start at `backup-doctor`. The full list, with what
+each is for, is in the guide below.
 
 Setup, the DR runbook and the verification regimen:
 [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md). Why each guard exists and every
@@ -633,9 +616,28 @@ OOM, nothing in the journal. With the rule the record names the sending process,
 - **auditd takes AppArmor denials out of the journal** — use `sudo ausearch -m AVC` afterwards.
 - Expect a benign burst from `systemd-shutdown` (pid 1) at every reboot.
 
-Commands: `audit-setup` (`--yes` skips the install prompt), `audit-status` (non-zero on fail),
-`audit-sweeps` (default: last 24h). Why the scope is `a0 == -1` only, and each silent-failure mode
-reported separately: [docs/AUDIT_TRIPWIRE.md](docs/AUDIT_TRIPWIRE.md).
+Commands are `audit-setup` / `audit-status` / `audit-sweeps`, listed below. Why the scope is
+`a0 == -1` only, and each silent-failure mode reported separately:
+[docs/AUDIT_TRIPWIRE.md](docs/AUDIT_TRIPWIRE.md).
+
+## VPN Resilience
+
+`vpn-failfast.service` (system, root) makes VPN-only destinations FAIL instead of hanging ~127s
+while the tunnel is down; `vpn-notify.service` (user, linked not enabled) notifies past a
+threshold. Root pieces come from `vpn-setup`, **copied never symlinked**; `./install` links only
+the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
+[docs/VPN_INTERNALS.md](docs/VPN_INTERNALS.md) · `scripts/test-vpn-failfast.sh`.
+
+- **No component may read a client log at runtime** — both dirs are writable by any process as
+  this user and the fail-fast unit is ROOT; it reads `ip -j link` / `ip -j route` only. The
+  notification body is a compile-time constant (GNOME renders `<a href>` inside it).
+- **A stale `unreachable` route blackholes a host permanently.** Identity is route `proto 66`,
+  nothing is deleted except by that filter, `vpn-doctor` FAILs on an orphan. `ip` ACCEPTS
+  `unreachable 0.0.0.0/0`, host bits and IPv6, so validate every destination BEFORE installing
+  any; an unusable config is exit 2, never a silent no-op.
+- **Never force a drop to test** (`SO_BINDTODEVICE` probe). **Parse the log offset, never match
+  it** (DST, 2026-10-25). Numbers come from the client's logs, **never Chrome history**.
+
 
 ## Common Tasks & Workflows
 
@@ -676,6 +678,8 @@ backup-restore-system # Guarded /etc-slice restore (never clobbers fstab/cryptta
 audit-setup          # Install/refresh the broadcast-kill audit tripwire (idempotent)
 audit-status         # Armed, switched on, recording to disk, in sync? (non-zero on fail)
 audit-sweeps         # Show broadcast kill(-1) events (default: last 24h)
+vpn-doctor           # VPN chain: orphans, drift, ACS port. vpn-status/-init/-setup alongside
+vpn-sweeps           # Offline VPN outage/re-auth report (--days N, --json)
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)
