@@ -231,6 +231,13 @@ def _remove_remote_worktrees(ctx, machine, items: list[dict]) -> dict:
 def apply_reap(ctx: Context, plan: dict, targets: set[str]) -> dict:
     if "sessions" in targets:
         raise errors.Usage("rabota never kills user sessions; use the close hints yourself")
+    if "spaces" in targets:
+        # Usage (exit 2) is for a thing rabota will NEVER do (sessions, above); spaces are only
+        # NOT YET reapable — a real precondition failure, not a bad argument — so this is Refused
+        # (exit 3). Checked before any worktrees work runs, so --apply --spaces --worktrees refuses
+        # the whole call rather than silently doing the worktrees half: naming one unsupported
+        # target poisons the call, the same as an unknown target would.
+        raise errors.Refused("spaces are deferred and not yet reapable; drop --spaces")
     rep = {"worktrees": None, "remote_worktrees": {"removed": [], "failed": []}, "failed": []}
     if "worktrees" in targets:
         if ctx.dry_run:

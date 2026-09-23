@@ -185,6 +185,24 @@ class ApplyReapTests(ReapTestCase):
         with self.assertRaises(errors.Usage):
             reap.apply_reap(ctx, reap.plan_reap(ctx, self.census()), {"sessions", "worktrees"})
 
+    def test_apply_spaces_refuses_instead_of_silently_doing_nothing(self):
+        """F2: --apply --spaces used to fall through apply_reap with no spaces branch, returning
+        an all-empty report and making zero runner calls — indistinguishable from success. It
+        must instead refuse (Refused, exit 3: spaces are not yet reapable, unlike sessions which
+        rabota will never reap at all)."""
+        ctx = self.ctx(FakeRunner([]))
+        with self.assertRaises(errors.Refused):
+            reap.apply_reap(ctx, reap.plan_reap(ctx, self.census()), {"spaces"})
+        self.assertEqual(ctx.runner.calls, [])
+
+    def test_apply_spaces_refuses_the_whole_call_even_combined_with_worktrees(self):
+        """Naming one unsupported target poisons the whole --apply call rather than silently
+        doing the worktrees half — wt-gc must never run."""
+        ctx = self.ctx(FakeRunner([]))
+        with self.assertRaises(errors.Refused):
+            reap.apply_reap(ctx, reap.plan_reap(ctx, self.census()), {"spaces", "worktrees"})
+        self.assertEqual(ctx.runner.calls, [])
+
     def test_apply_worktrees_delegates_to_wt_gc(self):
         runner = FakeRunner([(["wt-gc", "--apply"], Result(0, "reaped /w1\n", ""))])
         ctx = self.ctx(runner)
@@ -278,14 +296,33 @@ class RunTargetTests(ReapTestCase):
         base.update(over)
         return argparse.Namespace(**base)
 
-    def test_apply_with_no_target_refuses_and_touches_nothing(self):
+    def test_apply_with_no_target_refuses_and_touches_no_machine_but_still_marks_abandoned(self):
+        """F1: this only ever proved runner.calls == [] — no machine was touched — while leaving
+        the store's own bookkeeping unstated, even though plan_reap (called before the refusal)
+        unconditionally marks an idle started row abandoned. That marking is intended, locked-in
+        behaviour (see test_abandoned_marking_happens_without_apply), not something a no-target
+        --apply call should undo — so it is asserted here explicitly rather than left implicit."""
         ctx = self.ctx(FakeRunner([]))
+        ctx.store.insert_lane(self.lane_row(id="old", started_at="2026-09-16T00:00:00Z"))
         with mock.patch("rabota.commands.reap.Context.from_namespace", return_value=ctx), \
              mock.patch("rabota.commands.reap.gather", return_value=self.census()):
             with self.assertRaises(errors.Usage) as cm:
                 reap._run(self._ns(apply=True))
         self.assertIn("--worktrees", str(cm.exception))
         self.assertIn("1 worktree", str(cm.exception))
+        self.assertEqual(ctx.runner.calls, [])
+        self.assertEqual(ctx.store.get_lane("old")["status"], "abandoned")
+
+    def test_read_only_spaces_flag_still_prints_the_full_plan(self):
+        """`rabota reap --spaces` with no --apply is the read-only path: it must print the plan
+        exactly as with no target flags at all, unaffected by apply_reap's new spaces refusal."""
+        ctx = self.ctx(FakeRunner([]))
+        with mock.patch("rabota.commands.reap.Context.from_namespace", return_value=ctx), \
+             mock.patch("rabota.commands.reap.gather", return_value=self.census()):
+            plan = reap._run(self._ns(spaces=True))
+        self.assertEqual(len(plan["worktrees"]), 1)
+        self.assertEqual(plan["spaces"], [])
+        self.assertIn("deferred:spaces", plan["unavailable"])
         self.assertEqual(ctx.runner.calls, [])
 
     def test_apply_with_worktrees_target_still_acts(self):
