@@ -114,6 +114,33 @@ Design decisions that are load-bearing, not preferences:
   Found 2026-09-23, when a `SONIOX_API_KEY` survived in a transcript while the GitHub and
   Linear keys beside it were caught by shape. The audit, the scrub and the cadence:
   [TRANSCRIPT_SCRUB.md](TRANSCRIPT_SCRUB.md).
+- **The two VPN shapes are SHAPE rules because no name rule can reach them.** Added 2026-09-23
+  (DO-692, #209), when the VPN fail-fast work put AWS Client VPN client logs in front of this
+  pipeline for the first time. `SAMLRequest=` and `AUTH_FAILED,CRV1:` both appear *bare* — in a
+  log line and inside a URL, never as `VAR=value` — so the name rules that catch `…TOKEN=`,
+  `…SECRET=` and `_PAT=` have nothing to anchor on, and only a shape rule sees them. Measured
+  before either was added: a synthetic re-auth line passed through this script **completely
+  unchanged**, and Chrome history on this box already held **253 rows** carrying a `SAMLRequest`
+  parameter, so this was an emission already happening and not a hypothetical. `SAMLRequest=` is
+  an unsigned SAML AuthnRequest, deflate + base64 + percent-encoded — *not* a bearer credential,
+  which is why it is easy to wave through, but it names the IdP, the service provider and the
+  local assertion-consumer endpoint, and it is the string a phishing payload would be built
+  from. `AUTH_FAILED,CRV1:…` is the Client VPN re-auth challenge, whose `R:instance-…` segment
+  is a session identifier in its own right. **Both keep the key and replace only the value**,
+  which is load-bearing rather than cosmetic: `vpn-sweeps` pipes `vpn-log-report.py` through
+  *this very script*, and that reporter counts events by plain substring (`needle in line`) —
+  `AUTH_FAILED`, `Attempting to open browser with URL`, `SAML ACS received a request`,
+  `Succesfully retrieved and validated assertion`. Redacting from the `=` and from the `CRV1:`
+  onward leaves every one of those needles intact, so each count survives its own redaction; a
+  rule that ate the marker would make the reporter read zero forever and look like a fix that
+  worked. The suite pins the ACS and assertion lines as untouched for the same reason — note the
+  vendor's spelling of "Succesfully", matched exactly, because "Successfully" matches nothing
+  and would report a 0% success rate forever. **Both also refuse to fire on the bare key**, the
+  `ntn_short` reasoning again: `SAMLRequest=` carries a `{20,}` floor and the CRV1 rule takes
+  one-or-more rather than zero-or-more, so `SAMLRequest=` and `AUTH_FAILED,CRV1:` alone stay as
+  written. Prose that merely *names* either shape — this page, the SAML 2.0 spec — is left
+  alone, because a redactor that mangles prose is one somebody removes from the pipeline, after
+  which it redacts nothing.
 
 **`.gitignore`'s `**/*secret*` rule excluded all three of these files**, whose entire job
 is secrets — and `git add -A` skips ignored paths **silently**, so `git commit`, `git push`
@@ -128,6 +155,14 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (192 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (195 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
-`gitleaks` pre-commit hook over its own test data).
+`gitleaks` pre-commit hook over its own test data). **That count is asserted, not
+maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this
+sentence and CLAUDE.md's for it, so the number here cannot drift from the number that
+runs. It went wrong the other way first — this page said 79 and CLAUDE.md said 182 against
+an actual 192, each drifting from the first row added after it was written, and #215
+corrected both **by hand**, which fixes the numbers and not the reason they were wrong.
+Rewording the
+sentence so the count no longer follows the script name fails the suite by design; move
+the needle in `scripts/test-secret-guard.sh` with it.
