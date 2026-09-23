@@ -12,6 +12,21 @@ the mutation-testing rounds — including what their numbers did and did not mea
 
 ---
 
+## `.claude/rules/` cards cannot be scoped (measured 2026-09-23, moved here by DO-692)
+
+CLAUDE.md keeps only the imperative; this is the measurement behind it.
+
+On Claude Code **2.1.277** a rule card carrying `paths:` **never loads** — not at session start,
+not after reading a matching file, at project scope or user scope, in every spelling tried (block
+list, inline array, literal path). An identical card *without* `paths:` loads every time.
+
+So a card is not a cheap on-demand layer; it is more always-loaded text. That is why
+`scripts/check-claude-md.sh` **forbids** `paths:` rather than requiring it, and why its `SCOPE`
+check reports that all cards are unconditional and therefore all counted by `AGGR`. Until the
+loader changes, a rule that must reach an agent belongs in `CLAUDE.md` itself.
+
+---
+
 ## CI/CD Testing
 
 GitHub Actions runs: ShellCheck, syntax validation, YAML validation, pre-commit hooks, installation tests (Ubuntu 22.04/24.04), security scans, and documentation checks.

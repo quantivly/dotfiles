@@ -1,0 +1,68 @@
+# systemd/vpn-notify.service
+# ==========================
+# USER unit — a notification needs the session bus, which a system unit does not
+# have. Linked by ./install (dotbot) into ~/.config/systemd/user, and LINKED BUT
+# NOT ENABLED: arming it is Zvi's typed command, the same as wt-gc-sweep.timer
+# and rabota-precompute@.timer.
+#
+#   systemctl --user enable --now vpn-notify.service
+#
+# Both scripts/reconcile-systemd-units.sh and scripts/check-timer-health.sh print
+# "linked, not enabled — not checked" and exit 0 for a unit in that state, so
+# shipping it unarmed costs nothing and reports nothing.
+#
+# WHY A ConditionPathExists, and why it is safe to have one now. On a machine
+# with no AWS VPN Client there is no tunnel to watch, and this unit would sit
+# either failed or pointlessly polling. The condition makes systemd SKIP it
+# instead: ActiveState=inactive, Result=success, ConditionResult=no.
+#
+# That state used to be reported as a FAILURE by check_standalone_service(),
+# which read only LoadState and ActiveState — so arming this unit would have
+# installed a permanently-red checker on every machine but this one. DO-692 fixed
+# that first, in the commit before this file existed; the checker now reports a
+# skipped standalone unit as a decision, like "linked, not enabled". Do not add a
+# Condition* to any user unit without checking that rule still holds.
+
+[Unit]
+Description=Notify when the VPN tunnel has been down past the threshold
+Documentation=file://%h/.dotfiles/docs/VPN_RESILIENCE.md
+ConditionPathExists=/opt/awsvpnclient
+# PartOf, so closing the session takes the notifier with it. Not BindsTo: a
+# transient blip in the target must not leave the machine silently unwatched.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+# A user unit has no login shell, so PATH is systemd's own. notify-send lives in
+# /usr/bin and `ip` in /usr/sbin — which is NOT on the user manager's default
+# PATH on every distribution, and a missing `ip` here means tunnel_up() always
+# returns false and the notifier cries wolf forever.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/.dotfiles/scripts/vpn-notify.sh --watch
+# Withdraw the state on the way out so a restart does not inherit a verdict about
+# an outage that has since ended.
+ExecStopPost=%h/.dotfiles/scripts/vpn-notify.sh --withdraw
+
+# on-failure, not always — and this is the case the checker fix was about. With
+# Restart=always, a process that lives longer than StartLimitIntervalSec never
+# exhausts StartLimitBurst, so a permanent crash loop never reaches `failed`,
+# never appears in --state=failed, and DO-687's prompt warning never fires. Both
+# halves matter: on-failure means a clean exit stays exited, and the explicit
+# rate limit means a genuine loop ends in `failed` where something is watching.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# It reads two kernel interfaces and runs notify-send. Nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+# graphical-session.target: a notification with no session has nowhere to go.
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK — run ./install.
+WantedBy=graphical-session.target

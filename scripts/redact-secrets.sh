@@ -56,6 +56,8 @@ exec sed -E \
   -e 's/glpat-[A-Za-z0-9_-]{20,}/<REDACTED:gitlab-pat>/g' \
   -e 's/ntn_[A-Za-z0-9]{40,}/<REDACTED:notion-token>/g' \
   -e 's/lin_api_[A-Za-z0-9]{30,}/<REDACTED:linear-key>/g' \
+  -e 's/(SAMLRequest=)[A-Za-z0-9%+\/=_-]{20,}/\1<REDACTED:saml-request>/g' \
+  -e 's/(AUTH_FAILED,CRV1:)[^[:space:]]+/\1<REDACTED:vpn-auth-challenge>/g' \
   -e 's/([Bb]earer[[:space:]]+)[A-Za-z0-9._~+\/-]{20,}=*/\1<REDACTED:bearer>/g' \
   -e 's/(-----BEGIN [A-Z ]*PRIVATE KEY-----).*/\1<REDACTED:private-key>/g' \
   -e 's/(https?:\/\/[^:@[:space:]\/]+):[^@[:space:]\/]+@/\1:<REDACTED:url-password>@/g' \
@@ -81,3 +83,23 @@ exec sed -E \
   # the remedy, so a NOTION_PAT that matched neither a shape nor a name rule
   # printed in full through the very pipe the deny message recommends. A remedy
   # that silently does not remedy is worse than no remedy.
+  #
+  # The two VPN shapes, added 2026-09-23 (DO-692). Both are SHAPE rules: they
+  # appear bare in a log line and in a URL, never as VAR=value, so no name rule
+  # can reach them. Measured before adding: a synthetic re-auth line passed
+  # through this script completely unchanged, and Chrome history on this box
+  # already held 253 rows carrying a SAMLRequest parameter.
+  #
+  #   SAMLRequest= is an unsigned SAML AuthnRequest, deflate+base64+percent-
+  #   encoded. It is not a bearer credential, but it names the IdP, the service
+  #   provider and the local assertion-consumer endpoint, and it is the string a
+  #   phishing payload would be built from. The KEY is kept and only the value
+  #   replaced, so a redacted line still reads as what it is.
+  #
+  #   AUTH_FAILED,CRV1:… is the AWS Client VPN re-auth challenge. Its
+  #   `R:instance-…` segment is a session identifier of its own, so the value is
+  #   dropped to the first whitespace.
+  #
+  # The {20,} floor on SAMLRequest matches the `ntn_short` row's reasoning: a
+  # bare `SAMLRequest=` with nothing after it is prose, and a redactor that
+  # mangles prose is one somebody removes from the pipeline.

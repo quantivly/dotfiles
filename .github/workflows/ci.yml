@@ -249,6 +249,30 @@ jobs:
       - name: Run the timer-health state table
         run: ./scripts/test-timer-health.sh
 
+  vpn-failfast-test:
+    name: VPN Fail-Fast State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Every row runs against recording `ip` and `notify-send` stubs at the
+      # front of PATH, never against a runner that happens to lack either. That
+      # matters more here than anywhere else in this file: the subject INSTALLS
+      # ROUTES, and a suite that reached a real `ip` with privilege would
+      # blackhole a host. iproute2 is present on ubuntu-latest anyway, which is
+      # precisely why the stub has to come first rather than be assumed absent.
+      - name: Run the VPN fail-fast state table
+        run: ./scripts/test-vpn-failfast.sh
+
+      # Deliberately ONE step. The reporter's DST behaviour was briefly asserted
+      # here as well, and that was decoration: scripts/test-vpn-failfast.sh
+      # already makes exactly those assertions against exactly that fixture, so
+      # the second copy could only ever fail at the same moment as the first
+      # while being a second place to keep in step.
+
   claude-doctor-test:
     name: Claude Account & MCP Doctor State Table
     runs-on: ubuntu-latest

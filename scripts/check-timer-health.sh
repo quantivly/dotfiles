@@ -148,12 +148,19 @@
 #                               reconciler is the older one and has no
 #                               --list-managed, which is correctly an exit 2.
 #   TIMER_HEALTH_MAX_HORIZON_DAYS   default 14
+#   TIMER_HEALTH_RESTART_LIMIT  default 3 — see check_standalone_service()
 #   TIMER_HEALTH_NOW            epoch seconds to use as "now"
 
 set -uo pipefail
 
 SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-${HOME}/.config/systemd/user}"
 HORIZON_DAYS="${TIMER_HEALTH_MAX_HORIZON_DAYS:-14}"
+# Automatic restarts above which a standalone daemon is crash-looping rather than
+# starting. 3 sits above the one-off blip (a network hiccup, a resume) and below
+# systemd's default StartLimitBurst of 5, so this speaks BEFORE the rate limiter
+# would -- which matters because in the loop this catches the limiter never fires
+# at all. All four repo-owned user units read NRestarts=0 today.
+RESTART_LIMIT="${TIMER_HEALTH_RESTART_LIMIT:-3}"
 # Validated, not trusted: every use of these is inside (( )), where a non-numeric
 # value is a silent 0 in bash — a horizon of zero days would fail every unit and
 # a "now" of zero would pass every one of them. Either way the checker would be
@@ -161,6 +168,11 @@ HORIZON_DAYS="${TIMER_HEALTH_MAX_HORIZON_DAYS:-14}"
 if [[ ! "$HORIZON_DAYS" =~ ^[0-9]+$ ]] || (( HORIZON_DAYS <= 0 )); then
     printf 'check-timer-health: TIMER_HEALTH_MAX_HORIZON_DAYS must be a positive integer, got %s\n' \
         "$HORIZON_DAYS" >&2
+    exit 2
+fi
+if [[ ! "$RESTART_LIMIT" =~ ^[0-9]+$ ]]; then
+    printf 'check-timer-health: TIMER_HEALTH_RESTART_LIMIT must be a non-negative integer, got %s\n' \
+        "$RESTART_LIMIT" >&2
     exit 2
 fi
 if [[ -n "${TIMER_HEALTH_NOW:-}" && ! "${TIMER_HEALTH_NOW}" =~ ^[0-9]+$ ]]; then
@@ -245,7 +257,7 @@ unit_props() {
     systemctl --user show --timestamp=unix "$1" \
         -p LoadState -p ActiveState -p UnitFileState -p Result \
         -p ExecMainStatus -p ConditionResult -p ConditionTimestamp \
-        -p ActiveEnterTimestamp 2>/dev/null
+        -p ActiveEnterTimestamp -p NRestarts 2>/dev/null
 }
 prop() { sed -n "s/^$2=//p" <<<"$1" | head -1; }
 
@@ -439,8 +451,33 @@ check_timer() {
 # There is no freshness question for a Type=simple daemon; the question is
 # whether it is up. Its environment and ExecStart have their own two sections in
 # verify-tools.sh and are not repeated here.
+#
+# Two states that are not "up", and that this function got backwards until
+# DO-692 went to add a second standalone unit and had to look:
+#
+#   SKIPPED. A unit held back by an unmet Condition* is ActiveState=inactive,
+#   Result=success, ConditionResult=no — and was reported `✗ enabled but
+#   ActiveState=inactive`, the exact inverse of this repo's rule that a skipped
+#   unit is not a failed one. Not hypothetical: any unit gated on hardware, a
+#   dock or a vendor client is then permanently red on every machine that lacks
+#   it. check_service() has had this branch all along; this is the same branch
+#   with the OPPOSITE verdict, because the two questions differ. A
+#   TIMER-activated unit that stops matching its condition means scheduled work
+#   silently stopped — a fault. A standalone unit that never matches means this
+#   machine is not one it runs on — a decision, the same class as "linked, not
+#   enabled", and reported the same way.
+#
+#   CRASH-LOOPING. ActiveState reads `activating` between automatic restarts,
+#   and `activating` was accepted as ✓. A daemon whose every run outlives
+#   StartLimitIntervalSec never exhausts StartLimitBurst, so the rate limiter
+#   never trips: the unit never enters `failed`, never appears in
+#   `--state=failed`, and DO-687's prompt warning never fires. Sampling
+#   ActiveState cannot tell "starting" from "starting again for the ninth time";
+#   NRestarts is the only property that can, and it counts AUTOMATIC restarts
+#   only. Checked while `active` too, so a sample that lands in the up half of
+#   the cycle does not read as health.
 check_standalone_service() {
-    local svc="$1" props load active
+    local svc="$1" props load active cres cts restarts line
     props="$(unit_props "$svc")"
     load="$(prop "$props" LoadState)"
     if [[ "$load" != "loaded" ]]; then
@@ -448,11 +485,41 @@ check_standalone_service() {
         printf '  ✗ %s: enabled but LoadState=%s — systemd cannot load it. Fix: ./install\n' "$svc" "${load:-unknown}"
         return 0
     fi
+
     active="$(prop "$props" ActiveState)"
+
+    # Gated on the unit not being up: ConditionResult describes the most recent
+    # start attempt, so a unit that failed a condition once and is running now is
+    # judged on what it is doing now, not on what it once declined to do.
+    cres="$(prop "$props" ConditionResult)"
+    cts="$(epoch_of "$(prop "$props" ConditionTimestamp)")"
+    if [[ "$cres" == "no" ]] && (( cts > 0 )) \
+       && [[ "$active" != "active" && "$active" != "activating" ]]; then
+        printf '  · %s: SKIPPED by a condition since %s — not checked\n' "$svc" "$(fmt_time "$cts")"
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && printf '      %s\n' "$line"
+        done < <(condition_lines "$svc")
+        printf '      A skipped unit is NOT a failed one: no error, nothing in\n'
+        printf '      --state=failed, Result=success. This machine is not one it runs on.\n'
+        return 0
+    fi
+
     if [[ "$active" == "active" || "$active" == "activating" ]]; then
+        restarts="$(prop "$props" NRestarts)"
+        [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
+        if (( restarts > RESTART_LIMIT )); then
+            note_fail
+            printf '  ✗ %s: ActiveState=%s but NRestarts=%s (limit %s) — it is CRASH-LOOPING,\n' \
+                   "$svc" "$active" "$restarts" "$RESTART_LIMIT"
+            printf '      not running. Every run outliving StartLimitIntervalSec keeps the rate\n'
+            printf '      limiter from ever tripping, so this never reaches a failed state alone.\n'
+            printf '      journalctl --user -u %s -e\n' "$svc"
+            return 0
+        fi
         printf '  ✓ %s: %s\n' "$svc" "$active"
         return 0
     fi
+
     note_fail
     printf '  ✗ %s: enabled but ActiveState=%s (Result=%s)\n' "$svc" "${active:-unknown}" "$(prop "$props" Result)"
     printf '      journalctl --user -u %s -e\n' "$svc"

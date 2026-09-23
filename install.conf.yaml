@@ -107,6 +107,18 @@
     # SKIP it on a machine that has no such thing, which is not a failure.
     ~/.config/systemd/user/wt-gc-sweep.service: systemd/wt-gc-sweep.service
     ~/.config/systemd/user/wt-gc-sweep.timer: systemd/wt-gc-sweep.timer
+    # VPN tunnel-down notifier (DO-692). Linked, NOT enabled — arming it is a
+    # typed command, like wt-gc-sweep above, because a notifier that cries wolf
+    # is one people learn to dismiss and the threshold wants tuning from real
+    # vpn-sweeps output first:
+    #   systemctl --user enable --now vpn-notify.service
+    # Its ConditionPathExists=/opt/awsvpnclient makes systemd SKIP it on a
+    # machine with no VPN client — inactive, Result=success, which
+    # check_standalone_service() reports as a decision rather than a fault since
+    # DO-692 fixed it. Only the USER unit is linked here: the fail-fast SYSTEM
+    # unit needs root and is installed by `vpn-setup`, never by ./install, which
+    # never uses sudo.
+    ~/.config/systemd/user/vpn-notify.service: systemd/vpn-notify.service
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme

@@ -1,0 +1,82 @@
+# systemd/vpn-failfast.service
+# ============================
+# TEMPLATE. Rendered and installed root-owned to /etc/systemd/system/ by
+# `vpn-setup`, never by ./install — ./install never uses sudo, the same rule
+# backup-setup and audit-setup follow. __VPN_DOTFILES__ becomes the absolute path
+# of the checkout that installed it, substituted by scripts/vpn-render.sh.
+#
+# WHY A SYSTEM UNIT. Installing and removing routes needs CAP_NET_ADMIN, which a
+# user unit does not have. That is also why this unit is held to a much tighter
+# standard than the user-session notifier: it is root, and the one thing it must
+# never do is act on input an unprivileged process can write. It reads `ip -j
+# link` and `ip -j route` and nothing else. See the script's header.
+#
+# COPIED, NEVER SYMLINKED, for the same reason CLAUDE.md gives for
+# resticprofile/profiles.toml and audit/99-logout-catch.rules: ROOT runs this,
+# and a symlink into a working tree means a rebase, a bisect or a half-finished
+# checkout changes what root executes. vpn-doctor reports drift between the
+# installed copy and this checkout, which is the backup-doctor shape.
+#
+# UNVERIFIED UNDER SYSTEMD until `vpn-setup` has been run once: this file has
+# never been loaded by a system manager on this machine, because doing so needs
+# sudo and sudo does not work from an agent tool here. What HAS been verified is
+# the script it starts, hermetically, by scripts/test-vpn-failfast.sh.
+
+[Unit]
+Description=Fail fast for VPN-only destinations while the tunnel is down
+Documentation=file://__VPN_DOTFILES__/docs/VPN_RESILIENCE.md
+# After=, never Requires=/BindsTo=: this must run whether or not the VPN client
+# is installed, running or connected — its entire job is to react to the tunnel
+# NOT being there. A dependency on the client would make "the client is not
+# running" a reason for the fail-fast not to run, which is exactly backwards.
+After=network.target
+# Deliberately NOT Wants=network-online.target. Waiting for the network to be
+# "online" delays the window in which this is most needed — early boot, before a
+# tunnel exists — and network-online.target's meaning is per-backend and weak.
+
+[Service]
+Type=simple
+ExecStart="__VPN_DOTFILES__/scripts/vpn-failfast.sh" --watch
+# The withdraw path, and it runs on EVERY stop — clean, failed, killed or
+# reloaded. A leftover `unreachable` route blackholes a host permanently and
+# looks exactly like a server outage, so this is the single most important line
+# in the file. It is belt to the script's own SIGTERM trap, and braces to the
+# --watch path's "remove orphans before adding anything" at start, because the
+# case that strands routes is precisely the one where the stop path did not run.
+ExecStopPost="__VPN_DOTFILES__/scripts/vpn-failfast.sh" --clear
+
+# on-failure, not always: `systemctl stop vpn-failfast` must stay stopped, and
+# an operator stopping this is the documented way to clear the routes by hand.
+Restart=on-failure
+RestartSec=5
+# A bad /etc/vpn-failfast.conf makes the script exit 2 immediately, so without a
+# rate limit this becomes a tight restart loop against a file that will not fix
+# itself. Five starts per five minutes, then systemd gives up and the unit goes
+# to `failed` — which is a state check-timer-health.sh and vpn-doctor both
+# report, rather than a loop nothing notices.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Least privilege. The one capability this needs is CAP_NET_ADMIN; everything
+# else is dropped. Deliberately NOT ProtectSystem=strict + ReadWritePaths, which
+# would add a second thing to keep in sync for no gain here — this writes no
+# files at all.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# AF_NETLINK is how `ip` talks to the kernel; AF_UNIX for the journal.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

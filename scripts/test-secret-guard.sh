@@ -54,6 +54,18 @@ GHO="gho_$(printf 'A%.0s' {1..36})"
 PAT="github_pat_$(printf 'B%.0s' {1..30})"
 ANT="sk-ant-$(printf 'C%.0s' {1..40})"
 AWS="AKIA$(printf 'D%.0s' {1..16})"
+# The VPN shapes (DO-692). The host is split and the blob assembled for the same
+# reason as everything above: this file must contain no string that reads as a
+# live SAML re-auth URL. Written with the Write tool rather than a heredoc --
+# claude/hooks/secret-emission-guard.sh matches the SHELL STRING, so a heredoc
+# carrying a SAML auth URL is refused before it ever reaches disk.
+# The blob carries percent-encoding, because a real one does: the value is
+# deflate+base64 then URL-encoded, so +, / and = arrive as %2B, %2F and %3D. A
+# fixture of plain base64 let a mutant that dropped % from the character class
+# survive a sweep -- the rule still matched, just not to the end of the value.
+SAMLBLOB="$(printf 'fVNdb5swFP0r%%2Bx%%2Fy%%3D%.0s' {1..4})"
+SAMLHOST="accounts.google"".""com"
+SAMLURL="https://${SAMLHOST}/o/saml2/idp?idpid=C02zy1e8o&SAMLRequest=${SAMLBLOB}"
 
 echo
 echo "=== redact-secrets: the shapes it must catch ==="
@@ -94,6 +106,29 @@ check "linear key by shape, bare in prose" \
       "$(red "see $LIN here")" "see <REDACTED:linear-key> here"
 check "linear key by name too" "$(red "LINEAR_API_KEY=$LIN")" \
                                "LINEAR_API_KEY=<REDACTED:by-name>"
+# The AWS Client VPN shapes, added 2026-09-23 (DO-692). Both were measured
+# passing through this script COMPLETELY UNCHANGED before the rules existed.
+# Both are shape rules: they appear bare in a log line and inside a URL, never as
+# VAR=value, so no name rule can reach them -- the same two-rules-or-it-leaks
+# argument the header makes, in its third instance.
+check "saml request inside a re-auth URL" \
+      "$(red "Attempting to open browser with URL: $SAMLURL")" \
+      "Attempting to open browser with URL: https://${SAMLHOST}/o/saml2/idp?idpid=C02zy1e8o&SAMLRequest=<REDACTED:saml-request>"
+check "vpn re-auth challenge" \
+      "$(red "AUTH_FAILED,CRV1:R:instance-0a1b2c3d:${SAMLBLOB}")" \
+      "AUTH_FAILED,CRV1:<REDACTED:vpn-auth-challenge>"
+# The challenge value is dropped to the first whitespace, not to end of line: the
+# client writes the user's name after it, and a rule eating the rest of the line
+# would take the surrounding log context with it.
+check "the challenge stops at whitespace" \
+      "$(red "AUTH_FAILED,CRV1:R:instance-0a1b:${SAMLBLOB} connecting")" \
+      "AUTH_FAILED,CRV1:<REDACTED:vpn-auth-challenge> connecting"
+# Belt to the two rows above: no base64-shaped run of the blob survives anywhere,
+# whatever the surrounding text. An equality row pins one spelling; this pins the
+# property.
+check "no 20+ char blob survives either shape" \
+      "$(red "$SAMLURL AUTH_FAILED,CRV1:R:i:${SAMLBLOB}" \
+         | grep -oE '[A-Za-z0-9%+/=_-]{20,}' | grep -vc 'REDACTED')" "0"
 
 echo
 echo "=== redact-secrets: what it must NOT touch ==="
@@ -125,6 +160,27 @@ check "nor MY_PATHS"          "$(red 'MY_PATHS=/a:/b')"      "MY_PATHS=/a:/b"
 check "nor COMPATIBLE"        "$(red 'COMPATIBLE=yes')"      "COMPATIBLE=yes"
 check "nor PATTERN"           "$(red 'PATTERN=foo')"         "PATTERN=foo"
 check "a short ntn_ word is not a token" "$(red 'ntn_short')" "ntn_short"
+# The VPN rules must not mangle the two log lines vpn-sweeps counts. These are
+# the ground truth for every number this feature reports -- redacting them would
+# make the reporter read zero forever and look like a fix that worked. Note the
+# vendor's spelling of "Succesfully"; it is matched exactly, so it is written
+# exactly here too.
+check "the ACS request line is untouched" \
+      "$(red 'SAML ACS received a request: http://127.0.0.1:35001/ from Mozilla/5.0')" \
+      'SAML ACS received a request: http://127.0.0.1:35001/ from Mozilla/5.0'
+check "the assertion line is untouched" \
+      "$(red 'Succesfully retrieved and validated assertion')" \
+      'Succesfully retrieved and validated assertion'
+check "a bare AUTH_FAILED is prose"   "$(red 'AUTH_FAILED')"    'AUTH_FAILED'
+# The CRV1 rule takes one-or-more, not zero-or-more: with `*` the marker is
+# appended to a prefix carrying no value at all, which mangles prose for no gain.
+# Nothing else in this file exercises that distinction.
+check "an empty CRV1 challenge is prose" \
+      "$(red 'AUTH_FAILED,CRV1:')" 'AUTH_FAILED,CRV1:'
+check "an empty SAMLRequest is prose" "$(red 'SAMLRequest=')"   'SAMLRequest='
+check "the word SAMLRequest in prose" \
+      "$(red 'the SAMLRequest parameter is described in the SAML 2.0 spec')" \
+      'the SAMLRequest parameter is described in the SAML 2.0 spec'
 check "empty input"          "$(printf '' | "$REDACT")"     ""
 # Streaming filter: it must not swallow the command's status.
 check "exit status survives the pipe" \
