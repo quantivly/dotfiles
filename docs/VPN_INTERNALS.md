@@ -224,6 +224,37 @@ Both were the same shape — a probe that finds nothing and reads as a clean res
 With the probe fixed, the split is visible and matches §3: opens within 120s of a resume have a
 p50 of **64.3s** against **15.6s** away from one.
 
+### Two directives that would have made the unit unstartable
+
+Both shipped in the first DO-692 PR and were caught by hand, one command before the first
+`vpn-setup`. Neither is visible in a diff, and they fail in opposite ways.
+
+**`StartLimitIntervalSec=` in `[Service]` is silently ignored.** systemd moved it to `[Unit]`
+in v229; only the legacy `StartLimitBurst` spelling still parses in `[Service]`. So the burst
+applied against the **default 10 s interval**, and with `RestartSec=5` five restarts span 20 s
+— the limiter could never trip, and a broken unit would have restarted forever without ever
+reaching `failed`. That is exactly the crash-loop `check_standalone_service()`'s `NRestarts`
+guard was added for, shipped inside the unit that guard was added for.
+`systemd-analyze verify` says so in one line; nothing else does. The repo's own
+`rabota-precompute@.service` already had it right, in `[Unit]`.
+
+**`ProtectHome=yes` with an `ExecStart` under `/home`.** `systemd.exec` is explicit: `/home`,
+`/root` and `/run/user` are "made inaccessible and empty". The checkout **is** the deployment
+here, so `ExecStart` is `/home/zvi/.dotfiles/scripts/vpn-failfast.sh` — and the unit could not
+have executed its own script, 203/EXEC, on every start. Now `ProtectHome=read-only`, which is
+sufficient: the daemon writes nothing under `/home`, and it is root, so this was always
+defence-in-depth rather than a boundary.
+
+> **`systemd-analyze verify` does NOT catch the second one.** Measured: with
+> `ProtectHome=yes` restored it stayed completely silent, while complaining about the
+> `StartLimit` key on the same file. That is why `scripts/test-vpn-failfast.sh` carries a
+> dedicated ExecStart-vs-ProtectHome row rather than relying on the verifier.
+
+And a caution about how *not* to test this: a `systemd-run --user -p ProtectHome=yes` probe
+reported success, which proved nothing — the **user manager ignores `ProtectHome` entirely**.
+Measured, `/home/zvi` held the same 115 entries with and without it. A probe that cannot apply
+the setting it is testing returns the answer you wanted.
+
 ### DST will break a naive parser on 2026-10-25
 
 Every log line carries an explicit offset. All 12,697 timestamped lines in the corpus carry

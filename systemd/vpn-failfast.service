@@ -17,10 +17,15 @@
 # checkout changes what root executes. vpn-doctor reports drift between the
 # installed copy and this checkout, which is the backup-doctor shape.
 #
-# UNVERIFIED UNDER SYSTEMD until `vpn-setup` has been run once: this file has
-# never been loaded by a system manager on this machine, because doing so needs
-# sudo and sudo does not work from an agent tool here. What HAS been verified is
-# the script it starts, hermetically, by scripts/test-vpn-failfast.sh.
+# NOT YET LOADED BY A SYSTEM MANAGER on this machine -- that needs sudo, which
+# does not work from an agent tool here. What IS verified, by
+# scripts/test-vpn-failfast.sh: the script it starts (hermetically), that this
+# file renders with no placeholder left, that `systemd-analyze verify` is silent
+# on the rendered result, and that ProtectHome does not hide the ExecStart.
+#
+# Those last two exist because BOTH of the defects they catch shipped here and
+# were found by hand, one command before the first install. Neither shows up in a
+# diff, and systemd-analyze catches only one of them.
 
 [Unit]
 Description=Fail fast for VPN-only destinations while the tunnel is down
@@ -33,6 +38,21 @@ After=network.target
 # Deliberately NOT Wants=network-online.target. Waiting for the network to be
 # "online" delays the window in which this is most needed — early boot, before a
 # tunnel exists — and network-online.target's meaning is per-backend and weak.
+
+# IN [Unit], NOT [Service], and that is load-bearing rather than tidy. systemd
+# moved these in v229; `StartLimitBurst` in [Service] still parses as a legacy
+# alias but `StartLimitIntervalSec` does NOT, and systemd IGNORES it with only
+# a log line. The burst then applies against the DEFAULT 10s interval, and with
+# RestartSec=5 five restarts span 20s -- so the limiter never trips and a broken
+# unit restarts FOREVER without ever reaching `failed`. That is the exact
+# crash-loop the NRestarts guard in check-timer-health.sh was added for, and it
+# shipped inside the unit that guard was added for. `systemd-analyze verify` is
+# what says so; scripts/test-vpn-failfast.sh now runs it on both units.
+#
+# A bad /etc/vpn-failfast.conf makes the script exit 2 at once, so this is the
+# difference between a unit that gives up loudly and one that spins silently.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -49,13 +69,6 @@ ExecStopPost="__VPN_DOTFILES__/scripts/vpn-failfast.sh" --clear
 # an operator stopping this is the documented way to clear the routes by hand.
 Restart=on-failure
 RestartSec=5
-# A bad /etc/vpn-failfast.conf makes the script exit 2 immediately, so without a
-# rate limit this becomes a tight restart loop against a file that will not fix
-# itself. Five starts per five minutes, then systemd gives up and the unit goes
-# to `failed` — which is a state check-timer-health.sh and vpn-doctor both
-# report, rather than a loop nothing notices.
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Least privilege. The one capability this needs is CAP_NET_ADMIN; everything
 # else is dropped. Deliberately NOT ProtectSystem=strict + ReadWritePaths, which
@@ -65,7 +78,18 @@ AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=yes
 ProtectSystem=full
-ProtectHome=yes
+# read-only, NOT yes. `ProtectHome=yes` makes /home "inaccessible and empty"
+# (systemd.exec), and the ExecStart above lives under /home because in this repo
+# THE CHECKOUT IS THE DEPLOYMENT -- so `yes` stops the unit executing its own
+# script, 203/EXEC, on every single start. Caught before the first install by
+# reading the man page; a `systemd-run --user` probe of the same setting proved
+# NOTHING, because the user manager ignores ProtectHome entirely (measured:
+# /home held the same 115 entries with and without it).
+#
+# read-only suffices: this writes nothing under /home, and it is root, so this
+# was always defence-in-depth rather than a boundary. The real hardening is
+# CAP_NET_ADMIN-only plus NoNewPrivileges and the syscall filter below.
+ProtectHome=read-only
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
