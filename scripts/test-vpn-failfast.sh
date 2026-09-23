@@ -4,7 +4,7 @@
 # ============================
 #
 # State table for scripts/vpn-failfast.sh, scripts/vpn-notify.sh,
-# scripts/vpn-render.sh and scripts/vpn-log-report.py.
+# scripts/setup-vpn-failfast.sh and scripts/vpn-log-report.py.
 #
 # HERMETIC via recording `ip` and `notify-send` STUBS at the front of PATH, never
 # by relying on either being absent. The real `ip` on this box would need root to
@@ -41,7 +41,7 @@ set -uo pipefail
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FAILFAST="$DOTFILES/scripts/vpn-failfast.sh"
 NOTIFY="$DOTFILES/scripts/vpn-notify.sh"
-RENDER="$DOTFILES/scripts/vpn-render.sh"
+SETUP="$DOTFILES/scripts/setup-vpn-failfast.sh"
 REPORT="$DOTFILES/scripts/vpn-log-report.py"
 FIXTURES="$DOTFILES/tests/fixtures/vpn"
 
@@ -53,7 +53,7 @@ grep_ok()   { if grep -q -- "$2" <<<"$1"; then ok "$3"; else bad "$3 — output 
 grep_none() { if grep -q -- "$2" <<<"$1"; then bad "$3 — output unexpectedly contained '$2'"; else ok "$3"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for f in "$FAILFAST" "$NOTIFY" "$RENDER" "$REPORT"; do
+for f in "$FAILFAST" "$NOTIFY" "$SETUP" "$REPORT"; do
     [[ -x "$f" ]] || fatal "cannot execute $f"
 done
 [[ -r "$FIXTURES/aws_vpn_client_dst.log" ]] || fatal "missing DST fixture in $FIXTURES"
@@ -658,33 +658,44 @@ grep_ok "$OUT" 'tunnel:    UP' "--status reports the tunnel"
 OUT="$(nf "$NOW" --once --oops)"; RC=$?
 check "the notifier refuses a second argument: exit 2" "$RC" 2
 
-printf '\nvpn-render — an unresolved placeholder is a hard error\n'
+printf '\nthe installer refuses to point root at a worktree\n'
 
-TPL="$T/tpl"
-printf 'ExecStart="__VPN_DOTFILES__/scripts/vpn-failfast.sh" --watch\n' > "$TPL"
-OUT="$(VPN_RENDER_DOTFILES=/opt/x "$RENDER" "$TPL" 2>&1)"; RC=$?
-check "a template renders: exit 0" "$RC" 0
-check "...with the checkout path substituted" "$OUT" 'ExecStart="/opt/x/scripts/vpn-failfast.sh" --watch'
+# THE BUG THIS EXISTS FOR, and it reached a real install. `vpn-setup` resolves its
+# checkout from $PWD when that looks like one -- right for testing a branch,
+# wrong for a file root executes for months. The first install baked
+#   ExecStart=".../.herdr/worktrees/.dotfiles/zvi-do-692-.../vpn-failfast.sh"
+# into a root unit, and wt-gc-sweep DELETES landed worktrees daily. Same class as
+# CLAUDE.md's "never run ./install from a worktree".
+# A REAL git worktree, not a simulated one. An earlier version hand-built a
+# `.git` file and the guard did not fire -- the fixture described a state git
+# would never produce, so the row was green about nothing. `git worktree add` is
+# two commands and is the thing itself.
+MAINREPO="$T/mainrepo"
+FAKE_WT="$T/fakewt"
+git init -q "$MAINREPO" 2>/dev/null || fatal "git init failed"
+git -C "$MAINREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null \
+    || fatal "git commit failed"
+git -C "$MAINREPO" worktree add -q --detach "$FAKE_WT" 2>/dev/null || fatal "git worktree add failed"
+mkdir -p "$FAKE_WT/scripts" "$FAKE_WT/systemd" "$FAKE_WT/sysctl" || fatal setup
+cp -f "$SETUP" "$FAILFAST" "$FAKE_WT/scripts/" || fatal setup
+cp -f "$DOTFILES/systemd/vpn-failfast.service" "$FAKE_WT/systemd/" || fatal setup
+cp -f "$DOTFILES/sysctl/99-vpn-acs-port.conf" "$FAKE_WT/sysctl/" || fatal setup
+# Proof the fixture is what it claims to be, before any row leans on it.
+WT_GITDIR="$(git -C "$FAKE_WT" rev-parse --git-dir 2>/dev/null || true)"
+case "$WT_GITDIR" in
+    *"/.git/worktrees/"*) ok "the fixture really is a git worktree" ;;
+    *) bad "the fixture is NOT a worktree (git-dir=$WT_GITDIR) — the rows below prove nothing" ;;
+esac
 
-printf 'ExecStart=__VPN_MISSING__/x\n' > "$TPL"
-OUT="$(VPN_RENDER_DOTFILES=/opt/x "$RENDER" "$TPL" 2>&1)"; RC=$?
-check "an unresolved placeholder: exit 1, never a blank" "$RC" 1
-grep_ok "$OUT" 'unresolved placeholder' "unresolved placeholder: named"
+OUT="$(VPN_LOCAL_CONF="$CONF" "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1)"; RC=$?
+check "installing from a worktree: refused, exit 1" "$RC" 1
+grep_ok "$OUT" 'refusing to install from a WORKTREE' "worktree install: refused by name"
+grep_ok "$OUT" 'wt-gc-sweep' "worktree install: says WHY (the sweep deletes it)"
+grep_none "$OUT" 'Installing root-owned files' "worktree install: nothing was installed"
 
-printf 'ExecStart="__VPN_DOTFILES__/x"\n' > "$TPL"
-OUT="$(VPN_RENDER_DOTFILES='/opt/we"ird' "$RENDER" "$TPL" 2>&1)"; RC=$?
-check "a checkout path containing a double quote: exit 1" "$RC" 1
-
-OUT="$("$RENDER" "$T/no-such-template" 2>&1)"; RC=$?
-check "a missing template: exit 1" "$RC" 1
-
-# The real unit must actually render — a template that no row renders is a
-# template whose placeholder spelling nothing checks.
-OUT="$(VPN_RENDER_DOTFILES=/opt/x "$RENDER" "$DOTFILES/systemd/vpn-failfast.service" 2>&1)"; RC=$?
-check "the shipped unit renders: exit 0" "$RC" 0
-grep_ok "$OUT" '/opt/x/scripts/vpn-failfast.sh' "the shipped unit's ExecStart is substituted"
-grep_none "$OUT" '__VPN_' "the rendered unit carries no placeholder"
-grep_ok "$OUT" 'ExecStopPost' "the rendered unit keeps its withdraw-on-stop hook"
+# ... and the override exists, because testing a branch is a real need.
+OUT="$(VPN_SETUP_ALLOW_WORKTREE=1 VPN_LOCAL_CONF="$CONF" "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1 || true)"
+grep_ok "$OUT" 'continuing from a worktree anyway' "the override is honoured and says so"
 
 printf '\nthe units systemd will actually load\n'
 
@@ -704,13 +715,34 @@ printf '\nthe units systemd will actually load\n'
 # row here rather than one.
 UNITDIR="$T/units"
 mkdir -p "$UNITDIR" || fatal setup
-"$RENDER" "$DOTFILES/systemd/vpn-failfast.service" > "$UNITDIR/vpn-failfast.service" \
-    || fatal "could not render vpn-failfast.service"
+cp -f "$DOTFILES/systemd/vpn-failfast.service" "$UNITDIR/" || fatal setup
 cp -f "$DOTFILES/systemd/vpn-notify.service" "$UNITDIR/" || fatal setup
 
+# The system unit is STATIC now. A placeholder here would mean someone
+# reintroduced rendering without reintroducing the renderer, which installs a
+# unit with a literal __VPN_...__ in its ExecStart.
+check "vpn-failfast.service carries no placeholder" \
+      "$(grep -c '__VPN_[A-Z_]*__' "$UNITDIR/vpn-failfast.service" || true)" "0"
+
+# systemd-analyze checks that ExecStart EXISTS, and /usr/local/bin/vpn-failfast.sh
+# is only there after vpn-setup has run -- which must not be a precondition of
+# this suite. Verify a copy whose ExecStart points at a real temp file instead,
+# so any remaining complaint is about the unit's KEYS rather than the machine.
+STANDIN="$T/standin.sh"
+printf '#!/bin/sh\nexit 0\n' > "$STANDIN"; chmod +x "$STANDIN"
+sed "s#^ExecStart=.*#ExecStart=$STANDIN --watch#; s#^ExecStopPost=.*#ExecStopPost=$STANDIN --clear#" \
+    "$UNITDIR/vpn-failfast.service" > "$UNITDIR/probe.service"
+
 # Any output at all is a finding: systemd-analyze is silent on a clean unit.
-SA_SYS="$(systemd-analyze verify "$UNITDIR/vpn-failfast.service" 2>&1)"
+SA_SYS="$(systemd-analyze verify "$UNITDIR/probe.service" 2>&1 | grep -v 'probe.service: Command' || true)"
 check "vpn-failfast.service: systemd-analyze is silent" "$SA_SYS" ""
+
+# ROOT MUST NOT EXECUTE OUT OF \$HOME. This is the row the worktree incident
+# earned: /usr/local/bin is where backup-verify.sh and restic-notify already
+# live, and it is what lets ProtectHome go back to `yes`.
+FF_EXEC_SHIPPED="$(sed -n 's/^ExecStart=//p' "$UNITDIR/vpn-failfast.service" | head -1 | tr -d '"' | awk '{print $1}')"
+check "the shipped ExecStart is the installed copy, not a checkout path" \
+      "$FF_EXEC_SHIPPED" "/usr/local/bin/vpn-failfast.sh"
 # The user unit needs a fake HOME, because `%h` expands from $HOME and
 # systemd-analyze ALSO checks that ExecStart exists. Without this the row passed
 # on a machine that happens to have ~/.dotfiles and failed on a CI runner that
@@ -749,15 +781,14 @@ done
 # checkout IS the deployment here, so ExecStart lives under /home. systemd-analyze
 # does NOT flag the combination -- verified, it stayed silent about it while
 # complaining about the StartLimit key on the same file.
-FF_EXEC="$(sed -n 's/^ExecStart=//p' "$UNITDIR/vpn-failfast.service" | head -1 | tr -d '"')"
 FF_PH="$(sed -n 's/^ProtectHome=//p' "$UNITDIR/vpn-failfast.service" | head -1)"
-case "$FF_EXEC" in
+case "$FF_EXEC_SHIPPED" in
     /home/*) if [[ "$FF_PH" == "yes" || "$FF_PH" == "true" ]]; then
                  bad "ProtectHome=$FF_PH hides the ExecStart under /home — the unit cannot start"
              else
                  ok "ExecStart is under /home, and ProtectHome=${FF_PH:-unset} does not hide it"
              fi ;;
-    *)       ok "ExecStart is outside /home (ProtectHome=${FF_PH:-unset} cannot hide it)" ;;
+    *)       check "ExecStart is outside /home, so ProtectHome can be strict" "$FF_PH" "yes" ;;
 esac
 
 printf '\nthe reporter — DST, the join, and refusing to invent a clean week\n'
@@ -816,7 +847,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=125
+EXPECTED_ROWS=123
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

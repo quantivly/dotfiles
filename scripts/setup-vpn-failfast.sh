@@ -2,15 +2,20 @@
 # setup-vpn-failfast.sh — install the VPN fail-fast system unit and its config.
 #
 # Installs, all root-owned:
-#   /etc/vpn-failfast.conf              from ~/.vpn-failfast.conf (vpn-init)
-#   /etc/systemd/system/vpn-failfast.service   rendered from systemd/
-#   /etc/sysctl.d/99-vpn-acs-port.conf  from sysctl/
+#   /usr/local/bin/vpn-failfast.sh            the daemon itself, 0755
+#   /etc/vpn-failfast.conf                    from ~/.vpn-failfast.conf (vpn-init)
+#   /etc/systemd/system/vpn-failfast.service  static, from systemd/
+#   /etc/sysctl.d/99-vpn-acs-port.conf        from sysctl/
 #
-# Everything is COPIED, never symlinked into ~/.dotfiles — root reads all three,
-# and the same rule CLAUDE.md states for resticprofile/profiles.toml and the
-# audit rules applies: a user-writable file consumed by root is a
+# Everything is COPIED, never symlinked into ~/.dotfiles — root reads or EXECUTES
+# all four, and the same rule CLAUDE.md states for resticprofile/profiles.toml
+# and the audit rules applies: a user-writable file consumed by root is a
 # privilege-escalation hole, and a symlink into a working tree means a rebase or
 # a half-finished checkout changes what root runs.
+#
+# The DAEMON is copied for that reason too, which the first version got wrong by
+# pointing ExecStart into the checkout. backup-verify.sh, backup-manifest.sh and
+# restic-notify already live in /usr/local/bin for exactly this reason.
 #
 # Run via `vpn-setup` (zsh/functions/system.sh). NEVER by ./install — ./install
 # never uses sudo. Idempotent: re-run to resync after editing the repo copies.
@@ -35,11 +40,18 @@ done
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 UNIT_SRC="${DOTFILES}/systemd/vpn-failfast.service"
 SYSCTL_SRC="${DOTFILES}/sysctl/99-vpn-acs-port.conf"
-RENDER="${DOTFILES}/scripts/vpn-render.sh"
+SCRIPT_SRC="${DOTFILES}/scripts/vpn-failfast.sh"
 CONF_LOCAL="${VPN_LOCAL_CONF:-${HOME}/.vpn-failfast.conf}"
 CONF_DST="/etc/vpn-failfast.conf"
 UNIT_DST="/etc/systemd/system/vpn-failfast.service"
 SYSCTL_DST="/etc/sysctl.d/99-vpn-acs-port.conf"
+# The daemon is COPIED here and root runs it from here. Not a symlink and not a
+# path in $HOME: the same rule resticprofile/profiles.toml and the audit rules
+# follow, and the same place backup-verify.sh, backup-manifest.sh and
+# restic-notify already live. See the unit's header for what went wrong without
+# it -- the first install baked a WORKTREE path into a root unit, and
+# wt-gc-sweep deletes worktrees daily.
+SCRIPT_DST="/usr/local/bin/vpn-failfast.sh"
 ACS_PORT=35001
 
 if [[ -t 1 ]]; then
@@ -57,9 +69,31 @@ log() {
   esac
 }
 
-for f in "$UNIT_SRC" "$SYSCTL_SRC" "$RENDER"; do
+for f in "$UNIT_SRC" "$SYSCTL_SRC" "$SCRIPT_SRC"; do
   [[ -r "$f" ]] || { log ERROR "missing $f"; exit 1; }
 done
+
+# REFUSE to install out of a worktree. `vpn-setup` resolves its checkout from
+# $PWD when that looks like one, which is right for testing a branch and wrong
+# for installing a file root will execute for months. The first real install
+# copied from a worktree; wt-gc-sweep deletes landed worktrees daily, so the
+# drift check would have started reporting against a directory that no longer
+# exists. Same class as CLAUDE.md's "never run ./install from a worktree".
+if git -C "$DOTFILES" rev-parse --git-dir >/dev/null 2>&1; then
+  git_dir="$(git -C "$DOTFILES" rev-parse --git-dir 2>/dev/null || true)"
+  # A worktree's .git is a FILE, and its resolved git-dir lives under
+  # <main>/.git/worktrees/<name> rather than being <checkout>/.git.
+  case "$git_dir" in
+    *"/.git/worktrees/"*)
+      log ERROR "refusing to install from a WORKTREE: $DOTFILES"
+      log ERROR "  Root would run a copy taken from a branch checkout, and wt-gc-sweep"
+      log ERROR "  deletes landed worktrees daily. Run this from the live checkout:"
+      log ERROR "    cd ~/.dotfiles && vpn-setup"
+      log ERROR "  (set VPN_SETUP_ALLOW_WORKTREE=1 to override, e.g. to test a branch.)"
+      [[ "${VPN_SETUP_ALLOW_WORKTREE:-0}" == "1" ]] || exit 1
+      log WARNING "VPN_SETUP_ALLOW_WORKTREE=1 — continuing from a worktree anyway." ;;
+  esac
+fi
 
 if [[ ! -r "$CONF_LOCAL" ]]; then
   log ERROR "no destination list at $CONF_LOCAL"
@@ -77,25 +111,23 @@ if ! VPN_FAILFAST_CONF="$CONF_LOCAL" "${DOTFILES}/scripts/vpn-failfast.sh" --che
   exit 1
 fi
 
-# Render the unit to a temp file FIRST, and only install if the renderer
-# succeeded. Never `render | sudo tee` -- tee truncates the destination before
-# the renderer's exit status is known, so a failed render installs a zero-byte
-# unit that "succeeds". That trap is recorded in CLAUDE.md for the backup units;
-# it is the same one here.
-tmp_unit="$(mktemp)"
-trap 'rm -f "$tmp_unit"' EXIT
-if ! "$RENDER" "$UNIT_SRC" > "$tmp_unit"; then
-  log ERROR "could not render $UNIT_SRC — nothing installed"
+# The unit is STATIC now -- no placeholder, nothing rendered, so there is no
+# `render | sudo tee` to get wrong (tee truncates before the renderer's exit
+# status is known, which installs a zero-byte unit that "succeeds"). Refusing a
+# unit that still carries a placeholder is kept as a belt: it would mean someone
+# reintroduced rendering without reintroducing the renderer.
+if grep -q '__VPN_[A-Z_]*__' "$UNIT_SRC"; then
+  log ERROR "$UNIT_SRC contains an unresolved placeholder — nothing installed"
   exit 1
 fi
-[[ -s "$tmp_unit" ]] || { log ERROR "rendered unit is empty — nothing installed"; exit 1; }
 
 log INFO "Installing root-owned files"
+sudo install -m 755 -o root -g root "$SCRIPT_SRC" "$SCRIPT_DST"
 sudo install -m 644 -o root -g root "$CONF_LOCAL" "$CONF_DST"
-sudo install -m 644 -o root -g root "$tmp_unit"   "$UNIT_DST"
+sudo install -m 644 -o root -g root "$UNIT_SRC"   "$UNIT_DST"
 sudo install -d -m 755 -o root -g root /etc/sysctl.d
 sudo install -m 644 -o root -g root "$SYSCTL_SRC" "$SYSCTL_DST"
-log SUCCESS "installed $CONF_DST, $UNIT_DST, $SYSCTL_DST"
+log SUCCESS "installed $SCRIPT_DST, $CONF_DST, $UNIT_DST, $SYSCTL_DST"
 
 # Apply the sysctl now as well as at boot. A file in /etc/sysctl.d that has
 # never been applied is the silent-failure shape this repo keeps finding: it
