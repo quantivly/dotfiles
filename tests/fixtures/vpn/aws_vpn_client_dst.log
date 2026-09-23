@@ -1,0 +1,21 @@
+2026-10-24 22:00:00.100 +03:00 [DBG][TI=10][Quantivly] [PID: 111] MANAGEMENT: >STATE:1792868400,CONNECTED,SUCCESS,10.0.0.1,,,,
+2026-10-24 22:10:00.200 +03:00 [DBG][TI=9][Quantivly:111] CM received: >LOG:1792869000,,AUTH: Received control message: AUTH_FAILED,CRV1:R:instance-aaaa:BLOB1:Test User
+2026-10-24 22:10:00.201 +03:00 [DBG][TI=9][Quantivly:111] CM processsing: >LOG:1792869000,,AUTH: Received control message: AUTH_FAILED,CRV1:R:instance-aaaa:BLOB1:Test User
+2026-10-24 22:10:00.300 +03:00 [DBG][TI=10][Quantivly] [PID: 111] 2026-10-24 22:10:00 AUTH: Received control message: AUTH_FAILED,CRV1:R:instance-aaaa:BLOB1:Test User
+2026-10-24 22:10:00.400 +03:00 [DBG][TI=10][Quantivly] [PID: 111] MANAGEMENT: >STATE:1792869000,RECONNECTING,auth-failure,,,,,
+2026-10-24 22:10:01.000 +03:00 [DBG][TI=9][Quantivly:111] Attempting to open browser with URL: https://example.invalid/saml?idpid=TESTIDP
+2026-10-24 22:10:11.000 +03:00 [DBG][TI=9][] SAML ACS received a request: http://127.0.0.1:35001/ from TestAgent/1.0
+2026-10-24 22:10:12.000 +03:00 [DBG][TI=9][] Succesfully retrieved and validated assertion
+2026-10-24 22:10:20.000 +03:00 [DBG][TI=10][Quantivly] [PID: 111] MANAGEMENT: >STATE:1792869020,CONNECTED,SUCCESS,10.0.0.1,,,,
+   at AWSVPNClient.Core.Saml.AcsListener.Wait()
+   at AWSVPNClient.Core.Saml.SamlManager.Start()
+2026-10-25 02:30:00.100 +02:00 [DBG][TI=9][Quantivly:222] CM received: >LOG:1792888200,,AUTH: Received control message: AUTH_FAILED,CRV1:R:instance-bbbb:BLOB2:Test User
+2026-10-25 02:30:00.101 +02:00 [DBG][TI=9][Quantivly:222] CM processsing: >LOG:1792888200,,AUTH: Received control message: AUTH_FAILED,CRV1:R:instance-bbbb:BLOB2:Test User
+2026-10-25 02:30:00.200 +02:00 [DBG][TI=10][Quantivly] [PID: 222] 2026-10-25 02:30:00 AUTH: Received control message: AUTH_FAILED,CRV1:R:instance-bbbb:BLOB2:Test User
+2026-10-25 02:30:00.400 +02:00 [DBG][TI=10][Quantivly] [PID: 222] MANAGEMENT: >STATE:1792888200,RECONNECTING,auth-failure,,,,,
+2026-10-25 02:30:01.000 +02:00 [DBG][TI=9][Quantivly:222] Attempting to open browser with URL: https://example.invalid/saml?idpid=TESTIDP
+2026-10-25 02:30:02.000 +02:00 [DBG][TI=9][] SAML ACS started on port 35001
+2026-10-25 02:40:01.000 +02:00 [ERR][TI=9][Quantivly:222] AWSVPNClient.Core.Saml.SamlSessionTimedOutException: SAML session timed out
+2026-10-25 02:40:02.000 +02:00 [DBG][TI=9][] Acs did not stop correctly!
+2026-10-25 02:45:00.000 +02:00 [DBG][TI=10][Quantivly] [PID: 222] MANAGEMENT: >STATE:1792889100,RESOLVE,,,,,,
+2026-10-25 02:45:30.000 +02:00 [DBG][TI=10][Quantivly] [PID: 222] MANAGEMENT: >STATE:1792889130,CONNECTED,SUCCESS,10.0.0.1,,,,

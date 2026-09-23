@@ -255,8 +255,15 @@ tunnel_up() {
 # by nothing else: proto IS the identity, and a route with another proto is
 # somebody else's whatever it points at.
 owned_routes() {
+    # Whitespace-tolerant on purpose. Real iproute2 emits compact JSON here
+    # (verified), but `ip -p -j` pretty-prints, and a parser that silently
+    # matches nothing means NOTHING IS EVER WITHDRAWN -- the stale route that
+    # blackholes a host, arrived at through a formatting change nobody would
+    # connect to it. There is no error to notice: the delete loop simply has
+    # nothing to iterate.
     ip -j route show proto "$PROTO" 2>/dev/null \
-        | grep -o '"dst":"[^"]*"' | sed 's/^"dst":"//; s/"$//'
+        | grep -oE '"dst"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | sed 's/^"dst"[[:space:]]*:[[:space:]]*"//; s/"$//'
 }
 
 add_route() {
