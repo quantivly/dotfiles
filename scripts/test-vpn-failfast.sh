@@ -273,10 +273,13 @@ wait_for() {
     done
     return 1
 }
-# Invoked INDIRECTLY, as `wait_for 15 has_route <dst>`, which shellcheck cannot see.
-# shellcheck disable=SC2329
+# Invoked INDIRECTLY, as `wait_for 15 has_route <dst>`, which shellcheck cannot
+# see. BOTH codes: the pinned pre-commit shellcheck (v0.9) calls this SC2317,
+# newer ones call it SC2329, and disabling only the one your local binary emits
+# passes here and fails the hook.
+# shellcheck disable=SC2317,SC2329
 has_route()  { awk -F'\t' -v d="$1" '$1==d{f=1} END{exit !f}' "$IPSTATE/routes" 2>/dev/null; }
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 lacks_route() { ! has_route "$1"; }
 
 installed() { awk -F'\t' '{print $1}' "$IPSTATE/routes" 2>/dev/null | sort | tr '\n' ' '; }
