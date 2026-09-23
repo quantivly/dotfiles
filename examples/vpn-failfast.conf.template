@@ -1,0 +1,47 @@
+# /etc/vpn-failfast.conf
+# ======================
+# Destinations that are reachable ONLY through the AWS Client VPN tunnel.
+#
+# While the tunnel is down, scripts/vpn-failfast.sh installs an `unreachable`
+# route for each of these, so anything aimed at them fails INSTANTLY instead of
+# hanging for the ~127 seconds a TCP SYN takes to give up. When the tunnel
+# returns, the routes are withdrawn.
+#
+# Installed root-owned to /etc/vpn-failfast.conf by `vpn-setup`. Edit the live
+# file and then `sudo systemctl restart vpn-failfast` — this repo copy is the
+# seed, not the live config, and vpn-doctor will tell you if they have drifted.
+#
+# ONE DESTINATION PER LINE. IPv4 address or CIDR. `#` starts a comment.
+#
+# WHAT IS DELIBERATELY NOT HERE
+# -----------------------------
+# The internet, and anything a video call needs. Those keep working over the LAN
+# while the tunnel is down — that decision is the whole reason this is a list of
+# destinations rather than a default route. Adding a broad prefix here does not
+# make the VPN work sooner; it makes everything inside that prefix fail.
+#
+# THE VALIDATOR WILL REFUSE, and each of these was measured against the real `ip`
+# rather than assumed:
+#
+#   0.0.0.0/0        `ip` ACCEPTS this. It would blackhole the entire internet.
+#                    Anything broader than /8 is refused here.
+#   10.9.8.1/24      `ip` ACCEPTS this too, and installs the whole /24 — a typo
+#                    meant as a host route silently takes 256 addresses with it.
+#                    Host bits below the prefix are refused.
+#   ::1/128          `ip` ACCEPTS this and installs it into the v6 table. Only
+#                    IPv4 is supported here; v6 is refused rather than ignored.
+#   127.0.0.1        Loopback. Refused.
+#
+# A malformed entry makes the unit exit 2 and install NOTHING — never a partial
+# set, and never a silent "no destinations", which would be indistinguishable
+# from a healthy tunnel.
+
+# The four Quantivly servers, from ~/.ssh/config (the qmux hosts).
+54.166.22.221      # dev
+44.221.89.155      # staging
+23.21.26.91        # demo
+3.216.24.205       # qspace
+
+# Add internal CIDRs here as they are discovered. An incomplete list degrades to
+# today's behaviour for the missing host — a hang — it never breaks one. Growing
+# it is expected: `vpn-sweeps` and ordinary use are what find the gaps.
