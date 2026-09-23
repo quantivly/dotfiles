@@ -170,6 +170,14 @@ if (( ! ASSUME_YES )); then
   esac
 fi
 
+# Clear a previous failure BEFORE starting. Re-running this script after a
+# failed install is the normal recovery path -- it is what you do when
+# vpn-doctor tells you something is wrong -- and inside StartLimitIntervalSec a
+# unit that has exhausted its burst refuses to start with "Start request
+# repeated too quickly", which reads as a brand-new fault rather than as the
+# previous one still being counted. Harmless when the unit is healthy.
+sudo systemctl reset-failed vpn-failfast.service 2>/dev/null || true
+
 sudo systemctl enable --now vpn-failfast.service
 
 # VERIFY, rather than trusting that `enable --now` meant it worked. LoadState
