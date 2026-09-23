@@ -275,6 +275,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
       # Every row runs against recording `ip` and `notify-send` stubs at the
       # front of PATH, never against a runner that happens to lack either. That
       # matters more here than anywhere else in this file: the subject INSTALLS

@@ -63,6 +63,10 @@ command -v python3 >/dev/null || fatal "python3 is required"
 # missing so we skipped them" is the could-not-run-reads-as-a-pass shape this
 # repo keeps finding. Present on ubuntu-latest and on every machine with systemd.
 command -v systemd-analyze >/dev/null || fatal "systemd-analyze is required to verify the units"
+# The drift rows below exercise _vpn_drift, which is zsh. Same requirement, and
+# the same reason, as scripts/test-dotfiles-guard.sh: a skipped check is not a
+# passing one.
+command -v zsh >/dev/null || fatal "zsh is required to exercise the vpn-doctor helpers"
 
 T="$(mktemp -d)" || fatal "no temp dir"
 trap 'rm -rf "$T"' EXIT
@@ -791,6 +795,54 @@ case "$FF_EXEC_SHIPPED" in
     *)       check "ExecStart is outside /home, so ProtectHome can be strict" "$FF_PH" "yes" ;;
 esac
 
+printf '\ndrift is judged on DIRECTIVES, not bytes\n'
+
+# THE ROW THIS EXISTS FOR. The unit file here is mostly prose, and a docs commit
+# that touched only its header made vpn-doctor demand a sudo re-install that
+# would have changed nothing -- on a machine where the unit was running
+# perfectly. This repo had already worked that out once, in
+# systemd/herdr-server.service.d/10-execstart.conf: "a checker that cries wolf
+# over a comment is one people stop reading". It was written down and I did it
+# anyway, so now it has rows.
+SYSTEM_SH="$DOTFILES/zsh/functions/system.sh"
+[[ -r "$SYSTEM_SH" ]] || fatal "missing $SYSTEM_SH"
+zdrift() {
+    # $1 checkout file, $2 installed file. _DOCTOR_* are declared so the emitters
+    # do not trip `set -u` inside the function under test.
+    zsh -c "source '$SYSTEM_SH'; typeset -i _DOCTOR_FAIL=0 _DOCTOR_WARN=0; \
+            _vpn_drift 'thing' '$1' '$2' 'do the fix'" 2>&1
+}
+DA="$T/drift-a"; DB="$T/drift-b"
+
+printf '[Service]\n# a comment\nExecStart=/usr/local/bin/x --watch\n' > "$DA"
+cp -f "$DA" "$DB"
+OUT="$(zdrift "$DA" "$DB")"
+grep_ok "$OUT" '✓ thing matches this checkout' "identical files: a tick"
+
+# Comment-only: the case that cried wolf.
+printf '[Service]\n# a DIFFERENT comment, rewritten by a docs commit\nExecStart=/usr/local/bin/x --watch\n' > "$DB"
+OUT="$(zdrift "$DA" "$DB")"
+grep_ok "$OUT" 'COMMENTS ONLY' "comment-only drift: reported as a note"
+grep_none "$OUT" '⚠' "comment-only drift: NOT a warning"
+grep_none "$OUT" '✗' "comment-only drift: NOT a failure"
+
+# ... but a real directive change must still warn, or the fix above has quietly
+# turned the whole check off.
+printf '[Service]\n# a comment\nExecStart=/usr/local/bin/x --oops\n' > "$DB"
+OUT="$(zdrift "$DA" "$DB")"
+grep_ok "$OUT" '⚠ thing DIFFERS' "a directive change: still a warning"
+grep_ok "$OUT" 'do the fix' "a directive change: names the remedy"
+
+# Blank-line-only churn is comments' twin and must not warn either.
+printf '[Service]\n# a comment\n\n\nExecStart=/usr/local/bin/x --watch\n' > "$DB"
+OUT="$(zdrift "$DA" "$DB")"
+grep_none "$OUT" '⚠' "blank-line churn: not a warning"
+
+# A missing installed file is a FAILURE, not drift: nothing is installed at all.
+rm -f "$DB"
+OUT="$(zdrift "$DA" "$DB")"
+grep_ok "$OUT" '✗ thing not installed' "an absent installed file: a failure, not drift"
+
 printf '\nthe reporter — DST, the join, and refusing to invent a clean week\n'
 
 rep() { "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" "$@" 2>&1; }
@@ -847,7 +899,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=123
+EXPECTED_ROWS=131
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

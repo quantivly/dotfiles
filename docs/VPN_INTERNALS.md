@@ -40,7 +40,9 @@ github 140.82.121.3:443   forced out wlp0s20f3   CONNECTED in 0.06s
 established socket uses `tcp_retries2 = 15`, about 15 minutes. That is the 2–3 minutes exactly.
 
 **Use this probe to verify the fix**, not a forced disconnect: after the routes are installed the
-same connect must return `ENETUNREACH` immediately.
+same connect must fail immediately. **`EHOSTUNREACH` (errno 113, "No route to host"), not
+`ENETUNREACH`** — an `unreachable` route gives the host form, and an earlier draft of this page
+said otherwise. Measured below.
 
 ## 3. Where the recoverable time is — after two wrong answers
 
@@ -89,6 +91,21 @@ hands-free. The cost is in two places:
    (09-23: attempt 07:39:59 → assertion 07:40:08.673, 8.5s).
 
 **So the recoverable downtime is not a missing click. It is a missing signal.**
+
+### It worked, on the first real outage
+
+Not a drill and not a forced drop — the tunnel went down on its own on **2026-09-23**, a few
+minutes after the unit was armed, and `vpn-doctor` reported four `unreachable` routes installed.
+Measured during that outage:
+
+| target | before (§2, same probe) | with fail-fast armed |
+|---|---|---|
+| `dev` 54.166.22.221:22 | NO RESPONSE, timeout at 6.0s (ETIMEDOUT at ≈127s) | `EHOSTUNREACH` in **0.158s** |
+| `staging` 44.221.89.155:22 | — | `EHOSTUNREACH` in **0.366s** |
+| github.com:443 (control) | CONNECTED 0.06s | **CONNECTED 0.250s** |
+
+So the hang is gone, the failure is immediate and correctly typed, and the internet is untouched
+— which is the whole design in one table. The routes were withdrawn when the tunnel returned.
 
 ---
 
