@@ -102,6 +102,26 @@ List them with `ip route show proto 66` (no root needed).
 vpn-failfast` and `journalctl -u vpn-failfast -e`; the refusal names the file, the line and the
 reason. Fix `~/.vpn-failfast.conf` and re-run `vpn-setup`.
 
+**You got a notification but the VPN Client looks connected — or is not on screen at all.**
+Check whether the client is still *running*:
+
+```bash
+systemctl --user list-units --all 'app-gnome-awsvpnclient-*'   # the GUI application
+pgrep acvc-openvpn                                             # the tunnel worker
+```
+
+Both verified on this machine, and both deliberately avoid `ps`/`pgrep -a`, which
+`claude/hooks/secret-emission-guard.sh` refuses. Note the process is **not** called
+`awsvpnclient` — `pgrep awsvpnclient` finds nothing even while the client is running, which
+reads as "it is dead" when it is not.
+
+The client can exit and take the tunnel with it, and then there is no GUI to contradict the
+notification. That has happened here:
+the application quit after 7h15m and the tunnel was dead for 36 minutes in complete silence, with
+no log lines and no `AUTH_FAILED`, because there was no process left to write them. Relaunch the
+client; the notification's "Reconnect the AWS VPN Client" is the right advice for that case too.
+The detail is in [VPN_INTERNALS.md](VPN_INTERNALS.md) §3.
+
 **Notifications are too noisy, or never arrive.** The threshold is 90 seconds, chosen to clear
 the self-healing outages (p50 34s, and 17 of 41 recovered with no re-auth at all). Tune it with
 `VPN_NOTIFY_THRESHOLD` in `~/.zshrc.local` and restart the unit. If none arrive, check
