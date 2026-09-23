@@ -111,6 +111,15 @@ design, which is reported as a decision, not a failure.
 **`vpn-doctor` reports config or unit drift.** The live copies are copies; nothing keeps them in
 step with the checkout. Re-run `vpn-setup`.
 
+**`vpn-doctor` reports something that contradicts what you can see on disk.** Your shell is
+stale. `vpn-status`, `vpn-doctor` and the rest are zsh *functions*, loaded once when the shell
+started — so a shell opened before a deploy keeps running the old ones however new the checkout
+is. This bit on the first install: the doctor reported `does not render (unresolved
+placeholder?)` about a renderer that had already been deleted, from a function loaded before the
+merge. `source ~/.zshrc` (or `zshreload`), or open a new shell, then re-run. The same applies to
+every `*-doctor` in this repo; "the checkout IS the deployment" moves files, not the functions a
+running shell already holds.
+
 ## What this deliberately does not do
 
 It does not reconnect, re-open a browser, or touch the tunnel. The client already opens the

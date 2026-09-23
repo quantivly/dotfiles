@@ -26,16 +26,18 @@
 # vpn-doctor reports drift between the installed copy and this checkout, which is
 # the backup-doctor shape.
 #
-# NOT YET CONFIRMED STARTING under a system manager. The first install failed
-# with `coreutils: unknown program 'vpn-failfast'` from the /home path above —
-# uutils is the system coreutils here and its multicall strips the extension from
-# argv[0], so that message means something re-entered the dispatcher as
-# `vpn-failfast.sh`. The precise trigger was NOT isolated: reproducing it needs
-# root, which an agent tool does not have here, and a `systemd-run --user` bisect
-# proves nothing because the user manager ignores several of these directives.
-# What this file does is remove the whole class by not executing out of /home at
-# all. If it recurs from /usr/local/bin, that is a NEW finding and belongs in
-# docs/VPN_INTERNALS.md rather than another guess.
+# CONFIRMED STARTING, 2026-09-23 16:27, first install from /usr/local/bin:
+# ActiveState=active, NRestarts=0, a clean journal, and the full hardening below
+# in force — including ProtectHome=yes, which the /home ExecStart had made
+# impossible. The install before it, from a worktree path under /home, failed
+# with `coreutils: unknown program 'vpn-failfast'` on every start.
+#
+# That message is explained but its TRIGGER was never isolated, and moving the
+# daemon here made it moot rather than answering it. uutils is the system
+# coreutils on this box and its multicall strips the extension from argv[0], so
+# the message means something re-entered the dispatcher as `vpn-failfast.sh`.
+# Recorded in docs/VPN_INTERNALS.md as closed-by-removal, not solved: if it ever
+# recurs from /usr/local/bin, that is new information.
 
 [Unit]
 Description=Fail fast for VPN-only destinations while the tunnel is down
