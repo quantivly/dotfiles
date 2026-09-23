@@ -4,7 +4,9 @@ to ``wt-gc``, and remove the REMOTE lane worktrees of settled lanes.
 Dry-run by default (``--apply`` is required to act). Never kills a user session (locked decision,
 spec §... — a session is only ever *listed* with a ``close_hint`` the human runs themselves).
 Spaces wait on the herdr snapshot dimension and are deferred here: listed as ``[]`` and named in
-``unavailable``.
+``unavailable``, and ``--apply --spaces`` raises ``Refused`` (exit 3) rather than succeeding at
+nothing — *not yet implemented* is a different answer from ``--apply --sessions``'s ``Usage``
+(exit 2), which is *never*.
 
 A lane worktree on a REMOTE machine (``machines.dev`` and friends) is a full checkout that
 accumulates on the machine a lane ran on — ``wt-gc`` only ever looks at the laptop. This module
