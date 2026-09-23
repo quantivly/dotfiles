@@ -212,7 +212,7 @@ unit and a "now" of zero passes every one of them. Both are exit 2. Mutant **M14
 
 ## The state table
 
-`scripts/test-timer-health.sh`, 70 checks, hermetic, run in CI
+`scripts/test-timer-health.sh`, 77 checks, hermetic, run in CI
 ("Repo-Owned Timer Health State Table").
 
 **Hermetic means a recording `systemctl` stub at the front of `PATH`**, never "systemctl happens to
@@ -254,6 +254,58 @@ parses can still be a different mutation than its name — and restored from git
 | M13 | links-with-no-reconciler collapses to "empty machine" | — |
 | M14 | a non-numeric horizon is accepted | exit 1 instead of 2 |
 | M15 | `next <= 0` reads as clean | — |
+| M16 | a mid-run timer is treated as stopped | the four DO-686 rows below |
+
+## The first unattended run found a defect in the checker (DO-686)
+
+`wt-gc-sweep.timer`'s first real run, 2026-09-23. The machine slept through
+04:00, `Persistent=true` caught the run up at **07:29:39**, and while the sweep
+was still going this checker said:
+
+```
+✗ wt-gc-sweep.timer: active with NO next run scheduled — it has stopped firing.
+```
+
+It had not stopped firing. It was *running*.
+
+**A timer whose triggered unit is running has no next elapse** — systemd
+schedules one only once the run finishes:
+
+```
+$ systemctl --user list-timers --all -o json | jq -c '.[]|select(.unit=="wt-gc-sweep.timer")'
+{"next":null,"left":null,"last":1790137779225147,"passed":45101411929,
+ "unit":"wt-gc-sweep.timer","activates":"wt-gc-sweep.service"}
+$ systemctl --user show wt-gc-sweep.service -p ActiveState -p SubState
+ActiveState=activating
+SubState=start
+```
+
+`null`, not a number. The checker reads `(.next // 0)`, so it became the same
+`0` a genuinely stopped timer gives.
+
+**Why the state table did not catch it.** There *was* a row for that branch —
+"active with no next elapse: exit 1" — and it passed, because its fixture had
+the service `inactive`. It described a state the real machine never produces
+while pinning the branch that handles the state it does. A row that fails by
+looking green, in the form this repo keeps finding: not a missing check, but a
+check pinning the wrong rule. The lesson is narrower and sharper than "add a
+row" — **ask of every fixture whether the machine can actually be in that
+state, not only whether the branch is reached.**
+
+The fix reads the activated service's `ActiveState` before treating `next <= 0`
+as a fault; `active` or `activating` is mid-run and healthy. Nothing is asserted
+about a run in progress, because `Result` and `ExecMainStatus` still describe
+the **previous** run while a unit is activating — judging them there reports a
+stale verdict as a fresh one. Both readings of `next=0` are now rows, and
+reverting the fix fails exactly those four.
+
+One thing this cost: by the time the fix was written the sweep had finished, so
+the live machine no longer reproduced the fault. The suite is what proves the
+fix, not the box — the same trap as a finding repaired under you mid-review.
+
+For the record, that first run was otherwise clean:
+`mode=apply removed=6 branches=16 pruned=0 skipped=120 failed=0 warnings=0`,
+`Result=success`, 3m31s wall.
 
 ## What this does not do
 

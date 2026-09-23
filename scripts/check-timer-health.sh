@@ -315,10 +315,36 @@ check_timer() {
     next=$(( next_us / 1000000 ))
     last=$(( last_us / 1000000 ))
 
+    # A timer whose triggered unit is RUNNING has no next elapse, and that is
+    # normal: systemd does not schedule the next one until the current run
+    # finishes, so `list-timers -o json` reports "next": null -- which jq's
+    # `// 0` turns into the same 0 a stopped timer gives.
+    #
+    # Measured 2026-09-23, on wt-gc-sweep.timer's FIRST unattended run.
+    # Persistent=true caught up the 04:11 run at 07:29 after the machine slept
+    # through it, the service was ActiveState=activating, and this checker
+    # called a perfectly healthy mid-run timer "it has stopped firing" -- the
+    # permanently-red checker this repo's records warn about three times,
+    # produced by the checker rather than by the machine. The row that was
+    # supposed to pin this branch asserted the WRONG rule, because its fixture
+    # assumed next=0 could only mean "stopped".
+    #
+    # Nothing is asserted about a run in progress: Result and ExecMainStatus
+    # still describe the PREVIOUS run while a unit is activating, so judging
+    # them here would report a stale verdict as a fresh one. The next run of
+    # this checker, once the unit has finished, is the one that judges it.
+    local svc_state=""
+    [[ -n "$svc" ]] && svc_state="$(prop "$(unit_props "$svc")" ActiveState)"
+    if [[ "$svc_state" == "active" || "$svc_state" == "activating" ]]; then
+        printf '  ✓ %s: %s is running now (triggered %s) — no next elapse until it finishes\n' \
+               "$unit" "$svc" "$(fmt_ago "$last")"
+        return 0
+    fi
+
     if (( next <= 0 )); then
         note_fail
-        printf '  ✗ %s: active with NO next run scheduled — it has stopped firing.\n' "$unit"
-        printf '      systemctl --user list-timers --all %s\n' "$unit"
+        printf '  ✗ %s: active, NOT running, and with NO next run scheduled — it has\n' "$unit"
+        printf '      stopped firing. systemctl --user list-timers --all %s\n' "$unit"
         return 0
     fi
 

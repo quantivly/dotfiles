@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Timer health no longer reports a mid-run timer as stopped (DO-686).** A timer whose
+  triggered unit is running has **no next elapse** — systemd schedules one only once the run
+  finishes — and `list-timers -o json` reports `"next": null`, which `jq`'s `// 0` made
+  indistinguishable from a genuinely stopped timer's `0`. `wt-gc-sweep.timer`'s first
+  unattended run hit it: `Persistent=true` caught up the missed 04:00 run at 07:29, and while
+  the sweep was mid-flight the checker called it *"it has stopped firing"*. The state table had
+  a row for that branch, but its fixture had the service `inactive`, so it described a state
+  the machine never produces — a row pinning the wrong rule rather than a missing row. The
+  checker now reads the activated service's `ActiveState` first and asserts nothing about a run
+  in progress, since `Result` and `ExecMainStatus` still describe the previous run while a unit
+  is activating. Both readings of `next=0` are rows now (77, up from 70).
+
 ### Added
 
 - **`verify-tools.sh` now asserts that repo-owned systemd user timers actually RUN.** Unit
