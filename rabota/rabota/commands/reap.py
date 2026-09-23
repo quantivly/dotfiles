@@ -4,7 +4,9 @@ to ``wt-gc``, and remove the REMOTE lane worktrees of settled lanes.
 Dry-run by default (``--apply`` is required to act). Never kills a user session (locked decision,
 spec §... — a session is only ever *listed* with a ``close_hint`` the human runs themselves).
 Spaces wait on the herdr snapshot dimension and are deferred here: listed as ``[]`` and named in
-``unavailable``.
+``unavailable``, and ``--apply --spaces`` raises ``Refused`` (exit 3) rather than succeeding at
+nothing — *not yet implemented* is a different answer from ``--apply --sessions``'s ``Usage``
+(exit 2), which is *never*.
 
 A lane worktree on a REMOTE machine (``machines.dev`` and friends) is a full checkout that
 accumulates on the machine a lane ran on — ``wt-gc`` only ever looks at the laptop. This module
@@ -231,6 +233,13 @@ def _remove_remote_worktrees(ctx, machine, items: list[dict]) -> dict:
 def apply_reap(ctx: Context, plan: dict, targets: set[str]) -> dict:
     if "sessions" in targets:
         raise errors.Usage("rabota never kills user sessions; use the close hints yourself")
+    if "spaces" in targets:
+        # Usage (exit 2) is for a thing rabota will NEVER do (sessions, above); spaces are only
+        # NOT YET reapable — a real precondition failure, not a bad argument — so this is Refused
+        # (exit 3). Checked before any worktrees work runs, so --apply --spaces --worktrees refuses
+        # the whole call rather than silently doing the worktrees half: naming one unsupported
+        # target poisons the call, the same as an unknown target would.
+        raise errors.Refused("spaces are deferred and not yet reapable; drop --spaces")
     rep = {"worktrees": None, "remote_worktrees": {"removed": [], "failed": []}, "failed": []}
     if "worktrees" in targets:
         if ctx.dry_run:
@@ -276,11 +285,24 @@ def _build(sub):
     p.add_argument("--abandoned-hours", type=float, default=6)
 
 
+def _no_target_message(plan: dict) -> str:
+    """Names what ``--apply`` with no target flag would have done, not just the flag it wants —
+    an operator who nearly reaped the wrong thing needs to see what they nearly did, not just be
+    told the syntax.
+    """
+    n = len(plan["worktrees"])
+    if n:
+        machines = sorted({w.get("machine", "local") for w in plan["worktrees"]})
+        return (f"--apply requires an explicit target: would have removed {n} "
+                f"worktree{'s' if n != 1 else ''} ({', '.join(machines)}); pass --worktrees to do it")
+    return "--apply requires an explicit target: nothing to reap right now; pass --worktrees to act anyway"
+
+
 def _run(ns):
     ctx = Context.from_namespace(ns)
     census = gather(ctx, sample_seconds=2.0)
     plan = plan_reap(ctx, census, ns.idle_hours, ns.abandoned_hours)
-    targets = {t for t in ("sessions", "spaces", "worktrees") if getattr(ns, t)} or {"worktrees"}
+    targets = {t for t in ("sessions", "spaces", "worktrees") if getattr(ns, t)}
     if not ns.apply:
         if ns.text:
             lines = [f"abandoned {a['id']}: {a['reason']}" for a in plan["abandoned"]]
@@ -290,6 +312,8 @@ def _run(ns):
                      for w in plan["worktrees"]]
             return lines or ["nothing to reap"]
         return plan
+    if not targets:
+        raise errors.Usage(_no_target_message(plan))
     return apply_reap(ctx, plan, targets)
 
 
