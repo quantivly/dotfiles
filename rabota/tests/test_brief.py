@@ -26,6 +26,30 @@ class BriefTests(unittest.TestCase):
         self.assertIn(" · waiting: benoit · now", lines[0])
         self.assertEqual(lines[-1], "brief: /p/brief.md")
 
+    def test_blank_title_is_left_out_not_printed_as_a_dangling_dash(self):
+        # DO-715 F6: a bare Linear URL with no title rendered as "1. <key> —  · waiting: ...",
+        # a dash with nothing after it. A reader should see only what the source actually has.
+        s = seq(["K-1"]); s["items"][0]["title"] = ""
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertEqual(line, "1. K-1 · waiting: benoit · now")
+        self.assertNotIn(" — ", line)
+
+    def test_truncation_cuts_why_now_never_the_key_or_title(self):
+        # DO-715 F6: the old `[:LINE_MAX]` slice could land mid-word inside the trailing prose,
+        # e.g. "... — CORE-50" — the last thing a reader sees should never be a severed word.
+        s = seq(["K-1"])
+        s["items"][0]["title"] = "a short, real title"
+        s["items"][0]["why_now"] = "a very long reason that goes on and on and mentions CORE-500 " * 3
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertLessEqual(len(line), 120)
+        self.assertTrue(line.startswith("1. K-1 — a short, real title · waiting: benoit · "), line)
+        self.assertTrue(line.endswith("…"), line)
+        self.assertFalse(line[:-1].endswith(" "))
+        # cut at a word boundary: the last word standing must be whole, e.g. "CORE-500" or "very",
+        # never a fragment like "CORE-5" that a whole-word source string never contained.
+        cut_word = line[:-1].rsplit(" ", 1)[-1]
+        self.assertIn(cut_word, s["items"][0]["why_now"].split())
+
     def test_failed_source_gets_one_line(self):
         s = seq(["K-1"]); s["failed_sources"] = ["calendar"]
         lines = brief.terminal_lines(s, None, None)

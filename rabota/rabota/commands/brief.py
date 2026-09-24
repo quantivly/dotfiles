@@ -25,12 +25,39 @@ TITLE_MAX = 60
 LINE_MAX = 120
 
 
+def _truncate_suffix(s: str, budget: int) -> str:
+    """Cut ``s`` to ``budget`` chars at a word boundary, with a trailing ``…`` — or drop it if there's no room."""
+    if budget <= 0:
+        return ""
+    if len(s) <= budget:
+        return s
+    cut = s[:budget - 1].rstrip()
+    space = cut.rfind(" ")
+    if space > 0:
+        cut = cut[:space]
+    return cut + "…"
+
+
 def _fmt(n: int, item: dict) -> str:
+    """``N. KEY — title · waiting: who · why_now``, capped at ``LINE_MAX``.
+
+    A blank title is left out rather than printed as a dangling ``—`` — the source had no title,
+    and the line should say only what it knows. When the line is over budget, ``why_now`` (prose)
+    is what gets cut; ``N. KEY`` and the title are the identifier a reader needs to act on and are
+    never sliced.
+    """
     title = (item["title"] or "").strip()
     if len(title) > TITLE_MAX:
         title = title[:TITLE_MAX - 3] + "…"
+    head = f"{n}. {item['key']}" + (f" — {title}" if title else "")
     who = f" · waiting: {item['waiting_on']}" if item.get("waiting_on") else ""
-    return f"{n}. {item['key']} — {title}{who} · {item['why_now']}"[:LINE_MAX]
+    why = item.get("why_now") or ""
+    line = head + who + (f" · {why}" if why else "")
+    if len(line) <= LINE_MAX:
+        return line
+    room = LINE_MAX - len(head) - len(who) - len(" · ")
+    why = _truncate_suffix(why, room)
+    return (head + who + (f" · {why}" if why else ""))[:LINE_MAX]
 
 
 def staleness_line(seq: dict, now: datetime, max_age_min: int = STALE_AFTER_MIN) -> str | None:
