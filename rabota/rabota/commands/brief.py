@@ -1,28 +1,59 @@
-"""The output contract, as code: ≤12 lines, deltas on rerun, narrative in ``brief.md``.
+"""``brief`` runs the whole read-only cycle — preflight, rank, brief — in one process (DO-716).
 
 Line order: a staleness warning when the sequence is older than ``STALE_AFTER_MIN`` (the
 30-minute pre-compute timer has then missed at least once), the ranked items, one line per
-failed source, the inbox summary, and ``brief: <path>``. Everything counts toward the cap,
-and ``--max-lines`` lets a wrapper such as ``sol brief`` prepend its own line and still show
-twelve. On a same-day rerun only ``+``/``-`` deltas print, or ``no change since HH:MM``.
+failed source, one line per stale ``needs`` source, the inbox summary, and ``brief: <path>``.
+Everything counts toward the cap, and ``--max-lines`` lets a wrapper such as ``sol brief``
+prepend its own line and still show twelve. On a same-day rerun only ``+``/``-`` deltas print,
+or ``no change since HH:MM``.
 
 The cap applies on EVERY path, the no-change one included (review finding k4: it was never
 sliced, so ``--max-lines 1`` printed two lines). ``--max-lines 0`` is a usage error, not an
 empty brief — a zero-line brief is not a brief — and so is a negative cap. A ``generated_at``
 that does not parse is a usage error naming the file, never an unhandled ``ValueError``.
+
+**Move 1 (one process).** ``run_brief`` now runs ``preflight`` first — exactly the same
+``preflight.run_command`` the standalone ``rabota preflight`` command calls, so a failed
+identity pin still exits 3, still prints the report, and still records a ``runs`` row. Only
+then does it rank (if needed) and compose the brief. ``preflight`` and ``rank`` stay separate
+commands for their other callers (the timer, `rabota preflight` on its own); ``brief`` just
+calls them in-process instead of a wrapper spending a model round-trip between each.
+
+**Move 2 (``needs``, not a failure).** ``slack``, ``calendar`` and ``fireflies`` are never
+fetched by the CLI itself (``sync.FETCHED_SOURCES`` is only ``linear``/``github`` — those two
+are the 30-minute timer's job, and a stale one of those is a job for ``precompute``/``sync``,
+not for an agent to hand-fetch). For the other three, ``run_brief`` computes ``needs``: one
+entry per source that is either missing a snapshot entirely or older than
+``STALE_AFTER_MIN`` — deliberately the SAME number that ages the brief itself, not a third
+unrelated one, because both answer the same question ("how old is too old for today's brief?").
+"never fetched" and "stale (N min old)" are distinguished in the entry's ``reason`` because they
+are different facts — the CLI does not know a source's cadence, so it must not claim staleness
+about one it has literally never seen. A source the tenant does not list in ``sources`` is
+skipped, exactly as ``preflight`` already skips Linear for a tenant that does not use it.
+
+``needs`` ACCOMPANIES the brief, never replaces it: ``run_brief`` still prints and writes
+whatever is actually in today's ``sequence.json``, and each stale/missing source gets one
+``! <source> needs a fetch — <reason>`` terminal line — the same ``!``-line vocabulary
+``failed_sources`` already uses, not a second one. The full instruction for each — the exact
+query string and the exact path to write it to (``<state_dir>/ingest-<source>.json``, matching
+the ``rabota`` skill's step 2) — travels only in the JSON return (``{"needs": [...]}``).
+``needs`` is not itself a failure: the CLI did its job and is naming what would make the answer
+better, so it does not change the exit code (0), the same way a failed source already does not.
 """
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rabota import cli, emit, errors, snapshots
+from rabota.commands import preflight as preflight_cmd
 from rabota.commands.rank import run_rank
 from rabota.context import Context
 
 MAX_LINES = 12
-STALE_AFTER_MIN = 60          # twice the pre-compute timer's 30-minute period
+STALE_AFTER_MIN = 60          # twice the pre-compute timer's 30-minute period; also the "needs" staleness rule below
 TITLE_MAX = 60
 LINE_MAX = 120
+NEEDS_SOURCES = ("slack", "calendar", "fireflies")    # never fetched by the CLI itself; see module docstring
 
 
 def _truncate_suffix(s: str, budget: int) -> str:
@@ -95,8 +126,13 @@ def check_max_lines(max_lines) -> int:
 
 
 def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, max_lines: int = MAX_LINES,
-                   brief_path: str | None = None, now: datetime | None = None) -> list[str]:
-    """The ≤``max_lines`` terminal lines; with ``previous`` (last-brief.json) only the deltas print."""
+                   brief_path: str | None = None, now: datetime | None = None,
+                   needs: list[dict] | None = None) -> list[str]:
+    """The ≤``max_lines`` terminal lines; with ``previous`` (last-brief.json) only the deltas print.
+
+    One ``! <source> needs a fetch — <reason>`` line per ``needs`` entry (see ``compute_needs``),
+    reusing the same ``!``-line vocabulary ``failed_sources`` already prints rather than a second one.
+    """
     check_max_lines(max_lines)
     head = []
     if now is not None:
@@ -104,6 +140,7 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
         if stale:
             head.append(stale)
     footer = [f"! {s} failed — list is partial" for s in seq.get("failed_sources", [])]
+    footer += [f"! {n['source']} needs a fetch — {n['reason']}" for n in (needs or [])]
     if inbox_summary:
         footer.append(inbox_summary)
     if brief_path:
@@ -151,9 +188,54 @@ def _syncs(ctx: Context) -> list[dict]:
     return [dict(ctx.store.last_sync(ctx.tenant.name, s) or {"source": s, **never}) for s in ctx.tenant.sources]
 
 
-def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetime | None = None):
-    """Write today's ``brief.md`` and ``last-brief.json``; return the lines (``--text``) or ``{"lines", "brief_path"}``."""
+def _needs_query(source: str, snap: dict | None) -> str:
+    """The exact fetch instruction for ``source``, matching the ``rabota`` skill's step 2 wording."""
+    if source == "slack":
+        return f"to:me after:{snap['fetched_at'][:10]}" if snap else "to:me"
+    if source == "calendar":
+        return "free blocks for today"          # today's calendar has no "since last fetch" delta
+    if source == "fireflies":
+        return f"action items since {snap['fetched_at']}" if snap else "action items"
+    raise ValueError(f"no needs query for {source!r}")
+
+
+def compute_needs(ctx: Context, now: datetime) -> list[dict]:
+    """``needs``: one ``{"source", "reason", "query", "write_to"}`` per stale-or-missing ``NEEDS_SOURCES`` entry.
+
+    See the module docstring for why only ``slack``/``calendar``/``fireflies`` can appear, why the
+    staleness rule is ``STALE_AFTER_MIN`` and not a new number, and why "never fetched" and "stale"
+    are distinguished. A source the tenant does not list is skipped, never requested.
+    """
+    needs = []
+    for source in NEEDS_SOURCES:
+        if source not in ctx.tenant.sources:
+            continue
+        snap = snapshots.read(ctx.state_dir, source)
+        if snap is None:
+            reason = "never fetched"
+        else:
+            try:
+                fetched = snapshots.parse_fetched_at(snap["fetched_at"])
+            except (ValueError, TypeError, KeyError):
+                raise errors.Usage(f"sources/{source}.json: fetched_at must be UTC like "
+                                    f"2026-09-16T08:00:00Z, got {snap.get('fetched_at')!r}") from None
+            age_min = (now - fetched).total_seconds() / 60
+            if age_min <= STALE_AFTER_MIN:
+                continue
+            reason = f"stale ({int(age_min)} min old)"
+        needs.append({"source": source, "reason": reason, "query": _needs_query(source, snap),
+                      "write_to": str(ctx.state_dir / f"ingest-{source}.json")})
+    return needs
+
+
+def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetime | None = None, gh=None, lin=None):
+    """Preflight, rank (if needed) and compose today's brief in one call; return lines or ``{"lines", "brief_path", "needs"}``.
+
+    ``gh``/``lin`` let a test substitute preflight's identity clients, exactly as ``preflight.run_preflight``
+    already allows; left ``None`` (the CLI wiring), real clients are built and a failed pin exits 3.
+    """
     check_max_lines(max_lines)                  # a usage error must not leave a brief.md behind
+    preflight_cmd.run_command(ctx, gh=gh, lin=lin)   # exit 3 on a failed identity pin, exactly as `rabota preflight`
     day = ctx.state_dir / ctx.today.isoformat()
     day.mkdir(parents=True, exist_ok=True)
     seq_path = day / "sequence.json"
@@ -167,10 +249,12 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
     last_path = day / "last-brief.json"
     previous = _read_json(last_path)
+    now = now or datetime.now(timezone.utc)
+    needs = compute_needs(ctx, now)
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
-                           now=now or datetime.now(timezone.utc))
+                           now=now, needs=needs)
     emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
-    return lines if text else {"lines": lines, "brief_path": str(brief_path)}
+    return lines if text else {"lines": lines, "brief_path": str(brief_path), "needs": needs}
 
 
 def _build(sub):
