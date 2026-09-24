@@ -8,6 +8,17 @@ from rabota.runner import FakeRunner, Result
 from tests.support import last_json
 from tests.test_cli import install_fixture_home, run_cli
 
+RESOLVE_MARKER = "---RABOTA-RESOLVE---"
+
+
+def framed(home="/home/ubuntu", path="/usr/bin:/bin", claude="/home/ubuntu/.local/bin/claude",
+           *, before=""):
+    """A `resolve_remote` reply as the remote actually prints it: anything the login shell emitted
+    (``before``), then the marker, then exactly the three values -- an absent claude being an
+    EMPTY line, not a missing one. Every fixture builds its reply through here, so the framing is
+    written down once and a change to it cannot leave a row asserting the old shape."""
+    return f"{before}{RESOLVE_MARKER}\n{home}\n{path}\n{claude}\n"
+
 FIX = Path(__file__).parent / "fixtures"
 
 
@@ -239,11 +250,11 @@ class ResolveRemoteTests(LocalRecipeTests):
     ``resolve_remote``'s docstring for the full reasoning.
     """
 
-    def test_it_returns_home_and_the_claude_binary(self):
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "/home/ubuntu\n/home/ubuntu/.local/bin/claude", ""))]))
+    def test_it_returns_home_the_path_and_the_claude_binary(self):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(), ""))]))
         self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"]),
-                         {"home": "/home/ubuntu", "claude_bin": "/home/ubuntu/.local/bin/claude"})
+                         {"home": "/home/ubuntu", "path": "/usr/bin:/bin",
+                          "claude_bin": "/home/ubuntu/.local/bin/claude"})
 
     def test_a_failed_ssh_refuses_rather_than_guessing(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
@@ -253,8 +264,8 @@ class ResolveRemoteTests(LocalRecipeTests):
     def test_a_reply_missing_the_claude_line_refuses(self):
         # A successful ssh that finds no executable claude prints nothing for that field (the
         # script's own `[ -x "$p" ] &&` guard) — not room for a fallback, an unmeasured machine.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu", ""))]))
-        with self.assertRaises(errors.Refused):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(claude=""), ""))]))
+        with self.assertRaisesRegex(errors.Refused, "executable claude"):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
     def test_an_empty_reply_refuses(self):
@@ -264,9 +275,64 @@ class ResolveRemoteTests(LocalRecipeTests):
 
     def test_a_relative_home_refuses(self):
         # A first line not starting with "/" cannot be the proof this resolver promises; refuse
-        # rather than trust an unexpected shell reply verbatim.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "home\n/home/ubuntu/.local/bin/claude", ""))]))
+        # rather than trust an unexpected shell reply verbatim. Every OTHER field is well-formed
+        # here, so the row pins the home rule alone rather than passing on a second fault.
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(home="home"), ""))]))
+        with self.assertRaisesRegex(errors.Refused, r"\$HOME"):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_login_banner_on_stdout_refuses_instead_of_shifting_every_value(self):
+        """Review lane, 2026-09-24. Under the original positional parse a banner line that itself
+        began with `/` shifted all three values by one and EVERY check still passed: `$HOME`
+        became the banner and the claude binary became the PATH string. Silent and wrong, which
+        is the one outcome this module is shaped to refuse. The marker discards anything the
+        login shell said before it."""
+        for banner in ("/etc/motd says hi\n", "Welcome to dev\n", "a\nb\n"):
+            with self.subTest(banner=banner):
+                ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(before=banner), ""))]))
+                self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"])["home"],
+                                 "/home/ubuntu")
+
+    def test_a_fourth_value_after_the_marker_refuses_rather_than_taking_a_slot(self):
+        """The maintenance trap: a value added to the script later used to take `claude_bin`'s
+        slot silently. Exactly three lines are expected, so a fourth of any origin refuses."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(
+            0, framed() + "/etc/os-release\n", ""))]))
         with self.assertRaises(errors.Refused):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_newline_inside_the_path_refuses_rather_than_truncating_it(self):
+        """Same class from the other side: an embedded newline used to make `claude_bin` a PATH
+        fragment, which `build_local` would then emit as the binary to exec."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(
+            0, framed(path="/opt/a\n/opt/b:/usr/bin"), ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_reply_with_no_marker_at_all_refuses(self):
+        """A remote that answered without the framing -- an old script, a truncated stream -- is
+        unmeasured, and unmeasured refuses. It is never read as a bare positional reply."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(
+            0, "/home/ubuntu\n/usr/bin:/bin\n/home/ubuntu/.local/bin/claude\n", ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_failed_ssh_whose_payload_parses_still_names_something(self):
+        """`', '.join(missing)` is EMPTY when res.ok is false but all three values parse, and the
+        refusal then named nothing at all: "could not resolve  on dev: ...". A refusal that names
+        no cause is the same defect DO-710 fixed in the verdict validator."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(255, framed(), "connection reset"))]))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+        self.assertNotIn("resolve  on", str(cm.exception))
+        self.assertIn("ssh failed", str(cm.exception))
+
+    def test_a_reply_missing_the_path_line_refuses(self):
+        """DO-712. A lane's PATH is set from this value, and systemd has no "prepend" — so an
+        empty answer here would be a unit started with PATH unset, which is strictly worse than
+        the missing `~/.local/bin` it was added to fix. Unmeasured refuses; it is never room."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(path=""), ""))]))
+        with self.assertRaisesRegex(errors.Refused, r"\$PATH"):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
 
@@ -371,7 +437,13 @@ class SequencedRunner:
 
 
 class RunRecipeTests(LocalRecipeTests):
-    BRIEF_TEXT = "# Brief\nDo the thing.\n"
+    # A CONTRACT-SHAPED brief, not "# Brief\nDo the thing.": DO-711 wired `lanes.brief.validate`
+    # into `run_recipe`, which is where it always belonged and never was, so every row that
+    # dispatches now goes through it.
+    BRIEF_TEXT = ("# Brief\n## Common rules\nRead `_common-rules.md`, beside this brief.\n"
+                  "## Role\nYou do the thing.\n## Assignment\n1. Do the thing.\n"
+                  "## Ownership\nWrite only under out_dir.\n## Outputs\nout_dir: {out_dir}\n"
+                  "## Summary\nOne line.\n")
 
     def brief(self):
         p = Path(tempfile.mkdtemp())
@@ -392,9 +464,13 @@ class RunRecipeTests(LocalRecipeTests):
 
     RESOLVED_HOME = "/home/ubuntu"
     RESOLVED_BIN = "/home/ubuntu/.local/bin/claude"
+    # dev's real one, measured 2026-09-24 -- note it does NOT contain ~/.local/bin, which is the
+    # whole of DO-712's first half.
+    RESOLVED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
     # Fix round 5: resolve_remote no longer resolves or proves an account dir (nothing consumes
-    # one for a remote lane any more), so its reply is back to two lines.
-    RESOLVE_OUT = f"{RESOLVED_HOME}\n{RESOLVED_BIN}"
+    # one for a remote lane any more). DO-712 added $PATH, so its reply is three lines; the
+    # claude path stays LAST because it is the one printed without a trailing newline.
+    RESOLVE_OUT = framed(RESOLVED_HOME, RESOLVED_PATH, RESOLVED_BIN)
 
     def test_a_dry_recipe_resolves_the_remote_claude_bin_and_runs_nothing_else(self):
         # DO-652 task-7 dispatch correction 6: a non-local recipe resolves the remote home and
@@ -493,11 +569,12 @@ class RunRecipeTests(LocalRecipeTests):
         # ``.inputs`` is available for the brief-content check.
         ok = Result(0, self.RESOLVE_OUT, "")
         branch = Result(0, "main", "")
-        runner = SequencedRunner([ok, branch, ok, ok, ok])
+        runner = SequencedRunner([ok, branch, ok, ok, ok, ok])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         joined = [" ".join(c) for c in runner.calls]
-        self.assertEqual(len(runner.calls), 5)
+        # Six since DO-711: resolve, resolve-default-branch, fetch+worktree, brief, RULES, unit.
+        self.assertEqual(len(runner.calls), 6)
         self.assertIn("symbolic-ref", joined[1]); self.assertIn("origin/HEAD", joined[1])
         # Fix round 2, Critical 1: out_dir is created (mkdir -p) in the SAME call as the fetch and
         # the worktree add — a shell `>` redirection does not create parent directories, and
@@ -513,10 +590,11 @@ class RunRecipeTests(LocalRecipeTests):
         # of the joined command — only a check against ONE quoted element survives shquote.
         self.assertIn("'git'", joined[2]); self.assertIn("'worktree'", joined[2]); self.assertIn("'add'", joined[2])
         self.assertIn("cat > ", joined[3])
-        self.assertIn("systemd-run", joined[4])
+        self.assertIn("cat > ", joined[4])
+        self.assertIn("systemd-run", joined[5])
         # Mutation 7: the resolved bin (not the locally-expanded config default) must be what
         # actually starts the unit.
-        self.assertIn(self.RESOLVED_BIN, joined[4])
+        self.assertIn(self.RESOLVED_BIN, joined[5])
         # Fix round 2, Important 2: the brief's CONTENT (not just its path) must actually reach
         # the brief-send call — neither FakeRunner nor the old SequencedRunner recorded `input=`,
         # so a mutation that emptied the brief before sending it survived the whole suite.
@@ -524,7 +602,13 @@ class RunRecipeTests(LocalRecipeTests):
         # ...and the path used to SEND the brief must be the exact path the agent is told to READ.
         remote_brief_path = f"{out['out_dir']}/brief.md"
         self.assertIn(f"cat > '{remote_brief_path}'", joined[3])
-        self.assertIn(f"'Read {remote_brief_path} and execute.'", joined[4])
+        self.assertIn(f"'Read {remote_brief_path} and execute.'", joined[5])
+        # DO-711: the rules travel WITH the lane, into the same directory as brief.md, which is
+        # the one directory `--add-dir` grants it and the one a verbatim-shipped brief can name
+        # without any substitution. Content checked too, not just the path — a mutation that sent
+        # an empty rules file would otherwise look identical.
+        self.assertIn(f"cat > '{out['out_dir']}/{lanes_brief.RULES.name}'", joined[4])
+        self.assertEqual(runner.inputs[4], lanes_brief.RULES.read_text())
         row = ctx.store.list_lanes("quantivly")[0]
         self.assertEqual(row["status"], "started")
         self.assertEqual(row["unit"], out["unit"])
@@ -635,6 +719,70 @@ class RunRecipeTests(LocalRecipeTests):
         cleanup = " ".join(runner.calls[4])
         self.assertIn("'remove'", cleanup); self.assertIn("'--force'", cleanup)
 
+    # ---- DO-711: the rules reach the lane, or nothing starts -----------------------------
+
+    def test_a_missing_rules_source_refuses_before_anything_is_created(self):
+        """The budget is not spent, no ssh is made, no worktree exists and no row is written —
+        the same "refuse before you create" ordering `run_recipe` already promises for the gate.
+        A lane that would have to run without its rails must cost nothing to refuse."""
+        runner = SequencedRunner([])
+        ctx = self.ctx(runner)
+        gate = []
+        with patch.object(lanes_brief, "RULES", Path("/nonexistent/_common-rules.md")):
+            with self.assertRaises(errors.Refused):
+                lane.run_recipe(ctx, budget_fn=lambda **kw: gate.append(kw) or self.ok_budget(),
+                                **self.kw(run=True))
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(gate, [], "the budget gate must not be consulted for a lane that cannot start")
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
+
+    def test_a_brief_that_breaks_the_contract_is_refused_before_the_budget_gate(self):
+        """`brief.validate` existed, required `## Common rules`, and was called from NOTHING but
+        the tests — which is how both shipped briefs came to name a path that exists on no machine
+        a lane runs on. This row is the wiring."""
+        bad = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, bad, ignore_errors=True)
+        f = bad / "brief.md"; f.write_text("# Title only\n")
+        runner = SequencedRunner([])
+        gate = []
+        with self.assertRaises(errors.Usage) as cm:
+            lane.run_recipe(self.ctx(runner), budget_fn=lambda **kw: gate.append(kw) or self.ok_budget(),
+                            **self.kw(run=True, brief=str(f)))
+        self.assertIn("## Common rules", str(cm.exception))
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(gate, [])
+
+    def test_a_brief_naming_a_laptop_only_rules_path_is_refused_at_dispatch(self):
+        """The DO-711 defect itself, at the door it came through."""
+        bad = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, bad, ignore_errors=True)
+        f = bad / "brief.md"
+        f.write_text(self.BRIEF_TEXT.replace(
+            "Read `_common-rules.md`, beside this brief.",
+            "Read /home/zvi/quantivly/handoffs/rabota/_common-rules.md."))
+        with self.assertRaisesRegex(errors.Usage, "/home/zvi/quantivly"):
+            lane.run_recipe(self.ctx(SequencedRunner([])),
+                            budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True, brief=str(f)))
+
+    # ---- DO-712: the lane's PATH --------------------------------------------------------
+
+    def test_a_remote_lane_prepends_the_machines_local_bin_to_its_own_path(self):
+        """Measured on dev 2026-09-24: systemd 249's user manager PATH has no `~/.local/bin`, so
+        `rabota version` inside a lane exited 127 although `~/.local/bin/rabota` was right there.
+        The value is built from the PATH the machine ITSELF reported, so `/snap/bin` and anything
+        else that machine has survives — a hardcoded list would silently drop them."""
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
+        out = lane.run_recipe(self.ctx(runner), budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        want = f"--setenv=PATH={self.RESOLVED_HOME}/.local/bin:{self.RESOLVED_PATH}"
+        self.assertIn(f"'{want}'", out["shell"])
+        # The prepend, not a replacement: the machine's own entries are still there, after.
+        self.assertNotIn(f"--setenv=PATH={self.RESOLVED_HOME}/.local/bin'", out["shell"])
+
+    def test_a_local_recipe_sets_no_path_at_all(self):
+        """The paired half. `build_local` omits the flag when it has no proven value, exactly as
+        it omits `CLAUDE_CONFIG_DIR` — never emitted empty, never guessed. Only the machine the
+        argv will run on can say what its PATH is, and for a local lane nothing has asked it."""
+        argv = self.argv()
+        self.assertEqual([a for a in argv if a.startswith("--setenv=PATH")], [])
+
 
 class EvaluateRecipeTests(LocalRecipeTests):
     """DO-670: ``--kind evaluate --of <lane_id>``. Reuses ``LocalRecipeTests.ctx()`` only — the
@@ -696,7 +844,7 @@ class EvaluateRecipeTests(LocalRecipeTests):
     def ok_budget(self):
         return {"allowed_new_lanes": 2, "reasons": [], "seat_pick": "quantivly-0", "five_h_pct_now": 42}
 
-    RESOLVE_OUT = "/home/ubuntu\n/home/ubuntu/.local/bin/claude"
+    RESOLVE_OUT = framed(path="/usr/local/bin:/usr/bin:/bin")
 
     def test_an_unknown_of_lane_refuses(self):
         ctx = self.ctx(FakeRunner([]))
@@ -900,7 +1048,10 @@ class MachineArgvCliTests(unittest.TestCase):
     def setUp(self):
         install_fixture_home(self)
         self.brief = self.home / "brief.md"
-        self.brief.write_text("do the thing")
+        # Contract-shaped since DO-711 wired `lanes.brief.validate` into the dispatch path: a
+        # two-word stub would now be refused as a USAGE error (exit 2) before the machine name is
+        # ever looked at, which is the very confusion this row exists to detect.
+        self.brief.write_text(RunRecipeTests.BRIEF_TEXT)
 
     def test_an_undeclared_machine_is_a_named_refusal_not_an_argparse_usage_error(self):
         code, out, err = run_cli(["--tenant", "quantivly", "lane", "recipe",

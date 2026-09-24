@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every lane's first instruction was unsatisfiable on the only machine that runs lanes
+  (DO-711).** `rabota/briefs/smoke.md` and `evaluate.md.tmpl` both opened with
+  ``Read `/home/zvi/quantivly/handoffs/rabota/_common-rules.md` first`` — a laptop path. On `dev`
+  it exists under neither `/home/zvi` nor `/home/ubuntu`, and a work brief is shipped **verbatim**
+  (no `{out_dir}` substitution, DO-683) into a lane granted exactly one extra directory,
+  `--add-dir <out_dir>`. So every lane dispatched there failed to read the rules it was told to
+  obey — the first of which is "nothing outward-facing, ever" — and then carried on. One lane
+  reported it in `followups`; nothing in the substrate detected it, because
+  `lanes/brief.py:validate`, the function that requires the `## Common rules` heading, **was never
+  called from the dispatch path at all**. The rules now travel with the lane: they live in the repo
+  at `rabota/briefs/_common-rules.md` and are written to `<out_dir>/_common-rules.md` over the same
+  ssh-stdin channel that already ships `brief.md`, so a copy cannot go stale and lands in the one
+  directory the lane is guaranteed to reach. `validate` runs at dispatch now, before the budget
+  gate, and refuses **any** absolute path under `## Common rules` — the class, not the one path
+  that was wrong — while leaving the absolute `out_dir:` under `## Outputs` alone, which a check
+  over the whole brief would have refused on every real dispatch while looking like a working
+  guard. A missing or empty rules file refuses before anything is created: no ssh, no worktree, no
+  row, and the gate not even consulted. The briefs also tell the lane to stop and say so if the
+  rules are not there anyway.
+
+- **`rabota` was not invocable inside a lane (DO-712).** Two independent causes, both measured on
+  `dev` 2026-09-24. The lane's `PATH` lacked `~/.local/bin`, so `rabota version` exited 127: a
+  transient unit inherits the **user manager's** environment, not a login shell's, and
+  `~/.local/bin` only joined systemd's default user PATH in v250 while dev runs 249 — nothing in
+  dev's profile could ever have reached a lane. And invoking the binary directly still failed,
+  because `scripts/rabota` exec'd a bare `python3`, which on dev is 3.10.12, while `config.py`
+  imports `tomllib` (3.11+); `python3.11` was installed right beside it. `resolve_remote` now
+  proves the machine's `$PATH` in the ssh call it already makes for `$HOME` and the claude binary,
+  `build_local` emits `--setenv=PATH=<home>/.local/bin:<that>` — prepended, so `/snap/bin` and
+  anything else that machine has survives — and the entry point picks the first candidate
+  interpreter that can import `tomllib`, trying `python3` first so a current box pays one probe.
+  Where no interpreter can, it fails naming the requirement instead of a `ModuleNotFoundError`
+  from deep inside `config.py`. Not a `tomli` fallback: `tomli` happens to be importable under
+  3.10 on dev, but nothing installs or pins it, so that fix would have worked by luck on one
+  machine. `docs/superpowers/specs/2026-09-20-remote-lanes-design.md` decision 2 ("does dev need
+  rabota installed → No") is amended rather than left contradicting the code: rabota's *mechanism*
+  still runs only on the laptop, but a *lane* may now rely on the CLI being callable.
+
 ### Added
 
 - **A guard that enumerates the state tables with no row total, so the audit never has to be done
