@@ -411,7 +411,7 @@ decision before it starts running nightly.
 
 ## State table
 
-`scripts/test-scrub-transcript-secrets.sh` (111 checks, hermetic, run in CI as
+`scripts/test-scrub-transcript-secrets.sh` (112 checks, hermetic, run in CI as
 **Transcript Scrub State Table**). It carries the same 16 rule labels as
 `scripts/redact-secrets.sh`, and a row asserts that — see *Parity* above. Every row runs against a throwaway `mktemp` tree reached
 through `SCRUB_TRANSCRIPT_ROOTS`; nothing in the file names `~/.claude/projects`. Fixture

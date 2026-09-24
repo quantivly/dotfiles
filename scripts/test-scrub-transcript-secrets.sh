@@ -73,7 +73,7 @@ PY="$(command -v python3)"
 # EXPECTED_RULES is read by the parity group, which runs long before it.
 # `grep -c ✗` counts row NAMES, not outcomes; only the total at the end catches
 # a check that silently stopped running.
-EXPECTED_ROWS=111
+EXPECTED_ROWS=112
 EXPECTED_RULES=16
 
 T="$(mktemp -d)" || fatal "cannot create a temp dir"
@@ -651,15 +651,23 @@ check "every advertised rule has a fixture in this suite" \
 # squashed because the sentence wraps. Which page owns this count and why:
 # docs/REPO_CHECKS.md, "Where a check count lives".
 docs_claim() {
-  local f="$DOTFILES/$1"
-  local needle="${2:-\`scripts/test-scrub-transcript-secrets.sh\` ($EXPECTED_ROWS checks}"
+  local f="$DOTFILES/$1" needle="${2-}"
+  # The needle is MANDATORY, and this guard is not defensive programming. `tr`
+  # squashes the whole page onto ONE line, so `grep -c -F ""` returns exactly
+  # 1 -- the same value a real match returns, from a file it never looked at.
+  # A mutation sweep found that: this function first took the needle as an
+  # OPTIONAL argument defaulting to the check-count string, and emptying the
+  # default left every row green. A hollow pass here is indistinguishable from
+  # a true one, so the degenerate input is refused rather than guarded against.
+  [[ -n "$needle" ]] || { printf 'no needle given'; return; }
   [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
   tr -s '[:space:]' ' ' <"$f" | grep -c -F "$needle"
 }
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/TRANSCRIPT_SCRUB.md says $EXPECTED_ROWS checks" \
-      "$(docs_claim docs/TRANSCRIPT_SCRUB.md)" 1
+      "$(docs_claim docs/TRANSCRIPT_SCRUB.md \
+         "\`scripts/test-scrub-transcript-secrets.sh\` ($EXPECTED_ROWS checks")" 1
 # The unreadable branch needs a row of its own or nothing ever takes it, and an
 # untaken branch is free to be wrong: in DO-698 a sweep caught this branch
 # reporting "could not run" as a PASS, with every other row still green.
@@ -669,7 +677,11 @@ check "docs/TRANSCRIPT_SCRUB.md says $EXPECTED_RULES shared rule labels" \
       "$(docs_claim docs/TRANSCRIPT_SCRUB.md \
          "the same $EXPECTED_RULES rule labels")" 1
 check "a documented file that cannot be read is not a pass" \
-      "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
+      "$(docs_claim no/such/file.md "anything")" "cannot read no/such/file.md"
+# The other degenerate input, and the one a sweep actually caught: an empty
+# needle matches the squashed page once and reads as a correct claim.
+check "an empty needle is not a pass either" \
+      "$(docs_claim docs/TRANSCRIPT_SCRUB.md "")" "no needle given"
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
