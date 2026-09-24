@@ -1,8 +1,16 @@
 """Mutations with a rollback row before each write and a re-fetch after the batch."""
+import time
 from datetime import datetime, timezone
 from rabota import errors
 
 AUTO_BUCKETS = ("dead_issue", "own_pr_merged", "due_reminder")
+# Linear's read-after-write is not strongly consistent: a re-read immediately after a
+# successful write can still return the pre-write value. Retrying a few times with a short
+# backoff absorbs the ordinary replication lag; an issue still unconfirmed after these is
+# reported as `unconfirmed`, never as `failed` -- the write itself raised no error, so
+# folding it into `failed` would report a real success as a real failure (DO-707).
+VERIFY_ATTEMPTS = 3
+VERIFY_DELAY_S = 0.5
 
 
 def new_batch_id(prefix: str) -> str:
@@ -30,12 +38,14 @@ def apply_auto(plan: dict, client, store, tenant, dry_run: bool = False) -> dict
     return rep
 
 
-def apply_due_policy(plan: dict, client, store, tenant, confirmed: bool, dry_run: bool = False) -> dict:
+def apply_due_policy(plan: dict, client, store, tenant, confirmed: bool, dry_run: bool = False,
+                      verify_attempts: int = VERIFY_ATTEMPTS, verify_delay: float = VERIFY_DELAY_S,
+                      sleeper=time.sleep) -> dict:
     if confirmed is not True:
         raise errors.Refused("due_policy is a propose-tier batch; pass --confirmed after the user's typed OK")
     batch = new_batch_id("due")
     issues = plan["batches"]["due_policy"]["issues"]
-    rep = {"batch_id": batch, "cleared": 0, "verified": 0, "failed": []}
+    rep = {"batch_id": batch, "cleared": 0, "verified": 0, "unconfirmed": [], "failed": []}
     if dry_run:
         rep["would_clear"] = [i["identifier"] for i in issues]; return rep
     for i in issues:
@@ -44,8 +54,19 @@ def apply_due_policy(plan: dict, client, store, tenant, confirmed: bool, dry_run
             r = client.set_due_date(i["id"], None)
             if not r.get("success"): raise errors.RabotaError("success=false")
             rep["cleared"] += 1
-            if client.issue_state_and_due(i["id"]).get("dueDate") is None:
+            cleared_read_back = False
+            for attempt in range(verify_attempts):
+                if client.issue_state_and_due(i["id"]).get("dueDate") is None:
+                    cleared_read_back = True
+                    break
+                if attempt < verify_attempts - 1:
+                    sleeper(verify_delay)
+            if cleared_read_back:
                 store.mark_verified(batch, i["id"]); rep["verified"] += 1
+            else:
+                # The write succeeded (no RabotaError raised) but the re-read never caught up --
+                # a stale read, not a failed write, so it belongs apart from `failed`.
+                rep["unconfirmed"].append(i["identifier"])
         except errors.RabotaError as e:
             rep["failed"].append({"id": i["identifier"], "error": str(e)})
     return rep

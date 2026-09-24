@@ -12,13 +12,30 @@ GH = json.loads((FIX / "inbox" / "github.json").read_text())
 
 
 class FakeClient:
-    def __init__(self, notifications, issues):
+    def __init__(self, notifications, issues, stale_reads=0):
         self.n = {x["id"]: dict(x) for x in notifications}; self.i = {x["id"]: dict(x) for x in issues}; self.calls = []
+        # DO-707: Linear's read-after-write is not strongly consistent -- a re-read right after a
+        # successful write can still return the pre-write value. `stale_reads` is how many times
+        # EACH issue's `issue_state_and_due` answers with the value from before the write that is
+        # in flight, before it catches up; 0 reproduces the old always-fresh fake.
+        self.stale_reads = stale_reads; self._reads_since_write = {}
     def archive_notification(self, nid): self.calls.append(("archive", nid)); self.n[nid]["archivedAt"] = "now"; return {"success": True}
     def unarchive_notification(self, nid): self.calls.append(("unarchive", nid)); self.n[nid]["archivedAt"] = None; return {"success": True}
     def inbox_notifications(self): return [x for x in self.n.values() if not x["archivedAt"]]
-    def set_due_date(self, iid, due): self.calls.append(("due", iid, due)); self.i[iid]["dueDate"] = due; return {"success": True, "issue": {"id": iid, "dueDate": due}}
-    def issue_state_and_due(self, iid): return {"id": iid, "dueDate": self.i[iid]["dueDate"], "state": {"type": self.i[iid]["state"]["type"]}}
+    def set_due_date(self, iid, due):
+        self.calls.append(("due", iid, due))
+        prior = self.i[iid]["dueDate"]
+        self._pending = getattr(self, "_pending", {}); self._pending[iid] = prior
+        self._reads_since_write[iid] = 0
+        self.i[iid]["dueDate"] = due
+        return {"success": True, "issue": {"id": iid, "dueDate": due}}
+    def issue_state_and_due(self, iid):
+        n = self._reads_since_write.get(iid, self.stale_reads)
+        due = self.i[iid]["dueDate"]
+        if n < self.stale_reads:
+            due = self._pending[iid]
+            self._reads_since_write[iid] = n + 1
+        return {"id": iid, "dueDate": due, "state": {"type": self.i[iid]["state"]["type"]}}
 
 
 class ApplyTests(unittest.TestCase):
@@ -62,3 +79,29 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(self.client.i["i-real"]["dueDate"], "2026-09-25")
         apply.rollback(rep["batch_id"], self.client, self.store)
         self.assertEqual(self.client.i["i-due1"]["dueDate"], "2026-09-04")
+
+    def test_a_stale_read_after_write_is_retried_and_still_verifies(self):
+        """DO-707: `inbox apply --batch due_policy` reported `verified: 38` then `verified: 37`
+        against `cleared: 40` while every write had actually landed -- Linear's read-after-write
+        is not strongly consistent, so the single immediate re-read sometimes caught the
+        pre-write value. Every write here succeeds; a read that is stale for fewer attempts than
+        the retry budget must still end up verified, not silently dropped from the count."""
+        client = FakeClient(LIN["notifications"], LIN["issues"], stale_reads=2)
+        rep = apply.apply_due_policy(self.plan, client, self.store, T, confirmed=True, sleeper=lambda s: None)
+        self.assertEqual(rep["cleared"], 5)
+        self.assertEqual(rep["verified"], 5)
+        self.assertEqual(rep["unconfirmed"], [])
+        self.assertEqual(rep["failed"], [])
+
+    def test_a_write_that_never_reads_back_is_unconfirmed_not_failed(self):
+        """The other half of DO-707: `cleared: 40, verified: 37` reads like three writes silently
+        failed. A write whose re-read never catches up within the retry budget must be reported
+        as `unconfirmed` -- distinguishable from a genuine write failure -- never folded into
+        `failed`, since the write itself raised no error."""
+        client = FakeClient(LIN["notifications"], LIN["issues"], stale_reads=99)
+        rep = apply.apply_due_policy(self.plan, client, self.store, T, confirmed=True,
+                                      verify_attempts=2, sleeper=lambda s: None)
+        self.assertEqual(rep["cleared"], 5)
+        self.assertEqual(rep["verified"], 0)
+        self.assertEqual(sorted(rep["unconfirmed"]), sorted(i["identifier"] for i in self.plan["batches"]["due_policy"]["issues"]))
+        self.assertEqual(rep["failed"], [])
