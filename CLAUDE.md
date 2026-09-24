@@ -624,9 +624,10 @@ Commands are `audit-setup` / `audit-status` / `audit-sweeps`, listed below. Why 
 
 ## VPN Resilience
 
-`vpn-failfast.service` (system, root) makes VPN-only destinations FAIL instead of hanging ~127s
-while the tunnel is down; `vpn-notify.service` (user; arm it by hand) notifies past a
-threshold. Root pieces come from `vpn-setup`, **copied never symlinked**; `./install` links only
+`vpn-failfast.service` (system, root) makes VPN-only destinations FAIL instead of hanging while
+the tunnel is DOWN, and (armed by `vpn-setup --block-ipv6`) blocks IPv6 egress while it is UP —
+opposite polarities, because the tunnel carries no v6. `vpn-notify.service` (user; arm it by hand)
+notifies. Root pieces come from `vpn-setup`, **copied never symlinked**; `./install` links only
 the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
 [docs/VPN_INTERNALS.md](docs/VPN_INTERNALS.md) · `scripts/test-vpn-failfast.sh`.
 
@@ -634,9 +635,10 @@ the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
   this user and the fail-fast unit is ROOT; it reads `ip -j link` / `ip -j route` only. The
   notification body is a compile-time constant (GNOME renders `<a href>` inside it).
 - **A stale `unreachable` route blackholes a host permanently.** Identity is route `proto 66`,
-  nothing is deleted except by that filter, `vpn-doctor` FAILs on an orphan. `ip` ACCEPTS
-  `unreachable 0.0.0.0/0`, host bits and IPv6, so validate every destination BEFORE installing
-  any; an unusable config is exit 2, never a silent no-op.
+  nothing is deleted except by that filter, `vpn-doctor` FAILs on an orphan. Validate every
+  destination BEFORE installing any; an unusable config is exit 2, never a silent no-op.
+  **`ip route show proto 66` is IPv4-only** — every path that enumerates or withdraws owned
+  routes must ask `-4` **and** `-6`, or a v6 blackhole survives invisibly.
 - **Never force a drop to test** (`SO_BINDTODEVICE` probe). **Parse the log offset, never match
   it** (DST, 2026-10-25). Numbers come from the client's logs, **never Chrome history**.
 

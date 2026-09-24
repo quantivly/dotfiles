@@ -64,6 +64,44 @@
 # Every destination is validated HERE, all of them BEFORE any is installed, so a
 # bad entry can never leave a partial set behind.
 #
+# THE IPv6 BLOCK (DO-704), and why its polarity is the OPPOSITE of the above
+# ---------------------------------------------------------------------------
+# The endpoint is SplitTunnel=False but only IPv4 is tunnelled: the client
+# installs the 0.0.0.0/1 + 128.0.0.0/1 pair and NOTHING for IPv6, so while the
+# tunnel is up every v6 packet still leaves via the ISP -- and with no family
+# flag glibc PREFERS v6, so the leak is the default path, not an edge case.
+# Measured: `curl -4 ifconfig.me` returns the VPN's NAT gateway and `curl -6`
+# returns the ISP address, on the same connected client.
+#
+# So while the tunnel is UP this installs `unreachable ::/1` + `unreachable
+# 8000::/1`, and withdraws them while it is DOWN. That is the mirror image of
+# the IPv4 half above, and deliberately so: there is no leak to close while the
+# tunnel is down, and you keep a working dual-stack internet when disconnected.
+#
+# OFF BY DEFAULT. Arming is a typed command (`vpn-setup --block-ipv6`), which
+# installs a drop-in setting VPN_FAILFAST_IPV6=block. WITHDRAWAL IS NOT GATED ON
+# IT: --clear, the stop path and the tunnel-down branch remove the block however
+# the knob is set, so disarming and restarting actually withdraws.
+#
+# THERE IS NO AUTOMATIC EXPIRY AND THERE CANNOT BE ONE. `expires` is ACCEPTED on
+# an `unreachable` IPv6 route -- rc 0, netlink takes it -- and the attribute is
+# then NEVER ATTACHED: no `expires` in `show`, no "expires" key in `-j`, not
+# immediately and not later. The control is what makes that conclusive: a
+# NEXTHOP route given the IDENTICAL flag, in the same netns, by the same binary,
+# in the same second, shows `expires 4sec` at once and `expires -7sec` twelve
+# seconds on. So the flag is honoured there and simply does not apply here. A
+# dead-man switch built on it would be a safety claim that silently is not
+# true. Withdrawal is guaranteed
+# instead by four named things, none automatic: ExecStopPost=--clear (systemd
+# runs it on EVERY stop, including a killed main process), the clear-at-start on
+# --watch, the boot-time start via WantedBy=multi-user.target, and vpn-doctor's
+# orphan check.
+#
+# --once REFUSES to install the block. It converges and exits, leaving no daemon
+# and no ExecStopPost -- so `--once` with the tunnel up would blackhole global
+# IPv6 until somebody found the route. The block is a --watch-only capability
+# because only --watch can withdraw it.
+#
 # Usage:
 #   vpn-failfast.sh --watch     daemon: converge on every link event, and poll
 #   vpn-failfast.sh --once      converge once and exit
@@ -83,6 +121,7 @@
 #   VPN_FAILFAST_IFACE     default tun0
 #   VPN_FAILFAST_POLL      default 5       seconds
 #   VPN_FAILFAST_MIN_PREFIX default 8      refuse anything broader than this
+#   VPN_FAILFAST_IPV6      default off     off | block -- the DO-704 v6 block
 
 set -uo pipefail
 
@@ -92,6 +131,25 @@ METRIC="${VPN_FAILFAST_METRIC:-4242}"
 IFACE="${VPN_FAILFAST_IFACE:-tun0}"
 POLL="${VPN_FAILFAST_POLL:-5}"
 MIN_PREFIX="${VPN_FAILFAST_MIN_PREFIX:-8}"
+IPV6="${VPN_FAILFAST_IPV6:-off}"
+
+# THE DESTINATIONS ARE A CONSTANT, NOT CONFIG, and NOT `2000::/3`. The
+# well-known NAT64 prefix 64:ff9b::/96 lives in ::/3, so on an IPv6-only hotspot
+# with PREF64+DNS64 -- where every AAAA answer is a 64:ff9b:: address --
+# 2000::/3 would block nothing at all. Measured here: `ip -6 route get
+# 64:ff9b::1` resolves via the ISP default route.
+#
+# This pair is the exact mirror of the 0.0.0.0/1 + 128.0.0.0/1 the VPN client
+# installs for IPv4, which makes it self-explanatory in a routing table. Nothing
+# that should keep working is caught by it, measured rather than assumed:
+# multicast is in `table local` (consulted by rule 0 before anything else),
+# link-local fe80::/64 and the on-link LAN /64 win on prefix length, and
+# Tailscale's fd7a:115c:a1e0::/48 resolves via table 52 at rule 5270, which is
+# evaluated BEFORE the main table.
+IPV6_BLOCK_DSTS=( "::/1" "8000::/1" )
+
+# Set only on the --watch path. See the --once note in the header.
+ALLOW_V6_BLOCK=0
 
 log() { printf 'vpn-failfast: %s\n' "$*"; }
 err() { printf 'vpn-failfast: %s\n' "$*" >&2; }
@@ -116,6 +174,18 @@ if (( MIN_PREFIX < 1 || MIN_PREFIX > 32 )); then
     err "VPN_FAILFAST_MIN_PREFIX must be 1-32, got $MIN_PREFIX"
     exit 2
 fi
+# An unknown value is exit 2, NEVER a silent default in either direction.
+# Defaulting to `off` would disarm a machine that asked to be armed and say
+# nothing; defaulting to `block` would blackhole IPv6 off a typo. This is the
+# only producer of the value's meaning, and the installer uses this very
+# validation as its post-install check -- so `VPN_FAILFAST_IPV6=blocked` in the
+# drop-in is caught before `systemctl restart`, rather than making --watch exit
+# 2 on every start until the unit sits `failed` and IPv4 fail-fast dies with it.
+case "$IPV6" in
+    off|block) ;;
+    *) err "VPN_FAILFAST_IPV6 must be 'off' or 'block', got '$IPV6'"
+       exit 2 ;;
+esac
 
 command -v ip >/dev/null 2>&1 || { err "iproute2 'ip' not found"; exit 2; }
 
@@ -293,9 +363,19 @@ add_route() {
 }
 
 # del_route <-4|-6> <dst>
+#
+# THE v6 DELETE CARRIES NO `metric`, DELIBERATELY. Measured: `ip -6 route del
+# <dst> proto 66 metric 1024` against a metric-4242 route answers "No such
+# process" -- which the swallow below treats as SUCCESS. So a single metric
+# drift (a re-add, an RA, a kernel default) would make a v6 blackhole PERMANENT
+# while clear_owned cheerfully reported it cleared. Proto is the identity;
+# metric never was. The v4 delete keeps it because that half has shipped and its
+# metric is written by this same script on the way in.
 del_route() {
     local fam="$1" d="$2" out
-    if out="$(ip "$fam" route del unreachable "$d" proto "$PROTO" metric "$METRIC" 2>&1)"; then
+    local -a cmd=(ip "$fam" route del unreachable "$d" proto "$PROTO")
+    [[ "$fam" == "-6" ]] || cmd+=(metric "$METRIC")
+    if out="$("${cmd[@]}" 2>&1)"; then
         log "fail-fast OFF $d"
         return 0
     fi
@@ -310,21 +390,92 @@ del_route() {
 #
 # clear_owned <-4|-6>
 clear_owned() {
-    local fam="$1" d rc=0
+    local fam="$1" d rc=0 left
     while IFS= read -r d; do
         [[ -n "$d" ]] || continue
         del_route "$fam" "$d" || rc=1
     done < <(owned_routes "$fam")
+    # RE-READ, and it is worth the one extra `ip` call. "every delete reported
+    # success and the route is still there" is otherwise completely silent --
+    # and it is reachable, because del_route treats "No such process" as
+    # success, so a delete that addressed the wrong route looks identical to a
+    # delete that worked. This turns that whole class from silent into loud.
+    left="$(owned_routes "$fam")"
+    if [[ -n "$left" ]]; then
+        err "routes still owned after clearing ($fam): $(tr '\n' ' ' <<<"$left")"
+        rc=1
+    fi
+    return "$rc"
+}
+
+# Both families, unconditionally and regardless of the arming switch. This is
+# what --clear, the stop path and the --watch clear-at-start use: a stale v6
+# blackhole is exactly as dangerous as a stale v4 one, and "we were not armed"
+# is never a reason to leave one installed.
+clear_all() {
+    local rc=0
+    clear_owned -4 || rc=1
+    clear_owned -6 || rc=1
+    return "$rc"
+}
+
+# The IPv6 half of the tunnel-UP branch. Split out because it is the ONE place
+# in this file where "tunnel up" does not mean "withdraw everything", and
+# burying that inversion inside converge() is how it would get lost.
+#
+# It is a DELTA, never a clear-then-add. If the up-branch simply cleared and
+# re-added the block every pass, there would be a genuinely unblocked window
+# 17,280 times a day -- which is the leak this exists to close.
+converge_v6_up() {
+    local rc=0 d have keep k
+    if [[ "$IPV6" != "block" ]]; then
+        # Not armed: nothing should be blocked, so withdraw anything we own.
+        clear_owned -6 || rc=1
+        return "$rc"
+    fi
+    if (( ! ALLOW_V6_BLOCK )); then
+        log "the IPv6 block is a --watch-only capability (only --watch can withdraw it)" \
+            "-- installing the IPv4 half only"
+        clear_owned -6 || rc=1
+        return "$rc"
+    fi
+    have="$(owned_routes -6)"
+    for d in "${IPV6_BLOCK_DSTS[@]}"; do
+        grep -qxF -- "$d" <<<"$have" && continue
+        add_route -6 "$d" || rc=1
+    done
+    # A v6 route we own that is not one of today's halves is the same stale
+    # route the v4 branch drops when a destination leaves the config -- an older
+    # release's constant, or an operator's hand. Same rule, same reason.
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        keep=0
+        for k in "${IPV6_BLOCK_DSTS[@]}"; do [[ "$k" == "$d" ]] && { keep=1; break; }; done
+        (( keep )) || del_route -6 "$d" || rc=1
+    done <<<"$have"
     return "$rc"
 }
 
 # One convergence. The config must already be in DESTS.
+#
+# THE TWO BRANCHES RUN OPPOSITE WAYS FOR THE TWO FAMILIES, and that is the whole
+# design rather than an accident:
+#
+#   tunnel UP   -> v4 routes come OFF (the tunnel carries them),
+#                  v6 block goes ON   (the tunnel does NOT carry v6)
+#   tunnel DOWN -> v4 routes go ON,
+#                  v6 block comes OFF (there is no tunnel to leak around)
 converge() {
     local d rc=0 have
     if tunnel_up; then
         clear_owned -4 || rc=1
+        converge_v6_up || rc=1
         return "$rc"
     fi
+    # UNCONDITIONAL, and not gated on the arming switch: while the tunnel is
+    # down there is nothing to block, so a block left installed is an orphan
+    # that blackholes all global IPv6 on a machine with no VPN at all.
+    clear_owned -6 || rc=1
     have="$(owned_routes -4)"
     for d in "${DESTS[@]}"; do
         grep -qxF -- "$d" <<<"$have" && continue
@@ -362,6 +513,27 @@ print_status() {
         printf '  - %s\n' "$d"; n=$(( n + 1 ))
     done < <(owned_routes -4)
     (( n == 0 )) && printf '  (none)\n'
+    # The v6 block, armed state and installed halves. Cheap -- one more `ip`
+    # call -- and it is what makes vpn-doctor able to answer the orphan question
+    # for BOTH families from a single --status rather than growing a second
+    # route parser of its own.
+    #
+    # The `route get` canaries deliberately do NOT live here. vpn-doctor is the
+    # one consumer that needs them, it would otherwise run them two or three
+    # times per invocation, and their interpretation would end up written down
+    # twice -- once in bash and once in zsh.
+    # "as seen by THIS process" is not pedantry. The unit gets its value from a
+    # drop-in; a shell running --status by hand does not, so a bare "not armed"
+    # here would report every armed machine as disarmed. vpn-doctor reads the
+    # arming state from the drop-in for exactly this reason.
+    printf 'ipv6:    %s (VPN_FAILFAST_IPV6, as seen by this process)\n' "$IPV6"
+    printf 'ipv6 installed (proto %s):\n' "$PROTO"
+    n=0
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        printf '  - %s\n' "$d"; n=$(( n + 1 ))
+    done < <(owned_routes -6)
+    (( n == 0 )) && printf '  (none)\n'
     return 0
 }
 
@@ -379,7 +551,7 @@ run_watch() {
     fi
     # Withdraw on the way out as well as in ExecStopPost=, because the stop path
     # that fails to run is exactly the one that strands routes.
-    trap 'log "stopping"; clear_owned -4; exit 0' TERM INT
+    trap 'log "stopping"; clear_all; exit 0' TERM INT
     while :; do
         converge || true
         if (( have_mon )) && [[ -n "${MON_PID:-}" ]] && kill -0 "$MON_PID" 2>/dev/null; then
@@ -405,16 +577,17 @@ main() {
         --status)      print_status; exit 0 ;;
         --check)       read_config || exit 2
                        log "$CONF: ${#DESTS[@]} destination(s), all valid"; exit 0 ;;
-        --clear)       clear_owned -4 || exit 1; exit 0 ;;
+        --clear)       clear_all || exit 1; exit 0 ;;
         --once)        read_config || exit 2
-                       clear_owned -4 || exit 1
+                       clear_all || exit 1
                        converge || exit 1
                        exit 0 ;;
         --watch)       read_config || exit 2
                        # Orphans first, ALWAYS, and before anything is added: a
                        # route left by a previous run under a previous config is
                        # invisible to converge(), which only knows today's list.
-                       clear_owned -4 || exit 1
+                       clear_all || exit 1
+                       ALLOW_V6_BLOCK=1
                        run_watch ;;
         --help|-h)     usage; exit 0 ;;
         *)             err "unknown argument: $1"; usage >&2; exit 2 ;;

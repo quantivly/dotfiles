@@ -228,6 +228,18 @@ PY
           exit 0
         fi
         [ -e "$IPSTATE/fail-del" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
+        # Family-scoped failure, so a row can prove clear_owned reports a v6
+        # failure even when the v4 half succeeded -- an rc that only tracked the
+        # last family would report exactly that case as clean.
+        if [ "$fam" = "6" ] && [ -e "$IPSTATE/fail-del6" ]; then
+          echo "RTNETLINK answers: Operation not permitted" >&2; exit 2
+        fi
+        # Reports success and removes NOTHING. This is not a hypothetical: the
+        # subject treats "No such process" as success, so a delete that
+        # addressed the wrong route is indistinguishable from one that worked.
+        # The re-read guard in clear_owned is the only thing that catches it,
+        # and without this sentinel that guard has no way to be exercised.
+        [ -e "$IPSTATE/del-noop" ] && exit 0
         # THE DELETE HONOURS `metric` WHEN IT IS GIVEN, and matches on dst+proto
         # when it is not -- which is the difference the v6 delete turns on.
         # Measured: `ip -6 route del <dst> proto 66 metric 1024` against a
@@ -287,8 +299,60 @@ cat > "$STUBBIN/sudo" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${IPSTATE:-}" ] || { echo "sudo stub: no IPSTATE" >&2; exit 99; }
 printf '%s\n' "$*" >> "$IPSTATE/sudo.log"
-echo "sudo stub: refused (the suite never escalates)" >&2
-exit 1
+
+# systemctl and sysctl are NEVER executed, only recorded. The machine running
+# this suite has a live system manager holding a root VPN daemon, and a stub
+# that shelled out to `systemctl` would be one typo away from stopping it.
+verb="${1:-}"
+case "$verb" in
+  install | rm | rmdir | mkdir) ;;
+  *) exit 0 ;;
+esac
+
+# The file verbs DO run, because a row that only asserts argv cannot tell an
+# installer that writes the drop-in from one that does not -- and the
+# post-install check reads the file back. They run only under VPN_SETUP_PREFIX,
+# and with no prefix set nothing is written at all.
+pfx="${VPN_SETUP_PREFIX:-}"
+if [ -z "$pfx" ]; then
+  echo "sudo stub: refused (no VPN_SETUP_PREFIX, so nothing may be written)" >&2
+  exit 1
+fi
+
+has_d=0
+for a in "$@"; do [ "$a" = "-d" ] && has_d=1; done
+shift
+
+# -o root / -g root cannot work unprivileged, so they are stripped -- the
+# RECORDED argv above still carries them, which is what a row asserts.
+flags=(); ops=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o | -g) shift 2 ;;
+    -m)      flags+=("$1" "${2:-}"); shift 2 ;;
+    -*)      flags+=("$1"); shift ;;
+    *)       ops+=("$1"); shift ;;
+  esac
+done
+
+# EVERY DESTINATION MUST BE INSIDE THE PREFIX, checked here rather than trusted
+# to the caller. This is what makes it impossible for a row to write to the real
+# /etc by construction instead of by everyone remembering. Sources may of course
+# live outside it, so for `install` without -d only the LAST operand is a target.
+if [ "$verb" = "install" ] && [ "$has_d" -eq 0 ] && [ "${#ops[@]}" -gt 1 ]; then
+  targets=("${ops[$((${#ops[@]} - 1))]}")
+else
+  targets=("${ops[@]}")
+fi
+for t in "${targets[@]}"; do
+  case "$t" in
+    /*) case "$t" in
+          "$pfx"/*) ;;
+          *) echo "sudo stub: REFUSED a destination outside the prefix: $t" >&2; exit 97 ;;
+        esac ;;
+  esac
+done
+exec "$verb" "${flags[@]}" "${ops[@]}"
 STUB
 chmod +x "$STUBBIN/sudo" || fatal setup
 
@@ -397,7 +461,15 @@ has_route()  { awk -F'\t' -v d="$1" '$1==d{f=1} END{exit !f}' "$IPSTATE/routes" 
 # shellcheck disable=SC2317,SC2329
 lacks_route() { ! has_route "$1"; }
 
-installed() { awk -F'\t' '{print $1}' "$IPSTATE/routes" 2>/dev/null | sort | tr '\n' ' '; }
+# LC_ALL=C on EVERY sort here, and it is not decoration. `::/1` and `8000::/1`
+# order DIFFERENTLY under en_US.UTF-8 (which ignores punctuation when
+# collating) than under C/POSIX (where ':' is 0x3A and '8' is 0x38). A
+# developer machine is usually the former and a CI runner the latter, so an
+# expectation written without this passes locally and fails on CI -- which is
+# exactly what happened, on four rows, the first time this was pushed. Pinning
+# the collation makes the expected string a property of the code rather than of
+# whoever ran it.
+installed() { awk -F'\t' '{print $1}' "$IPSTATE/routes" 2>/dev/null | LC_ALL=C sort | tr '\n' ' '; }
 # awk, not `grep -c . || printf 0`: grep -c prints 0 AND exits 1 on an empty
 # file, so the `||` fires too and the helper returns "0\n0" -- which compares
 # unequal to "0" and fails a row that is actually correct. (On a MISSING file
@@ -562,6 +634,304 @@ printf '8.8.4.4\t%s\t%s\n' "$PROTO" "$METRIC" >> "$IPSTATE/routes"
 if wait_for 15 lacks_route 8.8.4.4; then ok "a route appearing under our proto mid-run is reclaimed"; else bad "a route appearing under our proto mid-run is reclaimed — timed out"; fi
 check "...and the configured destination is untouched" "$(installed)" "54.166.22.221 "
 watch_stop
+
+printf '\nthe IPv6 block (DO-704) — and its polarity is the OPPOSITE of the above\n'
+
+# Armed. The block is a --watch-only capability, so anything that must actually
+# INSTALL it goes through watch_start6 rather than --once.
+ff6() {
+    PATH="$STUBBIN:$PATH" \
+    VPN_FAILFAST_CONF="$CONF" VPN_FAILFAST_PROTO="$PROTO" \
+    VPN_FAILFAST_METRIC="$METRIC" VPN_FAILFAST_IFACE="$IFACE" \
+    VPN_FAILFAST_IPV6=block \
+    "$FAILFAST" "$@" 2>&1
+}
+watch_start6() {
+    PATH="$STUBBIN:$PATH" \
+    VPN_FAILFAST_CONF="$CONF" VPN_FAILFAST_PROTO="$PROTO" \
+    VPN_FAILFAST_METRIC="$METRIC" VPN_FAILFAST_IFACE="$IFACE" \
+    VPN_FAILFAST_POLL=1 VPN_FAILFAST_IPV6=block \
+    "$FAILFAST" --watch >"$IPSTATE/watch.out" 2>&1 &
+    WATCH_PID=$!
+}
+installed6()       { awk -F'\t' '{print $1}' "$IPSTATE/routes6" 2>/dev/null | LC_ALL=C sort | tr '\n' ' '; }
+installed6_count() { awk 'END{print NR+0}' "$IPSTATE/routes6" 2>/dev/null || printf '0\n'; }
+# Invoked INDIRECTLY through wait_for, which shellcheck cannot see. BOTH codes:
+# the pinned v0.9 says SC2317 and newer ones say SC2329.
+# shellcheck disable=SC2317,SC2329
+has_route6()   { awk -F'\t' -v d="$1" '$1==d{f=1} END{exit !f}' "$IPSTATE/routes6" 2>/dev/null; }
+# shellcheck disable=SC2317,SC2329
+lacks_route6() { ! has_route6 "$1"; }
+# shellcheck disable=SC2317,SC2329
+has_both_halves() { has_route6 '::/1' && has_route6 '8000::/1'; }
+# awk, never `grep -c ... || echo 0`: grep -c prints 0 AND exits 1 on no match,
+# so the `||` fires too and the helper answers "0\n0".
+# shellcheck disable=SC2317,SC2329
+converged_at_least() {
+    local n; n="$(awk '/route show dev tun0/{c++} END{print c+0}' "$IPSTATE/calls.log" 2>/dev/null)"
+    [[ "${n:-0}" -ge "$1" ]]
+}
+# shellcheck disable=SC2317,SC2329
+watch_said() { grep -q -- "$1" "$IPSTATE/watch.out" 2>/dev/null; }
+count_in() { awk -v pat="$1" 'index($0,pat){c++} END{print c+0}' "$2" 2>/dev/null; }
+
+# --- the knob -------------------------------------------------------------
+# An unknown value must be exit 2 in BOTH directions. Defaulting to `off` would
+# silently disarm a machine that asked to be armed; defaulting to `block` would
+# blackhole IPv6 off a typo. This validation is also what the installer uses as
+# its post-install check, so it has to be fatal in every mode.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(PATH="$STUBBIN:$PATH" VPN_FAILFAST_CONF="$CONF" \
+       VPN_FAILFAST_IPV6=blocked "$FAILFAST" --check 2>&1)"; RC=$?
+check "an unknown VPN_FAILFAST_IPV6: exit 2" "$RC" 2
+grep_ok "$OUT" 'VPN_FAILFAST_IPV6' "unknown knob value: names the knob"
+check "an unknown knob value installs nothing" "$(installed6_count)" "0"
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(ff --once)"
+check "the default is off: tunnel up, no v6 block installed" "$(installed6_count)" "0"
+check "...and no v6 route was even attempted" "$(asked '-6 route add')" "0"
+
+# --- polarity -------------------------------------------------------------
+# THE SINGLE STRONGEST ROW IN THIS SECTION. Asserting the argv byte for byte
+# kills wrong family, wrong verb, wrong destination, missing proto and missing
+# metric at once, and replaces five fuzzy ones. Same idiom the notification body
+# uses, and for the same reason: the only way to keep something constant is to
+# check that it IS constant.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+watch_start6
+if wait_for 15 has_both_halves; then ok "armed + tunnel UP: the block is installed"; else bad "armed + tunnel UP: the block is installed — timed out"; fi
+check "armed + UP: EXACTLY the two halves, nothing else" "$(installed6)" "8000::/1 ::/1 "
+grep_ok "$(cat "$IPSTATE/calls.log")" '^-6 route add unreachable ::/1 proto 66 metric 4242$' \
+        "the v6 install argv is exact, byte for byte"
+watch_stop
+
+# ... and the mirror. Tunnel DOWN means there is no tunnel to leak around, so
+# the block comes OFF and the v4 fail-fast routes go ON.
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+printf '::/1\t%s\t%s\n8000::/1\t%s\t%s\n' "$PROTO" "$METRIC" "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+watch_start6
+if wait_for 15 has_route 54.166.22.221; then ok "armed + tunnel DOWN: the v4 half is installed"; else bad "armed + tunnel DOWN: the v4 half is installed — timed out"; fi
+if wait_for 15 lacks_route6 '::/1'; then ok "armed + tunnel DOWN: the v6 block is withdrawn"; else bad "armed + tunnel DOWN: the v6 block is withdrawn — timed out"; fi
+check "...and withdrawn completely, not half of it" "$(installed6_count)" "0"
+watch_stop
+
+# Both ways round, under one daemon: this is the transition that actually
+# happens on this machine several times a day.
+reset; tunnel_up_state; write_conf 54.166.22.221
+watch_start6
+if wait_for 15 has_both_halves; then ok "UP: block on"; else bad "UP: block on — timed out"; fi
+tunnel_down_lingering
+if wait_for 15 lacks_route6 '::/1'; then ok "UP->DOWN: block off, without a restart"; else bad "UP->DOWN: block off — timed out"; fi
+if wait_for 15 has_route 54.166.22.221; then ok "UP->DOWN: v4 fail-fast on"; else bad "UP->DOWN: v4 fail-fast on — timed out"; fi
+tunnel_up_state
+if wait_for 15 has_both_halves; then ok "DOWN->UP: block back on"; else bad "DOWN->UP: block back on — timed out"; fi
+if wait_for 15 lacks_route 54.166.22.221; then ok "DOWN->UP: v4 fail-fast back off"; else bad "DOWN->UP: v4 fail-fast back off — timed out"; fi
+watch_stop
+
+# IDEMPOTENCE, and it is not cosmetic. If the up-branch cleared and re-added the
+# block each pass there would be a real unblocked window 17,280 times a day —
+# which is the leak this exists to close. One transition, one log line, however
+# many polls run.
+reset; tunnel_up_state; write_conf 54.166.22.221
+watch_start6
+if wait_for 15 has_both_halves; then ok "armed + UP: converged"; else bad "armed + UP: converged — timed out"; fi
+# A predicate, never a fixed sleep: a row that sleeps long enough today is a row
+# that flakes on a loaded CI runner, and this repo has already shipped one.
+if wait_for 20 converged_at_least 4; then ok "the daemon kept converging"; else bad "the daemon kept converging — timed out"; fi
+check "four converges later: still exactly the two halves" "$(installed6)" "8000::/1 ::/1 "
+check "...and ::/1 was announced ONCE, not once per poll" \
+      "$(count_in 'fail-fast ON  ::/1' "$IPSTATE/watch.out")" "1"
+check "...and it was never deleted and re-added" "$(asked '-6 route del')" "0"
+watch_stop
+
+# --- --once refuses the block --------------------------------------------
+# --once leaves no daemon and no ExecStopPost, so `--once` with the tunnel up
+# would blackhole global IPv6 until somebody found the route.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(ff6 --once)"; RC=$?
+check "--once with the block armed: exit 0" "$RC" 0
+check "--once refuses to install the block" "$(installed6_count)" "0"
+grep_ok "$OUT" 'watch-only capability' "--once says WHY it refused"
+
+reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
+OUT="$(ff6 --once)"
+check "--once still installs the IPv4 half" "$(installed)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
+
+# --- withdrawal is UNCONDITIONAL -----------------------------------------
+# Not gated on the arming switch, anywhere. "we were not armed" is never a
+# reason to leave a blackhole installed, and disarming then restarting has to
+# actually withdraw.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+OUT="$(ff --clear)"; RC=$?
+check "a DISARMED daemon still clears a v6 owned route: exit 0" "$RC" 0
+check "...and the route is gone" "$(installed6_count)" "0"
+
+reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
+ff --once >/dev/null
+printf '::/1\t%s\t%s\n8000::/1\t%s\t%s\n' "$PROTO" "$METRIC" "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+OUT="$(ff --clear)"; RC=$?
+check "--clear clears BOTH families in one call: exit 0" "$RC" 0
+check "--clear: v4 empty" "$(installed_count)" "0"
+check "--clear: v6 empty" "$(installed6_count)" "0"
+
+# A v6 route this tool owns that is NOT one of today's halves is an older
+# release's constant, or an operator's hand. Same rule as a destination dropped
+# from the config: it does not get to stay.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '2000::/3\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+watch_start6
+if wait_for 15 has_both_halves; then ok "armed + UP: the block converged over a stale constant"; else bad "armed + UP: the block converged over a stale constant — timed out"; fi
+if wait_for 15 lacks_route6 '2000::/3'; then ok "armed + UP: an owned v6 route that is not a half is dropped"; else bad "armed + UP: an owned v6 route that is not a half is dropped — timed out"; fi
+check "...and only the two halves remain" "$(installed6)" "8000::/1 ::/1 "
+watch_stop
+
+# Proto IS the identity in v6 exactly as in v4.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '2001:db8::/32\t111\t100\n' > "$IPSTATE/routes6"
+OUT="$(ff --clear)"
+check "a foreign-proto v6 route is never deleted" "$(installed6)" "2001:db8::/32 "
+check "...and no v6 delete was even attempted" "$(asked '-6 route del')" "0"
+
+# Orphan-clear-at-start through --watch, in v6. The unit runs --watch, and the
+# case that strands routes is the one where the stop path did not run.
+reset; tunnel_up_state; write_conf 54.166.22.221
+printf '2001:db8::/32\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+watch_start6
+if wait_for 15 lacks_route6 '2001:db8::/32'; then ok "--watch clears a v6 orphan"; else bad "--watch clears a v6 orphan — timed out"; fi
+if wait_for 15 has_both_halves; then ok "...and then installs the block"; else bad "...and then installs the block — timed out"; fi
+FIRST_DEL6="$(grep -n -- '-6 route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+FIRST_ADD6="$(grep -n -- '-6 route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+if [[ -n "$FIRST_DEL6" && -n "$FIRST_ADD6" && "$FIRST_DEL6" -lt "$FIRST_ADD6" ]]; then
+    ok "--watch removes a v6 orphan BEFORE its first v6 add"
+else
+    bad "--watch removes a v6 orphan BEFORE its first v6 add — del '$FIRST_DEL6', add '$FIRST_ADD6'"
+fi
+watch_stop
+
+# A v6 route appearing under our proto mid-run — another instance, or a hand —
+# is reclaimed by the next converge, not left until a restart.
+reset; tunnel_up_state; write_conf 54.166.22.221
+watch_start6
+if wait_for 15 has_both_halves; then ok "--watch installs the block"; else bad "--watch installs the block — timed out"; fi
+printf '2001:db8::/32\t%s\t%s\n' "$PROTO" "$METRIC" >> "$IPSTATE/routes6"
+if wait_for 15 lacks_route6 '2001:db8::/32'; then ok "a v6 route appearing under our proto mid-run is reclaimed"; else bad "a v6 route appearing under our proto mid-run is reclaimed — timed out"; fi
+check "...and the block itself is untouched" "$(installed6)" "8000::/1 ::/1 "
+watch_stop
+
+# A DISARMED daemon, tunnel DOWN, and a v6 route this tool owns appearing
+# mid-run. The start-clear cannot answer this one: the route arrives after it.
+# It is the only path on which converge's own tunnel-down v6 clear fires, and
+# therefore the only row that can see that clear being gated on the arming
+# switch.
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+watch_start
+if wait_for 15 has_route 54.166.22.221; then ok "disarmed + DOWN: the v4 half converged"; else bad "disarmed + DOWN: the v4 half converged — timed out"; fi
+printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" >> "$IPSTATE/routes6"
+if wait_for 15 lacks_route6 '::/1'; then ok "a DISARMED daemon still withdraws a v6 route it owns"; else bad "a DISARMED daemon still withdraws a v6 route it owns — timed out"; fi
+watch_stop
+
+# --- THE METRIC. Measured: `ip -6 route del <dst> proto 66 metric 1024`
+# against a metric-4242 route answers "No such process", which del_route treats
+# as SUCCESS. So one metric drift would make a v6 blackhole PERMANENT while
+# clear_owned reported it cleared.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '::/1\t%s\t1024\n' "$PROTO" > "$IPSTATE/routes6"
+OUT="$(ff --clear)"; RC=$?
+check "a v6 route at a DIFFERENT metric is still withdrawn: exit 0" "$RC" 0
+check "...and it is really gone" "$(installed6_count)" "0"
+
+# --- failures are not silences -------------------------------------------
+# A v6 add that FAILS. --once refuses the block and --watch swallows converge's
+# rc by design, so the only honest place this is observable is the daemon's own
+# output -- and it must name the destination rather than go quiet.
+reset; tunnel_up_state; write_conf 54.166.22.221
+touch "$IPSTATE/fail-add"
+watch_start6
+if wait_for 15 watch_said 'could not add unreachable ::/1'; then
+    ok "a failing v6 add is named, not swallowed"
+else
+    bad "a failing v6 add is named, not swallowed — nothing said so within the budget"
+fi
+check "...and nothing was installed" "$(installed6_count)" "0"
+watch_stop
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+touch "$IPSTATE/fail-del"
+OUT="$(ff --clear)"; RC=$?
+check "a v6 delete that fails for a REAL reason: exit 1, not 0" "$RC" 1
+grep_ok "$OUT" 'could not remove unreachable ::/1' "failed v6 delete: names the destination"
+
+# clear_owned must report a v6 failure even when the v4 half succeeded — an rc
+# that only tracked the last family would report this as clean.
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+ff --once >/dev/null
+printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+touch "$IPSTATE/fail-del6"
+OUT="$(ff --clear)"; RC=$?
+check "--clear fails when the v6 half fails and the v4 half SUCCEEDED: exit 1" "$RC" 1
+check "...and the v4 half really was cleared" "$(installed_count)" "0"
+
+# THE RE-READ GUARD. del_route treats "No such process" as success, so a delete
+# that addressed the wrong route is indistinguishable from one that worked. The
+# re-read is what makes "every delete succeeded and the route is still there"
+# loud instead of silent.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+touch "$IPSTATE/del-noop"
+OUT="$(ff --clear)"; RC=$?
+rm -f "$IPSTATE/del-noop"
+check "a delete that reports success and removes nothing: exit 1" "$RC" 1
+grep_ok "$OUT" 'still owned after clearing' "the surviving route is named, not swallowed"
+
+# The pretty-printed trap applies identically in v6 — and here it would mean the
+# BLOCK is never withdrawn, which blackholes all global IPv6.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '::/1\t%s\t%s\n8000::/1\t%s\t%s\n' "$PROTO" "$METRIC" "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+touch "$IPSTATE/pretty-json"
+OUT="$(ff --clear)"; RC=$?
+check "pretty-printed ip -6 -j output: exit 0" "$RC" 0
+check "...and the v6 routes are STILL withdrawn" "$(installed6_count)" "0"
+
+# --- --status and --help -------------------------------------------------
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(ff --status)"
+grep_ok "$OUT" 'ipv6:    off' "--status: reports the knob as off by default"
+grep_ok "$OUT" 'ipv6 installed (proto 66)' "--status: has a v6 installed section"
+OUT="$(ff6 --status)"
+grep_ok "$OUT" 'ipv6:    block' "--status: reports the knob as block when set"
+check "--status adds no route in either family" "$(asked 'route add')" "0"
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
+OUT="$(ff --status)"
+grep_ok "$OUT" '^  - ::/1$' "--status lists an installed v6 route"
+
+# EVERY knob appears in --help, extracted from the script rather than listed
+# here — so renaming one cannot make the daemon's own help lie while a
+# hand-written list stays green.
+OUT="$(ff --help)"
+MISSING=""
+while IFS= read -r k; do
+    [[ -n "$k" ]] || continue
+    grep -q -- "$k" <<<"$OUT" || MISSING="$MISSING $k"
+done < <(grep -oE 'VPN_FAILFAST_[A-Z_]+' "$FAILFAST" | LC_ALL=C sort -u)
+check "every VPN_FAILFAST_* identifier is documented in --help" "$MISSING" ""
+
+# --- the stub's own fidelity ---------------------------------------------
+# A fixture that cannot fail is decoration, so the stub's two load-bearing
+# behaviours get rows of their own.
+reset; tunnel_up_state
+OUT="$(PATH="$STUBBIN:$PATH" ip -6 route get 10.9.8.7 2>&1)"; RC=$?
+check "the stub rejects a v4 literal under -6, as the real tool does: exit 1" "$RC" 1
+grep_ok "$OUT" 'inet6 prefix is expected' "...with the measured message"
+OUT="$(PATH="$STUBBIN:$PATH" ip -4 route get ::1 2>&1)"; RC=$?
+check "the stub rejects a v6 literal under -4: exit 1" "$RC" 1
+grep_ok "$OUT" 'inet prefix is expected' "...with the measured message"
+OUT="$(PATH="$STUBBIN:$PATH" ip -9 route show proto 66 2>&1)"; RC=$?
+check "an unknown family flag still falls to the stub's exit 99" "$RC" 99
 
 printf '\nconfig validation — nothing is installed until ALL of it parses\n'
 
@@ -786,9 +1156,11 @@ git init -q "$MAINREPO" 2>/dev/null || fatal "git init failed"
 git -C "$MAINREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null \
     || fatal "git commit failed"
 git -C "$MAINREPO" worktree add -q --detach "$FAKE_WT" 2>/dev/null || fatal "git worktree add failed"
-mkdir -p "$FAKE_WT/scripts" "$FAKE_WT/systemd" "$FAKE_WT/sysctl" || fatal setup
+mkdir -p "$FAKE_WT/scripts" "$FAKE_WT/systemd/vpn-failfast.service.d" "$FAKE_WT/sysctl" || fatal setup
 cp -f "$SETUP" "$FAILFAST" "$FAKE_WT/scripts/" || fatal setup
 cp -f "$DOTFILES/systemd/vpn-failfast.service" "$FAKE_WT/systemd/" || fatal setup
+cp -f "$DOTFILES/systemd/vpn-failfast.service.d/ipv6-block.conf" \
+      "$FAKE_WT/systemd/vpn-failfast.service.d/" || fatal setup
 cp -f "$DOTFILES/sysctl/99-vpn-acs-port.conf" "$FAKE_WT/sysctl/" || fatal setup
 # Proof the fixture is what it claims to be, before any row leans on it.
 WT_GITDIR="$(git -C "$FAKE_WT" rev-parse --git-dir 2>/dev/null || true)"
@@ -949,6 +1321,237 @@ rm -f "$DB"
 OUT="$(zdrift "$DA" "$DB")"
 grep_ok "$OUT" '✗ thing not installed' "an absent installed file: a failure, not drift"
 
+printf '\nvpn-doctor and the IPv6 block — the canary that was specified backwards\n'
+
+# EVERY zsh row below puts PATH and IPSTATE INSIDE the `zsh -c` string. The
+# existing zdrift() has no stub on PATH and is safe only because _vpn_drift
+# shells out to nothing but diff and grep; a v6 doctor row written "like the
+# existing ones" would read the LIVE routing table and go green or red on
+# whether the tunnel happens to be up on the machine running the suite.
+zv6() {
+    zsh -c "export IPSTATE='$IPSTATE'; export PATH=\"$STUBBIN:\$PATH\"; \
+            source '$SYSTEM_SH'; typeset -i _DOCTOR_FAIL=0 _DOCTOR_WARN=0; $1" 2>&1
+}
+
+# --- the six-cell verdict table ------------------------------------------
+# _vpn_v6_verdict is PURE -- armed, tunnel-up, both-halves, any-owned, all as
+# arguments -- which is the only reason every cell is reachable from a row
+# without putting the machine into the state the cell describes. Three of the
+# six are FAILures for three different reasons.
+check "verdict: armed, UP, block installed"          "$(zv6 '_vpn_v6_verdict 1 1 1 1')" "ok"
+check "verdict: armed, UP, block MISSING -> leaking" "$(zv6 '_vpn_v6_verdict 1 1 0 0')" "leaking"
+check "verdict: armed, DOWN, block present -> orphan" "$(zv6 '_vpn_v6_verdict 1 0 1 1')" "orphan-down"
+check "verdict: armed, DOWN, nothing owned"          "$(zv6 '_vpn_v6_verdict 1 0 0 0')" "ok-down"
+check "verdict: NOT armed but routes owned -> orphan" "$(zv6 '_vpn_v6_verdict 0 1 1 1')" "orphan-disarmed"
+check "verdict: not armed, nothing owned -> a note"  "$(zv6 '_vpn_v6_verdict 0 1 0 0')" "not-armed"
+# Half the block installed is NOT installed. A single half leaves the other half
+# of the address space leaking, and reporting that as ok would be the quietest
+# possible failure.
+check "verdict: armed, UP, only ONE half -> leaking" "$(zv6 '_vpn_v6_verdict 1 1 0 1')" "leaking"
+
+# --- what the doctor DOES with a probe result ----------------------------
+# Pure, for the same reason _vpn_v6_verdict is: the halves-guard is the thing
+# standing between a green tick and crediting our block for somebody ELSE's
+# reject route, and inside vpn-doctor's own case statement it would be reachable
+# only with a whole machine in the state it describes.
+check "canary: blocked AND we own both halves -> a pass" \
+      "$(zv6 '_vpn_v6_canary_verdict blocked 1')" "ok"
+check "canary: blocked but we own NEITHER half -> not ours, not a pass" \
+      "$(zv6 '_vpn_v6_canary_verdict blocked 0')" "not-ours"
+check "canary: open -> leaking" "$(zv6 '_vpn_v6_canary_verdict open 1')" "leaking"
+check "canary: no-v6 is NEVER a pass" \
+      "$(zv6 '_vpn_v6_canary_verdict no-v6 1')" "not-exercised"
+check "canary: anything unrecognised -> odd" \
+      "$(zv6 '_vpn_v6_canary_verdict weird 1')" "odd"
+
+# --- the route-get canary ------------------------------------------------
+# THE ROW THE FIRST DESIGN NEEDED AND DID NOT HAVE. `ip -6 route get` prints the
+# winning route on STDOUT with rc 0 when open, and on failure prints NOTHING on
+# stdout with the message on STDERR and rc 2. So `grep -q unreachable` is never
+# true for the blocked case and ALWAYS true for the no-IPv6 case -- a green tick
+# for a block that is not installed.
+mkget() {   # mkget <addr> <rc> <stdout> <stderr>
+    printf '%s\n' "$2" > "$IPSTATE/get-$1.rc"
+    if [[ -n "$3" ]]; then printf '%s\n' "$3" > "$IPSTATE/get-$1.out"; else rm -f "$IPSTATE/get-$1.out"; fi
+    if [[ -n "$4" ]]; then printf '%s\n' "$4" > "$IPSTATE/get-$1.err"; else rm -f "$IPSTATE/get-$1.err"; fi
+}
+
+reset
+mkget 2606:4700:4700::1111 2 "" "RTNETLINK answers: No route to host"
+check "_vpn_v6_probe: EHOSTUNREACH is 'blocked'" \
+      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "blocked"
+
+reset
+mkget 2606:4700:4700::1111 0 "2606:4700:4700::1111 from :: via fe80::1 dev wlp0s20f3 proto ra src 2a06:c701::1 metric 600 pref medium" ""
+check "_vpn_v6_probe: rc 0 with a route on stdout is 'open'" \
+      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "open"
+
+# THE ROW THAT WOULD HAVE CAUGHT THE INVERTED CANARY. A machine with no IPv6 at
+# all answers ENETUNREACH, and the naive `grep -q unreachable` matches that
+# string -- so the original design reported "blocked" loudest on the machine
+# where nothing was blocked at all.
+reset
+mkget 2606:4700:4700::1111 2 "" "RTNETLINK answers: Network is unreachable"
+check "_vpn_v6_probe: ENETUNREACH is 'no-v6', NOT 'blocked'" \
+      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "no-v6"
+
+reset
+mkget 2606:4700:4700::1111 2 "" "RTNETLINK answers: Some new message nobody has seen"
+check "_vpn_v6_probe: anything else is 'odd', never a pass" \
+      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "odd"
+
+# ... and the probe is answering from the STUB, not from this machine's kernel.
+# Without this the four rows above would pass on a host whose real routing table
+# happened to agree with the fixtures.
+reset
+mkget 2606:4700:4700::1111 2 "" "RTNETLINK answers: No route to host"
+zv6 '_vpn_v6_probe 2606:4700:4700::1111' >/dev/null
+grep_ok "$(cat "$IPSTATE/calls.log")" '^-6 route get 2606:4700:4700::1111$' \
+        "the probe went through the stub, not the live routing table"
+
+# THE FIXTURE PINNED TO THE MEASUREMENT. These three strings are the whole
+# design; a fixture that drifted into fiction would prove the classifier correct
+# against strings iproute2 never emits.
+reset
+OUT="$(PATH="$STUBBIN:$PATH" ip -6 route get 2606:4700:4700::1111 2>&1)"; RC=$?
+check "a missing route-get fixture is exit 99, never a quiet default" "$RC" 99
+
+printf '\nthe IPv6 block drop-in, and arming it without breaking IPv4 fail-fast\n'
+
+DROPIN_SRC="$DOTFILES/systemd/vpn-failfast.service.d/ipv6-block.conf"
+[[ -r "$DROPIN_SRC" ]] || fatal "missing $DROPIN_SRC"
+
+# THE DROP-IN'S VALUE MUST BE ONE THE SCRIPT ACCEPTS. This is worth more than a
+# `systemd-analyze verify` row, which is decoration here: a drop-in containing
+# only Environment= cannot make the verifier speak, and the suite verifies a
+# sed'd copy at a path where the .d directory would not even be read.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+DROPIN_VAL="$(sed -n 's/^Environment=VPN_FAILFAST_IPV6=//p' "$DROPIN_SRC" | head -1)"
+check "the shipped drop-in sets exactly one value" \
+      "$(grep -c '^Environment=VPN_FAILFAST_IPV6=' "$DROPIN_SRC")" "1"
+OUT="$(PATH="$STUBBIN:$PATH" VPN_FAILFAST_CONF="$CONF" \
+       VPN_FAILFAST_IPV6="$DROPIN_VAL" "$FAILFAST" --check 2>&1)"; RC=$?
+check "the shipped drop-in's value is one the daemon accepts: exit 0" "$RC" 0
+check "...and it is the value that actually arms the block" "$DROPIN_VAL" "block"
+
+# --- the installer -------------------------------------------------------
+# A NON-worktree fixture, so the worktree guard is not in play and no row needs
+# VPN_SETUP_ALLOW_WORKTREE=1 on a path that reaches the install block.
+# $MAINREPO is a real repository whose git-dir is <root>/.git, which does not
+# match */.git/worktrees/*.
+INSTROOT="$MAINREPO"
+mkdir -p "$INSTROOT/scripts" "$INSTROOT/systemd/vpn-failfast.service.d" "$INSTROOT/sysctl" || fatal setup
+cp -f "$SETUP" "$FAILFAST" "$INSTROOT/scripts/" || fatal setup
+cp -f "$DOTFILES/systemd/vpn-failfast.service" "$INSTROOT/systemd/" || fatal setup
+cp -f "$DROPIN_SRC" "$INSTROOT/systemd/vpn-failfast.service.d/" || fatal setup
+cp -f "$DOTFILES/sysctl/99-vpn-acs-port.conf" "$INSTROOT/sysctl/" || fatal setup
+# Proof the fixture is what it claims to be, before any row leans on it.
+INST_GITDIR="$(git -C "$INSTROOT" rev-parse --git-dir 2>/dev/null || true)"
+case "$INST_GITDIR" in
+    *"/.git/worktrees/"*) bad "the installer fixture IS a worktree — the rows below would exit at the guard" ;;
+    *) ok "the installer fixture is a plain checkout, so the install block is reachable" ;;
+esac
+
+FAKEROOT="$T/fakeroot"
+DROPIN_ETC="etc/systemd/system/vpn-failfast.service.d/ipv6-block.conf"
+setup_run() {   # setup_run <prefix> <args...>
+    local pfx="$1"; shift
+    PATH="$STUBBIN:$PATH" VPN_SETUP_PREFIX="$pfx" VPN_LOCAL_CONF="$CONF" \
+      "$INSTROOT/scripts/setup-vpn-failfast.sh" --no-enable "$@" 2>&1
+}
+fresh_root() {
+    rm -rf "$FAKEROOT"
+    mkdir -p "$FAKEROOT/usr/local/bin" "$FAKEROOT/etc/systemd/system" "$FAKEROOT/etc/sysctl.d"
+}
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"; fresh_root
+OUT="$(setup_run "$FAKEROOT" --block-ipv6)"; RC=$?
+check "--block-ipv6: exit 0" "$RC" 0
+if [[ -r "$FAKEROOT/$DROPIN_ETC" ]]; then ok "--block-ipv6 installs the drop-in"; else bad "--block-ipv6 installs the drop-in — not there"; fi
+grep_ok "$(cat "$IPSTATE/sudo.log")" "install -m 644 -o root -g root" \
+        "the drop-in is installed ROOT-OWNED, mode 644"
+
+# NEITHER FLAG LEAVES ARMING EXACTLY AS IT IS. A re-run after `git pull` is the
+# normal path -- it is what vpn-doctor tells you to do -- and a boolean
+# defaulting to off would silently disarm the machine every single time.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(setup_run "$FAKEROOT")"; RC=$?
+check "a plain re-run: exit 0" "$RC" 0
+if [[ -r "$FAKEROOT/$DROPIN_ETC" ]]; then ok "a plain re-run does NOT disarm"; else bad "a plain re-run silently disarmed the machine"; fi
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(setup_run "$FAKEROOT" --no-block-ipv6)"; RC=$?
+check "--no-block-ipv6: exit 0" "$RC" 0
+if [[ -r "$FAKEROOT/$DROPIN_ETC" ]]; then bad "--no-block-ipv6 left the drop-in behind"; else ok "--no-block-ipv6 removes the drop-in"; fi
+if [[ -d "$FAKEROOT/etc/systemd/system/vpn-failfast.service.d" ]]; then
+    bad "--no-block-ipv6 left the now-empty .d directory behind"
+else
+    ok "--no-block-ipv6 drops the now-empty .d directory too"
+fi
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(setup_run "$FAKEROOT" --block-ipv6 --no-block-ipv6)"; RC=$?
+check "both flags at once: exit 2, never a guess" "$RC" 2
+grep_ok "$OUT" 'contradictory' "both flags: says why"
+
+# THE ONE THAT MATTERS. The drop-in is the only producer of VPN_FAILFAST_IPV6
+# and the knob is fatal on an unknown value, so `blocked` (or `Block`, or a
+# trailing space) makes --watch exit 2 on EVERY start -> Restart=on-failure ->
+# StartLimitBurst -> the unit sits failed, and IPv4 fail-fast, which works today
+# with NRestarts=0, is dead because of a typo in an OPTIONAL feature. The
+# pre-install validation runs the CHECKOUT script with the CHECKOUT environment
+# and cannot see the drop-in at all.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"; fresh_root
+printf '[Service]\nEnvironment=VPN_FAILFAST_IPV6=blocked\n' \
+    > "$INSTROOT/systemd/vpn-failfast.service.d/ipv6-block.conf"
+OUT="$(setup_run "$FAKEROOT" --block-ipv6)"; RC=$?
+cp -f "$DROPIN_SRC" "$INSTROOT/systemd/vpn-failfast.service.d/" || fatal setup
+check "a drop-in the daemon would REFUSE: exit 1, before any restart" "$RC" 1
+grep_ok "$OUT" 'REFUSES' "the bad value is named"
+if [[ -r "$FAKEROOT/$DROPIN_ETC" ]]; then
+    bad "the refused drop-in was left installed — the next boot would fail the unit"
+else
+    ok "the refused drop-in is REMOVED, not left for the next boot to find"
+fi
+if [[ -x "$FAKEROOT/usr/local/bin/vpn-failfast.sh" ]]; then
+    ok "the refusal leaves IPv4 fail-fast installed — it does not take the working half down"
+else
+    bad "the refusal removed the daemon itself"
+fi
+
+# A DROP-IN THE RUNNING UNIT HAS NOT RE-READ IS NOT ARMED. `enable --now` runs
+# `start`, and `start` on an already-active unit is a no-op -- so without this
+# the installer would arm the file, reload, report success, and change nothing
+# until the next reboot, while vpn-doctor correctly reported IPv6 as leaking.
+# `try-restart` cannot start a unit that --no-enable left stopped, which is why
+# it is safe to run before the DO_ENABLE gate.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"; fresh_root
+OUT="$(setup_run "$FAKEROOT" --block-ipv6)"
+grep_ok "$(cat "$IPSTATE/sudo.log")" 'systemctl try-restart vpn-failfast.service' \
+        "arming re-reads the running unit, so the block takes effect now"
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(setup_run "$FAKEROOT" --no-block-ipv6)"
+grep_ok "$(cat "$IPSTATE/sudo.log")" 'systemctl try-restart vpn-failfast.service' \
+        "disarming re-reads it too, so the block is really withdrawn"
+
+# ... and a routine re-run restarts NOTHING. This is the other half of the
+# tri-state: `vpn-setup` after a `git pull` must not bounce a root daemon that
+# is holding fail-fast routes for a tunnel that is currently down.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(setup_run "$FAKEROOT")"
+grep_none "$(cat "$IPSTATE/sudo.log")" 'try-restart' \
+          "a plain re-run does NOT bounce the running daemon"
+
+# The seam itself is validated rather than trusted: a relative or absent prefix
+# would silently install to the real /etc.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(PATH="$STUBBIN:$PATH" VPN_SETUP_PREFIX="relative/path" VPN_LOCAL_CONF="$CONF" \
+       "$INSTROOT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1)"; RC=$?
+check "a relative VPN_SETUP_PREFIX: exit 2, never the real /etc" "$RC" 2
+OUT="$(setup_run "$FAKEROOT")"
+grep_ok "$OUT" 'NOT to the real /etc' "a prefixed run says loudly that it is not a real install"
+
 printf '\nthe reporter — DST, the join, and refusing to invent a clean week\n'
 
 rep() { "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" "$@" 2>&1; }
@@ -1005,7 +1608,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=131
+EXPECTED_ROWS=238
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

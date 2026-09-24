@@ -30,6 +30,10 @@
 #                    Host bits below the prefix are refused.
 #   ::1/128          `ip` ACCEPTS this and installs it into the v6 table. Only
 #                    IPv4 is supported here; v6 is refused rather than ignored.
+#                    The DO-704 IPv6 EGRESS BLOCK is a separate thing and is NOT
+#                    configured from this file: its destinations are constants in
+#                    scripts/vpn-failfast.sh and it is armed with
+#                    `vpn-setup --block-ipv6`. Do not look for it in this list.
 #   127.0.0.1        Loopback. Refused.
 #
 # A malformed entry makes the unit exit 2 and install NOTHING — never a partial

@@ -20,17 +20,36 @@
 # Run via `vpn-setup` (zsh/functions/system.sh). NEVER by ./install — ./install
 # never uses sudo. Idempotent: re-run to resync after editing the repo copies.
 #
-# Usage: setup-vpn-failfast.sh [--yes] [--no-enable]
-#   --yes         do not prompt before enabling the unit
-#   --no-enable   install everything but leave the unit stopped and disabled
+# Usage: setup-vpn-failfast.sh [--yes] [--no-enable] [--block-ipv6|--no-block-ipv6]
+#   --yes             do not prompt before enabling the unit
+#   --no-enable       install everything but leave the unit stopped and disabled
+#   --block-ipv6      arm the DO-704 IPv6 block (installs the drop-in)
+#   --no-block-ipv6   disarm it (removes the drop-in)
+#
+# NEITHER IPv6 FLAG LEAVES ARMING EXACTLY AS IT IS. A routine re-run -- which is
+# what you do after a `git pull`, and what vpn-doctor tells you to do -- must
+# never silently disarm a machine, so the drop-in is only touched when you ask.
+#
+# VPN_SETUP_PREFIX is a TEST SEAM, not an operational knob: it prefixes every
+# destination path so the state table can exercise the install and the
+# post-install check for real instead of asserting argv. It is refused unless it
+# is an absolute path to an existing directory, and it says so loudly on every
+# run where it is set.
 set -euo pipefail
 
 ASSUME_YES=0
 DO_ENABLE=1
+BLOCK_IPV6=''   # '' = leave arming alone; 1 = arm; 0 = disarm
 for arg in "$@"; do
   case "$arg" in
     -y | --yes) ASSUME_YES=1 ;;
     --no-enable) DO_ENABLE=0 ;;
+    --block-ipv6)
+      [[ "$BLOCK_IPV6" == "0" ]] && { echo "--block-ipv6 and --no-block-ipv6 are contradictory" >&2; exit 2; }
+      BLOCK_IPV6=1 ;;
+    --no-block-ipv6)
+      [[ "$BLOCK_IPV6" == "1" ]] && { echo "--block-ipv6 and --no-block-ipv6 are contradictory" >&2; exit 2; }
+      BLOCK_IPV6=0 ;;
     -h | --help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' \
       "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -41,17 +60,27 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 UNIT_SRC="${DOTFILES}/systemd/vpn-failfast.service"
 SYSCTL_SRC="${DOTFILES}/sysctl/99-vpn-acs-port.conf"
 SCRIPT_SRC="${DOTFILES}/scripts/vpn-failfast.sh"
+DROPIN_SRC="${DOTFILES}/systemd/vpn-failfast.service.d/ipv6-block.conf"
 CONF_LOCAL="${VPN_LOCAL_CONF:-${HOME}/.vpn-failfast.conf}"
-CONF_DST="/etc/vpn-failfast.conf"
-UNIT_DST="/etc/systemd/system/vpn-failfast.service"
-SYSCTL_DST="/etc/sysctl.d/99-vpn-acs-port.conf"
+# A test seam, validated rather than trusted. Empty in every real run.
+PREFIX="${VPN_SETUP_PREFIX:-}"
+if [[ -n "$PREFIX" ]]; then
+  [[ "$PREFIX" == /* && -d "$PREFIX" ]] || {
+    echo "VPN_SETUP_PREFIX must be an absolute path to an existing directory, got '$PREFIX'" >&2
+    exit 2; }
+fi
+CONF_DST="${PREFIX}/etc/vpn-failfast.conf"
+UNIT_DST="${PREFIX}/etc/systemd/system/vpn-failfast.service"
+SYSCTL_DST="${PREFIX}/etc/sysctl.d/99-vpn-acs-port.conf"
+DROPIN_DIR="${PREFIX}/etc/systemd/system/vpn-failfast.service.d"
+DROPIN_DST="${DROPIN_DIR}/ipv6-block.conf"
 # The daemon is COPIED here and root runs it from here. Not a symlink and not a
 # path in $HOME: the same rule resticprofile/profiles.toml and the audit rules
 # follow, and the same place backup-verify.sh, backup-manifest.sh and
 # restic-notify already live. See the unit's header for what went wrong without
 # it -- the first install baked a WORKTREE path into a root unit, and
 # wt-gc-sweep deletes worktrees daily.
-SCRIPT_DST="/usr/local/bin/vpn-failfast.sh"
+SCRIPT_DST="${PREFIX}/usr/local/bin/vpn-failfast.sh"
 ACS_PORT=35001
 
 if [[ -t 1 ]]; then
@@ -69,9 +98,13 @@ log() {
   esac
 }
 
-for f in "$UNIT_SRC" "$SYSCTL_SRC" "$SCRIPT_SRC"; do
+for f in "$UNIT_SRC" "$SYSCTL_SRC" "$SCRIPT_SRC" "$DROPIN_SRC"; do
   [[ -r "$f" ]] || { log ERROR "missing $f"; exit 1; }
 done
+
+if [[ -n "$PREFIX" ]]; then
+  log WARNING "VPN_SETUP_PREFIX=$PREFIX — installing under a prefix, NOT to the real /etc"
+fi
 
 # REFUSE to install out of a worktree. `vpn-setup` resolves its checkout from
 # $PWD when that looks like one, which is right for testing a branch and wrong
@@ -125,9 +158,67 @@ log INFO "Installing root-owned files"
 sudo install -m 755 -o root -g root "$SCRIPT_SRC" "$SCRIPT_DST"
 sudo install -m 644 -o root -g root "$CONF_LOCAL" "$CONF_DST"
 sudo install -m 644 -o root -g root "$UNIT_SRC"   "$UNIT_DST"
-sudo install -d -m 755 -o root -g root /etc/sysctl.d
+sudo install -d -m 755 -o root -g root "${PREFIX}/etc/sysctl.d"
 sudo install -m 644 -o root -g root "$SYSCTL_SRC" "$SYSCTL_DST"
 log SUCCESS "installed $SCRIPT_DST, $CONF_DST, $UNIT_DST, $SYSCTL_DST"
+
+# ---------------------------------------------------------------------------
+# The IPv6 block (DO-704): arm, disarm, or leave exactly as it is
+# ---------------------------------------------------------------------------
+# An UNSET $BLOCK_IPV6 touches nothing. That is the whole reason it is tri-state
+# rather than a boolean: a re-run after `git pull` is the normal path, and a
+# boolean defaulting to off would silently disarm the machine every time.
+if [[ "$BLOCK_IPV6" == "1" ]]; then
+  log INFO "Arming the IPv6 block"
+  sudo install -d -m 755 -o root -g root "$DROPIN_DIR"
+  sudo install -m 644 -o root -g root "$DROPIN_SRC" "$DROPIN_DST"
+  log SUCCESS "installed $DROPIN_DST"
+elif [[ "$BLOCK_IPV6" == "0" ]]; then
+  log INFO "Disarming the IPv6 block"
+  # HARDCODED LITERALS, never "$DROPIN_DST"/"$DROPIN_DIR". Under `set -u` an
+  # unset variable aborts, but a variable that is set and EMPTY does not -- and
+  # `sudo rm -f /` -style removal is not a class of accident worth being one
+  # refactor away from. The prefix form is spelled out separately.
+  if [[ -n "$PREFIX" ]]; then
+    sudo rm -f "${PREFIX}/etc/systemd/system/vpn-failfast.service.d/ipv6-block.conf"
+    sudo rmdir --ignore-fail-on-non-empty "${PREFIX}/etc/systemd/system/vpn-failfast.service.d" 2>/dev/null || true
+  else
+    sudo rm -f /etc/systemd/system/vpn-failfast.service.d/ipv6-block.conf
+    sudo rmdir --ignore-fail-on-non-empty /etc/systemd/system/vpn-failfast.service.d 2>/dev/null || true
+  fi
+  log SUCCESS "removed the IPv6 block drop-in"
+fi
+
+# THE CHECK THAT MATTERS IS "WILL THE DAEMON STILL START", NOT "DID THE ROUTES
+# APPEAR". The drop-in is the only producer of VPN_FAILFAST_IPV6 and the script
+# treats an unknown value as fatal in every mode, so `blocked`, `Block` or a
+# trailing space makes --watch exit 2 on every start -> Restart=on-failure ->
+# StartLimitBurst -> the unit sits `failed`, and IPv4 fail-fast, which works
+# today with NRestarts=0, is dead because of a typo in an OPTIONAL feature.
+#
+# The validation above this runs the CHECKOUT script with the CHECKOUT
+# environment and cannot see the drop-in at all. So read the value back out of
+# the file that is actually installed, hand it to the script that is actually
+# installed, and refuse BEFORE systemctl ever restarts anything.
+if [[ -r "$DROPIN_DST" ]]; then
+  dropin_val="$(sed -n 's/^Environment=VPN_FAILFAST_IPV6=//p' "$DROPIN_DST" | head -1)"
+  log INFO "Checking the installed daemon accepts VPN_FAILFAST_IPV6='${dropin_val}'"
+  if VPN_FAILFAST_IPV6="$dropin_val" VPN_FAILFAST_CONF="$CONF_DST" \
+     "$SCRIPT_DST" --check >/dev/null 2>&1; then
+    log SUCCESS "the installed daemon accepts the drop-in's value"
+  else
+    log ERROR "the installed daemon REFUSES VPN_FAILFAST_IPV6='${dropin_val}'"
+    log ERROR "  Restarting now would leave the unit in a restart loop and then failed,"
+    log ERROR "  taking IPv4 fail-fast down with it. Removing the drop-in and refusing."
+    if [[ -n "$PREFIX" ]]; then
+      sudo rm -f "${PREFIX}/etc/systemd/system/vpn-failfast.service.d/ipv6-block.conf"
+    else
+      sudo rm -f /etc/systemd/system/vpn-failfast.service.d/ipv6-block.conf
+    fi
+    sudo systemctl daemon-reload
+    exit 1
+  fi
+fi
 
 # Apply the sysctl now as well as at boot. A file in /etc/sysctl.d that has
 # never been applied is the silent-failure shape this repo keeps finding: it
@@ -146,6 +237,23 @@ else
 fi
 
 sudo systemctl daemon-reload
+
+# A DROP-IN THE RUNNING UNIT HAS NOT RE-READ IS NOT ARMED. `systemctl enable
+# --now` below runs `start`, and `start` on an ALREADY-ACTIVE unit is a no-op --
+# it does not re-read the environment. So on the normal machine, where
+# vpn-failfast is already running, arming would install the file, reload, report
+# success, and change nothing at all until the next reboot. vpn-doctor would
+# then correctly report IPv6 as LEAKING while the installer had just said it was
+# armed, which is the worst possible pairing: a green install and a red doctor.
+#
+# `try-restart`, not `restart`: it restarts the unit only if it is ALREADY
+# running, and is a no-op otherwise -- so it cannot start a unit that --no-enable
+# deliberately left stopped. Guarded on the arming state having actually changed,
+# so a plain re-run still restarts nothing.
+if [[ -n "$BLOCK_IPV6" ]]; then
+  log INFO "Re-reading the unit so the drop-in takes effect now, not at the next boot"
+  sudo systemctl try-restart vpn-failfast.service
+fi
 
 if (( ! DO_ENABLE )); then
   log INFO "--no-enable: unit installed but not started."

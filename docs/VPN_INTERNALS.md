@@ -438,3 +438,321 @@ dropped — while `vpn-sweeps` counts every `>STATE` transition in the window. O
 every one of the 39 spans has an `AUTH_FAILED` strictly inside it, checked directly.
 
 **Compare the tool to itself.** The number this work targets is *SAML timeout → next attempt*.
+
+---
+
+## 10. The IPv6 leak, and the block that closes it (DO-704)
+
+The endpoint is `SplitTunnel=False`, but **only IPv4 is tunnelled**. The client installs the
+classic `0.0.0.0/1` + `128.0.0.0/1` pair over `tun0` and *nothing at all* for IPv6, so the v6
+default route still points at the ISP. Measured on a connected client: `curl -4 ifconfig.me`
+returns the VPN's NAT gateway, `curl -6` returns the ISP address — and `curl` with no family flag
+preferred v6, so on a dual-stack network the leak is the **default** path, not an edge case.
+
+Both alternatives are closed. **Split tunnel** is ruled out: nine security groups allowlist the VPN
+egress IP `34.230.137.243/32` (including production `Q-Proxy` with `IpProtocol: -1`) and the EC2
+instances are reached over their *public* IPs, so split tunnel would break SSH/HTTPS/RDP for all
+six users. **Dual-stacking** is impossible: `vpc-80a6c6fd` has no IPv6 CIDR and neither does the
+VPN subnet, so there are no v6 routes to push. The fix is therefore client-side only, and it
+changes nothing for the endpoint or the other five users.
+
+### Why routes and not nftables, and not `ip rule`
+
+`nft list table` **requires root**. `vpn-failfast.sh --status` and `vpn-doctor` are unprivileged by
+contract, and the doctor's most valuable question is the orphan one — so a mechanism only root can
+read would blind the check that matters most. A route is readable with `ip -6 route show proto 66`
+and *evaluable* with `ip -6 route get`, both unprivileged.
+
+`proto 66` is already the identity for "what this tool may remove", and the v6 filter genuinely
+filters — verified on this box:
+
+```
+$ ip -6 route show proto 66 | wc -l      ->  0
+$ ip -6 route show proto ra  | wc -l     ->  4
+```
+
+**`ip -6 rule show protocol 66` does NOT.** It silently ignores the filter and prints every rule
+with rc 0:
+
+```
+$ ip -6 rule show protocol 66 | wc -l    ->  6      # every rule on the box
+```
+
+That is the whole reason the `ip rule` design was killed: a cleanup loop written against that
+output would have deleted Tailscale's four rules. The trap does not apply to `route show`, which is
+why one is used and the other is not.
+
+A reject **route** has one more property a netfilter rule does not: it is visible to glibc's
+RFC 6724 reachability probe (a UDP `connect()` that sends no packet), so v6 addresses sort *last*
+and naive connect-the-first-result code never pays a failed v6 attempt.
+
+### The destinations: `::/1` + `8000::/1`, never `2000::/3`
+
+```
+$ ip -6 route get 64:ff9b::1
+64:ff9b::1 from :: via fe80::bed5:edff:fe4c:c652 dev enx8c3b4a256b7a proto ra ... metric 100
+```
+
+The well-known NAT64 prefix is in **`::/3`**, not `2000::/3`. On an IPv6-only hotspot with
+PREF64+DNS64 every AAAA answer is a `64:ff9b::/96` address, and `2000::/3` would block **none** of
+it. That is a prefix bug, not a mechanism bug — the nftables variant had it identically.
+
+Nothing that should keep working is caught by the `/1` pair, measured rather than assumed:
+
+| what | why it still works |
+|---|---|
+| multicast `ff00::/8` | lives in `table local` (17 entries), consulted by rule 0 before anything else |
+| `fe80::/64` link-local | longest-prefix-match, metric 256/1024 |
+| the on-link LAN `/64` | longest-prefix-match, metric 100/600 |
+| Tailscale `fd7a:115c:a1e0::/48` | rule **5270 → table 52**, evaluated *before* `32766 → main` |
+
+Verified: `ip -6 route get fd7a:115c:a1e0::53` → `dev tailscale0 table 52`. The pair is also the
+exact mirror of the `0.0.0.0/1` + `128.0.0.0/1` the client installs for IPv4, which makes it
+self-explanatory in a routing table.
+
+### `expires` is ACCEPTED on an `unreachable` v6 route and silently not applied
+
+This is the measurement the whole "no dead-man switch" decision rests on, and it was taken
+first-hand rather than carried — see *How these were measured* below.
+
+Both routes were created in the same namespace, by the same binary, in the same second:
+
+```
+SUBJECT  ip -6 route replace unreachable ::/1 proto 66 metric 4242 expires 5          -> rc 0
+CONTROL  ip -6 route replace 2001:db8:aaaa::/48 via 2001:db8:1::2 dev dummy0 \
+                             proto 66 metric 4242 expires 5                           -> rc 0
+
+immediately:
+  2001:db8:aaaa::/48 via 2001:db8:1::2 dev dummy0 metric 4242 expires 4sec pref medium
+  unreachable ::/1 dev lo metric 4242 pref medium                  <- NO expires AT ALL
+
+12 seconds later:
+  2001:db8:aaaa::/48 via 2001:db8:1::2 dev dummy0 metric 4242 expires -7sec pref medium
+  unreachable ::/1 dev lo metric 4242 pref medium                  <- still none
+```
+
+`expires` is **accepted with rc 0 and the attribute is never attached** to an `unreachable` route:
+nothing in `show`, no `"expires"` key in `-j`, immediately or ever. The control is what makes that
+conclusive rather than suggestive — the flag is plainly honoured and displayed on a nexthop route
+in the identical environment.
+
+**A correction to the planning note, which said the control "expired correctly".** It did not get
+*deleted* within the window either; it went to `expires -7sec`, so the kernel's fib6 garbage
+collector had simply not run. What the control demonstrates is **attachment**, which is the
+sharper fact: there is nothing to expire on a reject route, rather than an expiry that is merely
+slow. The conclusion — ship no dead-man switch — is unchanged and better supported.
+
+A dead-man switch built on it would be a safety claim that silently is not true, which is the exact
+shape this repo exists to prevent. It is not shipped. Withdrawal is guaranteed instead by four
+named things, none of them automatic: `ExecStopPost=--clear` (systemd runs it on *every* stop,
+including a killed main process), the clear-at-start on `--watch`, the boot-time start via
+`WantedBy=multi-user.target`, and `vpn-doctor`'s orphan check.
+
+### An observation, recorded but not investigated
+
+`tailscale netcheck` reports the machine's IPv4 STUN result as **79.177.134.244** — the ISP's
+address — while `curl -4 ifconfig.me` at the same moment returns **34.230.137.243**, the VPN's NAT
+gateway. So ordinary TCP egresses through the tunnel on v4 while Tailscale's own UDP underlay
+apparently does not. That is Tailscale's encrypted traffic to the user's own tailnet, not Quantivly
+traffic, and it is outside DO-704's scope; it is written down because it was seen, not because it
+was chased.
+
+### How these were measured
+
+`unshare -rn` is refused on this box — the kernel restricts unprivileged user namespaces
+(`write failed /proc/self/uid_map: Operation not permitted`) — and bubblewrap gives a private
+netns but cannot grant `CAP_NET_ADMIN`. The measurements above were therefore taken in a container
+with `--network none`, which is an empty network namespace: only `lo`, no veth, no bridge
+attachment, no nft rules, and the host's routing table and its five Docker networks untouched.
+
+**The host's own `ip` was chrooted in rather than the image's**, and that mattered:
+
+```bash
+docker run --rm --network none --cap-add NET_ADMIN -v /:/hostfs:ro \
+  --entrypoint sh postgres:16 -c 'chroot /hostfs /usr/bin/ip ...'
+# ip utility, iproute2-6.19.0, libbpf 1.6.3   <- identical to the host's
+```
+
+Both local images that ship an `ip` (`iq-diag`, `semgrep/semgrep`) carry **BusyBox**, whose error
+table is its own: for the same errno it prints `RTNETLINK answers: Host is unreachable`, not
+`No route to host`. A measurement taken with it would have looked exactly like confirmation and
+recorded the wrong string into a fixture that the whole canary design turns on.
+
+### `ip -6 route get` semantics, which made the first canary design exactly backwards
+
+Measured on iproute2-6.19.0:
+
+| case | rc | stdout | stderr |
+|---|---|---|---|
+| reachable | 0 | the winning route | — |
+| a reject route wins | 2 | **empty** | `RTNETLINK answers: No route to host` |
+| no IPv6 at all | 2 | **empty** | `RTNETLINK answers: Network is unreachable` |
+
+So `grep -q unreachable` on the output is **never** true for the blocked case and **always** true
+for the no-IPv6 case — a green tick for a block that is not installed, on the machine least able to
+notice. `_vpn_v6_probe` classifies rc and the message instead, and returns four states with
+`no-v6` explicitly **not** a pass. Three further rules sit on top: `blocked` passes only if this
+tool also owns both halves (otherwise the tick credits our block for somebody else's reject route),
+`open` is the FAIL and prints the winning route verbatim, and anything unrecognised is `odd`.
+
+`ip -6 route show` is **not** a substitute. It lists what exists; only `route get` asks the kernel
+which route *wins*, and a more-specific route from an RA, a second VPN or a v6-enabled Docker
+network beats ours without changing the list at all.
+
+### Two accepted bypasses, both documented rather than fixed
+
+- **A more-specific route silently wins.** An RFC 4191 RIO from the router, a second VPN, or a
+  v6-enabled Docker network installs something longer than `/1` and takes precedence. Detected by
+  the `ip -6 route get` canaries in `vpn-doctor`, which is why those are `route get` and not
+  `route show`.
+- **oif-pinned sockets bypass it on IPv6 but not IPv4.** A reject route's nexthop device is `lo`,
+  and the v6 lookup backtracks on device mismatch; IPv4 runs its reject check *before* the oif
+  comparison. So `SO_BINDTODEVICE`/`IPV6_PKTINFO` traffic escapes. Neither affects ordinary
+  application traffic — and this is also why there is **no `SO_BINDTODEVICE` probe** in
+  `vpn-doctor`: besides `CLAUDE.md` forbidding forcing a drop to test, it would report a *false*
+  "not blocked" for a block that is working perfectly.
+
+### A ≤5 s leak window on every connect and every resume
+
+`run_watch` monitors `ip monitor link`, but the transition that matters is a *route* appearing on
+`tun0`, not a link event. So the block lands on the next 5-second poll rather than on the event.
+Keeping `link` is deliberate — route events are high-volume and the poll is the correctness
+guarantee by design, not the optimisation — but the window is real and is written down here rather
+than left to be discovered.
+
+### Mutation sweep, 23 mutants
+
+Measured against the four files the mutants touch, identified by content rather than by a commit
+id — an amend rewrites the sha and would leave this paragraph naming a commit that no longer
+exists, which is the shape of stale evidence this page exists to avoid:
+
+```
+3f6a5c1d…  scripts/vpn-failfast.sh
+6c968cb2…  scripts/test-vpn-failfast.sh
+542ac973…  scripts/setup-vpn-failfast.sh
+5b3df058…  zsh/functions/system.sh
+```
+
+Every expected verdict was written down **before** the sweep ran, each mutant was dry-run for
+applicability first (**23/23 matched exactly once** — a pattern that no longer applies reads
+exactly like a survivor), each was diffed before its suite run, and each was restored by explicit
+path with the tree asserted clean and re-sha'd afterwards.
+
+**23/23 matched their expected verdict.**
+
+| mutant | expected | got |
+|---|---|---|
+| invert the v6 polarity | KILLED | KILLED |
+| `::/1`+`8000::/1` → `2000::/3` | KILLED | KILLED |
+| drop the family from the v6 show | KILLED | KILLED |
+| delete always with `-4` | KILLED | KILLED |
+| add with the wrong family | KILLED | KILLED |
+| gate the tunnel-down v6 clear on the arming switch | KILLED | KILLED |
+| `clear_all` iterates v4 only | KILLED | KILLED |
+| drop `clear_owned`'s re-read guard | KILLED | KILLED |
+| put `metric` back into the v6 delete | KILLED | KILLED |
+| swallow the v6 `add` exit status | **SURVIVE** | SURVIVED |
+| unknown knob value treated as `block` | KILLED | KILLED |
+| unknown knob value treated as `off` | KILLED | KILLED |
+| let `--once` install the block | KILLED | KILLED |
+| both-family `clear_owned` on the up-branch | KILLED | KILLED |
+| doctor treats a tunnel-down orphan as ok | KILLED | KILLED |
+| doctor classifies `no-v6` as blocked | KILLED | KILLED |
+| doctor accepts `blocked` without the halves | KILLED | KILLED |
+| doctor greps `unreachable` instead of classifying | KILLED | KILLED |
+| drop the installer's drop-in value check | KILLED | KILLED |
+| drop the installer's `try-restart` | KILLED | KILLED |
+| make the `try-restart` unconditional | KILLED | KILLED |
+| delete a row **and** lower `EXPECTED_ROWS` to match | **SURVIVE** | SURVIVED |
+| let the `sudo` stub write outside `VPN_SETUP_PREFIX` | **SURVIVE** | SURVIVED |
+
+**The three survivors are the informative rows, and each was predicted:**
+
+- **Swallowing the v6 `add` status.** `converge()`'s rc on that path has no observer by
+  construction: `--once` *refuses* the block so it never runs there, and `run_watch` swallows
+  converge's rc deliberately — a transient route failure must not kill the daemon. The observable
+  guarantee is the error *message*, which a row pins. Inventing a row for a dead rc would be
+  decoration, so none was added.
+- **Deleting a row and lowering the total to match.** This is what a row total does *not* catch,
+  demonstrated rather than asserted. `check-state-table-totals.sh` says the same thing in prose;
+  this is the measurement behind it.
+- **Letting the `sudo` stub write outside the prefix.** A detector mutant with no fault present:
+  no row puts the tree in the state that guard detects, so disabling it is unkillable *by
+  construction*. Recorded rather than "fixed", because the alternative — a row that deliberately
+  tries to write outside the prefix — would mean arming the exact failure the guard exists to
+  prevent.
+
+Two mutants exist only because earlier drafts would have failed them silently. **`M06`** (gating
+the tunnel-down v6 clear on the arming switch) survived until a row was added that puts a v6 route
+under our proto into a *disarmed* daemon's table **mid-run** — the start-clear cannot reach that
+case, so every other row was blind to it. **`M17`** (accepting `blocked` without owning both
+halves) survived while that guard lived inside `vpn-doctor`'s own `case`, reachable only with a
+whole machine in the state it describes; extracting `_vpn_v6_canary_verdict` as a pure helper is
+what made it killable.
+
+### `enable --now` does not re-read a drop-in on a unit that is already running
+
+Found in the local review, before merge, and it would have made arming a no-op on the only machine
+that matters. `setup-vpn-failfast.sh` ended with `systemctl daemon-reload` then
+`systemctl enable --now`. `enable --now` runs `start`, and `start` on an **already-active** unit
+does nothing — it does not re-read `Environment=`. vpn-failfast is active on this box with
+`NRestarts=0`, so `sudo vpn-setup --block-ipv6` would have installed the drop-in, reloaded,
+reported success, and left the daemon running with `VPN_FAILFAST_IPV6` unset until the next reboot.
+
+The pairing is what makes it nasty rather than merely wrong: the installer says *armed* and
+`vpn-doctor`, reading the routing table, correctly says **IPv6 is LEAKING**. A green install next
+to a red doctor is the shape that gets the doctor mistrusted.
+
+The fix is `systemctl try-restart`, guarded on the arming state having actually changed.
+`try-restart` restarts a unit only if it is already running and is a no-op otherwise, so it cannot
+start a unit that `--no-enable` deliberately left stopped; the guard means a routine `vpn-setup`
+after a `git pull` still bounces nothing — which matters, because that daemon may be holding
+fail-fast routes for a tunnel that is currently down.
+
+### A sort whose order was a property of the developer's locale, not the code
+
+The first push went red on CI with four rows green locally:
+
+```
+✗ armed + UP: EXACTLY the two halves — expected '::/1 8000::/1 ', got '8000::/1 ::/1 '
+```
+
+`installed6()` piped through a bare `sort`. Under **en_US.UTF-8** collation punctuation is ignored,
+so `::/1` sorts first; under **C/POSIX** it is byte order, `:` is `0x3A` and `8` is `0x38`, so
+`8000::/1` sorts first. A developer machine is usually the former and a GitHub runner the latter,
+so the expectation was a property of whoever ran the suite. The IPv4 expectations were unaffected
+and hid it — those destinations are digits and dots, which collate identically both ways, which is
+why this only surfaced once IPv6 destinations existed.
+
+Every `sort` in this suite is now `LC_ALL=C sort`, and the expected strings are written in byte
+order. Verified by running the whole table under both `LC_ALL=C` and `LC_ALL=en_US.UTF-8`: 235/235
+either way.
+
+**This is not unique to this file.** Ten other `scripts/test-*.sh` pipe through an unpinned `sort`.
+Whether any of them is latently wrong depends on whether its data carries punctuation that collates
+differently, which has not been audited here — it is a separate piece of work, named so that the
+next person to be bitten finds this paragraph rather than re-deriving it.
+
+### The state table was one successful `sudo` away from overwriting the running root daemon
+
+`scripts/test-vpn-failfast.sh`'s installer rows set `VPN_SETUP_ALLOW_WORKTREE=1`, which is the
+entire point of one of them. The guard at `setup-vpn-failfast.sh:93` therefore does **not** exit:
+execution runs on through the readable-config check, `--check` and the placeholder grep, and
+reaches
+
+```
+sudo install -m 755 -o root -g root "$SCRIPT_SRC" /usr/local/bin/vpn-failfast.sh
+```
+
+where `$SCRIPT_SRC` is the *branch's* script. The row's needle is printed thirty lines earlier and
+the `|| true` swallows the status, so **the row passed whether or not an install happened**. Only
+the absence of a usable `sudo` stopped it on a developer's machine; CI has passwordless sudo, so
+the green history never once exercised the inert path — and `install(1)` writes **in place**, which
+means rewriting the running root daemon's file underneath it. This file's own header claimed "No
+sudo, no root"; that claim was part of the defect.
+
+Confirmed by hand against a real `git worktree` fixture before the fix: the recorded escalation was
+exactly the line above. A recording `sudo` stub now sits at the front of `PATH` on both rows. It
+executes only `install`/`rm`/`rmdir`/`mkdir`, only inside `VPN_SETUP_PREFIX`, and refuses any
+destination outside it with its own exit code — `systemctl` and `sysctl` are recorded and never
+run, because the machine running the suite has a live system manager holding this very daemon.
