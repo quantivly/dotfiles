@@ -50,6 +50,33 @@ class BriefTests(unittest.TestCase):
         cut_word = line[:-1].rsplit(" ", 1)[-1]
         self.assertIn(cut_word, s["items"][0]["why_now"].split())
 
+    def test_an_over_long_identifier_is_cut_with_an_ellipsis_never_sliced_silently(self):
+        # Review finding: the old trailing `[:LINE_MAX]` fired whenever `N. KEY — title` alone
+        # overran, severing the identifier with no marker — while the docstring said the key was
+        # "never sliced". A cut that the reader cannot see is the untruth; the cut itself is fine.
+        s = seq(["K" * 150]); s["items"][0]["title"] = ""; s["items"][0]["why_now"] = ""
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertEqual(len(line), 120)
+        self.assertTrue(line.endswith("…"), line)
+
+    def test_waiting_is_dropped_before_the_identifier_when_the_line_is_over_budget(self):
+        # A bare-URL key — the fallback this change introduces — plus `waiting:` overruns on its
+        # own, with no why_now left to cut. The identifier is what the line exists to carry, so
+        # `waiting` goes first and the url survives whole.
+        url = "https://github.com/quantivly/some-really-long-repository-name/pull/123456/files#discussion_r1234567890123"
+        s = seq([url]); s["items"][0]["title"] = ""; s["items"][0]["why_now"] = "mentions you"
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertLessEqual(len(line), 120)
+        self.assertEqual(line, f"1. {url}")
+        self.assertNotIn("waiting:", line)
+
+    def test_a_whitespace_only_why_now_is_blank_not_a_dangling_separator(self):
+        # `title` was stripped before the emptiness check and `why_now` was not, so a whitespace
+        # why_now survived as truthy and collapsed under truncation to "· …" carrying nothing.
+        s = seq(["K-1"]); s["items"][0]["title"] = "t"; s["items"][0]["why_now"] = " " * 200
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertEqual(line, "1. K-1 — t · waiting: benoit")
+
     def test_failed_source_gets_one_line(self):
         s = seq(["K-1"]); s["failed_sources"] = ["calendar"]
         lines = brief.terminal_lines(s, None, None)

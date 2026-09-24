@@ -51,6 +51,18 @@ class RankTests(unittest.TestCase):
         item = next(i for i in seq["items"] if i["bucket"] == 1)
         self.assertEqual(item["key"], "quantivly/hub#456")
 
+    def test_reply_queue_item_with_no_url_at_all_falls_back_to_the_notification_id(self):
+        # Review finding: `url` is nullable on a Linear notification, so the bare-url fallback
+        # could return None and `brief` rendered the literal line "1. None" — worse than the bare
+        # URL this change replaces. Every notification has an id; print that instead.
+        plan = {"buckets": {"reply_queue": [{"issue_identifier": None, "pr_url": None, "url": None,
+                                              "notification_id": "n-abc", "title": "", "actor": "alex",
+                                              "created_at": "2026-09-14T00:00:00Z"}]}}
+        seq = rank.rank(self.base(plan=plan))
+        item = next(i for i in seq["items"] if i["bucket"] == 1)
+        self.assertEqual(item["key"], "n-abc")
+        self.assertNotIn(item["key"], (None, "None"))
+
     def test_reply_queue_item_with_neither_issue_nor_pr_url_keeps_the_bare_url(self):
         # No identifier is derivable: showing the url is honest; inventing one would not be.
         plan = {"buckets": {"reply_queue": [{"issue_identifier": None, "pr_url": None, "url": "https://example.com/x",

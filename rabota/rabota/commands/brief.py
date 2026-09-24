@@ -42,22 +42,33 @@ def _fmt(n: int, item: dict) -> str:
     """``N. KEY — title · waiting: who · why_now``, capped at ``LINE_MAX``.
 
     A blank title is left out rather than printed as a dangling ``—`` — the source had no title,
-    and the line should say only what it knows. When the line is over budget, ``why_now`` (prose)
-    is what gets cut; ``N. KEY`` and the title are the identifier a reader needs to act on and are
-    never sliced.
+    and the line should say only what it knows. A ``why_now`` that is only whitespace counts as
+    blank for the same reason.
+
+    Over budget, the line is cut in order of what a reader can act without: ``why_now`` (prose)
+    first, then ``waiting``, and only then the identifier itself. ``N. KEY — title`` is what the
+    line exists to carry, so it is the last thing sacrificed — and when it alone exceeds
+    ``LINE_MAX`` there is nothing left to give, so it is cut with a visible ``…`` rather than
+    sliced silently. Review finding: the old trailing ``[:LINE_MAX]`` did exactly that silent
+    slice whenever the head overran, which the docstring above it denied was possible — and a
+    bare-URL key, the fallback this very change introduces, is long enough to trigger it.
     """
     title = (item["title"] or "").strip()
     if len(title) > TITLE_MAX:
         title = title[:TITLE_MAX - 3] + "…"
     head = f"{n}. {item['key']}" + (f" — {title}" if title else "")
     who = f" · waiting: {item['waiting_on']}" if item.get("waiting_on") else ""
-    why = item.get("why_now") or ""
+    why = (item.get("why_now") or "").strip()
     line = head + who + (f" · {why}" if why else "")
     if len(line) <= LINE_MAX:
         return line
-    room = LINE_MAX - len(head) - len(who) - len(" · ")
-    why = _truncate_suffix(why, room)
-    return (head + who + (f" · {why}" if why else ""))[:LINE_MAX]
+    why = _truncate_suffix(why, LINE_MAX - len(head) - len(who) - len(" · "))
+    line = head + who + (f" · {why}" if why else "")
+    if len(line) <= LINE_MAX:
+        return line
+    if len(head) <= LINE_MAX:            # drop `waiting` before touching the identifier
+        return head
+    return head[:LINE_MAX - 1] + "…"     # nothing left to cut but the identifier itself
 
 
 def staleness_line(seq: dict, now: datetime, max_age_min: int = STALE_AFTER_MIN) -> str | None:
