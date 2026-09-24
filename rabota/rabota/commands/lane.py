@@ -281,17 +281,36 @@ def resolve_remote(ctx, machine) -> dict:
     lingering off) and would arrive here as an empty string — a lane with no PATH at all, which is
     worse than the entry it was meant to preserve.
 
-    ``claude_bin`` stays LAST in the payload: it is the one value printed without a trailing
-    newline, so that an absent claude yields a short list rather than a blank line, and the parse
-    below is positional.
+    THE REPLY FRAMES ITSELF, and the parse then demands EXACTLY three lines. An adversarial review
+    lane (2026-09-24) showed why a bare positional parse is not enough: any stdout line of its own
+    that happens to start with ``/`` -- a banner, an MOTD, a shell rc that echoes -- shifts all
+    three values by one and every check still passes, so the lane starts with ``$HOME`` set to a
+    banner and the claude binary set to the PATH string. A ``$PATH`` containing a newline does the
+    same, and a fourth value added here later would silently take ``claude_bin``'s slot. All three
+    are silent wrong answers, which is the failure mode this whole module is shaped to refuse.
+
+    The marker is the technique ``remote.build_argv`` already uses for census, for the same reason.
+    Everything before it is discarded; everything after it must be exactly the three lines this
+    asked for, so a fourth of ANY origin refuses instead of shifting a value. An absent claude
+    prints an EMPTY line rather than nothing -- the old "a short list means no claude" trick was a
+    comment rather than a constraint, with no row pinning the position it depended on.
     """
-    script = ('printf "%s\\n" "$HOME"; printf "%s\\n" "$PATH"; '
-              'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf %s "$p"')
+    marker = "---RABOTA-RESOLVE---"
+    script = (f'printf "%s\\n" {remote.shquote(marker)}; '
+              'printf "%s\\n" "$HOME"; printf "%s\\n" "$PATH"; '
+              'p="$HOME"/.local/bin/claude; if [ -x "$p" ]; then printf "%s\\n" "$p"; '
+              'else printf "\\n"; fi')
     res = ctx.runner.run(remote.ssh_argv(machine, script))
-    lines = (res.out or "").splitlines()
-    home = lines[0].strip() if len(lines) > 0 else ""
-    path = lines[1].strip() if len(lines) > 1 else ""
-    claude_bin = lines[2].strip() if len(lines) > 2 else ""
+    out = res.out or ""
+    # Split on the marker's own LINE, so the newline that terminates it is not counted as a
+    # fourth (empty) value by splitlines().
+    head = marker + "\n"
+    framed = out.split(head, 1)[1] if head in out else ""
+    lines = framed.splitlines()
+    if len(lines) == 3:
+        home, path, claude_bin = (l.strip() for l in lines)
+    else:
+        home = path = claude_bin = ""
     if not res.ok or not home.startswith("/") or "/" not in path or not claude_bin.startswith("/"):
         missing = []
         if not home.startswith("/"):
@@ -300,9 +319,11 @@ def resolve_remote(ctx, machine) -> dict:
             missing.append("$PATH")
         if not claude_bin.startswith("/"):
             missing.append("an executable claude")
+        # `', '.join(missing)` is EMPTY when the ssh itself failed but the payload happened to
+        # parse -- the message then named nothing at all ("could not resolve  on dev: ...").
         raise errors.Refused(
-            f"could not resolve {', '.join(missing)} on {machine.name}: "
-            f"{(res.err or res.out or 'no paths returned').strip()}")
+            f"could not resolve {', '.join(missing) or 'the machine (ssh failed)'} on "
+            f"{machine.name}: {(res.err or res.out or 'no paths returned').strip()}")
     return {"home": home, "path": path, "claude_bin": claude_bin}
 
 

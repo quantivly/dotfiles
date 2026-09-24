@@ -15,11 +15,24 @@ TEMPLATE = BRIEFS / "evaluate.md.tmpl"
 # is guaranteed to reach (`--add-dir`).
 RULES = BRIEFS / "_common-rules.md"
 
-# A path a lane cannot be assumed to have: absolute, or home-relative on a machine whose $HOME is
-# not this process's. Two or more segments are required so that a lone `/` in prose (`pass/fail`)
-# is not read as a path; the lookbehind keeps `and/or` and the `//` of a URL out for the same
-# reason. `\b`-style boundaries are not used -- `~` is not a word character.
-ABSOLUTE_PATH = re.compile(r"(?<![\w/~])(?:~?/[\w.+-]*[\w+-]){2,}")
+# HOW THE RULES ARE NAMED, not "does this prose contain a path". The first cut of this check was a
+# regex for an absolute path anywhere under `## Common rules`, and an adversarial review lane
+# (2026-09-24) broke it in BOTH directions in under a minute: it refused `./scripts/test-rabota.sh`
+# and `../other/verdict.json` (the lookbehind omitted `.`, so the match began at the slash) with a
+# message telling the author to name the path relatively -- which they had -- and it refused
+# `/etc/hosts` and a markdown link `[x](/a/b)` with the false explanation that they exist only on
+# one machine. Worse, it ACCEPTED `~/rules.md` and `/rules.md`, because it demanded two or more
+# segments, and `~/…` is the exact DO-711 class: the same string, a different file on every
+# machine that reads it.
+#
+# So the question is not "is there a path here". It is "is the rules file named the way it
+# actually arrives" -- by basename, beside the brief -- which is a fact about ONE token and needs
+# no prose heuristics. Anything ending in a separator immediately before that basename is a path
+# prefix, wherever it points and whatever syntax it uses; a Windows `\` is caught by the same rule
+# that catches `/`, which the regex could not do at all.
+# `[^\s`'"()\[\]]*` so a fence, a quote or a markdown link's punctuation ends the prefix rather
+# than being swallowed into it; the prefix must END in a separator to count at all.
+RULES_WITH_A_PREFIX = re.compile(r"""[^\s`'"()\[\]]*[/\\]""" + re.escape(RULES.name))
 
 
 def _section(lines: list[str], heading: str) -> list[str]:
@@ -78,17 +91,23 @@ def validate_text(text: str, where: str = "brief") -> dict:
         missing.insert(0, "# <title>")
     if missing:
         raise errors.Usage(f"{where} is missing sections: " + ", ".join(missing))
-    # The rules must be named the way they actually arrive -- beside the brief, in out_dir. An
-    # absolute path here is the DO-711 defect itself, and it is silent: the lane reports the
-    # failure in `followups` if it is conscientious, and otherwise just proceeds without the
-    # rails. This refuses the CLASS (any absolute path), not the one path that was wrong.
-    for l in _section(lines, "## Common rules"):
-        m = ABSOLUTE_PATH.search(l)
-        if m:
-            raise errors.Usage(
-                f"{where} names {m.group(0)!r} under '## Common rules': that path exists only on the "
-                f"machine the brief was written on. The rules are shipped into the lane's out_dir, "
-                f"so name them relatively -- `{RULES.name}`, in this brief's own directory")
+    # The rules must be named the way they actually arrive -- by basename, beside the brief. The
+    # section is JOINED before searching: `_section` returns lines, and a reference wrapped across
+    # two of them escaped a per-line search entirely (found by the review lane, 2026-09-24).
+    rules_section = "\n".join(_section(lines, "## Common rules"))
+    m = RULES_WITH_A_PREFIX.search(rules_section)
+    if m:
+        raise errors.Usage(
+            f"{where} names {m.group(0)!r} under '## Common rules': a path prefix resolves against "
+            f"whichever machine reads it, and a lane does not run on this one. `lane recipe` ships "
+            f"the rules into the lane's out_dir, so name them by basename alone -- "
+            f"`{RULES.name}`, in this brief's own directory")
+    if RULES.name not in rules_section:
+        # Not merely "no absolute path": a section that never names the rules at all is a lane
+        # that will not read them, which is the outcome DO-711 was about. Absence used to pass.
+        raise errors.Usage(
+            f"{where} does not name {RULES.name} under '## Common rules': `lane recipe` ships it "
+            f"beside the brief, and a lane that is not told to read it will not")
     out_dir = None
     for l in lines:
         if l.strip().lower().startswith("out_dir:"):

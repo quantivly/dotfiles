@@ -76,6 +76,28 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn("RAN:python3", res.stdout)
         self.assertNotIn("RAN:python3.11", res.stdout)
 
+    def test_it_can_report_the_interpreter_it_picked(self):
+        """`scripts/test-rabota.sh` asks for this rather than running the same loop again -- on
+        dev a bare `python3` is 3.10 and the whole suite collapses into import errors. One
+        consumer, so the picker has exactly one home and the two cannot drift."""
+        d = self.bindir({c: c == "python3.11" for c in CANDIDATES})
+        env = dict(os.environ)
+        env["PATH"] = f"{d}:/usr/bin:/bin"
+        env["RABOTA_PRINT_PYTHON"] = "1"
+        env.pop("PYTHONPATH", None)
+        res = subprocess.run([str(ENTRY)], capture_output=True, text=True, env=env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "python3.11")
+        self.assertNotIn("RAN:", res.stdout, "printing the interpreter must not also run the CLI")
+
+    def test_the_suite_runner_uses_the_interpreter_the_entry_point_picked(self):
+        """The wiring itself: a `python3` hardcoded back into test-rabota.sh would leave the suite
+        unrunnable on exactly the machine lanes run on, with nothing to say so."""
+        runner = ENTRY.parent / "test-rabota.sh"
+        text = runner.read_text()
+        self.assertIn("RABOTA_PRINT_PYTHON=1", text)
+        self.assertNotIn("\npython3 -m unittest", text)
+
     def test_no_capable_interpreter_fails_loudly_naming_the_requirement(self):
         """Not a traceback from deep inside config.py, and not a silent fall-through to an
         interpreter that will die on import: a named refusal with the version it needs."""

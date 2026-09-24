@@ -31,4 +31,9 @@ if [ -z "$py" ]; then
     exit 5
 fi
 
+# One consumer, not a knob: scripts/test-rabota.sh needs the SAME interpreter this picked, and
+# dev is the machine where that matters (its python3 is 3.10). Duplicating the loop there is how
+# the two drift; asking for the answer keeps the picker in one place.
+if [ -n "${RABOTA_PRINT_PYTHON:-}" ]; then printf '%s\n' "$py"; exit 0; fi
+
 PYTHONPATH="$here/rabota${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m rabota "$@"

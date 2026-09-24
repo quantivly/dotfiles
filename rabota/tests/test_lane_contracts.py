@@ -171,6 +171,49 @@ class CommonRulesTests(unittest.TestCase):
         self.assertIn("/home/zvi/quantivly/handoffs/rabota/_common-rules.md", str(cm.exception))
         self.assertIn(brief.RULES.name, str(cm.exception))
 
+    def test_the_rules_reference_check_is_about_the_reference_not_about_prose(self):
+        """The table an adversarial review lane (2026-09-24) built to break the FIRST version of
+        this check, which was a regex for an absolute path anywhere in the section. It failed in
+        both directions: it refused four briefs that were correct, and accepted `~/rules.md` --
+        the exact DO-711 class, since `~` resolves against whichever machine reads it.
+
+        Every row is the rendered brief run through the real validator, never the pattern in
+        isolation, because the pattern is not the contract; the refusal is."""
+        base = ("# T\n## Common rules\n{rules}\n## Role\nr\n## Assignment\na\n"
+                "## Ownership\no\n## Outputs\nout_dir: /tmp/x\n## Summary\ns\n")
+        allowed = [
+            "Read `_common-rules.md`, in this brief's own directory.",
+            "Read `_common-rules.md`. Also run `./scripts/test-rabota.sh`.",
+            "Read `_common-rules.md`. Never write ../other-lane/verdict.json.",
+            "Read `_common-rules.md`. Do not touch /etc/hosts.",
+            "Read `_common-rules.md`. See [the spec](/a/b).",
+        ]
+        refused = [
+            "Read ~/rules.md first.",
+            "Read /rules.md first.",
+            "Read C:\\Users\\zvi\\_common-rules.md.",
+            "Read /home/zvi/quantivly/handoffs/rabota/_common-rules.md.",
+            "Read `~/q/_common-rules.md`.",
+            "Read /home/\nzvi/.claude/_common-rules.md.",   # wrapped across two lines
+        ]
+        for rules in allowed:
+            with self.subTest(allowed=rules):
+                brief.validate_text(base.format(rules=rules), where="b")
+        for rules in refused:
+            with self.subTest(refused=rules):
+                with self.assertRaises(errors.Usage):
+                    brief.validate_text(base.format(rules=rules), where="b")
+
+    def test_a_common_rules_section_that_never_names_the_rules_is_refused(self):
+        """Absence used to pass: the old check only looked for a path, so a section saying
+        "you are one lane, push back with evidence" and nothing else satisfied it while leaving
+        the lane un-told to read the file `lane recipe` had just shipped it."""
+        base = ("# T\n## Common rules\nYou are one lane; push back with evidence.\n"
+                "## Role\nr\n## Assignment\na\n## Ownership\no\n## Outputs\n"
+                "out_dir: /tmp/x\n## Summary\ns\n")
+        with self.assertRaisesRegex(errors.Usage, brief.RULES.name):
+            brief.validate_text(base, where="b")
+
     def test_a_home_relative_rules_path_is_refused_too(self):
         """`~` is not a laptop-only path in the same way, it is worse: it expands against whichever
         home reads it, so the same string means a different file on dev and fails silently."""

@@ -8,6 +8,17 @@ from rabota.runner import FakeRunner, Result
 from tests.support import last_json
 from tests.test_cli import install_fixture_home, run_cli
 
+RESOLVE_MARKER = "---RABOTA-RESOLVE---"
+
+
+def framed(home="/home/ubuntu", path="/usr/bin:/bin", claude="/home/ubuntu/.local/bin/claude",
+           *, before=""):
+    """A `resolve_remote` reply as the remote actually prints it: anything the login shell emitted
+    (``before``), then the marker, then exactly the three values -- an absent claude being an
+    EMPTY line, not a missing one. Every fixture builds its reply through here, so the framing is
+    written down once and a change to it cannot leave a row asserting the old shape."""
+    return f"{before}{RESOLVE_MARKER}\n{home}\n{path}\n{claude}\n"
+
 FIX = Path(__file__).parent / "fixtures"
 
 
@@ -240,8 +251,7 @@ class ResolveRemoteTests(LocalRecipeTests):
     """
 
     def test_it_returns_home_the_path_and_the_claude_binary(self):
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "/home/ubuntu\n/usr/bin:/bin\n/home/ubuntu/.local/bin/claude", ""))]))
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(), ""))]))
         self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"]),
                          {"home": "/home/ubuntu", "path": "/usr/bin:/bin",
                           "claude_bin": "/home/ubuntu/.local/bin/claude"})
@@ -254,8 +264,8 @@ class ResolveRemoteTests(LocalRecipeTests):
     def test_a_reply_missing_the_claude_line_refuses(self):
         # A successful ssh that finds no executable claude prints nothing for that field (the
         # script's own `[ -x "$p" ] &&` guard) — not room for a fallback, an unmeasured machine.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, "/home/ubuntu", ""))]))
-        with self.assertRaises(errors.Refused):
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(claude=""), ""))]))
+        with self.assertRaisesRegex(errors.Refused, "executable claude"):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
     def test_an_empty_reply_refuses(self):
@@ -267,17 +277,61 @@ class ResolveRemoteTests(LocalRecipeTests):
         # A first line not starting with "/" cannot be the proof this resolver promises; refuse
         # rather than trust an unexpected shell reply verbatim. Every OTHER field is well-formed
         # here, so the row pins the home rule alone rather than passing on a second fault.
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "home\n/usr/bin:/bin\n/home/ubuntu/.local/bin/claude", ""))]))
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(home="home"), ""))]))
         with self.assertRaisesRegex(errors.Refused, r"\$HOME"):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_login_banner_on_stdout_refuses_instead_of_shifting_every_value(self):
+        """Review lane, 2026-09-24. Under the original positional parse a banner line that itself
+        began with `/` shifted all three values by one and EVERY check still passed: `$HOME`
+        became the banner and the claude binary became the PATH string. Silent and wrong, which
+        is the one outcome this module is shaped to refuse. The marker discards anything the
+        login shell said before it."""
+        for banner in ("/etc/motd says hi\n", "Welcome to dev\n", "a\nb\n"):
+            with self.subTest(banner=banner):
+                ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(before=banner), ""))]))
+                self.assertEqual(lane.resolve_remote(ctx, ctx.tenant.machines["dev"])["home"],
+                                 "/home/ubuntu")
+
+    def test_a_fourth_value_after_the_marker_refuses_rather_than_taking_a_slot(self):
+        """The maintenance trap: a value added to the script later used to take `claude_bin`'s
+        slot silently. Exactly three lines are expected, so a fourth of any origin refuses."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(
+            0, framed() + "/etc/os-release\n", ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_newline_inside_the_path_refuses_rather_than_truncating_it(self):
+        """Same class from the other side: an embedded newline used to make `claude_bin` a PATH
+        fragment, which `build_local` would then emit as the binary to exec."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(
+            0, framed(path="/opt/a\n/opt/b:/usr/bin"), ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_reply_with_no_marker_at_all_refuses(self):
+        """A remote that answered without the framing -- an old script, a truncated stream -- is
+        unmeasured, and unmeasured refuses. It is never read as a bare positional reply."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(
+            0, "/home/ubuntu\n/usr/bin:/bin\n/home/ubuntu/.local/bin/claude\n", ""))]))
+        with self.assertRaises(errors.Refused):
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+
+    def test_a_failed_ssh_whose_payload_parses_still_names_something(self):
+        """`', '.join(missing)` is EMPTY when res.ok is false but all three values parse, and the
+        refusal then named nothing at all: "could not resolve  on dev: ...". A refusal that names
+        no cause is the same defect DO-710 fixed in the verdict validator."""
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(255, framed(), "connection reset"))]))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
+        self.assertNotIn("resolve  on", str(cm.exception))
+        self.assertIn("ssh failed", str(cm.exception))
 
     def test_a_reply_missing_the_path_line_refuses(self):
         """DO-712. A lane's PATH is set from this value, and systemd has no "prepend" — so an
         empty answer here would be a unit started with PATH unset, which is strictly worse than
         the missing `~/.local/bin` it was added to fix. Unmeasured refuses; it is never room."""
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(
-            0, "/home/ubuntu\n\n/home/ubuntu/.local/bin/claude", ""))]))
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(0, framed(path=""), ""))]))
         with self.assertRaisesRegex(errors.Refused, r"\$PATH"):
             lane.resolve_remote(ctx, ctx.tenant.machines["dev"])
 
@@ -416,7 +470,7 @@ class RunRecipeTests(LocalRecipeTests):
     # Fix round 5: resolve_remote no longer resolves or proves an account dir (nothing consumes
     # one for a remote lane any more). DO-712 added $PATH, so its reply is three lines; the
     # claude path stays LAST because it is the one printed without a trailing newline.
-    RESOLVE_OUT = f"{RESOLVED_HOME}\n{RESOLVED_PATH}\n{RESOLVED_BIN}"
+    RESOLVE_OUT = framed(RESOLVED_HOME, RESOLVED_PATH, RESOLVED_BIN)
 
     def test_a_dry_recipe_resolves_the_remote_claude_bin_and_runs_nothing_else(self):
         # DO-652 task-7 dispatch correction 6: a non-local recipe resolves the remote home and
@@ -790,9 +844,7 @@ class EvaluateRecipeTests(LocalRecipeTests):
     def ok_budget(self):
         return {"allowed_new_lanes": 2, "reasons": [], "seat_pick": "quantivly-0", "five_h_pct_now": 42}
 
-    RESOLVE_OUT = ("/home/ubuntu\n"
-                   "/usr/local/bin:/usr/bin:/bin\n"
-                   "/home/ubuntu/.local/bin/claude")
+    RESOLVE_OUT = framed(path="/usr/local/bin:/usr/bin:/bin")
 
     def test_an_unknown_of_lane_refuses(self):
         ctx = self.ctx(FakeRunner([]))
