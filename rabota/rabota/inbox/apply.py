@@ -45,30 +45,44 @@ def apply_due_policy(plan: dict, client, store, tenant, confirmed: bool, dry_run
         raise errors.Refused("due_policy is a propose-tier batch; pass --confirmed after the user's typed OK")
     batch = new_batch_id("due")
     issues = plan["batches"]["due_policy"]["issues"]
-    rep = {"batch_id": batch, "cleared": 0, "verified": 0, "unconfirmed": [], "failed": []}
+    rep = {"batch_id": batch, "cleared": 0, "verified": 0, "unconfirmed": [], "read_errors": [], "failed": []}
     if dry_run:
         rep["would_clear"] = [i["identifier"] for i in issues]; return rep
     for i in issues:
         store.record_decision(batch, tenant.name, "propose", "due_policy", "issue", i["id"], "clear_due_date", {"dueDate": i["dueDate"]})
+        # Only the write is allowed to put an issue in `failed`. Review finding: with the verify
+        # read inside this same `try`, a read that RAISED landed the issue in `failed` having
+        # already counted it in `cleared` -- one issue in two buckets, and a write that actually
+        # succeeded reported as a failure. That is the exact untruth DO-707 exists to remove.
         try:
             r = client.set_due_date(i["id"], None)
             if not r.get("success"): raise errors.RabotaError("success=false")
-            rep["cleared"] += 1
-            cleared_read_back = False
-            for attempt in range(verify_attempts):
+        except errors.RabotaError as e:
+            rep["failed"].append({"id": i["identifier"], "error": str(e)})
+            continue
+        rep["cleared"] += 1
+        cleared_read_back, read_error = False, None
+        for attempt in range(verify_attempts):
+            try:
                 if client.issue_state_and_due(i["id"]).get("dueDate") is None:
                     cleared_read_back = True
                     break
-                if attempt < verify_attempts - 1:
-                    sleeper(verify_delay)
-            if cleared_read_back:
-                store.mark_verified(batch, i["id"]); rep["verified"] += 1
-            else:
-                # The write succeeded (no RabotaError raised) but the re-read never caught up --
-                # a stale read, not a failed write, so it belongs apart from `failed`.
-                rep["unconfirmed"].append(i["identifier"])
-        except errors.RabotaError as e:
-            rep["failed"].append({"id": i["identifier"], "error": str(e)})
+            except errors.RabotaError as e:
+                read_error = str(e)          # a read that errors is still only a read
+            if attempt < verify_attempts - 1:
+                sleeper(verify_delay)
+        if cleared_read_back:
+            store.mark_verified(batch, i["id"]); rep["verified"] += 1
+        else:
+            if read_error is not None:
+                # Recorded rather than swallowed: "we could not look" and "we looked and it was
+                # stale" are different things to a reader deciding whether to re-run. One entry
+                # per issue, the last error seen -- a transient read that a later attempt fixed
+                # is not news. `unconfirmed` still carries the issue either way.
+                rep["read_errors"].append({"id": i["identifier"], "error": read_error})
+            # The write succeeded (no RabotaError raised) but the re-read never caught up --
+            # a stale read, not a failed write, so it belongs apart from `failed`.
+            rep["unconfirmed"].append(i["identifier"])
     return rep
 
 

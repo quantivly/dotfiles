@@ -93,6 +93,39 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(rep["unconfirmed"], [])
         self.assertEqual(rep["failed"], [])
 
+    def test_a_verify_read_that_raises_is_unconfirmed_never_also_failed(self):
+        """Review finding: the verify read sat inside the same `try` as the write, so a read that
+        RAISED put the issue in `failed` having already counted it in `cleared` -- one issue in two
+        buckets, and a write that actually succeeded reported as a failure. The four buckets must
+        partition the issues: `failed` xor (`verified` xor `unconfirmed`), summing to the plan."""
+        issues = self.plan["batches"]["due_policy"]["issues"]
+        client = FakeClient(LIN["notifications"], LIN["issues"])
+        client.issue_state_and_due = lambda iid: (_ for _ in ()).throw(errors.RabotaError("read blew up"))
+        rep = apply.apply_due_policy(self.plan, client, self.store, T, confirmed=True,
+                                      verify_attempts=2, sleeper=lambda s: None)
+        self.assertEqual(rep["failed"], [])
+        self.assertEqual(rep["verified"], 0)
+        self.assertEqual(sorted(rep["unconfirmed"]), sorted(i["identifier"] for i in issues))
+        self.assertEqual(rep["cleared"], len(issues))
+        self.assertEqual(rep["verified"] + len(rep["unconfirmed"]) + len(rep["failed"]), len(issues))
+        # the read error is recorded, not swallowed: one entry per issue, not one per attempt
+        self.assertEqual(sorted(e["id"] for e in rep["read_errors"]), sorted(i["identifier"] for i in issues))
+        self.assertTrue(all(e["error"] == "read blew up" for e in rep["read_errors"]))
+
+    def test_a_write_that_fails_is_not_counted_as_cleared_and_is_never_read_back(self):
+        """The other side of the same partition: a write that raises must not increment `cleared`,
+        and must not be verified -- reading back an issue we never wrote can only mislead."""
+        issues = self.plan["batches"]["due_policy"]["issues"]
+        client = FakeClient(LIN["notifications"], LIN["issues"])
+        client.set_due_date = lambda iid, due: {"success": False}
+        client.issue_state_and_due = lambda iid: self.fail("a failed write must not be read back")
+        rep = apply.apply_due_policy(self.plan, client, self.store, T, confirmed=True, sleeper=lambda s: None)
+        self.assertEqual(rep["cleared"], 0)
+        self.assertEqual(rep["verified"], 0)
+        self.assertEqual(rep["unconfirmed"], [])
+        self.assertEqual(rep["read_errors"], [])
+        self.assertEqual(sorted(f["id"] for f in rep["failed"]), sorted(i["identifier"] for i in issues))
+
     def test_a_write_that_never_reads_back_is_unconfirmed_not_failed(self):
         """The other half of DO-707: `cleared: 40, verified: 37` reads like three writes silently
         failed. A write whose re-read never catches up within the retry budget must be reported
