@@ -390,8 +390,19 @@
       local pr_num
       pr_num=$(timeout 2s gh pr view --json number -q .number 2>/dev/null)
       if [[ $pr_num =~ ^[0-9]+$ ]]; then
+        # A leftover from the older FLAT <branch> cache layout can sit at
+        # $cache_dir as a FILE -- it happens whenever a branch sanitizes to the
+        # same string as a repo/worktree basename. `mkdir -p` then fails, and
+        # the redirection below reports `not a directory` ON THE PROMPT, once
+        # per render, which `2>/dev/null` CANNOT suppress: a failed redirection
+        # is the shell's own error, raised while setting redirections up, not
+        # output from the command. Verified:
+        #   zsh -c 'printf hi > afile/sub 2>/dev/null'  -> still prints it
+        # So the stale file is cleared, and the write is guarded on the
+        # directory actually existing rather than on mkdir's exit status.
+        [[ -e $cache_dir && ! -d $cache_dir ]] && rm -f "$cache_dir" 2>/dev/null
         mkdir -p "$cache_dir" 2>/dev/null
-        printf '%s' "$pr_num" > "$cache_file" 2>/dev/null
+        [[ -d $cache_dir ]] && printf '%s' "$pr_num" > "$cache_file" 2>/dev/null
       fi
     } &!
   }
