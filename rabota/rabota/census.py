@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rabota import remote, secrets, sysinfo
@@ -213,6 +214,24 @@ def worktrees(runner) -> tuple[list[dict], list[str]]:
     return rows, []
 
 
+def _ended_at(out_dir: str) -> str:
+    """The lane's own end time: ``verdict.json``'s mtime, not when a later census run noticed it.
+
+    DO-714: settling from ``now()`` gave every lane a census settled together the SAME
+    ``ended_at`` -- the census's own timestamp, not theirs -- inflating durations by however
+    long the lane sat finished before a census happened to run. ``verdict.json`` is written once,
+    when the lane actually finishes (spec §C6), so its mtime is the real end time. A lane with no
+    readable verdict artifact here (settled from another machine's stream text, or no verdict at
+    all) falls back to ``now()`` -- not knowing the real end time is not the same as it being now,
+    but it is the least-wrong answer available locally.
+    """
+    try:
+        mtime = (Path(out_dir) / "verdict.json").stat().st_mtime
+    except OSError:
+        return now()
+    return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None) -> list[str]:
     """A ``started`` row whose unit is gone and whose stream has a result line is settled from that line.
 
@@ -259,7 +278,8 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
                 result = obj
         if result is None:
             continue
-        ctx.store.update_lane(lane["id"], status="failed" if result.get("is_error") else "done", ended_at=now(),
+        ctx.store.update_lane(lane["id"], status="failed" if result.get("is_error") else "done",
+                              ended_at=_ended_at(lane["out_dir"]),
                               cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
         settled.append(lane["id"])
     return settled
