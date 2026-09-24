@@ -63,7 +63,7 @@ def validate_text(text: str, max_bytes: int, *, where: str) -> dict:
         # with the wrong key names cannot tell from "malformed" which names were wrong, and the
         # shipped smoke brief did exactly that (DO-710) -- the diagnosis took four commands.
         missing_c = [k for k in CLAIM_REQUIRED if k not in c]
-        if not missing_c and "cmd" not in c["evidence"]:
+        if not missing_c and (not isinstance(c["evidence"], dict) or "cmd" not in c["evidence"]):
             missing_c = ["evidence.cmd"]
         if missing_c:
             raise VerdictError(f"claim missing keys: {', '.join(missing_c)}; got {sorted(c)}")

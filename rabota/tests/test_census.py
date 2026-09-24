@@ -233,6 +233,25 @@ class CensusTests(unittest.TestCase):
         self.assertEqual((row["status"], row["cost_usd"], row["five_h_pct_at_end"]), ("done", 1.23, 41))
         self.assertIsNotNone(row["ended_at"])
 
+    def test_settle_finished_takes_ended_at_from_the_verdict_artifacts_mtime(self):
+        """DO-714: three lanes settled by one census all recorded the SAME ended_at -- the
+        census's own timestamp -- rather than each lane's real end time, inflating durations by
+        up to however long the lane sat finished before a census happened to notice. The real
+        end time is verdict.json's mtime; assert it, not just that some non-None value landed."""
+        out = Path(self.tmp.name) / "out" / "smoke2"; out.mkdir(parents=True)
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "verdict.json").write_text("{}")
+        old = 1790100150  # 2026-09-22T18:02:30Z, well before "now" in a running test
+        os.utime(out / "verdict.json", (old, old))
+        self.ctx.store.insert_lane({"id": "smoke2", "tenant": "quantivly", "kind": "work", "brief": "b", "repo": "r", "worktree": "w",
+                                    "out_dir": str(out), "machine": "local", "unit": "rabota-lane-quantivly-smoke2-dead.service",
+                                    "session_id": "s", "model": "m", "status": "started", "started_at": "2026-09-16T10:00:00Z",
+                                    "seat": "quantivly-1", "effort": "high", "five_h_pct_at_start": 30})
+        settled = census.settle_finished(self.ctx, units=[], seats=[{"name": "quantivly-1", "five_h_pct": 41}])
+        self.assertEqual(settled, ["smoke2"])
+        row = self.ctx.store.get_lane("smoke2")
+        self.assertEqual(row["ended_at"], "2026-09-22T18:02:30Z")
+
     def test_cli_no_worktrees_flag_produces_the_cheap_shape(self):
         # F17: commands/census.py's _run() builds its own Context and returns only the result
         # dict, never the context — so a caller outside cli.main's track_contexts() (this test)
