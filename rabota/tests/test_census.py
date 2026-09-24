@@ -252,6 +252,33 @@ class CensusTests(unittest.TestCase):
         row = self.ctx.store.get_lane("smoke2")
         self.assertEqual(row["ended_at"], "2026-09-22T18:02:30Z")
 
+    def test_a_local_lanes_ended_at_is_also_clamped_to_its_started_at(self):
+        """Review finding: the clamp applies to local lanes too, but nothing proved it — scoping it
+        to `machine != "local"` was invisible to the whole suite. A verdict mtime older than the
+        lane's own started_at (clock skew, a reused out_dir, a restored file) must not record the
+        lane as having ended before it began."""
+        out = Path(self.tmp.name) / "out" / "smoke3"; out.mkdir(parents=True)
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "verdict.json").write_text("{}")
+        ancient = 1600000000  # 2020-09-13, long before started_at below
+        os.utime(out / "verdict.json", (ancient, ancient))
+        self.ctx.store.insert_lane({"id": "smoke3", "tenant": "quantivly", "kind": "work", "brief": "b", "repo": "r", "worktree": "w",
+                                    "out_dir": str(out), "machine": "local", "unit": "rabota-lane-quantivly-smoke3-dead.service",
+                                    "session_id": "s", "model": "m", "status": "started", "started_at": "2026-09-16T10:00:00Z",
+                                    "seat": "quantivly-1", "effort": "high", "five_h_pct_at_start": 30})
+        settled = census.settle_finished(self.ctx, units=[], seats=[{"name": "quantivly-1", "five_h_pct": 41}])
+        self.assertEqual(settled, ["smoke3"])
+        self.assertEqual(self.ctx.store.get_lane("smoke3")["ended_at"], "2026-09-16T10:00:00Z")
+
+    def test_an_unreadable_remote_mtime_falls_back_instead_of_crashing_the_census(self):
+        """Review finding: `_ended_at_remote` caught ValueError, but a syntactically fine yet
+        unbounded epoch reaches `fromtimestamp` and raises OverflowError (or OSError) instead. That
+        value comes off another host, and `remote.read`'s broad catch is around `parse`, not around
+        this — so it escaped `settle_finished` and would crash the whole census run."""
+        for bad in ("99999999999999999999", "9" * 40, "abc", "", "  "):
+            with self.subTest(bad=bad):
+                self.assertEqual(len(census._ended_at_remote(bad)), len("2026-09-16T10:00:00Z"))
+
     def test_cli_no_worktrees_flag_produces_the_cheap_shape(self):
         # F17: commands/census.py's _run() builds its own Context and returns only the result
         # dict, never the context — so a caller outside cli.main's track_contexts() (this test)
@@ -370,10 +397,11 @@ class SettleRemoteTests(unittest.TestCase):
         self.addCleanup(lambda: c._store and c._store.close())
         return c
 
-    def lane(self, ctx, machine, out_dir):
+    def lane(self, ctx, machine, out_dir, started_at=None):
         ctx.store.insert_lane({"id": "L1", "tenant": "quantivly", "kind": "work", "brief": "b",
                                "repo": "hub", "worktree": "/w", "out_dir": out_dir, "machine": machine,
-                               "unit": "rabota-lane-x.service", "status": "started", "seat": "quantivly-0"})
+                               "unit": "rabota-lane-x.service", "status": "started", "seat": "quantivly-0",
+                               "started_at": started_at})
 
     def test_a_remote_lane_settles_from_the_machines_reading(self):
         ctx = self.ctx(FakeRunner([]))
@@ -385,6 +413,51 @@ class SettleRemoteTests(unittest.TestCase):
         self.assertEqual(settled, ["L1"])
         row = ctx.store.list_lanes("quantivly")[0]
         self.assertEqual((row["status"], row["cost_usd"], row["five_h_pct_at_end"]), ("done", 0.42, 12))
+
+    def test_a_remote_lane_settles_with_the_remote_machines_own_verdict_mtime(self):
+        # DO-714 fixed this for local lanes only: settling from now() gave every lane a census
+        # settled together the SAME ended_at, inflating durations by however long the lane sat
+        # finished before a census happened to run. DO-722 is the same bug for a remote lane --
+        # here the row carries a verdict mtime far in the past, and ended_at must come from THAT,
+        # not from when this settle_finished call happens to run.
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke", started_at="2020-01-01T00:00:00Z")
+        rows = [{"name": "dev", "reachable": True,
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'},
+                 "verdict_mtimes": {"/home/ubuntu/out/smoke": "1700000000"}}]
+        settled = census.settle_finished(ctx, units=[], seats=[], machines=rows)
+        self.assertEqual(settled, ["L1"])
+        row = ctx.store.get_lane("L1")
+        self.assertEqual(row["ended_at"], "2023-11-14T22:13:20Z")
+        self.assertNotEqual(row["ended_at"], census.now())
+
+    def test_a_remote_lane_with_no_verdict_falls_back_to_now(self):
+        # No verdict.json on the remote machine -- stat failed there, so the mtime line came back
+        # empty. Not knowing the real end time is not the same as it being now, but it is the
+        # least-wrong answer available, same as the local _ended_at fallback.
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke", started_at="2024-01-01T00:00:00Z")
+        rows = [{"name": "dev", "reachable": True,
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'},
+                 "verdict_mtimes": {"/home/ubuntu/out/smoke": ""}}]
+        before = census.now()
+        census.settle_finished(ctx, units=[], seats=[], machines=rows)
+        after = census.now()
+        ended_at = ctx.store.get_lane("L1")["ended_at"]
+        self.assertTrue(before <= ended_at <= after, (before, ended_at, after))
+
+    def test_ended_at_is_never_before_started_at(self):
+        # A negative duration is a worse untruth than the one this whole change fixes -- a remote
+        # verdict mtime that (clock skew, or any other cause) predates the lane's own started_at
+        # must clamp to started_at, never read as the lane ending before it began.
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke", started_at="2024-01-01T00:00:00Z")
+        rows = [{"name": "dev", "reachable": True,
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'},
+                 # 1700000000 == 2023-11-14, before the lane's own started_at.
+                 "verdict_mtimes": {"/home/ubuntu/out/smoke": "1700000000"}}]
+        census.settle_finished(ctx, units=[], seats=[], machines=rows)
+        self.assertEqual(ctx.store.get_lane("L1")["ended_at"], "2024-01-01T00:00:00Z")
 
     def test_a_remote_lane_with_no_result_yet_is_left_alone(self):
         ctx = self.ctx(FakeRunner([]))

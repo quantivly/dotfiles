@@ -232,6 +232,32 @@ def _ended_at(out_dir: str) -> str:
     return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _ended_at_remote(epoch_s: str) -> str:
+    """As ``_ended_at``, but for a lane on another machine: the verdict mtime already rode back as
+    an epoch-seconds string in this same census ssh call (DO-722; ``remote.parse``'s
+    ``verdict_mtimes``), because the local ``stat`` that ``_ended_at`` does can never see a file
+    on a machine this process is not running on. An empty string -- ``stat`` failed remotely (no
+    verdict written yet, or none at all) -- gets the same honest ``now()`` fallback as the local
+    case, and so does any value that is not a readable epoch at all. Not knowing the real end time
+    is not the same as it being now, but it is the least-wrong answer available, and it is the only
+    one that keeps another host's bytes from crashing the census that read them.
+    """
+    epoch_s = (epoch_s or "").strip()
+    if not epoch_s:
+        return now()
+    try:
+        return datetime.fromtimestamp(int(epoch_s), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError, OSError):
+        # These bytes came off another host. `remote.read`'s broad catch is around `parse` building
+        # the row, not around this -- so an exception here escapes `settle_finished` and crashes the
+        # whole census run, which is exactly what `remote.py`'s contract says must never happen: a
+        # shape it cannot read is a measurement of "unknown", never an exception in the caller.
+        # `int()` alone raises ValueError, but a syntactically fine yet unbounded value
+        # (`99999999999999999999`) reaches `fromtimestamp` and raises OverflowError or OSError
+        # instead, depending on platform.
+        return now()
+
+
 def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None) -> list[str]:
     """A ``started`` row whose unit is gone and whose stream has a result line is settled from that line.
 
@@ -242,7 +268,11 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
 
     A lane on another machine is settled from that machine's ``machines[]`` row — its stream lives
     there, so the local filesystem read below can never see it. An unreachable machine settles
-    nothing: not knowing is not the same as finished.
+    nothing: not knowing is not the same as finished. Its ``ended_at`` (DO-722) comes from that
+    same row's ``verdict_mtimes`` -- the remote machine's own measurement, ridden back in the one
+    ssh call ``machines()`` already makes -- rather than ``_ended_at()``'s local ``stat``, which can
+    never see a file on a machine this process is not running on. Either way ``ended_at`` is
+    clamped to never precede the lane's own ``started_at``.
     """
     by_name = {m["name"]: m for m in (machines or [])}
     # Keyed by (machine, unit) rather than unit alone: unit names are only unique per machine,
@@ -278,8 +308,18 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
                 result = obj
         if result is None:
             continue
+        if machine == "local":
+            ended_at = _ended_at(lane["out_dir"])
+        else:
+            ended_at = _ended_at_remote(row.get("verdict_mtimes", {}).get(lane["out_dir"], ""))
+        started_at = lane.get("started_at")
+        if started_at and ended_at < started_at:
+            # A negative duration is a worse untruth than the one this whole change fixes -- clock
+            # skew between machines, or a verdict mtime that predates the lane's own started_at
+            # row, must never read as the lane having ended before it began.
+            ended_at = started_at
         ctx.store.update_lane(lane["id"], status="failed" if result.get("is_error") else "done",
-                              ended_at=_ended_at(lane["out_dir"]),
+                              ended_at=ended_at,
                               cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
         settled.append(lane["id"])
     return settled

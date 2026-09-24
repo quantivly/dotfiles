@@ -1,5 +1,8 @@
 """Census's own remote reading, plus the ssh mechanics every caller shares: load, memory, lane
-units, and each lane's last result line.
+units, each lane's last result line, and each lane's verdict mtime (DO-722) -- the remote
+machine's own measurement of when the lane ended, ridden back in this same ssh call rather than a
+second one, since an unreachable machine must settle nothing and two calls could disagree about
+reachability.
 
 The ONLY module that knows an ssh invocation's shape (``ssh_argv``) or single-quotes a path for
 one (``shquote``) — dev's login shell is zsh, and bash's ``printf %q`` is not zsh-safe (a leading
@@ -56,8 +59,18 @@ def build_argv(machine, lane_out_dirs: list[str], marker: str = MARKER) -> list[
     ]
     for d in lane_out_dirs:
         q = shquote(d)
-        script += [f"printf %s {shquote(marker)}", f"printf '%s\\n' {q}",
-                   f"grep -h '\"type\":\"result\"' {q}/stream.jsonl 2>/dev/null | tail -1 || true"]
+        # Three lines, always -- never two or four, whatever the lane's own state. `r=$(...)` then
+        # `printf '%s\n' "$r"` prints a line even when the grep matched nothing (no result yet);
+        # the same shape for the verdict mtime prints an empty line when `stat` fails (no verdict
+        # written, or a lane that never wrote one). A conditionally-omitted line is what the
+        # docstring below warns against: it would let a stream line that happens to be blank shift
+        # into the mtime slot, or vice versa. Fixed line count, not fixed content, is what parse()
+        # can rely on.
+        script += [
+            f"printf %s {shquote(marker)}", f"printf '%s\\n' {q}",
+            f'r=$(grep -h \'"type":"result"\' {q}/stream.jsonl 2>/dev/null | tail -1); printf \'%s\\n\' "$r"',
+            f"m=$(stat -c %Y {q}/verdict.json 2>/dev/null); printf '%s\\n' \"$m\"",
+        ]
     return ssh_argv(machine, "; ".join(script))
 
 
@@ -95,13 +108,18 @@ def parse(name: str, out: str, expected_sections: int | None = None, marker: str
         if len(f) >= 3 and f[0].startswith("rabota-lane-"):
             units.append({"name": f[0], "state": f[2], "machine": name})
     streams = {}
+    verdict_mtimes = {}
     for chunk in parts[4:]:
         lines = chunk.splitlines()
-        if lines:
-            streams[lines[0]] = lines[1] if len(lines) > 1 else ""
+        if not lines:
+            continue
+        d = lines[0]
+        streams[d] = lines[1] if len(lines) > 1 else ""
+        verdict_mtimes[d] = lines[2] if len(lines) > 2 else ""
     return {"name": name, "reachable": True, "load1": si.load1, "ncpu": si.ncpu,
             "mem_available_gib": round(si.mem_available_gib, 1),
-            "swap_used_pct": si.swap_used_pct, "units": units, "streams": streams}
+            "swap_used_pct": si.swap_used_pct, "units": units, "streams": streams,
+            "verdict_mtimes": verdict_mtimes}
 
 
 def read(runner, machine, lane_out_dirs: list[str], timeout: float = 30) -> dict:
