@@ -252,6 +252,33 @@ class CensusTests(unittest.TestCase):
         row = self.ctx.store.get_lane("smoke2")
         self.assertEqual(row["ended_at"], "2026-09-22T18:02:30Z")
 
+    def test_a_local_lanes_ended_at_is_also_clamped_to_its_started_at(self):
+        """Review finding: the clamp applies to local lanes too, but nothing proved it — scoping it
+        to `machine != "local"` was invisible to the whole suite. A verdict mtime older than the
+        lane's own started_at (clock skew, a reused out_dir, a restored file) must not record the
+        lane as having ended before it began."""
+        out = Path(self.tmp.name) / "out" / "smoke3"; out.mkdir(parents=True)
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "verdict.json").write_text("{}")
+        ancient = 1600000000  # 2020-09-13, long before started_at below
+        os.utime(out / "verdict.json", (ancient, ancient))
+        self.ctx.store.insert_lane({"id": "smoke3", "tenant": "quantivly", "kind": "work", "brief": "b", "repo": "r", "worktree": "w",
+                                    "out_dir": str(out), "machine": "local", "unit": "rabota-lane-quantivly-smoke3-dead.service",
+                                    "session_id": "s", "model": "m", "status": "started", "started_at": "2026-09-16T10:00:00Z",
+                                    "seat": "quantivly-1", "effort": "high", "five_h_pct_at_start": 30})
+        settled = census.settle_finished(self.ctx, units=[], seats=[{"name": "quantivly-1", "five_h_pct": 41}])
+        self.assertEqual(settled, ["smoke3"])
+        self.assertEqual(self.ctx.store.get_lane("smoke3")["ended_at"], "2026-09-16T10:00:00Z")
+
+    def test_an_unreadable_remote_mtime_falls_back_instead_of_crashing_the_census(self):
+        """Review finding: `_ended_at_remote` caught ValueError, but a syntactically fine yet
+        unbounded epoch reaches `fromtimestamp` and raises OverflowError (or OSError) instead. That
+        value comes off another host, and `remote.read`'s broad catch is around `parse`, not around
+        this — so it escaped `settle_finished` and would crash the whole census run."""
+        for bad in ("99999999999999999999", "9" * 40, "abc", "", "  "):
+            with self.subTest(bad=bad):
+                self.assertEqual(len(census._ended_at_remote(bad)), len("2026-09-16T10:00:00Z"))
+
     def test_cli_no_worktrees_flag_produces_the_cheap_shape(self):
         # F17: commands/census.py's _run() builds its own Context and returns only the result
         # dict, never the context — so a caller outside cli.main's track_contexts() (this test)

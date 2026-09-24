@@ -238,17 +238,24 @@ def _ended_at_remote(epoch_s: str) -> str:
     ``verdict_mtimes``), because the local ``stat`` that ``_ended_at`` does can never see a file
     on a machine this process is not running on. An empty string -- ``stat`` failed remotely (no
     verdict written yet, or none at all) -- gets the same honest ``now()`` fallback as the local
-    case: not knowing the real end time is not the same as it being now, but it is the
-    least-wrong answer available.
+    case, and so does any value that is not a readable epoch at all. Not knowing the real end time
+    is not the same as it being now, but it is the least-wrong answer available, and it is the only
+    one that keeps another host's bytes from crashing the census that read them.
     """
     epoch_s = (epoch_s or "").strip()
     if not epoch_s:
         return now()
     try:
-        epoch = int(epoch_s)
-    except ValueError:
+        return datetime.fromtimestamp(int(epoch_s), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError, OSError):
+        # These bytes came off another host. `remote.read`'s broad catch is around `parse` building
+        # the row, not around this -- so an exception here escapes `settle_finished` and crashes the
+        # whole census run, which is exactly what `remote.py`'s contract says must never happen: a
+        # shape it cannot read is a measurement of "unknown", never an exception in the caller.
+        # `int()` alone raises ValueError, but a syntactically fine yet unbounded value
+        # (`99999999999999999999`) reaches `fromtimestamp` and raises OverflowError or OSError
+        # instead, depending on platform.
         return now()
-    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None) -> list[str]:
