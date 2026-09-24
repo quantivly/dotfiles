@@ -251,24 +251,37 @@ tunnel_up() {
     return 0
 }
 
-# The destinations this tool currently owns, one per line. Filtered by PROTO and
-# by nothing else: proto IS the identity, and a route with another proto is
-# somebody else's whatever it points at.
+# ADDRESS FAMILY IS AN EXPLICIT FIRST ARGUMENT, at every call site, with no
+# default anywhere. `ip route show proto N` answers about IPv4 ONLY -- it is not
+# a family-neutral query that happens to return v4 today. A defaulted family is
+# therefore a route this tool owns that nothing enumerates and nothing
+# withdraws: invisible to clear_owned(), to --status and to vpn-doctor, and
+# surviving a SIGKILLed daemon as a permanent blackhole with no symptom but the
+# outage. Making the caller say which family costs one token and removes the
+# entire class.
+
+# The destinations this tool currently owns in ONE family, one per line.
+# Filtered by PROTO and by nothing else: proto IS the identity, and a route with
+# another proto is somebody else's whatever it points at.
+#
+# owned_routes <-4|-6>
 owned_routes() {
+    local fam="$1"
     # Whitespace-tolerant on purpose. Real iproute2 emits compact JSON here
     # (verified), but `ip -p -j` pretty-prints, and a parser that silently
     # matches nothing means NOTHING IS EVER WITHDRAWN -- the stale route that
     # blackholes a host, arrived at through a formatting change nobody would
     # connect to it. There is no error to notice: the delete loop simply has
     # nothing to iterate.
-    ip -j route show proto "$PROTO" 2>/dev/null \
+    ip -j "$fam" route show proto "$PROTO" 2>/dev/null \
         | grep -oE '"dst"[[:space:]]*:[[:space:]]*"[^"]*"' \
         | sed 's/^"dst"[[:space:]]*:[[:space:]]*"//; s/"$//'
 }
 
+# add_route <-4|-6> <dst>
 add_route() {
-    local d="$1" out
-    if out="$(ip route add unreachable "$d" proto "$PROTO" metric "$METRIC" 2>&1)"; then
+    local fam="$1" d="$2" out
+    if out="$(ip "$fam" route add unreachable "$d" proto "$PROTO" metric "$METRIC" 2>&1)"; then
         log "fail-fast ON  $d"
         return 0
     fi
@@ -279,9 +292,10 @@ add_route() {
     return 1
 }
 
+# del_route <-4|-6> <dst>
 del_route() {
-    local d="$1" out
-    if out="$(ip route del unreachable "$d" proto "$PROTO" metric "$METRIC" 2>&1)"; then
+    local fam="$1" d="$2" out
+    if out="$(ip "$fam" route del unreachable "$d" proto "$PROTO" metric "$METRIC" 2>&1)"; then
         log "fail-fast OFF $d"
         return 0
     fi
@@ -290,14 +304,17 @@ del_route() {
     return 1
 }
 
-# Remove everything this tool owns, whatever the config says now. Used at start
-# (an orphan from a previous config is still an orphan), at stop, and by --clear.
+# Remove everything this tool owns IN ONE FAMILY, whatever the config says now.
+# Used at start (an orphan from a previous config is still an orphan), at stop,
+# and by --clear.
+#
+# clear_owned <-4|-6>
 clear_owned() {
-    local d rc=0
+    local fam="$1" d rc=0
     while IFS= read -r d; do
         [[ -n "$d" ]] || continue
-        del_route "$d" || rc=1
-    done < <(owned_routes)
+        del_route "$fam" "$d" || rc=1
+    done < <(owned_routes "$fam")
     return "$rc"
 }
 
@@ -305,13 +322,13 @@ clear_owned() {
 converge() {
     local d rc=0 have
     if tunnel_up; then
-        clear_owned || rc=1
+        clear_owned -4 || rc=1
         return "$rc"
     fi
-    have="$(owned_routes)"
+    have="$(owned_routes -4)"
     for d in "${DESTS[@]}"; do
         grep -qxF -- "$d" <<<"$have" && continue
-        add_route "$d" || rc=1
+        add_route -4 "$d" || rc=1
     done
     # A destination removed from the config while the tunnel is down must not be
     # left installed: it is exactly the stale route that blackholes a host.
@@ -319,7 +336,7 @@ converge() {
         [[ -n "$d" ]] || continue
         local keep=0 k
         for k in "${DESTS[@]}"; do [[ "$k" == "$d" ]] && { keep=1; break; }; done
-        (( keep )) || del_route "$d" || rc=1
+        (( keep )) || del_route -4 "$d" || rc=1
     done <<<"$have"
     return "$rc"
 }
@@ -343,7 +360,7 @@ print_status() {
     while IFS= read -r d; do
         [[ -n "$d" ]] || continue
         printf '  - %s\n' "$d"; n=$(( n + 1 ))
-    done < <(owned_routes)
+    done < <(owned_routes -4)
     (( n == 0 )) && printf '  (none)\n'
     return 0
 }
@@ -362,7 +379,7 @@ run_watch() {
     fi
     # Withdraw on the way out as well as in ExecStopPost=, because the stop path
     # that fails to run is exactly the one that strands routes.
-    trap 'log "stopping"; clear_owned; exit 0' TERM INT
+    trap 'log "stopping"; clear_owned -4; exit 0' TERM INT
     while :; do
         converge || true
         if (( have_mon )) && [[ -n "${MON_PID:-}" ]] && kill -0 "$MON_PID" 2>/dev/null; then
@@ -388,16 +405,16 @@ main() {
         --status)      print_status; exit 0 ;;
         --check)       read_config || exit 2
                        log "$CONF: ${#DESTS[@]} destination(s), all valid"; exit 0 ;;
-        --clear)       clear_owned || exit 1; exit 0 ;;
+        --clear)       clear_owned -4 || exit 1; exit 0 ;;
         --once)        read_config || exit 2
-                       clear_owned || exit 1
+                       clear_owned -4 || exit 1
                        converge || exit 1
                        exit 0 ;;
         --watch)       read_config || exit 2
                        # Orphans first, ALWAYS, and before anything is added: a
                        # route left by a previous run under a previous config is
                        # invisible to converge(), which only knows today's list.
-                       clear_owned || exit 1
+                       clear_owned -4 || exit 1
                        run_watch ;;
         --help|-h)     usage; exit 0 ;;
         *)             err "unknown argument: $1"; usage >&2; exit 2 ;;

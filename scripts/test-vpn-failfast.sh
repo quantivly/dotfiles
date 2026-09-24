@@ -86,15 +86,45 @@ cat > "$STUBBIN/ip" <<'STUB'
 [ -n "${IPSTATE:-}" ] || { echo "ip stub: no IPSTATE" >&2; exit 99; }
 printf '%s\n' "$*" >> "$IPSTATE/calls.log"
 
+# FAMILY IS STATE, NOT NOISE. Stripping -6 alongside -j into one fixture file
+# would make the "drop the -6" mutant unkillable by construction: the stub would
+# answer identically with the flag and without it, so a sweep would burn a cycle
+# against a written-down expected verdict. It is consumed into `fam` and selects
+# a SEPARATE fixture file, so a v6 query that lost its flag reads the v4 table
+# and a row sees it. Note $* is logged ABOVE, before this parse, which is what
+# lets a row grep for `-6 route del`.
 json=0
+fam=4
 args=()
 for a in "$@"; do
   case "$a" in
     -j|-json) json=1 ;;
+    -4) fam=4 ;;
+    -6) fam=6 ;;
     *) args+=("$a") ;;
   esac
 done
 set -- "${args[@]}"
+
+# Two fixture files. The v4 one and its JSON are byte-identical to what this
+# stub emitted before families existed, so every pre-existing row, installed()
+# and has_route() are untouched.
+if [ "$fam" = "6" ]; then RF="$IPSTATE/routes6"; else RF="$IPSTATE/routes"; fi
+
+# Family/literal mismatch is an ERROR, exactly as the real tool -- and
+# implementing this one behaviour is what makes "swap the family flag" and "drop
+# the -4" killable without a single extra row, because the SUBJECT fails rather
+# than the stub quietly recording the wrong thing. Measured against
+# iproute2-6.19.0 on this box:
+#   ip -6 route get 10.9.8.7 -> Error: inet6 prefix is expected rather than "10.9.8.7".  rc 1
+#   ip -4 route get ::1      -> Error: inet prefix is expected rather than "::1".        rc 1
+fam_check() {
+  case "$fam:$1" in
+    6:*:*) : ;;
+    6:*)   echo "Error: inet6 prefix is expected rather than \"$1\"." >&2; exit 1 ;;
+    4:*:*) echo "Error: inet prefix is expected rather than \"$1\"." >&2; exit 1 ;;
+  esac
+}
 
 case "${1:-}" in
   link)
@@ -120,17 +150,27 @@ case "${1:-}" in
           # never deletes one it did not create.
           want="${2:-}"
           out="[]"
-          if [ -r "$IPSTATE/routes" ]; then
-            out="$(python3 - "$IPSTATE/routes" "$want" "${IPSTATE}/pretty-json" <<'PY'
+          if [ -r "$RF" ]; then
+            out="$(python3 - "$RF" "$want" "${IPSTATE}/pretty-json" "$fam" <<'PY'
 import json,os,sys
 rows=[]
+fam=sys.argv[4]
 for line in open(sys.argv[1]):
     line=line.strip()
     if not line: continue
     dst,proto,metric = line.split('\t')
     if proto != sys.argv[2]: continue
-    rows.append({"type":"unreachable","dst":dst,"protocol":int(proto),
-                 "metric":int(metric),"flags":[]})
+    if fam == "6":
+        # MEASURED, not copied from the v4 row above: `ip -j -6 route show proto
+        # N` emits NO "protocol" key at all -- iproute2 suppresses the attribute
+        # it filtered on. A fixture carrying "protocol":66 here would describe
+        # output `ip` never produces, and the parser under test would be proved
+        # correct against fiction. A reject route's nexthop device is lo.
+        rows.append({"type":"unreachable","dst":dst,"dev":"lo",
+                     "metric":int(metric),"flags":[],"pref":"medium"})
+    else:
+        rows.append({"type":"unreachable","dst":dst,"protocol":int(proto),
+                     "metric":int(metric),"flags":[]})
 # COMPACT by default, because that is what real `ip -j` emits -- verified on
 # this box. The pretty form is what `ip -p -j` emits, and a row uses it.
 if os.path.exists(sys.argv[3]):
@@ -144,9 +184,25 @@ PY
           exit 0
         fi
         echo '[]'; exit 0 ;;
+      get)
+        # `route get` is a FIXTURE, not a simulation. Its three outcomes are
+        # recorded from the real tool and replayed verbatim, because the whole
+        # point of the doctor's canary is that it must CLASSIFY rc and stderr
+        # rather than grep stdout -- and a simulation would encode whatever the
+        # author already believed. A missing fixture is exit 99, never a quiet
+        # default that would let a doctor row pass on nothing at all.
+        dst="${3:-}"
+        fam_check "$dst"
+        base="$IPSTATE/get-$dst"
+        if [ -r "$base.rc" ]; then
+          [ -r "$base.out" ] && cat "$base.out"
+          [ -r "$base.err" ] && cat "$base.err" >&2
+          exit "$(cat "$base.rc")"
+        fi
+        echo "ip stub: no route get fixture for '$dst'" >&2; exit 99 ;;
       add|del)
         # Grammar exactly as the real one: `route add|del unreachable <dst> proto
-        # <n> metric <m>`.
+        # <n> [metric <m>]`.
         op="$sub"; shift 2
         [ "${1:-}" = "unreachable" ] || { echo "ip stub: expected 'unreachable', got '${1:-}'" >&2; exit 98; }
         dst="${2:-}"; proto=""; metric=""
@@ -159,23 +215,41 @@ PY
           esac
         done
         [ -n "$proto" ] || { echo "ip stub: no proto given" >&2; exit 98; }
-        touch "$IPSTATE/routes"
+        fam_check "$dst"
+        touch "$RF"
         if [ "$op" = "add" ]; then
           [ -e "$IPSTATE/fail-add" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
           # awk only: `grep` here is a ugrep shim, and -P is one of the GNU
           # extensions this repo's notes warn about resolving differently.
-          if awk -F'\t' -v d="$dst" '$1==d{found=1} END{exit !found}' "$IPSTATE/routes"; then
+          if awk -F'\t' -v d="$dst" '$1==d{found=1} END{exit !found}' "$RF"; then
             echo "RTNETLINK answers: File exists" >&2; exit 2
           fi
-          printf '%s\t%s\t%s\n' "$dst" "$proto" "$metric" >> "$IPSTATE/routes"
+          printf '%s\t%s\t%s\n' "$dst" "$proto" "$metric" >> "$RF"
           exit 0
         fi
         [ -e "$IPSTATE/fail-del" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
-        if ! awk -F'\t' -v d="$dst" -v p="$proto" '$1==d && $2==p{found=1} END{exit !found}' "$IPSTATE/routes"; then
+        # THE DELETE HONOURS `metric` WHEN IT IS GIVEN, and matches on dst+proto
+        # when it is not -- which is the difference the v6 delete turns on.
+        # Measured: `ip -6 route del <dst> proto 66 metric 1024` against a
+        # metric-4242 route answers "No such process", which del_route treats as
+        # SUCCESS. So one metric drift would make a v6 blackhole permanent while
+        # clear_owned reported it cleared. A stub that ignored metric could not
+        # tell those two commands apart and the mutant would be unkillable.
+        if [ -n "$metric" ]; then
+          if ! awk -F'\t' -v d="$dst" -v p="$proto" -v m="$metric" \
+               '$1==d && $2==p && $3==m{found=1} END{exit !found}' "$RF"; then
+            echo "RTNETLINK answers: No such process" >&2; exit 2
+          fi
+          awk -F'\t' -v d="$dst" -v p="$proto" -v m="$metric" \
+              '!($1==d && $2==p && $3==m)' "$RF" > "$IPSTATE/.r" \
+            && mv -f "$IPSTATE/.r" "$RF"
+          exit 0
+        fi
+        if ! awk -F'\t' -v d="$dst" -v p="$proto" '$1==d && $2==p{found=1} END{exit !found}' "$RF"; then
           echo "RTNETLINK answers: No such process" >&2; exit 2
         fi
-        awk -F'\t' -v d="$dst" -v p="$proto" '!($1==d && $2==p)' "$IPSTATE/routes" > "$IPSTATE/.r" \
-          && mv -f "$IPSTATE/.r" "$IPSTATE/routes"
+        awk -F'\t' -v d="$dst" -v p="$proto" '!($1==d && $2==p)' "$RF" > "$IPSTATE/.r" \
+          && mv -f "$IPSTATE/.r" "$RF"
         exit 0 ;;
     esac
     echo "ip stub: unhandled route subcommand: $sub" >&2; exit 99 ;;
@@ -187,6 +261,36 @@ echo "ip stub: unhandled: $*" >&2
 exit 99
 STUB
 chmod +x "$STUBBIN/ip" || fatal setup
+
+# ---------------------------------------------------------------------------
+# The `sudo` stub — and it is a BUG FIX, not scaffolding
+# ---------------------------------------------------------------------------
+# The installer rows below set VPN_SETUP_ALLOW_WORKTREE=1, which is the whole
+# point of one of them. With the REAL PATH the guard at setup-vpn-failfast.sh:93
+# then does not exit: execution runs on through the readable-config check,
+# `--check` and the placeholder grep, and reaches
+#
+#   sudo install -m 755 -o root -g root "$SCRIPT_SRC" /usr/local/bin/vpn-failfast.sh
+#
+# where $SCRIPT_SRC is the BRANCH's script. The row's needle is printed thirty
+# lines earlier and the `|| true` swallows the status, so the row passes whether
+# or not an install happened. Only the absence of a usable `sudo` stopped it on a
+# developer's machine; on CI, which has passwordless sudo, the block actually
+# ran — so the green history never once exercised the inert path, and
+# `install(1)` writes IN PLACE, which means rewriting the running root daemon's
+# file underneath it. The header of this file claims "No sudo, no root"; that
+# claim was part of the defect.
+#
+# Recording and REFUSING (exit 1) is what a developer's machine already does, so
+# it is the behaviour every green run to date was actually measured against.
+cat > "$STUBBIN/sudo" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${IPSTATE:-}" ] || { echo "sudo stub: no IPSTATE" >&2; exit 99; }
+printf '%s\n' "$*" >> "$IPSTATE/sudo.log"
+echo "sudo stub: refused (the suite never escalates)" >&2
+exit 1
+STUB
+chmod +x "$STUBBIN/sudo" || fatal setup
 
 cat > "$STUBBIN/notify-send" <<'STUB'
 #!/usr/bin/env bash
@@ -219,6 +323,8 @@ reset() {
     rm -rf "$IPSTATE"; mkdir -p "$IPSTATE" || fatal setup
     : > "$IPSTATE/calls.log"
     : > "$IPSTATE/routes"
+    : > "$IPSTATE/routes6"
+    : > "$IPSTATE/sudo.log"
 }
 
 # The measured healthy shape: two forwarding routes with a gateway, plus the
@@ -345,7 +451,7 @@ grep_none "$OUT" 'could not add' "converging twice: no error reported"
 reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
 OUT="$(ff --once)"
 check "tunnel up: nothing is installed" "$(installed_count)" "0"
-check "tunnel up: no route was ever added" "$(asked 'route add')" "0"
+check "tunnel up: no route was ever added" "$(asked '-4 route add')" "0"
 
 printf '\norphans, and the routes that are not ours\n'
 
@@ -364,8 +470,8 @@ check "...and only the configured set remains" "$(installed)" "10.20.0.0/16 44.2
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
 ff --once >/dev/null
-FIRST_DEL="$(grep -n 'route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
-FIRST_ADD="$(grep -n 'route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+FIRST_DEL="$(grep -n -- '-4 route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+FIRST_ADD="$(grep -n -- '-4 route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
 if [[ -n "$FIRST_DEL" && -n "$FIRST_ADD" && "$FIRST_DEL" -lt "$FIRST_ADD" ]]; then
     ok "the orphan is removed BEFORE the first add"
 else
@@ -378,7 +484,7 @@ reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
 printf '54.166.22.221\t111\t100\n' > "$IPSTATE/routes"
 OUT="$(ff --once)"
 check "a foreign-proto route is never deleted" "$(installed)" "54.166.22.221 "
-check "...and no delete was even attempted" "$(asked 'route del')" "0"
+check "...and no delete was even attempted" "$(asked '-4 route del')" "0"
 
 # A destination dropped from the config while the tunnel is DOWN must not be
 # left installed: that is precisely the stale route that blackholes a host.
@@ -435,8 +541,8 @@ reset; tunnel_down_lingering; write_conf 54.166.22.221
 printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
 watch_start
 if wait_for 15 has_route 54.166.22.221; then ok "--watch converges"; else bad "--watch converges — timed out"; fi
-FIRST_DEL="$(grep -n 'route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
-FIRST_ADD="$(grep -n 'route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+FIRST_DEL="$(grep -n -- '-4 route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+FIRST_ADD="$(grep -n -- '-4 route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
 if [[ -n "$FIRST_DEL" && -n "$FIRST_ADD" && "$FIRST_DEL" -lt "$FIRST_ADD" ]]; then
     ok "--watch removes an orphan BEFORE its first add"
 else
@@ -691,14 +797,14 @@ case "$WT_GITDIR" in
     *) bad "the fixture is NOT a worktree (git-dir=$WT_GITDIR) — the rows below prove nothing" ;;
 esac
 
-OUT="$(VPN_LOCAL_CONF="$CONF" "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1)"; RC=$?
+OUT="$(PATH="$STUBBIN:$PATH" VPN_LOCAL_CONF="$CONF" "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1)"; RC=$?
 check "installing from a worktree: refused, exit 1" "$RC" 1
 grep_ok "$OUT" 'refusing to install from a WORKTREE' "worktree install: refused by name"
 grep_ok "$OUT" 'wt-gc-sweep' "worktree install: says WHY (the sweep deletes it)"
 grep_none "$OUT" 'Installing root-owned files' "worktree install: nothing was installed"
 
 # ... and the override exists, because testing a branch is a real need.
-OUT="$(VPN_SETUP_ALLOW_WORKTREE=1 VPN_LOCAL_CONF="$CONF" "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1 || true)"
+OUT="$(PATH="$STUBBIN:$PATH" VPN_SETUP_ALLOW_WORKTREE=1 VPN_LOCAL_CONF="$CONF" "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1 || true)"
 grep_ok "$OUT" 'continuing from a worktree anyway' "the override is honoured and says so"
 
 printf '\nthe units systemd will actually load\n'

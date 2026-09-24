@@ -3351,20 +3351,27 @@ vpn-doctor() {
   echo "VPN resilience"
   echo
 
-  # --- the tunnel itself ----------------------------------------------------
-  if VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null | grep -q 'tunnel:  UP'; then
+  # --- the tunnel, and what is installed, from ONE --status -----------------
+  # One invocation, not three, and no second parser. The inline
+  # `ip -j route show proto` copy that used to answer "what is installed" here
+  # was a duplicate of owned_routes() -- and an IPv4-ONLY one, in the function
+  # whose entire job is to find an orphan, so a v6 route this tool owns was
+  # invisible to the check written to catch exactly that. `--status` is the one
+  # source of truth for both questions.
+  local vstat owned tunnel_up_now=0
+  vstat="$(VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null)"
+  [[ "$vstat" == *'tunnel:  UP'* ]] && tunnel_up_now=1
+  # The `{f=0}` terminator ends the list at the first line that is not an entry,
+  # so a section printed after it can never be read as one.
+  owned="$(awk '/^installed \(proto /{f=1;next} /^  - /{if(f)print substr($0,5);next} {f=0}' <<<"$vstat")"
+
+  if (( tunnel_up_now )); then
     _doctor_ok "tunnel is UP (tun0 has a gateway route)"
   else
     _doctor_note "tunnel is DOWN — every route finding below is expected, not a fault"
   fi
 
   # --- ORPHANS: the one real risk in this design ----------------------------
-  local owned tunnel_up_now
-  owned="$(ip -j route show proto "$proto" 2>/dev/null \
-           | grep -oE '"dst"[[:space:]]*:[[:space:]]*"[^"]*"' \
-           | sed 's/^"dst"[[:space:]]*:[[:space:]]*"//; s/"$//')"
-  tunnel_up_now=1
-  VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null | grep -q 'tunnel:  UP' || tunnel_up_now=0
   if [[ -n "$owned" && "$tunnel_up_now" == "1" ]]; then
     _doctor_bad "ORPHANED unreachable route(s) while the tunnel is UP — these BLACKHOLE the host:"
     printf '      %s\n' ${=owned}
