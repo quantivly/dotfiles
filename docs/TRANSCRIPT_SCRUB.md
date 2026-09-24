@@ -216,6 +216,58 @@ Three rows exist because the obvious version of this check passes vacuously:
 A fourth closes the loop the other way: **every advertised label must have a fixture in the
 suite.** A rule can reach both files, pass every parity row, and still never be exercised.
 
+## What the new rules actually found, measured
+
+Dry run on cilantro, 2026-09-24, against the committed branch (`1f8845f`, scrubber SHA
+`e5ac1b3…`, recorded before and after so the numbers are attributable to that code and not to
+a mutant left behind by a sweep):
+
+```
+mode=dry roots=2 scanned=2498 scrubbed=122 replacements=1292 skipped=0 refused=0
+```
+
+**The nightly run seven hours earlier, on the deployed rules, reported `scrubbed=0
+replacements=0` over the same corpus.** Not one of the 55 distinct kinds below was reachable
+by the seven shapes and seven names that shipped — the allowlist names (`GH_TOKEN`,
+`ANTHROPIC_API_KEY`, `LINEAR_API_KEY`, …) do not appear at all, because the 2026-09-23 sweep
+had already cleared them. So the whole 1,292 is what the gap was worth, and a clean nightly
+log was saying nothing about it.
+
+**Shapes: 861 of 1,292 (67%).** `vpn-auth-challenge` 485, `url-password` 218,
+`aws-temp-key-id` 106, `bearer` 32, `saml-request` 10, `aws-access-key-id` 6, `private-key` 4.
+The two largest are DO-692's, added to `redact-secrets.sh` and never propagated — the drift
+this issue is about, and 495 of these replacements are its direct cost.
+
+**Names: 431**, across 48 variables, none of them nameable in advance: `DB_PASSWORD` 45,
+`DEFAULT_API_KEY` 39, `OPENAI_API_KEY` 37, `POSTGRES_PASSWORD` 37, `TEXTQL_API_KEY` 24,
+`GITHUB_TOKEN` 23, `DTDB_PASSWORD` 16, then a long tail of one-deployment names —
+`SQLPAD_ADMIN_PASSWORD`, `MINIO_ROOT_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`,
+`WC_CONSUMER_SECRET`, `QLENS_OIDC_CLIENT_SECRET`, `CROSSBAR_WAMPCRA_BACKEND_SECRET`. This is
+the argument for a pattern over an allowlist, in one column.
+
+### The false positives, counted rather than predicted
+
+66 of 1,292 (**5.1%**), every one of them the class named in advance: a **pointer** under a
+credential-shaped name, not a credential.
+
+| variable | hits | what it holds |
+|---|---|---|
+| `GH_TOKEN_SOURCE` | 33 | which route supplied the token — this repo's own `gh-doctor` output |
+| `GOOGLE_APPLICATION_CREDENTIALS` | 11 | a path |
+| `POSTGRES_PASSWORD_FILE` | 8 | a path |
+| `RESTIC_PASSWORD_FILE` | 8 | a path |
+| `AWS_SHARED_CREDENTIALS_FILE` | 2 | a path |
+| `ANTHROPIC_IDENTITY_TOKEN_FILE` | 2 | a path |
+| `POSTGRES_SECRET_DIR` | 2 | a path |
+
+Each costs one value in one record; the variable name survives, the record stays valid JSON,
+and nothing is unreadable afterwards. Set against 1,226 real credentials, the trade is the one
+argued for above — and the measurement is what makes it an argument rather than an assertion.
+
+`GH_TOKEN_SOURCE` is the only one with a cost worth naming: it is a diagnostic this repo
+prints on purpose, and scrubbing it makes a `gh-doctor` transcript less useful for debugging
+account routing.
+
 ## Roots are derived, and the reason is measured
 
 `~/.claude/projects` is not the only transcript tree on a machine running these dotfiles.
@@ -305,6 +357,33 @@ missed. Both carry half an hour of jitter for the same reason.
 
 A missed night costs nothing: a second pass over an already-scrubbed transcript is a
 byte-for-byte no-op.
+
+## The mutation sweep
+
+18 mutants, **17 killed, 1 survived as predicted, 0 unexpected verdicts.** Every mutant
+carried an explicit expected verdict, and the sweep printed each diff — a mutation can apply,
+parse, kill rows, and still not be the mutation its name claims.
+
+Three kills are worth keeping, because each is the only thing standing between here and a
+defect that looks exactly like working code:
+
+- **`<` removed from the `vpn-auth-challenge` or `url-password` value class** — killed by one
+  row each, and it is the *count* assertion, not the `cmp`. The bytes are identical either
+  way. A rule that re-matches its own replacement reports work it did not do on every nightly
+  run forever, and byte comparison cannot see it.
+- **`private-key`'s `+` weakened to `*`** — killed by *"a PEM header with no body after it is
+  left alone"*. Without `+`, a bare mention of the header in prose grows a marker on every run.
+- **The redactor extractor faked to echo the scrubber's own list** — killed only by *"a rule
+  deleted from redact-secrets.sh is detected, and named"*. The four straightforward parity
+  rows all pass against an extractor that reads nothing, which is why that row exists.
+
+The survivor is `aws-secret`'s `[ \t]` widened to `\s`, and it is expected: a JSON record
+always closes with `"`, so the wider class cannot bridge two records on well-formed input.
+`[ \t]` is kept because relying on that is relying on the input being well formed.
+
+Three mutants in the first round reported **NOT APPLICABLE** — bad anchors, one of them a
+comment sharing its text with the rule it described. That reads exactly like a survivor, so
+they were re-anchored and re-run rather than counted as 12 of 15.
 
 ## Linked, not enabled
 
