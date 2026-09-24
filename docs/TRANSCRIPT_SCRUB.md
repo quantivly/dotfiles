@@ -360,9 +360,10 @@ byte-for-byte no-op.
 
 ## The mutation sweep
 
-18 mutants, **17 killed, 1 survived as predicted, 0 unexpected verdicts.** Every mutant
-carried an explicit expected verdict, and the sweep printed each diff — a mutation can apply,
-parse, kill rows, and still not be the mutation its name claims.
+Eighteen distinct mutants over four rounds: **16 killed, one survived as predicted, and one
+survived for real.** Every mutant carried an explicit expected verdict, and the sweep printed
+each diff — a mutation can apply, parse, kill rows, and still not be the mutation its name
+claims.
 
 Three kills are worth keeping, because each is the only thing standing between here and a
 defect that looks exactly like working code:
@@ -381,9 +382,29 @@ The survivor is `aws-secret`'s `[ \t]` widened to `\s`, and it is expected: a JS
 always closes with `"`, so the wider class cannot bridge two records on well-formed input.
 `[ \t]` is kept because relying on that is relying on the input being well formed.
 
-Three mutants in the first round reported **NOT APPLICABLE** — bad anchors, one of them a
-comment sharing its text with the rule it described. That reads exactly like a survivor, so
-they were re-anchored and re-run rather than counted as 12 of 15.
+**The real survivor was in the docs check, and it is the one worth writing down.** This suite
+inherited `docs_claim()` from DO-701, which hardcodes its needle; DO-700 generalised it with an
+optional second argument so the rule-count row could reuse it. Emptying that default left every
+row green:
+
+```
+tr -s '[:space:]' ' ' <"$f" | grep -c -F "$needle"
+```
+
+`tr` squashes the whole page onto **one line**, so `grep -c -F ""` returns exactly `1` — the
+same value a correct match returns, from a file it never inspected. The rows whose entire job
+is catching a stale documented count were passing without reading anything. The needle is now
+**mandatory**, both callers pass theirs explicitly, and two mutants pin it: removing the guard,
+and a caller reverting to a default. A convenience argument created a state the original could
+not reach, which is the general lesson — generalising a checker widens its input domain, and
+the new inputs are where the hollow passes live.
+
+**Three mutants in the first round, and one in the third, reported NOT APPLICABLE** — bad
+anchors, one a comment sharing its text with the rule it described, one a `SyntaxError` in the
+sweep script itself that made it silently re-run the previous round's list. Each reads exactly
+like a survivor, so they were re-anchored and re-run rather than counted as kills. The sweep
+now builds its mutants with `repr()` on text read out of the file, because hand-quoting shell
+inside Python is what produced two of the four.
 
 ## Linked, not enabled
 

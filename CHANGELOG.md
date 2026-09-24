@@ -173,8 +173,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agree perfectly), a rule deleted from a *copy* of the redactor must be detected and named (a
   function returning the scrubber's own list would pass otherwise), and an unreadable redactor is
   not a pass. A fourth asserts every advertised label has a fixture, so a rule cannot reach both
-  files and still go unexercised. `redact-secrets.sh` itself is untouched. 58 → 111 checks, and
-  the record's own stale row count (54) is now a row.
+  files and still go unexercised. `redact-secrets.sh` itself is untouched. 60 → 112 checks.
+
+  **Measured, not argued: a dry run over 2,498 transcripts found 1,292 replacements in 122
+  files, where the nightly run seven hours earlier on the deployed rules reported zero.** 861
+  of those are shapes (485 `vpn-auth-challenge` and 218 `url-password`, both DO-692's), 431 are
+  names, and the false positives are 66 — 5.1%, every one a *pointer* under a credential-shaped
+  name (`GH_TOKEN_SOURCE`, `GOOGLE_APPLICATION_CREDENTIALS`, `*_PASSWORD_FILE`), which is the
+  class named in the code before the run rather than after it. Eighteen mutants over four
+  rounds: 16 killed, one survived as predicted, and one survived for real — `docs_claim()`'s
+  needle, generalised here from DO-701's hardcoded form, returned a passing `1` from a file it
+  never read once its default was emptied, because `tr` squashes the page onto one line and
+  `grep -c -F ""` matches it. The needle is mandatory now, with two mutants pinning it.
 
 - **The secret-guard state table now asserts its own row total, and the two prose copies of it
   (DO-698).** `scripts/test-secret-guard.sh` had no `EXPECTED_ROWS` guard, and a row count is
