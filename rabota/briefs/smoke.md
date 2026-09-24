@@ -12,7 +12,10 @@ This worktree is yours to read. You write only under out_dir. No git verbs other
 ## Outputs
 out_dir: {out_dir}
 Write `{out_dir}/verdict.json` in the spec §C6 shape: `lane`, `status` (`done`), three `claims` (one per
-assignment item) each with `evidence: {cmd, expected, observed}` and `confidence`, empty `deliverables`
-and `followups`. ≤ 4096 bytes. Then stop.
+assignment item) each with **`id`**, **`text`**, `evidence: {cmd, expected, observed}` and `confidence`,
+empty `deliverables` and `followups`. ≤ 4096 bytes. Then stop.
+
+`id` and `text` are not optional — `lanes/verdict.py` refuses a claim without them, and a refused
+verdict makes `lane recipe --kind evaluate --of <id>` unreachable.
 ## Summary
 Three commands, one verdict file, nothing else.

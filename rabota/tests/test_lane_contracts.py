@@ -70,6 +70,50 @@ class ContractTests(unittest.TestCase):
             verdict.validate(p, 10)
         self.assertIn("bytes", str(cm.exception))
 
+    def test_a_refused_claim_names_the_keys_it_wanted(self):
+        """DO-710: the refusal said "claim malformed" and printed the claim back, so a lane that
+        had followed a brief with the wrong key names could not tell which names were wrong. The
+        shipped smoke brief did exactly that, and diagnosing it took four commands."""
+        v = {"lane": "l1", "status": "done", "deliverables": [], "followups": [],
+             "claims": [{"description": "t", "evidence": {"cmd": "true"}, "confidence": "medium"}]}
+        with self.assertRaises(verdict.VerdictError) as cm:
+            verdict.validate(self.tmpfile(json.dumps(v)), 4096)
+        msg = str(cm.exception)
+        self.assertIn("id", msg)
+        self.assertIn("text", msg)
+
+    def test_a_claim_missing_only_evidence_cmd_says_so(self):
+        """The nested key is the other way a claim is refused, and it must be named too rather
+        than reported as a whole-claim problem."""
+        v = {"lane": "l1", "status": "done", "deliverables": [], "followups": [],
+             "claims": [{"id": "c1", "text": "t", "evidence": {"expected": "x"}}]}
+        with self.assertRaises(verdict.VerdictError) as cm:
+            verdict.validate(self.tmpfile(json.dumps(v)), 4096)
+        self.assertIn("evidence.cmd", str(cm.exception))
+
+    def test_the_shipped_smoke_brief_names_every_key_this_validator_requires(self):
+        """DO-710 review F1: the first version of this row grepped smoke.md for hand-written
+        strings, so renaming verdict.py's required key from `text` to `description` left it
+        passing — a guard that could not fail. It now reads the requirement from
+        verdict.CLAIM_REQUIRED, so a rename there breaks this row until the brief follows."""
+        brief_md = Path(__file__).resolve().parents[1] / "briefs" / "smoke.md"
+        if not brief_md.exists():
+            self.skipTest("smoke.md not present in this checkout")
+        outputs = brief_md.read_text().split("## Outputs", 1)[1]
+        import re
+        for key in verdict.CLAIM_REQUIRED + tuple(n.split(".")[1] for n in verdict.CLAIM_REQUIRED_NESTED):
+            self.assertRegex(outputs, rf"\b{re.escape(key)}\b",
+                             f"smoke.md Outputs must name {key!r}, which verdict.py requires")
+
+    def test_a_claim_built_from_the_brief_s_documented_shape_validates(self):
+        """The other half of F1: assert the shape the brief asks for actually passes the
+        validator, rather than only that the words appear."""
+        claim = {k: "x" for k in verdict.CLAIM_REQUIRED}
+        claim["evidence"] = {"cmd": "true", "expected": "", "observed": ""}
+        claim["confidence"] = "high"
+        v = {"lane": "l1", "status": "done", "claims": [claim], "deliverables": [], "followups": []}
+        self.assertEqual(verdict.validate_text(json.dumps(v), 4096, where="x")["lane"], "l1")
+
     def test_verdict_bad_shape(self):
         with self.assertRaises(verdict.VerdictError):
             verdict.validate(self.tmpfile('{"lane": "l1", "status": "maybe", "claims": [], "deliverables": [], "followups": []}'), 4096)

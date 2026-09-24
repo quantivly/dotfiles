@@ -4,6 +4,13 @@ from pathlib import Path
 from rabota import errors
 
 
+# The keys every claim must carry. Declared here rather than inline so a brief that documents
+# the claim shape can be checked against this tuple: renaming one breaks any brief that has not
+# followed, instead of silently making the brief wrong (DO-710 review, F1).
+CLAIM_REQUIRED = ("id", "text", "evidence")
+CLAIM_REQUIRED_NESTED = ("evidence.cmd",)
+
+
 class VerdictError(errors.RabotaError):
     name = "verdict"
 
@@ -52,6 +59,12 @@ def validate_text(text: str, max_bytes: int, *, where: str) -> dict:
     if v["status"] not in ("done", "failed"):
         raise VerdictError(f"status must be done|failed, got {v['status']!r}")
     for c in v["claims"]:
-        if not all(k in c for k in ("id", "text", "evidence")) or "cmd" not in c["evidence"]:
-            raise VerdictError(f"claim malformed: {c}")
+        # Name what is missing rather than printing the claim back. A lane that followed a brief
+        # with the wrong key names cannot tell from "malformed" which names were wrong, and the
+        # shipped smoke brief did exactly that (DO-710) -- the diagnosis took four commands.
+        missing_c = [k for k in CLAIM_REQUIRED if k not in c]
+        if not missing_c and "cmd" not in c["evidence"]:
+            missing_c = ["evidence.cmd"]
+        if missing_c:
+            raise VerdictError(f"claim missing keys: {', '.join(missing_c)}; got {sorted(c)}")
     return v
