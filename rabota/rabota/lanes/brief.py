@@ -91,9 +91,15 @@ def validate_text(text: str, where: str = "brief") -> dict:
         missing.insert(0, "# <title>")
     if missing:
         raise errors.Usage(f"{where} is missing sections: " + ", ".join(missing))
-    # The rules must be named the way they actually arrive -- by basename, beside the brief. The
-    # section is JOINED before searching: `_section` returns lines, and a reference wrapped across
-    # two of them escaped a per-line search entirely (found by the review lane, 2026-09-24).
+    # The rules must be named the way they actually arrive -- by basename, beside the brief.
+    #
+    # The join is for convenience, NOT correctness, and the mutation sweep is what established
+    # that: swapping "\n" for " " here kills no row, because the prefix class excludes ALL
+    # whitespace and so a match can never span a line break either way. A reference split exactly
+    # AT its separator (`/home/zvi/` then `_common-rules.md` on the next line) is therefore not
+    # caught, in any join. That limit is recorded rather than papered over -- like the secret
+    # guard, this is a papercut guard and not a boundary: a brief that evades it still gets the
+    # real rules, because `run_recipe` ships them whatever the brief says.
     rules_section = "\n".join(_section(lines, "## Common rules"))
     m = RULES_WITH_A_PREFIX.search(rules_section)
     if m:

@@ -204,6 +204,19 @@ class CommonRulesTests(unittest.TestCase):
                 with self.assertRaises(errors.Usage):
                     brief.validate_text(base.format(rules=rules), where="b")
 
+    def test_the_one_shape_this_check_does_not_catch_is_written_down(self):
+        """A KNOWN limit, pinned so it cannot become a surprise. A reference split exactly at its
+        separator escapes, because the prefix may not contain whitespace — and the mutation sweep
+        showed the "\\n".join is not what saves the other wrapped shape, the pattern is. Recorded
+        rather than hidden: this is a papercut guard, not a boundary, and a brief that evades it
+        still gets the real rules because `run_recipe` ships them whatever the brief says."""
+        base = ("# T\n## Common rules\nRead /home/zvi/\n{tail}\n## Role\nr\n## Assignment\na\n"
+                "## Ownership\no\n## Outputs\nout_dir: /tmp/x\n## Summary\ns\n")
+        brief.validate_text(base.format(tail=brief.RULES.name), where="b")   # escapes: known
+        with self.assertRaises(errors.Usage):   # the same path unsplit does not
+            brief.validate_text(base.replace("/home/zvi/\n", "/home/zvi/").format(
+                tail=""), where="b")
+
     def test_a_common_rules_section_that_never_names_the_rules_is_refused(self):
         """Absence used to pass: the old check only looked for a path, so a section saying
         "you are one lane, push back with evidence" and nothing else satisfied it while leaving
