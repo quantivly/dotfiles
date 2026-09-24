@@ -11,8 +11,10 @@ and each is tested:
    connectors' already-completed fetches for no gain in safety — the good files are self-contained
    and independent, so writing them is exactly as safe as it is in three separate ``ingest`` calls.
    What is NOT allowed is a return that reads as "all three ok": ``run_ingest_many`` always raises
-   ``errors.Partial`` (exit 4, like ``sync.run_sync``) naming every source whose file didn't
-   validate, once every source has been attempted — never before, and never silently swallowed.
+   ``errors.Partial`` (exit 4, like ``sync.run_sync``) naming every source that did not land,
+   once every source has been attempted — never before, and never silently swallowed. "Did
+   not land" covers any failure, not only a validation one: a read or write error on one
+   source must not abandon the others, whose files are already fetched and independent of it.
 2. **The return shape is a dict keyed by source**, one entry per source, each entry exactly the dict
    ``run_ingest`` already returns for a valid source (or an ``{"ok": False, "error": ...}`` stand-in
    for a refused one) — the same shape ``sync.run_sync`` already uses for the same reason: a caller
@@ -86,11 +88,13 @@ def run_ingest_many(ctx: Context, files: list[tuple[str, Path]]) -> dict:
 
     Refuses the whole call, before touching any file, if ``files`` names a source more than once
     or names one outside ``ALLOWED``. Otherwise calls ``run_ingest`` once per ``(source, file)``
-    pair; a pair that fails validation is reported in the return value rather than raised
-    immediately, so the sources that DID validate still get written and recorded. Once every pair
-    has been attempted, raises ``errors.Partial`` naming every source that failed — an empty
-    ``failed`` list never reaches this point, so a caller who only checks the exit code cannot
-    mistake a partial ingest for a complete one.
+    pair; a pair that fails — for ANY reason, not only a validation one — is recorded rather
+    than raised immediately, so the sources after it are still attempted and the ones that did
+    land still get written and recorded. Once every pair has been attempted, raises
+    ``errors.Partial`` naming every source that did not land, with each one's reason in the
+    message: raising discards the return value, so that message is the only place a caller can
+    learn *why*. An empty ``failed`` list never reaches this point, so a caller who only checks
+    the exit code cannot mistake a partial ingest for a complete one.
 
     Returns ``{source: report}`` for every source given, valid or not: a valid source's report is
     exactly what ``run_ingest`` returns; a refused source's is
@@ -107,11 +111,25 @@ def run_ingest_many(ctx: Context, files: list[tuple[str, Path]]) -> dict:
     for source, file in files:
         try:
             report[source] = run_ingest(ctx, source, file)
-        except errors.Usage as e:
-            report[source] = {"source": source, "ok": False, "error": str(e), "items": 0, "path": ""}
+        except Exception as e:  # noqa: BLE001
+            # Deliberately broad. Catching only `errors.Usage` meant an `OSError` from the snapshot
+            # write escaped mid-loop: the sources after it were never attempted, though their files
+            # were already fetched, valid and independent of it, and the exit named the exception
+            # without saying what had landed and what had been skipped (review finding). Every
+            # source given is attempted; what went wrong with each is in its own report entry. The
+            # type name is kept for anything that is not one of ours, so a genuine bug here is still
+            # diagnosable from the output rather than flattened into a message.
+            msg = str(e) if isinstance(e, errors.RabotaError) else f"{type(e).__name__}: {e}"
+            report[source] = {"source": source, "ok": False, "error": msg, "items": 0, "path": ""}
             failed.append(source)
     if failed:
-        raise errors.Partial(f"ingest files invalid: {', '.join(failed)}", failed=failed)
+        # Not "files invalid": a source can also fail to land on a read or write error, and a
+        # message that names the wrong cause is the kind of small untruth that sends the reader to
+        # the wrong file. The reason rides in the message because raising discards ``report`` --
+        # `failed` stays a list of plain source names, the shape `cli.main` and `sync.run_sync`
+        # already share, so this message is the only place a caller can learn *why*.
+        why = "; ".join(f"{s} ({report[s]['error']})" for s in failed)
+        raise errors.Partial(f"ingest did not land: {why}", failed=failed)
     return report
 
 
@@ -127,8 +145,18 @@ def _build(sub):
 def _run(ns):
     ctx = Context.from_namespace(ns)
     if ns.source is not None:
-        if len(ns.file) != 1 or "=" in ns.file[0]:
-            raise errors.Usage("single-source ingest (`ingest <source> --file PATH`) takes exactly one plain --file")
+        if len(ns.file) != 1:
+            raise errors.Usage("single-source ingest (`ingest <source> --file PATH`) takes exactly one --file; "
+                                "to ingest several sources, drop the positional source and repeat --file SOURCE=PATH")
+        # Review finding: refusing every single-source `--file` containing `=` also refused a legal
+        # path that happens to contain one, which `main` accepted -- "unchanged" has to mean
+        # unchanged for the unusual inputs too. Only a prefix that is an actual source name can be
+        # the mixed form, so only that is refused, and the message names the ambiguity rather than
+        # letting a mistyped mixed form fail later as a missing file.
+        head = ns.file[0].partition("=")[0]
+        if "=" in ns.file[0] and head in ALLOWED:
+            raise errors.Usage(f"ingest names a source twice: positional {ns.source!r} and --file {head}=...; "
+                                f"use one form or the other")
         return run_ingest(ctx, ns.source, Path(ns.file[0]))
     if not ns.file:
         raise errors.Usage("ingest needs either `<source> --file PATH` or repeated `--file SOURCE=PATH`")

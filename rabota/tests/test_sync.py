@@ -264,6 +264,75 @@ class SyncTests(unittest.TestCase):
         body = json.loads(out)
         self.assertTrue(body["slack"]["ok"]); self.assertTrue(body["calendar"]["ok"])
 
+    def test_single_source_form_still_takes_a_path_containing_an_equals_sign(self):
+        # Review finding: refusing every single-source `--file` containing `=` (to catch the mixed
+        # form) also refused a legal path that happens to contain one, which `main` accepted. The
+        # brief's constraint was that this form keep working *unchanged*, and an unusual path is
+        # still a path.
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; odd = state / "a=b"; odd.mkdir(parents=True)
+        slack = odd / "slack-in.json"
+        slack.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": [{"text": "hi"}]}))
+        code, out, _ = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                 "slack", "--file", str(slack)])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(json.loads(out)["ok"])
+
+    def test_a_source_named_both_ways_is_refused_naming_the_ambiguity(self):
+        # The other half of the row above: `ingest slack --file calendar=f.json` names a source
+        # twice, and must still be refused -- but for saying so, not for containing an `=`.
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        f = state / "calendar-in.json"
+        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": []}))
+        code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                   "slack", "--file", f"calendar={f}"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("names a source twice", out + err)
+
+    def test_repeating_file_with_a_positional_source_is_refused_not_last_wins(self):
+        # `main` kept the last `--file` silently; this form now refuses. Untested until now, and an
+        # untested refusal is one revert away from becoming last-write-wins again.
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        a = state / "a.json"; b = state / "b.json"
+        for f in (a, b):
+            f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": []}))
+        code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                   "slack", "--file", str(a), "--file", str(b)])
+        self.assertEqual(code, 2, out)
+        self.assertIn("--file", out + err)
+        # the behaviour, not the wording: nothing may be ingested from either file
+        self.assertIsNone(snapshots.read(state, "slack"))
+
+    def test_a_write_error_on_one_source_still_attempts_the_others(self):
+        # Review finding: only `errors.Usage` was caught per source, so an OSError from the
+        # snapshot write escaped mid-loop -- the sources after it were never attempted, though
+        # their files were already fetched, valid, and independent of the one that blew up.
+        ctx = self.ctx()
+        files = [("calendar", self._write(ctx, "calendar-in", ok=True, items=[])),
+                  ("fireflies", self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}]))]
+        real = ingest.snapshots.write
+
+        def boom(state_dir, source, payload):
+            if source == "calendar":
+                raise OSError("no space left on device")
+            return real(state_dir, source, payload)
+
+        ingest.snapshots.write = boom
+        self.addCleanup(lambda: setattr(ingest.snapshots, "write", real))
+        with self.assertRaises(errors.Partial) as cm:
+            ingest.run_ingest_many(ctx, files)
+        self.assertEqual(cm.exception.failed, ["calendar"])
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "fireflies"))   # attempted despite the blow-up
+        self.assertIsNone(snapshots.read(ctx.state_dir, "calendar"))
+        # raising discards the report, so the reason has to reach the reader through the message
+        self.assertIn("OSError", str(cm.exception))
+        self.assertIn("no space left on device", str(cm.exception))
+
     def test_ingest_cli_single_source_form_unchanged(self):
         from tests.test_cli import run_cli, install_fixture_home
         install_fixture_home(self)
