@@ -1175,6 +1175,16 @@ grep_ok "$OUT" 'refusing to install from a WORKTREE' "worktree install: refused 
 grep_ok "$OUT" 'wt-gc-sweep' "worktree install: says WHY (the sweep deletes it)"
 grep_none "$OUT" 'Installing root-owned files' "worktree install: nothing was installed"
 
+# THE REMEDY MUST BE RUNNABLE VERBATIM. Dropping the flags prints a command
+# that succeeds and does something else: `vpn-setup` with no flags leaves arming
+# untouched by design, so a user who typed --block-ipv6, pasted the remedy, and
+# saw it succeed would still be leaking IPv6. Second time this class has bitten
+# here -- the first was `sudo vpn-setup`, which could not run at all.
+OUT="$(PATH="$STUBBIN:$PATH" VPN_LOCAL_CONF="$CONF" \
+       "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable --block-ipv6 2>&1)"
+grep_ok "$OUT" 'cd ~/.dotfiles && vpn-setup --no-enable --block-ipv6' \
+        "the worktree refusal echoes the flags you typed, so the remedy is runnable"
+
 # ... and the override exists, because testing a branch is a real need.
 OUT="$(PATH="$STUBBIN:$PATH" VPN_SETUP_ALLOW_WORKTREE=1 VPN_LOCAL_CONF="$CONF" "$FAKE_WT/scripts/setup-vpn-failfast.sh" --no-enable 2>&1 || true)"
 grep_ok "$OUT" 'continuing from a worktree anyway' "the override is honoured and says so"
@@ -1630,7 +1640,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=239
+EXPECTED_ROWS=240
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
