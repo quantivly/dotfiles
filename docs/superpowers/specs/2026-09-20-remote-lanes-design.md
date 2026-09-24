@@ -47,7 +47,7 @@ shares" (`rabota/rabota/budget.py`). `[machines.dev]` is already declared in the
 | # | Question | Decision |
 |---|---|---|
 | 1 | `dev-spawn` or `lane recipe` for remote dispatch | **`lane recipe`.** DO-642 is superseded (§3) |
-| 2 | Does dev need rabota installed | **No** (§4.4). WS6.3 shrinks accordingly |
+| 2 | Does dev need rabota installed | **No** (§4.4); WS6.3 shrinks accordingly — **amended 2026-09-24, see §4.4** |
 | 3 | Does the gate read dev's window from dev | **No, not in S0** (§4.2). The laptop's monitoring grant is authoritative |
 | 4 | nanoclaw as a lane target | **No.** "Hetzner never runs lanes" (consolidation-design §6) stands; it is a production box |
 | 5 | Brief transport | **stdin**, never argv (§4.4) |
@@ -165,6 +165,21 @@ migration and is **out of scope for S0** — recorded here so it is not rediscov
 
 ### 4.4 The dev form of `lane recipe`
 
+**AMENDED 2026-09-24 (DO-712).** Decision 2 was right about rabota's own *mechanism* — nothing
+rabota does runs on dev, and that has not changed. It was wrong about the *lane*. A lane is a
+Claude session with a Bash tool, and several plausible briefs want `rabota budget` or
+`rabota lane list`; the shipped `briefs/smoke.md` has told lanes to run `rabota version` since it
+was written. Measured on dev 2026-09-24, a lane could not: the unit's PATH (systemd 249's user
+manager, no `~/.local/bin`) made it exit 127, and invoking the binary directly failed because
+`/usr/bin/python3` is 3.10.12 and the CLI needs `tomllib`. `~/.local/bin/rabota` is already there
+as a side effect of `bash ~/.dotfiles/install` (Part B1 of the dev-box offload), so the decision
+this record carried and the machine's actual state had drifted apart in silence.
+
+Neither half of the fix is a provisioning step on dev, so §6 item 4 still stands: the lane's PATH
+is set by `build_local` from the PATH the machine itself reports, and the entry point picks an
+interpreter that has `tomllib`. What changes is that a lane may now *rely* on `rabota` being
+callable, and `scripts/test-rabota.sh` holds both halves.
+
 **Dev needs no rabota.** Everything rabota does happens on the laptop: render the argv, create the
 worktree, write the lane row, later observe. The unit runs `claude -p`, which invokes nothing of
 rabota's. §4.1 of consolidation-design mentions "`python3.11` for rabota there" — a leftover from the
@@ -174,7 +189,12 @@ Verified present on dev 2026-09-20: `/usr/bin/systemd-run`, `/usr/bin/git`, user
 `Linger=yes`, claude at `/home/ubuntu/.local/share/claude/versions/2.1.272`.
 
 **Brief transport is stdin, never argv.** The prompt is `Read <brief> and execute.`, so the brief must
-exist as a file on dev. Write it with `ssh dev 'cat > <path>'` and the content on stdin. Nothing but
+exist as a file on dev. **The lane rules ride the same channel** (DO-711, 2026-09-24):
+`briefs/_common-rules.md` is written to `<out_dir>/_common-rules.md` in a second `cat >`, and a
+brief names it relatively. Both shipped briefs used to name `/home/zvi/quantivly/handoffs/rabota/`,
+which exists on the laptop and nowhere else, so every dev lane failed its first instruction and ran
+without the hard rails; `out_dir` is the one directory `--add-dir` grants a lane, and the one a
+verbatim-shipped work brief can name without substitution (DO-683). Write it with `ssh dev 'cat > <path>'` and the content on stdin. Nothing but
 generated paths crosses a command line, which is what makes the bash-`%q`-into-zsh hazard (review F3;
 dev's login shell is zsh 5.8.1) structurally absent rather than handled.
 

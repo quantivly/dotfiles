@@ -19,7 +19,22 @@ and JSON errors on stderr. Exit codes: `0` ok · `2` usage · `3` refused · `4`
 | `rabota/commands/*.py` | one module per subcommand; each calls `cli.register` on import |
 | `tests/` | `unittest` suite with synthetic fixtures under `tests/fixtures/` |
 
-Entry point: `scripts/rabota` (linked to `~/.local/bin/rabota` by `install.conf.yaml`).
+Entry point: `scripts/rabota` (linked to `~/.local/bin/rabota` by `install.conf.yaml`). It
+**picks an interpreter rather than exec'ing a bare `python3`** (DO-712): `config.py` imports
+`tomllib`, which is 3.11+, and a box whose `python3` is older but which has a `python3.11` beside
+it — dev, measured 2026-09-24 — otherwise got `ModuleNotFoundError` with nothing to act on.
+`python3` is tried first, so a current box pays one probe and nothing else.
+
+| Path | Role |
+|---|---|
+| `briefs/_common-rules.md` | the lane rules, **shipped into every lane's `out_dir` beside `brief.md`** |
+| `briefs/smoke.md`, `briefs/evaluate.md.tmpl` | the shipped work brief and the evaluate template |
+
+A brief names the rules **relatively**, never by absolute path: `lane recipe` copies them next to
+the brief it sends, which is the one directory `--add-dir` grants the lane and the one a
+verbatim-shipped work brief can name without substitution. `lanes/brief.py:validate` refuses any
+absolute path under `## Common rules`, and `run_recipe` runs it before the budget gate — until
+DO-711 it ran nowhere, and both shipped briefs pointed every dev lane at `/home/zvi/...`.
 
 ## Where data lives
 

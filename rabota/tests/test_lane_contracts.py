@@ -5,7 +5,7 @@ from rabota.lanes import brief, verdict
 
 GOOD_BRIEF = """# Smoke: prove the lane substrate
 ## Common rules
-Read /home/zvi/quantivly/handoffs/rabota/_common-rules.md.
+Read `_common-rules.md`, in this brief's own directory.
 ## Role
 You investigate; you do not implement.
 ## Assignment
@@ -124,3 +124,86 @@ class ContractTests(unittest.TestCase):
         text = brief.render_evaluate({"id": "smoke", "brief": "/b/smoke.md"}, Path("/o/smoke/verdict.json"), Path("/o/smoke-eval"))
         self.assertIn("/o/smoke/verdict.json", text); self.assertIn("out_dir: /o/smoke-eval", text)
         brief.validate(self.tmpfile(text))   # the evaluate brief is itself a valid brief
+
+
+class CommonRulesTests(unittest.TestCase):
+    """DO-711. Every brief opened with `Read /home/zvi/quantivly/handoffs/rabota/_common-rules.md`.
+
+    That path exists on the laptop and on no other machine — and `dev`, the only machine where
+    `lane recipe --run` works, has it under neither `/home/zvi` nor its own `$HOME`. So every lane
+    dispatched there failed its first instruction and then carried on without the hard rails (the
+    first of which is "nothing outward-facing, ever"). One lane reported it in `followups`; nothing
+    in the substrate detected it, because `brief.validate` — which requires the `## Common rules`
+    heading — was never called from the dispatch path at all.
+
+    These rows hold the class, not the instance: any absolute path under that heading is refused,
+    wherever it points.
+    """
+
+    def tmpfile(self, text):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        p = Path(d.name) / "f"; p.write_text(text); return p
+
+    def test_the_shipped_rules_file_exists_and_carries_the_outward_facing_rail(self):
+        """Read from `brief.RULES`, not from a path spelled out here: the constant is what
+        `run_recipe` ships, so moving the file without moving the constant must break this row.
+        The needle is the one rail whose absence would be worst — a lane that merges or comments."""
+        text = brief.read_rules()
+        self.assertIn("Nothing outward-facing, ever", text)
+
+    def test_read_rules_refuses_an_absent_file(self):
+        with self.assertRaises(errors.Refused):
+            brief.read_rules(Path("/nonexistent/_common-rules.md"))
+
+    def test_read_rules_refuses_an_empty_file(self):
+        """Empty is a lane with no rails, and it arrives looking exactly like success."""
+        with self.assertRaises(errors.Refused) as cm:
+            brief.read_rules(self.tmpfile("   \n\n"))
+        self.assertIn("empty", str(cm.exception))
+
+    def test_a_brief_naming_an_absolute_rules_path_is_refused(self):
+        bad = GOOD_BRIEF.replace("Read `_common-rules.md`, in this brief's own directory.",
+                                 "Read /home/zvi/quantivly/handoffs/rabota/_common-rules.md.")
+        with self.assertRaises(errors.Usage) as cm:
+            brief.validate(self.tmpfile(bad))
+        # The message must NAME the path it refused — DO-710's lesson about a refusal that says
+        # "malformed" and leaves the reader to guess which key it meant.
+        self.assertIn("/home/zvi/quantivly/handoffs/rabota/_common-rules.md", str(cm.exception))
+        self.assertIn(brief.RULES.name, str(cm.exception))
+
+    def test_a_home_relative_rules_path_is_refused_too(self):
+        """`~` is not a laptop-only path in the same way, it is worse: it expands against whichever
+        home reads it, so the same string means a different file on dev and fails silently."""
+        bad = GOOD_BRIEF.replace("Read `_common-rules.md`, in this brief's own directory.",
+                                 "Read `~/quantivly/handoffs/rabota/_common-rules.md`.")
+        with self.assertRaises(errors.Usage):
+            brief.validate(self.tmpfile(bad))
+
+    def test_an_absolute_path_outside_the_common_rules_section_is_allowed(self):
+        """The negative control. `## Outputs` legitimately carries an absolute `out_dir:` — a
+        rendered evaluate brief always does — so a check that scanned the whole brief would refuse
+        every real dispatch while looking like a working guard."""
+        self.assertIn("out_dir: /tmp/lane-out", GOOD_BRIEF)
+        self.assertEqual(brief.validate(self.tmpfile(GOOD_BRIEF))["out_dir"], "/tmp/lane-out")
+
+    def test_both_shipped_briefs_name_the_rules_the_way_they_actually_arrive(self):
+        """smoke.md is shipped verbatim and evaluate.md.tmpl is rendered, so each is checked in
+        the form the lane actually receives. The needle is `brief.RULES.name`, never a literal:
+        renaming the shipped file without editing the briefs must break this row."""
+        smoke = Path(__file__).resolve().parents[1] / "briefs" / "smoke.md"
+        rendered = brief.render_evaluate({"id": "l1", "brief": "/o/l1/brief.md"},
+                                         Path("/o/l1/verdict.json"), Path("/o/l1-eval"))
+        for name, text in (("smoke.md", smoke.read_text()), ("evaluate.md.tmpl", rendered)):
+            with self.subTest(brief=name):
+                brief.validate_text(text, where=name)   # raises on an absolute path
+                rules = "\n".join(brief._section(text.splitlines(), "## Common rules"))
+                self.assertIn(brief.RULES.name, rules,
+                              f"{name} must name {brief.RULES.name}, which run_recipe ships beside it")
+
+    def test_a_lane_is_told_to_stop_when_the_rules_did_not_arrive(self):
+        """The lane-side half of "say so loudly". The substrate refuses to dispatch a brief whose
+        rules cannot reach it; this is what the lane does if they go missing anyway."""
+        smoke = Path(__file__).resolve().parents[1] / "briefs" / "smoke.md"
+        rules = " ".join(brief._section(smoke.read_text().splitlines(), "## Common rules"))
+        self.assertIn("stop", rules.lower())
+        self.assertIn("failed", rules)

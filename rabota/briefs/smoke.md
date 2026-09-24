@@ -1,6 +1,8 @@
 # Smoke: prove the lane substrate
 ## Common rules
-Read `/home/zvi/quantivly/handoffs/rabota/_common-rules.md` first. Read-only except under out_dir.
+Read `_common-rules.md`, in this brief's own directory, first. Read-only except under out_dir.
+If it is not there, **stop**: write a verdict with `status` `failed` saying the rules did not
+reach you, and do nothing else.
 ## Role
 You verify a runtime; you implement nothing and change no file outside out_dir.
 ## Assignment

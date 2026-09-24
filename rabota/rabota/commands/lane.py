@@ -61,7 +61,7 @@ def seat_config_dir(seat: str) -> str:
 
 def build_local(ctx, *, worktree, out_dir, brief, model, effort, unit,
                 session_id: str | None = None, claude_bin: str | None = None,
-                config_dir: str | None = None) -> list[str]:
+                config_dir: str | None = None, path: str | None = None) -> list[str]:
     """The systemd-run argv for a lane on this machine. Every value is an argv element, never a string.
 
     ``claude_bin`` overrides ``ctx.tenant.lanes.claude_bin``; either way the value is expanded with
@@ -71,6 +71,16 @@ def build_local(ctx, *, worktree, out_dir, brief, model, effort, unit,
 
     ``config_dir``, when given, emits ``--setenv=CLAUDE_CONFIG_DIR=<config_dir>``. When it is
     ``None`` (the default) the flag is OMITTED entirely — never emitted empty, never guessed.
+
+    ``path`` behaves the same way and emits ``--setenv=PATH=<path>`` (DO-712). A transient unit
+    inherits the USER MANAGER's environment, not a login shell's, so nothing in the target's
+    ``.profile`` or ``.zshrc`` can reach a lane — and ``~/.local/bin`` only joined systemd's own
+    default user PATH in v250, while dev runs 249. Measured on dev 2026-09-24: the manager's PATH
+    is ``/usr/local/sbin:…:/snap/bin`` with no ``~/.local/bin``, so a lane could not invoke
+    ``rabota`` (127) even though ``~/.local/bin/rabota`` is there. systemd has no "prepend", so
+    the caller passes the whole value; ``run_recipe`` builds it from the PATH the machine itself
+    reported (``resolve_remote``) rather than a hardcoded list, so ``/snap/bin`` and anything else
+    that machine has survives.
 
     This is deliberately asymmetric between the two callers (fix round 5, the first live smoke
     this plan ever ran, 2026-09-20): ``run_recipe``'s LOCAL branch passes ``seat_config_dir(seat)``
@@ -91,6 +101,8 @@ def build_local(ctx, *, worktree, out_dir, brief, model, effort, unit,
     ]
     if config_dir is not None:
         argv.append(f"--setenv=CLAUDE_CONFIG_DIR={config_dir}")
+    if path is not None:
+        argv.append(f"--setenv=PATH={path}")
     argv += [
         "-p", f"StandardOutput=append:{out_dir}/stream.jsonl",
         "-p", f"StandardError=append:{out_dir}/stream.err",
@@ -232,8 +244,8 @@ def read_remote_verdict(ctx, machine, path: str, max_bytes: int) -> dict:
 
 
 def resolve_remote(ctx, machine) -> dict:
-    """``$HOME`` and the absolute claude path ON ``machine`` — both proven, in one ssh call.
-    Never a guess.
+    """``$HOME``, ``$PATH`` and the absolute claude path ON ``machine`` — all proven, in one ssh
+    call. Never a guess.
 
     Every path rabota stores for a machine is home-relative (``~/.local/state/rabota``,
     ``~/quantivly/hub``) and this process's home is not the remote's. ``shquote`` single-quotes
@@ -258,23 +270,40 @@ def resolve_remote(ctx, machine) -> dict:
     ``build_local``'s docstring) — nothing consumes an account dir here anymore, so nothing here
     proves one. Proving a directory nobody references is exactly the dead check this repo's own
     guard (a mutation surviving with no row to kill it) would flag as due for retirement.
+
+    ``path`` joined this call in DO-712, so a lane's ``PATH`` is the target machine's own rather
+    than a list written down here. It is the NON-INTERACTIVE ssh session's ``$PATH``, which is not
+    quite the user manager's — measured on dev 2026-09-24 the two differ only by a duplicated
+    ``/snap/bin`` — so a manager-only entry would be dropped by the ``--setenv=PATH`` that
+    ``run_recipe`` builds from it. That is accepted rather than read from
+    ``systemctl --user show-environment``, whose failure mode on a non-interactive ssh is the one
+    ``remote.build_argv`` already documents (no ``XDG_RUNTIME_DIR``, user manager stopped,
+    lingering off) and would arrive here as an empty string — a lane with no PATH at all, which is
+    worse than the entry it was meant to preserve.
+
+    ``claude_bin`` stays LAST in the payload: it is the one value printed without a trailing
+    newline, so that an absent claude yields a short list rather than a blank line, and the parse
+    below is positional.
     """
-    script = ('printf "%s\\n" "$HOME"; '
+    script = ('printf "%s\\n" "$HOME"; printf "%s\\n" "$PATH"; '
               'p="$HOME"/.local/bin/claude; [ -x "$p" ] && printf %s "$p"')
     res = ctx.runner.run(remote.ssh_argv(machine, script))
     lines = (res.out or "").splitlines()
     home = lines[0].strip() if len(lines) > 0 else ""
-    claude_bin = lines[1].strip() if len(lines) > 1 else ""
-    if not res.ok or not home.startswith("/") or not claude_bin.startswith("/"):
+    path = lines[1].strip() if len(lines) > 1 else ""
+    claude_bin = lines[2].strip() if len(lines) > 2 else ""
+    if not res.ok or not home.startswith("/") or "/" not in path or not claude_bin.startswith("/"):
         missing = []
         if not home.startswith("/"):
             missing.append("$HOME")
+        if "/" not in path:
+            missing.append("$PATH")
         if not claude_bin.startswith("/"):
             missing.append("an executable claude")
         raise errors.Refused(
             f"could not resolve {', '.join(missing)} on {machine.name}: "
             f"{(res.err or res.out or 'no paths returned').strip()}")
-    return {"home": home, "claude_bin": claude_bin}
+    return {"home": home, "path": path, "claude_bin": claude_bin}
 
 
 def expand_remote(path: str, home: str) -> str:
@@ -379,6 +408,19 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
             f"--seat {seat!r} does not match {machine!r}'s declared profile {m.profile!r}: "
             f"a remote machine bills its own login, so the seat cannot be overridden there")
 
+    # BEFORE the budget gate, before any ssh, and on the dry path too: both are local file reads
+    # that cost nothing, and a lane that cannot be given its rules must not consume a window or
+    # leave a worktree behind to find that out. AFTER the machine and seat checks, so an
+    # undeclared machine keeps its own named refusal rather than being pre-empted by a complaint
+    # about the brief.
+    #
+    # `validate` had never been called from the dispatch path at all until DO-711 — it existed, it
+    # required the `## Common rules` heading, and nothing ran it, which is why both shipped briefs
+    # could name a rules path that exists on no machine a lane runs on.
+    if kind == "work":
+        lanes_brief.validate(brief)
+    rules_text = lanes_brief.read_rules()
+
     seat_pick = budget_mod.seat_for(ctx.tenant, machine, override=seat)
     fn = budget_fn or (lambda **kw: budget_cmd.run_budget(ctx, **kw))
     b = fn(machine=machine, model=model, effort=effort, est_minutes=est_minutes, seat=seat_pick)
@@ -409,6 +451,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     session_id = str(uuid.uuid4())
     claude_bin = None
     config_dir = None
+    lane_path = None
     if machine == "local":
         root = Path(ctx.tenant.state_dir).expanduser()
         repo_path = str(Path(ctx.tenant.root).expanduser() / repo)
@@ -422,6 +465,10 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         root = Path(expand_remote(m.state_dir, home))
         repo_path = expand_remote(m.repos[repo], home)
         claude_bin = info["claude_bin"]
+        # ``~/.local/bin`` PREPENDED to the machine's own PATH, never replacing it (DO-712): the
+        # user manager on dev (systemd 249) does not carry it, so `rabota` — and every other tool
+        # installed there — exited 127 inside a lane.
+        lane_path = f"{home}/.local/bin:{info['path']}"
         # config_dir stays None: dev uses its own login's defaults (fix round 5 — see
         # build_local's docstring for the measured evidence that setting it to a directory
         # relocates where Claude Code looks for .claude.json).
@@ -437,12 +484,16 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         of_for_template = dict(of_lane)
         of_for_template["brief"] = f"{of_lane['out_dir']}/brief.md"
         brief_text = lanes_brief.render_evaluate(of_for_template, verdict_path, out_dir)
+        # The rendered text, not the template: substitution is what puts machine-specific absolute
+        # paths into an evaluate brief, so the thing checked has to be the thing shipped.
+        lanes_brief.validate_text(brief_text, where="the rendered evaluate brief")
     else:
         brief_text = None
 
     argv = build_local(ctx, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,
-                       session_id=session_id, claude_bin=claude_bin, config_dir=config_dir)
+                       session_id=session_id, claude_bin=claude_bin, config_dir=config_dir,
+                       path=lane_path)
     if machine != "local":
         argv = build_remote(m, argv)
     out = {"argv": argv, "shell": " ".join(argv), "unit": unit, "session_id": session_id,
@@ -456,6 +507,11 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     create_worktree_remote(ctx, m, repo_path, worktree, out_dir, base)
     try:
         send_brief(ctx, m, remote_brief, brief_text if kind == "evaluate" else Path(brief).read_text())
+        # Beside brief.md, in the lane's own out_dir — the one directory `--add-dir` grants it, and
+        # the one the brief can name without any substitution (a work brief is shipped verbatim,
+        # DO-683). Inside this `try` so a failed rules send tears the worktree down like a failed
+        # brief send does: a lane started without its rails is worse than a lane not started.
+        send_brief(ctx, m, f"{out_dir}/{lanes_brief.RULES.name}", rules_text)
         res = ctx.runner.run(argv)
         if not res.ok:
             raise errors.RabotaError(f"could not start {unit} on {machine}: {(res.err or res.out).strip()}")

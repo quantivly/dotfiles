@@ -5,11 +5,14 @@ Enumerate. Never hand a lane a live query — a lane gets a brief, not a socket 
 ## Dispatch (exists today)
 
 ```
-rabota lane recipe --brief <path> --repo <path> --machine dev [--base <ref>] \
+rabota lane recipe --brief <path> --repo <key> --machine dev [--base <ref>] \
   [--seat <name>] [--model <name>] [--effort <level>] [--est-minutes <n>] [--run]
 ```
 
 Without `--run` this only prints the argv (a dry-run recipe), and `--machine` may be omitted.
+On a remote machine `--repo` is a **key** into `[machines.<m>].repos` (`dotfiles`, `hub`),
+not a path; locally it is a path fragment under the tenant root. The error quotes your path
+back as though a path were wanted.
 With `--run`, `--machine dev` is **required** — the local `--run` form is not implemented and
 refuses. With `--run` it is one call, one unit: `rabota budget` gates the seat before anything starts, and the CLI refuses with the seat's
 `resets_at` when the window is spent — do not retry around a refusal, print it and continue.
@@ -35,7 +38,8 @@ DO-670 lands; until then, a critical-reader deliverable is a gate (typed OK), no
 # Task 5.3: the rabota v2 skill
 
 ## Common rules
-Read `_common-rules.md` if present; you are one lane, push back with evidence.
+Read `_common-rules.md`, in this brief's own directory, first; if it is not there, stop and
+say so in your verdict. You are one lane, push back with evidence.
 
 ## Role
 You write the v2 skill and its three references. No Python, no new subcommand.
