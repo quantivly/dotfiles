@@ -70,6 +70,38 @@ class ContractTests(unittest.TestCase):
             verdict.validate(p, 10)
         self.assertIn("bytes", str(cm.exception))
 
+    def test_a_refused_claim_names_the_keys_it_wanted(self):
+        """DO-710: the refusal said "claim malformed" and printed the claim back, so a lane that
+        had followed a brief with the wrong key names could not tell which names were wrong. The
+        shipped smoke brief did exactly that, and diagnosing it took four commands."""
+        v = {"lane": "l1", "status": "done", "deliverables": [], "followups": [],
+             "claims": [{"description": "t", "evidence": {"cmd": "true"}, "confidence": "medium"}]}
+        with self.assertRaises(verdict.VerdictError) as cm:
+            verdict.validate(self.tmpfile(json.dumps(v)), 4096)
+        msg = str(cm.exception)
+        self.assertIn("id", msg)
+        self.assertIn("text", msg)
+
+    def test_a_claim_missing_only_evidence_cmd_says_so(self):
+        """The nested key is the other way a claim is refused, and it must be named too rather
+        than reported as a whole-claim problem."""
+        v = {"lane": "l1", "status": "done", "deliverables": [], "followups": [],
+             "claims": [{"id": "c1", "text": "t", "evidence": {"expected": "x"}}]}
+        with self.assertRaises(verdict.VerdictError) as cm:
+            verdict.validate(self.tmpfile(json.dumps(v)), 4096)
+        self.assertIn("evidence.cmd", str(cm.exception))
+
+    def test_the_shipped_smoke_brief_describes_a_verdict_this_validator_accepts(self):
+        """DO-710: briefs/smoke.md is the documented way to exercise a lane, and it enumerated a
+        claim shape the validator refuses, which made --kind evaluate unreachable as shipped."""
+        brief_md = Path(__file__).resolve().parents[1] / "briefs" / "smoke.md"
+        if not brief_md.exists():
+            self.skipTest("smoke.md not present in this checkout")
+        text = brief_md.read_text()
+        outputs = text.split("## Outputs", 1)[1]
+        for key in ("`id`", "`text`", "`evidence: {cmd, expected, observed}`"):
+            self.assertIn(key, outputs, f"smoke.md Outputs must name {key}")
+
     def test_verdict_bad_shape(self):
         with self.assertRaises(verdict.VerdictError):
             verdict.validate(self.tmpfile('{"lane": "l1", "status": "maybe", "claims": [], "deliverables": [], "followups": []}'), 4096)
