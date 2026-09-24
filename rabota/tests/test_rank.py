@@ -40,6 +40,37 @@ class RankTests(unittest.TestCase):
         self.assertEqual([t["key"] for t in seq["triage"]], ["quantivly/dev-setup#3"])  # hub-backend dropped (alex owns it)
         self.assertEqual(seq["items"][0]["waiting_on"], "benoit")
 
+    def test_reply_queue_pr_notification_without_an_issue_gets_a_repo_hash_number_key(self):
+        # DO-715 F6: a Linear notification about a PR (no linked issue) fell back to the raw
+        # PR url as the "key", rendering as a bare URL with no title. A repo#number is the
+        # same identifier bucket 4 already uses, and it is derived, not invented.
+        plan = {"buckets": {"reply_queue": [{"issue_identifier": None, "pr_url": "https://github.com/quantivly/hub/pull/456",
+                                              "url": "https://github.com/quantivly/hub/pull/456", "title": "",
+                                              "actor": "alex", "created_at": "2026-09-14T00:00:00Z", "type": "pullRequestReviewRequested"}]}}
+        seq = rank.rank(self.base(plan=plan))
+        item = next(i for i in seq["items"] if i["bucket"] == 1)
+        self.assertEqual(item["key"], "quantivly/hub#456")
+
+    def test_reply_queue_item_with_no_url_at_all_falls_back_to_the_notification_id(self):
+        # Review finding: `url` is nullable on a Linear notification, so the bare-url fallback
+        # could return None and `brief` rendered the literal line "1. None" — worse than the bare
+        # URL this change replaces. Every notification has an id; print that instead.
+        plan = {"buckets": {"reply_queue": [{"issue_identifier": None, "pr_url": None, "url": None,
+                                              "notification_id": "n-abc", "title": "", "actor": "alex",
+                                              "created_at": "2026-09-14T00:00:00Z"}]}}
+        seq = rank.rank(self.base(plan=plan))
+        item = next(i for i in seq["items"] if i["bucket"] == 1)
+        self.assertEqual(item["key"], "n-abc")
+        self.assertNotIn(item["key"], (None, "None"))
+
+    def test_reply_queue_item_with_neither_issue_nor_pr_url_keeps_the_bare_url(self):
+        # No identifier is derivable: showing the url is honest; inventing one would not be.
+        plan = {"buckets": {"reply_queue": [{"issue_identifier": None, "pr_url": None, "url": "https://example.com/x",
+                                              "title": "", "actor": "alex", "created_at": "2026-09-14T00:00:00Z"}]}}
+        seq = rank.rank(self.base(plan=plan))
+        item = next(i for i in seq["items"] if i["bucket"] == 1)
+        self.assertEqual(item["key"], "https://example.com/x")
+
     def test_bucket_1_orders_by_age_not_by_source(self):
         plan = {"buckets": {"reply_queue": [{"issue_identifier": "HUB-1", "actor": "b", "created_at": "2026-09-15T00:00:00Z", "url": "u", "title": "t"}]}}
         rr = [review("quantivly/hub", 1, True, [], updated="2026-09-10T00:00:00Z")]

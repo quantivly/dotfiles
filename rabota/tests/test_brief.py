@@ -26,6 +26,57 @@ class BriefTests(unittest.TestCase):
         self.assertIn(" · waiting: benoit · now", lines[0])
         self.assertEqual(lines[-1], "brief: /p/brief.md")
 
+    def test_blank_title_is_left_out_not_printed_as_a_dangling_dash(self):
+        # DO-715 F6: a bare Linear URL with no title rendered as "1. <key> —  · waiting: ...",
+        # a dash with nothing after it. A reader should see only what the source actually has.
+        s = seq(["K-1"]); s["items"][0]["title"] = ""
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertEqual(line, "1. K-1 · waiting: benoit · now")
+        self.assertNotIn(" — ", line)
+
+    def test_truncation_cuts_why_now_never_the_key_or_title(self):
+        # DO-715 F6: the old `[:LINE_MAX]` slice could land mid-word inside the trailing prose,
+        # e.g. "... — CORE-50" — the last thing a reader sees should never be a severed word.
+        s = seq(["K-1"])
+        s["items"][0]["title"] = "a short, real title"
+        s["items"][0]["why_now"] = "a very long reason that goes on and on and mentions CORE-500 " * 3
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertLessEqual(len(line), 120)
+        self.assertTrue(line.startswith("1. K-1 — a short, real title · waiting: benoit · "), line)
+        self.assertTrue(line.endswith("…"), line)
+        self.assertFalse(line[:-1].endswith(" "))
+        # cut at a word boundary: the last word standing must be whole, e.g. "CORE-500" or "very",
+        # never a fragment like "CORE-5" that a whole-word source string never contained.
+        cut_word = line[:-1].rsplit(" ", 1)[-1]
+        self.assertIn(cut_word, s["items"][0]["why_now"].split())
+
+    def test_an_over_long_identifier_is_cut_with_an_ellipsis_never_sliced_silently(self):
+        # Review finding: the old trailing `[:LINE_MAX]` fired whenever `N. KEY — title` alone
+        # overran, severing the identifier with no marker — while the docstring said the key was
+        # "never sliced". A cut that the reader cannot see is the untruth; the cut itself is fine.
+        s = seq(["K" * 150]); s["items"][0]["title"] = ""; s["items"][0]["why_now"] = ""
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertEqual(len(line), 120)
+        self.assertTrue(line.endswith("…"), line)
+
+    def test_waiting_is_dropped_before_the_identifier_when_the_line_is_over_budget(self):
+        # A bare-URL key — the fallback this change introduces — plus `waiting:` overruns on its
+        # own, with no why_now left to cut. The identifier is what the line exists to carry, so
+        # `waiting` goes first and the url survives whole.
+        url = "https://github.com/quantivly/some-really-long-repository-name/pull/123456/files#discussion_r1234567890123"
+        s = seq([url]); s["items"][0]["title"] = ""; s["items"][0]["why_now"] = "mentions you"
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertLessEqual(len(line), 120)
+        self.assertEqual(line, f"1. {url}")
+        self.assertNotIn("waiting:", line)
+
+    def test_a_whitespace_only_why_now_is_blank_not_a_dangling_separator(self):
+        # `title` was stripped before the emptiness check and `why_now` was not, so a whitespace
+        # why_now survived as truthy and collapsed under truncation to "· …" carrying nothing.
+        s = seq(["K-1"]); s["items"][0]["title"] = "t"; s["items"][0]["why_now"] = " " * 200
+        line = brief.terminal_lines(s, None, None)[0]
+        self.assertEqual(line, "1. K-1 — t · waiting: benoit")
+
     def test_failed_source_gets_one_line(self):
         s = seq(["K-1"]); s["failed_sources"] = ["calendar"]
         lines = brief.terminal_lines(s, None, None)

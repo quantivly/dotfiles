@@ -16,6 +16,7 @@ BATCH_MIN_CLUSTER = 5
 NEW_WORK_CAP = 3
 HOT_PRIORITIES = ("Urgent", "High")
 ISSUE_KEY = re.compile(r"\b([A-Z]{2,6})-?(\d{1,5})\b", re.I)
+PR_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 
 
 @dataclass
@@ -57,12 +58,31 @@ def _item(bucket, key, title, waiting_on, why_now, rationale, url, source) -> di
             "rationale": rationale, "url": url, "source": source}
 
 
+def _reply_key(n: dict) -> str:
+    """A reader-facing identifier for a reply-queue item: the Linear issue, else the PR it names,
+    else the bare URL, else the notification's own id — never invented, but a ``pull/123`` URL is
+    not an identifier, so it is reduced to the ``org/repo#123`` a reader already recognises from
+    bucket 4.
+
+    The last fallback is not decoration. ``url`` is nullable on a Linear notification, and
+    returning it unguarded made the key ``None``, which ``brief`` rendered as the literal line
+    ``1. None`` — strictly worse than the bare URL this change set out to replace. Every
+    notification has an id, so there is always something true to print.
+    """
+    if n.get("issue_identifier"):
+        return n["issue_identifier"]
+    m = PR_URL.search(n.get("pr_url") or n.get("url") or "")
+    if m:
+        return f"{m.group(1)}#{m.group(2)}"
+    return n.get("url") or n.get("notification_id") or "?"
+
+
 def _bucket_1(inp: RankInputs, reviews: list[dict], triage: list[dict]) -> list[dict]:
     """Reply queue plus individually requested reviews, oldest first; team-derived reviews go to triage or are dropped."""
     aged: list[tuple[str, dict]] = []
     for n in (inp.inbox_plan or {}).get("buckets", {}).get("reply_queue", []):
         since = n.get("created_at") or ""
-        aged.append((since, _item(1, n.get("issue_identifier") or n.get("url"), n.get("title", ""), n.get("actor", "?"),
+        aged.append((since, _item(1, _reply_key(n), n.get("title", ""), n.get("actor", "?"),
                                   f"{n.get('type', 'mention')} {since[:10]}, unanswered",
                                   "bucket 1: a human asked on an alive item", n.get("url"), "linear")))
     owned_teams = inp.tenant.review_routing.team_owned
