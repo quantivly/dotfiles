@@ -9,9 +9,14 @@ docs/TRANSCRIPT_SCRUB.md for the audit that produced this.
 
 WHY THIS IS NOT ANOTHER RULE IN redact-secrets.sh
 -------------------------------------------------
-Its shape rules are reused verbatim below and need no change: a shape matches
-anywhere, including inside a JSON string. Its NAME rules do not transfer, and
-BOTH ends of them are wrong at rest, not just one:
+It carries the SAME rules -- all fifteen shapes and both name rules -- and the
+difference is the VALUE GRAMMAR, not the coverage. An earlier version of this
+paragraph said the shape rules were "reused verbatim below" while only seven of
+the fifteen were here at all; DO-700 made the claim true and added `--rules` and
+a state-table row so it cannot quietly stop being true again.
+
+What genuinely does not transfer is where a value ENDS. Both ends of that file's
+name rules are wrong at rest, not just one:
 
     (^|[[:space:]])[A-Z][A-Z0-9_]*(TOKEN|SECRET|API_?KEY|...)=[^[:space:]]+
 
@@ -19,10 +24,10 @@ The leading boundary never matches, because a transcript's newlines are escaped
 `\\n` INSIDE a JSON string and there is no real whitespace before the name. And
 `[^[:space:]]+` would run to the next REAL space -- i.e. swallow the rest of the
 JSON line -- so loosening the anchor alone would mangle transcripts rather than
-redact them. A JSON string is a different value grammar, and it is what the name
-rules here are written against: the value ends at a quote, a backslash,
-whitespace or a separator. That is why this is a second tool and not a
-seventeenth `-e`.
+redact them. A JSON string is a different value grammar, and it is what every
+rule here is written against: a value ends at a quote, a backslash, whitespace
+or a separator. That is why this is a second tool and not a seventeenth `-e` --
+and why the rules below are a translation of that file's, never a copy of them.
 
 WHAT IT WILL NOT DO
 -------------------
@@ -64,6 +69,7 @@ Usage:
     scrub-transcript-secrets.py --apply         do it
     scrub-transcript-secrets.py --root DIR ...  override discovery (repeatable)
     scrub-transcript-secrets.py --json          machine-readable summary
+    scrub-transcript-secrets.py --rules         the redaction labels it applies
 
 Environment:
     SCRUB_TRANSCRIPT_ROOTS   colon-separated roots, overriding discovery
@@ -96,32 +102,128 @@ import subprocess
 import sys
 import time
 
-# Shape rules: lifted from scripts/redact-secrets.sh so the two agree. A shape
-# finds a credential wherever it appears, including bare in prose, so these
-# need no adaptation to a JSON string. Keep them in step with that file; the
-# state table pins the spelling of each.
+# One spelling per rule label. The label names the rule, goes into the
+# replacement, and is what `--rules` prints for the parity check in
+# scripts/test-scrub-transcript-secrets.sh -- so a label cannot disagree with
+# the text it emits, and a rule cannot exist here without being advertised.
+# `keep`/`tail` are the backreferences a KEYED rule preserves: the key stays
+# readable and only the value is replaced.
+def _rule(label, pattern, keep=b"", tail=b""):
+    return (label, re.compile(pattern),
+            keep + ("<REDACTED:%s>" % label).encode() + tail)
+
+
+# SHAPE RULES: all fifteen of scripts/redact-secrets.sh's, in its order, which
+# is longest/most-specific first so a broader pattern cannot eat half of a
+# narrower one's match. They are the same rules, not a subset -- the subset is
+# what DO-700 fixed, after seven of fifteen shipped here and DO-692's two never
+# arrived at all.
+#
+# THREE TRANSLATIONS FROM POSIX ERE TO PYTHON `re` ON BYTES, each forced by the
+# grammar rather than by taste:
+#
+#  1. `[[:space:]]` becomes `[ \t]`, never `\s`. sed is line-oriented, so its
+#     whitespace class cannot cross a record; this matches the whole file at
+#     once, where `\s` would let a rule bridge two JSON records. Unobservable
+#     on well-formed JSONL -- a record always closes with `"` -- and kept
+#     because relying on that is relying on the input being well formed.
+#  2. A value class gains `"` and `\` wherever sed's ended at whitespace. In a
+#     pipe the whitespace is real; inside a JSON string it is an escaped `\n`,
+#     and a rule that runs past the closing quote mangles the record rather
+#     than redacting it. This is the same reasoning as the name rules below.
+#  3. A value class also gains `<`, so a replacement cannot be re-matched. That
+#     is what makes a second run a byte-for-byte no-op AND a no-count one; a
+#     rule that re-matches its own output reports work it did not do, on every
+#     nightly run, forever.
+#
+# `private-key` is the one that needed real thought. In sed the rule is
+# `(-----BEGIN [A-Z ]*PRIVATE KEY-----).*` -- eat to end of line. Inside a JSON
+# string "end of line" is the end of the whole RECORD, so that translation
+# would swallow the closing `"}`, `unparseable()` would refuse the file, and
+# the credential would sit there un-scrubbed while the run reported a refusal.
+# So the body is matched as what a PEM in a JSON string actually is: base64
+# runs and escaped newlines, `(?:\\n|[A-Za-z0-9+/=])+`, stopping at the `-` of
+# the END marker, which is kept. The `+` (not `*`) is load-bearing: with `*` a
+# bare mention of the header in prose would match, append a marker, and do it
+# again on the next run.
 SHAPES = [
-    (re.compile(rb"gh[pousr]_[A-Za-z0-9]{30,}"),    b"<REDACTED:github-token>"),
-    (re.compile(rb"github_pat_[A-Za-z0-9_]{20,}"),  b"<REDACTED:github-pat>"),
-    (re.compile(rb"sk-ant-[A-Za-z0-9_-]{20,}"),     b"<REDACTED:anthropic-key>"),
-    (re.compile(rb"xox[baprse]-[A-Za-z0-9-]{10,}"), b"<REDACTED:slack-token>"),
-    (re.compile(rb"glpat-[A-Za-z0-9_-]{20,}"),      b"<REDACTED:gitlab-pat>"),
-    (re.compile(rb"ntn_[A-Za-z0-9]{40,}"),          b"<REDACTED:notion-token>"),
-    (re.compile(rb"lin_api_[A-Za-z0-9]{30,}"),      b"<REDACTED:linear-key>"),
+    _rule("github-token",       rb"gh[pousr]_[A-Za-z0-9]{30,}"),
+    _rule("github-pat",         rb"github_pat_[A-Za-z0-9_]{20,}"),
+    _rule("anthropic-key",      rb"sk-ant-[A-Za-z0-9_-]{20,}"),
+    _rule("slack-token",        rb"xox[baprse]-[A-Za-z0-9-]{10,}"),
+    _rule("aws-access-key-id",  rb"AKIA[0-9A-Z]{16}"),
+    _rule("aws-temp-key-id",    rb"ASIA[0-9A-Z]{16}"),
+    _rule("aws-secret",
+          rb"(aws_secret_access_key[ \t]*=[ \t]*)[A-Za-z0-9/+=]{30,}", b"\\1"),
+    _rule("gitlab-pat",         rb"glpat-[A-Za-z0-9_-]{20,}"),
+    _rule("notion-token",       rb"ntn_[A-Za-z0-9]{40,}"),
+    _rule("linear-key",         rb"lin_api_[A-Za-z0-9]{30,}"),
+    _rule("saml-request",       rb"(SAMLRequest=)[A-Za-z0-9%+/=_-]{20,}", b"\\1"),
+    _rule("vpn-auth-challenge", rb"(AUTH_FAILED,CRV1:)[^\s\"\\<]+", b"\\1"),
+    _rule("bearer",             rb"([Bb]earer[ \t]+)[A-Za-z0-9._~+/-]{20,}=*", b"\\1"),
+    _rule("private-key",
+          rb"(-----BEGIN [A-Z ]*PRIVATE KEY-----)(?:\\n|[A-Za-z0-9+/=])+"
+          rb"(-----END [A-Z ]*PRIVATE KEY-----)?", b"\\1", b"\\2"),
+    _rule("url-password",
+          rb"(https?://[^:@/\s\"\\]+):[^@/\s\"\\<]+@", b"\\1:", b"@"),
 ]
 
-# Name rules: for credentials with no distinctive shape. Add to this list
-# rather than inventing a shape for something that has none -- a shape invented
-# to fit one value is a false-positive generator, and a redactor that mangles
-# ordinary text is one somebody stops running.
-NAMES = [
-    "SONIOX_API_KEY", "LINEAR_API_KEY", "GH_TOKEN",
-    "GITHUB_PERSONAL_ACCESS_TOKEN", "ANTHROPIC_API_KEY",
-    "CLAUDE_CODE_MESSAGING_TOKEN", "ANTHROPIC_AUTH_TOKEN",
+# NAME RULES: for credentials with no distinctive shape -- the class that only
+# a name can reach, and the reason this tool exists. Same two rules as
+# redact-secrets.sh, matching on a generic SUFFIX of the variable name rather
+# than on an allowlist of names, and `_PAT` separate for its reason.
+#
+# WHY A PATTERN AND NOT AN ALLOWLIST, which is the judgement call in DO-700 and
+# is not a free win. This shipped with a hardcoded seven-name list, and the
+# argument for keeping one is real: a pipe filter's false positive is a mangled
+# line on a screen, but THIS runs unattended, nightly, and shreds its backup --
+# so a false positive here permanently rewrites a transcript with no undo.
+#
+# The pattern wins anyway, for four reasons, in order of weight:
+#
+#  1. The measured miss is not a tail, it is the bulk. Across 2,438
+#     transcripts: DB_PASSWORD in 75 files, OPENAI_API_KEY 55, GITHUB_TOKEN 51,
+#     DEFAULT_API_KEY 45, POSTGRES_PASSWORD 41, TEXTQL_API_KEY 34,
+#     OIDC_CLIENT_SECRET 22, SMTP_PASSWORD 20 -- none of them reachable by the
+#     seven. An allowlist cannot name what the next project calls its secret,
+#     and the standing cost of under-scrubbing is a live credential on disk.
+#  2. A false positive here is BOUNDED in a way the pipe case never was. Only
+#     the value is replaced, the name stays, the value grammar stops at the
+#     JSON string boundary, and `unparseable()` refuses anything that would not
+#     survive the edit. The worst case is one lost token in one record, not a
+#     mangled line and not an unreadable file.
+#  3. The allowlist was the drift. Two hand-kept parallel lists are what DO-700
+#     is about; replacing one of them with the pattern the other already uses
+#     removes the thing that rotted rather than re-stating it.
+#  4. What actually bounds false positives is PLACEHOLDER below, and it is
+#     name-independent: `$VAR`, `<REDACTED:...>`, `your-token`, `xxxx`, `...`
+#     are exempt whatever the variable is called, and an 8-character floor
+#     drops `TOKENIZERS_PARALLELISM=false` and `MAX_TOKENS=4096`.
+#
+# What is knowingly accepted: a path-shaped value under a credential-shaped
+# name (`GOOGLE_APPLICATION_CREDENTIALS=/home/u/key.json`) is redacted. A guard
+# for it would have to exempt values starting `/`, and base64 secrets start
+# with `/` too -- that trades a harmless false positive for a real miss, which
+# is the wrong direction for this tool.
+#
+# The value grammar is NOT widened and must not be: it ends at a quote, a
+# backslash, whitespace or a separator, because that is what a JSON string
+# gives you. redact-secrets.sh's `[^[:space:]]+` would run to the next REAL
+# space -- i.e. swallow the rest of the record. That difference is the entire
+# reason there are two tools.
+_VALUE = rb"=([^\"\s\\,;)}\]]{8,})"
+NAME_RULES = [
+    re.compile(rb"([A-Z][A-Z0-9_]*"
+               rb"(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)"
+               rb"[A-Z0-9_]*)" + _VALUE),
+    # `_PAT` is its OWN rule for redact-secrets.sh's measured reason: inside the
+    # alternation above, the trailing `[A-Z0-9_]*=` absorbs whatever follows, so
+    # `SOME_PATH=/x`, `MY_PATHS=/a` and `COMPATIBLE=yes` all redact. Requiring
+    # `_PAT` immediately before the `=` excludes all three, and a scrubber that
+    # mangles ordinary variables is one somebody stops running.
+    re.compile(rb"([A-Z][A-Z0-9_]*_PAT)" + _VALUE),
 ]
-# The value ends at a quote, a backslash, whitespace or a separator: what a
-# JSON string actually gives you, and the whole reason this file exists.
-NAME_RE = {n: re.compile((n + r"=([^\"\s\\,;)}\]]{8,})").encode()) for n in NAMES}
+NAME_LABEL = "by-name"
 
 # A value already redacted, or a shell variable, or documentation filler. Left
 # alone so a second run is a byte-for-byte no-op and so `GH_TOKEN=$GH_TOKEN`
@@ -169,30 +271,46 @@ def usable_roots(candidates):
     return out
 
 
+def rule_labels():
+    """Every redaction label this tool can emit, sorted. What `--rules` prints.
+
+    Derived from the compiled rules, never from a second list: a hand-kept
+    inventory is precisely what drifted out of step with redact-secrets.sh and
+    produced DO-700. The state table compares this against the labels it
+    extracts from that file's sed program, so a rule added to either file and
+    not the other fails CI instead of under-scrubbing quietly.
+    """
+    return sorted({label for label, _rx, _repl in SHAPES} | {NAME_LABEL})
+
+
 def scrub(data: bytes):
     """Return the scrubbed bytes and a Counter keyed by credential kind.
 
     Never returns, logs or raises a matched value -- the counter keys are rule
-    names, and that property is a row in the state table.
+    labels and VARIABLE NAMES, and that property is a row in the state table.
+
+    A name-rule hit is counted under the variable name rather than under
+    `by-name`, which matters more now the rule is a pattern: `--dry-run --json`
+    then lists exactly which variables a widened rule would rewrite, which is
+    the only review surface there is for a job that runs unattended and shreds
+    its own backup.
     """
     counts = collections.Counter()
-    for rx, repl in SHAPES:
+    for label, rx, repl in SHAPES:
         data, k = rx.subn(repl, data)
         if k:
-            counts[repl.decode().strip("<>").replace("REDACTED:", "")] += k
-    for name, rx in NAME_RE.items():
-        hits = 0
+            counts[label] += k
+    for rx in NAME_RULES:
+        hits = collections.Counter()
 
-        def rep(m, _name=name):
-            nonlocal hits
-            if PLACEHOLDER.match(m.group(1)):
+        def rep(m, _hits=hits):
+            if PLACEHOLDER.match(m.group(2)):
                 return m.group(0)
-            hits += 1
-            return _name.encode() + b"=<REDACTED:by-name>"
+            _hits[m.group(1).decode()] += 1
+            return m.group(1) + ("=<REDACTED:%s>" % NAME_LABEL).encode()
 
         data = rx.sub(rep, data)
-        if hits:
-            counts[name] += hits
+        counts.update(hits)
     return data, counts
 
 
@@ -362,7 +480,18 @@ def main() -> int:
                     help="a transcript root, overriding discovery (repeatable)")
     ap.add_argument("--json", action="store_true",
                     help="print the summary as one JSON object")
+    ap.add_argument("--rules", action="store_true",
+                    help="print the redaction labels this tool applies, and exit")
     args = ap.parse_args()
+
+    # Before every precondition: --rules is introspection, it reads no
+    # transcript and writes nothing, and the state table has to be able to ask
+    # for the rule inventory on a machine with no transcript root at all --
+    # which is every CI runner.
+    if args.rules:
+        for label in rule_labels():
+            print(label)
+        return 0
 
     if args.apply and args.dry_run:
         return die_cannot_run("--apply and --dry-run are mutually exclusive")

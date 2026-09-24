@@ -422,11 +422,11 @@ both of this machine's live GitHub tokens in plaintext in five session transcrip
 ordinary diagnostics. Rotation is the wrong loop to optimise; the emission is.
 
 - **Pipe anything that might print a credential through `scripts/redact-secrets.sh`.** It needs **two**
-  rule sets because either alone leaks: shapes find a credential anywhere, including bare in prose;
+  rule sets because either alone leaks: shapes find one anywhere, even bare in prose;
   names (`…TOKEN=`, `…SECRET=`, `_PAT=`) catch the ones no shape describes.
 - **A shapeless credential is invisible to the redactor AT REST** — its name rules need real
-  whitespace, and a transcript's newlines are escaped inside a JSON string.
-  `scripts/scrub-transcript-secrets.py` is that half, nightly, linked **not enabled**:
+  whitespace, which a JSON string has none of. `scripts/scrub-transcript-secrets.py` is that half,
+  **armed here**, and CI fails on a rule in one file and not the other:
   [docs/TRANSCRIPT_SCRUB.md](docs/TRANSCRIPT_SCRUB.md).
 - **`claude/hooks/secret-emission-guard.sh` (`PreToolUse`, `Bash`) refuses** the shapes that print
   credentials unless piped through the redactor: `gh auth token`, `gh auth status --show-token`, `ps`

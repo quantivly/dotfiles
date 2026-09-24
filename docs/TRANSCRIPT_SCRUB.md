@@ -51,10 +51,17 @@ remains is something ambient.
 
 ## Why it is a second tool and not another rule in `redact-secrets.sh`
 
-`scripts/redact-secrets.sh` has two rule families. Its **shape** rules (`gho_…`, `sk-ant-…`,
-`lin_api_…`) match anywhere, including inside a JSON string, and caught most of the audit's
-findings — they are reused **verbatim** by the scrubber and needed no adaptation. Its
-**name** rules are the problem:
+`scripts/redact-secrets.sh` has two rule families, and the scrubber carries **both, in
+full** — the same 16 rule labels, asserted by the state table (see *Parity* below). What
+differs between the two files is not coverage but the **value grammar**: where a redacted
+value ends.
+
+Its **shape** rules (`gho_…`, `sk-ant-…`, `lin_api_…`) match anywhere, including inside a
+JSON string, and caught most of the audit's findings. Six of the fifteen are *keyed* —
+`aws_secret_access_key=`, `SAMLRequest=`, `AUTH_FAILED,CRV1:`, `Bearer `, `-----BEGIN …
+PRIVATE KEY-----`, `https://user:…@` — and those need translating rather than copying,
+because their value ends where a **line** ends and here a line is a whole JSON record. Its
+**name** rules are the problem the tool was built for:
 
 ```
 (^|[[:space:]])[A-Z][A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Z0-9_]*=[^[:space:]]+
@@ -89,6 +96,177 @@ either half ever changes, the row fails rather than the argument quietly rotting
 > name, so its anchor matched and the row proved the opposite of what it claimed. The
 > condition being tested is an escaped newline hard against the name, with no real whitespace
 > anywhere on the line.
+
+## The eight shapes that were missing, and what translating them costs
+
+Measured 2026-09-23 (DO-700): the scrubber shipped with **seven of the redactor's fifteen**
+shapes, inherited from the out-of-repo handoff script it grew from, while its own docstring
+said they were "reused verbatim". Two of the missing eight were DO-692's, added to
+`redact-secrets.sh` the same week and never propagated — which is the drift the *Parity*
+section below exists to stop. Upper-bound counts across both roots, 2,438 files (this grep
+does not apply the `PLACEHOLDER` guard, so some hits are already-redacted or prose):
+
+| shape | files |
+|---|---|
+| `url-password` (`https://u:pw@`) | 68 |
+| `bearer` | 12 |
+| `vpn-auth-challenge` (`AUTH_FAILED,CRV1:`) | 8 |
+| `aws-temp-key-id` (`ASIA…`) | 7 |
+| `private-key` (`-----BEGIN … PRIVATE KEY-----`) | 6 |
+| `aws-access-key-id` (`AKIA…`) | 3 |
+| `saml-request` | 2 |
+| `aws-secret` (`aws_secret_access_key=`) | 0 |
+
+**Three translations from POSIX ERE to Python `re` on bytes**, each forced by the grammar:
+
+1. `[[:space:]]` becomes `[ \t]`, never `\s`. sed is line-oriented, so its whitespace class
+   cannot cross a record; the scrubber matches the whole file at once, where `\s` would let
+   a rule bridge two JSON records. Unobservable on well-formed JSONL — a record always
+   closes with `"` — and kept anyway, because relying on that is relying on the input being
+   well formed.
+2. A value class gains `"` and `\` wherever sed's ended at whitespace. Same reasoning as the
+   name rules: in a pipe the whitespace is real, in a JSON string it is an escaped `\n`.
+3. A value class also gains `<`, so a replacement cannot be re-matched. That is what makes a
+   second run a byte-for-byte no-op **and a no-count one**. A rule that re-matches its own
+   output reports replacements it did not make, on every nightly run, forever — and it is
+   invisible to a `cmp`-based idempotence check, because the bytes are identical.
+
+**`private-key` is the one that needed real thought, and the naive translation is a trap.**
+In sed the rule is `(-----BEGIN [A-Z ]*PRIVATE KEY-----).*` — eat to end of line. Inside a
+JSON string "end of line" is the end of the whole **record**, so `.*` swallows the closing
+`"}`, `unparseable()` refuses the file, and the key sits there un-scrubbed while the run
+reports a refusal. Verified: that spelling produces exactly one unparseable line on a
+one-record fixture. So the body is matched as what a PEM in a JSON string actually is —
+base64 runs and escaped newlines, `(?:\n|[A-Za-z0-9+/=])+` — stopping at the `-` of the END
+marker, which is **kept**, so a redacted record still reads as what it was. The `+` rather
+than `*` is load-bearing: with `*`, a bare mention of the header in prose would match,
+append a marker, and append another on every run after that.
+
+## The name rule: a pattern, not an allowlist
+
+This is the judgement call in DO-700, and it is **not a free win**. The scrubber shipped with
+a hardcoded seven-name allowlist where `redact-secrets.sh` has a generic suffix pattern. The
+argument for keeping an allowlist is real and worth stating plainly: a pipe filter's false
+positive is a mangled line on a screen, but this job runs **unattended, nightly, and shreds
+its own backup** — so a false positive here permanently rewrites a transcript with no undo.
+
+It is now the pattern. Four reasons, in order of weight:
+
+1. **The measured miss is not a tail, it is the bulk.** Across 2,438 transcripts, none of
+   these was reachable by the seven: `DB_PASSWORD` 75 files, `OPENAI_API_KEY` 55,
+   `GITHUB_TOKEN` 51, `DEFAULT_API_KEY` 45, `POSTGRES_PASSWORD` 41, `TEXTQL_API_KEY` 34,
+   `OIDC_CLIENT_SECRET` 22, `SMTP_PASSWORD` 20, `AZURE_OPENAI_API_KEY` 18,
+   `CLAUDE_CODE_OAUTH_TOKEN` 15. An allowlist cannot name what the next project calls its
+   secret, and the standing cost of under-scrubbing is a live credential on disk.
+2. **A false positive here is bounded in a way the pipe case never was.** Only the value is
+   replaced and the name stays; the value grammar stops at the JSON string boundary; and
+   `unparseable()` refuses anything that would not survive the edit. The worst case is one
+   lost token in one record — not a mangled line, and never an unreadable file.
+3. **The allowlist *was* the drift.** Two hand-kept parallel lists are what this issue is
+   about. Replacing one of them with the pattern the other already uses removes the thing
+   that rotted instead of re-stating it.
+4. **What actually bounds false positives is `PLACEHOLDER`, and it is name-independent.**
+   `$VAR`, `<REDACTED:…>`, `your-token`, `xxxx`, `…` are exempt whatever the variable is
+   called, and an 8-character floor drops `TOKENIZERS_PARALLELISM=false` and
+   `MAX_TOKENS=4096`. Both are rows.
+
+**What is knowingly accepted:** a path-shaped value under a credential-shaped name —
+`GOOGLE_APPLICATION_CREDENTIALS=/home/u/key.json` — is redacted. A guard for it would have to
+exempt values starting `/`, and base64 secrets start with `/` too; that trades a harmless
+false positive for a real miss, which is the wrong direction for this tool.
+
+**The value grammar is not widened and must not be.** It ends at a quote, a backslash,
+whitespace or a separator. `_PAT` stays a rule of its own for `redact-secrets.sh`'s measured
+reason — inside the alternation, the trailing `[A-Z0-9_]*=` absorbs whatever follows and
+`SOME_PATH=`, `MY_PATHS=` and `COMPATIBLE=` all redact. All five of those names are a row.
+
+One consequence worth knowing: a name-rule hit is counted under the **variable name**, not
+under `by-name`, so `--dry-run --json` lists exactly which variables a run would rewrite.
+With the rule a pattern rather than a list, that is the only review surface there is.
+
+## Parity: the mechanism, which is the actual fix
+
+Nothing asserted that the two files carried the same rules, so they drifted — seven shapes of
+fifteen here, and DO-692's two in one file and never in the other. Any fix that is only a fix
+rots the same way.
+
+`scrub-transcript-secrets.py --rules` prints the redaction labels it applies, **derived from
+the compiled rules** rather than from a second list, because a hand-kept inventory is exactly
+what drifted. The state table compares that against the labels it reads out of
+`redact-secrets.sh`'s `sed` program and fails if either side has a rule the other does not.
+
+**The comparison is over rule labels, not patterns, and that is deliberate.** The two files
+are in different languages against different value grammars, so their patterns *should*
+differ; an assertion that they match textually would be wrong as well as fragile. What must
+never differ is the set of credentials either one claims to cover, and a label is exactly
+that claim.
+
+Three rows exist because the obvious version of this check passes vacuously:
+
+- **Both counts are asserted against a literal.** Two extractors that harvest nothing agree
+  perfectly with each other, and that looks identical to a pass.
+- **A rule deleted from a *copy* of `redact-secrets.sh` must be detected and named.** A row
+  showing the extractor agrees with the scrubber proves nothing on its own — a function that
+  returned the scrubber's own list would pass it.
+- **An unreadable redactor is not a pass.** "No labels" compares equal to an empty list.
+  `test-secret-guard.sh` grew the same row after a mutation sweep found its docs check
+  reporting *could not run* as a pass, with every other row green because none reached that
+  branch.
+
+A fourth closes the loop the other way: **every advertised label must have a fixture in the
+suite.** A rule can reach both files, pass every parity row, and still never be exercised.
+
+## What the new rules actually found, measured
+
+Dry run on cilantro, 2026-09-24, against the committed branch (`1f8845f`, scrubber SHA
+`e5ac1b3…`, recorded before and after so the numbers are attributable to that code and not to
+a mutant left behind by a sweep):
+
+```
+mode=dry roots=2 scanned=2498 scrubbed=122 replacements=1292 skipped=0 refused=0
+```
+
+**The nightly run seven hours earlier, on the deployed rules, reported `scrubbed=0
+replacements=0` over the same corpus.** Not one of the 55 distinct kinds below was reachable
+by the seven shapes and seven names that shipped — the allowlist names (`GH_TOKEN`,
+`ANTHROPIC_API_KEY`, `LINEAR_API_KEY`, …) do not appear at all, because the 2026-09-23 sweep
+had already cleared them. So the whole 1,292 is what the gap was worth, and a clean nightly
+log was saying nothing about it.
+
+**Shapes: 861 of 1,292 (67%).** `vpn-auth-challenge` 485, `url-password` 218,
+`aws-temp-key-id` 106, `bearer` 32, `saml-request` 10, `aws-access-key-id` 6, `private-key` 4.
+The two largest are DO-692's, added to `redact-secrets.sh` and never propagated — the drift
+this issue is about, and 495 of these replacements are its direct cost.
+
+**Names: 431**, across 48 variables, none of them nameable in advance: `DB_PASSWORD` 45,
+`DEFAULT_API_KEY` 39, `OPENAI_API_KEY` 37, `POSTGRES_PASSWORD` 37, `TEXTQL_API_KEY` 24,
+`GITHUB_TOKEN` 23, `DTDB_PASSWORD` 16, then a long tail of one-deployment names —
+`SQLPAD_ADMIN_PASSWORD`, `MINIO_ROOT_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`,
+`WC_CONSUMER_SECRET`, `QLENS_OIDC_CLIENT_SECRET`, `CROSSBAR_WAMPCRA_BACKEND_SECRET`. This is
+the argument for a pattern over an allowlist, in one column.
+
+### The false positives, counted rather than predicted
+
+66 of 1,292 (**5.1%**), every one of them the class named in advance: a **pointer** under a
+credential-shaped name, not a credential.
+
+| variable | hits | what it holds |
+|---|---|---|
+| `GH_TOKEN_SOURCE` | 33 | which route supplied the token — this repo's own `gh-doctor` output |
+| `GOOGLE_APPLICATION_CREDENTIALS` | 11 | a path |
+| `POSTGRES_PASSWORD_FILE` | 8 | a path |
+| `RESTIC_PASSWORD_FILE` | 8 | a path |
+| `AWS_SHARED_CREDENTIALS_FILE` | 2 | a path |
+| `ANTHROPIC_IDENTITY_TOKEN_FILE` | 2 | a path |
+| `POSTGRES_SECRET_DIR` | 2 | a path |
+
+Each costs one value in one record; the variable name survives, the record stays valid JSON,
+and nothing is unreadable afterwards. Set against 1,226 real credentials, the trade is the one
+argued for above — and the measurement is what makes it an argument rather than an assertion.
+
+`GH_TOKEN_SOURCE` is the only one with a cost worth naming: it is a diagnostic this repo
+prints on purpose, and scrubbing it makes a `gh-doctor` transcript less useful for debugging
+account routing.
 
 ## Roots are derived, and the reason is measured
 
@@ -180,6 +358,54 @@ missed. Both carry half an hour of jitter for the same reason.
 A missed night costs nothing: a second pass over an already-scrubbed transcript is a
 byte-for-byte no-op.
 
+## The mutation sweep
+
+Eighteen distinct mutants over four rounds: **16 killed, one survived as predicted, and one
+survived for real.** Every mutant carried an explicit expected verdict, and the sweep printed
+each diff — a mutation can apply, parse, kill rows, and still not be the mutation its name
+claims.
+
+Three kills are worth keeping, because each is the only thing standing between here and a
+defect that looks exactly like working code:
+
+- **`<` removed from the `vpn-auth-challenge` or `url-password` value class** — killed by one
+  row each, and it is the *count* assertion, not the `cmp`. The bytes are identical either
+  way. A rule that re-matches its own replacement reports work it did not do on every nightly
+  run forever, and byte comparison cannot see it.
+- **`private-key`'s `+` weakened to `*`** — killed by *"a PEM header with no body after it is
+  left alone"*. Without `+`, a bare mention of the header in prose grows a marker on every run.
+- **The redactor extractor faked to echo the scrubber's own list** — killed only by *"a rule
+  deleted from redact-secrets.sh is detected, and named"*. The four straightforward parity
+  rows all pass against an extractor that reads nothing, which is why that row exists.
+
+The survivor is `aws-secret`'s `[ \t]` widened to `\s`, and it is expected: a JSON record
+always closes with `"`, so the wider class cannot bridge two records on well-formed input.
+`[ \t]` is kept because relying on that is relying on the input being well formed.
+
+**The real survivor was in the docs check, and it is the one worth writing down.** This suite
+inherited `docs_claim()` from DO-701, which hardcodes its needle; DO-700 generalised it with an
+optional second argument so the rule-count row could reuse it. Emptying that default left every
+row green:
+
+```
+tr -s '[:space:]' ' ' <"$f" | grep -c -F "$needle"
+```
+
+`tr` squashes the whole page onto **one line**, so `grep -c -F ""` returns exactly `1` — the
+same value a correct match returns, from a file it never inspected. The rows whose entire job
+is catching a stale documented count were passing without reading anything. The needle is now
+**mandatory**, both callers pass theirs explicitly, and two mutants pin it: removing the guard,
+and a caller reverting to a default. A convenience argument created a state the original could
+not reach, which is the general lesson — generalising a checker widens its input domain, and
+the new inputs are where the hollow passes live.
+
+**Three mutants in the first round, and one in the third, reported NOT APPLICABLE** — bad
+anchors, one a comment sharing its text with the rule it described, one a `SyntaxError` in the
+sweep script itself that made it silently re-run the previous round's list. Each reads exactly
+like a survivor, so they were re-anchored and re-run rather than counted as kills. The sweep
+now builds its mutants with `repr()` on text read out of the file, because hand-quoting shell
+inside Python is what produced two of the four.
+
 ## Linked, not enabled
 
 `./install` symlinks both units and enables neither. Arming is a typed command after one real
@@ -206,8 +432,9 @@ decision before it starts running nightly.
 
 ## State table
 
-`scripts/test-scrub-transcript-secrets.sh` (60 checks, hermetic, run in CI as
-**Transcript Scrub State Table**). Every row runs against a throwaway `mktemp` tree reached
+`scripts/test-scrub-transcript-secrets.sh` (112 checks, hermetic, run in CI as
+**Transcript Scrub State Table**). It carries the same 16 rule labels as
+`scripts/redact-secrets.sh`, and a row asserts that — see *Parity* above. Every row runs against a throwaway `mktemp` tree reached
 through `SCRUB_TRANSCRIPT_ROOTS`; nothing in the file names `~/.claude/projects`. Fixture
 credentials are assembled at runtime so the file contains no literal that `gitleaks` or
 `detect-private-key` would flag over its own test data — the same trick

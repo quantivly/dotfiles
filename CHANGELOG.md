@@ -131,6 +131,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the one suite with a total and no prose row, where it does survive. The reasoning, the measured
   drift table and what a row total cannot see: `docs/REPO_CHECKS.md`, "Where a check count lives".
 
+- **The transcript scrubber now carries every rule `redact-secrets.sh` does, and a check stops
+  them drifting apart again (DO-700).** `scripts/scrub-transcript-secrets.py` shipped in #215
+  with **seven of the redactor's fifteen** shapes — inherited from the out-of-repo script it grew
+  from — and a docstring claiming they were "reused verbatim". Two of the missing eight were
+  DO-692's, added to `redact-secrets.sh` the same week and never propagated. Nothing was damaged;
+  it under-scrubbed, on the exact axis that justified building it. Measured across 2,438
+  transcripts, the misses were real: `url-password` in 68 files, `bearer` 12,
+  `vpn-auth-challenge` 8, `aws-temp-key-id` 7, `private-key` 6, `aws-access-key-id` 3,
+  `saml-request` 2.
+
+  Three of the eight needed **translating** rather than copying, because sed matches a line and
+  this matches the bytes of a JSON record. `private-key` was the trap: the sed rule eats to end
+  of line, which inside a JSON string is the end of the whole record — that spelling swallows the
+  closing `"}`, `unparseable()` refuses the file, and the key stays on disk while the run reports
+  a refusal. The body is matched as what a PEM in a JSON string actually is instead, keeping the
+  END marker. Every value class also gained `<` so a replacement cannot re-match itself: without
+  it a rule reports replacements it never made, on every nightly run, and a `cmp`-based
+  idempotence check cannot see it because the bytes are identical.
+
+  **The name rule is now the redactor's generic suffix pattern, not a seven-name allowlist**, and
+  that was the judgement call rather than a free win: a pipe filter's false positive is a mangled
+  line on a screen, but this runs unattended, nightly, and shreds its backup. It went the wide way
+  because the measured miss is the bulk and not a tail (`DB_PASSWORD` in 75 files,
+  `OPENAI_API_KEY` 55, `GITHUB_TOKEN` 51, `POSTGRES_PASSWORD` 41, `OIDC_CLIENT_SECRET` 22),
+  because a false positive here is bounded — only the value is replaced, the value grammar stops
+  at the JSON string boundary, and `unparseable()` refuses anything that would not survive — and
+  because the allowlist *was* the drift. Accepted knowingly: a path under a credential-shaped
+  name (`GOOGLE_APPLICATION_CREDENTIALS=/home/u/key.json`) is redacted; the guard against that
+  would have to exempt values starting `/`, and base64 secrets start with `/` too. Hits are
+  counted under the **variable name**, so `--dry-run --json` lists exactly what a run would
+  rewrite — with the rule a pattern, that is the only review surface there is.
+
+  The actual fix is that neither of those can rot again. `--rules` prints the labels the scrubber
+  applies, derived from the compiled rules rather than a second list; the state table compares
+  them to the labels it reads out of `redact-secrets.sh`'s `sed` program and fails if either side
+  has a rule the other lacks. It compares **labels, not patterns** — the two files are in
+  different languages against different value grammars, so their patterns should differ, and what
+  must not differ is the set of credentials each claims to cover. Three rows exist because the
+  obvious version passes vacuously: both counts asserted against a literal (two empty extractors
+  agree perfectly), a rule deleted from a *copy* of the redactor must be detected and named (a
+  function returning the scrubber's own list would pass otherwise), and an unreadable redactor is
+  not a pass. A fourth asserts every advertised label has a fixture, so a rule cannot reach both
+  files and still go unexercised. `redact-secrets.sh` itself is untouched. 60 → 112 checks.
+
+  **Measured, not argued: a dry run over 2,498 transcripts found 1,292 replacements in 122
+  files, where the nightly run seven hours earlier on the deployed rules reported zero.** 861
+  of those are shapes (485 `vpn-auth-challenge` and 218 `url-password`, both DO-692's), 431 are
+  names, and the false positives are 66 — 5.1%, every one a *pointer* under a credential-shaped
+  name (`GH_TOKEN_SOURCE`, `GOOGLE_APPLICATION_CREDENTIALS`, `*_PASSWORD_FILE`), which is the
+  class named in the code before the run rather than after it. Eighteen mutants over four
+  rounds: 16 killed, one survived as predicted, and one survived for real — `docs_claim()`'s
+  needle, generalised here from DO-701's hardcoded form, returned a passing `1` from a file it
+  never read once its default was emptied, because `tr` squashes the page onto one line and
+  `grep -c -F ""` matches it. The needle is mandatory now, with two mutants pinning it.
+
 - **The secret-guard state table now asserts its own row total, and the two prose copies of it
   (DO-698).** `scripts/test-secret-guard.sh` had no `EXPECTED_ROWS` guard, and a row count is
   what catches a check that silently stopped running:
