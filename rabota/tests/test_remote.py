@@ -25,13 +25,22 @@ def patch_uuid():
     return mock.patch("rabota.remote.uuid.uuid4", return_value=FIXED_UUID)
 
 
-def payload(*, units=UNITS, streams=(("/home/ubuntu/out/smoke", RESULT),),
+def payload(*, units=UNITS, streams=(("/home/ubuntu/out/smoke", RESULT, "1700000000"),),
             marker=None, units_ok=True):
+    """``streams`` entries are ``(out_dir, result_line, verdict_mtime)`` -- a 2-tuple omits the
+    mtime line entirely, matching a lane chunk built before DO-722 (or a genuinely truncated one),
+    which ``parse()`` must still read without raising.
+    """
     marker = remote.MARKER if marker is None else marker
     units_s = units + (remote.UNITS_OK if units_ok else "")
     parts = [LOADAVG, MEMINFO, "16\n", units_s]
-    for out_dir, line in streams:
-        parts.append(f"{out_dir}\n{line}\n")
+    for entry in streams:
+        out_dir, line = entry[0], entry[1]
+        mtime = entry[2] if len(entry) > 2 else None
+        chunk = f"{out_dir}\n{line}\n"
+        if mtime is not None:
+            chunk += f"{mtime}\n"
+        parts.append(chunk)
     return marker.join(parts)
 
 
@@ -65,6 +74,12 @@ class RemoteArgvTests(unittest.TestCase):
         self.assertIn(f"&& printf %s {remote.shquote(remote.UNITS_OK)}", script)
         self.assertNotIn('no-legend "rabota-lane-*" 2>/dev/null || true', script)
 
+    def test_lane_chunk_carries_the_verdict_mtime_via_stat(self):
+        # DO-722: the remote mtime rides back in this SAME ssh call, quoted the same way as the
+        # stream grep -- shquote, never printf %q (dev's login shell is zsh).
+        script = remote.build_argv(MACHINE, ["/home/ubuntu/o ne"])[-1]
+        self.assertIn("stat -c %Y '/home/ubuntu/o ne'/verdict.json", script)
+
     def test_a_quote_in_an_out_dir_cannot_break_out(self):
         # The property is "a shell sees exactly one token, identical to the input". Assert it with
         # a real POSIX lexer; un-escaping the string by hand tests the un-escaping, not the quoting.
@@ -84,11 +99,34 @@ class RemoteParseTests(unittest.TestCase):
         self.assertEqual(r["units"][0]["state"], "active")
         self.assertEqual(r["units"][0]["machine"], "dev")
         self.assertEqual(r["streams"]["/home/ubuntu/out/smoke"], RESULT)
+        self.assertEqual(r["verdict_mtimes"]["/home/ubuntu/out/smoke"], "1700000000")
 
     def test_no_units_is_an_empty_list_not_a_failure(self):
         r = remote.parse("dev", payload(units=""))
         self.assertTrue(r["reachable"])
         self.assertEqual(r["units"], [])
+
+    def test_a_lane_with_no_result_yet_still_gets_a_readable_mtime(self):
+        # The stream line is empty (no result yet) but the verdict mtime line still follows it --
+        # this is the shape build_argv's `r=$(...); printf` guarantees: a fixed 3-line chunk
+        # regardless of which lines are empty, so a blank result line can never shift what the
+        # mtime line means.
+        r = remote.parse("dev", payload(streams=(("/home/ubuntu/out/smoke", "", "1700000000"),)))
+        self.assertEqual(r["streams"]["/home/ubuntu/out/smoke"], "")
+        self.assertEqual(r["verdict_mtimes"]["/home/ubuntu/out/smoke"], "1700000000")
+
+    def test_a_missing_verdict_mtime_line_is_an_empty_string_not_a_crash(self):
+        # A lane that finished without ever writing a verdict: `stat` fails remotely and the
+        # mtime line is empty, same shape as no result yet. This must still parse cleanly, and
+        # the empty value is what tells census.py to fall back to now() rather than a bogus 0.
+        r = remote.parse("dev", payload(streams=(("/home/ubuntu/out/smoke", RESULT, ""),)))
+        self.assertEqual(r["verdict_mtimes"]["/home/ubuntu/out/smoke"], "")
+
+    def test_a_chunk_with_no_mtime_line_at_all_still_parses(self):
+        # A 2-line chunk (pre-DO-722 shape, or a genuinely truncated one) must not raise -- it
+        # just has nothing to report for that lane's mtime.
+        r = remote.parse("dev", payload(streams=(("/home/ubuntu/out/smoke", RESULT),)))
+        self.assertEqual(r["verdict_mtimes"]["/home/ubuntu/out/smoke"], "")
 
 
 class RemoteReadTests(unittest.TestCase):
