@@ -91,16 +91,28 @@ class ContractTests(unittest.TestCase):
             verdict.validate(self.tmpfile(json.dumps(v)), 4096)
         self.assertIn("evidence.cmd", str(cm.exception))
 
-    def test_the_shipped_smoke_brief_describes_a_verdict_this_validator_accepts(self):
-        """DO-710: briefs/smoke.md is the documented way to exercise a lane, and it enumerated a
-        claim shape the validator refuses, which made --kind evaluate unreachable as shipped."""
+    def test_the_shipped_smoke_brief_names_every_key_this_validator_requires(self):
+        """DO-710 review F1: the first version of this row grepped smoke.md for hand-written
+        strings, so renaming verdict.py's required key from `text` to `description` left it
+        passing — a guard that could not fail. It now reads the requirement from
+        verdict.CLAIM_REQUIRED, so a rename there breaks this row until the brief follows."""
         brief_md = Path(__file__).resolve().parents[1] / "briefs" / "smoke.md"
         if not brief_md.exists():
             self.skipTest("smoke.md not present in this checkout")
-        text = brief_md.read_text()
-        outputs = text.split("## Outputs", 1)[1]
-        for key in ("`id`", "`text`", "`evidence: {cmd, expected, observed}`"):
-            self.assertIn(key, outputs, f"smoke.md Outputs must name {key}")
+        outputs = brief_md.read_text().split("## Outputs", 1)[1]
+        import re
+        for key in verdict.CLAIM_REQUIRED + tuple(n.split(".")[1] for n in verdict.CLAIM_REQUIRED_NESTED):
+            self.assertRegex(outputs, rf"\b{re.escape(key)}\b",
+                             f"smoke.md Outputs must name {key!r}, which verdict.py requires")
+
+    def test_a_claim_built_from_the_brief_s_documented_shape_validates(self):
+        """The other half of F1: assert the shape the brief asks for actually passes the
+        validator, rather than only that the words appear."""
+        claim = {k: "x" for k in verdict.CLAIM_REQUIRED}
+        claim["evidence"] = {"cmd": "true", "expected": "", "observed": ""}
+        claim["confidence"] = "high"
+        v = {"lane": "l1", "status": "done", "claims": [claim], "deliverables": [], "followups": []}
+        self.assertEqual(verdict.validate_text(json.dumps(v), 4096, where="x")["lane"], "l1")
 
     def test_verdict_bad_shape(self):
         with self.assertRaises(verdict.VerdictError):
