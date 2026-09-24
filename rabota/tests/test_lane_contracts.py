@@ -91,6 +91,17 @@ class ContractTests(unittest.TestCase):
             verdict.validate(self.tmpfile(json.dumps(v)), 4096)
         self.assertIn("evidence.cmd", str(cm.exception))
 
+    def test_a_non_dict_evidence_is_refused_not_accepted_or_crashed(self):
+        """DO-719: `"cmd" not in c["evidence"]` never checked that evidence was a dict, so a
+        string or list passed (`in` becomes a substring/membership test) and `None` raised an
+        unhandled TypeError instead of a VerdictError."""
+        for evidence in ("contains cmd", ["cmd"], None):
+            v = {"lane": "l1", "status": "done", "deliverables": [], "followups": [],
+                 "claims": [{"id": "c1", "text": "t", "evidence": evidence}]}
+            with self.assertRaises(verdict.VerdictError) as cm:
+                verdict.validate(self.tmpfile(json.dumps(v)), 4096)
+            self.assertIn("evidence.cmd", str(cm.exception))
+
     def test_the_shipped_smoke_brief_names_every_key_this_validator_requires(self):
         """DO-710 review F1: the first version of this row grepped smoke.md for hand-written
         strings, so renaming verdict.py's required key from `text` to `description` left it
