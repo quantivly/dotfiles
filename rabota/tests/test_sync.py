@@ -196,6 +196,156 @@ class SyncTests(unittest.TestCase):
         self.assertIsNone(snapshots.read(ctx.state_dir, "slack"))                          # nothing was recorded
         self.assertIsNone(ctx.store.last_sync("quantivly", "slack"))
 
+    # ---- DO-727: multi-source ingest ----------------------------------------------------------
+
+    def _write(self, ctx, name, **fields):
+        ctx.state_dir.mkdir(parents=True, exist_ok=True)
+        f = ctx.state_dir / f"{name}.json"
+        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", **fields}))
+        return f
+
+    def test_ingest_many_one_call_writes_and_records_all_three(self):
+        ctx = self.ctx()
+        files = [("slack", self._write(ctx, "slack-in", ok=True, items=[{"text": "hi"}])),
+                  ("calendar", self._write(ctx, "calendar-in", ok=True, items=[{"title": "standup"}])),
+                  ("fireflies", self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}]))]
+        rep = ingest.run_ingest_many(ctx, files)
+        self.assertEqual(set(rep), {"slack", "calendar", "fireflies"})
+        for source in ("slack", "calendar", "fireflies"):
+            self.assertTrue(rep[source]["ok"], source)
+            self.assertIsNotNone(snapshots.read(ctx.state_dir, source), source)
+            self.assertTrue(ctx.store.last_sync("quantivly", source)["ok"], source)
+
+    def test_ingest_many_single_source_form_unchanged(self):
+        # The positional/--file single-source call must still return the un-keyed dict, not a
+        # {source: ...} wrapper — a contract change here would break every existing caller.
+        ctx = self.ctx()
+        f = self._write(ctx, "slack-in", ok=True, items=[{"text": "hi"}])
+        rep = ingest.run_ingest(ctx, "slack", f)
+        self.assertEqual(rep, {"source": "slack", "ok": True, "error": None, "items": 1,
+                                "path": str(ctx.state_dir / "sources" / "slack.json")})
+
+    def test_ingest_many_bad_file_among_good_ones_still_writes_the_good_ones(self):
+        ctx = self.ctx()
+        bad = self._write(ctx, "calendar-in", ok="false")     # k5 shape: truthy string, refused
+        files = [("slack", self._write(ctx, "slack-in", ok=True, items=[{"text": "hi"}])),
+                  ("calendar", bad),
+                  ("fireflies", self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}]))]
+        with self.assertRaises(errors.Partial) as cm:
+            ingest.run_ingest_many(ctx, files)
+        self.assertEqual(cm.exception.failed, ["calendar"])
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "slack"))
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "fireflies"))
+        self.assertIsNone(snapshots.read(ctx.state_dir, "calendar"))          # refused file: nothing written
+        self.assertIsNone(ctx.store.last_sync("quantivly", "calendar"))       # refused file: nothing recorded
+        self.assertTrue(ctx.store.last_sync("quantivly", "slack")["ok"])
+        self.assertTrue(ctx.store.last_sync("quantivly", "fireflies")["ok"])
+
+    def test_ingest_many_duplicate_source_refused_before_writing_anything(self):
+        ctx = self.ctx()
+        f1 = self._write(ctx, "slack-in-1", ok=True, items=[{"text": "first"}])
+        f2 = self._write(ctx, "slack-in-2", ok=True, items=[{"text": "second"}])
+        with self.assertRaises(errors.Usage) as cm:
+            ingest.run_ingest_many(ctx, [("slack", f1), ("slack", f2)])
+        self.assertIn("slack", str(cm.exception))
+        self.assertIsNone(snapshots.read(ctx.state_dir, "slack"))
+        self.assertIsNone(ctx.store.last_sync("quantivly", "slack"))
+
+    def test_ingest_many_cli_wiring_source_equals_path(self):
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        slack = state / "slack-in.json"; calendar = state / "calendar-in.json"
+        slack.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": [{"text": "hi"}]}))
+        calendar.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": []}))
+        code, out, _ = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                 "--file", f"slack={slack}", "--file", f"calendar={calendar}"])
+        self.assertEqual(code, 0, out)
+        body = json.loads(out)
+        self.assertTrue(body["slack"]["ok"]); self.assertTrue(body["calendar"]["ok"])
+
+    def test_single_source_form_still_takes_a_path_containing_an_equals_sign(self):
+        # Review finding: refusing every single-source `--file` containing `=` (to catch the mixed
+        # form) also refused a legal path that happens to contain one, which `main` accepted. The
+        # brief's constraint was that this form keep working *unchanged*, and an unusual path is
+        # still a path.
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; odd = state / "a=b"; odd.mkdir(parents=True)
+        slack = odd / "slack-in.json"
+        slack.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": [{"text": "hi"}]}))
+        code, out, _ = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                 "slack", "--file", str(slack)])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(json.loads(out)["ok"])
+
+    def test_a_source_named_both_ways_is_refused_naming_the_ambiguity(self):
+        # The other half of the row above: `ingest slack --file calendar=f.json` names a source
+        # twice, and must still be refused -- but for saying so, not for containing an `=`.
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        f = state / "calendar-in.json"
+        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": []}))
+        code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                   "slack", "--file", f"calendar={f}"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("names a source twice", out + err)
+
+    def test_repeating_file_with_a_positional_source_is_refused_not_last_wins(self):
+        # `main` kept the last `--file` silently; this form now refuses. Untested until now, and an
+        # untested refusal is one revert away from becoming last-write-wins again.
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        a = state / "a.json"; b = state / "b.json"
+        for f in (a, b):
+            f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": []}))
+        code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                   "slack", "--file", str(a), "--file", str(b)])
+        self.assertEqual(code, 2, out)
+        self.assertIn("--file", out + err)
+        # the behaviour, not the wording: nothing may be ingested from either file
+        self.assertIsNone(snapshots.read(state, "slack"))
+
+    def test_a_write_error_on_one_source_still_attempts_the_others(self):
+        # Review finding: only `errors.Usage` was caught per source, so an OSError from the
+        # snapshot write escaped mid-loop -- the sources after it were never attempted, though
+        # their files were already fetched, valid, and independent of the one that blew up.
+        ctx = self.ctx()
+        files = [("calendar", self._write(ctx, "calendar-in", ok=True, items=[])),
+                  ("fireflies", self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}]))]
+        real = ingest.snapshots.write
+
+        def boom(state_dir, source, payload):
+            if source == "calendar":
+                raise OSError("no space left on device")
+            return real(state_dir, source, payload)
+
+        ingest.snapshots.write = boom
+        self.addCleanup(lambda: setattr(ingest.snapshots, "write", real))
+        with self.assertRaises(errors.Partial) as cm:
+            ingest.run_ingest_many(ctx, files)
+        self.assertEqual(cm.exception.failed, ["calendar"])
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "fireflies"))   # attempted despite the blow-up
+        self.assertIsNone(snapshots.read(ctx.state_dir, "calendar"))
+        # raising discards the report, so the reason has to reach the reader through the message
+        self.assertIn("OSError", str(cm.exception))
+        self.assertIn("no space left on device", str(cm.exception))
+
+    def test_ingest_cli_single_source_form_unchanged(self):
+        from tests.test_cli import run_cli, install_fixture_home
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        slack = state / "slack-in.json"
+        slack.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": [{"text": "hi"}]}))
+        code, out, _ = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
+                                 "slack", "--file", str(slack)])
+        self.assertEqual(code, 0, out)
+        body = json.loads(out)
+        self.assertEqual(body["source"], "slack")
+        self.assertTrue(body["ok"])
+
 
 class SnapshotTests(unittest.TestCase):
     def setUp(self):
