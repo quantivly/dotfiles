@@ -57,8 +57,8 @@ skill rather than reading the records end to end.
 
 | page | what it is | for |
 |---|---|---|
-| [VPN_RESILIENCE.md](VPN_RESILIENCE.md) | setting up and operating the VPN fail-fast unit, the tunnel-down notifier and `vpn-sweeps`; what to do about a stale `unreachable` route | guide |
-| [VPN_INTERNALS.md](VPN_INTERNALS.md) | 33 days of measurements, the three designs killed by evidence, why no runtime component may read a client log, and the silent-zero traps in the reporter | record |
+| [VPN_RESILIENCE.md](VPN_RESILIENCE.md) | setting up and operating the VPN fail-fast unit, the tunnel-down notifier, the IPv6 egress block and `vpn-sweeps`; what to do about a stale `unreachable` route | guide |
+| [VPN_INTERNALS.md](VPN_INTERNALS.md) | 33 days of measurements, the designs killed by evidence, why no runtime component may read a client log, why the IPv6 block is routes and not nftables, and the silent-zero traps in the reporter | record |
 
 ## Security
 

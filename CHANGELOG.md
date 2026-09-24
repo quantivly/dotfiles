@@ -49,6 +49,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Block IPv6 egress while the VPN tunnel is up, because the tunnel does not carry it
+  (DO-704).** The Client VPN endpoint is `SplitTunnel=False`, but only IPv4 is tunnelled: the
+  client installs `0.0.0.0/1` + `128.0.0.0/1` over `tun0` and *nothing* for IPv6, so every v6
+  packet still leaves via the ISP. Measured on a connected client, `curl -4 ifconfig.me` returns
+  the VPN's NAT gateway and `curl -6` returns the ISP address — and with no family flag `curl`
+  preferred v6, so on a dual-stack network the leak was the **default** path. Split tunnel was
+  ruled out (nine security groups allowlist the VPN egress IP, and the servers are reached over
+  public IPs) and dual-stacking is impossible (the VPC has no IPv6 CIDR), so the fix is
+  client-side: `unreachable ::/1` + `unreachable 8000::/1` under route `proto 66` while the tunnel
+  is up, withdrawn when it is down.
+
+  **Routes, not nftables**, because `nft list table` needs root and `vpn-doctor` is unprivileged by
+  contract — a mechanism only root can read would blind the orphan check, which is the most
+  valuable question the doctor asks. **Not `ip rule` either**: `ip -6 rule show protocol 66`
+  silently ignores the filter and prints every rule with rc 0, so a cleanup written against it
+  would have deleted Tailscale's four rules. **`::/1` + `8000::/1`, never `2000::/3`** — the
+  well-known NAT64 prefix `64:ff9b::/96` is in `::/3`, so on a DNS64 network `2000::/3` blocks
+  nothing at all.
+
+  **No dead-man switch, and the docs say why.** `expires` is *accepted* on an `unreachable` IPv6
+  route — rc 0, netlink takes it — and the attribute is then never attached: nothing in `show`, no
+  `"expires"` key in `-j`, ever. A control route given the identical flag in the same namespace,
+  by the same binary, in the same second showed `expires 4sec` immediately, so the flag works and
+  simply does not apply to a reject route. Withdrawal comes from `ExecStopPost=--clear`, the
+  clear-at-start, the boot-time start and `vpn-doctor` instead.
+
+  Off by default; `vpn-setup --block-ipv6` arms it and `--no-block-ipv6` disarms it, and **neither
+  flag leaves arming exactly as it is**, so a plain re-run after `git pull` can never silently
+  disarm a machine. The installer reads the drop-in's value back out of the file it just wrote and
+  runs the *installed* script's own `--check` with it **before** `systemctl restart`, because the
+  drop-in is the only producer of `VPN_FAILFAST_IPV6` and the knob is fatal on an unknown value —
+  so `blocked` instead of `block` would otherwise leave the unit in a restart loop and then
+  `failed`, killing IPv4 fail-fast over a typo in an optional feature.
+
+  `vpn-doctor` gained a six-cell verdict, a version-skew probe that uses the installed script's own
+  validator as its version oracle, and `route get` canaries that **classify** rc and stderr rather
+  than grepping stdout. That last one is not stylistic: `ip -6 route get` prints the winning route
+  on stdout with rc 0 when open and prints *nothing* on stdout when it fails, so `grep -q
+  unreachable` is never true for the blocked case and always true for the no-IPv6 case — a green
+  tick for a block that is not installed.
+
+- **Fixed: the VPN state table was one successful `sudo` away from overwriting the running root
+  daemon.** Its installer rows set `VPN_SETUP_ALLOW_WORKTREE=1`, so execution fell through the
+  worktree guard and reached `sudo install -m 755 -o root -g root "$SCRIPT_SRC"
+  /usr/local/bin/vpn-failfast.sh` with the *branch's* script. The needle was printed thirty lines
+  earlier and `|| true` swallowed the status, so the row passed whether or not an install
+  happened; only the absence of a usable `sudo` stopped it on a developer's machine, and CI has
+  passwordless sudo — so the green history never once exercised the inert path. `install(1)`
+  writes in place. The file's own header claimed "No sudo, no root". A recording `sudo` stub now
+  sits at the front of `PATH` on both rows; it runs only `install`/`rm`/`rmdir`/`mkdir`, only
+  inside `VPN_SETUP_PREFIX`, and never `systemctl` or `sysctl`.
+
 - **A guard that enumerates the state tables with no row total, so the audit never has to be done
   by hand again (DO-705).** DO-701 landed fourteen row totals and missed six suites; its own
   close-out then called fourteen "the state tables" when it was fourteen of twenty. That was the

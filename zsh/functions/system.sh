@@ -3281,7 +3281,72 @@ _VPN_SYSCTL_ETC="/etc/sysctl.d/99-vpn-acs-port.conf"
 # root EXECUTES this one, so it is a copy under /usr/local/bin rather than a path
 # in the checkout -- see the unit header. vpn-doctor drift-checks it like the rest.
 _VPN_SCRIPT_ETC="/usr/local/bin/vpn-failfast.sh"
+_VPN_DROPIN_ETC="/etc/systemd/system/vpn-failfast.service.d/ipv6-block.conf"
 _VPN_ACS_PORT=35001
+# The two halves of the DO-704 block, mirroring IPV6_BLOCK_DSTS in
+# scripts/vpn-failfast.sh. Deliberately NOT read out of the script: this is the
+# independent statement of what SHOULD be there, and a check that derives its
+# expectation from the thing under test cannot disagree with it.
+_VPN_V6_HALVES=('::/1' '8000::/1')
+
+# _vpn_v6_probe <addr> -> blocked | open | no-v6 | odd   (sets _VPN_V6_PROBE_OUT)
+#
+# THE FIRST VERSION OF THIS WAS EXACTLY INVERTED, so the shape is written down.
+# Measured on iproute2-6.19.0: `ip -6 route get` prints the WINNING ROUTE on
+# STDOUT with rc 0 when the destination is reachable, and on failure prints
+# NOTHING on stdout, putting `RTNETLINK answers: ...` on STDERR with rc 2.
+#
+# So `grep -q unreachable` -- the obvious spelling -- is never true for the
+# blocked case and ALWAYS true for the no-IPv6 case: a green tick for a block
+# that is not installed, on the machine least able to notice. Classify rc and
+# the message instead; never grep stdout for the word.
+_vpn_v6_probe() {
+  local out rc
+  out="$(ip -6 route get "$1" 2>&1)"; rc=$?
+  _VPN_V6_PROBE_OUT="$out"
+  if   (( rc == 0 ));                              then print -r -- open
+  elif [[ "$out" == *"No route to host"* ]];       then print -r -- blocked   # EHOSTUNREACH
+  elif [[ "$out" == *"Network is unreachable"* ]]; then print -r -- no-v6     # ENETUNREACH
+  else print -r -- odd
+  fi
+}
+
+# _vpn_v6_verdict <armed> <tunnel-up> <both-halves-present> <any-v6-owned>
+#
+# PURE -- no `ip`, no `systemctl`, no globals, every input an argument -- so
+# every one of the six cells is reachable from a row without a routing table in
+# the state the cell describes. Three of the six are FAILures for three
+# different reasons, and a caller that collapsed them would report an orphan
+# that blackholes all IPv6 in the same words as a leak.
+_vpn_v6_canary_verdict() {   # <probe-state> <both-halves-present> -> a verdict token
+  local state="$1" halves="$2"
+  case "$state" in
+    blocked)
+      # `blocked` ALONE is not a pass. Something else on this machine may be
+      # rejecting the destination -- another VPN, a firewall, a stale route --
+      # and a tick here would credit our block for someone else's work, on the
+      # one check whose job is to prove ours is in place.
+      (( halves )) && { print -r -- ok; return; }
+      print -r -- not-ours ;;
+    open)  print -r -- leaking ;;
+    no-v6) print -r -- not-exercised ;;   # NEVER a pass: the block was not tested
+    *)     print -r -- odd ;;
+  esac
+}
+
+_vpn_v6_verdict() {
+  local armed="$1" up="$2" halves="$3" any="$4"
+  if (( ! armed )); then
+    (( any )) && { print -r -- orphan-disarmed; return; }
+    print -r -- not-armed; return
+  fi
+  if (( up )); then
+    (( halves )) && { print -r -- ok; return; }
+    print -r -- leaking; return
+  fi
+  (( any )) && { print -r -- orphan-down; return; }
+  print -r -- ok-down
+}
 
 # Drift on a file whose comments outnumber its directives is compared on the
 # DIRECTIVES, never byte-for-byte. This repo already worked that out once, in
@@ -3351,20 +3416,27 @@ vpn-doctor() {
   echo "VPN resilience"
   echo
 
-  # --- the tunnel itself ----------------------------------------------------
-  if VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null | grep -q 'tunnel:  UP'; then
+  # --- the tunnel, and what is installed, from ONE --status -----------------
+  # One invocation, not three, and no second parser. The inline
+  # `ip -j route show proto` copy that used to answer "what is installed" here
+  # was a duplicate of owned_routes() -- and an IPv4-ONLY one, in the function
+  # whose entire job is to find an orphan, so a v6 route this tool owns was
+  # invisible to the check written to catch exactly that. `--status` is the one
+  # source of truth for both questions.
+  local vstat owned tunnel_up_now=0
+  vstat="$(VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null)"
+  [[ "$vstat" == *'tunnel:  UP'* ]] && tunnel_up_now=1
+  # The `{f=0}` terminator ends the list at the first line that is not an entry,
+  # so a section printed after it can never be read as one.
+  owned="$(awk '/^installed \(proto /{f=1;next} /^  - /{if(f)print substr($0,5);next} {f=0}' <<<"$vstat")"
+
+  if (( tunnel_up_now )); then
     _doctor_ok "tunnel is UP (tun0 has a gateway route)"
   else
     _doctor_note "tunnel is DOWN — every route finding below is expected, not a fault"
   fi
 
   # --- ORPHANS: the one real risk in this design ----------------------------
-  local owned tunnel_up_now
-  owned="$(ip -j route show proto "$proto" 2>/dev/null \
-           | grep -oE '"dst"[[:space:]]*:[[:space:]]*"[^"]*"' \
-           | sed 's/^"dst"[[:space:]]*:[[:space:]]*"//; s/"$//')"
-  tunnel_up_now=1
-  VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null | grep -q 'tunnel:  UP' || tunnel_up_now=0
   if [[ -n "$owned" && "$tunnel_up_now" == "1" ]]; then
     _doctor_bad "ORPHANED unreachable route(s) while the tunnel is UP — these BLACKHOLE the host:"
     printf '      %s\n' ${=owned}
@@ -3431,6 +3503,116 @@ vpn-doctor() {
     _doctor_ok "the installed daemon matches this checkout"
   else
     _doctor_warn "the installed daemon DIFFERS from this checkout — re-run vpn-setup"
+  fi
+
+  # --- the IPv6 block (DO-704) ---------------------------------------------
+  # Placed after the daemon check because the version-skew probe below runs the
+  # INSTALLED script, and "is there one" has just been answered.
+  #
+  # Arming is read from the DROP-IN, never from --status. --status reports
+  # VPN_FAILFAST_IPV6 as seen by whoever invoked it, and this function's shell
+  # does not have it set -- so reading it there would report every armed machine
+  # as disarmed, which is the pleasant direction to be wrong in and therefore
+  # the dangerous one.
+  local v6_armed=0 v6_halves=0 v6_any=0 v6_owned dropin_val half
+  if [[ -r "$_VPN_DROPIN_ETC" ]]; then
+    dropin_val="$(sed -n 's/^Environment=VPN_FAILFAST_IPV6=//p' "$_VPN_DROPIN_ETC" | head -1)"
+    [[ "$dropin_val" == "block" ]] && v6_armed=1
+  fi
+  v6_owned="$(awk '/^ipv6 installed \(proto /{f=1;next} /^  - /{if(f)print substr($0,5);next} {f=0}' <<<"$vstat")"
+  [[ -n "$v6_owned" ]] && v6_any=1
+  v6_halves=1
+  for half in "${_VPN_V6_HALVES[@]}"; do
+    grep -qxF -- "$half" <<<"$v6_owned" || v6_halves=0
+  done
+
+  case "$(_vpn_v6_verdict "$v6_armed" "$tunnel_up_now" "$v6_halves" "$v6_any")" in
+    ok)       _doctor_ok "IPv6 egress is blocked while the tunnel is up (${_VPN_V6_HALVES[*]})" ;;
+    ok-down)  _doctor_ok "IPv6 block armed and correctly withdrawn while the tunnel is down" ;;
+    leaking)  _doctor_bad "IPv6 is LEAKING outside the tunnel right now — armed, tunnel UP, block NOT installed:"
+              _doctor_bad "  Expected: ${_VPN_V6_HALVES[*]} at proto ${proto}. Found: ${v6_owned:-nothing}"
+              _doctor_bad "  Fix: sudo systemctl restart vpn-failfast" ;;
+    orphan-down)
+              _doctor_bad "ORPHANED IPv6 block while the tunnel is DOWN — this blackholes ALL global IPv6:"
+              printf '      %s\n' ${=v6_owned}
+              _doctor_bad "  Remove now:  sudo systemctl restart vpn-failfast   (it clears them at start)" ;;
+    orphan-disarmed)
+              _doctor_bad "ORPHANED IPv6 route(s) with the block NOT armed — this blackholes global IPv6:"
+              printf '      %s\n' ${=v6_owned}
+              _doctor_bad "  Remove now:  sudo ${_VPN_SCRIPT_ETC} --clear" ;;
+    not-armed)
+              _doctor_note "IPv6 is NOT blocked — the tunnel carries no v6, so v6 traffic leaves via the ISP (DO-704)"
+              _doctor_note "  Arm it with: sudo vpn-setup --block-ipv6" ;;
+  esac
+
+  if (( v6_armed )); then
+    # The daemon is the ONLY thing keeping the block converged; armed with
+    # nothing running is a leak waiting for the next connect.
+    local v6as
+    v6as="$(systemctl show -p ActiveState --value vpn-failfast.service 2>/dev/null)"
+    case "$v6as" in
+      active|activating) ;;
+      *) _doctor_bad "the IPv6 block is armed but vpn-failfast.service is ${v6as:-unknown} — nothing is converging it" ;;
+    esac
+
+    _vpn_drift "IPv6 block drop-in" "${root}/systemd/vpn-failfast.service.d/ipv6-block.conf" \
+               "$_VPN_DROPIN_ETC" "re-run vpn-setup --block-ipv6"
+
+    # VERSION SKEW, which no drift check on earth can see. `git pull` + a plain
+    # `sudo vpn-setup` updates the script and PRESERVES the drop-in, and an
+    # older installed script simply IGNORES the knob: drop-in armed, unit
+    # healthy, no block, nothing says so -- and `diff -q` is silent because the
+    # checkout and the installed copy match each other perfectly.
+    #
+    # The validator is its own version oracle. Both the code AND the message are
+    # checked, because exit 2 also means "the config is unreadable", and that
+    # reading would report an ancient script as knowing a knob it has never
+    # heard of.
+    local probe probe_rc
+    probe="$(VPN_FAILFAST_IPV6=__probe__ VPN_FAILFAST_CONF="$_VPN_CONF_ETC" \
+             "$_VPN_SCRIPT_ETC" --check 2>&1)"; probe_rc=$?
+    if (( probe_rc == 2 )) && [[ "$probe" == *VPN_FAILFAST_IPV6* ]]; then
+      _doctor_ok "the installed daemon understands VPN_FAILFAST_IPV6"
+    elif (( probe_rc == 0 )); then
+      _doctor_bad "VERSION SKEW: the drop-in arms the IPv6 block, but the installed daemon PREDATES it"
+      _doctor_bad "  It ignores VPN_FAILFAST_IPV6 entirely, so nothing is blocked and no check can see it."
+      _doctor_bad "  Fix: sudo vpn-setup"
+    else
+      _doctor_warn "could not tell whether the installed daemon knows VPN_FAILFAST_IPV6 (rc=${probe_rc}): ${probe}"
+    fi
+
+    # THE CANARIES, and only while armed AND up -- those are the only conditions
+    # under which "reachable" is a fault. `ip -6 route get` ASKS THE KERNEL
+    # which route wins; `ip -6 route show` only lists what exists, and a
+    # more-specific route from an RA, a second VPN or a v6-enabled Docker
+    # network silently beats ours without changing the list at all.
+    if (( tunnel_up_now )); then
+      local addr state
+      for addr in 2606:4700:4700::1111 64:ff9b::1; do
+        state="$(_vpn_v6_probe "$addr")"
+        case "$(_vpn_v6_canary_verdict "$state" "$v6_halves")" in
+          ok)      _doctor_ok "$addr is unreachable, and this tool owns both halves" ;;
+          not-ours)
+            _doctor_bad "$addr is rejected, but this tool owns neither half — something ELSE is rejecting it" ;;
+          leaking)
+            _doctor_bad "$addr is REACHABLE outside the tunnel — a more-specific route is winning:"
+            _doctor_bad "      ${_VPN_V6_PROBE_OUT}" ;;
+          not-exercised)
+            _doctor_note "$addr: no IPv6 route at all here — the block was not exercised" ;;
+          *)
+            _doctor_warn "$addr: could not classify \`ip -6 route get\` — ${_VPN_V6_PROBE_OUT}" ;;
+        esac
+      done
+      # POSITIVE CONTROL. fd7a:115c:a1e0::53, deliberately NOT this host's own
+      # tailnet address -- that one resolves `local ... table local` via rule 0
+      # and would pass even with rule 5270 and table 52 deleted, proving nothing.
+      state="$(_vpn_v6_probe fd7a:115c:a1e0::53)"
+      if [[ "$state" == "open" ]]; then
+        _doctor_ok "the tailnet still resolves past the block (table 52 precedes main)"
+      else
+        _doctor_warn "the tailnet canary is $state — the block may be broader than intended: ${_VPN_V6_PROBE_OUT}"
+      fi
+    fi
   fi
 
   # --- the notifier (user unit; linked-not-enabled is a DECISION) -----------
