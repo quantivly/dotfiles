@@ -1,4 +1,4 @@
-import argparse, json, shutil, tempfile, unittest
+import argparse, json, os, shutil, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from rabota import context, errors
@@ -18,6 +18,40 @@ def framed(home="/home/ubuntu", path="/usr/bin:/bin", claude="/home/ubuntu/.loca
     EMPTY line, not a missing one. Every fixture builds its reply through here, so the framing is
     written down once and a change to it cannot leave a row asserting the old shape."""
     return f"{before}{RESOLVE_MARKER}\n{home}\n{path}\n{claude}\n"
+
+# DO-669: a local $HOME no machine has. Many rows in the LocalRecipeTests hierarchy build a
+# command for a machine that is NOT this one, against fixtures whose remote home is dev's real
+# `/home/ubuntu`. On dev the two homes coincide, so "the resolved remote value reached the argv"
+# and "the tenant's home-relative default was expanded LOCALLY" render the same string. That
+# inverted two rows outright (they asserted `/home/ubuntu` was absent from commands that name it
+# by design) and hollowed four more. Pinning the LOCAL side — rather than moving the remote
+# sentinel off dev's measured values — separates the two on every machine, so a row's verdict no
+# longer depends on who runs it.
+#
+# The genuinely local rows are pinned too (`test_the_seat_is_pinned_by_config_dir`,
+# `test_a_local_recipe_sets_claude_config_dir_to_the_seat_path`), and the fiction costs them
+# nothing: each computes its expected value through the same `lane.seat_config_dir` call it
+# asserts against, so it is self-referential either way.
+LOCAL_HOME = "/nonexistent-local-home"
+
+
+def pin_local_home(test):
+    """Pin this process's ``$HOME`` to :data:`LOCAL_HOME` for the life of ``test``, and return what
+    ``Path.home()`` then answers.
+
+    :class:`LocalRecipeTests` calls this in ``setUp``, so the pin is in force before any row builds
+    a context and every class in that hierarchy inherits it.
+
+    The refusal is the point. Were the patch not to take, this would hand the caller the RUNNER's
+    own home as its needle — which is exactly the pre-DO-669 assertion: machine-dependent, passing
+    off dev and inverting on it. Raising says so at once rather than silently reinstating it.
+    """
+    patcher = patch.dict(os.environ, {"HOME": LOCAL_HOME})
+    patcher.start(); test.addCleanup(patcher.stop)
+    home = str(Path.home())
+    if home != LOCAL_HOME:
+        raise AssertionError(f"$HOME pin did not take: Path.home() is {home!r}, not {LOCAL_HOME!r}")
+    return home
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -40,6 +74,17 @@ class UnitNameTests(unittest.TestCase):
 
 
 class LocalRecipeTests(unittest.TestCase):
+    def setUp(self):
+        # DO-669. Measured, not assumed — and the counts are PER SUBSTITUTION, not a total.
+        # Replacing either half of `run_recipe`'s resolved remote answer with this process's own
+        # home — `claude_bin = None` (so the tenant's home-relative default is expanded here) or
+        # `home = str(Path.home())` — is killed by 3 rows each under a neutral $HOME. Without this
+        # pin each scores ZERO net kills on dev: the substitution is invisible there, and the two
+        # rows that are red on dev regardless are red with or without it, so they prove nothing
+        # about it. With the pin it is 3 and 3 on dev too. The two kill-sets share one row, so 5
+        # distinct rows rest on this, plus `test_an_explicit_config_dir_...` on the build_local side.
+        self.local_home = pin_local_home(self)
+
     def ctx(self, runner):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
@@ -216,6 +261,10 @@ class RemoteRecipeTests(LocalRecipeTests):
         # caller passes config_dir="/home/ubuntu/.claude" any more (round 5: run_recipe's remote
         # branch passes nothing at all, see test_a_remote_recipe_never_sets_claude_config_dir),
         # but the mechanism itself — "trust the given value, don't re-derive it" — still matters.
+        # DO-669: the local home is PINNED (setUp) rather than read from the environment, because
+        # the remote values here are dev's real ones and dev's real $HOME is /home/ubuntu — so on
+        # dev this row used to assert /home/ubuntu was absent from a command that names it twice
+        # by design — the CLAUDE_CONFIG_DIR value and the binary path, both passed in explicitly.
         ctx = self.ctx(FakeRunner([]))
         local = lane.build_local(ctx, worktree="/w/t", out_dir="/o/d",
                                  brief="/o/d/brief.md", model="claude-sonnet-5", effort="medium",
@@ -223,7 +272,7 @@ class RemoteRecipeTests(LocalRecipeTests):
                                  claude_bin="/home/ubuntu/.local/bin/claude")
         cmd = lane.build_remote(ctx.tenant.machines["dev"], local)[-1]
         self.assertIn("'--setenv=CLAUDE_CONFIG_DIR=/home/ubuntu/.claude'", cmd)
-        self.assertNotIn(str(Path.home()), cmd)
+        self.assertNotIn(self.local_home, cmd)
 
 
 class ResolveRemoteTests(LocalRecipeTests):
@@ -499,11 +548,16 @@ class RunRecipeTests(LocalRecipeTests):
         # not found", printed twice on stderr). The fix is to not set the variable for a remote
         # lane AT ALL, so dev falls back to its own login's defaults. This asserts the substring
         # is absent from the WHOLE rendered command — not present-but-empty, not a local value.
+        # DO-669: "not a local value" needs a local home that cannot BE the resolved remote one.
+        # RESOLVED_HOME is dev's real /home/ubuntu, so on dev the second assertion inverted; the
+        # setUp pin makes it hold everywhere, and makes it able to tell "the resolver's answer was
+        # used" apart from "the tenant's home-relative claude_bin default was expanded locally",
+        # which on dev produce the same string.
         runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
         self.assertNotIn("CLAUDE_CONFIG_DIR", out["shell"])
-        self.assertNotIn(str(Path.home()), out["shell"])
+        self.assertNotIn(self.local_home, out["shell"])
 
     def test_a_dry_recipe_records_no_row(self):
         ctx = self.ctx(FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))]))
