@@ -1552,6 +1552,28 @@ check "a relative VPN_SETUP_PREFIX: exit 2, never the real /etc" "$RC" 2
 OUT="$(setup_run "$FAKEROOT")"
 grep_ok "$OUT" 'NOT to the real /etc' "a prefixed run says loudly that it is not a real install"
 
+# A REMEDY THAT CANNOT BE RUN IS WORSE THAN NO REMEDY. `vpn-setup`, `vpn-init`,
+# `vpn-doctor` and `vpn-status` are zsh FUNCTIONS; `sudo` can only exec a binary,
+# so `sudo vpn-setup` fails with "command not found" before it does anything. The
+# script escalates per-command internally, which is the whole reason it does not
+# need a leading sudo. DO-704's approved plan said `sudo vpn-setup` throughout and
+# it reached vpn-doctor's own remedy lines — the first thing a user would type.
+# IN THE DOCS, ONLY A FENCED CODE BLOCK COUNTS. Prose that NAMES the broken
+# form in order to document it is legitimate -- this very suite caught the
+# heading "`sudo vpn-setup` cannot work" in VPN_INTERNALS, which is the sentence
+# explaining the bug. A row that cannot tell a remedy from a description of one
+# would be paid for by deleting the explanation, which is the wrong direction.
+# `awk`, not `grep -P`: this box's grep is a ugrep shim and its awk is mawk, so
+# no GNU extensions.
+doc_sudo() {
+    awk '/^```/ { inf = !inf; next }
+         inf && /sudo +(vpn-setup|vpn-init|vpn-doctor|vpn-status)/ { print FILENAME ":" FNR ": " $0 }' "$@"
+}
+BAD_SUDO="$( { grep -nE 'sudo +(vpn-setup|vpn-init|vpn-doctor|vpn-status)' "$SYSTEM_SH" || true
+               doc_sudo "$DOTFILES/docs/VPN_RESILIENCE.md" "$DOTFILES/docs/VPN_INTERNALS.md" || true
+             } | grep -v '^[[:space:]]*$' || true )"
+check "no remedy anywhere tells you to sudo a zsh function" "$BAD_SUDO" ""
+
 printf '\nthe reporter — DST, the join, and refusing to invent a clean week\n'
 
 rep() { "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" "$@" 2>&1; }
@@ -1608,7 +1630,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=238
+EXPECTED_ROWS=239
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

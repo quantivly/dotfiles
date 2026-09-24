@@ -3542,7 +3542,7 @@ vpn-doctor() {
               _doctor_bad "  Remove now:  sudo ${_VPN_SCRIPT_ETC} --clear" ;;
     not-armed)
               _doctor_note "IPv6 is NOT blocked — the tunnel carries no v6, so v6 traffic leaves via the ISP (DO-704)"
-              _doctor_note "  Arm it with: sudo vpn-setup --block-ipv6" ;;
+              _doctor_note "  Arm it with: vpn-setup --block-ipv6" ;;
   esac
 
   if (( v6_armed )); then
@@ -3559,7 +3559,7 @@ vpn-doctor() {
                "$_VPN_DROPIN_ETC" "re-run vpn-setup --block-ipv6"
 
     # VERSION SKEW, which no drift check on earth can see. `git pull` + a plain
-    # `sudo vpn-setup` updates the script and PRESERVES the drop-in, and an
+    # `vpn-setup` updates the script and PRESERVES the drop-in, and an
     # older installed script simply IGNORES the knob: drop-in armed, unit
     # healthy, no block, nothing says so -- and `diff -q` is silent because the
     # checkout and the installed copy match each other perfectly.
@@ -3576,7 +3576,7 @@ vpn-doctor() {
     elif (( probe_rc == 0 )); then
       _doctor_bad "VERSION SKEW: the drop-in arms the IPv6 block, but the installed daemon PREDATES it"
       _doctor_bad "  It ignores VPN_FAILFAST_IPV6 entirely, so nothing is blocked and no check can see it."
-      _doctor_bad "  Fix: sudo vpn-setup"
+      _doctor_bad "  Fix: vpn-setup"
     else
       _doctor_warn "could not tell whether the installed daemon knows VPN_FAILFAST_IPV6 (rc=${probe_rc}): ${probe}"
     fi

@@ -90,9 +90,9 @@ immediate, loud failure.
 **It is off by default.** Arming is a typed command:
 
 ```bash
-sudo vpn-setup --block-ipv6        # arm
+vpn-setup --block-ipv6             # arm
 vpn-doctor                         # every line should be green
-sudo vpn-setup --no-block-ipv6     # disarm; IPv4 fail-fast keeps working
+vpn-setup --no-block-ipv6          # disarm; IPv4 fail-fast keeps working
 ```
 
 Neither flag is the default — a plain `vpn-setup` re-run after a `git pull` leaves the arming state
@@ -152,7 +152,7 @@ outside `SYN_SENT`, so it retries to `tcp_retries2` — about 15 minutes. **Rest
 nftables reject rule would behave identically; this is TCP, not the mechanism.
 
 **A site is unreachable and it is IPv6-only.** That is the block doing its job. Disarm if you need
-it: `sudo vpn-setup --no-block-ipv6`.
+it: `vpn-setup --no-block-ipv6`.
 
 **`vpn-doctor` says IPv6 is leaking.** Armed, tunnel up, block not installed — the daemon is not
 converging. `sudo systemctl restart vpn-failfast`.
@@ -166,9 +166,9 @@ sudo systemctl restart vpn-failfast          # it clears orphans at start
 sudo /usr/local/bin/vpn-failfast.sh --clear  # or by hand, both families
 ```
 
-**`vpn-doctor` reports VERSION SKEW.** A `git pull` plus a plain `sudo vpn-setup` updates the
+**`vpn-doctor` reports VERSION SKEW.** A `git pull` plus a plain `vpn-setup` updates the
 daemon and preserves the drop-in, but an *older* daemon ignores the knob entirely: armed, healthy,
-and blocking nothing, with no file difference for a drift check to see. Re-run `sudo vpn-setup`.
+and blocking nothing, with no file difference for a drift check to see. Re-run `vpn-setup`.
 
 **Checking it by hand.** `vpn-doctor` makes all of these judgements itself and is the thing to
 trust, but the raw commands read cleanly once:
