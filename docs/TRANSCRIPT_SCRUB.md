@@ -406,10 +406,17 @@ like a survivor, so they were re-anchored and re-run rather than counted as kill
 now builds its mutants with `repr()` on text read out of the file, because hand-quoting shell
 inside Python is what produced two of the four.
 
-## Linked, not enabled
+## Linked by `./install`, armed by hand — and armed here since 2026-09-23
 
-`./install` symlinks both units and enables neither. Arming is a typed command after one real
-dry run:
+`./install` symlinks both units and enables neither, so a fresh machine has the timer present
+and inert. **That is the install-time state, not the state of this box:** cilantro armed it on
+2026-09-23 and it has run nightly since. The heading used to read "Linked, not enabled", which
+describes what `./install` does and was read as what the machine is doing — the same confusion
+already on record for `wt-gc-sweep`, where CLAUDE.md's "not enabled until armed" led a session
+to believe a daily job was not running. `systemctl --user list-timers` is the answer to which
+state a given machine is in; this page is not.
+
+Arming is a typed command after one real dry run:
 
 ```bash
 scripts/scrub-transcript-secrets.py --dry-run
@@ -423,12 +430,27 @@ inside the checkout, and `scripts/check-timer-health.sh` derives its list from t
 pick the unit up automatically and report `linked, not enabled — not checked` rather than
 going red.
 
-The gate is not ceremony. **The Claude Code permission classifier refuses an agent running
-this script at all**, `--dry-run` included, with `[Session Transcript Tampering]` — measured
-2026-09-23 while planning this change, and again during the original scrub, where the batch
-`--apply` was refused while a single-file write had been allowed. Whatever one makes of the
-boundary, an unattended job that does the thing an agent is refused is worth one human
-decision before it starts running nightly.
+**The gate is not ceremony, but the reason first given for it was overstated.** This page used
+to say the Claude Code permission classifier "refuses an agent running this script at all,
+`--dry-run` included", with `[Session Transcript Tampering]`. That is not reproducible.
+
+Measured 2026-09-24 (DO-718), on the branch that became DO-700:
+`scripts/scrub-transcript-secrets.py --dry-run --json` **ran to completion** from an agent
+session, across 2,498 transcripts, and produced the measurement DO-700 was argued from. What
+*was* refused in the same session was an **ad-hoc Python script reading the transcript trees
+directly**, and under a different reason — `[PII Data Handling]`.
+
+The 2026-09-23 observations were real (the batch `--apply` was refused while a single-file
+write was allowed), so either the classifier changed or the two cases were conflated when this
+was written. Either way the boundary is not "this script": it is nearer "ad-hoc code reading
+the corpus", and an agent can run the tool's own read-only mode.
+
+**The gate stands on its own argument, which is the one to keep.** An unattended job that
+rewrites transcripts in place and shreds its backup is irreversible, and irreversible work
+deserves one human decision before it starts running nightly. That reasoning does not depend
+on what any classifier does, and resting it on a claim that has since gone stale weakened it —
+which is the general lesson here: a measured claim about a moving external system needs its
+date attached and should not be load-bearing for a decision that can justify itself.
 
 ## State table
 

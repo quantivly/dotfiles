@@ -64,6 +64,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`docs/TRANSCRIPT_SCRUB.md` no longer overstates what the permission classifier refuses, and
+  no longer reads as though the timer were inert (DO-718).** Two claims, both in the section
+  justifying the human arming gate. The page said the Claude Code classifier "refuses an agent
+  running this script at all, `--dry-run` included"; measured 2026-09-24 while doing DO-700,
+  `scrub-transcript-secrets.py --dry-run --json` **ran to completion** over 2,498 transcripts
+  and produced the numbers DO-700 was argued from. What was refused that session was an ad-hoc
+  Python script reading the transcript trees directly, under `[PII Data Handling]` rather than
+  `[Session Transcript Tampering]`. The 2026-09-23 observations were real, so either the
+  classifier moved or the two cases were conflated — either way the boundary is nearer "ad-hoc
+  code reading the corpus" than "this script". The gate stays, on the argument that actually
+  carries it: an unattended job that rewrites transcripts and shreds its backup is
+  irreversible, and that reasoning needs no classifier. The heading "Linked, not enabled"
+  described what `./install` does while reading as the state of the machine — cilantro armed
+  the timer on 2026-09-23 and it has run nightly since, the same confusion already on record
+  for `wt-gc-sweep`. Documentation only: no code, no unit, no change to the timer.
+
 - **The six state tables DO-701 missed now assert their own row totals (DO-705).**
   `scripts/test-claude-doctor.sh` (331), `scripts/test-claude-account-dirs.sh` (159),
   `scripts/test-pane-reaper.sh` (141) and `scripts/test-machines-render.sh` (66) gained
