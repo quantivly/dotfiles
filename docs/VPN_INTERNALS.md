@@ -690,13 +690,38 @@ halves) survived while that guard lived inside `vpn-doctor`'s own `case`, reacha
 whole machine in the state it describes; extracting `_vpn_v6_canary_verdict` as a pure helper is
 what made it killable.
 
+### `sudo vpn-setup` cannot work, and it shipped in the doctor's own remedy
+
+`vpn-setup`, `vpn-init`, `vpn-doctor` and `vpn-status` are zsh **functions**. `sudo` can only exec a
+binary, so `sudo vpn-setup --block-ipv6` fails with `sudo: 'vpn-setup': command not found` before it
+does anything at all. The function runs `bash scripts/setup-vpn-failfast.sh`, and *that* escalates
+per-command — which is precisely why it needs no leading `sudo`.
+
+DO-704's approved plan wrote `sudo vpn-setup` throughout, and it was copied into the guide, this
+page and — worst — two of `vpn-doctor`'s own remedy lines, where it would have been the first thing
+a user typed after being told something was wrong. The pre-existing setup section three screens
+above had it right the whole time (`vpn-init` / `vpn-setup`, no `sudo`), which is the tell: a rule
+this file already stated was contradicted by new prose written from a plan rather than from the
+code.
+
+A row now checks `system.sh` anywhere, and the two VPN pages **only inside fenced code blocks** —
+because prose that names the broken form in order to document it is legitimate, and the first
+version of the row failed on the heading immediately above this paragraph. A row that cannot tell a
+remedy from a description of one would be paid for by deleting the explanation, which is the wrong
+direction. Verified in all three directions rather than one: red on a doctor remedy, red on a docs
+code fence, green on this prose.
+
+It was CI that caught it, not the local run, and the reason is worth recording: the heading was
+added *after* the last full suite run, and only the static checkers were re-run afterwards. Running
+"the gate" is not the same as running the gate.
+
 ### `enable --now` does not re-read a drop-in on a unit that is already running
 
 Found in the local review, before merge, and it would have made arming a no-op on the only machine
 that matters. `setup-vpn-failfast.sh` ended with `systemctl daemon-reload` then
 `systemctl enable --now`. `enable --now` runs `start`, and `start` on an **already-active** unit
 does nothing — it does not re-read `Environment=`. vpn-failfast is active on this box with
-`NRestarts=0`, so `sudo vpn-setup --block-ipv6` would have installed the drop-in, reloaded,
+`NRestarts=0`, so `vpn-setup --block-ipv6` would have installed the drop-in, reloaded,
 reported success, and left the daemon running with `VPN_FAILFAST_IPV6` unset until the next reboot.
 
 The pairing is what makes it nasty rather than merely wrong: the installer says *armed* and
