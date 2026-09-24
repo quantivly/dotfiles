@@ -690,6 +690,25 @@ halves) survived while that guard lived inside `vpn-doctor`'s own `case`, reacha
 whole machine in the state it describes; extracting `_vpn_v6_canary_verdict` as a pure helper is
 what made it killable.
 
+### The worktree refusal printed a remedy that succeeds and does the wrong thing
+
+Second instance of the same class, found the same day. The guard's advice line read
+
+```
+cd ~/.dotfiles && vpn-setup
+```
+
+with the user's flags dropped. Before DO-704 that was harmless — `vpn-setup` took no flag that
+changed an outcome. It is not harmless now: `vpn-setup` with no flag leaves the IPv6 arming state
+**deliberately** untouched (that tri-state is what stops a routine re-run silently disarming a
+machine), so someone who typed `--block-ipv6`, hit the guard, pasted the remedy and watched it
+succeed would be left with IPv6 still leaking and a green install to say otherwise.
+
+A remedy that quietly does something *different* is worse than one that fails outright, which is
+why this rates a fix rather than a note. `"$*"` is intact at that point — the argument loop is
+`for arg in "$@"` and does not shift — so the fix is one word. A row pins it, verified by dropping
+the flags again and watching it go red.
+
 ### `sudo vpn-setup` cannot work, and it shipped in the doctor's own remedy
 
 `vpn-setup`, `vpn-init`, `vpn-doctor` and `vpn-status` are zsh **functions**. `sudo` can only exec a

@@ -121,7 +121,14 @@ if git -C "$DOTFILES" rev-parse --git-dir >/dev/null 2>&1; then
       log ERROR "refusing to install from a WORKTREE: $DOTFILES"
       log ERROR "  Root would run a copy taken from a branch checkout, and wt-gc-sweep"
       log ERROR "  deletes landed worktrees daily. Run this from the live checkout:"
-      log ERROR "    cd ~/.dotfiles && vpn-setup"
+      # ECHO THE FLAGS THE USER TYPED. Without "$*" this prints a command that
+      # SUCCEEDS and does something different: `vpn-setup` with no flags leaves
+      # the IPv6 arming state deliberately untouched, so copy-pasting the
+      # remedy after `vpn-setup --block-ipv6` would install cleanly, report
+      # success, and leave IPv6 leaking. A remedy that quietly does the wrong
+      # thing is worse than one that fails. (The parse loop above is
+      # `for arg in "$@"` and does not shift, so "$*" is still intact here.)
+      log ERROR "    cd ~/.dotfiles && vpn-setup $*"
       log ERROR "  (set VPN_SETUP_ALLOW_WORKTREE=1 to override, e.g. to test a branch.)"
       [[ "${VPN_SETUP_ALLOW_WORKTREE:-0}" == "1" ]] || exit 1
       log WARNING "VPN_SETUP_ALLOW_WORKTREE=1 — continuing from a worktree anyway." ;;
