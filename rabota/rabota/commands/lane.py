@@ -529,7 +529,10 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         # adapted to this command's shape: `lane recipe` returns a dict that `emit` renders as
         # JSON (never lines), so the equivalent is one top-level string key rather than a head
         # line, and `_run` below turns it into the leading `--text` line.
-        out["dry_run"] = "nothing started (worktree, brief, unit, lane row)"
+        # The gate above is the one write a dry run still makes: `run_budget` refreshes
+        # budget.json (nothing reads it back today), so the notice names it rather than claim
+        # that nothing was written at all (DO-743 review).
+        out["dry_run"] = "nothing started (worktree, brief, unit, lane row); the budget gate still refreshed budget.json"
         return out
     if not run:
         return out

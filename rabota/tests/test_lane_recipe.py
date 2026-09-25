@@ -579,7 +579,7 @@ class RunRecipeTests(LocalRecipeTests):
         ctx = self.ctx(runner)
         ctx.dry_run = True
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
-        self.assertEqual(out["dry_run"], "nothing started (worktree, brief, unit, lane row)")
+        self.assertEqual(out["dry_run"], "nothing started (worktree, brief, unit, lane row); the budget gate still refreshed budget.json")
         self.assertEqual(len(runner.calls), 1)
         self.assertIn("systemd-run", out["shell"])            # the recipe is still rendered
         self.assertEqual(ctx.store.list_lanes("quantivly"), [])
@@ -592,7 +592,7 @@ class RunRecipeTests(LocalRecipeTests):
         ctx = self.ctx(runner)
         ctx.dry_run = True
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=False))
-        self.assertEqual(out["dry_run"], "nothing started (worktree, brief, unit, lane row)")
+        self.assertEqual(out["dry_run"], "nothing started (worktree, brief, unit, lane row); the budget gate still refreshed budget.json")
 
     def test_a_real_run_carries_no_dry_run_key(self):
         # The companion case: `ctx.dry_run=False` (the default) with --run must NOT gain a
