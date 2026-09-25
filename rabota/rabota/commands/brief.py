@@ -39,6 +39,30 @@ query string and the exact path to write it to (``<state_dir>/ingest-<source>.js
 the ``rabota`` skill's step 2) — travels only in the JSON return (``{"needs": [...]}``).
 ``needs`` is not itself a failure: the CLI did its job and is naming what would make the answer
 better, so it does not change the exit code (0), the same way a failed source already does not.
+
+**Move 5 (``--dry-run`` writes nothing, DO-742).** ``run_brief`` used to ignore ``ctx.dry_run``
+outright — the global flag every subcommand either honours or silently ignores — so a dry run
+wrote ``brief.md``, ``last-brief.json`` and (via the implicit ``run_rank``) ``sequence.json``
+exactly as a real run does. That is worse than a no-op: because ``last-brief.json`` is what makes
+the NEXT call print a delta instead of the ranked list, a dry run changed what tomorrow's real
+run would show, invisibly — the first symptom would be a live brief reading
+``no change since HH:MM`` with nothing under it.
+
+With ``ctx.dry_run`` set, ``run_brief`` still computes and prints exactly the lines a real run
+would (via ``rank.compute_sequence`` when today's ``sequence.json`` does not exist yet, instead of
+``run_rank``, which would write it), and says so with one ``dry-run: nothing written`` line — a
+dry run that prints nothing would be safe and useless, not just safe. What it skips is only the
+writes: ``sequence.json``/``.md``, ``brief.md``, and ``last-brief.json``.
+
+**Preflight still runs on the dry path, deliberately.** It is read-only (three ``GET``-shaped
+identity checks), but it is not free — it is three real API calls as @zvi and it records a
+``runs`` row regardless of ``--dry-run`` (``preflight.run_command`` does not read ``dry_run``
+either; unchanged here, and out of scope for this change per the audit). The argument for keeping
+it: a dry run that skipped the identity pin could show a brief the REAL run would then refuse to
+produce (exit 3) — a dry run whose answer the following real run cannot reproduce is a worse lie
+than the extra API calls. Skipping it would only be right if "what would this print" and "is
+identity still pinned" were different questions; they are not, because a failed pin is exactly
+what stops the real ``brief`` from printing anything at all.
 """
 import json
 from datetime import datetime, timezone
@@ -46,6 +70,7 @@ from pathlib import Path
 
 from rabota import cli, emit, errors, reconcile, snapshots
 from rabota.commands import preflight as preflight_cmd
+from rabota.commands import rank as rank_cmd
 from rabota.commands.rank import run_rank
 from rabota.context import Context
 
@@ -152,6 +177,13 @@ def _assemble(head: list[str], body: list[str], alerts: list[str], tail: list[st
     and the no-change path dropped every alert unconditionally, so a failed source printed no line
     at all on the commonest path of the day -- which the module docstring above says it does.
     """
+    # A `dry-run:` head line outranks even the reserved `brief: <path>`: a path is the escape hatch
+    # to what did not fit, but on a dry run nothing was written for it to point at -- `run_brief`
+    # passes `brief_path=None` there for that reason, so the two only ever compete when a caller
+    # builds an unreachable combination. Ranking it here makes "no `max_lines` can drop the notice"
+    # true unconditionally rather than by luck (review finding).
+    if head and head[0].startswith("dry-run:"):
+        return (head[:1] + _assemble(head[1:], body, alerts, tail, max_lines - 1))[:max_lines]
     reserved = tail[-1:] if tail and tail[-1].startswith("brief: ") else []
     rest_of_tail = tail[:-1] if reserved else list(tail)
     budget = max_lines - len(reserved)
@@ -172,7 +204,8 @@ def _assemble(head: list[str], body: list[str], alerts: list[str], tail: list[st
 
 def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, max_lines: int = MAX_LINES,
                    brief_path: str | None = None, now: datetime | None = None,
-                   needs: list[dict] | None = None, health: list[dict] | None = None) -> list[str]:
+                   needs: list[dict] | None = None, health: list[dict] | None = None,
+                   dry_run: bool = False) -> list[str]:
     """The ≤``max_lines`` terminal lines; with ``previous`` (last-brief.json) only the deltas print.
 
     One ``!`` line per failed source and per ``needs`` entry (see ``compute_needs`` and
@@ -180,9 +213,21 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
     do not fit is ``_assemble``'s job, and the no-change rerun goes through it too -- it used to
     return ``footer[-1:]``, which swallowed every alert on the path most likely to be taken twice
     in a morning.
+
+    ``dry_run`` adds one ``head`` line saying plainly that nothing was written, **first**, ahead of
+    the staleness warning — so no value of ``max_lines`` can drop it (DO-742: a dry run whose output
+    carries no hint that it is hypothetical is indistinguishable from a real one, and the first
+    version of this claimed the notice survived every cut while being appended where it did not).
     """
     check_max_lines(max_lines)
     head = []
+    if dry_run:
+        # FIRST, ahead of the staleness warning, so `head[:budget]` cannot drop it. Review finding:
+        # appended second, it was cut at `--max-lines 1` whenever the sequence was also stale, and
+        # the surviving line read exactly like a real run's. Of the two, this is the one that must
+        # survive: a reader who cannot tell a dry run from a real one may act on it, while the
+        # staleness warning is about the stored state and will still be there on the next real run.
+        head.append("dry-run: nothing written (brief.md, last-brief.json, sequence.json)")
     if now is not None:
         stale = staleness_line(seq, now)
         if stale:
@@ -306,25 +351,45 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     it (see ``rabota.reconcile``'s module docstring). It costs a re-read of the two small snapshot
     files already on disk, never a fetch, so it is built unconditionally in JSON mode; ``--text`` is
     the human/terminal path and has no line shape for structured data, so it skips the read entirely.
+
+    **Move 5 (``ctx.dry_run``, DO-742).** With it set, nothing is written — not ``sequence.json``/
+    ``.md``, not ``brief.md``, not ``last-brief.json`` — and the JSON return's ``brief_path`` is
+    ``None`` rather than a path to a file that does not exist. Everything else (the printed lines,
+    ``needs``, ``tracked``) is computed exactly as a real run would compute it; see the module
+    docstring for why preflight itself is not skipped.
     """
     check_max_lines(max_lines)                  # a usage error must not leave a brief.md behind
     preflight_cmd.run_command(ctx, gh=gh, lin=lin)   # exit 3 on a failed identity pin, exactly as `rabota preflight`
     day = ctx.state_dir / ctx.today.isoformat()
-    day.mkdir(parents=True, exist_ok=True)
     seq_path = day / "sequence.json"
-    if not seq_path.exists():
+    if seq_path.exists():
+        seq = json.loads(seq_path.read_text())
+    elif ctx.dry_run:
+        # The same ranked answer `run_rank` would produce, without its writes (DO-742) -- a dry
+        # run's line, `dry-run: nothing written`, would be false if this branch wrote sequence.json.
+        seq = rank_cmd.compute_sequence(ctx)
+    else:
+        day.mkdir(parents=True, exist_ok=True)
         run_rank(ctx)
-    seq = json.loads(seq_path.read_text())
+        seq = json.loads(seq_path.read_text())
     plan = _read_json(ctx.state_dir / "inbox-plan.json")
     summary_path = ctx.state_dir / "inbox-summary.txt"
     inbox_summary = summary_path.read_text().strip() if summary_path.exists() else None
-    brief_path = day / "brief.md"
     last_path = day / "last-brief.json"
     previous = _read_json(last_path)
     now = now or datetime.now(timezone.utc)
     needs = compute_needs(ctx, now)     # before any write: a half-rewritten brief.md is worse than none
-    emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
     health = reconcile.snapshot_health(ctx, now)     # in BOTH modes: see `snapshot_health`
+    if ctx.dry_run:
+        lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=None,
+                               now=now, needs=needs, health=health, dry_run=True)
+        if text:
+            return lines
+        tracked = reconcile.build_tracked_index(ctx, now) if needs else None
+        return {"lines": lines, "brief_path": None, "needs": needs, "tracked": tracked}
+    day.mkdir(parents=True, exist_ok=True)
+    brief_path = day / "brief.md"
+    emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
                            now=now, needs=needs, health=health)
     # `last-brief.json` records what the reader was SHOWN; it is what makes the next call print a

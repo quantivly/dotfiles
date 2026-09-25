@@ -156,12 +156,12 @@ class BriefTests(unittest.TestCase):
 
 
 class BriefCommandTests(unittest.TestCase):
-    def ctx(self):
+    def ctx(self, dry_run=False):
         # `brief` now runs preflight first (DO-716 move 1): the quantivly fixture pins gh_login
         # "work-login" and linear_viewer VIEWER, so a passing preflight needs fakes matching both,
         # plus the ssh-add response preflight's own agent check makes on every call.
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
-        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(ctx.close)
         self.gh, self.lin = FakeGh("work-login"), FakeLinear(VIEWER)
@@ -219,6 +219,48 @@ class BriefCommandTests(unittest.TestCase):
         lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc), gh=self.gh, lin=self.lin)
         self.assertTrue((ctx.state_dir / "2026-09-16" / "sequence.json").exists())
         self.assertTrue(lines[-1].startswith("brief: "))
+
+    def test_dry_run_writes_nothing_when_no_sequence_exists_yet(self):
+        # DO-742: the sequence has to be computed to print the same lines a real run would, but
+        # it must not be persisted -- this is the branch that used to call the writing `run_rank`
+        # unconditionally. Reverting the `elif ctx.dry_run: ... compute_sequence` branch back to
+        # always calling `run_rank(ctx)` makes this row fail: sequence.json exists afterwards.
+        ctx = self.ctx(dry_run=True)
+        now = datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc)
+        lines = brief.run_brief(ctx, text=True, now=now, gh=self.gh, lin=self.lin)
+        day = ctx.state_dir / "2026-09-16"
+        self.assertFalse((day / "sequence.json").exists())
+        self.assertFalse((day / "brief.md").exists())
+        self.assertTrue(any(l.startswith("dry-run: nothing written") for l in lines), lines)
+
+    def test_dry_run_writes_nothing_when_a_sequence_already_exists(self):
+        ctx = self.ctx(dry_run=True); day = self._write_seq(ctx, ["K-1"])
+        now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
+        lines = brief.run_brief(ctx, text=True, now=now, gh=self.gh, lin=self.lin)
+        self.assertFalse((day / "brief.md").exists())
+        self.assertFalse((day / "last-brief.json").exists())
+        self.assertTrue(any(l.startswith("dry-run: nothing written") for l in lines), lines)
+        # The ranked item is still shown -- a dry run that prints nothing is useless, not safe.
+        self.assertTrue(any(l.startswith("1. K-1") for l in lines), lines)
+
+    def test_dry_run_json_mode_reports_no_brief_path_but_still_computes_needs_and_tracked(self):
+        ctx = self.ctx(dry_run=True); self._write_seq(ctx, ["K-1"])
+        now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
+        out = brief.run_brief(ctx, text=False, now=now, gh=self.gh, lin=self.lin)
+        self.assertIsNone(out["brief_path"])
+        self.assertTrue(any(l.startswith("1. K-1") for l in out["lines"]), out["lines"])
+        self.assertTrue(any(n["source"] == "slack" for n in out["needs"]))  # never ingested in this test
+
+    def test_dry_run_does_not_change_what_the_next_real_run_prints(self):
+        # The bug this issue exists to fix: a dry run wrote last-brief.json, so the FOLLOWING real
+        # run saw a same-day rerun and printed a delta (or "no change") instead of the ranked list.
+        ctx = self.ctx(dry_run=True); day = self._write_seq(ctx, ["K-1"])
+        now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
+        brief.run_brief(ctx, text=True, now=now, gh=self.gh, lin=self.lin)
+        ctx.dry_run = False
+        lines = brief.run_brief(ctx, text=True, now=now, gh=self.gh, lin=self.lin)
+        self.assertTrue(any(l.startswith("1. K-1") for l in lines), lines)
+        self.assertFalse(any(l.startswith("no change since") for l in lines), lines)
 
     def test_registered_value_in_the_sequence_never_reaches_brief_md(self):
         # k2: a protected value in the ranked data used to reach brief.md through a file write that
@@ -420,6 +462,27 @@ class BriefNeedsTests(unittest.TestCase):
         # so a later call the same day settles to a delta instead of re-running the cycle
         again = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
         self.assertTrue(any(l.startswith("no change since") for l in again), again)
+
+    def test_the_dry_run_notice_cannot_be_cut_by_max_lines(self):
+        """Review finding: the notice was appended to `head` AFTER the staleness warning, and
+        `_assemble` slices `head[:budget]` in order -- so at `--max-lines 1` with a stale sequence it
+        was dropped, and the one surviving line read exactly like a real run's. Of the two, this is
+        the one that must survive: a reader who cannot tell a dry run from a real one may act on it,
+        while the staleness warning is about the stored state and returns on the next real run."""
+        stale_seq = {"tenant": "quantivly", "generated_at": "2026-09-16T05:00:00Z", "failed_sources": [],
+                     "items": [{"bucket": 1, "key": "K-1", "title": "t", "waiting_on": "b", "why_now": "now"}],
+                     "triage": [], "decisions": []}
+        for max_lines in (1, 2, 3, 12):
+            with self.subTest(max_lines=max_lines):
+                lines = brief.terminal_lines(stale_seq, "inbox: x", None, max_lines=max_lines,
+                                              brief_path="/p/brief.md", now=self.NOW, dry_run=True)
+                self.assertLessEqual(len(lines), max_lines)
+                self.assertTrue(lines[0].startswith("dry-run:"), lines)
+        # and the staleness warning is still there the moment there is room for it
+        two = brief.terminal_lines(stale_seq, None, None, max_lines=2, brief_path=None,
+                                   now=self.NOW, dry_run=True)
+        self.assertTrue(two[0].startswith("dry-run:"), two)
+        self.assertTrue(two[1].startswith("! brief is "), two)
 
     def test_an_unreadable_snapshot_is_needs_not_the_end_of_the_brief(self):
         """Review finding, and a deliberate reversal of this row's first version. It used to assert
