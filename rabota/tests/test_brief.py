@@ -4,9 +4,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from rabota import cli, context, errors, secrets, snapshots
 from rabota.commands import brief
-from rabota.runner import FakeRunner
+from rabota.runner import FakeRunner, Result
+from tests.test_preflight import VIEWER, FakeGh, FakeLinear
 
 FIX = Path(__file__).parent / "fixtures" / "config"
+SSH_OK = (["ssh-add", "-l"], Result(0, "256 SHA256:abc key (ED25519)\n", ""))
 
 def seq(keys, generated_at="2026-09-16T08:00:00Z"):
     return {"tenant": "quantivly", "generated_at": generated_at, "failed_sources": [],
@@ -155,10 +157,14 @@ class BriefTests(unittest.TestCase):
 
 class BriefCommandTests(unittest.TestCase):
     def ctx(self):
+        # `brief` now runs preflight first (DO-716 move 1): the quantivly fixture pins gh_login
+        # "work-login" and linear_viewer VIEWER, so a passing preflight needs fakes matching both,
+        # plus the ssh-add response preflight's own agent check makes on every call.
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
-        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(ctx.close)
+        self.gh, self.lin = FakeGh("work-login"), FakeLinear(VIEWER)
         return ctx
 
     def _write_seq(self, ctx, keys):
@@ -169,23 +175,23 @@ class BriefCommandTests(unittest.TestCase):
     def test_run_brief_writes_brief_md_and_last_brief_and_honours_max_lines(self):
         ctx = self.ctx(); day = self._write_seq(ctx, [f"K-{i}" for i in range(30)])
         now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
-        lines = brief.run_brief(ctx, text=True, max_lines=11, now=now)
+        lines = brief.run_brief(ctx, text=True, max_lines=11, now=now, gh=self.gh, lin=self.lin)
         self.assertLessEqual(len(lines), 11)
         self.assertEqual(lines[-1], f"brief: {day / 'brief.md'}")
         self.assertTrue((day / "brief.md").exists())
         self.assertEqual(json.loads((day / "last-brief.json").read_text())["keys"][:2], ["K-0", "K-1"])
-        out = brief.run_brief(ctx, text=False, now=now)
+        out = brief.run_brief(ctx, text=False, now=now, gh=self.gh, lin=self.lin)
         self.assertEqual(out["brief_path"], str(day / "brief.md"))
         self.assertTrue(out["lines"][0].startswith("no change since 08:00"), out["lines"])
 
     def test_run_brief_reports_staleness_from_the_clock(self):
         ctx = self.ctx(); self._write_seq(ctx, ["K-1"])
-        lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc))
+        lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc), gh=self.gh, lin=self.lin)
         self.assertTrue(lines[0].startswith("! brief is 90 min old"), lines)
 
     def test_run_brief_ranks_first_when_no_sequence_exists(self):
         ctx = self.ctx()
-        lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc))
+        lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc), gh=self.gh, lin=self.lin)
         self.assertTrue((ctx.state_dir / "2026-09-16" / "sequence.json").exists())
         self.assertTrue(lines[-1].startswith("brief: "))
 
@@ -200,7 +206,7 @@ class BriefCommandTests(unittest.TestCase):
         s = seq(["K-1"]); s["items"][0]["title"] = f"gh said: token {minted} rejected"
         (day / "sequence.json").write_text(json.dumps(s))
         with self.assertRaises(errors.SecretLeak) as cm:
-            brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc))
+            brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc), gh=self.gh, lin=self.lin)
         self.assertNotIn(minted, str(cm.exception))
         self.assertFalse((day / "brief.md").exists(), "brief.md was written with a protected value in it")
         self.assertFalse((day / "last-brief.json").exists())
@@ -212,7 +218,7 @@ class BriefCommandTests(unittest.TestCase):
         secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
         ctx = self.ctx(); day = self._write_seq(ctx, ["K-1"])
         ctx.store.record_sync("quantivly", "github", False, f"gh: HTTP 401 — token {minted} rejected", "")
-        lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc))
+        lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc), gh=self.gh, lin=self.lin)
         text = "\n".join(lines) + (day / "brief.md").read_text()
         self.assertNotIn(minted, text)
         self.assertIn("token [redacted:minted-token] rejected", text)
@@ -235,28 +241,222 @@ class BriefCommandTests(unittest.TestCase):
 
     def test_cli_refuses_max_lines_zero_and_negative_and_a_malformed_generated_at(self):
         # k4 at the CLI: exit 2 with a usage error, never 5 with an unhandled ValueError.
+        # Preflight (DO-716 move 1) is stubbed ok: this test is about --max-lines/generated_at
+        # usage errors, not identity pinning, which test_command_records_a_run_row_and_refuses_on_failure
+        # and test_brief_exit_3_on_failed_preflight already cover against real client fakes.
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         home = Path(tmp.name) / "home"; shutil.copytree(FIX, home / ".dotfiles-local" / "rabota")
         state = Path(tmp.name) / "state"
         base = ["--tenant", "quantivly", "--state-dir", str(state), "--text", "brief"]
-        for extra in (["--max-lines", "0"], ["--max-lines", "-1"]):
-            code, out, err = self._main(base + extra, home)
-            self.assertEqual(code, 2, err); self.assertEqual(out, "")
-            self.assertEqual(json.loads(err)["error"]["code"], "usage")
-            self.assertIn("max-lines", json.loads(err)["error"]["message"])
-        self.assertFalse(list(state.glob("*/brief.md")), "a usage error must not leave a brief.md behind")
-        code, out, err = self._main(base + ["--max-lines", "1"], home)                  # first run ranks
-        self.assertEqual((code, len(out.splitlines())), (0, 1), (out, err))
-        code, out, err = self._main(base + ["--max-lines", "1"], home)                  # no-change path, still capped
-        self.assertEqual((code, len(out.splitlines())), (0, 1), (out, err))
-        day = state / date.today().isoformat()
-        seq_doc = json.loads((day / "sequence.json").read_text()); seq_doc["generated_at"] = "yesterday-ish"
-        (day / "sequence.json").write_text(json.dumps(seq_doc))
-        code, out, err = self._main(base, home)
-        self.assertEqual(code, 2, err)
-        self.assertEqual(json.loads(err)["error"]["code"], "usage"); self.assertIn("generated_at", err)
+        with unittest.mock.patch("rabota.commands.preflight.run_command",
+                                 return_value={"ok": True, "failures": []}):
+            for extra in (["--max-lines", "0"], ["--max-lines", "-1"]):
+                code, out, err = self._main(base + extra, home)
+                self.assertEqual(code, 2, err); self.assertEqual(out, "")
+                self.assertEqual(json.loads(err)["error"]["code"], "usage")
+                self.assertIn("max-lines", json.loads(err)["error"]["message"])
+            self.assertFalse(list(state.glob("*/brief.md")), "a usage error must not leave a brief.md behind")
+            code, out, err = self._main(base + ["--max-lines", "1"], home)                  # first run ranks
+            self.assertEqual((code, len(out.splitlines())), (0, 1), (out, err))
+            code, out, err = self._main(base + ["--max-lines", "1"], home)                  # no-change path, still capped
+            self.assertEqual((code, len(out.splitlines())), (0, 1), (out, err))
+            day = state / date.today().isoformat()
+            seq_doc = json.loads((day / "sequence.json").read_text()); seq_doc["generated_at"] = "yesterday-ish"
+            (day / "sequence.json").write_text(json.dumps(seq_doc))
+            code, out, err = self._main(base, home)
+            self.assertEqual(code, 2, err)
+            self.assertEqual(json.loads(err)["error"]["code"], "usage"); self.assertIn("generated_at", err)
+
+    def test_brief_exit_3_on_failed_preflight_before_anything_is_written(self):
+        # Move 1's core claim: a failed identity pin exits 3, exactly as `rabota preflight` does
+        # today, and nothing past preflight runs — no sequence.json, no brief.md.
+        ctx = self.ctx()
+        with self.assertRaises(errors.Refused) as cm:
+            brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc),
+                            gh=FakeGh("someone-else"), lin=self.lin)
+        self.assertIn("gh identity", str(cm.exception))
+        day = ctx.state_dir / "2026-09-16"
+        self.assertFalse((day / "sequence.json").exists())
+        self.assertFalse((day / "brief.md").exists())
+        runs = ctx.store._rows("SELECT * FROM runs")
+        self.assertEqual((len(runs), runs[0]["mode"], runs[0]["preflight_ok"]), (1, "preflight", 0))
 
     def test_cli_exposes_max_lines_with_default_twelve(self):
         ns = cli.build_parser().parse_args(["brief"])
         self.assertEqual(ns.max_lines, 12)
         self.assertEqual(cli.build_parser().parse_args(["brief", "--max-lines", "11"]).max_lines, 11)
+
+
+class BriefNeedsTests(unittest.TestCase):
+    """DO-716 move 2: a stale/missing slack, calendar or fireflies snapshot produces `needs`."""
+
+    def ctx(self, tenant="quantivly"):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    NOW = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)   # 2026-09-16T09:00:00Z
+
+    def test_never_fetched_source_is_needs_with_never_fetched_reason(self):
+        ctx = self.ctx()
+        needs = brief.compute_needs(ctx, self.NOW)
+        by_source = {n["source"]: n for n in needs}
+        self.assertEqual(set(by_source), {"slack", "calendar", "fireflies"})
+        self.assertEqual(by_source["slack"]["reason"], "never fetched")
+        self.assertEqual(by_source["slack"]["query"], "to:me")
+        self.assertEqual(by_source["calendar"]["query"], "free blocks for today")
+        self.assertEqual(by_source["fireflies"]["query"], "action items")
+        self.assertEqual(by_source["slack"]["write_to"], str(ctx.state_dir / "ingest-slack.json"))
+
+    def test_fresh_snapshot_is_not_in_needs(self):
+        ctx = self.ctx()
+        snapshots.write(ctx.state_dir, "slack", {"ok": True, "items": [], "fetched_at": "2026-09-16T08:30:00Z"})
+        needs = brief.compute_needs(ctx, self.NOW)
+        self.assertNotIn("slack", {n["source"] for n in needs})
+
+    def test_stale_snapshot_is_needs_with_stale_reason_and_age_and_delta_query(self):
+        ctx = self.ctx()
+        snapshots.write(ctx.state_dir, "slack", {"ok": True, "items": [], "fetched_at": "2026-09-16T07:00:00Z"})
+        snapshots.write(ctx.state_dir, "fireflies", {"ok": True, "items": [], "fetched_at": "2026-09-16T07:00:00Z"})
+        needs = brief.compute_needs(ctx, self.NOW)
+        by_source = {n["source"]: n for n in needs}
+        self.assertEqual(by_source["slack"]["reason"], "stale (120 min old)")
+        self.assertEqual(by_source["slack"]["query"], "to:me after:2026-09-16")
+        self.assertEqual(by_source["fireflies"]["query"], "action items since 2026-09-16T07:00:00Z")
+
+    def test_exactly_at_the_boundary_is_not_stale(self):
+        # STALE_AFTER_MIN is 60: a snapshot exactly that old is not yet stale, matching
+        # staleness_line's own `age_min <= max_age_min` rule for the brief itself.
+        ctx = self.ctx()
+        snapshots.write(ctx.state_dir, "slack", {"ok": True, "items": [], "fetched_at": "2026-09-16T08:00:00Z"})
+        self.assertNotIn("slack", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+        snapshots.write(ctx.state_dir, "slack", {"ok": True, "items": [], "fetched_at": "2026-09-16T07:59:59Z"})
+        self.assertIn("slack", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_a_source_the_tenant_does_not_use_is_never_requested(self):
+        # toysim only lists `sources = ["github"]` (see tests/fixtures/config/tenants/toysim.toml):
+        # a tenant without Fireflies must never be told to fetch it, mirroring preflight's rule
+        # for a source the tenant does not list.
+        ctx = self.ctx("toysim")
+        self.assertEqual(brief.compute_needs(ctx, self.NOW), [])
+
+    def test_an_unreadable_snapshot_is_needs_not_the_end_of_the_brief(self):
+        """Review finding, and a deliberate reversal of this row's first version. It used to assert
+        `errors.Usage` for a malformed `fetched_at` -- which cost the brief entirely, and which two
+        other shapes did not even reach: a file that was not JSON raised an unhandled
+        `JSONDecodeError` and a JSON list an unhandled `AttributeError`. A file we cannot read is
+        precisely one whose fetch time we do not know, which is what needing a fetch means, and
+        "needs accompanies the brief, never replaces it" has to hold for a broken file too."""
+        for label, payload in (("bad fetched_at", '{"ok": true, "items": [], "fetched_at": "not-a-timestamp"}'),
+                                ("not json", "{oops"),
+                                ("a json list", "[]"),
+                                ("no fetched_at", '{"ok": true, "items": []}')):
+            with self.subTest(label=label):
+                ctx = self.ctx()
+                (ctx.state_dir / "sources").mkdir(parents=True, exist_ok=True)
+                (ctx.state_dir / "sources" / "calendar.json").write_text(payload)
+                needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+                self.assertIn("calendar", needs, label)
+                self.assertTrue(needs["calendar"]["reason"].startswith("unreadable"), needs["calendar"])
+
+    def test_a_recorded_failure_needs_a_fetch_however_fresh_it_is(self):
+        """Review finding: `compute_needs` ignored `ok`, so a snapshot recorded five minutes ago as
+        a FAILED fetch -- `items: []` by construction -- was reported as needing nothing. It also
+        reaches the reader as a `failed` line, but only through `sequence.json`, which a same-day
+        rerun does not regenerate, so that line can be stale where this one cannot."""
+        ctx = self.ctx()
+        snapshots.write(ctx.state_dir, "calendar",
+                        {"ok": False, "error": "connector timed out", "items": [],
+                         "fetched_at": "2026-09-16T08:55:00Z"})      # 5 minutes before NOW
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("calendar", needs)
+        self.assertIn("last fetch failed", needs["calendar"]["reason"])
+        self.assertIn("connector timed out", needs["calendar"]["reason"])
+
+    def test_a_text_needs_line_carries_the_query_and_the_file_to_write(self):
+        """Review finding: `query` and `write_to` were in the JSON return only, and the skill's
+        output contract runs `rabota --text brief`. So in the form actually documented, the half of
+        `needs` a caller can act on was unreachable without a second call -- the very round-trip
+        this change exists to remove."""
+        ctx = self.ctx()
+        lines = brief.terminal_lines({"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z",
+                                       "failed_sources": [], "items": [], "triage": [], "decisions": []},
+                                      None, None, brief_path="/p/brief.md",
+                                      needs=brief.compute_needs(ctx, self.NOW))
+        slack = next(l for l in lines if l.startswith("! slack "))
+        self.assertIn("ingest-slack.json", slack)
+        self.assertIn("to:me", slack)
+        self.assertTrue(all(len(l) <= 120 for l in lines), lines)
+
+    def test_a_no_change_rerun_still_prints_every_alert(self):
+        """Review finding, and pre-existing on `main` for `failed_sources` alone: the no-change path
+        returned `footer[-1:]`, so on the path most likely to be taken twice in a morning a failed
+        source printed no line at all -- while the module docstring says it gets one."""
+        seq = {"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z",
+               "failed_sources": ["linear"], "items": [{"bucket": 1, "key": "K-1", "title": "t",
+                                                         "waiting_on": "b", "why_now": "now"}],
+               "triage": [], "decisions": []}
+        previous = {"keys": ["K-1"], "generated_at": "2026-09-16T08:00:00Z"}
+        lines = brief.terminal_lines(seq, "inbox: 3 archived", previous, brief_path="/p/brief.md",
+                                      needs=[{"source": "slack", "reason": "never fetched",
+                                              "query": "to:me", "write_to": "/s/ingest-slack.json"}])
+        self.assertIn("no change since 08:00", lines[0])
+        self.assertTrue(any(l.startswith("! linear failed") for l in lines), lines)
+        self.assertTrue(any(l.startswith("! slack needs a fetch") for l in lines), lines)
+        self.assertEqual(lines[-1], "brief: /p/brief.md")
+
+    def test_an_overflowing_footer_keeps_the_brief_path_and_counts_the_alerts(self):
+        """Review finding: a blind `[:max_lines]` slice dropped `brief: <path>` -- the only route to
+        what did not fit -- and two of three alerts, with nothing saying so. The path is reserved
+        now, and alerts that cannot all fit collapse into one counted line instead of vanishing."""
+        seq = {"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z", "failed_sources": [],
+               "items": [], "triage": [], "decisions": []}
+        needs = [{"source": s, "reason": "never fetched", "query": "q", "write_to": f"/s/ingest-{s}.json"}
+                  for s in ("slack", "calendar", "fireflies")]
+        two = brief.terminal_lines(seq, None, None, max_lines=2, brief_path="/p/brief.md", needs=needs)
+        self.assertEqual(len(two), 2)
+        self.assertEqual(two[-1], "brief: /p/brief.md")
+        self.assertIn("3 source alerts", two[0])
+        for s in ("slack", "calendar", "fireflies"):
+            self.assertIn(s, two[0])
+        one = brief.terminal_lines(seq, None, None, max_lines=1, brief_path="/p/brief.md", needs=needs)
+        self.assertEqual(one, ["brief: /p/brief.md"])      # the escape hatch is the last thing cut
+
+    def test_run_brief_carries_needs_in_json_and_as_bang_lines_in_text(self):
+        # Two fresh contexts (not two calls on one): a second same-day call hits the no-change
+        # rerun path, which — like `failed_sources` today — keeps only the last footer line.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx()
+        day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
+        (day / "sequence.json").write_text(json.dumps(seq(["K-1"])))
+        out = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertEqual({n["source"] for n in out["needs"]}, {"slack", "calendar", "fireflies"})
+        for n in out["needs"]:
+            self.assertEqual(set(n), {"source", "reason", "query", "write_to"})
+        ctx2 = self.ctx()
+        day2 = ctx2.state_dir / "2026-09-16"; day2.mkdir(parents=True, exist_ok=True)
+        (day2 / "sequence.json").write_text(json.dumps(seq(["K-1"])))
+        lines = brief.run_brief(ctx2, text=True, now=self.NOW, gh=gh, lin=lin)
+        for source in ("slack", "calendar", "fireflies"):
+            self.assertTrue(any(l.startswith(f"! {source} needs a fetch —") for l in lines), lines)
+
+    def test_needs_does_not_replace_the_brief_or_change_the_exit_code(self):
+        # The strong recommendation in DO-716: `needs` accompanies the brief, never replaces it,
+        # and is not itself a failure — same exit code (0) as a brief with no needs at all.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
+        (day / "sequence.json").write_text(json.dumps(seq(["K-1"])))
+        out = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(out["needs"])
+        self.assertTrue((day / "brief.md").exists())
+        self.assertTrue(any(l.startswith("1. K-1") for l in out["lines"]))
+
+    def test_needs_line_budget_counts_toward_max_lines(self):
+        s = seq([f"K-{i}" for i in range(30)])
+        needs = [{"source": "slack", "reason": "never fetched", "query": "to:me", "write_to": "/p"}]
+        lines = brief.terminal_lines(s, None, None, max_lines=12, brief_path="/p/brief.md", needs=needs)
+        self.assertEqual(len(lines), 12)
+        self.assertTrue(any(l.startswith("! slack needs a fetch —") for l in lines))
