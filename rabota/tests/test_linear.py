@@ -443,6 +443,14 @@ class LinearClientTests(unittest.TestCase):
                      "issue.identifier", "project.name", "pullRequest.url", "pullRequest.title", "pullRequest.number"):
             self.assertIn(want, paths)
 
+    def test_issue_fields_selects_attachments_url_and_source_type_only(self):
+        # DO-735: `url`/`sourceType` are the only Attachment fields documented at all (see the
+        # module docstring's schema notes); `metadata` is deliberately never selected.
+        paths = tree_paths(selection_tree(linear.ISSUE_FIELDS))
+        self.assertIn("attachments.nodes.url", paths)
+        self.assertIn("attachments.nodes.sourceType", paths)
+        self.assertNotIn("attachments.nodes.metadata", paths)
+
     def test_inbox_notifications_reads_only_fields_the_selection_requests(self):
         # k7, dynamic half. Nodes are GENERATED from the selection set, per concrete type, so a
         # fixture physically cannot carry a key the query never asks for; and the nodes record
@@ -695,3 +703,17 @@ class LinearClientTests(unittest.TestCase):
         issues = linear.LinearClient("k" * 20, post=FakePost([page])).assigned_open(["completed"])
         self.assertEqual(issues[0]["labels"], ["bug"])
         self.assertEqual((issues[0]["blockedBy"], issues[0]["blocks"]), ([], []))
+        self.assertEqual(issues[0]["attachments"], [])   # no `attachments` key on the raw node at all
+
+    def test_flattened_issue_projects_attachments_to_url_and_source_type_only(self):
+        # DO-735: the raw node carries whatever Linear returns for the selected fields; `_flatten`
+        # keeps exactly `url`/`sourceType` per attachment, dropping the connection wrapper.
+        page = {"data": {"issues": {"nodes": [{"id": "i1", "identifier": "HUB-1",
+                                                "attachments": {"nodes": [
+                                                    {"url": "https://github.com/o/r/pull/12", "sourceType": "github"},
+                                                    {"url": "https://sentry.io/x", "sourceType": "sentry"}]}}],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        issues = linear.LinearClient("k" * 20, post=FakePost([page])).assigned_open(["completed"])
+        self.assertEqual(issues[0]["attachments"], [
+            {"url": "https://github.com/o/r/pull/12", "sourceType": "github"},
+            {"url": "https://sentry.io/x", "sourceType": "sentry"}])

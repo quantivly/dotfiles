@@ -24,11 +24,12 @@ directly; do not re-read the snapshot files. `tracked.<side>.ok` means "you can 
 with `reason` saying why not when it is false and `skipped: true` marking a source the tenant
 does not use rather than one that failed.
 
-**`state-contradiction`'s "no PR exists" case (golden `g06`) is not decidable from `tracked`
-alone.** `github.json` carries only `own_prs`/`review_requests`/`merged_recent`, and Linear's
-`ISSUE_FIELDS` never selects `attachments` — so "no PR exists" and "a PR exists attached to the
-issue that you cannot see in this projection" (golden `g07`) look identical from the index. Do
-not assert "no PR exists" from `tracked` alone; that gap is open as DO-735.
+**`state-contradiction`'s "no PR exists" case (golden `g06`/`g07`, DO-735).** Each Linear issue's
+`pr_links` is `null` (snapshot predates attachment sync — treat as unknown, never as "no PR"),
+`[]` (checked: no PR linked), or a list of `{key, url, state}` (`state` is `"open"`/`"merged"` when
+`github.json`'s `own_prs`/`merged_recent` confirms it, else `"unknown"` — never a live cross-org
+GitHub search). A non-empty `pr_links` whose `key` names a different issue than the one it's
+attached to is itself the finding (golden `g07`).
 
 | Class | Meaning | Example |
 |---|---|---|
