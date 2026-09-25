@@ -1,4 +1,5 @@
-import argparse, contextlib, io, tempfile, unittest
+import argparse, contextlib, io, tempfile, time, unittest
+from dataclasses import dataclass, field
 from pathlib import Path
 from rabota import context, errors
 from rabota.commands import preflight
@@ -17,6 +18,48 @@ class FakeGh:
 class FakeLinear:
     def __init__(self, vid): self.vid = vid
     def viewer(self): return {"id": self.vid, "name": "z"}
+
+class CountingGh(FakeGh):
+    """Records every ``api`` call so a test can assert a skipped source never runs one at all."""
+    def __init__(self, login, pin_ok=True):
+        super().__init__(login, pin_ok); self.api_calls = []
+    def api(self, path, **kw):
+        self.api_calls.append(path); return super().api(path, **kw)
+
+class RaisingGh:
+    """whoami() itself raises — the exception path, distinct from a wrong-but-returned login."""
+    def whoami(self): raise preflight.errors.RabotaError("boom")
+    def api(self, path, **kw): return {"full_name": path.split("repos/")[1]}
+
+class RaisingLinear:
+    def viewer(self): raise preflight.errors.RabotaError("linear boom")
+
+class DelayedGh:
+    """Answers after ``delay`` seconds, so a test can control which leg of the fan-out finishes last."""
+    def __init__(self, login, delay=0.0, pin_ok=True): self.login, self.delay, self.pin_ok = login, delay, pin_ok
+    def whoami(self):
+        time.sleep(self.delay); return self.login
+    def api(self, path, **kw):
+        if not self.pin_ok: raise preflight.errors.RabotaError("404")
+        return {"full_name": path.split("repos/")[1]}
+
+class DelayedLinear:
+    def __init__(self, vid, delay=0.0): self.vid, self.delay = vid, delay
+    def viewer(self):
+        time.sleep(self.delay); return {"id": self.vid, "name": "z"}
+
+@dataclass
+class DelayedRunner:
+    """Wraps a runner and sleeps before delegating, so ``ssh-add`` can be made the fastest or slowest leg."""
+    inner: FakeRunner
+    delay: float = 0.0
+
+    def run(self, argv, **kw):
+        time.sleep(self.delay)
+        return self.inner.run(argv, **kw)
+
+    @property
+    def calls(self): return self.inner.calls
 
 class PreflightTests(unittest.TestCase):
     def ctx(self, tenant, env, ssh_ok=True):
@@ -65,3 +108,84 @@ class PreflightTests(unittest.TestCase):
         runs = ctx.store._rows("SELECT * FROM runs")
         self.assertEqual((len(runs), runs[0]["mode"], runs[0]["preflight_ok"]), (1, "preflight", 0))
         self.assertIsNotNone(runs[0]["finished_at"])
+
+    # DO-730: concurrency ------------------------------------------------------------------
+
+    def test_skipped_source_never_becomes_a_task_that_runs(self):
+        """toysim lists no gh_pin_repo: the pin task must never be submitted, not merely discarded."""
+        gh = CountingGh("personal-login")
+        ctx = self.ctx("toysim", {"PATH": "/bin"})
+        r = preflight.run_preflight(ctx, gh=gh, lin=None)
+        self.assertTrue(r["ok"], r["failures"])
+        self.assertEqual(gh.api_calls, [])
+        self.assertEqual(r["gh_pin"], {})
+
+    def test_exception_inside_a_future_is_reported_not_swallowed(self):
+        """whoami() raising (not just returning a wrong login) must still surface through .result()."""
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        r = preflight.run_preflight(ctx, gh=RaisingGh(), lin=FakeLinear(VIEWER))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["gh"], {"ok": False, "error": "boom"})
+        self.assertTrue(any("gh identity check failed: boom" in f for f in r["failures"]))
+
+    def test_linear_exception_inside_a_future_is_reported_not_swallowed(self):
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        r = preflight.run_preflight(ctx, gh=FakeGh("work-login"), lin=RaisingLinear())
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["linear"]["error"], "linear boom")
+        self.assertTrue(any("Linear: linear boom" in f for f in r["failures"]))
+
+    def test_failure_order_is_stable_regardless_of_which_call_answers_first(self):
+        """Three legs (github, linear, ssh) all fail; drive them with reversed completion order
+        (ssh fastest, linear middle, github slowest, and the mirror image) and show the report —
+        including the order of ``failures`` — comes out byte-identical either way."""
+        def result_with(gh_delay, lin_delay, ssh_delay):
+            ctx = self.ctx("quantivly", {"PATH": "/bin"})
+            ctx.runner = DelayedRunner(FakeRunner([(["ssh-add", "-l"], Result(1, "", "no identities"))]), ssh_delay)
+            return preflight.run_preflight(ctx, gh=DelayedGh("someone-else", delay=gh_delay),
+                                            lin=DelayedLinear("someone-else-id", delay=lin_delay))
+
+        forward = result_with(gh_delay=0.0, lin_delay=0.05, ssh_delay=0.1)     # gh finishes first
+        reversed_ = result_with(gh_delay=0.1, lin_delay=0.05, ssh_delay=0.0)   # ssh finishes first
+        self.assertEqual(forward, reversed_)
+        self.assertEqual(forward["failures"], [
+            "gh identity is 'someone-else', expected 'work-login'",
+            "Linear viewer id does not match the tenant pin",
+            "ssh-agent has no keys (ssh-add -l failed)",
+        ])
+
+    def test_github_half_and_linear_half_and_ssh_all_overlap_in_wall_time(self):
+        """Three independent 0.3s legs: serial would be ~0.9s (plus a 4th 0.3s for the concurrent
+        gh pin call, ~1.2s total); concurrent must land near one round trip (~0.3-0.4s)."""
+        delay = 0.3
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        ctx.runner = DelayedRunner(FakeRunner([(["ssh-add", "-l"], Result(0, "ok\n", ""))]), delay)
+        start = time.perf_counter()
+        r = preflight.run_preflight(ctx, gh=DelayedGh("work-login", delay=delay),
+                                     lin=DelayedLinear(VIEWER, delay=delay))
+        elapsed = time.perf_counter() - start
+        self.assertTrue(r["ok"], r["failures"])
+        self.assertLess(elapsed, delay * 2)     # well under the ~4x a fully serial run would take
+        self.assertGreaterEqual(elapsed, delay)  # never faster than the slowest single leg
+
+    def test_real_gh_client_shared_between_whoami_and_pin_is_race_free(self):
+        """GhClient is built once and its ``whoami``/``api`` calls run concurrently against the
+        same instance; stress it over several iterations against the real class (not a fake) to
+        catch a race in the shared ``env``/``runner``."""
+        for _ in range(10):
+            runner = FakeRunner([
+                (["gh", "auth", "token"], Result(0, "minted-token\n", "")),
+                (["gh", "api", "user", "--jq", ".login"], Result(0, "work-login\n", "")),
+                (["gh", "api", "repos/org/pin-repo"], Result(0, '{"full_name": "org/pin-repo"}', "")),
+                (["ssh-add", "-l"], Result(0, "ok\n", "")),
+            ])
+            ns = argparse.Namespace(tenant="quantivly", state_dir=None, text=False, dry_run=False)
+            tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+            ns.state_dir = str(Path(tmp.name))
+            ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner,
+                                                  env={"PATH": "/bin"}, cwd=Path("/"))
+            self.addCleanup(ctx.close)
+            r = preflight.run_preflight(ctx, lin=FakeLinear(VIEWER))
+            self.assertTrue(r["ok"], r["failures"])
+            self.assertEqual(r["gh"], {"login": "work-login", "expected": "work-login", "ok": True})
+            self.assertEqual(r["gh_pin"], {"repo": "org/pin-repo", "ok": True})
