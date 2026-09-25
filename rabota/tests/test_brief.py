@@ -342,12 +342,87 @@ class BriefNeedsTests(unittest.TestCase):
         ctx = self.ctx("toysim")
         self.assertEqual(brief.compute_needs(ctx, self.NOW), [])
 
-    def test_malformed_fetched_at_is_usage_not_a_traceback(self):
+    def test_an_unreadable_snapshot_is_needs_not_the_end_of_the_brief(self):
+        """Review finding, and a deliberate reversal of this row's first version. It used to assert
+        `errors.Usage` for a malformed `fetched_at` -- which cost the brief entirely, and which two
+        other shapes did not even reach: a file that was not JSON raised an unhandled
+        `JSONDecodeError` and a JSON list an unhandled `AttributeError`. A file we cannot read is
+        precisely one whose fetch time we do not know, which is what needing a fetch means, and
+        "needs accompanies the brief, never replaces it" has to hold for a broken file too."""
+        for label, payload in (("bad fetched_at", '{"ok": true, "items": [], "fetched_at": "not-a-timestamp"}'),
+                                ("not json", "{oops"),
+                                ("a json list", "[]"),
+                                ("no fetched_at", '{"ok": true, "items": []}')):
+            with self.subTest(label=label):
+                ctx = self.ctx()
+                (ctx.state_dir / "sources").mkdir(parents=True, exist_ok=True)
+                (ctx.state_dir / "sources" / "calendar.json").write_text(payload)
+                needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+                self.assertIn("calendar", needs, label)
+                self.assertTrue(needs["calendar"]["reason"].startswith("unreadable"), needs["calendar"])
+
+    def test_a_recorded_failure_needs_a_fetch_however_fresh_it_is(self):
+        """Review finding: `compute_needs` ignored `ok`, so a snapshot recorded five minutes ago as
+        a FAILED fetch -- `items: []` by construction -- was reported as needing nothing. It also
+        reaches the reader as a `failed` line, but only through `sequence.json`, which a same-day
+        rerun does not regenerate, so that line can be stale where this one cannot."""
         ctx = self.ctx()
-        snapshots.write(ctx.state_dir, "calendar", {"ok": True, "items": [], "fetched_at": "not-a-timestamp"})
-        with self.assertRaises(errors.Usage) as cm:
-            brief.compute_needs(ctx, self.NOW)
-        self.assertIn("fetched_at", str(cm.exception))
+        snapshots.write(ctx.state_dir, "calendar",
+                        {"ok": False, "error": "connector timed out", "items": [],
+                         "fetched_at": "2026-09-16T08:55:00Z"})      # 5 minutes before NOW
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("calendar", needs)
+        self.assertIn("last fetch failed", needs["calendar"]["reason"])
+        self.assertIn("connector timed out", needs["calendar"]["reason"])
+
+    def test_a_text_needs_line_carries_the_query_and_the_file_to_write(self):
+        """Review finding: `query` and `write_to` were in the JSON return only, and the skill's
+        output contract runs `rabota --text brief`. So in the form actually documented, the half of
+        `needs` a caller can act on was unreachable without a second call -- the very round-trip
+        this change exists to remove."""
+        ctx = self.ctx()
+        lines = brief.terminal_lines({"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z",
+                                       "failed_sources": [], "items": [], "triage": [], "decisions": []},
+                                      None, None, brief_path="/p/brief.md",
+                                      needs=brief.compute_needs(ctx, self.NOW))
+        slack = next(l for l in lines if l.startswith("! slack "))
+        self.assertIn("ingest-slack.json", slack)
+        self.assertIn("to:me", slack)
+        self.assertTrue(all(len(l) <= 120 for l in lines), lines)
+
+    def test_a_no_change_rerun_still_prints_every_alert(self):
+        """Review finding, and pre-existing on `main` for `failed_sources` alone: the no-change path
+        returned `footer[-1:]`, so on the path most likely to be taken twice in a morning a failed
+        source printed no line at all -- while the module docstring says it gets one."""
+        seq = {"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z",
+               "failed_sources": ["linear"], "items": [{"bucket": 1, "key": "K-1", "title": "t",
+                                                         "waiting_on": "b", "why_now": "now"}],
+               "triage": [], "decisions": []}
+        previous = {"keys": ["K-1"], "generated_at": "2026-09-16T08:00:00Z"}
+        lines = brief.terminal_lines(seq, "inbox: 3 archived", previous, brief_path="/p/brief.md",
+                                      needs=[{"source": "slack", "reason": "never fetched",
+                                              "query": "to:me", "write_to": "/s/ingest-slack.json"}])
+        self.assertIn("no change since 08:00", lines[0])
+        self.assertTrue(any(l.startswith("! linear failed") for l in lines), lines)
+        self.assertTrue(any(l.startswith("! slack needs a fetch") for l in lines), lines)
+        self.assertEqual(lines[-1], "brief: /p/brief.md")
+
+    def test_an_overflowing_footer_keeps_the_brief_path_and_counts_the_alerts(self):
+        """Review finding: a blind `[:max_lines]` slice dropped `brief: <path>` -- the only route to
+        what did not fit -- and two of three alerts, with nothing saying so. The path is reserved
+        now, and alerts that cannot all fit collapse into one counted line instead of vanishing."""
+        seq = {"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z", "failed_sources": [],
+               "items": [], "triage": [], "decisions": []}
+        needs = [{"source": s, "reason": "never fetched", "query": "q", "write_to": f"/s/ingest-{s}.json"}
+                  for s in ("slack", "calendar", "fireflies")]
+        two = brief.terminal_lines(seq, None, None, max_lines=2, brief_path="/p/brief.md", needs=needs)
+        self.assertEqual(len(two), 2)
+        self.assertEqual(two[-1], "brief: /p/brief.md")
+        self.assertIn("3 source alerts", two[0])
+        for s in ("slack", "calendar", "fireflies"):
+            self.assertIn(s, two[0])
+        one = brief.terminal_lines(seq, None, None, max_lines=1, brief_path="/p/brief.md", needs=needs)
+        self.assertEqual(one, ["brief: /p/brief.md"])      # the escape hatch is the last thing cut
 
     def test_run_brief_carries_needs_in_json_and_as_bang_lines_in_text(self):
         # Two fresh contexts (not two calls on one): a second same-day call hits the no-change

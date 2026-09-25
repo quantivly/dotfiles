@@ -125,13 +125,61 @@ def check_max_lines(max_lines) -> int:
     return max_lines
 
 
+def _alert_lines(seq: dict, needs: list[dict] | None) -> list[str]:
+    """One ``!`` line per failed source and per ``needs`` entry, in that order.
+
+    A ``needs`` line carries its query and the basename to write, because a ``--text`` caller gets
+    only these lines and would otherwise have to make a second call for the instruction -- which is
+    the round-trip this whole change exists to remove. The JSON form keeps the absolute
+    ``write_to``; here the basename is enough, since the caller passed the state dir in.
+    """
+    lines = [f"! {s} failed — list is partial" for s in seq.get("failed_sources", [])]
+    for n in (needs or []):
+        lines.append(f"! {n['source']} needs a fetch — {n['reason']} → "
+                     f"{Path(n['write_to']).name} ({n['query']})")
+    return [line if len(line) <= LINE_MAX else line[:LINE_MAX - 1] + "…" for line in lines]
+
+
+def _assemble(head: list[str], body: list[str], alerts: list[str], tail: list[str], max_lines: int) -> list[str]:
+    """Lines in display order, capped at ``max_lines``, in a fixed order of what is sacrificed.
+
+    ``tail``'s last entry is ``brief: <path>`` when there is one, and it is **reserved**: it is the
+    only way to reach the narrative holding whatever did not fit, so dropping it is the one cut that
+    loses information irrecoverably. Above it, the ranked/delta ``body`` gives up lines first, then
+    the inbox summary, and the ``!`` alerts last -- and when even the alerts do not fit they are
+    **collapsed into one counted line** rather than silently dropped. Review finding: a blind
+    ``[:max_lines]`` slice dropped ``brief: <path>`` and two of three alerts at ``--max-lines 1``,
+    and the no-change path dropped every alert unconditionally, so a failed source printed no line
+    at all on the commonest path of the day -- which the module docstring above says it does.
+    """
+    reserved = tail[-1:] if tail and tail[-1].startswith("brief: ") else []
+    rest_of_tail = tail[:-1] if reserved else list(tail)
+    budget = max_lines - len(reserved)
+    if budget <= 0:                                   # only room for the escape hatch
+        return reserved[:max_lines]
+    keep_head = head[:budget]
+    budget -= len(keep_head)
+    if len(alerts) > budget:
+        # Collapse rather than drop: the count and the sources still say a list is incomplete.
+        sources = ", ".join(a.split(" ", 2)[1] for a in alerts)
+        one = f"! {len(alerts)} source alerts — {sources}"
+        alerts = [one if len(one) <= LINE_MAX else one[:LINE_MAX - 1] + "…"][:budget]
+    budget -= len(alerts)
+    keep_tail = rest_of_tail[:budget]
+    budget -= len(keep_tail)
+    return keep_head + body[:max(0, budget)] + alerts + keep_tail + reserved
+
+
 def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, max_lines: int = MAX_LINES,
                    brief_path: str | None = None, now: datetime | None = None,
                    needs: list[dict] | None = None) -> list[str]:
     """The ≤``max_lines`` terminal lines; with ``previous`` (last-brief.json) only the deltas print.
 
-    One ``! <source> needs a fetch — <reason>`` line per ``needs`` entry (see ``compute_needs``),
-    reusing the same ``!``-line vocabulary ``failed_sources`` already prints rather than a second one.
+    One ``!`` line per failed source and per ``needs`` entry (see ``compute_needs`` and
+    ``_alert_lines``), reusing one vocabulary rather than two. What gets sacrificed when the lines
+    do not fit is ``_assemble``'s job, and the no-change rerun goes through it too -- it used to
+    return ``footer[-1:]``, which swallowed every alert on the path most likely to be taken twice
+    in a morning.
     """
     check_max_lines(max_lines)
     head = []
@@ -139,23 +187,18 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
         stale = staleness_line(seq, now)
         if stale:
             head.append(stale)
-    footer = [f"! {s} failed — list is partial" for s in seq.get("failed_sources", [])]
-    footer += [f"! {n['source']} needs a fetch — {n['reason']}" for n in (needs or [])]
-    if inbox_summary:
-        footer.append(inbox_summary)
-    if brief_path:
-        footer.append(f"brief: {brief_path}")
+    alerts = _alert_lines(seq, needs)
+    tail = ([inbox_summary] if inbox_summary else []) + ([f"brief: {brief_path}"] if brief_path else [])
     keys = [i["key"] for i in seq["items"]]
     if previous is not None:
         added = [k for k in keys if k not in previous["keys"]]
         removed = [k for k in previous["keys"] if k not in keys]
         if not added and not removed:
-            return (head + [f"no change since {previous['generated_at'][11:16]}"] + footer[-1:])[:max_lines]
-        body = [f"+ {k}" for k in added] + [f"- {k}" for k in removed]
-        return (head + body + footer)[:max_lines]
-    room = max(0, max_lines - len(head) - len(footer))
-    body = [_fmt(n, i) for n, i in enumerate(seq["items"][:room], 1)]
-    return (head + body + footer)[:max_lines]
+            return _assemble(head + [f"no change since {previous['generated_at'][11:16]}"],
+                             [], alerts, tail, max_lines)
+        return _assemble(head, [f"+ {k}" for k in added] + [f"- {k}" for k in removed], alerts, tail, max_lines)
+    room = max(0, max_lines - len(head) - len(alerts) - len(tail))
+    return _assemble(head, [_fmt(n, i) for n, i in enumerate(seq["items"][:room], 1)], alerts, tail, max_lines)
 
 
 def compose_markdown(seq: dict, inbox_plan: dict | None, syncs: list[dict]) -> str:
@@ -210,19 +253,41 @@ def compute_needs(ctx: Context, now: datetime) -> list[dict]:
     for source in NEEDS_SOURCES:
         if source not in ctx.tenant.sources:
             continue
-        snap = snapshots.read(ctx.state_dir, source)
-        if snap is None:
-            reason = "never fetched"
+        try:
+            snap = snapshots.read(ctx.state_dir, source)
+        except Exception as e:  # noqa: BLE001
+            # Deliberately broad, and deliberately NOT a refusal. Review finding: a snapshot that
+            # was not JSON raised an unhandled `JSONDecodeError`, and one that was a JSON list an
+            # unhandled `AttributeError`, so a single corrupt connector file replaced the whole
+            # morning brief with a traceback. "needs accompanies the brief, never replaces it" has
+            # to hold for a broken file too -- and a file we cannot read is precisely one whose
+            # fetch time we do not know, which is what needing a fetch means.
+            snap, reason = None, f"unreadable ({type(e).__name__})"
         else:
-            try:
-                fetched = snapshots.parse_fetched_at(snap["fetched_at"])
-            except (ValueError, TypeError, KeyError):
-                raise errors.Usage(f"sources/{source}.json: fetched_at must be UTC like "
-                                    f"2026-09-16T08:00:00Z, got {snap.get('fetched_at')!r}") from None
-            age_min = (now - fetched).total_seconds() / 60
-            if age_min <= STALE_AFTER_MIN:
-                continue
-            reason = f"stale ({int(age_min)} min old)"
+            if snap is None:
+                reason = "never fetched"
+            elif not isinstance(snap, dict):
+                snap, reason = None, f"unreadable (not an object: {type(snap).__name__})"
+            else:
+                try:
+                    fetched = snapshots.parse_fetched_at(snap["fetched_at"])
+                except (ValueError, TypeError, KeyError):
+                    # Same reasoning: an unparseable `fetched_at` is an unknown fetch time, not a
+                    # reason to refuse. It used to raise `Usage`, which cost the brief entirely.
+                    snap, reason = None, "unreadable (fetched_at is not a UTC timestamp)"
+                else:
+                    age_min = (now - fetched).total_seconds() / 60
+                    if not snap.get("ok", True):
+                        # A recorded failure IS a reason to fetch again, however fresh it is: the
+                        # snapshot is there but its `items` are empty by construction. It also
+                        # reaches the reader as a `failed` line, but only via `sequence.json`, which
+                        # a same-day rerun does not regenerate -- so that line can be stale where
+                        # this one cannot.
+                        reason = f"last fetch failed ({snap.get('error') or 'no reason recorded'})"
+                    elif age_min <= STALE_AFTER_MIN:
+                        continue
+                    else:
+                        reason = f"stale ({int(age_min)} min old)"
         needs.append({"source": source, "reason": reason, "query": _needs_query(source, snap),
                       "write_to": str(ctx.state_dir / f"ingest-{source}.json")})
     return needs
@@ -246,11 +311,11 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     summary_path = ctx.state_dir / "inbox-summary.txt"
     inbox_summary = summary_path.read_text().strip() if summary_path.exists() else None
     brief_path = day / "brief.md"
-    emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
     last_path = day / "last-brief.json"
     previous = _read_json(last_path)
     now = now or datetime.now(timezone.utc)
-    needs = compute_needs(ctx, now)
+    needs = compute_needs(ctx, now)     # before any write: a half-rewritten brief.md is worse than none
+    emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
                            now=now, needs=needs)
     emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
