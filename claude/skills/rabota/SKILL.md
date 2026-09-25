@@ -34,11 +34,9 @@ most 2 model round-trips — 1 when nothing is stale. Design and provenance:
 ## The cycle
 
 `rabota brief` runs preflight, rank and brief in one process (#237), so never call `rabota
-preflight` or `rabota rank` *instead of* it. One exception, in turn 2 only: `brief` ranks only
-when the day's `sequence.json` is **missing**, so after an ingest it would otherwise re-print the
-pre-fetch ranking and call it `no change`. Turn 2 therefore ranks before its final brief. (Making
-`brief` re-rank when a source is newer than the sequence is the better fix and is filed; until then
-that call is what keeps the fetch from being wasted.)
+preflight` or `rabota rank` *instead of* it — including in turn 2, after an ingest: `brief`
+re-ranks on its own whenever anything `rank` reads has moved since the day's `sequence.json` was
+written, so the fetch you just landed is never silently skipped (DO-738).
 
 1. **Brief, turn 1.** One call: `rabota brief` (JSON, not `--text` — you need its `needs`
    field). Exit 3 → print the one failure line from the report and stop; a failed identity
@@ -68,13 +66,12 @@ that call is what keeps the fetch from being wasted.)
      already carried. Record: `rabota escalate --question … --evidence … --option …` for
      questions; dated promises become pins: `rabota pin <key> --bucket 2 --rationale …`. Say
      "already done" as confidently as "overdue"; cite the artifact.
-   - **Brief, turn 2's final call.** `rabota rank && rabota --text brief --max-lines 11 --classified fireflies` —
-     the `rank` is not optional: without it the brief re-prints the pre-fetch ranking and says `no
-     change`, so the fetch is wasted silently. `--classified fireflies` is what actually marks the
-     Fireflies items you were just handed as classified; omitting it (e.g. a bare `rabota --text
-     brief`) classifies nothing, however many items the screen names. Print its lines verbatim,
-     then append ≤2 lines of reconcile delta. **This is the only screen `/rabota brief` prints on a
-     stale morning.** Nothing else goes to the terminal.
+   - **Brief, turn 2's final call.** `rabota --text brief --max-lines 11 --classified fireflies` —
+     `--classified fireflies` is what actually marks the Fireflies items you were just handed as
+     classified; omitting it (e.g. a bare `rabota --text brief`) classifies nothing, however many
+     items the screen names. Print its lines verbatim, then append ≤2 lines of reconcile delta.
+     **This is the only screen `/rabota brief` prints on a stale morning.** Nothing else goes to
+     the terminal.
 3. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> --machine dev --run` — one call, one unit,
    seat-gated; the CLI refuses with the seat's `resets_at` when the window is spent. `--machine dev`
    is **required** with `--run`: the local form is not implemented and refuses. Watch with
@@ -110,9 +107,9 @@ Linear issue filed before the message that mentions it (`quantivly-conventions:l
 
 The screen is ≤12 lines, and there is **exactly one** of them per `/rabota brief`. Turn 1's
 `rabota brief` is JSON (needed for `needs`), so when `needs` is empty **print its `lines` field**,
-not raw stdout — and when `needs` is non-empty print nothing until turn 2's final `rabota rank &&
-rabota --text brief --max-lines 11` (one line reserved for the reconcile delta); print its lines
-verbatim. `--text` is a GLOBAL
+not raw stdout — and when `needs` is non-empty print nothing until turn 2's final `rabota --text
+brief --max-lines 11 --classified fireflies` (one line reserved for the reconcile delta); print
+its lines verbatim. `--text` is a GLOBAL
 flag and must precede the subcommand — `rabota brief --text` exits `unrecognized arguments`.
 `sol brief` handles its own line. Narrative lives in `brief.md`; print its path once. On a
 rerun the same day the CLI prints the delta. A source that failed, or a `linear`/`github`

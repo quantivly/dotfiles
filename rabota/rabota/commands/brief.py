@@ -12,6 +12,24 @@ sliced, so ``--max-lines 1`` printed two lines). ``--max-lines 0`` is a usage er
 empty brief — a zero-line brief is not a brief — and so is a negative cap. A ``generated_at``
 that does not parse is a usage error naming the file, never an unhandled ``ValueError``.
 
+**Move 7 (re-rank on a moved input, DO-738).** ``run_rank`` (if needed) used to mean "only when
+today's ``sequence.json`` does not exist yet" -- nothing deletes that file, so every later
+``brief`` call the same day, including the call right after an ingest, re-read the OLD ranking.
+The fetched item sat unranked and the reader was told ``no change since HH:MM``: the worst
+outcome available, since the work was done, the data landed, and the reader was told nothing
+happened. "Needed" now also means "``sequence.json`` exists but something ``rank`` reads has
+moved since it was written" -- ``rank_cmd.inputs_signature`` fingerprints every one of those
+inputs (see its docstring for why each field is a content-embedded stamp, never a file mtime, and
+why the pins table needs a real counter instead) and ``compute_sequence`` stamps it onto
+``seq["inputs"]``; ``run_brief`` recomputes the current signature on every call and compares.
+Re-ranking is not free -- it writes ``sequence.json``/``.md`` -- so it happens only on a mismatch,
+not on every call, and the ``--dry-run`` path takes the same ``compute_sequence`` branch Move 5
+already uses rather than ``run_rank``, so a dry run whose inputs moved still computes the new
+answer without writing it. This is a different question from the staleness line above, which is
+about ``generated_at`` being old relative to the clock -- a re-rank can leave ``sequence.json``
+fresh by that clock while an input was in fact stale a moment before, and the two lines can both
+print on the same call.
+
 **Move 1 (one process).** ``run_brief`` now runs ``preflight`` first — exactly the same
 ``preflight.run_command`` the standalone ``rabota preflight`` command calls, so a failed
 identity pin still exits 3, still prints the report, and still records a ``runs`` row. Only
@@ -563,8 +581,14 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     preflight_cmd.run_command(ctx, gh=gh, lin=lin)   # exit 3 on a failed identity pin, exactly as `rabota preflight`
     day = ctx.state_dir / ctx.today.isoformat()
     seq_path = day / "sequence.json"
-    if seq_path.exists():
-        seq = json.loads(seq_path.read_text())
+    existing = json.loads(seq_path.read_text()) if seq_path.exists() else None
+    # DO-738: re-rank not just when today's sequence.json is missing, but also when it exists and
+    # something `rank` reads has moved since -- `existing["inputs"]` is the signature `compute_sequence`
+    # stamped it with; an old sequence.json with no `inputs` key (written before this change) compares
+    # unequal to any real signature and is treated as stale, which is the right bootstrap behaviour.
+    stale_inputs = existing is None or existing.get("inputs") != rank_cmd.inputs_signature(ctx)
+    if not stale_inputs:
+        seq = existing
     elif ctx.dry_run:
         # The same ranked answer `run_rank` would produce, without its writes (DO-742) -- a dry
         # run's line, `dry-run: nothing written`, would be false if this branch wrote sequence.json.

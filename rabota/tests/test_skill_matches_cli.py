@@ -48,19 +48,23 @@ class SkillMatchesCliTests(unittest.TestCase):
         cycle = _cycle_section()
         self.assertNotRegex(cycle, r"(?mi)^\s*(?:\d+\.|-)\s*\*\*(?:Preflight|Rank)\b")
 
-    def test_turn_2_ranks_before_its_final_brief(self):
-        # `brief` ranks only when the day's sequence.json is MISSING, so after an ingest it would
-        # re-print the pre-fetch ranking and label it `no change` -- the fetch wasted, silently
-        # (review finding). Turn 2's final call therefore ranks first. Driven, not assumed: see
-        # test_brief for `sequence.json` not being regenerated on a second same-day call.
-        #
-        # AMENDED in the DO-746 fix round 2 (finding D): the exact string this asserted grew
-        # `--classified fireflies` -- the explicit acknowledgement that actually marks Fireflies
-        # items classified (see `commands.brief.run_brief`'s `classified` parameter). Without it
-        # this row would demand the skill keep an under-specified call that classifies nothing;
-        # it fails against pre-fix-round-2 code and against a reverted skill line alike.
-        self.assertIn("`rabota rank && rabota --text brief --max-lines 11 --classified fireflies`",
-                      _cycle_section())
+    def test_turn_2s_final_call_has_no_separate_rank_and_classifies_fireflies(self):
+        # AMENDED for DO-738: `brief` used to rank only when the day's sequence.json was MISSING,
+        # so turn 2 carried its own `rabota rank &&` ahead of the final brief call to avoid
+        # re-printing the pre-fetch ranking as `no change` after an ingest (review finding, fixed
+        # in #237's fix round). `run_brief` now re-ranks on its own whenever an input it reads has
+        # moved since (`rank_cmd.inputs_signature`, see `commands.brief`) -- an ingest is exactly
+        # such a move, so the workaround call is no longer needed and its presence would now read
+        # as two round-trips doing one job. This row fails against the pre-DO-738 skill text (which
+        # has `rank &&`) and against a skill that dropped `rank &&` but also dropped
+        # `--classified fireflies` -- see `test_fireflies_is_named_as_classified_not_fetched` and
+        # the DO-746 fix-round-2 rationale this replaces for why that flag is load-bearing on its
+        # own. Driven, not assumed: see test_brief.py's `BriefRerankTests` for `run_brief` actually
+        # re-ranking post-ingest without a caller-side `rank` call.
+        cycle = _cycle_section()
+        self.assertIn("`rabota --text brief --max-lines 11 --classified fireflies`", cycle)
+        self.assertNotIn("rabota rank &&", cycle)
+        self.assertNotRegex(cycle, r"(?mi)^\s*(?:\d+\.|-)\s*\*\*Rank\b")
 
     def test_needs_empty_stops_and_needs_non_empty_prints_nothing_yet(self):
         # Both halves: the empty case must stop, and the non-empty case must NOT print turn 1's

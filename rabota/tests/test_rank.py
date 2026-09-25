@@ -183,3 +183,51 @@ class RankCommandTests(unittest.TestCase):
         rank_cmd.run_rank(ctx)
         text = (ctx.state_dir / "2026-09-16" / "sequence.json").read_text()
         self.assertNotIn(minted, text); self.assertIn("spoken promise; token [redacted:minted-token]", text)
+
+    def test_inputs_signature_moves_with_every_input_rank_reads(self):
+        # DO-738: establish the input list from `rank`'s own code (RankInputs), not from the issue
+        # text. Each assertion changes exactly ONE thing `rank` reads and checks the signature
+        # moves; anything `inputs_signature` forgot to read would leave that one assertion looking
+        # at two identical dicts.
+        ctx = self.ctx()
+        base = rank_cmd.inputs_signature(ctx)
+
+        snapshots.write(ctx.state_dir, "linear", {"ok": True, "viewer": {}, "issues": [], "notifications": []})
+        self.assertNotEqual(rank_cmd.inputs_signature(ctx)["linear"], base["linear"])
+
+        snapshots.write(ctx.state_dir, "github", {"ok": True, "review_requests": [], "own_prs": []})
+        self.assertNotEqual(rank_cmd.inputs_signature(ctx)["github"], base["github"])
+
+        (ctx.state_dir / "inbox-plan.json").write_text(json.dumps({"generated_at": "2026-09-16T08:00:00Z"}))
+        self.assertNotEqual(rank_cmd.inputs_signature(ctx)["inbox_plan"], base["inbox_plan"])
+
+        (ctx.state_dir / "census.json").write_text(json.dumps({"at": "2026-09-16T08:00:00Z"}))
+        self.assertNotEqual(rank_cmd.inputs_signature(ctx)["census"], base["census"])
+
+        # The pins table: a `set_pin` moves it, and so does a `clear_pin` -- the case an mtime or a
+        # hash of the rows would miss (see test_store's pins_version test for why).
+        ctx.store.set_pin("quantivly", "PROMISE-1", 2, "spoken promise")
+        after_set = rank_cmd.inputs_signature(ctx)
+        self.assertNotEqual(after_set["pins"], base["pins"])
+        ctx.store.clear_pin("quantivly", "PROMISE-1")
+        self.assertNotEqual(rank_cmd.inputs_signature(ctx)["pins"], after_set["pins"])
+
+    def test_inputs_signature_ignores_slack_because_rank_never_reads_it(self):
+        # `RankInputs.slack` is filled in by `compute_sequence` but `rank.rank` never dereferences
+        # it (grep-verified against rank.py) -- a Slack snapshot landing cannot change the ranked
+        # answer, so fingerprinting it would re-rank (and rewrite sequence.json/.md) for nothing.
+        ctx = self.ctx()
+        before = rank_cmd.inputs_signature(ctx)
+        snapshots.write(ctx.state_dir, "slack", {"ok": True, "items": []})
+        self.assertEqual(rank_cmd.inputs_signature(ctx), before)
+
+    def test_inputs_signature_is_stable_when_nothing_moved(self):
+        ctx = self.ctx()
+        snapshots.write(ctx.state_dir, "linear", {"ok": True, "viewer": {}, "issues": [], "notifications": []})
+        ctx.store.set_pin("quantivly", "PROMISE-1", 2, "spoken promise")
+        self.assertEqual(rank_cmd.inputs_signature(ctx), rank_cmd.inputs_signature(ctx))
+
+    def test_compute_sequence_stamps_the_current_inputs_signature(self):
+        ctx = self.ctx()
+        seq = rank_cmd.compute_sequence(ctx)
+        self.assertEqual(seq["inputs"], rank_cmd.inputs_signature(ctx))
