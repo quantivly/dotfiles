@@ -212,9 +212,22 @@ def _build(sub):
 
 
 def _read_stdin_specs() -> list[tuple[str, dict]]:
-    """Parse ``--stdin``'s payload into ``(source, data)`` pairs; every fault is ``Usage``."""
+    """Parse ``--stdin``'s payload into ``(source, data)`` pairs; every fault is ``Usage``.
+
+    A terminal on stdin is refused rather than read: with nothing piped, the read would block until
+    something external killed the process (DO-740 review). The bytes are decoded strictly, as the
+    file form's ``read_text`` does, so invalid UTF-8 is refused here too instead of being stored
+    surrogate-escaped.
+    """
+    if sys.stdin is None or sys.stdin.isatty():
+        raise errors.Usage("--stdin: nothing is piped in; feed the JSON object on stdin (e.g. a heredoc)")
+    buf = getattr(sys.stdin, "buffer", None)
     try:
-        data = json.load(sys.stdin)
+        text = buf.read().decode("utf-8") if buf is not None else sys.stdin.read()
+    except UnicodeDecodeError as e:
+        raise errors.Usage(f"--stdin: not valid UTF-8: {e}") from None
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError as e:
         raise errors.Usage(f"--stdin: invalid JSON: {e}") from None
     if not isinstance(data, dict):

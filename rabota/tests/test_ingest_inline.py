@@ -164,7 +164,7 @@ class IngestInlineCliTests(unittest.TestCase):
         code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest",
                                    "slack", "--stdin"])
         self.assertEqual(code, 2, out + err)
-        self.assertIn("--stdin", out + err)
+        self.assertIn("cannot be combined with the single-source form", out + err)
 
     def test_stdin_not_an_object_is_usage(self):
         from tests.test_cli import run_cli, install_fixture_home
@@ -175,6 +175,7 @@ class IngestInlineCliTests(unittest.TestCase):
         with patch("sys.stdin", io.StringIO(json.dumps(["not", "an", "object"]))):
             code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest", "--stdin"])
         self.assertEqual(code, 2, out + err)
+        self.assertIn("must be an object keyed by source", out + err)
 
     def test_stdin_invalid_json_is_usage(self):
         from tests.test_cli import run_cli, install_fixture_home
@@ -185,6 +186,37 @@ class IngestInlineCliTests(unittest.TestCase):
         with patch("sys.stdin", io.StringIO("{not json")):
             code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest", "--stdin"])
         self.assertEqual(code, 2, out + err)
+        self.assertIn("--stdin: invalid JSON", out + err)
+
+    def test_a_terminal_on_stdin_is_refused_not_read(self):
+        # DO-740 review F1: with nothing piped, json.load(sys.stdin) blocked forever on a tty.
+        from tests.test_cli import run_cli, install_fixture_home
+        import io
+        from unittest.mock import patch
+        class Tty(io.StringIO):
+            def isatty(self): return True
+            def read(self, *a): raise AssertionError("a terminal must not be read")
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        with patch("sys.stdin", Tty()):
+            code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest", "--stdin"])
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("nothing is piped in", out + err)
+
+    def test_invalid_utf8_on_stdin_is_refused_like_the_file_form(self):
+        # DO-740 review F2: stdin decoded with surrogateescape stored mangled text and exited 0,
+        # where the same bytes through --file were refused.
+        from tests.test_cli import run_cli, install_fixture_home
+        import io
+        from unittest.mock import patch
+        install_fixture_home(self)
+        state = self.home / "s"; state.mkdir(parents=True)
+        raw = b'{"slack": {"fetched_at": "2026-09-16T07:00:00Z", "ok": true, "error": null, "items": [{"text": "\xff\xfe"}]}}'
+        with patch("sys.stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", errors="surrogateescape")):
+            code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "ingest", "--stdin"])
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("not valid UTF-8", out + err)
+        self.assertFalse((state / "sources" / "slack.json").exists())
 
     def test_dry_run_does_not_gate_the_inline_form_either(self):
         # Hazard 3 (DO-742's audit): `ingest` does not honour --dry-run today, and this brief is
