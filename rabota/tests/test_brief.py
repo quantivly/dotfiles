@@ -463,6 +463,27 @@ class BriefNeedsTests(unittest.TestCase):
         again = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
         self.assertTrue(any(l.startswith("no change since") for l in again), again)
 
+    def test_the_dry_run_notice_cannot_be_cut_by_max_lines(self):
+        """Review finding: the notice was appended to `head` AFTER the staleness warning, and
+        `_assemble` slices `head[:budget]` in order -- so at `--max-lines 1` with a stale sequence it
+        was dropped, and the one surviving line read exactly like a real run's. Of the two, this is
+        the one that must survive: a reader who cannot tell a dry run from a real one may act on it,
+        while the staleness warning is about the stored state and returns on the next real run."""
+        stale_seq = {"tenant": "quantivly", "generated_at": "2026-09-16T05:00:00Z", "failed_sources": [],
+                     "items": [{"bucket": 1, "key": "K-1", "title": "t", "waiting_on": "b", "why_now": "now"}],
+                     "triage": [], "decisions": []}
+        for max_lines in (1, 2, 3, 12):
+            with self.subTest(max_lines=max_lines):
+                lines = brief.terminal_lines(stale_seq, "inbox: x", None, max_lines=max_lines,
+                                              brief_path="/p/brief.md", now=self.NOW, dry_run=True)
+                self.assertLessEqual(len(lines), max_lines)
+                self.assertTrue(lines[0].startswith("dry-run:"), lines)
+        # and the staleness warning is still there the moment there is room for it
+        two = brief.terminal_lines(stale_seq, None, None, max_lines=2, brief_path=None,
+                                   now=self.NOW, dry_run=True)
+        self.assertTrue(two[0].startswith("dry-run:"), two)
+        self.assertTrue(two[1].startswith("! brief is "), two)
+
     def test_an_unreadable_snapshot_is_needs_not_the_end_of_the_brief(self):
         """Review finding, and a deliberate reversal of this row's first version. It used to assert
         `errors.Usage` for a malformed `fetched_at` -- which cost the brief entirely, and which two

@@ -177,6 +177,13 @@ def _assemble(head: list[str], body: list[str], alerts: list[str], tail: list[st
     and the no-change path dropped every alert unconditionally, so a failed source printed no line
     at all on the commonest path of the day -- which the module docstring above says it does.
     """
+    # A `dry-run:` head line outranks even the reserved `brief: <path>`: a path is the escape hatch
+    # to what did not fit, but on a dry run nothing was written for it to point at -- `run_brief`
+    # passes `brief_path=None` there for that reason, so the two only ever compete when a caller
+    # builds an unreachable combination. Ranking it here makes "no `max_lines` can drop the notice"
+    # true unconditionally rather than by luck (review finding).
+    if head and head[0].startswith("dry-run:"):
+        return (head[:1] + _assemble(head[1:], body, alerts, tail, max_lines - 1))[:max_lines]
     reserved = tail[-1:] if tail and tail[-1].startswith("brief: ") else []
     rest_of_tail = tail[:-1] if reserved else list(tail)
     budget = max_lines - len(reserved)
@@ -207,19 +214,24 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
     return ``footer[-1:]``, which swallowed every alert on the path most likely to be taken twice
     in a morning.
 
-    ``dry_run`` adds one ``head`` line saying plainly that nothing was written — the highest
-    priority line after staleness, so it survives every cut ``_assemble`` makes before the lines
-    it is describing do (DO-742: a dry run that prints the ranked list with no hint that it is
-    hypothetical is indistinguishable from a real one).
+    ``dry_run`` adds one ``head`` line saying plainly that nothing was written, **first**, ahead of
+    the staleness warning — so no value of ``max_lines`` can drop it (DO-742: a dry run whose output
+    carries no hint that it is hypothetical is indistinguishable from a real one, and the first
+    version of this claimed the notice survived every cut while being appended where it did not).
     """
     check_max_lines(max_lines)
     head = []
+    if dry_run:
+        # FIRST, ahead of the staleness warning, so `head[:budget]` cannot drop it. Review finding:
+        # appended second, it was cut at `--max-lines 1` whenever the sequence was also stale, and
+        # the surviving line read exactly like a real run's. Of the two, this is the one that must
+        # survive: a reader who cannot tell a dry run from a real one may act on it, while the
+        # staleness warning is about the stored state and will still be there on the next real run.
+        head.append("dry-run: nothing written (brief.md, last-brief.json, sequence.json)")
     if now is not None:
         stale = staleness_line(seq, now)
         if stale:
             head.append(stale)
-    if dry_run:
-        head.append("dry-run: nothing written (brief.md, last-brief.json, sequence.json)")
     alerts = _alert_lines(seq, needs) + [f"! {h['source']} snapshot is unreliable — {h['reason']}"
                                          for h in (health or [])]
     tail = ([inbox_summary] if inbox_summary else []) + ([f"brief: {brief_path}"] if brief_path else [])
