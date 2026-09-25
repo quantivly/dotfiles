@@ -7,7 +7,7 @@ import re
 import unittest
 from pathlib import Path
 
-from rabota.commands import brief, ingest
+from rabota.commands import brief
 
 SKILL = Path(__file__).parents[2] / "claude" / "skills" / "rabota" / "SKILL.md"
 
@@ -26,10 +26,18 @@ class SkillMatchesCliTests(unittest.TestCase):
         # One multi-source `ingest --file SOURCE=PATH` call, not one per source (#236). A
         # mutation that reintroduces `rabota ingest <source> --file …` three times fails this:
         # either the source= form disappears, or `rabota ingest` is invoked more than once.
+        #
+        # Checked against `brief.NEEDS_SOURCES`, not `ingest.ALLOWED`: the two were equal until
+        # DO-746 moved Fireflies out of NEEDS_SOURCES into `sync.FETCHED_SOURCES` while leaving it
+        # in `ingest.ALLOWED` (a manual/session ingest of it is still a legal, separate call this
+        # cycle just doesn't make). This row exists to check the ingest call this cycle actually
+        # builds from `needs`, so it has to key off the same set `needs` is drawn from — keying off
+        # `ingest.ALLOWED` instead would have kept demanding a stale `fireflies=…` in the one call
+        # this skill still makes, the moment the two sets first disagreed.
         cycle = _cycle_section()
         calls = re.findall(r"`rabota ingest[^`]*`", cycle)
         self.assertEqual(len(calls), 1, f"expected exactly one `rabota ingest …` call, found {calls}")
-        for source in ingest.ALLOWED:
+        for source in brief.NEEDS_SOURCES:
             self.assertIn(f"{source}=", calls[0], f"ingest call is missing {source}=…")
 
     def test_preflight_is_never_a_step_of_its_own(self):
@@ -66,9 +74,23 @@ class SkillMatchesCliTests(unittest.TestCase):
     def test_turn_2_sources_match_compute_needs(self):
         # brief.NEEDS_SOURCES is the exact set that can appear in `needs`; the skill's fetch
         # bullet must name all of them, or an agent following it would not know to fetch one.
+        #
+        # This row only asserts PRESENCE of every current member, never absence of a former one --
+        # so on its own it would not have caught DO-746 leaving a stale "fetch Fireflies in-session"
+        # instruction behind after Fireflies left NEEDS_SOURCES (hazard 3 in that brief: "a guard
+        # that silently passes on a stale mention"). It still cannot catch that class of drift; the
+        # explicit check below is what actually would.
         cycle = _cycle_section()
         for source in brief.NEEDS_SOURCES:
             self.assertIn(source, cycle, f"{source} (from brief.NEEDS_SOURCES) is not mentioned in the cycle")
+
+    def test_fireflies_is_not_named_as_something_the_session_fetches(self):
+        # DO-746: Fireflies moved from brief.NEEDS_SOURCES to sync.FETCHED_SOURCES -- it is now
+        # fetched server-side by the timer, like Linear and GitHub, and neither of those is named
+        # in this section either. A stale "fetch Fireflies" instruction here would cost an agent a
+        # round-trip for nothing (brief's hazard 3). `test_turn_2_sources_match_compute_needs`
+        # cannot catch this by itself since it only checks presence of current members.
+        self.assertNotIn("fireflies", _cycle_section().lower())
 
 
 if __name__ == "__main__":

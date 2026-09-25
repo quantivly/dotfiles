@@ -19,10 +19,11 @@ then does it rank (if needed) and compose the brief. ``preflight`` and ``rank`` 
 commands for their other callers (the timer, `rabota preflight` on its own); ``brief`` just
 calls them in-process instead of a wrapper spending a model round-trip between each.
 
-**Move 2 (``needs``, not a failure).** ``slack``, ``calendar`` and ``fireflies`` are never
-fetched by the CLI itself (``sync.FETCHED_SOURCES`` is only ``linear``/``github`` — those two
-are the 30-minute timer's job, and a stale one of those is a job for ``precompute``/``sync``,
-not for an agent to hand-fetch). For the other three, ``run_brief`` computes ``needs``: one
+**Move 2 (``needs``, not a failure).** ``slack`` and ``calendar`` are never fetched by the CLI
+itself (``sync.FETCHED_SOURCES`` is ``linear``/``github``/``fireflies`` — those are the 30-minute
+timer's job, and a stale one of those is a job for ``precompute``/``sync``, not for an agent to
+hand-fetch; Fireflies moved from here to that set in DO-746, once a static per-user API key made
+it fetchable the same way as Linear). For the other two, ``run_brief`` computes ``needs``: one
 entry per source that is either missing a snapshot entirely or older than
 ``STALE_AFTER_MIN`` — deliberately the SAME number that ages the brief itself, not a third
 unrelated one, because both answer the same question ("how old is too old for today's brief?").
@@ -78,7 +79,7 @@ MAX_LINES = 12
 STALE_AFTER_MIN = snapshots.STALE_AFTER_MIN    # one definition, in `snapshots`; never restate it here
 TITLE_MAX = 60
 LINE_MAX = 120
-NEEDS_SOURCES = ("slack", "calendar", "fireflies")    # never fetched by the CLI itself; see module docstring
+NEEDS_SOURCES = ("slack", "calendar")    # never fetched by the CLI itself; see module docstring
 
 
 def _truncate_suffix(s: str, budget: int) -> str:
@@ -283,8 +284,6 @@ def _needs_query(source: str, snap: dict | None) -> str:
         return f"to:me after:{snap['fetched_at'][:10]}" if snap else "to:me"
     if source == "calendar":
         return "free blocks for today"          # today's calendar has no "since last fetch" delta
-    if source == "fireflies":
-        return f"action items since {snap['fetched_at']}" if snap else "action items"
     raise ValueError(f"no needs query for {source!r}")
 
 

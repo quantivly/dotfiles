@@ -34,6 +34,16 @@ class LeakyGh(FakeGh):
     def review_requests(self): raise errors.RabotaError(f"gh api search/issues failed: HTTP 401 — token {MINTED} rejected")
 
 
+class FakeFf:
+    def recent_transcripts(self, since):
+        return [{"id": "t1", "title": "1:1", "date": "2026-09-02",
+                 "action_items": [{"speaker": "Zvi Baratz", "item": "Do the thing", "timestamp": "16:52"}]}]
+
+
+class BoomFf(FakeFf):
+    def recent_transcripts(self, since): raise errors.RabotaError("fireflies down")
+
+
 def db_bytes(state_dir):
     """Every byte sqlite has on disk for rabota.db, WAL included — a fresh reader's view is not enough."""
     return b"".join(p.read_bytes() for p in Path(state_dir).glob("rabota.db*"))
@@ -134,6 +144,44 @@ class SyncTests(unittest.TestCase):
     def test_unknown_source_is_usage(self):
         with self.assertRaises(errors.Usage):
             sync.run_sync(self.ctx(), ["slack"], lin=FakeLin(), gh=FakeGh())
+
+    def test_fireflies_is_a_fetched_source(self):
+        # DO-746: Fireflies joins linear/github in FETCHED_SOURCES, fetched by `rabota sync` like
+        # the other two, with its action_items already parsed into (speaker, item, timestamp).
+        self.assertEqual(sync.FETCHED_SOURCES, ("linear", "github", "fireflies"))
+        ctx = self.ctx()
+        rep = sync.run_sync(ctx, ["linear", "github", "fireflies"], lin=FakeLin(), gh=FakeGh(), ff=FakeFf())
+        snap = snapshots.read(ctx.state_dir, "fireflies")
+        self.assertTrue(snap["ok"]); self.assertIsNone(snap["error"])
+        self.assertEqual(snap["transcripts"][0]["action_items"],
+                         [{"speaker": "Zvi Baratz", "item": "Do the thing", "timestamp": "16:52"}])
+        self.assertEqual(rep["fireflies"]["counts"], {"transcripts": 1})
+        self.assertTrue(ctx.store.last_sync("quantivly", "fireflies")["ok"])
+
+    def test_a_missing_fireflies_key_is_a_recorded_failed_source_not_a_crash(self):
+        # Hazard 1 from the brief: there is no Fireflies API key on this machine, so this is the
+        # DEFAULT path, not an edge case -- and it must not take `linear`/`github` down with it.
+        # `FirefliesClient.from_context` is exercised for real here (no `ff=` override), so a
+        # missing `FIREFLIES_API_KEY` in `ctx.env` is what actually triggers the refusal.
+        ctx = self.ctx()
+        with self.assertRaises(errors.Partial) as cm:
+            sync.run_sync(ctx, ["linear", "github", "fireflies"], lin=FakeLin(), gh=FakeGh())
+        self.assertEqual(cm.exception.failed, ["fireflies"])
+        # the other two sources still synced and are on disk
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "linear"))
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "github"))
+        self.assertTrue(ctx.store.last_sync("quantivly", "linear")["ok"])
+        row = ctx.store.last_sync("quantivly", "fireflies")
+        self.assertFalse(row["ok"])
+        self.assertIn("FIREFLIES_API_KEY", row["error"])
+
+    def test_a_fireflies_query_failure_is_recorded_like_any_other_source(self):
+        ctx = self.ctx()
+        with self.assertRaises(errors.Partial) as cm:
+            sync.run_sync(ctx, ["fireflies"], ff=BoomFf())
+        self.assertEqual(cm.exception.failed, ["fireflies"])
+        row = ctx.store.last_sync("quantivly", "fireflies")
+        self.assertFalse(row["ok"]); self.assertIn("fireflies down", row["error"])
 
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()

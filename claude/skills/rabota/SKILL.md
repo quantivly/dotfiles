@@ -52,12 +52,12 @@ that call is what keeps the fetch from being wasted.)
 2. **Fetch, ingest, reconcile — turn 2, only when `needs` is non-empty.** These are tool
    calls inside this one turn, not a turn each:
    - For each entry in `needs`, fetch exactly its `query` (e.g. Slack `to:me after:…`,
-     Calendar free blocks for today, Fireflies action items since `…`) and write
+     Calendar free blocks for today) and write
      `{"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}` (a failed fetch:
      `"ok": false`, `"error": "<why>"`, `"items": []`) to the entry's `write_to` path.
      **`ok` must be a JSON boolean** — omit it and `ingest` exits 2. Do not retry more than
      once; never drop a failed source silently.
-   - **One** `rabota ingest --file slack=… --file calendar=… --file fireflies=…` call, naming
+   - **One** `rabota ingest --file slack=… --file calendar=…` call, naming
      only the sources actually in `needs`. A bad file among good ones is reported (exit 4),
      not silently dropped — the good ones still land.
    - **Reconcile** (`references/reconcile.md`) using turn 1's `tracked` field — it is already

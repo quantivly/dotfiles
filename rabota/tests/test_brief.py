@@ -355,7 +355,8 @@ class BriefCommandTests(unittest.TestCase):
 
 
 class BriefNeedsTests(unittest.TestCase):
-    """DO-716 move 2: a stale/missing slack, calendar or fireflies snapshot produces `needs`."""
+    """DO-716 move 2: a stale/missing slack or calendar snapshot produces `needs`
+    (fireflies moved to sync.FETCHED_SOURCES in DO-746 and no longer appears here)."""
 
     def ctx(self, tenant="quantivly"):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
@@ -370,11 +371,10 @@ class BriefNeedsTests(unittest.TestCase):
         ctx = self.ctx()
         needs = brief.compute_needs(ctx, self.NOW)
         by_source = {n["source"]: n for n in needs}
-        self.assertEqual(set(by_source), {"slack", "calendar", "fireflies"})
+        self.assertEqual(set(by_source), {"slack", "calendar"})
         self.assertEqual(by_source["slack"]["reason"], "never fetched")
         self.assertEqual(by_source["slack"]["query"], "to:me")
         self.assertEqual(by_source["calendar"]["query"], "free blocks for today")
-        self.assertEqual(by_source["fireflies"]["query"], "action items")
         self.assertEqual(by_source["slack"]["write_to"], str(ctx.state_dir / "ingest-slack.json"))
 
     def test_fresh_snapshot_is_not_in_needs(self):
@@ -386,12 +386,10 @@ class BriefNeedsTests(unittest.TestCase):
     def test_stale_snapshot_is_needs_with_stale_reason_and_age_and_delta_query(self):
         ctx = self.ctx()
         snapshots.write(ctx.state_dir, "slack", {"ok": True, "items": [], "fetched_at": "2026-09-16T07:00:00Z"})
-        snapshots.write(ctx.state_dir, "fireflies", {"ok": True, "items": [], "fetched_at": "2026-09-16T07:00:00Z"})
         needs = brief.compute_needs(ctx, self.NOW)
         by_source = {n["source"]: n for n in needs}
         self.assertEqual(by_source["slack"]["reason"], "stale (120 min old)")
         self.assertEqual(by_source["slack"]["query"], "to:me after:2026-09-16")
-        self.assertEqual(by_source["fireflies"]["query"], "action items since 2026-09-16T07:00:00Z")
 
     def test_exactly_at_the_boundary_is_not_stale(self):
         # STALE_AFTER_MIN is 60: a snapshot exactly that old is not yet stale, matching
@@ -404,8 +402,8 @@ class BriefNeedsTests(unittest.TestCase):
 
     def test_a_source_the_tenant_does_not_use_is_never_requested(self):
         # toysim only lists `sources = ["github"]` (see tests/fixtures/config/tenants/toysim.toml):
-        # a tenant without Fireflies must never be told to fetch it, mirroring preflight's rule
-        # for a source the tenant does not list.
+        # a tenant without Slack or Calendar must never be told to fetch either, mirroring
+        # preflight's rule for a source the tenant does not list.
         ctx = self.ctx("toysim")
         self.assertEqual(brief.compute_needs(ctx, self.NOW), [])
 
@@ -437,8 +435,8 @@ class BriefNeedsTests(unittest.TestCase):
 
     def test_a_printed_text_brief_is_recorded_even_while_a_connector_stays_broken(self):
         """Review finding on #240: gating the record on `needs` alone was the mirror image of the bug
-        it fixed. A connector with no session support -- `calendar` and `fireflies` have had none
-        since 2026-09-23 -- keeps `needs` non-empty forever, so the `--text` screen the cycle calls
+        it fixed. A connector with no session support -- `calendar` has had none since 2026-09-23 --
+        keeps `needs` non-empty forever, so the `--text` screen the cycle calls
         "the only screen `/rabota brief` prints on a stale morning" was never recorded, and every
         later call that day re-ran the whole two-round-trip cycle instead of settling to a delta."""
         ctx = self.ctx()
@@ -446,8 +444,6 @@ class BriefNeedsTests(unittest.TestCase):
         # slack fetched fine; calendar stays a recorded failure, as it is in the live tenant
         snapshots.write(ctx.state_dir, "slack", {"ok": True, "error": None, "items": [],
                                                  "fetched_at": "2026-09-16T08:55:00Z"})
-        snapshots.write(ctx.state_dir, "fireflies", {"ok": True, "error": None, "items": [],
-                                                      "fetched_at": "2026-09-16T08:55:00Z"})
         snapshots.write(ctx.state_dir, "calendar", {"ok": False, "error": "no connector", "items": [],
                                                      "fetched_at": "2026-09-16T08:55:00Z"})
         last = ctx.state_dir / "2026-09-16" / "last-brief.json"
@@ -574,14 +570,14 @@ class BriefNeedsTests(unittest.TestCase):
         day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
         (day / "sequence.json").write_text(json.dumps(seq(["K-1"])))
         out = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
-        self.assertEqual({n["source"] for n in out["needs"]}, {"slack", "calendar", "fireflies"})
+        self.assertEqual({n["source"] for n in out["needs"]}, {"slack", "calendar"})
         for n in out["needs"]:
             self.assertEqual(set(n), {"source", "reason", "query", "write_to"})
         ctx2 = self.ctx()
         day2 = ctx2.state_dir / "2026-09-16"; day2.mkdir(parents=True, exist_ok=True)
         (day2 / "sequence.json").write_text(json.dumps(seq(["K-1"])))
         lines = brief.run_brief(ctx2, text=True, now=self.NOW, gh=gh, lin=lin)
-        for source in ("slack", "calendar", "fireflies"):
+        for source in ("slack", "calendar"):
             self.assertTrue(any(l.startswith(f"! {source} needs a fetch —") for l in lines), lines)
 
     def test_needs_does_not_replace_the_brief_or_change_the_exit_code(self):

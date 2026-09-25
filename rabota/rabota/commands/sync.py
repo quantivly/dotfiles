@@ -1,12 +1,25 @@
-"""``rabota sync``: fetch Linear and GitHub into ``sources/*.json`` and record each outcome in ``source_syncs``."""
+"""``rabota sync``: fetch Linear, GitHub and Fireflies into ``sources/*.json`` and record each
+outcome in ``source_syncs``.
+
+Fireflies joined ``linear``/``github`` here in DO-746: a static per-user API key needs no
+per-seat connector authorization, so the timer can fetch it exactly as it already fetches Linear.
+A missing key is not a special case — there is no key on this machine yet — so
+``FirefliesClient.from_context`` refuses (``errors.Refused``, a ``RabotaError``) exactly as
+``LinearClient.from_context`` already does for an unset ``linear_key_env``, and ``run_sync``'s
+existing per-source ``except errors.RabotaError`` records it as a failed source rather than
+raising out of the loop: the other sources still sync, and ``precompute`` still finishes.
+"""
 import os
+from datetime import datetime, timedelta, timezone
 
 from rabota import cli, errors, secrets, snapshots
 from rabota.context import Context
+from rabota.sources.fireflies import FirefliesClient
 from rabota.sources.github import GhClient
 from rabota.sources.linear import LinearClient
 
-FETCHED_SOURCES = ("linear", "github")
+FETCHED_SOURCES = ("linear", "github", "fireflies")
+FIREFLIES_LOOKBACK_DAYS = 2
 
 
 def sync_linear(ctx: Context, lin) -> dict:
@@ -34,15 +47,26 @@ def sync_github(ctx: Context, gh) -> dict:
     return {k: len(payload[k]) for k in ("review_requests", "own_prs", "merged_recent")}
 
 
-def _sync_one(ctx: Context, source: str, lin, gh) -> dict:
+def sync_fireflies(ctx: Context, ff) -> dict:
+    """Recent meeting transcripts, ``action_items`` already parsed into ``(speaker, item, timestamp)``."""
+    since = datetime.now(timezone.utc) - timedelta(days=FIREFLIES_LOOKBACK_DAYS)
+    transcripts = ff.recent_transcripts(since)
+    payload = {"ok": True, "error": None, "transcripts": transcripts}
+    snapshots.write(ctx.state_dir, "fireflies", payload)
+    return {"transcripts": len(transcripts)}
+
+
+def _sync_one(ctx: Context, source: str, lin, gh, ff) -> dict:
     if source == "linear":
         return sync_linear(ctx, lin or LinearClient.from_context(ctx))
     if source == "github":
         return sync_github(ctx, gh or GhClient.from_context(ctx))
+    if source == "fireflies":
+        return sync_fireflies(ctx, ff or FirefliesClient.from_context(ctx))
     raise errors.Usage(f"sync does not fetch {source!r}; use `rabota ingest`")
 
 
-def run_sync(ctx: Context, sources: list[str], lin=None, gh=None) -> dict:
+def run_sync(ctx: Context, sources: list[str], lin=None, gh=None, ff=None) -> dict:
     """Sync each source in turn; the ones that succeed are written even when a later one fails.
 
     Returns ``{source: {"ok", "error", "path", "counts"}}`` and raises ``errors.Partial`` naming
@@ -52,7 +76,7 @@ def run_sync(ctx: Context, sources: list[str], lin=None, gh=None) -> dict:
     for source in sources:
         path = str(ctx.state_dir / "sources" / f"{source}.json")
         try:
-            counts = _sync_one(ctx, source, lin, gh)
+            counts = _sync_one(ctx, source, lin, gh, ff)
         except errors.Usage:
             raise
         except errors.RabotaError as e:
@@ -72,8 +96,8 @@ def run_sync(ctx: Context, sources: list[str], lin=None, gh=None) -> dict:
 
 
 def _build(sub):
-    p = sub.add_parser("sync", help="fetch Linear and GitHub into sources/*.json")
-    p.add_argument("--source", default=",".join(FETCHED_SOURCES), help="comma list: linear,github")
+    p = sub.add_parser("sync", help="fetch Linear, GitHub and Fireflies into sources/*.json")
+    p.add_argument("--source", default=",".join(FETCHED_SOURCES), help="comma list: linear,github,fireflies")
 
 
 def _run(ns):
