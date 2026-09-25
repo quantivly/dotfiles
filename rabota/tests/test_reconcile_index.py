@@ -119,7 +119,67 @@ class TrackedIndexShapeTests(unittest.TestCase):
         tmp, ctx = _ctx("toysim")
         self.addCleanup(tmp.cleanup)
         idx = reconcile.build_tracked_index(ctx, NOW)
-        self.assertEqual(idx["linear"], {"ok": False, "reason": "tenant does not use this source", "issues": []})
+        self.assertEqual(idx["linear"], {"ok": False, "skipped": True,
+                                          "reason": "tenant does not use this source", "issues": []})
+        # Review finding: a skipped source must be distinguishable from a real failure by a caller
+        # that checks `ok` alone, which is the cheap and obvious check. `preflight` already marks
+        # this case `skipped`; the flag is what keeps the two agreeing.
+        self.assertTrue(idx["linear"]["skipped"])
+        self.assertNotIn("skipped", reconcile.build_tracked_index(_ctx("quantivly")[1], NOW)["linear"])
+
+    def test_ok_means_trustworthy_not_merely_copied_from_the_snapshot(self):
+        """Review finding: `ok` was copied straight from the snapshot, so a side came back
+        `ok: True` while its own `reason` said the timestamp was unreadable, and a `fetched_at` in
+        the future came back with no reason at all. A caller that checks `ok` alone -- the cheap and
+        obvious check -- was misled in both cases."""
+        for label, fetched_at, expect_ok in (("unreadable timestamp", "not-a-date", False),
+                                              ("future timestamp", "2099-01-01T00:00:00Z", False),
+                                              ("merely stale", "2026-09-16T06:00:00Z", True),
+                                              ("fresh", "2026-09-16T08:55:00Z", True)):
+            with self.subTest(label=label):
+                tmp, ctx = _ctx("quantivly")
+                self.addCleanup(tmp.cleanup)
+                snapshots.write(ctx.state_dir, "linear",
+                                {"ok": True, "error": None, "issues": [], "fetched_at": fetched_at})
+                side = reconcile.build_tracked_index(ctx, NOW)["linear"]
+                self.assertEqual(side["ok"], expect_ok, side)
+                if not expect_ok:
+                    self.assertIsNotNone(side["reason"], side)
+
+    def test_snapshot_health_names_only_what_cannot_be_relied_on(self):
+        """Review finding: `--text` never noticed an unreadable `sources/linear.json` once the day's
+        `sequence.json` existed -- only JSON mode's `tracked` revalidated it -- so the brief could
+        rank on a corrupt snapshot and say nothing at all about it."""
+        tmp, ctx = _ctx("quantivly")
+        self.addCleanup(tmp.cleanup)
+        (ctx.state_dir / "sources").mkdir(parents=True, exist_ok=True)
+        (ctx.state_dir / "sources" / "linear.json").write_text("{oops")
+        snapshots.write(ctx.state_dir, "github", {"ok": True, "error": None, "own_prs": [],
+                                                   "merged_recent": [], "fetched_at": "2026-09-16T08:55:00Z"})
+        health = reconcile.snapshot_health(ctx, NOW)
+        self.assertEqual([h["source"] for h in health], ["linear"])
+        self.assertIn("unreadable", health[0]["reason"])
+        # A source the tenant does not use is not a health problem. toysim lists github only, so
+        # `linear` must be absent here -- while github, which it does use and has never synced, is
+        # correctly reported. That pair is the distinction the `skipped` flag exists to make.
+        tmp2, ctx2 = _ctx("toysim")
+        self.addCleanup(tmp2.cleanup)
+        toysim = [h["source"] for h in reconcile.snapshot_health(ctx2, NOW)]
+        self.assertNotIn("linear", toysim)
+        self.assertIn("github", toysim)
+
+    def test_the_staleness_rule_has_exactly_one_definition(self):
+        """Review finding: `commands.brief` and `reconcile` each defined `STALE_AFTER_MIN = 60`,
+        tied together only by a comment saying they were the same number. Halving one left the whole
+        suite green, so a comment was doing an import's job."""
+        from rabota import snapshots as snap_mod
+        from rabota.commands import brief as brief_mod
+        self.assertIs(reconcile.STALE_AFTER_MIN, snap_mod.STALE_AFTER_MIN)
+        self.assertIs(brief_mod.STALE_AFTER_MIN, snap_mod.STALE_AFTER_MIN)
+        src = (Path(reconcile.__file__).parent / "reconcile.py").read_text()
+        brief_src = (Path(reconcile.__file__).parent / "commands" / "brief.py").read_text()
+        for name, text in (("reconcile.py", src), ("commands/brief.py", brief_src)):
+            self.assertNotRegex(text, r"(?m)^STALE_AFTER_MIN\s*=\s*\d+", f"{name} restates the number")
 
 
 class TrackedIndexSizeTests(unittest.TestCase):
@@ -161,6 +221,12 @@ class TrackedIndexSizeTests(unittest.TestCase):
         # The honest claim: over the 4 KB reference point for a busy tenant, never carrying the
         # fields dropped on purpose (notifications, review_requests — see the module docstring).
         self.assertGreater(size, 4096, "this tenant scope should exceed the 4 KB reference point")
+        # Review finding: a band of 4096..10240 passed a per-item regression -- adding one field to
+        # every issue moved the total 9422 -> 9797 and still passed. The budget is per item now, so
+        # a field added to every record has to be justified against a number that notices.
+        items = len(issues) + len(own_prs) + len(merged)
+        per_item = size / items
+        self.assertLess(per_item, 265, f"{per_item:.0f} bytes/item: the index grew per record ({size} total)")
         self.assertLess(size, 10240, f"tracked index grew past the ~9 KB measured baseline: {size} bytes")
         self.assertNotIn("a notification the index must never carry", dumped)
         self.assertNotIn("a review request the index must never carry", dumped)

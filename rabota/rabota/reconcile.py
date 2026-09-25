@@ -33,8 +33,8 @@ the CLI has, so it is returned as-is with a ``reason`` noting its age, not suppr
 from datetime import datetime, timezone
 
 from rabota import snapshots
-
-STALE_AFTER_MIN = 60   # same number commands.brief uses for the brief's own staleness and for `needs`
+from rabota.snapshots import STALE_AFTER_MIN
+# One definition, in `snapshots` -- see the comment there for why it is not restated here.
 
 
 def _linear_side(state_dir, now: datetime) -> dict:
@@ -53,8 +53,10 @@ def _linear_side(state_dir, now: datetime) -> dict:
                "updated_at": i.get("updatedAt"), "blocked_by": i.get("blockedBy") or [],
                "blocks": i.get("blocks") or []}
               for i in snap["issues"]]
-    ok = bool(snap.get("ok", True))
-    reason = (snap.get("error") or "last sync failed") if not ok else _staleness_reason(snap, now)
+    fresh_ok, reason = _age_verdict(snap, now)
+    ok = bool(snap.get("ok", True)) and fresh_ok
+    if not snap.get("ok", True):
+        reason = snap.get("error") or "last sync failed"
     return {"ok": ok, "reason": reason, "issues": issues}
 
 
@@ -74,23 +76,33 @@ def _github_side(state_dir, now: datetime) -> dict:
                for p in snap["own_prs"]]
     merged = [{"key": f"{p.get('repo')}#{p.get('number')}", "url": p.get("url"), "merged_at": p.get("mergedAt")}
               for p in snap["merged_recent"]]
-    ok = bool(snap.get("ok", True))
-    reason = (snap.get("error") or "last sync failed") if not ok else _staleness_reason(snap, now)
+    fresh_ok, reason = _age_verdict(snap, now)
+    ok = bool(snap.get("ok", True)) and fresh_ok
+    if not snap.get("ok", True):
+        reason = snap.get("error") or "last sync failed"
     return {"ok": ok, "reason": reason, "own_prs": own_prs, "merged_recent": merged}
 
 
-def _staleness_reason(snap: dict, now: datetime) -> str | None:
-    """``"stale (N min old)"`` when ``fetched_at`` is older than ``STALE_AFTER_MIN``, else ``None``.
+def _age_verdict(snap: dict, now: datetime) -> tuple[bool, str | None]:
+    """``(trustworthy, reason)`` from a snapshot's ``fetched_at``.
 
-    An unparseable ``fetched_at`` is itself a staleness reason, not a raised error — same rule
-    ``compute_needs`` follows for the other three sources.
+    Review finding: ``ok`` used to be copied straight from the snapshot, so a side could come back
+    ``ok: True`` with ``reason`` saying its timestamp was unreadable, and a ``fetched_at`` in the
+    future came back with no reason at all. **``ok`` has to mean "you can rely on this"**, or a
+    caller that checks only ``ok`` -- which is the cheap and obvious thing to check -- is misled.
+    So an unreadable timestamp and a timestamp in the future are both ``False`` here: one means we
+    cannot tell how old the data is, the other means a clock is wrong, and neither is a basis for
+    relying on it. Merely stale stays trustworthy -- old data is still data, which is why it comes
+    back with a reason rather than emptied.
     """
     try:
         fetched = snapshots.parse_fetched_at(snap["fetched_at"])
     except (ValueError, TypeError, KeyError):
-        return "unreadable (fetched_at is not a UTC timestamp)"
+        return False, "unreadable (fetched_at is not a UTC timestamp)"
     age_min = (now - fetched).total_seconds() / 60
-    return f"stale ({int(age_min)} min old)" if age_min > STALE_AFTER_MIN else None
+    if age_min < 0:
+        return False, f"fetched_at is {int(-age_min)} min in the future (clock skew?)"
+    return True, (f"stale ({int(age_min)} min old)" if age_min > STALE_AFTER_MIN else None)
 
 
 def build_tracked_index(ctx, now: datetime | None = None) -> dict:
@@ -116,8 +128,29 @@ def build_tracked_index(ctx, now: datetime | None = None) -> dict:
     """
     now = now or datetime.now(timezone.utc)
     sources = getattr(ctx.tenant, "sources", [])
+    # `skipped` rather than only a reason string: review finding, a source the tenant does not use
+    # was indistinguishable from a real failure to a caller checking `ok` alone, which is the cheap
+    # and obvious check. `preflight` already marks this case `{"ok": True, "skipped": True}`; the
+    # flag is carried here too so the two agree, while `ok` stays False because there is no data.
     linear = (_linear_side(ctx.state_dir, now) if "linear" in sources
-              else {"ok": False, "reason": "tenant does not use this source", "issues": []})
+              else {"ok": False, "skipped": True, "reason": "tenant does not use this source", "issues": []})
     github = (_github_side(ctx.state_dir, now) if "github" in sources
-              else {"ok": False, "reason": "tenant does not use this source", "own_prs": [], "merged_recent": []})
+              else {"ok": False, "skipped": True, "reason": "tenant does not use this source",
+                    "own_prs": [], "merged_recent": []})
     return {"linear": linear, "github": github}
+
+
+def snapshot_health(ctx, now: datetime | None = None) -> list[dict]:
+    """``[{"source", "reason"}]`` for each of ``linear``/``github`` the CLI cannot rely on.
+
+    Cheap on purpose: it reads the two files but projects nothing, so both ``--text`` and JSON can
+    call it on every brief. Review finding: `--text` never noticed an unreadable
+    ``sources/linear.json`` at all once the day's ``sequence.json`` existed -- only JSON mode's
+    ``tracked`` revalidated it -- so the brief could rank on a corrupt snapshot and say nothing. A
+    source the tenant does not use is not a health problem and is never reported.
+    """
+    now = now or datetime.now(timezone.utc)
+    index = build_tracked_index(ctx, now)
+    return [{"source": source, "reason": side["reason"] or "unreliable"}
+            for source, side in index.items()
+            if not side["ok"] and not side.get("skipped")]

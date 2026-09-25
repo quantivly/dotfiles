@@ -10,6 +10,14 @@ from rabota.store import now
 
 FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
+# The one staleness rule for a snapshot, twice the pre-compute timer's 30-minute period.
+# It lives here, with `parse_fetched_at`, because it is a fact about snapshots rather than
+# about any one command -- and because it was briefly defined twice, in `commands.brief` and
+# in `reconcile`, tied together only by a comment saying they were the same number. Halving
+# one of them left the whole suite green (review finding), so a comment was doing an import's
+# job. Import it; do not restate it.
+STALE_AFTER_MIN = 60
+
 
 def _path(state_dir: Path, source: str) -> Path:
     return Path(state_dir) / "sources" / f"{source}.json"
