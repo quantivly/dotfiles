@@ -862,3 +862,25 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
         self.assertFalse(any("needs classifying" in l for l in lines), lines)
         self.assertTrue(json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())["ids"])
+
+    def test_classified_without_text_is_a_usage_error_and_marks_nothing(self):
+        # Review round 4, F1: a JSON call carrying the acknowledgement would mark items classified
+        # (and record the brief as shown) though nothing was printed.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        with self.assertRaises(errors.Usage):
+            brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
+        self.assertFalse((ctx.state_dir / brief.LAST_SHOWN_FILE).exists())
+
+    def test_an_unknown_classified_source_is_a_usage_error(self):
+        # Review round 4, F2: `Fireflies` or `slack` used to parse and acknowledge nothing, silently.
+        ctx = self.ctx()
+        for bad in (["Fireflies"], ["slack"], ["fireflies", "calendar"]):
+            with self.assertRaises(errors.Usage, msg=bad):
+                brief.run_brief(ctx, text=True, now=self.NOW, gh=FakeGh("work-login"),
+                                lin=FakeLinear(VIEWER), classified=bad)

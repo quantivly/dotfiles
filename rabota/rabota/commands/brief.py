@@ -127,6 +127,21 @@ LINE_MAX = 120
 NEEDS_SOURCES = ("slack", "calendar")    # never fetched by the CLI itself; see module docstring
 LAST_SHOWN_FILE = snapshots.LAST_SHOWN_FILE    # one definition, in `snapshots`; commands.sync reads it for F2
 FIREFLIES_CLASSIFIED_FILE = "fireflies-classified.json"
+CLASSIFIABLE_SOURCES = ("fireflies",)    # the only source whose handed-out items `--classified` can acknowledge
+
+
+def check_classified(classified: list[str] | None, text: bool) -> None:
+    """Refuse an acknowledgement that cannot be honest (DO-746 review round 4).
+
+    ``--classified`` marks items as classified; an unknown name would silently acknowledge nothing,
+    and one on a JSON call would mark items on a screen nobody was shown -- finding D's own bug,
+    reached by a path the CLI allowed. Both are usage errors, raised before anything is written.
+    """
+    unknown = [s for s in (classified or []) if s not in CLASSIFIABLE_SOURCES]
+    if unknown:
+        raise errors.Usage(f"--classified accepts only {', '.join(CLASSIFIABLE_SOURCES)}; got {', '.join(unknown)}")
+    if classified and not text:
+        raise errors.Usage("--classified requires --text: it acknowledges items on the screen the reader is shown")
 FIREFLIES_PENDING_FILE = "fireflies-pending.json"
 
 
@@ -544,6 +559,7 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     docstring for why preflight itself is not skipped.
     """
     check_max_lines(max_lines)                  # a usage error must not leave a brief.md behind
+    check_classified(classified, text)          # likewise, before preflight or any write
     preflight_cmd.run_command(ctx, gh=gh, lin=lin)   # exit 3 on a failed identity pin, exactly as `rabota preflight`
     day = ctx.state_dir / ctx.today.isoformat()
     seq_path = day / "sequence.json"
@@ -638,9 +654,9 @@ def _build(sub):
     p = sub.add_parser("brief", help="≤12 next actions; narrative to brief.md")
     p.add_argument("--max-lines", type=int, default=MAX_LINES,
                    help=f"cap on printed lines, at least 1 (default {MAX_LINES}); a wrapper that prepends a line passes one fewer")
-    p.add_argument("--classified", action="append", default=[],
+    p.add_argument("--classified", action="append", default=[], choices=CLASSIFIABLE_SOURCES,
                    help="source(s) whose handed-out items this call acknowledges as classified "
-                        "(fix round 2, finding D); currently only 'fireflies' does anything")
+                        "(fix round 2, finding D); requires --text")
 
 
 cli.register("brief", _build,
