@@ -68,11 +68,13 @@ that call is what keeps the fetch from being wasted.)
      already carried. Record: `rabota escalate --question … --evidence … --option …` for
      questions; dated promises become pins: `rabota pin <key> --bucket 2 --rationale …`. Say
      "already done" as confidently as "overdue"; cite the artifact.
-   - **Brief, turn 2's final call.** `rabota rank && rabota --text brief --max-lines 11` — the
-     `rank` is not optional: without it the brief re-prints the pre-fetch ranking and says `no
-     change`, so the fetch is wasted silently. Print its lines verbatim, then append ≤2 lines of
-     reconcile delta. **This is the only screen `/rabota brief` prints on a stale morning.**
-     Nothing else goes to the terminal.
+   - **Brief, turn 2's final call.** `rabota rank && rabota --text brief --max-lines 11 --classified fireflies` —
+     the `rank` is not optional: without it the brief re-prints the pre-fetch ranking and says `no
+     change`, so the fetch is wasted silently. `--classified fireflies` is what actually marks the
+     Fireflies items you were just handed as classified; omitting it (e.g. a bare `rabota --text
+     brief`) classifies nothing, however many items the screen names. Print its lines verbatim,
+     then append ≤2 lines of reconcile delta. **This is the only screen `/rabota brief` prints on a
+     stale morning.** Nothing else goes to the terminal.
 3. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> --machine dev --run` — one call, one unit,
    seat-gated; the CLI refuses with the seat's `resets_at` when the window is spent. `--machine dev`
    is **required** with `--run`: the local form is not implemented and refuses. Watch with

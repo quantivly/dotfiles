@@ -21,6 +21,10 @@ that honest: ``FIREFLIES_LOOKBACK_MARGIN_HOURS`` covers clock skew and a transcr
 little after its meeting ends, and ``FIREFLIES_LOOKBACK_MAX_DAYS`` stops a months-old or missing
 marker from asking Fireflies for a year of transcripts. A tenant that has never shown a brief
 falls back to ``FIREFLIES_LOOKBACK_MIN_DAYS``, the old fixed window, until it has one.
+
+``fireflies_since`` also clamps the UPPER bound at ``now`` (fix round 2, finding C) -- a marker
+ahead of the clock this call reads otherwise pushed ``since`` past ``now`` and the fetch window
+started in the future, so a real unclassified meeting was never fetched at all.
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -38,17 +42,26 @@ FIREFLIES_LOOKBACK_MAX_DAYS = 14                 # bound: a stale/missing marker
 
 
 def fireflies_since(ctx: Context, now: datetime) -> datetime:
-    """The fetch window start: since the last brief actually shown, plus a margin, bounded above.
+    """The fetch window start: since the last brief actually shown, plus a margin, bounded above
+    and below.
 
     See the module docstring for why this replaced a fixed ``FIREFLIES_LOOKBACK_DAYS``. Reads the
     marker through ``snapshots.read_last_shown`` rather than inline — see that function's comment
     for why the read must not live in this file.
+
+    **Finding C (DO-746 fix round 2).** Only the lower bound (``FIREFLIES_LOOKBACK_MAX_DAYS``) was
+    clamped; a ``last-brief-shown.json`` ahead of ``now`` -- multi-machine clock skew, or any
+    ``generated_at`` written ahead of this call's clock -- pushed ``since`` past ``now``, so the
+    window started in the future and every real meeting between the true last-shown time and now
+    was silently never fetched. ``since`` is now also capped at ``now``.
     """
     earliest = now - timedelta(days=FIREFLIES_LOOKBACK_MAX_DAYS)
     shown_at = snapshots.read_last_shown(ctx.state_dir)
     if shown_at is None:
-        return max(now - timedelta(days=FIREFLIES_LOOKBACK_MIN_DAYS), earliest)
-    return max(shown_at - timedelta(hours=FIREFLIES_LOOKBACK_MARGIN_HOURS), earliest)
+        since = max(now - timedelta(days=FIREFLIES_LOOKBACK_MIN_DAYS), earliest)
+    else:
+        since = max(shown_at - timedelta(hours=FIREFLIES_LOOKBACK_MARGIN_HOURS), earliest)
+    return min(since, now)
 
 
 def sync_linear(ctx: Context, lin) -> dict:

@@ -236,6 +236,18 @@ class SyncTests(unittest.TestCase):
                 since = sync.fireflies_since(ctx, self.NOW)
                 self.assertEqual(since, self.NOW - timedelta(days=sync.FIREFLIES_LOOKBACK_MIN_DAYS), label)
 
+    def test_a_marker_ahead_of_now_does_not_push_since_into_the_future(self):
+        # Finding C (DO-746 fix round 2): only the lower bound was clamped. A marker ahead of
+        # `now` -- multi-machine clock skew, or any `generated_at` written ahead of this call's
+        # clock -- pushed `since` past `now`, so the fetch window started in the future and a real
+        # unclassified meeting between the true last-shown time and now was never fetched. Revert
+        # the `min(since, now)` clamp to see this row fail.
+        ctx = self.ctx()
+        future = self.NOW + timedelta(days=1)
+        self._write_last_shown(ctx, future.isoformat().replace("+00:00", "Z"))
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertLessEqual(since, self.NOW)
+
     def test_sync_fireflies_actually_uses_the_derived_window(self):
         # Not just `fireflies_since` in isolation -- `sync_fireflies` must pass its result to the
         # client. Revert `sync_fireflies` to its old `datetime.now(...) - timedelta(days=2)` to see

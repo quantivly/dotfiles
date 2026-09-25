@@ -53,7 +53,14 @@ class SkillMatchesCliTests(unittest.TestCase):
         # re-print the pre-fetch ranking and label it `no change` -- the fetch wasted, silently
         # (review finding). Turn 2's final call therefore ranks first. Driven, not assumed: see
         # test_brief for `sequence.json` not being regenerated on a second same-day call.
-        self.assertIn("`rabota rank && rabota --text brief --max-lines 11`", _cycle_section())
+        #
+        # AMENDED in the DO-746 fix round 2 (finding D): the exact string this asserted grew
+        # `--classified fireflies` -- the explicit acknowledgement that actually marks Fireflies
+        # items classified (see `commands.brief.run_brief`'s `classified` parameter). Without it
+        # this row would demand the skill keep an under-specified call that classifies nothing;
+        # it fails against pre-fix-round-2 code and against a reverted skill line alike.
+        self.assertIn("`rabota rank && rabota --text brief --max-lines 11 --classified fireflies`",
+                      _cycle_section())
 
     def test_needs_empty_stops_and_needs_non_empty_prints_nothing_yet(self):
         # Both halves: the empty case must stop, and the non-empty case must NOT print turn 1's
