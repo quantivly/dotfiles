@@ -327,7 +327,14 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     health = reconcile.snapshot_health(ctx, now)     # in BOTH modes: see `snapshot_health`
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
                            now=now, needs=needs, health=health)
-    emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
+    # `last-brief.json` is the record of what the reader was SHOWN, and it is what makes the next
+    # call print a delta instead of the list. So it is only written when these lines were actually
+    # the screen -- which, per the cycle, is when `needs` is empty. Measured regression: with
+    # `needs` non-empty the caller prints nothing and fetches, then calls `brief` again; recording
+    # here made that second call a same-day rerun, so the one screen the reader got was
+    # `no change since HH:MM` and NOT A SINGLE RANKED ITEM. The brief had deleted itself.
+    if not needs:
+        emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
     if text:
         return lines
     # `tracked` only when something is actually going to be reconciled. Reconcile classifies
