@@ -44,13 +44,13 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rabota import cli, emit, errors, snapshots
+from rabota import cli, emit, errors, reconcile, snapshots
 from rabota.commands import preflight as preflight_cmd
 from rabota.commands.rank import run_rank
 from rabota.context import Context
 
 MAX_LINES = 12
-STALE_AFTER_MIN = 60          # twice the pre-compute timer's 30-minute period; also the "needs" staleness rule below
+STALE_AFTER_MIN = snapshots.STALE_AFTER_MIN    # one definition, in `snapshots`; never restate it here
 TITLE_MAX = 60
 LINE_MAX = 120
 NEEDS_SOURCES = ("slack", "calendar", "fireflies")    # never fetched by the CLI itself; see module docstring
@@ -172,7 +172,7 @@ def _assemble(head: list[str], body: list[str], alerts: list[str], tail: list[st
 
 def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, max_lines: int = MAX_LINES,
                    brief_path: str | None = None, now: datetime | None = None,
-                   needs: list[dict] | None = None) -> list[str]:
+                   needs: list[dict] | None = None, health: list[dict] | None = None) -> list[str]:
     """The ≤``max_lines`` terminal lines; with ``previous`` (last-brief.json) only the deltas print.
 
     One ``!`` line per failed source and per ``needs`` entry (see ``compute_needs`` and
@@ -187,7 +187,8 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
         stale = staleness_line(seq, now)
         if stale:
             head.append(stale)
-    alerts = _alert_lines(seq, needs)
+    alerts = _alert_lines(seq, needs) + [f"! {h['source']} snapshot is unreliable — {h['reason']}"
+                                         for h in (health or [])]
     tail = ([inbox_summary] if inbox_summary else []) + ([f"brief: {brief_path}"] if brief_path else [])
     keys = [i["key"] for i in seq["items"]]
     if previous is not None:
@@ -294,10 +295,17 @@ def compute_needs(ctx: Context, now: datetime) -> list[dict]:
 
 
 def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetime | None = None, gh=None, lin=None):
-    """Preflight, rank (if needed) and compose today's brief in one call; return lines or ``{"lines", "brief_path", "needs"}``.
+    """Preflight, rank (if needed) and compose today's brief in one call; return lines or
+    ``{"lines", "brief_path", "needs", "tracked"}``.
 
     ``gh``/``lin`` let a test substitute preflight's identity clients, exactly as ``preflight.run_preflight``
     already allows; left ``None`` (the CLI wiring), real clients are built and a failed pin exits 3.
+
+    **Move 4 (``tracked``).** The tracked-side index reconcile needs (``reconcile.build_tracked_index``)
+    rides in the same JSON reply as ``needs`` — turn 1's ``brief`` call, the only one that can afford
+    it (see ``rabota.reconcile``'s module docstring). It costs a re-read of the two small snapshot
+    files already on disk, never a fetch, so it is built unconditionally in JSON mode; ``--text`` is
+    the human/terminal path and has no line shape for structured data, so it skips the read entirely.
     """
     check_max_lines(max_lines)                  # a usage error must not leave a brief.md behind
     preflight_cmd.run_command(ctx, gh=gh, lin=lin)   # exit 3 on a failed identity pin, exactly as `rabota preflight`
@@ -316,10 +324,19 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     now = now or datetime.now(timezone.utc)
     needs = compute_needs(ctx, now)     # before any write: a half-rewritten brief.md is worse than none
     emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
+    health = reconcile.snapshot_health(ctx, now)     # in BOTH modes: see `snapshot_health`
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
-                           now=now, needs=needs)
+                           now=now, needs=needs, health=health)
     emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
-    return lines if text else {"lines": lines, "brief_path": str(brief_path), "needs": needs}
+    if text:
+        return lines
+    # `tracked` only when something is actually going to be reconciled. Reconcile classifies
+    # commitments found in the CONNECTOR items, and those arrive only via a fetch that `needs`
+    # asked for -- so with `needs` empty there is nothing new to classify, and the index would be
+    # ~9 KB of context bought for nothing on every brief of an already-fetched morning (review
+    # finding: it was built unconditionally, including on a "no change since HH:MM" rerun).
+    tracked = reconcile.build_tracked_index(ctx, now) if needs else None
+    return {"lines": lines, "brief_path": str(brief_path), "needs": needs, "tracked": tracked}
 
 
 def _build(sub):
