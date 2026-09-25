@@ -598,3 +598,156 @@ class BriefNeedsTests(unittest.TestCase):
         lines = brief.terminal_lines(s, None, None, max_lines=12, brief_path="/p/brief.md", needs=needs)
         self.assertEqual(len(lines), 12)
         self.assertTrue(any(l.startswith("! slack needs a fetch —") for l in lines))
+
+
+class BriefFirefliesNeedsTests(unittest.TestCase):
+    """DO-746 fix round, finding F1: Fireflies action items reach classification through `needs`
+    — no query, `fetched: True`, no `write_to` — and exactly once."""
+
+    def ctx(self, tenant="quantivly"):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    NOW = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+
+    def _write_fireflies(self, ctx, transcripts, fetched_at="2026-09-16T08:30:00Z"):
+        snapshots.write(ctx.state_dir, "fireflies",
+                        {"ok": True, "error": None, "transcripts": transcripts, "fetched_at": fetched_at})
+
+    def _fresh_needs_sources(self, ctx):
+        for source in brief.NEEDS_SOURCES:
+            snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [],
+                                                    "fetched_at": "2026-09-16T08:55:00Z"})
+
+    def test_no_fireflies_snapshot_is_not_in_needs(self):
+        ctx = self.ctx()
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_a_tenant_that_does_not_use_fireflies_never_gets_an_entry(self):
+        # toysim only lists `sources = ["github"]` (tests/fixtures/config/tenants/toysim.toml).
+        ctx = self.ctx("toysim")
+        self._write_fireflies(ctx, [{"id": "t1", "title": "x", "date": "d",
+                                     "action_items": [{"speaker": None, "item": "x", "timestamp": None}]}])
+        self.assertEqual(brief.compute_needs(ctx, self.NOW), [])
+
+    def test_an_empty_transcripts_snapshot_is_not_in_needs(self):
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [])
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_a_transcript_with_no_action_items_contributes_nothing(self):
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [{"id": "t1", "title": "x", "date": "d", "action_items": []}])
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_an_unreadable_fireflies_snapshot_is_not_needs_and_does_not_crash(self):
+        # Same precedent as `compute_needs`'s own unreadable-snapshot handling for slack/calendar:
+        # a broken file is a reason to say nothing about Fireflies, never a reason to cost the brief.
+        ctx = self.ctx()
+        (ctx.state_dir / "sources").mkdir(parents=True, exist_ok=True)
+        (ctx.state_dir / "sources" / "fireflies.json").write_text("{oops")
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_unclassified_items_produce_a_needs_entry_that_carries_them_with_no_fetch(self):
+        # F1's core claim: this is what lets a headless turn 2 classify without a fetch or ingest.
+        # Revert `compute_needs` to drop the `_fireflies_need` call to see this row fail: with
+        # `29ab0d3` alone, Fireflies never appears in `needs` at all, however stale its snapshot.
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("fireflies", needs)
+        entry = needs["fireflies"]
+        self.assertTrue(entry["fetched"])
+        self.assertNotIn("query", entry)
+        self.assertNotIn("write_to", entry)
+        self.assertEqual(entry["items"], [{"transcript_id": "t1", "meeting": "1:1", "date": "2026-09-16",
+                                           "speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}])
+
+    def test_alert_line_says_classify_not_fetch(self):
+        # `_alert_lines` keys off `fetched`, not the source name (Move 6) -- a Fireflies alert must
+        # never claim there is a fetch or a file to write, since there is neither.
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": None, "item": "x", "timestamp": None}]}])
+        needs = brief.compute_needs(ctx, self.NOW)
+        lines = brief.terminal_lines({"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z",
+                                      "failed_sources": [], "items": [], "triage": [], "decisions": []},
+                                     None, None, needs=needs)
+        line = next(l for l in lines if l.startswith("! fireflies "))
+        self.assertIn("classify", line)
+        self.assertNotIn("needs a fetch", line)
+
+    def test_a_needs_empty_morning_can_still_be_caused_by_fireflies_alone(self):
+        # The invariant's clause "whether or not Slack or Calendar need a fetch that morning":
+        # fresh slack/calendar plus an unclassified Fireflies item must still make `needs`
+        # non-empty, so turn 2 still runs and classifies it.
+        ctx = self.ctx()
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        needs = brief.compute_needs(ctx, self.NOW)
+        self.assertEqual({n["source"] for n in needs}, {"fireflies"})
+
+    def test_run_brief_shown_marks_items_classified_so_they_do_not_reappear(self):
+        # "Exactly once": once a brief carrying these items was actually shown (--text, or JSON
+        # with needs now empty), the same transcript must not be handed to `needs` again.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        first = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(any("fireflies" in l for l in first), first)
+        classified_file = ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE
+        self.assertTrue(classified_file.exists())
+        self.assertEqual(json.loads(classified_file.read_text())["ids"], ["t1"])
+        second = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertNotIn("fireflies", {n["source"] for n in second["needs"]})
+
+    def test_a_meeting_after_being_shown_still_reaches_classification(self):
+        # The other half of "exactly once": a NEW meeting that lands after the last shown brief
+        # must still reach `needs`, even though an older transcript in the same snapshot is now
+        # classified. Weekends and a missed tick must not open a gap here either -- this is the
+        # same mechanism that closes that gap, just exercised same-day.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]},
+                                    {"id": "t2", "title": "standup", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "New thing", "timestamp": "02:00"}]}])
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("fireflies", needs)
+        self.assertEqual([i["transcript_id"] for i in needs["fireflies"]["items"]], ["t2"])
+
+    def test_a_brief_that_was_not_shown_does_not_mark_anything_classified(self):
+        # Mirrors `test_a_brief_that_printed_nothing_does_not_record_itself_as_shown`: turn 1's
+        # JSON call with `needs` non-empty (here, purely because of fireflies) prints nothing and
+        # must not mark the items classified -- only a call that was actually shown may.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
+
+    def test_last_brief_shown_marker_is_written_cross_day_matching_the_sequence(self):
+        # `commands.sync.fireflies_since` reads this file to derive its fetch window (F2); it must
+        # exist at the state-dir root, not nested under today's day directory, so it survives a day
+        # boundary the way the day-scoped `last-brief.json` cannot.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        day_seq = json.loads((ctx.state_dir / "2026-09-16" / "sequence.json").read_text())
+        marker = ctx.state_dir / brief.LAST_SHOWN_FILE
+        self.assertTrue(marker.exists())
+        self.assertEqual(json.loads(marker.read_text())["generated_at"], day_seq["generated_at"])

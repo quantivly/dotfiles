@@ -84,13 +84,30 @@ class SkillMatchesCliTests(unittest.TestCase):
         for source in brief.NEEDS_SOURCES:
             self.assertIn(source, cycle, f"{source} (from brief.NEEDS_SOURCES) is not mentioned in the cycle")
 
-    def test_fireflies_is_not_named_as_something_the_session_fetches(self):
-        # DO-746: Fireflies moved from brief.NEEDS_SOURCES to sync.FETCHED_SOURCES -- it is now
-        # fetched server-side by the timer, like Linear and GitHub, and neither of those is named
-        # in this section either. A stale "fetch Fireflies" instruction here would cost an agent a
-        # round-trip for nothing (brief's hazard 3). `test_turn_2_sources_match_compute_needs`
-        # cannot catch this by itself since it only checks presence of current members.
-        self.assertNotIn("fireflies", _cycle_section().lower())
+    def test_fireflies_is_named_as_classified_not_fetched(self):
+        # DO-746: Fireflies moved from brief.NEEDS_SOURCES to sync.FETCHED_SOURCES -- it is fetched
+        # server-side by the timer, like Linear and GitHub, and neither of those is named in this
+        # section either. A stale "fetch Fireflies" instruction here would cost an agent a
+        # round-trip for nothing (original brief's hazard 3).
+        #
+        # AMENDED in the DO-746 fix round (finding F1): before that round this row asserted
+        # "fireflies" appears nowhere in the cycle at all -- true then, because nothing read its
+        # snapshot. F1's fix makes `compute_needs` hand unclassified Fireflies items to turn 2
+        # through `needs` itself (a `fetched: true` entry, no query), so the skill now has to name
+        # it -- as something turn 2 classifies, never as something it fetches. The old assertion
+        # would fail against the fixed code (it must mention "fireflies" now); this replacement
+        # still catches the original regression, a reintroduced "fetch Fireflies" instruction.
+        # Whitespace-collapsed so this checks prose-level adjacency, not accidental line-wrap
+        # placement in the markdown source.
+        cycle = re.sub(r"\s+", " ", _cycle_section())
+        self.assertIn("fireflies", cycle.lower())
+        # The correct instruction says Fireflies needs NO fetch -- "no fetch" must sit right next
+        # to it. What must never appear is a reverted imperative to fetch it, e.g. "fetch Fireflies"
+        # or "Fireflies: fetch ... query" (the original brief's hazard 3 shape) -- a literal
+        # "fetch"/"fireflies" adjacency with no "no" between them.
+        self.assertRegex(cycle, r"(?i)fireflies\)[^.]*\bno fetch\b")
+        self.assertNotIn("fetch fireflies", cycle.lower())
+        self.assertNotIn("fireflies: fetch", cycle.lower())
 
 
 if __name__ == "__main__":

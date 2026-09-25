@@ -1,10 +1,19 @@
 """``rabota ingest``: store connector results the skill fetched in-session.
 
-Single-source form (unchanged): ``ingest {slack,calendar,fireflies} --file F``. Multi-source form
-(DO-727): ``ingest --file slack=F1 --file calendar=F2 --file fireflies=F3`` — the skill fetches all
-three connectors in one in-session round-trip, so one ``ingest`` call replaces three, each a full
+Single-source form (unchanged): ``ingest {slack,calendar} --file F``. Multi-source form
+(DO-727): ``ingest --file slack=F1 --file calendar=F2`` — the skill fetches both
+connectors in one in-session round-trip, so one ``ingest`` call replaces two, each a full
 model round-trip in an agent loop. Four decisions govern the multi-source form; each is load-bearing
 and each is tested:
+
+**Fireflies is not in ``ALLOWED`` (DO-746 fix round, finding F4).** It moved to
+``sync.FETCHED_SOURCES`` in DO-746: the timer fetches it server-side into
+``sources/fireflies.json`` with a ``{"transcripts": [...]}`` shape. Before this fix, a manual
+``ingest fireflies --file F`` was still accepted and wrote ``{"items": [...]}`` instead — a
+different shape, at the same path, with nothing to notice the mismatch — silently discarding the
+timer's snapshot until the next sync tick. There is no legitimate caller for it any more: the
+skill never fetches Fireflies in-session (see ``commands.brief``'s ``compute_needs``), so the only
+way to reach this path was a stale habit or a hand-typed command, and it is refused outright now.
 
 1. **A bad file among good ones is reported, not silently dropped, and the good ones still land.**
    Refusing the whole call whenever one of three files is malformed would waste the other two
@@ -45,7 +54,7 @@ from pathlib import Path
 from rabota import cli, errors, snapshots
 from rabota.context import Context
 
-ALLOWED = ("slack", "calendar", "fireflies")
+ALLOWED = ("slack", "calendar")
 
 
 def _load(file: Path) -> dict:

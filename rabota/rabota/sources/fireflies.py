@@ -27,9 +27,22 @@ beyond that, so the parser degrades rather than raises on anything that does not
 - A header followed immediately by another header (or by nothing) → that speaker contributes no
   items; the loop just never appends any line for them.
 - A line with no trailing ``(MM:SS)``/``(HH:MM:SS)`` → ``timestamp: None``, item text kept as-is.
+- A header spelled ``**Alex:**`` (trailing colon) → the colon is stripped from ``speaker``, not
+  kept as part of the name.
 
 No branch below raises: the four cases above already fall out of one loop with no special-casing,
 which is the point — a shape observed in a handful of meetings should not be enforced as a schema.
+
+**Known limitation, not fixed here (DO-746 fix round, finding F3).** A long action item that
+wraps onto a second markdown line with no blank line between — the timestamp then trailing the
+*second* line, not the first — is parsed as two separate items, and the first loses its
+timestamp. Joining consecutive non-header lines would fix that case, but nothing in this string
+distinguishes it from two genuinely separate one-line items with no timestamp of their own
+(``test_item_with_no_timestamp_keeps_the_full_text_and_a_none_timestamp`` exists because that
+case is real) — a join that guesses wrong silently merges two unrelated commitments into one,
+which is worse than the current split. Left as a known limit and pinned by
+``test_a_wrapped_two_line_item_is_a_known_pinned_limitation`` in ``tests/test_fireflies.py``
+rather than guessed at.
 """
 import json
 import re
@@ -72,6 +85,8 @@ def parse_action_items(text: str | None) -> list[dict]:
         header = _HEADER_RE.match(line)
         if header:
             name = header.group(1).strip()
+            if name.endswith(":"):     # minor: **Alex:** must not leak the colon into the name
+                name = name[:-1].strip()
             speaker = None if name == "Unassigned" else name
             continue
         match = _TIMESTAMP_RE.search(line)

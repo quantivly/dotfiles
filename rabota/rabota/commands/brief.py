@@ -41,6 +41,29 @@ the ``rabota`` skill's step 2) — travels only in the JSON return (``{"needs": 
 ``needs`` is not itself a failure: the CLI did its job and is naming what would make the answer
 better, so it does not change the exit code (0), the same way a failed source already does not.
 
+**Move 6 (Fireflies reaches classification without a fetch, DO-746 fix round finding F1).**
+``29ab0d3`` moved Fireflies into ``sync.FETCHED_SOURCES`` but left nothing reading
+``sources/fireflies.json`` for classification: ``reconcile.build_tracked_index`` projects only
+Linear and GitHub, and turn 2 of the skill cycle only ever ran when ``needs`` was non-empty for
+Slack/Calendar. So a Fireflies action item could sync forever and never reach the model that
+classifies it — silently, because nothing failed. The fix reuses turn 2 rather than adding a new
+path: ``compute_needs`` appends a ``{"source": "fireflies", "items": [...], "fetched": True}``
+entry — no ``query``, because there is nothing left to fetch — whenever the snapshot holds action
+items not yet classified. ``_alert_lines`` and the skill's step 2 both key off ``fetched`` rather
+than the source name, so this degrades to the ordinary fetch-needed shape for anything else.
+
+"Not yet classified" is tracked by transcript id in ``<state_dir>/fireflies-classified.json``
+(``_fireflies_classified_ids`` / ``_mark_fireflies_classified``), written at exactly the point
+``run_brief`` decides today's per-day ``last-brief.json`` records a brief that was actually shown
+(see Move 2's comment on that gate) — the same "shown, not merely computed" test this file already
+applies to the delta record. A transcript id is dropped from the stored set as soon as it falls out
+of the current snapshot, so the file stays bounded by ``sync``'s own fetch window (see
+``commands.sync``'s F2 fix) rather than growing forever. This is also the point that writes
+``last-brief-shown.json`` at the state-dir root — cross-day, unlike the day-scoped
+``last-brief.json`` — which ``commands.sync.fireflies_since`` reads to derive its fetch window from
+the invariant ("every item from a meeting after the last shown brief reaches classification")
+rather than a fixed number of days.
+
 **Move 5 (``--dry-run`` writes nothing, DO-742).** ``run_brief`` used to ignore ``ctx.dry_run``
 outright — the global flag every subcommand either honours or silently ignores — so a dry run
 wrote ``brief.md``, ``last-brief.json`` and (via the implicit ``run_rank``) ``sequence.json``
@@ -80,6 +103,8 @@ STALE_AFTER_MIN = snapshots.STALE_AFTER_MIN    # one definition, in `snapshots`;
 TITLE_MAX = 60
 LINE_MAX = 120
 NEEDS_SOURCES = ("slack", "calendar")    # never fetched by the CLI itself; see module docstring
+LAST_SHOWN_FILE = snapshots.LAST_SHOWN_FILE    # one definition, in `snapshots`; commands.sync reads it for F2
+FIREFLIES_CLASSIFIED_FILE = "fireflies-classified.json"
 
 
 def _truncate_suffix(s: str, budget: int) -> str:
@@ -158,11 +183,19 @@ def _alert_lines(seq: dict, needs: list[dict] | None) -> list[str]:
     only these lines and would otherwise have to make a second call for the instruction -- which is
     the round-trip this whole change exists to remove. The JSON form keeps the absolute
     ``write_to``; here the basename is enough, since the caller passed the state dir in.
+
+    An entry with ``fetched: True`` (Move 6: Fireflies already has its items, nothing to fetch)
+    gets a different line naming what is actually true of it — no fetch, no file to write, only
+    classification — keyed off that flag rather than the source name, so any future source that
+    reuses this shape gets the right words for free.
     """
     lines = [f"! {s} failed — list is partial" for s in seq.get("failed_sources", [])]
     for n in (needs or []):
-        lines.append(f"! {n['source']} needs a fetch — {n['reason']} → "
-                     f"{Path(n['write_to']).name} ({n['query']})")
+        if n.get("fetched"):
+            lines.append(f"! {n['source']} needs classifying — {n['reason']}, no fetch needed")
+        else:
+            lines.append(f"! {n['source']} needs a fetch — {n['reason']} → "
+                         f"{Path(n['write_to']).name} ({n['query']})")
     return [line if len(line) <= LINE_MAX else line[:LINE_MAX - 1] + "…" for line in lines]
 
 
@@ -287,12 +320,89 @@ def _needs_query(source: str, snap: dict | None) -> str:
     raise ValueError(f"no needs query for {source!r}")
 
 
-def compute_needs(ctx: Context, now: datetime) -> list[dict]:
-    """``needs``: one ``{"source", "reason", "query", "write_to"}`` per stale-or-missing ``NEEDS_SOURCES`` entry.
+def _fireflies_classified_path(ctx: Context) -> Path:
+    return ctx.state_dir / FIREFLIES_CLASSIFIED_FILE
 
-    See the module docstring for why only ``slack``/``calendar``/``fireflies`` can appear, why the
-    staleness rule is ``STALE_AFTER_MIN`` and not a new number, and why "never fetched" and "stale"
-    are distinguished. A source the tenant does not list is skipped, never requested.
+
+def _fireflies_classified_ids(ctx: Context) -> set[str]:
+    """The set of Fireflies transcript ids already handed to a shown brief for classification."""
+    path = _fireflies_classified_path(ctx)
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+    ids = data.get("ids") if isinstance(data, dict) else None
+    return set(ids) if isinstance(ids, list) else set()
+
+
+def _fireflies_transcripts(ctx: Context) -> list[dict] | None:
+    """The current ``sources/fireflies.json`` snapshot's ``transcripts``, or ``None`` if there is
+    nothing usable — absent, unreadable, or not the expected shape. Never raises: an unreadable
+    Fireflies snapshot is not this function's failure to report, only its reason to say nothing."""
+    try:
+        snap = snapshots.read(ctx.state_dir, "fireflies")
+    except Exception:  # noqa: BLE001 — same reasoning as the rest of `compute_needs`
+        return None
+    if not isinstance(snap, dict):
+        return None
+    transcripts = snap.get("transcripts")
+    return transcripts if isinstance(transcripts, list) else None
+
+
+def _fireflies_need(ctx: Context) -> dict | None:
+    """A ``needs`` entry carrying every Fireflies action item not yet handed to a shown brief.
+
+    See Move 6 in the module docstring. Unlike a Slack/Calendar entry, this one needs no fetch —
+    the timer already fetched it — so it carries ``items`` directly and ``fetched: True``, and has
+    no ``query``/``write_to``. ``None`` when there is nothing unclassified, so a tenant with no
+    Fireflies key (or nothing new since last shown) gets no entry at all.
+    """
+    transcripts = _fireflies_transcripts(ctx)
+    if not transcripts:
+        return None
+    classified = _fireflies_classified_ids(ctx)
+    items = []
+    for t in transcripts:
+        tid = t.get("id")
+        if tid is None or str(tid) in classified:
+            continue
+        for action_item in (t.get("action_items") or []):
+            items.append({"transcript_id": tid, "meeting": t.get("title"), "date": t.get("date"),
+                         **action_item})
+    if not items:
+        return None
+    return {"source": "fireflies", "reason": f"{len(items)} unclassified item(s)",
+            "items": items, "fetched": True}
+
+
+def _mark_fireflies_classified(ctx: Context, needs: list[dict]) -> None:
+    """Record every Fireflies transcript id just handed to a SHOWN brief as classified.
+
+    Called only where ``run_brief`` already decides today's brief was the screen the reader got
+    (see Move 6) — handing items to `needs` is not itself classification; being shown is the closest
+    proxy the CLI has for "turn 2 actually ran". Ids no longer present in the current snapshot are
+    dropped rather than kept forever, so this file stays bounded by `sync`'s own fetch window
+    instead of growing across every meeting Fireflies has ever recorded.
+    """
+    entry = next((n for n in needs if n.get("source") == "fireflies" and n.get("fetched")), None)
+    transcripts = _fireflies_transcripts(ctx) or []
+    current_ids = {str(t["id"]) for t in transcripts if t.get("id") is not None}
+    ids = _fireflies_classified_ids(ctx) & current_ids
+    if entry:
+        ids |= {str(i["transcript_id"]) for i in entry["items"] if i.get("transcript_id") is not None}
+    emit.write_file(_fireflies_classified_path(ctx), json.dumps({"ids": sorted(ids)}))
+
+
+def compute_needs(ctx: Context, now: datetime) -> list[dict]:
+    """``needs``: one entry per stale-or-missing ``NEEDS_SOURCES`` entry, plus one Fireflies entry
+    when the snapshot holds action items not yet classified.
+
+    See the module docstring for why only ``slack``/``calendar`` fetch through this loop, why
+    Fireflies is appended separately with no ``query`` (Move 6), why the staleness rule is
+    ``STALE_AFTER_MIN`` and not a new number, and why "never fetched" and "stale" are distinguished.
+    A source the tenant does not list is skipped, never requested.
     """
     needs = []
     for source in NEEDS_SOURCES:
@@ -335,6 +445,10 @@ def compute_needs(ctx: Context, now: datetime) -> list[dict]:
                         reason = f"stale ({int(age_min)} min old)"
         needs.append({"source": source, "reason": reason, "query": _needs_query(source, snap),
                       "write_to": str(ctx.state_dir / f"ingest-{source}.json")})
+    if "fireflies" in ctx.tenant.sources:
+        fireflies_need = _fireflies_need(ctx)
+        if fireflies_need is not None:
+            needs.append(fireflies_need)
     return needs
 
 
@@ -407,6 +521,15 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     # later call re-ran the whole two-round-trip cycle instead of settling to a delta.
     if text or not needs:
         emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
+        # Cross-day marker (Move 6): `commands.sync.fireflies_since` reads this to derive its fetch
+        # window from the invariant instead of a fixed number of days (F2), and it needs to survive
+        # a day boundary where the day-scoped `last_path` above does not exist yet. Written at the
+        # exact same "this WAS shown" gate as `last_path`, for the same reason.
+        emit.write_file(ctx.state_dir / LAST_SHOWN_FILE, json.dumps({"generated_at": seq["generated_at"]}))
+        # Fireflies items just handed to this shown brief are now classified (Move 6, F1): a
+        # transcript id in `needs` here is one turn 2 was just given to classify, and this is the
+        # closest proxy the CLI has for "turn 2 actually ran" — see `_mark_fireflies_classified`.
+        _mark_fireflies_classified(ctx, needs)
     if text:
         return lines
     # `tracked` only when something is actually going to be reconciled. Reconcile classifies

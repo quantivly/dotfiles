@@ -67,6 +67,31 @@ class ParseActionItemsTests(unittest.TestCase):
         items = parse_action_items("**Alex Russo**\nJust do the thing, no time given\n")
         self.assertEqual(items, [{"speaker": "Alex Russo", "item": "Just do the thing, no time given", "timestamp": None}])
 
+    def test_header_with_a_trailing_colon_does_not_leak_it_into_the_speaker_name(self):
+        # Minor finding, DO-746 fix round: `**Alex:**` must parse to speaker "Alex", not "Alex:".
+        items = parse_action_items("**Alex Russo:**\nDo the thing (00:14)\n")
+        self.assertEqual(items[0]["speaker"], "Alex Russo")
+
+    def test_a_wrapped_two_line_item_is_a_known_pinned_limitation(self):
+        # F3 from the DO-746 fix-round brief: a long item wrapped onto a second markdown line (no
+        # blank line between) is parsed as two garbled items, and the first loses its timestamp.
+        # Documented as a known limit rather than "fixed" by joining consecutive lines: nothing in
+        # this string distinguishes a wrapped continuation from two genuinely separate one-line
+        # items that each carry no timestamp of their own (see the module docstring and
+        # test_item_with_no_timestamp_keeps_the_full_text_and_a_none_timestamp above) -- a join
+        # that guesses wrong would silently merge two unrelated commitments into one, which this
+        # test pins as worse than the current, honest split.
+        text = ("**Alex Russo**\n"
+                "Verify alignment of calendar edit modal with existing design system and report\n"
+                "findings (00:14)\n")
+        items = parse_action_items(text)
+        self.assertEqual(items, [
+            {"speaker": "Alex Russo",
+             "item": "Verify alignment of calendar edit modal with existing design system and report",
+             "timestamp": None},
+            {"speaker": "Alex Russo", "item": "findings", "timestamp": "00:14"},
+        ])
+
 
 class FirefliesClientFromContextTests(unittest.TestCase):
     def ctx(self, env=None):

@@ -64,3 +64,32 @@ def age_seconds(state_dir: Path, source: str, now_dt: datetime | None = None) ->
         return None
     fetched = parse_fetched_at(snap["fetched_at"])
     return ((now_dt or datetime.now(timezone.utc)) - fetched).total_seconds()
+
+
+# `<state_dir>/last-brief-shown.json` (DO-746 fix round): the `generated_at` of the last brief
+# actually shown to @zvi, written by `commands.brief.run_brief` at the same point it decides
+# today's day-scoped `last-brief.json` was the screen the reader got. Cross-day, unlike that
+# file, so `commands.sync.fireflies_since` can read it on a Monday morning when nothing under
+# today's (still-empty) day directory exists yet. Deliberately NOT read via a helper defined in
+# `commands/sync.py` itself: that module is one of the two files
+# `tests/test_linear.py`'s static ingestion-boundary scan parses whole, and a subscript read
+# reachable (however unrelated) through that module's shared `ctx` parameter is exactly the shape
+# the scan flags -- keeping the read here, outside both scanned files, sidesteps it rather than
+# fighting the scan's own over-approximation.
+LAST_SHOWN_FILE = "last-brief-shown.json"
+
+
+def read_last_shown(state_dir: Path) -> datetime | None:
+    """``generated_at`` of the last brief actually shown, or ``None`` if there isn't one yet.
+
+    Any fault in the file (missing, unreadable, malformed) is treated the same as "never shown" —
+    it is not this function's job to raise over a marker file it does not own.
+    """
+    path = Path(state_dir) / LAST_SHOWN_FILE
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return parse_fetched_at(data["generated_at"])
+    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None
