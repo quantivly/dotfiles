@@ -32,23 +32,36 @@ class SkillMatchesCliTests(unittest.TestCase):
         for source in ingest.ALLOWED:
             self.assertIn(f"{source}=", calls[0], f"ingest call is missing {source}=…")
 
-    def test_preflight_and_rank_are_never_invoked_as_separate_steps(self):
-        # `rabota brief` runs preflight+rank+brief itself (#237); the only two mentions of
-        # `rabota preflight` / `rabota rank` allowed in the cycle are the sentence that says not
-        # to call them separately. A mutation that reintroduces a "1. Preflight. `rabota
-        # preflight`" step raises this count and fails.
+    def test_preflight_is_never_a_step_of_its_own(self):
+        # `rabota brief` runs preflight itself (#237). Counting mentions was too brittle to keep --
+        # turn 2 legitimately gained a `rabota rank` call -- so this asserts the thing that actually
+        # matters: no numbered or bulleted step is headed "Preflight" or "Rank". A mutation that
+        # reintroduces "1. **Preflight.** `rabota preflight`" fails here.
         cycle = _cycle_section()
-        self.assertEqual(cycle.count("`rabota preflight`"), 1, cycle)
-        self.assertEqual(cycle.count("`rabota rank`"), 1, cycle)
+        self.assertNotRegex(cycle, r"(?mi)^\s*(?:\d+\.|-)\s*\*\*(?:Preflight|Rank)\b")
 
-    def test_needs_empty_stops_the_cycle(self):
+    def test_turn_2_ranks_before_its_final_brief(self):
+        # `brief` ranks only when the day's sequence.json is MISSING, so after an ingest it would
+        # re-print the pre-fetch ranking and label it `no change` -- the fetch wasted, silently
+        # (review finding). Turn 2's final call therefore ranks first. Driven, not assumed: see
+        # test_brief for `sequence.json` not being regenerated on a second same-day call.
+        self.assertIn("`rabota rank && rabota --text brief --max-lines 11`", _cycle_section())
+
+    def test_needs_empty_stops_and_needs_non_empty_prints_nothing_yet(self):
+        # Both halves: the empty case must stop, and the non-empty case must NOT print turn 1's
+        # lines, or the reader gets two screens and the second says `no change`.
         cycle = _cycle_section()
-        self.assertIn("needs` is empty", cycle)
-        self.assertIn("stop", cycle.lower())
+        self.assertRegex(cycle, r"(?s)`needs` empty.*?stop here")   # (?s): the sentence wraps
+        self.assertRegex(cycle, r"`needs` non-empty: print nothing yet")
 
-    def test_exit_3_still_stops_everything(self):
+    def test_exit_3_stops_everything_and_says_so(self):
+        # Review finding: asserting only that "Exit 3" appears passed a mutation that inverted the
+        # invariant -- "a failed identity pin ... is retried; continue to turn 2 anyway" kept the
+        # string and the whole guard stayed green. The words that carry the rule are asserted now.
         cycle = _cycle_section()
         self.assertIn("Exit 3", cycle)
+        self.assertIn("never worked around", cycle)
+        self.assertNotRegex(cycle, r"(?i)identity pin[^.]*(retr|continue|ignore|work around it)")
 
     def test_turn_2_sources_match_compute_needs(self):
         # brief.NEEDS_SOURCES is the exact set that can appear in `needs`; the skill's fetch

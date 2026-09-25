@@ -25,23 +25,30 @@ most 2 model round-trips — 1 when nothing is stale. Design and provenance:
 
 | Invocation | Steps |
 |---|---|
-| `/rabota brief` | 1 (read-only; 2 only if `needs` is non-empty) |
-| `/rabota status` | `rabota --text census`, `rabota lane list --status started`, open escalations (`rabota --text brief` shows the delta) |
+| `/rabota brief` | 1; then 2 only if `needs` is non-empty — **2 writes** (ingest, escalate, pin) |
+| `/rabota status` | `rabota --text census`, `rabota lane list --status started`, open escalations. **Not free:** `rabota --text brief` shows the delta but also identity-checks and rewrites today's `brief.md` (#237) — skip it unless the delta is what was asked for |
 | `/rabota` | 1–2, then 3–5 |
 | `/rabota inbox` | 1, then §Inbox session |
 | `/rabota close` | 5 |
 
 ## The cycle
 
-`rabota brief` now runs preflight, rank and brief itself (one process, #237) — never call
-`rabota preflight` or `rabota rank` separately from this skill.
+`rabota brief` runs preflight, rank and brief in one process (#237), so never call `rabota
+preflight` or `rabota rank` *instead of* it. One exception, in turn 2 only: `brief` ranks only
+when the day's `sequence.json` is **missing**, so after an ingest it would otherwise re-print the
+pre-fetch ranking and call it `no change`. Turn 2 therefore ranks before its final brief. (Making
+`brief` re-rank when a source is newer than the sequence is the better fix and is filed; until then
+that call is what keeps the fetch from being wasted.)
 
 1. **Brief, turn 1.** One call: `rabota brief` (JSON, not `--text` — you need its `needs`
    field). Exit 3 → print the one failure line from the report and stop; a failed identity
-   pin is not a `needs` and is never worked around. **Print `lines` from the JSON reply,
-   verbatim.** If `needs` is empty, that is the whole of `/rabota brief` — stop here. Do not
-   run `preflight`, `rank`, `inbox summary`, or anything else out of habit; there is nothing
-   left to do.
+   pin is not a `needs` and is never worked around.
+   - **`needs` empty: print `lines` from the JSON reply, verbatim. That is the whole of
+     `/rabota brief` — stop here.** Do not run `preflight`, `rank`, `inbox summary`, or anything
+     else out of habit; there is nothing left to do.
+   - **`needs` non-empty: print nothing yet.** Turn 2 ends with the brief that includes what you
+     fetched, and that is the one screen the reader gets. Printing here too would show the
+     pre-fetch brief and then a second, near-empty `no change` block after it.
 2. **Fetch, ingest, reconcile — turn 2, only when `needs` is non-empty.** These are tool
    calls inside this one turn, not a turn each:
    - For each entry in `needs`, fetch exactly its `query` (e.g. Slack `to:me after:…`,
@@ -59,8 +66,11 @@ most 2 model round-trips — 1 when nothing is stale. Design and provenance:
      `rabota escalate --question … --evidence … --option …` for questions; dated promises
      become pins: `rabota pin <key> --bucket 2 --rationale …`. Say "already done" as
      confidently as "overdue"; cite the artifact.
-   - **Brief, turn 2's final call.** `rabota --text brief --max-lines 11`. Print its lines
-     verbatim, then append ≤2 lines of reconcile delta. Nothing else goes to the terminal.
+   - **Brief, turn 2's final call.** `rabota rank && rabota --text brief --max-lines 11` — the
+     `rank` is not optional: without it the brief re-prints the pre-fetch ranking and says `no
+     change`, so the fetch is wasted silently. Print its lines verbatim, then append ≤2 lines of
+     reconcile delta. **This is the only screen `/rabota brief` prints on a stale morning.**
+     Nothing else goes to the terminal.
 3. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> --machine dev --run` — one call, one unit,
    seat-gated; the CLI refuses with the seat's `resets_at` when the window is spent. `--machine dev`
    is **required** with `--run`: the local form is not implemented and refuses. Watch with
@@ -94,9 +104,11 @@ Linear issue filed before the message that mentions it (`quantivly-conventions:l
 
 ## Output contract
 
-The screen is ≤12 lines. Turn 1's `rabota brief` is JSON (needed for `needs`), so **print its
-`lines` field**, not raw stdout. Turn 2's final call is `rabota --text brief --max-lines 11`
-(one line reserved for the reconcile delta); print its lines verbatim. `--text` is a GLOBAL
+The screen is ≤12 lines, and there is **exactly one** of them per `/rabota brief`. Turn 1's
+`rabota brief` is JSON (needed for `needs`), so when `needs` is empty **print its `lines` field**,
+not raw stdout — and when `needs` is non-empty print nothing until turn 2's final `rabota rank &&
+rabota --text brief --max-lines 11` (one line reserved for the reconcile delta); print its lines
+verbatim. `--text` is a GLOBAL
 flag and must precede the subcommand — `rabota brief --text` exits `unrecognized arguments`.
 `sol brief` handles its own line. Narrative lives in `brief.md`; print its path once. On a
 rerun the same day the CLI prints the delta. A source that failed, or a `linear`/`github`
