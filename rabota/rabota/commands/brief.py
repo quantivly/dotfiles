@@ -44,7 +44,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rabota import cli, emit, errors, snapshots
+from rabota import cli, emit, errors, reconcile, snapshots
 from rabota.commands import preflight as preflight_cmd
 from rabota.commands.rank import run_rank
 from rabota.context import Context
@@ -294,10 +294,17 @@ def compute_needs(ctx: Context, now: datetime) -> list[dict]:
 
 
 def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetime | None = None, gh=None, lin=None):
-    """Preflight, rank (if needed) and compose today's brief in one call; return lines or ``{"lines", "brief_path", "needs"}``.
+    """Preflight, rank (if needed) and compose today's brief in one call; return lines or
+    ``{"lines", "brief_path", "needs", "tracked"}``.
 
     ``gh``/``lin`` let a test substitute preflight's identity clients, exactly as ``preflight.run_preflight``
     already allows; left ``None`` (the CLI wiring), real clients are built and a failed pin exits 3.
+
+    **Move 4 (``tracked``).** The tracked-side index reconcile needs (``reconcile.build_tracked_index``)
+    rides in the same JSON reply as ``needs`` — turn 1's ``brief`` call, the only one that can afford
+    it (see ``rabota.reconcile``'s module docstring). It costs a re-read of the two small snapshot
+    files already on disk, never a fetch, so it is built unconditionally in JSON mode; ``--text`` is
+    the human/terminal path and has no line shape for structured data, so it skips the read entirely.
     """
     check_max_lines(max_lines)                  # a usage error must not leave a brief.md behind
     preflight_cmd.run_command(ctx, gh=gh, lin=lin)   # exit 3 on a failed identity pin, exactly as `rabota preflight`
@@ -319,7 +326,10 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
                            now=now, needs=needs)
     emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
-    return lines if text else {"lines": lines, "brief_path": str(brief_path), "needs": needs}
+    if text:
+        return lines
+    tracked = reconcile.build_tracked_index(ctx, now)
+    return {"lines": lines, "brief_path": str(brief_path), "needs": needs, "tracked": tracked}
 
 
 def _build(sub):

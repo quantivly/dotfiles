@@ -184,6 +184,22 @@ class BriefCommandTests(unittest.TestCase):
         self.assertEqual(out["brief_path"], str(day / "brief.md"))
         self.assertTrue(out["lines"][0].startswith("no change since 08:00"), out["lines"])
 
+    def test_run_brief_json_mode_carries_the_tracked_index_text_mode_does_not(self):
+        # DO-716 move 4: the tracked-side index rides in the same JSON reply as `needs` -- turn 1's
+        # only call -- so reconcile never has to open sources/linear.json or sources/github.json
+        # itself. `--text` (human/terminal) has no line shape for it and does not build it at all.
+        ctx = self.ctx(); self._write_seq(ctx, ["K-1"])
+        snapshots.write(ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-1", "title": "t", "url": "u", "state": {"name": "Todo", "type": "unstarted"},
+             "priorityLabel": "P2", "dueDate": None, "updatedAt": "t", "blockedBy": [], "blocks": []}],
+            "notifications": []})
+        now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
+        out = brief.run_brief(ctx, text=False, now=now, gh=self.gh, lin=self.lin)
+        self.assertEqual(out["tracked"]["linear"]["issues"][0]["key"], "HUB-1")
+        self.assertTrue(out["tracked"]["github"]["ok"] is False)  # never synced in this test
+        lines = brief.run_brief(ctx, text=True, now=now, gh=self.gh, lin=self.lin)
+        self.assertIsInstance(lines, list)   # no dict, no "tracked" key reachable at all in --text mode
+
     def test_run_brief_reports_staleness_from_the_clock(self):
         ctx = self.ctx(); self._write_seq(ctx, ["K-1"])
         lines = brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc), gh=self.gh, lin=self.lin)
