@@ -175,6 +175,12 @@ class BriefCommandTests(unittest.TestCase):
     def test_run_brief_writes_brief_md_and_last_brief_and_honours_max_lines(self):
         ctx = self.ctx(); day = self._write_seq(ctx, [f"K-{i}" for i in range(30)])
         now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
+        # Fresh connector snapshots so `needs` is empty: `last-brief.json` records what the reader
+        # was SHOWN, and with `needs` non-empty the caller prints nothing (see
+        # test_a_brief_that_printed_nothing_does_not_record_itself_as_shown).
+        for source in brief.NEEDS_SOURCES:
+            snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [],
+                                                    "fetched_at": "2026-09-16T08:05:00Z"})
         lines = brief.run_brief(ctx, text=True, max_lines=11, now=now, gh=self.gh, lin=self.lin)
         self.assertLessEqual(len(lines), 11)
         self.assertEqual(lines[-1], f"brief: {day / 'brief.md'}")
@@ -357,6 +363,32 @@ class BriefNeedsTests(unittest.TestCase):
         # for a source the tenant does not list.
         ctx = self.ctx("toysim")
         self.assertEqual(brief.compute_needs(ctx, self.NOW), [])
+
+    def test_a_brief_that_printed_nothing_does_not_record_itself_as_shown(self):
+        """Measured regression, found by timing a real `/rabota brief` (2026-09-25): with `needs`
+        non-empty the caller prints nothing, fetches, and calls `brief` again -- but turn 1 had
+        already written `last-brief.json`, so the second call was a same-day rerun and the only
+        screen the reader got was `no change since HH:MM` with **no ranked items at all**. The
+        record is of what was SHOWN, so it is written only when these lines were the screen."""
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        # needs non-empty (nothing fetched yet) -> nothing shown -> nothing recorded
+        first = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(first["needs"])
+        last = ctx.state_dir / "2026-09-16" / "last-brief.json"
+        self.assertFalse(last.exists(), "recorded a brief the caller was told not to print")
+        # the follow-up call must therefore still be a first-run: ranked lines, not a delta
+        second = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertFalse(any(l.startswith("no change since") for l in second["lines"]), second["lines"])
+        # and once nothing is stale, the record IS written, so a genuine rerun still shows a delta
+        for source in brief.NEEDS_SOURCES:
+            snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [],
+                                                    "fetched_at": "2026-09-16T08:55:00Z"})
+        third = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertEqual(third["needs"], [])
+        self.assertTrue(last.exists(), "a brief that WAS the screen must be recorded")
+        fourth = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(any(l.startswith("no change since") for l in fourth["lines"]), fourth["lines"])
 
     def test_an_unreadable_snapshot_is_needs_not_the_end_of_the_brief(self):
         """Review finding, and a deliberate reversal of this row's first version. It used to assert
