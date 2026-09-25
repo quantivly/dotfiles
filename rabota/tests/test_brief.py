@@ -176,8 +176,11 @@ class BriefCommandTests(unittest.TestCase):
         ctx = self.ctx(); day = self._write_seq(ctx, [f"K-{i}" for i in range(30)])
         now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
         # Fresh connector snapshots so `needs` is empty: `last-brief.json` records what the reader
-        # was SHOWN, and with `needs` non-empty the caller prints nothing (see
+        # was SHOWN, and with `needs` non-empty a JSON caller prints nothing (see
         # test_a_brief_that_printed_nothing_does_not_record_itself_as_shown).
+        # Review finding, recorded so nobody mistakes this row for coverage: adding that
+        # precondition makes this row pass identically against the pre-#240 unconditional write, so
+        # it does NOT exercise the guard. The two rows named above are what do.
         for source in brief.NEEDS_SOURCES:
             snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [],
                                                     "fetched_at": "2026-09-16T08:05:00Z"})
@@ -389,6 +392,34 @@ class BriefNeedsTests(unittest.TestCase):
         self.assertTrue(last.exists(), "a brief that WAS the screen must be recorded")
         fourth = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
         self.assertTrue(any(l.startswith("no change since") for l in fourth["lines"]), fourth["lines"])
+
+    def test_a_printed_text_brief_is_recorded_even_while_a_connector_stays_broken(self):
+        """Review finding on #240: gating the record on `needs` alone was the mirror image of the bug
+        it fixed. A connector with no session support -- `calendar` and `fireflies` have had none
+        since 2026-09-23 -- keeps `needs` non-empty forever, so the `--text` screen the cycle calls
+        "the only screen `/rabota brief` prints on a stale morning" was never recorded, and every
+        later call that day re-ran the whole two-round-trip cycle instead of settling to a delta."""
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        # slack fetched fine; calendar stays a recorded failure, as it is in the live tenant
+        snapshots.write(ctx.state_dir, "slack", {"ok": True, "error": None, "items": [],
+                                                 "fetched_at": "2026-09-16T08:55:00Z"})
+        snapshots.write(ctx.state_dir, "fireflies", {"ok": True, "error": None, "items": [],
+                                                      "fetched_at": "2026-09-16T08:55:00Z"})
+        snapshots.write(ctx.state_dir, "calendar", {"ok": False, "error": "no connector", "items": [],
+                                                     "fetched_at": "2026-09-16T08:55:00Z"})
+        last = ctx.state_dir / "2026-09-16" / "last-brief.json"
+        # turn 1 (JSON, needs non-empty because calendar failed): prints nothing, records nothing
+        first = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(first["needs"])
+        self.assertFalse(last.exists())
+        # turn 2's final call (--text): IS printed, so it must be recorded even though needs stands
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        self.assertFalse(any(l.startswith("no change since") for l in lines), lines)
+        self.assertTrue(last.exists(), "the screen that was shown went unrecorded")
+        # so a later call the same day settles to a delta instead of re-running the cycle
+        again = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(any(l.startswith("no change since") for l in again), again)
 
     def test_an_unreadable_snapshot_is_needs_not_the_end_of_the_brief(self):
         """Review finding, and a deliberate reversal of this row's first version. It used to assert

@@ -327,13 +327,21 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     health = reconcile.snapshot_health(ctx, now)     # in BOTH modes: see `snapshot_health`
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
                            now=now, needs=needs, health=health)
-    # `last-brief.json` is the record of what the reader was SHOWN, and it is what makes the next
-    # call print a delta instead of the list. So it is only written when these lines were actually
-    # the screen -- which, per the cycle, is when `needs` is empty. Measured regression: with
-    # `needs` non-empty the caller prints nothing and fetches, then calls `brief` again; recording
-    # here made that second call a same-day rerun, so the one screen the reader got was
-    # `no change since HH:MM` and NOT A SINGLE RANKED ITEM. The brief had deleted itself.
-    if not needs:
+    # `last-brief.json` records what the reader was SHOWN; it is what makes the next call print a
+    # delta instead of the list. The CLI cannot see a caller's terminal, so it infers "shown" from
+    # the two shapes the cycle actually has, and needs both halves:
+    #
+    #   * `--text` asks for lines for a human, so they are printed. Always record.
+    #   * JSON asks for data, and the cycle prints its `lines` only when `needs` is empty -- with
+    #     `needs` non-empty it prints nothing, fetches, and calls `brief` again.
+    #
+    # Measured regression (#240): recording on the JSON call with `needs` non-empty made that
+    # second call a same-day rerun, so the one screen the reader got was `no change since HH:MM`
+    # and NOT A SINGLE RANKED ITEM -- the brief had deleted itself. Review finding on that fix:
+    # gating on `needs` alone was the mirror-image error. A connector with no session support keeps
+    # `needs` non-empty forever, so the `--text` screen that WAS shown went unrecorded and every
+    # later call re-ran the whole two-round-trip cycle instead of settling to a delta.
+    if text or not needs:
         emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
     if text:
         return lines
