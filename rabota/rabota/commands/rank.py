@@ -10,10 +10,10 @@ def _read_json(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def run_rank(ctx: Context) -> dict:
-    """Rank today's inputs; sources whose last sync failed are listed in ``failed_sources``."""
-    day = ctx.state_dir / ctx.today.isoformat()
-    day.mkdir(parents=True, exist_ok=True)
+def compute_sequence(ctx: Context) -> dict:
+    """Rank today's inputs and return ``seq``, without writing anything (used by ``rank`` and by
+    ``brief --dry-run``, which needs the same ranked answer but must not persist it).
+    """
     inp = rank_mod.RankInputs(
         linear=snapshots.read(ctx.state_dir, "linear"), github=snapshots.read(ctx.state_dir, "github"),
         slack=snapshots.read(ctx.state_dir, "slack"),
@@ -23,6 +23,14 @@ def run_rank(ctx: Context) -> dict:
     seq = rank_mod.rank(inp)
     seq["failed_sources"] = [s for s in ctx.tenant.sources
                              if (ctx.store.last_sync(ctx.tenant.name, s) or {}).get("ok") == 0]
+    return seq
+
+
+def run_rank(ctx: Context) -> dict:
+    """Rank today's inputs; sources whose last sync failed are listed in ``failed_sources``."""
+    day = ctx.state_dir / ctx.today.isoformat()
+    day.mkdir(parents=True, exist_ok=True)
+    seq = compute_sequence(ctx)
     emit.write_file(day / "sequence.json", json.dumps(seq, indent=1))    # guarded: nothing lands on a leak (k2)
     emit.write_file(day / "sequence.md", rank_mod.to_markdown(seq))
     return {"path": str(day / "sequence.json"), "items": len(seq["items"]),
