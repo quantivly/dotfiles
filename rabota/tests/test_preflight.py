@@ -79,6 +79,32 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(r["herdr"]); self.assertTrue(r["ssh_agent"])
         self.assertEqual(r["gh_pin"], {"repo": "org/pin-repo", "ok": True})
 
+    def test_the_github_client_is_built_on_the_calling_thread(self):
+        # DO-730 review: building GhClient mints a token and registers it with `secrets`
+        # (module-global). That must happen on the calling thread, never inside a worker.
+        import threading
+        from unittest import mock
+        seen = []
+        def build(ctx):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return FakeGh("work-login")
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        with mock.patch.object(preflight.GhClient, "from_context", side_effect=build):
+            r = preflight.run_preflight(ctx, lin=FakeLinear(VIEWER))
+        self.assertTrue(r["ok"], r["failures"])
+        self.assertEqual(seen, [True])
+
+    def test_a_client_that_cannot_be_built_is_reported_once_and_never_retried(self):
+        from unittest import mock
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        with mock.patch.object(preflight.GhClient, "from_context",
+                               side_effect=errors.RabotaError("no token for work-login")) as build:
+            r = preflight.run_preflight(ctx, lin=FakeLinear(VIEWER))
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(r["gh"], {"ok": False, "error": "no token for work-login"})
+        self.assertEqual(r["gh_pin"], {})
+        self.assertIn("gh identity check failed: no token for work-login", r["failures"])
+
     def test_wrong_identity_fails_loud(self):
         ctx = self.ctx("quantivly", {"PATH": "/bin"})
         r = preflight.run_preflight(ctx, gh=FakeGh("ZviBaratz"), lin=FakeLinear(VIEWER))
@@ -157,7 +183,7 @@ class PreflightTests(unittest.TestCase):
     def test_github_half_and_linear_half_and_ssh_all_overlap_in_wall_time(self):
         """Three independent 0.3s legs: serial would be ~0.9s (plus a 4th 0.3s for the concurrent
         gh pin call, ~1.2s total); concurrent must land near one round trip (~0.3-0.4s)."""
-        delay = 0.3
+        delay = 0.5   # long enough that scheduling noise on a loaded CI runner is small beside it
         ctx = self.ctx("quantivly", {"PATH": "/bin"})
         ctx.runner = DelayedRunner(FakeRunner([(["ssh-add", "-l"], Result(0, "ok\n", ""))]), delay)
         start = time.perf_counter()
@@ -165,7 +191,9 @@ class PreflightTests(unittest.TestCase):
                                      lin=DelayedLinear(VIEWER, delay=delay))
         elapsed = time.perf_counter() - start
         self.assertTrue(r["ok"], r["failures"])
-        self.assertLess(elapsed, delay * 2)     # well under the ~4x a fully serial run would take
+        # Under 2x: a version that ran the two GitHub calls one after the other would take 2x and
+        # fail here, while 0.8x of slack absorbs a loaded runner (DO-730 review).
+        self.assertLess(elapsed, delay * 1.8)
         self.assertGreaterEqual(elapsed, delay)  # never faster than the slowest single leg
 
     def test_real_gh_client_shared_between_whoami_and_pin_is_race_free(self):

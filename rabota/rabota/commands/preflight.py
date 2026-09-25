@@ -88,12 +88,24 @@ def run_preflight(ctx: Context, gh=None, lin=None) -> dict:
     report = {"herdr": bool(ctx.env.get("HERDR_ENV")),
               "profile": Path(profile_dir).name if profile_dir else None}
 
+    # Build the GitHub client HERE, on the calling thread, before any worker starts: building it
+    # mints a token and registers it with `secrets` (module-global state), and that registration
+    # belongs on the thread that owns the process, not inside a worker (DO-730 review). A build
+    # failure is passed through to `_check_github`, which reports it exactly as it always has.
+    gh_built_failed = None
+    if gh is None:
+        try:
+            gh = GhClient.from_context(ctx)
+        except errors.RabotaError as e:
+            # The same tuple `_check_github` returns for a client it cannot build, so the report is
+            # unchanged, and no second mint is attempted inside a worker.
+            gh_built_failed = ({"ok": False, "error": str(e)}, {}, [f"gh identity check failed: {e}"])
     with concurrent.futures.ThreadPoolExecutor(max_workers=TOP_LEVEL_WORKERS) as ex:
-        gh_future = ex.submit(_check_github, ctx, gh)
+        gh_future = None if gh_built_failed else ex.submit(_check_github, ctx, gh)
         lin_future = ex.submit(_check_linear, ctx, lin)
         ssh_future = ex.submit(ctx.runner.run, ["ssh-add", "-l"], env=ctx.env)
 
-        report["gh"], report["gh_pin"], gh_failures = gh_future.result()
+        report["gh"], report["gh_pin"], gh_failures = gh_built_failed or gh_future.result()
         report["linear"], lin_failures = lin_future.result()
         agent = ssh_future.result()
 
