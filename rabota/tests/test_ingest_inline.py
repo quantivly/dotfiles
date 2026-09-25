@@ -10,6 +10,7 @@ shell quoting at all.
 """
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -242,7 +243,7 @@ class IngestInlineRealShellTests(unittest.TestCase):
     def _run_heredoc(self, tmp_home: Path, state: Path, payload_text: str) -> subprocess.CompletedProcess:
         script = (
             f'cd {REPO} && '
-            f'HOME={tmp_home} PYTHONPATH={REPO} python3.11 -m rabota '
+            f'HOME={tmp_home} PYTHONPATH={REPO} {shlex.quote(sys.executable)} -m rabota '
             f'--tenant quantivly --state-dir {state} ingest --stdin <<\'RABOTA_EOF\'\n'
             f'{payload_text}\n'
             f'RABOTA_EOF\n'
