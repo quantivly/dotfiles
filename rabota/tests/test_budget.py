@@ -109,6 +109,28 @@ class BudgetTests(unittest.TestCase):
         b = json.loads((ctx.state_dir / "budget.json").read_text())
         self.assertEqual((b["schema"], b["seat_pick"], b["five_h_pct_now"]), (1, "quantivly-1", 40))
 
+    def test_run_budget_writes_only_budget_json_never_a_store_row(self):
+        # DO-743 hazard 1: `lane recipe`'s dry path (like its existing non-`--run` path today)
+        # still consults `run_budget` before returning -- "would this be refused" is exactly what
+        # a careful caller wants to know. This proves the gate itself is safe to keep on a dry
+        # path: it writes `budget.json` (a file, not a row anything else reads as history) and
+        # touches none of `lanes`, `runs`, `pins` or `escalations`. Counted from the tables
+        # themselves, never a hash of `rabota.db` (more than one writer touches that file, so a
+        # hash proves nothing -- WAL/journal bookkeeping alone can change it with zero rows added).
+        from rabota.commands import budget as cmd
+        runner = FakeRunner([(["claude-pick"], pick_json("picked", "quantivly-1", 30, 87, "allow", 0))])
+        ctx = self.ctx(runner)
+
+        def counts():
+            return {t: ctx.store.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in ("lanes", "runs", "pins", "escalations")}
+
+        before = counts()
+        self.assertFalse((ctx.state_dir / "budget.json").exists())
+        cmd.run_budget(ctx, machine="local", model="m", effort="e", est_minutes=30)
+        self.assertTrue((ctx.state_dir / "budget.json").exists())
+        self.assertEqual(counts(), before)
+
     def test_command_seat_refusal_before_any_write_is_a_clean_refusal(self):
         # the seat rule fires before claude-pick is asked or budget.json exists; the CLI must not trip over the missing file
         from rabota import cli
