@@ -520,6 +520,20 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     out = {"argv": argv, "shell": " ".join(argv), "unit": unit, "session_id": session_id,
            "seat": seat_pick, "machine": machine, "est_minutes": est_minutes,
            "worktree": worktree, "out_dir": out_dir}
+    if ctx.dry_run:
+        # --dry-run WINS over --run (DO-743): the recipe above is rendered exactly as a real
+        # --run would build it -- the read-only `resolve_remote` (and, for an evaluate lane, the
+        # verdict check) already ran, on this path too, so the printed argv is the real one, not
+        # a placeholder -- but nothing past this point runs: no worktree, no brief sent, no unit
+        # started, no lane row. Mirrors `brief.py`'s `dry-run: nothing written` line (DO-742),
+        # adapted to this command's shape: `lane recipe` returns a dict that `emit` renders as
+        # JSON (never lines), so the equivalent is one top-level string key rather than a head
+        # line, and `_run` below turns it into the leading `--text` line.
+        # The gate above is the one write a dry run still makes: `run_budget` refreshes
+        # budget.json (nothing reads it back today), so the notice names it rather than claim
+        # that nothing was written at all (DO-743 review).
+        out["dry_run"] = "nothing started (worktree, brief, unit, lane row); the budget gate still refreshed budget.json"
+        return out
     if not run:
         return out
 
@@ -598,6 +612,11 @@ def run_retire(ctx, lane_id: str) -> dict:
     the unit's own stream (there is no unit inspection here to re-derive that). Retiring an
     already-``retired`` lane is a defined no-op: it returns the row unchanged rather than refusing,
     so the skill's "as soon as evaluated" call site never has to check first.
+
+    With ``ctx.dry_run`` set (DO-743, same audit as ``lane recipe``), a lane that WOULD retire
+    changes no row: the status check above still runs (so a caller learns whether the retire would
+    be refused), but ``store.update_lane`` is skipped and the row comes back unchanged plus a
+    ``dry_run`` key, the same shape ``run_recipe`` uses.
     """
     row = _get_tenant_lane(ctx, lane_id)
     if row["status"] == RETIRED_STATUS:
@@ -606,6 +625,8 @@ def run_retire(ctx, lane_id: str) -> dict:
         raise errors.Refused(
             f"lane {lane_id!r} has status {row['status']!r}, not one of {TERMINAL_STATUSES}: "
             "only a settled lane may be retired")
+    if ctx.dry_run:
+        return {**row, "dry_run": "nothing retired"}
     ctx.store.update_lane(lane_id, status=RETIRED_STATUS)
     return _get_tenant_lane(ctx, lane_id)
 
@@ -622,7 +643,8 @@ def _build(sub):
     r.add_argument("--model", default=None)
     r.add_argument("--effort", default=None)
     r.add_argument("--est-minutes", type=int, default=30)
-    r.add_argument("--run", action="store_true")
+    r.add_argument("--run", action="store_true",
+                   help="start the lane; the global --dry-run overrides this and only prints the recipe")
     r.add_argument("--kind", choices=["work", "evaluate"], default="work")
     r.add_argument("--of", default=None)
     l = s.add_parser("list", help="list lane rows, tenant-scoped")
@@ -654,14 +676,20 @@ def _run(ns, **ctx_kw):
         return [f"{row['id']} {row['status']}"] if ns.text else row
     if lane_cmd == "retire":
         row = run_retire(ctx, ns.lane_id)
-        return [f"{row['id']} {row['status']}"] if ns.text else row
+        lines = [f"{row['id']} {row['status']}"]
+        if row.get("dry_run"):
+            lines.insert(0, f"dry-run: {row['dry_run']}")
+        return lines if ns.text else row
     default_model = (ctx.tenant.lanes.evaluate_model if ns.kind == "evaluate"
                      else ctx.tenant.lanes.default_model)
     out = run_recipe(ctx, brief=ns.brief, repo=ns.repo, machine=ns.machine, base=ns.base,
                      seat=ns.seat, model=ns.model or default_model,
                      effort=ns.effort or ctx.tenant.lanes.default_effort,
                      est_minutes=ns.est_minutes, run=ns.run, kind=ns.kind, of=ns.of)
-    return [out["unit"], out["shell"]] if ns.text else out
+    lines = [out["unit"], out["shell"]]
+    if out.get("dry_run"):
+        lines.insert(0, f"dry-run: {out['dry_run']}")
+    return lines if ns.text else out
 
 
 cli.register("lane", _build, _run)

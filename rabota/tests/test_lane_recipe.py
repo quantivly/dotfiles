@@ -564,6 +564,60 @@ class RunRecipeTests(LocalRecipeTests):
         lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw())
         self.assertEqual(ctx.store.list_lanes("quantivly"), [])
 
+    # ---- DO-743: the global --dry-run flag must win over --run --------------------------
+
+    def test_global_dry_run_wins_over_run_and_starts_nothing(self):
+        # Before this change `ctx.dry_run` was never read here, so `--dry-run lane recipe --run`
+        # ran the WHOLE dispatch: worktree, brief, unit, row. This proves the recipe still
+        # renders (the read-only resolve above already ssh's, on this path too -- decision (b):
+        # a dry run prints exactly what --run would execute rather than a placeholder) but
+        # nothing past it happens. Only ONE runner call -- the resolve -- must be made; the
+        # `resolve_default_branch_remote`/fetch+worktree/brief/unit calls a real --run would make
+        # are absent entirely, so a `SequencedRunner` with only one canned reply is itself part
+        # of the assertion: a second call raises IndexError (`.pop(0)` on an empty list).
+        runner = SequencedRunner([Result(0, self.RESOLVE_OUT, "")])
+        ctx = self.ctx(runner)
+        ctx.dry_run = True
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+        self.assertEqual(out["dry_run"], "nothing started (worktree, brief, unit, lane row); the budget gate still refreshed budget.json")
+        self.assertEqual(len(runner.calls), 1)
+        self.assertIn("systemd-run", out["shell"])            # the recipe is still rendered
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
+
+    def test_global_dry_run_without_run_also_carries_the_notice(self):
+        # `--dry-run lane recipe` (no --run at all) was already a no-op before this change; this
+        # pins that the notice appears there too, so a caller cannot tell "recipe only" from
+        # "dry-run" apart by the dict shape alone -- both must say plainly that nothing started.
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
+        ctx = self.ctx(runner)
+        ctx.dry_run = True
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=False))
+        self.assertEqual(out["dry_run"], "nothing started (worktree, brief, unit, lane row); the budget gate still refreshed budget.json")
+
+    def test_a_real_run_carries_no_dry_run_key(self):
+        # The companion case: `ctx.dry_run=False` (the default) with --run must NOT gain a
+        # `dry_run` key, so a caller can test for the key's presence rather than its value.
+        ok = Result(0, self.RESOLVE_OUT, "")
+        branch = Result(0, "main", "")
+        runner = SequencedRunner([ok, branch, ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+        self.assertNotIn("dry_run", out)
+
+    def test_dry_run_still_consults_the_budget_gate(self):
+        # Hazard 1: "would this be refused" is exactly what a careful caller wants from a dry
+        # run, so the gate must still run and a zero budget must still refuse -- even with
+        # --dry-run set, even with --run set. `run_budget`'s own writes (only budget.json, never
+        # a store row) are proven separately in test_budget.py.
+        runner = SequencedRunner([Result(0, self.RESOLVE_OUT, "")])
+        ctx = self.ctx(runner)
+        ctx.dry_run = True
+        zero = {"allowed_new_lanes": 0, "reasons": [{"code": "machine:load", "detail": "busy"}],
+                "seat_pick": "quantivly-0"}
+        with self.assertRaises(errors.Refused):
+            lane.run_recipe(ctx, budget_fn=lambda **_: zero, **self.kw(run=True))
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
+
     def test_zero_budget_refuses_and_records_no_row(self):
         runner = FakeRunner([])
         ctx = self.ctx(runner)
@@ -1126,3 +1180,20 @@ class MachineArgvCliTests(unittest.TestCase):
                                   "--machine", ""])
         self.assertEqual(code, 2, err)
         self.assertEqual(last_json(err)["error"]["code"], "usage")
+
+
+class RunDryRunHelpTextTests(unittest.TestCase):
+    """DO-743: the issue asks for the ``--run``/``--dry-run`` collision to be resolved in the
+    help text, naming which one wins. This is the one row that reads the actual argparse help
+    string rather than trusting the docstring/commit-message claim that it says so."""
+
+    def test_the_run_flags_help_names_dry_run_as_the_winner(self):
+        from rabota import cli
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+        lane_parser = sub.choices["lane"]
+        lane_sub = next(a for a in lane_parser._subparsers._group_actions if a.dest == "lane_cmd")
+        recipe_parser = lane_sub.choices["recipe"]
+        run_action = next(a for a in recipe_parser._actions if a.dest == "run")
+        self.assertIn("--dry-run", run_action.help)
+        self.assertIn("overrides", run_action.help)

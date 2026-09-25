@@ -17,10 +17,10 @@ FIX = Path(__file__).parent / "fixtures"
 
 
 class LaneStateTests(unittest.TestCase):
-    def ctx(self, runner=None, tenant="quantivly"):
+    def ctx(self, runner=None, tenant="quantivly", dry_run=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
         c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner or FakeRunner([]),
                                            env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(lambda: c._store and c._store.close())
@@ -138,6 +138,35 @@ class LaneStateTests(unittest.TestCase):
         lane.run_retire(ctx, "a1")
         self.assertEqual(runner.calls, [])
 
+    # --- retire, --dry-run (DO-743) ---
+
+    def test_a_dry_run_retire_leaves_the_row_untouched(self):
+        ctx = self.ctx(dry_run=True)
+        ctx.store.insert_lane(self.row(id="a1", status="done"))
+        row = lane.run_retire(ctx, "a1")
+        # The returned row still SAYS retired-would-happen via `dry_run`, but the STORED row
+        # (what census/reap would see) must be exactly what it was before the call.
+        self.assertEqual(row["dry_run"], "nothing retired")
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "done")
+
+    def test_a_dry_run_retire_still_refuses_a_still_running_lane(self):
+        # The status check is a read, not a write -- it must still run and still refuse, so a
+        # dry run answers "would this be refused" honestly rather than always returning ok.
+        ctx = self.ctx(dry_run=True)
+        ctx.store.insert_lane(self.row(id="a1", status="started"))
+        with self.assertRaises(errors.Refused):
+            lane.run_retire(ctx, "a1")
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    def test_a_dry_run_retire_of_an_already_retired_lane_carries_no_dry_run_key(self):
+        # The already-retired no-op path returns the row unchanged either way; it never touches
+        # the store, so there is nothing for `dry_run` to announce.
+        ctx = self.ctx(dry_run=True)
+        ctx.store.insert_lane(self.row(id="a1", status="retired"))
+        row = lane.run_retire(ctx, "a1")
+        self.assertEqual(row["status"], "retired")
+        self.assertNotIn("dry_run", row)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -207,3 +236,19 @@ class LaneCliWiringTests(unittest.TestCase):
         self.assertEqual(code, 0)
         code, body = self.run_cli("lane", "status", "B2")
         self.assertEqual(body["status"], "retired")
+
+    def test_the_global_dry_run_flag_reaches_retire_and_transitions_nothing(self):
+        """``--dry-run`` is a GLOBAL flag (before the subcommand, per ``cli.build_parser``); this
+        is the one row that proves it actually reaches ``run_retire`` through ``Context.dry_run``
+        rather than only being tested against the function directly (DO-743)."""
+        from rabota import cli
+        import contextlib, io, json as _json
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(["--tenant", "quantivly", "--state-dir", self.state, "--dry-run",
+                             "lane", "retire", "B2"])
+        self.assertEqual(code, 0)
+        body = _json.loads(out.getvalue())
+        self.assertEqual(body["dry_run"], "nothing retired")
+        code, status_body = self.run_cli("lane", "status", "B2")
+        self.assertEqual(status_body["status"], "done", "a dry-run retire must not have transitioned the row")
