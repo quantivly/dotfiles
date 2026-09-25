@@ -1,4 +1,5 @@
 """``rabota rank``: read the snapshots, plan, census and pins; write ``YYYY-MM-DD/sequence.{json,md}``."""
+import hashlib
 import json
 from pathlib import Path
 
@@ -23,22 +24,31 @@ def inputs_signature(ctx: Context) -> dict:
     re-rank (and rewrite ``sequence.json``/``.md``) on a change that could not have altered the
     answer. If a future change makes ``rank.rank`` read Slack, add it here in the same commit.
 
-    Each remaining field already carries its own stamp — ``fetched_at``, ``generated_at`` or
-    ``at`` — written once by the single process that produced it; that content-embedded value is
-    the signal, never a file mtime, which would also change on a touch that did not change the
-    content. The pins table is different: it lives in ``rabota.db``, which several writers share,
+    Each remaining field is a digest of its file's bytes (see ``_digest``) — never a file mtime,
+    which would also change on a touch that did not change the content. The pins table is different: it lives in ``rabota.db``, which several writers share,
     so neither an mtime nor a hash of its rows proves anything (a lesson from this project — a
     delete can leave a row-derived aggregate like ``MAX(ts)`` unchanged). ``Store.pins_version`` is
     a counter bumped on every ``set_pin``/``clear_pin``, so it is the one thing here that is
     actually true of "did the pins table change" rather than merely correlated with it.
     """
-    linear = snapshots.read(ctx.state_dir, "linear")
-    github = snapshots.read(ctx.state_dir, "github")
-    plan = _read_json(ctx.state_dir / "inbox-plan.json")
-    census = _read_json(ctx.state_dir / "census.json")
-    return {"linear": (linear or {}).get("fetched_at"), "github": (github or {}).get("fetched_at"),
-            "inbox_plan": (plan or {}).get("generated_at"),
-            "census": (census or {}).get("at"), "pins": ctx.store.pins_version(ctx.tenant.name)}
+    sd = ctx.state_dir
+    return {"linear": _digest(sd / "sources" / "linear.json"), "github": _digest(sd / "sources" / "github.json"),
+            "inbox_plan": _digest(sd / "inbox-plan.json"), "census": _digest(sd / "census.json"),
+            "pins": ctx.store.pins_version(ctx.tenant.name)}
+
+
+def _digest(path: Path) -> str | None:
+    """A short content digest of one input file, or ``None`` when it does not exist.
+
+    Content, not the embedded stamp (DO-738 review): ``fetched_at`` has one-second resolution, so
+    two writes with different content in the same second carried the same stamp and the change was
+    missed. A digest of the bytes cannot miss a content change, and like the stamp it ignores a
+    touch that changes nothing.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except FileNotFoundError:
+        return None
 
 
 def compute_sequence(ctx: Context) -> dict:

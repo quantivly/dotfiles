@@ -935,6 +935,36 @@ class BriefRerankTests(unittest.TestCase):
         self.assertEqual(seq_path.stat().st_mtime_ns, mtime)
         self.assertTrue(any(l.startswith("no change since") for l in second["lines"]), second["lines"])
 
+    def test_a_same_second_rewrite_with_new_content_still_reranks(self):
+        # DO-738 review F1: the signature used each snapshot's `fetched_at`, which has one-second
+        # resolution, so a rewrite with different content inside the same second went unnoticed.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        linear = ctx.state_dir / "sources" / "linear.json"
+        stamp = {"ok": True, "error": None, "fetched_at": "2026-09-16T08:05:00Z"}
+        linear.write_text(json.dumps({**stamp, "issues": []}))
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        seq_path = ctx.state_dir / "2026-09-16" / "sequence.json"
+        before = seq_path.read_text()
+        linear.write_text(json.dumps({**stamp, "issues": [{"identifier": "HUB-1", "title": "new"}]}))
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertNotEqual(seq_path.read_text(), before,
+                            "linear.json changed content under the same fetched_at, and nothing re-ranked")
+
+    def test_an_unstamped_live_sequence_reranks_once_then_settles(self):
+        # DO-738 review F2: every sequence.json the old code wrote carries no `inputs` key. The
+        # first brief after deploy must re-rank once, then settle, not re-rank on every call.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True)
+        seq_path = day / "sequence.json"
+        seq_path.write_text(json.dumps(seq(["OLD-1"])))
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        first = seq_path.read_text()
+        self.assertIn("inputs", json.loads(first), "the unstamped sequence was not re-ranked")
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertEqual(seq_path.read_text(), first, "re-ranked again with nothing moved")
+
     def test_a_moved_pin_triggers_a_rerank_with_a_truthful_delta(self):
         # A pin is the input DO-738's issue itself calls out, and the one furthest from a file --
         # `Store.pins_version` (see test_store.py) is what has to notice it moved.
