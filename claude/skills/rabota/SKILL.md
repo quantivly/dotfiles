@@ -1,9 +1,10 @@
 ---
 name: rabota
 description: >
-  Orchestrate @zvi's work day over the `rabota` CLI: run preflight, hand connector
-  results to the CLI, reconcile spoken/chat commitments against what is tracked,
-  print the ≤12-line brief, dispatch and evaluate headless lanes, gate outward
+  Orchestrate @zvi's work day over the `rabota` CLI: call `rabota brief` (it runs
+  preflight, rank and brief itself), hand connector results the CLI cannot fetch
+  back to it, reconcile spoken/chat commitments against what is tracked, print
+  the ≤12-line brief, dispatch and evaluate headless lanes, gate outward
   actions, close to disk. Use for `/rabota`, `/rabota brief`, `/rabota status`,
   `/rabota inbox`, `/rabota close`, or when asked what to work on next, who is
   waiting, or to sequence a day. Do NOT use for a single known task, for PR/issue
@@ -16,41 +17,61 @@ description: >
 Every deterministic step is a `rabota` subcommand that prints JSON. You do three
 things the CLI cannot: fetch connector sources in this session, **reconcile**
 commitments, and answer gates with the user. You never implement, never read a
-pane, never re-derive state the CLI already measured. Design and provenance:
+pane, never re-derive state the CLI already measured. `/rabota brief` costs at
+most 2 model round-trips — 1 when nothing is stale. Design and provenance:
 `~/quantivly/handoffs/rabota-v2/2026-09-16-rabota-v2-design.md`.
 
 ## Modes
 
 | Invocation | Steps |
 |---|---|
-| `/rabota brief` | 1–4 (read-only) |
-| `/rabota status` | `rabota --text census`, `rabota lane list --status started`, open escalations (`rabota --text brief` shows the delta) |
-| `/rabota` | 1–7 |
+| `/rabota brief` | 1; then 2 only if `needs` is non-empty — **2 writes** (ingest, escalate, pin) |
+| `/rabota status` | `rabota --text census`, `rabota lane list --status started`, open escalations. **Not free:** `rabota --text brief` shows the delta but also identity-checks and rewrites today's `brief.md` (#237) — skip it unless the delta is what was asked for |
+| `/rabota` | 1–2, then 3–5 |
 | `/rabota inbox` | 1, then §Inbox session |
-| `/rabota close` | 7 |
+| `/rabota close` | 5 |
 
 ## The cycle
 
-1. **Preflight.** `rabota preflight`. Exit 3 → print the one failure line and stop.
-   Never work around a failed identity pin.
-2. **Connector delta.** Read `rabota --tenant <t> inbox summary` and the newest
-   `sources/*.json` `fetched_at`. Fetch only what the CLI cannot: Slack
-   `to:me after:<last fetched_at date>`, Calendar free blocks for today, Fireflies
-   action items since then. Write each as
-   `{"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}` to
-   `<state_dir>/ingest-<source>.json` and run `rabota ingest <source> --file …`.
-   **`ok` must be a JSON boolean and is required** — omit it and `ingest` exits 2.
-   A connector that FAILED is still ingested, as `"ok": false` with `"error": "<why>"`
-   and `"items": []`; that is what puts its one `!` line in the brief. Do not retry
-   more than once, and never drop a failed source silently.
-3. **Reconcile** (`references/reconcile.md`). Classify every commitment in the
-   connector items against `sources/linear.json` and `sources/github.json`.
-   Record: `rabota escalate --question … --evidence … --option …` for questions;
-   dated promises become pins: `rabota pin <key> --bucket 2 --rationale …`.
-   Say "already done" as confidently as "overdue"; cite the artifact.
-4. **Brief.** `rabota rank && rabota --text brief`. Print its output verbatim. You
-   may append ≤2 lines of reconcile deltas. Nothing else goes to the terminal.
-5. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> --machine dev --run` — one call, one unit,
+`rabota brief` runs preflight, rank and brief in one process (#237), so never call `rabota
+preflight` or `rabota rank` *instead of* it. One exception, in turn 2 only: `brief` ranks only
+when the day's `sequence.json` is **missing**, so after an ingest it would otherwise re-print the
+pre-fetch ranking and call it `no change`. Turn 2 therefore ranks before its final brief. (Making
+`brief` re-rank when a source is newer than the sequence is the better fix and is filed; until then
+that call is what keeps the fetch from being wasted.)
+
+1. **Brief, turn 1.** One call: `rabota brief` (JSON, not `--text` — you need its `needs`
+   field). Exit 3 → print the one failure line from the report and stop; a failed identity
+   pin is not a `needs` and is never worked around.
+   - **`needs` empty: print `lines` from the JSON reply, verbatim. That is the whole of
+     `/rabota brief` — stop here.** Do not run `preflight`, `rank`, `inbox summary`, or anything
+     else out of habit; there is nothing left to do.
+   - **`needs` non-empty: print nothing yet.** Turn 2 ends with the brief that includes what you
+     fetched, and that is the one screen the reader gets. Printing here too would show the
+     pre-fetch brief and then a second, near-empty `no change` block after it.
+2. **Fetch, ingest, reconcile — turn 2, only when `needs` is non-empty.** These are tool
+   calls inside this one turn, not a turn each:
+   - For each entry in `needs`, fetch exactly its `query` (e.g. Slack `to:me after:…`,
+     Calendar free blocks for today, Fireflies action items since `…`) and write
+     `{"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}` (a failed fetch:
+     `"ok": false`, `"error": "<why>"`, `"items": []`) to the entry's `write_to` path.
+     **`ok` must be a JSON boolean** — omit it and `ingest` exits 2. Do not retry more than
+     once; never drop a failed source silently.
+   - **One** `rabota ingest --file slack=… --file calendar=… --file fireflies=…` call, naming
+     only the sources actually in `needs`. A bad file among good ones is reported (exit 4),
+     not silently dropped — the good ones still land.
+   - **Reconcile** (`references/reconcile.md`) using turn 1's `tracked` field — it is already
+     the Linear/GitHub projection reconcile needs; do not re-read `sources/*.json` yourself.
+     Classify every commitment in the items you just fetched. Record:
+     `rabota escalate --question … --evidence … --option …` for questions; dated promises
+     become pins: `rabota pin <key> --bucket 2 --rationale …`. Say "already done" as
+     confidently as "overdue"; cite the artifact.
+   - **Brief, turn 2's final call.** `rabota rank && rabota --text brief --max-lines 11` — the
+     `rank` is not optional: without it the brief re-prints the pre-fetch ranking and says `no
+     change`, so the fetch is wasted silently. Print its lines verbatim, then append ≤2 lines of
+     reconcile delta. **This is the only screen `/rabota brief` prints on a stale morning.**
+     Nothing else goes to the terminal.
+3. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> --machine dev --run` — one call, one unit,
    seat-gated; the CLI refuses with the seat's `resets_at` when the window is spent. `--machine dev`
    is **required** with `--run`: the local form is not implemented and refuses. Watch with
    `rabota --text census`; read only the lane's `verdict.json` (≤4 KB), which lives at
@@ -58,11 +79,11 @@ pane, never re-derive state the CLI already measured. Design and provenance:
    prints it, so fetch that one file. Evaluate with
    `rabota lane recipe --kind evaluate --of <lane> --run` (DO-670) and read `evaluation.json` only.
    Never read a pane, never send a keystroke, never `journalctl` a lane into this context.
-6. **Monitor and evaluate.** `rabota --text census` settles a finished lane's row — never
-   poll on a clock, never read a pane. Read only `verdict.json`, fetched from the path in step 5.
-   For anything going to a critical reader, evaluate as in step 5 and read only
+4. **Monitor and evaluate.** `rabota --text census` settles a finished lane's row — never
+   poll on a clock, never read a pane. Read only `verdict.json`, fetched from the path in step 3.
+   For anything going to a critical reader, evaluate as in step 3 and read only
    `evaluation.json`. `rabota lane retire <id>` as soon as evaluated.
-7. **Close.** `rabota close [--note …]`. Then `rabota --text reap`; apply only
+5. **Close.** `rabota close [--note …]`. Then `rabota --text reap`; apply only
    `--lanes` and `--spaces`; print the session close hints for the user.
 
 ## Inbox session (`/rabota inbox`, and offered on the first run of a Monday)
@@ -83,15 +104,19 @@ Linear issue filed before the message that mentions it (`quantivly-conventions:l
 
 ## Output contract
 
-The screen is ≤12 lines: `rabota --text brief --max-lines 12`; when you append a
-reconcile delta, call `--max-lines 11` instead. `--text` is a GLOBAL flag and must
-precede the subcommand — `rabota brief --text` exits `unrecognized arguments`. `sol brief` handles its own line.
-Narrative lives in `brief.md`; print its path once. On a rerun the same day the
-CLI prints the delta. A source that failed gets its one `!` line from the CLI.
+The screen is ≤12 lines, and there is **exactly one** of them per `/rabota brief`. Turn 1's
+`rabota brief` is JSON (needed for `needs`), so when `needs` is empty **print its `lines` field**,
+not raw stdout — and when `needs` is non-empty print nothing until turn 2's final `rabota rank &&
+rabota --text brief --max-lines 11` (one line reserved for the reconcile delta); print its lines
+verbatim. `--text` is a GLOBAL
+flag and must precede the subcommand — `rabota brief --text` exits `unrecognized arguments`.
+`sol brief` handles its own line. Narrative lives in `brief.md`; print its path once. On a
+rerun the same day the CLI prints the delta. A source that failed, or a `linear`/`github`
+snapshot the CLI cannot rely on, gets its own `!` line from the CLI — you never compute one.
 
 ## Before reporting
 
-1. Did `preflight` return `ok: true`, or am I trusting an absence?
+1. Did turn 1's `rabota brief` return successfully (not exit 3), or am I trusting an absence?
 2. Is every number from a CLI result or an artifact, not from a lane's prose?
 3. Is the terminal output ≤12 lines?
 4. Did every outward action have a typed OK and a `rabota gate` record?

@@ -18,6 +18,18 @@ yet?" — the second question is what `outcome` records.
 Read `blocks`/`blockedBy` relations before description prose: a Linear description can be stale
 in a way the relation graph is not.
 
+Inputs: turn 1's `rabota brief` reply carries `tracked.{linear,github}` — a slim projection of
+`sources/linear.json` and `sources/github.json` built by `reconcile.build_tracked_index`. Use it
+directly; do not re-read the snapshot files. `tracked.<side>.ok` means "you can rely on this",
+with `reason` saying why not when it is false and `skipped: true` marking a source the tenant
+does not use rather than one that failed.
+
+**`state-contradiction`'s "no PR exists" case (golden `g06`) is not decidable from `tracked`
+alone.** `github.json` carries only `own_prs`/`review_requests`/`merged_recent`, and Linear's
+`ISSUE_FIELDS` never selects `attachments` — so "no PR exists" and "a PR exists attached to the
+issue that you cannot see in this projection" (golden `g07`) look identical from the index. Do
+not assert "no PR exists" from `tracked` alone; that gap is open as DO-735.
+
 | Class | Meaning | Example |
 |---|---|---|
 | `promised-untracked` | A spoken or written commitment with no Linear issue or PR behind it. | Fireflies transcript action item attributed by speaker, no issue filed (golden `g08`). |
