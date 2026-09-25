@@ -214,28 +214,28 @@ def worktrees(runner) -> tuple[list[dict], list[str]]:
     return rows, []
 
 
-# A lane's own output artifact, by kind (DO-747): a work lane writes ``verdict.json``, a review
-# lane (run as ``kind=work`` with a review brief) writes ``review.json``, an evaluate lane writes
-# ``evaluation.json``. `settle_finished` does not know from the lane row alone which of these a
-# given lane was meant to write (a review brief is just a work lane's `brief` text) -- so absence
-# is judged over the whole set: NONE of the three present is the one shape common to every kind
-# that means "nothing to settle from but the stream's own result line."
-OUTPUT_FILENAMES = ("verdict.json", "review.json", "evaluation.json")
+# A lane's own output artifact (DO-747, amended DO-747 fix round): work-lane briefs are free
+# text, and this project's own history has lanes told to write `fix-verdict.json`,
+# `rebase-verdict.json`, `evaluation-2.json` and the like -- a fixed list of three names
+# (`verdict.json`, `review.json`, `evaluation.json`) would settle any of those lanes `failed` with
+# a wrong `settle_reason` even though the lane succeeded. The rule that cannot drift: a lane counts
+# as having produced output when its out_dir holds ANY `*.json` file. `rabota` itself never writes
+# one there -- a lane's out_dir carries only `brief.md`, `_common-rules.md`, `stream.jsonl` and
+# `stream.err` (see `lane.py`'s `build_local`/`create_worktree_remote`/`send_brief` and this
+# module's own `_ended_at`), so this glob can never true-positive on rabota's own scaffolding.
+NO_OUTPUT_REASON = "no output file: no *.json file was written to out_dir before the lane's unit exited"
 
 
 def _output_mtime_local(out_dir: str) -> float | None:
-    """The newest mtime among ``OUTPUT_FILENAMES`` present in ``out_dir``, or ``None`` if none exist.
+    """The newest mtime among ``out_dir``'s ``*.json`` files, or ``None`` if none exist.
 
     At most one is ever expected for a given lane; ``max`` over whichever are readable is so a
     stray leftover file from a prior lane reusing the directory can never make this return
-    ``None`` when a real one is present, not a claim that more than one is normal.
+    ``None`` when a real one is present, not a claim that more than one is normal. A missing
+    ``out_dir`` glob-matches to nothing (no ``OSError``), same as a directory with no ``*.json``
+    in it -- both mean "no output".
     """
-    mtimes = []
-    for filename in OUTPUT_FILENAMES:
-        try:
-            mtimes.append((Path(out_dir) / filename).stat().st_mtime)
-        except OSError:
-            continue
+    mtimes = [p.stat().st_mtime for p in Path(out_dir).glob("*.json")]
     return max(mtimes) if mtimes else None
 
 
@@ -287,7 +287,7 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
 
     ``ended_at``, ``cost_usd`` (``result.total_cost_usd``) and ``five_h_pct_at_end`` (the seat's
     current reading) are written; ``status`` becomes ``done`` or ``failed`` per ``is_error`` --
-    UNLESS the lane wrote none of ``OUTPUT_FILENAMES``, in which case it settles ``failed``
+    UNLESS the lane's out_dir has no ``*.json`` file in it, in which case it settles ``failed``
     regardless of ``is_error``, with ``settle_reason`` naming the absence (DO-747: a headless lane
     that put its whole brief into a backgrounded subagent and ended its turn printed a clean
     ``is_error: false`` result with no ``review.json`` ever written, and the row settled ``done``).
@@ -362,8 +362,7 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
             status, settle_reason = ("failed" if result.get("is_error") else "done"), None
         else:
             status = "failed"
-            settle_reason = ("no output file: none of " + ", ".join(OUTPUT_FILENAMES)
-                              + " was written before the lane's unit exited")
+            settle_reason = NO_OUTPUT_REASON
         ctx.store.update_lane(lane["id"], status=status, ended_at=ended_at, settle_reason=settle_reason,
                               cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
         settled.append(lane["id"])

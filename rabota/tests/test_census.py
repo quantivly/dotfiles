@@ -258,9 +258,25 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(settled, ["no-output"])
         row = self.ctx.store.get_lane("no-output")
         self.assertEqual(row["status"], "failed")
-        self.assertIn("verdict.json", row["settle_reason"])
-        self.assertIn("review.json", row["settle_reason"])
-        self.assertIn("evaluation.json", row["settle_reason"])
+        self.assertIn("*.json", row["settle_reason"])
+
+    def test_a_lane_that_wrote_a_differently_named_json_file_still_settles_from_is_error(self):
+        """DO-747 fix round: work-lane briefs are free text, and this project's own history has
+        lanes told to write `fix-verdict.json` -- a fixed three-name list would settle this lane
+        `failed` with a wrong `settle_reason` even though it succeeded. Any `*.json` counts."""
+        out = Path(self.tmp.name) / "out" / "fixname"; out.mkdir(parents=True)
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "fix-verdict.json").write_text("{}")
+        self.ctx.store.insert_lane({"id": "fixname", "tenant": "quantivly", "kind": "work", "brief": "b",
+                                    "repo": "r", "worktree": "w", "out_dir": str(out), "machine": "local",
+                                    "unit": "rabota-lane-quantivly-fixname-dead.service",
+                                    "session_id": "s", "model": "m", "status": "started",
+                                    "started_at": "2026-09-16T10:00:00Z", "seat": "quantivly-1", "effort": "high"})
+        settled = census.settle_finished(self.ctx, units=[], seats=[{"name": "quantivly-1", "five_h_pct": 41}])
+        self.assertEqual(settled, ["fixname"])
+        row = self.ctx.store.get_lane("fixname")
+        self.assertEqual(row["status"], "done")
+        self.assertIsNone(row["settle_reason"])
 
     def test_settle_finished_takes_ended_at_from_the_verdict_artifacts_mtime(self):
         """DO-714: three lanes settled by one census all recorded the SAME ended_at -- the
@@ -452,9 +468,9 @@ class SettleRemoteTests(unittest.TestCase):
 
     def test_a_remote_lane_with_no_output_file_settles_failed_even_when_is_error_is_false(self):
         """The remote-path twin of test_a_lane_with_no_output_file_settles_failed_...: an empty
-        `verdict_mtimes` entry for a lane's out_dir means `stat` found none of the three known
-        output files on that machine either -- this is what DO-747's incident row (machine "dev")
-        actually looked like."""
+        `verdict_mtimes` entry for a lane's out_dir means `stat` found no `*.json` file on that
+        machine either -- this is what DO-747's incident row (machine "dev") actually looked
+        like."""
         ctx = self.ctx(FakeRunner([]))
         self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
         rows = [{"name": "dev", "reachable": True,
@@ -465,7 +481,7 @@ class SettleRemoteTests(unittest.TestCase):
         self.assertEqual(settled, ["L1"])
         row = ctx.store.list_lanes("quantivly")[0]
         self.assertEqual(row["status"], "failed")
-        self.assertIn("verdict.json", row["settle_reason"])
+        self.assertIn("*.json", row["settle_reason"])
 
     def test_a_remote_lane_settles_with_the_remote_machines_own_verdict_mtime(self):
         # DO-714 fixed this for local lanes only: settling from now() gave every lane a census

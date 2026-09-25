@@ -9,11 +9,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rabota import context, errors
+from rabota import census, context, errors
 from rabota.commands import lane
 from rabota.runner import FakeRunner
 
 FIX = Path(__file__).parent / "fixtures"
+
+
+def _run_text(tmp_name, tenant, lane_id):
+    ns = argparse.Namespace(tenant=tenant, state_dir=tmp_name, text=True, dry_run=False,
+                            lane_cmd="status", lane_id=lane_id)
+    return lane._run(ns, cfg_base=FIX / "config", runner=FakeRunner([]),
+                     env={"PATH": "/bin"}, cwd=Path("/"))
 
 
 class LaneStateTests(unittest.TestCase):
@@ -92,6 +99,25 @@ class LaneStateTests(unittest.TestCase):
         ctx.store.insert_lane(self.row(id="a1", status="done"))
         lane.run_status(ctx, "a1")
         self.assertEqual(runner.calls, [])
+
+    def test_text_status_with_no_settle_reason_is_one_line(self):
+        # F2: `lane status --text` used to print only id and status, so a lane settled `failed`
+        # with a `settle_reason` (DO-747) was unreachable from the workflow -- a caller had to
+        # fetch the JSON row instead. A settled `done` row (no reason recorded) must still print
+        # exactly its old one-line shape.
+        ctx = self.ctx()
+        ctx.store.insert_lane(self.row(id="a1", status="done"))
+        # `self.ctx()` opens its own tempdir; reuse ITS state_dir for `_run` below rather than a
+        # second tempdir, so the row inserted above is the one `_run` reads back.
+        lines = _run_text(str(ctx.state_dir), "quantivly", "a1")
+        self.assertEqual(lines, ["a1 done"])
+
+    def test_text_status_prints_settle_reason_when_set(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(self.row(id="a1", status="failed"))
+        ctx.store.update_lane("a1", settle_reason=census.NO_OUTPUT_REASON)
+        lines = _run_text(str(ctx.state_dir), "quantivly", "a1")
+        self.assertEqual(lines, ["a1 failed", census.NO_OUTPUT_REASON])
 
     # --- retire ---
 

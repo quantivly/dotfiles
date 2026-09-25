@@ -673,7 +673,12 @@ def _run(ns, **ctx_kw):
                 if ns.text else out)
     if lane_cmd == "status":
         row = run_status(ctx, ns.lane_id)
-        return [f"{row['id']} {row['status']}"] if ns.text else row
+        if not ns.text:
+            return row
+        lines = [f"{row['id']} {row['status']}"]
+        if row.get("settle_reason"):
+            lines.append(row["settle_reason"])
+        return lines
     if lane_cmd == "retire":
         row = run_retire(ctx, ns.lane_id)
         lines = [f"{row['id']} {row['status']}"]

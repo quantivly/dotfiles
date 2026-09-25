@@ -69,11 +69,17 @@ def build_argv(machine, lane_out_dirs: list[str], marker: str = MARKER) -> list[
         script += [
             f"printf %s {shquote(marker)}", f"printf '%s\\n' {q}",
             f'r=$(grep -h \'"type":"result"\' {q}/stream.jsonl 2>/dev/null | tail -1); printf \'%s\\n\' "$r"',
-            # DO-747: a lane writes exactly one of verdict.json (work), review.json (a review
-            # brief, still kind=work) or evaluation.json (evaluate) -- never knowing from here
-            # which, all three are stat'd and the newest (only one is ever expected to exist)
-            # wins; none existing prints an empty line, same shape as `stat` failing on one name.
-            f"m=$(stat -c %Y {q}/verdict.json {q}/review.json {q}/evaluation.json 2>/dev/null | sort -rn | head -1); "
+            # DO-747 fix round: a fixed list of filenames (verdict.json/review.json/
+            # evaluation.json) drifts -- work-lane briefs are free text, and this project's own
+            # history has lanes told to write fix-verdict.json, rebase-verdict.json,
+            # evaluation-2.json and the like. The rule that cannot drift: ANY *.json file in
+            # out_dir counts. Verified against dash, bash and zsh (the login shell sshd invokes
+            # here) with an empty out_dir, one holding only stream.jsonl, and one holding
+            # fix-verdict.json: zsh alone prints "no matches found" to stderr on the no-match
+            # cases (its default NOMATCH behavior, unlike bash/dash which leave the pattern
+            # literal), but in every shell `stat` still sees no argument that resolves to a real
+            # path and the pipeline's stdout is empty -- the stderr noise is never captured here.
+            f"m=$(stat -c %Y {q}/*.json 2>/dev/null | sort -rn | head -1); "
             'printf \'%s\\n\' "$m"',
         ]
     return ssh_argv(machine, "; ".join(script))

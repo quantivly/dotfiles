@@ -1,7 +1,11 @@
 import re
 import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
 import uuid
+from pathlib import Path
 from unittest import mock
 from rabota import remote
 from rabota.config import Machine
@@ -76,14 +80,40 @@ class RemoteArgvTests(unittest.TestCase):
 
     def test_lane_chunk_carries_the_verdict_mtime_via_stat(self):
         # DO-722: the remote mtime rides back in this SAME ssh call, quoted the same way as the
-        # stream grep -- shquote, never printf %q (dev's login shell is zsh). DO-747: the SAME
-        # stat call is also how census learns whether the lane wrote any output at all, so it must
-        # cover all three known output filenames, not just verdict.json -- a review lane (kind=work
-        # with a review brief) writes review.json, an evaluate lane writes evaluation.json, and
-        # neither would ever ride back the alternative name if only verdict.json were stat'd.
+        # stream grep -- shquote, never printf %q (dev's login shell is zsh). DO-747 fix round:
+        # the fixed three-name list (verdict.json/review.json/evaluation.json) drifted against
+        # this project's own history of lanes told to write fix-verdict.json,
+        # rebase-verdict.json, evaluation-2.json -- so the stat call now globs `*.json` instead
+        # of naming files, the rule that cannot drift.
         script = remote.build_argv(MACHINE, ["/home/ubuntu/o ne"])[-1]
-        self.assertIn("stat -c %Y '/home/ubuntu/o ne'/verdict.json "
-                      "'/home/ubuntu/o ne'/review.json '/home/ubuntu/o ne'/evaluation.json", script)
+        self.assertIn("stat -c %Y '/home/ubuntu/o ne'/*.json", script)
+
+    def test_the_json_glob_survives_a_no_match_in_bash_dash_and_zsh(self):
+        # Hazard: an unquoted glob with no match can expand to the literal pattern (bash/dash) or
+        # abort the command with a stderr message (zsh, the login shell sshd invokes remotely,
+        # per the module docstring) -- either way `stat` must still see no real path and the
+        # fragment's stdout must be empty, never the literal `*.json` string itself. Driven
+        # against an empty dir, a dir holding only stream.jsonl, and a dir holding
+        # fix-verdict.json (a lane-chosen name outside the old fixed list).
+        shells = [s for s in ("zsh", "bash", "dash", "sh") if shutil.which(s)]
+        self.assertTrue(shells, "at least one shell must be present to exercise this hazard")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "empty").mkdir()
+            (root / "onlystream").mkdir()
+            (root / "onlystream" / "stream.jsonl").write_text("hi")
+            (root / "onlyverdict").mkdir()
+            (root / "onlyverdict" / "fix-verdict.json").write_text("{}")
+            for shell in shells:
+                for case, expect_empty in (("empty", True), ("onlystream", True), ("onlyverdict", False)):
+                    q = remote.shquote(str(root / case))
+                    frag = f"m=$(stat -c %Y {q}/*.json 2>/dev/null | sort -rn | head -1); printf '%s' \"$m\""
+                    out = subprocess.run([shell, "-c", frag], capture_output=True, text=True, check=True).stdout
+                    with self.subTest(shell=shell, case=case):
+                        if expect_empty:
+                            self.assertEqual(out, "", f"{shell}/{case}: {out!r}")
+                        else:
+                            self.assertTrue(out.strip().isdigit(), f"{shell}/{case}: {out!r}")
 
     def test_a_quote_in_an_out_dir_cannot_break_out(self):
         # The property is "a shell sees exactly one token, identical to the input". Assert it with
