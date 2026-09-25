@@ -79,6 +79,7 @@ class Tenant:
     gh_pin_repo: str | None = None
     linear_key_env: str | None = None
     linear_viewer: str | None = None
+    fireflies_key_env: str | None = None
     slack_user_id: str | None = None
     sources: list[str] = field(default_factory=lambda: ["github"])
     review_routing: ReviewRouting = field(default_factory=ReviewRouting)
@@ -121,7 +122,8 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
         name=name, root=_p(d["root"]), state_dir=_p(d["state_dir"]),
         gh_config_dir=_p(d.get("gh_config_dir")), gh_login=d.get("gh_login"),
         gh_pin_repo=d.get("gh_pin_repo"), linear_key_env=d.get("linear_key_env"),
-        linear_viewer=d.get("linear_viewer"), slack_user_id=d.get("slack_user_id"),
+        linear_viewer=d.get("linear_viewer"), fireflies_key_env=d.get("fireflies_key_env"),
+        slack_user_id=d.get("slack_user_id"),
         sources=d.get("sources", ["github"]),
         review_routing=_dc(ReviewRouting, d.get("review_routing", {})),
         linear=_dc(LinearRules, d.get("linear", {})),

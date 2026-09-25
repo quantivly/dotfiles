@@ -1,6 +1,6 @@
 import argparse, json, sqlite3, tempfile, unittest
 from unittest import mock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from rabota import context, errors, secrets, snapshots
 from rabota.commands import sync, ingest
@@ -32,6 +32,16 @@ MINTED = "minted-gho-token-0123456789abcdef"
 class LeakyGh(FakeGh):
     """gh's stderr echoed the minted token; the wrapper folds stderr into the error text."""
     def review_requests(self): raise errors.RabotaError(f"gh api search/issues failed: HTTP 401 — token {MINTED} rejected")
+
+
+class FakeFf:
+    def recent_transcripts(self, since):
+        return [{"id": "t1", "title": "1:1", "date": "2026-09-02",
+                 "action_items": [{"speaker": "Zvi Baratz", "item": "Do the thing", "timestamp": "16:52"}]}]
+
+
+class BoomFf(FakeFf):
+    def recent_transcripts(self, since): raise errors.RabotaError("fireflies down")
 
 
 def db_bytes(state_dir):
@@ -135,6 +145,126 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(errors.Usage):
             sync.run_sync(self.ctx(), ["slack"], lin=FakeLin(), gh=FakeGh())
 
+    def test_fireflies_is_a_fetched_source(self):
+        # DO-746: Fireflies joins linear/github in FETCHED_SOURCES, fetched by `rabota sync` like
+        # the other two, with its action_items already parsed into (speaker, item, timestamp).
+        self.assertEqual(sync.FETCHED_SOURCES, ("linear", "github", "fireflies"))
+        ctx = self.ctx()
+        rep = sync.run_sync(ctx, ["linear", "github", "fireflies"], lin=FakeLin(), gh=FakeGh(), ff=FakeFf())
+        snap = snapshots.read(ctx.state_dir, "fireflies")
+        self.assertTrue(snap["ok"]); self.assertIsNone(snap["error"])
+        self.assertEqual(snap["transcripts"][0]["action_items"],
+                         [{"speaker": "Zvi Baratz", "item": "Do the thing", "timestamp": "16:52"}])
+        self.assertEqual(rep["fireflies"]["counts"], {"transcripts": 1})
+        self.assertTrue(ctx.store.last_sync("quantivly", "fireflies")["ok"])
+
+    def test_a_missing_fireflies_key_is_a_recorded_failed_source_not_a_crash(self):
+        # Hazard 1 from the brief: there is no Fireflies API key on this machine, so this is the
+        # DEFAULT path, not an edge case -- and it must not take `linear`/`github` down with it.
+        # `FirefliesClient.from_context` is exercised for real here (no `ff=` override), so a
+        # missing `FIREFLIES_API_KEY` in `ctx.env` is what actually triggers the refusal.
+        ctx = self.ctx()
+        with self.assertRaises(errors.Partial) as cm:
+            sync.run_sync(ctx, ["linear", "github", "fireflies"], lin=FakeLin(), gh=FakeGh())
+        self.assertEqual(cm.exception.failed, ["fireflies"])
+        # the other two sources still synced and are on disk
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "linear"))
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "github"))
+        self.assertTrue(ctx.store.last_sync("quantivly", "linear")["ok"])
+        row = ctx.store.last_sync("quantivly", "fireflies")
+        self.assertFalse(row["ok"])
+        self.assertIn("FIREFLIES_API_KEY", row["error"])
+
+    def test_a_fireflies_query_failure_is_recorded_like_any_other_source(self):
+        ctx = self.ctx()
+        with self.assertRaises(errors.Partial) as cm:
+            sync.run_sync(ctx, ["fireflies"], ff=BoomFf())
+        self.assertEqual(cm.exception.failed, ["fireflies"])
+        row = ctx.store.last_sync("quantivly", "fireflies")
+        self.assertFalse(row["ok"]); self.assertIn("fireflies down", row["error"])
+
+    # ---- F2: the fetch window is derived from the last shown brief, not a fixed 2 days ----------
+
+    NOW = datetime(2026, 9, 22, 7, 0, tzinfo=timezone.utc)   # a Monday 07:00Z timer tick
+
+    def _write_last_shown(self, ctx, generated_at):
+        ctx.state_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.state_dir / snapshots.LAST_SHOWN_FILE).write_text(json.dumps({"generated_at": generated_at}))
+
+    def test_no_last_shown_marker_falls_back_to_the_old_fixed_window(self):
+        # Revert `fireflies_since` to always return `now - FIREFLIES_LOOKBACK_MAX_DAYS` (or any
+        # value that ignores the missing-marker branch) to see this row fail.
+        ctx = self.ctx()
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertEqual(since, self.NOW - timedelta(days=sync.FIREFLIES_LOOKBACK_MIN_DAYS))
+
+    def test_a_friday_shown_brief_still_covers_friday_on_the_monday_tick(self):
+        # F2's actual regression: a Monday 07:00 tick that only asked "since Saturday 07:00" (a
+        # fixed 2-day lookback) lost Friday afternoon's meetings, because `sync` overwrites the
+        # snapshot rather than merging it. Friday's brief was shown at 2026-09-19T16:00:00Z; the
+        # derived window must start at or before that, margin included -- unlike the old fixed
+        # `now - 2 days`, which lands Saturday morning and misses Friday afternoon entirely.
+        ctx = self.ctx()
+        self._write_last_shown(ctx, "2026-09-19T16:00:00Z")
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertLessEqual(since, datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
+        fixed_two_day_window = self.NOW - timedelta(days=2)
+        self.assertLess(since, fixed_two_day_window, "the old fixed 2-day window would still miss Friday")
+
+    def test_the_margin_is_applied_on_top_of_the_last_shown_time(self):
+        ctx = self.ctx()
+        self._write_last_shown(ctx, "2026-09-21T10:00:00Z")
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertEqual(since, datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc)
+                          - timedelta(hours=sync.FIREFLIES_LOOKBACK_MARGIN_HOURS))
+
+    def test_a_months_old_marker_is_bounded_not_asked_for_a_year(self):
+        # Revert the `max(..., earliest)` clamp to see this row fail: a stale marker would then
+        # ask Fireflies for months of transcripts on every tick.
+        ctx = self.ctx()
+        self._write_last_shown(ctx, "2026-01-01T00:00:00Z")
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertEqual(since, self.NOW - timedelta(days=sync.FIREFLIES_LOOKBACK_MAX_DAYS))
+
+    def test_a_malformed_marker_falls_back_like_a_missing_one(self):
+        ctx = self.ctx()
+        for label, text in (("not json", "{oops"), ("no generated_at", "{}"),
+                             ("bad timestamp", '{"generated_at": "not-a-timestamp"}')):
+            with self.subTest(label=label):
+                ctx.state_dir.mkdir(parents=True, exist_ok=True)
+                (ctx.state_dir / snapshots.LAST_SHOWN_FILE).write_text(text)
+                since = sync.fireflies_since(ctx, self.NOW)
+                self.assertEqual(since, self.NOW - timedelta(days=sync.FIREFLIES_LOOKBACK_MIN_DAYS), label)
+
+    def test_a_marker_ahead_of_now_does_not_push_since_into_the_future(self):
+        # Finding C (DO-746 fix round 2): only the lower bound was clamped. A marker ahead of
+        # `now` -- multi-machine clock skew, or any `generated_at` written ahead of this call's
+        # clock -- pushed `since` past `now`, so the fetch window started in the future and a real
+        # unclassified meeting between the true last-shown time and now was never fetched. Revert
+        # the `min(since, now)` clamp to see this row fail.
+        ctx = self.ctx()
+        future = self.NOW + timedelta(days=1)
+        self._write_last_shown(ctx, future.isoformat().replace("+00:00", "Z"))
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertLessEqual(since, self.NOW)
+
+    def test_sync_fireflies_actually_uses_the_derived_window(self):
+        # Not just `fireflies_since` in isolation -- `sync_fireflies` must pass its result to the
+        # client. Revert `sync_fireflies` to its old `datetime.now(...) - timedelta(days=2)` to see
+        # this row fail: with "now" being whenever the suite actually runs, a fixed 2-day window
+        # lands long after this marker, while the derived window must not.
+        ctx = self.ctx()
+        self._write_last_shown(ctx, "2026-09-19T16:00:00Z")
+        seen = {}
+
+        class RecordingFf(FakeFf):
+            def recent_transcripts(self, since):
+                seen["since"] = since
+                return super().recent_transcripts(since)
+
+        sync.sync_fireflies(ctx, RecordingFf())
+        self.assertLessEqual(seen["since"], datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
+
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()
         f = ctx.state_dir / "slack.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)
@@ -204,17 +334,30 @@ class SyncTests(unittest.TestCase):
         f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", **fields}))
         return f
 
-    def test_ingest_many_one_call_writes_and_records_all_three(self):
+    def test_ingest_many_one_call_writes_and_records_both(self):
         ctx = self.ctx()
         files = [("slack", self._write(ctx, "slack-in", ok=True, items=[{"text": "hi"}])),
-                  ("calendar", self._write(ctx, "calendar-in", ok=True, items=[{"title": "standup"}])),
-                  ("fireflies", self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}]))]
+                  ("calendar", self._write(ctx, "calendar-in", ok=True, items=[{"title": "standup"}]))]
         rep = ingest.run_ingest_many(ctx, files)
-        self.assertEqual(set(rep), {"slack", "calendar", "fireflies"})
-        for source in ("slack", "calendar", "fireflies"):
+        self.assertEqual(set(rep), {"slack", "calendar"})
+        for source in ("slack", "calendar"):
             self.assertTrue(rep[source]["ok"], source)
             self.assertIsNotNone(snapshots.read(ctx.state_dir, source), source)
             self.assertTrue(ctx.store.last_sync("quantivly", source)["ok"], source)
+
+    def test_fireflies_is_refused_by_ingest_now_that_the_timer_fetches_it(self):
+        # F4 from the DO-746 fix-round brief: before this fix, `ingest fireflies --file F` was
+        # still accepted and overwrote the timer's `{"transcripts": [...]}` snapshot with ingest's
+        # `{"items": [...]}` shape at the same path, with nothing to notice the mismatch. Revert
+        # `ALLOWED` to include "fireflies" to see this row fail (both single- and multi-source form
+        # go straight through instead of refusing).
+        ctx = self.ctx()
+        f = self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}])
+        with self.assertRaises(errors.Usage):
+            ingest.run_ingest(ctx, "fireflies", f)
+        with self.assertRaises(errors.Usage):
+            ingest.run_ingest_many(ctx, [("fireflies", f)])
+        self.assertNotIn("fireflies", ingest.ALLOWED)
 
     def test_ingest_many_single_source_form_unchanged(self):
         # The positional/--file single-source call must still return the un-keyed dict, not a
@@ -229,17 +372,14 @@ class SyncTests(unittest.TestCase):
         ctx = self.ctx()
         bad = self._write(ctx, "calendar-in", ok="false")     # k5 shape: truthy string, refused
         files = [("slack", self._write(ctx, "slack-in", ok=True, items=[{"text": "hi"}])),
-                  ("calendar", bad),
-                  ("fireflies", self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}]))]
+                  ("calendar", bad)]
         with self.assertRaises(errors.Partial) as cm:
             ingest.run_ingest_many(ctx, files)
         self.assertEqual(cm.exception.failed, ["calendar"])
         self.assertIsNotNone(snapshots.read(ctx.state_dir, "slack"))
-        self.assertIsNotNone(snapshots.read(ctx.state_dir, "fireflies"))
         self.assertIsNone(snapshots.read(ctx.state_dir, "calendar"))          # refused file: nothing written
         self.assertIsNone(ctx.store.last_sync("quantivly", "calendar"))       # refused file: nothing recorded
         self.assertTrue(ctx.store.last_sync("quantivly", "slack")["ok"])
-        self.assertTrue(ctx.store.last_sync("quantivly", "fireflies")["ok"])
 
     def test_ingest_many_duplicate_source_refused_before_writing_anything(self):
         ctx = self.ctx()
@@ -314,7 +454,7 @@ class SyncTests(unittest.TestCase):
         # their files were already fetched, valid, and independent of the one that blew up.
         ctx = self.ctx()
         files = [("calendar", self._write(ctx, "calendar-in", ok=True, items=[])),
-                  ("fireflies", self._write(ctx, "fireflies-in", ok=True, items=[{"title": "1:1"}]))]
+                  ("slack", self._write(ctx, "slack-in", ok=True, items=[{"text": "hi"}]))]
         real = ingest.snapshots.write
 
         def boom(state_dir, source, payload):
@@ -327,7 +467,7 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(errors.Partial) as cm:
             ingest.run_ingest_many(ctx, files)
         self.assertEqual(cm.exception.failed, ["calendar"])
-        self.assertIsNotNone(snapshots.read(ctx.state_dir, "fireflies"))   # attempted despite the blow-up
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "slack"))   # attempted despite the blow-up
         self.assertIsNone(snapshots.read(ctx.state_dir, "calendar"))
         # raising discards the report, so the reason has to reach the reader through the message
         self.assertIn("OSError", str(cm.exception))

@@ -355,7 +355,8 @@ class BriefCommandTests(unittest.TestCase):
 
 
 class BriefNeedsTests(unittest.TestCase):
-    """DO-716 move 2: a stale/missing slack, calendar or fireflies snapshot produces `needs`."""
+    """DO-716 move 2: a stale/missing slack or calendar snapshot produces `needs`
+    (fireflies moved to sync.FETCHED_SOURCES in DO-746 and no longer appears here)."""
 
     def ctx(self, tenant="quantivly"):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
@@ -370,11 +371,10 @@ class BriefNeedsTests(unittest.TestCase):
         ctx = self.ctx()
         needs = brief.compute_needs(ctx, self.NOW)
         by_source = {n["source"]: n for n in needs}
-        self.assertEqual(set(by_source), {"slack", "calendar", "fireflies"})
+        self.assertEqual(set(by_source), {"slack", "calendar"})
         self.assertEqual(by_source["slack"]["reason"], "never fetched")
         self.assertEqual(by_source["slack"]["query"], "to:me")
         self.assertEqual(by_source["calendar"]["query"], "free blocks for today")
-        self.assertEqual(by_source["fireflies"]["query"], "action items")
         self.assertEqual(by_source["slack"]["write_to"], str(ctx.state_dir / "ingest-slack.json"))
 
     def test_fresh_snapshot_is_not_in_needs(self):
@@ -386,12 +386,10 @@ class BriefNeedsTests(unittest.TestCase):
     def test_stale_snapshot_is_needs_with_stale_reason_and_age_and_delta_query(self):
         ctx = self.ctx()
         snapshots.write(ctx.state_dir, "slack", {"ok": True, "items": [], "fetched_at": "2026-09-16T07:00:00Z"})
-        snapshots.write(ctx.state_dir, "fireflies", {"ok": True, "items": [], "fetched_at": "2026-09-16T07:00:00Z"})
         needs = brief.compute_needs(ctx, self.NOW)
         by_source = {n["source"]: n for n in needs}
         self.assertEqual(by_source["slack"]["reason"], "stale (120 min old)")
         self.assertEqual(by_source["slack"]["query"], "to:me after:2026-09-16")
-        self.assertEqual(by_source["fireflies"]["query"], "action items since 2026-09-16T07:00:00Z")
 
     def test_exactly_at_the_boundary_is_not_stale(self):
         # STALE_AFTER_MIN is 60: a snapshot exactly that old is not yet stale, matching
@@ -404,8 +402,8 @@ class BriefNeedsTests(unittest.TestCase):
 
     def test_a_source_the_tenant_does_not_use_is_never_requested(self):
         # toysim only lists `sources = ["github"]` (see tests/fixtures/config/tenants/toysim.toml):
-        # a tenant without Fireflies must never be told to fetch it, mirroring preflight's rule
-        # for a source the tenant does not list.
+        # a tenant without Slack or Calendar must never be told to fetch either, mirroring
+        # preflight's rule for a source the tenant does not list.
         ctx = self.ctx("toysim")
         self.assertEqual(brief.compute_needs(ctx, self.NOW), [])
 
@@ -437,8 +435,8 @@ class BriefNeedsTests(unittest.TestCase):
 
     def test_a_printed_text_brief_is_recorded_even_while_a_connector_stays_broken(self):
         """Review finding on #240: gating the record on `needs` alone was the mirror image of the bug
-        it fixed. A connector with no session support -- `calendar` and `fireflies` have had none
-        since 2026-09-23 -- keeps `needs` non-empty forever, so the `--text` screen the cycle calls
+        it fixed. A connector with no session support -- `calendar` has had none since 2026-09-23 --
+        keeps `needs` non-empty forever, so the `--text` screen the cycle calls
         "the only screen `/rabota brief` prints on a stale morning" was never recorded, and every
         later call that day re-ran the whole two-round-trip cycle instead of settling to a delta."""
         ctx = self.ctx()
@@ -446,8 +444,6 @@ class BriefNeedsTests(unittest.TestCase):
         # slack fetched fine; calendar stays a recorded failure, as it is in the live tenant
         snapshots.write(ctx.state_dir, "slack", {"ok": True, "error": None, "items": [],
                                                  "fetched_at": "2026-09-16T08:55:00Z"})
-        snapshots.write(ctx.state_dir, "fireflies", {"ok": True, "error": None, "items": [],
-                                                      "fetched_at": "2026-09-16T08:55:00Z"})
         snapshots.write(ctx.state_dir, "calendar", {"ok": False, "error": "no connector", "items": [],
                                                      "fetched_at": "2026-09-16T08:55:00Z"})
         last = ctx.state_dir / "2026-09-16" / "last-brief.json"
@@ -574,14 +570,14 @@ class BriefNeedsTests(unittest.TestCase):
         day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
         (day / "sequence.json").write_text(json.dumps(seq(["K-1"])))
         out = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
-        self.assertEqual({n["source"] for n in out["needs"]}, {"slack", "calendar", "fireflies"})
+        self.assertEqual({n["source"] for n in out["needs"]}, {"slack", "calendar"})
         for n in out["needs"]:
             self.assertEqual(set(n), {"source", "reason", "query", "write_to"})
         ctx2 = self.ctx()
         day2 = ctx2.state_dir / "2026-09-16"; day2.mkdir(parents=True, exist_ok=True)
         (day2 / "sequence.json").write_text(json.dumps(seq(["K-1"])))
         lines = brief.run_brief(ctx2, text=True, now=self.NOW, gh=gh, lin=lin)
-        for source in ("slack", "calendar", "fireflies"):
+        for source in ("slack", "calendar"):
             self.assertTrue(any(l.startswith(f"! {source} needs a fetch —") for l in lines), lines)
 
     def test_needs_does_not_replace_the_brief_or_change_the_exit_code(self):
@@ -602,3 +598,289 @@ class BriefNeedsTests(unittest.TestCase):
         lines = brief.terminal_lines(s, None, None, max_lines=12, brief_path="/p/brief.md", needs=needs)
         self.assertEqual(len(lines), 12)
         self.assertTrue(any(l.startswith("! slack needs a fetch —") for l in lines))
+
+
+class BriefFirefliesNeedsTests(unittest.TestCase):
+    """DO-746 fix round, finding F1: Fireflies action items reach classification through `needs`
+    — no query, `fetched: True`, no `write_to` — and exactly once."""
+
+    def ctx(self, tenant="quantivly", dry_run=False):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    NOW = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+
+    def _write_fireflies(self, ctx, transcripts, fetched_at="2026-09-16T08:30:00Z"):
+        snapshots.write(ctx.state_dir, "fireflies",
+                        {"ok": True, "error": None, "transcripts": transcripts, "fetched_at": fetched_at})
+
+    def _fresh_needs_sources(self, ctx):
+        for source in brief.NEEDS_SOURCES:
+            snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [],
+                                                    "fetched_at": "2026-09-16T08:55:00Z"})
+
+    def test_no_fireflies_snapshot_is_not_in_needs(self):
+        ctx = self.ctx()
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_a_tenant_that_does_not_use_fireflies_never_gets_an_entry(self):
+        # toysim only lists `sources = ["github"]` (tests/fixtures/config/tenants/toysim.toml).
+        ctx = self.ctx("toysim")
+        self._write_fireflies(ctx, [{"id": "t1", "title": "x", "date": "d",
+                                     "action_items": [{"speaker": None, "item": "x", "timestamp": None}]}])
+        self.assertEqual(brief.compute_needs(ctx, self.NOW), [])
+
+    def test_an_empty_transcripts_snapshot_is_not_in_needs(self):
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [])
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_a_transcript_with_no_action_items_contributes_nothing(self):
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [{"id": "t1", "title": "x", "date": "d", "action_items": []}])
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_an_unreadable_fireflies_snapshot_is_not_needs_and_does_not_crash(self):
+        # Same precedent as `compute_needs`'s own unreadable-snapshot handling for slack/calendar:
+        # a broken file is a reason to say nothing about Fireflies, never a reason to cost the brief.
+        ctx = self.ctx()
+        (ctx.state_dir / "sources").mkdir(parents=True, exist_ok=True)
+        (ctx.state_dir / "sources" / "fireflies.json").write_text("{oops")
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+
+    def test_unclassified_items_produce_a_needs_entry_that_carries_them_with_no_fetch(self):
+        # F1's core claim: this is what lets a headless turn 2 classify without a fetch or ingest.
+        # Revert `compute_needs` to drop the `_fireflies_need` call to see this row fail: with
+        # `29ab0d3` alone, Fireflies never appears in `needs` at all, however stale its snapshot.
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("fireflies", needs)
+        entry = needs["fireflies"]
+        self.assertTrue(entry["fetched"])
+        self.assertNotIn("query", entry)
+        self.assertNotIn("write_to", entry)
+        self.assertEqual(entry["items"], [{"transcript_id": "t1", "meeting": "1:1", "date": "2026-09-16",
+                                           "speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}])
+
+    def test_alert_line_says_classify_not_fetch(self):
+        # `_alert_lines` keys off `fetched`, not the source name (Move 6) -- a Fireflies alert must
+        # never claim there is a fetch or a file to write, since there is neither.
+        ctx = self.ctx()
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": None, "item": "x", "timestamp": None}]}])
+        needs = brief.compute_needs(ctx, self.NOW)
+        lines = brief.terminal_lines({"tenant": "quantivly", "generated_at": "2026-09-16T08:00:00Z",
+                                      "failed_sources": [], "items": [], "triage": [], "decisions": []},
+                                     None, None, needs=needs)
+        line = next(l for l in lines if l.startswith("! fireflies "))
+        self.assertIn("classify", line)
+        self.assertNotIn("needs a fetch", line)
+
+    def test_a_needs_empty_morning_can_still_be_caused_by_fireflies_alone(self):
+        # The invariant's clause "whether or not Slack or Calendar need a fetch that morning":
+        # fresh slack/calendar plus an unclassified Fireflies item must still make `needs`
+        # non-empty, so turn 2 still runs and classifies it.
+        ctx = self.ctx()
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        needs = brief.compute_needs(ctx, self.NOW)
+        self.assertEqual({n["source"] for n in needs}, {"fireflies"})
+
+    def test_run_brief_acknowledged_marks_items_classified_so_they_do_not_reappear(self):
+        # "Exactly once", fix round 2 shape (finding D): turn 1 (JSON) hands the items out, and
+        # only turn 2's EXPLICIT `--classified fireflies` acknowledgement marks them -- not merely
+        # being shown. AMENDED from the fix-round-1 version of this test, which called
+        # `run_brief(text=True)` alone and expected that bare call to mark items classified: that
+        # was finding D's bug (a bare `--text brief` also passed the old gate). This version drives
+        # the real two-call cycle and fails against the OLD gate-on-"shown" code, which marks on
+        # ANY `text=True` call whether or not `--classified` is honoured.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        turn1 = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)   # turn 1: JSON, hands out
+        self.assertIn("fireflies", {n["source"] for n in turn1["needs"]})
+        classified_file = ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE
+        self.assertFalse(classified_file.exists())    # not yet -- only handed out, not acknowledged
+        second = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        # The acknowledgement itself classifies t1, so THIS screen must not say fireflies still
+        # needs classifying (finding B) -- see the dedicated test for that below.
+        self.assertFalse(any("fireflies" in l for l in second), second)
+        self.assertTrue(classified_file.exists())
+        ids = json.loads(classified_file.read_text())["ids"]
+        self.assertEqual(len(ids), 1)
+        self.assertTrue(ids[0].startswith("t1:"))
+        third = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertNotIn("fireflies", {n["source"] for n in third["needs"]})
+
+    def test_a_bare_text_brief_never_marks_anything_classified(self):
+        # Finding D's exact bug: `rabota --text brief` (no `--classified`), typed by @zvi or by
+        # anything outside the skill's turn 2, must classify nothing -- the reader only ever saw
+        # the one-line alert, never the items. Fails against the pre-fix-round-2 code, which marked
+        # on any `text=True` call.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)    # turn 1: hands out
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)    # a BARE --text call
+        self.assertTrue(any("fireflies" in l for l in lines), lines)
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
+        # And the item is still there to classify on a later, real acknowledgement.
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("fireflies", needs)
+
+    def test_a_meeting_landing_between_turn_1_and_turn_2_is_not_marked_by_the_ack(self):
+        # Finding D's "what the acknowledgement marks must be exactly the items turn 1 handed
+        # out" clause: a meeting that lands mid-turn must survive the very next acknowledgement
+        # unmarked, or it is classified without ever having been seen.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)    # turn 1 hands out t1 only
+        # A meeting lands mid-turn, independently of this call (sync's job, exercised elsewhere).
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]},
+                                    {"id": "t2", "title": "standup", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "New thing", "timestamp": "02:00"}]}])
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        classified_ids = json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())["ids"]
+        self.assertEqual(len(classified_ids), 1)
+        self.assertTrue(classified_ids[0].startswith("t1:"))
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("fireflies", needs)      # t2 is still unclassified -- it was never handed out
+        self.assertEqual([i["transcript_id"] for i in needs["fireflies"]["items"]], ["t2"])
+
+    def test_two_json_briefs_in_a_row_refresh_the_pending_handout(self):
+        # Two turn-1 calls with no acknowledgement between them: the second overwrites what the
+        # first handed out (nothing was ever marked, so there is nothing to lose), and an
+        # acknowledgement right after still marks everything currently pending.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        ids = json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())["ids"]
+        self.assertEqual(len(ids), 1)
+
+    def test_turn_2_dying_before_acknowledging_loses_nothing(self):
+        # Turn 1 hands out t1; turn 2 "dies" (never called). The next day's turn 1 still finds t1
+        # pending and hands it out again -- nothing about the missing acknowledgement drops it.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)   # turn 1; no turn 2 follows
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("fireflies", needs)
+        self.assertEqual([i["transcript_id"] for i in needs["fireflies"]["items"]], ["t1"])
+
+    def test_a_dry_run_acknowledgement_marks_nothing(self):
+        # DO-742: `--dry-run` writes nothing, marking included, even when `--classified fireflies`
+        # is passed.
+        ctx = self.ctx(dry_run=True)
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_PENDING_FILE).exists())
+
+    def test_a_late_item_appended_to_an_already_classified_transcript_is_not_lost(self):
+        # Finding A's core claim: Fireflies fills a transcript's action items in over time, and
+        # keying classification on the bare transcript id made anything appended after the first
+        # classification invisible forever. Revert `_fireflies_item_key` to return the bare
+        # transcript id (dropping the digest) to see this row fail.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "First", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        self.assertNotIn("fireflies", {n["source"] for n in brief.compute_needs(ctx, self.NOW)})
+        # Fireflies fills in the SAME transcript with a second item later.
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "First", "timestamp": "01:00"},
+                                                       {"speaker": "Zvi", "item": "SECOND-added-later", "timestamp": "05:00"}]}])
+        needs = {n["source"]: n for n in brief.compute_needs(ctx, self.NOW)}
+        self.assertIn("fireflies", needs)
+        self.assertEqual([i["item"] for i in needs["fireflies"]["items"]], ["SECOND-added-later"])
+
+    def test_a_brief_that_was_not_shown_does_not_mark_anything_classified(self):
+        # Mirrors `test_a_brief_that_printed_nothing_does_not_record_itself_as_shown`: turn 1's
+        # JSON call with `needs` non-empty (here, purely because of fireflies) prints nothing and
+        # must not mark the items classified -- only an explicit acknowledgement may.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
+
+    def test_last_brief_shown_marker_is_written_cross_day_matching_the_sequence(self):
+        # `commands.sync.fireflies_since` reads this file to derive its fetch window (F2); it must
+        # exist at the state-dir root, not nested under today's day directory, so it survives a day
+        # boundary the way the day-scoped `last-brief.json` cannot.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        day_seq = json.loads((ctx.state_dir / "2026-09-16" / "sequence.json").read_text())
+        marker = ctx.state_dir / brief.LAST_SHOWN_FILE
+        self.assertTrue(marker.exists())
+        self.assertEqual(json.loads(marker.read_text())["generated_at"], day_seq["generated_at"])
+
+    def test_the_acknowledging_call_does_not_say_its_own_marking_still_needs_classifying(self):
+        # Finding B: `terminal_lines` used to build the `! fireflies needs classifying` line from
+        # `needs` computed BEFORE marking ran, so the one screen @zvi actually reads said an item
+        # still needed classifying when this very call had just classified it. Marking now happens
+        # before `needs` is (re)computed for this call's own lines -- see `run_brief`'s ordering.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)    # turn 1: hands t1 out
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        self.assertFalse(any("needs classifying" in l for l in lines), lines)
+        self.assertTrue(json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())["ids"])
+
+    def test_classified_without_text_is_a_usage_error_and_marks_nothing(self):
+        # Review round 4, F1: a JSON call carrying the acknowledgement would mark items classified
+        # (and record the brief as shown) though nothing was printed.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        with self.assertRaises(errors.Usage):
+            brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
+        self.assertFalse((ctx.state_dir / brief.LAST_SHOWN_FILE).exists())
+
+    def test_an_unknown_classified_source_is_a_usage_error(self):
+        # Review round 4, F2: `Fireflies` or `slack` used to parse and acknowledge nothing, silently.
+        ctx = self.ctx()
+        for bad in (["Fireflies"], ["slack"], ["fireflies", "calendar"]):
+            with self.assertRaises(errors.Usage, msg=bad):
+                brief.run_brief(ctx, text=True, now=self.NOW, gh=FakeGh("work-login"),
+                                lin=FakeLinear(VIEWER), classified=bad)

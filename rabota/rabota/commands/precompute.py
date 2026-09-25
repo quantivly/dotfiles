@@ -20,11 +20,15 @@ DRY_RUN_NOTE = ("--dry-run suppresses only the Linear-mutating 'auto' step; sync
 
 
 def _default_steps():
-    from rabota.commands.sync import run_sync
+    from rabota.commands.sync import FETCHED_SOURCES, run_sync
     from rabota.commands.inbox import run_plan, run_apply
     from rabota.commands.rank import run_rank
     from rabota.census import gather
-    return {"sync": lambda ctx: run_sync(ctx, [s for s in ("linear", "github") if s in ctx.tenant.sources]),
+    # `FETCHED_SOURCES`, not a restated tuple (DO-746): a literal ("linear", "github") here kept
+    # Fireflies out of every precompute tick even after it joined FETCHED_SOURCES, because this
+    # step never reads that constant -- the one place that decides what the CLI itself fetches
+    # would then disagree with the one place that actually calls it, silently.
+    return {"sync": lambda ctx: run_sync(ctx, [s for s in FETCHED_SOURCES if s in ctx.tenant.sources]),
             "plan": lambda ctx: run_plan(ctx),
             "auto": lambda ctx: run_apply(ctx, tier="auto", batch=None, confirmed=False, dry_run=ctx.dry_run),
             "rank": lambda ctx: run_rank(ctx),

@@ -2,12 +2,14 @@
 (DO-716 move 4).
 
 **Why this exists.** Turn 1 of ``/rabota brief`` cannot know a commitment's tracked counterpart —
-Slack/Calendar/Fireflies are not fetched yet (see ``commands.brief.compute_needs``). So pairing a
-commitment with what Linear/GitHub say has to wait for turn 2, where the agent has just fetched
-the connectors — and it can only cost 0 further round trips if what it needs is already sitting in
-turn 1's ``brief`` reply. This module builds exactly that: a slim projection of the two snapshots
-the 30-minute ``precompute`` timer already keeps fresh, so building it costs a re-read of two small
-files already on disk, never a new fetch.
+Slack and Calendar are not fetched yet (see ``commands.brief.compute_needs``), and Fireflies,
+though fetched server-side by the timer since DO-746, is not yet classified: its items reach
+``needs`` unclassified, the same way a stale Slack/Calendar entry does. So pairing a commitment
+with what Linear/GitHub say has to wait for turn 2, where the agent has just fetched or been
+handed the connector items — and it can only cost 0 further round trips if what it needs is
+already sitting in turn 1's ``brief`` reply. This module builds exactly that: a slim projection of
+the two snapshots the 30-minute ``precompute`` timer already keeps fresh, so building it costs a
+re-read of two small files already on disk, never a new fetch.
 
 **What it is not.** It does not fetch anything itself, and it does not do the classification —
 that stays model judgement (``reconcile.md``). It is the haystack, not the needle.

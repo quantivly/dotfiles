@@ -141,6 +141,19 @@ class PrecomputeTests(unittest.TestCase):
         self.assertTrue(rep["steps"]["rank"]["ok"])
         self.assertTrue(rep["steps"]["census"]["ok"])
 
+    def test_sync_step_asks_for_every_fetched_source_the_tenant_lists(self):
+        # DO-746 hazard: `_default_steps` used to filter a hardcoded ("linear", "github") tuple
+        # instead of importing `sync.FETCHED_SOURCES`, so adding "fireflies" to FETCHED_SOURCES
+        # alone would never have made the timer actually fetch it -- the one place that decides
+        # what the CLI fetches would have silently disagreed with the one place that calls it.
+        # The "quantivly" fixture tenant lists fireflies in `sources` (see fixtures/config), so
+        # this fails if the step ever again names its sources independently of FETCHED_SOURCES.
+        ctx = self.ctx()
+        with mock.patch("rabota.commands.sync.run_sync", return_value={}) as fake_sync:
+            steps = precompute._default_steps()
+            steps["sync"](ctx)
+        fake_sync.assert_called_once_with(ctx, ["linear", "github", "fireflies"])
+
     def test_census_step_calls_gather_with_include_worktrees_false(self):
         # F24: the timer's census step must ask for the cheap shape — drive this through the real
         # `_default_steps()` wiring (not by inspecting the lambda's source) so a future refactor of

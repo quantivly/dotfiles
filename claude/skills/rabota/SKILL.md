@@ -51,26 +51,30 @@ that call is what keeps the fetch from being wasted.)
      pre-fetch brief and then a second, near-empty `no change` block after it.
 2. **Fetch, ingest, reconcile — turn 2, only when `needs` is non-empty.** These are tool
    calls inside this one turn, not a turn each:
-   - For each entry in `needs`, fetch exactly its `query` (e.g. Slack `to:me after:…`,
-     Calendar free blocks for today, Fireflies action items since `…`) and write
+   - An entry with `fetched: true` (fireflies) already carries its `items` — classify them,
+     no fetch and no ingest. Every other entry: fetch exactly its `query` (e.g. Slack
+     `to:me after:…`, Calendar free blocks for today) and write
      `{"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}` (a failed fetch:
      `"ok": false`, `"error": "<why>"`, `"items": []`) to the entry's `write_to` path.
      **`ok` must be a JSON boolean** — omit it and `ingest` exits 2. Do not retry more than
      once; never drop a failed source silently.
-   - **One** `rabota ingest --file slack=… --file calendar=… --file fireflies=…` call, naming
-     only the sources actually in `needs`. A bad file among good ones is reported (exit 4),
-     not silently dropped — the good ones still land.
+   - **One** `rabota ingest --file slack=… --file calendar=…` call, naming
+     only the sources actually in `needs` that were fetched (never fireflies — it has no
+     `write_to`). A bad file among good ones is reported (exit 4), not silently dropped —
+     the good ones still land.
    - **Reconcile** (`references/reconcile.md`) using turn 1's `tracked` field — it is already
      the Linear/GitHub projection reconcile needs; do not re-read `sources/*.json` yourself.
-     Classify every commitment in the items you just fetched. Record:
-     `rabota escalate --question … --evidence … --option …` for questions; dated promises
-     become pins: `rabota pin <key> --bucket 2 --rationale …`. Say "already done" as
-     confidently as "overdue"; cite the artifact.
-   - **Brief, turn 2's final call.** `rabota rank && rabota --text brief --max-lines 11` — the
-     `rank` is not optional: without it the brief re-prints the pre-fetch ranking and says `no
-     change`, so the fetch is wasted silently. Print its lines verbatim, then append ≤2 lines of
-     reconcile delta. **This is the only screen `/rabota brief` prints on a stale morning.**
-     Nothing else goes to the terminal.
+     Classify every commitment in the items you just fetched or that a `fetched: true` entry
+     already carried. Record: `rabota escalate --question … --evidence … --option …` for
+     questions; dated promises become pins: `rabota pin <key> --bucket 2 --rationale …`. Say
+     "already done" as confidently as "overdue"; cite the artifact.
+   - **Brief, turn 2's final call.** `rabota rank && rabota --text brief --max-lines 11 --classified fireflies` —
+     the `rank` is not optional: without it the brief re-prints the pre-fetch ranking and says `no
+     change`, so the fetch is wasted silently. `--classified fireflies` is what actually marks the
+     Fireflies items you were just handed as classified; omitting it (e.g. a bare `rabota --text
+     brief`) classifies nothing, however many items the screen names. Print its lines verbatim,
+     then append ≤2 lines of reconcile delta. **This is the only screen `/rabota brief` prints on a
+     stale morning.** Nothing else goes to the terminal.
 3. **Dispatch.** `rabota lane recipe --brief <path> --repo <path> --machine dev --run` — one call, one unit,
    seat-gated; the CLI refuses with the seat's `resets_at` when the window is spent. `--machine dev`
    is **required** with `--run`: the local form is not implemented and refuses. Watch with
