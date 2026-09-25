@@ -76,9 +76,14 @@ class RemoteArgvTests(unittest.TestCase):
 
     def test_lane_chunk_carries_the_verdict_mtime_via_stat(self):
         # DO-722: the remote mtime rides back in this SAME ssh call, quoted the same way as the
-        # stream grep -- shquote, never printf %q (dev's login shell is zsh).
+        # stream grep -- shquote, never printf %q (dev's login shell is zsh). DO-747: the SAME
+        # stat call is also how census learns whether the lane wrote any output at all, so it must
+        # cover all three known output filenames, not just verdict.json -- a review lane (kind=work
+        # with a review brief) writes review.json, an evaluate lane writes evaluation.json, and
+        # neither would ever ride back the alternative name if only verdict.json were stat'd.
         script = remote.build_argv(MACHINE, ["/home/ubuntu/o ne"])[-1]
-        self.assertIn("stat -c %Y '/home/ubuntu/o ne'/verdict.json", script)
+        self.assertIn("stat -c %Y '/home/ubuntu/o ne'/verdict.json "
+                      "'/home/ubuntu/o ne'/review.json '/home/ubuntu/o ne'/evaluation.json", script)
 
     def test_a_quote_in_an_out_dir_cannot_break_out(self):
         # The property is "a shell sees exactly one token, identical to the input". Assert it with

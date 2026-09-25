@@ -69,7 +69,12 @@ def build_argv(machine, lane_out_dirs: list[str], marker: str = MARKER) -> list[
         script += [
             f"printf %s {shquote(marker)}", f"printf '%s\\n' {q}",
             f'r=$(grep -h \'"type":"result"\' {q}/stream.jsonl 2>/dev/null | tail -1); printf \'%s\\n\' "$r"',
-            f"m=$(stat -c %Y {q}/verdict.json 2>/dev/null); printf '%s\\n' \"$m\"",
+            # DO-747: a lane writes exactly one of verdict.json (work), review.json (a review
+            # brief, still kind=work) or evaluation.json (evaluate) -- never knowing from here
+            # which, all three are stat'd and the newest (only one is ever expected to exist)
+            # wins; none existing prints an empty line, same shape as `stat` failing on one name.
+            f"m=$(stat -c %Y {q}/verdict.json {q}/review.json {q}/evaluation.json 2>/dev/null | sort -rn | head -1); "
+            'printf \'%s\\n\' "$m"',
         ]
     return ssh_argv(machine, "; ".join(script))
 
