@@ -203,14 +203,17 @@ class LaneCliWiringTests(unittest.TestCase):
                            "started_at": "2026-09-22T00:00:00Z"})
 
     def run_cli(self, *args):
-        """``(code, parsed)`` — both streams captured, since a refusal prints to stderr."""
-        import contextlib, io, json as _json
+        """``(code, parsed)`` — both streams captured, since a refusal prints to stderr, and a
+        stray warning (e.g. a ResourceWarning from an unrelated leaked connection) may print
+        ahead of the JSON reply (DO-750)."""
+        import contextlib, io, json as _json, re as _re
         from rabota import cli
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(["--tenant", "quantivly", "--state-dir", self.state, *args])
-        raw = out.getvalue().strip() or err.getvalue().strip()
-        return code, (_json.loads(raw) if raw.startswith(("{", "[")) else raw)
+        raw = out.getvalue() + err.getvalue()
+        m = _re.search(r"\{[\s\S]*\}", raw)
+        return code, (_json.loads(m.group(0)) if m else raw.strip())
 
     def test_status_flag_reaches_the_query(self):
         """Pins the dispatch: with --status hardcoded away, this row is what fails."""

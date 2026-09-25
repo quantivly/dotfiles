@@ -17,7 +17,9 @@ class BudgetTests(unittest.TestCase):
     def ctx(self, runner, tenant="quantivly"):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
-        return context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
 
     def test_seat_for_uses_tenant_config_and_refuses_the_console(self):
         ctx = self.ctx(FakeRunner([]))
