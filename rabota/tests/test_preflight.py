@@ -1,7 +1,7 @@
 import argparse, contextlib, io, tempfile, time, unittest
 from dataclasses import dataclass, field
 from pathlib import Path
-from rabota import context, errors
+from rabota import context, errors, secrets
 from rabota.commands import preflight
 from rabota.runner import FakeRunner, Result
 
@@ -172,6 +172,7 @@ class PreflightTests(unittest.TestCase):
         """GhClient is built once and its ``whoami``/``api`` calls run concurrently against the
         same instance; stress it over several iterations against the real class (not a fake) to
         catch a race in the shared ``env``/``runner``."""
+        self.addCleanup(secrets.REGISTERED_VALUES.discard, "minted-token")
         for _ in range(10):
             runner = FakeRunner([
                 (["gh", "auth", "token"], Result(0, "minted-token\n", "")),
