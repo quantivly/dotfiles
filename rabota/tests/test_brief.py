@@ -946,7 +946,8 @@ class BriefRerankTests(unittest.TestCase):
         brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
         seq_path = ctx.state_dir / "2026-09-16" / "sequence.json"
         before = seq_path.read_text()
-        linear.write_text(json.dumps({**stamp, "issues": [{"identifier": "HUB-1", "title": "new"}]}))
+        linear.write_text(json.dumps({**stamp, "issues": [{"identifier": "HUB-1", "title": "new", "url": "u", "priorityLabel": "Low",
+                                                             "state": {"type": "unstarted", "name": "Todo"}}]}))
         brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
         self.assertNotEqual(seq_path.read_text(), before,
                             "linear.json changed content under the same fetched_at, and nothing re-ranked")
