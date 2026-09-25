@@ -1465,6 +1465,45 @@ want_link "a healthy first build still links the credential" \
           "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
 no_out    "...and the resting state says nothing about auth_broken" "auth_broken"
 
+#-----------------------------------------------------------------------------
+section "Z. IMP-3358 (nanoclaw) — a REAL directory where a shared link belongs"
+#-----------------------------------------------------------------------------
+# GNU `ln -sfn` onto an existing directory nests the link INSIDE it; toysim-0's
+# projects/ became a real directory with its own memory files that way.
+new_home z1; mk_profile p1
+# The fixture HOME has no ~/.claude/projects; give it one so the shared link exists.
+mkdir -p "$FHOME/.claude/projects"
+run_sut p1
+want_rc "a good build succeeds" 0
+if [[ -L "$ACCOUNT_ROOT/p1/projects" ]]; then
+    ok "projects is a link after a good build"
+else
+    bad "projects is not a link after a good build"
+fi
+# Now the shape of the incident: a REAL directory where the link belongs.
+rm "$ACCOUNT_ROOT/p1/projects"; mkdir -p "$ACCOUNT_ROOT/p1/projects/keep-me"
+run_sut p1
+want_rc "a real directory does not fail the build" 0
+want_out "a real directory is refused loudly" "REAL directory"
+if [[ ! -e "$ACCOUNT_ROOT/p1/projects/projects" ]]; then
+    ok "no nested projects/projects link was created"
+else
+    bad "a nested projects/projects link was created inside the real directory"
+fi
+if [[ -d "$ACCOUNT_ROOT/p1/projects/keep-me" ]]; then
+    ok "the real directory's contents were left alone"
+else
+    bad "the real directory's contents were touched"
+fi
+run_sut --check
+want_rc "--check exits 1 while a real directory exists" 1
+want_out "--check names the real directory" "REAL-DIR p1/projects"
+rm -rf "$ACCOUNT_ROOT/p1/projects"
+run_sut p1
+run_sut --check
+want_rc "--check is clean once the directory is gone and the link rebuilt" 0
+want_out "--check says so" "nested projects/projects links: 0"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -1480,7 +1519,7 @@ no_out    "...and the resting state says nothing about auth_broken" "auth_broken
 # whole point of it. A docs_claim row would demand it be rewritten to 159 today
 # and to something else next month, destroying the record to satisfy the guard.
 # scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=159
+EXPECTED_ROWS=169
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

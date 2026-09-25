@@ -970,7 +970,19 @@ build_one() {
     for entry in "$GLOBAL_DIR"/*; do
         name="${entry##*/}"
         is_special "$name" && continue
-        ln -sfn "$entry" "$account_dir/$name"
+        # IMP-3358 (nanoclaw): GNU `ln -sfn` onto an EXISTING REAL DIRECTORY puts the
+        # link INSIDE it (…/name/name -> entry) instead of replacing it, and every
+        # later build re-nests. That is how toysim-0's projects/ became a real
+        # directory with its own slugs and memory files (2026-09-15..24) that shared
+        # nothing with the live store. A real directory here is DATA the operator
+        # must reconcile by hand — never something this script deletes — so refuse
+        # it loudly and leave it alone; `-T` makes the destination a file, so a
+        # directory can never be entered again.
+        if [[ -d "$account_dir/$name" && ! -L "$account_dir/$name" ]]; then
+            warn "$profile: $name is a REAL directory, not a link — left alone; reconcile it by hand and remove it, then rebuild (IMP-3358)"
+            continue
+        fi
+        ln -sfnT "$entry" "$account_dir/$name"
     done
 
     # 2. Prune links whose source has since disappeared. A renamed source
@@ -1062,11 +1074,44 @@ build_one() {
     printf '%s\n' "$account_dir"
 }
 
+# IMP-3358: a DRY RUN over every account dir — report each shared entry that is a
+# real directory instead of a link, and any nested link inside it. Changes nothing;
+# exits 1 when it finds one, so it can gate the fix.
+check_all() {
+    local d profile name entry rc=0 found=0
+    [[ -d "$ROOT" ]] || { warn "no account dirs at ${ROOT/#$HOME/\~}"; return 0; }
+    shopt -s dotglob nullglob
+    for d in "$ROOT"/*/; do
+        profile="$(basename "$d")"
+        for entry in "$GLOBAL_DIR"/*; do
+            name="${entry##*/}"
+            is_special "$name" && continue
+            found=1
+            if [[ -d "$d$name" && ! -L "$d$name" ]]; then
+                printf 'REAL-DIR %s/%s\n' "$profile" "$name"
+                rc=1
+                if [[ -L "$d$name/$name" ]]; then
+                    printf 'NESTED   %s/%s/%s -> %s\n' "$profile" "$name" "$name" "$(readlink "$d$name/$name")"
+                fi
+            fi
+        done
+    done
+    shopt -u dotglob nullglob
+    (( found )) || warn "no shared entries to check"
+    (( rc == 0 )) && printf 'OK: every shared entry in every account dir is a link (nested projects/projects links: 0)\n'
+    return $rc
+}
+
 main() {
-    (( $# )) || { printf 'Usage: %s <profile> [<profile>...] | --all | --reconcile\n' "$0" >&2; exit 2; }
+    (( $# )) || { printf 'Usage: %s <profile> [<profile>...] | --all | --reconcile | --check\n' "$0" >&2; exit 2; }
 
     if [[ "$1" == "--reconcile" ]]; then
         reconcile_all
+        return $?
+    fi
+
+    if [[ "$1" == "--check" ]]; then
+        check_all
         return $?
     fi
 
