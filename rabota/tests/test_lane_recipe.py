@@ -386,60 +386,89 @@ class ResolveRemoteTests(LocalRecipeTests):
 
 
 class CreateWorktreeRemoteTests(LocalRecipeTests):
-    """DO-657: ``create_worktree_remote`` fetches before ``worktree add``, in the same ssh call, and
-    a caller that passes no ``--base`` gets the remote's own ``origin/HEAD`` rather than whatever
-    the clone's local ``HEAD`` happened to be left at.
+    """DO-725: ``create_worktree_remote`` fetches, resolves ``base`` (or, absent one, the remote's
+    own ``origin/HEAD``) to a COMMIT, and only then ``worktree add``s at that commit — all in ONE
+    ssh call. Resolving to a commit is the fix itself: ``git worktree add <path> <ref>`` refuses a
+    branch ref already checked out anywhere in the clone (measured on dev against `main`, which the
+    laptop's own primary checkout sits on, and against a finished lane's own branch until its
+    worktree is removed), but never refuses a bare commit that way — a lane always starts detached.
+
+    AMENDED from the pre-DO-725 shape (``test_no_base_resolves_origin_head_and_uses_it_for_
+    worktree_add``, ``test_a_missing_origin_head_refuses_naming_the_repo``,
+    ``test_a_failed_origin_head_lookup_refuses_naming_the_repo``): those pinned a SEPARATE
+    ``git symbolic-ref`` round trip ahead of the fetch+worktree-add call (2 ssh calls with no
+    ``--base``, DO-657's shape). All three fail against ``main`` as written, because ``main``
+    still makes that separate call and this fix removes it — the resolution is folded into the
+    one call the fetch already makes instead.
     """
 
     def machine(self, ctx):
         return ctx.tenant.machines["dev"]
 
-    def test_the_fetch_is_present_and_ordered_before_worktree_add_in_the_same_command(self):
+    def test_fetch_precedes_resolve_precedes_worktree_add_in_one_command(self):
         runner = FakeRunner([(["ssh"], Result(0, "", ""))])
         ctx = self.ctx(runner)
         lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", "origin/main")
         self.assertEqual(len(runner.calls), 1)  # one ssh call, not two
         cmd = runner.calls[0][-1]
-        self.assertLess(cmd.index("'fetch'"), cmd.index("'worktree'"))
+        self.assertLess(cmd.index("'fetch'"), cmd.index("'rev-parse'"))
+        self.assertLess(cmd.index("'rev-parse'"), cmd.index("worktree add"))
         self.assertIn("'origin'", cmd)
+
+    def test_an_explicit_base_is_the_ref_resolved_to_a_commit_not_passed_to_add_directly(self):
+        """DO-725's core claim, pinned at the unit this issue is actually about: ``worktree add``
+        must never be handed the raw ref (which `git worktree add` can refuse as already checked
+        out) — only the commit the resolve step names via the shell variable it assigns.
+        Fails against ``main``: there, ``'add'`` is immediately followed by the literal
+        ``'origin/main'``, never a rev-parse step at all."""
+        runner = FakeRunner([(["ssh"], Result(0, "", ""))])
+        ctx = self.ctx(runner)
+        lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", "origin/main")
+        cmd = runner.calls[0][-1]
+        self.assertIn("'--verify'", cmd)
+        self.assertIn("'origin/main^{commit}'", cmd)
+        self.assertIn("worktree add '/w/t' \"$sha\"", cmd)
+        self.assertNotIn("add '/w/t' 'origin/main'", cmd)
 
     def test_a_failing_fetch_refuses_and_creates_nothing(self):
         runner = FakeRunner([(["ssh"], Result(1, "", "fatal: unable to access repo"))])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.Refused):
             lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", "origin/main")
-        # The one ssh call made is the fetch+worktree batch itself — no separate worktree-add
-        # call was ever attempted after it.
+        # The one ssh call made is the fetch+resolve+worktree batch itself — no separate call
+        # was ever attempted after it.
         self.assertEqual(len(runner.calls), 1)
 
-    def test_no_base_resolves_origin_head_and_uses_it_for_worktree_add(self):
-        runner = SequencedRunner([Result(0, "main", ""), Result(0, "", "")])
+    def test_no_base_resolves_origin_head_to_a_commit_in_the_same_call(self):
+        runner = FakeRunner([(["ssh"], Result(0, "", ""))])
         ctx = self.ctx(runner)
         lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", None)
-        self.assertEqual(len(runner.calls), 2)
-        resolve_cmd = runner.calls[0][-1]
-        self.assertIn("symbolic-ref", resolve_cmd)
-        self.assertIn("refs/remotes/origin/HEAD", resolve_cmd)
-        worktree_cmd = runner.calls[1][-1]
-        self.assertIn("'main'", worktree_cmd)
-        self.assertLess(worktree_cmd.index("'add'"), worktree_cmd.index("'main'"))
+        self.assertEqual(len(runner.calls), 1)  # DO-725: no separate resolve-then-add round trip
+        cmd = runner.calls[0][-1]
+        self.assertIn("refs/remotes/origin/HEAD^{commit}", cmd)
+        self.assertIn("'--verify'", cmd)
 
-    def test_a_missing_origin_head_refuses_naming_the_repo(self):
-        runner = FakeRunner([(["ssh"], Result(0, "", ""))])  # symbolic-ref found nothing
+    def test_a_missing_origin_head_refuses_naming_the_repo_and_the_ref(self):
+        runner = FakeRunner([(["ssh"], Result(1, "", "fatal: ambiguous argument"))])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.Refused) as cm:
             lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", None)
         self.assertIn("/repo", str(cm.exception))
         self.assertIn("--base", str(cm.exception))
-        # Refused before ever attempting the fetch+worktree-add call.
+        self.assertIn("refs/remotes/origin/HEAD", str(cm.exception))
+        # Refused after the ONE call this now costs, never a second lookup.
         self.assertEqual(len(runner.calls), 1)
 
-    def test_a_failed_origin_head_lookup_refuses_naming_the_repo(self):
-        runner = FakeRunner([(["ssh"], Result(255, "", "no route to host"))])
+    def test_an_explicit_base_that_does_not_resolve_names_it_in_the_refusal(self):
+        runner = FakeRunner([(["ssh"], Result(1, "", "fatal: bad revision 'nosuchbranch^{commit}'"))])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.Refused) as cm:
-            lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", None)
+            lane.create_worktree_remote(ctx, self.machine(ctx), "/repo", "/w/t", "/o/d", "nosuchbranch")
+        self.assertIn("nosuchbranch", str(cm.exception))
         self.assertIn("/repo", str(cm.exception))
+        self.assertIn("bad revision", str(cm.exception))
+        # An explicit --base got no "pass --base explicitly" hint -- it already did.
+        self.assertNotIn("pass --base explicitly", str(cm.exception))
 
 
 class ExpandRemoteTests(unittest.TestCase):
@@ -660,6 +689,23 @@ class RunRecipeTests(LocalRecipeTests):
         with self.assertRaises(errors.Refused):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(repo="nosuch"))
 
+    def test_the_unknown_repo_refusal_says_repo_takes_a_config_key_not_a_path(self):
+        """DO-725: the issue names this message specifically -- `--repo` on `--machine dev` takes
+        the KEY under `[machines.<m>].repos`, not a path, and the refusal must say so rather than
+        just naming the machine and the repo it does not have. Fails against main: the old
+        message ("machine 'dev' declares no repo 'nosuch' ([machines.dev].repos)") never uses the
+        words "config key" and never tells the reader that a PATH is exactly the wrong thing to
+        pass."""
+        ctx = self.ctx(FakeRunner([]))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                            **self.kw(repo="/home/ubuntu/quantivly/hub"))
+        msg = str(cm.exception)
+        self.assertIn("--repo", msg)
+        self.assertIn("config key", msg)
+        self.assertIn("[machines.dev].repos", msg)
+        self.assertIn("/home/ubuntu/quantivly/hub", msg)
+
     def test_an_empty_machine_is_rejected_rather_than_written_to_a_row(self):
         # DO-652 task-7 dispatch correction 8: census's settle path reads an empty/missing
         # ``machine`` column as "local" (``lane.get("machine") or "local"``), so a blank value
@@ -670,53 +716,56 @@ class RunRecipeTests(LocalRecipeTests):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(machine=""))
 
     def test_run_creates_the_worktree_sends_the_brief_then_starts_the_unit(self):
-        # DO-657: a remote --run with no --base now makes FIVE runner calls (resolve,
-        # resolve-default-branch, fetch+worktree, brief, unit) — one more than DO-652's four,
-        # because resolving `origin/HEAD` for an unspecified --base is a real extra round trip
-        # (see create_worktree_remote's docstring). SequencedRunner (not FakeRunner) so
+        # DO-725 AMENDED (from DO-657's shape): a remote --run with no --base now makes FIVE
+        # runner calls (resolve, fetch+resolve-to-commit+worktree, brief, RULES, unit) — one
+        # FEWER than DO-657's six, because resolving `origin/HEAD` to a commit is folded into the
+        # same call the fetch already makes (create_worktree_remote) instead of a separate
+        # symbolic-ref round trip ahead of it. This row fails against main (which still expects
+        # six calls with a `symbolic-ref` one second). SequencedRunner (not FakeRunner) so
         # ``.inputs`` is available for the brief-content check.
         ok = Result(0, self.RESOLVE_OUT, "")
-        branch = Result(0, "main", "")
-        runner = SequencedRunner([ok, branch, ok, ok, ok, ok])
+        runner = SequencedRunner([ok, ok, ok, ok, ok])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         joined = [" ".join(c) for c in runner.calls]
-        # Six since DO-711: resolve, resolve-default-branch, fetch+worktree, brief, RULES, unit.
-        self.assertEqual(len(runner.calls), 6)
-        self.assertIn("symbolic-ref", joined[1]); self.assertIn("origin/HEAD", joined[1])
+        self.assertEqual(len(runner.calls), 5)
         # Fix round 2, Critical 1: out_dir is created (mkdir -p) in the SAME call as the fetch and
         # the worktree add — a shell `>` redirection does not create parent directories, and
         # systemd-run returns 0 once the transient unit is CREATED, so a missing out_dir would
         # otherwise fail invisibly AFTER a "started" row was already written.
-        self.assertIn("'mkdir'", joined[2]); self.assertIn("'-p'", joined[2])
-        self.assertIn(f"'{out['out_dir']}'", joined[2])
+        self.assertIn("'mkdir'", joined[1]); self.assertIn("'-p'", joined[1])
+        self.assertIn(f"'{out['out_dir']}'", joined[1])
         # DO-657: the fetch is ordered before the worktree add, in the same command.
-        self.assertLess(joined[2].index("'fetch'"), joined[2].index("'worktree'"))
-        # DO-652 task-7 dispatch, an additional bug found in the brief's own row (same class as
-        # its already-flagged correction 7): once every argv element is POSIX single-quoted, a
-        # phrase spanning two elements ("git -C", "worktree add") is never a contiguous substring
-        # of the joined command — only a check against ONE quoted element survives shquote.
-        self.assertIn("'git'", joined[2]); self.assertIn("'worktree'", joined[2]); self.assertIn("'add'", joined[2])
+        # DO-725: resolving the ref to a commit is ordered between the two.
+        self.assertLess(joined[1].index("'fetch'"), joined[1].index("'rev-parse'"))
+        self.assertLess(joined[1].index("'rev-parse'"), joined[1].index("worktree add"))
+        self.assertIn("refs/remotes/origin/HEAD^{commit}", joined[1])
+        self.assertIn("'git'", joined[1]); self.assertIn("worktree add", joined[1])
+        self.assertIn("cat > ", joined[2])
         self.assertIn("cat > ", joined[3])
-        self.assertIn("cat > ", joined[4])
-        self.assertIn("systemd-run", joined[5])
+        self.assertIn("systemd-run", joined[4])
         # Mutation 7: the resolved bin (not the locally-expanded config default) must be what
         # actually starts the unit.
-        self.assertIn(self.RESOLVED_BIN, joined[5])
-        # Fix round 2, Important 2: the brief's CONTENT (not just its path) must actually reach
-        # the brief-send call — neither FakeRunner nor the old SequencedRunner recorded `input=`,
-        # so a mutation that emptied the brief before sending it survived the whole suite.
-        self.assertEqual(runner.inputs[3], self.BRIEF_TEXT)
+        self.assertIn(self.RESOLVED_BIN, joined[4])
+        # DO-683 AMENDED: the OLD assertion here was `self.assertEqual(runner.inputs[3],
+        # self.BRIEF_TEXT)` -- the brief sent VERBATIM, literal `{out_dir}` and all. That is
+        # exactly the DO-683 defect: a work brief's copy never had its `{out_dir}` substituted
+        # the way an evaluate brief's already is. This fails against main, where the sent text
+        # still equals `self.BRIEF_TEXT` unmodified.
+        expected_sent = lanes_brief.substitute(self.BRIEF_TEXT, out_dir=out["out_dir"])
+        self.assertEqual(runner.inputs[2], expected_sent)
+        self.assertNotIn("{out_dir}", runner.inputs[2])
+        self.assertIn(f"out_dir: {out['out_dir']}", runner.inputs[2])
         # ...and the path used to SEND the brief must be the exact path the agent is told to READ.
         remote_brief_path = f"{out['out_dir']}/brief.md"
-        self.assertIn(f"cat > '{remote_brief_path}'", joined[3])
-        self.assertIn(f"'Read {remote_brief_path} and execute.'", joined[5])
+        self.assertIn(f"cat > '{remote_brief_path}'", joined[2])
+        self.assertIn(f"'Read {remote_brief_path} and execute.'", joined[4])
         # DO-711: the rules travel WITH the lane, into the same directory as brief.md, which is
         # the one directory `--add-dir` grants it and the one a verbatim-shipped brief can name
         # without any substitution. Content checked too, not just the path — a mutation that sent
         # an empty rules file would otherwise look identical.
-        self.assertIn(f"cat > '{out['out_dir']}/{lanes_brief.RULES.name}'", joined[4])
-        self.assertEqual(runner.inputs[4], lanes_brief.RULES.read_text())
+        self.assertIn(f"cat > '{out['out_dir']}/{lanes_brief.RULES.name}'", joined[3])
+        self.assertEqual(runner.inputs[3], lanes_brief.RULES.read_text())
         row = ctx.store.list_lanes("quantivly")[0]
         self.assertEqual(row["status"], "started")
         self.assertEqual(row["unit"], out["unit"])
@@ -730,7 +779,29 @@ class RunRecipeTests(LocalRecipeTests):
         # Fix round 2, Minor 3: the budget's five_h_pct_now must reach the stored row.
         self.assertEqual(row["five_h_pct_at_start"], 42)
 
-    def test_an_explicit_base_is_appended_to_the_worktree_add_call(self):
+    def test_the_substituted_work_brief_is_what_validate_text_checks(self):
+        """DO-683 bullet 3: `validate` used to run on the brief's FILE alone, before dispatch --
+        never on the substituted text a lane actually receives, unlike the evaluate path (which
+        validates its rendered form). This pins that `validate_text` now also runs against the
+        SUBSTITUTED work brief. Fails against main: `validate_text` is never called for a work
+        lane there at all (only the file-based `validate`), so no call in the spy's history ever
+        carries the real out_dir with no literal `{out_dir}` left in it."""
+        ok = Result(0, self.RESOLVE_OUT, "")
+        runner = SequencedRunner([ok, ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        with patch.object(lanes_brief, "validate_text", wraps=lanes_brief.validate_text) as spy:
+            out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
+        texts = [c.args[0] for c in spy.call_args_list]
+        self.assertTrue(any(out["out_dir"] in t and "{out_dir}" not in t for t in texts),
+                        "validate_text must see the substituted work brief text")
+
+    def test_an_explicit_base_is_resolved_to_a_commit_before_the_worktree_add(self):
+        # DO-725 AMENDED: `base` is no longer passed to `worktree add` directly -- it is resolved
+        # to a commit first (see create_worktree_remote), so this now asserts the rev-parse step
+        # names it and the add step consumes the resolved shell variable instead. Fails against
+        # main, where 'add' is directly followed by the literal `'origin/main'` with no
+        # `rev-parse` step at all.
+        #
         # Fix round 2, Minor: every OTHER row passes base=None, so dropping the append or
         # appending it in the wrong position survived undetected.
         ok = Result(0, self.RESOLVE_OUT, "")
@@ -738,9 +809,10 @@ class RunRecipeTests(LocalRecipeTests):
         ctx = self.ctx(runner)
         lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True, base="origin/main"))
         joined = " ".join(runner.calls[1])
-        self.assertIn("'origin/main'", joined)
-        self.assertLess(joined.index("'worktree'"), joined.index("'origin/main'"))
-        self.assertLess(joined.index("'add'"), joined.index("'origin/main'"))
+        self.assertIn("'origin/main^{commit}'", joined)
+        self.assertLess(joined.index("'--verify'"), joined.index("'origin/main^{commit}'"))
+        self.assertIn("worktree add '", joined)
+        self.assertIn('"$sha"', joined)
 
     def test_local_run_refuses_cleanly_rather_than_crashing(self):
         # Fix round 2, Minor: without this row, a local --run reaches
@@ -771,18 +843,17 @@ class RunRecipeTests(LocalRecipeTests):
         # the remote. This proves the RESOLVED $HOME is what actually reaches both the returned
         # paths and the `git -C` argv, not the raw config value.
         ok = Result(0, self.RESOLVE_OUT, "")
-        branch = Result(0, "main", "")
-        runner = SequencedRunner([ok, branch, ok, ok, ok])
+        runner = SequencedRunner([ok, ok, ok, ok])
         ctx = self.ctx(runner)
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         self.assertNotIn("~", out["worktree"])
         self.assertNotIn("~", out["out_dir"])
         self.assertTrue(out["worktree"].startswith(self.RESOLVED_HOME + "/"), out["worktree"])
         self.assertTrue(out["out_dir"].startswith(self.RESOLVED_HOME + "/"), out["out_dir"])
-        # calls[1] is the origin/HEAD resolution, itself against the resolved (not tilde) repo
-        # path — proven separately below; calls[2] is the fetch+worktree-add batch.
-        self.assertNotIn("~", " ".join(runner.calls[1]))
-        worktree_call = " ".join(runner.calls[2])
+        # DO-725 AMENDED: calls[1] used to be a SEPARATE origin/HEAD resolution ahead of
+        # calls[2]'s fetch+worktree-add batch; the resolution is now folded into the one call
+        # the fetch already makes, so calls[1] IS that merged fetch+resolve+worktree-add batch.
+        worktree_call = " ".join(runner.calls[1])
         self.assertNotIn("~", worktree_call)
         self.assertIn(f"'-C' '{self.RESOLVED_HOME}/quantivly/hub'", worktree_call)
 
@@ -792,17 +863,23 @@ class RunRecipeTests(LocalRecipeTests):
         # with the literal element "cat > " — which never equals the generated command string
         # "cat > '/o/d/brief.md'", so it never matched; every ssh call fell through to the bare
         # ["ssh"] response instead, and the WORKTREE call (not the unit start) failed first. A
-        # SequencedRunner replaces it: success for resolve/worktree/brief, failure only on the
-        # unit start — the exact call this row claims to be testing.
+        # SequencedRunner replaces it: success for resolve/worktree/brief/RULES, failure only on
+        # the unit start — the exact call this row claims to be testing.
         #
         # Fix round 2, Important 1: a worktree created in the fetch+worktree call and orphaned by
         # this failure is invisible to every rabota command from then on (census/reap both work
-        # from lane rows), so the LAST call here is best-effort cleanup. DO-657 adds the
-        # origin/HEAD resolution ahead of it, so the failure path is now six calls, not five —
-        # resolve, resolve-default-branch, fetch+worktree, brief, the failing unit start, cleanup.
+        # from lane rows), so the LAST call here is best-effort cleanup.
+        #
+        # DO-725 AMENDED (from DO-657's shape): the failure path used to be six calls (resolve,
+        # resolve-default-branch, fetch+worktree, brief, the failing unit start, cleanup) because
+        # a separate origin/HEAD lookup preceded the fetch+worktree batch. That lookup is now
+        # folded into the fetch+worktree call itself, so this is five real calls plus cleanup —
+        # still six total, but one fewer real step ahead of the failure. Fails against main: main
+        # makes six real calls before the (there, fifth) failing one, so this row's five-item
+        # SequencedRunner runs out and pads the sixth with a default SUCCESS instead of the
+        # intended failure, and the assertRaises never fires.
         ok = Result(0, self.RESOLVE_OUT, "")
-        branch = Result(0, "main", "")
-        runner = SequencedRunner([ok, branch, ok, ok, Result(1, "", "Failed to start")])
+        runner = SequencedRunner([ok, ok, ok, ok, Result(1, "", "Failed to start")])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.RabotaError):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
@@ -814,17 +891,22 @@ class RunRecipeTests(LocalRecipeTests):
     def test_a_failed_brief_send_removes_the_orphaned_worktree_and_still_raises(self):
         # Fix round 2, Important 1: the SAME cleanup, on the OTHER failure path (brief send
         # fails rather than unit start) — and the ORIGINAL error (RabotaError from send_brief)
-        # must still be what's raised, never masked by a cleanup outcome. DO-657: resolve,
-        # resolve-default-branch and fetch+worktree must all succeed before the brief send is
-        # even attempted, so this is five calls, not three.
-        runner = SequencedRunner([Result(0, self.RESOLVE_OUT, ""), Result(0, "main", ""),
+        # must still be what's raised, never masked by a cleanup outcome.
+        #
+        # DO-725 AMENDED: resolve and the merged fetch+resolve-commit+worktree call must both
+        # succeed before the brief send is even attempted, so this is three calls before the
+        # failure, not four — one fewer than DO-657's shape, since there is no more separate
+        # origin/HEAD lookup. Fails against main for the same reason as the row above: main
+        # expects a fourth successful call (the separate origin/HEAD lookup) ahead of the brief
+        # send, so this three-item-then-failure list fails at the WRONG step there.
+        runner = SequencedRunner([Result(0, self.RESOLVE_OUT, ""),
                                   Result(0, "", ""), Result(1, "", "no space left on device")])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.RabotaError):
             lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         self.assertEqual(ctx.store.list_lanes("quantivly"), [])
-        self.assertEqual(len(runner.calls), 5)
-        cleanup = " ".join(runner.calls[4])
+        self.assertEqual(len(runner.calls), 4)
+        cleanup = " ".join(runner.calls[3])
         self.assertIn("'remove'", cleanup); self.assertIn("'--force'", cleanup)
 
     # ---- DO-711: the rules reach the lane, or nothing starts -----------------------------
