@@ -122,9 +122,34 @@ def _percentile(values: list[float], p: float) -> float:
     return statistics.quantiles(sorted(values), n=100, method="inclusive")[round(p * 100) - 1]
 
 
-def running_lanes_minutes(store, tenant: str, seat: str, rate: float) -> tuple[float, str]:
-    """Projected remaining minutes across every ``started`` lane on ``seat``, and a detail string
-    naming their share of the projected burn.
+def _unit_running(census: dict | None, machine: str, unit: str | None) -> bool:
+    """Whether ``unit`` on ``machine`` is the running-lane's real state, per ``census`` -- the
+    strict/safe answer (DO-756).
+
+    True (counts as running) whenever this cannot be determined: no ``unit`` on the row, no
+    census at all, ``machine`` missing from the census, or a remote row marked unreachable --
+    "unknown" is not "not running", so the strict side is to keep counting it. False (excluded)
+    only when a REACHABLE machine's own unit list is checked and does not show it active or
+    activating -- gone, failed, or never named is all "not running" from that machine's own report.
+    """
+    if not unit or census is None:
+        return True
+    if machine == "local":
+        return any(u.get("name") == unit and u.get("state") in ("active", "activating")
+                   for u in census.get("units") or [])
+    for m in census.get("machines", []):
+        if m.get("name") == machine:
+            if not m.get("reachable"):
+                return True
+            return any(u.get("name") == unit and u.get("state") in ("active", "activating")
+                       for u in m.get("units", []))
+    return True
+
+
+def running_lanes_minutes(store, tenant: str, seat: str, rate: float, census: dict | None = None,
+                          max_census_age_s: int = 900) -> tuple[float, str]:
+    """Projected remaining minutes across every ``started`` lane on ``seat`` whose unit is actually
+    still running, and a detail string naming their share of the projected burn.
 
     DO-728 fix round (critical): the gate used to project only the NEW lane's own ``est_minutes``
     against the rate, so a seat already several lanes deep could admit a lane whose own projection
@@ -135,10 +160,27 @@ def running_lanes_minutes(store, tenant: str, seat: str, rate: float) -> tuple[f
     (v3 -> v4) has no estimate of its own, so it is assumed to run for the seat's own median lane
     duration -- derived from the exact settled-lane sample ``measured_rate`` already reads, so a
     seat with no history at all still falls back to zero (no rows, nothing to add).
+
+    DO-756: a ``started`` row survives its unit dying -- ``systemctl stop``, a crash, or a reboot
+    never writes a result line, and the row sits ``started`` until ``reap`` abandons it hours
+    later. Counting it here adds a phantom floor to every projection until then. ``census`` (when
+    given and fresh -- ``_census_fresh`` at the same ``max_census_age_s`` the gate itself refuses
+    on) is used to drop a row whose unit is absent from a REACHABLE machine's own unit list; a
+    missing or stale census, or an unreachable machine, leaves every row counted (see
+    ``_unit_running``).
     """
     running = [r for r in store.list_lanes(tenant=tenant, status="started") if r.get("seat") == seat]
     if not running:
         return 0.0, ""
+    live_census = census if census is not None and _census_fresh(census, max_census_age_s) else None
+    excluded = [r for r in running if not _unit_running(live_census, r.get("machine") or "local", r.get("unit"))]
+    running = [r for r in running if r not in excluded]
+    if not running:
+        detail = ""
+        if excluded:
+            names = ", ".join(f"{r['id']} ({r.get('unit')} gone on {r.get('machine') or 'local'})" for r in excluded)
+            detail = f"0 running lane(s) on {seat}; excluded {len(excluded)}: {names}"
+        return 0.0, detail
     settled = store.lanes_for_rate(tenant, seat, limit=RATE_HISTORY_LIMIT)
     durations = []
     for r in settled:
@@ -168,6 +210,9 @@ def running_lanes_minutes(store, tenant: str, seat: str, rate: float) -> tuple[f
     detail = f"{len(running)} running lane(s) on {seat} project +{pct:.0f}% more before this one finishes"
     if overrun:
         detail += f" ({overrun} past its own estimate, floored at {RUNNING_LANE_FLOOR_MINUTES}m remaining)"
+    if excluded:
+        names = ", ".join(f"{r['id']} ({r.get('unit')} gone on {r.get('machine') or 'local'})" for r in excluded)
+        detail += f"; excluded {len(excluded)} whose unit is gone: {names}"
     return total_minutes, detail
 
 
