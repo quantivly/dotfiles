@@ -33,8 +33,9 @@ the CLI has, so it is returned as-is with a ``reason`` noting its age, not suppr
 import re
 from datetime import datetime, timezone
 
-from rabota import snapshots
+from rabota import errors, snapshots
 from rabota.snapshots import STALE_AFTER_MIN
+from rabota.sources.linear import LinearClient
 # One definition, in `snapshots` -- see the comment there for why it is not restated here.
 
 # DO-735: a GitHub-integration attachment's URL path, not its (undocumented) `metadata`, is what
@@ -268,28 +269,40 @@ def snapshot_health(ctx, now: datetime | None = None) -> list[dict]:
             if not side["ok"] and not side.get("skipped")]
 
 
-def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
+def lookup_tracked(ctx, keys: list[str], now: datetime | None = None, lin=None) -> dict:
     """``{"linear": {"ok", "reason"}, "github": {"ok", "reason"}, "results": [...]}`` for exactly
     ``keys`` (DO-751) -- what ``rabota tracked <key>...`` answers, and what turn 2 calls instead of
     reading a whole-tenant index out of turn 1's ``brief`` reply. Built from the same per-issue/PR
     projection ``build_tracked_index`` computes (so a lookup can never disagree with it about what
     a field means), then cut to the handful of subjects a caller is actually classifying, which is
-    what keeps this cheap where returning the whole index is not: one CLI call, no network, and a
-    byte cost proportional to the keys asked for rather than to the tenant's issue count.
+    what keeps this cheap where returning the whole index is not: one CLI call, and a byte cost
+    proportional to the keys asked for rather than to the tenant's issue count.
 
     Each result is exactly one of:
 
     - ``{"key", "status": "found", "kind": "linear"|"github", "record": {...}}`` -- the same record
       shape ``build_tracked_index`` returns for that item (an issue dict with ``pr_links``, or a PR
       dict tagged with ``kind: "own_pr"``/``"merged_recent"``).
-    - ``{"key", "status": "not_found"}`` -- the source is trustworthy (``ok`` true) and simply does
-      not name this subject. This is the answer a `promised-untracked` check wants: proof of
-      absence, not silence about it.
+    - ``{"key", "status": "not_found", "kind": "linear"|"github"}`` -- the source is trustworthy
+      (``ok`` true) and simply does not name this subject *among what that source fetches*: for
+      Linear, the open-issue snapshot (see below); for GitHub, own open PRs plus merges in the
+      last 30 days -- an older merge, or a colleague's PR, reads ``not_found`` too, a known gap
+      `reconcile.md` names rather than a network call fixes. ``kind`` is what lets a caller (and
+      `commands.tracked._text_line`) say which, instead of the single "does not name this
+      subject" that DO-754 found could be misread as "does not exist".
+    - ``{"key", "status": "found_closed", "kind": "linear", "state": {"name", "type"},
+      "completed_at"}`` -- DO-754: a Linear identifier the open-issue snapshot doesn't carry
+      (``sync`` fetches only ``assigned_open``/``created_open``, both excluding
+      ``dead_state_types``) but that Linear, checked with one batched read-only query (below),
+      still has on file. **Never treat this as absence** -- for `promised-untracked` it means
+      "already done" (or otherwise resolved), not "untracked"; see `reconcile.md` for what it means
+      for the other classes.
     - ``{"key", "status": "unknown", "reason"}`` -- the source cannot be relied on (unsynced,
-      unreadable, or the tenant does not use it), so absence here proves nothing. **Never conflate
-      this with ``not_found``** — that conflation is exactly golden ``g06``'s bug (a pre-attachment
-      snapshot read as "no PR exists" rather than "attachments unknown"), one level up: at the
-      per-key rather than per-attachment layer.
+      unreadable, the tenant does not use it, or -- DO-754 -- the batched Linear lookup below could
+      not be made or failed), so absence here proves nothing. **Never conflate this with
+      ``not_found``** — that conflation is exactly golden ``g06``'s bug (a pre-attachment snapshot
+      read as "no PR exists" rather than "attachments unknown"), one level up: at the per-key
+      rather than per-attachment layer.
     - ``{"key", "status": "ambiguous", "candidates"}`` -- an owner-less PR key (``repo#n``)
       matching more than one ``owner/repo#n`` in the index; the candidates are listed, never picked.
     - Any result may carry ``resolved``: the canonical key (see `normalize_subject`) when it differs
@@ -300,6 +313,14 @@ def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
 
     A PR key present in both ``own_prs`` and ``merged_recent`` reads as ``merged_recent`` — the
     same precedence `_resolve_pr_states` already gives a merged PR over an open one.
+
+    **DO-754.** Once every key above resolves, ``_resolve_closed`` makes ONE batched, read-only
+    ``LinearClient.find_by_identifiers`` call -- but only when at least one result is still
+    ``not_found`` and classified ``linear``; a caller whose keys all resolved from the snapshot (or
+    named none) costs nothing extra. ``lin`` is an injectable client for tests (same shape as
+    ``commands.sync``'s ``lin``/``gh``/``ff`` params); a real run builds ``LinearClient.from_context``
+    itself. A dry run does not suppress this call -- it is a read, and ``LinearClient.dry_run`` only
+    ever gates a mutation.
     """
     now = now or datetime.now(timezone.utc)
     index = build_tracked_index(ctx, now)
@@ -312,6 +333,7 @@ def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
         github_by_key[p["key"]] = {"kind": "merged_recent", **p}
 
     results = []
+    canon_of = {}
     for key in keys:
         subject = classify_subject(key)
         canon = normalize_subject(key)
@@ -328,6 +350,7 @@ def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
             if matches:
                 canon = matches[0]
         resolved = {} if canon == key else {"resolved": canon}
+        canon_of[key] = canon
         if subject == "other":
             results.append({"key": key, "status": "not_applicable"})
         elif canon in by_key:
@@ -335,7 +358,38 @@ def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
         elif not side["ok"]:
             results.append({"key": key, "status": "unknown", "reason": side["reason"]})
         else:
-            results.append({"key": key, "status": "not_found"})
+            results.append({"key": key, **resolved, "status": "not_found", "kind": subject})
+    _resolve_closed(ctx, results, canon_of, lin)
     return {"linear": {"ok": linear_side["ok"], "reason": linear_side["reason"]},
             "github": {"ok": github_side["ok"], "reason": github_side["reason"]},
             "results": results}
+
+
+def _resolve_closed(ctx, results: list[dict], canon_of: dict, lin) -> None:
+    """DO-754: rewrite each still-``not_found`` Linear-classified result in ``results`` in place,
+    with ONE batched, read-only ``LinearClient.find_by_identifiers`` call naming exactly those
+    identifiers -- never a call per key, and never a call at all when nothing is pending (the
+    common case: most keys resolve from the snapshot). ``lin`` is used if given (tests); otherwise
+    a real client is built from ``ctx`` on demand, so a tenant with no Linear key configured, or a
+    request that fails outright, never reaches the wire and downgrades every pending key to
+    ``unknown`` instead -- a failed or refused call proves nothing about whether the issue exists,
+    so it must never read as the ``not_found`` `promised-untracked` takes as proof of absence.
+    """
+    pending = [r for r in results if r["status"] == "not_found" and r.get("kind") == "linear"]
+    if not pending:
+        return
+    idents = sorted({canon_of[r["key"]] for r in pending})
+    try:
+        client = lin or LinearClient.from_context(ctx)
+        found = {rec["identifier"]: rec for rec in client.find_by_identifiers(idents)}
+    except errors.RabotaError as e:
+        for r in pending:
+            r["status"], r["reason"] = "unknown", f"Linear lookup failed: {e}"
+            del r["kind"]
+        return
+    for r in pending:
+        rec = found.get(canon_of[r["key"]])
+        if rec:
+            r["status"] = "found_closed"
+            r["state"] = rec["state"]
+            r["completed_at"] = rec.get("completedAt")

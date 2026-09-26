@@ -8,7 +8,7 @@ import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from rabota import context, reconcile, snapshots
+from rabota import context, errors, reconcile, snapshots
 from rabota.runner import FakeRunner, Result
 
 FIX = Path(__file__).parent / "fixtures" / "config"
@@ -49,6 +49,25 @@ GITHUB_SNAP = {
     ],
     "merged_recent": [{"repo": "auto-conf", "number": 450, "url": "https://github.com/x/450", "mergedAt": "2026-09-10T00:00:00Z"}],
 }
+
+
+class FakeLinLookup:
+    """DO-754: a ``find_by_identifiers``-only double for ``reconcile._resolve_closed`` — the only
+    ``LinearClient`` method that path calls. ``closed`` maps identifier -> ``{"state", "completedAt"}``
+    for the issues Linear still has on file; an identifier not in it reads as genuinely absent."""
+    def __init__(self, closed=None):
+        self.closed = closed or {}
+        self.calls: list[list[str]] = []
+
+    def find_by_identifiers(self, identifiers):
+        self.calls.append(list(identifiers))
+        return [{"identifier": k, **v} for k, v in self.closed.items() if k in identifiers]
+
+
+class BoomLinLookup:
+    """A batched Linear lookup that fails outright — no key configured, the request itself down."""
+    def find_by_identifiers(self, identifiers):
+        raise errors.RabotaError("linear down")
 
 
 class TrackedIndexShapeTests(unittest.TestCase):
@@ -575,18 +594,77 @@ class LookupTrackedTests(unittest.TestCase):
         self.assertEqual(by_key["auto-conf#461"]["candidates"], ["quantivly/auto-conf#461", "someone/auto-conf#461"])
 
     def test_found_not_found_and_unknown_are_distinct(self):
+        # DO-754 amendment: a Linear `not_found` now costs one batched check before it is final —
+        # HUB-9999 must still read `not_found` once that check confirms Linear genuinely has no
+        # such issue, so a `lin` double is injected here (against `main`, before DO-754, this row
+        # passed with no `lin` at all — see the new DO-754 rows below for the behaviour that
+        # changed: `main` has no `found_closed`/batched-`unknown` outcome to test).
         snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
         snapshots.write(self.ctx.state_dir, "github", dict(GITHUB_SNAP))
+        lin = FakeLinLookup()
         out = reconcile.lookup_tracked(self.ctx, ["HUB-5812", "HUB-9999", "sre-customers-library#369",
-                                                   "no-such-repo#1", "C0A2FRLPA58"], NOW)
+                                                   "no-such-repo#1", "C0A2FRLPA58"], NOW, lin=lin)
         by_key = {r["key"]: r for r in out["results"]}
         self.assertEqual(by_key["HUB-5812"]["status"], "found")
         self.assertEqual(by_key["HUB-5812"]["kind"], "linear")
         self.assertEqual(by_key["HUB-9999"]["status"], "not_found")           # trustworthy source, absent subject
+        self.assertEqual(by_key["HUB-9999"]["kind"], "linear")
         self.assertEqual(by_key["sre-customers-library#369"]["status"], "found")
         self.assertEqual(by_key["sre-customers-library#369"]["kind"], "github")
         self.assertEqual(by_key["no-such-repo#1"]["status"], "not_found")
         self.assertEqual(by_key["C0A2FRLPA58"]["status"], "not_applicable")
+        self.assertEqual(lin.calls, [["HUB-9999"]])   # exactly the one pending linear key, one call
+
+    def test_a_not_found_linear_key_resolves_closed_via_one_batched_query(self):
+        # DO-754: HUB-9999 is absent from the open-issue snapshot because it's closed, not because
+        # it never existed — `sync` only fetches assigned_open/created_open.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        lin = FakeLinLookup({"HUB-9999": {"state": {"name": "Done", "type": "completed"},
+                                           "completedAt": "2026-09-01T00:00:00Z"}})
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-9999"], NOW, lin=lin)
+        r = out["results"][0]
+        self.assertEqual(r["status"], "found_closed")
+        self.assertEqual(r["state"], {"name": "Done", "type": "completed"})
+        self.assertEqual(r["completed_at"], "2026-09-01T00:00:00Z")
+        self.assertEqual(lin.calls, [["HUB-9999"]])
+
+    def test_the_batched_check_asks_for_every_pending_key_in_one_call(self):
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        lin = FakeLinLookup({"HUB-9998": {"state": {"name": "Canceled", "type": "canceled"},
+                                          "completedAt": None}})
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-9997", "HUB-9998"], NOW, lin=lin)
+        by_key = {r["key"]: r for r in out["results"]}
+        self.assertEqual(by_key["HUB-9997"]["status"], "not_found")
+        self.assertEqual(by_key["HUB-9998"]["status"], "found_closed")
+        self.assertEqual(lin.calls, [["HUB-9997", "HUB-9998"]])   # ONE call, both keys
+
+    def test_the_batched_check_never_runs_when_nothing_is_missing(self):
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        snapshots.write(self.ctx.state_dir, "github", dict(GITHUB_SNAP))
+        lin = FakeLinLookup()
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-5812", "sre-customers-library#369"], NOW, lin=lin)
+        self.assertEqual({r["status"] for r in out["results"]}, {"found"})
+        self.assertEqual(lin.calls, [])   # no not_found linear key -- no call at all
+
+    def test_a_failed_batched_check_downgrades_pending_keys_to_unknown_never_not_found(self):
+        # A failed or refused call proves nothing about whether the issue exists: it must never
+        # read as the `not_found` `promised-untracked` would take as proof of absence.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-9999"], NOW, lin=BoomLinLookup())
+        r = out["results"][0]
+        self.assertEqual(r["status"], "unknown")
+        self.assertIn("linear down", r["reason"])
+        self.assertNotIn("kind", r)
+
+    def test_a_dry_run_still_makes_the_batched_read(self):
+        # DO-754 hazard: `--dry-run` must not suppress a read -- only `LinearClient.dry_run` gating
+        # a *mutation* is the dry-run contract (DO-753); nothing here writes at all.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        self.ctx.dry_run = True
+        lin = FakeLinLookup({"HUB-9999": {"state": {"name": "Done", "type": "completed"}, "completedAt": "d"}})
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-9999"], NOW, lin=lin)
+        self.assertEqual(out["results"][0]["status"], "found_closed")
+        self.assertEqual(lin.calls, [["HUB-9999"]])
 
     def test_unknown_is_never_conflated_with_not_found(self):
         # golden g06's bug one level up: a key routed to a source that cannot be relied on (never

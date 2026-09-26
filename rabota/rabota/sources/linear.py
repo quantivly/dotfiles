@@ -47,6 +47,11 @@ it ever does, the fix is genuine pagination, not a bigger arbitrary number.
 
 The key is passed only as an HTTP header. It is never logged, never formatted into an
 exception, and never part of a reply; ``query`` raises with Linear's own messages only.
+
+DO-754: ``find_by_identifiers`` resolves the handful of Linear keys ``reconcile.lookup_tracked``
+found missing from the open-issue snapshot (which fetches only ``assigned_open``/``created_open``)
+-- a closed issue is not a nonexistent one, and this is the one place that tells them apart. See
+that function for the batching and the "unknown, never not_found" rule on a failed call.
 """
 import json
 import urllib.error
@@ -88,6 +93,13 @@ Q_RELATIONS = """query($ids: [ID!]) {
   issues(first: %d, filter: { id: { in: $ids } }) {
     nodes { id relations { nodes { type relatedIssue { identifier } } }
             inverseRelations { nodes { type issue { identifier } } } } } }""" % PAGE_SIZE
+# DO-754: IssueFilter has no direct "identifier" field (linear.app/developers/filtering) -- an
+# identifier is a team key plus issue number, and the documented filter schema combines
+# alternatives with `or`, so each requested identifier becomes its own `{team, number}` branch.
+Q_BY_IDENTIFIERS = """query($after: String, $filters: [IssueFilter!]) {
+  issues(first: %d, after: $after, filter: { or: $filters }) {
+    nodes { identifier state { name type } completedAt }
+    pageInfo { hasNextPage endCursor } } }""" % PAGE_SIZE
 Q_ISSUE_STATE = """query($id: String!) { issue(id: $id) { id dueDate state { type } } }"""
 Q_VIEWER = "{ viewer { id name } }"
 M_ARCHIVE_ALL = """mutation($issueId: String!) {
@@ -223,6 +235,25 @@ class LinearClient:
 
     def issue_state_and_due(self, issue_id: str) -> dict:
         return self.query(Q_ISSUE_STATE, {"id": issue_id})["issue"]
+
+    def find_by_identifiers(self, identifiers: list[str]) -> list[dict]:
+        """DO-754: resolve exactly these Linear identifiers (``HUB-5812`` shape) in ONE batched,
+        read-only query -- for a key ``sync``'s open-issue fetch left ``not_found``, telling
+        "closed" apart from "never existed". Cost: one HTTP round trip no matter how many
+        identifiers are asked for (a turn-2 classification pass names single digits of subjects at
+        a time; pagination only bites past ``PAGE_SIZE`` matches, which this never approaches in
+        practice). Each identifier becomes its own ``{team: {key: {eq: ...}}, number: {eq: ...}}``
+        branch, ORed together -- see ``Q_BY_IDENTIFIERS`` for why. Returns one
+        ``{"identifier", "state", "completedAt"}`` per issue Linear actually has; an identifier
+        missing from the return really does not exist, as far as this query can tell."""
+        if not identifiers:
+            return []
+        filters = []
+        for ident in identifiers:
+            team, _, number = ident.partition("-")
+            filters.append({"team": {"key": {"eq": team}}, "number": {"eq": int(number)}})
+        return [{"identifier": n["identifier"], "state": n["state"], "completedAt": n.get("completedAt")}
+                for n in self.paginate(Q_BY_IDENTIFIERS, ["issues"], {"filters": filters})]
 
 
 def _flatten(issue: dict) -> dict:

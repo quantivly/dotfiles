@@ -734,6 +734,31 @@ class LinearClientTests(unittest.TestCase):
         rel = linear.LinearClient("k" * 20, post=FakePost([page])).relations(["a"])
         self.assertEqual(rel, {"a": {"blockedBy": ["CORE-1"], "blocks": ["HUB-2"]}})
 
+    def test_find_by_identifiers_ors_team_and_number_branches_in_one_call(self):
+        # DO-754: IssueFilter has no direct "identifier" field, so each requested identifier
+        # becomes its own {team, number} branch, ORed together in one request.
+        page = {"data": {"issues": {"nodes": [
+            {"identifier": "HUB-5812", "state": {"name": "Done", "type": "completed"}, "completedAt": "2026-09-01T00:00:00Z"}],
+            "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        post = FakePost([page])
+        out = linear.LinearClient("k" * 20, post=post).find_by_identifiers(["HUB-5812", "DO-751"])
+        self.assertEqual(len(post.calls), 1)   # ONE batched call, not one per identifier
+        self.assertEqual(post.calls[0]["variables"]["filters"],
+                         [{"team": {"key": {"eq": "HUB"}}, "number": {"eq": 5812}},
+                          {"team": {"key": {"eq": "DO"}}, "number": {"eq": 751}}])
+        self.assertEqual(out, [{"identifier": "HUB-5812", "state": {"name": "Done", "type": "completed"},
+                                "completedAt": "2026-09-01T00:00:00Z"}])
+
+    def test_find_by_identifiers_of_an_empty_list_makes_no_call(self):
+        def post(body):
+            raise AssertionError("find_by_identifiers must not POST for an empty request")
+        self.assertEqual(linear.LinearClient("k" * 20, post=post).find_by_identifiers([]), [])
+
+    def test_find_by_identifiers_missing_from_the_reply_really_do_not_exist(self):
+        page = {"data": {"issues": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        out = linear.LinearClient("k" * 20, post=FakePost([page])).find_by_identifiers(["HUB-9999"])
+        self.assertEqual(out, [])
+
     def test_flattened_issue_has_label_names_and_relation_defaults(self):
         page = {"data": {"issues": {"nodes": [{"id": "i1", "identifier": "HUB-1", "labels": {"nodes": [{"name": "bug"}]}}],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
