@@ -227,6 +227,11 @@ def validate_machine(tenant, machine: str):
     ``cli.build_parser``), so a tenant declaring a machine other than ``dev``, or none at all,
     got two different answers from the two commands.
     """
+    if not machine:
+        # The same usage error `lane recipe` raises for an empty `--machine`, so an unset
+        # `--machine "$M"` gets one answer from both commands (DO-663 review), not exit 2 from one
+        # and a "declares no machine ''" refusal from the other.
+        raise errors.Usage("--machine must not be empty")
     if machine == "local":
         return None
     m = tenant.machines.get(machine)

@@ -756,6 +756,18 @@ class MachineArgvCliTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "refused")
         self.assertNotIn("nosuchmachine", payload["error"]["message"])
 
+    def test_an_empty_machine_is_the_same_usage_error_from_budget_and_lane_recipe(self):
+        # DO-663 review: `--machine ""` (an unset `$M`) exited 3 from budget ("declares no machine
+        # ''") but 2 from lane recipe ("must not be empty"). One shared check, one answer.
+        code_b, _, budget_err = run_cli(["--tenant", "quantivly", "budget", "--machine", ""])
+        brief = self.home / "brief.md"
+        brief.write_text("## Common rules\nstub\n")
+        code_l, _, lane_err = run_cli(["--tenant", "quantivly", "lane", "recipe", "--brief", str(brief),
+                                       "--repo", "hub", "--machine", ""])
+        self.assertEqual((code_b, code_l), (2, 2))
+        self.assertEqual(last_json(budget_err)["error"]["message"], "--machine must not be empty")
+        self.assertEqual(last_json(budget_err)["error"]["message"], last_json(lane_err)["error"]["message"])
+
     def test_lane_recipe_and_budget_refuse_the_same_undeclared_machine_identically(self):
         # DO-663 item 2: both commands now call the one shared `budget_mod.validate_machine`, so
         # their refusal text for the same undeclared machine name must be word-for-word identical
