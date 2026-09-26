@@ -5,6 +5,7 @@ Every pin is a real request answered by the identity the tenant names: ``GET /us
 inferred from configuration, because that inference is the bug (F14). A source the tenant
 does not list is skipped and counts as ok; a tenant without Linear is not a failure.
 """
+import concurrent.futures
 from pathlib import Path
 
 from rabota import cli, emit, errors
@@ -12,63 +13,106 @@ from rabota.context import Context
 from rabota.sources.github import GhClient
 from rabota.sources.linear import LinearClient
 
+GITHUB_WORKERS = 2   # whoami + the pin-repo read; independent, so they run side by side
+TOP_LEVEL_WORKERS = 3   # the github half, the linear half, and ssh-add
 
-def _check_github(ctx: Context, gh, report: dict, failures: list[str]) -> None:
-    """Pin the gh identity and the tenant's pin repo; a client that cannot be built is itself a failure."""
+
+def _check_github(ctx: Context, gh) -> tuple[dict, dict, list[str]]:
+    """Pin the gh identity and the tenant's pin repo concurrently; return (gh, gh_pin, failures).
+
+    Building the client (minting a token) must finish first since both calls need it; once it
+    exists, ``whoami`` and the pin-repo read touch no shared mutable state (``GhClient.env`` is
+    built once and never mutated) so they run in their own two-worker pool. A client that cannot
+    be built is itself a failure and short-circuits both checks, exactly as before.
+    """
     t = ctx.tenant
+    failures: list[str] = []
     try:
         gh = gh or GhClient.from_context(ctx)
-        login = gh.whoami()
     except errors.RabotaError as e:
-        report["gh"] = {"ok": False, "error": str(e)}
         failures.append(f"gh identity check failed: {e}")
-        return
-    ok = login == t.gh_login
-    report["gh"] = {"login": login, "expected": t.gh_login, "ok": ok}
-    if not ok:
-        failures.append(f"gh identity is {login!r}, expected {t.gh_login!r}")
-    if not t.gh_pin_repo:
-        return
-    try:
-        gh.api(f"repos/{t.gh_pin_repo}")
-    except errors.RabotaError as e:
-        report["gh_pin"] = {"repo": t.gh_pin_repo, "ok": False}
-        failures.append(f"gh pin repo unreachable: {e}")
-    else:
-        report["gh_pin"] = {"repo": t.gh_pin_repo, "ok": True}
+        return {"ok": False, "error": str(e)}, {}, failures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=GITHUB_WORKERS) as ex:
+        who_future = ex.submit(gh.whoami)
+        pin_future = ex.submit(gh.api, f"repos/{t.gh_pin_repo}") if t.gh_pin_repo else None
+
+        try:
+            login = who_future.result()
+        except errors.RabotaError as e:
+            gh_report = {"ok": False, "error": str(e)}
+            failures.append(f"gh identity check failed: {e}")
+        else:
+            ok = login == t.gh_login
+            gh_report = {"login": login, "expected": t.gh_login, "ok": ok}
+            if not ok:
+                failures.append(f"gh identity is {login!r}, expected {t.gh_login!r}")
+
+        if pin_future is None:
+            return gh_report, {}, failures
+        try:
+            pin_future.result()
+        except errors.RabotaError as e:
+            pin_report = {"repo": t.gh_pin_repo, "ok": False}
+            failures.append(f"gh pin repo unreachable: {e}")
+        else:
+            pin_report = {"repo": t.gh_pin_repo, "ok": True}
+        return gh_report, pin_report, failures
 
 
-def _check_linear(ctx: Context, lin, report: dict, failures: list[str]) -> None:
+def _check_linear(ctx: Context, lin) -> tuple[dict, list[str]]:
     """Pin Linear's viewer to the tenant's ``linear_viewer``; skipped (and ok) when the tenant has no Linear."""
     t = ctx.tenant
     if "linear" not in t.sources:
-        report["linear"] = {"ok": True, "skipped": True}
-        return
+        return {"ok": True, "skipped": True}, []
     try:
         lin = lin or LinearClient.from_context(ctx)
         vid = lin.viewer()["id"]
     except errors.RabotaError as e:
-        report["linear"] = {"ok": False, "skipped": False, "error": str(e)}
-        failures.append(f"Linear: {e}")
-        return
+        return {"ok": False, "skipped": False, "error": str(e)}, [f"Linear: {e}"]
     ok = (t.linear_viewer is None) or (vid == t.linear_viewer)
-    report["linear"] = {"viewer_id": vid, "expected": t.linear_viewer, "ok": ok, "skipped": False}
-    if not ok:
-        failures.append("Linear viewer id does not match the tenant pin")
+    report = {"viewer_id": vid, "expected": t.linear_viewer, "ok": ok, "skipped": False}
+    return report, [] if ok else ["Linear viewer id does not match the tenant pin"]
 
 
 def run_preflight(ctx: Context, gh=None, lin=None) -> dict:
-    """Return the preflight report; ``ok`` is false whenever ``failures`` is non-empty."""
-    failures: list[str] = []
+    """Return the preflight report; ``ok`` is false whenever ``failures`` is non-empty.
+
+    The github half, the linear half and the local ``ssh-add`` check touch no shared mutable
+    state (``ctx.runner`` only reads its own ``env`` per call; each client owns its own state) so
+    they run concurrently. Each half computes its own failures list and they are concatenated in
+    a fixed order (github, then linear, then ssh) after every future resolves, so the report and
+    ``failures`` never depend on which call answered first.
+    """
     profile_dir = ctx.env.get("CLAUDE_CONFIG_DIR")
-    report = {"gh": {}, "gh_pin": {}, "linear": {}, "ssh_agent": False, "herdr": bool(ctx.env.get("HERDR_ENV")),
+    report = {"herdr": bool(ctx.env.get("HERDR_ENV")),
               "profile": Path(profile_dir).name if profile_dir else None}
-    _check_github(ctx, gh, report, failures)
-    _check_linear(ctx, lin, report, failures)
-    agent = ctx.runner.run(["ssh-add", "-l"], env=ctx.env)
+
+    # Build the GitHub client HERE, on the calling thread, before any worker starts: building it
+    # mints a token and registers it with `secrets` (module-global state), and that registration
+    # belongs on the thread that owns the process, not inside a worker (DO-730 review). A build
+    # failure is passed through to `_check_github`, which reports it exactly as it always has.
+    gh_built_failed = None
+    if gh is None:
+        try:
+            gh = GhClient.from_context(ctx)
+        except errors.RabotaError as e:
+            # The same tuple `_check_github` returns for a client it cannot build, so the report is
+            # unchanged, and no second mint is attempted inside a worker.
+            gh_built_failed = ({"ok": False, "error": str(e)}, {}, [f"gh identity check failed: {e}"])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=TOP_LEVEL_WORKERS) as ex:
+        gh_future = None if gh_built_failed else ex.submit(_check_github, ctx, gh)
+        lin_future = ex.submit(_check_linear, ctx, lin)
+        ssh_future = ex.submit(ctx.runner.run, ["ssh-add", "-l"], env=ctx.env)
+
+        report["gh"], report["gh_pin"], gh_failures = gh_built_failed or gh_future.result()
+        report["linear"], lin_failures = lin_future.result()
+        agent = ssh_future.result()
+
     report["ssh_agent"] = agent.ok
-    if not agent.ok:
-        failures.append("ssh-agent has no keys (ssh-add -l failed)")
+    ssh_failures = [] if agent.ok else ["ssh-agent has no keys (ssh-add -l failed)"]
+
+    failures = gh_failures + lin_failures + ssh_failures
     report["ok"], report["failures"] = not failures, failures
     return report
 
