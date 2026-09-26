@@ -748,8 +748,10 @@ class LinearClientTests(unittest.TestCase):
         self.assertIn("id: { in: $ids }", post.calls[0]["query"])
         self.assertNotIn("or:", post.calls[0]["query"])
         self.assertEqual(post.calls[0]["variables"]["ids"], ["DO-751", "HUB-5812"])
-        self.assertEqual(out, [{"identifier": "HUB-5812", "state": {"name": "Done", "type": "completed"},
+        self.assertEqual(out, [{"identifier": "HUB-5812", "asked": "HUB-5812",
+                                "state": {"name": "Done", "type": "completed"},
                                 "completedAt": "2026-09-01T00:00:00Z"}])
+        self.assertEqual(len(post.calls), 1)   # nothing moved, so no single-issue lookups
 
     def test_find_by_identifiers_refuses_a_reply_the_filter_was_not_applied_to(self):
         # The guard: more rows than keys, or a second page, means Linear dropped the filter again.
