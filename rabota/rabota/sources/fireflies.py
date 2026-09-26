@@ -48,13 +48,18 @@ import json
 import re
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable
 
 from rabota import errors
 
 ENDPOINT = "https://api.fireflies.ai/graphql"
 TIMEOUT_SECONDS = 60
+
+# A bare integer at or above this is read as epoch milliseconds; below it, as epoch seconds
+# (DO-749 hazard 1). Real transcript dates are ~1.7e12 ms (2026) vs ~1.7e9 s -- this threshold
+# stays unambiguous until epoch seconds themselves reach 1e12, i.e. the year 33658.
+_EPOCH_MS_THRESHOLD = 10**12
 
 Q_TRANSCRIPTS = """query($fromDate: DateTime) {
   transcripts(fromDate: $fromDate) {
@@ -94,6 +99,44 @@ def parse_action_items(text: str | None) -> list[dict]:
         item = line[:match.start()].rstrip() if match else line
         items.append({"speaker": speaker, "item": item, "timestamp": timestamp})
     return items
+
+
+def _epoch_to_iso(n: int | float) -> str | None:
+    """``n`` (epoch seconds or milliseconds, see ``_EPOCH_MS_THRESHOLD``) as ``...Z`` UTC, or
+    ``None`` for a value ``datetime`` cannot represent."""
+    seconds = n / 1000 if abs(n) >= _EPOCH_MS_THRESHOLD else n
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def normalize_date(value) -> str | None:
+    """A Fireflies transcript's ``date`` as ``YYYY-MM-DDTHH:MM:SSZ`` UTC, or ``None`` (DO-749).
+
+    Fireflies' docs type ``transcripts[].date`` as ``DateTime`` but a live read on 2026-09-25
+    returned epoch milliseconds (see the module docstring) -- an int or a numeric string is
+    read as an epoch (see ``_EPOCH_MS_THRESHOLD`` for seconds vs. milliseconds). An ISO string
+    is accepted as given and reformatted to the same ``Z`` form. Anything else -- ``None``,
+    an unparseable string, a value ``datetime`` cannot represent -- becomes ``None``, never the
+    raw value, so a downstream reader never has to guess the shape of what it got.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return _epoch_to_iso(value)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if re.fullmatch(r"-?\d+", stripped):
+        return _epoch_to_iso(int(stripped))
+    try:
+        dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _urllib_post(api_key: str) -> Callable[[dict], dict]:
@@ -153,6 +196,6 @@ class FirefliesClient:
         out = []
         for t in data.get("transcripts") or []:
             summary = t.get("summary") or {}
-            out.append({"id": t.get("id"), "title": t.get("title"), "date": t.get("date"),
+            out.append({"id": t.get("id"), "title": t.get("title"), "date": normalize_date(t.get("date")),
                         "action_items": parse_action_items(summary.get("action_items"))})
         return out

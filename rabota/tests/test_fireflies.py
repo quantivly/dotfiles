@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rabota import context, errors
-from rabota.sources.fireflies import FirefliesClient, parse_action_items
+from rabota.sources.fireflies import FirefliesClient, normalize_date, parse_action_items
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -133,7 +133,7 @@ class FirefliesClientQueryTests(unittest.TestCase):
         ]}}
         client = FirefliesClient("k" * 20, post=FakePost([reply]))
         out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
-        self.assertEqual(out, [{"id": "t1", "title": "Trenser sync review", "date": "2026-09-02",
+        self.assertEqual(out, [{"id": "t1", "title": "Trenser sync review", "date": "2026-09-02T00:00:00Z",
                                 "action_items": [{"speaker": "Zvi Baratz", "item": "Do the thing", "timestamp": "16:52"}]}])
 
     def test_query_errors_raise_rabota_error_naming_the_message(self):
@@ -147,6 +147,59 @@ class FirefliesClientQueryTests(unittest.TestCase):
         client = FirefliesClient("k" * 20, post=FakePost([reply]))
         out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
         self.assertEqual(out[0]["action_items"], [])
+        self.assertIsNone(out[0]["date"])  # "d" is garbage, not an epoch and not ISO -- None, never raw
+
+    def test_recent_transcripts_normalizes_an_epoch_millisecond_date(self):
+        reply = {"data": {"transcripts": [
+            {"id": "t1", "title": "x", "date": 1790273700000, "summary": None}]}}
+        client = FirefliesClient("k" * 20, post=FakePost([reply]))
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        # Verified independently: `date -u -d @1790273700` and `datetime.utcfromtimestamp` both
+        # give 18:15:00, not 17:35:00 -- see the verdict for this discrepancy against the brief.
+        self.assertEqual(out[0]["date"], "2026-09-24T18:15:00Z")
+
+
+class NormalizeDateTests(unittest.TestCase):
+    """One row per input shape (DO-749): epoch milliseconds, epoch seconds, a numeric string of
+    each, an ISO string (date-only and full datetime, with and without a timezone), and
+    everything that must degrade to ``None`` rather than pass the raw value through.
+    """
+
+    def test_epoch_milliseconds_int(self):
+        self.assertEqual(normalize_date(1790273700000), "2026-09-24T18:15:00Z")
+
+    def test_epoch_milliseconds_numeric_string(self):
+        self.assertEqual(normalize_date("1790273700000"), "2026-09-24T18:15:00Z")
+
+    def test_epoch_seconds_int_is_told_apart_from_milliseconds(self):
+        # Hazard 1: the same instant, in seconds, must not be misread as 1970 (n // 1000 == 1790273).
+        self.assertEqual(normalize_date(1790273700), "2026-09-24T18:15:00Z")
+
+    def test_epoch_seconds_numeric_string(self):
+        self.assertEqual(normalize_date("1790273700"), "2026-09-24T18:15:00Z")
+
+    def test_iso_datetime_string_with_z_is_reformatted_to_the_same_form(self):
+        self.assertEqual(normalize_date("2026-09-24T18:15:00Z"), "2026-09-24T18:15:00Z")
+
+    def test_iso_date_only_string_gets_a_midnight_utc_time(self):
+        self.assertEqual(normalize_date("2026-09-02"), "2026-09-02T00:00:00Z")
+
+    def test_iso_string_with_a_non_utc_offset_is_converted_to_utc(self):
+        self.assertEqual(normalize_date("2026-09-24T14:15:00-04:00"), "2026-09-24T18:15:00Z")
+
+    def test_none_becomes_none(self):
+        self.assertIsNone(normalize_date(None))
+
+    def test_unparseable_garbage_string_becomes_none_not_the_raw_value(self):
+        self.assertIsNone(normalize_date("not a date"))
+
+    def test_absurd_integer_out_of_datetimes_range_becomes_none(self):
+        self.assertIsNone(normalize_date(10**30))
+
+    def test_a_bool_is_not_treated_as_an_epoch_int(self):
+        # bool is a subclass of int in Python; True/False are not dates Fireflies would send,
+        # but a naive `isinstance(x, int)` check would silently treat True as epoch 1.
+        self.assertIsNone(normalize_date(True))
 
 
 if __name__ == "__main__":
