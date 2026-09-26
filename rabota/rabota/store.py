@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS inbox_decisions(batch_id TEXT, tenant TEXT, ts TEXT, 
   entity_type TEXT, entity_id TEXT, action TEXT, prior TEXT, verified INTEGER DEFAULT 0, rolled_back_at TEXT);
 CREATE TABLE IF NOT EXISTS pins(tenant TEXT, item_key TEXT, bucket INTEGER, rationale TEXT, ts TEXT,
   PRIMARY KEY(tenant, item_key));
+CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NOT NULL);
 """
 LANE_FIELDS = ("id", "tenant", "kind", "brief", "repo", "worktree", "out_dir", "machine", "unit",
                "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached",
@@ -247,7 +248,26 @@ class Store:
     # pins
     def set_pin(self, tenant, item_key, bucket, rationale):
         self._exec("INSERT OR REPLACE INTO pins VALUES (?,?,?,?,?)", (tenant, item_key, bucket, rationale, now()))
+        self._bump_pins_version(tenant)
     def pins(self, tenant):
         return self._rows("SELECT * FROM pins WHERE tenant=? ORDER BY bucket, ts", (tenant,))
     def clear_pin(self, tenant, item_key):
         self._exec("DELETE FROM pins WHERE tenant=? AND item_key=?", (tenant, item_key))
+        self._bump_pins_version(tenant)
+    def _bump_pins_version(self, tenant):
+        """Advance ``tenant``'s pins version by one, creating the row at 1 if this is its first pin write.
+
+        A row's own ``ts`` (set on insert, untouched by delete) cannot stand in for "did the pins
+        table change": a delete of any row but the max-``ts`` one leaves ``MAX(ts)`` unchanged, and a
+        delete is exactly as much a change as a set (a lesson from this project — mtime/hash
+        comparisons over a multi-writer file prove nothing; the same is true of a derived aggregate
+        that a delete can leave untouched). This counter increments on both mutations, so any change
+        — set or clear — is visible to a caller polling it, never just some of them.
+        """
+        self._exec("INSERT INTO pins_meta(tenant, version) VALUES (?, 1) "
+                   "ON CONFLICT(tenant) DO UPDATE SET version = version + 1", (tenant,))
+    def pins_version(self, tenant) -> int:
+        """``tenant``'s pins version: 0 until the first ``set_pin``/``clear_pin``, then a strictly
+        increasing counter bumped by both — the real signal ``rank``'s inputs are checked against."""
+        rows = self._rows("SELECT version FROM pins_meta WHERE tenant=?", (tenant,))
+        return rows[0]["version"] if rows else 0

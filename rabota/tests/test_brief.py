@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from rabota import cli, context, errors, secrets, snapshots
 from rabota.commands import brief
+from rabota.commands import rank as rank_cmd
 from rabota.runner import FakeRunner, Result
 from tests.test_preflight import VIEWER, FakeGh, FakeLinear
 
@@ -14,6 +15,16 @@ def seq(keys, generated_at="2026-09-16T08:00:00Z"):
     return {"tenant": "quantivly", "generated_at": generated_at, "failed_sources": [],
             "items": [{"bucket": 1, "key": k, "title": "title " * 20, "waiting_on": "benoit", "why_now": "now", "rationale": "r", "url": "u", "source": "linear"} for k in keys],
             "triage": [], "decisions": []}
+
+def seq_for(ctx, keys, generated_at="2026-09-16T08:00:00Z"):
+    """``seq()`` stamped with ``ctx``'s CURRENT inputs signature (DO-738), so writing this fixture
+    to disk does not itself read as "an input moved" the moment ``run_brief`` checks it. Call this
+    AFTER every snapshot/pin/plan the test means to have in place before ``run_brief`` runs — the
+    ones after this call are exactly what the test means to have moved.
+    """
+    s = seq(keys, generated_at)
+    s["inputs"] = rank_cmd.inputs_signature(ctx)
+    return s
 
 class BriefTests(unittest.TestCase):
     def test_caps_at_twelve_lines_including_footer(self):
@@ -169,11 +180,11 @@ class BriefCommandTests(unittest.TestCase):
 
     def _write_seq(self, ctx, keys):
         day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
-        (day / "sequence.json").write_text(json.dumps(seq(keys)))
+        (day / "sequence.json").write_text(json.dumps(seq_for(ctx, keys)))
         return day
 
     def test_run_brief_writes_brief_md_and_last_brief_and_honours_max_lines(self):
-        ctx = self.ctx(); day = self._write_seq(ctx, [f"K-{i}" for i in range(30)])
+        ctx = self.ctx()
         now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
         # Fresh connector snapshots so `needs` is empty: `last-brief.json` records what the reader
         # was SHOWN, and with `needs` non-empty a JSON caller prints nothing (see
@@ -181,9 +192,14 @@ class BriefCommandTests(unittest.TestCase):
         # Review finding, recorded so nobody mistakes this row for coverage: adding that
         # precondition makes this row pass identically against the pre-#240 unconditional write, so
         # it does NOT exercise the guard. The two rows named above are what do.
+        #
+        # Written BEFORE the sequence fixture (DO-738): `slack` is one of `rank`'s own inputs (not
+        # just a `needs` source), so writing it after would itself look like a moved input and
+        # trigger a real re-rank, which is a different test (see BriefRerankTests).
         for source in brief.NEEDS_SOURCES:
             snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [],
                                                     "fetched_at": "2026-09-16T08:05:00Z"})
+        day = self._write_seq(ctx, [f"K-{i}" for i in range(30)])
         lines = brief.run_brief(ctx, text=True, max_lines=11, now=now, gh=self.gh, lin=self.lin)
         self.assertLessEqual(len(lines), 11)
         self.assertEqual(lines[-1], f"brief: {day / 'brief.md'}")
@@ -270,7 +286,7 @@ class BriefCommandTests(unittest.TestCase):
         minted = "minted-gho-token-0123456789abcdef"
         secrets.register_value(minted); self.addCleanup(secrets.REGISTERED_VALUES.discard, minted)
         ctx = self.ctx(); day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
-        s = seq(["K-1"]); s["items"][0]["title"] = f"gh said: token {minted} rejected"
+        s = seq_for(ctx, ["K-1"]); s["items"][0]["title"] = f"gh said: token {minted} rejected"
         (day / "sequence.json").write_text(json.dumps(s))
         with self.assertRaises(errors.SecretLeak) as cm:
             brief.run_brief(ctx, text=True, now=datetime(2026, 9, 16, 8, 5, tzinfo=timezone.utc), gh=self.gh, lin=self.lin)
@@ -568,14 +584,14 @@ class BriefNeedsTests(unittest.TestCase):
         gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
         ctx = self.ctx()
         day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
-        (day / "sequence.json").write_text(json.dumps(seq(["K-1"])))
+        (day / "sequence.json").write_text(json.dumps(seq_for(ctx, ["K-1"])))
         out = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
         self.assertEqual({n["source"] for n in out["needs"]}, {"slack", "calendar"})
         for n in out["needs"]:
             self.assertEqual(set(n), {"source", "reason", "query", "write_to"})
         ctx2 = self.ctx()
         day2 = ctx2.state_dir / "2026-09-16"; day2.mkdir(parents=True, exist_ok=True)
-        (day2 / "sequence.json").write_text(json.dumps(seq(["K-1"])))
+        (day2 / "sequence.json").write_text(json.dumps(seq_for(ctx2, ["K-1"])))
         lines = brief.run_brief(ctx2, text=True, now=self.NOW, gh=gh, lin=lin)
         for source in ("slack", "calendar"):
             self.assertTrue(any(l.startswith(f"! {source} needs a fetch —") for l in lines), lines)
@@ -586,7 +602,7 @@ class BriefNeedsTests(unittest.TestCase):
         ctx = self.ctx()
         gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
         day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
-        (day / "sequence.json").write_text(json.dumps(seq(["K-1"])))
+        (day / "sequence.json").write_text(json.dumps(seq_for(ctx, ["K-1"])))
         out = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
         self.assertTrue(out["needs"])
         self.assertTrue((day / "brief.md").exists())
@@ -884,3 +900,181 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
             with self.assertRaises(errors.Usage, msg=bad):
                 brief.run_brief(ctx, text=True, now=self.NOW, gh=FakeGh("work-login"),
                                 lin=FakeLinear(VIEWER), classified=bad)
+
+
+class BriefRerankTests(unittest.TestCase):
+    """DO-738: `brief` re-ranks when an input `rank` reads has moved since ``sequence.json`` was
+    written, and — because re-ranking writes ``sequence.json``/``.md`` — never otherwise."""
+
+    def ctx(self, dry_run=False):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    NOW = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
+
+    def _fresh_needs_sources(self, ctx, at="2026-09-16T08:05:00Z"):
+        for source in brief.NEEDS_SOURCES:
+            snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [], "fetched_at": at})
+
+    def test_nothing_moved_does_not_rerank_or_rewrite_sequence_json(self):
+        # Revert the DO-738 staleness check (always reuse an existing sequence.json) and this row
+        # still passes -- it is `test_a_moved_pin_triggers_a_rerank...` below that fails then. This
+        # row exists to prove the OTHER half: re-ranking is not free, so it must not happen on
+        # every call, only on a real mismatch.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)     # first call: ranks (no sequence yet)
+        seq_path = ctx.state_dir / "2026-09-16" / "sequence.json"
+        written_once = seq_path.read_text()
+        mtime = seq_path.stat().st_mtime_ns
+        second = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertEqual(seq_path.read_text(), written_once, "sequence.json was rewritten with nothing moved")
+        self.assertEqual(seq_path.stat().st_mtime_ns, mtime)
+        self.assertTrue(any(l.startswith("no change since") for l in second["lines"]), second["lines"])
+
+    def test_a_same_second_rewrite_with_new_content_still_reranks(self):
+        # DO-738 review F1: the signature used each snapshot's `fetched_at`, which has one-second
+        # resolution, so a rewrite with different content inside the same second went unnoticed.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        linear = ctx.state_dir / "sources" / "linear.json"
+        stamp = {"ok": True, "error": None, "fetched_at": "2026-09-16T08:05:00Z"}
+        linear.write_text(json.dumps({**stamp, "issues": []}))
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        seq_path = ctx.state_dir / "2026-09-16" / "sequence.json"
+        before = seq_path.read_text()
+        linear.write_text(json.dumps({**stamp, "issues": [{"identifier": "HUB-1", "title": "new", "url": "u", "priorityLabel": "Low",
+                                                             "state": {"type": "unstarted", "name": "Todo"}}]}))
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertNotEqual(seq_path.read_text(), before,
+                            "linear.json changed content under the same fetched_at, and nothing re-ranked")
+
+    def test_an_unstamped_live_sequence_reranks_once_then_settles(self):
+        # DO-738 review F2: every sequence.json the old code wrote carries no `inputs` key. The
+        # first brief after deploy must re-rank once, then settle, not re-rank on every call.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True)
+        seq_path = day / "sequence.json"
+        seq_path.write_text(json.dumps(seq(["OLD-1"])))
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        first = seq_path.read_text()
+        self.assertIn("inputs", json.loads(first), "the unstamped sequence was not re-ranked")
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertEqual(seq_path.read_text(), first, "re-ranked again with nothing moved")
+
+    def test_a_moved_pin_triggers_a_rerank_with_a_truthful_delta(self):
+        # A pin is the input DO-738's issue itself calls out, and the one furthest from a file --
+        # `Store.pins_version` (see test_store.py) is what has to notice it moved.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        seq_path = ctx.state_dir / "2026-09-16" / "sequence.json"
+        before = seq_path.read_text()
+        ctx.store.set_pin("quantivly", "PROMISE-1", 2, "spoken promise to benoit")
+        out = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertNotEqual(seq_path.read_text(), before, "the pin moved but sequence.json was not rewritten")
+        self.assertEqual(json.loads(seq_path.read_text())["inputs"], rank_cmd.inputs_signature(ctx))
+        # The delta is truthful: PROMISE-1 is genuinely new since the previous SHOWN brief.
+        self.assertTrue(any(l.startswith("+ PROMISE-1") for l in out["lines"]), out["lines"])
+        self.assertFalse(any(l.startswith("no change since") for l in out["lines"]), out["lines"])
+        # And with nothing moved again, the NEXT call settles back to a truthful no-change.
+        again = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(any(l.startswith("no change since") for l in again["lines"]), again["lines"])
+
+    def test_dry_run_reranks_via_compute_sequence_without_writing(self):
+        # DO-742 + DO-738: a dry run whose inputs moved must still compute the new ranking (through
+        # `rank_cmd.compute_sequence`, never the writing `run_rank`) so the printed lines are not a
+        # lie about what a real run would show -- but it must leave sequence.json exactly as it was.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)      # a real sequence.json exists
+        seq_path = ctx.state_dir / "2026-09-16" / "sequence.json"
+        before = seq_path.read_text()
+        ctx.store.set_pin("quantivly", "PROMISE-1", 2, "spoken promise to benoit")
+        ctx.dry_run = True
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        self.assertEqual(seq_path.read_text(), before, "a dry run rewrote sequence.json")
+        self.assertTrue(any(l.startswith("dry-run: nothing written") for l in lines), lines)
+        self.assertTrue(any(l.startswith("1. PROMISE-1") or l.startswith("+ PROMISE-1") for l in lines), lines)
+
+    def test_staleness_and_a_moved_input_are_different_questions_and_can_both_print(self):
+        # The staleness line is about `generated_at` vs the clock; a moved input is about content.
+        # A re-rank stamps a FRESH `generated_at`, so the two cannot both be triggered by one call
+        # here -- what this row proves instead is that they stay independent: a stale sequence with
+        # NOTHING moved gets only the clock line, never a spurious rerank.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
+        old = seq_for(ctx, ["K-1"], generated_at="2026-09-16T05:00:00Z")
+        (day / "sequence.json").write_text(json.dumps(old))
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(lines[0].startswith("! brief is "), lines)
+        self.assertEqual(json.loads((day / "sequence.json").read_text())["generated_at"], "2026-09-16T05:00:00Z",
+                         "an unmoved sequence was re-ranked just because it looked stale by the clock")
+
+    def test_max_lines_one_two_three_stay_within_budget_while_reranking(self):
+        # A re-rank happens on EVERY one of these calls (a fresh pin moves the input each time), so
+        # this is `_assemble`'s cap exercised on the path that just rewrote sequence.json, not on a
+        # cached one.
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx(); self._fresh_needs_sources(ctx)
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        for n, max_lines in enumerate((1, 2, 3)):
+            ctx.store.set_pin("quantivly", f"PROMISE-{n}", 2, "spoken promise")
+            before = (ctx.state_dir / "2026-09-16" / "sequence.json").read_text()
+            lines = brief.run_brief(ctx, text=True, max_lines=max_lines, now=self.NOW, gh=gh, lin=lin)
+            self.assertNotEqual((ctx.state_dir / "2026-09-16" / "sequence.json").read_text(), before,
+                                f"max_lines={max_lines}: pin moved but no rerank happened")
+            self.assertLessEqual(len(lines), max_lines)
+
+    def test_full_cycle_after_ingest_reranks_without_a_separate_rank_call(self):
+        """Drives the skill's actual two-turn cycle end to end, with no ``rank`` call anywhere
+        (DO-738's whole point): turn 1 (JSON, ``needs`` non-empty on a fresh tempdir), an ingest of
+        the sources ``needs`` named plus a reconciled pin (the real shape a Slack/Fireflies item
+        takes once turn 2 has acted on it — see ``rabota`` skill step 2), then turn 2's exact final
+        call, ``--text brief --max-lines 11 --classified fireflies``. The pin must be ranked and
+        printed; the screen must not say ``no change``.
+
+        Slack itself is deliberately NOT what makes the new item appear: `rank.rank` never reads
+        `RankInputs.slack` (grep-verified; see `rank_cmd.inputs_signature`'s docstring), so an
+        ingested Slack snapshot alone cannot move anything this test could observe in the ranked
+        list. Fetching it still clears `needs` for that source, which is what unblocks the real
+        cycle's final call in production -- the reconciled pin is the part of "the fetched item
+        sits unranked" that a moved rank input can actually fix, and it is what this row checks.
+        """
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        ctx = self.ctx()
+        # Turn 1: needs is non-empty (nothing fetched yet), so nothing is printed or recorded.
+        turn1 = brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        self.assertTrue(turn1["needs"])
+        self.assertFalse((ctx.state_dir / "2026-09-16" / "last-brief.json").exists())
+        # Ingest: the Slack item this cycle fetched, plus calendar so `needs` clears, plus a
+        # Fireflies action item so `--classified fireflies` has something real to acknowledge.
+        snapshots.write(ctx.state_dir, "slack", {"ok": True, "error": None,
+                                                 "items": [{"channel": "C1", "text": "can you review HUB-9?",
+                                                            "user": "benoit", "ts": "2026-09-16T08:00:00Z"}],
+                                                 "fetched_at": "2026-09-16T08:05:00Z"})
+        snapshots.write(ctx.state_dir, "calendar", {"ok": True, "error": None, "items": [],
+                                                     "fetched_at": "2026-09-16T08:05:00Z"})
+        snapshots.write(ctx.state_dir, "fireflies", {"ok": True, "error": None, "fetched_at": "2026-09-16T08:05:00Z",
+                                                     "transcripts": [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                                                     "action_items": [{"speaker": "benoit",
+                                                                                       "item": "review HUB-9",
+                                                                                       "timestamp": "01:00"}]}]})
+        # Reconcile: the Slack item names a dated promise, so it becomes a pin -- exactly what the
+        # skill's step 2 does with a fetched item before turn 2's final call.
+        ctx.store.set_pin("quantivly", "HUB-9", 2, "review requested by benoit in Slack")
+        # Turn 2's exact final call: `rabota --text brief --max-lines 11 --classified fireflies`,
+        # with no `rank` call anywhere in this test -- the re-rank must happen inside `run_brief`
+        # itself. `--max-lines 1/2/3` (the same rerank, driven with a tighter budget each time) is
+        # covered separately in `test_max_lines_one_two_three_stay_within_budget_while_reranking`,
+        # since varying the budget here would need a fresh pin per call to keep exercising a rerank
+        # rather than the (equally real, separately tested) no-change path on an unmoved input.
+        lines = brief.run_brief(ctx, text=True, max_lines=11, now=self.NOW, gh=gh, lin=lin,
+                                classified=["fireflies"])
+        self.assertLessEqual(len(lines), 11)
+        self.assertFalse(any(l.startswith("no change since") for l in lines), lines)
+        self.assertTrue(any(l.startswith("1. HUB-9") for l in lines), lines)

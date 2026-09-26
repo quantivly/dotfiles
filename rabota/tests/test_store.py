@@ -57,6 +57,29 @@ class StoreTests(unittest.TestCase):
         self.store.clear_pin("quantivly", "HUB-1")
         self.assertEqual(self.store.pins("quantivly"), [])
 
+    def test_pins_version_bumps_on_set_and_on_clear_never_from_another_tenant(self):
+        # DO-738: `rank` needs a real "did the pins table change" signal. A row's own `ts` cannot
+        # be it -- `clear_pin` deletes the row, so `MAX(ts)` over what is left is unchanged unless
+        # the deleted row happened to hold the max, which a real caller has no way to arrange or
+        # even know. `pins_version` is a counter bumped on every mutation, set OR clear, so it is
+        # true of the change itself rather than merely correlated with it.
+        self.assertEqual(self.store.pins_version("quantivly"), 0)
+        self.store.set_pin("quantivly", "HUB-1", 1, "spoken promise")
+        v1 = self.store.pins_version("quantivly")
+        self.assertGreater(v1, 0)
+        self.store.set_pin("quantivly", "HUB-2", 2, "another promise")
+        v2 = self.store.pins_version("quantivly")
+        self.assertGreater(v2, v1)
+        # Deleting the OLDER row (never the max-ts one) is exactly the case a `ts`-derived
+        # aggregate misses: MAX(ts) over the surviving row is unchanged, but the table did change.
+        self.store.clear_pin("quantivly", "HUB-1")
+        v3 = self.store.pins_version("quantivly")
+        self.assertGreater(v3, v2)
+        # A second tenant's pins are a wholly separate counter, starting fresh at 0.
+        self.assertEqual(self.store.pins_version("toysim"), 0)
+        self.store.set_pin("toysim", "T-1", 1, "promise")
+        self.assertEqual(self.store.pins_version("quantivly"), v3, "an unrelated tenant's pin bumped this one")
+
     def test_newer_on_disk_schema_is_refused_and_left_alone(self):
         # A DB written by a future rabota: this code cannot know its semantics, so it must not write.
         self.store.conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION + 1,))
