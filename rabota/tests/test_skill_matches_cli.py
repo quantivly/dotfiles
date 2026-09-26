@@ -34,11 +34,24 @@ class SkillMatchesCliTests(unittest.TestCase):
         # builds from `needs`, so it has to key off the same set `needs` is drawn from — keying off
         # `ingest.ALLOWED` instead would have kept demanding a stale `fireflies=…` in the one call
         # this skill still makes, the moment the two sets first disagreed.
+        #
+        # Since DO-740 the one call is the inline form, `rabota ingest --stdin`, with the payload
+        # keyed by source, so each needs source must appear as a JSON key in the cycle, not as a
+        # `source=` path. A mutation back to the file form, or to one call per source, fails here.
         cycle = _cycle_section()
         calls = re.findall(r"`rabota ingest[^`]*`", cycle)
         self.assertEqual(len(calls), 1, f"expected exactly one `rabota ingest …` call, found {calls}")
+        self.assertIn("--stdin", calls[0], "the cycle's ingest call is not the inline --stdin form")
         for source in brief.NEEDS_SOURCES:
-            self.assertIn(f"{source}=", calls[0], f"ingest call is missing {source}=…")
+            self.assertIn(f'"{source}"', cycle, f"the stdin payload does not name {source} as a key")
+
+    def test_reconcile_uses_the_tracked_lookup_not_a_turn_1_field(self):
+        # DO-751: `brief` no longer returns `tracked`; turn 2 asks `rabota tracked <key>...` for the
+        # subjects it classifies. A skill still pointing at "turn 1's `tracked` field" sends an
+        # agent after a key that is not there.
+        cycle = _cycle_section()
+        self.assertIn("rabota tracked", cycle)
+        self.assertNotIn("turn 1's `tracked` field", cycle)
 
     def test_preflight_is_never_a_step_of_its_own(self):
         # `rabota brief` runs preflight itself (#237). Counting mentions was too brittle to keep --

@@ -51,21 +51,21 @@ written, so the fetch you just landed is never silently skipped (DO-738).
    calls inside this one turn, not a turn each:
    - An entry with `fetched: true` (fireflies) already carries its `items` — classify them,
      no fetch and no ingest. Every other entry: fetch exactly its `query` (e.g. Slack
-     `to:me after:…`, Calendar free blocks for today) and write
-     `{"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}` (a failed fetch:
-     `"ok": false`, `"error": "<why>"`, `"items": []`) to the entry's `write_to` path.
-     **`ok` must be a JSON boolean** — omit it and `ingest` exits 2. Do not retry more than
-     once; never drop a failed source silently.
-   - **One** `rabota ingest --file slack=… --file calendar=…` call, naming
-     only the sources actually in `needs` that were fetched (never fireflies — it has no
-     `write_to`). A bad file among good ones is reported (exit 4), not silently dropped —
-     the good ones still land.
-   - **Reconcile** (`references/reconcile.md`) using turn 1's `tracked` field — it is already
-     the Linear/GitHub projection reconcile needs; do not re-read `sources/*.json` yourself.
-     Classify every commitment in the items you just fetched or that a `fetched: true` entry
-     already carried. Record: `rabota escalate --question … --evidence … --option …` for
-     questions; dated promises become pins: `rabota pin <key> --bucket 2 --rationale …`. Say
-     "already done" as confidently as "overdue"; cite the artifact.
+     `to:me after:…`, Calendar free blocks for today). Do not retry more than once; never drop
+     a failed source silently.
+   - **One** ingest, no files: `rabota ingest --stdin <<'RABOTA_EOF'`, then ONE line of compact
+     JSON (every newline inside a value escaped as `\n`) keyed by source, `{"slack":
+     {"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}, "calendar": {...}}`
+     (a failed fetch: `"ok": false`, `"error": "<why>"`, `"items": []`), then `RABOTA_EOF`.
+     **`ok` must be a JSON boolean.** Only sources in `needs` that you fetched (never
+     fireflies). A bad source among good ones exits 4; the good ones land.
+   - **Reconcile** (`references/reconcile.md`): one `rabota tracked <key> [<key>…]` call with
+     exactly the subjects you are classifying (issue keys, `owner/repo#n`); it answers `found`,
+     `not_found`, `unknown` or `ambiguous` per key. Turn 1 carries no `tracked` field; do not
+     re-read `sources/*.json`. Classify every commitment in the fetched and `fetched: true`
+     items. Record: `rabota escalate --question … --evidence … --option …` for questions;
+     dated promises become pins: `rabota pin <key> --bucket 2 --rationale …`. Say "already
+     done" as confidently as "overdue"; cite the artifact.
    - **Brief, turn 2's final call.** `rabota --text brief --max-lines 11 --classified fireflies` —
      `--classified fireflies` is what actually marks the Fireflies items you were just handed as
      classified; omitting it (e.g. a bare `rabota --text brief`) classifies nothing, however many

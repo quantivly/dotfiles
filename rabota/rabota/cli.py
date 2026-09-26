@@ -28,7 +28,7 @@ register("version", _version_build, _version_run)
 # while workstreams land; each module is imported by name and skipped if absent.
 COMMAND_MODULES = ["doctor", "preflight", "sync", "ingest", "inbox", "rank", "brief",
                    "close", "escalate", "census", "budget", "lane", "reap", "db", "precompute",
-                   "pin", "gate"]
+                   "pin", "gate", "tracked"]
 
 
 def _load_command_modules():

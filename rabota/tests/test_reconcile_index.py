@@ -255,6 +255,80 @@ class TrackedIndexSizeTests(unittest.TestCase):
         self.assertNotIn("a review request the index must never carry", dumped)
 
 
+class TrackedIndexLiveScaleTests(unittest.TestCase):
+    """DO-751: measured, not assumed, at the scale the brief names — @zvi's real tenant has ~908
+    open (assigned-or-created) Linear issues. ``TrackedIndexSizeTests`` above measures a 25-issue
+    fixture; this measures ``build_tracked_index`` at 908 issues (110 carrying one PR attachment
+    each), 20 open PRs of @zvi's, 100 merged — the scale ``commands.brief.run_brief`` stopped
+    returning this index at (DO-751), because it is this test's number, not the 25-issue one, that
+    a real morning pays.
+    """
+
+    def _live_scale_fixture(self, ctx):
+        n_issues, n_attach, n_own, n_merged = 908, 110, 20, 100
+        issues = [{"identifier": f"HUB-{5000 + n}", "title": "a realistically sized issue title here",
+                   "url": f"https://linear.app/hub-{5000 + n}", "state": {"name": "In Progress", "type": "started"},
+                   "priorityLabel": "P2", "dueDate": "2026-09-20", "updatedAt": "2026-09-15T00:00:00Z",
+                   "blockedBy": [], "blocks": [], "attachments": []} for n in range(n_issues)]
+        for i in range(n_attach):
+            # A realistic split across the three PR-link outcomes: resolves open, resolves
+            # merged, or resolves to neither (stays "unknown") -- see reconcile.py's docstring.
+            bucket = i % 3
+            if bucket == 0:
+                url = f"https://github.com/quantivly/hub/pull/{1000 + i}"
+            elif bucket == 1:
+                url = f"https://github.com/quantivly/hub/pull/{900 + i}"
+            else:
+                url = f"https://github.com/quantivly/other/pull/{i}"
+            issues[i]["attachments"] = [{"url": url, "sourceType": "github"}]
+        own_prs = [{"repo": "quantivly/hub", "number": 1000 + n, "url": f"https://github.com/quantivly/hub/pull/{1000 + n}",
+                    "title": "a realistically sized PR title here", "isDraft": False, "mergeable": "MERGEABLE",
+                    "reviewDecision": "APPROVED", "approved_by": ["benoit"]} for n in range(n_own)]
+        merged = [{"repo": "quantivly/hub", "number": 900 + n, "url": f"https://github.com/quantivly/hub/pull/{900 + n}",
+                   "title": "a realistically sized PR title here", "mergedAt": "2026-09-10T00:00:00Z"} for n in range(n_merged)]
+        notifications = [{"id": f"n{n}", "title": "a notification the index must never carry"} for n in range(30)]
+        review_requests = [{"repo": "quantivly/hub", "number": n, "title": "a review request the index must never carry"}
+                           for n in range(15)]
+        snapshots.write(ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": issues,
+                                                   "notifications": notifications})
+        snapshots.write(ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
+                                                   "review_requests": review_requests, "own_prs": own_prs,
+                                                   "merged_recent": merged})
+        return issues, own_prs, merged
+
+    def test_build_tracked_index_at_live_scale_measures_hundreds_of_kb(self):
+        tmp, ctx = _ctx()
+        self.addCleanup(tmp.cleanup)
+        issues, own_prs, merged = self._live_scale_fixture(ctx)
+        idx = reconcile.build_tracked_index(ctx, NOW)
+        dumped = json.dumps(idx)
+        size = len(dumped.encode())
+        items = len(issues) + len(own_prs) + len(merged)
+        # The honest number this test exists to pin down: at @zvi's real scale the whole-tenant
+        # index is not "a bit over the 4 KB reference point" (the 25-issue fixture's framing) but
+        # two orders of magnitude over it -- this is what commands.brief.run_brief stopped
+        # returning in turn 1's JSON reply (DO-751), never something this module claims to shrink
+        # further while it still projects every issue in the tenant.
+        self.assertGreater(size, 200_000, f"only {size} bytes at 908 issues -- re-measure before trusting this row")
+        self.assertLess(size, 400_000, f"{size} bytes: grew enough past the measured ~300 KB to recheck the maths")
+        print(f"DO-751 live-scale measurement: {size} bytes total, {size / items:.0f} bytes/item, "
+              f"{items} items ({len(issues)} issues, {len(own_prs)} own_prs, {len(merged)} merged)")
+
+    def test_lookup_tracked_at_live_scale_costs_bytes_proportional_to_the_keys_asked_for(self):
+        # The claim `rabota tracked` exists to make true: unlike `build_tracked_index`, its cost is
+        # the number of SUBJECTS a caller names, not the tenant's issue count -- measured here by
+        # asking for a handful of keys against the same 908-issue tenant above and confirming the
+        # reply stays small regardless of tenant size.
+        tmp, ctx = _ctx()
+        self.addCleanup(tmp.cleanup)
+        self._live_scale_fixture(ctx)
+        keys = ["HUB-5000", "HUB-5001", "HUB-5002", "quantivly/hub#1000", "quantivly/hub#900", "HUB-9999"]
+        out = reconcile.lookup_tracked(ctx, keys, NOW)
+        size = len(json.dumps(out).encode())
+        self.assertLess(size, 4096, f"{size} bytes for {len(keys)} keys: no longer proportional to the ask")
+        self.assertEqual(len(out["results"]), len(keys))
+
+
 class GoldenClassSupportTests(unittest.TestCase):
     """Class by class against ``tests/fixtures/reconcile/golden.json``: does the index carry what
     that golden entry needed to be decided? Two of the six classes never touch the tracked side at
@@ -447,3 +521,148 @@ class GoldenClassSupportTests(unittest.TestCase):
         # sources/github.json.
         idx = reconcile.build_tracked_index(self.ctx, NOW)
         self.assertEqual(idx["linear"], {"ok": False, "reason": "never synced", "issues": []})
+
+
+class LookupTrackedTests(unittest.TestCase):
+    """DO-751: ``reconcile.lookup_tracked`` — what ``rabota tracked <key>...`` answers instead of
+    a whole-tenant index. Drives the same golden cases ``GoldenClassSupportTests`` drives against
+    ``build_tracked_index``, but per-key, to confirm cutting the reply down to exactly the asked-for
+    subjects loses no decidability.
+    """
+
+    def setUp(self):
+        self.tmp, self.ctx = _ctx()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_classify_subject_routes_linear_github_and_other(self):
+        self.assertEqual(reconcile.classify_subject("HUB-5812"), "linear")
+        self.assertEqual(reconcile.classify_subject("CORE-561"), "linear")
+        self.assertEqual(reconcile.classify_subject("sre-customers-library#369"), "github")
+        self.assertEqual(reconcile.classify_subject("quantivly/hub#9"), "github")
+        # A person-plus-topic subject (a Slack channel id, a Fireflies transcript id): neither
+        # shape, so `question-owed`/`spoken-already-done` never look it up here at all.
+        self.assertEqual(reconcile.classify_subject("C0A2FRLPA58"), "other")
+        self.assertEqual(reconcile.classify_subject("01M1H28CHBVMJXBSDKF1ZHN32D"), "other")
+
+    def test_subjects_copied_from_free_text_resolve_to_the_same_record(self):
+        # DO-751 review F2/F3: an agent builds keys from Slack and transcript text. A trailing comma,
+        # a lowercase key, a full Linear URL or a full PR URL must reach the record the bare key does.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        gh = dict(GITHUB_SNAP)
+        gh["own_prs"] = [dict(p, repo="quantivly/" + p["repo"]) for p in GITHUB_SNAP["own_prs"]]
+        snapshots.write(self.ctx.state_dir, "github", gh)
+        asked = ["HUB-5812,", "hub-5812", "(HUB-5812)", "https://linear.app/quantivly/issue/HUB-5812/some-slug",
+                 "https://github.com/quantivly/auto-conf/pull/461", "quantivly/auto-conf#461."]
+        out = reconcile.lookup_tracked(self.ctx, asked, NOW)
+        for r in out["results"]:
+            self.assertEqual(r["status"], "found", r)
+        self.assertEqual({r.get("resolved", r["key"]) for r in out["results"]},
+                         {"HUB-5812", "quantivly/auto-conf#461"})
+
+    def test_an_owner_less_pr_key_resolves_by_unique_suffix_and_reports_ambiguity(self):
+        # DO-751 review: `auto-conf#461` against an index keyed `quantivly/auto-conf#461` answered
+        # not_found for a PR that is there. A unique suffix match resolves it; two are reported.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        gh = dict(GITHUB_SNAP)
+        gh["own_prs"] = [dict(p, repo="quantivly/" + p["repo"]) for p in GITHUB_SNAP["own_prs"]] + [
+            dict(GITHUB_SNAP["own_prs"][1], repo="someone/auto-conf")]
+        snapshots.write(self.ctx.state_dir, "github", gh)
+        by_key = {r["key"]: r for r in reconcile.lookup_tracked(
+            self.ctx, ["sre-customers-library#369", "auto-conf#461"], NOW)["results"]}
+        self.assertEqual(by_key["sre-customers-library#369"]["status"], "found")
+        self.assertEqual(by_key["sre-customers-library#369"]["resolved"], "quantivly/sre-customers-library#369")
+        self.assertEqual(by_key["auto-conf#461"]["status"], "ambiguous")
+        self.assertEqual(by_key["auto-conf#461"]["candidates"], ["quantivly/auto-conf#461", "someone/auto-conf#461"])
+
+    def test_found_not_found_and_unknown_are_distinct(self):
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        snapshots.write(self.ctx.state_dir, "github", dict(GITHUB_SNAP))
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-5812", "HUB-9999", "sre-customers-library#369",
+                                                   "no-such-repo#1", "C0A2FRLPA58"], NOW)
+        by_key = {r["key"]: r for r in out["results"]}
+        self.assertEqual(by_key["HUB-5812"]["status"], "found")
+        self.assertEqual(by_key["HUB-5812"]["kind"], "linear")
+        self.assertEqual(by_key["HUB-9999"]["status"], "not_found")           # trustworthy source, absent subject
+        self.assertEqual(by_key["sre-customers-library#369"]["status"], "found")
+        self.assertEqual(by_key["sre-customers-library#369"]["kind"], "github")
+        self.assertEqual(by_key["no-such-repo#1"]["status"], "not_found")
+        self.assertEqual(by_key["C0A2FRLPA58"]["status"], "not_applicable")
+
+    def test_unknown_is_never_conflated_with_not_found(self):
+        # golden g06's bug one level up: a key routed to a source that cannot be relied on (never
+        # synced here) must read "unknown", never the "not_found" a caller could mistake for proof
+        # of absence.
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-5812", "sre-customers-library#369"], NOW)
+        for r in out["results"]:
+            self.assertEqual(r["status"], "unknown", r)
+            self.assertIn("never synced", r["reason"])
+
+    def test_a_skipped_source_reads_unknown_not_not_found(self):
+        tmp, ctx = _ctx("toysim")   # lists github only, per tests/fixtures/config
+        self.addCleanup(tmp.cleanup)
+        out = reconcile.lookup_tracked(ctx, ["HUB-1"], NOW)
+        self.assertEqual(out["results"][0]["status"], "unknown")
+        self.assertIn("does not use this source", out["results"][0]["reason"])
+
+    def test_g03_tracked_satisfied_decidable_from_a_single_pr_lookup(self):
+        snapshots.write(self.ctx.state_dir, "github", {
+            "ok": True, "error": None, "login": "x", "review_requests": [],
+            "own_prs": [{"repo": "sre-customers-library", "number": 369, "url": "u", "title": "t",
+                        "isDraft": False, "mergeable": "CLEAN", "reviewDecision": "APPROVED",
+                        "approved_by": ["benoit"]}],
+            "merged_recent": []})
+        out = reconcile.lookup_tracked(self.ctx, ["sre-customers-library#369"], NOW)
+        r = out["results"][0]
+        self.assertEqual(r["status"], "found")
+        self.assertEqual(r["record"]["kind"], "own_pr")
+        self.assertEqual(r["record"]["review_decision"], "APPROVED")
+
+    def test_g04_stale_blocked_decidable_from_a_single_pr_lookup(self):
+        snapshots.write(self.ctx.state_dir, "github", {
+            "ok": True, "error": None, "login": "x", "review_requests": [], "merged_recent": [],
+            "own_prs": [{"repo": "auto-conf", "number": 461, "url": "u", "title": "t", "isDraft": False,
+                        "mergeable": "BEHIND", "reviewDecision": "REVIEW_REQUIRED", "approved_by": []}]})
+        out = reconcile.lookup_tracked(self.ctx, ["auto-conf#461"], NOW)
+        r = out["results"][0]["record"]
+        self.assertEqual((r["mergeable"], r["review_decision"]), ("BEHIND", "REVIEW_REQUIRED"))
+
+    def test_g07_state_contradiction_decidable_from_a_single_issue_lookup(self):
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-5812", "title": "gate the sre-ui view header editor", "url": "u",
+             "state": {"name": "In Review", "type": "started"}, "priorityLabel": "P2", "dueDate": "2026-09-04",
+             "updatedAt": "2026-08-29T00:00:00Z", "blockedBy": [], "blocks": [],
+             "attachments": [{"url": "https://github.com/quantivly/sre-core/pull/1473", "sourceType": "github"}]}],
+            "notifications": []})
+        snapshots.write(self.ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
+                                                        "review_requests": [], "own_prs": [],
+                                                        "merged_recent": [{"repo": "quantivly/sre-core", "number": 1473,
+                                                                           "url": "u", "title": "HUB-5693",
+                                                                           "mergedAt": "2026-08-31T00:00:00Z"}]})
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-5812"], NOW)
+        rec = out["results"][0]["record"]
+        self.assertEqual(rec["pr_links"], [{"key": "quantivly/sre-core#1473",
+                                             "url": "https://github.com/quantivly/sre-core/pull/1473",
+                                             "state": "merged", "title": "HUB-5693"}])
+
+    def test_g10_tracked_satisfied_decidable_from_merged_recent_lookup(self):
+        snapshots.write(self.ctx.state_dir, "github", {
+            "ok": True, "error": None, "login": "x", "review_requests": [], "own_prs": [],
+            "merged_recent": [{"repo": "auto-conf", "number": 461, "url": "u", "title": "t",
+                               "mergedAt": "2026-09-05T00:00:00Z"}]})
+        out = reconcile.lookup_tracked(self.ctx, ["auto-conf#461"], NOW)
+        self.assertEqual(out["results"][0]["record"]["kind"], "merged_recent")
+
+    def test_a_pr_key_in_both_own_prs_and_merged_recent_resolves_to_merged(self):
+        snapshots.write(self.ctx.state_dir, "github", {
+            "ok": True, "error": None, "login": "x", "review_requests": [],
+            "own_prs": [{"repo": "auto-conf", "number": 461, "url": "u", "title": "t", "isDraft": False,
+                        "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "approved_by": []}],
+            "merged_recent": [{"repo": "auto-conf", "number": 461, "url": "u", "title": "t",
+                               "mergedAt": "2026-09-05T00:00:00Z"}]})
+        out = reconcile.lookup_tracked(self.ctx, ["auto-conf#461"], NOW)
+        self.assertEqual(out["results"][0]["record"]["kind"], "merged_recent")
+
+    def test_empty_keys_returns_empty_results_and_still_reports_side_status(self):
+        out = reconcile.lookup_tracked(self.ctx, [], NOW)
+        self.assertEqual(out["results"], [])
+        self.assertFalse(out["linear"]["ok"])

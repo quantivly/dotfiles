@@ -209,10 +209,13 @@ class BriefCommandTests(unittest.TestCase):
         self.assertEqual(out["brief_path"], str(day / "brief.md"))
         self.assertTrue(out["lines"][0].startswith("no change since 08:00"), out["lines"])
 
-    def test_run_brief_json_mode_carries_the_tracked_index_text_mode_does_not(self):
-        # DO-716 move 4: the tracked-side index rides in the same JSON reply as `needs` -- turn 1's
-        # only call -- so reconcile never has to open sources/linear.json or sources/github.json
-        # itself. `--text` (human/terminal) has no line shape for it and does not build it at all.
+    def test_run_brief_json_mode_no_longer_carries_a_tracked_index(self):
+        # DO-751: the whole-tenant tracked-side projection used to ride in this same JSON reply
+        # (DO-716 move 4) -- removed because it grows linearly with the tenant's open-issue count
+        # (~303 KB synthetically scaled to @zvi's real ~908-issue tenant; see
+        # tests/test_reconcile_index.py's TrackedIndexLiveScaleTests and reconcile.py's module
+        # docstring). Turn 2 now calls `rabota tracked <key>...` (reconcile.lookup_tracked) with
+        # exactly the subjects it is classifying instead of reading this reply's shape.
         ctx = self.ctx(); self._write_seq(ctx, ["K-1"])
         snapshots.write(ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
             {"identifier": "HUB-1", "title": "t", "url": "u", "state": {"name": "Todo", "type": "unstarted"},
@@ -220,8 +223,8 @@ class BriefCommandTests(unittest.TestCase):
             "notifications": []})
         now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
         out = brief.run_brief(ctx, text=False, now=now, gh=self.gh, lin=self.lin)
-        self.assertEqual(out["tracked"]["linear"]["issues"][0]["key"], "HUB-1")
-        self.assertTrue(out["tracked"]["github"]["ok"] is False)  # never synced in this test
+        self.assertNotIn("tracked", out)
+        self.assertEqual(set(out), {"lines", "brief_path", "needs"})
         lines = brief.run_brief(ctx, text=True, now=now, gh=self.gh, lin=self.lin)
         self.assertIsInstance(lines, list)   # no dict, no "tracked" key reachable at all in --text mode
 
@@ -259,13 +262,14 @@ class BriefCommandTests(unittest.TestCase):
         # The ranked item is still shown -- a dry run that prints nothing is useless, not safe.
         self.assertTrue(any(l.startswith("1. K-1") for l in lines), lines)
 
-    def test_dry_run_json_mode_reports_no_brief_path_but_still_computes_needs_and_tracked(self):
+    def test_dry_run_json_mode_reports_no_brief_path_but_still_computes_needs(self):
         ctx = self.ctx(dry_run=True); self._write_seq(ctx, ["K-1"])
         now = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
         out = brief.run_brief(ctx, text=False, now=now, gh=self.gh, lin=self.lin)
         self.assertIsNone(out["brief_path"])
         self.assertTrue(any(l.startswith("1. K-1") for l in out["lines"]), out["lines"])
         self.assertTrue(any(n["source"] == "slack" for n in out["needs"]))  # never ingested in this test
+        self.assertNotIn("tracked", out)
 
     def test_dry_run_does_not_change_what_the_next_real_run_prints(self):
         # The bug this issue exists to fix: a dry run wrote last-brief.json, so the FOLLOWING real
@@ -529,7 +533,7 @@ class BriefNeedsTests(unittest.TestCase):
         self.assertIn("last fetch failed", needs["calendar"]["reason"])
         self.assertIn("connector timed out", needs["calendar"]["reason"])
 
-    def test_a_text_needs_line_carries_the_query_and_the_file_to_write(self):
+    def test_a_text_needs_line_carries_the_query_and_the_inline_ingest(self):
         """Review finding: `query` and `write_to` were in the JSON return only, and the skill's
         output contract runs `rabota --text brief`. So in the form actually documented, the half of
         `needs` a caller can act on was unreachable without a second call -- the very round-trip
@@ -540,7 +544,10 @@ class BriefNeedsTests(unittest.TestCase):
                                       None, None, brief_path="/p/brief.md",
                                       needs=brief.compute_needs(ctx, self.NOW))
         slack = next(l for l in lines if l.startswith("! slack "))
-        self.assertIn("ingest-slack.json", slack)
+        # Amended (DO-751 review): the line used to name `ingest-slack.json`, the file the skill no
+        # longer writes. It now names the inline ingest and no file at all.
+        self.assertNotIn("ingest-slack.json", slack)
+        self.assertIn("ingest --stdin", slack)
         self.assertIn("to:me", slack)
         self.assertTrue(all(len(l) <= 120 for l in lines), lines)
 
