@@ -734,20 +734,33 @@ class LinearClientTests(unittest.TestCase):
         rel = linear.LinearClient("k" * 20, post=FakePost([page])).relations(["a"])
         self.assertEqual(rel, {"a": {"blockedBy": ["CORE-1"], "blocks": ["HUB-2"]}})
 
-    def test_find_by_identifiers_ors_team_and_number_branches_in_one_call(self):
-        # DO-754: IssueFilter has no direct "identifier" field, so each requested identifier
-        # becomes its own {team, number} branch, ORed together in one request.
+    def test_find_by_identifiers_filters_by_id_in_with_the_identifiers_in_one_call(self):
+        # DO-754, corrected after a live read: an `or` of per-key {team, number} branches is
+        # SILENTLY IGNORED by Linear (it paged 4647 issues in 30.5 s). `id: {in: [...]}` takes
+        # identifiers directly (0.57 s, missing keys simply absent). A fake cannot know Linear's
+        # semantics, so this row pins the shape that was measured to work.
         page = {"data": {"issues": {"nodes": [
             {"identifier": "HUB-5812", "state": {"name": "Done", "type": "completed"}, "completedAt": "2026-09-01T00:00:00Z"}],
             "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
         post = FakePost([page])
         out = linear.LinearClient("k" * 20, post=post).find_by_identifiers(["HUB-5812", "DO-751"])
         self.assertEqual(len(post.calls), 1)   # ONE batched call, not one per identifier
-        self.assertEqual(post.calls[0]["variables"]["filters"],
-                         [{"team": {"key": {"eq": "HUB"}}, "number": {"eq": 5812}},
-                          {"team": {"key": {"eq": "DO"}}, "number": {"eq": 751}}])
+        self.assertIn("id: { in: $ids }", post.calls[0]["query"])
+        self.assertNotIn("or:", post.calls[0]["query"])
+        self.assertEqual(post.calls[0]["variables"]["ids"], ["DO-751", "HUB-5812"])
         self.assertEqual(out, [{"identifier": "HUB-5812", "state": {"name": "Done", "type": "completed"},
                                 "completedAt": "2026-09-01T00:00:00Z"}])
+
+    def test_find_by_identifiers_refuses_a_reply_the_filter_was_not_applied_to(self):
+        # The guard: more rows than keys, or a second page, means Linear dropped the filter again.
+        # That must fail loudly (and read as `unknown` upstream), never page the whole org.
+        many = {"data": {"issues": {"nodes": [{"identifier": f"DO-{i}", "state": {"name": "Todo"}} for i in range(3)],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        with self.assertRaisesRegex(errors.RabotaError, "filter was not applied"):
+            linear.LinearClient("k" * 20, post=FakePost([many])).find_by_identifiers(["DO-1"])
+        paged = {"data": {"issues": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "c"}}}}
+        with self.assertRaisesRegex(errors.RabotaError, "filter was not applied"):
+            linear.LinearClient("k" * 20, post=FakePost([paged])).find_by_identifiers(["DO-1"])
 
     def test_find_by_identifiers_of_an_empty_list_makes_no_call(self):
         def post(body):

@@ -96,8 +96,13 @@ Q_RELATIONS = """query($ids: [ID!]) {
 # DO-754: IssueFilter has no direct "identifier" field (linear.app/developers/filtering) -- an
 # identifier is a team key plus issue number, and the documented filter schema combines
 # alternatives with `or`, so each requested identifier becomes its own `{team, number}` branch.
-Q_BY_IDENTIFIERS = """query($after: String, $filters: [IssueFilter!]) {
-  issues(first: %d, after: $after, filter: { or: $filters }) {
+# `id: {in: [...]}` accepts identifiers ("DO-751") directly: measured live on 2026-09-26, 4 keys
+# (2 real, 2 missing) in 0.57 s, the missing ones simply absent. The first version ORed one
+# `{team, number}` branch per key, and Linear SILENTLY IGNORED the top-level `or`: it paged the
+# whole org, 4647 issues in 30.5 s. `find_by_identifiers` now also refuses any reply larger than
+# what it asked for, so a filter Linear drops again reads as `unknown`, never as a crawl.
+Q_BY_IDENTIFIERS = """query($after: String, $ids: [ID!]) {
+  issues(first: %d, after: $after, filter: { id: { in: $ids } }) {
     nodes { identifier state { name type } completedAt }
     pageInfo { hasNextPage endCursor } } }""" % PAGE_SIZE
 Q_ISSUE_STATE = """query($id: String!) { issue(id: $id) { id dueDate state { type } } }"""
@@ -242,18 +247,25 @@ class LinearClient:
         "closed" apart from "never existed". Cost: one HTTP round trip no matter how many
         identifiers are asked for (a turn-2 classification pass names single digits of subjects at
         a time; pagination only bites past ``PAGE_SIZE`` matches, which this never approaches in
-        practice). Each identifier becomes its own ``{team: {key: {eq: ...}}, number: {eq: ...}}``
-        branch, ORed together -- see ``Q_BY_IDENTIFIERS`` for why. Returns one
+        practice). The identifiers go in one ``id: {in: [...]}`` filter -- see ``Q_BY_IDENTIFIERS``
+        for why not an ``or`` of per-key branches. Returns one
         ``{"identifier", "state", "completedAt"}`` per issue Linear actually has; an identifier
         missing from the return really does not exist, as far as this query can tell."""
         if not identifiers:
             return []
-        filters = []
-        for ident in identifiers:
-            team, _, number = ident.partition("-")
-            filters.append({"team": {"key": {"eq": team}}, "number": {"eq": int(number)}})
+        wanted = sorted(set(identifiers))
+        data = self.query(Q_BY_IDENTIFIERS, {"ids": wanted, "after": None})
+        conn = (data or {}).get("issues") or {}
+        nodes = conn.get("nodes")
+        if not isinstance(nodes, list):
+            raise errors.RabotaError("Linear reply lacks issues.nodes")
+        # One page is always enough for a handful of keys; more rows than keys, or another page,
+        # means the filter was not applied, and the answer cannot be trusted.
+        if len(nodes) > len(wanted) or (conn.get("pageInfo") or {}).get("hasNextPage"):
+            raise errors.RabotaError(f"Linear returned {len(nodes)} issues for {len(wanted)} identifiers: "
+                                     "the identifier filter was not applied")
         return [{"identifier": n["identifier"], "state": n["state"], "completedAt": n.get("completedAt")}
-                for n in self.paginate(Q_BY_IDENTIFIERS, ["issues"], {"filters": filters})]
+                for n in nodes if n.get("identifier") in wanted]
 
 
 def _flatten(issue: dict) -> dict:
