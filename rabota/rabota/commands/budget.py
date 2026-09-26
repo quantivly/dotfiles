@@ -22,12 +22,13 @@ def run_budget(ctx: Context, machine: str, model: str, effort: str, est_minutes:
     """
     seat = budget_mod.seat_for(ctx.tenant, machine, override=seat)
     rate, rate_source = budget_mod.measured_rate(ctx.store, ctx.tenant.name, seat)
-    running_minutes, running_detail = budget_mod.running_lanes_minutes(ctx.store, ctx.tenant.name, seat, rate)
+    census_path = ctx.state_dir / "census.json"
+    census = json.loads(census_path.read_text()) if census_path.exists() else None
+    running_minutes, running_detail = budget_mod.running_lanes_minutes(ctx.store, ctx.tenant.name, seat, rate,
+                                                                       census=census)
     cred = budget_mod.credential_gate(ctx.runner, seat, model, effort, est_minutes,
                                       env=ctx.env, rate=rate, rate_source=rate_source,
                                       running_minutes=running_minutes, running_detail=running_detail)
-    census_path = ctx.state_dir / "census.json"
-    census = json.loads(census_path.read_text()) if census_path.exists() else None
     b = budget_mod.compute(census, cred, ctx.tenant.budget, ctx.tenant.budget.max_lanes_local, machine=machine)
     b["seat_pick"] = seat
     if not dry_run:

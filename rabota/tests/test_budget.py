@@ -166,12 +166,12 @@ from rabota.config import BudgetThresholds as BT
 
 OK_CRED = {"ok": True, "code": None, "detail": "", "five_h_pct_now": 5, "resets_at": None, "tier": "Team"}
 
-def census_with(*, local_load=1.0, dev=None, counts=None):
+def census_with(*, local_load=1.0, dev=None, counts=None, units=None):
     # "at" is always present and fresh: Task 8 makes a census without one stale, and every row
     # here is about the MACHINE dimension, not freshness.
     c = {"at": store.now(),
          "machine": {"load1": local_load, "ncpu": 8, "mem_available_gib": 20.0, "swap_used_pct": 0},
-         "counts": counts or {"rabota": 0, "sol": 0}, "unavailable": [], "machines": []}
+         "counts": counts or {"rabota": 0, "sol": 0}, "unavailable": [], "machines": [], "units": units or []}
     if dev is not None:
         c["machines"] = [dev]
     return c
@@ -299,9 +299,9 @@ class RecordingRunner:
 
 
 def lane_row(id, seat, started_at, ended_at, pct_start, pct_end, *, tenant="quantivly",
-            status="done", settle_reason=None, est_minutes=None):
+            status="done", settle_reason=None, est_minutes=None, machine="local", unit=None):
     return dict(id=id, tenant=tenant, kind="work", brief="b", repo="r", worktree="w", out_dir="o",
-                machine="local", unit=f"rabota-lane-{id}.service", session_id="s", model="m",
+                machine=machine, unit=unit or f"rabota-lane-{id}.service", session_id="s", model="m",
                 status=status, started_at=started_at, ended_at=ended_at, seat=seat, effort="e",
                 five_h_pct_at_start=pct_start, five_h_pct_at_end=pct_end, settle_reason=settle_reason,
                 est_minutes=est_minutes)
@@ -524,6 +524,99 @@ class RunningLanesMinutesTests(unittest.TestCase):
                                        status="started", est_minutes=60))
         minutes, _ = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0)
         self.assertEqual(minutes, 0.0)
+
+
+class RunningLanesUnitFilterTests(unittest.TestCase):
+    """DO-756: only a ``started`` row whose unit is actually active counts. Each test here fails
+    against ``c41e96e`` (DO-728), which reads no census at all in ``running_lanes_minutes`` --
+    every row there always counts, so ``test_unit_absent_on_a_reachable_machine_drops_the_row`` and
+    ``test_the_only_row_that_may_drop_is_reachable_and_absent`` are the two that distinguish this
+    change; the other three assert the unchanged (strict/safe) behaviour."""
+
+    def ctx(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=FakeRunner([]),
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def test_unit_active_on_a_reachable_machine_still_counts(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("r0", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60, machine="local",
+                                       unit="rabota-lane-r0.service"))
+        c = census_with(units=[{"name": "rabota-lane-r0.service", "state": "active"}])
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0, census=c)
+        self.assertAlmostEqual(minutes, 30.0, delta=0.5)
+        self.assertIn("1 running lane(s)", detail)
+        self.assertNotIn("excluded", detail)
+
+    def test_unit_absent_on_a_reachable_machine_drops_the_row(self):
+        # This is the one case this change adds: c41e96e counted this row (a phantom 10-minute
+        # floor, or the seat's median duration) even though its unit is gone.
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("gone", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60, machine="local",
+                                       unit="rabota-lane-gone.service"))
+        c = census_with(units=[])   # reachable (local) and the unit is simply not in the list
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0, census=c)
+        self.assertEqual(minutes, 0.0)
+        self.assertIn("excluded 1", detail)
+        self.assertIn("gone", detail)
+        self.assertIn("rabota-lane-gone.service", detail)
+
+    def test_an_unreachable_machine_still_counts_its_row(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("remote", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60, machine="dev",
+                                       unit="rabota-lane-remote.service"))
+        c = census_with(dev={"name": "dev", "reachable": False, "error": "no route"})
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0, census=c)
+        self.assertAlmostEqual(minutes, 30.0, delta=0.5)
+        self.assertNotIn("excluded", detail)
+
+    def test_a_missing_census_still_counts_every_row(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("r0", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60))
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0, census=None)
+        self.assertAlmostEqual(minutes, 30.0, delta=0.5)
+        self.assertNotIn("excluded", detail)
+
+    def test_a_stale_census_still_counts_every_row(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("r0", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60, machine="local",
+                                       unit="rabota-lane-r0.service"))
+        c = census_with(units=[])   # would drop the row if read fresh -- but it is stale
+        c["at"] = "2020-01-01T00:00:00Z"
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0, census=c,
+                                                        max_census_age_s=900)
+        self.assertAlmostEqual(minutes, 30.0, delta=0.5)
+        self.assertNotIn("excluded", detail)
+
+    def test_the_only_row_that_may_drop_is_reachable_and_absent(self):
+        # All five hazard rows in one call: only "absent" (on the reachable "local" machine) drops.
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("active", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60, machine="local",
+                                       unit="rabota-lane-active.service"))
+        ctx.store.insert_lane(lane_row("absent", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60, machine="local",
+                                       unit="rabota-lane-absent.service"))
+        ctx.store.insert_lane(lane_row("unreachable", "quantivly-1", _minutes_ago(30), None, None, None,
+                                       status="started", est_minutes=60, machine="dev",
+                                       unit="rabota-lane-unreachable.service"))
+        c = census_with(units=[{"name": "rabota-lane-active.service", "state": "active"}],
+                        dev={"name": "dev", "reachable": False, "error": "no route"})
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0, census=c)
+        self.assertAlmostEqual(minutes, 60.0, delta=0.5)   # active + unreachable, absent dropped
+        self.assertIn("2 running lane(s)", detail)
+        self.assertIn("excluded 1", detail)
+        self.assertIn("absent", detail)
+        self.assertNotIn("active (", detail)
+        self.assertNotIn("unreachable (", detail)
 
 
 class GateMathRunner:
