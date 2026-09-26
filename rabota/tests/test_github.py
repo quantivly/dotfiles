@@ -89,10 +89,12 @@ class GhClientTests(unittest.TestCase):
         self.assertEqual((prs[0]["reviewDecision"], prs[0]["baseRefName"]), ("APPROVED", "main"))
 
     def test_merged_recent_uses_closed_at_as_merged_at(self):
-        search = [{"repository": {"nameWithOwner": "o/r"}, "number": 3, "url": "u3", "closedAt": "2026-09-10T00:00:00Z"}]
+        search = [{"repository": {"nameWithOwner": "o/r"}, "number": 3, "url": "u3", "title": "t3",
+                   "closedAt": "2026-09-10T00:00:00Z"}]
         runner = FakeRunner([MINT_OK, (["gh", "search", "prs"], Result(0, json.dumps(search), ""))])
         merged = github.GhClient(runner, {"PATH": "/bin"}, None, "me").merged_recent(days=30)
-        self.assertEqual(merged, [{"repo": "o/r", "number": 3, "url": "u3", "mergedAt": "2026-09-10T00:00:00Z"}])
+        self.assertEqual(merged, [{"repo": "o/r", "number": 3, "url": "u3", "title": "t3",
+                                   "mergedAt": "2026-09-10T00:00:00Z"}])
         self.assertTrue(any(a.startswith("--merged-at=>=") for a in runner.calls[1]))
 
     def test_api_failure_raises_with_stderr(self):

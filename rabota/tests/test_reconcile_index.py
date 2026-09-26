@@ -187,21 +187,39 @@ class TrackedIndexSizeTests(unittest.TestCase):
     discipline (``max_verdict_bytes``, ``2026-09-16-rabota-v2-design.md`` line 232) cited as the
     reference point for "small" in the brief — not a bar this change claims to clear.
 
-    At ~277 bytes/issue and ~214 bytes/PR (see ``reconcile.py``'s module docstring), an active
-    engineer's realistic scope — 25 open assigned-or-created Linear issues, 8 open own PRs, 5
-    recently merged — measures to the number this test asserts, roughly 2x the 4 KB bar. That is
-    the honest number, not a compatibility guard: dropping notifications and ``review_requests``
-    (never selected at all — see the fixtures below, which include them) is what keeps it that
-    low rather than the ~23 KB re-reading both raw snapshots whole would cost.
+    DO-735 re-measurement: adding ``pr_links`` (25 issues, 3 carrying one PR attachment each — one
+    open, one merged, one unresolvable against ``own_prs``/``merged_recent``, the rest an explicit
+    empty list — see ``reconcile.py``'s module docstring) moved the previous ~9.7 KB baseline to
+    ~10 KB / ~269 bytes-per-item. That is the honest number, not a compatibility guard: dropping
+    notifications and ``review_requests`` (never selected at all — see the fixtures below, which
+    include them) is what keeps it there rather than the ~23 KB re-reading both raw snapshots
+    whole would cost.
+
+    F2 re-measurement (review of DO-735): carrying a PR's ``title`` into ``pr_links`` and
+    ``merged_recent`` moves this same fixture from ~10.2 KB to **10573 bytes / ~278 bytes-per-item**
+    — +48 bytes per resolved ``pr_links`` entry (a matched title, ``"a realistically sized PR title
+    here"``), +15 bytes for the one that stays unresolved (``title: null``), and +48 bytes per
+    ``merged_recent`` row (all 5 in this fixture now carry one). ``own_prs`` already carried
+    ``title`` before this change, so its rows cost nothing extra. That is roughly +351 bytes total
+    for a 38-item fixture with 3 PR links and 5 merges — cheap here because only a minority of
+    issues carry a resolvable PR link at all; a tenant whose PRs are *mostly* resolved against
+    ``own_prs``/``merged_recent`` pays closer to the full +48 bytes on every ``pr_links`` entry.
     """
 
-    def test_a_realistic_tenants_index_measures_about_9kb_not_4kb(self):
+    def test_a_realistic_tenants_index_measures_about_10kb_not_4kb(self):
         tmp, ctx = _ctx()
         self.addCleanup(tmp.cleanup)
         issues = [{"identifier": f"HUB-{5000 + n}", "title": "a realistically sized issue title here",
                    "url": f"https://linear.app/hub-{5000 + n}", "state": {"name": "In Progress", "type": "started"},
                    "priorityLabel": "P2", "dueDate": "2026-09-20", "updatedAt": "2026-09-15T00:00:00Z",
-                   "blockedBy": [], "blocks": []} for n in range(25)]
+                   "blockedBy": [], "blocks": [], "attachments": []} for n in range(25)]
+        # A realistic minority of issues actually carry a linked PR — one whose state resolves via
+        # own_prs (open), one via merged_recent (merged), and one that resolves to neither (a
+        # colleague's PR, or one outside this tenant's own_prs/merged_recent scope) and so stays
+        # "unknown" rather than being guessed at.
+        issues[0]["attachments"] = [{"url": "https://github.com/quantivly/hub/pull/1000", "sourceType": "github"}]
+        issues[1]["attachments"] = [{"url": "https://github.com/quantivly/hub/pull/900", "sourceType": "github"}]
+        issues[2]["attachments"] = [{"url": "https://github.com/quantivly/other/pull/42", "sourceType": "github"}]
         notifications = [{"id": f"n{n}", "title": "a notification the index must never carry"} for n in range(10)]
         own_prs = [{"repo": "quantivly/hub", "number": 1000 + n, "url": f"https://github.com/quantivly/hub/pull/{1000 + n}",
                     "title": "a realistically sized PR title here", "isDraft": False, "mergeable": "MERGEABLE",
@@ -209,7 +227,7 @@ class TrackedIndexSizeTests(unittest.TestCase):
         review_requests = [{"repo": "quantivly/hub", "number": n, "title": "a review request the index must never carry"}
                            for n in range(6)]
         merged = [{"repo": "quantivly/hub", "number": 900 + n, "url": f"https://github.com/quantivly/hub/pull/{900 + n}",
-                   "mergedAt": "2026-09-10T00:00:00Z"} for n in range(5)]
+                   "title": "a realistically sized PR title here", "mergedAt": "2026-09-10T00:00:00Z"} for n in range(5)]
         snapshots.write(ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": issues,
                                                    "notifications": notifications})
         snapshots.write(ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
@@ -221,13 +239,16 @@ class TrackedIndexSizeTests(unittest.TestCase):
         # The honest claim: over the 4 KB reference point for a busy tenant, never carrying the
         # fields dropped on purpose (notifications, review_requests — see the module docstring).
         self.assertGreater(size, 4096, "this tenant scope should exceed the 4 KB reference point")
-        # Review finding: a band of 4096..10240 passed a per-item regression -- adding one field to
-        # every issue moved the total 9422 -> 9797 and still passed. The budget is per item now, so
-        # a field added to every record has to be justified against a number that notices.
+        # Review finding (pre-DO-735): a band of 4096..10240 passed a per-item regression -- adding
+        # one field to every issue moved the total 9422 -> 9797 and still passed. The budget is per
+        # item now, so a field added to every record has to be justified against a number that
+        # notices. DO-735 moved it again, deliberately, to ~269 bytes/item / ~10 KB total; F2
+        # (carrying `title`, review of DO-735) moved it again to ~278 bytes/item / 10573 bytes for
+        # this fixture -- see the class docstring for the per-field cost that adds up to.
         items = len(issues) + len(own_prs) + len(merged)
         per_item = size / items
-        self.assertLess(per_item, 265, f"{per_item:.0f} bytes/item: the index grew per record ({size} total)")
-        self.assertLess(size, 10240, f"tracked index grew past the ~9 KB measured baseline: {size} bytes")
+        self.assertLess(per_item, 285, f"{per_item:.0f} bytes/item: the index grew per record ({size} total)")
+        self.assertLess(size, 10752, f"tracked index grew past the ~10 KB DO-735 baseline: {size} bytes")
         self.assertNotIn("a notification the index must never carry", dumped)
         self.assertNotIn("a review request the index must never carry", dumped)
 
@@ -295,14 +316,12 @@ class GoldenClassSupportTests(unittest.TestCase):
         idx = reconcile.build_tracked_index(self.ctx, NOW)
         self.assertEqual(idx["linear"]["issues"][0]["priority_label"], "No priority")
 
-    def test_state_contradiction_g06_g07_cross_repo_pr_existence_is_a_named_gap(self):
-        # golden g06/g07: "no PR exists" / "the one PR is a different issue entirely" required a
-        # live cross-org GitHub search (any repo, any author) and, for g07, Linear's `attachments`
-        # -- neither is in `sources/github.json` (own_prs/review_requests/merged_recent are scoped
-        # to PRs @zvi authored or was asked to review) or `sources/linear.json` (ISSUE_FIELDS never
-        # selects `attachments`). This is the one class this index cannot fully decide; see the
-        # verdict. An issue with no matching own_prs/merged_recent entry is necessarily ambiguous
-        # between "no PR" and "a PR the index's scope does not cover."
+    def test_state_contradiction_g06_pre_attachment_snapshot_is_unknown_not_no_pr(self):
+        # golden g06 (2026-09-03): recorded "no sre-ui PR exists" from a snapshot shaped exactly
+        # like this fixture -- no `attachments` key on the raw issue at all, because it predates
+        # DO-735. `pr_links` must read that as `None` ("unknown"), never as `[]` ("checked: no PR
+        # linked") -- conflating the two is exactly how g06's wrong "no PR exists" claim happened,
+        # corrected three days later by g07.
         snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
             {"identifier": "HUB-5812", "title": "gate the sre-ui view header editor", "url": "u",
              "state": {"name": "In Review", "type": "started"}, "priorityLabel": "P2", "dueDate": "2026-09-04",
@@ -311,10 +330,102 @@ class GoldenClassSupportTests(unittest.TestCase):
                                                         "review_requests": [], "own_prs": [], "merged_recent": []})
         idx = reconcile.build_tracked_index(self.ctx, NOW)
         issue = idx["linear"]["issues"][0]
-        self.assertNotIn("attachments", issue)                 # not carried: see reason above
-        prs_naming_it = [p for side in (idx["github"]["own_prs"], idx["github"]["merged_recent"])
-                        for p in side if "5812" in p.get("key", "")]
-        self.assertEqual(prs_naming_it, [], "the index has no field that could confirm or rule out sre-core#1473")
+        self.assertIsNone(issue["pr_links"])
+
+    def test_state_contradiction_g07_a_misleading_attachment_reads_as_linked_and_merged(self):
+        # golden g07 (2026-09-06): HUB-5812 carries exactly one attachment, sre-core#1473 -- titled
+        # HUB-5693 (a DIFFERENT issue), authored by @zvi, merged 2026-08-31. With `attachments`
+        # synced, `pr_links` surfaces it as linked (never "no PR"); its `key` is ALWAYS
+        # `owner/repo#n` so it can never name a Linear issue at all (F2, review of DO-735) -- the
+        # signal that this PR belongs to a different piece of work is its carried `title`
+        # ("HUB-5693" rather than HUB-5812), resolved from `merged_recent` (own_prs/merged_recent
+        # are scoped to @zvi, and this PR was authored by @zvi, so cross-referencing resolves it
+        # without a live GitHub search).
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-5812", "title": "gate the sre-ui view header editor", "url": "u",
+             "state": {"name": "In Review", "type": "started"}, "priorityLabel": "P2", "dueDate": "2026-09-04",
+             "updatedAt": "2026-08-29T00:00:00Z", "blockedBy": [], "blocks": [],
+             "attachments": [{"url": "https://github.com/quantivly/sre-core/pull/1473", "sourceType": "github"}]}],
+            "notifications": []})
+        snapshots.write(self.ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
+                                                        "review_requests": [], "own_prs": [],
+                                                        "merged_recent": [{"repo": "quantivly/sre-core", "number": 1473,
+                                                                           "url": "u", "title": "HUB-5693",
+                                                                           "mergedAt": "2026-08-31T00:00:00Z"}]})
+        idx = reconcile.build_tracked_index(self.ctx, NOW)
+        issue = idx["linear"]["issues"][0]
+        self.assertEqual(issue["pr_links"], [{"key": "quantivly/sre-core#1473",
+                                               "url": "https://github.com/quantivly/sre-core/pull/1473",
+                                               "state": "merged", "title": "HUB-5693"}])
+
+    def test_pr_link_state_open_when_in_own_prs(self):
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-1", "title": "t", "url": "u", "state": {"name": "In Review", "type": "started"},
+             "priorityLabel": "P2", "dueDate": None, "updatedAt": "t", "blockedBy": [], "blocks": [],
+             "attachments": [{"url": "https://github.com/quantivly/hub/pull/9", "sourceType": "github"}]}],
+            "notifications": []})
+        snapshots.write(self.ctx.state_dir, "github", {"ok": True, "error": None, "login": "x", "review_requests": [],
+                                                        "own_prs": [{"repo": "quantivly/hub", "number": 9, "url": "u",
+                                                                     "title": "t", "isDraft": False, "mergeable": "MERGEABLE",
+                                                                     "reviewDecision": "APPROVED", "approved_by": []}],
+                                                        "merged_recent": []})
+        idx = reconcile.build_tracked_index(self.ctx, NOW)
+        self.assertEqual(idx["linear"]["issues"][0]["pr_links"][0]["state"], "open")
+        self.assertEqual(idx["linear"]["issues"][0]["pr_links"][0]["title"], "t")
+
+    def test_pr_link_state_unknown_when_no_pr_exists_or_a_colleagues_pr_is_linked(self):
+        # A PR outside own_prs/merged_recent's scope -- a colleague's open PR, one closed without
+        # merging, or one merged outside the merged_recent window -- must not be guessed at; it
+        # stays "unknown", the fallback the brief requires when a state cannot be relied on.
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-1", "title": "t", "url": "u", "state": {"name": "In Review", "type": "started"},
+             "priorityLabel": "P2", "dueDate": None, "updatedAt": "t", "blockedBy": [], "blocks": [],
+             "attachments": [{"url": "https://github.com/quantivly/hub/pull/9", "sourceType": "github"}]}],
+            "notifications": []})
+        snapshots.write(self.ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
+                                                        "review_requests": [], "own_prs": [], "merged_recent": []})
+        idx = reconcile.build_tracked_index(self.ctx, NOW)
+        self.assertEqual(idx["linear"]["issues"][0]["pr_links"][0]["state"], "unknown")
+        self.assertIsNone(idx["linear"]["issues"][0]["pr_links"][0]["title"])
+
+    def test_no_pr_linked_is_an_empty_list_once_attachments_are_synced(self):
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-1", "title": "t", "url": "u", "state": {"name": "In Review", "type": "started"},
+             "priorityLabel": "P2", "dueDate": None, "updatedAt": "t", "blockedBy": [], "blocks": [], "attachments": []}],
+            "notifications": []})
+        snapshots.write(self.ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
+                                                        "review_requests": [], "own_prs": [], "merged_recent": []})
+        idx = reconcile.build_tracked_index(self.ctx, NOW)
+        self.assertEqual(idx["linear"]["issues"][0]["pr_links"], [])
+
+    def test_a_pr_link_is_recognized_whatever_its_source_type(self):
+        # F1 (review of DO-735): `sourceType` used to gate matching, but Linear's own live tenant
+        # has GitHub `/pull/` attachment URLs whose `sourceType` reads `api` or `oauthClient`, not
+        # `github` -- those issues read as `pr_links: []`, "no PR linked", which is false. The URL
+        # regex already anchors on `github.com/.../pull/<n>`; that alone is the discriminator now.
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-1", "title": "t", "url": "u", "state": {"name": "In Review", "type": "started"},
+             "priorityLabel": "P2", "dueDate": None, "updatedAt": "t", "blockedBy": [], "blocks": [],
+             "attachments": [{"url": "https://github.com/quantivly/hub/pull/9", "sourceType": "api"}]}],
+            "notifications": []})
+        snapshots.write(self.ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
+                                                        "review_requests": [], "own_prs": [], "merged_recent": []})
+        idx = reconcile.build_tracked_index(self.ctx, NOW)
+        self.assertEqual(idx["linear"]["issues"][0]["pr_links"],
+                          [{"key": "quantivly/hub#9", "url": "https://github.com/quantivly/hub/pull/9",
+                            "state": "unknown", "title": None}])
+
+    def test_a_non_github_attachment_is_not_read_as_a_pr_link(self):
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [
+            {"identifier": "HUB-1", "title": "t", "url": "u", "state": {"name": "In Review", "type": "started"},
+             "priorityLabel": "P2", "dueDate": None, "updatedAt": "t", "blockedBy": [], "blocks": [],
+             "attachments": [{"url": "https://sentry.io/x", "sourceType": "sentry"},
+                              {"url": "https://github.com/quantivly/hub/issues/9", "sourceType": "github"}]}],
+            "notifications": []})
+        snapshots.write(self.ctx.state_dir, "github", {"ok": True, "error": None, "login": "x",
+                                                        "review_requests": [], "own_prs": [], "merged_recent": []})
+        idx = reconcile.build_tracked_index(self.ctx, NOW)
+        self.assertEqual(idx["linear"]["issues"][0]["pr_links"], [])
 
     def test_stale_blocked_g04_decided_from_mergeable_and_review_decision(self):
         # golden g04: auto-conf#461 is BEHIND and REVIEW_REQUIRED, not lint-failed as recorded.

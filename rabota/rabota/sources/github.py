@@ -15,7 +15,7 @@ from pathlib import Path
 from rabota import errors, secrets
 
 SEARCH_FIELDS = "repository,number,url,title,author,updatedAt,isDraft"
-MERGED_FIELDS = "repository,number,url,closedAt"
+MERGED_FIELDS = "repository,number,url,title,closedAt"
 PR_VIEW_FIELDS = "reviews,mergeable,reviewDecision,headRefName,baseRefName,isDraft"
 SEARCH_LIMIT = "100"
 MINT_TIMEOUT = 20
@@ -107,8 +107,11 @@ class GhClient:
         return out
 
     def merged_recent(self, days: int = 30) -> list[dict]:
-        """My PRs merged in the last ``days`` days; ``gh search`` exposes ``closedAt``, which is the merge time."""
+        """My PRs merged in the last ``days`` days; ``gh search`` exposes ``closedAt``, which is the
+        merge time. ``title`` (DO-735 review, F2) is what lets ``reconcile.py`` carry a merged PR's
+        title into its ``pr_links`` entry — the signal ``reconcile.md``'s g07 case is decided from."""
         since = (date.today() - timedelta(days=days)).isoformat()
         raw = self._search_prs("--author=@me", "--merged", f"--merged-at=>={since}", fields=MERGED_FIELDS)
-        return [{"repo": p["repository"]["nameWithOwner"], "number": p["number"], "url": p["url"], "mergedAt": p["closedAt"]}
+        return [{"repo": p["repository"]["nameWithOwner"], "number": p["number"], "url": p["url"],
+                 "title": p["title"], "mergedAt": p["closedAt"]}
                 for p in raw]

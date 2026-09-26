@@ -18,6 +18,33 @@ with no Authorization header at all (output in ``out/ws2/FIX-ACCEPTANCE.md``):
   B", so A's ``relations`` are what A blocks and A's ``inverseRelations`` are what blocks A.
   If a live check says otherwise, swap the two comprehensions in ``relations``.
 
+DO-735: ``attachments`` (checked against Linear's published GraphQL docs, not the live API — see
+that issue for why). ``linear.app/developers/attachments`` documents ``url``, ``title``,
+``subtitle`` and a free-form ``metadata`` object as the fields every attachment carries, and says
+metadata is "key-value... any string or number... related to your integration" with no schema
+Linear commits to for its own GitHub integration's PRs — so a PR's merged/open/closed state is
+NOT reliably in it, and this module does not select or read it. ``sourceType`` (confirmed via a
+real ``attachment(id)`` query shown in third-party API docs, alongside ``source``) is the one
+reliable discriminator for "this attachment came from the GitHub integration"; PR vs. plain GitHub
+Issue is then read off the URL path (``/pull/<n>`` vs. ``/issues/<n>``), never off metadata.
+``ISSUE_FIELDS`` selects only ``url`` and ``sourceType`` — enough to tell "a PR is linked" and
+which one, never enough to tell its state; ``reconcile.py`` fills state in from ``sources/github.json``
+where it can (see that module) and otherwise reports "linked, state unknown" rather than guessing.
+Review finding F1: ``reconcile._pr_links`` no longer reads ``sourceType`` to decide whether an
+attachment is a PR link at all — the URL path alone (``/pull/<n>``) is sourceType-agnostic and
+sufficient, since a live tenant has GitHub ``/pull/`` attachments whose ``sourceType`` is ``api``
+or ``oauthClient``, not ``github``. ``sourceType`` is kept selected here only as descriptive
+metadata on the raw snapshot (e.g. telling a plain GitHub Issue link apart from a Sentry one at a
+glance); nothing in this codebase reads it for a decision any more.
+
+Review finding F3: ``attachments`` has no ``first:`` argument, so Linear's default page size (50)
+silently caps a very-attached issue with no signal that it happened. ``first: 50`` makes that cap
+explicit rather than accidental, and ``pageInfo { hasNextPage }`` is selected so ``_flatten`` can
+record when it was reached (``attachments_capped``) rather than reading a truncated list as
+complete — cheap because it costs one more field in the same request, never a second network call
+per issue. Measured live, the most any issue carries is 2, so the cap is not expected to bite; if
+it ever does, the fix is genuine pagination, not a bigger arbitrary number.
+
 The key is passed only as an HTTP header. It is never logged, never formatted into an
 exception, and never part of a reply; ``query`` raises with Linear's own messages only.
 """
@@ -35,7 +62,7 @@ TIMEOUT_SECONDS = 60
 ISSUE_FIELDS = """
   id identifier title url priority priorityLabel estimate dueDate createdAt updatedAt
   state { name type } team { key } project { name } assignee { id displayName } creator { id }
-  labels { nodes { name } }
+  labels { nodes { name } } attachments(first: 50) { nodes { url sourceType } pageInfo { hasNextPage } }
 """
 NOTIFICATION_FIELDS = """
   id type createdAt readAt archivedAt snoozedUntilAt url title subtitle groupingKey
@@ -187,9 +214,16 @@ class LinearClient:
 
 
 def _flatten(issue: dict) -> dict:
-    """Snapshot shape: ``labels`` as names, and empty relation lists until ``relations`` fills them."""
+    """Snapshot shape: ``labels`` as names, ``attachments`` as a plain list (plus
+    ``attachments_capped``, F3 — ``True`` when the ``first: 50`` page has more attachments than
+    were fetched, never guessed at from the list's length), and empty relation lists until
+    ``relations`` fills them."""
     issue = dict(issue)
     issue["labels"] = [label["name"] for label in (issue.get("labels") or {}).get("nodes", [])]
+    raw_attachments = issue.get("attachments") or {}
+    issue["attachments_capped"] = bool((raw_attachments.get("pageInfo") or {}).get("hasNextPage"))
+    issue["attachments"] = [{"url": a.get("url"), "sourceType": a.get("sourceType")}
+                             for a in raw_attachments.get("nodes", [])]
     issue.setdefault("blockedBy", [])
     issue.setdefault("blocks", [])
     return issue
