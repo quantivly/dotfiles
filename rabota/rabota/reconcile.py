@@ -381,10 +381,15 @@ def _resolve_closed(ctx, results: list[dict], canon_of: dict, lin) -> None:
     idents = sorted({canon_of[r["key"]] for r in pending})
     try:
         client = lin or LinearClient.from_context(ctx)
-        found = {rec["identifier"]: rec for rec in client.find_by_identifiers(idents)}
-    except errors.RabotaError as e:
+        # Keyed by the identifier ASKED FOR: a moved issue comes back under its new identifier,
+        # and `find_by_identifiers` records which asked key it answers (DO-754 review F2).
+        found = {rec.get("asked", rec["identifier"]): rec for rec in client.find_by_identifiers(idents)}
+    except Exception as e:  # noqa: BLE001 -- DO-754 review F1: a timeout or any other failure
+        # proves nothing about existence, so every pending key reads `unknown`, never `not_found`,
+        # and the keys already resolved from the snapshot are kept rather than failing the call.
+        msg = str(e) if isinstance(e, errors.RabotaError) else f"{type(e).__name__}: {e}"
         for r in pending:
-            r["status"], r["reason"] = "unknown", f"Linear lookup failed: {e}"
+            r["status"], r["reason"] = "unknown", f"Linear lookup failed: {msg}"
             del r["kind"]
         return
     for r in pending:
@@ -393,3 +398,5 @@ def _resolve_closed(ctx, results: list[dict], canon_of: dict, lin) -> None:
             r["status"] = "found_closed"
             r["state"] = rec["state"]
             r["completed_at"] = rec.get("completedAt")
+            if rec.get("identifier") != canon_of[r["key"]]:
+                r["moved_to"] = rec["identifier"]   # the same issue, now under another team's key

@@ -762,6 +762,27 @@ class LinearClientTests(unittest.TestCase):
         with self.assertRaisesRegex(errors.RabotaError, "filter was not applied"):
             linear.LinearClient("k" * 20, post=FakePost([paged])).find_by_identifiers(["DO-1"])
 
+    def test_find_by_identifiers_maps_a_moved_issue_back_to_the_key_asked(self):
+        # DO-754 review F2: Linear answers `id: {in: ["OLD-5"]}` with the issue under its new
+        # identifier. The unmatched key is resolved with `issue(id:)`, which accepts the old one.
+        batch = {"data": {"issues": {"nodes": [
+            {"identifier": "NEW-9", "state": {"name": "Done", "type": "completed"}, "completedAt": "2026-09-01T00:00:00Z"}],
+            "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        one = {"data": {"issue": {"identifier": "NEW-9", "state": {"name": "Done", "type": "completed"},
+                                  "completedAt": "2026-09-01T00:00:00Z"}}}
+        post = FakePost([batch, one])
+        out = linear.LinearClient("k" * 20, post=post).find_by_identifiers(["OLD-5"])
+        self.assertEqual([(r["asked"], r["identifier"]) for r in out], [("OLD-5", "NEW-9")])
+        self.assertEqual(post.calls[1]["variables"], {"id": "OLD-5"})
+
+    def test_find_by_identifiers_treats_entity_not_found_on_the_single_lookup_as_absent(self):
+        batch = {"data": {"issues": {"nodes": [
+            {"identifier": "NEW-9", "state": {"name": "Done"}, "completedAt": None}],
+            "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        gone = {"errors": [{"message": "Entity not found: Issue"}], "data": None}
+        out = linear.LinearClient("k" * 20, post=FakePost([batch, gone, gone])).find_by_identifiers(["A-1", "B-2"])
+        self.assertEqual(out, [])
+
     def test_find_by_identifiers_of_an_empty_list_makes_no_call(self):
         def post(body):
             raise AssertionError("find_by_identifiers must not POST for an empty request")

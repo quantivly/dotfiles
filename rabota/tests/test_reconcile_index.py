@@ -656,6 +656,31 @@ class LookupTrackedTests(unittest.TestCase):
         self.assertIn("linear down", r["reason"])
         self.assertNotIn("kind", r)
 
+    def test_a_timeout_in_the_lookup_reads_unknown_and_keeps_every_other_answer(self):
+        # DO-754 review F1: a non-RabotaError (a body-read timeout) escaped _resolve_closed and
+        # failed the whole `tracked` call, discarding the keys already answered from the snapshot.
+        class TimeoutLookup:
+            def find_by_identifiers(self, identifiers):
+                raise TimeoutError("timed out")
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-5812", "HUB-9999"], NOW, lin=TimeoutLookup())
+        by_key = {r["key"]: r for r in out["results"]}
+        self.assertEqual(by_key["HUB-5812"]["status"], "found")
+        self.assertEqual(by_key["HUB-9999"]["status"], "unknown")
+        self.assertIn("TimeoutError", by_key["HUB-9999"]["reason"])
+
+    def test_a_moved_closed_issue_resolves_to_the_key_that_was_asked(self):
+        # DO-754 review F2: a moved issue comes back under its NEW identifier; keyed by `asked`, it
+        # reads found_closed (with where it moved), never not_found.
+        class MovedLookup:
+            def find_by_identifiers(self, identifiers):
+                return [{"identifier": "NEW-9", "asked": "OLD-5", "state": {"name": "Done", "type": "completed"},
+                         "completedAt": "2026-09-01T00:00:00Z"}]
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        r = reconcile.lookup_tracked(self.ctx, ["OLD-5"], NOW, lin=MovedLookup())["results"][0]
+        self.assertEqual(r["status"], "found_closed")
+        self.assertEqual(r["moved_to"], "NEW-9")
+
     def test_a_dry_run_still_makes_the_batched_read(self):
         # DO-754 hazard: `--dry-run` must not suppress a read -- only `LinearClient.dry_run` gating
         # a *mutation* is the dry-run contract (DO-753); nothing here writes at all.

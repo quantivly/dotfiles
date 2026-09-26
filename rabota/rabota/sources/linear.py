@@ -105,6 +105,7 @@ Q_BY_IDENTIFIERS = """query($after: String, $ids: [ID!]) {
   issues(first: %d, after: $after, filter: { id: { in: $ids } }) {
     nodes { identifier state { name type } completedAt }
     pageInfo { hasNextPage endCursor } } }""" % PAGE_SIZE
+Q_ONE_ISSUE = """query($id: String!) { issue(id: $id) { identifier state { name type } completedAt } }"""
 Q_ISSUE_STATE = """query($id: String!) { issue(id: $id) { id dueDate state { type } } }"""
 Q_VIEWER = "{ viewer { id name } }"
 M_ARCHIVE_ALL = """mutation($issueId: String!) {
@@ -264,8 +265,28 @@ class LinearClient:
         if len(nodes) > len(wanted) or (conn.get("pageInfo") or {}).get("hasNextPage"):
             raise errors.RabotaError(f"Linear returned {len(nodes)} issues for {len(wanted)} identifiers: "
                                      "the identifier filter was not applied")
-        return [{"identifier": n["identifier"], "state": n["state"], "completedAt": n.get("completedAt")}
-                for n in nodes if n.get("identifier") in wanted]
+        rec = lambda n, asked: {"identifier": n["identifier"], "asked": asked, "state": n["state"],
+                                "completedAt": n.get("completedAt")}
+        out = [rec(n, n["identifier"]) for n in nodes if n.get("identifier") in wanted]
+        # A node under an identifier nobody asked for is an issue moved between teams, answering one
+        # of the keys still unmatched (DO-754 review F2: dropping it made a moved-and-closed issue
+        # read not_found). The batch cannot say which key it answers, so each unmatched key is
+        # resolved with `issue(id:)`, which accepts an old identifier. This is only paid when a
+        # moved issue actually appears. "Entity not found" is a real absence; any other error
+        # propagates.
+        if any(n.get("identifier") not in wanted for n in nodes):
+            matched = {r["asked"] for r in out}
+            for key in (k for k in wanted if k not in matched):
+                reply = self._post({"query": Q_ONE_ISSUE, "variables": {"id": key}})
+                errs = reply.get("errors") or []
+                if any("not found" in str(e.get("message", "")).lower() for e in errs):
+                    continue
+                if errs or "data" not in reply:
+                    raise errors.RabotaError(f"Linear lookup of {key} failed: "
+                                             + "; ".join(str(e.get("message", "?")) for e in errs))
+                if reply["data"].get("issue"):
+                    out.append(rec(reply["data"]["issue"], key))
+        return out
 
 
 def _flatten(issue: dict) -> dict:
