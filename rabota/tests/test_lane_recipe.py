@@ -405,6 +405,30 @@ class CreateWorktreeRemoteTests(LocalRecipeTests):
     def machine(self, ctx):
         return ctx.tenant.machines["dev"]
 
+    def test_a_bare_branch_resolves_to_the_fetched_origin_not_a_stale_local_branch(self):
+        """DO-755: `--base main` on dev started two lanes on the host clone's LOCAL `main`, 28 commits
+        behind the `origin/main` the same command had just fetched. Runs the exact ssh fragment
+        locally against real repos: local `main` behind, origin ahead."""
+        import subprocess, tempfile
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+        def git(*a, cwd):
+            return subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        origin = tmp / "origin"; origin.mkdir()
+        git("init", "-q", "-b", "main", ".", cwd=origin)
+        for k, v in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+            git("config", k, v, cwd=origin)
+        (origin / "f").write_text("a\n"); git("add", "f", cwd=origin); git("commit", "-qm", "old", cwd=origin)
+        clone = tmp / "clone"; git("clone", "-q", str(origin), str(clone), cwd=tmp)
+        (origin / "f").write_text("b\n"); git("commit", "-qam", "new", cwd=origin)
+        want = git("rev-parse", "HEAD", cwd=origin)
+        runner = FakeRunner([(["ssh"], Result(0, "", ""))])
+        ctx = self.ctx(runner)
+        lane.create_worktree_remote(ctx, self.machine(ctx), str(clone), str(tmp / "wt"), str(tmp / "out"), "main")
+        r = subprocess.run(["bash", "-c", runner.calls[0][-1]], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(git("rev-parse", "main", cwd=clone), want)   # local main really is stale
+        self.assertEqual(git("rev-parse", "HEAD", cwd=tmp / "wt"), want)
+
     def test_a_branch_only_on_origin_resolves_through_the_real_shell_fragment(self):
         """DO-725 review: `git worktree add <branch>` used to guess `origin/<branch>` for a branch the
         clone had never checked out (a colleague's, or a finished lane's), and `rev-parse` does not.
