@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from rabota import budget as budget_mod
-from rabota import cli, errors, remote, store
+from rabota import census, cli, errors, remote, store
 from rabota.commands import budget as budget_cmd
 from rabota.context import Context
 from rabota.lanes import brief as lanes_brief
@@ -633,29 +633,95 @@ def run_status(ctx, lane_id: str) -> dict:
     return _get_tenant_lane(ctx, lane_id)
 
 
+def _settle_started_lane(ctx, row: dict) -> str | None:
+    """Try to settle ``row`` (a ``started`` lane) from its own machine alone, reusing
+    ``census._settle_row`` (DO-713) for the actual settle so the row this produces is identical to
+    one ``census`` would have settled — same result-line parsing, the DO-747 output-file rule, and
+    the DO-722 ``ended_at`` clamp.
+
+    Unlike a full census this measures only THIS lane's unit and stream: one local
+    ``systemctl --user list-units`` call for a local lane, or ONE ssh call (``remote.read``, the
+    exact call ``census.machines`` already makes) for a remote one — never sessions, worktrees, or
+    any other lane's row.
+
+    Returns the status settled to (or, under ``ctx.dry_run``, the status that WOULD be settled to
+    — ``census._settle_row`` itself skips the write when ``ctx.dry_run`` is set), or ``None`` when
+    the lane is not settleable yet: its unit is still active, or its unit is gone but its stream
+    carries no ``result`` line yet. Both leave the row ``started``, exactly as a full census would
+    — the caller's existing "status started, not terminal" refusal already covers that case and
+    needs no change here.
+
+    Raises ``errors.Refused`` ONLY when the lane's machine cannot be measured at all: undeclared,
+    or (remote) unreachable. Not knowing is not "still running" and must not read as it — a caller
+    told "started, not terminal" for an unreachable machine would look for a live unit that this
+    process in fact never managed to check.
+    """
+    machine = row.get("machine") or "local"
+    unit = row.get("unit")
+    seats_rows, _ = census.seats(ctx.runner)
+    pct = {s["name"]: s.get("five_h_pct") for s in seats_rows}
+    if machine == "local":
+        units_rows, unavailable = census.units(ctx.runner)
+        if unavailable:
+            raise errors.Refused(f"lane {row['id']!r}: could not read local unit state (systemctl --user failed)")
+        if any(u["name"] == unit and u.get("state") in ("active", "activating") for u in units_rows):
+            return None
+        stream = Path(row["out_dir"]) / "stream.jsonl"
+        if not stream.exists():
+            return None
+        text = stream.read_text()
+        ended_at = census._ended_at(row["out_dir"])
+        has_output = census._output_mtime_local(row["out_dir"]) is not None
+    else:
+        m = ctx.tenant.machines.get(machine)
+        if m is None:
+            raise errors.Refused(f"lane {row['id']!r}: tenant {ctx.tenant.name!r} declares no machine {machine!r}")
+        mrow = remote.read(ctx.runner, m, [row["out_dir"]])
+        if not mrow.get("reachable"):
+            raise errors.Refused(
+                f"lane {row['id']!r}: machine {machine!r} is unreachable: {mrow.get('error', '')}")
+        if any(u["name"] == unit and u.get("state") in ("active", "activating") for u in mrow.get("units", [])):
+            return None
+        text = mrow.get("streams", {}).get(row["out_dir"], "")
+        mtime_s = mrow.get("verdict_mtimes", {}).get(row["out_dir"], "")
+        ended_at = census._ended_at_remote(mtime_s)
+        has_output = bool((mtime_s or "").strip())
+    return census._settle_row(ctx, row, text, has_output, ended_at, pct, ctx.dry_run)
+
+
 def run_retire(ctx, lane_id: str) -> dict:
     """Transition a settled lane to ``status="retired"``; return the row as it ends up.
 
-    Only a lane already in ``TERMINAL_STATUSES`` may retire — a still-``started`` lane refuses,
-    because retiring it would throw away the row ``census`` still needs in order to settle it from
-    the unit's own stream (there is no unit inspection here to re-derive that). Retiring an
+    A still-``started`` row is no longer refused outright (DO-713): it is first offered to
+    ``_settle_started_lane``, which settles it from its own machine's unit state and stream —
+    reusing ``census._settle_row``'s exact semantics — and retires it below if that leaves it
+    terminal. This is what lets the orchestrator retire a lane in one call, without a full census
+    in between. A row that is not settleable (unit still active) or not yet retirable (a genuinely
+    unmeasurable machine, which ``_settle_started_lane`` raises for by name) is refused exactly as
+    before: only a lane already in ``TERMINAL_STATUSES`` may retire. Retiring an
     already-``retired`` lane is a defined no-op: it returns the row unchanged rather than refusing,
     so the skill's "as soon as evaluated" call site never has to check first.
 
-    With ``ctx.dry_run`` set (DO-743, same audit as ``lane recipe``), a lane that WOULD retire
-    changes no row: the status check above still runs (so a caller learns whether the retire would
-    be refused), but ``store.update_lane`` is skipped and the row comes back unchanged plus a
-    ``dry_run`` key, the same shape ``run_recipe`` uses.
+    With ``ctx.dry_run`` set (DO-743, same audit as ``lane recipe``), nothing is written: the
+    settle attempt still runs (so a caller learns whether it WOULD settle and retire), but
+    ``census._settle_row`` itself skips its store write under ``dry_run``, and the retire write
+    below is skipped too. The row comes back with its would-be status plus a ``dry_run`` key.
     """
     row = _get_tenant_lane(ctx, lane_id)
     if row["status"] == RETIRED_STATUS:
         return row
+    settled_status = None
+    if row["status"] == "started":
+        settled_status = _settle_started_lane(ctx, row)
+        row = ({**row, "status": settled_status} if ctx.dry_run and settled_status is not None
+               else _get_tenant_lane(ctx, lane_id))
     if row["status"] not in TERMINAL_STATUSES:
         raise errors.Refused(
             f"lane {lane_id!r} has status {row['status']!r}, not one of {TERMINAL_STATUSES}: "
             "only a settled lane may be retired")
     if ctx.dry_run:
-        return {**row, "dry_run": "nothing retired"}
+        note = "nothing settled or retired" if settled_status is not None else "nothing retired"
+        return {**row, "dry_run": note}
     ctx.store.update_lane(lane_id, status=RETIRED_STATUS)
     return _get_tenant_lane(ctx, lane_id)
 

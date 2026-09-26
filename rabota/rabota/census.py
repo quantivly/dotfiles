@@ -282,6 +282,49 @@ def _ended_at_remote(epoch_s: str) -> str:
         return now()
 
 
+def _settle_row(ctx, lane: dict, text: str, has_output: bool, ended_at: str, pct: dict,
+                dry_run: bool) -> str | None:
+    """Settle ONE ``started`` row from its already-read stream ``text``.
+
+    The caller has already established the lane's unit is gone (``settle_finished``'s
+    ``live``-set check across every started lane, or ``lane retire``'s single-unit check for just
+    one) — this function does not check liveness itself, only what the two callers cannot share:
+    parsing the stream's last ``result`` line, the DO-747 output-file rule, and the DO-722
+    ``ended_at`` clamp. Split out of ``settle_finished`` (DO-713) precisely so ``lane retire`` can
+    settle one lane with these exact semantics without reimplementing them — the row a lane gets
+    from ``retire`` must be identical to the one ``census`` would have produced for it.
+
+    Returns the status settled to (``"done"`` or ``"failed"``), or ``None`` when ``text`` carries
+    no ``result`` line yet — the unit is gone but the CLI has not flushed one, which is not
+    settleable now (``reap`` handles abandonment, not this).
+    """
+    result = None
+    for line in text.splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            result = obj
+    if result is None:
+        return None
+    started_at = lane.get("started_at")
+    if started_at and ended_at < started_at:
+        # A negative duration is a worse untruth than the one this whole change fixes -- clock
+        # skew between machines, or a verdict mtime that predates the lane's own started_at
+        # row, must never read as the lane having ended before it began.
+        ended_at = started_at
+    if has_output:
+        status, settle_reason = ("failed" if result.get("is_error") else "done"), None
+    else:
+        status = "failed"
+        settle_reason = NO_OUTPUT_REASON
+    if not dry_run:   # DO-753 review: a dry census reports what would settle and writes no row
+        ctx.store.update_lane(lane["id"], status=status, ended_at=ended_at, settle_reason=settle_reason,
+                              cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
+    return status
+
+
 def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None,
                     dry_run: bool = False) -> list[str]:
     """A ``started`` row whose unit is gone and whose stream has a result line is settled from that line.
@@ -293,7 +336,8 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
     that put its whole brief into a backgrounded subagent and ended its turn printed a clean
     ``is_error: false`` result with no ``review.json`` ever written, and the row settled ``done``).
     A row whose unit is still active, or whose stream has no result yet, is left alone (``reap``
-    handles abandonment). Returns the ids settled.
+    handles abandonment). Returns the ids settled. (The actual settle -- result parsing, the
+    output-file rule, the ``ended_at`` clamp -- is ``_settle_row``, shared with ``lane retire``.)
 
     A lane on another machine is settled from that machine's ``machines[]`` row — its stream lives
     there, so the local filesystem read below can never see it. An unreachable machine settles
@@ -331,43 +375,19 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
             if not stream.exists():
                 continue
             text = stream.read_text()
+            ended_at = _ended_at(lane["out_dir"])
+            has_output = _output_mtime_local(lane["out_dir"]) is not None
         else:
             row = by_name.get(machine)
             if not row or not row.get("reachable"):
                 continue
             text = row.get("streams", {}).get(lane["out_dir"], "")
-        result = None
-        for line in text.splitlines():
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and obj.get("type") == "result":
-                result = obj
-        if result is None:
-            continue
-        if machine == "local":
-            ended_at = _ended_at(lane["out_dir"])
-            has_output = _output_mtime_local(lane["out_dir"]) is not None
-        else:
             mtime_s = row.get("verdict_mtimes", {}).get(lane["out_dir"], "")
             ended_at = _ended_at_remote(mtime_s)
             has_output = bool((mtime_s or "").strip())
-        started_at = lane.get("started_at")
-        if started_at and ended_at < started_at:
-            # A negative duration is a worse untruth than the one this whole change fixes -- clock
-            # skew between machines, or a verdict mtime that predates the lane's own started_at
-            # row, must never read as the lane having ended before it began.
-            ended_at = started_at
-        if has_output:
-            status, settle_reason = ("failed" if result.get("is_error") else "done"), None
-        else:
-            status = "failed"
-            settle_reason = NO_OUTPUT_REASON
-        if not dry_run:   # DO-753 review: a dry census reports what would settle and writes no row
-            ctx.store.update_lane(lane["id"], status=status, ended_at=ended_at, settle_reason=settle_reason,
-                                  cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
-        settled.append(lane["id"])
+        status = _settle_row(ctx, lane, text, has_output, ended_at, pct, dry_run)
+        if status is not None:
+            settled.append(lane["id"])
     return settled
 
 

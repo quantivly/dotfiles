@@ -5,13 +5,15 @@ real tenant state dir — and drives ``FakeRunner([])``, which raises on any unm
 makes "no runner call" an assertion on ``runner.calls == []``, not an inference.
 """
 import argparse
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from rabota import census, context, errors
 from rabota.commands import lane
-from rabota.runner import FakeRunner
+from rabota.runner import FakeRunner, Result
+from tests.test_remote import FIXED_MARKER, patch_uuid, payload
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -136,8 +138,21 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(lane.run_retire(ctx, "ab1")["status"], "retired")
 
     def test_retire_a_still_running_lane_refuses(self):
-        ctx = self.ctx()
-        ctx.store.insert_lane(self.row(id="a1", status="started"))
+        # AMENDED (DO-713): retire now tries to settle a `started` row itself, so a bare
+        # `FakeRunner([])` no longer reproduces this case -- it raises AssertionError on the
+        # `systemctl --user list-units` call `_settle_started_lane` makes rather than reaching
+        # `errors.Refused` at all. This fails against `main` with exactly that AssertionError; the
+        # fix is to give the runner a real "unit still active" answer, which is what the row
+        # SHOULD do when the unit genuinely has not finished.
+        row = self.row(id="a1", status="started")
+        runner = FakeRunner([
+            (["systemctl", "--user", "list-units"], Result(0, json.dumps(
+                [{"unit": row["unit"], "load": "loaded", "active": "active", "sub": "running",
+                  "description": "x"}]), "")),
+            (["clauth", "status", "--json"], Result(0, "{}", "")),
+        ])
+        ctx = self.ctx(runner)
+        ctx.store.insert_lane(row)
         with self.assertRaises(errors.Refused) as cm:
             lane.run_retire(ctx, "a1")
         self.assertIn("started", str(cm.exception))
@@ -178,8 +193,18 @@ class LaneStateTests(unittest.TestCase):
     def test_a_dry_run_retire_still_refuses_a_still_running_lane(self):
         # The status check is a read, not a write -- it must still run and still refuse, so a
         # dry run answers "would this be refused" honestly rather than always returning ok.
-        ctx = self.ctx(dry_run=True)
-        ctx.store.insert_lane(self.row(id="a1", status="started"))
+        # AMENDED (DO-713), same reason as test_retire_a_still_running_lane_refuses above: this
+        # now needs a runner that actually answers the settle attempt's calls; against `main` it
+        # fails with AssertionError, not errors.Refused.
+        row = self.row(id="a1", status="started")
+        runner = FakeRunner([
+            (["systemctl", "--user", "list-units"], Result(0, json.dumps(
+                [{"unit": row["unit"], "load": "loaded", "active": "active", "sub": "running",
+                  "description": "x"}]), "")),
+            (["clauth", "status", "--json"], Result(0, "{}", "")),
+        ])
+        ctx = self.ctx(runner, dry_run=True)
+        ctx.store.insert_lane(row)
         with self.assertRaises(errors.Refused):
             lane.run_retire(ctx, "a1")
         self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
@@ -192,6 +217,166 @@ class LaneStateTests(unittest.TestCase):
         row = lane.run_retire(ctx, "a1")
         self.assertEqual(row["status"], "retired")
         self.assertNotIn("dry_run", row)
+
+
+# --- retire settles a `started` row itself (DO-713) ---
+
+
+class LaneRetireSettleTests(unittest.TestCase):
+    """``lane retire`` on a `started` row: settle it from its own machine, then retire it if that
+    leaves it terminal. Reuses ``LaneStateTests``'s fixtures rather than subclassing, since the
+    two classes' `ctx`/`row` helpers are identical and duplicating a base class here would be the
+    kind of abstraction this repo's own style guidance (CLAUDE.md) asks not to add for two users.
+    """
+
+    def ctx(self, runner=None, tenant="quantivly", dry_run=False):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner or FakeRunner([]),
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def row(self, out_dir, **over):
+        base = dict(id="a1", tenant="quantivly", kind="work", brief="b", repo="r", worktree="w",
+                    out_dir=str(out_dir), machine="local", unit="rabota-lane-quantivly-a1.service",
+                    session_id="s", model="m", status="started", started_at="2026-09-16T00:00:00Z",
+                    seat="quantivly-1")
+        base.update(over)
+        return base
+
+    def out_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def local_runner(self, *, active=False, unit="rabota-lane-quantivly-a1.service"):
+        units = [{"unit": unit, "load": "loaded", "active": "active", "sub": "running",
+                 "description": "x"}] if active else []
+        return FakeRunner([
+            (["systemctl", "--user", "list-units"], Result(0, json.dumps(units), "")),
+            (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+        ])
+
+    def test_settles_and_retires_a_finished_local_lane_in_one_call(self):
+        out = self.out_dir()
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "verdict.json").write_text("{}")
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        row = lane.run_retire(ctx, "a1")
+        self.assertEqual(row["status"], "retired")
+        stored = ctx.store.get_lane("a1")
+        self.assertEqual(stored["status"], "retired")
+        self.assertEqual(stored["cost_usd"], 1.23)
+        self.assertIsNone(stored["settle_reason"])
+        self.assertIsNotNone(stored["ended_at"])
+
+    def test_a_finished_local_lane_with_no_output_file_settles_failed_then_stays_started_at_terminal_check(self):
+        # No `*.json` file was ever written -- DO-747's rule settles this `failed` regardless of
+        # `is_error`, and `failed` IS terminal, so the same call also retires it.
+        out = self.out_dir()
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        row = lane.run_retire(ctx, "a1")
+        self.assertEqual(row["status"], "retired")
+        stored = ctx.store.get_lane("a1")
+        self.assertEqual(stored["settle_reason"], census.NO_OUTPUT_REASON)
+
+    def test_retire_produces_the_same_row_census_would_have(self):
+        # Hazard 1: settling via `retire` must be indistinguishable from settling the same lane
+        # via a full `census` -- same result parsing, same output-file rule, same ended_at.
+        out_a, out_b = self.out_dir(), self.out_dir()
+        for out in (out_a, out_b):
+            (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+            (out / "verdict.json").write_text("{}")
+        ctx = self.ctx(self.local_runner(active=False, unit="rabota-lane-quantivly-a1.service"))
+        ctx.store.insert_lane(self.row(out_a, id="via-retire", unit="rabota-lane-quantivly-a1.service"))
+        ctx.store.insert_lane(self.row(out_b, id="via-census", unit="rabota-lane-quantivly-b1.service"))
+        lane.run_retire(ctx, "via-retire")
+        settled = census.settle_finished(ctx, units=[], seats=[{"name": "quantivly-1", "five_h_pct": 38}])
+        self.assertEqual(settled, ["via-census"])
+        via_retire = ctx.store.get_lane("via-retire")
+        via_census = ctx.store.get_lane("via-census")
+        for key in ("cost_usd", "settle_reason", "five_h_pct_at_end"):
+            self.assertEqual(via_retire[key], via_census[key], key)
+        # `retire` additionally moves the row on to `retired`; `census` never does.
+        self.assertEqual(via_retire["status"], "retired")
+        self.assertEqual(via_census["status"], "done")
+
+    def test_retire_of_a_still_active_local_lane_refuses_as_today(self):
+        out = self.out_dir()
+        ctx = self.ctx(self.local_runner(active=True))
+        ctx.store.insert_lane(self.row(out))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.run_retire(ctx, "a1")
+        self.assertIn("started", str(cm.exception))
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    def test_a_dry_run_retire_settles_and_retires_nothing_but_says_so(self):
+        out = self.out_dir()
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "verdict.json").write_text("{}")
+        ctx = self.ctx(self.local_runner(active=False), dry_run=True)
+        ctx.store.insert_lane(self.row(out))
+        row = lane.run_retire(ctx, "a1")
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["dry_run"], "nothing settled or retired")
+        stored = ctx.store.get_lane("a1")
+        self.assertEqual(stored["status"], "started")
+        self.assertIsNone(stored["cost_usd"])
+
+    # --- remote lane: one ssh call, never settled from a full census ---
+
+    def test_retire_of_an_unreachable_remote_machine_refuses_naming_it(self):
+        ctx = self.ctx(FakeRunner([
+            (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+            (["ssh"], Result(255, "", "no route to host")),
+        ]))
+        ctx.store.insert_lane(self.row("/home/ubuntu/out/dev-a1", machine="dev"))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.run_retire(ctx, "a1")
+        self.assertIn("dev", str(cm.exception))
+        self.assertIn("unreachable", str(cm.exception))
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    def test_retire_of_a_still_active_remote_unit_refuses_as_today(self):
+        out_dir = "/home/ubuntu/out/dev-a1"
+        with patch_uuid():
+            ctx = self.ctx(FakeRunner([
+                (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+                (["ssh"], Result(0, payload(
+                    marker=FIXED_MARKER,
+                    units="rabota-lane-quantivly-a1.service loaded active running lane\n",
+                    streams=((out_dir, ""),)), "")),
+            ]))
+            ctx.store.insert_lane(self.row(out_dir, machine="dev"))
+            with self.assertRaises(errors.Refused) as cm:
+                lane.run_retire(ctx, "a1")
+        self.assertIn("started", str(cm.exception))
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    def test_settles_and_retires_a_finished_remote_lane_with_one_ssh_call(self):
+        out_dir = "/home/ubuntu/out/dev-a1"
+        result_line = '{"type":"result","is_error":false,"total_cost_usd":2.5}'
+        with patch_uuid():
+            runner = FakeRunner([
+                (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+                (["ssh"], Result(0, payload(
+                    marker=FIXED_MARKER, units="",
+                    streams=((out_dir, result_line, "1700000000"),)), "")),
+            ])
+            ctx = self.ctx(runner)
+            ctx.store.insert_lane(self.row(out_dir, machine="dev", started_at="2020-01-01T00:00:00Z"))
+            row = lane.run_retire(ctx, "a1")
+        ssh_calls = [c for c in runner.calls if c[0] == "ssh"]
+        self.assertEqual(len(ssh_calls), 1)
+        self.assertEqual(row["status"], "retired")
+        stored = ctx.store.get_lane("a1")
+        self.assertEqual(stored["cost_usd"], 2.5)
+        self.assertEqual(stored["ended_at"], "2023-11-14T22:13:20Z")
 
 
 if __name__ == "__main__":
