@@ -750,9 +750,20 @@ def _settle_or_abandon_started_lane(ctx, row: dict) -> str | None:
     status = census._settle_row(ctx, row, m["text"], m["has_output"], m["ended_at"], m["pct"], ctx.dry_run)
     if status is not None:
         return status
+    if m["has_output"]:
+        # DO-757 review F1: an output file with no parseable result line is most likely a lane that
+        # FINISHED and was cut off mid-flush (a truncated final line reads exactly like no line at
+        # all). Abandoning it would discard a real result and its cost, so refuse and say why.
+        raise errors.Refused(
+            f"lane {row['id']!r} wrote an output file but its stream has no parseable result line "
+            "(possibly truncated): not abandoning a lane that may have finished; inspect its out_dir")
     settle_reason = "unit gone with no result line; abandoned by retire"
+    ended_at = m["stream_ended_at"]
+    started_at = row.get("started_at")
+    if started_at and ended_at and ended_at < started_at:
+        ended_at = started_at   # DO-757 review F2: the same clamp census._settle_row applies
     if not ctx.dry_run:
-        ctx.store.update_lane(row["id"], status="abandoned", ended_at=m["stream_ended_at"],
+        ctx.store.update_lane(row["id"], status="abandoned", ended_at=ended_at,
                               abandoned_at=store.now(), settle_reason=settle_reason)
     return "abandoned"
 

@@ -443,6 +443,33 @@ class LaneRetireAbandonTests(unittest.TestCase):
         self.assertIsNone(stored["settle_reason"])
         self.assertEqual(stored["cost_usd"], 1.23)
 
+    def test_abandon_refuses_a_lane_with_output_but_a_truncated_result_line(self):
+        # DO-757 review F1: the unit died mid-flush after writing real output. The final result line
+        # is cut off, so it does not parse, and reads exactly like "no result line". Abandoning would
+        # discard a finished lane's result and cost.
+        out = self.out_dir()
+        full = (FIX / "census" / "stream.jsonl").read_text().rstrip("\n").splitlines()
+        (out / "stream.jsonl").write_text("\n".join(full[:-1] + [full[-1][: len(full[-1]) // 2]]) + "\n")
+        (out / "verdict.json").write_text("{}")
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        with self.assertRaisesRegex(errors.Refused, "possibly truncated"):
+            lane.run_retire(ctx, "a1", abandon=True)
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    def test_abandon_never_writes_an_ended_at_before_started_at(self):
+        # DO-757 review F2: a stale stream.jsonl in a reused out_dir predates this lane's start.
+        import os
+        out = self.out_dir()
+        (out / "stream.jsonl").write_text('{"type":"assistant","message":{}}\n')
+        old = 1758000000   # 2025-09-16, well before the row's started_at
+        os.utime(out / "stream.jsonl", (old, old))
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        lane.run_retire(ctx, "a1", abandon=True)
+        stored = ctx.store.get_lane("a1")
+        self.assertGreaterEqual(stored["ended_at"], stored["started_at"])
+
     # Drive 3/5: unit gone WITHOUT a result line -- the one case that abandons.
     def test_abandon_of_a_killed_local_lane_marks_abandoned_and_retires(self):
         out = self.out_dir()
