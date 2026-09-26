@@ -415,6 +415,32 @@ class LinearClientTests(unittest.TestCase):
         with self.assertRaises(errors.Refused):
             linear.LinearClient.from_context(Ctx())
 
+    def test_from_context_carries_ctx_dry_run_onto_the_client(self):
+        class T: linear_key_env = "LINEAR_API_KEY"
+        class Ctx: tenant = T(); env = {"LINEAR_API_KEY": "k" * 20}; dry_run = True
+        c = linear.LinearClient.from_context(Ctx())
+        self.assertTrue(c.dry_run)
+
+    def test_dry_run_mutations_send_nothing_over_the_wire(self):
+        # DO-753 central guard: every named mutation method routes through `mutate`, which with
+        # `dry_run` set never calls `self._post` at all -- `post` here raises if invoked, so any
+        # mutation that still reaches the wire fails this test rather than merely being unasserted.
+        def post(body):
+            raise AssertionError(f"a dry-run client must never POST: {body}")
+        c = linear.LinearClient("k" * 20, post=post, dry_run=True)
+        self.assertEqual(c.archive_notification("n1"), {"success": True})
+        self.assertEqual(c.unarchive_notification("n1"), {"success": True})
+        self.assertEqual(c.set_due_date("i1", None), {"success": True})
+        self.assertEqual(c.archive_notifications_for_issue("i1"), {"success": True})
+
+    def test_a_real_mutation_still_reaches_the_wire_and_unwraps_its_result_key(self):
+        # The central guard must not make a REAL run write less: with dry_run unset (the default),
+        # `mutate` still posts and still unwraps the named result key exactly as before.
+        post = FakePost([{"data": {"notificationArchive": {"success": True}}}])
+        c = linear.LinearClient("k" * 20, post=post)
+        self.assertEqual(c.archive_notification("n1"), {"success": True})
+        self.assertEqual(len(post.calls), 1)
+
     def test_assigned_open_excludes_dead_types_in_filter(self):
         post = FakePost([{"data": {"issues": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}])
         linear.LinearClient("k" * 20, post=post).assigned_open(["completed", "canceled", "duplicate"])

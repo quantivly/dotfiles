@@ -38,8 +38,16 @@ def _project(ctx: Context, row: dict):
 
 def run_escalate(ctx: Context, question: str, evidence: str, options: list[str], kind: str = "finding",
                   subject: str | None = None, notify: bool = True) -> dict:
+    """Record and project an escalation, and (best-effort) notify.
+
+    ``ctx.dry_run`` (DO-753): no ``escalations`` row is written, nothing is projected to
+    ``escalations.jsonl``, and no notification fires — there is no real escalation yet for a
+    notification to be about.
+    """
     if kind not in KINDS:
         raise errors.Usage(f"kind must be one of {KINDS}")
+    if ctx.dry_run:
+        return {"id": None, "notified": None, "dry_run": "nothing written (escalations row, escalations.jsonl)"}
     eid = ctx.store.add_escalation(ctx.tenant.name, question, evidence, options, kind=kind, subject=subject)
     row = ctx.store.escalation(eid)
     try:
@@ -61,6 +69,12 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
 
 
 def run_answer(ctx: Context, esc_id: int, label: str, resolution: str | None = None) -> dict:
+    """Resolve an open escalation.
+
+    ``ctx.dry_run`` (DO-753): the escalation is still read and validated (an unknown id or an
+    already-resolved one still refuses exactly as a real run would), but nothing is written —
+    neither the store row nor the jsonl projection.
+    """
     row = ctx.store.escalation(esc_id)
     if not row:
         raise errors.Usage(f"no escalation {esc_id}")
@@ -71,6 +85,8 @@ def run_answer(ctx: Context, esc_id: int, label: str, resolution: str | None = N
         raise errors.Refused(f"escalation {esc_id} is already resolved as {row['disposition']!r}")
     if row["options"] and label not in row["options"]:
         raise errors.Refused(f"label {label!r} is not one of {row['options']}")
+    if ctx.dry_run:
+        return {"id": esc_id, "disposition": label, "dry_run": "nothing written (escalations row, escalations.jsonl)"}
     ctx.store.answer_escalation(esc_id, label, resolution)
     stored = ctx.store.escalation(esc_id)
     try:

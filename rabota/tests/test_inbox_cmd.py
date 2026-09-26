@@ -111,6 +111,14 @@ class InboxCmdTests(unittest.TestCase):
         rep = cmd.run_apply(ctx, tier="auto", batch=None, confirmed=False, dry_run=True)
         self.assertIn("would_archive", rep)
 
+    def test_dry_run_rollback_needs_no_credentials_and_mutates_nothing(self):
+        # DO-753 "most urgent": `inbox rollback` used to ignore --dry-run entirely and build a
+        # real LinearClient (`ctx.env` here carries none, so that would raise Refused before ever
+        # reaching Linear -- proving no client was built at all, not merely that it did nothing).
+        ctx = self.ctx(); cmd.run_plan(ctx)
+        rep = cmd.run_rollback(ctx, "auto-does-not-exist", dry_run=True)
+        self.assertEqual(rep, {"batch_id": "auto-does-not-exist", "would_restore": []})
+
     def test_dry_run_due_policy_needs_no_credentials(self):
         ctx = self.ctx(); cmd.run_plan(ctx)
         rep = cmd.run_apply(ctx, tier="propose", batch="due_policy", confirmed=True, dry_run=True)

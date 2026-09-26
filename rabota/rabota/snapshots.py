@@ -28,16 +28,22 @@ def parse_fetched_at(value: str) -> datetime:
     return datetime.strptime(value, FETCHED_AT_FORMAT).replace(tzinfo=timezone.utc)
 
 
-def write(state_dir: Path, source: str, payload: dict) -> Path:
+def write(state_dir: Path, source: str, payload: dict, dry_run: bool = False) -> Path:
     """Write ``payload`` (stamped with ``fetched_at`` if it has none) via a temp file and ``os.replace``.
 
     A reader therefore sees the previous snapshot or the new one, never a partial file. The
     serialised text is checked with ``secrets.assert_clean`` BEFORE anything is created on
     disk — a connector error that echoes a token must not land in the state dir (k2).
+
+    ``dry_run`` (DO-753): the guard above still runs, but nothing is created on disk — not even
+    the parent ``sources/`` directory — and the path that WOULD have been written is still
+    returned, so a caller can still report it.
     """
     payload = {**payload, "fetched_at": payload.get("fetched_at") or now()}
     text = secrets.assert_clean(json.dumps(payload, indent=1, default=str), os.environ)
     path = _path(state_dir, source)
+    if dry_run:
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{source}.", suffix=".json")
     try:

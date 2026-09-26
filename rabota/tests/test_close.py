@@ -169,6 +169,24 @@ class CloseTests(unittest.TestCase):
 
     # --- item 2: the answer projection must carry resolvedAt ---------------
 
+    def test_dry_run_escalate_and_answer_write_nothing_and_never_notify(self):
+        ctx = self.ctx(FakeRunner([]))  # no herdr call permitted at all
+        ctx.dry_run = True
+        out = escalate.run_escalate(ctx, "merge HUB-1?", "approved by alex", ["merge", "wait"])
+        self.assertIsNone(out["id"]); self.assertIsNone(out["notified"])
+        self.assertFalse((ctx.state_dir / "escalations.jsonl").exists())
+        self.assertEqual(ctx.store.open_escalations("quantivly"), [])
+        # A real escalation exists (created without dry_run) so run_answer's validation has
+        # something real to check against; the dry answer must still not write anything.
+        ctx.dry_run = False
+        eid = escalate.run_escalate(ctx, "merge HUB-2?", "e", ["merge", "wait"], notify=False)["id"]
+        before = (ctx.state_dir / "escalations.jsonl").read_text()
+        ctx.dry_run = True
+        ans = escalate.run_answer(ctx, eid, "merge")
+        self.assertEqual(ans["dry_run"], "nothing written (escalations row, escalations.jsonl)")
+        self.assertEqual((ctx.state_dir / "escalations.jsonl").read_text(), before)
+        self.assertIsNone(ctx.store.escalation(eid)["resolved_at"])
+
     def test_answer_projects_resolvedAt_from_the_stored_row(self):
         ctx = self.ctx()
         eid = escalate.run_escalate(ctx, "q", "e", ["a", "b"], notify=False)["id"]
@@ -212,6 +230,13 @@ class CloseTests(unittest.TestCase):
         self.assertIn("line one\nline two", cf)
         self.assertIn("has | a pipe", cf)
 
+    def test_dry_run_close_writes_neither_file(self):
+        ctx = self.ctx(); ctx.dry_run = True
+        out = close.run_close(ctx, notes=["did not touch SEC-211"])
+        self.assertFalse((ctx.state_dir / (ctx.today.isoformat())).exists())
+        self.assertFalse((ctx.state_dir / "INDEX.md").exists())
+        self.assertEqual(out["dry_run"], "nothing written (carry-forward.md, INDEX.md)")
+
     def test_close_lists_open_corrections_separately(self):
         ctx = self.ctx()
         escalate.run_escalate(ctx, "revert bad merge?", "evidence", [], kind="correction", notify=False)
@@ -230,6 +255,18 @@ class CloseTests(unittest.TestCase):
         self.assertEqual((rep["imported"], rep["resolved"]), (4, 1))
         open_esc = ctx.store.open_escalations("quantivly")
         self.assertEqual(len(open_esc), 3)
+
+    def test_dry_run_import_v1_counts_without_writing(self):
+        ctx = self.ctx(); ctx.dry_run = True
+        rep = db.run_import_v1(ctx, FIX / "v1" / "escalations.jsonl")
+        self.assertEqual((rep["imported"], rep["resolved"]), (4, 1))   # same counts as a real run
+        self.assertEqual(rep["dry_run"], "nothing written (escalations rows)")
+        self.assertEqual(ctx.store.open_escalations("quantivly"), [])
+        self.assertEqual(ctx.store.escalations_by_identity("quantivly"), {})
+        # A second dry run against the same (untouched) store reports the same counts, exactly
+        # as a real run's own idempotence (test_import_v1_is_idempotent_on_rerun) does.
+        rep2 = db.run_import_v1(ctx, FIX / "v1" / "escalations.jsonl")
+        self.assertEqual((rep2["imported"], rep2["resolved"]), (4, 1))
 
     def test_import_v1_preserves_kind_when_present_and_defaults_when_absent(self):
         ctx = self.ctx()

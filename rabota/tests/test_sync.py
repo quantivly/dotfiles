@@ -68,6 +68,30 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(ctx.store.last_sync("quantivly", "linear")["ok"])
         self.assertEqual(ctx.store.last_sync("quantivly", "github")["path"], rep["github"]["path"])
 
+    def test_dry_run_sync_fetches_but_writes_nothing(self):
+        # DO-753: the connector read still happens (FakeLin/FakeGh are still invoked and their
+        # counts still come back), but neither `sources/*.json` nor a `source_syncs` row lands.
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=True)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        rep = sync.run_sync(ctx, ["linear", "github"], lin=FakeLin(), gh=FakeGh())
+        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1})
+        self.assertIsNone(snapshots.read(ctx.state_dir, "linear"))
+        self.assertIsNone(snapshots.read(ctx.state_dir, "github"))
+        self.assertIsNone(ctx.store.last_sync("quantivly", "linear"))
+        self.assertIsNone(ctx.store.last_sync("quantivly", "github"))
+        self.assertEqual(rep["dry_run"], "nothing written (sources/*.json, source_syncs rows)")
+
+    def test_dry_run_sync_failure_also_records_nothing(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=True)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        with self.assertRaises(errors.Partial):
+            sync.run_sync(ctx, ["github"], gh=BoomGh())
+        self.assertIsNone(ctx.store.last_sync("quantivly", "github"))
+
     def test_sync_linear_reads_only_requested_notification_fields_wherever_the_read_happens(self):
         # k7: a read in sync.py is as much a read as one in linear.py. Route generated Recording
         # nodes through a REAL LinearClient into sync_linear and check what was read on the way.
@@ -83,7 +107,7 @@ class SyncTests(unittest.TestCase):
         # items(), which Recording notes as a copy (E-B/E-D). The boundary is explicit — the real
         # writer is wrapped with Recording.plain — so a copy anywhere BEFORE the write still fails.
         real_write = snapshots.write
-        with mock.patch.object(snapshots, "write", lambda sd, src, payload: real_write(sd, src, Recording.plain(payload))):
+        with mock.patch.object(snapshots, "write", lambda sd, src, payload, **kw: real_write(sd, src, Recording.plain(payload), **kw)):
             rep = sync.sync_linear(ctx, linear.LinearClient("k" * 20, post=FakePost(pages)))
         self.assertEqual(rep, {"issues": 0, "notifications": 2})
         self.assertFalse([k for k in seen if k.endswith(COPIED)], f"a notification was copied to a plain dict: {sorted(seen)}")
@@ -279,6 +303,19 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(errors.Usage):
             ingest.run_ingest(ctx, "slack", f)
 
+    def test_dry_run_ingest_writes_nothing(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=True)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        f = ctx.state_dir / "slack.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"fetched_at": "2026-09-16T07:00:00Z", "ok": True, "items": [{"text": "hi"}]}))
+        rep = ingest.run_ingest(ctx, "slack", f)
+        self.assertEqual(rep["items"], 1)                                 # still validated and counted
+        self.assertIsNone(snapshots.read(ctx.state_dir, "slack"))         # nothing written
+        self.assertIsNone(ctx.store.last_sync("quantivly", "slack"))
+        self.assertEqual(rep["dry_run"], "nothing written (sources/<source>.json, source_syncs row)")
+
     def test_ingest_failed_fetch_records_failure_without_raising(self):
         ctx = self.ctx()
         f = ctx.state_dir / "calendar.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)
@@ -457,10 +494,10 @@ class SyncTests(unittest.TestCase):
                   ("slack", self._write(ctx, "slack-in", ok=True, items=[{"text": "hi"}]))]
         real = ingest.snapshots.write
 
-        def boom(state_dir, source, payload):
+        def boom(state_dir, source, payload, **kw):
             if source == "calendar":
                 raise OSError("no space left on device")
-            return real(state_dir, source, payload)
+            return real(state_dir, source, payload, **kw)
 
         ingest.snapshots.write = boom
         self.addCleanup(lambda: setattr(ingest.snapshots, "write", real))
@@ -502,6 +539,12 @@ class SnapshotTests(unittest.TestCase):
     def test_write_keeps_a_given_fetched_at(self):
         snapshots.write(self.state, "slack", {"fetched_at": "2026-09-16T07:00:00Z", "items": []})
         self.assertEqual(snapshots.read(self.state, "slack")["fetched_at"], "2026-09-16T07:00:00Z")
+
+    def test_dry_run_writes_nothing_not_even_the_sources_directory(self):
+        path = snapshots.write(self.state, "linear", {"ok": True, "items": []}, dry_run=True)
+        self.assertEqual(path, self.state / "sources" / "linear.json")   # the path it WOULD use
+        self.assertFalse((self.state / "sources").exists())
+        self.assertIsNone(snapshots.read(self.state, "linear"))
 
     def test_read_and_age_of_missing_snapshot_are_none(self):
         self.assertIsNone(snapshots.read(self.state, "nope"))

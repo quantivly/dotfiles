@@ -11,8 +11,11 @@ def _build(sub):
 
 def text_lines(c: dict) -> list[str]:
     k, m = c["counts"], c["machine"]
-    lines = [f"sessions {k['sessions']} (user {k['user']} · sol {k['sol']} · rabota {k['rabota']}) · "
-             f"units active {k['units_active']} · load {m['load1']}/{m['ncpu']} · swap {m['swap_used_pct']}%"]
+    lines = []
+    if c.get("dry_run"):
+        lines.append(f"dry-run: {c['dry_run']}")
+    lines.append(f"sessions {k['sessions']} (user {k['user']} · sol {k['sol']} · rabota {k['rabota']}) · "
+                 f"units active {k['units_active']} · load {m['load1']}/{m['ncpu']} · swap {m['swap_used_pct']}%")
     lines += [f"  seat {s['name']} {s['tier']} 5h {'unknown' if s['five_h_pct'] is None else str(s['five_h_pct']) + '%'}"
               f"{' STALE' if s['stale'] else ''}" for s in c["seats"]]
     if c["unavailable"]:

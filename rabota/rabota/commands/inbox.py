@@ -38,22 +38,32 @@ def _fresh_linear(ctx, allow_stale):
     return lin
 
 
-def run_plan(ctx: Context, allow_stale: bool = False) -> dict:
+def _compute_plan(ctx: Context, allow_stale: bool = False) -> dict:
     lin = _fresh_linear(ctx, allow_stale)
-    plan = buckets.classify(lin, snapshots.read(ctx.state_dir, "github"), ctx.tenant, ctx.today)
-    emit.write_file(_plan_path(ctx), json.dumps(plan, indent=1))
-    emit.write_file(_summary_path(ctx), buckets.summary_line(plan, None) + "\n")
-    return {"path": str(_plan_path(ctx)), "unread_total": plan["unread_total"], "totals": plan["totals"],
-            "batches": {k: len(v["issues"]) for k, v in plan["batches"].items()}}
+    return buckets.classify(lin, snapshots.read(ctx.state_dir, "github"), ctx.tenant, ctx.today)
+
+
+def run_plan(ctx: Context, allow_stale: bool = False) -> dict:
+    plan = _compute_plan(ctx, allow_stale)
+    emit.write_file(_plan_path(ctx), json.dumps(plan, indent=1), dry_run=ctx.dry_run)
+    emit.write_file(_summary_path(ctx), buckets.summary_line(plan, None) + "\n", dry_run=ctx.dry_run)
+    out = {"path": str(_plan_path(ctx)), "unread_total": plan["unread_total"], "totals": plan["totals"],
+           "batches": {k: len(v["issues"]) for k, v in plan["batches"].items()}}
+    if ctx.dry_run:
+        out["dry_run"] = "nothing written (inbox-plan.json, inbox-summary.txt)"
+    return out
 
 
 def run_apply(ctx: Context, tier: str, batch: str | None, confirmed: bool, client=None, dry_run: bool = False) -> dict:
-    if not _plan_path(ctx).exists(): run_plan(ctx)
-    plan = json.loads(_plan_path(ctx).read_text())
+    # Not `if missing: run_plan(ctx)` then re-read the file: with `ctx.dry_run` set, `run_plan`
+    # (DO-753) no longer writes `inbox-plan.json` at all, so a plan computed but not yet persisted
+    # would otherwise leave this reading a file that was never created. Computing the plan directly
+    # here works whether or not a plan was ever written, dry run or not.
+    plan = json.loads(_plan_path(ctx).read_text()) if _plan_path(ctx).exists() else _compute_plan(ctx)
     if tier == "auto":
         if client is None and not dry_run: client = LinearClient.from_context(ctx)
         rep = apply.apply_auto(plan, client, ctx.store, ctx.tenant, dry_run=dry_run)
-        emit.write_file(_summary_path(ctx), buckets.summary_line(plan, rep) + "\n")
+        emit.write_file(_summary_path(ctx), buckets.summary_line(plan, rep) + "\n", dry_run=dry_run)
         return rep
     if tier == "propose":
         if batch == "due_policy":
@@ -68,8 +78,12 @@ def run_apply(ctx: Context, tier: str, batch: str | None, confirmed: bool, clien
     raise errors.Usage("--tier must be auto or propose")
 
 
-def run_rollback(ctx: Context, batch_id: str, client=None) -> dict:
-    return apply.rollback(batch_id, client or LinearClient.from_context(ctx), ctx.store)
+def run_rollback(ctx: Context, batch_id: str, client=None, dry_run: bool = False) -> dict:
+    # No client is ever built on a dry path -- mirroring `run_apply` above -- so a rollback that
+    # would mutate Linear (DO-753's "most urgent" finding) cannot reach the network at all, rather
+    # than relying solely on `LinearClient.mutate`'s own dry-run guard as the only backstop.
+    client = client or (None if dry_run else LinearClient.from_context(ctx))
+    return apply.rollback(batch_id, client, ctx.store, dry_run=dry_run)
 
 
 def _build(sub):
@@ -86,7 +100,7 @@ def _run(ns):
     ctx = Context.from_namespace(ns)
     if ns.inbox_command == "plan": return run_plan(ctx, ns.allow_stale)
     if ns.inbox_command == "apply": return run_apply(ctx, ns.tier, ns.batch, ns.confirmed, dry_run=ns.dry_run)
-    if ns.inbox_command == "rollback": return run_rollback(ctx, ns.batch_id)
+    if ns.inbox_command == "rollback": return run_rollback(ctx, ns.batch_id, dry_run=ns.dry_run)
     if ns.inbox_command == "summary":
         p = _summary_path(ctx); return [p.read_text().strip()] if p.exists() else ["inbox: no plan yet"]
 

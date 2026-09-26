@@ -117,11 +117,21 @@ def run_preflight(ctx: Context, gh=None, lin=None) -> dict:
     return report
 
 
-def run_command(ctx: Context, gh=None, lin=None) -> dict:
-    """Record a ``runs`` row either way; on failure print the report, then refuse (exit 3)."""
-    run_id = ctx.store.begin_run(ctx.tenant.name, "preflight")
+def run_command(ctx: Context, gh=None, lin=None, record_run: bool = True) -> dict:
+    """Run preflight (three real, read-only identity calls) and refuse (exit 3) on any failure.
+
+    ``record_run`` (DO-753, hazard 1): a ``runs`` row is itself state, so the standalone
+    ``preflight`` command passes ``record_run=not ctx.dry_run`` -- "nothing is written" means no
+    row either. ``commands.brief.run_brief`` calls this with the default (``True``) UNCHANGED: its
+    own module docstring (Move 5/DO-742) already decided, deliberately and out of scope for this
+    change, that its dry path still records a `runs` row because preflight is not free (three real
+    API calls as @zvi) and a dry run whose identity pin the following real run then refuses would
+    be a worse lie than the row. Reads (``run_preflight`` itself) are never suppressed either way.
+    """
+    run_id = ctx.store.begin_run(ctx.tenant.name, "preflight") if record_run else None
     report = run_preflight(ctx, gh=gh, lin=lin)
-    ctx.store.finish_run(run_id, report["ok"], "; ".join(report["failures"]))
+    if record_run:
+        ctx.store.finish_run(run_id, report["ok"], "; ".join(report["failures"]))
     if not report["ok"]:
         emit.json_out(report)   # the caller sees the report and then the refusal
         raise errors.Refused("; ".join(report["failures"]))
@@ -133,7 +143,11 @@ def _build(sub):
 
 
 def _run(ns):
-    return run_command(Context.from_namespace(ns))
+    ctx = Context.from_namespace(ns)
+    report = run_command(ctx, record_run=not ctx.dry_run)
+    if ctx.dry_run:
+        report = {**report, "dry_run": "nothing written (runs row)"}
+    return report
 
 
 cli.register("preflight", _build, _run)

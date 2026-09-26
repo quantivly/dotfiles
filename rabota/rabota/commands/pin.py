@@ -12,6 +12,10 @@ from rabota.context import Context
 
 
 def run_pin(ctx: Context, item_key: str, bucket: int, rationale: str) -> dict:
+    """Upsert a pin; with ``ctx.dry_run`` (DO-753) no ``pins`` row is written and none is read back."""
+    if ctx.dry_run:
+        return {"item_key": item_key, "bucket": bucket, "rationale": rationale, "ts": None,
+                "dry_run": "nothing written (pins row)"}
     ctx.store.set_pin(ctx.tenant.name, item_key, bucket, rationale)
     row = next(p for p in ctx.store.pins(ctx.tenant.name) if p["item_key"] == item_key)
     return {"item_key": row["item_key"], "bucket": row["bucket"], "rationale": row["rationale"], "ts": row["ts"]}

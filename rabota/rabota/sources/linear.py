@@ -123,8 +123,9 @@ def _urllib_post(api_key: str) -> Callable[[dict], dict]:
 class LinearClient:
     """One Linear identity: ``query`` and ``paginate`` over an injectable transport, plus the named reads and mutations."""
 
-    def __init__(self, api_key: str, post: Callable[[dict], dict] | None = None):
+    def __init__(self, api_key: str, post: Callable[[dict], dict] | None = None, dry_run: bool = False):
         self._post = post or _urllib_post(api_key)
+        self.dry_run = dry_run
 
     @classmethod
     def from_context(cls, ctx) -> "LinearClient":
@@ -133,7 +134,7 @@ class LinearClient:
         key = ctx.env.get(name) if name else None
         if not key:
             raise errors.Refused(f"tenant has no Linear key (env var {name or 'unset'})")
-        return cls(key)
+        return cls(key, dry_run=ctx.dry_run)
 
     def query(self, gql: str, variables: dict | None = None) -> dict:
         """POST one operation and return its ``data``; any ``errors`` in the reply is a ``RabotaError``."""
@@ -197,17 +198,28 @@ class LinearClient:
         return rel
 
     # mutations — callers record rollback rows before calling these
+    def mutate(self, gql: str, variables: dict, result_key: str) -> dict:
+        """Every Linear mutation goes through here (DO-753): with ``self.dry_run`` set, nothing is
+        sent over the wire and a canned ``{"success": True}`` stands in for the reply. Callers do
+        not usually need to touch this directly — it exists so a caller that DOES build a real
+        client on a dry path (rather than skipping the client entirely, as ``inbox.py`` does) still
+        cannot mutate Linear by accident.
+        """
+        if self.dry_run:
+            return {"success": True}
+        return self.query(gql, variables)[result_key]
+
     def archive_notifications_for_issue(self, issue_id: str) -> dict:
-        return self.query(M_ARCHIVE_ALL, {"issueId": issue_id})["notificationArchiveAll"]
+        return self.mutate(M_ARCHIVE_ALL, {"issueId": issue_id}, "notificationArchiveAll")
 
     def archive_notification(self, notification_id: str) -> dict:
-        return self.query(M_ARCHIVE_ONE, {"id": notification_id})["notificationArchive"]
+        return self.mutate(M_ARCHIVE_ONE, {"id": notification_id}, "notificationArchive")
 
     def unarchive_notification(self, notification_id: str) -> dict:
-        return self.query(M_UNARCHIVE_ONE, {"id": notification_id})["notificationUnarchive"]
+        return self.mutate(M_UNARCHIVE_ONE, {"id": notification_id}, "notificationUnarchive")
 
     def set_due_date(self, issue_id: str, due_date: str | None) -> dict:
-        return self.query(M_SET_DUE, {"id": issue_id, "due": due_date})["issueUpdate"]
+        return self.mutate(M_SET_DUE, {"id": issue_id, "due": due_date}, "issueUpdate")
 
     def issue_state_and_due(self, issue_id: str) -> dict:
         return self.query(Q_ISSUE_STATE, {"id": issue_id})["issue"]

@@ -154,6 +154,17 @@ class RankCommandTests(unittest.TestCase):
         self.assertEqual([i["key"] for i in seq["items"]], ["PROMISE-1", "HUB-7"])
         self.assertIn("HUB-7", (day / "sequence.md").read_text())
 
+    def test_dry_run_rank_writes_nothing(self):
+        ctx = self.ctx(); ctx.dry_run = True
+        snapshots.write(ctx.state_dir, "linear", {"ok": True, "viewer": {"id": "me"}, "notifications": [],
+                                                   "issues": [issue("HUB-7", "unstarted", "High", due="2026-09-20")]})
+        rep = rank_cmd.run_rank(ctx)
+        day = ctx.state_dir / "2026-09-16"
+        self.assertFalse(day.exists())
+        self.assertIsNone(rep["path"])
+        self.assertEqual(rep["items"], 1)   # still computed
+        self.assertEqual(rep["dry_run"], "nothing written (sequence.json, sequence.md)")
+
     def test_registered_value_in_ranked_data_never_reaches_sequence_files(self):
         # k2, third route: ranked data carrying a protected value used to land in sequence.json and
         # sequence.md through two Path.write_text calls that skipped the guard emit.write_file exists
