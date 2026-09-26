@@ -14,6 +14,7 @@ This module supplies both the local form (``unit_name``, ``build_local``) and th
 """
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rabota import budget as budget_mod
@@ -638,23 +639,36 @@ def run_status(ctx, lane_id: str) -> dict:
     return _get_tenant_lane(ctx, lane_id)
 
 
-def _settle_started_lane(ctx, row: dict) -> str | None:
-    """Try to settle ``row`` (a ``started`` lane) from its own machine alone, reusing
-    ``census._settle_row`` (DO-713) for the actual settle so the row this produces is identical to
-    one ``census`` would have settled — same result-line parsing, the DO-747 output-file rule, and
-    the DO-722 ``ended_at`` clamp.
+def _stream_mtime_local(out_dir: str) -> str:
+    """The local ``stream.jsonl``'s own mtime, or ``now()`` when it does not exist.
 
-    Unlike a full census this measures only THIS lane's unit and stream: one local
+    This is what ``lane retire --abandon`` records as ``ended_at`` for a lane it abandons — the
+    last moment a killed unit's stdout was appended to, which is a real measurement distinct from
+    ``census._ended_at``: that reads the lane's OUTPUT artifact (``*.json``), which an abandoned
+    lane by definition never wrote (it never got as far as a ``result`` line, let alone a verdict).
+    """
+    try:
+        mtime = (Path(out_dir) / "stream.jsonl").stat().st_mtime
+    except OSError:
+        return store.now()
+    return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _measure_started_lane(ctx, row: dict) -> dict | None:
+    """One measurement of ``row``'s unit and stream/out_dir state: a single local
     ``systemctl --user list-units`` call for a local lane, or ONE ssh call (``remote.read``, the
     exact call ``census.machines`` already makes) for a remote one — never sessions, worktrees, or
-    any other lane's row.
+    any other lane's row. Shared by ``_settle_started_lane`` and ``lane retire --abandon`` so
+    neither ever spends a second call measuring the same lane.
 
-    Returns the status settled to (or, under ``ctx.dry_run``, the status that WOULD be settled to
-    — ``census._settle_row`` itself skips the write when ``ctx.dry_run`` is set), or ``None`` when
-    the lane is not settleable yet: its unit is still active, or its unit is gone but its stream
-    carries no ``result`` line yet. Both leave the row ``started``, exactly as a full census would
-    — the caller's existing "status started, not terminal" refusal already covers that case and
-    needs no change here.
+    Returns ``None`` when the unit is still active or activating: nothing further can or should be
+    measured about a running lane, and the caller must never treat that as settleable OR
+    abandonable. Otherwise returns ``{"text", "has_output", "ended_at", "stream_ended_at", "pct"}``:
+    ``text``/``has_output``/``ended_at`` are exactly what ``census._settle_row`` needs to settle a
+    FINISHED lane (a ``result`` line present); ``stream_ended_at`` is ``_stream_mtime_local``'s
+    reading, used only by the ``--abandon`` path (a remote read carries no stream mtime today, so
+    it falls back to ``now()`` there — see ``_stream_mtime_local``'s docstring for why that is the
+    right fallback, not a guess).
 
     Raises ``errors.Refused`` ONLY when the lane's machine cannot be measured at all: undeclared,
     or (remote) unreachable. Not knowing is not "still running" and must not read as it — a caller
@@ -672,11 +686,10 @@ def _settle_started_lane(ctx, row: dict) -> str | None:
         if any(u["name"] == unit and u.get("state") in ("active", "activating") for u in units_rows):
             return None
         stream = Path(row["out_dir"]) / "stream.jsonl"
-        if not stream.exists():
-            return None
-        text = stream.read_text()
+        text = stream.read_text() if stream.exists() else ""
         ended_at = census._ended_at(row["out_dir"])
         has_output = census._output_mtime_local(row["out_dir"]) is not None
+        stream_ended_at = _stream_mtime_local(row["out_dir"])
     else:
         m = ctx.tenant.machines.get(machine)
         if m is None:
@@ -691,10 +704,60 @@ def _settle_started_lane(ctx, row: dict) -> str | None:
         mtime_s = mrow.get("verdict_mtimes", {}).get(row["out_dir"], "")
         ended_at = census._ended_at_remote(mtime_s)
         has_output = bool((mtime_s or "").strip())
-    return census._settle_row(ctx, row, text, has_output, ended_at, pct, ctx.dry_run)
+        # No remote call reads stream.jsonl's mtime today (only its last `result` line and its
+        # output artifact's mtime) -- adding one would be a second ssh round trip, which is exactly
+        # what sharing this measurement is meant to avoid. `now()` is the honest fallback, not a
+        # guess: see `_stream_mtime_local`'s docstring for the local case this mirrors.
+        stream_ended_at = store.now()
+    return {"text": text, "has_output": has_output, "ended_at": ended_at,
+            "stream_ended_at": stream_ended_at, "pct": pct}
 
 
-def run_retire(ctx, lane_id: str) -> dict:
+def _settle_started_lane(ctx, row: dict) -> str | None:
+    """Try to settle ``row`` (a ``started`` lane) from its own machine alone, reusing
+    ``census._settle_row`` (DO-713) for the actual settle so the row this produces is identical to
+    one ``census`` would have settled — same result-line parsing, the DO-747 output-file rule, and
+    the DO-722 ``ended_at`` clamp.
+
+    Returns the status settled to (or, under ``ctx.dry_run``, the status that WOULD be settled to
+    — ``census._settle_row`` itself skips the write when ``ctx.dry_run`` is set), or ``None`` when
+    the lane is not settleable yet: its unit is still active, or its unit is gone but its stream
+    carries no ``result`` line yet. Both leave the row ``started``, exactly as a full census would
+    — the caller's existing "status started, not terminal" refusal already covers that case and
+    needs no change here.
+    """
+    m = _measure_started_lane(ctx, row)
+    if m is None:
+        return None
+    return census._settle_row(ctx, row, m["text"], m["has_output"], m["ended_at"], m["pct"], ctx.dry_run)
+
+
+def _settle_or_abandon_started_lane(ctx, row: dict) -> str | None:
+    """As ``_settle_started_lane``, but this is ``lane retire --abandon``'s path: when the unit is
+    confirmed gone with no ``result`` line, ABANDON the row instead of leaving it ``started`` —
+    the one thing ``--abandon`` adds over a plain retire.
+
+    Shares ``_measure_started_lane``'s single call with the plain-settle path, so a lane whose
+    stream DOES carry a ``result`` line still settles exactly as ``_settle_started_lane`` would
+    (never abandoned — a finished lane is not an abandoned one), and a lane whose unit is still
+    active still returns ``None`` here too (the caller's existing "not terminal" refusal covers
+    it) — abandonment is reached only through the one gap those two leave: gone, reachable, no
+    result line yet.
+    """
+    m = _measure_started_lane(ctx, row)
+    if m is None:
+        return None
+    status = census._settle_row(ctx, row, m["text"], m["has_output"], m["ended_at"], m["pct"], ctx.dry_run)
+    if status is not None:
+        return status
+    settle_reason = "unit gone with no result line; abandoned by retire"
+    if not ctx.dry_run:
+        ctx.store.update_lane(row["id"], status="abandoned", ended_at=m["stream_ended_at"],
+                              abandoned_at=store.now(), settle_reason=settle_reason)
+    return "abandoned"
+
+
+def run_retire(ctx, lane_id: str, abandon: bool = False) -> dict:
     """Transition a settled lane to ``status="retired"``; return the row as it ends up.
 
     A still-``started`` row is no longer refused outright (DO-713): it is first offered to
@@ -707,17 +770,29 @@ def run_retire(ctx, lane_id: str) -> dict:
     already-``retired`` lane is a defined no-op: it returns the row unchanged rather than refusing,
     so the skill's "as soon as evaluated" call site never has to check first.
 
+    ``abandon=True`` (DO-757) is for a lane killed outright — ``systemctl stop``, a crash, a
+    reboot — which never writes a ``result`` line and so can never settle ``done``/``failed``: it
+    routes the ``started`` row through ``_settle_or_abandon_started_lane`` instead, which marks it
+    ``status="abandoned"`` (the same status ``reap`` already uses, with the same ``abandoned_at``
+    column) the moment its unit is confirmed gone AND its stream carries no result line — never
+    while the unit is active, and never over a lane that DID finish (that settles normally, same
+    as without ``--abandon``). This gives that lane a terminal state without waiting hours for
+    ``reap``'s ``--abandoned-hours`` timer.
+
     With ``ctx.dry_run`` set (DO-743, same audit as ``lane recipe``), nothing is written: the
-    settle attempt still runs (so a caller learns whether it WOULD settle and retire), but
-    ``census._settle_row`` itself skips its store write under ``dry_run``, and the retire write
-    below is skipped too. The row comes back with its would-be status plus a ``dry_run`` key.
+    settle/abandon attempt still runs (so a caller learns whether it WOULD settle, abandon, and
+    retire), but the write is skipped in every case (``census._settle_row`` skips its own under
+    ``dry_run``; ``_settle_or_abandon_started_lane`` does the same for its abandon write), and the
+    retire write below is skipped too. The row comes back with its would-be status plus a
+    ``dry_run`` key.
     """
     row = _get_tenant_lane(ctx, lane_id)
     if row["status"] == RETIRED_STATUS:
         return row
     settled_status = None
     if row["status"] == "started":
-        settled_status = _settle_started_lane(ctx, row)
+        settle = _settle_or_abandon_started_lane if abandon else _settle_started_lane
+        settled_status = settle(ctx, row)
         row = ({**row, "status": settled_status} if ctx.dry_run and settled_status is not None
                else _get_tenant_lane(ctx, lane_id))
     if row["status"] not in TERMINAL_STATUSES:
@@ -753,6 +828,9 @@ def _build(sub):
     st.add_argument("lane_id")
     rt = s.add_parser("retire", help="mark a settled lane retired")
     rt.add_argument("lane_id")
+    rt.add_argument("--abandon", action="store_true",
+                    help="abandon a started lane whose unit is confirmed gone with no result "
+                         "line (never one still active or one that finished), then retire it")
 
 
 def _run(ns, **ctx_kw):
@@ -780,8 +858,10 @@ def _run(ns, **ctx_kw):
             lines.append(row["settle_reason"])
         return lines
     if lane_cmd == "retire":
-        row = run_retire(ctx, ns.lane_id)
+        row = run_retire(ctx, ns.lane_id, abandon=getattr(ns, "abandon", False))
         lines = [f"{row['id']} {row['status']}"]
+        if row.get("settle_reason"):
+            lines.append(row["settle_reason"])
         if row.get("dry_run"):
             lines.insert(0, f"dry-run: {row['dry_run']}")
         return lines if ns.text else row

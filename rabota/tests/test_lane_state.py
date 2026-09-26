@@ -379,6 +379,160 @@ class LaneRetireSettleTests(unittest.TestCase):
         self.assertEqual(stored["ended_at"], "2023-11-14T22:13:20Z")
 
 
+# --- retire --abandon (DO-757): a killed lane never writes a result line ---
+
+
+class LaneRetireAbandonTests(unittest.TestCase):
+    """``lane retire --abandon``: give a lane killed outright (``systemctl stop``, a crash, a
+    reboot) a terminal state without waiting for ``reap``'s ``--abandoned-hours`` timer.
+
+    Reuses ``LaneRetireSettleTests``'s fixtures (same reason given there: two users, no base
+    class).
+    """
+
+    def ctx(self, runner=None, tenant="quantivly", dry_run=False):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner or FakeRunner([]),
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def row(self, out_dir, **over):
+        base = dict(id="a1", tenant="quantivly", kind="work", brief="b", repo="r", worktree="w",
+                    out_dir=str(out_dir), machine="local", unit="rabota-lane-quantivly-a1.service",
+                    session_id="s", model="m", status="started", started_at="2026-09-16T00:00:00Z",
+                    seat="quantivly-1")
+        base.update(over)
+        return base
+
+    def out_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def local_runner(self, *, active=False, unit="rabota-lane-quantivly-a1.service"):
+        units = [{"unit": unit, "load": "loaded", "active": "active", "sub": "running",
+                 "description": "x"}] if active else []
+        return FakeRunner([
+            (["systemctl", "--user", "list-units"], Result(0, json.dumps(units), "")),
+            (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+        ])
+
+    # Drive 1/5: unit active -- never abandon a lane that is still running.
+    def test_abandon_of_a_still_active_local_lane_refuses(self):
+        out = self.out_dir()
+        ctx = self.ctx(self.local_runner(active=True))
+        ctx.store.insert_lane(self.row(out))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.run_retire(ctx, "a1", abandon=True)
+        self.assertIn("started", str(cm.exception))
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    # Drive 2/5: unit gone WITH a result line -- settle normally, never abandon a lane that finished.
+    def test_abandon_of_a_finished_local_lane_settles_normally_never_abandoned(self):
+        out = self.out_dir()
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "verdict.json").write_text("{}")
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        row = lane.run_retire(ctx, "a1", abandon=True)
+        self.assertEqual(row["status"], "retired")
+        stored = ctx.store.get_lane("a1")
+        self.assertIsNone(stored["settle_reason"])
+        self.assertEqual(stored["cost_usd"], 1.23)
+
+    # Drive 3/5: unit gone WITHOUT a result line -- the one case that abandons.
+    def test_abandon_of_a_killed_local_lane_marks_abandoned_and_retires(self):
+        out = self.out_dir()
+        # A killed unit: some transcript was flushed, but the CLI never printed its terminating
+        # `result` line (that is exactly what distinguishes "killed" from "finished").
+        (out / "stream.jsonl").write_text('{"type":"assistant","message":{}}\n')
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        row = lane.run_retire(ctx, "a1", abandon=True)
+        self.assertEqual(row["status"], "retired")
+        stored = ctx.store.get_lane("a1")
+        self.assertEqual(stored["settle_reason"], "unit gone with no result line; abandoned by retire")
+        self.assertIsNotNone(stored["abandoned_at"])
+        self.assertIsNotNone(stored["ended_at"])
+        # `ended_at` is the STREAM's own mtime, never `now()`'s census-time-of-noticing, exactly
+        # the DO-714 reasoning `census._ended_at` already applies to the output artifact.
+        import os
+        expected = (out / "stream.jsonl").stat().st_mtime
+        from datetime import datetime, timezone
+        self.assertEqual(stored["ended_at"],
+                         datetime.fromtimestamp(expected, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    def test_abandon_of_a_killed_local_lane_with_no_stream_file_at_all_still_abandons(self):
+        # A unit killed before it ever flushed anything to stream.jsonl -- no file at all, not
+        # just an empty one. Reap's own `plan_reap` never requires a stream file either; `--abandon`
+        # must not be stricter than reap is about the same case.
+        out = self.out_dir()
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        row = lane.run_retire(ctx, "a1", abandon=True)
+        self.assertEqual(row["status"], "retired")
+        self.assertEqual(ctx.store.get_lane("a1")["settle_reason"],
+                         "unit gone with no result line; abandoned by retire")
+
+    # Drive 4/5: machine unreachable -- refuse by name, exactly as a plain retire does.
+    def test_abandon_of_an_unreachable_remote_machine_refuses_naming_it(self):
+        ctx = self.ctx(FakeRunner([
+            (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+            (["ssh"], Result(255, "", "no route to host")),
+        ]))
+        ctx.store.insert_lane(self.row("/home/ubuntu/out/dev-a1", machine="dev"))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.run_retire(ctx, "a1", abandon=True)
+        self.assertIn("dev", str(cm.exception))
+        self.assertIn("unreachable", str(cm.exception))
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    # Drive 5/5: a killed REMOTE lane -- one ssh call, same abandon semantics as local.
+    def test_abandon_of_a_killed_remote_lane_marks_abandoned_with_one_ssh_call(self):
+        out_dir = "/home/ubuntu/out/dev-a1"
+        with patch_uuid():
+            runner = FakeRunner([
+                (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
+                (["ssh"], Result(0, payload(marker=FIXED_MARKER, units="", streams=((out_dir, ""),)), "")),
+            ])
+            ctx = self.ctx(runner)
+            ctx.store.insert_lane(self.row(out_dir, machine="dev"))
+            row = lane.run_retire(ctx, "a1", abandon=True)
+        ssh_calls = [c for c in runner.calls if c[0] == "ssh"]
+        self.assertEqual(len(ssh_calls), 1)
+        self.assertEqual(row["status"], "retired")
+        self.assertEqual(ctx.store.get_lane("a1")["settle_reason"],
+                         "unit gone with no result line; abandoned by retire")
+
+    def test_without_the_flag_a_killed_local_lane_stays_started_as_today(self):
+        # Regression: `lane retire` (no --abandon) must be entirely unchanged for this same row --
+        # it leaves a killed lane `started` for `reap` to find later, exactly as DO-713 shipped it.
+        out = self.out_dir()
+        (out / "stream.jsonl").write_text('{"type":"assistant","message":{}}\n')
+        ctx = self.ctx(self.local_runner(active=False))
+        ctx.store.insert_lane(self.row(out))
+        with self.assertRaises(errors.Refused) as cm:
+            lane.run_retire(ctx, "a1")
+        self.assertIn("started", str(cm.exception))
+        self.assertEqual(ctx.store.get_lane("a1")["status"], "started")
+
+    def test_a_dry_run_abandon_writes_nothing(self):
+        out = self.out_dir()
+        (out / "stream.jsonl").write_text('{"type":"assistant","message":{}}\n')
+        ctx = self.ctx(self.local_runner(active=False), dry_run=True)
+        ctx.store.insert_lane(self.row(out))
+        row = lane.run_retire(ctx, "a1", abandon=True)
+        self.assertEqual(row["status"], "abandoned")
+        self.assertEqual(row["dry_run"], "nothing settled or retired")
+        stored = ctx.store.get_lane("a1")
+        self.assertEqual(stored["status"], "started")
+        self.assertIsNone(stored["settle_reason"])
+        self.assertIsNone(stored["abandoned_at"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -466,3 +620,13 @@ class LaneCliWiringTests(unittest.TestCase):
         self.assertEqual(body["dry_run"], "nothing retired")
         code, status_body = self.run_cli("lane", "status", "B2")
         self.assertEqual(status_body["status"], "done", "a dry-run retire must not have transitioned the row")
+
+    def test_the_abandon_flag_reaches_retire(self):
+        """Pins the ``--abandon`` wiring itself: with it hardcoded away (``getattr(ns, "abandon",
+        False)`` dropped for a bare ``False``), this row is what fails -- an already-terminal row
+        (``B2`` is ``done``) exercises the flag's plumbing without needing a real unit/stream to
+        measure, since ``run_retire`` never calls ``_settle_or_abandon_started_lane`` for a row
+        that is not ``started``."""
+        code, body = self.run_cli("lane", "retire", "B2", "--abandon")
+        self.assertEqual(code, 0)
+        self.assertEqual(body["status"], "retired")
