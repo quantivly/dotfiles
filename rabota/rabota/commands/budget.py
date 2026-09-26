@@ -20,6 +20,7 @@ def run_budget(ctx: Context, machine: str, model: str, effort: str, est_minutes:
     parameter at its default (``False``) and is unaffected. Only the standalone ``rabota budget``
     command passes ``dry_run=ctx.dry_run`` explicitly.
     """
+    budget_mod.validate_machine(ctx.tenant, machine)
     seat = budget_mod.seat_for(ctx.tenant, machine, override=seat)
     rate, rate_source = budget_mod.measured_rate(ctx.store, ctx.tenant.name, seat)
     census_path = ctx.state_dir / "census.json"
@@ -47,7 +48,9 @@ def run_budget(ctx: Context, machine: str, model: str, effort: str, est_minutes:
 
 def _build(sub):
     p = sub.add_parser("budget", help="lanes the seat and the box allow; exit 3 when zero")
-    p.add_argument("--machine", default="local", choices=["local", "dev"])
+    p.add_argument("--machine", default="local",
+                   help="local, or a machine the tenant declares (validated at runtime: argparse "
+                        "builds this parser before the tenant is known, see cli.build_parser)")
     p.add_argument("--seat", help="override the tenant's seat for this machine (still checked)")
     p.add_argument("--model", default=None, help="default: the tenant's lanes.default_model")
     p.add_argument("--effort", default=None, help="default: the tenant's lanes.default_effort")

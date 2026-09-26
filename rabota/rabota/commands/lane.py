@@ -444,9 +444,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
 
     if not machine:
         raise errors.Usage("--machine must not be empty")
-    m = ctx.tenant.machines.get(machine) if machine != "local" else None
-    if machine != "local" and m is None:
-        raise errors.Refused(f"tenant {ctx.tenant.name!r} declares no machine {machine!r}")
+    m = budget_mod.validate_machine(ctx.tenant, machine)
     if machine != "local" and seat and seat != m.profile:
         raise errors.Refused(
             f"--seat {seat!r} does not match {machine!r}'s declared profile {m.profile!r}: "

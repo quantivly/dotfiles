@@ -3,6 +3,8 @@ from pathlib import Path
 from rabota import budget, context, errors
 from rabota.config import BudgetThresholds
 from rabota.runner import FakeRunner, Result
+from tests.support import last_json
+from tests.test_cli import install_fixture_home, run_cli
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -69,6 +71,10 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(out["ok"], False)
         self.assertEqual(out["code"], "credential:window")      # not "credential:unmeasured"
         self.assertIn("7d fable", out["detail"])
+        # DO-644 (amended assertion; fails against main, which reports resets_at.five_hour
+        # "2026-09-19T20:00:00Z" here instead): the wall that actually fired is the per-model
+        # window named in gate.model_window, and its own resets_at is the instant it clears.
+        self.assertEqual(out["resets_at"], "2026-09-21T09:00:00Z")
 
     def test_gate_spend_wall_detail_does_not_fall_back_to_the_5h_sentence(self):
         # The gate always sets a reason; if a future one does not, the fallback must
@@ -80,6 +86,19 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(out["code"], "credential:window")
         self.assertNotIn("projected", out["detail"])
         self.assertIn("weekly window spent", out["detail"])   # only the fallback prints this
+
+    def test_gate_spend_wall_falls_back_to_the_aggregate_weekly_reset_when_no_model_window_governed(self):
+        # DO-644: the weekly arm decided from the aggregate seven_day window (gate.model_window
+        # is null) rather than a per-model one -- the wall clears at the aggregate's own weekly
+        # reset, top-level resets_at.weekly, not the 5h window's.
+        j = {"state": "gate-spend-wall", "reason": "aggregate weekly window spent",
+             "usage": {"five_hour": 12}, "resets_at": {"five_hour": "2026-09-19T20:00:00Z",
+                                                        "weekly": "2026-09-22T00:00:00Z"},
+             "gate": {"verdict": "refuse", "spend": "none", "model_window": None}}
+        runner = FakeRunner([(["claude-pick"], Result(2, json.dumps(j), ""))])
+        out = budget.credential_gate(runner, "q1", "claude-fable-5-1", "high", 30)
+        self.assertEqual(out["code"], "credential:window")
+        self.assertEqual(out["resets_at"], "2026-09-22T00:00:00Z")
 
     def test_gate_never_reads_a_zero_exit_without_an_allow_as_ok(self):
         # exit 0 but no gate verdict (an older claude-pick without --gate, or --gate dropped): unmeasured, not ok
@@ -229,6 +248,19 @@ class MachineDimensionTests(unittest.TestCase):
                                      {"name": "rabota-lane-b.service", "state": "active", "machine": "dev"}])
         b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
         self.assertEqual(b["allowed_new_lanes"], 1)
+
+    def test_a_full_cap_names_counts_cap_not_an_empty_reasons_list(self):
+        # DO-663 item 1 (amended assertion; fails against main, which returns allowed_new_lanes: 0
+        # with reasons == [] here -- everything else measured fine, so run_recipe's own refusal
+        # falls back to the unhelpful constant string "no lane capacity" instead of naming the cap).
+        busy = dict(DEV_IDLE, units=[{"name": "rabota-lane-a.service", "state": "active", "machine": "dev"},
+                                     {"name": "rabota-lane-b.service", "state": "active", "machine": "dev"},
+                                     {"name": "rabota-lane-c.service", "state": "active", "machine": "dev"}])
+        b = budget.compute(census_with(dev=busy), OK_CRED, self.t(), 3, machine="dev")
+        self.assertEqual(b["allowed_new_lanes"], 0)
+        self.assertEqual([r["code"] for r in b["reasons"]], ["counts:cap"])
+        self.assertIn("running 3", b["reasons"][0]["detail"])
+        self.assertIn("cap 3", b["reasons"][0]["detail"])
 
 
 class CensusFreshnessTests(MachineDimensionTests):
@@ -689,3 +721,48 @@ class RunningLanesGateTests(unittest.TestCase):
         runner = GateMathRunner(five_hour=70)
         g = budget.credential_gate(runner, "quantivly-1", "m", "e", 30, rate=20.0, running_minutes=0.0)
         self.assertTrue(g["ok"])
+
+
+class MachineArgvCliTests(unittest.TestCase):
+    """DO-663 item 2: ``commands/budget.py`` hard-coded ``--machine choices=["local", "dev"]``,
+    a second, narrower vocabulary than ``lane recipe``'s (which validates against
+    ``tenant.machines`` at runtime -- see ``MachineArgvCliTests`` in test_lane_recipe.py, the
+    same finding there). Under the hardcoded choices an undeclared machine name never reached
+    ``budget_mod.validate_machine`` at all: argparse itself refused it first, as a plain usage
+    error (exit 2), not the informative, named refusal (exit 3) the tenant-declared machine
+    check gives. Exercises the real argv parser (``cli.main``), not ``run_budget`` directly,
+    since the defect lived in the parser layer.
+    """
+
+    def setUp(self):
+        install_fixture_home(self)
+
+    def test_an_undeclared_machine_is_a_named_refusal_not_an_argparse_usage_error(self):
+        code, out, err = run_cli(["--tenant", "quantivly", "budget", "--machine", "nosuchmachine"])
+        self.assertEqual(code, 3, err)
+        payload = last_json(err)
+        self.assertEqual(payload["error"]["code"], "refused")
+        self.assertIn("nosuchmachine", payload["error"]["message"])
+
+    def test_a_machine_the_tenant_declares_other_than_dev_is_accepted_by_the_parser(self):
+        # The hardcoded choices also rejected any tenant-declared machine OTHER than "dev" before
+        # it ever reached the tenant config. This tenant declares only "local"/"dev", so this
+        # proves the parser itself no longer restricts the vocabulary -- the refusal that follows
+        # (no clauth profile for the fixture's dev seat) comes from validate_machine's caller
+        # (seat_for/credential_gate), never from argparse, and is still a named refusal (exit 3).
+        code, out, err = run_cli(["--tenant", "quantivly", "budget", "--machine", "dev"])
+        self.assertEqual(code, 3, err)
+        payload = last_json(err)
+        self.assertEqual(payload["error"]["code"], "refused")
+        self.assertNotIn("nosuchmachine", payload["error"]["message"])
+
+    def test_lane_recipe_and_budget_refuse_the_same_undeclared_machine_identically(self):
+        # DO-663 item 2: both commands now call the one shared `budget_mod.validate_machine`, so
+        # their refusal text for the same undeclared machine name must be word-for-word identical
+        # -- not just "both exit 3".
+        _, _, budget_err = run_cli(["--tenant", "quantivly", "budget", "--machine", "nosuchmachine"])
+        brief = self.home / "brief.md"
+        brief.write_text("## Common rules\nstub\n")
+        _, _, lane_err = run_cli(["--tenant", "quantivly", "lane", "recipe", "--brief", str(brief),
+                                  "--repo", "hub", "--machine", "nosuchmachine"])
+        self.assertEqual(last_json(budget_err)["error"]["message"], last_json(lane_err)["error"]["message"])

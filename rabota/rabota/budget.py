@@ -216,6 +216,25 @@ def running_lanes_minutes(store, tenant: str, seat: str, rate: float, census: di
     return total_minutes, detail
 
 
+def validate_machine(tenant, machine: str):
+    """The tenant's machine record for ``machine`` (``None`` for ``"local"``), refusing a machine
+    the tenant does not declare.
+
+    Shared by ``budget`` and ``lane recipe`` (DO-663 item 2) so the two commands check one
+    vocabulary, not two: ``commands/budget.py`` used to hard-code ``--machine choices=["local",
+    "dev"]`` while ``lane recipe`` validated against ``tenant.machines`` at runtime (argparse
+    ``choices`` cannot see the tenant — it is built before ``--tenant``/cwd resolve one, see
+    ``cli.build_parser``), so a tenant declaring a machine other than ``dev``, or none at all,
+    got two different answers from the two commands.
+    """
+    if machine == "local":
+        return None
+    m = tenant.machines.get(machine)
+    if m is None:
+        raise errors.Refused(f"tenant {tenant.name!r} declares no machine {machine!r}")
+    return m
+
+
 def seat_for(tenant, machine: str, override: str | None = None) -> str:
     """The seat a lane for ``tenant`` on ``machine`` must use; refuses a seat the tenant rule forbids.
 
@@ -310,6 +329,15 @@ def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int
         notes = [n for n in (rate_source, running_detail) if n]
         if notes and state != "gate-spend-wall":
             out["detail"] = f"{out['detail']} ({'; '.join(notes)})"
+        if state == "gate-spend-wall":
+            # The wall the gate actually hit is a WEEKLY one, not the 5h window `resets_at`
+            # defaults to above (DO-644): claude-pick's weekly arm decides per model window
+            # (gate.model_window: {label, utilization, resets_at, state}) when one governs the
+            # lane, and falls back to the aggregate seven_day window (top-level resets_at.weekly)
+            # only when it decided from the aggregate instead (model_window null) — see
+            # scripts/claude-pick's json_model_window and its gate_mw_* assembly.
+            model_window = gate.get("model_window")
+            out["resets_at"] = model_window["resets_at"] if model_window else resets.get("weekly")
     else:  # gate-unmeasured, gate-misconfigured, no-profiles, bad-table, backpressure,
            # or exit 0 without a verdict
         out["code"] = "credential:unmeasured"
@@ -344,6 +372,14 @@ def compute(census: dict | None, cred: dict, t, max_lanes_local: int, machine: s
             reasons.extend(_machine_reasons(m, t))
             running = _running_lanes(census, machine)
         unavailable.extend(census.get("unavailable", []))
+    if not reasons and running >= max_lanes_local:
+        # The cap itself: every other dimension measured fine, but this machine is already at
+        # (or over) its lane count. Without a named reason here, a reader sees
+        # ``allowed_new_lanes: 0`` with an empty ``reasons`` list and no way to tell "at cap"
+        # apart from "nothing was measured" -- `run_recipe`'s own refusal then falls back to the
+        # unhelpful constant string "no lane capacity" (DO-663).
+        reasons.append({"code": "counts:cap",
+                        "detail": f"running {running} at cap {max_lanes_local} on {machine}"})
     allowed = 0 if reasons else max(0, max_lanes_local - running)
     return {"schema": 1, "at": now(), "allowed_new_lanes": allowed, "reasons": reasons,
             "seat_pick": None, "five_h_pct_now": cred.get("five_h_pct_now"), "resets_at": cred.get("resets_at"),
