@@ -113,14 +113,22 @@ def _load_file(file: Path) -> dict:
 
 
 def _store(ctx: Context, source: str, data: dict) -> dict:
-    """Write ``sources/<source>.json`` from an already-validated payload; a failed fetch is recorded, not raised."""
+    """Write ``sources/<source>.json`` from an already-validated payload; a failed fetch is recorded, not raised.
+
+    ``ctx.dry_run`` (DO-753): the payload is still validated and the report still says what the
+    ingest would have recorded, but neither the snapshot nor the ``source_syncs`` row is written.
+    """
     ok = data["ok"]                       # a bool, or the caller's validation already raised
     error = None if ok else str(data.get("error") or "unknown error")
     items = data["items"] if ok else []
     payload = {"ok": ok, "error": error, "fetched_at": data["fetched_at"], "items": items}
-    path = snapshots.write(ctx.state_dir, source, payload)
-    ctx.store.record_sync(ctx.tenant.name, source, ok, error, str(path))
-    return {"source": source, "ok": ok, "error": error, "items": len(items), "path": str(path)}
+    path = snapshots.write(ctx.state_dir, source, payload, dry_run=ctx.dry_run)
+    if not ctx.dry_run:
+        ctx.store.record_sync(ctx.tenant.name, source, ok, error, str(path))
+    out = {"source": source, "ok": ok, "error": error, "items": len(items), "path": str(path)}
+    if ctx.dry_run:
+        out["dry_run"] = "nothing written (sources/<source>.json, source_syncs row)"
+    return out
 
 
 def run_ingest(ctx: Context, source: str, file: Path) -> dict:

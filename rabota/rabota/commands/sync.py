@@ -77,7 +77,7 @@ def sync_linear(ctx: Context, lin) -> dict:
     notifications = lin.inbox_notifications()
     payload = {"ok": True, "error": None, "viewer": viewer, "issues": list(issues.values()),
                "notifications": notifications}
-    snapshots.write(ctx.state_dir, "linear", payload)
+    snapshots.write(ctx.state_dir, "linear", payload, dry_run=ctx.dry_run)
     return {"issues": len(issues), "notifications": len(notifications)}
 
 
@@ -85,7 +85,7 @@ def sync_github(ctx: Context, gh) -> dict:
     """Review requests (individual vs team resolved), own open PRs, and recently merged PRs."""
     payload = {"ok": True, "error": None, "login": gh.login, "review_requests": gh.review_requests(),
                "own_prs": gh.own_prs(), "merged_recent": gh.merged_recent()}
-    snapshots.write(ctx.state_dir, "github", payload)
+    snapshots.write(ctx.state_dir, "github", payload, dry_run=ctx.dry_run)
     return {k: len(payload[k]) for k in ("review_requests", "own_prs", "merged_recent")}
 
 
@@ -94,7 +94,7 @@ def sync_fireflies(ctx: Context, ff) -> dict:
     since = fireflies_since(ctx, datetime.now(timezone.utc))
     transcripts = ff.recent_transcripts(since)
     payload = {"ok": True, "error": None, "transcripts": transcripts}
-    snapshots.write(ctx.state_dir, "fireflies", payload)
+    snapshots.write(ctx.state_dir, "fireflies", payload, dry_run=ctx.dry_run)
     return {"transcripts": len(transcripts)}
 
 
@@ -113,6 +113,12 @@ def run_sync(ctx: Context, sources: list[str], lin=None, gh=None, ff=None) -> di
 
     Returns ``{source: {"ok", "error", "path", "counts"}}`` and raises ``errors.Partial`` naming
     the failed sources after every source has been attempted and recorded.
+
+    ``ctx.dry_run`` (DO-753): each connector is still fetched for real (a network READ), and
+    ``sync_linear``/``sync_github``/``sync_fireflies`` still compute the full payload, but
+    ``snapshots.write`` (called inside each of those) skips the write, and the ``source_syncs``
+    row below is skipped too — no state file, no store row, on either the success or the failure
+    path.
     """
     report, failed = {}, []
     for source in sources:
@@ -126,12 +132,16 @@ def run_sync(ctx: Context, sources: list[str], lin=None, gh=None, ff=None) -> di
             # store redacts again on its own; redacting here too keeps the terminal report
             # printable, so the caller gets `partial` naming the source instead of `secret_leak`.
             msg = secrets.redact(str(e), os.environ)
-            ctx.store.record_sync(ctx.tenant.name, source, False, msg, "")
+            if not ctx.dry_run:
+                ctx.store.record_sync(ctx.tenant.name, source, False, msg, "")
             report[source] = {"ok": False, "error": msg, "path": "", "counts": {}}
             failed.append(source)
             continue
-        ctx.store.record_sync(ctx.tenant.name, source, True, None, path)
+        if not ctx.dry_run:
+            ctx.store.record_sync(ctx.tenant.name, source, True, None, path)
         report[source] = {"ok": True, "error": None, "path": path, "counts": counts}
+    if ctx.dry_run:
+        report["dry_run"] = "nothing written (sources/*.json, source_syncs rows)"
     if failed:
         raise errors.Partial(f"sources failed: {', '.join(failed)}", failed=failed)
     return report

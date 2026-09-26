@@ -123,6 +123,16 @@ def run_import_v1(ctx: Context, jsonl: Path) -> dict:
     ids = {key: e["id"] for key, e in by_key.items()}
     resolved_already = {key for key, e in by_key.items() if e["resolved_at"]}
     imported = resolved = 0
+    if ctx.dry_run:
+        # DO-753: the same walk `with ctx.store.transaction()` below performs, but counting only —
+        # neither `add_escalation` nor `answer_escalation` is called, so nothing lands in the store.
+        seen_ids, seen_resolved = set(ids), set(resolved_already)
+        for key, fs, row in rows:
+            if key not in seen_ids:
+                seen_ids.add(key); imported += 1
+            if not _is_open(row.get("disposition")) and key not in seen_resolved:
+                seen_resolved.add(key); resolved += 1
+        return {"imported": imported, "resolved": resolved, "dry_run": "nothing written (escalations rows)"}
     with ctx.store.transaction():
         for key, fs, row in rows:
             if key not in ids:

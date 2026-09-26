@@ -133,6 +133,17 @@ class BudgetTests(unittest.TestCase):
         self.assertTrue((ctx.state_dir / "budget.json").exists())
         self.assertEqual(counts(), before)
 
+    def test_dry_run_writes_no_budget_json(self):
+        # DO-753: the standalone `rabota budget` command passes `dry_run=ctx.dry_run` explicitly;
+        # `lane recipe`'s own gate call site (DO-743) leaves the parameter at its default and is
+        # covered separately in tests/test_lane_recipe.py, unaffected by this.
+        from rabota.commands import budget as cmd
+        runner = FakeRunner([(["claude-pick"], pick_json("picked", "quantivly-1", 30, 87, "allow", 0))])
+        ctx = self.ctx(runner)
+        b = cmd.run_budget(ctx, machine="local", model="m", effort="e", est_minutes=30, dry_run=True)
+        self.assertFalse((ctx.state_dir / "budget.json").exists())
+        self.assertEqual(b["dry_run"], "nothing written (budget.json)")
+
     def test_command_seat_refusal_before_any_write_is_a_clean_refusal(self):
         # the seat rule fires before claude-pick is asked or budget.json exists; the CLI must not trip over the missing file
         from rabota import cli

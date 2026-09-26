@@ -84,6 +84,16 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(json.loads((Path(self.tmp.name) / "s" / "census.json").read_text())["counts"], c["counts"])
         for s in c["sessions"]: self.assertNotIn("argv", s); self.assertNotIn("env", s)
 
+    def test_dry_run_gather_writes_no_census_json_but_still_measures(self):
+        # DO-753: the measurement itself (including settle_finished's lane bookkeeping, per the
+        # reap.py principle that local bookkeeping about already-happened events survives a dry
+        # run) is unaffected -- only census.json's own write is suppressed.
+        self.ctx.dry_run = True
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertEqual(c["counts"], {"sessions": 5, "user": 2, "sol": 1, "rabota": 2, "unknown": 0, "units_active": 1})
+        self.assertFalse((Path(self.tmp.name) / "s" / "census.json").exists())
+        self.assertEqual(c["dry_run"], "nothing written (census.json)")
+
     def test_gather_writes_machines_into_the_contract_file(self):
         c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
         self.assertEqual([m["name"] for m in c["machines"]], ["dev"])
@@ -567,3 +577,15 @@ class SettleRemoteTests(unittest.TestCase):
                                          [{"name": "quantivly-0", "five_h_pct": 12}], machines=rows)
         self.assertEqual(settled, ["L1"])
         self.assertEqual(ctx.store.get_lane("L1")["cost_usd"], 0.42)
+
+
+class CensusCmdTextLinesTests(unittest.TestCase):
+    def test_dry_run_head_line_is_first_and_only_present_when_set(self):
+        from rabota.commands.census import text_lines
+        c = {"counts": {"sessions": 0, "user": 0, "sol": 0, "rabota": 0, "units_active": 0},
+             "machine": {"load1": 0.1, "ncpu": 4, "swap_used_pct": 0}, "seats": [], "unavailable": [],
+             "dry_run": "nothing written (census.json)"}
+        lines = text_lines(c)
+        self.assertEqual(lines[0], "dry-run: nothing written (census.json)")
+        del c["dry_run"]
+        self.assertFalse(text_lines(c)[0].startswith("dry-run:"))

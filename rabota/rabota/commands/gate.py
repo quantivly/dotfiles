@@ -10,6 +10,9 @@ from rabota.context import Context
 
 
 def run_gate(ctx: Context, subject: str, label: str) -> dict:
+    """Append a gate-answered event; with ``ctx.dry_run`` (DO-753) no ``gate_answers`` row is written."""
+    if ctx.dry_run:
+        return {"subject": subject, "label": label, "ts": None, "dry_run": "nothing written (gate_answers row)"}
     ctx.store.record_gate(ctx.tenant.name, subject, label)
     row = ctx.store.gates(ctx.tenant.name)[-1]
     return {"subject": row["subject"], "label": row["label"], "ts": row["ts"]}

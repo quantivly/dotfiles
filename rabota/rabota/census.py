@@ -418,6 +418,11 @@ def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper
                        "swap_used_pct": si.swap_used_pct},
            "sessions": sess, "units": us, "seats": st, "worktrees": wt, "machines": ms, "counts": counts,
            "unavailable": unavailable}
+    # DO-753: everything above (including `settle_finished`'s lane-row bookkeeping) still runs on a
+    # dry census -- it is real measurement, not a write of the census's OWN state -- but
+    # `census.json` itself is not written, and its parent directory is not created just to hold it.
+    if ctx.dry_run:
+        return {**out, "dry_run": "nothing written (census.json)"}
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     # Written through the same guard emit applies to stdout: a contract file is output too.
     text = secrets.assert_clean(json.dumps(out, indent=1, sort_keys=True) + "\n", os.environ)

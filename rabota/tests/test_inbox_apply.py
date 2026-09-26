@@ -63,6 +63,18 @@ class ApplyTests(unittest.TestCase):
         self.assertIsNone(self.client.n["n1"]["archivedAt"])
         self.assertIsNotNone(self.store.decisions(rep["batch_id"])[0]["rolled_back_at"])
 
+    def test_dry_run_rollback_never_touches_the_client_or_marks_rolled_back(self):
+        # DO-753 "most urgent": a --dry-run rollback used to mutate Linear for real (unarchive,
+        # restore a due date) because `apply.rollback` read no dry_run at all. `self.client` here
+        # records every call it receives, so any mutation attempted at all fails this immediately.
+        rep = apply.apply_auto(self.plan, self.client, self.store, T)
+        calls_before = list(self.client.calls)
+        rb = apply.rollback(rep["batch_id"], self.client, self.store, dry_run=True)
+        self.assertEqual(self.client.calls, calls_before)          # nothing sent to Linear
+        self.assertEqual(sorted(rb["would_restore"]),
+                         sorted(d["entity_id"] for d in self.store.decisions(rep["batch_id"])))
+        self.assertIsNone(self.store.decisions(rep["batch_id"])[0]["rolled_back_at"])   # not marked rolled back
+
     def test_due_policy_requires_confirmed_is_true_not_truthy(self):
         # k5's shape: a truthy-but-not-True confirmed must not pass. The CLI path is safe (argparse
         # produces a real bool); this guards the Python API a future caller (WS5) will use directly.

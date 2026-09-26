@@ -5,9 +5,16 @@ suppresses only the Linear-mutating ``auto`` step (``run_apply`` is called with
 ``dry_run=ctx.dry_run``, so it plans but does not apply). ``sync``, ``plan``, ``rank`` and
 ``census`` write only local files under the tenant's own state dir — ``sources/*.json``,
 ``sequence.json``/``.md``, ``census.json``, and ``precompute.log`` itself — and always do,
-dry-run or not: ``run_sync``, ``run_plan``, ``run_rank`` and ``census.gather`` take no
-``dry_run`` parameter at all. Making ``--dry-run`` suppress those writes too would be a
-CLI-wide semantics change affecting every subcommand, not a ``precompute``-local decision.
+dry-run or not.
+
+**DO-753 made ``run_sync``/``run_plan``/``run_rank``/``census.gather`` themselves read
+``ctx.dry_run``** (their standalone CLI commands' own meaning: "nothing is written"), which is
+exactly the opposite of what this module needs from them — the timer's own point is to keep local
+state current, and ``--dry-run`` here is a promise about Linear, never about the timer's own
+bookkeeping. ``_local_write_step`` runs a step with ``ctx.dry_run`` forced ``False`` for its
+duration, so those four functions still write local state on a ``precompute --dry-run`` tick
+exactly as before, while the ``auto`` step (still reading the REAL ``ctx.dry_run``) is the only one
+whose behaviour actually changes.
 """
 import json, time
 from rabota import cli, emit, errors
@@ -19,6 +26,24 @@ DRY_RUN_NOTE = ("--dry-run suppresses only the Linear-mutating 'auto' step; sync
                  "precompute.log) whether or not --dry-run is set.")
 
 
+def _local_write_step(fn):
+    """Wrap a step so it always writes its own local state, regardless of the global --dry-run.
+
+    See the module docstring: DO-753 gave ``run_sync``/``run_plan``/``run_rank``/``census.gather``
+    their own ``ctx.dry_run`` reading, and precompute's contract for those four steps is the
+    opposite of that reading. Flipping ``ctx.dry_run`` for the duration of one step (restored in
+    ``finally``, even if the step raises) is cheaper than building a second ``Context`` (which would
+    open a second sqlite connection to the same store) and touches no other step.
+    """
+    def wrapped(ctx):
+        saved, ctx.dry_run = ctx.dry_run, False
+        try:
+            return fn(ctx)
+        finally:
+            ctx.dry_run = saved
+    return wrapped
+
+
 def _default_steps():
     from rabota.commands.sync import FETCHED_SOURCES, run_sync
     from rabota.commands.inbox import run_plan, run_apply
@@ -28,11 +53,11 @@ def _default_steps():
     # Fireflies out of every precompute tick even after it joined FETCHED_SOURCES, because this
     # step never reads that constant -- the one place that decides what the CLI itself fetches
     # would then disagree with the one place that actually calls it, silently.
-    return {"sync": lambda ctx: run_sync(ctx, [s for s in FETCHED_SOURCES if s in ctx.tenant.sources]),
-            "plan": lambda ctx: run_plan(ctx),
+    return {"sync": _local_write_step(lambda ctx: run_sync(ctx, [s for s in FETCHED_SOURCES if s in ctx.tenant.sources])),
+            "plan": _local_write_step(lambda ctx: run_plan(ctx)),
             "auto": lambda ctx: run_apply(ctx, tier="auto", batch=None, confirmed=False, dry_run=ctx.dry_run),
-            "rank": lambda ctx: run_rank(ctx),
-            "census": lambda ctx: gather(ctx, sample_seconds=2.0, include_worktrees=False)}
+            "rank": _local_write_step(lambda ctx: run_rank(ctx)),
+            "census": _local_write_step(lambda ctx: gather(ctx, sample_seconds=2.0, include_worktrees=False))}
 
 
 def run_precompute(ctx: Context, steps=None) -> dict:

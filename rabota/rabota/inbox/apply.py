@@ -86,9 +86,20 @@ def apply_due_policy(plan: dict, client, store, tenant, confirmed: bool, dry_run
     return rep
 
 
-def rollback(batch_id: str, client, store) -> dict:
+def rollback(batch_id: str, client, store, dry_run: bool = False) -> dict:
+    """Undo a batch's writes from its recorded ``prior`` values.
+
+    ``dry_run`` (DO-753, "most urgent"): a rollback mutates Linear (unarchiving a notification,
+    restoring a due date), so a ``--dry-run`` rollback must send nothing — this returns before
+    ``client`` is ever touched or ``store.mark_rolled_back`` is called, naming what it would have
+    restored instead of restoring it. ``store.decisions`` itself is a read: it costs nothing to
+    compute the ``would_restore`` list from the same rows a real rollback would act on.
+    """
+    decisions = store.decisions(batch_id)
+    if dry_run:
+        return {"batch_id": batch_id, "would_restore": [d["entity_id"] for d in decisions]}
     rep = {"batch_id": batch_id, "restored": 0, "failed": []}
-    for d in store.decisions(batch_id):
+    for d in decisions:
         try:
             if d["action"] == "archive":
                 client.unarchive_notification(d["entity_id"])

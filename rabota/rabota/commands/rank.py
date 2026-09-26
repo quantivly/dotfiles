@@ -72,10 +72,18 @@ def compute_sequence(ctx: Context) -> dict:
 
 
 def run_rank(ctx: Context) -> dict:
-    """Rank today's inputs; sources whose last sync failed are listed in ``failed_sources``."""
+    """Rank today's inputs; sources whose last sync failed are listed in ``failed_sources``.
+
+    ``ctx.dry_run`` (DO-753): the same ranked answer is still computed (``compute_sequence``,
+    already write-free — the same function ``brief --dry-run`` uses), but ``sequence.json``/``.md``
+    are not written and the day directory is not created.
+    """
+    seq = compute_sequence(ctx)
+    if ctx.dry_run:
+        return {"path": None, "items": len(seq["items"]), "decisions": len(seq["decisions"]),
+                "triage": len(seq["triage"]), "dry_run": "nothing written (sequence.json, sequence.md)"}
     day = ctx.state_dir / ctx.today.isoformat()
     day.mkdir(parents=True, exist_ok=True)
-    seq = compute_sequence(ctx)
     emit.write_file(day / "sequence.json", json.dumps(seq, indent=1))    # guarded: nothing lands on a leak (k2)
     emit.write_file(day / "sequence.md", rank_mod.to_markdown(seq))
     return {"path": str(day / "sequence.json"), "items": len(seq["items"]),

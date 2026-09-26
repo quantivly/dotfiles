@@ -219,11 +219,11 @@ class IngestInlineCliTests(unittest.TestCase):
         self.assertIn("not valid UTF-8", out + err)
         self.assertFalse((state / "sources" / "slack.json").exists())
 
-    def test_dry_run_does_not_gate_the_inline_form_either(self):
-        # Hazard 3 (DO-742's audit): `ingest` does not honour --dry-run today, and this brief is
-        # explicitly out of scope for fixing that. This row proves the inline form inherits the
-        # same gap rather than silently fixing or silently worsening it: --dry-run is accepted but
-        # the write still happens.
+    def test_dry_run_gates_the_inline_form_too(self):
+        # DO-753 (amends the DO-742-era row this replaced, which asserted the opposite -- that
+        # `ingest` ignored `--dry-run` and wrote anyway, "explicitly out of scope" at the time).
+        # `ingest` is one of DO-753's named commands: --dry-run must now mean nothing is written,
+        # and the inline form must inherit that exactly as it inherited the old gap.
         from tests.test_cli import run_cli, install_fixture_home
         import io
         from unittest.mock import patch
@@ -234,7 +234,7 @@ class IngestInlineCliTests(unittest.TestCase):
             code, out, err = run_cli(["--tenant", "quantivly", "--state-dir", str(state), "--dry-run",
                                        "ingest", "--stdin"])
         self.assertEqual(code, 0, out + err)
-        self.assertIsNotNone(snapshots.read(state, "slack"))   # written despite --dry-run
+        self.assertIsNone(snapshots.read(state, "slack"))   # nothing written under --dry-run
 
 
 class IngestInlineRealShellTests(unittest.TestCase):

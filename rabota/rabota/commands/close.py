@@ -35,7 +35,8 @@ def run_close(ctx: Context, notes: list[str] | None = None) -> dict:
     if held:
         raise errors.Refused("lanes held: " + ", ".join(f"{l['id']} ({l['held_reason']})" for l in held))
     day = ctx.state_dir / ctx.today.isoformat()
-    day.mkdir(parents=True, exist_ok=True)
+    if not ctx.dry_run:
+        day.mkdir(parents=True, exist_ok=True)
     running = ctx.store.list_lanes(ctx.tenant.name, status="started")
     open_esc = ctx.store.open_escalations(ctx.tenant.name)
     corrections = [e for e in open_esc if e.get("kind") == "correction"]
@@ -58,15 +59,19 @@ def run_close(ctx: Context, notes: list[str] | None = None) -> dict:
     lines += [f"- ESC-{e['id']} (since {e['first_seen'][:10]}): {e['question']}" for e in corrections] or ["- none"]
 
     cf = day / "carry-forward.md"
-    emit.write_file(cf, "\n".join(lines) + "\n")
+    emit.write_file(cf, "\n".join(lines) + "\n", dry_run=ctx.dry_run)
 
     index = ctx.state_dir / "INDEX.md"
     if not index.exists():
-        emit.write_file(index, "| Date | Mode | Items | Lanes running | Open escalations | Notes |\n|---|---|---|---|---|---|\n")
+        emit.write_file(index, "| Date | Mode | Items | Lanes running | Open escalations | Notes |\n|---|---|---|---|---|---|\n",
+                        dry_run=ctx.dry_run)
     notes_cell = "; ".join(_index_cell(n) for n in (notes or []))
     row = f"| {ctx.today.isoformat()} | close | - | {len(running)} | {len(open_esc)} | {notes_cell} |"
-    emit.append_file(index, row + "\n")
-    return {"carry_forward": str(cf), "index_row": row}
+    emit.append_file(index, row + "\n", dry_run=ctx.dry_run)
+    out = {"carry_forward": str(cf), "index_row": row}
+    if ctx.dry_run:
+        out["dry_run"] = "nothing written (carry-forward.md, INDEX.md)"
+    return out
 
 
 def _build(sub):

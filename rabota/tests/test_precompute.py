@@ -57,6 +57,33 @@ class PrecomputeTests(unittest.TestCase):
             steps["auto"](ctx)
         fake_apply.assert_called_once_with(ctx, tier="auto", batch=None, confirmed=False, dry_run=True)
 
+    def test_local_write_step_forces_dry_run_off_for_its_duration_only(self):
+        # DO-753 gave run_sync/run_plan/run_rank/census.gather their own ctx.dry_run reading, the
+        # opposite of precompute's contract (module docstring: those always write local state,
+        # dry-run or not). `_local_write_step` must flip ctx.dry_run to False for the wrapped call
+        # and restore it afterwards -- including when the step raises.
+        ctx = self.ctx(); ctx.dry_run = True
+        seen = []
+        def step(c):
+            seen.append(c.dry_run)
+            raise errors.RabotaError("boom")
+        wrapped = precompute._local_write_step(step)
+        with self.assertRaises(errors.RabotaError):
+            wrapped(ctx)
+        self.assertEqual(seen, [False])
+        self.assertTrue(ctx.dry_run)   # restored
+
+    def test_precompute_dry_run_still_writes_rank_output_for_real(self):
+        # End-to-end version of the same guarantee, through the real `rank` step rather than a
+        # stub -- proves `run_rank` actually receives dry_run=False under a `precompute --dry-run`
+        # tick (`rank` needs no runner/network calls, unlike `sync`/`census`, so it drives the real
+        # function without a FakeRunner setup of its own).
+        ctx = self.ctx(); ctx.dry_run = True
+        steps = precompute._default_steps()
+        steps["rank"](ctx)
+        self.assertTrue((ctx.state_dir / ctx.today.isoformat() / "sequence.json").exists())
+        self.assertTrue(ctx.dry_run)   # the global flag itself is unchanged after the step
+
     def test_middle_step_non_rabota_exception_does_not_abort_the_chain(self):
         # Item 1: run_precompute used to catch only errors.RabotaError, so a plain
         # KeyError/OSError/Exception from any step took the whole tick down uncaught —

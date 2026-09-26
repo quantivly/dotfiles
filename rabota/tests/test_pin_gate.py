@@ -50,6 +50,12 @@ class PinGateCmdTests(unittest.TestCase):
         self.assertEqual(rows[0]["bucket"], 3)
         self.assertEqual(rows[0]["rationale"], "revised rationale")
 
+    def test_dry_run_pin_writes_no_row(self):
+        ctx = self.ctx(); ctx.dry_run = True
+        out = pin_cmd.run_pin(ctx, "HUB-1", 2, "promised Thursday")
+        self.assertEqual(ctx.store.pins("quantivly"), [])
+        self.assertEqual(out["dry_run"], "nothing written (pins row)")
+
     def test_missing_required_flag_is_usage_error(self):
         # argparse itself raises ``SystemExit(2)`` for a required subcommand argument on this
         # interpreter — a subparser's ``error()`` is never routed through ``cli.py``'s
@@ -89,6 +95,12 @@ class PinGateCmdTests(unittest.TestCase):
         rows = ctx.store.gates("quantivly")
         self.assertEqual(len(rows), 2)
         self.assertEqual([r["label"] for r in rows], ["go ahead", "go ahead"])
+
+    def test_dry_run_gate_writes_no_row(self):
+        ctx = self.ctx(); ctx.dry_run = True
+        out = gate_cmd.run_gate(ctx, "merge PR 42", "go ahead")
+        self.assertEqual(ctx.store.gates("quantivly"), [])
+        self.assertEqual(out["dry_run"], "nothing written (gate_answers row)")
 
     def test_gate_missing_required_flag_is_usage_error(self):
         with self.assertRaises(SystemExit) as cm:

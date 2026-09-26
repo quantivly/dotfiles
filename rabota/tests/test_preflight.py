@@ -135,6 +135,22 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual((len(runs), runs[0]["mode"], runs[0]["preflight_ok"]), (1, "preflight", 0))
         self.assertIsNotNone(runs[0]["finished_at"])
 
+    def test_dry_run_command_records_no_run_row(self):
+        # DO-753 hazard 1: the standalone `preflight` command passes record_run=not ctx.dry_run;
+        # a passing preflight still refuses nothing, but records no `runs` row.
+        ctx = self.ctx("quantivly", {"PATH": "/bin", "HERDR_ENV": "1", "CLAUDE_CONFIG_DIR": "/x/quantivly-1"})
+        report = preflight.run_command(ctx, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER), record_run=False)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(ctx.store._rows("SELECT * FROM runs"), [])
+
+    def test_record_run_default_is_unchanged_for_an_existing_caller_like_brief(self):
+        # `commands.brief.run_brief` calls `run_command(ctx, gh=gh, lin=lin)` with no `record_run`
+        # argument at all, on every path including its own dry one (Move 5, DO-742, deliberately
+        # out of scope for DO-753) -- the default must still record, so that caller is unaffected.
+        ctx = self.ctx("quantivly", {"PATH": "/bin", "HERDR_ENV": "1", "CLAUDE_CONFIG_DIR": "/x/quantivly-1"})
+        preflight.run_command(ctx, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER))
+        self.assertEqual(len(ctx.store._rows("SELECT * FROM runs")), 1)
+
     # DO-730: concurrency ------------------------------------------------------------------
 
     def test_skipped_source_never_becomes_a_task_that_runs(self):

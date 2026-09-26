@@ -47,18 +47,31 @@ def json_err(code_name, message, **extra):
     sys.stderr.write(text)
 
 
-def write_file(path, text: str) -> Path:
-    """Guard ``text`` with ``assert_clean`` and only then write it to ``path``; nothing is written on a leak."""
+def write_file(path, text: str, dry_run: bool = False) -> Path:
+    """Guard ``text`` with ``assert_clean`` and only then write it to ``path``; nothing is written on a leak.
+
+    ``dry_run`` (DO-753) still runs the guard — a dry run computes the real text and a leak in it
+    is exactly as real — but returns before anything touches disk. This is the one place a
+    caller's ``--dry-run`` becomes "no bytes land", so every command writing a state-dir file
+    threads ``ctx.dry_run`` through here rather than re-implementing the skip itself.
+    """
     text = _guard(text)
     path = Path(path)
+    if dry_run:
+        return path
     path.write_text(text)
     return path
 
 
-def append_file(path, text: str) -> Path:
-    """Guard ``text`` with ``assert_clean`` and only then append it to ``path``; nothing is appended on a leak."""
+def append_file(path, text: str, dry_run: bool = False) -> Path:
+    """Guard ``text`` with ``assert_clean`` and only then append it to ``path``; nothing is appended on a leak.
+
+    ``dry_run``: see ``write_file`` — same reasoning, same one place the skip happens.
+    """
     text = _guard(text)
     path = Path(path)
+    if dry_run:
+        return path
     with path.open("a") as f:
         f.write(text)
     return path
