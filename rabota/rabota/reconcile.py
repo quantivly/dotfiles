@@ -6,30 +6,24 @@ Slack and Calendar are not fetched yet (see ``commands.brief.compute_needs``), a
 though fetched server-side by the timer since DO-746, is not yet classified: its items reach
 ``needs`` unclassified, the same way a stale Slack/Calendar entry does. So pairing a commitment
 with what Linear/GitHub say has to wait for turn 2, where the agent has just fetched or been
-handed the connector items — and it can only cost 0 further round trips if what it needs is
-already sitting in turn 1's ``brief`` reply. This module builds exactly that: a slim projection of
-the two snapshots the 30-minute ``precompute`` timer already keeps fresh, so building it costs a
-re-read of two small files already on disk, never a new fetch.
+handed the connector items.
 
 **What it is not.** It does not fetch anything itself, and it does not do the classification —
 that stays model judgement (``reconcile.md``). It is the haystack, not the needle.
 
-**Size — measured, not assumed.** No description prose, no notifications, no ``review_requests``
-(none of the six classes in ``reconcile.md`` need them — see ``build_tracked_index``'s docstring).
-Even so, ``tests/test_reconcile_index.py`` measures a realistic tenant (25 open Linear issues, 8
-open + 5 merged PRs) at **~10.6 KB** (was ~10 KB post-DO-735/~9.7 KB before ``pr_links``), roughly
-2.6x the lane-artifact ``max_verdict_bytes`` discipline (4096 bytes, ``2026-09-16-rabota-v2-design.md``
-line 232) cited here as the reference point for "small," not a bar this module claims to clear. At
-~278 bytes/issue (most of which carry no PR attachment at all — ``pr_links: []`` costs about 15
-bytes; one that resolves against ``own_prs``/``merged_recent`` costs roughly 140-160 more, of which
-``title`` (F2, review of DO-735) is +48) and ~215-260 bytes/PR (``merged_recent`` also gained
-``title`` — +48 there too), the 4 KB line falls at roughly 15 tracked items total, and a working
-tenant's assigned-or-created-open Linear queue alone routinely exceeds that. The honest tradeoff:
-still far smaller than re-reading both raw snapshots whole (notifications and ``review_requests``
-are the bulk of what is dropped), but not small in the lane-artifact sense — a caller with an
-unusually large backlog pays for it in context every morning, and that cost was not reduced further
-here (see the verdict for this being named rather than papered over, per the brief's
-finding-worth-reporting instruction).
+**DO-751: this module's projection no longer rides in turn 1's JSON reply at all.**
+``build_tracked_index`` builds the whole-tenant projection below and is kept — ``snapshot_health``
+still calls it, and so does ``lookup_tracked`` — but ``commands.brief.run_brief`` stopped returning
+it once @zvi's real tenant (~908 open assigned-or-created issues) measured it at ~303 KB
+synthetically scaled to that count (110 with a PR attachment, 20 open PRs, 100 merged;
+``tests/test_reconcile_index.py``'s ``TrackedIndexLiveScaleTests``) — about 75x the ~4 KB reference
+point this module's docstring used to cite as "small," and climbing linearly with the tenant's
+open-issue count, never bounded by what a turn-2 classification pass actually needs to look at
+(typically single digits of subjects). ``lookup_tracked`` (below) answers ``rabota tracked
+<key>...`` instead: the same per-item projection, cut to exactly the keys a caller names, at the
+cost of one more CLI call turn 2 already has the connector items to make. See ``reconcile.md`` for
+the turn-2 contract and ``lookup_tracked``'s docstring for the "not found" vs "unknown" split that
+answers the same question ``build_tracked_index``'s per-side ``ok``/``reason`` always has.
 
 **Missing or unreadable snapshots.** Following the precedent ``compute_needs`` set (#237): an
 unreadable or absent snapshot is an empty side of the index plus a ``reason``, never an exception —
@@ -46,6 +40,24 @@ from rabota.snapshots import STALE_AFTER_MIN
 # DO-735: a GitHub-integration attachment's URL path, not its (undocumented) `metadata`, is what
 # tells a PR attachment apart from a plain GitHub Issue one — see sources/linear.py's schema notes.
 _GITHUB_PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
+
+# A Linear identifier: team key, dash, number (``HUB-5812``, ``CORE-561``). A GitHub PR/issue key
+# built by this module is always ``owner/repo#n`` and so always contains ``#`` -- the two shapes
+# never collide, which is what lets `classify_subject` route on shape alone (DO-751).
+_LINEAR_KEY = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
+
+
+def classify_subject(key: str) -> str:
+    """``"linear"``/``"github"``/``"other"`` -- which side of the tracked index, if any, a
+    commitment's subject could be looked up against. A person-plus-topic subject (a Slack thread, a
+    Fireflies transcript) is ``"other"``: `reconcile.md` verifies those two classes
+    (``question-owed``/``spoken-already-done``) against the connector artifact itself, never
+    against Linear or GitHub, so `lookup_tracked` never looks one up at all."""
+    if "#" in key:
+        return "github"
+    if _LINEAR_KEY.match(key):
+        return "linear"
+    return "other"
 
 
 def _pr_links(issue: dict) -> list[dict] | None:
@@ -229,3 +241,60 @@ def snapshot_health(ctx, now: datetime | None = None) -> list[dict]:
     return [{"source": source, "reason": side["reason"] or "unreliable"}
             for source, side in index.items()
             if not side["ok"] and not side.get("skipped")]
+
+
+def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
+    """``{"linear": {"ok", "reason"}, "github": {"ok", "reason"}, "results": [...]}`` for exactly
+    ``keys`` (DO-751) -- what ``rabota tracked <key>...`` answers, and what turn 2 calls instead of
+    reading a whole-tenant index out of turn 1's ``brief`` reply. Built from the same per-issue/PR
+    projection ``build_tracked_index`` computes (so a lookup can never disagree with it about what
+    a field means), then cut to the handful of subjects a caller is actually classifying, which is
+    what keeps this cheap where returning the whole index is not: one CLI call, no network, and a
+    byte cost proportional to the keys asked for rather than to the tenant's issue count.
+
+    Each result is exactly one of:
+
+    - ``{"key", "status": "found", "kind": "linear"|"github", "record": {...}}`` -- the same record
+      shape ``build_tracked_index`` returns for that item (an issue dict with ``pr_links``, or a PR
+      dict tagged with ``kind: "own_pr"``/``"merged_recent"``).
+    - ``{"key", "status": "not_found"}`` -- the source is trustworthy (``ok`` true) and simply does
+      not name this subject. This is the answer a `promised-untracked` check wants: proof of
+      absence, not silence about it.
+    - ``{"key", "status": "unknown", "reason"}`` -- the source cannot be relied on (unsynced,
+      unreadable, or the tenant does not use it), so absence here proves nothing. **Never conflate
+      this with ``not_found``** — that conflation is exactly golden ``g06``'s bug (a pre-attachment
+      snapshot read as "no PR exists" rather than "attachments unknown"), one level up: at the
+      per-key rather than per-attachment layer.
+    - ``{"key", "status": "not_applicable"}`` -- ``key`` is neither a Linear identifier nor a
+      ``owner/repo#n`` PR key (see `classify_subject`), i.e. a person-plus-topic subject that
+      `reconcile.md` verifies against the connector artifact itself and never against this index.
+
+    A PR key present in both ``own_prs`` and ``merged_recent`` reads as ``merged_recent`` — the
+    same precedence `_resolve_pr_states` already gives a merged PR over an open one.
+    """
+    now = now or datetime.now(timezone.utc)
+    index = build_tracked_index(ctx, now)
+    linear_side, github_side = index["linear"], index["github"]
+    linear_by_key = {i["key"]: i for i in linear_side.get("issues", [])}
+    github_by_key = {}
+    for p in github_side.get("own_prs", []):
+        github_by_key[p["key"]] = {"kind": "own_pr", **p}
+    for p in github_side.get("merged_recent", []):     # merged wins over open — see docstring
+        github_by_key[p["key"]] = {"kind": "merged_recent", **p}
+
+    results = []
+    for key in keys:
+        subject = classify_subject(key)
+        side = linear_side if subject == "linear" else github_side if subject == "github" else None
+        by_key = linear_by_key if subject == "linear" else github_by_key
+        if subject == "other":
+            results.append({"key": key, "status": "not_applicable"})
+        elif key in by_key:
+            results.append({"key": key, "status": "found", "kind": subject, "record": by_key[key]})
+        elif not side["ok"]:
+            results.append({"key": key, "status": "unknown", "reason": side["reason"]})
+        else:
+            results.append({"key": key, "status": "not_found"})
+    return {"linear": {"ok": linear_side["ok"], "reason": linear_side["reason"]},
+            "github": {"ok": github_side["ok"], "reason": github_side["reason"]},
+            "results": results}

@@ -554,7 +554,7 @@ def compute_needs(ctx: Context, now: datetime) -> list[dict]:
 def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetime | None = None, gh=None, lin=None,
              classified: list[str] | None = None):
     """Preflight, rank (if needed) and compose today's brief in one call; return lines or
-    ``{"lines", "brief_path", "needs", "tracked"}``.
+    ``{"lines", "brief_path", "needs"}``.
 
     ``gh``/``lin`` let a test substitute preflight's identity clients, exactly as ``preflight.run_preflight``
     already allows; left ``None`` (the CLI wiring), real clients are built and a failed pin exits 3.
@@ -564,17 +564,20 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     — a dry run writes nothing, marking included. See the module docstring's finding-D section for
     why marking is this explicit rather than a side effect of a brief being shown.
 
-    **Move 4 (``tracked``).** The tracked-side index reconcile needs (``reconcile.build_tracked_index``)
-    rides in the same JSON reply as ``needs`` — turn 1's ``brief`` call, the only one that can afford
-    it (see ``rabota.reconcile``'s module docstring). It costs a re-read of the two small snapshot
-    files already on disk, never a fetch, so it is built unconditionally in JSON mode; ``--text`` is
-    the human/terminal path and has no line shape for structured data, so it skips the read entirely.
+    **Move 4 (``tracked``, DO-716) removed (DO-751).** This reply used to also carry
+    ``reconcile.build_tracked_index``'s whole-tenant projection — cheap on the 25-issue tenant it
+    was measured against, but it grows linearly with the tenant's open-issue count and measured
+    ~303 KB synthetically scaled to @zvi's real one (~908 open issues). Turn 2 now calls ``rabota
+    tracked <key>...`` (``reconcile.lookup_tracked``) with exactly the subjects it is classifying
+    instead — one more CLI call, no network, paid only when there is something to classify. A
+    caller reading the JSON reply for a ``"tracked"`` key gets ``KeyError`` now, not a stale or
+    empty placeholder; see ``reconcile.py``'s module docstring for the full measurement.
 
     **Move 5 (``ctx.dry_run``, DO-742).** With it set, nothing is written — not ``sequence.json``/
     ``.md``, not ``brief.md``, not ``last-brief.json`` — and the JSON return's ``brief_path`` is
     ``None`` rather than a path to a file that does not exist. Everything else (the printed lines,
-    ``needs``, ``tracked``) is computed exactly as a real run would compute it; see the module
-    docstring for why preflight itself is not skipped.
+    ``needs``) is computed exactly as a real run would compute it; see the module docstring for why
+    preflight itself is not skipped.
     """
     check_max_lines(max_lines)                  # a usage error must not leave a brief.md behind
     check_classified(classified, text)          # likewise, before preflight or any write
@@ -631,8 +634,7 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
                                now=now, needs=needs, health=health, dry_run=True)
         if text:
             return lines
-        tracked = reconcile.build_tracked_index(ctx, now) if needs else None
-        return {"lines": lines, "brief_path": None, "needs": needs, "tracked": tracked}
+        return {"lines": lines, "brief_path": None, "needs": needs}
     day.mkdir(parents=True, exist_ok=True)
     brief_path = day / "brief.md"
     emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
@@ -665,13 +667,7 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
         # only via the explicit `classified` acknowledgement above.
     if text:
         return lines
-    # `tracked` only when something is actually going to be reconciled. Reconcile classifies
-    # commitments found in the CONNECTOR items, and those arrive only via a fetch that `needs`
-    # asked for -- so with `needs` empty there is nothing new to classify, and the index would be
-    # ~9 KB of context bought for nothing on every brief of an already-fetched morning (review
-    # finding: it was built unconditionally, including on a "no change since HH:MM" rerun).
-    tracked = reconcile.build_tracked_index(ctx, now) if needs else None
-    return {"lines": lines, "brief_path": str(brief_path), "needs": needs, "tracked": tracked}
+    return {"lines": lines, "brief_path": str(brief_path), "needs": needs}
 
 
 def _build(sub):

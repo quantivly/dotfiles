@@ -18,11 +18,29 @@ yet?" — the second question is what `outcome` records.
 Read `blocks`/`blockedBy` relations before description prose: a Linear description can be stale
 in a way the relation graph is not.
 
-Inputs: turn 1's `rabota brief` reply carries `tracked.{linear,github}` — a slim projection of
-`sources/linear.json` and `sources/github.json` built by `reconcile.build_tracked_index`. Use it
-directly; do not re-read the snapshot files. `tracked.<side>.ok` means "you can rely on this",
-with `reason` saying why not when it is false and `skipped: true` marking a source the tenant
-does not use rather than one that failed.
+Inputs: `rabota brief`'s turn-1 reply no longer carries a tracked-side index (DO-751 — it grew
+linearly with the tenant's open-issue count, measured ~303 KB on a synthetic tenant scaled to
+@zvi's real one). Once you know which subjects you are classifying, call `rabota tracked <key>
+[<key>…]` — one call, no network, answered from `sources/linear.json`/`sources/github.json` on
+disk. Never re-read those snapshot files yourself.
+
+Each key in the reply's `results` is exactly one of:
+
+- `{"key", "status": "found", "kind": "linear"|"github", "record": {...}}` — the tracked record
+  (a Linear issue with `pr_links`, or a GitHub PR tagged `kind: "own_pr"`/`"merged_recent"`).
+- `{"key", "status": "not_found"}` — the source is trustworthy and simply does not name this
+  subject. This is what `promised-untracked` needs: proof of absence, not silence.
+- `{"key", "status": "unknown", "reason"}` — the source cannot be relied on (unsynced,
+  unreadable, or the tenant does not use it). **Never treat this as `not_found`** — that
+  conflation is golden `g06`'s bug one level up (a pre-attachment snapshot read as "no PR
+  exists" rather than "attachments unknown").
+- `{"key", "status": "not_applicable"}` — the subject is a person-plus-topic (a Slack thread, a
+  Fireflies transcript), never a Linear identifier or an `owner/repo#n` PR key. `question-owed`
+  and `spoken-already-done` are always this — verify them against the connector artifact
+  itself, never against `rabota tracked`.
+
+The top-level `linear`/`github` in the reply carry the same source-level `ok`/`reason` as before,
+for when nothing you asked for resolved to either side at all.
 
 **`state-contradiction`'s "no PR exists" case (golden `g06`/`g07`, DO-735).** Each Linear issue's
 `pr_links` is `null` (snapshot predates attachment sync — treat as unknown, never as "no PR"),
