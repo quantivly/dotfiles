@@ -53,11 +53,36 @@ def classify_subject(key: str) -> str:
     Fireflies transcript) is ``"other"``: `reconcile.md` verifies those two classes
     (``question-owed``/``spoken-already-done``) against the connector artifact itself, never
     against Linear or GitHub, so `lookup_tracked` never looks one up at all."""
+    key = normalize_subject(key)
     if "#" in key:
         return "github"
     if _LINEAR_KEY.match(key):
         return "linear"
     return "other"
+
+
+_LINEAR_URL = re.compile(r"^https://linear\.app/[^/\s]+/issue/([A-Za-z][A-Za-z0-9]*-\d+)(?:/|$)")
+_LINEAR_KEY_ANY_CASE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
+_STRAY = "\"'`()[]{}<>.,;:!?"
+
+
+def normalize_subject(key: str) -> str:
+    """The canonical form of a subject an agent copied out of free text (DO-751 review).
+
+    Surrounding quotes, brackets and punctuation are stripped (``HUB-5812,`` from a Slack line), a
+    GitHub PR URL becomes ``owner/repo#n``, a Linear issue URL becomes its identifier, and a Linear
+    identifier is upper-cased (``hub-5812``). Anything else is returned stripped but otherwise as
+    given, so an unrecognised subject still reads as ``other``, never as a guessed key."""
+    key = (key or "").strip().strip(_STRAY)
+    m = _GITHUB_PR_URL.match(key)
+    if m:
+        return f"{m.group(1)}#{m.group(2)}"
+    m = _LINEAR_URL.match(key)
+    if m:
+        return m.group(1).upper()
+    if _LINEAR_KEY_ANY_CASE.match(key):
+        return key.upper()
+    return key
 
 
 def _pr_links(issue: dict) -> list[dict] | None:
@@ -265,6 +290,10 @@ def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
       this with ``not_found``** — that conflation is exactly golden ``g06``'s bug (a pre-attachment
       snapshot read as "no PR exists" rather than "attachments unknown"), one level up: at the
       per-key rather than per-attachment layer.
+    - ``{"key", "status": "ambiguous", "candidates"}`` -- an owner-less PR key (``repo#n``)
+      matching more than one ``owner/repo#n`` in the index; the candidates are listed, never picked.
+    - Any result may carry ``resolved``: the canonical key (see `normalize_subject`) when it differs
+      from what was asked.
     - ``{"key", "status": "not_applicable"}`` -- ``key`` is neither a Linear identifier nor a
       ``owner/repo#n`` PR key (see `classify_subject`), i.e. a person-plus-topic subject that
       `reconcile.md` verifies against the connector artifact itself and never against this index.
@@ -285,12 +314,24 @@ def lookup_tracked(ctx, keys: list[str], now: datetime | None = None) -> dict:
     results = []
     for key in keys:
         subject = classify_subject(key)
+        canon = normalize_subject(key)
         side = linear_side if subject == "linear" else github_side if subject == "github" else None
         by_key = linear_by_key if subject == "linear" else github_by_key
+        if subject == "github" and "/" not in canon.split("#")[0]:
+            # `sre-core#1473` with no owner: the index is keyed `owner/repo#n`, so an exact lookup
+            # would answer not_found for a PR that is there (DO-751 review). Resolve by a unique
+            # suffix; more than one match is reported, never picked.
+            matches = [k for k in by_key if k.endswith("/" + canon)]
+            if len(matches) > 1:
+                results.append({"key": key, "status": "ambiguous", "candidates": sorted(matches)})
+                continue
+            if matches:
+                canon = matches[0]
+        resolved = {} if canon == key else {"resolved": canon}
         if subject == "other":
             results.append({"key": key, "status": "not_applicable"})
-        elif key in by_key:
-            results.append({"key": key, "status": "found", "kind": subject, "record": by_key[key]})
+        elif canon in by_key:
+            results.append({"key": key, **resolved, "status": "found", "kind": subject, "record": by_key[canon]})
         elif not side["ok"]:
             results.append({"key": key, "status": "unknown", "reason": side["reason"]})
         else:

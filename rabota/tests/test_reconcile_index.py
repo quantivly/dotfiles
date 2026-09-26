@@ -544,6 +544,36 @@ class LookupTrackedTests(unittest.TestCase):
         self.assertEqual(reconcile.classify_subject("C0A2FRLPA58"), "other")
         self.assertEqual(reconcile.classify_subject("01M1H28CHBVMJXBSDKF1ZHN32D"), "other")
 
+    def test_subjects_copied_from_free_text_resolve_to_the_same_record(self):
+        # DO-751 review F2/F3: an agent builds keys from Slack and transcript text. A trailing comma,
+        # a lowercase key, a full Linear URL or a full PR URL must reach the record the bare key does.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        gh = dict(GITHUB_SNAP)
+        gh["own_prs"] = [dict(p, repo="quantivly/" + p["repo"]) for p in GITHUB_SNAP["own_prs"]]
+        snapshots.write(self.ctx.state_dir, "github", gh)
+        asked = ["HUB-5812,", "hub-5812", "(HUB-5812)", "https://linear.app/quantivly/issue/HUB-5812/some-slug",
+                 "https://github.com/quantivly/auto-conf/pull/461", "quantivly/auto-conf#461."]
+        out = reconcile.lookup_tracked(self.ctx, asked, NOW)
+        for r in out["results"]:
+            self.assertEqual(r["status"], "found", r)
+        self.assertEqual({r.get("resolved", r["key"]) for r in out["results"]},
+                         {"HUB-5812", "quantivly/auto-conf#461"})
+
+    def test_an_owner_less_pr_key_resolves_by_unique_suffix_and_reports_ambiguity(self):
+        # DO-751 review: `auto-conf#461` against an index keyed `quantivly/auto-conf#461` answered
+        # not_found for a PR that is there. A unique suffix match resolves it; two are reported.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        gh = dict(GITHUB_SNAP)
+        gh["own_prs"] = [dict(p, repo="quantivly/" + p["repo"]) for p in GITHUB_SNAP["own_prs"]] + [
+            dict(GITHUB_SNAP["own_prs"][1], repo="someone/auto-conf")]
+        snapshots.write(self.ctx.state_dir, "github", gh)
+        by_key = {r["key"]: r for r in reconcile.lookup_tracked(
+            self.ctx, ["sre-customers-library#369", "auto-conf#461"], NOW)["results"]}
+        self.assertEqual(by_key["sre-customers-library#369"]["status"], "found")
+        self.assertEqual(by_key["sre-customers-library#369"]["resolved"], "quantivly/sre-customers-library#369")
+        self.assertEqual(by_key["auto-conf#461"]["status"], "ambiguous")
+        self.assertEqual(by_key["auto-conf#461"]["candidates"], ["quantivly/auto-conf#461", "someone/auto-conf#461"])
+
     def test_found_not_found_and_unknown_are_distinct(self):
         snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
         snapshots.write(self.ctx.state_dir, "github", dict(GITHUB_SNAP))
