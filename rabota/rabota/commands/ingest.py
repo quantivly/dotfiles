@@ -3,8 +3,31 @@
 Single-source form (unchanged): ``ingest {slack,calendar} --file F``. Multi-source form
 (DO-727): ``ingest --file slack=F1 --file calendar=F2`` — the skill fetches both
 connectors in one in-session round-trip, so one ``ingest`` call replaces two, each a full
-model round-trip in an agent loop. Four decisions govern the multi-source form; each is load-bearing
-and each is tested:
+model round-trip in an agent loop.
+
+Inline form (DO-740): ``ingest --stdin < payload.json``, where the payload is one JSON object
+keyed by source, e.g. ``{"slack": {...}, "calendar": {...}}`` — each value the same shape a
+``--file`` would point at. This drops the step where the agent writes ``sources/<source>.json``
+files to disk before calling ``ingest``, which was one full model round-trip (a tool call whose
+only purpose was producing the next tool call's argument) per ``/rabota brief`` run.
+
+**Stdin JSON, not a repeated ``--json SOURCE=PAYLOAD`` flag.** A command-line argument is
+shell-quoted by whatever emits it; a heredoc on stdin is not. Real Slack/Calendar items carry
+`"`, `'`, backticks, `$`, newlines and non-ASCII text, and a payload that must survive as one
+shell *argument* needs the model to get argument-quoting exactly right on every call, with a
+silent wrong-output failure mode when it doesn't (a backtick or `$(...)` left unescaped executes;
+a stray unescaped quote merges two arguments or truncates the payload). A heredoc handed to
+stdin (`rabota ingest --stdin <<'EOF' ... EOF`) carries all of that verbatim: the shell does not
+tokenize or expand anything inside a quoted heredoc, so the only requirement left is valid JSON,
+which the model is already good at emitting. This is proven in ``tests/test_ingest_inline.py``,
+which drives the inline form with quotes, backticks, `$`, a literal `EOF` line, newlines, emoji
+and a 100 KB payload through an actual heredoc-fed stdin and asserts byte-for-byte survival.
+
+The inline and file forms combine in one call (``--stdin`` plus ``--file SOURCE=PATH``) and share
+the duplicate-source refusal: a source named in both is refused before anything is written, the
+same as a source named twice within one form (see ``run_ingest_many``).
+
+Four decisions govern the multi-source form; each is load-bearing and each is tested:
 
 **Fireflies is not in ``ALLOWED`` (DO-746 fix round, finding F4).** It moved to
 ``sync.FETCHED_SOURCES`` in DO-746: the timer fetches it server-side into
@@ -32,11 +55,11 @@ way to reach this path was a stale habit or a hand-typed command, and it is refu
 3. **A source named twice in one call is refused outright, before any file is touched or written.**
    Last-write-wins would let a duplicate ``slack=`` silently shadow the first one — exactly the
    silent coercion this module refuses everywhere else (see the ``ok`` rule below).
-4. **No half-written state.** ``_load`` fully reads and validates a file in memory before
-   ``run_ingest`` writes anything, so a refused source never leaves a partial ``sources/<source>.json``
-   or a stray ``record_sync`` row — this was already true of the single-source form and multi-source
-   ingest calls ``run_ingest`` once per source unchanged, so it inherits the guarantee rather than
-   re-implementing it.
+4. **No half-written state.** ``_load_file``/``_validate`` fully read and validate a file or an
+   inline payload in memory before ``_store`` writes anything, so a refused source never leaves a
+   partial ``sources/<source>.json`` or a stray ``record_sync`` row — this was already true of the
+   single-source form and multi-source ingest calls ``run_ingest``/``run_ingest_inline`` once per
+   source unchanged, so it inherits the guarantee rather than re-implementing it.
 
 The file itself is ``{"fetched_at": "<UTC Z>", "ok": true|false, "error": str|null, "items": [...]}``.
 ``ok`` must be a JSON boolean: a string ``"false"`` is truthy, so coercing it recorded a failed
@@ -49,6 +72,7 @@ and ``source_syncs`` gets ``ok=0`` with the error — so ``brief`` can say
 unchanged by DO-727 and out of scope for it.
 """
 import json
+import sys
 from pathlib import Path
 
 from rabota import cli, errors, snapshots
@@ -57,33 +81,40 @@ from rabota.context import Context
 ALLOWED = ("slack", "calendar")
 
 
-def _load(file: Path) -> dict:
-    """Read and validate the ingest file; every fault in it is ``Usage`` naming the file."""
+def _validate(data: object, label: str) -> dict:
+    """Validate an already-parsed ingest payload; every fault in it is ``Usage`` naming ``label``.
+
+    Shared by the file form (``label`` is the path) and the inline form (``label`` names the
+    source, e.g. ``"stdin:slack"``) — the schema a caller must satisfy does not depend on how the
+    bytes arrived, and this is the one place that schema is written down.
+    """
+    if not isinstance(data, dict) or "fetched_at" not in data:
+        raise errors.Usage(f"{label}: ingest payload must be an object with 'fetched_at' (and 'items' when ok)")
+    try:
+        snapshots.parse_fetched_at(str(data["fetched_at"]))
+    except ValueError:
+        raise errors.Usage(f"{label}: fetched_at must be UTC like 2026-09-16T07:00:00Z") from None
+    ok = data.get("ok")
+    if not isinstance(ok, bool):
+        got = "absent" if "ok" not in data else f"{type(ok).__name__} {ok!r}"
+        raise errors.Usage(f"{label}: 'ok' must be a JSON boolean (true or false), got {got}")
+    if ok and not isinstance(data.get("items"), list):
+        raise errors.Usage(f"{label}: a successful ingest payload needs an 'items' list")
+    return data
+
+
+def _load_file(file: Path) -> dict:
+    """Read and validate an ingest file; every fault in it is ``Usage`` naming the file."""
     try:
         data = json.loads(Path(file).read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise errors.Usage(f"cannot read {file}: {e}") from None
-    if not isinstance(data, dict) or "fetched_at" not in data:
-        raise errors.Usage(f"{file}: ingest file must be an object with 'fetched_at' (and 'items' when ok)")
-    try:
-        snapshots.parse_fetched_at(str(data["fetched_at"]))
-    except ValueError:
-        raise errors.Usage(f"{file}: fetched_at must be UTC like 2026-09-16T07:00:00Z") from None
-    ok = data.get("ok")
-    if not isinstance(ok, bool):
-        got = "absent" if "ok" not in data else f"{type(ok).__name__} {ok!r}"
-        raise errors.Usage(f"{file}: 'ok' must be a JSON boolean (true or false), got {got}")
-    if ok and not isinstance(data.get("items"), list):
-        raise errors.Usage(f"{file}: a successful ingest file needs an 'items' list")
-    return data
+    return _validate(data, str(file))
 
 
-def run_ingest(ctx: Context, source: str, file: Path) -> dict:
-    """Validate ``file`` and write ``sources/<source>.json``; a failed fetch is recorded, not raised."""
-    if source not in ALLOWED:
-        raise errors.Usage(f"ingest accepts {ALLOWED}")
-    data = _load(file)
-    ok = data["ok"]                       # a bool, or _load raised
+def _store(ctx: Context, source: str, data: dict) -> dict:
+    """Write ``sources/<source>.json`` from an already-validated payload; a failed fetch is recorded, not raised."""
+    ok = data["ok"]                       # a bool, or the caller's validation already raised
     error = None if ok else str(data.get("error") or "unknown error")
     items = data["items"] if ok else []
     payload = {"ok": ok, "error": error, "fetched_at": data["fetched_at"], "items": items}
@@ -92,12 +123,36 @@ def run_ingest(ctx: Context, source: str, file: Path) -> dict:
     return {"source": source, "ok": ok, "error": error, "items": len(items), "path": str(path)}
 
 
-def run_ingest_many(ctx: Context, files: list[tuple[str, Path]]) -> dict:
-    """Validate and store one file per source in a single call; see the module docstring for why.
+def run_ingest(ctx: Context, source: str, file: Path) -> dict:
+    """Validate ``file`` and write ``sources/<source>.json``; a failed fetch is recorded, not raised."""
+    if source not in ALLOWED:
+        raise errors.Usage(f"ingest accepts {ALLOWED}")
+    return _store(ctx, source, _load_file(file))
 
-    Refuses the whole call, before touching any file, if ``files`` names a source more than once
-    or names one outside ``ALLOWED``. Otherwise calls ``run_ingest`` once per ``(source, file)``
-    pair; a pair that fails — for ANY reason, not only a validation one — is recorded rather
+
+def run_ingest_inline(ctx: Context, source: str, data: dict) -> dict:
+    """Inline counterpart of ``run_ingest``: ``data`` is an already-parsed payload, not a file path.
+
+    Same schema, same ``ok``-must-be-boolean rule, same recording of a failed fetch — ``_validate``
+    and ``_store`` are exactly what the file form calls, so the two forms cannot silently drift.
+    """
+    if source not in ALLOWED:
+        raise errors.Usage(f"ingest accepts {ALLOWED}")
+    return _store(ctx, source, _validate(data, f"stdin:{source}"))
+
+
+def run_ingest_many(ctx: Context, specs: list[tuple[str, object]]) -> dict:
+    """Validate and store one entry per source in a single call; see the module docstring for why.
+
+    ``specs`` pairs a source name with either a ``Path`` (file form) or an already-parsed ``dict``
+    (inline form, from ``--stdin``) — the two forms are indistinguishable from here on, so a call
+    mixing both (``--file slack=F`` plus a ``calendar`` key on stdin) is handled the same as a call
+    using only one.
+
+    Refuses the whole call, before touching any file, if ``specs`` names a source more than once —
+    across the two forms, not only within one of them — or names one outside ``ALLOWED``.
+    Otherwise dispatches each pair to ``run_ingest`` or ``run_ingest_inline`` depending on its
+    type; a pair that fails — for ANY reason, not only a validation one — is recorded rather
     than raised immediately, so the sources after it are still attempted and the ones that did
     land still get written and recorded. Once every pair has been attempted, raises
     ``errors.Partial`` naming every source that did not land, with each one's reason in the
@@ -106,10 +161,10 @@ def run_ingest_many(ctx: Context, files: list[tuple[str, Path]]) -> dict:
     the exit code cannot mistake a partial ingest for a complete one.
 
     Returns ``{source: report}`` for every source given, valid or not: a valid source's report is
-    exactly what ``run_ingest`` returns; a refused source's is
+    exactly what ``run_ingest``/``run_ingest_inline`` returns; a refused source's is
     ``{"source", "ok": False, "error", "items": 0, "path": ""}``.
     """
-    sources = [s for s, _ in files]
+    sources = [s for s, _ in specs]
     dupes = sorted({s for s in sources if sources.count(s) > 1})
     if dupes:
         raise errors.Usage(f"source given twice in one ingest call: {', '.join(dupes)}")
@@ -117,9 +172,10 @@ def run_ingest_many(ctx: Context, files: list[tuple[str, Path]]) -> dict:
     if unknown:
         raise errors.Usage(f"ingest accepts {ALLOWED}, got {', '.join(unknown)}")
     report, failed = {}, []
-    for source, file in files:
+    for source, spec in specs:
         try:
-            report[source] = run_ingest(ctx, source, file)
+            report[source] = run_ingest(ctx, source, spec) if isinstance(spec, Path) \
+                else run_ingest_inline(ctx, source, spec)
         except Exception as e:  # noqa: BLE001
             # Deliberately broad. Catching only `errors.Usage` meant an `OSError` from the snapshot
             # write escaped mid-loop: the sources after it were never attempted, though their files
@@ -149,11 +205,43 @@ def _build(sub):
     p.add_argument("--file", action="append", default=[], metavar="PATH|SOURCE=PATH",
                     help="single-source form: --file PATH; multi-source form: repeat "
                          "--file SOURCE=PATH, once per source")
+    p.add_argument("--stdin", action="store_true",
+                    help="inline multi-source form: read one JSON object from stdin keyed by "
+                         'source, e.g. {"slack": {...}, "calendar": {...}}; combines with '
+                         "--file SOURCE=PATH")
+
+
+def _read_stdin_specs() -> list[tuple[str, dict]]:
+    """Parse ``--stdin``'s payload into ``(source, data)`` pairs; every fault is ``Usage``.
+
+    A terminal on stdin is refused rather than read: with nothing piped, the read would block until
+    something external killed the process (DO-740 review). The bytes are decoded strictly, as the
+    file form's ``read_text`` does, so invalid UTF-8 is refused here too instead of being stored
+    surrogate-escaped.
+    """
+    if sys.stdin is None or sys.stdin.isatty():
+        raise errors.Usage("--stdin: nothing is piped in; feed the JSON object on stdin (e.g. a heredoc)")
+    buf = getattr(sys.stdin, "buffer", None)
+    try:
+        text = buf.read().decode("utf-8") if buf is not None else sys.stdin.read()
+    except UnicodeDecodeError as e:
+        raise errors.Usage(f"--stdin: not valid UTF-8: {e}") from None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise errors.Usage(f"--stdin: invalid JSON: {e}") from None
+    if not isinstance(data, dict):
+        raise errors.Usage("--stdin: JSON must be an object keyed by source, "
+                            'e.g. {"slack": {...}, "calendar": {...}}')
+    return list(data.items())
 
 
 def _run(ns):
     ctx = Context.from_namespace(ns)
     if ns.source is not None:
+        if ns.stdin:
+            raise errors.Usage("--stdin cannot be combined with the single-source form; "
+                                "drop the positional source to ingest inline")
         if len(ns.file) != 1:
             raise errors.Usage("single-source ingest (`ingest <source> --file PATH`) takes exactly one --file; "
                                 "to ingest several sources, drop the positional source and repeat --file SOURCE=PATH")
@@ -167,15 +255,17 @@ def _run(ns):
             raise errors.Usage(f"ingest names a source twice: positional {ns.source!r} and --file {head}=...; "
                                 f"use one form or the other")
         return run_ingest(ctx, ns.source, Path(ns.file[0]))
-    if not ns.file:
-        raise errors.Usage("ingest needs either `<source> --file PATH` or repeated `--file SOURCE=PATH`")
-    files = []
+    if not ns.file and not ns.stdin:
+        raise errors.Usage("ingest needs `<source> --file PATH`, repeated `--file SOURCE=PATH`, or --stdin")
+    specs: list[tuple[str, object]] = []
     for arg in ns.file:
         if "=" not in arg:
             raise errors.Usage(f"multi-source ingest needs --file SOURCE=PATH, got {arg!r}")
         source, _, path = arg.partition("=")
-        files.append((source, Path(path)))
-    return run_ingest_many(ctx, files)
+        specs.append((source, Path(path)))
+    if ns.stdin:
+        specs.extend(_read_stdin_specs())
+    return run_ingest_many(ctx, specs)
 
 
 cli.register("ingest", _build, _run)
