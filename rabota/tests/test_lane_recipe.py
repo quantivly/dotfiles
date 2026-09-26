@@ -405,6 +405,31 @@ class CreateWorktreeRemoteTests(LocalRecipeTests):
     def machine(self, ctx):
         return ctx.tenant.machines["dev"]
 
+    def test_a_branch_only_on_origin_resolves_through_the_real_shell_fragment(self):
+        """DO-725 review: `git worktree add <branch>` used to guess `origin/<branch>` for a branch the
+        clone had never checked out (a colleague's, or a finished lane's), and `rev-parse` does not.
+        Runs the exact command the recipe would send over ssh, locally, against real git repos."""
+        import subprocess, tempfile
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+        def git(*a, cwd):
+            return subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        origin = tmp / "origin"; origin.mkdir()
+        git("init", "-q", "-b", "main", ".", cwd=origin)
+        for k, v in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+            git("config", k, v, cwd=origin)
+        (origin / "f").write_text("a\n"); git("add", "f", cwd=origin); git("commit", "-qm", "init", cwd=origin)
+        git("checkout", "-qb", "feature", cwd=origin)
+        (origin / "f").write_text("b\n"); git("commit", "-qam", "f1", cwd=origin)
+        want = git("rev-parse", "HEAD", cwd=origin); git("checkout", "-q", "main", cwd=origin)
+        clone = tmp / "clone"; git("clone", "-q", str(origin), str(clone), cwd=tmp)
+        runner = FakeRunner([(["ssh"], Result(0, "", ""))])
+        ctx = self.ctx(runner)
+        lane.create_worktree_remote(ctx, self.machine(ctx), str(clone), str(tmp / "wt"), str(tmp / "out"), "feature")
+        cmd = runner.calls[0][-1]
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=tmp / "wt"), want)
+
     def test_fetch_precedes_resolve_precedes_worktree_add_in_one_command(self):
         runner = FakeRunner([(["ssh"], Result(0, "", ""))])
         ctx = self.ctx(runner)

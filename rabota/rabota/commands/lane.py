@@ -201,6 +201,13 @@ def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, out_dir:
     # exit. `^{commit}` is single-quoted whole (shquote wraps the entire resolve argv element),
     # so neither bash's nor zsh's brace expansion ever sees the literal `{commit}`.
     resolve = ["git", "-C", repo_path, "rev-parse", "--verify", f"{ref}^{{commit}}"]
+    # A branch that exists only as `origin/<ref>` (a colleague's, or a finished lane's own) used to
+    # work: `git worktree add <ref>` guesses the remote-tracking branch. `rev-parse` does not guess,
+    # so fall back to `refs/remotes/origin/<ref>` explicitly (DO-725 review). The first attempt's
+    # stderr is dropped only when the fallback is tried; if both fail, the fallback's error is the
+    # one reported.
+    fallback = (["git", "-C", repo_path, "rev-parse", "--verify", f"refs/remotes/{REMOTE}/{ref}^{{commit}}"]
+                if base and not base.startswith(("refs/", f"{REMOTE}/")) else None)
     steps = [
         " ".join(remote.shquote(p) for p in mkdir),
         " ".join(remote.shquote(p) for p in fetch),
@@ -208,7 +215,9 @@ def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, out_dir:
         # is where it must expand. `[ -n "$sha" ]` is the belt: a rev-parse that somehow prints
         # nothing but exits 0 must not carry an empty ref into `worktree add`, which would try to
         # add the CURRENT HEAD instead of refusing.
-        f"sha=$({' '.join(remote.shquote(p) for p in resolve)}) && [ -n \"$sha\" ]",
+        (f"sha=$({' '.join(remote.shquote(p) for p in resolve)} 2>/dev/null || "
+         f"{' '.join(remote.shquote(p) for p in fallback)}) && [ -n \"$sha\" ]" if fallback else
+         f"sha=$({' '.join(remote.shquote(p) for p in resolve)}) && [ -n \"$sha\" ]"),
         f"git -C {remote.shquote(repo_path)} worktree add {remote.shquote(worktree)} \"$sha\"",
     ]
     cmd = " && ".join(steps)
