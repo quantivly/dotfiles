@@ -192,6 +192,21 @@ class Store:
         if tenant: sql += " AND tenant=?"; args.append(tenant)
         if status: sql += " AND status=?"; args.append(status)
         return self._rows(sql + " ORDER BY started_at", args)
+    def lanes_for_rate(self, tenant, seat, limit=30):
+        """Recent settled lanes on ``seat`` with the columns a burn-rate sample needs, newest first.
+
+        Read-only, for the budget gate's measured rate (DO-728). A row missing any of
+        ``started_at``/``ended_at``/``five_h_pct_at_start``/``five_h_pct_at_end`` is not a lane
+        the rate can be measured from (a ``started`` or ``abandoned`` row never gets these), and a
+        non-empty ``settle_reason`` (DO-747) means ``ended_at`` is a ``now()`` fallback rather than
+        the lane's real finish time — both are excluded here so ``budget.py`` never has to re-derive
+        "was this row usable" from timestamps alone.
+        """
+        return self._rows(
+            "SELECT * FROM lanes WHERE tenant=? AND seat=? AND started_at IS NOT NULL "
+            "AND ended_at IS NOT NULL AND five_h_pct_at_start IS NOT NULL AND five_h_pct_at_end IS NOT NULL "
+            "AND (settle_reason IS NULL OR settle_reason='') ORDER BY started_at DESC LIMIT ?",
+            (tenant, seat, limit))
 
     # escalations / gates
     def add_escalation(self, tenant, question, evidence, options, first_seen=None, kind=None, subject=None) -> int:

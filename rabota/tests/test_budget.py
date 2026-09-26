@@ -273,3 +273,147 @@ class CensusFreshnessTests(MachineDimensionTests):
         b = budget.compute(c, OK_CRED, self.t(), 3, machine="dev")
         self.assertEqual([r["code"] for r in b["reasons"]], ["census:stale"])
         self.assertEqual(b["allowed_new_lanes"], 0)
+
+
+class RecordingRunner:
+    """Local test double (not ``rabota.runner.FakeRunner``): records the ``env`` each call got,
+    which ``FakeRunner`` deliberately does not (it matches by argv prefix only) and ``runner.py``
+    is out of DO-728's edit scope. One canned ``result`` answers every call."""
+    def __init__(self, result):
+        self.result, self.calls = result, []
+
+    def run(self, argv, *, env=None, input=None, timeout=60, cwd=None):
+        self.calls.append({"argv": list(argv), "env": dict(env) if env is not None else None})
+        return self.result
+
+
+def lane_row(id, seat, started_at, ended_at, pct_start, pct_end, *, tenant="quantivly",
+            status="done", settle_reason=None):
+    return dict(id=id, tenant=tenant, kind="work", brief="b", repo="r", worktree="w", out_dir="o",
+                machine="local", unit=f"rabota-lane-{id}.service", session_id="s", model="m",
+                status=status, started_at=started_at, ended_at=ended_at, seat=seat, effort="e",
+                five_h_pct_at_start=pct_start, five_h_pct_at_end=pct_end, settle_reason=settle_reason)
+
+
+class MeasuredRateTests(unittest.TestCase):
+    def ctx(self, tenant="quantivly"):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=FakeRunner([]),
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def test_no_history_returns_the_floor(self):
+        rate, source = budget.measured_rate(self.ctx().store, "quantivly", "quantivly-1")
+        self.assertEqual(rate, budget.RATE_FLOOR)
+        self.assertEqual(source, "floor 115 pts/h, no history")
+
+    def test_non_overlapping_lanes_use_the_trailing_median(self):
+        # Three lanes, back to back, no overlap: 10%/h, 20%/h, 30%/h -> median 20.
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T01:00:00Z", 0, 10))
+        ctx.store.insert_lane(lane_row("b", "quantivly-1", "2026-09-24T02:00:00Z", "2026-09-24T03:00:00Z", 10, 30))
+        ctx.store.insert_lane(lane_row("c", "quantivly-1", "2026-09-24T04:00:00Z", "2026-09-24T04:30:00Z", 30, 45))
+        rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
+        self.assertEqual(rate, 20.0)
+        self.assertEqual(source, "measured median 20.0 pts/h over 3 lanes")
+
+    def test_a_naive_per_lane_rate_would_be_far_higher_than_three_overlapping_lanes_really_burned(self):
+        # DO-728 hazard: three lanes on ONE seat overlapping over a single hour, seat pct rising
+        # from 10 to 30 over that whole hour (20 pts/h really burned). A naive per-lane rate
+        # counts each lane's own start-to-end delta separately and triple-counts the shared rise
+        # (a's 20pts/30min=40/h, b's 15pts/40min=22.5/h, c's 10pts/20min=30/h -- median 30, none of
+        # them close to the true 20). The busy-span computation must return the true rate instead.
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T00:30:00Z", 10, 30))
+        ctx.store.insert_lane(lane_row("b", "quantivly-1", "2026-09-24T00:10:00Z", "2026-09-24T00:50:00Z", 14, 29))
+        ctx.store.insert_lane(lane_row("c", "quantivly-1", "2026-09-24T00:40:00Z", "2026-09-24T01:00:00Z", 26, 30))
+        rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
+        self.assertEqual(rate, 20.0)   # (30 - 10) / 1h, from the earliest start and the latest end
+        self.assertIn("over 3 lanes", source)
+
+    def test_a_window_reset_mid_span_is_dropped_not_inverted(self):
+        # The 5h window reset between this lane's start and end: pct_end < pct_start. A naive
+        # subtraction goes negative; it must instead be dropped from the sample, falling back to
+        # the floor when it is the only row.
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T01:00:00Z", 90, 5))
+        rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
+        self.assertEqual((rate, source), (budget.RATE_FLOOR, "floor 115 pts/h, no history"))
+        # Mixed with one usable lane, only the usable one contributes.
+        ctx.store.insert_lane(lane_row("b", "quantivly-1", "2026-09-24T02:00:00Z", "2026-09-24T03:00:00Z", 10, 26))
+        rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
+        self.assertEqual(rate, 16.0)
+
+    def test_a_row_with_no_output_is_excluded_its_timing_is_suspect(self):
+        # DO-747: ended_at on a no-output row is a now() fallback, not the lane's real finish time.
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T00:05:00Z",
+                                       10, 90, settle_reason="no output file: ..."))
+        rate, _ = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
+        self.assertEqual(rate, budget.RATE_FLOOR)   # the 960 pts/h row never entered the sample
+
+    def test_a_started_or_abandoned_row_has_no_ended_at_and_is_excluded(self):
+        ctx = self.ctx()
+        row = lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", None, 10, None, status="started")
+        ctx.store.insert_lane(row)
+        rate, _ = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
+        self.assertEqual(rate, budget.RATE_FLOOR)
+
+    def test_rate_is_per_seat_and_per_tenant(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T01:00:00Z", 0, 50))
+        # A different seat's history must not leak into quantivly-2's rate.
+        rate, _ = budget.measured_rate(ctx.store, "quantivly", "quantivly-2")
+        self.assertEqual(rate, budget.RATE_FLOOR)
+
+    def test_credential_gate_overrides_claude_picks_rate_and_names_its_source(self):
+        window = pick_json("gate-projected", "quantivly-1", 40, 97, "refuse", 2)
+        runner = RecordingRunner(window)
+        g = budget.credential_gate(runner, "quantivly-1", "m", "e", 30,
+                                   env={"PATH": "/bin"}, rate=16.2, rate_source="measured median 16.2 pts/h over 8 lanes")
+        self.assertEqual(runner.calls[0]["env"]["CLAUDE_PICK_RATE_DEFAULT"], "16")
+        self.assertEqual(runner.calls[0]["env"]["PATH"], "/bin")   # the base env survives, not just the override
+        self.assertIn("measured median 16.2 pts/h over 8 lanes", g["detail"])
+
+    def test_credential_gate_without_a_rate_is_unchanged(self):
+        # Direct callers that pass no rate (existing behaviour) must get exactly the old call.
+        allow = FakeRunner([(["claude-pick"], pick_json("picked", "quantivly-1", 30, 87, "allow", 0))])
+        g = budget.credential_gate(allow, "quantivly-1", "m", "e", 30)
+        self.assertEqual((g["ok"], g["code"]), (True, None))
+
+
+class TwentySixSeptemberSampleTests(unittest.TestCase):
+    """DO-728's own worked evidence: 2026-09-24 lane burn measured 6.7-20.5 pts/h, median ~16, over
+    8 lanes. The brief did not carry the raw per-lane rows, so this reconstructs a representative
+    sample with that exact range and median and checks the new gate against it (hazard 1): a
+    50-minute lane must not be refused on a seat sitting at a normal daytime utilisation, the way
+    the fixed 115 pts/h constant refused it (96% projected for a 50-minute lane from empty)."""
+    RATES = [6.7, 9.4, 12.1, 14.8, 16.2, 17.5, 19.0, 20.5]   # median 16.2, matches DO-728's report
+
+    def test_median_of_the_reconstructed_sample_matches_the_reported_median(self):
+        ctx_store = None
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        import argparse as _argparse
+        ns = _argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=FakeRunner([]),
+                                             env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: ctx._store and ctx._store.close())
+        base = datetime.datetime(2026, 9, 24, tzinfo=datetime.timezone.utc)
+        for i, r in enumerate(self.RATES):
+            start = base + datetime.timedelta(hours=3 * i)
+            end = start + datetime.timedelta(hours=1)
+            pct = round(r)
+            ctx.store.insert_lane(lane_row(f"l{i}", "quantivly-1", start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                           end.strftime("%Y-%m-%dT%H:%M:%SZ"), 0, pct))
+        rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
+        self.assertEqual(rate, 15.5)   # rounded-to-int pct deltas over 1h spans; matches the reported ~16
+        self.assertIn("over 8 lanes", source)
+        # Hazard 1: at this rate a 50-minute lane from an empty window projects to 16*50/60 ~= 13%,
+        # nowhere near the 95% ceiling -- the fixed 115 pts/h constant alone projected 96% for the
+        # same lane (est_minutes=50 in the brief's own arithmetic: 115*50/60 = 95.8). The new rate
+        # frees exactly the work DO-728 says was being refused, without raising the ceiling itself.
+        self.assertLess(rate * 50 / 60, 20)
+        self.assertGreater(budget.RATE_FLOOR * 50 / 60, 95)
