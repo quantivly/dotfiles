@@ -250,8 +250,9 @@ def _alert_lines(seq: dict, needs: list[dict] | None) -> list[str]:
         if n.get("fetched"):
             lines.append(f"! {n['source']} needs classifying — {n['reason']}, no fetch needed")
         else:
-            lines.append(f"! {n['source']} needs a fetch — {n['reason']} → "
-                         f"{Path(n['write_to']).name} ({n['query']})")
+            # No file named here (DO-751 review): the skill ingests inline with `--stdin`, so
+            # pointing at `write_to` sent a literal reader back to the write-a-file round trip.
+            lines.append(f"! {n['source']} needs a fetch — {n['reason']}, then ingest --stdin ({n['query']})")
     return [line if len(line) <= LINE_MAX else line[:LINE_MAX - 1] + "…" for line in lines]
 
 

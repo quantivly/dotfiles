@@ -34,6 +34,9 @@ Each key in the reply's `results` is exactly one of:
   unreadable, or the tenant does not use it). **Never treat this as `not_found`** — that
   conflation is golden `g06`'s bug one level up (a pre-attachment snapshot read as "no PR
   exists" rather than "attachments unknown").
+- `{"key", "status": "ambiguous", "candidates"}` — an owner-less `repo#n` matching more than one
+  `owner/repo#n`. Pick by the evidence in the commitment (the repo it names, the org); if nothing
+  decides it, escalate with the candidates as options, never guess.
 - `{"key", "status": "not_applicable"}` — the subject is a person-plus-topic (a Slack thread, a
   Fireflies transcript), never a Linear identifier or an `owner/repo#n` PR key. `question-owed`
   and `spoken-already-done` are always this — verify them against the connector artifact

@@ -544,7 +544,10 @@ class BriefNeedsTests(unittest.TestCase):
                                       None, None, brief_path="/p/brief.md",
                                       needs=brief.compute_needs(ctx, self.NOW))
         slack = next(l for l in lines if l.startswith("! slack "))
-        self.assertIn("ingest-slack.json", slack)
+        # Amended (DO-751 review): the line used to name `ingest-slack.json`, the file the skill no
+        # longer writes. It now names the inline ingest and no file at all.
+        self.assertNotIn("ingest-slack.json", slack)
+        self.assertIn("ingest --stdin", slack)
         self.assertIn("to:me", slack)
         self.assertTrue(all(len(l) <= 120 for l in lines), lines)
 

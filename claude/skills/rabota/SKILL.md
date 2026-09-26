@@ -53,11 +53,12 @@ written, so the fetch you just landed is never silently skipped (DO-738).
      no fetch and no ingest. Every other entry: fetch exactly its `query` (e.g. Slack
      `to:me after:…`, Calendar free blocks for today). Do not retry more than once; never drop
      a failed source silently.
-   - **One** ingest, no files: `rabota ingest --stdin <<'EOF'` with ONE line of compact JSON
-     keyed by source, `{"slack": {"fetched_at": "<UTC Z>", "ok": true, "error": null,
-     "items": [...]}, "calendar": {...}}` (a failed fetch: `"ok": false`, `"error": "<why>"`,
-     `"items": []`), then `EOF`. **`ok` must be a JSON boolean.** Only sources in `needs` that
-     you fetched (never fireflies). A bad source among good ones exits 4; the good ones land.
+   - **One** ingest, no files: `rabota ingest --stdin <<'RABOTA_EOF'`, then ONE line of compact
+     JSON (every newline inside a value escaped as `\n`) keyed by source, `{"slack":
+     {"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}, "calendar": {...}}`
+     (a failed fetch: `"ok": false`, `"error": "<why>"`, `"items": []`), then `RABOTA_EOF`.
+     **`ok` must be a JSON boolean.** Only sources in `needs` that you fetched (never
+     fireflies). A bad source among good ones exits 4; the good ones land.
    - **Reconcile** (`references/reconcile.md`): one `rabota tracked <key> [<key>…]` call with
      exactly the subjects you are classifying (issue keys, `owner/repo#n`); it answers `found`,
      `not_found`, `unknown` or `ambiguous` per key. Turn 1 carries no `tracked` field; do not
