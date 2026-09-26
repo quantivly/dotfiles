@@ -125,7 +125,9 @@ class TrackedIndexShapeTests(unittest.TestCase):
         # that checks `ok` alone, which is the cheap and obvious check. `preflight` already marks
         # this case `skipped`; the flag is what keeps the two agreeing.
         self.assertTrue(idx["linear"]["skipped"])
-        self.assertNotIn("skipped", reconcile.build_tracked_index(_ctx("quantivly")[1], NOW)["linear"])
+        tmp2, ctx2 = _ctx("quantivly")
+        self.addCleanup(tmp2.cleanup)
+        self.assertNotIn("skipped", reconcile.build_tracked_index(ctx2, NOW)["linear"])
 
     def test_ok_means_trustworthy_not_merely_copied_from_the_snapshot(self):
         """Review finding: `ok` was copied straight from the snapshot, so a side came back
