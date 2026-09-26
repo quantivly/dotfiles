@@ -28,12 +28,26 @@ Each key in the reply's `results` is exactly one of:
 
 - `{"key", "status": "found", "kind": "linear"|"github", "record": {...}}` — the tracked record
   (a Linear issue with `pr_links`, or a GitHub PR tagged `kind: "own_pr"`/`"merged_recent"`).
-- `{"key", "status": "not_found"}` — the source is trustworthy and simply does not name this
-  subject. This is what `promised-untracked` needs: proof of absence, not silence.
+- `{"key", "status": "not_found", "kind": "linear"|"github"}` — the source is trustworthy and
+  simply does not name this subject *among what that source fetches* — never read this as "does
+  not exist". For `linear`, a batched check (below) has already confirmed Linear itself has no
+  such issue. For `github`, no such check is made: `sync` only knows own open PRs plus merges in
+  the last 30 days, so a PR merged longer ago, merged by someone else, or closed without merging
+  reads `not_found` too — a known gap, not proof the PR never existed. This is what
+  `promised-untracked` needs for `linear`: proof of absence, not silence — for `github` it is
+  weaker evidence, so weigh other signals (the commitment's own wording, a linked URL) before
+  relying on it alone.
+- `{"key", "status": "found_closed", "kind": "linear", "state": {"name", "type"},
+  "completed_at"}` — the issue is real; it is just filed under a state `sync` doesn't fetch
+  (closed, cancelled, or a duplicate). **Never treat this as `promised-untracked`** — it means the
+  commitment is already done (or otherwise resolved): say so, citing `state.name` and
+  `completed_at`, the same way `tracked-satisfied`/`spoken-already-done` cite their evidence. For
+  `state-contradiction`/`stale-blocked`, a `found_closed` result is itself the contradiction worth
+  reporting — the tracked side moved on and the commitment hasn't caught up.
 - `{"key", "status": "unknown", "reason"}` — the source cannot be relied on (unsynced,
-  unreadable, or the tenant does not use it). **Never treat this as `not_found`** — that
-  conflation is golden `g06`'s bug one level up (a pre-attachment snapshot read as "no PR
-  exists" rather than "attachments unknown").
+  unreadable, the tenant does not use it, or the batched Linear check below could not be made or
+  failed). **Never treat this as `not_found`** — that conflation is golden `g06`'s bug one level
+  up (a pre-attachment snapshot read as "no PR exists" rather than "attachments unknown").
 - `{"key", "status": "ambiguous", "candidates"}` — an owner-less `repo#n` matching more than one
   `owner/repo#n`. Pick by the evidence in the commitment (the repo it names, the org); if nothing
   decides it, escalate with the candidates as options, never guess.
@@ -44,6 +58,13 @@ Each key in the reply's `results` is exactly one of:
 
 The top-level `linear`/`github` in the reply carry the same source-level `ok`/`reason` as before,
 for when nothing you asked for resolved to either side at all.
+
+**A Linear `not_found` already means "checked Linear itself, not just the snapshot" (DO-754).**
+When one or more keys come back `not_found` and classified `linear`, `rabota tracked` has already
+made one batched, read-only Linear query naming exactly those keys, so a closed issue reads
+`found_closed` rather than `not_found` — `promised-untracked` requires a true `not_found` for its
+Linear evidence, never a `found_closed`. A `not_found`/`found_closed` split for GitHub does not
+exist and is not planned: see above for why `github`'s `not_found` stays weaker evidence.
 
 **`state-contradiction`'s "no PR exists" case (golden `g06`/`g07`, DO-735).** Each Linear issue's
 `pr_links` is `null` (snapshot predates attachment sync — treat as unknown, never as "no PR"),

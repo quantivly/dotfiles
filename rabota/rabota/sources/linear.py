@@ -47,6 +47,11 @@ it ever does, the fix is genuine pagination, not a bigger arbitrary number.
 
 The key is passed only as an HTTP header. It is never logged, never formatted into an
 exception, and never part of a reply; ``query`` raises with Linear's own messages only.
+
+DO-754: ``find_by_identifiers`` resolves the handful of Linear keys ``reconcile.lookup_tracked``
+found missing from the open-issue snapshot (which fetches only ``assigned_open``/``created_open``)
+-- a closed issue is not a nonexistent one, and this is the one place that tells them apart. See
+that function for the batching and the "unknown, never not_found" rule on a failed call.
 """
 import json
 import urllib.error
@@ -88,6 +93,19 @@ Q_RELATIONS = """query($ids: [ID!]) {
   issues(first: %d, filter: { id: { in: $ids } }) {
     nodes { id relations { nodes { type relatedIssue { identifier } } }
             inverseRelations { nodes { type issue { identifier } } } } } }""" % PAGE_SIZE
+# DO-754: IssueFilter has no direct "identifier" field (linear.app/developers/filtering) -- an
+# identifier is a team key plus issue number, and the documented filter schema combines
+# alternatives with `or`, so each requested identifier becomes its own `{team, number}` branch.
+# `id: {in: [...]}` accepts identifiers ("DO-751") directly: measured live on 2026-09-26, 4 keys
+# (2 real, 2 missing) in 0.57 s, the missing ones simply absent. The first version ORed one
+# `{team, number}` branch per key, and Linear SILENTLY IGNORED the top-level `or`: it paged the
+# whole org, 4647 issues in 30.5 s. `find_by_identifiers` now also refuses any reply larger than
+# what it asked for, so a filter Linear drops again reads as `unknown`, never as a crawl.
+Q_BY_IDENTIFIERS = """query($after: String, $ids: [ID!]) {
+  issues(first: %d, after: $after, filter: { id: { in: $ids } }) {
+    nodes { identifier state { name type } completedAt }
+    pageInfo { hasNextPage endCursor } } }""" % PAGE_SIZE
+Q_ONE_ISSUE = """query($id: String!) { issue(id: $id) { identifier state { name type } completedAt } }"""
 Q_ISSUE_STATE = """query($id: String!) { issue(id: $id) { id dueDate state { type } } }"""
 Q_VIEWER = "{ viewer { id name } }"
 M_ARCHIVE_ALL = """mutation($issueId: String!) {
@@ -223,6 +241,52 @@ class LinearClient:
 
     def issue_state_and_due(self, issue_id: str) -> dict:
         return self.query(Q_ISSUE_STATE, {"id": issue_id})["issue"]
+
+    def find_by_identifiers(self, identifiers: list[str]) -> list[dict]:
+        """DO-754: resolve exactly these Linear identifiers (``HUB-5812`` shape) in ONE batched,
+        read-only query -- for a key ``sync``'s open-issue fetch left ``not_found``, telling
+        "closed" apart from "never existed". Cost: one HTTP round trip no matter how many
+        identifiers are asked for (a turn-2 classification pass names single digits of subjects at
+        a time; pagination only bites past ``PAGE_SIZE`` matches, which this never approaches in
+        practice). The identifiers go in one ``id: {in: [...]}`` filter -- see ``Q_BY_IDENTIFIERS``
+        for why not an ``or`` of per-key branches. Returns one
+        ``{"identifier", "state", "completedAt"}`` per issue Linear actually has; an identifier
+        missing from the return really does not exist, as far as this query can tell."""
+        if not identifiers:
+            return []
+        wanted = sorted(set(identifiers))
+        data = self.query(Q_BY_IDENTIFIERS, {"ids": wanted, "after": None})
+        conn = (data or {}).get("issues") or {}
+        nodes = conn.get("nodes")
+        if not isinstance(nodes, list):
+            raise errors.RabotaError("Linear reply lacks issues.nodes")
+        # One page is always enough for a handful of keys; more rows than keys, or another page,
+        # means the filter was not applied, and the answer cannot be trusted.
+        if len(nodes) > len(wanted) or (conn.get("pageInfo") or {}).get("hasNextPage"):
+            raise errors.RabotaError(f"Linear returned {len(nodes)} issues for {len(wanted)} identifiers: "
+                                     "the identifier filter was not applied")
+        rec = lambda n, asked: {"identifier": n["identifier"], "asked": asked, "state": n["state"],
+                                "completedAt": n.get("completedAt")}
+        out = [rec(n, n["identifier"]) for n in nodes if n.get("identifier") in wanted]
+        # A node under an identifier nobody asked for is an issue moved between teams, answering one
+        # of the keys still unmatched (DO-754 review F2: dropping it made a moved-and-closed issue
+        # read not_found). The batch cannot say which key it answers, so each unmatched key is
+        # resolved with `issue(id:)`, which accepts an old identifier. This is only paid when a
+        # moved issue actually appears. "Entity not found" is a real absence; any other error
+        # propagates.
+        if any(n.get("identifier") not in wanted for n in nodes):
+            matched = {r["asked"] for r in out}
+            for key in (k for k in wanted if k not in matched):
+                reply = self._post({"query": Q_ONE_ISSUE, "variables": {"id": key}})
+                errs = reply.get("errors") or []
+                if any("not found" in str(e.get("message", "")).lower() for e in errs):
+                    continue
+                if errs or "data" not in reply:
+                    raise errors.RabotaError(f"Linear lookup of {key} failed: "
+                                             + "; ".join(str(e.get("message", "?")) for e in errs))
+                if reply["data"].get("issue"):
+                    out.append(rec(reply["data"]["issue"], key))
+        return out
 
 
 def _flatten(issue: dict) -> dict:
