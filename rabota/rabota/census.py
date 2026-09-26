@@ -214,20 +214,44 @@ def worktrees(runner) -> tuple[list[dict], list[str]]:
     return rows, []
 
 
+# A lane's own output artifact (DO-747, amended DO-747 fix round): work-lane briefs are free
+# text, and this project's own history has lanes told to write `fix-verdict.json`,
+# `rebase-verdict.json`, `evaluation-2.json` and the like -- a fixed list of three names
+# (`verdict.json`, `review.json`, `evaluation.json`) would settle any of those lanes `failed` with
+# a wrong `settle_reason` even though the lane succeeded. The rule that cannot drift: a lane counts
+# as having produced output when its out_dir holds ANY `*.json` file. `rabota` itself never writes
+# one there -- a lane's out_dir carries only `brief.md`, `_common-rules.md`, `stream.jsonl` and
+# `stream.err` (see `lane.py`'s `build_local`/`create_worktree_remote`/`send_brief` and this
+# module's own `_ended_at`), so this glob can never true-positive on rabota's own scaffolding.
+NO_OUTPUT_REASON = "no output file: no *.json file was written to out_dir before the lane's unit exited"
+
+
+def _output_mtime_local(out_dir: str) -> float | None:
+    """The newest mtime among ``out_dir``'s ``*.json`` files, or ``None`` if none exist.
+
+    At most one is ever expected for a given lane; ``max`` over whichever are readable is so a
+    stray leftover file from a prior lane reusing the directory can never make this return
+    ``None`` when a real one is present, not a claim that more than one is normal. A missing
+    ``out_dir`` glob-matches to nothing (no ``OSError``), same as a directory with no ``*.json``
+    in it -- both mean "no output".
+    """
+    mtimes = [p.stat().st_mtime for p in Path(out_dir).glob("*.json")]
+    return max(mtimes) if mtimes else None
+
+
 def _ended_at(out_dir: str) -> str:
-    """The lane's own end time: ``verdict.json``'s mtime, not when a later census run noticed it.
+    """The lane's own end time: its output artifact's mtime, not when a later census run noticed it.
 
     DO-714: settling from ``now()`` gave every lane a census settled together the SAME
     ``ended_at`` -- the census's own timestamp, not theirs -- inflating durations by however
-    long the lane sat finished before a census happened to run. ``verdict.json`` is written once,
+    long the lane sat finished before a census happened to run. The artifact is written once,
     when the lane actually finishes (spec §C6), so its mtime is the real end time. A lane with no
-    readable verdict artifact here (settled from another machine's stream text, or no verdict at
+    readable output artifact here (settled from another machine's stream text, or no output at
     all) falls back to ``now()`` -- not knowing the real end time is not the same as it being now,
     but it is the least-wrong answer available locally.
     """
-    try:
-        mtime = (Path(out_dir) / "verdict.json").stat().st_mtime
-    except OSError:
+    mtime = _output_mtime_local(out_dir)
+    if mtime is None:
         return now()
     return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -262,17 +286,30 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
     """A ``started`` row whose unit is gone and whose stream has a result line is settled from that line.
 
     ``ended_at``, ``cost_usd`` (``result.total_cost_usd``) and ``five_h_pct_at_end`` (the seat's
-    current reading) are written; ``status`` becomes ``done`` or ``failed`` per ``is_error``. A row
-    whose unit is still active, or whose stream has no result yet, is left alone (``reap`` handles
-    abandonment). Returns the ids settled.
+    current reading) are written; ``status`` becomes ``done`` or ``failed`` per ``is_error`` --
+    UNLESS the lane's out_dir has no ``*.json`` file in it, in which case it settles ``failed``
+    regardless of ``is_error``, with ``settle_reason`` naming the absence (DO-747: a headless lane
+    that put its whole brief into a backgrounded subagent and ended its turn printed a clean
+    ``is_error: false`` result with no ``review.json`` ever written, and the row settled ``done``).
+    A row whose unit is still active, or whose stream has no result yet, is left alone (``reap``
+    handles abandonment). Returns the ids settled.
 
     A lane on another machine is settled from that machine's ``machines[]`` row — its stream lives
     there, so the local filesystem read below can never see it. An unreachable machine settles
-    nothing: not knowing is not the same as finished. Its ``ended_at`` (DO-722) comes from that
-    same row's ``verdict_mtimes`` -- the remote machine's own measurement, ridden back in the one
-    ssh call ``machines()`` already makes -- rather than ``_ended_at()``'s local ``stat``, which can
-    never see a file on a machine this process is not running on. Either way ``ended_at`` is
-    clamped to never precede the lane's own ``started_at``.
+    nothing: not knowing is not the same as finished. Its ``ended_at`` (DO-722) and output presence
+    both come from that same row's ``verdict_mtimes`` -- the remote machine's own measurement,
+    ridden back in the one ssh call ``machines()`` already makes -- rather than a local ``stat``,
+    which can never see a file on a machine this process is not running on. Either way ``ended_at``
+    is clamped to never precede the lane's own ``started_at``.
+
+    Timing: the output file, when a lane writes one at all, is written by a tool call strictly
+    inside the agent's own turn -- before the CLI ever prints the terminating ``result`` line to
+    ``stream.jsonl`` and exits. Because this function only reaches a lane once its unit is already
+    gone (checked above) AND a ``result`` line is present, the file (if the lane wrote one) is
+    already fully on disk by the time either the local ``stat`` or the remote ssh's ``stat`` runs
+    -- both happen-after the same process exit that also produced the ``result`` line. There is no
+    window where "unit gone, result line present, output not yet visible" is a live possibility for
+    a lane that did write one; it is only ever genuinely absent.
     """
     by_name = {m["name"]: m for m in (machines or [])}
     # Keyed by (machine, unit) rather than unit alone: unit names are only unique per machine,
@@ -310,16 +347,23 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
             continue
         if machine == "local":
             ended_at = _ended_at(lane["out_dir"])
+            has_output = _output_mtime_local(lane["out_dir"]) is not None
         else:
-            ended_at = _ended_at_remote(row.get("verdict_mtimes", {}).get(lane["out_dir"], ""))
+            mtime_s = row.get("verdict_mtimes", {}).get(lane["out_dir"], "")
+            ended_at = _ended_at_remote(mtime_s)
+            has_output = bool((mtime_s or "").strip())
         started_at = lane.get("started_at")
         if started_at and ended_at < started_at:
             # A negative duration is a worse untruth than the one this whole change fixes -- clock
             # skew between machines, or a verdict mtime that predates the lane's own started_at
             # row, must never read as the lane having ended before it began.
             ended_at = started_at
-        ctx.store.update_lane(lane["id"], status="failed" if result.get("is_error") else "done",
-                              ended_at=ended_at,
+        if has_output:
+            status, settle_reason = ("failed" if result.get("is_error") else "done"), None
+        else:
+            status = "failed"
+            settle_reason = NO_OUTPUT_REASON
+        ctx.store.update_lane(lane["id"], status=status, ended_at=ended_at, settle_reason=settle_reason,
                               cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
         settled.append(lane["id"])
     return settled

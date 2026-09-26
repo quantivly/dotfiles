@@ -119,7 +119,7 @@ class StoreTests(unittest.TestCase):
         ecols = {r[1] for r in s.conn.execute("PRAGMA table_info(escalations)")}
         self.assertTrue({"kind", "subject"} <= ecols)
         s.close()
-        s2 = Store.open(Path(tmp.name)); self.assertEqual(s2.schema_version(), 2)   # idempotent
+        s2 = Store.open(Path(tmp.name)); self.assertEqual(s2.schema_version(), SCHEMA_VERSION)   # idempotent
         eid = s2.add_escalation("quantivly", "q", "e", ["a"], kind="decision", subject="PR #1")
         self.assertEqual((s2.escalation(eid)["kind"], s2.escalation(eid)["subject"]), ("decision", "PR #1"))
         s2.close()

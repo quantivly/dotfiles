@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rabota import errors, secrets
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # v(N) → v(N+1) steps, keyed by the version they upgrade FROM. Each list runs in one
 # transaction and restamps. A fresh database gets the final shape from SCHEMA directly.
 MIGRATIONS = {
@@ -17,6 +17,11 @@ MIGRATIONS = {
         "ALTER TABLE lanes ADD COLUMN cost_usd REAL", "ALTER TABLE lanes ADD COLUMN five_h_pct_at_start INTEGER",
         "ALTER TABLE lanes ADD COLUMN five_h_pct_at_end INTEGER", "ALTER TABLE lanes ADD COLUMN abandoned_at TEXT",
         "ALTER TABLE escalations ADD COLUMN kind TEXT", "ALTER TABLE escalations ADD COLUMN subject TEXT",
+    ],
+    2: [  # v2 → v3 (DO-747): why a lane settled the way it did, when that isn't self-evident from
+          # status/cost_usd alone -- namely a lane census settled `failed` for writing no known
+          # output file at all, distinct from an agent-reported failure.
+        "ALTER TABLE lanes ADD COLUMN settle_reason TEXT",
     ],
 }
 SCHEMA = """
@@ -29,7 +34,7 @@ CREATE TABLE IF NOT EXISTS lanes(id TEXT PRIMARY KEY, tenant TEXT, kind TEXT, br
   worktree TEXT, out_dir TEXT, machine TEXT, unit TEXT, session_id TEXT, model TEXT, status TEXT,
   started_at TEXT, ended_at TEXT, held_reason TEXT, of_lane TEXT, attached INTEGER DEFAULT 0,
   seat TEXT, effort TEXT, cost_usd REAL, five_h_pct_at_start INTEGER, five_h_pct_at_end INTEGER,
-  abandoned_at TEXT);
+  abandoned_at TEXT, settle_reason TEXT);
 CREATE TABLE IF NOT EXISTS escalations(id INTEGER PRIMARY KEY, tenant TEXT, first_seen TEXT NOT NULL,
   ts TEXT, question TEXT, evidence TEXT, options TEXT, disposition TEXT, resolved_at TEXT, resolution TEXT,
   kind TEXT, subject TEXT);
@@ -42,7 +47,8 @@ CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NO
 """
 LANE_FIELDS = ("id", "tenant", "kind", "brief", "repo", "worktree", "out_dir", "machine", "unit",
                "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached",
-               "seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at")
+               "seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at",
+               "settle_reason")
 
 
 def now() -> str:

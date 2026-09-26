@@ -68,6 +68,10 @@ your instructions and your verdict file is the whole of your reply.
   nobody.
 - Write your deliverable to the exact path your brief names. The orchestrator
   polls that path to know you finished; it does not trust lifecycle status.
+- **Do all the work in your own turn.** Never delegate it to a subagent, and
+  never run anything with `run_in_background`: a headless lane ends the moment
+  its own turn ends, `claude -p` kills background tasks still running after
+  600s, and the result you already printed settles as `done` regardless (DO-747).
 
 ## Nothing will interrupt you
 

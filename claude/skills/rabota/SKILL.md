@@ -79,7 +79,8 @@ written, so the fetch you just landed is never silently skipped (DO-738).
    `<machine state_dir>/out/<tenant>/<lane_id>/verdict.json` **on the lane's machine** — no command
    prints it, so fetch that one file. Evaluate with
    `rabota lane recipe --kind evaluate --of <lane> --run` (DO-670) and read `evaluation.json` only.
-   Never read a pane, never send a keystroke, never `journalctl` a lane into this context.
+   Never read a pane, never send a keystroke, never `journalctl` a lane into this context. A lane
+   that settled `failed` with no output file shows why in `rabota lane status <id>`.
 4. **Monitor and evaluate.** `rabota --text census` settles a finished lane's row — never
    poll on a clock, never read a pane. Read only `verdict.json`, fetched from the path in step 3.
    For anything going to a critical reader, evaluate as in step 3 and read only

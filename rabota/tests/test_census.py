@@ -223,6 +223,13 @@ class CensusTests(unittest.TestCase):
     def test_settle_finished_reads_result_line(self):
         out = Path(self.tmp.name) / "out" / "smoke"; out.mkdir(parents=True)
         (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        # DO-747: settling now requires an output artifact too, not the result line alone --
+        # without this, a lane that never wrote one settles `failed` (see
+        # test_a_lane_with_no_output_file_settles_failed_even_when_is_error_is_false), which this
+        # row is not testing. Amended per that change; it still passed against the pre-DO-747 code
+        # (which ignored the file's presence entirely), so it proves nothing about the fix by
+        # itself -- the negative case below does.
+        (out / "verdict.json").write_text("{}")
         self.ctx.store.insert_lane({"id": "smoke", "tenant": "quantivly", "kind": "work", "brief": "b", "repo": "r", "worktree": "w",
                                     "out_dir": str(out), "machine": "local", "unit": "rabota-lane-quantivly-smoke-dead.service",
                                     "session_id": "s", "model": "m", "status": "started", "started_at": "2026-09-16T10:00:00Z",
@@ -232,6 +239,44 @@ class CensusTests(unittest.TestCase):
         row = self.ctx.store.get_lane("smoke")
         self.assertEqual((row["status"], row["cost_usd"], row["five_h_pct_at_end"]), ("done", 1.23, 41))
         self.assertIsNotNone(row["ended_at"])
+        self.assertIsNone(row["settle_reason"])
+
+    def test_a_lane_with_no_output_file_settles_failed_even_when_is_error_is_false(self):
+        """DO-747: lane aba797fe put its whole brief into one backgrounded Agent call, `claude -p`
+        killed it at the 600s background-task ceiling, and NO review.json was ever written -- but
+        the stream's own result line still said `is_error: false`, and the old code settled the
+        row `done` from that line alone. A lane with a result line and no known output file must
+        settle `failed`, with `settle_reason` naming the absence, regardless of `is_error`."""
+        out = Path(self.tmp.name) / "out" / "no-output"; out.mkdir(parents=True)
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        self.ctx.store.insert_lane({"id": "no-output", "tenant": "quantivly", "kind": "work", "brief": "b",
+                                    "repo": "r", "worktree": "w", "out_dir": str(out), "machine": "local",
+                                    "unit": "rabota-lane-quantivly-no-output-dead.service",
+                                    "session_id": "s", "model": "m", "status": "started",
+                                    "started_at": "2026-09-16T10:00:00Z", "seat": "quantivly-1", "effort": "high"})
+        settled = census.settle_finished(self.ctx, units=[], seats=[{"name": "quantivly-1", "five_h_pct": 41}])
+        self.assertEqual(settled, ["no-output"])
+        row = self.ctx.store.get_lane("no-output")
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("*.json", row["settle_reason"])
+
+    def test_a_lane_that_wrote_a_differently_named_json_file_still_settles_from_is_error(self):
+        """DO-747 fix round: work-lane briefs are free text, and this project's own history has
+        lanes told to write `fix-verdict.json` -- a fixed three-name list would settle this lane
+        `failed` with a wrong `settle_reason` even though it succeeded. Any `*.json` counts."""
+        out = Path(self.tmp.name) / "out" / "fixname"; out.mkdir(parents=True)
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "fix-verdict.json").write_text("{}")
+        self.ctx.store.insert_lane({"id": "fixname", "tenant": "quantivly", "kind": "work", "brief": "b",
+                                    "repo": "r", "worktree": "w", "out_dir": str(out), "machine": "local",
+                                    "unit": "rabota-lane-quantivly-fixname-dead.service",
+                                    "session_id": "s", "model": "m", "status": "started",
+                                    "started_at": "2026-09-16T10:00:00Z", "seat": "quantivly-1", "effort": "high"})
+        settled = census.settle_finished(self.ctx, units=[], seats=[{"name": "quantivly-1", "five_h_pct": 41}])
+        self.assertEqual(settled, ["fixname"])
+        row = self.ctx.store.get_lane("fixname")
+        self.assertEqual(row["status"], "done")
+        self.assertIsNone(row["settle_reason"])
 
     def test_settle_finished_takes_ended_at_from_the_verdict_artifacts_mtime(self):
         """DO-714: three lanes settled by one census all recorded the SAME ended_at -- the
@@ -404,15 +449,39 @@ class SettleRemoteTests(unittest.TestCase):
                                "started_at": started_at})
 
     def test_a_remote_lane_settles_from_the_machines_reading(self):
+        # DO-747: settling now requires the remote row to carry a non-empty `verdict_mtimes` entry
+        # too (an output file was seen on that machine) -- amended per that change; against the
+        # pre-DO-747 code this row still passed (it never looked at `verdict_mtimes` at all), so it
+        # is not itself evidence of the fix -- see
+        # test_a_remote_lane_with_no_output_file_settles_failed_even_when_is_error_is_false.
         ctx = self.ctx(FakeRunner([]))
         self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
         rows = [{"name": "dev", "reachable": True,
-                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'}}]
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'},
+                 "verdict_mtimes": {"/home/ubuntu/out/smoke": "1700000000"}}]
         settled = census.settle_finished(ctx, units=[], seats=[{"name": "quantivly-0", "five_h_pct": 12}],
                                          machines=rows)
         self.assertEqual(settled, ["L1"])
         row = ctx.store.list_lanes("quantivly")[0]
         self.assertEqual((row["status"], row["cost_usd"], row["five_h_pct_at_end"]), ("done", 0.42, 12))
+        self.assertIsNone(row["settle_reason"])
+
+    def test_a_remote_lane_with_no_output_file_settles_failed_even_when_is_error_is_false(self):
+        """The remote-path twin of test_a_lane_with_no_output_file_settles_failed_...: an empty
+        `verdict_mtimes` entry for a lane's out_dir means `stat` found no `*.json` file on that
+        machine either -- this is what DO-747's incident row (machine "dev") actually looked
+        like."""
+        ctx = self.ctx(FakeRunner([]))
+        self.lane(ctx, "dev", "/home/ubuntu/out/smoke")
+        rows = [{"name": "dev", "reachable": True,
+                 "streams": {"/home/ubuntu/out/smoke": '{"type":"result","is_error":false,"total_cost_usd":0.42}'},
+                 "verdict_mtimes": {"/home/ubuntu/out/smoke": ""}}]
+        settled = census.settle_finished(ctx, units=[], seats=[{"name": "quantivly-0", "five_h_pct": 12}],
+                                         machines=rows)
+        self.assertEqual(settled, ["L1"])
+        row = ctx.store.list_lanes("quantivly")[0]
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("*.json", row["settle_reason"])
 
     def test_a_remote_lane_settles_with_the_remote_machines_own_verdict_mtime(self):
         # DO-714 fixed this for local lanes only: settling from now() gave every lane a census
