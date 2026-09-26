@@ -282,7 +282,8 @@ def _ended_at_remote(epoch_s: str) -> str:
         return now()
 
 
-def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None) -> list[str]:
+def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[dict] | None = None,
+                    dry_run: bool = False) -> list[str]:
     """A ``started`` row whose unit is gone and whose stream has a result line is settled from that line.
 
     ``ended_at``, ``cost_usd`` (``result.total_cost_usd``) and ``five_h_pct_at_end`` (the seat's
@@ -363,8 +364,9 @@ def settle_finished(ctx, units: list[dict], seats: list[dict], machines: list[di
         else:
             status = "failed"
             settle_reason = NO_OUTPUT_REASON
-        ctx.store.update_lane(lane["id"], status=status, ended_at=ended_at, settle_reason=settle_reason,
-                              cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
+        if not dry_run:   # DO-753 review: a dry census reports what would settle and writes no row
+            ctx.store.update_lane(lane["id"], status=status, ended_at=ended_at, settle_reason=settle_reason,
+                                  cost_usd=result.get("total_cost_usd"), five_h_pct_at_end=pct.get(lane.get("seat")))
         settled.append(lane["id"])
     return settled
 
@@ -405,7 +407,7 @@ def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper
         wt, u3 = [], ["skipped:worktrees"]
     ms, u4 = machines(ctx)
     unavailable += u0 + u1 + u2 + u3 + u4
-    settle_finished(ctx, us, st, machines=ms)
+    settled = settle_finished(ctx, us, st, machines=ms, dry_run=ctx.dry_run)
     si = sysinfo.read(proc)
     # ``unknown`` is its own count, so user + sol + rabota do not silently sum to fewer than
     # sessions — the counts must not imply a certainty the readers did not have.
@@ -418,11 +420,12 @@ def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper
                        "swap_used_pct": si.swap_used_pct},
            "sessions": sess, "units": us, "seats": st, "worktrees": wt, "machines": ms, "counts": counts,
            "unavailable": unavailable}
-    # DO-753: everything above (including `settle_finished`'s lane-row bookkeeping) still runs on a
-    # dry census -- it is real measurement, not a write of the census's OWN state -- but
-    # `census.json` itself is not written, and its parent directory is not created just to hold it.
+    # DO-753: the measurement above still runs on a dry census, but nothing is written: not
+    # `census.json`, and not the lane rows `settle_finished` would have settled (review finding: it
+    # used to flip them to done/failed under a message saying nothing was written). The lanes that
+    # WOULD settle are reported instead, so a dry run still shows what a real one would do.
     if ctx.dry_run:
-        return {**out, "dry_run": "nothing written (census.json)"}
+        return {**out, "would_settle": settled, "dry_run": "nothing written (census.json, lane rows)"}
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     # Written through the same guard emit applies to stdout: a contract file is output too.
     text = secrets.assert_clean(json.dumps(out, indent=1, sort_keys=True) + "\n", os.environ)

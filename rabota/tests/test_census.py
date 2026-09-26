@@ -85,14 +85,29 @@ class CensusTests(unittest.TestCase):
         for s in c["sessions"]: self.assertNotIn("argv", s); self.assertNotIn("env", s)
 
     def test_dry_run_gather_writes_no_census_json_but_still_measures(self):
-        # DO-753: the measurement itself (including settle_finished's lane bookkeeping, per the
-        # reap.py principle that local bookkeeping about already-happened events survives a dry
-        # run) is unaffected -- only census.json's own write is suppressed.
+        # DO-753: the measurement itself is unaffected; census.json is not written. (Lane rows are
+        # not settled either -- see the row below.)
         self.ctx.dry_run = True
         c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
         self.assertEqual(c["counts"], {"sessions": 5, "user": 2, "sol": 1, "rabota": 2, "unknown": 0, "units_active": 1})
         self.assertFalse((Path(self.tmp.name) / "s" / "census.json").exists())
-        self.assertEqual(c["dry_run"], "nothing written (census.json)")
+        self.assertEqual(c["dry_run"], "nothing written (census.json, lane rows)")
+
+    def test_a_dry_census_settles_no_lane_and_reports_which_would(self):
+        # DO-753 review: settle_finished ran before the dry-run check and flipped a started lane to
+        # done while the reply said nothing was written.
+        out = Path(self.tmp.name) / "out" / "dry"; out.mkdir(parents=True)
+        (out / "stream.jsonl").write_text((FIX / "census" / "stream.jsonl").read_text())
+        (out / "verdict.json").write_text("{}")
+        self.ctx.store.insert_lane({"id": "dry", "tenant": "quantivly", "kind": "work", "brief": "b", "repo": "r", "worktree": "w",
+                                    "out_dir": str(out), "machine": "local", "unit": "rabota-lane-quantivly-dry-dead.service",
+                                    "session_id": "s", "model": "m", "status": "started", "started_at": "2026-09-16T10:00:00Z",
+                                    "seat": "quantivly-1", "effort": "high", "five_h_pct_at_start": 30})
+        self.ctx.dry_run = True
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        row = self.ctx.store.get_lane("dry")
+        self.assertEqual((row["status"], row["ended_at"], row["cost_usd"]), ("started", None, None))
+        self.assertEqual(c["would_settle"], ["dry"])
 
     def test_gather_writes_machines_into_the_contract_file(self):
         c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
