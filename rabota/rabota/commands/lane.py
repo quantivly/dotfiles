@@ -594,7 +594,8 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
                         "repo": repo, "worktree": worktree, "out_dir": out_dir, "machine": machine,
                         "unit": unit, "session_id": session_id, "status": "started", "seat": seat_pick,
                         "model": model, "effort": effort, "started_at": store.now(),
-                        "of_lane": of, "five_h_pct_at_start": b.get("five_h_pct_now")})
+                        "of_lane": of, "five_h_pct_at_start": b.get("five_h_pct_now"),
+                        "est_minutes": est_minutes})
     return out
 
 

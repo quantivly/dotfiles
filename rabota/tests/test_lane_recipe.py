@@ -682,6 +682,18 @@ class RunRecipeTests(LocalRecipeTests):
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True))
         self.assertNotIn("dry_run", out)
 
+    def test_a_real_run_records_est_minutes_on_the_started_row(self):
+        # DO-728 fix round: the budget gate's running-lanes projection (budget.running_lanes_minutes)
+        # reads this column back for every OTHER started lane on the seat, so a lane that never
+        # writes its own estimate here is invisible to that projection forever.
+        ok = Result(0, self.RESOLVE_OUT, "")
+        branch = Result(0, "main", "")
+        runner = SequencedRunner([ok, branch, ok, ok, ok, ok])
+        ctx = self.ctx(runner)
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(), **self.kw(run=True, est_minutes=45))
+        lane_id = out["unit"].rsplit("-", 1)[-1].removesuffix(".service")
+        self.assertEqual(ctx.store.get_lane(lane_id)["est_minutes"], 45)
+
     def test_dry_run_still_consults_the_budget_gate(self):
         # Hazard 1: "would this be refused" is exactly what a careful caller wants from a dry
         # run, so the gate must still run and a zero budget must still refuse -- even with
