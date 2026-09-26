@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rabota import errors, secrets
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # v(N) → v(N+1) steps, keyed by the version they upgrade FROM. Each list runs in one
 # transaction and restamps. A fresh database gets the final shape from SCHEMA directly.
 MIGRATIONS = {
@@ -23,6 +23,12 @@ MIGRATIONS = {
           # output file at all, distinct from an agent-reported failure.
         "ALTER TABLE lanes ADD COLUMN settle_reason TEXT",
     ],
+    3: [  # v3 → v4 (DO-728 fix round): a lane's own requested runtime, persisted at start time, so
+          # the budget gate can later project a STILL-RUNNING lane's remaining burn instead of
+          # treating it as invisible. A row written before this migration has no value here; the
+          # gate falls back to the seat's own median lane duration for those (budget.py).
+        "ALTER TABLE lanes ADD COLUMN est_minutes INTEGER",
+    ],
 }
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -34,7 +40,7 @@ CREATE TABLE IF NOT EXISTS lanes(id TEXT PRIMARY KEY, tenant TEXT, kind TEXT, br
   worktree TEXT, out_dir TEXT, machine TEXT, unit TEXT, session_id TEXT, model TEXT, status TEXT,
   started_at TEXT, ended_at TEXT, held_reason TEXT, of_lane TEXT, attached INTEGER DEFAULT 0,
   seat TEXT, effort TEXT, cost_usd REAL, five_h_pct_at_start INTEGER, five_h_pct_at_end INTEGER,
-  abandoned_at TEXT, settle_reason TEXT);
+  abandoned_at TEXT, settle_reason TEXT, est_minutes INTEGER);
 CREATE TABLE IF NOT EXISTS escalations(id INTEGER PRIMARY KEY, tenant TEXT, first_seen TEXT NOT NULL,
   ts TEXT, question TEXT, evidence TEXT, options TEXT, disposition TEXT, resolved_at TEXT, resolution TEXT,
   kind TEXT, subject TEXT);
@@ -48,7 +54,7 @@ CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NO
 LANE_FIELDS = ("id", "tenant", "kind", "brief", "repo", "worktree", "out_dir", "machine", "unit",
                "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached",
                "seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at",
-               "settle_reason")
+               "settle_reason", "est_minutes")
 
 
 def now() -> str:

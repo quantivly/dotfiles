@@ -288,11 +288,12 @@ class RecordingRunner:
 
 
 def lane_row(id, seat, started_at, ended_at, pct_start, pct_end, *, tenant="quantivly",
-            status="done", settle_reason=None):
+            status="done", settle_reason=None, est_minutes=None):
     return dict(id=id, tenant=tenant, kind="work", brief="b", repo="r", worktree="w", out_dir="o",
                 machine="local", unit=f"rabota-lane-{id}.service", session_id="s", model="m",
                 status=status, started_at=started_at, ended_at=ended_at, seat=seat, effort="e",
-                five_h_pct_at_start=pct_start, five_h_pct_at_end=pct_end, settle_reason=settle_reason)
+                five_h_pct_at_start=pct_start, five_h_pct_at_end=pct_end, settle_reason=settle_reason,
+                est_minutes=est_minutes)
 
 
 class MeasuredRateTests(unittest.TestCase):
@@ -309,29 +310,56 @@ class MeasuredRateTests(unittest.TestCase):
         self.assertEqual(rate, budget.RATE_FLOOR)
         self.assertEqual(source, "floor 115 pts/h, no history")
 
-    def test_non_overlapping_lanes_use_the_trailing_median(self):
-        # Three lanes, back to back, no overlap: 10%/h, 20%/h, 30%/h -> median 20.
+    def test_non_overlapping_lanes_use_the_trailing_p75(self):
+        # AMENDED (DO-728 fix round, median-vs-tail): this used to assert the MEDIAN of
+        # 10%/h, 20%/h, 30%/h (20.0, "measured median ..."); it passed against d2b1a99, which used
+        # `statistics.median`. The fix moves the gate's statistic to p75 -- the ceiling-facing one,
+        # not the typical one -- so the same three rates now give the linearly-interpolated p75
+        # (25.0) and the source string names p75, not median.
         ctx = self.ctx()
         ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T01:00:00Z", 0, 10))
         ctx.store.insert_lane(lane_row("b", "quantivly-1", "2026-09-24T02:00:00Z", "2026-09-24T03:00:00Z", 10, 30))
         ctx.store.insert_lane(lane_row("c", "quantivly-1", "2026-09-24T04:00:00Z", "2026-09-24T04:30:00Z", 30, 45))
         rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
-        self.assertEqual(rate, 20.0)
-        self.assertEqual(source, "measured median 20.0 pts/h over 3 lanes")
+        self.assertEqual(rate, 25.0)
+        self.assertEqual(source, "measured p75 25.0 pts/h over 3 lanes")
 
     def test_a_naive_per_lane_rate_would_be_far_higher_than_three_overlapping_lanes_really_burned(self):
-        # DO-728 hazard: three lanes on ONE seat overlapping over a single hour, seat pct rising
-        # from 10 to 30 over that whole hour (20 pts/h really burned). A naive per-lane rate
-        # counts each lane's own start-to-end delta separately and triple-counts the shared rise
-        # (a's 20pts/30min=40/h, b's 15pts/40min=22.5/h, c's 10pts/20min=30/h -- median 30, none of
-        # them close to the true 20). The busy-span computation must return the true rate instead.
+        # AMENDED (DO-728 fix round, reset-hidden-inside-merged-span): the original fixture here
+        # (a 10->30, b 14->29, c 26->30) passed against d2b1a99, but its own boundary readings were
+        # not self-consistent in real time -- sorted by wallclock, a's own end reading (30 at
+        # t=00:30) is HIGHER than c's later start reading (26 at t=00:40), which the new internal
+        # -reset check (correctly) reads as a reset and drops the whole span. Rebuilt so every
+        # reading is non-decreasing in real chronological order while keeping the same story: three
+        # lanes on ONE seat overlapping over a single hour, seat pct rising from 10 to 30 over that
+        # whole hour (20 pts/h really burned). A naive per-lane rate counts each lane's own
+        # start-to-end delta separately and triple-counts the shared rise (a's 15pts/30min=30/h,
+        # b's 19pts/40min=28.5/h, c's 5pts/20min=15/h -- median 28.5, well above the true 20). The
+        # busy-span computation must return the true rate instead; with only one span in this
+        # sample, p75 of one value is that value, so the assertion is unaffected by the
+        # median-vs-p75 change.
         ctx = self.ctx()
-        ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T00:30:00Z", 10, 30))
-        ctx.store.insert_lane(lane_row("b", "quantivly-1", "2026-09-24T00:10:00Z", "2026-09-24T00:50:00Z", 14, 29))
-        ctx.store.insert_lane(lane_row("c", "quantivly-1", "2026-09-24T00:40:00Z", "2026-09-24T01:00:00Z", 26, 30))
+        ctx.store.insert_lane(lane_row("a", "quantivly-1", "2026-09-24T00:00:00Z", "2026-09-24T00:30:00Z", 10, 25))
+        ctx.store.insert_lane(lane_row("b", "quantivly-1", "2026-09-24T00:10:00Z", "2026-09-24T00:50:00Z", 10, 29))
+        ctx.store.insert_lane(lane_row("c", "quantivly-1", "2026-09-24T00:40:00Z", "2026-09-24T01:00:00Z", 25, 30))
         rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
         self.assertEqual(rate, 20.0)   # (30 - 10) / 1h, from the earliest start and the latest end
         self.assertIn("over 3 lanes", source)
+
+    def test_a_reset_hidden_inside_a_merged_span_is_dropped_not_averaged_in(self):
+        # Review repro (repro_reset_span.py): a(90->95, 0:00-0:10) and b(0->5, 0:05-0:15) overlap,
+        # then c(5->96, 0:12-2:10) overlaps b -- one merged span. The OLD code compared only the
+        # span's overall first pct_start (90) to its last pct_end (96): 96 >= 90, so it read as a
+        # small positive rate (~2.8 pts/h) instead of being dropped, even though the 5h window
+        # visibly reset from 95 to 0 between a and b. Tracking every boundary in real chronological
+        # order catches the 95->0 step and drops the whole span; with no other history, the rate
+        # falls back to the floor.
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("a", "quantivly-9", "2026-09-24T00:00:00Z", "2026-09-24T00:10:00Z", 90, 95))
+        ctx.store.insert_lane(lane_row("b", "quantivly-9", "2026-09-24T00:05:00Z", "2026-09-24T00:15:00Z", 0, 5))
+        ctx.store.insert_lane(lane_row("c", "quantivly-9", "2026-09-24T00:12:00Z", "2026-09-24T02:10:00Z", 5, 96))
+        rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-9")
+        self.assertEqual((rate, source), (budget.RATE_FLOOR, "floor 115 pts/h, no history"))
 
     def test_a_window_reset_mid_span_is_dropped_not_inverted(self):
         # The 5h window reset between this lane's start and end: pct_end < pct_start. A naive
@@ -392,8 +420,12 @@ class TwentySixSeptemberSampleTests(unittest.TestCase):
     the fixed 115 pts/h constant refused it (96% projected for a 50-minute lane from empty)."""
     RATES = [6.7, 9.4, 12.1, 14.8, 16.2, 17.5, 19.0, 20.5]   # median 16.2, matches DO-728's report
 
-    def test_median_of_the_reconstructed_sample_matches_the_reported_median(self):
-        ctx_store = None
+    def test_p75_of_the_reconstructed_sample_is_above_the_reported_median(self):
+        # AMENDED (DO-728 fix round, median-vs-tail): this asserted the MEDIAN (15.5,
+        # "measured median ... over 8 lanes") and passed against d2b1a99. The fix moves the gate's
+        # statistic to p75; over this same reconstructed sample p75 is 18.25 (the interpolated
+        # 75th percentile of the rounded-to-int per-lane deltas), higher than the 15.5 median as
+        # the medium finding expects, and the source string names p75.
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         import argparse as _argparse
@@ -409,11 +441,147 @@ class TwentySixSeptemberSampleTests(unittest.TestCase):
             ctx.store.insert_lane(lane_row(f"l{i}", "quantivly-1", start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                                            end.strftime("%Y-%m-%dT%H:%M:%SZ"), 0, pct))
         rate, source = budget.measured_rate(ctx.store, "quantivly", "quantivly-1")
-        self.assertEqual(rate, 15.5)   # rounded-to-int pct deltas over 1h spans; matches the reported ~16
-        self.assertIn("over 8 lanes", source)
-        # Hazard 1: at this rate a 50-minute lane from an empty window projects to 16*50/60 ~= 13%,
-        # nowhere near the 95% ceiling -- the fixed 115 pts/h constant alone projected 96% for the
-        # same lane (est_minutes=50 in the brief's own arithmetic: 115*50/60 = 95.8). The new rate
-        # frees exactly the work DO-728 says was being refused, without raising the ceiling itself.
+        self.assertEqual(rate, 18.25)
+        self.assertEqual(source, "measured p75 18.2 pts/h over 8 lanes")
+        # Hazard 1: at this rate a 50-minute lane from an empty window projects to 18.25*50/60 ~=
+        # 15.2%, nowhere near the 95% ceiling -- the fixed 115 pts/h constant alone projected 96%
+        # for the same lane (est_minutes=50 in the brief's own arithmetic: 115*50/60 = 95.8). The
+        # new rate frees exactly the work DO-728 says was being refused, without raising the
+        # ceiling itself.
         self.assertLess(rate * 50 / 60, 20)
         self.assertGreater(budget.RATE_FLOOR * 50 / 60, 95)
+
+
+def _minutes_ago(m):
+    return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class RunningLanesMinutesTests(unittest.TestCase):
+    """DO-728 fix round, critical: a running lane's own future burn used to be invisible to the
+    gate -- the projection only ever accounted for the NEW lane's ``est_minutes``. These test
+    ``running_lanes_minutes`` directly; the end-to-end refusal (the review's repro) is replayed
+    below in ``RunningLanesGateTests``."""
+
+    def ctx(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=FakeRunner([]),
+                                           env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def test_no_running_lanes_adds_nothing(self):
+        ctx = self.ctx()
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0)
+        self.assertEqual((minutes, detail), (0.0, ""))
+
+    def test_running_lanes_add_their_remaining_estimate_and_name_their_share(self):
+        ctx = self.ctx()
+        for i in range(3):
+            ctx.store.insert_lane(lane_row(f"r{i}", "quantivly-1", _minutes_ago(30), None, None, None,
+                                           status="started", est_minutes=60))
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0)
+        self.assertAlmostEqual(minutes, 90.0, delta=0.5)   # 3 lanes x (60 est - 30 elapsed) = 90
+        self.assertIn("3 running lane(s)", detail)
+        self.assertIn("quantivly-1", detail)
+
+    def test_a_lane_past_its_own_estimate_is_floored_not_zeroed_and_the_overrun_is_named(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("over", "quantivly-1", _minutes_ago(120), None, None, None,
+                                       status="started", est_minutes=60))   # 60 min past its own estimate
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0)
+        self.assertEqual(minutes, budget.RUNNING_LANE_FLOOR_MINUTES)
+        self.assertIn("1 past its own estimate", detail)
+        self.assertIn(f"floored at {budget.RUNNING_LANE_FLOOR_MINUTES}m", detail)
+
+    def test_a_running_lane_with_no_est_minutes_falls_back_to_the_seats_median_duration(self):
+        # A row from before the v3->v4 migration: est_minutes is NULL. It is assumed to run for
+        # the seat's own median settled-lane duration -- here 40 minutes (20, 40, 60 -> median 40).
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("s1", "quantivly-1", "2026-09-20T00:00:00Z", "2026-09-20T00:20:00Z", 0, 5))
+        ctx.store.insert_lane(lane_row("s2", "quantivly-1", "2026-09-21T00:00:00Z", "2026-09-21T00:40:00Z", 0, 10))
+        ctx.store.insert_lane(lane_row("s3", "quantivly-1", "2026-09-22T00:00:00Z", "2026-09-22T01:00:00Z", 0, 15))
+        ctx.store.insert_lane(lane_row("running", "quantivly-1", _minutes_ago(10), None, None, None,
+                                       status="started", est_minutes=None))
+        minutes, detail = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0)
+        self.assertAlmostEqual(minutes, 30.0, delta=0.5)   # median duration 40 - 10 elapsed = 30
+        self.assertIn("1 running lane(s)", detail)
+
+    def test_a_different_seat_or_tenants_running_lanes_do_not_leak_in(self):
+        ctx = self.ctx()
+        ctx.store.insert_lane(lane_row("other-seat", "quantivly-2", _minutes_ago(10), None, None, None,
+                                       status="started", est_minutes=60))
+        minutes, _ = budget.running_lanes_minutes(ctx.store, "quantivly", "quantivly-1", 20.0)
+        self.assertEqual(minutes, 0.0)
+
+
+class GateMathRunner:
+    """Reproduces scripts/claude-pick's own ``--gate`` arithmetic (``projected = u5 + rate *
+    est_minutes / 60``, refuse when ``projected > 95``) closely enough to prove that folding
+    running lanes' remaining burn into ``est_minutes`` changes the actual verdict -- a canned
+    JSON response could not show that, since it would refuse (or allow) regardless of what
+    ``credential_gate`` computed and asked for."""
+
+    def __init__(self, five_hour):
+        self.five_hour = five_hour
+        self.calls = []
+
+    def run(self, argv, *, env=None, timeout=60, **kw):
+        self.calls.append(list(argv))
+        est = int(argv[argv.index("--est-minutes") + 1])
+        rate = int((env or {}).get("CLAUDE_PICK_RATE_DEFAULT", 115))
+        projected = self.five_hour + round(rate * est / 60)
+        verdict = "allow" if projected <= 95 else "refuse"
+        j = {"state": "picked" if verdict == "allow" else "gate-projected", "profile": argv[2], "tier": "Team",
+             "usage": {"five_hour": self.five_hour, "weekly": 10, "cache_age_s": 1},
+             "resets_at": {"five_hour": "2026-09-26T20:00:00Z", "weekly": None},
+             "gate": {"model": "m", "effort": "e", "est_minutes": est, "rate": rate, "projected": projected,
+                      "max": 95, "verdict": verdict}, "reason": None}
+        return Result(0 if verdict == "allow" else 2, json.dumps(j), "")
+
+
+class RunningLanesGateTests(unittest.TestCase):
+    """Hazard 2 (review repro_running_lanes.py, replayed end to end): a seat at 70%, with 3 lanes
+    already running at ~20 pts/h and 30 minutes left each, must refuse a 4th 30-minute lane -- true
+    finish is 70 + 3*(20*0.5) + 20*0.5 = 110%, over the 95% ceiling, even though the 4th lane's OWN
+    projection (70 + 20*30/60 = 80%) looks fine in isolation. d2b1a99 allowed this (the review's
+    own ``gate_ok True true_final_pct 110.0``); this must now refuse and name the running lanes."""
+
+    def ctx(self, runner):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        c = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(lambda: c._store and c._store.close())
+        return c
+
+    def test_the_review_repro_is_now_refused_and_names_the_running_lanes(self):
+        from rabota.commands import budget as cmd
+        runner = GateMathRunner(five_hour=70)
+        ctx = self.ctx(runner)
+        # One settled lane gives a clean, single-span rate of exactly 20 pts/h (the review's own
+        # figure), matching the repro precisely rather than approximating it.
+        ctx.store.insert_lane(lane_row("hist", "quantivly-1", "2026-09-25T00:00:00Z", "2026-09-25T01:00:00Z", 0, 20))
+        for i in range(3):
+            ctx.store.insert_lane(lane_row(f"r{i}", "quantivly-1", _minutes_ago(30), None, None, None,
+                                           status="started", est_minutes=60))
+        with self.assertRaises(errors.Refused) as cm:
+            cmd.run_budget(ctx, machine="local", model="m", effort="e", est_minutes=30, raise_on_zero=True)
+        self.assertIn("credential:window", str(cm.exception))
+        # The one claude-pick call actually made: est-minutes folded the 4th lane's own 30
+        # together with the three running lanes' ~90 remaining minutes into ~120.
+        called_est = int(runner.calls[0][runner.calls[0].index("--est-minutes") + 1])
+        self.assertGreaterEqual(called_est, 115)   # 30 (new) + ~90 (3 x ~30 remaining) = ~120
+        b = json.loads((ctx.state_dir / "budget.json").read_text())
+        self.assertIn("3 running lane(s)", b["reasons"][0]["detail"])
+        self.assertEqual(b["allowed_new_lanes"], 0)
+
+    def test_without_the_running_lanes_the_same_new_lane_would_have_been_allowed(self):
+        # Confirms the refusal above comes from the running lanes, not from the new lane's own
+        # projection: with NO running lanes folded in, the exact same seat/rate/estimate is
+        # allowed (70 + 20*30/60 = 80% <= 95%), exactly the "looks fine in isolation" the finding
+        # is about. Calls ``credential_gate`` directly (not ``run_budget``) so this isolates the
+        # credential dimension from the machine/census one, which is unmeasured in this fixture
+        # and would refuse on its own regardless of the credential verdict.
+        runner = GateMathRunner(five_hour=70)
+        g = budget.credential_gate(runner, "quantivly-1", "m", "e", 30, rate=20.0, running_minutes=0.0)
+        self.assertTrue(g["ok"])

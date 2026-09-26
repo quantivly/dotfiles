@@ -101,6 +101,53 @@ class StoreTests(unittest.TestCase):
         self.store = Store.open(Path(self.tmp.name) / "handoffs" / "rabota")
         self.assertEqual(self.store.schema_version(), 0)
 
+    def test_migrate_v3_to_v4_adds_est_minutes_on_a_v3_shaped_store(self):
+        # DO-728 fix round, hazard 1: driven on a v3-shaped store carrying both a settled row and
+        # a STILL-RUNNING one, since a real store the day this ships has exactly that mix.
+        from rabota.store import Store, SCHEMA_VERSION
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "rabota.db"
+        conn = sqlite3.connect(db, isolation_level=None)
+        conn.executescript("""
+            CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES (3);
+            CREATE TABLE lanes(id TEXT PRIMARY KEY, tenant TEXT, kind TEXT, brief TEXT, repo TEXT, worktree TEXT,
+              out_dir TEXT, machine TEXT, unit TEXT, session_id TEXT, model TEXT, status TEXT, started_at TEXT,
+              ended_at TEXT, held_reason TEXT, of_lane TEXT, attached INTEGER DEFAULT 0, seat TEXT, effort TEXT,
+              cost_usd REAL, five_h_pct_at_start INTEGER, five_h_pct_at_end INTEGER, abandoned_at TEXT,
+              settle_reason TEXT);
+            CREATE TABLE escalations(id INTEGER PRIMARY KEY, tenant TEXT, first_seen TEXT NOT NULL, ts TEXT,
+              question TEXT, evidence TEXT, options TEXT, disposition TEXT, resolved_at TEXT, resolution TEXT,
+              kind TEXT, subject TEXT);
+            INSERT INTO lanes(id, tenant, status, started_at, ended_at, seat, five_h_pct_at_start, five_h_pct_at_end)
+              VALUES ('settled', 'quantivly', 'done', '2026-09-24T00:00:00Z', '2026-09-24T01:00:00Z', 'quantivly-1', 0, 20);
+            INSERT INTO lanes(id, tenant, status, started_at, seat) VALUES ('running', 'quantivly', 'started',
+              '2026-09-26T00:00:00Z', 'quantivly-1');
+        """)
+        conn.close()
+        s = Store.open(Path(tmp.name))
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
+        cols = {r[1] for r in s.conn.execute("PRAGMA table_info(lanes)")}
+        self.assertIn("est_minutes", cols)
+        rows = {r["id"]: r["est_minutes"] for r in s._rows("SELECT id, est_minutes FROM lanes")}
+        self.assertEqual(rows, {"settled": None, "running": None})   # pre-migration rows: no estimate, never invented
+        self.assertEqual(s.get_lane("settled")["status"], "done")
+        self.assertEqual(s.get_lane("running")["status"], "started")
+        s.close()
+
+    def test_v4_store_is_refused_by_v3_code(self):
+        # DO-728 fix round, hazard 1: the other direction -- an older rabota (still at v3) must
+        # refuse a v4 store cleanly, exactly as v3-code refused a v2 database before it.
+        from rabota.store import Store
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        state_dir = Path(tmp.name)
+        s = Store.open(state_dir)
+        self.assertEqual(s.schema_version(), 4)
+        s.close()
+        with mock.patch("rabota.store.SCHEMA_VERSION", 3):
+            with self.assertRaises(errors.Refused) as cm:
+                Store.open(state_dir)
+            self.assertIn("schema is 4, newer than this rabota's 3", str(cm.exception))
+
     def test_migrate_v1_to_v2_adds_columns_and_restamps(self):
         from rabota.store import Store, SCHEMA_VERSION
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)

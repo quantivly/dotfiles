@@ -21,9 +21,23 @@ WORK_TENANT = "quantivly"
 # only a seat with real history earns a lower, less conservative rate.
 RATE_FLOOR = 115.0
 RATE_HISTORY_LIMIT = 30   # how many of a seat's most recent usable lanes the trailing stat sees
+RATE_PERCENTILE = 0.75
+# DO-728 fix round (median-vs-tail, medium): the gate exists to keep a seat under its ceiling, not
+# to describe a typical lane, and the observed spread (a live sample ran 4.8-30.0 pts/h around a
+# 19.6 median) means roughly HALF of all lanes burn faster than the median -- projecting the
+# median understates a real lane's burn on a coin flip. p75 is the statistic that answers "how
+# fast does this seat burn when it is running hot", which is the question a ceiling-facing
+# projection has to ask; ``RATE_FLOOR`` still bounds the downside for a seat with no history.
+
+# DO-728 fix round (running-lanes, critical): a lane that is STILL RUNNING keeps burning until it
+# ends, and the gate has to count that remaining burn against a new lane's admission -- a seat
+# already three lanes deep can look fine on the new lane's own projection alone and still finish
+# well over its ceiling. A lane past its own estimate is still burning too, so its remainder is
+# floored rather than zeroed.
+RUNNING_LANE_FLOOR_MINUTES = 10
 
 
-def _busy_intervals(rows: list[dict]) -> list[tuple[float, float, int, int]]:
+def _busy_intervals(rows: list[dict]) -> list[tuple[float, float, int, int, bool]]:
     """Collapse ``rows`` (one seat's lanes) into non-overlapping busy spans.
 
     Two or three lanes often run on one seat at once (DO-728): a lane's own start-to-end delta
@@ -35,9 +49,19 @@ def _busy_intervals(rows: list[dict]) -> list[tuple[float, float, int, int]]:
     ends before the span's current bounds) is folded in for coverage but does not move either
     edge, matching "at least exclude overlap from the sample" without discarding it outright.
 
-    Returns ``(start_epoch, end_epoch, pct_start, pct_end)`` tuples, chronological, unsorted by
-    duration. A span whose ``pct_end < pct_start`` (the 5h window reset mid-span) is dropped by
-    the caller, never corrected into a negative or absurd rate here.
+    Returns ``(start_epoch, end_epoch, pct_start, pct_end, reset)`` tuples, chronological, unsorted
+    by duration. ``reset`` is True when the 5h window went DOWN between any two of the span's
+    boundary readings taken in real chronological order -- not just between its overall first
+    start and last end, but at every lane start/end folded into it (DO-728 fix round: a span that
+    climbs, resets, and recovers past its own starting point used to read as a small positive rate
+    instead of being dropped; a hidden reset like that drags a trailing sample toward zero rather
+    than being excluded from it). Ordering by real time, not by which row contributed a reading,
+    matters: two lanes overlap precisely because one starts before the other ends, so a lane's OWN
+    start/end pair can arrive on the wallclock before an earlier-starting neighbour's end -- sorting
+    events by row-processing order instead of by their own timestamp would compare an earlier
+    reading against a later one backwards and manufacture a "reset" out of ordinary overlap. The
+    caller drops any span with ``reset`` set, never correcting one into a negative or absurd rate
+    here.
     """
     parsed = []
     for r in rows:
@@ -50,39 +74,101 @@ def _busy_intervals(rows: list[dict]) -> list[tuple[float, float, int, int]]:
             continue   # zero/negative duration: a clamped or otherwise unreal ended_at (DO-722)
         parsed.append((start.timestamp(), end.timestamp(), r["five_h_pct_at_start"], r["five_h_pct_at_end"]))
     parsed.sort(key=lambda x: x[0])
-    spans = []
+    spans = []   # each: [start, end, pct_start, pct_end, events]; events are (timestamp, pct)
     for start, end, pct_start, pct_end in parsed:
         if spans and start <= spans[-1][1]:
             s = spans[-1]
+            s[4].append((start, pct_start)); s[4].append((end, pct_end))
             if end > s[1]:
-                spans[-1] = (s[0], end, s[2], pct_end)
+                s[1], s[3] = end, pct_end
         else:
-            spans.append((start, end, pct_start, pct_end))
-    return spans
+            spans.append([start, end, pct_start, pct_end, [(start, pct_start), (end, pct_end)]])
+    result = []
+    for start, end, pct_start, pct_end, events in spans:
+        ordered = [pct for _, pct in sorted(events, key=lambda e: e[0])]
+        reset = any(b < a for a, b in zip(ordered, ordered[1:]))
+        result.append((start, end, pct_start, pct_end, reset))
+    return result
 
 
 def measured_rate(store, tenant: str, seat: str) -> tuple[float, str]:
-    """The seat's trailing MEDIAN burn rate in pts/h, and a source string naming how it was derived.
+    """The seat's trailing p75 burn rate in pts/h, and a source string naming how it was derived.
 
-    Median, not p75 or max: DO-728's own 2026-09-24 sample (8 lanes, 6.7-20.5 pts/h) is what a
-    single fixed 115 pts/h was refusing affordable work against, and the median is the rate that
-    describes what a lane on this seat actually costs most of the time -- p75 or max would carry
-    forward the same overestimate the fixed constant did, just a smaller one. ``RATE_FLOOR``
-    still bounds the DOWNSIDE for a seat with no history at all.
+    p75, not median or max (DO-728 fix round): the gate is ceiling-facing, so the statistic it
+    projects from has to describe a seat running HOT, not a typical lane -- the median lets
+    roughly half of all lanes burn faster than the number the gate assumes. Max would carry the
+    same "one fixed worst case forever" problem the 115 pts/h constant had, just rebased to this
+    seat. ``RATE_FLOOR`` still bounds the downside for a seat with no history at all.
     """
     rows = store.lanes_for_rate(tenant, seat, limit=RATE_HISTORY_LIMIT)
     spans = _busy_intervals(rows)
     rates = []
-    for start, end, pct_start, pct_end in spans:
-        if pct_end < pct_start:
-            continue   # the 5h window reset mid-span; never let that read as a negative rate
+    for start, end, pct_start, pct_end, reset in spans:
+        if reset:
+            continue   # the 5h window went down somewhere inside the span; never sample it
         hours = (end - start) / 3600
         if hours > 0:
             rates.append((pct_end - pct_start) / hours)
     if not rates:
         return RATE_FLOOR, f"floor {RATE_FLOOR:g} pts/h, no history"
-    rate = statistics.median(rates)
-    return rate, f"measured median {rate:.1f} pts/h over {len(rows)} lanes"
+    rate = _percentile(rates, RATE_PERCENTILE)
+    return rate, f"measured p75 {rate:.1f} pts/h over {len(rows)} lanes"
+
+
+def _percentile(values: list[float], p: float) -> float:
+    """Linear-interpolated percentile of ``values`` (0 <= p <= 1); exact for a single value."""
+    if len(values) == 1:
+        return values[0]
+    return statistics.quantiles(sorted(values), n=100, method="inclusive")[round(p * 100) - 1]
+
+
+def running_lanes_minutes(store, tenant: str, seat: str, rate: float) -> tuple[float, str]:
+    """Projected remaining minutes across every ``started`` lane on ``seat``, and a detail string
+    naming their share of the projected burn.
+
+    DO-728 fix round (critical): the gate used to project only the NEW lane's own ``est_minutes``
+    against the rate, so a seat already several lanes deep could admit a lane whose own projection
+    looked fine while the seat's TRUE finish (once every running lane's remaining burn is counted)
+    lands well over the ceiling. Each running lane contributes ``est_minutes - elapsed``, floored
+    at ``RUNNING_LANE_FLOOR_MINUTES`` once it has run past its own estimate (it is still burning,
+    never "done" just because its estimate ran out). A row from before the est_minutes migration
+    (v3 -> v4) has no estimate of its own, so it is assumed to run for the seat's own median lane
+    duration -- derived from the exact settled-lane sample ``measured_rate`` already reads, so a
+    seat with no history at all still falls back to zero (no rows, nothing to add).
+    """
+    running = [r for r in store.list_lanes(tenant=tenant, status="started") if r.get("seat") == seat]
+    if not running:
+        return 0.0, ""
+    settled = store.lanes_for_rate(tenant, seat, limit=RATE_HISTORY_LIMIT)
+    durations = []
+    for r in settled:
+        try:
+            start = datetime.datetime.fromisoformat(str(r["started_at"]).replace("Z", "+00:00"))
+            end = datetime.datetime.fromisoformat(str(r["ended_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if end > start:
+            durations.append((end - start).total_seconds() / 60)
+    default_est = statistics.median(durations) if durations else 0.0
+    now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    total_minutes, overrun = 0.0, 0
+    for r in running:
+        try:
+            started = datetime.datetime.fromisoformat(str(r["started_at"]).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        est = r.get("est_minutes")
+        est = float(est) if est is not None else default_est
+        remaining = est - (now_ts - started) / 60
+        if remaining <= RUNNING_LANE_FLOOR_MINUTES:
+            remaining = RUNNING_LANE_FLOOR_MINUTES
+            overrun += 1
+        total_minutes += remaining
+    pct = rate * total_minutes / 60
+    detail = f"{len(running)} running lane(s) on {seat} project +{pct:.0f}% more before this one finishes"
+    if overrun:
+        detail += f" ({overrun} past its own estimate, floored at {RUNNING_LANE_FLOOR_MINUTES}m remaining)"
+    return total_minutes, detail
 
 
 def seat_for(tenant, machine: str, override: str | None = None) -> str:
@@ -117,7 +203,8 @@ def seat_for(tenant, machine: str, override: str | None = None) -> str:
 
 
 def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int, *,
-                    env: dict | None = None, rate: float | None = None, rate_source: str = "") -> dict:
+                    env: dict | None = None, rate: float | None = None, rate_source: str = "",
+                    running_minutes: float = 0.0, running_detail: str = "") -> dict:
     """Ask ``claude-pick --gate`` about ``seat``. Any answer that is not a measured allow is a refusal with a code.
 
     ``credential:window`` — the seat exists and is measured, and the 5h projection, the pool, or the
@@ -133,13 +220,22 @@ def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int
     whatever rate they used. ``rate_source`` is appended to the refusal detail so the seat's own
     history (or the floor, and why) is named too, not just the number. A tenant config that still
     sets ``CLAUDE_PICK_RATES[model:effort]`` for this exact pair wins over either — out of scope here.
+
+    ``running_minutes`` (from ``running_lanes_minutes``), when non-zero, is ADDED to ``est_minutes``
+    before the call: claude-pick's own projection is ``u5 + rate * est_minutes / 60``, and folding
+    the running lanes' remaining minutes into the estimate it is given makes their remaining burn
+    part of that same projection instead of invisible to it (DO-728 fix round, critical) — claude-pick
+    itself still only ever sees one ``--est-minutes`` value; this is what makes it count for both.
+    ``running_detail`` is appended to the refusal detail alongside ``rate_source`` so the running
+    lanes' share of the projection is named, not just folded silently into a bigger number.
     """
     call_env = dict(env) if env is not None else None
     if rate is not None:
         call_env = {**(call_env or {}), "CLAUDE_PICK_RATE_DEFAULT": str(max(1, round(rate)))}
     kwargs = {"env": call_env} if call_env is not None else {}
+    call_minutes = max(1, round(est_minutes + running_minutes))
     res = runner.run(["claude-pick", "--profile", seat, "--dry-run", "--json", "--gate",
-                      "--model", model, "--effort", effort, "--est-minutes", str(est_minutes)],
+                      "--model", model, "--effort", effort, "--est-minutes", str(call_minutes)],
                       timeout=30, **kwargs)
     base = {"ok": False, "code": "credential:unmeasured", "detail": "", "five_h_pct_now": None, "resets_at": None, "tier": None}
     if res.code in (5, 127) or not res.out.strip():
@@ -166,8 +262,9 @@ def credential_gate(runner, seat: str, model: str, effort: str, est_minutes: int
                     if state == "gate-spend-wall"
                     else f"{seat} 5h window: {usage.get('five_hour')}% now, projected {gate.get('projected')}%")
         out["detail"] = out["detail"] or fallback
-        if rate_source and state != "gate-spend-wall":
-            out["detail"] = f"{out['detail']} ({rate_source})"
+        notes = [n for n in (rate_source, running_detail) if n]
+        if notes and state != "gate-spend-wall":
+            out["detail"] = f"{out['detail']} ({'; '.join(notes)})"
     else:  # gate-unmeasured, gate-misconfigured, no-profiles, bad-table, backpressure,
            # or exit 0 without a verdict
         out["code"] = "credential:unmeasured"
