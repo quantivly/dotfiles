@@ -533,7 +533,7 @@ class BriefNeedsTests(unittest.TestCase):
         self.assertIn("last fetch failed", needs["calendar"]["reason"])
         self.assertIn("connector timed out", needs["calendar"]["reason"])
 
-    def test_a_text_needs_line_carries_the_query_and_the_file_to_write(self):
+    def test_a_text_needs_line_carries_the_query_and_the_inline_ingest(self):
         """Review finding: `query` and `write_to` were in the JSON return only, and the skill's
         output contract runs `rabota --text brief`. So in the form actually documented, the half of
         `needs` a caller can act on was unreachable without a second call -- the very round-trip
