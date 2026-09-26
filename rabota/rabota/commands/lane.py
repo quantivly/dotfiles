@@ -594,9 +594,9 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     return out
 
 
-TERMINAL_STATUSES = ("done", "failed", "abandoned")  # set by census.settle_finished / reap;
-# a lane in one of these is settled and safe to retire. "started" is not: retiring it would
-# discard the row a later `census` call still needs to settle from the unit's own stream.
+TERMINAL_STATUSES = ("done", "failed", "abandoned")  # set by census.settle_finished / reap / retire;
+# a lane in one of these is settled and safe to retire. "started" is not KNOWN terminal until
+# `_settle_started_lane` measures it from the unit and stream (DO-713); retire does that first.
 RETIRED_STATUS = "retired"
 
 
