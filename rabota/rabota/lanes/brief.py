@@ -121,7 +121,23 @@ def validate_text(text: str, where: str = "brief") -> dict:
     return {"title": title, "sections": list(REQUIRED_HEADINGS), "out_dir": out_dir}
 
 
+def substitute(text: str, **placeholders) -> str:
+    """Replace each ``{name}`` in ``text`` with its keyword value, by literal substring
+    replacement -- never ``str.format``.
+
+    A brief may legitimately contain ``{`` and ``}`` for reasons that have nothing to do with
+    this substitution: a JSON example in the Assignment section, or a shell ``${VAR}`` snippet.
+    ``str.format`` would choke on the former (an unescaped ``{`` in a JSON blob is a
+    ``KeyError``/``IndexError`` waiting to happen) and has no reason to ever see the latter. A
+    plain ``.replace()`` per named placeholder touches only the exact tokens it is given and
+    leaves everything else byte for byte untouched, which is what ``render_evaluate`` already
+    relied on before this helper existed to name the technique.
+    """
+    for name, value in placeholders.items():
+        text = text.replace("{" + name + "}", str(value))
+    return text
+
+
 def render_evaluate(of_lane: dict, verdict_path: Path, out_dir: Path) -> str:
-    return (TEMPLATE.read_text()
-            .replace("{lane_id}", of_lane["id"]).replace("{lane_brief}", str(of_lane["brief"]))
-            .replace("{verdict_path}", str(verdict_path)).replace("{out_dir}", str(out_dir)))
+    return substitute(TEMPLATE.read_text(), lane_id=of_lane["id"], lane_brief=of_lane["brief"],
+                       verdict_path=str(verdict_path), out_dir=str(out_dir))

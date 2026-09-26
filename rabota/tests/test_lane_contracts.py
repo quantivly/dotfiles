@@ -136,6 +136,32 @@ class ContractTests(unittest.TestCase):
         self.assertIn("/o/smoke/verdict.json", text); self.assertIn("out_dir: /o/smoke-eval", text)
         brief.validate(self.tmpfile(text))   # the evaluate brief is itself a valid brief
 
+    def test_substitute_replaces_only_the_named_placeholders(self):
+        self.assertEqual(brief.substitute("out_dir: {out_dir}", out_dir="/o/d"), "out_dir: /o/d")
+        self.assertEqual(brief.substitute("{a} and {b}", a="1", b="2"), "1 and 2")
+
+    def test_substitute_leaves_json_and_shell_dollar_braces_byte_for_byte(self):
+        """DO-683: a brief may carry `{` and `}` for reasons that have nothing to do with a named
+        placeholder -- a JSON example in the Assignment section, or a shell `${VAR}` snippet --
+        and `substitute` must never touch either, byte for byte, while still replacing the one
+        placeholder it was asked to."""
+        text = ('## Assignment\n'
+                '1. Expect this JSON: {"key": "value", "nested": {"n": 1}}\n'
+                '2. This shell snippet must survive too: echo "${HOME}/x"\n'
+                '## Outputs\nout_dir: {out_dir}\n')
+        got = brief.substitute(text, out_dir="/o/d")
+        self.assertIn('{"key": "value", "nested": {"n": 1}}', got)
+        self.assertIn('${HOME}/x', got)
+        self.assertIn("out_dir: /o/d", got)
+        self.assertNotIn("{out_dir}", got)
+
+    def test_substitute_is_not_str_format(self):
+        """A brief containing an unescaped `{` that is not a named placeholder must not raise --
+        `str.format` would choke on `{"key"` (KeyError: '"key"'); a plain `.replace()` per
+        placeholder does not."""
+        self.assertEqual(brief.substitute('{"key": "value"} {out_dir}', out_dir="/o/d"),
+                         '{"key": "value"} /o/d')
+
 
 class CommonRulesTests(unittest.TestCase):
     """DO-711. Every brief opened with `Read /home/zvi/quantivly/handoffs/rabota/_common-rules.md`.

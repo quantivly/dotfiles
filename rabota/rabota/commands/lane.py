@@ -8,9 +8,9 @@ It is the ONE door a headless lane comes through, which is why every spawner sha
 a window gets spent unmetered.
 
 This module supplies both the local form (``unit_name``, ``build_local``) and the remote/dev form
-(``build_remote``, ``send_brief``, ``create_worktree_remote``, ``resolve_default_branch_remote``,
-``resolve_remote``, ``expand_remote``) plus the entry point that ties them together,
-``run_recipe``, and its ``rabota lane recipe`` registration.
+(``build_remote``, ``send_brief``, ``create_worktree_remote``, ``resolve_remote``,
+``expand_remote``) plus the entry point that ties them together, ``run_recipe``, and its
+``rabota lane recipe`` registration.
 """
 import re
 import uuid
@@ -154,41 +154,37 @@ REMOTE = "origin"  # every repo under [machines.dev].repos uses this remote name
 # adding one would be a config-shape change this defect does not call for.
 
 
-def resolve_default_branch_remote(ctx, machine, repo_path: str) -> str:
-    """The repo's default branch on ``machine``, read from ``origin/HEAD`` — never a guess.
-
-    Called only when the caller passed no ``--base``. ``origin/HEAD`` is a symbolic ref set by
-    ``git clone`` or ``git remote set-head``, not by ``fetch`` — a clone made without either (or
-    one where it was pruned) has none, and falling back to the remote's local ``HEAD`` in that
-    case is exactly the bug this function exists to refuse instead of committing: local ``HEAD``
-    on a bare or freshly-cloned mirror is whatever branch happened to be checked out last, not
-    necessarily the project's default.
-    """
-    script = f"git -C {remote.shquote(repo_path)} symbolic-ref -q --short refs/remotes/{REMOTE}/HEAD"
-    res = ctx.runner.run(remote.ssh_argv(machine, script))
-    branch = (res.out or "").strip()
-    if not res.ok or not branch:
-        raise errors.Refused(
-            f"{repo_path} on {machine.name} has no {REMOTE}/HEAD set: pass --base explicitly")
-    return branch
-
-
 def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, out_dir: str,
                            base: str | None, *, timeout: float = REMOTE_WORKTREE_TIMEOUT) -> None:
-    """``mkdir -p`` the lane's ``out_dir``, fetch, and ``git worktree add`` the worktree — fetch
-    and the add in ONE ssh call, ahead of the add, so refreshing the clone costs no extra round
-    trip beyond the call this docstring already batches.
+    """``mkdir -p`` the lane's ``out_dir``, fetch, resolve ``base`` to a COMMIT, and ``git
+    worktree add`` the worktree at that commit — all four in ONE ssh call.
 
-    A fetch failure REFUSES the lane rather than falling through to ``worktree add`` against
+    DO-725: ``git worktree add <path> <ref>`` refuses a ref already checked out anywhere in the
+    target clone — measured on dev against ``main`` itself (the laptop's own primary checkout
+    sits on it) and against a finished lane's own branch until that worktree is removed. Every
+    dispatch used to work around this by hand, passing a commit as ``--base``. Resolving to a
+    commit HERE means a lane always starts detached regardless of what the caller passed: ``git
+    worktree add`` never refuses a bare commit as "already checked out" (an unlimited number of
+    worktrees may sit detached at the same commit), and a lane creates its own branch on its
+    first commit, so nothing about starting detached costs it anything.
+
+    ``base`` is any ref the remote's own git understands — a branch, a tag, ``origin/main``, or
+    already a commit. When the caller passed none, the ref resolved is ``refs/remotes/origin/HEAD``
+    — the symbolic ref ``git clone``/``git remote set-head`` sets, never a guess this process
+    makes and never the clone's own (possibly stale) local ``HEAD``, which is whatever branch
+    happened to be checked out last and not necessarily the project's default.
+
+    Folded into the SAME ssh call the fetch already makes (DO-725) rather than a resolve-then-add
+    round trip: which commit a ref names is remote-only information, but so is whether the fetch
+    itself succeeds, and a caller with no ``--base`` no longer pays a second round trip to learn
+    it. A fetch failure REFUSES the lane rather than falling through to a resolve or add against
     whatever the clone last had — the same "an unmeasured dimension refuses, never as room" rule
     ``budget.py`` holds for its own gate: a stale clone that failed to refresh is not evidence the
-    tree is current, so it must not be treated as room to proceed.
-
-    When the caller passed no ``--base``, one resolves first (see
-    ``resolve_default_branch_remote``) — a real extra round trip, since which branch is default is
-    remote-only information this process cannot know in advance; it is not folded into this call
-    because a refusal here must name the repo on its own, not share an exit code with an unrelated
-    fetch failure.
+    tree is current, so it must not be treated as room to proceed. The three steps are chained
+    with shell ``&&``, so any one failing (fetch, the resolve, or the add) aborts the rest and the
+    whole call reports not-ok; the refusal below names the ref this call tried to resolve and
+    carries whatever git itself printed, which is the one detail that tells the two failure modes
+    (fetch vs. resolve vs. add) apart in practice.
 
     ``out_dir`` must exist before the brief is sent (a shell ``>`` redirection does not create
     parent directories) and before the unit starts (its ``StandardOutput``/``StandardError``
@@ -197,17 +193,40 @@ def create_worktree_remote(ctx, machine, repo_path: str, worktree: str, out_dir:
     anyway. ``timeout`` defaults well above the runner's own 60s default: a timeout maps to the
     same ``Result`` shape as a real failure, and git on a large repo can legitimately run long.
     """
-    if not base:
-        base = resolve_default_branch_remote(ctx, machine, repo_path)
+    ref = base or f"refs/remotes/{REMOTE}/HEAD"
     mkdir = ["mkdir", "-p", out_dir]
     fetch = ["git", "-C", repo_path, "fetch", REMOTE]
-    worktree_add = ["git", "-C", repo_path, "worktree", "add", worktree, base]
-    cmd = " && ".join(" ".join(remote.shquote(p) for p in parts)
-                      for parts in (mkdir, fetch, worktree_add))
+    # `rev-parse --verify <ref>^{commit}` -- not `--quiet`, so a real failure carries git's own
+    # explanation (e.g. "unknown revision") into the refusal below rather than a bare non-zero
+    # exit. `^{commit}` is single-quoted whole (shquote wraps the entire resolve argv element),
+    # so neither bash's nor zsh's brace expansion ever sees the literal `{commit}`.
+    resolve = ["git", "-C", repo_path, "rev-parse", "--verify", f"{ref}^{{commit}}"]
+    # A branch that exists only as `origin/<ref>` (a colleague's, or a finished lane's own) used to
+    # work: `git worktree add <ref>` guesses the remote-tracking branch. `rev-parse` does not guess,
+    # so fall back to `refs/remotes/origin/<ref>` explicitly (DO-725 review). The first attempt's
+    # stderr is dropped only when the fallback is tried; if both fail, the fallback's error is the
+    # one reported.
+    fallback = (["git", "-C", repo_path, "rev-parse", "--verify", f"refs/remotes/{REMOTE}/{ref}^{{commit}}"]
+                if base and not base.startswith(("refs/", f"{REMOTE}/")) else None)
+    steps = [
+        " ".join(remote.shquote(p) for p in mkdir),
+        " ".join(remote.shquote(p) for p in fetch),
+        # `sha` is a shell variable, deliberately NOT single-quoted at its use site below -- that
+        # is where it must expand. `[ -n "$sha" ]` is the belt: a rev-parse that somehow prints
+        # nothing but exits 0 must not carry an empty ref into `worktree add`, which would try to
+        # add the CURRENT HEAD instead of refusing.
+        (f"sha=$({' '.join(remote.shquote(p) for p in resolve)} 2>/dev/null || "
+         f"{' '.join(remote.shquote(p) for p in fallback)}) && [ -n \"$sha\" ]" if fallback else
+         f"sha=$({' '.join(remote.shquote(p) for p in resolve)}) && [ -n \"$sha\" ]"),
+        f"git -C {remote.shquote(repo_path)} worktree add {remote.shquote(worktree)} \"$sha\"",
+    ]
+    cmd = " && ".join(steps)
     res = ctx.runner.run(remote.ssh_argv(machine, cmd), timeout=timeout)
     if not res.ok:
-        raise errors.Refused(f"could not fetch or create the worktree on {machine.name}: "
-                             f"{(res.err or res.out).strip()}")
+        hint = "" if base else " (no --base given: origin/HEAD may be unset; pass --base explicitly)"
+        raise errors.Refused(
+            f"could not fetch {repo_path} on {machine.name}, resolve {ref!r} to a commit, or "
+            f"create the worktree there{hint}: {(res.err or res.out).strip()}")
 
 
 def _remove_worktree_remote(ctx, machine, repo_path: str, worktree: str) -> None:
@@ -479,8 +498,10 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         config_dir = seat_config_dir(seat_pick)
     else:
         if repo not in m.repos:
-            raise errors.Refused(f"machine {machine!r} declares no repo {repo!r} "
-                                 f"([machines.{machine}].repos)")
+            raise errors.Refused(
+                f"--repo {repo!r} is not a config key {machine!r} declares: --repo takes the "
+                f"KEY under [machines.{machine}].repos (that table's value is the path), not a "
+                f"path itself; known keys: {sorted(m.repos)}")
         info = resolve_remote(ctx, m)
         home = info["home"]
         root = Path(expand_remote(m.state_dir, home))
@@ -509,7 +530,15 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         # paths into an evaluate brief, so the thing checked has to be the thing shipped.
         lanes_brief.validate_text(brief_text, where="the rendered evaluate brief")
     else:
-        brief_text = None
+        # DO-683: a work brief's copy gets the same `{out_dir}` substitution an evaluate brief
+        # already gets (`render_evaluate`), so `out_dir: {out_dir}` in the brief's own Outputs
+        # section is the real path rather than a placeholder every lane so far worked out by
+        # inference from `--add-dir` instead. Validated again, on the SUBSTITUTED text, for the
+        # same reason the evaluate path validates its rendered form rather than its template: the
+        # thing checked has to be the thing shipped.
+        raw_brief_text = Path(brief).read_text()
+        brief_text = lanes_brief.substitute(raw_brief_text, out_dir=out_dir)
+        lanes_brief.validate_text(brief_text, where="the rendered work brief")
 
     argv = build_local(ctx, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,
@@ -541,7 +570,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         raise errors.Refused("the local --run form is not implemented; use --machine dev")
     create_worktree_remote(ctx, m, repo_path, worktree, out_dir, base)
     try:
-        send_brief(ctx, m, remote_brief, brief_text if kind == "evaluate" else Path(brief).read_text())
+        send_brief(ctx, m, remote_brief, brief_text)
         # Beside brief.md, in the lane's own out_dir — the one directory `--add-dir` grants it, and
         # the one the brief can name without any substitution (a work brief is shipped verbatim,
         # DO-683). Inside this `try` so a failed rules send tears the worktree down like a failed
