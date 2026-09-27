@@ -1332,6 +1332,17 @@ _claude_pick_week_spent() {
 # wall each exhausted member is behind. It reads the _CPM_* the caller already
 # has in scope -- zsh locals are dynamically scoped, the same contract
 # _claude_profile_metrics' callers use.
+# THE POOL'S NAME, for a message. One home, because the two reason strings and
+# the §5.4 header all need it and two of them had it wrong: the idiom
+# `${t:+pool $t}${t:-the account pool}` fires BOTH halves when `t` is set --
+# `:-` substitutes the VALUE, not the default -- so a pinned tenant produced
+# "every member of pool toysimtoysim". The header never had the bug because it
+# spelled the branch out; now everything uses the branch.
+_claude_pick_pool_label() {
+  if [[ -n "$_claude_pick_tenant" ]]; then print -r -- "pool '$_claude_pick_tenant'"
+  else print -r -- "the account pool"; fi
+}
+
 _claude_pick_week_wall() {
   local spent; _claude_pick_week_spent; spent=$_CLAUDE_PICK_WEEK_SPENT
   [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == (none|disabled) ]] && (( _CPM_UW >= spent ))
@@ -2240,7 +2251,7 @@ _claude_pick_for_dir() {
     if (( strict )); then
       REPLY=""
       _claude_pick_state=exhausted
-      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant}${_claude_pick_tenant:-the account pool} is exhausted — a spent 5h window, or a spent week with no spend headroom"
+      _claude_pick_reason="every member of $(_claude_pick_pool_label) is exhausted — a spent 5h window, or a spent week with no spend headroom"
       _claude_pick_report_exhausted strict
       return 2
     fi
@@ -2254,7 +2265,7 @@ _claude_pick_for_dir() {
     if (( allweek )) && [[ -z "${CLAUDE_PICK_SPENT_OK:-}" ]]; then
       REPLY=""
       _claude_pick_state=exhausted
-      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant}${_claude_pick_tenant:-the account pool} is spent for the week — a seat in this state refuses every model"
+      _claude_pick_reason="every member of $(_claude_pick_pool_label) is spent for the week — a seat in this state refuses every model"
       _claude_pick_report_exhausted weekwall
       return 2
     fi
@@ -2404,8 +2415,7 @@ _claude_pick_report_exhausted() {
   local mode="${1:-strict}" prog="${_claude_pick_prog:-claude}"
   local e n u5 uw uwt r5 label soon lbr="$_claude_pick_leastbad_reset"
   local -a f
-  label="the account pool"
-  [[ -n "$_claude_pick_tenant" ]] && label="pool '$_claude_pick_tenant'"
+  label="$(_claude_pick_pool_label)"
   soon="$(_claude_pick_reset_text "$lbr")"
   # A reset already in the past is not a time to quote back. Same reasoning as
   # _claude_pick_window_text, at the header.

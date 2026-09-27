@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-pick` printed the pool's name twice in its refusal reason (DO-766).** A pinned tenant
+  read `every member of pool toysimtoysim is spent for the week`. The name was built as
+  `${t:+pool $t}${t:-the account pool}`, and both halves fire when `t` is set — `:-` substitutes
+  the variable's **value**, not the default. An unpinned pool read correctly, and every fixture in
+  `scripts/test-claude-pick.sh` ran with no tenant, so nothing saw it; the §5.4 header was right
+  all along because it spelled the branch out instead. The name now has one home
+  (`_claude_pick_pool_label`) used by all three readers, and the suite runs pinned-tenant fixtures
+  on both the strict and the weekly-wall paths. One site was pre-existing (DO-621), the other was
+  added an hour earlier by DO-765 copying the same idiom.
+
 - **A spent Max seat was measured to block, so the picker stops handing them out
   (DO-765).** Running `claude` in a `toysim` directory printed a one-line `weekly-spent` note and
   started a session that failed on its first prompt. Both members of that pool (`toysim-0`,
