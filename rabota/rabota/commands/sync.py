@@ -100,10 +100,18 @@ def sync_github(ctx: Context, gh) -> dict:
 
 
 def sync_fireflies(ctx: Context, ff) -> dict:
-    """Recent meeting transcripts, ``action_items`` already parsed into ``(speaker, item, timestamp)``."""
+    """Recent meeting transcripts, ``action_items`` already parsed into ``(speaker, item, timestamp)``.
+
+    ``since`` (the window start this very fetch asked for) is stamped onto the payload alongside
+    ``fetched_at`` (DO-761 fix round): a classifying acknowledgement can vouch for coverage only up
+    to what the snapshot it read actually asked Fireflies for, never for the moment of the
+    acknowledgement itself, and only the snapshot can say what that was. See
+    ``commands.brief._mark_fireflies_classified``.
+    """
     since = fireflies_since(ctx, datetime.now(timezone.utc))
     transcripts = ff.recent_transcripts(since)
-    payload = {"ok": True, "error": None, "transcripts": transcripts}
+    payload = {"ok": True, "error": None, "transcripts": transcripts,
+               "since": since.strftime(snapshots.FETCHED_AT_FORMAT)}
     snapshots.write(ctx.state_dir, "fireflies", payload, dry_run=ctx.dry_run)
     return {"transcripts": len(transcripts)}
 
