@@ -108,6 +108,21 @@ class SkillMatchesCliTests(unittest.TestCase):
         for source in brief.NEEDS_SOURCES:
             self.assertIn(source, cycle, f"{source} (from brief.NEEDS_SOURCES) is not mentioned in the cycle")
 
+    def test_fetch_is_one_turn_naming_slack_and_calendar_tools(self):
+        # DO-752: the Slack search and the Calendar `list_events` used to run in separate turns
+        # (turns 3 and 4 of a measured 6-turn cycle); they are independent fetches, so they now
+        # run together as parallel calls in ONE turn. The skill also has to name the expected
+        # connector tools so the load is a single exact `ToolSearch select:` call, with a
+        # keyword-search fallback for an account whose connector names differ (e.g. a plugin
+        # connector is `mcp__plugin_slack_slack__…`, not `mcp__claude_ai_Slack__…`). A mutation
+        # that drops "ONE turn" back to a turn each, or that stops naming the tools or the
+        # fallback, fails here.
+        cycle = _cycle_section()
+        self.assertIn("Fetch every `needs` source in ONE turn, as parallel tool calls", cycle)
+        self.assertIn("mcp__claude_ai_Slack__slack_search_public_and_private", cycle)
+        self.assertIn("mcp__claude_ai_Google_Calendar__list_events", cycle)
+        self.assertIn("fall back once", cycle)
+
     def test_fireflies_is_named_as_classified_not_fetched(self):
         # DO-746: Fireflies moved from brief.NEEDS_SOURCES to sync.FETCHED_SOURCES -- it is fetched
         # server-side by the timer, like Linear and GitHub, and neither of those is named in this
