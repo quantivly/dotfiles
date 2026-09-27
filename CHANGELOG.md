@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A spent Max seat was measured to block, so the picker stops handing them out
+  (DO-765).** Running `claude` in a `toysim` directory printed a one-line `weekly-spent` note and
+  started a session that failed on its first prompt. Both members of that pool (`toysim-0`,
+  `personal-0`) were at 100% of their weekly window as Max seats — `spend.enabled:false`, which
+  `_claude_pick_class` mapped to `disabled` and deliberately did **not** treat as a wall, because
+  no one had ever watched such a seat blocked and refusing would empty both all-Max tenants for a
+  week. That arm's own comment said it was "a one-line change back" if a Max seat at 100% were
+  ever watched to block. It was, on 2026-09-27: `toysim-0` refused `claude -p` on **every** model
+  with `You've hit your weekly limit · resets Oct 1, 1am`, including `claude-sonnet-5`, which has
+  no per-model window in the seat's usage block at all — so the wall is the **aggregate**,
+  seat-wide, not the `7d fable` window sitting at 100 beside it. `disabled` now joins `none` in
+  the exhaustion arm; the same predicate has one home (`_claude_pick_week_wall`) because
+  `_claude_pick_block_reset` reads it too, and a widened class with an unwidened reset would quote
+  the **5h** window for a wall that lasts days. The gate reports the aggregate case as
+  `gate-spend-wall` instead of `gate-unmeasured`, so rabota reads it as `credential:window` rather
+  than "could not measure"; a per-model-only wall on a Max seat stays `gate-unmeasured`, because
+  both of `toysim-0`'s windows were at 100 together and that case was never separated. The
+  now-unreachable `disabled` billing warning was retired rather than left as an arm that cannot
+  fire. Interactively, a pool where **every** exhausted member is behind the *weekly* wall now
+  refuses instead of proceeding on the least-bad one — and `claude()` returns rather than falling
+  through, which would have landed on the **shared** credential, billing an account nobody picked
+  to run a session every seat is measured to refuse. A 5h wall keeps DO-574's behaviour exactly.
+  `CLAUDE_PICK_SPENT_OK=1` starts it anyway. Also: `new_home` in `scripts/test-claude-pick.sh` now
+  clears its fixture — `wk1` and `wk2` were each defined twice, and the second group silently
+  inherited the first's profiles, which makes an all-exhausted pool produce a pick and a refusal
+  assertion compare two empty strings.
+
 - **Every lane's first instruction was unsatisfiable on the only machine that runs lanes
   (DO-711).** `rabota/briefs/smoke.md` and `evaluate.md.tmpl` both opened with
   ``Read `/home/zvi/quantivly/handoffs/rabota/_common-rules.md` first`` — a laptop path. On `dev`

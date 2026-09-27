@@ -1325,11 +1325,33 @@ _claude_pick_week_spent() {
 #
 # CLAUDE_PICK_WEEK_EXHAUSTED stays as an INERT knob, defaulting to 101 so it can
 # never fire, for whoever wants the strict behaviour back.
+# THE WEEKLY SPEND WALL, as ONE predicate. Three readers need it and they must
+# not drift: _claude_pick_class refuses on it, _claude_pick_block_reset quotes
+# the WEEK's reset because of it (a 5h reset quoted for a weekly wall tells the
+# reader to wait for the wrong moment), and _claude_pick_for_dir records which
+# wall each exhausted member is behind. It reads the _CPM_* the caller already
+# has in scope -- zsh locals are dynamically scoped, the same contract
+# _claude_profile_metrics' callers use.
+_claude_pick_week_wall() {
+  local spent; _claude_pick_week_spent; spent=$_CLAUDE_PICK_WEEK_SPENT
+  [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == (none|disabled) ]] && (( _CPM_UW >= spent ))
+}
+
+# WHICH wall an exhausted member is behind, for the interactive decision below.
+# The WEEK comes first: a member behind both walls is still days from relief, and
+# it is the longer one that settles whether proceeding could possibly work.
+_claude_pick_wall_kind() {
+  local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97} exw=${CLAUDE_PICK_WEEK_EXHAUSTED:-101}
+  if _claude_pick_week_wall; then print -r -- week
+  elif [[ "$_CPM_UW" != unknown ]] && (( _CPM_UW >= exw )); then print -r -- week
+  elif [[ "$_CPM_U5" == <-> ]] && (( _CPM_U5 >= ex5 )); then print -r -- 5h
+  else print -r -- other; fi
+}
+
 _claude_pick_class() {
   local name="$1" why
   local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97}
   local exw=${CLAUDE_PICK_WEEK_EXHAUSTED:-101}
-  local spent; _claude_pick_week_spent; spent=$_CLAUDE_PICK_WEEK_SPENT
   local max_age=${CLAUDE_PICK_CACHE_MAX_AGE:-3600}
   local _CPM_U5 _CPM_R5 _CPM_UW _CPM_RW _CPM_AGE _CPM_TIER _CPM_R5_AT _CPM_RW_AT _CPM_SPEND _CPM_SPEND_TXT _CPM_FETCHED _CPM_WINDOWS
 
@@ -1382,33 +1404,34 @@ _claude_pick_class() {
   # only: spend `unknown` never escalates to a refusal (missing data is not a
   # wall), and a LAPSED week has uW `unknown` so it never reaches this line.
   #
-  # A MAX SEAT DEMOTES HERE, IT DOES NOT REFUSE. `spend.enabled == false` maps
-  # to its OWN state `disabled` (DO-623 split it out of `unknown`) so each
-  # consumer can say what is actually known. This line tests `none` alone, so
-  # `disabled` reaches it and does not fire. The GATE (`claude-pick --gate`,
-  # headless, nobody watching) deliberately differs: it refuses a Max seat on a
-  # live spent window as gate-unmeasured (decided 2026-09-19; the reasoning is in
-  # docs/CLAUDE_ACCOUNT_PICKER.md). The blocking arm above is MEASURED for a Team
-  # seat: six "individual spend limit" errors on 2026-09-18. For a Max seat there
-  # is no measurement at all — only the field name, and the reasoning "no
-  # usage-credit overflow, therefore blocked". Plausible, and not enough:
-  # personal-0 reads used 134.43 against a limit of 125.0 with enabled:false, so a
-  # Max seat does carry a spend counter that has passed a limit, which is not the
-  # shape "no credits" predicts.
+  # A MAX SEAT REFUSES HERE TOO, AS OF 2026-09-27 — MEASURED, not inferred.
+  # `spend.enabled == false` maps to its own state `disabled` (DO-623 split it
+  # out of `unknown`) so each consumer can say what is actually known. Until
+  # today nobody had watched such a seat blocked by a spent week, so this line
+  # tested `none` alone and a Max seat only DEMOTED, on the argument that
+  # refusing on an inference would empty both all-Max tenants for up to a week.
   #
-  # The asymmetry decides it. ~/.config/claude-tenants.zsh composes both
-  # non-work tenants entirely out of Max seats (`personal` = personal-0 alone,
-  # `toysim` = toysim-0 personal-0) with CLAUDE_TENANT_OVERFLOW empty. Refusing
-  # on the inference costs EVERY headless caller on both tenants for up to a
-  # week, with nothing to borrow; demoting costs ONE session, which fails at
-  # auth and names the reason. That is the same trade DO-574 made when a hard
-  # weekly block would have refused across the whole work tree.
+  # The measurement that arm was waiting for: toysim-0, Max, aggregate
+  # `seven_day` 100 with spend `disabled`, cache 3 s old. `claude -p` refused on
+  # EVERY model with "You've hit your weekly limit · resets Oct 1, 1am
+  # (Asia/Jerusalem)" — including claude-sonnet-5, which has NO per-model window
+  # in the seat's own usage block, so the wall is the AGGREGATE and seat-wide
+  # rather than the `7d fable` window that was at 100 beside it. A seat in this
+  # state serves nothing, so demoting it bought a session that dies on its first
+  # prompt, days from relief.
   #
-  # So this line fires only where it was measured: a Team seat whose spend has
-  # reached its limit. If a Max seat at 100% is ever WATCHED to block, that is
-  # the measurement this arm is waiting for, and it is a one-line change back.
-  if [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == none ]] && (( _CPM_UW >= spent )); then
-    print -r -- "exhausted:weekly window ${_CPM_UW}% used and no spend headroom"
+  # This empties `personal` and `toysim` until their weekly reset, and that is a
+  # fact about capacity rather than a policy choice — the seats are walled either
+  # way; the only question was whether the picker says so before or after you
+  # type. `claude-as <profile>` stays the explicit door for whoever wants the
+  # dead session anyway. `unknown` still never escalates (missing data is not a
+  # wall), and a LAPSED week has uW `unknown`, so it never reaches this line.
+  if _claude_pick_week_wall; then
+    if [[ "$_CPM_SPEND" == disabled ]]; then
+      print -r -- "exhausted:weekly window ${_CPM_UW}% used and no spend limit configured"
+    else
+      print -r -- "exhausted:weekly window ${_CPM_UW}% used and no spend headroom"
+    fi
     return 0
   fi
   print -r -- "eligible"
@@ -1701,13 +1724,12 @@ _claude_pick_backpressure() {
 # makes the whole undateable — quoting the readable one would present a lower
 # bound as the answer.
 _claude_pick_block_reset() {
-  local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97} spent
+  local ex5=${CLAUDE_PICK_5H_EXHAUSTED:-97}
   local r="$_CPM_R5" wall5=0
-  _claude_pick_week_spent; spent=$_CLAUDE_PICK_WEEK_SPENT
   if [[ "$_CPM_U5" == <-> ]] && (( _CPM_U5 >= ex5 )); then wall5=1; fi
   # Does the spend wall apply? Decided WITHOUT reference to whether its reset can
   # be dated — entry 2 above is what folding the two together cost.
-  if [[ "$_CPM_UW" != unknown && "$_CPM_SPEND" == none ]] && (( _CPM_UW >= spent )); then
+  if _claude_pick_week_wall; then
     if [[ "$_CPM_RW" != (-|)<-> ]]; then
       r=unknown
     elif (( wall5 )) && [[ "$r" != (-|)<-> ]]; then
@@ -2152,8 +2174,9 @@ _claude_pick_for_dir() {
           _claude_pick_unknowns+=( "0"$'\t'"$name" )
           ;;
         exhausted)
-          # Field 5 (appended, never inserted): the reset that ends THIS wall.
-          _claude_pick_exhausted+=( "$name"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_R5"$'\t'"$(_claude_pick_block_reset)" )
+          # Fields 5 and 6 (appended, never inserted): the reset that ends THIS
+          # wall, and WHICH wall it is.
+          _claude_pick_exhausted+=( "$name"$'\t'"$_CPM_U5"$'\t'"$_CPM_UW"$'\t'"$_CPM_R5"$'\t'"$(_claude_pick_block_reset)"$'\t'"$(_claude_pick_wall_kind)" )
           ;;
         *)
           _claude_pick_skipped+=("$name ($why)")
@@ -2204,7 +2227,13 @@ _claude_pick_for_dir() {
   # proceeds on the least-bad member and says so loudly, because the alternative
   # is a human blocked by a window that clears itself.
   if (( ${#_claude_pick_exhausted} )); then
-    for p in "${_claude_pick_exhausted[@]}"; do exnames+=( "${p%%$'\t'*}" ); done
+    local allweek=1
+    local -a exf
+    for p in "${_claude_pick_exhausted[@]}"; do
+      exnames+=( "${p%%$'\t'*}" )
+      exf=( "${(@ps:\t:)p}" )
+      [[ "${exf[6]:-}" == week ]] || allweek=0
+    done
     _claude_pick_least_bad "${exnames[@]}"
     _claude_pick_leastbad="$REPLY"
     _claude_pick_leastbad_reset="$_CLAUDE_PICK_LEASTBAD_RESET"
@@ -2213,6 +2242,20 @@ _claude_pick_for_dir() {
       _claude_pick_state=exhausted
       _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant}${_claude_pick_tenant:-the account pool} is exhausted — a spent 5h window, or a spent week with no spend headroom"
       _claude_pick_report_exhausted strict
+      return 2
+    fi
+    # EVERY MEMBER BEHIND THE WEEKLY WALL — refuse, even interactively. The
+    # least-bad path exists because "a human blocked by a window that clears
+    # itself" is the worse error, and that reasoning is about the 5h window: it
+    # clears in hours and its reading can be stale. The weekly wall is neither.
+    # Measured 2026-09-27: such a seat refuses EVERY model, so proceeding hands
+    # back a session that dies on its first prompt, days from relief — strictly
+    # worse than refusing at launch, where the reset and the doors can be named.
+    if (( allweek )) && [[ -z "${CLAUDE_PICK_SPENT_OK:-}" ]]; then
+      REPLY=""
+      _claude_pick_state=exhausted
+      _claude_pick_reason="every member of ${_claude_pick_tenant:+pool $_claude_pick_tenant}${_claude_pick_tenant:-the account pool} is spent for the week — a seat in this state refuses every model"
+      _claude_pick_report_exhausted weekwall
       return 2
     fi
     _claude_pick_class=least-bad
@@ -2306,10 +2349,10 @@ _claude_pick_publish() {
   if [[ "$_claude_pick_class" == weekly-spent ]]; then
     case "$_CPM_SPEND" in
       headroom) _claude_pick_warnings+=("$1: weekly window spent — usage bills credits${_CPM_SPEND_TXT:+ ($_CPM_SPEND_TXT)}") ;;
-      # A Max seat has no spend limit configured, which is not the same as a
-      # spend limit nobody could read. Nobody has watched such a seat block, so
-      # the warning says what is known and claims nothing more.
-      disabled) _claude_pick_warnings+=("$1: weekly window spent — this seat has no spend limit configured, so what it bills is unmeasured") ;;
+      # `disabled` can no longer REACH this tier (2026-09-27): a live spent week
+      # on a Max seat is measured to block, so _claude_pick_class makes it
+      # `exhausted` and it is never `eligible` to demote here. Retired rather
+      # than kept as an arm whose condition cannot fire.
       *)        _claude_pick_warnings+=("$1: weekly window spent — usage may bill credits (spend headroom unknown)") ;;
     esac
   fi
@@ -2368,7 +2411,13 @@ _claude_pick_report_exhausted() {
   # _claude_pick_window_text, at the header.
   [[ "$lbr" == (-|)<-> ]] && (( lbr <= 0 )) && soon=""
 
-  if [[ "$mode" == interactive ]]; then
+  if [[ "$mode" == weekwall ]]; then
+    if [[ -n "$soon" ]]; then
+      print -u2 -- "$prog: refused — every account in $label is spent for the week (earliest reset $soon, on $_claude_pick_leastbad)"
+    else
+      print -u2 -- "$prog: refused — every account in $label is spent for the week"
+    fi
+  elif [[ "$mode" == interactive ]]; then
     print -u2 -- "$prog: $label has NO usable account — proceeding on the least-bad one:"
   elif [[ -n "$soon" ]]; then
     print -u2 -- "$prog: refused — $label exhausted (earliest reset $soon, on $_claude_pick_leastbad)"
@@ -2396,7 +2445,10 @@ _claude_pick_report_exhausted() {
     print -u2 -- "        $n  5h ${u5}% · $uwt ($(_claude_pick_window_text "$r5"))"
   done
 
-  if [[ "$mode" == interactive ]]; then
+  if [[ "$mode" == weekwall ]]; then
+    print -u2 -- "        A seat in this state refuses EVERY model (measured 2026-09-27), so a session would start and fail on its first prompt."
+    print -u2 -- "        Doors: claude-as <profile> · CLAUDE_ACCOUNT_TENANT=<t> claude · CLAUDE_PICK_SPENT_OK=1 claude (start it anyway)"
+  elif [[ "$mode" == interactive ]]; then
     print -u2 -- "        Headless callers refuse here. Override: claude-as <profile> · CLAUDE_ACCOUNT_TENANT=<t> claude"
   elif [[ -n "$soon" ]]; then
     print -u2 -- "        --profile <p> to override, or retry after $soon."
@@ -2488,13 +2540,21 @@ claude() {
       # resolver. A pinned tenant skips the resolver but NOT the ranking inside
       # its pool — pinning says where to bill, not which account to burn.
       #
-      # $PWD, and the picker resolves it. INTERACTIVE (strict=0): an exhausted
-      # pool proceeds on the least-bad member with the loud §5.4 block, because
-      # a human blocked by a window that clears itself in minutes is a worse
-      # outcome than a tight session. hspawn and claude-pick --strict refuse in
-      # the same state; that asymmetry is the decision, not an oversight.
+      # $PWD, and the picker resolves it. INTERACTIVE (strict=0): a pool
+      # exhausted by the 5h window proceeds on the least-bad member with the
+      # loud §5.4 block, because a human blocked by a window that clears itself
+      # in minutes is a worse outcome than a tight session.
+      #
+      # A pool exhausted by the WEEK does not (2026-09-27): every seat in it is
+      # measured to refuse every model for days. Falling through to `profile=""`
+      # there would be worse than the old behaviour, not better — it lands on
+      # the SHARED credential below, billing an account nobody picked, to run a
+      # session that cannot answer. The picker has already printed the block
+      # naming the reset and the doors, so this only has to stop.
       if _claude_pick_for_dir "$PWD" "${CLAUDE_ACCOUNT_TENANT:-}" 0 0; then
         profile="$REPLY"
+      elif [[ "$_claude_pick_state" == exhausted ]]; then
+        return 2
       else
         profile=""
       fi

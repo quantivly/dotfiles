@@ -582,15 +582,21 @@ run "claude"
 check "a billing pick is announced as billing"   "$(outgrep "usage bills credits")" "1"
 rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
 
-# DO-623: a disabled Max seat (enabled:false) gets its own wording, not the
-# headroom-unknown one -- it is a measured fact, not a gap.
+# 2026-09-27: a disabled Max seat on a live spent week is now REFUSED, not
+# announced -- such a seat is measured to refuse every model, so claude() must
+# not start a session that dies on its first prompt. The retired warning's
+# wording must not reappear on either the refusal or a pick.
 cat > "$FHOME/.clauth/profiles/personal/usage_cache.json" <<EOF
 {"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100.0,"resets_at":"$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"},"spend":{"enabled":false,"used":134.43,"limit":125.0}}
 EOF
 run "claude"
-check "a disabled Max seat's pick names no spend limit, not the headroom wording" \
-      "$(outgrep "no spend limit configured")" "1"
-check "...and the headroom-unknown wording is absent" \
+check "a disabled Max seat on a spent week is refused, not announced" \
+      "$(outgrep "is spent for the week")" "1"
+check "...and the refusal names the door that starts it anyway" \
+      "$(outgrep "CLAUDE_PICK_SPENT_OK=1")" "1"
+check "...and no session is launched" \
+      "$(inclaude "CMD ")" "0"
+check "...and the retired billing wording is gone" \
       "$(outgrep "spend headroom unknown")" "0"
 rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
 
@@ -2329,7 +2335,7 @@ rm -rf "$FHOME/.clauth/profiles/fz"
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=466
+EXPECTED_ROWS=468
 
 docs_claim() {
   local f="$DOTFILES/$1"

@@ -110,7 +110,8 @@
 #
 #   window state            spend       verdict
 #   live                    headroom    allow, bills_credits true
-#   live                    disabled    refuse  gate-unmeasured  (a Max seat)
+#   live aggregate          disabled    refuse  gate-spend-wall  (a Max seat)
+#   live per-model only      disabled    refuse  gate-unmeasured  (a Max seat)
 #   live                    none        refuse  gate-spend-wall
 #   live                    unknown     refuse  gate-unmeasured
 #   lapsed (fetched_at)     any         allow   (the window has rolled)
@@ -118,13 +119,16 @@
 #   unreadable (utilization not a number)  any   refuse  gate-unmeasured
 #
 # Per-model windows that cannot be decoded at all refuse as gate-unmeasured,
-# unless the aggregate is a live wall (spend none), which is then reported;
-# the gate is never optimistic about data it could not read.
+# unless the aggregate is a live wall (spend none or disabled), which is then
+# reported; the gate is never optimistic about data it could not read.
 #
-# `disabled` (enabled:false, a Max seat) REFUSES: nobody has watched such a seat
-# run past a spent window, so whether it bills or blocks is unmeasured. The
-# ranker only demotes it; the two deliberately differ (decided 2026-09-19, the
-# reasoning in docs/CLAUDE_ACCOUNT_PICKER.md). A label governs when its first
+# `disabled` (enabled:false, a Max seat) REFUSES, and since 2026-09-27 a live
+# spent AGGREGATE on such a seat is a MEASURED wall, reported as
+# gate-spend-wall so rabota reads it as credential:window rather than
+# credential:unmeasured. The ranker now refuses it too, so the two no longer
+# differ (the 2026-09-19 asymmetry is retired; the measurement is in
+# docs/CLAUDE_ACCOUNT_PICKER.md). A per-model-only wall on a Max seat is still
+# unmeasured. A label governs when its first
 # word after "7d " equals a whole "-"-token of the lowercased model id
 # (`7d claude` governs nothing). An unreadable aggregate — absent, or lapsed,
 # which the metrics layer maps to `unknown` too — is not a candidate. The gate
@@ -731,7 +735,11 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
               case "$_claude_pick_spend" in
                 headroom) gate_w_verdict=allow; gate_bills=true ;;
                 disabled) gate_w_verdict=refuse
-                          gate_w_state_reason="the seat has no spend limit configured (a Max seat${_claude_pick_spend_txt:+, $_claude_pick_spend_txt with spend disabled}); whether it bills or blocks past a spent window is unmeasured, so refusing" ;;
+                          if [[ "$gate_w_label" == aggregate ]]; then
+                            gate_w_state_reason="the seat has no spend limit configured (a Max seat${_claude_pick_spend_txt:+, $_claude_pick_spend_txt with spend disabled}) and a spent week is MEASURED to block it outright (2026-09-27)"
+                          else
+                            gate_w_state_reason="the seat has no spend limit configured (a Max seat${_claude_pick_spend_txt:+, $_claude_pick_spend_txt with spend disabled}); whether it bills or blocks past a spent PER-MODEL window is unmeasured, so refusing"
+                          fi ;;
                 none)     gate_w_verdict=refuse; gate_w_state_reason="the seat has no spend headroom left${_claude_pick_spend_txt:+ ($_claude_pick_spend_txt)}" ;;
                 *)        gate_w_verdict=refuse; gate_w_state_reason="the seat's spend headroom cannot be read${_claude_pick_spend_txt:+ ($_claude_pick_spend_txt)}" ;;
               esac ;;
@@ -744,7 +752,17 @@ if (( gate && rc == 0 )) && [[ -n "$REPLY" ]]; then
         # fared; reporting it as gate-unmeasured would hide why the lane is
         # blocked. Anything short of that still refuses as unmeasured.
         gate_wall=0
-        [[ "$gate_mw_verdict" == refuse && "$gate_mw_state" == live && "$_claude_pick_spend" == none ]] && gate_wall=1
+        # `disabled` joins `none` here for the AGGREGATE only (measured
+        # 2026-09-27: a Max seat at 100% of its week refused every model,
+        # including one with no per-model window of its own). A per-model-only
+        # wall on a Max seat was NOT measured — both of toysim-0's windows were
+        # at 100 together — so it stays gate-unmeasured and says so.
+        if [[ "$gate_mw_verdict" == refuse && "$gate_mw_state" == live ]]; then
+          case "$_claude_pick_spend" in
+            none)     gate_wall=1 ;;
+            disabled) [[ "$gate_mw_label" == aggregate ]] && gate_wall=1 ;;
+          esac
+        fi
         if (( ! gate_dec_ok && ! gate_wall )); then
           gate_verdict=refuse; gate_bills=""; _claude_pick_state=gate-unmeasured
           _claude_pick_reason="$REPLY's per-model weekly windows cannot be read (the decode failed); refusing rather than assuming none of them is spent"

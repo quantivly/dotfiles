@@ -66,6 +66,10 @@ chosen when nothing above it exists, so an entirely-spent pool still yields an a
 starts a session — DO-574's measured decision kept intact, but no longer able to lose to a
 crowding term. `CLAUDE_PICK_WEEK_SPENT` (100) is the threshold.
 
+**Since 2026-09-27 the tier holds only the seats that can still serve**, i.e. spend `headroom`
+(it bills) and spend `unknown` (it may). A spent week on a Max seat (`disabled`) is measured to
+block and left the tier for `exhausted` — see "The Max-seat wall, measured" below.
+
 The tier also had to be added to the **overflow** guard, and that was the one unpinned edit:
 overflow borrows another tenant's account, so it is paid only when the pool named nothing usable
 at all, and a weekly-spent member *is* usable. Dropping it from that guard left all 197 other
@@ -398,15 +402,30 @@ ranking as the refusal class that a live spent week with spend `none` now joins.
 `unknown` never escalates to `exhausted` — missing data is not a wall — and its warning
 says "may bill" rather than "bills".
 
-**What the Max-seat inference costs, since it is an arm nobody has watched fire.**
+**The Max-seat wall, measured 2026-09-27 — the arm nobody had watched fire.**
 `_claude_profile_metrics` maps `spend.enabled == false` to **`disabled`** (DO-623 split it out of
-`unknown`, which it shared until then), not to `none`, so a
-Max seat at 100% of its week is DEMOTED to `weekly-spent` and stays choosable. The blocking
-arm fires only where it was measured: a Team seat whose spend has reached its limit. Both
-non-work tenants are composed entirely of Max seats with no overflow, so refusing on the
-inference would empty them for up to a week; demoting costs one session that fails at auth
-and names the reason. The headless gate, which has no one watching, refuses it instead — see
-the DO-623 section below.
+`unknown`, which it shared until then), not to `none`. Until this date that state only DEMOTED a
+Max seat at 100% of its week, on the argument that the block was inferred from a field name and
+that refusing would empty both all-Max tenants for up to a week.
+
+The measurement, taken on the seat a session had just reported as unusable: **toysim-0**, Max,
+aggregate `seven_day` 100 with spend `disabled`, usage cache 3 s old.
+
+| model asked for | result |
+|---|---|
+| `claude-fable-5-1` | `You've hit your weekly limit · resets Oct 1, 1am (Asia/Jerusalem)` |
+| `claude-sonnet-5` | `You've hit your weekly limit · resets Oct 1, 1am (Asia/Jerusalem)` |
+
+**`claude-sonnet-5` is the load-bearing row.** The seat's usage block lists exactly one
+per-model window, `7d fable` at 100 — and no `7d sonnet` at all. A model with no governing
+window was refused anyway, so what blocks is the **aggregate**, seat-wide, and not the per-model
+window sitting at 100 beside it. The quoted reset cannot separate the two (the two instants are
+one second apart); the model can, and does.
+
+So `disabled` joins `none` in the exhaustion arm, and the cost that argued against it is now
+simply the truth about capacity: `personal` and `toysim` really are unusable until their weekly
+reset, and demoting only bought a session that died on its first prompt. A **lapsed** week is
+still `unknown` and never reaches the arm.
 
 **Consume-first on the week, without switching the week off.** `weekf` stays, its penalty
 fading as the weekly reset nears (`weekf_eff`), plus a consume-first bonus scaled by
@@ -449,7 +468,7 @@ spent window is a wall only where the seat cannot bill past it:
 |---|---|---|
 | `none` | `enabled:true`, `used >= limit` | **refuse** `gate-spend-wall` |
 | `headroom` | `enabled:true`, `used < limit` | allow, `bills_credits: true` |
-| `disabled` | `enabled:false` — a Max seat | **refuse** `gate-unmeasured` |
+| `disabled` | `enabled:false` — a Max seat | **refuse** — `gate-spend-wall` on the aggregate (measured 2026-09-27), `gate-unmeasured` on a per-model window alone |
 | `unknown` | no spend block, or a non-numeric `used`/`limit` | **refuse** `gate-unmeasured` |
 
 A lapsed window (dated by `fetched_at`) allows whatever the spend; an undated one refuses
@@ -457,7 +476,9 @@ as `gate-unmeasured`. rabota maps `gate-spend-wall` to `credential:window`, beca
 unlisted states fall to `credential:unmeasured` and a measured refusal would then read as
 "could not measure".
 
-**Why `disabled` refuses, while the ranker only demotes it.** The DO-623 plan proposed
+**Why `disabled` refuses, while the ranker only demoted it** — the reasoning as it stood
+between 2026-09-19 and 2026-09-27, kept because it is the record of a decision made under
+uncertainty that the measurement above has since settled. The DO-623 plan proposed
 allowing a Max seat on a spent window, and the branch first shipped that (`bills_credits:
 null`), arguing that the utilization is a good measurement whose *consequence* is unknown and
 that refusing would empty the all-Max `personal` and `toysim` tenants once DO-624 routes
@@ -478,14 +499,29 @@ instead: refuse, reported as `gate-unmeasured`** (the reason says "no spend limi
   would run, the cost is a refused lane until the window resets — against a lane that dies
   mid-task, which is what the gate exists to prevent.
 
-It is `gate-unmeasured`, not `gate-spend-wall`: the block was never measured, and rabota maps
-the two differently. **The ranker and the gate now deliberately differ** (the approved
-spec's decision 6): `_claude_pick_class` still only *demotes* a spent Max seat to
-`weekly-spent`, because an interactive session that fails at auth names its reason, while
-the headless gate refuses. The `disabled` state stays split out of `unknown` — it is what
-lets the gate give an accurate reason and the ranker's warning say "no spend limit
-configured" rather than "spend headroom unknown". A **lapsed** window still allows on a Max
-seat, as on any seat.
+**2026-09-27 settles it, and the asymmetry is retired.** The gate's refusal was right; what
+was wrong was calling it unmeasured and letting the ranker disagree. A live spent
+**aggregate** on a Max seat is now `gate-spend-wall`, so rabota reads it as
+`credential:window` rather than `credential:unmeasured` — a measured refusal no longer
+reports as "could not measure". A spent **per-model** window alone on such a seat is still
+`gate-unmeasured`: both of toysim-0's windows were at 100 together, so that case was not
+separated and nothing may claim it was. `_claude_pick_class` refuses the aggregate case too,
+which is what the "one-line change back" in its own comment was waiting for.
+
+The `disabled` state stays split out of `unknown` — it is what lets each consumer give an
+accurate reason, and it is now what lets the gate distinguish the aggregate wall it can
+prove from the per-model one it cannot. A **lapsed** window still allows on a Max seat, as on
+any seat.
+
+**The interactive path stops too.** `weekly-spent` used to keep an all-Max pool startable;
+`exhausted` alone would not have, because `_claude_pick_for_dir`'s interactive arm proceeds on
+the least-bad member — and `claude()` then falls back to the **shared** credential when the
+picker names no profile, billing an account nobody picked to run a session every seat is
+measured to refuse. So the interactive arm refuses when **every** exhausted member is behind
+the *weekly* wall, and `claude()` returns rather than falling through. A 5h wall keeps the old
+behaviour exactly: it clears in hours and its reading goes stale, which is the whole of
+DO-574's reasoning and none of this. `CLAUDE_PICK_SPENT_OK=1` is the one-command door, beside
+`claude-as <profile>` and `CLAUDE_ACCOUNT_TENANT=<t>`.
 
 **Which window governs a lane.** clauth 0.15.2 builds a label as `"7d " + name.lowercase()`
 from the scope's model `display_name`. The lane's model id loses a trailing `[…]`
