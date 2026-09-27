@@ -547,8 +547,9 @@ session on the wrong account, use the [claude-accounts](.claude/skills/claude-ac
 - **Access tokens live 8 h.** A suspend that outlasts the validity a token had *left* expires every
   account at once; expect clauth to quarantine accounts on resume.
 - **Accounts are chosen per directory** from `~/.config/claude-tenants.zsh`; `claude-pick --explain`
-  shows which one a directory would bill and why. A spent week demotes in the ranker; the gate
-  refuses it unless spend headroom is left.
+  shows which one a directory would bill and why. A spent week demotes while the seat can still
+  bill; on a Max seat (no spend limit configured) it is MEASURED to refuse every model, so the
+  ranker, the gate and `claude()` all refuse. `CLAUDE_PICK_SPENT_OK=1` starts it anyway.
 - **In a Claude Code Bash-tool shell, single-underscore functions do not exist** — the shell
   snapshot drops them, so `claude`/`hspawn` are defined and their `_helpers` are not. A guard whose
   failure mode is a *match* rather than an error is the one to audit.

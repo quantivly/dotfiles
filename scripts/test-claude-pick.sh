@@ -62,7 +62,14 @@ done
 
 FHOME=""
 new_home() {   # $1 = label; a fresh fixture HOME per timing-sensitive group
+    # CLEARED, not just created. A label reused by two groups used to hand the
+    # second one the first's profiles, and the symptom is a row that passes for
+    # the wrong reason: an inherited ELIGIBLE member makes an all-exhausted pool
+    # produce a pick and print nothing, so an assertion on the refusal compares
+    # two empty strings. Found 2026-09-27, with `wk1` and `wk2` each defined
+    # twice; the duplicate names are gone, and this makes the next one harmless.
     FHOME="$TMPROOT/$1"
+    rm -rf "$FHOME"
     mkdir -p "$FHOME/.clauth/profiles" "$FHOME/.local/state/claude-account-dirs"
 }
 
@@ -362,10 +369,14 @@ mkprof d4 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":0.0}}"
 check "spent week + spend headroom: eligible (it bills; the tier demotes)" "$(cls a1)" "eligible"
 check "spent week + spend unknown: eligible — missing data never refuses"   "$(cls b2)" "eligible"
 check "spent week + spend at its limit: exhausted"                          "$(cls c3 | cut -d: -f1)" "exhausted"
-# A Max seat is DEMOTED, never refused: the blocking arm is measured for a Team
-# seat only, and both non-work tenants are composed entirely of Max seats with no
-# overflow — refusing on an inference would empty them for a week.
-check "spent week + spend disabled (a Max seat): eligible, not exhausted"   "$(cls d4)" "eligible"
+# A Max seat REFUSES here too since 2026-09-27, and that is MEASURED, not
+# inferred: toysim-0 at 100% of its week refused every model, including
+# claude-sonnet-5, which has no per-model window of its own — so the wall is the
+# aggregate and seat-wide. The two reasons stay distinguishable, because they are
+# different facts: `none` overran a limit, `disabled` never had one.
+check "spent week + spend disabled (a Max seat): exhausted, measured"       "$(cls d4 | cut -d: -f1)" "exhausted"
+check "...its reason names the missing spend LIMIT"                         "$(cls d4 | grep -c 'no spend limit configured')" "1"
+check "...and does not borrow the no-headroom wording"                      "$(cls d4 | grep -c 'no spend headroom')" "0"
 check "...and the reason names the spend wall"                              "$(cls c3 | grep -c 'no spend headroom')" "1"
 
 # CLAUDE_PICK_WEEK_SPENT IS VALIDATED BEFORE ANY ARITHMETIC. zsh reads a
@@ -440,13 +451,15 @@ new_home sw2
 mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":true,\"used\":10.0,\"limit\":250.0}}"
 check "a billing seat is picked in the weekly-spent tier"   "$(pfd '' '' '' 0 | cut -d: -f1,4)" "0:weekly-spent"
 
-# DO-623 companion to sp_disabled above: `disabled` still only DEMOTES the pick
-# (to weekly-spent), it never refuses it -- _claude_pick_class's `== none` test
-# is unchanged, so `disabled` never reaches the exhaustion arm.
+# 2026-09-27 reverses the DO-623 companion to sp_disabled above: `disabled` is no
+# longer a demotion. An all-Max pool spent for the week refuses even
+# interactively, because the seat serves nothing and "proceed on the least-bad
+# one" would hand back a session that dies on its first prompt.
 new_home sw2b
 mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
-check "a disabled Max seat still only DEMOTES, to weekly-spent" \
-      "$(pfd '' '' '' 0 | cut -d: -f4)" "weekly-spent"
+check "a disabled Max seat is refused, not demoted"            "$(pfd '' '' '' 0 | cut -d: -f1)" "2"
+check "...and names no class, the way every refusal does"      "$(pfd '' '' '' 0 | cut -d: -f4)" ""
+check "...but CLAUDE_PICK_SPENT_OK=1 still opens the door"     "$(pfd 'CLAUDE_PICK_SPENT_OK=1' '' '' 0 | cut -d: -f1)" "0"
 
 new_home sw3
 mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"2000-01-01T00:00:00Z\"},\"spend\":{\"enabled\":true,\"used\":275.23,\"limit\":275.0}}"
@@ -2131,15 +2144,17 @@ cli --dry-run --json
 check "an unknown-spend weekly-spent pick warns with the UNKNOWN wording, never the headroom one" \
       "$(jq -r '[.warnings[] | select(contains("spend headroom unknown"))] | length' <<<"$CLI_OUT")" "1"
 
-# DO-623: a disabled Max seat's warning must not claim spend headroom is
-# unknown -- it is a measured fact (no spend limit configured), not a gap.
+# 2026-09-27: a disabled Max seat on a live spent week no longer WARNS at all --
+# it refuses, so the billing warning's `disabled` arm was retired rather than
+# left as an arm whose condition cannot fire. These rows pin that it is a
+# refusal, not a quiet pick carrying a warning.
 new_home bill4
 mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
 cli --dry-run --json
-check "a disabled Max seat's warning does not claim headroom is unknown" \
-      "$(jq -r '[.warnings[] | select(contains("no spend limit configured"))] | length' <<<"$CLI_OUT")" "1"
-check "...and does not use the headroom wording" \
-      "$(jq -r '[.warnings[] | select(contains("spend headroom unknown"))] | length' <<<"$CLI_OUT")" "0"
+check "a disabled Max seat on a spent week refuses rather than warning" \
+      "$(jq -r .state <<<"$CLI_OUT")" "exhausted"
+check "...so no weekly-spent billing warning is emitted for it" \
+      "$(jq -r '[.warnings[] | select(contains("weekly window spent"))] | length' <<<"$CLI_OUT")" "0"
 
 #-----------------------------------------------------------------------------
 echo
@@ -2651,8 +2666,8 @@ check "...on a LIVE window"                             "$(jq -r .gate.model_win
 new_home gw_agg_disabled
 mk_gate_prof a1 '[]' "$SP_OFF" "{\"utilization\":100.0,\"resets_at\":\"$(iso_in 194400)\"}"
 gw a1 claude-opus-5
-check "gate/aggregate: a Max seat on a live spent aggregate REFUSES as unmeasured" \
-      "$(jq -r .state <<<"$out")" "gate-unmeasured"
+check "gate/aggregate: a Max seat on a live spent aggregate is a MEASURED wall" \
+      "$(jq -r .state <<<"$out")" "gate-spend-wall"
 check "...naming the aggregate and the Max-seat case" \
       "$(jq -r '.reason | test("aggregate weekly") and test("no spend limit configured")' <<<"$out")" "true"
 # ...but a LAPSED window has rolled, whatever the spend state: it allows.
@@ -2919,6 +2934,83 @@ cli --profile a1 --dry-run --json
 check "gate: without --gate the spent window changes nothing" \
       "$(jq -r '[.gate, .profile, (.exit_code|tostring)] | map(tostring) | join("/")' <<<"$CLI_OUT")" "null/a1/0"
 
+# =============================================================================
+# 2026-09-27 — THE WEEKLY WALL IS MEASURED, AND IT REFUSES
+#
+# toysim-0 (Max, aggregate seven_day 100, spend disabled, cache 3 s old) refused
+# `claude -p` on EVERY model with "You've hit your weekly limit · resets Oct 1,
+# 1am" — including claude-sonnet-5, which has no per-model window of its own, so
+# the wall is the aggregate and seat-wide. Three consequences are pinned here:
+# the class, the reset that is quoted, and whether an interactive launch starts.
+# =============================================================================
+WWLIVE="\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 259200)\"}"
+SP_MAX='"spend":{"enabled":false,"used":134.43,"limit":125.0}'
+SP_WALL='"spend":{"enabled":true,"used":275.23,"limit":275.0}'
+SP_ROOM='"spend":{"enabled":true,"used":10.0,"limit":250.0}'
+FIVE_WALL='"five_hour":{"utilization":99.0,"resets_at":"'"$(iso_in 3600)"'"}'
+wallkind() { zrun "_claude_profile_metrics '$1' >/dev/null; _claude_pick_wall_kind"; }
+
+# WHICH wall a member is behind. One predicate, three readers -- the class, the
+# reset, and the interactive decision -- so the kind is asserted on its own.
+new_home ww_kind
+mkprof a1 "{$FIVE,$WWLIVE,$SP_MAX}"
+mkprof b2 "{$FIVE_WALL,\"seven_day\":{\"utilization\":10.0,\"resets_at\":\"$(iso_in 86400)\"}}"
+mkprof c3 "{$FIVE,$WWLIVE,$SP_ROOM}"
+check "wall kind: a spent week on a Max seat is 'week'"      "$(wallkind a1)" "week"
+check "wall kind: a spent 5h window alone is '5h'"           "$(wallkind b2)" "5h"
+check "wall kind: a billing seat is behind no wall at all"   "$(wallkind c3)" "other"
+
+# THE RESET THAT IS QUOTED, differentially -- _claude_pick_block_reset is the
+# SECOND site the predicate had to reach, and a widened class with an unwidened
+# reset would quote the 5h window for a wall that lasts days. Each fixture is
+# behind BOTH walls and differs only in its spend block, so the comparison
+# isolates that one branch. No datetime is hard-coded: the assertion is that
+# `disabled` lands where `none` lands and not where `headroom` does.
+new_home ww_reset_max
+mkprof a1 "{$FIVE_WALL,$WWLIVE,$SP_MAX}"
+WK_DISABLED="$(report 1 | grep -oE '\(resets [^)]*\)' | head -1)"
+new_home ww_reset_none
+mkprof a1 "{$FIVE_WALL,$WWLIVE,$SP_WALL}"
+WK_NONE="$(report 1 | grep -oE '\(resets [^)]*\)' | head -1)"
+new_home ww_reset_room
+mkprof a1 "{$FIVE_WALL,$WWLIVE,$SP_ROOM}"
+WK_ROOM="$(report 1 | grep -oE '\(resets [^)]*\)' | head -1)"
+check "a Max seat behind both walls quotes the WEEK, as a no-headroom seat does" \
+      "$WK_DISABLED" "$WK_NONE"
+check "...and a reset was actually quoted, so the row is not comparing two blanks" \
+      "$([[ "$WK_DISABLED" == \(resets\ * ]] && echo quoted)" "quoted"
+check "...while a billing seat behind only the 5h wall quotes the 5h reset" \
+      "$([[ "$WK_ROOM" != "$WK_DISABLED" ]] && echo differs)" "differs"
+
+# WHETHER AN INTERACTIVE LAUNCH STARTS. The least-bad path exists because "a
+# human blocked by a window that clears itself" is the worse error -- reasoning
+# about the 5h window, which clears in hours and whose reading goes stale. The
+# weekly wall is neither, so every member behind it refuses.
+new_home ww_refuse
+mkprof a1 "{$FIVE,$WWLIVE,$SP_MAX}"
+mkprof b2 "{$FIVE,$WWLIVE,$SP_WALL}"
+check "every member behind the WEEK refuses an interactive launch" \
+      "$(pfd '' '' '' 0 | cut -d: -f1)" "2"
+check "...reporting the exhausted state rather than a pick" \
+      "$(pfd '' '' '' 0 | cut -d: -f3)" "exhausted"
+check "...and naming no profile"                             "$(pfd '' '' '' 0 | cut -d: -f2)" ""
+check "...the header says spent for the week, not 'proceeding'" \
+      "$(report 0 | head -1 | grep -c 'refused — every account in the account pool is spent for the week')" "1"
+check "...it lists EVERY member, the way a refusal does"     "$(report 0 | grep -cE '^        (a1|b2)  5h ')" "2"
+check "...and the last line offers CLAUDE_PICK_SPENT_OK as a door" \
+      "$(report 0 | tail -1 | grep -c 'CLAUDE_PICK_SPENT_OK=1')" "1"
+check "CLAUDE_PICK_SPENT_OK=1 proceeds on the least-bad member anyway" \
+      "$(pfd 'CLAUDE_PICK_SPENT_OK=1' '' '' 0 | cut -d: -f1,3)" "0:picked"
+
+# ...and DO-574's least-bad behaviour is untouched wherever ANY member's wall
+# clears by itself. a1 is behind the 5h window only (its week bills), so the
+# pool is not uniformly weekly-walled and the launch proceeds as before.
+new_home ww_mixed
+mkprof a1 "{$FIVE_WALL,$WWLIVE,$SP_ROOM}"
+mkprof b2 "{$FIVE,$WWLIVE,$SP_MAX}"
+check "a pool with one 5h-walled member still proceeds interactively" \
+      "$(pfd '' '' '' 0 | cut -d: -f1,3)" "0:picked"
+
 # --- the row total ------------------------------------------------------------
 # The total catches a row that VANISHED (an early exit, a deleted block, an unset
 # variable under `set -u`) -- every row that still ran would pass in silence and
@@ -2933,7 +3025,7 @@ check "gate: without --gate the spent window changes nothing" \
 # every time a row lands, which is the one thing that would make the record
 # worthless. So this suite gets a total and no prose row.
 # docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=503
+EXPECTED_ROWS=521
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
