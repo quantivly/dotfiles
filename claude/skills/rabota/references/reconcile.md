@@ -3,9 +3,7 @@
 Six classes, fixed vocabulary (`rabota/tests/fixtures/reconcile/golden.json` is the golden set).
 **A class names the KIND of commitment, not its current state.** "Already answered" or "already
 done" is an `outcome`, never a `class` — the six names below have no seventh slot for state, and
-folding state into the class name is the one blind-evaluate mistake seen so far (a run once wrote
-`Class: question owed → already answered`, which is a `question-owed` item whose `outcome` is
-that it was already answered — not a new class).
+folding state into the class name is the one blind-evaluate mistake seen so far.
 
 The axis that separates the six is the KIND of commitment — a question, a promise, a tracked
 item — never whether it is currently outstanding. `question-owed` and `spoken-already-done` are the
@@ -18,11 +16,10 @@ yet?" — the second question is what `outcome` records.
 Read `blocks`/`blockedBy` relations before description prose: a Linear description can be stale
 in a way the relation graph is not.
 
-Inputs: `rabota brief`'s turn-1 reply no longer carries a tracked-side index (DO-751 — it grew
-linearly with the tenant's open-issue count, measured ~303 KB on a synthetic tenant scaled to
-@zvi's real one). Once you know which subjects you are classifying, call `rabota tracked <key>
-[<key>…]` — one call, no network, answered from `sources/linear.json`/`sources/github.json` on
-disk. Never re-read those snapshot files yourself.
+Inputs: `rabota brief`'s turn-1 reply no longer carries a tracked-side index (DO-751). Once you
+know which subjects you are classifying, call `rabota tracked <key> [<key>…]` — one call, no
+network, answered from `sources/linear.json`/`sources/github.json` on disk. Never re-read those
+snapshot files yourself.
 
 Each key in the reply's `results` is exactly one of:
 
@@ -48,8 +45,7 @@ Each key in the reply's `results` is exactly one of:
   **Never treat this as `found_closed`**: not done; use like `found`, never as absence proof.
 - `{"key", "status": "unknown", "reason"}` — the source cannot be relied on (unsynced,
   unreadable, the tenant does not use it, or the batched Linear check below could not be made or
-  failed). **Never treat this as `not_found`** — that conflation is golden `g06`'s bug one level
-  up (a pre-attachment snapshot read as "no PR exists" rather than "attachments unknown").
+  failed). **Never treat this as `not_found`** — that conflation is golden `g06`'s bug one level up.
 - `{"key", "status": "ambiguous", "candidates"}` — an owner-less `repo#n` matching more than one
   `owner/repo#n`. Pick by the evidence in the commitment (the repo it names, the org); if nothing
   decides it, escalate with the candidates as options, never guess.
@@ -74,8 +70,8 @@ above for why its `not_found` stays weaker evidence.
 `"merged"` when `github.json`'s `own_prs`/`merged_recent` confirms it, else `"unknown"` — never a
 live cross-org GitHub search; `title` is that PR's title, carried along from the same match, or
 `null` when the state is still `"unknown"`). **`key` can never be the g07 signal**: it is always
-`owner/repo#n`, never a Linear identifier, so it cannot "name a different issue". The actual
-signal is `title`: a
+`owner/repo#n`, never a Linear identifier, so it cannot "name a different issue" — a non-empty
+`pr_links` whose `key` is a real PR is unremarkable on its own. The actual signal is `title`: a
 `pr_links` entry whose title reads as belonging to a different piece of work than the issue it's
 attached to (golden `g07` — HUB-5812's one attachment resolves to a PR titled `HUB-5693`, not
 HUB-5812).

@@ -89,6 +89,9 @@ class Tenant:
     machines: dict[str, Machine] = field(default_factory=dict)
     seats: dict[str, str] = field(default_factory=dict)   # {"local": "<clauth profile>"}; a REMOTE machine's seat comes from the registry (DO-665), not from here
     excludes: list[Path] = field(default_factory=list)
+    # Set by ``_tenant`` to the tenant's own toml path; used only to name the file in a
+    # resolve-time error (DO-764 review G1), never read for any other purpose.
+    config_path: Path | None = None
 
 
 @dataclass
@@ -118,15 +121,12 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
                 f"defect, and a losing copy is still the one somebody edits")
         machines[m] = Machine(name=m, **v)
         machines[m].profile = seats_by_machine.get(m)
+    # DO-764 review G1: an empty ``dead_state_types`` is NOT rejected here. ``load()`` builds
+    # every tenants/*.toml before any command picks the one it needs (see ``load``'s docstring),
+    # so raising in ``_tenant`` would fail every tenant's every command over one sibling's stray
+    # toml. The check moved to ``resolve_tenant``, which only ever sees the tenant a command
+    # actually resolved to -- a bad tenant's config can then only ever hurt that tenant.
     linear = _dc(LinearRules, d.get("linear", {}))
-    if not linear.dead_state_types:
-        # DO-764 review F3: an empty list is honoured verbatim with no check anywhere downstream,
-        # and reconcile.py's found_open/found_closed split, sync.py and inbox/buckets.py all key
-        # off this one field -- a tenant that declares no dead state types can never read anything
-        # as closed, flipping "resolved" to read as "live" in three subsystems at once.
-        raise errors.Usage(
-            f"{path or f'tenants/{name}.toml'}: [linear] dead_state_types is empty -- a tenant "
-            f"needs at least one dead state type, or every issue reads as still open")
     return Tenant(
         name=name, root=_p(d["root"]), state_dir=_p(d["state_dir"]),
         gh_config_dir=_p(d.get("gh_config_dir")), gh_login=d.get("gh_login"),
@@ -141,6 +141,7 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
         machines=machines,
         seats=dict(d.get("seats", {})),
         excludes=[_p(x) for x in d.get("excludes", [])],
+        config_path=path,
     )
 
 
@@ -194,20 +195,37 @@ def load(base: Path | None = None, seats_by_machine: dict[str, str] | None = Non
     return Config(routes=routes, default=default, tenants=tenants)
 
 
+def _check_dead_state_types(tenant: Tenant) -> None:
+    # DO-764 review G1: moved here from ``_tenant`` so a bad tenant's config can only ever hurt
+    # the tenant it belongs to. reconcile.py's found_open/found_closed split, sync.py and
+    # inbox/buckets.py all key off this one field -- a tenant that declares no dead state types
+    # can never read anything as closed, flipping "resolved" to read as "live" in three
+    # subsystems at once -- so this runs on every path out of ``resolve_tenant``, not just the
+    # override branch.
+    if not tenant.linear.dead_state_types:
+        raise errors.Usage(
+            f"{tenant.config_path or f'tenants/{tenant.name}.toml'}: [linear] dead_state_types "
+            f"is empty -- a tenant needs at least one dead state type, or every issue reads as "
+            f"still open")
+
+
 def resolve_tenant(cfg: Config, cwd: Path, env: Mapping[str, str], override: str | None) -> Tenant:
     """Pick a tenant: ``override`` → ``$CLAUDE_ACCOUNT_TENANT`` → longest route prefix of ``cwd`` → default."""
     name = override or env.get("CLAUDE_ACCOUNT_TENANT")
     if name:
         if name not in cfg.tenants:
             raise errors.Usage(f"unknown tenant {name!r}; known: {sorted(cfg.tenants)}")
-        return cfg.tenants[name]
-    cwd = Path(cwd).resolve()
-    best = None
-    for prefix, tenant in cfg.routes:
-        try:
-            cwd.relative_to(prefix.resolve())
-        except ValueError:
-            continue
-        if best is None or len(str(prefix)) > len(str(best[0])):
-            best = (prefix, tenant)
-    return cfg.tenants[best[1] if best else cfg.default]
+        tenant = cfg.tenants[name]
+    else:
+        cwd = Path(cwd).resolve()
+        best = None
+        for prefix, route_tenant in cfg.routes:
+            try:
+                cwd.relative_to(prefix.resolve())
+            except ValueError:
+                continue
+            if best is None or len(str(prefix)) > len(str(best[0])):
+                best = (prefix, route_tenant)
+        tenant = cfg.tenants[best[1] if best else cfg.default]
+    _check_dead_state_types(tenant)
+    return tenant
