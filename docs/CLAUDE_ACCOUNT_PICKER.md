@@ -427,6 +427,16 @@ simply the truth about capacity: `personal` and `toysim` really are unusable unt
 reset, and demoting only bought a session that died on its first prompt. A **lapsed** week is
 still `unknown` and never reaches the arm.
 
+Rows: `scripts/test-claude-pick.sh` (503 → 521), `scripts/test-hspawn.sh` (466 → 468).
+**9 mutants, 8 deaths and one deliberate survivor**, each dry-run for applicability and the
+mutated region diffed before a kill was booked. The survivor is `new_home` no longer clearing
+its fixture: the duplicate `wk1`/`wk2` labels that made it matter are gone, so nothing depends
+on it any more and it is prophylaxis for the next duplicate rather than a live rule — which is
+what the comment on it says. The kills worth naming: reverting the shared predicate to `none`
+fails 15 rows; disabling it in `_claude_pick_block_reset` **alone** still fails 11, which is the
+whole reason the predicate has one home; and deleting `claude()`'s `return 2` fails the row that
+asserts no session is launched — the fallthrough it restores lands on the shared credential.
+
 **Consume-first on the week, without switching the week off.** `weekf` stays, its penalty
 fading as the weekly reset nears (`weekf_eff`), plus a consume-first bonus scaled by
 weekly headroom (`CLAUDE_PICK_W_WEEK_EXPIRE`, 200). The weight is set against
