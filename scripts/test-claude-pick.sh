@@ -3011,6 +3011,44 @@ mkprof b2 "{$FIVE,$WWLIVE,$SP_MAX}"
 check "a pool with one 5h-walled member still proceeds interactively" \
       "$(pfd '' '' '' 0 | cut -d: -f1,3)" "0:picked"
 
+# THE POOL'S NAME APPEARS ONCE. `${t:+pool $t}${t:-the account pool}` fires both
+# halves when `t` is set, because `:-` substitutes the VALUE and not the default
+# -- so a pinned tenant read "every member of pool t1t1 is exhausted". The §5.4
+# header never had it (it spelled the branch out); the two `_claude_pick_reason`
+# strings did, and both reached `--json .reason` and rabota's refusal detail.
+# Found live on 2026-09-27 against pool 'toysim'.
+pfd_reason() {   # $1 = prelude, $2 = tenant, $3 = strict -> _claude_pick_reason
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' '${3:-0}' 0 >/dev/null 2>&1
+      print -r -- \"\$_claude_pick_reason\"" 2>/dev/null
+}
+
+# a1 is 5h-walled (a 5h wall, so the interactive path still proceeds and the
+# STRICT reason is the one under test); b2 carries the weekly wall for the
+# second row, where every member is behind the week.
+new_home pl1
+mkprof a1 '{"five_hour":{"utilization":99.0}}'
+check "the strict reason names a pinned pool once" \
+      "$(pfd_reason 'CLAUDE_TENANT_POOL=( t1 "a1" )' t1 1 | grep -c "of pool 't1' is exhausted")" "1"
+check "...and never doubles the tenant name" \
+      "$(pfd_reason 'CLAUDE_TENANT_POOL=( t1 "a1" )' t1 1 | grep -c 't1t1')" "0"
+check "...while an unpinned pool is still called the account pool" \
+      "$(pfd_reason '' '' 1 | grep -c 'of the account pool is exhausted')" "1"
+
+new_home pl2
+mkprof a1 "{$FIVE,$WWLIVE,$SP_MAX}"
+check "the weekly-wall reason names a pinned pool once" \
+      "$(pfd_reason 'CLAUDE_TENANT_POOL=( t1 "a1" )' t1 0 | grep -c "of pool 't1' is spent for the week")" "1"
+check "...and never doubles the tenant name either" \
+      "$(pfd_reason 'CLAUDE_TENANT_POOL=( t1 "a1" )' t1 0 | grep -c 't1t1')" "0"
+
 # --- the row total ------------------------------------------------------------
 # The total catches a row that VANISHED (an early exit, a deleted block, an unset
 # variable under `set -u`) -- every row that still ran would pass in silence and
@@ -3025,7 +3063,7 @@ check "a pool with one 5h-walled member still proceeds interactively" \
 # every time a row lands, which is the one thing that would make the record
 # worthless. So this suite gets a total and no prose row.
 # docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=521
+EXPECTED_ROWS=526
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
