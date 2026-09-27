@@ -337,6 +337,31 @@ class SyncTests(unittest.TestCase):
         self.assertLess(since, old_fixed_window,
                         "the old fixed lookback would still miss the true last-shown time")
 
+    def test_the_fallback_anchor_freezes_instead_of_sliding_forward_on_shown(self):
+        # Review finding 1 (DO-761 fix round 2): a tenant that only ever gets brief text -- a bare
+        # `rabota --text brief`, or an agent that reads turn 1 and never sends `--classified
+        # fireflies` back -- never creates `fireflies-classified.json`, so the day-brief fallback
+        # used to stay live forever: `read_newest_day_brief` was read live, at call time, on every
+        # tick, and a new day-scoped `last-brief.json` landing each day (from the brief simply
+        # being shown) walked the window start forward a full day at a time -- the review measured
+        # 2026-09-16T09:00Z -> 2026-09-25T09:00Z over ten such days, with no classification record
+        # ever created and no alert. `fireflies_since` must now freeze at the FIRST day-brief it
+        # ever sees and hold there. Fails on a167822, where `fireflies_since` reads
+        # `snapshots.read_newest_day_brief` directly instead of the frozen fallback.
+        ctx = self.ctx()
+        day0 = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+        first_since = None
+        for i in range(10):
+            day = day0 + timedelta(days=i)
+            self._write_day_brief(ctx, day.date().isoformat(), day.strftime(snapshots.FETCHED_AT_FORMAT))
+            since = sync.fireflies_since(ctx, day + timedelta(hours=1))
+            if first_since is None:
+                first_since = since
+            self.assertEqual(since, first_since,
+                             f"day {i}: the fallback anchor must freeze at the first day shown, not slide")
+            self.assertFalse((ctx.state_dir / snapshots.FIREFLIES_CLASSIFIED_FILE).exists(),
+                             f"day {i}: shown, never classified -- no classification record must ever appear")
+
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()
         f = ctx.state_dir / "slack.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)

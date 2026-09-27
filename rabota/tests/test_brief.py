@@ -951,6 +951,25 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
         self.assertTrue(any("coverage gap" in l for l in lines), lines)
 
+    def test_the_coverage_gap_alert_does_not_contradict_itself(self):
+        # Review finding 2 (DO-761 fix round 2): the old alert reused the `fetched: True` shape,
+        # rendering "! fireflies needs classifying -- coverage gap Xh (...) -- anchor held, will
+        # retry next sync, no fetch needed" -- asserting nothing needs classifying (nothing was
+        # ever fetched for the gap) while saying "no fetch needed" when its own text says the
+        # remedy IS another fetch. The skill's step 2 keys off exactly the same `fetched` flag, so
+        # the machine reader was misled too. Pins the rendered text so the contradiction cannot
+        # come back; fails against the pre-fix `fetched: True` shape.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_day_brief(ctx, "2026-09-25", "2026-09-25T10:42:43Z")
+        self._write_fireflies_with_since(ctx, [], since="2026-09-27T15:00:00Z", fetched_at="2026-09-27T14:16:08Z")
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        line = next(l for l in lines if l.startswith("! fireflies "))
+        self.assertIn("coverage gap", line)
+        self.assertNotIn("needs classifying", line)
+        self.assertNotIn("no fetch needed", line)
+
     def test_no_gap_still_advances_the_anchor_within_what_was_covered(self):
         # The mirror case: the snapshot's own window reaches back to (or before) the anchor already
         # on record, so there is no uncovered stretch, and an acknowledgement -- even an empty one

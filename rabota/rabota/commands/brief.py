@@ -246,10 +246,19 @@ def _alert_lines(seq: dict, needs: list[dict] | None) -> list[str]:
     gets a different line naming what is actually true of it — no fetch, no file to write, only
     classification — keyed off that flag rather than the source name, so any future source that
     reuses this shape gets the right words for free.
+
+    An entry with ``gap: True`` (``run_brief``'s coverage-gap alert, DO-761 fix round 2 finding 2)
+    is neither of those: nothing was fetched for the gap stretch, so there is nothing to classify,
+    and the remedy IS another fetch (the next sync will ask for it again, because the anchor held
+    rather than stepping over it) — the opposite of what the ``fetched: True`` line says. Its
+    ``reason`` already states the gap and the remedy in full, so the line is just that reason,
+    without either of the other shape's two clauses.
     """
     lines = [f"! {s} failed — list is partial" for s in seq.get("failed_sources", [])]
     for n in (needs or []):
-        if n.get("fetched"):
+        if n.get("gap"):
+            lines.append(f"! {n['source']} {n['reason']}")
+        elif n.get("fetched"):
             lines.append(f"! {n['source']} needs classifying — {n['reason']}, no fetch needed")
         else:
             # No file named here (DO-751 review): the skill ingests inline with `--stdin`, so
@@ -495,10 +504,15 @@ def _fireflies_coverage(ctx: Context, now: datetime) -> tuple[datetime, dict | N
     for a gap and is trusted as before.
 
     The anchor already on record is read exactly as ``commands.sync.fireflies_since`` reads it —
-    ``read_last_classified``, falling back to ``read_newest_day_brief`` — so the very first
-    acknowledgement a tenant ever makes (no ``fireflies-classified.json`` yet, but a day-scoped
-    ``last-brief.json`` already on disk) is checked for a gap too, rather than being exempted from
-    the check the same way a genuinely first-ever anchor has to be.
+    ``read_last_classified``, falling back to the SAME frozen fallback
+    (``read_or_freeze_fireflies_fallback_anchor``) — so the very first acknowledgement a tenant
+    ever makes (no ``fireflies-classified.json`` yet, but a day-scoped ``last-brief.json`` already
+    on disk) is checked for a gap too, rather than being exempted from the check the same way a
+    genuinely first-ever anchor has to be. Reading the frozen answer here rather than
+    ``read_newest_day_brief`` directly matters for more than consistency: this call can itself be
+    the FIRST reader ever to consult the fallback (an acknowledgement before any sync has run this
+    process), and it must freeze exactly what ``fireflies_since`` would have frozen, not a value
+    that could differ because a newer day-scoped brief has landed since.
     """
     snap = snapshots.read(ctx.state_dir, "fireflies") or {}
     try:
@@ -511,7 +525,7 @@ def _fireflies_coverage(ctx: Context, now: datetime) -> tuple[datetime, dict | N
         window_since = None
     anchor = snapshots.read_last_classified(ctx.state_dir)
     if anchor is None:
-        anchor = snapshots.read_newest_day_brief(ctx.state_dir)
+        anchor = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
     if anchor is not None and window_since is not None and window_since > anchor:
         return anchor, {"since": anchor, "until": window_since}
     if fetched_at is None:
@@ -679,14 +693,15 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     if coverage_gap is not None:
         # The anchor just held rather than stepping over the stretch between `since` and `until`
         # (see `_fireflies_coverage`) -- real, and not otherwise visible anywhere else in `needs`,
-        # since nothing was ever fetched for it to appear as an unclassified item. Reuses the
-        # existing `fetched: True` alert shape (Move 6) rather than inventing a new one: the
-        # remedy is another Fireflies sync, which the very fact that the anchor held already
-        # guarantees will ask for this stretch again.
+        # since nothing was ever fetched for it to appear as an unclassified item. `gap: True`
+        # (fix round 2, finding 2), NOT the `fetched: True` shape: that shape's line asserts
+        # nothing needs classifying and no fetch is needed, and here the opposite of BOTH is true
+        # -- nothing was fetched at all, and the remedy IS another Fireflies sync, which the very
+        # fact that the anchor held already guarantees will ask for this stretch again.
         gap_hours = (coverage_gap["until"] - coverage_gap["since"]).total_seconds() / 3600
         since_str = coverage_gap["since"].strftime(snapshots.FETCHED_AT_FORMAT)
         until_str = coverage_gap["until"].strftime(snapshots.FETCHED_AT_FORMAT)
-        needs.append({"source": "fireflies", "fetched": True,
+        needs.append({"source": "fireflies", "gap": True,
                      "reason": f"coverage gap {gap_hours:.1f}h ({since_str} to {until_str}) — anchor held, will retry next sync"})
 
     if not ctx.dry_run and not acknowledge_fireflies and not text:

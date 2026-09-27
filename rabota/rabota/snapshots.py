@@ -5,7 +5,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rabota import secrets
+from rabota import emit, secrets
 from rabota.store import now
 
 FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -133,3 +133,71 @@ def read_newest_day_brief(state_dir: Path) -> datetime | None:
         if newest is None or generated_at > newest:
             newest = generated_at
     return newest
+
+
+# `<state_dir>/fireflies-bootstrap-anchor.json` (DO-761 fix round 2, finding 1): freezes the FIRST
+# answer `read_newest_day_brief` gives, so a tenant that never sends the classifying
+# acknowledgement back (a bare `rabota --text brief`, or an agent that reads turn 1 and never sends
+# turn 2) does not have its fetch window slide forward one full day for every day a brief is merely
+# shown. `read_newest_day_brief` is recomputed live from whatever the newest day directory is AT
+# CALL TIME -- exactly right the first time nothing has ever been classified, but wrong to keep
+# recomputing on every later call with the same "nothing classified yet" excuse, since the tenant's
+# actual classification state has not moved at all. The invariant this whole change protects --
+# "every item from a meeting after the point Fireflies was last actually classified must still be
+# fetched" -- cannot be satisfied by an anchor that advances on "shown" instead of on an actual
+# classification, so the answer is frozen instead of re-read. Once a real classification exists,
+# `read_last_classified` takes priority over both this and ``read_newest_day_brief`` and this file
+# stops mattering.
+FIREFLIES_BOOTSTRAP_ANCHOR_FILE = "fireflies-bootstrap-anchor.json"
+
+
+def read_fireflies_bootstrap_anchor(state_dir: Path) -> datetime | None:
+    """The anchor frozen by ``read_or_freeze_fireflies_fallback_anchor``, or ``None`` if nothing
+    has been frozen yet.
+
+    Any fault in the file (missing, unreadable, malformed) is treated the same as "not frozen
+    yet" -- same reasoning as ``read_last_classified``.
+    """
+    path = Path(state_dir) / FIREFLIES_BOOTSTRAP_ANCHOR_FILE
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return parse_fetched_at(data["anchor"])
+    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None
+
+
+def _freeze_fireflies_bootstrap_anchor(state_dir: Path, anchor: datetime) -> None:
+    """Persist ``anchor`` as the frozen fallback anchor, once -- a second call is a no-op, so the
+    anchor this protects can only ever be set once per tenant (until a real classification
+    supersedes it as the primary anchor). Written through ``emit.write_file``, same as every other
+    state-dir file this module does not itself guard with its own atomic dance."""
+    path = Path(state_dir) / FIREFLIES_BOOTSTRAP_ANCHOR_FILE
+    if path.exists():
+        return
+    emit.write_file(path, json.dumps({"anchor": anchor.strftime(FETCHED_AT_FORMAT)}))
+
+
+def read_or_freeze_fireflies_fallback_anchor(state_dir: Path, dry_run: bool = False) -> datetime | None:
+    """Fallback #2 for ``commands.sync.fireflies_since``/``commands.brief._fireflies_coverage``,
+    behind ``read_last_classified``: the newest day-scoped brief's ``generated_at`` — frozen the
+    first time an answer is available, rather than recomputed live on every call. See the
+    ``FIREFLIES_BOOTSTRAP_ANCHOR_FILE`` comment above for why a live re-read of
+    ``read_newest_day_brief`` cannot satisfy the classification invariant.
+
+    ``None`` while no day-scoped brief has ever existed (nothing to freeze yet) — the caller then
+    falls back further, to a fixed lookback. The moment one does exist, that answer is frozen for
+    every later call, even once newer day-scoped briefs land, until a real classification record
+    exists and takes over as the primary anchor. ``dry_run`` (matching ``snapshots.write``'s own
+    flag) skips the freeze itself — a dry run must not start a state change a real call would.
+    """
+    frozen = read_fireflies_bootstrap_anchor(state_dir)
+    if frozen is not None:
+        return frozen
+    anchor = read_newest_day_brief(state_dir)
+    if anchor is None:
+        return None
+    if not dry_run:
+        _freeze_fireflies_bootstrap_anchor(state_dir, anchor)
+    return anchor
