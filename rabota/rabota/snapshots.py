@@ -72,30 +72,64 @@ def age_seconds(state_dir: Path, source: str, now_dt: datetime | None = None) ->
     return ((now_dt or datetime.now(timezone.utc)) - fetched).total_seconds()
 
 
-# `<state_dir>/last-brief-shown.json` (DO-746 fix round): the `generated_at` of the last brief
-# actually shown to @zvi, written by `commands.brief.run_brief` at the same point it decides
-# today's day-scoped `last-brief.json` was the screen the reader got. Cross-day, unlike that
-# file, so `commands.sync.fireflies_since` can read it on a Monday morning when nothing under
-# today's (still-empty) day directory exists yet. Deliberately NOT read via a helper defined in
-# `commands/sync.py` itself: that module is one of the two files
+# `<state_dir>/fireflies-classified.json` (DO-746 fix round 2, finding D; `commands.brief`'s
+# `_mark_fireflies_classified` is the only writer): the set of classified item keys, plus
+# ``classified_at`` — the time of the most recent acknowledgement. `commands.sync.fireflies_since`
+# reads `classified_at` (DO-761) as its primary anchor for the fetch window, because "shown" was
+# only ever a proxy for "classified" and a tenant that had never shown a brief (no
+# `last-brief-shown.json`, the marker this replaced) fell all the way back to a fixed window even
+# though a day-scoped `last-brief.json` was on disk the whole time. Deliberately NOT read via a
+# helper defined in `commands/sync.py` itself: that module is one of the two files
 # `tests/test_linear.py`'s static ingestion-boundary scan parses whole, and a subscript read
 # reachable (however unrelated) through that module's shared `ctx` parameter is exactly the shape
 # the scan flags -- keeping the read here, outside both scanned files, sidesteps it rather than
 # fighting the scan's own over-approximation.
-LAST_SHOWN_FILE = "last-brief-shown.json"
+FIREFLIES_CLASSIFIED_FILE = "fireflies-classified.json"
 
 
-def read_last_shown(state_dir: Path) -> datetime | None:
-    """``generated_at`` of the last brief actually shown, or ``None`` if there isn't one yet.
+def read_last_classified(state_dir: Path) -> datetime | None:
+    """``classified_at`` of the most recent Fireflies acknowledgement, or ``None`` if nothing has
+    ever been classified yet.
 
-    Any fault in the file (missing, unreadable, malformed) is treated the same as "never shown" —
-    it is not this function's job to raise over a marker file it does not own.
+    Any fault in the file (missing, unreadable, malformed) is treated the same as "never
+    classified" — it is not this function's job to raise over a marker file it does not own.
     """
-    path = Path(state_dir) / LAST_SHOWN_FILE
+    path = Path(state_dir) / FIREFLIES_CLASSIFIED_FILE
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text())
-        return parse_fetched_at(data["generated_at"])
+        return parse_fetched_at(data["classified_at"])
     except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
         return None
+
+
+def read_newest_day_brief(state_dir: Path) -> datetime | None:
+    """``generated_at`` of the most recent day-scoped ``<day>/last-brief.json`` under ``state_dir``,
+    or ``None`` if none exists.
+
+    Fallback #2 for ``commands.sync.fireflies_since`` (DO-761), behind ``read_last_classified``:
+    a tenant with no classification record yet may still have day-scoped briefs on disk — exactly
+    the live case that motivated this change, where `last-brief-shown.json` did not exist at all
+    but `2025-09-25/last-brief.json` (a real "shown" record) had been sitting there the whole time.
+    Lives here, not in `commands/sync.py`, for the same scan-avoidance reason as
+    ``read_last_classified`` above.
+    """
+    state_dir = Path(state_dir)
+    if not state_dir.is_dir():
+        return None
+    newest = None
+    for entry in state_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        path = entry / "last-brief.json"
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+            generated_at = parse_fetched_at(data["generated_at"])
+        except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+            continue
+        if newest is None or generated_at > newest:
+            newest = generated_at
+    return newest

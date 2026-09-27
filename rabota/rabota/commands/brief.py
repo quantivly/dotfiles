@@ -71,11 +71,14 @@ items not yet classified. ``_alert_lines`` and the skill's step 2 both key off `
 than the source name, so this degrades to the ordinary fetch-needed shape for anything else.
 
 "Not yet classified" is tracked in ``<state_dir>/fireflies-classified.json``
-(``_fireflies_classified_ids`` / ``_mark_fireflies_classified``). ``last-brief-shown.json`` at the
-state-dir root — cross-day, unlike the day-scoped ``last-brief.json`` — is still written at the
-same "shown, not merely computed" gate as before, and ``commands.sync.fireflies_since`` still reads
-it to derive its fetch window from the invariant rather than a fixed number of days. What changed
-in the fix round below is *what* gets marked classified, and *when*.
+(``_fireflies_classified_ids`` / ``_mark_fireflies_classified``), which also stamps a
+``classified_at`` on every acknowledgement (DO-761): ``commands.sync.fireflies_since`` reads that
+timestamp to derive its fetch window from the invariant rather than a fixed number of days. What
+changed in the fix round below is *what* gets marked classified, and *when*; DO-761 changed *what
+`fireflies_since` reads to find that point* — see that module's docstring. ``last-brief-shown.json``
+is no longer written: it existed only to serve that one read, "shown" was always the wrong proxy
+for "classified" (a bare ``rabota --text brief`` marks nothing), and nothing else in this
+codebase reads it — keeping it around would leave two markers whose disagreement nothing detects.
 
 **Fix round 2, finding A (keyed by item, not by transcript).** Fireflies fills a transcript's
 ``action_items`` in over time (the parser's own docstring says so), so keying the classified set on
@@ -143,8 +146,7 @@ STALE_AFTER_MIN = snapshots.STALE_AFTER_MIN    # one definition, in `snapshots`;
 TITLE_MAX = 60
 LINE_MAX = 120
 NEEDS_SOURCES = ("slack", "calendar")    # never fetched by the CLI itself; see module docstring
-LAST_SHOWN_FILE = snapshots.LAST_SHOWN_FILE    # one definition, in `snapshots`; commands.sync reads it for F2
-FIREFLIES_CLASSIFIED_FILE = "fireflies-classified.json"
+FIREFLIES_CLASSIFIED_FILE = snapshots.FIREFLIES_CLASSIFIED_FILE   # one definition, in `snapshots`; commands.sync reads its classified_at for F2/DO-761
 CLASSIFIABLE_SOURCES = ("fireflies",)    # the only source whose handed-out items `--classified` can acknowledge
 
 
@@ -477,14 +479,20 @@ def _write_fireflies_pending(ctx: Context, items: list[dict]) -> None:
     emit.write_file(_fireflies_pending_path(ctx), json.dumps({"items": items}))
 
 
-def _mark_fireflies_classified(ctx: Context, items: list[dict]) -> None:
-    """Record every Fireflies item in ``items`` as classified.
+def _mark_fireflies_classified(ctx: Context, items: list[dict], now: datetime) -> None:
+    """Record every Fireflies item in ``items`` as classified, and stamp this acknowledgement's
+    ``classified_at`` (DO-761).
 
     ``items`` is exactly what an acknowledging call read from ``fireflies-pending.json`` (finding
     D) — never recomputed from the current snapshot, or a meeting landing mid-turn would be marked
     without ever being shown. The stored set is bounded to what the current snapshot still holds
     before the new items are unioned in, so it cannot grow past one fetch window's worth of items
     (finding A: this is now a set of item keys, not transcript ids).
+
+    ``classified_at`` is written unconditionally on every call to this function, even when
+    ``items`` is empty: an acknowledgement with nothing pending still confirms nothing sat
+    unclassified as of ``now``, and ``commands.sync.fireflies_since`` reads exactly this timestamp
+    as its fetch-window anchor.
     """
     transcripts = _fireflies_transcripts(ctx) or []
     current_keys = {_fireflies_item_key(t["id"], ai)
@@ -492,7 +500,8 @@ def _mark_fireflies_classified(ctx: Context, items: list[dict]) -> None:
                     for ai in (t.get("action_items") or [])}
     ids = _fireflies_classified_ids(ctx) & current_keys
     ids |= {_fireflies_item_key(i["transcript_id"], i) for i in items if i.get("transcript_id") is not None}
-    emit.write_file(_fireflies_classified_path(ctx), json.dumps({"ids": sorted(ids)}))
+    emit.write_file(_fireflies_classified_path(ctx),
+                    json.dumps({"ids": sorted(ids), "classified_at": now.strftime(snapshots.FETCHED_AT_FORMAT)}))
 
 
 def compute_needs(ctx: Context, now: datetime) -> list[dict]:
@@ -615,7 +624,7 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     # so a meeting landing between turn 1 and turn 2 cannot be marked by an ack that never saw it.
     acknowledge_fireflies = bool(classified) and "fireflies" in classified and not ctx.dry_run
     if acknowledge_fireflies:
-        _mark_fireflies_classified(ctx, _read_fireflies_pending(ctx))
+        _mark_fireflies_classified(ctx, _read_fireflies_pending(ctx), now)
         _write_fireflies_pending(ctx, [])
 
     needs = compute_needs(ctx, now)     # before any write: a half-rewritten brief.md is worse than none
@@ -657,15 +666,13 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
     # later call re-ran the whole two-round-trip cycle instead of settling to a delta.
     if text or not needs:
         emit.write_file(last_path, json.dumps({"keys": [i["key"] for i in seq["items"]], "generated_at": seq["generated_at"]}))
-        # Cross-day marker (Move 6): `commands.sync.fireflies_since` reads this to derive its fetch
-        # window from the invariant instead of a fixed number of days (F2), and it needs to survive
-        # a day boundary where the day-scoped `last_path` above does not exist yet. Written at the
-        # exact same "this WAS shown" gate as `last_path`, for the same reason.
-        emit.write_file(ctx.state_dir / LAST_SHOWN_FILE, json.dumps({"generated_at": seq["generated_at"]}))
-        # Fireflies classification is NOT recorded here any more (fix round 2, finding D): being
-        # shown used to be the proxy for "turn 2 actually classified these", but a bare
-        # `rabota --text brief` is shown too, and never classified anything. Marking now happens
-        # only via the explicit `classified` acknowledgement above.
+        # `last-brief-shown.json` (the cross-day "shown" marker, Move 6) is gone as of DO-761:
+        # `commands.sync.fireflies_since` now reads `fireflies-classified.json`'s `classified_at`
+        # (or, absent that, the newest day-scoped `last-brief.json` across all days) instead, since
+        # "shown" was always the wrong proxy for "classified" -- a bare `rabota --text brief`
+        # reaches this branch too and classifies nothing. Fireflies classification is NOT recorded
+        # here either, for the same reason (fix round 2, finding D): marking happens only via the
+        # explicit `classified` acknowledgement above.
     if text:
         return lines
     return {"lines": lines, "brief_path": str(brief_path), "needs": needs}

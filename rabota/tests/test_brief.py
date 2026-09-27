@@ -858,18 +858,16 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
         self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
 
-    def test_last_brief_shown_marker_is_written_cross_day_matching_the_sequence(self):
-        # `commands.sync.fireflies_since` reads this file to derive its fetch window (F2); it must
-        # exist at the state-dir root, not nested under today's day directory, so it survives a day
-        # boundary the way the day-scoped `last-brief.json` cannot.
+    def test_a_shown_brief_no_longer_writes_the_retired_last_shown_marker(self):
+        # DO-761: `last-brief-shown.json` is gone -- its only reader was
+        # `commands.sync.fireflies_since`, which now reads `fireflies-classified.json`'s
+        # `classified_at` (or the newest day-scoped `last-brief.json`) instead. A brief being SHOWN
+        # must not resurrect the retired file.
         ctx = self.ctx()
         gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
         self._fresh_needs_sources(ctx)
         brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin)
-        day_seq = json.loads((ctx.state_dir / "2026-09-16" / "sequence.json").read_text())
-        marker = ctx.state_dir / brief.LAST_SHOWN_FILE
-        self.assertTrue(marker.exists())
-        self.assertEqual(json.loads(marker.read_text())["generated_at"], day_seq["generated_at"])
+        self.assertFalse((ctx.state_dir / "last-brief-shown.json").exists())
 
     def test_the_acknowledging_call_does_not_say_its_own_marking_still_needs_classifying(self):
         # Finding B: `terminal_lines` used to build the `! fireflies needs classifying` line from
@@ -886,6 +884,20 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         self.assertFalse(any("needs classifying" in l for l in lines), lines)
         self.assertTrue(json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())["ids"])
 
+    def test_acknowledging_stamps_classified_at_for_the_fetch_window_to_read(self):
+        # DO-761: `commands.sync.fireflies_since` reads exactly this timestamp as its primary
+        # fetch-window anchor. Revert `_mark_fireflies_classified` to drop `classified_at` to see
+        # this row fail.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_fireflies(ctx, [{"id": "t1", "title": "1:1", "date": "2026-09-16",
+                                     "action_items": [{"speaker": "Zvi", "item": "Do the thing", "timestamp": "01:00"}]}])
+        brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        data = json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())
+        self.assertEqual(data["classified_at"], self.NOW.strftime(snapshots.FETCHED_AT_FORMAT))
+
     def test_classified_without_text_is_a_usage_error_and_marks_nothing(self):
         # Review round 4, F1: a JSON call carrying the acknowledgement would mark items classified
         # (and record the brief as shown) though nothing was printed.
@@ -898,7 +910,6 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         with self.assertRaises(errors.Usage):
             brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
         self.assertFalse((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).exists())
-        self.assertFalse((ctx.state_dir / brief.LAST_SHOWN_FILE).exists())
 
     def test_an_unknown_classified_source_is_a_usage_error(self):
         # Review round 4, F2: `Fireflies` or `slack` used to parse and acknowledge nothing, silently.
