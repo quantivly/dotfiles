@@ -294,9 +294,18 @@ def lookup_tracked(ctx, keys: list[str], now: datetime | None = None, lin=None) 
       "completed_at"}`` -- DO-754: a Linear identifier the open-issue snapshot doesn't carry
       (``sync`` fetches only ``assigned_open``/``created_open``, both excluding
       ``dead_state_types``) but that Linear, checked with one batched read-only query (below),
-      still has on file. **Never treat this as absence** -- for `promised-untracked` it means
-      "already done" (or otherwise resolved), not "untracked"; see `reconcile.md` for what it means
-      for the other classes.
+      still has on file, filed under one of the tenant's own ``dead_state_types``. **Never treat
+      this as absence** -- for `promised-untracked` it means "already done" (or otherwise
+      resolved), not "untracked"; see `reconcile.md` for what it means for the other classes.
+      ``completed_at`` can itself be ``None`` (a cancelled issue is not always completed-stamped)
+      -- a caller renders it only when set, never as a bare "completed None".
+    - ``{"key", "status": "found_open", "kind": "linear", "state": {"name", "type"}}`` -- DO-764:
+      the same batched query finds the issue, but its state's ``type`` is *not* one of the
+      tenant's ``dead_state_types`` -- it is simply outside @zvi's own snapshot (``assigned_open``
+      ∪ ``created_open``), most often because it belongs to a colleague. **Never treat this as
+      `found_closed`** -- the commitment behind it is not done; that conflation is exactly the
+      false "already resolved" DO-764 was filed to stop. No ``completed_at`` is carried: a live
+      issue is never completed.
     - ``{"key", "status": "unknown", "reason"}`` -- the source cannot be relied on (unsynced,
       unreadable, the tenant does not use it, or -- DO-754 -- the batched Linear lookup below could
       not be made or failed), so absence here proves nothing. **Never conflate this with
@@ -374,6 +383,13 @@ def _resolve_closed(ctx, results: list[dict], canon_of: dict, lin) -> None:
     request that fails outright, never reaches the wire and downgrades every pending key to
     ``unknown`` instead -- a failed or refused call proves nothing about whether the issue exists,
     so it must never read as the ``not_found`` `promised-untracked` takes as proof of absence.
+
+    DO-764: a key this call finds is not always closed -- ``sync`` only fetches issues
+    assigned to or created by @zvi, so a colleague's live issue is just as absent from the
+    snapshot as a genuinely closed one, and the reply already carries what tells them apart
+    (``Q_BY_IDENTIFIERS`` selects ``state { name type }``). The state's own ``type`` against the
+    tenant's ``dead_state_types`` is the split: a dead type keeps ``found_closed``; anything else
+    is ``found_open`` -- real, tracked, and not done.
     """
     pending = [r for r in results if r["status"] == "not_found" and r.get("kind") == "linear"]
     if not pending:
@@ -392,11 +408,15 @@ def _resolve_closed(ctx, results: list[dict], canon_of: dict, lin) -> None:
             r["status"], r["reason"] = "unknown", f"Linear lookup failed: {msg}"
             del r["kind"]
         return
+    dead_state_types = ctx.tenant.linear.dead_state_types
     for r in pending:
         rec = found.get(canon_of[r["key"]])
         if rec:
-            r["status"] = "found_closed"
+            if (rec["state"] or {}).get("type") in dead_state_types:
+                r["status"] = "found_closed"
+                r["completed_at"] = rec.get("completedAt")
+            else:
+                r["status"] = "found_open"
             r["state"] = rec["state"]
-            r["completed_at"] = rec.get("completedAt")
             if rec.get("identifier") != canon_of[r["key"]]:
                 r["moved_to"] = rec["identifier"]   # the same issue, now under another team's key

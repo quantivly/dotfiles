@@ -64,6 +64,18 @@ class RunTrackedTests(unittest.TestCase):
         self.assertEqual(r["state"]["name"], "Done")
         self.assertEqual(r["completed_at"], "2026-09-20T00:00:00Z")
 
+    def test_run_tracked_reports_a_live_issue_outside_the_snapshot_as_found_open(self):
+        # DO-764: POPS-5132 belongs to a colleague and is `In Progress` (state type `started`) --
+        # absent from @zvi's own snapshot but not closed, so it must never read `found_closed`.
+        snapshots.write(self.ctx.state_dir, "linear", {"ok": True, "error": None, "viewer": {}, "issues": [],
+                                                        "notifications": []})
+        lin = FakeLinLookup({"POPS-5132": {"state": {"name": "In Progress", "type": "started"}}})
+        out = tracked_cmd.run_tracked(self.ctx, ["POPS-5132"], lin=lin)
+        r = out["results"][0]
+        self.assertEqual(r["status"], "found_open")
+        self.assertEqual(r["state"]["name"], "In Progress")
+        self.assertNotIn("completed_at", r)
+
     def test_run_tracked_reports_an_unresolvable_check_as_unknown_not_not_found(self):
         # No `lin` injected and the fixture tenant's LINEAR_API_KEY is unset in this test's env
         # (`_ctx` below) -- `LinearClient.from_context` refuses before any request is made, and
@@ -87,6 +99,16 @@ class RunTrackedTests(unittest.TestCase):
                                          "state": {"name": "Done", "type": "completed"}, "completed_at": "d"})
         self.assertIn("found closed", lines)
         self.assertIn("Done", lines)
+        # DO-764: a cancelled issue with no `completed_at` must never print a bare "None".
+        lines = tracked_cmd._text_line({"key": "HUB-9", "status": "found_closed", "kind": "linear",
+                                         "state": {"name": "Canceled", "type": "canceled"}, "completed_at": None})
+        self.assertIn("found closed", lines)
+        self.assertNotIn("None", lines)
+        lines = tracked_cmd._text_line({"key": "POPS-5132", "status": "found_open", "kind": "linear",
+                                         "state": {"name": "In Progress", "type": "started"}})
+        self.assertIn("found open", lines)
+        self.assertIn("In Progress", lines)
+        self.assertNotIn("None", lines)
         lines = tracked_cmd._text_line({"key": "HUB-9", "status": "unknown", "reason": "never synced"})
         self.assertIn("never synced", lines)
         lines = tracked_cmd._text_line({"key": "C0A2FRLPA58", "status": "not_applicable"})

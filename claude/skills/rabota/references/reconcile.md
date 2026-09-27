@@ -38,12 +38,15 @@ Each key in the reply's `results` is exactly one of:
   weaker evidence, so weigh other signals (the commitment's own wording, a linked URL) before
   relying on it alone.
 - `{"key", "status": "found_closed", "kind": "linear", "state": {"name", "type"},
-  "completed_at"}` — the issue is real; it is just filed under a state `sync` doesn't fetch
-  (closed, cancelled, or a duplicate). **Never treat this as `promised-untracked`** — it means the
-  commitment is already done (or otherwise resolved): say so, citing `state.name` and
-  `completed_at`, the same way `tracked-satisfied`/`spoken-already-done` cite their evidence. For
-  `state-contradiction`/`stale-blocked`, a `found_closed` result is itself the contradiction worth
-  reporting — the tracked side moved on and the commitment hasn't caught up.
+  "completed_at"}` — real, and its state's `type` is one of the tenant's `dead_state_types`
+  (completed, cancelled, or a duplicate). **Never treat this as `promised-untracked`** — already
+  done (or resolved): say so, citing `state.name` and `completed_at` when set (a cancellation
+  isn't always completed-stamped — never print a bare "None"). For
+  `state-contradiction`/`stale-blocked`, `found_closed` is itself the contradiction worth
+  reporting.
+- `{"key", "status": "found_open", "kind": "linear", "state": {"name", "type"}}` — DO-764: found,
+  state `type` *not* in `dead_state_types` — outside @zvi's snapshot (often a colleague's issue).
+  **Never treat this as `found_closed`**: not done; use like `found`, never as absence proof.
 - `{"key", "status": "unknown", "reason"}` — the source cannot be relied on (unsynced,
   unreadable, the tenant does not use it, or the batched Linear check below could not be made or
   failed). **Never treat this as `not_found`** — that conflation is golden `g06`'s bug one level
@@ -61,10 +64,10 @@ for when nothing you asked for resolved to either side at all.
 
 **A Linear `not_found` already means "checked Linear itself, not just the snapshot" (DO-754).**
 When one or more keys come back `not_found` and classified `linear`, `rabota tracked` has already
-made one batched, read-only Linear query naming exactly those keys, so a closed issue reads
-`found_closed` rather than `not_found` — `promised-untracked` requires a true `not_found` for its
-Linear evidence, never a `found_closed`. A `not_found`/`found_closed` split for GitHub does not
-exist and is not planned: see above for why `github`'s `not_found` stays weaker evidence.
+made one batched, read-only Linear query naming exactly those keys: closed reads `found_closed`, a
+colleague's live issue reads `found_open` (DO-764), only true absence stays `not_found` —
+`promised-untracked` needs that true `not_found`, never a `found_*`. GitHub has no such split: see
+above for why its `not_found` stays weaker evidence.
 
 **`state-contradiction`'s "no PR exists" case (golden `g06`/`g07`, DO-735).** Each Linear issue's
 `pr_links` is `null` (snapshot predates attachment sync — treat as unknown, never as "no PR"),

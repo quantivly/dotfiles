@@ -25,7 +25,10 @@ def _text_line(r: dict) -> str:
             return f"{r['key']}: found (linear) — {rec['state']} · {rec['priority_label']}"
         return f"{r['key']}: found (github, {rec['kind']})"
     if r["status"] == "found_closed":
-        return f"{r['key']}: found closed (linear) — {r['state']['name']} · completed {r['completed_at']}"
+        line = f"{r['key']}: found closed (linear) — {r['state']['name']}"
+        return f"{line} · completed {r['completed_at']}" if r.get("completed_at") else line
+    if r["status"] == "found_open":
+        return f"{r['key']}: found open (linear, outside snapshot) — {r['state']['name']}"
     if r["status"] == "not_found":
         if r["kind"] == "github":
             return f"{r['key']}: not found — not among own open or recently merged PRs"

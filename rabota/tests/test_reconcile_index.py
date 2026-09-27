@@ -628,6 +628,18 @@ class LookupTrackedTests(unittest.TestCase):
         self.assertEqual(r["completed_at"], "2026-09-01T00:00:00Z")
         self.assertEqual(lin.calls, [["HUB-9999"]])
 
+    def test_a_not_found_linear_key_resolves_open_when_its_state_is_not_dead(self):
+        # DO-764: POPS-5132 is `In Progress` (state type `started`), a colleague's issue outside
+        # @zvi's own snapshot -- not a closed one. The batched query still finds it, but its state
+        # type isn't in `dead_state_types`, so it must read `found_open`, never `found_closed`.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        lin = FakeLinLookup({"POPS-5132": {"state": {"name": "In Progress", "type": "started"}}})
+        out = reconcile.lookup_tracked(self.ctx, ["POPS-5132"], NOW, lin=lin)
+        r = out["results"][0]
+        self.assertEqual(r["status"], "found_open")
+        self.assertEqual(r["state"], {"name": "In Progress", "type": "started"})
+        self.assertNotIn("completed_at", r)
+
     def test_the_batched_check_asks_for_every_pending_key_in_one_call(self):
         snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
         lin = FakeLinLookup({"HUB-9998": {"state": {"name": "Canceled", "type": "canceled"},
@@ -637,6 +649,17 @@ class LookupTrackedTests(unittest.TestCase):
         self.assertEqual(by_key["HUB-9997"]["status"], "not_found")
         self.assertEqual(by_key["HUB-9998"]["status"], "found_closed")
         self.assertEqual(lin.calls, [["HUB-9997", "HUB-9998"]])   # ONE call, both keys
+
+    def test_a_cancelled_issue_with_no_completed_at_still_reads_found_closed(self):
+        # A cancelled state type isn't always completed-stamped; `found_closed` must still hold
+        # (`type` is in `dead_state_types`) with `completed_at` left `None`, not defaulted away.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        lin = FakeLinLookup({"HUB-9998": {"state": {"name": "Canceled", "type": "canceled"},
+                                          "completedAt": None}})
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-9998"], NOW, lin=lin)
+        r = out["results"][0]
+        self.assertEqual(r["status"], "found_closed")
+        self.assertIsNone(r["completed_at"])
 
     def test_the_batched_check_never_runs_when_nothing_is_missing(self):
         snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
