@@ -412,11 +412,17 @@ def _resolve_closed(ctx, results: list[dict], canon_of: dict, lin) -> None:
     for r in pending:
         rec = found.get(canon_of[r["key"]])
         if rec:
-            if (rec["state"] or {}).get("type") in dead_state_types:
+            # DO-764 review F1/F2: a `state` that is missing or `None` is not proof of anything --
+            # normalize it ONCE, here, to a well-formed dict, so nothing downstream (this
+            # classification or `tracked._text_line`) can crash or KeyError on it. `type: None`
+            # is never in `dead_state_types`, so an unreadable state reads `found_open` --
+            # unclassifiable is not the same claim as "dead", and the safer direction is "live".
+            state = rec.get("state") or {"name": "unknown", "type": None}
+            if state.get("type") in dead_state_types:
                 r["status"] = "found_closed"
                 r["completed_at"] = rec.get("completedAt")
             else:
                 r["status"] = "found_open"
-            r["state"] = rec["state"]
+            r["state"] = state
             if rec.get("identifier") != canon_of[r["key"]]:
                 r["moved_to"] = rec["identifier"]   # the same issue, now under another team's key

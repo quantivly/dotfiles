@@ -118,6 +118,15 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
                 f"defect, and a losing copy is still the one somebody edits")
         machines[m] = Machine(name=m, **v)
         machines[m].profile = seats_by_machine.get(m)
+    linear = _dc(LinearRules, d.get("linear", {}))
+    if not linear.dead_state_types:
+        # DO-764 review F3: an empty list is honoured verbatim with no check anywhere downstream,
+        # and reconcile.py's found_open/found_closed split, sync.py and inbox/buckets.py all key
+        # off this one field -- a tenant that declares no dead state types can never read anything
+        # as closed, flipping "resolved" to read as "live" in three subsystems at once.
+        raise errors.Usage(
+            f"{path or f'tenants/{name}.toml'}: [linear] dead_state_types is empty -- a tenant "
+            f"needs at least one dead state type, or every issue reads as still open")
     return Tenant(
         name=name, root=_p(d["root"]), state_dir=_p(d["state_dir"]),
         gh_config_dir=_p(d.get("gh_config_dir")), gh_login=d.get("gh_login"),
@@ -126,7 +135,7 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
         slack_user_id=d.get("slack_user_id"),
         sources=d.get("sources", ["github"]),
         review_routing=_dc(ReviewRouting, d.get("review_routing", {})),
-        linear=_dc(LinearRules, d.get("linear", {})),
+        linear=linear,
         budget=_dc(BudgetThresholds, d.get("budget", {})),
         lanes=_dc(LaneDefaults, d.get("lanes", {})),
         machines=machines,

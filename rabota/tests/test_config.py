@@ -37,3 +37,10 @@ class ConfigTests(unittest.TestCase):
     def test_paths_are_expanded(self):
         self.assertEqual(self.cfg.tenants["quantivly"].root, Path.home() / "quantivly")
         self.assertEqual(self.cfg.tenants["personal"].excludes, [Path.home() / "Projects" / "nanoclaw"])
+
+    def test_empty_dead_state_types_is_a_usage_error(self):
+        # DO-764 review F3: an explicit empty list used to be honoured verbatim with no
+        # validation, silently flipping reconcile.py's found_open/found_closed split (and sync.py's
+        # and inbox/buckets.py's notion of "closed") the wrong way for the whole tenant.
+        with self.assertRaises(errors.Usage):
+            config._tenant("t", {"root": "~/t", "state_dir": "~/t/s", "linear": {"dead_state_types": []}})

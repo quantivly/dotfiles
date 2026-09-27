@@ -640,6 +640,31 @@ class LookupTrackedTests(unittest.TestCase):
         self.assertEqual(r["state"], {"name": "In Progress", "type": "started"})
         self.assertNotIn("completed_at", r)
 
+    def test_a_null_state_reads_found_open_with_a_placeholder_instead_of_a_bare_none(self):
+        # DO-764 review F1: `_resolve_closed` used to treat a Linear `state: None` as "not dead"
+        # (classifying `found_open`) and then store the bare `None` -- crashing
+        # `tracked._text_line`'s unguarded `r['state']['name']`. A `None` state is normalized to a
+        # placeholder dict here, so it can never surface unguarded downstream.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        lin = FakeLinLookup({"HUB-9998": {"state": None, "completedAt": None}})
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-9998"], NOW, lin=lin)
+        r = out["results"][0]
+        self.assertEqual(r["status"], "found_open")
+        self.assertEqual(r["state"], {"name": "unknown", "type": None})
+
+    def test_a_record_with_no_state_key_at_all_reads_found_open_not_a_keyerror(self):
+        # DO-764 review F2: a found record with no `state` key at all used to raise an uncaught
+        # `KeyError` from this per-record loop -- outside the try/except whose docstring promises
+        # "unknown, never not_found". `LinearClient.find_by_identifiers` cannot currently produce
+        # this shape (Linear's schema guarantees `Issue.state` is non-null), but a test double or
+        # a future connector might.
+        snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
+        lin = FakeLinLookup({"HUB-9998": {"completedAt": None}})
+        out = reconcile.lookup_tracked(self.ctx, ["HUB-9998"], NOW, lin=lin)
+        r = out["results"][0]
+        self.assertEqual(r["status"], "found_open")
+        self.assertEqual(r["state"], {"name": "unknown", "type": None})
+
     def test_the_batched_check_asks_for_every_pending_key_in_one_call(self):
         snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
         lin = FakeLinLookup({"HUB-9998": {"state": {"name": "Canceled", "type": "canceled"},
@@ -650,16 +675,21 @@ class LookupTrackedTests(unittest.TestCase):
         self.assertEqual(by_key["HUB-9998"]["status"], "found_closed")
         self.assertEqual(lin.calls, [["HUB-9997", "HUB-9998"]])   # ONE call, both keys
 
-    def test_a_cancelled_issue_with_no_completed_at_still_reads_found_closed(self):
-        # A cancelled state type isn't always completed-stamped; `found_closed` must still hold
-        # (`type` is in `dead_state_types`) with `completed_at` left `None`, not defaulted away.
+    def test_completed_at_is_gated_by_classification_not_set_unconditionally(self):
+        # DO-764 review F4: a bare "found_closed + completed_at is None" row (for a cancelled,
+        # never-completed-stamped issue) passes unchanged against the pre-DO-764 code too, which
+        # always set `status = "found_closed"` and always did `completed_at = rec.get("completedAt")`
+        # -- so it pins nothing this PR actually changed. What IS new: `completed_at` is only ever
+        # read when the state's own `type` lands in `dead_state_types`. A stale `completedAt` left
+        # on an issue whose current type is NOT dead (e.g. reopened) must never surface -- proof
+        # that classification gates the field, rather than the field always being copied across.
         snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))
-        lin = FakeLinLookup({"HUB-9998": {"state": {"name": "Canceled", "type": "canceled"},
-                                          "completedAt": None}})
+        lin = FakeLinLookup({"HUB-9998": {"state": {"name": "In Progress", "type": "started"},
+                                          "completedAt": "2026-01-01T00:00:00Z"}})
         out = reconcile.lookup_tracked(self.ctx, ["HUB-9998"], NOW, lin=lin)
         r = out["results"][0]
-        self.assertEqual(r["status"], "found_closed")
-        self.assertIsNone(r["completed_at"])
+        self.assertEqual(r["status"], "found_open")
+        self.assertNotIn("completed_at", r)
 
     def test_the_batched_check_never_runs_when_nothing_is_missing(self):
         snapshots.write(self.ctx.state_dir, "linear", dict(LINEAR_SNAP))

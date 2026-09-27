@@ -35,8 +35,7 @@ Each key in the reply's `results` is exactly one of:
   the last 30 days, so a PR merged longer ago, merged by someone else, or closed without merging
   reads `not_found` too — a known gap, not proof the PR never existed. This is what
   `promised-untracked` needs for `linear`: proof of absence, not silence — for `github` it is
-  weaker evidence, so weigh other signals (the commitment's own wording, a linked URL) before
-  relying on it alone.
+  weaker evidence, so weigh other signals (wording, a linked URL).
 - `{"key", "status": "found_closed", "kind": "linear", "state": {"name", "type"},
   "completed_at"}` — real, and its state's `type` is one of the tenant's `dead_state_types`
   (completed, cancelled, or a duplicate). **Never treat this as `promised-untracked`** — already
@@ -75,8 +74,8 @@ above for why its `not_found` stays weaker evidence.
 `"merged"` when `github.json`'s `own_prs`/`merged_recent` confirms it, else `"unknown"` — never a
 live cross-org GitHub search; `title` is that PR's title, carried along from the same match, or
 `null` when the state is still `"unknown"`). **`key` can never be the g07 signal**: it is always
-`owner/repo#n`, never a Linear identifier, so it cannot "name a different issue" — a non-empty
-`pr_links` whose `key` is a real PR is unremarkable on its own. The actual signal is `title`: a
+`owner/repo#n`, never a Linear identifier, so it cannot "name a different issue". The actual
+signal is `title`: a
 `pr_links` entry whose title reads as belonging to a different piece of work than the issue it's
 attached to (golden `g07` — HUB-5812's one attachment resolves to a PR titled `HUB-5693`, not
 HUB-5812).
