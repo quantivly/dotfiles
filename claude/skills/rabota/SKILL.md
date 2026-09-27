@@ -58,9 +58,12 @@ written, so the fetch you just landed is never silently skipped (DO-738).
    - **Fetch every `needs` source in ONE turn, as parallel tool calls** — the Slack search and
      the Calendar `list_events` are independent of each other, so issue both together rather
      than one per turn. An entry with `fetched: true` (fireflies) already carries its
-     `items` — classify them, no fetch and no ingest. Every other entry: fetch exactly its
-     `query` (e.g. Slack `to:me after:…`, Calendar free blocks for today). Do not retry more
-     than once; never drop a failed source silently.
+     `items` — classify them, no fetch and no ingest. An entry with `gap: true` (fireflies
+     coverage gap, DO-761) has neither `items` nor `query` — there is nothing to fetch or
+     classify this turn; its `reason` already states the gap and the remedy in full (another
+     Fireflies sync, not something this turn can do), so just carry its text into the printed
+     brief. Every other entry: fetch exactly its `query` (e.g. Slack `to:me after:…`, Calendar
+     free blocks for today). Do not retry more than once; never drop a failed source silently.
    - **One** ingest, no files: `rabota ingest --stdin <<'RABOTA_EOF'`, then ONE line of compact
      JSON (every newline inside a value escaped as `\n`) keyed by source, `{"slack":
      {"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}, "calendar": {...}}`

@@ -169,14 +169,32 @@ def read_fireflies_bootstrap_anchor(state_dir: Path) -> datetime | None:
 
 
 def _freeze_fireflies_bootstrap_anchor(state_dir: Path, anchor: datetime) -> None:
-    """Persist ``anchor`` as the frozen fallback anchor, once -- a second call is a no-op, so the
-    anchor this protects can only ever be set once per tenant (until a real classification
-    supersedes it as the primary anchor). Written through ``emit.write_file``, same as every other
-    state-dir file this module does not itself guard with its own atomic dance."""
-    path = Path(state_dir) / FIREFLIES_BOOTSTRAP_ANCHOR_FILE
-    if path.exists():
+    """Persist ``anchor`` as the frozen fallback anchor, once a VALID one is not already on disk --
+    a second call once a good anchor is frozen is a no-op, so the anchor this protects can only
+    ever be set once per tenant (until a real classification supersedes it as the primary anchor).
+
+    Review finding 2 (DO-761 fix round 3): the guard used to be ``path.exists()`` -- existence,
+    not validity -- so a corrupt file (a bad write, or a process killed mid-write) could never be
+    replaced: every later call kept re-deriving a live answer it could never persist, silently
+    reconstructing the day-by-day slide this whole mechanism exists to kill. Guarding on
+    ``read_fireflies_bootstrap_anchor`` instead means a corrupt file reads as "nothing frozen yet",
+    same as a missing one, and heals itself the next time anything asks.
+
+    Review finding 1 (DO-761 fix round 3): the write itself is wrapped, because every real caller
+    of ``read_or_freeze_fireflies_fallback_anchor`` -- ``sync.fireflies_since`` on every real sync
+    tick, ``brief._fireflies_coverage`` on every classifying acknowledgement -- sits on a path
+    built to degrade one source, never to crash the whole call on it (``run_sync``'s own docstring:
+    "the ones that succeed are written even when a later one fails"). A read-only state dir, a full
+    disk or a permissions fault must not turn this opportunistic persist, tucked inside what every
+    caller treats as a read, into an unhandled ``OSError`` that takes down Linear and GitHub too.
+    """
+    if read_fireflies_bootstrap_anchor(state_dir) is not None:
         return
-    emit.write_file(path, json.dumps({"anchor": anchor.strftime(FETCHED_AT_FORMAT)}))
+    path = Path(state_dir) / FIREFLIES_BOOTSTRAP_ANCHOR_FILE
+    try:
+        emit.write_file(path, json.dumps({"anchor": anchor.strftime(FETCHED_AT_FORMAT)}))
+    except OSError:
+        pass    # best-effort: the caller already has `anchor` to answer with this call either way
 
 
 def read_or_freeze_fireflies_fallback_anchor(state_dir: Path, dry_run: bool = False) -> datetime | None:

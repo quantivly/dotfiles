@@ -132,12 +132,13 @@ what stops the real ``brief`` from printing anything at all.
 """
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rabota import cli, emit, errors, reconcile, snapshots
 from rabota.commands import preflight as preflight_cmd
 from rabota.commands import rank as rank_cmd
+from rabota.commands import sync as sync_cmd
 from rabota.commands.rank import run_rank
 from rabota.context import Context
 
@@ -252,7 +253,10 @@ def _alert_lines(seq: dict, needs: list[dict] | None) -> list[str]:
     and the remedy IS another fetch (the next sync will ask for it again, because the anchor held
     rather than stepping over it) — the opposite of what the ``fetched: True`` line says. Its
     ``reason`` already states the gap and the remedy in full, so the line is just that reason,
-    without either of the other shape's two clauses.
+    without either of the other shape's two clauses. An entry ALSO carrying ``permanent: True``
+    (fix round 3, finding 3) is the one case where that remedy is false — the anchor already
+    advanced past a stretch too old to ever retry — and its ``reason`` says that instead; the
+    line itself needs no separate branch, since the reason text already carries the distinction.
     """
     lines = [f"! {s} failed — list is partial" for s in seq.get("failed_sources", [])]
     for n in (needs or []):
@@ -513,6 +517,31 @@ def _fireflies_coverage(ctx: Context, now: datetime) -> tuple[datetime, dict | N
     the FIRST reader ever to consult the fallback (an acknowledgement before any sync has run this
     process), and it must freeze exactly what ``fireflies_since`` would have frozen, not a value
     that could differ because a newer day-scoped brief has landed since.
+
+    **Review finding 3 (DO-761 fix round 3): a held anchor past ``FIREFLIES_LOOKBACK_MAX_DAYS`` is
+    never allowed to hold forever.** ``fireflies_since``'s ``since`` is ``max(anchor - margin,
+    earliest)`` where ``earliest = now - FIREFLIES_LOOKBACK_MAX_DAYS`` moves with ``now`` while a
+    held ``anchor`` does not -- so the ONLY way ``window_since`` (this snapshot's own fetch
+    window's ``since``) can ever exceed ``anchor`` at all is for ``anchor`` to already be more
+    than ``FIREFLIES_LOOKBACK_MAX_DAYS`` stale (see the arithmetic: whenever ``anchor`` is still
+    within that bound, ``anchor - margin`` is the larger term and ``window_since <= anchor -
+    margin < anchor``, so no gap is even possible). Once that bound is passed, HOLDING the anchor
+    can never let a later cycle catch back up to it -- ``earliest`` only recedes further from
+    ``anchor`` as ``now`` advances -- so holding here (as the ordinary gap branch below does)
+    would re-detect the same permanent condition every subsequent cycle too, advancing the anchor
+    by only one day's worth each time and alerting forever without ever closing the gap, because
+    the SAME ``FIREFLIES_LOOKBACK_MAX_DAYS`` bound that made it permanent keeps reopening it one
+    day behind ``now``. So the anchor instead advances all the way to what THIS window's fetch
+    actually completed (``fetched_at``, exactly the no-gap path's own answer) rather than merely
+    to where the window started (``window_since``) -- the stretch between ``anchor`` and
+    ``window_since`` is the one truly lost piece (never asked for by any fetch, ever), but
+    everything from ``window_since`` to ``fetched_at`` WAS fetched by this very sync and is exactly
+    as covered as any ordinary cycle's answer, so there is no reason to also hold there. This is
+    what makes it a single alert instead of a daily one: the anchor coming out of this call is
+    fresh (this cycle's own fetch time), so the very next cycle is back in the ordinary,
+    gap-free branch. The gap returned is marked ``"permanent"`` so the caller can tell a reader
+    plainly that the ``anchor``-to-``window_since`` stretch is gone for good, rather than promise a
+    retry that cannot succeed.
     """
     snap = snapshots.read(ctx.state_dir, "fireflies") or {}
     try:
@@ -527,6 +556,9 @@ def _fireflies_coverage(ctx: Context, now: datetime) -> tuple[datetime, dict | N
     if anchor is None:
         anchor = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
     if anchor is not None and window_since is not None and window_since > anchor:
+        if now - anchor > timedelta(days=sync_cmd.FIREFLIES_LOOKBACK_MAX_DAYS):
+            coverage = min(fetched_at, now) if fetched_at is not None else window_since
+            return coverage, {"since": anchor, "until": window_since, "permanent": True}
         return anchor, {"since": anchor, "until": window_since}
     if fetched_at is None:
         return anchor or now, None
@@ -701,8 +733,18 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
         gap_hours = (coverage_gap["until"] - coverage_gap["since"]).total_seconds() / 3600
         since_str = coverage_gap["since"].strftime(snapshots.FETCHED_AT_FORMAT)
         until_str = coverage_gap["until"].strftime(snapshots.FETCHED_AT_FORMAT)
-        needs.append({"source": "fireflies", "gap": True,
-                     "reason": f"coverage gap {gap_hours:.1f}h ({since_str} to {until_str}) — anchor held, will retry next sync"})
+        if coverage_gap.get("permanent"):
+            # Finding 3: past `FIREFLIES_LOOKBACK_MAX_DAYS` the anchor can never catch back up on
+            # its own, so `_fireflies_coverage` already advanced past this stretch rather than
+            # hold it forever -- "will retry next sync" would be false here, so this line says
+            # plainly that the stretch is gone instead.
+            needs.append({"source": "fireflies", "gap": True, "permanent": True,
+                         "reason": f"coverage gap {gap_hours:.1f}h ({since_str} to {until_str}) — "
+                                   f"beyond the {sync_cmd.FIREFLIES_LOOKBACK_MAX_DAYS}-day lookback, "
+                                   f"unrecoverable — anchor advanced, that stretch will not be fetched"})
+        else:
+            needs.append({"source": "fireflies", "gap": True,
+                         "reason": f"coverage gap {gap_hours:.1f}h ({since_str} to {until_str}) — anchor held, will retry next sync"})
 
     if not ctx.dry_run and not acknowledge_fireflies and not text:
         # This is a turn-1 (JSON) call: record exactly the Fireflies item set it is handing out,

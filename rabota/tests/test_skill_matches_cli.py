@@ -148,6 +148,18 @@ class SkillMatchesCliTests(unittest.TestCase):
         self.assertNotIn("fetch fireflies", cycle.lower())
         self.assertNotIn("fireflies: fetch", cycle.lower())
 
+    def test_gap_true_is_named_as_neither_fetched_nor_classified(self):
+        # Review finding 5 (DO-761 fix round 3): step 2 used to document exactly two `needs`
+        # shapes -- `fetched: true` (classify, no fetch) and "every other entry: fetch exactly its
+        # `query`" -- so a `gap: true` entry (`run_brief`'s coverage-gap alert, neither `items` nor
+        # `query`) fell into "every other entry" by the skill's own literal wording, telling an
+        # agent to fetch something that carries no query to fetch. Fails on a skill text that does
+        # not mention `gap: true` at all, or one that still tells the reader to fetch it.
+        cycle = _cycle_section()
+        self.assertIn("gap: true", cycle)
+        self.assertRegex(cycle, r"(?i)gap: true[^.]*\bnothing to fetch\b")
+        self.assertNotIn("fetch its gap", cycle.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

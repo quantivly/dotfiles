@@ -1,10 +1,11 @@
 import argparse, io, json, os, shutil, tempfile, unittest, unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from rabota import cli, context, errors, secrets, snapshots
 from rabota.commands import brief
 from rabota.commands import rank as rank_cmd
+from rabota.commands import sync
 from rabota.runner import FakeRunner, Result
 from tests.test_preflight import VIEWER, FakeGh, FakeLinear
 
@@ -982,6 +983,33 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
         data = json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())
         self.assertEqual(data["classified_at"], "2026-09-16T08:30:00Z")
+
+    def test_a_held_anchor_past_max_days_advances_instead_of_growing_forever(self):
+        # Review finding 3 (DO-761 fix round 3): once `now - anchor > FIREFLIES_LOOKBACK_MAX_DAYS`,
+        # `fireflies_since`'s `earliest = now - MAX_DAYS` floor recedes from a HELD anchor every day
+        # `now` advances, so holding (the pre-fix behaviour) re-detects the same gap on every later
+        # cycle too, widening by about a day per day forever -- "will retry next sync" never comes
+        # true. Isolates the mechanism exactly as the review did: a stale `classified_at`, no
+        # bootstrap-anchor file involved at all. Fails on 4558e23, where cycle 2 renders a bigger
+        # gap than cycle 1 instead of no gap at all.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        (ctx.state_dir / snapshots.FIREFLIES_CLASSIFIED_FILE).write_text(
+            json.dumps({"ids": [], "classified_at": "2026-01-05T00:00:00Z"}))
+        cycle0 = datetime(2026, 6, 1, 9, 0, tzinfo=timezone.utc)
+        gap_lines = []
+        for i in range(3):
+            cycle_now = cycle0 + timedelta(days=i)
+            since = sync.fireflies_since(ctx, cycle_now)
+            self._write_fireflies_with_since(ctx, [], since=since.strftime(snapshots.FETCHED_AT_FORMAT),
+                                             fetched_at=cycle_now.strftime(snapshots.FETCHED_AT_FORMAT))
+            lines = brief.run_brief(ctx, text=True, now=cycle_now, gh=gh, lin=lin, classified=["fireflies"])
+            gap_lines.append(next((l for l in lines if l.startswith("! fireflies ") and "coverage gap" in l), None))
+        self.assertIsNotNone(gap_lines[0], "the first cycle must still alert on the real, permanent loss")
+        self.assertIn("beyond the", gap_lines[0])
+        for i, line in enumerate(gap_lines[1:], start=1):
+            self.assertIsNone(line, f"cycle {i}: the anchor must have healed by now, not grown a bigger gap")
 
     def test_classified_without_text_is_a_usage_error_and_marks_nothing(self):
         # Review round 4, F1: a JSON call carrying the acknowledgement would mark items classified
