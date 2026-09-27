@@ -49,10 +49,18 @@ written, so the fetch you just landed is never silently skipped (DO-738).
      pre-fetch brief and then a second, near-empty `no change` block after it.
 2. **Fetch, ingest, reconcile — turn 2, only when `needs` is non-empty.** These are tool
    calls inside this one turn, not a turn each:
-   - An entry with `fetched: true` (fireflies) already carries its `items` — classify them,
-     no fetch and no ingest. Every other entry: fetch exactly its `query` (e.g. Slack
-     `to:me after:…`, Calendar free blocks for today). Do not retry more than once; never drop
-     a failed source silently.
+   - **Name the connector tools, one `ToolSearch`.** Load both Slack and Calendar in the one
+     call this turn needs: `ToolSearch select:mcp__claude_ai_Slack__slack_search_public_and_private,mcp__claude_ai_Google_Calendar__list_events`.
+     Those are this account's names; a plugin connector differs (e.g.
+     `mcp__plugin_slack_slack__…`, not `mcp__claude_ai_Slack__…`). If a name is not found,
+     fall back once: search by keyword (`slack search`, `calendar list events`) instead of
+     guessing further.
+   - **Fetch every `needs` source in ONE turn, as parallel tool calls** — the Slack search and
+     the Calendar `list_events` are independent of each other, so issue both together rather
+     than one per turn. An entry with `fetched: true` (fireflies) already carries its
+     `items` — classify them, no fetch and no ingest. Every other entry: fetch exactly its
+     `query` (e.g. Slack `to:me after:…`, Calendar free blocks for today). Do not retry more
+     than once; never drop a failed source silently.
    - **One** ingest, no files: `rabota ingest --stdin <<'RABOTA_EOF'`, then ONE line of compact
      JSON (every newline inside a value escaped as `\n`) keyed by source, `{"slack":
      {"fetched_at": "<UTC Z>", "ok": true, "error": null, "items": [...]}, "calendar": {...}}`
