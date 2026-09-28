@@ -334,8 +334,15 @@ def record_fireflies_freeze_result(ctx, freeze_error: str | None) -> None:
     ``FIREFLIES_FREEZE_STREAK_FALLBACK_FILE``'s comment for the DB-specific fault this covers,
     which the store guard alone left silent forever.
 
-    On a successful store write, any stale fallback record is cleared -- the store is trusted
-    again the moment it proves it still works.
+    On a successful store write, the fallback is cleared only once ``freeze_error`` is ``None`` --
+    i.e. once the freeze itself has actually recovered. A successful write while the freeze is
+    STILL failing (DO-768 fix round 3) is not that: the store's own streak restarts from whatever
+    it last held -- typically 0, since the failures that built the fallback's count never reached
+    it -- so clearing the fallback there would report a LOWER count than an operator was already
+    shown, for a fault that never went away. Leaving the fallback in place lets
+    ``reconcile.snapshot_health``'s ``max(store, fallback)`` keep ratcheting forward on every
+    further failed attempt until the freeze truly recovers, at which point both channels clear
+    together.
     """
     try:
         ctx.store.record_freeze_result(ctx.tenant.name, freeze_error)
@@ -343,4 +350,5 @@ def record_fireflies_freeze_result(ctx, freeze_error: str | None) -> None:
         if freeze_error is not None:
             _record_fireflies_freeze_fallback(ctx.state_dir, freeze_error)
         return
-    _clear_fireflies_freeze_fallback(ctx.state_dir)
+    if freeze_error is None:
+        _clear_fireflies_freeze_fallback(ctx.state_dir)

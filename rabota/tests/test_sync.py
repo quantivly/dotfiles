@@ -611,6 +611,41 @@ class SyncTests(unittest.TestCase):
                         "sync-then-brief within one tick is 2 consecutive attempts, matching what "
                         "the threshold actually counts")
 
+    def test_a_recovering_store_does_not_silence_a_still_failing_freeze(self):
+        # Third review of #272 (fix round 2): `record_fireflies_freeze_result` cleared the
+        # fallback file on ANY successful store write, without consulting `freeze_error` -- so a
+        # store that recovers mid-streak while the freeze itself is STILL failing throws the
+        # fallback's count away, and the store's own streak restarts from 0 (it never got written
+        # while the store was down). The row below drives exactly that sequence -- freeze failing
+        # on every one of 4 attempts, the store failing for the first 3 and then recovering for
+        # the 4th -- and asserts the alert is still live right after the recovery, with the fault
+        # completely unchanged.
+        #
+        # Fails on dff1921: the 4th call clears the fallback (3 fails, over threshold) the moment
+        # the store write succeeds, and the store's own fresh row only holds 1 fail (below
+        # `FIREFLIES_FREEZE_ALERT_AFTER == 2`) -- so `snapshot_health` finds nothing to alert on,
+        # even though the freeze has now failed 4 times in a row with no recovery at all.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        real_record = store.Store.record_freeze_result
+        calls = {"n": 0}
+        def flaky_then_recovered(self, tenant, error):
+            calls["n"] += 1
+            if calls["n"] <= 3:
+                raise sqlite3.OperationalError("database is locked")
+            return real_record(self, tenant, error)
+        with mock.patch.object(store.Store, "record_freeze_result", flaky_then_recovered):
+            for i in range(4):
+                anchor, freeze_error = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
+                self.assertIsNotNone(freeze_error, f"call {i}: the anchor write must still fail")
+                snapshots.record_fireflies_freeze_result(ctx, freeze_error)
+        self.assertEqual(calls["n"], 4)
+        health = reconcile.snapshot_health(ctx, self.NOW)
+        self.assertTrue([h for h in health if h["source"] == "fireflies"],
+                        "the freeze is still failing on every attempt; the store recovering "
+                        "mid-streak must not silence an alert that was already live")
+
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()
         f = ctx.state_dir / "slack.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)
