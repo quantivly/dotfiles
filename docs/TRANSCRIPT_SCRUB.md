@@ -278,7 +278,7 @@ Measured on cilantro, 2026-09-23, after the scrub was reported complete:
 
 ```
 2367  ~/.claude/projects
-  58  ~/.local/state/claude-account-dirs/toysim-0/projects   <-- never scanned
+  58  ~/.local/state/claude-account-dirs/<a non-work seat>/projects   <-- never scanned
    0  (nine other account dirs)
 ```
 

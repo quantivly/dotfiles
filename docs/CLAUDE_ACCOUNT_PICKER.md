@@ -408,8 +408,8 @@ says "may bill" rather than "bills".
 Max seat at 100% of its week, on the argument that the block was inferred from a field name and
 that refusing would empty both all-Max tenants for up to a week.
 
-The measurement, taken on the seat a session had just reported as unusable: **toysim-0**, Max,
-aggregate `seven_day` 100 with spend `disabled`, usage cache 3 s old.
+The measurement, taken on the seat a session had just reported as unusable — a non-work
+**Max seat**, aggregate `seven_day` 100 with spend `disabled`, usage cache 3 s old:
 
 | model asked for | result |
 |---|---|
@@ -423,7 +423,7 @@ window sitting at 100 beside it. The quoted reset cannot separate the two (the t
 one second apart); the model can, and does.
 
 So `disabled` joins `none` in the exhaustion arm, and the cost that argued against it is now
-simply the truth about capacity: `personal` and `toysim` really are unusable until their weekly
+simply the truth about capacity: an all-Max non-work pool really is unusable until its weekly
 reset, and demoting only bought a session that died on its first prompt. A **lapsed** week is
 still `unknown` and never reaches the arm.
 
@@ -491,7 +491,7 @@ between 2026-09-19 and 2026-09-27, kept because it is the record of a decision m
 uncertainty that the measurement above has since settled. The DO-623 plan proposed
 allowing a Max seat on a spent window, and the branch first shipped that (`bills_credits:
 null`), arguing that the utilization is a good measurement whose *consequence* is unknown and
-that refusing would empty the all-Max `personal` and `toysim` tenants once DO-624 routes
+that refusing would empty the all-Max non-work tenants once DO-624 routes
 `hspawn` through the gate. **The user decided on 2026-09-19 to keep the approved spec's rule
 instead: refuse, reported as `gate-unmeasured`** (the reason says "no spend limit configured
 (a Max seat)" and quotes the seat's own spend figures). The evidence behind the decision:
@@ -514,7 +514,7 @@ was wrong was calling it unmeasured and letting the ranker disagree. A live spen
 **aggregate** on a Max seat is now `gate-spend-wall`, so rabota reads it as
 `credential:window` rather than `credential:unmeasured` — a measured refusal no longer
 reports as "could not measure". A spent **per-model** window alone on such a seat is still
-`gate-unmeasured`: both of toysim-0's windows were at 100 together, so that case was not
+`gate-unmeasured`: both of the measured seat's windows were at 100 together, so that case was not
 separated and nothing may claim it was. `_claude_pick_class` refuses the aggregate case too,
 which is what the "one-line change back" in its own comment was waiting for.
 
