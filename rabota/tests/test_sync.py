@@ -2,7 +2,7 @@ import argparse, json, sqlite3, tempfile, unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from rabota import context, errors, reconcile, secrets, snapshots
+from rabota import context, errors, reconcile, secrets, snapshots, store
 from rabota.commands import brief, sync, ingest
 from rabota.runner import FakeRunner
 from rabota.sources import linear
@@ -490,6 +490,29 @@ class SyncTests(unittest.TestCase):
         (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
         sync.fireflies_since(ctx, self.NOW)
         self.assertIsNone(ctx.store.freeze_fault("quantivly"), "a dry run must record no freeze-fault row")
+
+    def test_a_read_only_state_dir_fails_loudly_before_any_freeze_logic_runs(self):
+        # Independent review of #272 (`mergeable: false`): the freeze-fault streak lives in
+        # `rabota.db` inside `state_dir`, and #272's own tests only simulate an unwritable
+        # state dir by occupying the ANCHOR FILE's own path -- never the state dir itself -- so
+        # the review read that as the alarm being unable to sound in the realistic failure it
+        # exists to report. Driven here against a genuinely read-only state dir: the tick does
+        # not slide silently, it fails outright, before `_freeze_fireflies_bootstrap_anchor` or
+        # any freeze-fault bookkeeping is ever reached. `snapshots.write` raises the bare OSError
+        # (a permissions fault is never this call's problem to degrade -- unlike the one small
+        # bootstrap-anchor file, most callers of `snapshots.write` have nothing softer to fall
+        # back to), and `Store.open` raises `errors.RabotaError` naming the state dir. The
+        # freeze-fault streak being skipped in this shape is therefore unreachable, not
+        # unreported -- see the comment at `fireflies_since`'s DO-768 paragraph in sync.py.
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        state_dir = Path(tmp.name) / "state"; state_dir.mkdir()
+        state_dir.chmod(0o555)
+        self.addCleanup(state_dir.chmod, 0o755)   # tempdir cleanup needs write access back
+        with self.assertRaises(PermissionError):
+            snapshots.write(state_dir, "linear", {"items": []})
+        with self.assertRaises(errors.RabotaError) as cm:
+            store.Store.open(state_dir)
+        self.assertIn(str(state_dir), str(cm.exception))
 
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()

@@ -258,6 +258,12 @@ def record_fireflies_freeze_result(ctx, freeze_error: str | None) -> None:
     written -- must not turn this bookkeeping step into the crash the freeze itself just avoided.
     Losing one streak update this way is the same trade the freeze itself already makes: the
     caller already has its answer for this call regardless of whether the count gets recorded.
+
+    This streak covers only the narrow shape where the anchor's OWN path is unwritable while the
+    rest of ``state_dir`` -- ``ctx.store``, ``sources/*.json`` -- is not. A ``state_dir`` unwritable
+    in general never reaches this line: ``snapshots.write`` and ``Store.open`` both raise on it, so
+    the whole tick fails loudly (non-zero exit, no snapshot, no rank, no brief) before any freeze
+    logic runs, and needs no streak here to be noticed.
     """
     try:
         ctx.store.record_freeze_result(ctx.tenant.name, freeze_error)

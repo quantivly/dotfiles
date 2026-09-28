@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NO
 CREATE TABLE IF NOT EXISTS fireflies_freeze_faults(tenant TEXT PRIMARY KEY, fails INTEGER NOT NULL,
   last_error TEXT, last_failed_at TEXT);
 """
+# `fireflies_freeze_faults` (DO-768) reaches a pre-existing v4 store through the trailing
+# `executescript(SCHEMA)` at the end of `migrate()`, not a `MIGRATIONS[4]` step -- so `SCHEMA_VERSION`
+# deliberately stays 4 rather than bumping to 5 for a table add with no column on an existing table
+# and nothing for old rows to backfill. See `test_migrate_adds_fireflies_freeze_faults_to_a_pre_do768_v4_store`.
 LANE_FIELDS = ("id", "tenant", "kind", "brief", "repo", "worktree", "out_dir", "machine", "unit",
                "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached",
                "seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at",
