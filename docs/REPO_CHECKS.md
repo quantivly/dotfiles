@@ -720,3 +720,61 @@ running, every row that did run still passes and the suite still prints a green
 total; that is what the count catches. A row whose fixture cannot reach the
 branch it names still runs, still passes, and is invisible to it — which is what
 the mutation sweeps are for.
+
+## What protects `main`, and why (DO-773 follow-up, 2026-09-28)
+
+**The settings are on GitHub, so this is the only place the reasoning exists.** Nothing in the
+tree can show them, which is the failure shape this repository documents everywhere else:
+configuration living outside the checkout, where the next person reads the *what* and never the
+*why*. As of 2026-09-28 `main` carries:
+
+| setting | value |
+|---|---|
+| `required_status_checks.strict` | **true** — "require branches to be up to date before merging" |
+| `required_status_checks.contexts` | the three `rabota Unit Tests` legs, `Pre-commit Hooks`, `ShellCheck`, `Shell Syntax Check` |
+| `required_pull_request_reviews` | **none** — deliberately removed, see below |
+| `enforce_admins` | false |
+| `required_linear_history`, `required_conversation_resolution` | true |
+
+**A squash merge of a branch that is BEHIND replaces the tree.** Measured the day this was added:
+`gh pr merge --squash --admin` on a branch two commits behind produced a commit whose tree was
+byte-identical to the branch tip's — `b7d5b75^{tree} == 1ad0be7^{tree}` — silently reverting the PR
+that had landed in between. 504 deletions; one symbol went from 13 occurrences to 0; #276 existed
+only to put it back.
+
+**Nothing announced it, and each signal that should have was individually correct.** The merging
+PR's CI was green, because a branch that never had the code cannot fail for lacking it.
+`gh pr merge` reported success. `git log` read linear, because the squash commit's *parent* was
+right — only its tree was wrong. And the two PRs touched **no files in common**, which makes the
+collision less visible rather than more. The one tell was arithmetic: **one** commit between `HEAD`
+and `origin/main` but **ten** files differing, which no three-file PR can produce.
+
+**The review requirement was the actual root cause, not the staleness.** `main` required one
+approving review, and an agent cannot approve its own PR, so `--admin` was the standing merge
+procedure — and `--admin` overrides *everything*. While it was in use no server-side protection
+could bind, including the `strict` flag that would have refused the stale branch. Removing the
+review requirement is what makes the rest real: with nothing to bypass, a plain `gh pr merge
+--squash` is used, and GitHub refuses a behind-branch. Verified the same day — PR #275 went from
+`mergeable_state: unknown` to `BEHIND` the moment the change landed.
+
+**So the trap, stated plainly for whoever edits this next: re-adding a required review silently
+disables the freshness guard.** Not by changing it — `strict` stays `true` and still reads as
+enabled — but by forcing `--admin` back into the merge command, which overrides it. If a review
+requirement is ever wanted again, pair it with `enforce_admins: true`, or the protection becomes
+decoration. The same goes for passing `--admin` out of habit once it is no longer needed.
+
+**What this does not cover, since a guard that reads as broader than it is teaches the wrong
+lesson:** these contexts are six of the ~35 jobs, chosen because they run on every PR (`ci.yml`
+has no `paths:` filter) and so cannot fail to report and wedge a merge. The state tables for the
+other guards are not required contexts and a red one will not block. And none of this constrains a
+direct push to a branch, only what may merge into `main`.
+
+**The client-side check, for anywhere this protection does not reach** — another repo, or a
+window where it is off:
+
+```bash
+git rev-list --count "$(git merge-base HEAD origin/main)..origin/main"   # must be 0
+```
+
+Matching a PR's head SHA to local `HEAD` does **not** substitute for it: that verifies the branch,
+never the merge, and it was green throughout the incident above.
