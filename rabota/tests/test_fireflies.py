@@ -207,6 +207,43 @@ class FirefliesClientPagingTests(unittest.TestCase):
             client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
         self.assertIn("limit was not honored", str(cm.exception))
 
+    def test_a_duplicate_id_across_pages_is_removed_keeping_first_position(self):
+        """A hand-built repeat: the second page's first id is one the first page already gave."""
+        full = [f"t{i}" for i in range(PAGE_SIZE)]
+        short = [full[-1], "tnew"]
+        post = FakePost([_page_reply(full), _page_reply(short)])
+        client = FirefliesClient("k" * 20, post=post)
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        out_ids = [t["id"] for t in out]
+        self.assertEqual(out_ids, full + ["tnew"])
+        self.assertEqual(out_ids.count(full[-1]), 1)
+
+    def test_a_reordering_between_calls_causes_a_duplicate_that_is_deduped(self):
+        """No hand-built repeat: the server itself reorders its list between the two calls, which
+        shifts an id already handed out on page 1 into page 2's window."""
+        ids = [f"t{i}" for i in range(PAGE_SIZE + 1)]  # 51 ids: one full page, one short page
+
+        class ReorderingPost:
+            def __init__(self, order):
+                self.order, self.calls = list(order), []
+
+            def __call__(self, body):
+                self.calls.append(body)
+                skip, limit = body["variables"]["skip"], body["variables"]["limit"]
+                page = self.order[skip:skip + limit]
+                if len(self.calls) == 1:
+                    self.order = self.order[1:] + self.order[:1]  # rotate first id to the end
+                return _page_reply(page)
+
+        post = ReorderingPost(ids)
+        client = FirefliesClient("k" * 20, post=post)
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        out_ids = [t["id"] for t in out]
+        self.assertEqual(len(post.calls), 2)
+        # page 2 re-delivers ids[0] (rotated to the tail) instead of anything new -- deduped away.
+        self.assertEqual(out_ids, ids[:PAGE_SIZE])
+        self.assertEqual(out_ids.count(ids[0]), 1)
+
 
 class NormalizeDateTests(unittest.TestCase):
     """One row per input shape (DO-749): epoch milliseconds, epoch seconds, a numeric string of

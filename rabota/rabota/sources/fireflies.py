@@ -212,6 +212,17 @@ class FirefliesClient:
         Paging past ``MAX_PAGES`` is refused rather than truncated silently -- see its comment
         for the bound.
 
+        **Duplicates only, not gaps (DO-772 fix round).** ``transcripts`` gives no cursor, so each
+        page is a fresh query at a fixed ``skip`` against whatever order the server holds *right
+        now* -- if that order changes between two calls (a meeting's ``date`` corrected, a
+        transcript finishing processing mid-run), an id can shift across the page boundary and
+        come back twice. Every id already added is tracked, so a second occurrence is dropped
+        rather than appended, keeping the first occurrence's position. An id that shifts the other
+        way -- out of every page's window entirely -- cannot be told apart from an id that was
+        simply never in range: nothing in a reply says how many ids exist or which ones a stable
+        server would have shown, so a skip is not detected here, and a page containing a duplicate
+        is not evidence of one either (it is only evidence of *this* duplicate).
+
         **Unverified against a schema.** DO-772's brief could not confirm ``limit``/``skip`` are
         Fireflies' real argument names from anything checked into this repo -- there is no
         Fireflies schema here, and this lane has no live access to check them against the API
@@ -220,6 +231,7 @@ class FirefliesClient:
         """
         from_date = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         out = []
+        seen_ids = set()
         for page_num in range(MAX_PAGES):
             data = self.query(Q_TRANSCRIPTS, {"fromDate": from_date, "limit": PAGE_SIZE, "skip": page_num * PAGE_SIZE})
             page = data.get("transcripts")
@@ -229,8 +241,12 @@ class FirefliesClient:
                 raise errors.RabotaError(f"Fireflies returned {len(page)} transcripts for a page of "
                                          f"{PAGE_SIZE}: limit was not honored")
             for t in page:
+                tid = t.get("id")
+                if tid in seen_ids:     # a reordered server can hand the same id back on a later page
+                    continue
+                seen_ids.add(tid)
                 summary = t.get("summary") or {}
-                out.append({"id": t.get("id"), "title": t.get("title"), "date": normalize_date(t.get("date")),
+                out.append({"id": tid, "title": t.get("title"), "date": normalize_date(t.get("date")),
                             "action_items": parse_action_items(summary.get("action_items"))})
             if len(page) < PAGE_SIZE:
                 return out
