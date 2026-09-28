@@ -9,22 +9,41 @@ A missing key is not a special case — there is no key on this machine yet — 
 existing per-source ``except errors.RabotaError`` records it as a failed source rather than
 raising out of the loop: the other sources still sync, and ``precompute`` still finishes.
 
-**The fetch window (DO-746 fix round, finding F2).** A fixed ``FIREFLIES_LOOKBACK_DAYS = 2`` lost
-Friday afternoon's meetings on a Monday 07:00 tick: the timer runs Mon-Fri, ``sync`` overwrites
-the snapshot rather than merging it, and a Monday tick asking only "since Saturday 07:00" never
-sees Friday's transcripts again. The window is derived from the invariant instead — every item
-from a meeting after the last brief @zvi was actually shown must reach classification — by
-reading ``<state_dir>/last-brief-shown.json`` (written by ``commands.brief.run_brief`` at the
-same point it decides today's per-day ``last-brief.json`` was the screen the reader got; see that
-module for why it is a separate, cross-day file rather than the day-scoped one). Two bounds keep
-that honest: ``FIREFLIES_LOOKBACK_MARGIN_HOURS`` covers clock skew and a transcript that posts a
-little after its meeting ends, and ``FIREFLIES_LOOKBACK_MAX_DAYS`` stops a months-old or missing
-marker from asking Fireflies for a year of transcripts. A tenant that has never shown a brief
-falls back to ``FIREFLIES_LOOKBACK_MIN_DAYS``, the old fixed window, until it has one.
+**The fetch window (DO-746 fix round, finding F2; re-keyed in DO-761).** A fixed
+``FIREFLIES_LOOKBACK_DAYS = 2`` lost Friday afternoon's meetings on a Monday 07:00 tick: the
+timer runs Mon-Fri, ``sync`` overwrites the snapshot rather than merging it, and a Monday tick
+asking only "since Saturday 07:00" never sees Friday's transcripts again. The window is derived
+from the invariant instead — every item from a meeting after the point Fireflies was last
+actually classified must reach classification.
 
-``fireflies_since`` also clamps the UPPER bound at ``now`` (fix round 2, finding C) -- a marker
-ahead of the clock this call reads otherwise pushed ``since`` past ``now`` and the fetch window
-started in the future, so a real unclassified meeting was never fetched at all.
+That point used to be read from ``last-brief-shown.json``, a marker only ``commands.brief.run_brief``
+writes — but "shown" was only ever a proxy for "classified" (a bare ``rabota --text brief``
+is shown and classifies nothing), and on a tenant that had never shown a single brief the file did
+not exist at all, so the window fell all the way back to the fixed ``FIREFLIES_LOOKBACK_MIN_DAYS``
+even on a machine with weeks of day-scoped briefs already on disk (DO-761). ``fireflies_since`` now
+reads ``snapshots.read_last_classified`` — the classification record itself — first, falls back to
+``snapshots.read_newest_day_brief`` (the newest day-scoped ``last-brief.json`` across every day
+directory) when nothing has been classified yet, and only then to ``FIREFLIES_LOOKBACK_MIN_DAYS``.
+Two bounds keep whichever anchor is used honest: ``FIREFLIES_LOOKBACK_MARGIN_HOURS`` covers clock
+skew and a transcript that posts a little after its meeting ends, and ``FIREFLIES_LOOKBACK_MAX_DAYS``
+stops a months-old or missing marker from asking Fireflies for a year of transcripts.
+
+``fireflies_since`` also clamps the UPPER bound at ``now`` (fix round 2, finding C) -- an anchor
+ahead of the clock this call reads otherwise pushed ``since`` past ``now``, so the fetch window
+started in the future and a real unclassified meeting was never fetched at all.
+
+**The day-brief fallback is frozen, not re-read (DO-761 fix round 2, finding 1).**
+``read_newest_day_brief`` is recomputed live from whatever the newest day directory is AT CALL
+TIME, and a tenant that only ever gets brief text -- a bare ``rabota --text brief``, or an agent
+that reads turn 1 and never sends the classifying acknowledgement back -- never creates
+``fireflies-classified.json``, so this fallback used to stay live forever rather than only at
+bootstrap: the window start walked forward a full day for every day a brief was merely shown, and
+because ``sync_fireflies`` overwrites (never merges) the snapshot, a transcript fetched on day N
+and never acknowledged was silently dropped from every later window. ``fireflies_since`` now reads
+``snapshots.read_or_freeze_fireflies_fallback_anchor`` in place of ``read_newest_day_brief``
+directly: it freezes the first answer that function gives and every later call gets that same
+frozen value back, however many newer day-scoped briefs land in the meantime, until a real
+classification record exists and takes over as the primary anchor.
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -36,31 +55,37 @@ from rabota.sources.github import GhClient
 from rabota.sources.linear import LinearClient
 
 FETCHED_SOURCES = ("linear", "github", "fireflies")
-FIREFLIES_LOOKBACK_MIN_DAYS = 2                  # fallback: no brief has ever been shown yet
+FIREFLIES_LOOKBACK_MIN_DAYS = 2                  # fallback: neither a classification record nor any day-scoped brief exists yet
 FIREFLIES_LOOKBACK_MARGIN_HOURS = 6              # clock skew / a transcript posted after the fact
-FIREFLIES_LOOKBACK_MAX_DAYS = 14                 # bound: a stale/missing marker asks for 2 weeks, not a year
+FIREFLIES_LOOKBACK_MAX_DAYS = 14                 # bound: a stale/missing anchor asks for 2 weeks, not a year
 
 
 def fireflies_since(ctx: Context, now: datetime) -> datetime:
-    """The fetch window start: since the last brief actually shown, plus a margin, bounded above
-    and below.
+    """The fetch window start: since Fireflies was last actually classified, plus a margin,
+    bounded above and below.
 
-    See the module docstring for why this replaced a fixed ``FIREFLIES_LOOKBACK_DAYS``. Reads the
-    marker through ``snapshots.read_last_shown`` rather than inline — see that function's comment
-    for why the read must not live in this file.
+    See the module docstring for why this replaced a fixed ``FIREFLIES_LOOKBACK_DAYS`` and, in
+    DO-761, replaced ``last-brief-shown.json`` with the classification record, and (fix round 2)
+    why the day-brief fallback is frozen rather than re-read live. Reads both anchors through
+    ``snapshots.read_last_classified``/``snapshots.read_or_freeze_fireflies_fallback_anchor``
+    rather than inline — see those functions' comments for why the reads must not live in this
+    file.
 
-    **Finding C (DO-746 fix round 2).** Only the lower bound (``FIREFLIES_LOOKBACK_MAX_DAYS``) was
-    clamped; a ``last-brief-shown.json`` ahead of ``now`` -- multi-machine clock skew, or any
-    ``generated_at`` written ahead of this call's clock -- pushed ``since`` past ``now``, so the
-    window started in the future and every real meeting between the true last-shown time and now
-    was silently never fetched. ``since`` is now also capped at ``now``.
+    **Finding C (DO-746 fix round 2), still honoured.** Only the lower bound
+    (``FIREFLIES_LOOKBACK_MAX_DAYS``) used to be clamped; an anchor ahead of ``now`` -- multi-machine
+    clock skew, or any ``generated_at``/``classified_at`` written ahead of this call's clock --
+    pushed ``since`` past ``now``, so the window started in the future and every real meeting
+    between the true anchor and now was silently never fetched. ``since`` is still also capped at
+    ``now``, whichever anchor produced it.
     """
     earliest = now - timedelta(days=FIREFLIES_LOOKBACK_MAX_DAYS)
-    shown_at = snapshots.read_last_shown(ctx.state_dir)
-    if shown_at is None:
+    anchor = snapshots.read_last_classified(ctx.state_dir)
+    if anchor is None:
+        anchor = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
+    if anchor is None:
         since = max(now - timedelta(days=FIREFLIES_LOOKBACK_MIN_DAYS), earliest)
     else:
-        since = max(shown_at - timedelta(hours=FIREFLIES_LOOKBACK_MARGIN_HOURS), earliest)
+        since = max(anchor - timedelta(hours=FIREFLIES_LOOKBACK_MARGIN_HOURS), earliest)
     return min(since, now)
 
 
@@ -90,10 +115,18 @@ def sync_github(ctx: Context, gh) -> dict:
 
 
 def sync_fireflies(ctx: Context, ff) -> dict:
-    """Recent meeting transcripts, ``action_items`` already parsed into ``(speaker, item, timestamp)``."""
+    """Recent meeting transcripts, ``action_items`` already parsed into ``(speaker, item, timestamp)``.
+
+    ``since`` (the window start this very fetch asked for) is stamped onto the payload alongside
+    ``fetched_at`` (DO-761 fix round): a classifying acknowledgement can vouch for coverage only up
+    to what the snapshot it read actually asked Fireflies for, never for the moment of the
+    acknowledgement itself, and only the snapshot can say what that was. See
+    ``commands.brief._mark_fireflies_classified``.
+    """
     since = fireflies_since(ctx, datetime.now(timezone.utc))
     transcripts = ff.recent_transcripts(since)
-    payload = {"ok": True, "error": None, "transcripts": transcripts}
+    payload = {"ok": True, "error": None, "transcripts": transcripts,
+               "since": since.strftime(snapshots.FETCHED_AT_FORMAT)}
     snapshots.write(ctx.state_dir, "fireflies", payload, dry_run=ctx.dry_run)
     return {"transcripts": len(transcripts)}
 

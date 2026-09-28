@@ -207,68 +207,75 @@ class SyncTests(unittest.TestCase):
         row = ctx.store.last_sync("quantivly", "fireflies")
         self.assertFalse(row["ok"]); self.assertIn("fireflies down", row["error"])
 
-    # ---- F2: the fetch window is derived from the last shown brief, not a fixed 2 days ----------
+    # ---- F2/DO-761: the fetch window is derived from what has actually been classified, not a
+    # fixed 2 days and not a "shown" marker only `brief` ever wrote --------------------------------
 
     NOW = datetime(2026, 9, 22, 7, 0, tzinfo=timezone.utc)   # a Monday 07:00Z timer tick
 
-    def _write_last_shown(self, ctx, generated_at):
+    def _write_classified(self, ctx, classified_at, ids=()):
         ctx.state_dir.mkdir(parents=True, exist_ok=True)
-        (ctx.state_dir / snapshots.LAST_SHOWN_FILE).write_text(json.dumps({"generated_at": generated_at}))
+        (ctx.state_dir / snapshots.FIREFLIES_CLASSIFIED_FILE).write_text(
+            json.dumps({"ids": list(ids), "classified_at": classified_at}))
 
-    def test_no_last_shown_marker_falls_back_to_the_old_fixed_window(self):
+    def _write_day_brief(self, ctx, day, generated_at):
+        day_dir = ctx.state_dir / day
+        day_dir.mkdir(parents=True, exist_ok=True)
+        (day_dir / "last-brief.json").write_text(json.dumps({"keys": [], "generated_at": generated_at}))
+
+    def test_no_classification_or_day_brief_falls_back_to_the_old_fixed_window(self):
         # Revert `fireflies_since` to always return `now - FIREFLIES_LOOKBACK_MAX_DAYS` (or any
-        # value that ignores the missing-marker branch) to see this row fail.
+        # value that ignores the missing-anchor branch) to see this row fail.
         ctx = self.ctx()
         since = sync.fireflies_since(ctx, self.NOW)
         self.assertEqual(since, self.NOW - timedelta(days=sync.FIREFLIES_LOOKBACK_MIN_DAYS))
 
-    def test_a_friday_shown_brief_still_covers_friday_on_the_monday_tick(self):
+    def test_a_friday_classification_still_covers_friday_on_the_monday_tick(self):
         # F2's actual regression: a Monday 07:00 tick that only asked "since Saturday 07:00" (a
         # fixed 2-day lookback) lost Friday afternoon's meetings, because `sync` overwrites the
-        # snapshot rather than merging it. Friday's brief was shown at 2026-09-19T16:00:00Z; the
-        # derived window must start at or before that, margin included -- unlike the old fixed
+        # snapshot rather than merging it. Fireflies was last classified at 2026-09-19T16:00:00Z;
+        # the derived window must start at or before that, margin included -- unlike the old fixed
         # `now - 2 days`, which lands Saturday morning and misses Friday afternoon entirely.
         ctx = self.ctx()
-        self._write_last_shown(ctx, "2026-09-19T16:00:00Z")
+        self._write_classified(ctx, "2026-09-19T16:00:00Z")
         since = sync.fireflies_since(ctx, self.NOW)
         self.assertLessEqual(since, datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
         fixed_two_day_window = self.NOW - timedelta(days=2)
         self.assertLess(since, fixed_two_day_window, "the old fixed 2-day window would still miss Friday")
 
-    def test_the_margin_is_applied_on_top_of_the_last_shown_time(self):
+    def test_the_margin_is_applied_on_top_of_the_last_classified_time(self):
         ctx = self.ctx()
-        self._write_last_shown(ctx, "2026-09-21T10:00:00Z")
+        self._write_classified(ctx, "2026-09-21T10:00:00Z")
         since = sync.fireflies_since(ctx, self.NOW)
         self.assertEqual(since, datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc)
                           - timedelta(hours=sync.FIREFLIES_LOOKBACK_MARGIN_HOURS))
 
-    def test_a_months_old_marker_is_bounded_not_asked_for_a_year(self):
-        # Revert the `max(..., earliest)` clamp to see this row fail: a stale marker would then
+    def test_a_months_old_classification_is_bounded_not_asked_for_a_year(self):
+        # Revert the `max(..., earliest)` clamp to see this row fail: a stale anchor would then
         # ask Fireflies for months of transcripts on every tick.
         ctx = self.ctx()
-        self._write_last_shown(ctx, "2026-01-01T00:00:00Z")
+        self._write_classified(ctx, "2026-01-01T00:00:00Z")
         since = sync.fireflies_since(ctx, self.NOW)
         self.assertEqual(since, self.NOW - timedelta(days=sync.FIREFLIES_LOOKBACK_MAX_DAYS))
 
-    def test_a_malformed_marker_falls_back_like_a_missing_one(self):
+    def test_a_malformed_classification_record_falls_back_like_a_missing_one(self):
         ctx = self.ctx()
-        for label, text in (("not json", "{oops"), ("no generated_at", "{}"),
-                             ("bad timestamp", '{"generated_at": "not-a-timestamp"}')):
+        for label, text in (("not json", "{oops"), ("no classified_at", "{}"),
+                             ("bad timestamp", '{"classified_at": "not-a-timestamp"}')):
             with self.subTest(label=label):
                 ctx.state_dir.mkdir(parents=True, exist_ok=True)
-                (ctx.state_dir / snapshots.LAST_SHOWN_FILE).write_text(text)
+                (ctx.state_dir / snapshots.FIREFLIES_CLASSIFIED_FILE).write_text(text)
                 since = sync.fireflies_since(ctx, self.NOW)
                 self.assertEqual(since, self.NOW - timedelta(days=sync.FIREFLIES_LOOKBACK_MIN_DAYS), label)
 
-    def test_a_marker_ahead_of_now_does_not_push_since_into_the_future(self):
-        # Finding C (DO-746 fix round 2): only the lower bound was clamped. A marker ahead of
-        # `now` -- multi-machine clock skew, or any `generated_at` written ahead of this call's
+    def test_a_classification_ahead_of_now_does_not_push_since_into_the_future(self):
+        # Finding C (DO-746 fix round 2): only the lower bound was clamped. An anchor ahead of
+        # `now` -- multi-machine clock skew, or any `classified_at` written ahead of this call's
         # clock -- pushed `since` past `now`, so the fetch window started in the future and a real
-        # unclassified meeting between the true last-shown time and now was never fetched. Revert
-        # the `min(since, now)` clamp to see this row fail.
+        # unclassified meeting between the true anchor and now was never fetched. Revert the
+        # `min(since, now)` clamp to see this row fail.
         ctx = self.ctx()
         future = self.NOW + timedelta(days=1)
-        self._write_last_shown(ctx, future.isoformat().replace("+00:00", "Z"))
+        self._write_classified(ctx, future.isoformat().replace("+00:00", "Z"))
         since = sync.fireflies_since(ctx, self.NOW)
         self.assertLessEqual(since, self.NOW)
 
@@ -276,9 +283,9 @@ class SyncTests(unittest.TestCase):
         # Not just `fireflies_since` in isolation -- `sync_fireflies` must pass its result to the
         # client. Revert `sync_fireflies` to its old `datetime.now(...) - timedelta(days=2)` to see
         # this row fail: with "now" being whenever the suite actually runs, a fixed 2-day window
-        # lands long after this marker, while the derived window must not.
+        # lands long after this anchor, while the derived window must not.
         ctx = self.ctx()
-        self._write_last_shown(ctx, "2026-09-19T16:00:00Z")
+        self._write_classified(ctx, "2026-09-19T16:00:00Z")
         seen = {}
 
         class RecordingFf(FakeFf):
@@ -288,6 +295,115 @@ class SyncTests(unittest.TestCase):
 
         sync.sync_fireflies(ctx, RecordingFf())
         self.assertLessEqual(seen["since"], datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
+
+    def test_no_classification_record_falls_back_to_the_newest_day_scoped_last_brief(self):
+        # DO-761's own fallback #2: no `fireflies-classified.json` yet, but a day-scoped
+        # `last-brief.json` is on disk. The older, no-longer-written `last-brief-shown.json` marker
+        # is never involved -- this must work with nothing but the day-scoped file present.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertLessEqual(since, datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
+
+    def test_the_newest_of_several_day_scoped_briefs_is_used(self):
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-18", "2026-09-18T09:00:00Z")
+        self._write_day_brief(ctx, "2026-09-20", "2026-09-20T09:00:00Z")
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertEqual(since, datetime(2026, 9, 20, 9, 0, tzinfo=timezone.utc)
+                          - timedelta(hours=sync.FIREFLIES_LOOKBACK_MARGIN_HOURS))
+
+    def test_the_classification_record_takes_priority_over_a_day_scoped_last_brief(self):
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        self._write_classified(ctx, "2026-09-21T10:00:00Z")
+        since = sync.fireflies_since(ctx, self.NOW)
+        self.assertEqual(since, datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc)
+                          - timedelta(hours=sync.FIREFLIES_LOOKBACK_MARGIN_HOURS))
+
+    def test_the_live_do_761_case_no_marker_a_day_scoped_brief_and_a_monday_morning_now(self):
+        # The exact regression measured against @zvi's laptop: no `fireflies-classified.json` and
+        # no (removed) `last-brief-shown.json`, but the day-scoped `2026-09-25/last-brief.json` was
+        # on disk the whole time. A Monday 2026-09-28T04:01:15Z tick asking the OLD fixed
+        # `FIREFLIES_LOOKBACK_MIN_DAYS` window would start at 2026-09-26T04:01:15Z, missing the true
+        # last-shown time of 2026-09-25T16:42:43Z entirely. Revert either fallback branch in
+        # `fireflies_since` to see this row fail.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-25", "2026-09-25T16:42:43Z")
+        now = datetime(2026, 9, 28, 4, 1, 15, tzinfo=timezone.utc)
+        since = sync.fireflies_since(ctx, now)
+        self.assertLessEqual(since, datetime(2026, 9, 25, 16, 42, 43, tzinfo=timezone.utc))
+        old_fixed_window = now - timedelta(days=sync.FIREFLIES_LOOKBACK_MIN_DAYS)
+        self.assertLess(since, old_fixed_window,
+                        "the old fixed lookback would still miss the true last-shown time")
+
+    def test_the_fallback_anchor_freezes_instead_of_sliding_forward_on_shown(self):
+        # Review finding 1 (DO-761 fix round 2): a tenant that only ever gets brief text -- a bare
+        # `rabota --text brief`, or an agent that reads turn 1 and never sends `--classified
+        # fireflies` back -- never creates `fireflies-classified.json`, so the day-brief fallback
+        # used to stay live forever: `read_newest_day_brief` was read live, at call time, on every
+        # tick, and a new day-scoped `last-brief.json` landing each day (from the brief simply
+        # being shown) walked the window start forward a full day at a time -- the review measured
+        # 2026-09-16T09:00Z -> 2026-09-25T09:00Z over ten such days, with no classification record
+        # ever created and no alert. `fireflies_since` must now freeze at the FIRST day-brief it
+        # ever sees and hold there. Fails on a167822, where `fireflies_since` reads
+        # `snapshots.read_newest_day_brief` directly instead of the frozen fallback.
+        ctx = self.ctx()
+        day0 = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+        first_since = None
+        for i in range(10):
+            day = day0 + timedelta(days=i)
+            self._write_day_brief(ctx, day.date().isoformat(), day.strftime(snapshots.FETCHED_AT_FORMAT))
+            since = sync.fireflies_since(ctx, day + timedelta(hours=1))
+            if first_since is None:
+                first_since = since
+            self.assertEqual(since, first_since,
+                             f"day {i}: the fallback anchor must freeze at the first day shown, not slide")
+            self.assertFalse((ctx.state_dir / snapshots.FIREFLIES_CLASSIFIED_FILE).exists(),
+                             f"day {i}: shown, never classified -- no classification record must ever appear")
+
+    def test_a_write_failure_freezing_the_anchor_does_not_crash_the_caller(self):
+        # Review finding 1 (DO-761 fix round 3): `_freeze_fireflies_bootstrap_anchor` called
+        # `emit.write_file` with no try/except, and `read_or_freeze_fireflies_fallback_anchor`
+        # calls it whenever nothing is frozen yet -- exactly the state a first-ever call to
+        # `fireflies_since` is always in. A read-only state dir, a full disk or a permissions
+        # fault therefore raised a bare `PermissionError`/`OSError` straight out of a nominal
+        # "read" helper, crashing the whole `rabota sync` tick instead of degrading one source.
+        # Fails on 4558e23: `fireflies_since` raises instead of returning a value.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        ctx.state_dir.chmod(0o555)
+        try:
+            since = sync.fireflies_since(ctx, self.NOW)
+        finally:
+            ctx.state_dir.chmod(0o755)
+        self.assertLessEqual(since, datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
+        self.assertFalse((ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).exists(),
+                         "a failed write must not leave a partial/phantom anchor file behind")
+
+    def test_a_corrupt_bootstrap_anchor_heals_instead_of_sliding_forever(self):
+        # Review finding 2 (DO-761 fix round 3): `_freeze_fireflies_bootstrap_anchor`'s guard used
+        # to be `path.exists()` -- existence, not validity -- so a corrupt anchor file (a bad
+        # write, or a process killed mid-write) could never be replaced: every call re-derives a
+        # fresh, LIVE `read_newest_day_brief` answer it can never persist, silently reconstructing
+        # the day-by-day slide this whole mechanism exists to kill, with no error and no alert.
+        # Fails on 4558e23: `since` keeps advancing one day at a time forever instead of healing to
+        # a fixed value starting the very next call after the corruption is first seen.
+        ctx = self.ctx()
+        ctx.state_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).write_text("{not json")
+        day0 = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+        healed = None
+        for i in range(5):
+            day = day0 + timedelta(days=i)
+            self._write_day_brief(ctx, day.date().isoformat(), day.strftime(snapshots.FETCHED_AT_FORMAT))
+            since = sync.fireflies_since(ctx, day + timedelta(hours=1))
+            if i == 0:
+                healed = since
+            else:
+                self.assertEqual(since, healed, f"day {i}: the anchor must heal and hold, not keep sliding")
+        self.assertIsNotNone(snapshots.read_fireflies_bootstrap_anchor(ctx.state_dir),
+                             "the corrupt file must have been replaced by a valid one")
 
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()
