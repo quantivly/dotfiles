@@ -266,13 +266,20 @@ def snapshot_health(ctx, now: datetime | None = None) -> list[dict]:
 
     **DO-768.** A Fireflies entry is appended, through the SAME ``{"source", "reason"}`` shape and
     the same ``! <source> snapshot is unreliable — <reason>`` alert line ``_alert_lines`` already
-    renders for this list, once ``Store.freeze_fault`` shows the bootstrap-anchor freeze has
+    renders for this list, once the freeze-fault streak shows the bootstrap-anchor freeze has
     failed ``snapshots.FIREFLIES_FREEZE_ALERT_AFTER`` or more times IN A ROW for this tenant. One
     fluke never reaches here (the streak is 1, below the threshold) -- a persistent one does, on
-    every brief until a freeze finally succeeds and ``Store.record_freeze_result`` resets the
-    streak to zero. Reading the streak is guarded the same way recording it is (see
-    ``snapshots.record_fireflies_freeze_result``): a store that cannot even open must not turn a
-    health check into a crash.
+    every brief until a freeze finally succeeds and the streak resets to zero. Reading the streak
+    is guarded the same way recording it is (see ``snapshots.record_fireflies_freeze_result``): a
+    store that cannot even open must not turn a health check into a crash.
+
+    **Fix round 2, finding 1.** The streak is read from TWO channels and the larger wins:
+    ``Store.freeze_fault`` (the primary, durable count) and ``snapshots.read_fireflies_freeze_fallback``
+    (a plain file, written only when a store write for the same result failed). A DB-specific
+    fault -- ``rabota.db`` locked or unwritable while the rest of ``state_dir`` is fine -- silences
+    the first channel exactly the way it silenced the write it exists to report on; reading only
+    it left this alert unable to sound for that shape no matter how long the fault persisted. The
+    fallback channel does not depend on the write that just failed, so it still counts.
     """
     now = now or datetime.now(timezone.utc)
     index = build_tracked_index(ctx, now)
@@ -284,10 +291,15 @@ def snapshot_health(ctx, now: datetime | None = None) -> list[dict]:
             fault = ctx.store.freeze_fault(ctx.tenant.name)
         except (errors.RabotaError, sqlite3.Error):
             fault = None
-        if fault and fault["fails"] >= snapshots.FIREFLIES_FREEZE_ALERT_AFTER:
+        fallback = snapshots.read_fireflies_freeze_fallback(ctx.state_dir)
+        store_fails = fault["fails"] if fault else 0
+        fallback_fails = fallback["fails"] if fallback else 0
+        fails = max(store_fails, fallback_fails)
+        if fails >= snapshots.FIREFLIES_FREEZE_ALERT_AFTER:
+            source_row = fallback if fallback_fails >= store_fails else fault
             health.append({"source": "fireflies",
-                           "reason": f"bootstrap anchor unwritten for {fault['fails']} consecutive "
-                                     f"attempts ({fault['last_error']}) — fetch window may be sliding forward"})
+                           "reason": f"bootstrap anchor unwritten for {fails} consecutive "
+                                     f"attempts ({source_row['last_error']}) — fetch window may be sliding forward"})
     return health
 
 

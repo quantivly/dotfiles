@@ -514,6 +514,103 @@ class SyncTests(unittest.TestCase):
             store.Store.open(state_dir)
         self.assertIn(str(state_dir), str(cm.exception))
 
+    # ---- DO-768 fix round 2: the bookkeeping cannot depend on the disk it reports about --------
+
+    def test_a_db_specific_fault_still_reaches_the_operator(self):
+        # Adjudicated review of #272 (`mergeable: false` against 2094b11): the row above only pins
+        # the case where the WHOLE `state_dir` is unwritable -- `Store.open` and `snapshots.write`
+        # both raise before any freeze logic runs -- and the fix round reasoned from there that no
+        # narrower gap exists. False: `rabota.db` is a single file inside `state_dir` that can be
+        # unwritable on its OWN (chmod, a corrupt page forcing a read-only fallback, a full disk
+        # hit specific to that file) while the anchor path and `sources/*.json` stay writable.
+        # `Store.open` succeeds against a chmod-0o444 `rabota.db` (`migrate()` is a no-op once the
+        # schema already matches, so no write is even attempted at open time -- verified directly),
+        # the freeze write fails (anchor path occupied by a directory), and
+        # `record_fireflies_freeze_result`'s own guard then swallows the DB write that would have
+        # recorded THAT failure too -- the same swallow, for the same reason, producing the same
+        # silence the row above exists to catch, just one file narrower.
+        #
+        # Fails on 2094b11: the streak lives only in `rabota.db`. `record_fireflies_freeze_result`'s
+        # INSERT never lands against a read-only file, `Store.freeze_fault` stays `None` forever,
+        # and `reconcile.snapshot_health` never has anything to alert on -- however many times the
+        # loop below runs.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        ctx.store   # force the lazy open now, so `rabota.db` exists before it is chmoded
+        ctx.close()
+        db_path = ctx.state_dir / "rabota.db"
+        db_path.chmod(0o444)
+        self.addCleanup(db_path.chmod, 0o644)   # tempdir cleanup needs write access back
+        for i in range(5):
+            anchor, freeze_error = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
+            self.assertIsNotNone(freeze_error, f"call {i}: the anchor write must still fail")
+            snapshots.record_fireflies_freeze_result(ctx, freeze_error)
+        self.assertIsNone(ctx.store.freeze_fault("quantivly"),
+                          "the DB write itself must have failed too, against a read-only rabota.db")
+        health = reconcile.snapshot_health(ctx, self.NOW)
+        self.assertTrue([h for h in health if h["source"] == "fireflies"],
+                        "a DB-specific fault must still reach the operator, through a path that "
+                        "does not require the write that just failed")
+
+    def test_a_locked_database_also_reaches_the_operator(self):
+        # "A locked database is the everyday form of this" (review): the timer and an interactive
+        # session open the same store concurrently by design, so a write can lose a real lock race
+        # (`sqlite3.OperationalError: database is locked`, past `busy_timeout`) with no permission
+        # bit involved at all -- a different shape than the chmod row above, and worth its own row
+        # rather than trusting one failure mode to stand in for the other. Simulated directly on
+        # `Store.record_freeze_result` rather than with a second real connection racing
+        # `busy_timeout=5000ms`, which would make this row slow and still only probabilistically
+        # exercise the lock.
+        #
+        # Fails on 2094b11 the same way the row above does: nothing but `Store.freeze_fault` is
+        # ever consulted, and that streak never advances once every write to it raises.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        with mock.patch.object(store.Store, "record_freeze_result",
+                                side_effect=sqlite3.OperationalError("database is locked")):
+            for i in range(3):
+                anchor, freeze_error = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
+                self.assertIsNotNone(freeze_error, f"call {i}: the anchor write must still fail")
+                snapshots.record_fireflies_freeze_result(ctx, freeze_error)
+        health = reconcile.snapshot_health(ctx, self.NOW)
+        self.assertTrue([h for h in health if h["source"] == "fireflies"],
+                        "a locked rabota.db must still reach the operator")
+
+    def test_a_persistent_fault_within_one_tick_crosses_the_threshold(self):
+        # Fix round 2, finding 2: `FIREFLIES_FREEZE_ALERT_AFTER` counts consecutive failed
+        # ATTEMPTS, not consecutive ticks -- `sync.fireflies_since` and `brief._fireflies_coverage`
+        # are two independent CLI processes that each make their own attempt once per real
+        # operational tick (a timer runs `rabota sync` then `rabota brief`), so a fault present for
+        # exactly ONE tick already posts 2 consecutive attempts -- one from sync, one from brief --
+        # and crosses the threshold within that one tick, not on a second tick. See the
+        # `FIREFLIES_FREEZE_ALERT_AFTER` comment in snapshots.py for why the comment now says
+        # "attempt", not "tick", rather than inventing a shared tick id neither process has.
+        #
+        # Driven through a DB-specific fault (this fix round's own new fallback channel) rather
+        # than a working `rabota.db`, so this row also fails on 2094b11 -- not because the
+        # attempts-vs-ticks semantics changed (they did not: two attempts already crossed the
+        # threshold there too), but because a read-only `rabota.db` there silences BOTH attempts
+        # the same way the row above shows, leaving nothing to alert on regardless of how the
+        # threshold is counted.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        ctx.store
+        ctx.close()
+        db_path = ctx.state_dir / "rabota.db"
+        db_path.chmod(0o444)
+        self.addCleanup(db_path.chmod, 0o644)
+        sync.fireflies_since(ctx, self.NOW)                        # sync's own attempt, this tick
+        self.assertFalse([h for h in reconcile.snapshot_health(ctx, self.NOW) if h["source"] == "fireflies"],
+                         "one attempt alone must still be quiet")
+        brief._fireflies_coverage(ctx, self.NOW)                   # brief's own attempt, the SAME tick
+        health = reconcile.snapshot_health(ctx, self.NOW)
+        self.assertTrue([h for h in health if h["source"] == "fireflies"],
+                        "sync-then-brief within one tick is 2 consecutive attempts, matching what "
+                        "the threshold actually counts")
+
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()
         f = ctx.state_dir / "slack.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)

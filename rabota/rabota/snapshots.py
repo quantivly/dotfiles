@@ -1,4 +1,5 @@
 """Source snapshots: ``<state_dir>/sources/<source>.json``, written atomically and guarded, read back as dicts."""
+import contextlib
 import json
 import os
 import sqlite3
@@ -170,14 +171,27 @@ def read_fireflies_bootstrap_anchor(state_dir: Path) -> datetime | None:
 
 
 # One transient freeze-write failure must stay quiet (DO-768): `since` is still correct THIS call
-# either way (the caller already has `anchor` in hand), and the very next tick tries the write
+# either way (the caller already has `anchor` in hand), and the very next attempt tries the write
 # again from the same "nothing frozen yet" state -- a single fluke costs an operator nothing but
 # one retry it never sees. What must not stay quiet is the SAME write failing again and again: the
 # window then never freezes at all, and every later call re-derives `read_newest_day_brief` live,
 # restoring the pre-DO-761 day-by-day slide with no error and no alert. `FIREFLIES_FREEZE_ALERT_AFTER`
-# is the count of CONSECUTIVE failures (tracked in `Store.fireflies_freeze_faults`, reset to zero
-# the moment a freeze succeeds) at which `reconcile.snapshot_health` starts saying so -- one failure
-# is a fluke by definition here, so 2 is the first count that is not.
+# is the count of CONSECUTIVE failed ATTEMPTS (tracked in `Store.fireflies_freeze_faults`, reset to
+# zero the moment a freeze succeeds) at which `reconcile.snapshot_health` starts saying so -- one
+# failure is a fluke by definition here, so 2 is the first count that is not.
+#
+# DO-768 fix round 2, finding 2: "attempt", not "tick" -- deliberately. `sync.fireflies_since` and
+# `brief._fireflies_coverage` are two independent CLI processes that each make their own attempt
+# once per real operational tick (a timer runs `rabota sync` then `rabota brief`), so a fault
+# present for exactly one tick already posts 2 consecutive attempts and crosses this threshold
+# within that one tick, not on a second tick. Keying the count on something the two processes
+# share (a tick id, a lockfile) would restore a true one-fluke-per-tick guarantee, but nothing in
+# this pipeline hands either process such an id, and inventing one to serve a threshold comment
+# is the wrong end to fix: the threshold's job is "an operator is told before too long", and
+# crossing it a tick early on a persistent fault still does that. The comment and the tests
+# describe attempts, not ticks -- see `test_a_single_transient_freeze_failure_stays_quiet` (one
+# attempt) and `test_a_persistent_fault_within_one_tick_crosses_the_threshold` (sync then brief,
+# same tick, same persistent fault).
 FIREFLIES_FREEZE_ALERT_AFTER = 2
 
 
@@ -248,24 +262,85 @@ def read_or_freeze_fireflies_fallback_anchor(state_dir: Path, dry_run: bool = Fa
     return anchor, _freeze_fireflies_bootstrap_anchor(state_dir, anchor)
 
 
+# `<state_dir>/fireflies-freeze-streak.json` (DO-768 fix round 2, finding 1): the fallback channel
+# for the SAME consecutive-failure streak `Store.fireflies_freeze_faults` tracks, used only when
+# the store write that would have recorded it fails too. Independent review of #272 found that
+# `record_fireflies_freeze_result`'s own guard swallows a DB-specific fault -- `rabota.db` chmoded
+# read-only, locked by a concurrent writer past `busy_timeout`, or a full disk hit mid-write --
+# exactly the way the freeze write it exists to report on is swallowed, while the REST of
+# `state_dir` (the anchor path included) stays perfectly writable. That shape is invisible to the
+# unwritable-state_dir test below (`Store.open` succeeds against a chmoded-read-only `rabota.db`:
+# `migrate()` is a no-op once the schema already matches, so no write is even attempted at open
+# time) -- so the streak must not live ONLY in the file that is, itself, the thing failing. A plain
+# file next to it is a different write path: unwritable is only the whole-`state_dir` shape already
+# covered elsewhere and already loud.
+FIREFLIES_FREEZE_STREAK_FALLBACK_FILE = "fireflies-freeze-streak.json"
+
+
+def read_fireflies_freeze_fallback(state_dir: Path) -> dict | None:
+    """The fallback freeze-fault streak (``{"fails", "last_error", "last_failed_at"}``) recorded
+    via ``FIREFLIES_FREEZE_STREAK_FALLBACK_FILE``, or ``None`` when nothing has ever been recorded
+    there (including an unreadable or corrupt file -- same reasoning as every other marker file in
+    this module: it is not this function's job to raise over a marker it does not own).
+
+    ``reconcile.snapshot_health`` reads this alongside ``Store.freeze_fault`` so a DB-specific
+    fault cannot silence the alert the streak exists to raise -- see
+    ``FIREFLIES_FREEZE_STREAK_FALLBACK_FILE``'s comment for why the two channels exist at all.
+    """
+    path = Path(state_dir) / FIREFLIES_FREEZE_STREAK_FALLBACK_FILE
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _record_fireflies_freeze_fallback(state_dir: Path, freeze_error: str) -> None:
+    """Bump the fallback streak by one and persist it -- called only once the store write for the
+    SAME result has already failed (``record_fireflies_freeze_result`` below). Guarded the same
+    way the anchor freeze itself is: a state dir that cannot take this write either is the
+    whole-directory shape that already fails loudly elsewhere, not a new silent gap.
+    """
+    prior = read_fireflies_freeze_fallback(state_dir)
+    fails = (prior["fails"] if prior else 0) + 1
+    path = Path(state_dir) / FIREFLIES_FREEZE_STREAK_FALLBACK_FILE
+    with contextlib.suppress(OSError):
+        emit.write_file(path, json.dumps({"fails": fails, "last_error": freeze_error, "last_failed_at": now()}))
+
+
+def _clear_fireflies_freeze_fallback(state_dir: Path) -> None:
+    """Drop the fallback streak once a real store write succeeds -- the store is authoritative
+    again, and a stale fallback file must not keep alerting after the fault it recorded has
+    healed. A no-op when there is nothing to clear, which is the common case."""
+    path = Path(state_dir) / FIREFLIES_FREEZE_STREAK_FALLBACK_FILE
+    if path.exists():
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
 def record_fireflies_freeze_result(ctx, freeze_error: str | None) -> None:
     """Best-effort bookkeeping of ``freeze_error`` (see ``read_or_freeze_fireflies_fallback_anchor``)
-    into ``ctx.store``'s consecutive-failure streak for ``ctx.tenant``.
+    into ``ctx.store``'s consecutive-failure streak for ``ctx.tenant`` -- and, when that write
+    itself fails, into the plain-file fallback streak instead (DO-768 fix round 2).
 
     Guarded, deliberately: a caller reaches this only after the freeze itself already degraded
     gracefully (DO-768) rather than crashing, and a store that cannot even open -- a state dir
     unwritable from the very first call this process ever made, before any row has ever been
     written -- must not turn this bookkeeping step into the crash the freeze itself just avoided.
-    Losing one streak update this way is the same trade the freeze itself already makes: the
-    caller already has its answer for this call regardless of whether the count gets recorded.
+    Losing the STORE'S streak update this way is the same trade the freeze itself already makes:
+    the caller already has its answer for this call regardless of whether the count gets recorded
+    there. It is not, any more, the same trade for the streak overall -- see
+    ``FIREFLIES_FREEZE_STREAK_FALLBACK_FILE``'s comment for the DB-specific fault this covers,
+    which the store guard alone left silent forever.
 
-    This streak covers only the narrow shape where the anchor's OWN path is unwritable while the
-    rest of ``state_dir`` -- ``ctx.store``, ``sources/*.json`` -- is not. A ``state_dir`` unwritable
-    in general never reaches this line: ``snapshots.write`` and ``Store.open`` both raise on it, so
-    the whole tick fails loudly (non-zero exit, no snapshot, no rank, no brief) before any freeze
-    logic runs, and needs no streak here to be noticed.
+    On a successful store write, any stale fallback record is cleared -- the store is trusted
+    again the moment it proves it still works.
     """
     try:
         ctx.store.record_freeze_result(ctx.tenant.name, freeze_error)
     except (errors.RabotaError, sqlite3.Error):
-        pass
+        if freeze_error is not None:
+            _record_fireflies_freeze_fallback(ctx.state_dir, freeze_error)
+        return
+    _clear_fireflies_freeze_fallback(ctx.state_dir)
