@@ -190,12 +190,13 @@ check "one profile's spend never leaks into the next one measured" \
 
 # DO-623: `disabled` is its own state, split out of `unknown` -- a Max seat with
 # enabled:false is a measured fact ("no spend limit configured"), not an
-# unmeasured one. The fixture is the real shape (personal-0 reads 134.43 against
-# 125.0 with enabled:false), which is why "no credits" is not what enabled:false
-# means. (The companion assertion that it still only DEMOTES the pick to
+# unmeasured one. The fixture is the real shape -- a `used` PAST its own `limit`
+# with enabled:false -- which is why "no credits" is not what enabled:false
+# means. (Figures are synthetic: a live seat's spend does not belong in a public
+# repo, and the SHAPE is the whole of what the row needs.) (The companion assertion that it still only DEMOTES the pick to
 # weekly-spent -- not exhausted -- lives below with sw2/sw3, once `pfd` exists.)
 new_home sp_disabled
-mkprof a1 "{\"plan\":{\"tier\":{\"Max\":20}},\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+mkprof a1 "{\"plan\":{\"tier\":{\"Max\":20}},\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\"spend\":{\"enabled\":false,\"used\":60.0,\"limit\":50.0}}"
 check "spend: enabled:false is 'disabled', not 'unknown'" "$(spend_of a1 | cut -d'|' -f1)" "disabled"
 
 new_home sp_absent_enabled
@@ -456,7 +457,7 @@ check "a billing seat is picked in the weekly-spent tier"   "$(pfd '' '' '' 0 | 
 # interactively, because the seat serves nothing and "proceed on the least-bad
 # one" would hand back a session that dies on its first prompt.
 new_home sw2b
-mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+mkprof a1 "{$FIVE,$WEEK_SPENT_LIVE,\"spend\":{\"enabled\":false,\"used\":60.0,\"limit\":50.0}}"
 check "a disabled Max seat is refused, not demoted"            "$(pfd '' '' '' 0 | cut -d: -f1)" "2"
 check "...and names no class, the way every refusal does"      "$(pfd '' '' '' 0 | cut -d: -f4)" ""
 check "...but CLAUDE_PICK_SPENT_OK=1 still opens the door"     "$(pfd 'CLAUDE_PICK_SPENT_OK=1' '' '' 0 | cut -d: -f1)" "0"
@@ -2149,7 +2150,7 @@ check "an unknown-spend weekly-spent pick warns with the UNKNOWN wording, never 
 # left as an arm whose condition cannot fire. These rows pin that it is a
 # refusal, not a quiet pick carrying a warning.
 new_home bill4
-mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+mkprof a1 "{$FIVE,\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 86400)\"},\"spend\":{\"enabled\":false,\"used\":60.0,\"limit\":50.0}}"
 cli --dry-run --json
 check "a disabled Max seat on a spent week refuses rather than warning" \
       "$(jq -r .state <<<"$CLI_OUT")" "exhausted"
@@ -2580,7 +2581,7 @@ mk_gate_prof() {
 
 SP_NONE='{"enabled":true,"used":275.23,"limit":275.0}'
 SP_ROOM='{"enabled":true,"used":190.77,"limit":250.0}'
-SP_OFF='{"enabled":false,"used":134.43,"limit":125.0}'
+SP_OFF='{"enabled":false,"used":60.0,"limit":50.0}'
 SP_NADA='null'
 WS_FABLE_SPENT="[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]"
 
@@ -2944,7 +2945,7 @@ check "gate: without --gate the spent window changes nothing" \
 # the class, the reset that is quoted, and whether an interactive launch starts.
 # =============================================================================
 WWLIVE="\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 259200)\"}"
-SP_MAX='"spend":{"enabled":false,"used":134.43,"limit":125.0}'
+SP_MAX='"spend":{"enabled":false,"used":60.0,"limit":50.0}'
 SP_WALL='"spend":{"enabled":true,"used":275.23,"limit":275.0}'
 SP_ROOM='"spend":{"enabled":true,"used":10.0,"limit":250.0}'
 FIVE_WALL='"five_hour":{"utilization":99.0,"resets_at":"'"$(iso_in 3600)"'"}'

@@ -66,8 +66,8 @@ Why `disabled` allows, written down because it is the arm that reads as inconsis
   refusal is about a figure that describes *nothing*: stale, rolled, or undated. Here the
   utilization is freshly fetched with a live reset. "Never optimistic" was written about
   measurements, not about a good measurement of unknown effect.
-- **Nobody has watched a Max seat block on a spent window.** `personal-0` reads
-  `used 134.43` against `limit 125.0` with `enabled:false`, which is not the shape "no
+- **Nobody has watched a Max seat block on a spent window.** A Max seat here reads a
+  `used` PAST its own `limit` with `enabled:false`, which is not the shape "no
   credits" predicts. Refusing on the field name is the #123 failure — a plausible mechanism
   standing in for an observation — recurring one document over from the repo's own record of it.
 - **The asymmetry is the same one Part A already resolved.** `~/.config/claude-tenants.zsh`
@@ -172,9 +172,8 @@ when `fetched_at` is absent".
 ```sh
 new_home sp_disabled
 # A Max seat: enabled:false, and a `used` that has PASSED its `limit` — the real
-# shape (personal-0 reads 134.43 against 125.0), which is why "no credits" is not
-# what enabled:false means.
-mkprof a1 "{\"plan\":{\"tier\":{\"Max\":20}},\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\"spend\":{\"enabled\":false,\"used\":134.43,\"limit\":125.0}}"
+# shape one is in here, which is why "no credits" is not what enabled:false means.
+mkprof a1 "{\"plan\":{\"tier\":{\"Max\":20}},\"five_hour\":{\"utilization\":5.0,\"resets_at\":\"$(iso_in 3600)\"},\"seven_day\":{\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"},\"spend\":{\"enabled\":false,\"used\":60.0,\"limit\":50.0}}"
 check "spend: enabled:false is 'disabled', not 'unknown'" "$(metrics a1 | cut -d' ' -f9)" "disabled"
 check "...and a disabled Max seat still only DEMOTES"     "$(_claude_pick_class a1)"      "weekly-spent"
 
@@ -230,8 +229,8 @@ Update the field doc at `zsh/zshrc.herdr:699`:
   # seat: six "individual spend limit" errors on 2026-09-18. For a Max seat there
   # is no measurement at all — only the field name, and the reasoning "no
   # usage-credit overflow, therefore blocked". Plausible, and not enough:
-  # personal-0 reads used 134.43 against a limit of 125.0 with enabled:false, so a
-  # Max seat does carry a spend counter that has passed a limit, which is not the
+  # a Max seat here reads a used PAST its own limit with enabled:false, so such a
+  # seat does carry a spend counter that has passed a limit, which is not the
   # shape "no credits" predicts.
 ```
 
@@ -468,7 +467,7 @@ ${fa:+,\"fetched_at\":$fa},\"seven_day\":$sd,\"weekly_scoped\":$ws,\"spend\":$sp
 
 SP_NONE='{"enabled":true,"used":275.23,"limit":275.0}'
 SP_ROOM='{"enabled":true,"used":190.77,"limit":250.0}'
-SP_OFF='{"enabled":false,"used":134.43,"limit":125.0}'
+SP_OFF='{"enabled":false,"used":60.0,"limit":50.0}'
 SP_NADA='null'
 WS_FABLE_SPENT="[{\"label\":\"7d fable\",\"utilization\":100.0,\"resets_at\":\"$(iso_in 216000)\"}]"
 

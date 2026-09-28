@@ -587,7 +587,7 @@ rm -f "$FHOME/.clauth/profiles/personal/usage_cache.json"
 # not start a session that dies on its first prompt. The retired warning's
 # wording must not reappear on either the refusal or a pick.
 cat > "$FHOME/.clauth/profiles/personal/usage_cache.json" <<EOF
-{"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100.0,"resets_at":"$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"},"spend":{"enabled":false,"used":134.43,"limit":125.0}}
+{"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100.0,"resets_at":"$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"},"spend":{"enabled":false,"used":60.0,"limit":50.0}}
 EOF
 run "claude"
 check "a disabled Max seat on a spent week is refused, not announced" \

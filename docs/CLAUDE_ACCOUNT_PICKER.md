@@ -503,8 +503,9 @@ instead: refuse, reported as `gate-unmeasured`** (the reason says "no spend limi
   individual spend limit · run /usage-credits to raise it" and "monthly spend limit"
   errors.** The *raise it* wording (not "ask your admin") is consistent with individual
   seats. This is suggestive, not proof: the records could not be attributed to a seat.
-- **personal-0's `used 134.43` against `limit 125` with `enabled:false`** fits "extra usage
-  was on, overran, and was switched off". Either way the seat has no overflow.
+- **A Max seat here records a `used` that has PASSED its own `limit`, with `enabled:false`** —
+  which fits "extra usage was on, overran, and was switched off". Either way the seat has no
+  overflow.
 - **It is the cheaper error.** If such a seat would block, refusing loses nothing; if it
   would run, the cost is a refused lane until the window resets — against a lane that dies
   mid-task, which is what the gate exists to prevent.
