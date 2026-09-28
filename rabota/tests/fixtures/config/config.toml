@@ -1,7 +1,5 @@
-default = "personal"
-[[route]]
-prefix = "~/quantivly"
-tenant = "quantivly"
-[[route]]
-prefix = "~/toysim"
-tenant = "toysim"
+# Routes and the default moved to the tenants file in DO-773 — CLAUDE_TENANT_ROUTES,
+# CLAUDE_TENANT_PATH_ROUTES and CLAUDE_TENANT_DEFAULT in ~/.config/claude-tenants.zsh are the one
+# home for which tenant owns a directory, and config.load REFUSES either key here rather than
+# ignoring it. This file is deliberately left with no keys at all: the tenants under tenants/ are
+# the whole of what this overlay declares.

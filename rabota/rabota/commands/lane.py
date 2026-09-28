@@ -401,6 +401,13 @@ def local_repo_path(tenant, repo: str) -> str:
     failure deferred to whoever lands the local run form. Both branches now name the mistake in
     the same shape, before anything is created.
 
+    TWO VOCABULARIES, in one order: a key of the tenant's ``[repos]`` table wins, and every other
+    name is resolved under ``root`` as it always was. The table is what lets a tenant address a
+    repository that cannot live under its root — ``~/.dotfiles`` is the case that forced it,
+    since dotbot's symlinks require that exact path — and it is symmetric with
+    ``[machines.<m>].repos``, which the remote branch has always had. A tenant that declares no
+    table behaves exactly as it did before DO-773.
+
     ``--repo`` must name something UNDER the root rather than merely resolve to a directory, and
     an existence check alone does not say that. ``Path("/a") / "/etc"`` is ``/etc``, so an
     absolute ``--repo`` would hand a local lane a checkout outside the tenant entirely -- and be
@@ -414,8 +421,36 @@ def local_repo_path(tenant, repo: str) -> str:
     sharper message at the cost of refusing a layout that works. Existence is the fault this was
     filed for; the list is a hint, labelled as the hint it is.
     """
+    # A DECLARED KEY WINS, and the root still answers everything else. Declared beats implicit,
+    # so a key may deliberately shadow a same-named child of the root; a name that is NOT a key
+    # falls through to the root form below, and the one refusal at the end names both
+    # vocabularies so neither miss is reported as the other.
+    #
+    # NOT an allow-list, and that was measured rather than reasoned. Making the table exclusive
+    # reads better beside a refusal that lists keys, but on the machine this was written for it
+    # costs a tenant 31 repositories to gain one: ~/quantivly holds 32 checkouts and needs the
+    # root form, while ~/.dotfiles is the single repository that cannot live under it. A table
+    # that ADDS named paths keeps both, is backwards compatible for every tenant that declares
+    # none, and has no silent failure of its own -- an unknown name is one refusal naming the
+    # keys AND the checkouts.
+    if repo in tenant.repos:
+        declared = Path(tenant.repos[repo]).expanduser()
+        if not declared.is_dir():
+            # A DECLARED path that is not there is a different fault from an unknown name, with a
+            # different fix -- clone it, or correct the table -- so it gets its own sentence
+            # rather than being folded into the root-form refusal by a single existence test.
+            raise errors.Refused(
+                f"--repo {repo!r} is declared by tenant {tenant.name!r} as {str(declared)!r}, "
+                f"which is not a directory on this machine ([repos] in tenants/{tenant.name}.toml)")
+        return str(declared)
+
     root = Path(tenant.root).expanduser()
     where = f"tenant {tenant.name!r}'s root {str(root)!r}"
+    # Carried into EVERY refusal below. A mistyped key reaches the root form and would otherwise
+    # be told only about the root -- sending the reader to clone something that is declared and
+    # already there under another name.
+    keys = (f"; keys under [repos] in tenants/{tenant.name}.toml: {sorted(tenant.repos)}"
+            if tenant.repos else "")
     # ``not parts`` covers "" and ".", both of which make ``root / repo`` the ROOT ITSELF and so
     # hand a lane the whole tenant as its repo -- an existence check alone passes them, because
     # the root does exist.
@@ -424,20 +459,20 @@ def local_repo_path(tenant, repo: str) -> str:
         raise errors.Refused(
             f"--repo {repo!r} is not a name under {where}: --repo names a checkout INSIDE the "
             f"tenant's root, and an empty name, an absolute path, or one stepping up through "
-            f"'..' is not one")
+            f"'..' is not one{keys}")
     path = root / repo
     if path.is_dir():
         return str(path)
     if not root.is_dir():
         raise errors.Refused(
             f"--repo {repo!r} is not reachable: {where} is not a directory, so a local lane for "
-            f"this tenant can reach no repo at all (tenants/{tenant.name}.toml sets root)")
+            f"this tenant can reach nothing under it (tenants/{tenant.name}.toml sets root){keys}")
     names = local_repos(root)
     known = (f"git checkouts under it: {names}" if names is not None else
              f"and {str(root)!r} could not be listed, so this cannot say what is there")
     raise errors.Refused(
         f"--repo {repo!r} is not a directory under {where}: --repo takes a name under that root, "
-        f"which is where a local lane looks for it; {known}")
+        f"which is where a local lane looks for it; {known}{keys}")
 
 
 def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minutes, run,

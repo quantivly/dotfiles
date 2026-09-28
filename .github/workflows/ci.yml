@@ -378,6 +378,31 @@ jobs:
       - name: Run the machine registry state table
         run: ./scripts/test-machines-render.sh
 
+  tenant-route-test:
+    name: Tenant Router State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh, jq and git
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq git
+
+      # The router decides WHICH TENANT OWNS A DIRECTORY, and therefore which
+      # seat a lane bills and whose books its row lands in. Two layers used to
+      # answer that by different keys and disagreed for any repository checked
+      # out away from its tenant's root -- a lane billing one account while the
+      # interactive session in the same directory billed another (DO-773). The
+      # rows are all one question: can this hand back a tenant it did not derive?
+      # A directory git cannot read must be an ERROR, never the default, because
+      # the default is the one wrong answer that looks right.
+      - name: Run the tenant router state table
+        run: ./scripts/test-tenant-route.sh
+
   claude-pick-test:
     name: Claude Account Picker State Table
     runs-on: ubuntu-latest

@@ -1,0 +1,195 @@
+#!/usr/bin/env zsh
+#
+# scripts/tenant-route
+# ====================
+#
+# WHICH TENANT OWNS A DIRECTORY, answered once, by the one implementation.
+#
+# Two layers used to answer this by different keys (DO-773). `rabota`
+# (`config.resolve_tenant`) routed by cwd PATH PREFIX; the account picker
+# (`_claude_tenant_for` in zsh/zshrc.herdr) routes by GIT REMOTE OWNER first,
+# then a path route, then the default. So one directory had two tenants, and on
+# this box two of them were live:
+#
+#   ~/.dotfiles        picker: quantivly (remote owner)  rabota: personal (default)
+#   ~/Projects/toysim  picker: toysim    (remote owner)  rabota: personal (default)
+#
+# That is not cosmetic. A lane dispatched from such a directory bills the seat
+# and files its row under whichever tenant rabota chose, while an interactive
+# session in the same directory bills the one the picker chose — different
+# seats, different gh identities, and pools with nothing in common.
+#
+# WHICH RULE SURVIVED, and why that direction. The picker's, and it is argued
+# where it lives: "Only a directory with no GitHub remote may be decided by its
+# PLACE. A remote that matched no route has already answered 'the default
+# tenant' — the answer git identity gives — and the path table must not overrule
+# it." That rule exists to stop a work repository drawing the personal pool, and
+# regressing it to reinstate path-first would reintroduce a failure this layer
+# was built to end. A repository's identity travels with the repository; where it
+# happens to be checked out does not.
+#
+# AND NOTHING IS REIMPLEMENTED. This calls `_claude_tenant_for` rather than
+# parsing remotes again in another language — "copying _gh_url_owner here would
+# give the machine two answers to who owns this repo", which is the exact defect
+# above, one level down. The mechanism is `scripts/machines-render`'s, for the
+# same reason DO-665 chose it there: the tenants file is canonical, nothing is
+# rendered to disk to go stale, and the loud side asks.
+#
+# Usage:
+#   tenant-route [<dir>]     JSON: {"tenant", "state", "why"} for <dir> (default $PWD)
+#   tenant-route --check     validate the tenants file only; print nothing on success
+#
+# Exit: 0 answered · 2 could not answer · 64 usage.
+#
+# THERE IS NO "EMPTY" ANSWER HERE, and that is the difference from
+# machines-render. An empty registry is a real answer (a modular adopter owns no
+# machine); an empty TENANT is not — every directory belongs to someone, so a
+# question this cannot answer is exit 2 and never a blank that a caller might
+# read as "the default". `git-error` is the case that matters: "git could not be
+# asked" is not "there is nothing here", and falling through to the default is
+# precisely how a work repository would get the personal pool in silence.
+
+emit_usage() {
+  print -u2 -- "usage: tenant-route [<dir>] | tenant-route --check"
+  exit 64
+}
+
+check_only=0
+dir="$PWD"
+case "${1:-}" in
+  "")       ;;
+  --check)  check_only=1 ;;
+  -*)       emit_usage ;;
+  *)        dir="$1" ;;
+esac
+(( $# > 1 )) && emit_usage
+
+# Relative to THIS script, never ~/.dotfiles: rabota ships inside this repo, and
+# a worktree or a test checkout must route through its own copy of the picker
+# rather than whichever one happens to be deployed. Same rule, and same reason,
+# as `machines.RENDERER` on the Python side.
+HERE="${0:A:h}"
+ROOT="${HERE:h}"
+GITHUB_SH="$ROOT/zsh/functions/github.sh"
+HERDR_SH="$ROOT/zsh/zshrc.herdr"
+TENANTS="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+
+die() { print -u2 -- "tenant-route: $1"; exit 2 }
+
+# EVERY FILE THE FORK WILL SOURCE IS CHECKED HERE, not inside it. A `source`
+# that fails leaves the forked shell RUNNING with the function undefined and the
+# tables empty, so the fault arrives as "no tenant" rather than as itself — the
+# shape machines-render pays for at length. `zsh -n` separates "does it parse"
+# from "what did it return"; only the first is a fault.
+for f in "$GITHUB_SH" "$HERDR_SH"; do
+  [[ -r "$f" ]] || die "cannot read $f, which supplies the tenant resolver"
+  if ! parse_err="$(command zsh -n "$f" 2>&1)"; then
+    die "$f does not parse, so nothing in it ran: ${parse_err:-zsh -n failed with no message}"
+  fi
+done
+
+# A SYMLINK WHOSE TARGET IS GONE is not "no tenants file" — `-e` follows the
+# link, and a broken one is what a mid-deploy checkout or a removed worktree
+# leaves behind: a state that arrives by accident and would otherwise read as a
+# choice. machines-render's rule, and its wording.
+if [[ -L "$TENANTS" && ! -e "$TENANTS" ]]; then
+  die "$TENANTS is a symlink whose target does not exist"
+fi
+# UNLIKE machines-render, a MISSING tenants file is a fault rather than an empty
+# answer. There is no tenant to fall back to: rabota gave up its own [[route]]
+# table and default to this file (DO-773), so "the file is not there" means the
+# question has no answer at all, and guessing one is the fail-open direction
+# this whole script exists to close.
+[[ -e "$TENANTS" ]] || die "$TENANTS does not exist, and it is where the tenant tables live"
+# `-f` not `-e`: a DIRECTORY passes both -e and -r, `source` fails on it, and the
+# tables come back empty with exit 0.
+[[ -f "$TENANTS" ]] || die "$TENANTS is not a regular file"
+[[ -r "$TENANTS" ]] || die "cannot read $TENANTS"
+if ! zsh_n_err="$(command zsh -n "$TENANTS" 2>&1)"; then
+  print -u2 -- "tenant-route: $TENANTS does not parse, so nothing in it ran:"
+  print -u2 -- "    ${zsh_n_err:-zsh -n failed with no message}"
+  print -u2 -- "    Check it yourself with: zsh -n $TENANTS"
+  exit 2
+fi
+(( check_only )) && exit 0
+
+command -v jq >/dev/null 2>&1 || die "jq is required to render the answer and is not on PATH"
+
+# MARKED output and a sentinel, both for machines-render's measured reasons: a
+# stray `print` in a sourced file would otherwise BECOME the data, and the fork
+# failing to complete at all is a different thing from it answering nothing.
+# The tables are pre-declared even though zshrc.herdr declares them too — a
+# subscript assignment to a name neither declares would abort the source at that
+# line and hand back an empty answer.
+fork_err="$(command mktemp)" || die "could not create a temp file"
+raw="$(command zsh -f -c '
+  typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+  typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR \
+              CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID
+  source "$2"            # github.sh  — _gh_repo_remotes, the ONE remote reader
+  source "$3"            # zshrc.herdr — _claude_tenant_for, the ONE rule
+  source "$1"            # the tenants file, sourced LAST and at top level
+  if (( ! $+functions[_claude_tenant_for] )); then print -r -- "__NOFUNC__"; print -r -- "__DONE__"; return 0; fi
+  _claude_tenant_for "$4"; rc=$?
+  print -r -- "__RC__$rc"
+  print -r -- "__STATE__${_CLAUDE_TENANT_STATE}"
+  print -r -- "__TENANT__${_CLAUDE_TENANT}"
+  # NEWLINES SQUASHED, never passed through: `why` can carry git'"'"'s own stderr
+  # verbatim, which is multi-line, and a marker protocol reads the second line as
+  # a field it never sent. A tab does the same to the jq split below.
+  why="${_CLAUDE_TENANT_WHY//$'"'"'\n'"'"'/ }"
+  print -r -- "__WHY__${why//$'"'"'\t'"'"'/ }"
+  print -r -- "__DONE__"' tenant-route "$TENANTS" "$GITHUB_SH" "$HERDR_SH" "$dir" </dev/null 2>"$fork_err")"
+fork_err_text="$(< "$fork_err")"
+command rm -f "$fork_err"
+
+# ANY STDERR FROM THE FORK IS A FAULT — the class-wide guard, not a list of
+# shapes. The forked shell declares, sources and prints, so every byte here came
+# from one of the three files, and a command in one of them failing at RUN time
+# is the way the answer goes empty that neither `zsh -n` nor the source's status
+# nor the sentinel can see. Measured 0 bytes for the real files on this box.
+if [[ -n "$fork_err_text" ]]; then
+  print -u2 -- "tenant-route: the tenant resolver did not run cleanly, so its answer is not trustworthy:"
+  # fd 1 into the pipe, not fd 2: `print -u2 … | sed` hands sed an empty stdin
+  # and the indent silently does nothing (DO-674).
+  print -r -- "${fork_err_text}" | command sed 's/^/    /' >&2
+  print -u2 -- "    Check for CRLF line endings or a byte-order mark in $TENANTS, or an"
+  print -u2 -- "    assignment there to a table this script does not declare."
+  exit 2
+fi
+if [[ $'\n'"$raw"$'\n' != *$'\n'__DONE__$'\n'* ]]; then
+  die "the tenant resolver never reported back — no zsh on PATH, the process killed, or its output truncated"
+fi
+
+rc=""; state=""; tenant=""; why=""; nofunc=0
+while IFS= read -r line; do
+  case "$line" in
+    __NOFUNC__) nofunc=1 ;;
+    __RC__*)    rc="${line#__RC__}" ;;
+    __STATE__*) state="${line#__STATE__}" ;;
+    __TENANT__*) tenant="${line#__TENANT__}" ;;
+    __WHY__*)   why="${line#__WHY__}" ;;
+  esac
+done <<< "$raw"
+
+if (( nofunc )); then
+  die "$HERDR_SH defines no _claude_tenant_for — this script routes through the picker's own resolver and will not reimplement it"
+fi
+# A NON-ZERO rc IS THE RESOLVER REFUSING, and it is carried through rather than
+# translated: `git-error` (git could not be asked), `bad-table` (the tenant
+# tables are malformed) and `none` (no route matched and no default is set) are
+# three different faults with three different fixes, and the resolver's own
+# `why` names which.
+if [[ "$rc" != 0 || -z "$tenant" ]]; then
+  print -u2 -- "tenant-route: no tenant for '$dir' (state ${state:-unknown}): ${why:-no reason given}"
+  exit 2
+fi
+
+# jq from typed pieces, never string concatenation: `why` is prose carrying
+# quotes and apostrophes by design ("remote 'origin' owner 'quantivly' matches
+# route 'quantivly'"), and one of them is the difference between a document and
+# a syntax error.
+print -r -- "$tenant"$'\t'"$state"$'\t'"$why" |
+  command jq -R -s '
+    rtrimstr("\n") | split("\t")
+    | {tenant: .[0], state: .[1], why: .[2]}'

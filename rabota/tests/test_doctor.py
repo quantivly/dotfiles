@@ -1,8 +1,8 @@
 import argparse, hashlib, json, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
 from unittest import mock
 from pathlib import Path
-from rabota import context
-from rabota.commands import doctor
+from rabota import context, errors
+from rabota.commands import doctor, lane
 from rabota.runner import FakeRunner, Result
 from rabota.store import SCHEMA_VERSION
 from tests.support import last_json
@@ -612,7 +612,7 @@ class TenantRootTests(unittest.TestCase):
         return ctx
 
     def row(self, **kw):
-        rows = doctor.tenant_root(self.ctx(**kw))
+        rows = doctor.tenant_repos(self.ctx(**kw))
         self.assertEqual(len(rows), 1, rows)   # exactly one row per tenant, pass or fail
         return rows[0]
 
@@ -645,7 +645,7 @@ class TenantRootTests(unittest.TestCase):
         than everything". The fixture declares one key, so the partial case is built by hand."""
         ctx = self.ctx(repos=("hub",))
         ctx.tenant.machines["dev"].repos["extra"] = "~/quantivly/extra"
-        name, ok, detail = doctor.tenant_root(ctx)[0]
+        name, ok, detail = doctor.tenant_repos(ctx)[0]
         self.assertTrue(ok, detail)
         self.assertIn("resolves 1 of the 2 repo keys", detail)
         self.assertIn("not checked out here: ['extra']", detail)
@@ -662,7 +662,7 @@ class TenantRootTests(unittest.TestCase):
         self.assertEqual(name, "toysim")
         self.assertTrue(ok, detail)
         self.assertIn("1 git checkout", detail)
-        self.assertIn("declares no machine repos", detail)
+        self.assertIn("widgets", detail)
 
     def test_a_tenant_declaring_no_machine_repos_fails_on_an_empty_root(self):
         name, ok, detail = self.row(tenant="toysim", plain=("notes",))
@@ -675,15 +675,95 @@ class TenantRootTests(unittest.TestCase):
         git checkout" sends the reader to clone what may already be there."""
         ctx = self.ctx(tenant="toysim", repos=("widgets",))
         with mock.patch.object(Path, "iterdir", side_effect=PermissionError(13, "denied")):
-            name, ok, detail = doctor.tenant_root(ctx)[0]
+            name, ok, detail = doctor.tenant_repos(ctx)[0]
         self.assertFalse(ok)
         self.assertIn("UNMEASURED", detail)
         self.assertNotIn("holds no git checkout", detail)
 
     def test_the_check_touches_no_machine(self):
         ctx = self.ctx(repos=("hub",))
-        doctor.tenant_root(ctx)
+        doctor.tenant_repos(ctx)
         self.assertEqual(ctx.runner.calls, [])
+
+
+class DeclaredReposTests(unittest.TestCase):
+    """DO-773: a tenant declaring ``[repos]`` is checked against that table, not against its root.
+
+    The two vocabularies must be the SAME two ``lane.local_repo_path`` uses. A doctor that asked
+    the stricter question would FAIL a tenant whose lanes all start fine, and one that asked the
+    looser would pass a tenant whose every lane refuses — both are the defect this issue is about,
+    reappearing in the check written to catch it.
+    """
+
+    def ctx(self, **repos):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name) / "state"),
+                                text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]),
+                                             env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        base = Path(tmp.name) / "elsewhere"
+        base.mkdir()
+        # A root that holds NOTHING. Every row here passes or fails on the table alone, so a
+        # root still being weighed would show up as a row that cannot be satisfied.
+        ctx.tenant.root = Path(tmp.name) / "unused-root"
+        ctx.tenant.root.mkdir()
+        ctx.tenant.repos = {}
+        for key, present in repos.items():
+            path = base / key
+            if present:
+                path.mkdir(); (path / ".git").mkdir()
+            ctx.tenant.repos[key] = str(path)
+        return ctx
+
+    def row(self, **repos):
+        rows = doctor.tenant_repos(self.ctx(**repos))
+        self.assertEqual(len(rows), 1, rows)
+        return rows[0]
+
+    def test_all_declared_repos_present_passes_and_counts_them(self):
+        name, ok, detail = self.row(dotfiles=True, hub=True)
+        self.assertTrue(ok, detail)
+        self.assertIn("declares 2 repos", detail)
+        self.assertIn("2 of them here", detail)
+
+    def test_a_partial_answer_passes_and_names_the_missing_path(self):
+        name, ok, detail = self.row(dotfiles=True, hub=False)
+        self.assertTrue(ok, detail)
+        self.assertIn("not a directory here", detail)
+        self.assertIn("hub -> ", detail)          # the PATH, which is what the reader must fix
+        self.assertNotIn("dotfiles -> ", detail)  # and not the one that is fine
+
+    def test_nothing_reachable_by_EITHER_route_fails(self):
+        """The row follows the lane: a tenant fails only when neither the table nor the root can
+        give it a --repo. Here the table resolves nothing and the root is empty."""
+        name, ok, detail = self.row(dotfiles=False, hub=False)
+        self.assertFalse(ok)
+        self.assertIn("not a directory here", detail)
+        self.assertIn("nothing it can be given", detail)
+
+    def test_a_missing_root_does_not_fail_a_tenant_whose_table_reaches_something(self):
+        """A root that is not there and a tenant that is fine: its declared repo resolves, so its
+        lanes start. Failing it here would be doctor disagreeing with the command it checks."""
+        ctx = self.ctx(dotfiles=True)
+        ctx.tenant.root = Path("/no/such/root/anywhere")
+        name, ok, detail = doctor.tenant_repos(ctx)[0]
+        self.assertTrue(ok, detail)
+        self.assertIn("nothing needs it", detail)
+
+    def test_the_row_agrees_with_what_the_lane_would_actually_do(self):
+        """The coupling itself, asserted rather than assumed: for each declared key, doctor's
+        verdict and ``lane.local_repo_path`` must agree about whether it is reachable."""
+        ctx = self.ctx(dotfiles=True, hub=False)
+        for key, reachable in (("dotfiles", True), ("hub", False)):
+            with self.subTest(key=key):
+                try:
+                    lane.local_repo_path(ctx.tenant, key)
+                    lane_ok = True
+                except errors.Refused:
+                    lane_ok = False
+                self.assertEqual(lane_ok, reachable)
+        self.assertTrue(doctor.tenant_repos(ctx)[0][1])   # one resolves, so the row passes
 
 
 class TenantRootWiringTests(unittest.TestCase):
@@ -703,7 +783,7 @@ class TenantRootWiringTests(unittest.TestCase):
         pin_tenant_root(self, ctx, "widgets")
         report = doctor.run_doctor(ctx)
         self.assertTrue(report["ok"], report["problems"])
-        self.assertEqual([(r["tenant"], r["ok"]) for r in report["tenant_root"]], [("toysim", True)])
+        self.assertEqual([(r["tenant"], r["ok"]) for r in report["tenant_repos"]], [("toysim", True)])
 
     def test_an_unreachable_root_fails_the_whole_report_and_is_named_in_problems(self):
         ctx = self.make_ctx(healthy_runner())
@@ -711,8 +791,8 @@ class TenantRootWiringTests(unittest.TestCase):
         ctx.tenant.root = Path(tmp.name) / "no-such-root"
         report = doctor.run_doctor(ctx)
         self.assertFalse(report["ok"])
-        self.assertEqual([r["ok"] for r in report["tenant_root"]], [False])
-        self.assertTrue(any("tenant root" in p for p in report["problems"]), report["problems"])
+        self.assertEqual([r["ok"] for r in report["tenant_repos"]], [False])
+        self.assertTrue(any("tenant repos" in p for p in report["problems"]), report["problems"])
 
     def test_the_root_problem_is_reported_ahead_of_the_cross_machine_ones(self):
         """``problems`` is joined into the refusal text, so its order is what a reader sees first.
@@ -731,7 +811,7 @@ class TenantRootWiringTests(unittest.TestCase):
         ctx.tenant.root = Path(tmp.name) / "no-such-root"
         problems = doctor.run_doctor(ctx, clauth_profiles=clauth_tree(self))["problems"]
         kinds = [p.split(":")[0] for p in problems]
-        self.assertEqual(kinds[0], "tenant root for 'quantivly'")
+        self.assertEqual(kinds[0], "tenant repos for 'quantivly'")
         for later in ("seat cache for machine 'dev'", "lane memory budget on machine 'dev'",
                       "declared seat on machine 'dev'"):
             self.assertIn(later, kinds)

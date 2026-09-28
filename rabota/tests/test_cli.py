@@ -145,17 +145,33 @@ class ExitCodeTests(unittest.TestCase):
         self.assertIn("toysim.toml", err)
         self.assertIn("root", err)
 
-    def test_route_to_tenant_without_toml_is_usage(self):
+    def test_a_leftover_route_table_is_refused_rather_than_ignored(self):
+        """DO-773 moved routing to the tenants file. A [[route]] still written here is REFUSED,
+        not ignored: a table that is read by nothing is the worst of the three states — it looks
+        maintained, it is what someone edits when routing surprises them, and it changes
+        nothing."""
         with (self.base / "config.toml").open("a") as f:
             f.write('\n[[route]]\nprefix = "~/ghost"\ntenant = "ghost"\n')
         err = self._usage(["--tenant", "quantivly", "doctor"])
-        self.assertIn("ghost", err)
         self.assertIn("config.toml", err)
+        self.assertIn("route", err)
+        self.assertIn("claude-tenants.zsh", err)
 
-    def test_default_tenant_without_toml_is_usage(self):
-        (self.base / "tenants" / "personal.toml").unlink()
+    def test_a_leftover_default_is_refused_rather_than_ignored(self):
+        with (self.base / "config.toml").open("a") as f:
+            f.write('\ndefault = "personal"\n')
         err = self._usage(["--tenant", "quantivly", "doctor"])
-        self.assertIn("personal", err)
+        self.assertIn("config.toml", err)
+        self.assertIn("default", err)
+
+    def test_an_overlay_with_no_tenant_files_is_usage_not_an_empty_answer(self):
+        """``load`` used to prove at least one tenant existed by checking the default named a
+        file. With the default gone that proof went with it, and an empty overlay would have
+        reached ``resolve_tenant`` to fail there, naming the router rather than the real fault."""
+        for f in (self.base / "tenants").glob("*.toml"):
+            f.unlink()
+        err = self._usage(["--tenant", "quantivly", "doctor"])
+        self.assertIn("no tenants", err)
 
     def test_unusable_state_dir_is_error_not_traceback(self):
         def run(ns):

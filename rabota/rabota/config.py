@@ -7,6 +7,7 @@ from typing import Mapping
 
 from rabota import errors
 from rabota import machines as machines_mod
+from rabota import tenants as tenants_mod
 
 DEFAULT_BASE = Path("~/.dotfiles-local/rabota")
 
@@ -87,6 +88,13 @@ class Tenant:
     budget: BudgetThresholds = field(default_factory=BudgetThresholds)
     lanes: LaneDefaults = field(default_factory=LaneDefaults)
     machines: dict[str, Machine] = field(default_factory=dict)
+    # LOCAL lane repos, key -> path, mirroring [machines.<m>].repos for the remote form (DO-773).
+    # Declared, this table IS the vocabulary `--repo` takes for a local lane and `root` is not
+    # consulted at all; left out, `--repo` stays a name under `root`, which is what every tenant
+    # did before this existed. It is what lets a tenant address a repository that cannot live
+    # under its root -- ~/.dotfiles being the case that forced it, since dotbot's symlinks
+    # require that exact path.
+    repos: dict[str, str] = field(default_factory=dict)
     seats: dict[str, str] = field(default_factory=dict)   # {"local": "<clauth profile>"}; a REMOTE machine's seat comes from the registry (DO-665), not from here
     excludes: list[Path] = field(default_factory=list)
     # Set by ``_tenant`` to the tenant's own toml path; used only to name the file in a
@@ -96,8 +104,11 @@ class Tenant:
 
 @dataclass
 class Config:
-    routes: list[tuple[Path, str]]
-    default: str
+    """Every tenant this overlay declares. NO routes and NO default (DO-773).
+
+    Which tenant owns a directory is answered by ``tenants.route`` from the tenants file, the
+    one home for that fact — see ``rabota/tenants.py`` for why rabota gave up its own copy.
+    """
     tenants: dict[str, Tenant]
 
 
@@ -139,6 +150,7 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
         budget=_dc(BudgetThresholds, d.get("budget", {})),
         lanes=_dc(LaneDefaults, d.get("lanes", {})),
         machines=machines,
+        repos=dict(d.get("repos", {})),
         seats=dict(d.get("seats", {})),
         excludes=[_p(x) for x in d.get("excludes", [])],
         config_path=path,
@@ -172,12 +184,18 @@ def load(base: Path | None = None, seats_by_machine: dict[str, str] | None = Non
     # The parameter is the test seam, the same shape config.load already uses for `base`.
     if seats_by_machine is None:
         seats_by_machine = machines_mod.seats()
-    routes = []
-    for r in top.get("route", []):
-        try:
-            routes.append((_p(r["prefix"]), r["tenant"]))
-        except KeyError as e:
-            raise errors.Usage(f"{main}: a [[route]] entry is missing required key {e.args[0]!r}") from None
+    # A LEFTOVER [[route]] OR default IS REFUSED, not ignored (DO-773). Both moved to the
+    # tenants file, and a table that is still written here but no longer read is the worst of
+    # the three states: it looks maintained, it is edited when routing surprises someone, and
+    # it changes nothing. Naming it is the only way the move completes.
+    stale = [k for k in ("route", "default") if k in top]
+    if stale:
+        raise errors.Usage(
+            f"{main}: {' and '.join(sorted(stale))} moved to the tenants file in DO-773 — "
+            f"CLAUDE_TENANT_ROUTES / CLAUDE_TENANT_PATH_ROUTES / CLAUDE_TENANT_DEFAULT in "
+            f"~/.config/claude-tenants.zsh are the one home for which tenant owns a directory. "
+            f"Delete {'them' if len(stale) > 1 else 'it'} from this file; rabota no longer reads "
+            f"{'them' if len(stale) > 1 else 'it'}")
     tenants = {}
     for path in sorted((base / "tenants").glob("*.toml")):
         try:
@@ -186,13 +204,9 @@ def load(base: Path | None = None, seats_by_machine: dict[str, str] | None = Non
             raise errors.Usage(f"{path}: missing required key {e.args[0]!r}") from None
         except TypeError as e:   # a [machines.<name>] table missing a Machine field
             raise errors.Usage(f"{path}: {e}") from None
-    for prefix, tenant in routes:
-        if tenant not in tenants:
-            raise errors.Usage(f"{main}: route {str(prefix)!r} names tenant {tenant!r}, which has no tenants/{tenant}.toml")
-    default = top.get("default", "personal")
-    if default not in tenants:
-        raise errors.Usage(f"{main}: default tenant {default!r} has no tenants/{default}.toml")
-    return Config(routes=routes, default=default, tenants=tenants)
+    if not tenants:
+        raise errors.Usage(f"{base}/tenants: no tenants/*.toml, so no tenant can ever be resolved")
+    return Config(tenants=tenants)
 
 
 def _check_dead_state_types(tenant: Tenant) -> None:
@@ -209,23 +223,42 @@ def _check_dead_state_types(tenant: Tenant) -> None:
             f"still open")
 
 
-def resolve_tenant(cfg: Config, cwd: Path, env: Mapping[str, str], override: str | None) -> Tenant:
-    """Pick a tenant: ``override`` → ``$CLAUDE_ACCOUNT_TENANT`` → longest route prefix of ``cwd`` → default."""
+def resolve_tenant(cfg: Config, cwd: Path, env: Mapping[str, str], override: str | None,
+                   route_fn=None) -> Tenant:
+    """Pick a tenant: ``override`` → ``$CLAUDE_ACCOUNT_TENANT`` → whatever owns ``cwd``.
+
+    The third step is ``tenants.route`` (DO-773), which asks the ACCOUNT PICKER's own resolver
+    through ``scripts/tenant-route``: git remote owner first, then a path route, then the default.
+    rabota used to answer it from a ``[[route]]`` table of its own, by path only, and the two
+    disagreed for any repository checked out away from its tenant's root — one tenant for an
+    interactive session and another for a lane in the same directory.
+
+    THE FIRST TWO STEPS STILL SHORT-CIRCUIT, and that is load-bearing rather than an
+    optimisation: every scripted caller passes ``--tenant``, so the fork is skipped on the path
+    that runs most often, and a command that names its tenant keeps working in a directory git
+    cannot read at all.
+
+    A ROUTING FAULT RAISES; it never becomes the default. ``tenants.route`` documents why, and
+    "git could not be asked" is the case it is written for.
+
+    ``route_fn`` is the test seam — ``f(cwd) -> {"tenant", "state", "why"}`` — the same shape
+    ``run_recipe`` uses for ``budget_fn``. It exists so the suite does not fork a shell per row;
+    rows that mean to exercise the real ``scripts/tenant-route`` call it directly.
+    """
     name = override or env.get("CLAUDE_ACCOUNT_TENANT")
-    if name:
+    if not name:
+        answer = (route_fn or tenants_mod.route)(Path(cwd))
+        name = answer["tenant"]
         if name not in cfg.tenants:
-            raise errors.Usage(f"unknown tenant {name!r}; known: {sorted(cfg.tenants)}")
-        tenant = cfg.tenants[name]
-    else:
-        cwd = Path(cwd).resolve()
-        best = None
-        for prefix, route_tenant in cfg.routes:
-            try:
-                cwd.relative_to(prefix.resolve())
-            except ValueError:
-                continue
-            if best is None or len(str(prefix)) > len(str(best[0])):
-                best = (prefix, route_tenant)
-        tenant = cfg.tenants[best[1] if best else cfg.default]
+            # The tenants file named a tenant this overlay has no file for. That is the two
+            # halves of the configuration disagreeing, so it names BOTH sides: the reader has to
+            # know which file to edit, and the router's own `why` says how that name was reached.
+            raise errors.Usage(
+                f"the tenant router routed {str(cwd)!r} to tenant {name!r} ({answer['why']}), "
+                f"which has no tenants/{name}.toml; the routing tables in the tenants file and "
+                f"the tenant files in this overlay disagree. Known here: {sorted(cfg.tenants)}")
+    elif name not in cfg.tenants:
+        raise errors.Usage(f"unknown tenant {name!r}; known: {sorted(cfg.tenants)}")
+    tenant = cfg.tenants[name]
     _check_dead_state_types(tenant)
     return tenant

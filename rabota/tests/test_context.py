@@ -1,8 +1,11 @@
-import tempfile, unittest
+import argparse, tempfile, unittest
 from pathlib import Path
 from rabota import context
+from rabota.runner import FakeRunner
 from rabota.context import Context, track_contexts
 from tests.support import connection_is_closed as _closed
+
+FIX = Path(__file__).parent / "fixtures" / "config"
 
 
 class _ContextTestCase(unittest.TestCase):
@@ -84,3 +87,34 @@ class TrackContextsTests(_ContextTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RouteFnSeamTests(unittest.TestCase):
+    """``Context.from_namespace`` must PASS its ``route_fn`` down to ``resolve_tenant``.
+
+    Found by mutation: dropping ``route_fn=route_fn`` from that call survived the whole suite,
+    because every test then forked the REAL router, which answers from the fixture tenants file
+    and happens to give the same tenant. A seam that is silently ignored is worse than no seam —
+    it reads as injected and is not — so the row uses an answer the real router cannot produce.
+    """
+
+    def test_the_injected_router_is_the_one_consulted(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=None, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        # "toysim" is a tenant the fixture tenants file would NEVER route "/" to: its default is
+        # personal and no owner or path route can match a bare "/".
+        ctx = context.Context.from_namespace(
+            ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"),
+            route_fn=lambda cwd: {"tenant": "toysim", "state": "matched", "why": "injected"})
+        self.addCleanup(ctx.close)
+        self.assertEqual(ctx.tenant.name, "toysim")
+
+    def test_without_the_seam_the_real_router_answers(self):
+        # The paired half, so the row above cannot pass by the fake being ignored AND the real
+        # router coincidentally saying toysim.
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=None, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]),
+                                             env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        self.assertEqual(ctx.tenant.name, "personal")

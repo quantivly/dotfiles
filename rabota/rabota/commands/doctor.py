@@ -1,9 +1,9 @@
 """``rabota doctor``: install link, config parse, store schema, pre-compute timer, the tenant's
 own root, and the three couplings that span two machines.
 
-``tenant_root`` is the one check here about this machine alone: whether the directory every
-local lane resolves ``--repo`` under exists, and whether anything this tenant expects is
-actually checked out there. It was added by DO-776 alongside the refusal ``lane recipe`` now
+``tenant_repos`` is the one check here about this machine alone: whether a local lane for this
+tenant could be given any ``--repo`` at all -- against the ``[repos]`` table when it declares
+one, and otherwise against what is checked out under its ``root``. It was added by DO-776 alongside the refusal ``lane recipe`` now
 raises for the same condition -- doctor answers it for the whole tenant, ahead of the lane that
 would otherwise be the first to find out.
 
@@ -361,8 +361,13 @@ def remote_seat_identity(ctx, clauth_profiles=None) -> list[tuple[str, bool, str
     return rows
 
 
-def tenant_root(ctx) -> list[tuple[str, bool, str]]:
-    """One row: can this tenant reach any of the repos a local lane resolves under its ``root``?
+def tenant_repos(ctx) -> list[tuple[str, bool, str]]:
+    """One row: can a local lane for this tenant reach any repo at all?
+
+    Named for the question, not for ``root``: a tenant declaring ``[repos]`` is checked against
+    that table and its ``root`` is never consulted, which is exactly what ``lane.local_repo_path``
+    does with the same two vocabularies (DO-773). Only a tenant without the table falls back to
+    "a name under ``root``", and only that branch reads ``root`` at all.
 
     ``lane.run_recipe``'s local branch builds ``<tenant.root>/<--repo>`` and, since DO-776,
     refuses by name when that is not a directory. This asks the same question for the whole
@@ -388,12 +393,35 @@ def tenant_root(ctx) -> list[tuple[str, bool, str]]:
     a bare or corrupt checkout passes. It also says nothing about which branch anything is on.
     """
     name = ctx.tenant.name
+    # THE DECLARED TABLE IS WEIGHED FIRST AND THEN THE ROOT, in that order and both, because
+    # that is exactly what ``lane.local_repo_path`` does. A row that asked only one of them
+    # would disagree with the command it exists to check -- failing a tenant whose lanes start
+    # fine, or passing one whose every lane refuses -- and two answers to one question is this
+    # issue's own defect class, reappearing inside the check written to catch it.
+    declared_paths = {k: Path(v).expanduser() for k, v in ctx.tenant.repos.items()}
+    declared_found = sorted(k for k, v in declared_paths.items() if v.is_dir())
+    declared_missing = sorted(k for k in declared_paths if k not in declared_found)
+    declared_detail = ""
+    if declared_paths:
+        declared_detail = (f"[repos] in tenants/{name}.toml declares {len(declared_paths)} "
+                           f"{'repo' if len(declared_paths) == 1 else 'repos'}, "
+                           f"{len(declared_found)} of them here: {declared_found}")
+        if declared_missing:
+            declared_detail += ("; not a directory here: "
+                                + str([f"{k} -> {str(declared_paths[k])}" for k in declared_missing]))
+
     root = Path(ctx.tenant.root).expanduser()
     declared = sorted({r for m in ctx.tenant.machines.values() for r in m.repos})
     where = f"tenants/{name}.toml sets root"
     if not root.is_dir():
-        return [(name, False, f"root {str(root)!r} is not a directory, so every local lane for "
-                              f"{name!r} refuses before it starts ({where})")]
+        detail = (f"root {str(root)!r} is not a directory ({where})")
+        if declared_found:
+            # The root is gone and the tenant is still fine, because its repos are declared. Not
+            # a failure, and saying so is the difference between a row someone acts on and one
+            # they learn to ignore.
+            return [(name, True, f"{declared_detail}; {detail}, but nothing needs it")]
+        return [(name, False, (f"{declared_detail}; " if declared_detail else "")
+                 + f"{detail}, so every local lane for {name!r} refuses before it starts")]
     if declared:
         found = [r for r in declared if (root / r).is_dir()]
         missing = [r for r in declared if r not in found]
@@ -402,20 +430,25 @@ def tenant_root(ctx) -> list[tuple[str, bool, str]]:
                   f"{found}")
         if missing:
             detail += f"; not checked out here: {missing}"
-        if not found:
+        if not found and not declared_found:
             detail += (f" -- no declared repo resolves under it, so a local lane for {name!r} has "
                        f"nothing it can be given as --repo")
-        return [(name, bool(found), detail)]
+        return [(name, bool(found) or bool(declared_found),
+                 (f"{declared_detail}; " if declared_detail else "") + detail)]
     present = lane.local_repos(root)
     if present is None:
         return [(name, False, f"root {str(root)!r} could not be listed, so what a local lane for "
                               f"{name!r} can reach is UNMEASURED -- which is not the same as empty")]
     if not present:
-        return [(name, False, f"root {str(root)!r} holds no git checkout, so there is nothing a "
-                              f"local lane for {name!r} could be given as --repo ({where})")]
-    return [(name, True, f"root {str(root)!r} holds {len(present)} git "
-                         f"{'checkout' if len(present) == 1 else 'checkouts'} {present}; this "
-                         f"tenant declares no machine repos to weigh them against")]
+        return [(name, bool(declared_found),
+                 (f"{declared_detail}; " if declared_detail else "")
+                 + f"root {str(root)!r} holds no git checkout"
+                 + ("" if declared_found else
+                    f", so there is nothing a local lane for {name!r} could be given as --repo "
+                    f"({where})"))]
+    return [(name, True, (f"{declared_detail}; " if declared_detail else "")
+             + f"root {str(root)!r} holds {len(present)} git "
+             + f"{'checkout' if len(present) == 1 else 'checkouts'} {present}")]
 
 
 def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
@@ -444,10 +477,10 @@ def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
                             "(no migration is defined for it yet)")
     # FIRST of the row checks, and a pure stat: a tenant that can reach no repo is a local fault
     # worth naming before three ssh round trips are spent on the remote couplings.
-    root_rows = tenant_root(ctx)
-    for name, ok, detail in root_rows:
+    repo_rows = tenant_repos(ctx)
+    for name, ok, detail in repo_rows:
         if not ok:
-            problems.append(f"tenant root for {name!r}: {detail}")
+            problems.append(f"tenant repos for {name!r}: {detail}")
     seat_rows = seat_cache_age(ctx)
     for name, ok, detail in seat_rows:
         if not ok:
@@ -463,7 +496,7 @@ def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
     as_rows = lambda rs: [{"machine": n, "ok": ok, "detail": d} for n, ok, d in rs]
     return {"tenant": ctx.tenant.name, "state_dir": str(ctx.state_dir), "config_ok": True,
             "db_schema": schema, "links": {"rabota": link_ok}, "timer": {"state": timer_state},
-            "tenant_root": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in root_rows],
+            "tenant_repos": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in repo_rows],
             "seat_cache": as_rows(seat_rows), "slice_headroom": as_rows(slice_rows),
             "remote_seat": as_rows(identity_rows),
             "ok": not problems, "problems": problems}

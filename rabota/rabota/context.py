@@ -64,11 +64,17 @@ class Context:
         self.close()   # returns None: never suppresses the body's exception
 
     @classmethod
-    def from_namespace(cls, ns, cfg_base=None, runner=None, env=None, cwd=None, today=None):
-        """Build a context from parsed args; every keyword lets a test inject a substitute."""
+    def from_namespace(cls, ns, cfg_base=None, runner=None, env=None, cwd=None, today=None,
+                       route_fn=None):
+        """Build a context from parsed args; every keyword lets a test inject a substitute.
+
+        ``route_fn`` is passed to ``config.resolve_tenant`` and is only ever consulted when
+        neither ``--tenant`` nor ``$CLAUDE_ACCOUNT_TENANT`` names one (DO-773).
+        """
         env = dict(env if env is not None else os.environ)
         cfg = config.load(cfg_base)
-        tenant = config.resolve_tenant(cfg, Path(cwd or Path.cwd()), env, getattr(ns, "tenant", None))
+        tenant = config.resolve_tenant(cfg, Path(cwd or Path.cwd()), env,
+                                       getattr(ns, "tenant", None), route_fn=route_fn)
         state_dir = Path(getattr(ns, "state_dir", None) or tenant.state_dir)
         scrubbed = secrets.scrub_env(env)
         return cls(cfg, tenant, state_dir, runner or SubprocessRunner(scrubbed), scrubbed,
