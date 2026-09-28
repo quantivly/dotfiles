@@ -1,10 +1,11 @@
 import argparse, io, json, os, shutil, tempfile, unittest, unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from rabota import cli, context, errors, secrets, snapshots
 from rabota.commands import brief
 from rabota.commands import rank as rank_cmd
+from rabota.commands import sync
 from rabota.runner import FakeRunner, Result
 from tests.test_preflight import VIEWER, FakeGh, FakeLinear
 
@@ -640,6 +641,20 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         snapshots.write(ctx.state_dir, "fireflies",
                         {"ok": True, "error": None, "transcripts": transcripts, "fetched_at": fetched_at})
 
+    def _write_fireflies_with_since(self, ctx, transcripts, since, fetched_at):
+        # `since` (DO-761 fix round): the fetch window start `commands.sync.sync_fireflies` now
+        # stamps onto the snapshot alongside `fetched_at` -- distinct from it whenever the window
+        # start and the moment the fetch completed differ, which is exactly the case a coverage
+        # gap needs to detect.
+        snapshots.write(ctx.state_dir, "fireflies",
+                        {"ok": True, "error": None, "transcripts": transcripts,
+                         "fetched_at": fetched_at, "since": since})
+
+    def _write_day_brief(self, ctx, day, generated_at):
+        day_dir = ctx.state_dir / day
+        day_dir.mkdir(parents=True, exist_ok=True)
+        (day_dir / "last-brief.json").write_text(json.dumps({"keys": [], "generated_at": generated_at}))
+
     def _fresh_needs_sources(self, ctx):
         for source in brief.NEEDS_SOURCES:
             snapshots.write(ctx.state_dir, source, {"ok": True, "error": None, "items": [],
@@ -884,10 +899,13 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         self.assertFalse(any("needs classifying" in l for l in lines), lines)
         self.assertTrue(json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())["ids"])
 
-    def test_acknowledging_stamps_classified_at_for_the_fetch_window_to_read(self):
-        # DO-761: `commands.sync.fireflies_since` reads exactly this timestamp as its primary
-        # fetch-window anchor. Revert `_mark_fireflies_classified` to drop `classified_at` to see
-        # this row fail.
+    def test_acknowledging_stamps_classified_at_from_what_the_snapshot_covered_not_now(self):
+        # DO-761 fix round: an acknowledgement can vouch only for what the snapshot it read
+        # actually asked Fireflies to cover (its `fetched_at`), never for the moment of the
+        # acknowledgement itself -- `self.NOW` (09:00Z) is 30 minutes after the snapshot's own
+        # `fetched_at` (08:30Z, `_write_fireflies`'s default), and `commands.sync.fireflies_since`
+        # reads this timestamp as its primary fetch-window anchor. Revert `_mark_fireflies_classified`
+        # to stamp `now` (the pre-fix behaviour) to see this row fail.
         ctx = self.ctx()
         gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
         self._fresh_needs_sources(ctx)
@@ -896,7 +914,102 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
         brief.run_brief(ctx, text=False, now=self.NOW, gh=gh, lin=lin)
         brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
         data = json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())
-        self.assertEqual(data["classified_at"], self.NOW.strftime(snapshots.FETCHED_AT_FORMAT))
+        self.assertEqual(data["classified_at"], "2026-09-16T08:30:00Z")
+        self.assertNotEqual(data["classified_at"], self.NOW.strftime(snapshots.FETCHED_AT_FORMAT))
+
+    def test_an_empty_acknowledgement_does_not_advance_past_a_gap_the_snapshot_never_covered(self):
+        # The exact DO-761 regression reproduced on this branch's own code: a day-scoped
+        # `last-brief.json` sits on disk (Friday, covering up to 10:42:43Z); a `sources/fireflies.json`
+        # snapshot lands whose OWN fetch window (`since`, DO-761 fix round) starts later, at 15:00Z
+        # -- a real gap the acknowledgement never saw any transcript for, because nothing was ever
+        # fetched for it. An acknowledgement with zero pending items must not step the anchor over
+        # that gap. Revert `_fireflies_coverage`'s gap check (or `sync_fireflies`'s new `since` stamp)
+        # to see this row fail: on `origin/zvi/do-761-fireflies-window`, `_mark_fireflies_classified`
+        # stamps `now`, which is exactly the pre-existing bug this reproduces.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_day_brief(ctx, "2026-09-25", "2026-09-25T10:42:43Z")
+        self._write_fireflies_with_since(ctx, [], since="2026-09-27T15:00:00Z", fetched_at="2026-09-27T14:16:08Z")
+        # Turn 1 establishes the anchor from the day-scoped brief (no classification record yet) --
+        # NOT exercised by `_mark_fireflies_classified` directly, so drive it the same way production
+        # does: an acknowledging call with nothing pending (`_read_fireflies_pending` returns `[]`
+        # on a fresh tempdir, matching "the acknowledgement classified zero items").
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        data = json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())
+        self.assertEqual(data["classified_at"], "2026-09-25T10:42:43Z",
+                         "the anchor must hold at the day-brief's coverage, not step over the gap")
+        self.assertNotEqual(data["classified_at"], self.NOW.strftime(snapshots.FETCHED_AT_FORMAT))
+
+    def test_a_coverage_gap_produces_an_alert_line(self):
+        # The brief: "a gap that is real must not be silently swallowed". Reuses the existing
+        # `fetched: True` alert shape (Move 6) rather than a new one -- see `_fireflies_coverage`.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_day_brief(ctx, "2026-09-25", "2026-09-25T10:42:43Z")
+        self._write_fireflies_with_since(ctx, [], since="2026-09-27T15:00:00Z", fetched_at="2026-09-27T14:16:08Z")
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        self.assertTrue(any("coverage gap" in l for l in lines), lines)
+
+    def test_the_coverage_gap_alert_does_not_contradict_itself(self):
+        # Review finding 2 (DO-761 fix round 2): the old alert reused the `fetched: True` shape,
+        # rendering "! fireflies needs classifying -- coverage gap Xh (...) -- anchor held, will
+        # retry next sync, no fetch needed" -- asserting nothing needs classifying (nothing was
+        # ever fetched for the gap) while saying "no fetch needed" when its own text says the
+        # remedy IS another fetch. The skill's step 2 keys off exactly the same `fetched` flag, so
+        # the machine reader was misled too. Pins the rendered text so the contradiction cannot
+        # come back; fails against the pre-fix `fetched: True` shape.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_day_brief(ctx, "2026-09-25", "2026-09-25T10:42:43Z")
+        self._write_fireflies_with_since(ctx, [], since="2026-09-27T15:00:00Z", fetched_at="2026-09-27T14:16:08Z")
+        lines = brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        line = next(l for l in lines if l.startswith("! fireflies "))
+        self.assertIn("coverage gap", line)
+        self.assertNotIn("needs classifying", line)
+        self.assertNotIn("no fetch needed", line)
+
+    def test_no_gap_still_advances_the_anchor_within_what_was_covered(self):
+        # The mirror case: the snapshot's own window reaches back to (or before) the anchor already
+        # on record, so there is no uncovered stretch, and an acknowledgement -- even an empty one
+        # -- may still advance the anchor to what this snapshot covered.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        self._write_day_brief(ctx, "2026-09-14", "2026-09-14T10:00:00Z")
+        self._write_fireflies_with_since(ctx, [], since="2026-09-14T08:00:00Z", fetched_at="2026-09-16T08:30:00Z")
+        brief.run_brief(ctx, text=True, now=self.NOW, gh=gh, lin=lin, classified=["fireflies"])
+        data = json.loads((ctx.state_dir / brief.FIREFLIES_CLASSIFIED_FILE).read_text())
+        self.assertEqual(data["classified_at"], "2026-09-16T08:30:00Z")
+
+    def test_a_held_anchor_past_max_days_advances_instead_of_growing_forever(self):
+        # Review finding 3 (DO-761 fix round 3): once `now - anchor > FIREFLIES_LOOKBACK_MAX_DAYS`,
+        # `fireflies_since`'s `earliest = now - MAX_DAYS` floor recedes from a HELD anchor every day
+        # `now` advances, so holding (the pre-fix behaviour) re-detects the same gap on every later
+        # cycle too, widening by about a day per day forever -- "will retry next sync" never comes
+        # true. Isolates the mechanism exactly as the review did: a stale `classified_at`, no
+        # bootstrap-anchor file involved at all. Fails on 4558e23, where cycle 2 renders a bigger
+        # gap than cycle 1 instead of no gap at all.
+        ctx = self.ctx()
+        gh, lin = FakeGh("work-login"), FakeLinear(VIEWER)
+        self._fresh_needs_sources(ctx)
+        (ctx.state_dir / snapshots.FIREFLIES_CLASSIFIED_FILE).write_text(
+            json.dumps({"ids": [], "classified_at": "2026-01-05T00:00:00Z"}))
+        cycle0 = datetime(2026, 6, 1, 9, 0, tzinfo=timezone.utc)
+        gap_lines = []
+        for i in range(3):
+            cycle_now = cycle0 + timedelta(days=i)
+            since = sync.fireflies_since(ctx, cycle_now)
+            self._write_fireflies_with_since(ctx, [], since=since.strftime(snapshots.FETCHED_AT_FORMAT),
+                                             fetched_at=cycle_now.strftime(snapshots.FETCHED_AT_FORMAT))
+            lines = brief.run_brief(ctx, text=True, now=cycle_now, gh=gh, lin=lin, classified=["fireflies"])
+            gap_lines.append(next((l for l in lines if l.startswith("! fireflies ") and "coverage gap" in l), None))
+        self.assertIsNotNone(gap_lines[0], "the first cycle must still alert on the real, permanent loss")
+        self.assertIn("beyond the", gap_lines[0])
+        for i, line in enumerate(gap_lines[1:], start=1):
+            self.assertIsNone(line, f"cycle {i}: the anchor must have healed by now, not grown a bigger gap")
 
     def test_classified_without_text_is_a_usage_error_and_marks_nothing(self):
         # Review round 4, F1: a JSON call carrying the acknowledgement would mark items classified

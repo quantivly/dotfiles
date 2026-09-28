@@ -337,6 +337,74 @@ class SyncTests(unittest.TestCase):
         self.assertLess(since, old_fixed_window,
                         "the old fixed lookback would still miss the true last-shown time")
 
+    def test_the_fallback_anchor_freezes_instead_of_sliding_forward_on_shown(self):
+        # Review finding 1 (DO-761 fix round 2): a tenant that only ever gets brief text -- a bare
+        # `rabota --text brief`, or an agent that reads turn 1 and never sends `--classified
+        # fireflies` back -- never creates `fireflies-classified.json`, so the day-brief fallback
+        # used to stay live forever: `read_newest_day_brief` was read live, at call time, on every
+        # tick, and a new day-scoped `last-brief.json` landing each day (from the brief simply
+        # being shown) walked the window start forward a full day at a time -- the review measured
+        # 2026-09-16T09:00Z -> 2026-09-25T09:00Z over ten such days, with no classification record
+        # ever created and no alert. `fireflies_since` must now freeze at the FIRST day-brief it
+        # ever sees and hold there. Fails on a167822, where `fireflies_since` reads
+        # `snapshots.read_newest_day_brief` directly instead of the frozen fallback.
+        ctx = self.ctx()
+        day0 = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+        first_since = None
+        for i in range(10):
+            day = day0 + timedelta(days=i)
+            self._write_day_brief(ctx, day.date().isoformat(), day.strftime(snapshots.FETCHED_AT_FORMAT))
+            since = sync.fireflies_since(ctx, day + timedelta(hours=1))
+            if first_since is None:
+                first_since = since
+            self.assertEqual(since, first_since,
+                             f"day {i}: the fallback anchor must freeze at the first day shown, not slide")
+            self.assertFalse((ctx.state_dir / snapshots.FIREFLIES_CLASSIFIED_FILE).exists(),
+                             f"day {i}: shown, never classified -- no classification record must ever appear")
+
+    def test_a_write_failure_freezing_the_anchor_does_not_crash_the_caller(self):
+        # Review finding 1 (DO-761 fix round 3): `_freeze_fireflies_bootstrap_anchor` called
+        # `emit.write_file` with no try/except, and `read_or_freeze_fireflies_fallback_anchor`
+        # calls it whenever nothing is frozen yet -- exactly the state a first-ever call to
+        # `fireflies_since` is always in. A read-only state dir, a full disk or a permissions
+        # fault therefore raised a bare `PermissionError`/`OSError` straight out of a nominal
+        # "read" helper, crashing the whole `rabota sync` tick instead of degrading one source.
+        # Fails on 4558e23: `fireflies_since` raises instead of returning a value.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        ctx.state_dir.chmod(0o555)
+        try:
+            since = sync.fireflies_since(ctx, self.NOW)
+        finally:
+            ctx.state_dir.chmod(0o755)
+        self.assertLessEqual(since, datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
+        self.assertFalse((ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).exists(),
+                         "a failed write must not leave a partial/phantom anchor file behind")
+
+    def test_a_corrupt_bootstrap_anchor_heals_instead_of_sliding_forever(self):
+        # Review finding 2 (DO-761 fix round 3): `_freeze_fireflies_bootstrap_anchor`'s guard used
+        # to be `path.exists()` -- existence, not validity -- so a corrupt anchor file (a bad
+        # write, or a process killed mid-write) could never be replaced: every call re-derives a
+        # fresh, LIVE `read_newest_day_brief` answer it can never persist, silently reconstructing
+        # the day-by-day slide this whole mechanism exists to kill, with no error and no alert.
+        # Fails on 4558e23: `since` keeps advancing one day at a time forever instead of healing to
+        # a fixed value starting the very next call after the corruption is first seen.
+        ctx = self.ctx()
+        ctx.state_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).write_text("{not json")
+        day0 = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+        healed = None
+        for i in range(5):
+            day = day0 + timedelta(days=i)
+            self._write_day_brief(ctx, day.date().isoformat(), day.strftime(snapshots.FETCHED_AT_FORMAT))
+            since = sync.fireflies_since(ctx, day + timedelta(hours=1))
+            if i == 0:
+                healed = since
+            else:
+                self.assertEqual(since, healed, f"day {i}: the anchor must heal and hold, not keep sliding")
+        self.assertIsNotNone(snapshots.read_fireflies_bootstrap_anchor(ctx.state_dir),
+                             "the corrupt file must have been replaced by a valid one")
+
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()
         f = ctx.state_dir / "slack.json"; ctx.state_dir.mkdir(parents=True, exist_ok=True)
