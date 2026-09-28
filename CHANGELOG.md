@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One directory resolved to two different tenants, so a lane and the session beside it billed
+  different accounts (DO-773).** `rabota`'s `config.resolve_tenant` routed by cwd path prefix from
+  a `[[route]]` table of its own; the account picker (`_claude_tenant_for`) routes by git remote
+  owner first, then a path route, then the default. They agree for a repository checked out under
+  its tenant's root and disagree for every other one — measured here, `~/.dotfiles` and a
+  `Toysim-LTD` checkout under the personal root each resolved one way interactively and another for
+  a lane. **The issue filed this as latent and it was not**: the two tenants `~/.dotfiles` actually
+  lands on declare different seats (`personal-0` vs `quantivly-1`), different gh identities and
+  pools with nothing in common. The picker's rule survived because it is the one with an argument
+  behind it — a repository's identity travels with the repository, and the path table must not
+  overrule a remote, which is what stops a work repository drawing the personal pool.
+  `scripts/tenant-route` *calls* `_claude_tenant_for` rather than parsing remotes again in Python,
+  and `rabota/tenants.py` shells out to it exactly as `machines.py` does to `machines-render`; a
+  second URL parser is the same defect one field over. rabota therefore gave up its copy —
+  `[[route]]` and `default` are gone from `config.toml` and `config.load` **refuses** either key
+  rather than ignoring it, because a table read by nothing is the one somebody edits when routing
+  surprises them. A fault is never a tenant: `git-error` raises rather than becoming the default,
+  which is the one wrong answer that looks right. Measured at ~34 ms per call against the ~41 ms
+  `machines-render` fork `config.load` already makes, and skipped whenever `--tenant` or
+  `$CLAUDE_ACCOUNT_TENANT` answers first — a mutation removing that short-circuit was killed by 350
+  rows. Alongside it, `--repo` on a local lane stopped meaning "a direct child of the tenant root":
+  a tenant's new `[repos]` table (key → path, mirroring `[machines.<m>].repos`) is consulted first
+  and the root answers everything else, which is what lets a tenant address `~/.dotfiles` — code
+  that cannot live under `~/quantivly` because dotbot's symlinks require that exact path. The table
+  is deliberately **not** an allow-list: exclusivity would cost this machine 31 repositories to
+  gain one. Both halves had to land together, because routing alone breaks the Toysim tenant — its
+  root holds no checkout at all. `rabota doctor`'s row follows and is renamed `tenant_repos`, and a
+  row asserts it agrees with `lane.local_repo_path` per key. Two of twenty mutants survived the
+  first sweep and both were real gaps: the `[repos]` table could be disconnected from the TOML
+  entirely, and the `route_fn` seam could be dropped, each invisible because the rows built the
+  state they asserted about instead of exercising the path that produces it. The new state table's
+  own fixture helper had the subshell defect its `run()` comment warns about — every fixture was
+  written to one path, each overwriting the last.
+
 - **A local lane accepted a `--repo` this machine cannot reach, and `rabota doctor` never looked
   at a tenant's `root` at all (DO-776).** `lane recipe`'s remote branch refuses a `--repo` the
   machine does not declare and lists the keys it knows; the local branch built

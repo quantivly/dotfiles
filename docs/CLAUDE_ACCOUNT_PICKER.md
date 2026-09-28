@@ -1027,3 +1027,80 @@ table however the fork's copy inside it is trimmed.
 invisible in its own output: restoring each mutant with `git checkout --` reverted the *uncommitted
 implementation* along with it, so every later mutant reported `NOT APPLICABLE` and two reported
 kills against the pre-change file. Back the files up and restore from the copy, or commit first.
+
+## One directory, two tenants (DO-773)
+
+**Two layers answered "which tenant owns this directory?" by different keys, and nothing compared
+them.** `rabota`'s `config.resolve_tenant` routed by **cwd path prefix** from a `[[route]]` table
+of its own; `_claude_tenant_for` routes by **git remote owner** first, then a path route, then the
+default. They agree for a repository checked out under its tenant's root and disagree for every
+other one. Measured on this machine, 2026-09-28, by running both resolvers over the same paths:
+
+| directory | `_claude_tenant_for` | old `resolve_tenant` |
+|---|---|---|
+| `~/.dotfiles` (and its worktrees) | quantivly — `matched`, remote owner | **personal** — default |
+| `~/Projects/toysim` (`Toysim-LTD/admin-website`) | toysim — `matched`, remote owner | **personal** — default |
+| `~/quantivly/hub` | quantivly | quantivly |
+| `~/Projects` | personal | personal |
+
+**The issue filed it as latent. It was not.** DO-773 recorded that the two candidate tenants
+"happen to declare the same seat and the same `gh_config_dir`, so nothing is mis-billed" — true of
+some pair, but not of the pair `~/.dotfiles` actually lands on. Measured the same day: seats
+`personal-0` vs `quantivly-1`, gh identities `gh-personal` vs `gh-quantivly`, and picker pools with
+**nothing in common**. A lane dispatched from the dotfiles repo billed one account while the
+interactive session in the same directory billed another. The lesson is the narrower one: a claim
+that a divergence is harmless is a claim about *specific* config values, and it goes stale the
+moment either side is edited — so it is worth re-measuring before it is relied on, not quoting.
+
+**Which rule survived, and why that direction.** The picker's. Its own comment carries the
+argument — *"Only a directory with no GitHub remote may be decided by its PLACE. A remote that
+matched no route has already answered 'the default tenant' … and the path table must not overrule
+it"* — and that rule exists to stop a work repository drawing the personal pool. A repository's
+identity travels with the repository; where it happens to be checked out does not. Regressing the
+picker to path-first would have reinstated a failure this layer was built to end.
+
+**So rabota gave up its copy, which is DO-665's trade one field over.** `scripts/tenant-route`
+*calls* `_claude_tenant_for` rather than parsing remotes again in Python, and `rabota/tenants.py`
+shells out to it exactly as `machines.py` shells out to `machines-render`. `[[route]]` and
+`default` are gone from `config.toml`, and `config.load` **refuses** either key rather than
+ignoring it: a table read by nothing is the worst of the three states, because it looks maintained
+and is what somebody edits when routing surprises them.
+
+**The fork costs about what the one already there costs.** Measured 2026-09-28: ~34 ms per call,
+against ~41 ms for the `machines-render` fork `config.load` already makes on every invocation. It
+is skipped entirely when `--tenant` or `$CLAUDE_ACCOUNT_TENANT` answers first, which is every
+scripted caller — and that short-circuit is load-bearing rather than an optimisation: a mutation
+removing it was killed by **350** rows, because it makes a command that names its own tenant
+depend on git being able to read the cwd.
+
+**A fault is never a tenant.** `git-error` raises; it does not become the default. That is the one
+wrong answer that looks right, and it is the fail-open shape the whole layer exists to close.
+
+**`--repo` stopped meaning "a child of the tenant root" at the same time, and had to.** The
+repository that forced it is `~/.dotfiles`: quantivly code that cannot live under `~/quantivly`,
+because dotbot's symlinks require that exact path. No routing answer fixes that — wherever the
+directory routes, the path built from that tenant's root does not exist. A tenant's `[repos]`
+table (key → path) is consulted first and the root answers everything else.
+
+**The table is not an allow-list, and that was measured rather than reasoned.** Exclusivity reads
+better beside a refusal that lists keys, and it costs this machine 31 repositories to gain one:
+`~/quantivly` holds **32** checkouts and needs the root form, `~/toysim` holds **0**, and
+`~/Projects` holds 12. Which brings the second consequence, worth stating because it is a
+*regression the routing half creates on its own*: once `~/Projects/toysim` routes to `toysim` by
+remote owner, that tenant's root can reach nothing, and every local lane for it refuses until its
+`[repos]` table names the checkout. Routing and addressing had to land together.
+
+**The mutation sweep found two survivors, and both were real gaps rather than wording.** The
+`[repos]` table could be disconnected from the TOML entirely — `repos=dict(d.get("repos", {}))`
+replaced by `{}` — and the whole suite stayed green, because every row set `tenant.repos` in Python
+and none loaded it from a file. The `route_fn` seam on `Context.from_namespace` could be dropped
+for the same reason inverted: every test then forked the *real* router, which answers from the
+fixture tenants file and happens to give the same tenant, so a seam that read as injected was not.
+Both are the same shape — a test that builds the state it is asserting about instead of exercising
+the path that produces it — and neither is visible in a green run.
+
+**The state table's own fixture helper had the defect its `run()` comment warns about.** `tf` is
+called as `f="$(tf …)"`, a subshell, so its `N=$((N+1))` never reached the parent and every fixture
+was written to one path, each overwriting the last. Rows still passed — each `run` follows its own
+`tf` immediately — and only a fixture *reused later* silently asserted against whichever file was
+written most recently. `mktemp` now, and the comment says why.
