@@ -1,5 +1,11 @@
-"""``rabota doctor``: install link, config parse, store schema, pre-compute timer, and the three
-couplings that span two machines.
+"""``rabota doctor``: install link, config parse, store schema, pre-compute timer, the tenant's
+own root, and the three couplings that span two machines.
+
+``tenant_root`` is the one check here about this machine alone: whether the directory every
+local lane resolves ``--repo`` under exists, and whether anything this tenant expects is
+actually checked out there. It was added by DO-776 alongside the refusal ``lane recipe`` now
+raises for the same condition -- doctor answers it for the whole tenant, ahead of the lane that
+would otherwise be the first to find out.
 
 A coupling between two machines is invisible from either one, so each is asserted here rather
 than assumed. All three concern a remote lane, and all three were "documented and kept true by
@@ -355,6 +361,63 @@ def remote_seat_identity(ctx, clauth_profiles=None) -> list[tuple[str, bool, str
     return rows
 
 
+def tenant_root(ctx) -> list[tuple[str, bool, str]]:
+    """One row: can this tenant reach any of the repos a local lane resolves under its ``root``?
+
+    ``lane.run_recipe``'s local branch builds ``<tenant.root>/<--repo>`` and, since DO-776,
+    refuses by name when that is not a directory. This asks the same question for the whole
+    tenant instead of one lane, and ahead of it: a root that is not there, or that holds none of
+    what this tenant expects, means every local lane refuses -- and doctor said nothing, because
+    until now its only ``root`` was the clauth profile directory and nothing here read the
+    tenant's at all.
+
+    "Expected" is the repo KEYS the tenant's machines declare, because ``--repo`` is one
+    vocabulary across machines: the same name is a key under ``[machines.<m>].repos`` remotely
+    and a directory under ``root`` locally. A tenant declaring no machine repos has no such list
+    to weigh, and the question degrades to the weaker honest one -- is any git checkout there at
+    all. Both forms emit a row; neither falls silent, because a missing row reads like a clean
+    one.
+
+    FAIL is "reaches nothing", not "reaches less than everything". A repo declared for a remote
+    machine need not also be cloned on this one -- that is the normal state of a laptop against
+    dev -- so a partial answer PASSES and names what is missing rather than manufacturing a
+    failure out of a legitimate layout.
+
+    What the row cannot see, said rather than implied: a declared repo counts as resolved on
+    ``is_dir()`` alone, exactly as the lane's own refusal accepts it, so this never runs git and
+    a bare or corrupt checkout passes. It also says nothing about which branch anything is on.
+    """
+    name = ctx.tenant.name
+    root = Path(ctx.tenant.root).expanduser()
+    declared = sorted({r for m in ctx.tenant.machines.values() for r in m.repos})
+    where = f"tenants/{name}.toml sets root"
+    if not root.is_dir():
+        return [(name, False, f"root {str(root)!r} is not a directory, so every local lane for "
+                              f"{name!r} refuses before it starts ({where})")]
+    if declared:
+        found = [r for r in declared if (root / r).is_dir()]
+        missing = [r for r in declared if r not in found]
+        detail = (f"root {str(root)!r} resolves {len(found)} of the {len(declared)} repo "
+                  f"{'key' if len(declared) == 1 else 'keys'} this tenant's machines declare: "
+                  f"{found}")
+        if missing:
+            detail += f"; not checked out here: {missing}"
+        if not found:
+            detail += (f" -- no declared repo resolves under it, so a local lane for {name!r} has "
+                       f"nothing it can be given as --repo")
+        return [(name, bool(found), detail)]
+    present = lane.local_repos(root)
+    if present is None:
+        return [(name, False, f"root {str(root)!r} could not be listed, so what a local lane for "
+                              f"{name!r} can reach is UNMEASURED -- which is not the same as empty")]
+    if not present:
+        return [(name, False, f"root {str(root)!r} holds no git checkout, so there is nothing a "
+                              f"local lane for {name!r} could be given as --repo ({where})")]
+    return [(name, True, f"root {str(root)!r} holds {len(present)} git "
+                         f"{'checkout' if len(present) == 1 else 'checkouts'} {present}; this "
+                         f"tenant declares no machine repos to weigh them against")]
+
+
 def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
     """Return the doctor report; ``ok`` is false whenever ``problems`` is non-empty.
 
@@ -379,6 +442,12 @@ def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
         if schema != SCHEMA_VERSION:
             problems.append(f"rabota.db schema is {schema}, this rabota expects {SCHEMA_VERSION} "
                             "(no migration is defined for it yet)")
+    # FIRST of the row checks, and a pure stat: a tenant that can reach no repo is a local fault
+    # worth naming before three ssh round trips are spent on the remote couplings.
+    root_rows = tenant_root(ctx)
+    for name, ok, detail in root_rows:
+        if not ok:
+            problems.append(f"tenant root for {name!r}: {detail}")
     seat_rows = seat_cache_age(ctx)
     for name, ok, detail in seat_rows:
         if not ok:
@@ -394,6 +463,7 @@ def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
     as_rows = lambda rs: [{"machine": n, "ok": ok, "detail": d} for n, ok, d in rs]
     return {"tenant": ctx.tenant.name, "state_dir": str(ctx.state_dir), "config_ok": True,
             "db_schema": schema, "links": {"rabota": link_ok}, "timer": {"state": timer_state},
+            "tenant_root": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in root_rows],
             "seat_cache": as_rows(seat_rows), "slice_headroom": as_rows(slice_rows),
             "remote_seat": as_rows(identity_rows),
             "ok": not problems, "problems": problems}

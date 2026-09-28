@@ -38,6 +38,25 @@ def clauth_tree(case, uuid=DECLARED_UUID, profile="quantivly-0"):
     return root
 
 
+def pin_tenant_root(case, ctx, *repos):
+    """Point ``ctx.tenant.root`` at a fresh tree holding ``repos`` as git checkouts.
+
+    DO-776 gave ``run_doctor`` a row about the tenant's own ``root``, and the fixture tenants
+    name ``~/quantivly`` and ``~/toysim`` — real directories, holding a real ``hub``, on the
+    machine this suite was written on. Left unpinned, every row asserting ``report["ok"]``
+    answers from the runner's filesystem: green here, red on a CI runner with no such tree, and
+    green for the wrong reason either way. Pinning the local side is the same fix
+    ``test_lane_recipe``'s ``LOCAL_HOME`` makes one level down (DO-669).
+    """
+    tmp = tempfile.TemporaryDirectory(); case.addCleanup(tmp.cleanup)
+    root = Path(tmp.name)
+    for r in repos:
+        (root / r).mkdir(parents=True)
+        (root / r / ".git").mkdir()
+    ctx.tenant.root = root
+    return root
+
+
 def remote_ok():
     """Healthy answers for both of doctor's per-machine ssh calls.
 
@@ -62,6 +81,7 @@ class DoctorTests(unittest.TestCase):
         ns = argparse.Namespace(tenant="toysim", state_dir=str(self.state_dir), text=False, dry_run=False, command="doctor")
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(ctx.close)   # nothing else owns it: the test builds it, so the test closes it
+        pin_tenant_root(self, ctx, "widgets")
         return ctx
 
     def _stamp(self, version):
@@ -254,6 +274,9 @@ class SeatCacheDoctorWiringTests(unittest.TestCase):
                                 text=False, dry_run=False, command="doctor")
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(ctx.close)
+        # "hub" is the one repo key the quantivly fixture's [machines.dev].repos declares; the
+        # toysim fixture declares none, and any checkout answers its row.
+        pin_tenant_root(self, ctx, "hub")
         return ctx
 
     def healthy_base(self):
@@ -562,6 +585,158 @@ class RemoteSeatIdentityTests(unittest.TestCase):
         self.assertIn("accountUuid", script)
 
 
+class TenantRootTests(unittest.TestCase):
+    """DO-776: the tenant's own ``root``, and which of its expected repos are checked out there.
+
+    ``lane recipe`` refuses a local ``--repo`` it cannot reach; this is the same question asked
+    for the whole tenant, before any lane. Every row builds the tree it asserts against — the
+    fixture roots are real directories on the machine this was written on (see
+    :func:`pin_tenant_root`), so an unpinned row is green for the runner's filesystem rather than
+    for the code.
+    """
+
+    def ctx(self, tenant="quantivly", *, repos=(), plain=(), root=None):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name) / "state"),
+                                text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]),
+                                             env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        base = Path(tmp.name) / "root"
+        base.mkdir()
+        for r in repos:
+            (base / r).mkdir(); (base / r / ".git").mkdir()
+        for d in plain:
+            (base / d).mkdir()
+        ctx.tenant.root = base if root is None else root
+        return ctx
+
+    def row(self, **kw):
+        rows = doctor.tenant_root(self.ctx(**kw))
+        self.assertEqual(len(rows), 1, rows)   # exactly one row per tenant, pass or fail
+        return rows[0]
+
+    def test_a_root_holding_the_declared_repo_passes_and_names_it(self):
+        name, ok, detail = self.row(repos=("hub",))
+        self.assertEqual(name, "quantivly")
+        self.assertTrue(ok, detail)
+        self.assertIn("resolves 1 of the 1 repo key", detail)
+        self.assertIn("'hub'", detail)
+
+    def test_a_root_that_is_not_a_directory_fails_and_names_the_consequence(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        name, ok, detail = self.row(root=Path(tmp.name) / "no-such-root")
+        self.assertFalse(ok)
+        self.assertIn("is not a directory", detail)
+        self.assertIn("every local lane", detail)
+        self.assertIn("tenants/quantivly.toml", detail)
+
+    def test_a_root_resolving_no_declared_repo_fails_rather_than_passing_quietly(self):
+        # The root EXISTS and holds a checkout — just not the one the tenant's machines declare.
+        # "root is there" is not the question; "can this tenant reach what it expects" is.
+        name, ok, detail = self.row(repos=("unrelated",))
+        self.assertFalse(ok)
+        self.assertIn("no declared repo resolves", detail)
+        self.assertIn("'hub'", detail)
+
+    def test_a_partial_answer_passes_and_names_what_is_missing(self):
+        """A repo declared for a remote machine need not also be cloned on this one — that is the
+        normal state of a laptop against dev — so FAIL is "reaches nothing", not "reaches less
+        than everything". The fixture declares one key, so the partial case is built by hand."""
+        ctx = self.ctx(repos=("hub",))
+        ctx.tenant.machines["dev"].repos["extra"] = "~/quantivly/extra"
+        name, ok, detail = doctor.tenant_root(ctx)[0]
+        self.assertTrue(ok, detail)
+        self.assertIn("resolves 1 of the 2 repo keys", detail)
+        self.assertIn("not checked out here: ['extra']", detail)
+
+    def test_a_declared_repo_counts_on_is_dir_exactly_as_the_lane_refusal_accepts_it(self):
+        """The lane's own guard accepts a directory, not a git checkout (``lane.local_repo_path``
+        says why). If doctor asked the stricter question it would FAIL a tenant whose lanes all
+        start fine — two answers to one question, which is the defect class this issue is in."""
+        name, ok, detail = self.row(plain=("hub",))
+        self.assertTrue(ok, detail)
+
+    def test_a_tenant_declaring_no_machine_repos_falls_back_to_any_checkout(self):
+        name, ok, detail = self.row(tenant="toysim", repos=("widgets",))
+        self.assertEqual(name, "toysim")
+        self.assertTrue(ok, detail)
+        self.assertIn("1 git checkout", detail)
+        self.assertIn("declares no machine repos", detail)
+
+    def test_a_tenant_declaring_no_machine_repos_fails_on_an_empty_root(self):
+        name, ok, detail = self.row(tenant="toysim", plain=("notes",))
+        self.assertFalse(ok)
+        self.assertIn("holds no git checkout", detail)
+
+    def test_an_unlistable_root_is_unmeasured_not_empty(self):
+        """``local_repos`` answers ``None`` rather than ``[]`` when ``iterdir`` raises, and the
+        row must carry that distinction through: a root nobody could read reported as "holds no
+        git checkout" sends the reader to clone what may already be there."""
+        ctx = self.ctx(tenant="toysim", repos=("widgets",))
+        with mock.patch.object(Path, "iterdir", side_effect=PermissionError(13, "denied")):
+            name, ok, detail = doctor.tenant_root(ctx)[0]
+        self.assertFalse(ok)
+        self.assertIn("UNMEASURED", detail)
+        self.assertNotIn("holds no git checkout", detail)
+
+    def test_the_check_touches_no_machine(self):
+        ctx = self.ctx(repos=("hub",))
+        doctor.tenant_root(ctx)
+        self.assertEqual(ctx.runner.calls, [])
+
+
+class TenantRootWiringTests(unittest.TestCase):
+    """The row reaches the report body AND the exit status — a check nothing wires in is decoration."""
+
+    def make_ctx(self, runner, tenant="toysim"):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name) / "state"),
+                                text=False, dry_run=False, command="doctor")
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"},
+                                             cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    def test_a_healthy_root_reports_a_passing_row_and_does_not_fail_the_report(self):
+        ctx = self.make_ctx(healthy_runner())
+        pin_tenant_root(self, ctx, "widgets")
+        report = doctor.run_doctor(ctx)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual([(r["tenant"], r["ok"]) for r in report["tenant_root"]], [("toysim", True)])
+
+    def test_an_unreachable_root_fails_the_whole_report_and_is_named_in_problems(self):
+        ctx = self.make_ctx(healthy_runner())
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ctx.tenant.root = Path(tmp.name) / "no-such-root"
+        report = doctor.run_doctor(ctx)
+        self.assertFalse(report["ok"])
+        self.assertEqual([r["ok"] for r in report["tenant_root"]], [False])
+        self.assertTrue(any("tenant root" in p for p in report["problems"]), report["problems"])
+
+    def test_the_root_problem_is_reported_ahead_of_the_cross_machine_ones(self):
+        """``problems`` is joined into the refusal text, so its order is what a reader sees first.
+        A tenant that can reach no repo explains every machine row under it — a laptop with no
+        checkout still fails its slice and seat checks — and putting it last buries the cause
+        under three consequences. Every row here is red, so the order is the only thing asserted.
+        """
+        # The install link and the timer are HEALTHY: they are checked before any of the row
+        # checks and would otherwise sit at the head of `problems` and satisfy nothing about it.
+        runner = FakeRunner(healthy_runner().responses + [
+            (["claude-pick"], Result(5, "", "no clauth")),
+            (["ssh"], Result(1, "", "unreachable")),
+        ])
+        ctx = self.make_ctx(runner, tenant="quantivly")
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ctx.tenant.root = Path(tmp.name) / "no-such-root"
+        problems = doctor.run_doctor(ctx, clauth_profiles=clauth_tree(self))["problems"]
+        kinds = [p.split(":")[0] for p in problems]
+        self.assertEqual(kinds[0], "tenant root for 'quantivly'")
+        for later in ("seat cache for machine 'dev'", "lane memory budget on machine 'dev'",
+                      "declared seat on machine 'dev'"):
+            self.assertIn(later, kinds)
+
+
 class CrossMachineWiringTests(unittest.TestCase):
     """Both new checks reach the report body AND the exit status."""
 
@@ -571,6 +746,9 @@ class CrossMachineWiringTests(unittest.TestCase):
                                 text=False, dry_run=False, command="doctor")
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(ctx.close)
+        # "hub" is the one repo key the quantivly fixture's [machines.dev].repos declares; the
+        # toysim fixture declares none, and any checkout answers its row.
+        pin_tenant_root(self, ctx, "hub")
         return ctx
 
     def base(self, *extra):

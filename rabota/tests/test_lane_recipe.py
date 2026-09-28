@@ -583,6 +583,29 @@ class RunRecipeTests(LocalRecipeTests):
                     model="claude-sonnet-5", effort="medium", est_minutes=30, run=False)
         base.update(over); return base
 
+    def local_ctx(self, runner=None, *, repos=("hub",)):
+        """A context whose tenant ``root`` is a fixture tree holding ``repos`` as git checkouts.
+
+        DO-776 made the LOCAL branch of ``run_recipe`` refuse a ``--repo`` it cannot reach, so
+        every row that takes that branch has to say what this machine can reach. The fixture
+        tenant's root is ``~/quantivly``, and ``LocalRecipeTests`` pins ``$HOME`` to a directory
+        that does not exist — which is deliberate for every OTHER row here and is exactly what
+        these rows must not inherit. Pinning the root to a tree this test built is the same move
+        as :data:`LOCAL_HOME` one level down: the verdict stops depending on who runs the suite.
+        """
+        ctx = self.ctx(runner if runner is not None else FakeRunner([]))
+        ctx.tenant.root = self.repo_root(*repos)
+        return ctx
+
+    def repo_root(self, *repos):
+        """A temp directory holding one git checkout per name in ``repos``; returns its path."""
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for r in repos:
+            (root / r).mkdir(parents=True)
+            (root / r / ".git").mkdir()
+        return root
+
     def ok_budget(self):
         # five_h_pct_now (fix round 2, Minor 3): every OTHER budget stub omits it, so the
         # inserted row's five_h_pct_at_start column was None everywhere and a renamed/dropped key
@@ -879,9 +902,12 @@ class RunRecipeTests(LocalRecipeTests):
         # Fix round 2, Minor: without this row, a local --run reaches
         # create_worktree_remote(ctx, None, ...) and dies on None.ssh as an exit-5 AttributeError
         # instead of the clean exit-3 refusal the message already promises.
-        ctx = self.ctx(FakeRunner([]))
-        with self.assertRaises(errors.Refused):
-            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+        #
+        # DO-776: the repo is now REACHABLE and the message is asserted. `assertRaises(Refused)`
+        # over an unreachable `~/quantivly/hub` was satisfied by the new repo refusal too, on a
+        # machine where that path does not exist — a green row about a rule it no longer reached.
+        with self.assertRaisesRegex(errors.Refused, "local --run form is not implemented"):
+            lane.run_recipe(self.local_ctx(), budget_fn=lambda **_: self.ok_budget(),
                             **self.kw(machine="local", run=True))
 
     def test_a_local_recipe_sets_claude_config_dir_to_the_seat_path(self):
@@ -889,8 +915,7 @@ class RunRecipeTests(LocalRecipeTests):
         # no row exercised run_recipe's LOCAL branch and inspected the resulting
         # CLAUDE_CONFIG_DIR value; test_the_seat_is_pinned_by_config_dir only calls build_local
         # directly. This row closes that gap.
-        ctx = self.ctx(FakeRunner([]))
-        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+        out = lane.run_recipe(self.local_ctx(), budget_fn=lambda **_: self.ok_budget(),
                               **self.kw(machine="local", repo="hub"))
         expected = lane.seat_config_dir(out["seat"])
         self.assertIn(f"CLAUDE_CONFIG_DIR={expected}", out["shell"])
@@ -1033,6 +1058,130 @@ class RunRecipeTests(LocalRecipeTests):
         argv will run on can say what its PATH is, and for a local lane nothing has asked it."""
         argv = self.argv()
         self.assertEqual([a for a in argv if a.startswith("--setenv=PATH")], [])
+
+
+class LocalRepoTests(LocalRecipeTests):
+    """DO-776: a LOCAL lane's ``--repo`` is refused by name when this machine cannot reach it.
+
+    The remote branch has refused an undeclared ``--repo`` since DO-663 and says so in the
+    machine's own vocabulary (``test_the_unknown_repo_refusal_says_repo_takes_a_config_key_not_a_path``
+    above). The local branch built ``<tenant.root>/<repo>`` and checked nothing at all, so the
+    same mistake was a named refusal on one path and silence on the other. These rows are the
+    local half, written to the same shape.
+
+    Every row here pins the tenant root to a tree it built (``local_ctx``/``repo_root``): the
+    fixture root is ``~/quantivly``, which is a real directory holding a real ``hub`` on the
+    machine this was written on, so an unpinned row answers from the runner's filesystem.
+    """
+
+    # Borrowed by reference rather than inherited: subclassing ``RunRecipeTests`` would rerun its
+    # whole work-lane suite a second time for nothing, which is the same call ``EvaluateRecipeTests``
+    # makes and for the same reason. These four are the only things from it these rows need.
+    BRIEF_TEXT = RunRecipeTests.BRIEF_TEXT
+    brief = RunRecipeTests.brief
+    kw = RunRecipeTests.kw
+    ok_budget = RunRecipeTests.ok_budget
+    local_ctx = RunRecipeTests.local_ctx
+    repo_root = RunRecipeTests.repo_root
+
+    def refusal(self, ctx, **over):
+        """Run a local recipe expected to refuse; return the message."""
+        with self.assertRaises(errors.Refused) as cm:
+            lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                            **self.kw(machine="local", **over))
+        return str(cm.exception)
+
+    def test_a_reachable_local_repo_resolves_under_the_tenant_root(self):
+        ctx = self.local_ctx(repos=("hub", "other"))
+        self.assertEqual(lane.local_repo_path(ctx.tenant, "hub"), str(Path(ctx.tenant.root) / "hub"))
+
+    def test_an_unreachable_local_repo_refuses_and_names_what_is_there(self):
+        msg = self.refusal(self.local_ctx(repos=("hub", "widgets")), repo="nosuch")
+        self.assertIn("--repo 'nosuch'", msg)
+        self.assertIn("'hub'", msg)
+        self.assertIn("'widgets'", msg)
+
+    def test_the_local_refusal_says_repo_takes_a_name_under_the_tenant_root(self):
+        """The local mirror of the DO-725 row above. A refusal that only said "no such repo"
+        would leave a reader who passed an absolute path — the mistake that message exists for on
+        the remote side — with nowhere to go, so the local one names the root it looked under and
+        says ``--repo`` is a name relative to it."""
+        ctx = self.local_ctx(repos=("hub",))
+        msg = self.refusal(ctx, repo="nosuch")
+        self.assertIn("--repo takes a name under that root", msg)
+        self.assertIn(str(ctx.tenant.root), msg)
+        self.assertIn("quantivly", msg)     # the tenant is named, not just the path
+
+    def test_a_missing_tenant_root_names_the_root_rather_than_an_empty_repo_list(self):
+        """A root that is not there and a root with nothing in it are different faults with
+        different fixes, and ``git checkouts under it: []`` is the wrong sentence for the first —
+        it tells the reader to clone when the directory above is what is missing."""
+        ctx = self.ctx(FakeRunner([]))
+        ctx.tenant.root = Path(tempfile.mkdtemp()) / "no-such-root"
+        msg = self.refusal(ctx, repo="hub")
+        self.assertIn("is not a directory", msg)
+        self.assertIn("can reach no repo at all", msg)
+        self.assertNotIn("git checkouts under it", msg)
+
+    def test_an_empty_root_lists_nothing_and_still_refuses(self):
+        ctx = self.local_ctx(repos=())
+        msg = self.refusal(ctx, repo="hub")
+        self.assertIn("git checkouts under it: []", msg)
+
+    def test_a_root_that_cannot_be_listed_says_so_rather_than_printing_an_empty_list(self):
+        """``local_repos`` returns ``None``, never ``[]``, when ``iterdir`` raises. An unreadable
+        root reported as empty is this repo's "green over the thing it exists to catch" shape:
+        the reader is told to clone a repo that may be sitting right there."""
+        ctx = self.local_ctx(repos=("hub",))
+        with patch.object(Path, "iterdir", side_effect=PermissionError(13, "Permission denied")):
+            msg = self.refusal(ctx, repo="nosuch")
+        self.assertIn("could not be listed", msg)
+        self.assertNotIn("git checkouts under it", msg)
+
+    def test_local_repos_returns_none_for_an_unlistable_root_and_a_list_otherwise(self):
+        root = self.repo_root("hub")
+        (root / "notes").mkdir()                  # a directory that is not a checkout
+        (root / "README.md").write_text("x")      # and a plain file
+        self.assertEqual(lane.local_repos(root), ["hub"])
+        with patch.object(Path, "iterdir", side_effect=PermissionError(13, "Permission denied")):
+            self.assertIsNone(lane.local_repos(root))
+
+    def test_an_absolute_repo_is_refused_rather_than_escaping_the_tenant_root(self):
+        """``Path("/a") / "/etc"`` is ``/etc``. The escape target here EXISTS and is a checkout,
+        so an existence check alone passes it — which is the whole point of the row: what is
+        refused is leaving the tenant, not being absent."""
+        ctx = self.local_ctx(repos=("hub",))
+        outside = self.repo_root("elsewhere") / "elsewhere"
+        self.assertTrue(outside.is_dir())
+        msg = self.refusal(ctx, repo=str(outside))
+        self.assertIn("is not a name under", msg)
+        self.assertIn("INSIDE the", msg)
+
+    def test_a_repo_stepping_up_through_dotdot_is_refused(self):
+        ctx = self.local_ctx(repos=("hub",))
+        sibling = Path(ctx.tenant.root).parent / "outside-repo"
+        sibling.mkdir(); self.addCleanup(shutil.rmtree, sibling, ignore_errors=True)
+        self.assertTrue((Path(ctx.tenant.root) / ".." / "outside-repo").is_dir())
+        msg = self.refusal(ctx, repo="../outside-repo")
+        self.assertIn("is not a name under", msg)
+
+    def test_an_empty_repo_name_is_refused_rather_than_resolving_to_the_root_itself(self):
+        """``root / ""`` is ``root``, which exists — so an existence check hands the lane the
+        whole tenant as its repo and calls it reachable."""
+        ctx = self.local_ctx(repos=("hub",))
+        for repo in ("", "."):
+            with self.subTest(repo=repo):
+                self.assertIn("is not a name under", self.refusal(ctx, repo=repo))
+
+    def test_the_local_repo_refusal_lands_before_anything_is_created(self):
+        """``--run`` and all: no runner call, no lane row. The remote branch's own ``--repo``
+        refusal sits in the same place for the same reason, and a refusal raised after a worktree
+        exists is the failure this issue is about."""
+        runner = FakeRunner([])
+        ctx = self.local_ctx(runner, repos=("hub",))
+        self.refusal(ctx, repo="nosuch", run=True)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(ctx.store.list_lanes("quantivly"), [])
 
 
 class EvaluateRecipeTests(LocalRecipeTests):
