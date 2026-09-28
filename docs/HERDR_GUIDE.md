@@ -995,7 +995,7 @@ Regenerate it after every `herdr update`.
 stack. Treat it as **shared, not disposable**: an OOM or an unasked-for restart there is a team
 outage.
 
-- **Policy: quantivly only.** Nothing personal or toysim goes on dev. Its seat is **quantivly-0**,
+- **Policy: quantivly only.** Nothing non-work goes on dev. Its seat is **quantivly-0**,
   held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* that
   window, but launching on that seat belongs on dev.
 - **The declared seat is checked, by `rabota doctor`, without reading a credential.**
