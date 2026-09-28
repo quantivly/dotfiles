@@ -43,6 +43,20 @@ DO-711 it ran nowhere, and both shipped briefs pointed every dev lane at `/home/
   `tenants/<name>.toml` (identity pins, thresholds, lane defaults).
 - **State** is per tenant at `<tenant state_dir>/rabota.db` plus day directories of prose.
 
+## Reconcile classification notes
+
+Evidence behind two rules in `claude/skills/rabota/references/reconcile.md`, trimmed there for the
+skill's byte budget (`scripts/test-rabota.sh`):
+
+- **Folding state into the class name.** A blind-evaluate run once wrote
+  `Class: question owed → already answered`, scoring it as a new, seventh class. It is a
+  `question-owed` item whose `outcome` happens to be "already answered" — the class names the KIND
+  of commitment, never whether it is currently outstanding.
+- **DO-751: `rabota brief`'s turn-1 reply dropped its tracked-side index.** It grew linearly with
+  the tenant's open-issue count, measured ~303 KB on a synthetic tenant scaled to @zvi's real one.
+  `rabota tracked <key> [<key>…]` replaced it: one call, no network, answered from
+  `sources/linear.json`/`sources/github.json` on disk.
+
 ## Running tests
 
 ```bash
