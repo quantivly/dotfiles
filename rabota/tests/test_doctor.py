@@ -751,6 +751,38 @@ class DeclaredReposTests(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertIn("nothing needs it", detail)
 
+    def test_a_key_the_table_resolved_is_not_ALSO_reported_missing_from_the_root(self):
+        """Found on the live machine the day DO-773 deployed. The quantivly row read
+        ``1 of them here: ['dotfiles'] ... not checked out here: ['dotfiles']`` — a PASSING row
+        naming a reachable repo as missing, which is this repo's "a derived complaint printed
+        beside its own cause" shape and sends a reader to fix what is already right.
+
+        The fixture is the real shape: a machine declares ``dotfiles`` as a repo KEY, the tenant's
+        ``[repos]`` table resolves it to a path outside the root, and the root does not and never
+        will contain it.
+        """
+        ctx = self.ctx(dotfiles=True)
+        ctx.tenant.machines["dev"].repos["dotfiles"] = "~/elsewhere/dotfiles"
+        name, ok, detail = doctor.tenant_repos(ctx)[0]
+        self.assertTrue(ok, detail)
+        self.assertIn("1 of them here: ['dotfiles']", detail)
+        # THE SEGMENT, not a fixed rendering of the whole list. The first cut of this row
+        # asserted `not in` against "not checked out here: ['dotfiles']", which only matches when
+        # that list has exactly one element — the fixture also leaves 'hub' unresolved, so the
+        # mutant printed "['dotfiles', 'hub']", the needle missed, and the row passed against the
+        # very defect it was written for. Caught by mutation, not by the suite.
+        missing_segment = detail.split("not checked out here:", 1)[-1] if \
+            "not checked out here:" in detail else ""
+        self.assertNotIn("dotfiles", missing_segment, f"reported as missing although resolved: {detail}")
+
+    def test_a_key_NEITHER_side_resolves_is_still_reported_once(self):
+        """The paired half, so the fix cannot be "stop reporting missing keys at all"."""
+        ctx = self.ctx(dotfiles=False)
+        ctx.tenant.machines["dev"].repos["dotfiles"] = "~/elsewhere/dotfiles"
+        name, ok, detail = doctor.tenant_repos(ctx)[0]
+        self.assertIn("not a directory here", detail)      # the [repos] side says so
+        self.assertIn("'dotfiles'", detail)
+
     def test_the_row_agrees_with_what_the_lane_would_actually_do(self):
         """The coupling itself, asserted rather than assumed: for each declared key, doctor's
         verdict and ``lane.local_repo_path`` must agree about whether it is reachable."""

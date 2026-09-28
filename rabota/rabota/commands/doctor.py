@@ -411,7 +411,14 @@ def tenant_repos(ctx) -> list[tuple[str, bool, str]]:
                                 + str([f"{k} -> {str(declared_paths[k])}" for k in declared_missing]))
 
     root = Path(ctx.tenant.root).expanduser()
-    declared = sorted({r for m in ctx.tenant.machines.values() for r in m.repos})
+    # MINUS whatever the [repos] table already resolved. The two halves answer about the same
+    # `--repo` vocabulary, so a key satisfied by the table is not also missing from the root --
+    # and reporting it twice sent the reader to fix a repo that is reachable. Measured on the
+    # live machine right after DO-773 deployed: the quantivly row read "1 of them here:
+    # ['dotfiles'] ... not checked out here: ['dotfiles']" on a PASSING row, which is this
+    # repo's "a derived complaint printed beside its own cause" shape.
+    declared = sorted({r for m in ctx.tenant.machines.values() for r in m.repos}
+                      - set(declared_found))
     where = f"tenants/{name}.toml sets root"
     if not root.is_dir():
         detail = (f"root {str(root)!r} is not a directory ({where})")

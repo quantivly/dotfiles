@@ -554,9 +554,7 @@ def _fireflies_coverage(ctx: Context, now: datetime) -> tuple[datetime, dict | N
         window_since = None
     anchor = snapshots.read_last_classified(ctx.state_dir)
     if anchor is None:
-        anchor, freeze_error = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
-        if not ctx.dry_run:
-            snapshots.record_fireflies_freeze_result(ctx, freeze_error)
+        anchor = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
     if anchor is not None and window_since is not None and window_since > anchor:
         if now - anchor > timedelta(days=sync_cmd.FIREFLIES_LOOKBACK_MAX_DAYS):
             coverage = min(fetched_at, now) if fetched_at is not None else window_since
