@@ -61,8 +61,17 @@ TIMEOUT_SECONDS = 60
 # stays unambiguous until epoch seconds themselves reach 1e12, i.e. the year 33658.
 _EPOCH_MS_THRESHOLD = 10**12
 
-Q_TRANSCRIPTS = """query($fromDate: DateTime) {
-  transcripts(fromDate: $fromDate) {
+PAGE_SIZE = 50
+# Measured live 2026-09-28 (DO-772): a 90-day window and a 365-day window both returned exactly
+# 50 transcripts with no `limit` given -- 50 is the server's silent default page size, so an
+# explicit `limit: 50` matches the one page size the live API is confirmed to honor.
+MAX_PAGES = 40
+# At PAGE_SIZE transcripts per page that is 2000 transcripts -- at the measured live rate of
+# ~0.8 meetings/day (DO-772), roughly 7 years of continuous meetings. A window that would page
+# past this is refused (`errors.RabotaError`) rather than looped on forever or silently capped.
+
+Q_TRANSCRIPTS = """query($fromDate: DateTime, $limit: Int, $skip: Int) {
+  transcripts(fromDate: $fromDate, limit: $limit, skip: $skip) {
     id title date
     summary { action_items }
   }
@@ -191,11 +200,55 @@ class FirefliesClient:
         return reply["data"]
 
     def recent_transcripts(self, since: datetime) -> list[dict]:
-        """Transcripts since ``since``, each with ``action_items`` already parsed."""
-        data = self.query(Q_TRANSCRIPTS, {"fromDate": since.strftime("%Y-%m-%dT%H:%M:%SZ")})
+        """Transcripts since ``since``, each with ``action_items`` already parsed.
+
+        Pages explicitly with ``limit``/``skip`` -- ``transcripts`` returns a plain list, not a
+        ``pageInfo`` connection like Linear's queries, so this follows ``linear.py``'s spirit
+        (ask for a bounded page, keep going while the server hands back more) rather than its
+        cursor mechanics, which do not apply here. A page shorter than ``PAGE_SIZE`` is the only
+        signal this API gives that there is no more to fetch; a page *longer* than ``PAGE_SIZE``
+        means ``limit`` was not honored and the reply cannot be trusted, exactly
+        ``linear.find_by_identifiers``'s precedent for a filter that silently did not apply.
+        Paging past ``MAX_PAGES`` is refused rather than truncated silently -- see its comment
+        for the bound.
+
+        **Duplicates only, not gaps (DO-772 fix round).** ``transcripts`` gives no cursor, so each
+        page is a fresh query at a fixed ``skip`` against whatever order the server holds *right
+        now* -- if that order changes between two calls (a meeting's ``date`` corrected, a
+        transcript finishing processing mid-run), an id can shift across the page boundary and
+        come back twice. Every id already added is tracked, so a second occurrence is dropped
+        rather than appended, keeping the first occurrence's position. An id that shifts the other
+        way -- out of every page's window entirely -- cannot be told apart from an id that was
+        simply never in range: nothing in a reply says how many ids exist or which ones a stable
+        server would have shown, so a skip is not detected here, and a page containing a duplicate
+        is not evidence of one either (it is only evidence of *this* duplicate).
+
+        **Unverified against a schema.** DO-772's brief could not confirm ``limit``/``skip`` are
+        Fireflies' real argument names from anything checked into this repo -- there is no
+        Fireflies schema here, and this lane has no live access to check them against the API
+        directly. They match the shape documented at docs.fireflies.ai, which is the best
+        available signal, but a live run is what actually confirms or refutes them.
+        """
+        from_date = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         out = []
-        for t in data.get("transcripts") or []:
-            summary = t.get("summary") or {}
-            out.append({"id": t.get("id"), "title": t.get("title"), "date": normalize_date(t.get("date")),
-                        "action_items": parse_action_items(summary.get("action_items"))})
-        return out
+        seen_ids = set()
+        for page_num in range(MAX_PAGES):
+            data = self.query(Q_TRANSCRIPTS, {"fromDate": from_date, "limit": PAGE_SIZE, "skip": page_num * PAGE_SIZE})
+            page = data.get("transcripts")
+            if not isinstance(page, list):
+                raise errors.RabotaError("Fireflies reply lacks transcripts")
+            if len(page) > PAGE_SIZE:
+                raise errors.RabotaError(f"Fireflies returned {len(page)} transcripts for a page of "
+                                         f"{PAGE_SIZE}: limit was not honored")
+            for t in page:
+                tid = t.get("id")
+                if tid in seen_ids:     # a reordered server can hand the same id back on a later page
+                    continue
+                seen_ids.add(tid)
+                summary = t.get("summary") or {}
+                out.append({"id": tid, "title": t.get("title"), "date": normalize_date(t.get("date")),
+                            "action_items": parse_action_items(summary.get("action_items"))})
+            if len(page) < PAGE_SIZE:
+                return out
+        raise errors.RabotaError(f"Fireflies transcripts since {from_date} still paging full pages after "
+                                 f"{MAX_PAGES} pages ({len(out)} transcripts): refusing rather than truncating")

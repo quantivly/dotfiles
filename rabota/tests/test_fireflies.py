@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rabota import context, errors
-from rabota.sources.fireflies import FirefliesClient, normalize_date, parse_action_items
+from rabota.sources.fireflies import PAGE_SIZE, MAX_PAGES, FirefliesClient, normalize_date, parse_action_items
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -157,6 +157,92 @@ class FirefliesClientQueryTests(unittest.TestCase):
         # Verified independently: `date -u -d @1790273700` and `datetime.utcfromtimestamp` both
         # give 18:15:00, not 17:35:00 -- see the verdict for this discrepancy against the brief.
         self.assertEqual(out[0]["date"], "2026-09-24T18:15:00Z")
+
+    def test_the_empty_case_returns_an_empty_list_without_paging(self):
+        client = FirefliesClient("k" * 20, post=FakePost([{"data": {"transcripts": []}}]))
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertEqual(out, [])
+
+
+def _page_reply(ids):
+    return {"data": {"transcripts": [
+        {"id": i, "title": i, "date": "2026-09-02", "summary": None} for i in ids]}}
+
+
+class FirefliesClientPagingTests(unittest.TestCase):
+    """DO-772: the server hands back at most 50 transcripts per reply and nothing in the query
+    said so -- a window wide enough to hold more than one page silently lost the oldest entries.
+    ``recent_transcripts`` now asks for an explicit page and keeps going while the page is full.
+    """
+
+    def test_a_full_page_then_a_short_page_returns_every_transcript_in_order(self):
+        full = [f"t{i}" for i in range(PAGE_SIZE)]
+        short = ["tlast1", "tlast2"]
+        post = FakePost([_page_reply(full), _page_reply(short)])
+        client = FirefliesClient("k" * 20, post=post)
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertEqual([t["id"] for t in out], full + short)
+        # two round trips, second one skipping past the first page
+        self.assertEqual(len(post.calls), 2)
+        self.assertEqual(post.calls[0]["variables"]["skip"], 0)
+        self.assertEqual(post.calls[0]["variables"]["limit"], PAGE_SIZE)
+        self.assertEqual(post.calls[1]["variables"]["skip"], PAGE_SIZE)
+
+    def test_full_pages_forever_are_refused_not_truncated(self):
+        full = [f"t{i}" for i in range(PAGE_SIZE)]
+
+        def post(body):
+            return _page_reply(full)
+
+        client = FirefliesClient("k" * 20, post=post)
+        with self.assertRaises(errors.RabotaError) as cm:
+            client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertIn(str(MAX_PAGES), str(cm.exception))
+
+    def test_a_page_longer_than_the_requested_limit_is_refused(self):
+        oversized = [f"t{i}" for i in range(PAGE_SIZE + 1)]
+        post = FakePost([_page_reply(oversized)])
+        client = FirefliesClient("k" * 20, post=post)
+        with self.assertRaises(errors.RabotaError) as cm:
+            client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertIn("limit was not honored", str(cm.exception))
+
+    def test_a_duplicate_id_across_pages_is_removed_keeping_first_position(self):
+        """A hand-built repeat: the second page's first id is one the first page already gave."""
+        full = [f"t{i}" for i in range(PAGE_SIZE)]
+        short = [full[-1], "tnew"]
+        post = FakePost([_page_reply(full), _page_reply(short)])
+        client = FirefliesClient("k" * 20, post=post)
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        out_ids = [t["id"] for t in out]
+        self.assertEqual(out_ids, full + ["tnew"])
+        self.assertEqual(out_ids.count(full[-1]), 1)
+
+    def test_a_reordering_between_calls_causes_a_duplicate_that_is_deduped(self):
+        """No hand-built repeat: the server itself reorders its list between the two calls, which
+        shifts an id already handed out on page 1 into page 2's window."""
+        ids = [f"t{i}" for i in range(PAGE_SIZE + 1)]  # 51 ids: one full page, one short page
+
+        class ReorderingPost:
+            def __init__(self, order):
+                self.order, self.calls = list(order), []
+
+            def __call__(self, body):
+                self.calls.append(body)
+                skip, limit = body["variables"]["skip"], body["variables"]["limit"]
+                page = self.order[skip:skip + limit]
+                if len(self.calls) == 1:
+                    self.order = self.order[1:] + self.order[:1]  # rotate first id to the end
+                return _page_reply(page)
+
+        post = ReorderingPost(ids)
+        client = FirefliesClient("k" * 20, post=post)
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        out_ids = [t["id"] for t in out]
+        self.assertEqual(len(post.calls), 2)
+        # page 2 re-delivers ids[0] (rotated to the tail) instead of anything new -- deduped away.
+        self.assertEqual(out_ids, ids[:PAGE_SIZE])
+        self.assertEqual(out_ids.count(ids[0]), 1)
 
 
 class NormalizeDateTests(unittest.TestCase):
