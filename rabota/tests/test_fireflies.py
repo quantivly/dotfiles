@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rabota import context, errors
-from rabota.sources.fireflies import FirefliesClient, normalize_date, parse_action_items
+from rabota.sources.fireflies import PAGE_SIZE, MAX_PAGES, FirefliesClient, normalize_date, parse_action_items
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
@@ -157,6 +157,55 @@ class FirefliesClientQueryTests(unittest.TestCase):
         # Verified independently: `date -u -d @1790273700` and `datetime.utcfromtimestamp` both
         # give 18:15:00, not 17:35:00 -- see the verdict for this discrepancy against the brief.
         self.assertEqual(out[0]["date"], "2026-09-24T18:15:00Z")
+
+    def test_the_empty_case_returns_an_empty_list_without_paging(self):
+        client = FirefliesClient("k" * 20, post=FakePost([{"data": {"transcripts": []}}]))
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertEqual(out, [])
+
+
+def _page_reply(ids):
+    return {"data": {"transcripts": [
+        {"id": i, "title": i, "date": "2026-09-02", "summary": None} for i in ids]}}
+
+
+class FirefliesClientPagingTests(unittest.TestCase):
+    """DO-772: the server hands back at most 50 transcripts per reply and nothing in the query
+    said so -- a window wide enough to hold more than one page silently lost the oldest entries.
+    ``recent_transcripts`` now asks for an explicit page and keeps going while the page is full.
+    """
+
+    def test_a_full_page_then_a_short_page_returns_every_transcript_in_order(self):
+        full = [f"t{i}" for i in range(PAGE_SIZE)]
+        short = ["tlast1", "tlast2"]
+        post = FakePost([_page_reply(full), _page_reply(short)])
+        client = FirefliesClient("k" * 20, post=post)
+        out = client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertEqual([t["id"] for t in out], full + short)
+        # two round trips, second one skipping past the first page
+        self.assertEqual(len(post.calls), 2)
+        self.assertEqual(post.calls[0]["variables"]["skip"], 0)
+        self.assertEqual(post.calls[0]["variables"]["limit"], PAGE_SIZE)
+        self.assertEqual(post.calls[1]["variables"]["skip"], PAGE_SIZE)
+
+    def test_full_pages_forever_are_refused_not_truncated(self):
+        full = [f"t{i}" for i in range(PAGE_SIZE)]
+
+        def post(body):
+            return _page_reply(full)
+
+        client = FirefliesClient("k" * 20, post=post)
+        with self.assertRaises(errors.RabotaError) as cm:
+            client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertIn(str(MAX_PAGES), str(cm.exception))
+
+    def test_a_page_longer_than_the_requested_limit_is_refused(self):
+        oversized = [f"t{i}" for i in range(PAGE_SIZE + 1)]
+        post = FakePost([_page_reply(oversized)])
+        client = FirefliesClient("k" * 20, post=post)
+        with self.assertRaises(errors.RabotaError) as cm:
+            client.recent_transcripts(datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertIn("limit was not honored", str(cm.exception))
 
 
 class NormalizeDateTests(unittest.TestCase):
