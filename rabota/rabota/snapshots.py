@@ -1,11 +1,12 @@
 """Source snapshots: ``<state_dir>/sources/<source>.json``, written atomically and guarded, read back as dicts."""
 import json
 import os
+import sqlite3
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rabota import emit, secrets
+from rabota import emit, errors, secrets
 from rabota.store import now
 
 FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -168,10 +169,27 @@ def read_fireflies_bootstrap_anchor(state_dir: Path) -> datetime | None:
         return None
 
 
-def _freeze_fireflies_bootstrap_anchor(state_dir: Path, anchor: datetime) -> None:
+# One transient freeze-write failure must stay quiet (DO-768): `since` is still correct THIS call
+# either way (the caller already has `anchor` in hand), and the very next tick tries the write
+# again from the same "nothing frozen yet" state -- a single fluke costs an operator nothing but
+# one retry it never sees. What must not stay quiet is the SAME write failing again and again: the
+# window then never freezes at all, and every later call re-derives `read_newest_day_brief` live,
+# restoring the pre-DO-761 day-by-day slide with no error and no alert. `FIREFLIES_FREEZE_ALERT_AFTER`
+# is the count of CONSECUTIVE failures (tracked in `Store.fireflies_freeze_faults`, reset to zero
+# the moment a freeze succeeds) at which `reconcile.snapshot_health` starts saying so -- one failure
+# is a fluke by definition here, so 2 is the first count that is not.
+FIREFLIES_FREEZE_ALERT_AFTER = 2
+
+
+def _freeze_fireflies_bootstrap_anchor(state_dir: Path, anchor: datetime) -> str | None:
     """Persist ``anchor`` as the frozen fallback anchor, once a VALID one is not already on disk --
     a second call once a good anchor is frozen is a no-op, so the anchor this protects can only
     ever be set once per tenant (until a real classification supersedes it as the primary anchor).
+
+    Returns ``None`` when a frozen anchor is now on disk -- it already was, or this call just
+    wrote it -- or the ``OSError`` text when this call's own write attempt failed. A caller uses
+    that to tell "frozen" from "answered but not frozen" (DO-768; the old version returned nothing
+    at all, so no caller could ever tell the difference).
 
     Review finding 2 (DO-761 fix round 3): the guard used to be ``path.exists()`` -- existence,
     not validity -- so a corrupt file (a bad write, or a process killed mid-write) could never be
@@ -187,35 +205,61 @@ def _freeze_fireflies_bootstrap_anchor(state_dir: Path, anchor: datetime) -> Non
     "the ones that succeed are written even when a later one fails"). A read-only state dir, a full
     disk or a permissions fault must not turn this opportunistic persist, tucked inside what every
     caller treats as a read, into an unhandled ``OSError`` that takes down Linear and GitHub too.
+    DO-768: the fault is no longer swallowed with a bare ``pass`` -- it is reported back to the
+    caller instead, so it can reach an operator once it stops being a one-off.
     """
     if read_fireflies_bootstrap_anchor(state_dir) is not None:
-        return
+        return None
     path = Path(state_dir) / FIREFLIES_BOOTSTRAP_ANCHOR_FILE
     try:
         emit.write_file(path, json.dumps({"anchor": anchor.strftime(FETCHED_AT_FORMAT)}))
-    except OSError:
-        pass    # best-effort: the caller already has `anchor` to answer with this call either way
+        return None
+    except OSError as e:
+        return str(e) or type(e).__name__
 
 
-def read_or_freeze_fireflies_fallback_anchor(state_dir: Path, dry_run: bool = False) -> datetime | None:
+def read_or_freeze_fireflies_fallback_anchor(state_dir: Path, dry_run: bool = False) -> tuple[datetime | None, str | None]:
     """Fallback #2 for ``commands.sync.fireflies_since``/``commands.brief._fireflies_coverage``,
     behind ``read_last_classified``: the newest day-scoped brief's ``generated_at`` — frozen the
     first time an answer is available, rather than recomputed live on every call. See the
     ``FIREFLIES_BOOTSTRAP_ANCHOR_FILE`` comment above for why a live re-read of
     ``read_newest_day_brief`` cannot satisfy the classification invariant.
 
-    ``None`` while no day-scoped brief has ever existed (nothing to freeze yet) — the caller then
-    falls back further, to a fixed lookback. The moment one does exist, that answer is frozen for
-    every later call, even once newer day-scoped briefs land, until a real classification record
-    exists and takes over as the primary anchor. ``dry_run`` (matching ``snapshots.write``'s own
-    flag) skips the freeze itself — a dry run must not start a state change a real call would.
+    Returns ``(anchor, freeze_error)``. ``anchor`` is ``None`` while no day-scoped brief has ever
+    existed (nothing to freeze yet) — the caller then falls back further, to a fixed lookback. The
+    moment one does exist, that answer is frozen for every later call, even once newer day-scoped
+    briefs land, until a real classification record exists and takes over as the primary anchor.
+    ``dry_run`` (matching ``snapshots.write``'s own flag) skips the freeze itself — a dry run must
+    not start a state change a real call would.
+
+    ``freeze_error`` (DO-768) is ``None`` when the anchor is frozen -- already was, or this call
+    just persisted it -- when there is nothing to freeze yet, or on a dry run (which never
+    attempts the write); it is the ``OSError`` text from ``_freeze_fireflies_bootstrap_anchor``
+    when this call tried to persist a new anchor and failed. Before this, the return value could
+    not express "answered but not frozen" at all -- every one of those cases looked identical to a
+    caller that only ever saw the ``datetime``.
     """
     frozen = read_fireflies_bootstrap_anchor(state_dir)
     if frozen is not None:
-        return frozen
+        return frozen, None
     anchor = read_newest_day_brief(state_dir)
-    if anchor is None:
-        return None
-    if not dry_run:
-        _freeze_fireflies_bootstrap_anchor(state_dir, anchor)
-    return anchor
+    if anchor is None or dry_run:
+        return anchor, None
+    return anchor, _freeze_fireflies_bootstrap_anchor(state_dir, anchor)
+
+
+def record_fireflies_freeze_result(ctx, freeze_error: str | None) -> None:
+    """Best-effort bookkeeping of ``freeze_error`` (see ``read_or_freeze_fireflies_fallback_anchor``)
+    into ``ctx.store``'s consecutive-failure streak for ``ctx.tenant``.
+
+    Guarded, deliberately: a caller reaches this only after the freeze itself already degraded
+    gracefully (DO-768) rather than crashing, and a store that cannot even open -- a state dir
+    unwritable from the very first call this process ever made, before any row has ever been
+    written -- must not turn this bookkeeping step into the crash the freeze itself just avoided.
+    Losing one streak update this way is the same trade the freeze itself already makes: the
+    caller already has its answer for this call regardless of whether the count gets recorded.
+    """
+    try:
+        ctx.store.record_freeze_result(ctx.tenant.name, freeze_error)
+    except (errors.RabotaError, sqlite3.Error):
+        pass

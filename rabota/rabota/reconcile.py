@@ -31,6 +31,7 @@ the brief must still print. A *stale* snapshot is not the same thing: the data i
 the CLI has, so it is returned as-is with a ``reason`` noting its age, not suppressed.
 """
 import re
+import sqlite3
 from datetime import datetime, timezone
 
 from rabota import errors, snapshots
@@ -254,19 +255,40 @@ def build_tracked_index(ctx, now: datetime | None = None) -> dict:
 
 
 def snapshot_health(ctx, now: datetime | None = None) -> list[dict]:
-    """``[{"source", "reason"}]`` for each of ``linear``/``github`` the CLI cannot rely on.
+    """``[{"source", "reason"}]`` for each of ``linear``/``github``/``fireflies`` the CLI cannot
+    rely on.
 
     Cheap on purpose: it reads the two files but projects nothing, so both ``--text`` and JSON can
     call it on every brief. Review finding: `--text` never noticed an unreadable
     ``sources/linear.json`` at all once the day's ``sequence.json`` existed -- only JSON mode's
     ``tracked`` revalidated it -- so the brief could rank on a corrupt snapshot and say nothing. A
     source the tenant does not use is not a health problem and is never reported.
+
+    **DO-768.** A Fireflies entry is appended, through the SAME ``{"source", "reason"}`` shape and
+    the same ``! <source> snapshot is unreliable — <reason>`` alert line ``_alert_lines`` already
+    renders for this list, once ``Store.freeze_fault`` shows the bootstrap-anchor freeze has
+    failed ``snapshots.FIREFLIES_FREEZE_ALERT_AFTER`` or more times IN A ROW for this tenant. One
+    fluke never reaches here (the streak is 1, below the threshold) -- a persistent one does, on
+    every brief until a freeze finally succeeds and ``Store.record_freeze_result`` resets the
+    streak to zero. Reading the streak is guarded the same way recording it is (see
+    ``snapshots.record_fireflies_freeze_result``): a store that cannot even open must not turn a
+    health check into a crash.
     """
     now = now or datetime.now(timezone.utc)
     index = build_tracked_index(ctx, now)
-    return [{"source": source, "reason": side["reason"] or "unreliable"}
-            for source, side in index.items()
-            if not side["ok"] and not side.get("skipped")]
+    health = [{"source": source, "reason": side["reason"] or "unreliable"}
+              for source, side in index.items()
+              if not side["ok"] and not side.get("skipped")]
+    if "fireflies" in ctx.tenant.sources:
+        try:
+            fault = ctx.store.freeze_fault(ctx.tenant.name)
+        except (errors.RabotaError, sqlite3.Error):
+            fault = None
+        if fault and fault["fails"] >= snapshots.FIREFLIES_FREEZE_ALERT_AFTER:
+            health.append({"source": "fireflies",
+                           "reason": f"bootstrap anchor unwritten for {fault['fails']} consecutive "
+                                     f"attempts ({fault['last_error']}) — fetch window may be sliding forward"})
+    return health
 
 
 def lookup_tracked(ctx, keys: list[str], now: datetime | None = None, lin=None) -> dict:

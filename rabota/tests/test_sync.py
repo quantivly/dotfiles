@@ -2,8 +2,8 @@ import argparse, json, sqlite3, tempfile, unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from rabota import context, errors, secrets, snapshots
-from rabota.commands import sync, ingest
+from rabota import context, errors, reconcile, secrets, snapshots
+from rabota.commands import brief, sync, ingest
 from rabota.runner import FakeRunner
 from rabota.sources import linear
 from tests.test_linear import COPIED, FakePost, Recording, _parse_selection, node_from_selection, tree_paths
@@ -404,6 +404,92 @@ class SyncTests(unittest.TestCase):
                 self.assertEqual(since, healed, f"day {i}: the anchor must heal and hold, not keep sliding")
         self.assertIsNotNone(snapshots.read_fireflies_bootstrap_anchor(ctx.state_dir),
                              "the corrupt file must have been replaced by a valid one")
+
+    # ---- DO-768: a PERSISTENT freeze-write fault must be loud, a transient one must stay quiet --
+
+    def test_a_persistent_freeze_failure_is_told_through_the_existing_alert_shape(self):
+        # `34d1787`'s `_freeze_fireflies_bootstrap_anchor` swallows the write's `OSError` with a
+        # bare `pass` -- right for a ONE-TIME fault (`since` still answers correctly this call,
+        # and the next call retries), wrong forever: nothing ever tells an operator the anchor
+        # never landed, so every later call re-derives `read_newest_day_brief` live and the
+        # window slides a day per day -- the pre-DO-761 behaviour, restored silently. Occupy the
+        # anchor's OWN path with a directory, so every write attempt fails the SAME way on EVERY
+        # one of several calls -- the persistent case, not a fluke.
+        #
+        # Fails on 34d1787: `reconcile.snapshot_health` never looks at Fireflies at all there, so
+        # `health` stays empty and no `!` line about it ever prints, however many times
+        # `fireflies_since` is called -- the exact "no error and no alert" this row exists to catch.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        for i in range(3):
+            since = sync.fireflies_since(ctx, self.NOW)
+            self.assertLessEqual(since, datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc), f"call {i}")
+            self.assertIsNone(snapshots.read_fireflies_bootstrap_anchor(ctx.state_dir),
+                             f"call {i}: a directory occupying the path must never read back as a frozen anchor")
+
+        health = reconcile.snapshot_health(ctx, self.NOW)
+        fireflies_health = [h for h in health if h["source"] == "fireflies"]
+        self.assertEqual(len(fireflies_health), 1,
+                         "a freeze failure repeated across several calls must reach snapshot_health")
+
+        lines = brief.terminal_lines({"items": [], "failed_sources": []}, None, None, health=health)
+        self.assertTrue(any(l.startswith("! fireflies") for l in lines),
+                        f"no `!` line names the stuck freeze: {lines}")
+
+    def test_a_single_transient_freeze_failure_stays_quiet(self):
+        # The distinction from the row above: exactly ONE failed attempt, not several in a row,
+        # must cost an operator nothing -- the guard's whole point is that a moment's disk hiccup
+        # is not an incident, since the very next tick just retries from the same "nothing frozen
+        # yet" state. `Store.freeze_fault`/`record_freeze_result` do not exist before this change,
+        # so this row does not merely assert an empty `health` (true on 34d1787 for every input,
+        # since nothing there ever populates it) -- it asserts the actual streak the fix tracks,
+        # which fails outright (`AttributeError`) against 34d1787's `Store`.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        sync.fireflies_since(ctx, self.NOW)      # exactly one failed freeze attempt
+        fault = ctx.store.freeze_fault("quantivly")
+        self.assertIsNotNone(fault)
+        self.assertEqual(fault["fails"], 1, "one fluke must count as one, not already read as a streak")
+        health = reconcile.snapshot_health(ctx, self.NOW)
+        self.assertFalse([h for h in health if h["source"] == "fireflies"],
+                         "a single fluke must not reach an operator")
+
+    def test_a_persistent_freeze_fault_does_not_take_down_syncs_other_sources(self):
+        # The guard's whole point (`run_sync`'s own docstring: "the ones that succeed are written
+        # even when a later one fails") -- a disk problem specific to one small bootstrap-anchor
+        # file must not stop Linear, GitHub, or even Fireflies' OWN transcript fetch, from
+        # landing. `store.freeze_fault` (absent on 34d1787: `AttributeError`) confirms the fault
+        # was actually driven, so this row cannot pass vacuously just because nothing broke.
+        ctx = self.ctx()
+        self._write_day_brief(ctx, "2026-09-19", "2026-09-19T16:00:00Z")
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        rep = sync.run_sync(ctx, ["linear", "github", "fireflies"], lin=FakeLin(), gh=FakeGh(), ff=FakeFf())
+        self.assertTrue(rep["linear"]["ok"], rep); self.assertTrue(rep["github"]["ok"], rep)
+        self.assertTrue(rep["fireflies"]["ok"], rep)
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "linear"))
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "github"))
+        self.assertIsNotNone(snapshots.read(ctx.state_dir, "fireflies"))
+        fault = ctx.store.freeze_fault("quantivly")
+        self.assertIsNotNone(fault, "the freeze fault must have been driven, not silently avoided")
+        self.assertGreaterEqual(fault["fails"], 1)
+
+    def test_dry_run_never_writes_a_freeze_fault_row_even_on_a_persistent_fault(self):
+        # DO-753/DO-768: a dry run must not start a state change a real call would -- including
+        # this new bookkeeping. `read_or_freeze_fireflies_fallback_anchor` already skips the
+        # write itself on `dry_run`, so `fireflies_since` must never even ATTEMPT to record a
+        # result for it.
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=True)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        ctx.state_dir.mkdir(parents=True, exist_ok=True)
+        day_dir = ctx.state_dir / "2026-09-19"; day_dir.mkdir(parents=True, exist_ok=True)
+        (day_dir / "last-brief.json").write_text(json.dumps({"keys": [], "generated_at": "2026-09-19T16:00:00Z"}))
+        (ctx.state_dir / snapshots.FIREFLIES_BOOTSTRAP_ANCHOR_FILE).mkdir(parents=True)
+        sync.fireflies_since(ctx, self.NOW)
+        self.assertIsNone(ctx.store.freeze_fault("quantivly"), "a dry run must record no freeze-fault row")
 
     def test_ingest_validates_and_writes(self):
         ctx = self.ctx()

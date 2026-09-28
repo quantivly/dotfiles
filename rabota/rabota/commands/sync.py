@@ -77,11 +77,21 @@ def fireflies_since(ctx: Context, now: datetime) -> datetime:
     pushed ``since`` past ``now``, so the window started in the future and every real meeting
     between the true anchor and now was silently never fetched. ``since`` is still also capped at
     ``now``, whichever anchor produced it.
+
+    **DO-768.** A freeze attempt's outcome is reported through
+    ``snapshots.record_fireflies_freeze_result`` -- best-effort, never this call's problem to
+    surface directly -- so a PERSISTENT write fault (not a one-off) reaches an operator via
+    ``reconcile.snapshot_health`` without this function raising, exactly as a single transient
+    fault already degraded gracefully before this change. ``since`` itself is unaffected either
+    way: the in-memory ``anchor`` this call just derived answers the window regardless of whether
+    it could also be persisted.
     """
     earliest = now - timedelta(days=FIREFLIES_LOOKBACK_MAX_DAYS)
     anchor = snapshots.read_last_classified(ctx.state_dir)
     if anchor is None:
-        anchor = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
+        anchor, freeze_error = snapshots.read_or_freeze_fireflies_fallback_anchor(ctx.state_dir, ctx.dry_run)
+        if not ctx.dry_run:
+            snapshots.record_fireflies_freeze_result(ctx, freeze_error)
     if anchor is None:
         since = max(now - timedelta(days=FIREFLIES_LOOKBACK_MIN_DAYS), earliest)
     else:
