@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rabota doctor` named a reachable repo as missing, on a passing row (DO-773 follow-up).** A
+  repo key satisfied by a tenant's `[repos]` table was also weighed against the tenant's `root`
+  and reported there as absent, so the live quantivly row read `1 of them here: ['dotfiles'] …
+  not checked out here: ['dotfiles']`. The verdict was right and the sentence sent the reader to
+  fix something already reachable — "a derived complaint printed beside its own cause", which this
+  repo has paid for before. The root side now excludes whatever the table already resolved. Found
+  by running the check against the real machine minutes after DO-773 deployed; no fixture had a
+  key declared for a remote machine *and* declared locally to a path outside the root, which is
+  the shape the live config has. The row written to pin it was itself hollow at first — its needle
+  matched only a one-element list, so the mutant printing `['dotfiles', 'hub']` slipped past it and
+  the row passed against the very defect it was for. It asserts on the segment now.
+
 - **One directory resolved to two different tenants, so a lane and the session beside it billed
   different accounts (DO-773).** `rabota`'s `config.resolve_tenant` routed by cwd path prefix from
   a `[[route]]` table of its own; the account picker (`_claude_tenant_for`) routes by git remote

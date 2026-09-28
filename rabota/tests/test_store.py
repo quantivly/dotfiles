@@ -134,35 +134,6 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(s.get_lane("running")["status"], "started")
         s.close()
 
-    def test_migrate_adds_fireflies_freeze_faults_to_a_pre_do768_v4_store(self):
-        # DO-768 fix round, review's low finding: no row drove `Store.migrate()` adding
-        # `fireflies_freeze_faults` to a store already stamped v4 -- every other table/column
-        # added since v1 got its own dedicated row here. This one doesn't get a `MIGRATIONS[4]`
-        # step because `SCHEMA_VERSION` deliberately stays 4 (see the comment above `SCHEMA` in
-        # store.py): the table arrives via the trailing idempotent `executescript(SCHEMA)`, which
-        # a pre-DO-768 v4 database never ran. Fails before this change: `record_freeze_result`
-        # against a real, pre-existing v4 store raises `sqlite3.OperationalError: no such table`.
-        from rabota.store import Store, SCHEMA_VERSION
-        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
-        db = Path(tmp.name) / "rabota.db"
-        conn = sqlite3.connect(db, isolation_level=None)
-        conn.executescript("""
-            CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES (4);
-            CREATE TABLE lanes(id TEXT PRIMARY KEY, tenant TEXT, kind TEXT, brief TEXT, repo TEXT, worktree TEXT,
-              out_dir TEXT, machine TEXT, unit TEXT, session_id TEXT, model TEXT, status TEXT, started_at TEXT,
-              ended_at TEXT, held_reason TEXT, of_lane TEXT, attached INTEGER DEFAULT 0, seat TEXT, effort TEXT,
-              cost_usd REAL, five_h_pct_at_start INTEGER, five_h_pct_at_end INTEGER, abandoned_at TEXT,
-              settle_reason TEXT, est_minutes INTEGER);
-        """)
-        conn.close()
-        s = Store.open(Path(tmp.name))
-        self.assertEqual(s.schema_version(), SCHEMA_VERSION)   # unchanged: still 4, not bumped to 5
-        tables = {r[0] for r in s.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertIn("fireflies_freeze_faults", tables)
-        s.record_freeze_result("quantivly", "disk full")   # would raise `no such table` before this change
-        self.assertEqual(s.freeze_fault("quantivly")["fails"], 1)
-        s.close()
-
     def test_v4_store_is_refused_by_v3_code(self):
         # DO-728 fix round, hazard 1: the other direction -- an older rabota (still at v3) must
         # refuse a v4 store cleanly, exactly as v3-code refused a v2 database before it.

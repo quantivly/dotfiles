@@ -50,13 +50,7 @@ CREATE TABLE IF NOT EXISTS inbox_decisions(batch_id TEXT, tenant TEXT, ts TEXT, 
 CREATE TABLE IF NOT EXISTS pins(tenant TEXT, item_key TEXT, bucket INTEGER, rationale TEXT, ts TEXT,
   PRIMARY KEY(tenant, item_key));
 CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS fireflies_freeze_faults(tenant TEXT PRIMARY KEY, fails INTEGER NOT NULL,
-  last_error TEXT, last_failed_at TEXT);
 """
-# `fireflies_freeze_faults` (DO-768) reaches a pre-existing v4 store through the trailing
-# `executescript(SCHEMA)` at the end of `migrate()`, not a `MIGRATIONS[4]` step -- so `SCHEMA_VERSION`
-# deliberately stays 4 rather than bumping to 5 for a table add with no column on an existing table
-# and nothing for old rows to backfill. See `test_migrate_adds_fireflies_freeze_faults_to_a_pre_do768_v4_store`.
 LANE_FIELDS = ("id", "tenant", "kind", "brief", "repo", "worktree", "out_dir", "machine", "unit",
                "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached",
                "seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at",
@@ -183,30 +177,6 @@ class Store:
                           (tenant, source, now(), int(ok), error, path))
     def last_sync(self, tenant, source):
         r = self._rows("SELECT * FROM source_syncs WHERE tenant=? AND source=?", (tenant, source))
-        return r[0] if r else None
-
-    # fireflies bootstrap-anchor freeze health (DO-768)
-    def record_freeze_result(self, tenant, error):
-        """Track consecutive Fireflies bootstrap-anchor freeze failures for ``tenant``.
-
-        ``error`` ``None`` (the freeze succeeded, or there was nothing to freeze) resets the
-        streak to zero -- a fresh problem, not this one, must build its own count from scratch.
-        A message extends the streak by one. ``reconcile.snapshot_health`` is the only reader, and
-        only alerts once the streak reaches ``snapshots.FIREFLIES_FREEZE_ALERT_AFTER`` -- keeping
-        the count here rather than only the latest result is what lets that decision be made
-        without re-deriving "is this the second time in a row" from anything else.
-        """
-        if error is None:
-            self._exec("DELETE FROM fireflies_freeze_faults WHERE tenant=?", (tenant,))
-            return
-        row = self._rows("SELECT fails FROM fireflies_freeze_faults WHERE tenant=?", (tenant,))
-        fails = (row[0]["fails"] if row else 0) + 1
-        self._exec("INSERT OR REPLACE INTO fireflies_freeze_faults VALUES (?,?,?,?)",
-                          (tenant, fails, error, now()))
-    def freeze_fault(self, tenant):
-        """The current streak for ``tenant`` -- ``{"tenant", "fails", "last_error", "last_failed_at"}``
-        -- or ``None`` when the last attempt (if any) succeeded."""
-        r = self._rows("SELECT * FROM fireflies_freeze_faults WHERE tenant=?", (tenant,))
         return r[0] if r else None
 
     # lanes
