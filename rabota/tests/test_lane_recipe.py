@@ -1138,11 +1138,24 @@ class LocalRepoTests(LocalRecipeTests):
         self.assertIn("could not be listed", msg)
         self.assertNotIn("git checkouts under it", msg)
 
-    def test_local_repos_returns_none_for_an_unlistable_root_and_a_list_otherwise(self):
-        root = self.repo_root("hub")
+    def test_local_repos_lists_only_checkouts(self):
+        root = self.repo_root("widgets", "hub")
         (root / "notes").mkdir()                  # a directory that is not a checkout
         (root / "README.md").write_text("x")      # and a plain file
-        self.assertEqual(lane.local_repos(root), ["hub"])
+        self.assertEqual(lane.local_repos(root), ["hub", "widgets"])
+
+    def test_local_repos_sorts_what_iterdir_hands_it(self):
+        """The order is asserted through a PATCHED ``iterdir``, not a hand-built tree, because no
+        tree can pin it: measured here, ``iterdir`` over a directory whose entries were created
+        as widgets/hub/notes returns them already sorted, so dropping ``sorted`` survives every
+        fixture built from a real filesystem. An unsorted list is not a wrong answer, but it makes
+        the refusal message nondeterministic for whoever reads or asserts on it."""
+        root = self.repo_root("widgets", "hub")
+        with patch.object(Path, "iterdir", return_value=[root / "widgets", root / "hub"]):
+            self.assertEqual(lane.local_repos(root), ["hub", "widgets"])
+
+    def test_local_repos_returns_none_for_an_unlistable_root(self):
+        root = self.repo_root("hub")
         with patch.object(Path, "iterdir", side_effect=PermissionError(13, "Permission denied")):
             self.assertIsNone(lane.local_repos(root))
 

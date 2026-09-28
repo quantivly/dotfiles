@@ -82,12 +82,19 @@ EXPECTED_CHECKS=4
 # A stale entry is a rule whose condition can no longer fire, so ALLOW below
 # FAILS on an entry naming no file -- the list cannot rot quietly.
 #
-#   scripts/test-rabota.sh -- a 21-line wrapper around `python3 -m unittest
-#   discover`, not a shell state table. Its 595 tests are counted, named and
+#   scripts/test-rabota.sh -- a 27-line wrapper around `python3 -m unittest
+#   discover`, not a shell state table. Its 1027 tests are counted, named and
 #   reported by unittest, which fails on a collection error rather than
 #   silently discovering fewer tests; a shell row total would be a second,
 #   weaker copy of a count Python already owns. The two size-budget assertions
 #   it adds after the unittest run are `exit 1` on breach, not table rows.
+#   Both figures are measurements taken 2026-09-28, not invariants. Nothing
+#   compares them to anything -- which is the whole argument above, applied to
+#   this comment too -- so they drift: written 2026-09-23 as 21 lines and 595
+#   tests, correct then, they read 27 and 990 five days later. Carrying the
+#   date is what keeps a stale one legible as stale instead of as a claim, and
+#   is what docs/REPO_CHECKS.md's "one prose home per count" prescribes for a
+#   number no assertion can hold right.
 ALLOWLIST=(
     scripts/test-rabota.sh
 )
