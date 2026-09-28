@@ -1120,7 +1120,7 @@ class LocalRepoTests(LocalRecipeTests):
         ctx.tenant.root = Path(tempfile.mkdtemp()) / "no-such-root"
         msg = self.refusal(ctx, repo="hub")
         self.assertIn("is not a directory", msg)
-        self.assertIn("can reach no repo at all", msg)
+        self.assertIn("can reach nothing under it", msg)
         self.assertNotIn("git checkouts under it", msg)
 
     def test_an_empty_root_lists_nothing_and_still_refuses(self):
@@ -1227,32 +1227,42 @@ class DeclaredRepoTests(LocalRepoTests):
         self.assertEqual(lane.local_repo_path(ctx.tenant, "dotfiles"),
                          ctx.tenant.repos["dotfiles"])
 
-    def test_the_root_is_not_consulted_at_all_when_a_table_is_declared(self):
-        """The root here does not contain the declared repo and never could — if it were still
-        being weighed, this would refuse. One tenant, one vocabulary."""
+    def test_a_declared_key_resolves_though_the_root_could_never_hold_it(self):
+        """The whole point: the declared path is outside the root, so no root-relative rule could
+        ever reach it. ~/.dotfiles is this case on the real machine."""
         ctx = self.declared_ctx(dotfiles=True)
         self.assertFalse((Path(ctx.tenant.root) / "dotfiles").exists())
         self.assertEqual(lane.local_repo_path(ctx.tenant, "dotfiles"), ctx.tenant.repos["dotfiles"])
 
-    def test_a_name_under_the_root_is_refused_once_a_table_is_declared(self):
-        """The table is an allow-list, deliberately. A fallback to the root would give --repo two
-        meanings and turn a typo'd key into a root-relative miss, reported as the wrong fault."""
+    def test_a_name_under_the_root_still_resolves_alongside_a_table(self):
+        """The table ADDS named paths; it is not an allow-list. Making it exclusive reads better
+        beside a refusal that lists keys, and on this machine it would cost a tenant 31
+        repositories to gain one — ~/quantivly holds 32 checkouts and ~/.dotfiles is the single
+        one that cannot live under it."""
         ctx = self.declared_ctx(dotfiles=True)
         (Path(ctx.tenant.root) / "hub").mkdir()
-        msg = self.refusal(ctx, repo="hub")
-        self.assertIn("not a config key", msg)
-        self.assertIn("'dotfiles'", msg)
+        self.assertEqual(lane.local_repo_path(ctx.tenant, "hub"),
+                         str(Path(ctx.tenant.root) / "hub"))
 
-    def test_the_unknown_key_refusal_reads_like_the_remote_one(self):
-        """The remote branch has said this since DO-725 — --repo takes the KEY, the table's value
-        is the path, and a path is exactly the wrong thing to pass. The local form now says it in
-        the same words, because it is now the same mistake."""
+    def test_a_declared_key_shadows_a_same_named_child_of_the_root(self):
+        """Declared beats implicit, and it has to: the table exists to point a name somewhere the
+        root cannot reach, so a root child of the same name silently winning would make the
+        table's own entries conditional on what is checked out beside them."""
+        ctx = self.declared_ctx(dotfiles=True)
+        (Path(ctx.tenant.root) / "dotfiles").mkdir()
+        self.assertEqual(lane.local_repo_path(ctx.tenant, "dotfiles"),
+                         ctx.tenant.repos["dotfiles"])
+
+    def test_a_name_in_neither_vocabulary_refuses_naming_BOTH(self):
+        """A mistyped KEY lands in the root form, and being told only about the root would send
+        the reader to clone something that is declared and already there."""
         ctx = self.declared_ctx(dotfiles=True, hub=True)
-        msg = self.refusal(ctx, repo=str(Path(ctx.tenant.repos["hub"])))
-        self.assertIn("--repo takes the KEY", msg)
+        (Path(ctx.tenant.root) / "rooted").mkdir()
+        (Path(ctx.tenant.root) / "rooted" / ".git").mkdir()
+        msg = self.refusal(ctx, repo="dotfi1es")
         self.assertIn("[repos] in tenants/quantivly.toml", msg)
-        self.assertIn("not a path itself", msg)
-        self.assertIn("known keys: ['dotfiles', 'hub']", msg)
+        self.assertIn("'dotfiles'", msg)        # the key they meant
+        self.assertIn("'rooted'", msg)          # and what the root offers
 
     def test_a_declared_path_that_is_not_there_is_a_different_fault_from_an_unknown_key(self):
         """Clone it, or fix the table — two different fixes, so two different sentences. Folding

@@ -662,7 +662,7 @@ class TenantRootTests(unittest.TestCase):
         self.assertEqual(name, "toysim")
         self.assertTrue(ok, detail)
         self.assertIn("1 git checkout", detail)
-        self.assertIn("declares no machine repos", detail)
+        self.assertIn("widgets", detail)
 
     def test_a_tenant_declaring_no_machine_repos_fails_on_an_empty_root(self):
         name, ok, detail = self.row(tenant="toysim", plain=("notes",))
@@ -725,7 +725,7 @@ class DeclaredReposTests(unittest.TestCase):
         name, ok, detail = self.row(dotfiles=True, hub=True)
         self.assertTrue(ok, detail)
         self.assertIn("declares 2 repos", detail)
-        self.assertIn("2 resolve", detail)
+        self.assertIn("2 of them here", detail)
 
     def test_a_partial_answer_passes_and_names_the_missing_path(self):
         name, ok, detail = self.row(dotfiles=True, hub=False)
@@ -734,20 +734,22 @@ class DeclaredReposTests(unittest.TestCase):
         self.assertIn("hub -> ", detail)          # the PATH, which is what the reader must fix
         self.assertNotIn("dotfiles -> ", detail)  # and not the one that is fine
 
-    def test_no_declared_repo_resolving_fails(self):
+    def test_nothing_reachable_by_EITHER_route_fails(self):
+        """The row follows the lane: a tenant fails only when neither the table nor the root can
+        give it a --repo. Here the table resolves nothing and the root is empty."""
         name, ok, detail = self.row(dotfiles=False, hub=False)
         self.assertFalse(ok)
-        self.assertIn("no declared repo resolves", detail)
-        self.assertIn("every local lane", detail)
+        self.assertIn("not a directory here", detail)
+        self.assertIn("nothing it can be given", detail)
 
-    def test_the_root_is_never_weighed_when_a_table_is_declared(self):
-        """A root that does not exist at all must not fail a tenant addressed by key — its lanes
-        are fine, and failing them here would be doctor disagreeing with the command it checks."""
+    def test_a_missing_root_does_not_fail_a_tenant_whose_table_reaches_something(self):
+        """A root that is not there and a tenant that is fine: its declared repo resolves, so its
+        lanes start. Failing it here would be doctor disagreeing with the command it checks."""
         ctx = self.ctx(dotfiles=True)
         ctx.tenant.root = Path("/no/such/root/anywhere")
         name, ok, detail = doctor.tenant_repos(ctx)[0]
         self.assertTrue(ok, detail)
-        self.assertNotIn("/no/such/root", detail)
+        self.assertIn("nothing needs it", detail)
 
     def test_the_row_agrees_with_what_the_lane_would_actually_do(self):
         """The coupling itself, asserted rather than assumed: for each declared key, doctor's

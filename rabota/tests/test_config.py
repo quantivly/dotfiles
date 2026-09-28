@@ -1,3 +1,5 @@
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from rabota import config, errors
@@ -61,6 +63,26 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("ghost", msg)
         self.assertIn("tenants/ghost.toml", msg)
         self.assertIn("ghost-co", msg)          # the router's WHY, not just its answer
+
+    def test_a_repos_table_in_the_toml_reaches_the_tenant(self):
+        """END TO END, from a file on disk. Found by mutation: every other [repos] row sets
+        ``tenant.repos`` in Python, so replacing the loader's ``d.get("repos", {})`` with ``{}``
+        — the table declared in the toml and never read — survived the entire suite. The feature
+        could have been wired to nothing and shipped green."""
+        base = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        (base / "config.toml").write_text("")
+        (base / "tenants").mkdir()
+        (base / "tenants" / "solo.toml").write_text(
+            'root = "~/code"\nstate_dir = "~/code/state"\n\n'
+            '[repos]\ndotfiles = "~/.dotfiles"\nhub = "~/elsewhere/hub"\n')
+        cfg = config.load(base, seats_by_machine={})
+        self.assertEqual(cfg.tenants["solo"].repos,
+                         {"dotfiles": "~/.dotfiles", "hub": "~/elsewhere/hub"})
+
+    def test_a_tenant_declaring_no_repos_table_gets_an_empty_one(self):
+        # Not None: every reader does `repo in tenant.repos` and `if tenant.repos`, and None
+        # would raise inside the lane rather than fall back to the root form.
+        self.assertEqual(self.cfg.tenants["personal"].repos, {})
 
     def test_the_config_carries_no_routes_or_default_of_its_own(self):
         """A regression row for the move itself: re-adding either field to Config is how the two

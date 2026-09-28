@@ -393,31 +393,35 @@ def tenant_repos(ctx) -> list[tuple[str, bool, str]]:
     a bare or corrupt checkout passes. It also says nothing about which branch anything is on.
     """
     name = ctx.tenant.name
-    # THE [repos] BRANCH FIRST, and it returns rather than falling through: a tenant that
-    # declares the table is addressed by key alone, so weighing its root here would FAIL a
-    # tenant whose lanes all start fine -- two answers to one question, which is the defect
-    # class this issue is in.
-    if ctx.tenant.repos:
-        declared_paths = {k: Path(v).expanduser() for k, v in ctx.tenant.repos.items()}
-        found = sorted(k for k, v in declared_paths.items() if v.is_dir())
-        missing = sorted(k for k in declared_paths if k not in found)
-        detail = (f"[repos] in tenants/{name}.toml declares {len(declared_paths)} "
-                  f"{'repo' if len(declared_paths) == 1 else 'repos'}; {len(found)} resolve on "
-                  f"this machine: {found}")
-        if missing:
-            detail += ("; not a directory here: "
-                       + str([f"{k} -> {str(declared_paths[k])}" for k in missing]))
-        if not found:
-            detail += (f" -- no declared repo resolves, so every local lane for {name!r} refuses "
-                       f"before it starts")
-        return [(name, bool(found), detail)]
+    # THE DECLARED TABLE IS WEIGHED FIRST AND THEN THE ROOT, in that order and both, because
+    # that is exactly what ``lane.local_repo_path`` does. A row that asked only one of them
+    # would disagree with the command it exists to check -- failing a tenant whose lanes start
+    # fine, or passing one whose every lane refuses -- and two answers to one question is this
+    # issue's own defect class, reappearing inside the check written to catch it.
+    declared_paths = {k: Path(v).expanduser() for k, v in ctx.tenant.repos.items()}
+    declared_found = sorted(k for k, v in declared_paths.items() if v.is_dir())
+    declared_missing = sorted(k for k in declared_paths if k not in declared_found)
+    declared_detail = ""
+    if declared_paths:
+        declared_detail = (f"[repos] in tenants/{name}.toml declares {len(declared_paths)} "
+                           f"{'repo' if len(declared_paths) == 1 else 'repos'}, "
+                           f"{len(declared_found)} of them here: {declared_found}")
+        if declared_missing:
+            declared_detail += ("; not a directory here: "
+                                + str([f"{k} -> {str(declared_paths[k])}" for k in declared_missing]))
 
     root = Path(ctx.tenant.root).expanduser()
     declared = sorted({r for m in ctx.tenant.machines.values() for r in m.repos})
     where = f"tenants/{name}.toml sets root"
     if not root.is_dir():
-        return [(name, False, f"root {str(root)!r} is not a directory, so every local lane for "
-                              f"{name!r} refuses before it starts ({where})")]
+        detail = (f"root {str(root)!r} is not a directory ({where})")
+        if declared_found:
+            # The root is gone and the tenant is still fine, because its repos are declared. Not
+            # a failure, and saying so is the difference between a row someone acts on and one
+            # they learn to ignore.
+            return [(name, True, f"{declared_detail}; {detail}, but nothing needs it")]
+        return [(name, False, (f"{declared_detail}; " if declared_detail else "")
+                 + f"{detail}, so every local lane for {name!r} refuses before it starts")]
     if declared:
         found = [r for r in declared if (root / r).is_dir()]
         missing = [r for r in declared if r not in found]
@@ -426,20 +430,25 @@ def tenant_repos(ctx) -> list[tuple[str, bool, str]]:
                   f"{found}")
         if missing:
             detail += f"; not checked out here: {missing}"
-        if not found:
+        if not found and not declared_found:
             detail += (f" -- no declared repo resolves under it, so a local lane for {name!r} has "
                        f"nothing it can be given as --repo")
-        return [(name, bool(found), detail)]
+        return [(name, bool(found) or bool(declared_found),
+                 (f"{declared_detail}; " if declared_detail else "") + detail)]
     present = lane.local_repos(root)
     if present is None:
         return [(name, False, f"root {str(root)!r} could not be listed, so what a local lane for "
                               f"{name!r} can reach is UNMEASURED -- which is not the same as empty")]
     if not present:
-        return [(name, False, f"root {str(root)!r} holds no git checkout, so there is nothing a "
-                              f"local lane for {name!r} could be given as --repo ({where})")]
-    return [(name, True, f"root {str(root)!r} holds {len(present)} git "
-                         f"{'checkout' if len(present) == 1 else 'checkouts'} {present}; this "
-                         f"tenant declares no machine repos to weigh them against")]
+        return [(name, bool(declared_found),
+                 (f"{declared_detail}; " if declared_detail else "")
+                 + f"root {str(root)!r} holds no git checkout"
+                 + ("" if declared_found else
+                    f", so there is nothing a local lane for {name!r} could be given as --repo "
+                    f"({where})"))]
+    return [(name, True, (f"{declared_detail}; " if declared_detail else "")
+             + f"root {str(root)!r} holds {len(present)} git "
+             + f"{'checkout' if len(present) == 1 else 'checkouts'} {present}")]
 
 
 def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
