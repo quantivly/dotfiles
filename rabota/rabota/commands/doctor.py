@@ -1,9 +1,9 @@
 """``rabota doctor``: install link, config parse, store schema, pre-compute timer, the tenant's
 own root, and the three couplings that span two machines.
 
-``tenant_root`` is the one check here about this machine alone: whether the directory every
-local lane resolves ``--repo`` under exists, and whether anything this tenant expects is
-actually checked out there. It was added by DO-776 alongside the refusal ``lane recipe`` now
+``tenant_repos`` is the one check here about this machine alone: whether a local lane for this
+tenant could be given any ``--repo`` at all -- against the ``[repos]`` table when it declares
+one, and otherwise against what is checked out under its ``root``. It was added by DO-776 alongside the refusal ``lane recipe`` now
 raises for the same condition -- doctor answers it for the whole tenant, ahead of the lane that
 would otherwise be the first to find out.
 
@@ -361,8 +361,13 @@ def remote_seat_identity(ctx, clauth_profiles=None) -> list[tuple[str, bool, str
     return rows
 
 
-def tenant_root(ctx) -> list[tuple[str, bool, str]]:
-    """One row: can this tenant reach any of the repos a local lane resolves under its ``root``?
+def tenant_repos(ctx) -> list[tuple[str, bool, str]]:
+    """One row: can a local lane for this tenant reach any repo at all?
+
+    Named for the question, not for ``root``: a tenant declaring ``[repos]`` is checked against
+    that table and its ``root`` is never consulted, which is exactly what ``lane.local_repo_path``
+    does with the same two vocabularies (DO-773). Only a tenant without the table falls back to
+    "a name under ``root``", and only that branch reads ``root`` at all.
 
     ``lane.run_recipe``'s local branch builds ``<tenant.root>/<--repo>`` and, since DO-776,
     refuses by name when that is not a directory. This asks the same question for the whole
@@ -388,6 +393,25 @@ def tenant_root(ctx) -> list[tuple[str, bool, str]]:
     a bare or corrupt checkout passes. It also says nothing about which branch anything is on.
     """
     name = ctx.tenant.name
+    # THE [repos] BRANCH FIRST, and it returns rather than falling through: a tenant that
+    # declares the table is addressed by key alone, so weighing its root here would FAIL a
+    # tenant whose lanes all start fine -- two answers to one question, which is the defect
+    # class this issue is in.
+    if ctx.tenant.repos:
+        declared_paths = {k: Path(v).expanduser() for k, v in ctx.tenant.repos.items()}
+        found = sorted(k for k, v in declared_paths.items() if v.is_dir())
+        missing = sorted(k for k in declared_paths if k not in found)
+        detail = (f"[repos] in tenants/{name}.toml declares {len(declared_paths)} "
+                  f"{'repo' if len(declared_paths) == 1 else 'repos'}; {len(found)} resolve on "
+                  f"this machine: {found}")
+        if missing:
+            detail += ("; not a directory here: "
+                       + str([f"{k} -> {str(declared_paths[k])}" for k in missing]))
+        if not found:
+            detail += (f" -- no declared repo resolves, so every local lane for {name!r} refuses "
+                       f"before it starts")
+        return [(name, bool(found), detail)]
+
     root = Path(ctx.tenant.root).expanduser()
     declared = sorted({r for m in ctx.tenant.machines.values() for r in m.repos})
     where = f"tenants/{name}.toml sets root"
@@ -444,10 +468,10 @@ def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
                             "(no migration is defined for it yet)")
     # FIRST of the row checks, and a pure stat: a tenant that can reach no repo is a local fault
     # worth naming before three ssh round trips are spent on the remote couplings.
-    root_rows = tenant_root(ctx)
-    for name, ok, detail in root_rows:
+    repo_rows = tenant_repos(ctx)
+    for name, ok, detail in repo_rows:
         if not ok:
-            problems.append(f"tenant root for {name!r}: {detail}")
+            problems.append(f"tenant repos for {name!r}: {detail}")
     seat_rows = seat_cache_age(ctx)
     for name, ok, detail in seat_rows:
         if not ok:
@@ -463,7 +487,7 @@ def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
     as_rows = lambda rs: [{"machine": n, "ok": ok, "detail": d} for n, ok, d in rs]
     return {"tenant": ctx.tenant.name, "state_dir": str(ctx.state_dir), "config_ok": True,
             "db_schema": schema, "links": {"rabota": link_ok}, "timer": {"state": timer_state},
-            "tenant_root": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in root_rows],
+            "tenant_repos": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in repo_rows],
             "seat_cache": as_rows(seat_rows), "slice_headroom": as_rows(slice_rows),
             "remote_seat": as_rows(identity_rows),
             "ok": not problems, "problems": problems}

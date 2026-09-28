@@ -401,6 +401,12 @@ def local_repo_path(tenant, repo: str) -> str:
     failure deferred to whoever lands the local run form. Both branches now name the mistake in
     the same shape, before anything is created.
 
+    TWO VOCABULARIES, chosen by the tenant's own config and never mixed. A tenant declaring
+    ``[repos]`` is addressed by KEY from that table, symmetric with ``[machines.<m>].repos`` on
+    the remote branch, and everything below about the root does not apply to it. Without that
+    table ``--repo`` stays a name under ``root``, which is what every tenant did before DO-773
+    and is still the right answer for one whose code all lives in one place.
+
     ``--repo`` must name something UNDER the root rather than merely resolve to a directory, and
     an existence check alone does not say that. ``Path("/a") / "/etc"`` is ``/etc``, so an
     absolute ``--repo`` would hand a local lane a checkout outside the tenant entirely -- and be
@@ -414,6 +420,28 @@ def local_repo_path(tenant, repo: str) -> str:
     sharper message at the cost of refusing a layout that works. Existence is the fault this was
     filed for; the list is a hint, labelled as the hint it is.
     """
+    # A TENANT THAT DECLARES [repos] IS ADDRESSED BY KEY, exactly as a remote machine is, and its
+    # `root` is not consulted at all. One tenant, one vocabulary: a table that were consulted
+    # first and then fell back to the root would give `--repo` two meanings and a typo'd key
+    # would quietly become a root-relative miss. Declaring the table is therefore an allow-list,
+    # deliberately -- it is the only way to reach a repository that cannot live under the root,
+    # and the refusal below names the keys the way the remote branch names its own.
+    if tenant.repos:
+        if repo not in tenant.repos:
+            raise errors.Refused(
+                f"--repo {repo!r} is not a config key tenant {tenant.name!r} declares: --repo "
+                f"takes the KEY under [repos] in tenants/{tenant.name}.toml (that table's value "
+                f"is the path), not a path itself; known keys: {sorted(tenant.repos)}")
+        declared = Path(tenant.repos[repo]).expanduser()
+        if not declared.is_dir():
+            # A DECLARED path that is not there is a different fault from an unknown key, with a
+            # different fix -- clone it, or correct the table -- so it gets its own sentence
+            # rather than being folded into "unknown key" by a single existence test.
+            raise errors.Refused(
+                f"--repo {repo!r} is declared by tenant {tenant.name!r} as {str(declared)!r}, "
+                f"which is not a directory on this machine ([repos] in tenants/{tenant.name}.toml)")
+        return str(declared)
+
     root = Path(tenant.root).expanduser()
     where = f"tenant {tenant.name!r}'s root {str(root)!r}"
     # ``not parts`` covers "" and ".", both of which make ``root / repo`` the ROOT ITSELF and so

@@ -88,6 +88,13 @@ class Tenant:
     budget: BudgetThresholds = field(default_factory=BudgetThresholds)
     lanes: LaneDefaults = field(default_factory=LaneDefaults)
     machines: dict[str, Machine] = field(default_factory=dict)
+    # LOCAL lane repos, key -> path, mirroring [machines.<m>].repos for the remote form (DO-773).
+    # Declared, this table IS the vocabulary `--repo` takes for a local lane and `root` is not
+    # consulted at all; left out, `--repo` stays a name under `root`, which is what every tenant
+    # did before this existed. It is what lets a tenant address a repository that cannot live
+    # under its root -- ~/.dotfiles being the case that forced it, since dotbot's symlinks
+    # require that exact path.
+    repos: dict[str, str] = field(default_factory=dict)
     seats: dict[str, str] = field(default_factory=dict)   # {"local": "<clauth profile>"}; a REMOTE machine's seat comes from the registry (DO-665), not from here
     excludes: list[Path] = field(default_factory=list)
     # Set by ``_tenant`` to the tenant's own toml path; used only to name the file in a
@@ -143,6 +150,7 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
         budget=_dc(BudgetThresholds, d.get("budget", {})),
         lanes=_dc(LaneDefaults, d.get("lanes", {})),
         machines=machines,
+        repos=dict(d.get("repos", {})),
         seats=dict(d.get("seats", {})),
         excludes=[_p(x) for x in d.get("excludes", [])],
         config_path=path,

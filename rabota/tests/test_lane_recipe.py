@@ -1197,6 +1197,88 @@ class LocalRepoTests(LocalRecipeTests):
         self.assertEqual(ctx.store.list_lanes("quantivly"), [])
 
 
+class DeclaredRepoTests(LocalRepoTests):
+    """DO-773: a tenant declaring ``[repos]`` addresses local repos by KEY, and its root is not
+    consulted at all.
+
+    This is what lets a tenant reach a repository that cannot live under its root — ``~/.dotfiles``
+    being the case that forced it, since dotbot's symlinks require that exact path — and it makes
+    the local form symmetric with ``[machines.<m>].repos``, which the remote branch has always had.
+    """
+
+    def declared_ctx(self, **repos):
+        """A context whose tenant declares ``[repos]``; every value is a directory this built."""
+        ctx = self.ctx(FakeRunner([]))
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        ctx.tenant.root = base / "root-that-must-not-be-used"
+        ctx.tenant.root.mkdir()
+        ctx.tenant.repos = {}
+        for key, present in repos.items():
+            path = base / f"{key}-checkout"
+            if present:
+                path.mkdir()
+                (path / ".git").mkdir()
+            ctx.tenant.repos[key] = str(path)
+        return ctx
+
+    def test_a_declared_key_resolves_to_its_declared_path(self):
+        ctx = self.declared_ctx(dotfiles=True)
+        self.assertEqual(lane.local_repo_path(ctx.tenant, "dotfiles"),
+                         ctx.tenant.repos["dotfiles"])
+
+    def test_the_root_is_not_consulted_at_all_when_a_table_is_declared(self):
+        """The root here does not contain the declared repo and never could — if it were still
+        being weighed, this would refuse. One tenant, one vocabulary."""
+        ctx = self.declared_ctx(dotfiles=True)
+        self.assertFalse((Path(ctx.tenant.root) / "dotfiles").exists())
+        self.assertEqual(lane.local_repo_path(ctx.tenant, "dotfiles"), ctx.tenant.repos["dotfiles"])
+
+    def test_a_name_under_the_root_is_refused_once_a_table_is_declared(self):
+        """The table is an allow-list, deliberately. A fallback to the root would give --repo two
+        meanings and turn a typo'd key into a root-relative miss, reported as the wrong fault."""
+        ctx = self.declared_ctx(dotfiles=True)
+        (Path(ctx.tenant.root) / "hub").mkdir()
+        msg = self.refusal(ctx, repo="hub")
+        self.assertIn("not a config key", msg)
+        self.assertIn("'dotfiles'", msg)
+
+    def test_the_unknown_key_refusal_reads_like_the_remote_one(self):
+        """The remote branch has said this since DO-725 — --repo takes the KEY, the table's value
+        is the path, and a path is exactly the wrong thing to pass. The local form now says it in
+        the same words, because it is now the same mistake."""
+        ctx = self.declared_ctx(dotfiles=True, hub=True)
+        msg = self.refusal(ctx, repo=str(Path(ctx.tenant.repos["hub"])))
+        self.assertIn("--repo takes the KEY", msg)
+        self.assertIn("[repos] in tenants/quantivly.toml", msg)
+        self.assertIn("not a path itself", msg)
+        self.assertIn("known keys: ['dotfiles', 'hub']", msg)
+
+    def test_a_declared_path_that_is_not_there_is_a_different_fault_from_an_unknown_key(self):
+        """Clone it, or fix the table — two different fixes, so two different sentences. Folding
+        both into one existence test would send a reader to edit a table that is already right."""
+        ctx = self.declared_ctx(dotfiles=False)
+        msg = self.refusal(ctx, repo="dotfiles")
+        self.assertIn("is declared by tenant", msg)
+        self.assertIn("not a directory on this machine", msg)
+        self.assertNotIn("not a config key", msg)
+
+    def test_a_declared_repo_may_sit_anywhere_including_outside_the_root(self):
+        """The escape guard DO-776 added applies to a NAME the user passed, not to a path the
+        tenant declared. An absolute declared path is the entire point of the table."""
+        ctx = self.declared_ctx(dotfiles=True)
+        self.assertTrue(Path(ctx.tenant.repos["dotfiles"]).is_absolute())
+        self.assertFalse(str(ctx.tenant.repos["dotfiles"]).startswith(str(ctx.tenant.root)))
+        self.assertEqual(lane.local_repo_path(ctx.tenant, "dotfiles"), ctx.tenant.repos["dotfiles"])
+
+    def test_a_tenant_with_no_table_still_takes_a_name_under_its_root(self):
+        """The fallback is not dead code: it is what every tenant whose code lives in one place
+        keeps doing, and LocalRepoTests above is entirely about it."""
+        ctx = self.local_ctx(repos=("hub",))
+        self.assertEqual(ctx.tenant.repos, {})
+        self.assertEqual(lane.local_repo_path(ctx.tenant, "hub"), str(Path(ctx.tenant.root) / "hub"))
+
+
 class EvaluateRecipeTests(LocalRecipeTests):
     """DO-670: ``--kind evaluate --of <lane_id>``. Reuses ``LocalRecipeTests.ctx()`` only — the
     inherited ``argv()``-based rows exist to exercise ``build_local`` directly and have nothing to
