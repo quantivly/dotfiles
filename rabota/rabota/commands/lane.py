@@ -7,11 +7,12 @@ It is the ONE door a headless lane comes through, which is why every spawner sha
 ``claude-pick --gate`` beneath it (``rabota budget``). A second door that skips the gate is how
 a window gets spent unmetered.
 
-This module supplies both the local form (``unit_name``, ``build_local``) and the remote/dev form
-(``build_remote``, ``send_brief``, ``create_worktree_remote``, ``resolve_remote``,
-``expand_remote``) plus the entry point that ties them together, ``run_recipe``, and its
-``rabota lane recipe`` registration.
+This module supplies both the local form (``unit_name``, ``build_local``, ``local_repo_path``)
+and the remote/dev form (``build_remote``, ``send_brief``, ``create_worktree_remote``,
+``resolve_remote``, ``expand_remote``) plus the entry point that ties them together,
+``run_recipe``, and its ``rabota lane recipe`` registration.
 """
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -367,6 +368,78 @@ def expand_remote(path: str, home: str) -> str:
     return path
 
 
+def local_repos(root: Path) -> list[str] | None:
+    """The names under ``root`` that a local lane could be given as ``--repo``: its git checkouts.
+
+    ``None`` -- never ``[]`` -- when ``root`` cannot be listed at all. An unreadable directory is
+    not an empty one, and a refusal that prints ``git checkouts under it: []`` for a root nobody
+    could read names the wrong fault: it sends the reader off to clone something that may already
+    be sitting in front of them.
+
+    A checkout is ``<name>/.git`` present, which is true of a worktree (where it is a file) as
+    well as a clone (where it is a directory). This never runs git, so a bare, corrupt or
+    half-cloned repo counts as one; the question here is what a reader should be offered as a
+    suggestion, not whether git would be happy with it.
+    """
+    try:
+        return sorted(p.name for p in root.iterdir() if (p / ".git").exists())
+    except OSError:
+        return None
+
+
+def local_repo_path(tenant, repo: str) -> str:
+    """``<tenant.root>/<repo>`` for a LOCAL lane, refused by name when it is not reachable.
+
+    The remote branch of ``run_recipe`` refuses an unknown ``--repo`` against the keys the machine
+    declares. A local lane has no such table -- its repos are whatever is checked out under the
+    tenant's ``root`` -- so until DO-776 the same mistake was built straight into a path here and
+    never checked, on the one branch that could have checked it for free with a ``stat``.
+
+    What that silence actually bought, stated rather than implied: the local ``--run`` form is not
+    implemented (see ``run_recipe``), so no local lane has ever reached ``git -C``. What a bad
+    ``--repo`` produced was a ``--dry-run`` recipe naming a repo this machine does not have, and a
+    failure deferred to whoever lands the local run form. Both branches now name the mistake in
+    the same shape, before anything is created.
+
+    ``--repo`` must name something UNDER the root rather than merely resolve to a directory, and
+    an existence check alone does not say that. ``Path("/a") / "/etc"`` is ``/etc``, so an
+    absolute ``--repo`` would hand a local lane a checkout outside the tenant entirely -- and be
+    accepted, because it exists; ``..`` does the same with one more step, and ``""`` or ``"."``
+    resolves to the tenant root itself.
+
+    What is accepted is a DIRECTORY, deliberately not a git checkout, though the suggestion list
+    in the refusal is checkouts only and says so. Requiring ``.git`` would read better beside that
+    list and was rejected anyway: a bare repository (``hub.git``) has no ``.git`` child and
+    ``git -C`` and ``git worktree add`` both work against one, so the stricter predicate buys a
+    sharper message at the cost of refusing a layout that works. Existence is the fault this was
+    filed for; the list is a hint, labelled as the hint it is.
+    """
+    root = Path(tenant.root).expanduser()
+    where = f"tenant {tenant.name!r}'s root {str(root)!r}"
+    # ``not parts`` covers "" and ".", both of which make ``root / repo`` the ROOT ITSELF and so
+    # hand a lane the whole tenant as its repo -- an existence check alone passes them, because
+    # the root does exist.
+    parts = Path(repo).parts
+    if not parts or os.path.isabs(repo) or ".." in parts:
+        raise errors.Refused(
+            f"--repo {repo!r} is not a name under {where}: --repo names a checkout INSIDE the "
+            f"tenant's root, and an empty name, an absolute path, or one stepping up through "
+            f"'..' is not one")
+    path = root / repo
+    if path.is_dir():
+        return str(path)
+    if not root.is_dir():
+        raise errors.Refused(
+            f"--repo {repo!r} is not reachable: {where} is not a directory, so a local lane for "
+            f"this tenant can reach no repo at all (tenants/{tenant.name}.toml sets root)")
+    names = local_repos(root)
+    known = (f"git checkouts under it: {names}" if names is not None else
+             f"and {str(root)!r} could not be listed, so this cannot say what is there")
+    raise errors.Refused(
+        f"--repo {repo!r} is not a directory under {where}: --repo takes a name under that root, "
+        f"which is where a local lane looks for it; {known}")
+
+
 def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minutes, run,
                kind="work", of=None, budget_fn=None) -> dict:
     """Render one lane; with ``run``, create the worktree, send the brief and start the unit.
@@ -497,7 +570,11 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     lane_path = None
     if machine == "local":
         root = Path(ctx.tenant.state_dir).expanduser()
-        repo_path = str(Path(ctx.tenant.root).expanduser() / repo)
+        # Sits exactly where the remote branch's own `--repo` refusal sits, and for the same
+        # reason: nothing has been created yet on either path -- no ssh, no worktree, no out dir,
+        # no store row -- and the two mistakes are one mistake, so they should refuse in one
+        # shape (DO-776).
+        repo_path = local_repo_path(ctx.tenant, repo)
         config_dir = seat_config_dir(seat_pick)
     else:
         if repo not in m.repos:

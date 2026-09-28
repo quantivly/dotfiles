@@ -603,11 +603,16 @@ reserved for the checker being self-inconsistent, distinct from exit 1 for the
 tree being wrong, copying `scripts/check-claude-md.sh`.
 
 **The allow-list has one entry and it is argued in the file, never implied by
-absence.** `scripts/test-rabota.sh` is a 21-line wrapper around
-`python3 -m unittest discover`: its 595 tests are counted, named and reported by
+absence.** `scripts/test-rabota.sh` is a 27-line wrapper around
+`python3 -m unittest discover`: its 1027 tests are counted, named and reported by
 unittest, which fails on a collection error rather than silently discovering
 fewer tests, so a shell row total would be a second and weaker copy of a count
-Python already owns.
+Python already owns. Both figures are measurements taken 2026-09-28, not
+invariants, and they are dated for the reason the section above gives: nothing
+compares them to anything, so they drift. Written 2026-09-23 as 21 lines and 595
+tests — correct then — they read 27 and 990 five days later, found by DO-776 and
+not by any check. The number is colour on an argument that does not need it; the
+date is what keeps a stale one legible as stale rather than as a claim.
 
 **`scripts/test-gpg-installation.sh` was retired rather than backfilled.** It was
 the fifth file the guard named on its first run, and it tests three scripts

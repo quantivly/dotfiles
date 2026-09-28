@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A local lane accepted a `--repo` this machine cannot reach, and `rabota doctor` never looked
+  at a tenant's `root` at all (DO-776).** `lane recipe`'s remote branch refuses a `--repo` the
+  machine does not declare and lists the keys it knows; the local branch built
+  `<tenant.root>/<repo>` and checked nothing, so one mistake was a named refusal on one path and
+  silence on the other. Since the local `--run` form is not implemented, what that silence bought
+  was a `--dry-run` recipe naming a repo that is not there, and a `git -C` failure deferred to
+  whoever lands it. `lane.local_repo_path` now refuses in the same shape and the same place —
+  before any ssh, worktree, out dir or store row — naming the root it looked under and listing the
+  git checkouts that are there, or saying the root could not be listed rather than printing an
+  empty list for one nobody could read. It also refuses a `--repo` that is not a *name* under the
+  root, which an existence check alone cannot say: an absolute path resolves clean out of the
+  tenant (`Path("/a") / "/etc"` is `/etc`) and is accepted for existing, `..` does the same one
+  step later, and `""` or `"."` resolves to the tenant root itself. `rabota doctor` gains
+  `tenant_root`, asking the same question per tenant ahead of the lane that would otherwise be
+  first to find out: the root must exist, and at least one of the repo keys the tenant's machines
+  declare must be checked out under it (a tenant declaring none falls back to "any git checkout").
+  Reaching nothing FAILs; reaching some PASSes and names what is missing, because a repo declared
+  for dev need not also be cloned on the laptop. Two existing rows turned out to answer from the
+  runner's filesystem rather than from the code — the fixture roots `~/quantivly` and `~/toysim`
+  are real directories on this machine, holding a real `hub` — and one was worse than
+  machine-dependent: `test_local_run_refuses_cleanly_rather_than_crashing` asserted only
+  `Refused`, which the new repo refusal satisfies too, so it went green about a rule it no longer
+  reached. Both now pin a root they build, and that one asserts its message. Sixteen mutants, each
+  with its verdict written before the run and its mutated region diffed: fifteen killed, and the
+  sixteenth — dropping the `sorted` from the suggestion list — survived until the row that pins it
+  stopped using a real filesystem, because `iterdir` here returns an already-sorted answer and no
+  tree can tell the two apart. Also: `scripts/check-state-table-totals.sh` and
+  `docs/REPO_CHECKS.md` described `scripts/test-rabota.sh` as a 21-line wrapper around 595 tests;
+  correct when written on 2026-09-23, it was 27 lines and 990 tests five days later, and nothing
+  compares either figure to anything. Both now carry the date they were measured.
+
 - **`claude-pick` printed the pool's name twice in its refusal reason (DO-766).** A pinned tenant
   read `every member of pool <tenant><tenant> is spent for the week`. The name was built as
   `${t:+pool $t}${t:-the account pool}`, and both halves fire when `t` is set — `:-` substitutes
