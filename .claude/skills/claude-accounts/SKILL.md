@@ -6,7 +6,7 @@ description: >
   claude.ai connectors disconnecting or returning unauthorized; (3) a session billing the
   wrong account, or the sidebar naming an account that does not match; (4) clauth reporting
   auth_broken or quarantining a profile; (5) deciding whether it is safe to run
-  `clauth <profile>`. Use when working in the dotfiles repo on any of these, or when editing
+  `clauth switch <profile>`. Use when working in the dotfiles repo on any of these, or when editing
   zsh/functions/claude.sh, zsh/zshrc.herdr's claude() / picker code, or
   scripts/claude-account-dirs.sh. Do NOT use for GitHub account routing (that is
   gh-doctor), for herdr pane or workspace control (see the herdr skill), or for general
@@ -38,7 +38,7 @@ credential, answered from `$CLAUDE_CONFIG_DIR`. The daemon logs to the **journal
 
 | what you see | most likely | read |
 |---|---|---|
-| Several sessions logged out in the **same minute** | a write to a shared credential (a `clauth <profile>` switch, or a session on the global file) | CLAUDE_ACCOUNTS.md → "A logout is not one session's problem" |
+| Several sessions logged out in the **same minute** | a write to a shared credential (a `clauth switch`, or a session on the global file) | CLAUDE_ACCOUNTS.md → "A logout is not one session's problem" |
 | Every account broken right after the laptop woke | tokens (8 h) expired during the suspend; clauth flagged `auth_broken` | CLAUDE_ACCOUNTS.md → "A long suspend expires every account at once" |
 | `auth_broken` standing although sessions work | the reconciler adopted a live token; a successful fetch never clears the flag on 0.15.1 | CLAUDE_ACCOUNTS.md → "A standing `auth_broken` is reported" |
 | One MCP server's entry has an empty token | no `expiresAt`/`scope`: never authorised in this config dir. With them: a lost interleaved write | CLAUDE_ACCOUNTS.md → the 2026-09-06 correction |
@@ -50,7 +50,8 @@ credential, answered from `$CLAUDE_CONFIG_DIR`. The daemon logs to the **journal
 - **Wrong account for your own work** → `claude-as <profile>`. It moves only your session.
 - **An account needs re-auth** → `clauth login <profile>`. This is the only thing that clears
   `auth_broken`.
-- **`clauth <profile>`** → only after `claude-doctor` says the stored copy **matches** the live
+- **`clauth switch <profile>`** (0.16.0; bare `clauth <profile>` is the deprecated spelling) → only
+  after `claude-doctor` says the stored copy **matches** the live
   credential. If it says DIFFERS, the store holds a superseded refresh token and switching logs
   out every session on that account.
 - **Never** relink an account dir's `.credentials.json`, copy a credential between profiles, or
