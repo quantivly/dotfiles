@@ -501,8 +501,8 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
   sessions, and `HERDR_PLUGIN_ID` is what says whose the other two are.
 - **The server's `PATH` is a snapshot taken when it started.** Link a tool into `~/.local/bin` to make
   it visible without a restart.
-- **`clauth start <profile>` bypasses `claude()`**, so it is not a team lead (`clauth <profile>` then
-  `claude`); it is refused for a profile another machine owns (`CLAUDE_TENANT_MACHINE_OWNED`).
+- **`clauth start <profile>` bypasses `claude()`**, so it is not a team lead (`claude-as <profile>`
+  is); it is refused for a profile another machine owns (`CLAUDE_TENANT_MACHINE_OWNED`).
 - **A modular adopter** runs `./install --herdr` (five links, nothing else),
   `scripts/herdr-claude-wire.sh`, and `scripts/verify-tools.sh --herdr` as the one check.
 - **A spawned session cannot tear down its own worktree** — removing it closes the space it
@@ -526,10 +526,11 @@ dirs, clauth's writes, suspend storms, `auth_broken` — are in
 [docs/CLAUDE_SETUP.md](docs/CLAUDE_SETUP.md). To diagnose a logout, a dropped MCP server or a
 session on the wrong account, use the [claude-accounts](.claude/skills/claude-accounts/SKILL.md) skill.
 
-- **Run `claude-doctor` first, and never `clauth <profile>` while it says the stored copy DIFFERS
+- **Run `claude-doctor` first, and never `clauth switch <profile>` (or the deprecated bare
+  `clauth <profile>`) while it says the stored copy DIFFERS
   from the live credential.** Refresh tokens rotate server-side; clauth restores its stored copy,
   and a superseded token logs out every session on that account at once.
-- **Prefer `claude-as <profile>` to `clauth <profile>`** — it changes nothing outside your session.
+- **Prefer `claude-as <profile>` to `clauth switch <profile>`** — it changes nothing outside your session.
 - **Every session gets its own account dir** (`claude()` does this by default). An account dir's
   `.credentials.json` is a **symlink** into `~/.clauth/profiles/<p>/`, never a copy — a copy is an
   independent holder of one grant. **Never relink one by hand**: Claude Code writes atomically and
@@ -652,7 +653,7 @@ localrc              # Edit ~/.zshrc.local
 qcache-refresh       # Refresh startup caches
 gh-refresh-tokens    # Refresh GH CLI token cache
 gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offline)
-claude-doctor        # Claude auth + MCP health; run BEFORE 'clauth <profile>'
+claude-doctor        # Claude auth + MCP health; run BEFORE 'clauth switch <profile>'
 claude-as <profile>  # claude on a named account: isolated AND still a team lead
 claude-pick          # which account would this directory bill? (--explain --json --strict)
 scripts/claude-account-dirs.sh --all   # (re)build every profile's persistent config dir
@@ -688,5 +689,5 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
 - **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
-- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth <profile>` while the doctor reports the stored copy DIFFERS from the live credential — and prefer `claude-as <profile>`, which changes nothing outside your own session. If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.
+- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth switch <profile>` while the doctor reports the stored copy DIFFERS from the live credential — and prefer `claude-as <profile>`, which changes nothing outside your own session. If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.
 - **Backups:** `backup-doctor` (full-chain correctness — start here), `backup-status` (quick health), `systemctl list-timers | grep restic`, `resticprofile -c /etc/resticprofile/profiles.toml show` (validate config)

@@ -2723,8 +2723,11 @@ claude() {
   }
 }
 
-# `clauth` as a function, for the two forms that NAME a profile outright —
-# `clauth start [opts] <profile>` and `clauth <profile>` (a machine-wide switch).
+# `clauth` as a function, for the forms that NAME a profile outright —
+# `clauth start [opts] <profile>`, `clauth switch <profile>` (the machine-wide
+# switch; clauth 0.16.0 deprecates the bare `clauth <profile>` spelling, still
+# caught below) and `clauth switch <sid> <profile>` (moves a LIVE session onto a
+# profile — the same seat question, so the LAST positional is the profile).
 # A profile another machine owns is refused (claude-profile-foreign); everything
 # else reaches the binary untouched. herdr-draft's account row TYPES
 # `clauth start <p> --` into a pane's interactive shell, so this is the door the
@@ -2789,6 +2792,20 @@ clauth() {
       # wrapper has already returned.
       [[ -z "$p" ]] || resume_remedy="Resume it elsewhere: clauth resume --profile <a profile you own> $target"
     fi
+  elif [[ "$cmd" == switch ]]; then
+    # `clauth switch <profile>` and `clauth switch <sid> <profile>` (0.16.0). The
+    # profile is the LAST positional in both spellings; a bare `clauth switch`
+    # names nothing and passes. `--theme` is the one option taking a value, and it
+    # is read here as well as at top level because the rows put it AFTER the
+    # profile — where a wrapper that forgot it would take its value for the seat.
+    for a in "${@[i+1,-1]}"; do
+      if (( skip )); then skip=0; continue; fi
+      case "$a" in
+        --theme) skip=1 ;;
+        -*) ;;
+        *) p="$a" ;;
+      esac
+    done
   elif [[ -n "$cmd" && -d "$HOME/.clauth/profiles/$cmd" ]]; then
     p="$cmd"
   fi
@@ -4319,10 +4336,11 @@ ACCOUNTS (every session on its own credential file):
   clauth login <name>     - add an account; more accounts = smaller blast radius
   clauth start <profile>  - supervised worker (--with-fallback quota rotation),
                             launches the BINARY so it is NOT a team lead
-  clauth <profile>        - switches the GLOBAL credential, which nothing reads
+  clauth switch <profile> - switches the GLOBAL credential, which nothing reads
                             once sessions are isolated. AVOID: it overwrites that
-                            file under every holder at once
-  claude-doctor           - auth + MCP health; RUN BEFORE 'clauth <profile>'
+                            file under every holder at once (bare `clauth <p>` is
+                            the same switch, deprecated in 0.16.0)
+  claude-doctor           - auth + MCP health; RUN BEFORE 'clauth switch <p>'
                             (a switch restores clauth's STORED tokens over the
                              live ones — if they have drifted it can log out
                              every session holding that profile)

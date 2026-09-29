@@ -1972,6 +1972,23 @@ check "foreign: --theme's VALUE is not read as the profile"         "$RC" "3"
 crun "clauth fz"
 check "foreign: the bare machine-wide switch is refused"            "$RC" "3"
 check "foreign: ...before the binary runs"                          "$(clog 'fz')" "0"
+# clauth 0.16.0 spells the switch `clauth switch <profile>` and adds
+# `clauth switch <sid> <profile>`, which moves a LIVE session onto a profile —
+# the profile is the LAST positional in both. DO-784: until this arm existed,
+# both spellings passed straight to the binary.
+crun "clauth switch fz"
+check "foreign: clauth switch <owned> (the 0.16.0 spelling) is refused" "$RC" "3"
+check "foreign: ...before the binary runs"                          "$(clog 'switch')" "0"
+crun "clauth switch s-live fz"
+check "foreign: clauth switch <sid> <owned> (a live-session move) is refused" "$RC" "3"
+# --theme AFTER the profile: a wrapper that forgot the option would take its
+# VALUE as the seat, and `full` is unowned, so this row would pass through.
+crun "clauth switch fz --theme full"
+check "foreign: switch: --theme's VALUE is not read as the profile" "$RC" "3"
+crun "clauth switch personal"
+check "foreign: switch to an unowned profile passes through"        "$(clog 'switch personal')" "1"
+crun "clauth switch s-live personal"
+check "foreign: ...and so does a live-session move onto one"        "$(clog 'switch s-live personal')" "1"
 crun "clauth start personal"
 check "foreign: an unowned profile passes through"                  "$(clog 'start personal')" "1"
 crun "clauth login fz"
@@ -2335,7 +2352,7 @@ rm -rf "$FHOME/.clauth/profiles/fz"
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=468
+EXPECTED_ROWS=474
 
 docs_claim() {
   local f="$DOTFILES/$1"
