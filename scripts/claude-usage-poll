@@ -28,7 +28,8 @@
 #     server's `retry-after` is written to the sidecar and the account is
 #     skipped until it lapses (clauth #83 is what polling through a 429 costs).
 #   * A symlinked account dir (a compat alias) is skipped — the target is
-#     polled under its own name (the DO-604 rule).
+#     polled under its own name (the DO-604 rule). A `*.retired-*` dir is
+#     skipped by name: its credential has no profile store behind it (DO-788).
 #
 # Usage:
 #   claude-usage-poll [--root DIR] [--url URL] [--dry-run]
@@ -102,6 +103,10 @@ for dir in "$ROOT"/*; do
   # the target is polled under its own name. `-d` follows links; test the link first.
   if [[ -L "$dir" ]]; then printf '%s: skipped (alias -> %s)\n' "$name" "$(basename "$(readlink "$dir")")"; continue; fi
   [[ -d "$dir" ]] || continue
+  # A retired dir (`<p>.retired-<date>`, left by a profile rename) holds a
+  # credential no profile store backs; claude-doctor already reports it. A
+  # reader of a retired credential should not exist, so it is skipped by name.
+  if [[ "$name" == *.retired-* ]]; then printf '%s: skipped (retired)\n' "$name"; continue; fi
   cred="$dir/.credentials.json"
   [[ -r "$cred" ]] || { printf '%s: skipped (no readable credential)\n' "$name"; continue; }
 

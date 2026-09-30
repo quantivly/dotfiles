@@ -70,6 +70,7 @@ seed expired fake-exp "$past"
 mkdir -p "$ROOT/stub"; printf '{"claudeAiOauth":{"accessToken":"","scopes":[]}}\n' > "$ROOT/stub/.credentials.json"; chmod 600 "$ROOT/stub/.credentials.json"
 ln -s "$ROOT/ok" "$ROOT/alias"
 mkdir -p "$ROOT/nocred"
+seed old.retired-20260917 fake-ret "$future"
 hits() { grep -c -- "GET $1 " "$STUB_LOG" || true; }
 state() { jq -r '.state // "none"' "$ROOT/$1/usage.json" 2>/dev/null || echo none; }
 reason() { jq -r '.reason // ""' "$ROOT/$1/usage.json" 2>/dev/null; }
@@ -111,6 +112,7 @@ check "expired token: NO request was made (never refreshed)"            "$(hits 
 check "discovery stub (no expiresAt): state unknown"                    "$(state stub)" "unknown"
 check "alias symlink: skipped, not polled twice"                        "$(grep -c '^alias: skipped (alias -> ok)' <<<"$OUT")/$(hits fake-ok)" "1/1"
 check "a dir with no credential is skipped"                             "$(grep -c '^nocred: skipped' <<<"$OUT")" "1"
+check "a retired dir is skipped by name: no request, no file"           "$(grep -c '^old.retired-20260917: skipped (retired)' <<<"$OUT")/$(hits fake-ret)/$( [ -e "$ROOT/old.retired-20260917/usage.json" ] && echo file || echo nofile )" "1/0/nofile"
 
 echo "=== a second run honours the 429 sidecar ==="
 OUT="$("$SUT" --root "$ROOT" --url "$URL" 2>&1)"
@@ -124,14 +126,14 @@ check "a refused connection is unknown, not a crash"                    "$(state
 
 echo "=== canary: no token in any output or written file ==="
 leak=0
-for tok in fake-ok fake-401 fake-429 fake-bad fake-exp; do
+for tok in fake-ok fake-401 fake-429 fake-bad fake-exp fake-ret; do
   grep -rq -- "$tok" "$ROOT"/*/usage.json "$ROOT"/*/.usage.retry-after 2>/dev/null && leak=$((leak + 1))
 done
 check "no fixture token in any file the poller wrote"                   "$leak" "0"
-check "no fixture token in the poller's output"                         "$(grep -c -E 'fake-(ok|401|429|bad|exp)' <<<"$OUT")" "0"
+check "no fixture token in the poller's output"                         "$(grep -c -E 'fake-(ok|401|429|bad|exp|ret)' <<<"$OUT")" "0"
 
 # --- the row total, and the count this suite is documented as running --------
-EXPECTED_ROWS=34
+EXPECTED_ROWS=35
 docs_claim() {
   local f="$DOTFILES/$1"
   [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
