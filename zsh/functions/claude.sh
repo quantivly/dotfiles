@@ -1319,6 +1319,63 @@ claude-doctor() {
     _doctor_note "nothing refreshes these on a schedule: clauth's only usage writer is lease-gated to its TUI and its daemon, and there is no 'clauth refresh'"
   fi
 
+  # ---- 3d. The shadow usage poll against clauth, per profile (DO-786/787) ---
+  #
+  # scripts/claude-usage-poll writes <account dir>/usage.json — the endpoint's
+  # raw reply plus fetched_at, or state=unknown with a reason — and clauth
+  # writes the profile store's usage_cache.json. Nothing ranks on the poll; this
+  # line is the reader the week of side-by-side readings exists for. Two
+  # readings of one account should agree to the point (the first armed run did:
+  # 7d identical, 5h within one); a gap past five points is worth a look, so it
+  # is a ⚠. A missing poll output is a note, never a fault: the timer is linked
+  # by install and armed by hand.
+  echo
+  zmodload zsh/datetime 2>/dev/null
+  sp_root="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
+  sp_seen=0; sp_now_ms=$(( EPOCHSECONDS * 1000 ))
+  for adir in "$sp_root"/*(N/); do
+    [[ -L "$adir" ]] && continue                 # an alias; its target is reported under its own name
+    [[ "${adir:t}" == *.retired-* ]] && continue # no profile store behind it (DO-788 skips it too)
+    spf="$adir/usage.json"; [[ -r "$spf" ]] || continue
+    (( sp_seen++ ))
+    sp_p="${adir:t}"; sp_ucf="$HOME/.clauth/profiles/$sp_p/usage_cache.json"
+    # One jq per file; `// null` keeps an absent field's column (the DO-621
+    # rule: `empty` shifts every later field left), and the fields are joined by
+    # a UNIT SEPARATOR rather than tabs: a tab is IFS whitespace, so `read`
+    # folds two in a row and an EMPTY reason shifted every column after it
+    # (measured on the first draft: the 7d slot showed the timestamp).
+    sp_line="$(jq -r '[(.state // "ok"), (.reason // ""), (.five_hour.utilization // null), (.seven_day.utilization // null), (.fetched_at // null)] | map(tostring) | join("\u001f")' "$spf" 2>/dev/null)" || sp_line=""
+    IFS=$'\x1f' read -r sp_st sp_reason sp_5 sp_7 sp_fa <<<"$sp_line"
+    if [[ "$sp_st" != ok ]]; then
+      _doctor_note "$sp_p: shadow poll is 'unknown' — ${sp_reason:-no reason recorded}"
+      continue
+    fi
+    sp_c5=""; sp_c7=""; sp_cfa=""
+    if [[ -r "$sp_ucf" ]]; then
+      sp_cline="$(jq -r '[(.five_hour.utilization // null), (.seven_day.utilization // null), (.fetched_at // null)] | map(tostring) | join("\u001f")' "$sp_ucf" 2>/dev/null)" || sp_cline=""
+      IFS=$'\x1f' read -r sp_c5 sp_c7 sp_cfa <<<"$sp_cline"
+    fi
+    sp_age="?"; [[ "$sp_fa" == <-> ]] && sp_age="$(_claude_fmt_delta $(( sp_fa - sp_now_ms )))"
+    sp_cage="?"; [[ "$sp_cfa" == <-> ]] && sp_cage="$(_claude_fmt_delta $(( sp_cfa - sp_now_ms )))"
+    if [[ ! "$sp_c5" =~ ^[0-9]+(\.[0-9]+)?$ || ! "$sp_c7" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      _doctor_note "$sp_p: shadow 5h=${sp_5} 7d=${sp_7} ($sp_age); clauth has no reading to compare"
+      continue
+    fi
+    if [[ ! "$sp_5" =~ ^[0-9]+(\.[0-9]+)?$ || ! "$sp_7" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      _doctor_warn "$sp_p: shadow poll is 'ok' but carries no 5h/7d utilization — the endpoint's shape changed under it"
+      continue
+    fi
+    # zsh arithmetic is float-capable; the gap is compared in points, unsigned.
+    sp_d5=$(( sp_5 - sp_c5 )); (( sp_d5 < 0 )) && sp_d5=$(( -sp_d5 ))
+    sp_d7=$(( sp_7 - sp_c7 )); (( sp_d7 < 0 )) && sp_d7=$(( -sp_d7 ))
+    if (( sp_d5 > 5 || sp_d7 > 5 )); then
+      _doctor_warn "$sp_p: shadow 5h=${sp_5} 7d=${sp_7} ($sp_age) vs clauth 5h=${sp_c5} 7d=${sp_c7} ($sp_cage) — apart by more than 5 points"
+    else
+      _doctor_ok "$sp_p: shadow 5h=${sp_5} 7d=${sp_7} ($sp_age) agrees with clauth 5h=${sp_c5} 7d=${sp_c7} ($sp_cage)"
+    fi
+  done
+  (( sp_seen )) || _doctor_note "no shadow usage poll output under ${sp_root/#$HOME/~} — the DO-786 timer is linked by install and armed by hand: systemctl --user enable --now claude-usage-poll.timer"
+
   # ---- 4. Concurrency on the shared file -----------------------------------
   # Claude Code does not lock .credentials.json. That is upstream's to fix, not
   # ours, so it is a ⚠ at worst and only when the count makes a race likely — an

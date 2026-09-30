@@ -1571,6 +1571,43 @@ printf '{"five_hour":{"utilization":10.0},"fetched_at":%s}\n' "$(( ($(date +%s) 
 run_doctor
 want_out "the doctor dates a cache from fetched_at, not its fresh mtime" "oldest 2h ago"
 
+# DO-787: the shadow poll (scripts/claude-usage-poll) beside clauth, per profile.
+# The poll's file is <account dir>/usage.json; clauth's is the profile store's
+# usage_cache.json. Agreement is a ✓, a gap past five points a ⚠, a poll in state
+# unknown a note carrying its reason, no poll output at all a note naming the
+# timer — never a ✗, since nothing ranks on the poll.
+mk_poll() {   # $1 = profile, $2 = 5h, $3 = 7d  (state ok, fetched two hours ago: coarse, so seconds of run time cannot move the rendering)
+    printf '{"state":"ok","five_hour":{"utilization":%s},"seven_day":{"utilization":%s},"fetched_at":%s}\n' \
+        "$2" "$3" "$(( ($(date +%s) - 7200) * 1000 ))" > "$FHOME/.local/state/claude-account-dirs/$1/usage.json"
+}
+mk_cache() {  # $1 = profile, $2 = 5h, $3 = 7d  (clauth's cache, fetched two hours ago)
+    printf '{"five_hour":{"utilization":%s},"seven_day":{"utilization":%s},"fetched_at":%s}\n' \
+        "$2" "$3" "$(( ($(date +%s) - 7200) * 1000 ))" > "$FHOME/.clauth/profiles/$1/usage_cache.json"
+}
+new_home sp0; write_cred
+mk_account_dir p1 linked
+run_doctor
+want_out "no poll output is a note naming the timer to arm" "no shadow usage poll output"
+want_rc  "...and not a failure" 0
+
+new_home sp1; write_cred
+mk_account_dir p1 linked; mk_poll p1 10.0 40.0; mk_cache p1 10.0 40.0
+mk_account_dir p2 linked; mk_poll p2 30.0 40.0; mk_cache p2 10.0 40.0
+mk_account_dir p3 linked
+printf '{"state":"unknown","reason":"401 from the usage endpoint; not refreshed by design","fetched_at":%s}\n' "$(( $(date +%s) * 1000 ))" \
+    > "$FHOME/.local/state/claude-account-dirs/p3/usage.json"
+mkdir -p "$FHOME/.local/state/claude-account-dirs/old.retired-20260917"
+printf '{"state":"ok","five_hour":{"utilization":1.0},"seven_day":{"utilization":1.0},"fetched_at":1}\n' \
+    > "$FHOME/.local/state/claude-account-dirs/old.retired-20260917/usage.json"
+run_doctor
+want_out "agreeing readings are a ✓ with both figures and ages"      "p1: shadow 5h=10.0 7d=40.0 (2h ago) agrees with clauth 5h=10.0 7d=40.0 (2h ago)"
+want_out "a gap past five points is a ⚠ naming both sides"           "p2: shadow 5h=30.0 7d=40.0 (2h ago) vs clauth 5h=10.0 7d=40.0 (2h ago) — apart by more than 5 points"
+want_out "a poll in state unknown is a note carrying its reason"     "p3: shadow poll is 'unknown' — 401 from the usage endpoint"
+# The needle is the §3d line shape, not the dir name: §3's account-dir report
+# names a retired dir too ("no clauth profile store"), so a bare name would
+# fail this row for a reason the row is not about.
+if (( $(grep -c 'old.retired-20260917: shadow' <<<"$OUT") == 0 )); then ok "a retired dir's poll output is not reported"; else bad "a retired dir's poll output is not reported"; fi
+
 # THREE MORE RULES OF _claude_usage_cache_age_s, PINNED DIRECTLY. Until here the
 # only rule with a row on this side was "fetched_at beats the mtime" (above) and
 # "no fetched_at at all falls back to it" (every mk_usage_profile fixture). The
@@ -2656,7 +2693,7 @@ no_out   "...and is not reported as an armed chain"  "auto-switch armed"
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=331
+EXPECTED_ROWS=337
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
