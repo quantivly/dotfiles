@@ -3059,7 +3059,7 @@ _hspawn_usage() {
     '' \
     'Options:' \
     '  -p, --profile <clauth-profile>  run in that profile'"'"'s own persistent CLAUDE_CONFIG_DIR' \
-    '                                  (default: the clauth profile with the fewest live sessions).' \
+    '                                  (default: the pool member with the best score; claude-pick --explain).' \
     '                                  Isolated AND able to lead a herdr team.' \
     '      --shared                    use the SHARED global credential instead — adds a writer to the' \
     '                                  unlocked ~/.claude/.credentials.json, which a profile switch' \

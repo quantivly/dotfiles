@@ -48,9 +48,10 @@
 # The remaining GNU-isms are `date +%s%N` and `timeout` (HERDR_GUIDE.md §10).
 #
 # NOT published to herdr (removed 2026-08-30): rate limits and session cost.
-# The clauth daemon already rotates accounts automatically at its thresholds, so
-# the rate-limit bands explained why a rotation had happened rather than prompting
-# any action, and every published token is a silent-failure surface. Both are still
+# At the time the clauth daemon's chain rotated accounts at its thresholds, so the
+# bands explained why a rotation had happened rather than prompting any action; the
+# chain has been empty by decision since 2026-09-06 (HERDR_GUIDE §4), and the bands
+# stay out because every published token is a silent-failure surface. Both are still
 # computed below and printed in the VISIBLE status line, in the pane where you are
 # already looking — that costs nothing extra, since this script runs either way as
 # Claude Code's own statusLine command. Any rl_*/cost tokens left on a pane from a

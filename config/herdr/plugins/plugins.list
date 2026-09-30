@@ -16,7 +16,8 @@
 # round-robin in ORDERING ("from the slot after it, wrapping"), which is why the
 # upstream wording is easy to read as the other thing.
 # `clauth start <profile>` is the per-session primitive (its own CLAUDE_CONFIG_DIR);
-# HERDR_GUIDE §4 has what that costs a team lead.
+# HERDR_GUIDE §4 has what that costs a team lead. The chain on this box is EMPTY by
+# decision (same section); the daemon polls usage and rotates tokens, and switches nothing.
 uwuclxdy/clauth/herdr-plugin
 
 # worktree.created hook: symlink node_modules et al, copy settings.local.json.

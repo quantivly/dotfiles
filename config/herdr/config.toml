@@ -532,9 +532,10 @@ claude = [
   # is ~25 columns ("✻ Opus 5 1M" + "xhigh" + "▄ 47%" + separators) against
   # sidebar_width 40, so it does not trigger truncation.
   #
-  # The rate-limit bands were removed 2026-08-30: the clauth daemon already
-  # rotates accounts automatically (95%/5h, 98%/7d), so the numbers explained why
-  # a rotation had happened rather than prompting any action, and every published
+  # The rate-limit bands were removed 2026-08-30, when the clauth daemon's chain
+  # rotated accounts at 95%/5h, 98%/7d; the chain has been empty by decision since
+  # 2026-09-06 (HERDR_GUIDE §4) and the bands stayed out because the numbers are
+  # in the pane's own status line, and every published
   # token is a silent-failure surface. Rate limits and session cost are still
   # printed by the statusLine command IN the pane. The context ramp stays: it is
   # the only warning before a forced compaction, and nothing else surfaces it
