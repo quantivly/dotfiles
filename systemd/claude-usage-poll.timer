@@ -1,6 +1,8 @@
 # Every 5 minutes: the gate's freshness bound is 600 s (claude-pick), the ranker's
 # 3600 s, and clauth's own poll is 90 s; five minutes measures the feed at a
-# cadence a repo poller could sustain without leaning on the endpoint.
+# cadence a repo poller could sustain without leaning on the endpoint. Within a
+# run the profiles are polled CLAUDE_USAGE_POLL_GAP seconds apart (default 3),
+# so nine profiles take under half a minute of the five (DO-789).
 [Unit]
 Description=Shadow poll of Claude usage per account dir, every 5 minutes (DO-786)
 
