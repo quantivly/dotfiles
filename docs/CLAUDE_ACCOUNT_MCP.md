@@ -328,17 +328,114 @@ stops being ranked, and `claude-doctor` reports the oldest age on every run
 precisely because nothing can be done about it from a script. If the picker's
 choices look arbitrary, check that line first, then the daemon unit.
 
-### Adopting a new profile
+### Adding an account to the pool
 
-A profile's `mcpOAuth` entries are its own, so a fresh one starts with none and
-`claude-doctor` lists each plugin MCP server as *never authorised in this config
-dir*. Two ways to settle that, and the second is usually right:
+Seven steps. Two of them need a person at a browser, and three of them fail
+silently if skipped. Worked through end to end on 2026-09-30.
 
-1. Authorise each server once from `/mcp` inside a session on that profile.
-2. Use the **claude.ai connector** for that service instead of the plugin MCP
-   server. Connectors ride the login token, need no per-config-dir OAuth at all,
-   and `claude-doctor` already warns that Linear, Notion and Slack are reachable
-   on both paths.
+**1. Pick a name that has never existed.** Check `~/.clauth/profiles/` *and*
+`~/.local/state/claude-account-dirs/`. A renamed profile leaves a compatibility
+symlink at its old name (the 2026-09-10 rename left `quantivly-2 -> quantivly-1`),
+so a free-looking slot can still resolve to another account. That kind of
+cross-account mix-up is what the staged rename existed to prevent. The number in
+the name does not have to match anything in the address.
+
+**2. `clauth login <name>`** — the one step that must be done by a person.
+It does not switch the machine's account. The grant goes to whichever claude.ai
+account the page that opens is signed in to, so make sure that is the new account.
+Then confirm it is a new seat and not a second login to an existing one. No
+account id may repeat:
+
+```bash
+sha256sum ~/.clauth/profiles/*/account_id.json | awk '{print $1}' | sort | uniq -d | wc -l   # must print 0
+```
+
+The address shows up only after the first launch, at
+`jq -r .oauthAccount.emailAddress ~/.local/state/claude-account-dirs/<name>/.claude.json`.
+
+**3. Copy a sibling's settings into `~/.clauth/profiles/<name>/config.toml`.**
+`clauth login` writes an all-commented template, while the existing seats set
+`[models]`, `auto_start` and `fallback_threshold`. Match them:
+`diff ~/.clauth/profiles/<name>/config.toml ~/.clauth/profiles/<sibling>/config.toml`,
+then uncomment the differences. **This is what makes a session movable later.**
+`clauth switch <sid> <profile>` refuses to move a live session to a profile whose
+model settings differ from the ones it launched with. The refusal shows up only
+in the daemon's journal (`quantivly-3 is not swappable (its model routing differs
+from the launch snapshot)`); the CLI prints `pointed session … at …` either way.
+A session launched on the seat before this step can never be moved in place.
+
+**4. Add it to its tenant's pool.** The tenants file is
+`~/.config/claude-tenants.zsh`, which is data outside this repo. Add the name to
+`CLAUDE_TENANT_POOL[<tenant>]` and nowhere else. Leave
+`CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
+another machine will own the seat, and leave `CLAUDE_TENANT_BUCKETS` alone until
+the new seat's usage has been measured against the others. Do this after step 2,
+so the pool never names a profile with no credential. Then check the file: a
+tenants file that exists and cannot be read refuses every launch.
+
+```bash
+zsh -n ~/.config/claude-tenants.zsh && scripts/machines-render --check
+```
+
+**5. Build and verify.** Run `scripts/claude-account-dirs.sh <name>`. Then
+`claude-doctor` should print `✓ <name>: credential shared with the clauth store`,
+and `claude-pick --explain --dry-run` from one of that tenant's repos should list
+the new name in the pool.
+
+**6. MCP servers.** A profile's `mcpOAuth` entries are its own, so a fresh one
+starts with none. There are two kinds of server, and they behave differently:
+
+- **Plugin servers (Slack, Notion, Linear): authorise once, from a session on
+  the new profile.** Use `/mcp`, or the server's `authenticate` tool, which hands
+  back a URL. The redirect goes to `localhost` and claude.ai is not involved, so
+  it does not matter which claude.ai account the browser is on. Sign in to the
+  service as yourself. `claude-doctor` then shows
+  `✓ plugin:<server>: valid in …, refreshable`, and the token covers every
+  session on that profile.
+- **claude.ai connectors are saved to the claude.ai account the BROWSER is signed
+  in to, not to the seat the session runs on.** With the browser on your main
+  account, `/mcp` → *claude.ai Slack* completed and looked successful, while the
+  session still got `mcp_unauthorized_no_token`: the grant had gone to the main
+  account. So for Slack, Notion and Linear use the plugin servers above. This
+  section used to recommend the connectors, which is wrong for a new seat. For a
+  service with no plugin server here (Gmail, Calendar, Drive, Fireflies, Figma),
+  use a separate browser profile signed in to claude.ai *as the new account*, and
+  connect from Settings → Connectors there. If the new address is a Workspace
+  alias, it has no Google login of its own: sign in to claude.ai by emailed link,
+  and when the service asks for Google, use your normal Google account. That half
+  has not yet been verified end to end.
+
+**7. Watch where the next launches land.** A fresh seat's week is empty. If
+that week also resets within a couple of days, the picker's consume-first bonus
+(DO-621) is worth up to twice the entire 5h score. Meanwhile each session already
+on a seat whose 5h reads 0% costs it only 300 points. At the 2026-09-29 restore
+that put the new seat 14,050 points ahead, roughly fifty sessions' worth, so every
+session restored after the reboot landed on it. Sessions keep the seat they
+launched on. So the new seat's 5h window was spent the next morning while two
+sibling seats sat at 0%, and every session on it stopped at the same moment.
+`claude-doctor`'s concurrency section shows the count. See
+[Moving sessions off a spent seat](#moving-sessions-off-a-spent-seat) below.
+
+### Moving sessions off a spent seat
+
+- **A `clauth start` session** (its config dir is
+  `~/.clauth/profiles/<p>/runtime-<pid>-<seq>`) moves in place with
+  `clauth switch <sid> <profile>`, at its next request, with nothing restarted.
+  This only works when the two profiles' model settings match (step 3). Confirm
+  it moved from `current_member` in `~/.clauth/live_sessions/<sid>.json` or from
+  the daemon journal, not from the CLI's reply.
+- **Any other session** has to be stopped and resumed. Type `/exit` in its pane,
+  then relaunch it the way it was started: `claude-as <p> --resume <id>` for a
+  `claude()` session, `clauth start <p> -- --resume <id>` for a clauth one. The
+  transcript survives, but whatever was running in the process does not. So
+  check first for a background shell (`ps -o pid,etime,comm --ppid <pid>`) and
+  for a subagent the limit stopped partway (its transcript sits under
+  `<transcript-dir>/<session>/subagents/`). Leave a session with either one until
+  the reset.
+- **A session that is not blocked has nothing to gain from moving.** A session
+  waiting on you uses no quota. Resume it on another seat when you next need it.
+- `claude()` keeps an inherited `CLAUDE_CONFIG_DIR`, so check that the pane's
+  shell does not export one before relying on `claude-as` there.
 
 ---
 

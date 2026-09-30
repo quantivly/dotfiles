@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The runbook's advice for a new account was wrong, and the procedure was missing.**
+  `docs/CLAUDE_ACCOUNT_MCP.md` recommended claude.ai connectors for a fresh profile. But a
+  connector authorised from `/mcp` is saved to whichever claude.ai account the browser is signed
+  in to, so on a new seat it "succeeds" and the session still gets `mcp_unauthorized_no_token`.
+  The section is now "Adding an account to the pool": seven steps, found by doing it on
+  2026-09-30. It covers a free-looking name that is still a compat symlink, and `clauth login`
+  writing an all-commented `config.toml` (which makes every in-place `clauth switch <sid>` refuse,
+  with the refusal only in the journal). It also covers plugin-server sign-in, and the new seat
+  drawing every launch. A companion subsection covers moving sessions off a spent seat.
+
 - **`rabota doctor` named a reachable repo as missing, on a passing row (DO-773 follow-up).** A
   repo key satisfied by a tenant's `[repos]` table was also weighed against the tenant's `root`
   and reported there as absent, so the live quantivly row read `1 of them here: ['dotfiles'] …
