@@ -1117,8 +1117,9 @@ access token, honours a 429's `retry-after` through a `.usage.retry-after` sidec
 symlinks, and passes the bearer to curl through a 0600 file, never argv. **Nothing reads
 `usage.json` yet**: the picker, the gate, rabota and herdr-draft still rank on clauth's
 `usage_cache.json`. The point is a week of side-by-side readings, which is the one measurement
-the 2026-09-29 account-manager comparison said was missing; a doctor row that diffs the two per
-profile is DO-787. The units are linked by `install.conf.yaml` and **not enabled**: arm the
+the 2026-09-29 account-manager comparison said was missing; `claude-doctor` §3d prints the two
+side by side per profile (DO-787): agreement is a ✓, a gap past five points a ⚠, an `unknown`
+poll a note with its reason, no poll output a note naming the timer to arm. The units are linked by `install.conf.yaml` and **not enabled**: arm the
 timer by hand with `systemctl --user enable --now claude-usage-poll.timer`.
 
 State table: `scripts/test-claude-usage-poll.sh` (34 checks, in CI as `usage-poll-test`) —
