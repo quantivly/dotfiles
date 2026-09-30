@@ -94,9 +94,11 @@ it. **An unpinned fix is an unverified fix, and a surviving mutant is the only t
   — its TUI and its daemon — and no CLI subcommand takes it. Probed against caches already 207–282 s
   old, `clauth which`, `status --json`, `list`, `sessions` and `jobs` left every mtime unchanged to
   the second, and `clauth --help` has no `refresh`; a 15-minute sample at 10 s resolution recorded
-  **zero** writes while ~29 panes were open, the caches aging monotonically to 20m45s. At 900 s every
-  profile would read `unknown` for most of the day and the picker would rank on nothing. The honest
-  follow-up is an upstream request for a first-class `clauth refresh [profile]`.
+  **zero** writes while ~29 panes were open, the caches aging monotonically to 20m45s — measured
+  2026-09-09 with the daemon stopped. With the daemon running (since 2026-09-10) every cache is
+  rewritten each 90 s poll, and 3600 stays so that a daemon outage degrades the ranking rather than
+  blanking it: at 900 s every profile would read `unknown` for most of such an outage. The honest
+  follow-up is still an upstream request for a first-class `clauth refresh [profile]`.
 - **A negative `r5` earns no bonus.** `.five_hour.resets_at` **can be absent** — measured on three of
   five profiles, absent exactly where utilization is `0.0`, i.e. an unstarted window — and §5.3's
   `100 - min(100, max(0,r5)·100/18000)` yields **100**, the *maximum* urgency, for a window that has

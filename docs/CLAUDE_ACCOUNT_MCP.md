@@ -253,8 +253,8 @@ member of the group that a single bad write destroys.
   memory; `hreap --close --mine` closes your own idle spawns. An idle agent
   still holds its memory *and* still refreshes its token.
 
-**How many groups you get is how many logins you have.** Four profiles against
-18–30 concurrent sessions means groups of five to seven; `clauth login <name>`
+**How many groups you get is how many logins you have.** Seven profiles (2026-09-30; the
+number moves, `clauth list` has today's) against 18–30 concurrent sessions; `clauth login <name>`
 is the only thing that makes them smaller. `claude-doctor`'s concurrency section
 prints the current grouping, and the number to drive to zero is the one on
 **the SHARED global file** — it was 17 of 18 when this was written.
@@ -320,13 +320,13 @@ or `CLAUDE_PICK_SWAP_WARN` (60%), but nothing refuses unless
 deliberately oversubscribed; the picker's job is to choose an account, not to
 police the machine.
 
-**The usage numbers are as fresh as the last time somebody opened clauth's TUI.**
-There is no `clauth refresh`: clauth's only writer of `usage_cache.json` is
-lease-gated to its TUI and its daemon, and the daemon is disabled. So a profile
-whose cache has aged past the threshold silently stops being ranked, and
-`claude-doctor` reports the oldest age on every run precisely because nothing can
-be done about it from a script. If the picker's choices look arbitrary, check that
-line first.
+**The usage numbers are as fresh as the daemon's last poll — 90 s while
+`clauth-daemon.service` runs, the last TUI open when it does not.** There is no
+`clauth refresh`: clauth's only writer of `usage_cache.json` is lease-gated to its
+TUI and its daemon. So a profile whose cache has aged past the threshold silently
+stops being ranked, and `claude-doctor` reports the oldest age on every run
+precisely because nothing can be done about it from a script. If the picker's
+choices look arbitrary, check that line first, then the daemon unit.
 
 ### Adopting a new profile
 

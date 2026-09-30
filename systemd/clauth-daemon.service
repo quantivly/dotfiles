@@ -1,0 +1,19 @@
+# clauth's usage refresh + auto-switch loop. Linked into ~/.config/systemd/user by
+# install.conf.yaml and reconciled by scripts/reconcile-systemd-units.sh, like the
+# reconcile units. Its log goes to the JOURNAL (journalctl --user -u
+# clauth-daemon.service), never to ~/.clauth/clauth.log (docs/CLAUDE_ACCOUNTS.md,
+# "A standing auth_broken"). --standby waits for a running daemon to exit and takes
+# over, so a restart of this unit is how the binary moves: `systemctl --user
+# restart clauth-daemon.service`, never a bare `clauth daemon` from a pane.
+# The fallback chain is empty by decision (docs/HERDR_GUIDE.md §4): this unit polls
+# usage every refresh_interval_ms and rotates tokens ahead of expiry; it moves no
+# session between accounts.
+[Unit]
+Description=clauth usage refresh + auto-switch loop
+
+[Service]
+ExecStart=%h/.local/bin/clauth daemon --standby
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
