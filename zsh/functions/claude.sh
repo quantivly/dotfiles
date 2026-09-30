@@ -154,10 +154,11 @@ _claude_active_profile() {
 #
 # THE AUTHORITY IS profiles.toml, NOT status.json. clauth writes the flag there
 # under its own state flock (`set_auth_broken_persisted` -> `save_app_state`);
-# status.json only republishes it as `profiles[].auth = "broken"`, and that feed
-# is the daemon's, so a reader of it goes quiet exactly when the daemon is
-# stopped — a state this machine has been in deliberately, and the one most worth
-# reporting. Same precedence #145 settled for the active profile, same reason.
+# status.json only republishes it as `profiles[].auth_status = "broken"` (schema 2;
+# `auth` was the schema-1 name), and that feed is the daemon's, so a reader of it
+# goes quiet exactly when the daemon is stopped — a state this machine was in from
+# 2026-09-08 to 09-10, and the one most worth reporting. Same precedence #145
+# settled for the active profile, same reason.
 #
 # Returns 1 when the question could not be ASKED, so empty output never carries
 # two meanings: at status 0 it means "nothing quarantined", including the case
@@ -932,8 +933,9 @@ claude-doctor() {
           _doctor_warn "could not compare stored and live credentials — NOT CHECKED (an unreadable file is not agreement)"
         elif [[ "$spath" == "$gcred" ]]; then
           # SAME FILE, so "they match" is a tautology, not a finding. The global
-          # path is a symlink into the store on this machine (relinked 2026-09-14
-          # so the two Chrome native hosts stopped being independent holders), and
+          # path WAS a symlink into the store here from 2026-09-14 (relinked so the
+          # two Chrome native hosts stopped being independent holders) until Claude
+          # Code's atomic write replaced it — a regular file since 2026-09-24 — and
           # a comparison of a file with itself printing ✓ under the heading "the
           # one check that predicts a mass logout" is the vacuous-tick trap this
           # file already records for isolated sessions, back by a new route. It is
@@ -1103,10 +1105,12 @@ claude-doctor() {
         # the concentration the account-dir design exists to undo. Before this
         # block nothing in this repo printed the word outside a comment.
         #
-        # AND IT DOES NOT HEAL ITSELF. Measured against the INSTALLED clauth —
-        # 0.15.1, and that is proven rather than assumed: sha256 of
-        # ~/.local/bin/clauth equals the clauth-linux-x86_64 asset of the v0.15.1
-        # release, so the source read below is the code that runs. The flag has
+        # AND IT DOES NOT HEAL ITSELF. Measured against the clauth installed at
+        # the time — 0.15.1, proven rather than assumed: sha256 of
+        # ~/.local/bin/clauth equalled the clauth-linux-x86_64 asset of the v0.15.1
+        # release. The box moved to 0.15.2 on 2026-09-18 and to 0.16.0 on
+        # 2026-09-29 (asset sha 538b0233…c933, verified against sha256sums.txt);
+        # the five paths below have NOT been re-read on either. The flag has
         # five clearing paths: `clauth login` / capture, an adopt from the live
         # mirror, an adopt from disk at switch time, a carry after a terminal 400,
         # and a successful REFRESH. A successful usage FETCH is not one of them.
@@ -1216,7 +1220,7 @@ claude-doctor() {
           if (( qreal )); then
             # Said ONCE, after the rows, and only when at least one entry names a
             # real profile: on the inert-entry path every sentence here is wrong.
-            echo "    What lifts an auth_broken flag on clauth 0.15.1: 'clauth login', or clauth"
+            echo "    What lifts an auth_broken flag (read on clauth 0.15.1; unverified on 0.16.0): 'clauth login', or clauth"
             echo "    itself adopting or carrying a rotation it can prove. A later successful usage"
             echo "    FETCH does not, so a flag can stand for hours after the store is healthy again."
             # ATTRIBUTED ONLY WHERE THE RECONCILER CAN RUN. `reconcile_all` walks

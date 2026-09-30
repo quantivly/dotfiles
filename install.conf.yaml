@@ -78,6 +78,11 @@
     # token the server already invalidated (which quarantines the account).
     ~/.config/systemd/user/claude-cred-reconcile.service: systemd/claude-cred-reconcile.service
     ~/.config/systemd/user/claude-cred-reconcile.timer: systemd/claude-cred-reconcile.timer
+    # The clauth daemon: usage polling every 90 s and token rotation ahead of expiry, no
+    # account switching (the chain is empty by decision). It ran from a hand-written unit at
+    # this path from 2026-08-29 until DO-785 brought it here; a pre-existing REAL file at the
+    # target is kept by dotbot, so on that one machine the hand-made file is moved aside first.
+    ~/.config/systemd/user/clauth-daemon.service: systemd/clauth-daemon.service
     # rabota pre-compute timer (WS5): a systemd USER TEMPLATE unit, instantiated per tenant
     # (rabota-precompute@quantivly.timer). Linking does NOT enable or start it — that is a
     # gate Zvi runs by hand (scripts/rabota-env-write.sh, then `systemctl --user enable --now

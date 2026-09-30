@@ -448,14 +448,15 @@ Forking keeps both properties and puts the divergence somewhere `git status` sho
 Claude Code accounts are managed with **clauth**, which owns credentials and per-session config
 directories.
 
-> **Corrected 2026-09-09.** This section used to describe an armed rotation chain
-> (`quantivly-3 (home) → quantivly-1 → quantivly-2`, thresholds 95 %/5 h and 98 %/7 d) driven by a
-> running `clauth-daemon.service`. **Neither is true, and both had been untrue for some time.**
-> Measured on the machine this file is written on:
+> **Corrected 2026-09-09, and again 2026-09-29.** This section used to describe an armed rotation
+> chain (`quantivly-3 (home) → quantivly-1 → quantivly-2`, thresholds 95 %/5 h and 98 %/7 d). The
+> chain has been empty since 2026-09-06. The daemon was stopped 2026-09-08 → 09-10 while its
+> serializer destroyed MCP logins (below) and has run since; the 09-09 text that said it was
+> disabled outlived the decision by twenty days. Measured 2026-09-29:
 >
 > ```
-> systemctl --user is-active clauth-daemon.service   → inactive
-> systemctl --user is-enabled clauth-daemon.service  → disabled
+> systemctl --user is-active clauth-daemon.service   → active
+> systemctl --user is-enabled clauth-daemon.service  → enabled
 > fallback_chain in ~/.clauth/profiles.toml          → []
 > ```
 >
@@ -471,26 +472,26 @@ every live session; per-session placement does not. Per-session rotation is stil
 is genuinely wanted, via `clauth start <p> --with-fallback`, which moves that one session and touches
 no other.
 
-**The daemon is disabled deliberately, and re-enabling it destroys data.** Its serializer models five
-of the seven top-level keys Claude Code writes and drops the rest: measured 2026-09-08, a running
-daemon rewrote all four profile stores within ~20 minutes and lost **`rateLimitTier` and every
-`mcpOAuth` entry** — 2/3/3/1 plugin MCP logins to zero, each costing a browser OAuth flow to restore.
-Leave it stopped until that is fixed upstream.
+**The daemon runs, by decision, from the repo's `systemd/clauth-daemon.service` (DO-785).** It polls
+usage every 90 s and rotates each profile's token pair ahead of expiry; with the chain empty it
+switches nothing. The reason it was stopped on 2026-09-08 is closed: clauth 0.14.1's serializer
+modelled five of the seven keys Claude Code writes and destroyed every `mcpOAuth` entry on each
+rewrite (2/3/3/1 plugin MCP logins to zero, measured that day); 0.15.1 fixed the sibling blocks and
+0.15.2 the subkeys (upstream #75). The record: `docs/CLAUDE_ACCOUNTS.md`, "clauth's store keeps 5
+of the 7 keys". Its log is the journal, not `~/.clauth/clauth.log`.
 
-**What the daemon being off actually costs is usage-cache freshness**, and the cost is larger than it
-looks. Reading clauth's source: the only writer of `usage_cache.json` is
-`src/usage/scheduler.rs:1563`, every fetch is gated on the single-fetcher lease, and
-`FetchLease::acquire()` is called from exactly two places — the **TUI** (`src/tui/app.rs:2236`) and
-the **daemon**. No CLI subcommand acquires it, and neither `clauth start` nor `clauth mcp` does. So
-with the daemon off, the caches are refreshed **only while somebody has the clauth TUI open**, which
-is why they arrive in bursts across all four profiles and then age monotonically for tens of minutes.
-Anything that ranks accounts on those numbers has to treat a stale reading as *unknown* rather than
-as agreement — which the picker does: past `CLAUDE_PICK_CACHE_MAX_AGE` (3600 s) a profile is class
-`unknown` and ranks after every measured candidate, still choosable when nothing else is left.
-`claude-doctor` prints the oldest cache age on every run for the same reason, and
-`claude-pick --explain` shows the age it ranked each candidate on. That is also why the threshold
-stayed at 3600 rather than dropping to the planned 900: with no refresher to call, 900 would mark
-every profile `unknown` for most of the day and the picker would rank on nothing at all.
+**What the daemon provides is usage-cache freshness**, and its absence costs more than it looks.
+Reading clauth's source: the only writer of `usage_cache.json` is `src/usage/scheduler.rs`, every
+fetch is gated on the single-fetcher lease, and that lease is acquired in exactly two places — the
+**TUI** and the **daemon**. No CLI subcommand acquires it, and neither `clauth start` nor
+`clauth mcp` does. With the daemon stopped, caches refresh **only while somebody has the TUI open**
+(measured 2026-09-09: bursts, then monotonic ageing to 20 minutes). Anything that ranks accounts on
+those numbers has to treat a stale reading as *unknown* rather than as agreement — which the picker
+does: past `CLAUDE_PICK_CACHE_MAX_AGE` (3600 s) a profile is class `unknown` and ranks after every
+measured candidate, still choosable when nothing else is left. `claude-doctor` prints the oldest
+cache age on every run for the same reason, and `claude-pick --explain` shows the age it ranked
+each candidate on. The threshold stays at 3600 rather than the planned 900 so that a daemon outage
+degrades the ranking instead of blanking it.
 
 **Which account a launch takes, without launching:** `claude-pick` prints the profile a directory
 would bill, `--explain` adds the per-candidate table (class, 5h, 7d, cache age, holders, score,

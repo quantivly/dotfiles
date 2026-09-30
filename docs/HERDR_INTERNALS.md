@@ -288,8 +288,9 @@ Gotchas, in the order they bite:
   passes `--settings '{"teammateMode":"tmux"}'` so teammates become herdr panes. Whether teams are
   enabled at all depends on the flag *reaching the process* — a contaminated server hands it to
   everyone, and such a session leads a team whose teammates run in-process, invisible to herdr
-  (INFERRED from Claude Code's default `teammateMode`; not observed). Team leads need
-  `clauth <profile>` then `claude`; prove it with `herdr pane process-info --pane <id>` showing
+  (INFERRED from Claude Code's default `teammateMode`; not observed). Team leads use
+  `claude-as <profile>` (the 2026-09-09 correction in HERDR_GUIDE §4: a global switch under live
+  sessions is the 09-06 logout class); prove it with `herdr pane process-info --pane <id>` showing
   `teammateMode`, not with `command -v tmux`.
 - **`herdr plugin link` state is herdr-local** and is not restored by herdr-lazy after a rebuild.
 - **If you spawn agents or panes, CLOSE THEM when their work is collected.** This is not tidiness
