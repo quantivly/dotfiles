@@ -27,6 +27,13 @@
 #   * A 401 is `unknown`, not a retry and not a refresh. A 429 is honoured: the
 #     server's `retry-after` is written to the sidecar and the account is
 #     skipped until it lapses (clauth #83 is what polling through a 429 costs).
+#     An absent or zero `retry-after` is floored at 60 s: the first armed run
+#     (2026-09-30) got `retry-after: 0` on six of nine profiles, and a sidecar
+#     that lapses at once makes the next run repeat the burst.
+#   * Requests to the one host are paced: `CLAUDE_USAGE_POLL_GAP` seconds
+#     (default 3) between profiles, because every OAuth account hits the same
+#     host and nine back-to-back GETs tripped its burst limit while clauth's
+#     paced fetches beside them did not.
 #   * A symlinked account dir (a compat alias) is skipped — the target is
 #     polled under its own name (the DO-604 rule). A `*.retired-*` dir is
 #     skipped by name: its credential has no profile store behind it (DO-788).
@@ -37,6 +44,8 @@
 #                or $CLAUDE_ACCOUNT_DIRS_ROOT)
 #     --url      usage endpoint (default the Anthropic one; tests point it at a stub)
 #     --dry-run  read and decide, write nothing, send nothing
+#     --gap SEC  seconds between two profiles' requests (default 3, or
+#                $CLAUDE_USAGE_POLL_GAP); 0 only in a test against a stub
 #   Exit: 0 every profile handled (whatever its state); 2 could not run (no jq
 #   or curl, root unreadable) — never a pass.
 #   State table: scripts/test-claude-usage-poll.sh.
@@ -44,12 +53,14 @@ set -euo pipefail
 
 ROOT="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
 URL="${CLAUDE_USAGE_POLL_URL:-https://api.anthropic.com/api/oauth/usage}"
+GAP="${CLAUDE_USAGE_POLL_GAP:-3}"
 DRY=0
 while (( $# )); do
   case "$1" in
     --root) ROOT="$2"; shift 2 ;;
     --url) URL="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
+    --gap) GAP="$2"; shift 2 ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) printf 'claude-usage-poll: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -59,6 +70,9 @@ for tool in jq curl; do
   command -v "$tool" >/dev/null 2>&1 || { printf 'claude-usage-poll: %s not found — could not run\n' "$tool" >&2; exit 2; }
 done
 [[ -d "$ROOT" && -r "$ROOT" ]] || { printf 'claude-usage-poll: account-dir root %s unreadable — could not run\n' "$ROOT" >&2; exit 2; }
+[[ "$GAP" =~ ^[0-9]+$ ]] || { printf 'claude-usage-poll: --gap must be a whole number of seconds — could not run\n' >&2; exit 2; }
+RETRY_FLOOR=60
+sent=0   # requests made this run; the gap is slept BEFORE every request but the first
 
 # The User-Agent Claude Code sends, so the endpoint sees the client it expects
 # (clauth's src/usage/fetch.rs builds the same string). Falls back to the bare
@@ -136,6 +150,7 @@ for dir in "$ROOT"/*; do
     : > "$hdr"; unknown "$dir" "credential has no accessToken"; printf '%s: unknown (no accessToken)\n' "$name"; continue
   fi
   : > "$body"; : > "$resp_hdr"
+  (( sent > 0 && GAP > 0 )) && sleep "$GAP"; sent=$((sent + 1))
   code="$(curl -sS --max-time 20 -o "$body" -D "$resp_hdr" -w '%{http_code}' \
           -H @"$hdr" -H 'Accept: application/json, text/plain, */*' \
           -H 'Content-Type: application/json' -H 'anthropic-beta: oauth-2025-04-20' \
@@ -156,6 +171,7 @@ for dir in "$ROOT"/*; do
       # mawk has no IGNORECASE; lower-case the field name instead.
       ra="$(awk 'tolower($1)=="retry-after:" {gsub("\r","",$2); print $2; exit}' "$resp_hdr")"
       [[ "$ra" =~ ^[0-9]+$ ]] || ra=300
+      (( ra < RETRY_FLOOR )) && ra=$RETRY_FLOOR
       until_ms=$(( $(now_ms) + ra * 1000 ))
       tmp="$(mktemp "$dir/.usage.retry-after.XXXXXX")"; chmod 600 "$tmp"; printf '%s\n' "$until_ms" > "$tmp"; mv -f "$tmp" "$dir/.usage.retry-after"
       unknown "$dir" "429; retry-after ${ra}s honoured"; printf '%s: unknown (429, retry in %ss)\n' "$name" "$ra" ;;

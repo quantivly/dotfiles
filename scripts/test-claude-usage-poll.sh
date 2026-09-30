@@ -30,9 +30,10 @@ LOG, PORTFILE = sys.argv[1], sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _log(self, verb):
+        import time
         tok = self.headers.get('Authorization', '').replace('Bearer ', '')
         with open(LOG, 'a') as f:
-            f.write(f"{verb} {tok} ua={self.headers.get('User-Agent','')} beta={self.headers.get('anthropic-beta','')}\n")
+            f.write(f"{verb} {tok} ua={self.headers.get('User-Agent','')} beta={self.headers.get('anthropic-beta','')} t={time.monotonic():.3f}\n")
         return tok
     def do_GET(self):
         tok = self._log('GET')
@@ -44,6 +45,8 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(401); self.end_headers(); self.wfile.write(b'{"error":"unauthorized"}')
         elif tok == 'fake-429':
             self.send_response(429); self.send_header('Retry-After', '7'); self.end_headers(); self.wfile.write(b'{}')
+        elif tok == 'fake-429z':
+            self.send_response(429); self.send_header('Retry-After', '0'); self.end_headers(); self.wfile.write(b'{}')
         elif tok == 'fake-bad':
             self.send_response(200); self.end_headers(); self.wfile.write(b'not json')
         else:
@@ -65,6 +68,7 @@ seed() { mkdir -p "$ROOT/$1"; printf '{"claudeAiOauth":{"accessToken":"%s","refr
 seed ok      fake-ok  "$future"
 seed denied  fake-401 "$future"
 seed limited fake-429 "$future"
+seed burst   fake-429z "$future"
 seed garbled fake-bad "$future"
 seed expired fake-exp "$past"
 mkdir -p "$ROOT/stub"; printf '{"claudeAiOauth":{"accessToken":"","scopes":[]}}\n' > "$ROOT/stub/.credentials.json"; chmod 600 "$ROOT/stub/.credentials.json"
@@ -88,7 +92,7 @@ check "dry-run wrote no usage.json"                                     "$(find 
 check "dry-run sent no request"                                         "$(wc -l < "$STUB_LOG")" "0"
 
 echo "=== one live run ==="
-OUT="$("$SUT" --root "$ROOT" --url "$URL" 2>&1)"; RC=$?
+OUT="$("$SUT" --root "$ROOT" --url "$URL" --gap 0 2>&1)"; RC=$?
 check "a full run exits 0 whatever the states"                          "$RC" "0"
 check "200: state ok"                                                   "$(state ok)" "ok"
 check "200: the raw reply is kept (five_hour.utilization)"              "$(jq -r '.five_hour.utilization' "$ROOT/ok/usage.json")" "12.5"
@@ -105,6 +109,7 @@ check "429: state unknown"                                              "$(state
 # never wrote the file made the bare arithmetic error out and the row vanish).
 sidecar_future() { [[ -r "$ROOT/limited/.usage.retry-after" ]] || { echo absent; return; }; (( $(tr -dc '0-9' < "$ROOT/limited/.usage.retry-after") > $(date +%s)000 )) && echo future || echo past; }
 check "429: retry-after sidecar written with a future instant"          "$(sidecar_future)" "future"
+check "a zero retry-after is floored: sidecar at least 60 s out"        "$( [[ -r "$ROOT/burst/.usage.retry-after" ]] && (( $(tr -dc '0-9' < "$ROOT/burst/.usage.retry-after") >= $(date +%s)000 + 55000 )) && echo floored || echo not )" "floored"
 check "malformed 200: state unknown"                                    "$(state garbled)" "unknown"
 check "malformed 200: the reason says so"                               "$(reason garbled | grep -c 'not a JSON object')" "1"
 check "expired token: state unknown"                                    "$(state expired)" "unknown"
@@ -115,25 +120,36 @@ check "a dir with no credential is skipped"                             "$(grep 
 check "a retired dir is skipped by name: no request, no file"           "$(grep -c '^old.retired-20260917: skipped (retired)' <<<"$OUT")/$(hits fake-ret)/$( [ -e "$ROOT/old.retired-20260917/usage.json" ] && echo file || echo nofile )" "1/0/nofile"
 
 echo "=== a second run honours the 429 sidecar ==="
-OUT="$("$SUT" --root "$ROOT" --url "$URL" 2>&1)"
+OUT="$("$SUT" --root "$ROOT" --url "$URL" --gap 0 2>&1)"
 check "rate-limited profile is skipped while retry-after stands"        "$(grep -c '^limited: skipped (rate-limited' <<<"$OUT")" "1"
 check "...so the server saw it once"                                    "$(hits fake-429)" "1"
 check "the others were polled again"                                    "$(hits fake-ok)" "2"
 
+echo "=== requests to one host are paced ==="
+# A sleep is a lower bound, so the gap between consecutive requests is at least
+# --gap; measured from the stub's own clock, not the suite's. The sidecars are
+# cleared first so every eligible profile is polled in this pass.
+rm -f "$ROOT"/*/.usage.retry-after; : > "$STUB_LOG"
+"$SUT" --root "$ROOT" --url "$URL" --gap 1 >/dev/null 2>&1
+check "with --gap 1, no two requests are closer than one second"        "$(awk -F't=' '/^GET/ {if (prev != "" && $2 - prev < 1.0) bad++; prev = $2} END {print bad + 0}' "$STUB_LOG")" "0"
+check "...and every eligible profile was still polled"                  "$(grep -c '^GET' "$STUB_LOG")" "5"
+OUT="$("$SUT" --root "$ROOT" --url "$URL" --gap x 2>&1)"; RC=$?
+check "a non-numeric --gap is could-not-run, exit 2"                    "$RC" "2"
+
 echo "=== no response ==="
-OUT="$("$SUT" --root "$ROOT" --url "http://127.0.0.1:1/closed" 2>&1)"
+OUT="$("$SUT" --root "$ROOT" --url "http://127.0.0.1:1/closed" --gap 0 2>&1)"
 check "a refused connection is unknown, not a crash"                    "$(state ok)/$(reason ok | grep -c 'no response')" "unknown/1"
 
 echo "=== canary: no token in any output or written file ==="
 leak=0
-for tok in fake-ok fake-401 fake-429 fake-bad fake-exp fake-ret; do
+for tok in fake-ok fake-401 fake-429 fake-429z fake-bad fake-exp fake-ret; do
   grep -rq -- "$tok" "$ROOT"/*/usage.json "$ROOT"/*/.usage.retry-after 2>/dev/null && leak=$((leak + 1))
 done
 check "no fixture token in any file the poller wrote"                   "$leak" "0"
-check "no fixture token in the poller's output"                         "$(grep -c -E 'fake-(ok|401|429|bad|exp|ret)' <<<"$OUT")" "0"
+check "no fixture token in the poller's output"                         "$(grep -c -E 'fake-(ok|401|429|429z|bad|exp|ret)' <<<"$OUT")" "0"
 
 # --- the row total, and the count this suite is documented as running --------
-EXPECTED_ROWS=35
+EXPECTED_ROWS=39
 docs_claim() {
   local f="$DOTFILES/$1"
   [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }

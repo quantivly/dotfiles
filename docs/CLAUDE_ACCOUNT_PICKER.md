@@ -1113,7 +1113,10 @@ written most recently. `mktemp` now, and the comment says why.
 the headers Claude Code sends, and writes `usage.json` beside the credential: the raw reply plus
 `fetched_at` (epoch ms). It never refreshes a token (a refresh spends the single-use refresh
 token under a live session — the 09-06 logout class), writes `unknown` on a 401 or an expired
-access token, honours a 429's `retry-after` through a `.usage.retry-after` sidecar, skips alias
+access token, honours a 429's `retry-after` through a `.usage.retry-after` sidecar (floored at
+60 s: the first armed run got `retry-after: 0` on six of nine profiles), paces requests to the
+one host `CLAUDE_USAGE_POLL_GAP` seconds apart (default 3; nine back-to-back GETs tripped a
+burst limit that clauth's paced fetches beside them did not), skips alias
 symlinks and `*.retired-*` dirs, and passes the bearer to curl through a 0600 file, never argv. **Nothing reads
 `usage.json` yet**: the picker, the gate, rabota and herdr-draft still rank on clauth's
 `usage_cache.json`. The point is a week of side-by-side readings, which is the one measurement
@@ -1122,7 +1125,7 @@ side by side per profile (DO-787): agreement is a ✓, a gap past five points a 
 poll a note with its reason, no poll output a note naming the timer to arm. The units are linked by `install.conf.yaml` and **not enabled**: arm the
 timer by hand with `systemctl --user enable --now claude-usage-poll.timer`.
 
-State table: `scripts/test-claude-usage-poll.sh` (35 checks, in CI as `usage-poll-test`) —
+State table: `scripts/test-claude-usage-poll.sh` (39 checks, in CI as `usage-poll-test`) —
 a loopback stub answers by fixture token, and the last two rows are a canary asserting no
 fixture token reached stdout or any file the poller wrote. The suite found the clock defect on
 this box: `date +%s%3N` returns nanoseconds with the precision digit dropped, so `fetched_at`
