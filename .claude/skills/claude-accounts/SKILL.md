@@ -6,7 +6,8 @@ description: >
   claude.ai connectors disconnecting or returning unauthorized; (3) a session billing the
   wrong account, or the sidebar naming an account that does not match; (4) clauth reporting
   auth_broken or quarantining a profile; (5) deciding whether it is safe to run
-  `clauth switch <profile>`. Use when working in the dotfiles repo on any of these, or when editing
+  `clauth switch <profile>`; (6) adding a new account to a pool, or moving sessions off a
+  seat whose window is spent. Use when working in the dotfiles repo on any of these, or when editing
   zsh/functions/claude.sh, zsh/zshrc.herdr's claude() / picker code, or
   scripts/claude-account-dirs.sh. Do NOT use for GitHub account routing (that is
   gh-doctor), for herdr pane or workspace control (see the herdr skill), or for general
@@ -67,5 +68,5 @@ credential, answered from `$CLAUDE_CONFIG_DIR`. The daemon logs to the **journal
 |---|---|
 | [docs/CLAUDE_ACCOUNTS.md](../../../docs/CLAUDE_ACCOUNTS.md) | you need the mechanism or the incident record behind any rule above |
 | [docs/CLAUDE_ACCOUNT_PICKER.md](../../../docs/CLAUDE_ACCOUNT_PICKER.md) | the question is *which* account, not whether it works |
-| [docs/CLAUDE_ACCOUNT_MCP.md](../../../docs/CLAUDE_ACCOUNT_MCP.md) | you are at the click-through step: connector cleanup, reviving a dead stdio server |
+| [docs/CLAUDE_ACCOUNT_MCP.md](../../../docs/CLAUDE_ACCOUNT_MCP.md) | you are at the click-through step: connector cleanup, reviving a dead stdio server — or adding an account, or moving sessions off a spent seat (§5, "Adding an account to the pool") |
 | [docs/CLAUDE_SETUP.md](../../../docs/CLAUDE_SETUP.md) | a plugin or MCP server is enabled in the wrong scope |
