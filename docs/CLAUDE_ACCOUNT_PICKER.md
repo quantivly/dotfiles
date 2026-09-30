@@ -1114,14 +1114,14 @@ the headers Claude Code sends, and writes `usage.json` beside the credential: th
 `fetched_at` (epoch ms). It never refreshes a token (a refresh spends the single-use refresh
 token under a live session — the 09-06 logout class), writes `unknown` on a 401 or an expired
 access token, honours a 429's `retry-after` through a `.usage.retry-after` sidecar, skips alias
-symlinks, and passes the bearer to curl through a 0600 file, never argv. **Nothing reads
+symlinks and `*.retired-*` dirs, and passes the bearer to curl through a 0600 file, never argv. **Nothing reads
 `usage.json` yet**: the picker, the gate, rabota and herdr-draft still rank on clauth's
 `usage_cache.json`. The point is a week of side-by-side readings, which is the one measurement
 the 2026-09-29 account-manager comparison said was missing; a doctor row that diffs the two per
 profile is DO-787. The units are linked by `install.conf.yaml` and **not enabled**: arm the
 timer by hand with `systemctl --user enable --now claude-usage-poll.timer`.
 
-State table: `scripts/test-claude-usage-poll.sh` (34 checks, in CI as `usage-poll-test`) —
+State table: `scripts/test-claude-usage-poll.sh` (35 checks, in CI as `usage-poll-test`) —
 a loopback stub answers by fixture token, and the last two rows are a canary asserting no
 fixture token reached stdout or any file the poller wrote. The suite found the clock defect on
 this box: `date +%s%3N` returns nanoseconds with the precision digit dropped, so `fetched_at`
