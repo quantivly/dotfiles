@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+#
+# scripts/claude-usage-poll — a SHADOW usage poller for the per-account config dirs.
+# ==================================================================================
+#
+# For every real directory under the account-dir root that holds a readable
+# credential file, read the login's access token, GET the usage endpoint with
+# the headers Claude Code sends, and write `usage.json` beside the credential:
+# the raw reply plus `fetched_at` (epoch ms). Nothing reads that file yet — the
+# picker, the gate, rabota and herdr-draft all still rank on clauth's
+# `usage_cache.json` — which is the point: a week of side-by-side readings is
+# the measurement the account-manager comparison (2026-09-29) said was missing.
+#
+# What this deliberately does NOT do, and why each is a rule rather than a gap:
+#
+#   * It never refreshes a token. A refresh spends the single-use refresh token
+#     and rotates the pair; with a live session holding the same file that is
+#     the 09-06 logout class (docs/CLAUDE_ACCOUNTS.md, "a third party writing
+#     a superseded credential"). An expired access token reads as `unknown`,
+#     and the next session on that account refreshes it.
+#   * It never writes anything but `usage.json` and its `.usage.retry-after`
+#     sidecar, both beside the credential, both 0600, via temp file + rename.
+#   * It never prints a token. The bearer reaches curl through a 0600 header
+#     file under $XDG_RUNTIME_DIR (or a private mkdtemp), never argv — a token
+#     on argv is readable from /proc by any process as this user, which is the
+#     shape claude/hooks/secret-emission-guard.sh refuses `ps` for.
+#   * A 401 is `unknown`, not a retry and not a refresh. A 429 is honoured: the
+#     server's `retry-after` is written to the sidecar and the account is
+#     skipped until it lapses (clauth #83 is what polling through a 429 costs).
+#   * A symlinked account dir (a compat alias) is skipped — the target is
+#     polled under its own name (the DO-604 rule).
+#
+# Usage:
+#   claude-usage-poll [--root DIR] [--url URL] [--dry-run]
+#     --root     account-dir root (default ~/.local/state/claude-account-dirs,
+#                or $CLAUDE_ACCOUNT_DIRS_ROOT)
+#     --url      usage endpoint (default the Anthropic one; tests point it at a stub)
+#     --dry-run  read and decide, write nothing, send nothing
+#   Exit: 0 every profile handled (whatever its state); 2 could not run (no jq
+#   or curl, root unreadable) — never a pass.
+#   State table: scripts/test-claude-usage-poll.sh.
+set -euo pipefail
+
+ROOT="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
+URL="${CLAUDE_USAGE_POLL_URL:-https://api.anthropic.com/api/oauth/usage}"
+DRY=0
+while (( $# )); do
+  case "$1" in
+    --root) ROOT="$2"; shift 2 ;;
+    --url) URL="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    *) printf 'claude-usage-poll: unknown argument %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+for tool in jq curl; do
+  command -v "$tool" >/dev/null 2>&1 || { printf 'claude-usage-poll: %s not found — could not run\n' "$tool" >&2; exit 2; }
+done
+[[ -d "$ROOT" && -r "$ROOT" ]] || { printf 'claude-usage-poll: account-dir root %s unreadable — could not run\n' "$ROOT" >&2; exit 2; }
+
+# The User-Agent Claude Code sends, so the endpoint sees the client it expects
+# (clauth's src/usage/fetch.rs builds the same string). Falls back to the bare
+# product when no claude is on PATH.
+cc_ver="$(command claude --version 2>/dev/null | awk 'NR==1{print $1}')" || cc_ver=""
+UA="claude-cli"; [[ "$cc_ver" =~ ^[0-9] ]] && UA="claude-cli/${cc_ver} (external, cli)"
+
+# Epoch milliseconds. Never `%3N`: the coreutils here (uutils on this Ubuntu)
+# expand it as nanoseconds and drop the precision digit, so the stamp came out
+# 19 digits long and every fixture read as expired (measured 2026-09-30). Slice
+# a `%N` reading; where `%N` is not expanded at all, fall back to whole seconds.
+now_ms() {
+  local s; s="$(date +%s%N)"
+  if [[ "$s" =~ ^[0-9]{19}$ ]]; then printf '%s' "${s:0:13}"; else printf '%s' "$(( $(date +%s) * 1000 ))"; fi
+}
+
+# 0600 from birth, in a private directory, never /tmp.
+priv="${XDG_RUNTIME_DIR:-}"
+if [[ -z "$priv" || ! -d "$priv" || ! -w "$priv" ]]; then priv="$(mktemp -d)"; fi
+hdr="$(mktemp "$priv/claude-usage-poll.XXXXXX")"; chmod 600 "$hdr"
+body="$(mktemp "$priv/claude-usage-poll.XXXXXX")"; chmod 600 "$body"
+resp_hdr="$(mktemp "$priv/claude-usage-poll.XXXXXX")"; chmod 600 "$resp_hdr"
+cleanup() { rm -f "$hdr" "$body" "$resp_hdr"; }
+trap cleanup EXIT
+
+# write_json DIR JSON — temp file + rename, 0600, beside the credential.
+write_json() {
+  local dir="$1" json="$2" tmp
+  (( DRY )) && return 0
+  tmp="$(mktemp "$dir/.usage.json.XXXXXX")"; chmod 600 "$tmp"
+  printf '%s\n' "$json" > "$tmp" && mv -f "$tmp" "$dir/usage.json"
+}
+
+# unknown DIR REASON — the reading nobody should rank on.
+unknown() {
+  write_json "$1" "$(jq -cn --arg r "$2" --argjson t "$(now_ms)" '{state:"unknown", reason:$r, fetched_at:$t}')"
+}
+
+for dir in "$ROOT"/*; do
+  name="${dir##*/}"
+  # A symlink is an alias (personal -> personal-0, quantivly-2 -> quantivly-1):
+  # the target is polled under its own name. `-d` follows links; test the link first.
+  if [[ -L "$dir" ]]; then printf '%s: skipped (alias -> %s)\n' "$name" "$(basename "$(readlink "$dir")")"; continue; fi
+  [[ -d "$dir" ]] || continue
+  cred="$dir/.credentials.json"
+  [[ -r "$cred" ]] || { printf '%s: skipped (no readable credential)\n' "$name"; continue; }
+
+  # 429 sidecar: skip until the server's retry-after lapses.
+  if [[ -r "$dir/.usage.retry-after" ]]; then
+    until_ms="$(tr -dc '0-9' < "$dir/.usage.retry-after")"
+    if [[ -n "$until_ms" ]] && (( until_ms > $(now_ms) )); then
+      printf '%s: skipped (rate-limited for %ss more)\n' "$name" "$(( (until_ms - $(now_ms)) / 1000 ))"; continue
+    fi
+    (( DRY )) || rm -f "$dir/.usage.retry-after"
+  fi
+
+  # Expiry, read once. A credential with no expiresAt is a discovery stub
+  # (CLAUDE_ACCOUNTS.md, the 2026-09-06 correction) and reads as unknown.
+  exp_ms="$(jq -r '.claudeAiOauth.expiresAt // empty' "$cred" 2>/dev/null || true)"
+  if [[ ! "$exp_ms" =~ ^[0-9]+$ ]]; then
+    unknown "$dir" "credential has no expiresAt (discovery stub or unreadable)"; printf '%s: unknown (no expiresAt)\n' "$name"; continue
+  fi
+  if (( exp_ms <= $(now_ms) )); then
+    unknown "$dir" "access token expired; this poller never refreshes"; printf '%s: unknown (expired; a session must refresh it)\n' "$name"; continue
+  fi
+  if (( DRY )); then printf '%s: would GET %s\n' "$name" "$URL"; continue; fi
+
+  # The bearer goes to curl through a 0600 file, never argv, never stdout.
+  { printf 'Authorization: Bearer '; jq -r '.claudeAiOauth.accessToken // empty' "$cred"; } > "$hdr"
+  if (( $(wc -c < "$hdr") <= 22 )); then
+    : > "$hdr"; unknown "$dir" "credential has no accessToken"; printf '%s: unknown (no accessToken)\n' "$name"; continue
+  fi
+  : > "$body"; : > "$resp_hdr"
+  code="$(curl -sS --max-time 20 -o "$body" -D "$resp_hdr" -w '%{http_code}' \
+          -H @"$hdr" -H 'Accept: application/json, text/plain, */*' \
+          -H 'Content-Type: application/json' -H 'anthropic-beta: oauth-2025-04-20' \
+          -A "$UA" "$URL" 2>/dev/null)" || code="000"
+  : > "$hdr"
+
+  case "$code" in
+    200)
+      if jq -e 'type == "object"' "$body" >/dev/null 2>&1; then
+        write_json "$dir" "$(jq -c --argjson t "$(now_ms)" '. + {state:"ok", fetched_at:$t, source:"claude-usage-poll"}' "$body")"
+        printf '%s: ok\n' "$name"
+      else
+        unknown "$dir" "200 with a body that is not a JSON object"; printf '%s: unknown (malformed 200)\n' "$name"
+      fi ;;
+    401)
+      unknown "$dir" "401 from the usage endpoint; not refreshed by design"; printf '%s: unknown (401)\n' "$name" ;;
+    429)
+      # mawk has no IGNORECASE; lower-case the field name instead.
+      ra="$(awk 'tolower($1)=="retry-after:" {gsub("\r","",$2); print $2; exit}' "$resp_hdr")"
+      [[ "$ra" =~ ^[0-9]+$ ]] || ra=300
+      until_ms=$(( $(now_ms) + ra * 1000 ))
+      tmp="$(mktemp "$dir/.usage.retry-after.XXXXXX")"; chmod 600 "$tmp"; printf '%s\n' "$until_ms" > "$tmp"; mv -f "$tmp" "$dir/.usage.retry-after"
+      unknown "$dir" "429; retry-after ${ra}s honoured"; printf '%s: unknown (429, retry in %ss)\n' "$name" "$ra" ;;
+    000)
+      unknown "$dir" "no response (network or timeout)"; printf '%s: unknown (no response)\n' "$name" ;;
+    *)
+      unknown "$dir" "HTTP $code"; printf '%s: unknown (HTTP %s)\n' "$name" "$code" ;;
+  esac
+done

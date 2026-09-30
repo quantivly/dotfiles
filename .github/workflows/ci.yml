@@ -190,6 +190,27 @@ jobs:
       - name: Run the hspawn state table
         run: ./scripts/test-hspawn.sh
 
+  usage-poll-test:
+    name: Shadow Usage Poller State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
+
+      # The poller reads access tokens and talks to an endpoint, which is two ways
+      # for a defect to be invisible: a token that leaks into a file or a log, and a
+      # refresh that logs every session on the account out. The suite drives it
+      # against a loopback stub that answers by fixture token (200, 401, 429 with
+      # Retry-After, malformed) and ends with a canary row asserting no fixture
+      # token reached stdout or any written file. Needs python3, curl and jq.
+      - name: Run the shadow usage poller state table
+        run: ./scripts/test-claude-usage-poll.sh
+
   pane-reaper-test:
     name: pane-reaper Plugin State Table
     runs-on: ubuntu-latest

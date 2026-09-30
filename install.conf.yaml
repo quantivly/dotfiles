@@ -107,6 +107,12 @@
     # SKIP it on a machine that has no such thing, which is not a failure.
     ~/.config/systemd/user/wt-gc-sweep.service: systemd/wt-gc-sweep.service
     ~/.config/systemd/user/wt-gc-sweep.timer: systemd/wt-gc-sweep.timer
+    # Shadow usage poller (DO-786): reads each account dir's access token and writes
+    # usage.json beside it, never refreshes, nothing reads it yet. Linked, NOT enabled —
+    # it reads credentials, so arming it is a hand decision:
+    #   systemctl --user enable --now claude-usage-poll.timer
+    ~/.config/systemd/user/claude-usage-poll.service: systemd/claude-usage-poll.service
+    ~/.config/systemd/user/claude-usage-poll.timer: systemd/claude-usage-poll.timer
     # Daily scrub of credentials out of Claude Code transcripts. Linked, NOT
     # enabled, for the same reason as wt-gc-sweep above and one of its own: it
     # rewrites session transcripts unattended, which is the exact act the Claude
