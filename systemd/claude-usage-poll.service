@@ -1,0 +1,16 @@
+# Shadow usage poller (DO-786): reads each account dir's access token, GETs the
+# usage endpoint, writes usage.json beside the credential. Never refreshes a
+# token, never touches clauth's store, and nothing reads its output yet — the
+# week of side-by-side readings against clauth's usage_cache.json is the point.
+# Linked by install.conf.yaml, NOT enabled by it: it reads credentials, so the
+# decision to run it is made by hand, once —
+#   systemctl --user enable --now claude-usage-poll.timer
+# — and undone with disable --now. Its log is the journal.
+[Unit]
+Description=Shadow poll of Claude usage per account dir (DO-786)
+ConditionPathIsDirectory=%h/.local/state/claude-account-dirs
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/scripts/claude-usage-poll
+TimeoutStartSec=90
