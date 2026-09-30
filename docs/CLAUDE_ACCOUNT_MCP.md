@@ -413,7 +413,9 @@ that put the new seat 14,050 points ahead, roughly fifty sessions' worth, so eve
 session restored after the reboot landed on it. Sessions keep the seat they
 launched on. So the new seat's 5h window was spent the next morning while two
 sibling seats sat at 0%, and every session on it stopped at the same moment.
-`claude-doctor`'s concurrency section shows the count. See
+Until [DO-792](https://linear.app/quantivly/issue/DO-792) changes the weights,
+expect this after every seat added mid-week. `claude-doctor`'s concurrency
+section shows the count. See
 [Moving sessions off a spent seat](#moving-sessions-off-a-spent-seat) below.
 
 ### Moving sessions off a spent seat
