@@ -282,10 +282,17 @@ class SyncTests(unittest.TestCase):
     def test_sync_fireflies_actually_uses_the_derived_window(self):
         # Not just `fireflies_since` in isolation -- `sync_fireflies` must pass its result to the
         # client. Revert `sync_fireflies` to its old `datetime.now(...) - timedelta(days=2)` to see
-        # this row fail: with "now" being whenever the suite actually runs, a fixed 2-day window
-        # lands long after this anchor, while the derived window must not.
+        # this row fail: a fixed 2-day window lands after an anchor 5 days old, while the derived
+        # window must not.
+        #
+        # The anchor is RELATIVE TO THE REAL CLOCK, because `sync_fireflies` reads that clock and
+        # clamps to `now - FIREFLIES_LOOKBACK_MAX_DAYS`. A fixed date ages out of the clamp: this
+        # row used "2026-09-19T16:00:00Z" and began failing on every branch, main included, once
+        # that date was more than 14 days old (2026-10-03). Five days sits between the 2-day
+        # fallback and the 14-day bound, so the row still tells the two windows apart.
         ctx = self.ctx()
-        self._write_classified(ctx, "2026-09-19T16:00:00Z")
+        anchor = (datetime.now(timezone.utc) - timedelta(days=5)).replace(microsecond=0)
+        self._write_classified(ctx, anchor.isoformat().replace("+00:00", "Z"))
         seen = {}
 
         class RecordingFf(FakeFf):
@@ -294,7 +301,7 @@ class SyncTests(unittest.TestCase):
                 return super().recent_transcripts(since)
 
         sync.sync_fireflies(ctx, RecordingFf())
-        self.assertLessEqual(seen["since"], datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc))
+        self.assertLessEqual(seen["since"], anchor)
 
     def test_no_classification_record_falls_back_to_the_newest_day_scoped_last_brief(self):
         # DO-761's own fallback #2: no `fireflies-classified.json` yet, but a day-scoped
