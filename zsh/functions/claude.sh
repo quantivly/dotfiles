@@ -679,8 +679,8 @@ _claude_doctor_pools() {
   local line t m ref k v va vb kv lnk otype ouuid p id disp n_issue
   local -a lines members valid swap_diff other_diff unknown_org no_id
   local -A cfg_ref cfg_m seen_ids keys otypes ouuids
-  # clauth's defaults for the keys whose ABSENCE means a value (agent read of
-  # ProfileConfig at v0.16.0). Without them, a file that leaves a key out and one
+  # clauth's defaults for the keys whose ABSENCE means a value (`ProfileConfig`,
+  # profile.rs, clauth v0.16.0). Without them, a file that leaves a key out and one
   # that spells out the default would read as a difference.
   local -A dflt=( disabled false auto_start false fallback_threshold 95
                   check_weekly true check_scoped true rolling_token false
