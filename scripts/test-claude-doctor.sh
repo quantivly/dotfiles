@@ -2791,6 +2791,15 @@ run_doctor
 want_out "a dotted key with a trailing comment reads the same as a [models] table" \
          "2 members agree on every setting a move compares"
 
+# The comment above sits after a QUOTED value, which the quoted branch already
+# ends at its closing quote. This one is unquoted, which is where the strip works.
+new_home w8b; write_cred
+mk_seat a "auto_start = true # warm the window
+$M1"; mk_seat b "auto_start = true
+$M1"; mk_tenants "$POOL_AB"
+run_doctor
+no_out "a trailing comment on an unquoted value is not part of it" "differs from 'a'"
+
 new_home w9; write_cred
 mk_seat a '[models]
 default = "opus"
@@ -2802,6 +2811,15 @@ default = "opus"'; mk_tenants "$POOL_AB"
 run_doctor
 want_out "the same key under two tables is two keys, in either order" \
          "2 members agree on every setting a move compares"
+
+# An array of tables is not a profile setting clauth compares, and must not be
+# read as a `[`-table whose name starts with a bracket.
+new_home w9b; write_cred
+mk_seat a "$M1
+[[presets]]
+name = \"x\""; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+run_doctor
+no_out "an array of tables is skipped, not read as a setting" "differs from 'a'"
 
 # --- pool members that are not usable profiles --------------------------------
 new_home w10; write_cred
@@ -2861,6 +2879,16 @@ mk_seat a "$M1" claude_team org-one; mk_seat b "$M1" claude_team org-one; mk_ten
 run_doctor
 no_out   "one organisation across a team pool is not a finding" "different organisation"
 want_out "...and the pool gets its ✓"                         "2 members agree on every setting a move compares"
+
+# The reference must be a team seat whose organisation is KNOWN. Taking the first
+# team seat regardless made an empty id the yardstick, and every seat with a real
+# one then read as "a different organisation".
+new_home w15c; write_cred
+mk_seat a "$M1" claude_team ''; mk_seat b "$M1" claude_team org-one; mk_seat c "$M1" claude_team org-one
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a b c" )'
+run_doctor
+no_out   "a team seat with no organisation id is not the yardstick" "different organisation"
+want_out "...and is reported as unknown"                            "pool 'w': organisation of a is unknown until its first launch"
 
 new_home w16; write_cred
 mk_seat a "$M1" claude_team org-one; mk_seat b "$M1" claude_max org-two; mk_tenants "$POOL_AB"
@@ -2947,7 +2975,7 @@ no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=388
+EXPECTED_ROWS=392
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
