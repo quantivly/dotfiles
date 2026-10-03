@@ -2987,7 +2987,7 @@ want_out "CRLF line endings are a ✗, not 'no pools'" "did not run cleanly — 
 new_home x3; write_cred
 mk_seat a "$M1"; mk_seat b '[models]
 default = "opus"'
-mk_tenants 'CLAUDE_TENANT_GH_DIR[w]="$HOME/gh"
+mk_tenants 'CLAUDE_TENANT_GH_DIR[w]="/nonexistent/gh"
 typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a b" )'
 run_doctor
 want_out "a sibling table assigned by subscript does not hide the pools" \

@@ -174,8 +174,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`claude-doctor` checks that each account pool's members are real, distinct and swappable
-  (DO-793).** A new `--- Pools ---` section reads the tenant table from the file (what the next
-  launch reads, not the shell's copy). It reports four states that nothing reported before:
+  (DO-793).** A new `--- Pools ---` section reads the tenant table from the file, the way a launch
+  does. That means a clean `zsh -f` with every table declared, where any error makes it a `✗`
+  rather than "no pools". The shell's own copy is not used. It also fails the pool-shaped checks a
+  launch applies: an empty pool that something routes to, and a member with a character the picker
+  rejects. It reports four states that nothing reported before:
   - **a pool member that is not a usable profile.** That covers a compat symlink, a retired name,
     or a name with no store, all of which the picker drops without a word;
   - **two profiles logged in to one account.** `clauth login` has no duplicate check;
@@ -186,7 +189,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **a team pool spanning two organisations**, which is the trace of a login made with the browser
     on the wrong claude.ai account.
 
-  It never prints an account or organisation id, or a value from `[env]` or `api_key`. Retired
+  It never prints an account or organisation id, an api key, or a value from `[env]`, an inline
+  table, or any key it does not know to be harmless. A file that exists and cannot be read is
+  reported as unreadable, never treated as absent. Retired
   account dirs (`<name>.retired-<date>`) now read as tombstones: the doctor no longer advises
   `clauth login <name>.retired-…`, and the reconciler no longer warns about them every two minutes.
   On the live box the section found one pool whose two members differ in `[models].default`.
