@@ -173,6 +173,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`claude-doctor` checks that each account pool's members are real, distinct and swappable
+  (DO-793).** A new `--- Pools ---` section reads the tenant table from the file (what the next
+  launch reads, not the shell's copy). It reports four states that nothing reported before:
+  - **a pool member that is not a usable profile.** That covers a compat symlink, a retired name,
+    or a name with no store, all of which the picker drops without a word;
+  - **two profiles logged in to one account.** `clauth login` has no duplicate check;
+  - **members that differ in a setting clauth's swap check compares** (`env`, any `[models]` field,
+    `base_url`, `disabled`, api-key presence). `clauth switch <sid> <p>` prints success while the
+    daemon refuses the move in its journal, and a fresh `clauth login` starts every new seat in
+    this state;
+  - **a team pool spanning two organisations**, which is the trace of a login made with the browser
+    on the wrong claude.ai account.
+
+  It never prints an account or organisation id, or a value from `[env]` or `api_key`. Retired
+  account dirs (`<name>.retired-<date>`) now read as tombstones: the doctor no longer advises
+  `clauth login <name>.retired-…`, and the reconciler no longer warns about them every two minutes.
+  On the live box the section found one pool whose two members differ in `[models].default`.
+
 - **Block IPv6 egress while the VPN tunnel is up, because the tunnel does not carry it
   (DO-704).** The Client VPN endpoint is `SplitTunnel=False`, but only IPv4 is tunnelled: the
   client installs `0.0.0.0/1` + `128.0.0.0/1` over `tun0` and *nothing* for IPv6, so every v6

@@ -181,6 +181,10 @@ switch. What its findings mean:
 | `stored copy ... DIFFERS` | a switch now can log out every session | wait for clauth's poll, re-run |
 | `N Claude processes ... no lock` | the race is likely at this concurrency | `hreap` and close what you are done with |
 | `configured on BOTH` | duplicate service | §2.3 |
+| `pool '<t>': '<b>' differs from '<a>' in …` | in-place `clauth switch <sid>` between them is refused, in the journal only | make the two `config.toml` files agree (§5, step 3) |
+| `pool '<t>' names '<n>', a compat symlink` / `a retired name` / `which has no clauth profile store` | the picker drops that name without a word | put the real profile's name in the pool, or remove it |
+| `profiles '<a>', '<b>' are logged in to the SAME account` | two names for one seat | `clauth delete` the newer one, and drop it from its pool |
+| `'<b>' is in a different organisation` / `a claude_max account in a pool of team seats` | the login went to the browser's claude.ai account, not the seat | `clauth login <b>` again with the browser on the right account |
 
 ---
 
@@ -350,6 +354,9 @@ account id may repeat:
 sha256sum ~/.clauth/profiles/*/account_id.json | awk '{print $1}' | sort | uniq -d | wc -l   # must print 0
 ```
 
+`claude-doctor`'s `--- Pools ---` section makes the same check on every run, and prints a `✗`
+naming both profiles.
+
 The address shows up only after the first launch, at
 `jq -r .oauthAccount.emailAddress ~/.local/state/claude-account-dirs/<name>/.claude.json`.
 
@@ -363,6 +370,8 @@ model settings differ from the ones it launched with. The refusal shows up only
 in the daemon's journal (`quantivly-3 is not swappable (its model routing differs
 from the launch snapshot)`); the CLI prints `pointed session … at …` either way.
 A session launched on the seat before this step can never be moved in place.
+`claude-doctor`'s `--- Pools ---` section compares every member of a pool on the settings that
+check uses, and prints a `✗` for each difference.
 
 **4. Add it to its tenant's pool.** The tenants file is
 `~/.config/claude-tenants.zsh`, which is data outside this repo. Add the name to
