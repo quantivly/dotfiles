@@ -3123,16 +3123,19 @@ section "X. Plugin MCP sign-ins, per pool member (DO-794)"
 # been signed in to any of the three plugin servers its siblings use.
 
 # Add one mcpOAuth entry to profile $1's STORE. $2 = server name, $3 = state:
-# good | discovery (never signed in) | fossil (lost write) | norefresh | broken.
+# good | discovery (never signed in) | fossil (lost write) | norefresh | noexpiry |
+# broken. $4 = the key's config hash (default h4sh): two hashes give one server
+# two entries, which is what a changed server config leaves behind.
 mk_mcp() {
     local st="$FHOME/.clauth/profiles/$1/credentials.json" tmp
     tmp="$st.tmp"
-    jq --arg s "$2" --arg state "$3" --arg tok "$FAKE_TOKEN" --argjson fut "$FUTURE" '
-      .mcpOAuth = ((.mcpOAuth // {}) + { ($s + "|h4sh"):
+    jq --arg s "$2" --arg state "$3" --arg h "${4:-h4sh}" --arg tok "$FAKE_TOKEN" --argjson fut "$FUTURE" '
+      .mcpOAuth = ((.mcpOAuth // {}) + { ($s + "|" + $h):
         (if   $state == "good"      then {serverName: $s, accessToken: $tok, refreshToken: ($tok + "-r"), expiresAt: $fut, scope: "read"}
          elif $state == "discovery" then {serverName: $s, accessToken: "", clientId: "c", discoveryState: {}}
          elif $state == "fossil"    then {serverName: $s, accessToken: "", expiresAt: $fut, scope: "read"}
          elif $state == "norefresh" then {serverName: $s, accessToken: $tok, expiresAt: $fut}
+         elif $state == "noexpiry"  then {serverName: $s, accessToken: $tok, refreshToken: ($tok + "-r"), scope: "read"}
          else "garbage" end) })' "$st" > "$tmp" && mv -f "$tmp" "$st"
 }
 
@@ -3227,6 +3230,93 @@ mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
 run_doctor
 no_out "a pool where nobody uses a plugin server says nothing about sign-ins" "plugin MCP"
 
+# --- review findings, 2026-10-03: each printed ✓ or nothing over a bad sign-in ---
+# Two entries for one server: EVERY entry counts, in either order. Keyed by name
+# alone, whichever entry jq listed last decided, and a fossil hid behind a ✓.
+new_home z1; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack fossil h0; mk_mcp b plugin:slack:slack good h1
+run_doctor
+want_out "a fossil listed BEFORE a good entry for the same server is a ✗" "'b' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"
+no_out   "...and the pool gets no sign-in ✓"                            "every member is signed in"
+
+new_home z1b; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack good h0; mk_mcp b plugin:slack:slack fossil h1
+run_doctor
+want_out "...and a fossil listed AFTER it is the same ✗" "'b' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"
+
+new_home z2; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack good h0; mk_mcp b plugin:slack:slack discovery h1
+run_doctor
+no_out "a good entry beside a later discovery record is signed in" "'b' is not signed in"
+
+new_home z3; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a" )'
+mk_mcp a plugin:slack:slack fossil
+st="$FHOME/.clauth/profiles/a/credentials.json"
+jq '.mcpOAuth |= with_entries(.value.serverName = "")' "$st" > "$st.tmp" && mv -f "$st.tmp" "$st"
+run_doctor
+want_out "an empty serverName falls back to the key, so damage still shows" "'a' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"
+
+new_home z4; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack noexpiry
+run_doctor
+want_out "a token with no expiry is section 2's ⚠, here too" \
+         "'b' has a plugin MCP sign-in whose expiry is missing or not a number: plugin:slack:slack"
+no_out   "...and the pool gets no sign-in ✓"     "every member is signed in"
+
+# Unreadable is not absent: jq exits 0 on an empty file, and `false // {}` is {}.
+new_home z5; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good
+: > "$FHOME/.clauth/profiles/b/credentials.json"
+run_doctor
+want_out "an EMPTY credential file cannot be read" "cannot read the MCP sign-ins of b — NOT CHECKED"
+no_out   "...and is not called unsigned"           "'b' is not signed in"
+
+new_home z5b; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good
+printf '{"claudeAiOauth":{"accessToken":"x"},"mcpOAuth":false}\n' > "$FHOME/.clauth/profiles/b/credentials.json"
+run_doctor
+want_out "an mcpOAuth of false cannot be read" "cannot read the MCP sign-ins of b — NOT CHECKED"
+
+new_home z5c; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good
+printf 'null\n' > "$FHOME/.clauth/profiles/b/credentials.json"
+run_doctor
+want_out "a credential file that is just null cannot be read" "cannot read the MCP sign-ins of b — NOT CHECKED"
+
+new_home z5d; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good
+printf '{"claudeAiOauth":{"accessToken":"x"},"mcpOAuth":[]}\n' > "$FHOME/.clauth/profiles/b/credentials.json"
+run_doctor
+want_out "an mcpOAuth that is an empty array cannot be read" "cannot read the MCP sign-ins of b — NOT CHECKED"
+
+# The file a session READS: the account dir's, which a lost write replaces first.
+new_home z6; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack good
+ad="$FHOME/.local/state/claude-account-dirs/b"
+rm -f "$ad/.credentials.json"
+jq '.mcpOAuth |= with_entries(.value.accessToken = "")' "$FHOME/.clauth/profiles/b/credentials.json" > "$ad/.credentials.json"
+run_doctor
+want_out "a lost write in the account dir's real file is seen, though the store is good" \
+         "'b' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"
+
+# A seat never launched has no account-dir file: its store is read instead.
+new_home z6b; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack fossil
+rm -f "$FHOME/.local/state/claude-account-dirs/b/.credentials.json"
+run_doctor
+want_out "with no account-dir file, the store is read" "'b' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"
+
 # A referenced tenant WITH members is not flagged. Pins the pool lookup's keys:
 # zsh keeps a bare $'\t' in a SUBSCRIPT literally, which broke this section's own
 # member lookup in its first draft, and would make every referenced pool "empty".
@@ -3262,7 +3352,7 @@ no_out   "...and no longer recommends it"                            "in favour 
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=447
+EXPECTED_ROWS=461
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

@@ -688,9 +688,9 @@ _claude_doctor_pools() {
   local pdir="$HOME/.clauth/profiles"
   local line t m ref k v va vb kv lnk otype ouuid p id disp n_issue raw out cf cj fin=0
   local -a lines members valid swap_diff other_diff unknown_org no_id unread_id
-  local -a ovf refs errs bad_json unread_cfg cmp mbad missing damaged
+  local -a ovf refs errs bad_json unread_cfg cmp mbad missing damaged oddexp
   local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j mstate munion seenk
-  local store kk m_issue sep=$'\x1f'
+  local store kk m_issue st hit sep=$'\x1f'
   # clauth's defaults for the keys whose ABSENCE means a value (`ProfileConfig`,
   # profile.rs, clauth v0.16.0). Without them, a file that leaves a key out and one
   # that spells out the default would read as a difference.
@@ -963,19 +963,42 @@ _claude_doctor_pools() {
     #
     # The yardstick is the pool itself: a plugin server signed in on ANY member is
     # expected on every member. A server nobody in the pool uses is not a gap.
-    # Each entry is classified by section 2's rule. An empty token with no expiry,
-    # scope or refresh token is a DISCOVERY record (never signed in here, not
-    # damage). An empty token that kept them is the fossil of a lost write (damage).
-    # Damage is reported whether or not a sibling uses the server.
     #
-    # Reads names and states only; no token value leaves jq.
+    # WHICH FILE: the one a session on that seat reads, the account dir's
+    # .credentials.json. It is a link into the clauth store, until an atomic write
+    # replaces it with a real file, and a lost write lands THERE first. The store is
+    # read only for a seat that has no account-dir file yet (review, 2026-10-03).
+    #
+    # Each entry is sorted by section 2's discriminator. An empty token with no
+    # expiry, scope or refresh token is a DISCOVERY record: never signed in here,
+    # not damage. An empty token that kept them is the fossil of a lost write, which
+    # IS damage. A token whose expiry is missing or not a number is section 2's ⚠.
+    #
+    # A server can have SEVERAL entries: the key carries a hash of the server's
+    # config, so a config change leaves the old one behind. Every entry counts. The
+    # member is signed in if any entry is good, and damaged if any entry is damaged.
+    # Keying by name alone let whichever entry jq listed last decide.
+    #
+    # Damage is reported whether or not a sibling uses the server. Reads names and
+    # states only; no token value leaves jq.
     mstate=(); munion=(); mbad=(); m_issue=0
     for m in $valid; do
-      store="$pdir/$m/credentials.json"
-      out="$(jq -r '
-        (.mcpOAuth // {}) | to_entries[]
+      store="$adroot/$m/.credentials.json"
+      [[ -e "$store" || -L "$store" ]] || store="$pdir/$m/credentials.json"
+      # Every shape below read as "no sign-ins" until it was refused here, measured:
+      #   - an EMPTY file: a filter runs zero times and jq exits 0, so `input` with -n;
+      #   - a root of null: `null | has(…)` is false, not an error, so the root check;
+      #   - an mcpOAuth of false: `false // {}` is {}, so `has` rather than `//`;
+      #   - an mcpOAuth of []: `[] | to_entries` is empty, so the second type check.
+      out="$(jq -n -r '
+        input
+        | if type != "object" then error("not an object") else . end
+        | (if has("mcpOAuth") then .mcpOAuth else {} end)
+        | if type != "object" then error("mcpOAuth is not an object") else . end
+        | to_entries[]
         | (.key | split("|")[0]) as $k
-        | (if (.value | type) == "object" then (.value.serverName // $k) else $k end) as $s
+        | (if (.value | type) == "object" and (.value.serverName | type) == "string"
+              and .value.serverName != "" then .value.serverName else $k end) as $s
         | select($s | startswith("plugin:"))
         | if (.value | type) != "object" then "\($s)\tbroken"
           else ((.value.accessToken // "") | length == 0) as $empty
@@ -984,6 +1007,7 @@ _claude_doctor_pools() {
             | if $empty and ($meta | not) then "\($s)\tdiscovery"
               elif $empty then "\($s)\tfossil"
               elif $noref then "\($s)\tnorefresh"
+              elif (.value.expiresAt | type) != "number" then "\($s)\tnoexpiry"
               else "\($s)\tgood" end
           end' "$store" 2>/dev/null)" || { mbad+=( "$m" ); continue; }
       for kv in "${(@f)out}"; do
@@ -991,7 +1015,7 @@ _claude_doctor_pools() {
         # A variable, not $'\t', as the key separator: inside a SUBSCRIPT zsh keeps
         # $'\t' literally, which silently broke the pattern filter below.
         k="${kv%%$'\t'*}"; v="${kv#*$'\t'}"
-        mstate[$m$sep$k]="$v"
+        mstate[$m$sep$k]+="${mstate[$m$sep$k]:+ }$v"
         [[ "$v" == good ]] && munion[$k]=1
       done
     done
@@ -1001,21 +1025,26 @@ _claude_doctor_pools() {
     fi
     for m in $valid; do
       (( ${mbad[(Ie)$m]} )) && continue
-      missing=(); damaged=(); seenk=()
+      missing=(); damaged=(); oddexp=(); seenk=()
       for kk in ${(k)munion} ${${(M)${(k)mstate}:#${(b)m}${sep}*}#${(b)m}${sep}}; do
         (( ${+seenk[$kk]} )) && continue
         seenk[$kk]=1
-        case "${mstate[$m$sep$kk]-}" in
-          good)      ;;
-          fossil)    damaged+=( "$kk (token blanked by a lost write)" ) ;;
-          norefresh) damaged+=( "$kk (no refresh token)" ) ;;
-          broken)    damaged+=( "$kk (entry is not an object)" ) ;;
-          *)         (( ${+munion[$kk]} )) && missing+=( "$kk" ) ;;
-        esac
+        st=" ${mstate[$m$sep$kk]-} "; hit=0
+        [[ "$st" == *" fossil "* ]]    && { damaged+=( "$kk (token blanked by a lost write)" ); hit=1; }
+        [[ "$st" == *" norefresh "* ]] && { damaged+=( "$kk (no refresh token)" ); hit=1; }
+        [[ "$st" == *" broken "* ]]    && { damaged+=( "$kk (entry is not an object)" ); hit=1; }
+        [[ "$st" == *" noexpiry "* ]]  && { oddexp+=( "$kk" ); hit=1; }
+        (( hit )) && continue
+        [[ "$st" == *" good "* ]] && continue
+        (( ${+munion[$kk]} )) && missing+=( "$kk" )
       done
       if (( ${#damaged} )); then
         _doctor_bad "pool '$t': '$m' has broken plugin MCP sign-ins: ${(j:, :)${(@o)damaged}}"
         echo "    Re-authorise each from a session on it: claude-as $m, then /mcp."
+        (( ++m_issue ))
+      fi
+      if (( ${#oddexp} )); then
+        _doctor_warn "pool '$t': '$m' has a plugin MCP sign-in whose expiry is missing or not a number: ${(j:, :)${(@o)oddexp}}"
         (( ++m_issue ))
       fi
       if (( ${#missing} )); then
