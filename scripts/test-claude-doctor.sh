@@ -2750,14 +2750,29 @@ mk_seat a '[env]
 TOKEN_X = "envsecret-one"'; mk_seat b '[env]
 TOKEN_X = "envsecret-two"'; mk_tenants "$POOL_AB"
 run_doctor
-want_out "an [env] difference is a ✗"                   "in [env].TOKEN_X (values not shown)"
+# The ✗ is part of every needle in this block. Without it the needle also matches
+# the NOTE line a key ignored by the swap check gets, so moving [env] out of the
+# swap keys left this row green (mutation M2, first sweep).
+want_out "an [env] difference is a ✗"                   "✗ pool 'w': 'b' differs from 'a' in [env].TOKEN_X (values not shown)"
 no_out   "...and neither [env] value is printed"        "envsecret-"
 
 new_home w5; write_cred
 mk_seat a "api_key = \"$FAKE_TOKEN\""; mk_seat b ''; mk_tenants "$POOL_AB"
 run_doctor
-want_out "an api key set on one member only is a ✗"     "in api_key (set on one only)"
+want_out "an api key set on one member only is a ✗"     "✗ pool 'w': 'b' differs from 'a' in api_key (set on one only)"
 no_out   "...and the key itself is never printed"       "$FAKE_TOKEN"
+
+new_home w5c; write_cred
+mk_seat a "base_url = \"https://gateway.example\"
+$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a base_url difference is a ✗" "✗ pool 'w': 'b' differs from 'a' in base_url ('https://gateway.example' vs 'unset')"
+
+new_home w5d; write_cred
+mk_seat a "$M1"; mk_seat b "disabled = true
+$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a disabled member is a ✗ (a move to it is refused)" "✗ pool 'w': 'b' differs from 'a' in disabled ('false' vs 'true')"
 
 # PRESENCE, not value: the swap check compares whether a key is set. Two members
 # with different keys are as swappable as two with the same one.
@@ -2859,6 +2874,15 @@ printf '"acct-shared-canary"\n' > "$FHOME/.clauth/profiles/b/account_id.json"
 run_doctor
 want_out "two profiles on one account are a ✗" "✗ profiles 'a', 'b' are logged in to the SAME account"
 no_out   "...and the account id is never printed" "acct-shared-canary"
+
+# Not a pool question: it is checked with no tenant table at all.
+new_home w13b; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"
+printf '"acct-shared"\n' > "$FHOME/.clauth/profiles/a/account_id.json"
+printf '"acct-shared"\n' > "$FHOME/.clauth/profiles/b/account_id.json"
+run_doctor
+want_out "two profiles on one account are a ✗ even with no tenant table" \
+         "✗ profiles 'a', 'b' are logged in to the SAME account"
 
 new_home w14; write_cred
 mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
@@ -2975,7 +2999,7 @@ no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=392
+EXPECTED_ROWS=395
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

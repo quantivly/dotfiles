@@ -686,21 +686,9 @@ _claude_doctor_pools() {
                   check_weekly true check_scoped true rolling_token false
                   max_auto_spend 0 last_resort false preferred false )
 
-  if [[ ! -e "$tf" && ! -L "$tf" ]]; then
-    _doctor_note "no tenant table at ${tf/#$HOME/~} — pool checks skipped"
-    return 0
-  fi
-  # "Could not read" is NOT "no pools". An unreadable or unparseable table makes
-  # every launch refuse (claude-tenants-unreadable-refuse), and a partial `source`
-  # would hand this check whatever lines ran before the error.
-  if [[ ! -r "$tf" ]] || ! "${commands[zsh]:-zsh}" -n "$tf" 2>/dev/null; then
-    _doctor_bad "the tenant table at ${tf/#$HOME/~} cannot be read or does not parse — pool checks NOT RUN"
-    echo "    Every launch refuses until it does. Check it with: zsh -n ${tf/#$HOME/~}"
-    return 0
-  fi
-
-  # ACCOUNT IDS FIRST, across every registered profile and not only pool members:
-  # a second name for one seat is wrong wherever it sits.
+  # ACCOUNT IDS FIRST, across every registered profile and not only pool members,
+  # and before the tenant table is even looked at: a second name for one seat is
+  # wrong wherever it sits, including on a machine with no tenant table at all.
   for p in "$pdir"/*(N-/); do
     m="${p:t}"
     _claude_name_cannot_be_profile "$m" && continue
@@ -720,6 +708,19 @@ _claude_doctor_pools() {
     echo "    profile ('clauth delete <name>'), and its name from any pool."
   done
   (( ${#no_id} )) && _doctor_note "no account id recorded for ${(j:, :)no_id} — the duplicate-account check cannot cover them"
+
+  if [[ ! -e "$tf" && ! -L "$tf" ]]; then
+    _doctor_note "no tenant table at ${tf/#$HOME/~} — pool checks skipped"
+    return 0
+  fi
+  # "Could not read" is NOT "no pools". An unreadable or unparseable table makes
+  # every launch refuse (claude-tenants-unreadable-refuse), and a partial `source`
+  # would hand this check whatever lines ran before the error.
+  if [[ ! -r "$tf" ]] || ! "${commands[zsh]:-zsh}" -n "$tf" 2>/dev/null; then
+    _doctor_bad "the tenant table at ${tf/#$HOME/~} cannot be read or does not parse — pool checks NOT RUN"
+    echo "    Every launch refuses until it does. Check it with: zsh -n ${tf/#$HOME/~}"
+    return 0
+  fi
 
   lines=( "${(@f)$(
     unset CLAUDE_TENANT_POOL; typeset -gA CLAUDE_TENANT_POOL
