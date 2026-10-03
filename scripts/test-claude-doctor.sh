@@ -3112,6 +3112,137 @@ want_out "a registered profile whose name looks retired is checked as a profile"
          "x.retired-20260917: credential shared with the clauth store"
 no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
 
+#-----------------------------------------------------------------------------
+section "X. Plugin MCP sign-ins, per pool member (DO-794)"
+#-----------------------------------------------------------------------------
+#
+# mcpOAuth is stored per config dir, and section 2 reads only the RUNNING
+# session's file. So a seat nobody had opened a session on showed nothing: the
+# 2026-09-30 addition needed a session on the new profile just to see its state,
+# and on the live box this section's first run found a work seat that had never
+# been signed in to any of the three plugin servers its siblings use.
+
+# Add one mcpOAuth entry to profile $1's STORE. $2 = server name, $3 = state:
+# good | discovery (never signed in) | fossil (lost write) | norefresh | broken.
+mk_mcp() {
+    local st="$FHOME/.clauth/profiles/$1/credentials.json" tmp
+    tmp="$st.tmp"
+    jq --arg s "$2" --arg state "$3" --arg tok "$FAKE_TOKEN" --argjson fut "$FUTURE" '
+      .mcpOAuth = ((.mcpOAuth // {}) + { ($s + "|h4sh"):
+        (if   $state == "good"      then {serverName: $s, accessToken: $tok, refreshToken: ($tok + "-r"), expiresAt: $fut, scope: "read"}
+         elif $state == "discovery" then {serverName: $s, accessToken: "", clientId: "c", discoveryState: {}}
+         elif $state == "fossil"    then {serverName: $s, accessToken: "", expiresAt: $fut, scope: "read"}
+         elif $state == "norefresh" then {serverName: $s, accessToken: $tok, expiresAt: $fut}
+         else "garbage" end) })' "$st" > "$tmp" && mv -f "$tmp" "$st"
+}
+
+new_home y1; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack good
+run_doctor
+want_out "a pool whose members share their sign-ins gets a ✓" "✓ pool 'w': every member is signed in to its 1 plugin MCP server(s)"
+no_out   "...and no token is ever printed"                    "$FAKE_TOKEN"
+
+new_home y2; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp a plugin:Notion:notion good; mk_mcp b plugin:slack:slack good
+run_doctor
+want_out "a member missing a server a sibling uses is a ⚠" \
+         "⚠ pool 'w': 'b' is not signed in to plugin:Notion:notion, which another member uses"
+want_out "...with the way to sign in"                      "claude-as b, then /mcp"
+no_out   "...and the pool gets no sign-in ✓"               "every member is signed in"
+want_out "...while its settings ✓ still stands"            "2 members agree on every setting a move compares"
+
+new_home y2b; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp a plugin:Notion:notion good
+run_doctor
+want_out "several missing servers are named in sorted order" \
+         "'b' is not signed in to plugin:Notion:notion, plugin:slack:slack, which another member uses"
+
+# The live shape: discovery records for every server. Never signed in, not damage.
+new_home y3; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack discovery
+run_doctor
+want_out "a discovery record is NOT signed in" "'b' is not signed in to plugin:slack:slack, which another member uses"
+no_out   "...and is not called damage"        "has broken plugin MCP sign-ins"
+
+new_home y4; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack fossil
+run_doctor
+# The newline ends the needle at the line's end: a server listed twice would pass
+# a needle that stops at its first mention.
+want_out "a token blanked by a lost write is a ✗, named once" \
+         "✗ pool 'w': 'b' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"$'\n'
+no_out   "...and is not ALSO called missing"     "'b' is not signed in"
+
+new_home y5; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack norefresh
+run_doctor
+want_out "an entry with no refresh token is a ✗" "plugin:slack:slack (no refresh token)"
+
+new_home y6; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp b plugin:slack:slack broken
+run_doctor
+want_out "an entry that is not an object is a ✗, named without its key hash" \
+         "plugin:slack:slack (entry is not an object)"
+
+# Damage is damage whether or not a sibling uses the server.
+new_home y7; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a" )'
+mk_mcp a plugin:slack:slack fossil
+run_doctor
+want_out "a lone member's blanked token is still a ✗" "'a' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"
+
+# Only PLUGIN servers are compared: another kind is not a sibling's to require.
+new_home y8; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a "claude.ai Gmail" good
+run_doctor
+no_out "a non-plugin server on one member is not required of another" "is not signed in to"
+
+# A server only DISCOVERED somewhere is not one the pool uses.
+new_home y9; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:linear:linear discovery
+run_doctor
+no_out "a server no member is signed in to is not a gap" "is not signed in to"
+no_out "...and earns no sign-in ✓ either"                 "every member is signed in"
+
+new_home y10; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good
+printf '{"mcpOAuth": "not-an-object"}\n' > "$FHOME/.clauth/profiles/b/credentials.json"
+run_doctor
+want_out "a store whose sign-ins cannot be read is said so" "pool 'w': cannot read the MCP sign-ins of b — NOT CHECKED"
+no_out   "...and the pool gets no sign-in ✓"               "every member is signed in"
+
+new_home y11; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+run_doctor
+no_out "a pool where nobody uses a plugin server says nothing about sign-ins" "plugin MCP"
+
+# A referenced tenant WITH members is not flagged. Pins the pool lookup's keys:
+# zsh keeps a bare $'\t' in a SUBSCRIPT literally, which broke this section's own
+# member lookup in its first draft, and would make every referenced pool "empty".
+new_home y13; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"
+mk_tenants "$POOL_AB
+CLAUDE_TENANT_DEFAULT=w"
+run_doctor
+no_out "a tenant the default names, with members, is not called empty" "its pool has no members"
+
+# Section 2's remedy for a discovery record no longer sends a NEW seat to the
+# claude.ai connector, whose grant lands on the browser's account (2026-09-30).
+new_home y12; write_cred '.mcpOAuth["plugin:linear:linear|abc"] = {serverName: "plugin:linear:linear", accessToken: "", clientId: "c"}'
+run_doctor
+want_out "the discovery-record remedy warns off the connector route" "NOT through the claude.ai connector"
+no_out   "...and no longer recommends it"                            "in favour of the"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -3130,7 +3261,7 @@ no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=423
+EXPECTED_ROWS=446
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

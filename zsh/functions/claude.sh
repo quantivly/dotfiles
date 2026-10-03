@@ -688,8 +688,9 @@ _claude_doctor_pools() {
   local pdir="$HOME/.clauth/profiles"
   local line t m ref k v va vb kv lnk otype ouuid p id disp n_issue raw out cf cj fin=0
   local -a lines members valid swap_diff other_diff unknown_org no_id unread_id
-  local -a ovf refs errs bad_json unread_cfg cmp
-  local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j
+  local -a ovf refs errs bad_json unread_cfg cmp mbad missing damaged
+  local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j mstate munion seenk
+  local store kk m_issue sep=$'\x1f'
   # clauth's defaults for the keys whose ABSENCE means a value (`ProfileConfig`,
   # profile.rs, clauth v0.16.0). Without them, a file that leaves a key out and one
   # that spells out the default would read as a difference.
@@ -955,6 +956,79 @@ _claude_doctor_pools() {
         _doctor_note "pool '$t': organisation of ${(j:, :)unknown_org} is unknown until its first launch"
     fi
 
+    # PLUGIN MCP SIGN-INS, per member (DO-794). mcpOAuth is stored per config dir,
+    # so every member has its own and a fresh seat starts with none. The section
+    # above reads only the RUNNING session's file, and skips even that without an
+    # mcpOAuth key, so a profile nobody had opened a session on showed nothing.
+    #
+    # The yardstick is the pool itself: a plugin server signed in on ANY member is
+    # expected on every member. A server nobody in the pool uses is not a gap.
+    # Each entry is classified by section 2's rule. An empty token with no expiry,
+    # scope or refresh token is a DISCOVERY record (never signed in here, not
+    # damage). An empty token that kept them is the fossil of a lost write (damage).
+    # Damage is reported whether or not a sibling uses the server.
+    #
+    # Reads names and states only; no token value leaves jq.
+    mstate=(); munion=(); mbad=(); m_issue=0
+    for m in $valid; do
+      store="$pdir/$m/credentials.json"
+      out="$(jq -r '
+        (.mcpOAuth // {}) | to_entries[]
+        | (.key | split("|")[0]) as $k
+        | (if (.value | type) == "object" then (.value.serverName // $k) else $k end) as $s
+        | select($s | startswith("plugin:"))
+        | if (.value | type) != "object" then "\($s)\tbroken"
+          else ((.value.accessToken // "") | length == 0) as $empty
+            | ((.value.refreshToken // "") | length == 0) as $noref
+            | ((.value | has("expiresAt")) or (.value | has("scope")) or ($noref | not)) as $meta
+            | if $empty and ($meta | not) then "\($s)\tdiscovery"
+              elif $empty then "\($s)\tfossil"
+              elif $noref then "\($s)\tnorefresh"
+              else "\($s)\tgood" end
+          end' "$store" 2>/dev/null)" || { mbad+=( "$m" ); continue; }
+      for kv in "${(@f)out}"; do
+        [[ -n "$kv" ]] || continue
+        # A variable, not $'\t', as the key separator: inside a SUBSCRIPT zsh keeps
+        # $'\t' literally, which silently broke the pattern filter below.
+        k="${kv%%$'\t'*}"; v="${kv#*$'\t'}"
+        mstate[$m$sep$k]="$v"
+        [[ "$v" == good ]] && munion[$k]=1
+      done
+    done
+    if (( ${#mbad} )); then
+      _doctor_warn "pool '$t': cannot read the MCP sign-ins of ${(j:, :)mbad} — NOT CHECKED"
+      (( ++m_issue ))
+    fi
+    for m in $valid; do
+      (( ${mbad[(Ie)$m]} )) && continue
+      missing=(); damaged=(); seenk=()
+      for kk in ${(k)munion} ${${(M)${(k)mstate}:#${(b)m}${sep}*}#${(b)m}${sep}}; do
+        (( ${+seenk[$kk]} )) && continue
+        seenk[$kk]=1
+        case "${mstate[$m$sep$kk]-}" in
+          good)      ;;
+          fossil)    damaged+=( "$kk (token blanked by a lost write)" ) ;;
+          norefresh) damaged+=( "$kk (no refresh token)" ) ;;
+          broken)    damaged+=( "$kk (entry is not an object)" ) ;;
+          *)         (( ${+munion[$kk]} )) && missing+=( "$kk" ) ;;
+        esac
+      done
+      if (( ${#damaged} )); then
+        _doctor_bad "pool '$t': '$m' has broken plugin MCP sign-ins: ${(j:, :)${(@o)damaged}}"
+        echo "    Re-authorise each from a session on it: claude-as $m, then /mcp."
+        (( ++m_issue ))
+      fi
+      if (( ${#missing} )); then
+        _doctor_warn "pool '$t': '$m' is not signed in to ${(j:, :)${(@o)missing}}, which another member uses"
+        echo "    mcpOAuth is per config dir, so a new seat starts with none. Sign in from a"
+        echo "    session on it: claude-as $m, then /mcp."
+        (( ++m_issue ))
+      fi
+    done
+    if (( ${#munion} && ! m_issue )); then
+      _doctor_ok "pool '$t': every member is signed in to its ${#munion} plugin MCP server(s)"
+    fi
+
     if (( ! n_issue )); then
       if (( ${#valid} == 1 )); then
         _doctor_ok "pool '$t': 1 member, nothing to compare"
@@ -1180,9 +1254,9 @@ claude-doctor() {
       if [[ "$empty_tok" == "true" && "$has_meta" != "true" ]]; then
         _doctor_note "$srv: never authorised in this config dir (discovery record only)"
         echo "    mcpOAuth is per CLAUDE_CONFIG_DIR, so an isolated session starts with none."
-        echo "    Fix: authorise it from /mcp here, or drop the plugin in favour of the"
-        echo "    claude.ai connector for the same service — connectors ride the login token"
-        echo "    and need no per-config-dir OAuth at all."
+        echo "    Fix: authorise it from /mcp here. NOT through the claude.ai connector for the"
+        echo "    same service: that grant goes to whichever claude.ai account the BROWSER is"
+        echo "    signed in to, not to this seat (docs/CLAUDE_ACCOUNT_MCP.md §5, step 6)."
       elif [[ "$empty_tok" == "true" ]]; then
         _doctor_bad "$srv: accessToken is EMPTY but its expiry/scope survive — an interleaved write"
         echo "    Fix: re-authenticate it from /mcp, then see the concurrency note below."
