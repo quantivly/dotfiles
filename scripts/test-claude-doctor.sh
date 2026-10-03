@@ -3177,6 +3177,7 @@ run_doctor
 want_out "a token blanked by a lost write is a ✗, named once" \
          "✗ pool 'w': 'b' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"$'\n'
 no_out   "...and is not ALSO called missing"     "'b' is not signed in"
+no_out   "...and the pool gets no sign-in ✓"     "every member is signed in"
 
 new_home y5; write_cred
 mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
@@ -3261,7 +3262,7 @@ no_out   "...and no longer recommends it"                            "in favour 
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=446
+EXPECTED_ROWS=447
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

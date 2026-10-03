@@ -185,6 +185,8 @@ switch. What its findings mean:
 | `pool '<t>' names '<n>', a compat symlink` / `a retired name` / `which has no clauth profile store` | the picker drops that name without a word | put the real profile's name in the pool, or remove it |
 | `profiles '<a>', '<b>' are logged in to the SAME account` | two names for one seat | `clauth delete` the newer one, and drop it from its pool |
 | `'<b>' is in a different organisation` / `a claude_max account in a pool of team seats` | the login went to the browser's claude.ai account, not the seat | `clauth login <b>` again with the browser on the right account |
+| `'<b>' is not signed in to plugin:…, which another member uses` | that seat never signed in to a plugin server its pool uses | `claude-as <b>`, then `/mcp` |
+| `'<b>' has broken plugin MCP sign-ins: …` | a token blanked by a lost write, or one with no refresh token | re-authorise from a session on it, then §2.4 |
 
 ---
 
@@ -398,9 +400,11 @@ starts with none. There are two kinds of server, and they behave differently:
   the new profile.** Use `/mcp`, or the server's `authenticate` tool, which hands
   back a URL. The redirect goes to `localhost` and claude.ai is not involved, so
   it does not matter which claude.ai account the browser is on. Sign in to the
-  service as yourself. `claude-doctor` then shows
-  `✓ plugin:<server>: valid in …, refreshable`, and the token covers every
-  session on that profile.
+  service as yourself. The token covers every session on that profile.
+  `claude-doctor`'s `--- Pools ---` section checks every member from any shell:
+  it names each plugin server a sibling uses that this seat is not signed in to,
+  and prints `✓ pool '<t>': every member is signed in to its N plugin MCP
+  server(s)` once none is missing.
 - **claude.ai connectors are saved to the claude.ai account the BROWSER is signed
   in to, not to the seat the session runs on.** With the browser on your main
   account, `/mcp` → *claude.ai Slack* completed and looked successful, while the
