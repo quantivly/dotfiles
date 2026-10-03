@@ -2675,6 +2675,260 @@ want_out "a member containing a space is NOT CHECKED (the class does not widen)"
          "could not read clauth's fallback_chain"
 no_out   "...and is not reported as an armed chain"  "auto-switch armed"
 
+#-----------------------------------------------------------------------------
+section "W. Pools — members that are real, distinct and swappable (DO-793)"
+#-----------------------------------------------------------------------------
+#
+# Every row here is a state that nothing reported before this section existed.
+# Case 3 cost a whole session on 2026-09-30: a fresh `clauth login` writes an
+# all-commented config.toml, and `clauth switch <sid> <p>` then printed "pointed
+# session … at …" eight times while the daemon refused all eight in its journal.
+#
+# The doctor reads the tenant table from the FILE, so every row writes
+# $FHOME/.config/claude-tenants.zsh (run_doctor sets HOME to the fixture).
+
+# A registered profile with a healthy account dir (mk_account_dir's `linked`
+# shape, so the account-dirs section stays quiet and a want_rc row measures the
+# pool section alone). $2 = config.toml body ('' = no file at all); $3/$4 =
+# organisation type and id, which land in .claude.json's oauthAccount ('' = the
+# seat has never been launched, so .claude.json has no oauthAccount).
+mk_seat() {
+    local p="$1" cfg="${2-}" otype="${3-}" oid="${4-}"
+    local pd="$FHOME/.clauth/profiles/$p" ad="$FHOME/.local/state/claude-account-dirs/$p"
+    mk_account_dir "$p" linked
+    if [[ -n "$cfg" ]]; then printf '%s\n' "$cfg" > "$pd/config.toml"; fi
+    if [[ -n "$otype" ]]; then
+        jq -n --arg t "$otype" --arg o "$oid" \
+            '{oauthAccount: {organizationType: $t, organizationUuid: $o, emailAddress: "seat@example.invalid"}}' \
+            > "$ad/.claude.json"
+    else
+        printf '{}\n' > "$ad/.claude.json"
+    fi
+}
+mk_tenants() { mkdir -p "$FHOME/.config"; printf '%s\n' "$1" > "$FHOME/.config/claude-tenants.zsh"; }
+POOL_AB='typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a b" )'
+M1='[models]
+default = "opus[1m]"'
+
+# --- the baseline both directions are measured against -----------------------
+new_home w1; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a pool whose members agree gets a ✓" "pool 'w': 2 members agree on every setting a move compares"
+want_rc  "...and the doctor exits 0"            0
+
+new_home w1b; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a" )'
+run_doctor
+want_out "a one-member pool says there is nothing to compare" "pool 'w': 1 member, nothing to compare"
+
+# --- settings parity ---------------------------------------------------------
+new_home w2; write_cred
+mk_seat a "$M1"; mk_seat b '[models]
+default = "opus"'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a [models] difference is a ✗ naming both values" \
+         "✗ pool 'w': 'b' differs from 'a' in [models].default ('opus[1m]' vs 'opus')"
+no_out   "...and the pool is NOT also given a ✓"   "agree on every setting a move compares"
+want_rc  "...and the doctor exits 1"               1
+LEAKS="$(printf '%s' "$OUT" | grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' || true)"
+if [[ "$LEAKS" == 0 ]]; then ok "...and the pool section leaks no bare name=value line"
+else bad "...and the pool section leaks no bare name=value line — found $LEAKS"; fi
+
+# The 2026-09-30 shape exactly: clauth's all-commented template beside a sibling.
+new_home w3; write_cred
+mk_seat a "$M1"; mk_seat b '# auto_start = true
+# fallback_threshold = 95
+# [models]
+# default = "opus[1m]"'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an all-commented template beside a configured sibling is a ✗" \
+         "'b' differs from 'a' in [models].default ('opus[1m]' vs 'unset')"
+
+new_home w4; write_cred
+mk_seat a '[env]
+TOKEN_X = "envsecret-one"'; mk_seat b '[env]
+TOKEN_X = "envsecret-two"'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an [env] difference is a ✗"                   "in [env].TOKEN_X (values not shown)"
+no_out   "...and neither [env] value is printed"        "envsecret-"
+
+new_home w5; write_cred
+mk_seat a "api_key = \"$FAKE_TOKEN\""; mk_seat b ''; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an api key set on one member only is a ✗"     "in api_key (set on one only)"
+no_out   "...and the key itself is never printed"       "$FAKE_TOKEN"
+
+# PRESENCE, not value: the swap check compares whether a key is set. Two members
+# with different keys are as swappable as two with the same one.
+new_home w5b; write_cred
+mk_seat a 'api_key = "key-one"'; mk_seat b 'api_key = "key-two"'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "two DIFFERENT api keys are not a difference (presence is compared)" \
+         "pool 'w': 2 members agree on every setting a move compares"
+
+new_home w6; write_cred
+mk_seat a "auto_start = true
+$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a difference the swap check ignores is a note" \
+         "· pool 'w': 'b' differs from 'a' in auto_start ('true' vs 'false') — not a setting a move compares"
+no_out   "...and not a ✗"                        "✗ pool 'w'"
+want_rc  "...and the doctor exits 0"             0
+
+# A key spelled out at clauth's default against one left out is NOT a difference.
+new_home w7; write_cred
+mk_seat a "fallback_threshold = 95.0
+$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a default spelled out ('95.0') equals the key left out" "2 members agree on every setting a move compares"
+no_out   "...and is not even a note"                               "fallback_threshold"
+
+new_home w8; write_cred
+mk_seat a 'models.default = "opus" # pinned 2026-09-30'; mk_seat b '[models]
+default = "opus"'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a dotted key with a trailing comment reads the same as a [models] table" \
+         "2 members agree on every setting a move compares"
+
+new_home w9; write_cred
+mk_seat a '[models]
+default = "opus"
+[env]
+default = "x"'; mk_seat b '[env]
+default = "x"
+[models]
+default = "opus"'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "the same key under two tables is two keys, in either order" \
+         "2 members agree on every setting a move compares"
+
+# --- pool members that are not usable profiles --------------------------------
+new_home w10; write_cred
+mk_seat a "$M1"; ln -s a "$FHOME/.local/state/claude-account-dirs/old"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a old" )'
+run_doctor
+want_out "a pool naming a compat symlink is a ✗ naming its target" \
+         "✗ pool 'w' names 'old', a compat symlink to 'a'"
+no_out   "...and is not misreported as a missing store" "names 'old', which has no clauth profile store"
+
+# The cross-account case the staged rename existed to prevent: the old name was
+# logged in AGAIN while its compat link still points at another profile's dir.
+new_home w10b; write_cred
+mk_seat a "$M1"; ln -s a "$FHOME/.local/state/claude-account-dirs/old"
+mkdir -p "$FHOME/.clauth/profiles/old"
+printf '{"claudeAiOauth":{"accessToken":"t","expiresAt":9}}\n' > "$FHOME/.clauth/profiles/old/credentials.json"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a old" )'
+run_doctor
+want_out "a compat link whose name is ALSO a profile says so" "'old' is ALSO a registered profile"
+
+new_home w11; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a a.retired-20260917" )'
+run_doctor
+want_out "a pool naming a retired name is a ✗" "✗ pool 'w' names 'a.retired-20260917', a retired name"
+
+new_home w12; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a ghost" )'
+run_doctor
+want_out "a pool naming a name with no store is a ✗" "✗ pool 'w' names 'ghost', which has no clauth profile store"
+want_rc  "...and the doctor exits 1"                 1
+
+# --- two names for one account ------------------------------------------------
+new_home w13; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+printf '"acct-shared-canary"\n' > "$FHOME/.clauth/profiles/a/account_id.json"
+printf '"acct-shared-canary"\n' > "$FHOME/.clauth/profiles/b/account_id.json"
+run_doctor
+want_out "two profiles on one account are a ✗" "✗ profiles 'a', 'b' are logged in to the SAME account"
+no_out   "...and the account id is never printed" "acct-shared-canary"
+
+new_home w14; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+rm -f "$FHOME/.clauth/profiles/b/account_id.json"
+run_doctor
+want_out "a profile with no account id is named as uncovered" \
+         "no account id recorded for b — the duplicate-account check cannot cover them"
+
+# --- organisation -------------------------------------------------------------
+new_home w15; write_cred
+mk_seat a "$M1" claude_team org-canary-one; mk_seat b "$M1" claude_team org-canary-two; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a team pool spanning two organisations is a ✗" "✗ pool 'w': 'b' is in a different organisation from 'a'"
+no_out   "...and no organisation id is printed"          "org-canary-"
+
+new_home w15b; write_cred
+mk_seat a "$M1" claude_team org-one; mk_seat b "$M1" claude_team org-one; mk_tenants "$POOL_AB"
+run_doctor
+no_out   "one organisation across a team pool is not a finding" "different organisation"
+want_out "...and the pool gets its ✓"                         "2 members agree on every setting a move compares"
+
+new_home w16; write_cred
+mk_seat a "$M1" claude_team org-one; mk_seat b "$M1" claude_max org-two; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an individual account in a pool of team seats is a ✗" \
+         "✗ pool 'w': 'b' is a claude_max account in a pool of team seats like 'a'"
+
+new_home w17; write_cred
+mk_seat a "$M1" claude_team org-one; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "a seat never launched is unknown, said as a note" \
+         "pool 'w': organisation of b is unknown until its first launch"
+no_out   "...and is not a ✗"                         "✗ pool 'w'"
+
+new_home w18; write_cred
+mk_seat a "$M1" claude_max org-one; mk_seat b "$M1" claude_max org-two; mk_tenants "$POOL_AB"
+run_doctor
+no_out   "individual accounts each have their own organisation — not a finding" "different organisation"
+
+# --- reading the table ----------------------------------------------------------
+new_home w19; write_cred
+run_doctor
+want_out "no tenant table is a note, not a failure" "no tenant table at ~/.config/claude-tenants.zsh — pool checks skipped"
+want_rc  "...and the doctor exits 0"                0
+
+new_home w20; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a"'
+run_doctor
+want_out "an unparseable table is a ✗ that says the checks did NOT run" "pool checks NOT RUN"
+no_out   "...and is not read as a table with no pools"                    "defines no pools"
+want_rc  "...and the doctor exits 1"                                       1
+
+new_home w21; write_cred
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=()'
+run_doctor
+want_out "a table with no pools says so" "the tenant table defines no pools"
+
+# The FILE is what the next launch reads; this shell's copy can be hours old.
+new_home w22; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+PRELUDE='typeset -gA CLAUDE_TENANT_POOL=(w "zzz-stale")' run_doctor
+want_out "the table is read from the file, not from this shell" "2 members agree on every setting a move compares"
+no_out   "...and the shell's stale copy is not consulted"       "zzz-stale"
+
+# --- retired account dirs -------------------------------------------------------
+new_home w23; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a" )'
+mkdir -p "$FHOME/.local/state/claude-account-dirs/old.retired-20260917"
+ln -s "$FHOME/.clauth/profiles/a/credentials.json" "$FHOME/.local/state/claude-account-dirs/old.retired-20260917/.credentials.json"
+run_doctor
+want_out "a retired account dir is a tombstone, with its date" "old.retired-20260917: retired 2026-09-17 — a tombstone, not an account dir"
+no_out   "...and is never offered to 'clauth login'"           "clauth login old.retired-20260917"
+want_out "...and its credential is named as a link"            "Its credential is a LINK into 'a's store"
+
+new_home w24; write_cred
+mkdir -p "$FHOME/.local/state/claude-account-dirs/old.retired-20260917"
+printf '{"claudeAiOauth":{"accessToken":"t","expiresAt":9}}\n' > "$FHOME/.local/state/claude-account-dirs/old.retired-20260917/.credentials.json"
+run_doctor
+want_out "a retired dir holding a credential FILE is a warning" "old.retired-20260917: retired 2026-09-17, but it holds a credential of its own"
+
+# A store under the FULL name makes it a real profile, however it is spelled.
+new_home w25; write_cred
+mk_seat x.retired-20260917 "$M1"
+run_doctor
+want_out "a registered profile whose name looks retired is checked as a profile" \
+         "x.retired-20260917: credential shared with the clauth store"
+no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -2693,7 +2947,7 @@ no_out   "...and is not reported as an armed chain"  "auto-switch armed"
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=337
+EXPECTED_ROWS=388
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

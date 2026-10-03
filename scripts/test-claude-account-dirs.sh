@@ -1136,6 +1136,32 @@ fi
 want_link "and the target is still reconciled under its real name" \
           "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
 
+# A RETIRED account dir (`<name>.retired-<date>`) is a tombstone. With no store
+# under its own name it reached the no-profile warning on every 2-minute tick,
+# and claude-doctor turned the same fact into advice to `clauth login` it
+# (DO-793). The fixture is the live shape: a real dir whose credential is a link
+# into the still-registered profile's store.
+new_home g6r; mk_profile p1
+run_sut --all
+mkdir -p "$ACCOUNT_ROOT/p1.retired-20260917"
+ln -s "$(store_of p1)" "$ACCOUNT_ROOT/p1.retired-20260917/.credentials.json"
+run_sut --reconcile
+want_rc "--reconcile with a retired dir succeeds" 0
+no_out  "a retired account dir is skipped without a word" "p1.retired-20260917"
+want_link "...and the live profile is still reconciled" \
+          "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+
+# A store under the FULL name makes it a real profile, however it is spelled, so
+# the skip must not reach it. The link is replaced by an identical COPY first, so
+# --reconcile has work to do there: a skip leaves the copy in place.
+new_home g6s; mk_profile p1.retired-20260917
+run_sut --all
+rm -f "$ACCOUNT_ROOT/p1.retired-20260917/.credentials.json"
+cp "$(store_of p1.retired-20260917)" "$ACCOUNT_ROOT/p1.retired-20260917/.credentials.json"
+run_sut --reconcile
+want_link "a registered profile whose name looks retired is still reconciled" \
+          "$ACCOUNT_ROOT/p1.retired-20260917/.credentials.json" "$(store_of p1.retired-20260917)"
+
 # Outside the root, nothing else will ever reach that directory, so a skip there
 # would be silent data loss rather than a tidy-up. An empty answer is not agreement.
 new_home g7; mk_profile p1
@@ -1519,7 +1545,7 @@ want_out "--check says so" "nested projects/projects links: 0"
 # whole point of it. A docs_claim row would demand it be rewritten to 159 today
 # and to something else next month, destroying the record to satisfy the guard.
 # scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=169
+EXPECTED_ROWS=173
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
