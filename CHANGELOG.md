@@ -173,6 +173,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`claude-doctor` reports every pool member's plugin MCP sign-ins, not just the running
+  session's (DO-794).** mcpOAuth is stored per config dir, and section 2 reads only the file of the
+  session the doctor runs in. So a seat nobody had opened a session on showed nothing. The Pools
+  section now does three things:
+  - takes the pool as the yardstick: a plugin server signed in on any member is expected on every
+    member, and a `⚠` names the gap and the way to close it (`claude-as <p>`, then `/mcp`);
+  - reports a token blanked by a lost write, or one with no refresh token, as a `✗`, whether or
+    not a sibling uses that server;
+  - keeps section 2's rule that a discovery record means "never signed in here", not damage.
+
+  It reads names and states only. On its first live run it found a work seat that had never been
+  signed in to any of the three plugin servers its siblings use. Section 2's remedy for a discovery
+  record no longer sends a new seat to the claude.ai connector, whose grant lands on the
+  browser's account.
+
 - **`claude-doctor` checks that each account pool's members are real, distinct and swappable
   (DO-793).** A new `--- Pools ---` section reads the tenant table from the file, the way a launch
   does. That means a clean `zsh -f` with every table declared, where any error makes it a `✗`
