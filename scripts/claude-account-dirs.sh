@@ -927,6 +927,18 @@ reconcile_all() {
             continue
         fi
 
+        # A RETIRED account dir (`<name>.retired-<date>`, where a rename or a
+        # retirement parks the old dir) is a tombstone, not an account. With no
+        # store under its own name it fell to the warning below, so the timer said
+        # "an account dir with no clauth profile" about each one every two minutes,
+        # forever, and claude-doctor turned the same fact into advice to `clauth
+        # login <name>.retired-<date>`. The shadow usage poller already skips
+        # these names (DO-788). A store under the FULL name would make it a real
+        # profile, so that case still falls through and is reconciled.
+        if [[ "$profile" == *.retired-* && ! -d "$PROFILES_DIR/$profile" ]]; then
+            continue
+        fi
+
         # NOTE: this asks whether a DIRECTORY EXISTS, not whether clauth
         # registers the profile -- an emptied, deregistered profile dir passes
         # it. The symlink skip above closes the observed case (every stray dir

@@ -617,6 +617,354 @@ _claude_cred_shape() {
 _CLAUDE_LOG_OK='Successfully connected'
 _CLAUDE_LOG_FAIL='Connection failed'
 
+# The effective `key<TAB>value` lines of a clauth profile config.toml, with the
+# section folded into the key: `[models]` + `default = "x"` becomes
+# `models.default<TAB>x`. Comments, blank lines and arrays of tables are dropped,
+# and an array written across several lines is joined into one value. clauth
+# renders a flat file of `[section]` tables holding scalars, which is the shape
+# this reads. An INLINE table (`env = { … }`) is not taken apart: its text is
+# passed on behind a \x01 prefix, which the comparison reads as "compare for
+# equality, never print". A hand-written `env = { TOKEN = … }` is exactly where a
+# credential would sit. Prints nothing for a file it cannot read; the caller says
+# what that means.
+_claude_toml_flat() {
+  local f="${1:-}" line sect="" k v more
+  [[ -f "$f" && -r "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if [[ "$line" == '[['* ]]; then sect='[['; continue; fi
+    if [[ "$line" == '['* ]]; then
+      sect="${${line#\[}%%\]*}"; sect="${sect//[[:space:]]/}"
+      continue
+    fi
+    [[ "$sect" == '[[' || "$line" != *=* ]] && continue
+    k="${${line%%=*}//[[:space:]\"]/}"
+    v="${line#*=}"; v="${v#"${v%%[![:space:]]*}"}"
+    case "$v" in
+      \{*) v=$'\x01'"$v" ;;
+      \[*) # An array, joined across lines up to its closing bracket.
+           while [[ "$v" != *\]* ]] && IFS= read -r more; do v+="$more"; done
+           v="${v//[[:space:]]/}" ;;
+      \"*) v="${${v#\"}%%\"*}" ;;
+      \'*) v="${${v#\'}%%\'*}" ;;
+      *)   v="${v%%\#*}"; v="${v%"${v##*[![:space:]]}"}" ;;
+    esac
+    [[ -n "$sect" ]] && k="$sect.$k"
+    print -r -- "$k"$'\t'"$v"
+  done < "$f"
+}
+
+# Pool integrity, the "--- Pools ---" section of claude-doctor (DO-793). Ways a
+# pool goes wrong that nothing reported:
+#
+#   - a member is not a usable profile (a compat symlink, a retired name, no
+#     store). The picker filters pool names against the registered profiles and
+#     DROPS the rest without a word;
+#   - two profiles hold one account. `clauth login` has no duplicate check, only
+#     `capture` does;
+#   - members disagree on a setting clauth's swap check compares (clauth v0.16.0
+#     runtime.rs `swap_eligible`: env, every [models] field, base_url, disabled,
+#     whether an api key is set). `clauth switch <sid> <p>` then answers
+#     "pointed session … at …" while the daemon refuses the move, in its journal
+#     only. A fresh `clauth login` writes an all-commented template, so every new
+#     seat starts out in this state (2026-09-30);
+#   - a team pool's members are in different organisations, which is what a login
+#     looks like when it went to whichever claude.ai account the BROWSER was on;
+#   - the table itself is one a launch refuses: it errors when sourced, a tenant it
+#     routes to has no members, or a member uses a character the picker rejects.
+#     Those are the pool-shaped checks of _claude_tenant_table_ok in zshrc.herdr;
+#     the route-syntax checks stay there, with the launcher that applies them.
+#
+# A separate function because claude-doctor is one long scope in which every
+# `local` is shared. The table is read FRESH from the file, the way a launch reads
+# it (claude-tenants-owner): this shell's own copy dates from whenever it started.
+#
+# Never prints an account id, an organisation id, or a value from [env], from an
+# inline table, or from any key it does not know to be harmless.
+_claude_doctor_pools() {
+  local tf="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+  local adroot="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
+  local pdir="$HOME/.clauth/profiles"
+  local line t m ref k v va vb kv lnk otype ouuid p id disp n_issue raw out cf cj fin=0
+  local -a lines members valid swap_diff other_diff unknown_org no_id unread_id
+  local -a ovf refs errs bad_json unread_cfg cmp
+  local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j
+  # clauth's defaults for the keys whose ABSENCE means a value (`ProfileConfig`,
+  # profile.rs, clauth v0.16.0). Without them, a file that leaves a key out and one
+  # that spells out the default would read as a difference.
+  local -A dflt=( disabled false auto_start false fallback_threshold 95
+                  check_weekly true check_scoped true rolling_token false
+                  max_auto_spend 0 last_resort false preferred false )
+  # The top-level keys whose VALUES may be printed. Everything else — [env], an
+  # inline table, a key a later clauth adds — is compared and reported by name only.
+  local show=" base_url disabled auto_start fallback_threshold weekly_threshold check_weekly check_scoped last_resort preferred preferred_days max_auto_spend bell_threshold rolling_token "
+
+  # ACCOUNT IDS FIRST, across every registered profile and not only pool members,
+  # and before the tenant table is even looked at: a second name for one seat is
+  # wrong wherever it sits, including on a machine with no tenant table at all.
+  for p in "$pdir"/*(N-/); do
+    m="${p:t}"
+    _claude_name_cannot_be_profile "$m" && continue
+    [[ -e "$p/credentials.json" || -L "$p/credentials.json" ]] || continue
+    # UNREADABLE IS NOT ABSENT. Folding the two together hid a duplicate behind
+    # "no account id recorded", which reads as a seat that was never seeded.
+    if [[ -e "$p/account_id.json" && ( ! -f "$p/account_id.json" || ! -r "$p/account_id.json" ) ]]; then
+      unread_id+=("$m"); continue
+    fi
+    id=""
+    [[ -r "$p/account_id.json" ]] && id="$(<"$p/account_id.json")"
+    id="${id//[[:space:]\"]/}"
+    if [[ -z "$id" ]]; then no_id+=("$m"); continue; fi
+    seen_ids[$id]+="${seen_ids[$id]:+ }$m"
+  done
+  for id in ${(k)seen_ids}; do
+    members=( ${=seen_ids[$id]} )
+    (( ${#members} > 1 )) || continue
+    _doctor_bad "profiles '${(j:', ':)members}' are logged in to the SAME account"
+    echo "    'clauth login' has no duplicate check. Two names for one seat split its holders"
+    echo "    into two groups and count its window twice in the picker. Remove the newer"
+    echo "    profile ('clauth delete <name>'), and its name from any pool."
+  done
+  (( ${#unread_id} )) && _doctor_warn "cannot read the account id of ${(j:, :)unread_id} — the duplicate-account check did NOT run for them"
+  (( ${#no_id} )) && _doctor_note "no account id recorded for ${(j:, :)no_id} — the duplicate-account check cannot cover them"
+
+  if [[ ! -e "$tf" && ! -L "$tf" ]]; then
+    _doctor_note "no tenant table at ${tf/#$HOME/~} — pool checks skipped"
+    return 0
+  fi
+  # "Could not read" is NOT "no pools". An unreadable or unparseable table makes
+  # every launch refuse (claude-tenants-unreadable-refuse), and a partial `source`
+  # would hand this check whatever lines ran before the error.
+  if [[ ! -f "$tf" || ! -r "$tf" ]] || ! "${commands[zsh]:-zsh}" -n "$tf" 2>/dev/null; then
+    _doctor_bad "the tenant table at ${tf/#$HOME/~} cannot be read or does not parse — pool checks NOT RUN"
+    echo "    Every launch refuses until it does. Check it with: zsh -n ${tf/#$HOME/~}"
+    return 0
+  fi
+
+  # READ IT THE WAY A LAUNCH DOES (claude-tenants-owner): a clean `zsh -f`, EVERY
+  # table the file may assign pre-declared, and ANY stderr a fault. `zsh -n` alone
+  # passed a file that fails at RUN time — a typo'd command, CRLF line endings — and
+  # this section printed ✓ while every launch refused (review, 2026-10-03). A
+  # subscript assignment to a table declared only by zshrc.herdr aborted the source
+  # in a bare shell, so the answer depended on which shell asked. The file's own
+  # stdout is discarded, as a launch ignores it; ours is marked, so an unmarked
+  # line can only be its stderr. __DONE__ proves the fork finished.
+  raw="$("${commands[zsh]:-zsh}" -f -c '
+    typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID
+    typeset -g CLAUDE_TENANT_DEFAULT=
+    source "$1" >/dev/null
+    for t in ${(ko)CLAUDE_TENANT_POOL}; do printf "__POOL__%s\t%s\n" "$t" "${CLAUDE_TENANT_POOL[$t]}"; done
+    for t in ${(ko)CLAUDE_TENANT_OVERFLOW}; do printf "__OVF__%s\t%s\n" "$t" "${CLAUDE_TENANT_OVERFLOW[$t]}"; done
+    for t in "${(@)CLAUDE_TENANT_ROUTES#*=}" "${(@)CLAUDE_TENANT_PATH_ROUTES#*=}" "${(@k)CLAUDE_TENANT_OVERFLOW}" $CLAUDE_TENANT_DEFAULT; do
+      [[ -n "$t" ]] && printf "__REF__%s\n" "$t"
+    done
+    print -r -- __DONE__' tenants "$tf" </dev/null 2>&1)"
+  for line in "${(@f)raw}"; do
+    case "$line" in
+      __POOL__*) lines+=( "${line#__POOL__}" ) ;;
+      __OVF__*)  ovf+=( "${line#__OVF__}" ) ;;
+      __REF__*)  refs+=( "${line#__REF__}" ) ;;
+      __DONE__)  fin=1 ;;
+      '')        ;;
+      *)         errs+=( "$line" ) ;;
+    esac
+  done
+  if (( ${#errs} )); then
+    _doctor_bad "the tenant table at ${tf/#$HOME/~} did not run cleanly — pool checks NOT RUN"
+    echo "    ${errs[1]/#$HOME/~}"
+    echo "    Every launch refuses until it does: a launch treats any error from it as a fault."
+    return 0
+  fi
+  if (( ! fin )); then
+    _doctor_bad "reading the tenant table at ${tf/#$HOME/~} did not finish — pool checks NOT RUN"
+    return 0
+  fi
+
+  # THE TABLE AS A LAUNCH VALIDATES IT, its pool-shaped half. A tenant that a
+  # route, the default or an overflow key names must have members: an empty pool
+  # is indistinguishable from "no pool", so the picker refuses the whole table.
+  for line in $lines; do pool_of[${line%%$'\t'*}]="${line#*$'\t'}"; done
+  for t in ${(u)refs}; do
+    [[ -n "${pool_of[$t]//[[:space:]]/}" ]] && continue
+    _doctor_bad "tenant '$t' is named by a route, the default or an overflow entry, but its pool has no members"
+    echo "    The picker refuses the whole table until it does ('the tenant table is unusable')."
+  done
+  for line in $ovf; do
+    for m in ${=line#*$'\t'}; do
+      [[ -z "${m//[A-Za-z0-9_.-]/}" ]] && continue
+      _doctor_bad "overflow for '${line%%$'\t'*}' names '$m' — a member may only contain letters, digits, - _ and ."
+      echo "    The picker refuses the whole table until it is fixed."
+    done
+  done
+
+  if (( ! ${#lines} )); then
+    _doctor_note "the tenant table defines no pools — nothing to check"
+    return 0
+  fi
+
+  for line in $lines; do
+    t="${line%%$'\t'*}"
+    members=( ${=line#*$'\t'} )
+    valid=(); n_issue=0
+    if (( ! ${#members} )); then
+      # A referenced one was reported above. This one is inert, and not a ✓.
+      (( ${refs[(Ie)$t]} )) || _doctor_note "pool '$t' is empty, and nothing routes to it"
+      continue
+    fi
+
+    for m in $members; do
+      if [[ -n "${m//[A-Za-z0-9_.-]/}" ]]; then
+        _doctor_bad "pool '$t' names '$m' — a member may only contain letters, digits, - _ and ."
+        echo "    The picker refuses the whole table until it is fixed."
+        (( ++n_issue )); continue
+      fi
+      if [[ -L "$adroot/$m" ]]; then
+        zmodload -F zsh/stat b:zstat 2>/dev/null
+        lnk="$(zstat +link -- "$adroot/$m" 2>/dev/null)" || lnk=""
+        _doctor_bad "pool '$t' names '$m', a compat symlink${lnk:+ to '${lnk:t}'}"
+        echo "    The picker drops it without a word. Name the profile it stands for instead."
+        [[ -e "$pdir/$m/credentials.json" || -L "$pdir/$m/credentials.json" ]] && \
+          echo "    '$m' is ALSO a registered profile, so its account dir is another profile's dir."
+        (( ++n_issue )); continue
+      fi
+      if [[ "$m" == *.retired-* ]]; then
+        _doctor_bad "pool '$t' names '$m', a retired name"
+        echo "    The picker drops it without a word. Remove it from the pool."
+        (( ++n_issue )); continue
+      fi
+      if [[ ! -e "$pdir/$m/credentials.json" && ! -L "$pdir/$m/credentials.json" ]]; then
+        _doctor_bad "pool '$t' names '$m', which has no clauth profile store"
+        echo "    The picker drops it without a word. 'clauth login $m' if it should exist;"
+        echo "    otherwise remove it from the pool."
+        (( ++n_issue )); continue
+      fi
+      valid+=( "$m" )
+    done
+
+    # SETTINGS PARITY against the first member whose config can be read. A config
+    # that EXISTS and cannot be read is not "every key at its default": that
+    # reading let two unreadable files with different [models] agree.
+    cmp=(); unread_cfg=()
+    for m in $valid; do
+      cf="$pdir/$m/config.toml"
+      if [[ -e "$cf" && ( ! -f "$cf" || ! -r "$cf" ) ]]; then unread_cfg+=( "$m" ); else cmp+=( "$m" ); fi
+    done
+    if (( ${#unread_cfg} )); then
+      _doctor_warn "pool '$t': cannot read config.toml of ${(j:, :)unread_cfg} — its settings were NOT compared"
+      (( ++n_issue ))
+    fi
+    if (( ${#cmp} > 1 )); then
+      ref="${cmp[1]}"
+      cfg_ref=()
+      for kv in "${(@f)$(_claude_toml_flat "$pdir/$ref/config.toml")}"; do
+        [[ -n "$kv" ]] || continue
+        k="${kv%%$'\t'*}"; v="${kv#*$'\t'}"
+        [[ "$k" == kick_timer ]] && k=auto_start
+        [[ "$k" == api_key ]] && v=set
+        [[ "$v" == <->.0 ]] && v="${v%.0}"
+        cfg_ref[$k]="$v"
+      done
+      for m in ${cmp[2,-1]}; do
+        cfg_m=(); keys=(); swap_diff=(); other_diff=()
+        for kv in "${(@f)$(_claude_toml_flat "$pdir/$m/config.toml")}"; do
+          [[ -n "$kv" ]] || continue
+          k="${kv%%$'\t'*}"; v="${kv#*$'\t'}"
+          [[ "$k" == kick_timer ]] && k=auto_start
+          [[ "$k" == api_key ]] && v=set
+          [[ "$v" == <->.0 ]] && v="${v%.0}"
+          cfg_m[$k]="$v"
+        done
+        for k in ${(k)cfg_ref} ${(k)cfg_m}; do keys[$k]=1; done
+        for k in ${(ko)keys}; do
+          va="${cfg_ref[$k]-}"; [[ -n "$va" ]] || va="${dflt[$k]-}"
+          vb="${cfg_m[$k]-}";   [[ -n "$vb" ]] || vb="${dflt[$k]-}"
+          [[ "$va" == "$vb" ]] && continue
+          if [[ "$k" == *.* ]]; then disp="[${k%%.*}].${k#*.}"; else disp="$k"; fi
+          if [[ "$va" == $'\x01'* || "$vb" == $'\x01'* ]]; then
+            disp+=" (an inline table this check does not read; compare by hand — values not shown)"
+          elif [[ "$k" == models.* || "$show" == *" $k "* ]]; then
+            disp+=" ('${va:-unset}' vs '${vb:-unset}')"
+          elif [[ "$k" == api_key ]]; then
+            disp+=" (set on one only)"
+          else
+            disp+=" (values not shown)"
+          fi
+          case "$k" in
+            base_url|api_key|disabled|env|env.*|models|models.*) swap_diff+=( "$disp" ) ;;
+            *)                                                   other_diff+=( "$disp" ) ;;
+          esac
+        done
+        if (( ${#swap_diff} )); then
+          _doctor_bad "pool '$t': '$m' differs from '$ref' in ${(j:, :)swap_diff}"
+          echo "    clauth refuses to move a live session between them ('clauth switch <sid> <p>'),"
+          echo "    and only the daemon's journal says so — the CLI reports success. Make the two"
+          echo "    agree in ~/.clauth/profiles/<p>/config.toml; a session launched before then stays put."
+          (( ++n_issue ))
+        fi
+        (( ${#other_diff} )) && \
+          _doctor_note "pool '$t': '$m' differs from '$ref' in ${(j:, :)other_diff} — not a setting a move compares"
+      done
+    fi
+
+    # ORGANISATION, for a pool holding team seats. Read from the account dir's
+    # .claude.json, which carries oauthAccount only after the seat's first launch;
+    # before then the organisation is UNKNOWN, which is not a finding. A file that
+    # does not PARSE is a different state, and said as one: folding it into
+    # "unknown" skipped the check without a word.
+    otypes=(); ouuids=(); ref=""; unknown_org=(); bad_json=(); bad_j=()
+    for m in $valid; do
+      otype=""; ouuid=""
+      cj="$adroot/$m/.claude.json"
+      if [[ -e "$cj" ]]; then
+        if out="$(jq -r '(.oauthAccount // {}) | "\(.organizationType // "-") \(.organizationUuid // "-")"' "$cj" 2>/dev/null)"; then
+          read -r otype ouuid <<<"$out"
+        else
+          bad_json+=( "$m" ); bad_j[$m]=1
+        fi
+      fi
+      [[ "$otype" == - ]] && otype=""
+      [[ "$ouuid" == - ]] && ouuid=""
+      otypes[$m]="$otype"; ouuids[$m]="$ouuid"
+      [[ -z "$ref" && "$otype" == claude_team && -n "$ouuid" ]] && ref="$m"
+    done
+    if (( ${#bad_json} )); then
+      _doctor_warn "pool '$t': cannot parse .claude.json of ${(j:, :)bad_json} — its organisation was NOT checked"
+      (( ++n_issue ))
+    fi
+    if [[ -n "$ref" ]]; then
+      for m in $valid; do
+        [[ "$m" == "$ref" || -n "${bad_j[$m]-}" ]] && continue
+        if [[ -z "${otypes[$m]}" ]]; then unknown_org+=( "$m" ); continue; fi
+        if [[ "${otypes[$m]}" != claude_team ]]; then
+          _doctor_bad "pool '$t': '$m' is a ${otypes[$m]} account in a pool of team seats like '$ref'"
+          echo "    A login that went to whichever claude.ai account the browser was signed in to"
+          echo "    looks like this. Re-login '$m' with the browser on the intended account."
+          (( ++n_issue ))
+        elif [[ -z "${ouuids[$m]}" ]]; then
+          unknown_org+=( "$m" )
+        elif [[ "${ouuids[$m]}" != "${ouuids[$ref]}" ]]; then
+          _doctor_bad "pool '$t': '$m' is in a different organisation from '$ref'"
+          echo "    A login that went to whichever claude.ai account the browser was signed in to"
+          echo "    looks like this. Re-login '$m' with the browser on the intended account."
+          (( ++n_issue ))
+        fi
+      done
+      (( ${#unknown_org} )) && \
+        _doctor_note "pool '$t': organisation of ${(j:, :)unknown_org} is unknown until its first launch"
+    fi
+
+    if (( ! n_issue )); then
+      if (( ${#valid} == 1 )); then
+        _doctor_ok "pool '$t': 1 member, nothing to compare"
+      else
+        _doctor_ok "pool '$t': ${#valid} members agree on every setting a move compares"
+      fi
+    fi
+  done
+}
+
 claude-doctor() {
   # Usage: claude-doctor [--days N] [--all]
   #
@@ -651,6 +999,7 @@ claude-doctor() {
   # block scope shares one namespace, and an undeclared assignment inside it
   # leaks a global — which is the defect the `local pdir pname` fix above closed.
   local -a _cshape shared_stores dangling_stores
+  local rdate
   local -a quarantined chain_walk
   local -A group_n group_label
 
@@ -1808,6 +2157,29 @@ claude-doctor() {
           continue
         fi
 
+        # A RETIRED account dir is a tombstone, not a broken account. A rename or
+        # a retirement parks the old dir as `<name>.retired-<date>`. With no store
+        # under that full name it fell through to the branch below, which told the
+        # reader to `clauth login <name>.retired-<date>`. Following that advice
+        # would turn a tombstone into a live profile. Observed on this machine for
+        # two such dirs (DO-793). A store under the FULL name makes it a real
+        # profile, so that case is still checked like any other.
+        if [[ "$name" == *.retired-* && ! -e "$store" && ! -L "$store" ]]; then
+          rdate="${name##*.retired-}"
+          [[ "$rdate" == <-> && ${#rdate} == 8 ]] && rdate="${rdate[1,4]}-${rdate[5,6]}-${rdate[7,8]}"
+          _cshape=( ${=$(_claude_cred_shape "$ad/.credentials.json")} )
+          if [[ "${_cshape[1]}" == file ]]; then
+            _doctor_warn "$name: retired $rdate, but it holds a credential of its own"
+            echo "    A real file, not a link into a store: nothing reconciles or rotates it."
+            echo "    Shred it once nothing runs here; the retired name is not a 'clauth login' candidate."
+          else
+            _doctor_note "$name: retired $rdate — a tombstone, not an account dir"
+            [[ "${_cshape[1]}" == managed ]] && \
+              echo "    Its credential is a LINK into '${_cshape[2]}'s store; removing the dir drops only the link."
+          fi
+          continue
+        fi
+
         seen=1
 
         if [[ ! -e "$store" && ! -L "$store" ]]; then
@@ -2081,6 +2453,10 @@ claude-doctor() {
       echo "    there is one source of truth — a stale one reads as configuration that works."
     fi
   }
+
+  echo
+  echo "--- Pools ---"
+  _claude_doctor_pools
 
   _doctor_summary "Claude Code auth and MCP surface look healthy." \
     "Start with the ✗ items; 'claude-doctor --all' also lists the servers that are fine."
