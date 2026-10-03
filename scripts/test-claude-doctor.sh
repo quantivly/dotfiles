@@ -2814,6 +2814,7 @@ $M1"; mk_seat b "auto_start = true
 $M1"; mk_tenants "$POOL_AB"
 run_doctor
 no_out "a trailing comment on an unquoted value is not part of it" "differs from 'a'"
+want_out "...and the pool still gets its ✓" "2 members agree on every setting a move compares"
 
 new_home w9; write_cred
 mk_seat a '[models]
@@ -2835,6 +2836,7 @@ mk_seat a "$M1
 name = \"x\""; mk_seat b "$M1"; mk_tenants "$POOL_AB"
 run_doctor
 no_out "an array of tables is skipped, not read as a setting" "differs from 'a'"
+want_out "...and the pool still gets its ✓" "2 members agree on every setting a move compares"
 
 # --- pool members that are not usable profiles --------------------------------
 new_home w10; write_cred
@@ -2931,6 +2933,7 @@ new_home w18; write_cred
 mk_seat a "$M1" claude_max org-one; mk_seat b "$M1" claude_max org-two; mk_tenants "$POOL_AB"
 run_doctor
 no_out   "individual accounts each have their own organisation — not a finding" "different organisation"
+want_out "...and the pool still gets its ✓" "2 members agree on every setting a move compares"
 
 # --- reading the table ----------------------------------------------------------
 new_home w19; write_cred
@@ -2941,7 +2944,7 @@ want_rc  "...and the doctor exits 0"                0
 new_home w20; write_cred
 mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a"'
 run_doctor
-want_out "an unparseable table is a ✗ that says the checks did NOT run" "pool checks NOT RUN"
+want_out "an unparseable table is a ✗ that says the checks did NOT run" "cannot be read or does not parse — pool checks NOT RUN"
 no_out   "...and is not read as a table with no pools"                    "defines no pools"
 want_rc  "...and the doctor exits 1"                                       1
 
@@ -2956,6 +2959,134 @@ mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
 PRELUDE='typeset -gA CLAUDE_TENANT_POOL=(w "zzz-stale")' run_doctor
 want_out "the table is read from the file, not from this shell" "2 members agree on every setting a move compares"
 no_out   "...and the shell's stale copy is not consulted"       "zzz-stale"
+
+# --- a table a LAUNCH refuses, read the way a launch reads it -------------------
+# Found by review on 2026-10-03: `zsh -n` was the only gate and the source's
+# stderr went to /dev/null. Every row in this block printed ✓ (or "defines no
+# pools") while claude-tenants-owner refused every launch on the same file.
+new_home x1; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"
+mk_tenants "$POOL_AB
+CLAUDE_TENANT_DEFAULT=w
+nonexistent_cmd_typo"
+run_doctor
+want_out "a table that errors when sourced is a ✗ that says the checks did NOT run" \
+         "did not run cleanly — pool checks NOT RUN"
+no_out   "...and the pool is not given a ✓"  "agree on every setting a move compares"
+want_rc  "...and the doctor exits 1"         1
+
+new_home x2; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"
+mkdir -p "$FHOME/.config"
+printf 'typeset -gA CLAUDE_TENANT_POOL\r\nCLAUDE_TENANT_POOL=( w "a b" )\r\n' > "$FHOME/.config/claude-tenants.zsh"
+run_doctor
+want_out "CRLF line endings are a ✗, not 'no pools'" "did not run cleanly — pool checks NOT RUN"
+
+# A subscript assignment to a table zshrc.herdr declares, BEFORE the pools. In a
+# bare shell that aborted the source; a launch declares all five tables first.
+new_home x3; write_cred
+mk_seat a "$M1"; mk_seat b '[models]
+default = "opus"'
+mk_tenants 'CLAUDE_TENANT_GH_DIR[w]="$HOME/gh"
+typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a b" )'
+run_doctor
+want_out "a sibling table assigned by subscript does not hide the pools" \
+         "✗ pool 'w': 'b' differs from 'a' in [models].default"
+
+# The file's own stdout is not a fault: a launch ignores it.
+new_home x4; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"
+mk_tenants "print -r -- loading the tenant table
+$POOL_AB"
+run_doctor
+want_out "a tenant table that prints to stdout is not a fault" "2 members agree on every setting a move compares"
+
+new_home x5; write_cred
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "" ); CLAUDE_TENANT_DEFAULT=w'
+run_doctor
+want_out "a tenant the default names with an empty pool is a ✗" \
+         "✗ tenant 'w' is named by a route, the default or an overflow entry, but its pool has no members"
+no_out   "...and is not a ✓ over zero members" "0 members"
+
+new_home x5b; write_cred
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "" )'
+run_doctor
+want_out "an empty pool nothing routes to is a note" "pool 'w' is empty, and nothing routes to it"
+no_out   "...and is not a ✓ over zero members"      "0 members"
+
+new_home x6; write_cred
+mk_seat a "$M1"; mk_seat zvi+b "$M1"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a zvi+b" )'
+run_doctor
+want_out "a member with a character the picker rejects is a ✗" \
+         "✗ pool 'w' names 'zvi+b' — a member may only contain letters, digits, - _ and ."
+
+new_home x6b; write_cred
+mk_seat a "$M1"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_OVERFLOW=( w "c+d" )'
+run_doctor
+want_out "an overflow member with a rejected character is a ✗" "✗ overflow for 'w' names 'c+d'"
+
+# --- values that must never be printed, and shapes the reader must not misread ---
+new_home x7; write_cred
+mk_seat a 'env = { TOKEN_X = "envsecret-one" }'; mk_seat b 'env = { TOKEN_X = "envsecret-two" }'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an inline env table that differs is a ✗" \
+         "✗ pool 'w': 'b' differs from 'a' in env (an inline table this check does not read"
+no_out   "...and neither value is printed"        "envsecret-"
+
+new_home x7b; write_cred
+mk_seat a 'models = { default = "opus" }'; mk_seat b 'models = { default = "sonnet" }'; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an inline models table that differs is a ✗" "✗ pool 'w': 'b' differs from 'a' in models (an inline table"
+
+# A key this check does not know is reported by NAME: it could hold anything.
+new_home x7c; write_cred
+mk_seat a 'future_key = "s3cr3t-x"'; mk_seat b ''; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an unknown key is reported by name" "differs from 'a' in future_key (values not shown)"
+no_out   "...and its value is not printed"    "s3cr3t-x"
+
+new_home x8; write_cred
+mk_seat a "preferred_days = [
+  \"mon\",
+]"; mk_seat b "preferred_days = [
+  \"tue\",
+]"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "an array written across lines is read whole" "differs from 'a' in preferred_days"
+
+new_home x8b; write_cred
+mk_seat a "preferred_days = [
+  \"mon\",
+]"; mk_seat b "preferred_days = [\"mon\",]"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "...and the same array on one line is the same value" "2 members agree on every setting a move compares"
+
+# --- files that exist and cannot be read are not files that are absent ----------
+# A directory at the path stands in for an unreadable file: `chmod 000` reads fine
+# as root, and a row skipped under root would break the fixed row total.
+new_home x9; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+printf '"SAME"\n' > "$FHOME/.clauth/profiles/a/account_id.json"
+rm -f "$FHOME/.clauth/profiles/b/account_id.json"; mkdir "$FHOME/.clauth/profiles/b/account_id.json"
+run_doctor
+want_out "an account id that cannot be read is said so" "cannot read the account id of b — the duplicate-account check did NOT run for them"
+no_out   "...and is not called unrecorded"             "no account id recorded for b"
+
+new_home x10; write_cred
+mk_seat a "$M1"; mk_seat b ''; mk_tenants "$POOL_AB"
+mkdir "$FHOME/.clauth/profiles/b/config.toml"
+run_doctor
+want_out "a config.toml that cannot be read is said so" "pool 'w': cannot read config.toml of b — its settings were NOT compared"
+no_out   "...and the pool is not given a ✓"            "agree on every setting a move compares"
+
+new_home x11; write_cred
+mk_seat a "$M1" claude_team org-one; mk_seat b "$M1" claude_team org-two; mk_tenants "$POOL_AB"
+printf '{"oauthAccount": {"organizationType": "claude_te' > "$FHOME/.local/state/claude-account-dirs/a/.claude.json"
+run_doctor
+want_out "a .claude.json that does not parse is said so" "pool 'w': cannot parse .claude.json of a — its organisation was NOT checked"
+no_out   "...and is not called unknown-until-launch"    "organisation of a is unknown"
 
 # --- retired account dirs -------------------------------------------------------
 new_home w23; write_cred
@@ -2999,7 +3130,7 @@ no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=395
+EXPECTED_ROWS=423
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
