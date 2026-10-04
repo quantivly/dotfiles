@@ -40,6 +40,11 @@
 #   claude-tenants-edit [--dry-run] [--commit] pool-add    <tenant> <name>
 #   claude-tenants-edit [--dry-run] [--commit] pool-remove <tenant> <name>
 #   claude-tenants-edit [--dry-run] [--commit] retire-name <name> <reason>
+#   claude-tenants-edit dump
+#
+#   dump       print every table as a launch reads it, one sorted line per value,
+#              fields separated by \x1f: TABLE, key, value. Read-only; the reader
+#              claude-seat uses, so there is one reader of this file, not two.
 #
 #   --dry-run  check everything and print the diff; write nothing
 #   --commit   commit the tenants file ALONE in its repo, with a message naming
@@ -69,6 +74,7 @@ usage() {
   print -u2 -- "usage: $prog [--dry-run] [--commit] pool-add <tenant> <name>"
   print -u2 -- "       $prog [--dry-run] [--commit] pool-remove <tenant> <name>"
   print -u2 -- "       $prog [--dry-run] [--commit] retire-name <name> <reason>"
+  print -u2 -- "       $prog dump"
   exit 64
 }
 refuse() { print -u2 -- "$prog: refused: $*"; exit 1 }
@@ -85,20 +91,25 @@ while (( $# )); do
   esac
   shift
 done
-(( $# == 3 )) || usage
-# A flag AFTER the operation would otherwise be read as an argument: measured,
-# `retire-name old9 --dry-run` wrote "--dry-run" as the reason, for real.
-[[ "$2" != -* && "$3" != -* ]] || usage
-op="$1"
-case "$op" in
-  pool-add|pool-remove) tenant="$2"; name="$3"; reason="" ;;
-  retire-name)          tenant="";   name="$2"; reason="$3" ;;
-  *)                    usage ;;
-esac
+if [[ "${1:-}" == dump ]]; then
+  (( $# == 1 && ! dry && ! commit )) || usage
+  op=dump tenant="" name="" reason=""
+else
+  (( $# == 3 )) || usage
+  # A flag AFTER the operation would otherwise be read as an argument: measured,
+  # `retire-name old9 --dry-run` wrote "--dry-run" as the reason, for real.
+  [[ "$2" != -* && "$3" != -* ]] || usage
+  op="$1"
+  case "$op" in
+    pool-add|pool-remove) tenant="$2"; name="$3"; reason="" ;;
+    retire-name)          tenant="";   name="$2"; reason="$3" ;;
+    *)                    usage ;;
+  esac
+fi
 
 # The picker's own member rule (_claude_tenant_table_ok): a name outside it is
 # refused there, for the whole table, so it is refused here before anything else.
-[[ -n "$name" && -z "${name//[A-Za-z0-9_.-]/}" ]] || \
+[[ "$op" == dump || ( -n "$name" && -z "${name//[A-Za-z0-9_.-]/}" ) ]] || \
   refuse "'$name' may only contain letters, digits, - _ and ."
 if [[ -n "$tenant" ]]; then
   [[ -z "${tenant//[A-Za-z0-9_.-]/}" ]] || refuse "tenant '$tenant' may only contain letters, digits, - _ and ."
@@ -118,7 +129,11 @@ if [[ -L "$TENANTS" && ! -e "$TENANTS" ]]; then
 fi
 [[ -e "$TENANTS" ]] || unsafe "there is no tenants file at $TENANTS"
 [[ -f "$TENANTS" ]] || unsafe "$TENANTS is not a regular file"
-[[ -r "$TENANTS" && -w "${TENANTS:A}" ]] || unsafe "cannot read and write $TENANTS"
+if [[ "$op" == dump ]]; then
+  [[ -r "$TENANTS" ]] || unsafe "cannot read $TENANTS"
+else
+  [[ -r "$TENANTS" && -w "${TENANTS:A}" ]] || unsafe "cannot read and write $TENANTS"
+fi
 real="${TENANTS:A}"
 dir="${real:h}"
 
@@ -128,7 +143,9 @@ if ! err="$(command zsh -n "$real" 2>&1)"; then
   unsafe "$TENANTS does not parse:"$'\n'"    ${err:-zsh -n failed with no message}"
 fi
 
-# One edit at a time. A second editor waits briefly, then gives up.
+# One edit at a time. A second editor waits briefly, then gives up. (A dump
+# writes nothing, so it neither takes the lock nor asks git anything.)
+if [[ "$op" != dump ]]; then
 mkdir -p "$STATE" 2>/dev/null
 [[ -d "$STATE" && -w "$STATE" ]] || unsafe "cannot use the state directory $STATE"
 # `zsystem flock` opens an EXISTING file; it does not create one.
@@ -159,6 +176,7 @@ if (( commit )); then
     unsafe "could not ask git whether $real has uncommitted changes"
   [[ -z "$dirty" ]] || unsafe "$real already has uncommitted changes; commit or discard them before --commit"
 fi
+fi
 
 # ---- reading a table the way a launch does ------------------------------------
 # A bare `zsh -f`, every table a tenants file may assign pre-declared, the file
@@ -172,7 +190,8 @@ dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
   out="$(command zsh -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
     typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR \
-                CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED
+                CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED \
+                CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT
     typeset -g CLAUDE_TENANT_DEFAULT=
     source "$1" >/dev/null
     s=$2
@@ -183,6 +202,8 @@ dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
     for k in "${(@k)CLAUDE_TENANT_MACHINE_OWNED}"; do print -r -- "MACHINE_OWNED$s$k$s${CLAUDE_TENANT_MACHINE_OWNED[$k]}"; done
     for k in "${(@k)CLAUDE_TENANT_MACHINE_ID}";    do print -r -- "MACHINE_ID$s$k$s${CLAUDE_TENANT_MACHINE_ID[$k]}"; done
     for k in "${(@k)CLAUDE_TENANT_RETIRED}";       do print -r -- "RETIRED$s$k$s${CLAUDE_TENANT_RETIRED[$k]}"; done
+    for k in "${(@k)CLAUDE_TENANT_CONNECTORS}";    do print -r -- "CONNECTORS$s$k$s${CLAUDE_TENANT_CONNECTORS[$k]}"; done
+    for k in "${(@k)CLAUDE_TENANT_CONNECTOR_ACCOUNT}"; do print -r -- "CONNECTOR_ACCOUNT$s$k$s${CLAUDE_TENANT_CONNECTOR_ACCOUNT[$k]}"; done
     i=0; for v in "${CLAUDE_TENANT_ROUTES[@]}";      do (( ++i )); print -r -- "ROUTES$s$i$s$v"; done
     i=0; for v in "${CLAUDE_TENANT_PATH_ROUTES[@]}"; do (( ++i )); print -r -- "PATH_ROUTES$s$i$s$v"; done
     i=0; for v in "${CLAUDE_TENANT_BUCKETS[@]}";     do (( ++i )); print -r -- "BUCKETS$s$i$s$v"; done
@@ -203,6 +224,10 @@ dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
 }
 
 old_dump="$(dump "$real" 2>&1)" || unsafe "$TENANTS: $old_dump"
+if [[ "$op" == dump ]]; then
+  [[ -n "$old_dump" ]] && print -r -- "$old_dump"
+  exit 0
+fi
 # `$mapfile`, byte-exact. `$(<file)` strips trailing newlines, which the rewrite
 # would then drop, and `$(< file; cmd)` is NOT that shortcut: a redirection with
 # a command after it runs $READNULLCMD, a pager, and read nothing when there was

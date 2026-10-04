@@ -1030,8 +1030,25 @@ build_one() {
         warn "$profile: no ~/.claude/settings.json to copy — the statusline and hooks will be absent"
     fi
 
+    # 5. .claude.json: real, seeded once, never overwritten by a re-run.
+    if [[ ! -e "$account_dir/.claude.json" ]]; then
+        [[ -f "$GLOBAL_JSON" ]] \
+            || die "$profile: no ${GLOBAL_JSON/#$HOME/\~} to seed .claude.json from — refusing to create an unonboarded config dir"
+        local size
+        size=$(stat -Lc %s "$GLOBAL_JSON")
+        if (( size < MIN_CLAUDE_JSON_BYTES )); then
+            die "$profile: ${GLOBAL_JSON/#$HOME/\~} is only ${size} bytes — that is a husk, not a config file.
+       Seeding from it would give this account dir first-run onboarding and a trust
+       dialog in every worktree, silently, because a husk is still valid JSON.
+       Check which file Claude Code is really using before re-running."
+        fi
+        cp -p "$GLOBAL_JSON" "$account_dir/.claude.json"
+        chmod 600 "$account_dir/.claude.json"
+    fi
+
+
     # 5b. A STALE ACCOUNT IDENTITY in .claude.json. Seeded once from the global
-    #     file (below), that block names whichever account was live at seed time
+    #     file (above), that block names whichever account was live at seed time
     #     and is corrected only if Claude Code happens to rewrite it -- so on this
     #     machine quantivly-1 and quantivly-2 both advertised quantivly-3's
     #     account, complete with its organizationName, seatTier and rate-limit
@@ -1044,6 +1061,10 @@ build_one() {
     #     profile switch ("the stale account-identity block is dropped, so Claude
     #     Code re-derives identity"). Guessing the other fields ourselves would be
     #     inventing account metadata.
+    #
+    #     AFTER the seed, not before it: before it, a FIRST build kept the global
+    #     file's identity, so a brand-new seat advertised another account and
+    #     `claude-seat add` checked that account's organisation instead (DO-796).
     if [[ -f "$account_dir/.claude.json" && -s "$pdir/account_id.json" ]] && has_jq; then
         local want_uuid have_uuid
         want_uuid="$(jq -e -r 'select(type == "string") | select(. != "")' \
@@ -1059,28 +1080,12 @@ build_one() {
                 chmod 600 "$cj_tmp" 2>/dev/null || true
                 mv -f "$cj_tmp" "$account_dir/.claude.json"
                 warn "$profile: dropped a stale account identity from .claude.json (it named"
-                warn "        another profile's account) — Claude Code will re-derive it."
+                warn "        another account) — Claude Code will re-derive it."
             else
                 rm -f "$cj_tmp"
                 warn "$profile: could not drop the stale account identity from .claude.json"
             fi
         fi
-    fi
-
-    # 5. .claude.json: real, seeded once, never overwritten by a re-run.
-    if [[ ! -e "$account_dir/.claude.json" ]]; then
-        [[ -f "$GLOBAL_JSON" ]] \
-            || die "$profile: no ${GLOBAL_JSON/#$HOME/\~} to seed .claude.json from — refusing to create an unonboarded config dir"
-        local size
-        size=$(stat -Lc %s "$GLOBAL_JSON")
-        if (( size < MIN_CLAUDE_JSON_BYTES )); then
-            die "$profile: ${GLOBAL_JSON/#$HOME/\~} is only ${size} bytes — that is a husk, not a config file.
-       Seeding from it would give this account dir first-run onboarding and a trust
-       dialog in every worktree, silently, because a husk is still valid JSON.
-       Check which file Claude Code is really using before re-running."
-        fi
-        cp -p "$GLOBAL_JSON" "$account_dir/.claude.json"
-        chmod 600 "$account_dir/.claude.json"
     fi
 
     printf '%s\n' "$account_dir"

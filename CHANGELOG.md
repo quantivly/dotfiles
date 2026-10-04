@@ -173,6 +173,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-seat add <tenant> [name]`: one command from a new login to a verified, pooled
+  seat (DO-796).** It replaces the seven-step manual procedure in `docs/CLAUDE_ACCOUNT_MCP.md` §5,
+  three of whose steps failed silently on 2026-09-30. Its steps:
+  - propose a name nobody has used: not a profile, an account dir, a compat link, a retired dir, a
+    tenant table entry, rabota's seat or the picker's ledger. The name must fit rabota's prefix
+    rule;
+  - run `clauth login`, the human step;
+  - refuse a second login to an existing account;
+  - copy the pool's `config.toml`, and refuse if the members disagree, before any login;
+  - build the account dir;
+  - check the seat's own identity, the one naming the account id the login recorded, against
+    every pool member's type and, for a team, organisation. It comes from `claude auth status`,
+    or with `--yes` one tiny first launch;
+  - only then add the seat to the pool through `claude-tenants-edit --commit`.
+
+  When any check fails, nothing is added to the pool, and every step can be re-run; without a name,
+  a seat a run left unfinished is refused with its resume command rather than proposed past. Exit 3
+  means the seat IS in the pool but the picker's dry run, or a failed editor commit, disagrees. It
+  ends with
+  what is left for a person: plugin MCP sign-ins, the tenant's claude.ai connectors (named from the
+  new optional `CLAUDE_TENANT_CONNECTORS` and `CLAUDE_TENANT_CONNECTOR_ACCOUNT` tables), and the
+  DO-792 warning. `claude-tenants-edit dump` is the one reader of the tenants file it uses. Runbook
+  §5 is rewritten around the command.
+
+- **`claude-account-dirs.sh`: a first build no longer keeps the global file's account identity
+  (DO-796).** `.claude.json` is seeded from `~/.claude.json`, identity and all, and the drop of an
+  identity naming another account ran before that seed, so a new dir advertised whichever account
+  the global file named until a second run.
+
 - **`scripts/claude-tenants-edit`: a validated, atomic editor for the account pools (DO-795).**
   It replaces hand-editing the tenants file, the riskiest step of adding a seat. A parse error above
   the pools empties them, and the ranked pick then widens to every profile; a run-time error makes

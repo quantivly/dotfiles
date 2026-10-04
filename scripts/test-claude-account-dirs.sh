@@ -1003,6 +1003,21 @@ else
     bad "dropping the identity damaged the rest of .claude.json"
 fi
 
+# A FIRST build: the seed is a copy of the global file, so it names whichever
+# account that file does. The check used to run before the seed and never saw it,
+# and a brand-new seat advertised another account's organisation (DO-796).
+new_home f36; mk_profile p1
+jq '.oauthAccount = {accountUuid: "uuid-of-somebody-else", organizationType: "claude_team"}' \
+    "$FHOME/.claude.json" > "$FHOME/.claude.json.tmp" && mv -f "$FHOME/.claude.json.tmp" "$FHOME/.claude.json"
+run_sut p1
+want_out "a first build drops an identity the global file names for another account" "dropped a stale account identity"
+if [[ "$(jq -r 'has("oauthAccount")' "$ACCOUNT_ROOT/p1/.claude.json")" == false && \
+      "$(jq -r '.hasCompletedOnboarding' "$ACCOUNT_ROOT/p1/.claude.json")" == true ]]; then
+    ok "...so the new dir starts with no identity, and the rest of the seed"
+else
+    bad "a first build kept the global file's identity, or lost the rest of the seed"
+fi
+
 #-----------------------------------------------------------------------------
 section "F5. The verdict file — so the doctor need not re-derive the rule"
 #-----------------------------------------------------------------------------
@@ -1545,7 +1560,7 @@ want_out "--check says so" "nested projects/projects links: 0"
 # whole point of it. A docs_claim row would demand it be rewritten to 159 today
 # and to something else next month, destroying the record to satisfy the guard.
 # scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=173
+EXPECTED_ROWS=175
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

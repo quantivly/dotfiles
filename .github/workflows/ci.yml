@@ -422,6 +422,28 @@ jobs:
       - name: Run the tenants file editor state table
         run: ./scripts/test-claude-tenants-edit.sh
 
+  claude-seat-test:
+    name: Seat Onboarding State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh and jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq
+
+      # `claude-seat add` takes a new login all the way into a tenant's pool. Each
+      # of its checks exists because the manual procedure failed silently there,
+      # so most rows assert one thing: when a check fails, the seat is NOT in the
+      # pool. clauth, claude, the account-dir builder and the picker are stubs
+      # that record every call; nothing reaches a real account.
+      - name: Run the seat onboarding state table
+        run: ./scripts/test-claude-seat.sh
+
   tenant-route-test:
     name: Tenant Router State Table
     runs-on: ubuntu-latest
