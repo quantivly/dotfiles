@@ -922,6 +922,14 @@ new_home i26 "$R5"; retire_fixture
 mk_proc 304 "../../.local/state/claude-account-dirs/quantivly-5"
 run retire quantivly-5
 check "a relative CLAUDE_CONFIG_DIR is resolved against the session's own cwd" "$RC" "3"
+new_home i26b "$R5"; retire_fixture
+mk_proc 307 "../../.local/state/claude-account-dirs/quantivly-5"; rm -f "$FHOME/procfix/307/cwd"
+run retire quantivly-5
+check "...and one whose cwd cannot be read is undecided, so exit 3" "$RC" "3"
+
+new_home i32b "$R5"; retire_fixture; STUB_AD_RC=1 run retire quantivly-5
+check "a reconcile that fails after the logout still retires" "$RC" "0"
+want_out "...saying the store keeps its copy"                 "Its store still holds plugin:slack:slack until then"
 
 new_home i27 "$R5"; retire_fixture
 mkdir -p "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0" "$FHOME/.clauth/live_sessions"
@@ -993,7 +1001,7 @@ check "a session that arrives during the pool edit stops the teardown" "$RC" "3"
 check "...and the dir is kept"                                         "$([[ -d "$FHOME/.local/state/claude-account-dirs/quantivly-5" ]] && echo kept)" "kept"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=310
+EXPECTED_ROWS=313
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
