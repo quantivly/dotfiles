@@ -34,18 +34,27 @@
 # did not finish is refused rather than proposed past: a second login of the same
 # person under the next number is the mistake that would follow.
 #
+# `claude-seat mcp <name>` is the step after it (DO-797): it signs the seat in to
+# each plugin MCP server another member of its pools uses, or re-authorises one of
+# its own that is damaged, through Claude Code's own `claude mcp login`.
+#
 # Usage:
 #   claude-seat add [--dry-run] [--yes] [--email ADDR] <tenant> [name]
+#   claude-seat mcp [--dry-run] [--no-browser] <name>
 #
-#   name       default: the tenant's prefix and the next number never used
-#   --dry-run  check, propose the name, print the plan; touch nothing
-#   --yes      allow the one-request first launch the identity step may need
-#   --email    the address the seat must have; refused if it differs
+#   name          default: the tenant's prefix and the next number never used
+#   --dry-run     check and print the plan; touch nothing
+#   --yes         allow the one-request first launch the identity step may need
+#   --email       the address the seat must have; refused if it differs
+#   --no-browser  print each sign-in URL instead of opening it (needs a terminal)
 #
-# Exit: 0 added (or dry run passed) · 1 refused: the request does not fit, and
-#       nothing was added to the pool · 2 could not finish safely, and nothing was
-#       added to the pool · 3 the seat IS in the pool, but a check after the edit
-#       failed (the message says which) · 64 usage.
+# Exit (add): 0 added (or dry run passed) · 1 refused: the request does not fit,
+#       and nothing was added to the pool · 2 could not finish safely, and nothing
+#       was added to the pool · 3 the seat IS in the pool, but a check after the
+#       edit failed (the message says which) · 64 usage.
+# Exit (mcp): 0 signed in to every plugin server its pools use (or dry run
+#       passed) · 1 refused · 2 a sign-in failed or did not take, or an input
+#       could not be read · 64 usage.
 
 emulate -R zsh
 setopt no_unset pipe_fail extended_glob
@@ -71,12 +80,15 @@ WORK_PREFIX=quantivly-
 
 usage() {
   print -u2 -- "usage: $prog add [--dry-run] [--yes] [--email ADDR] <tenant> [name]"
+  print -u2 -- "       $prog mcp [--dry-run] [--no-browser] <name>"
   exit 64
 }
 say()    { print -r -- "$*" }
 step()   { print -r -- ""; print -r -- "[$1] $2" }
-refuse() { print -u2 -- "$prog: refused: $*"; print -u2 -- "    Nothing was added to the pool."; exit 1 }
-fail()   { print -u2 -- "$prog: $*"; print -u2 -- "    Nothing was added to the pool."; exit 2 }
+# `add` never touches the pool before its last step, so every refusal says so.
+trailer="Nothing was added to the pool."
+refuse() { print -u2 -- "$prog: refused: $*"; [[ -z "$trailer" ]] || print -u2 -- "    $trailer"; exit 1 }
+fail()   { print -u2 -- "$prog: $*"; [[ -z "$trailer" ]] || print -u2 -- "    $trailer"; exit 2 }
 # The last lines of a command's error output, through the repo's redactor: never
 # printed raw, because what claude prints on failure is not ours to vouch for.
 tail_redacted() {
@@ -92,25 +104,34 @@ unfinished_where() { [[ "${1//(a clauth profile|an account dir)/}" == (|, |, , )
 id_of() { [[ -r "$1" ]] && print -r -- "${${mapfile[$1]-}//[[:space:]\"]/}" }
 
 # ---- arguments --------------------------------------------------------------------
-[[ "${1:-}" == add ]] || usage
+cmd="${1:-}"
+[[ "$cmd" == (add|mcp) ]] || usage
 shift
-dry=0 yes=0 email=""
+dry=0 yes=0 email="" nobrowser=0
 typeset -a pos
 while (( $# )); do
   case "$1" in
-    --dry-run) dry=1 ;;
-    --yes)     yes=1 ;;
-    --email)   [[ -n "${2:-}" && "$2" != -* ]] || usage; email="$2"; shift ;;
-    --*)       usage ;;
-    -*)        usage ;;
-    *)         pos+=( "$1" ) ;;
+    --dry-run)    dry=1 ;;
+    --yes)        [[ "$cmd" == add ]] || usage; yes=1 ;;
+    --email)      [[ "$cmd" == add && -n "${2:-}" && "$2" != -* ]] || usage; email="$2"; shift ;;
+    --no-browser) [[ "$cmd" == mcp ]] || usage; nobrowser=1 ;;
+    --*)          usage ;;
+    -*)           usage ;;
+    *)            pos+=( "$1" ) ;;
   esac
   shift
 done
-(( ${#pos} == 1 || ${#pos} == 2 )) || usage
-tenant="${pos[1]}"
-name="${pos[2]-}"
-[[ -z "${tenant//[A-Za-z0-9_.-]/}" ]] || refuse "tenant '$tenant' may only contain letters, digits, - _ and ."
+if [[ "$cmd" == add ]]; then
+  (( ${#pos} == 1 || ${#pos} == 2 )) || usage
+  tenant="${pos[1]}"
+  name="${pos[2]-}"
+  [[ -z "${tenant//[A-Za-z0-9_.-]/}" ]] || refuse "tenant '$tenant' may only contain letters, digits, - _ and ."
+else
+  (( ${#pos} == 1 )) || usage
+  tenant="" name="${pos[1]}" trailer=""
+  [[ "$name" == [A-Za-z0-9]* && -z "${name//[A-Za-z0-9_.-]/}" ]] || \
+    refuse "'$name' may only contain letters, digits, - _ and ., and must start with a letter or digit"
+fi
 
 for t in "$EDIT" "$ACCDIRS" "$CLAUDE_SH" "$PICK"; do
   [[ -r "$t" ]] || fail "cannot find $t, which this needs"
@@ -137,12 +158,16 @@ for line in "${(@f)dumpout}"; do
   esac
 done
 
-(( ${+pool[$tenant]} )) || refuse "tenant '$tenant' has no pool in the tenants file; give it one by hand first"
+if [[ "$cmd" == add ]]; then
+  (( ${+pool[$tenant]} )) || refuse "tenant '$tenant' has no pool in the tenants file; give it one by hand first"
+fi
 
 # The settings a move compares, normalised, from claude.sh's own reader. The same
 # keys and defaults as claude-doctor's parity check (clauth v0.16.0 swap_eligible).
 source "$CLAUDE_SH" >/dev/null 2>&1
-(( $+functions[_claude_toml_flat] )) || fail "$CLAUDE_SH does not define _claude_toml_flat"
+for f in _claude_toml_flat _claude_seat_cred_file _claude_mcp_plugin_states _claude_plugins_disabled; do
+  (( $+functions[$f] )) || fail "$CLAUDE_SH does not define $f"
+done
 swapkeys() {   # $1 = config.toml -> sorted "key=value" lines a move compares
   local kv k v
   local -a out
@@ -160,6 +185,130 @@ swapkeys() {   # $1 = config.toml -> sorted "key=value" lines a move compares
   print -r -- "${(F)out}"
 }
 effective() { _claude_toml_flat "$1" }
+
+# ---- mcp: sign a seat in to its pools' plugin MCP servers (DO-797) -------------------------
+# The yardstick is the doctor's (DO-794), read with the doctor's own helpers: a
+# plugin server signed in on ANY other member of a pool the seat is in is expected
+# on the seat, a damaged entry of its own is re-authorised, and a disabled plugin
+# is neither. Each sign-in is `claude mcp login`, Claude Code's own OAuth flow in
+# the seat's config dir. An entry is NEVER copied from another seat: a copy is a
+# second holder of one rotating refresh chain. One at a time, because Slack's
+# plugin listens on a fixed callback port.
+seat_mcp() {
+  local ad="$ADROOT/$name" seatf t m f k out kv srv st
+  local -a pools targets lflags notok
+  local -A want have why poff
+  for t in ${(k)pool}; do
+    (( ${${=pool[$t]}[(Ie)$name]} )) && pools+=( "$t" )
+  done
+  (( ${#pools} )) || refuse "'$name' is in no pool, so no other seat says which plugin servers it needs"
+  pools=( "${(@o)pools}" )
+  [[ -e "$ad/.credentials.json" || -L "$ad/.credentials.json" ]] || \
+    refuse "'$name' has no account dir with a credential (${ad/#$HOME/~}); add the seat first: $prog add <tenant> $name"
+  for k in ${(f)"$(_claude_plugins_disabled)"}; do
+    [[ -n "$k" ]] && poff[$k]=1
+  done
+
+  step mcp "'$name', in ${(j:, :)pools}"
+  for t in $pools; do
+    for m in ${=pool[$t]}; do
+      [[ "$m" == "$name" ]] && continue
+      [[ -e "$PROFILES/$m/credentials.json" || -L "$PROFILES/$m/credentials.json" ]] || continue
+      f="$(_claude_seat_cred_file "$ADROOT" "$PROFILES" "$m")"
+      out="$(_claude_mcp_plugin_states "$f")" || \
+        fail "cannot read the MCP sign-ins of '$m' (${f/#$HOME/~}), so which servers '$name' needs is unknown"
+      for kv in "${(@f)out}"; do
+        [[ -n "$kv" ]] || continue
+        srv="${kv%%$'\t'*}"; st="${kv#*$'\t'}"
+        (( ${+poff[${${srv#plugin:}%%:*}]} )) && continue
+        [[ "$st" == good ]] && ! (( ${+want[$srv]} )) && want[$srv]="$m"
+      done
+    done
+  done
+  seatf="$(_claude_seat_cred_file "$ADROOT" "$PROFILES" "$name")"
+  out="$(_claude_mcp_plugin_states "$seatf")" || \
+    fail "cannot read the MCP sign-ins of '$name' itself (${seatf/#$HOME/~})"
+  for kv in "${(@f)out}"; do
+    [[ -n "$kv" ]] || continue
+    srv="${kv%%$'\t'*}"; st="${kv#*$'\t'}"
+    (( ${+poff[${${srv#plugin:}%%:*}]} )) && continue
+    have[$srv]+=" $st"
+  done
+  for srv in ${(k)want} ${(k)have}; do
+    (( ${targets[(Ie)$srv]} )) && continue
+    st="${have[$srv]-} "
+    if [[ "$st" == *(fossil|norefresh|broken)" "* ]]; then
+      targets+=( "$srv" ); why[$srv]="its own entry is damaged"
+    elif [[ "$st" != *"good "* ]] && (( ${+want[$srv]} )); then
+      targets+=( "$srv" ); why[$srv]="'${want[$srv]}' is signed in to it"
+    fi
+  done
+  targets=( "${(@o)targets}" )
+
+  if (( ! ${#targets} )); then
+    if (( ${#want} )); then
+      say "signed in to all ${#want} plugin MCP server(s) its pools use; nothing to do"
+    else
+      say "no other member of ${(j:, :)pools} is signed in to a plugin MCP server; nothing to do"
+    fi
+    return 0
+  fi
+  for srv in $targets; do say "  $srv: ${why[$srv]}"; done
+  if (( dry )); then
+    step plan "nothing below runs in a dry run"
+    for srv in $targets; do
+      say "  CLAUDE_CONFIG_DIR=${ad/#$HOME/~} claude mcp login $srv"
+    done
+    return 0
+  fi
+  if (( nobrowser )); then
+    [[ -t 0 ]] || refuse "--no-browser asks you to paste the redirect back, so it needs a terminal"
+    lflags=( --no-browser )
+  fi
+
+  for srv in $targets; do
+    step login "$srv"
+    say "  Approve it in the browser as this tenant's account at that service, the one its"
+    say "  other seats use. The redirect goes to localhost, so whichever claude.ai account"
+    say "  the browser is on does not matter."
+    CLAUDE_CONFIG_DIR="$ad" "$CLAUDE_BIN" mcp login "${lflags[@]}" "$srv" || \
+      say "  'claude mcp login $srv' failed (above)"
+  done
+
+  # What the seat's own file says now, read the way the doctor reads it: a login
+  # that exited 0 without writing a usable entry is not a sign-in.
+  step check "'$name'"
+  seatf="$(_claude_seat_cred_file "$ADROOT" "$PROFILES" "$name")"
+  out="$(_claude_mcp_plugin_states "$seatf")" || \
+    fail "cannot read the MCP sign-ins of '$name' after signing in (${seatf/#$HOME/~})"
+  have=()
+  for kv in "${(@f)out}"; do
+    [[ -n "$kv" ]] || continue
+    srv="${kv%%$'\t'*}"; st="${kv#*$'\t'}"
+    have[$srv]+=" $st"
+  done
+  for srv in $targets; do
+    st="${have[$srv]-} "
+    if [[ "$st" == *"good "* && "$st" != *(fossil|norefresh|broken)" "* ]]; then
+      say "  ✓ $srv"
+    else
+      say "  ✗ $srv"
+      notok+=( "$srv" )
+    fi
+  done
+  if (( ${#notok} )); then
+    print -u2 -- "$prog: '$name' is still not signed in to ${(j:, :)notok}."
+    print -u2 -- "    Sign in from a session on it instead: claude-as $name, then /mcp, and choose each."
+    return 2
+  fi
+  say ""
+  say "'$name' is signed in to every plugin MCP server its pools use."
+  return 0
+}
+if [[ "$cmd" == mcp ]]; then
+  seat_mcp
+  exit $?
+fi
 
 # ---- preflight ------------------------------------------------------------------------
 step preflight "tenant '$tenant', pool: ${pool[$tenant]:-<empty>}"
@@ -454,8 +603,8 @@ fi
 
 # ---- what is left for a person ---------------------------------------------------------------------
 step done "'$name' is in '$tenant'. Left for you:"
-say "  1. Plugin MCP sign-ins: claude-as $name, then /mcp, for each plugin server the"
-say "     other seats use. claude-doctor's Pools section names any that are missing."
+say "  1. Plugin MCP sign-ins: $prog mcp $name signs it in to each plugin server the"
+say "     other seats use, one browser approval each (or: claude-as $name, then /mcp)."
 if [[ -n "${connectors[$tenant]-}" ]]; then
   say "  2. claude.ai connectors: ${connectors[$tenant]}. Connect them at claude.ai -> Settings"
   say "     -> Connectors, signed in to claude.ai as $name${cacct[$tenant]:+, choosing ${cacct[$tenant]} when Google asks}."

@@ -173,6 +173,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-seat mcp <name>`: sign a seat in to its pools' plugin MCP servers from the
+  shell (DO-797).** For each plugin server another member of the seat's pools is signed in to,
+  and each damaged entry of its own, it runs `claude mcp login` in the seat's config dir, one at a
+  time, then re-reads the seat with the doctor's own classifier and prints the `/mcp` steps for any
+  that did not take. Disabled plugins are skipped, and no entry is ever copied between seats. The
+  classifier, the disabled-plugin list and the choice of credential file are now helpers in
+  `claude.sh`, shared with `claude-doctor`'s Pools section, whose remedies name the command.
+
 - **Linear reaches every seat through `LINEAR_API_KEY`, with no per-seat sign-in (DO-801).**
   `claude/plugins/linear-key` is a repo-owned plugin, in a directory marketplace, whose only
   content is Linear's MCP server with `Authorization: Bearer ${LINEAR_API_KEY}`. The key was

@@ -3162,6 +3162,7 @@ run_doctor
 want_out "a member missing a server a sibling uses is a ⚠" \
          "⚠ pool 'w': 'b' is not signed in to plugin:Notion:notion, which another member uses"
 want_out "...with the way to sign in"                      "claude-as b, then /mcp"
+want_out "...and the command that does it from the shell"  "claude-seat mcp b"
 no_out   "...and the pool gets no sign-in ✓"               "every member is signed in"
 want_out "...while its settings ✓ still stands"            "2 members agree on every setting a move compares"
 
@@ -3619,7 +3620,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=517
+EXPECTED_ROWS=518
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
