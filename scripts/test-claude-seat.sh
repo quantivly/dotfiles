@@ -298,6 +298,8 @@ new_home c8; run add quantivly personal-5
 check "a work seat outside the work prefix is refused" "$RC" "1"
 new_home c9; run add personal quantivly-7
 check "another tenant's seat inside the work prefix is refused" "$RC" "1"
+want_err "...by the prefix rule"                               "only a 'quantivly' seat may be named quantivly-*"
+no_log   "...before any login"                                 "clauth login"
 
 #-----------------------------------------------------------------------------
 section "D. The whole way through"
@@ -468,7 +470,7 @@ want_out "with none recorded, it says how to record them" "set
 want_out "the DO-792 warning is printed"                 "DO-792"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=136
+EXPECTED_ROWS=138
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
