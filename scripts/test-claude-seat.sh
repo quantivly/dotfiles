@@ -194,8 +194,10 @@ run add quantivly
 check "a pool whose members disagree is refused"   "$RC" "1"
 want_err "...naming the two members"               "'quantivly-1' and 'quantivly-3' disagree"
 no_log   "...before any login"                     "clauth login"
-new_home b3; run add quantivly 'quantivly+5'
+new_home b3; run add quantivly 'quantivly-5+x'
 check "a name with a character the picker rejects is refused" "$RC" "1"
+want_err "...for its characters, not the prefix rule"  "may only contain letters, digits"
+no_log   "...before any login"                         "clauth login"
 
 #-----------------------------------------------------------------------------
 section "C. A name that has never existed"
@@ -338,7 +340,7 @@ want_out "with none recorded, it says how to record them" "set
 want_out "the DO-792 warning is printed"                 "DO-792"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=82
+EXPECTED_ROWS=84
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
