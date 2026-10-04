@@ -397,11 +397,14 @@ the same person.
   official plugin is serving it again: fix that rather than signing in.
 - **Plugin MCP servers (Slack, Notion): `scripts/claude-seat mcp <name>`.** It
   runs `claude mcp login` in the seat's config dir for each plugin server another
-  member of its pools is signed in to, plus any entry of its own that is damaged,
-  one at a time (Slack's plugin listens on a fixed port). Each asks for one
+  member of its pools is signed in to, plus any of its own whose only entries are
+  damaged, one at a time (Slack's plugin listens on a fixed port). A damaged entry
+  beside a good one is reported, not retried: it sits under an older config's
+  key, which a new sign-in writes past. Each asks for one
   approval in the browser, as the tenant's account at that service; the redirect
   goes to `localhost`, so the claude.ai account the browser is on does not
-  matter. A disabled plugin is skipped. Afterwards it reads the seat's sign-ins
+  matter. A disabled plugin is skipped, and an unreadable settings file stops it
+  rather than counting as "nothing disabled". Afterwards it reads the seat's sign-ins
   the way `claude-doctor`'s `--- Pools ---` section does, and prints the `/mcp`
   steps for any that did not take. It never copies an entry from another seat: a
   copy is a second holder of one rotating refresh chain. `--dry-run` lists what
