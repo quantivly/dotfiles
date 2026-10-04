@@ -209,10 +209,11 @@ seat_mcp() {
   case "$(_claude_pool_member_problem "$ADROOT" "$PROFILES" "$name")" in
     compat)  refuse "'$name' is a compat symlink in the account root; its dir is another profile's, so name that profile instead" ;;
     retired) refuse "'$name' is a retired name" ;;
-    nostore) refuse "'$name' has no clauth profile store; add the seat first: $prog add <tenant> $name" ;;
+    # Not `claude-seat add`: it refuses a name already in a pool.
+    nostore) refuse "'$name' has no clauth profile store: 'clauth login $name' if it should exist, otherwise take it out of the pool (claude-tenants-edit --commit pool-remove ${pools[1]} $name)" ;;
   esac
   [[ -e "$ad/.credentials.json" || -L "$ad/.credentials.json" ]] || \
-    refuse "'$name' has no account dir with a credential (${ad/#$HOME/~}); add the seat first: $prog add <tenant> $name"
+    refuse "'$name' has no account dir with a credential (${ad/#$HOME/~}); build it: scripts/claude-account-dirs.sh $name"
   # The doctor reads an unreadable settings file as "nothing disabled", which costs
   # it at most a warning. Here it would cost a real sign-in to a plugin switched off.
   sf="$(_claude_global_settings_file)"

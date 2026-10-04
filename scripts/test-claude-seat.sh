@@ -549,7 +549,7 @@ no_log   "...before any sign-in"              "mcp login"
 new_home h3 "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-4\"}"
 run mcp quantivly-4
 check "a pooled seat with no account dir is refused" "$RC" "1"
-want_err "...naming what to do"                      "add the seat first"
+want_err "...naming the builder, not add, which refuses a pooled name" "build it: scripts/claude-account-dirs.sh quantivly-4"
 
 # quantivly-1 uses Slack, Notion and Linear; quantivly-3 has Notion already; the
 # Linear plugin is switched off in the user settings (DO-801).
@@ -661,6 +661,9 @@ mcp_fixture
 run mcp --dry-run quantivly-3
 check "a pool member with no profile is skipped, not read" "$RC" "0"
 want_out "...and the others still count"                   "plugin:slack:slack: 'quantivly-1'"
+run mcp quantivly-7
+check "a pooled seat with no profile store is refused"     "$RC" "1"
+want_err "...with the doctor's remedy, not add's"          "'clauth login quantivly-7' if it should exist, otherwise take it out of the pool (claude-tenants-edit --commit pool-remove quantivly quantivly-7)"
 
 new_home h17; mcp_fixture; printf '{"enabledPlugins": [' > "$FHOME/.claude/settings.json"
 run mcp quantivly-3
@@ -679,7 +682,7 @@ check "with Slack disabled too, nothing is left to do" "$RC" "0"
 want_out "...and it says so"                           "nothing to do"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=207
+EXPECTED_ROWS=209
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
