@@ -933,7 +933,7 @@ want_out "...saying the store keeps its copy"                 "Its store still h
 
 new_home i27 "$R5"; retire_fixture
 mkdir -p "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0" "$FHOME/.clauth/live_sessions"
-cp "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"rotated-%s","refreshToken":"r-%s"}}\n' 305 305 > "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0/.credentials.json"
 printf '{"pid":305,"start_profile":"quantivly-1","current_member":"quantivly-5"}\n' > "$FHOME/.clauth/live_sessions/305-0.json"
 mk_proc 305 "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0"
 run retire quantivly-5
@@ -941,7 +941,7 @@ check "a clauth session clauth moved onto the seat holds it"   "$RC" "3"
 want_out "...named by its sid"                                 "clauth switch 305-0 quantivly-1"
 new_home i27b "$R5"; retire_fixture
 mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-306-0" "$FHOME/.clauth/live_sessions"
-cp "$FHOME/.clauth/profiles/quantivly-1/credentials.json" "$FHOME/.clauth/profiles/quantivly-5/runtime-306-0/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"rotated-%s","refreshToken":"r-%s"}}\n' 306 306 > "$FHOME/.clauth/profiles/quantivly-5/runtime-306-0/.credentials.json"
 printf '{"pid":306,"start_profile":"quantivly-5","current_member":"quantivly-1"}\n' > "$FHOME/.clauth/live_sessions/306-0.json"
 mk_proc 306 "$FHOME/.clauth/profiles/quantivly-5/runtime-306-0"
 run retire quantivly-5
@@ -1000,8 +1000,57 @@ CLAUDE_SEAT_TENANTS_EDIT="$STUBS/edit-launch-during-remove" REAL_EDIT="$DOTFILES
 check "a session that arrives during the pool edit stops the teardown" "$RC" "3"
 check "...and the dir is kept"                                         "$([[ -d "$FHOME/.local/state/claude-account-dirs/quantivly-5" ]] && echo kept)" "kept"
 
+# A real file no store matches, in the seat's own runtime dir, with no live-session
+# row: nothing says it moved, so it holds the seat. Likewise a runtime dir with no
+# credential at all.
+new_home i9b "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-308-0"
+printf '{"claudeAiOauth":{"accessToken":"rotated-%s","refreshToken":"r-%s"}}\n' 308 308 > "$FHOME/.clauth/profiles/quantivly-5/runtime-308-0/.credentials.json"
+mk_proc 308 "$FHOME/.clauth/profiles/quantivly-5/runtime-308-0"
+run retire quantivly-5
+check "an undecidable real file in the seat's own runtime dir holds it" "$RC" "3"
+new_home i9c "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-309-0"
+mk_proc 309 "$FHOME/.clauth/profiles/quantivly-5/runtime-309-0"
+run retire quantivly-5
+check "...as does its runtime dir with no credential at all"           "$RC" "3"
+
+# A session in ANOTHER profile's runtime dir, linked into this seat's deleted store.
+new_home i23b "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-1/runtime-310-0"
+ln -s "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.clauth/profiles/quantivly-1/runtime-310-0/.credentials.json"
+rm -f "$FHOME/.clauth/profiles/quantivly-5/credentials.json"
+mk_proc 310 "$FHOME/.clauth/profiles/quantivly-1/runtime-310-0"
+run retire quantivly-5
+check "a link into its deleted store from another profile's dir holds it" "$RC" "3"
+
+# The store is gone and the account dir holds a real file nobody can attribute:
+# the account dir itself is what makes it a holder.
+new_home i22b "$R5"; retire_fixture
+rm -f "$FHOME/.local/state/claude-account-dirs/quantivly-5/.credentials.json" "$FHOME/.clauth/profiles/quantivly-5/credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"rotated-%s","refreshToken":"r-%s"}}\n' 311 311 > "$FHOME/.local/state/claude-account-dirs/quantivly-5/.credentials.json"
+mk_proc 311 "$FHOME/.local/state/claude-account-dirs/quantivly-5"
+run retire quantivly-5
+check "a session on its account dir holds it, whatever its credential" "$RC" "3"
+
+# A CONSOLE_SEATS that is one line long does not swallow the lines after it.
+new_home i28b "$R5"; retire_fixture
+printf 'CONSOLE_SEATS = "quantivly-3"
+OTHER = ("quantivly-5",)
+' > "$FHOME/budget.py"
+run retire quantivly-5
+check "a one-line CONSOLE_SEATS ends at its line"   "$RC" "0"
+
+# An earlier run renamed the dir but never recorded the name, and the profile is gone.
+new_home i35 "$R5"; retire_fixture
+mv "$FHOME/.local/state/claude-account-dirs/quantivly-5" "$FHOME/.local/state/claude-account-dirs/quantivly-5.retired-20260101"
+rm -f "$FHOME/.clauth/profiles/quantivly-5/credentials.json"
+run retire quantivly-5
+check "a tombstone whose name was never recorded is finished, not refused" "$RC" "0"
+check "...recording it"                                                  "$(retired_of quantivly-5)" "retired $(date +%F) with claude-seat"
+
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=313
+EXPECTED_ROWS=320
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
