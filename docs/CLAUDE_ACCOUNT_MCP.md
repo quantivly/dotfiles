@@ -376,17 +376,32 @@ A session launched on the seat before this step can never be moved in place.
 check uses, and prints a `✗` for each difference.
 
 **4. Add it to its tenant's pool.** The tenants file is
-`~/.config/claude-tenants.zsh`, which is data outside this repo. Add the name to
-`CLAUDE_TENANT_POOL[<tenant>]` and nowhere else. Leave
-`CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
-another machine will own the seat, and leave `CLAUDE_TENANT_BUCKETS` alone until
-the new seat's usage has been measured against the others. Do this after step 2,
-so the pool never names a profile with no credential. Then check the file: a
-tenants file that exists and cannot be read refuses every launch.
+`~/.config/claude-tenants.zsh`, which is data outside this repo. Do not edit it
+by hand. Use the editor:
 
 ```bash
-zsh -n ~/.config/claude-tenants.zsh && scripts/machines-render --check
+scripts/claude-tenants-edit --dry-run pool-add <tenant> <name>   # see the change
+scripts/claude-tenants-edit --commit  pool-add <tenant> <name>   # make and commit it
 ```
+
+It changes the name's pool and nothing else. It refuses:
+- a name with no profile store;
+- a name another machine owns;
+- a compat symlink;
+- a retired name.
+
+It writes only after checking three things on a copy: the copy parses, it loads
+cleanly the way a launch loads it, and the tables differ from the original by
+exactly that one change. It keeps a backup under
+`~/.local/state/claude-tenants-edit/`. `--commit` commits the file alone, and
+refuses if the file already had a hand edit. `pool-remove` and `retire-name`
+work the same way. A retired name goes into `CLAUDE_TENANT_RETIRED`, so it is
+never handed out again.
+
+Leave `CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
+another machine will own the seat. Leave `CLAUDE_TENANT_BUCKETS` alone until the
+new seat's usage has been measured against the others. Do this step after step 2,
+so the pool never names a profile with no credential.
 
 **5. Build and verify.** Run `scripts/claude-account-dirs.sh <name>`. Then
 `claude-doctor` should print `✓ <name>: credential shared with the clauth store`,

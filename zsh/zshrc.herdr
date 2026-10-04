@@ -241,7 +241,7 @@ _claude_holder_count_one() {
 # DO-641 guard silently off. The on-demand path for shells that never ran this
 # (claude-tenants-owner) therefore forks a shell rather than sourcing in place.
 typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED
 : "${CLAUDE_TENANT_DEFAULT=}"
 [[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
   source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
@@ -607,7 +607,7 @@ claude-tenants-owner() {   # $1 = profile
   fork_err="$(command mktemp)" || { print -r -- "could not create a temp file to read $f"; return 2 }
   raw="$(command zsh -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED
     source "$1"
     print -r -- "__OWNER__${CLAUDE_TENANT_MACHINE_OWNED[$2]:-}"
     print -r -- "__DONE__"' \
