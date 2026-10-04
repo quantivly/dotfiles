@@ -473,15 +473,15 @@ cred_signal() {   # $1 = credential file
   fi
   return 0
 }
-# clauth's live-session row for a runtime dir (`<profiles>/<p>/runtime-<sid>`):
-# the member it is on now. Trusted only when its pid IS this process: a row left
-# by an earlier session with the same sid says nothing about this one.
+# clauth's live-session row for a runtime dir (`runtime-<sid>`): the member it
+# is on now. Trusted only when its pid IS this process: a row left by an earlier
+# session with the same sid says nothing about this one, and one whose pid
+# matches is clauth's own word, wherever the dir is.
 row_signal() {   # $1 = config dir (absolute, normalised), $2 = pid
   local sid row_f rpid member
   sig=""
   [[ "${1:t}" == runtime-(#b)(<->-<->) ]] || return 0
   sid="${match[1]}"
-  [[ "${1:h:h}" == "${PROFILES:a}" || "${1:h:h}" == "${PROFILES:P}" ]] || return 0
   row_f="$HOME/.clauth/live_sessions/$sid.json"
   [[ -e "$row_f" || -L "$row_f" ]] || return 0
   rpid="$(jq -er '.pid | tostring' "$row_f" 2>/dev/null)" || { sig=unknown; return 0; }

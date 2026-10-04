@@ -1182,8 +1182,35 @@ new_home i57 "$R5"; retire_fixture; printf '# a hand edit
 run retire --plan quantivly-5
 check "a plan on a tenants file the editor will not commit exits 2" "$RC" "2"
 
+new_home i58 "$R5"; retire_fixture; mk_proc 412 ""
+run retire quantivly-5
+check "a session on a global file nothing attributes is undecided, so exit 3" "$RC" "3"
+
+new_home i43b "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-413-0" "$FHOME/.clauth/live_sessions"
+printf '{"claudeAiOauth":{"accessToken":"rotated-413","refreshToken":"r-413"}}\n' > "$FHOME/.clauth/profiles/quantivly-5/runtime-413-0/.credentials.json"
+printf '{"pid":999,"start_profile":"quantivly-5","current_member":"quantivly-1"}\n' > "$FHOME/.clauth/live_sessions/413-0.json"
+mk_proc 413 "$FHOME/.clauth/profiles/quantivly-5/runtime-413-0"
+run retire quantivly-5
+check "a stale row does not clear the seat's own runtime dir either" "$RC" "3"
+
+cat > "$STUBS/edit-launch-during-record" <<'STUB'
+#!/usr/bin/env zsh
+if [[ " $* " == *" retire-name "* ]]; then
+  d="$HOME/procfix/414"; mkdir -p "$d"; print claude > "$d/comm"
+  printf 'CLAUDE_CONFIG_DIR=%s\0' "$HOME/.local/state/claude-account-dirs/quantivly-5" > "$d/environ"
+fi
+exec zsh "$REAL_EDIT" "$@"
+STUB
+chmod +x "$STUBS/edit-launch-during-record"
+new_home i59 "$R5"; retire_fixture
+CLAUDE_SEAT_TENANTS_EDIT="$STUBS/edit-launch-during-record" REAL_EDIT="$DOTFILES/scripts/claude-tenants-edit" \
+    run retire quantivly-5
+check "a session that starts while the name is recorded stops the logout" "$RC" "3"
+no_log "...which is not run"                                           "mcp logout"
+
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=339
+EXPECTED_ROWS=343
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
