@@ -62,10 +62,11 @@
 # Exit (mcp): 0 signed in to every plugin server its pools use (or dry run
 #       passed) · 1 refused · 2 a sign-in failed or did not take, or an input
 #       could not be read · 64 usage.
-# Exit (retire): 0 retired (or already retired, or the plan printed) · 1 refused:
-#       something this does not edit still names the seat · 2 could not finish
-#       safely · 3 out of every pool, but sessions still hold it: nothing was
-#       deleted; move them and run it again · 64 usage.
+# Exit (retire): 0 retired (or already retired, or a plan the real run would
+#       carry out) · 1 refused, or a plan the real run would refuse: something
+#       this does not edit still names the seat · 2 could not finish safely, or an
+#       input could not be read · 3 out of every pool, but it may still be in use:
+#       nothing was deleted; move its sessions and run it again · 64 usage.
 
 emulate -R zsh
 setopt no_unset pipe_fail extended_glob
@@ -118,7 +119,8 @@ id_of() { [[ -r "$1" ]] && print -r -- "${${mapfile[$1]-}//[[:space:]\"]/}" }
 
 # rabota's seats, into rseat (name -> where): each tenant TOML's `[seats] local`,
 # in every spelling tomllib reads (`local = "x"`, `local = 'x'`, `seats.local =
-# ...`, `seats = { local = ... }`). A commented-out line matches too; refusing one
+# ...`, `seats = { local = ... }`, `"local" = ...`). A commented-out line matches
+# too; refusing one
 # name too many is the safe direction. A file it cannot read is a failure, never
 # empty. (`${mapfile[f]-}`: an empty file is UNSET to mapfile, which no_unset makes
 # fatal.) Filled in place rather than printed, so `fail` exits the script and not
@@ -129,7 +131,7 @@ rabota_seats() {
   for f in "$RABOTA"/tenants/*.toml(N); do
     [[ -r "$f" ]] || fail "cannot read $f, which may name a seat"
     for l in "${(@f)mapfile[$f]-}"; do
-      [[ "$l" == (#b)(|*[^A-Za-z0-9_-])local[[:space:]]#=[[:space:]]#[\"\']([^\"\']##)[\"\']* ]] && \
+      [[ "$l" == (#b)(|*[^A-Za-z0-9_-])[\"\']#local[\"\']#[[:space:]]#=[[:space:]]#[\"\']([^\"\']##)[\"\']* ]] && \
         rseat[$match[2]]="rabota's seat in ${f:t}"
     done
   done
@@ -138,16 +140,23 @@ rabota_seats() {
 # ever runs on (DO-805 moves it into data). A file it cannot read, or one without
 # that line, is a failure: the seat could be named there.
 console_seats() {
-  local l rest found=0
+  local l rest found=0 inside=0
   [[ -r "$RABOTA_BUDGET" ]] || fail "cannot read ${RABOTA_BUDGET/#$HOME/~}, whose CONSOLE_SEATS may name the seat"
   for l in "${(@f)mapfile[$RABOTA_BUDGET]-}"; do
-    [[ "$l" == [[:space:]]#CONSOLE_SEATS[[:space:]]#=* ]] || continue
-    found=1
-    rest="${l#*=}"
+    if (( ! inside )); then
+      [[ "$l" == [[:space:]]#CONSOLE_SEATS[[:space:]]#(:[^=]#|)=* ]] || continue
+      found=1 inside=1
+      rest="${l#*=}"
+      # A value that opens no bracket is one line long.
+      [[ "$rest" == *[\(\[]* ]] || inside=0
+    else
+      rest="$l"
+    fi
     while [[ "$rest" == (#b)[^\"\']#[\"\']([^\"\']##)[\"\'](*) ]]; do
       cseat[$match[1]]=1
       rest="$match[2]"
     done
+    [[ "$l" == *[\)\]]* ]] && inside=0
   done
   (( found )) || fail "found no CONSOLE_SEATS line in ${RABOTA_BUDGET/#$HOME/~}; its format changed, so the console seat is unknown"
 }
@@ -195,6 +204,10 @@ if [[ "$cmd" == add ]]; then
 else
   (( ${#pos} == 1 )) || usage
   tenant="" name="${pos[1]}" trailer=""
+  # The editor's own rule for a retire reason, checked before anything is changed
+  # rather than at the record step, after the pool edit.
+  [[ "$reason" != *[\"\$\`\\]* && "$reason" != *[[:cntrl:]]* ]] || \
+    refuse "the reason may not contain a double quote, \$, a backtick, a backslash or a control character"
   [[ "$name" == [A-Za-z0-9]* && -z "${name//[A-Za-z0-9_.-]/}" ]] || \
     refuse "'$name' may only contain letters, digits, - _ and ., and must start with a letter or digit"
 fi
@@ -233,7 +246,7 @@ fi
 source "$CLAUDE_SH" >/dev/null 2>&1
 for f in _claude_toml_flat _claude_seat_cred_file _claude_mcp_plugin_states _claude_plugins_disabled \
          _claude_pool_member_problem _claude_proc_config_dirs _claude_proc_root _claude_active_profile \
-         _claude_global_cred_file; do
+         _claude_global_cred_file _claude_cred_owner _claude_cred_id; do
   (( $+functions[$f] )) || fail "$CLAUDE_SH does not define $f"
 done
 swapkeys() {   # $1 = config.toml -> sorted "key=value" lines a move compares
@@ -412,15 +425,38 @@ fi
 # is never reused. `clauth delete` stays the human's: it discards the login, and
 # it revokes nothing server-side.
 
+# Whether credential file $1 is a link into seat $name's store. Read off the
+# link's OWN target, made absolute, as well as resolved: zsh's :A does not follow
+# a DANGLING link, so once `clauth delete` removed the store, a link into it
+# resolved to itself and every session on the seat looked like no session.
+links_to_store() {
+  local c="$1" t
+  [[ -L "$c" ]] || return 1
+  [[ "${c:A}" == "${store:A}" ]] && return 0
+  t="$(readlink -- "$c" 2>/dev/null)" || return 1
+  [[ "$t" == /* ]] || t="${c:h}/$t"
+  [[ "${t:a}" == "${store:a}" || "${t:a}" == "${PROFILES:A}/$name/credentials.json" ]]
+}
+# The profile a real credential file belongs to, by the doctor's own identity
+# (_claude_cred_id), or nothing.
+real_owner() { _claude_cred_owner "$(_claude_cred_id "$1" 2>/dev/null)" 2>/dev/null }
+
 # The sessions holding seat $name, into holders (one line each, with the command
-# that moves it to $target) and n_unknown. A session holds the seat when its
-# credential is a link into the seat's store; when it is a real file (an atomic
-# write replaced the link), its config dir decides: the seat's account dir, or one
-# of its clauth runtime dirs. One with no CLAUDE_CONFIG_DIR reads the global file,
-# which is clauth's ACTIVE profile.
+# that moves it to $target) and n_unknown. Every case that cannot be decided is
+# n_unknown, which stops the teardown like a holder does:
+#   - its account dir as the config dir: a holder, whatever its credential is;
+#   - a clauth runtime dir (`<profile>/runtime-<sid>`, any profile): the member
+#     clauth's live-session row says it is on now; without a row, where its
+#     credential link points, or for a real file, whose credential it is;
+#   - any other config dir: where its credential link points, or whose it is;
+#   - no config dir: the global file, which is clauth's ACTIVE profile.
+# A relative CLAUDE_CONFIG_DIR is resolved against the process's OWN cwd.
 holders_of_seat() {
-  local row pid cfg cred hold cwd procroot active sa="${store:A}" ada="${ad:A}" pa="${PROFILES:A}/$name"
+  local row pid cfg cred cwdp cwd hold sid row_f member owner procroot active
+  holders=() n_unknown=0
   procroot="$(_claude_proc_root)"
+  [[ -d "$procroot" && -r "$procroot" && -x "$procroot" ]] || \
+    fail "cannot read ${procroot}, so whether a session holds '$name' is unknown"
   active="$(_claude_active_profile)"
   for row in ${(f)"$(_claude_proc_config_dirs)"}; do
     [[ -n "$row" ]] || continue
@@ -429,21 +465,50 @@ holders_of_seat() {
       (( ++n_unknown ))
       continue
     fi
+    cwdp="$(readlink "$procroot/$pid/cwd" 2>/dev/null)"
+    if [[ -n "$cfg" && "$cfg" != /* ]]; then
+      if [[ -z "$cwdp" ]]; then (( ++n_unknown )); continue; fi
+      cfg="$cwdp/$cfg"
+    fi
     hold=0
     if [[ -z "$cfg" ]]; then
       cred="$(_claude_global_cred_file)"
-      [[ "$active" == "$name" || ( -L "$cred" && "${cred:A}" == "$sa" ) ]] && hold=1
+      if [[ -n "$active" ]]; then
+        [[ "$active" == "$name" ]] && hold=1
+      elif links_to_store "$cred"; then
+        hold=1
+      else
+        owner="$(real_owner "$cred")"
+        if [[ -z "$owner" ]]; then (( ++n_unknown )); continue; fi
+        [[ "$owner" == "$name" ]] && hold=1
+      fi
+    elif [[ "${cfg:a}" == "${ad:a}" || "${cfg:A}" == "${ad:A}" ]]; then
+      hold=1
     else
       cred="$cfg/.credentials.json"
-      if [[ -L "$cred" ]]; then
-        [[ "${cred:A}" == "$sa" ]] && hold=1
-      else
-        [[ "${cfg:A}" == "$ada" || "${cfg:A}" == "$pa"/* ]] && hold=1
+      member=""
+      if [[ "${cfg:t}" == runtime-(#b)(<->-<->) ]]; then
+        sid="${match[1]}"
+        row_f="$HOME/.clauth/live_sessions/$sid.json"
+        [[ -r "$row_f" ]] && member="$(jq -r '(.current_member // .start_profile) // empty' "$row_f" 2>/dev/null)"
+      fi
+      if [[ -n "$member" ]]; then
+        [[ "$member" == "$name" ]] && hold=1
+      elif [[ -L "$cred" ]]; then
+        links_to_store "$cred" && hold=1
+      elif [[ -e "$cred" ]]; then
+        owner="$(real_owner "$cred")"
+        if [[ -n "$owner" ]]; then
+          [[ "$owner" == "$name" ]] && hold=1
+        elif [[ "${cfg:a}" == "${PROFILES:a}/$name"/* || "${cfg:A}" == "${PROFILES:A}/$name"/* ]]; then
+          hold=1    # this seat's own runtime dir, and nothing says otherwise
+        fi
+      elif [[ "${cfg:a}" == "${PROFILES:a}/$name"/* ]]; then
+        hold=1
       fi
     fi
     (( hold )) || continue
-    cwd="$(readlink "$procroot/$pid/cwd" 2>/dev/null)"
-    cwd="${${cwd/#$HOME/~}:-?}"
+    cwd="${${cwdp/#$HOME/~}:-?}"
     if [[ -n "$cfg" && "${cfg:t}" == runtime-(#b)(<->-<->) ]]; then
       holders+=( "clauth session ${match[1]} (pid $pid, $cwd): clauth switch ${match[1]} $target" )
     elif [[ -z "$cfg" ]]; then
@@ -454,17 +519,33 @@ holders_of_seat() {
   done
 }
 
+# The plugin servers credential file $1 is signed in to, one per line, sorted and
+# once each (not discovery records). Nothing for a missing file or a link left
+# dangling by `clauth delete`. Run in $(...), so the caller checks its status.
+servers_of() {
+  local out kv
+  local -aU srvs
+  [[ -e "$1" ]] || return 0
+  out="$(_claude_mcp_plugin_states "$1")" || fail "cannot read the MCP sign-ins in ${1/#$HOME/~}"
+  for kv in "${(@f)out}"; do
+    [[ -n "$kv" && "${kv#*$'\t'}" != discovery ]] && srvs+=( "${kv%%$'\t'*}" )
+  done
+  (( ${#srvs} )) && print -rl -- "${(@o)srvs}"
+  return 0
+}
+
 seat_retire() {
-  local store="$PROFILES/$name/credentials.json" ad="$ADROOT/$name" t m h f out kv srv tomb rc
-  local target="" n_unknown=0
-  local -a pools ovfs blockers holders servers
-  local -A seen
+  local store="$PROFILES/$name/credentials.json" ad="$ADROOT/$name" t m h srv tomb rc err out n_unknown=0
+  local target="" refusal=""
+  local -a pools ovfs blockers holders tombs ssv lsv left
+  local -aU servers
   case "$(_claude_pool_member_problem "$ADROOT" "$PROFILES" "$name")" in
     compat)  refuse "'$name' is a compat symlink in the account root, not a seat; retire the profile it stands for" ;;
     retired) refuse "'$name' is itself a retired name" ;;
   esac
   for t in ${(ok)pool}; do (( ${${=pool[$t]}[(Ie)$name]} )) && pools+=( "$t" ); done
   for t in ${(ok)ovf};  do (( ${${=ovf[$t]}[(Ie)$name]} ))  && ovfs+=( "$t" ); done
+  tombs=( "$ADROOT/$name".retired-*(N/) )
   rabota_seats
   console_seats
   (( ${+owned[$name]} )) && blockers+=( "CLAUDE_TENANT_MACHINE_OWNED in the tenants file: another machine bills it" )
@@ -479,7 +560,8 @@ seat_retire() {
       [[ -e "$store" || -L "$store" ]] && say "Its profile is still here: clauth delete $name -y"
       return 0
     fi
-    [[ -e "$store" || -L "$store" ]] || refuse "there is no seat called '$name' here: no pool, profile or account dir names it"
+    [[ -e "$store" || -L "$store" ]] || (( ${#tombs} )) || \
+      refuse "there is no seat called '$name' here: no pool, profile or account dir names it"
   fi
 
   # Where its sessions go: another usable member of a pool it is in.
@@ -491,85 +573,73 @@ seat_retire() {
       fi
     done
   done
-  [[ -n "$target" ]] || target="<another profile>"
+  [[ -n "$target" ]] || target="<another seat>"
+
+  # Every pool edit is checked before any is made: a refusal on the second pool
+  # must not leave the first one already edited and committed.
+  if (( ! ${#blockers} )); then
+    for t in $pools; do
+      err="$(command zsh "$EDIT" --dry-run pool-remove "$t" "$name" 2>&1 >/dev/null)"
+      rc=$?
+      (( rc == 0 )) && continue
+      if (( rc == 1 )); then
+        refusal="the tenants-file editor would not take '$name' out of '$t': ${${err%%$'\n'*}#*refused: }"
+      else
+        refusal="the tenants-file editor could not check taking '$name' out of '$t' (exit $rc): ${err%%$'\n'*}"
+      fi
+      break
+    done
+  fi
   holders_of_seat
 
   step plan "'$name'"
   say "  pools:          ${${(j:, :)pools}:-none}"
   if [[ -e "$store" || -L "$store" ]]; then say "  profile store:  yes"; else say "  profile store:  none"; fi
   if [[ -d "$ad" ]]; then say "  account dir:    ${ad/#$HOME/~}"; else say "  account dir:    none"; fi
-  if (( ${+retired[$name]} )); then say "  retired table:  already names it"; fi
+  (( ${+retired[$name]} )) && say "  retired table:  already names it"
   for h in $blockers; do say "  named in:       $h"; done
   for h in $holders; do say "  held by:        $h"; done
-  if (( n_unknown )); then
-    say "  cannot tell:    $n_unknown Claude process(es) whose environment cannot be read"
-  fi
+  (( n_unknown )) && say "  cannot tell:    $n_unknown Claude process(es) whose holder cannot be decided"
   if (( dry )); then
     say ""
+    if (( ${#blockers} )); then
+      say "the real run would refuse: still named in ${(j:; :)blockers}"
+      return 1
+    elif [[ -n "$refusal" ]]; then
+      say "the real run would refuse: $refusal"
+      return 1
+    fi
     say "a plan only: nothing was changed"
     return 0
   fi
   (( ${#blockers} )) && \
     refuse "'$name' is still named in: ${(j:; :)blockers}. Edit those first; this command does not."
+  [[ -z "$refusal" ]] || refuse "$refusal"
 
   if (( ${#pools} )); then
     step pool "out of ${(j:, :)pools}"
     typeset -ga eflags
     editor_flags
     for t in $pools; do
-      command zsh "$EDIT" "${eflags[@]}" pool-remove "$t" "$name"
-      rc=$?
-      (( rc == 0 )) && continue
-      (( rc == 1 )) && refuse "the tenants-file editor would not take '$name' out of '$t' (above)"
-      fail "the tenants-file editor could not take '$name' out of '$t' (above)"
+      command zsh "$EDIT" "${eflags[@]}" pool-remove "$t" "$name" || \
+        fail "the tenants-file editor did not take '$name' out of '$t' (above); the pools before it were edited"
     done
   fi
 
+  # Scanned AGAIN, now that no new launch can be routed to it.
   step holders "'$name'"
+  holders_of_seat
   if (( ${#holders} || n_unknown )); then
     for h in $holders; do say "  $h"; done
-    if (( n_unknown )); then
-      say "  $n_unknown Claude process(es) whose environment cannot be read: cannot tell whether they hold it"
-    fi
+    (( n_unknown )) && say "  $n_unknown Claude process(es) whose holder cannot be decided"
     print -u2 -- "$prog: '$name' is out of every pool, but it may still be in use; nothing was deleted."
     print -u2 -- "    Move each session above, then run this again."
     exit 3
   fi
   say "  none"
 
-  if [[ -d "$ad" ]]; then
-    step logout "plugin MCP servers in '$name'"
-    f="$(_claude_seat_cred_file "$ADROOT" "$PROFILES" "$name")"
-    # A link left dangling by `clauth delete` holds nothing to log out of.
-    if [[ -e "$f" ]]; then
-      out="$(_claude_mcp_plugin_states "$f")" || \
-        fail "cannot read the MCP sign-ins of '$name' (${f/#$HOME/~})"
-      for kv in "${(@f)out}"; do
-        [[ -n "$kv" ]] || continue
-        srv="${kv%%$'\t'*}"
-        [[ "${kv#*$'\t'}" == discovery ]] && continue
-        (( ${+seen[$srv]} )) && continue
-        seen[$srv]=1
-        servers+=( "$srv" )
-      done
-    fi
-    servers=( "${(@o)servers}" )
-    for srv in $servers; do
-      if CLAUDE_CONFIG_DIR="$ad" "$CLAUDE_BIN" mcp logout "$srv" >/dev/null 2>&1; then
-        say "  ✓ $srv"
-      else
-        say "  ✗ $srv: 'claude mcp logout' failed; revoke its grant at the service (below)"
-      fi
-    done
-    (( ${#servers} )) || say "  none signed in"
-
-    step tombstone "${ad/#$HOME/~}"
-    tomb="$ADROOT/$name.retired-$(date +%Y%m%d)"
-    [[ ! -e "$tomb" && ! -L "$tomb" ]] || fail "${tomb/#$HOME/~} already exists; rename one of them by hand"
-    command mv -- "$ad" "$tomb" || fail "could not rename ${ad/#$HOME/~}"
-    say "  now ${tomb/#$HOME/~}"
-  fi
-
+  # Recorded FIRST of the teardown: the step most likely to be refused (it checks
+  # the reason and the tables) comes before anything that cannot be redone.
   step record "the retired-names table"
   if (( ${+retired[$name]} )); then
     say "  already names it"
@@ -584,10 +654,46 @@ seat_retire() {
     }
   fi
 
+  # Everything it was signed in to, for the revoke list: the store, read BEFORE
+  # the logout changes it, and the account dir. Only the dir's are logged out.
+  out="$(servers_of "$store")" || exit $?
+  ssv=( ${(f)out} )
+  if [[ -d "$ad" ]]; then
+    step logout "plugin MCP servers in '$name'"
+    out="$(servers_of "$ad/.credentials.json")" || exit $?
+    lsv=( ${(f)out} )
+    for srv in $lsv; do
+      if CLAUDE_CONFIG_DIR="$ad" "$CLAUDE_BIN" mcp logout "$srv" >/dev/null 2>&1; then
+        say "  ✓ $srv"
+      else
+        say "  ✗ $srv: 'claude mcp logout' failed; revoke its grant at the service (below)"
+      fi
+    done
+    (( ${#lsv} )) || say "  none signed in"
+    # A logout is an atomic write: it replaces the dir's link with a real file and
+    # leaves the store's copy as it was. The account-dir builder's reconciler folds
+    # it back, before the rename takes the dir out of its reach.
+    if (( ${#lsv} )) && [[ -e "$store" ]]; then
+      command bash "$ACCDIRS" "$name" >/dev/null 2>&1 || \
+        say "  claude-account-dirs.sh $name failed, so the store may keep its copy (below)"
+    fi
+
+    step tombstone "${ad/#$HOME/~}"
+    tomb="$ADROOT/$name.retired-$(date +%Y%m%d)"
+    [[ ! -e "$tomb" && ! -L "$tomb" ]] || fail "${tomb/#$HOME/~} already exists; rename one of them by hand"
+    command mv -- "$ad" "$tomb" || fail "could not rename ${ad/#$HOME/~}"
+    say "  now ${tomb/#$HOME/~}"
+  fi
+  servers=( $ssv $lsv )
+  servers=( "${(@o)servers}" )
+  out="$(servers_of "$store")" || exit $?
+  left=( ${(f)out} )
+
   step done "'$name' is retired here. Left for you:"
   if [[ -e "$store" || -L "$store" ]]; then
     say "  - clauth delete $name -y    removes the profile and its login on this machine;"
     say "    it revokes nothing server-side."
+    (( ${#left} )) && say "    Its store still holds ${(j:, :)left} until then."
   fi
   say "  - claude.ai -> Settings -> Claude Code: revoke this seat's login."
   say "  - Remove the seat from the Team, and its Workspace alias, or hand it over."

@@ -460,23 +460,26 @@ scripts/claude-seat retire --plan <name>     # where the name appears, who holds
 scripts/claude-seat retire <name>            # do it
 ```
 
-The steps are ordered so that each is safe to repeat, and **nothing is deleted while a
-session holds the seat**:
+`--plan` exits 1 when the real run would refuse. The steps are ordered so that each
+is safe to repeat, and **nothing is deleted while a session may hold the seat**:
 
 1. **Refuse** when something the command does not edit names the seat: rabota's
    `[seats] local` or `CONSOLE_SEATS`, the machine-ownership tables, or an overflow
-   entry. It says which; edit that first.
+   entry. It says which; edit that first. Every pool edit is also checked before
+   any is made, so a pool it cannot leave stops it before the first edit.
 2. **Out of every pool**, through `claude-tenants-edit`, so no new launch lands on it.
-   The editor refuses to empty a pool.
-3. **Holders.** Every live Claude process whose credential is the seat's: a
-   `clauth start` session (printed with its `clauth switch <sid> <seat>`), a session
-   on its account dir (`/exit`, then `claude-as <seat> --resume <id>`), or one on the
-   global file while the seat is clauth's active profile. A process whose
-   environment cannot be read counts as a holder. With any holder it stops at exit 3
-   and moves nothing itself: move them, then run it again.
-4. **With none left:** `claude mcp logout` for each plugin server in its dir, the
-   account dir renamed to `<name>.retired-<date>`, and the name recorded in
-   `CLAUDE_TENANT_RETIRED` so it is never handed out again.
+3. **Holders, read after the pool edit.** A live Claude process holds the seat when
+   its config dir is the seat's account dir; when it is a `clauth start` session
+   whose live-session row says it is on the seat; when its credential links into
+   the seat's store, even a store `clauth delete` already removed; or when it reads
+   the global file while the seat is clauth's active profile. A process it cannot
+   decide about counts as a holder. With any, it stops at exit 3, prints the move
+   for each (`clauth switch <sid> <seat>`, or `/exit` then `claude-as <seat>
+   --resume <id>`), and moves nothing itself.
+4. **With none left:** the name is recorded in `CLAUDE_TENANT_RETIRED` first, so it
+   is never handed out again. Then `claude mcp logout` runs for each plugin server
+   in its dir, the account-dir builder folds the logged-out file back into the
+   store, and the account dir is renamed to `<name>.retired-<date>`.
 
 **After it: the steps that stay manual.** The command prints them.
 

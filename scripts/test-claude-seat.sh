@@ -125,6 +125,11 @@ ad="$HOME/.local/state/claude-account-dirs/$1"; mkdir -p "$ad"
 if [[ "${STUB_AD_COPY:-0}" == 1 ]]; then
   rm -f "$ad/.credentials.json"; cp "$HOME/.clauth/profiles/$1/credentials.json" "$ad/.credentials.json"
 else
+  # A real file there is the newer copy (an atomic write replaced the link): it is
+  # adopted into the store before the link is restored, as the reconciler does.
+  if [[ -f "$ad/.credentials.json" && ! -L "$ad/.credentials.json" ]]; then
+    cp "$ad/.credentials.json" "$HOME/.clauth/profiles/$1/credentials.json"
+  fi
   ln -sfn "$HOME/.clauth/profiles/$1/credentials.json" "$ad/.credentials.json"
 fi
 # A first build seeds .claude.json from the global file, identity and all:
@@ -776,6 +781,8 @@ check "...in two commits of the tenants file"      "$(gitf -C "$FHOME/repo" log 
 want_out "...with clauth delete left for a person" "clauth delete quantivly-5 -y"
 no_log   "...which it does not run"                "clauth delete"
 want_out "...and the service grants to revoke"     "Revoke its app grants at each service (plugin:slack:slack)"
+check "...and the store no longer holds the sign-in it logged out" \
+      "$(jq -r '[.mcpOAuth // {} | keys[] | select(startswith("plugin:slack:slack"))] | length' "$FHOME/.clauth/profiles/quantivly-5/credentials.json")" "0"
 run retire quantivly-5
 check "retiring it again is exit 0"                "$RC" "0"
 want_out "...saying it is done"                    "already retired"
@@ -825,7 +832,7 @@ check "a session started on it but moved to another seat does not hold it" "$RC"
 new_home i11 "$R5"; retire_fixture; mk_proc 204 -
 run retire quantivly-5
 check "an unreadable Claude process is exit 3"     "$RC" "3"
-want_out "...as one it cannot tell about"          "cannot tell whether they hold it"
+want_out "...as one it cannot tell about"          "whose holder cannot be decided"
 check "...and nothing is deleted"                  "$([[ -d "$FHOME/.local/state/claude-account-dirs/quantivly-5" ]] && echo kept)" "kept"
 
 new_home i12 "$R5"; retire_fixture; mk_proc 205 ""
@@ -881,8 +888,112 @@ run retire quantivly-5
 check "a seat whose profile is already deleted is still retired" "$RC" "0"
 no_out "...without asking for clauth delete"                     "clauth delete quantivly-5"
 
+# --- from the reviews: every way a holder was missed, or a step ran out of order
+new_home i22 "$R5"; retire_fixture; rm -f "$FHOME/.clauth/profiles/quantivly-5/credentials.json"
+mk_proc 301 "$FHOME/.local/state/claude-account-dirs/quantivly-5"
+run retire quantivly-5
+check "a session on its account dir holds it even with the store deleted" "$RC" "3"
+check "...and the dir is kept"                                            "$([[ -d "$FHOME/.local/state/claude-account-dirs/quantivly-5" ]] && echo kept)" "kept"
+
+new_home i23 "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-302-0"
+ln -s "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.clauth/profiles/quantivly-5/runtime-302-0/.credentials.json"
+rm -f "$FHOME/.clauth/profiles/quantivly-5/credentials.json"
+mk_proc 302 "$FHOME/.clauth/profiles/quantivly-5/runtime-302-0"
+run retire quantivly-5
+check "a clauth session whose link into the deleted store dangles holds it" "$RC" "3"
+
+new_home i24 "$R5"; retire_fixture; chmod 000 "$FHOME/procfix"
+run retire quantivly-5
+check "an unreadable process table is exit 2"       "$RC" "2"
+chmod 755 "$FHOME/procfix"
+new_home i24b "$R5"; retire_fixture; rmdir "$FHOME/procfix"
+run retire quantivly-5
+check "a missing process table is exit 2"           "$RC" "2"
+want_err "...as not knowing who holds it"           "whether a session holds 'quantivly-5' is unknown"
+
+new_home i25 "$R5"; retire_fixture; mk_proc 303 ""
+printf 'active_profile = "quantivly-5"\n' > "$FHOME/.clauth/profiles.toml"; chmod 000 "$FHOME/.clauth/profiles.toml"
+run retire quantivly-5
+check "a session on the global file, with clauth's active profile unreadable, is exit 3" "$RC" "3"
+chmod 644 "$FHOME/.clauth/profiles.toml"
+
+new_home i26 "$R5"; retire_fixture
+mk_proc 304 "../../.local/state/claude-account-dirs/quantivly-5"
+run retire quantivly-5
+check "a relative CLAUDE_CONFIG_DIR is resolved against the session's own cwd" "$RC" "3"
+
+new_home i27 "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0" "$FHOME/.clauth/live_sessions"
+cp "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0/.credentials.json"
+printf '{"pid":305,"start_profile":"quantivly-1","current_member":"quantivly-5"}\n' > "$FHOME/.clauth/live_sessions/305-0.json"
+mk_proc 305 "$FHOME/.clauth/profiles/quantivly-1/runtime-305-0"
+run retire quantivly-5
+check "a clauth session clauth moved onto the seat holds it"   "$RC" "3"
+want_out "...named by its sid"                                 "clauth switch 305-0 quantivly-1"
+new_home i27b "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-306-0" "$FHOME/.clauth/live_sessions"
+cp "$FHOME/.clauth/profiles/quantivly-1/credentials.json" "$FHOME/.clauth/profiles/quantivly-5/runtime-306-0/.credentials.json"
+printf '{"pid":306,"start_profile":"quantivly-5","current_member":"quantivly-1"}\n' > "$FHOME/.clauth/live_sessions/306-0.json"
+mk_proc 306 "$FHOME/.clauth/profiles/quantivly-5/runtime-306-0"
+run retire quantivly-5
+check "...and one clauth moved off it does not"                "$RC" "0"
+
+new_home i28 "$R5"; retire_fixture
+printf 'CONSOLE_SEATS = (\n    "quantivly-3",\n)\n' > "$FHOME/budget.py"
+run retire quantivly-3
+check "a CONSOLE_SEATS spread over lines still names its seat" "$RC" "1"
+want_err "...as the console seat"                              "CONSOLE_SEATS in"
+
+new_home i29 "$R5"; retire_fixture
+printf '[seats]\n"local" = "quantivly-5"\n' > "$FHOME/.dotfiles-local/rabota/tenants/other.toml"
+run retire quantivly-5
+check "a quoted local key is rabota's seat too"     "$RC" "1"
+want_err "...naming it"                             "rabota's seat in other.toml"
+
+new_home i30 "$R5"; retire_fixture
+run retire --reason 'handed to "B"' quantivly-5
+check "a reason the editor would refuse is refused first" "$RC" "1"
+check "...before its pool is touched"                     "$(pool_of quantivly)" "quantivly-1 quantivly-3 quantivly-5"
+
+new_home i31 "$R5
+CLAUDE_TENANT_POOL+=( solo \"quantivly-5\" )
+CLAUDE_TENANT_ROUTES+=( \"orgs=solo\" )"; retire_fixture
+run retire quantivly-5
+check "a seat a second pool cannot lose is refused"       "$RC" "1"
+check "...before the first pool is edited"                "$(pool_of quantivly)" "quantivly-1 quantivly-3 quantivly-5"
+
+new_home i32 "$R5"; retire_fixture; rm -rf "$FHOME/.local/state/claude-account-dirs/quantivly-5"
+run retire quantivly-5
+check "a seat with no account dir is retired"              "$RC" "0"
+want_out "...and the store's sign-ins are on the revoke list" "Revoke its app grants at each service (plugin:slack:slack)"
+
+new_home i33; run retire --plan quantivly-4
+check "a plan the real run would refuse is exit 1"       "$RC" "1"
+want_out "...saying so"                                  "the real run would refuse: still named in"
+new_home i33b; run retire --plan personal-0
+check "...as is one the editor would refuse"             "$RC" "1"
+want_out "...saying so"                                  "the real run would refuse: the tenants-file editor would not take 'personal-0'"
+
+# A launch routed to it while the pool edit was being made is still seen: the
+# holders are read again after the edit, not only before it.
+cat > "$STUBS/edit-launch-during-remove" <<'STUB'
+#!/usr/bin/env zsh
+if [[ " $* " == *" pool-remove "* && " $* " != *" --dry-run "* ]]; then
+  d="$HOME/procfix/401"; mkdir -p "$d"; print claude > "$d/comm"
+  printf 'CLAUDE_CONFIG_DIR=%s\0' "$HOME/.local/state/claude-account-dirs/quantivly-5" > "$d/environ"
+fi
+exec zsh "$REAL_EDIT" "$@"
+STUB
+chmod +x "$STUBS/edit-launch-during-remove"
+new_home i34 "$R5"; retire_fixture
+CLAUDE_SEAT_TENANTS_EDIT="$STUBS/edit-launch-during-remove" REAL_EDIT="$DOTFILES/scripts/claude-tenants-edit" \
+    run retire quantivly-5
+check "a session that arrives during the pool edit stops the teardown" "$RC" "3"
+check "...and the dir is kept"                                         "$([[ -d "$FHOME/.local/state/claude-account-dirs/quantivly-5" ]] && echo kept)" "kept"
+
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=282
+EXPECTED_ROWS=310
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
