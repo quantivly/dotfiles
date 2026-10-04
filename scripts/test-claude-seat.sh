@@ -53,9 +53,11 @@ printf 'clauth %s\n' "$*" >> "$STUB_LOG"
 [[ "${1:-}" == login ]] || exit 0
 [[ "${STUB_LOGIN_RC:-0}" == 0 ]] || exit "$STUB_LOGIN_RC"
 [[ "${STUB_LOGIN_NOSTORE:-0}" == 1 ]] && exit 0
+# A hand edit of the tenants file while the human is logging in.
+[[ "${STUB_LOGIN_TOUCH_TENANTS:-0}" == 1 ]] && printf '# edited during the login\n' >> "$HOME/.config/claude-tenants.zsh"
 d="$HOME/.clauth/profiles/$2"; mkdir -p "$d"
 printf '{"claudeAiOauth":{"accessToken":"fake"}}\n' > "$d/credentials.json"
-printf '"%s"\n' "${STUB_ACCOUNT_ID:-acct-$2}" > "$d/account_id.json"
+printf '"%s"\n' "${STUB_ACCOUNT_ID-uuid-$2}" > "$d/account_id.json"
 printf '# clauth template: every line commented\n# auto_start = false\n# [models]\n# default = "x"\n' > "$d/config.toml"
 [[ "${STUB_LOGIN_PARTIAL:-0}" == 1 ]] && exit 1
 exit 0
@@ -63,17 +65,23 @@ STUB
 cat > "$STUBS/claude" <<'STUB'
 #!/usr/bin/env bash
 # `claude auth status` and a first `claude -p` launch: either may write the
-# seat's oauthAccount, as configured by the row.
+# seat's oauthAccount, as configured by the row. By default it is the account the
+# login recorded, as Claude Code derives it from the credential.
 printf 'claude %s\n' "$*" >> "$STUB_LOG"
 write() {
-  local cj="$CLAUDE_CONFIG_DIR/.claude.json"
+  local cj="$CLAUDE_CONFIG_DIR/.claude.json" own
+  own="$(jq -r . "$HOME/.clauth/profiles/${CLAUDE_CONFIG_DIR##*/}/account_id.json" 2>/dev/null)"
   [[ -s "$cj" ]] || printf '{}\n' > "$cj"
-  jq --arg u "${STUB_UUID:-uuid-new}" --arg t "${STUB_OTYPE:-claude_team}" \
+  jq --arg u "${STUB_UUID:-$own}" --arg t "${STUB_OTYPE:-claude_team}" \
      --arg o "${STUB_ORG:-org-1}" --arg e "${STUB_EMAIL:-seat@example.invalid}" \
      '.oauthAccount = {accountUuid: $u, organizationType: $t, organizationUuid: $o, emailAddress: $e, organizationName: "Fixture Org"}' \
      "$cj" > "$cj.tmp" && mv -f "$cj.tmp" "$cj"
 }
-if [[ "${1:-}" == auth ]]; then [[ "${STUB_AUTH_WRITES:-1}" == 1 ]] && write; exit 0; fi
+if [[ "${1:-}" == auth ]]; then
+  [[ "${STUB_AUTH_WRITES:-1}" == 1 ]] && write
+  [[ -n "${STUB_AUTH_ERR:-}" ]] && { printf '%s\n' "$STUB_AUTH_ERR" >&2; exit 1; }
+  exit 0
+fi
 if [[ "${1:-}" == -p ]]; then [[ "${STUB_LAUNCH_WRITES:-1}" == 1 ]] && write; exit 0; fi
 exit 0
 STUB
@@ -88,7 +96,16 @@ if [[ "${STUB_AD_COPY:-0}" == 1 ]]; then
 else
   ln -sfn "$HOME/.clauth/profiles/$1/credentials.json" "$ad/.credentials.json"
 fi
-[[ -e "$ad/.claude.json" ]] || printf '{}\n' > "$ad/.claude.json"
+# A first build seeds .claude.json from the global file, identity and all:
+# STUB_AD_SEED="<uuid> <type> <org>" stands for a global file that names an account.
+if [[ ! -e "$ad/.claude.json" ]]; then
+  if [[ "${STUB_AD_CJ_BAD:-0}" == 1 ]]; then printf 'not json\n' > "$ad/.claude.json"
+  elif [[ -n "${STUB_AD_SEED:-}" ]]; then
+    read -r u t o <<< "$STUB_AD_SEED"
+    jq -n --arg u "$u" --arg t "$t" --arg o "$o" \
+      '{oauthAccount: {accountUuid: $u, organizationType: $t, organizationUuid: $o, emailAddress: "main@example.invalid"}}' > "$ad/.claude.json"
+  else printf '{}\n' > "$ad/.claude.json"; fi
+fi
 STUB
 cat > "$STUBS/pick" <<'STUB'
 #!/usr/bin/env zsh
@@ -96,7 +113,18 @@ cat > "$STUBS/pick" <<'STUB'
 print -r -- "pick $*" >> "$STUB_LOG"
 typeset -gA CLAUDE_TENANT_POOL
 source "$HOME/.config/claude-tenants.zsh" >/dev/null 2>&1
-print -u2 -- "  pool:   ${CLAUDE_TENANT_POOL[$2]-}"
+print -u2 -- "  pool:   ${STUB_PICK_LINE-${CLAUDE_TENANT_POOL[$2]-}}"
+STUB
+# The editor, when its commit fails AND its roll-back fails: the edit stands, and
+# it exits 2. Everything else is passed to the real one.
+cat > "$STUBS/edit-written-then-failed" <<'STUB'
+#!/usr/bin/env zsh
+if [[ " $* " == *" pool-add "* ]]; then
+  zsh "$REAL_EDIT" "${@:#--commit}" >/dev/null 2>&1
+  print -u2 -- "claude-tenants-edit: the commit failed AND the roll-back failed"
+  exit 2
+fi
+exec zsh "$REAL_EDIT" "$@"
 STUB
 chmod +x "$STUBS"/*
 
@@ -126,7 +154,7 @@ seat() {   # $1 = profile, $2 = org type, $3 = org id ('' = no account dir)
     local p="$1" pd="$FHOME/.clauth/profiles/$1" ad="$FHOME/.local/state/claude-account-dirs/$1"
     mkdir -p "$pd"
     printf '{"claudeAiOauth":{"accessToken":"fake"}}\n' > "$pd/credentials.json"
-    printf '"acct-%s"\n' "$p" > "$pd/account_id.json"
+    printf '"uuid-%s"\n' "$p" > "$pd/account_id.json"
     printf '%s\n' "$M1" > "$pd/config.toml"
     if [[ -n "${2:-}" ]]; then
         mkdir -p "$ad"; ln -sfn "$pd/credentials.json" "$ad/.credentials.json"
@@ -198,6 +226,16 @@ new_home b3; run add quantivly 'quantivly-5+x'
 check "a name with a character the picker rejects is refused" "$RC" "1"
 want_err "...for its characters, not the prefix rule"  "may only contain letters, digits"
 no_log   "...before any login"                         "clauth login"
+new_home b4; chmod 000 "$FHOME/.clauth/profiles/quantivly-3/config.toml"
+run add quantivly
+check "a member's unreadable config.toml is exit 2, not read as agreeing" "$RC" "2"
+want_err "...naming it"                                "cannot read $FHOME/.clauth/profiles/quantivly-3/config.toml"
+no_log   "...before any login"                         "clauth login"
+new_home b5; : > "$FHOME/.clauth/profiles/quantivly-4/account_id.json"
+run add quantivly
+check "another profile's empty account id is exit 2" "$RC" "2"
+want_err "...as a second login it could not tell apart" "cannot read the account id of 'quantivly-4'"
+no_log   "...found before any login"                   "clauth login"
 
 #-----------------------------------------------------------------------------
 section "C. A name that has never existed"
@@ -224,6 +262,32 @@ run add quantivly quantivly-8
 check "a name only the picker's ledger remembers is refused" "$RC" "1"
 want_err "...naming the ledger"                              "the picker's ledger"
 
+new_home c11; run add personal ..
+check "'..' is refused as a name" "$RC" "1"
+want_err "...for how it starts"   "must start with a letter or digit"
+no_log   "...before any login"    "clauth login"
+
+new_home c12; printf "[seats]\nlocal = 'quantivly-5'\n" > "$FHOME/.dotfiles-local/rabota/tenants/other.toml"
+run add --dry-run quantivly
+want_out "a rabota seat in single quotes counts" "proposed name: quantivly-6"
+new_home c13; printf '[general]\nseats = { local = "quantivly-5" }\n' > "$FHOME/.dotfiles-local/rabota/tenants/other.toml"
+run add --dry-run quantivly
+want_out "a rabota seat in an inline table counts" "proposed name: quantivly-6"
+new_home c14; : > "$FHOME/.local/state/claude-account-dirs/.pick-ledger"; : > "$FHOME/.dotfiles-local/rabota/tenants/empty.toml"
+run add --dry-run quantivly
+check "an empty ledger and an empty rabota file are read as empty" "$RC" "0"
+want_out "...and the name is still proposed"                         "proposed name: quantivly-5"
+new_home c15; chmod 000 "$FHOME/.dotfiles-local/rabota/tenants/quantivly.toml"
+run add --dry-run quantivly
+check "an unreadable rabota file is exit 2: it may name a seat" "$RC" "2"
+want_err "...naming it"                                         "quantivly.toml, which may name a seat"
+
+new_home c16; seat quantivly-5
+run add quantivly
+check "a seat a run started and did not finish is not proposed past" "$RC" "1"
+want_err "...and the refusal says how to resume it"                  "Resume it: claude-seat add quantivly quantivly-5"
+no_log   "...before any second login"                                "clauth login"
+
 new_home c7; run add quantivly quantivly-3
 check "a name already in a pool is refused" "$RC" "1"; want_err "...as used" "already been used"
 new_home c8; run add quantivly personal-5
@@ -246,9 +310,37 @@ want_out "...the picker sees it"                "the picker sees 'quantivly-5'"
 want_out "...and what is left is listed"        "claude-as quantivly-5, then /mcp"
 no_log   "...with no first launch needed"       "claude -p"
 
-new_home d2; run add personal
+new_home d2; STUB_OTYPE=claude_max run add personal
 check "a seat in a pool of individual accounts is added" "$RC" "0"
 check "...and its pool names it" "$(pool_of personal)" "personal-0 personal-1"
+
+new_home d3; run add personal
+check "a team account in a pool of individual accounts is refused" "$RC" "1"
+want_err "...naming both types"     "is a claude_team account, and 'personal-0' is claude_max"
+check "...and the pool is unchanged" "$(pool_of personal)" "personal-0"
+
+# The account dir is seeded from ~/.claude.json, identity and all.
+new_home d4; STUB_AD_SEED="uuid-main claude_team org-1" STUB_OTYPE=claude_max run add quantivly
+check "an identity copied into the dir is not judged: the login's own is" "$RC" "1"
+want_log "...auth status is asked for it"                                  "claude auth status"
+want_err "...and the login's own type is refused"                          "is a claude_max account"
+not_pooled "...and the seat is not pooled"
+new_home d5; STUB_AD_SEED="uuid-quantivly-1 claude_team org-1" run add quantivly
+check "a copied identity naming another seat does not refuse a good login" "$RC" "0"
+check "...which is pooled" "$(pool_of quantivly)" "quantivly-1 quantivly-3 quantivly-5"
+
+# Members whose account dir names ANOTHER account (a stale copy) are not compared.
+new_home d6
+jq -n '{oauthAccount: {accountUuid: "uuid-stale", organizationType: "claude_max", organizationUuid: "org-x"}}' \
+    > "$FHOME/.local/state/claude-account-dirs/quantivly-1/.claude.json"
+run add quantivly
+check "a member with a stale identity is not compared" "$RC" "0"
+new_home d7
+for m in quantivly-1 quantivly-3; do printf '{}\n' > "$FHOME/.local/state/claude-account-dirs/$m/.claude.json"; done
+run add quantivly
+check "a pool with no member identity to compare against is exit 2" "$RC" "2"
+want_err "...saying so"                                              "nothing to be compared with"
+not_pooled "...and the seat is not pooled"
 
 #-----------------------------------------------------------------------------
 section "E. Every failed check leaves the seat OUT of the pool"
@@ -266,7 +358,7 @@ check "a login that succeeds without a store is exit 2" "$RC" "2"
 want_err "...naming the missing store"                  "does not exist"
 not_pooled "...and the seat is not pooled"
 
-new_home e2; STUB_ACCOUNT_ID=acct-quantivly-1 run add quantivly
+new_home e2; STUB_ACCOUNT_ID=uuid-quantivly-1 run add quantivly
 check "a second login to an existing account is refused" "$RC" "1"
 want_err "...naming the account it repeats"             "same account as 'quantivly-1'"
 not_pooled "...and the seat is not pooled"
@@ -274,6 +366,7 @@ not_pooled "...and the seat is not pooled"
 new_home e3; STUB_AUTH_WRITES=0 STUB_LAUNCH_WRITES=1 run add quantivly
 check "an identity auth status cannot give, with no --yes, is exit 2" "$RC" "2"
 no_log  "...and no first launch is made unasked"                       "claude -p"
+want_err "...naming the exact re-run, so the next number is not taken" "claude-seat add --yes quantivly quantivly-5"
 not_pooled "...and the seat is not pooled"
 
 new_home e4; STUB_AUTH_WRITES=0 STUB_LAUNCH_WRITES=1 run add --yes quantivly
@@ -289,9 +382,24 @@ new_home e6; STUB_OTYPE=claude_max run add quantivly
 check "an individual account in a pool of team seats is refused" "$RC" "1"
 not_pooled "...and the seat is not pooled"
 
-new_home e7; STUB_UUID=uuid-quantivly-1 run add quantivly
-check "the same account under another account dir is refused" "$RC" "1"
-want_err "...naming it"                                       "same account as 'quantivly-1'"
+new_home e7; STUB_UUID=uuid-someone-else run add --yes quantivly
+check "an identity naming another account than the login's is exit 2" "$RC" "2"
+want_err "...saying so"                                               "names another account than the one"
+not_pooled "...and the seat is not pooled"
+
+new_home e7b; STUB_ACCOUNT_ID="" run add quantivly
+check "a login that records no account id is exit 2" "$RC" "2"
+want_err "...as nothing to anchor the identity to"   "recorded no account id"
+not_pooled "...and the seat is not pooled"
+
+new_home e7c; STUB_AD_CJ_BAD=1 run add --yes quantivly
+check "a dir whose .claude.json is not JSON is exit 2" "$RC" "2"
+no_log  "...and no launch is made into it"            "claude -p"
+not_pooled "...and the seat is not pooled"
+
+new_home e7d; STUB_AUTH_WRITES=0 STUB_AUTH_ERR="fixture: token revoked" run add quantivly
+check "a failed auth status is exit 2" "$RC" "2"
+want_err "...and what it said is kept"  "token revoked"
 
 new_home e8; STUB_EMAIL=seat@example.invalid run add --email other@example.invalid quantivly
 check "an address other than --email is refused" "$RC" "1"
@@ -308,7 +416,23 @@ not_pooled "...and the seat is not pooled"
 new_home e10; printf '# a hand edit\n' >> "$REAL"
 run add quantivly
 check "a tenants file the editor will not commit is exit 2" "$RC" "2"
+no_log  "...found before the login"                         "clauth login"
 not_pooled "...and the seat is not pooled"
+
+new_home e11; STUB_LOGIN_TOUCH_TENANTS=1 run add quantivly
+check "a tenants file edited during the login is exit 2" "$RC" "2"
+want_err "...as the editor's refusal"                    "did not add it"
+not_pooled "...and the seat is not pooled"
+
+new_home e12; CLAUDE_SEAT_TENANTS_EDIT="$STUBS/edit-written-then-failed" REAL_EDIT="$DOTFILES/scripts/claude-tenants-edit" \
+    run add quantivly
+check "an editor failure that left the edit standing is exit 3" "$RC" "3"
+want_err "...saying the seat IS in the pool"                    "IS in the pool of 'quantivly'"
+check "...which it is" "$(pool_of quantivly)" "quantivly-1 quantivly-3 quantivly-5"
+
+new_home e13; STUB_PICK_LINE="quantivly-1 quantivly-3 quantivly-51" run add quantivly
+check "a picker that does not list the seat is exit 3" "$RC" "3"
+want_err "...not fooled by a longer name"              "the picker's dry run does not list it"
 
 #-----------------------------------------------------------------------------
 section "F. A run that stopped can be run again"
@@ -340,7 +464,7 @@ want_out "with none recorded, it says how to record them" "set
 want_out "the DO-792 warning is printed"                 "DO-792"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=84
+EXPECTED_ROWS=134
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
