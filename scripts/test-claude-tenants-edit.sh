@@ -96,7 +96,7 @@ gitf() { GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 git "$@"; }
 # OUT / ERR / RC as globals, never inside $( ): an exit code assigned in a
 # command substitution dies with the subshell.
 run() {
-    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME \
+    OUT="$(umask "${RUN_UMASK:-022}"; env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME \
                HOME="$FHOME" GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                zsh "$SUT" "$@" 2>"$TMPROOT/err")"; RC=$?
     ERR="$(cat "$TMPROOT/err")"
@@ -177,17 +177,21 @@ check "a subscript assignment to a sibling table is not a fault" "$RC" "0"
 #-----------------------------------------------------------------------------
 section "D. pool-add"
 #-----------------------------------------------------------------------------
-new_home d1; chmod 640 "$REAL"
-run pool-add work w3
+# 604 under a 077 umask: `cp` without -p already copies the mode, minus what the
+# umask removes, so under a permissive umask a copy that dropped -p kept the mode
+# anyway and this row could not tell the two apart. Under 077 it comes out 600.
+new_home d1; chmod 604 "$REAL"
+RUN_UMASK=077 run pool-add work w3
 check "adding a member succeeds"                  "$RC" "0"
 check "...and the pool a launch reads gains it"   "$(pool_of work)" "w1 w2 w3"
 check "...by changing exactly one line"           "$(changed_lines)" "2"
 check "...the tenants path is still a symlink"    "$([[ -L "$FHOME/.config/claude-tenants.zsh" ]] && echo yes)" "yes"
-check "...the file keeps its mode"                "$(stat -c %a "$REAL")" "640"
+check "...the file keeps its mode"                "$(stat -c %a "$REAL")" "604"
 check "...and a backup of the old file is kept"   "$(backups)" "1"
 
 new_home d2; run pool-add nosuch w3
 check "an unknown tenant is refused" "$RC" "1"; unchanged "...and the file is untouched"
+want_err "...as an unknown tenant, not by a later accident" "has no CLAUDE_TENANT_POOL entry"
 new_home d3; run pool-add work w2
 check "a member already in the pool is refused" "$RC" "1"
 new_home d4; run pool-add work nostore
@@ -309,6 +313,7 @@ check "...and nothing was committed"  "$(gitf -C "$FHOME/repo" rev-list --count 
 new_home h3; rm -rf "$FHOME/repo/.git"
 run --commit pool-add work w3
 check "--commit outside a git work tree is refused" "$RC" "2"
+want_err "...for that reason, not a later git error" "needs"
 unchanged "...and the file is untouched"
 
 new_home h4; run pool-add work w3
@@ -337,7 +342,7 @@ unchanged "...and the file is untouched"
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that vanished: an early exit, a deleted block, an emptied loop.
-EXPECTED_ROWS=89
+EXPECTED_ROWS=91
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
