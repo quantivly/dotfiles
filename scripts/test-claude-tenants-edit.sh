@@ -273,6 +273,7 @@ unchanged "...and the file is untouched"
 new_home e3b "$(printf '%s\n' "$BASE" | sed 's/^  work "w1 w2"$/  work "w1"/')"
 run pool-remove work w1
 check "emptying a pool a route names is refused" "$RC" "1"
+want_err "...as one every launch depends on"     "every launch would refuse"
 # An unreferenced pool emptied is worse than a referenced one: a launch PINNED to
 # that tenant reads an empty pool as none and widens to every profile, another
 # machine's seat included (review, 2026-10-05). This row used to assert the edit.
@@ -338,7 +339,7 @@ check "...and nothing was committed"  "$(gitf -C "$FHOME/repo" rev-list --count 
 new_home h3; rm -rf "$FHOME/repo/.git"
 run --commit pool-add work w3
 check "--commit outside a git work tree is refused" "$RC" "2"
-want_err "...for that reason, not a later git error" "needs"
+want_err "...for that reason, not a later check" "inside a git work tree"
 unchanged "...and the file is untouched"
 
 new_home h5; mkdir -p "$FHOME/repo/.git/hooks"
@@ -402,7 +403,7 @@ check "...and the edit lands"                               "$(pool_of work)" "w
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that vanished: an early exit, a deleted block, an emptied loop.
-EXPECTED_ROWS=114
+EXPECTED_ROWS=115
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

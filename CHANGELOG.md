@@ -184,10 +184,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - compares every table, and writes only if the difference is exactly the requested change;
   - keeps a backup, then renames the copy over the symlink's target, never over the symlink.
 
-  `--dry-run` prints the diff. `--commit` commits the tenants file alone, refuses if the file
-  already had a hand edit, and never pushes. Any layout it does not edit (two tenants on a line,
-  single quotes, the subscript form) is refused with "edit it by hand". `CLAUDE_TENANT_RETIRED` is
-  pre-declared by every reader of the file.
+  It refuses to empty any pool. Even an unreferenced one matters, because a launch pinned to that
+  tenant widens an empty pool to every profile (DO-804 fixes that in the picker itself).
+
+  `--dry-run` prints the diff. `--commit` is all or nothing:
+  - it commits the tenants file alone, and never pushes;
+  - it refuses beforehand if the file has a hand edit, is untracked or ignored, or the repo is
+    locked;
+  - if a hook rejects the commit, it unstages the change and rolls it back.
+
+  Any layout it does not edit (two tenants on a line, single quotes, the subscript form) is refused
+  with "edit it by hand". `CLAUDE_TENANT_RETIRED` is pre-declared by every reader of the file.
 
 - **`claude-doctor` reports every pool member's plugin MCP sign-ins, not just the running
   session's (DO-794).** mcpOAuth is stored per config dir, and section 2 reads only the file of the
