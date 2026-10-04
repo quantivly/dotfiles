@@ -460,22 +460,25 @@ scripts/claude-seat retire --plan <name>     # where the name appears, who holds
 scripts/claude-seat retire <name>            # do it
 ```
 
-`--plan` exits 1 when the real run would refuse. The steps are ordered so that each
-is safe to repeat, and **nothing is deleted while a session may hold the seat**:
+`--plan` exits with the code the real run would stop at. The steps are ordered so
+that each is safe to repeat, and **nothing is deleted while a session may hold the
+seat**:
 
 1. **Refuse** when something the command does not edit names the seat: rabota's
    `[seats] local` or `CONSOLE_SEATS`, the machine-ownership tables, or an overflow
    entry. It says which; edit that first. Every pool edit is also checked before
    any is made, so a pool it cannot leave stops it before the first edit.
 2. **Out of every pool**, through `claude-tenants-edit`, so no new launch lands on it.
-3. **Holders, read after the pool edit.** A live Claude process holds the seat when
-   its config dir is the seat's account dir; when it is a `clauth start` session
-   whose live-session row says it is on the seat; when its credential links into
-   the seat's store, even a store `clauth delete` already removed; or when it reads
-   the global file while the seat is clauth's active profile. A process it cannot
-   decide about counts as a holder. With any, it stops at exit 3, prints the move
-   for each (`clauth switch <sid> <seat>`, or `/exit` then `claude-as <seat>
-   --resume <id>`), and moves nothing itself.
+3. **Holders, read after the pool edit and again before each step that cannot be
+   redone.** Every signal about a live Claude process is weighed, and any one that
+   names the seat makes it a holder: its config dir is the seat's account dir or
+   one of its runtime dirs; clauth's live-session row for that very process says it
+   is on the seat; its credential links into the seat's store (even one `clauth
+   delete` removed) or is a copy of it; or it reads the global file while that is
+   the seat. A signal that cannot be read counts as a holder too; only definite
+   evidence of another seat clears a process. With any holder it stops at exit 3,
+   prints the move for each (`clauth switch <sid> <seat>`, or `/exit` then
+   `claude-as <seat> --resume <id>`), and moves nothing itself.
 4. **With none left:** the name is recorded in `CLAUDE_TENANT_RETIRED` first, so it
    is never handed out again. Then `claude mcp logout` runs for each plugin server
    in its dir, the account-dir builder folds the logged-out file back into the

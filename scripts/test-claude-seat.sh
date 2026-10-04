@@ -92,9 +92,14 @@ if [[ "${1:-}" == auth ]]; then
   exit 0
 fi
 if [[ "${1:-}" == -p ]]; then [[ "${STUB_LAUNCH_WRITES:-1}" == 1 ]] && write; exit 0; fi
-# `claude mcp logout <server>`: drops that server's entries, atomically.
+# `claude mcp logout <server>`: drops that server's entries, atomically. With
+# STUB_LOGOUT_SPAWN=1 a session on the seat's account dir starts meanwhile.
 if [[ "${1:-}" == mcp && "${2:-}" == logout ]]; then
   srv="$3"
+  if [[ "${STUB_LOGOUT_SPAWN:-0}" == 1 ]]; then
+    mkdir -p "$CLAUDE_DOCTOR_PROC_ROOT/701"; printf 'claude\n' > "$CLAUDE_DOCTOR_PROC_ROOT/701/comm"
+    printf 'CLAUDE_CONFIG_DIR=%s\0' "$CLAUDE_CONFIG_DIR" > "$CLAUDE_DOCTOR_PROC_ROOT/701/environ"
+  fi
   if [[ " ${STUB_LOGOUT_FAIL:-} " == *" $srv "* ]]; then echo "logout failed: $srv" >&2; exit 1; fi
   f="$CLAUDE_CONFIG_DIR/.credentials.json"
   jq --arg s "$srv" '.mcpOAuth |= with_entries(select((.key | split("|")[0]) != $s))' "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
@@ -1041,16 +1046,144 @@ OTHER = ("quantivly-5",)
 run retire quantivly-5
 check "a one-line CONSOLE_SEATS ends at its line"   "$RC" "0"
 
-# An earlier run renamed the dir but never recorded the name, and the profile is gone.
-new_home i35 "$R5"; retire_fixture
+# An earlier run took it out of its pool and renamed the dir, but never recorded
+# the name, and the profile is gone: only the tombstone says the name was a seat.
+new_home i35; retire_fixture
 mv "$FHOME/.local/state/claude-account-dirs/quantivly-5" "$FHOME/.local/state/claude-account-dirs/quantivly-5.retired-20260101"
 rm -f "$FHOME/.clauth/profiles/quantivly-5/credentials.json"
 run retire quantivly-5
 check "a tombstone whose name was never recorded is finished, not refused" "$RC" "0"
 check "...recording it"                                                  "$(retired_of quantivly-5)" "retired $(date +%F) with claude-seat"
 
+# --- the second review: no single signal decides, and none is skipped
+new_home i40 "$R5"; retire_fixture; mk_proc 401 ""
+ln -sfn "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.claude/.credentials.json" 2>/dev/null || { mkdir -p "$FHOME/.claude"; ln -sfn "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.claude/.credentials.json"; }
+printf 'active_profile = "quantivly-1"\n' > "$FHOME/.clauth/profiles.toml"
+run retire quantivly-5
+check "a global file linked into the seat holds it, whatever the active profile says" "$RC" "3"
+
+new_home i41 "$R5"; retire_fixture; mk_proc 402 ""
+printf 'active_profile = "quantivly-5"\n' > "$FHOME/.clauth/profiles.toml"; chmod 000 "$FHOME/.clauth/profiles.toml"
+printf '{"active_profile":"quantivly-1"}\n' > "$FHOME/.clauth/status.json"
+run retire quantivly-5
+check "an unreadable profiles.toml is not read past to status.json" "$RC" "3"
+chmod 644 "$FHOME/.clauth/profiles.toml"
+
+new_home i42 "$R5"; retire_fixture; mkdir -p "$FHOME/.claude"
+printf '{"claudeAiOauth":{"accessToken":"rotated-%s","refreshToken":"r-%s"}}\n' 42 42 > "$FHOME/.claude/.credentials.json"
+printf 'active_profile = "quantivly-5"
+' > "$FHOME/.clauth/profiles.toml"
+mk_proc 403 "$FHOME/.claude"
+run retire quantivly-5
+check "CLAUDE_CONFIG_DIR set to ~/.claude is the global file too"  "$RC" "3"
+
+new_home i43 "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-404-0" "$FHOME/.clauth/live_sessions"
+ln -s "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.clauth/profiles/quantivly-5/runtime-404-0/.credentials.json"
+printf '{"pid":999,"start_profile":"quantivly-5","current_member":"quantivly-1"}
+' > "$FHOME/.clauth/live_sessions/404-0.json"
+mk_proc 404 "$FHOME/.clauth/profiles/quantivly-5/runtime-404-0"
+run retire quantivly-5
+check "a stale live-session row (another pid) does not clear a link into the seat" "$RC" "3"
+
+new_home i44 "$R5"; retire_fixture
+mkdir -p "$FHOME/elsewhere/runtime-12-0" "$FHOME/.clauth/live_sessions"
+ln -s "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/elsewhere/runtime-12-0/.credentials.json"
+printf '{"pid":405,"start_profile":"quantivly-1"}
+' > "$FHOME/.clauth/live_sessions/12-0.json"
+mk_proc 405 "$FHOME/elsewhere/runtime-12-0"
+run retire quantivly-5
+check "a runtime-named dir outside clauth's profiles is not read as a clauth session" "$RC" "3"
+
+i27_like() {   # $1 = row content (or "" for none); a clauth session moved onto the seat
+    mkdir -p "$FHOME/.clauth/profiles/quantivly-1/runtime-406-0" "$FHOME/.clauth/live_sessions"
+    printf '{"claudeAiOauth":{"accessToken":"rotated-%s","refreshToken":"r-%s"}}\n' 406 406 > "$FHOME/.clauth/profiles/quantivly-1/runtime-406-0/.credentials.json"
+    printf '%s
+' "$1" > "$FHOME/.clauth/live_sessions/406-0.json"
+}
+new_home i45 "$R5"; retire_fixture; i27_like '{"pid":406, "current_member": '
+mk_proc 406 "$FHOME/.clauth/profiles/quantivly-1/runtime-406-0"
+run retire quantivly-5
+check "a malformed live-session row is undecided, not 'no row'" "$RC" "3"
+new_home i46 "$R5"; retire_fixture; i27_like '{"pid":406,"current_member":"quantivly-5"}'
+chmod 000 "$FHOME/.clauth/live_sessions/406-0.json"
+mk_proc 406 "$FHOME/.clauth/profiles/quantivly-1/runtime-406-0"
+run retire quantivly-5
+check "...as is an unreadable one"                              "$RC" "3"
+chmod 644 "$FHOME/.clauth/live_sessions/406-0.json"
+new_home i47 "$R5"; retire_fixture; i27_like '{"pid":406,"current_member":"quantivly-5"}'
+mk_proc 406 "$FHOME/.clauth/profiles/quantivly-1/runtime-406-0/."
+run retire quantivly-5
+check "a config dir ending in /. is still its runtime dir"      "$RC" "3"
+
+new_home i48 "$R5"; retire_fixture
+cp "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.clauth/profiles/quantivly-1/credentials.json"
+mkdir -p "$FHOME/custom"; cp "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/custom/.credentials.json"
+mk_proc 407 "$FHOME/custom"
+run retire quantivly-5
+check "a copy of the seat's credential holds it, even when another store is identical" "$RC" "3"
+
+new_home i49 "$R5"; retire_fixture
+mv "$FHOME/.clauth/profiles/quantivly-5" "$FHOME/realq5"; ln -s "$FHOME/realq5" "$FHOME/.clauth/profiles/quantivly-5"
+mkdir -p "$FHOME/realq5/runtime-408-0"
+printf '{"claudeAiOauth":{"accessToken":"rotated-%s","refreshToken":"r-%s"}}\n' 408 408 > "$FHOME/realq5/runtime-408-0/.credentials.json"
+mk_proc 408 "$FHOME/realq5/runtime-408-0"
+run retire quantivly-5
+check "a runtime dir named by the seat's resolved profile dir is the seat's" "$RC" "3"
+
+new_home i50 "$R5"; retire_fixture
+mkdir -p "$FHOME/.clauth/profiles/quantivly-5/sub" "$FHOME/.clauth/profiles/quantivly-5/runtime-409-0"
+ln -s "$FHOME/.clauth/profiles/quantivly-5/sub" "$FHOME/q5link"
+mk_proc 409 "$FHOME/q5link/../runtime-409-0"
+run retire quantivly-5
+check "a config dir reaching the seat's runtime dir through a link and .. is the seat's" "$RC" "3"
+
+new_home i51 "$R5"; retire_fixture
+printf 'active_profile = "quantivly-5"
+' > "$FHOME/.clauth/profiles.toml"
+mkdir -p "$FHOME/procfix/410"; printf 'claude
+' > "$FHOME/procfix/410/comm"
+printf 'HOME=%s NOTE=a
+CLAUDE_CONFIG_DIR=%s ' "$FHOME" "$FHOME/.local/state/claude-account-dirs/quantivly-1" > "$FHOME/procfix/410/environ"
+run retire quantivly-5
+check "a CLAUDE_CONFIG_DIR= line inside another variable is not its config dir" "$RC" "3"
+
+new_home i52 "$R5"; retire_fixture
+STUB_LOGOUT_SPAWN=1 run retire quantivly-5
+check "a session that starts during the logout stops the rename" "$RC" "3"
+check "...so the dir is kept"                                    "$([[ -d "$FHOME/.local/state/claude-account-dirs/quantivly-5" ]] && echo kept)" "kept"
+
+new_home i53 "$R5"; retire_fixture
+printf 'CONSOLE_SEATS: tuple[str, ...] = (
+    "quantivly-3",
+)
+' > "$FHOME/budget.py"
+run retire quantivly-3
+check "an annotated CONSOLE_SEATS over lines still names its seat" "$RC" "1"
+new_home i54 "$R5"; retire_fixture
+printf 'CONSOLE_SEATS = (  # API-billed (console) seats
+    "quantivly-3",
+)
+' > "$FHOME/budget.py"
+run retire quantivly-3
+check "...as does one whose first line carries a comment"        "$RC" "1"
+new_home i55 "$R5"; retire_fixture
+printf '[seats]
+local = """quantivly-5"""
+' > "$FHOME/.dotfiles-local/rabota/tenants/other.toml"
+run retire quantivly-5
+check "a triple-quoted rabota seat counts"                       "$RC" "1"
+
+new_home i56 "$R5"; retire_fixture; mk_proc 411 "$FHOME/.local/state/claude-account-dirs/quantivly-5"
+run retire --plan quantivly-5
+check "a plan for a seat in use exits 3, as the real run would stop" "$RC" "3"
+new_home i57 "$R5"; retire_fixture; printf '# a hand edit
+' >> "$REAL"
+run retire --plan quantivly-5
+check "a plan on a tenants file the editor will not commit exits 2" "$RC" "2"
+
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=320
+EXPECTED_ROWS=339
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

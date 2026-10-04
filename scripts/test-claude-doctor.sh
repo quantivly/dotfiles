@@ -842,6 +842,14 @@ run_doctor
 want_out "an unreadable environment is NOT CHECKED" "could not be read — NOT CHECKED"
 no_out   "and is not silently counted as shared"    "1 on the SHARED global file"
 
+# The environment is split on its NULs: a line inside ANOTHER variable's value is
+# not a CLAUDE_CONFIG_DIR (DO-798).
+new_home j4; write_cred
+mk_proc 101 claude ""
+printf 'HOME=%s\0NOTE=see\nCLAUDE_CONFIG_DIR=%s\0' "$FHOME" "$FHOME/elsewhere" > "$FHOME/procfix/101/environ"
+run_doctor
+want_out "a CLAUDE_CONFIG_DIR= line inside another variable is not the config dir" "1 on the SHARED global file"
+
 #-----------------------------------------------------------------------------
 section "K. Legacy pre-clauth config dirs"
 #-----------------------------------------------------------------------------
@@ -3620,7 +3628,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=518
+EXPECTED_ROWS=519
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

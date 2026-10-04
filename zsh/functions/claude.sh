@@ -458,25 +458,31 @@ _claude_proc_root() { print -r -- "${CLAUDE_DOCTOR_PROC_ROOT:-/proc}"; }
 # "cannot tell" is not "shares the global file". Shared by the doctor's
 # concurrency section and `claude-seat retire` (DO-798).
 #
+# The environment is split on its NULs, one element per variable: grepping it
+# joined by newlines let another variable whose value holds a line starting
+# `CLAUDE_CONFIG_DIR=` pose as the real one (DO-798 review).
+#
 # Counts by /proc comm, because Claude Code teammates exec the VERSIONED binary
 # and so appear as "2.1.259" rather than "claude" — the same blind spot that made
 # `herdr agent list` report 14 while 33 processes ran. Reads ONE variable and
 # prints a PATH, never a value: a process environment is full of tokens and this
 # output lands in transcripts (CLAUDE.md, "Keeping secrets out of transcripts").
 _claude_proc_config_dirs() {
-  local p comm envblob cfgdir procroot
+  local p comm envraw procroot
+  local -a envs cfgs
   procroot="$(_claude_proc_root)"
   for p in $procroot/[0-9]*(N); do
     [[ -r "$p/comm" ]] || continue
     comm="$(<"$p/comm")" 2>/dev/null
     case "$comm" in claude|2.[0-9]*) ;; *) continue ;; esac
-    envblob="$(tr '\0' '\n' < "$p/environ" 2>/dev/null)"
-    if [[ -z "$envblob" ]]; then
+    envraw="$(<"$p/environ")" 2>/dev/null
+    if [[ -z "$envraw" ]]; then
       print -r -- "${p:t}"$'\t'"?"
       continue
     fi
-    cfgdir="$(print -r -- "$envblob" | grep -m1 '^CLAUDE_CONFIG_DIR=')"
-    print -r -- "${p:t}"$'\t'"${cfgdir#CLAUDE_CONFIG_DIR=}"
+    envs=( "${(@0)envraw}" )
+    cfgs=( ${(M)envs:#CLAUDE_CONFIG_DIR=*} )
+    print -r -- "${p:t}"$'\t'"${${cfgs[1]-}#CLAUDE_CONFIG_DIR=}"
   done
 }
 

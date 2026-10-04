@@ -62,11 +62,11 @@
 # Exit (mcp): 0 signed in to every plugin server its pools use (or dry run
 #       passed) · 1 refused · 2 a sign-in failed or did not take, or an input
 #       could not be read · 64 usage.
-# Exit (retire): 0 retired (or already retired, or a plan the real run would
-#       carry out) · 1 refused, or a plan the real run would refuse: something
-#       this does not edit still names the seat · 2 could not finish safely, or an
-#       input could not be read · 3 out of every pool, but it may still be in use:
-#       nothing was deleted; move its sessions and run it again · 64 usage.
+# Exit (retire): 0 retired (or already retired) · 1 refused: something this does
+#       not edit still names the seat · 2 could not finish safely, or an input
+#       could not be read · 3 it may still be in use, so nothing that cannot be
+#       redone was done; move its sessions and run it again · 64 usage. A --plan
+#       exits with the code the real run would stop at.
 
 emulate -R zsh
 setopt no_unset pipe_fail extended_glob
@@ -131,7 +131,7 @@ rabota_seats() {
   for f in "$RABOTA"/tenants/*.toml(N); do
     [[ -r "$f" ]] || fail "cannot read $f, which may name a seat"
     for l in "${(@f)mapfile[$f]-}"; do
-      [[ "$l" == (#b)(|*[^A-Za-z0-9_-])[\"\']#local[\"\']#[[:space:]]#=[[:space:]]#[\"\']([^\"\']##)[\"\']* ]] && \
+      [[ "$l" == (#b)(|*[^A-Za-z0-9_-])[\"\']#local[\"\']#[[:space:]]#=[[:space:]]#[\"\']##([^\"\']##)[\"\']* ]] && \
         rseat[$match[2]]="rabota's seat in ${f:t}"
     done
   done
@@ -143,20 +143,22 @@ console_seats() {
   local l rest found=0 inside=0
   [[ -r "$RABOTA_BUDGET" ]] || fail "cannot read ${RABOTA_BUDGET/#$HOME/~}, whose CONSOLE_SEATS may name the seat"
   for l in "${(@f)mapfile[$RABOTA_BUDGET]-}"; do
+    # Only the value counts: an annotation before the `=` (`tuple[str, ...]`) and
+    # a comment after a `#` both hold brackets that would close it early.
     if (( ! inside )); then
       [[ "$l" == [[:space:]]#CONSOLE_SEATS[[:space:]]#(:[^=]#|)=* ]] || continue
       found=1 inside=1
-      rest="${l#*=}"
+      rest="${${l#*=}%%\#*}"
       # A value that opens no bracket is one line long.
       [[ "$rest" == *[\(\[]* ]] || inside=0
     else
-      rest="$l"
+      rest="${l%%\#*}"
     fi
+    [[ "$rest" == *[\)\]]* ]] && inside=0
     while [[ "$rest" == (#b)[^\"\']#[\"\']([^\"\']##)[\"\'](*) ]]; do
       cseat[$match[1]]=1
       rest="$match[2]"
     done
-    [[ "$l" == *[\)\]]* ]] && inside=0
   done
   (( found )) || fail "found no CONSOLE_SEATS line in ${RABOTA_BUDGET/#$HOME/~}; its format changed, so the console seat is unknown"
 }
@@ -427,37 +429,92 @@ fi
 
 # Whether credential file $1 is a link into seat $name's store. Read off the
 # link's OWN target, made absolute, as well as resolved: zsh's :A does not follow
-# a DANGLING link, so once `clauth delete` removed the store, a link into it
+# a DANGLING link (nor does :P), so once `clauth delete` removed the store, a link into it
 # resolved to itself and every session on the seat looked like no session.
 links_to_store() {
   local c="$1" t
   [[ -L "$c" ]] || return 1
-  [[ "${c:A}" == "${store:A}" ]] && return 0
+  [[ "${c:P}" == "${store:P}" ]] && return 0
   t="$(readlink -- "$c" 2>/dev/null)" || return 1
   [[ "$t" == /* ]] || t="${c:h}/$t"
-  [[ "${t:a}" == "${store:a}" || "${t:a}" == "${PROFILES:A}/$name/credentials.json" ]]
+  [[ "${t:a}" == "${store:a}" || "${t:a}" == "${PROFILES:P}/$name/credentials.json" ]]
 }
-# The profile a real credential file belongs to, by the doctor's own identity
-# (_claude_cred_id), or nothing.
-real_owner() { _claude_cred_owner "$(_claude_cred_id "$1" 2>/dev/null)" 2>/dev/null }
+
+# HOLDER EVIDENCE. Each *_signal sets sig to `yes` (it says this seat), `no` (it
+# says another seat), `unknown` (it exists and cannot be read), or nothing (it
+# has nothing to say). holders_of_seat weighs them all: ANY yes makes a holder,
+# else any unknown is undecided, and only a definite no clears a process. The
+# first signal deciding on its own is how a stale row, an active profile or the
+# first of two identical stores each overruled a link into this very seat.
+
+# The credential file a process reads: a link into this seat's store (yes) or
+# into another profile's (no); a real file, by the doctor's credential identity,
+# compared with this seat's own store FIRST (two stores can be byte-identical, and
+# the first owner found would then be the other one).
+cred_signal() {   # $1 = credential file
+  local c="$1" t id
+  sig=""
+  if [[ -L "$c" ]]; then
+    if links_to_store "$c"; then sig=yes; return 0; fi
+    t="$(readlink -- "$c" 2>/dev/null)" || { sig=unknown; return 0; }
+    [[ "$t" == /* ]] || t="${c:h}/$t"
+    if [[ "${t:a}" == "${PROFILES:a}"/*/credentials.json || "${t:P}" == "${PROFILES:P}"/*/credentials.json ]]; then
+      sig=no; return 0
+    fi
+    [[ -e "$c" ]] || { sig=unknown; return 0; }
+  fi
+  [[ -e "$c" ]] || return 0
+  id="$(_claude_cred_id "$c" 2>/dev/null)"
+  [[ -n "$id" ]] || { sig=unknown; return 0; }
+  if [[ -e "$store" && "$id" == "$(_claude_cred_id "$store" 2>/dev/null)" ]]; then
+    sig=yes
+  elif [[ -n "$(_claude_cred_owner "$id" 2>/dev/null)" ]]; then
+    sig=no
+  fi
+  return 0
+}
+# clauth's live-session row for a runtime dir (`<profiles>/<p>/runtime-<sid>`):
+# the member it is on now. Trusted only when its pid IS this process: a row left
+# by an earlier session with the same sid says nothing about this one.
+row_signal() {   # $1 = config dir (absolute, normalised), $2 = pid
+  local sid row_f rpid member
+  sig=""
+  [[ "${1:t}" == runtime-(#b)(<->-<->) ]] || return 0
+  sid="${match[1]}"
+  [[ "${1:h:h}" == "${PROFILES:a}" || "${1:h:h}" == "${PROFILES:P}" ]] || return 0
+  row_f="$HOME/.clauth/live_sessions/$sid.json"
+  [[ -e "$row_f" || -L "$row_f" ]] || return 0
+  rpid="$(jq -er '.pid | tostring' "$row_f" 2>/dev/null)" || { sig=unknown; return 0; }
+  [[ "$rpid" == "$2" ]] || return 0
+  member="$(jq -er '(.current_member // .start_profile) | strings' "$row_f" 2>/dev/null)" || { sig=unknown; return 0; }
+  if [[ "$member" == "$name" ]]; then sig=yes; else sig=no; fi
+  return 0
+}
+# The global file's owner, by clauth's active profile. A profiles.toml that exists
+# and cannot be read is unknown, never a quiet fall-back to status.json.
+global_signal() {
+  local pt="$HOME/.clauth/profiles.toml" a
+  sig=""
+  if [[ -e "$pt" && ! -r "$pt" ]]; then sig=unknown; return 0; fi
+  a="$(_claude_active_profile)"
+  [[ -n "$a" ]] || return 0
+  if [[ "$a" == "$name" ]]; then sig=yes; else sig=no; fi
+  return 0
+}
 
 # The sessions holding seat $name, into holders (one line each, with the command
-# that moves it to $target) and n_unknown. Every case that cannot be decided is
-# n_unknown, which stops the teardown like a holder does:
-#   - its account dir as the config dir: a holder, whatever its credential is;
-#   - a clauth runtime dir (`<profile>/runtime-<sid>`, any profile): the member
-#     clauth's live-session row says it is on now; without a row, where its
-#     credential link points, or for a real file, whose credential it is;
-#   - any other config dir: where its credential link points, or whose it is;
-#   - no config dir: the global file, which is clauth's ACTIVE profile.
-# A relative CLAUDE_CONFIG_DIR is resolved against the process's OWN cwd.
+# that moves it to $target) and n_unknown, which stops the teardown like a
+# holder. Paths are compared lexically (:a) AND physically (:P), against both
+# forms of the seat's dirs, so neither a symlinked profile dir nor a `..` hides
+# one. A relative CLAUDE_CONFIG_DIR is resolved against the process's OWN cwd.
 holders_of_seat() {
-  local row pid cfg cred cwdp cwd hold sid row_f member owner procroot active
+  local row pid cfg cn cA cwdp cwd yes unk no procroot ada="${ad:a}" adA="${ad:P}"
+  local pa="$PROFILES/$name" paa paA ga gA sig
+  paa="${pa:a}"; paA="${pa:P}"; ga="${HOME:a}/.claude"; gA="${${HOME}/.claude:P}"
   holders=() n_unknown=0
   procroot="$(_claude_proc_root)"
   [[ -d "$procroot" && -r "$procroot" && -x "$procroot" ]] || \
     fail "cannot read ${procroot}, so whether a session holds '$name' is unknown"
-  active="$(_claude_active_profile)"
   for row in ${(f)"$(_claude_proc_config_dirs)"}; do
     [[ -n "$row" ]] || continue
     pid="${row%%$'\t'*}"; cfg="${row#*$'\t'}"
@@ -470,53 +527,52 @@ holders_of_seat() {
       if [[ -z "$cwdp" ]]; then (( ++n_unknown )); continue; fi
       cfg="$cwdp/$cfg"
     fi
-    hold=0
-    if [[ -z "$cfg" ]]; then
-      cred="$(_claude_global_cred_file)"
-      if [[ -n "$active" ]]; then
-        [[ "$active" == "$name" ]] && hold=1
-      elif links_to_store "$cred"; then
-        hold=1
-      else
-        owner="$(real_owner "$cred")"
-        if [[ -z "$owner" ]]; then (( ++n_unknown )); continue; fi
-        [[ "$owner" == "$name" ]] && hold=1
-      fi
-    elif [[ "${cfg:a}" == "${ad:a}" || "${cfg:A}" == "${ad:A}" ]]; then
-      hold=1
+    yes=0 unk=0 no=0
+    cn="${cfg:+${cfg:a}}"; cA="${cfg:+${cfg:P}}"
+    if [[ -z "$cfg" || "$cn" == "$ga" || "$cA" == "$gA" ]]; then
+      # The global file: what it links to, or is, and whose clauth says it is.
+      cred_signal "$(_claude_global_cred_file)"
+      case "$sig" in yes) yes=1 ;; unknown) unk=1 ;; no) no=1 ;; esac
+      global_signal
+      case "$sig" in yes) yes=1 ;; unknown) unk=1 ;; no) no=1 ;; esac
+      (( yes || unk || no )) || unk=1      # nothing says whose it is
     else
-      cred="$cfg/.credentials.json"
-      member=""
-      if [[ "${cfg:t}" == runtime-(#b)(<->-<->) ]]; then
-        sid="${match[1]}"
-        row_f="$HOME/.clauth/live_sessions/$sid.json"
-        [[ -r "$row_f" ]] && member="$(jq -r '(.current_member // .start_profile) // empty' "$row_f" 2>/dev/null)"
-      fi
-      if [[ -n "$member" ]]; then
-        [[ "$member" == "$name" ]] && hold=1
-      elif [[ -L "$cred" ]]; then
-        links_to_store "$cred" && hold=1
-      elif [[ -e "$cred" ]]; then
-        owner="$(real_owner "$cred")"
-        if [[ -n "$owner" ]]; then
-          [[ "$owner" == "$name" ]] && hold=1
-        elif [[ "${cfg:a}" == "${PROFILES:a}/$name"/* || "${cfg:A}" == "${PROFILES:A}/$name"/* ]]; then
-          hold=1    # this seat's own runtime dir, and nothing says otherwise
-        fi
-      elif [[ "${cfg:a}" == "${PROFILES:a}/$name"/* ]]; then
-        hold=1
+      [[ "$cn" == ($ada|$adA) || "$cA" == ($ada|$adA) ]] && yes=1
+      row_signal "$cn" "$pid"
+      case "$sig" in yes) yes=1 ;; unknown) unk=1 ;; no) no=1 ;; esac
+      cred_signal "$cfg/.credentials.json"
+      case "$sig" in yes) yes=1 ;; unknown) unk=1 ;; no) no=1 ;; esac
+      # One of this seat's own dirs, and nothing else says anything: held.
+      if (( ! yes && ! unk && ! no )) && \
+         [[ "$cn" == ($paa|$paA)/* || "$cA" == ($paa|$paA)/* ]]; then
+        yes=1
       fi
     fi
-    (( hold )) || continue
+    if (( ! yes )); then
+      (( unk )) && (( ++n_unknown ))
+      continue
+    fi
     cwd="${${cwdp/#$HOME/~}:-?}"
-    if [[ -n "$cfg" && "${cfg:t}" == runtime-(#b)(<->-<->) ]]; then
+    if [[ -n "$cfg" && "${cn:t}" == runtime-(#b)(<->-<->) ]]; then
       holders+=( "clauth session ${match[1]} (pid $pid, $cwd): clauth switch ${match[1]} $target" )
-    elif [[ -z "$cfg" ]]; then
+    elif [[ -z "$cfg" || "$cn" == "$ga" ]]; then
       holders+=( "pid $pid ($cwd), on the global file, which is '$name': clauth switch $target, then restart it" )
     else
       holders+=( "pid $pid ($cwd): /exit in it, then claude-as $target --resume <the id /exit prints>" )
     fi
   done
+}
+# Read the holders again and stop at exit 3 if there are any: $1 says what has
+# been done so far, so the message is true at every point it is called from.
+stop_if_held() {
+  local h
+  holders_of_seat
+  (( ${#holders} || n_unknown )) || return 0
+  for h in $holders; do say "  $h"; done
+  (( n_unknown )) && say "  $n_unknown Claude process(es) whose holder cannot be decided"
+  print -u2 -- "$prog: '$name' $1, but it may still be in use; nothing more was done."
+  print -u2 -- "    Move each session above, then run this again."
+  exit 3
 }
 
 # The plugin servers credential file $1 is signed in to, one per line, sorted and
@@ -577,9 +633,11 @@ seat_retire() {
 
   # Every pool edit is checked before any is made: a refusal on the second pool
   # must not leave the first one already edited and committed.
-  if (( ! ${#blockers} )); then
+  if (( ! ${#blockers} && ${#pools} )); then
+    typeset -ga eflags
+    editor_flags
     for t in $pools; do
-      err="$(command zsh "$EDIT" --dry-run pool-remove "$t" "$name" 2>&1 >/dev/null)"
+      err="$(command zsh "$EDIT" --dry-run "${eflags[@]}" pool-remove "$t" "$name" 2>&1 >/dev/null)"
       rc=$?
       (( rc == 0 )) && continue
       if (( rc == 1 )); then
@@ -608,6 +666,9 @@ seat_retire() {
     elif [[ -n "$refusal" ]]; then
       say "the real run would refuse: $refusal"
       return 1
+    elif (( ${#holders} || n_unknown )); then
+      say "the real run would take it out of its pools and stop at exit 3: it may still be in use"
+      return 3
     fi
     say "a plan only: nothing was changed"
     return 0
@@ -628,14 +689,7 @@ seat_retire() {
 
   # Scanned AGAIN, now that no new launch can be routed to it.
   step holders "'$name'"
-  holders_of_seat
-  if (( ${#holders} || n_unknown )); then
-    for h in $holders; do say "  $h"; done
-    (( n_unknown )) && say "  $n_unknown Claude process(es) whose holder cannot be decided"
-    print -u2 -- "$prog: '$name' is out of every pool, but it may still be in use; nothing was deleted."
-    print -u2 -- "    Move each session above, then run this again."
-    exit 3
-  fi
+  stop_if_held "is out of every pool"
   say "  none"
 
   # Recorded FIRST of the teardown: the step most likely to be refused (it checks
@@ -659,6 +713,9 @@ seat_retire() {
   out="$(servers_of "$store")" || exit $?
   ssv=( ${(f)out} )
   if [[ -d "$ad" ]]; then
+    # And again before each step that cannot be redone: a `claude-as <seat>`
+    # launch is pinned, so the pool edit does not keep it away.
+    stop_if_held "is out of every pool and recorded as retired"
     step logout "plugin MCP servers in '$name'"
     out="$(servers_of "$ad/.credentials.json")" || exit $?
     lsv=( ${(f)out} )
@@ -678,6 +735,7 @@ seat_retire() {
         say "  claude-account-dirs.sh $name failed, so the store may keep its copy (below)"
     fi
 
+    stop_if_held "is recorded as retired and logged out, but its account dir was not renamed"
     step tombstone "${ad/#$HOME/~}"
     tomb="$ADROOT/$name.retired-$(date +%Y%m%d)"
     [[ ! -e "$tomb" && ! -L "$tomb" ]] || fail "${tomb/#$HOME/~} already exists; rename one of them by hand"
