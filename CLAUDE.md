@@ -656,7 +656,7 @@ gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offlin
 claude-doctor        # Claude auth + MCP health; run BEFORE 'clauth switch <profile>'
 claude-as <profile>  # claude on a named account: isolated AND still a team lead
 claude-pick          # which account would this directory bill? (--explain --json --strict)
-scripts/claude-account-dirs.sh --all   # (re)build every profile's persistent config dir
+scripts/claude-seat add <tenant>   # add a seat: login to verified, pooled (--dry-run first)
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 scripts/scrub-transcript-secrets.py --dry-run  # Credentials sitting in transcripts at rest
 tool_status          # Check installed tools

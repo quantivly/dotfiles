@@ -1,0 +1,366 @@
+#!/usr/bin/env zsh
+#
+# scripts/claude-seat
+# ===================
+#
+# ADD A CLAUDE SEAT TO A TENANT'S POOL in one command (DO-796). The procedure it
+# replaces, docs/CLAUDE_ACCOUNT_MCP.md §5 "Adding an account to the pool", was
+# seven manual steps, three of which failed silently when skipped. Adding one
+# seat on 2026-09-30 took a whole session.
+#
+# The order is the point. The pool is the LAST thing touched, so the pool never
+# names a seat that failed a check:
+#
+#   preflight  the tenant has a pool, its members agree on the settings a move
+#              compares, and the name has never existed anywhere (profiles,
+#              account dirs including compat links and retired dirs, every tenant
+#              table, rabota's seats, the picker's ledger) and fits rabota's
+#              per-tenant prefix rule;
+#   login      `clauth login <name>`, the one human step, skipped if done;
+#   distinct   the new account id repeats no other profile's;
+#   settings   the pool's config.toml is copied in. clauth writes an all-commented
+#              template, and every in-place `clauth switch <sid>` between seats
+#              with different [models] is refused in the daemon's journal only;
+#   dir        the account dir is built, its credential a link into the store;
+#   identity   the seat's organisation and type match the pool's: a login that
+#              went to the browser's claude.ai account looks exactly like a good
+#              one until this check;
+#   pool       claude-tenants-edit adds it, committing the tenants file alone.
+#
+# Every step checks the state first and skips what is done, so a run that stops
+# can be run again with the same name.
+#
+# Usage:
+#   claude-seat add [--dry-run] [--yes] [--email ADDR] <tenant> [name]
+#
+#   name       default: the tenant's prefix and the next number never used
+#   --dry-run  check, propose the name, print the plan; touch nothing
+#   --yes      allow the one-request first launch the identity step may need
+#   --email    the address the seat must have; refused if it differs
+#
+# Exit: 0 added (or dry run passed) · 1 refused: the request does not fit, and
+#       the seat is not in the pool · 2 could not finish safely, and the seat is
+#       not in the pool · 64 usage.
+
+emulate -R zsh
+setopt no_unset pipe_fail extended_glob
+zmodload zsh/mapfile 2>/dev/null
+
+prog=claude-seat
+here="${0:A:h}"
+EDIT="${CLAUDE_SEAT_TENANTS_EDIT:-$here/claude-tenants-edit}"
+ACCDIRS="${CLAUDE_SEAT_ACCOUNT_DIRS:-$here/claude-account-dirs.sh}"
+PICK="${CLAUDE_SEAT_PICK:-$here/claude-pick}"
+CLAUDE_SH="${CLAUDE_SEAT_CLAUDE_SH:-$here/../zsh/functions/claude.sh}"
+CLAUTH="${CLAUDE_SEAT_CLAUTH:-clauth}"
+CLAUDE_BIN="${CLAUDE_SEAT_CLAUDE:-claude}"
+TENANTS="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+PROFILES="$HOME/.clauth/profiles"
+ADROOT="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
+RABOTA="${CLAUDE_SEAT_RABOTA_DIR:-$HOME/.dotfiles-local/rabota}"
+SEP=$'\x1f'
+# rabota's seat rule (rabota/rabota/budget.py: WORK_TENANT, WORK_PREFIX): a lane
+# refuses a work-tenant seat outside quantivly-*, and any other tenant's inside it.
+WORK_TENANT=quantivly
+WORK_PREFIX=quantivly-
+
+usage() {
+  print -u2 -- "usage: $prog add [--dry-run] [--yes] [--email ADDR] <tenant> [name]"
+  exit 64
+}
+say()    { print -r -- "$*" }
+step()   { print -r -- ""; print -r -- "[$1] $2" }
+refuse() { print -u2 -- "$prog: refused: $*"; print -u2 -- "    The seat is NOT in the pool."; exit 1 }
+fail()   { print -u2 -- "$prog: $*"; print -u2 -- "    The seat is NOT in the pool."; exit 2 }
+
+# ---- arguments --------------------------------------------------------------------
+[[ "${1:-}" == add ]] || usage
+shift
+dry=0 yes=0 email=""
+typeset -a pos
+while (( $# )); do
+  case "$1" in
+    --dry-run) dry=1 ;;
+    --yes)     yes=1 ;;
+    --email)   [[ -n "${2:-}" && "$2" != -* ]] || usage; email="$2"; shift ;;
+    --*)       usage ;;
+    -*)        usage ;;
+    *)         pos+=( "$1" ) ;;
+  esac
+  shift
+done
+(( ${#pos} == 1 || ${#pos} == 2 )) || usage
+tenant="${pos[1]}"
+name="${pos[2]-}"
+[[ -z "${tenant//[A-Za-z0-9_.-]/}" ]] || refuse "tenant '$tenant' may only contain letters, digits, - _ and ."
+
+for t in "$EDIT" "$ACCDIRS" "$CLAUDE_SH"; do
+  [[ -r "$t" ]] || fail "cannot find $t, which this needs"
+done
+
+# ---- the tenant table, read ONCE, through the editor's reader ------------------------
+# One reader of the tenants file, not two: the editor's `dump` is the launch's
+# read (bare zsh -f, every table declared, any stderr a fault).
+if ! dumpout="$(command zsh "$EDIT" dump 2>&1)"; then
+  fail "cannot read the tenants file: $dumpout"
+fi
+typeset -A pool ovf owned mid retired connectors cacct
+for line in "${(@f)dumpout}"; do
+  [[ -n "$line" ]] || continue
+  tab="${line%%$SEP*}"; rest="${line#*$SEP}"; k="${rest%%$SEP*}"; v="${rest#*$SEP}"
+  case "$tab" in
+    POOL)              pool[$k]="$v" ;;
+    OVERFLOW)          ovf[$k]="$v" ;;
+    MACHINE_OWNED)     owned[$k]="$v" ;;
+    MACHINE_ID)        mid[$k]="$v" ;;
+    RETIRED)           retired[$k]="$v" ;;
+    CONNECTORS)        connectors[$k]="$v" ;;
+    CONNECTOR_ACCOUNT) cacct[$k]="$v" ;;
+  esac
+done
+
+(( ${+pool[$tenant]} )) || refuse "tenant '$tenant' has no pool in the tenants file; give it one by hand first"
+
+# The settings a move compares, normalised, from claude.sh's own reader. The same
+# keys and defaults as claude-doctor's parity check (clauth v0.16.0 swap_eligible).
+source "$CLAUDE_SH" >/dev/null 2>&1
+(( $+functions[_claude_toml_flat] )) || fail "$CLAUDE_SH does not define _claude_toml_flat"
+swapkeys() {   # $1 = config.toml -> sorted "key=value" lines a move compares
+  local kv k v
+  local -a out
+  for kv in "${(@f)$(_claude_toml_flat "$1")}"; do
+    [[ -n "$kv" ]] || continue
+    k="${kv%%$'\t'*}"; v="${kv#*$'\t'}"
+    [[ "$k" == api_key ]] && v=set
+    [[ "$v" == <->.0 ]] && v="${v%.0}"
+    case "$k" in
+      base_url|api_key|env|env.*|models|models.*) out+=( "$k=$v" ) ;;
+      disabled) [[ "$v" == false ]] || out+=( "$k=$v" ) ;;
+    esac
+  done
+  out=( "${(@o)out}" )
+  print -r -- "${(F)out}"
+}
+effective() { _claude_toml_flat "$1" }
+
+# ---- preflight ------------------------------------------------------------------------
+step preflight "tenant '$tenant', pool: ${pool[$tenant]:-<empty>}"
+typeset -a sibs
+for m in ${=pool[$tenant]}; do
+  [[ "$m" == "$name" && -n "$name" ]] && continue
+  [[ -e "$PROFILES/$m/credentials.json" || -L "$PROFILES/$m/credentials.json" ]] && sibs+=( "$m" )
+done
+ref="${sibs[1]-}"
+if [[ -n "$ref" ]]; then
+  refkeys="$(swapkeys "$PROFILES/$ref/config.toml")"
+  for m in ${sibs[2,-1]}; do
+    [[ "$(swapkeys "$PROFILES/$m/config.toml")" == "$refkeys" ]] || \
+      refuse "pool members '$ref' and '$m' disagree on a setting a move compares; make them agree first (claude-doctor names the key)"
+  done
+fi
+
+# Every name that has ever existed, with where it was seen.
+typeset -A known
+known_add() { [[ -n "$1" ]] && known[$1]="${known[$1]:+${known[$1]}, }$2" }
+for p in "$PROFILES"/*(N-/:t); do known_add "$p" "a clauth profile"; done
+for a in "$ADROOT"/*(ND-/:t) "$ADROOT"/*(ND@:t); do
+  if [[ -L "$ADROOT/$a" ]]; then known_add "$a" "a compat symlink"
+  elif [[ "$a" == *.retired-* ]]; then known_add "${a%%.retired-*}" "a retired account dir"
+  else known_add "$a" "an account dir"; fi
+done
+for t in ${(k)pool}; do for m in ${=pool[$t]}; do known_add "$m" "pool '$t'"; done; done
+for t in ${(k)ovf};  do for m in ${=ovf[$t]};  do known_add "$m" "overflow '$t'"; done; done
+for k in ${(k)owned}; do known_add "$k" "the machine-ownership table"; done
+for k in ${(k)mid};   do known_add "$k" "the machine-id table"; done
+for k in ${(k)retired}; do known_add "$k" "the retired-names table"; done
+for f in "$RABOTA"/tenants/*.toml(N); do
+  for l in "${(@f)mapfile[$f]}"; do
+    [[ "$l" == (#b)[[:space:]]#local[[:space:]]#=[[:space:]]#\"([^\"]##)\"* ]] && known_add "$match[1]" "rabota's seat in ${f:t}"
+  done
+done
+if [[ -r "$ADROOT/.pick-ledger" ]]; then
+  for l in "${(@f)mapfile[$ADROOT/.pick-ledger]}"; do known_add "${l%%$'\t'*}" "the picker's ledger"; done
+fi
+
+if [[ "$tenant" == "$WORK_TENANT" ]]; then prefix="$WORK_PREFIX"; else prefix="$tenant-"; fi
+resume=0
+if [[ -z "$name" ]]; then
+  max=-1
+  for k in ${(k)known}; do
+    [[ "$k" == ${(b)prefix}(#b)(<->) ]] && (( match[1] > max )) && max=$match[1]
+  done
+  name="$prefix$(( max + 1 ))"
+  say "proposed name: $name (nothing called that has ever existed)"
+else
+  [[ "$name" != -* && -z "${name//[A-Za-z0-9_.-]/}" ]] || refuse "'$name' may only contain letters, digits, - _ and ."
+  if [[ "$tenant" == "$WORK_TENANT" ]]; then
+    [[ "$name" == ${WORK_PREFIX}* ]] || refuse "a '$WORK_TENANT' seat must be named $WORK_PREFIX*; rabota refuses every lane on it otherwise"
+  else
+    [[ "$name" != ${WORK_PREFIX}* ]] || refuse "only a '$WORK_TENANT' seat may be named $WORK_PREFIX*; rabota refuses it for '$tenant'"
+  fi
+  if (( ${+known[$name]} )); then
+    # A run that stopped part-way leaves exactly a profile and maybe an account
+    # dir behind. That, and nothing else, is resumed.
+    where="${known[$name]}"
+    if [[ "${where//(a clauth profile|an account dir)/}" == (|, |, , ) ]]; then
+      resume=1
+      say "'$name' exists as $where, and nothing else: resuming"
+    else
+      refuse "'$name' has already been used: $where. A name is never reused."
+    fi
+  fi
+fi
+
+if (( dry )); then
+  step plan "nothing below runs in a dry run"
+  say "  login      ${CLAUTH} login $name   (the human step)"
+  say "  distinct   its account id must repeat no other profile's"
+  # An explicit branch: `${ref:-x}` prints $ref itself when it is set.
+  if [[ -n "$ref" ]]; then say "  settings   copy $ref's config.toml"
+  else say "  settings   no member to copy from: clauth's defaults stay"; fi
+  say "  dir        claude-account-dirs.sh $name"
+  say "  identity   claude auth status, then its organisation against the pool's"
+  say "  pool       claude-tenants-edit --commit pool-add $tenant $name"
+  exit 0
+fi
+
+# ---- login ------------------------------------------------------------------------------
+store="$PROFILES/$name/credentials.json"
+step login "$name"
+if [[ -e "$store" || -L "$store" ]]; then
+  say "already logged in; skipping"
+else
+  say "  Sign in AS THE NEW SEAT, not your main account. clauth opens a browser and also"
+  say "  prints the URL: open it in the browser profile signed in to claude.ai as the"
+  say "  new seat. The grant goes to whichever claude.ai account that page is signed in to."
+  "$CLAUTH" login "$name" || fail "'clauth login $name' failed"
+  [[ -e "$store" || -L "$store" ]] || fail "'clauth login $name' finished, but $store does not exist"
+fi
+
+# ---- distinct -----------------------------------------------------------------------------
+step distinct "account id"
+idf="$PROFILES/$name/account_id.json"
+newid=""
+[[ -r "$idf" ]] && newid="${${mapfile[$idf]}//[[:space:]\"]/}"
+if [[ -z "$newid" ]]; then
+  say "no account id recorded; the identity step checks the account again"
+else
+  for p in "$PROFILES"/*(N-/:t); do
+    [[ "$p" == "$name" ]] && continue
+    [[ -r "$PROFILES/$p/account_id.json" ]] || continue
+    [[ "${${mapfile[$PROFILES/$p/account_id.json]}//[[:space:]\"]/}" == "$newid" ]] && \
+      refuse "'$name' is logged in to the same account as '$p'. Undo it: clauth delete $name, then claude-tenants-edit retire-name $name 'a second login to $p'"
+  done
+  say "distinct from every other profile"
+fi
+
+# ---- settings -----------------------------------------------------------------------------
+step settings "config.toml"
+cfg="$PROFILES/$name/config.toml"
+if [[ -z "$ref" ]]; then
+  say "no other member to copy from; clauth's defaults stay"
+elif [[ "$(effective "$cfg")" == "$(effective "$PROFILES/$ref/config.toml")" ]]; then
+  say "already matches '$ref'"
+elif [[ -z "$(effective "$cfg")" ]]; then
+  command cp "$PROFILES/$ref/config.toml" "$cfg" || fail "could not copy $ref's config.toml"
+  say "copied from '$ref'"
+else
+  refuse "$cfg has settings of its own that differ from '$ref'; make them match by hand"
+fi
+
+# ---- dir ------------------------------------------------------------------------------------
+step dir "account dir"
+ad="$ADROOT/$name"
+if ! err="$(command bash "$ACCDIRS" "$name" 2>&1)"; then
+  fail "claude-account-dirs.sh $name failed:"$'\n'"$err"
+fi
+credl="$ad/.credentials.json"
+[[ -L "$credl" && "${credl:A}" == "${store:A}" ]] || fail "$credl is not a link into $store"
+say "built: ${ad/#$HOME/~}"
+
+# ---- identity --------------------------------------------------------------------------------
+step identity "organisation and account"
+cj="$ad/.claude.json"
+account_of() { jq -r '.oauthAccount.accountUuid // empty' "$1" 2>/dev/null }
+if [[ -z "$(account_of "$cj")" ]]; then
+  CLAUDE_CONFIG_DIR="$ad" "$CLAUDE_BIN" auth status --json >/dev/null 2>&1
+fi
+if [[ -z "$(account_of "$cj")" ]]; then
+  ans=n
+  if (( yes )); then
+    ans=y
+  elif [[ -t 0 ]]; then
+    read -r "ans?A first launch sends one tiny request on '$name' to fetch its identity. Run it? [y/N] "
+  fi
+  [[ "$ans" == [yY]* ]] || fail "the seat's identity is unknown; re-run with --yes to allow one first launch"
+  CLAUDE_CONFIG_DIR="$ad" "$CLAUDE_BIN" -p 'Reply with the single word: ok' --model haiku >/dev/null 2>&1
+fi
+uuid="$(account_of "$cj")"
+[[ -n "$uuid" ]] || fail "the seat's identity is still unknown after a launch"
+otype="$(jq -r '.oauthAccount.organizationType // ""' "$cj")"
+ouuid="$(jq -r '.oauthAccount.organizationUuid // ""' "$cj")"
+mail="$(jq -r '.oauthAccount.emailAddress // ""' "$cj")"
+oname="$(jq -r '.oauthAccount.organizationName // ""' "$cj")"
+
+for a in "$ADROOT"/*(N/:t); do
+  [[ "$a" == "$name" || "$a" == *.retired-* || -L "$ADROOT/$a" ]] && continue
+  [[ -r "$ADROOT/$a/.claude.json" ]] || continue
+  [[ "$(account_of "$ADROOT/$a/.claude.json")" == "$uuid" ]] && \
+    refuse "'$name' is logged in to the same account as '$a'. Undo it: clauth delete $name, then claude-tenants-edit retire-name $name 'a second login to $a'"
+done
+if [[ -n "$email" && "${(L)mail}" != "${(L)email}" ]]; then
+  refuse "'$name' is ${mail:-<no address>}, not $email. The login went to another claude.ai account; clauth delete $name and log in again"
+fi
+# A pool of team seats: the new one must be a team seat in the same organisation.
+for m in $sibs; do
+  scj="$ADROOT/$m/.claude.json"
+  [[ -r "$scj" ]] || continue
+  stype="$(jq -r '.oauthAccount.organizationType // ""' "$scj" 2>/dev/null)"
+  sorg="$(jq -r '.oauthAccount.organizationUuid // ""' "$scj" 2>/dev/null)"
+  [[ "$stype" == claude_team && -n "$sorg" ]] || continue
+  [[ "$otype" == claude_team ]] || \
+    refuse "'$name' is a ${otype:-unknown} account, and '$m' is a team seat. The login went to the browser's claude.ai account; clauth delete $name and log in again"
+  [[ "$ouuid" == "$sorg" ]] || \
+    refuse "'$name' is in a different organisation from '$m'. The login went to the browser's claude.ai account; clauth delete $name and log in again"
+  break
+done
+say "${mail:-<no address>}${oname:+, $oname} (${otype:-unknown type})"
+
+# ---- pool ---------------------------------------------------------------------------------------
+step pool "'$tenant'"
+if (( ${${=pool[$tenant]}[(Ie)$name]} )); then
+  say "already in the pool"
+else
+  typeset -a eflags
+  real="${TENANTS:A}"
+  if top="$(command git -C "${real:h}" rev-parse --show-toplevel 2>/dev/null)" && \
+     command git -C "$top" ls-files --error-unmatch -- "$real" >/dev/null 2>&1; then
+    eflags=( --commit )
+  fi
+  command zsh "$EDIT" "${eflags[@]}" pool-add "$tenant" "$name" || \
+    fail "the tenants-file editor did not add it (above)"
+fi
+if [[ -r "$PICK" ]]; then
+  pickout="$(command zsh "$PICK" --tenant "$tenant" --dry-run --explain 2>&1 >/dev/null)"
+  if [[ "$pickout" == *pool:*" $name"* ]]; then
+    say "the picker sees '$name' in '$tenant'"
+  else
+    say "WARNING: the picker's dry run did not list '$name'; check: claude-pick --tenant $tenant --explain --dry-run"
+  fi
+fi
+
+# ---- what is left for a person ---------------------------------------------------------------------
+step done "'$name' is in '$tenant'. Left for you:"
+say "  1. Plugin MCP sign-ins: claude-as $name, then /mcp, for each plugin server the"
+say "     other seats use. claude-doctor's Pools section names any that are missing."
+if [[ -n "${connectors[$tenant]-}" ]]; then
+  say "  2. claude.ai connectors: ${connectors[$tenant]}. Connect them at claude.ai -> Settings"
+  say "     -> Connectors, signed in to claude.ai as $name${cacct[$tenant]:+, choosing ${cacct[$tenant]} when Google asks}."
+else
+  say "  2. claude.ai connectors, if this tenant's sessions use any (Gmail, Calendar, Drive):"
+  say "     connect them signed in to claude.ai as $name. To have this list name them, set"
+  say "     CLAUDE_TENANT_CONNECTORS and CLAUDE_TENANT_CONNECTOR_ACCOUNT for '$tenant'."
+fi
+say "  3. A fresh seat with an empty week draws every new launch until its 5h window fills"
+say "     (DO-792). claude-doctor's concurrency section shows how many it holds."
+exit 0

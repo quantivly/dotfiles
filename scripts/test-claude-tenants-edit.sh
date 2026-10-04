@@ -401,9 +401,22 @@ new_home i4; READNULLCMD=rev run pool-add work w3
 check "the file is read directly, not through READNULLCMD" "$RC" "0"
 check "...and the edit lands"                               "$(pool_of work)" "w1 w2 w3"
 
+#-----------------------------------------------------------------------------
+section "J. dump: the one reader claude-seat uses"
+#-----------------------------------------------------------------------------
+new_home j1; chmod 444 "$REAL"
+run dump
+check "dump reads a file it may not write"   "$RC" "0"
+check "...one line per value, in the launch's table" "$(printf '%s\n' "$OUT" | tr '\037' '|' | grep -c '^POOL|work|w1 w2$')" "1"
+run dump extra
+check "dump takes no arguments"              "$RC" "64"
+new_home j2; printf '%s\r\n' 'typeset -gA CLAUDE_TENANT_POOL' 'CLAUDE_TENANT_POOL=( work "w1" )' > "$REAL"
+run dump
+check "dump of a file that errors at run time is exit 2" "$RC" "2"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that vanished: an early exit, a deleted block, an emptied loop.
-EXPECTED_ROWS=115
+EXPECTED_ROWS=119
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

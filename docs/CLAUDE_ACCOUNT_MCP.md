@@ -336,115 +336,93 @@ choices look arbitrary, check that line first, then the daemon unit.
 
 ### Adding an account to the pool
 
-Seven steps. Two of them need a person at a browser, and three of them fail
-silently if skipped. Worked through end to end on 2026-09-30.
-
-**1. Pick a name that has never existed.** Check `~/.clauth/profiles/` *and*
-`~/.local/state/claude-account-dirs/`. A renamed profile leaves a compatibility
-symlink at its old name (the 2026-09-10 rename left `quantivly-2 -> quantivly-1`),
-so a free-looking slot can still resolve to another account. That kind of
-cross-account mix-up is what the staged rename existed to prevent. The number in
-the name does not have to match anything in the address.
-
-**2. `clauth login <name>`** — the one step that must be done by a person.
-It does not switch the machine's account. The grant goes to whichever claude.ai
-account the page that opens is signed in to, so make sure that is the new account.
-Then confirm it is a new seat and not a second login to an existing one. No
-account id may repeat:
+One command, plus the steps only a person can do. On 2026-09-30 this took a whole
+session by hand, and three of its seven steps failed silently when skipped.
 
 ```bash
-sha256sum ~/.clauth/profiles/*/account_id.json | awk '{print $1}' | sort | uniq -d | wc -l   # must print 0
+scripts/claude-seat add --dry-run <tenant>    # propose a name, show the plan
+scripts/claude-seat add <tenant>              # do it
 ```
 
-`claude-doctor`'s `--- Pools ---` section makes the same check on every run, and prints a `✗`
-naming both profiles.
+**Before it: create the seat.** That means the Workspace alias, the Team invite,
+and accepting the invite by emailed link. Team has no API for any of it.
 
-The address shows up only after the first launch, at
-`jq -r .oauthAccount.emailAddress ~/.local/state/claude-account-dirs/<name>/.claude.json`.
+**What the command does,** in this order. The pool is the last thing it touches,
+so the pool never names a seat that failed a check. Each step checks the state
+first, so a run that stopped can be run again with the same name.
 
-**3. Copy a sibling's settings into `~/.clauth/profiles/<name>/config.toml`.**
-`clauth login` writes an all-commented template, while the existing seats set
-`[models]`, `auto_start` and `fallback_threshold`. Match them:
-`diff ~/.clauth/profiles/<name>/config.toml ~/.clauth/profiles/<sibling>/config.toml`,
-then uncomment the differences. **This is what makes a session movable later.**
-`clauth switch <sid> <profile>` refuses to move a live session to a profile whose
-model settings differ from the ones it launched with. The refusal shows up only
-in the daemon's journal (`quantivly-3 is not swappable (its model routing differs
-from the launch snapshot)`); the CLI prints `pointed session … at …` either way.
-A session launched on the seat before this step can never be moved in place.
-`claude-doctor`'s `--- Pools ---` section compares every member of a pool on the settings that
-check uses, and prints a `✗` for each difference.
+1. **Name.** It proposes the tenant's prefix with the next number nobody has used,
+   or checks the one you give. A name is never reused: one that exists anywhere
+   as a profile, an account dir, a compat symlink, a retired dir, a tenant-table
+   entry, rabota's seat or the picker's ledger is refused. A renamed profile
+   leaves a compat symlink at its old name (the 2026-09-10 rename left
+   `quantivly-2 -> quantivly-1`), so a free-looking slot can resolve to another
+   account. The name must also fit rabota's prefix rule.
+2. **Login: `clauth login <name>`, the one step a person does.** The grant goes
+   to whichever claude.ai account the page is signed in to, so open the URL clauth
+   prints in a browser profile signed in to claude.ai **as the new seat**.
+3. **Distinct.** The new account id must repeat no other profile's: a second login
+   to an existing seat is refused.
+4. **Settings.** It copies the pool's `config.toml`. `clauth login` writes an
+   all-commented template, and `clauth switch <sid> <profile>` refuses to move a
+   live session between seats whose `[models]` differ. The refusal appears only in
+   the daemon's journal (`… is not swappable (its model routing differs from the
+   launch snapshot)`), while the CLI prints `pointed session … at …` either way.
+5. **Account dir.** It runs `scripts/claude-account-dirs.sh <name>`, and checks
+   that the credential is a link into the store.
+6. **Identity.** It reads the seat's account and organisation, from
+   `claude auth status`, or with `--yes` from one tiny first launch. For a pool of
+   team seats, the new one must be a team seat in the same organisation:
+   anything else is the browser's account, not the seat. `--email <addr>` also
+   checks the address.
+7. **Pool.** It adds the name through `scripts/claude-tenants-edit` (below) and
+   commits the tenants file alone. Then it confirms with the picker's dry run.
 
-**4. Add it to its tenant's pool.** The tenants file is
-`~/.config/claude-tenants.zsh`, which is data outside this repo. Do not edit it
-by hand. Use the editor:
+**After it: the steps that stay manual.** The command prints them.
+
+- **Plugin MCP servers (Slack, Notion, Linear).** Run `claude-as <name>`, then
+  `/mcp`, and sign in to each server the other seats use. The redirect goes to
+  `localhost`, so it does not matter which claude.ai account the browser is on.
+  `claude-doctor`'s `--- Pools ---` section names any server a sibling uses that
+  this seat is not signed in to.
+- **claude.ai connectors (Gmail, Calendar, Drive) follow the tenant.** The
+  claude.ai side is the seat; the Google side is the tenant's identity. A
+  connector authorised from `/mcp` is saved to the claude.ai account the
+  **browser** is on: with the browser on the main account, it "succeeded" and the
+  seat still got `mcp_unauthorized_no_token`. So connect from claude.ai →
+  Settings → Connectors in a browser profile signed in as the seat. Record each
+  tenant's connectors in `CLAUDE_TENANT_CONNECTORS` and
+  `CLAUDE_TENANT_CONNECTOR_ACCOUNT`, and the command will name them.
+- **Watch where the next launches land.** A fresh seat's week is empty. If that
+  week also resets within a couple of days, the picker's consume-first bonus
+  (DO-621) is worth up to twice the entire 5h score, against 300 points per
+  session already on a seat whose 5h reads 0%. At the 2026-09-29 restore, that put
+  the new seat 14,050 points ahead, and every restored session landed on it.
+  Sessions keep the seat they launched on, so its 5h window was spent the next
+  morning while two siblings sat at 0%. Until
+  [DO-792](https://linear.app/quantivly/issue/DO-792) changes the weights, expect
+  this after every seat added mid-week. See
+  [Moving sessions off a spent seat](#moving-sessions-off-a-spent-seat) below.
+
+**The tenants file by hand: `scripts/claude-tenants-edit`.** `claude-seat` uses
+it, and it is the way to change a pool directly:
 
 ```bash
 scripts/claude-tenants-edit --dry-run pool-add <tenant> <name>   # see the change
 scripts/claude-tenants-edit --commit  pool-add <tenant> <name>   # make and commit it
 ```
 
-It changes the name's pool and nothing else. It refuses:
-- a name with no profile store;
-- a name another machine owns;
-- a compat symlink;
-- a retired name.
-
-It writes only after checking three things on a copy: the copy parses, it loads
-cleanly the way a launch loads it, and the tables differ from the original by
-exactly that one change. It keeps a backup under
-`~/.local/state/claude-tenants-edit/`. `--commit` commits the file alone, and
-refuses if the file already had a hand edit. `pool-remove` and `retire-name`
-work the same way. A retired name goes into `CLAUDE_TENANT_RETIRED`, so it is
-never handed out again.
+It changes one pool line and nothing else. It refuses a name that has no profile
+store, is machine-owned, is a compat symlink or is retired. It never empties a
+pool. It writes only after checking a copy: the copy parses, loads cleanly the way
+a launch loads it, and differs from the original by exactly that change. It keeps
+a backup under `~/.local/state/claude-tenants-edit/`. `pool-remove` and
+`retire-name` work the same way, and a retired name goes into
+`CLAUDE_TENANT_RETIRED` so it is never handed out again.
 
 Leave `CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
 another machine will own the seat. Leave `CLAUDE_TENANT_BUCKETS` alone until the
-new seat's usage has been measured against the others. Do this step after step 2,
-so the pool never names a profile with no credential.
-
-**5. Build and verify.** Run `scripts/claude-account-dirs.sh <name>`. Then
-`claude-doctor` should print `✓ <name>: credential shared with the clauth store`,
-and `claude-pick --explain --dry-run` from one of that tenant's repos should list
-the new name in the pool.
-
-**6. MCP servers.** A profile's `mcpOAuth` entries are its own, so a fresh one
-starts with none. There are two kinds of server, and they behave differently:
-
-- **Plugin servers (Slack, Notion, Linear): authorise once, from a session on
-  the new profile.** Use `/mcp`, or the server's `authenticate` tool, which hands
-  back a URL. The redirect goes to `localhost` and claude.ai is not involved, so
-  it does not matter which claude.ai account the browser is on. Sign in to the
-  service as yourself. The token covers every session on that profile.
-  `claude-doctor`'s `--- Pools ---` section checks every member from any shell:
-  it names each plugin server a sibling uses that this seat is not signed in to,
-  and prints `✓ pool '<t>': every member is signed in to its N plugin MCP
-  server(s)` once none is missing.
-- **claude.ai connectors are saved to the claude.ai account the BROWSER is signed
-  in to, not to the seat the session runs on.** With the browser on your main
-  account, `/mcp` → *claude.ai Slack* completed and looked successful, while the
-  session still got `mcp_unauthorized_no_token`: the grant had gone to the main
-  account. So for Slack, Notion and Linear use the plugin servers above. This
-  section used to recommend the connectors, which is wrong for a new seat. For a
-  service with no plugin server here (Gmail, Calendar, Drive, Fireflies, Figma),
-  use a separate browser profile signed in to claude.ai *as the new account*, and
-  connect from Settings → Connectors there. If the new address is a Workspace
-  alias, it has no Google login of its own: sign in to claude.ai by emailed link,
-  and when the service asks for Google, use your normal Google account. That half
-  has not yet been verified end to end.
-
-**7. Watch where the next launches land.** A fresh seat's week is empty. If
-that week also resets within a couple of days, the picker's consume-first bonus
-(DO-621) is worth up to twice the entire 5h score. Meanwhile each session already
-on a seat whose 5h reads 0% costs it only 300 points. At the 2026-09-29 restore
-that put the new seat 14,050 points ahead, roughly fifty sessions' worth, so every
-session restored after the reboot landed on it. Sessions keep the seat they
-launched on. So the new seat's 5h window was spent the next morning while two
-sibling seats sat at 0%, and every session on it stopped at the same moment.
-Until [DO-792](https://linear.app/quantivly/issue/DO-792) changes the weights,
-expect this after every seat added mid-week. `claude-doctor`'s concurrency
-section shows the count. See
-[Moving sessions off a spent seat](#moving-sessions-off-a-spent-seat) below.
+new seat's usage has been measured against the others.
 
 ### Moving sessions off a spent seat
 
