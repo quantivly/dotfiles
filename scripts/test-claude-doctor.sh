@@ -88,7 +88,7 @@ CLAUTH_LOG="$TMPROOT/clauth.log"
 #     done by blanking PATH — env would fail to exec zsh and report 127, which
 #     is a different failure wearing the same exit code.
 SYSBIN="$TMPROOT/sysbin"; mkdir -p "$SYSBIN"
-for t in zsh date stat grep sed sort uniq head tail cut tr wc ls sha256sum cat printf; do
+for t in zsh date stat grep sed sort uniq head tail cut tr wc ls sha256sum cat printf cmp; do
     p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$SYSBIN/$t"
 done
 JQ_BIN="$(command -v jq)"
@@ -103,6 +103,10 @@ cp -a "$SYSBIN/." "$NOJQBIN/"; rm -f "$NOJQBIN/jq"
 # asked" — the defect that shipped in this PR's first revision.
 NOSEDBIN="$TMPROOT/nosedbin"; mkdir -p "$NOSEDBIN"
 cp -a "$SYSBIN/." "$NOSEDBIN/"; rm -f "$NOSEDBIN/sed"
+# ...and minus cmp, for the Linear section's drift check (section Y).
+NOCMPBIN="$TMPROOT/nocmpbin"; mkdir -p "$NOCMPBIN"
+cp -a "$SYSBIN/." "$NOCMPBIN/"; rm -f "$NOCMPBIN/cmp"
+[[ -x "$SYSBIN/cmp" ]] || fatal "could not stage cmp into the fixture PATH"
 
 #-----------------------------------------------------------------------------
 # The clauth stub
@@ -258,13 +262,18 @@ run_doctor() {
     local base="$SYSBIN" p
     [[ "${NO_JQ:-0}" == 1 ]] && base="$NOJQBIN"
     [[ "${NO_SED:-0}" == 1 ]] && base="$NOSEDBIN"
+    [[ "${NO_CMP:-0}" == 1 ]] && base="$NOCMPBIN"
     [[ -n "${ACTIVE_PROFILE:-}" ]] && mk_status "$ACTIVE_PROFILE"
     # The clauth stub is prepended ONLY when a row asks for it. Without it there
     # is no clauth anywhere on this PATH — see the SYSBIN note above.
     p="$base"
     [[ "${WITH_CLAUTH:-0}" == 1 ]] && p="$STUBBIN:$base"
     local -a pre=()
-    if [[ -n "${CFGDIR:-}" ]]; then pre=("CLAUDE_CONFIG_DIR=$CFGDIR"); else pre=(-u CLAUDE_CONFIG_DIR); fi
+    # Never the real key: env inherits this shell's, and a session that runs the
+    # suite has one. A row that wants it set says so with LKEY. The `-u` options go
+    # FIRST: env takes the first word after an assignment as the command (127).
+    if [[ -n "${LKEY:-}" ]]; then pre=("LINEAR_API_KEY=$LKEY"); else pre=(-u LINEAR_API_KEY); fi
+    if [[ -n "${CFGDIR:-}" ]]; then pre+=("CLAUDE_CONFIG_DIR=$CFGDIR"); else pre=(-u CLAUDE_CONFIG_DIR "${pre[@]}"); fi
     OUT="$(env "${pre[@]}" HOME="$FHOME" \
               CLAUDE_DOCTOR_PROC_ROOT="${PROC_ROOT:-$FHOME/procfix}" \
               CLAUTH_STUB_LOG="$CLAUTH_LOG" \
@@ -3317,6 +3326,88 @@ rm -f "$FHOME/.local/state/claude-account-dirs/b/.credentials.json"
 run_doctor
 want_out "with no account-dir file, the store is read" "'b' has broken plugin MCP sign-ins: plugin:slack:slack (token blanked by a lost write)"
 
+# --- a disabled plugin's sign-ins are not compared (DO-801) -------------------
+# Linear moved from the official plugin's per-seat OAuth to a repo plugin that
+# sends LINEAR_API_KEY, so the official plugin is disabled. Every seat that ever
+# signed in to it keeps that mcpOAuth entry, and nothing removes it. Counted, it
+# would warn forever that a NEW seat lacks a sign-in no session can use.
+mk_plugins() {   # $1 = the enabledPlugins object, as JSON
+    jq -n --argjson ep "$1" '{enabledPlugins: $ep}' > "$FHOME/.claude/settings.json"
+}
+
+new_home dk1; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp a plugin:linear:linear good; mk_mcp b plugin:slack:slack good
+mk_plugins '{"slack@mkt": true, "linear@mkt": false}'
+run_doctor
+no_out   "a sign-in for a disabled plugin is not required of a sibling" "is not signed in to"
+want_out "...so the pool's ✓ counts only the servers in use" \
+         "✓ pool 'w': every member is signed in to its 1 plugin MCP server(s)"
+want_out "...and what was left out is said" \
+         "pool 'w': not comparing sign-ins for disabled plugins: plugin:linear:linear"$'\n'
+
+# The same seats with no settings.json at all: everything counts, as before.
+new_home dk1b; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp a plugin:linear:linear good; mk_mcp b plugin:slack:slack good
+run_doctor
+want_out "with no settings.json, every signed-in server is compared" \
+         "'b' is not signed in to plugin:linear:linear, which another member uses"
+no_out   "...and nothing is said to be left out" "not comparing sign-ins"
+
+new_home dk2; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:slack:slack good; mk_mcp a plugin:linear:linear good; mk_mcp b plugin:slack:slack good
+mk_plugins '{"slack@mkt": true}'
+run_doctor
+want_out "a plugin with NO enabledPlugins entry is still compared" \
+         "'b' is not signed in to plugin:linear:linear, which another member uses"
+
+# One plugin name in two marketplaces: off only if EVERY entry for it is false.
+new_home dk3; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:linear:linear good
+mk_plugins '{"linear@mkt": false, "linear@other": true}'
+run_doctor
+want_out "a name still enabled in another marketplace is compared" \
+         "'b' is not signed in to plugin:linear:linear, which another member uses"
+
+# The server name carries the plugin.json name, the key the marketplace name, and
+# the official Notion plugin spells them differently. A match that folded case
+# would widen what is hidden; an exact one at worst leaves a warning standing.
+new_home dk4; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:Notion:notion good
+mk_plugins '{"notion@mkt": false}'
+run_doctor
+want_out "a disabled key that matches only by case hides nothing" \
+         "'b' is not signed in to plugin:Notion:notion, which another member uses"
+
+new_home dk5; write_cred
+mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a" )'
+mk_mcp a plugin:linear:linear fossil
+mk_plugins '{"linear@mkt": false}'
+run_doctor
+no_out "a blanked token for a disabled plugin is not damage anyone can hit" "has broken plugin MCP sign-ins"
+
+# Only a real `false` turns a plugin off. A string "false", or a null, is not
+# what `claude plugin disable` writes, and is not read as off.
+new_home dk5b; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:linear:linear good
+mk_plugins '{"linear@mkt": "false"}'
+run_doctor
+want_out "an enabledPlugins value that is not the boolean false hides nothing" \
+         "'b' is not signed in to plugin:linear:linear, which another member uses"
+
+new_home dk6; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
+mk_mcp a plugin:linear:linear good
+printf '{"enabledPlugins":' > "$FHOME/.claude/settings.json"
+run_doctor
+want_out "an unparseable settings.json leaves every server compared" \
+         "'b' is not signed in to plugin:linear:linear, which another member uses"
+
 # A referenced tenant WITH members is not flagged. Pins the pool lookup's keys:
 # zsh keeps a bare $'\t' in a SUBSCRIPT literally, which broke this section's own
 # member lookup in its first draft, and would make every referenced pool "empty".
@@ -3333,6 +3424,182 @@ new_home y12; write_cred '.mcpOAuth["plugin:linear:linear|abc"] = {serverName: "
 run_doctor
 want_out "the discovery-record remedy warns off the connector route" "NOT through the claude.ai connector"
 no_out   "...and no longer recommends it"                            "in favour of the"
+
+#-----------------------------------------------------------------------------
+section "Y. The Linear API-key plugin (DO-801)"
+#-----------------------------------------------------------------------------
+#
+# claude/plugins/linear-key sends LINEAR_API_KEY to Linear's MCP server, so no
+# seat signs in. Each row below is one way it stops doing that while every
+# session still shows Linear tools, served by the official plugin's per-seat
+# OAuth. The fixture key is fake, and run_doctor unsets the real one.
+
+# The literal ${LINEAR_API_KEY} is the point: Claude Code expands it, not the shell.
+# shellcheck disable=SC2016
+LK_DEF='{"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer ${LINEAR_API_KEY}"}}}'
+LK_FAKE="lin_api_FAKE_DO801_never_real"
+
+# The healthy state: the plugin in ~/.dotfiles, a user-scope install whose cached
+# copy matches it, the marketplace registered from the primary checkout,
+# linear-key on and the official plugin off. $1 = jq filter over settings.json.
+mk_lk() {
+    local src="$FHOME/.dotfiles/claude/plugins" cache="$FHOME/.claude/plugins/cache/dotfiles/linear-key/1.0.0"
+    mkdir -p "$src/linear-key" "$cache"
+    mkdir -p "$src/linear-key/.claude-plugin" "$cache/.claude-plugin"
+    printf '%s\n' "$LK_DEF" > "$src/linear-key/.mcp.json"
+    printf '%s\n' '{"name":"linear-key","version":"1.0.0"}' > "$src/linear-key/.claude-plugin/plugin.json"
+    cp "$src/linear-key/.mcp.json" "$cache/.mcp.json"
+    cp "$src/linear-key/.claude-plugin/plugin.json" "$cache/.claude-plugin/plugin.json"
+    jq -n --arg ip "$cache" '{version: 2, plugins: {"linear-key@dotfiles": [{scope: "user", installPath: $ip, version: "1.0.0"}]}}' \
+      > "$FHOME/.claude/plugins/installed_plugins.json"
+    jq -n --arg p "$src" '{dotfiles: {source: {source: "directory", path: $p}, installLocation: $p}}' \
+      > "$FHOME/.claude/plugins/known_marketplaces.json"
+    jq -n '{enabledPlugins: {"linear-key@dotfiles": true, "linear@claude-plugins-official": false}}' \
+      | jq "${1:-.}" > "$FHOME/.claude/settings.json"
+}
+
+new_home lk0; write_cred
+LKEY="$LK_FAKE" run_doctor
+want_out "with no plugin in ~/.dotfiles, the section says it did not check" "no linear-key plugin in ~/.dotfiles/claude/plugins — NOT CHECKED"
+no_out   "...and warns about nothing"                                     "linear-key plugin is not installed"
+
+new_home lk1; write_cred; mk_lk
+LKEY="$LK_FAKE" run_doctor
+want_out "installed, enabled, current and keyed is a ✓" "✓ linear-key plugin installed, enabled and current; the official Linear plugin is off"
+no_out   "...and the key is never printed"              "$LK_FAKE"
+
+new_home lk2; write_cred; mk_lk 'del(.enabledPlugins["linear@claude-plugins-official"])'
+rm -f "$FHOME/.claude/plugins/installed_plugins.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "not installed, with a key to use, is a ⚠" "⚠ the linear-key plugin is not installed at user scope"
+want_out "...with where the setup is"              "docs/CLAUDE_SETUP.md"
+no_out   "...and no ✓"                             "linear-key plugin installed, enabled"
+
+new_home lk2b; write_cred; mk_lk 'del(.enabledPlugins["linear@claude-plugins-official"])'
+rm -f "$FHOME/.claude/plugins/installed_plugins.json"
+run_doctor
+want_out "not installed and no key is only a note" "the linear-key plugin is not installed, and LINEAR_API_KEY is not exported here"
+no_out   "...not a ⚠"                              "not installed at user scope"
+
+# A setup or rollback that stopped half way: the official plugin off, nothing in
+# its place. Not "sign in on every seat", which cannot work; and not a note just
+# because this shell has no key.
+new_home lk2e; write_cred; mk_lk; rm -f "$FHOME/.claude/plugins/installed_plugins.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "not installed with the official plugin off is a ✗" "✗ neither linear-key nor the official Linear plugin is active — no session has Linear"
+no_out   "...not the sign-in ⚠"                              "every seat still needs its own Linear sign-in"
+
+new_home lk2f; write_cred; mk_lk; rm -f "$FHOME/.claude/plugins/installed_plugins.json"
+run_doctor
+want_out "...whether or not this shell has the key" "neither linear-key nor the official Linear plugin is active"
+
+# A project-scope install reaches one directory, not every seat.
+new_home lk2c; write_cred; mk_lk 'del(.enabledPlugins["linear@claude-plugins-official"])'
+st="$FHOME/.claude/plugins/installed_plugins.json"
+jq '.plugins["linear-key@dotfiles"][0].scope = "project"' "$st" > "$st.tmp" && mv -f "$st.tmp" "$st"
+LKEY="$LK_FAKE" run_doctor
+want_out "a project-scope install is not installed for every seat" "the linear-key plugin is not installed at user scope"
+
+# Unreadable is not absent.
+new_home lk3; write_cred; mk_lk; printf '{"plugins":' > "$FHOME/.claude/plugins/installed_plugins.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "an unparseable installed_plugins.json is NOT CHECKED" "cannot read ~/.claude/plugins/installed_plugins.json — the linear-key plugin is NOT CHECKED"
+no_out   "...and is not read as not installed"                 "is not installed"
+# The fixture has the official plugin off, so falling through to "not installed"
+# prints the half-done-setup ✗ instead, which the needle above does not match.
+no_out   "...nor as a setup that left no Linear"               "no session has Linear"
+
+new_home lk3b; write_cred; mk_lk; : > "$FHOME/.claude/plugins/installed_plugins.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "an EMPTY installed_plugins.json is NOT CHECKED either" "the linear-key plugin is NOT CHECKED"
+
+new_home lk4; write_cred
+mk_lk '.enabledPlugins["linear-key@dotfiles"] = false | del(.enabledPlugins["linear@claude-plugins-official"])'
+LKEY="$LK_FAKE" run_doctor
+want_out "installed but disabled is a ⚠" "⚠ linear-key@dotfiles is installed but not enabled (enabledPlugins: false)"
+no_out   "...and no ✓"                   "linear-key plugin installed, enabled"
+
+new_home lk4b; write_cred; mk_lk 'del(.enabledPlugins["linear-key@dotfiles"], .enabledPlugins["linear@claude-plugins-official"])'
+LKEY="$LK_FAKE" run_doctor
+want_out "installed with no enabledPlugins entry is the same ⚠" "linear-key@dotfiles is installed but not enabled (enabledPlugins: null)"
+
+# Both off: no session has Linear, and no sign-in can fix it.
+new_home lk4c; write_cred; mk_lk '.enabledPlugins["linear-key@dotfiles"] = false'
+LKEY="$LK_FAKE" run_doctor
+want_out "installed but disabled, with the official plugin off, is a ✗" \
+         "✗ linear-key@dotfiles is installed but not enabled, and the official Linear plugin is off — no session has Linear"
+no_out   "...not just the disabled ⚠"                                    "(enabledPlugins: false)"
+
+new_home lk5; write_cred; mk_lk '.enabledPlugins["linear@claude-plugins-official"] = true'
+LKEY="$LK_FAKE" run_doctor
+want_out "the official plugin still on is a ⚠" "⚠ linear@claude-plugins-official is still enabled"
+# The printed command must not run through claude() or a session's config dir:
+# `--scope user` would land in a settings.json copy the next launch overwrites.
+want_out "...with the command that turns it off, outside any account dir" \
+         "( unset CLAUDE_CONFIG_DIR; command claude plugin disable linear@claude-plugins-official --scope user )"
+no_out   "...and no ✓"                          "linear-key plugin installed, enabled"
+
+new_home lk6; write_cred; mk_lk
+printf '%s\n' '{"linear":{"type":"http","url":"https://mcp.linear.app/mcp/readonly"}}' \
+  > "$FHOME/.claude/plugins/cache/dotfiles/linear-key/1.0.0/.mcp.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "an installed copy that differs from the repo is a ⚠" "⚠ the installed linear-key's .mcp.json differs from ~/.dotfiles/claude/plugins/linear-key"
+want_out "...whose update command runs outside any account dir" \
+         "( unset CLAUDE_CONFIG_DIR; command claude plugin marketplace update dotfiles && command claude plugin update linear-key@dotfiles --scope user )"
+want_out "...naming the version bump an update needs"          "ignores an edit unless plugin.json's version changes"
+no_out   "...and no ✓"                                         "linear-key plugin installed, enabled"
+
+new_home lk6b; write_cred; mk_lk; rm -f "$FHOME/.claude/plugins/cache/dotfiles/linear-key/1.0.0/.mcp.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "an install with no .mcp.json is a ⚠" "the installed linear-key has no .mcp.json"
+
+# A version bumped in the checkout but never updated: .mcp.json can still match.
+new_home lk6c; write_cred; mk_lk
+printf '%s\n' '{"name":"linear-key","version":"1.0.1"}' > "$FHOME/.dotfiles/claude/plugins/linear-key/.claude-plugin/plugin.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "a plugin.json that differs from the checkout is a ⚠" "the installed linear-key's .claude-plugin/plugin.json differs"
+no_out   "...and no ✓"                                         "linear-key plugin installed, enabled"
+
+new_home lk7; write_cred; mk_lk
+jq -n '{dotfiles: {source: {source: "directory", path: "/somewhere/worktree/claude/plugins"}}}' \
+  > "$FHOME/.claude/plugins/known_marketplaces.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "a marketplace registered from elsewhere is a ⚠" "⚠ the 'dotfiles' marketplace points at /somewhere/worktree/claude/plugins, not ~/.dotfiles/claude/plugins"
+no_out   "...and no ✓"                                    "linear-key plugin installed, enabled"
+
+new_home lk7b; write_cred; mk_lk
+jq -n --arg p "$FHOME/.dotfiles/claude/plugins/" '{dotfiles: {source: {source: "directory", path: $p}}}' \
+  > "$FHOME/.claude/plugins/known_marketplaces.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "the same path with a trailing slash is the primary checkout" "✓ linear-key plugin installed, enabled and current"
+
+new_home lk8; write_cred; mk_lk
+run_doctor
+want_out "no LINEAR_API_KEY with the plugin installed is a ⚠" "⚠ LINEAR_API_KEY is not exported in this shell"
+no_out   "...and no ✓"                                        "linear-key plugin installed, enabled"
+
+# Set but NOT exported: the doctor's own shell sees it, a session it starts does
+# not. PRELUDE assigns it inside the doctor's shell, after env unset it.
+new_home lk8b; write_cred; mk_lk
+PRELUDE="LINEAR_API_KEY=$LK_FAKE" run_doctor
+want_out "a key that is set but not exported is a ⚠" "⚠ LINEAR_API_KEY is not exported in this shell"
+no_out   "...and no ✓"                               "linear-key plugin installed, enabled"
+
+# No settings.json at all enables nothing.
+new_home lk9b; write_cred; mk_lk; rm -f "$FHOME/.claude/settings.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "an absent settings.json is installed-but-not-enabled" "linear-key@dotfiles is installed but not enabled (enabledPlugins: null)"
+
+new_home lk10; write_cred; mk_lk
+NO_CMP=1 LKEY="$LK_FAKE" run_doctor
+want_out "without cmp, the drift check says it did not run" "cmp not found — whether the installed copy is current is NOT CHECKED"
+no_out   "...rather than calling every file different"     "differs from"
+no_out   "...and earns no ✓"                               "linear-key plugin installed, enabled"
+
+new_home lk9; write_cred; mk_lk; printf '{"enabledPlugins":' > "$FHOME/.claude/settings.json"
+LKEY="$LK_FAKE" run_doctor
+want_out "an unreadable settings.json leaves enablement NOT CHECKED" "whether linear-key is enabled is NOT CHECKED"
+no_out   "...and earns no ✓"                                        "linear-key plugin installed, enabled"
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
@@ -3352,7 +3619,7 @@ no_out   "...and no longer recommends it"                            "in favour 
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=461
+EXPECTED_ROWS=517
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

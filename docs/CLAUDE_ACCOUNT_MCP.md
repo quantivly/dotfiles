@@ -58,8 +58,8 @@ every call while still advertising a full tool list, so nothing about the tool
 list reveals it. Measured 1,936 failures, and 136 failures against 0 successes
 on the day it was found.
 
-Either **remove** it (the `linear` plugin's own MCP server already works and
-holds a valid token) or **remove and re-add** it so a fresh id is issued. Do not
+Either **remove** it (the repo's `linear-key` plugin serves Linear on the API
+key, with no token to hold) or **remove and re-add** it so a fresh id is issued. Do not
 leave both a dead connector and a working plugin in place.
 
 ### 2.2 The `authenticate`-only connectors are the catalogue, not your config
@@ -129,7 +129,7 @@ ship **skills and slash commands**, which go away with the plugin. `linear` and
 
 | service | plugin also brings | current reading |
 |---|---|---|
-| Linear | nothing (MCP only) | keep the **plugin**; the connector is dead |
+| Linear | nothing (MCP only) | the repo's `linear-key` plugin, on the API key; official plugin off, connector dead ([DO-801](https://linear.app/quantivly/issue/DO-801)) |
 | Notion | 1 skill, 6 commands  | keep the plugin for the skills; drop one MCP path |
 | Slack  | 7 skills, 5 commands | keep the **plugin**; it is the only working Slack |
 
@@ -389,7 +389,13 @@ the same person.
 
 **After it: the steps that stay manual.** The command prints them.
 
-- **Plugin MCP servers (Slack, Notion, Linear).** Run `claude-as <name>`, then
+- **Linear: nothing to do.** It is served by this repo's `linear-key` plugin,
+  which authenticates with `LINEAR_API_KEY` from the environment, so no seat signs
+  in to it ([CLAUDE_SETUP.md](CLAUDE_SETUP.md#linear-one-api-key-no-sign-in-do-801)).
+  `claude-doctor`'s `--- Linear ---` section says whether that plugin is installed,
+  enabled and current. If `/mcp` offers an *authenticate* step for Linear, the
+  official plugin is serving it again: fix that rather than signing in.
+- **Plugin MCP servers (Slack, Notion).** Run `claude-as <name>`, then
   `/mcp`, and sign in to each server the other seats use. The redirect goes to
   `localhost`, so it does not matter which claude.ai account the browser is on.
   `claude-doctor`'s `--- Pools ---` section names any server a sibling uses that

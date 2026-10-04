@@ -173,6 +173,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Linear reaches every seat through `LINEAR_API_KEY`, with no per-seat sign-in (DO-801).**
+  `claude/plugins/linear-key` is a repo-owned plugin, in a directory marketplace, whose only
+  content is Linear's MCP server with `Authorization: Bearer ${LINEAR_API_KEY}`. The key was
+  already in every session's environment for rabota. It is installed once, at user scope, and
+  every account dir shares the plugins dir, so each new seat has Linear at its first launch, and
+  there is no Linear entry in any `mcpOAuth` for a lost write to blank. Measured on Claude Code
+  2.1.289: the variable is expanded in `headers`, and a missing key is a loud 401, because Claude
+  Code turns off the OAuth fallback when `headers.Authorization` is set. Two plugins at one URL
+  are deduplicated by their order in `enabledPlugins`, so the official `linear` plugin is disabled
+  rather than left to be outranked. The one-time setup, the rollback and the evidence are in
+  `docs/CLAUDE_SETUP.md`. The runbook's manual steps after `claude-seat add` no longer send a
+  new seat to sign in to Linear.
+  `claude-doctor` changes in two places:
+  - a new `--- Linear ---` section reports when the plugin is not installed at user scope, is not
+    enabled, sits beside an official plugin that is still enabled, was registered from somewhere
+    other than `~/.dotfiles`, or has an installed copy that differs from the checkout. That last
+    one matters because `claude plugin update` ignores an edit made without a version bump. It
+    also reports when `LINEAR_API_KEY` is not exported. A setup or rollback that stopped half way,
+    leaving neither plugin on, is a `✗`: no session has Linear then, and no sign-in can fix it.
+    Every command it prints runs outside `claude()` and any session's config dir, because from
+    there `--scope user` writes an account dir's `settings.json` copy, which the next launch
+    overwrites.
+  - `--- Pools ---` stops comparing sign-ins for a plugin whose every `enabledPlugins` entry is
+    `false`. Nothing removes an `mcpOAuth` entry when its plugin is disabled, so a seat that never
+    signed in to the old plugin would otherwise be warned about it forever. An absent or
+    non-boolean entry still counts, because the plugin name in a server name (`plugin:Notion:…`)
+    and the settings key (`notion@…`) can differ.
+
 - **`scripts/claude-seat add <tenant> [name]`: one command from a new login to a verified, pooled
   seat (DO-796).** It replaces the seven-step manual procedure in `docs/CLAUDE_ACCOUNT_MCP.md` §5,
   three of whose steps failed silently on 2026-09-30. Its steps:

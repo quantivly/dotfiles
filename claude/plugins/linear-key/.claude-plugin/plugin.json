@@ -1,0 +1,8 @@
+{
+  "name": "linear-key",
+  "version": "1.0.0",
+  "description": "Linear's MCP server, authenticated with LINEAR_API_KEY from the environment instead of a per-seat OAuth sign-in.",
+  "author": {
+    "name": "dotfiles"
+  }
+}
