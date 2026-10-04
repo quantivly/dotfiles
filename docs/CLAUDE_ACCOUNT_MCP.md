@@ -185,8 +185,8 @@ switch. What its findings mean:
 | `pool '<t>' names '<n>', a compat symlink` / `a retired name` / `which has no clauth profile store` | the picker drops that name without a word | put the real profile's name in the pool, or remove it |
 | `profiles '<a>', '<b>' are logged in to the SAME account` | two names for one seat | `clauth delete` the newer one, and drop it from its pool |
 | `'<b>' is in a different organisation` / `a claude_max account in a pool of team seats` | the login went to the browser's claude.ai account, not the seat | `clauth login <b>` again with the browser on the right account |
-| `'<b>' is not signed in to plugin:…, which another member uses` | that seat never signed in to a plugin server its pool uses | `claude-as <b>`, then `/mcp` |
-| `'<b>' has broken plugin MCP sign-ins: …` | a token blanked by a lost write, or one with no refresh token | re-authorise from a session on it, then §2.4 |
+| `'<b>' is not signed in to plugin:…, which another member uses` | that seat never signed in to a plugin server its pool uses | `scripts/claude-seat mcp <b>`, or `claude-as <b>`, then `/mcp` |
+| `'<b>' has broken plugin MCP sign-ins: …` | a token blanked by a lost write, or one with no refresh token | `scripts/claude-seat mcp <b>`, then §2.4 |
 
 ---
 
@@ -395,11 +395,23 @@ the same person.
   `claude-doctor`'s `--- Linear ---` section says whether that plugin is installed,
   enabled and current. If `/mcp` offers an *authenticate* step for Linear, the
   official plugin is serving it again: fix that rather than signing in.
-- **Plugin MCP servers (Slack, Notion).** Run `claude-as <name>`, then
-  `/mcp`, and sign in to each server the other seats use. The redirect goes to
-  `localhost`, so it does not matter which claude.ai account the browser is on.
-  `claude-doctor`'s `--- Pools ---` section names any server a sibling uses that
-  this seat is not signed in to.
+- **Plugin MCP servers (Slack, Notion): `scripts/claude-seat mcp <name>`.** It
+  runs `claude mcp login` in the seat's config dir for each plugin server another
+  member of its pools is signed in to, plus any of its own whose only entries are
+  damaged, one at a time (Slack's plugin listens on a fixed port). A damaged entry
+  beside a good one is reported, not retried: it sits under an older config's
+  key, which a new sign-in writes past. Each asks for one
+  approval in the browser, as the tenant's account at that service; the redirect
+  goes to `localhost`, so the claude.ai account the browser is on does not
+  matter. A disabled plugin is skipped, and an unreadable settings file stops it
+  rather than counting as "nothing disabled". Afterwards it reads the seat's sign-ins
+  the way `claude-doctor`'s `--- Pools ---` section does, and prints the `/mcp`
+  steps for any that did not take. It never copies an entry from another seat: a
+  copy is a second holder of one rotating refresh chain. `--dry-run` lists what
+  it would do; `--no-browser` prints each URL instead, in a terminal. The same
+  command re-authorises an existing seat after a lost write. Whether
+  `claude mcp login` accepts plugin server names is confirmed by the first real
+  run; if it does not, use `claude-as <name>`, then `/mcp`.
 - **claude.ai connectors (Gmail, Calendar, Drive) follow the tenant.** The
   claude.ai side is the seat; the Google side is the tenant's identity. A
   connector authorised from `/mcp` is saved to the claude.ai account the

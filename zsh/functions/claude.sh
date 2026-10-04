@@ -655,6 +655,90 @@ _claude_toml_flat() {
   done < "$f"
 }
 
+# PLUGIN MCP SIGN-INS, shared by the doctor's Pools section and `claude-seat mcp`
+# (DO-797), so the two cannot disagree about what "signed in" means.
+#
+# The file a session on seat $3 reads: the account dir's .credentials.json. It is
+# a link into the clauth store until an atomic write replaces it with a real file,
+# and a lost write lands THERE first. The store is read only for a seat that has
+# no account-dir file yet (review, 2026-10-03).
+_claude_seat_cred_file() {   # $1 = account-dir root, $2 = clauth profiles dir, $3 = seat
+  local f="$1/$3/.credentials.json"
+  [[ -e "$f" || -L "$f" ]] || f="$2/$3/credentials.json"
+  print -r -- "$f"
+}
+
+# The plugin MCP entries in one credential file, as "server<TAB>state" lines,
+# sorted by section 2's discriminator. An empty token with no expiry, scope or
+# refresh token is a DISCOVERY record: never signed in here, not damage. An empty
+# token that kept them is the FOSSIL of a lost write, which IS damage. Then
+# norefresh, noexpiry (an expiry missing or not a number), broken (not an object)
+# and good. A server can have several entries, one per config hash; every one is
+# printed. Names and states only: no token value leaves jq.
+#
+# Non-zero when the file is not a credential object. Every shape below read as
+# "no sign-ins" until it was refused here, measured:
+#   - an EMPTY file: a filter runs zero times and jq exits 0, so `input` with -n;
+#   - a root of null: `null | has(…)` is false, not an error, so the root check;
+#   - an mcpOAuth of false: `false // {}` is {}, so `has` rather than `//`;
+#   - an mcpOAuth of []: `[] | to_entries` is empty, so the second type check.
+_claude_mcp_plugin_states() {   # $1 = credential file
+  jq -n -r '
+    input
+    | if type != "object" then error("not an object") else . end
+    | (if has("mcpOAuth") then .mcpOAuth else {} end)
+    | if type != "object" then error("mcpOAuth is not an object") else . end
+    | to_entries[]
+    | (.key | split("|")[0]) as $k
+    | (if (.value | type) == "object" and (.value.serverName | type) == "string"
+          and .value.serverName != "" then .value.serverName else $k end) as $s
+    | select($s | startswith("plugin:"))
+    | if (.value | type) != "object" then "\($s)\tbroken"
+      else ((.value.accessToken // "") | length == 0) as $empty
+        | ((.value.refreshToken // "") | length == 0) as $noref
+        | ((.value | has("expiresAt")) or (.value | has("scope")) or ($noref | not)) as $meta
+        | if $empty and ($meta | not) then "\($s)\tdiscovery"
+          elif $empty then "\($s)\tfossil"
+          elif $noref then "\($s)\tnorefresh"
+          elif (.value.expiresAt | type) != "number" then "\($s)\tnoexpiry"
+          else "\($s)\tgood" end
+      end' "$1" 2>/dev/null
+}
+
+# Why pool member $3 is not a usable seat, as one word, or nothing when it is:
+# charset (a character the picker rejects; it refuses the whole table), compat (a
+# compat symlink in the account root: the picker drops it, and the dir it points
+# at is another profile's), retired (a tombstone name), nostore (no clauth profile
+# store). The doctor reports each; `claude-seat mcp` skips a member that has one
+# and refuses a seat that does, so the two read a pool the same way.
+_claude_pool_member_problem() {   # $1 = account-dir root, $2 = clauth profiles dir, $3 = name
+  if [[ -n "${3//[A-Za-z0-9_.-]/}" ]]; then print -r -- charset
+  elif [[ -L "$1/$3" ]]; then print -r -- compat
+  elif [[ "$3" == *.retired-* ]]; then print -r -- retired
+  elif [[ ! -e "$2/$3/credentials.json" && ! -L "$2/$3/credentials.json" ]]; then print -r -- nostore
+  fi
+}
+
+# The plugins switched off in the USER settings, one name per line: the segment
+# of a server name (`plugin:<name>:…`) whose every enabledPlugins entry is false
+# (DO-801). Nothing removes an mcpOAuth entry when its plugin is disabled, so
+# without this a seat that never signed in to a plugin nobody runs any more is
+# told to, forever. Narrow on purpose: the server-name segment is the plugin.json
+# name and the settings key is the marketplace name, and they can differ
+# (`plugin:Notion:notion` vs `notion@…`), so an absent or unmatched key keeps a
+# server counted, which errs towards an extra warning, never a hidden gap. An
+# unreadable settings file prints nothing, so everything counts. A project that
+# re-enables a plugin disabled here is not consulted.
+_claude_plugins_disabled() {
+  jq -r '
+    .enabledPlugins | select(type == "object")
+    | reduce to_entries[] as $e ({};
+        ($e.key | sub("@[^@]*$"; "")) as $p
+        | .[$p] = ((if has($p) then .[$p] else true end) and ($e.value == false)))
+    | to_entries[] | select(.value == true) | .key
+  ' "$(_claude_global_settings_file)" 2>/dev/null
+}
+
 # Pool integrity, the "--- Pools ---" section of claude-doctor (DO-793). Ways a
 # pool goes wrong that nothing reported:
 #
@@ -816,31 +900,29 @@ _claude_doctor_pools() {
     fi
 
     for m in $members; do
-      if [[ -n "${m//[A-Za-z0-9_.-]/}" ]]; then
-        _doctor_bad "pool '$t' names '$m' — a member may only contain letters, digits, - _ and ."
-        echo "    The picker refuses the whole table until it is fixed."
-        (( ++n_issue )); continue
-      fi
-      if [[ -L "$adroot/$m" ]]; then
-        zmodload -F zsh/stat b:zstat 2>/dev/null
-        lnk="$(zstat +link -- "$adroot/$m" 2>/dev/null)" || lnk=""
-        _doctor_bad "pool '$t' names '$m', a compat symlink${lnk:+ to '${lnk:t}'}"
-        echo "    The picker drops it without a word. Name the profile it stands for instead."
-        [[ -e "$pdir/$m/credentials.json" || -L "$pdir/$m/credentials.json" ]] && \
-          echo "    '$m' is ALSO a registered profile, so its account dir is another profile's dir."
-        (( ++n_issue )); continue
-      fi
-      if [[ "$m" == *.retired-* ]]; then
-        _doctor_bad "pool '$t' names '$m', a retired name"
-        echo "    The picker drops it without a word. Remove it from the pool."
-        (( ++n_issue )); continue
-      fi
-      if [[ ! -e "$pdir/$m/credentials.json" && ! -L "$pdir/$m/credentials.json" ]]; then
-        _doctor_bad "pool '$t' names '$m', which has no clauth profile store"
-        echo "    The picker drops it without a word. 'clauth login $m' if it should exist;"
-        echo "    otherwise remove it from the pool."
-        (( ++n_issue )); continue
-      fi
+      case "$(_claude_pool_member_problem "$adroot" "$pdir" "$m")" in
+        charset)
+          _doctor_bad "pool '$t' names '$m' — a member may only contain letters, digits, - _ and ."
+          echo "    The picker refuses the whole table until it is fixed."
+          (( ++n_issue )); continue ;;
+        compat)
+          zmodload -F zsh/stat b:zstat 2>/dev/null
+          lnk="$(zstat +link -- "$adroot/$m" 2>/dev/null)" || lnk=""
+          _doctor_bad "pool '$t' names '$m', a compat symlink${lnk:+ to '${lnk:t}'}"
+          echo "    The picker drops it without a word. Name the profile it stands for instead."
+          [[ -e "$pdir/$m/credentials.json" || -L "$pdir/$m/credentials.json" ]] && \
+            echo "    '$m' is ALSO a registered profile, so its account dir is another profile's dir."
+          (( ++n_issue )); continue ;;
+        retired)
+          _doctor_bad "pool '$t' names '$m', a retired name"
+          echo "    The picker drops it without a word. Remove it from the pool."
+          (( ++n_issue )); continue ;;
+        nostore)
+          _doctor_bad "pool '$t' names '$m', which has no clauth profile store"
+          echo "    The picker drops it without a word. 'clauth login $m' if it should exist;"
+          echo "    otherwise remove it from the pool."
+          (( ++n_issue )); continue ;;
+      esac
       valid+=( "$m" )
     done
 
@@ -964,15 +1046,8 @@ _claude_doctor_pools() {
     # The yardstick is the pool itself: a plugin server signed in on ANY member is
     # expected on every member. A server nobody in the pool uses is not a gap.
     #
-    # WHICH FILE: the one a session on that seat reads, the account dir's
-    # .credentials.json. It is a link into the clauth store, until an atomic write
-    # replaces it with a real file, and a lost write lands THERE first. The store is
-    # read only for a seat that has no account-dir file yet (review, 2026-10-03).
-    #
-    # Each entry is sorted by section 2's discriminator. An empty token with no
-    # expiry, scope or refresh token is a DISCOVERY record: never signed in here,
-    # not damage. An empty token that kept them is the fossil of a lost write, which
-    # IS damage. A token whose expiry is missing or not a number is section 2's ⚠.
+    # WHICH FILE, and each entry's state: _claude_seat_cred_file and
+    # _claude_mcp_plugin_states, above, shared with `claude-seat mcp`.
     #
     # A server can have SEVERAL entries: the key carries a hash of the server's
     # config, so a config change leaves the old one behind. Every entry counts. The
@@ -982,56 +1057,16 @@ _claude_doctor_pools() {
     # Damage is reported whether or not a sibling uses the server. Reads names and
     # states only; no token value leaves jq.
     #
-    # A DISABLED PLUGIN'S ENTRIES ARE NOT COUNTED (DO-801). Nothing removes an
-    # mcpOAuth entry when its plugin is disabled, so without this a seat that never
-    # signed in to a plugin nobody runs any more is warned about it forever. The
-    # test is narrow on purpose: a plugin is off only when it HAS an enabledPlugins
-    # entry and every entry for that name is `false`. The segment in a server name
-    # is the plugin.json name and the settings key is the marketplace name, and
-    # they can differ (`plugin:Notion:notion` vs `notion@…`), so an absent or
-    # unmatched key keeps a server counted: that errs towards an extra warning,
-    # never a hidden gap. An unreadable settings.json counts everything, as before;
-    # section 7 reports the file itself. Only the USER settings are read: a project
-    # that re-enables a plugin disabled here is not consulted.
+    # A DISABLED PLUGIN'S ENTRIES ARE NOT COUNTED (DO-801): _claude_plugins_disabled,
+    # above. An unreadable settings.json counts everything; section 7 reports it.
     poff=()
-    for k in ${(f)"$(jq -r '
-        .enabledPlugins | select(type == "object")
-        | reduce to_entries[] as $e ({};
-            ($e.key | sub("@[^@]*$"; "")) as $p
-            | .[$p] = ((if has($p) then .[$p] else true end) and ($e.value == false)))
-        | to_entries[] | select(.value == true) | .key
-      ' "$(_claude_global_settings_file)" 2>/dev/null)"}; do
+    for k in ${(f)"$(_claude_plugins_disabled)"}; do
       [[ -n "$k" ]] && poff[$k]=1
     done
     mstate=(); munion=(); mbad=(); m_issue=0; ignored=()
     for m in $valid; do
-      store="$adroot/$m/.credentials.json"
-      [[ -e "$store" || -L "$store" ]] || store="$pdir/$m/credentials.json"
-      # Every shape below read as "no sign-ins" until it was refused here, measured:
-      #   - an EMPTY file: a filter runs zero times and jq exits 0, so `input` with -n;
-      #   - a root of null: `null | has(…)` is false, not an error, so the root check;
-      #   - an mcpOAuth of false: `false // {}` is {}, so `has` rather than `//`;
-      #   - an mcpOAuth of []: `[] | to_entries` is empty, so the second type check.
-      out="$(jq -n -r '
-        input
-        | if type != "object" then error("not an object") else . end
-        | (if has("mcpOAuth") then .mcpOAuth else {} end)
-        | if type != "object" then error("mcpOAuth is not an object") else . end
-        | to_entries[]
-        | (.key | split("|")[0]) as $k
-        | (if (.value | type) == "object" and (.value.serverName | type) == "string"
-              and .value.serverName != "" then .value.serverName else $k end) as $s
-        | select($s | startswith("plugin:"))
-        | if (.value | type) != "object" then "\($s)\tbroken"
-          else ((.value.accessToken // "") | length == 0) as $empty
-            | ((.value.refreshToken // "") | length == 0) as $noref
-            | ((.value | has("expiresAt")) or (.value | has("scope")) or ($noref | not)) as $meta
-            | if $empty and ($meta | not) then "\($s)\tdiscovery"
-              elif $empty then "\($s)\tfossil"
-              elif $noref then "\($s)\tnorefresh"
-              elif (.value.expiresAt | type) != "number" then "\($s)\tnoexpiry"
-              else "\($s)\tgood" end
-          end' "$store" 2>/dev/null)" || { mbad+=( "$m" ); continue; }
+      store="$(_claude_seat_cred_file "$adroot" "$pdir" "$m")"
+      out="$(_claude_mcp_plugin_states "$store")" || { mbad+=( "$m" ); continue; }
       for kv in "${(@f)out}"; do
         [[ -n "$kv" ]] || continue
         # A variable, not $'\t', as the key separator: inside a SUBSCRIPT zsh keeps
@@ -1066,7 +1101,8 @@ _claude_doctor_pools() {
       done
       if (( ${#damaged} )); then
         _doctor_bad "pool '$t': '$m' has broken plugin MCP sign-ins: ${(j:, :)${(@o)damaged}}"
-        echo "    Re-authorise each from a session on it: claude-as $m, then /mcp."
+        echo "    Re-authorise each: ~/.dotfiles/scripts/claude-seat mcp $m"
+        echo "    (or from a session on it: claude-as $m, then /mcp)."
         (( ++m_issue ))
       fi
       if (( ${#oddexp} )); then
@@ -1075,8 +1111,8 @@ _claude_doctor_pools() {
       fi
       if (( ${#missing} )); then
         _doctor_warn "pool '$t': '$m' is not signed in to ${(j:, :)${(@o)missing}}, which another member uses"
-        echo "    mcpOAuth is per config dir, so a new seat starts with none. Sign in from a"
-        echo "    session on it: claude-as $m, then /mcp."
+        echo "    mcpOAuth is per config dir, so a new seat starts with none. Sign it in:"
+        echo "    ~/.dotfiles/scripts/claude-seat mcp $m (or claude-as $m, then /mcp)."
         (( ++m_issue ))
       fi
     done

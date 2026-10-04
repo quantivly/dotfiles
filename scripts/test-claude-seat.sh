@@ -4,7 +4,8 @@
 # ===========================
 #
 # State table for `scripts/claude-seat add` (DO-796): one command from a new login
-# to a verified, pooled seat.
+# to a verified, pooled seat; and `claude-seat mcp` (DO-797), which signs a seat in
+# to its pools' plugin MCP servers through `claude mcp login`.
 #
 # Why this exists: adding a seat by hand hit three silent failures on 2026-09-30,
 # and each one looked like success. So most rows below assert the one property the
@@ -34,6 +35,7 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 want_err() { if [[ "$ERR" == *"$2"* ]]; then ok "$1"; else bad "$1 — expected stderr to contain '$2'; got: ${ERR:0:300}"; fi; }
 want_out() { if [[ "$OUT" == *"$2"* ]]; then ok "$1"; else bad "$1 — expected stdout to contain '$2'; got: ${OUT:0:300}"; fi; }
+no_out()   { if [[ "$OUT$ERR" != *"$2"* ]]; then ok "$1"; else bad "$1 — the output contains '$2'"; fi; }
 no_log()   { if ! grep -q -- "$2" "$STUB_LOG" 2>/dev/null; then ok "$1"; else bad "$1 — the stubs were called with '$2'"; fi; }
 want_log() { if grep -q -- "$2" "$STUB_LOG" 2>/dev/null; then ok "$1"; else bad "$1 — no stub call with '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 1; }
@@ -68,6 +70,11 @@ cat > "$STUBS/claude" <<'STUB'
 # seat's oauthAccount, as configured by the row. By default it is the account the
 # login recorded, as Claude Code derives it from the credential.
 printf 'claude %s\n' "$*" >> "$STUB_LOG"
+# Never a config dir outside the fixture: this box's own is a LIVE account dir.
+if [[ -z "${CLAUDE_CONFIG_DIR:-}" || "$CLAUDE_CONFIG_DIR" != "$HOME"/* ]]; then
+  echo "stub claude: CLAUDE_CONFIG_DIR '${CLAUDE_CONFIG_DIR:-}' is not inside the fixture HOME" >&2
+  exit 97
+fi
 write() {
   local cj="$CLAUDE_CONFIG_DIR/.claude.json" own
   own="$(jq -r . "$HOME/.clauth/profiles/${CLAUDE_CONFIG_DIR##*/}/account_id.json" 2>/dev/null)"
@@ -83,6 +90,20 @@ if [[ "${1:-}" == auth ]]; then
   exit 0
 fi
 if [[ "${1:-}" == -p ]]; then [[ "${STUB_LAUNCH_WRITES:-1}" == 1 ]] && write; exit 0; fi
+# `claude mcp login [--no-browser] <server>`: the seat's own OAuth flow. It writes
+# ITS OWN entry, atomically, as Claude Code does: a new file over the link.
+if [[ "${1:-}" == mcp && "${2:-}" == login ]]; then
+  shift 2
+  [[ "${1:-}" == --no-browser ]] && shift
+  srv="$1"
+  if [[ " ${STUB_MCP_FAIL:-} " == *" $srv "* ]]; then echo "No MCP server found with name: $srv" >&2; exit 1; fi
+  [[ " ${STUB_MCP_NOWRITE:-} " == *" $srv "* ]] && exit 0
+  f="$CLAUDE_CONFIG_DIR/.credentials.json"
+  jq --arg k "$srv|h-login" --arg s "$srv" \
+     '.mcpOAuth[$k] = {serverName: $s, accessToken: "STUB-MCP-TOKEN", refreshToken: "r", expiresAt: 4102444800000, scope: "s"}' \
+     "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+  exit 0
+fi
 exit 0
 STUB
 cat > "$STUBS/account-dirs" <<'STUB'
@@ -162,6 +183,26 @@ seat() {   # $1 = profile, $2 = org type, $3 = org id ('' = no account dir)
             '{oauthAccount: {accountUuid: $u, organizationType: $t, organizationUuid: $o}}' > "$ad/.claude.json"
     fi
 }
+# An mcpOAuth entry in a seat's store: good, discovery (never signed in) or fossil
+# (a lost write blanked the token but kept its bookkeeping). Synthetic tokens.
+mcp_entry() {   # $1 = seat, $2 = server, $3 = state, $4 = key suffix (another config hash)
+    local f="$FHOME/.clauth/profiles/$1/credentials.json" e
+    # The $s and $p in these are jq's, bound by --arg below, not the shell's.
+    # shellcheck disable=SC2016
+    case "$3" in
+        good)      e='{serverName: $s, accessToken: ("tok-" + $p), refreshToken: "r", expiresAt: 4102444800000, scope: "s"}' ;;
+        discovery) e='{serverName: $s, accessToken: ""}' ;;
+        fossil)    e='{serverName: $s, accessToken: "", expiresAt: 4102444800000, scope: "s"}' ;;
+        noexpiry)  e='{serverName: $s, accessToken: ("tok-" + $p), refreshToken: "r", expiresAt: "soon"}' ;;
+    esac
+    jq --arg k "$2|h-$1${4:-}" --arg s "$2" --arg p "$1" ".mcpOAuth[\$k] = $e" "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+settings_off() {   # the user settings, with the plugins named switched off
+    local k body='"notion@claude-plugins-official":true'
+    for k in "$@"; do body+=",\"$k\":false"; done
+    mkdir -p "$FHOME/.claude"
+    printf '{"enabledPlugins":{%s}}\n' "$body" > "$FHOME/.claude/settings.json"
+}
 new_home() {   # $1 = name, $2 = tenants content (default BASE)
     FHOME="$TMPROOT/home.$1"; rm -rf "$FHOME"
     mkdir -p "$FHOME/.config" "$FHOME/repo/claude" "$FHOME/.clauth/profiles" \
@@ -186,13 +227,26 @@ gitf() { GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 git "$@"; }
 # OUT / ERR / RC as globals. stdin is /dev/null: never a terminal, so the
 # first-launch question is never answered by accident.
 run() {
-    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME \
+    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME -u CLAUDE_CONFIG_DIR \
                HOME="$FHOME" STUB_LOG="$STUB_LOG" \
                GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
                CLAUDE_SEAT_ACCOUNT_DIRS="$STUBS/account-dirs" CLAUDE_SEAT_PICK="$STUBS/pick" \
                zsh "$SUT" "$@" </dev/null 2>"$TMPROOT/err")"; RC=$?
     ERR="$(cat "$TMPROOT/err")"
+}
+# The same, under a pseudo-terminal: --no-browser needs one. script(1) joins the
+# streams, so everything lands in OUT.
+run_tty() {
+    local cmd="zsh '$SUT'" a
+    for a in "$@"; do cmd+=" '$a'"; done
+    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME -u CLAUDE_CONFIG_DIR \
+               HOME="$FHOME" STUB_LOG="$STUB_LOG" \
+               GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+               CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
+               CLAUDE_SEAT_ACCOUNT_DIRS="$STUBS/account-dirs" CLAUDE_SEAT_PICK="$STUBS/pick" \
+               script -qec "$cmd" /dev/null </dev/null 2>&1)"; RC=$?
+    ERR=""
 }
 pool_of() {
     zsh -f -c 'typeset -gA CLAUDE_TENANT_POOL; source "$1" >/dev/null 2>&1; print -r -- "${CLAUDE_TENANT_POOL[$2]-<none>}"' _ "$REAL" "$1"
@@ -314,6 +368,7 @@ check "...and the pool names it"                "$(pool_of quantivly)" "quantivl
 check "...in a commit of the tenants file"      "$(gitf -C "$FHOME/repo" log -1 --format=%s)" "tenants: pool-add quantivly quantivly-5"
 want_out "...the picker sees it"                "the picker sees 'quantivly-5'"
 want_out "...and what is left is listed"        "claude-as quantivly-5, then /mcp"
+want_out "...starting with the mcp step"        "claude-seat mcp quantivly-5 signs it in"
 no_log   "...with no first launch needed"       "claude -p"
 
 new_home d2; STUB_OTYPE=claude_max run add personal
@@ -469,8 +524,165 @@ want_out "with none recorded, it says how to record them" "set
      CLAUDE_TENANT_CONNECTORS"
 want_out "the DO-792 warning is printed"                 "DO-792"
 
+#-----------------------------------------------------------------------------
+section "H. mcp: sign a seat in to its pools' plugin MCP servers"
+#-----------------------------------------------------------------------------
+new_home h1
+run mcp;                               check "mcp with no seat is a usage error"        "$RC" "64"
+run mcp --yes quantivly-3;             check "--yes is not an mcp option"                "$RC" "64"
+run add --no-browser quantivly;        check "--no-browser is not an add option"         "$RC" "64"
+run mcp quantivly-3 quantivly-1;       check "mcp takes one seat"                        "$RC" "64"
+run mcp ..;                            check "mcp refuses a name that is not a seat's"   "$RC" "1"
+
+new_home h2; run mcp quantivly-4
+check "a seat in no pool is refused" "$RC" "1"
+want_err "...as having nothing to compare with" "is in no pool"
+want_err "...without the add trailer"            "refused: 'quantivly-4'"
+no_out   "...which would be false here"          "Nothing was added to the pool"
+
+new_home h2b "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-2\"}"
+run mcp quantivly-2
+check "a compat symlink is refused as a seat" "$RC" "1"
+want_err "...as another profile's dir"        "its dir is another profile's"
+no_log   "...before any sign-in"              "mcp login"
+
+new_home h3 "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-4\"}"
+run mcp quantivly-4
+check "a pooled seat with no account dir is refused" "$RC" "1"
+want_err "...naming the builder, not add, which refuses a pooled name" "build it: scripts/claude-account-dirs.sh quantivly-4"
+
+# quantivly-1 uses Slack, Notion and Linear; quantivly-3 has Notion already; the
+# Linear plugin is switched off in the user settings (DO-801).
+mcp_fixture() {
+    mcp_entry quantivly-1 plugin:slack:slack good
+    mcp_entry quantivly-1 plugin:Notion:notion good
+    mcp_entry quantivly-1 plugin:linear:linear good
+    mcp_entry quantivly-3 plugin:Notion:notion good
+    settings_off linear@claude-plugins-official
+}
+new_home h4; mcp_fixture
+run mcp --dry-run quantivly-3
+check "a dry run passes"                           "$RC" "0"
+want_out "...naming a server a sibling uses"       "plugin:slack:slack: 'quantivly-1' is signed in to it"
+want_out "...and the command each would run"       "claude mcp login plugin:slack:slack"
+no_out   "...not one it is signed in to already"   "plugin:Notion:notion:"
+no_out   "...nor a disabled plugin's"              "plugin:linear:linear"
+no_log   "...and signs in to nothing"              "mcp login"
+
+new_home h4b; mcp_fixture; mcp_entry quantivly-3 plugin:linear:linear fossil
+run mcp --dry-run quantivly-3
+no_out "a damaged entry of a disabled plugin is not re-authorised" "plugin:linear:linear"
+
+new_home h5; mcp_fixture
+run mcp quantivly-3
+check "a seat is signed in to what its pool uses" "$RC" "0"
+want_log "...through claude mcp login"            "claude mcp login plugin:slack:slack"
+no_log   "...and nothing else"                    "mcp login plugin:linear"
+want_out "...checked afterwards"                  "✓ plugin:slack:slack"
+check    "...with an entry of its own, not a copy of the sibling's" \
+         "$(jq -r '.mcpOAuth["plugin:slack:slack|h-login"].accessToken // "none"' "$FHOME/.local/state/claude-account-dirs/quantivly-3/.credentials.json")" \
+         "STUB-MCP-TOKEN"
+no_out   "...and no token is printed"             "STUB-MCP-TOKEN"
+no_out   "...not even the sibling's"              "tok-quantivly-1"
+
+new_home h6; mcp_fixture; mcp_entry quantivly-3 plugin:github:github fossil
+run mcp --dry-run quantivly-3
+want_out "a damaged entry of its own is re-authorised, used by a sibling or not" "plugin:github:github: its own entry is damaged"
+new_home h6c; mcp_fixture; mcp_entry quantivly-3 plugin:Notion:notion fossil -old
+run mcp quantivly-3
+check "a damaged entry beside a good one is not signed in again" "$RC" "0"
+no_log   "...for that server"                                    "mcp login plugin:Notion"
+want_out "...but reported"                                       "plugin:Notion:notion: signed in, beside an older entry that is damaged"
+
+new_home h6d; mcp_fixture; mcp_entry quantivly-3 plugin:slack:slack noexpiry
+run mcp --dry-run quantivly-3
+want_out "an entry with no usable expiry, and nothing good, is signed in again" "plugin:slack:slack: its own entry has no usable expiry"
+
+new_home h6b; mcp_fixture; mcp_entry quantivly-3 plugin:Notion:notion discovery -old
+mcp_entry quantivly-1 plugin:figma:figma discovery; mcp_entry quantivly-3 plugin:figma:figma discovery
+run mcp --dry-run quantivly-3
+check    "a seat with discovery records still dry-runs"     "$RC" "0"
+no_out   "a discovery record is not damage"                 "plugin:figma:figma"
+no_out   "...nor does it hide a good entry beside it"       "plugin:Notion:notion:"
+
+new_home h7; mcp_fixture; STUB_MCP_FAIL="plugin:slack:slack" run mcp quantivly-3
+check "a sign-in that fails is exit 2"            "$RC" "2"
+want_err "...naming the server"                   "still not signed in to plugin:slack:slack"
+want_err "...with the /mcp steps instead"         "claude-as quantivly-3, then /mcp"
+
+new_home h8; mcp_fixture; STUB_MCP_NOWRITE="plugin:slack:slack" run mcp quantivly-3
+check "a sign-in that exits 0 but writes nothing is exit 2" "$RC" "2"
+want_out "...as not signed in"                              "✗ plugin:slack:slack"
+
+new_home h9; mcp_fixture; mcp_entry quantivly-1 plugin:asana:asana good
+STUB_MCP_FAIL="plugin:asana:asana" run mcp quantivly-3
+check "one failed sign-in does not stop the next" "$RC" "2"
+want_log "...which is still made"                 "claude mcp login plugin:slack:slack"
+want_out "...and succeeds"                        "✓ plugin:slack:slack"
+
+new_home h10; mcp_fixture; mcp_entry quantivly-3 plugin:slack:slack good
+run mcp quantivly-3
+check "a seat already signed in to everything is exit 0" "$RC" "0"
+want_out "...saying there is nothing to do"              "nothing to do"
+no_log   "...and signing in to nothing"                  "mcp login"
+
+new_home h11; mcp_fixture; printf 'not json\n' > "$FHOME/.clauth/profiles/quantivly-1/credentials.json"
+run mcp quantivly-3
+check "a sibling's unreadable sign-ins are exit 2" "$RC" "2"
+want_err "...naming it"                            "cannot read the MCP sign-ins of 'quantivly-1'"
+no_log   "...before any sign-in"                   "mcp login"
+
+new_home h12; mcp_fixture; printf 'null\n' > "$FHOME/.clauth/profiles/quantivly-3/credentials.json"
+run mcp quantivly-3
+check "the seat's own unreadable sign-ins are exit 2" "$RC" "2"
+want_err "...naming it"                               "of 'quantivly-3' itself"
+
+new_home h13; mcp_fixture
+run mcp --no-browser quantivly-3
+check "--no-browser with no terminal is refused" "$RC" "1"
+no_log   "...before any sign-in"                 "mcp login"
+run mcp --dry-run --no-browser quantivly-3
+check "...but a dry run needs none"              "$RC" "0"
+want_out "...and its plan carries the flag"      "claude mcp login --no-browser plugin:slack:slack"
+new_home h13b; mcp_fixture
+run_tty mcp --no-browser quantivly-3
+check "--no-browser in a terminal signs in"      "$RC" "0"
+want_log "...passing the flag to claude"         "claude mcp login --no-browser plugin:slack:slack"
+
+new_home h14 "$BASE
+CLAUDE_TENANT_POOL+=( lab \"personal-0 quantivly-3\" )"
+mcp_fixture; mcp_entry personal-0 plugin:asana:asana good
+run mcp --dry-run quantivly-3
+want_out "a seat in two pools needs what either pool uses" "plugin:asana:asana: 'personal-0' is signed in to it"
+want_out "...and the other pool's too"                    "plugin:slack:slack: 'quantivly-1'"
+
+new_home h16 "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-7\"}"
+mcp_fixture
+run mcp --dry-run quantivly-3
+check "a pool member with no profile is skipped, not read" "$RC" "0"
+want_out "...and the others still count"                   "plugin:slack:slack: 'quantivly-1'"
+run mcp quantivly-7
+check "a pooled seat with no profile store is refused"     "$RC" "1"
+want_err "...with the doctor's remedy, not add's"          "'clauth login quantivly-7' if it should exist, otherwise take it out of the pool (claude-tenants-edit --commit pool-remove quantivly quantivly-7)"
+
+new_home h17; mcp_fixture; printf '{"enabledPlugins": [' > "$FHOME/.claude/settings.json"
+run mcp quantivly-3
+check "an unreadable settings file is exit 2, not 'nothing disabled'" "$RC" "2"
+want_err "...naming it"                                                "cannot read which plugins are enabled"
+no_log   "...before any sign-in"                                       "mcp login"
+
+new_home h18 "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-0.retired-20260917\"}"
+mcp_fixture; seat quantivly-0.retired-20260917; mcp_entry quantivly-0.retired-20260917 plugin:asana:asana good
+run mcp --dry-run quantivly-3
+no_out "a retired member's sign-ins are not expected" "plugin:asana:asana"
+
+new_home h15; mcp_fixture; settings_off linear@claude-plugins-official slack@claude-plugins-official
+run mcp --dry-run quantivly-3
+check "with Slack disabled too, nothing is left to do" "$RC" "0"
+want_out "...and it says so"                           "nothing to do"
+
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=138
+EXPECTED_ROWS=209
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
