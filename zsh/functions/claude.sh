@@ -689,8 +689,8 @@ _claude_doctor_pools() {
   local line t m ref k v va vb kv lnk otype ouuid p id disp n_issue raw out cf cj fin=0
   local -a lines members valid swap_diff other_diff unknown_org no_id unread_id
   local -a ovf refs errs bad_json unread_cfg cmp mbad missing damaged oddexp
-  local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j mstate munion seenk
-  local store kk m_issue st hit sep=$'\x1f'
+  local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j mstate munion seenk poff ignored
+  local store kk m_issue st hit pseg sep=$'\x1f'
   # clauth's defaults for the keys whose ABSENCE means a value (`ProfileConfig`,
   # profile.rs, clauth v0.16.0). Without them, a file that leaves a key out and one
   # that spells out the default would read as a difference.
@@ -981,7 +981,29 @@ _claude_doctor_pools() {
     #
     # Damage is reported whether or not a sibling uses the server. Reads names and
     # states only; no token value leaves jq.
-    mstate=(); munion=(); mbad=(); m_issue=0
+    #
+    # A DISABLED PLUGIN'S ENTRIES ARE NOT COUNTED (DO-801). Nothing removes an
+    # mcpOAuth entry when its plugin is disabled, so without this a seat that never
+    # signed in to a plugin nobody runs any more is warned about it forever. The
+    # test is narrow on purpose: a plugin is off only when it HAS an enabledPlugins
+    # entry and every entry for that name is `false`. The segment in a server name
+    # is the plugin.json name and the settings key is the marketplace name, and
+    # they can differ (`plugin:Notion:notion` vs `notion@…`), so an absent or
+    # unmatched key keeps a server counted: that errs towards an extra warning,
+    # never a hidden gap. An unreadable settings.json counts everything, as before;
+    # section 7 reports the file itself. Only the USER settings are read: a project
+    # that re-enables a plugin disabled here is not consulted.
+    poff=()
+    for k in ${(f)"$(jq -r '
+        .enabledPlugins | select(type == "object")
+        | reduce to_entries[] as $e ({};
+            ($e.key | sub("@[^@]*$"; "")) as $p
+            | .[$p] = ((if has($p) then .[$p] else true end) and ($e.value == false)))
+        | to_entries[] | select(.value == true) | .key
+      ' "$(_claude_global_settings_file)" 2>/dev/null)"}; do
+      [[ -n "$k" ]] && poff[$k]=1
+    done
+    mstate=(); munion=(); mbad=(); m_issue=0; ignored=()
     for m in $valid; do
       store="$adroot/$m/.credentials.json"
       [[ -e "$store" || -L "$store" ]] || store="$pdir/$m/credentials.json"
@@ -1015,10 +1037,14 @@ _claude_doctor_pools() {
         # A variable, not $'\t', as the key separator: inside a SUBSCRIPT zsh keeps
         # $'\t' literally, which silently broke the pattern filter below.
         k="${kv%%$'\t'*}"; v="${kv#*$'\t'}"
+        pseg="${${k#plugin:}%%:*}"
+        if (( ${+poff[$pseg]} )); then ignored[$k]=1; continue; fi
         mstate[$m$sep$k]+="${mstate[$m$sep$k]:+ }$v"
         [[ "$v" == good ]] && munion[$k]=1
       done
     done
+    (( ${#ignored} )) && \
+      _doctor_note "pool '$t': not comparing sign-ins for disabled plugins: ${(j:, :)${(@ok)ignored}}"
     if (( ${#mbad} )); then
       _doctor_warn "pool '$t': cannot read the MCP sign-ins of ${(j:, :)mbad} — NOT CHECKED"
       (( ++m_issue ))
@@ -1066,6 +1092,125 @@ _claude_doctor_pools() {
       fi
     fi
   done
+}
+
+# The Linear API-key plugin, the "--- Linear ---" section of claude-doctor
+# (DO-801). claude/plugins/linear-key sends LINEAR_API_KEY to Linear's MCP server,
+# so no seat signs in. Every way it stops doing that is silent, measured on
+# Claude Code 2.1.289 in a scratch CLAUDE_CONFIG_DIR:
+#
+#   - not installed, or not enabled: the official plugin still serves Linear, and
+#     a new seat is back to needing its own sign-in;
+#   - both plugins enabled: two plugins at one URL are deduplicated, and the one
+#     listed FIRST in enabledPlugins wins — the order, not the kind;
+#   - edited without a version bump: install COPIES the plugin into the cache, and
+#     `claude plugin update` answers "already at the latest version";
+#   - the marketplace registered from a worktree: the copy works until that
+#     worktree is removed, and every later update then fails;
+#   - no LINEAR_API_KEY: Linear answers 401, and with headers.Authorization set
+#     Claude Code disables the OAuth fallback, so there is no sign-in to fall to.
+#
+# Files only: no clauth, no network. Never prints the key, only whether it is set.
+#
+# Every command it prints runs in `( unset CLAUDE_CONFIG_DIR; command claude … )`.
+# Bare, `claude()` puts it in an account dir, and pasted from a session it uses
+# that session's dir. Either way `--scope user` lands in a settings.json copy the
+# next launch overwrites, and installPath points into a dir that goes away.
+#
+# "Set" means EXPORTED: a plain shell variable passes `${LINEAR_API_KEY-}` here,
+# and a session started from that shell never sees it (review, 2026-10-05).
+_claude_doctor_linear_key() {
+  local src="$HOME/.dotfiles/claude/plugins" inst="$HOME/.claude/plugins/installed_plugins.json"
+  local mkts="$HOME/.claude/plugins/known_marketplaces.json" gs ip mp on off f keyok=0 sok=1 n=0
+  local run='( unset CLAUDE_CONFIG_DIR; command claude'
+  gs="$(_claude_global_settings_file)"
+  [[ -n "${LINEAR_API_KEY-}" && ${(t)LINEAR_API_KEY} == *export* ]] && keyok=1
+  if [[ ! -f "$src/linear-key/.mcp.json" ]]; then
+    _doctor_note "no linear-key plugin in ${src/#$HOME/~} — NOT CHECKED"
+    return 0
+  fi
+  # UNREADABLE IS NOT ABSENT: a file that exists and does not parse is said so,
+  # never read as "not installed".
+  if [[ -e "$inst" ]]; then
+    ip="$(jq -n -r 'input | .plugins["linear-key@dotfiles"] // []
+                    | map(select(.scope == "user")) | .[0].installPath // ""' "$inst" 2>/dev/null)" || {
+      _doctor_warn "cannot read ${inst/#$HOME/~} — the linear-key plugin is NOT CHECKED"
+      return 0
+    }
+  fi
+  # A settings.json that does not exist enables nothing, so it is read as {}; one
+  # that exists and does not parse is not read at all (sok=0).
+  if [[ ! -e "$gs" ]]; then
+    on=null; off=null
+  elif jq -e . "$gs" >/dev/null 2>&1; then
+    on="$(jq -r '.enabledPlugins["linear-key@dotfiles"] | tostring' "$gs")"
+    off="$(jq -r '.enabledPlugins["linear@claude-plugins-official"] | tostring' "$gs")"
+  else
+    sok=0
+  fi
+  if [[ -z "$ip" ]]; then
+    # The official plugin turned off by hand, with nothing in its place: a setup
+    # or rollback that stopped half way. No session has Linear, and no sign-in
+    # can fix it. Only an explicit `false` says so: a machine that never used
+    # Linear has no entry, and is not red for it.
+    if (( sok )) && [[ "$off" == false ]]; then
+      _doctor_bad "neither linear-key nor the official Linear plugin is active — no session has Linear"
+      echo "    Finish the setup, or the rollback: docs/CLAUDE_SETUP.md, \"Linear: one API key, no sign-in\"."
+    elif (( keyok )); then
+      _doctor_warn "the linear-key plugin is not installed at user scope — every seat still needs its own Linear sign-in"
+      echo "    One-time setup: docs/CLAUDE_SETUP.md, \"Linear: one API key, no sign-in\"."
+    else
+      _doctor_note "the linear-key plugin is not installed, and LINEAR_API_KEY is not exported here"
+    fi
+    return 0
+  fi
+  if (( sok )); then
+    if [[ "$on" != true && "$off" == false ]]; then
+      _doctor_bad "linear-key@dotfiles is installed but not enabled, and the official Linear plugin is off — no session has Linear"
+      (( ++n ))
+    elif [[ "$on" != true ]]; then
+      _doctor_warn "linear-key@dotfiles is installed but not enabled (enabledPlugins: $on)"
+      (( ++n ))
+    fi
+    if [[ "$off" == true ]]; then
+      _doctor_warn "linear@claude-plugins-official is still enabled — of two plugins at one URL, the one listed first in enabledPlugins wins"
+      echo "    $run plugin disable linear@claude-plugins-official --scope user )"
+      (( ++n ))
+    fi
+  else
+    _doctor_note "global settings.json unreadable — whether linear-key is enabled is NOT CHECKED"
+    (( ++n ))
+  fi
+  mp="$(jq -r '.dotfiles.source.path // ""' "$mkts" 2>/dev/null)"
+  if [[ "${mp%/}" != "$src" ]]; then
+    _doctor_warn "the 'dotfiles' marketplace points at ${${mp:-<nothing>}/#$HOME/~}, not ${src/#$HOME/~}"
+    echo "    Updates come from there. Re-add it from the primary checkout: docs/CLAUDE_SETUP.md."
+    (( ++n ))
+  fi
+  # Both files: plugin.json carries the version an update compares. Without cmp
+  # every file would read as "differs", with a remedy that changes nothing.
+  if (( ! ${+commands[cmp]} )); then
+    _doctor_note "cmp not found — whether the installed copy is current is NOT CHECKED"
+    (( ++n ))
+  else
+    for f in .mcp.json .claude-plugin/plugin.json; do
+      if [[ ! -f "$ip/$f" ]]; then
+        _doctor_warn "the installed linear-key has no $f at ${ip/#$HOME/~}"
+        (( ++n ))
+      elif ! cmp -s "$ip/$f" "$src/linear-key/$f"; then
+        _doctor_warn "the installed linear-key's $f differs from ${src/#$HOME/~}/linear-key"
+        echo "    'claude plugin update' ignores an edit unless plugin.json's version changes."
+        echo "    Bump it, deploy, then:"
+        echo "    $run plugin marketplace update dotfiles && command claude plugin update linear-key@dotfiles --scope user )"
+        (( ++n ))
+      fi
+    done
+  fi
+  if (( ! keyok )); then
+    _doctor_warn "LINEAR_API_KEY is not exported in this shell — a session started from it gets 401 from Linear, with no sign-in to fall back to"
+    (( ++n ))
+  fi
+  (( n )) || _doctor_ok "linear-key plugin installed, enabled and current; the official Linear plugin is off at user scope"
 }
 
 claude-doctor() {
@@ -2560,6 +2705,10 @@ claude-doctor() {
   echo
   echo "--- Pools ---"
   _claude_doctor_pools
+
+  echo
+  echo "--- Linear ---"
+  _claude_doctor_linear_key
 
   _doctor_summary "Claude Code auth and MCP surface look healthy." \
     "Start with the ✗ items; 'claude-doctor --all' also lists the servers that are fine."

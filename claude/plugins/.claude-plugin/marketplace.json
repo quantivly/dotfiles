@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "dotfiles",
+  "owner": {
+    "name": "dotfiles"
+  },
+  "metadata": {
+    "description": "Plugins owned by this dotfiles repo, installed from the live checkout."
+  },
+  "plugins": [
+    {
+      "name": "linear-key",
+      "source": "./linear-key",
+      "description": "Linear's MCP server, authenticated with LINEAR_API_KEY from the environment instead of a per-seat OAuth sign-in."
+    }
+  ]
+}
