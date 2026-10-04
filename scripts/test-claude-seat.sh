@@ -281,6 +281,10 @@ new_home c15; chmod 000 "$FHOME/.dotfiles-local/rabota/tenants/quantivly.toml"
 run add --dry-run quantivly
 check "an unreadable rabota file is exit 2: it may name a seat" "$RC" "2"
 want_err "...naming it"                                         "quantivly.toml, which may name a seat"
+new_home c15b; chmod 000 "$FHOME/.local/state/claude-account-dirs/.pick-ledger"
+run add --dry-run quantivly
+check "an unreadable picker ledger is exit 2: it remembers names" "$RC" "2"
+want_err "...naming it"                                           ".pick-ledger, which remembers names"
 
 new_home c16; seat quantivly-5
 run add quantivly
@@ -464,7 +468,7 @@ want_out "with none recorded, it says how to record them" "set
 want_out "the DO-792 warning is printed"                 "DO-792"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=134
+EXPECTED_ROWS=136
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
