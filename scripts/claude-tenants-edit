@@ -54,6 +54,7 @@
 emulate -R zsh
 setopt no_unset pipe_fail extended_glob
 zmodload zsh/system 2>/dev/null
+zmodload zsh/mapfile 2>/dev/null
 
 prog=claude-tenants-edit
 here="${0:A:h}"
@@ -85,6 +86,9 @@ while (( $# )); do
   shift
 done
 (( $# == 3 )) || usage
+# A flag AFTER the operation would otherwise be read as an argument: measured,
+# `retire-name old9 --dry-run` wrote "--dry-run" as the reason, for real.
+[[ "$2" != -* && "$3" != -* ]] || usage
 op="$1"
 case "$op" in
   pool-add|pool-remove) tenant="$2"; name="$3"; reason="" ;;
@@ -103,8 +107,8 @@ if [[ "$op" == retire-name ]]; then
   # Written inside double quotes in a zsh file: anything that would need escaping
   # there is refused rather than escaped.
   [[ -n "$reason" ]] || refuse "a retired name needs a reason"
-  [[ "$reason" != *[\"\$\`\\]* && "$reason" != *$'\n'* && "$reason" != *$'\t'* ]] || \
-    refuse "the reason may not contain a double quote, \$, a backtick, a backslash, a tab or a newline"
+  [[ "$reason" != *[\"\$\`\\]* && "$reason" != *[[:cntrl:]]* ]] || \
+    refuse "the reason may not contain a double quote, \$, a backtick, a backslash or a control character"
 fi
 
 # ---- the file ------------------------------------------------------------------
@@ -117,6 +121,8 @@ fi
 [[ -r "$TENANTS" && -w "${TENANTS:A}" ]] || unsafe "cannot read and write $TENANTS"
 real="${TENANTS:A}"
 dir="${real:h}"
+
+[[ -r "$RENDER" ]] || unsafe "machines-render is not beside this script ($RENDER); the edited copy cannot be checked"
 
 if ! err="$(command zsh -n "$real" 2>&1)"; then
   unsafe "$TENANTS does not parse:"$'\n'"    ${err:-zsh -n failed with no message}"
@@ -136,8 +142,19 @@ gitdir=""
 if top="$(command git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$top" ]]; then
   gitdir="$top"
 fi
+tracked=0
+if [[ -n "$gitdir" ]] && command git -C "$gitdir" ls-files --error-unmatch -- "$real" >/dev/null 2>&1; then
+  tracked=1
+fi
 if (( commit )); then
   [[ -n "$gitdir" ]] || unsafe "--commit needs $real to be inside a git work tree"
+  # An untracked or ignored file passes the dirty check below (`status
+  # --porcelain` prints nothing for an ignored path) and then fails at `git add`,
+  # after the write. Measured, so asked first.
+  (( tracked )) || unsafe "--commit needs $real to be tracked in ${gitdir/#$HOME/~}; it is untracked or ignored"
+  lockf="$(command git -C "$gitdir" rev-parse --git-path index.lock 2>/dev/null)"
+  [[ "$lockf" == /* ]] || lockf="$gitdir/$lockf"
+  [[ ! -e "$lockf" ]] || unsafe "${gitdir/#$HOME/~} has an index.lock; another git command is running there"
   dirty="$(command git -C "$gitdir" status --porcelain -- "$real" 2>/dev/null)" || \
     unsafe "could not ask git whether $real has uncommitted changes"
   [[ -z "$dirty" ]] || unsafe "$real already has uncommitted changes; commit or discard them before --commit"
@@ -147,8 +164,8 @@ fi
 # A bare `zsh -f`, every table a tenants file may assign pre-declared, the file
 # sourced at TOP LEVEL, and ANY stderr a fault (claude-tenants-owner,
 # machines-render). Prints one canonical line per value, sorted, so two files can
-# be compared table by table. A value holding a newline cannot be one line, and
-# is reported rather than mangled.
+# be compared table by table. A value holding a newline spans two dump lines;
+# nothing reports it here, but the exact comparison below then refuses the edit.
 dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
   local f="$1" errf out
   errf="$(command mktemp)" || { print -u2 -- "could not create a temp file"; return 1 }
@@ -186,9 +203,11 @@ dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
 }
 
 old_dump="$(dump "$real" 2>&1)" || unsafe "$TENANTS: $old_dump"
-# `$(<file)` strips trailing newlines, which the rewrite would then drop: the
-# sentinel keeps them, and `trail` puts them back.
-old_text="$(< "$real"; print -n x)"; old_text="${old_text%x}"
+# `$mapfile`, byte-exact. `$(<file)` strips trailing newlines, which the rewrite
+# would then drop, and `$(< file; cmd)` is NOT that shortcut: a redirection with
+# a command after it runs $READNULLCMD, a pager, and read nothing when there was
+# none (review, 2026-10-05).
+old_text="${mapfile[$real]}"
 body="${old_text%%$'\n'#}"; trail="${old_text#"$body"}"
 
 typeset -A pool ovf owned mid retired
@@ -236,8 +255,16 @@ case "$op" in
   pool-remove)
     (( ${members[(Ie)$name]} )) || refuse "'$name' is not in the pool of '$tenant'"
     new_members=( ${members:#${(b)name}} )
-    if (( ! ${#new_members} && ${refs[(Ie)$tenant]} )); then
-      refuse "that would leave '$tenant' with no members while a route, the default or an overflow entry names it; every launch would refuse"
+    # NO POOL MAY BE EMPTIED, referenced or not. A referenced one makes every
+    # launch refuse. An unreferenced one is worse: a launch PINNED to that tenant
+    # (`--tenant`, CLAUDE_ACCOUNT_TENANT, `hspawn --tenant`) reads an empty pool
+    # as no pool and widens to every registered profile, other machines' seats
+    # included (review, 2026-10-05). Removing a tenant is a hand edit.
+    if (( ! ${#new_members} )); then
+      if (( ${refs[(Ie)$tenant]} )); then
+        refuse "that would leave '$tenant' with no members while a route, the default or an overflow entry names it; every launch would refuse"
+      fi
+      refuse "that would leave '$tenant' with no members, and a launch pinned to '$tenant' widens an empty pool to every profile; remove the tenant's line by hand if that is what you mean"
     fi
     ;;
   retire-name)
@@ -251,6 +278,9 @@ esac
 tmp="$dir/.${real:t}.edit-$$"
 command cp -p "$real" "$tmp" 2>/dev/null || unsafe "could not copy $real to $tmp"
 trap 'command rm -f "$tmp"' EXIT
+trap 'command rm -f "$tmp"; exit 129' HUP
+trap 'command rm -f "$tmp"; exit 130' INT
+trap 'command rm -f "$tmp"; exit 143' TERM
 
 typeset -a lines
 lines=( "${(@f)body}" )
@@ -341,14 +371,17 @@ fi
 # ---- write ----------------------------------------------------------------------
 # Changed underneath us since it was read? Then the verified copy is of a file
 # that no longer exists, and renaming it over the new one would lose that edit.
-now_text="$(< "$real"; print -n x)"
-[[ "${now_text%x}" == "$old_text" ]] || unsafe "$TENANTS changed while this ran"
+[[ "${mapfile[$real]}" == "$old_text" ]] || unsafe "$TENANTS changed while this ran"
 
 stamp="$(command date +%Y%m%d-%H%M%S)"
-backup="$STATE/${real:t}.$stamp.$op-$name"
+# The pid makes it unique per run: two edits in one second used to share a name,
+# and the second's backup silently replaced the first's, so the original file was
+# in no backup at all (review, 2026-10-05).
+backup="$STATE/${real:t}.$stamp.$$.$op-${tenant:+$tenant-}$name"
+[[ ! -e "$backup" ]] || unsafe "a backup named $backup already exists"
 command cp -p "$real" "$backup" 2>/dev/null || unsafe "could not keep a backup at $backup"
 command mv -f "$tmp" "$real" || unsafe "could not rename $tmp over $real"
-trap - EXIT
+trap - EXIT HUP INT TERM
 print -r -- "$prog: $op ${tenant:+$tenant }$name — written; backup at ${backup/#$HOME/~}"
 
 if [[ -n "$gitdir" ]]; then
@@ -359,11 +392,23 @@ if [[ -n "$gitdir" ]]; then
        command git -C "$gitdir" commit -q -m "$msg" -- "$real"; then
       print -r -- "$prog: committed $(command git -C "$gitdir" rev-parse --short HEAD) in ${gitdir/#$HOME/~} (not pushed)"
     else
-      print -u2 -- "$prog: written, but the commit failed; the change is in the work tree of ${gitdir/#$HOME/~}"
+      # --commit is all or nothing. A hook that rejects the commit left the edit
+      # written AND STAGED, where the next plain `git commit` there swept it in.
+      # So unstage it, and put the original back from the backup just taken.
+      command git -C "$gitdir" reset -q -- "$real" 2>/dev/null
+      rb="$dir/.${real:t}.rollback-$$"
+      if command cp -p "$backup" "$rb" 2>/dev/null && command mv -f "$rb" "$real"; then
+        print -u2 -- "$prog: the commit failed, so the edit was rolled back; $TENANTS is as it was"
+      else
+        command rm -f "$rb"
+        print -u2 -- "$prog: the commit failed AND the roll-back failed; restore $TENANTS from ${backup/#$HOME/~}"
+      fi
       exit 2
     fi
-  else
+  elif (( tracked )); then
     print -r -- "$prog: not committed. To commit it: git -C ${gitdir/#$HOME/~} commit -m '…' -- ${real/#$HOME/~}"
+  else
+    print -r -- "$prog: not committed, and not tracked in ${gitdir/#$HOME/~}: add it to that repo first"
   fi
 fi
 exit 0

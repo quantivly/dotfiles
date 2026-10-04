@@ -101,6 +101,13 @@ run() {
                zsh "$SUT" "$@" 2>"$TMPROOT/err")"; RC=$?
     ERR="$(cat "$TMPROOT/err")"
 }
+run_at() {   # $1 = path of a SUT copy, rest = args
+    local sut="$1"; shift
+    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME \
+               HOME="$FHOME" GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+               zsh "$sut" "$@" 2>"$TMPROOT/err")"; RC=$?
+    ERR="$(cat "$TMPROOT/err")"
+}
 unchanged() { check "$1" "$(cat "$REAL" 2>/dev/null)" "$BEFORE"; }
 # The pool value a launch would read, from a bare zsh with the table declared.
 pool_of() {
@@ -122,6 +129,11 @@ run;                               check "no arguments is a usage error"        
 run frobnicate work w3;            check "an unknown operation is a usage error"    "$RC" "64"
 run pool-add work;                 check "a missing argument is a usage error"      "$RC" "64"
 run --force pool-add work w3;      check "an unknown option is a usage error"       "$RC" "64"
+# A flag after the operation used to be read as an argument: `retire-name old9
+# --dry-run` wrote "--dry-run" as the reason, for real (review, 2026-10-05).
+run retire-name old9 --dry-run;    check "a flag after the operation is a usage error" "$RC" "64"
+unchanged "...and nothing is written"
+run pool-add work --dry-run;       check "...in any position"                       "$RC" "64"
 
 #-----------------------------------------------------------------------------
 section "B. Names and reasons the table cannot hold"
@@ -136,6 +148,8 @@ run retire-name old9 'renamed "badly"'
 check "a reason with a double quote is refused"  "$RC" "1"
 run retire-name old9 ''
 check "an empty reason is refused"               "$RC" "1"
+run retire-name old9 $'renamed\rX'
+check "a reason with a carriage return is refused" "$RC" "1"
 unchanged "...and the file is untouched"
 
 #-----------------------------------------------------------------------------
@@ -188,6 +202,13 @@ check "...by changing exactly one line"           "$(changed_lines)" "2"
 check "...the tenants path is still a symlink"    "$([[ -L "$FHOME/.config/claude-tenants.zsh" ]] && echo yes)" "yes"
 check "...the file keeps its mode"                "$(stat -c %a "$REAL")" "604"
 check "...and a backup of the old file is kept"   "$(backups)" "1"
+
+# Two edits in one second shared a backup name, and the second's backup replaced
+# the first's: the original file was in no backup at all (review, 2026-10-05).
+# The same edit twice in a second is the case only the pid tells apart.
+new_home d1b; run pool-add work w3; run pool-remove work w3; run pool-add work w3
+check "three quick edits keep three backups" "$(backups)" "3"
+check "...one of which is the original"  "$(for b in "$FHOME"/.local/state/claude-tenants-edit/tenants.zsh.*; do [[ "$(cat "$b")" == "$BEFORE" ]] && echo yes; done | head -1)" "yes"
 
 new_home d2; run pool-add nosuch w3
 check "an unknown tenant is refused" "$RC" "1"; unchanged "...and the file is untouched"
@@ -252,9 +273,13 @@ unchanged "...and the file is untouched"
 new_home e3b "$(printf '%s\n' "$BASE" | sed 's/^  work "w1 w2"$/  work "w1"/')"
 run pool-remove work w1
 check "emptying a pool a route names is refused" "$RC" "1"
+# An unreferenced pool emptied is worse than a referenced one: a launch PINNED to
+# that tenant reads an empty pool as none and widens to every profile, another
+# machine's seat included (review, 2026-10-05). This row used to assert the edit.
 new_home e4; run pool-remove w w1
-check "emptying a pool nothing names is allowed" "$RC" "0"
-check "...and leaves it empty"                   "$(pool_of w)" ""
+check "emptying a pool nothing names is refused too" "$RC" "1"
+want_err "...because a pinned launch would widen"   "widens an empty pool to every profile"
+unchanged "...and the file is untouched"
 
 #-----------------------------------------------------------------------------
 section "F. retire-name"
@@ -316,6 +341,28 @@ check "--commit outside a git work tree is refused" "$RC" "2"
 want_err "...for that reason, not a later git error" "needs"
 unchanged "...and the file is untouched"
 
+new_home h5; mkdir -p "$FHOME/repo/.git/hooks"
+printf '#!/bin/sh\nexit 1\n' > "$FHOME/repo/.git/hooks/pre-commit"; chmod +x "$FHOME/repo/.git/hooks/pre-commit"
+run --commit pool-add work w3
+check "a commit a hook rejects is exit 2"            "$RC" "2"
+unchanged "...and the edit is rolled back"
+check "...and nothing is left staged"                "$(gitf -C "$FHOME/repo" status --porcelain -- claude/tenants.zsh)" ""
+want_err "...and it says so"                         "rolled back"
+
+new_home h6; gitf -C "$FHOME/repo" rm -q --cached claude/tenants.zsh; gitf -C "$FHOME/repo" commit -q -m untrack
+run --commit pool-add work w3
+check "--commit on an untracked file is refused" "$RC" "2"
+want_err "...as untracked, before anything is written" "untracked or ignored"
+unchanged "...and the file is untouched"
+run pool-add work w3
+want_out "without --commit it says the file is not tracked" "not tracked"
+
+new_home h7; : > "$FHOME/repo/.git/index.lock"
+run --commit pool-add work w3
+check "--commit while git holds index.lock is refused" "$RC" "2"
+want_err "...naming the lock, before git does"         "has an index.lock; another git command is running there"
+unchanged "...and the file is untouched"
+
 new_home h4; run pool-add work w3
 check "without --commit, nothing is committed" "$(gitf -C "$FHOME/repo" rev-list --count HEAD)" "1"
 want_out "...and it says how to commit"         "not committed"
@@ -340,9 +387,22 @@ check "an edit that does not change what a launch reads is not written" "$RC" "2
 want_err "...and says the table differs"                                "differs from the table"
 unchanged "...and the file is untouched"
 
+new_home i3; mkdir -p "$TMPROOT/lone"; cp "$SUT" "$TMPROOT/lone/claude-tenants-edit"
+run_at "$TMPROOT/lone/claude-tenants-edit" pool-add work w3
+check "with no machines-render beside it, nothing is written" "$RC" "2"
+want_err "...and it says machines-render is missing"          "machines-render is not beside"
+unchanged "...and the file is untouched"
+
+# `$(< f; cmd)` is not zsh's file shortcut: it runs $READNULLCMD. With a pager
+# missing it read nothing (review, 2026-10-05); with `rev` it reads the file
+# backwards, which this row would catch.
+new_home i4; READNULLCMD=rev run pool-add work w3
+check "the file is read directly, not through READNULLCMD" "$RC" "0"
+check "...and the edit lands"                               "$(pool_of work)" "w1 w2 w3"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that vanished: an early exit, a deleted block, an emptied loop.
-EXPECTED_ROWS=91
+EXPECTED_ROWS=114
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
