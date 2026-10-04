@@ -193,6 +193,7 @@ mcp_entry() {   # $1 = seat, $2 = server, $3 = state, $4 = key suffix (another c
         good)      e='{serverName: $s, accessToken: ("tok-" + $p), refreshToken: "r", expiresAt: 4102444800000, scope: "s"}' ;;
         discovery) e='{serverName: $s, accessToken: ""}' ;;
         fossil)    e='{serverName: $s, accessToken: "", expiresAt: 4102444800000, scope: "s"}' ;;
+        noexpiry)  e='{serverName: $s, accessToken: ("tok-" + $p), refreshToken: "r", expiresAt: "soon"}' ;;
     esac
     jq --arg k "$2|h-$1${4:-}" --arg s "$2" --arg p "$1" ".mcpOAuth[\$k] = $e" "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
 }
@@ -539,6 +540,12 @@ want_err "...as having nothing to compare with" "is in no pool"
 want_err "...without the add trailer"            "refused: 'quantivly-4'"
 no_out   "...which would be false here"          "Nothing was added to the pool"
 
+new_home h2b "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-2\"}"
+run mcp quantivly-2
+check "a compat symlink is refused as a seat" "$RC" "1"
+want_err "...as another profile's dir"        "its dir is another profile's"
+no_log   "...before any sign-in"              "mcp login"
+
 new_home h3 "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-4\"}"
 run mcp quantivly-4
 check "a pooled seat with no account dir is refused" "$RC" "1"
@@ -581,6 +588,16 @@ no_out   "...not even the sibling's"              "tok-quantivly-1"
 new_home h6; mcp_fixture; mcp_entry quantivly-3 plugin:github:github fossil
 run mcp --dry-run quantivly-3
 want_out "a damaged entry of its own is re-authorised, used by a sibling or not" "plugin:github:github: its own entry is damaged"
+new_home h6c; mcp_fixture; mcp_entry quantivly-3 plugin:Notion:notion fossil -old
+run mcp quantivly-3
+check "a damaged entry beside a good one is not signed in again" "$RC" "0"
+no_log   "...for that server"                                    "mcp login plugin:Notion"
+want_out "...but reported"                                       "plugin:Notion:notion: signed in, beside an older entry that is damaged"
+
+new_home h6d; mcp_fixture; mcp_entry quantivly-3 plugin:slack:slack noexpiry
+run mcp --dry-run quantivly-3
+want_out "an entry with no usable expiry, and nothing good, is signed in again" "plugin:slack:slack: its own entry has no usable expiry"
+
 new_home h6b; mcp_fixture; mcp_entry quantivly-3 plugin:Notion:notion discovery -old
 mcp_entry quantivly-1 plugin:figma:figma discovery; mcp_entry quantivly-3 plugin:figma:figma discovery
 run mcp --dry-run quantivly-3
@@ -626,6 +643,7 @@ check "--no-browser with no terminal is refused" "$RC" "1"
 no_log   "...before any sign-in"                 "mcp login"
 run mcp --dry-run --no-browser quantivly-3
 check "...but a dry run needs none"              "$RC" "0"
+want_out "...and its plan carries the flag"      "claude mcp login --no-browser plugin:slack:slack"
 new_home h13b; mcp_fixture
 run_tty mcp --no-browser quantivly-3
 check "--no-browser in a terminal signs in"      "$RC" "0"
@@ -644,13 +662,24 @@ run mcp --dry-run quantivly-3
 check "a pool member with no profile is skipped, not read" "$RC" "0"
 want_out "...and the others still count"                   "plugin:slack:slack: 'quantivly-1'"
 
+new_home h17; mcp_fixture; printf '{"enabledPlugins": [' > "$FHOME/.claude/settings.json"
+run mcp quantivly-3
+check "an unreadable settings file is exit 2, not 'nothing disabled'" "$RC" "2"
+want_err "...naming it"                                                "cannot read which plugins are enabled"
+no_log   "...before any sign-in"                                       "mcp login"
+
+new_home h18 "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-0.retired-20260917\"}"
+mcp_fixture; seat quantivly-0.retired-20260917; mcp_entry quantivly-0.retired-20260917 plugin:asana:asana good
+run mcp --dry-run quantivly-3
+no_out "a retired member's sign-ins are not expected" "plugin:asana:asana"
+
 new_home h15; mcp_fixture; settings_off linear@claude-plugins-official slack@claude-plugins-official
 run mcp --dry-run quantivly-3
 check "with Slack disabled too, nothing is left to do" "$RC" "0"
 want_out "...and it says so"                           "nothing to do"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=195
+EXPECTED_ROWS=207
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

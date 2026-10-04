@@ -705,6 +705,20 @@ _claude_mcp_plugin_states() {   # $1 = credential file
       end' "$1" 2>/dev/null
 }
 
+# Why pool member $3 is not a usable seat, as one word, or nothing when it is:
+# charset (a character the picker rejects; it refuses the whole table), compat (a
+# compat symlink in the account root: the picker drops it, and the dir it points
+# at is another profile's), retired (a tombstone name), nostore (no clauth profile
+# store). The doctor reports each; `claude-seat mcp` skips a member that has one
+# and refuses a seat that does, so the two read a pool the same way.
+_claude_pool_member_problem() {   # $1 = account-dir root, $2 = clauth profiles dir, $3 = name
+  if [[ -n "${3//[A-Za-z0-9_.-]/}" ]]; then print -r -- charset
+  elif [[ -L "$1/$3" ]]; then print -r -- compat
+  elif [[ "$3" == *.retired-* ]]; then print -r -- retired
+  elif [[ ! -e "$2/$3/credentials.json" && ! -L "$2/$3/credentials.json" ]]; then print -r -- nostore
+  fi
+}
+
 # The plugins switched off in the USER settings, one name per line: the segment
 # of a server name (`plugin:<name>:…`) whose every enabledPlugins entry is false
 # (DO-801). Nothing removes an mcpOAuth entry when its plugin is disabled, so
@@ -886,31 +900,29 @@ _claude_doctor_pools() {
     fi
 
     for m in $members; do
-      if [[ -n "${m//[A-Za-z0-9_.-]/}" ]]; then
-        _doctor_bad "pool '$t' names '$m' — a member may only contain letters, digits, - _ and ."
-        echo "    The picker refuses the whole table until it is fixed."
-        (( ++n_issue )); continue
-      fi
-      if [[ -L "$adroot/$m" ]]; then
-        zmodload -F zsh/stat b:zstat 2>/dev/null
-        lnk="$(zstat +link -- "$adroot/$m" 2>/dev/null)" || lnk=""
-        _doctor_bad "pool '$t' names '$m', a compat symlink${lnk:+ to '${lnk:t}'}"
-        echo "    The picker drops it without a word. Name the profile it stands for instead."
-        [[ -e "$pdir/$m/credentials.json" || -L "$pdir/$m/credentials.json" ]] && \
-          echo "    '$m' is ALSO a registered profile, so its account dir is another profile's dir."
-        (( ++n_issue )); continue
-      fi
-      if [[ "$m" == *.retired-* ]]; then
-        _doctor_bad "pool '$t' names '$m', a retired name"
-        echo "    The picker drops it without a word. Remove it from the pool."
-        (( ++n_issue )); continue
-      fi
-      if [[ ! -e "$pdir/$m/credentials.json" && ! -L "$pdir/$m/credentials.json" ]]; then
-        _doctor_bad "pool '$t' names '$m', which has no clauth profile store"
-        echo "    The picker drops it without a word. 'clauth login $m' if it should exist;"
-        echo "    otherwise remove it from the pool."
-        (( ++n_issue )); continue
-      fi
+      case "$(_claude_pool_member_problem "$adroot" "$pdir" "$m")" in
+        charset)
+          _doctor_bad "pool '$t' names '$m' — a member may only contain letters, digits, - _ and ."
+          echo "    The picker refuses the whole table until it is fixed."
+          (( ++n_issue )); continue ;;
+        compat)
+          zmodload -F zsh/stat b:zstat 2>/dev/null
+          lnk="$(zstat +link -- "$adroot/$m" 2>/dev/null)" || lnk=""
+          _doctor_bad "pool '$t' names '$m', a compat symlink${lnk:+ to '${lnk:t}'}"
+          echo "    The picker drops it without a word. Name the profile it stands for instead."
+          [[ -e "$pdir/$m/credentials.json" || -L "$pdir/$m/credentials.json" ]] && \
+            echo "    '$m' is ALSO a registered profile, so its account dir is another profile's dir."
+          (( ++n_issue )); continue ;;
+        retired)
+          _doctor_bad "pool '$t' names '$m', a retired name"
+          echo "    The picker drops it without a word. Remove it from the pool."
+          (( ++n_issue )); continue ;;
+        nostore)
+          _doctor_bad "pool '$t' names '$m', which has no clauth profile store"
+          echo "    The picker drops it without a word. 'clauth login $m' if it should exist;"
+          echo "    otherwise remove it from the pool."
+          (( ++n_issue )); continue ;;
+      esac
       valid+=( "$m" )
     done
 

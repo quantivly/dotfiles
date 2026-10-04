@@ -165,7 +165,8 @@ fi
 # The settings a move compares, normalised, from claude.sh's own reader. The same
 # keys and defaults as claude-doctor's parity check (clauth v0.16.0 swap_eligible).
 source "$CLAUDE_SH" >/dev/null 2>&1
-for f in _claude_toml_flat _claude_seat_cred_file _claude_mcp_plugin_states _claude_plugins_disabled; do
+for f in _claude_toml_flat _claude_seat_cred_file _claude_mcp_plugin_states _claude_plugins_disabled \
+         _claude_pool_member_problem; do
   (( $+functions[$f] )) || fail "$CLAUDE_SH does not define $f"
 done
 swapkeys() {   # $1 = config.toml -> sorted "key=value" lines a move compares
@@ -195,16 +196,30 @@ effective() { _claude_toml_flat "$1" }
 # second holder of one rotating refresh chain. One at a time, because Slack's
 # plugin listens on a fixed callback port.
 seat_mcp() {
-  local ad="$ADROOT/$name" seatf t m f k out kv srv st
-  local -a pools targets lflags notok
-  local -A want have why poff
+  local ad="$ADROOT/$name" seatf t m f k out kv srv st sf
+  local -a pools targets lflags notok stale
+  local -A want have why poff seen
   for t in ${(k)pool}; do
     (( ${${=pool[$t]}[(Ie)$name]} )) && pools+=( "$t" )
   done
   (( ${#pools} )) || refuse "'$name' is in no pool, so no other seat says which plugin servers it needs"
   pools=( "${(@o)pools}" )
+  # The doctor's member rules. A compat symlink's dir is ANOTHER profile's, so a
+  # sign-in there would land on that profile.
+  case "$(_claude_pool_member_problem "$ADROOT" "$PROFILES" "$name")" in
+    compat)  refuse "'$name' is a compat symlink in the account root; its dir is another profile's, so name that profile instead" ;;
+    retired) refuse "'$name' is a retired name" ;;
+    nostore) refuse "'$name' has no clauth profile store; add the seat first: $prog add <tenant> $name" ;;
+  esac
   [[ -e "$ad/.credentials.json" || -L "$ad/.credentials.json" ]] || \
     refuse "'$name' has no account dir with a credential (${ad/#$HOME/~}); add the seat first: $prog add <tenant> $name"
+  # The doctor reads an unreadable settings file as "nothing disabled", which costs
+  # it at most a warning. Here it would cost a real sign-in to a plugin switched off.
+  sf="$(_claude_global_settings_file)"
+  if [[ -e "$sf" || -L "$sf" ]]; then
+    jq -e 'type == "object" and ((.enabledPlugins // {}) | type == "object")' "$sf" >/dev/null 2>&1 || \
+      fail "cannot read which plugins are enabled in ${sf/#$HOME/~}, so one switched off could be signed in to"
+  fi
   for k in ${(f)"$(_claude_plugins_disabled)"}; do
     [[ -n "$k" ]] && poff[$k]=1
   done
@@ -213,7 +228,7 @@ seat_mcp() {
   for t in $pools; do
     for m in ${=pool[$t]}; do
       [[ "$m" == "$name" ]] && continue
-      [[ -e "$PROFILES/$m/credentials.json" || -L "$PROFILES/$m/credentials.json" ]] || continue
+      [[ -z "$(_claude_pool_member_problem "$ADROOT" "$PROFILES" "$m")" ]] || continue
       f="$(_claude_seat_cred_file "$ADROOT" "$PROFILES" "$m")"
       out="$(_claude_mcp_plugin_states "$f")" || \
         fail "cannot read the MCP sign-ins of '$m' (${f/#$HOME/~}), so which servers '$name' needs is unknown"
@@ -234,16 +249,26 @@ seat_mcp() {
     (( ${+poff[${${srv#plugin:}%%:*}]} )) && continue
     have[$srv]+=" $st"
   done
+  # Only a server with no good entry is a target. A damaged entry BESIDE a good one
+  # sits under an older config's key, which a new sign-in writes past rather than
+  # over, so signing in again cannot clear it: it is reported, not retried.
   for srv in ${(k)want} ${(k)have}; do
-    (( ${targets[(Ie)$srv]} )) && continue
+    (( ${+seen[$srv]} )) && continue
+    seen[$srv]=1
     st="${have[$srv]-} "
-    if [[ "$st" == *(fossil|norefresh|broken)" "* ]]; then
+    if [[ "$st" == *"good "* ]]; then
+      [[ "$st" == *(fossil|norefresh|broken|noexpiry)" "* ]] && stale+=( "$srv" )
+    elif [[ "$st" == *(fossil|norefresh|broken)" "* ]]; then
       targets+=( "$srv" ); why[$srv]="its own entry is damaged"
-    elif [[ "$st" != *"good "* ]] && (( ${+want[$srv]} )); then
+    elif [[ "$st" == *"noexpiry "* ]]; then
+      targets+=( "$srv" ); why[$srv]="its own entry has no usable expiry"
+    elif (( ${+want[$srv]} )); then
       targets+=( "$srv" ); why[$srv]="'${want[$srv]}' is signed in to it"
     fi
   done
   targets=( "${(@o)targets}" )
+  (( ${#stale} )) && \
+    say "  note: ${(j:, :)${(@o)stale}}: signed in, beside an older entry that is damaged; a new sign-in does not replace it (claude-doctor reports it)"
 
   if (( ! ${#targets} )); then
     if (( ${#want} )); then
@@ -254,16 +279,16 @@ seat_mcp() {
     return 0
   fi
   for srv in $targets; do say "  $srv: ${why[$srv]}"; done
+  (( nobrowser )) && lflags=( --no-browser )
   if (( dry )); then
     step plan "nothing below runs in a dry run"
     for srv in $targets; do
-      say "  CLAUDE_CONFIG_DIR=${ad/#$HOME/~} claude mcp login $srv"
+      say "  CLAUDE_CONFIG_DIR=${ad/#$HOME/~} claude mcp login ${lflags:+--no-browser }$srv"
     done
     return 0
   fi
   if (( nobrowser )); then
     [[ -t 0 ]] || refuse "--no-browser asks you to paste the redirect back, so it needs a terminal"
-    lflags=( --no-browser )
   fi
 
   for srv in $targets; do
@@ -288,8 +313,7 @@ seat_mcp() {
     have[$srv]+=" $st"
   done
   for srv in $targets; do
-    st="${have[$srv]-} "
-    if [[ "$st" == *"good "* && "$st" != *(fossil|norefresh|broken)" "* ]]; then
+    if [[ "${have[$srv]-} " == *"good "* ]]; then
       say "  ✓ $srv"
     else
       say "  ✗ $srv"
