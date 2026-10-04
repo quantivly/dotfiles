@@ -125,7 +125,7 @@ fork_err="$(command mktemp)" || die "could not create a temp file"
 raw="$(command zsh -f -c '
   typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
   typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR \
-              CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID
+              CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED
   source "$2"            # github.sh  — _gh_repo_remotes, the ONE remote reader
   source "$3"            # zshrc.herdr — _claude_tenant_for, the ONE rule
   source "$1"            # the tenants file, sourced LAST and at top level

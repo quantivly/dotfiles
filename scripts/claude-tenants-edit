@@ -1,0 +1,414 @@
+#!/usr/bin/env zsh
+#
+# scripts/claude-tenants-edit
+# ===========================
+#
+# EDIT THE ACCOUNT POOLS IN THE TENANTS FILE, one verified change at a time
+# (DO-795). Adding or retiring a seat used to mean hand-editing
+# `CLAUDE_TENANT_POOL` in ~/.config/claude-tenants.zsh, and a hand edit is the
+# riskiest step of adding a seat:
+#
+#   - zsh `source` runs every line up to a parse error, so an error above the
+#     pool lines leaves the pool EMPTY, and the ranked pick then widens to every
+#     profile. A file that errors at RUN time (CRLF, a typo'd command) makes every
+#     launch refuse instead (claude-tenants-owner).
+#   - `machines-render --check` validates the ownership tables, not the pools.
+#   - Nothing recorded which names had been used before, so a retired name could
+#     come back as a different account.
+#
+# So every change goes through the same gate, and nothing is written unless all
+# of it passes:
+#
+#   1. the request is checked against the table as a launch reads it;
+#   2. the edit is made to a TEMP COPY beside the real file;
+#   3. the copy must parse (`zsh -n`), must load cleanly in a bare `zsh -f` with
+#      every table pre-declared and ANY stderr a fault, and must pass
+#      `machines-render --check`;
+#   4. both files are loaded and every table compared: the difference must be
+#      EXACTLY the requested change, so an edit that touches anything else, or a
+#      text edit that did not do what it meant, writes nothing;
+#   5. a timestamped backup is kept, and the copy is renamed over the real file.
+#      The tenants path is usually a symlink into a private repo, so the TARGET is
+#      replaced, never the link.
+#
+# The text edit itself is deliberately narrow: one `tenant "members"` line inside
+# a `CLAUDE_TENANT_POOL=(` block. Any other layout (two tenants on a line, single
+# quotes, the subscript form) is refused with "edit by hand" rather than guessed
+# at, and step 4 would catch a guess that went wrong anyway.
+#
+# Usage:
+#   claude-tenants-edit [--dry-run] [--commit] pool-add    <tenant> <name>
+#   claude-tenants-edit [--dry-run] [--commit] pool-remove <tenant> <name>
+#   claude-tenants-edit [--dry-run] [--commit] retire-name <name> <reason>
+#
+#   --dry-run  check everything and print the diff; write nothing
+#   --commit   commit the tenants file ALONE in its repo, with a message naming
+#              the change. Refused when that file already had uncommitted
+#              changes, so a hand edit is never swept into it. Never pushes.
+#
+# Exit: 0 done (or dry run passed) · 1 refused: the request does not fit the
+#       table · 2 could not do it safely: the file is unusable, its layout is not
+#       one this edits, a check failed, or the commit could not be made ·
+#       64 usage.
+
+emulate -R zsh
+setopt no_unset pipe_fail extended_glob
+zmodload zsh/system 2>/dev/null
+zmodload zsh/mapfile 2>/dev/null
+
+prog=claude-tenants-edit
+here="${0:A:h}"
+TENANTS="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+PROFILES="$HOME/.clauth/profiles"
+ADROOT="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/claude-tenants-edit"
+RENDER="$here/machines-render"
+SEP=$'\x1f'
+
+usage() {
+  print -u2 -- "usage: $prog [--dry-run] [--commit] pool-add <tenant> <name>"
+  print -u2 -- "       $prog [--dry-run] [--commit] pool-remove <tenant> <name>"
+  print -u2 -- "       $prog [--dry-run] [--commit] retire-name <name> <reason>"
+  exit 64
+}
+refuse() { print -u2 -- "$prog: refused: $*"; exit 1 }
+unsafe() { print -u2 -- "$prog: $*"; print -u2 -- "    Nothing was written."; exit 2 }
+
+dry=0 commit=0
+while (( $# )); do
+  case "$1" in
+    --dry-run) dry=1 ;;
+    --commit)  commit=1 ;;
+    --help|-h) usage ;;
+    --*)       usage ;;
+    *)         break ;;
+  esac
+  shift
+done
+(( $# == 3 )) || usage
+# A flag AFTER the operation would otherwise be read as an argument: measured,
+# `retire-name old9 --dry-run` wrote "--dry-run" as the reason, for real.
+[[ "$2" != -* && "$3" != -* ]] || usage
+op="$1"
+case "$op" in
+  pool-add|pool-remove) tenant="$2"; name="$3"; reason="" ;;
+  retire-name)          tenant="";   name="$2"; reason="$3" ;;
+  *)                    usage ;;
+esac
+
+# The picker's own member rule (_claude_tenant_table_ok): a name outside it is
+# refused there, for the whole table, so it is refused here before anything else.
+[[ -n "$name" && -z "${name//[A-Za-z0-9_.-]/}" ]] || \
+  refuse "'$name' may only contain letters, digits, - _ and ."
+if [[ -n "$tenant" ]]; then
+  [[ -z "${tenant//[A-Za-z0-9_.-]/}" ]] || refuse "tenant '$tenant' may only contain letters, digits, - _ and ."
+fi
+if [[ "$op" == retire-name ]]; then
+  # Written inside double quotes in a zsh file: anything that would need escaping
+  # there is refused rather than escaped.
+  [[ -n "$reason" ]] || refuse "a retired name needs a reason"
+  [[ "$reason" != *[\"\$\`\\]* && "$reason" != *[[:cntrl:]]* ]] || \
+    refuse "the reason may not contain a double quote, \$, a backtick, a backslash or a control character"
+fi
+
+# ---- the file ------------------------------------------------------------------
+# The same four states machines-render tells apart, for the same reasons.
+if [[ -L "$TENANTS" && ! -e "$TENANTS" ]]; then
+  unsafe "$TENANTS is a symlink whose target does not exist"
+fi
+[[ -e "$TENANTS" ]] || unsafe "there is no tenants file at $TENANTS"
+[[ -f "$TENANTS" ]] || unsafe "$TENANTS is not a regular file"
+[[ -r "$TENANTS" && -w "${TENANTS:A}" ]] || unsafe "cannot read and write $TENANTS"
+real="${TENANTS:A}"
+dir="${real:h}"
+
+[[ -r "$RENDER" ]] || unsafe "machines-render is not beside this script ($RENDER); the edited copy cannot be checked"
+
+if ! err="$(command zsh -n "$real" 2>&1)"; then
+  unsafe "$TENANTS does not parse:"$'\n'"    ${err:-zsh -n failed with no message}"
+fi
+
+# One edit at a time. A second editor waits briefly, then gives up.
+mkdir -p "$STATE" 2>/dev/null
+[[ -d "$STATE" && -w "$STATE" ]] || unsafe "cannot use the state directory $STATE"
+# `zsystem flock` opens an EXISTING file; it does not create one.
+: >> "$STATE/.lock" 2>/dev/null || unsafe "cannot create $STATE/.lock"
+zsystem flock -t 10 "$STATE/.lock" 2>/dev/null || unsafe "another $prog holds $STATE/.lock"
+
+# --commit is decided BEFORE anything is written: a file that already carries a
+# hand edit is not ours to commit, and finding that out afterwards would leave a
+# written, uncommitted change behind.
+gitdir=""
+if top="$(command git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$top" ]]; then
+  gitdir="$top"
+fi
+tracked=0
+if [[ -n "$gitdir" ]] && command git -C "$gitdir" ls-files --error-unmatch -- "$real" >/dev/null 2>&1; then
+  tracked=1
+fi
+if (( commit )); then
+  [[ -n "$gitdir" ]] || unsafe "--commit needs $real to be inside a git work tree"
+  # An untracked or ignored file passes the dirty check below (`status
+  # --porcelain` prints nothing for an ignored path) and then fails at `git add`,
+  # after the write. Measured, so asked first.
+  (( tracked )) || unsafe "--commit needs $real to be tracked in ${gitdir/#$HOME/~}; it is untracked or ignored"
+  lockf="$(command git -C "$gitdir" rev-parse --git-path index.lock 2>/dev/null)"
+  [[ "$lockf" == /* ]] || lockf="$gitdir/$lockf"
+  [[ ! -e "$lockf" ]] || unsafe "${gitdir/#$HOME/~} has an index.lock; another git command is running there"
+  dirty="$(command git -C "$gitdir" status --porcelain -- "$real" 2>/dev/null)" || \
+    unsafe "could not ask git whether $real has uncommitted changes"
+  [[ -z "$dirty" ]] || unsafe "$real already has uncommitted changes; commit or discard them before --commit"
+fi
+
+# ---- reading a table the way a launch does ------------------------------------
+# A bare `zsh -f`, every table a tenants file may assign pre-declared, the file
+# sourced at TOP LEVEL, and ANY stderr a fault (claude-tenants-owner,
+# machines-render). Prints one canonical line per value, sorted, so two files can
+# be compared table by table. A value holding a newline spans two dump lines;
+# nothing reports it here, but the exact comparison below then refuses the edit.
+dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
+  local f="$1" errf out
+  errf="$(command mktemp)" || { print -u2 -- "could not create a temp file"; return 1 }
+  out="$(command zsh -f -c '
+    typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR \
+                CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED
+    typeset -g CLAUDE_TENANT_DEFAULT=
+    source "$1" >/dev/null
+    s=$2
+    # Spelled out per table: zsh 5.9 has no namerefs (`typeset -n`).
+    for k in "${(@k)CLAUDE_TENANT_POOL}";          do print -r -- "POOL$s$k$s${CLAUDE_TENANT_POOL[$k]}"; done
+    for k in "${(@k)CLAUDE_TENANT_OVERFLOW}";      do print -r -- "OVERFLOW$s$k$s${CLAUDE_TENANT_OVERFLOW[$k]}"; done
+    for k in "${(@k)CLAUDE_TENANT_GH_DIR}";        do print -r -- "GH_DIR$s$k$s${CLAUDE_TENANT_GH_DIR[$k]}"; done
+    for k in "${(@k)CLAUDE_TENANT_MACHINE_OWNED}"; do print -r -- "MACHINE_OWNED$s$k$s${CLAUDE_TENANT_MACHINE_OWNED[$k]}"; done
+    for k in "${(@k)CLAUDE_TENANT_MACHINE_ID}";    do print -r -- "MACHINE_ID$s$k$s${CLAUDE_TENANT_MACHINE_ID[$k]}"; done
+    for k in "${(@k)CLAUDE_TENANT_RETIRED}";       do print -r -- "RETIRED$s$k$s${CLAUDE_TENANT_RETIRED[$k]}"; done
+    i=0; for v in "${CLAUDE_TENANT_ROUTES[@]}";      do (( ++i )); print -r -- "ROUTES$s$i$s$v"; done
+    i=0; for v in "${CLAUDE_TENANT_PATH_ROUTES[@]}"; do (( ++i )); print -r -- "PATH_ROUTES$s$i$s$v"; done
+    i=0; for v in "${CLAUDE_TENANT_BUCKETS[@]}";     do (( ++i )); print -r -- "BUCKETS$s$i$s$v"; done
+    print -r -- "DEFAULT$s$s$CLAUDE_TENANT_DEFAULT"
+    print -r -- "__DONE__"' tenants-edit "$f" "$SEP" </dev/null 2>"$errf")"
+  local errtext="$(< "$errf")"
+  command rm -f "$errf"
+  if [[ -n "$errtext" ]]; then
+    print -u2 -- "it did not run cleanly:"$'\n'"${errtext}"
+    return 1
+  fi
+  [[ $'\n'"$out"$'\n' == *$'\n'__DONE__$'\n'* ]] || { print -u2 -- "reading it did not finish"; return 1 }
+  # Built step by step: a nested array expansion inside double quotes collapses
+  # to one word without (@), and then sorts nothing.
+  local -a L
+  L=( "${(@f)out}" ); L=( "${(@)L:#__DONE__}" ); L=( "${(@o)L}" )
+  print -r -- "${(F)L}"
+}
+
+old_dump="$(dump "$real" 2>&1)" || unsafe "$TENANTS: $old_dump"
+# `$mapfile`, byte-exact. `$(<file)` strips trailing newlines, which the rewrite
+# would then drop, and `$(< file; cmd)` is NOT that shortcut: a redirection with
+# a command after it runs $READNULLCMD, a pager, and read nothing when there was
+# none (review, 2026-10-05).
+old_text="${mapfile[$real]}"
+body="${old_text%%$'\n'#}"; trail="${old_text#"$body"}"
+
+typeset -A pool ovf owned mid retired
+typeset -a refs
+for line in "${(@f)old_dump}"; do
+  t="${line%%$SEP*}"; rest="${line#*$SEP}"; k="${rest%%$SEP*}"; v="${rest#*$SEP}"
+  case "$t" in
+    POOL)          pool[$k]="$v" ;;
+    OVERFLOW)      ovf[$k]="$v"; refs+=( "$k" ) ;;
+    MACHINE_OWNED) owned[$k]="$v" ;;
+    MACHINE_ID)    mid[$k]="$v" ;;
+    RETIRED)       retired[$k]="$v" ;;
+    ROUTES|PATH_ROUTES) refs+=( "${v#*=}" ) ;;
+    DEFAULT)       [[ -n "$v" ]] && refs+=( "$v" ) ;;
+  esac
+done
+
+# ---- the request, against that table ------------------------------------------
+in_any_pool() {  # $1 = name; prints the tenants whose pool or overflow names it
+  local t m
+  for t in ${(k)pool}; do for m in ${=pool[$t]}; do [[ "$m" == "$1" ]] && print -r -- "pool $t"; done; done
+  for t in ${(k)ovf};  do for m in ${=ovf[$t]};  do [[ "$m" == "$1" ]] && print -r -- "overflow $t"; done; done
+}
+
+typeset -a members new_members
+case "$op" in
+  pool-add|pool-remove)
+    (( ${+pool[$tenant]} )) || refuse "tenant '$tenant' has no CLAUDE_TENANT_POOL entry"
+    members=( ${=pool[$tenant]} )
+    ;;
+esac
+
+case "$op" in
+  pool-add)
+    (( ${members[(Ie)$name]} )) && refuse "'$name' is already in the pool of '$tenant'"
+    [[ -e "$PROFILES/$name/credentials.json" || -L "$PROFILES/$name/credentials.json" ]] || \
+      refuse "'$name' is not a registered clauth profile (no $PROFILES/$name/credentials.json)"
+    [[ -L "$ADROOT/$name" ]] && \
+      refuse "'$name' is a compat symlink in $ADROOT; the picker drops it, and its dir is another profile's"
+    (( ${+owned[$name]} || ${+mid[$name]} )) && \
+      refuse "'$name' is in the machine-ownership tables; another machine bills it"
+    (( ${+retired[$name]} )) && refuse "'$name' is a retired name (${retired[$name]})"
+    new_members=( $members $name )
+    ;;
+  pool-remove)
+    (( ${members[(Ie)$name]} )) || refuse "'$name' is not in the pool of '$tenant'"
+    new_members=( ${members:#${(b)name}} )
+    # NO POOL MAY BE EMPTIED, referenced or not. A referenced one makes every
+    # launch refuse. An unreferenced one is worse: a launch PINNED to that tenant
+    # (`--tenant`, CLAUDE_ACCOUNT_TENANT, `hspawn --tenant`) reads an empty pool
+    # as no pool and widens to every registered profile, other machines' seats
+    # included (review, 2026-10-05). Removing a tenant is a hand edit.
+    if (( ! ${#new_members} )); then
+      if (( ${refs[(Ie)$tenant]} )); then
+        refuse "that would leave '$tenant' with no members while a route, the default or an overflow entry names it; every launch would refuse"
+      fi
+      refuse "that would leave '$tenant' with no members, and a launch pinned to '$tenant' widens an empty pool to every profile; remove the tenant's line by hand if that is what you mean"
+    fi
+    ;;
+  retire-name)
+    (( ${+retired[$name]} )) && refuse "'$name' is already retired (${retired[$name]})"
+    where="$(in_any_pool "$name")"
+    [[ -z "$where" ]] || refuse "'$name' is still named in: ${(j:, :)${(@f)where}}; remove it there first"
+    ;;
+esac
+
+# ---- the edit, on a copy --------------------------------------------------------
+tmp="$dir/.${real:t}.edit-$$"
+command cp -p "$real" "$tmp" 2>/dev/null || unsafe "could not copy $real to $tmp"
+trap 'command rm -f "$tmp"' EXIT
+trap 'command rm -f "$tmp"; exit 129' HUP
+trap 'command rm -f "$tmp"; exit 130' INT
+trap 'command rm -f "$tmp"; exit 143' TERM
+
+typeset -a lines
+lines=( "${(@f)body}" )
+case "$op" in
+  pool-add|pool-remove)
+    # The ONE line `<indent><tenant><space>"<members>"` inside the
+    # `CLAUDE_TENANT_POOL=(` block. Zero or several such lines is a layout this
+    # does not edit.
+    inblock=0 hits=0 idx=0 i=0
+    for l in "${lines[@]}"; do
+      (( ++i ))
+      if (( ! inblock )); then
+        [[ "$l" == [[:space:]]#CLAUDE_TENANT_POOL=\([[:space:]]# ]] && inblock=1
+        continue
+      fi
+      [[ "$l" == [[:space:]]#\)[[:space:]]# ]] && { inblock=2; break }
+      if [[ "$l" == (#b)([[:space:]]#)${(b)tenant}([[:space:]]##)\"([^\"]#)\"[[:space:]]# ]]; then
+        (( ++hits )); idx=$i; ind="$match[1]"; gap="$match[2]"
+      fi
+    done
+    (( inblock == 2 )) || unsafe "found no 'CLAUDE_TENANT_POOL=(' ... ')' block in $TENANTS; edit it by hand"
+    (( hits == 1 )) || unsafe "found $hits editable lines for tenant '$tenant' in the pool block (want exactly one '$tenant \"...\"' line); edit it by hand"
+    lines[$idx]="$ind$tenant$gap\"${(j: :)new_members}\""
+    ;;
+  retire-name)
+    start=0 close=0 i=0
+    for l in "${lines[@]}"; do
+      (( ++i ))
+      if (( ! start )); then
+        [[ "$l" == [[:space:]]#CLAUDE_TENANT_RETIRED=\([[:space:]]# ]] && start=$i
+        continue
+      fi
+      [[ "$l" == [[:space:]]#\)[[:space:]]# ]] && { close=$i; break }
+    done
+    entry="  $name \"$reason\""
+    if (( start && close )); then
+      lines=( "${(@)lines[1,close-1]}" "$entry" "${(@)lines[close,-1]}" )
+    elif (( start )); then
+      unsafe "the CLAUDE_TENANT_RETIRED=( block in $TENANTS never closes; edit it by hand"
+    elif [[ "$old_text" == *CLAUDE_TENANT_RETIRED* ]]; then
+      unsafe "$TENANTS mentions CLAUDE_TENANT_RETIRED in a layout this does not edit; edit it by hand"
+    else
+      lines+=( ""
+        "# Names never to be used for a seat again, with why. Written by"
+        "# scripts/claude-tenants-edit retire-name; read before a name is reused."
+        "typeset -gA CLAUDE_TENANT_RETIRED"
+        "CLAUDE_TENANT_RETIRED=("
+        "$entry"
+        ")" )
+    fi
+    ;;
+esac
+print -rn -- "${(F)lines}$trail" > "$tmp" || unsafe "could not write $tmp"
+
+# ---- verify the copy --------------------------------------------------------------
+if ! err="$(command zsh -n "$tmp" 2>&1)"; then
+  unsafe "the edited copy does not parse:"$'\n'"    $err"
+fi
+new_dump="$(dump "$tmp" 2>&1)" || unsafe "the edited copy: $new_dump"
+
+# What the dump must become: the old one with exactly this change.
+typeset -a expect
+expect=( "${(@f)old_dump}" )
+case "$op" in
+  pool-add|pool-remove)
+    expect=( "${(@)expect:#POOL$SEP${(b)tenant}$SEP*}" "POOL$SEP$tenant$SEP${(j: :)new_members}" ) ;;
+  retire-name)
+    expect+=( "RETIRED$SEP$name$SEP$reason" ) ;;
+esac
+expect=( "${(@o)expect}" ); want="${(F)expect}"
+if [[ "$new_dump" != "$want" ]]; then
+  print -u2 -- "$prog: the edited copy differs from the table by more than '$op':"
+  command diff <(print -r -- "$want") <(print -r -- "$new_dump") | command sed 's/^/    /' >&2
+  print -u2 -- "    Nothing was written."
+  exit 2
+fi
+
+if ! err="$(CLAUDE_TENANTS_FILE="$tmp" command zsh "$RENDER" --check 2>&1)"; then
+  unsafe "machines-render --check rejects the edited copy:"$'\n'"${err}"
+fi
+
+command diff -u --label "$TENANTS (before)" --label "$TENANTS (after)" "$real" "$tmp"
+if (( dry )); then
+  print -r -- "$prog: dry run; nothing written."
+  exit 0
+fi
+
+# ---- write ----------------------------------------------------------------------
+# Changed underneath us since it was read? Then the verified copy is of a file
+# that no longer exists, and renaming it over the new one would lose that edit.
+[[ "${mapfile[$real]}" == "$old_text" ]] || unsafe "$TENANTS changed while this ran"
+
+stamp="$(command date +%Y%m%d-%H%M%S)"
+# The pid makes it unique per run: two edits in one second used to share a name,
+# and the second's backup silently replaced the first's, so the original file was
+# in no backup at all (review, 2026-10-05).
+backup="$STATE/${real:t}.$stamp.$$.$op-${tenant:+$tenant-}$name"
+[[ ! -e "$backup" ]] || unsafe "a backup named $backup already exists"
+command cp -p "$real" "$backup" 2>/dev/null || unsafe "could not keep a backup at $backup"
+command mv -f "$tmp" "$real" || unsafe "could not rename $tmp over $real"
+trap - EXIT HUP INT TERM
+print -r -- "$prog: $op ${tenant:+$tenant }$name — written; backup at ${backup/#$HOME/~}"
+
+if [[ -n "$gitdir" ]]; then
+  if (( commit )); then
+    msg="tenants: $op ${tenant:+$tenant }$name"
+    [[ "$op" == retire-name ]] && msg+=" ($reason)"
+    if command git -C "$gitdir" add -- "$real" && \
+       command git -C "$gitdir" commit -q -m "$msg" -- "$real"; then
+      print -r -- "$prog: committed $(command git -C "$gitdir" rev-parse --short HEAD) in ${gitdir/#$HOME/~} (not pushed)"
+    else
+      # --commit is all or nothing. A hook that rejects the commit left the edit
+      # written AND STAGED, where the next plain `git commit` there swept it in.
+      # So unstage it, and put the original back from the backup just taken.
+      command git -C "$gitdir" reset -q -- "$real" 2>/dev/null
+      rb="$dir/.${real:t}.rollback-$$"
+      if command cp -p "$backup" "$rb" 2>/dev/null && command mv -f "$rb" "$real"; then
+        print -u2 -- "$prog: the commit failed, so the edit was rolled back; $TENANTS is as it was"
+      else
+        command rm -f "$rb"
+        print -u2 -- "$prog: the commit failed AND the roll-back failed; restore $TENANTS from ${backup/#$HOME/~}"
+      fi
+      exit 2
+    fi
+  elif (( tracked )); then
+    print -r -- "$prog: not committed. To commit it: git -C ${gitdir/#$HOME/~} commit -m '…' -- ${real/#$HOME/~}"
+  else
+    print -r -- "$prog: not committed, and not tracked in ${gitdir/#$HOME/~}: add it to that repo first"
+  fi
+fi
+exit 0

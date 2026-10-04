@@ -399,6 +399,29 @@ jobs:
       - name: Run the machine registry state table
         run: ./scripts/test-machines-render.sh
 
+  tenants-edit-test:
+    name: Tenants File Editor State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
+      # The tenants file decides which account every launch bills, and both of
+      # its failure directions are silent: a parse error above the pools EMPTIES
+      # them (the ranked pick then widens to every profile), and a run-time error
+      # makes every launch refuse. The rows assert that an edit changes exactly
+      # what was asked, that a refusal leaves the file byte-for-byte alone, and
+      # that a file the editor cannot handle safely never comes back as "done".
+      - name: Run the tenants file editor state table
+        run: ./scripts/test-claude-tenants-edit.sh
+
   tenant-route-test:
     name: Tenant Router State Table
     runs-on: ubuntu-latest

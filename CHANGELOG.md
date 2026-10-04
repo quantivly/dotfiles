@@ -173,6 +173,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-tenants-edit`: a validated, atomic editor for the account pools (DO-795).**
+  It replaces hand-editing the tenants file, the riskiest step of adding a seat. A parse error above
+  the pools empties them, and the ranked pick then widens to every profile; a run-time error makes
+  every launch refuse. It has three commands: `pool-add`, `pool-remove`, and `retire-name`, which
+  records a name in a new `CLAUDE_TENANT_RETIRED` table so it is never reused. Each command:
+  - checks the request against the table as a launch reads it;
+  - edits a copy, then requires that copy to parse, to load cleanly in a bare `zsh -f` with every
+    table declared and any stderr a fault, and to pass `machines-render --check`;
+  - compares every table, and writes only if the difference is exactly the requested change;
+  - keeps a backup, then renames the copy over the symlink's target, never over the symlink.
+
+  It refuses to empty any pool. Even an unreferenced one matters, because a launch pinned to that
+  tenant widens an empty pool to every profile (DO-804 fixes that in the picker itself).
+
+  `--dry-run` prints the diff. `--commit` is all or nothing:
+  - it commits the tenants file alone, and never pushes;
+  - it refuses beforehand if the file has a hand edit, is untracked or ignored, or the repo is
+    locked;
+  - if a hook rejects the commit, it unstages the change and rolls it back.
+
+  Any layout it does not edit (two tenants on a line, single quotes, the subscript form) is refused
+  with "edit it by hand". `CLAUDE_TENANT_RETIRED` is pre-declared by every reader of the file.
+
 - **`claude-doctor` reports every pool member's plugin MCP sign-ins, not just the running
   session's (DO-794).** mcpOAuth is stored per config dir, and section 2 reads only the file of the
   session the doctor runs in. So a seat nobody had opened a session on showed nothing. The Pools
