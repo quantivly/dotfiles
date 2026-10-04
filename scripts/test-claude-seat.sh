@@ -751,6 +751,11 @@ want_err "...naming CONSOLE_SEATS"                 "CONSOLE_SEATS in"
 new_home i5; run retire quantivly-4
 check "a seat another machine bills is refused"    "$RC" "1"
 want_err "...naming the ownership table"           "CLAUDE_TENANT_MACHINE_OWNED"
+new_home i5b "$R5
+CLAUDE_TENANT_MACHINE_ID+=( quantivly-5 box )"; retire_fixture
+run retire quantivly-5
+check "a seat the machine-id table alone names is refused" "$RC" "1"
+want_err "...naming it"                                    "CLAUDE_TENANT_MACHINE_ID"
 new_home i6 "$R5
 typeset -gA CLAUDE_TENANT_OVERFLOW
 CLAUDE_TENANT_OVERFLOW=( personal \"quantivly-5\" )"; retire_fixture
@@ -787,6 +792,20 @@ rm -rf "$FHOME/procfix/201"
 run retire quantivly-5
 check "once it has moved, running again retires it" "$RC" "0"
 check "...tombstoned"                              "$([[ -d "$FHOME/.local/state/claude-account-dirs/quantivly-5.retired-$TODAY" ]] && echo yes)" "yes"
+
+# An atomic write replaced the account dir's link with a real file: the dir decides.
+new_home i8b "$R5"; retire_fixture
+rm -f "$FHOME/.local/state/claude-account-dirs/quantivly-5/.credentials.json"
+cp "$FHOME/.clauth/profiles/quantivly-5/credentials.json" "$FHOME/.local/state/claude-account-dirs/quantivly-5/.credentials.json"
+mk_proc 207 "$FHOME/.local/state/claude-account-dirs/quantivly-5"
+run retire quantivly-5
+check "a session whose credential is a real file in the seat's dir holds it" "$RC" "3"
+
+# The move goes to ANOTHER member, wherever the seat sits in the pool line.
+new_home i8c "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-5 quantivly-1 quantivly-3\"}"
+retire_fixture; mk_proc 208 "$FHOME/.local/state/claude-account-dirs/quantivly-5"
+run retire quantivly-5
+want_out "a session is moved to another member, not to the seat itself" "claude-as quantivly-1 --resume"
 
 new_home i9 "$R5"; retire_fixture
 mkdir -p "$FHOME/.clauth/profiles/quantivly-5/runtime-202-0"
@@ -863,7 +882,7 @@ check "a seat whose profile is already deleted is still retired" "$RC" "0"
 no_out "...without asking for clauth delete"                     "clauth delete quantivly-5"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=278
+EXPECTED_ROWS=282
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
