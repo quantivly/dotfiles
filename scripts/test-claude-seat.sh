@@ -70,6 +70,11 @@ cat > "$STUBS/claude" <<'STUB'
 # seat's oauthAccount, as configured by the row. By default it is the account the
 # login recorded, as Claude Code derives it from the credential.
 printf 'claude %s\n' "$*" >> "$STUB_LOG"
+# Never a config dir outside the fixture: this box's own is a LIVE account dir.
+if [[ -z "${CLAUDE_CONFIG_DIR:-}" || "$CLAUDE_CONFIG_DIR" != "$HOME"/* ]]; then
+  echo "stub claude: CLAUDE_CONFIG_DIR '${CLAUDE_CONFIG_DIR:-}' is not inside the fixture HOME" >&2
+  exit 97
+fi
 write() {
   local cj="$CLAUDE_CONFIG_DIR/.claude.json" own
   own="$(jq -r . "$HOME/.clauth/profiles/${CLAUDE_CONFIG_DIR##*/}/account_id.json" 2>/dev/null)"
@@ -221,7 +226,7 @@ gitf() { GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 git "$@"; }
 # OUT / ERR / RC as globals. stdin is /dev/null: never a terminal, so the
 # first-launch question is never answered by accident.
 run() {
-    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME \
+    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME -u CLAUDE_CONFIG_DIR \
                HOME="$FHOME" STUB_LOG="$STUB_LOG" \
                GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
@@ -234,7 +239,7 @@ run() {
 run_tty() {
     local cmd="zsh '$SUT'" a
     for a in "$@"; do cmd+=" '$a'"; done
-    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME \
+    OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME -u CLAUDE_CONFIG_DIR \
                HOME="$FHOME" STUB_LOG="$STUB_LOG" \
                GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
@@ -557,6 +562,10 @@ no_out   "...not one it is signed in to already"   "plugin:Notion:notion:"
 no_out   "...nor a disabled plugin's"              "plugin:linear:linear"
 no_log   "...and signs in to nothing"              "mcp login"
 
+new_home h4b; mcp_fixture; mcp_entry quantivly-3 plugin:linear:linear fossil
+run mcp --dry-run quantivly-3
+no_out "a damaged entry of a disabled plugin is not re-authorised" "plugin:linear:linear"
+
 new_home h5; mcp_fixture
 run mcp quantivly-3
 check "a seat is signed in to what its pool uses" "$RC" "0"
@@ -573,7 +582,7 @@ new_home h6; mcp_fixture; mcp_entry quantivly-3 plugin:github:github fossil
 run mcp --dry-run quantivly-3
 want_out "a damaged entry of its own is re-authorised, used by a sibling or not" "plugin:github:github: its own entry is damaged"
 new_home h6b; mcp_fixture; mcp_entry quantivly-3 plugin:Notion:notion discovery -old
-mcp_entry quantivly-1 plugin:figma:figma discovery
+mcp_entry quantivly-1 plugin:figma:figma discovery; mcp_entry quantivly-3 plugin:figma:figma discovery
 run mcp --dry-run quantivly-3
 no_out   "a discovery record is not damage"                 "plugin:figma:figma"
 no_out   "...nor does it hide a good entry beside it"       "plugin:Notion:notion:"
@@ -628,13 +637,19 @@ run mcp --dry-run quantivly-3
 want_out "a seat in two pools needs what either pool uses" "plugin:asana:asana: 'personal-0' is signed in to it"
 want_out "...and the other pool's too"                    "plugin:slack:slack: 'quantivly-1'"
 
+new_home h16 "${BASE/quantivly \"quantivly-1 quantivly-3\"/quantivly \"quantivly-1 quantivly-3 quantivly-7\"}"
+mcp_fixture
+run mcp --dry-run quantivly-3
+check "a pool member with no profile is skipped, not read" "$RC" "0"
+want_out "...and the others still count"                   "plugin:slack:slack: 'quantivly-1'"
+
 new_home h15; mcp_fixture; settings_off linear@claude-plugins-official slack@claude-plugins-official
 run mcp --dry-run quantivly-3
 check "with Slack disabled too, nothing is left to do" "$RC" "0"
 want_out "...and it says so"                           "nothing to do"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=191
+EXPECTED_ROWS=194
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
