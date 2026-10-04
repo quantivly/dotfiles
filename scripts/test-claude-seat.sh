@@ -584,6 +584,7 @@ want_out "a damaged entry of its own is re-authorised, used by a sibling or not"
 new_home h6b; mcp_fixture; mcp_entry quantivly-3 plugin:Notion:notion discovery -old
 mcp_entry quantivly-1 plugin:figma:figma discovery; mcp_entry quantivly-3 plugin:figma:figma discovery
 run mcp --dry-run quantivly-3
+check    "a seat with discovery records still dry-runs"     "$RC" "0"
 no_out   "a discovery record is not damage"                 "plugin:figma:figma"
 no_out   "...nor does it hide a good entry beside it"       "plugin:Notion:notion:"
 
@@ -649,7 +650,7 @@ check "with Slack disabled too, nothing is left to do" "$RC" "0"
 want_out "...and it says so"                           "nothing to do"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=194
+EXPECTED_ROWS=195
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
