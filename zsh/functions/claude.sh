@@ -452,6 +452,34 @@ _claude_mcp_log_root() { print -r -- "$HOME/.cache/claude-cli-nodejs"; }
 # every other suite here stubs clauth, herdr and systemctl.
 _claude_proc_root() { print -r -- "${CLAUDE_DOCTOR_PROC_ROOT:-/proc}"; }
 
+# Every live Claude process, as "pid<TAB>config dir" lines. The dir is empty for a
+# process that sets no CLAUDE_CONFIG_DIR, so it holds the global file, and "?"
+# when its environment cannot be read (or it exited between the two reads):
+# "cannot tell" is not "shares the global file". Shared by the doctor's
+# concurrency section and `claude-seat retire` (DO-798).
+#
+# Counts by /proc comm, because Claude Code teammates exec the VERSIONED binary
+# and so appear as "2.1.259" rather than "claude" — the same blind spot that made
+# `herdr agent list` report 14 while 33 processes ran. Reads ONE variable and
+# prints a PATH, never a value: a process environment is full of tokens and this
+# output lands in transcripts (CLAUDE.md, "Keeping secrets out of transcripts").
+_claude_proc_config_dirs() {
+  local p comm envblob cfgdir procroot
+  procroot="$(_claude_proc_root)"
+  for p in $procroot/[0-9]*(N); do
+    [[ -r "$p/comm" ]] || continue
+    comm="$(<"$p/comm")" 2>/dev/null
+    case "$comm" in claude|2.[0-9]*) ;; *) continue ;; esac
+    envblob="$(tr '\0' '\n' < "$p/environ" 2>/dev/null)"
+    if [[ -z "$envblob" ]]; then
+      print -r -- "${p:t}"$'\t'"?"
+      continue
+    fi
+    cfgdir="$(print -r -- "$envblob" | grep -m1 '^CLAUDE_CONFIG_DIR=')"
+    print -r -- "${p:t}"$'\t'"${cfgdir#CLAUDE_CONFIG_DIR=}"
+  done
+}
+
 # Epoch milliseconds, to compare against the expiresAt fields, which are ms.
 _claude_now_ms() { print -r -- $(( $(date +%s) * 1000 )); }
 
@@ -1270,7 +1298,7 @@ claude-doctor() {
   local root d srv ok_n fail_n unauth_n invalid_n key empty_tok no_refresh
   local i comm svc a b
   local gcred gcred_id link_target session_owner global_owner has_meta gsettings val
-  local unknown_n cfgdir credpath ldir grp envblob n label procroot
+  local unknown_n cfgdir credpath ldir grp envblob n label procroot row
   local uc_max uc_age uc_oldest uc_oldest_p uc_seen uc_stale uc_missing ucf
   local pname
   # The quarantine block in §3. Declared HERE with everything else: zsh has no
@@ -2015,31 +2043,22 @@ claude-doctor() {
   # unfixable condition reported as ✗ is how gh-doctor came to exit 1 on every run
   # (docs/GH_ACCOUNT_ROUTING.md).
   #
-  # Counts by /proc comm, because Claude Code teammates exec the VERSIONED
-  # binary and so appear as "2.1.259" rather than "claude" — the same blind spot
-  # that made `herdr agent list` report 14 while 33 processes ran.
+  # Which processes, and the config dir each one holds: _claude_proc_config_dirs.
   echo
   nproc_claude=0; unknown_n=0
   group_n=(); group_label=()
-  procroot="$(_claude_proc_root)"
-  for p in $procroot/[0-9]*(N); do
-    [[ -r "$p/comm" ]] || continue
-    comm="$(<"$p/comm")" 2>/dev/null
-    case "$comm" in claude|2.[0-9]*) ;; *) continue ;; esac
+  for row in ${(f)"$(_claude_proc_config_dirs)"}; do
+    [[ -n "$row" ]] || continue
     (( nproc_claude++ ))
     # Which credential file this process holds — the only thing that decides whose
-    # logout a bad write causes. Reads ONE variable's value and reports a PATH,
-    # never a value: a process environment is full of tokens and this output lands
-    # in transcripts. See "Keeping secrets out of transcripts" in CLAUDE.md.
-    envblob="$(tr '\0' '\n' < "$p/environ" 2>/dev/null)"
-    if [[ -z "$envblob" ]]; then
+    # logout a bad write causes.
+    cfgdir="${row#*$'\t'}"
+    if [[ "$cfgdir" == "?" ]]; then
       # Unreadable, or a process that exited between the two reads. "Cannot tell"
       # is not "shares the global file" — the same rule _dotfiles_umask_guard
       # follows in system.sh when /etc/group cannot answer.
       (( unknown_n++ )); continue
     fi
-    cfgdir="$(print -r -- "$envblob" | grep -m1 '^CLAUDE_CONFIG_DIR=')"
-    cfgdir="${cfgdir#CLAUDE_CONFIG_DIR=}"
     if [[ -z "$cfgdir" ]]; then
       credpath="$gcred"; grp="the SHARED global file"
     else

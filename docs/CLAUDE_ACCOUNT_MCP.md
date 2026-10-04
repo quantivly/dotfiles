@@ -451,6 +451,43 @@ Leave `CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
 another machine will own the seat. Leave `CLAUDE_TENANT_BUCKETS` alone until the
 new seat's usage has been measured against the others.
 
+### Retiring a seat
+
+To take a seat out of service, or hand it to someone else:
+
+```bash
+scripts/claude-seat retire --plan <name>     # where the name appears, who holds it; changes nothing
+scripts/claude-seat retire <name>            # do it
+```
+
+The steps are ordered so that each is safe to repeat, and **nothing is deleted while a
+session holds the seat**:
+
+1. **Refuse** when something the command does not edit names the seat: rabota's
+   `[seats] local` or `CONSOLE_SEATS`, the machine-ownership tables, or an overflow
+   entry. It says which; edit that first.
+2. **Out of every pool**, through `claude-tenants-edit`, so no new launch lands on it.
+   The editor refuses to empty a pool.
+3. **Holders.** Every live Claude process whose credential is the seat's: a
+   `clauth start` session (printed with its `clauth switch <sid> <seat>`), a session
+   on its account dir (`/exit`, then `claude-as <seat> --resume <id>`), or one on the
+   global file while the seat is clauth's active profile. A process whose
+   environment cannot be read counts as a holder. With any holder it stops at exit 3
+   and moves nothing itself: move them, then run it again.
+4. **With none left:** `claude mcp logout` for each plugin server in its dir, the
+   account dir renamed to `<name>.retired-<date>`, and the name recorded in
+   `CLAUDE_TENANT_RETIRED` so it is never handed out again.
+
+**After it: the steps that stay manual.** The command prints them.
+
+- `clauth delete <name> -y` removes the profile and its login on this machine. It
+  revokes nothing server-side, and it is left for you because it is the step that
+  cannot be undone.
+- At claude.ai → Settings → Claude Code, revoke the seat's login.
+- Remove the seat from the Team and its Workspace alias, or hand it over.
+- Revoke its app grants at each service it was signed in to: Slack apps, Notion
+  connections, Linear authorized apps. Each seat registered its own client there.
+
 ### Moving sessions off a spent seat
 
 - **A `clauth start` session** (its config dir is

@@ -173,6 +173,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-seat retire <name>`: take a seat out of service without leaving its name
+  reusable (DO-798).** It refuses while rabota, the ownership tables or an overflow name the seat,
+  then takes it out of every pool through `claude-tenants-edit`. It stops at exit 3, moving
+  nothing, while any live Claude process holds it, and prints the move command for each. With none
+  left it logs out its plugin sign-ins, renames its account dir to `<name>.retired-<date>` and
+  records the name as retired. `--plan` lists every place the name appears. `clauth delete` and the
+  server-side revocations are printed for a person. The doctor's `/proc` scan is now a helper both
+  share.
+
 - **`scripts/claude-seat mcp <name>`: sign a seat in to its pools' plugin MCP servers from the
   shell (DO-797).** For each plugin server another member of the seat's pools is signed in to,
   and each of its own with only damaged entries, it runs `claude mcp login` in the seat's config
