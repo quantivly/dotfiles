@@ -182,6 +182,8 @@ seat() {   # $1 = profile, $2 = org type, $3 = org id ('' = no account dir)
 # (a lost write blanked the token but kept its bookkeeping). Synthetic tokens.
 mcp_entry() {   # $1 = seat, $2 = server, $3 = state, $4 = key suffix (another config hash)
     local f="$FHOME/.clauth/profiles/$1/credentials.json" e
+    # The $s and $p in these are jq's, bound by --arg below, not the shell's.
+    # shellcheck disable=SC2016
     case "$3" in
         good)      e='{serverName: $s, accessToken: ("tok-" + $p), refreshToken: "r", expiresAt: 4102444800000, scope: "s"}' ;;
         discovery) e='{serverName: $s, accessToken: ""}' ;;
