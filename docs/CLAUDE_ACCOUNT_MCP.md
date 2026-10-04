@@ -349,7 +349,10 @@ and accepting the invite by emailed link. Team has no API for any of it.
 
 **What the command does,** in this order. The pool is the last thing it touches,
 so the pool never names a seat that failed a check. Each step checks the state
-first, so a run that stopped can be run again with the same name.
+first, so a run that stopped can be run again with the same name. Run without a
+name, it refuses to propose past a seat a run left unfinished, and prints the
+command that resumes it: proposing the next number would start a second login of
+the same person.
 
 1. **Name.** It proposes the tenant's prefix with the next number nobody has used,
    or checks the one you give. A name is never reused: one that exists anywhere
@@ -362,7 +365,8 @@ first, so a run that stopped can be run again with the same name.
    to whichever claude.ai account the page is signed in to, so open the URL clauth
    prints in a browser profile signed in to claude.ai **as the new seat**.
 3. **Distinct.** The new account id must repeat no other profile's: a second login
-   to an existing seat is refused.
+   to an existing seat is refused. Every other profile's id is read before the
+   login, and one that cannot be read stops the run there.
 4. **Settings.** It copies the pool's `config.toml`. `clauth login` writes an
    all-commented template, and `clauth switch <sid> <profile>` refuses to move a
    live session between seats whose `[models]` differ. The refusal appears only in
@@ -371,12 +375,17 @@ first, so a run that stopped can be run again with the same name.
 5. **Account dir.** It runs `scripts/claude-account-dirs.sh <name>`, and checks
    that the credential is a link into the store.
 6. **Identity.** It reads the seat's account and organisation, from
-   `claude auth status`, or with `--yes` from one tiny first launch. For a pool of
-   team seats, the new one must be a team seat in the same organisation:
-   anything else is the browser's account, not the seat. `--email <addr>` also
-   checks the address.
+   `claude auth status`, or with `--yes` from one tiny first launch. Only an
+   identity naming the account id the login recorded counts: the account dir is
+   seeded from `~/.claude.json`, which names another account. The type must match
+   every pool member whose account dir names its own account, and for team seats
+   the organisation too; anything else is the browser's account, not the seat.
+   With no such member to compare against, it stops. `--email <addr>` also checks
+   the address.
 7. **Pool.** It adds the name through `scripts/claude-tenants-edit` (below) and
    commits the tenants file alone. Then it confirms with the picker's dry run.
+   Exit 3 means the seat **is** in the pool, but the picker does not list it, or
+   the editor reported a failure after its edit stood.
 
 **After it: the steps that stay manual.** The command prints them.
 
