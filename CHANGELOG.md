@@ -181,9 +181,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`CLAUDE_TENANT_SPILL`: a pool can spill to named seats once its own are spent (DO-800).** Overflow
   engages only when a pool names nothing usable, by design; spill is a pool owner's choice to borrow
-  past a wall. Its seats become candidates only when every pool member is exhausted (nothing eligible,
-  billing a spent week, or unmeasured), are then ranked normally for interactive and headless callers
-  alike, and the launch line says it spilled and names the pool's earliest reset. The table check, the
+  past a wall. Its seats become candidates only when every pool member is exhausted (a quarantined or
+  disabled one is not spent), are then ranked normally for interactive and headless callers alike, and
+  the launch line says it spilled and names the pool's earliest reset; `claude-pick --explain` and
+  `--json` say whether it engaged. The table check, the
   tenants editor, `claude-seat` and `claude-doctor` (settings parity, unusable spill seats) know it.
 
 - **`scripts/claude-seat browser <tenant>`: one browser profile per tenant (DO-799).** It opens

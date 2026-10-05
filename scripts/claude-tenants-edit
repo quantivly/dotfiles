@@ -290,7 +290,7 @@ case "$op" in
     # included (review, 2026-10-05). Removing a tenant is a hand edit.
     if (( ! ${#new_members} )); then
       if (( ${refs[(Ie)$tenant]} )); then
-        refuse "that would leave '$tenant' with no members while a route, the default or an overflow entry names it; every launch would refuse"
+        refuse "that would leave '$tenant' with no members while a route, the default, an overflow or a spill entry names it; every launch would refuse"
       fi
       refuse "that would leave '$tenant' with no members, and a launch pinned to '$tenant' would be refused; remove the tenant's line by hand if that is what you mean"
     fi

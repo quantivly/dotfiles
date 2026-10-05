@@ -131,10 +131,12 @@ a seat to get past it would bill the wrong tenant permanently for a wait of minu
 
 **Spill is that borrowing, when a pool's owner has decided it is wanted (DO-800).**
 `CLAUDE_TENANT_SPILL` names seats a tenant may use **only once every member of its pool is spent**:
-the pool pass yielded nothing eligible, nothing billing a spent week and nothing unmeasured, and at
-least one member hit a wall. Then the spill seats are ranked like any others, interactive and headless
+every member the pool pass examined hit a wall. A quarantined or disabled member is not spent, so it
+keeps the pool from spilling, as an eligible, weekly-billing or unmeasured one does. Then the spill seats are ranked like any others, interactive and headless
 callers alike take one with room instead of refusing, and the launch line says it spilled and when
-the pool's own first wall clears. A pool with room never spills, however much room a spill seat has.
+the pool's own first wall clears; `claude-pick --explain` prints a `spill:` line saying whether it
+engaged, and `--json` a `spilled` field. A pool with room never spills, however much room a spill seat
+has.
 Spill sits between the pool and overflow; overflow's meaning, the class order and a pin are unchanged.
 The table check validates spill members like pool members, and `claude-doctor` holds them to the
 pool's settings, since sessions move between the two.

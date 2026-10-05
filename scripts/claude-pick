@@ -312,6 +312,7 @@ typeset _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
 typeset _claude_pick_rw=unknown _claude_pick_age=unknown _claude_pick_tier=unknown
 typeset _claude_pick_r5_at=unknown _claude_pick_rw_at=unknown
 typeset _claude_pick_holders=0 _claude_pick_load="" _claude_pick_overflow=0
+typeset _claude_pick_spilled=0 _claude_pick_spill_reset=unknown
 typeset _claude_pick_leastbad="" _claude_pick_leastbad_reset=unknown _claude_pick_spend=unknown
 typeset _claude_pick_windows="" _claude_pick_fetched=unknown _claude_pick_spend_txt=""
 typeset _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
@@ -322,7 +323,7 @@ typeset _CLAUDE_TS_DELTA=unknown _CLAUDE_TS_ABS=unknown
 typeset -a _claude_pick_skipped=() _claude_pick_warnings=()
 typeset -a _claude_pick_explain=() _claude_pick_exhausted=()
 typeset -a _claude_pick_cands=() _claude_pick_unknowns=()
-typeset -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
+typeset -a _claude_pick_pool_members=() _claude_pick_overflow_members=() _claude_pick_spill_members=()
 typeset _claude_pick_dry_run="$dry"
 typeset _claude_pick_prog="$PROG"
 typeset REPLY=""
@@ -845,6 +846,13 @@ if (( explain )); then
     print -r -- "  pool:   ${_claude_pick_pool_members:-<every registered profile>}"
     (( ${#_claude_pick_overflow_members} )) && \
       print -r -- "  overflow: ${_claude_pick_overflow_members}"
+    if (( ${#_claude_pick_spill_members} )); then
+      if (( _claude_pick_spilled )); then
+        print -r -- "  spill:    ${_claude_pick_spill_members} (engaged: every pool member is exhausted)"
+      else
+        print -r -- "  spill:    ${_claude_pick_spill_members} (not engaged)"
+      fi
+    fi
     printf '  %-14s %-12s %5s %5s %7s %5s %9s  %s\n' \
            PROFILE CLASS 5H 7D AGE HOLD SCORE WHY
     for e in "${_claude_pick_explain[@]}"; do
@@ -904,6 +912,7 @@ if (( as_json )); then
     --arg    reason       "$_claude_pick_reason" \
     --argjson score       "$(json_num "$_claude_pick_score")" \
     --argjson overflow    "$(( _claude_pick_overflow ? 1 : 0 ))" \
+    --argjson spilled     "$(( _claude_pick_spilled ? 1 : 0 ))" \
     --argjson five_hour   "$(json_num "$_claude_pick_u5")" \
     --argjson weekly      "$(json_num "$_claude_pick_uw")" \
     --argjson cache_age   "$(json_num "$_claude_pick_age")" \
@@ -941,6 +950,7 @@ if (( as_json )); then
        reason:       (if $reason == "" then null else $reason end),
        exit_code:    $exit_code,
        overflow:     ($overflow == 1),
+       spilled:      ($spilled == 1),
        usage:        { five_hour: $five_hour, weekly: $weekly, cache_age_s: $cache_age,
                        spend: (if $spend == "" then null else $spend end) },
        resets_at:    { five_hour: $r5, weekly: $rw },

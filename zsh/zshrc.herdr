@@ -1994,7 +1994,7 @@ _claude_pick_pool() {
 # pinned oracle for "may this account be chosen".
 _claude_pick_for_dir() {
   local dir="${1:-}" tenant="${2:-}" strict="${3:-0}" force="${4:-0}"
-  local p name cls why score holders pass_name fb bp_rc=0
+  local p name cls why score holders pass_name fb bp_rc=0 pool_seen=0
   local week_spent week_spent_bad=0
   _claude_pick_week_spent || week_spent_bad=1
   week_spent=$_CLAUDE_PICK_WEEK_SPENT
@@ -2115,8 +2115,10 @@ _claude_pick_for_dir() {
   for pass_name in pool spill overflow; do
     if [[ "$pass_name" == spill ]]; then
       (( ${#_claude_pick_spill_members} )) || continue
-      (( ! ${#_claude_pick_cands} && ! ${#_claude_pick_weekly} && ! ${#_claude_pick_unknowns} \
-         && ${#_claude_pick_exhausted} )) || continue
+      # EVERY member the pool pass looked at is exhausted: a quarantined or
+      # disabled one is not spent, and must not be read as spent just because
+      # another member is (review, 2026-10-06).
+      (( pool_seen && ${#_claude_pick_exhausted} == pool_seen )) || continue
       local -a _spill_from=()
       for p in "${_claude_pick_exhausted[@]}"; do _spill_from+=( "${p%%$'\t'*}" ); done
       _claude_pick_least_bad "${_spill_from[@]}"
@@ -2135,6 +2137,7 @@ _claude_pick_for_dir() {
       if (( ${#pass_members} )); then
         (( ${pass_members[(Ie)$name]} )) || continue
       fi
+      [[ "$pass_name" == pool ]] && (( ++pool_seen ))
       cls="$(_claude_pick_class "$name")"
       if [[ "$cls" == *:* ]]; then why="${cls#*:}"; cls="${cls%%:*}"; else why=""; fi
       _claude_profile_metrics "$name" >/dev/null 2>&1
