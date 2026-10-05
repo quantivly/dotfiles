@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A launch pinned to a tenant whose pool is empty widened to every profile (DO-804).** An entry that
+  is present but empty, `( t "" )`, passed the picker's "has a pool" check, and its empty member list
+  was read as "every profile", another machine's seat included. `claude-pick --tenant t`,
+  `CLAUDE_ACCOUNT_TENANT=t` and `hspawn --tenant t` now refuse with exit 4, as for a missing entry,
+  and `claude-doctor` reports any empty pool as a ✗ naming the pinned-launch risk.
+
 - **The runbook's advice for a new account was wrong, and the procedure was missing.**
   `docs/CLAUDE_ACCOUNT_MCP.md` recommended claude.ai connectors for a fresh profile. But a
   connector authorised from `/mcp` is saved to whichever claude.ai account the browser is signed

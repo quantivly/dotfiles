@@ -1897,6 +1897,13 @@ _claude_pick_pool() {
       return 4
     fi
     _claude_pick_pool_members=( ${=CLAUDE_TENANT_POOL[$tenant]} )
+    # An entry that is present but EMPTY, `( t "" )`, is no pool either: its member
+    # list is just as empty, and the candidate loop would read it as every profile,
+    # another machine's seat included (DO-804). Refused like a missing entry.
+    if (( ! ${#_claude_pick_pool_members} )); then
+      _claude_pick_skipped+=("tenant '$tenant' has an EMPTY CLAUDE_TENANT_POOL entry — refusing to widen the pool to every account")
+      return 4
+    fi
     _claude_pick_overflow_members=( ${=CLAUDE_TENANT_OVERFLOW[$tenant]-} )
     return 0
   fi

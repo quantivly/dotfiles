@@ -928,8 +928,13 @@ _claude_doctor_pools() {
     members=( ${=line#*$'\t'} )
     valid=(); n_issue=0
     if (( ! ${#members} )); then
-      # A referenced one was reported above. This one is inert, and not a ✓.
-      (( ${refs[(Ie)$t]} )) || _doctor_note "pool '$t' is empty, and nothing routes to it"
+      # A referenced one was reported above, as making the whole table unusable.
+      # One nothing routes to is still reachable by a PIN, which the picker
+      # refuses (DO-804): a ✗, because a pinned launch was relying on it.
+      if (( ! ${refs[(Ie)$t]} )); then
+        _doctor_bad "pool '$t' is empty: a launch pinned to it (claude-pick --tenant $t, CLAUDE_ACCOUNT_TENANT=$t, hspawn --tenant $t) is refused"
+        echo "    Give it members, or remove its line from the tenants file."
+      fi
       continue
     fi
 
