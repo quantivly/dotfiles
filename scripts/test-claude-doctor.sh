@@ -3028,8 +3028,12 @@ no_out   "...and is not a ✓ over zero members" "0 members"
 new_home x5b; write_cred
 mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "" )'
 run_doctor
-want_out "an empty pool nothing routes to is a note" "pool 'w' is empty, and nothing routes to it"
+want_out "an empty pool nothing routes to is a ✗: a pinned launch is refused" \
+         "✗ pool 'w' is empty: a launch pinned to it (claude-pick --tenant w"
 no_out   "...and is not a ✓ over zero members"      "0 members"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "   " )'
+run_doctor
+want_out "...nor is one of only spaces"              "✗ pool 'w' is empty: a launch pinned to it"
 
 new_home x6; write_cred
 mk_seat a "$M1"; mk_seat zvi+b "$M1"
@@ -3628,7 +3632,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=519
+EXPECTED_ROWS=520
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

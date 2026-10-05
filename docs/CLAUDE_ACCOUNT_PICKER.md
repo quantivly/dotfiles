@@ -660,7 +660,13 @@ Traps this area has, each of which produced a **passing test** first:
   member list, and the membership test reads an empty list as "no filter" — i.e. *every* account on
   the machine, which is exactly what this layer exists to prevent. The table check catches a tenant
   named in the table; a caller-supplied one (`CLAUDE_ACCOUNT_TENANT`, `hspawn --tenant`) never passes
-  through it, so the picker **refuses** rather than falling back to a pool nobody asked for.
+  through it, so the picker **refuses** rather than falling back to a pool nobody asked for. An entry
+  that is present but **empty**, `( t "" )`, widened the same way until DO-804 (2026-10-05): the key
+  check passed and the member list was just as empty. It is refused alike, and a PINNED launch
+  (`CLAUDE_ACCOUNT_TENANT`, `hspawn --tenant`) now refuses too, where it used to fall back to the
+  shared credential, an account nobody picked; an unpinned one still falls back, loudly.
+  `claude-doctor` reports any empty pool as a ✗, routed to or not, and the table check strips
+  whitespace as the doctor does.
 - **An unusable TABLE widens it the same way, and that one shipped.** When the resolver cannot answer
   — `bad-table`, `git-error`, or an empty `CLAUDE_TENANT_DEFAULT` — the caller leaves the tenant empty
   and lands on `CLAUDE_ACCOUNT_POOL`, and an **empty** flat pool means "every registered profile".

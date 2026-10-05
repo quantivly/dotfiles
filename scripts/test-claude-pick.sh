@@ -1526,6 +1526,13 @@ new_home fd8
 mkprof a1 '{"five_hour":{"utilization":10.0}}'
 check "a tenant with no pool entry is exit 4, never a widened pool" \
       "$(pfd '' '' 'nosuchtenant' 0 | cut -d: -f1,3)" "4:bad-table"
+# Present but EMPTY is no pool either (DO-804): it was read as every profile.
+check "a tenant whose pool entry is empty is exit 4 too, never a widened pool" \
+      "$(pfd 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( t "" other a1 )' '' 't' 0 | cut -d: -f1,3)" "4:bad-table"
+check "...as is one of only spaces" \
+      "$(pfd 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( t "   " other a1 )' '' 't' 0 | cut -d: -f1,3)" "4:bad-table"
+check "...while a pool with members is unchanged" \
+      "$(pfd 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( t a1 )' '' 't' 0 | cut -d: -f1,2)" "0:a1"
 
 # --dry-run leaves the ledger alone, and the second half of the pair is what
 # makes the first mean anything: "no file" is also what a broken write produces.
@@ -3064,7 +3071,7 @@ check "...and never doubles the tenant name either" \
 # every time a row lands, which is the one thing that would make the record
 # worthless. So this suite gets a total and no prose row.
 # docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=526
+EXPECTED_ROWS=529
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

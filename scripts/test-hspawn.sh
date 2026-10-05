@@ -1484,6 +1484,12 @@ CLAUDE_TENANT_PATH_ROUTES=( "/roots/work=work" )
 CLAUDE_TENANT_DEFAULT=home
 CLAUDE_TENANT_POOL=( work "a b" home "c" )')" ""
 
+# A pool of only spaces is as empty as "" (DO-804): the doctor says so, and the
+# picker refuses a pinned launch to it; the validator agrees.
+check "a pool of only spaces that the default names is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "   " )')" "bad-table"
+
 check "a route entry with no '=' is bad-table" \
       "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "quantivly" )
 CLAUDE_TENANT_DEFAULT=home
@@ -1936,6 +1942,30 @@ check "a machine-ceiling refusal stops the spawn too" "$RC" "1"
 check "...and names the machine rather than the accounts" \
       "$(inout 'refused — fixture refusal')" "1"
 
+# A PINNED tenant the picker cannot serve (no pool, or an empty one: DO-804) is
+# refused by both callers, as claude-pick refuses it. Unpinned, the old fallback
+# to the shared credential stands, but it must name the table, not credentials.
+PICKSTUB4="$(cat <<'STUB'
+_claude_pick_for_dir() {
+    print -r -- "$1|$2|$3|$4" >> "$PICKREC"
+    REPLY=""; _claude_pick_state=bad-table; _claude_pick_skipped=( "fixture table refusal" )
+    return 4
+  };
+STUB
+)"
+run "${PICKSTUB4}hspawn --tenant t '$REPO' fixture-slug"
+check "hspawn --tenant on a tenant the picker cannot serve is refused" "$RC" "1"
+check "...naming why"                                  "$(inout 'hspawn: refused — fixture table refusal')" "1"
+check "...and creating no worktree"                    "$(incmd 'worktree create')" "0"
+run "${PICKSTUB4}hspawn '$REPO' fixture-slug"
+check "unpinned, it still falls back, naming the table" "$(inout 'the tenant table cannot answer (fixture table refusal)')" "1"
+check "...not a missing credential"                     "$(inout 'no profile has a credential')" "0"
+run "${PICKSTUB4}CLAUDE_ACCOUNT_TENANT=t claude --version"
+check "CLAUDE_ACCOUNT_TENANT on a tenant the picker cannot serve is refused" "$RC" "4"
+check "...naming why"                                  "$(inout 'claude: refused — fixture table refusal')" "1"
+run "${PICKSTUB4}claude --version"
+check "unpinned, claude() still falls back, loudly"    "$(inout 'NO usable account')" "1"
+
 # claude() is the other half of the asymmetry. It has its own fixture above
 # (the resolver rows), so the strict flag is read there.
 : > "$PICKREC"
@@ -2352,7 +2382,7 @@ rm -rf "$FHOME/.clauth/profiles/fz"
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=474
+EXPECTED_ROWS=483
 
 docs_claim() {
   local f="$DOTFILES/$1"
