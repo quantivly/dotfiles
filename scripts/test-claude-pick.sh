@@ -1333,9 +1333,12 @@ check "...naming when the pool's own first wall clears" \
       "$(pfdw "$SPILL" t1 0 | grep -c 'its earliest reset is ')" "1"
 
 new_home sp3
-mkprof a1 "$SPENT5"; mkprof s1 "$SPENT5"
+mkprof a1 "$SPENT5"
+mkprof s1 '{"five_hour":{"utilization":99.0,"resets_at":"2099-03-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
 check "with the spill seat exhausted too, a headless launch refuses as before" \
       "$(pfd "$SPILL" '' t1 1 | cut -d: -f1,3)" "2:exhausted"
+check "...and an interactive one on the least-bad POOL member says nothing about spilling" \
+      "$(pfdw "$SPILL" t1 0 | grep -c 'spilled')" "0"
 
 new_home sp4
 mkprof a1 -; mkprof s1 "$ROOMY"
@@ -1346,6 +1349,19 @@ new_home sp5
 mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'; mkprof s1 "$ROOMY"
 check "a pool that still bills a spent week does not spill" \
       "$(pfd "$SPILL" '' t1 0 | cut -d: -f2,4)" "a1:weekly-spent"
+SPILL2='CLAUDE_TENANT_POOL=( t1 "a1 a2" ); CLAUDE_TENANT_SPILL=( t1 "s1" )'
+new_home sp5b
+mkprof a1 "$SPENT5"; mkprof a2 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'; mkprof s1 "$ROOMY"
+check "...nor one where ONE member is exhausted and another bills a spent week" \
+      "$(pfd "$SPILL2" '' t1 0 | cut -d: -f2,4)" "a2:weekly-spent"
+new_home sp5c
+mkprof a1 "$SPENT5"; mkprof a2 -; mkprof s1 "$ROOMY"
+check "...nor one where ONE member is exhausted and another is unmeasured" \
+      "$(pfd "$SPILL2" '' t1 0 | cut -d: -f2,4)" "a2:unknown"
+new_home sp7
+mkprof s1 "$ROOMY"
+check "a pool that names nothing that exists does not spill: that is overflow's case" \
+      "$(pfd 'CLAUDE_TENANT_POOL=( t1 "zz" ); CLAUDE_TENANT_SPILL=( t1 "s1" )' '' t1 0 | cut -d: -f2)" ""
 
 new_home sp6
 mkprof a1 "$SPENT5"; mkprof s1 "$ROOMY"
@@ -3128,7 +3144,7 @@ check "...and never doubles the tenant name either" \
 # every time a row lands, which is the one thing that would make the record
 # worthless. So this suite gets a total and no prose row.
 # docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=539
+EXPECTED_ROWS=543
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

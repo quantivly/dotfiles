@@ -2119,10 +2119,8 @@ _claude_pick_for_dir() {
          && ${#_claude_pick_exhausted} )) || continue
       local -a _spill_from=()
       for p in "${_claude_pick_exhausted[@]}"; do _spill_from+=( "${p%%$'\t'*}" ); done
-      local _spill_reply="$REPLY"
       _claude_pick_least_bad "${_spill_from[@]}"
       _claude_pick_spill_reset="$_CLAUDE_PICK_LEASTBAD_RESET"
-      REPLY="$_spill_reply"
       pass_members=( "${_claude_pick_spill_members[@]}" )
       _claude_pick_spilled=1
     elif [[ "$pass_name" == overflow ]]; then
