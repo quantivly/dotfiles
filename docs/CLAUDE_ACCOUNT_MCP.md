@@ -451,6 +451,49 @@ Leave `CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
 another machine will own the seat. Leave `CLAUDE_TENANT_BUCKETS` alone until the
 new seat's usage has been measured against the others.
 
+### Retiring a seat
+
+To take a seat out of service, or hand it to someone else:
+
+```bash
+scripts/claude-seat retire --plan <name>     # where the name appears, who holds it; changes nothing
+scripts/claude-seat retire <name>            # do it
+```
+
+`--plan` exits with the code the real run would stop at. The steps are ordered so
+that each is safe to repeat, and **nothing is deleted while a session may hold the
+seat**:
+
+1. **Refuse** when something the command does not edit names the seat: rabota's
+   `[seats] local` or `CONSOLE_SEATS`, the machine-ownership tables, or an overflow
+   entry. It says which; edit that first. Every pool edit is also checked before
+   any is made, so a pool it cannot leave stops it before the first edit.
+2. **Out of every pool**, through `claude-tenants-edit`, so no new launch lands on it.
+3. **Holders, read after the pool edit and again before each step that cannot be
+   redone.** Every signal about a live Claude process is weighed, and any one that
+   names the seat makes it a holder: its config dir is the seat's account dir or
+   one of its runtime dirs; clauth's live-session row for that very process says it
+   is on the seat; its credential links into the seat's store (even one `clauth
+   delete` removed) or is a copy of it; or it reads the global file while that is
+   the seat. A signal that cannot be read counts as a holder too; only definite
+   evidence of another seat clears a process. With any holder it stops at exit 3,
+   prints the move for each (`clauth switch <sid> <seat>`, or `/exit` then
+   `claude-as <seat> --resume <id>`), and moves nothing itself.
+4. **With none left:** the name is recorded in `CLAUDE_TENANT_RETIRED` first, so it
+   is never handed out again. Then `claude mcp logout` runs for each plugin server
+   in its dir, the account-dir builder folds the logged-out file back into the
+   store, and the account dir is renamed to `<name>.retired-<date>`.
+
+**After it: the steps that stay manual.** The command prints them.
+
+- `clauth delete <name> -y` removes the profile and its login on this machine. It
+  revokes nothing server-side, and it is left for you because it is the step that
+  cannot be undone.
+- At claude.ai → Settings → Claude Code, revoke the seat's login.
+- Remove the seat from the Team and its Workspace alias, or hand it over.
+- Revoke its app grants at each service it was signed in to: Slack apps, Notion
+  connections, Linear authorized apps. Each seat registered its own client there.
+
 ### Moving sessions off a spent seat
 
 - **A `clauth start` session** (its config dir is
