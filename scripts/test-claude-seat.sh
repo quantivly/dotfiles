@@ -179,7 +179,13 @@ STUB
 cat > "$STUBS/browser" <<'STUB'
 #!/usr/bin/env bash
 printf 'browser %s\n' "$*" >> "$STUB_LOG"
+if [[ -n "${STUB_BROWSER_RC:-}" ]]; then echo "Missing X server or \$DISPLAY" >&2; exit "$STUB_BROWSER_RC"; fi
+# Stays up, like a browser on a profile of its own.
+[[ "${STUB_BROWSER_STAYS:-0}" == 1 ]] && sleep 3
+exit 0
 STUB
+# A wrapper that execs a snap, as Ubuntu's firefox does.
+printf '#!/bin/sh\n# transitional package\nexec /snap/bin/firefox "$@"\n' > "$STUBS/snapfirefox"
 cp "$STUBS/browser" "$STUBS/firefox"
 mkdir -p "$STUBS/browserbin"
 for b in google-chrome google-chrome-stable chromium chromium-browser firefox; do
@@ -288,6 +294,7 @@ run() {
                HOME="$FHOME" STUB_LOG="$STUB_LOG" \
                CLAUDE_DOCTOR_PROC_ROOT="$FHOME/procfix" CLAUDE_SEAT_RABOTA_BUDGET="$FHOME/budget.py" \
                CLAUDE_SEAT_BROWSER="${SEAT_BROWSER-$STUBS/browser}" PATH="$STUBS/browserbin:$PATH" \
+               CLAUDE_SEAT_BROWSER_WAIT=0.4 \
                GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
                CLAUDE_SEAT_ACCOUNT_DIRS="$STUBS/account-dirs" CLAUDE_SEAT_PICK="$STUBS/pick" \
@@ -303,6 +310,7 @@ run_tty() {
                HOME="$FHOME" STUB_LOG="$STUB_LOG" \
                CLAUDE_DOCTOR_PROC_ROOT="$FHOME/procfix" CLAUDE_SEAT_RABOTA_BUDGET="$FHOME/budget.py" \
                CLAUDE_SEAT_BROWSER="${SEAT_BROWSER-$STUBS/browser}" PATH="$STUBS/browserbin:$PATH" \
+               CLAUDE_SEAT_BROWSER_WAIT=0.4 \
                GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
                CLAUDE_SEAT_ACCOUNT_DIRS="$STUBS/account-dirs" CLAUDE_SEAT_PICK="$STUBS/pick" \
@@ -430,7 +438,7 @@ check "...in a commit of the tenants file"      "$(gitf -C "$FHOME/repo" log -1 
 want_out "...the picker sees it"                "the picker sees 'quantivly-5'"
 want_out "...and what is left is listed"        "claude-as quantivly-5, then /mcp"
 want_out "...starting with the mcp step"        "claude-seat mcp quantivly-5 signs it in"
-want_out "...and the login names the tenant's browser profile" "claude-seat browser quantivly"
+want_out "...and the login names the tenant's browser profile, before it" "run 'claude-seat browser quantivly', sign in as the seat there"
 no_log   "...with no first launch needed"       "claude -p"
 
 new_home d2; STUB_OTYPE=claude_max run add personal
@@ -1226,7 +1234,7 @@ run browser;                          check "browser with no tenant is a usage e
 run browser quantivly personal;       check "browser takes one tenant"                   "$RC" "64"
 run browser --yes quantivly;          check "--yes is not a browser option"              "$RC" "64"
 run browser ..;                       check "a tenant that is not a directory name is refused" "$RC" "1"
-want_err "...for its name, before the tenants file is asked" "must start with a letter or digit"
+want_err "...for its name, before the tenants file is asked" "must not start with a dot"
 
 new_home j2; run browser nosuch
 check "a tenant the tenants file does not declare is refused" "$RC" "1"
@@ -1273,13 +1281,45 @@ new_home j8; SEAT_BROWSER="" run browser quantivly
 check "with no CLAUDE_SEAT_BROWSER it finds one on PATH" "$RC" "0"
 wait_log "...Chrome first"                               "shim google-chrome --user-data-dir="
 
+new_home j10; STUB_BROWSER_RC=1 run browser quantivly
+check "a browser that dies at once is exit 2, not 'opened'" "$RC" "2"
+want_err "...with what it said"                             "Missing X server"
+new_home j10b; STUB_BROWSER_STAYS=1 run browser quantivly
+check "one still running after the wait is opened"          "$RC" "0"
+want_out "...on its own profile"                            "opened browser on its own profile"
+new_home j10c; run browser quantivly
+want_out "one that exits 0 at once handed the window on"    "handed to browser, already running on this profile"
+new_home j11; mkdir -p "$FHOME/adir"; SEAT_BROWSER="$FHOME/adir" run browser quantivly
+check "a directory is not a browser"                        "$RC" "2"
+new_home j12; SEAT_BROWSER="$STUBS/snapfirefox" run browser quantivly
+check "a snap browser is refused"                           "$RC" "2"
+want_err "...as unable to use the profile"                  "is a snap browser"
+new_home j13; mkdir -p "$FHOME/.local/state/claude-seat/browser/personal"
+ln -s "$FHOME/.local/state/claude-seat/browser/personal" "$FHOME/.local/state/claude-seat/browser/quantivly"
+run browser quantivly
+check "a profile dir that is a symlink is refused"          "$RC" "2"
+want_err "...as not its own"                                "a tenant's profile must be its own directory"
+sleep 0.5; no_log "...and nothing is opened"                "browser"
+new_home j13b; mkdir -p "$FHOME/elsewhere" "$FHOME/.local/state/claude-seat"
+ln -s "$FHOME/elsewhere" "$FHOME/.local/state/claude-seat/browser"
+run browser quantivly
+check "...as is a browser dir that is a symlink"            "$RC" "2"
+new_home j14; mkdir -p "$FHOME/.local/state/claude-seat/browser/quantivly"; chmod 755 "$FHOME/.local/state/claude-seat/browser/quantivly"
+run browser quantivly
+check "an existing profile left open is made private"       "$(stat -c %a "$FHOME/.local/state/claude-seat/browser/quantivly")" "700"
+new_home j15; CLAUDE_SEAT_STATE="rel/state" run browser quantivly
+check "a relative CLAUDE_SEAT_STATE is refused"             "$RC" "2"
+new_home j16 "$BASE
+CLAUDE_TENANT_POOL+=( _lab \"personal-0\" )"; run browser --dry-run _lab
+check "a tenant add accepts is one browser accepts"         "$RC" "0"
+
 new_home j9; : > "$FHOME/notadir"
 CLAUDE_SEAT_STATE="$FHOME/notadir" run browser quantivly
 check "a profile dir that cannot be made is exit 2"     "$RC" "2"
 sleep 0.5; no_log "...and nothing is opened"            "browser"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=377
+EXPECTED_ROWS=392
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

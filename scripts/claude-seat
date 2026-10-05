@@ -73,9 +73,10 @@
 #       could not be read · 3 it may still be in use, so nothing that cannot be
 #       redone was done; move its sessions and run it again · 64 usage. A --plan
 #       exits with the code the real run would stop at.
-# Exit (browser): 0 opened (or the dry run printed) · 1 refused: the tenants file
-#       does not declare the tenant · 2 no browser to open, or its profile dir
-#       could not be made · 64 usage.
+# Exit (browser): 0 opened (or the dry run printed) · 1 refused: the tenant's name
+#       is not a directory name, or the tenants file does not declare it · 2 no
+#       browser to open (or only a snap one), the profile dir is not safe or could
+#       not be made, the launch failed, or an input could not be read · 64 usage.
 
 emulate -R zsh
 setopt no_unset pipe_fail extended_glob
@@ -217,9 +218,9 @@ if [[ "$cmd" == add ]]; then
 elif [[ "$cmd" == browser ]]; then
   (( ${#pos} == 1 )) || usage
   tenant="${pos[1]}" name="" trailer=""
-  # It becomes a directory name.
-  [[ "$tenant" == [A-Za-z0-9]* && -z "${tenant//[A-Za-z0-9_.-]/}" ]] || \
-    refuse "tenant '$tenant' may only contain letters, digits, - _ and ., and must start with a letter or digit"
+  # It becomes a directory name: add's rule, and not `.` or `..`.
+  [[ "$tenant" == [A-Za-z0-9_]* && -z "${tenant//[A-Za-z0-9_.-]/}" ]] || \
+    refuse "tenant '$tenant' may only contain letters, digits, - _ and ., and must not start with a dot"
 else
   (( ${#pos} == 1 )) || usage
   tenant="" name="${pos[1]}" trailer=""
@@ -786,21 +787,36 @@ seat_retire() {
 # as one seat at a time, then out again. The connector list and the Google
 # account come from the tenants file, never from this repo.
 seat_browser() {
-  local dir="$SEAT_STATE/browser/$tenant" b url="https://claude.ai/login"
+  local dir="$SEAT_STATE/browser/$tenant" b url="https://claude.ai/login" d brc
+  local launch="$SEAT_STATE/browser/.launch-$tenant"
   local -a args
   (( ${+pool[$tenant]} )) || \
     refuse "the tenants file declares no tenant '$tenant', so there is no profile to open for it"
+  [[ "$SEAT_STATE" == /* ]] || fail "CLAUDE_SEAT_STATE must be an absolute path, not '$SEAT_STATE'"
   if [[ -n "${CLAUDE_SEAT_BROWSER-}" ]]; then
     b="$CLAUDE_SEAT_BROWSER"
-    [[ -x "$b" ]] || b="$(whence -p -- "$b" 2>/dev/null)"
+    [[ -f "$b" && -x "$b" ]] || b="$(whence -p -- "$b" 2>/dev/null)"
   else
     for b in google-chrome google-chrome-stable chromium chromium-browser ""; do
       [[ -n "$b" ]] || break
       b="$(whence -p -- "$b" 2>/dev/null)" && [[ -n "$b" ]] && break
     done
   fi
-  [[ -n "$b" && -x "$b" ]] || \
+  [[ -n "$b" && -f "$b" && -x "$b" ]] || \
     fail "no browser to open: install Chrome or Chromium, or set CLAUDE_SEAT_BROWSER"
+  # A snap browser cannot reach a profile under a dot-directory, and fails or falls
+  # back to its own DEFAULT profile, the main account. Ubuntu's firefox, chromium
+  # and chromium-browser are snaps, or small wrappers that exec one.
+  if [[ "${b:A}" == /snap/* ]] || \
+     { [[ $(command stat -Lc %s -- "$b" 2>/dev/null || print 0) -lt 16384 ]] && command grep -q '/snap/' -- "$b" 2>/dev/null; }; then
+    fail "${b:t} is a snap browser, which cannot use a profile under ${SEAT_STATE/#$HOME/~}; install the deb, or set CLAUDE_SEAT_BROWSER"
+  fi
+  # A profile must be this tenant's own: a symlink at any level could point it at
+  # another tenant's cookies, which is the very leak the profile exists to stop.
+  for d in "$SEAT_STATE" "$SEAT_STATE/browser" "$dir"; do
+    [[ ! -L "$d" ]] || fail "${d/#$HOME/~} is a symlink; a tenant's profile must be its own directory"
+    [[ ! -e "$d" || ( -d "$d" && -O "$d" ) ]] || fail "${d/#$HOME/~} is not a directory owned by you"
+  done
   # A Chromium profile is a --user-data-dir; a Firefox one, -profile with
   # -no-remote, so it does not hand the URL to a running Firefox. (A snap Firefox
   # cannot reach a profile under a dot-directory.)
@@ -817,8 +833,22 @@ seat_browser() {
     if [[ ! -d "$dir" ]]; then
       ( umask 077 && command mkdir -p -- "$dir" ) || fail "could not make ${dir/#$HOME/~}"
     fi
-    "$b" "${args[@]}" </dev/null >/dev/null 2>&1 &!
-    say "  opened ${b:t} on its own profile"
+    # Private even when an earlier hand left it open.
+    command chmod 700 -- "$dir" || fail "could not make ${dir/#$HOME/~} private"
+    # Watched for a moment: a browser that dies at once (no display, a crash) is a
+    # failure, not "opened". One that exits 0 at once handed the window to a
+    # browser already running on that profile.
+    ( umask 077 && command mkdir -p -- "$launch" ) || fail "could not make ${launch/#$HOME/~}"
+    : > "$launch/err"; command rm -f -- "$launch/rc"
+    ( "$b" "${args[@]}" </dev/null >/dev/null 2>"$launch/err"; print -r -- $? > "$launch/rc" ) &!
+    sleep "${CLAUDE_SEAT_BROWSER_WAIT:-1.5}"
+    if [[ -s "$launch/rc" ]]; then
+      brc="$(<"$launch/rc")"
+      (( brc == 0 )) || fail "${b:t} exited $brc at once: $(tail_redacted "$(<"$launch/err")")"
+      say "  handed to ${b:t}, already running on this profile"
+    else
+      say "  opened ${b:t} on its own profile"
+    fi
   fi
   say ""
   say "In that window, for each seat of '$tenant':"
@@ -974,7 +1004,8 @@ else
   say "  Sign in AS THE NEW SEAT, not your main account. clauth opens a browser and also"
   say "  prints the URL: open it in the browser profile signed in to claude.ai as the"
   say "  new seat. The grant goes to whichever claude.ai account that page is signed in to."
-  say "  The tenant's own profile is one command away: $prog browser $tenant"
+  say "  Not signed in as the seat in the tenant's own profile yet? Stop here (Ctrl-C),"
+  say "  run '$prog browser $tenant', sign in as the seat there, and run this again."
   "$CLAUTH" login "$name" || fail "'clauth login $name' failed"
   [[ -e "$store" || -L "$store" ]] || fail "'clauth login $name' finished, but $store does not exist"
 fi
