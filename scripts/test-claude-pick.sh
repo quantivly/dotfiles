@@ -1297,6 +1297,87 @@ check "a weekly-spent POOL member is used rather than borrowing from overflow" \
       "$(pfd 'CLAUDE_TENANT_POOL=( t1 "b2" ); CLAUDE_TENANT_OVERFLOW=( t1 "a1" )' '' t1 0 | cut -d: -f2,4)" \
       "b2:weekly-spent"
 
+# --- SPILL (DO-800): a tenant's own fallback seat, used ONLY once its pool is spent.
+# Overflow (above) is never that: it engages only when the pool named nothing that
+# exists. Spill is the owner's decision to borrow past a wall.
+pfdw() {   # like pfd, but prints the picker's warnings, one per line
+    zsh -f -c "
+      unset CLAUDE_CONFIG_DIR HERDR_PANE_ID CLAUDE_ACCOUNT_PROFILE CLAUDE_ACCOUNT_TENANT
+      export HOME='$FHOME'
+      export TZ='$FIXTZ'
+      CLAUDE_ACCOUNT_DIRS_ROOT='$FHOME/.local/state/claude-account-dirs'
+      CLAUDE_TENANTS_FILE=/nonexistent
+      source '$HERDRRC' >/dev/null 2>&1
+      ${1:-}
+      _claude_pick_for_dir '' '${2:-}' '${3:-0}' 0
+      print -rl -- \"\${_claude_pick_warnings[@]}\"" 2>/dev/null
+}
+SPILL='CLAUDE_TENANT_POOL=( t1 "a1" ); CLAUDE_TENANT_SPILL=( t1 "s1" )'
+SPENT5='{"five_hour":{"utilization":99.0,"resets_at":"2099-02-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
+ROOMY='{"five_hour":{"utilization":0.0},"seven_day":{"utilization":0.0}}'
+
+new_home sp1
+mkprof a1 '{"five_hour":{"utilization":60.0},"seven_day":{"utilization":60.0}}'; mkprof s1 "$ROOMY"
+check "with its pool not spent, a spill seat is never chosen, however much room it has" \
+      "$(pfd "$SPILL" '' t1 0 | cut -d: -f1,2)" "0:a1"
+
+new_home sp2
+mkprof a1 "$SPENT5"; mkprof s1 "$ROOMY"
+check "with every pool member exhausted, an interactive launch spills" \
+      "$(pfd "$SPILL" '' t1 0 | cut -d: -f1,2,4)" "0:s1:eligible"
+check "...and so does a headless one, instead of refusing" \
+      "$(pfd "$SPILL" '' t1 1 | cut -d: -f1,2)" "0:s1"
+check "...and the launch line says it spilled" \
+      "$(pfdw "$SPILL" t1 0 | grep -c "spilled to 's1': every member of")" "1"
+check "...naming when the pool's own first wall clears" \
+      "$(pfdw "$SPILL" t1 0 | grep -c 'its earliest reset is ')" "1"
+
+new_home sp3
+mkprof a1 "$SPENT5"
+mkprof s1 '{"five_hour":{"utilization":99.0,"resets_at":"2099-03-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
+check "with the spill seat exhausted too, a headless launch refuses as before" \
+      "$(pfd "$SPILL" '' t1 1 | cut -d: -f1,3)" "2:exhausted"
+check "...and an interactive one on the least-bad POOL member says nothing about spilling" \
+      "$(pfdw "$SPILL" t1 0 | grep -c 'spilled')" "0"
+
+new_home sp4
+mkprof a1 -; mkprof s1 "$ROOMY"
+check "an unmeasured pool does not spill" \
+      "$(pfd "$SPILL" '' t1 0 | cut -d: -f2,4)" "a1:unknown"
+
+new_home sp5
+mkprof a1 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'; mkprof s1 "$ROOMY"
+check "a pool that still bills a spent week does not spill" \
+      "$(pfd "$SPILL" '' t1 0 | cut -d: -f2,4)" "a1:weekly-spent"
+SPILL2='CLAUDE_TENANT_POOL=( t1 "a1 a2" ); CLAUDE_TENANT_SPILL=( t1 "s1" )'
+new_home sp5b
+mkprof a1 "$SPENT5"; mkprof a2 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":100.0}}'; mkprof s1 "$ROOMY"
+check "...nor one where ONE member is exhausted and another bills a spent week" \
+      "$(pfd "$SPILL2" '' t1 0 | cut -d: -f2,4)" "a2:weekly-spent"
+new_home sp5c
+mkprof a1 "$SPENT5"; mkprof a2 -; mkprof s1 "$ROOMY"
+check "...nor one where ONE member is exhausted and another is unmeasured" \
+      "$(pfd "$SPILL2" '' t1 0 | cut -d: -f2,4)" "a2:unknown"
+new_home sp7
+mkprof s1 "$ROOMY"
+check "a pool that names nothing that exists does not spill: that is overflow's case" \
+      "$(pfd 'CLAUDE_TENANT_POOL=( t1 "zz" ); CLAUDE_TENANT_SPILL=( t1 "s1" )' '' t1 0 | cut -d: -f2)" ""
+
+new_home sp6
+mkprof a1 "$SPENT5"; mkprof s1 "$ROOMY"
+check "overflow keeps its meaning: an exhausted pool never borrows from it" \
+      "$(pfd 'CLAUDE_TENANT_POOL=( t1 "a1" ); CLAUDE_TENANT_OVERFLOW=( t1 "s1" )' '' t1 1 | cut -d: -f1,3)" "2:exhausted"
+check "...and a launch that did not spill says nothing about spilling" \
+      "$(pfdw 'CLAUDE_TENANT_POOL=( t1 "a1" ); CLAUDE_TENANT_OVERFLOW=( t1 "s1" )' t1 0 | grep -c 'spilled')" "0"
+
+new_home sp8
+mkprof a1 "$SPENT5"; mkprof a2 '{"five_hour":{"utilization":5.0},"seven_day":{"utilization":5.0}}'; mkprof s1 "$ROOMY"
+printf 'auth_broken = [\n  "a2",\n]\n' > "$FHOME/.clauth/profiles.toml"
+check "a pool with one member exhausted and another QUARANTINED does not spill" \
+      "$(pfd "$SPILL2" '' t1 1 | cut -d: -f1,3)" "2:exhausted"
+check "...nor claim every member is exhausted" \
+      "$(pfdw "$SPILL2" t1 0 | grep -c 'spilled')" "0"
+
 # A 5h wall is still a 5h wall. The weekly tier must not rescue an account the
 # exhaustion class already caught, or DO-574's refusal path stops working.
 new_home fd2f
@@ -1869,6 +1950,25 @@ cli() {   # $@ = claude-pick args; sets CLI_OUT, CLI_ERR, CLI_RC
     CLI_OUT="$(cat "$TMPROOT/cli.out")"
     CLI_ERR="$(cat "$TMPROOT/cli.err")"
 }
+
+# Spill (DO-800) through the CLI: --json and --explain say whether it engaged.
+ROOMY='{"five_hour":{"utilization":0.0},"seven_day":{"utilization":0.0}}'
+new_home sp9
+mkprof a1 "$SPENT5"; mkprof s1 "$ROOMY"
+printf '%s\n' 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL' 'CLAUDE_TENANT_POOL=( t1 "a1" )' 'CLAUDE_TENANT_SPILL=( t1 "s1" )' > "$FHOME/tenants.zsh"
+CLI_ENV="CLAUDE_TENANTS_FILE=$FHOME/tenants.zsh" cli --dry-run --tenant t1 --json
+check "claude-pick --json says it spilled" "$(jq -r '.spilled' <<<"$CLI_OUT")" "true"
+CLI_ENV="CLAUDE_TENANTS_FILE=$FHOME/tenants.zsh" cli --dry-run --tenant t1 --explain
+check "...and --explain names the spill seats, engaged" \
+      "$(printf '%s' "$CLI_ERR$CLI_OUT" | grep -c 'spill:    s1 (engaged: every pool member is exhausted)')" "1"
+new_home sp9b
+mkprof a1 "$ROOMY"; mkprof s1 "$ROOMY"
+printf '%s\n' 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL' 'CLAUDE_TENANT_POOL=( t1 "a1" )' 'CLAUDE_TENANT_SPILL=( t1 "s1" )' > "$FHOME/tenants.zsh"
+CLI_ENV="CLAUDE_TENANTS_FILE=$FHOME/tenants.zsh" cli --dry-run --tenant t1 --json
+check "...and false when it did not" "$(jq -r '.spilled' <<<"$CLI_OUT")" "false"
+CLI_ENV="CLAUDE_TENANTS_FILE=$FHOME/tenants.zsh" cli --dry-run --tenant t1 --explain
+check "...and --explain says it was not engaged" \
+      "$(printf '%s' "$CLI_ERR$CLI_OUT" | grep -c 'spill:    s1 (not engaged)')" "1"
 
 new_home cli1
 mkprof a1 '{"plan":{"tier":"Team"},"five_hour":{"utilization":10.0,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":40.0}}'
@@ -3071,7 +3171,7 @@ check "...and never doubles the tenant name either" \
 # every time a row lands, which is the one thing that would make the record
 # worthless. So this suite gets a total and no prose row.
 # docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=529
+EXPECTED_ROWS=549
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '\033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

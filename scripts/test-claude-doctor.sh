@@ -2739,6 +2739,34 @@ mk_seat a "$M1"; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=
 run_doctor
 want_out "a one-member pool says there is nothing to compare" "pool 'w': 1 member, nothing to compare"
 
+# --- spill seats (DO-800) take the pool's sessions once it is spent, so they are
+# held to its settings, and one the picker cannot use is named.
+new_home w2s; write_cred
+mk_seat a "$M1"; mk_seat b '[models]
+default = "opus"'
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_SPILL=( w "b" )'
+run_doctor
+want_out "a spill seat with other settings is a ✗" \
+         "✗ pool 'w': 'b' differs from 'a' in [models].default ('opus[1m]' vs 'opus')"
+new_home w2t; write_cred
+mk_seat a "$M1"; mk_seat b "$M1"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_SPILL=( w "b" )'
+run_doctor
+want_out "...and one that agrees is counted in the ✓" \
+         "pool 'w': 1 members and 1 spill seat(s) agree on every setting a move compares"
+new_home w2u; write_cred
+mk_seat a "$M1"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_SPILL=( w "zz" )'
+run_doctor
+want_out "a spill seat the picker cannot use is a ✗" \
+         "✗ spill for 'w' names 'zz', which the picker cannot use (nostore)"
+new_home w2v; write_cred
+mk_seat a "$M1"
+mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_SPILL=( x "a" )'
+run_doctor
+want_out "a spill entry for a tenant with no pool is a ✗" \
+         "✗ tenant 'x' is named by a route, the default, an overflow or a spill entry, but its pool has no members"
+
 # --- settings parity ---------------------------------------------------------
 new_home w2; write_cred
 mk_seat a "$M1"; mk_seat b '[models]
@@ -3022,7 +3050,7 @@ new_home x5; write_cred
 mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "" ); CLAUDE_TENANT_DEFAULT=w'
 run_doctor
 want_out "a tenant the default names with an empty pool is a ✗" \
-         "✗ tenant 'w' is named by a route, the default or an overflow entry, but its pool has no members"
+         "✗ tenant 'w' is named by a route, the default, an overflow or a spill entry, but its pool has no members"
 no_out   "...and is not a ✓ over zero members" "0 members"
 
 new_home x5b; write_cred
@@ -3046,7 +3074,7 @@ new_home x6b; write_cred
 mk_seat a "$M1"
 mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_OVERFLOW=( w "c+d" )'
 run_doctor
-want_out "an overflow member with a rejected character is a ✗" "✗ overflow for 'w' names 'c+d'"
+want_out "an overflow member with a rejected character is a ✗" "✗ overflow or spill for 'w' names 'c+d'"
 
 # --- values that must never be printed, and shapes the reader must not misread ---
 new_home x7; write_cred
@@ -3632,7 +3660,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=520
+EXPECTED_ROWS=524
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

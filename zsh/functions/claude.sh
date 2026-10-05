@@ -804,9 +804,9 @@ _claude_doctor_pools() {
   local tf="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
   local adroot="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
   local pdir="$HOME/.clauth/profiles"
-  local line t m ref k v va vb kv lnk otype ouuid p id disp n_issue raw out cf cj fin=0
+  local line t m ref k v va vb kv lnk otype ouuid p id disp n_issue raw out cf cj prob fin=0
   local -a lines members valid swap_diff other_diff unknown_org no_id unread_id
-  local -a ovf refs errs bad_json unread_cfg cmp mbad missing damaged oddexp
+  local -a ovf spill vspill refs errs bad_json unread_cfg cmp mbad missing damaged oddexp
   local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j mstate munion seenk poff ignored
   local store kk m_issue st hit pseg sep=$'\x1f'
   # clauth's defaults for the keys whose ABSENCE means a value (`ProfileConfig`,
@@ -871,12 +871,13 @@ _claude_doctor_pools() {
   # line can only be its stderr. __DONE__ proves the fork finished.
   raw="$("${commands[zsh]:-zsh}" -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
     typeset -g CLAUDE_TENANT_DEFAULT=
     source "$1" >/dev/null
     for t in ${(ko)CLAUDE_TENANT_POOL}; do printf "__POOL__%s\t%s\n" "$t" "${CLAUDE_TENANT_POOL[$t]}"; done
     for t in ${(ko)CLAUDE_TENANT_OVERFLOW}; do printf "__OVF__%s\t%s\n" "$t" "${CLAUDE_TENANT_OVERFLOW[$t]}"; done
-    for t in "${(@)CLAUDE_TENANT_ROUTES#*=}" "${(@)CLAUDE_TENANT_PATH_ROUTES#*=}" "${(@k)CLAUDE_TENANT_OVERFLOW}" $CLAUDE_TENANT_DEFAULT; do
+    for t in ${(ko)CLAUDE_TENANT_SPILL}; do printf "__SPILL__%s\t%s\n" "$t" "${CLAUDE_TENANT_SPILL[$t]}"; done
+    for t in "${(@)CLAUDE_TENANT_ROUTES#*=}" "${(@)CLAUDE_TENANT_PATH_ROUTES#*=}" "${(@k)CLAUDE_TENANT_OVERFLOW}" "${(@k)CLAUDE_TENANT_SPILL}" $CLAUDE_TENANT_DEFAULT; do
       [[ -n "$t" ]] && printf "__REF__%s\n" "$t"
     done
     print -r -- __DONE__' tenants "$tf" </dev/null 2>&1)"
@@ -884,6 +885,7 @@ _claude_doctor_pools() {
     case "$line" in
       __POOL__*) lines+=( "${line#__POOL__}" ) ;;
       __OVF__*)  ovf+=( "${line#__OVF__}" ) ;;
+      __SPILL__*) spill+=( "${line#__SPILL__}" ) ;;
       __REF__*)  refs+=( "${line#__REF__}" ) ;;
       __DONE__)  fin=1 ;;
       '')        ;;
@@ -907,13 +909,13 @@ _claude_doctor_pools() {
   for line in $lines; do pool_of[${line%%$'\t'*}]="${line#*$'\t'}"; done
   for t in ${(u)refs}; do
     [[ -n "${pool_of[$t]//[[:space:]]/}" ]] && continue
-    _doctor_bad "tenant '$t' is named by a route, the default or an overflow entry, but its pool has no members"
+    _doctor_bad "tenant '$t' is named by a route, the default, an overflow or a spill entry, but its pool has no members"
     echo "    The picker refuses the whole table until it does ('the tenant table is unusable')."
   done
-  for line in $ovf; do
+  for line in $ovf $spill; do
     for m in ${=line#*$'\t'}; do
       [[ -z "${m//[A-Za-z0-9_.-]/}" ]] && continue
-      _doctor_bad "overflow for '${line%%$'\t'*}' names '$m' — a member may only contain letters, digits, - _ and ."
+      _doctor_bad "overflow or spill for '${line%%$'\t'*}' names '$m' — a member may only contain letters, digits, - _ and ."
       echo "    The picker refuses the whole table until it is fixed."
     done
   done
@@ -965,12 +967,30 @@ _claude_doctor_pools() {
       esac
       valid+=( "$m" )
     done
+    # SPILL members (DO-800) take the pool's sessions once it is spent, so they are
+    # held to its settings too. One the picker cannot use is dropped by it without
+    # a word, so it is named here.
+    vspill=()
+    for line in $spill; do
+      [[ "${line%%$'\t'*}" == "$t" ]] || continue
+      for m in ${=line#*$'\t'}; do
+        [[ -n "${m//[A-Za-z0-9_.-]/}" ]] && continue
+        (( ${valid[(Ie)$m]} || ${vspill[(Ie)$m]} )) && continue
+        prob="$(_claude_pool_member_problem "$adroot" "$pdir" "$m")"
+        if [[ -n "$prob" ]]; then
+          _doctor_bad "spill for '$t' names '$m', which the picker cannot use ($prob)"
+          (( ++n_issue ))
+        else
+          vspill+=( "$m" )
+        fi
+      done
+    done
 
     # SETTINGS PARITY against the first member whose config can be read. A config
     # that EXISTS and cannot be read is not "every key at its default": that
     # reading let two unreadable files with different [models] agree.
     cmp=(); unread_cfg=()
-    for m in $valid; do
+    for m in $valid $vspill; do
       cf="$pdir/$m/config.toml"
       if [[ -e "$cf" && ( ! -f "$cf" || ! -r "$cf" ) ]]; then unread_cfg+=( "$m" ); else cmp+=( "$m" ); fi
     done
@@ -1161,8 +1181,10 @@ _claude_doctor_pools() {
     fi
 
     if (( ! n_issue )); then
-      if (( ${#valid} == 1 )); then
+      if (( ${#valid} + ${#vspill} == 1 )); then
         _doctor_ok "pool '$t': 1 member, nothing to compare"
+      elif (( ${#vspill} )); then
+        _doctor_ok "pool '$t': ${#valid} members and ${#vspill} spill seat(s) agree on every setting a move compares"
       else
         _doctor_ok "pool '$t': ${#valid} members agree on every setting a move compares"
       fi

@@ -1490,6 +1490,19 @@ check "a pool of only spaces that the default names is bad-table" \
       "$(tenant_state 'CLAUDE_TENANT_DEFAULT=home
 CLAUDE_TENANT_POOL=( home "   " )')" "bad-table"
 
+check "a spill entry for a tenant with no pool is bad-table (DO-800)" \
+      "$(tenant_state 'CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c" )
+CLAUDE_TENANT_SPILL=( nosuch "c" )')" "bad-table"
+check "a spill member with a rejected character is bad-table" \
+      "$(tenant_state 'CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c" )
+CLAUDE_TENANT_SPILL=( home "c+d" )')" "bad-table"
+check "a well-formed spill entry validates" \
+      "$(tenant_state 'CLAUDE_TENANT_DEFAULT=home
+CLAUDE_TENANT_POOL=( home "c" )
+CLAUDE_TENANT_SPILL=( home "d" )')" ""
+
 check "a route entry with no '=' is bad-table" \
       "$(tenant_state 'CLAUDE_TENANT_ROUTES=( "quantivly" )
 CLAUDE_TENANT_DEFAULT=home
@@ -2382,7 +2395,7 @@ rm -rf "$FHOME/.clauth/profiles/fz"
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=483
+EXPECTED_ROWS=486
 
 docs_claim() {
   local f="$DOTFILES/$1"
