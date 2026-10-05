@@ -1160,6 +1160,9 @@ check "a triple-quoted rabota seat counts"                       "$RC" "1"
 new_home i56 "$R5"; retire_fixture; mk_proc 411 "$FHOME/.local/state/claude-account-dirs/quantivly-5"
 run retire --plan quantivly-5
 check "a plan for a seat in use exits 3, as the real run would stop" "$RC" "3"
+new_home i56b "$R5"; retire_fixture; mk_proc 415 -
+run retire --plan quantivly-5
+check "...as does one with a process it cannot decide about"     "$RC" "3"
 new_home i57 "$R5"; retire_fixture; printf '# a hand edit\n' >> "$REAL"
 run retire --plan quantivly-5
 check "a plan on a tenants file the editor will not commit exits 2" "$RC" "2"
@@ -1192,7 +1195,7 @@ check "a session that starts while the name is recorded stops the logout" "$RC" 
 no_log "...which is not run"                                           "mcp logout"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=343
+EXPECTED_ROWS=344
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
