@@ -308,7 +308,7 @@ _claude_tenant_table_ok() {
   for t in "${(@)${(@)CLAUDE_TENANT_ROUTES#*=}}" "${(@)${(@)CLAUDE_TENANT_PATH_ROUTES#*=}}" \
            "${(@k)CLAUDE_TENANT_OVERFLOW}" $CLAUDE_TENANT_DEFAULT; do
     [[ -n "$t" ]] || continue
-    if [[ -z "${CLAUDE_TENANT_POOL[$t]-}" ]]; then
+    if [[ -z "${${CLAUDE_TENANT_POOL[$t]-}//[[:space:]]/}" ]]; then
       _CLAUDE_TENANT_STATE=bad-table
       _CLAUDE_TENANT_WHY="tenant '$t' is named by a route, the default or an overflow entry but has no CLAUDE_TENANT_POOL entry"
       return 1
@@ -2572,6 +2572,13 @@ claude() {
         profile="$REPLY"
       elif [[ "$_claude_pick_state" == exhausted ]]; then
         return 2
+      elif [[ "$_claude_pick_state" == bad-table && -n "${CLAUDE_ACCOUNT_TENANT:-}" ]]; then
+        # A PINNED tenant the picker cannot serve, with no pool entry or an empty
+        # one (DO-804). The shared file below would bill an account nobody picked,
+        # for a launch that named the tenant it wanted: refused, like claude-pick.
+        print -u2 -- "claude: refused — ${(j:, :)_claude_pick_skipped:-tenant '$CLAUDE_ACCOUNT_TENANT' has no usable pool}"
+        print -u2 -- "        Fix the tenants file, or choose an account deliberately: claude-as <profile>"
+        return 4
       else
         profile=""
       fi
@@ -3421,6 +3428,13 @@ hspawn() {
       # says how long the wait is.
       _claude_pick_for_dir "$repo" "$tenant" 1 0
       local pick_rc=$?
+      if (( pick_rc == 4 && tenant_set )); then
+        # A PINNED tenant the picker cannot serve (DO-804): refused, as claude-pick
+        # does, rather than spawned on the shared credential nobody picked.
+        echo "hspawn: refused — ${(j:, :)_claude_pick_skipped:-tenant '$tenant' has no usable pool}" >&2
+        echo "hspawn: nothing was spawned. Fix the tenants file, or pass -p <profile>." >&2
+        return 1
+      fi
       profile="$REPLY"
       tenant="$_claude_pick_tenant"
       local _w
@@ -3441,8 +3455,13 @@ hspawn() {
         # because the caller asked for isolation by omission and is not getting
         # it, and nothing about the running pane reveals that afterwards.
         shared=1
-        echo "hspawn: clauth is installed but no profile has a credential — this spawn shares the" >&2
-        echo "        global credential (no isolation). 'clauth login <name>', or pass -p <profile>." >&2
+        if (( pick_rc == 4 )); then
+          echo "hspawn: the tenant table cannot answer (${(j:, :)_claude_pick_skipped}) — this spawn" >&2
+          echo "        shares the global credential (no isolation). Fix it, or pass -p <profile>." >&2
+        else
+          echo "hspawn: clauth is installed but no profile has a credential — this spawn shares the" >&2
+          echo "        global credential (no isolation). 'clauth login <name>', or pass -p <profile>." >&2
+        fi
       fi
     else
       shared=1

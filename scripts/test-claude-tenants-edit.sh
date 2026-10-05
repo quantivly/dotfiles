@@ -274,12 +274,12 @@ new_home e3b "$(printf '%s\n' "$BASE" | sed 's/^  work "w1 w2"$/  work "w1"/')"
 run pool-remove work w1
 check "emptying a pool a route names is refused" "$RC" "1"
 want_err "...as one every launch depends on"     "every launch would refuse"
-# An unreferenced pool emptied is worse than a referenced one: a launch PINNED to
-# that tenant reads an empty pool as none and widens to every profile, another
-# machine's seat included (review, 2026-10-05). This row used to assert the edit.
+# An unreferenced pool emptied is refused too: a launch PINNED to that tenant had
+# no pool to use. It widened to every profile until DO-804, and is refused since
+# (review, 2026-10-05). This row used to assert the edit.
 new_home e4; run pool-remove w w1
 check "emptying a pool nothing names is refused too" "$RC" "1"
-want_err "...because a pinned launch would widen"   "widens an empty pool to every profile"
+want_err "...because a pinned launch would be refused" "a launch pinned to 'w' would be refused"
 unchanged "...and the file is untouched"
 
 #-----------------------------------------------------------------------------

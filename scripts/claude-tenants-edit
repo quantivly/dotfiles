@@ -289,7 +289,7 @@ case "$op" in
       if (( ${refs[(Ie)$tenant]} )); then
         refuse "that would leave '$tenant' with no members while a route, the default or an overflow entry names it; every launch would refuse"
       fi
-      refuse "that would leave '$tenant' with no members, and a launch pinned to '$tenant' widens an empty pool to every profile; remove the tenant's line by hand if that is what you mean"
+      refuse "that would leave '$tenant' with no members, and a launch pinned to '$tenant' would be refused; remove the tenant's line by hand if that is what you mean"
     fi
     ;;
   retire-name)
