@@ -401,6 +401,22 @@ new_home i4; READNULLCMD=rev run pool-add work w3
 check "the file is read directly, not through READNULLCMD" "$RC" "0"
 check "...and the edit lands"                               "$(pool_of work)" "w1 w2 w3"
 
+new_home k1 "$(cat <<'EOF'
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL
+CLAUDE_TENANT_POOL=(
+  quantivly "w2 w3"
+  w "w1"
+)
+CLAUDE_TENANT_SPILL=( w "w2" )
+EOF
+)"
+run retire-name w2 "test"
+check "a name a spill entry holds is not retired" "$RC" "1"
+want_err "...naming the spill"                    "spill w"
+run pool-remove w w1
+check "emptying a pool a spill entry needs is refused as referenced" "$RC" "1"
+want_err "...as every launch would refuse"        "every launch would refuse"
+
 #-----------------------------------------------------------------------------
 section "J. dump: the one reader claude-seat uses"
 #-----------------------------------------------------------------------------
@@ -416,7 +432,7 @@ check "dump of a file that errors at run time is exit 2" "$RC" "2"
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that vanished: an early exit, a deleted block, an emptied loop.
-EXPECTED_ROWS=119
+EXPECTED_ROWS=123
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

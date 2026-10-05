@@ -415,6 +415,13 @@ check "a seat a run started and did not finish is not proposed past" "$RC" "1"
 want_err "...and the refusal says how to resume it"                  "Resume it: claude-seat add quantivly quantivly-5"
 no_log   "...before any second login"                                "clauth login"
 
+new_home c17 "$BASE
+typeset -gA CLAUDE_TENANT_SPILL
+CLAUDE_TENANT_SPILL=( personal \"quantivly-9\" )"
+run add quantivly quantivly-9
+check "a name a spill entry holds is used (DO-800)" "$RC" "1"
+want_err "...naming the spill"                     "spill 'personal'"
+
 new_home c7; run add quantivly quantivly-3
 check "a name already in a pool is refused" "$RC" "1"; want_err "...as used" "already been used"
 new_home c8; run add quantivly personal-5
@@ -793,6 +800,12 @@ want_err "...naming CONSOLE_SEATS"                 "CONSOLE_SEATS in"
 new_home i5; run retire quantivly-4
 check "a seat another machine bills is refused"    "$RC" "1"
 want_err "...naming the ownership table"           "CLAUDE_TENANT_MACHINE_OWNED"
+new_home i5c "$R5
+typeset -gA CLAUDE_TENANT_SPILL
+CLAUDE_TENANT_SPILL=( personal \"quantivly-5\" )"; retire_fixture
+run retire quantivly-5
+check "a seat a spill entry names is refused" "$RC" "1"
+want_err "...naming it"                       "CLAUDE_TENANT_SPILL for 'personal'"
 new_home i5b "$R5
 CLAUDE_TENANT_MACHINE_ID+=( quantivly-5 box )"; retire_fixture
 run retire quantivly-5
@@ -1326,7 +1339,7 @@ check "a profile dir that cannot be made is exit 2"     "$RC" "2"
 sleep 0.5; no_log "...and nothing is opened"            "browser"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=395
+EXPECTED_ROWS=399
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

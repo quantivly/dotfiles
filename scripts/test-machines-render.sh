@@ -320,6 +320,12 @@ f="$(tf 'CLAUDE_TENANT_POOL[work]="quantivly-1 quantivly-2"' \
 run "$f"
 check "a subscript assignment to ANOTHER table does not abort the read" \
       "$(jq -r '.dev.profile' <<<"$OUT")" "quantivly-0"
+f="$(tf 'CLAUDE_TENANT_SPILL[work]="personal-0"' \
+        'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )' \
+        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev )')"
+run "$f"
+check "...nor does one to the spill table (DO-800)" \
+      "$(jq -r '.dev.profile' <<<"$OUT")" "quantivly-0"
 
 echo
 echo "=== declaring no machine ids is 'not adopted', not drift ==="
@@ -400,7 +406,7 @@ check "...and the document is still valid JSON" "$(jq -e . <<<"$OUT" >/dev/null 
 # they are RECORDS of what a change did, true where they stand, not claims about
 # today. Asserting one would force a historical entry to be rewritten every time
 # a row lands. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=66
+EXPECTED_ROWS=67
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

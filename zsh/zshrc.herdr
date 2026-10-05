@@ -241,7 +241,7 @@ _claude_holder_count_one() {
 # DO-641 guard silently off. The on-demand path for shells that never ran this
 # (claude-tenants-owner) therefore forks a shell rather than sourcing in place.
 typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
 : "${CLAUDE_TENANT_DEFAULT=}"
 [[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
   source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
@@ -306,18 +306,18 @@ _claude_tenant_table_ok() {
   # indistinguishable from "no pool configured" — which means EVERY profile. So a
   # typo here would silently WIDEN the pool at the moment it looks narrowed.
   for t in "${(@)${(@)CLAUDE_TENANT_ROUTES#*=}}" "${(@)${(@)CLAUDE_TENANT_PATH_ROUTES#*=}}" \
-           "${(@k)CLAUDE_TENANT_OVERFLOW}" $CLAUDE_TENANT_DEFAULT; do
+           "${(@k)CLAUDE_TENANT_OVERFLOW}" "${(@k)CLAUDE_TENANT_SPILL}" $CLAUDE_TENANT_DEFAULT; do
     [[ -n "$t" ]] || continue
     if [[ -z "${${CLAUDE_TENANT_POOL[$t]-}//[[:space:]]/}" ]]; then
       _CLAUDE_TENANT_STATE=bad-table
-      _CLAUDE_TENANT_WHY="tenant '$t' is named by a route, the default or an overflow entry but has no CLAUDE_TENANT_POOL entry"
+      _CLAUDE_TENANT_WHY="tenant '$t' is named by a route, the default, an overflow or a spill entry but has no CLAUDE_TENANT_POOL entry"
       return 1
     fi
   done
   # Pool values are whitespace-split, so a profile name needing whitespace cannot
   # be expressed at all; anything else illegal is named here rather than left to
   # quietly match no profile later.
-  for t in "${(@v)CLAUDE_TENANT_POOL}" "${(@v)CLAUDE_TENANT_OVERFLOW}"; do
+  for t in "${(@v)CLAUDE_TENANT_POOL}" "${(@v)CLAUDE_TENANT_OVERFLOW}" "${(@v)CLAUDE_TENANT_SPILL}"; do
     for m in ${=t}; do
       if [[ -n "${m//[A-Za-z0-9_.-]/}" ]]; then
         _CLAUDE_TENANT_STATE=bad-table
@@ -607,7 +607,7 @@ claude-tenants-owner() {   # $1 = profile
   fork_err="$(command mktemp)" || { print -r -- "could not create a temp file to read $f"; return 2 }
   raw="$(command zsh -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
     source "$1"
     print -r -- "__OWNER__${CLAUDE_TENANT_MACHINE_OWNED[$2]:-}"
     print -r -- "__DONE__"' \
@@ -1882,7 +1882,7 @@ _claude_fallback_profile() {
 # Returns 0 usable · 4 the table, or the caller's tenant, is unusable.
 _claude_pick_pool() {
   local tenant="${1:-}"
-  _claude_pick_pool_members=(); _claude_pick_overflow_members=()
+  _claude_pick_pool_members=(); _claude_pick_overflow_members=(); _claude_pick_spill_members=()
   if [[ -n "$tenant" ]]; then
     # A tenant with no pool entry yields an EMPTY member list, and an empty list
     # is indistinguishable from "no pool configured" — which the candidate loop
@@ -1905,6 +1905,7 @@ _claude_pick_pool() {
       return 4
     fi
     _claude_pick_overflow_members=( ${=CLAUDE_TENANT_OVERFLOW[$tenant]-} )
+    _claude_pick_spill_members=( ${=CLAUDE_TENANT_SPILL[$tenant]-} )
     return 0
   fi
   # No tenant. Two very different situations reach here, and only one of them is
@@ -2008,7 +2009,7 @@ _claude_pick_for_dir() {
   _claude_pick_r5=unknown; _claude_pick_rw=unknown; _claude_pick_age=unknown
   _claude_pick_r5_at=unknown; _claude_pick_rw_at=unknown
   _claude_pick_tier=unknown; _claude_pick_holders=0
-  _claude_pick_load=""; _claude_pick_overflow=0
+  _claude_pick_load=""; _claude_pick_overflow=0; _claude_pick_spilled=0; _claude_pick_spill_reset=unknown
   _claude_pick_tenant=""; _claude_pick_tenant_state=""
   _claude_pick_leastbad=""; _claude_pick_leastbad_reset=unknown; _claude_pick_spend=unknown
   # DO-623: reset for the same reason _claude_pick_spend is above -- an
@@ -2104,8 +2105,27 @@ _claude_pick_for_dir() {
   # EXHAUSTED pool is deliberately not that case: it is a real wall that clears
   # itself, with a reset time to quote, and borrowing a seat to get past it would
   # bill the wrong tenant permanently for a wait of minutes.
-  for pass_name in pool overflow; do
-    if [[ "$pass_name" == overflow ]]; then
+  # SPILL (DO-800) sits between them: a tenant's OWN choice to borrow named seats
+  # once every member of its pool is spent. Overflow will not do that, by design
+  # (above); spill is for a pool whose owner decided the borrowing is wanted. It
+  # engages only when the pool pass yielded nothing usable at all -- nothing
+  # eligible, nothing billing a spent week, nothing unmeasured -- and at least one
+  # member hit a wall, so a pool merely unreadable never spills. Its members are
+  # then ranked like any others, and the launch line says it spilled.
+  for pass_name in pool spill overflow; do
+    if [[ "$pass_name" == spill ]]; then
+      (( ${#_claude_pick_spill_members} )) || continue
+      (( ! ${#_claude_pick_cands} && ! ${#_claude_pick_weekly} && ! ${#_claude_pick_unknowns} \
+         && ${#_claude_pick_exhausted} )) || continue
+      local -a _spill_from=()
+      for p in "${_claude_pick_exhausted[@]}"; do _spill_from+=( "${p%%$'\t'*}" ); done
+      local _spill_reply="$REPLY"
+      _claude_pick_least_bad "${_spill_from[@]}"
+      _claude_pick_spill_reset="$_CLAUDE_PICK_LEASTBAD_RESET"
+      REPLY="$_spill_reply"
+      pass_members=( "${_claude_pick_spill_members[@]}" )
+      _claude_pick_spilled=1
+    elif [[ "$pass_name" == overflow ]]; then
       (( ${#_claude_pick_cands} + ${#_claude_pick_weekly} + ${#_claude_pick_unknowns} + ${#_claude_pick_exhausted} )) && break
       (( ${#_claude_pick_overflow_members} )) || break
       pass_members=( "${_claude_pick_overflow_members[@]}" )
@@ -2237,6 +2257,7 @@ _claude_pick_for_dir() {
   fi
   if [[ -n "$_claude_pick_class" ]] && _claude_pick_with_ledger_lock _claude_pick_decide; then
     _claude_pick_state=picked
+    _claude_pick_note_spill "$REPLY"
     _claude_pick_publish "$REPLY"
     return 0
   fi
@@ -2282,6 +2303,7 @@ _claude_pick_for_dir() {
     _claude_pick_report_exhausted interactive
     if [[ -n "$REPLY" ]]; then
       (( ${_claude_pick_dry_run:-0} )) || _claude_pick_with_ledger_lock _claude_pick_ledger_write "$REPLY"
+      _claude_pick_note_spill "$REPLY"
       _claude_pick_publish "$REPLY"
       return 0
     fi
@@ -2326,6 +2348,14 @@ _claude_pick_for_dir() {
 # Choose and record, run under the ledger lock as ONE unit: read -> decide ->
 # write. Split out only because _claude_pick_with_ledger_lock takes a command,
 # and it must run in this shell rather than a subshell or REPLY dies with it.
+# The launch line says when a pick SPILLED (DO-800): which seat it borrowed, from
+# where, and when the pool's own first wall clears.
+_claude_pick_note_spill() {
+  (( _claude_pick_spilled )) && (( ${_claude_pick_spill_members[(Ie)$1]} )) || return 0
+  local when
+  when="$(_claude_pick_reset_text "$_claude_pick_spill_reset")"
+  _claude_pick_warnings+=("spilled to '$1': every member of $(_claude_pick_pool_label) is exhausted${when:+; its earliest reset is $when}")
+}
 _claude_pick_decide() {
   _claude_pick_choose || return 1
   (( ${_claude_pick_dry_run:-0} )) || _claude_pick_ledger_write "$REPLY"
@@ -2491,7 +2521,8 @@ claude() {
   local -a _claude_pick_skipped=() _claude_pick_warnings=()
   local -a _claude_pick_explain=() _claude_pick_exhausted=()
   local -a _claude_pick_cands=() _claude_pick_unknowns=() _claude_pick_weekly=()
-  local -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
+  local -a _claude_pick_pool_members=() _claude_pick_overflow_members=() _claude_pick_spill_members=()
+  local _claude_pick_spilled=0 _claude_pick_spill_reset=unknown
   local _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
   local _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
   local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown
@@ -3235,7 +3266,8 @@ hspawn() {
   local -a _claude_pick_skipped=() _claude_pick_warnings=()
   local -a _claude_pick_explain=() _claude_pick_exhausted=()
   local -a _claude_pick_cands=() _claude_pick_unknowns=() _claude_pick_weekly=()
-  local -a _claude_pick_pool_members=() _claude_pick_overflow_members=()
+  local -a _claude_pick_pool_members=() _claude_pick_overflow_members=() _claude_pick_spill_members=()
+  local _claude_pick_spilled=0 _claude_pick_spill_reset=unknown
   local _claude_pick_state="" _claude_pick_class="" _claude_pick_reason=""
   local _claude_pick_score="" _claude_pick_tenant="" _claude_pick_tenant_state=""
   local _claude_pick_u5=unknown _claude_pick_uw=unknown _claude_pick_r5=unknown

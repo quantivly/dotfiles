@@ -242,13 +242,14 @@ done
 if ! dumpout="$(command zsh "$EDIT" dump 2>&1)"; then
   fail "cannot read the tenants file: $dumpout"
 fi
-typeset -A pool ovf owned mid retired connectors cacct
+typeset -A pool ovf spill owned mid retired connectors cacct
 for line in "${(@f)dumpout}"; do
   [[ -n "$line" ]] || continue
   tab="${line%%$SEP*}"; rest="${line#*$SEP}"; k="${rest%%$SEP*}"; v="${rest#*$SEP}"
   case "$tab" in
     POOL)              pool[$k]="$v" ;;
     OVERFLOW)          ovf[$k]="$v" ;;
+    SPILL)             spill[$k]="$v" ;;
     MACHINE_OWNED)     owned[$k]="$v" ;;
     MACHINE_ID)        mid[$k]="$v" ;;
     RETIRED)           retired[$k]="$v" ;;
@@ -611,7 +612,7 @@ servers_of() {
 seat_retire() {
   local store="$PROFILES/$name/credentials.json" ad="$ADROOT/$name" t m h srv tomb rc err out n_unknown=0
   local target="" refusal=""
-  local -a pools ovfs blockers holders tombs ssv lsv left
+  local -a pools ovfs spills blockers holders tombs ssv lsv left
   local -aU servers
   case "$(_claude_pool_member_problem "$ADROOT" "$PROFILES" "$name")" in
     compat)  refuse "'$name' is a compat symlink in the account root, not a seat; retire the profile it stands for" ;;
@@ -619,12 +620,14 @@ seat_retire() {
   esac
   for t in ${(ok)pool}; do (( ${${=pool[$t]}[(Ie)$name]} )) && pools+=( "$t" ); done
   for t in ${(ok)ovf};  do (( ${${=ovf[$t]}[(Ie)$name]} ))  && ovfs+=( "$t" ); done
+  for t in ${(ok)spill}; do (( ${${=spill[$t]}[(Ie)$name]} )) && spills+=( "$t" ); done
   tombs=( "$ADROOT/$name".retired-*(N/) )
   rabota_seats
   console_seats
   (( ${+owned[$name]} )) && blockers+=( "CLAUDE_TENANT_MACHINE_OWNED in the tenants file: another machine bills it" )
   (( ${+mid[$name]} ))   && blockers+=( "CLAUDE_TENANT_MACHINE_ID in the tenants file" )
   for t in $ovfs; do blockers+=( "CLAUDE_TENANT_OVERFLOW for '$t' in the tenants file" ); done
+  for t in $spills; do blockers+=( "CLAUDE_TENANT_SPILL for '$t' in the tenants file" ); done
   (( ${+rseat[$name]} )) && blockers+=( "${rseat[$name]} ([seats] local)" )
   (( ${+cseat[$name]} )) && blockers+=( "CONSOLE_SEATS in ${RABOTA_BUDGET/#$HOME/~}" )
 
@@ -909,6 +912,7 @@ for a in "$ADROOT"/*(ND-/:t) "$ADROOT"/*(ND@:t); do
 done
 for t in ${(k)pool}; do for m in ${=pool[$t]}; do known_add "$m" "pool '$t'"; done; done
 for t in ${(k)ovf};  do for m in ${=ovf[$t]};  do known_add "$m" "overflow '$t'"; done; done
+for t in ${(k)spill}; do for m in ${=spill[$t]}; do known_add "$m" "spill '$t'"; done; done
 for k in ${(k)owned}; do known_add "$k" "the machine-ownership table"; done
 for k in ${(k)mid};   do known_add "$k" "the machine-id table"; done
 for k in ${(k)retired}; do known_add "$k" "the retired-names table"; done

@@ -129,6 +129,16 @@ tenant's account bills work to the wrong place, so it is paid only when the alte
 isolation. An exhausted pool is a real wall that clears itself, with a reset time to quote; borrowing
 a seat to get past it would bill the wrong tenant permanently for a wait of minutes.
 
+**Spill is that borrowing, when a pool's owner has decided it is wanted (DO-800).**
+`CLAUDE_TENANT_SPILL` names seats a tenant may use **only once every member of its pool is spent**:
+the pool pass yielded nothing eligible, nothing billing a spent week and nothing unmeasured, and at
+least one member hit a wall. Then the spill seats are ranked like any others, interactive and headless
+callers alike take one with room instead of refusing, and the launch line says it spilled and when
+the pool's own first wall clears. A pool with room never spills, however much room a spill seat has.
+Spill sits between the pool and overflow; overflow's meaning, the class order and a pin are unchanged.
+The table check validates spill members like pool members, and `claude-doctor` holds them to the
+pool's settings, since sessions move between the two.
+
 **A pin overrides the ranking, so it never refuses on the account — but it says what it was handed.**
 `--profile <p>` / `CLAUDE_ACCOUNT_PROFILE` skips scoring entirely, and when the named account is
 `exhausted` or `excluded` (clauth's own quarantine) that is one stderr line and a `warnings[]` entry,
@@ -632,6 +642,7 @@ CLAUDE_TENANT_PATH_ROUTES=( "$HOME/quantivly=work" )   # only for a dir with NO 
 CLAUDE_TENANT_DEFAULT=personal                         # empty = indeterminate, state `none`
 CLAUDE_TENANT_POOL=( work "quantivly-1 quantivly-2 quantivly-3" personal "personal" )
 CLAUDE_TENANT_OVERFLOW=( )                             # used ONLY when a pool has no candidate
+CLAUDE_TENANT_SPILL=( )                                # used ONLY when every pool member is spent
 CLAUDE_TENANT_GH_DIR=( work "$HOME/.config/gh-quantivly" )
 ```
 
