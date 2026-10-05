@@ -802,7 +802,7 @@ seat_browser() {
       b="$(whence -p -- "$b" 2>/dev/null)" && [[ -n "$b" ]] && break
     done
   fi
-  [[ -n "$b" && -f "$b" && -x "$b" ]] || \
+  [[ -n "$b" && -x "$b" ]] || \
     fail "no browser to open: install Chrome or Chromium, or set CLAUDE_SEAT_BROWSER"
   # A snap browser cannot reach a profile under a dot-directory, and fails or falls
   # back to its own DEFAULT profile, the main account. Ubuntu's firefox, chromium
@@ -831,7 +831,7 @@ seat_browser() {
     say "  would run: ${b:t} ${(j: :)${(@q)args}}"
   else
     if [[ ! -d "$dir" ]]; then
-      ( umask 077 && command mkdir -p -- "$dir" ) || fail "could not make ${dir/#$HOME/~}"
+      ( umask 077 && command mkdir -p -- "$dir" ) || fail "could not create ${dir/#$HOME/~}"
     fi
     # Private even when an earlier hand left it open.
     command chmod 700 -- "$dir" || fail "could not make ${dir/#$HOME/~} private"

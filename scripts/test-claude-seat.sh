@@ -1257,6 +1257,7 @@ check "a declared tenant's profile is opened"          "$RC" "0"
 wait_log "...on its own user-data dir"                 "browser --user-data-dir=$FHOME/.local/state/claude-seat/browser/quantivly "
 want_log "...at claude.ai's sign-in"                   "https://claude.ai/login"
 check "...made private"                                "$(stat -c %a "$FHOME/.local/state/claude-seat/browser/quantivly" 2>/dev/null)" "700"
+check "...as is the dir that lists every tenant's"     "$(stat -c %a "$FHOME/.local/state/claude-seat/browser" 2>/dev/null)" "700"
 want_out "...naming the tenant's connectors"           "connect Gmail Calendar Drive."
 want_out "...and the Google account to choose"         "choose work@example.invalid, and no other account"
 want_out "...and signing out after each seat"          "Sign out of claude.ai"
@@ -1313,13 +1314,19 @@ new_home j16 "$BASE
 CLAUDE_TENANT_POOL+=( _lab \"personal-0\" )"; run browser --dry-run _lab
 check "a tenant add accepts is one browser accepts"         "$RC" "0"
 
+new_home j9b; mkdir -p "$FHOME/.local/state/claude-seat/browser"; chmod 500 "$FHOME/.local/state/claude-seat/browser"
+run browser quantivly
+check "a profile dir that cannot be created is exit 2"  "$RC" "2"
+want_err "...saying so"                                 "could not create"
+chmod 700 "$FHOME/.local/state/claude-seat/browser"
+
 new_home j9; : > "$FHOME/notadir"
 CLAUDE_SEAT_STATE="$FHOME/notadir" run browser quantivly
 check "a profile dir that cannot be made is exit 2"     "$RC" "2"
 sleep 0.5; no_log "...and nothing is opened"            "browser"
 
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=392
+EXPECTED_ROWS=395
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"
