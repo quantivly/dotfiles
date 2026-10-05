@@ -42,10 +42,16 @@
 # once no session holds it, its plugin sign-ins logged out, its account dir made a
 # tombstone and its name recorded as retired, so it is never reused.
 #
+# `claude-seat browser <tenant>` (DO-799) opens a browser profile kept for one
+# tenant, for the two steps that go to whichever account a browser is signed in
+# to: the seat's `clauth login`, and its claude.ai connectors, whose Google side
+# must be the TENANT's identity.
+#
 # Usage:
 #   claude-seat add [--dry-run] [--yes] [--email ADDR] <tenant> [name]
 #   claude-seat mcp [--dry-run] [--no-browser] <name>
 #   claude-seat retire [--plan] [--reason TEXT] <name>
+#   claude-seat browser [--dry-run] <tenant>
 #
 #   name          default: the tenant's prefix and the next number never used
 #   --dry-run     check and print the plan; touch nothing
@@ -67,6 +73,9 @@
 #       could not be read · 3 it may still be in use, so nothing that cannot be
 #       redone was done; move its sessions and run it again · 64 usage. A --plan
 #       exits with the code the real run would stop at.
+# Exit (browser): 0 opened (or the dry run printed) · 1 refused: the tenants file
+#       does not declare the tenant · 2 no browser to open, or its profile dir
+#       could not be made · 64 usage.
 
 emulate -R zsh
 setopt no_unset pipe_fail extended_glob
@@ -85,6 +94,7 @@ PROFILES="$HOME/.clauth/profiles"
 ADROOT="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
 RABOTA="${CLAUDE_SEAT_RABOTA_DIR:-$HOME/.dotfiles-local/rabota}"
 RABOTA_BUDGET="${CLAUDE_SEAT_RABOTA_BUDGET:-$here/../rabota/rabota/budget.py}"
+SEAT_STATE="${CLAUDE_SEAT_STATE:-$HOME/.local/state/claude-seat}"
 SEP=$'\x1f'
 # rabota's seat rule (rabota/rabota/budget.py: WORK_TENANT, WORK_PREFIX): a lane
 # refuses a work-tenant seat outside quantivly-*, and any other tenant's inside it.
@@ -95,6 +105,7 @@ usage() {
   print -u2 -- "usage: $prog add [--dry-run] [--yes] [--email ADDR] <tenant> [name]"
   print -u2 -- "       $prog mcp [--dry-run] [--no-browser] <name>"
   print -u2 -- "       $prog retire [--plan] [--reason TEXT] <name>"
+  print -u2 -- "       $prog browser [--dry-run] <tenant>"
   exit 64
 }
 say()    { print -r -- "$*" }
@@ -180,7 +191,7 @@ editor_flags() {
 
 # ---- arguments --------------------------------------------------------------------
 cmd="${1:-}"
-[[ "$cmd" == (add|mcp|retire) ]] || usage
+[[ "$cmd" == (add|mcp|retire|browser) ]] || usage
 shift
 dry=0 yes=0 email="" nobrowser=0 reason=""
 typeset -a pos
@@ -203,6 +214,12 @@ if [[ "$cmd" == add ]]; then
   tenant="${pos[1]}"
   name="${pos[2]-}"
   [[ -z "${tenant//[A-Za-z0-9_.-]/}" ]] || refuse "tenant '$tenant' may only contain letters, digits, - _ and ."
+elif [[ "$cmd" == browser ]]; then
+  (( ${#pos} == 1 )) || usage
+  tenant="${pos[1]}" name="" trailer=""
+  # It becomes a directory name.
+  [[ "$tenant" == [A-Za-z0-9]* && -z "${tenant//[A-Za-z0-9_.-]/}" ]] || \
+    refuse "tenant '$tenant' may only contain letters, digits, - _ and ., and must start with a letter or digit"
 else
   (( ${#pos} == 1 )) || usage
   tenant="" name="${pos[1]}" trailer=""
@@ -761,6 +778,71 @@ seat_retire() {
   fi
   return 0
 }
+# ---- browser: one browser profile per tenant (DO-799) --------------------------------
+# A browser's claude.ai session decides where a `clauth login` grant goes, and its
+# Google session decides which identity a connector gets. A profile kept for ONE
+# tenant holds that tenant's Google sign-in and nothing else, so a seat's
+# connectors cannot pick up another tenant's identity, and claude.ai is signed in
+# as one seat at a time, then out again. The connector list and the Google
+# account come from the tenants file, never from this repo.
+seat_browser() {
+  local dir="$SEAT_STATE/browser/$tenant" b url="https://claude.ai/login"
+  local -a args
+  (( ${+pool[$tenant]} )) || \
+    refuse "the tenants file declares no tenant '$tenant', so there is no profile to open for it"
+  if [[ -n "${CLAUDE_SEAT_BROWSER-}" ]]; then
+    b="$CLAUDE_SEAT_BROWSER"
+    [[ -x "$b" ]] || b="$(whence -p -- "$b" 2>/dev/null)"
+  else
+    for b in google-chrome google-chrome-stable chromium chromium-browser ""; do
+      [[ -n "$b" ]] || break
+      b="$(whence -p -- "$b" 2>/dev/null)" && [[ -n "$b" ]] && break
+    done
+  fi
+  [[ -n "$b" && -x "$b" ]] || \
+    fail "no browser to open: install Chrome or Chromium, or set CLAUDE_SEAT_BROWSER"
+  # A Chromium profile is a --user-data-dir; a Firefox one, -profile with
+  # -no-remote, so it does not hand the URL to a running Firefox. (A snap Firefox
+  # cannot reach a profile under a dot-directory.)
+  if [[ "${b:t}" == firefox* ]]; then
+    args=( -profile "$dir" -no-remote "$url" )
+  else
+    args=( "--user-data-dir=$dir" --no-first-run --no-default-browser-check "$url" )
+  fi
+
+  step browser "'$tenant': ${dir/#$HOME/~}"
+  if (( dry )); then
+    say "  would run: ${b:t} ${(j: :)${(@q)args}}"
+  else
+    if [[ ! -d "$dir" ]]; then
+      ( umask 077 && command mkdir -p -- "$dir" ) || fail "could not make ${dir/#$HOME/~}"
+    fi
+    "$b" "${args[@]}" </dev/null >/dev/null 2>&1 &!
+    say "  opened ${b:t} on its own profile"
+  fi
+  say ""
+  say "In that window, for each seat of '$tenant':"
+  say "  1. Sign in to claude.ai AS THE SEAT (the link goes to the seat's address)."
+  say "  2. Run '$prog add $tenant' in a terminal; open the URL clauth prints IN THIS WINDOW."
+  if [[ -n "${connectors[$tenant]-}" ]]; then
+    say "  3. claude.ai -> Settings -> Connectors: connect ${connectors[$tenant]}."
+    if [[ -n "${cacct[$tenant]-}" ]]; then
+      say "     When Google asks, choose ${cacct[$tenant]}, and no other account."
+    fi
+  else
+    say "  3. claude.ai -> Settings -> Connectors: connect the tenant's connectors. To have this"
+    say "     name them and the Google account, set CLAUDE_TENANT_CONNECTORS and"
+    say "     CLAUDE_TENANT_CONNECTOR_ACCOUNT for '$tenant' in the tenants file."
+  fi
+  say "  4. Sign out of claude.ai, so the next seat's login cannot land on this one."
+  say "The Google sign-in stays in this profile; a claude.ai sign-in never should."
+  return 0
+}
+if [[ "$cmd" == browser ]]; then
+  seat_browser
+  exit $?
+fi
+
 if [[ "$cmd" == retire ]]; then
   seat_retire
   exit $?
@@ -892,6 +974,7 @@ else
   say "  Sign in AS THE NEW SEAT, not your main account. clauth opens a browser and also"
   say "  prints the URL: open it in the browser profile signed in to claude.ai as the"
   say "  new seat. The grant goes to whichever claude.ai account that page is signed in to."
+  say "  The tenant's own profile is one command away: $prog browser $tenant"
   "$CLAUTH" login "$name" || fail "'clauth login $name' failed"
   [[ -e "$store" || -L "$store" ]] || fail "'clauth login $name' finished, but $store does not exist"
 fi

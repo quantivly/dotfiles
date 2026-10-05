@@ -347,6 +347,25 @@ scripts/claude-seat add <tenant>              # do it
 **Before it: create the seat.** That means the Workspace alias, the Team invite,
 and accepting the invite by emailed link. Team has no API for any of it.
 
+**Then open the tenant's browser profile: `scripts/claude-seat browser <tenant>`.**
+Two steps go to whichever account a browser is signed in to: the `clauth login`
+grant (claude.ai) and each connector (Google). The command opens a Chrome profile
+kept for that tenant under `~/.local/state/claude-seat/browser/<tenant>`, so its
+Google sign-in is the tenant's identity and no other's. In it, for each seat:
+
+1. sign in to claude.ai as the seat (the magic link goes to the seat's address);
+2. run `claude-seat add <tenant>` and open the URL clauth prints in that window;
+3. connect the tenant's connectors, choosing the tenant's Google account;
+4. sign out of claude.ai, so the next seat's login cannot land on this one.
+
+It refuses a tenant the tenants file does not declare, and names the connectors
+and the Google account from `CLAUDE_TENANT_CONNECTORS` and
+`CLAUDE_TENANT_CONNECTOR_ACCOUNT` there, never from this repo. `--dry-run` prints
+the command; `CLAUDE_SEAT_BROWSER` picks another browser (a snap Firefox cannot
+reach a profile under a dot-directory). **Unverified end to end:** the first real
+use records here whether claude.ai's magic link and each connector's consent
+behave in a fresh profile.
+
 **What the command does,** in this order. The pool is the last thing it touches,
 so the pool never names a seat that failed a check. Each step checks the state
 first, so a run that stopped can be run again with the same name. Run without a
@@ -417,7 +436,8 @@ the same person.
   connector authorised from `/mcp` is saved to the claude.ai account the
   **browser** is on: with the browser on the main account, it "succeeded" and the
   seat still got `mcp_unauthorized_no_token`. So connect from claude.ai →
-  Settings → Connectors in a browser profile signed in as the seat. Record each
+  Settings → Connectors in the tenant's browser profile (above), signed in as the
+  seat. Record each
   tenant's connectors in `CLAUDE_TENANT_CONNECTORS` and
   `CLAUDE_TENANT_CONNECTOR_ACCOUNT`, and the command will name them.
 - **Watch where the next launches land.** A fresh seat's week is empty. If that
