@@ -7,7 +7,9 @@
 # to a verified, pooled seat; and `claude-seat mcp` (DO-797), which signs a seat in
 # to its pools' plugin MCP servers through `claude mcp login`; and `claude-seat
 # retire` (DO-798), which takes a seat out of service without deleting anything a
-# live session still holds.
+# live session still holds; and `claude-seat browser` (DO-799), which opens a
+# browser profile kept for one tenant. NO REAL BROWSER IS EVER STARTED: the browser
+# is a stub, and every browser name on PATH is a shim that logs and exits.
 #
 # Why this exists: adding a seat by hand hit three silent failures on 2026-09-30,
 # and each one looked like success. So most rows below assert the one property the
@@ -40,6 +42,11 @@ want_out() { if [[ "$OUT" == *"$2"* ]]; then ok "$1"; else bad "$1 — expected 
 no_out()   { if [[ "$OUT$ERR" != *"$2"* ]]; then ok "$1"; else bad "$1 — the output contains '$2'"; fi; }
 no_log()   { if ! grep -q -- "$2" "$STUB_LOG" 2>/dev/null; then ok "$1"; else bad "$1 — the stubs were called with '$2'"; fi; }
 want_log() { if grep -q -- "$2" "$STUB_LOG" 2>/dev/null; then ok "$1"; else bad "$1 — no stub call with '$2'"; fi; }
+wait_log() {   # like want_log, for a stub the SUT started in the background
+    local n=0
+    until grep -q -- "$2" "$STUB_LOG" 2>/dev/null || (( ++n > 10 )); do sleep 0.2; done
+    want_log "$1" "$2"
+}
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 1; }
 section() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
@@ -167,6 +174,26 @@ if [[ " $* " == *" pool-add "* ]]; then
 fi
 exec zsh "$REAL_EDIT" "$@"
 STUB
+# A browser: records its arguments. Started in the background by the SUT, so rows
+# that need its line wait for it (wait_log).
+cat > "$STUBS/browser" <<'STUB'
+#!/usr/bin/env bash
+printf 'browser %s\n' "$*" >> "$STUB_LOG"
+if [[ -n "${STUB_BROWSER_RC:-}" ]]; then echo "Missing X server or \$DISPLAY" >&2; exit "$STUB_BROWSER_RC"; fi
+# Stays up, like a browser on a profile of its own.
+[[ "${STUB_BROWSER_STAYS:-0}" == 1 ]] && sleep 3
+exit 0
+STUB
+# A wrapper that execs a snap, as Ubuntu's firefox does.
+printf '#!/bin/sh\n# transitional package\nexec /snap/bin/firefox "$@"\n' > "$STUBS/snapfirefox"
+cp "$STUBS/browser" "$STUBS/firefox"
+mkdir -p "$STUBS/browserbin"
+for b in google-chrome google-chrome-stable chromium chromium-browser firefox; do
+    # The $* is the shim's own, expanded when the shim runs.
+    # shellcheck disable=SC2016
+    printf '#!/usr/bin/env bash\nprintf "shim %s %%s\\n" "$*" >> "$STUB_LOG"\n' "$b" > "$STUBS/browserbin/$b"
+done
+chmod +x "$STUBS/browserbin"/*
 chmod +x "$STUBS"/*
 
 BASE='typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
@@ -266,6 +293,8 @@ run() {
     OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME -u CLAUDE_CONFIG_DIR \
                HOME="$FHOME" STUB_LOG="$STUB_LOG" \
                CLAUDE_DOCTOR_PROC_ROOT="$FHOME/procfix" CLAUDE_SEAT_RABOTA_BUDGET="$FHOME/budget.py" \
+               CLAUDE_SEAT_BROWSER="${SEAT_BROWSER-$STUBS/browser}" PATH="$STUBS/browserbin:$PATH" \
+               CLAUDE_SEAT_BROWSER_WAIT=0.4 \
                GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
                CLAUDE_SEAT_ACCOUNT_DIRS="$STUBS/account-dirs" CLAUDE_SEAT_PICK="$STUBS/pick" \
@@ -280,6 +309,8 @@ run_tty() {
     OUT="$(env -u CLAUDE_TENANTS_FILE -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME -u CLAUDE_CONFIG_DIR \
                HOME="$FHOME" STUB_LOG="$STUB_LOG" \
                CLAUDE_DOCTOR_PROC_ROOT="$FHOME/procfix" CLAUDE_SEAT_RABOTA_BUDGET="$FHOME/budget.py" \
+               CLAUDE_SEAT_BROWSER="${SEAT_BROWSER-$STUBS/browser}" PATH="$STUBS/browserbin:$PATH" \
+               CLAUDE_SEAT_BROWSER_WAIT=0.4 \
                GIT_CONFIG_GLOBAL="$FHOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
                CLAUDE_SEAT_CLAUTH="$STUBS/clauth" CLAUDE_SEAT_CLAUDE="$STUBS/claude" \
                CLAUDE_SEAT_ACCOUNT_DIRS="$STUBS/account-dirs" CLAUDE_SEAT_PICK="$STUBS/pick" \
@@ -407,6 +438,7 @@ check "...in a commit of the tenants file"      "$(gitf -C "$FHOME/repo" log -1 
 want_out "...the picker sees it"                "the picker sees 'quantivly-5'"
 want_out "...and what is left is listed"        "claude-as quantivly-5, then /mcp"
 want_out "...starting with the mcp step"        "claude-seat mcp quantivly-5 signs it in"
+want_out "...and the login names the tenant's browser profile, before it" "run 'claude-seat browser quantivly', sign in as the seat there"
 no_log   "...with no first launch needed"       "claude -p"
 
 new_home d2; STUB_OTYPE=claude_max run add personal
@@ -1194,8 +1226,107 @@ CLAUDE_SEAT_TENANTS_EDIT="$STUBS/edit-launch-during-record" REAL_EDIT="$DOTFILES
 check "a session that starts while the name is recorded stops the logout" "$RC" "3"
 no_log "...which is not run"                                           "mcp logout"
 
+#-----------------------------------------------------------------------------
+section "J. browser: one browser profile per tenant"
+#-----------------------------------------------------------------------------
+new_home j1
+run browser;                          check "browser with no tenant is a usage error"    "$RC" "64"
+run browser quantivly personal;       check "browser takes one tenant"                   "$RC" "64"
+run browser --yes quantivly;          check "--yes is not a browser option"              "$RC" "64"
+run browser ..;                       check "a tenant that is not a directory name is refused" "$RC" "1"
+want_err "...for its name, before the tenants file is asked" "must not start with a dot"
+
+new_home j2; run browser nosuch
+check "a tenant the tenants file does not declare is refused" "$RC" "1"
+want_err "...saying so"                                       "declares no tenant 'nosuch'"
+sleep 0.5; no_log "...and no browser is opened"               "browser"
+check "...nor a profile made" "$([[ -e "$FHOME/.local/state/claude-seat/browser/nosuch" ]] && echo made || echo none)" "none"
+
+new_home j3; run browser --dry-run quantivly
+check "a dry run passes"                     "$RC" "0"
+want_out "...printing the command"           "would run: browser --user-data-dir="
+sleep 0.5; no_log "...without opening it"    "browser"
+check "...or making the profile" "$([[ -e "$FHOME/.local/state/claude-seat/browser/quantivly" ]] && echo made || echo none)" "none"
+
+new_home j4 "$BASE
+typeset -gA CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT
+CLAUDE_TENANT_CONNECTORS=( quantivly \"Gmail Calendar Drive\" )
+CLAUDE_TENANT_CONNECTOR_ACCOUNT=( quantivly \"work@example.invalid\" )"
+run browser quantivly
+check "a declared tenant's profile is opened"          "$RC" "0"
+wait_log "...on its own user-data dir"                 "browser --user-data-dir=$FHOME/.local/state/claude-seat/browser/quantivly "
+want_log "...at claude.ai's sign-in"                   "https://claude.ai/login"
+check "...made private"                                "$(stat -c %a "$FHOME/.local/state/claude-seat/browser/quantivly" 2>/dev/null)" "700"
+check "...as is the dir that lists every tenant's"     "$(stat -c %a "$FHOME/.local/state/claude-seat/browser" 2>/dev/null)" "700"
+want_out "...naming the tenant's connectors"           "connect Gmail Calendar Drive."
+want_out "...and the Google account to choose"         "choose work@example.invalid, and no other account"
+want_out "...and signing out after each seat"          "Sign out of claude.ai"
+no_log   "...never through a real browser on PATH"     "shim "
+
+new_home j5; run browser quantivly
+want_out "with no connectors recorded, it says how to record them" "set CLAUDE_TENANT_CONNECTORS and"
+
+new_home j6; SEAT_BROWSER="$STUBS/firefox" run browser quantivly
+check "a Firefox opens too"                            "$RC" "0"
+wait_log "...on its own profile, not a running one"    "browser -profile $FHOME/.local/state/claude-seat/browser/quantivly -no-remote https://claude.ai/login"
+
+new_home j7; SEAT_BROWSER="/nonexistent/browser" run browser quantivly
+check "no browser to open is exit 2"                   "$RC" "2"
+want_err "...saying so"                                "no browser to open"
+
+new_home j7b; SEAT_BROWSER="chromium" run browser quantivly
+check "a CLAUDE_SEAT_BROWSER that is a name is looked up on PATH" "$RC" "0"
+wait_log "...and that one is opened"                             "shim chromium --user-data-dir="
+
+new_home j8; SEAT_BROWSER="" run browser quantivly
+check "with no CLAUDE_SEAT_BROWSER it finds one on PATH" "$RC" "0"
+wait_log "...Chrome first"                               "shim google-chrome --user-data-dir="
+
+new_home j10; STUB_BROWSER_RC=1 run browser quantivly
+check "a browser that dies at once is exit 2, not 'opened'" "$RC" "2"
+want_err "...with what it said"                             "Missing X server"
+new_home j10b; STUB_BROWSER_STAYS=1 run browser quantivly
+check "one still running after the wait is opened"          "$RC" "0"
+want_out "...on its own profile"                            "opened browser on its own profile"
+new_home j10c; run browser quantivly
+want_out "one that exits 0 at once handed the window on"    "handed to browser, already running on this profile"
+new_home j11; mkdir -p "$FHOME/adir"; SEAT_BROWSER="$FHOME/adir" run browser quantivly
+check "a directory is not a browser"                        "$RC" "2"
+new_home j12; SEAT_BROWSER="$STUBS/snapfirefox" run browser quantivly
+check "a snap browser is refused"                           "$RC" "2"
+want_err "...as unable to use the profile"                  "is a snap browser"
+new_home j13; mkdir -p "$FHOME/.local/state/claude-seat/browser/personal"
+ln -s "$FHOME/.local/state/claude-seat/browser/personal" "$FHOME/.local/state/claude-seat/browser/quantivly"
+run browser quantivly
+check "a profile dir that is a symlink is refused"          "$RC" "2"
+want_err "...as not its own"                                "a tenant's profile must be its own directory"
+sleep 0.5; no_log "...and nothing is opened"                "browser"
+new_home j13b; mkdir -p "$FHOME/elsewhere" "$FHOME/.local/state/claude-seat"
+ln -s "$FHOME/elsewhere" "$FHOME/.local/state/claude-seat/browser"
+run browser quantivly
+check "...as is a browser dir that is a symlink"            "$RC" "2"
+new_home j14; mkdir -p "$FHOME/.local/state/claude-seat/browser/quantivly"; chmod 755 "$FHOME/.local/state/claude-seat/browser/quantivly"
+run browser quantivly
+check "an existing profile left open is made private"       "$(stat -c %a "$FHOME/.local/state/claude-seat/browser/quantivly")" "700"
+new_home j15; CLAUDE_SEAT_STATE="rel/state" run browser quantivly
+check "a relative CLAUDE_SEAT_STATE is refused"             "$RC" "2"
+new_home j16 "$BASE
+CLAUDE_TENANT_POOL+=( _lab \"personal-0\" )"; run browser --dry-run _lab
+check "a tenant add accepts is one browser accepts"         "$RC" "0"
+
+new_home j9b; mkdir -p "$FHOME/.local/state/claude-seat/browser"; chmod 500 "$FHOME/.local/state/claude-seat/browser"
+run browser quantivly
+check "a profile dir that cannot be created is exit 2"  "$RC" "2"
+want_err "...saying so"                                 "could not create"
+chmod 700 "$FHOME/.local/state/claude-seat/browser"
+
+new_home j9; : > "$FHOME/notadir"
+CLAUDE_SEAT_STATE="$FHOME/notadir" run browser quantivly
+check "a profile dir that cannot be made is exit 2"     "$RC" "2"
+sleep 0.5; no_log "...and nothing is opened"            "browser"
+
 # --- the row total -----------------------------------------------------------
-EXPECTED_ROWS=344
+EXPECTED_ROWS=395
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))"

@@ -173,6 +173,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-seat browser <tenant>`: one browser profile per tenant (DO-799).** It opens
+  Chrome on a profile kept for that tenant under `~/.local/state/claude-seat/browser/`, so a seat's
+  `clauth login` and its claude.ai connectors happen where Google is signed in as the tenant's
+  identity and claude.ai as one seat at a time. It refuses a tenant the tenants file does not
+  declare, and names the connectors and the Google account from that file. `claude-seat add` points
+  at it from its login step.
+
 - **`scripts/claude-seat retire <name>`: take a seat out of service without leaving its name
   reusable (DO-798).** It refuses while rabota, the ownership tables or an overflow name the seat,
   then takes it out of every pool through `claude-tenants-edit`. It stops at exit 3, moving
