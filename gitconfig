@@ -120,9 +120,14 @@
 
 [delta]
     features = line-numbers
-    syntax-theme = GitHub
-    plus-style = "syntax #22863a"
-    minus-style = "syntax #b31d28"
+    # Tuned for a dark terminal (Alacritty's default colours) and for screen
+    # share: no syntax colours, bold green/red text on the terminal background.
+    # The GitHub theme is dark-on-white and its #22863a/#b31d28 used as
+    # backgrounds put dark text on dark green/red.
+    dark = true
+    syntax-theme = none
+    plus-style = bold green
+    minus-style = bold red
     line-numbers = true
 
     # Navigation keybindings (n/N) for large diffs
@@ -131,8 +136,8 @@
     # Clickable links for commits, files, line numbers
     hyperlinks = true
 
-    # De-emphasize unchanged lines for cleaner visual
-    zero-style = dim syntax
+    # Unchanged lines in the terminal's normal colour (dim was unreadable on dark)
+    zero-style = normal
     line-numbers-zero-style = dim
 
     # Hunk header with syntax only (filename shown in decoration above)

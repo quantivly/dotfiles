@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **delta diffs were unreadable on a dark terminal.** The `GitHub` syntax theme is dark-on-white,
+  and its `#22863a`/`#b31d28` backgrounds put dark text on dark green and red. Unchanged lines
+  were `dim`, which was too faint. `[delta]` now sets `dark = true` and drops syntax colouring:
+  added and removed lines are bold green and red on the terminal's own background, and unchanged
+  lines use its normal colour. The result is also legible over a screen share.
+
 - **A launch pinned to a tenant whose pool is empty widened to every profile (DO-804).** An entry that
   is present but empty, `( t "" )`, passed the picker's "has a pool" check, and its empty member list
   was read as "every profile", another machine's seat included. `claude-pick --tenant t`,
