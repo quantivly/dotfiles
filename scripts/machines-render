@@ -12,20 +12,21 @@
 # and divergence is silent in both directions: reassign a seat in one and the
 # other goes on gating the seat that machine no longer bills. DO-665.
 #
-# WHICH COPY SURVIVED, and why that direction. The tenants file is canonical
-# because a stale copy there fails OPEN and SILENTLY: `claude-profile-foreign`
-# reads an empty table as "no machine owns anything" and the DO-632/DO-641
-# guards simply stop refusing, with nothing said. rabota fails loudly by
-# comparison — a missing seat is a `Refused` naming the file. So the hand-edited
-# copy stays on the side whose staleness nobody would notice, and rabota asks
-# for the answer instead of keeping one.
+# WHICH COPY SURVIVED, and why that direction. The tenants file was made
+# canonical because a stale copy there failed OPEN and SILENTLY: the DO-632/DO-641
+# machine-ownership guards read an empty table as "no machine owns anything" and
+# simply stopped refusing, with nothing said. rabota fails loudly by comparison —
+# a missing seat is a `Refused` naming the file. Those guards went with DO-810;
+# the file stays canonical because every launch already reads it, and one it
+# cannot read refuses every launch (claude-tenants-check). rabota asks for the
+# answer instead of keeping one.
 #
 # AND NOTHING IS GENERATED. There is no rendered file to go stale, because a
 # rendered file is exactly the failure this change exists to remove, one level
 # down. This prints on demand and rabota calls it, the way `rabota doctor`
 # already shells out to `claude-pick`.
 #
-# THE FORK IS THE MECHANISM, and it is `claude-tenants-owner`'s exactly (see
+# THE FORK IS THE MECHANISM, and it is `claude-tenants-check`'s exactly (see
 # zsh/zshrc.herdr): a bare `zsh -f` that declares the arrays, sources the
 # tenants file at TOP LEVEL and prints. A tenants file may spell its tables as a
 # plain assignment, `typeset -A` or `typeset -gA`, and only a top-level source
@@ -92,7 +93,7 @@ fi
 # CONTINUES in the forked shell, and the tables are simply empty — so a single
 # unbalanced quote in the canonical file rendered `{}` with exit 0, and --check
 # passed it. The source's STATUS cannot tell these apart either: it is the status
-# of the file's last command, which is why claude-tenants-owner ignores it (a
+# of the file's last command, which is why claude-tenants-check ignores it (a
 # tenants file ending in a false command is legitimate). `zsh -n` separates the
 # two questions — does it parse, and what did it return — and only the first is
 # a fault.
@@ -104,7 +105,7 @@ if ! zsh_n_err="$(command zsh -n "$TENANTS" 2>&1)"; then
 fi
 
 # MARKED output, and the source's exit status ignored — both are failure modes
-# `claude-tenants-owner` already paid for (2026-09-20): a tenants file ending in
+# the launch-time reader already paid for (2026-09-20): a tenants file ending in
 # a false command made `|| exit` report "no owner", and a stray `print` in that
 # file BECAME the data. Marking every line lets a stray one be dropped rather
 # than parsed. stdin is closed: a file that reads would eat the caller's.

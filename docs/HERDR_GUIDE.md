@@ -997,8 +997,10 @@ stack. Treat it as **shared, not disposable**: an OOM or an unasked-for restart 
 outage.
 
 - **Policy: quantivly only.** Nothing non-work goes on dev. Its seat is **quantivly-0**,
-  held by dev's own `/login`. The laptop keeps a grant to that account so it can *see* that
-  window, but launching on that seat belongs on dev.
+  held by dev's own `/login`. The laptop keeps its own login to that account, which is how it —
+  and rabota — *sees* that window. Two logins to one seat are independent, so a laptop session
+  on it logs nothing out, but it spends the window dev's lanes are gated on: on the laptop it is
+  the quantivly pool's spill seat (`CLAUDE_TENANT_SPILL`), taken only once the pool is spent.
 - **The declared seat is checked, by `rabota doctor`, without reading a credential.**
   `[machines.<m>].profile` only *declares* which seat a machine's lanes bill; the lane
   authenticates with that machine's own login, so a machine sitting on a different account would

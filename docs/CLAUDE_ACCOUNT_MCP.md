@@ -460,15 +460,17 @@ scripts/claude-tenants-edit --commit  pool-add <tenant> <name>   # make and comm
 ```
 
 It changes one pool line and nothing else. It refuses a name that has no profile
-store, is machine-owned, is a compat symlink or is retired. It never empties a
-pool. It writes only after checking a copy: the copy parses, loads cleanly the way
+store, is a compat symlink or is retired. It never empties a pool. It writes only after checking a copy: the copy parses, loads cleanly the way
 a launch loads it, and differs from the original by exactly that change. It keeps
 a backup under `~/.local/state/claude-tenants-edit/`. `pool-remove` and
 `retire-name` work the same way, and a retired name goes into
 `CLAUDE_TENANT_RETIRED` so it is never handed out again.
 
 Leave `CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
-another machine will own the seat. Leave `CLAUDE_TENANT_BUCKETS` alone until the
+another machine will bill the seat. A seat another machine bills belongs in
+`CLAUDE_TENANT_SPILL`, not in a pool: two logins to one seat are independent, but
+they spend one usage window, and a pool member's sessions would drain the window
+that machine's lanes are gated on. Leave `CLAUDE_TENANT_BUCKETS` alone until the
 new seat's usage has been measured against the others.
 
 ### Retiring a seat

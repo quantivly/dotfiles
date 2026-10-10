@@ -207,17 +207,25 @@ _claude_holder_count_one() {
 #   CLAUDE_TENANT_PATH_ROUTES=( "$HOME/quantivly=work" )  # only without a remote
 #   CLAUDE_TENANT_DEFAULT=personal
 #   CLAUDE_TENANT_POOL=( work "quantivly-1 quantivly-2" personal "personal" )
-#   CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )   # profile=the machine that owns it
+#   CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )   # profile=the machine that bills it
 #   CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )               # profile=that machine's ID
 #
 # The last two are ONE fact keyed two ways, and are edited together: the label is
-# prose for a human reading a refusal, the id is what rabota dispatches on
-# (DO-665). `scripts/machines-render --check` refuses a partial pair; declaring
-# NEITHER is fine and means this machine registers no remote machines.
+# prose for a human, the id is what rabota dispatches on (DO-665).
+# `scripts/machines-render --check` refuses a partial pair; declaring NEITHER is
+# fine and means this machine registers no remote machines.
+#
+# ASSIGNMENT, NOT EXCLUSIVITY (DO-810). Nothing refuses a launch on a seat named
+# there: two separate logins to one seat are independent (measured 2026-10-08,
+# docs/CLAUDE_ACCOUNTS.md), so this machine using that seat logs nobody out. What
+# it still does is spend the ONE usage window the other machine's lanes are gated
+# on, and neither machine's picker sees the other's sessions. So such a seat
+# belongs in CLAUDE_TENANT_SPILL — taken only once the pool's own seats are spent
+# — and not in CLAUDE_TENANT_POOL.
 #
 # Keep this file SELF-CONTAINED: plain assignments, no shell functions, nothing
-# printed. An agent's shell re-reads it in a bare `zsh -f` (claude-tenants-owner),
-# where a function is undefined and anything printed is mistaken for data.
+# printed. Every launch re-reads it in a bare `zsh -f` (claude-tenants-check),
+# where a function is undefined, and any error it raises refuses every launch.
 #
 # No table loaded is the modular adopter's normal state: the resolver is skipped
 # entirely and CLAUDE_ACCOUNT_POOL keeps its exact meaning.
@@ -238,8 +246,8 @@ _claude_holder_count_one() {
 # return, so every table reads empty — and an unusable table does not narrow the
 # pool, it widens it to every registered profile (docs/CLAUDE_ACCOUNT_PICKER.md).
 # Measured 2026-09-20: sourced from a function, the `typeset -A` spelling left the
-# DO-641 guard silently off. The on-demand path for shells that never ran this
-# (claude-tenants-owner) therefore forks a shell rather than sourcing in place.
+# DO-641 ownership guard (removed by DO-810) silently off. The launch-time check
+# (claude-tenants-check) therefore forks a shell rather than sourcing in place.
 typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
 typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
 : "${CLAUDE_TENANT_DEFAULT=}"
@@ -508,57 +516,58 @@ _claude_profile_excluded() {
   return 1
 }
 
-# Who owns this profile according to the tenants FILE, read in a shell of its own?
+# Can the tenants FILE be trusted? Read in a shell of its own, on every launch.
+#
+#   claude-tenants-check   → 0 usable, or no tenants file at all · 2 + the fault
+#
+# EVERY LAUNCH ASKS, picked or named (DO-674, kept by DO-810). A tenants file
+# that exists and cannot be read leaves the tables empty or half-filled, and an
+# unusable table does not narrow the pool, it WIDENS it to every registered
+# profile (docs/CLAUDE_ACCOUNT_PICKER.md). Until DO-810 this check rode inside the
+# machine-ownership doors, so it fired only when a launch NAMED a profile, and
+# removing those doors would have removed it with them, silently. It is its own
+# door now (claude-tenants-door, below), called by claude(), hspawn and clauth's
+# launch forms whether or not a profile is named.
 #
 # The fork is the point. A Claude Code Bash-tool shell snapshot carries functions
 # but no variables (measured: 9,148 lines of functions beside a single `export
-# PATH=` line), so in an agent's shell the table is empty while the code that
-# reads it is present. Sourcing the file from inside a function would not fix
+# PATH=` line), so in an agent's shell the tables are empty while the code that
+# reads them is present. Sourcing the file from inside a function would not fix
 # that — a `typeset -A` in the user's file would become function-local and the
 # table would read empty anyway — so the read happens at the TOP LEVEL of a
 # `zsh -f` that exists only to answer this one question. Every spelling a tenants
 # file uses (plain assignment, `typeset -A`, `typeset -gA`) then behaves alike,
-# and nothing the file does leaks into the caller's shell.
+# and nothing the file does leaks into the caller's shell. The FILE is asked even
+# where the tables did load: a launch refused right after a bad edit is better
+# than one that proceeds on what an older shell remembers.
 #
 # THE CONSTRAINT IT PUTS ON A TENANTS FILE: that fork has no functions and no
 # unexported variables, so an assignment guarded by one — `has_command jq &&
-# CLAUDE_TENANT_MACHINE_OWNED=( … )`, `$HOSTNAME` — works in an interactive shell
-# and declares nothing here. A tenants file must be self-contained.
+# CLAUDE_TENANT_POOL=( … )`, `$HOSTNAME` — works in an interactive shell and
+# declares nothing here. A tenants file must be self-contained.
 #
 # THAT USED TO BE A SILENT FAIL-OPEN, and DO-674 is why it is not. The fork
 # ignored its exit status and discarded its stderr, so any file that ran without
-# populating the table answered "nobody owns anything" and every DO-641 door
-# stopped refusing with nothing said. Measured on the live machine 2026-09-21,
-# all reading `not foreign`: CRLF line endings, an unterminated quote, a
+# populating the tables answered as an empty one. Measured on the live machine
+# 2026-09-21, all five read as clean: CRLF line endings, an unterminated quote, a
 # subscript assignment to an undeclared table, a UTF-8 BOM, and the function
 # guard above. `scripts/machines-render` — the OTHER reader of this same file —
 # refused all five with exit 2, so the two readers of one canonical file
-# disagreed about whether a broken file was fatal.
-#
-# SO A FAULT IS NEVER "NOT FOREIGN" NOW: it is rc 2 and every door refuses,
-# because the alternative is the DO-641 incident itself — a seat spent silently,
-# invisible to both machines — while a wrong refusal is a named error carrying
-# zsh's own complaint and the `CLAUDE_FOREIGN_PROFILE_OK=1` way past it. The one
-# leniency is DO-665's: NO tenants file, and a file that owns nothing, are real
-# answers ("a modular adopter has no machines") and stay rc 1.
+# disagreed about whether a broken file was fatal. A fault is rc 2 now and every
+# door refuses. The one leniency is DO-665's: NO tenants file is a real answer
+# ("a modular adopter has none") and stays rc 0.
 #
 # WHAT STILL CANNOT BE DETECTED, stated rather than implied: a tenants file that
 # ends early SILENTLY — a `return`, or `[[ -n "$UNSET" ]] && TABLE=( … )` —
 # parses, runs cleanly, prints nothing and declares nothing. No reader can tell
 # it from an honestly empty file; only the self-contained contract forbids it.
 #
-# Reached whenever the table is EMPTY — which is the snapshot case, but also an
-# ordinary shell whose tenants file owns no profile at all. The file is re-read
-# once per guarded command there, which is why it has to be silent and
-# side-effect-free.
-#
-# COST, re-measured after DO-674 added the guards: **9.9 ms** a call, up from the
-# 1.7 ms this comment used to claim — a second fork for `zsh -n` and an `mktemp`
-# for the stderr. Still nothing against a command whose next act is to start
-# Claude Code, and it is reached once per launch, never in a loop or a prompt
-# hook. The path that an ordinary interactive shell takes is unchanged and
-# short-circuits before any fork: 0.03 ms, measured the same way.
-claude-tenants-owner() {   # $1 = profile
+# COST: **9.9 ms** a launch, measured after DO-674 added the guards — a fork for
+# `zsh -n`, one to source, and an `mktemp` for the stderr. Nothing against a
+# command whose next act is to start Claude Code, and it is reached once per
+# launch, never in a loop or a prompt hook. No tenants file costs nothing: the
+# existence test returns before any fork.
+claude-tenants-check() {
   local f="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
   # A DANGLING SYMLINK IS NOT "NO TENANTS FILE". `-e` follows the link, so a
   # broken one answers the modular adopter's question instead of its own — and a
@@ -568,20 +577,17 @@ claude-tenants-owner() {   # $1 = profile
     print -r -- "$f is a symlink whose target does not exist"; return 2
   fi
   # NO TENANTS FILE AT ALL is the modular adopter, and the one leniency here.
-  [[ -e "$f" ]] || return 1
-  # One that EXISTS but cannot be USED is a fault, and must not read as "nobody
-  # owns anything". `-f` rather than `-e`: a DIRECTORY passes both -e and -r and
-  # `source` fails on it. `-r` was `|| return 1` until DO-674, i.e. a file this
-  # shell may not read answered the same as no file at all.
+  [[ -e "$f" ]] || return 0
+  # One that EXISTS but cannot be USED is a fault, and must not read as an empty
+  # one. `-f` rather than `-e`: a DIRECTORY passes both -e and -r and `source`
+  # fails on it. `-r` was `|| return 1` until DO-674, i.e. a file this shell may
+  # not read answered the same as no file at all.
   [[ -f "$f" ]] || { print -r -- "$f is not a regular file"; return 2 }
   [[ -r "$f" ]] || { print -r -- "$f cannot be read"; return 2 }
-  # The declarations mirror the top-level ones above: a tenants file may assign
-  # any of these as a bare `name=( … )`, and an associative table assigned into
-  # an undeclared name is a normal array whose lookup silently answers nothing.
   whence -p zsh >/dev/null 2>&1 || { print -r -- "there is no zsh on PATH to read $f with"; return 2 }
   # IT MUST PARSE, checked before it is sourced. This is the discriminator the
   # fork cannot supply: `source` on a file with a syntax error fails, execution
-  # CONTINUES in the forked shell, and the table is simply empty. The source's
+  # CONTINUES in the forked shell, and the tables are simply empty. The source's
   # STATUS cannot tell these apart either — it is the status of the file's last
   # command, which is why it is ignored below (a tenants file ending in a false
   # command is legitimate). `zsh -n` separates the two questions.
@@ -590,35 +596,31 @@ claude-tenants-owner() {   # $1 = profile
     print -r -- "$f does not parse, so nothing in it ran:"$'\n'"${zsh_n_err:-zsh -n failed with no message}"
     return 2
   fi
-  # MARKED output, and the source's status ignored. Both are failure modes found
-  # by review, 2026-09-20: a tenants file ending in a false command (`[[ -n "$X" ]]`)
-  # made `|| exit 1` answer "no owner" and the guard passed a foreign profile
-  # through; a stray `print` in that file BECAME the owner, refusing every
-  # profile on the machine and naming the printed line as the owning machine.
-  # The top-level read at the head of this file ignores the status too, so the
-  # two paths now agree. stdin is closed: a file that reads would eat the
-  # caller's.
+  # The source's STATUS is ignored and its STDOUT discarded, both for reasons
+  # found by review, 2026-09-20: a tenants file may legitimately end in a false
+  # command (`[[ -n "$X" ]]`), and a stray `print` in it is noise, not a fault —
+  # discarded here so it cannot forge the sentinel either. stdin is closed: a file
+  # that reads would eat the caller's.
   #
-  # EVERY TABLE THE TENANTS FILE MAY ASSIGN IS PRE-DECLARED, not just the one
-  # read here — a subscript assignment to an undeclared name raises "assignment
-  # to invalid subscript range" and aborts the source at that line. The list is
-  # the top-level one above; `scripts/machines-render` carries the same list.
-  local fork_err raw owner
+  # EVERY TABLE THE TENANTS FILE MAY ASSIGN IS PRE-DECLARED — a subscript
+  # assignment to an undeclared name raises "assignment to invalid subscript
+  # range" and aborts the source at that line. The list is the top-level one
+  # above; `scripts/machines-render` carries the same list.
+  local fork_err raw
   fork_err="$(command mktemp)" || { print -r -- "could not create a temp file to read $f"; return 2 }
   raw="$(command zsh -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
     typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
-    source "$1"
-    print -r -- "__OWNER__${CLAUDE_TENANT_MACHINE_OWNED[$2]:-}"
+    source "$1" >/dev/null
     print -r -- "__DONE__"' \
-    tenants-owner "$f" "$1" </dev/null 2>"$fork_err")"
+    tenants-check "$f" </dev/null 2>"$fork_err")"
   local fork_err_text="$(< "$fork_err")"
   command rm -f "$fork_err"
   # ANY STDERR FROM THE FORK IS A FAULT, and this is the guard that covers the
   # CLASS rather than a list of shapes (DO-674, following DO-665). The forked
   # shell does nothing but declare, source and print, so every byte on its stderr
   # came from the tenants file — and a command in that file failing at RUN time
-  # is the way the table ends up empty that neither `zsh -n` (it parses) nor the
+  # is the way a table ends up empty that neither `zsh -n` (it parses) nor the
   # source's status (it is the file's last command) nor the sentinel (it still
   # prints) can see.
   if [[ -n "$fork_err_text" ]]; then
@@ -631,169 +633,51 @@ claude-tenants-owner() {   # $1 = profile
     print -r -- "reading $f did not finish — the shell doing it never reported back"
     return 2
   fi
-  owner="$(print -r -- "$raw" | command sed -n 's/^__OWNER__//p' | command tail -1)"
-  [[ -n "$owner" ]] || return 1
-  print -r -- "$owner"
+  return 0
 }
 
-# Is this profile OWNED BY ANOTHER MACHINE? Prints that machine's label, rc 0;
-# otherwise prints nothing, rc 1.
+# The refusal every door prints, so the doors cannot drift apart. $2 is
+# claude-tenants-check's own text, which carries zsh's complaint verbatim: the
+# fault is `^M`, a BOM or an invisible command name, and paraphrasing it leaves
+# the reader nothing to search for.
 #
-# This is for the EXPLICIT doors, every one of which goes straight past the
-# picker — and, since DO-632, for the picker's LAST RESORT too: that path
-# consults no pool by construction, so it was the one automatic selection this
-# table never reached (_claude_fallback_profile). What is still outside it is
-# the RANKED pick, where the pool remains the only enforcement — a pool that
-# LISTS an owned profile therefore still hands it out. That is a table
-# contradicting itself rather than a door left open, and closing it would put a
-# tenants-file read on every candidate of every pick; it is pinned by a row in
-# test-claude-pick.sh, so moving it is a decision rather than a drift. On
-# 2026-09-19 two `clauth start quantivly-0` sessions, typed into panes by
-# herdr-draft's account row, were spending dev's seat from the laptop while dev
-# sat idle. Holding the LOGIN stays allowed: this machine's own grant is how it
-# SEES that seat's window, and two independent logins of one account coexist
-# (docs/CLAUDE_ACCOUNTS.md). Launching on it is what drains one window from two
-# machines, each invisible to the other's picker. DO-641.
-#
-# No table, or no entry, means "not foreign": a modular adopter has no machines.
-#
-# PUBLICLY NAMED, deliberately. A Claude Code Bash-tool shell snapshot keeps
-# public functions and drops single-underscore ones, so an underscore name here
-# would make the guard fail open in exactly the population that caused the
-# incident — agent sessions — while stopping a human at a prompt. The name alone
-# is not enough: the snapshot carries no VARIABLES either, so the table is read
-# from the file on demand (claude-tenants-owner, above) or this is present and blind.
-# THREE ANSWERS SINCE DO-674, not two: 0 + the owning machine, 1 "not foreign",
-# and 2 + a fault description, meaning the tenants file exists and could not be
-# trusted, so this question HAS no answer. A caller that treats 2 as 1 puts the
-# fail-open back exactly where it was; `claude-foreign-door` is the one place
-# that reads it, so there is one place to get it wrong.
-#
-# The fault text goes on STDOUT beside the owner, never a global: every caller
-# reads this through `$( )`, and a global cannot cross a command substitution —
-# the rule this file already records for the picker's REPLY.
-claude-profile-foreign() {
-  # THE ESCAPE HATCH SHORT-CIRCUITS THE FAULT TOO. "To borrow it on purpose, for
-  # one command" has to mean the whole guard, or a broken tenants file would
-  # leave the user with a refusal whose own printed remedy does not work.
-  [[ -n "$1" && -z "${CLAUDE_FOREIGN_PROFILE_OK:-}" ]] || return 1
-  # An EMPTY table is not evidence of "no table": in a shell snapshot the data
-  # never loaded, because a snapshot carries no variables. Ask the file itself
-  # rather than reading "off" out of an artefact of where this is running.
-  local owner rc
-  # A NON-EMPTY table means the file loaded, so it cannot be at fault — the fork
-  # and its checks are skipped, and this stays the ~0-cost path it was.
-  if (( ${#CLAUDE_TENANT_MACHINE_OWNED} )); then
-    owner="${CLAUDE_TENANT_MACHINE_OWNED[$1]:-}"
-    [[ -n "$owner" ]] || return 1
-    print -r -- "$owner"
-    return 0
-  fi
-  owner="$(claude-tenants-owner "$1")"; rc=$?
-  (( rc == 2 )) && { print -r -- "$owner"; return 2 }
-  [[ -n "$owner" ]] || return 1
-  print -r -- "$owner"
-}
-
-# Which profile would `clauth resume <target>` land on when no --profile names
-# one? clauth "defaults to the session's last-ran profile" (its --help), recorded
-# in ~/.clauth/session_profiles.json. `clauth info` resolves `latest` to an id and
-# "Never launches anything" (its --help), so it is safe to ask from here.
-#
-# Prints the profile, or nothing. UNKNOWN and clauth's own "contested" print
-# nothing, and the resume then passes through. That is a CHOICE, not a blind
-# spot: clauth's documented fallback for such a session is its active profile,
-# which is readable here, and "contested" is not rare — 235 of 689 entries on
-# this machine, 34%, measured 2026-09-20. Refusing a third of all resumes to
-# catch the rare foreign one would trade a real cost for a speculative save.
-#
-# KNOWN GAP, stated rather than papered over: on a TTY clauth prompts, so a human
-# still gets a say; in an agent's shell there is no TTY and no prompt, so an
-# unattributable resume proceeds on whatever clauth picks. Closing it means
-# reading clauth's active profile here and refusing on that — cheap, and a third
-# of all resumes wide. Left open deliberately; revisit if a foreign resume ever
-# actually happens. What no wrapper can see either way is the profile chosen at
-# that prompt, after this function has returned.
-claude-resume-profile() {
-  local target="$1" id db
-  [[ -n "$target" ]] || return 1
-  db="$HOME/.clauth/session_profiles.json"
-  [[ -r "$db" ]] || return 1
-  whence -p jq >/dev/null 2>&1 || return 1
-  id="$target"
-  if [[ "$id" == latest ]]; then
-    id="$(command clauth info latest 2>/dev/null | sed -n 's/^resume:[[:space:]]*clauth resume //p')"
-    [[ -n "$id" ]] || return 1
-  fi
-  # The type test is the point: an entry is EITHER an object with .known or the
-  # bare string "contested", and indexing the string would be a silent nothing.
-  jq -e -r --arg s "$id" \
-     '.sessions[$s] | select(type == "object") | .known
-      | select(type == "string") | select(. != "")' "$db" 2>/dev/null
-}
-
-# The one refusal every door prints, so the doors cannot drift apart.
-# $4 is the door's OWN way out, and it matters: for `clauth resume` the right
-# answer is to resume under a profile you own, and a refusal whose only remedy is
-# "borrow the seat anyway" would hand the user the thing the guard exists to
-# prevent. The borrow line stays last, as the deliberate option it is.
-claude-foreign-refuse() {   # $1 = refusing command, $2 = profile, $3 = owner, $4 = remedy
-  print -u2 -- "$1: refused — '$2' is owned by $3 (CLAUDE_TENANT_MACHINE_OWNED)."
-  [[ -n "${4:-}" ]] && print -u2 -- "    $4"
-  print -u2 -- "    Run this work on $3 instead: its machine in herdr's sidebar."
-  print -u2 -- "    To borrow it on purpose, for one command: CLAUDE_FOREIGN_PROFILE_OK=1 $1 …"
-}
-
-# The refusal for the OTHER answer: the table could not be read, so whether this
-# profile is foreign is unknown. A separate emitter rather than a mode of the one
-# above, because every line of that message is false here — there is no owning
-# machine to name, so "Run this work on <machine> instead" would send the reader
-# to a machine this function just failed to identify.
-#
-# $3 is claude-tenants-owner's own text, which carries zsh's complaint verbatim:
-# the fault is `^M`, a BOM or an invisible command name, and paraphrasing it
-# leaves the reader nothing to search for.
-claude-tenants-unreadable-refuse() {   # $1 = refusing command, $2 = profile, $3 = fault
-  print -u2 -- "$1: refused — cannot tell whether '$2' is owned by another machine."
+# NO WAY PAST IS PRINTED, because none is offered (DO-810): fixing the file is
+# the remedy. Until then this printed `CLAUDE_FOREIGN_PROFILE_OK=1`, the
+# machine-ownership override, which went with the ownership doors. `command
+# claude` and `command clauth` still bypass these wrappers entirely, as they
+# always have.
+claude-tenants-refuse() {   # $1 = refusing command, $2 = fault
+  print -u2 -- "$1: refused — the tenants file cannot be trusted, and no launch proceeds until it can."
   # `print -r -- … | sed … >&2`, NOT `print -u2 … | sed`: the pipe reads fd 1,
   # so writing to fd 2 first hands sed an empty stdin and the indent silently
-  # does nothing. DO-665's copy of this line had that defect (fixed with this
-  # change); a row asserts the indentation so it cannot come back.
-  print -r -- "$3" | command sed 's/^/    /' >&2
+  # does nothing. DO-665's copy of this line had that defect; a row asserts the
+  # indentation so it cannot come back.
+  print -r -- "$2" | command sed 's/^/    /' >&2
   print -u2 -- "    A tenants file must be self-contained and silent. Check for CRLF line endings,"
   print -u2 -- "    a byte-order mark, or an assignment to a table this reader does not declare."
   print -u2 -- "    Check it parses with: zsh -n ${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
-  print -u2 -- "    To proceed unguarded, for one command: CLAUDE_FOREIGN_PROFILE_OK=1 $1 …"
 }
 
-# THE DOOR ITSELF, so the three explicit doors cannot drift apart. They used to
-# repeat a five-line `(( $+functions[…] )) && owner="$(…)"` block each; with a
-# third answer to handle that would have become three near-identical `case`
-# statements, and the argument for one emitter is the argument for one door.
+# THE DOOR ITSELF: claude(), hspawn and clauth's launch forms each make this one
+# call, so they cannot drift apart.
 #
-#   claude-foreign-door <prog> <profile> [remedy]   → 0 proceed · 3 refused, printed
+#   claude-tenants-door <prog>   → 0 proceed · 3 refused, printed
 #
-# DASHED AND PUBLIC, for the same reason `claude-profile-foreign` is: a Claude
-# Code Bash-tool shell snapshot keeps dashed functions and drops single-underscore
-# ones first, so an `_` name here would make the doors fail open in exactly the
-# population that caused the incident.
+# DASHED AND PUBLIC: a Claude Code Bash-tool shell snapshot keeps dashed
+# functions and drops single-underscore ones first, so an `_` name here would
+# make every door fail open in agent sessions while stopping a human at a prompt.
 #
-# IT ABSORBS THE PRESENCE TEST, and that is deliberate rather than tidiness: with
-# the predicate or an emitter missing this returns 0 and the launch proceeds,
-# silently — the same fail-open the doors had before, pinned by rows in
-# test-hspawn.sh and test-claude-pick.sh. A door whose guard is droppable should
-# show up there as a fail-open, not as nothing.
-claude-foreign-door() {   # $1 = prog, $2 = profile, $3 = remedy
-  [[ -n "${2:-}" ]] || return 0
-  (( $+functions[claude-profile-foreign] && $+functions[claude-foreign-refuse] \
-     && $+functions[claude-tenants-unreadable-refuse] )) || return 0
-  local out rc
-  out="$(claude-profile-foreign "$2")"; rc=$?
-  case $rc in
-    0) claude-foreign-refuse "$1" "$2" "$out" "${3:-}"; return 3 ;;
-    2) claude-tenants-unreadable-refuse "$1" "$2" "$out"; return 3 ;;
-  esac
-  return 0
+# IT ABSORBS THE PRESENCE TEST, deliberately: with the check or the emitter
+# missing this returns 0 and the launch proceeds, silently, because a wrapper
+# that breaks the launch when it breaks gets removed wholesale. Pinned by a row
+# in test-hspawn.sh, so a rename that made the guard droppable shows up there as
+# a fail-open rather than as nothing.
+claude-tenants-door() {   # $1 = prog
+  (( $+functions[claude-tenants-check] && $+functions[claude-tenants-refuse] )) || return 0
+  local out
+  out="$(claude-tenants-check)" && return 0
+  claude-tenants-refuse "$1" "$out"
+  return 3
 }
 
 # clauth's `auth_broken` list, parsed once. Sets `_CQ_NAMES` and returns 1 when
@@ -1783,31 +1667,18 @@ _claude_pick_reset_text() {
   print -r -- "$(strftime '%a %d %b %H:%M %Z' $(( EPOCHSECONDS + r )) 2>/dev/null)"
 }
 
-# clauth's own active profile, when it has a credential and this machine may
-# use it. This is the last-resort ACCOUNT: it keeps a session isolated when
-# every pool member is unusable, instead of dropping it onto the shared global
-# file.
+# clauth's own active profile, when it has a credential and is not excluded. This
+# is the last-resort ACCOUNT: it keeps a session isolated when every pool member
+# is unusable, instead of dropping it onto the shared global file.
 #
 # IT CONSULTS NO POOL, and that is the point — the pool is what just came up
-# empty. So it is also the one selection path the tenant table's exclusions
-# never reached: until DO-632 it handed out clauth's active profile whatever the
-# table said about it, and a profile is absent from every pool on this machine
-# for exactly one reason — ANOTHER MACHINE OWNS THAT SEAT. MEASURED, 2026-09-19:
-# the work pool was unusable (one seat at 100%, one behind the spend wall), so a
-# session in this repo took `personal-1`, nanoclaw's seat.
-#
-# THE COST IS A CORRELATION, and it is written as one on purpose.
-# `quantivly-0`'s login was revoked 2026-09-18 22:16:03 and needed a human
-# `/login`; two laptop sessions were found on that seat on 09-19, through
-# `clauth start` (a door DO-641 has since closed). But that rejection is
-# `RefreshError::Invalid`, which CANNOT distinguish a double-spend from a
-# genuine server-side revocation — docs/CLAUDE_ACCOUNTS.md settles that, inside
-# a correction whose stated purpose is to stop this very inference being
-# rendered as an entailment. So a double-spend is the live hypothesis, not a
-# finding, and the next revocation here still has to be diagnosed rather than
-# attributed from this comment. What is NOT in doubt is the mechanism the rule
-# rests on: refresh-token rotation is server-side, so two machines logged in to
-# one account are two independent holders of one grant.
+# empty. From DO-632 to DO-810 it also declined a seat another machine owned
+# (CLAUDE_TENANT_MACHINE_OWNED); the two-logins experiment (2026-10-08,
+# docs/CLAUDE_ACCOUNTS.md) removed that rule along with the launch doors. What
+# remains is the window cost — a seat another machine bills has one usage window
+# between them — and that is answered by making such a seat a spill seat rather
+# than a pool member, not here: the last resort is reached only when nothing
+# else is.
 #
 # SETS RATHER THAN PRINTS, because the caller cannot read a global out of a
 # `$( )` — the rule this file records for the picker's own REPLY — and the
@@ -1818,15 +1689,8 @@ _claude_pick_reset_text() {
 #   _CLAUDE_FALLBACK_WHY      why it was declined, empty when it was taken
 #
 # Returns 0 when _CLAUDE_FALLBACK_PROFILE may be taken.
-#
-# The foreign test is `claude-profile-foreign`, the SAME predicate the five
-# explicit doors use (DO-641), and not a second reading of the same table: it
-# honours `CLAUDE_FOREIGN_PROFILE_OK` for a deliberate borrow, and it re-reads
-# the tenants FILE when the table is not in memory — which is the shell an agent
-# gets, where a snapshot carries functions but no variables. An in-memory-only
-# check would be present and blind in precisely the sessions that spent the seat.
 _claude_fallback_profile() {
-  local ap why owner rc
+  local ap why
   _CLAUDE_FALLBACK_PROFILE=""; _CLAUDE_FALLBACK_WHY=""
   [[ -r "$HOME/.clauth/status.json" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
@@ -1834,35 +1698,6 @@ _claude_fallback_profile() {
         "$HOME/.clauth/status.json" 2>/dev/null)" || return 1
   [[ -f "$HOME/.clauth/profiles/$ap/credentials.json" ]] || return 1
   _CLAUDE_FALLBACK_PROFILE="$ap"
-  # Guarded, and it FAILS OPEN when the predicate is missing — but not for the
-  # reason DO-641's doors do. The argument that survives here is about which
-  # shells can hold which halves: `claude-profile-foreign` is public and dashed,
-  # so a Claude Code Bash-tool snapshot KEEPS it, while `_claude_fallback_profile`
-  # is single-underscore and is dropped from that snapshot first. There is no
-  # realistic shell holding this function without that one, so the open branch is
-  # reachable only by a deliberate `unset -f` — which is the shape the row in
-  # test-claude-pick.sh pins, so a future rename that made the guard droppable
-  # would show up as a fail-open rather than as nothing.
-  #
-  # NOT `claude-foreign-door`: this path DECLINES a candidate, it does not refuse
-  # a command, so it reports through _CLAUDE_FALLBACK_WHY instead of printing a
-  # door's refusal. It reads the predicate's three answers itself.
-  if (( $+functions[claude-profile-foreign] )); then
-    owner="$(claude-profile-foreign "$ap")"; rc=$?
-    # 2 is DO-674's "the tenants file could not be read", and declining is the
-    # only safe reading of it: the last resort consults no pool by construction,
-    # so taking a seat the table cannot vouch for is the exact fail-open this
-    # guard exists to close. Under the `&&` this branch used to live in, a 2 read
-    # as "not foreign" and the seat was taken.
-    if (( rc == 2 )); then
-      _CLAUDE_FALLBACK_WHY="the tenants file could not be read, so ownership is unknown: $owner"
-      return 1
-    fi
-    if (( rc == 0 )); then
-      _CLAUDE_FALLBACK_WHY="owned by $owner (CLAUDE_TENANT_MACHINE_OWNED)"
-      return 1
-    fi
-  fi
   if why="$(_claude_profile_excluded "$ap")"; then
     _CLAUDE_FALLBACK_WHY="$why"
     return 1
@@ -1899,7 +1734,7 @@ _claude_pick_pool() {
     _claude_pick_pool_members=( ${=CLAUDE_TENANT_POOL[$tenant]} )
     # An entry that is present but EMPTY, `( t "" )`, is no pool either: its member
     # list is just as empty, and the candidate loop would read it as every profile,
-    # another machine's seat included (DO-804). Refused like a missing entry.
+    # every other tenant's seat included (DO-804). Refused like a missing entry.
     if (( ! ${#_claude_pick_pool_members} )); then
       _claude_pick_skipped+=("tenant '$tenant' has an EMPTY CLAUDE_TENANT_POOL entry — refusing to widen the pool to every account")
       return 4
@@ -2331,13 +2166,13 @@ _claude_pick_for_dir() {
   # DO-632 — AND WHEN THE LAST RESORT DECLINES, SAY SO AND NAME THE SEAT. What
   # follows this line is the shared global credential (claude(), loudly) or a
   # refusal (hspawn, --strict), so a silent decline reads as "clauth's active
-  # account did not exist" — which is how a machine-owned seat being borrowed,
-  # and a quarantined one being skipped, both looked from the outside.
+  # account did not exist" — which is how a quarantined seat being skipped
+  # looked from the outside.
   # Two arrays, two jobs and no repeated sentence: the WARNING is printed by
   # every caller on every launch, the skipped entry is the terse phrase
   # claude() joins into its "refused:" list.
   if [[ -n "$_CLAUDE_FALLBACK_WHY" ]]; then
-    _claude_pick_warnings+=("the last resort declined clauth's active account '$_CLAUDE_FALLBACK_PROFILE': ${_CLAUDE_FALLBACK_WHY} — this session gets no account of its own rather than a seat this machine may not take")
+    _claude_pick_warnings+=("the last resort declined clauth's active account '$_CLAUDE_FALLBACK_PROFILE': ${_CLAUDE_FALLBACK_WHY} — this session gets no account of its own rather than one that cannot serve it")
     _claude_pick_skipped+=("$_CLAUDE_FALLBACK_PROFILE (${_CLAUDE_FALLBACK_WHY})")
   fi
   REPLY=""
@@ -2537,16 +2372,13 @@ claude() {
   local _CML_LOAD1=unknown _CML_NCPU=unknown _CML_SWAPPCT=unknown
   # Whose name the picker's own messages carry.
   local _claude_pick_prog=claude
-  # DO-641: a NAMED profile (claude-as, or CLAUDE_ACCOUNT_PROFILE by hand) is an
-  # explicit door past the pool, so it gets the same machine-ownership refusal.
-  # The door handles the empty-profile case, the predicate being absent, and the
-  # DO-674 "cannot tell" answer; this stays one call so the three doors agree.
-  if (( $+functions[claude-foreign-door] )); then
-    claude-foreign-door claude "${CLAUDE_ACCOUNT_PROFILE:-}" || return 3
+  # DO-674, kept by DO-810: a tenants file that exists and cannot be trusted
+  # refuses EVERY launch — picked, named (claude-as) or on an inherited config
+  # dir — not only one that names a profile. One call, the same one hspawn and
+  # clauth make, and the door handles the check being absent.
+  if (( $+functions[claude-tenants-door] )); then
+    claude-tenants-door claude || return 3
   fi
-  # Not inherited by the session this launches — see the clauth wrapper for why
-  # this is `local` and not `local -x`.
-  local CLAUDE_FOREIGN_PROFILE_OK
   # The resolver reports through these too, and they are shell-wide names.
   local _CLAUDE_TENANT="" _CLAUDE_TENANT_STATE="" _CLAUDE_TENANT_WHY=""
 
@@ -2769,19 +2601,23 @@ claude() {
   }
 }
 
-# `clauth` as a function, for the forms that NAME a profile outright —
-# `clauth start [opts] <profile>`, `clauth switch <profile>` (the machine-wide
-# switch; clauth 0.16.0 deprecates the bare `clauth <profile>` spelling, still
-# caught below) and `clauth switch <sid> <profile>` (moves a LIVE session onto a
-# profile — the same seat question, so the LAST positional is the profile).
-# A profile another machine owns is refused (claude-profile-foreign); everything
-# else reaches the binary untouched. herdr-draft's account row TYPES
-# `clauth start <p> --` into a pane's interactive shell, so this is the door the
-# 2026-09-19 sessions came through.
+# `clauth` as a function, for its LAUNCH forms — `clauth start`, `clauth resume`,
+# `clauth switch` (the machine-wide switch, and since 0.16.0 `switch <sid>
+# <profile>`, which moves a LIVE session) and the deprecated bare `clauth
+# <profile>`. Each asks claude-tenants-door first, as claude() and hspawn do, so
+# a tenants file that cannot be trusted refuses these too (DO-674); everything
+# else — `login` above all, which is how a broken account is fixed — reaches the
+# binary untouched. herdr-draft's account row TYPES `clauth start <p> --` into a
+# pane's interactive shell, so this is a real launch path, not a formality.
 #
-# FAILS OPEN where the helpers are absent — a Claude Code Bash-tool shell keeps
-# public functions and drops single-underscore ones — because a wrapper that
-# breaks `clauth` when it breaks gets removed wholesale.
+# WHICH profile is never read here. Until DO-810 this wrapper refused a profile
+# another machine owned (CLAUDE_TENANT_MACHINE_OWNED), and parsed every spelling
+# of start, switch and resume to find it; the two-logins experiment (2026-10-08,
+# docs/CLAUDE_ACCOUNTS.md) removed that rule, and with it every reason to know
+# the profile.
+#
+# FAILS OPEN where the door is absent, because a wrapper that breaks `clauth`
+# when it breaks gets removed wholesale.
 #
 # Being a function, it makes `command -v clauth` true on a machine WITHOUT the
 # binary, so "is clauth installed?" is asked as `whence -p clauth`, which sees
@@ -2794,7 +2630,7 @@ claude() {
 # claude it spawned, so a 3 from this function and a 3 from a session that itself
 # exited 3 are indistinguishable to a caller. Nothing branches on it today.
 clauth() {
-  local p="" a cmd="" target="" resume_remedy="" skip=0 want=0 i=1
+  local cmd="" i=1
   # The SUBCOMMAND is the first word that is not a top-level option, because
   # `clauth --theme compatible start <p>` is accepted by the real CLI and a
   # wrapper dispatching on "$1" alone would hand that spelling straight to the
@@ -2806,68 +2642,12 @@ clauth() {
       *)       cmd="${@[i]}"; break ;;
     esac
   done
-  if [[ "$cmd" == start ]]; then
-    for a in "${@[i+1,-1]}"; do
-      if (( skip )); then skip=0; continue; fi
-      case "$a" in
-        --theme) skip=1 ;;        # the one `clauth start` option that takes a value
-        -*) ;;
-        *) p="$a"; break ;;
-      esac
-    done
-  elif [[ "$cmd" == resume ]]; then
-    # `clauth resume --profile <p> <target>` is a launch too (clauth 0.15.2:
-    # "Resume a session under a chosen profile"). WITHOUT that flag it still
-    # launches — on the session's own last-ran profile, which no argument names,
-    # so the target is resolved through clauth's record (claude-resume-profile).
-    for a in "${@[i+1,-1]}"; do
-      if (( want )); then p="$a"; break; fi
-      if (( skip )); then skip=0; continue; fi
-      case "$a" in
-        --profile=*) p="${a#--profile=}"; break ;;
-        --profile) want=1 ;;
-        --theme) skip=1 ;;
-        -*) ;;
-        *) [[ -n "$target" ]] || target="$a" ;;
-      esac
-    done
-    if [[ -z "$p" && -n "$target" ]]; then
-      p="$(claude-resume-profile "$target")"
-      # Resolved rather than typed, so the way out is to name a profile you own —
-      # which clauth would also have offered at its own TTY prompt, after this
-      # wrapper has already returned.
-      [[ -z "$p" ]] || resume_remedy="Resume it elsewhere: clauth resume --profile <a profile you own> $target"
+  if [[ "$cmd" == (start|resume|switch) ]] \
+     || [[ -n "$cmd" && -d "$HOME/.clauth/profiles/$cmd" ]]; then
+    if (( $+functions[claude-tenants-door] )); then
+      claude-tenants-door clauth || return 3
     fi
-  elif [[ "$cmd" == switch ]]; then
-    # `clauth switch <profile>` and `clauth switch <sid> <profile>` (0.16.0). The
-    # profile is the LAST positional in both spellings; a bare `clauth switch`
-    # names nothing and passes. `--theme` is the one option taking a value, and it
-    # is read here as well as at top level because the rows put it AFTER the
-    # profile — where a wrapper that forgot it would take its value for the seat.
-    for a in "${@[i+1,-1]}"; do
-      if (( skip )); then skip=0; continue; fi
-      case "$a" in
-        --theme) skip=1 ;;
-        -*) ;;
-        *) p="$a" ;;
-      esac
-    done
-  elif [[ -n "$cmd" && -d "$HOME/.clauth/profiles/$cmd" ]]; then
-    p="$cmd"
   fi
-  # DO-641 / DO-674, through the one door the other two use. $resume_remedy is
-  # this door's OWN way out: for a resume, "borrow the seat anyway" must not be
-  # the only option on offer.
-  if (( $+functions[claude-foreign-door] )); then
-    claude-foreign-door clauth "$p" "${resume_remedy:-}" || return 3
-  fi
-  # UNSET for the child, so "for one command" is true. A prefix assignment is
-  # exported, so a borrowed launch would otherwise hand the unlocked state to the
-  # session it starts — and to every command inside it, which is the shape the
-  # guard exists to stop, reproduced from inside its own escape hatch. `local`,
-  # never `local -x`: an exported EMPTY value is a third state, and this file
-  # records an incident caused by exactly that distinction (DO-613).
-  local CLAUDE_FOREIGN_PROFILE_OK
   command clauth "$@"
 }
 
@@ -3427,10 +3207,11 @@ hspawn() {
   #
   # NEVER SILENT, in either direction: which credential a spawn burns decides
   # which account is billed, so both paths say so.
-  # DO-641: a named profile is an explicit door past the pool. Refused here,
-  # before any resolution or herdr call, so a rejected spawn reaches nothing.
-  if (( $+functions[claude-foreign-door] )); then
-    claude-foreign-door hspawn "$profile" || return 3
+  # DO-674: a tenants file that cannot be trusted refuses EVERY spawn, -p or
+  # picked — here, before any resolution or herdr call, so a rejected spawn
+  # reaches nothing (and is not left as a pane whose own claude() refuses).
+  if (( $+functions[claude-tenants-door] )); then
+    claude-tenants-door hspawn || return 3
   fi
   if (( ! profile_set )) && [[ -z "$profile" ]] && (( ! shared )); then
     if whence -p clauth >/dev/null 2>&1; then

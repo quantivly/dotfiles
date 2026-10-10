@@ -3008,7 +3008,7 @@ no_out   "...and the shell's stale copy is not consulted"       "zzz-stale"
 # --- a table a LAUNCH refuses, read the way a launch reads it -------------------
 # Found by review on 2026-10-03: `zsh -n` was the only gate and the source's
 # stderr went to /dev/null. Every row in this block printed ✓ (or "defines no
-# pools") while claude-tenants-owner refused every launch on the same file.
+# pools") while the launch-time check refused every launch on the same file.
 new_home x1; write_cred
 mk_seat a "$M1"; mk_seat b "$M1"
 mk_tenants "$POOL_AB

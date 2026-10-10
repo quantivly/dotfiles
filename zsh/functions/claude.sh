@@ -796,7 +796,7 @@ _claude_plugins_disabled() {
 #
 # A separate function because claude-doctor is one long scope in which every
 # `local` is shared. The table is read FRESH from the file, the way a launch reads
-# it (claude-tenants-owner): this shell's own copy dates from whenever it started.
+# it (claude-tenants-check): this shell's own copy dates from whenever it started.
 #
 # Never prints an account id, an organisation id, or a value from [env], from an
 # inline table, or from any key it does not know to be harmless.
@@ -853,7 +853,7 @@ _claude_doctor_pools() {
     return 0
   fi
   # "Could not read" is NOT "no pools". An unreadable or unparseable table makes
-  # every launch refuse (claude-tenants-unreadable-refuse), and a partial `source`
+  # every launch refuse (claude-tenants-refuse), and a partial `source`
   # would hand this check whatever lines ran before the error.
   if [[ ! -f "$tf" || ! -r "$tf" ]] || ! "${commands[zsh]:-zsh}" -n "$tf" 2>/dev/null; then
     _doctor_bad "the tenant table at ${tf/#$HOME/~} cannot be read or does not parse — pool checks NOT RUN"
@@ -861,7 +861,7 @@ _claude_doctor_pools() {
     return 0
   fi
 
-  # READ IT THE WAY A LAUNCH DOES (claude-tenants-owner): a clean `zsh -f`, EVERY
+  # READ IT THE WAY A LAUNCH DOES (claude-tenants-check): a clean `zsh -f`, EVERY
   # table the file may assign pre-declared, and ANY stderr a fault. `zsh -n` alone
   # passed a file that fails at RUN time — a typo'd command, CRLF line endings — and
   # this section printed ✓ while every launch refused (review, 2026-10-03). A

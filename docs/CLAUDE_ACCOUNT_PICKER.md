@@ -738,7 +738,68 @@ State tables: `scripts/test-hspawn.sh` (269 → 315) and `scripts/test-gh-routin
 Every fix is pinned by a mutant that dies (19 mutants, 19 deaths), and every mutation is dry-run for
 applicability first — a mutation that no longer applies reads exactly like a surviving mutant.
 
+## Machine ownership removed (DO-810)
+
+**The rule went because its premise was tested and failed.** From DO-641 (2026-09-19) this machine
+refused to launch on a seat listed in `CLAUDE_TENANT_MACHINE_OWNED`, through five doors
+(`claude-as` and a named `claude()`, `clauth start`/`switch`/`resume`, `hspawn -p`), the last
+resort (DO-632) and `claude-tenants-edit pool-add`, on the premise that two logins to one seat
+cannot coexist. The two-logins experiment (2026-09-30 → 10-08, [CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md))
+found them independent, so every one of those refusals went, with `CLAUDE_FOREIGN_PROFILE_OK`.
+
+**What survived is the other argument, and it has a different answer.** One seat has one usage
+window, and neither machine's picker sees the other's sessions, so a laptop session on `dev`'s seat
+drains the window rabota gates `dev`'s lanes on. That is a reason to rank the seat last, not to
+refuse it: it belongs in `CLAUDE_TENANT_SPILL` (DO-800), taken only once the pool's own seats are
+spent. The tenants file says so; no code enforces it.
+
+**The DO-674 check could not simply go with the doors, because it lived inside them.**
+`claude-foreign-door` returned 0 for an empty profile, so an unreadable tenants file was refused
+only when a launch *named* one, and deleting the doors would have deleted it silently. It is its
+own door now:
+
+- **`claude-tenants-check`** forks the same bare `zsh -f` and answers 0 (usable, or no file) or 2
+  plus the fault. It reads no table out any more, only whether the file can be trusted.
+- **`claude-tenants-door <prog>` is asked by every launch:** `claude()` first thing (picked, named,
+  or on an inherited config dir), every `hspawn` before any herdr call, and clauth's launch forms
+  (`start`, `resume`, `switch`, the bare `clauth <profile>`). `clauth login` is not a launch and
+  stays open, because it is how a broken account is fixed.
+- **No way past is offered** (decided 2026-10-10). A replacement for `CLAUDE_FOREIGN_PROFILE_OK`
+  would be a new way to launch on a half-read table. `command claude` still bypasses the wrapper,
+  as it always has.
+- **The file is asked even where the tables loaded.** The old guard skipped its fork whenever the
+  ownership table was non-empty in memory. The check now forks on every launch that has a tenants
+  file (~10 ms), so a bad edit refuses the next launch, not the next new shell. No file costs
+  nothing.
+- **The last resort no longer reads the tenants file at all.** Its DO-674 decline existed only
+  because ownership could not be told. `claude-pick` is a query, not a launch, so it does not
+  ask the door. Given an unreadable file, its last resort takes clauth's active profile, and it
+  only gets that far when every member of an already-widened pool is unusable.
+- **The clauth wrapper parses no profile.** It needed *which* profile only for the ownership
+  question, so `claude-resume-profile` and its `clauth info latest` round trip went too.
+
+**Found on the way:** `test-hspawn.sh`'s `claude_with_stub` single-quoted `$PATH`, so its PATH was
+the stub directory alone, with no `zsh` and no `sed`. That was harmless while a picked launch forked
+nothing. Once every launch ran the check, the resolver rows were refused before they reached the
+resolver. The fixture prepends now.
+
+State tables: `scripts/test-hspawn.sh` (486 → 454) and `scripts/test-claude-pick.sh`
+(549 → 539). In test-hspawn, the door rows now say every door passes an owned profile. The DO-674
+rows gained a PICKED launch, a profile-less `hspawn`, an inherited config dir, `clauth switch`, the
+bare switch, an unflagged `resume`, `login` staying open and a forged sentinel. In test-claude-pick,
+the last resort takes an owned seat, and its decline rows moved to the quarantine case.
+`scripts/test-claude-tenants-edit.sh` (123) has its owned-seat row inverted. **25 mutants, 25
+deaths**, each with an expected verdict and its diff read. The first pass was 24 of 25: reading a
+`--theme` value as the subcommand **survived**, because the two rows written for that spelling
+grepped the stub log for `CMD start fz` while the stub logs the whole argv, `CMD --theme compatible
+start fz`. Those rows read 0 whether or not the binary ran. They match the logged line now, and the
+door-removed mutant kills three more rows than it did.
+
 ## The last resort, and the seat another machine owns (DO-632)
+
+> **Superseded in part by DO-810** ([below](#machine-ownership-removed-do-810)): the last resort no
+> longer declines a seat another machine owns. The reporting this section built — loud, reportable,
+> cleared between picks — stands, for the reasons left: quarantined and disabled.
 
 **`_claude_fallback_profile` is the one selection path that consults no pool** — by
 construction, since the pool is what has just come up empty. It hands out clauth's *active*
@@ -746,11 +807,11 @@ profile so that a session still gets an account of its own rather than the share
 `~/.claude/.credentials.json`, where one bad write logs every session on the box out. That
 much is right and is unchanged.
 
-What was wrong is that a profile is absent from every pool on this machine **for exactly one
-reason: another machine owns that seat**. `~/.config/claude-tenants.zsh` says so in its own
-words — refresh-token rotation is server-side, so a profile this laptop hands out *and* a
-server logs in as are two independent holders of one grant, and they log each other out. The
-last resort walked straight past the only place that rule lived.
+What was wrong, as it was understood then, is that a profile is absent from every pool on this
+machine **for exactly one reason: another machine owns that seat**, and the tenants file held that
+this laptop and a server could not both use one seat. The two-logins experiment disproved that on
+2026-10-08 ([CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md)). The last resort walked straight past the
+only place that rule lived.
 
 **Measured, 2026-09-19**: a session in this repo ran on `personal-1`, nanoclaw's seat — the work
 pool was unusable (one seat at 100%, one behind the spend wall), so the fallback took clauth's
@@ -764,12 +825,10 @@ closed), and `quantivly-0` is the EC2 box's, in no pool here. But that rejection
 revocation** — [CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md) settles that, inside a correction whose
 stated purpose is to stop this inference being rendered as an entailment. A double-spend is
 therefore the live hypothesis, not a finding, and the next revocation on this box still has to be
-diagnosed from the daemon journal rather than attributed from here. The mechanism the rule rests
-on is not in doubt: refresh-token rotation is server-side, so two machines logged in to one
-account are two independent holders of one grant.
+diagnosed from the daemon journal rather than attributed from here.
 
-The fix is DO-641's own predicate, `claude-profile-foreign`, not a second reading of the same
-table: it honours `CLAUDE_FOREIGN_PROFILE_OK` for a deliberate borrow, and it **re-reads the
+The fix was DO-641's own predicate, `claude-profile-foreign`, not a second reading of the same
+table: it honoured `CLAUDE_FOREIGN_PROFILE_OK` for a deliberate borrow, and it **re-reads the
 tenants file when the table is not in memory**, which is the shell an agent gets — a Claude
 Code Bash-tool snapshot carries functions but no variables, so an in-memory-only check would
 be present and blind in precisely the sessions that spent the seat.
@@ -848,8 +907,9 @@ neither could be derived from the other. That is why the fix adds `CLAUDE_TENANT
 was the machine id, and once it is written down the tenants file can answer both questions.
 
 **Which copy survived, and why that direction is the whole decision.** A stale copy on the
-dotfiles side fails **open and silently**: `claude-profile-foreign` reads an empty table as "no
-machine owns anything", and the DO-632 / DO-641 guards simply stop refusing with nothing said.
+dotfiles side failed **open and silently**: `claude-profile-foreign` read an empty table as "no
+machine owns anything", and the DO-632 / DO-641 guards simply stopped refusing with nothing said
+(those guards went with DO-810).
 rabota fails **loudly** — a missing seat is a `Refused` naming the file. So the hand-edited copy
 stays where staleness would not be noticed, and the loud side asks. Choosing the direction by
 "which file feels canonical" would have put the generated artefact on the silent side.
@@ -857,7 +917,7 @@ stays where staleness would not be noticed, and the loud side asks. Choosing the
 **And nothing is generated.** A rendered file is the same defect one level down, so
 `scripts/machines-render` prints on demand and rabota shells out to it at config load — the
 same boundary `rabota doctor` already crosses to reach `claude-pick`. One `zsh -f` fork per load.
-The fork is `claude-tenants-owner`'s exactly: a bare shell that declares the arrays, sources the
+The fork is `claude-tenants-check`'s exactly: a bare shell that declares the arrays, sources the
 tenants file **at top level** and prints, so a plain assignment, `typeset -A` and `typeset -gA`
 all behave alike.
 
@@ -890,7 +950,7 @@ to prevent, at once. Three separate causes, each now its own row:
   that fails to parse *returns* to the forked shell, which then runs the loops over empty tables
   and prints any completion sentinel quite happily (measured; the first proposed fix was a
   sentinel and it did not work). The source's *status* cannot serve either: it is the status of
-  the file's last command, which is why `claude-tenants-owner` ignores it.
+  the file's last command, which is why `claude-tenants-check` ignores it.
 - **A path that is not a regular file.** A directory passes both `-e` and `-r`; `-f` is the test.
 - **A subscript assignment to another table.** The fork declared only the two machine tables, so
   `CLAUDE_TENANT_POOL[work]=…` — valid everywhere else, because `zshrc.herdr` declares that name
@@ -967,6 +1027,12 @@ first place.
 
 
 ## The other reader of that same file (DO-674)
+
+> **Moved by DO-810** ([below](#machine-ownership-removed-do-810)): with the ownership doors gone,
+> this check is its own door, `claude-tenants-door`, asked by **every** launch — `claude()` picked
+> or named, every `hspawn`, and `clauth start`/`resume`/`switch` — rather than only by one naming a
+> profile. `CLAUDE_FOREIGN_PROFILE_OK` went with the doors, so the refusal offers no way past but
+> fixing the file. What follows is the record of why the check exists.
 
 **DO-665 hardened the renderer and left the guard exactly as it was**, and the section above says
 why that mattered without noticing it had happened: `claude-tenants-owner` forked a bare `zsh -f`,

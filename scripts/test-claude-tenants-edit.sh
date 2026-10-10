@@ -217,9 +217,12 @@ new_home d3; run pool-add work w2
 check "a member already in the pool is refused" "$RC" "1"
 new_home d4; run pool-add work nostore
 check "a name with no clauth profile store is refused" "$RC" "1"
+# A seat another machine bills is no longer refused (DO-810): two logins to one
+# seat are independent. Whether it SHOULD be a pool member is the tenants file's
+# call — such a seat is meant to be a spill seat — not this tool's.
 new_home d5; run pool-add work owned1
-check "a name another machine owns is refused" "$RC" "1"
-want_err "...naming the ownership tables" "machine-ownership tables"
+check "a name another machine bills is accepted (DO-810)" "$RC" "0"
+check "...and the pool a launch reads gains it" "$(pool_of work)" "w1 w2 owned1"
 new_home d6 "$BASE
 typeset -gA CLAUDE_TENANT_RETIRED
 CLAUDE_TENANT_RETIRED=(
