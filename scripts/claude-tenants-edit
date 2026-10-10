@@ -11,8 +11,8 @@
 #   - zsh `source` runs every line up to a parse error, so an error above the
 #     pool lines leaves the pool EMPTY, and the ranked pick then widens to every
 #     profile. A file that errors at RUN time (CRLF, a typo'd command) makes every
-#     launch refuse instead (claude-tenants-owner).
-#   - `machines-render --check` validates the ownership tables, not the pools.
+#     launch refuse instead (claude-tenants-check).
+#   - `machines-render --check` validates the machine tables, not the pools.
 #   - Nothing recorded which names had been used before, so a retired name could
 #     come back as a different account.
 #
@@ -180,7 +180,7 @@ fi
 
 # ---- reading a table the way a launch does ------------------------------------
 # A bare `zsh -f`, every table a tenants file may assign pre-declared, the file
-# sourced at TOP LEVEL, and ANY stderr a fault (claude-tenants-owner,
+# sourced at TOP LEVEL, and ANY stderr a fault (claude-tenants-check,
 # machines-render). Prints one canonical line per value, sorted, so two files can
 # be compared table by table. A value holding a newline spans two dump lines;
 # nothing reports it here, but the exact comparison below then refuses the edit.
@@ -236,7 +236,7 @@ fi
 old_text="${mapfile[$real]}"
 body="${old_text%%$'\n'#}"; trail="${old_text#"$body"}"
 
-typeset -A pool ovf spill owned mid retired
+typeset -A pool ovf spill retired
 typeset -a refs
 for line in "${(@f)old_dump}"; do
   t="${line%%$SEP*}"; rest="${line#*$SEP}"; k="${rest%%$SEP*}"; v="${rest#*$SEP}"
@@ -244,8 +244,6 @@ for line in "${(@f)old_dump}"; do
     POOL)          pool[$k]="$v" ;;
     OVERFLOW)      ovf[$k]="$v"; refs+=( "$k" ) ;;
     SPILL)         spill[$k]="$v"; refs+=( "$k" ) ;;
-    MACHINE_OWNED) owned[$k]="$v" ;;
-    MACHINE_ID)    mid[$k]="$v" ;;
     RETIRED)       retired[$k]="$v" ;;
     ROUTES|PATH_ROUTES) refs+=( "${v#*=}" ) ;;
     DEFAULT)       [[ -n "$v" ]] && refs+=( "$v" ) ;;
@@ -275,8 +273,6 @@ case "$op" in
       refuse "'$name' is not a registered clauth profile (no $PROFILES/$name/credentials.json)"
     [[ -L "$ADROOT/$name" ]] && \
       refuse "'$name' is a compat symlink in $ADROOT; the picker drops it, and its dir is another profile's"
-    (( ${+owned[$name]} || ${+mid[$name]} )) && \
-      refuse "'$name' is in the machine-ownership tables; another machine bills it"
     (( ${+retired[$name]} )) && refuse "'$name' is a retired name (${retired[$name]})"
     new_members=( $members $name )
     ;;

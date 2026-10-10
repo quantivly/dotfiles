@@ -6,11 +6,12 @@ Until DO-665 this fact was written down twice — ``CLAUDE_TENANT_MACHINE_OWNED`
 agreed. Divergence was silent both ways: reassign a seat in one and the other goes on gating the
 seat that machine no longer bills.
 
-WHY THE TENANTS FILE WON, and rabota gave up its copy. A stale copy on the dotfiles side fails
-OPEN and SILENTLY: ``claude-profile-foreign`` reads an empty table as "no machine owns anything",
-and the DO-632 / DO-641 guards simply stop refusing with nothing said. rabota fails LOUDLY —
-a missing seat is a ``Refused`` naming the file. So the hand-edited copy stays where staleness
-would not be noticed, and the loud side asks.
+WHY THE TENANTS FILE WON, and rabota gave up its copy. A stale copy on the dotfiles side failed
+OPEN and SILENTLY: the DO-632 / DO-641 machine-ownership guards read an empty table as "no machine
+owns anything" and simply stopped refusing with nothing said. rabota fails LOUDLY — a missing seat
+is a ``Refused`` naming the file. So the hand-edited copy stayed where staleness would not be
+noticed, and the loud side asks. (Those guards went with DO-810; every launch still reads the
+file, and refuses when it cannot.)
 
 AND NOTHING IS CACHED TO DISK. A rendered file is the same defect one level down, so this shells
 out to ``scripts/machines-render`` on demand, the way ``rabota doctor`` already shells out to

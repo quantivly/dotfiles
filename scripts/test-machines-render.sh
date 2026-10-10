@@ -6,12 +6,14 @@
 # State table for scripts/machines-render (DO-665): the machine registry that
 # `~/.config/claude-tenants.zsh` declares and rabota consumes.
 #
-# Why this exists: the registry decides WHICH SEAT A REMOTE LANE BILLS, and the
-# guard that reads the other half of the same file (`claude-profile-foreign`,
-# DO-632/DO-641) fails OPEN and SILENTLY when its table reads empty. So every row
+# Why this exists: the registry decides WHICH SEAT A REMOTE LANE BILLS, and a
+# misread registry is silent — rabota just stops gating the seat. So every row
 # below is really about one question — can a misconfiguration come back as "this
 # machine owns nothing" instead of as an error? An empty registry and an
-# unreadable one must never be the same answer.
+# unreadable one must never be the same answer. (The other reader of the same
+# file, the launch check `claude-tenants-check`, refuses every launch on one it
+# cannot read; until DO-810 it was the DO-632/DO-641 ownership guard, which read
+# such a file as empty and stopped refusing.)
 #
 # HERMETIC: a fixture tenants file per case, no real ~/.config, no network.
 # Requires: zsh, bash, jq.
@@ -124,9 +126,9 @@ echo "=== a file that cannot be SOURCED must not read as an empty registry ==="
 # THE HOLE A REVIEW FOUND, and the reason the section above is not enough. Every
 # case here rendered `{}` with exit 0 before the fix, and --check passed all of
 # them — so one unbalanced quote in the canonical file disabled rabota's seat
-# gate while the OTHER reader of that same file (claude-profile-foreign) read it
-# empty and stopped refusing, silently, which is the pair this change exists to
-# prevent.
+# gate while the OTHER reader of that same file (then the ownership guard,
+# claude-profile-foreign) read it empty and stopped refusing, silently, which is
+# the pair this change exists to prevent.
 #
 # The discriminator is `zsh -n`, NOT the fork's exit status and NOT a sentinel:
 # a `source` that fails to parse returns to the forked shell, which then runs the
@@ -173,7 +175,7 @@ check "...naming CRLF, since no editor shows it"            "$(grep -c 'CRLF' <<
 # pipes fd 1 — an empty stdin — so sed indented nothing and the tenants file's
 # own complaint ran flush against the message, reading as a second message
 # rather than as this one's evidence. Found writing the same line for
-# claude-tenants-owner (DO-674). No other row here reads the shape of the
+# the launch-time reader (DO-674). No other row here reads the shape of the
 # output, only its words, so without this the fix is deletable. Counted as
 # "no line escaped the indent" rather than "N lines got it": the fixture is
 # two CRLF lines, so an exact count would be a row about its length.
@@ -362,7 +364,7 @@ check "...and not ALSO as a cross-check failure, which is a derived complaint" \
 echo
 echo "=== what the FORK can and cannot see, which constrains the tenants file ==="
 # Every row here is a spelling a real tenants file uses, or a shape that made
-# claude-tenants-owner answer wrongly in 2026-09-20. The fork exists so all of
+# the launch-time reader answer wrongly in 2026-09-20. The fork exists so all of
 # them behave alike; a renderer that sourced the file in-process would differ on each.
 f="$(tf 'typeset -A CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID' \
         'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )' \

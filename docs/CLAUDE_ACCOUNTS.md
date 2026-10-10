@@ -513,28 +513,22 @@ Design points that are load-bearing rather than preferences:
   first, and did. Also `${${(o)arr}[1]}` **joins the array into one scalar and indexes its first
   CHARACTER**: it returned `0` from the zero-padded sort key, and the picker silently chose nothing.
 - **Credential groups can only equal logins.** Four profiles against 18–30 sessions gives groups
-  of five to seven; `clauth login <name>` is what makes them smaller. Whether two logins can hold
-  *the same* account independently is **observed, not yet tested**: everything below happened to
-  two grants that already existed, and no `/login` was performed to see what a *new* authorisation
-  does to an old one. That is the experiment still owed, and it wants a non-preferred profile and
-  nothing in flight.
-  What is observed, both directions, on `quantivly-0` (one login on the laptop, one on dev):
-  dev's login is from 09-15 and the laptop's grant **re-issued on 09-19 12:02Z** without it
-  breaking; the laptop's grant polled continuously on 09-18 (944 polls) while dev's refreshed at
-  05:54Z; and on 09-20 dev served a live `claude -p` from its own grant at 09:13:26Z (DO-640 Task
-  B3, PR #181) while this laptop's `~/.clauth/status.json` still reported `auth_status=ok` for the
-  same account, with no `auth_broken` entry in `profiles.toml`. Neither side has knocked the other
-  out in five days of overlap. Note what that evidence is NOT: `fetch_status`/`fetched_at` are
-  clauth's usage-poll state, not proof of a live credential, and an access token minted before a
-  refresh stays valid for its 8 h regardless. `auth_status` is firmer but is poll-derived too — a
-  401 on a poll is what sets `auth_broken` — so it means "no poll has failed", not "the credential
-  is live". The load-bearing observation is the RE-ISSUE: a grant that rotated after the other
-  machine's login is one the other login did not revoke.
-  If it holds, each `/login` is an independent grant and groups shrink without new accounts; if it
-  does not, a second authorisation may revoke the first and log out every holder.
-  Either way this says nothing about window ACCOUNTING: each machine's spend stays invisible to the
-  other's picker. That is why `CLAUDE_TENANT_MACHINE_OWNED` (DO-641) refuses only LAUNCHES on another
-  machine's profile, never the login — the laptop's grant is how it sees that seat's window.
+  of five to seven; `clauth login <name>` is what makes them smaller. **Two logins to one account
+  are independent — tested, 2026-09-30 → 10-08.** A second `/login` was made on one seat, into a
+  config dir of its own, beside the grant clauth's store already held for it, and then left
+  unused for eight days while the store's grant rotated several times and served live sessions
+  throughout. On 2026-10-08 the second login refreshed on its first use and answered a
+  `claude -p` probe; the store's grant fetched usage 13 s later with `auth_status=ok`, and the
+  daemon journal logged no auth error. Neither grant revoked the other, so each `/login` is an
+  independent grant and groups shrink without new accounts. That settles what the earlier overlap
+  on `quantivly-0` (one login on the laptop, one on dev; the laptop's grant re-issued on 09-19
+  without breaking dev's) could only suggest, and it is why DO-810 removed the machine-ownership
+  refusals (DO-641's launch doors and DO-632's last-resort decline).
+  It says nothing about window ACCOUNTING: one seat has one usage window however many machines log
+  in to it, and each machine's spend stays invisible to the other's picker. So a seat another
+  machine bills is a **spill** seat here (`CLAUDE_TENANT_SPILL`, DO-800), taken only once the
+  pool's own seats are spent, not a pool member. Keep this machine's own login to it: that grant
+  is how this machine — and rabota, gating the other machine's lanes — sees the seat's window.
 - **`preferred = true` on `quantivly-3` should be REMOVED — corrected 2026-09-09.** This line
   previously read "stays", on the reasoning that once nothing reads the global credential the
   daemon's walk-back rewrites a file with no readers. That argument only holds while **both** halves

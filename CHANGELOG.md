@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The machine-ownership refusals (DO-810).** Five launch doors (`claude-as` and a named
+  `claude()`, `clauth start`/`switch`/`resume`, `hspawn -p`), the last resort and
+  `claude-tenants-edit pool-add` refused a profile in `CLAUDE_TENANT_MACHINE_OWNED`, on the premise
+  that two logins to one seat cannot coexist. A two-logins experiment (2026-09-30 → 10-08)
+  disproved it: a second `/login` sat unused for eight days while the first rotated, then
+  refreshed and answered, and the first stayed `auth_status=ok`. The doors, the last-resort
+  decline, the `pool-add` refusal and `CLAUDE_FOREIGN_PROFILE_OK` are gone. **Kept, and
+  widened:** a tenants file that exists and cannot be read (DO-674) now refuses *every* launch
+  (picked or named `claude`, every `hspawn`, `clauth start`/`resume`/`switch`) through its own
+  door, `claude-tenants-door`. Before, the check rode on the ownership doors and fired only when a
+  launch named a profile. It offers no way past but fixing the file. What still holds is window
+  accounting, since one seat has one window whichever machine spends it. So a seat another machine
+  bills belongs in `CLAUDE_TENANT_SPILL`, not a pool. State tables: `test-hspawn.sh` 486 → 454,
+  `test-claude-pick.sh` 549 → 539. 25 mutants, 25 deaths, after the sweep exposed two hollow
+  `--theme` rows.
+
 ### Fixed
 
 - **delta diffs were unreadable on a dark terminal.** The `GitHub` syntax theme is dark-on-white,
