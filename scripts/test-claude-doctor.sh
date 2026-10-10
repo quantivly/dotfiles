@@ -1591,8 +1591,9 @@ want_out "the doctor dates a cache from fetched_at, not its fresh mtime" "oldest
 # DO-787: the shadow poll (scripts/claude-usage-poll) beside clauth, per profile.
 # The poll's file is <account dir>/usage.json; clauth's is the profile store's
 # usage_cache.json. Agreement is a ✓, a gap past five points a ⚠, a poll in state
-# unknown a note carrying its reason, no poll output at all a note naming the
-# timer — never a ✗, since nothing ranks on the poll.
+# unknown or deferred (DO-813: clauth's reading was fresh) a note carrying its
+# state and reason, no poll output at all a note naming the timer — never a ✗,
+# since nothing ranks on the poll.
 mk_poll() {   # $1 = profile, $2 = 5h, $3 = 7d  (state ok, fetched two hours ago: coarse, so seconds of run time cannot move the rendering)
     printf '{"state":"ok","five_hour":{"utilization":%s},"seven_day":{"utilization":%s},"fetched_at":%s}\n' \
         "$2" "$3" "$(( ($(date +%s) - 7200) * 1000 ))" > "$FHOME/.local/state/claude-account-dirs/$1/usage.json"
@@ -1613,6 +1614,11 @@ mk_account_dir p2 linked; mk_poll p2 30.0 40.0; mk_cache p2 10.0 40.0
 mk_account_dir p3 linked
 printf '{"state":"unknown","reason":"401 from the usage endpoint; not refreshed by design","fetched_at":%s}\n' "$(( $(date +%s) * 1000 ))" \
     > "$FHOME/.local/state/claude-account-dirs/p3/usage.json"
+mk_account_dir p4 linked
+printf '{"state":"deferred","reason":"clauth fetched it 40s ago; a poll beside it would cost one side a 429","fetched_at":%s}\n' "$(( $(date +%s) * 1000 ))" \
+    > "$FHOME/.local/state/claude-account-dirs/p4/usage.json"
+mk_account_dir p5 linked
+printf 'not json\n' > "$FHOME/.local/state/claude-account-dirs/p5/usage.json"
 mkdir -p "$FHOME/.local/state/claude-account-dirs/old.retired-20260917"
 printf '{"state":"ok","five_hour":{"utilization":1.0},"seven_day":{"utilization":1.0},"fetched_at":1}\n' \
     > "$FHOME/.local/state/claude-account-dirs/old.retired-20260917/usage.json"
@@ -1620,6 +1626,8 @@ run_doctor
 want_out "agreeing readings are a ✓ with both figures and ages"      "p1: shadow 5h=10.0 7d=40.0 (2h ago) agrees with clauth 5h=10.0 7d=40.0 (2h ago)"
 want_out "a gap past five points is a ⚠ naming both sides"           "p2: shadow 5h=30.0 7d=40.0 (2h ago) vs clauth 5h=10.0 7d=40.0 (2h ago) — apart by more than 5 points"
 want_out "a poll in state unknown is a note carrying its reason"     "p3: shadow poll is 'unknown' — 401 from the usage endpoint"
+want_out "a deferred poll is a note naming its state, not 'unknown'"  "p4: shadow poll is 'deferred' — clauth fetched it 40s ago"
+want_out "an unparseable poll file reads as 'unknown', no reason"     "p5: shadow poll is 'unknown' — no reason recorded"
 # The needle is the §3d line shape, not the dir name: §3's account-dir report
 # names a retired dir too ("no clauth profile store"), so a bare name would
 # fail this row for a reason the row is not about.
@@ -3660,7 +3668,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=524
+EXPECTED_ROWS=526
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

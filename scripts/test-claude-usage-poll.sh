@@ -22,6 +22,11 @@ check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', g
 TMPROOT="$(mktemp -d)"; chmod 700 "$TMPROOT"
 trap 'kill "$STUB_PID" 2>/dev/null; rm -rf "$TMPROOT"' EXIT
 ROOT="$TMPROOT/dirs"; mkdir -p "$ROOT"
+# Hermetic: no row reads the real ~/.clauth. The rows before the clauth section
+# run against an empty clauth home, so nothing defers and every eligible
+# profile is polled, as before DO-813.
+unset CLAUDE_USAGE_POLL_STALE_AFTER CLAUDE_USAGE_POLL_GAP
+export CLAUDE_USAGE_POLL_CLAUTH_DIR="$TMPROOT/clauth-empty"; mkdir -p "$CLAUDE_USAGE_POLL_CLAUTH_DIR"
 STUB_LOG="$TMPROOT/stub.log"; PORTFILE="$TMPROOT/port"; : > "$STUB_LOG"
 
 cat > "$TMPROOT/stub.py" <<'PY'
@@ -37,7 +42,7 @@ class H(http.server.BaseHTTPRequestHandler):
         return tok
     def do_GET(self):
         tok = self._log('GET')
-        if tok == 'fake-ok':
+        if tok.startswith('fake-ok'):
             body = json.dumps({"five_hour": {"utilization": 12.5, "resets_at": "2026-10-01T00:00:00Z"},
                                "seven_day": {"utilization": 40.0, "resets_at": "2026-10-03T00:00:00Z"}}).encode()
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(body)
@@ -76,8 +81,8 @@ ln -s "$ROOT/ok" "$ROOT/alias"
 mkdir -p "$ROOT/nocred"
 seed old.retired-20260917 fake-ret "$future"
 hits() { grep -c -- "GET $1 " "$STUB_LOG" || true; }
-state() { jq -r '.state // "none"' "$ROOT/$1/usage.json" 2>/dev/null || echo none; }
-reason() { jq -r '.reason // ""' "$ROOT/$1/usage.json" 2>/dev/null; }
+state() { jq -r '.state // "none"' "${2:-$ROOT}/$1/usage.json" 2>/dev/null || echo none; }
+reason() { jq -r '.reason // ""' "${2:-$ROOT}/$1/usage.json" 2>/dev/null; }
 
 echo "=== could not run is exit 2 ==="
 OUT="$("$SUT" --root "$TMPROOT/nowhere" --url "$URL" 2>&1)"; RC=$?
@@ -136,6 +141,66 @@ check "...and every eligible profile was still polled"                  "$(grep 
 OUT="$("$SUT" --root "$ROOT" --url "$URL" --gap x 2>&1)"; RC=$?
 check "a non-numeric --gap is could-not-run, exit 2"                    "$RC" "2"
 
+echo "=== an account clauth already reads is not polled (DO-813) ==="
+# Every token here starts fake-ok (the stub answers 200) and is unique per
+# profile, so hits() counts each profile's requests on its own.
+ROOT2="$TMPROOT/dirs2"; CL="$TMPROOT/clauth"; mkdir -p "$ROOT2" "$CL/profiles"
+now_s=$(date +%s)
+seed2() { mkdir -p "$ROOT2/$1"; printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"%s-r","expiresAt":%s}}\n' "$2" "$2" "$future" > "$ROOT2/$1/.credentials.json"; chmod 600 "$ROOT2/$1/.credentials.json"; }
+# ucache NAME JSON-FETCHED-AT — clauth's reading of that account.
+ucache() { mkdir -p "$CL/profiles/$1"; printf '{"five_hour":{"utilization":3.0},"seven_day":{"utilization":9.0},"fetched_at":%s}\n' "$2" > "$CL/profiles/$1/usage_cache.json"; }
+seed2 fresh fake-ok-fresh; ucache fresh "$(( (now_s - 60) * 1000 ))"
+seed2 stale fake-ok-stale; ucache stale "$(( (now_s - 1200) * 1000 ))"
+seed2 storm fake-ok-storm; ucache storm "$(( (now_s - 1200) * 1000 ))"
+seed2 nofa  fake-ok-nofa;  mkdir -p "$CL/profiles/nofa"; printf '{"five_hour":{"utilization":3.0}}\n' > "$CL/profiles/nofa/usage_cache.json"
+seed2 bare  fake-ok-bare   # no clauth store at all
+# q-1 beside a RateLimited q-10: matching is by whole name, not substring.
+seed2 q-1   fake-ok-q1;    ucache q-1 "$(( (now_s - 1200) * 1000 ))"
+# A fetched_at that is an arithmetic expression: bash evaluates a variable's
+# VALUE inside (( )), array subscripts included, so without the digits-only
+# check this string runs `touch` — measured under the poller's own `set -euo
+# pipefail`. The subscript is on `now`, a variable the poller has set: on an
+# unset name `set -u` aborts the run first and the command never executes, so
+# the row would pass on a crash instead of on the guard.
+seed2 evil  fake-ok-evil;  mkdir -p "$CL/profiles/evil"
+jq -cn --arg v "now[\$(touch $TMPROOT/injected)]" '{five_hour:{utilization:3.0}, fetched_at:$v}' > "$CL/profiles/evil/usage_cache.json"
+printf '{"profiles":[{"name":"storm","fetch_status":"RateLimited"},{"name":"stale","fetch_status":"Fresh"},{"name":"fresh","fetch_status":"Fresh"},{"name":"q-10","fetch_status":"RateLimited"}]}\n' > "$CL/status.json"
+OUT="$("$SUT" --root "$ROOT2" --url "$URL" --gap 0 --clauth-dir "$CL" 2>&1)"
+check "a fresh clauth reading is deferred: no request"                  "$(grep -c '^fresh: deferred (clauth fetched it 6[0-9]s ago)' <<<"$OUT")/$(hits fake-ok-fresh)" "1/0"
+check "...and usage.json says deferred, naming clauth's reading"        "$(state fresh "$ROOT2")/$(reason fresh "$ROOT2" | grep -c 'clauth fetched it')" "deferred/1"
+check "a stale clauth reading (20 min, status Fresh) is polled"         "$(hits fake-ok-stale)/$(state stale "$ROOT2")" "1/ok"
+check "a live clauth RateLimited on it is deferred: no request"         "$(grep -c '^storm: deferred (clauth is rate-limited on it)' <<<"$OUT")/$(hits fake-ok-storm)" "1/0"
+check "a clauth reading with no fetched_at is not fresh: polled"        "$(hits fake-ok-nofa)" "1"
+check "an account with no clauth store is polled"                       "$(hits fake-ok-bare)" "1"
+check "RateLimited on q-10 does not defer q-1: names match whole"       "$(hits fake-ok-q1)" "1"
+check "a fetched_at that is not digits never reaches shell arithmetic"  "$( [[ -e "$TMPROOT/injected" ]] && echo evaluated || echo inert )/$(hits fake-ok-evil)" "inert/1"
+touch -d '-20 minutes' "$CL/status.json"
+"$SUT" --root "$ROOT2" --url "$URL" --gap 0 --clauth-dir "$CL" >/dev/null 2>&1
+check "a status.json nothing rewrote for 20 min does not defer"         "$(hits fake-ok-storm)" "1"
+"$SUT" --root "$ROOT2" --url "$URL" --gap 0 --clauth-dir "$CL" --stale-after 0 >/dev/null 2>&1
+check "--stale-after 0 polls beside a fresh clauth reading"             "$(hits fake-ok-fresh)" "1"
+# The knob reaches both comparisons. Counted as deltas so each row stands alone.
+b=$(hits fake-ok-fresh); "$SUT" --root "$ROOT2" --url "$URL" --gap 0 --clauth-dir "$CL" --stale-after 30 >/dev/null 2>&1
+check "--stale-after 30 polls a reading a minute old"                   "$(( $(hits fake-ok-fresh) - b ))" "1"
+b=$(hits fake-ok-fresh); CLAUDE_USAGE_POLL_STALE_AFTER=30 "$SUT" --root "$ROOT2" --url "$URL" --gap 0 --clauth-dir "$CL" >/dev/null 2>&1
+check "...and so does CLAUDE_USAGE_POLL_STALE_AFTER=30"                 "$(( $(hits fake-ok-fresh) - b ))" "1"
+# 0290 is not octal (it has a 9): read as octal, (( )) errors, the test around
+# it swallows the error and deferral is silently off.
+b=$(hits fake-ok-fresh); "$SUT" --root "$ROOT2" --url "$URL" --gap 0 --clauth-dir "$CL" --stale-after 0290 >/dev/null 2>&1
+check "a leading zero is decimal: --stale-after 0290 still defers"      "$(( $(hits fake-ok-fresh) - b ))" "0"
+touch -d '-5 minutes' "$CL/status.json"
+b=$(hits fake-ok-storm); "$SUT" --root "$ROOT2" --url "$URL" --gap 0 --clauth-dir "$CL" --stale-after 120 >/dev/null 2>&1
+check "a status.json older than --stale-after 120 does not defer"       "$(( $(hits fake-ok-storm) - b ))" "1"
+# Without the suite's own CLAUDE_USAGE_POLL_CLAUTH_DIR, which would mark the dir
+# named by itself and leave the flag's half of the rule untested.
+OUT="$(env -u CLAUDE_USAGE_POLL_CLAUTH_DIR "$SUT" --root "$ROOT2" --url "$URL" --clauth-dir "$TMPROOT/no-such-clauth" 2>&1)"; RC=$?
+check "a named --clauth-dir that does not exist is exit 2, not 'no clauth'" "$RC/$(grep -c 'could not run' <<<"$OUT")" "2/1"
+OUT="$(CLAUDE_USAGE_POLL_CLAUTH_DIR="$TMPROOT/no-such-clauth" "$SUT" --root "$ROOT2" --url "$URL" 2>&1)"; RC=$?
+check "...and so is one named by CLAUDE_USAGE_POLL_CLAUTH_DIR"          "$RC" "2"
+OUT="$("$SUT" --root "$ROOT2" --url "$URL" --stale-after x 2>&1)"; RC=$?
+check "a non-numeric --stale-after is could-not-run, exit 2"            "$RC" "2"
+check "--help prints the whole header, through the exit codes"          "$("$SUT" --help | grep -c -e '^#   Exit:' -e '^#     --clauth-dir')" "2"
+
 echo "=== no response ==="
 OUT="$("$SUT" --root "$ROOT" --url "http://127.0.0.1:1/closed" --gap 0 2>&1)"
 check "a refused connection is unknown, not a crash"                    "$(state ok)/$(reason ok | grep -c 'no response')" "unknown/1"
@@ -143,13 +208,13 @@ check "a refused connection is unknown, not a crash"                    "$(state
 echo "=== canary: no token in any output or written file ==="
 leak=0
 for tok in fake-ok fake-401 fake-429 fake-429z fake-bad fake-exp fake-ret; do
-  grep -rq -- "$tok" "$ROOT"/*/usage.json "$ROOT"/*/.usage.retry-after 2>/dev/null && leak=$((leak + 1))
+  grep -rq -- "$tok" "$ROOT"/*/usage.json "$ROOT"/*/.usage.retry-after "$ROOT2"/*/usage.json 2>/dev/null && leak=$((leak + 1))
 done
 check "no fixture token in any file the poller wrote"                   "$leak" "0"
 check "no fixture token in the poller's output"                         "$(grep -c -E 'fake-(ok|401|429|429z|bad|exp|ret)' <<<"$OUT")" "0"
 
 # --- the row total, and the count this suite is documented as running --------
-EXPECTED_ROWS=39
+EXPECTED_ROWS=57
 docs_claim() {
   local f="$DOTFILES/$1"
   [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }

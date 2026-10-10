@@ -4,12 +4,15 @@
 # ==================================================================================
 #
 # For every real directory under the account-dir root that holds a readable
-# credential file, read the login's access token, GET the usage endpoint with
-# the headers Claude Code sends, and write `usage.json` beside the credential:
-# the raw reply plus `fetched_at` (epoch ms). Nothing reads that file yet — the
-# picker, the gate, rabota and herdr-draft all still rank on clauth's
-# `usage_cache.json` — which is the point: a week of side-by-side readings is
-# the measurement the account-manager comparison (2026-09-29) said was missing.
+# credential file and that clauth is not already reading, read the login's
+# access token, GET the usage endpoint with the headers Claude Code sends, and
+# write `usage.json` beside the credential: the raw reply plus `fetched_at`
+# (epoch ms). Nothing ranks on that file — the picker, the gate, rabota and
+# herdr-draft rank on clauth's `usage_cache.json` — and its one reader is
+# claude-doctor §3d. It was built for a week of side-by-side readings against
+# clauth (2026-09-30 → 10-10, agreeing to the point); since DO-813 it stands
+# aside while clauth's reading is fresh, so it is a second feed for when
+# clauth's goes stale.
 #
 # What this deliberately does NOT do, and why each is a rule rather than a gap:
 #
@@ -30,30 +33,54 @@
 #     An absent or zero `retry-after` is floored at 60 s: the first armed run
 #     (2026-09-30) got `retry-after: 0` on six of nine profiles, and a sidecar
 #     that lapses at once makes the next run repeat the burst.
+#   * It does not poll an account clauth is already reading. The endpoint's
+#     limit is per account, a sliding window that counts refused requests too
+#     (clauth #30), and clauth's 90 s cadence leaves no room in it: measured
+#     2026-10-10, a poll landing within 30 s after clauth's fetch was refused
+#     41% of the time, and one landing later made clauth's NEXT fetch refused
+#     instead (DO-813). So an account is polled only when clauth's own
+#     usage_cache.json is older than `CLAUDE_USAGE_POLL_STALE_AFTER` seconds
+#     (default 600, the gate's freshness bound) and clauth's live status.json
+#     does not show it RateLimited — a poll inside clauth's 429 storm would be
+#     refused and would keep the window full. Otherwise it writes
+#     `state: "deferred"`, naming clauth's reading.
 #   * Requests to the one host are paced: `CLAUDE_USAGE_POLL_GAP` seconds
-#     (default 3) between profiles, because every OAuth account hits the same
-#     host and nine back-to-back GETs tripped its burst limit while clauth's
-#     paced fetches beside them did not.
+#     (default 3) between profiles. The first armed run's nine back-to-back
+#     GETs drew a burst of 429s; the gap is a courtesy against that burst, not
+#     the budget (that is per account, above).
 #   * A symlinked account dir (a compat alias) is skipped — the target is
 #     polled under its own name (the DO-604 rule). A `*.retired-*` dir is
 #     skipped by name: its credential has no profile store behind it (DO-788).
 #
 # Usage:
-#   claude-usage-poll [--root DIR] [--url URL] [--dry-run]
+#   claude-usage-poll [--root DIR] [--url URL] [--dry-run] [--gap SEC]
+#                     [--stale-after SEC] [--clauth-dir DIR]
 #     --root     account-dir root (default ~/.local/state/claude-account-dirs,
 #                or $CLAUDE_ACCOUNT_DIRS_ROOT)
 #     --url      usage endpoint (default the Anthropic one; tests point it at a stub)
 #     --dry-run  read and decide, write nothing, send nothing
 #     --gap SEC  seconds between two profiles' requests (default 3, or
 #                $CLAUDE_USAGE_POLL_GAP); 0 only in a test against a stub
+#     --stale-after SEC  poll only when clauth's reading is older than this
+#                (default 600, or $CLAUDE_USAGE_POLL_STALE_AFTER); 0 polls
+#                beside clauth regardless, which costs one side a 429
+#     --clauth-dir DIR  clauth's home (default ~/.clauth, or
+#                $CLAUDE_USAGE_POLL_CLAUTH_DIR); tests point it at a fixture.
+#                A dir named explicitly must exist: a typo there would read as
+#                "no clauth" and poll every account beside it
+#   Knobs are decimal: a leading zero is not octal (`0600` is 600 s).
 #   Exit: 0 every profile handled (whatever its state); 2 could not run (no jq
-#   or curl, root unreadable) — never a pass.
+#   or curl, root unreadable, a non-numeric knob, a named clauth dir that is
+#   missing) — never a pass.
 #   State table: scripts/test-claude-usage-poll.sh.
 set -euo pipefail
 
 ROOT="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
 URL="${CLAUDE_USAGE_POLL_URL:-https://api.anthropic.com/api/oauth/usage}"
 GAP="${CLAUDE_USAGE_POLL_GAP:-3}"
+STALE_AFTER="${CLAUDE_USAGE_POLL_STALE_AFTER:-600}"
+CLAUTH_DIR="${CLAUDE_USAGE_POLL_CLAUTH_DIR:-$HOME/.clauth}"
+CLAUTH_NAMED=0; [[ -n "${CLAUDE_USAGE_POLL_CLAUTH_DIR:-}" ]] && CLAUTH_NAMED=1
 DRY=0
 while (( $# )); do
   case "$1" in
@@ -61,7 +88,9 @@ while (( $# )); do
     --url) URL="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --gap) GAP="$2"; shift 2 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    --stale-after) STALE_AFTER="$2"; shift 2 ;;
+    --clauth-dir) CLAUTH_DIR="$2"; CLAUTH_NAMED=1; shift 2 ;;
+    -h|--help) sed -n '2,/^set -euo/{/^set -euo/d;p;}' "$0"; exit 0 ;;
     *) printf 'claude-usage-poll: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -71,6 +100,13 @@ for tool in jq curl; do
 done
 [[ -d "$ROOT" && -r "$ROOT" ]] || { printf 'claude-usage-poll: account-dir root %s unreadable — could not run\n' "$ROOT" >&2; exit 2; }
 [[ "$GAP" =~ ^[0-9]+$ ]] || { printf 'claude-usage-poll: --gap must be a whole number of seconds — could not run\n' >&2; exit 2; }
+[[ "$STALE_AFTER" =~ ^[0-9]+$ ]] || { printf 'claude-usage-poll: --stale-after must be a whole number of seconds — could not run\n' >&2; exit 2; }
+# Base 10, said once: bash reads `08` inside (( )) as a bad octal and the error
+# is swallowed by the test around it, which silently turned deferral off.
+GAP=$((10#$GAP)); STALE_AFTER=$((10#$STALE_AFTER))
+if (( CLAUTH_NAMED )) && [[ ! -d "$CLAUTH_DIR" ]]; then
+  printf 'claude-usage-poll: clauth dir %s does not exist — could not run\n' "$CLAUTH_DIR" >&2; exit 2
+fi
 RETRY_FLOOR=60
 sent=0   # requests made this run; the gap is slept BEFORE every request but the first
 
@@ -111,6 +147,41 @@ unknown() {
   write_json "$1" "$(jq -cn --arg r "$2" --argjson t "$(now_ms)" '{state:"unknown", reason:$r, fetched_at:$t}')"
 }
 
+# deferred DIR REASON — clauth has this account; a poll beside it would collide.
+deferred() {
+  write_json "$1" "$(jq -cn --arg r "$2" --argjson t "$(now_ms)" '{state:"deferred", reason:$r, fetched_at:$t}')"
+}
+
+# clauth_reason NAME — print why clauth has this account covered, or nothing.
+# Covered means its reading is fresh (usage_cache.json's fetched_at, epoch ms,
+# within STALE_AFTER), or its daemon is ticking (status.json rewritten within
+# STALE_AFTER; the daemon rewrites it every few seconds) and reports the
+# account RateLimited. A status.json nothing has rewritten lately is a dead
+# daemon's last word, so it does not defer. `Cached` (a non-429 error) and
+# `AuthExpired` (clauth stopped) do not defer either: there clauth is not
+# spending the account's window, and a reading from the poll is the fallback
+# this exists for.
+clauth_reason() {
+  local ucf="$CLAUTH_DIR/profiles/$1/usage_cache.json" st="$CLAUTH_DIR/status.json" now fa mt
+  (( STALE_AFTER > 0 )) || return 0
+  now="$(now_ms)"
+  if [[ -r "$ucf" ]]; then
+    # Digits only, before any arithmetic: bash evaluates a variable's value
+    # inside (( )), so a string like `x[$(cmd)]` from the file would run cmd.
+    fa="$(jq -r '.fetched_at // empty' "$ucf" 2>/dev/null || true)"
+    if [[ "$fa" =~ ^[0-9]{13}$ ]] && (( now - fa < STALE_AFTER * 1000 )); then
+      printf 'clauth fetched it %ss ago' "$(( (now - fa) / 1000 ))"; return 0
+    fi
+  fi
+  if [[ -r "$st" ]]; then
+    mt="$(stat -c %Y "$st" 2>/dev/null || echo 0)"
+    if (( now / 1000 - mt < STALE_AFTER )) &&
+       [[ "$(jq -r --arg n "$1" '[.profiles[]? | select(.name == $n) | .fetch_status] | first // empty' "$st" 2>/dev/null)" == RateLimited ]]; then
+      printf 'clauth is rate-limited on it'
+    fi
+  fi
+}
+
 for dir in "$ROOT"/*; do
   name="${dir##*/}"
   # A symlink is an alias (personal -> personal-0, quantivly-2 -> quantivly-1):
@@ -131,6 +202,12 @@ for dir in "$ROOT"/*; do
       printf '%s: skipped (rate-limited for %ss more)\n' "$name" "$(( (until_ms - $(now_ms)) / 1000 ))"; continue
     fi
     (( DRY )) || rm -f "$dir/.usage.retry-after"
+  fi
+
+  # clauth already reads this account: polling beside it costs one side a 429.
+  why="$(clauth_reason "$name")"
+  if [[ -n "$why" ]]; then
+    deferred "$dir" "$why; a poll beside it would cost one side a 429"; printf '%s: deferred (%s)\n' "$name" "$why"; continue
   fi
 
   # Expiry, read once. A credential with no expiresAt is a discovery stub
