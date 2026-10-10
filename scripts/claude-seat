@@ -242,7 +242,7 @@ done
 if ! dumpout="$(command zsh "$EDIT" dump 2>&1)"; then
   fail "cannot read the tenants file: $dumpout"
 fi
-typeset -A pool ovf spill owned mid retired connectors cacct
+typeset -A pool ovf spill mid retired connectors cacct
 for line in "${(@f)dumpout}"; do
   [[ -n "$line" ]] || continue
   tab="${line%%$SEP*}"; rest="${line#*$SEP}"; k="${rest%%$SEP*}"; v="${rest#*$SEP}"
@@ -250,7 +250,6 @@ for line in "${(@f)dumpout}"; do
     POOL)              pool[$k]="$v" ;;
     OVERFLOW)          ovf[$k]="$v" ;;
     SPILL)             spill[$k]="$v" ;;
-    MACHINE_OWNED)     owned[$k]="$v" ;;
     MACHINE_ID)        mid[$k]="$v" ;;
     RETIRED)           retired[$k]="$v" ;;
     CONNECTORS)        connectors[$k]="$v" ;;
@@ -624,8 +623,7 @@ seat_retire() {
   tombs=( "$ADROOT/$name".retired-*(N/) )
   rabota_seats
   console_seats
-  (( ${+owned[$name]} )) && blockers+=( "CLAUDE_TENANT_MACHINE_OWNED in the tenants file: another machine bills it" )
-  (( ${+mid[$name]} ))   && blockers+=( "CLAUDE_TENANT_MACHINE_ID in the tenants file" )
+  (( ${+mid[$name]} )) && blockers+=( "CLAUDE_TENANT_MACHINE_ID in the tenants file: machine '${mid[$name]}' bills it" )
   for t in $ovfs; do blockers+=( "CLAUDE_TENANT_OVERFLOW for '$t' in the tenants file" ); done
   for t in $spills; do blockers+=( "CLAUDE_TENANT_SPILL for '$t' in the tenants file" ); done
   (( ${+rseat[$name]} )) && blockers+=( "${rseat[$name]} ([seats] local)" )
@@ -913,7 +911,6 @@ done
 for t in ${(k)pool}; do for m in ${=pool[$t]}; do known_add "$m" "pool '$t'"; done; done
 for t in ${(k)ovf};  do for m in ${=ovf[$t]};  do known_add "$m" "overflow '$t'"; done; done
 for t in ${(k)spill}; do for m in ${=spill[$t]}; do known_add "$m" "spill '$t'"; done; done
-for k in ${(k)owned}; do known_add "$k" "the machine-ownership table"; done
 for k in ${(k)mid};   do known_add "$k" "the machine-id table"; done
 for k in ${(k)retired}; do known_add "$k" "the retired-names table"; done
 rabota_seats

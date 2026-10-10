@@ -1974,15 +1974,17 @@ check "...about \$PWD" \
 #-----------------------------------------------------------------------------
 # Machine-owned profiles are no longer refused (DO-810)
 #-----------------------------------------------------------------------------
-# From DO-641 to DO-810 every launch door refused a profile listed in
-# CLAUDE_TENANT_MACHINE_OWNED. The two-logins experiment (2026-10-08,
-# docs/CLAUDE_ACCOUNTS.md) removed the rule, so these rows pin that EVERY door
-# now passes such a profile straight through — each one a door that used to
-# refuse it, so reinstating any single refusal fails a row. `run` does not
+# From DO-641 to DO-810 every launch door refused a profile another machine
+# owned (CLAUDE_TENANT_MACHINE_OWNED, gone since DO-811). The two-logins
+# experiment (2026-10-08, docs/CLAUDE_ACCOUNTS.md) removed the rule, so these
+# rows pin that EVERY door passes a profile another machine bills — named in
+# CLAUDE_TENANT_MACHINE_ID, the table that survived — straight through. Each is
+# a door that used to refuse it, so reinstating any single refusal, keyed on the
+# table that is left, fails a row. `run` does not
 # truncate the clauth log, so every row here does it itself.
 echo "=== machine-owned profiles: every door passes them (DO-810) ==="
 FOREIGN_TENANTS="$TMPROOT/tenants-foreign.zsh"
-printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_ID=( fz box-z )' > "$FOREIGN_TENANTS"
 mkdir -p "$FHOME/.clauth/profiles/fz"
 export CLAUDE_TENANTS_FILE="$FOREIGN_TENANTS"
 crun()   { : > "$TMPROOT/clauth.log"; run "$1"; }
@@ -2017,7 +2019,7 @@ check "owned: hspawn -p <owned> spawns onto that profile" \
 printf '%s\n' 'typeset -A CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a1" )' > "$FOREIGN_TENANTS"
 run "print -r -- \"TABLE=\${#CLAUDE_TENANT_POOL}\""
 check "tenants: the file is sourced at TOP LEVEL, so it fills the table" "$(inout 'TABLE=1')" "1"
-printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( fz "box-z" )' > "$FOREIGN_TENANTS"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_ID=( fz box-z )' > "$FOREIGN_TENANTS"
 
 #-----------------------------------------------------------------------------
 # A tenants file that cannot be TRUSTED refuses every launch (DO-674, DO-810)

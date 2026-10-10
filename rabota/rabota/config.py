@@ -63,7 +63,7 @@ class Machine:
     repos: dict[str, str] = field(default_factory=dict)
     state_dir: str = "~/.local/state/rabota"
     # FILLED FROM THE REGISTRY, never from this file (DO-665). The seat a machine bills is
-    # declared once, in the tenants file's CLAUDE_TENANT_MACHINE_OWNED / _MACHINE_ID pair, and
+    # declared once, in the tenants file's CLAUDE_TENANT_MACHINE_ID table (DO-811), and
     # read through scripts/machines-render. A `profile` key left in a [machines.<m>] table is
     # a REFUSAL rather than an override -- see _tenant -- because a second copy that merely loses
     # is still a second copy, and the losing one is the one somebody will edit.
@@ -127,8 +127,8 @@ def _tenant(name: str, d: dict, seats_by_machine: dict[str, str] | None = None,
             raise errors.Usage(
                 f"{path or f'tenants/{name}.toml'}: "
                 f"[machines.{m}] declares profile = {v['profile']!r}, which moved to the tenants "
-                f"file in DO-665: set CLAUDE_TENANT_MACHINE_OWNED and CLAUDE_TENANT_MACHINE_ID "
-                f"there and delete this key. Two copies of which seat a machine bills is the "
+                f"file in DO-665: set CLAUDE_TENANT_MACHINE_ID there and delete this key. Two "
+                f"copies of which seat a machine bills is the "
                 f"defect, and a losing copy is still the one somebody edits")
         machines[m] = Machine(name=m, **v)
         machines[m].profile = seats_by_machine.get(m)

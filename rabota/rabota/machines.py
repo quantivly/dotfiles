@@ -4,7 +4,9 @@ Until DO-665 this fact was written down twice — ``CLAUDE_TENANT_MACHINE_OWNED`
 ``~/.config/claude-tenants.zsh`` (profile -> a human label) and ``[machines.<m>].profile`` here
 (machine id -> profile) — in two files, two formats and two languages, with nothing checking they
 agreed. Divergence was silent both ways: reassign a seat in one and the other goes on gating the
-seat that machine no longer bills.
+seat that machine no longer bills. Since DO-811 it is one table, ``CLAUDE_TENANT_MACHINE_ID``
+(profile -> machine id): the label half had no reader left once DO-810 removed the
+machine-ownership refusals, so the registry carries no label either.
 
 WHY THE TENANTS FILE WON, and rabota gave up its copy. A stale copy on the dotfiles side failed
 OPEN and SILENTLY: the DO-632 / DO-641 machine-ownership guards read an empty table as "no machine
@@ -43,10 +45,11 @@ TIMEOUT = 15
 
 
 def registry(renderer: Path | None = None, env: dict | None = None) -> dict[str, dict]:
-    """``{machine_id: {"profile": str, "label": str}}``, from the tenants file.
+    """``{machine_id: {"profile": str}}``, from the tenants file's ``CLAUDE_TENANT_MACHINE_ID``.
 
     Raises ``errors.Usage`` when the answer cannot be obtained — a missing renderer, a non-zero
-    exit (the renderer's own cross-check found the two halves of the fact disagreeing), a timeout,
+    exit (the renderer found the table unusable: an entry naming no machine, or a machine claimed
+    twice), a timeout,
     or output that is not the object this promises.
     """
     path = Path(renderer) if renderer else RENDERER
@@ -84,5 +87,5 @@ def registry(renderer: Path | None = None, env: dict | None = None) -> dict[str,
 
 
 def seats(renderer: Path | None = None, env: dict | None = None) -> dict[str, str]:
-    """``{machine_id: profile}`` — the registry with the display labels dropped."""
+    """``{machine_id: profile}`` — the registry, flattened."""
     return {m: row["profile"] for m, row in registry(renderer, env).items()}

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`CLAUDE_TENANT_MACHINE_OWNED` (DO-811).** Once DO-810 removed the ownership refusals, its only
+  reader was `scripts/machines-render`, which still required an OWNED entry per machine id. So
+  deleting it would have failed every rabota command at load and blocked every
+  `claude-tenants-edit` write. The renderer now reads `CLAUDE_TENANT_MACHINE_ID` alone and renders
+  `{machine: {profile}}`, with no label. It newly refuses an entry naming no machine. rabota
+  behaves as before (`seat_for(dev)` is `quantivly-0`), and `claude-seat retire` still refuses a
+  seat a machine bills. The table is gone from all six declared-name lists, which are now
+  cross-checked by rows. **Delete the table from your tenants file when deploying this:** assigned
+  by subscript, it is now an undeclared table, and every launch refuses.
+  `test-machines-render.sh` 67 → 70. 18 mutants, 18 deaths.
+
 - **The machine-ownership refusals (DO-810).** Five launch doors (`claude-as` and a named
   `claude()`, `clauth start`/`switch`/`resume`, `hspawn -p`), the last resort and
   `claude-tenants-edit pool-add` refused a profile in `CLAUDE_TENANT_MACHINE_OWNED`, on the premise

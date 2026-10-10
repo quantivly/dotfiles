@@ -5,12 +5,20 @@
 #
 # THE MACHINE REGISTRY, rendered once from the one place it is written down.
 #
-# "Which machine owns which clauth seat" used to be declared twice: as
+# "Which machine bills which clauth seat" used to be declared twice: as
 # `CLAUDE_TENANT_MACHINE_OWNED` (profile -> a human label) in the tenants file,
 # and as `[machines.<m>].profile` (machine id -> profile) in rabota's tenant
 # TOML. Two files, two formats, two languages, nothing checking they agree —
 # and divergence is silent in both directions: reassign a seat in one and the
-# other goes on gating the seat that machine no longer bills. DO-665.
+# other goes on gating the seat that machine no longer bills. DO-665 moved it
+# into the tenants file as a PAIR, the label table plus `CLAUDE_TENANT_MACHINE_ID`
+# (profile -> machine id), cross-checked here.
+#
+# ONE TABLE SINCE DO-811. The label table's only other reader was the
+# machine-ownership refusals, which DO-810 removed; kept, it was a table nothing
+# needed and everything validated — deleting it made this exit 1, every rabota
+# command fail at load and every `claude-tenants-edit` write refuse. So this
+# reads `CLAUDE_TENANT_MACHINE_ID` alone and the registry carries no label.
 #
 # WHICH COPY SURVIVED, and why that direction. The tenants file was made
 # canonical because a stale copy there failed OPEN and SILENTLY: the DO-632/DO-641
@@ -36,11 +44,12 @@
 # nothing printed. A `has_command jq && ...` guard in there reads EMPTY here.
 #
 # Usage:
-#   machines-render            JSON, machine id -> {profile, label}
+#   machines-render            JSON, machine id -> {profile}
 #   machines-render --check    validate only; print nothing on success
 #
-# Exit: 0 rendered (possibly `{}`) · 1 the two tables disagree · 2 the tenants
-#       file could not be read · 64 usage.
+# Exit: 0 rendered (possibly `{}`) · 1 the table is inconsistent (an unusable
+#       name, or one machine claimed by two profiles) · 2 the tenants file could
+#       not be read · 64 usage.
 #
 # AN EMPTY REGISTRY IS NOT AN ERROR. A modular adopter has no tenants file and
 # no machines, and `{}` is the true answer for them; an unreadable file that
@@ -109,12 +118,12 @@ fi
 # a false command made `|| exit` report "no owner", and a stray `print` in that
 # file BECAME the data. Marking every line lets a stray one be dropped rather
 # than parsed. stdin is closed: a file that reads would eat the caller's.
-# EVERY TABLE THE TENANTS FILE MAY ASSIGN IS PRE-DECLARED, not just the two read
+# EVERY TABLE THE TENANTS FILE MAY ASSIGN IS PRE-DECLARED, not just the one read
 # here. A tenants file that writes `CLAUDE_TENANT_POOL[work]=...` — the subscript
 # form, valid everywhere else because zshrc.herdr declares that name `-gA` before
 # sourcing — would otherwise raise "assignment to invalid subscript range", abort
 # the source at that line, and hand back an empty registry. The declaration list
-# is zshrc.herdr's, plus the one this file adds.
+# is zshrc.herdr's.
 #
 # `__DONE__` IS NOT THE PARSE CHECK — `zsh -n` above is, and the distinction is
 # worth stating because the obvious reading is wrong: a `source` that fails to
@@ -138,23 +147,17 @@ fork_err="$(command mktemp)" || { print -u2 -- "machines-render: could not creat
 raw="$(command zsh -f -c '
   typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
   typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR \
-              CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED \
+              CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED \
               CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
   source "$1"
-  for p in "${(@k)CLAUDE_TENANT_MACHINE_OWNED}"; do
-    v="${CLAUDE_TENANT_MACHINE_OWNED[$p]}"
+  for p in "${(@k)CLAUDE_TENANT_MACHINE_ID}"; do
+    v="${CLAUDE_TENANT_MACHINE_ID[$p]}"
     # A tab or a newline would be re-split downstream and silently truncate the
     # field, or synthesise a marker line and invent a machine. Refused rather
     # than mangled. THE KEY IS CHECKED TOO: a profile name is likelier to be
     # clean, but an unchecked one does the exact thing the value check exists to
     # prevent, and does it with exit 0. `__BADKEY__` carries no payload, because
     # a key containing a tab cannot be reported through a tab-delimited line.
-    [[ "$p" == *$'"'"'\t'"'"'* || "$p" == *$'"'"'\n'"'"'* ]] && print -r -- "__BADKEY__" && continue
-    [[ "$v" == *$'"'"'\t'"'"'* || "$v" == *$'"'"'\n'"'"'* ]] && print -r -- "__BAD__$p" && continue
-    print -r -- "__OWNED__$p"$'"'"'\t'"'"'"$v"
-  done
-  for p in "${(@k)CLAUDE_TENANT_MACHINE_ID}"; do
-    v="${CLAUDE_TENANT_MACHINE_ID[$p]}"
     [[ "$p" == *$'"'"'\t'"'"'* || "$p" == *$'"'"'\n'"'"'* ]] && print -r -- "__BADKEY__" && continue
     [[ "$v" == *$'"'"'\t'"'"'* || "$v" == *$'"'"'\n'"'"'* ]] && print -r -- "__BAD__$p" && continue
     print -r -- "__ID__$p"$'"'"'\t'"'"'"$v"
@@ -205,68 +208,57 @@ if [[ $'\n'"$raw"$'\n' != *$'\n'__DONE__$'\n'* ]]; then
   exit 2
 fi
 
-typeset -A owned ids
-typeset -a bad_labels
+typeset -A ids
+typeset -a bad_values
 typeset bad_keys=0
 typeset line key val
 while IFS= read -r line; do
   case "$line" in
-    __OWNED__*) key="${line#__OWNED__}"
+    __ID__*)    key="${line#__ID__}"
                 # A marker line ALWAYS carries a tab; without this test a
                 # truncated one sets value = key, which is how a dropped line
                 # became an invented machine rather than a missing one.
                 if [[ "$key" == *$'\t'* ]]; then val="${key#*$'\t'}"; key="${key%%$'\t'*}"
                 else val=""; fi
-                owned[$key]="$val" ;;
-    __ID__*)    key="${line#__ID__}"
-                if [[ "$key" == *$'\t'* ]]; then val="${key#*$'\t'}"; key="${key%%$'\t'*}"
-                else val=""; fi
                 ids[$key]="$val" ;;
-    __BAD__*)   bad_labels+=("${line#__BAD__}") ;;
+    __BAD__*)   bad_values+=("${line#__BAD__}") ;;
     __BADKEY__) bad_keys=1 ;;
   esac
 done <<< "$raw"
 
-# THE CROSS-CHECK IS THE POINT, not the rendering. Each of these is a way the
-# two halves of one fact drift apart inside the canonical file itself, and each
-# would otherwise surface as a machine silently having no seat.
+# THE CHECKS ARE THE POINT, not the rendering. Each is a way the table can be
+# wrong inside the canonical file itself, and each would otherwise surface as a
+# machine silently having no seat, or the wrong one.
 typeset -a faults
 typeset p m
 typeset -A seen_machine
-# REPORTED ALONE, and before the cross-check. A rejected value is dropped from
-# `owned`/`ids`, so the cross-check below would then also report it as unowned or
-# unnamed — a derived complaint printed beside its own cause, which is how a
-# reader ends up fixing the wrong line.
+# REPORTED ALONE, and before the rest. A rejected value is dropped from `ids`,
+# so a later check would then report a derived complaint beside its own cause,
+# which is how a reader ends up fixing the wrong line.
 if (( bad_keys )); then
   print -u2 -- "machines-render: a profile name in $TENANTS contains a tab or a newline."
   print -u2 -- "    A profile name is an identifier; neither belongs in one, and both would"
   print -u2 -- "    silently split the registry rather than fail."
   exit 1
 fi
-if (( ${#bad_labels} )); then
+if (( ${#bad_values} )); then
   print -u2 -- "machines-render: the machine registry in $TENANTS has an unusable value:"
-  for p in "${bad_labels[@]}"; do
-    print -u2 -- "    the value for '$p' contains a tab or a newline; it is display text and neither belongs in one"
+  for p in "${bad_values[@]}"; do
+    print -u2 -- "    the machine id for '$p' contains a tab or a newline; it is an identifier and neither belongs in one"
   done
   exit 1
 fi
-# AN ENTIRELY EMPTY _MACHINE_ID IS "NOT ADOPTED", NOT DRIFT. A tenants file that
-# declares owners and no machine ids is every pre-DO-665 file, and the honest
-# answer for it is an empty registry: no machine is declared, so rabota refuses a
-# remote lane by name. Treating it as a fault instead would make EVERY rabota
-# command exit 2 — including `rabota doctor`, the tool you would reach for to
-# find out why. A PARTIAL table is the real drift and still refuses below.
-if (( ${#ids} )); then
-  for p in "${(@k)owned}"; do
-    if [[ -z "${ids[$p]:-}" ]]; then
-      faults+=("profile '$p' is owned by ${owned[$p]} but CLAUDE_TENANT_MACHINE_ID names no machine for it")
-    fi
-  done
-fi
+# AN EMPTY TABLE IS "NOT ADOPTED", NOT DRIFT: no machine is declared, so the
+# honest registry is `{}` and rabota refuses a remote lane by name. Treating it
+# as a fault would make EVERY rabota command exit 2 — including `rabota doctor`,
+# the tool you would reach for to find out why. An entry with an EMPTY machine
+# id is different: it names a seat for no machine, and would render under the
+# key "", so it refuses.
 for p in "${(@k)ids}"; do
   m="${ids[$p]}"
-  if [[ -z "${owned[$p]:-}" ]]; then
-    faults+=("CLAUDE_TENANT_MACHINE_ID maps '$p' to machine '$m', but CLAUDE_TENANT_MACHINE_OWNED does not own '$p'")
+  if [[ -z "$m" ]]; then
+    faults+=("CLAUDE_TENANT_MACHINE_ID names no machine for profile '$p'")
+    continue
   fi
   if [[ -n "${seen_machine[$m]:-}" ]]; then
     faults+=("machine '$m' is claimed by two profiles ('${seen_machine[$m]}' and '$p') — a machine bills one seat")
@@ -282,17 +274,17 @@ fi
 
 (( check_only )) && exit 0
 
-# jq builds the document from typed pieces, never string concatenation: a label
-# is data, and one apostrophe in "nanoclaw (Zvi's box)" would be the difference
-# between a document and a syntax error.
+# jq builds the document from typed pieces, never string concatenation: a name
+# is data, and one quote or backslash in it would be the difference between a
+# document and a syntax error.
 if (( ! ${#ids} )); then
   print -r -- "{}"
   exit 0
 fi
 {
   for p in "${(@k)ids}"; do
-    print -r -- "${ids[$p]}"$'\t'"$p"$'\t'"${owned[$p]}"
+    print -r -- "${ids[$p]}"$'\t'"$p"
   done
 } | command jq -R -s '
     split("\n") | map(select(length > 0)) | map(split("\t"))
-    | map({key: .[0], value: {profile: .[1], label: .[2]}}) | from_entries'
+    | map({key: .[0], value: {profile: .[1]}}) | from_entries'

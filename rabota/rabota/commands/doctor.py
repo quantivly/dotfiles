@@ -350,8 +350,8 @@ def remote_seat_identity(ctx, clauth_profiles=None) -> list[tuple[str, bool, str
             continue
         if got != want:
             rows.append((name, False, f"MISMATCH: {name!r}'s own login is NOT declared seat "
-                                      f"{m.profile!r}; {leak}. Either fix the tenants file's entry for {name!r} "
-                                      f"in tenants/{ctx.tenant.name}.toml or log {name!r} into the "
+                                      f"{m.profile!r}; {leak}. Either fix the tenants file's "
+                                      f"CLAUDE_TENANT_MACHINE_ID entry for {name!r} or log {name!r} into the "
                                       f"declared account. (Record fetched {fetched}.)"))
             continue
         rows.append((name, True, f"{name!r}'s own login is declared seat {m.profile}, compared by "

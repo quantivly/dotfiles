@@ -466,8 +466,8 @@ a backup under `~/.local/state/claude-tenants-edit/`. `pool-remove` and
 `retire-name` work the same way, and a retired name goes into
 `CLAUDE_TENANT_RETIRED` so it is never handed out again.
 
-Leave `CLAUDE_TENANT_MACHINE_OWNED` and `CLAUDE_TENANT_MACHINE_ID` alone unless
-another machine will bill the seat. A seat another machine bills belongs in
+Leave `CLAUDE_TENANT_MACHINE_ID` alone unless another machine will bill the
+seat. A seat another machine bills belongs in
 `CLAUDE_TENANT_SPILL`, not in a pool: two logins to one seat are independent, but
 they spend one usage window, and a pool member's sessions would drain the window
 that machine's lanes are gated on. Leave `CLAUDE_TENANT_BUCKETS` alone until the
@@ -487,8 +487,8 @@ that each is safe to repeat, and **nothing is deleted while a session may hold t
 seat**:
 
 1. **Refuse** when something the command does not edit names the seat: rabota's
-   `[seats] local` or `CONSOLE_SEATS`, the machine-ownership tables, or an overflow
-   entry. It says which; edit that first. Every pool edit is also checked before
+   `[seats] local` or `CONSOLE_SEATS`, `CLAUDE_TENANT_MACHINE_ID`, or an overflow
+   or spill entry. It says which; edit that first. Every pool edit is also checked before
    any is made, so a pool it cannot leave stops it before the first edit.
 2. **Out of every pool**, through `claude-tenants-edit`, so no new launch lands on it.
 3. **Holders, read after the pool edit and again before each step that cannot be

@@ -795,6 +795,45 @@ grepped the stub log for `CMD start fz` while the stub logs the whole argv, `CMD
 start fz`. Those rows read 0 whether or not the binary ran. They match the logged line now, and the
 door-removed mutant kills three more rows than it did.
 
+## One machine table (DO-811)
+
+**`CLAUDE_TENANT_MACHINE_OWNED` went once nothing read it.** After DO-810 its only reader was
+`scripts/machines-render`, which still demanded an OWNED entry for every `CLAUDE_TENANT_MACHINE_ID`
+entry. So deleting the table made the renderer exit 1, every rabota command fail at load, and
+every `claude-tenants-edit` write refuse (each runs `machines-render --check`). It was a table
+nothing needed and everything validated. The renderer now reads `CLAUDE_TENANT_MACHINE_ID` alone
+and renders `{machine: {profile}}`, with no label. rabota only ever read the profile, so
+`seat_for(dev)` is still `quantivly-0`.
+
+- **What the renderer still refuses:** an unreadable file (exit 2, every DO-674 shape), a tab or
+  newline in a name, two profiles claiming one machine, and, new, an entry naming **no** machine,
+  which would otherwise render under the key `""`. The old cross-check caught that last one only
+  incidentally, through the label table. An empty table is still `{}` and exit 0.
+- **A leftover label table is ignored, not validated**, when it is assigned plainly. Assigned **by
+  subscript**, it is now an assignment to a table no reader declares, and every reader refuses
+  the file (exit 2 here, and every launch). That is the right failure, but deleting the line in the
+  same change as deploying this is what keeps it from happening.
+- **The six copies of the table list are cross-checked now**, not two. Before, only `zshrc.herdr`
+  and the renderer were compared, so the doctor, `tenant-route` and `claude-tenants-edit` could
+  have kept the old name, and accepted a subscript assignment the others refuse, without a row
+  noticing.
+- **`claude-seat retire` still refuses a seat a machine bills**, now naming the machine. **`claude-seat
+  add` still counts a billed seat as a used name, and that is not redundant**, although it looked
+  it. On this laptop such a seat exists only as a clauth profile, kept for metering, and `add`
+  reads a name known *only* as a profile as an add it never finished. Dropping the machine-id
+  entry from its known names makes `add` refuse the whole tenant ("was started and not finished").
+  The mutation sweep found that, against a prediction that it would survive.
+- **Stale text fixed:** `rabota doctor`'s mismatch remedy sent the reader to `tenants/<t>.toml`,
+  where a `profile` key has been refused since DO-665. It now names `CLAUDE_TENANT_MACHINE_ID`.
+
+State tables: `scripts/test-machines-render.sh` (67 → 70). Its two-table rows became single-table
+rows, plus a leftover-label pair, an empty-id pair and the three new list-copy rows. rabota is 1111
+tests, with assertions pinning the two corrected messages and the leftover-`profile` refusal.
+**18 mutants, 18 deaths**, each with an expected verdict and its diff read. Two were predicted to
+survive and did not. The `add` one is above. The other was dumping `MACHINE_OWNED` again from
+`claude-tenants-edit`: a table nobody declares makes the dump fork write to stderr, so every edit
+refused.
+
 ## The last resort, and the seat another machine owns (DO-632)
 
 > **Superseded in part by DO-810** ([below](#machine-ownership-removed-do-810)): the last resort no
@@ -893,6 +932,10 @@ for applicability first. What the sweep cost, written down because it is the par
 
 
 ## The machine registry (DO-665)
+
+> **One table since DO-811** ([below](#one-machine-table-do-811)): the label half,
+> `CLAUDE_TENANT_MACHINE_OWNED`, went once nothing read it, and the renderer reads
+> `CLAUDE_TENANT_MACHINE_ID` alone. The cross-check this section describes is gone with it.
 
 **"Which machine owns which clauth seat" was written down twice**, in two files, two formats and
 two languages: `CLAUDE_TENANT_MACHINE_OWNED` in the tenants file (profile → a human label) and

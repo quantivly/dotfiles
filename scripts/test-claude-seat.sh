@@ -197,7 +197,7 @@ chmod +x "$STUBS/browserbin"/*
 chmod +x "$STUBS"/*
 
 BASE='typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_ID
 
 CLAUDE_TENANT_ROUTES=(
   "orgq=quantivly"
@@ -209,9 +209,6 @@ CLAUDE_TENANT_POOL=(
   personal  "personal-0"
 )
 
-CLAUDE_TENANT_MACHINE_OWNED=(
-  quantivly-4 "box (server)"
-)
 CLAUDE_TENANT_MACHINE_ID=(
   quantivly-4 box
 )'
@@ -365,7 +362,7 @@ section "C. A name that has never existed"
 #-----------------------------------------------------------------------------
 new_home c1; run add --dry-run quantivly
 check "a dry run passes" "$RC" "0"
-want_out "the next free number skips retired, compat and owned names" "proposed name: quantivly-5"
+want_out "the next free number skips retired, compat and machine-billed names" "proposed name: quantivly-5"
 no_log   "...and a dry run logs in to nothing"                         "clauth"
 check    "...and creates no profile" "$([[ -e "$FHOME/.clauth/profiles/quantivly-5" ]] && echo yes || echo no)" "no"
 new_home c2; run add --dry-run personal
@@ -376,7 +373,7 @@ check "a compat symlink's name is refused" "$RC" "1"; want_err "...named as one"
 new_home c4; run add quantivly quantivly-0
 check "a retired dir's name is refused" "$RC" "1"; want_err "...named as one" "a retired account dir"
 new_home c5; run add quantivly quantivly-4
-check "a machine-owned name is refused" "$RC" "1"
+check "a name a machine bills is refused" "$RC" "1"
 new_home c6; printf '[seats]\nlocal = "quantivly-9"\n' > "$FHOME/.dotfiles-local/rabota/tenants/other.toml"
 run add quantivly quantivly-9
 check "a name rabota uses is refused" "$RC" "1"; want_err "...naming rabota" "rabota's seat"
@@ -799,7 +796,7 @@ check "rabota's console seat is refused"           "$RC" "1"
 want_err "...naming CONSOLE_SEATS"                 "CONSOLE_SEATS in"
 new_home i5; run retire quantivly-4
 check "a seat another machine bills is refused"    "$RC" "1"
-want_err "...naming the ownership table"           "CLAUDE_TENANT_MACHINE_OWNED"
+want_err "...naming the machine that bills it"     "CLAUDE_TENANT_MACHINE_ID in the tenants file: machine 'box' bills it"
 new_home i5c "$R5
 typeset -gA CLAUDE_TENANT_SPILL
 CLAUDE_TENANT_SPILL=( personal \"quantivly-5\" )"; retire_fixture
@@ -807,10 +804,10 @@ run retire quantivly-5
 check "a seat a spill entry names is refused" "$RC" "1"
 want_err "...naming it"                       "CLAUDE_TENANT_SPILL for 'personal'"
 new_home i5b "$R5
-CLAUDE_TENANT_MACHINE_ID+=( quantivly-5 box )"; retire_fixture
+CLAUDE_TENANT_MACHINE_ID+=( quantivly-5 box5 )"; retire_fixture
 run retire quantivly-5
-check "a seat the machine-id table alone names is refused" "$RC" "1"
-want_err "...naming it"                                    "CLAUDE_TENANT_MACHINE_ID"
+check "a seat added to the machine-id table later is refused too" "$RC" "1"
+want_err "...naming that machine"                          "machine 'box5' bills it"
 new_home i6 "$R5
 typeset -gA CLAUDE_TENANT_OVERFLOW
 CLAUDE_TENANT_OVERFLOW=( personal \"quantivly-5\" )"; retire_fixture

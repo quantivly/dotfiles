@@ -46,7 +46,7 @@ for tool in zsh bash git diff; do command -v "$tool" >/dev/null || fatal "$tool 
 # `work`, which is what the row about editing the right line needs.
 BASE='# fixture tenants file
 typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_ID
 
 CLAUDE_TENANT_ROUTES=(
   "orgw=work"
@@ -61,9 +61,6 @@ CLAUDE_TENANT_POOL=(
 
 CLAUDE_TENANT_OVERFLOW=()
 
-CLAUDE_TENANT_MACHINE_OWNED=(
-  owned1 "server (box)"
-)
 CLAUDE_TENANT_MACHINE_ID=(
   owned1 box
 )
@@ -374,9 +371,9 @@ want_out "...and it says how to commit"         "not committed"
 #-----------------------------------------------------------------------------
 section "I. The checks on the edited copy"
 #-----------------------------------------------------------------------------
-# machines-render rejects an owned profile with no machine id. The edit itself
+# machines-render rejects one machine claimed by two profiles. The edit itself
 # is fine; the copy fails the check, so nothing is written.
-new_home i1 "$(printf '%s\n' "$BASE" | sed 's/^  owned1 box$/  other9 box/')"
+new_home i1 "$(printf '%s\n' "$BASE" | sed 's/^  owned1 box$/  owned1 box\n  w2 box/')"
 run pool-add work w3
 check "a copy machines-render rejects is not written" "$RC" "2"
 want_err "...naming machines-render"                  "machines-render"
