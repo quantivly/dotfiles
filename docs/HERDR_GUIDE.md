@@ -1002,7 +1002,7 @@ outage.
   on it logs nothing out, but it spends the window dev's lanes are gated on: on the laptop it is
   the quantivly pool's spill seat (`CLAUDE_TENANT_SPILL`), taken only once the pool is spent.
 - **The declared seat is checked, by `rabota doctor`, without reading a credential.**
-  `[machines.<m>].profile` only *declares* which seat a machine's lanes bill; the lane
+  `CLAUDE_TENANT_MACHINE_ID` in the tenants file only *declares* which seat a machine's lanes bill; the lane
   authenticates with that machine's own login, so a machine sitting on a different account would
   spend a window the gate never metered. `doctor` now compares clauth's own `account_id.json` for
   the declared profile against `oauthAccount.accountUuid` in that machine's `$HOME/.claude.json`

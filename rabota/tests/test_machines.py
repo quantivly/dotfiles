@@ -39,7 +39,7 @@ class RegistryTests(unittest.TestCase):
         # The end-to-end path, with no stub anywhere: the script this ships, the fork it does,
         # and the fixture file tests/__init__ points CLAUDE_TENANTS_FILE at.
         reg = machines.registry()
-        self.assertEqual(reg, {"dev": {"profile": "quantivly-0", "label": "dev (EC2)"}})
+        self.assertEqual(reg, {"dev": {"profile": "quantivly-0"}})
         self.assertEqual(machines.seats(), {"dev": "quantivly-0"})
 
     def test_the_shipped_renderer_is_where_this_module_looks_for_it(self):
@@ -83,7 +83,7 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("not an object", str(cm.exception))
 
     def test_an_entry_without_a_profile_raises_naming_the_machine(self):
-        r = fake_renderer('echo \'{"dev": {"label": "dev (EC2)"}}\'')
+        r = fake_renderer('echo \'{"dev": {}}\'')
         with self.assertRaises(errors.Usage) as cm:
             machines.registry(r)
         self.assertIn("dev", str(cm.exception))
@@ -121,6 +121,9 @@ class ConfigWiringTests(unittest.TestCase):
             config._tenant("quantivly", d, {"dev": "quantivly-0"})
         self.assertIn("DO-665", str(cm.exception))
         self.assertIn("quantivly-0", str(cm.exception))
+        # ...and it names the one table to set since DO-811, not the label twin that went.
+        self.assertIn("CLAUDE_TENANT_MACHINE_ID", str(cm.exception))
+        self.assertNotIn("MACHINE_OWNED", str(cm.exception))
 
     def test_a_renderer_failure_propagates_out_of_config_load(self):
         """THE SEAM, not the function.

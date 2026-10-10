@@ -3,8 +3,12 @@
 # scripts/test-machines-render
 # ===============================
 #
-# State table for scripts/machines-render (DO-665): the machine registry that
-# `~/.config/claude-tenants.zsh` declares and rabota consumes.
+# State table for scripts/machines-render (DO-665, DO-811): the machine registry
+# that `~/.config/claude-tenants.zsh` declares in CLAUDE_TENANT_MACHINE_ID and
+# rabota consumes. Until DO-811 the registry was a PAIR of tables cross-checked
+# against each other; the label half had no reader left after DO-810, so it went,
+# and these rows pin the one table — including that a leftover label table is
+# ignored rather than validated.
 #
 # Why this exists: the registry decides WHICH SEAT A REMOTE LANE BILLS, and a
 # misread registry is silent — rabota just stops gating the seat. So every row
@@ -49,11 +53,9 @@ run() {  # $1 = tenants file (or '-' for none), $2... = args
 }
 
 TENANTS_REAL_PROBE="$TMPROOT/plain-good.zsh"
-printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )' 'CLAUDE_TENANT_MACHINE_ID=( a1 boxy )' \
-    > "$TENANTS_REAL_PROBE"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_ID=( a1 boxy )' > "$TENANTS_REAL_PROBE"
 
-BOTH=( 'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)"  personal-1 "nanoclaw (Hetzner)" )'
-       'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev          personal-1 nanoclaw )' )
+BOTH=( 'CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev  personal-1 nanoclaw )' )
 
 echo "=== the happy path: one object, keyed by machine id ==="
 f="$(tf "${BOTH[@]}")"
@@ -61,7 +63,7 @@ run "$f"
 check "exit 0"                         "$RC" "0"
 check "both machines are present"      "$(jq -r '. | keys | join(",")' <<<"$OUT")" "dev,nanoclaw"
 check "dev's seat"                     "$(jq -r '.dev.profile' <<<"$OUT")" "quantivly-0"
-check "dev's label is carried through" "$(jq -r '.dev.label' <<<"$OUT")" "dev (EC2)"
+check "...and nothing but the seat: no label since DO-811" "$(jq -c '.dev' <<<"$OUT")" '{"profile":"quantivly-0"}'
 check "nanoclaw's seat"                "$(jq -r '.nanoclaw.profile' <<<"$OUT")" "personal-1"
 
 echo
@@ -78,31 +80,53 @@ check "a file that exists but cannot be READ is exit 2"     "$RC" "2"
 check "...and prints no registry at all"                    "$OUT" ""
 check "...naming the file"                                  "$(grep -c "$f" <<<"$ERR")" "1"
 chmod 644 "$f"
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( )' 'CLAUDE_TENANT_MACHINE_ID=( )')"
+f="$(tf 'CLAUDE_TENANT_MACHINE_ID=( )')"
 run "$f"
 check "a readable file declaring no machine is {} and exit 0" "$RC:$OUT" "0:{}"
 
 echo
-echo "=== the cross-check: the two halves of one fact, inside one file ==="
-# Each of these is a way the canonical file drifts against ITSELF. Without them
-# the renderer would happily emit a machine with a null seat, or drop a seat
-# nobody can name, and rabota would report "no seat configured" for a machine
-# the table plainly owns.
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)"  personal-1 "nanoclaw" )' \
-        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev )')"
-run "$f"
-check "a seat owned by an unnamed machine is exit 1"    "$RC" "1"
+echo "=== the table against ITSELF, inside one file ==="
+# Each of these is a way the canonical file can be wrong on its own. Without
+# them the renderer would emit a seat under the machine key "", or let two seats
+# claim one machine, and rabota would gate a lane on whichever won.
+# Its OWN path, not tf's: tf runs inside `$( )`, so its counter never advances
+# and every tf fixture is the same file, overwritten by the next. Reused below.
+EMPTYID="$TMPROOT/emptyid.zsh"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev  personal-1 "" )' > "$EMPTYID"
+run "$EMPTYID"
+check "an entry naming NO machine is exit 1, not a key \"\""  "$RC" "1"
 check "...naming the profile"                           "$(grep -c "personal-1" <<<"$ERR")" "1"
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )' \
-        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev  personal-1 nanoclaw )')"
-run "$f"
-check "a machine id for a seat nobody owns is exit 1"   "$RC" "1"
-check "...naming the machine"                           "$(grep -c "nanoclaw" <<<"$ERR")" "1"
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev" personal-1 "dev again" )' \
-        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev   personal-1 dev )')"
+f="$(tf 'CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev  personal-1 dev )')"
 run "$f"
 check "two profiles claiming ONE machine is exit 1"     "$RC" "1"
 check "...saying a machine bills one seat"              "$(grep -c 'bills one seat' <<<"$ERR")" "1"
+# TWO EMPTY IDS are two faults of one kind, not ALSO a machine "" claimed twice:
+# the empty-id branch skips the duplicate check, and without that a derived
+# complaint is printed beside its own cause.
+f="$(tf 'CLAUDE_TENANT_MACHINE_ID=( a1 ""  a2 "" )')"
+run "$f"
+check "...and two empty ids are not ALSO reported as a machine claimed twice" \
+      "$(grep -c 'claimed by two profiles' <<<"$ERR")" "0"
+
+echo
+echo "=== the label table is gone, and a leftover one is IGNORED (DO-811) ==="
+# Until DO-811 an id with no label was exit 1, and that is what made the label
+# table impossible to delete: rabota failed at load, and every claude-tenants-edit
+# write refused. A tenants file still carrying it by plain assignment is read
+# past — it does not have to agree with anything.
+f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( other9 "somewhere else" )' \
+        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev  personal-1 nanoclaw )')"
+run "$f"
+check "an id the label table does not name renders, exit 0" "$RC" "0"
+check "...with its seat"                                    "$(jq -r '.nanoclaw.profile' <<<"$OUT")" "personal-1"
+# ...BUT BY SUBSCRIPT it is now an assignment to a table nobody declares, which
+# aborts the source at that line — loud, as the undeclared-table row below
+# requires. This is the mirror of the drift rows: the name left every list.
+f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED[quantivly-0]="dev (EC2)"' \
+        'CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )')"
+run "$f"
+check "a leftover label table assigned by SUBSCRIPT is exit 2" "$RC" "2"
+check "...naming it, so the line to delete is obvious"         "$(grep -c 'CLAUDE_TENANT_MACHINE_OWNED' <<<"$ERR")" "1"
 
 echo
 echo "=== --check validates without rendering ==="
@@ -110,12 +134,9 @@ f="$(tf "${BOTH[@]}")"
 run "$f" --check
 check "--check on a good file is exit 0"            "$RC" "0"
 check "...and prints NOTHING, so it is usable in a hook" "$OUT" ""
-# A PARTIAL pair is the drift. An entirely empty _MACHINE_ID is a different
-# thing and is tolerated below, so this fixture names TWO owners and one id.
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box" a2 "box two" )' \
-        'CLAUDE_TENANT_MACHINE_ID=( a1 boxy )')"
+f="$EMPTYID"
 run "$f" --check
-check "--check on a drifted file is exit 1"         "$RC" "1"
+check "--check on an inconsistent file is exit 1"   "$RC" "1"
 run /nonexistent --check
 check "--check with no tenants file is exit 0"      "$RC" "0"
 run "$f" --nope
@@ -135,7 +156,7 @@ echo "=== a file that cannot be SOURCED must not read as an empty registry ==="
 # loops over empty tables and prints any sentinel quite happily (measured). The
 # status cannot serve either — it is the status of the file's LAST COMMAND, which
 # is why a tenants file ending in a false command is legitimate.
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "oops')"
+f="$(tf 'CLAUDE_TENANT_MACHINE_ID=( a1 "oops')"
 run "$f"
 check "an unterminated quote is exit 2, not an empty registry" "$RC" "2"
 check "...and prints no registry"                              "$OUT" ""
@@ -165,7 +186,7 @@ echo "=== a file that RUNS but does not populate the tables is a fault too ==="
 #
 # Each row below rendered `{}` with exit 0 before that guard, and --check passed
 # all of them.
-printf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )\r\nCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\r\n' \
+printf 'CLAUDE_TENANT_POOL=( w "a1" )\r\nCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\r\n' \
     > "$TMPROOT/crlf.zsh"
 run "$TMPROOT/crlf.zsh"
 check "CRLF line endings are exit 2, not an empty registry" "$RC" "2"
@@ -182,8 +203,7 @@ check "...naming CRLF, since no editor shows it"            "$(grep -c 'CRLF' <<
 check "...with the file's own complaint indented under it, not flush left" \
       "$(grep -cE '^[^ ].*command not found' <<<"$ERR")" "0"
 
-printf '\xef\xbb\xbfCLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )\nCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\n' \
-    > "$TMPROOT/bom.zsh"
+printf '\xef\xbb\xbfCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\n' > "$TMPROOT/bom.zsh"
 run "$TMPROOT/bom.zsh"
 check "a UTF-8 BOM is exit 2"                               "$RC" "2"
 
@@ -192,7 +212,6 @@ check "a UTF-8 BOM is exit 2"                               "$RC" "2"
 # it aborts the source at that line. The list is a convenience that avoids
 # refusing a file that is fine — this row pins that a missing name is LOUD.
 f="$(tf 'CLAUDE_TENANT_FUTURE[work]="x"' \
-        'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )' \
         'CLAUDE_TENANT_MACHINE_ID=( a1 boxy )')"
 run "$f"
 check "a subscript assignment to an UNDECLARED table is exit 2" "$RC" "2"
@@ -202,8 +221,7 @@ check "...carrying zsh's own complaint, which names the table"  "$(grep -c 'CLAU
 # passes just as well for a renderer that refuses everything.
 # shellcheck disable=SC2016  # fixture text written INTO a zsh file, not an
 # expression for this shell to expand.
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )' \
-        'CLAUDE_TENANT_MACHINE_ID=( a1 boxy )' \
+f="$(tf 'CLAUDE_TENANT_MACHINE_ID=( a1 boxy )' \
         '[[ -n "${NOPE:-}" ]]')"
 run "$f"
 check "a file ending in a false command still renders"      "$(jq -r '.boxy.profile' <<<"$OUT")" "a1"
@@ -218,37 +236,35 @@ echo "=== the sentinel: the read being CUT SHORT, which no other guard sees ==="
 # file that kills its own shell produces no stderr and no __DONE__, which is
 # precisely the state it exists for: measured, with the sentinel disabled this
 # same fixture renders `{}` and exits 0.
-printf 'kill -9 $$\nCLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )\n' > "$TMPROOT/killed.zsh"
+printf 'kill -9 $$\nCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\n' > "$TMPROOT/killed.zsh"
 run "$TMPROOT/killed.zsh"
 check "a fork that is killed mid-read is exit 2, not an empty registry" "$RC" "2"
 check "...and prints no registry"                                      "$OUT" ""
 check "...saying the read did not finish, not that the file is wrong"  "$(grep -c 'did not finish' <<<"$ERR")" "1"
 
 echo
-echo "=== 'a tab OR A NEWLINE', in BOTH tables ==="
-# The title, the comment and the message all promise newlines, and both loops
-# carry the identical guard — but only a tab, and only in CLAUDE_TENANT_MACHINE_OWNED,
-# had a fixture. Three mutants lived in the gap between the promise and the rows.
-printf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "line1\nline2" )\nCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\n' \
-    > "$TMPROOT/nl.zsh"
+echo "=== a machine id is an identifier: 'a tab OR A NEWLINE' is refused ==="
+# The comment and the message both promise newlines as well as tabs; when only a
+# tab had a fixture, three mutants lived in the gap between promise and rows.
+# A tab or a newline would re-split downstream and truncate the id, or
+# synthesise a marker line and invent a machine.
+printf 'CLAUDE_TENANT_MACHINE_ID=( a1 "line1\nline2" )\n' > "$TMPROOT/nl.zsh"
 run "$TMPROOT/nl.zsh"
-check "a NEWLINE in a label is refused, like a tab"   "$RC" "1"
+check "a NEWLINE in a machine id is refused, like a tab"   "$RC" "1"
 check "...naming it as the cause"                     "$(grep -c 'contains a tab or a newline' <<<"$ERR")" "1"
 
-printf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box" )\nCLAUDE_TENANT_MACHINE_ID=( a1 "boxy\tX" )\n' \
-    > "$TMPROOT/idtab.zsh"
+printf 'CLAUDE_TENANT_MACHINE_ID=( a1 "boxy\tX" )\n' > "$TMPROOT/idtab.zsh"
 run "$TMPROOT/idtab.zsh"
-check "a tab in the MACHINE_ID table is refused too"  "$RC" "1"
+check "a TAB in a machine id is refused"              "$RC" "1"
 
 echo
 echo "=== the refusals name the file they are about ==="
 # Three messages carried "$TENANTS" that no row read, so the path could be
 # dropped from all of them — and a refusal that does not say WHICH tenants file
 # is the one thing an operator with a worktree and a deployed checkout cannot act on.
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box" a2 "two" )' \
-        'CLAUDE_TENANT_MACHINE_ID=( a1 boxy )')"
+f="$EMPTYID"
 run "$f"
-check "the cross-check refusal names the tenants file"  "$(grep -c "$f" <<<"$ERR")" "1"
+check "the consistency refusal names the tenants file"  "$(grep -c "$f" <<<"$ERR")" "1"
 run "$TMPROOT/nl.zsh"
 check "the unusable-value refusal names it too"         "$(grep -c "$TMPROOT/nl.zsh" <<<"$ERR")" "1"
 
@@ -270,18 +286,17 @@ check "a dangling symlink is exit 2, not an empty registry"  "$RC" "2"
 check "...saying the target is missing"                      "$(grep -c 'target does not exist' <<<"$ERR")" "1"
 
 echo
-echo "=== a tab or newline in a profile NAME, not only in a label ==="
+echo "=== a tab or newline in a profile NAME, not only in a machine id ==="
 # The value check was there and the key check was not, so a tab in a profile
 # name did the exact thing the value check exists to prevent — split the record
 # and invent a machine — with exit 0.
-printf 'CLAUDE_TENANT_MACHINE_OWNED=( "a1\tX" "box" )\nCLAUDE_TENANT_MACHINE_ID=( "a1\tX" boxy )\n' \
-    > "$TMPROOT/tabkey.zsh"
+printf 'CLAUDE_TENANT_MACHINE_ID=( "a1\tX" boxy )\n' > "$TMPROOT/tabkey.zsh"
 run "$TMPROOT/tabkey.zsh"
 check "a TAB in a profile name is refused"                   "$RC" "1"
-check "...naming the profile name as the fault, not the label" \
+check "...naming the profile name as the fault, not the machine id" \
       "$(grep -c 'a profile name in' <<<"$ERR")" "1"
-check "...and not reporting it as a label fault as well" \
-      "$(grep -c 'is display text' <<<"$ERR")" "0"
+check "...and not reporting it as a machine-id fault as well" \
+      "$(grep -c 'the machine id for' <<<"$ERR")" "0"
 
 echo
 echo "=== the pre-declaration list must not drift from zshrc.herdr's ==="
@@ -308,67 +323,54 @@ check "every table zshrc.herdr declares is pre-declared by the fork" "$missing" 
 # is only half true and the next reader trusts it in the wrong direction.
 extra="$(comm -13 <(decl_names "$DOTFILES/zsh/zshrc.herdr") <(decl_names "$REND") | tr '\n' ',')"
 check "...and the fork declares no table zshrc.herdr does not" "$extra" ""
+# THE OTHER THREE COPIES (DO-811). The list is written out six times — twice in
+# zshrc.herdr, once here, and in the doctor, tenant-route and claude-tenants-edit
+# — and until DO-811 only these first two were compared. Removing
+# CLAUDE_TENANT_MACHINE_OWNED meant editing all six by hand; one missed copy
+# accepts a subscript assignment the others refuse, and the readers disagree.
+for copy in zsh/functions/claude.sh scripts/tenant-route scripts/claude-tenants-edit; do
+    drift="$(comm -3 <(decl_names "$DOTFILES/zsh/zshrc.herdr") <(decl_names "$DOTFILES/$copy") | tr -d '\t' | tr '\n' ',')"
+    check "$copy declares exactly zshrc.herdr's tables" "$drift" ""
+done
 
 echo
 echo "=== the fork must tolerate every OTHER table a tenants file declares ==="
 # A real tenants file assigns CLAUDE_TENANT_POOL and friends. The subscript form
 # is valid everywhere else because zsh/zshrc.herdr declares those names -gA before
-# sourcing; a fork that declared only the two machine tables raised "assignment to
+# sourcing; a fork that declared only the machine tables raised "assignment to
 # invalid subscript range", aborted the source at THAT LINE, and returned an empty
 # registry from a file that is correct.
 f="$(tf 'CLAUDE_TENANT_POOL[work]="quantivly-1 quantivly-2"' \
-        'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )' \
-        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev )')"
+        'CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )')"
 run "$f"
 check "a subscript assignment to ANOTHER table does not abort the read" \
       "$(jq -r '.dev.profile' <<<"$OUT")" "quantivly-0"
 f="$(tf 'CLAUDE_TENANT_SPILL[work]="personal-0"' \
-        'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )' \
-        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev )')"
+        'CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )')"
 run "$f"
 check "...nor does one to the spill table (DO-800)" \
       "$(jq -r '.dev.profile' <<<"$OUT")" "quantivly-0"
 
 echo
 echo "=== declaring no machine ids is 'not adopted', not drift ==="
-# Every pre-DO-665 tenants file has owners and no ids. Refusing it would make
-# EVERY rabota command exit 2 — including `rabota doctor`, the tool you would
-# reach for to find out why — so the honest answer is an empty registry, and
-# rabota then refuses a remote lane by name. A PARTIAL pair is still drift.
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)"  personal-1 "nanoclaw" )')"
+# A tenants file with pools and no machine ids is every pre-DO-665 file, and a
+# modular adopter's. Refusing it would make EVERY rabota command exit 2 —
+# including `rabota doctor`, the tool you would reach for to find out why — so
+# the honest answer is an empty registry, and rabota then refuses a remote lane
+# by name.
+f="$(tf 'CLAUDE_TENANT_POOL=( w "a1" )')"
 run "$f"
-check "owners with no ids at all is an empty registry, exit 0" "$RC:$OUT" "0:{}"
+check "a file with pools and no machine ids is an empty registry, exit 0" "$RC:$OUT" "0:{}"
 run "$f" --check
 check "...and --check is content with it"                      "$RC" "0"
-
-echo
-echo "=== a label is display text: a tab or a newline is refused, not truncated ==="
-# Both used to be silent: a tab re-split downstream and truncated the label, and a
-# newline could synthesise a marker line and invent a machine the cross-check then
-# refused FOR THE WRONG REASON.
-# printf '%b' so the \t becomes a REAL tab. With '%s' the fixture holds a literal
-# backslash-t, no fault fires, and the row passes for the wrong reason — which is
-# exactly what it did on the first run.
-printf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "dev\tEC2" )\nCLAUDE_TENANT_MACHINE_ID=( a1 boxy )\n' \
-    > "$TMPROOT/tab.zsh"
-f="$TMPROOT/tab.zsh"
-run "$f"
-check "a TAB in a label is refused"                  "$RC" "1"
-# NAMING THE CAUSE, not a consequence. A rejected value is dropped from the
-# tables, so the cross-check would refuse it too — exit 1 either way — and a row
-# that only counted the profile name passed with the whole check deleted.
-check "...naming the tab as the cause"               "$(grep -c 'contains a tab or a newline' <<<"$ERR")" "1"
-check "...and not ALSO as a cross-check failure, which is a derived complaint" \
-      "$(grep -c 'does not own' <<<"$ERR")" "0"
 
 echo
 echo "=== what the FORK can and cannot see, which constrains the tenants file ==="
 # Every row here is a spelling a real tenants file uses, or a shape that made
 # the launch-time reader answer wrongly in 2026-09-20. The fork exists so all of
 # them behave alike; a renderer that sourced the file in-process would differ on each.
-f="$(tf 'typeset -A CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID' \
-        'CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )' \
-        'CLAUDE_TENANT_MACHINE_ID=(    quantivly-0 dev )')"
+f="$(tf 'typeset -A CLAUDE_TENANT_MACHINE_ID' \
+        'CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )')"
 run "$f"
 check "a 'typeset -A' spelling renders (a function-local would read empty)" \
       "$(jq -r '.dev.profile' <<<"$OUT")" "quantivly-0"
@@ -384,15 +386,14 @@ check "a file ending in a FALSE command still renders" "$RC" "0"
 check "...with both machines"                          "$(jq -r '. | keys | length' <<<"$OUT")" "2"
 
 echo
-echo "=== a label is DATA, not JSON source ==="
+echo "=== a name is DATA, not JSON source ==="
 # jq builds from typed pieces precisely so this cannot be a syntax error. One
-# apostrophe in a label is the difference between a document and a crash, and a
+# quote in a name is the difference between a document and a crash, and a
 # renderer built with printf passes every row above and fails this one.
-f="$(tf 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "Zvi'"'"'s box, \"the loud one\"" )' \
-        'CLAUDE_TENANT_MACHINE_ID=(    a1 boxy )')"
+f="$(tf 'CLAUDE_TENANT_MACHINE_ID=( "a\"1" "box'"'"'y" )')"
 run "$f"
-check "a label with a quote and an apostrophe survives intact" \
-      "$(jq -r '.boxy.label' <<<"$OUT")" "Zvi's box, \"the loud one\""
+check "a profile and a machine id with quotes in them survive intact" \
+      "$(jq -r '.["box'"'"'y"].profile' <<<"$OUT")" 'a"1'
 check "...and the document is still valid JSON" "$(jq -e . <<<"$OUT" >/dev/null && echo valid)" "valid"
 
 # --- the row total -----------------------------------------------------------
@@ -408,7 +409,7 @@ check "...and the document is still valid JSON" "$(jq -e . <<<"$OUT" >/dev/null 
 # they are RECORDS of what a change did, true where they stand, not claims about
 # today. Asserting one would force a historical entry to be rewritten every time
 # a row lands. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=67
+EXPECTED_ROWS=70
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

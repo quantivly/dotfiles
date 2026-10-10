@@ -1651,7 +1651,8 @@ fb_quarantine() {   # clauth's own quarantine list, naming a1
     printf 'auth_broken = [\n    "a1",\n]\nprofiles = [\n    "a1",\n]\n' > "$FHOME/.clauth/profiles.toml"
 }
 FB_POOL='CLAUDE_TENANT_POOL=( t1 "zz" )'
-FB_OWNED='CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )'
+# A seat another machine bills: the table that survived DO-811.
+FB_OWNED='CLAUDE_TENANT_MACHINE_ID=( a1 box-z )'
 
 # One of the picker's arrays, after a pick that was allowed to fail.
 pickarr() {   # $1 = prelude, $2 = tenant, $3 = array name -> one entry per line
@@ -1703,7 +1704,7 @@ check "...with no decline raised about it" \
 # table in memory, a readable file on disk — so a file-reading decline that came
 # back would fail here even though the in-memory row above stays green.
 FB_OWNED_FILE="$TMPROOT/tenants-owned.zsh"
-printf '%s\n' 'CLAUDE_TENANT_MACHINE_OWNED=( a1 "box-z" )' > "$FB_OWNED_FILE"
+printf '%s\n' 'CLAUDE_TENANT_MACHINE_ID=( a1 box-z )' > "$FB_OWNED_FILE"
 fb_home fb4 a1
 check "...and one known only to the tenants FILE (an agent's shell)" \
       "$(pfd "CLAUDE_TENANTS_FILE='$FB_OWNED_FILE'; $FB_POOL" '' t1 0)" "0:a1:fallback:fallback"
@@ -1777,8 +1778,8 @@ fb_home fb10 a1
 fb_quarantine
 check "a seat that is owned AND quarantined reports the quarantine" \
       "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'auth broken — clauth login a1')" "1"
-check "...and says nothing about who owns it" \
-      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'owned by')" "0"
+check "...and says nothing about the machine that bills it" \
+      "$(pickarr "$FB_POOL; $FB_OWNED" t1 _claude_pick_warnings | grep -c 'box-z')" "0"
 
 # THE REASON CARRIES THE SEAT TOO, not just the warning. `_claude_pick_reason` is
 # what --json and --explain report and what a caller quotes back; compose it

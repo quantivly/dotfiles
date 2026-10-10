@@ -452,7 +452,7 @@ class SliceHeadroomTests(unittest.TestCase):
 
 
 class RemoteSeatIdentityTests(unittest.TestCase):
-    """The seat [machines.<m>].profile DECLARES, against the account that machine really bills."""
+    """The seat CLAUDE_TENANT_MACHINE_ID DECLARES, against the account that machine really bills."""
 
     def ctx(self, runner):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
@@ -479,6 +479,10 @@ class RemoteSeatIdentityTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("MISMATCH", detail)
         self.assertIn("window the gate never metered", detail)
+        # The fix it names is the table that declares the seat (DO-811), not the tenant TOML,
+        # where a `profile` key is refused outright since DO-665.
+        self.assertIn("CLAUDE_TENANT_MACHINE_ID", detail)
+        self.assertNotIn(".toml", detail)
 
     def test_no_row_ever_prints_the_account_id_or_its_digest(self):
         # The whole premise of the check: an identifier never reaches a transcript. Both sides

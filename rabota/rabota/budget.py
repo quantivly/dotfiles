@@ -257,7 +257,7 @@ def seat_for(tenant, machine: str, override: str | None = None) -> str:
         seat = m.profile if m else None
     if not seat:
         where = (f"[seats] local in tenants/{tenant.name}.toml" if machine == "local" else
-                 f"CLAUDE_TENANT_MACHINE_OWNED + CLAUDE_TENANT_MACHINE_ID for machine "
+                 f"CLAUDE_TENANT_MACHINE_ID for machine "
                  f"{machine!r} in the tenants file (see scripts/machines-render)")
         raise errors.Refused(f"no seat configured for tenant {tenant.name!r} on machine {machine!r} ({where})")
     if seat in CONSOLE_SEATS:

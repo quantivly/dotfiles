@@ -190,7 +190,7 @@ dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
   out="$(command zsh -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
     typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR \
-                CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED \
+                CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED \
                 CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
     typeset -g CLAUDE_TENANT_DEFAULT=
     source "$1" >/dev/null
@@ -200,7 +200,6 @@ dump() {   # $1 = file; prints the dump, or fails with the reason on stderr
     for k in "${(@k)CLAUDE_TENANT_OVERFLOW}";      do print -r -- "OVERFLOW$s$k$s${CLAUDE_TENANT_OVERFLOW[$k]}"; done
     for k in "${(@k)CLAUDE_TENANT_SPILL}";         do print -r -- "SPILL$s$k$s${CLAUDE_TENANT_SPILL[$k]}"; done
     for k in "${(@k)CLAUDE_TENANT_GH_DIR}";        do print -r -- "GH_DIR$s$k$s${CLAUDE_TENANT_GH_DIR[$k]}"; done
-    for k in "${(@k)CLAUDE_TENANT_MACHINE_OWNED}"; do print -r -- "MACHINE_OWNED$s$k$s${CLAUDE_TENANT_MACHINE_OWNED[$k]}"; done
     for k in "${(@k)CLAUDE_TENANT_MACHINE_ID}";    do print -r -- "MACHINE_ID$s$k$s${CLAUDE_TENANT_MACHINE_ID[$k]}"; done
     for k in "${(@k)CLAUDE_TENANT_RETIRED}";       do print -r -- "RETIRED$s$k$s${CLAUDE_TENANT_RETIRED[$k]}"; done
     for k in "${(@k)CLAUDE_TENANT_CONNECTORS}";    do print -r -- "CONNECTORS$s$k$s${CLAUDE_TENANT_CONNECTORS[$k]}"; done

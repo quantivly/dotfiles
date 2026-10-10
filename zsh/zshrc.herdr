@@ -207,13 +207,12 @@ _claude_holder_count_one() {
 #   CLAUDE_TENANT_PATH_ROUTES=( "$HOME/quantivly=work" )  # only without a remote
 #   CLAUDE_TENANT_DEFAULT=personal
 #   CLAUDE_TENANT_POOL=( work "quantivly-1 quantivly-2" personal "personal" )
-#   CLAUDE_TENANT_MACHINE_OWNED=( quantivly-0 "dev (EC2)" )   # profile=the machine that bills it
-#   CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )               # profile=that machine's ID
+#   CLAUDE_TENANT_MACHINE_ID=( quantivly-0 dev )   # profile=the machine that bills it
 #
-# The last two are ONE fact keyed two ways, and are edited together: the label is
-# prose for a human, the id is what rabota dispatches on (DO-665).
-# `scripts/machines-render --check` refuses a partial pair; declaring NEITHER is
-# fine and means this machine registers no remote machines.
+# The last is what rabota dispatches on (DO-665): `scripts/machines-render`
+# renders it, and refuses an entry naming no machine or a machine claimed twice.
+# Declaring none is fine and means this machine registers no remote machines.
+# It had a twin, CLAUDE_TENANT_MACHINE_OWNED (profile -> a label), until DO-811.
 #
 # ASSIGNMENT, NOT EXCLUSIVITY (DO-810). Nothing refuses a launch on a seat named
 # there: two separate logins to one seat are independent (measured 2026-10-08,
@@ -249,7 +248,7 @@ _claude_holder_count_one() {
 # DO-641 ownership guard (removed by DO-810) silently off. The launch-time check
 # (claude-tenants-check) therefore forks a shell rather than sourcing in place.
 typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
+typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
 : "${CLAUDE_TENANT_DEFAULT=}"
 [[ -r "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}" ]] && \
   source "${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
@@ -610,7 +609,7 @@ claude-tenants-check() {
   fork_err="$(command mktemp)" || { print -r -- "could not create a temp file to read $f"; return 2 }
   raw="$(command zsh -f -c '
     typeset -ga CLAUDE_TENANT_ROUTES CLAUDE_TENANT_PATH_ROUTES CLAUDE_TENANT_BUCKETS
-    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_OWNED CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
+    typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_OVERFLOW CLAUDE_TENANT_GH_DIR CLAUDE_TENANT_MACHINE_ID CLAUDE_TENANT_RETIRED CLAUDE_TENANT_CONNECTORS CLAUDE_TENANT_CONNECTOR_ACCOUNT CLAUDE_TENANT_SPILL
     source "$1" >/dev/null
     print -r -- "__DONE__"' \
     tenants-check "$f" </dev/null 2>"$fork_err")"

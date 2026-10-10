@@ -37,7 +37,11 @@ class BudgetTests(unittest.TestCase):
         self.assertIn("[seats]", str(cm.exception))
         with self.assertRaises(errors.Refused): budget.seat_for(p.tenant, "local", override="quantivly-1")   # work seat, personal tenant
         self.assertEqual(budget.seat_for(p.tenant, "local", override="personal-0"), "personal-0")
-        with self.assertRaises(errors.Refused): budget.seat_for(p.tenant, "dev")   # no [machines.dev] for personal
+        with self.assertRaises(errors.Refused) as cm: budget.seat_for(p.tenant, "dev")   # no [machines.dev] for personal
+        # It names the one table that declares a machine's seat since DO-811, and not the
+        # label table that went with it.
+        self.assertIn("CLAUDE_TENANT_MACHINE_ID", str(cm.exception))
+        self.assertNotIn("MACHINE_OWNED", str(cm.exception))
 
     def test_gate_allow_and_refusals_map_to_reason_codes(self):
         allow = FakeRunner([(["claude-pick"], pick_json("picked", "quantivly-1", 30, 87, "allow", 0))])

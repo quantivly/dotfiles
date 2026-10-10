@@ -285,8 +285,9 @@ class ResolveRemoteTests(LocalRecipeTests):
     binary alone.
 
     Round 3 (2026-09-20, Zvi's decision): a remote lane authenticates with the TARGET MACHINE'S
-    OWN login (spec §4.2) — never a per-seat account dir; ``[machines.<m>].profile`` only
-    DECLARES the seat a machine's usage bills, for the laptop's own budget gate.
+    OWN login (spec §4.2) — never a per-seat account dir; the declared seat (then
+    ``[machines.<m>].profile``, now ``CLAUDE_TENANT_MACHINE_ID``) only DECLARES the seat a
+    machine's usage bills, for the laptop's own budget gate.
 
     Round 5 (the first live smoke this plan ever ran): this used to also resolve and prove the
     account dir (``$HOME/.claude``) so it could be passed to ``CLAUDE_CONFIG_DIR``. The smoke
@@ -744,11 +745,12 @@ class RunRecipeTests(LocalRecipeTests):
 
     def test_a_seat_mismatched_with_the_machines_declared_profile_refuses(self):
         # Finding 1 (final whole-branch review): --seat was validated against the tenant
-        # family rule but nothing tied it to [machines.<m>].profile, so a lane on dev could
+        # family rule but nothing tied it to the machine's declared seat, so a lane on dev could
         # be told to bill quantivly-1 (a valid PERSONAL... no, a valid quantivly-family seat)
         # on the laptop's gate while dev's own login (the fixture's dev profile,
         # "quantivly-0") actually bills the work — two numbers wrong at once, silently. The
-        # fixture's dev profile is "quantivly-0" (tests/fixtures/config/tenants/quantivly.toml).
+        # fixture's dev profile is "quantivly-0" (CLAUDE_TENANT_MACHINE_ID in
+        # tests/fixtures/config/tenants.zsh).
         runner = FakeRunner([])
         ctx = self.ctx(runner)
         with self.assertRaises(errors.Refused):
