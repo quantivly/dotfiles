@@ -1,7 +1,9 @@
 # Shadow usage poller (DO-786): reads each account dir's access token, GETs the
 # usage endpoint, writes usage.json beside the credential. Never refreshes a
-# token, never touches clauth's store, and nothing reads its output yet — the
-# week of side-by-side readings against clauth's usage_cache.json is the point.
+# token, never touches clauth's store; its one reader is claude-doctor §3d.
+# Since DO-813 it polls an account only when clauth's own reading has gone
+# stale — beside a healthy clauth one of the two is refused — so it writes
+# state "deferred" otherwise.
 # Linked by install.conf.yaml, NOT enabled by it: it reads credentials, so the
 # decision to run it is made by hand, once —
 #   systemctl --user enable --now claude-usage-poll.timer

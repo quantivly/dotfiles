@@ -1242,18 +1242,54 @@ the headers Claude Code sends, and writes `usage.json` beside the credential: th
 `fetched_at` (epoch ms). It never refreshes a token (a refresh spends the single-use refresh
 token under a live session — the 09-06 logout class), writes `unknown` on a 401 or an expired
 access token, honours a 429's `retry-after` through a `.usage.retry-after` sidecar (floored at
-60 s: the first armed run got `retry-after: 0` on six of nine profiles), paces requests to the
-one host `CLAUDE_USAGE_POLL_GAP` seconds apart (default 3; nine back-to-back GETs tripped a
-burst limit that clauth's paced fetches beside them did not), skips alias
-symlinks and `*.retired-*` dirs, and passes the bearer to curl through a 0600 file, never argv. **Nothing reads
-`usage.json` yet**: the picker, the gate, rabota and herdr-draft still rank on clauth's
-`usage_cache.json`. The point is a week of side-by-side readings, which is the one measurement
-the 2026-09-29 account-manager comparison said was missing; `claude-doctor` §3d prints the two
-side by side per profile (DO-787): agreement is a ✓, a gap past five points a ⚠, an `unknown`
-poll a note with its reason, no poll output a note naming the timer to arm. The units are linked by `install.conf.yaml` and **not enabled**: arm the
-timer by hand with `systemctl --user enable --now claude-usage-poll.timer`.
+60 s: the first armed run got `retry-after: 0` on six of nine profiles), spaces the requests it
+makes `CLAUDE_USAGE_POLL_GAP` seconds apart (default 3, a courtesy against a burst, not the
+budget), skips alias symlinks and `*.retired-*` dirs, and passes the bearer to curl through a
+0600 file, never argv. **It stands aside while clauth reads the account** (DO-813): an account
+is polled only when clauth's own `usage_cache.json` is older than
+`CLAUDE_USAGE_POLL_STALE_AFTER` (default 600 s, the gate's freshness bound) and clauth's live
+`status.json` does not report it `RateLimited`; otherwise `usage.json` says `state: "deferred"`
+with the reason (the age of clauth's reading, or that clauth is rate-limited on the account).
+A named `--clauth-dir` that does not exist is exit 2, because "no clauth" would poll every
+account beside it. While clauth is healthy a run sends nothing, so the poll is now a second
+feed for when clauth's goes stale rather than a side-by-side one, because the endpoint has no
+room for both (below). **Nothing ranks on `usage.json`**: the picker, the gate, rabota and
+herdr-draft rank on clauth's `usage_cache.json`. Its one reader is `claude-doctor` §3d (DO-787),
+which prints the two per profile: agreement is a ✓, a gap past five points a ⚠, an `unknown` or
+`deferred` poll a note with its reason, no poll output a note naming the timer to arm. The
+side-by-side week it was built for ran 2026-09-30 → 10-10 and agreed with clauth to the point on
+every profile that got a 200. The units are linked by `install.conf.yaml` and **not enabled**:
+arm the timer by hand with `systemctl --user enable --now claude-usage-poll.timer`.
 
-State table: `scripts/test-claude-usage-poll.sh` (39 checks, in CI as `usage-poll-test`) —
+### The usage endpoint has no room for a second reader (DO-813)
+
+After DO-789's pacing the poll was still refused on 41% of its requests (3,462 of 8,424 over
+2026-10-05 → 10-10). DO-813 read that as a per-host budget the shadow poll alone exceeded,
+because clauth's daemon "logged no rate limit". Both halves were wrong (measured 2026-10-10):
+
+- **clauth never logs a 429.** A refusal shows only as `fetch_status: "RateLimited"` in
+  `~/.clauth/status.json`, so the figures below come from sampling that file every 5 s. Its
+  `usage_history.jsonl` records only *changed* readings, so its gaps say nothing about refusals.
+- **The limit is per account**: a sliding window that counts refused requests too (clauth
+  upstream #30), not a host budget the 3 s gap between accounts could pace. In one hour of
+  clauth's and the poll's requests together, refusals by the gap since the previous request on
+  the same account were 41 of 101 under 60 s, 4 of 47 at 60–90 s, and 20 of 165 at 90–120 s
+  (clauth's own cadence).
+- **The poll was causing clauth's steady refusals.** In that hour clauth was refused on 44 of
+  240 attempts (18%), in every ten minutes of it. With the poll's timer stopped for the next
+  hour it was refused on 1 of 198 over 49 minutes, until the shared burst below. A poll
+  landing within 30 s after clauth's fetch was refused 41% of the time; one landing 40–60 s after
+  it got its 200 and clauth's *next* fetch was refused instead (8 of 9). At clauth's ~95 s
+  cadence there is no slot left, so no interval or gap fits a second reader beside it. That is
+  why the poll defers, which was the third option DO-813 listed.
+- **Something is shared on top.** At 22:50, with the poll still stopped, clauth was refused on
+  15 of 26 fetches in six minutes across every account at once, and nothing on the box fired
+  then. Over the five days the poll's refusals were correlated across accounts the same way: 24%
+  of runs saw none and 7% saw all seven, where independent accounts would give about 2% and
+  0.3%. Requests in the second half of a clock minute were refused about 12 points more often.
+  Claude Code itself calls `/api/oauth/usage` too, and backs off five minutes after a 429.
+
+State table: `scripts/test-claude-usage-poll.sh` (57 checks, in CI as `usage-poll-test`) —
 a loopback stub answers by fixture token, and the last two rows are a canary asserting no
 fixture token reached stdout or any file the poller wrote. The suite found the clock defect on
 this box: `date +%s%3N` returns nanoseconds with the precision digit dropped, so `fetched_at`

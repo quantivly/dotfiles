@@ -2019,11 +2019,15 @@ claude-doctor() {
   # scripts/claude-usage-poll writes <account dir>/usage.json — the endpoint's
   # raw reply plus fetched_at, or state=unknown with a reason — and clauth
   # writes the profile store's usage_cache.json. Nothing ranks on the poll; this
-  # line is the reader the week of side-by-side readings exists for. Two
-  # readings of one account should agree to the point (the first armed run did:
-  # 7d identical, 5h within one); a gap past five points is worth a look, so it
-  # is a ⚠. A missing poll output is a note, never a fault: the timer is linked
-  # by install and armed by hand.
+  # line is its reader. Since DO-813 the poll stands aside (state=deferred)
+  # while clauth's own reading is fresh, because the endpoint's per-account
+  # window has no room for a second reader, so an 'ok' poll exists only once
+  # clauth's reading had gone stale. Two readings taken together agree to the
+  # point (the side-by-side week did: 7d identical, 5h within one); a gap past
+  # five points now usually means clauth's reading is the old one, so read the
+  # two ages printed with it. Either way it is worth a look, so it is a ⚠. A
+  # deferred or unknown poll is a note with its reason. A missing poll output
+  # is a note, never a fault: the timer is linked by install and armed by hand.
   echo
   zmodload zsh/datetime 2>/dev/null
   sp_root="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
@@ -2042,7 +2046,7 @@ claude-doctor() {
     sp_line="$(jq -r '[(.state // "ok"), (.reason // ""), (.five_hour.utilization // null), (.seven_day.utilization // null), (.fetched_at // null)] | map(tostring) | join("\u001f")' "$spf" 2>/dev/null)" || sp_line=""
     IFS=$'\x1f' read -r sp_st sp_reason sp_5 sp_7 sp_fa <<<"$sp_line"
     if [[ "$sp_st" != ok ]]; then
-      _doctor_note "$sp_p: shadow poll is 'unknown' — ${sp_reason:-no reason recorded}"
+      _doctor_note "$sp_p: shadow poll is '${sp_st:-unknown}' — ${sp_reason:-no reason recorded}"
       continue
     fi
     sp_c5=""; sp_c7=""; sp_cfa=""
