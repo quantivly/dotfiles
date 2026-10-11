@@ -1028,7 +1028,9 @@ _claude_doctor_pools() {
           if [[ "$va" == $'\x01'* || "$vb" == $'\x01'* ]]; then
             disp+=" (an inline table this check does not read; compare by hand — values not shown)"
           elif [[ "$k" == models.* || "$show" == *" $k "* ]]; then
-            disp+=" ('${va:-unset}' vs '${vb:-unset}')"
+            # $m's value first: the line reads "'$m' differs from '$ref'", and these
+            # name the config.toml to edit. ref-first sent the reader to the wrong one.
+            disp+=" ('${vb:-unset}' vs '${va:-unset}')"
           elif [[ "$k" == api_key ]]; then
             disp+=" (set on one only)"
           else
