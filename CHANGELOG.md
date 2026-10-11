@@ -43,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `opus[1m]`, so every value read as the other seat's. That includes the ✗ lines whose job is
   to name which `config.toml` to edit before clauth will move a session between two seats. Values
   now follow the sentence: the named seat's first. The six rows that pinned the old order now
-  assert the right one. `test-claude-doctor.sh` stays at 526.
+  assert the right one, and a new row covers the reference seat's own `unset` fallback, which
+  no row reached. `test-claude-doctor.sh` 526 → 527.
 
 - **delta diffs were unreadable on a dark terminal.** The `GitHub` syntax theme is dark-on-white,
   and its `#22863a`/`#b31d28` backgrounds put dark text on dark green and red. Unchanged lines

@@ -2820,6 +2820,14 @@ mk_seat a "base_url = \"https://gateway.example\"
 $M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
 run_doctor
 want_out "a base_url difference is a ✗" "✗ pool 'w': 'b' differs from 'a' in base_url ('unset' vs 'https://gateway.example')"
+# The other way round: the REFERENCE seat leaves it unset. Each side has its own
+# 'unset' fallback, and only this row reaches the reference seat's.
+new_home w5e; write_cred
+mk_seat a "$M1"; mk_seat b "base_url = \"https://gateway.example\"
+$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "...and with the reference seat unset, the named seat's value still comes first" \
+         "✗ pool 'w': 'b' differs from 'a' in base_url ('https://gateway.example' vs 'unset')"
 
 new_home w5d; write_cred
 mk_seat a "$M1"; mk_seat b "disabled = true
@@ -3668,7 +3676,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=526
+EXPECTED_ROWS=527
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
