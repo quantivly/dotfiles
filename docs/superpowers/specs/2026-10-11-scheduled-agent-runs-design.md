@@ -472,26 +472,21 @@ Approving the plan did not answer any of these.
    never result bodies.
 8. **A go-ahead for each live step.**
 
-## 12. Proposed issues
+## 12. Issues
 
-These are for team DO in Linear, and are not filed until @zvi says so. The nanoclaw half goes
-to nanoclaw's own tracker.
+Filed in Linear team DO on 2026-10-11. The nanoclaw half goes to nanoclaw's own tracker.
 
-1. Show open escalations in `rabota brief` and add `rabota escalations`, with a desktop
-   notification. This also stands alone, because today only `rabota close` reads
-   escalations.
-2. Add a `schedules` table and `rabota schedule add|list|show|cancel` (declaration, freezing,
-   refusals).
-3. Fire scheduled runs from a `rabota-schedule@` timer. The tick covers the claim, the command
-   executor, settle, retry, expiry, the record append, escalation and the export, and `answer`
-   gains its declared `rerun` and `cancel-followups` actions.
-4. Assert scheduler health in `rabota doctor`.
-5. Start a local, in-place, read-only lane with declared permissions: the local form of
-   `lane recipe --run`.
-6. Dispatch and settle agent runs from the tick, with denials as escalations and
-   `--then-prompt` follow-ups.
-7. Teach agents to schedule instead of handing over a prompt: the `run-later` skill, the
-   `CLAUDE.md` lines, and the allow rules.
+| # | Issue | Blocked by |
+|---|---|---|
+| 1 | DO-815: Show open escalations in `rabota brief` and add `rabota escalations` (stands alone) | — |
+| 2 | DO-816: Add a `schedules` table and `rabota schedule add`, `list`, `show` and `cancel` | — |
+| 3 | DO-817: Fire scheduled runs from a `rabota-schedule` timer. This covers the tick, the command executor, the record, escalations, the answer actions and the export | DO-815, DO-816 |
+| 4 | DO-818: Assert scheduler health in `rabota doctor` | DO-817 |
+| 5 | DO-819: Start a local, in-place, read-only lane with declared permissions | — |
+| 6 | DO-820: Dispatch and settle scheduled agent runs from the tick | DO-817, DO-819 |
+| 7 | DO-821: Teach agents to schedule a run instead of handing over a prompt | DO-817 |
+
+Phase 1 is DO-815 through DO-818, plus DO-821. Phase 2 is DO-819 and DO-820.
 
 ## 13. Out of scope
 
