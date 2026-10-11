@@ -478,12 +478,13 @@ These are for team DO in Linear, and are not filed until @zvi says so. The nanoc
 to nanoclaw's own tracker.
 
 1. Show open escalations in `rabota brief` and add `rabota escalations`, with a desktop
-   notification and declared answer actions. This also stands alone, because today only
-   `rabota close` reads escalations.
+   notification. This also stands alone, because today only `rabota close` reads
+   escalations.
 2. Add a `schedules` table and `rabota schedule add|list|show|cancel` (declaration, freezing,
    refusals).
 3. Fire scheduled runs from a `rabota-schedule@` timer. The tick covers the claim, the command
-   executor, settle, retry, expiry, the record append, escalation and the export.
+   executor, settle, retry, expiry, the record append, escalation and the export, and `answer`
+   gains its declared `rerun` and `cancel-followups` actions.
 4. Assert scheduler health in `rabota doctor`.
 5. Start a local, in-place, read-only lane with declared permissions: the local form of
    `lane recipe --run`.
