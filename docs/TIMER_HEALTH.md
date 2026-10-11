@@ -258,9 +258,13 @@ parses can still be a different mutation than its name — and restored from git
 
 ## The first unattended run found a defect in the checker (DO-686)
 
-`wt-gc-sweep.timer`'s first real run, 2026-09-23. The machine slept through
-04:00, `Persistent=true` caught the run up at **07:29:39**, and while the sweep
-was still going this checker said:
+`wt-gc-sweep.timer`'s first real run was on 2026-09-23. The machine was suspended
+over 04:00, and the calendar timer caught the run up on resume, at **07:29:39**.
+A calendar timer catches up on resume whether or not `Persistent=true` is set.
+One boot spans 09-22 to 09-29 in `journalctl --list-boots`, so the machine was
+suspended, not off; `Persistent=` is what covers poweroff (`man systemd.timer`).
+An earlier version of this page credited `Persistent=true` with the catch-up.
+While the sweep was still going, this checker said:
 
 ```
 ✗ wt-gc-sweep.timer: active with NO next run scheduled — it has stopped firing.
