@@ -2755,7 +2755,7 @@ default = "opus"'
 mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_SPILL=( w "b" )'
 run_doctor
 want_out "a spill seat with other settings is a ✗" \
-         "✗ pool 'w': 'b' differs from 'a' in [models].default ('opus[1m]' vs 'opus')"
+         "✗ pool 'w': 'b' differs from 'a' in [models].default ('opus' vs 'opus[1m]')"
 new_home w2t; write_cred
 mk_seat a "$M1"; mk_seat b "$M1"
 mk_tenants 'typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL; CLAUDE_TENANT_POOL=( w "a" ); CLAUDE_TENANT_SPILL=( w "b" )'
@@ -2781,7 +2781,7 @@ mk_seat a "$M1"; mk_seat b '[models]
 default = "opus"'; mk_tenants "$POOL_AB"
 run_doctor
 want_out "a [models] difference is a ✗ naming both values" \
-         "✗ pool 'w': 'b' differs from 'a' in [models].default ('opus[1m]' vs 'opus')"
+         "✗ pool 'w': 'b' differs from 'a' in [models].default ('opus' vs 'opus[1m]')"
 no_out   "...and the pool is NOT also given a ✓"   "agree on every setting a move compares"
 want_rc  "...and the doctor exits 1"               1
 LEAKS="$(printf '%s' "$OUT" | grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' || true)"
@@ -2796,7 +2796,7 @@ mk_seat a "$M1"; mk_seat b '# auto_start = true
 # default = "opus[1m]"'; mk_tenants "$POOL_AB"
 run_doctor
 want_out "an all-commented template beside a configured sibling is a ✗" \
-         "'b' differs from 'a' in [models].default ('opus[1m]' vs 'unset')"
+         "'b' differs from 'a' in [models].default ('unset' vs 'opus[1m]')"
 
 new_home w4; write_cred
 mk_seat a '[env]
@@ -2819,13 +2819,21 @@ new_home w5c; write_cred
 mk_seat a "base_url = \"https://gateway.example\"
 $M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
 run_doctor
-want_out "a base_url difference is a ✗" "✗ pool 'w': 'b' differs from 'a' in base_url ('https://gateway.example' vs 'unset')"
+want_out "a base_url difference is a ✗" "✗ pool 'w': 'b' differs from 'a' in base_url ('unset' vs 'https://gateway.example')"
+# The other way round: the REFERENCE seat leaves it unset. Each side has its own
+# 'unset' fallback, and only this row reaches the reference seat's.
+new_home w5e; write_cred
+mk_seat a "$M1"; mk_seat b "base_url = \"https://gateway.example\"
+$M1"; mk_tenants "$POOL_AB"
+run_doctor
+want_out "...and with the reference seat unset, the named seat's value still comes first" \
+         "✗ pool 'w': 'b' differs from 'a' in base_url ('https://gateway.example' vs 'unset')"
 
 new_home w5d; write_cred
 mk_seat a "$M1"; mk_seat b "disabled = true
 $M1"; mk_tenants "$POOL_AB"
 run_doctor
-want_out "a disabled member is a ✗ (a move to it is refused)" "✗ pool 'w': 'b' differs from 'a' in disabled ('false' vs 'true')"
+want_out "a disabled member is a ✗ (a move to it is refused)" "✗ pool 'w': 'b' differs from 'a' in disabled ('true' vs 'false')"
 
 # PRESENCE, not value: the swap check compares whether a key is set. Two members
 # with different keys are as swappable as two with the same one.
@@ -2840,7 +2848,7 @@ mk_seat a "auto_start = true
 $M1"; mk_seat b "$M1"; mk_tenants "$POOL_AB"
 run_doctor
 want_out "a difference the swap check ignores is a note" \
-         "· pool 'w': 'b' differs from 'a' in auto_start ('true' vs 'false') — not a setting a move compares"
+         "· pool 'w': 'b' differs from 'a' in auto_start ('false' vs 'true') — not a setting a move compares"
 no_out   "...and not a ✗"                        "✗ pool 'w'"
 want_rc  "...and the doctor exits 0"             0
 
@@ -3668,7 +3676,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=526
+EXPECTED_ROWS=527
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
