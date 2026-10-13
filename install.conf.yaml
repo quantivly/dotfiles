@@ -91,6 +91,14 @@
     # link + reconcile pattern as herdr-server.service above.
     ~/.config/systemd/user/rabota-precompute@.service: systemd/rabota-precompute@.service
     ~/.config/systemd/user/rabota-precompute@.timer: systemd/rabota-precompute@.timer
+    # rabota scheduled-run tick (DO-817): the same per-tenant TEMPLATE shape as rabota-precompute@
+    # above (rabota-schedule@quantivly.timer), and the same rule: linking does NOT enable or start
+    # it. Arming a tenant's timer is a gate Zvi runs by hand (`systemctl --user enable --now
+    # rabota-schedule@<tenant>.timer`), because an armed tick starts, unattended, every command
+    # that tenant's queue holds, and `rabota schedule add` refuses for a tenant whose timer is not
+    # enabled. Linked from the checkout, so check-timer-health.sh covers the instance once armed.
+    ~/.config/systemd/user/rabota-schedule@.service: systemd/rabota-schedule@.service
+    ~/.config/systemd/user/rabota-schedule@.timer: systemd/rabota-schedule@.timer
     # Static, dotfiles-owned: no packaging variant to detect, so nothing else
     # needs to write it. `environment.d` is read by the systemd user manager and
     # the graphical session, neither of which reads a shell rc — see the

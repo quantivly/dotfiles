@@ -1,9 +1,12 @@
 """``rabota schedule``: declare a run for later, as a row rabota owns (DO-816).
 
 Design: ``docs/superpowers/specs/2026-10-11-scheduled-agent-runs-design.md`` — §3 for the fields,
-§8 for the verbs. This module is the DECLARATION half only: ``add``, ``list``, ``show`` and
-``cancel``. Nothing here runs anything; the tick that fires a due row, the command executor and
-the ``rabota-schedule@`` units are DO-817, and agent-run execution is phase 2 (DO-819, DO-820).
+§8 for the verbs. This module is the DECLARATION half: ``add``, ``list``, ``show`` and
+``cancel``, plus the CLI wiring of ``tick``. Nothing here runs anything: the tick that fires a due
+row, the command executor, the record, the escalations, the answer actions and the export are
+``rabota/scheduler.py`` (DO-817), and agent-run execution is phase 2 (DO-819, DO-820). ``add`` and
+``cancel`` rewrite the export (``scheduler.write_export``) once their row is written; a failed
+rewrite is reported in the output as ``export`` and fails neither, since the next tick rewrites it.
 
 ``add`` freezes the payload — the prompt, or the script — into ``<state_dir>/schedules/<id>/``
 with a ``SHA256SUMS`` beside it, so editing or deleting the source cannot change what runs. It
@@ -54,11 +57,17 @@ DEFAULT_EXPIRY = timedelta(hours=48)        # expires_at = not_before + this, un
 MAX_HORIZON = timedelta(days=30)            # --at at most this far ahead; --expires at most this far past --at
 MAX_TIMEOUT = timedelta(hours=6)            # --timeout at most this long, for either kind
 MAX_ATTEMPTS = 2
+RETRY_DELAY = timedelta(minutes=30)         # a could-not-run attempt below MAX_ATTEMPTS starts again this much later
 COMMAND_TIMEOUT = timedelta(minutes=15)
 COMMAND_MEMORY_MAX = "1G"
 AGENT_TIMEOUT = timedelta(minutes=20)
 AGENT_MAX_BUDGET_USD = 3.0
 # An agent run's memory_max is the tenant's own [lanes] memory_max: a tenant setting, not a default.
+
+# The options an escalation offers when the declaration names none (design §6 step 4).
+DEFAULT_OPTIONS = ({"label": "acknowledge", "action": "none"},
+                   {"label": "re-run now", "action": "rerun"},
+                   {"label": "cancel follow-ups", "action": "cancel-followups"})
 
 KINDS = ("agent", "command")
 STATUSES = ("pending", "running", "done", "failed", "expired", "cancelled")
@@ -161,6 +170,9 @@ def parse_option(text: str) -> dict:
     if action not in ("none", "cancel-followups") and not _RERUN.match(action):
         raise errors.Usage(f"--option {text!r}: the action must be none, rerun, rerun:+<n>[mhd] "
                            f"or cancel-followups, not {action!r}")
+    delay = _RERUN.match(action).group(1) if _RERUN.match(action) else None
+    if delay and parse_duration(delay, "--option") > MAX_HORIZON:
+        raise errors.Usage(f"--option {text!r} re-runs further ahead than the {MAX_HORIZON.days}-day horizon")
     return {"label": label, "action": action}
 
 
@@ -278,6 +290,8 @@ def _lines(d: dict) -> list[str]:
     lines += [f"option {o['label']} = {o['action']}" for o in d.get("options") or []]
     if "payload_intact" in d:
         lines.append("payload intact" if d["payload_intact"] else "PAYLOAD CHANGED since it was frozen")
+    if (d.get("export") or {}).get("error"):
+        lines.append(f"export not rewritten: {d['export']['error']}")
     if d.get("dry_run"):
         lines.insert(0, f"dry-run: {d['dry_run']}")
     return lines
@@ -463,7 +477,7 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
     except BaseException:
         shutil.rmtree(sched_dir, ignore_errors=True)
         raise
-    return {**declaration(ctx.store.get_schedule(sched_id)), "timer": timer}
+    return {**declaration(ctx.store.get_schedule(sched_id)), "timer": timer, "export": _rewrite_export(ctx, now)}
 
 
 def _tenant_row(ctx, sched_id: str) -> dict:
@@ -497,7 +511,16 @@ def run_cancel(ctx, sched_id: str, now: datetime | None = None) -> dict:
     if not ctx.store.cancel_schedule(sched_id, stamp, "cancelled by rabota schedule cancel"):
         raise errors.Refused(f"schedule {sched_id} stopped being pending while it was being cancelled "
                              f"(now {ctx.store.get_schedule(sched_id)['status']}); nothing was changed")
-    return ctx.store.get_schedule(sched_id)
+    return {**ctx.store.get_schedule(sched_id), "export": _rewrite_export(ctx, now)}
+
+
+def _rewrite_export(ctx, now: datetime | None = None) -> dict:
+    """``scheduler.write_export`` after a write; a failure is returned, never raised (module docstring)."""
+    from rabota import scheduler     # not at the top: scheduler imports this module
+    try:
+        return scheduler.write_export(ctx.cfg, now, own=(ctx.tenant.name, ctx.state_dir))
+    except Exception as e:      # noqa: BLE001 -- the row is written; the next tick rewrites the export
+        return {"error": str(e) if isinstance(e, errors.RabotaError) else f"{type(e).__name__}: {e}"}
 
 
 def _summary(row: dict) -> dict:
@@ -571,6 +594,7 @@ def _build(sub):
     sh.add_argument("id")
     c = s.add_parser("cancel", help="cancel a pending run")
     c.add_argument("id")
+    s.add_parser("tick", help="the rabota-schedule@ timer's entry point: settle, expire and dispatch due runs")
 
 
 def _run(ns, **ctx_kw):
@@ -587,6 +611,9 @@ def _run(ns, **ctx_kw):
             out = run_show(ctx, ns.id)
         elif cmd == "cancel":
             out = run_cancel(ctx, ns.id)
+        elif cmd == "tick":
+            from rabota import scheduler     # not at the top: scheduler imports this module
+            out = scheduler.run_tick(ctx)
         else:
             out = run_add(ctx, at=ns.at, title=ns.title, kind=ns.kind, prompt_file=ns.prompt_file,
                           command=ns.script, args=ns.args, expires=ns.expires, cwd=ns.cwd, record=ns.record,
@@ -600,7 +627,24 @@ def _run(ns, **ctx_kw):
                 for r in out["schedules"]] or ["no scheduled runs"]
     if cmd == "cancel":
         return [f"{out['id']} {out['status']}"] + ([f"dry-run: {out['dry_run']}"] if out.get("dry_run") else [])
+    if cmd == "tick":
+        return _tick_lines(out)
     return _lines(out)
+
+
+def _tick_lines(rep: dict) -> list[str]:
+    if rep.get("locked"):
+        return [f"tick {rep['tenant']}: {rep['locked']}"]
+    lines = [f"tick {rep['tenant']} {_local(rep['at'])}: " + ", ".join(
+        f"{len(rep[k])} {k}" for k in ("settled", "expired", "refused", "dispatched", "deferred"))]
+    lines += [f"settled {r['id']} attempt {r['attempt']}: {r['outcome']}"
+              + (" (retrying)" if r["retry"] else f" (ESC-{r['escalation']})" if r["escalation"] else "")
+              for r in rep["settled"]]
+    lines += [f"expired {r['id']} (ESC-{r['escalation']})" for r in rep["expired"]]
+    lines += [f"refused {r['id']}: {r['reason']}" for r in rep["refused"]]
+    lines += [f"dispatched {r['id']} attempt {r['attempt']} as {r['unit']}" for r in rep["dispatched"]]
+    lines += [f"deferred {r['id']}: {r['reason']}" for r in rep["deferred"]]
+    return lines
 
 
 cli.register("schedule", _build, _run)

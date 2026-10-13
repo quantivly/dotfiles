@@ -17,9 +17,12 @@ package for every spelling of one so the fourth round cannot happen. What is
 PERSISTED into ``rabota.db`` is redacted rather than refused (``secrets.redact``,
 ``Store._exec``), because a row is a record and dropping it hides the failure.
 """
+import contextlib
 import json
 import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 from rabota import secrets
@@ -60,6 +63,33 @@ def write_file(path, text: str, dry_run: bool = False) -> Path:
     if dry_run:
         return path
     path.write_text(text)
+    return path
+
+
+def replace_file(path, text: str, mode: int = 0o600) -> Path:
+    """Guard ``text``, then replace ``path`` with it ATOMICALLY: a sibling temp file renamed over it.
+
+    For a file someone else reads while it is rewritten, or that a crash must never leave
+    truncated: the schedule export, and a record whose results go at a marker mid-file (DO-817).
+    An existing file keeps its own mode; a new one gets ``mode``. On any failure the temp file is
+    removed and ``path`` is exactly as it was.
+    """
+    text = _guard(text)
+    path = Path(path)
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
     return path
 
 

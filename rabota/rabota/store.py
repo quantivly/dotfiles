@@ -132,14 +132,16 @@ class Store:
     def close(self): self.conn.close()
 
     @contextlib.contextmanager
-    def transaction(self):
+    def transaction(self, immediate: bool = False):
         """Run the enclosed writes atomically: one ``COMMIT`` on success, ``ROLLBACK`` and re-raise on failure.
 
         ``isolation_level=None`` means every ``_exec`` call is otherwise its own autocommitted
         statement; this is the one place multiple writes are made all-or-nothing (import-v1, F2:
-        a damaged row used to leave the rows before it committed).
+        a damaged row used to leave the rows before it committed). ``immediate`` takes the write
+        lock at ``BEGIN`` rather than at the first write, so a read inside the block cannot be
+        made stale by another writer before this one commits (the schedule tick's claim, DO-817).
         """
-        self.conn.execute("BEGIN")
+        self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         try:
             yield
         except BaseException:
@@ -298,6 +300,20 @@ class Store:
         cur = self._exec("UPDATE schedules SET status='cancelled', ended_at=?, updated_at=?, last_reason=? "
                          "WHERE id=? AND status='pending'", (stamp, stamp, reason, sched_id))
         return cur.rowcount == 1
+    def update_schedule_where(self, sched_id, where: dict, **fields) -> bool:
+        """``update_schedule``, but only while every column in ``where`` still holds its value; False if not.
+
+        One statement, so nothing can change the row between the check and the write (DO-817: the
+        tick settles a run only while it is still ``running`` under the unit it is settling).
+        """
+        bad = (set(fields) | set(where)) - set(SCHEDULE_FIELDS)
+        if bad: raise ValueError(f"unknown schedule fields {bad}")
+        fields = {k: (json.dumps(v) if k in SCHEDULE_JSON_FIELDS and v is not None else v) for k, v in fields.items()}
+        fields.setdefault("updated_at", now())
+        sets = ",".join(f"{k}=?" for k in fields)
+        conds = "".join(f" AND {k} IS ?" for k in where)
+        cur = self._exec(f"UPDATE schedules SET {sets} WHERE id=?{conds}", (*fields.values(), sched_id, *where.values()))
+        return cur.rowcount == 1
     def _decode_schedule(self, r):
         for k in SCHEDULE_JSON_FIELDS:
             r[k] = json.loads(r[k]) if r[k] is not None else None
@@ -330,6 +346,16 @@ class Store:
         r[0]["options"] = json.loads(r[0]["options"] or "[]"); return r[0]
     def open_escalations(self, tenant):
         return self.escalations(tenant, open_only=True)
+    def find_escalation(self, tenant, kind, subject, evidence):
+        """The oldest escalation with exactly this ``kind``, ``subject`` and ``evidence``, or None.
+
+        The schedule tick's idempotence key (DO-817): it raises an escalation BEFORE the row write
+        that records it, so a crash between the two is found here on the next tick and adopted,
+        rather than raised (and notified) a second time.
+        """
+        r = self._rows("SELECT id FROM escalations WHERE tenant=? AND kind=? AND subject=? AND evidence=? "
+                       "ORDER BY id LIMIT 1", (tenant, kind, subject, evidence))
+        return self.escalation(r[0]["id"]) if r else None
     def escalations(self, tenant, open_only=False):
         """Every escalation for ``tenant``, oldest first; ``open_only`` keeps the unresolved ones.
 

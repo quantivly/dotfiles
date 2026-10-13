@@ -1,0 +1,17 @@
+# systemd/rabota-schedule@.service
+[Unit]
+Description=rabota scheduled-run tick for tenant %i (settle, expire, dispatch)
+
+[Service]
+Type=oneshot
+# The tick needs no secret: it syncs nothing, and the command units it starts get the user
+# manager's environment, never this one. The file is read for the LEAK GUARD alone: a command
+# runs as you, can print any value that file holds, and the tick can only redact a value it
+# knows before the output reaches a record or the export. Same file as rabota-precompute@.
+EnvironmentFile=-%h/.config/rabota/env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/rabota --tenant %i schedule tick
+TimeoutStartSec=5min
+Nice=10
+# No Restart=, unlike rabota-precompute@: the timer fires again in ten minutes, and a tick that
+# failed has already left every row it could not move exactly as the next tick needs to find it.
