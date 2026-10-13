@@ -289,6 +289,15 @@ class Store:
         fields.setdefault("updated_at", now())
         sets = ",".join(f"{k}=?" for k in fields)
         self._exec(f"UPDATE schedules SET {sets} WHERE id=?", (*fields.values(), sched_id))
+    def cancel_schedule(self, sched_id, stamp, reason) -> bool:
+        """Cancel ``sched_id`` only if it is STILL pending, in one statement; False when it was not.
+
+        Read-then-write would race the tick: a row it claimed between the two would be stamped
+        cancelled while its unit runs on.
+        """
+        cur = self._exec("UPDATE schedules SET status='cancelled', ended_at=?, updated_at=?, last_reason=? "
+                         "WHERE id=? AND status='pending'", (stamp, stamp, reason, sched_id))
+        return cur.rowcount == 1
     def _decode_schedule(self, r):
         for k in SCHEDULE_JSON_FIELDS:
             r[k] = json.loads(r[k]) if r[k] is not None else None

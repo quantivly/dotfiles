@@ -52,9 +52,10 @@ class GuardFake(FakeRunner):
 
     def __init__(self, responses, guard_works=True, guard_code=0):
         super().__init__(responses)
-        self.guard_works, self.guard_code, self.guard_inputs = guard_works, guard_code, []
+        self.guard_works, self.guard_code, self.guard_inputs, self.envs = guard_works, guard_code, [], []
 
     def run(self, argv, *, env=None, input=None, timeout=60, cwd=None):
+        self.envs.append(env)
         if list(argv) == ["bash", str(schedule.GUARD)]:
             self.calls.append(list(argv)); self.guard_inputs.append(input)
             cmd = json.loads(input)["tool_input"]["command"]
@@ -105,6 +106,9 @@ class AddRefusalTests(ScheduleBase):
     def test_refuses_a_past_at(self):
         self.refused(NEEDLES["past"], self.ctx(), at="2026-10-13 11:59+00:00")
         self.assertEqual(self.add(self.ctx(), at="2026-10-13 12:00+00:00")["status"], "pending")   # now is not past
+        # --at has minute precision, so "this minute" is not past even 20 seconds into it (review)
+        out = self.add(self.ctx(), at="2026-10-13 12:00+00:00", now=NOW.replace(second=20))
+        self.assertEqual(out["status"], "pending")
 
     def test_refuses_an_expiry_before_at(self):
         self.refused(NEEDLES["expiry"], self.ctx(), expires="2026-10-14 08:00+00:00")
@@ -131,6 +135,9 @@ class AddRefusalTests(ScheduleBase):
         self.refused("could not ask git about --record", ctx, record=str(self.record))
         ctx = self.ctx([(["git"], Result(128, "", "fatal: not a git repository (or any parent)"))])
         self.assertEqual(self.add(ctx, record=str(self.record))["record"], str(self.record))
+        # the message is matched in English, so git must be asked in C (review: a German LANG refused)
+        git_envs = [e for c, e in zip(ctx.runner.calls, ctx.runner.envs) if c[0] == "git"]
+        self.assertTrue(git_envs and all(e["LC_ALL"] == "C" for e in git_envs), git_envs)
 
     def test_refuses_a_record_the_secret_guard_protects(self):
         guarded = self.work / ".backup.local"; guarded.write_text("x\n")
@@ -162,7 +169,8 @@ class AddRefusalTests(ScheduleBase):
         self.assertEqual(self.add(ctx, cwd=str(sibling))["cwd"], str(sibling.resolve()))
 
     def test_refuses_a_command_script_that_invokes_claude(self):
-        for body in ("claude -p 'check it'\n", "~/.local/bin/claude --resume x\n", "x=1; claude-as personal\n"):
+        for body in ("claude -p 'check it'\n", "~/.local/bin/claude --resume x\n", "x=1; claude-as personal\n",
+                     "clauth start quantivly-1 -p x\n", "hspawn --mode auto brief.md\n", "herdr-draft x\n"):
             with self.subTest(body=body):
                 self.script.write_text("#!/bin/sh\n" + body)
                 self.refused(NEEDLES["claude"], self.ctx())
@@ -240,11 +248,23 @@ class AddUsageTests(ScheduleBase):
         self.usage("must be an existing regular file", record=str(self.work))
 
     def test_allow_takes_only_real_bash_rules(self):
-        for rule in ("Edit(//etc/**)", "Bash", "Bash()", "Bash(*)", "Bash(:*)"):
+        for rule in ("Edit(//etc/**)", "Bash", "Bash()", "Bash(*)", "Bash(:*)", "Bash(**)", "Bash(*:*)",
+                     "Bash( *)", "Bash(x) Read(//**)"):
             with self.subTest(rule=rule):
                 self.usage("is not a Bash(...) rule", prompt_file=str(self.prompt), allow=[rule])
         out = self.add(self.ctx(), prompt_file=str(self.prompt), allow=["Bash(journalctl:*)"])
         self.assertEqual(out["allow"], ["Bash(journalctl:*)"])
+
+    def test_read_refuses_home_and_its_ancestors_and_normalises(self):
+        for path in ("/", str(self.home), str(self.home / "a" / "..")):
+            with self.subTest(path=path):
+                self.usage("covers your whole home directory", prompt_file=str(self.prompt), read=[path])
+        out = self.add(self.ctx(), prompt_file=str(self.prompt), read=[str(self.work / "x" / ".." / "log.txt")])
+        self.assertEqual(out["read"], [str(self.work / "log.txt")])
+
+    def test_budget_must_be_finite_and_a_command_run_refuses_one_even_at_zero(self):
+        self.usage("finite amount", prompt_file=str(self.prompt), max_budget_usd=float("inf"))
+        self.usage("a command run takes none", max_budget_usd=0.0)
 
     def test_option_parsing(self):
         self.assertEqual(schedule.parse_option("ack"), {"label": "ack", "action": "none"})
@@ -395,6 +415,28 @@ class VerbTests(ScheduleBase):
         ctx.store.update_schedule(sid, status="running")
         with self.assertRaises(errors.Refused):
             schedule.run_cancel(ctx, sid)
+
+    def test_cancel_refuses_a_row_that_stopped_being_pending_after_it_was_read(self):
+        # The tick claiming the row between cancel's read and its write (review): the row must stay
+        # as the tick left it, not be stamped cancelled under a live unit.
+        ctx = self.ctx(); sid = self.add(ctx)["id"]
+        pending = ctx.store.get_schedule(sid)
+        ctx.store.update_schedule(sid, status="running")
+        real_get = ctx.store.get_schedule
+        calls = iter([pending])
+        with mock.patch.object(ctx.store, "get_schedule", side_effect=lambda i: next(calls, None) or real_get(i)):
+            with self.assertRaises(errors.Refused) as cm:
+                schedule.run_cancel(ctx, sid)
+        self.assertIn("stopped being pending", str(cm.exception))
+        self.assertEqual((real_get(sid)["status"], real_get(sid)["ended_at"]), ("running", None))
+
+    def test_list_all_tenants_reports_a_corrupt_store_as_a_failure(self):
+        state = self.home / "toysim" / "handoffs" / "rabota"; state.mkdir(parents=True)
+        (state / "rabota.db").write_bytes(b"this is not a database, it is plain text\n" * 100)
+        from rabota import config
+        with self.assertRaises(errors.Partial) as cm:
+            schedule.run_list_all(config.load(self.base, seats_by_machine={}))
+        self.assertEqual([f["tenant"] for f in cm.exception.failed], ["toysim"])
 
     def test_dry_run_cancel_writes_nothing(self):
         ctx = self.ctx(); sid = self.add(ctx)["id"]

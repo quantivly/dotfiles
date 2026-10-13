@@ -40,6 +40,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -78,10 +79,12 @@ DENIED_COMMANDS = ("clauth", "claude", "rabota lane", "rabota schedule add", "ra
 FIXED_DENY = (tuple(f"{tool}({p})" for p in CREDENTIAL_PATHS for tool in ("Read", "Edit"))
               + tuple(f"Bash({c}:*)" for c in DENIED_COMMANDS))
 
-# `claude` as a word: `claude -p`, `~/.local/bin/claude`, `claude-as`. Not `~/.claude/…` (a dot
-# before it), not `…/claude/hooks` (a slash after it), not `CLAUDE_CONFIG_DIR` (case). Comments are
-# NOT stripped first: over-refusing a script that merely mentions claude is the safe direction.
-CLAUDE_WORD = re.compile(r"(?<![\w.-])claude(?![\w./])")
+# `claude`, or a launcher of it, as a word: `claude -p`, `~/.local/bin/claude`, `claude-as`,
+# `clauth start`, `hspawn`, `herdr-draft`. Not `~/.claude/…` (a dot before it), not
+# `…/claude/hooks` (a slash after it), not `CLAUDE_CONFIG_DIR` (case). Comments are NOT stripped
+# first: over-refusing a script that merely mentions one is the safe direction. A text scan cannot
+# follow what the script itself runs — a second script it execs is not read.
+CLAUDE_WORD = re.compile(r"(?<![\w.-])(?:claude|clauth|hspawn|herdr-draft)(?![\w./])")
 
 GUARD = Path(__file__).resolve().parents[3] / "claude" / "hooks" / "secret-emission-guard.sh"
 # A file the guard is known to refuse a read of. Asked first: the hook FAILS OPEN (no jq, no
@@ -184,7 +187,9 @@ def _claude_hit(text: str) -> str | None:
 def _refuse_tracked(ctx, paths: list[Path]) -> None:
     """Refuse when git tracks any of ``paths``; "could not tell" refuses too, never passes."""
     for p in paths:
-        res = ctx.runner.run(["git", "-C", str(p.parent), "ls-files", "--error-unmatch", "--", p.name], timeout=15)
+        # LC_ALL=C: the not-a-repository case is recognised by git's message, which is translated.
+        res = ctx.runner.run(["git", "-C", str(p.parent), "ls-files", "--error-unmatch", "--", p.name],
+                             env={**ctx.env, "LC_ALL": "C"}, timeout=15)
         if res.code == 0:
             raise errors.Refused(
                 f"--record {p} is tracked by git: a scheduled run's result never lands in a tracked "
@@ -328,7 +333,8 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
             raise errors.Usage("arguments after -- belong to --command; an agent run takes none")
     else:
         stray = [f for f, v in (("--allow", allow), ("--read", read), ("--seat", seat), ("--model", model),
-                                ("--effort", effort), ("--max-budget-usd", max_budget_usd)) if v]
+                                ("--effort", effort), ("--max-budget-usd", max_budget_usd))
+                 if v is not None and v != []]
         if stray:
             raise errors.Usage(f"{', '.join(stray)} configure an agent run; a command run takes none")
     title = (title or "").strip()
@@ -341,22 +347,29 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
     if len(set(labels)) != len(labels):
         raise errors.Usage(f"--option labels must be unique: {labels}")
     for rule in allow:
-        if not re.fullmatch(r"Bash\((?!\*?\))(?!:\*\)).+\)", rule):
+        # One rule, with a body that names something: `Bash(*)`, `Bash(**)`, `Bash(*:*)` and `Bash( *)`
+        # are each "any command", and `Bash(x) Read(//**)` is two rules in one string.
+        body = re.fullmatch(r"Bash\(([^()]*)\)", rule)
+        if not body or not body.group(1).strip(" *:"):
             raise errors.Usage(f"--allow {rule!r} is not a Bash(...) rule; reads go in --read, "
                                f"and a run writes only its own out_dir")
     read_rules = []
+    home = Path.home().resolve()
     for r in read:
         p = Path(r).expanduser()
         if not p.is_absolute():
             raise errors.Usage(f"--read {r!r} must be an absolute path")
+        p = Path(os.path.normpath(p))       # no `..` survives into a rule
+        if home.is_relative_to(p):
+            raise errors.Usage(f"--read {r!r} covers your whole home directory; name the paths the run needs")
         read_rules.append(f"{p}/**" if p.is_dir() else str(p))
-    if max_budget_usd is not None and not max_budget_usd > 0:
-        raise errors.Usage("--max-budget-usd must be more than 0")
+    if max_budget_usd is not None and not (math.isfinite(max_budget_usd) and max_budget_usd > 0):
+        raise errors.Usage("--max-budget-usd must be a finite amount more than 0")
 
     # --- when (refusals) -----------------------------------------------------------------------
     not_before = parse_time(at, "--at")
     expires_at = parse_time(expires, "--expires") if expires else not_before + DEFAULT_EXPIRY
-    if not_before < now:
+    if not_before < now.replace(second=0, microsecond=0):   # --at has minute precision: "this minute" is not past
         raise errors.Refused(f"--at {_local(_iso(not_before))} is in the past")
     if expires_at <= not_before:
         raise errors.Refused(f"--expires {_local(_iso(expires_at))} is not after --at {_local(_iso(not_before))}")
@@ -382,7 +395,7 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
         hit = _claude_hit(text) or next((f"argument {a!r}" for a in args if CLAUDE_WORD.search(a)), None)
         if hit:
             raise errors.Refused(
-                f"--command {source} invokes `claude` ({hit}): a command run spends no seat and passes "
+                f"--command {source} invokes `claude` or a launcher of it ({hit}): a command run spends no seat and passes "
                 f"no budget gate, so it must not start an agent. Schedule it with --kind agent")
         seat_pick = None
         timeout_s = int((parse_duration(timeout, "--timeout") if timeout else COMMAND_TIMEOUT).total_seconds())
@@ -472,8 +485,9 @@ def run_cancel(ctx, sched_id: str, now: datetime | None = None) -> dict:
     if ctx.dry_run:
         return {**row, "status": "cancelled", "dry_run": "nothing written (schedules row)"}
     stamp = _iso(now or datetime.now(timezone.utc))
-    ctx.store.update_schedule(sched_id, status="cancelled", ended_at=stamp, updated_at=stamp,
-                              last_reason="cancelled by rabota schedule cancel")
+    if not ctx.store.cancel_schedule(sched_id, stamp, "cancelled by rabota schedule cancel"):
+        raise errors.Refused(f"schedule {sched_id} stopped being pending while it was being cancelled "
+                             f"(now {ctx.store.get_schedule(sched_id)['status']}); nothing was changed")
     return ctx.store.get_schedule(sched_id)
 
 
@@ -503,14 +517,15 @@ def run_list_all(cfg, status: str | None = None) -> dict:
         state_dir = Path(tenant.state_dir).expanduser()
         if not (state_dir / "rabota.db").is_file():
             continue
+        s = None
         try:
             s = store.Store.open(state_dir)
-        except errors.RabotaError as e:
-            failed.append({"tenant": name, "error": str(e)}); continue
-        try:
             rows += [_summary(r) for r in s.list_schedules(name, status)]
+        except (errors.RabotaError, sqlite3.Error) as e:     # a corrupt or locked file is sqlite's own error
+            failed.append({"tenant": name, "error": str(e)})
         finally:
-            s.close()
+            if s is not None:
+                s.close()
     if failed:
         raise errors.Partial(f"could not read the schedules of {', '.join(f['tenant'] for f in failed)}", failed)
     return {"tenant": None, "schedules": sorted(rows, key=lambda r: (r["not_before"], r["id"]))}
