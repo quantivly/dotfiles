@@ -245,7 +245,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is rewritten by every tick, `add`, `cancel` and answer. It covers every tenant, never creates or
     migrates another tenant's store, and never carries a result body.
 
-  `rabota/tests/test_schedule_tick.py` adds 66 hermetic rows. 70 mutants: 69 deaths and 1
+  `rabota/tests/test_schedule_tick.py` adds 70 hermetic rows. 74 mutants: 73 deaths and 1
   declared-equivalent survivor (`BEGIN IMMEDIATE`: the claim is one conditional `UPDATE`, atomic on
   its own). An earlier sweep exposed a redundant redaction, which is now gone.
 
