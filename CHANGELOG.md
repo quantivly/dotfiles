@@ -240,8 +240,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a clean pass raises one `scheduled-run` escalation, notified once, with the declared options.
     `rabota answer` executes only an option's declared `rerun[:+<n>]` (exactly one new run) or
     `cancel-followups`; any other option executes nothing. `~/.local/state/rabota/schedule-export.json`
-    is rewritten by every tick, `add`, `cancel` and answer. It covers every tenant and never carries
-    a result body.
+    is rewritten by every tick, `add`, `cancel` and answer. It covers every tenant, never creates or
+    migrates another tenant's store, and never carries a result body.
 
 - **A run due later can be declared to rabota instead of handed over as a prompt (DO-816).** Until
   now, a check that came due days later was a prompt file for @zvi to paste on a date. `rabota

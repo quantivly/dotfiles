@@ -129,6 +129,30 @@ class Store:
             raise
         return store
 
+    @classmethod
+    def open_current(cls, state_dir: Path) -> "Store":
+        """Open an EXISTING store that is already at ``SCHEMA_VERSION``: never create one, never migrate.
+
+        For a reader of ANOTHER tenant's store (the schedule export, DO-817), which must not be the
+        thing that creates its file or moves its schema. A store at any other version is refused,
+        naming it; ``open`` is how a command for that tenant migrates it.
+        """
+        db = Path(state_dir) / "rabota.db"
+        if not db.is_file():
+            raise errors.RabotaError(f"no store at {db}")
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=rw", uri=True, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+            if row is None or row[0] != SCHEMA_VERSION:
+                raise errors.Refused(f"{db} is at schema {row[0] if row else 'none'}, not this rabota's "
+                                     f"{SCHEMA_VERSION}; any rabota command for that tenant migrates it")
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+            raise
+        return cls(conn)
+
     def close(self): self.conn.close()
 
     @contextlib.contextmanager
@@ -287,12 +311,7 @@ class Store:
         self._exec(f"INSERT INTO schedules({cols}) VALUES ({qs})", tuple(vals[k] for k in SCHEDULE_FIELDS))
     def update_schedule(self, sched_id, **fields):
         """Update named schedule columns and ``updated_at``; an unknown field is a ``ValueError``."""
-        bad = set(fields) - set(SCHEDULE_FIELDS)
-        if bad: raise ValueError(f"unknown schedule fields {bad}")
-        fields = {k: (json.dumps(v) if k in SCHEDULE_JSON_FIELDS and v is not None else v) for k, v in fields.items()}
-        fields.setdefault("updated_at", now())
-        sets = ",".join(f"{k}=?" for k in fields)
-        self._exec(f"UPDATE schedules SET {sets} WHERE id=?", (*fields.values(), sched_id))
+        self.update_schedule_where(sched_id, {}, **fields)
     def cancel_schedule(self, sched_id, stamp, reason) -> bool:
         """Cancel ``sched_id`` only if it is STILL pending, in one statement; False when it was not.
 

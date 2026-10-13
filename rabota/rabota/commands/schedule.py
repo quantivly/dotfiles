@@ -170,8 +170,8 @@ def parse_option(text: str) -> dict:
     if action not in ("none", "cancel-followups") and not _RERUN.match(action):
         raise errors.Usage(f"--option {text!r}: the action must be none, rerun, rerun:+<n>[mhd] "
                            f"or cancel-followups, not {action!r}")
-    delay = _RERUN.match(action).group(1) if _RERUN.match(action) else None
-    if delay and parse_duration(delay, "--option") > MAX_HORIZON:
+    rerun = _RERUN.match(action)
+    if rerun and rerun.group(1) and parse_duration(rerun.group(1), "--option") > MAX_HORIZON:
         raise errors.Usage(f"--option {text!r} re-runs further ahead than the {MAX_HORIZON.days}-day horizon")
     return {"label": label, "action": action}
 
@@ -508,7 +508,12 @@ def run_cancel(ctx, sched_id: str, now: datetime | None = None) -> dict:
     if ctx.dry_run:
         return {**row, "status": "cancelled", "dry_run": "nothing written (schedules row)"}
     stamp = _iso(now or datetime.now(timezone.utc))
-    if not ctx.store.cancel_schedule(sched_id, stamp, "cancelled by rabota schedule cancel"):
+    from rabota import scheduler     # not at the top: scheduler imports this module
+    # Under the tick's lock: a cancel between the tick raising an escalation for this row and its
+    # row write would leave that escalation pointing at nothing (scheduler.tick_lock).
+    with scheduler.tick_lock(ctx, f"cancelling {sched_id}"):
+        cancelled = ctx.store.cancel_schedule(sched_id, stamp, "cancelled by rabota schedule cancel")
+    if not cancelled:
         raise errors.Refused(f"schedule {sched_id} stopped being pending while it was being cancelled "
                              f"(now {ctx.store.get_schedule(sched_id)['status']}); nothing was changed")
     return {**ctx.store.get_schedule(sched_id), "export": _rewrite_export(ctx, now)}
@@ -520,7 +525,7 @@ def _rewrite_export(ctx, now: datetime | None = None) -> dict:
     try:
         return scheduler.write_export(ctx.cfg, now, own=(ctx.tenant.name, ctx.state_dir))
     except Exception as e:      # noqa: BLE001 -- the row is written; the next tick rewrites the export
-        return {"error": str(e) if isinstance(e, errors.RabotaError) else f"{type(e).__name__}: {e}"}
+        return {"error": scheduler._error(e)}
 
 
 def _summary(row: dict) -> dict:

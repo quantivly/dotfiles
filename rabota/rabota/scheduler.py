@@ -55,8 +55,10 @@ stays where the next one goes. Otherwise it goes at the end, through ``emit.appe
 guard the text. The command's output arrives redacted (``secrets.redact``), so a script that prints
 a protected value still leaves its section, and no ``<!--`` survives in a body, so output can never
 forge a key or move the marker. A record that git tracks by now is not written: ``add``'s rule,
-asked again. A record that cannot be written fails the tick and turns even a ``pass`` into an
-escalation, because otherwise its result would be lost with nothing to show for it.
+asked again. A record that cannot be written fails the tick (exit 4), and on a final outcome it
+turns even a ``pass`` into an escalation, because otherwise that result would be lost with nothing
+to show for it. A retried attempt raises nothing, so its lost section is reported by the tick's
+failure alone; the outcome its retries end in escalates as usual.
 
 **Escalations** (§6 step 4). ``OUTCOMES`` maps each of the six outcomes to the status it leaves and
 the urgency of its escalation. ``pass`` raises none; ``fail``, ``denied``, ``expired`` and
@@ -78,8 +80,8 @@ an option that reads "rerun" or spells a rollback command executes nothing. The 
 the answer commit in one transaction, after every refusal has been asked.
 
 **The export** (§6), ``~/.local/state/rabota/schedule-export.json``, is rewritten atomically by every
-tick, every ``add`` and ``cancel``, and every answer to a scheduled run. It covers every tenant, each
-read from its own store and none created. It is versioned and redacted field by field. It carries
+tick, every ``add`` and ``cancel``, and every answer to a scheduled run, under one lock all tenants
+share. It covers every tenant, each read from its own store, which is never created or migrated. It is versioned and redacted field by field. It carries
 titles, statuses, outcomes, reasons, and each escalation's question and options, and never a result
 body or a path to one.
 """
@@ -92,6 +94,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -110,6 +113,11 @@ TAIL_BYTES = 4096                 # of each output stream, into result.md and th
 LIVE = ("active", "activating", "deactivating", "reloading", "refreshing")
 EXPORT_VERSION = 1
 EXPORT_WINDOW = timedelta(days=30)   # a settled row stays in the export this long after it ended
+# How long a writer waits for a lock another holds before giving up. Every holder is a short
+# read-modify-write, so running out means something is stuck, and the caller reports it.
+TICK_LOCK_WAIT = 60.0          # cancel and answer, for a tick in progress
+EXPORT_LOCK_WAIT = 30.0        # an export rewrite, for another tenant's
+RECORD_LOCK_WAIT = 30.0        # a record write, for another in the same directory
 AGENT_DEFERRAL = ("deferred: agent runs have no executor until phase 2 (DO-820); it stays pending, "
                   "so it expires and escalates if none arrives in time")
 # $0 names the process, $1 is the exit-status path, the rest is the frozen script and its args.
@@ -161,20 +169,45 @@ def _error(e: Exception) -> str:
     return str(e) if isinstance(e, errors.RabotaError) else f"{type(e).__name__}: {e}"
 
 
-@contextlib.contextmanager
-def _flock(path: Path):
-    """Yield True holding an exclusive lock on ``path``, or False at once if another tick holds it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
+def _acquire(fd: int, wait: float) -> bool:
+    deadline = time.monotonic() + wait
+    while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
         except BlockingIOError:
-            yield False
-            return
-        yield True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+@contextlib.contextmanager
+def _flock(path: Path, wait: float = 0, directory: bool = False):
+    """Yield whether an exclusive lock on ``path`` was taken within ``wait`` seconds (0: at once).
+
+    ``directory`` locks the directory itself, a path no atomic rename can replace under the lock.
+    """
+    if not directory:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY) if directory else os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        yield _acquire(fd, wait)
     finally:
         os.close(fd)        # closing the descriptor releases the lock
+
+
+@contextlib.contextmanager
+def tick_lock(ctx, what: str):
+    """The tick's own lock, for a writer that must not interleave with one: ``cancel`` and ``answer``.
+
+    The tick raises an escalation before the row write that records it. A cancel landing between
+    the two would leave an escalation no row points at, offering actions nothing would execute.
+    """
+    with _flock(ctx.state_dir / LOCK, wait=TICK_LOCK_WAIT) as held:
+        if not held:
+            raise errors.Refused(f"a schedule tick for {ctx.tenant.name} has held its lock for "
+                                 f"{TICK_LOCK_WAIT:g} s, so {what} was not done; try again")
+        yield
 
 
 # --- the tick ----------------------------------------------------------------------------------
@@ -198,7 +231,11 @@ def run_tick(ctx, now: datetime | None = None) -> dict:
         except Exception as e:      # noqa: BLE001 -- reported; the queue itself has moved
             rep["errors"].append({"step": "export", "id": None, "error": _error(e)})
     if rep["errors"]:
-        raise errors.Partial(f"schedule tick for {ctx.tenant.name}: {len(rep['errors'])} failure(s)", rep["errors"])
+        # The CLI prints only the failures, so the message says what the tick still did.
+        moved = "; ".join(f"{k} {', '.join(r['id'] for r in rep[k])}"
+                          for k in ("settled", "expired", "refused", "dispatched", "deferred") if rep[k])
+        raise errors.Partial(f"schedule tick for {ctx.tenant.name}: {len(rep['errors'])} failure(s)"
+                             + (f"; it still {moved}" if moved else ""), rep["errors"])
     return rep
 
 
@@ -313,7 +350,9 @@ def _result_md(row, outcome, detail, retry, ended, now) -> str:
         text, cut = _tail(out_dir / name)
         if text.strip():
             parts.append(f"{name}{f' (last {TAIL_BYTES} bytes)' if cut else ''}:\n\n{_fence(text)}")
-    return _neutral("\n\n".join(parts)) + "\n"
+    # The whole body, not just the streams: a title or ask stored before this environment held a
+    # value is not redacted in the row, and a leak here would wedge the row in every tick after.
+    return _redact(_neutral("\n\n".join(parts))) + "\n"
 
 
 def _expire(ctx, now, rep):
@@ -372,7 +411,12 @@ def _cannot_start(ctx, row) -> tuple[str, str] | None:
 
 
 def command_argv(row: dict, unit: str, out_dir: Path) -> list[str]:
-    """The ``systemd-run`` argv for one command attempt. Every value is an argv element, never text."""
+    """The ``systemd-run`` argv for one command attempt. Every value is an argv element, never text.
+
+    ``--expand-environment=`` is systemd 254 or later. The tick runs only on this laptop (design
+    §13), which runs 259; an older systemd refuses the flag, and that surfaces as a could-not-run
+    escalation naming the error, never as a run that silently did not happen.
+    """
     return ["systemd-run", "--user", "--collect", f"--unit={unit}", f"--working-directory={row['cwd']}",
             "--expand-environment=no", f"--setenv=PATH={unit_path()}",
             "-p", f"MemoryMax={row['memory_max']}", "-p", f"RuntimeMaxSec={row['timeout_s']}",
@@ -423,22 +467,31 @@ def _refuse(ctx, row, problem, evidence, now, rep):
 # --- the record and the escalation -------------------------------------------------------------
 
 def _record(ctx, row, key: str, text: str) -> str | None:
-    """Put ``text`` under ``key`` in the row's record; ``appended``, ``present``, or None for no record."""
+    """Put ``text`` under ``key`` in the row's record; ``appended``, ``present``, or None for no record.
+
+    The read, the key check and the write happen under a lock on the record's DIRECTORY, so two
+    rabota writers (a tick and an answer, or two tenants' ticks sharing one file) cannot each read
+    the old file and have the second rename drop the first one's section. An editor saving over
+    the file at the same instant is outside any lock rabota can take.
+    """
     if not row["record"]:
         return None
     p = Path(row["record"])
     decl._refuse_tracked(ctx, [p])
-    current = p.read_text()
-    tag = f"<!-- rabota-schedule:{key} -->"
-    if tag in current:
-        return "present"
-    block = f"{tag}\n{text.rstrip()}\n\n"
-    if MARKER in current:
-        i = current.index(MARKER)
-        emit.replace_file(p, current[:i] + block + current[i:])
-    else:
-        lead = "" if not current or current.endswith("\n\n") else "\n" if current.endswith("\n") else "\n\n"
-        emit.append_file(p, lead + block)
+    with _flock(p.parent, wait=RECORD_LOCK_WAIT, directory=True) as held:
+        if not held:
+            raise errors.RabotaError(f"another writer held {p.parent} for {RECORD_LOCK_WAIT:g} s")
+        current = p.read_text()
+        tag = f"<!-- rabota-schedule:{key} -->"
+        if tag in current:
+            return "present"
+        block = f"{tag}\n{_redact(text).rstrip()}\n\n"
+        if MARKER in current:
+            i = current.index(MARKER)
+            emit.replace_file(p, current[:i] + block + current[i:])
+        else:
+            lead = "" if not current or current.endswith("\n\n") else "\n" if current.endswith("\n") else "\n\n"
+            emit.append_file(p, lead + block)
     return "appended"
 
 
@@ -457,6 +510,7 @@ def _escalate_once(ctx, row, outcome, evidence, detail, record_error=None) -> in
     urgency = OUTCOMES[outcome][1] or ("normal" if record_error else None)
     if urgency is None:
         return None
+    evidence = _redact(evidence)
     found = ctx.store.find_escalation(ctx.tenant.name, ESC_KIND, row["id"], evidence)
     if found is not None:
         return found["id"]
@@ -466,7 +520,7 @@ def _escalate_once(ctx, row, outcome, evidence, detail, record_error=None) -> in
     if row["ask"]:
         question += f". {row['ask']}"
     labels = [o["label"] for o in options_of(row)]
-    return escalate.run_escalate(ctx, question, evidence, labels, kind=ESC_KIND, subject=row["id"],
+    return escalate.run_escalate(ctx, _redact(question), evidence, labels, kind=ESC_KIND, subject=row["id"],
                                  urgency=urgency)["id"]
 
 
@@ -494,8 +548,20 @@ def _exported(e: dict, now: datetime) -> bool:
 
 def write_export(cfg, now: datetime | None = None, own: tuple[str, Path] | None = None) -> dict:
     """Rewrite the export from every tenant's store. ``own`` is ``(tenant, state_dir)`` for a
-    ``--state-dir`` override, so the caller's own store is the one read for its tenant."""
-    now = now or datetime.now(timezone.utc)
+    ``--state-dir`` override, so the caller's own store is the one read for its tenant.
+
+    Every tenant's tick writes the same file, and two timers can fire in the same second. The read
+    and the write therefore happen under one lock, so the last export written is never one read
+    before another writer's change: each tenant's own store write lands before its rewrite starts.
+    """
+    with _flock(export_path().with_name(".schedule-export.lock"), wait=EXPORT_LOCK_WAIT) as held:
+        if not held:
+            raise errors.RabotaError(f"another export rewrite held its lock for {EXPORT_LOCK_WAIT:g} s; "
+                                     f"this one was skipped, and the next tick rewrites it")
+        return _write_export(cfg, now or datetime.now(timezone.utc), own)
+
+
+def _write_export(cfg, now, own) -> dict:
     tenants, rows = {}, []
     for name, tenant in sorted(cfg.tenants.items()):
         state_dir = Path(own[1]) if own and own[0] == name else Path(tenant.state_dir).expanduser()
@@ -504,7 +570,7 @@ def write_export(cfg, now: datetime | None = None, own: tuple[str, Path] | None 
             continue
         s = None
         try:
-            s = store.Store.open(state_dir)
+            s = store.Store.open_current(state_dir)     # never creates or migrates another tenant's store
             mine = [e for e in (_export_row(s, r) for r in s.list_schedules(name)) if _exported(e, now)]
         except (errors.RabotaError, sqlite3.Error) as e:
             tenants[name] = {"ok": False, "error": _redact(_error(e))}
@@ -579,6 +645,15 @@ def run_answer(ctx, esc: dict, row: dict, label: str, resolution: str | None = N
                now: datetime | None = None) -> dict:
     """Answer a tick-raised escalation: execute the label's declared action, record, export."""
     now = now or datetime.now(timezone.utc)
+    if ctx.dry_run:
+        return _answer(ctx, esc, row, label, resolution, now)
+    with tick_lock(ctx, f"the answer to ESC-{esc['id']}"):
+        out = _answer(ctx, esc, row, label, resolution, now)
+    return _after_answer(ctx, esc, row, label, resolution, now, out)
+
+
+def _answer(ctx, esc, row, label, resolution, now) -> dict:
+    """Plan the label's action, ask every refusal, then commit the action and the answer as one."""
     action = action_for(row, label)
     plan = _plan_rerun(ctx, row, esc["id"], label, action, now) if decl._RERUN.match(action) else None
     followups = _followups(ctx, row) if action == "cancel-followups" else []
@@ -586,6 +661,11 @@ def run_answer(ctx, esc: dict, row: dict, label: str, resolution: str | None = N
            "enqueued": plan["row"]["id"] if plan else None, "cancelled": [f["id"] for f in followups]}
     if ctx.dry_run:
         return {**out, "dry_run": "nothing written (escalations row, escalations.jsonl, schedules, record, export)"}
+    # Asked again under the lock: two answers that both read "open" before either committed would
+    # otherwise each execute the action, and a rerun would be enqueued twice.
+    current = ctx.store.escalation(esc["id"])
+    if current["resolved_at"]:
+        raise errors.Refused(f"escalation {esc['id']} was answered {current['disposition']!r} while this answer ran")
     # Everything the projection will carry is checked now, so a leak refuses before the action commits.
     secrets.assert_clean(json.dumps([esc["question"], esc["evidence"], esc["options"], label, resolution]), os.environ)
     frozen = decl._freeze(ctx, plan["row"]["id"], [(plan["name"], plan["raw"], plan["raw"].decode("utf-8"),
@@ -604,6 +684,13 @@ def run_answer(ctx, esc: dict, row: dict, label: str, resolution: str | None = N
         if frozen is not None:
             shutil.rmtree(frozen, ignore_errors=True)
         raise
+    out["plan"] = plan
+    return out
+
+
+def _after_answer(ctx, esc, row, label, resolution, now, out) -> dict:
+    """The projection, the record's ``decided`` line and the export, once the answer has committed."""
+    plan, stamp, action = out.pop("plan"), decl._iso(now), out["action"]
     escalate._project(ctx, escalate.answer_projection(ctx, esc, label, resolution))
     effect = (f"; enqueued {out['enqueued']}, due {decl._local(plan['row']['not_before'])}" if plan
               else f"; cancelled {', '.join(out['cancelled']) or 'nothing pending'}" if action == "cancel-followups"

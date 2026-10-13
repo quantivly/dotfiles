@@ -10,9 +10,11 @@ import configparser
 import fcntl
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -92,6 +94,13 @@ class TickBase(ScheduleBase):
         if not keep_live:
             self.runner.live.discard(row["unit"])
         return row
+
+    def hold(self, path, directory=False):
+        """Take an exclusive flock on ``path`` for the rest of the test, as another writer would."""
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY) if directory else os.open(path, os.O_RDWR | os.O_CREAT)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
 
     def run_once(self, ctx, code, **kw):
         """Declare, dispatch at DUE, finish with ``code``, settle ten minutes later. Returns the id."""
@@ -412,6 +421,32 @@ class RecordTests(TickBase):
             self.assertNotIn(CANARY, text)
             self.assertIn("token=[redacted:LINEAR_API_KEY]", text)
 
+    def test_a_value_stored_before_the_environment_held_it_cannot_wedge_the_row(self):
+        ctx = self.tctx(); sid = self.declare(ctx, title=f"check {CANARY}", record=str(self.record))
+        self.tick(ctx, DUE); self.finish(ctx, sid, 1)
+        with mock.patch.dict(os.environ, {"LINEAR_API_KEY": CANARY}):
+            self.tick(ctx, DUE + 10 * MIN)
+            (esc,) = ctx.store.escalations("quantivly")
+        row = ctx.store.get_schedule(sid)
+        self.assertEqual((row["status"], row["escalation_id"]), ("done", esc["id"]))
+        result = (Path(row["out_dir"]) / "result.md").read_text()
+        for text in (result, self.record.read_text(), esc["question"]):
+            self.assertNotIn(CANARY, text)
+            self.assertIn("[redacted:LINEAR_API_KEY]", text)
+
+    def test_a_record_another_writer_holds_is_reported_and_escalates(self):
+        ctx = self.tctx(); sid = self.declare(ctx, record=str(self.record))
+        before = self.record.read_text()
+        self.tick(ctx, DUE); self.finish(ctx, sid, 0)
+        self.hold(self.record.parent, directory=True)
+        with mock.patch.object(scheduler, "RECORD_LOCK_WAIT", 0.2):
+            with self.assertRaises(errors.Partial) as cm:
+                self.tick(ctx, DUE + 10 * MIN)
+        self.assertIn("held", cm.exception.failed[0]["error"])
+        self.assertEqual(self.record.read_text(), before)
+        (esc,) = self.escs(ctx)
+        self.assertIn("its record was not written", esc["question"])
+
     def test_a_record_git_now_tracks_is_not_written_and_even_a_pass_escalates(self):
         ctx = self.tctx(); sid = self.declare(ctx, record=str(self.record))
         before = self.record.read_text()
@@ -431,6 +466,20 @@ class RecordTests(TickBase):
 
 class ConcurrencyTests(TickBase):
     """§10 "Concurrency and crashes"."""
+
+    def test_cancel_and_answer_wait_for_a_tick_and_refuse_rather_than_interleave(self):
+        ctx = self.tctx(); sid = self.run_once(ctx, 1)
+        eid = ctx.store.get_schedule(sid)["escalation_id"]
+        pending = self.declare(ctx, at="2026-10-16 09:00+00:00")
+        self.hold(ctx.state_dir / scheduler.LOCK)                  # a tick, mid-run
+        with mock.patch.object(scheduler, "TICK_LOCK_WAIT", 0.2):
+            with self.assertRaises(errors.Refused) as cm:
+                schedule.run_cancel(ctx, pending)
+            self.assertIn("has held its lock", str(cm.exception))
+            with self.assertRaises(errors.Refused):
+                escalate.run_answer(ctx, eid, "re-run now")
+        self.assertEqual(ctx.store.get_schedule(pending)["status"], "pending")
+        self.assertIsNone(ctx.store.escalation(eid)["resolved_at"])
 
     def test_a_held_lock_makes_a_tick_do_nothing(self):
         ctx = self.tctx(); sid = self.declare(ctx)
@@ -509,6 +558,7 @@ class ConcurrencyTests(TickBase):
                 self.tick(ctx, DUE)
         self.assertEqual([(f["step"], f["id"]) for f in cm.exception.failed], [("dispatch", bad)])
         self.assertEqual(ctx.store.get_schedule(good)["status"], "running")
+        self.assertTrue(str(cm.exception).endswith(f"; it still dispatched {good}"), str(cm.exception))
 
 
 class DeferralTests(TickBase):
@@ -645,6 +695,16 @@ class AnswerTests(TickBase):
         self.assertEqual(sorted(p.name for p in (ctx.state_dir / "schedules").iterdir()),
                          sorted(r["id"] for r in ctx.store.list_schedules()))     # no orphaned frozen copy
 
+    def test_a_second_answer_racing_the_first_executes_nothing(self):
+        ctx = self.tctx(); sid, eid = self.failed(ctx)
+        stale = ctx.store.escalation(eid)                           # read open, before the first commits
+        escalate.run_answer(ctx, eid, "re-run now")
+        n = self.count(ctx)
+        with self.assertRaises(errors.Refused) as cm:
+            scheduler.run_answer(ctx, stale, ctx.store.get_schedule(sid), "re-run now")
+        self.assertIn("while this answer ran", str(cm.exception))
+        self.assertEqual(self.count(ctx), n)
+
     def test_a_hand_made_scheduled_run_escalation_executes_nothing(self):
         ctx = self.tctx(); sid = self.declare(ctx)
         eid = escalate.run_escalate(ctx, "q", "e", ["re-run now"], kind="scheduled-run", subject=sid)["id"]
@@ -722,6 +782,42 @@ class ExportTests(TickBase):
         rep = self.tick(q, DUE)
         self.assertEqual(rep["export"]["failed"], ["toysim"])
         self.assertFalse(self.export()["tenants"]["toysim"]["ok"])
+
+    def test_a_rewrite_waits_for_one_already_in_progress(self):
+        ctx = self.tctx(); self.declare(ctx)
+        lock = scheduler.export_path().with_name(".schedule-export.lock")
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT); self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)                         # another tenant's tick, mid-rewrite
+        before = scheduler.export_path().read_text()
+        ctx.store.update_schedule(ctx.store.list_schedules()[0]["id"], last_reason="moved")
+        done = threading.Event()
+        t = threading.Thread(target=lambda: (scheduler.write_export(ctx.cfg, NOW), done.set()), daemon=True)
+        t.start()
+        self.assertFalse(done.wait(0.3))
+        self.assertEqual(scheduler.export_path().read_text(), before)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        self.assertTrue(done.wait(10))
+        self.assertIn('"moved"', scheduler.export_path().read_text())
+
+    def test_a_rewrite_held_off_too_long_is_reported_never_hangs(self):
+        ctx = self.tctx(); self.declare(ctx)
+        self.hold(scheduler.export_path().with_name(".schedule-export.lock"))
+        with mock.patch.object(scheduler, "EXPORT_LOCK_WAIT", 0.2):
+            with self.assertRaises(errors.Partial) as cm:
+                self.tick(ctx, DUE - MIN)
+        self.assertEqual(cm.exception.failed[0]["step"], "export")
+        self.assertIn("held its lock", cm.exception.failed[0]["error"])
+
+    def test_the_export_never_migrates_another_tenants_store(self):
+        t = self.ctx(tenant="toysim", runner=self.runner); self.declare(t)
+        t.store.conn.execute("UPDATE schema_version SET version=4"); t.close()
+        q = self.tctx(); self.declare(q)
+        scheduler.write_export(q.cfg, NOW)
+        self.assertFalse(self.export()["tenants"]["toysim"]["ok"])
+        self.assertIn("is at schema 4", self.export()["tenants"]["toysim"]["error"])
+        db = self.home / "toysim" / "handoffs" / "rabota" / "rabota.db"
+        conn = sqlite3.connect(db); self.addCleanup(conn.close)
+        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0], 4)
 
     def test_a_settled_row_leaves_the_export_after_the_window(self):
         ctx = self.tctx(); sid = self.run_once(ctx, 0)
