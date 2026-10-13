@@ -315,6 +315,7 @@ class AddTests(ScheduleBase):
         out = self.add(ctx, record=str(self.record))
         self.assertIn("nothing written", out["dry_run"])
         self.assertEqual(out["status"], "pending")
+        self.assertFalse((ctx.state_dir / "rabota.db").exists())    # the store was not even opened
         self.assertEqual(ctx.store.list_schedules(), [])
         self.assertFalse((ctx.state_dir / "schedules").exists())
         self.assertIn(["systemctl", "--user", "is-enabled", "rabota-schedule@quantivly.timer"], ctx.runner.calls)

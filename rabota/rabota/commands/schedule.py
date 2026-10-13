@@ -410,7 +410,10 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
     timer = _refuse_disarmed(ctx)
 
     sched_id = f"s-{uuid.uuid4().hex[:8]}"
-    while ctx.store.get_schedule(sched_id) or (ctx.state_dir / "schedules" / sched_id).exists():
+    # Not on a dry run: opening the store creates rabota.db where there is none and MIGRATES one that
+    # is older, and a dry run must leave the tenant's store exactly as it found it.
+    while not ctx.dry_run and (ctx.store.get_schedule(sched_id)
+                               or (ctx.state_dir / "schedules" / sched_id).exists()):
         sched_id = f"s-{uuid.uuid4().hex[:8]}"
     payload_name = "prompt.md" if kind == "agent" else "script"
     sched_dir = ctx.state_dir / "schedules" / sched_id
