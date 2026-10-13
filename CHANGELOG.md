@@ -243,6 +243,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is rewritten by every tick, `add`, `cancel` and answer. It covers every tenant, never creates or
     migrates another tenant's store, and never carries a result body.
 
+  `rabota/tests/test_schedule_tick.py` adds 66 hermetic rows. 70 mutants: 69 deaths and 1
+  declared-equivalent survivor (`BEGIN IMMEDIATE`: the claim is one conditional `UPDATE`, atomic on
+  its own). An earlier sweep exposed a redundant redaction, which is now gone.
+
 - **A run due later can be declared to rabota instead of handed over as a prompt (DO-816).** Until
   now, a check that came due days later was a prompt file for @zvi to paste on a date. `rabota
   schedule add` records it instead as a row in the tenant's `rabota.db`, in a new `schedules`
