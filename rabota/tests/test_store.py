@@ -156,26 +156,59 @@ class StoreTests(unittest.TestCase):
         """)
         conn.close()
         s = Store.open(Path(tmp.name))
-        self.assertEqual(s.schema_version(), SCHEMA_VERSION)   # unchanged: still 4, not bumped to 5
+        # DO-768 left the stamp at 4; a v4 store now walks on to 5 through MIGRATIONS[4] (DO-816).
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
         tables = {r[0] for r in s.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("fireflies_freeze_faults", tables)
         s.record_freeze_result("quantivly", "disk full")   # would raise `no such table` before this change
         self.assertEqual(s.freeze_fault("quantivly")["fails"], 1)
         s.close()
 
-    def test_v4_store_is_refused_by_v3_code(self):
-        # DO-728 fix round, hazard 1: the other direction -- an older rabota (still at v3) must
-        # refuse a v4 store cleanly, exactly as v3-code refused a v2 database before it.
-        from rabota.store import Store
+    def test_current_store_is_refused_by_the_previous_rabota(self):
+        # DO-728 fix round, hazard 1: the other direction -- an older rabota must refuse a newer
+        # store cleanly, exactly as v3-code refused a v2 database before it. Written against
+        # SCHEMA_VERSION rather than a literal since DO-816 (v5), so the next bump keeps it honest.
+        from rabota.store import Store, SCHEMA_VERSION
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         state_dir = Path(tmp.name)
         s = Store.open(state_dir)
-        self.assertEqual(s.schema_version(), 4)
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
         s.close()
-        with mock.patch("rabota.store.SCHEMA_VERSION", 3):
+        with mock.patch("rabota.store.SCHEMA_VERSION", SCHEMA_VERSION - 1):
             with self.assertRaises(errors.Refused) as cm:
                 Store.open(state_dir)
-            self.assertIn("schema is 4, newer than this rabota's 3", str(cm.exception))
+            self.assertIn(f"schema is {SCHEMA_VERSION}, newer than this rabota's {SCHEMA_VERSION - 1}",
+                          str(cm.exception))
+
+    def test_migrate_v4_to_v5_adds_schedules_and_touches_nothing_else(self):
+        # DO-816: the step is purely additive. A v4 store carrying a lane and an escalation comes
+        # out stamped 5 with both rows exactly as they were, every pre-existing table's columns
+        # unchanged, and a `schedules` table a row can be written to and read back from.
+        from rabota.store import Store, SCHEMA_VERSION
+        self.assertEqual(SCHEMA_VERSION, 5)
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        fresh = Store.open(Path(tmp.name) / "fresh")
+        before = {t: [r[1] for r in fresh.conn.execute(f"PRAGMA table_info({t})")]
+                  for (t,) in fresh.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        fresh.conn.execute("DROP TABLE schedules"); fresh.conn.execute("UPDATE schema_version SET version=4")
+        fresh.add_escalation("quantivly", "q", "e", ["a"], kind="decision", subject="s")
+        fresh.insert_lane({"id": "l1", "tenant": "quantivly", "status": "done", "est_minutes": 7})
+        fresh.close()
+        s = Store.open(Path(tmp.name) / "fresh")
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
+        after = {t: [r[1] for r in s.conn.execute(f"PRAGMA table_info({t})")]
+                 for (t,) in s.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertEqual(after, before)      # schedules is back, with the fresh shape; nothing else moved
+        self.assertEqual((s.get_lane("l1")["status"], s.get_lane("l1")["est_minutes"]), ("done", 7))
+        self.assertEqual(s.open_escalations("quantivly")[0]["subject"], "s")
+        s.insert_schedule({"id": "s-0000abcd", "tenant": "quantivly", "kind": "command", "title": "t",
+                           "cwd": "/", "payload_path": "/x", "payload_sha256": "0" * 64, "args": ["-v"],
+                           "not_before": "2026-10-14T06:00:00Z", "expires_at": "2026-10-16T06:00:00Z",
+                           "timeout_s": 900, "memory_max": "1G", "max_attempts": 2, "status": "pending",
+                           "created_at": "2026-10-13T06:00:00Z"})
+        row = s.get_schedule("s-0000abcd")
+        self.assertEqual((row["args"], row["attempt"], row["allow"]), (["-v"], 0, None))
+        s.close()
 
     def test_migrate_v1_to_v2_adds_columns_and_restamps(self):
         from rabota.store import Store, SCHEMA_VERSION

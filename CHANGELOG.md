@@ -222,6 +222,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A run due later can be declared to rabota instead of handed over as a prompt (DO-816).** Until
+  now, a check that came due days later was a prompt file for @zvi to paste on a date. `rabota
+  schedule add` records it instead as a row in the tenant's `rabota.db`, in a new `schedules`
+  table: store schema 4 → 5, purely additive, so an older rabota now refuses the store.
+  - **What `add` takes.** An agent run (`--prompt-file`) or a command run
+    (`--command <script> [-- args]`), due `--at` a local time.
+  - **What it freezes.** The prompt or script goes into `<state_dir>/schedules/<id>/` with its
+    sha256, so editing the source changes nothing.
+  - **What it prints.** The whole declaration, including an agent run's effective permissions:
+    `dontAsk`, the declared `Bash(...)` and read rules, and a fixed deny list of credential paths
+    and agent-launching verbs.
+  - **What it refuses, each by name.**
+    - a past `--at`, or one more than 30 days ahead;
+    - an `--expires` not after `--at`, or more than 30 days after it;
+    - a `--timeout` over 6 h;
+    - a `--cwd` containing the run's out_dir;
+    - a script that invokes `claude`, `clauth`, `hspawn` or `herdr-draft`;
+    - a `--record` git tracks, or one the secret guard protects (both tools are asked, and a tool
+      that cannot answer refuses);
+    - a tenant whose `rabota-schedule@` timer is not enabled. That check runs last, and
+      `--dry-run` refuses on it too, saying that the declaration is otherwise valid.
+
+  `list [--status] [--all-tenants]`, `show <id>` (which re-hashes the frozen payload) and `cancel
+  <id>` (pending only, in one conditional write) complete the verb. Nothing fires a row yet: the
+  tick and the timer are DO-817. The defaults and bounds are named constants, pending @zvi's
+  decision 5. 58 mutants: 57 deaths, and 1 declared-equivalent survivor. The migration's step is
+  re-created by the trailing `CREATE TABLE IF NOT EXISTS`, and `store.py` says so. The first sweep
+  exposed a hollow row: a "could not ask git" message carried the tracked needle.
+
 - **Open escalations reach @zvi after the herdr notification has gone (DO-815).** Before, `rabota
   close` was the only code that read an open escalation, so a question a lane raised reached him
   only if he was watching herdr at the time. `rabota brief` now starts `brief.md` with a `## Needs
