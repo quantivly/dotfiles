@@ -101,6 +101,7 @@ class AddRefusalTests(ScheduleBase):
 
     def test_refuses_a_past_at(self):
         self.refused(NEEDLES["past"], self.ctx(), at="2026-10-13 11:59+00:00")
+        self.assertEqual(self.add(self.ctx(), at="2026-10-13 12:00+00:00")["status"], "pending")   # now is not past
 
     def test_refuses_an_expiry_before_at(self):
         self.refused(NEEDLES["expiry"], self.ctx(), expires="2026-10-14 08:00+00:00")
