@@ -24,10 +24,12 @@ fails is reported, the others still move, and the tick exits 4.
    A row that fails a check is REFUSED, terminally, with a critical escalation, because neither
    fault heals itself and a retry would only delay the news. A row that passes is CLAIMED in one
    ``BEGIN IMMEDIATE`` conditional write that stores its attempt, unit name and out_dir, and only
-   then started with ``systemd-run``. An agent row is never dispatched (DO-820 brings its
-   executor): it is DEFERRED with ``AGENT_DEFERRAL`` as its ``last_reason``. A deferral is not an
-   attempt, so the row stays visible in ``schedule list`` and, if no executor arrives in time,
-   expires and escalates by the ordinary path.
+   then started with ``systemd-run``. At most ``MAX_RUNNING_COMMANDS`` command units run at once
+   per tenant, counting those still running from earlier ticks: a due command past the cap is
+   DEFERRED (``COMMAND_DEFERRAL``) and a later tick starts it. An agent row is never dispatched
+   (DO-820 brings its executor): it is DEFERRED with ``AGENT_DEFERRAL``. A deferral is not an
+   attempt, so the row stays visible in ``schedule list`` with its reason and, if it never gets to
+   start, expires and escalates by the ordinary path.
 
 **Crash recovery.** The claim is written before ``systemd-run``, so the tick can die anywhere after
 it without losing the run. The next tick finds a ``running`` row and asks systemd about its unit. A
@@ -120,6 +122,8 @@ EXPORT_LOCK_WAIT = 30.0        # an export rewrite, for another tenant's
 RECORD_LOCK_WAIT = 30.0        # a record write, for another in the same directory
 AGENT_DEFERRAL = ("deferred: agent runs have no executor until phase 2 (DO-820); it stays pending, "
                   "so it expires and escalates if none arrives in time")
+COMMAND_DEFERRAL = (f"deferred: {decl.MAX_RUNNING_COMMANDS} command runs are already running for this "
+                    f"tenant (MAX_RUNNING_COMMANDS); a later tick starts it once one ends")
 # $0 names the process, $1 is the exit-status path, the rest is the frozen script and its args.
 WRAPPER = r'f=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$f.tmp" && mv -f "$f.tmp" "$f"'
 
@@ -240,9 +244,9 @@ def run_tick(ctx, now: datetime | None = None) -> dict:
 
 
 def _isolated(rep, step, sched_id, fn, *args):
-    """Run one row's step; a failure is reported and never stops the next row."""
+    """Run one row's step and return what it returns; a failure is reported (None) and never stops the next row."""
     try:
-        fn(*args)
+        return fn(*args)
     except Exception as e:      # noqa: BLE001 -- see the docstring; the tick exits 4 on any of these
         rep["errors"].append({"step": step, "id": sched_id, "error": _error(e)})
 
@@ -377,13 +381,18 @@ def _expire_one(ctx, row, now, rep):
 
 
 def _dispatch(ctx, now, rep):
+    # Command units already running (from an earlier tick, after step 1 settled what had ended),
+    # plus each one this tick starts. Past the cap a due command is DEFERRED, never an attempt.
+    running = sum(r["kind"] == "command" for r in ctx.store.list_schedules(ctx.tenant.name, "running"))
     for row in ctx.store.list_schedules(ctx.tenant.name, "pending"):
         if _parse(row["not_before"]) > now or _parse(row["expires_at"]) <= now:
             continue        # not due yet; or past expiry, which step 3 has already reported
-        if row["kind"] == "command":
-            _isolated(rep, "dispatch", row["id"], _dispatch_command, ctx, row, now, rep)
-        else:
+        if row["kind"] != "command":
             _isolated(rep, "dispatch", row["id"], _defer, ctx, row, AGENT_DEFERRAL, rep)
+        elif running >= decl.MAX_RUNNING_COMMANDS:
+            _isolated(rep, "dispatch", row["id"], _defer, ctx, row, COMMAND_DEFERRAL, rep)
+        elif _isolated(rep, "dispatch", row["id"], _dispatch_command, ctx, row, now, rep):
+            running += 1
 
 
 def _defer(ctx, row, reason, rep):
@@ -448,6 +457,7 @@ def _dispatch_command(ctx, row, now, rep):
         ctx.store.update_schedule_where(row["id"], {"status": "running", "unit": unit}, last_reason=why)
         raise errors.RabotaError(f"{why}; the next tick settles it as an attempt that could not run")
     rep["dispatched"].append({"id": row["id"], "attempt": n, "unit": unit})
+    return True
 
 
 def _refuse(ctx, row, problem, evidence, now, rep):

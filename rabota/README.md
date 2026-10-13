@@ -62,12 +62,13 @@ tenant's `schedules` table — design: `docs/superpowers/specs/2026-10-11-schedu
   `rabota-schedule@<tenant>.timer` is not enabled. That last one is checked last, and **the
   global `--dry-run` refuses on it too**: a dry run validates what the real `add` would do, and
   one that exited 0 for a run nothing would ever fire would be a green answer to the wrong question.
-- The defaults and bounds (expiry, horizon, timeouts and their 6 h cap, attempts, the retry delay, memory, budget) are named constants at the
+- The defaults and bounds (expiry, horizon, timeouts and their 6 h cap, attempts, the retry delay, the running-command cap, memory, budget) are named constants at the
   top of `rabota/commands/schedule.py`, one line each.
 - **The tick** takes an `flock`, then settles finished command runs, expires overdue ones and
   dispatches due ones, in that order. A command runs as a transient
   `rabota-sched-<tenant>-<id>-a<n>.service` under `MemoryMax`, `RuntimeMaxSec`, `Nice=10` and
-  `KillMode=control-group`, with `~/.local/bin` on its `PATH`, and no seat or budget gate. Its exit
+  `KillMode=control-group`, with `~/.local/bin` on its `PATH`, and no seat or budget gate. At most
+  two run at once per tenant (`MAX_RUNNING_COMMANDS`); a due command past that is deferred. Its exit
   code is its outcome: 0 `pass`, 1 `fail`, anything else (or none) `could-not-run`, retried once
   30 minutes later. A frozen payload that no longer hashes to its declaration is never run. An
   agent run is deferred until phase 2, so it expires and escalates. The claim is written before

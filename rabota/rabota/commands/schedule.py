@@ -58,6 +58,9 @@ MAX_HORIZON = timedelta(days=30)            # --at at most this far ahead; --exp
 MAX_TIMEOUT = timedelta(hours=6)            # --timeout at most this long, for either kind
 MAX_ATTEMPTS = 2
 RETRY_DELAY = timedelta(minutes=30)         # a could-not-run attempt below MAX_ATTEMPTS starts again this much later
+# At most this many command units run at once per tenant; the tick defers any further due command.
+# Memory is this laptop's binding constraint, and after a long poweroff every due run comes due at once.
+MAX_RUNNING_COMMANDS = 2
 COMMAND_TIMEOUT = timedelta(minutes=15)
 COMMAND_MEMORY_MAX = "1G"
 AGENT_TIMEOUT = timedelta(minutes=20)

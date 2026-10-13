@@ -229,8 +229,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   linked by `install.conf.yaml` and enabled by nobody: arming a tenant is @zvi's step.
   - **Command runs** start as a transient `rabota-sched-<tenant>-<id>-a<n>.service` under
     `MemoryMax`, `RuntimeMaxSec`, `Nice=10` and `KillMode=control-group`, with `~/.local/bin` on
-    `PATH` and no seat or budget gate. The exit code is the outcome: 0 `pass`, 1 `fail`, anything
-    else, or none, `could-not-run`. A `could-not-run` is retried 30 minutes later up to
+    `PATH` and no seat or budget gate. At most two run at once per tenant (`MAX_RUNNING_COMMANDS`),
+    counting those still running from an earlier tick; a due command past the cap is deferred, so
+    a long poweroff cannot start every due run at once. The exit code is the outcome: 0 `pass`,
+    1 `fail`, anything else, or none, `could-not-run`. A `could-not-run` is retried 30 minutes later up to
     `max_attempts`. A `fail` is never re-run. A frozen script that no longer matches its sha256 is
     never run. An agent run is deferred until DO-820, so it expires and escalates.
   - **Crash recovery.** The claim (`BEGIN IMMEDIATE`) stores the attempt and unit name before

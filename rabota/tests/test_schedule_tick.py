@@ -589,6 +589,48 @@ class DeferralTests(TickBase):
         self.assertIn("no executor until phase 2", esc["question"])
 
 
+class CapTests(TickBase):
+    """MAX_RUNNING_COMMANDS: past the cap a due command is deferred, never an attempt."""
+
+    def test_the_cap_is_two(self):
+        self.assertEqual(schedule.MAX_RUNNING_COMMANDS, 2)
+
+    def test_three_due_commands_start_two_and_defer_the_third(self):
+        ctx = self.tctx(); ids = [self.declare(ctx) for _ in range(3)]
+        rep = self.tick(ctx, DUE)
+        started = [r["id"] for r in rep["dispatched"]]
+        self.assertEqual(len(started), 2)
+        self.assertEqual(len(self.runner.of("systemd-run")), 2)
+        (left,) = set(ids) - set(started)
+        self.assertEqual(rep["deferred"], [{"id": left, "reason": scheduler.COMMAND_DEFERRAL}])
+        row = ctx.store.get_schedule(left)
+        self.assertEqual((row["status"], row["attempt"], row["last_reason"]), ("pending", 0, scheduler.COMMAND_DEFERRAL))
+
+    def test_the_deferred_command_starts_on_the_next_tick_once_a_slot_frees(self):
+        ctx = self.tctx(); ids = [self.declare(ctx) for _ in range(3)]
+        started = [r["id"] for r in self.tick(ctx, DUE)["dispatched"]]
+        (left,) = set(ids) - set(started)
+        self.assertEqual(self.tick(ctx, DUE + 10 * MIN)["dispatched"], [])     # both still running
+        self.assertEqual(ctx.store.get_schedule(left)["attempt"], 0)
+        self.finish(ctx, started[0], 0)
+        rep = self.tick(ctx, DUE + 20 * MIN)
+        self.assertEqual([r["id"] for r in rep["settled"]], [started[0]])
+        self.assertEqual(rep["dispatched"], [{"id": left, "attempt": 1,
+                                              "unit": f"rabota-sched-quantivly-{left}-a1.service"}])
+        row = ctx.store.get_schedule(left)
+        self.assertEqual((row["status"], row["last_reason"]), ("running", None))
+
+    def test_a_command_running_from_an_earlier_tick_counts_toward_the_cap(self):
+        ctx = self.tctx(); first = self.declare(ctx)
+        self.tick(ctx, DUE)                                             # first is running from here on
+        later = [self.declare(ctx, at="2026-10-14 10:00+00:00") for _ in range(2)]
+        rep = self.tick(ctx, DUE + timedelta(hours=1))
+        self.assertEqual(ctx.store.get_schedule(first)["status"], "running")
+        self.assertEqual(len(rep["dispatched"]), 1)
+        self.assertEqual([r["id"] for r in rep["deferred"]], [r for r in later if r != rep["dispatched"][0]["id"]])
+        self.assertEqual(len(self.runner.of("systemd-run")), 2)
+
+
 class AnswerTests(TickBase):
     """§10 "Answers and follow-ups" (the non-agent rows), and answer's contract for everything else."""
 
