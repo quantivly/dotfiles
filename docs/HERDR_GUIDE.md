@@ -1123,13 +1123,15 @@ outage.
   ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
   ```
 - **Keep dev level with `scripts/dev-sync`, run from the laptop.** `--check` (the default)
-  reports drift and changes nothing: dotfiles vs `origin/main`, Claude Code vs the laptop's version,
-  herdr-draft vs the laptop's commit, the work tenant's plugins, missing and stale `~/quantivly`
+  reports drift and changes nothing: dotfiles vs `origin/main`, Claude Code and herdr vs the
+  laptop's versions, herdr-draft vs the laptop's commit, the work tenant's plugins, missing and stale `~/quantivly`
   clones, the effective `agents.slice` cap, and abandoned login-session scopes over 200 MB.
   `--apply` fixes the ✗ rows inside a capped transient scope in `agents.slice`, and arms
   `dev-sync.timer` on dev, a daily run of the same thing that needs no laptop and no `aws login`.
-  It never signs in to an MCP server, never handles `LINEAR_API_KEY`'s value, never runs sudo and
-  never restarts the herdr server; those come back as ⚠ rows for a person. Disarm the timer by
+  A herdr upgrade installs the laptop's exact release asset, verified against the laptop
+  binary's sha256, and restarts dev's server through the unit only while `herdr agent list` is
+  empty; otherwise it reports "restart pending". It never signs in to an MCP server, never
+  handles `LINEAR_API_KEY`'s value and never runs sudo; those come back as ⚠ rows for a person. Disarm the timer by
   deleting `~/.config/dev-sync/armed` on dev, never with `systemctl --user disable`.
 - **Disconnects leave dev's agents running.** The health-check timeouts in the log are this
   laptop's own suspends, not dev going away; reconnect and the panes are still there.

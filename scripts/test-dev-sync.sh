@@ -44,8 +44,10 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 V_LAPTOP="2.1.296"
+HV="0.9.1"            # the laptop's herdr
+ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|daemon-reload'
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|daemon-reload'
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -87,8 +89,13 @@ STUB
     cat >"$b/herdr" <<'STUB'
 #!/usr/bin/env bash
 S="$HOME/stub"; echo "herdr $*" >>"$S/calls"
+V="${V:-$(cat "$S/herdr-version")}"   # a release "asset" built from this stub pins V on line 2
 case "$1 ${2:-}" in
-    "--version "*) echo "herdr $(cat "$S/herdr-version")" ;;
+    "--version "*) echo "herdr $V" ;;
+    "--skill "*) echo "skill for $V" ;;
+    "status server") printf 'status: running\nversion: %s\n' "$(cat "$S/server-version")" ;;
+    "agent list") printf '{"result":{"agents":[%s]}}\n' "$(cat "$S/agents" 2>/dev/null)" ;;
+    "pane list") echo '{"result":{"panes":[{"pane_id":"w1:p1"}]}}' ;;
     "plugin list") [[ -e "$S/draft-down" ]] && exit 1; cat "$S/draft.json" ;;
     "plugin install")
         echo "$PATH" >"$S/herdr-install-path"
@@ -111,6 +118,7 @@ case "$1" in
     is-enabled) cat "$S/timer-enabled" 2>/dev/null || { echo disabled; exit 1; } ;;
     is-active) cat "$S/timer-active" 2>/dev/null || { echo inactive; exit 3; } ;;
     daemon-reload) ;;
+    restart) "$HOME/.local/bin/herdr" --version | awk '{print $2}' >"$S/server-version" ;;
     enable) [[ -e "$S/enable-fails" ]] && exit 1; echo enabled >"$S/timer-enabled"; echo active >"$S/timer-active" ;;
     list-units) cat "$S/units" 2>/dev/null ;;
     show)
@@ -142,7 +150,11 @@ new_case() {
     CASE=$((CASE + 1)); C="$TMPROOT/c$CASE"; H="$C/home"; GH="$C/gh"
     mkdir -p "$H/stub" "$GH" "$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/dev-sync" "$H/quantivly"
     write_stubs "$H"
-    echo "$V_LAPTOP" >"$H/stub/claude-version"; echo "0.9.1" >"$H/stub/herdr-version"
+    echo "$V_LAPTOP" >"$H/stub/claude-version"; echo "$HV" >"$H/stub/herdr-version"; echo "$HV" >"$H/stub/server-version"
+    # herdr's "release": the stub with its version pinned, served over file://
+    mkdir -p "$C/releases/v$HV"; sed "2i V=$HV" "$H/.local/bin/herdr" >"$C/releases/v$HV/herdr-linux-$ARCH"
+    HSHA="$(sha256sum "$C/releases/v$HV/herdr-linux-$ARCH" | cut -c1-64)"
+    mkdir -p "$H/.claude/skills/herdr"; echo old >"$H/.claude/skills/herdr/SKILL.md"
     : >"$H/stub/calls"
 
     # dotfiles: origin with an install script and the linear-key plugin; dev at origin/main.
@@ -202,12 +214,14 @@ new_case() {
 }
 
 # Facts a laptop run would send for a level dev.
-facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version 0.9.1 --draft-sha "$DRAFT" \
+facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --herdr-arch "$ARCH" --herdr-sha256 "$HSHA" \
+    --draft-sha "$DRAFT" \
     --dotfiles-sha "$(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)" --clone alpha=quantivly/alpha; }
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
 run() {   # $@ = dev-sync args after --here
     OUT="$(env -u LINEAR_API_KEY HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
+        DEV_SYNC_HERDR_RELEASES="file://$C/releases" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here "$@" 2>&1)"
     RC=$?
 }
@@ -337,6 +351,53 @@ has   "herdr server down: ⚠, not ✓" "$OUT" "did not answer"
 new_case
 run --check --draft-sha abc1234
 check "an abbreviated --draft-sha is refused (64)" "$RC" 64
+
+echo "== herdr itself"
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+run_level --check
+has   "older herdr: ✗ with both versions" "$OUT" "0.9.0, laptop has $HV (server 0.9.0)"
+hasnt "older herdr: --check downloads nothing" "$(calls)" "systemctl --user restart"
+check "older herdr: --check leaves the binary" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
+run_level --apply
+check "older herdr: --apply installs the laptop's exact version" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr $HV"
+has   "older herdr, no agents: the server is restarted through the unit" "$(calls)" "systemctl --user restart herdr-server.service"
+has   "older herdr, no agents: ✓ restarted" "$OUT" "server restarted on $HV"
+check "older herdr: the agent skill is regenerated" "$(cat "$H/.claude/skills/herdr/SKILL.md")" "skill for $HV"
+check "older herdr: the previous binary is kept" "$([[ -e "$H/.local/state/dev-sync/herdr-0.9.0" ]] && echo yes || echo no)" yes
+reset_calls; run_level --apply
+check "second --apply after a herdr upgrade calls nothing mutating" "$(mutations)" 0
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; echo '{"pane_id":"w1:p2"}' >"$H/stub/agents"
+run_level --apply
+check "agents running: the binary is still upgraded" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr $HV"
+hasnt "agents running: the server is NOT restarted" "$(calls)" "systemctl --user restart"
+has   "agents running: ⚠ restart pending" "$OUT" "restart pending, 1 agent(s) running"
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+echo tampered >>"$C/releases/v$HV/herdr-linux-$ARCH"
+run_level --apply
+has   "an asset that does not match the laptop's hash: ✗" "$OUT" "does not match the laptop's binary"
+check "an asset that does not match: not installed" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"
+mapfile -t F < <(facts); F=("${F[@]/#$ARCH/other_arch}")
+run --apply "${F[@]}"
+has   "laptop on another architecture: ⚠, never an unverified binary" "$OUT" "cannot vouch for a $ARCH asset"
+new_case
+echo 0.9.4 >"$H/stub/herdr-version"; echo 0.9.4 >"$H/stub/server-version"
+run_level --apply
+has   "newer herdr on dev: never downgraded" "$OUT" "0.9.4, ahead of laptop $HV"
+new_case
+echo 0.9.0 >"$H/stub/server-version"
+run_level --check
+has   "binary current, server old: ✗ restart pending" "$OUT" "server runs 0.9.0, binary $HV: restart pending"
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"
+mapfile -t F < <(facts | grep -v -e '^--herdr' -e "^$HV\$" -e "^$ARCH\$" -e "^$HSHA\$")
+run --apply "${F[@]}"
+has   "no laptop facts (the timer): herdr is only reported" "$OUT" "version parity is laptop-driven"
+hasnt "no laptop facts: no restart" "$(calls)" "systemctl --user restart"
 
 echo "== plugins"
 new_case
@@ -483,6 +544,7 @@ FACTS_OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_DOTFILES_REM
     DEV_SYNC_GITHUB_BASE="file://$GH" bash "$SUT" --print-facts 2>&1)"
 has   "facts: the laptop's Claude version" "$FACTS_OUT" "--claude-version $V_LAPTOP"
 has   "facts: herdr-draft's resolved commit, in full" "$FACTS_OUT" "--draft-sha $DRAFT"
+has   "facts: the laptop herdr binary's sha256, for dev to verify against" "$FACTS_OUT" "--herdr-sha256 $(sha256sum "$L/.local/bin/herdr" | cut -c1-64)"
 has   "facts: dotfiles main from the remote" "$FACTS_OUT" "--dotfiles-sha $(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)"
 has   "facts: a host-alias origin is normalised" "$FACTS_OUT" "--clone alpha=quantivly/alpha"
 has   "facts: owner case is normalised, dir name kept" "$FACTS_OUT" "--clone Gamma=quantivly/gamma"
@@ -508,7 +570,7 @@ has   "end to end --apply: the clone failure is reported, not hidden" "$E2E" "Ga
 check "end to end --apply: so it exits 1" "$E2E_RC" 1
 
 printf '\n'
-EXPECTED_ROWS=104
+EXPECTED_ROWS=124
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

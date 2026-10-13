@@ -13,14 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Run from the laptop, it sends the laptop's Claude Code version, herdr-draft commit and
   `~/quantivly` clone list to dev, and pipes itself there. `--check` (the default) reports drift
   and changes nothing. `--apply` fixes it: it fast-forwards and installs dotfiles, installs the
-  laptop's Claude Code (never a downgrade), and installs herdr-draft at the full SHA. It updates
+  laptop's Claude Code (never a downgrade), and installs herdr-draft at the full SHA. It installs
+  the laptop's herdr release, verified against the laptop binary's sha256, which herdr-draft's
+  `--machine` needs on dev (0.9.1 or later). It restarts dev's server only when no agent is
+  running there, and otherwise reports "restart pending". It updates
   marketplaces, enables `quantivly-conventions`, `slack`, `notion` and `linear-key`, turns off
   `linear` only after `linear-key` is on, and turns off superseded plugins. It also clones the
   missing repos and fetches stale ones, with no checkout changed. Each step runs in a capped
   transient scope in `agents.slice`. The first `--apply` arms `systemd/dev-sync.timer` on dev:
   daily, and needing no laptop and no `aws login`. It reports, but never acts on, OAuth sign-ins,
   `LINEAR_API_KEY` (checked by name), abandoned login-session scopes over 200 MB (it prints the
-  sudo command), and the effective `agents.slice` cap. `test-dev-sync.sh`: 104 rows; a 20-mutant sweep killed 18, and the other two are equivalent.
+  sudo command), and the effective `agents.slice` cap. `test-dev-sync.sh`: 124 rows; mutation sweeps killed 24 of 26 mutants, and the other two are equivalent.
 
 ### Changed
 

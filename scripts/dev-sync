@@ -47,8 +47,9 @@
 #     edits to a file origin/main also changes.
 #   - replace a herdr-draft that is LINKED from a local checkout, or touch a
 #     ~/quantivly directory whose origin is a different repository.
-#   - update the herdr binary. Its server would need a restart, which ends every
-#     pane on dev. The version gap is shown as information.
+#   - restart dev's herdr server while an agent runs there. After a herdr upgrade
+#     the server restarts only when `herdr agent list` is empty; otherwise the
+#     row says "restart pending".
 #   - stop abandoned login-session scopes (they need sudo); it lists any over
 #     200 MB along with the command to stop them.
 #   - write agents.slice. Its cap is set on dev with `systemctl --user
@@ -70,8 +71,8 @@
 #
 # Rows: ✓ level · ✗ drift --apply fixes · ⚠ needs a person · · information
 #
-# Test overrides (scripts/test-dev-sync.sh): DEV_SYNC_GITHUB_BASE,
-# DEV_SYNC_NPM_URL, DEV_SYNC_DOTFILES_REMOTE, DEV_SYNC_NO_SCOPE=1 (skip the
+# Test overrides (scripts/test-dev-sync.sh): DEV_SYNC_GITHUB_BASE, DEV_SYNC_NPM_URL,
+# DEV_SYNC_HERDR_RELEASES, DEV_SYNC_DOTFILES_REMOTE, DEV_SYNC_NO_SCOPE=1 (skip the
 # systemd-run wrapper), DEV_SYNC_SSH (the ssh command).
 
 set -uo pipefail
@@ -114,6 +115,7 @@ LINEAR_OFFICIAL="linear@claude-plugins-official"
 LINEAR_KEY="linear-key@dotfiles"
 
 GITHUB_BASE="${DEV_SYNC_GITHUB_BASE:-https://github.com}"
+HERDR_RELEASES="${DEV_SYNC_HERDR_RELEASES:-https://github.com/herdrdev/herdr/releases/download}"
 NPM_LATEST_URL="${DEV_SYNC_NPM_URL:-https://registry.npmjs.org/@anthropic-ai/claude-code/latest}"
 FETCH_MAX_AGE_H="${DEV_SYNC_FETCH_MAX_AGE_H:-24}"
 MARKET_MAX_AGE_D="${DEV_SYNC_MARKET_MAX_AGE_D:-7}"
@@ -309,11 +311,93 @@ here_claude() {
     fi
 }
 
-here_herdr_version() {
-    local cur
-    cur="$("$HERDR" --version 2>/dev/null | awk 'NR==1{print $2}')"
-    [[ -n "$ARG_HERDR" && -n "$cur" && "$cur" != "$ARG_HERDR" ]] || return 0
-    row info herdr "$cur here, $ARG_HERDR on the laptop; not managed (a server restart ends every pane)"
+server_version() { "$HERDR" status server 2>/dev/null </dev/null | awk '$1=="version:"{print $2; exit}'; }
+
+# herdr itself, at the laptop's exact version. herdr-draft's `--machine` needs the remote side
+# on 0.9.1 or later: a 0.9.0 dev answers "remote Herdr does not support machine API
+# forwarding". Laptop-driven only. The timer cannot know the laptop's version, and a dev that
+# moves AHEAD of the laptop risks the client/server protocol the laptop's own client speaks.
+#
+# THE BINARY is the release asset for this architecture, accepted only if its sha256 equals the
+# laptop's own binary (the laptop runs the unmodified release asset; checked 2026-10-13). It is
+# renamed into place, so the running server keeps its old inode.
+#
+# THE SERVER keeps running the old version until it restarts, and a restart closes every pane
+# on dev. So it restarts only when `herdr agent list` is empty, through the unit, which builds
+# a clean environment; never from a pane or a session. Otherwise it reports "restart pending".
+here_herdr() {
+    local bin srv target="$ARG_HERDR" tmp got arch agents panes i
+    [[ -x "$HERDR" ]] || return 0   # here_draft reports a missing herdr
+    bin="$("$HERDR" --version 2>/dev/null | awk 'NR==1{print $2}')"
+    if [[ -z "$target" ]]; then
+        row info herdr "$bin; version parity is laptop-driven (no laptop facts in this run)"
+        return
+    fi
+    if [[ "$bin" != "$target" ]] && ver_ge "$bin" "$target"; then
+        row ok herdr "$bin, ahead of laptop $target (never downgraded)"
+        return
+    fi
+    if [[ "$bin" != "$target" ]]; then
+        if [[ "$MODE" != apply ]]; then
+            row drift herdr "$bin, laptop has $target (server $(server_version || true))"
+            return
+        fi
+        arch="$(uname -m)"
+        if [[ -z "$ARG_HERDR_SHA" || "$ARG_HERDR_ARCH" != "$arch" ]]; then
+            row oper herdr "$bin, laptop $target, but the laptop's binary hash cannot vouch for a $arch asset; update by hand"
+            return
+        fi
+        tmp="$HOME/.local/bin/.herdr.dev-sync.$$"
+        if ! curl -fsSL --max-time 300 -o "$tmp" "$HERDR_RELEASES/v$target/herdr-linux-$arch" 2>/dev/null; then
+            rm -f "$tmp"; row drift herdr "download of herdr v$target ($arch) failed"; return
+        fi
+        got="$(sha256sum "$tmp" | cut -c1-64)"
+        if [[ "$got" != "$ARG_HERDR_SHA" ]]; then
+            rm -f "$tmp"; row drift herdr "the v$target asset does not match the laptop's binary (sha256); not installed"; return
+        fi
+        chmod 0755 "$tmp"
+        if [[ "$("$tmp" --version 2>/dev/null | awk 'NR==1{print $2}')" != "$target" ]]; then
+            rm -f "$tmp"; row drift herdr "the downloaded binary does not report $target; not installed"; return
+        fi
+        cp -p "$HERDR" "$STATE/herdr-$bin" 2>/dev/null
+        mv -f "$tmp" "$HERDR"
+        # The agent skill is the CLI reference a lead Claude drives panes with; a stale copy
+        # teaches the wrong flags (HERDR_GUIDE.md, "Updating").
+        if [[ -d "$HOME/.claude/skills/herdr" ]] && "$HERDR" --skill >"$STATE/SKILL.md.new" 2>/dev/null; then
+            mv -f "$STATE/SKILL.md.new" "$HOME/.claude/skills/herdr/SKILL.md"
+        fi
+        row ok herdr "binary $bin → $target (previous kept in ~/.local/state/dev-sync/herdr-$bin)"
+        bin="$target"
+    fi
+
+    srv="$(server_version)"
+    if [[ -z "$srv" ]]; then
+        row oper herdr "binary $bin; the server did not answer \`status server\`"
+        return
+    fi
+    if [[ "$srv" == "$bin" ]]; then
+        row ok herdr "$bin, server $srv"
+        return
+    fi
+    agents="$("$HERDR" agent list 2>/dev/null </dev/null | jq -r '.result.agents | length' 2>/dev/null)"
+    panes="$("$HERDR" pane list 2>/dev/null </dev/null | jq -r '.result.panes | length' 2>/dev/null)"
+    if [[ "$MODE" != apply ]]; then
+        row drift herdr "server runs $srv, binary $bin: restart pending (${agents:-?} agent(s), ${panes:-?} pane(s) now)"
+        return
+    fi
+    if [[ "$agents" != 0 ]]; then
+        row oper herdr "server runs $srv, binary $bin: restart pending, ${agents:-?} agent(s) running; when they finish: systemctl --user restart herdr-server.service"
+        return
+    fi
+    systemctl --user restart herdr-server.service >/dev/null 2>&1
+    for (( i = 0; i < 30; i++ )); do
+        srv="$(server_version)"; [[ "$srv" == "$bin" ]] && break; sleep 1
+    done
+    if [[ "$srv" == "$bin" ]]; then
+        row ok herdr "server restarted on $bin (no agents; ${panes:-?} idle pane(s) closed)"
+    else
+        row drift herdr "server restart did not come back on $bin (now: ${srv:-not answering}); journalctl --user -u herdr-server.service"
+    fi
 }
 
 draft_state() {   # sets D_KIND D_COMMIT D_REF from the running herdr server; 1 if it cannot answer
@@ -687,7 +771,7 @@ here_main() {
     here_dotfiles
     here_timer
     here_claude
-    here_herdr_version
+    here_herdr
     here_draft
     here_plugins
     here_mcp
@@ -723,7 +807,11 @@ laptop_facts() {   # fills FACTS; notes go to stderr
     else echo "dev-sync: no Claude Code version on this machine; dev will target latest" >&2; fi
 
     v="$("$HOME/.local/bin/herdr" --version 2>/dev/null | awk 'NR==1{print $2}')"
-    [[ "$v" =~ $VER_RE ]] && FACTS+=(--herdr-version "$v")
+    if [[ "$v" =~ $VER_RE ]]; then
+        FACTS+=(--herdr-version "$v" --herdr-arch "$(uname -m)")
+        v="$(sha256sum "$(readlink -f "$HOME/.local/bin/herdr")" 2>/dev/null | cut -c1-64)"
+        [[ "$v" =~ ^[0-9a-f]{64}$ ]] && FACTS+=(--herdr-sha256 "$v")
+    fi
 
     # herdr-draft: the laptop usually runs a LINKED checkout, whose HEAD is only usable on
     # dev if it is on GitHub; otherwise fall back to main and say so.
@@ -823,7 +911,7 @@ laptop_main() {
 
 main() {
     MODE="check"; ARM=0; NO_MCP=0
-    ARG_CLAUDE=""; ARG_HERDR=""; ARG_DRAFT_SHA=""; ARG_DOTFILES_SHA=""; ARG_DOTFILES_BEHIND=""
+    ARG_CLAUDE=""; ARG_HERDR=""; ARG_HERDR_SHA=""; ARG_HERDR_ARCH=""; ARG_DRAFT_SHA=""; ARG_DOTFILES_SHA=""; ARG_DOTFILES_BEHIND=""
     ARG_CLONES=()
     if [[ "${1:-}" != --here ]]; then
         SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -840,6 +928,8 @@ main() {
             --no-mcp) NO_MCP=1 ;;
             --claude-version) ARG_CLAUDE="${2:-}"; shift ;;
             --herdr-version) ARG_HERDR="${2:-}"; shift ;;
+            --herdr-sha256) ARG_HERDR_SHA="${2:-}"; shift ;;
+            --herdr-arch) ARG_HERDR_ARCH="${2:-}"; shift ;;
             --draft-sha) ARG_DRAFT_SHA="${2:-}"; shift ;;
             --dotfiles-sha) ARG_DOTFILES_SHA="${2:-}"; shift ;;
             --dotfiles-behind) ARG_DOTFILES_BEHIND="${2:-}"; shift ;;
@@ -852,6 +942,9 @@ main() {
     [[ -z "$ARG_CLAUDE" || "$ARG_CLAUDE" =~ $VER_RE ]] || { echo "dev-sync: bad --claude-version" >&2; return 64; }
     [[ -z "$ARG_DRAFT_SHA" || "$ARG_DRAFT_SHA" =~ $SHA_RE ]] || { echo "dev-sync: --draft-sha must be a full 40-character SHA" >&2; return 64; }
     [[ -z "$ARG_DOTFILES_SHA" || "$ARG_DOTFILES_SHA" =~ $SHA_RE ]] || { echo "dev-sync: bad --dotfiles-sha" >&2; return 64; }
+    [[ -z "$ARG_HERDR" || "$ARG_HERDR" =~ $VER_RE ]] || { echo "dev-sync: bad --herdr-version" >&2; return 64; }
+    [[ -z "$ARG_HERDR_SHA" || "$ARG_HERDR_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "dev-sync: bad --herdr-sha256" >&2; return 64; }
+    [[ -z "$ARG_HERDR_ARCH" || "$ARG_HERDR_ARCH" =~ ^[a-z0-9_]+$ ]] || { echo "dev-sync: bad --herdr-arch" >&2; return 64; }
     local c
     for c in ${ARG_CLONES[@]+"${ARG_CLONES[@]}"}; do
         [[ "${c%%=*}" =~ $SAFE_DIR_RE && "${c#*=}" =~ $SAFE_REPO_RE && "$c" == *=* ]] ||
