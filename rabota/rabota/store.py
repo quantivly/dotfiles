@@ -8,7 +8,18 @@ from pathlib import Path
 
 from rabota import errors, secrets
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+# One spelling, used by both the v4 → v5 step and the fresh-database SCHEMA below, so the two can
+# never describe different tables. Field meanings: design §3 and ``commands/schedule.py``.
+SCHEDULES_DDL = """CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, tenant TEXT NOT NULL,
+  kind TEXT NOT NULL, title TEXT NOT NULL, cwd TEXT NOT NULL, payload_source TEXT, payload_path TEXT NOT NULL,
+  payload_sha256 TEXT NOT NULL, args TEXT, not_before TEXT NOT NULL, expires_at TEXT NOT NULL,
+  seat TEXT, model TEXT, effort TEXT, est_minutes INTEGER, allow TEXT, read TEXT, record TEXT,
+  ask TEXT, options TEXT, then_prompt_path TEXT, then_prompt_sha256 TEXT, then_on TEXT,
+  timeout_s INTEGER NOT NULL, memory_max TEXT NOT NULL, max_budget_usd REAL, max_attempts INTEGER NOT NULL,
+  status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, last_reason TEXT, unit TEXT, lane_id TEXT,
+  out_dir TEXT, outcome TEXT, cost_usd REAL, escalation_id INTEGER, created_at TEXT NOT NULL,
+  updated_at TEXT, started_at TEXT, ended_at TEXT, created_from_cwd TEXT, created_from_session TEXT)"""
 # v(N) → v(N+1) steps, keyed by the version they upgrade FROM. Each list runs in one
 # transaction and restamps. A fresh database gets the final shape from SCHEMA directly.
 MIGRATIONS = {
@@ -28,6 +39,12 @@ MIGRATIONS = {
           # treating it as invisible. A row written before this migration has no value here; the
           # gate falls back to the seat's own median lane duration for those (budget.py).
         "ALTER TABLE lanes ADD COLUMN est_minutes INTEGER",
+    ],
+    4: [  # v4 → v5 (DO-816): the `schedules` table, scheduled-runs design §3. Purely additive: no
+          # existing table or row is touched, so the one thing this step changes for an older
+          # rabota is that it now refuses the store -- which is intended, since a queue it cannot
+          # see is a queue it cannot list, cancel or report on.
+        SCHEDULES_DDL,
     ],
 }
 SCHEMA = """
@@ -52,15 +69,26 @@ CREATE TABLE IF NOT EXISTS pins(tenant TEXT, item_key TEXT, bucket INTEGER, rati
 CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fireflies_freeze_faults(tenant TEXT PRIMARY KEY, fails INTEGER NOT NULL,
   last_error TEXT, last_failed_at TEXT);
-"""
+""" + SCHEDULES_DDL + ";\n"
 # `fireflies_freeze_faults` (DO-768) reaches a pre-existing v4 store through the trailing
-# `executescript(SCHEMA)` at the end of `migrate()`, not a `MIGRATIONS[4]` step -- so `SCHEMA_VERSION`
-# deliberately stays 4 rather than bumping to 5 for a table add with no column on an existing table
-# and nothing for old rows to backfill. See `test_migrate_adds_fireflies_freeze_faults_to_a_pre_do768_v4_store`.
+# `executescript(SCHEMA)` at the end of `migrate()`, not a migration step -- `SCHEMA_VERSION` stayed 4
+# for it, a table add with no column on an existing table and nothing for old rows to backfill. See
+# `test_migrate_adds_fireflies_freeze_faults_to_a_pre_do768_v4_store`. `schedules` (DO-816) is the
+# same shape and DID bump, to 5, through `MIGRATIONS[4]`: the design asks for the stamp, because an
+# older rabota must refuse a store holding a queue it cannot see rather than run beside it blind.
+# The trailing `executescript(SCHEMA)` would create it on a v4 store anyway; the step is the stamp.
 LANE_FIELDS = ("id", "tenant", "kind", "brief", "repo", "worktree", "out_dir", "machine", "unit",
                "session_id", "model", "status", "started_at", "ended_at", "held_reason", "of_lane", "attached",
                "seat", "effort", "cost_usd", "five_h_pct_at_start", "five_h_pct_at_end", "abandoned_at",
                "settle_reason", "est_minutes")
+SCHEDULE_FIELDS = ("id", "tenant", "kind", "title", "cwd", "payload_source", "payload_path", "payload_sha256",
+                   "args", "not_before", "expires_at", "seat", "model", "effort", "est_minutes", "allow", "read",
+                   "record", "ask", "options", "then_prompt_path", "then_prompt_sha256", "then_on", "timeout_s",
+                   "memory_max", "max_budget_usd", "max_attempts", "status", "attempt", "last_reason", "unit",
+                   "lane_id", "out_dir", "outcome", "cost_usd", "escalation_id", "created_at", "updated_at",
+                   "started_at", "ended_at", "created_from_cwd", "created_from_session")
+# Stored as JSON text, decoded on the way out, so no caller ever sees half of the encoding.
+SCHEDULE_JSON_FIELDS = ("args", "allow", "read", "options")
 
 
 def now() -> str:
@@ -243,6 +271,36 @@ class Store:
             "AND ended_at IS NOT NULL AND five_h_pct_at_start IS NOT NULL AND five_h_pct_at_end IS NOT NULL "
             "AND (settle_reason IS NULL OR settle_reason='') ORDER BY started_at DESC LIMIT ?",
             (tenant, seat, limit))
+
+    # schedules (DO-816, scheduled-runs design §3)
+    def insert_schedule(self, row: dict):
+        """Insert one schedule row; JSON-shaped fields are encoded here, never by the caller."""
+        vals = {k: row.get(k) for k in SCHEDULE_FIELDS}
+        vals["attempt"] = int(vals["attempt"] or 0)    # an explicit NULL would bypass the column default
+        for k in SCHEDULE_JSON_FIELDS:
+            vals[k] = None if vals[k] is None else json.dumps(vals[k])
+        cols = ",".join(SCHEDULE_FIELDS); qs = ",".join("?" for _ in SCHEDULE_FIELDS)
+        self._exec(f"INSERT INTO schedules({cols}) VALUES ({qs})", tuple(vals[k] for k in SCHEDULE_FIELDS))
+    def update_schedule(self, sched_id, **fields):
+        """Update named schedule columns and ``updated_at``; an unknown field is a ``ValueError``."""
+        bad = set(fields) - set(SCHEDULE_FIELDS)
+        if bad: raise ValueError(f"unknown schedule fields {bad}")
+        fields = {k: (json.dumps(v) if k in SCHEDULE_JSON_FIELDS and v is not None else v) for k, v in fields.items()}
+        fields.setdefault("updated_at", now())
+        sets = ",".join(f"{k}=?" for k in fields)
+        self._exec(f"UPDATE schedules SET {sets} WHERE id=?", (*fields.values(), sched_id))
+    def _decode_schedule(self, r):
+        for k in SCHEDULE_JSON_FIELDS:
+            r[k] = json.loads(r[k]) if r[k] is not None else None
+        return r
+    def get_schedule(self, sched_id):
+        r = self._rows("SELECT * FROM schedules WHERE id=?", (sched_id,))
+        return self._decode_schedule(r[0]) if r else None
+    def list_schedules(self, tenant=None, status=None):
+        sql, args = "SELECT * FROM schedules WHERE 1=1", []
+        if tenant: sql += " AND tenant=?"; args.append(tenant)
+        if status: sql += " AND status=?"; args.append(status)
+        return [self._decode_schedule(r) for r in self._rows(sql + " ORDER BY not_before, id", args)]
 
     # escalations / gates
     def add_escalation(self, tenant, question, evidence, options, first_seen=None, kind=None, subject=None) -> int:

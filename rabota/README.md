@@ -14,7 +14,7 @@ and JSON errors on stderr. Exit codes: `0` ok · `2` usage · `3` refused · `4`
 | `rabota/secrets.py` | env scrubbing (`gh` runs without its token vars) and leak assertion |
 | `rabota/runner.py` | the only place subprocesses run; `FakeRunner` for tests |
 | `rabota/config.py` | tenant TOML loading and cwd/env → tenant resolution |
-| `rabota/store.py` | SQLite schema v1 at `<state_dir>/rabota.db` |
+| `rabota/store.py` | SQLite store at `<state_dir>/rabota.db`; `SCHEMA_VERSION` and its `MIGRATIONS` |
 | `rabota/context.py` | per-command `Context` (config, tenant, store, runner, scrubbed env) |
 | `rabota/commands/*.py` | one module per subcommand; each calls `cli.register` on import |
 | `tests/` | `unittest` suite with synthetic fixtures under `tests/fixtures/` |
@@ -42,6 +42,26 @@ DO-711 it ran nowhere, and both shipped briefs pointed every dev lane at `/home/
   `~/.dotfiles-local/rabota/`: `config.toml` (cwd → tenant routes, default) and
   `tenants/<name>.toml` (identity pins, thresholds, lane defaults).
 - **State** is per tenant at `<tenant state_dir>/rabota.db` plus day directories of prose.
+
+## Scheduled runs
+
+`rabota schedule add|list|show|cancel` (DO-816) declares work that runs later as a row in the
+tenant's `schedules` table — design: `docs/superpowers/specs/2026-10-11-scheduled-agent-runs-design.md`
+§3 and §8. Nothing fires a row yet: the tick, the executor and the `rabota-schedule@` units are
+DO-817, and agent-run execution is phase 2.
+
+- `add` freezes the prompt (`--prompt-file`, an agent run) or the script (`--command <script>
+  [-- args]`) into `<state_dir>/schedules/<id>/` with a `SHA256SUMS`, stores the row, and prints
+  the whole declaration, including an agent run's effective permissions. `show` re-hashes the
+  frozen payload as `payload_intact`.
+- Its refusals (exit 3) each name what failed: a past `--at`, an `--expires` not after it, an
+  `--at` over 30 days ahead, a `--cwd` containing the run's out_dir, a script or argument that
+  invokes `claude`, a `--record` git tracks or the secret guard protects, and a tenant whose
+  `rabota-schedule@<tenant>.timer` is not enabled. That last one is checked last, and **the
+  global `--dry-run` refuses on it too**: a dry run validates what the real `add` would do, and
+  one that exited 0 for a run nothing would ever fire would be a green answer to the wrong question.
+- The defaults (expiry, horizon, attempts, timeouts, memory, budget) are named constants at the
+  top of `rabota/commands/schedule.py`, one line each.
 
 ## Reconcile classification notes
 
