@@ -26,7 +26,7 @@ most 2 model round-trips — 1 when nothing is stale. Design and provenance:
 | Invocation | Steps |
 |---|---|
 | `/rabota brief` | 1; then 2 only if `needs` is non-empty — **2 writes** (ingest, escalate, pin) |
-| `/rabota status` | `rabota --text census`, `rabota lane list --status started`, open escalations. **Not free:** `rabota --text brief` shows the delta but also identity-checks and rewrites today's `brief.md` (#237) — skip it unless the delta is what was asked for |
+| `/rabota status` | `rabota --text census`, `rabota lane list --status started`, `rabota --text escalations --open` (never answer one for the user). **Not free:** `rabota --text brief` shows the delta but also identity-checks and rewrites today's `brief.md` (#237) — skip it unless the delta is what was asked for |
 | `/rabota` | 1–2, then 3–5 |
 | `/rabota inbox` | 1, then §Inbox session |
 | `/rabota close` | 5 |

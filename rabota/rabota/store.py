@@ -262,7 +262,11 @@ class Store:
         if not r: return None
         r[0]["options"] = json.loads(r[0]["options"] or "[]"); return r[0]
     def open_escalations(self, tenant):
-        rows = self._rows("SELECT * FROM escalations WHERE tenant=? AND resolved_at IS NULL ORDER BY first_seen", (tenant,))
+        return self.escalations(tenant, open_only=True)
+    def escalations(self, tenant, open_only=False):
+        """Every escalation for ``tenant``, oldest first; ``open_only`` keeps the unresolved ones."""
+        where = " AND resolved_at IS NULL" if open_only else ""
+        rows = self._rows(f"SELECT * FROM escalations WHERE tenant=?{where} ORDER BY first_seen, id", (tenant,))
         for r in rows: r["options"] = json.loads(r["options"] or "[]")
         return rows
     def answer_escalation(self, esc_id, label, resolution=None):
