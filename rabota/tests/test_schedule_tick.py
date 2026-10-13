@@ -42,6 +42,7 @@ class TickRunner(GuardFake):
     def __init__(self):
         super().__init__([ENABLED, (["herdr"], Result(0, "", "")), (["notify-send"], Result(0, "", ""))])
         self.live, self.units_fail, self.tracked = set(), False, False
+        self.states = {}            # unit -> ActiveState other than "active", for a listed unit
         self.start, self.on_start = Result(0, "Running as unit\n", ""), None
 
     def run(self, argv, *, env=None, input=None, timeout=60, cwd=None):
@@ -50,7 +51,7 @@ class TickRunner(GuardFake):
             self.calls.append(argv)
             if self.units_fail:
                 return Result(1, "", "Failed to connect to bus")
-            return Result(0, json.dumps([{"unit": u, "active": "active"} for u in sorted(self.live)]), "")
+            return Result(0, json.dumps([{"unit": u, "active": self.states.get(u, "active")} for u in sorted(self.live)]), "")
         if argv[0] == "systemd-run":
             self.calls.append(argv)
             if self.start.ok:
@@ -140,6 +141,13 @@ class TimingTests(TickBase):
         self.assertEqual(argv[argv.index("--urgency") + 1], "critical")
         self.assertIn(f"<!-- rabota-schedule:{sid}:expired -->", self.record.read_text())
         self.assertIn(f"scheduled run {sid}: expired", self.record.read_text())
+
+    def test_a_run_past_expiry_is_never_started_even_when_expiring_it_failed(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        with mock.patch.object(scheduler, "_expire_one", side_effect=OSError("disk full")):
+            with self.assertRaises(errors.Partial):
+                self.tick(ctx, DUE + timedelta(hours=48))
+        self.assertEqual((ctx.store.get_schedule(sid)["status"], self.runner.of("systemd-run")), ("pending", []))
 
     def test_expiry_is_checked_before_dispatch_at_the_boundary(self):
         ctx = self.tctx(); sid = self.declare(ctx, expires="2026-10-14 09:10+00:00")
@@ -302,6 +310,15 @@ class OutcomeTests(TickBase):
         self.finish(ctx, sid, 0, keep_live=True)
         rep = self.tick(ctx, DUE + 10 * MIN)
         self.assertEqual((rep["settled"], ctx.store.get_schedule(sid)["status"]), ([], "running"))
+
+    def test_a_deactivating_unit_is_still_live_and_an_inactive_one_is_not(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.tick(ctx, DUE)
+        unit = self.finish(ctx, sid, 0, keep_live=True)["unit"]
+        self.runner.states[unit] = "deactivating"            # a RuntimeMaxSec stop, still in progress
+        self.assertEqual(self.tick(ctx, DUE + 10 * MIN)["settled"], [])
+        self.runner.states[unit] = "inactive"                 # stopped but not yet collected
+        self.assertEqual([r["id"] for r in self.tick(ctx, DUE + 20 * MIN)["settled"]], [sid])
 
     def test_unknown_unit_state_settles_nothing(self):
         ctx = self.tctx(); sid = self.declare(ctx)
@@ -607,6 +624,26 @@ class AnswerTests(TickBase):
             schedule.parse_option("later=rerun:+31d")
         self.assertIn("horizon", str(cm.exception))
         self.assertEqual(schedule.parse_option("later=rerun:+30d")["action"], "rerun:+30d")
+
+    def test_a_stored_rerun_past_the_horizon_is_refused_at_answer_time(self):
+        ctx = self.tctx(); sid, eid = self.failed(ctx, ask="Again?", options=["far=rerun:+30d"])
+        ctx.store.update_schedule(sid, options=[{"label": "far", "action": "rerun:+31d"}])   # stored before the check
+        n = self.count(ctx)
+        with self.assertRaises(errors.Refused) as cm:
+            escalate.run_answer(ctx, eid, "far")
+        self.assertIn("past the 30-day horizon", str(cm.exception))
+        self.assertEqual((self.count(ctx), ctx.store.escalation(eid)["resolved_at"]), (n, None))
+
+    def test_a_leak_in_the_answer_refuses_before_its_action_commits(self):
+        ctx = self.tctx(); sid, eid = self.failed(ctx)
+        before, n = self.record.read_text(), self.count(ctx)
+        with mock.patch.dict(os.environ, {"LINEAR_API_KEY": CANARY}):
+            with self.assertRaises(errors.SecretLeak):
+                escalate.run_answer(ctx, eid, "re-run now", resolution=f"see {CANARY}")
+        self.assertEqual((self.count(ctx), self.record.read_text()), (n, before))
+        self.assertIsNone(ctx.store.escalation(eid)["resolved_at"])
+        self.assertEqual(sorted(p.name for p in (ctx.state_dir / "schedules").iterdir()),
+                         sorted(r["id"] for r in ctx.store.list_schedules()))     # no orphaned frozen copy
 
     def test_a_hand_made_scheduled_run_escalation_executes_nothing(self):
         ctx = self.tctx(); sid = self.declare(ctx)

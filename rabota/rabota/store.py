@@ -138,8 +138,10 @@ class Store:
         ``isolation_level=None`` means every ``_exec`` call is otherwise its own autocommitted
         statement; this is the one place multiple writes are made all-or-nothing (import-v1, F2:
         a damaged row used to leave the rows before it committed). ``immediate`` takes the write
-        lock at ``BEGIN`` rather than at the first write, so a read inside the block cannot be
-        made stale by another writer before this one commits (the schedule tick's claim, DO-817).
+        lock at ``BEGIN`` rather than at the first write. The schedule tick's claim uses it because
+        the design asks for it (§4), but what makes that claim single is its one conditional
+        ``UPDATE``, which is atomic on its own; with no read inside the block, ``immediate`` changes
+        no outcome there today (DO-817's mutation sweep declares that mutant equivalent).
         """
         self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         try:
