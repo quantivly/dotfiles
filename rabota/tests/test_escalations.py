@@ -65,8 +65,14 @@ class EscalateNotifiesTheDesktopTests(Base):
         question = 'click <a href="https://example.invalid">here</a> & go'
         out = escalate.run_escalate(self.ctx(runner), question, "e", [])
         body = desktop_calls(runner)[0][-1]
-        self.assertEqual(body, f"ESC-{out['id']}: rabota --text escalations --open")
+        self.assertEqual(body, f"ESC-{out['id']}: rabota --tenant quantivly --text escalations --open")
         self.assertNotIn("<", body)
+
+    def test_the_summary_is_one_line_and_cannot_be_read_as_markup_by_any_daemon(self):
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        out = escalate.run_escalate(self.ctx(runner), 'see <a href="x">this</a>\n& <b>that</b>', "e", [])
+        summary = desktop_calls(runner)[0][-2]
+        self.assertEqual(summary, f'ESC-{out["id"]} rabota finding: see ‹a href="x"›this‹/a› ＆ ‹b›that‹/b›')
 
     def test_an_unknown_urgency_is_usage_before_anything_is_written_or_sent(self):
         for dry_run in (False, True):
@@ -189,6 +195,59 @@ class EscalationsCommandTests(Base):
                                 "disposition", "resolved_at", "resolution", "kind", "subject"])
 
 
+class RedactedOnReadTests(Base):
+    """Review finding: a lane that escalated without holding a value the reader holds stored it
+    unredacted, and the reader's output guard then refused the whole brief."""
+
+    def _leaky(self, ctx):
+        value = "minted-gho-token-not-real-4242"
+        eid = escalate.run_escalate(ctx, f"is {value} live?", f"log: {value}", [f"revoke {value}"], notify=False)["id"]
+        secrets.register_value(value); self.addCleanup(secrets.REGISTERED_VALUES.discard, value)
+        return value, eid
+
+    def test_brief_still_prints_and_brief_md_carries_the_marker(self):
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK])
+        ctx = self.ctx(runner)
+        value, eid = self._leaky(ctx)
+        day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
+        (day / "sequence.json").write_text(json.dumps(seq_for(ctx, ["K-1"])))
+        lines = brief.run_brief(ctx, text=True, now=NOW, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER))
+        self.assertTrue(lines[0].startswith("needs you: 1 open escalation"), lines)
+        md = (day / "brief.md").read_text()
+        self.assertNotIn(value, md)
+        self.assertIn("is [redacted:minted-token] live?", md)
+        self.assertIn("evidence: log: [redacted:minted-token]", md)
+        self.assertIn("options: revoke [redacted:minted-token]", md)
+
+    def test_escalations_and_close_print_the_marker_not_the_value(self):
+        ctx = self.ctx()
+        value, eid = self._leaky(ctx)
+        text = json.dumps(escalations.run_escalations(ctx)) + "\n".join(escalations.run_escalations(ctx, text=True))
+        self.assertNotIn(value, text)
+        self.assertIn("[redacted:minted-token]", text)
+        cf = Path(close.run_close(ctx)["carry_forward"]).read_text()
+        self.assertIn(f"ESC-{eid}", cf)
+        self.assertNotIn(value, cf)
+
+    def test_answer_still_validates_against_the_stored_option(self):
+        # `rabota answer`'s contract is unchanged: it reads the row through `escalation()`, not
+        # the redacting listing.
+        ctx = self.ctx()
+        value, eid = self._leaky(ctx)
+        with self.assertRaises(errors.Refused):
+            escalate.run_answer(ctx, eid, "revoke [redacted:minted-token]")
+
+
+class CloseOneLineTests(Base):
+    def test_a_multi_line_question_stays_one_list_item_in_carry_forward(self):
+        ctx = self.ctx()
+        eid = escalate.run_escalate(ctx, "first\nsecond", "e", [], kind="correction", notify=False)["id"]
+        cf = Path(close.run_close(ctx)["carry_forward"]).read_text()
+        self.assertEqual(cf.count(f"- ESC-{eid} (since "), 2)       # awaiting + corrections
+        self.assertNotIn("first\nsecond", cf)
+        self.assertIn(": first second\n", cf)
+
+
 class EscalationsCliTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
@@ -239,18 +298,20 @@ class BriefNeedsYouTests(Base):
         lines = brief.terminal_lines(seq(["K-1"]), None, None, brief_path="/p/brief.md",
                                      now=datetime(2026, 9, 16, 9, 30, tzinfo=timezone.utc),
                                      open_escalations=self._open(2))
-        self.assertEqual(lines[0], "needs you: 2 open escalations — ESC-1, ESC-2 — rabota --text escalations --open")
+        self.assertEqual(lines[0], "needs you: 2 open escalations — ESC-1, ESC-2 — rabota --tenant quantivly --text escalations --open")
         self.assertTrue(lines[1].startswith("! brief is "), lines)       # outranks the staleness warning
 
     def test_one_open_escalation_is_singular(self):
-        line = brief.needs_you_line(self._open(1))
-        self.assertEqual(line, "needs you: 1 open escalation — ESC-1 — rabota --text escalations --open")
+        line = brief.needs_you_line(self._open(1), "quantivly")
+        self.assertEqual(line, "needs you: 1 open escalation — ESC-1 — rabota --tenant quantivly --text escalations --open")
 
     def test_no_open_escalation_prints_no_line(self):
-        self.assertIsNone(brief.needs_you_line([]))
-        self.assertIsNone(brief.needs_you_line(None))
+        self.assertIsNone(brief.needs_you_line([], "quantivly"))
+        self.assertIsNone(brief.needs_you_line(None, "quantivly"))
         lines = brief.terminal_lines(seq(["K-1"]), None, None, open_escalations=[])
         self.assertFalse(any(l.startswith("needs you") for l in lines))
+        # Nothing open must not read the tenant: test_sync passes a sequence without one.
+        self.assertEqual(brief.terminal_lines({"items": [], "failed_sources": []}, None, None), [])
 
     def test_the_line_survives_the_no_change_rerun(self):
         previous = {"keys": ["K-1"], "generated_at": "2026-09-16T08:00:00Z"}
@@ -260,34 +321,34 @@ class BriefNeedsYouTests(Base):
         self.assertIn("no change since 08:00", lines[1])
 
     def test_many_ids_are_cut_never_the_count_or_the_command(self):
-        line = brief.needs_you_line(self._open(40))
+        line = brief.needs_you_line(self._open(40), "quantivly")
         self.assertLessEqual(len(line), brief.LINE_MAX)
         self.assertTrue(line.startswith("needs you: 40 open escalations — ESC-1, ESC-2"), line)
-        self.assertTrue(line.endswith(", … — rabota --text escalations --open"), line)
+        self.assertTrue(line.endswith(", … — rabota --tenant quantivly --text escalations --open"), line)
 
     def _ids(self, *ids):
         return [{"id": i} for i in ids]
 
     def test_ids_that_exactly_fit_are_not_cut_and_one_more_char_is(self):
-        # The budget boundary. Two ids whose digits sum to 43 fill the line to exactly LINE_MAX.
-        exact = brief.needs_you_line(self._ids(10**20, 10**21))
+        # The budget boundary. Two ids whose digits sum to 24 fill the line to exactly LINE_MAX.
+        exact = brief.needs_you_line(self._ids(10**11, 10**11 + 1), "quantivly")
         self.assertEqual(len(exact), brief.LINE_MAX)
         self.assertNotIn("…", exact)
-        over = brief.needs_you_line(self._ids(10**20, 10**22))
+        over = brief.needs_you_line(self._ids(10**11, 10**12), "quantivly")
         self.assertLessEqual(len(over), brief.LINE_MAX)
-        self.assertIn(f"ESC-{10**20}, … — rabota", over)
+        self.assertIn(f"ESC-{10**11}, … — rabota", over)
 
     def test_a_first_id_too_long_for_the_line_leaves_only_the_marker(self):
-        line = brief.needs_you_line(self._ids(10**60, 1))
-        self.assertEqual(line, "needs you: 2 open escalations — … — rabota --text escalations --open")
+        line = brief.needs_you_line(self._ids(10**60, 1), "quantivly")
+        self.assertEqual(line, "needs you: 2 open escalations — … — rabota --tenant quantivly --text escalations --open")
 
     def test_the_cut_marker_itself_never_overruns_the_line(self):
         # Review of the first version: reserving 2 chars for the 3-char ", …" overran by one.
         for width in range(1, 30):
             for n in range(1, 25):
-                line = brief.needs_you_line(self._ids(*[10**(width - 1) + k for k in range(n)]))
+                line = brief.needs_you_line(self._ids(*[10**(width - 1) + k for k in range(n)]), "quantivly")
                 self.assertLessEqual(len(line), brief.LINE_MAX, (width, n, line))
-                self.assertTrue(line.endswith(" — rabota --text escalations --open"), line)
+                self.assertTrue(line.endswith(" — rabota --tenant quantivly --text escalations --open"), line)
                 self.assertTrue(line.startswith(f"needs you: {n} open escalation"), line)
 
     def test_the_dry_run_notice_still_comes_first(self):
@@ -304,7 +365,7 @@ class BriefNeedsYouTests(Base):
         self.assertEqual(sections[0], "## Needs you")
         self.assertIn("- ESC-1 [decision] HUB-1 · since 2026-09-15: q1 — options: merge | wait", md)
         self.assertIn("  evidence: line one line two", md)
-        self.assertIn("  answer: rabota answer 1 <label>", md)
+        self.assertIn("  answer: rabota --tenant quantivly answer 1 <label>", md)
         self.assertIn("- ESC-2 [correction] since 2026-09-15: q2", md)
 
     def test_brief_md_says_nothing_is_open_rather_than_dropping_the_section(self):
@@ -322,7 +383,7 @@ class BriefNeedsYouTests(Base):
         (day / "sequence.json").write_text(json.dumps(seq_for(ctx, ["K-1"])))
         lines = brief.run_brief(ctx, text=True, now=NOW, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER))
         self.assertEqual(lines[0], f"needs you: 3 open escalations — {', '.join(f'ESC-{i}' for i in ids)}"
-                                   " — rabota --text escalations --open")
+                                   " — rabota --tenant quantivly --text escalations --open")
         md = (day / "brief.md").read_text()
         needs_you = md.split("## Needs you\n", 1)[1].split("\n## ", 1)[0]
         for i, k in zip(ids, kinds):
@@ -336,7 +397,7 @@ class BriefNeedsYouTests(Base):
         eid = escalate.run_escalate(real, "q?", "e", [])["id"]
         dry = self.ctx(runner, dry_run=True, state_dir=Path(tmp.name))
         lines = brief.run_brief(dry, text=True, now=NOW, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER))
-        self.assertEqual(lines[1], f"needs you: 1 open escalation — ESC-{eid} — rabota --text escalations --open")
+        self.assertEqual(lines[1], f"needs you: 1 open escalation — ESC-{eid} — rabota --tenant quantivly --text escalations --open")
 
 
 class SkillStatusRowTests(unittest.TestCase):

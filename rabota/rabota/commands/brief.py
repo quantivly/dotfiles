@@ -238,17 +238,20 @@ def staleness_line(seq: dict, now: datetime, max_age_min: int = STALE_AFTER_MIN)
     return f"! brief is {age_min} min old — timer failed? run: rabota --tenant {seq['tenant']} precompute"
 
 
-def needs_you_line(open_escalations: list[dict] | None) -> str | None:
-    """``needs you: N open escalation(s) — ESC-a, ESC-b — rabota --text escalations --open``, or ``None``.
+def needs_you_line(open_escalations: list[dict] | None, tenant: str) -> str | None:
+    """``needs you: N open escalation(s) — ESC-a, ESC-b — rabota --tenant T --text escalations --open``,
+    or ``None``.
 
     The ids are what is cut when the line would overrun ``LINE_MAX``, never the count or the
     command: the count says how many there are and the command lists every one of them in full.
+    The command names the tenant, as ``staleness_line`` does: ids are per-tenant database rows,
+    so the same ``ESC-3`` exists in two tenants, and a cwd-resolved tenant may be the other one.
     """
     if not open_escalations:
         return None
     n = len(open_escalations)
     prefix = f"needs you: {n} open escalation{'' if n == 1 else 's'} — "
-    suffix = " — rabota --text escalations --open"
+    suffix = f" — rabota --tenant {tenant} --text escalations --open"
     budget = LINE_MAX - len(prefix) - len(suffix)
     cut = ", …"                         # says some were cut; the command lists them all
     ids = ""
@@ -367,8 +370,8 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
         # survive: a reader who cannot tell a dry run from a real one may act on it, while the
         # staleness warning is about the stored state and will still be there on the next real run.
         head.append("dry-run: nothing written (brief.md, last-brief.json, sequence.json)")
-    needs_you = needs_you_line(open_escalations)
-    if needs_you:
+    if open_escalations:            # only then: a caller with nothing open may pass a seq without a tenant
+        needs_you = needs_you_line(open_escalations, seq["tenant"])
         head.append(needs_you)      # a decision waiting on @zvi outranks a stale-timer warning
     if now is not None:
         stale = staleness_line(seq, now)
@@ -398,7 +401,7 @@ def compose_markdown(seq: dict, inbox_plan: dict | None, syncs: list[dict],
         lines.append(f"- {escalations_cmd.line(e)}")
         if e.get("evidence"):
             lines.append(f"  evidence: {escalations_cmd.one_line(e['evidence'])}")
-        lines.append(f"  answer: rabota answer {e['id']} <label>")
+        lines.append(f"  answer: rabota --tenant {seq['tenant']} answer {e['id']} <label>")
     if not open_escalations:
         lines.append("- nothing open")
     lines += ["", "## Sources"]

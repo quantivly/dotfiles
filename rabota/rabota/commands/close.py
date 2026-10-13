@@ -15,6 +15,7 @@ exists to check. ``store.record_gate`` stores a gate's *label* only, never who
 answered it (Rule 0), so the "Gates answered" section below must never name a person either.
 """
 from rabota import cli, emit, errors
+from rabota.commands.escalations import one_line
 from rabota.context import Context
 
 
@@ -50,13 +51,13 @@ def run_close(ctx: Context, notes: list[str] | None = None) -> dict:
     lines += ["", "## Running lanes"]
     lines += [f"- {l['id']} — brief {l['brief']} — out {l['out_dir']} — {l['machine']}" for l in running] or ["- none"]
     lines += ["", "## Awaiting the user"]
-    lines += [f"- ESC-{e['id']} (since {e['first_seen'][:10]}): {e['question']}" for e in open_esc] or ["- nothing"]
+    lines += [f"- ESC-{e['id']} (since {e['first_seen'][:10]}): {one_line(e['question'])}" for e in open_esc] or ["- nothing"]
     lines += ["", "## Gates answered"]
     lines += [f"- {g['subject']}: the gate was answered: {g['label']}" for g in gates] or ["- none"]
     lines += ["", "## Deliberately not done"]
     lines += [f"- {n}" for n in (notes or [])] or ["- nothing recorded"]
     lines += ["", "## Corrections carried forward"]
-    lines += [f"- ESC-{e['id']} (since {e['first_seen'][:10]}): {e['question']}" for e in corrections] or ["- none"]
+    lines += [f"- ESC-{e['id']} (since {e['first_seen'][:10]}): {one_line(e['question'])}" for e in corrections] or ["- none"]
 
     cf = day / "carry-forward.md"
     emit.write_file(cf, "\n".join(lines) + "\n", dry_run=ctx.dry_run)

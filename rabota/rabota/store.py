@@ -264,10 +264,20 @@ class Store:
     def open_escalations(self, tenant):
         return self.escalations(tenant, open_only=True)
     def escalations(self, tenant, open_only=False):
-        """Every escalation for ``tenant``, oldest first; ``open_only`` keeps the unresolved ones."""
+        """Every escalation for ``tenant``, oldest first; ``open_only`` keeps the unresolved ones.
+
+        Free text is redacted AGAIN on the way out (DO-815), with THIS process's environment:
+        ``_exec`` redacted it with the writer's, and a lane that escalated may not have held a value
+        the reader holds. Every reader prints through a guard that would otherwise refuse the whole
+        output, so one such escalation would take down ``brief`` -- the very screen meant to show it.
+        """
         where = " AND resolved_at IS NULL" if open_only else ""
         rows = self._rows(f"SELECT * FROM escalations WHERE tenant=?{where} ORDER BY first_seen, id", (tenant,))
-        for r in rows: r["options"] = json.loads(r["options"] or "[]")
+        for r in rows:
+            for k in ("question", "evidence", "subject", "resolution", "disposition"):
+                if isinstance(r[k], str):
+                    r[k] = secrets.redact(r[k], os.environ)
+            r["options"] = [secrets.redact(o, os.environ) for o in json.loads(r["options"] or "[]")]
         return rows
     def answer_escalation(self, esc_id, label, resolution=None):
         self._exec("UPDATE escalations SET disposition=?, resolved_at=?, resolution=? WHERE id=?",

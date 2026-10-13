@@ -31,12 +31,16 @@ re-read sends nothing. Its urgency is the caller's, not the kind's: ``urgency`` 
 defaults to ``normal``, and a scheduled run's ``fail``/``denied``/``expired`` outcome passes
 ``critical`` (spec §6 step 4). It is validated before anything is written, and never stored —
 the ``escalations`` schema is unchanged. Only the summary carries free text: GNOME renders markup
-in the BODY (``docs/VPN_INTERNALS.md``), so the body is built from the id alone. Its outcome rides
+in the BODY (``docs/VPN_INTERNALS.md``), so the body is built from the id and tenant alone. Other
+daemons (dunst, mako with markup on) render it in the summary too, so the question goes there
+collapsed to one line with ``<``, ``>`` and ``&`` replaced by look-alikes (``_plain``): no daemon
+can read it as markup, and a reader still sees what was asked. Its outcome rides
 along as ``desktop_notified``, with the same ``True``/``False``/``None`` meaning as ``notified``.
 """
 import json
 
 from rabota import cli, emit, errors
+from rabota.commands.escalations import one_line
 from rabota.context import Context
 from rabota.store import now
 
@@ -46,6 +50,11 @@ URGENCIES = ("low", "normal", "critical")     # notify-send's own levels; see th
 
 def _project(ctx: Context, row: dict):
     emit.append_file(ctx.state_dir / "escalations.jsonl", json.dumps(row) + "\n")
+
+
+def _plain(text: str) -> str:
+    """``text`` on one line with no character any notification daemon could read as markup."""
+    return one_line(text).translate(str.maketrans({"<": "‹", ">": "›", "&": "＆"}))
 
 
 def _notify_best_effort(ctx: Context, argv: list[str]) -> bool:
@@ -84,7 +93,8 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
         notified = _notify_best_effort(ctx, ["herdr", "notification", "show", f"rabota {kind}: {question[:100]}"])
         desktop_notified = _notify_best_effort(ctx, [
             "notify-send", "--app-name", "rabota", "--urgency", urgency,
-            f"ESC-{eid} rabota {kind}: {question[:100]}", f"ESC-{eid}: rabota --text escalations --open"])
+            f"ESC-{eid} rabota {kind}: {_plain(question)[:100]}",
+            f"ESC-{eid}: rabota --tenant {ctx.tenant.name} --text escalations --open"])
     return {"id": eid, "notified": notified, "desktop_notified": desktop_notified}
 
 
