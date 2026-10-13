@@ -22,23 +22,51 @@ an escalation nobody has seen yet is safe; an ``answer`` instead undoes the reso
 "open" on the same failure, since the escalation itself may already be visible (its id already
 returned to a prior caller) and must not vanish. Either way the store and the jsonl file agree again
 before the exception leaves, so ``close`` never lists an escalation Sol cannot see in the projection.
+
+**The desktop notification (DO-815).** Beside the herdr one, and best-effort the same way, creation
+sends one ``notify-send`` — the surface @zvi actually reads when he is not looking at herdr. It is
+sent HERE and nowhere else: no reader (``brief``, ``escalations``, ``close``) ever notifies, so
+"once per escalation" holds by construction with no column recording that it was sent, and a
+re-read sends nothing. Its urgency is the caller's, not the kind's: ``urgency`` (``--urgency``)
+defaults to ``normal``, and a scheduled run's ``fail``/``denied``/``expired`` outcome passes
+``critical`` (spec §6 step 4). It is validated before anything is written, and never stored —
+the ``escalations`` schema is unchanged. Only the summary carries free text: GNOME renders markup
+in the BODY (``docs/VPN_INTERNALS.md``), so the body is built from the id and tenant alone. Other
+daemons (dunst, mako with markup on) render it in the summary too, so the question goes there
+collapsed to one line with ``<``, ``>`` and ``&`` replaced by look-alikes (``_plain``): no daemon
+can read it as markup, and a reader still sees what was asked. Its outcome rides
+along as ``desktop_notified``, with the same ``True``/``False``/``None`` meaning as ``notified``.
 """
 import json
 
 from rabota import cli, emit, errors
+from rabota.commands.escalations import one_line
 from rabota.context import Context
 from rabota.store import now
 
 KINDS = ("decision", "finding", "verification", "pr-blocked", "prereq", "incident", "correction", "commitment")
+URGENCIES = ("low", "normal", "critical")     # notify-send's own levels; see the module docstring
 
 
 def _project(ctx: Context, row: dict):
     emit.append_file(ctx.state_dir / "escalations.jsonl", json.dumps(row) + "\n")
 
 
+def _plain(text: str) -> str:
+    """``text`` on one line with no character any notification daemon could read as markup."""
+    return one_line(text).translate(str.maketrans({"<": "‹", ">": "›", "&": "＆"}))
+
+
+def _notify_best_effort(ctx: Context, argv: list[str]) -> bool:
+    try:
+        return ctx.runner.run(argv, timeout=5).ok
+    except Exception:
+        return False
+
+
 def run_escalate(ctx: Context, question: str, evidence: str, options: list[str], kind: str = "finding",
-                  subject: str | None = None, notify: bool = True) -> dict:
-    """Record and project an escalation, and (best-effort) notify.
+                  subject: str | None = None, notify: bool = True, urgency: str = "normal") -> dict:
+    """Record and project an escalation, and (best-effort) notify on herdr and the desktop.
 
     ``ctx.dry_run`` (DO-753): no ``escalations`` row is written, nothing is projected to
     ``escalations.jsonl``, and no notification fires — there is no real escalation yet for a
@@ -46,8 +74,11 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
     """
     if kind not in KINDS:
         raise errors.Usage(f"kind must be one of {KINDS}")
+    if urgency not in URGENCIES:
+        raise errors.Usage(f"urgency must be one of {URGENCIES}")
     if ctx.dry_run:
-        return {"id": None, "notified": None, "dry_run": "nothing written (escalations row, escalations.jsonl)"}
+        return {"id": None, "notified": None, "desktop_notified": None,
+                "dry_run": "nothing written (escalations row, escalations.jsonl)"}
     eid = ctx.store.add_escalation(ctx.tenant.name, question, evidence, options, kind=kind, subject=subject)
     row = ctx.store.escalation(eid)
     try:
@@ -57,15 +88,18 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
     except errors.SecretLeak:
         ctx.store.delete_escalation(eid)
         raise
-    notified = None
+    notified = desktop_notified = None
     if notify:
-        try:
-            result = ctx.runner.run(["herdr", "notification", "show", f"rabota {kind}: {question[:100]}"],
-                                     timeout=5)
-            notified = result.ok
-        except Exception:
-            notified = False
-    return {"id": eid, "notified": notified}
+        # Built from the STORED question (redacted by `Store._exec`), not the argument. Today the two
+        # are always equal here -- `_project` refuses any value the store would redact, before this
+        # point -- so this is defence in depth: it keeps holding if that order ever changes.
+        stored = row["question"]
+        notified = _notify_best_effort(ctx, ["herdr", "notification", "show", f"rabota {kind}: {stored[:100]}"])
+        desktop_notified = _notify_best_effort(ctx, [
+            "notify-send", "--app-name", "rabota", "--urgency", urgency,
+            f"ESC-{eid} rabota {kind}: {_plain(stored)[:100]}",
+            f"ESC-{eid}: rabota --tenant {ctx.tenant.name} --text escalations --open"])
+    return {"id": eid, "notified": notified, "desktop_notified": desktop_notified}
 
 
 def run_answer(ctx: Context, esc_id: int, label: str, resolution: str | None = None) -> dict:
@@ -107,7 +141,9 @@ def _build(sub):
     e.add_argument("--option", action="append", default=[], help="repeatable")
     e.add_argument("--kind", choices=KINDS, default="finding")
     e.add_argument("--subject")
-    e.add_argument("--no-notify", action="store_true", help="skip the herdr notification")
+    e.add_argument("--no-notify", action="store_true", help="skip the herdr and desktop notifications")
+    e.add_argument("--urgency", choices=URGENCIES, default="normal",
+                   help="desktop notification urgency (default normal; critical for a failed scheduled run)")
     a = sub.add_parser("answer", help="resolve an escalation with an offered label")
     a.add_argument("id", type=int)
     a.add_argument("label")
@@ -117,7 +153,7 @@ def _build(sub):
 def _run_escalate(ns):
     ctx = Context.from_namespace(ns)
     return run_escalate(ctx, ns.question, ns.evidence, ns.option, kind=ns.kind, subject=ns.subject,
-                         notify=not ns.no_notify)
+                         notify=not ns.no_notify, urgency=ns.urgency)
 
 
 def _run_answer(ns):

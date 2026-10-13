@@ -1,7 +1,8 @@
 """``brief`` runs the whole read-only cycle — preflight, rank, brief — in one process (DO-716).
 
-Line order: a staleness warning when the sequence is older than ``STALE_AFTER_MIN`` (the
-30-minute pre-compute timer has then missed at least once), the ranked items, one line per
+Line order: a ``needs you:`` line when any escalation is open (DO-815), a staleness warning when
+the sequence is older than ``STALE_AFTER_MIN`` (the 30-minute pre-compute timer has then missed at
+least once), the ranked items, one line per
 failed source, one line per stale ``needs`` source, the inbox summary, and ``brief: <path>``.
 Everything counts toward the cap, and ``--max-lines`` lets a wrapper such as ``sol brief``
 prepend its own line and still show twelve. On a same-day rerun only ``+``/``-`` deltas print,
@@ -129,6 +130,14 @@ produce (exit 3) — a dry run whose answer the following real run cannot reprod
 than the extra API calls. Skipping it would only be right if "what would this print" and "is
 identity still pinned" were different questions; they are not, because a failed pin is exactly
 what stops the real ``brief`` from printing anything at all.
+
+**"Needs you" (DO-815).** Every open escalation of every kind is listed in a ``## Needs you``
+section at the TOP of ``brief.md`` — present even when empty, saying so, so its absence is never
+mistaken for "nothing open" — and counted on one ``needs you:`` terminal line naming each id.
+That line goes in ``head``, so it survives the no-change rerun (a new escalation moves no ranked
+key, and that is exactly the call that must still show it) and outranks the staleness warning;
+only a dry run's notice and the reserved ``brief: <path>`` outrank it. Reading escalations here
+never notifies — ``escalate`` notifies once, at creation (see ``commands/escalations.py``).
 """
 import hashlib
 import json
@@ -136,6 +145,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rabota import cli, emit, errors, reconcile, snapshots
+from rabota.commands import escalations as escalations_cmd
 from rabota.commands import preflight as preflight_cmd
 from rabota.commands import rank as rank_cmd
 from rabota.commands import sync as sync_cmd
@@ -228,6 +238,32 @@ def staleness_line(seq: dict, now: datetime, max_age_min: int = STALE_AFTER_MIN)
     return f"! brief is {age_min} min old — timer failed? run: rabota --tenant {seq['tenant']} precompute"
 
 
+def needs_you_line(open_escalations: list[dict] | None, tenant: str) -> str | None:
+    """``needs you: N open escalation(s) — ESC-a, ESC-b — rabota --tenant T --text escalations --open``,
+    or ``None``.
+
+    The ids are what is cut when the line would overrun ``LINE_MAX``, never the count or the
+    command: the count says how many there are and the command lists every one of them in full.
+    The command names the tenant, as ``staleness_line`` does: ids are per-tenant database rows,
+    so the same ``ESC-3`` exists in two tenants, and a cwd-resolved tenant may be the other one.
+    """
+    if not open_escalations:
+        return None
+    n = len(open_escalations)
+    prefix = f"needs you: {n} open escalation{'' if n == 1 else 's'} — "
+    suffix = f" — rabota --tenant {tenant} --text escalations --open"
+    budget = LINE_MAX - len(prefix) - len(suffix)
+    cut = ", …"                         # says some were cut; the command lists them all
+    ids = ""
+    for i, e in enumerate(open_escalations):
+        nxt = f"{ids}, ESC-{e['id']}" if ids else f"ESC-{e['id']}"
+        if len(nxt) + (len(cut) if i < n - 1 else 0) > budget:
+            ids = ids + cut if ids else cut[2:]
+            break
+        ids = nxt
+    return prefix + ids + suffix
+
+
 def check_max_lines(max_lines) -> int:
     """``max_lines`` if it is a positive int, else ``Usage``; called before anything is written or printed."""
     if not isinstance(max_lines, int) or max_lines < 1:
@@ -311,7 +347,7 @@ def _assemble(head: list[str], body: list[str], alerts: list[str], tail: list[st
 def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, max_lines: int = MAX_LINES,
                    brief_path: str | None = None, now: datetime | None = None,
                    needs: list[dict] | None = None, health: list[dict] | None = None,
-                   dry_run: bool = False) -> list[str]:
+                   dry_run: bool = False, open_escalations: list[dict] | None = None) -> list[str]:
     """The ≤``max_lines`` terminal lines; with ``previous`` (last-brief.json) only the deltas print.
 
     One ``!`` line per failed source and per ``needs`` entry (see ``compute_needs`` and
@@ -334,6 +370,9 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
         # survive: a reader who cannot tell a dry run from a real one may act on it, while the
         # staleness warning is about the stored state and will still be there on the next real run.
         head.append("dry-run: nothing written (brief.md, last-brief.json, sequence.json)")
+    if open_escalations:            # only then: a caller with nothing open may pass a seq without a tenant
+        needs_you = needs_you_line(open_escalations, seq["tenant"])
+        head.append(needs_you)      # a decision waiting on @zvi outranks a stale-timer warning
     if now is not None:
         stale = staleness_line(seq, now)
         if stale:
@@ -353,9 +392,19 @@ def terminal_lines(seq: dict, inbox_summary: str | None, previous: dict | None, 
     return _assemble(head, [_fmt(n, i) for n, i in enumerate(seq["items"][:room], 1)], alerts, tail, max_lines)
 
 
-def compose_markdown(seq: dict, inbox_plan: dict | None, syncs: list[dict]) -> str:
-    """``brief.md``: source status, every ranked item with rationale and URL, decisions, triage, inbox totals."""
-    lines = [f"# brief — {seq['tenant']} — {seq['generated_at']}", "", "## Sources"]
+def compose_markdown(seq: dict, inbox_plan: dict | None, syncs: list[dict],
+                     open_escalations: list[dict] | None = None) -> str:
+    """``brief.md``: what needs @zvi first, then source status, every ranked item with rationale
+    and URL, decisions, triage, inbox totals."""
+    lines = [f"# brief — {seq['tenant']} — {seq['generated_at']}", "", "## Needs you"]
+    for e in open_escalations or []:
+        lines.append(f"- {escalations_cmd.line(e)}")
+        if e.get("evidence"):
+            lines.append(f"  evidence: {escalations_cmd.one_line(e['evidence'])}")
+        lines.append(f"  answer: rabota --tenant {seq['tenant']} answer {e['id']} <label>")
+    if not open_escalations:
+        lines.append("- nothing open")
+    lines += ["", "## Sources"]
     for s in syncs:
         status = "ok" if s["ok"] else "FAILED"
         error = f" — {s['error']}" if s.get("error") else ""
@@ -758,17 +807,18 @@ def run_brief(ctx: Context, text: bool, max_lines: int = MAX_LINES, now: datetim
         _write_fireflies_pending(ctx, fireflies_entry["items"] if fireflies_entry else [])
 
     health = reconcile.snapshot_health(ctx, now)     # in BOTH modes: see `snapshot_health`
+    open_esc = ctx.store.open_escalations(ctx.tenant.name)    # a read: never notifies (DO-815)
     if ctx.dry_run:
         lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=None,
-                               now=now, needs=needs, health=health, dry_run=True)
+                               now=now, needs=needs, health=health, dry_run=True, open_escalations=open_esc)
         if text:
             return lines
         return {"lines": lines, "brief_path": None, "needs": needs}
     day.mkdir(parents=True, exist_ok=True)
     brief_path = day / "brief.md"
-    emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx)))     # guarded: a sync error may echo a token
+    emit.write_file(brief_path, compose_markdown(seq, plan, _syncs(ctx), open_esc))  # guarded: a sync error or evidence may echo a token
     lines = terminal_lines(seq, inbox_summary, previous, max_lines=max_lines, brief_path=str(brief_path),
-                           now=now, needs=needs, health=health)
+                           now=now, needs=needs, health=health, open_escalations=open_esc)
     # `last-brief.json` records what the reader was SHOWN; it is what makes the next call print a
     # delta instead of the list. The CLI cannot see a caller's terminal, so it infers "shown" from
     # the two shapes the cycle actually has, and needs both halves:

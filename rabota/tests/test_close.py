@@ -42,10 +42,11 @@ class CloseTests(unittest.TestCase):
             escalate.run_escalate(ctx, "q", "e", [], kind="bogus")
 
     def test_escalate_notifies_once_per_call_with_the_kind_and_question(self):
-        runner = FakeRunner([HERDR_OK, HERDR_OK])
+        # DO-815: one herdr call and one notify-send (tests/test_escalations.py covers the latter).
+        runner = FakeRunner([HERDR_OK, (["notify-send"], Result(0, "", ""))])
         ctx = self.ctx(runner)
         escalate.run_escalate(ctx, "merge HUB-1?", "evidence", [], kind="decision", subject="HUB-1")
-        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual([c[0] for c in runner.calls], ["herdr", "notify-send"])
         argv = runner.calls[0]
         self.assertEqual(argv[:3], ["herdr", "notification", "show"])
         self.assertIn("rabota decision: merge HUB-1?", argv[3])
