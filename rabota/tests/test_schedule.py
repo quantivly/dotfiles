@@ -33,10 +33,13 @@ UNTRACKED = (["git"], Result(1, "", "error: pathspec 'x' did not match any file(
 DENY = json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                           "permissionDecisionReason": "`cat` on `x`, which holds credentials. Pipe it"}})
 
-# One needle per refusal; `test_needles_are_unique` proves no message carries another's.
+# One needle per refusal; `test_needles_are_unique` proves no message carries another's -- including
+# the two "could not ask" refusals, whose wording once contained the tracked needle and let a row
+# that disabled the tracked check pass on the wrong refusal (mutation sweep, tracked-off).
 NEEDLES = {"past": "is in the past", "expiry": "is not after --at", "horizon": "the maximum horizon",
            "tracked": "is tracked by git", "guarded": "a path the secret guard protects",
-           "cwd": "contains the run's out_dir", "claude": "invokes `claude`", "timer": "is not enabled"}
+           "cwd": "contains the run's out_dir", "claude": "invokes `claude`", "timer": "is not enabled",
+           "git-unknown": "could not ask git about", "guard-unknown": "did not refuse its own control path"}
 
 
 class GuardFake(FakeRunner):
@@ -125,7 +128,7 @@ class AddRefusalTests(ScheduleBase):
 
     def test_a_git_that_cannot_answer_refuses_and_outside_a_repo_is_untracked(self):
         ctx = self.ctx([(["git"], Result(129, "", "usage: git ls-files"))])
-        self.refused("could not tell whether --record", ctx, record=str(self.record))
+        self.refused("could not ask git about --record", ctx, record=str(self.record))
         ctx = self.ctx([(["git"], Result(128, "", "fatal: not a git repository (or any parent)"))])
         self.assertEqual(self.add(ctx, record=str(self.record))["record"], str(self.record))
 
@@ -166,7 +169,7 @@ class AddRefusalTests(ScheduleBase):
 
     def test_a_script_naming_claude_paths_or_variables_is_not_refused(self):
         self.script.write_text("#!/bin/sh\njq . ~/.claude/settings.json\necho $CLAUDE_CONFIG_DIR\n"
-                               "ls ~/.dotfiles/claude/hooks\n")
+                               "ls ~/.dotfiles/claude/hooks\ndu -sh ~/.claude\nnoclaude=1\n")
         self.assertEqual(self.add(self.ctx())["status"], "pending")
 
     def test_refuses_a_tenant_whose_timer_is_not_enabled(self):
@@ -200,10 +203,13 @@ class AddRefusalTests(ScheduleBase):
                 ("guarded", {"record": str(self.work / ".zshrc.local")}, []),
                 ("cwd", {"cwd": str(self.home)}, []),
                 ("claude", {"args": ["claude"]}, []),
-                ("timer", {}, [(["systemctl"], Result(1, "disabled\n", ""))])):
+                ("timer", {}, [(["systemctl"], Result(1, "disabled\n", ""))]),
+                ("git-unknown", {"record": str(self.record)}, [(["git"], Result(129, "", "usage"))]),
+                ("guard-unknown", {"record": str(self.record), "guard_works": False}, [])):
             (self.work / ".zshrc.local").write_text("x\n")
+            ctx = self.ctx(responses, guard_works=kw.pop("guard_works", True))
             with self.assertRaises(errors.Refused) as cm:
-                self.add(self.ctx(responses), **kw)
+                self.add(ctx, **kw)
             msgs[key] = str(cm.exception)
         for key, msg in msgs.items():
             self.assertEqual([k for k, n in NEEDLES.items() if n in msg], [key], msg)

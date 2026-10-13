@@ -192,8 +192,8 @@ def _refuse_tracked(ctx, paths: list[Path]) -> None:
                 f"untracked file, e.g. under a handoffs directory")
         if res.code == 1 or (res.code == 128 and "not a git repository" in res.err):
             continue
-        raise errors.Refused(f"could not tell whether --record {p} is tracked by git "
-                             f"(exit {res.code}: {(res.err or res.out).strip()[:200]})")
+        raise errors.Refused(f"could not ask git about --record {p}, so it is refused rather than "
+                             f"assumed untracked (exit {res.code}: {(res.err or res.out).strip()[:200]})")
 
 
 def _guard_denies(ctx, command: str) -> str | None:
