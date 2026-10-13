@@ -52,8 +52,8 @@ of the attempt for a section that is not one), and skipped when the key is alrea
 immediately BEFORE a ``<!-- rabota-schedule-results -->`` marker when the file has one, through
 ``emit.replace_file`` (an atomic rewrite), so results stay in the order they happened and the marker
 stays where the next one goes. Otherwise it goes at the end, through ``emit.append_file``. Both
-guard the text. The command's output arrives redacted (``secrets.redact``), so a script that prints
-a protected value still leaves its section, and no ``<!--`` survives in a body, so output can never
+guard the text. The command's output arrives redacted (``secrets.redact``, over the whole of
+``result.md``), so a script that prints a protected value still leaves its section, and no ``<!--`` survives in a body, so output can never
 forge a key or move the marker. A record that git tracks by now is not written: ``add``'s rule,
 asked again. A record that cannot be written fails the tick (exit 4), and on a final outcome it
 turns even a ``pass`` into an escalation, because otherwise that result would be lost with nothing
@@ -318,7 +318,7 @@ def _finish_attempt(ctx, row, outcome, detail, ended, now, rep):
 
 
 def _tail(p: Path) -> tuple[str, bool]:
-    """The last ``TAIL_BYTES`` of ``p``, decoded and redacted, and whether anything was cut."""
+    """The last ``TAIL_BYTES`` of ``p``, decoded, and whether anything was cut (``_result_md`` redacts)."""
     try:
         size = p.stat().st_size
         with p.open("rb") as f:
@@ -326,7 +326,7 @@ def _tail(p: Path) -> tuple[str, bool]:
             data = f.read()
     except FileNotFoundError:
         return "", False
-    return _redact(data.decode("utf-8", errors="replace")), size > TAIL_BYTES
+    return data.decode("utf-8", errors="replace"), size > TAIL_BYTES
 
 
 def _fence(text: str) -> str:
