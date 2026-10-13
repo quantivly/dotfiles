@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transient scope in `agents.slice`. The first `--apply` arms `systemd/dev-sync.timer` on dev:
   daily, and needing no laptop and no `aws login`. It reports, but never acts on, OAuth sign-ins,
   `LINEAR_API_KEY` (checked by name), abandoned login-session scopes over 200 MB (it prints the
-  sudo command), and the effective `agents.slice` cap. `test-dev-sync.sh`: 102 rows.
+  sudo command), and the effective `agents.slice` cap. `test-dev-sync.sh`: 104 rows; a 20-mutant sweep killed 18, and the other two are equivalent.
 
 ### Changed
 
