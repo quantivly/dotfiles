@@ -443,6 +443,28 @@ jobs:
       - name: Run the seat onboarding state table
         run: ./scripts/test-claude-seat.sh
 
+  dev-sync-test:
+    name: dev-sync State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh, jq and git
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh jq git
+
+      # dev is shared with the team's platform stack. The rows ask two things: does
+      # --check report exactly the drift there is and change nothing, and does --apply
+      # fix only that, and refuse rather than guess at anything a person must decide
+      # (a checkout off main, local edits, a linked plugin, a sign-in, sudo)? claude,
+      # herdr, mise and systemctl are stubs; git runs against file:// bare repos.
+      - name: Run the dev-sync state table
+        run: ./scripts/test-dev-sync.sh
+
   tenant-route-test:
     name: Tenant Router State Table
     runs-on: ubuntu-latest

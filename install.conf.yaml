@@ -147,6 +147,12 @@
     # unit needs root and is installed by `vpn-setup`, never by ./install, which
     # never uses sudo.
     ~/.config/systemd/user/vpn-notify.service: systemd/vpn-notify.service
+    # dev-sync: keeps dev's tooling level with the laptop's. Linked everywhere and
+    # enabled only on dev, by the first `scripts/dev-sync --apply` run from the
+    # laptop. That run also writes the marker the service's ConditionPathExists
+    # needs, so on any other machine the unit is SKIPPED, which is not a failure.
+    ~/.config/systemd/user/dev-sync.service: systemd/dev-sync.service
+    ~/.config/systemd/user/dev-sync.timer: systemd/dev-sync.timer
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme

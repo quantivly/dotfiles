@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/dev-sync`: keep dev's tooling level with the laptop's (compute migration plan, B1).**
+  Run from the laptop, it sends the laptop's Claude Code version, herdr-draft commit and
+  `~/quantivly` clone list to dev, and pipes itself there. `--check` (the default) reports drift
+  and changes nothing. `--apply` fixes it: it fast-forwards and installs dotfiles, installs the
+  laptop's Claude Code (never a downgrade), and installs herdr-draft at the full SHA. It updates
+  marketplaces, enables `quantivly-conventions`, `slack`, `notion` and `linear-key`, turns off
+  `linear` only after `linear-key` is on, and turns off superseded plugins. It also clones the
+  missing repos and fetches stale ones, with no checkout changed. Each step runs in a capped
+  transient scope in `agents.slice`. The first `--apply` arms `systemd/dev-sync.timer` on dev:
+  daily, and needing no laptop and no `aws login`. It reports, but never acts on, OAuth sign-ins,
+  `LINEAR_API_KEY` (checked by name), abandoned login-session scopes over 200 MB (it prints the
+  sudo command), and the effective `agents.slice` cap. `test-dev-sync.sh`: 102 rows.
+
+### Changed
+
+- **`docs/HERDR_GUIDE.md`: dev's `agents.slice` cap is now 12G/16G**, set on 2026-10-13 with
+  `systemctl --user set-property`. Its drop-ins override the base file, which still says 8G/10G.
+
 ### Removed
 
 - **`CLAUDE_TENANT_MACHINE_OWNED` (DO-811).** Once DO-810 removed the ownership refusals, its only
