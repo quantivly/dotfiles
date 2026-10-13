@@ -39,7 +39,8 @@ DENY = json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permis
 NEEDLES = {"past": "is in the past", "expiry": "is not after --at", "horizon": "the maximum horizon",
            "tracked": "is tracked by git", "guarded": "a path the secret guard protects",
            "cwd": "contains the run's out_dir", "claude": "invokes `claude`", "timer": "is not enabled",
-           "git-unknown": "could not ask git about", "guard-unknown": "did not refuse its own control path"}
+           "git-unknown": "could not ask git about", "guard-unknown": "did not refuse its own control path",
+           "expires-cap": "the longest a due run may wait", "timeout-cap": "the longest a run may hold its unit"}
 
 
 class GuardFake(FakeRunner):
@@ -118,6 +119,22 @@ class AddRefusalTests(ScheduleBase):
         self.refused(NEEDLES["horizon"], self.ctx(), at="2026-11-12 12:01+00:00")
         out = self.add(self.ctx(), at="2026-11-12 12:00+00:00")
         self.assertEqual(out["not_before"], "2026-11-12T12:00:00Z")
+
+    def test_refuses_an_expiry_over_30_days_after_at_measured_from_at(self):
+        self.refused(NEEDLES["expires-cap"], self.ctx(), expires="2026-11-13 09:01+00:00")   # at + 30 d + 1 min
+        self.assertEqual(self.add(self.ctx(), expires="2026-11-13 09:00+00:00")["expires_at"], "2026-11-13T09:00:00Z")
+        # from the due time, not from now: a run due in 29 days keeps its default 48 h expiry
+        out = self.add(self.ctx(), at="2026-11-11 12:00+00:00")
+        self.assertEqual(out["expires_at"], "2026-11-13T12:00:00Z")
+
+    def test_refuses_a_timeout_over_6_hours_for_either_kind(self):
+        kinds = ({}, {"prompt_file": str(self.prompt)})     # command, agent; one store, so refusals first
+        for kw in kinds:
+            with self.subTest(kind="agent" if kw else "command"):
+                self.refused(NEEDLES["timeout-cap"], self.ctx(), timeout="361m", **kw)
+        for kw in kinds:
+            with self.subTest(kind="agent" if kw else "command"):
+                self.assertEqual(self.add(self.ctx(), timeout="6h", **kw)["timeout_s"], 21600)
 
     def test_refuses_a_record_git_tracks(self):
         ctx = self.ctx([(["git", "-C", str(self.work)], Result(0, "results.md\n", ""))])
@@ -217,7 +234,9 @@ class AddRefusalTests(ScheduleBase):
                 ("claude", {"args": ["claude"]}, []),
                 ("timer", {}, [(["systemctl"], Result(1, "disabled\n", ""))]),
                 ("git-unknown", {"record": str(self.record)}, [(["git"], Result(129, "", "usage"))]),
-                ("guard-unknown", {"record": str(self.record), "guard_works": False}, [])):
+                ("guard-unknown", {"record": str(self.record), "guard_works": False}, []),
+                ("expires-cap", {"expires": "2026-12-01 00:00+00:00"}, []),
+                ("timeout-cap", {"timeout": "7h"}, [])):
             (self.work / ".zshrc.local").write_text("x\n")
             ctx = self.ctx(responses, guard_works=kw.pop("guard_works", True))
             with self.assertRaises(errors.Refused) as cm:

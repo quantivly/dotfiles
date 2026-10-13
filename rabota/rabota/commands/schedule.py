@@ -51,7 +51,8 @@ from rabota.context import Context
 
 # --- Defaults: design §11 decision 5, which @zvi confirms. One constant each, one line to change. ---
 DEFAULT_EXPIRY = timedelta(hours=48)        # expires_at = not_before + this, unless --expires
-MAX_HORIZON = timedelta(days=30)            # --at may be at most this far ahead
+MAX_HORIZON = timedelta(days=30)            # --at at most this far ahead; --expires at most this far past --at
+MAX_TIMEOUT = timedelta(hours=6)            # --timeout at most this long, for either kind
 MAX_ATTEMPTS = 2
 COMMAND_TIMEOUT = timedelta(minutes=15)
 COMMAND_MEMORY_MAX = "1G"
@@ -376,6 +377,10 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
     if not_before - now > MAX_HORIZON:
         raise errors.Refused(f"--at {_local(_iso(not_before))} is more than {MAX_HORIZON.days} days "
                              f"ahead, the maximum horizon")
+    # Measured from the due time, not from now: a run due in 29 days keeps its default 48 h expiry.
+    if expires_at - not_before > MAX_HORIZON:
+        raise errors.Refused(f"--expires {_local(_iso(expires_at))} is more than {MAX_HORIZON.days} days "
+                             f"after --at, the longest a due run may wait to fire")
 
     # --- where ---------------------------------------------------------------------------------
     run_cwd = Path(cwd or caller_cwd).expanduser()
@@ -390,6 +395,12 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
             f"start in a directory that holds its own and every other run's output")
 
     # --- what ----------------------------------------------------------------------------------
+    run_timeout = (parse_duration(timeout, "--timeout") if timeout
+                   else AGENT_TIMEOUT if kind == "agent" else COMMAND_TIMEOUT)
+    if run_timeout > MAX_TIMEOUT:
+        raise errors.Refused(f"--timeout {timeout} is longer than {MAX_TIMEOUT}, the longest a run may "
+                             f"hold its unit")
+    timeout_s = int(run_timeout.total_seconds())
     source, raw, text = _read_payload(prompt_file or command, "--prompt-file" if kind == "agent" else "--command")
     if kind == "command":
         hit = _claude_hit(text) or next((f"argument {a!r}" for a in args if CLAUDE_WORD.search(a)), None)
@@ -398,11 +409,9 @@ def run_add(ctx, *, at: str, title: str, kind: str | None = None, prompt_file: s
                 f"--command {source} invokes `claude` or a launcher of it ({hit}): a command run spends no seat and passes "
                 f"no budget gate, so it must not start an agent. Schedule it with --kind agent")
         seat_pick = None
-        timeout_s = int((parse_duration(timeout, "--timeout") if timeout else COMMAND_TIMEOUT).total_seconds())
         memory_max, budget = COMMAND_MEMORY_MAX, None
     else:
         seat_pick = budget_mod.seat_for(ctx.tenant, "local", override=seat)
-        timeout_s = int((parse_duration(timeout, "--timeout") if timeout else AGENT_TIMEOUT).total_seconds())
         memory_max = ctx.tenant.lanes.memory_max
         budget = max_budget_usd if max_budget_usd is not None else AGENT_MAX_BUDGET_USD
 

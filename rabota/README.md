@@ -54,13 +54,14 @@ DO-817, and agent-run execution is phase 2.
   [-- args]`) into `<state_dir>/schedules/<id>/` with a `SHA256SUMS`, stores the row, and prints
   the whole declaration, including an agent run's effective permissions. `show` re-hashes the
   frozen payload as `payload_intact`.
-- Its refusals (exit 3) each name what failed: a past `--at`, an `--expires` not after it, an
-  `--at` over 30 days ahead, a `--cwd` containing the run's out_dir, a script or argument that
-  invokes `claude`, a `--record` git tracks or the secret guard protects, and a tenant whose
+- Its refusals (exit 3) each name what failed: a past `--at`, an `--expires` not after it or
+  more than 30 days after it, an `--at` over 30 days ahead, a `--timeout` over 6 h, a `--cwd`
+  containing the run's out_dir, a script or argument that invokes `claude` or a launcher of it, a
+  `--record` git tracks or the secret guard protects, and a tenant whose
   `rabota-schedule@<tenant>.timer` is not enabled. That last one is checked last, and **the
   global `--dry-run` refuses on it too**: a dry run validates what the real `add` would do, and
   one that exited 0 for a run nothing would ever fire would be a green answer to the wrong question.
-- The defaults (expiry, horizon, attempts, timeouts, memory, budget) are named constants at the
+- The defaults and bounds (expiry, horizon, timeouts and their 6 h cap, attempts, memory, budget) are named constants at the
   top of `rabota/commands/schedule.py`, one line each.
 
 ## Reconcile classification notes
