@@ -50,16 +50,16 @@ class GuardFake(FakeRunner):
     """
     NAMES = (".zshrc.local", ".gitconfig.local", ".backup.local", ".credentials.json")
 
-    def __init__(self, responses, guard_works=True):
+    def __init__(self, responses, guard_works=True, guard_code=0):
         super().__init__(responses)
-        self.guard_works, self.guard_inputs = guard_works, []
+        self.guard_works, self.guard_code, self.guard_inputs = guard_works, guard_code, []
 
     def run(self, argv, *, env=None, input=None, timeout=60, cwd=None):
         if list(argv) == ["bash", str(schedule.GUARD)]:
             self.calls.append(list(argv)); self.guard_inputs.append(input)
             cmd = json.loads(input)["tool_input"]["command"]
             hit = self.guard_works and any(n in cmd for n in self.NAMES)
-            return Result(0, DENY if hit else "", "")
+            return Result(self.guard_code, DENY if hit else "", "")
         return super().run(argv, env=env, input=input, timeout=timeout, cwd=cwd)
 
 
@@ -146,6 +146,10 @@ class AddRefusalTests(ScheduleBase):
     def test_a_guard_that_fails_open_refuses_rather_than_clears(self):
         msg = self.refused("did not refuse its own control path", self.ctx(guard_works=False),
                            record=str(self.record))
+        self.assertNotIn(NEEDLES["guarded"], msg)
+
+    def test_a_guard_that_errors_refuses_rather_than_clears(self):
+        msg = self.refused("the secret guard exited 2", self.ctx(guard_code=2), record=str(self.record))
         self.assertNotIn(NEEDLES["guarded"], msg)
 
     def test_refuses_a_cwd_that_contains_the_out_dir(self):
