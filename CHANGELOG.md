@@ -233,10 +233,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduled run can ask for `critical` without a schema change. It is sent only when the
   escalation is created and no reader sends one, so each escalation notifies once. The
   notification body carries no free text, and the summary is one line that no daemon can read as
-  markup. Every printed command names `--tenant`, because escalation ids repeat across tenants.
+  markup. Both notifications are built from the stored, redacted question. A protected value in
+  the question is refused before either one is sent. Every printed command names `--tenant`, because escalation ids repeat across tenants.
   Listings redact free text again with the reader's environment, so a value the escalating lane
   did not hold cannot make the brief refuse to print. The `escalations` schema and `rabota answer`
-  are unchanged. 37 mutants, 37 deaths.
+  are unchanged. 40 mutants: 37 deaths, and 3 declared-equivalent survivors (the raw question in
+  place of the stored one, which cannot differ once the projection guard has passed).
 
 - **`CLAUDE_TENANT_SPILL`: a pool can spill to named seats once its own are spent (DO-800).** Overflow
   engages only when a pool names nothing usable, by design; spill is a pool owner's choice to borrow
