@@ -90,10 +90,14 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
         raise
     notified = desktop_notified = None
     if notify:
-        notified = _notify_best_effort(ctx, ["herdr", "notification", "show", f"rabota {kind}: {question[:100]}"])
+        # Built from the STORED question (redacted by `Store._exec`), not the argument. Today the two
+        # are always equal here -- `_project` refuses any value the store would redact, before this
+        # point -- so this is defence in depth: it keeps holding if that order ever changes.
+        stored = row["question"]
+        notified = _notify_best_effort(ctx, ["herdr", "notification", "show", f"rabota {kind}: {stored[:100]}"])
         desktop_notified = _notify_best_effort(ctx, [
             "notify-send", "--app-name", "rabota", "--urgency", urgency,
-            f"ESC-{eid} rabota {kind}: {_plain(question)[:100]}",
+            f"ESC-{eid} rabota {kind}: {_plain(stored)[:100]}",
             f"ESC-{eid}: rabota --tenant {ctx.tenant.name} --text escalations --open"])
     return {"id": eid, "notified": notified, "desktop_notified": desktop_notified}
 

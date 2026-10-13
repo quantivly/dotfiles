@@ -125,6 +125,22 @@ class EscalateNotifiesTheDesktopTests(Base):
         self.assertEqual(runner.calls, [])
 
 
+    def test_an_env_held_secret_in_the_question_reaches_no_notifier(self):
+        # Orchestrator review: the notifiers must never carry a protected value. What actually
+        # stops it today is `_project`'s guard, which refuses before either notifier runs, so the
+        # escalation is not created at all; the notifiers reading the stored (redacted) question
+        # is defence in depth behind that, and is not separately observable while it holds.
+        value = "lin-api-not-real-value-0000000000"
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        ctx = self.ctx(runner)
+        with unittest.mock.patch.dict(os.environ, {"LINEAR_API_KEY": value}):
+            with self.assertRaises(errors.SecretLeak):
+                escalate.run_escalate(ctx, f"is {value} live?", "e", [])
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(ctx.store.escalations("quantivly"), [])
+        self.assertFalse((ctx.state_dir / "escalations.jsonl").exists())
+
+
 class NotifiedOncePerEscalationTests(Base):
     """§10: "a notification is sent once per escalation, never once per tick" — every reader of an
     open escalation is run against the same store after creation, and none of them notifies."""
