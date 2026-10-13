@@ -434,6 +434,16 @@ class RecordTests(TickBase):
             self.assertNotIn(CANARY, text)
             self.assertIn("[redacted:LINEAR_API_KEY]", text)
 
+    def test_an_expiry_naming_a_value_stored_before_the_environment_held_it_is_still_recorded(self):
+        ctx = self.tctx(); sid = self.declare(ctx, record=str(self.record))
+        ctx.store.update_schedule(sid, last_reason=f"deferred: {CANARY}")
+        with mock.patch.dict(os.environ, {"LINEAR_API_KEY": CANARY}):
+            self.tick(ctx, DUE + timedelta(hours=48))              # no Partial: the record was written
+        rec = self.record.read_text()
+        self.assertIn(f"<!-- rabota-schedule:{sid}:expired -->", rec)
+        self.assertIn("deferred: [redacted:LINEAR_API_KEY]", rec)
+        self.assertNotIn(CANARY, rec)
+
     def test_a_record_another_writer_holds_is_reported_and_escalates(self):
         ctx = self.tctx(); sid = self.declare(ctx, record=str(self.record))
         before = self.record.read_text()

@@ -510,7 +510,6 @@ def _escalate_once(ctx, row, outcome, evidence, detail, record_error=None) -> in
     urgency = OUTCOMES[outcome][1] or ("normal" if record_error else None)
     if urgency is None:
         return None
-    evidence = _redact(evidence)
     found = ctx.store.find_escalation(ctx.tenant.name, ESC_KIND, row["id"], evidence)
     if found is not None:
         return found["id"]
