@@ -615,10 +615,9 @@ here_clones() {
                 row oper clone "$dir is ${have:-no origin} here and $repo on the laptop; not touched"
         elif [[ "$MODE" != apply ]]; then
             row drift clone "$dir missing (laptop: $repo)"
-        elif git_net clone --quiet "$GITHUB_BASE/$repo.git" "$p" >/dev/null 2>&1 &&
-            git_net -C "$p" fetch --quiet origin >/dev/null 2>&1; then
-            # The follow-up fetch writes FETCH_HEAD, which a clone does not, so a second run
-            # does not read the new clone as "never fetched".
+        elif git_net clone --quiet "$GITHUB_BASE/$repo.git" "$p" >/dev/null 2>&1; then
+            # A clone writes no FETCH_HEAD, so the stale pass below reads it as "never
+            # fetched" and fetches it in this same run; the next run then finds it fresh.
             row ok clone "$dir cloned from $repo"
         else
             row drift clone "$dir: git clone $repo failed"
@@ -804,8 +803,9 @@ laptop_main() {
     [[ "$behind" =~ ^[0-9]+$ ]] && FACTS+=(--dotfiles-behind "$behind")
     [[ "$mode" == apply ]] && FACTS+=(--arm)
 
-    # Every fact was validated against a narrow charset, so plain word-splitting is safe in
-    # dev's login shell (zsh). Re-checked here because this is the line that would inject.
+    # Every fact is already filtered where laptop_facts gathers it, so this cannot fire today
+    # (a mutation sweep confirms it is unreachable). It stays because this is the line that
+    # would inject into dev's login shell (zsh) if a later fact were added without a filter.
     for arg in "${FACTS[@]}"; do
         [[ "$arg" =~ ^[A-Za-z0-9._=/-]+$ ]] || { echo "dev-sync: refusing unsafe fact: $arg" >&2; return 2; }
     done

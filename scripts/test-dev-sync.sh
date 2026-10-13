@@ -396,7 +396,8 @@ echo "== MCP sign-ins and LINEAR_API_KEY"
 new_case
 printf 'plugin:slack:slack: https://x (HTTP) - ! Needs authentication\nplugin:Notion:notion: https://y (HTTP) - ✔ Connected\n' >"$H/stub/mcp-list"
 run_level --check
-has   "slack needs a sign-in: ⚠ with the /mcp step" "$OUT" "slack needs a sign-in on dev"
+has   "slack needs a sign-in: ⚠ with the /mcp step" "$OUT" "⚠ mcp            slack needs a sign-in on dev"
+has   "a sign-in step is counted as a person's step" "$OUT" "1 step(s) need a person"
 check "a sign-in step alone does not fail --check" "$RC" 0
 reset_calls; run_level --check --no-mcp
 hasnt "--no-mcp: claude mcp list is not run" "$(calls)" "claude mcp list"
@@ -415,7 +416,7 @@ has   "missing clone: ✗ names the laptop's repo" "$OUT" "beta missing (laptop:
 check "missing clone: --check does not clone" "$([[ -e "$H/quantivly/beta" ]] && echo yes || echo no)" no
 run_level --apply --clone beta=quantivly/beta
 check "missing clone: --apply clones it" "$(git -C "$H/quantivly/beta" remote get-url origin 2>/dev/null)" "file://$GH/quantivly/beta.git"
-check "missing clone: and fetches it, so it reads as fresh" "$([[ -e "$H/quantivly/beta/.git/FETCH_HEAD" ]] && echo yes || echo no)" yes
+check "missing clone: fetched in the same run, so it reads as fresh" "$([[ -e "$H/quantivly/beta/.git/FETCH_HEAD" ]] && echo yes || echo no)" yes
 reset_calls; run_level --apply --clone beta=quantivly/beta
 hasnt "missing clone: second --apply has no ✗" "$OUT" "✗"
 new_case
@@ -476,7 +477,8 @@ mk lab https://gitlab.com/quantivly/lab.git
 mk noremote
 mkdir -p "$L/quantivly/plain"
 git init -q "$L/quantivly/.hidden"; git -C "$L/quantivly/.hidden" remote add origin https://github.com/quantivly/hidden.git
-mkdir -p "$L/quantivly/a-worktree"; printf 'gitdir: /nowhere\n' >"$L/quantivly/a-worktree/.git"
+git -C "$L/quantivly/alpha" commit -q --allow-empty -m init
+git -C "$L/quantivly/alpha" worktree add -q "$L/quantivly/alpha-wt" -b wt   # a REAL worktree: .git is a file, origin resolves
 FACTS_OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" \
     DEV_SYNC_GITHUB_BASE="file://$GH" bash "$SUT" --print-facts 2>&1)"
 has   "facts: the laptop's Claude version" "$FACTS_OUT" "--claude-version $V_LAPTOP"
@@ -506,7 +508,7 @@ has   "end to end --apply: the clone failure is reported, not hidden" "$E2E" "Ga
 check "end to end --apply: so it exits 1" "$E2E_RC" 1
 
 printf '\n'
-EXPECTED_ROWS=103
+EXPECTED_ROWS=104
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
