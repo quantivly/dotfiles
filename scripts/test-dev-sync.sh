@@ -404,6 +404,9 @@ new_case
 : >"$H/.zshrc.local"
 run_level --check
 has   "no LINEAR_API_KEY on dev: ⚠" "$OUT" "LINEAR_API_KEY is not in dev's ~/.zshrc.local"
+mapfile -t F < <(facts)
+OUT="$(LINEAR_API_KEY=inherited HOME="$H" PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here --check "${F[@]}" 2>&1)"
+has   "a key in the CALLER's environment does not read as in the file" "$OUT" "LINEAR_API_KEY is not in dev's ~/.zshrc.local"
 
 echo "== clones"
 new_case
@@ -503,7 +506,7 @@ has   "end to end --apply: the clone failure is reported, not hidden" "$E2E" "Ga
 check "end to end --apply: so it exits 1" "$E2E_RC" 1
 
 printf '\n'
-EXPECTED_ROWS=102
+EXPECTED_ROWS=103
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
