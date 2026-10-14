@@ -1073,8 +1073,12 @@ outage.
   not touch it — but an *agent session* driving a push over ssh needs an approval or a
   `permissions.allow` rule, the same answer §4.6 reached for `rabota lane recipe`.
 - **The memory budget covers panes by inheritance, and lanes only by joining.** `agents.slice`
-  (`MemoryHigh=8G`, `MemoryMax=10G`) contains `herdr-server.service`, so every pane shell inherits
-  the cap — that much is automatic. A command started over a plain `ssh dev` lands in a session scope under
+  (`MemoryHigh=12G`, `MemoryMax=16G` since 2026-10-13) contains `herdr-server.service`, so every
+  pane shell inherits the cap — that much is automatic. **The base file
+  `~/.config/systemd/user/agents.slice` still says 8G/10G**: the raise was made with `systemctl
+  --user set-property`, whose drop-ins in `~/.config/systemd/user.control/agents.slice.d/` win.
+  Read the effective values with `systemctl --user show agents.slice -p MemoryHigh -p MemoryMax`,
+  never from the file, and do not "fix" the file back without carrying the drop-ins with it. A command started over a plain `ssh dev` lands in a session scope under
   `user-<uid>.slice`, a *sibling* of `user@<uid>.service`, so the slice can never account it;
   docker is outside too (`system.slice`). That is why an attended session reaches dev as a herdr
   pane (herdr-draft's popup) rather than over bare ssh — and why a headless lane instead joins the slice
@@ -1092,11 +1096,12 @@ outage.
   the wrong thing at the wrong time: the lane you wanted refuses, and the cause is a TOML edit
   from three weeks ago.
   The check found this broken on its first run: at the `6G` default, 3 × 6 = **18 GiB admissible
-  into dev's 10 GiB slice**. Settled 2026-09-21 by putting `memory_max = "3G"` in
+  into dev's then-10 GiB slice**. Settled 2026-09-21 by putting `memory_max = "3G"` in
   `~/.dotfiles-local/rabota/tenants/quantivly.toml` — 3 × 3 = 9 GiB fits, and 3 GiB per lane is
   still ~10× the highest agent memory ever measured there (whole-slice peak 323 MiB). Raising
-  dev's slice instead was rejected: dev has 13 GiB available of 61, the rest held by the platform
-  stack it runs for the team, so a bigger agent slice buys headroom by taking it from them.
+  dev's slice was rejected *then*, with 13 GiB of 61 available. It was raised to 16G on
+  2026-10-13, for full-time work sessions, after stopping 24 abandoned login-session scopes that
+  had held about 38 GB freed dev to ~50 GiB available (see `scripts/dev-sync`'s `sessions` row).
   **Whichever number you change, change it knowing `budget` still does not read the slice** — it
   admits on the host's load, memory and swap, and `doctor` is the only thing comparing the two.
 - **Read `FragmentPath`, never `MemoryMax` alone.** `systemctl --user show agents.slice -p
@@ -1111,12 +1116,33 @@ outage.
   `MemoryMax` the largest process is killed and the unit continues — `OOMPolicy=continue` in
   `systemd/herdr-server.service` is what makes that survivable, so do not "fix" it. Swap is
   bounded **separately** — neither setting above touches it — so the slice also carries
-  `MemorySwapMax=4G`: without it a runaway holds 10 GiB resident *plus* every page of dev's 15 GiB
+  `MemorySwapMax=4G`: without it a runaway holds 16 GiB resident *plus* every page of dev's 15 GiB
   of swap, and the thrash lands on the platform stack dev runs for the team, not just on the agent.
   The high-water mark is what to revisit the numbers against:
   ```bash
   ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
   ```
+- **Keep dev level with `scripts/dev-sync`, run from the laptop.** `--check` (the default)
+  reports drift and writes nothing on dev: dotfiles vs `origin/main`, Claude Code and herdr vs
+  the laptop's versions, herdr-draft vs its `main`, the work tenant's plugins, missing and stale
+  `~/quantivly` clones, the effective `agents.slice` cap, and this user's abandoned
+  login-session scopes over 200 MB. `--apply` fixes the ✗ rows inside a capped transient scope
+  in `agents.slice`, and arms `dev-sync.timer` on dev, a daily run of the same thing that needs
+  no laptop and no `aws login`. A herdr upgrade installs the laptop's exact release asset,
+  verified against the laptop binary's sha256, and only while **no pane** is open on dev's
+  server, because the restart closes every pane; until then it is a ⚠ naming what is open. It
+  never signs in to an MCP server, never handles `LINEAR_API_KEY`'s value and never runs sudo;
+  those come back as ⚠ rows for a person.
+- **Disarming dev-sync's timer is sticky, and takes three steps on dev.** Deleting the `armed`
+  marker alone leaves an enabled timer whose runs are skipped, which
+  [timer health](TIMER_HEALTH.md) rightly reports as broken, and the next laptop `--apply` would
+  re-arm it. Never `systemctl --user disable`: it deletes the dotbot link that is the unit.
+  ```bash
+  touch ~/.config/dev-sync/disarmed && rm -f ~/.config/dev-sync/armed
+  systemctl --user stop dev-sync.timer
+  rm ~/.config/systemd/user/default.target.wants/dev-sync.timer && systemctl --user daemon-reload
+  ```
+  Re-arm by deleting `disarmed` and running `scripts/dev-sync --apply` from the laptop.
 - **Disconnects leave dev's agents running.** The health-check timeouts in the log are this
   laptop's own suspends, not dev going away; reconnect and the panes are still there.
 - **Close what you spawn, and only that** — `herdr pane close <id>` over ssh, as above.

@@ -1,0 +1,44 @@
+# systemd/dev-sync.service
+# ========================
+# Keeps dev's tooling level with the laptop's: dotfiles to origin/main, Claude Code to
+# latest, herdr-draft to main, the work tenant's plugins enabled, the ~/quantivly clones
+# fetched. scripts/dev-sync holds all of it, including why the timer lives on dev rather
+# than on the laptop.
+#
+# ARMED ONLY ON DEV. ./install links this unit on every machine, but the condition below
+# makes systemd SKIP it on any machine without the marker. A skipped unit is not a failed
+# one. The marker is written by the first `scripts/dev-sync --apply` run FROM THE LAPTOP,
+# which also enables the timer. To disarm, follow docs/HERDR_GUIDE.md ("Disarming dev-sync's
+# timer"): a `disarmed` file, so the laptop cannot re-arm it, and the timer's .wants link
+# pruned by hand. Never `systemctl --user disable` or `reenable` it: the disable half deletes
+# the dotbot symlink that IS the unit (see systemd/herdr-server.service's [Install]).
+#
+# DEV IS SHARED, so the run is capped: it goes in agents.slice beside every agent, at nice
+# 10 and idle IO, with its own MemoryMax and CPUQuota. The heaviest step is herdr-draft's
+# `go build`, and that runs only when herdr-draft's main has moved.
+#
+# Watch it:  journalctl --user -u dev-sync.service -e
+# Logs:      ~/.local/state/dev-sync/ (install, claude-install, herdr-draft-install, plugins)
+
+[Unit]
+Description=Keep dev's tooling level with the laptop's (dev-sync)
+Documentation=file://%h/.dotfiles/scripts/dev-sync
+ConditionPathExists=%h/.config/dev-sync/armed
+
+[Service]
+Type=oneshot
+# A user unit has systemd's PATH, without ~/.local/bin. The script prepends that itself;
+# this is for the tools it calls by name.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# --no-mcp: the MCP sign-in rows are for a person reading --check, and an unattended run
+# has none. The marker above is what --apply checks before it changes anything.
+ExecStart=%h/.dotfiles/scripts/dev-sync --here --apply --no-mcp
+Slice=agents.slice
+MemoryMax=3G
+CPUQuota=200%
+Nice=10
+IOSchedulingClass=idle
+# Dominated by network calls (fetches, a Claude Code download, a Go module download). A cap
+# keeps a hung call from blocking every later run, since a oneshot has no start timeout by
+# default and the timer does not fire while the last run is still active.
+TimeoutStartSec=30min
