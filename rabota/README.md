@@ -16,6 +16,7 @@ and JSON errors on stderr. Exit codes: `0` ok · `2` usage · `3` refused · `4`
 | `rabota/config.py` | tenant TOML loading and cwd/env → tenant resolution |
 | `rabota/store.py` | SQLite store at `<state_dir>/rabota.db`; `SCHEMA_VERSION` and its `MIGRATIONS` |
 | `rabota/context.py` | per-command `Context` (config, tenant, store, runner, scrubbed env) |
+| `rabota/scheduler.py` | the schedule tick: settle, expire, dispatch; the record, escalations, answer actions, export |
 | `rabota/commands/*.py` | one module per subcommand; each calls `cli.register` on import |
 | `tests/` | `unittest` suite with synthetic fixtures under `tests/fixtures/` |
 
@@ -47,8 +48,8 @@ DO-711 it ran nowhere, and both shipped briefs pointed every dev lane at `/home/
 
 `rabota schedule add|list|show|cancel` (DO-816) declares work that runs later as a row in the
 tenant's `schedules` table — design: `docs/superpowers/specs/2026-10-11-scheduled-agent-runs-design.md`
-§3 and §8. Nothing fires a row yet: the tick, the executor and the `rabota-schedule@` units are
-DO-817, and agent-run execution is phase 2.
+§3 and §8. `rabota schedule tick` (DO-817, `rabota/scheduler.py`) fires and follows it up, from
+`rabota-schedule@<tenant>.timer` every ten minutes; agent-run execution is phase 2 (DO-820).
 
 - `add` freezes the prompt (`--prompt-file`, an agent run) or the script (`--command <script>
   [-- args]`) into `<state_dir>/schedules/<id>/` with a `SHA256SUMS`, stores the row, and prints
@@ -61,8 +62,24 @@ DO-817, and agent-run execution is phase 2.
   `rabota-schedule@<tenant>.timer` is not enabled. That last one is checked last, and **the
   global `--dry-run` refuses on it too**: a dry run validates what the real `add` would do, and
   one that exited 0 for a run nothing would ever fire would be a green answer to the wrong question.
-- The defaults and bounds (expiry, horizon, timeouts and their 6 h cap, attempts, memory, budget) are named constants at the
+- The defaults and bounds (expiry, horizon, timeouts and their 6 h cap, attempts, the retry delay, the running-command cap, memory, budget) are named constants at the
   top of `rabota/commands/schedule.py`, one line each.
+- **The tick** takes an `flock`, then settles finished command runs, expires overdue ones and
+  dispatches due ones, in that order. A command runs as a transient
+  `rabota-sched-<tenant>-<id>-a<n>.service` under `MemoryMax`, `RuntimeMaxSec`, `Nice=10` and
+  `KillMode=control-group`, with `~/.local/bin` on its `PATH`, and no seat or budget gate. At most
+  two run at once per tenant (`MAX_RUNNING_COMMANDS`); a due command past that is deferred. Its exit
+  code is its outcome: 0 `pass`, 1 `fail`, anything else (or none) `could-not-run`, retried once
+  30 minutes later. A frozen payload that no longer hashes to its declaration is never run. An
+  agent run is deferred until phase 2, so it expires and escalates. The claim is written before
+  `systemd-run`, so a crash is adopted on the next tick, never re-run blind.
+- **What the tick leaves.** One keyed section per attempt in the `--record` file (before a
+  `<!-- rabota-schedule-results -->` marker if it has one), an escalation of kind `scheduled-run` for
+  every outcome but a clean pass, and `~/.local/state/rabota/schedule-export.json`, which covers
+  every tenant and never carries a result body. `rabota answer` executes only an option's declared
+  `rerun[:+<n>]` or `cancel-followups`; any other option executes nothing.
+- **Arming** a tenant is @zvi's step: `systemctl --user enable --now rabota-schedule@<tenant>.timer`.
+  `install.conf.yaml` only links the units.
 
 ## Reconcile classification notes
 

@@ -1,0 +1,16 @@
+# systemd/rabota-schedule@.timer
+[Unit]
+Description=Tick rabota's scheduled-run queue for tenant %i every 10 minutes
+
+[Timer]
+# Calendar, not monotonic: a calendar elapse missed during a SUSPEND fires on resume with or
+# without Persistent=, while a monotonic timer pauses. Persistent= is what covers a POWEROFF,
+# firing the missed tick at boot (design §2, §4). Either way a due run starts within about ten
+# minutes of the laptop being awake.
+OnCalendar=*:0/10
+Persistent=true
+RandomizedDelaySec=30
+Unit=rabota-schedule@%i.service
+
+[Install]
+WantedBy=timers.target

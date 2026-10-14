@@ -222,6 +222,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A declared run now fires on time and its result is read without @zvi reading it (DO-817).**
+  `rabota schedule tick`, from a new per-tenant `rabota-schedule@<tenant>.timer` (`OnCalendar=*:0/10`,
+  `Persistent=true`), works the tenant's queue in four steps under an `flock`: it settles finished
+  runs, gives each exactly one outcome, expires overdue ones and dispatches due ones. The units are
+  linked by `install.conf.yaml` and enabled by nobody: arming a tenant is @zvi's step.
+  - **Command runs** start as a transient `rabota-sched-<tenant>-<id>-a<n>.service` under
+    `MemoryMax`, `RuntimeMaxSec`, `Nice=10` and `KillMode=control-group`, with `~/.local/bin` on
+    `PATH` and no seat or budget gate. At most two run at once per tenant (`MAX_RUNNING_COMMANDS`),
+    counting those still running from an earlier tick; a due command past the cap is deferred, so
+    a long poweroff cannot start every due run at once. The exit code is the outcome: 0 `pass`,
+    1 `fail`, anything else, or none, `could-not-run`. A `could-not-run` is retried 30 minutes later up to
+    `max_attempts`. A `fail` is never re-run. A frozen script that no longer matches its sha256 is
+    never run. An agent run is deferred until DO-820, so it expires and escalates.
+  - **Crash recovery.** The claim (`BEGIN IMMEDIATE`) stores the attempt and unit name before
+    `systemd-run`, so a tick that dies is adopted by the next one, never re-run blind.
+  - **The consumer loop.** Each attempt is appended to the declared record, keyed and so
+    idempotent, before a `<!-- rabota-schedule-results -->` marker if there is one. Every outcome but
+    a clean pass raises one `scheduled-run` escalation, notified once, with the declared options.
+    `rabota answer` executes only an option's declared `rerun[:+<n>]` (exactly one new run) or
+    `cancel-followups`; any other option executes nothing. `~/.local/state/rabota/schedule-export.json`
+    is rewritten by every tick, `add`, `cancel` and answer. It covers every tenant, never creates or
+    migrates another tenant's store, and never carries a result body.
+
+  `rabota/tests/test_schedule_tick.py` adds 70 hermetic rows. 74 mutants: 73 deaths and 1
+  declared-equivalent survivor (`BEGIN IMMEDIATE`: the claim is one conditional `UPDATE`, atomic on
+  its own). An earlier sweep exposed a redundant redaction, which is now gone.
+
 - **A run due later can be declared to rabota instead of handed over as a prompt (DO-816).** Until
   now, a check that came due days later was a prompt file for @zvi to paste on a date. `rabota
   schedule add` records it instead as a row in the tenant's `rabota.db`, in a new `schedules`

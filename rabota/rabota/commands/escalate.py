@@ -44,7 +44,11 @@ from rabota.commands.escalations import one_line
 from rabota.context import Context
 from rabota.store import now
 
-KINDS = ("decision", "finding", "verification", "pr-blocked", "prereq", "incident", "correction", "commitment")
+# `scheduled-run` (DO-817) is what the schedule tick raises, and the one kind whose answer can carry
+# an action: `run_answer` hands it to `scheduler.run_answer`, which executes the declared rerun or
+# cancel-followups only for the escalation the tick itself recorded on the schedule row.
+KINDS = ("decision", "finding", "verification", "pr-blocked", "prereq", "incident", "correction", "commitment",
+         "scheduled-run")
 URGENCIES = ("low", "normal", "critical")     # notify-send's own levels; see the module docstring
 
 
@@ -119,19 +123,29 @@ def run_answer(ctx: Context, esc_id: int, label: str, resolution: str | None = N
         raise errors.Refused(f"escalation {esc_id} is already resolved as {row['disposition']!r}")
     if row["options"] and label not in row["options"]:
         raise errors.Refused(f"label {label!r} is not one of {row['options']}")
+    if row["kind"] == "scheduled-run":
+        from rabota import scheduler     # not at the top: scheduler imports this module
+        sched = scheduler.schedule_for(ctx, row)
+        if sched is not None:
+            return scheduler.run_answer(ctx, row, sched, label, resolution)
     if ctx.dry_run:
         return {"id": esc_id, "disposition": label, "dry_run": "nothing written (escalations row, escalations.jsonl)"}
     ctx.store.answer_escalation(esc_id, label, resolution)
-    stored = ctx.store.escalation(esc_id)
     try:
-        _project(ctx, {"ts": now(), "firstSeen": row["first_seen"], "kind": row["kind"], "subject": row["subject"],
-                       "tenant": ctx.tenant.name, "question": row["question"], "evidence": row["evidence"],
-                       "options": row["options"], "disposition": label, "resolvedAt": stored["resolved_at"],
-                       "resolution": resolution})
+        _project(ctx, answer_projection(ctx, row, label, resolution))
     except errors.SecretLeak:
         ctx.store.unresolve_escalation(esc_id)
         raise
     return {"id": esc_id, "disposition": label}
+
+
+def answer_projection(ctx: Context, row: dict, label: str, resolution: str | None) -> dict:
+    """The ``escalations.jsonl`` line an answer projects, read after ``answer_escalation`` committed."""
+    stored = ctx.store.escalation(row["id"])
+    return {"ts": now(), "firstSeen": row["first_seen"], "kind": row["kind"], "subject": row["subject"],
+            "tenant": ctx.tenant.name, "question": row["question"], "evidence": row["evidence"],
+            "options": row["options"], "disposition": label, "resolvedAt": stored["resolved_at"],
+            "resolution": resolution}
 
 
 def _build(sub):
