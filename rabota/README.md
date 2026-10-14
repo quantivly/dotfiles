@@ -100,5 +100,6 @@ skill's byte budget (`scripts/test-rabota.sh`):
 ```bash
 ~/.dotfiles/scripts/test-rabota.sh          # python3 -m unittest discover, needs Python ≥ 3.11
 ~/.dotfiles/scripts/test-rabota.sh -k Store # one class
-rabota doctor                               # install link, config, schema, timer, tenant root
+rabota doctor                               # install link, config, schema, timer, tenant root,
+                                            # scheduled-run queue (timers armed, nothing overdue or stuck)
 ```

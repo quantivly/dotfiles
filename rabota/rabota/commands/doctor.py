@@ -1,5 +1,5 @@
 """``rabota doctor``: install link, config parse, store schema, pre-compute timer, the tenant's
-own root, and the three couplings that span two machines.
+own root, the three couplings that span two machines, and the scheduler's queue.
 
 ``tenant_repos`` is the one check here about this machine alone: whether a local lane for this
 tenant could be given any ``--repo`` at all -- against the ``[repos]`` table when it declares
@@ -18,15 +18,27 @@ hand" before they were checks:
   Nothing else compares them, and ``budget`` never reads the slice.
 * ``remote_seat_identity`` — the seat the MACHINE REGISTRY declares against the account that
   machine's own login actually bills. A mismatch spends a window the gate never metered.
+
+The last three checks watch the scheduler's QUEUE (DO-818; scheduled-runs design §5, "Monitored,
+concretely"). Timer-health says whether ``rabota-schedule@<tenant>.timer`` ticks; only the rows
+say whether the runs in it move. All three read EVERY tenant's store, as the schedule export does,
+each through ``Store.open_current``, so doctor never creates or migrates another tenant's store:
+
+* ``schedule_timers`` — every tenant with a pending run has its timer enabled.
+* ``schedule_overdue`` — no run is still pending ``OVERDUE_AFTER`` past its due time.
+* ``schedule_stuck`` — no run has been running longer than its own timeout plus ``RUNNING_GRACE``.
 """
 import datetime
 import hashlib
 import json
+import os
 import re
+import sqlite3
 from pathlib import Path
 
-from rabota import cli, emit, errors, remote
+from rabota import cli, emit, errors, remote, secrets, store
 from rabota.commands import lane
+from rabota.commands import schedule as decl
 from rabota.context import Context
 from rabota.store import SCHEMA_VERSION
 
@@ -458,12 +470,180 @@ def tenant_repos(ctx) -> list[tuple[str, bool, str]]:
              + f"{'checkout' if len(present) == 1 else 'checkouts'} {present}")]
 
 
-def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
+# --- the scheduler's queue (DO-818) -------------------------------------------------------------
+# rabota-schedule@.timer ticks every 10 minutes (OnCalendar=*:0/10, RandomizedDelaySec=30). A
+# healthy tick dispatches a due row, or defers it with a reason, within one period.
+
+# A pending run this long past its due time is OVERDUE: three tick periods, so a tick that missed it
+# twice running, or one that keeps deferring it (an agent row before DO-820, a command past
+# MAX_RUNNING_COMMANDS). Counting a deferred row is the point: its last_reason is what gets printed.
+OVERDUE_AFTER = datetime.timedelta(minutes=30)
+# How far past its own timeout_s a running run may go before it is STUCK. A healthy row overruns
+# its timeout by up to about 12 minutes: RuntimeMaxSec stops the unit, which then sits in
+# `deactivating` (scheduler.LIVE, so not settled) for up to TimeoutStopSec's default 90 s, and the
+# next tick, 10 minutes and up to 30 s of RandomizedDelaySec later, settles it. Twenty minutes is
+# that one settling tick plus one spare, for a tick that did nothing because another held its lock.
+RUNNING_GRACE = datetime.timedelta(minutes=20)
+# The schema that brought the `schedules` table (store.MIGRATIONS[4], DO-816). A store stamped
+# below it cannot hold a run, so it has none; open_current refuses it all the same.
+SCHEDULES_SCHEMA = 5
+
+
+def _stamped_version(db: Path) -> int | None:
+    """The version stamped in ``db``, read without migrating it; None when it cannot be read."""
+    try:
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row and isinstance(row[0], int) else None
+
+
+def schedule_stores(ctx) -> dict[str, dict]:
+    """Every tenant's schedules, each from its own store: ``{tenant: {"rows", "why"}}``.
+
+    ``rows`` is None when the store could not be read, and ``why`` then says why. The caller's own
+    tenant is read from ``ctx.state_dir``, so a ``--state-dir`` override is honoured, exactly as
+    ``scheduler.write_export``'s ``own`` does. No store, or one older than ``SCHEDULES_SCHEMA``,
+    holds no run: that is an answer, not a failure. Any other store ``open_current`` refuses (a
+    newer one, or a corrupt one) is UNMEASURED, and is reported, never migrated.
+    """
+    out = {}
+    for name, tenant in sorted(ctx.cfg.tenants.items()):
+        state_dir = ctx.state_dir if name == ctx.tenant.name else Path(tenant.state_dir).expanduser()
+        db = state_dir / "rabota.db"
+        if not db.is_file():
+            out[name] = {"rows": [], "why": f"has no store at {db}"}
+            continue
+        s = None
+        try:
+            s = store.Store.open_current(state_dir)
+            out[name] = {"rows": s.list_schedules(name), "why": None}
+        except (errors.RabotaError, sqlite3.Error) as e:
+            version = _stamped_version(db)
+            if version is not None and version < SCHEDULES_SCHEMA:
+                out[name] = {"rows": [], "why": f"has a store at schema {version}, older than the "
+                                                f"schedules table"}
+            else:
+                out[name] = {"rows": None,
+                             "why": str(e) if isinstance(e, errors.RabotaError) else f"{type(e).__name__}: {e}"}
+        finally:
+            if s is not None:
+                s.close()
+    return out
+
+
+def _clean(text: str) -> str:
+    """A row carries titles and reasons a run's declaration or its unit wrote: redacted, as the export is."""
+    return secrets.redact(text, os.environ)
+
+
+def _minutes(td: datetime.timedelta) -> str:
+    return f"{int(td.total_seconds() // 60)} min"
+
+
+def _run_name(tenant: str, row: dict) -> str:
+    return f"{tenant!r} run {row['id']} ({row['title']})"
+
+
+def schedule_timers(ctx, stores: dict) -> list[tuple[str, bool, str]]:
+    """One row per tenant: if it has pending runs, is its ``rabota-schedule@`` timer enabled?
+
+    ``schedule add`` refuses on a disarmed timer, but a timer can be disabled after its runs were
+    declared, and then nothing fires them: each sits until it would have expired, and nothing
+    expires it either. Only a tenant WITH pending runs asks systemd; one without passes and says
+    why, so a missing row never reads as a clean one.
+    """
+    rows = []
+    for name, got in stores.items():
+        unit = decl.timer_unit(name)
+        if got["rows"] is None:
+            rows.append((name, False, f"could not read {name!r}'s schedules ({got['why']}), so whether "
+                                      f"{unit} has pending runs to fire is UNMEASURED; doctor does not "
+                                      f"migrate another tenant's store"))
+            continue
+        pending = [r for r in got["rows"] if r["status"] == "pending"]
+        if not pending:
+            rows.append((name, True, f"{name!r} {got['why'] or 'has no pending run'}, so {unit} has "
+                                     f"nothing to fire"))
+            continue
+        res = ctx.runner.run(["systemctl", "--user", "is-enabled", unit], timeout=15)
+        state = (res.out.strip() or res.err.strip() or f"exit {res.code}").splitlines()[0]
+        ok = res.ok and state == "enabled"
+        what = f"{name!r} has {len(pending)} pending {'run' if len(pending) == 1 else 'runs'}"
+        rows.append((name, ok, f"{what} and {unit} is enabled" if ok else
+                     _clean(f"{what} ({', '.join(r['id'] for r in pending)}) and {unit} is NOT "
+                            f"enabled ({state}), so nothing fires them; arming it is @zvi's step: "
+                            f"systemctl --user enable --now {unit}")))
+    return rows
+
+
+def _read(stores: dict) -> str:
+    return ", ".join(n for n, g in stores.items() if g["rows"] is not None) or "none"
+
+
+def schedule_overdue(stores: dict, now: datetime.datetime) -> list[tuple[str | None, bool, str]]:
+    """One FAIL row per run still pending ``OVERDUE_AFTER`` past its due time, naming its last_reason.
+
+    A deferred row counts, deliberately: an agent run before DO-820, or a command past the
+    running cap, stays pending with its reason, and this is where that reason surfaces before
+    the run expires. With none overdue, one PASS row names the tenants whose stores were read; a
+    store that could not be read is ``schedule_timers``' failure, not repeated here.
+    """
+    rows = []
+    for name, got in stores.items():
+        for r in got["rows"] or []:
+            due = datetime.datetime.fromisoformat(r["not_before"].replace("Z", "+00:00"))
+            if r["status"] == "pending" and now - due > OVERDUE_AFTER:
+                rows.append((r["id"], False, _clean(
+                    f"{_run_name(name, r)} was due {decl._local(r['not_before'])} and is still pending "
+                    f"{_minutes(now - due)} later; last reason: "
+                    f"{r['last_reason'] or 'none, so no tick has reached it since it came due'}")))
+    return rows or [(None, True, f"no pending run is more than {_minutes(OVERDUE_AFTER)} past due "
+                                 f"(stores read: {_read(stores)})")]
+
+
+def schedule_stuck(stores: dict, now: datetime.datetime) -> list[tuple[str | None, bool, str]]:
+    """One FAIL row per run ``running`` longer than its ``timeout_s`` plus ``RUNNING_GRACE``.
+
+    Its unit should have been killed by RuntimeMaxSec at ``timeout_s`` and settled by the next
+    tick, so a row still running past the grace is a unit that outlived its bound, or a tick that
+    has stopped settling. Measured in WALL time from ``started_at``; RuntimeMaxSec's own clock
+    across a suspend is unmeasured (design §5), so a run a suspend interrupted can read stuck
+    until its unit ends, and the row says so.
+    """
+    rows = []
+    for name, got in stores.items():
+        for r in got["rows"] or []:
+            if r["status"] != "running":
+                continue
+            if not r["started_at"]:
+                rows.append((r["id"], False, _clean(f"{_run_name(name, r)} is running with no started_at, "
+                                                    f"so how long it has run is UNMEASURED")))
+                continue
+            started = datetime.datetime.fromisoformat(r["started_at"].replace("Z", "+00:00"))
+            limit = datetime.timedelta(seconds=r["timeout_s"]) + RUNNING_GRACE
+            if now - started > limit:
+                rows.append((r["id"], False, _clean(
+                    f"{_run_name(name, r)} has been running {_minutes(now - started)} since "
+                    f"{decl._local(r['started_at'])}, past its {r['timeout_s']} s timeout plus "
+                    f"{_minutes(RUNNING_GRACE)} grace, as {r['unit']}; see `systemctl --user status "
+                    f"{r['unit']}`. Wall time: a suspend while it ran counts")))
+    return rows or [(None, True, f"no running run is past its timeout plus {_minutes(RUNNING_GRACE)} "
+                                 f"(stores read: {_read(stores)})")]
+
+
+def run_doctor(ctx: Context, clauth_profiles=None, now: datetime.datetime | None = None) -> dict:
     """Return the doctor report; ``ok`` is false whenever ``problems`` is non-empty.
 
     ``clauth_profiles`` is passed through to ``remote_seat_identity`` so the state table can hand
-    it a fixture tree instead of this user's real clauth store.
+    it a fixture tree instead of this user's real clauth store. ``now`` is the scheduler checks'
+    test seam.
     """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
     problems = []
     link = ctx.runner.run(["readlink", "-f", str(Path.home() / ".local/bin/rabota")])
     link_ok = link.ok and link.out.strip() == str(EXPECTED_LINK)
@@ -500,17 +680,34 @@ def run_doctor(ctx: Context, clauth_profiles=None) -> dict:
     for name, ok, detail in identity_rows:
         if not ok:
             problems.append(f"declared seat on machine {name!r}: {detail}")
+    stores = schedule_stores(ctx)
+    timer_rows = schedule_timers(ctx, stores)
+    for name, ok, detail in timer_rows:
+        # This tenant's own store failing to open IS the schema problem above: its row stays in
+        # the report, but one cause is not listed twice.
+        if not ok and not (name == ctx.tenant.name and schema != SCHEMA_VERSION):
+            problems.append(f"schedule timer for {name!r}: {detail}")
+    overdue_rows = schedule_overdue(stores, now)
+    stuck_rows = schedule_stuck(stores, now)
+    for label, rs in (("overdue", overdue_rows), ("stuck", stuck_rows)):
+        for run, ok, detail in rs:
+            if not ok:
+                problems.append(f"{label} scheduled run {run}: {detail}")
     as_rows = lambda rs: [{"machine": n, "ok": ok, "detail": d} for n, ok, d in rs]
+    as_runs = lambda rs: [{"run": n, "ok": ok, "detail": d} for n, ok, d in rs]
     return {"tenant": ctx.tenant.name, "state_dir": str(ctx.state_dir), "config_ok": True,
             "db_schema": schema, "links": {"rabota": link_ok}, "timer": {"state": timer_state},
             "tenant_repos": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in repo_rows],
             "seat_cache": as_rows(seat_rows), "slice_headroom": as_rows(slice_rows),
             "remote_seat": as_rows(identity_rows),
+            "schedule_timers": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in timer_rows],
+            "schedule_overdue": as_runs(overdue_rows), "schedule_stuck": as_runs(stuck_rows),
             "ok": not problems, "problems": problems}
 
 
 def _build(sub):
-    sub.add_parser("doctor", help="check install, config, store, timer, and the cross-machine couplings")
+    sub.add_parser("doctor", help="check install, config, store, timer, the cross-machine couplings, "
+                                  "and the scheduled-run queue")
 
 
 def _run(ns):
