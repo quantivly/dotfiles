@@ -253,11 +253,34 @@ is_bare_template() { [[ "${1%.*}" == *@ ]]; }
 # One `show` per unit, as KEY=value lines, timestamps normalised to @<epoch>.
 # --timestamp=unix is what makes LastTriggerUSec and ActiveEnterTimestamp
 # comparable without parsing "Tue 2026-09-22 15:13:59 IDT".
+#
+# systemd before 251 has no --timestamp=unix: it prints "Invalid value: unix."
+# and exits 1 (dev's 249, measured 2026-10-14). Every property then read as
+# empty, so a healthy timer was reported "ActiveState=unknown — it will not
+# fire". There, ask without the flag and convert the two timestamps here, in
+# UTC: a zone abbreviation is ambiguous, and this box's uutils date rejects
+# "IDT" outright.
+UNIT_PROPS=(-p LoadState -p ActiveState -p UnitFileState -p Result
+    -p ExecMainStatus -p ConditionResult -p ConditionTimestamp
+    -p ActiveEnterTimestamp -p NRestarts)
 unit_props() {
-    systemctl --user show --timestamp=unix "$1" \
-        -p LoadState -p ActiveState -p UnitFileState -p Result \
-        -p ExecMainStatus -p ConditionResult -p ConditionTimestamp \
-        -p ActiveEnterTimestamp -p NRestarts 2>/dev/null
+    local out line v e
+    if out="$(systemctl --user show --timestamp=unix "$1" "${UNIT_PROPS[@]}" 2>/dev/null)"; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    out="$(TZ=UTC systemctl --user show "$1" "${UNIT_PROPS[@]}" 2>/dev/null)" || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            ConditionTimestamp=?*|ActiveEnterTimestamp=?*)
+                v="${line#*=}"
+                # Unparseable is left empty: "no timestamp", never a wrong one.
+                e="$(TZ=UTC date -d "$v" +%s 2>/dev/null)" || e=""
+                [[ "$e" =~ ^[0-9]+$ ]] && line="${line%%=*}=@$e" || line="${line%%=*}="
+                ;;
+        esac
+        printf '%s\n' "$line"
+    done <<<"$out"
 }
 prop() { sed -n "s/^$2=//p" <<<"$1" | head -1; }
 

@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing on dev. `--apply` fixes it: it fast-forwards and installs dotfiles, installs the
   laptop's Claude Code (never a downgrade), and installs herdr-draft's `main` at the full SHA.
   It installs the laptop's herdr release, verified against the laptop binary's sha256, which
-  herdr-draft's `--machine` needs on dev (0.9.1 or later), but only while no pane is open on
-  dev's server, since the restart closes every pane. It updates marketplaces, enables
+  herdr-draft's `--machine` needs on dev (0.9.1 or later), but only while no agent runs and
+  every pane is idle at its shell prompt, since the restart closes every pane. It updates marketplaces, enables
   `quantivly-conventions`, `slack`, `notion` and `linear-key`, turns off `linear` only after
   `linear-key` is on, and turns off superseded plugins. It also clones the missing repos and
   fetches stale ones, with no checkout changed. Each step runs in a capped transient scope in
@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   laptop and no `aws login`, and a hand disarm is sticky. It reports, but never acts on, OAuth
   sign-ins, `LINEAR_API_KEY` (checked by name), this user's abandoned login-session scopes over
   200 MB (it prints the sudo command naming them), and the effective `agents.slice` cap.
-  `test-dev-sync.sh`: 149 rows. Mutation sweeps killed 45 of 47 mutants, and the other two are
+  `test-dev-sync.sh`: 156 rows. Mutation sweeps killed 51 of 53 mutants, and the other two are
   equivalent.
 
 ### Changed

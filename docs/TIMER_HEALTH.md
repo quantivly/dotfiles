@@ -212,7 +212,7 @@ unit and a "now" of zero passes every one of them. Both are exit 2. Mutant **M14
 
 ## The state table
 
-`scripts/test-timer-health.sh` (127 checks, hermetic, run in CI, job
+`scripts/test-timer-health.sh` (133 checks, hermetic, run in CI, job
 "Repo-Owned Timer Health State Table").
 
 **Hermetic means a recording `systemctl` stub at the front of `PATH`**, never "systemctl happens to
