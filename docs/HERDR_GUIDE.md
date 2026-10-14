@@ -1123,16 +1123,26 @@ outage.
   ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
   ```
 - **Keep dev level with `scripts/dev-sync`, run from the laptop.** `--check` (the default)
-  reports drift and changes nothing: dotfiles vs `origin/main`, Claude Code and herdr vs the
-  laptop's versions, herdr-draft vs the laptop's commit, the work tenant's plugins, missing and stale `~/quantivly`
-  clones, the effective `agents.slice` cap, and abandoned login-session scopes over 200 MB.
-  `--apply` fixes the ✗ rows inside a capped transient scope in `agents.slice`, and arms
-  `dev-sync.timer` on dev, a daily run of the same thing that needs no laptop and no `aws login`.
-  A herdr upgrade installs the laptop's exact release asset, verified against the laptop
-  binary's sha256, and restarts dev's server through the unit only while `herdr agent list` is
-  empty; otherwise it reports "restart pending". It never signs in to an MCP server, never
-  handles `LINEAR_API_KEY`'s value and never runs sudo; those come back as ⚠ rows for a person. Disarm the timer by
-  deleting `~/.config/dev-sync/armed` on dev, never with `systemctl --user disable`.
+  reports drift and writes nothing on dev: dotfiles vs `origin/main`, Claude Code and herdr vs
+  the laptop's versions, herdr-draft vs its `main`, the work tenant's plugins, missing and stale
+  `~/quantivly` clones, the effective `agents.slice` cap, and this user's abandoned
+  login-session scopes over 200 MB. `--apply` fixes the ✗ rows inside a capped transient scope
+  in `agents.slice`, and arms `dev-sync.timer` on dev, a daily run of the same thing that needs
+  no laptop and no `aws login`. A herdr upgrade installs the laptop's exact release asset,
+  verified against the laptop binary's sha256, and only while **no pane** is open on dev's
+  server, because the restart closes every pane; until then it is a ⚠ naming what is open. It
+  never signs in to an MCP server, never handles `LINEAR_API_KEY`'s value and never runs sudo;
+  those come back as ⚠ rows for a person.
+- **Disarming dev-sync's timer is sticky, and takes three steps on dev.** Deleting the `armed`
+  marker alone leaves an enabled timer whose runs are skipped, which
+  [timer health](TIMER_HEALTH.md) rightly reports as broken, and the next laptop `--apply` would
+  re-arm it. Never `systemctl --user disable`: it deletes the dotbot link that is the unit.
+  ```bash
+  touch ~/.config/dev-sync/disarmed && rm -f ~/.config/dev-sync/armed
+  systemctl --user stop dev-sync.timer
+  rm ~/.config/systemd/user/default.target.wants/dev-sync.timer && systemctl --user daemon-reload
+  ```
+  Re-arm by deleting `disarmed` and running `scripts/dev-sync --apply` from the laptop.
 - **Disconnects leave dev's agents running.** The health-check timeouts in the log are this
   laptop's own suspends, not dev going away; reconnect and the panes are still there.
 - **Close what you spawn, and only that** — `herdr pane close <id>` over ssh, as above.

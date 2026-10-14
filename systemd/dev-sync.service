@@ -8,9 +8,10 @@
 # ARMED ONLY ON DEV. ./install links this unit on every machine, but the condition below
 # makes systemd SKIP it on any machine without the marker. A skipped unit is not a failed
 # one. The marker is written by the first `scripts/dev-sync --apply` run FROM THE LAPTOP,
-# which also enables the timer. To disarm, delete the marker: the timer keeps firing, and
-# every run is skipped. Never `systemctl --user disable` or `reenable` it: the disable half
-# deletes the dotbot symlink that IS the unit (see systemd/herdr-server.service's [Install]).
+# which also enables the timer. To disarm, follow docs/HERDR_GUIDE.md ("Disarming dev-sync's
+# timer"): a `disarmed` file, so the laptop cannot re-arm it, and the timer's .wants link
+# pruned by hand. Never `systemctl --user disable` or `reenable` it: the disable half deletes
+# the dotbot symlink that IS the unit (see systemd/herdr-server.service's [Install]).
 #
 # DEV IS SHARED, so the run is capped: it goes in agents.slice beside every agent, at nice
 # 10 and idle IO, with its own MemoryMax and CPUQuota. The heaviest step is herdr-draft's

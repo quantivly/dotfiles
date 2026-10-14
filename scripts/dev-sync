@@ -3,8 +3,8 @@
 # scripts/dev-sync
 # ================
 #
-# Keep dev's tooling level with the laptop's: dotfiles, Claude Code, herdr-draft,
-# the work tenant's Claude plugins, and the ~/quantivly clones.
+# Keep dev's tooling level with the laptop's: dotfiles, Claude Code, herdr and
+# herdr-draft, the work tenant's Claude plugins, and the ~/quantivly clones.
 #
 # WHY. dev (the team EC2) sat unused from 2026-09-28, partly because nothing kept
 # it current: on 2026-10-12 it was 73 dotfiles commits and 24 Claude Code
@@ -13,14 +13,15 @@
 # Every fix was a one-off by hand, so the drift came back.
 #
 # TWO HALVES, ONE FILE. Run from the laptop, this collects the laptop's facts
-# (its Claude Code version, its herdr-draft commit, its list of ~/quantivly
-# clones) and pipes ITSELF to dev as `bash -s -- --here …`, so the logic that
-# acts on dev runs on dev. `--here` without those facts is what dev's own daily
-# timer (systemd/dev-sync.timer) runs. It needs no laptop state: dotfiles go to
-# origin/main, Claude Code to the `latest` channel (which the laptop's
-# auto-updater follows), herdr-draft to its main, and only the clones dev
-# already has are fetched. Adding a clone dev lacks is the one thing only a
-# laptop run can do.
+# (its Claude Code and herdr versions, its herdr binary's sha256, its list of
+# ~/quantivly clones) and pipes ITSELF to dev as `bash -s -- --here …`, so the
+# logic that acts on dev runs on dev. `--here` without those facts is what dev's
+# own daily timer (systemd/dev-sync.timer) runs. It needs no laptop state:
+# dotfiles go to origin/main, Claude Code to the `latest` channel (which the
+# laptop's auto-updater follows), herdr-draft to its main (from both paths, so
+# the two never undo each other), and only the clones dev already has are
+# fetched. Adding a clone dev lacks and upgrading herdr are the things only a
+# laptop run does.
 #
 # A TIMER ON DEV, NOT ON THE LAPTOP. A laptop timer needs an `aws login` session
 # for SSM, which lasts about a day and is renewed by hand, and a laptop that is
@@ -34,9 +35,9 @@
 # outage. So every mutating step runs inside agents.slice, with its own
 # MemoryMax and CPUQuota and at nice 10. From the laptop that is a transient
 # scope (`systemd-run --user --scope`); from the timer it is the unit's own
-# Slice=. Nothing here touches Docker, restarts the herdr server, or runs
-# `git config`. On dev, ~/.gitconfig is a symlink into the tracked, public
-# gitconfig.
+# Slice=. Nothing here touches Docker or runs `git config` (on dev, ~/.gitconfig
+# is a symlink into the tracked, public gitconfig), and the herdr server is
+# restarted only when no pane is open on it.
 #
 # WHAT IT WILL NOT DO, AND REPORTS INSTEAD (⚠ rows, for the operator):
 #   - sign in to an OAuth MCP server (Slack, Notion). That is an interactive
@@ -47,11 +48,13 @@
 #     edits to a file origin/main also changes.
 #   - replace a herdr-draft that is LINKED from a local checkout, or touch a
 #     ~/quantivly directory whose origin is a different repository.
-#   - restart dev's herdr server while an agent runs there. After a herdr upgrade
-#     the server restarts only when `herdr agent list` is empty; otherwise the
-#     row says "restart pending".
-#   - stop abandoned login-session scopes (they need sudo); it lists any over
-#     200 MB along with the command to stop them.
+#   - upgrade herdr while any pane is open on dev's server. A restart closes every
+#     pane, and an empty `herdr agent list` does not mean nothing is running: a
+#     test run or an editor in a plain pane is not an agent. The row says what
+#     is open, and the upgrade waits; the binary is not swapped either, so the
+#     CLI never runs ahead of its server.
+#   - stop abandoned login-session scopes (they need sudo); it lists this user's
+#     scopes over 200 MB, with a command naming exactly those.
 #   - write agents.slice. Its cap is set on dev with `systemctl --user
 #     set-property` (drop-ins under ~/.config/systemd/user.control/), and the
 #     effective values are shown as information.
@@ -66,7 +69,7 @@
 #
 # Exit: 0 nothing for dev-sync to fix (⚠ operator steps may still be listed)
 #       1 drift remains (in --check: what --apply would fix; in --apply: a fix failed)
-#       2 could not run (dev unreachable, another run holds the lock, not armed)
+#       2 could not run (dev unreachable, another run holds the lock, not armed, killed)
 #       64 usage
 #
 # Rows: ✓ level · ✗ drift --apply fixes · ⚠ needs a person · · information
@@ -117,7 +120,11 @@ LINEAR_KEY="linear-key@dotfiles"
 GITHUB_BASE="${DEV_SYNC_GITHUB_BASE:-https://github.com}"
 HERDR_RELEASES="${DEV_SYNC_HERDR_RELEASES:-https://github.com/herdrdev/herdr/releases/download}"
 NPM_LATEST_URL="${DEV_SYNC_NPM_URL:-https://registry.npmjs.org/@anthropic-ai/claude-code/latest}"
-FETCH_MAX_AGE_H="${DEV_SYNC_FETCH_MAX_AGE_H:-24}"
+# A clone is drift once its last fetch is older than FETCH_MAX_AGE_H, and --apply refreshes
+# anything older than FETCH_REFRESH_H. The gap absorbs the daily timer's half-hour jitter: one
+# threshold equal to the period read a level dev as drifted about every other afternoon.
+FETCH_MAX_AGE_H="${DEV_SYNC_FETCH_MAX_AGE_H:-36}"
+FETCH_REFRESH_H="${DEV_SYNC_FETCH_REFRESH_H:-20}"
 MARKET_MAX_AGE_D="${DEV_SYNC_MARKET_MAX_AGE_D:-7}"
 SCOPE_MIN_MB="${DEV_SYNC_SCOPE_MIN_MB:-200}"
 
@@ -246,8 +253,14 @@ here_dotfiles() {
     fi
 }
 
+# Disarming is sticky: ~/.config/dev-sync/disarmed outranks the laptop's --arm, so a later
+# laptop --apply still syncs dev but does not re-arm its timer. HERDR_GUIDE.md has the steps.
 here_timer() {
     local marker="$HOME/.config/dev-sync/armed" en ac next
+    if [[ -e "$HOME/.config/dev-sync/disarmed" ]]; then
+        row info timer "disarmed by hand (~/.config/dev-sync/disarmed); --apply does not re-arm it"
+        return
+    fi
     en="$(systemctl --user is-enabled dev-sync.timer 2>/dev/null)"
     ac="$(systemctl --user is-active dev-sync.timer 2>/dev/null)"
     if [[ -e "$marker" && "$en" == enabled && "$ac" == active ]]; then
@@ -323,10 +336,13 @@ server_version() { "$HERDR" status server 2>/dev/null </dev/null | awk '$1=="ver
 # renamed into place, so the running server keeps its old inode.
 #
 # THE SERVER keeps running the old version until it restarts, and a restart closes every pane
-# on dev. So it restarts only when `herdr agent list` is empty, through the unit, which builds
-# a clean environment; never from a pane or a session. Otherwise it reports "restart pending".
+# on dev. An empty `herdr agent list` is not enough to allow that: it lists detected agents
+# only, and a test run or an editor in a plain pane is not one. So the whole upgrade waits
+# until NO pane is open, the binary included, which also keeps a new CLI from talking to an
+# old server for days. The restart goes through the unit, which builds a clean environment;
+# never from a pane or a session.
 here_herdr() {
-    local bin srv target="$ARG_HERDR" tmp got arch agents panes i
+    local bin srv target="$ARG_HERDR" got arch agents="" panes="" i old
     [[ -x "$HERDR" ]] || return 0   # here_draft reports a missing herdr
     bin="$("$HERDR" --version 2>/dev/null | awk 'NR==1{print $2}')"
     if [[ -z "$target" ]]; then
@@ -337,56 +353,68 @@ here_herdr() {
         row ok herdr "$bin, ahead of laptop $target (never downgraded)"
         return
     fi
-    if [[ "$bin" != "$target" ]]; then
-        if [[ "$MODE" != apply ]]; then
-            row drift herdr "$bin, laptop has $target (server $(server_version || true))"
-            return
+    srv="$(server_version)"
+    if [[ "$bin" == "$target" && "$srv" == "$bin" ]]; then
+        row ok herdr "$bin, server $srv"
+        return
+    fi
+    if [[ -n "$srv" ]]; then
+        agents="$("$HERDR" agent list 2>/dev/null </dev/null | jq -r '.result.agents | length' 2>/dev/null)"
+        panes="$("$HERDR" pane list 2>/dev/null </dev/null | jq -r '.result.panes | length' 2>/dev/null)"
+    fi
+    if [[ "$MODE" != apply ]]; then
+        if [[ "$bin" != "$target" ]]; then
+            row drift herdr "$bin, laptop has $target (server ${srv:-not answering})"
+        else
+            row drift herdr "server runs $srv, binary $bin: restart pending (${agents:-?} agent(s), ${panes:-?} pane(s) now)"
         fi
+        return
+    fi
+    # Fails closed: a pane count that cannot be read is not zero.
+    if [[ -n "$srv" && "$panes" != 0 ]]; then
+        row oper herdr "$bin → $target waits: ${panes:-?} pane(s) open on dev's herdr (${agents:-?} agent(s)); close them, then run dev-sync --apply again"
+        return
+    fi
+    if [[ "$bin" != "$target" ]]; then
         arch="$(uname -m)"
         if [[ -z "$ARG_HERDR_SHA" || "$ARG_HERDR_ARCH" != "$arch" ]]; then
             row oper herdr "$bin, laptop $target, but the laptop's binary hash cannot vouch for a $arch asset; update by hand"
             return
         fi
-        tmp="$HOME/.local/bin/.herdr.dev-sync.$$"
-        if ! curl -fsSL --max-time 300 -o "$tmp" "$HERDR_RELEASES/v$target/herdr-linux-$arch" 2>/dev/null; then
-            rm -f "$tmp"; row drift herdr "download of herdr v$target ($arch) failed"; return
+        if [[ -L "$HERDR" ]]; then
+            row oper herdr "$bin, laptop $target, but ~/.local/bin/herdr is a symlink; dev-sync does not replace a link"
+            return
         fi
-        got="$(sha256sum "$tmp" | cut -c1-64)"
+        # Global, so the EXIT trap can still name it after this function returns.
+        HERDR_TMP="$HOME/.local/bin/.herdr.dev-sync.$$"
+        trap 'rm -f "$HERDR_TMP"' EXIT
+        trap 'exit 2' INT TERM HUP
+        if ! curl -fsSL --max-time 300 -o "$HERDR_TMP" "$HERDR_RELEASES/v$target/herdr-linux-$arch" 2>/dev/null; then
+            rm -f "$HERDR_TMP"; row drift herdr "download of herdr v$target ($arch) failed"; return
+        fi
+        got="$(sha256sum "$HERDR_TMP" | cut -c1-64)"
         if [[ "$got" != "$ARG_HERDR_SHA" ]]; then
-            rm -f "$tmp"; row drift herdr "the v$target asset does not match the laptop's binary (sha256); not installed"; return
+            rm -f "$HERDR_TMP"; row drift herdr "the v$target asset does not match the laptop's binary (sha256); not installed"; return
         fi
-        chmod 0755 "$tmp"
-        if [[ "$("$tmp" --version 2>/dev/null | awk 'NR==1{print $2}')" != "$target" ]]; then
-            rm -f "$tmp"; row drift herdr "the downloaded binary does not report $target; not installed"; return
+        chmod 0755 "$HERDR_TMP"
+        if [[ "$("$HERDR_TMP" --version 2>/dev/null | awk 'NR==1{print $2}')" != "$target" ]]; then
+            rm -f "$HERDR_TMP"; row drift herdr "the downloaded binary does not report $target; not installed"; return
         fi
-        cp -p "$HERDR" "$STATE/herdr-$bin" 2>/dev/null
-        mv -f "$tmp" "$HERDR"
+        if ! cp -p "$HERDR" "$STATE/herdr-$bin" 2>/dev/null; then
+            rm -f "$HERDR_TMP"; row drift herdr "could not keep a copy of the $bin binary; not installed"; return
+        fi
+        mv -f "$HERDR_TMP" "$HERDR"
         # The agent skill is the CLI reference a lead Claude drives panes with; a stale copy
-        # teaches the wrong flags (HERDR_GUIDE.md, "Updating").
-        if [[ -d "$HOME/.claude/skills/herdr" ]] && "$HERDR" --skill >"$STATE/SKILL.md.new" 2>/dev/null; then
+        # teaches the wrong flags (HERDR_GUIDE.md, "Updating"). Never install an empty one.
+        if [[ -d "$HOME/.claude/skills/herdr" ]] && "$HERDR" --skill >"$STATE/SKILL.md.new" 2>/dev/null &&
+            [[ -s "$STATE/SKILL.md.new" ]]; then
             mv -f "$STATE/SKILL.md.new" "$HOME/.claude/skills/herdr/SKILL.md"
         fi
         row ok herdr "binary $bin → $target (previous kept in ~/.local/state/dev-sync/herdr-$bin)"
-        bin="$target"
+        old="$bin"; bin="$target"
     fi
-
-    srv="$(server_version)"
     if [[ -z "$srv" ]]; then
         row oper herdr "binary $bin; the server did not answer \`status server\`"
-        return
-    fi
-    if [[ "$srv" == "$bin" ]]; then
-        row ok herdr "$bin, server $srv"
-        return
-    fi
-    agents="$("$HERDR" agent list 2>/dev/null </dev/null | jq -r '.result.agents | length' 2>/dev/null)"
-    panes="$("$HERDR" pane list 2>/dev/null </dev/null | jq -r '.result.panes | length' 2>/dev/null)"
-    if [[ "$MODE" != apply ]]; then
-        row drift herdr "server runs $srv, binary $bin: restart pending (${agents:-?} agent(s), ${panes:-?} pane(s) now)"
-        return
-    fi
-    if [[ "$agents" != 0 ]]; then
-        row oper herdr "server runs $srv, binary $bin: restart pending, ${agents:-?} agent(s) running; when they finish: systemctl --user restart herdr-server.service"
         return
     fi
     systemctl --user restart herdr-server.service >/dev/null 2>&1
@@ -394,9 +422,9 @@ here_herdr() {
         srv="$(server_version)"; [[ "$srv" == "$bin" ]] && break; sleep 1
     done
     if [[ "$srv" == "$bin" ]]; then
-        row ok herdr "server restarted on $bin (no agents; ${panes:-?} idle pane(s) closed)"
+        row ok herdr "server restarted on $bin (no panes were open)"
     else
-        row drift herdr "server restart did not come back on $bin (now: ${srv:-not answering}); journalctl --user -u herdr-server.service"
+        row drift herdr "server did not come back on $bin (now: ${srv:-not answering}); journalctl --user -u herdr-server.service${old:+; to roll back: mv ~/.local/state/dev-sync/herdr-$old ~/.local/bin/herdr && systemctl --user restart herdr-server.service}"
     fi
 }
 
@@ -418,12 +446,11 @@ here_draft() {
         row oper herdr-draft "the herdr server did not answer \`plugin list\`; is herdr-server.service running?"
         return
     fi
-    if [[ -n "$ARG_DRAFT_SHA" ]]; then
-        target="$ARG_DRAFT_SHA"; src="laptop"
-    else
-        target="$(git_net ls-remote "$GITHUB_BASE/$DRAFT_REPO.git" refs/heads/main 2>/dev/null | cut -f1)"
-        src="main"
-    fi
+    # main, from the laptop and the timer alike. A laptop-supplied commit (a feature branch, or
+    # an older main) would be undone by the next timer run and redone by the next laptop run,
+    # each time a `go build` on the shared box.
+    target="$(git_net ls-remote "$GITHUB_BASE/$DRAFT_REPO.git" refs/heads/main 2>/dev/null | cut -f1)"
+    src="main"
     if [[ ! "$target" =~ $SHA_RE ]]; then
         # Never --ref an abbreviation: herdr 0.9.0 rejects it only after cloning.
         row drift herdr-draft "could not resolve a full commit for $DRAFT_REPO ($src)"
@@ -462,48 +489,56 @@ here_draft() {
 }
 
 plugin_enabled() { jq -r --arg p "$1" '.enabledPlugins[$p] // "absent"' "$SETTINGS" 2>/dev/null; }
-plugin_installed() { jq -e --arg p "$1" '(.plugins[$p] // []) | length > 0' "$INSTALLED" >/dev/null 2>&1; }
-plugin_version() { jq -r --arg p "$1" '.plugins[$p][0].version // empty' "$INSTALLED" 2>/dev/null; }
+# The USER-scope entry: a plugin also has project-scope entries, one per project it was
+# installed in, and those neither load everywhere nor share the user entry's version.
+plugin_installed() { jq -e --arg p "$1" 'any((.plugins[$p] // [])[]; .scope == "user")' "$INSTALLED" >/dev/null 2>&1; }
+plugin_version() { jq -r --arg p "$1" 'first((.plugins[$p] // [])[] | select(.scope == "user")) | .version // empty' "$INSTALLED" 2>/dev/null; }
 claude_plugin() { (cd "$HOME" && "$CLAUDE" plugin "$@" >>"$STATE/plugins.log" 2>&1 </dev/null); }
 
+# Why marketplace $1 (source $2) needs a refresh, or nothing if it does not. Asked again after
+# the add or update, so a failed one is a ✗ rather than a ✓ on every run.
+market_why() {
+    local name="$1" src="$2" loc updated age p
+    if [[ "$(jq -r --arg m "$name" 'has($m)' "$KNOWN" 2>/dev/null)" != true ]]; then
+        echo "not added"; return
+    fi
+    loc="$(jq -r --arg m "$name" '.[$m].installLocation // empty' "$KNOWN")"
+    for p in "${PLUGINS_ON[@]}"; do
+        [[ "${p#*@}" == "$name" ]] || continue
+        jq -e --arg n "${p%@*}" 'any(.plugins[]; .name == $n)' "$loc/.claude-plugin/marketplace.json" \
+            >/dev/null 2>&1 || { echo "does not list ${p%@*}"; return; }
+    done
+    # A directory marketplace is the checkout itself; only a cloned one goes stale. An update
+    # moves lastUpdated even when upstream has not changed (measured 2026-10-14).
+    [[ "$src" == /* ]] && return
+    updated="$(jq -r --arg m "$name" '.[$m].lastUpdated // empty' "$KNOWN")"
+    age=$(( ( $(date +%s) - $(date -d "${updated:-1970-01-01}" +%s 2>/dev/null || echo 0) ) / 86400 ))
+    (( age > MARKET_MAX_AGE_D )) && echo "last updated ${age}d ago"
+}
+
 here_marketplaces() {
-    local entry name src known loc updated age stale_why p
+    local entry name src why after
     for entry in "${MARKETPLACES[@]}"; do
         name="${entry%%=*}"; src="${entry#*=}"; src="${src//@DOTFILES@/$DOTFILES}"
-        known="$(jq -r --arg m "$name" 'has($m)' "$KNOWN" 2>/dev/null)"
-        stale_why=""
-        if [[ "$known" != true ]]; then
-            stale_why="not added"
-        else
-            loc="$(jq -r --arg m "$name" '.[$m].installLocation // empty' "$KNOWN")"
-            for p in "${PLUGINS_ON[@]}"; do
-                [[ "${p#*@}" == "$name" ]] || continue
-                jq -e --arg n "${p%@*}" 'any(.plugins[]; .name == $n)' "$loc/.claude-plugin/marketplace.json" \
-                    >/dev/null 2>&1 || stale_why="does not list ${p%@*}"
-            done
-            if [[ -z "$stale_why" && "$src" != /* ]]; then
-                updated="$(jq -r --arg m "$name" '.[$m].lastUpdated // empty' "$KNOWN")"
-                age=$(( ( $(date +%s) - $(date -d "${updated:-1970-01-01}" +%s 2>/dev/null || echo 0) ) / 86400 ))
-                (( age > MARKET_MAX_AGE_D )) && stale_why="last updated ${age}d ago"
-            fi
-        fi
-        if [[ -z "$stale_why" ]]; then
+        why="$(market_why "$name" "$src")"
+        if [[ -z "$why" ]]; then
             row ok marketplace "$name"
             continue
         fi
         if [[ "$MODE" != apply ]]; then
-            row drift marketplace "$name: $stale_why"
+            row drift marketplace "$name: $why"
             continue
         fi
-        if [[ "$known" != true ]]; then
+        if [[ "$why" == "not added" ]]; then
             claude_plugin marketplace add "$src" --scope user
         else
             claude_plugin marketplace update "$name"
         fi
-        if [[ "$(jq -r --arg m "$name" 'has($m)' "$KNOWN" 2>/dev/null)" == true ]]; then
-            row ok marketplace "$name (${stale_why})"
+        after="$(market_why "$name" "$src")"
+        if [[ -z "$after" ]]; then
+            row ok marketplace "$name (was: $why)"
         else
-            row drift marketplace "$name: add failed (log: ~/.local/state/dev-sync/plugins.log)"
+            row drift marketplace "$name: still $after after --apply (log: ~/.local/state/dev-sync/plugins.log)"
         fi
     done
 }
@@ -636,14 +671,17 @@ gib() { awk -v b="$1" 'BEGIN { printf "%.1fG", b / 1073741824 }'; }
 # session-*.scope units held about 38 GB, mostly orphaned VS Code LSP runners. Stopping one
 # is a system unit and needs sudo, so this only ever REPORTS, with the command to run.
 here_sessions() {
-    local u sub mem big=() total=0 min=$(( SCOPE_MIN_MB * 1048576 ))
+    local u sub mem big=() names=() total=0 min=$(( SCOPE_MIN_MB * 1048576 )) mine
     command -v systemctl >/dev/null 2>&1 || return 0
+    mine="user-$(id -u).slice"
     while read -r u _ _ sub _; do
         [[ "$sub" == abandoned ]] || continue
+        # This user's sessions only: the box is shared, and another user's leftovers are theirs.
+        [[ "$(systemctl show "$u" -p Slice --value 2>/dev/null)" == "$mine" ]] || continue
         mem="$(systemctl show "$u" -p MemoryCurrent --value 2>/dev/null)"
         [[ "$mem" =~ ^[0-9]+$ ]] || continue
         (( mem >= min )) || continue
-        big+=("$u $(gib "$mem")")
+        big+=("$u $(gib "$mem")"); names+=("$u")
         total=$(( total + mem ))
     done < <(systemctl list-units --all --no-legend --plain 'session-*.scope' 2>/dev/null)
     if (( ${#big[@]} == 0 )); then
@@ -653,9 +691,10 @@ here_sessions() {
     row oper sessions "${#big[@]} abandoned session scope(s) hold $(gib "$total"); stop them from a terminal on dev:"
     printf '        %s\n' "${big[@]:0:10}"
     (( ${#big[@]} > 10 )) && printf '        … and %d more\n' $(( ${#big[@]} - 10 ))
-    # --plain keeps a failed unit's leading ● from shifting the columns awk reads; xargs, not
-    # a $var, because dev's login shell is zsh, which does not word-split one.
-    printf '        %s\n' "systemctl list-units --all --no-legend --plain 'session-*.scope' | awk '\$4==\"abandoned\"{print \$1}' | xargs -r sudo systemctl stop"
+    # The units by name, not a pipeline that re-lists them: that would stop every abandoned
+    # session on the box, any size, any user. --plain above keeps a failed unit's leading ●
+    # from shifting the columns read.
+    printf '        sudo systemctl stop %s\n' "${names[*]}"
 }
 
 # The cap every agent and this script's own runs live under. It is set on dev with
@@ -687,7 +726,8 @@ fetch_age_h() {   # hours since $1 was last fetched; 99999 if never
 
 here_clones() {
     local root="$HOME/$WORK_ORG" pair dir repo p have age n=0 stale=() failed=() oldest="" oldest_age=-1
-    [[ -d "$root" ]] || mkdir -p "$root"
+    # --check writes nothing, not even the directory.
+    [[ -d "$root" || "$MODE" != apply ]] || mkdir -p "$root"
 
     for pair in ${ARG_CLONES[@]+"${ARG_CLONES[@]}"}; do
         dir="${pair%%=*}"; repo="${pair#*=}"; p="$root/$dir"
@@ -714,10 +754,11 @@ here_clones() {
         git -C "$p" remote get-url origin >/dev/null 2>&1 || continue
         n=$((n + 1))
         age="$(fetch_age_h "$p")"
-        (( age >= FETCH_MAX_AGE_H )) || continue
         if [[ "$MODE" == apply ]]; then
+            (( age >= FETCH_REFRESH_H )) || continue
             git_net -C "$p" fetch --quiet origin >/dev/null 2>&1 || failed+=("${p##*/}")
         else
+            (( age >= FETCH_MAX_AGE_H )) || continue
             stale+=("${p##*/}")
             (( age > oldest_age )) && { oldest_age="$age"; oldest="${p##*/}"; }
         fi
@@ -763,7 +804,7 @@ here_main() {
     fi
 
     printf 'dev-sync %s on %s, %s\n' "$MODE" "$(hostname)" "$(date '+%F %T %Z')"
-    [[ -n "$ARG_CLAUDE$ARG_DRAFT_SHA$ARG_DOTFILES_SHA" ]] ||
+    [[ -n "$ARG_CLAUDE$ARG_DOTFILES_SHA" ]] ||
         printf '  (no laptop facts: targets are origin/main, Claude Code latest, herdr-draft main)\n'
 
     # Order matters: ./install links the timer's units and the dotfiles marketplace's
@@ -799,7 +840,7 @@ here_main() {
 # ==============================================================================================
 
 laptop_facts() {   # fills FACTS; notes go to stderr
-    local v root d url repo info kind commit
+    local v root d url repo
     FACTS=()
 
     v="$("$HOME/.local/bin/claude" --version 2>/dev/null </dev/null | awk 'NR==1{print $1}')"
@@ -812,25 +853,6 @@ laptop_facts() {   # fills FACTS; notes go to stderr
         v="$(sha256sum "$(readlink -f "$HOME/.local/bin/herdr")" 2>/dev/null | cut -c1-64)"
         [[ "$v" =~ ^[0-9a-f]{64}$ ]] && FACTS+=(--herdr-sha256 "$v")
     fi
-
-    # herdr-draft: the laptop usually runs a LINKED checkout, whose HEAD is only usable on
-    # dev if it is on GitHub; otherwise fall back to main and say so.
-    commit=""
-    if info="$("$HOME/.local/bin/herdr" plugin list --plugin "$DRAFT_ID" --json 2>/dev/null </dev/null)"; then
-        kind="$(jq -r '.result.plugins[0].source.kind // empty' <<<"$info" 2>/dev/null)"
-        if [[ "$kind" == github ]]; then
-            commit="$(jq -r '.result.plugins[0].source.resolved_commit // empty' <<<"$info")"
-        elif [[ "$kind" == local ]]; then
-            d="$(jq -r '.result.plugins[0].plugin_root // empty' <<<"$info")"
-            commit="$(git -C "$d" rev-parse HEAD 2>/dev/null)"
-            if [[ -z "$(git -C "$d" branch -r --contains "$commit" 2>/dev/null)" ]]; then
-                echo "dev-sync: the laptop's herdr-draft ($(short "$commit")) is not on any remote branch; using main" >&2
-                commit=""
-            fi
-        fi
-    fi
-    [[ -n "$commit" ]] || commit="$(git_net ls-remote "$GITHUB_BASE/$DRAFT_REPO.git" refs/heads/main 2>/dev/null | cut -f1)"
-    [[ "$commit" =~ $SHA_RE ]] && FACTS+=(--draft-sha "$commit")
 
     local remote="${DEV_SYNC_DOTFILES_REMOTE:-origin}"
     v="$(git_net -C "$SELF_REPO" ls-remote "$remote" refs/heads/main 2>/dev/null | cut -f1)"
@@ -906,12 +928,16 @@ laptop_main() {
     $ssh_cmd "$host" "export PATH=\"\$HOME/.local/bin:\$PATH\"; $scope bash -s -- $remote_args" <"$SELF" | "$redact"
     rc="${PIPESTATUS[0]}"
     (( rc == 255 )) && { echo "dev-sync: ssh to '$host' failed" >&2; return 2; }
-    return "$rc"
+    # Anything else is the remote bash killed or never started (137 is an OOM kill), not drift.
+    case "$rc" in
+        0|1|2|64) return "$rc" ;;
+        *) echo "dev-sync: the run on '$host' ended with status $rc (killed?)" >&2; return 2 ;;
+    esac
 }
 
 main() {
     MODE="check"; ARM=0; NO_MCP=0
-    ARG_CLAUDE=""; ARG_HERDR=""; ARG_HERDR_SHA=""; ARG_HERDR_ARCH=""; ARG_DRAFT_SHA=""; ARG_DOTFILES_SHA=""; ARG_DOTFILES_BEHIND=""
+    ARG_CLAUDE=""; ARG_HERDR=""; ARG_HERDR_SHA=""; ARG_HERDR_ARCH=""; ARG_DOTFILES_SHA=""; ARG_DOTFILES_BEHIND=""
     ARG_CLONES=()
     if [[ "${1:-}" != --here ]]; then
         SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -930,7 +956,6 @@ main() {
             --herdr-version) ARG_HERDR="${2:-}"; shift ;;
             --herdr-sha256) ARG_HERDR_SHA="${2:-}"; shift ;;
             --herdr-arch) ARG_HERDR_ARCH="${2:-}"; shift ;;
-            --draft-sha) ARG_DRAFT_SHA="${2:-}"; shift ;;
             --dotfiles-sha) ARG_DOTFILES_SHA="${2:-}"; shift ;;
             --dotfiles-behind) ARG_DOTFILES_BEHIND="${2:-}"; shift ;;
             --clone) ARG_CLONES+=("${2:-}"); shift ;;
@@ -940,7 +965,6 @@ main() {
     done
     # Validate everything that arrives over the wire before any of it reaches a command.
     [[ -z "$ARG_CLAUDE" || "$ARG_CLAUDE" =~ $VER_RE ]] || { echo "dev-sync: bad --claude-version" >&2; return 64; }
-    [[ -z "$ARG_DRAFT_SHA" || "$ARG_DRAFT_SHA" =~ $SHA_RE ]] || { echo "dev-sync: --draft-sha must be a full 40-character SHA" >&2; return 64; }
     [[ -z "$ARG_DOTFILES_SHA" || "$ARG_DOTFILES_SHA" =~ $SHA_RE ]] || { echo "dev-sync: bad --dotfiles-sha" >&2; return 64; }
     [[ -z "$ARG_HERDR" || "$ARG_HERDR" =~ $VER_RE ]] || { echo "dev-sync: bad --herdr-version" >&2; return 64; }
     [[ -z "$ARG_HERDR_SHA" || "$ARG_HERDR_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "dev-sync: bad --herdr-sha256" >&2; return 64; }

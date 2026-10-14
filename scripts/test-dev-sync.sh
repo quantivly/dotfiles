@@ -47,7 +47,7 @@ V_LAPTOP="2.1.296"
 HV="0.9.1"            # the laptop's herdr
 ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|daemon-reload'
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|daemon-reload|^sudo '
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -70,6 +70,7 @@ case "$1" in
             "marketplace add")
                 jqi "$KM" --arg l "$3" '.dotfiles={source:{source:"directory",path:$l},installLocation:$l,lastUpdated:(now|todate)}' ;;
             "marketplace update")
+                [[ -e "$S/market-update-fails" ]] && exit 1
                 jqi "$KM" --arg n "$3" '.[$n].lastUpdated=(now|todate)'
                 if [[ -e "$S/market-$3.json" ]]; then
                     cp "$S/market-$3.json" "$(jq -r --arg n "$3" '.[$n].installLocation' "$KM")/.claude-plugin/marketplace.json"
@@ -82,7 +83,7 @@ case "$1" in
             disable*) jqi "$SET" --arg p "$2" '.enabledPlugins[$p]=false' ;;
             update*)
                 v="$(jq -r .version "$HOME/.dotfiles/claude/plugins/linear-key/.claude-plugin/plugin.json")"
-                jqi "$IP" --arg p "$2" --arg v "$v" '.plugins[$p][0].version=$v' ;;
+                jqi "$IP" --arg p "$2" --arg v "$v" '(.plugins[$p][] | select(.scope == "user") | .version) = $v' ;;
         esac ;;
 esac
 STUB
@@ -95,7 +96,7 @@ case "$1 ${2:-}" in
     "--skill "*) echo "skill for $V" ;;
     "status server") printf 'status: running\nversion: %s\n' "$(cat "$S/server-version")" ;;
     "agent list") printf '{"result":{"agents":[%s]}}\n' "$(cat "$S/agents" 2>/dev/null)" ;;
-    "pane list") echo '{"result":{"panes":[{"pane_id":"w1:p1"}]}}' ;;
+    "pane list") printf '{"result":{"panes":[%s]}}\n' "$(cat "$S/panes" 2>/dev/null)" ;;
     "plugin list") [[ -e "$S/draft-down" ]] && exit 1; cat "$S/draft.json" ;;
     "plugin install")
         echo "$PATH" >"$S/herdr-install-path"
@@ -118,7 +119,7 @@ case "$1" in
     is-enabled) cat "$S/timer-enabled" 2>/dev/null || { echo disabled; exit 1; } ;;
     is-active) cat "$S/timer-active" 2>/dev/null || { echo inactive; exit 3; } ;;
     daemon-reload) ;;
-    restart) "$HOME/.local/bin/herdr" --version | awk '{print $2}' >"$S/server-version" ;;
+    restart) [[ -e "$S/restart-fails" ]] && exit 1; "$HOME/.local/bin/herdr" --version | awk '{print $2}' >"$S/server-version" ;;
     enable) [[ -e "$S/enable-fails" ]] && exit 1; echo enabled >"$S/timer-enabled"; echo active >"$S/timer-active" ;;
     list-units) cat "$S/units" 2>/dev/null ;;
     show)
@@ -129,9 +130,13 @@ case "$1" in
             agents.slice:DropInPaths) echo "/x/50-MemoryHigh.conf /x/50-MemoryMax.conf" ;;
             dev-sync.timer:*) echo "Wed 2026-10-14 05:12:00 EDT" ;;
             session-*:MemoryCurrent) cat "$S/mem-$2" 2>/dev/null ;;
+            session-*:Slice) cat "$S/slice-$2" 2>/dev/null || echo "user-$(id -u).slice" ;;
         esac ;;
 esac
 STUB
+    # dev-sync must never run sudo; a logging stub makes a call visible to the rows.
+    # shellcheck disable=SC2016  # expanded by the stub, deliberately
+    printf '#!/bin/sh\necho "sudo $*" >>"$HOME/stub/calls"\nexit 1\n' >"$b/sudo"
     chmod +x "$b"/* "$1/stub/go/bin/go"
 }
 
@@ -195,9 +200,11 @@ new_case() {
         "dotfiles": {installLocation: ($h + "/.dotfiles/claude/plugins"), lastUpdated: "2020-01-01T00:00:00Z"}
     }' >"$H/.claude/plugins/known_marketplaces.json"
     jq -n '{plugins: {
-        "quantivly-conventions@quantivly": [{version: "1"}], "slack@claude-plugins-official": [{version: "1"}],
-        "notion@claude-plugins-official": [{version: "1"}], "linear-key@dotfiles": [{version: "1.0.0"}],
-        "linear@claude-plugins-official": [{version: "1"}]}}' >"$H/.claude/plugins/installed_plugins.json"
+        "quantivly-conventions@quantivly": [{scope: "user", version: "1"}],
+        "slack@claude-plugins-official": [{scope: "user", version: "1"}],
+        "notion@claude-plugins-official": [{scope: "user", version: "1"}],
+        "linear-key@dotfiles": [{scope: "user", version: "1.0.0"}],
+        "linear@claude-plugins-official": [{scope: "user", version: "1"}]}}' >"$H/.claude/plugins/installed_plugins.json"
     jq -n '{theme: "dark", enabledPlugins: {
         "quantivly-conventions@quantivly": true, "slack@claude-plugins-official": true,
         "notion@claude-plugins-official": true, "linear-key@dotfiles": true,
@@ -215,7 +222,6 @@ new_case() {
 
 # Facts a laptop run would send for a level dev.
 facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --herdr-arch "$ARCH" --herdr-sha256 "$HSHA" \
-    --draft-sha "$DRAFT" \
     --dotfiles-sha "$(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)" --clone alpha=quantivly/alpha; }
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
@@ -244,8 +250,7 @@ check "level --check exits 0" "$RC" 0
 has   "level --check says Level." "$OUT" "Level."
 hasnt "level --check has no ✗ row" "$OUT" "✗"
 check "level --check calls nothing mutating" "$(mutations)" 0
-[[ -d "$H/.local/state/dev-sync" ]] && rm -rf "$H/.local/state/dev-sync/lock"
-hasnt "--check takes no lock (writes nothing)" "$(ls "$H/.local/state/dev-sync")" "lock"
+hasnt "--check takes no lock" "$(ls "$H/.local/state/dev-sync")" "lock"
 hasnt "the LINEAR_API_KEY value is never printed" "$OUT" "$FAKE_KEY"
 has   "the key is reported present, by name" "$OUT" "LINEAR_API_KEY is set"
 has   "the slice row reads the effective cap" "$OUT" "MemoryHigh=12.0G MemoryMax=16.0G (2 drop-in(s))"
@@ -255,6 +260,24 @@ run_level --apply
 check "--apply on a level dev exits 0" "$RC" 0
 check "--apply on a level dev calls nothing mutating" "$(mutations)" 0
 check "--apply on a level dev does not re-run ./install" "$([[ -e "$H/stub/install-ran" ]] && echo ran || echo no)" no
+
+echo "== --check writes nothing"
+# Every kind of drift at once, so every step's apply path is one gate away. The stub log is the
+# only file allowed to change: git, curl, mkdir and jq rewrites are invisible to $MUTATING.
+new_case
+push_origin b.txt two
+echo 2.1.272 >"$H/stub/claude-version"; echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s"}}]}}\n' "$(printf 'a%.0s' {1..40})" >"$H/stub/draft.json"
+jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" &&
+    mv "$C/k" "$H/.claude/plugins/known_marketplaces.json"
+jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugins["linear@claude-plugins-official"] = true' \
+    "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
+rm -rf "$H/.local/state/dev-sync" "$H/.config/dev-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
+snapshot() { find "$H" -path "$H/stub" -prune -o -printf '%p %s %m %T@\n' | sort; }
+before="$(snapshot)"
+run_level --check --clone beta=quantivly/beta
+check "a fully drifted --check exits 1" "$RC" 1
+check "--check changes no file, directory or mode under \$HOME" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
 
 echo "== dotfiles"
 new_case
@@ -334,7 +357,7 @@ new_case
 printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s","requested_ref":"v0.1.0"}}]}}\n' \
     "$(printf 'a%.0s' {1..40})" >"$H/stub/draft.json"
 run_level --check
-has   "stale herdr-draft: ✗ names the ref" "$OUT" "(ref v0.1.0), laptop at"
+has   "stale herdr-draft: ✗ names the ref, against main" "$OUT" "(ref v0.1.0), main at"
 run_level --apply
 has   "stale herdr-draft: installs with the FULL sha and --yes" "$(calls)" "herdr plugin install ZviBaratz/herdr-draft --ref $DRAFT --yes"
 has   "stale herdr-draft: the build sees mise's Go on PATH" "$(cat "$H/stub/herdr-install-path")" "$H/stub/go/bin"
@@ -348,31 +371,40 @@ new_case
 touch "$H/stub/draft-down"
 run_level --check
 has   "herdr server down: ⚠, not ✓" "$OUT" "did not answer"
-new_case
-run --check --draft-sha abc1234
-check "an abbreviated --draft-sha is refused (64)" "$RC" 64
 
 echo "== herdr itself"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 run_level --check
 has   "older herdr: ✗ with both versions" "$OUT" "0.9.0, laptop has $HV (server 0.9.0)"
-hasnt "older herdr: --check downloads nothing" "$(calls)" "systemctl --user restart"
+hasnt "older herdr: --check restarts nothing" "$(calls)" "systemctl --user restart"
 check "older herdr: --check leaves the binary" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
 run_level --apply
 check "older herdr: --apply installs the laptop's exact version" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr $HV"
-has   "older herdr, no agents: the server is restarted through the unit" "$(calls)" "systemctl --user restart herdr-server.service"
-has   "older herdr, no agents: ✓ restarted" "$OUT" "server restarted on $HV"
+has   "older herdr, no panes: the server is restarted through the unit" "$(calls)" "systemctl --user restart herdr-server.service"
+has   "older herdr, no panes: ✓ restarted" "$OUT" "server restarted on $HV (no panes were open)"
 check "older herdr: the agent skill is regenerated" "$(cat "$H/.claude/skills/herdr/SKILL.md")" "skill for $HV"
 check "older herdr: the previous binary is kept" "$([[ -e "$H/.local/state/dev-sync/herdr-0.9.0" ]] && echo yes || echo no)" yes
 reset_calls; run_level --apply
 check "second --apply after a herdr upgrade calls nothing mutating" "$(mutations)" 0
 new_case
-echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; echo '{"pane_id":"w1:p2"}' >"$H/stub/agents"
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"
 run_level --apply
-check "agents running: the binary is still upgraded" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr $HV"
-hasnt "agents running: the server is NOT restarted" "$(calls)" "systemctl --user restart"
-has   "agents running: ⚠ restart pending" "$OUT" "restart pending, 1 agent(s) running"
+check "a pane open but NO agent: the binary is not swapped" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
+hasnt "a pane open but no agent: the server is NOT restarted" "$(calls)" "systemctl --user restart"
+has   "a pane open: ⚠ says the upgrade waits, and why" "$OUT" "0.9.0 → $HV waits: 1 pane(s) open on dev's herdr (0 agent(s))"
+check "a pane open: the upgrade waiting is a person's step, not a failure" "$RC" 0
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+mv "$H/.local/bin/herdr" "$C/herdr-bin"; ln -s "$C/herdr-bin" "$H/.local/bin/herdr"
+run_level --apply
+has   "herdr is a symlink: ⚠, never replaced" "$OUT" "is a symlink; dev-sync does not replace a link"
+check "herdr is a symlink: still a symlink" "$([[ -L "$H/.local/bin/herdr" ]] && echo link || echo file)" link
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/restart-fails"
+run_level --apply
+has   "server not back after the restart: ✗ prints the rollback" "$OUT" "to roll back: mv ~/.local/state/dev-sync/herdr-0.9.0 ~/.local/bin/herdr"
+check "server not back: exit 1" "$RC" 1
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 echo tampered >>"$C/releases/v$HV/herdr-linux-$ARCH"
@@ -392,6 +424,8 @@ new_case
 echo 0.9.0 >"$H/stub/server-version"
 run_level --check
 has   "binary current, server old: ✗ restart pending" "$OUT" "server runs 0.9.0, binary $HV: restart pending"
+echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"; run_level --apply
+hasnt "binary current, server old, a pane open: no restart" "$(calls)" "systemctl --user restart"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"
 mapfile -t F < <(facts | grep -v -e '^--herdr' -e "^$HV\$" -e "^$ARCH\$" -e "^$HSHA\$")
@@ -407,6 +441,14 @@ run_level --check
 has   "stale marketplace: ✗ with its age" "$OUT" "quantivly: last updated"
 run_level --apply
 has   "stale marketplace: --apply updates it" "$(calls)" "claude plugin marketplace update quantivly"
+has   "stale marketplace: ✓ once the update has moved it" "$OUT" "✓ marketplace    quantivly (was: last updated"
+new_case
+jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z"' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" &&
+    mv "$C/k" "$H/.claude/plugins/known_marketplaces.json"
+touch "$H/stub/market-update-fails"
+run_level --apply
+has   "a marketplace update that fails: ✗, re-checked, never ✓" "$OUT" "quantivly: still last updated"
+check "a marketplace update that fails: exit 1" "$RC" 1
 new_case
 jq 'del(.dotfiles)' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" && mv "$C/k" "$H/.claude/plugins/known_marketplaces.json"
 run_level --apply
@@ -427,6 +469,16 @@ run_level --check
 has   "missing plugin: ✗ not installed" "$OUT" "slack@claude-plugins-official not installed"
 run_level --apply
 has   "missing plugin: installed at USER scope" "$(calls)" "claude plugin install slack@claude-plugins-official --scope user"
+new_case
+jq '.plugins["slack@claude-plugins-official"] = [{scope: "project", projectPath: "/x", version: "1"}]' \
+    "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
+run_level --check
+has   "a PROJECT-scope install only: not installed for the user" "$OUT" "slack@claude-plugins-official not installed"
+new_case
+jq '.plugins["linear-key@dotfiles"] = [{scope: "project", projectPath: "/x", version: "0.1.0"}, {scope: "user", version: "1.0.0"}]' \
+    "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
+run_level --check
+hasnt "a project entry listed first: the USER entry's version is read" "$OUT" "0.1.0 installed"
 new_case
 jq '.enabledPlugins["notion@claude-plugins-official"] = false' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
 run_level --apply
@@ -487,11 +539,21 @@ has   "a directory with another origin: ⚠, not touched" "$OUT" "beta is someon
 new_case
 touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
 run_level --check
-has   "stale fetch: ✗ with its age" "$OUT" "1 of 1 not fetched in 24h (oldest: alpha, 3d ago)"
+has   "stale fetch: ✗ with its age" "$OUT" "1 of 1 not fetched in 36h (oldest: alpha, 3d ago)"
 before="$(head_of "$H/quantivly/alpha")"
 run_level --apply
 check "stale fetch: --apply refreshes FETCH_HEAD" "$(( $(date +%s) - $(stat -c %Y "$H/quantivly/alpha/.git/FETCH_HEAD") < 60 ))" 1
 check "stale fetch: the checkout is not changed" "$(head_of "$H/quantivly/alpha")" "$before"
+new_case
+touch -d '25 hours ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
+run_level --check
+has   "a day-old fetch (timer jitter) is not drift" "$OUT" "1 clones under ~/quantivly fetched within 36h"
+run_level --apply
+check "a day-old fetch: --apply refreshes it anyway" "$(( $(date +%s) - $(stat -c %Y "$H/quantivly/alpha/.git/FETCH_HEAD") < 60 ))" 1
+new_case
+rm -rf "$H/quantivly"
+run_level --check --clone beta=quantivly/beta
+check "no ~/quantivly: --check does not create it" "$([[ -e "$H/quantivly" ]] && echo yes || echo no)" no
 new_case
 run --check --clone 'x;rm=quantivly/x'
 check "an unsafe --clone dir is refused (64)" "$RC" 64
@@ -507,19 +569,28 @@ has   "unarmed dev: --check shows the ✗" "$OUT" "dev-sync.timer not armed"
 run_level --apply --arm
 check "--arm: the marker is written" "$([[ -e "$H/.config/dev-sync/armed" ]] && echo yes || echo no)" yes
 has   "--arm: enable, never reenable" "$(calls)" "systemctl --user enable --now dev-sync.timer"
-hasnt "--arm: no reenable or disable" "$(calls)" "able dev-sync.timer --"
+hasnt "--arm: no reenable or disable" "$(grep -E '(re|dis)able' "$H/stub/calls")" "dev-sync.timer"
+new_case
+rm "$H/.config/dev-sync/armed" "$H/stub/timer-enabled" "$H/stub/timer-active"; : >"$H/.config/dev-sync/disarmed"
+reset_calls; run_level --apply --arm
+check "disarmed by hand: --arm does not write the marker" "$([[ -e "$H/.config/dev-sync/armed" ]] && echo yes || echo no)" no
+hasnt "disarmed by hand: the timer is not enabled" "$(calls)" "enable --now dev-sync.timer"
+has   "disarmed by hand: · says so, and it is not drift" "$OUT" "· timer          disarmed by hand"
+check "disarmed by hand: the rest still syncs, and exits 0" "$RC" 0
 
 echo "== hygiene: abandoned sessions, slice"
 new_case
-printf 'session-1.scope loaded active abandoned Session 1\nsession-2.scope loaded active abandoned Session 2\nsession-3.scope loaded active running Session 3\n' >"$H/stub/units"
+printf 'session-%s.scope loaded active %s Session\n' 1 abandoned 2 abandoned 3 running 4 abandoned 5 abandoned >"$H/stub/units"
 echo $((300 * 1048576)) >"$H/stub/mem-session-1.scope"; echo $((100 * 1048576)) >"$H/stub/mem-session-2.scope"
-echo $((900 * 1048576)) >"$H/stub/mem-session-3.scope"
+echo $((900 * 1048576)) >"$H/stub/mem-session-3.scope"; echo $((900 * 1048576)) >"$H/stub/mem-session-4.scope"
+echo $((250 * 1048576)) >"$H/stub/mem-session-5.scope"; echo "user-4242.slice" >"$H/stub/slice-session-4.scope"
 run_level --apply
 has   "abandoned scope over 200 MB: ⚠ names it" "$OUT" "session-1.scope 0.3G"
 hasnt "abandoned scope under 200 MB: not listed" "$OUT" "session-2.scope"
 hasnt "a RUNNING session is never listed" "$OUT" "session-3.scope"
-has   "the stop command is printed for a person" "$OUT" "xargs -r sudo systemctl stop"
-hasnt "--apply never runs it" "$(calls)" "systemctl stop"
+hasnt "another user's abandoned scope is never listed" "$OUT" "session-4.scope"
+has   "the stop command names exactly the listed units" "$OUT" "sudo systemctl stop session-1.scope session-5.scope"$'\n'
+hasnt "--apply never runs it (sudo is stubbed and logs)" "$(calls)" "sudo"
 new_case
 touch "$H/stub/no-slice"
 run_level --check
@@ -543,7 +614,7 @@ git -C "$L/quantivly/alpha" worktree add -q "$L/quantivly/alpha-wt" -b wt   # a 
 FACTS_OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" \
     DEV_SYNC_GITHUB_BASE="file://$GH" bash "$SUT" --print-facts 2>&1)"
 has   "facts: the laptop's Claude version" "$FACTS_OUT" "--claude-version $V_LAPTOP"
-has   "facts: herdr-draft's resolved commit, in full" "$FACTS_OUT" "--draft-sha $DRAFT"
+hasnt "facts: no herdr-draft commit (laptop and timer both target main)" "$FACTS_OUT" "--draft-sha"
 has   "facts: the laptop herdr binary's sha256, for dev to verify against" "$FACTS_OUT" "--herdr-sha256 $(sha256sum "$L/.local/bin/herdr" | cut -c1-64)"
 has   "facts: dotfiles main from the remote" "$FACTS_OUT" "--dotfiles-sha $(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)"
 has   "facts: a host-alias origin is normalised" "$FACTS_OUT" "--clone alpha=quantivly/alpha"
@@ -568,9 +639,18 @@ E2E="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/fakessh" D
 has   "end to end --apply: claude raised to the laptop's" "$(cat "$H/stub/claude-version")" "$V_LAPTOP"
 has   "end to end --apply: the clone failure is reported, not hidden" "$E2E" "Gamma: git clone quantivly/gamma failed"
 check "end to end --apply: so it exits 1" "$E2E_RC" 1
+# Reachable, and the dotfiles probe answers; only the run itself dies, as an OOM kill would.
+# shellcheck disable=SC2016  # expanded by the inner shell, deliberately
+printf '#!/usr/bin/env bash\n[[ "$*" == *"bash -s"* ]] && { cat >/dev/null; exit 137; }\nexec "%s" "$@"\n' "$C/fakessh" >"$C/oomssh"
+chmod +x "$C/oomssh"
+OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/oomssh" DEV_SYNC_NO_SCOPE=1 \
+    DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" DEV_SYNC_GITHUB_BASE="file://$GH" \
+    bash "$SUT" --check 2>&1)"; RC=$?
+check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
+has   "the remote run killed: says so" "$OUT" "ended with status 137"
 
 printf '\n'
-EXPECTED_ROWS=124
+EXPECTED_ROWS=146
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
