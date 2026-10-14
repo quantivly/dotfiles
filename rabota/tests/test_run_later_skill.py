@@ -5,9 +5,11 @@ so a skill that drifted from the CLI teaches a command that fails, or one that "
 runs. Precedent: ``test_skill_matches_cli.py`` for the rabota skill. Each row is written to fail on
 a specific drift, and reads the fact from the code rather than restating it: a flag from the real
 parser, a limit from its constant, an exit code from ``command_outcome``. Nothing here executes
-``systemctl``, ``git`` or the secret guard: the one row that drives ``add`` uses the ``FakeRunner``
-fixture of ``test_schedule.py``.
+``systemctl``, ``git`` or the secret guard: the rows that drive ``add`` and the tick use the
+``FakeRunner`` fixtures of ``test_schedule.py`` and ``test_schedule_tick.py``.
 """
+import argparse
+import functools
 import re
 import shlex
 import unittest
@@ -18,11 +20,13 @@ from pathlib import Path
 from rabota import cli, scheduler
 from rabota.commands import schedule
 from tests.test_schedule import ScheduleBase
+from tests.test_schedule_tick import DUE, TickBase
 
 REPO = Path(__file__).parents[2]
 SKILL = REPO / "claude" / "skills" / "run-later" / "SKILL.md"
 
 
+@functools.cache
 def _text() -> str:
     return SKILL.read_text()
 
@@ -59,13 +63,14 @@ def _is_invocation(command: str) -> bool:
     return any(t.startswith(("-", "<")) for t in shlex.split(command)[1:])
 
 
+@functools.cache
 def _parser():
     cli._load_command_modules()
     return cli.build_parser()
 
 
 def _subparsers(parser):
-    return next((a for a in parser._actions if a.nargs == "A..."), None)   # argparse.PARSER
+    return next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
 
 
 def _check(command: str):
@@ -164,17 +169,6 @@ class RunLaterSkillTests(unittest.TestCase):
             self.assertNotIn("--then-prompt", _text())
             self.assertNotIn("--then-on", _text())
 
-    def test_agent_runs_are_called_deferred_exactly_while_the_tick_defers_them(self):
-        # Both directions. While the tick defers every agent row, the skill must say so, or an agent
-        # schedules a run that silently expires. When DO-820 removes the deferral, this fails until
-        # the skill stops saying it.
-        says_deferred = "agent runs are not dispatched yet" in _flat()
-        if hasattr(scheduler, "AGENT_DEFERRAL"):
-            self.assertTrue(says_deferred, "the tick defers agent runs and the skill does not say so")
-            self.assertIn("DO-820", _flat())
-        else:
-            self.assertFalse(says_deferred, "agent runs are dispatched now; the skill still says they are not")
-
     def test_exit_codes_match_command_outcome(self):
         flat = _flat()
         for code, word in ((0, "pass"), (1, "fail"), (2, "could-not-run")):
@@ -238,11 +232,44 @@ class RunLaterSkillTests(unittest.TestCase):
     def test_a_workspace_root_cwd_is_steered_to_a_repo(self):
         self.assertIn("--cwd <a repo or other directory>", _flat())
 
+    def test_tenant_resolution_matches_the_resolver(self):
+        # config.resolve_tenant: --tenant, then $CLAUDE_ACCOUNT_TENANT, then whatever owns the cwd.
+        # Review finding: "your session's tenant" named a mechanism nothing exports.
+        flat = _flat()
+        self.assertIn("The tenant** is `--tenant`, else `$CLAUDE_ACCOUNT_TENANT`, else whatever owns your cwd", flat)
+        self.assertIn("never `--cwd`", flat)
+
+    def test_a_run_that_cannot_start_is_not_promised_a_retry(self):
+        # scheduler._cannot_start refuses a gone cwd or a changed payload terminally (review finding).
+        self.assertIn("A run that cannot start at all, because its `--cwd` is gone or its frozen script "
+                      "changed, is `could-not-run` at once and never retried", _flat())
+
+    def test_a_record_must_stay_untracked_not_only_be_untracked_at_add(self):
+        # The tick re-asks git at every write (scheduler module docstring); a record in a repo that
+        # commits its notes passes `add` and is lost later (review finding).
+        self.assertIn("must not be tracked by git, then or later", _flat())
+
+    def test_a_disarmed_timer_hands_over_the_add_line(self):
+        # The refusal stores nothing, so the declaration survives only as the line itself (review).
+        self.assertIn("Nothing was stored and no id exists", _flat())
+        self.assertIn("hand over the exact `add` line", _flat())
+
 
 class RunLaterExampleAddsTests(ScheduleBase):
     """The add example, run through the real ``run_add`` (dry run, ``FakeRunner``). Parsing proves the
-    flags exist; this proves the COMBINATION is accepted, e.g. that the example does not put an agent
-    flag on a command run, or an option `add` would refuse."""
+    flags exist; this proves the example's own FLAGS are accepted together, e.g. that it puts no agent
+    flag on a command run and no option `add` refuses. Its paths and time are placeholders, so
+    ``--at``, ``--cwd``, ``--command`` and ``--record`` come from the fixture, not from the skill."""
+
+    def test_the_example_script_is_one_add_accepts(self):
+        # The fenced script is what agents copy: it needs a shebang (it is executed directly) and
+        # must not trip the claude refusal. The add example's own script argument is checked too.
+        (script,) = [b for b in re.findall(r"```bash\n(.*?)```", _text(), re.S) if b.startswith("#!")]
+        self.assertRegex(script, r"^#!/")
+        self.assertIsNone(schedule._claude_hit(script))
+        line, ns = _add_example()
+        self.assertFalse(schedule.CLAUDE_WORD.search(ns.script), ns.script)
+        self.assertTrue(script.rstrip().endswith("# 0 pass, 1 fail"), "the script's verdict is not its exit code")
 
     def test_the_add_example_validates_with_its_own_options(self):
         _, ns = _add_example()
@@ -255,6 +282,23 @@ class RunLaterExampleAddsTests(ScheduleBase):
         self.assertEqual(len(out["options"]), len(ns.option))
         self.assertTrue(any(o["action"].startswith("rerun") for o in out["options"]),
                         "the example shows no rerun option, the only way a check recurs")
+
+
+class RunLaterDeferralTests(TickBase):
+    """Both directions, from what the tick DOES with an agent row, not from a constant existing
+    (review finding: DO-820 might keep ``AGENT_DEFERRAL`` for a fallback). While the tick defers an
+    agent run, the skill must say so, or an agent schedules a run that silently expires; once it
+    dispatches one, this fails until the skill stops saying it."""
+
+    def test_agent_runs_are_called_deferred_exactly_while_the_tick_defers_them(self):
+        ctx = self.tctx(); sid = self.declare(ctx, prompt_file=str(self.prompt))
+        rep = self.tick(ctx, DUE)
+        deferred = sid in [d["id"] for d in rep["deferred"]]
+        says = "agent runs are not dispatched yet" in _flat()
+        self.assertEqual(says, deferred, f"the tick {'defers' if deferred else 'dispatches'} agent runs; "
+                                         f"the skill says they are {'not ' if says else ''}dispatched yet")
+        if deferred:
+            self.assertIn("DO-820", _flat())
 
 
 if __name__ == "__main__":

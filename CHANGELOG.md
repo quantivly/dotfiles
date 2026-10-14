@@ -256,6 +256,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agents schedule work due later instead of handing over a prompt (DO-821).** A user-level
+  `run-later` skill, linked to `~/.claude/skills/run-later` by `install.conf.yaml`, teaches every
+  agent on this laptop `rabota schedule add`. It steers mechanical checks to `--command` scripts,
+  says agent runs are stored but not dispatched until DO-820, shows `--record`, `--ask` and
+  `--option`, and points the next agent at `schedule list`, `show` and `escalations --open`. A
+  disarmed timer is reported to @zvi, never armed. Its description claims local one-off work
+  ahead of the built-in cloud `schedule` skill. `rabota/tests/test_run_later_skill.py` holds it to
+  the CLI: every command it shows parses, its `add` example passes a dry run, and each limit,
+  exit code and refused launcher is read from the code. `CLAUDE.md` gains one Common Tasks line,
+  at no net growth. **Run `./install` to link the skill.**
+
 - **`rabota doctor` now says whether the scheduled-run queue is moving, not just whether its timer
   ticks (DO-818).** Three checks read every tenant's store through `Store.open_current`, so doctor
   never creates or migrates another tenant's store. A store older than the `schedules` table holds
