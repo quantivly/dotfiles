@@ -16,6 +16,16 @@
 
 - clean: ['~', '~/.config']
 
+# config/environment.d/tmpdir.conf (linked below) points TMPDIR at this directory
+# for every process the systemd user manager starts, and the manager does not
+# create it. Where nothing else had, every user unit got a TMPDIR that did not
+# exist: on dev, dev-sync's first timer run failed in `go build` with "creating
+# work dir: stat ~/.cache/tmp: no such file or directory" (2026-10-14). 0700
+# because it is a temp directory, as /tmp's per-user files would be.
+- create:
+    ~/.cache/tmp:
+      mode: 0700
+
 - link:
     ~/.config/gh/config.yml: gh/config.yml
     ~/.config/git/ignore: config/git/ignore

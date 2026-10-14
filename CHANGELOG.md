@@ -63,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`./install` now creates `~/.cache/tmp` (mode 0700).** `config/environment.d/tmpdir.conf`
+  points every systemd user unit's `TMPDIR` there, and nothing created it, so on a machine where
+  nothing else had, user units got a `TMPDIR` that did not exist. dev-sync's first timer run on
+  dev failed in herdr-draft's `go build` ("creating work dir: … no such file or directory").
+
+- **The timer-health check read nothing on systemd before 251 (#310).** dev runs 249, which
+  rejects `show --timestamp=unix`, so every healthy timer there was reported "enabled but
+  ActiveState=unknown — it will not fire". It now falls back to a plain `show` in UTC.
+
 - **`claude-doctor` printed pool-difference values in the reverse order of the seats it named
   (DO-814).** `'b' differs from 'a' in [models].default ('opus[1m]' vs 'opus')` meant `a` had
   `opus[1m]`, so every value read as the other seat's. That includes the ✗ lines whose job is
