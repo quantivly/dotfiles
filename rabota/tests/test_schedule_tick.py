@@ -143,7 +143,7 @@ class TimingTests(TickBase):
         row = ctx.store.get_schedule(sid)
         self.assertEqual((row["status"], row["outcome"], self.runner.of("systemd-run")), ("expired", "expired", []))
         self.assertIn("it was never tried", row["last_reason"])
-        self.assertEqual(rep["expired"], [{"id": sid, "escalation": row["escalation_id"]}])
+        self.assertEqual(rep["expired"], [{"id": sid, "escalation": row["escalation_id"], "desktop_notified": True}])
         (esc,) = self.escs(ctx)
         self.assertEqual((esc["kind"], esc["subject"]), ("scheduled-run", sid))
         argv = self.runner.of("notify-send")[0]
@@ -246,12 +246,14 @@ class OutcomeTests(TickBase):
             with self.subTest(outcome=outcome):
                 runner = TickRunner(); ctx = self.ctx(runner=runner); sid = self.declare(ctx)
                 row = {**ctx.store.get_schedule(sid), "id": sid}
-                eid = scheduler._escalate_once(ctx, row, outcome, f"ev-{outcome}", "detail")
-                self.assertEqual(eid is None, urgency is None)
+                eid, notified = scheduler._escalate_once(ctx, row, outcome, f"ev-{outcome}", "detail")
+                self.assertEqual((eid is None, notified), (True, None) if urgency is None else (False, True))
                 sent = runner.of("notify-send")
                 self.assertEqual(len(sent), 0 if urgency is None else 1)
                 if urgency:
                     self.assertEqual(sent[0][sent[0].index("--urgency") + 1], urgency)
+                    # only a critical one carries rabota's sound (escalate.CRITICAL_EXTRAS)
+                    self.assertEqual("string:sound-name:alarm-clock-elapsed" in sent[0], urgency == "critical")
 
     def test_a_clean_pass_is_recorded_and_raises_nothing(self):
         ctx = self.tctx(); sid = self.run_once(ctx, 0, record=str(self.record), stdout="0 refusals\n")
@@ -312,6 +314,35 @@ class OutcomeTests(TickBase):
         for k in range(2, 8):
             self.tick(ctx, DUE + k * 10 * MIN)
         self.assertEqual((len(self.runner.of("notify-send")), len(self.runner.of("herdr"))), (1, 1))
+
+    def test_the_report_says_whether_the_desktop_notification_went_out(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.tick(ctx, DUE)
+        self.finish(ctx, sid, 1)
+        rep = self.tick(ctx, DUE + 10 * MIN)
+        (entry,) = rep["settled"]
+        self.assertIs(entry["desktop_notified"], True)
+        self.assertEqual(schedule._tick_lines(rep)[1], f"settled {sid} attempt 1: fail (ESC-{entry['escalation']})")
+
+    def test_a_failed_desktop_notification_is_named_in_the_report_and_its_line(self):
+        self.runner.responses.insert(0, (["notify-send"], Result(1, "", "no bus")))
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.tick(ctx, DUE)
+        self.finish(ctx, sid, 1)
+        rep = self.tick(ctx, DUE + 10 * MIN)
+        (entry,) = rep["settled"]
+        self.assertIs(entry["desktop_notified"], False)
+        self.assertEqual(schedule._tick_lines(rep)[1],
+                         f"settled {sid} attempt 1: fail (ESC-{entry['escalation']}, desktop notification FAILED)")
+
+    def test_an_escalation_found_again_sends_nothing_and_reports_none(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        row = ctx.store.get_schedule(sid)
+        eid, sent = scheduler._escalate_once(ctx, row, "fail", "e", "d")
+        self.assertEqual((sent, len(self.runner.of("notify-send"))), (True, 1))
+        self.assertEqual(scheduler._escalate_once(ctx, row, "fail", "e", "d"), (eid, None))
+        self.assertEqual(len(self.runner.of("notify-send")), 1)
+        self.assertEqual(scheduler._escalate_once(ctx, row, "pass", "e", "d"), (None, None))
 
     def test_a_live_unit_is_never_settled_even_with_an_exit_status(self):
         ctx = self.tctx(); sid = self.declare(ctx)

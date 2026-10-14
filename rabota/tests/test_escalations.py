@@ -60,6 +60,23 @@ class EscalateNotifiesTheDesktopTests(Base):
         argv = desktop_calls(runner)[0]
         self.assertEqual(argv[argv.index("--urgency") + 1], "critical")
 
+    def test_a_critical_one_carries_rabotas_own_sound_and_a_warning_icon(self):
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        out = escalate.run_escalate(self.ctx(runner), "q", "e", [], urgency="critical")
+        argv = desktop_calls(runner)[0]
+        self.assertEqual(argv[5:9], ["--icon", "dialog-warning", "--hint", "string:sound-name:alarm-clock-elapsed"])
+        # the two positionals stay last, so the summary and body tests below hold for every urgency
+        self.assertEqual(argv[-2], f"ESC-{out['id']} rabota finding: q")
+
+    def test_a_normal_or_low_one_stays_silent(self):
+        for urgency in ("normal", "low"):
+            runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+            escalate.run_escalate(self.ctx(runner), "q", "e", [], urgency=urgency)
+            argv = desktop_calls(runner)[0]
+            self.assertNotIn("--hint", argv, urgency)
+            self.assertNotIn("--icon", argv, urgency)
+            self.assertEqual(len(argv), 7, urgency)
+
     def test_the_body_carries_no_free_text_because_gnome_renders_markup_there(self):
         runner = FakeRunner([HERDR_OK, NOTIFY_OK])
         question = 'click <a href="https://example.invalid">here</a> & go'
