@@ -222,6 +222,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rabota doctor` now says whether the scheduled-run queue is moving, not just whether its timer
+  ticks (DO-818).** Three checks read every tenant's store through `Store.open_current`, so doctor
+  never creates or migrates another tenant's store. A store older than the `schedules` table holds
+  no run and passes; any other unreadable store fails as unmeasured.
+  - **Timers.** A tenant with pending or running runs has its `rabota-schedule@<tenant>.timer`
+    enabled. Running runs count because only a tick settles one. The state is read, not just the
+    exit code (`static` exits 0 and is not armed), through `schedule.timer_armed`, which `schedule
+    add` now shares.
+  - **Overdue.** No run is still pending 30 minutes past its due time (`OVERDUE_AFTER`, three
+    ticks). Each overdue run fails on its own row naming its `last_reason`, so a deferred run
+    surfaces before it expires.
+  - **Stuck.** No run has been running longer than its own timeout plus 20 minutes
+    (`RUNNING_GRACE`: one settling tick after `RuntimeMaxSec` and its stop, plus one spare).
+  - **Never clean when unmeasured.** A timestamp that does not parse, or a check that could read no
+    store at all, fails rather than passes. A disarmed timer is the one problem listed for its
+    tenant's overdue runs, which stay in the report as failing rows.
+
+  The existing checks and the exit-code contract are unchanged. `rabota/tests/test_doctor.py` adds
+  32 hermetic rows. 36 mutants: 35 deaths and 1 declared-equivalent survivor (`is-enabled` never
+  prints `enabled` with a non-zero exit). An earlier sweep exposed two untested boundaries, the
+  schema below which a store holds no run and the tenant filter, and both are now pinned.
+
 - **A declared run now fires on time and its result is read without @zvi reading it (DO-817).**
   `rabota schedule tick`, from a new per-tenant `rabota-schedule@<tenant>.timer` (`OnCalendar=*:0/10`,
   `Persistent=true`), works the tenant's queue in four steps under an `flock`: it settles finished
