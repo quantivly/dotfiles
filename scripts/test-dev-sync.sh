@@ -47,6 +47,8 @@ V_LAPTOP="2.1.296"
 HV="0.9.1"            # the laptop's herdr
 ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
+# Built at runtime so no token-shaped literal sits in the repo for a scanner to flag.
+FAKE_TOK="sk-ant-""oat01-FIXTUREtokenNOTREAL0123456789abcdef"
 MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|daemon-reload|^sudo '
 
 # ---------------------------------------------------------------------------------------------
@@ -58,12 +60,20 @@ write_stubs() {   # $1 = HOME
     cat >"$b/claude" <<'STUB'
 #!/usr/bin/env bash
 S="$HOME/stub"; echo "claude $*" >>"$S/calls"
+# Which calls ran with the long-lived token in their environment, by name only.
+[[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && echo "claude $*" >>"$S/calls-with-token"
 P="$HOME/.claude/plugins"; SET="$HOME/.claude/settings.json"; IP="$P/installed_plugins.json"; KM="$P/known_marketplaces.json"
 jqi() { local f=$1; shift; jq "$@" "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
 case "$1" in
     --version) echo "$(cat "$S/claude-version") (Claude Code)" ;;
     install) [[ -e "$S/claude-install-fails" ]] && exit 1; echo "$2" >"$S/claude-version" ;;
     mcp) cat "$S/mcp-list" 2>/dev/null ;;
+    auth)
+        [[ -e "$S/auth-fails" ]] && exit 1
+        if [[ -e "$S/no-login" ]]; then echo '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
+        elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" && ! -e "$S/ignores-token" ]]; then
+            echo '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}'
+        else echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'; fi ;;
     plugin)
         shift
         case "$1 $2" in
@@ -215,12 +225,29 @@ new_case() {
     printf 'plugin:slack:slack: https://x (HTTP) - ✔ Connected\nplugin:Notion:notion: https://y (HTTP) - ✔ Connected\n' >"$H/stub/mcp-list"
     printf 'export LINEAR_API_KEY=%s\n' "$FAKE_KEY" >"$H/.zshrc.local"
 
+    # the long-lived token, stored 10 days ago; one Claude process, carrying it
+    store_token "$(date -d '10 days ago' +%F)"
+    fake_proc 4101 claude 1
+
     # one fresh clone; a worktree of it, which must be ignored
     bare quantivly/alpha
     git clone -q "$GH/quantivly/alpha.git" "$H/quantivly/alpha"
     git -C "$H/quantivly/alpha" fetch -q origin
     git -C "$H/quantivly/alpha" worktree add -q "$H/quantivly/alpha-wt" -b wt 2>/dev/null
     bare quantivly/beta   # exists on "GitHub", not on dev
+}
+
+store_token() {   # $1 = the created date; writes what claude-oauth-store writes
+    mkdir -p "$H/.config/claude-oauth"; chmod 700 "$H/.config/claude-oauth"
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$FAKE_TOK" >"$H/.config/claude-oauth/token.env"
+    chmod 600 "$H/.config/claude-oauth/token.env"
+    echo "$1" >"$H/.config/claude-oauth/created"
+}
+ntok() { if [[ -e "$H/stub/calls-with-token" ]]; then wc -l <"$H/stub/calls-with-token"; else echo 0; fi; }
+fake_proc() {   # $1 = pid, $2 = comm, $3 = 1 if its environment carries the token
+    local d="$C/proc/$1"; mkdir -p "$d"; echo "$2" >"$d/comm"
+    if [[ "$3" == 1 ]]; then printf 'HOME=/x\0CLAUDE_CODE_OAUTH_TOKEN=%s\0TERM=y\0' "$FAKE_TOK" >"$d/environ"
+    else printf 'HOME=/x\0TERM=y\0' >"$d/environ"; fi
 }
 
 # Facts a laptop run would send for a level dev.
@@ -230,7 +257,7 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
 run() {   # $@ = dev-sync args after --here
     OUT="$(env -u LINEAR_API_KEY HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
-        DEV_SYNC_HERDR_RELEASES="file://$C/releases" \
+        DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here "$@" 2>&1)"
     RC=$?
 }
@@ -688,8 +715,205 @@ OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/oomssh" DE
 check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
 has   "the remote run killed: says so" "$OUT" "ended with status 137"
 
+echo "== the long-lived Claude token"
+new_case
+run_level --check
+check "token level: --check exits 0" "$RC" 0
+has   "token level: logged in by the token, said so" "$OUT" "claude uses the long-lived token (oauth_token)"
+has   "token level: its date and age are reported" "$OUT" "token stored $(date -d '10 days ago' +%F), 10 day(s) old"
+has   "token level: the running Claude process carries it" "$OUT" "all 1 Claude process(es) carry the token"
+hasnt "token level: the token value is never printed" "$OUT" "$FAKE_TOK"
+check "token level: every claude call dev-sync makes carries the token" \
+    "$(wc -l <"$H/stub/calls-with-token")" "$(grep -c '^claude ' "$H/stub/calls")"
+has   "token level: auth status is among them" "$(cat "$H/stub/calls-with-token")" "claude auth status --json"
+
+new_case
+rm -rf "$H/.config/claude-oauth"
+CLAUDE_CODE_OAUTH_TOKEN="$FAKE_TOK" run_level --check
+check "no token file: still exit 0 (a person's step, not drift)" "$RC" 0
+has   "no token file: only the shared /login, warned" "$OUT" "only the shared /login (claude.ai)"
+check "no token file: a token the CALLER exported is not used" \
+    "$(ntok)" 0
+hasnt "no token file: no age row" "$OUT" "token stored"
+
+new_case
+rm -rf "$H/.config/claude-oauth"; touch "$H/stub/no-login"
+run_level --check
+has   "not logged in: said so" "$OUT" "Claude is not logged in on dev (none)"
+
+new_case
+touch "$H/stub/auth-fails"
+run_level --check
+has   "auth status gives no answer: unknown, not 'not logged in'" "$OUT" "claude auth status gave no answer"
+
+new_case
+chmod 000 "$H/.config/claude-oauth/token.env"
+run_level --check
+has   "an unreadable token file: named as unreadable" "$OUT" "token.env is not readable by"
+
+new_case
+touch "$H/stub/ignores-token"
+run_level --check
+has   "a stored token claude does not use: said so" "$OUT" "a token is stored, but claude reports claude.ai"
+
+new_case
+chmod 644 "$H/.config/claude-oauth/token.env"
+run_level --check
+has   "token file mode 644: warned with the fix" "$OUT" "the token file is mode 644, not 600"
+
+new_case
+printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$FAKE_TOK" >"$H/.config/claude-oauth/token.env"
+run_level --check
+has   "a malformed token line: warned" "$OUT" "holds no CLAUDE_CODE_OAUTH_TOKEN line"
+check "a malformed token line: not loaded" "$(ntok)" 0
+hasnt "a malformed token line: its value is never printed" "$OUT" "$FAKE_TOK"
+
+new_case
+rm "$H/.config/claude-oauth/created"
+run_level --check
+has   "no created date: expiry unknown, warned" "$OUT" "has no readable date"
+
+new_case
+date -d '334 days ago' +%F >"$H/.config/claude-oauth/created"
+run_level --check
+has   "334 days old: still ✓" "$OUT" "334 day(s) old"
+new_case
+date -d '335 days ago' +%F >"$H/.config/claude-oauth/created"
+run_level --check
+has   "335 days old: a month's warning" "$OUT" "expires in about 30 day(s)"
+new_case
+date -d '365 days ago' +%F >"$H/.config/claude-oauth/created"
+run_level --check
+has   "365 days old: expired on the day" "$OUT" "is a year old and has expired"
+new_case
+date -d '30 days' +%F >"$H/.config/claude-oauth/created"
+run_level --check
+has   "a date in the future: expiry unknown, warned" "$OUT" "is in the future"
+new_case
+date -d '400 days ago' +%F >"$H/.config/claude-oauth/created"
+run_level --check
+has   "400 days old: expired" "$OUT" "is a year old and has expired"
+
+new_case
+fake_proc 4102 claude 0; fake_proc 4103 zsh 0; fake_proc 4104 2.1.296 0
+run_level --check
+has   "Claude processes without the token, a versioned one included: counted, others ignored" "$OUT" \
+    "2 of 3 Claude process(es) started without the token"
+new_case
+rm -rf "$C/proc"
+run_level --check
+has   "no Claude process: information only" "$OUT" "no Claude process running"
+
+echo "== claude-oauth-store"
+STORE="$DOTFILES/scripts/claude-oauth-store"
+store() {   # $1 = what is typed at the prompt; runs under a pty, its own streams to files
+    SO="$C/store.out"; SE="$C/store.err"
+    printf '%s\n' "$1" | env -i HOME="$H" PATH="/usr/bin:/bin" TERM=dumb \
+        script -qec "'$STORE' >'$SO' 2>'$SE'" /dev/null >/dev/null 2>&1
+    RC=$?
+}
+new_case
+rm -rf "$H/.config/claude-oauth"
+store "$FAKE_TOK"
+check "store: exit 0" "$RC" 0
+check "store: the file holds exactly the one line" "$(cat "$H/.config/claude-oauth/token.env")" "CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK"
+check "store: file mode 600" "$(stat -c %a "$H/.config/claude-oauth/token.env")" 600
+check "store: directory mode 700" "$(stat -c %a "$H/.config/claude-oauth")" 700
+check "store: dated today" "$(cat "$H/.config/claude-oauth/created")" "$(date +%F)"
+hasnt "store: never prints the token" "$(cat "$SO" "$SE")" "$FAKE_TOK"
+run_level --check
+has   "store: what it writes is what dev-sync accepts" "$OUT" "claude uses the long-lived token (oauth_token)"
+
+new_case
+rm -rf "$H/.config/claude-oauth"
+store "sk-ant-api03-notasetuptoken0123456789abcdef"
+check "store: a non-setup-token key is refused" "$RC" 1
+check "store: nothing written for it" "$([[ -e "$H/.config/claude-oauth/token.env" ]] && echo yes || echo no)" no
+hasnt "store: the refused value is not echoed" "$(cat "$SO" "$SE")" "notasetuptoken"
+
+new_case
+rm -rf "$H/.config/claude-oauth"
+# Typed AFTER the prompt is up, as a person would: with echo off, the terminal never shows it.
+{ sleep 2; printf '%s\n' "$FAKE_TOK"; } | env -i HOME="$H" PATH="/usr/bin:/bin" TERM=dumb \
+    script -qec "'$STORE' >/dev/null 2>&1" "$C/typescript" >/dev/null 2>&1
+check "store: a typed token is stored" "$(cat "$H/.config/claude-oauth/token.env" 2>/dev/null)" "CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK"
+hasnt "store: a typed token is never echoed to the terminal" "$(cat "$C/typescript")" "$FAKE_TOK"
+
+new_case
+chmod 755 "$H/.config/claude-oauth"
+store "$FAKE_TOK"
+check "store: an existing directory is tightened to 700" "$(stat -c %a "$H/.config/claude-oauth")" 700
+
+new_case
+rm -rf "$H/.config/claude-oauth"
+printf '%s\n' "$FAKE_TOK" | env -i HOME="$H" PATH="/usr/bin:/bin" "$STORE" >/dev/null 2>&1; RC=$?
+check "store: a piped token (no terminal) is refused" "$RC" 1
+check "store: nothing written from a pipe" "$([[ -e "$H/.config/claude-oauth/token.env" ]] && echo yes || echo no)" no
+
+new_case
+rm -rf "$H/.config/claude-oauth"; mkdir -p "$H/.clauth"
+store "$FAKE_TOK"
+check "store: refused where clauth manages accounts" "$RC" 1
+has   "store: says why" "$(cat "$SE")" "clauth manages Claude accounts here"
+
+echo "== shells and the herdr launcher load it"
+zload() {   # what an interactive shell on the host ends up with: unset, the token, or other
+    # shellcheck disable=SC2016  # expanded by the inner zsh, deliberately
+    env -i HOME="$H" PATH="/usr/bin:/bin" zsh -f -c \
+        'source "$1" >/dev/null 2>&1
+         if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then echo unset
+         elif [[ "$CLAUDE_CODE_OAUTH_TOKEN" == "$2" ]]; then echo token; else echo other; fi' \
+        zsh "$DOTFILES/zsh/zshrc.company" "$FAKE_TOK"
+}
+new_case
+check "zshrc.company exports the stored token" "$(zload)" token
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s; touch x\n' "$FAKE_TOK" >"$H/.config/claude-oauth/token.env"
+check "zshrc.company exports nothing from a line of any other shape" "$(zload)" unset
+new_case
+mkdir -p "$H/.clauth"
+check "zshrc.company exports nothing on a clauth machine" "$(zload)" unset
+
+LAUNCH="$DOTFILES/scripts/herdr-server-launch.sh"
+new_case
+OUT="$(env -i HOME="$H" USER=t PATH="/usr/bin:/bin" "$LAUNCH" --print-env 2>/dev/null)"
+has   "launcher --print-env: the token is declared, masked" "$OUT" "CLAUDE_CODE_OAUTH_TOKEN=<set>"
+hasnt "launcher --print-env: never its value" "$OUT" "$FAKE_TOK"
+# A real launch, into a herdr stub that reports what the server would inherit.
+mkdir -p "$C/run"; chmod 700 "$C/run"
+# shellcheck disable=SC2016  # expanded by the stub, deliberately
+printf '#!/bin/sh\n[ "$1" = server ] || exit 0\n[ "$CLAUDE_CODE_OAUTH_TOKEN" = "%s" ] && echo yes >"%s" || echo no >"%s"\n' \
+    "$FAKE_TOK" "$C/server-env" "$C/server-env" >"$H/.local/bin/herdr"
+rm -f "$H/.zshrc.local"   # no LINEAR_API_KEY: the token alone must take the hand-off path
+# The /bin/sh that reads the hand-off resolves `rm` on the declared PATH, which starts at
+# ~/.local/bin: this stub records the file's mode on its way out. umask 022 is the user
+# manager's default, under which a plain redirect would make it 644.
+# shellcheck disable=SC2016  # expanded by the stub, deliberately
+printf '#!/bin/sh
+for a; do f=$a; done
+stat -c %%a "$f" >"%s"
+exec /bin/rm "$@"
+' "$C/handoff-mode" >"$H/.local/bin/rm"
+chmod +x "$H/.local/bin/rm"
+(umask 022; env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" >/dev/null 2>&1)
+check "launcher: the server starts with the token" "$(cat "$C/server-env" 2>/dev/null)" yes
+check "launcher: the hand-off file is 0600 under umask 022" "$(cat "$C/handoff-mode" 2>/dev/null)" 600
+check "launcher: the hand-off file is gone" "$(ls -A "$C/run")" ""
+mkdir -p "$H/.clauth"; : >"$C/server-env"
+env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" >/dev/null 2>&1
+check "launcher: no token on a clauth machine" "$(cat "$C/server-env")" no
+rmdir "$H/.clauth"
+rm -rf "$H/.config/claude-oauth"; : >"$C/server-env"
+env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" >/dev/null 2>&1
+check "launcher: no file, no token" "$(cat "$C/server-env")" no
+# The hand-off file is SOURCED by /bin/sh, so a line that is not exactly the one assignment must
+# never reach it: here it would run a command as the server starts.
+mkdir -p "$H/.config/claude-oauth"
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s; touch %s\n' "$FAKE_TOK" "$C/pwned" >"$H/.config/claude-oauth/token.env"
+env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" >/dev/null 2>&1
+check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
+
 printf '\n'
-EXPECTED_ROWS=156
+EXPECTED_ROWS=211
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

@@ -33,6 +33,13 @@ SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 # different slice than the lane joins would report a budget nothing is subject to.
 LANE_SLICE = "agents.slice"
 
+# Where a remote host keeps its long-lived Claude token (scripts/claude-oauth-store, in the
+# dotfiles). A remote lane loads it as an EnvironmentFile= so it authenticates with the token
+# instead of refreshing the machine's one shared /login, whose rotating refresh token logs every
+# concurrent session out at once when two of them race (dev, 2026-10-14). Home-relative; the
+# remote's own home is prepended by ``run_recipe``.
+REMOTE_TOKEN_FILE = ".config/claude-oauth/token.env"
+
 
 def unit_name(tenant: str, slug: str) -> str:
     """``rabota-lane-<tenant>-<slug>-<uuid8>.service``, with the slug reduced to safe characters."""
@@ -63,7 +70,8 @@ def seat_config_dir(seat: str) -> str:
 
 def build_local(ctx, *, worktree, out_dir, brief, model, effort, unit,
                 session_id: str | None = None, claude_bin: str | None = None,
-                config_dir: str | None = None, path: str | None = None) -> list[str]:
+                config_dir: str | None = None, path: str | None = None,
+                env_file: str | None = None) -> list[str]:
     """The systemd-run argv for a lane on this machine. Every value is an argv element, never a string.
 
     ``claude_bin`` overrides ``ctx.tenant.lanes.claude_bin``; either way the value is expanded with
@@ -83,6 +91,11 @@ def build_local(ctx, *, worktree, out_dir, brief, model, effort, unit,
     the caller passes the whole value; ``run_recipe`` builds it from the PATH the machine itself
     reported (``resolve_remote``) rather than a hardcoded list, so ``/snap/bin`` and anything else
     that machine has survives.
+
+    ``env_file`` behaves the same way and emits ``-p EnvironmentFile=-<env_file>``. The leading
+    ``-`` is systemd's "skip if missing", so a host without a stored token runs the lane on its
+    own login exactly as before. Only the remote branch passes one: this laptop's lanes bill a
+    per-seat account dir, and a token there would outrank it.
 
     This is deliberately asymmetric between the two callers (fix round 5, the first live smoke
     this plan ever ran, 2026-09-20): ``run_recipe``'s LOCAL branch passes ``seat_config_dir(seat)``
@@ -105,6 +118,8 @@ def build_local(ctx, *, worktree, out_dir, brief, model, effort, unit,
         argv.append(f"--setenv=CLAUDE_CONFIG_DIR={config_dir}")
     if path is not None:
         argv.append(f"--setenv=PATH={path}")
+    if env_file is not None:
+        argv += ["-p", f"EnvironmentFile=-{env_file}"]
     argv += [
         "-p", f"StandardOutput=append:{out_dir}/stream.jsonl",
         "-p", f"StandardError=append:{out_dir}/stream.err",
@@ -603,6 +618,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     claude_bin = None
     config_dir = None
     lane_path = None
+    env_file = None
     if machine == "local":
         root = Path(ctx.tenant.state_dir).expanduser()
         # Sits exactly where the remote branch's own `--repo` refusal sits, and for the same
@@ -626,6 +642,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         # user manager on dev (systemd 249) does not carry it, so `rabota` — and every other tool
         # installed there — exited 127 inside a lane.
         lane_path = f"{home}/.local/bin:{info['path']}"
+        env_file = f"{home}/{REMOTE_TOKEN_FILE}"
         # config_dir stays None: dev uses its own login's defaults (fix round 5 — see
         # build_local's docstring for the measured evidence that setting it to a directory
         # relocates where Claude Code looks for .claude.json).
@@ -658,7 +675,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     argv = build_local(ctx, worktree=worktree, out_dir=out_dir,
                        brief=remote_brief, model=model, effort=effort, unit=unit,
                        session_id=session_id, claude_bin=claude_bin, config_dir=config_dir,
-                       path=lane_path)
+                       path=lane_path, env_file=env_file)
     if machine != "local":
         argv = build_remote(m, argv)
     out = {"argv": argv, "shell": " ".join(argv), "unit": unit, "session_id": session_id,

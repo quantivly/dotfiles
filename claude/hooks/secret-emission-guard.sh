@@ -385,7 +385,7 @@ credential_file_read() {
 
     # Path on the RAW segment: `cat "$HOME/.zshrc.local"` must still match, and
     # $stripped below cannot see a path that exists only inside quotes.
-    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json) ]] || continue
+    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env) ]] || continue
     hit="${BASH_REMATCH[1]}"
 
     # Verb on the QUOTE-STRIPPED segment: a message naming the file is not a read.
@@ -401,7 +401,7 @@ credential_file_read() {
     # nothing from the named file.
     # In a variable: an unquoted `<` inside [[ =~ ]] is parsed as a redirection
     # before the regex is ever seen, and `\<` does not escape it.
-    redir_re='(^|[^<])[<][[:space:]]*[^<[:space:]]*(\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json)'
+    redir_re='(^|[^<])[<][[:space:]]*[^<[:space:]]*(\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env)'
     if [[ "$stripped" =~ $redir_re ]]; then
       CFR_WHY="an input redirection from \`$hit\`, which holds credentials"
       return 0

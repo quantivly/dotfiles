@@ -258,7 +258,8 @@ for c in \
   'source ~/.zshrc.local' \
   'head -20 /home/zvi/.backup.local' \
   'less ~/.gitconfig.local' \
-  'cat ~/.claude/.credentials.json'
+  'cat ~/.claude/.credentials.json' \
+  'cat ~/.config/claude-oauth/token.env'
 do
   check "refuses: $c" "$(ask "$c")" "deny"
 done
@@ -609,7 +610,8 @@ for c in \
   'tee < ~/.zshrc.local' \
   'mapfile -t a < ~/.zshrc.local' \
   'readarray -t a < ~/.zshrc.local' \
-  'grep KEY < ~/.zshrc.local'
+  'grep KEY < ~/.zshrc.local' \
+  'tr -d x < ~/.config/claude-oauth/token.env'
 do
   check "refuses: $c" "$(ask "$c")" "deny"
 done
@@ -798,7 +800,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=194
+EXPECTED_ROWS=196
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.

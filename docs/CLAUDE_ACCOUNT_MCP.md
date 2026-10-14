@@ -551,6 +551,8 @@ for the logouts. It is a one-year token with no refresh and no race, which makes
 it tempting — but the documentation is explicit that it *"can only make model
 requests, so it can't establish Remote Control sessions or fetch claude.ai
 connectors."* It would trade the logouts for permanently dead connectors.
+dev is the exception: one shared login, and plugin MCP servers rather than connectors — see
+[HERDR_GUIDE.md, "Working on dev"](HERDR_GUIDE.md#working-on-dev).
 
 **Do not read an empty `accessToken` as damage on its own.** An `mcpOAuth` entry
 with an empty token and **no** `expiresAt`, `scope` or `refreshToken` is a

@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   200 MB (it prints the sudo command naming them), and the effective `agents.slice` cap.
   `test-dev-sync.sh`: 156 rows. Mutation sweeps killed 51 of 53 mutants, and the other two are
   equivalent.
+- **dev authenticates with a long-lived Claude token instead of its shared `/login`.** Concurrent
+  session starts on dev raced its one rotating refresh token and logged every session out at once
+  (2026-10-14). `scripts/claude-oauth-store` stores a `claude setup-token` token, read at a hidden
+  prompt, in `~/.config/claude-oauth/token.env` (mode 600), dated, and refuses on a clauth machine.
+  Shells (`zshrc.company`), the herdr launcher (its 0600 hand-off, not a unit `EnvironmentFile=`,
+  which its `env -i` would drop), rabota's remote lanes and dev-sync's own `claude` calls load it.
+  `dev-sync --check` gains `auth` rows: the login method, the file's mode and age (⚠ from day 335),
+  and running Claude processes that still lack it. What remains is in HERDR_GUIDE's "Working on
+  dev". `test-dev-sync.sh`: 211 rows; rabota +2 tests; secret guard +2 rows (it now refuses reads of the token file). 28 mutants, 28 deaths.
 
 ### Changed
 

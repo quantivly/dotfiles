@@ -922,6 +922,22 @@ class RunRecipeTests(LocalRecipeTests):
         expected = lane.seat_config_dir(out["seat"])
         self.assertIn(f"CLAUDE_CONFIG_DIR={expected}", out["shell"])
 
+    def test_a_remote_recipe_loads_the_hosts_token_file_if_present(self):
+        # A remote lane authenticates with the host's long-lived token when one is stored, so it
+        # never refreshes the host's one shared /login (dev, 2026-10-14: concurrent refreshes
+        # logged every session out). The path is built from the RESOLVED home, and the leading
+        # "-" is what keeps a host without a token working on its login as before.
+        runner = FakeRunner([(["ssh"], Result(0, self.RESOLVE_OUT, ""))])
+        out = lane.run_recipe(self.ctx(runner), budget_fn=lambda **_: self.ok_budget(), **self.kw())
+        self.assertIn(f"'EnvironmentFile=-{self.RESOLVED_HOME}/.config/claude-oauth/token.env'", out["shell"])
+
+    def test_a_local_recipe_never_loads_a_token_file(self):
+        # The laptop's lanes bill a per-seat account dir; a token in their environment would
+        # outrank it and bill one seat for every lane.
+        out = lane.run_recipe(self.local_ctx(), budget_fn=lambda **_: self.ok_budget(),
+                              **self.kw(machine="local", repo="hub"))
+        self.assertNotIn("EnvironmentFile", out["shell"])
+
     def test_remote_paths_use_the_resolved_home_never_a_literal_tilde(self):
         # DO-652 task-7 fix round 1: the dev fixture's state_dir and repos.hub are both
         # ~-prefixed ("~/.local/state/rabota", "~/quantivly/hub" —
