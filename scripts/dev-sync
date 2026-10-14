@@ -37,7 +37,7 @@
 # scope (`systemd-run --user --scope`); from the timer it is the unit's own
 # Slice=. Nothing here touches Docker or runs `git config` (on dev, ~/.gitconfig
 # is a symlink into the tracked, public gitconfig), and the herdr server is
-# restarted only when no pane is open on it.
+# restarted only when every pane on it is idle at a shell prompt.
 #
 # WHAT IT WILL NOT DO, AND REPORTS INSTEAD (⚠ rows, for the operator):
 #   - sign in to an OAuth MCP server (Slack, Notion). That is an interactive
@@ -48,11 +48,11 @@
 #     edits to a file origin/main also changes.
 #   - replace a herdr-draft that is LINKED from a local checkout, or touch a
 #     ~/quantivly directory whose origin is a different repository.
-#   - upgrade herdr while any pane is open on dev's server. A restart closes every
-#     pane, and an empty `herdr agent list` does not mean nothing is running: a
-#     test run or an editor in a plain pane is not an agent. The row says what
-#     is open, and the upgrade waits; the binary is not swapped either, so the
-#     CLI never runs ahead of its server.
+#   - upgrade herdr while an agent runs on dev, or while any pane is running
+#     something rather than sitting at its shell prompt. A restart closes every
+#     pane, and a test run or an editor in a plain pane is not an agent. The row
+#     says what is busy, and the upgrade waits; the binary is not swapped either,
+#     so the CLI never runs ahead of its server.
 #   - stop abandoned login-session scopes (they need sudo); it lists this user's
 #     scopes over 200 MB, with a command naming exactly those.
 #   - write agents.slice. Its cap is set on dev with `systemctl --user
@@ -337,12 +337,31 @@ server_version() { "$HERDR" status server 2>/dev/null </dev/null | awk '$1=="ver
 #
 # THE SERVER keeps running the old version until it restarts, and a restart closes every pane
 # on dev. An empty `herdr agent list` is not enough to allow that: it lists detected agents
-# only, and a test run or an editor in a plain pane is not one. So the whole upgrade waits
-# until NO pane is open, the binary included, which also keeps a new CLI from talking to an
-# old server for days. The restart goes through the unit, which builds a clean environment;
-# never from a pane or a session.
+# only, and a test run or an editor in a plain pane is not one. Nor can it wait for NO pane:
+# while a client is attached, herdr recreates a default workspace the moment the last one
+# closes (src/app/mod.rs, ensure_default_workspace), so a watched dev always has one. The test
+# is herdr's own for "at the prompt" (src/cli/agent.rs): a pane whose foreground process group
+# is its shell is running nothing in the foreground. The whole upgrade waits until every pane
+# passes it, the binary included, which also keeps a new CLI from talking to an old server for
+# days. A job put in the background with & would still die; nothing here can see one. The
+# restart goes through the unit, which builds a clean environment; never from a pane or a
+# session.
+# How many panes are NOT idle at their shell prompt; nothing at all if the server cannot say.
+# Only two pids are read from each pane, never its command lines.
+busy_panes() {
+    local ids id st n=0
+    ids="$("$HERDR" pane list 2>/dev/null </dev/null | jq -r '.result.panes[].pane_id' 2>/dev/null)" || return 1
+    while read -r id; do
+        [[ -n "$id" ]] || continue
+        st="$("$HERDR" pane process-info --pane "$id" 2>/dev/null </dev/null | jq -r '.result.process_info |
+            if .shell_pid != null and .foreground_process_group_id == .shell_pid then "idle" else "busy" end' 2>/dev/null)"
+        [[ "$st" == idle ]] || n=$((n + 1))   # unreadable counts as busy
+    done <<<"$ids"
+    echo "$n"
+}
+
 here_herdr() {
-    local bin srv target="$ARG_HERDR" got arch agents="" panes="" i old
+    local bin srv target="$ARG_HERDR" got arch agents="" panes="" busy="" i old
     [[ -x "$HERDR" ]] || return 0   # here_draft reports a missing herdr
     bin="$("$HERDR" --version 2>/dev/null | awk 'NR==1{print $2}')"
     if [[ -z "$target" ]]; then
@@ -361,18 +380,19 @@ here_herdr() {
     if [[ -n "$srv" ]]; then
         agents="$("$HERDR" agent list 2>/dev/null </dev/null | jq -r '.result.agents | length' 2>/dev/null)"
         panes="$("$HERDR" pane list 2>/dev/null </dev/null | jq -r '.result.panes | length' 2>/dev/null)"
+        busy="$(busy_panes)"
     fi
     if [[ "$MODE" != apply ]]; then
         if [[ "$bin" != "$target" ]]; then
-            row drift herdr "$bin, laptop has $target (server ${srv:-not answering}${panes:+, $panes pane(s) open; --apply upgrades only at 0})"
+            row drift herdr "$bin, laptop has $target (server ${srv:-not answering}${panes:+, $panes pane(s), ${busy:-?} busy; --apply upgrades only when none is})"
         else
-            row drift herdr "server runs $srv, binary $bin: restart pending (${agents:-?} agent(s), ${panes:-?} pane(s) now)"
+            row drift herdr "server runs $srv, binary $bin: restart pending (${agents:-?} agent(s), ${busy:-?} of ${panes:-?} pane(s) busy now)"
         fi
         return
     fi
-    # Fails closed: a pane count that cannot be read is not zero.
-    if [[ -n "$srv" && "$panes" != 0 ]]; then
-        row oper herdr "$bin → $target waits: ${panes:-?} pane(s) open on dev's herdr (${agents:-?} agent(s)); close them, then run dev-sync --apply again"
+    # Fails closed: a count that cannot be read is not zero.
+    if [[ -n "$srv" && ( "$agents" != 0 || "$busy" != 0 ) ]]; then
+        row oper herdr "$bin → $target waits: ${agents:-?} agent(s), ${busy:-?} of ${panes:-?} pane(s) busy on dev's herdr; when they are idle, run dev-sync --apply again"
         return
     fi
     if [[ "$bin" != "$target" ]]; then
@@ -422,7 +442,7 @@ here_herdr() {
         srv="$(server_version)"; [[ "$srv" == "$bin" ]] && break; sleep 1
     done
     if [[ "$srv" == "$bin" ]]; then
-        row ok herdr "server restarted on $bin (no panes were open)"
+        row ok herdr "server restarted on $bin (${panes:-0} idle pane(s) closed)"
     else
         row drift herdr "server did not come back on $bin (now: ${srv:-not answering}); journalctl --user -u herdr-server.service${old:+; to roll back: mv ~/.local/state/dev-sync/herdr-$old ~/.local/bin/herdr && systemctl --user restart herdr-server.service}"
     fi
@@ -488,7 +508,11 @@ here_draft() {
     fi
 }
 
-plugin_enabled() { jq -r --arg p "$1" '.enabledPlugins[$p] // "absent"' "$SETTINGS" 2>/dev/null; }
+# Not `.enabledPlugins[$p] // "absent"`: jq's // treats false as missing, so a plugin just set to
+# false read back as "absent" and every disable reported failure (dev, 2026-10-14).
+plugin_enabled() {
+    jq -r --arg p "$1" '(.enabledPlugins // {}) | if has($p) then .[$p] | tostring else "absent" end' "$SETTINGS" 2>/dev/null
+}
 # The USER-scope entry: a plugin also has project-scope entries, one per project it was
 # installed in, and those neither load everywhere nor share the user entry's version.
 plugin_installed() { jq -e --arg p "$1" 'any((.plugins[$p] // [])[]; .scope == "user")' "$INSTALLED" >/dev/null 2>&1; }

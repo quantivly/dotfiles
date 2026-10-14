@@ -96,7 +96,10 @@ case "$1 ${2:-}" in
     "--skill "*) [[ -e "$S/skill-empty" ]] || echo "skill for $V" ;;
     "status server") printf 'status: running\nversion: %s\n' "$(cat "$S/server-version")" ;;
     "agent list") printf '{"result":{"agents":[%s]}}\n' "$(cat "$S/agents" 2>/dev/null)" ;;
-    "pane list") printf '{"result":{"panes":[%s]}}\n' "$(cat "$S/panes" 2>/dev/null)" ;;
+    "pane list") [[ -e "$S/panes-down" ]] && exit 1; printf '{"result":{"panes":[%s]}}\n' "$(cat "$S/panes" 2>/dev/null)" ;;
+    "pane process-info")   # idle at its prompt unless the case says otherwise
+        [[ -e "$S/proc-down" ]] && exit 1
+        cat "$S/proc-$4" 2>/dev/null || echo '{"result":{"process_info":{"shell_pid":10,"foreground_process_group_id":10}}}' ;;
     "plugin list") [[ -e "$S/draft-down" ]] && exit 1; cat "$S/draft.json" ;;
     "plugin install")
         echo "$PATH" >"$S/herdr-install-path"
@@ -376,13 +379,13 @@ echo "== herdr itself"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 run_level --check
-has   "older herdr: ✗ with both versions and what is open" "$OUT" "0.9.0, laptop has $HV (server 0.9.0, 0 pane(s) open; --apply upgrades only at 0)"
+has   "older herdr: ✗ with both versions and what is busy" "$OUT" "0.9.0, laptop has $HV (server 0.9.0, 0 pane(s), 0 busy; --apply upgrades only when none is)"
 hasnt "older herdr: --check restarts nothing" "$(calls)" "systemctl --user restart"
 check "older herdr: --check leaves the binary" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
 run_level --apply
 check "older herdr: --apply installs the laptop's exact version" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr $HV"
 has   "older herdr, no panes: the server is restarted through the unit" "$(calls)" "systemctl --user restart herdr-server.service"
-has   "older herdr, no panes: ✓ restarted" "$OUT" "server restarted on $HV (no panes were open)"
+has   "older herdr, no panes: ✓ restarted" "$OUT" "server restarted on $HV (0 idle pane(s) closed)"
 check "older herdr: the agent skill is regenerated" "$(cat "$H/.claude/skills/herdr/SKILL.md")" "skill for $HV"
 check "older herdr: the previous binary is kept" "$([[ -e "$H/.local/state/dev-sync/herdr-0.9.0" ]] && echo yes || echo no)" yes
 reset_calls; run_level --apply
@@ -390,10 +393,31 @@ check "second --apply after a herdr upgrade calls nothing mutating" "$(mutations
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"
 run_level --apply
-check "a pane open but NO agent: the binary is not swapped" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
-hasnt "a pane open but no agent: the server is NOT restarted" "$(calls)" "systemctl --user restart"
-has   "a pane open: ⚠ says the upgrade waits, and why" "$OUT" "0.9.0 → $HV waits: 1 pane(s) open on dev's herdr (0 agent(s))"
-check "a pane open: the upgrade waiting is a person's step, not a failure" "$RC" 0
+check "an idle shell pane (herdr recreates one): the binary is upgraded" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr $HV"
+has   "an idle shell pane: the server restarts, and the row says it closed" "$OUT" "server restarted on $HV (1 idle pane(s) closed)"
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+echo '{"pane_id":"w1:p1"},{"pane_id":"w1:p2"}' >"$H/stub/panes"
+echo '{"result":{"process_info":{"shell_pid":10,"foreground_process_group_id":22}}}' >"$H/stub/proc-w1:p2"
+run_level --apply
+check "a pane running something, but NO agent: the binary is not swapped" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
+hasnt "a busy pane: the server is NOT restarted" "$(calls)" "systemctl --user restart"
+has   "a busy pane: ⚠ says the upgrade waits, and why" "$OUT" "0.9.0 → $HV waits: 0 agent(s), 1 of 2 pane(s) busy on dev's herdr"
+check "a busy pane: the upgrade waiting is a person's step, not a failure" "$RC" 0
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"
+touch "$H/stub/proc-down"
+run_level --apply
+hasnt "a pane whose process info cannot be read counts as busy" "$(calls)" "systemctl --user restart"
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/panes-down"
+run_level --apply
+hasnt "a pane list that cannot be read holds the upgrade" "$(calls)" "systemctl --user restart"
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"
+echo '{"pane_id":"w1:p1"}' >"$H/stub/agents"
+run_level --apply
+has   "an agent at its prompt still holds the upgrade" "$OUT" "waits: 1 agent(s), 0 of 1 pane(s) busy"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 mv "$H/.local/bin/herdr" "$C/herdr-bin"; ln -s "$C/herdr-bin" "$H/.local/bin/herdr"
@@ -435,8 +459,10 @@ new_case
 echo 0.9.0 >"$H/stub/server-version"
 run_level --check
 has   "binary current, server old: ✗ restart pending" "$OUT" "server runs 0.9.0, binary $HV: restart pending"
-echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"; run_level --apply
-hasnt "binary current, server old, a pane open: no restart" "$(calls)" "systemctl --user restart"
+echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"
+echo '{"result":{"process_info":{"shell_pid":10,"foreground_process_group_id":22}}}' >"$H/stub/proc-w1:p1"
+run_level --apply
+hasnt "binary current, server old, a busy pane: no restart" "$(calls)" "systemctl --user restart"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"
 mapfile -t F < <(facts | grep -v -e '^--herdr' -e "^$HV\$" -e "^$ARCH\$" -e "^$HSHA\$")
@@ -469,6 +495,8 @@ jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true' "$H/.claude/se
 run_level --check
 has   "superseded plugin enabled: ✗" "$OUT" "quantivly-pr-conventions@quantivly is enabled but superseded"
 run_level --apply
+has   "superseded plugin: ✓ disabled, read back as false (jq // treats false as missing)" "$OUT" "✓ plugin         quantivly-pr-conventions@quantivly disabled (superseded)"
+check "superseded plugin: --apply exits 0" "$RC" 0
 check "superseded plugin: set false in settings.json" "$(jq -r '.enabledPlugins["quantivly-pr-conventions@quantivly"]' "$H/.claude/settings.json")" false
 check "superseded plugin: the rest of settings.json survives" "$(jq -r .theme "$H/.claude/settings.json")" dark
 check "superseded plugin: a backup is kept" "$([[ -e "$H/.local/state/dev-sync/settings.json.before-dev-sync" ]] && echo yes || echo no)" yes
@@ -661,7 +689,7 @@ check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
 has   "the remote run killed: says so" "$OUT" "ended with status 137"
 
 printf '\n'
-EXPECTED_ROWS=149
+EXPECTED_ROWS=156
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
