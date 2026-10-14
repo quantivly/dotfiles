@@ -55,6 +55,9 @@
 #     so the CLI never runs ahead of its server.
 #   - stop abandoned login-session scopes (they need sudo); it lists this user's
 #     scopes over 200 MB, with a command naming exactly those.
+#   - mint or store the long-lived Claude token. A person runs `claude setup-token`
+#     and scripts/claude-oauth-store on dev; this reads only the file's mode, its
+#     shape and its date, and loads it for its own `claude` calls.
 #   - write agents.slice. Its cap is set on dev with `systemctl --user
 #     set-property` (drop-ins under ~/.config/systemd/user.control/), and the
 #     effective values are shown as information.
@@ -76,7 +79,8 @@
 #
 # Test overrides (scripts/test-dev-sync.sh): DEV_SYNC_GITHUB_BASE, DEV_SYNC_NPM_URL,
 # DEV_SYNC_HERDR_RELEASES, DEV_SYNC_DOTFILES_REMOTE, DEV_SYNC_NO_SCOPE=1 (skip the
-# systemd-run wrapper), DEV_SYNC_SSH (the ssh command).
+# systemd-run wrapper), DEV_SYNC_SSH (the ssh command), DEV_SYNC_PROC (/proc),
+# DEV_SYNC_TOKEN_WARN_D.
 
 set -uo pipefail
 
@@ -127,11 +131,16 @@ FETCH_MAX_AGE_H="${DEV_SYNC_FETCH_MAX_AGE_H:-36}"
 FETCH_REFRESH_H="${DEV_SYNC_FETCH_REFRESH_H:-20}"
 MARKET_MAX_AGE_D="${DEV_SYNC_MARKET_MAX_AGE_D:-7}"
 SCOPE_MIN_MB="${DEV_SYNC_SCOPE_MIN_MB:-200}"
+# A setup-token token lives a year (code.claude.com/docs/en/authentication). Warn a month ahead.
+TOKEN_LIFE_D=365
+TOKEN_WARN_D="${DEV_SYNC_TOKEN_WARN_D:-335}"
+PROC="${DEV_SYNC_PROC:-/proc}"
 
 SAFE_DIR_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 SAFE_REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
 SHA_RE='^[0-9a-f]{40}$'
 VER_RE='^[0-9]+(\.[0-9]+)+$'
+TOKEN_LINE_RE='^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat[0-9]+-[A-Za-z0-9_-]+$'
 
 usage() { sed -n '/^# Usage (laptop):/,/^# Exit:/p' "${SELF:-/dev/null}" 2>/dev/null | sed '$d; s/^# \{0,1\}//'; }
 
@@ -321,6 +330,95 @@ here_claude() {
         fi
     else
         row drift claude "$cur, $src has $target"
+    fi
+}
+
+# THE LONG-LIVED TOKEN. Every session on dev used to share one /login, whose refresh token
+# rotates: when several start within minutes, one refreshes with a superseded token and they all
+# log out at once (2026-10-14, 07:37 EDT). CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`
+# outranks the stored login and is never refreshed. scripts/claude-oauth-store writes it; shells
+# (zshrc.company), the herdr launcher and rabota's remote lanes load it. These rows read its
+# mode, its shape and its date, never its value, and `claude auth status` for two fields.
+# Loaded into THIS process too, so dev-sync's own `claude` calls do not refresh the login.
+load_token() {
+    local line=""
+    [[ -r "$TOKEN_FILE" ]] || return 1
+    IFS= read -r line <"$TOKEN_FILE" || [[ -n "$line" ]] || return 1
+    [[ "$line" =~ $TOKEN_LINE_RE ]] || return 1
+    export CLAUDE_CODE_OAUTH_TOKEN="${line#CLAUDE_CODE_OAUTH_TOKEN=}"
+}
+
+# "<claude processes of this user> <of them without the token>", from /proc. Only the variable's
+# NAME is tested; a value is held in a bash variable for one comparison, never printed or piped.
+claude_procs() {
+    local d c e n=0 w=0 has
+    for d in "$PROC"/[0-9]*; do
+        # A session is `claude`; one started by its versioned path (a herdmates teammate)
+        # shows the version as its name.
+        c="$(cat "$d/comm" 2>/dev/null)"
+        [[ -O "$d" && ( "$c" == claude || "$c" =~ $VER_RE ) ]] || continue
+        n=$((n + 1)); has=0
+        while IFS= read -r -d '' e; do
+            [[ "$e" == CLAUDE_CODE_OAUTH_TOKEN=?* ]] && { has=1; break; }
+        done <"$d/environ" 2>/dev/null
+        e=""
+        (( has )) || w=$((w + 1))
+    done
+    printf '%d %d\n' "$n" "$w"
+}
+
+here_auth() {
+    local st logged method mode created then_s age left n w
+    st="$(cd "$HOME" && timeout 60 "$CLAUDE" auth status --json 2>/dev/null </dev/null |
+        jq -r '"\(.loggedIn) \(.authMethod)"' 2>/dev/null)"
+    read -r logged method <<<"$st"
+    if [[ -z "$logged" ]]; then
+        row oper auth "claude auth status gave no answer, so the login state on dev is unknown"
+    elif [[ "$logged" != true ]]; then
+        row oper auth "Claude is not logged in on dev ($method); store a long-lived token, HERDR_GUIDE.md \"Working on dev\""
+    elif [[ "$method" == oauth_token ]]; then
+        # auth status does not test the token (any value reads as logged in), so this says
+        # it is in use, not that it works.
+        row ok auth "claude uses the long-lived token (oauth_token), not the shared /login"
+    elif (( TOKEN_LOADED )); then
+        row oper auth "a token is stored, but claude reports $method: it is not being used"
+    else
+        row oper auth "only the shared /login ($method): sessions that start together can log every session out at once; store a long-lived token, HERDR_GUIDE.md \"Working on dev\""
+    fi
+    [[ -e "$TOKEN_FILE" ]] || return 0
+    if [[ ! -r "$TOKEN_FILE" ]]; then
+        row oper auth "$TOKEN_FILE is not readable by $(id -un); fix its owner and mode (600)"
+        return 0
+    elif (( ! TOKEN_LOADED )); then
+        row oper auth "$TOKEN_FILE holds no CLAUDE_CODE_OAUTH_TOKEN line of setup-token's shape; store it again (scripts/claude-oauth-store)"
+        return 0
+    fi
+    mode="$(stat -c %a "$TOKEN_FILE" 2>/dev/null)"
+    [[ "$mode" == 600 ]] || row oper auth "the token file is mode ${mode:-?}, not 600: chmod 600 $TOKEN_FILE"
+    created="$(cat "$TOKEN_DIR/created" 2>/dev/null)"
+    # Whole days between two dates, both read as UTC midnights, so a DST change cannot
+    # move the count by the hour that would floor it a day short.
+    if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || ! then_s="$(TZ=UTC date -d "$created" +%s 2>/dev/null)"; then
+        row oper auth "the token has no readable date in $TOKEN_DIR/created, so its expiry is unknown; store it again"
+    else
+        age=$(( ($(TZ=UTC date -d "$(date +%F)" +%s) - then_s) / 86400 )); left=$((TOKEN_LIFE_D - age))
+        if (( age < 0 )); then
+            row oper auth "the token's date $created is in the future, so its expiry is unknown; store it again"
+        elif (( left <= 0 )); then
+            row oper auth "the token stored $created is a year old and has expired: mint a new one (claude setup-token) and store it"
+        elif (( age >= TOKEN_WARN_D )); then
+            row oper auth "the token stored $created expires in about $left day(s): mint a new one (claude setup-token) and store it"
+        else
+            row ok auth "token stored $created, $age day(s) old"
+        fi
+    fi
+    read -r n w <<<"$(claude_procs)"
+    if (( n == 0 )); then
+        row info auth "no Claude process running"
+    elif (( w == 0 )); then
+        row ok auth "all $n Claude process(es) carry the token"
+    else
+        row oper auth "$w of $n Claude process(es) started without the token and still refresh the shared /login; restart them when idle"
     fi
 }
 
@@ -807,6 +905,12 @@ here_main() {
     SETTINGS="$HOME/.claude/settings.json"
     INSTALLED="$HOME/.claude/plugins/installed_plugins.json"
     KNOWN="$HOME/.claude/plugins/known_marketplaces.json"
+    TOKEN_DIR="$HOME/.config/claude-oauth"
+    TOKEN_FILE="$TOKEN_DIR/token.env"
+    # The file decides, not whatever the caller exported.
+    unset CLAUDE_CODE_OAUTH_TOKEN
+    TOKEN_LOADED=0
+    load_token && TOKEN_LOADED=1
     # A non-interactive ssh and a user unit both lack ~/.local/bin (docs/HERDR_GUIDE.md).
     export PATH="$HOME/.local/bin:$PATH"
 
@@ -836,6 +940,7 @@ here_main() {
     here_dotfiles
     here_timer
     here_claude
+    here_auth
     here_herdr
     here_draft
     here_plugins

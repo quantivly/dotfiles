@@ -116,6 +116,12 @@
 #               gh, by contrast, authenticates through its config + keyring
 #               (GH_CONFIG_DIR only selects the account), so no token needs to
 #               sit in an environment every pane inherits.
+#   CLAUDE_CODE_OAUTH_TOKEN   from ~/.config/claude-oauth/token.env when that file
+#               holds one (dev only: scripts/claude-oauth-store writes it and refuses on
+#               a clauth machine). Same 0600 file and same argv hygiene as LINEAR_API_KEY.
+#               It outranks the stored /login, so panes here stop refreshing one shared
+#               credential. Pane shells also read the file at start (zshrc.company), so
+#               this matters only for what the server starts without a shell.
 #   GH_CONFIG_DIR    ~/.config/gh-quantivly when that directory exists — see the
 #               trade-off where it is set below.
 
@@ -228,6 +234,16 @@ if [[ -z "$linear_key" ]]; then
     warn "LINEAR_API_KEY not found in ~/.zshrc.local — tdi.worktree-from-linear (the Linear picker) will not authenticate"
 fi
 
+# One KEY=VALUE line; only exactly that key with setup-token's shape is taken, so the
+# value needs no quoting (claude-oauth-store enforces the same character class). Never on
+# a clauth machine, where the token would outrank every session's own account dir.
+claude_token_line=""
+token_file="$home/.config/claude-oauth/token.env"
+if [[ -r "$token_file" && ! -d "$home/.clauth" ]]; then
+    IFS= read -r claude_token_line <"$token_file" || true
+    [[ "$claude_token_line" =~ ^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat[0-9]+-[A-Za-z0-9_-]+$ ]] || claude_token_line=""
+fi
+
 # gh account for plugins. The gh-pr plugin runs `gh` under the SERVER env, so one
 # account serves every pane; work repos dominate here, so it is the Quantivly config
 # and panes in personal repos that account cannot see get no `$pr` row. Per
@@ -284,6 +300,7 @@ if [[ "$print_env_only" == true ]]; then
         # Not in server_env (argv hygiene, above) but part of the environment the
         # server WOULD get — shown masked, like any other secret.
         if [[ -n "$linear_key" ]]; then printf 'LINEAR_API_KEY=<set>\n'; fi
+        if [[ -n "$claude_token_line" ]]; then printf 'CLAUDE_CODE_OAUTH_TOKEN=<set>\n'; fi
     } | sort
     if [[ -z "$herdr_bin" ]]; then
         warn "note: herdr is NOT resolvable on the declared PATH — a real launch would refuse"
@@ -296,16 +313,21 @@ fi
 # Deterministic cwd (the unit's default is $HOME too); panes open in their
 # workspace directories, not here.
 cd "$home"
-if [[ -n "$linear_key" ]]; then
+if [[ -n "$linear_key" || -n "$claude_token_line" ]]; then
     # Argv hygiene: `env -i LINEAR_API_KEY=… ` would publish the value in
     # env(1)'s /proc/<pid>/cmdline (world-readable; no hidepid here). Instead the
     # key goes into a 0600 file under XDG_RUNTIME_DIR (user-only tmpfs) that the
     # intermediate /bin/sh exports and deletes before exec'ing herdr — every argv
     # along the way carries only paths. Single-quote-escaped so the value can
     # never be parsed as anything but one assignment.
-    envfile="$xdg_runtime_dir/herdr-server-env.$$"
+    # mktemp creates it 0600 whatever the umask; a redirect would follow the user
+    # manager's 0022 and leave both secrets readable as 0644.
+    envfile="$(mktemp "$xdg_runtime_dir/herdr-server-env.XXXXXX")" || die "cannot create the hand-off file in $xdg_runtime_dir"
     sq_key=${linear_key//\'/\'\\\'\'}
-    ( umask 077; printf "LINEAR_API_KEY='%s'\n" "$sq_key" > "$envfile" )
+    {
+        if [[ -n "$linear_key" ]]; then printf "LINEAR_API_KEY='%s'\n" "$sq_key"; fi
+        if [[ -n "$claude_token_line" ]]; then printf '%s\n' "$claude_token_line"; fi
+    } > "$envfile"
     # shellcheck disable=SC2016  # "$1"/"$2" are for /bin/sh to expand, deliberately not bash
     exec env -i "${server_env[@]}" /bin/sh -c \
         'set -a; . "$1"; set +a; rm -f -- "$1"; exec "$2" server' sh "$envfile" "$herdr_bin"

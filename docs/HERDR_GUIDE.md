@@ -1011,13 +1011,39 @@ outage.
   account id, its digest, or anything else identifying**: the verdict is the whole actionable
   content. Verified matching on dev 2026-09-21. What it proves is the account that machine
   **last recorded**, not a live check of its token, so every row carries that record's age.
-- **Concurrent remote lanes on dev share one credential file.** The headless door bills dev's own
-  login rather than a per-seat account dir, so every simultaneous lane there — up to
-  `max_lanes_local` (3 by default) — reads and refreshes the same `~/.claude` on dev. That is the
-  trade of using the machine's own login instead of per-seat dirs, not a bug to fix here. The
-  symptom if it bites is the one CLAUDE.md documents for a superseded refresh token: every session
-  on that account logs out **at once**, not a gradual degradation — so a sudden multi-lane logout
-  on dev is this, not a new fault.
+- **dev authenticates with a long-lived token, not its shared `/login`.** Every session and lane
+  there used to refresh one `~/.claude/.credentials.json`, and a rotating refresh token loses to
+  whichever two sessions refresh together: on 2026-10-14 several starts within minutes zeroed
+  `claudeAiOauth.expiresAt` at 07:37 EDT and logged everything on dev out at once.
+  `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` lives a year, is never refreshed, and
+  outranks the stored login (code.claude.com/docs/en/authentication, "Authentication
+  precedence"). It is one `KEY=VALUE` line in `~/.config/claude-oauth/token.env` (mode 600),
+  beside a non-secret `created` date. Four things load it: pane and ssh shells
+  (`zsh/zshrc.company`, at shell start); the herdr server (`scripts/herdr-server-launch.sh`,
+  through the same 0600 hand-off as `LINEAR_API_KEY`, since its `env -i` would drop a unit
+  `EnvironmentFile=`); rabota's remote lanes (`-p EnvironmentFile=-…`, so a host without the file
+  runs on its login as before); and dev-sync's own `claude` calls. To store or renew it, a person
+  runs this in a plain terminal, never a pane an agent reads and never `!` in a Claude session:
+  ```bash
+  ssh -t dev '~/.local/bin/claude setup-token && ~/.dotfiles/scripts/claude-oauth-store'
+  ```
+  Approve in a browser signed in to **quantivly-0**, the seat dev's `/login` uses: `rabota
+  doctor` reads the account from `.claude.json`, which the token does not change, so a token
+  minted on another account would bill it unseen. Paste the token at the hidden prompt, then
+  clear that terminal's scrollback. `dev-sync --check` reports the method (which shows the token is in use, not that it works:
+  `claude auth status` does not test it), the file's mode, its age (⚠ from day 335) and how
+  many running Claude processes still lack it. What it costs, and
+  what is left:
+  - **No claude.ai connectors or Remote Control in dev sessions** — the token "can only make
+    model requests". The plugin MCP servers (Slack, Notion) and `linear-key` still work.
+  - **Plugin MCP OAuth can still race.** `mcpOAuth` sits in the same unlocked
+    `.credentials.json`, so two sessions refreshing or signing in together can blank Slack's or
+    Notion's entry ([CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md)). The symptom is one server needing
+    a sign-in again (dev-sync's `mcp` ⚠), not a logout.
+  - **Still on the shared login:** a session started before the token was stored, until it
+    restarts; a bare `ssh dev claude …`, which reads no zshrc; and any session that runs
+    `/login`, which switches that session to the stored login. Never `/login` on dev. (`--bare`
+    reads neither credential, only `ANTHROPIC_API_KEY` or `apiKeyHelper`, so it cannot race.)
 - **Two doors, not one.** **Attended:** pick `dev (EC2)` in the machine sidebar and spawn with
   herdr-draft's popup in that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the
   popup finds its own binary, but a shell invocation needs
@@ -1125,7 +1151,7 @@ outage.
 - **Keep dev level with `scripts/dev-sync`, run from the laptop.** `--check` (the default)
   reports drift and writes nothing on dev: dotfiles vs `origin/main`, Claude Code and herdr vs
   the laptop's versions, herdr-draft vs its `main`, the work tenant's plugins, missing and stale
-  `~/quantivly` clones, the effective `agents.slice` cap, and this user's abandoned
+  `~/quantivly` clones, the long-lived Claude token, the effective `agents.slice` cap, and this user's abandoned
   login-session scopes over 200 MB. `--apply` fixes the ✗ rows inside a capped transient scope
   in `agents.slice`, and arms `dev-sync.timer` on dev, a daily run of the same thing that needs
   no laptop and no `aws login`. A herdr upgrade installs the laptop's exact release asset,
@@ -1133,7 +1159,8 @@ outage.
   is idle at its shell prompt**, because the restart closes every pane; until then it is a ⚠
   naming what is busy. "No pane at all" is not a usable test: while a client is attached, herdr
   recreates a default workspace the moment the last one closes. It
-  never signs in to an MCP server, never handles `LINEAR_API_KEY`'s value and never runs sudo;
+  never signs in to an MCP server, never stores the Claude token, never handles `LINEAR_API_KEY`'s
+  value and never runs sudo;
   those come back as ⚠ rows for a person.
 - **Disarming dev-sync's timer is sticky, and takes three steps on dev.** Deleting the `armed`
   marker alone leaves an enabled timer whose runs are skipped, which

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# scripts/claude-oauth-store
+# ==========================
+#
+# Store a long-lived Claude Code token (from `claude setup-token`) on a shared
+# agent host, so its sessions stop refreshing one shared login.
+#
+# WHY. Every Claude session on dev uses the one `/login` in ~/.claude/.credentials.json.
+# Refresh tokens rotate, so when several sessions start within minutes one of them
+# refreshes with a superseded token and every session on the account logs out at
+# once. That happened on 2026-10-14 (claudeAiOauth.expiresAt zeroed at 07:37 EDT).
+# A setup-token token lives a year and is never refreshed, and CLAUDE_CODE_OAUTH_TOKEN
+# outranks the stored login, so there is nothing left to race.
+#
+# RUN IT YOURSELF, in a plain terminal. Not in a herdr pane an agent can read, and
+# not as `!` inside a Claude session: the token would land in that transcript.
+#   ssh -t dev '~/.local/bin/claude setup-token && ~/.dotfiles/scripts/claude-oauth-store'
+# then clear that terminal's scrollback, where setup-token printed the token.
+#
+# WHAT IT WRITES, in ~/.config/claude-oauth/ (mode 700):
+#   token.env  CLAUDE_CODE_OAUTH_TOKEN=<token>, mode 600. One KEY=VALUE line, so the
+#              same file is a systemd EnvironmentFile= (rabota lanes), a line the
+#              herdr launcher and zshrc.company read, and dev-sync's check.
+#   created    the date it was stored, YYYY-MM-DD. Not secret: dev-sync reads it to
+#              warn before the token's year runs out.
+# The token is read at a hidden prompt and never echoed or logged.
+#
+# REFUSES on a machine where clauth manages accounts. There every session picks its
+# own account dir, and this token would outrank all of them, so every session on the
+# laptop would bill this one seat.
+#
+# Usage: claude-oauth-store
+# Exit: 0 stored · 1 refused or not stored · 64 usage
+
+set -euo pipefail
+
+DIR="$HOME/.config/claude-oauth"
+TOKEN_FILE="$DIR/token.env"
+# setup-token's shape. The character class is also what makes the file safe to read as
+# shell and as an EnvironmentFile= without quoting.
+TOKEN_RE='^sk-ant-oat[0-9]+-[A-Za-z0-9_-]{20,}$'
+
+die() { printf 'claude-oauth-store: %s\n' "$*" >&2; exit 1; }
+
+case "${1:-}" in
+    "") ;;
+    -h | --help) sed -n '/^# Usage:/p' "$0" | sed 's/^# //'; exit 0 ;;
+    *) printf 'usage: claude-oauth-store\n' >&2; exit 64 ;;
+esac
+
+if [[ -d "$HOME/.clauth" ]] || command -v clauth >/dev/null 2>&1; then
+    die "refusing: clauth manages Claude accounts here, and this token would outrank every account dir. It is for a host on one login (dev)."
+fi
+[[ -t 0 ]] || die "refusing: stdin is not a terminal. Run it with ssh -t, and paste at the prompt; never pipe the token in."
+
+printf 'Paste the token claude setup-token printed (input hidden), then Enter: ' >&2
+IFS= read -rs token || true
+printf '\n' >&2
+token="${token//[[:space:]]/}"
+if [[ ! "$token" =~ $TOKEN_RE ]]; then
+    n=${#token}; token=""
+    die "that does not look like a setup-token token (sk-ant-oat…, $n characters read). Nothing was written."
+fi
+
+umask 077
+mkdir -p "$DIR"
+chmod 700 "$DIR"
+tmp="$(mktemp "$DIR/.token.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$token" >"$tmp"
+token=""
+mv -f "$tmp" "$TOKEN_FILE"
+date +%F >"$DIR/created"
+
+printf 'Stored in %s (mode %s), dated %s.\n' "$TOKEN_FILE" "$(stat -c %a "$TOKEN_FILE")" "$(cat "$DIR/created")"
+printf 'New shells, rabota lanes and dev-sync use it now. Sessions already running keep the old login\n'
+printf 'until they restart; herdr panes get it from their shell, and the server itself at its next start.\n'
+printf 'Check from the laptop: ~/.dotfiles/scripts/dev-sync --check\n'

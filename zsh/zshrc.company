@@ -48,6 +48,18 @@ else
 fi
 unset _test_path _qcache_dir
 
+# A long-lived Claude token, on a shared host that keeps one (dev). It outranks the
+# stored /login, so sessions here stop refreshing one shared credential, whose race
+# logs every session out at once. Written by scripts/claude-oauth-store. Never loaded on a
+# clauth machine, where it would outrank every session's own account dir. Read on every
+# shell start, so a new token reaches new shells without a herdr restart. Only a line of
+# exactly this form is exported. docs/HERDR_GUIDE.md, "Working on dev".
+if [[ -r "${HOME}/.config/claude-oauth/token.env" && ! -d "${HOME}/.clauth" ]]; then
+  IFS= read -r _claude_tok_line <"${HOME}/.config/claude-oauth/token.env"
+  [[ "$_claude_tok_line" =~ '^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat[0-9]+-[A-Za-z0-9_-]+$' ]] && export CLAUDE_CODE_OAUTH_TOKEN="${_claude_tok_line#CLAUDE_CODE_OAUTH_TOKEN=}"
+  unset _claude_tok_line
+fi
+
 #==============================================================================
 # Quanticli Aliases and Functions
 #==============================================================================
