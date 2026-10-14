@@ -608,8 +608,12 @@ copilot = [
 ]
 
 [ui.toast]
-# Desktop notifications when a background agent finishes or blocks.
-delivery = "system"
+# In-app toasts, NOT desktop notifications. "system" sent one notify-send per
+# background agent per state change (~55/h measured with 21 panes, 2026-10-14):
+# under GNOME's Do Not Disturb none showed a banner, each became its own row in
+# the message list, and a critical rabota escalation could not be found among
+# them. [ui.sound] keeps the audible cue. docs/HERDR_GUIDE.md section 7.
+delivery = "herdr"
 delay_seconds = 1
 
 [ui.sound]

@@ -1,0 +1,46 @@
+#!/bin/sh
+# config/herdr/shims/pw-play — herdr's sound player, silenced by GNOME's Do Not Disturb.
+#
+# herdr 0.9.1 has no runtime sound toggle (`herdr config` is check/reset-keys only,
+# and there is no mute action). Its CLIENT plays a sound by running the first of
+# paplay / pw-play / ffplay on its PATH, and `pw-play` is what it runs on this
+# machine (measured 2026-10-14). The `herdr()` wrapper in zsh/zshrc.herdr puts
+# this directory first on PATH for that client only, so this script runs in place
+# of the player, and only for herdr.
+#
+# One rule. If GNOME's Do Not Disturb is on (show-banners is `false`), exit 0 and
+# play nothing. Otherwise exec the real player with every argument unchanged.
+# The quick-settings DND toggle is then the single "don't disturb me" switch, for
+# banners and herdr's sound alike. Critical notifications (rabota escalations)
+# still get through, banner and sound: GNOME shows a critical banner under DND.
+#
+# FAILS OPEN. Any answer from gsettings other than exactly `false` plays the
+# sound: gsettings missing, gsettings failing, an unexpected value. A shim that
+# went quiet on its own errors would be a mute nobody chose.
+#
+# Finding the real player: walk PATH, skip this script's own directory, and exec
+# the first other executable with the same name. Comparing physical directories
+# (`pwd -P`) means a symlinked spelling of this directory is skipped too, so it
+# can never exec itself. If there is no real player, exit 127 as a missing
+# command would.
+#
+# State table: scripts/test-herdr-quiet.sh. docs/HERDR_GUIDE.md section 7.
+
+name=${0##*/}
+self=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)
+
+if [ "$(gsettings get org.gnome.desktop.notifications show-banners 2>/dev/null)" = "false" ]; then
+    exit 0
+fi
+
+IFS=:
+for d in $PATH; do
+    [ -n "$d" ] || continue
+    [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$self" ] && continue
+    if [ -f "$d/$name" ] && [ -x "$d/$name" ]; then
+        unset IFS
+        exec "$d/$name" "$@"
+    fi
+done
+echo "$name: no real $name on PATH (herdr quiet shim)" >&2
+exit 127

@@ -2691,6 +2691,26 @@ herdr-lazy() {
 }
 
 #==============================================================================
+# herdr — the attached client's sounds obey GNOME's Do Not Disturb
+#==============================================================================
+# herdr's CLIENT plays its done/needs-attention sounds by running a player from
+# its own PATH (pw-play here). herdr 0.9.1 has no runtime mute. This puts
+# config/herdr/shims first on PATH for herdr only; the pw-play there plays nothing
+# while DND is on and execs the real one otherwise (it fails open). Panes are
+# spawned by the systemd-run server, which never sees this PATH. A bare `herdr`
+# that STARTS a server would pass it on, which is one more reason the server runs
+# from herdr-server.service. A modular adopter without the shims directory gets
+# plain `herdr`. State table: scripts/test-herdr-quiet.sh; docs/HERDR_GUIDE.md §7.
+herdr() {
+  local shims="${DOTFILES_ROOT:-$HOME/.dotfiles}/config/herdr/shims"
+  if [[ -d "$shims" ]]; then
+    PATH="$shims:$PATH" command herdr "$@"
+  else
+    command herdr "$@"
+  fi
+}
+
+#==============================================================================
 # hspawn / hdespawn / hreap — Atrium's `atrium new` loop, rebuilt on herdr
 #==============================================================================
 # Atrium's core verb was a single call: worktree + branch + agent + first
