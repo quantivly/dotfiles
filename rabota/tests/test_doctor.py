@@ -1109,6 +1109,24 @@ class ScheduleTimerTests(SchedulerHealthBase):
         self.assertEqual(stamped(d), SCHEMA_VERSION + 1)
         self.assertEqual(self.unsched_calls(), [])
 
+    def test_after_a_schema_bump_a_store_that_has_the_schedules_table_is_unmeasured_not_empty(self):
+        # Only a store BELOW SCHEDULES_SCHEMA is known to hold no run. Once SCHEMA_VERSION moves
+        # past it, a store at SCHEDULES_SCHEMA can hold pending runs open_current refuses to read.
+        ctx = self.make_ctx()
+        d = self.put(ctx, "personal", sched("s-p1"))
+        self.assertEqual(stamped(d), doctor.SCHEDULES_SCHEMA)
+        with mock.patch.object(store, "SCHEMA_VERSION", doctor.SCHEDULES_SCHEMA + 1):
+            got = doctor.schedule_stores(ctx)["personal"]
+        self.assertIsNone(got["rows"])
+        self.assertIn(f"is at schema {doctor.SCHEDULES_SCHEMA}", got["why"])
+
+    def test_only_the_tenants_own_rows_are_weighed_as_the_tick_reads_them(self):
+        # A row tagged for another tenant (a --state-dir pointed across) is one no tick for this
+        # tenant would ever fire, so it is not this tenant's pending run.
+        ctx = self.make_ctx()
+        self.put(ctx, "toysim", {**sched("s-foreign"), "tenant": "quantivly"}, sched("s-own"))
+        self.assertEqual([r["id"] for r in doctor.schedule_stores(ctx)["toysim"]["rows"]], ["s-own"])
+
     def test_a_tenant_with_no_store_passes_and_none_is_created(self):
         ctx = self.make_ctx()
         got = doctor.schedule_stores(ctx)
