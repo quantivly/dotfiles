@@ -991,6 +991,15 @@ jobs:
           test -L ~/.gitconfig || (echo "~/.gitconfig symlink not created" && exit 1)
           echo "✅ Symlinks verified"
 
+      - name: Verify the TMPDIR that environment.d points at exists
+        run: |
+          # tmpdir.conf hands every user unit TMPDIR=~/.cache/tmp; a missing
+          # directory broke dev-sync's first timer run on dev.
+          test -L ~/.config/environment.d/tmpdir.conf || (echo "tmpdir.conf not linked" && exit 1)
+          test -d ~/.cache/tmp || (echo "~/.cache/tmp not created" && exit 1)
+          [ "$(stat -c %a ~/.cache/tmp)" = 700 ] || (echo "~/.cache/tmp is not mode 700" && exit 1)
+          echo "✅ TMPDIR directory verified"
+
       - name: Verify mise config deployed
         run: |
           test -f ~/.config/mise/config.toml || (echo "mise config not deployed" && exit 1)
