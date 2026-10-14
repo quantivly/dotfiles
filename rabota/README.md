@@ -80,6 +80,9 @@ tenant's `schedules` table — design: `docs/superpowers/specs/2026-10-11-schedu
   `rerun[:+<n>]` or `cancel-followups`; any other option executes nothing.
 - **Arming** a tenant is @zvi's step: `systemctl --user enable --now rabota-schedule@<tenant>.timer`.
   `install.conf.yaml` only links the units.
+- **Agents learn it from** `claude/skills/run-later/SKILL.md` (DO-821), linked to
+  `~/.claude/skills/run-later`. `tests/test_run_later_skill.py` holds that skill to this CLI: its
+  flags, limits, exit codes and the agent-run deferral are read from the code, not restated.
 
 ## Reconcile classification notes
 

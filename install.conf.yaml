@@ -50,6 +50,10 @@
     # can be created — that swap is WS5 task 5.4, gated on Zvi's typed OK, and is not done by
     # linking this entry.
     ~/.claude/skills/rabota: claude/skills/rabota
+    # run-later: teaches every agent, in every repository and on every seat, to schedule work
+    # due later on this laptop with `rabota schedule add` instead of handing over a prompt to
+    # paste on a date (DO-821, design §8). A separate skill because rabota's is nearly full.
+    ~/.claude/skills/run-later: claude/skills/run-later
     # The account picker as a command, for callers that are not a zsh function —
     # herdr-draft's create dialog reads its --json. It goes on ~/.local/bin
     # rather than being invoked by path because the herdr SERVER's PATH is a
