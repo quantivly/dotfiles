@@ -25,8 +25,9 @@ record file, and escalates anything but a clean pass to @zvi: a desktop notifica
 
 - **A mechanical verdict is a `--command <script>` run.** It is live, it bills no seat, and it
   is deterministic. Exit **0 `pass`, 1 `fail`, 2 `could-not-run`**; any other code, a timeout
-  kill or no exit status at all is `could-not-run` too. `could-not-run` is retried once, 30
-  minutes later. `fail` is a result and is never retried.
+  kill or no exit status at all is `could-not-run` too, and is retried once, 30 minutes later.
+  A run that cannot start at all, because its `--cwd` is gone or its frozen script changed, is
+  `could-not-run` at once and never retried. `fail` is a result and is never retried.
 - **Judgement goes in `--ask`, not in an agent.** Agent runs (`--prompt-file`) are accepted and
   stored, but agent runs are not dispatched yet: the tick defers every one until phase 2
   (DO-820), so it sits `pending` until it expires (default: due + 48 h) and escalates as
@@ -62,9 +63,8 @@ echo "refused lines in the last 7 days: $n"
 ## Declare it: dry run first
 
 ```bash
-rabota --dry-run schedule add --at '2026-10-20 09:00' --title 'refusals since the fix: still zero?' \
-    --command ~/quantivly/handoffs/check-refusals.sh --cwd ~/quantivly/repo \
-    --record ~/quantivly/handoffs/check-refusals.md --timeout 5m \
+rabota --dry-run schedule add --at 'YYYY-MM-DD 09:00' --title 'refusals since the fix: still zero?' \
+    --command <check.sh> --cwd <repo> --record <results.md> --timeout 5m \
     --ask 'Refusals came back. Reopen the issue?' \
     --option 'reopen it, I will' --option 'look again tomorrow=rerun:+24h' --option 'drop it=cancel-followups'
 ```
@@ -78,11 +78,16 @@ prints the whole declaration and stores nothing. Then run the same line without 
 - **`--title`** is one line and is shown on every surface. Make it the question.
 - **`--cwd`** is where the run starts; without it, your cwd. A cwd that contains the tenant's
   state directory is refused, so from a workspace root such as `~/quantivly` pass
-  `--cwd <a repo or other directory>`. The tenant comes from YOUR cwd, not from `--cwd`.
-- **`--record <file>`** must already exist, must not be tracked by git, and must not be a file
-  the secret guard protects. Each result goes before a `<!-- rabota-schedule-results -->` marker
-  if the file has one, and at the end otherwise. Create the file first: a handoff note with that
-  marker under its "Results" heading works well. The run never writes the record itself.
+  `--cwd <a repo or other directory>`. Pick one that still exists at the due time, not a worktree
+  the daily sweep may remove.
+- **The tenant** is `--tenant`, else `$CLAUDE_ACCOUNT_TENANT`, else whatever owns your cwd (its git
+  remote, then its path); never `--cwd`. Outside every tenant's tree, pass `--tenant`.
+- **`--record <file>`** must already exist, must not be a file the secret guard protects, and
+  must not be tracked by git, then or later: the tick asks again at every write, and a record
+  that became tracked is not written, which escalates even a pass. So never a note in a repo that
+  commits its notes, such as a handoffs repo; use a file outside every repo, or one its repo
+  ignores. Each result goes before a `<!-- rabota-schedule-results -->` marker if the file has
+  one, and at the end otherwise. The run never writes the record itself.
 - **`--ask '<question>'` and `--option '<label>[=action]'`**, repeatable, are the decision
   @zvi is offered on any outcome but a clean pass. Write them now, while you hold the context.
   The label text is never executed; only the action after `=` is: `none` (the default),
@@ -96,9 +101,10 @@ prints the whole declaration and stores nothing. Then run the same line without 
 
 ## Refusals (exit 3) and what to do
 
-- **`rabota-schedule@<tenant>.timer is not enabled`.** Tell @zvi, with the dry-run output; the
-  refusal comes last, so it also means the declaration is otherwise valid. Never arm the timer
-  yourself: enabling it is his step.
+- **`rabota-schedule@<tenant>.timer is not enabled`.** Nothing was stored and no id exists. Tell
+  @zvi, and hand over the exact `add` line, with its script and record left where it names them,
+  to run once the timer is armed. The refusal comes last, so the declaration is otherwise valid.
+  Never arm the timer yourself: enabling it is his step.
 - **Anything else** (a past `--at`, a horizon over 30 days, a tracked or guarded record, a
   `--cwd` holding the state directory, a script that invokes `claude`, a timeout over 6 h)
   names what failed. Fix the declaration. Usage errors exit 2.
@@ -117,4 +123,5 @@ prints the whole declaration and stores nothing. Then run the same line without 
 ## Hand it over
 
 Tell the user the run's id, its due and expiry times, its record, and the question it will ask.
-That replaces the prompt you would have written for them to paste.
+That replaces the prompt you would have written for them to paste. Only a refused `add` (a
+disarmed timer) still hands over a line, and it is the `add` line itself.

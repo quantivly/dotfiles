@@ -198,6 +198,7 @@ class RunLaterSkillTests(unittest.TestCase):
             "COMMAND_TIMEOUT": f"default {m(schedule.COMMAND_TIMEOUT)} min",
             "COMMAND_MEMORY_MAX": f"memory ({schedule.COMMAND_MEMORY_MAX})",
             "RETRY_DELAY": f"retried once, {m(scheduler.decl.RETRY_DELAY)} minutes later",
+            "TAIL_BYTES": f"The last {scheduler.TAIL_BYTES // 1024} KiB of stdout and of stderr",
         }
         self.assertEqual(schedule.MAX_ATTEMPTS, 2, "the skill says `retried once`; MAX_ATTEMPTS moved")
         for const, claim in claims.items():
