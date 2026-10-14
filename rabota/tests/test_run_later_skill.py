@@ -269,7 +269,11 @@ class RunLaterExampleAddsTests(ScheduleBase):
         self.assertIsNone(schedule._claude_hit(script))
         line, ns = _add_example()
         self.assertFalse(schedule.CLAUDE_WORD.search(ns.script), ns.script)
-        self.assertTrue(script.rstrip().endswith("# 0 pass, 1 fail"), "the script's verdict is not its exit code")
+        # The verdict is the script's exit code, so its LAST command is a test. Checked on the code
+        # before the comment: asserting the trailing `# 0 pass, 1 fail` comment let a script ending
+        # in `echo` pass (mutation sweep, M37).
+        last = script.rstrip().splitlines()[-1].split("#", 1)[0].strip()
+        self.assertRegex(last, r"^\[ .+ \]$", f"the script's last command {last!r} is not its verdict")
 
     def test_the_add_example_validates_with_its_own_options(self):
         _, ns = _add_example()
