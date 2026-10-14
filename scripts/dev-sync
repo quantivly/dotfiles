@@ -364,7 +364,7 @@ here_herdr() {
     fi
     if [[ "$MODE" != apply ]]; then
         if [[ "$bin" != "$target" ]]; then
-            row drift herdr "$bin, laptop has $target (server ${srv:-not answering})"
+            row drift herdr "$bin, laptop has $target (server ${srv:-not answering}${panes:+, $panes pane(s) open; --apply upgrades only at 0})"
         else
             row drift herdr "server runs $srv, binary $bin: restart pending (${agents:-?} agent(s), ${panes:-?} pane(s) now)"
         fi

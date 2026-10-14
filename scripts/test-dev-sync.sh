@@ -376,7 +376,7 @@ echo "== herdr itself"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 run_level --check
-has   "older herdr: ✗ with both versions" "$OUT" "0.9.0, laptop has $HV (server 0.9.0)"
+has   "older herdr: ✗ with both versions and what is open" "$OUT" "0.9.0, laptop has $HV (server 0.9.0, 0 pane(s) open; --apply upgrades only at 0)"
 hasnt "older herdr: --check restarts nothing" "$(calls)" "systemctl --user restart"
 check "older herdr: --check leaves the binary" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
 run_level --apply
