@@ -503,7 +503,7 @@ def _stamped_version(db: Path) -> int | None:
 
 
 def schedule_stores(ctx) -> dict[str, dict]:
-    """Every tenant's schedules, each from its own store: ``{tenant: {"rows", "why"}}``.
+    """Every tenant's pending and running schedules, each from its own store: ``{tenant: {"rows", "why"}}``.
 
     ``rows`` is None when the store could not be read, and ``why`` then says why. The caller's own
     tenant is read from ``ctx.state_dir``, so a ``--state-dir`` override is honoured, exactly as
@@ -521,7 +521,9 @@ def schedule_stores(ctx) -> dict[str, dict]:
         s = None
         try:
             s = store.Store.open_current(state_dir)
-            out[name] = {"rows": s.list_schedules(name), "why": None}
+            # Only the live rows: terminal ones are never pruned, and no check reads them.
+            out[name] = {"rows": [r for st in ("pending", "running") for r in s.list_schedules(name, st)],
+                         "why": None}
         # ValueError: a JSON column that no longer decodes. Doctor is what runs when a store is
         # broken, so a row it cannot read is unmeasured, never a traceback.
         except (errors.RabotaError, sqlite3.Error, ValueError) as e:
@@ -552,12 +554,17 @@ def _run_name(tenant: str, row: dict) -> str:
 
 
 def schedule_timers(ctx, stores: dict) -> list[tuple[str, bool, str]]:
-    """One row per tenant: if it has pending runs, is its ``rabota-schedule@`` timer enabled?
+    """One row per tenant: if it has runs waiting on a tick, is its ``rabota-schedule@`` timer enabled?
 
     ``schedule add`` refuses on a disarmed timer, but a timer can be disabled after its runs were
     declared, and then nothing fires them: each sits until it would have expired, and nothing
-    expires it either. Only a tenant WITH pending runs asks systemd; one without passes and says
-    why, so a missing row never reads as a clean one.
+    expires it either. A RUNNING run waits on the tick too, since only a tick settles it, so both
+    count (the design names pending; a running run under a disarmed timer would otherwise pass
+    here and surface only as stuck, its timeout later). Only a tenant with such runs asks systemd;
+    one without passes and says why, so a missing row never reads as a clean one.
+
+    "Enabled" is the design's test and ``schedule add``'s (``decl.timer_armed``, shared). Whether
+    an enabled timer is still FIRING is timer-health's leg of §5, not this one.
     """
     rows = []
     for name, got in stores.items():
@@ -567,24 +574,36 @@ def schedule_timers(ctx, stores: dict) -> list[tuple[str, bool, str]]:
                                       f"{unit} has pending runs to fire is UNMEASURED; doctor does not "
                                       f"migrate another tenant's store"))
             continue
-        pending = [r for r in got["rows"] if r["status"] == "pending"]
-        if not pending:
-            rows.append((name, True, f"{name!r} {got['why'] or 'has no pending run'}, so {unit} has "
-                                     f"nothing to fire"))
+        waiting = [r for r in got["rows"] if r["status"] in ("pending", "running")]
+        if not waiting:
+            rows.append((name, True, f"{name!r} {got['why'] or 'has no pending or running run'}, so "
+                                     f"{unit} has nothing to fire"))
             continue
-        res = ctx.runner.run(["systemctl", "--user", "is-enabled", unit], timeout=15)
-        state = (res.out.strip() or res.err.strip() or f"exit {res.code}").splitlines()[0]
-        ok = res.ok and state == "enabled"
-        what = f"{name!r} has {len(pending)} pending {'run' if len(pending) == 1 else 'runs'}"
+        ok, state = decl.timer_armed(ctx.runner, name)
+        what = f"{name!r} has {len(waiting)} pending or running {'run' if len(waiting) == 1 else 'runs'}"
         rows.append((name, ok, f"{what} and {unit} is enabled" if ok else
-                     _clean(f"{what} ({', '.join(r['id'] for r in pending)}) and {unit} is NOT "
-                            f"enabled ({state}), so nothing fires them; arming it is @zvi's step: "
-                            f"systemctl --user enable --now {unit}")))
+                     _clean(f"{what} ({', '.join(r['id'] for r in waiting)}) and {unit} is NOT "
+                            f"enabled ({state}), so nothing fires or settles them; arming it is "
+                            f"@zvi's step: systemctl --user enable --now {unit}")))
     return rows
 
 
-def _read(stores: dict) -> str:
-    return ", ".join(n for n, g in stores.items() if g["rows"] is not None) or "none"
+def _all_clear(stores: dict, claim: str) -> tuple[None, bool, str]:
+    """The one row a check emits when it found nothing: a PASS naming the stores read, or, when no
+    store could be read at all, a FAIL -- nothing measured is not clean."""
+    read = [n for n, g in stores.items() if g["rows"] is not None]
+    if not read:
+        return (None, False, f"no tenant's store could be read, so whether {claim} is UNMEASURED")
+    return (None, True, f"{claim} (stores read: {', '.join(read)})")
+
+
+def _when(row: dict, field: str) -> datetime.datetime | None:
+    """``row[field]`` as an aware time; None when it is missing or not one a tick would have written."""
+    try:
+        t = datetime.datetime.fromisoformat((row[field] or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else None
 
 
 def schedule_overdue(stores: dict, now: datetime.datetime) -> list[tuple[str | None, bool, str]]:
@@ -598,14 +617,19 @@ def schedule_overdue(stores: dict, now: datetime.datetime) -> list[tuple[str | N
     rows = []
     for name, got in stores.items():
         for r in got["rows"] or []:
-            due = datetime.datetime.fromisoformat(r["not_before"].replace("Z", "+00:00"))
-            if r["status"] == "pending" and now - due > OVERDUE_AFTER:
+            if r["status"] != "pending":
+                continue
+            due = _when(r, "not_before")
+            if due is None:
+                rows.append((r["id"], False, _clean(f"{_run_name(name, r)} is pending with a due time "
+                                                    f"that does not parse ({r['not_before']!r}), so "
+                                                    f"whether it is overdue is UNMEASURED")))
+            elif now - due > OVERDUE_AFTER:
                 rows.append((r["id"], False, _clean(
                     f"{_run_name(name, r)} was due {decl._local(r['not_before'])} and is still pending "
                     f"{_minutes(now - due)} later; last reason: "
                     f"{r['last_reason'] or 'none, so no tick has reached it since it came due'}")))
-    return rows or [(None, True, f"no pending run is more than {_minutes(OVERDUE_AFTER)} past due "
-                                 f"(stores read: {_read(stores)})")]
+    return rows or [_all_clear(stores, f"no pending run is more than {_minutes(OVERDUE_AFTER)} past due")]
 
 
 def schedule_stuck(stores: dict, now: datetime.datetime) -> list[tuple[str | None, bool, str]]:
@@ -622,11 +646,12 @@ def schedule_stuck(stores: dict, now: datetime.datetime) -> list[tuple[str | Non
         for r in got["rows"] or []:
             if r["status"] != "running":
                 continue
-            if not r["started_at"]:
-                rows.append((r["id"], False, _clean(f"{_run_name(name, r)} is running with no started_at, "
-                                                    f"so how long it has run is UNMEASURED")))
+            started = _when(r, "started_at")
+            if started is None:
+                rows.append((r["id"], False, _clean(f"{_run_name(name, r)} is running with no started_at "
+                                                    f"it can be timed from ({r['started_at']!r}), so how "
+                                                    f"long it has run is UNMEASURED")))
                 continue
-            started = datetime.datetime.fromisoformat(r["started_at"].replace("Z", "+00:00"))
             limit = datetime.timedelta(seconds=r["timeout_s"]) + RUNNING_GRACE
             if now - started > limit:
                 rows.append((r["id"], False, _clean(
@@ -634,8 +659,7 @@ def schedule_stuck(stores: dict, now: datetime.datetime) -> list[tuple[str | Non
                     f"{decl._local(r['started_at'])}, past its {r['timeout_s']} s timeout plus "
                     f"{_minutes(RUNNING_GRACE)} grace, as {r['unit']}; see `systemctl --user status "
                     f"{r['unit']}`. Wall time: a suspend while it ran counts")))
-    return rows or [(None, True, f"no running run is past its timeout plus {_minutes(RUNNING_GRACE)} "
-                                 f"(stores read: {_read(stores)})")]
+    return rows or [_all_clear(stores, f"no running run is past its timeout plus {_minutes(RUNNING_GRACE)}")]
 
 
 def run_doctor(ctx: Context, clauth_profiles=None, now: datetime.datetime | None = None) -> dict:
@@ -684,16 +708,22 @@ def run_doctor(ctx: Context, clauth_profiles=None, now: datetime.datetime | None
             problems.append(f"declared seat on machine {name!r}: {detail}")
     stores = schedule_stores(ctx)
     timer_rows = schedule_timers(ctx, stores)
+    # One cause is not listed twice; each consequence stays in the report as its own failing row.
+    # This tenant's own store failing to open IS the schema problem above, and a disarmed timer IS
+    # why its tenant's runs are overdue (every one of them, by "no tick has reached it").
+    disarmed = set()
     for name, ok, detail in timer_rows:
-        # This tenant's own store failing to open IS the schema problem above: its row stays in
-        # the report, but one cause is not listed twice.
-        if not ok and not (name == ctx.tenant.name and schema != SCHEMA_VERSION):
+        if ok:
+            continue
+        if stores[name]["rows"] is not None:
+            disarmed |= {r["id"] for r in stores[name]["rows"]}
+        if not (name == ctx.tenant.name and schema != SCHEMA_VERSION):
             problems.append(f"schedule timer for {name!r}: {detail}")
     overdue_rows = schedule_overdue(stores, now)
     stuck_rows = schedule_stuck(stores, now)
     for label, rs in (("overdue", overdue_rows), ("stuck", stuck_rows)):
         for run, ok, detail in rs:
-            if not ok:
+            if not ok and not (label == "overdue" and run in disarmed):
                 problems.append(f"{label} scheduled run {run}: {detail}")
     as_rows = lambda rs: [{"machine": n, "ok": ok, "detail": d} for n, ok, d in rs]
     as_runs = lambda rs: [{"run": n, "ok": ok, "detail": d} for n, ok, d in rs]

@@ -965,9 +965,11 @@ ENABLED = Result(0, "enabled\n", "")
 # One needle per row kind, each in that kind's text and in no other's (test_needles_are_unique).
 NEEDLES = {"timer-armed": "timer is enabled", "timer-disarmed": "is NOT enabled",
            "timer-idle": "has nothing to fire", "timer-unmeasured": "doctor does not migrate",
-           "overdue-pass": "no pending run is more than", "overdue-fail": "and is still pending",
-           "stuck-pass": "no running run is past its timeout", "stuck-fail": "has been running",
-           "stuck-unmeasured": "is running with no started_at"}
+           "overdue-pass": "past due (stores read:", "overdue-fail": "and is still pending",
+           "stuck-pass": "past its timeout plus 20 min (stores read:", "stuck-fail": "has been running",
+           "stuck-unmeasured": "is running with no started_at",
+           "overdue-unmeasured": "with a due time that does not parse",
+           "nothing-read": "no tenant's store could be read"}
 
 
 def _iso(dt):
@@ -1048,7 +1050,7 @@ class ScheduleTimerTests(SchedulerHealthBase):
     def test_pending_runs_and_an_enabled_timer_pass_asking_for_that_tenants_unit(self):
         ctx = self.make_ctx(is_enabled("toysim"))
         rows = doctor.schedule_timers(ctx, self.stores(toysim=[sched("s-1"), sched("s-2")]))
-        self.assertEqual(rows, [("toysim", True, "'toysim' has 2 pending runs and "
+        self.assertEqual(rows, [("toysim", True, "'toysim' has 2 pending or running runs and "
                                                  "rabota-schedule@toysim.timer is enabled")])
         self.assertIn(NEEDLES["timer-armed"], rows[0][2])
         self.assertEqual(self.unsched_calls(), [["systemctl", "--user", "is-enabled", "rabota-schedule@toysim.timer"]])
@@ -1067,10 +1069,18 @@ class ScheduleTimerTests(SchedulerHealthBase):
                 self.assertIn("(s-1)", detail)
                 self.assertIn("systemctl --user enable --now rabota-schedule@toysim.timer", detail)
 
-    def test_a_tenant_with_no_pending_run_passes_and_asks_systemd_nothing(self):
+    def test_a_running_run_needs_the_timer_too_since_only_a_tick_settles_it(self):
+        ctx = self.make_ctx(is_enabled("toysim", Result(1, "disabled\n", "")))
+        [(name, ok, detail)] = doctor.schedule_timers(
+            ctx, self.stores(toysim=[sched("s-1", status="running", started=S_NOW)]))
+        self.assertEqual((name, ok), ("toysim", False))
+        self.assertIn("1 pending or running run (s-1)", detail)
+        self.assertIn(NEEDLES["timer-disarmed"], detail)
+
+    def test_a_tenant_with_no_pending_or_running_run_passes_and_asks_systemd_nothing(self):
         ctx = self.make_ctx()        # no is-enabled response: a call would fail the row
         rows = doctor.schedule_timers(ctx, self.stores(
-            toysim=[sched("s-1", status="running", started=S_NOW), sched("s-2", status="done")], personal=[]))
+            toysim=[sched("s-1", status="done"), sched("s-2", status="cancelled")], personal=[]))
         self.assertEqual([(n, ok) for n, ok, _ in rows], [("personal", True), ("toysim", True)])
         self.assertTrue(all(NEEDLES["timer-idle"] in d for _, _, d in rows), rows)
         self.assertEqual(self.unsched_calls(), [])
@@ -1195,6 +1205,22 @@ class ScheduleOverdueTests(SchedulerHealthBase):
                                                                             "expired", "cancelled")]), S_NOW)
         self.assertEqual([ok for _, ok, _ in rows], [True])
 
+    def test_a_due_time_that_does_not_parse_is_unmeasured_not_a_crash(self):
+        for bad in ("not a time", "2026-10-14T11:00:00"):        # garbage; naive (no offset)
+            with self.subTest(bad=bad):
+                [(run, ok, detail)] = doctor.schedule_overdue(
+                    self.stores(toysim=[{**sched("s-1"), "not_before": bad}]), S_NOW)
+                self.assertEqual((run, ok), ("s-1", False))
+                self.assertIn(NEEDLES["overdue-unmeasured"], detail)
+
+    def test_no_store_read_at_all_is_unmeasured_not_clean(self):
+        nothing = {"personal": {"rows": None, "why": "x"}, "toysim": {"rows": None, "why": "y"}}
+        for check in (doctor.schedule_overdue, doctor.schedule_stuck):
+            with self.subTest(check=check.__name__):
+                [(run, ok, detail)] = check(nothing, S_NOW)
+                self.assertEqual((run, ok), (None, False))
+                self.assertIn(NEEDLES["nothing-read"], detail)
+
     def test_an_unreadable_store_is_left_to_the_timer_check(self):
         rows = doctor.schedule_overdue({"personal": {"rows": None, "why": "x"},
                                         "toysim": {"rows": [], "why": None}}, S_NOW)
@@ -1226,10 +1252,13 @@ class ScheduleStuckTests(SchedulerHealthBase):
             sched("s-long", status="running", started=start, timeout_s=3600)]), S_NOW)
         self.assertEqual([(run, ok) for run, ok, _ in rows], [("s-short", False)])
 
-    def test_a_running_row_with_no_start_time_is_unmeasured_not_clean(self):
-        [(run, ok, detail)] = doctor.schedule_stuck(self.stores(toysim=[sched("s-1", status="running")]), S_NOW)
-        self.assertEqual((run, ok), ("s-1", False))
-        self.assertIn(NEEDLES["stuck-unmeasured"], detail)
+    def test_a_running_row_with_no_usable_start_time_is_unmeasured_not_clean(self):
+        for bad in (None, "garbage", "2026-10-14T11:00:00"):       # missing; garbage; naive
+            with self.subTest(bad=bad):
+                [(run, ok, detail)] = doctor.schedule_stuck(
+                    self.stores(toysim=[{**sched("s-1", status="running"), "started_at": bad}]), S_NOW)
+                self.assertEqual((run, ok), ("s-1", False))
+                self.assertIn(NEEDLES["stuck-unmeasured"], detail)
 
     def test_only_a_running_row_can_be_stuck(self):
         old = S_NOW - timedelta(days=2)
@@ -1251,14 +1280,34 @@ class SchedulerHealthWiringTests(SchedulerHealthBase):
         self.assertEqual([(r["run"], r["ok"]) for r in report["schedule_stuck"]], [(None, True)])
 
     def test_each_failure_is_named_in_problems_and_fails_the_report(self):
-        ctx = self.make_ctx(is_enabled("toysim", Result(1, "disabled\n", "")))
+        ctx = self.make_ctx(is_enabled("toysim"), is_enabled("personal", Result(1, "disabled\n", "")))
         self.put(ctx, "toysim", sched("s-late", due=S_NOW - timedelta(hours=1)),
                  sched("s-hung", status="running", started=S_NOW - timedelta(hours=1)))
+        self.put(ctx, "personal", sched("s-p1"))
         report = doctor.run_doctor(ctx, now=S_NOW)
         self.assertFalse(report["ok"])
         kinds = [p.split(":")[0] for p in report["problems"]]
-        self.assertEqual(kinds, ["schedule timer for 'toysim'", "overdue scheduled run s-late",
+        self.assertEqual(kinds, ["schedule timer for 'personal'", "overdue scheduled run s-late",
                                  "stuck scheduled run s-hung"])
+
+    def test_a_disarmed_timer_is_the_one_problem_for_its_overdue_runs_which_stay_in_the_report(self):
+        ctx = self.make_ctx(is_enabled("toysim", Result(1, "disabled\n", "")))
+        self.put(ctx, "toysim", sched("s-a", due=S_NOW - timedelta(hours=1)),
+                 sched("s-b", due=S_NOW - timedelta(hours=2)),
+                 sched("s-hung", status="running", started=S_NOW - timedelta(hours=1)))
+        report = doctor.run_doctor(ctx, now=S_NOW)
+        kinds = [p.split(":")[0] for p in report["problems"]]
+        # a stuck run is not explained by the timer alone: its unit outlived RuntimeMaxSec too
+        self.assertEqual(kinds, ["schedule timer for 'toysim'", "stuck scheduled run s-hung"])
+        self.assertEqual([(r["run"], r["ok"]) for r in report["schedule_overdue"]],
+                         [("s-b", False), ("s-a", False)])
+
+    def test_a_corrupt_terminal_row_is_never_read(self):
+        # Only pending and running rows are loaded, so history cannot crash or slow the check.
+        ctx = self.make_ctx()
+        self.put(ctx, "toysim", sched("s-old", status="done"))
+        ctx.store.conn.execute("UPDATE schedules SET args='{not json' WHERE id='s-old'")
+        self.assertEqual(doctor.schedule_stores(ctx)["toysim"]["rows"], [])
 
     def test_a_scheduler_failure_exits_through_doctors_existing_refusal(self):
         # The CLI path, unchanged: a report that is not ok is printed and then refused (exit 3).
@@ -1299,6 +1348,9 @@ class SchedulerHealthWiringTests(SchedulerHealthBase):
             "stuck-fail": doctor.schedule_stuck(self.stores(c=[sched("s-1", status="running", started=start)]),
                                                 S_NOW)[0][2],
             "stuck-unmeasured": doctor.schedule_stuck(self.stores(c=[sched("s-1", status="running")]), S_NOW)[0][2],
+            "overdue-unmeasured": doctor.schedule_overdue(
+                self.stores(c=[{**sched("s-1"), "not_before": "x"}]), S_NOW)[0][2],
+            "nothing-read": doctor.schedule_overdue({"d": {"rows": None, "why": "x"}}, S_NOW)[0][2],
         }
         for kind, needle in NEEDLES.items():
             self.assertEqual([k for k, t in texts.items() if needle in t], [kind], needle)
