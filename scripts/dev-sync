@@ -58,6 +58,9 @@
 #   - mint or store the long-lived Claude token. A person runs `claude setup-token`
 #     and scripts/claude-oauth-store on dev; this reads only the file's mode, its
 #     shape and its date, and loads it for its own `claude` calls.
+#   - repoint ~/.ssh/ssh_auth_sock. It reports where the link goes (dev's own agent,
+#     dangling, or an agent FORWARDED from the laptop, which it never probes) and
+#     how fast `ssh-add -l` answers, bounded to 1 s. The shell repairs the link.
 #   - write agents.slice. Its cap is set on dev with `systemctl --user
 #     set-property` (drop-ins under ~/.config/systemd/user.control/), and the
 #     effective values are shown as information.
@@ -456,6 +459,44 @@ busy_panes() {
         [[ "$st" == idle ]] || n=$((n + 1))   # unreadable counts as busy
     done <<<"$ids"
     echo "$n"
+}
+
+# ~/.ssh/ssh_auth_sock is what panes, the herdr server and tmux hand every process as
+# SSH_AUTH_SOCK. On 2026-10-14 it pointed at an agent forwarded from the laptop: while any ssh to
+# dev stayed open, each new pane's ssh-add went back through it to the laptop's Bitwarden agent
+# and hung, and anything on the box could use the laptop's keys. The shell no longer publishes a
+# forwarded agent here (zshrc.conditionals.plugins); this reports what the link is now.
+# Forwarded means VSCode's socket, or sshd's /tmp/ssh-*/agent.<pid> with sshd behind the pid: a
+# local `ssh-agent -s` makes the same shape, named after its own parent.
+# shellcheck disable=SC2088  # "~/.ssh/..." is a label in the rows, not a path to expand
+here_agent() {
+    local link="$HOME/.ssh/ssh_auth_sock" t pid="" comm="" t0 ms rc
+    if [[ ! -L "$link" ]]; then
+        row info agent "no ~/.ssh/ssh_auth_sock link$([[ -e "$link" ]] && echo ", a plain file is there")"
+        return
+    fi
+    if [[ ! -S "$link" ]]; then
+        row info agent "~/.ssh/ssh_auth_sock dangles (→ $(readlink "$link")); the next shell relinks it to dev's own agent"
+        return
+    fi
+    t="$(readlink -f "$link")"
+    [[ "$t" =~ /ssh-[^/]+/agent\.([0-9]+)$ ]] && pid="${BASH_REMATCH[1]}"
+    [[ -n "$pid" && -r "$PROC/$pid/comm" ]] && comm="$(<"$PROC/$pid/comm")"
+    if [[ "$t" == */vscode-ssh-auth-sock-* || "$comm" == sshd* ]]; then
+        # Never probed: asking a forwarded agent is the hang this row exists for.
+        row oper agent "~/.ssh/ssh_auth_sock → an agent FORWARDED from the laptop ($t): any process here can use its keys, and new panes' ssh-add waits on it. Set ForwardAgent no for dev and end that ssh; the next shell relinks to dev's own agent"
+        return
+    fi
+    row ok agent "~/.ssh/ssh_auth_sock → $t, a local agent"
+    t0="${EPOCHREALTIME/./}"
+    SSH_AUTH_SOCK="$link" timeout 1 ssh-add -l >/dev/null 2>&1 && rc=0 || rc=$?
+    ms=$(( (${EPOCHREALTIME/./} - t0) / 1000 ))
+    case "$rc" in
+        0) row ok agent "ssh-add -l answered in $ms ms, keys loaded" ;;
+        1) row ok agent "ssh-add -l answered in $ms ms, no keys loaded" ;;
+        124) row oper agent "ssh-add -l did not answer within 1 s: every new shell here waits on this agent" ;;
+        *) row info agent "ssh-add -l could not reach the agent (exit $rc, $ms ms)" ;;
+    esac
 }
 
 here_herdr() {
@@ -941,6 +982,7 @@ here_main() {
     here_timer
     here_claude
     here_auth
+    here_agent
     here_herdr
     here_draft
     here_plugins

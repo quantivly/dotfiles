@@ -1074,6 +1074,16 @@ outage.
   ```
   A non-interactive `ssh dev` has **no `~/.local/bin`**, so set `PATH` or use an absolute path.
   Never `zsh -ic` there: dev's interactive startup repoints `~/.ssh/ssh_auth_sock`.
+- **No forwarded ssh agent on dev.** Keep `ForwardAgent no` in the laptop's `Host dev` block.
+  With it on, dev's shell relinked `~/.ssh/ssh_auth_sock`, which panes, herdr and tmux hand
+  every process, to the laptop's agent. While any ssh to dev stayed open, each new pane's
+  `ssh-add -l` went back to Bitwarden and hung (5 s, 2026-10-14), and anything on the box could
+  use the laptop's keys. Nothing on dev needs it: signing reads `~/.ssh/signing_key.pub` and
+  git is HTTPS (next bullet). As defence in depth, a host with `~/.config/dev-sync` (the marker
+  dev-sync's timer keeps) never publishes a forwarded agent (sshd's or VSCode's) through the
+  link, relinks it to dev's own agent, and bounds every `ssh-add` probe at shell start to 1 s.
+  The laptop has no marker, so nothing changes there. `dev-sync --check`'s `agent` rows report
+  where the link goes and how fast `ssh-add -l` answers. They never probe a forwarded agent.
 - **Git is HTTPS-only.** `~/.gitconfig.local` rewrites both `git@github.com:` and
   `ssh://git@github.com/` to HTTPS so gh's credential helper (`!gh auth git-credential`, from the
   tracked `gitconfig`) authenticates, and pushes then need **no forwarded agent** — which a
