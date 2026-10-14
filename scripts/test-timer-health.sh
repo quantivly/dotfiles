@@ -85,6 +85,13 @@ case "${1:-}" in
     exit 0 ;;
   show)
     shift
+    # systemd < 251 (dev runs 249) rejects the flag outright, and prints its
+    # timestamps as local dates rather than @<epoch>.
+    old_systemd=0
+    if [ -e "$SCTL_STATE/old-systemd" ]; then
+      case " $* " in *" --timestamp=unix "*) echo "Invalid value: unix." >&2; exit 1 ;; esac
+      old_systemd=1
+    fi
     # The property list is read from the -p flags rather than matched against a
     # hardcoded set of names, and the output is FILTERED to it. Real systemctl
     # returns only what was asked for and silently OMITS a property the unit does
@@ -110,8 +117,13 @@ case "${1:-}" in
       *@.*) echo "Unit name $unit is neither a valid invocation ID nor unit name." >&2; exit 1 ;;
     esac
     emit() {
-      if [ -z "$want" ]; then cat; return 0; fi
       while IFS= read -r line; do
+        if [ "$old_systemd" = 1 ]; then
+          case "$line" in
+            *Timestamp=@*) line="${line%%=*}=$(date -d "${line#*=}" '+%a %Y-%m-%d %H:%M:%S %Z')" ;;
+          esac
+        fi
+        if [ -z "$want" ]; then printf '%s\n' "$line"; continue; fi
         case " $want " in *" ${line%%=*} "*) printf '%s\n' "$line" ;; esac
       done
       return 0
@@ -771,9 +783,41 @@ OUT="$(run --write-state --extra 2>&1)"; RC=$?
 check "--write-state takes no second argument" "$RC" 2
 
 # ---------------------------------------------------------------------------
+printf '\nsystemd before 251 (no --timestamp=unix)\n'
+# dev runs systemd 249, which rejects the flag with "Invalid value: unix." and
+# exit 1. Every property then read as empty, and a healthy timer was reported
+# "enabled but ActiveState=unknown — it will not fire" in every pane's banner.
+
+healthy
+: > "$STATE/old-systemd"
+OUT="$(run)"; RC=$?
+check "old systemd, healthy timer: exit 0" "$RC" 0
+grep_none "$OUT" 'will not fire' "old systemd: a healthy timer is not reported dead"
+check "old systemd: falls back to show without the flag" \
+      "$(( $(asked '^--user show precompute.timer') > 0 ))" 1
+
+healthy
+: > "$STATE/old-systemd"
+props precompute.service loaded failed exit-code 1 yes "@$((NOW-600))" ""
+OUT="$(run)"; RC=$?
+grep_ok "$OUT" 'last run FAILED' "old systemd: a failed run is still named"
+
+# The skip report needs ConditionTimestamp as a number: proof the local-date
+# form is converted rather than dropped. Pinned to a zone whose abbreviation
+# (IDT) uutils date cannot parse, so the row means the same on a UTC CI runner
+# as it does on a laptop: the checker must ask systemctl for UTC itself.
+healthy
+: > "$STATE/old-systemd"
+props precompute.service loaded inactive success 0 no "@$((NOW-600))" ""
+OUT="$(TZ=Asia/Jerusalem run)"; RC=$?
+check "old systemd, armed but SKIPPED: exit 1" "$RC" 1
+grep_ok "$OUT" "SKIPPED since $(TZ=Asia/Jerusalem date -d "@$((NOW-600))" '+%Y-%m-%d %H:%M')" \
+        "old systemd: the skip is dated from the converted timestamp"
+
+# ---------------------------------------------------------------------------
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=127
+EXPECTED_ROWS=133
 
 # --- the count this suite is documented as running ---------------------------
 # docs_claim pins the number the prose quotes to EXPECTED_ROWS above: it greps

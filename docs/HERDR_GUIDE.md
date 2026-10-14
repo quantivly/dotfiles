@@ -1129,8 +1129,10 @@ outage.
   login-session scopes over 200 MB. `--apply` fixes the ✗ rows inside a capped transient scope
   in `agents.slice`, and arms `dev-sync.timer` on dev, a daily run of the same thing that needs
   no laptop and no `aws login`. A herdr upgrade installs the laptop's exact release asset,
-  verified against the laptop binary's sha256, and only while **no pane** is open on dev's
-  server, because the restart closes every pane; until then it is a ⚠ naming what is open. It
+  verified against the laptop binary's sha256, and only while no agent runs and **every pane
+  is idle at its shell prompt**, because the restart closes every pane; until then it is a ⚠
+  naming what is busy. "No pane at all" is not a usable test: while a client is attached, herdr
+  recreates a default workspace the moment the last one closes. It
   never signs in to an MCP server, never handles `LINEAR_API_KEY`'s value and never runs sudo;
   those come back as ⚠ rows for a person.
 - **Disarming dev-sync's timer is sticky, and takes three steps on dev.** Deleting the `armed`
