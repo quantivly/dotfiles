@@ -1,7 +1,8 @@
 import argparse, hashlib, json, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
-from rabota import context, errors
+from rabota import context, errors, store
 from rabota.commands import doctor, lane
 from rabota.runner import FakeRunner, Result
 from rabota.store import SCHEMA_VERSION
@@ -57,6 +58,22 @@ def pin_tenant_root(case, ctx, *repos):
     return root
 
 
+def pin_tenant_stores(case, ctx):
+    """Point every OTHER fixture tenant's ``state_dir`` at a fresh, empty directory.
+
+    DO-818's scheduler checks read every tenant's store, and the fixture tenants' state dirs
+    expand to real paths under ``~`` -- which hold this user's live stores on the machine this
+    suite was written on. Left unpinned, a row answers from those: the same trap
+    ``pin_tenant_root`` closes for the tenant's ``root``. The caller's own tenant is read from
+    ``ctx.state_dir``, which every builder here already points into a temp dir.
+    """
+    tmp = tempfile.TemporaryDirectory(); case.addCleanup(tmp.cleanup)
+    for name, t in ctx.cfg.tenants.items():
+        if name != ctx.tenant.name:
+            t.state_dir = Path(tmp.name) / name
+    return Path(tmp.name)
+
+
 def remote_ok():
     """Healthy answers for both of doctor's per-machine ssh calls.
 
@@ -82,6 +99,7 @@ class DoctorTests(unittest.TestCase):
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(ctx.close)   # nothing else owns it: the test builds it, so the test closes it
         pin_tenant_root(self, ctx, "widgets")
+        pin_tenant_stores(self, ctx)
         return ctx
 
     def _stamp(self, version):
@@ -121,6 +139,7 @@ class DoctorTests(unittest.TestCase):
                                         text=False, dry_run=False, command="doctor")
                 ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
                 self.addCleanup(ctx.close)
+                pin_tenant_stores(self, ctx)
                 doctor.run_doctor(ctx, clauth_profiles=clauth_tree(self))
                 timer_call = next(c for c in runner.calls if c[:3] == ["systemctl", "--user", "is-enabled"])
                 self.assertEqual(timer_call[-1], f"rabota-precompute@{tenant}.timer")
@@ -277,6 +296,7 @@ class SeatCacheDoctorWiringTests(unittest.TestCase):
         # "hub" is the one repo key the quantivly fixture's [machines.dev].repos declares; the
         # toysim fixture declares none, and any checkout answers its row.
         pin_tenant_root(self, ctx, "hub")
+        pin_tenant_stores(self, ctx)
         return ctx
 
     def healthy_base(self):
@@ -812,6 +832,7 @@ class TenantRootWiringTests(unittest.TestCase):
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"},
                                              cwd=Path("/"))
         self.addCleanup(ctx.close)
+        pin_tenant_stores(self, ctx)
         return ctx
 
     def test_a_healthy_root_reports_a_passing_row_and_does_not_fail_the_report(self):
@@ -865,6 +886,7 @@ class CrossMachineWiringTests(unittest.TestCase):
         # "hub" is the one repo key the quantivly fixture's [machines.dev].repos declares; the
         # toysim fixture declares none, and any checkout answers its row.
         pin_tenant_root(self, ctx, "hub")
+        pin_tenant_stores(self, ctx)
         return ctx
 
     def base(self, *extra):
@@ -930,3 +952,405 @@ class FetchedAtTests(unittest.TestCase):
         detail = doctor.remote_seat_identity(ctx, clauth_tree(self))[0][2]
         self.assertIn("2026-09-20T09:13:27Z", detail)
         self.assertNotIn("1789895607090", detail)
+
+
+# --- the scheduler's queue (DO-818) -------------------------------------------------------------
+
+S_NOW = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
+S_MIN = timedelta(minutes=1)
+READLINK = (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", ""))
+PRECOMPUTE = (["systemctl", "--user", "is-enabled", "rabota-precompute@toysim.timer"], Result(0, "enabled\n", ""))
+ENABLED = Result(0, "enabled\n", "")
+
+# One needle per row kind, each in that kind's text and in no other's (test_needles_are_unique).
+NEEDLES = {"timer-armed": "timer is enabled", "timer-disarmed": "is NOT enabled",
+           "timer-idle": "has nothing to fire", "timer-unmeasured": "doctor does not migrate",
+           "overdue-pass": "past due (stores read:", "overdue-fail": "and is still pending",
+           "stuck-pass": "past its timeout plus 20 min (stores read:", "stuck-fail": "has been running",
+           "stuck-unmeasured": "is running with no started_at",
+           "overdue-unmeasured": "with a due time that does not parse",
+           "nothing-read": "no tenant's store could be read"}
+
+
+def _iso(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def sched(sid, tenant="toysim", status="pending", due=S_NOW - 5 * S_MIN, started=None, timeout_s=900,
+          last_reason=None, title="count refusals", kind="command"):
+    """One schedules row, as the store returns it and as ``insert_schedule`` takes it."""
+    return {"id": sid, "tenant": tenant, "kind": kind, "title": title, "cwd": "/tmp",
+            "payload_path": f"/x/schedules/{sid}/script", "payload_sha256": "0" * 64,
+            "not_before": _iso(due), "expires_at": _iso(due + timedelta(hours=48)),
+            "timeout_s": timeout_s, "memory_max": "1G", "max_attempts": 2, "status": status,
+            "attempt": 1 if status == "running" else 0, "last_reason": last_reason,
+            "unit": f"rabota-sched-{tenant}-{sid}-a1.service" if status == "running" else None,
+            "started_at": _iso(started) if started else None, "created_at": _iso(S_NOW - timedelta(days=1))}
+
+
+def is_enabled(tenant, result=ENABLED):
+    """A response keyed on the WHOLE argv, so a call for any other unit falls through and fails."""
+    return (["systemctl", "--user", "is-enabled", f"rabota-schedule@{tenant}.timer"], result)
+
+
+def stamp(state_dir, version):
+    conn = sqlite3.connect(Path(state_dir) / "rabota.db")
+    conn.execute("UPDATE schema_version SET version=?", (version,)); conn.commit(); conn.close()
+
+
+def stamped(state_dir):
+    conn = sqlite3.connect(Path(state_dir) / "rabota.db")
+    try:
+        return conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
+class SchedulerHealthBase(unittest.TestCase):
+    """The caller is toysim (no machines, so no ssh); personal and quantivly are the OTHER tenants."""
+
+    def make_ctx(self, *responses):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        self.runner = FakeRunner([READLINK, PRECOMPUTE] + list(responses))
+        ns = argparse.Namespace(tenant="toysim", state_dir=str(Path(tmp.name) / "state"),
+                                text=False, dry_run=False, command="doctor")
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=self.runner, env={"PATH": "/bin"},
+                                             cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        pin_tenant_root(self, ctx, "widgets")
+        pin_tenant_stores(self, ctx)
+        return ctx
+
+    def put(self, ctx, tenant, *rows):
+        """Write ``rows`` into ``tenant``'s own store: the caller's through its context, any other's directly."""
+        if tenant == ctx.tenant.name:
+            for r in rows:
+                ctx.store.insert_schedule(r)
+            return ctx.state_dir
+        state_dir = Path(ctx.cfg.tenants[tenant].state_dir)
+        s = store.Store.open(state_dir)
+        try:
+            for r in rows:
+                s.insert_schedule({**r, "tenant": tenant})
+        finally:
+            s.close()
+        return state_dir
+
+    def stores(self, **by_tenant):
+        """A ``schedule_stores`` result built by hand, for the checks that only read it."""
+        return {t: {"rows": rows, "why": None} for t, rows in sorted(by_tenant.items())}
+
+    def unsched_calls(self):
+        return [c for c in self.runner.calls if c[-1].startswith("rabota-schedule@")]
+
+
+class ScheduleTimerTests(SchedulerHealthBase):
+    """Check 1: every tenant that has pending runs has its rabota-schedule@ timer enabled."""
+
+    def test_pending_runs_and_an_enabled_timer_pass_asking_for_that_tenants_unit(self):
+        ctx = self.make_ctx(is_enabled("toysim"))
+        rows = doctor.schedule_timers(ctx, self.stores(toysim=[sched("s-1"), sched("s-2")]))
+        self.assertEqual(rows, [("toysim", True, "'toysim' has 2 pending or running runs and "
+                                                 "rabota-schedule@toysim.timer is enabled")])
+        self.assertIn(NEEDLES["timer-armed"], rows[0][2])
+        self.assertEqual(self.unsched_calls(), [["systemctl", "--user", "is-enabled", "rabota-schedule@toysim.timer"]])
+
+    def test_pending_runs_and_a_timer_that_is_not_enabled_fail_naming_runs_state_and_remedy(self):
+        # `static` exits 0 and is still not armed: the state is read, not just the exit code.
+        for res, state in ((Result(1, "disabled\n", ""), "disabled"), (Result(4, "not-found\n", ""), "not-found"),
+                           (Result(0, "static\n", ""), "static"), (Result(1, "", "Failed to connect to bus"),
+                                                                    "Failed to connect to bus")):
+            with self.subTest(state=state):
+                ctx = self.make_ctx(is_enabled("toysim", res))
+                [(name, ok, detail)] = doctor.schedule_timers(ctx, self.stores(toysim=[sched("s-1")]))
+                self.assertEqual((name, ok), ("toysim", False))
+                self.assertIn(NEEDLES["timer-disarmed"], detail)
+                self.assertIn(f"({state})", detail)
+                self.assertIn("(s-1)", detail)
+                self.assertIn("systemctl --user enable --now rabota-schedule@toysim.timer", detail)
+
+    def test_a_running_run_needs_the_timer_too_since_only_a_tick_settles_it(self):
+        ctx = self.make_ctx(is_enabled("toysim", Result(1, "disabled\n", "")))
+        [(name, ok, detail)] = doctor.schedule_timers(
+            ctx, self.stores(toysim=[sched("s-1", status="running", started=S_NOW)]))
+        self.assertEqual((name, ok), ("toysim", False))
+        self.assertIn("1 pending or running run (s-1)", detail)
+        self.assertIn(NEEDLES["timer-disarmed"], detail)
+
+    def test_a_tenant_with_no_pending_or_running_run_passes_and_asks_systemd_nothing(self):
+        ctx = self.make_ctx()        # no is-enabled response: a call would fail the row
+        rows = doctor.schedule_timers(ctx, self.stores(
+            toysim=[sched("s-1", status="done"), sched("s-2", status="cancelled")], personal=[]))
+        self.assertEqual([(n, ok) for n, ok, _ in rows], [("personal", True), ("toysim", True)])
+        self.assertTrue(all(NEEDLES["timer-idle"] in d for _, _, d in rows), rows)
+        self.assertEqual(self.unsched_calls(), [])
+
+    def test_another_tenants_pending_run_is_weighed_against_ITS_timer_and_fails_this_report(self):
+        ctx = self.make_ctx(is_enabled("personal", Result(1, "disabled\n", "")))
+        self.put(ctx, "personal", sched("s-p1"))
+        report = doctor.run_doctor(ctx, now=S_NOW)
+        self.assertFalse(report["ok"])
+        self.assertEqual({r["tenant"]: r["ok"] for r in report["schedule_timers"]},
+                         {"personal": False, "quantivly": True, "toysim": True})
+        self.assertTrue(any(p.startswith("schedule timer for 'personal': ") for p in report["problems"]),
+                        report["problems"])
+
+    def test_a_store_older_than_the_schedules_table_holds_no_run_and_is_not_migrated(self):
+        ctx = self.make_ctx()
+        d = self.put(ctx, "personal")
+        stamp(d, 4)
+        got = doctor.schedule_stores(ctx)["personal"]
+        self.assertEqual(got["rows"], [])
+        [(_, ok, detail)] = [r for r in doctor.schedule_timers(ctx, {"personal": got})]
+        self.assertTrue(ok)
+        self.assertIn("schema 4, older than the schedules table", detail)
+        self.assertEqual(stamped(d), 4)
+
+    def test_a_newer_store_is_unmeasured_and_fails_and_is_not_migrated(self):
+        ctx = self.make_ctx()
+        d = self.put(ctx, "personal", sched("s-p1"))
+        stamp(d, SCHEMA_VERSION + 1)
+        report = doctor.run_doctor(ctx, now=S_NOW)
+        [row] = [r for r in report["schedule_timers"] if r["tenant"] == "personal"]
+        self.assertFalse(row["ok"])
+        self.assertIn(NEEDLES["timer-unmeasured"], row["detail"])
+        self.assertIn(f"is at schema {SCHEMA_VERSION + 1}", row["detail"])
+        self.assertFalse(report["ok"])
+        self.assertEqual(stamped(d), SCHEMA_VERSION + 1)
+        self.assertEqual(self.unsched_calls(), [])
+
+    def test_after_a_schema_bump_a_store_that_has_the_schedules_table_is_unmeasured_not_empty(self):
+        # Only a store BELOW SCHEDULES_SCHEMA is known to hold no run. Once SCHEMA_VERSION moves
+        # past it, a store at SCHEDULES_SCHEMA can hold pending runs open_current refuses to read.
+        ctx = self.make_ctx()
+        d = self.put(ctx, "personal", sched("s-p1"))
+        self.assertEqual(stamped(d), doctor.SCHEDULES_SCHEMA)
+        with mock.patch.object(store, "SCHEMA_VERSION", doctor.SCHEDULES_SCHEMA + 1):
+            got = doctor.schedule_stores(ctx)["personal"]
+        self.assertIsNone(got["rows"])
+        self.assertIn(f"is at schema {doctor.SCHEDULES_SCHEMA}", got["why"])
+
+    def test_only_the_tenants_own_rows_are_weighed_as_the_tick_reads_them(self):
+        # A row tagged for another tenant (a --state-dir pointed across) is one no tick for this
+        # tenant would ever fire, so it is not this tenant's pending run.
+        ctx = self.make_ctx()
+        self.put(ctx, "toysim", {**sched("s-foreign"), "tenant": "quantivly"}, sched("s-own"))
+        self.assertEqual([r["id"] for r in doctor.schedule_stores(ctx)["toysim"]["rows"]], ["s-own"])
+
+    def test_a_store_whose_rows_no_longer_decode_is_unmeasured_not_a_crash(self):
+        ctx = self.make_ctx()
+        d = self.put(ctx, "personal", sched("s-p1"))
+        conn = sqlite3.connect(d / "rabota.db")
+        conn.execute("UPDATE schedules SET args='{not json'"); conn.commit(); conn.close()
+        got = doctor.schedule_stores(ctx)["personal"]
+        self.assertIsNone(got["rows"])
+        self.assertIn("JSONDecodeError", got["why"])
+
+    def test_a_tenant_with_no_store_passes_and_none_is_created(self):
+        ctx = self.make_ctx()
+        got = doctor.schedule_stores(ctx)
+        self.assertEqual(got["quantivly"]["rows"], [])
+        self.assertIn("has no store at", got["quantivly"]["why"])
+        self.assertFalse(Path(ctx.cfg.tenants["quantivly"].state_dir).exists())
+
+    def test_the_callers_own_store_is_read_from_its_state_dir_override(self):
+        ctx = self.make_ctx()
+        ctx.tenant.state_dir = Path("/nonexistent/should-not-be-read")
+        self.put(ctx, "toysim", sched("s-own"))
+        self.assertEqual([r["id"] for r in doctor.schedule_stores(ctx)["toysim"]["rows"]], ["s-own"])
+
+    def test_the_callers_own_unreadable_store_is_not_listed_twice(self):
+        # The schema problem already names it; the timer row stays in the report, failing.
+        ctx = self.make_ctx()
+        ctx.store.close(); ctx._store = None
+        stamp(ctx.state_dir, SCHEMA_VERSION + 1)
+        report = doctor.run_doctor(ctx, now=S_NOW)
+        [row] = [r for r in report["schedule_timers"] if r["tenant"] == "toysim"]
+        self.assertFalse(row["ok"])
+        self.assertEqual([p for p in report["problems"] if "schedule timer" in p], [])
+
+
+class ScheduleOverdueTests(SchedulerHealthBase):
+    """Check 2: no run due more than 30 minutes ago is still pending; a failure names each and its last_reason."""
+
+    def test_a_run_due_exactly_the_threshold_ago_passes_with_one_row_naming_the_stores_read(self):
+        rows = doctor.schedule_overdue(self.stores(toysim=[sched("s-1", due=S_NOW - doctor.OVERDUE_AFTER)],
+                                                   personal=[]), S_NOW)
+        self.assertEqual(rows, [(None, True, "no pending run is more than 30 min past due "
+                                             "(stores read: personal, toysim)")])
+        self.assertIn(NEEDLES["overdue-pass"], rows[0][2])
+
+    def test_each_overdue_run_fails_on_its_own_row_naming_its_last_reason(self):
+        from rabota import scheduler
+        late = S_NOW - doctor.OVERDUE_AFTER - S_MIN
+        rows = doctor.schedule_overdue(self.stores(
+            toysim=[sched("s-1", due=late, kind="agent", last_reason=scheduler.AGENT_DEFERRAL)],
+            personal=[sched("s-2", due=late - timedelta(hours=2), last_reason=scheduler.COMMAND_DEFERRAL)]), S_NOW)
+        self.assertEqual([(run, ok) for run, ok, _ in rows], [("s-2", False), ("s-1", False)])
+        for (_, _, detail), reason, ago in zip(rows, (scheduler.COMMAND_DEFERRAL, scheduler.AGENT_DEFERRAL),
+                                              ("151 min", "31 min")):
+            self.assertIn(NEEDLES["overdue-fail"], detail)
+            self.assertIn(f"{ago} later; last reason: {reason}", detail)
+
+    def test_an_overdue_run_no_tick_ever_touched_says_so(self):
+        [(_, ok, detail)] = doctor.schedule_overdue(
+            self.stores(toysim=[sched("s-1", due=S_NOW - timedelta(hours=1))]), S_NOW)
+        self.assertFalse(ok)
+        self.assertIn("last reason: none, so no tick has reached it", detail)
+
+    def test_only_a_pending_row_can_be_overdue(self):
+        old = S_NOW - timedelta(days=2)
+        rows = doctor.schedule_overdue(self.stores(toysim=[
+            sched(f"s-{st}", status=st, due=old, started=S_NOW) for st in ("running", "done", "failed",
+                                                                            "expired", "cancelled")]), S_NOW)
+        self.assertEqual([ok for _, ok, _ in rows], [True])
+
+    def test_a_due_time_that_does_not_parse_is_unmeasured_not_a_crash(self):
+        for bad in ("not a time", "2026-10-14T11:00:00"):        # garbage; naive (no offset)
+            with self.subTest(bad=bad):
+                [(run, ok, detail)] = doctor.schedule_overdue(
+                    self.stores(toysim=[{**sched("s-1"), "not_before": bad}]), S_NOW)
+                self.assertEqual((run, ok), ("s-1", False))
+                self.assertIn(NEEDLES["overdue-unmeasured"], detail)
+
+    def test_no_store_read_at_all_is_unmeasured_not_clean(self):
+        nothing = {"personal": {"rows": None, "why": "x"}, "toysim": {"rows": None, "why": "y"}}
+        for check in (doctor.schedule_overdue, doctor.schedule_stuck):
+            with self.subTest(check=check.__name__):
+                [(run, ok, detail)] = check(nothing, S_NOW)
+                self.assertEqual((run, ok), (None, False))
+                self.assertIn(NEEDLES["nothing-read"], detail)
+
+    def test_an_unreadable_store_is_left_to_the_timer_check(self):
+        rows = doctor.schedule_overdue({"personal": {"rows": None, "why": "x"},
+                                        "toysim": {"rows": [], "why": None}}, S_NOW)
+        self.assertEqual(rows, [(None, True, "no pending run is more than 30 min past due (stores read: toysim)")])
+
+
+class ScheduleStuckTests(SchedulerHealthBase):
+    """Check 3: no run has been running longer than its own timeout plus RUNNING_GRACE."""
+
+    def test_a_run_at_exactly_its_timeout_plus_grace_passes(self):
+        start = S_NOW - timedelta(seconds=900) - doctor.RUNNING_GRACE
+        rows = doctor.schedule_stuck(self.stores(toysim=[sched("s-1", status="running", started=start)]), S_NOW)
+        self.assertEqual(rows, [(None, True, "no running run is past its timeout plus 20 min (stores read: toysim)")])
+        self.assertIn(NEEDLES["stuck-pass"], rows[0][2])
+
+    def test_a_run_past_its_timeout_plus_grace_fails_naming_its_unit(self):
+        start = S_NOW - timedelta(seconds=900) - doctor.RUNNING_GRACE - S_MIN
+        [(run, ok, detail)] = doctor.schedule_stuck(
+            self.stores(toysim=[sched("s-1", status="running", started=start)]), S_NOW)
+        self.assertEqual((run, ok), ("s-1", False))
+        self.assertIn(NEEDLES["stuck-fail"], detail)
+        self.assertIn("running 36 min", detail)
+        self.assertIn("past its 900 s timeout plus 20 min grace, as rabota-sched-toysim-s-1-a1.service", detail)
+
+    def test_each_run_is_weighed_against_its_own_timeout(self):
+        start = S_NOW - timedelta(minutes=40)       # past 15 min + 20, inside 60 min + 20
+        rows = doctor.schedule_stuck(self.stores(toysim=[
+            sched("s-short", status="running", started=start, timeout_s=900),
+            sched("s-long", status="running", started=start, timeout_s=3600)]), S_NOW)
+        self.assertEqual([(run, ok) for run, ok, _ in rows], [("s-short", False)])
+
+    def test_a_running_row_with_no_usable_start_time_is_unmeasured_not_clean(self):
+        for bad in (None, "garbage", "2026-10-14T11:00:00"):       # missing; garbage; naive
+            with self.subTest(bad=bad):
+                [(run, ok, detail)] = doctor.schedule_stuck(
+                    self.stores(toysim=[{**sched("s-1", status="running"), "started_at": bad}]), S_NOW)
+                self.assertEqual((run, ok), ("s-1", False))
+                self.assertIn(NEEDLES["stuck-unmeasured"], detail)
+
+    def test_only_a_running_row_can_be_stuck(self):
+        old = S_NOW - timedelta(days=2)
+        rows = doctor.schedule_stuck(self.stores(toysim=[
+            sched(f"s-{st}", status=st, due=old, started=old) for st in ("pending", "done", "failed")]), S_NOW)
+        self.assertEqual([ok for _, ok, _ in rows], [True])
+
+
+class SchedulerHealthWiringTests(SchedulerHealthBase):
+    """The three checks reach the report body, its problems and the exit status -- and nothing else moves."""
+
+    def test_a_healthy_queue_reports_a_passing_row_for_each_check_and_stays_ok(self):
+        ctx = self.make_ctx(is_enabled("toysim"))
+        self.put(ctx, "toysim", sched("s-1"), sched("s-2", status="running", started=S_NOW - S_MIN))
+        report = doctor.run_doctor(ctx, now=S_NOW)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual([r["ok"] for r in report["schedule_timers"]], [True, True, True])
+        self.assertEqual([(r["run"], r["ok"]) for r in report["schedule_overdue"]], [(None, True)])
+        self.assertEqual([(r["run"], r["ok"]) for r in report["schedule_stuck"]], [(None, True)])
+
+    def test_each_failure_is_named_in_problems_and_fails_the_report(self):
+        ctx = self.make_ctx(is_enabled("toysim"), is_enabled("personal", Result(1, "disabled\n", "")))
+        self.put(ctx, "toysim", sched("s-late", due=S_NOW - timedelta(hours=1)),
+                 sched("s-hung", status="running", started=S_NOW - timedelta(hours=1)))
+        self.put(ctx, "personal", sched("s-p1"))
+        report = doctor.run_doctor(ctx, now=S_NOW)
+        self.assertFalse(report["ok"])
+        kinds = [p.split(":")[0] for p in report["problems"]]
+        self.assertEqual(kinds, ["schedule timer for 'personal'", "overdue scheduled run s-late",
+                                 "stuck scheduled run s-hung"])
+
+    def test_a_disarmed_timer_is_the_one_problem_for_its_overdue_runs_which_stay_in_the_report(self):
+        ctx = self.make_ctx(is_enabled("toysim", Result(1, "disabled\n", "")))
+        self.put(ctx, "toysim", sched("s-a", due=S_NOW - timedelta(hours=1)),
+                 sched("s-b", due=S_NOW - timedelta(hours=2)),
+                 sched("s-hung", status="running", started=S_NOW - timedelta(hours=1)))
+        report = doctor.run_doctor(ctx, now=S_NOW)
+        kinds = [p.split(":")[0] for p in report["problems"]]
+        # a stuck run is not explained by the timer alone: its unit outlived RuntimeMaxSec too
+        self.assertEqual(kinds, ["schedule timer for 'toysim'", "stuck scheduled run s-hung"])
+        self.assertEqual([(r["run"], r["ok"]) for r in report["schedule_overdue"]],
+                         [("s-b", False), ("s-a", False)])
+
+    def test_a_corrupt_terminal_row_is_never_read(self):
+        # Only pending and running rows are loaded, so history cannot crash or slow the check.
+        ctx = self.make_ctx()
+        self.put(ctx, "toysim", sched("s-old", status="done"))
+        ctx.store.conn.execute("UPDATE schedules SET args='{not json' WHERE id='s-old'")
+        self.assertEqual(doctor.schedule_stores(ctx)["toysim"]["rows"], [])
+
+    def test_a_scheduler_failure_exits_through_doctors_existing_refusal(self):
+        # The CLI path, unchanged: a report that is not ok is printed and then refused (exit 3).
+        ctx = self.make_ctx(is_enabled("toysim"))
+        self.put(ctx, "toysim", sched("s-late", due=datetime(2020, 1, 1, tzinfo=timezone.utc)))
+        ns = argparse.Namespace()
+        with mock.patch.object(context.Context, "from_namespace", return_value=ctx), \
+                mock.patch.object(doctor.emit, "json_out"):
+            with self.assertRaises(errors.Refused) as cm:
+                doctor._run(ns)
+        self.assertIn("overdue scheduled run s-late", str(cm.exception))
+        self.assertEqual(cm.exception.code, 3)
+
+    def test_a_title_carrying_a_protected_value_is_redacted_in_every_row(self):
+        canary = "lin_api_" + "canary" + "0123456789"
+        ctx = self.make_ctx(is_enabled("toysim", Result(1, "disabled\n", "")))
+        title = f"check {canary}"
+        self.put(ctx, "toysim", sched("s-late", due=S_NOW - timedelta(hours=1), title=title),
+                 sched("s-hung", status="running", started=S_NOW - timedelta(hours=1), title=title,
+                       last_reason=canary))
+        with mock.patch.dict(os.environ, {"LINEAR_API_KEY": canary}):
+            report = doctor.run_doctor(ctx, now=S_NOW)
+        text = json.dumps(report)
+        self.assertNotIn(canary, text)
+        self.assertIn("[redacted:LINEAR_API_KEY]", text)
+
+    def test_needles_are_unique(self):
+        ctx = self.make_ctx(is_enabled("a"), is_enabled("b", Result(1, "disabled\n", "")))
+        late, start = S_NOW - timedelta(hours=1), S_NOW - timedelta(hours=1)
+        texts = {
+            "timer-armed": doctor.schedule_timers(ctx, self.stores(a=[sched("s-1")]))[0][2],
+            "timer-disarmed": doctor.schedule_timers(ctx, self.stores(b=[sched("s-1")]))[0][2],
+            "timer-idle": doctor.schedule_timers(ctx, self.stores(c=[]))[0][2],
+            "timer-unmeasured": doctor.schedule_timers(ctx, {"d": {"rows": None, "why": "x"}})[0][2],
+            "overdue-pass": doctor.schedule_overdue(self.stores(c=[]), S_NOW)[0][2],
+            "overdue-fail": doctor.schedule_overdue(self.stores(c=[sched("s-1", due=late)]), S_NOW)[0][2],
+            "stuck-pass": doctor.schedule_stuck(self.stores(c=[]), S_NOW)[0][2],
+            "stuck-fail": doctor.schedule_stuck(self.stores(c=[sched("s-1", status="running", started=start)]),
+                                                S_NOW)[0][2],
+            "stuck-unmeasured": doctor.schedule_stuck(self.stores(c=[sched("s-1", status="running")]), S_NOW)[0][2],
+            "overdue-unmeasured": doctor.schedule_overdue(
+                self.stores(c=[{**sched("s-1"), "not_before": "x"}]), S_NOW)[0][2],
+            "nothing-read": doctor.schedule_overdue({"d": {"rows": None, "why": "x"}}, S_NOW)[0][2],
+        }
+        for kind, needle in NEEDLES.items():
+            self.assertEqual([k for k, t in texts.items() if needle in t], [kind], needle)

@@ -247,11 +247,18 @@ def _refuse_guarded(ctx, paths: list[Path]) -> None:
         raise errors.Refused(f"--record {paths[0]} is a path the secret guard protects ({why.split('. ')[0]})")
 
 
+def timer_armed(runner, tenant: str) -> tuple[bool, str]:
+    """``(armed, state)`` for ``tenant``'s ``rabota-schedule@`` timer: the state is read, not just
+    the exit code, since ``static`` exits 0 and is not armed. ``add`` and ``rabota doctor`` share it."""
+    res = runner.run(["systemctl", "--user", "is-enabled", timer_unit(tenant)], timeout=15)
+    state = (res.out.strip() or res.err.strip() or f"exit {res.code}").splitlines()[0]
+    return res.ok and state == "enabled", state
+
+
 def _refuse_disarmed(ctx) -> dict:
     unit = timer_unit(ctx.tenant.name)
-    res = ctx.runner.run(["systemctl", "--user", "is-enabled", unit], timeout=15)
-    state = (res.out.strip() or res.err.strip() or f"exit {res.code}").splitlines()[0]
-    if not (res.ok and state == "enabled"):
+    armed, state = timer_armed(ctx.runner, ctx.tenant.name)
+    if not armed:
         raise errors.Refused(
             f"{unit} is not enabled ({state}), so nothing would ever fire this run. The declaration "
             f"is otherwise valid; arming the timer is @zvi's step: "
