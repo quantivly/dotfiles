@@ -5,7 +5,7 @@ description: >
   prompt for @zvi to paste on a date. Use when you would say "re-check this tomorrow", "run X
   after the weekend", "verify in N days", "remind me to check", or would hand over a command or
   prompt to run later, and the work needs this laptop's files, credentials or tools (the
-  journal, local repos and worktrees, ~/.local/state, clauth, herdr). Use it INSTEAD of the
+  journal, local repos, ~/.local/state, account and herdr state). Use it INSTEAD of the
   built-in cloud `schedule` skill for any such one-off run: that one runs in Anthropic's cloud
   and cannot see this machine. Also use it to read what an earlier session scheduled
   (`rabota schedule list`, `rabota schedule show`). Do NOT use for a recurring cron routine, or
@@ -43,8 +43,12 @@ record file, and escalates anything but a clean pass to @zvi: a desktop notifica
 - **It is frozen.** `add` copies it into the tenant's state; editing or deleting the source
   afterwards changes nothing. To change it, `cancel` and `add` again.
 - **Start it with a shebang**; it is executed directly. Arguments go after `--`.
-- **It is not your shell.** It runs in a transient systemd user unit in `--cwd`, with
-  `~/.local/bin` on `PATH`, no terminal, and no zsh functions or aliases.
+- **It is not your shell.** It runs in a transient systemd user unit in `--cwd`, with no
+  terminal and no zsh functions or aliases. Its `PATH` is exactly
+  `~/.local/bin:/usr/local/bin:/usr/bin:/bin`, so tools mise installs (e.g. `rg`) are not on it.
+  A script that calls one exits 127 on both attempts and escalates, and `--dry-run` cannot catch
+  that, because it never runs the script. Call such a tool by its absolute path, or stick to
+  `/usr/bin` tools.
 - **It runs unconfined, as you.** Only its memory (1G) and `--timeout` (default 15 min, at most
   6 h) bound it. Keep it a read-only check: no edits, pushes, merges or messages.
 - **Print the evidence.** The last 4 KiB of stdout and of stderr go, redacted, into the result

@@ -232,6 +232,22 @@ class RunLaterSkillTests(unittest.TestCase):
     def test_a_workspace_root_cwd_is_steered_to_a_repo(self):
         self.assertIn("--cwd <a repo or other directory>", _flat())
 
+    def test_the_unit_path_is_stated_exactly(self):
+        # Orchestrator review: mise-installed tools are not on a command unit's PATH, so a script
+        # calling one exits 127 on both attempts, and a dry run never runs the script to notice.
+        # The skill quotes scheduler.unit_path() with the home directory written as `~`.
+        unit = scheduler.unit_path().replace(str(Path.home()), "~", 1)
+        flat = _flat()
+        self.assertIn(f"Its `PATH` is exactly `{unit}`", flat)
+        self.assertIn("tools mise installs", flat)
+        self.assertIn("by its absolute path", flat)
+
+    def test_the_description_names_no_command_add_refuses(self):
+        # The description lists what a run may need; naming `clauth` there invited a script `add`
+        # refuses (CLAUDE_WORD). State files, not launchers.
+        desc = _frontmatter()["description"]
+        self.assertIsNone(schedule.CLAUDE_WORD.search(desc), schedule.CLAUDE_WORD.search(desc))
+
     def test_tenant_resolution_matches_the_resolver(self):
         # config.resolve_tenant: --tenant, then $CLAUDE_ACCOUNT_TENANT, then whatever owns the cwd.
         # Review finding: "your session's tenant" named a mechanism nothing exports.
