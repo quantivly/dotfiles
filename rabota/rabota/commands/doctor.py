@@ -522,7 +522,9 @@ def schedule_stores(ctx) -> dict[str, dict]:
         try:
             s = store.Store.open_current(state_dir)
             out[name] = {"rows": s.list_schedules(name), "why": None}
-        except (errors.RabotaError, sqlite3.Error) as e:
+        # ValueError: a JSON column that no longer decodes. Doctor is what runs when a store is
+        # broken, so a row it cannot read is unmeasured, never a traceback.
+        except (errors.RabotaError, sqlite3.Error, ValueError) as e:
             version = _stamped_version(db)
             if version is not None and version < SCHEDULES_SCHEMA:
                 out[name] = {"rows": [], "why": f"has a store at schema {version}, older than the "

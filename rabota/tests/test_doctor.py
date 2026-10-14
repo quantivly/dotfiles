@@ -1127,6 +1127,15 @@ class ScheduleTimerTests(SchedulerHealthBase):
         self.put(ctx, "toysim", {**sched("s-foreign"), "tenant": "quantivly"}, sched("s-own"))
         self.assertEqual([r["id"] for r in doctor.schedule_stores(ctx)["toysim"]["rows"]], ["s-own"])
 
+    def test_a_store_whose_rows_no_longer_decode_is_unmeasured_not_a_crash(self):
+        ctx = self.make_ctx()
+        d = self.put(ctx, "personal", sched("s-p1"))
+        conn = sqlite3.connect(d / "rabota.db")
+        conn.execute("UPDATE schedules SET args='{not json'"); conn.commit(); conn.close()
+        got = doctor.schedule_stores(ctx)["personal"]
+        self.assertIsNone(got["rows"])
+        self.assertIn("JSONDecodeError", got["why"])
+
     def test_a_tenant_with_no_store_passes_and_none_is_created(self):
         ctx = self.make_ctx()
         got = doctor.schedule_stores(ctx)
