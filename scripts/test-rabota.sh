@@ -24,4 +24,11 @@ if [ "$refs_bytes" -gt 12288 ]; then
   echo "test-rabota: claude/skills/rabota/references/*.md total $refs_bytes bytes, budget is 12288" >&2
   exit 1
 fi
-echo "test-rabota: skill size budget ok ($skill_lines SKILL.md lines, $refs_bytes references bytes)"
+# run-later (DO-821) loads in EVERY repo on this laptop, unlike rabota's, so it gets the same line
+# budget and no references/ at all: what an agent needs to schedule a run has to fit on one read.
+later_lines="$(wc -l < "$here/claude/skills/run-later/SKILL.md")"
+if [ "$later_lines" -gt 150 ]; then
+  echo "test-rabota: claude/skills/run-later/SKILL.md is $later_lines lines, budget is 150" >&2
+  exit 1
+fi
+echo "test-rabota: skill size budget ok ($skill_lines SKILL.md lines, $refs_bytes references bytes, $later_lines run-later lines)"

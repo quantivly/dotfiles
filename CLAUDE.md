@@ -656,6 +656,7 @@ gh-doctor            # Which GitHub account is gh ACTUALLY using here? (--offlin
 claude-doctor        # Claude auth + MCP health; run BEFORE 'clauth switch <profile>'
 claude-as <profile>  # claude on a named account: isolated AND still a team lead
 claude-pick          # which account would this directory bill? (--explain --json --strict)
+rabota schedule add  # work due LATER on this laptop, never a prompt to paste (run-later skill)
 scripts/claude-seat add <tenant>   # add a seat: login to verified, pooled (--dry-run first)
 scripts/redact-secrets.sh  # Filter secrets out of anything before it is printed
 scripts/scrub-transcript-secrets.py --dry-run  # Credentials sitting in transcripts at rest
@@ -689,5 +690,5 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
 - **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
-- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Never run `clauth switch <profile>` while the doctor reports the stored copy DIFFERS from the live credential — and prefer `claude-as <profile>`, which changes nothing outside your own session. If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.
+- **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Heed its DIFFERS warning before any `clauth switch` (see the Claude section). If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.
 - **Backups:** `backup-doctor` (full-chain correctness — start here), `backup-status` (quick health), `systemctl list-timers | grep restic`, `resticprofile -c /etc/resticprofile/profiles.toml show` (validate config)
