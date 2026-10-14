@@ -23,7 +23,9 @@
 #              herdr launcher and zshrc.company read, and dev-sync's check.
 #   created    the date it was stored, YYYY-MM-DD. Not secret: dev-sync reads it to
 #              warn before the token's year runs out.
-# The token is read at a hidden prompt and never echoed or logged.
+# The token is read at a hidden prompt and never echoed or logged. Input ends at an empty line,
+# so a paste wrapped across lines is joined back together, and the token must answer one
+# `claude -p` before anything is written.
 #
 # REFUSES on a machine where clauth manages accounts. There every session picks its
 # own account dir, and this token would outrank all of them, so every session on the
@@ -53,13 +55,44 @@ if [[ -d "$HOME/.clauth" ]] || command -v clauth >/dev/null 2>&1; then
 fi
 [[ -t 0 ]] || die "refusing: stdin is not a terminal. Run it with ssh -t, and paste at the prompt; never pipe the token in."
 
-printf 'Paste the token claude setup-token printed (input hidden), then Enter: ' >&2
-IFS= read -rs token || true
+printf 'Paste the token claude setup-token printed (input hidden), press Enter, then Enter again: ' >&2
+# setup-token wraps a long token across lines, and a copy keeps the breaks. Reading one line
+# stored a cut token on 2026-10-14 (65 characters of it), which passed the shape check below and
+# failed every request. So read lines and join them until an empty one. Not "whatever arrives
+# within a moment": a terminal hands over a line only at Enter, so the last piece of a paste
+# waits for the person's own Enter, however late.
+token=""
+for _ in 1 2 3 4 5 6 7 8; do
+    line=""
+    IFS= read -rs line || { token+="${line//[[:space:]]/}"; break; }
+    line="${line//[[:space:]]/}"
+    [[ -n "$line" ]] || break
+    token+="$line"
+done
+line=""
 printf '\n' >&2
 token="${token//[[:space:]]/}"
 if [[ ! "$token" =~ $TOKEN_RE ]]; then
     n=${#token}; token=""
     die "that does not look like a setup-token token (sk-ant-oat…, $n characters read). Nothing was written."
+fi
+
+# The shape cannot tell a whole token from a cut one, so ask the API before writing anything.
+# --no-session-persistence leaves no transcript; --strict-mcp-config starts no MCP server, so
+# nothing writes ~/.claude/.credentials.json.
+claude_bin="$(command -v claude || true)"
+[[ -n "$claude_bin" ]] || claude_bin="$HOME/.local/bin/claude"
+[[ -x "$claude_bin" ]] || { token=""; die "cannot check the token: claude is not installed here. Nothing was written."; }
+printf 'Checking it with one request...\n' >&2
+probe_dir="$(mktemp -d)"
+probe_rc=0
+probe="$(cd "$probe_dir" && CLAUDE_CODE_OAUTH_TOKEN="$token" timeout 120 "$claude_bin" -p 'Reply with exactly: OK' \
+    --model haiku --output-format json --no-session-persistence --strict-mcp-config 2>/dev/null)" || probe_rc=$?
+rmdir "$probe_dir" 2>/dev/null || true
+if (( probe_rc != 0 )) || [[ "$probe" != *'"is_error":false'* ]]; then
+    n=${#token}; token=""
+    why="$(printf '%s' "$probe" | sed -n 's/.*"result":"\([^"]\{0,200\}\).*/\1/p')"
+    die "the API refused it (${why:-no answer, exit $probe_rc}; $n characters read). Nothing was written. If it was cut, widen the terminal so the token prints on one line, and mint again."
 fi
 
 umask 077
