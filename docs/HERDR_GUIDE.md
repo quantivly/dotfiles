@@ -790,7 +790,7 @@ Things to know:
 - **It reaches the client only.** Panes come from the systemd-run server, whose PATH never
   includes the shims.
 
-State table: `scripts/test-herdr-quiet.sh` (26 checks, in CI as `herdr-quiet-test`). It is
+State table: `scripts/test-herdr-quiet.sh` (27 checks, in CI as `herdr-quiet-test`). It is
 hermetic: `gsettings` and the player are stubs, and PATH holds neither `/usr/bin` nor `/bin`.
 
 ---

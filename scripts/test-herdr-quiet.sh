@@ -135,6 +135,8 @@ check "herdr is a function after sourcing the layer" \
 check "puts the shims directory first on PATH" "$(wrap "$FAKE" | head -1)" "$FAKE/config/herdr/shims"
 check "without that directory, PATH is left alone" "$(wrap "$T/nowhere" | head -1)" "$BIN"
 check "arguments pass through verbatim" "$(wrap "$FAKE" pane list "a b" | tail -n +2 | tr '\n' '|')" "pane|list|a b|"
+check "...and without the shims directory too" \
+      "$(wrap "$T/nowhere" pane list "a b" | tail -n +2 | tr '\n' '|')" "pane|list|a b|"
 check "herdr's exit status is the wrapper's" "$(HERDR_RC=4 wrap "$FAKE" >/dev/null; echo $?)" 4
 
 # End to end, against the REPO's shim directory: the wrapper's PATH makes a
@@ -158,7 +160,7 @@ check "end to end, DND off: the client's sound plays"      "$(e2e)" "/s/request.
 # --- the row total, and the count this suite is documented as running --------
 # Same contract as scripts/test-buildlimits.sh: the total catches a row that
 # VANISHED, and docs_claim pins the documented count to it with a FIXED needle.
-EXPECTED_ROWS=26
+EXPECTED_ROWS=27
 
 docs_claim() {
   local f="$ROOT/$1"

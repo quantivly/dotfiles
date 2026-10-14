@@ -35,7 +35,6 @@ fi
 
 IFS=:
 for d in $PATH; do
-    [ -n "$d" ] || continue
     [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$self" ] && continue
     if [ -f "$d/$name" ] && [ -x "$d/$name" ]; then
         unset IFS
