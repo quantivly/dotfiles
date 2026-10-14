@@ -93,7 +93,7 @@ S="$HOME/stub"; echo "herdr $*" >>"$S/calls"
 V="${V:-$(cat "$S/herdr-version")}"   # a release "asset" built from this stub pins V on line 2
 case "$1 ${2:-}" in
     "--version "*) echo "herdr $V" ;;
-    "--skill "*) echo "skill for $V" ;;
+    "--skill "*) [[ -e "$S/skill-empty" ]] || echo "skill for $V" ;;
     "status server") printf 'status: running\nversion: %s\n' "$(cat "$S/server-version")" ;;
     "agent list") printf '{"result":{"agents":[%s]}}\n' "$(cat "$S/agents" 2>/dev/null)" ;;
     "pane list") printf '{"result":{"panes":[%s]}}\n' "$(cat "$S/panes" 2>/dev/null)" ;;
@@ -401,6 +401,17 @@ run_level --apply
 has   "herdr is a symlink: ⚠, never replaced" "$OUT" "is a symlink; dev-sync does not replace a link"
 check "herdr is a symlink: still a symlink" "$([[ -L "$H/.local/bin/herdr" ]] && echo link || echo file)" link
 new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/skill-empty"
+run_level --apply
+check "an empty --skill output never replaces the agent skill" "$(cat "$H/.claude/skills/herdr/SKILL.md")" old
+new_case
+echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+: >"$H/.local/state/dev-sync/lock"; chmod 555 "$H/.local/state/dev-sync"   # the backup copy cannot be written
+run_level --apply
+chmod 755 "$H/.local/state/dev-sync"
+has   "no backup of the old binary: ✗, not installed" "$OUT" "could not keep a copy of the 0.9.0 binary; not installed"
+check "no backup of the old binary: still the old binary" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
+new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/restart-fails"
 run_level --apply
 has   "server not back after the restart: ✗ prints the rollback" "$OUT" "to roll back: mv ~/.local/state/dev-sync/herdr-0.9.0 ~/.local/bin/herdr"
@@ -650,7 +661,7 @@ check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
 has   "the remote run killed: says so" "$OUT" "ended with status 137"
 
 printf '\n'
-EXPECTED_ROWS=146
+EXPECTED_ROWS=149
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
