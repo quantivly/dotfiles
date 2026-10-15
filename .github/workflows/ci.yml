@@ -139,6 +139,26 @@ jobs:
       - name: Run the build-limits state table
         run: ./scripts/test-buildlimits.sh
 
+  herdr-quiet-test:
+    name: herdr Sound Under Do Not Disturb State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
+      # gsettings and pw-play are STUBBED on a PATH without /usr/bin or /bin: a
+      # runner has neither a desktop nor a DND setting, and a developer's machine
+      # has both, so any real one would make the rows measure the host.
+      - name: Run the herdr quiet-shim state table
+        run: ./scripts/test-herdr-quiet.sh
+
   dotfiles-guard-test:
     name: Dotfiles Live-Config Guard State Table
     runs-on: ubuntu-latest

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Desktop notifications carry what must interrupt, not agent chatter.** A 13-minute D-Bus sample
+  (2026-10-14) caught 12 notifications, every one herdr's per-pane toast (~55/h with 21 panes).
+  - **herdr toasts move into herdr.** `[ui.toast] delivery` is now `"herdr"`. Under Do Not
+    Disturb the old toasts showed no banner and each took its own row in the message list, burying
+    critical rabota escalation ESC-11.
+  - **Do Not Disturb silences herdr's sound.** herdr has no runtime mute, so a `herdr()` wrapper in
+    `zsh/zshrc.herdr` puts `config/herdr/shims` first on the attached client's PATH. The `pw-play`
+    there is silent while DND is on and fails open.
+    - State table: `scripts/test-herdr-quiet.sh` (27 rows, hermetic, CI `herdr-quiet-test`).
+  - **A critical rabota escalation is audible.** It now carries the `alarm-clock-elapsed` sound and
+    a `dialog-warning` icon. GNOME Shell 50.1 shows a critical banner under DND and never hides it,
+    but plays a sound only from a hint.
+  - **The tick reports whether each escalation reached the desktop.** Its settled, expired and
+    refused entries carry `desktop_notified`, and its text names a failed send.
+  - `docs/HERDR_GUIDE.md` §7 is corrected: the herdr **client**, not the server, runs
+    `notify-send` and the sound player.
+
 - **Agents schedule work due later instead of handing over a prompt (DO-821).** A user-level
   `run-later` skill, linked to `~/.claude/skills/run-later` by `install.conf.yaml`, teaches every
   agent on this laptop `rabota schedule add`. It steers mechanical checks to `--command` scripts,

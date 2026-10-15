@@ -647,16 +647,22 @@ def _run(ns, **ctx_kw):
     return _lines(out)
 
 
+def _esc(r: dict) -> str:
+    """``ESC-<n>``, naming a desktop notification that did NOT go out (``False``; ``None`` = not sent)."""
+    return f"ESC-{r['escalation']}" + (", desktop notification FAILED" if r.get("desktop_notified") is False else "")
+
+
 def _tick_lines(rep: dict) -> list[str]:
     if rep.get("locked"):
         return [f"tick {rep['tenant']}: {rep['locked']}"]
     lines = [f"tick {rep['tenant']} {_local(rep['at'])}: " + ", ".join(
         f"{len(rep[k])} {k}" for k in ("settled", "expired", "refused", "dispatched", "deferred"))]
     lines += [f"settled {r['id']} attempt {r['attempt']}: {r['outcome']}"
-              + (" (retrying)" if r["retry"] else f" (ESC-{r['escalation']})" if r["escalation"] else "")
+              + (" (retrying)" if r["retry"] else f" ({_esc(r)})" if r["escalation"] else "")
               for r in rep["settled"]]
-    lines += [f"expired {r['id']} (ESC-{r['escalation']})" for r in rep["expired"]]
-    lines += [f"refused {r['id']}: {r['reason']}" for r in rep["refused"]]
+    lines += [f"expired {r['id']} ({_esc(r)})" for r in rep["expired"]]
+    lines += [f"refused {r['id']}: {r['reason']}" + (f" ({_esc(r)})" if r["escalation"] else "")
+              for r in rep["refused"]]
     lines += [f"dispatched {r['id']} attempt {r['attempt']} as {r['unit']}" for r in rep["dispatched"]]
     lines += [f"deferred {r['id']}: {r['reason']}" for r in rep["deferred"]]
     return lines

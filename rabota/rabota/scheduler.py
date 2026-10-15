@@ -305,9 +305,9 @@ def _finish_attempt(ctx, row, outcome, detail, ended, now, rep):
     heading = (f"{decl._local(decl._iso(ended))} scheduled run {row['id']}: {outcome}"
                + (f" (attempt {attempt} of {most}, retrying)" if retry else ""))
     record, record_error = _record_step(ctx, row, f"{row['id']}:{attempt}", f"## {heading}\n\n{body}", rep)
-    eid = None
+    eid = sent = None
     if not retry:
-        eid = _escalate_once(ctx, row, outcome, str(out_dir / RESULT), detail, record_error)
+        eid, sent = _escalate_once(ctx, row, outcome, str(out_dir / RESULT), detail, record_error)
     if retry:
         fields = {"status": "pending", "not_before": decl._iso(now + decl.RETRY_DELAY),
                   "last_reason": f"attempt {attempt} of {most} could not run: {detail}; retrying"}
@@ -318,7 +318,7 @@ def _finish_attempt(ctx, row, outcome, detail, ended, now, rep):
         raise errors.RabotaError(f"{row['id']} stopped being running under {row['unit']} while it was "
                                  f"settled, so its row was left as it was")
     rep["settled"].append({"id": row["id"], "attempt": attempt, "outcome": outcome, "retry": retry,
-                           "escalation": eid, "record": record})
+                           "escalation": eid, "desktop_notified": sent, "record": record})
 
 
 def _tail(p: Path) -> tuple[str, bool]:
@@ -372,12 +372,12 @@ def _expire_one(ctx, row, now, rep):
     stamp = decl._local(decl._iso(now))
     _, record_error = _record_step(ctx, row, f"{row['id']}:expired",
                                    f"## {stamp} scheduled run {row['id']}: expired\n\n{_neutral(f'- **expired**: {detail}')}\n", rep)
-    eid = _escalate_once(ctx, row, "expired", f"schedule {row['id']} expired at {row['expires_at']}", detail, record_error)
+    eid, sent = _escalate_once(ctx, row, "expired", f"schedule {row['id']} expired at {row['expires_at']}", detail, record_error)
     if not ctx.store.update_schedule_where(row["id"], {"status": "pending", "attempt": row["attempt"]},
                                            status="expired", outcome="expired", ended_at=decl._iso(now),
                                            last_reason=detail, escalation_id=eid):
         raise errors.RabotaError(f"{row['id']} stopped being pending while it was expired; its row was left as it was")
-    rep["expired"].append({"id": row["id"], "escalation": eid})
+    rep["expired"].append({"id": row["id"], "escalation": eid, "desktop_notified": sent})
 
 
 def _dispatch(ctx, now, rep):
@@ -466,12 +466,12 @@ def _refuse(ctx, row, problem, evidence, now, rep):
     stamp = decl._local(decl._iso(now))
     _, record_error = _record_step(ctx, row, f"{row['id']}:refused",
                                    f"## {stamp} scheduled run {row['id']}: could-not-run\n\n{_neutral(f'- **could-not-run**: {detail}')}\n", rep)
-    eid = _escalate_once(ctx, row, "could-not-run", evidence, detail, record_error)
+    eid, sent = _escalate_once(ctx, row, "could-not-run", evidence, detail, record_error)
     if not ctx.store.update_schedule_where(row["id"], {"status": "pending", "attempt": row["attempt"]},
                                            status="failed", outcome="could-not-run", ended_at=decl._iso(now),
                                            last_reason=detail, escalation_id=eid):
         raise errors.RabotaError(f"{row['id']} stopped being pending while it was refused; its row was left as it was")
-    rep["refused"].append({"id": row["id"], "reason": detail, "escalation": eid})
+    rep["refused"].append({"id": row["id"], "reason": detail, "escalation": eid, "desktop_notified": sent})
 
 
 # --- the record and the escalation -------------------------------------------------------------
@@ -515,22 +515,29 @@ def _record_step(ctx, row, key, text, rep) -> tuple[str | None, str | None]:
         return "failed", why
 
 
-def _escalate_once(ctx, row, outcome, evidence, detail, record_error=None) -> int | None:
-    """The escalation for this outcome, raised once: found again by kind, subject and evidence."""
+def _escalate_once(ctx, row, outcome, evidence, detail, record_error=None) -> tuple[int | None, bool | None]:
+    """The escalation for this outcome, raised once: found again by kind, subject and evidence.
+
+    Returns ``(id, desktop_notified)``. ``desktop_notified`` is ``run_escalate``'s: whether the one
+    ``notify-send`` went out. It is ``None`` when nothing was sent, either because no escalation is
+    due or because it was found again. The tick puts it in its report, so the journal answers "was
+    ESC-n ever on the desktop" (2026-10-14: nothing could say so for ESC-11).
+    """
     urgency = OUTCOMES[outcome][1] or ("normal" if record_error else None)
     if urgency is None:
-        return None
+        return None, None
     found = ctx.store.find_escalation(ctx.tenant.name, ESC_KIND, row["id"], evidence)
     if found is not None:
-        return found["id"]
+        return found["id"], None
     question = f"{row['id']} {row['title']}: {outcome}, {detail}"
     if record_error:
         question += f"; its record was not written: {record_error}"
     if row["ask"]:
         question += f". {row['ask']}"
     labels = [o["label"] for o in options_of(row)]
-    return escalate.run_escalate(ctx, _redact(question), evidence, labels, kind=ESC_KIND, subject=row["id"],
-                                 urgency=urgency)["id"]
+    out = escalate.run_escalate(ctx, _redact(question), evidence, labels, kind=ESC_KIND, subject=row["id"],
+                                urgency=urgency)
+    return out["id"], out["desktop_notified"]
 
 
 # --- the export --------------------------------------------------------------------------------

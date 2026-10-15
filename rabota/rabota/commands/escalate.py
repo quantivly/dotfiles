@@ -36,6 +36,14 @@ daemons (dunst, mako with markup on) render it in the summary too, so the questi
 collapsed to one line with ``<``, ``>`` and ``&`` replaced by look-alikes (``_plain``): no daemon
 can read it as markup, and a reader still sees what was asked. Its outcome rides
 along as ``desktop_notified``, with the same ``True``/``False``/``None`` meaning as ``notified``.
+
+**A critical one is loud (2026-10-14).** GNOME Shell 50.1 already gives critical urgency everything
+a banner can have: it bypasses Do Not Disturb, never auto-hides, auto-expands and jumps a full queue
+(``messageTray.js`` 929/1206/1166/944, read from the installed shell). It plays a sound only when the
+notification carries a ``sound-name`` hint, and a critical banner's sound plays under DND too. So
+critical adds ``CRITICAL_EXTRAS``: the freedesktop ``alarm-clock-elapsed`` sound, which nothing else
+here uses, and a ``dialog-warning`` icon. ESC-11 went out without either and was silent. Lower
+urgencies stay silent on purpose: a sound on every escalation would teach @zvi to ignore it.
 """
 import json
 
@@ -50,6 +58,9 @@ from rabota.store import now
 KINDS = ("decision", "finding", "verification", "pr-blocked", "prereq", "incident", "correction", "commitment",
          "scheduled-run")
 URGENCIES = ("low", "normal", "critical")     # notify-send's own levels; see the module docstring
+# A critical one gets a sound nothing else on the machine uses and a warning icon, so it is told apart
+# from vpn-notify's and nanoclaw's criticals; see the module docstring.
+CRITICAL_EXTRAS = ("--icon", "dialog-warning", "--hint", "string:sound-name:alarm-clock-elapsed")
 
 
 def _project(ctx: Context, row: dict):
@@ -101,6 +112,7 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
         notified = _notify_best_effort(ctx, ["herdr", "notification", "show", f"rabota {kind}: {stored[:100]}"])
         desktop_notified = _notify_best_effort(ctx, [
             "notify-send", "--app-name", "rabota", "--urgency", urgency,
+            *(CRITICAL_EXTRAS if urgency == "critical" else ()),
             f"ESC-{eid} rabota {kind}: {_plain(stored)[:100]}",
             f"ESC-{eid}: rabota --tenant {ctx.tenant.name} --text escalations --open"])
     return {"id": eid, "notified": notified, "desktop_notified": desktop_notified}

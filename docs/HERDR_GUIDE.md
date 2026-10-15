@@ -739,23 +739,59 @@ all the band machinery above. Start minimal and add only what changes a decision
 
 ## 7. Interrupts — the part that matters most
 
-**Verified end to end.** With `[ui.toast] delivery = "system"`, a background agent that finishes
-or blocks raises a real desktop notification:
+**This config uses `[ui.toast] delivery = "herdr"`: in-app toasts, plus `[ui.sound]`.** It used
+`"system"` until 2026-10-14. In that mode a background agent that finishes or blocks raises a real
+desktop notification:
 
 ```
 summary: "claude needs attention"
 body:    "~ · 1 · toast-test"        <- the tab label, so you know which agent
 ```
 
-Confirmed by instrumenting the D-Bus session bus and driving an agent to `blocked` in an
-unfocused tab. Implementation detail: herdr shells out to `notify-send`, so that binary must be
-on the **server's** PATH (§2.3) and the server needs the session-bus environment — which is why
-the launcher in §2.4 passes `DBUS_SESSION_BUS_ADDRESS` and the display variables through.
-Linux-verified; the macOS delivery path is **UNVERIFIED**.
+That works, and at scale it is the problem.
+- **The volume.** With 21 claude panes, a 13-minute D-Bus sample caught 12 of these and nothing
+  else (~55/h, in bursts of 3–4 a minute).
+- **Each one is its own row.** `Herdr` has no `.desktop` entry, so GNOME keys every one by pid and
+  none collapse.
+- **Under Do Not Disturb they pile up silently.** None shows a banner; they accumulate in the
+  message list.
+- **They buried a critical rabota escalation**, which could not then be confirmed as seen.
+
+The desktop is now reserved for things that are rare and must interrupt, such as rabota's
+critical escalations. Agent state stays inside herdr.
+
+**The CLIENT does the notifying, not the server** (herdr 0.9.1, measured 2026-10-14). Each
+`notify-send` was a child of the attached `herdr` in the Alacritty scope, not of
+`herdr-server.service`. The same is true of the sound player, `paplay` / `pw-play` / `ffplay`,
+whichever is on PATH. So it is the **client's** PATH and environment that matter for both. An
+earlier version of this section said the server's, and was wrong.
 
 This is the difference between *watching* a dashboard and *being told*. Bind
 `open_notification_target` (`ctrl+alt+o`) and let the queue come to you. `[ui.sound] enabled`
-adds a second channel that needs no screen at all.
+adds a second channel that needs no screen at all. GNOME's Do Not Disturb silences that sound too;
+see [Quiet herdr with Do Not Disturb](#quiet-herdr-with-do-not-disturb) below.
+
+### Quiet herdr with Do Not Disturb
+
+herdr 0.9.1 has no runtime mute: `herdr config` offers only `check` and `reset-keys`, and there is
+no mute action. So **GNOME's Do Not Disturb toggle in quick settings is the switch.**
+
+How it works:
+- `zsh/zshrc.herdr` defines a `herdr()` wrapper that puts `config/herdr/shims` first on the
+  client's PATH.
+- The `pw-play` there plays nothing while DND is on, and otherwise execs the real player.
+- DND on: herdr is silent and normal banners are hidden. A critical notification, such as a rabota
+  escalation, still shows its banner and plays its sound; GNOME exempts critical urgency from DND.
+- DND off: herdr beeps as before.
+
+Things to know:
+- **It fails open.** Any answer from `gsettings` other than exactly `false` plays the sound.
+- **A client attached before this shipped is not covered** until it is detached and re-attached.
+- **It reaches the client only.** Panes come from the systemd-run server, whose PATH never
+  includes the shims.
+
+State table: `scripts/test-herdr-quiet.sh` (27 checks, in CI as `herdr-quiet-test`). It is
+hermetic: `gsettings` and the player are stubs, and PATH holds neither `/usr/bin` nor `/bin`.
 
 ---
 
