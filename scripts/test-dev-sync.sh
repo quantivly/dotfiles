@@ -68,6 +68,12 @@ case "$1" in
     --version) echo "$(cat "$S/claude-version") (Claude Code)" ;;
     install) [[ -e "$S/claude-install-fails" ]] && exit 1; echo "$2" >"$S/claude-version" ;;
     mcp) cat "$S/mcp-list" 2>/dev/null ;;
+    -p)   # claude-oauth-store's check of a token: shapes measured against claude 2.1.299
+        if [[ -e "$S/token-rejected" ]]; then
+            echo '{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 OAuth access token is invalid."}'
+            exit 1
+        fi
+        echo '{"type":"result","subtype":"success","is_error":false,"result":"OK"}' ;;
     auth)
         [[ -e "$S/auth-fails" ]] && exit 1
         if [[ -e "$S/no-login" ]]; then echo '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
@@ -806,9 +812,9 @@ has   "no Claude process: information only" "$OUT" "no Claude process running"
 
 echo "== claude-oauth-store"
 STORE="$DOTFILES/scripts/claude-oauth-store"
-store() {   # $1 = what is typed at the prompt; runs under a pty, its own streams to files
+store() {   # $1 = what is typed at the prompt, then the empty line that ends it; under a pty
     SO="$C/store.out"; SE="$C/store.err"
-    printf '%s\n' "$1" | env -i HOME="$H" PATH="/usr/bin:/bin" TERM=dumb \
+    printf '%s\n\n' "$1" | env -i HOME="$H" PATH="/usr/bin:/bin" TERM=dumb \
         script -qec "'$STORE' >'$SO' 2>'$SE'" /dev/null >/dev/null 2>&1
     RC=$?
 }
@@ -833,8 +839,32 @@ hasnt "store: the refused value is not echoed" "$(cat "$SO" "$SE")" "notasetupto
 
 new_case
 rm -rf "$H/.config/claude-oauth"
+# The 2026-10-14 failure: setup-token's output wrapped, and only the first line was stored.
+store "${FAKE_TOK:0:25}"$'\n'"   ${FAKE_TOK:25}"
+check "store: a paste wrapped across lines is joined and stored whole" \
+    "$(cat "$H/.config/claude-oauth/token.env" 2>/dev/null)" "CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK"
+has   "store: the token is checked with one request, with the token in its environment" \
+    "$(cat "$H/stub/calls-with-token" 2>/dev/null)" "claude -p"
+has   "store: the check leaves no transcript and starts no MCP server" "$(grep '^claude -p' "$H/stub/calls")" \
+    "--no-session-persistence --strict-mcp-config"
+
+new_case
+rm -rf "$H/.config/claude-oauth"; touch "$H/stub/token-rejected"
+store "$FAKE_TOK"
+check "store: a token the API refuses is not stored" "$RC/$([[ -e "$H/.config/claude-oauth/token.env" ]] && echo written || echo none)" "1/none"
+has   "store: says the API refused it, and why" "$(cat "$SE")" "the API refused it (Failed to authenticate"
+hasnt "store: the refused token is not echoed" "$(cat "$SO" "$SE")" "$FAKE_TOK"
+
+new_case
+rm -rf "$H/.config/claude-oauth"; rm "$H/.local/bin/claude"
+store "$FAKE_TOK"
+check "store: no claude to check with: nothing stored" "$RC/$([[ -e "$H/.config/claude-oauth/token.env" ]] && echo written || echo none)" "1/none"
+has   "store: says it could not check" "$(cat "$SE")" "cannot check the token: claude is not installed here"
+
+new_case
+rm -rf "$H/.config/claude-oauth"
 # Typed AFTER the prompt is up, as a person would: with echo off, the terminal never shows it.
-{ sleep 2; printf '%s\n' "$FAKE_TOK"; } | env -i HOME="$H" PATH="/usr/bin:/bin" TERM=dumb \
+{ sleep 2; printf '%s\n\n' "$FAKE_TOK"; } | env -i HOME="$H" PATH="/usr/bin:/bin" TERM=dumb \
     script -qec "'$STORE' >/dev/null 2>&1" "$C/typescript" >/dev/null 2>&1
 check "store: a typed token is stored" "$(cat "$H/.config/claude-oauth/token.env" 2>/dev/null)" "CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK"
 hasnt "store: a typed token is never echoed to the terminal" "$(cat "$C/typescript")" "$FAKE_TOK"
@@ -913,7 +943,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
 
 printf '\n'
-EXPECTED_ROWS=211
+EXPECTED_ROWS=219
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

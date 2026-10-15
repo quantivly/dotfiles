@@ -83,6 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`scripts/claude-oauth-store` no longer stores a cut token.** `claude setup-token` wraps its
+  token, and reading one line stored 65 characters of it on dev (2026-10-14). The cut token
+  passed the shape check, and every request failed until the token was minted again. Input now
+  ends at an empty line, joining a wrapped paste, and one `claude -p` with the token (no
+  transcript, no MCP server) must succeed before anything is written. `test-dev-sync.sh`: 219
+  rows. 6 mutants, 6 deaths.
+
 - **`./install` now creates `~/.cache/tmp` (mode 0700).** `config/environment.d/tmpdir.conf`
   points every systemd user unit's `TMPDIR` there, and nothing created it, so on a machine where
   nothing else had, user units got a `TMPDIR` that did not exist. dev-sync's first timer run on

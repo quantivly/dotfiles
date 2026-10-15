@@ -1029,8 +1029,10 @@ outage.
   ```
   Approve in a browser signed in to **quantivly-0**, the seat dev's `/login` uses: `rabota
   doctor` reads the account from `.claude.json`, which the token does not change, so a token
-  minted on another account would bill it unseen. Paste the token at the hidden prompt, then
-  clear that terminal's scrollback. `dev-sync --check` reports the method (which shows the token is in use, not that it works:
+  minted on another account would bill it unseen. Paste the token at the hidden prompt and press
+  Enter twice: input ends at an empty line, so a token the terminal wrapped is joined back
+  together, and the store sends one request with it before writing anything. Then clear that
+  terminal's scrollback. `dev-sync --check` reports the method (which shows the token is in use, not that it works:
   `claude auth status` does not test it), the file's mode, its age (⚠ from day 335) and how
   many running Claude processes still lack it. What it costs, and
   what is left:
