@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`~/.cache/tmp` is aged out again (DO-824).** Moving `TMPDIR` off the `/tmp` tmpfs took away
+  the cleanup a reboot gave it, and nothing replaced it. The hand-written tmpfiles rule relied on
+  the vendor `systemd-tmpfiles-clean.timer`, which Ubuntu leaves disabled for user managers and
+  which had never run. The directory reached ~188G.
+  - **The rule is tracked.** `config/user-tmpfiles.d/tmpdir.conf` ages the root at 7 days and
+    Claude Code's `claude-<uid>/` at 14.
+  - **A repo-owned timer applies it.** `tmpdir-clean.timer` runs daily at 05:15 at idle priority.
+    `./install` enables and starts it. With `Persistent=true` and no stamp file, starting it does
+    not run it, so the first run is the next 05:15. `check-timer-health` and the reconciler cover
+    it.
+  - **Registered worktrees are guarded.** `scripts/tmpdir-clean.sh` writes an `x` line for every
+    registered git worktree under the root whose host is outside it, at any depth. It refuses,
+    deleting nothing, on a path it cannot encode, a failing `find`, an unreadable `.git` file, a
+    git dir it cannot search, or a root that is a symlink. The root is read from the config.
+  - **`verify-tools.sh` asserts it.** It FAILs when the redirect is linked and the timer is not
+    enabled, and WARNs when the unguarded vendor timer is enabled.
+  - **Opt-out: `TMPDIR_CLEAN_OFF=1`** in `~/.zshrc.local`, then `./install`. That stops the
+    timer and removes its `.wants` link, and `verify-tools.sh` reports the cleanup as deliberately
+    off. Never `systemctl --user disable`: it deletes the dotbot symlink, and the next
+    `./install` re-enables the timer.
+  - State table: `scripts/test-tmpdir-clean.sh` (hermetic, real systemd-tmpfiles, CI
+    `tmpdir-clean-test`). Why, and the evidence: `docs/TMPDIR.md`.
+
 - **A rabota escalation's desktop notification is a doorbell into Sol.**
   - **What it does.** With `[notify] desktop_entry` set in `~/.dotfiles-local/rabota/config.toml`,
     the one notification per escalation is filed under that app (Sol's PWA), so clicking it opens
@@ -82,6 +105,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dev". `test-dev-sync.sh`: 211 rows; rabota +2 tests; secret guard +2 rows (it now refuses reads of the token file). 28 mutants, 28 deaths.
 
 ### Changed
+
+- **`dotfiles-work` creates worktrees under `~/.herdr/worktrees/.dotfiles/`**, not
+  `~/dotfiles-worktrees/`, so the nightly `wt-gc-sweep` reaps a landed one (DO-824).
+  `DOTFILES_WORKTREES` still overrides it.
+  - **Migration.** A worktree still under `~/dotfiles-worktrees/` is no longer found by
+    re-entry or by `--remove`, which look only under the new default. Re-entry then fails,
+    because its branch is checked out in the old worktree. `--list` still shows it. Either
+    remove those first, with the old location named
+    (`DOTFILES_WORKTREES=~/dotfiles-worktrees dotfiles-work --remove <branch>`), or keep the old
+    location by exporting `DOTFILES_WORKTREES=~/dotfiles-worktrees` in `~/.zshrc.local`.
 
 - **`docs/HERDR_GUIDE.md`: dev's `agents.slice` cap is now 12G/16G**, set on 2026-10-13 with
   `systemctl --user set-property`. Its drop-ins override the base file, which still says 8G/10G.

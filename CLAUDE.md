@@ -458,8 +458,6 @@ Prefix-free tmux setup with Terminator-style keybindings. Prefix: Ctrl+s.
 
 **Key notes:**
 - No auto-start — launch manually with `tmn <session>`
-- Alacritty coupling — Ctrl+Shift+letter bindings require CSI u entries in `~/.config/alacritty/alacritty.toml` (template: `examples/alacritty.toml.template`, install with `alacritty-init`)
-- `extended-keys` and `terminal-features` are server-level — require `tmux kill-server`, not just config reload
 - Plugins: tmux-resurrect, tmux-continuum, tmux-thumbs, tmux-open, tmux-dispatch
 - Claude Code runs in fullscreen rendering (alt-screen) to avoid scrollback corruption — its output isn't in tmux copy-mode; scroll/search inside Claude (`Ctrl+o`, then `[` to dump to scrollback). See [docs/CLAUDE_CODE_TMUX.md](docs/CLAUDE_CODE_TMUX.md)
 
@@ -509,6 +507,8 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
   runs in — so `wt-gc-sweep` does it daily, linked but not enabled until armed by hand after
   one `scripts/wt-gc-sweep.sh --dry-run`. Scope, grace and blast radius:
   [docs/WORKTREE_SWEEP.md](docs/WORKTREE_SWEEP.md).
+- **Nothing that must outlive 7 days goes under `$TMPDIR`** (`~/.cache/tmp`, aged out daily by
+  `tmpdir-clean.timer`): registered worktrees are guarded, clones are not. [docs/TMPDIR.md](docs/TMPDIR.md).
 - **Never judge a unit from one `systemctl` field.** A unit that does not exist answers
   `LoadState=not-found` and `Result=success` — read `LoadState` first. A SKIPPED unit (unmet
   `ConditionPathExists`) is not a FAILED one either: `Result=success`, nothing in

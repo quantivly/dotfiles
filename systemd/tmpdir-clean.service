@@ -1,0 +1,56 @@
+# systemd/tmpdir-clean.service
+# ============================
+# Ages out $TMPDIR (~/.cache/tmp), keeping registered git worktrees.
+#
+# WHY THIS EXISTS. config/environment.d/tmpdir.conf points TMPDIR at
+# ~/.cache/tmp, off the /tmp tmpfs, and so takes away the cleanup /tmp got from
+# every reboot. A hand-written user-tmpfiles.d rule was meant to replace it, but
+# nothing applied the rule: Ubuntu ships the vendor systemd-tmpfiles-clean.timer
+# disabled for user managers, and it had never run. By 2026-10-15 the directory
+# held ~188G in ~258k top-level entries. docs/TMPDIR.md has the measurements.
+#
+# WHAT IT ACTUALLY RUNS is scripts/tmpdir-clean.sh, which holds the policy: it
+# writes an `x` exclusion for every registered git worktree under the root whose
+# host repository is outside it, refuses rather than cleaning on a partial guard,
+# and only then runs systemd-tmpfiles against config/user-tmpfiles.d/tmpdir.conf.
+#
+# ENABLED AND STARTED BY ./install, unlike wt-gc-sweep. That is a deliberate
+# departure from "linked, not enabled" for an unattended deleter: this restores a
+# cleanup the TMPDIR redirect took away, rather than adding a new one, and the one
+# thing in the root that is not disposable (a registered worktree) is guarded.
+# Started, with Persistent=true and no stamp file, the timer first fires at the
+# next 05:15, not at once (docs/TMPDIR.md), so there is time to read
+#   scripts/tmpdir-clean.sh --dry-run        # systemd >= 256
+# Turning it off: TMPDIR_CLEAN_OFF=1 in ~/.zshrc.local, then ./install. Never
+# `systemctl --user disable` or `reenable` — the disable half deletes the dotbot
+# symlink that IS the unit. See systemd/herdr-server.service's [Install] note.
+#
+# PRIORITY. ionice and IOSchedulingClass= do nothing on this laptop (the NVMe
+# scheduler is `none`, and the user manager delegates only cpu, memory and pids).
+# Nice= and CPUWeight= work, and MemoryHigh= bounds the dentry and inode slab a
+# 258k-entry walk charges to the unit's memcg. IOSchedulingClass=idle stays for
+# machines on BFQ. CPUWeight=idle needs systemd >= 250; older managers log the
+# line as unparseable and run the unit anyway.
+#
+# Watch it:  journalctl --user -u tmpdir-clean.service -e
+# Audit it:  ~/.local/state/tmpdir-clean/log
+
+[Unit]
+Description=Age out $TMPDIR (~/.cache/tmp), keeping registered git worktrees
+Documentation=file://%h/.dotfiles/docs/TMPDIR.md
+# No ConditionPathIsDirectory= on the root. check-timer-health reports a
+# timer-activated unit that a condition SKIPS as a fault, and the root is
+# config/user-tmpfiles.d/tmpdir.conf's to name, not this file's. With no root
+# the script says "nothing to do" and exits 0.
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/scripts/tmpdir-clean.sh
+Nice=19
+CPUWeight=idle
+MemoryHigh=512M
+IOSchedulingClass=idle
+# The first run on a machine that has never been cleaned walks every entry ever
+# written there. Type=oneshot has no start timeout by default, and the timer will
+# not fire again while a run is active, so a hung run would block every later one.
+TimeoutStartSec=3h

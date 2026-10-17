@@ -177,6 +177,7 @@ hasnt "$OUT_HERDR" "Oh-My-Zsh"         "no oh-my-zsh plugin inventory"
 hasnt "$OUT_HERDR" "Forgit"            "no forgit section"
 hasnt "$OUT_HERDR" "mise install"      "summary does not tell a modular adopter to run mise install"
 hasnt "$OUT_HERDR" "README.md"         "summary does not point at the full-repo guide"
+hasnt "$OUT_HERDR" "TMPDIR cleanup"    "no TMPDIR cleanup assertion — --herdr never links the redirect"
 
 echo
 echo "=== verify-tools --herdr: what it must report ==="
@@ -191,6 +192,7 @@ OUT_FULL="$(verify "$H")"
 has "$OUT_FULL" "Modern CLI Tools"   "full run still inventories tools"
 has "$OUT_FULL" "mise config drift"  "full run still checks mise drift"
 has "$OUT_FULL" "Claude Code wiring" "full run also checks Claude wiring — ./install wires neither"
+has "$OUT_FULL" "TMPDIR cleanup"     "full run asserts TMPDIR cleanup"
 
 echo
 echo "=== verify-tools: argument handling ==="
@@ -1441,7 +1443,7 @@ hasnt "$(cat "$DOTFILES/scripts/verify-tools.sh")" "import tomllib" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=249
+EXPECTED_ROWS=251
 
 docs_claim() {
   local f="$DOTFILES/$1"

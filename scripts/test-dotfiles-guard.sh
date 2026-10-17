@@ -1226,6 +1226,12 @@ check "new branch has no upstream" "$(git -C "$WTBASE/feat-new" config --get bra
 check "no upstream merge ref"      "$(git -C "$WTBASE/feat-new" config --get branch.feat/new.merge)"  ""
 check "re-entry is recognised"     "$(work feat/new | grep -c 'Entered existing worktree')"           "1"
 check "re-entry exits 0"           "$(work_rc feat/new)"                                              "0"
+# The default is where herdr puts its own worktrees, because that is the scope
+# the nightly wt-gc-sweep reaps (DO-824). The old default, ~/dotfiles-worktrees,
+# was outside it, so a landed dotfiles worktree there stayed until removed by hand.
+zrun "unset DOTFILES_WORKTREES; HOME='$FAKEHOME' DOTFILES_ROOT='$REPO' DOTFILES_PIN_BRANCH=main dotfiles-work feat/default" >/dev/null
+check "unset DOTFILES_WORKTREES puts it under ~/.herdr/worktrees/.dotfiles" \
+  "$(git -C "$FAKEHOME/.herdr/worktrees/.dotfiles/feat-default" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/default"
 
 echo
 echo "=== dotfiles-work --remove: a worktree ./install has run in ==="
@@ -1794,7 +1800,7 @@ check "every functions module parses" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=396
+EXPECTED_ROWS=397
 
 docs_claim() {
   local f="$DOTFILES/$1"
