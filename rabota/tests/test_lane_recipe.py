@@ -2,7 +2,7 @@ import argparse, json, os, shutil, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from rabota import context, errors
-from rabota.commands import lane
+from rabota.commands import lane, reap
 from rabota.lanes import brief as lanes_brief
 from rabota.runner import FakeRunner, Result
 from tests.support import last_json
@@ -937,6 +937,16 @@ class RunRecipeTests(LocalRecipeTests):
         out = lane.run_recipe(self.local_ctx(), budget_fn=lambda **_: self.ok_budget(),
                               **self.kw(machine="local", repo="hub"))
         self.assertNotIn("EnvironmentFile", out["shell"])
+
+    def test_a_local_lane_worktree_sits_in_the_scope_reap_hands_wt_gc(self):
+        # DO-825: `reap` lets `wt-gc --apply` remove only under `--scope`, which is right only
+        # while it is the directory this tenant's local lanes are actually created in, as
+        # `<scope>/<id>` — the scope ends in the tenant, so no other tenant's lanes are under it.
+        ctx = self.local_ctx()
+        out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
+                              **self.kw(machine="local", repo="hub"))
+        argv = reap.wt_gc_apply_argv(ctx)
+        self.assertEqual(str(Path(out["worktree"]).parent), argv[argv.index("--scope") + 1])
 
     def test_remote_paths_use_the_resolved_home_never_a_literal_tilde(self):
         # DO-652 task-7 fix round 1: the dev fixture's state_dir and repos.hub are both

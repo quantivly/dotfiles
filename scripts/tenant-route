@@ -14,6 +14,11 @@
 #   ~/.dotfiles        picker: quantivly (remote owner)  rabota: personal (default)
 #   ~/Projects/toysim  picker: toysim    (remote owner)  rabota: personal (default)
 #
+# (Measured 2026-09-28. That clone moved to ~/toysim/admin-site on 2026-10-17,
+# and rabota now asks this script, so both layers answer toysim there by remote
+# owner. The toysim tenant's [repos] table maps `--repo admin-website` to that
+# path; it plays no part in choosing the tenant.)
+#
 # That is not cosmetic. A lane dispatched from such a directory bills the seat
 # and files its row under whichever tenant rabota chose, while an interactive
 # session in the same directory bills the one the picker chose — different

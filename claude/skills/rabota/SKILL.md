@@ -97,7 +97,8 @@ written, so the fetch you just landed is never silently skipped (DO-738).
    For anything going to a critical reader, evaluate as in step 3 and read only
    `evaluation.json`. `rabota lane retire <id>` as soon as evaluated.
 5. **Close.** `rabota close [--note …]`. Then `rabota --text reap`; apply only
-   `--lanes` and `--spaces`; print the session close hints for the user.
+   `--apply --worktrees` (rabota's own lane worktrees, as listed): `--spaces` is deferred and
+   refuses, `--sessions` never applies; print the session close hints for the user.
 
 ## Inbox session (`/rabota inbox`, and offered on the first run of a Monday)
 

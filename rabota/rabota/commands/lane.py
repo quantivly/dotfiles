@@ -40,6 +40,25 @@ LANE_SLICE = "agents.slice"
 # remote's own home is prepended by ``run_recipe``.
 REMOTE_TOKEN_FILE = ".config/claude-oauth/token.env"
 
+# Every lane worktree is ``<state root>/worktrees/<tenant>/<lane_id>`` (``run_recipe``). Shared
+# with ``reap``, which scopes ``wt-gc --apply`` to the LOCAL form of this directory: a scope
+# rebuilt there could drift from where lanes are actually put, and reap would then remove none of
+# rabota's worktrees, or someone else's.
+WORKTREES_DIR = "worktrees"
+
+
+def local_state_root(tenant) -> Path:
+    """A LOCAL lane's state root: the tenant's own ``state_dir``, not ``ctx.state_dir`` (which
+    ``--state-dir`` overrides). A remote lane's is the machine's ``state_dir`` instead."""
+    return Path(tenant.state_dir).expanduser()
+
+
+def local_lane_worktrees(tenant) -> Path:
+    """The directory holding this tenant's LOCAL lane worktrees, one ``<lane_id>`` each. Down to
+    the tenant, not just ``worktrees/``: two tenants sharing a state root would otherwise share a
+    reap scope, and one tenant's reap could remove the other's lanes."""
+    return local_state_root(tenant) / WORKTREES_DIR / tenant.name
+
 
 def unit_name(tenant: str, slug: str) -> str:
     """``rabota-lane-<tenant>-<slug>-<uuid8>.service``, with the slug reduced to safe characters."""
@@ -620,7 +639,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
     lane_path = None
     env_file = None
     if machine == "local":
-        root = Path(ctx.tenant.state_dir).expanduser()
+        root = local_state_root(ctx.tenant)
         # Sits exactly where the remote branch's own `--repo` refusal sits, and for the same
         # reason: nothing has been created yet on either path -- no ssh, no worktree, no out dir,
         # no store row -- and the two mistakes are one mistake, so they should refuse in one
@@ -646,7 +665,7 @@ def run_recipe(ctx, *, brief, repo, machine, base, seat, model, effort, est_minu
         # config_dir stays None: dev uses its own login's defaults (fix round 5 — see
         # build_local's docstring for the measured evidence that setting it to a directory
         # relocates where Claude Code looks for .claude.json).
-    worktree = str(root / "worktrees" / ctx.tenant.name / lane_id)
+    worktree = str(root / WORKTREES_DIR / ctx.tenant.name / lane_id)
     out_dir = str(root / "out" / ctx.tenant.name / lane_id)
     remote_brief = f"{out_dir}/brief.md"
     if kind == "evaluate":
