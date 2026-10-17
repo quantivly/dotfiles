@@ -100,6 +100,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **dev never publishes a forwarded ssh agent, and its shell's `ssh-add` probes are bounded.**
+  With `ForwardAgent yes`, dev's startup relinked `~/.ssh/ssh_auth_sock` to the laptop's agent.
+  While any ssh to dev stayed open, new panes' `ssh-add -l` hung on Bitwarden (2026-10-14), and
+  every process on the shared box could use the laptop's keys. On a host with
+  `~/.config/dev-sync`, `zshrc.conditionals.plugins` now treats an sshd or VSCode socket as
+  forwarded and never links it. It repairs a link that points at one, skips the VSCode scan, and
+  bounds each probe to 1 s. A login may still use its own forwarded agent. The laptop is
+  unchanged. `dev-sync --check` gains report-only `agent` rows: where the link goes, and how fast
+  `ssh-add -l` answers. `test-dev-sync.sh`: 237 rows. 13 mutants, 13 deaths.
+
 - **`scripts/claude-oauth-store` no longer stores a cut token.** `claude setup-token` wraps its
   token, and reading one line stored 65 characters of it on dev (2026-10-14). The cut token
   passed the shape check, and every request failed until the token was minted again. Input now

@@ -103,6 +103,17 @@ case "$1" in
         esac ;;
 esac
 STUB
+    cat >"$b/ssh-add" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "$(readlink -f "${SSH_AUTH_SOCK:-/none}" 2>/dev/null || echo "${SSH_AUTH_SOCK:-unset}")" >>"$S/ssh-add-calls"
+[[ -e "$S/ssh-add-hangs" ]] && sleep 10
+exit "$(cat "$S/ssh-add-rc" 2>/dev/null || echo 1)"
+STUB
+    cat >"$b/ssh-agent" <<'STUB'
+#!/usr/bin/env bash
+echo "ssh-agent $*" >>"$HOME/stub/calls"
+STUB
+    chmod +x "$b/ssh-add" "$b/ssh-agent"
     cat >"$b/herdr" <<'STUB'
 #!/usr/bin/env bash
 S="$HOME/stub"; echo "herdr $*" >>"$S/calls"
@@ -886,6 +897,111 @@ store "$FAKE_TOK"
 check "store: refused where clauth manages accounts" "$RC" 1
 has   "store: says why" "$(cat "$SE")" "clauth manages Claude accounts here"
 
+echo "== dev never publishes a forwarded ssh agent"
+rowtxt() { printf '%s %-14s %s' "$1" "$2" "$3"; }   # a row as dev-sync prints it
+mksock() { mkdir -p "$(dirname "$1")"; python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+# A forwarded agent: sshd's /…/ssh-*/agent.<pid>, with a process really named sshd behind the pid
+# (the shell reads the real /proc). A script run by its #! line takes the script's name as its
+# comm; a copied binary would not do (sleep here is a multi-call binary that refuses other names).
+agent_fixture() {
+    R="$C/run"; mksock "$R/ssh-agent.socket"; LOCAL="$(readlink -f "$R/ssh-agent.socket")"
+    mkdir -p "$C/abin" "$H/.ssh"; printf '#!/bin/sh\nwhile :; do sleep 1; done\n' >"$C/abin/sshd"; chmod +x "$C/abin/sshd"
+    "$C/abin/sshd" & SSHD_PID=$!
+    [[ "$(cat "/proc/$SSHD_PID/comm" 2>/dev/null)" == sshd ]] || fatal "the fixture's sshd process is named $(cat "/proc/$SSHD_PID/comm" 2>/dev/null)"
+    FWD="$C/ssh-Fwd123/agent.$SSHD_PID"; mksock "$FWD"
+    sleep 300 & OTHER_PID=$!   # a local `ssh-agent -s` socket is named after its parent: not sshd
+    OWN="$C/ssh-Own456/agent.$OTHER_PID"; mksock "$OWN"
+}
+agent_done() { kill "$SSHD_PID" "$OTHER_PID" 2>/dev/null; wait "$SSHD_PID" "$OTHER_PID" 2>/dev/null; }
+zagent() {   # $1 = SSH_AUTH_SOCK the shell starts with ("" = unset). Sets ZS (its final socket), ZL (the link), ZMS
+    local out
+    : >"$H/stub/ssh-add-calls"
+    # shellcheck disable=SC2016  # expanded by the inner zsh, deliberately
+    out="$(env -i HOME="$H" XDG_RUNTIME_DIR="$R" PATH="$H/.local/bin:/usr/bin:/bin" ${1:+SSH_AUTH_SOCK="$1"} zsh -f -c '
+        zmodload zsh/datetime; t=$EPOCHREALTIME
+        source "$1" >/dev/null 2>&1
+        print -r -- "${SSH_AUTH_SOCK:+${SSH_AUTH_SOCK:A}}|$(readlink -f ~/.ssh/ssh_auth_sock 2>/dev/null)|$(( (EPOCHREALTIME - t) * 1000 ))"' \
+        zsh "$DOTFILES/zsh/zshrc.conditionals.plugins")"
+    IFS='|' read -r ZS ZL ZMS <<<"$out"; ZMS="${ZMS%%.*}"
+    ZS="${ZS/#$LOCAL/local}"; ZS="${ZS/#$FWD/fwd}"; ZS="${ZS/#$OWN/own}"
+    ZL="${ZL/#$LOCAL/local}"; ZL="${ZL/#$FWD/fwd}"; ZL="${ZL/#$OWN/own}"
+}
+fwd_asked() { grep -c "ssh-Fwd123" "$H/stub/ssh-add-calls" 2>/dev/null || true; }
+
+new_case
+agent_fixture
+ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"
+zagent "$H/.ssh/ssh_auth_sock"
+check "dev pane, link on a forwarded agent: repaired to dev's own agent" "$ZS/$ZL" "local/local"
+
+# With no agent of dev's own to fall back on, the link must still not be reused or asked.
+mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"
+zagent "$H/.ssh/ssh_auth_sock"
+check "dev, no local agent, link on a forwarded agent: never asked, never reused" "$(fwd_asked)/$ZS" "0/"
+mv "$R/off.socket" "$R/ssh-agent.socket"
+
+ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
+zagent "$FWD"
+check "dev login with its own forwarded agent: may use it, never publishes it" "$ZS/$ZL" "fwd/local"
+
+ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
+zagent ""
+check "dev, dangling link, no agent: relinked to dev's own agent" "$ZS/$ZL" "local/local"
+
+zagent "$OWN"
+check "dev, a local ssh-agent -s socket is not mistaken for a forwarded one" "$ZS/$ZL" "own/own"
+
+touch "$H/stub/ssh-add-hangs"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
+zagent ""
+rm "$H/stub/ssh-add-hangs"
+check "dev, an agent that never answers: shell start bounded (two 1 s probes, not two 10 s ones), and not adopted" \
+    "$(( ZMS < 5000 ))/$ZS" "1/"
+
+# VSCode forwards an agent too, and the shell prefers it to dev's own when one is keyed.
+mksock "$R/vscode-ssh-auth-sock-1"; echo 0 >"$H/stub/ssh-add-rc"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
+zagent ""
+rm "$R/vscode-ssh-auth-sock-1" "$H/stub/ssh-add-rc"
+check "dev, a VSCode-forwarded socket is never adopted" "$ZS/$ZL" "local/local"
+
+mv "$H/.config/dev-sync" "$H/.config/dev-sync.off"
+ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
+zagent "$FWD"
+check "laptop (no dev-sync marker): unchanged, the login's agent is published as before" "$ZS/$ZL" "fwd/fwd"
+mv "$H/.config/dev-sync.off" "$H/.config/dev-sync"
+agent_done
+
+echo "== dev-sync reports the agent link"
+new_case
+agent_fixture
+ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
+run_level --check
+# shellcheck disable=SC2088  # a label as dev-sync prints it
+has   "agent: a local agent is named" "$OUT" "~/.ssh/ssh_auth_sock → $LOCAL, a local agent"
+has   "agent: with a bounded ssh-add timing" "$OUT" "ssh-add -l answered in"
+echo 0 >"$H/stub/ssh-add-rc"; run_level --check
+has   "agent: keys loaded" "$OUT" "ms, keys loaded"
+rm "$H/stub/ssh-add-rc"; touch "$H/stub/ssh-add-hangs"; run_level --check; rm "$H/stub/ssh-add-hangs"
+has   "agent: an agent that does not answer in 1 s: a person's step" "$OUT" "$(rowtxt ⚠ agent "ssh-add -l did not answer within 1 s")"
+ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"
+fake_proc "$SSHD_PID" sshd 0
+: >"$H/stub/ssh-add-calls"; run_level --check
+# shellcheck disable=SC2088  # a label as dev-sync prints it
+has   "agent: a link on a forwarded agent: a person's step" "$OUT" "$(rowtxt ⚠ agent "~/.ssh/ssh_auth_sock → an agent FORWARDED from the laptop")"
+check "agent: the forwarded agent is never probed" "$(fwd_asked)" 0
+check "agent: report-only, no drift from it" "$RC" 0
+fake_proc "$SSHD_PID" sleep 0
+run_level --check
+has   "agent: the same socket shape from a local agent is local" "$OUT" "$FWD, a local agent"
+ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
+run_level --check
+# shellcheck disable=SC2088  # a label as dev-sync prints it
+has   "agent: a dangling link is information" "$OUT" "$(rowtxt · agent "~/.ssh/ssh_auth_sock dangles")"
+rm "$H/.ssh/ssh_auth_sock"
+run_level --check
+# shellcheck disable=SC2088  # a label as dev-sync prints it
+has   "agent: no link is information" "$OUT" "$(rowtxt · agent "no ~/.ssh/ssh_auth_sock link")"
+agent_done
+
 echo "== shells and the herdr launcher load it"
 zload() {   # what an interactive shell on the host ends up with: unset, the token, or other
     # shellcheck disable=SC2016  # expanded by the inner zsh, deliberately
@@ -943,7 +1059,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
 
 printf '\n'
-EXPECTED_ROWS=219
+EXPECTED_ROWS=237
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
