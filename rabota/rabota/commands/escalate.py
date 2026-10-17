@@ -46,6 +46,7 @@ here uses, and a ``dialog-warning`` icon. ESC-11 went out without either and was
 urgencies stay silent on purpose: a sound on every escalation would teach @zvi to ignore it.
 """
 import json
+import re
 
 from rabota import cli, emit, errors
 from rabota.commands.escalations import one_line
@@ -61,6 +62,8 @@ URGENCIES = ("low", "normal", "critical")     # notify-send's own levels; see th
 # A critical one gets a sound nothing else on the machine uses and a warning icon, so it is told apart
 # from vpn-notify's and nanoclaw's criticals; see the module docstring.
 CRITICAL_EXTRAS = ("--icon", "dialog-warning", "--hint", "string:sound-name:alarm-clock-elapsed")
+TITLE_CHARS = 60          # of the question, in the notification title; see ``_title``
+DOORBELL_MAX = "3d"       # how long a doorbell's waiting notify-send lives; see ``_desktop_notify``
 
 
 def _project(ctx: Context, row: dict):
@@ -70,6 +73,56 @@ def _project(ctx: Context, row: dict):
 def _plain(text: str) -> str:
     """``text`` on one line with no character any notification daemon could read as markup."""
     return one_line(text).translate(str.maketrans({"<": "‹", ">": "›", "&": "＆"}))
+
+
+def _title(text: str) -> str:
+    """``text`` as a notification title: one line, no markup, at most ``TITLE_CHARS`` plus "…".
+
+    Cut at the last space in the second half of the limit, so a word is not split; a text with
+    no such space (one long token) is cut hard. The whole question is in Sol and
+    ``rabota escalations``; the title only has to say which escalation rang."""
+    t = _plain(text)
+    if len(t) <= TITLE_CHARS:
+        return t
+    cut = t[:TITLE_CHARS]
+    space = cut.rfind(" ")
+    if space >= TITLE_CHARS // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.") + "…"
+
+
+def _doorbell_unit(tenant: str, eid: int) -> str:
+    """The transient unit's name: anything systemd would refuse in a tenant name becomes ``_``."""
+    return f"rabota-doorbell-{re.sub(r'[^A-Za-z0-9_-]', '_', tenant)}-{eid}"
+
+
+def _desktop_notify(ctx: Context, eid: int, urgency: str, stored: str) -> bool:
+    """Send THE one desktop notification for a new escalation; True if it went out.
+
+    With ``[notify] desktop_entry`` set, it is a doorbell: filed under that app (Sol's PWA), so a
+    click opens it. GNOME Shell 50.1 destroys an app-filed notification the moment its sender
+    leaves the bus (``notificationDaemon.js`` 342-349), so the sender is a ``notify-send --wait``
+    in a transient unit of its own, which outlives this process and any scheduled tick that
+    called it. The click does NOT end that wait (measured 2026-10-17: the waiter ran on to its
+    timeout), so ``DOORBELL_MAX`` bounds it, and when it ends GNOME removes the notification.
+    True here means the unit STARTED, not that notify-send inside it succeeded; its journal
+    (``journalctl --user -u 'rabota-doorbell-*'``) is where that is answered.
+
+    A doorbell that does not start falls back to the plain notification, so a configured
+    doorbell is never less than no doorbell at all."""
+    tenant = ctx.tenant.name
+    extras = CRITICAL_EXTRAS if urgency == "critical" else ()
+    title = f"rabota ESC-{eid}: {_title(stored)}"
+    pointer = f"ESC-{eid}: rabota --tenant {tenant} --text escalations --open"
+    entry = ctx.cfg.desktop_entry
+    if entry and _notify_best_effort(ctx, [
+            "systemd-run", "--user", "--collect", "--quiet", f"--unit={_doorbell_unit(tenant, eid)}",
+            f"--property=RuntimeMaxSec={DOORBELL_MAX}", "--",
+            "notify-send", "--wait", "--app-name", "rabota", "--urgency", urgency, *extras,
+            "--hint", f"string:desktop-entry:{entry}", title, f"Open in Sol. {pointer}"]):
+        return True
+    return _notify_best_effort(ctx, [
+        "notify-send", "--app-name", "rabota", "--urgency", urgency, *extras, title, pointer])
 
 
 def _notify_best_effort(ctx: Context, argv: list[str]) -> bool:
@@ -110,11 +163,7 @@ def run_escalate(ctx: Context, question: str, evidence: str, options: list[str],
         # point -- so this is defence in depth: it keeps holding if that order ever changes.
         stored = row["question"]
         notified = _notify_best_effort(ctx, ["herdr", "notification", "show", f"rabota {kind}: {stored[:100]}"])
-        desktop_notified = _notify_best_effort(ctx, [
-            "notify-send", "--app-name", "rabota", "--urgency", urgency,
-            *(CRITICAL_EXTRAS if urgency == "critical" else ()),
-            f"ESC-{eid} rabota {kind}: {_plain(stored)[:100]}",
-            f"ESC-{eid}: rabota --tenant {ctx.tenant.name} --text escalations --open"])
+        desktop_notified = _desktop_notify(ctx, eid, urgency, stored)
     return {"id": eid, "notified": notified, "desktop_notified": desktop_notified}
 
 

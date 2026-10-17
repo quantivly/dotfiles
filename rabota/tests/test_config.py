@@ -79,6 +79,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.tenants["solo"].repos,
                          {"dotfiles": "~/.dotfiles", "hub": "~/elsewhere/hub"})
 
+    def _overlay(self, config_toml: str):
+        base = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        (base / "config.toml").write_text(config_toml)
+        (base / "tenants").mkdir()
+        (base / "tenants" / "solo.toml").write_text('root = "~/code"\nstate_dir = "~/code/state"\n')
+        return base
+
+    def test_notify_desktop_entry_is_read_from_the_toml(self):
+        cfg = config.load(self._overlay('[notify]\ndesktop_entry = "chrome-abc-Default"\n'),
+                          seats_by_machine={})
+        self.assertEqual(cfg.desktop_entry, "chrome-abc-Default")
+
+    def test_no_notify_table_means_no_desktop_entry(self):
+        self.assertIsNone(self.cfg.desktop_entry)
+
+    def test_a_desktop_entry_that_is_not_a_plain_desktop_id_is_usage(self):
+        # It reaches a notify-send hint and a GNOME app lookup; a path, a space or a non-string
+        # is a typo to name at load, not a doorbell that silently files under nothing.
+        for bad in ('"../evil"', '"a b"', '""', "3", '"x.desktop"'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(errors.Usage) as cm:
+                    config.load(self._overlay(f"[notify]\ndesktop_entry = {bad}\n"), seats_by_machine={})
+                self.assertIn("desktop_entry", str(cm.exception))
+
     def test_a_tenant_declaring_no_repos_table_gets_an_empty_one(self):
         # Not None: every reader does `repo in tenant.repos` and `if tenant.repos`, and None
         # would raise inside the lane rather than fall back to the root form.
