@@ -589,7 +589,9 @@ which can override it on a stock GNOME desktop. `~/.config/environment.d/` holds
 file, owned differently on purpose:
 
 - **Static files** (no packaging to detect) are dotfiles-owned and symlinked by `./install` —
-  `tmpdir.conf` is the existing example (`config/environment.d/tmpdir.conf` in this repo).
+  `tmpdir.conf` is the existing example (`config/environment.d/tmpdir.conf` in this repo). It
+  moves `TMPDIR` to `~/.cache/tmp`, which `tmpdir-clean.timer` ages out daily, so nothing that must
+  outlive 7 days belongs there: [docs/TMPDIR.md](docs/TMPDIR.md).
 - **`10-bitwarden-ssh-agent.conf` is deliberately *not* linked by dotfiles.** Its value depends on
   which Bitwarden package is installed (snap/deb/flatpak), and Quantivly's `dev-setup` is the side
   that detects that and writes the file (tracked in DO-675). If dotbot also linked it, dev-setup's

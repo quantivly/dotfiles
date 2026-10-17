@@ -118,6 +118,15 @@
     # the graphical session, neither of which reads a shell rc — see the
     # SSH_AUTH_SOCK entry below for why that distinction matters (DO-675).
     ~/.config/environment.d/tmpdir.conf: config/environment.d/tmpdir.conf
+    # The cleanup half of that redirect (DO-824). Moving TMPDIR off the /tmp tmpfs
+    # took away the cleanup /tmp got from a reboot, and for two months nothing
+    # replaced it: ~/.cache/tmp reached ~188G (docs/TMPDIR.md). A hand-written
+    # file at the first path is moved aside by dotbot as
+    # tmpdir.conf.dotbot-backup.<ts>, a name systemd-tmpfiles does not read.
+    # The timer is ENABLED by the shell step after the reconcile, below.
+    ~/.config/user-tmpfiles.d/tmpdir.conf: config/user-tmpfiles.d/tmpdir.conf
+    ~/.config/systemd/user/tmpdir-clean.service: systemd/tmpdir-clean.service
+    ~/.config/systemd/user/tmpdir-clean.timer: systemd/tmpdir-clean.timer
     # DELIBERATELY NOT LINKED: ~/.config/environment.d/10-bitwarden-ssh-agent.conf
     # is written by dev-setup (DO-675), which is the side that can detect the
     # install flavor (snap/deb/flatpak). Linking it here would make dotbot's
@@ -260,6 +269,30 @@
       # whole install rather than skipping one step.
       if [ -f scripts/reconcile-systemd-units.sh ]; then
         bash scripts/reconcile-systemd-units.sh
+      fi
+    - |
+      # ENABLE tmpdir-clean.timer — the one unattended deleter this file enables
+      # rather than leaving for a hand-run gate like wt-gc-sweep. It restores a
+      # cleanup the TMPDIR redirect took away, rather than adding a new one, and
+      # the one thing under ~/.cache/tmp that is not disposable, a registered git
+      # worktree, is guarded by scripts/tmpdir-clean.sh. Without it the redirect
+      # is a directory that only grows, and scripts/verify-tools.sh FAILs.
+      # `enable` without --now: the timer starts at the next boot or login, so the
+      # first, largest run is never a side effect of an install. Never `reenable`
+      # (see the reconcile step above). Gated like it: no user manager, no step.
+      if [ -L ~/.config/systemd/user/tmpdir-clean.timer ] \
+         && command -v systemctl >/dev/null 2>&1 \
+         && systemctl --user show-environment >/dev/null 2>&1; then
+        if [ "$(systemctl --user is-enabled tmpdir-clean.timer 2>/dev/null)" = enabled ]; then
+          echo "✓ tmpdir-clean.timer already enabled"
+        elif systemctl --user daemon-reload && systemctl --user enable tmpdir-clean.timer; then
+          echo "✓ Enabled tmpdir-clean.timer (ages out ~/.cache/tmp daily at 05:15)."
+          echo "  It starts at the next boot or login. To start it now — it will not run"
+          echo "  before 05:15 — read a dry run first (scripts/tmpdir-clean.sh --dry-run),"
+          echo "  then: systemctl --user start tmpdir-clean.timer"
+        else
+          echo "⚠ could not enable tmpdir-clean.timer — scripts/verify-tools.sh will FAIL until it is" >&2
+        fi
       fi
     - |
       # Create ~/.backup.local from template (workstation only; no-op on servers).

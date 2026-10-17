@@ -1,0 +1,26 @@
+# systemd/tmpdir-clean.timer
+# ==========================
+# Runs tmpdir-clean.service once a day. See that unit's header for what it does,
+# and why ./install enables this one when it leaves wt-gc-sweep for a human.
+#
+# WHY 05:15. After the 04:00 wt-gc-sweep and its half-hour jitter, so a worktree
+# that sweep removes is gone before this walk starts, and the two runs do not
+# compete for the disk. Persistent=true means a laptop asleep at 05:15 runs this
+# on the next resume. RandomizedDelaySec keeps that run off the instant every
+# other missed job picks.
+
+[Unit]
+Description=Daily age-out of $TMPDIR (~/.cache/tmp)
+Documentation=file://%h/.dotfiles/docs/TMPDIR.md
+
+[Timer]
+OnCalendar=*-*-* 05:15:00
+RandomizedDelaySec=30min
+Persistent=true
+AccuracySec=5min
+
+[Install]
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK — run ./install, never
+# `systemctl --user reenable`, which would delete the dotbot symlink that IS the
+# unit. See systemd/herdr-server.service's [Install] note for the full account.
+WantedBy=default.target

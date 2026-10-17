@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`~/.cache/tmp` is aged out again (DO-824).** Moving `TMPDIR` off the `/tmp` tmpfs took away
+  the cleanup a reboot gave it, and nothing replaced it. The hand-written tmpfiles rule relied on
+  the vendor `systemd-tmpfiles-clean.timer`, which Ubuntu leaves disabled for user managers and
+  which had never run. The directory reached ~188G.
+  - **The rule is tracked.** `config/user-tmpfiles.d/tmpdir.conf` ages the root at 7 days and
+    Claude Code's `claude-<uid>/` at 14.
+  - **A repo-owned timer applies it.** `tmpdir-clean.timer` runs daily at 05:15 at idle priority.
+    `./install` enables it without `--now`, so it starts at the next boot or login, and
+    `check-timer-health` and the reconciler cover it.
+  - **Registered worktrees are guarded.** `scripts/tmpdir-clean.sh` writes an `x` line for every
+    registered git worktree under the root whose host is outside it. It refuses, deleting
+    nothing, on a path it cannot encode, a failing `find` or an unreadable `.git` file.
+  - **`verify-tools.sh` asserts it.** It FAILs when the redirect is linked and the timer is not
+    enabled, and WARNs when the unguarded vendor timer is enabled.
+  - State table: `scripts/test-tmpdir-clean.sh` (hermetic, real systemd-tmpfiles, CI
+    `tmpdir-clean-test`). Why, and the evidence: `docs/TMPDIR.md`.
+
 - **A rabota escalation's desktop notification is a doorbell into Sol.**
   - **What it does.** With `[notify] desktop_entry` set in `~/.dotfiles-local/rabota/config.toml`,
     the one notification per escalation is filed under that app (Sol's PWA), so clicking it opens

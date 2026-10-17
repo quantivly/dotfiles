@@ -12,7 +12,7 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 #
-# EXIT CODE: non-zero if and only if one of the five ASSERTION sections FAILs:
+# EXIT CODE: non-zero if and only if one of the six ASSERTION sections FAILs:
 # "herdr server environment hygiene" — forbidden variables in the running
 # server's environment, a teammux shim dir on its PATH, or session variables the
 # session provides that the server does not have — or "systemd user unit
@@ -37,6 +37,8 @@
 # (an unmet ConditionPathExists) is not even failed: Result stays success and
 # nothing appears in --state=failed. wt-gc-sweep deletes worktrees unattended, so
 # it was armed into a system with nothing listening.
+# The SIXTH, full report only, is "TMPDIR cleanup": TMPDIR redirected to
+# ~/.cache/tmp with no tmpdir-clean.timer enabled to age it out (DO-824).
 # Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
@@ -85,9 +87,9 @@ Usage: verify-tools.sh [--herdr]
              Claude Code wiring. For a machine that ran `./install --herdr` and
              linked five files, not eighteen.
 
-EXIT: non-zero if a herdr assertion FAILs (server env, unit enablement, unit
-ExecStart, timer health, Claude Code wiring). Missing optional tools and mise
-drift stay informational.
+EXIT: non-zero if an assertion FAILs (server env, unit enablement, unit
+ExecStart, timer health, Claude Code wiring, and in the full report TMPDIR
+cleanup). Missing optional tools and mise drift stay informational.
 USAGE
         exit 0 ;;
     *)
@@ -617,6 +619,24 @@ else
 fi
 
 echo ""
+# The SIXTH assertion (see EXIT CODE in the header), full report only: only
+# ./install links the TMPDIR redirect, never ./install --herdr. That redirect
+# moves temp files off the /tmp tmpfs and so takes away the cleanup /tmp got
+# from a reboot; tmpdir-clean.timer gives it back. The redirect without the timer
+# is how ~/.cache/tmp reached ~188G (docs/TMPDIR.md). Delegated to the script's
+# --check, like the sections above, so it is testable on its own
+# (scripts/test-tmpdir-clean.sh).
+tmpdir_clean_failed=0
+if [[ "$HERDR_ONLY" != true ]]; then
+    echo -e "${BLUE}=== TMPDIR cleanup (~/.cache/tmp) ===${NC}"
+    if [[ -x "$DOTFILES_ROOT/scripts/tmpdir-clean.sh" ]]; then
+        "$DOTFILES_ROOT/scripts/tmpdir-clean.sh" --check || tmpdir_clean_failed=1
+    else
+        echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/tmpdir-clean.sh missing — TMPDIR cleanup UNCHECKED"
+        tmpdir_clean_failed=1
+    fi
+    echo ""
+fi
 echo -e "${BLUE}=== Plugin dependencies under the herdr SERVER PATH ===${NC}"
 # Why: the server's PATH is a snapshot taken when it started, and it is what every
 # plugin and popup resolves against — not your shell's PATH (mise adds tools per
@@ -1019,7 +1039,7 @@ echo ""
 # Non-zero on a herdr ASSERTION failure — see EXIT CODE in the header. Both
 # counters, not just the first: OR-ing them here is what keeps a green tick from
 # one section standing in for the other.
-if (( herdr_hygiene_failed || claude_wiring_failed )); then
+if (( herdr_hygiene_failed || claude_wiring_failed || tmpdir_clean_failed )); then
     exit 1
 fi
 exit 0

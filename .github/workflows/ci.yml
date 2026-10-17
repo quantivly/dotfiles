@@ -268,6 +268,23 @@ jobs:
       - name: Run the wt-gc-sweep state table
         run: ./scripts/test-wt-gc-sweep.sh
 
+  tmpdir-clean-test:
+    name: TMPDIR Cleanup State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The subject DELETES files under ~/.cache/tmp, and its aging rows run the
+      # real systemd-tmpfiles: stock here, like git. They are made hermetic by a
+      # fake HOME and XDG dirs plus config passed by path, never by the runner
+      # having nothing to delete — and the suite proves %h resolves to the fake
+      # HOME, non-destructively, before any clean runs. On a runner whose systemd
+      # is older than 256 the real --dry-run row takes the refusal path rather
+      # than a real dry run; both expect nothing deleted.
+      - name: Run the tmpdir-clean state table
+        run: ./scripts/test-tmpdir-clean.sh
+
   scrub-transcript-secrets-test:
     name: Transcript Scrub State Table
     runs-on: ubuntu-latest
