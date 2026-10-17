@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Its lifetime.** The unit is capped at 3 days, because a click does not end the wait.
   - **Its fallback.** If the unit does not start, rabota sends the plain notification.
   - **Its title** is now `rabota ESC-<id>: <question>`, cut at a word near 60 characters.
+  - **Its image is the app's own icon** (Sol's), not the warning icon. With the warning icon it
+    read as "rabota". A critical keeps its alarm sound.
   - **Not covered here.** Opening one particular escalation needs click actions, which GNOME's
     notification relay leaves unanswered on this machine. Sol's own web push is the path for
     that.

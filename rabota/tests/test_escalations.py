@@ -494,18 +494,29 @@ class DoorbellTests(Base):
             "systemd-run", "--user", "--collect", "--quiet", f"--unit=rabota-doorbell-quantivly-{eid}",
             "--property=RuntimeMaxSec=3d", "--",
             "notify-send", "--wait", "--app-name", "rabota", "--urgency", "normal",
-            "--hint", "string:desktop-entry:sol-test",
+            "--icon", "sol-test", "--hint", "string:desktop-entry:sol-test",
             f"rabota ESC-{eid}: merge HUB-1?",
             f"Open in Sol. ESC-{eid}: rabota --tenant quantivly --text escalations --open"])
         self.assertIs(out["desktop_notified"], True)
 
-    def test_a_critical_doorbell_keeps_the_sound_and_icon(self):
+    def test_a_critical_doorbell_keeps_the_sound_and_shows_the_apps_icon_not_the_warning(self):
+        # The app's icon is what makes it read as Sol at a glance (2026-10-17: with the warning
+        # icon it read as "rabota", the small header naming Sol went unnoticed). The sound, the
+        # sticky banner and the DND bypass still mark it critical.
         runner = FakeRunner([HERDR_OK, SYSTEMD_RUN_OK])
         escalate.run_escalate(self.dctx(runner), "q", "e", [], urgency="critical")
         (argv,) = doorbell_calls(runner)
         i = argv.index("notify-send")
-        self.assertEqual(argv[i:i + 10], ["notify-send", "--wait", "--app-name", "rabota", "--urgency", "critical",
-                                          *escalate.CRITICAL_EXTRAS])
+        self.assertEqual(argv[i:i + 12], ["notify-send", "--wait", "--app-name", "rabota", "--urgency", "critical",
+                                          "--icon", "sol-test", *escalate.CRITICAL_SOUND,
+                                          "--hint", "string:desktop-entry:sol-test"])
+        self.assertNotIn("dialog-warning", argv)
+
+    def test_the_plain_fallback_keeps_the_warning_icon(self):
+        runner = FakeRunner([HERDR_OK, (["systemd-run"], Result(1, "", "x")), NOTIFY_OK])
+        escalate.run_escalate(self.dctx(runner), "q", "e", [], urgency="critical")
+        (plain,) = desktop_calls(runner)
+        self.assertEqual(plain[5:9], list(escalate.CRITICAL_EXTRAS))
 
     def test_a_failed_doorbell_falls_back_to_the_plain_notification(self):
         for failure in (Result(1, "", "Unit rabota-doorbell-x already exists"), RuntimeError("no systemd")):
