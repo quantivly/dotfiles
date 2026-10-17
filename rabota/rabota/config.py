@@ -1,5 +1,6 @@
 """Tenant data lives in ~/.dotfiles-local/rabota (private overlay). Mechanism here."""
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +111,27 @@ class Config:
     one home for that fact — see ``rabota/tenants.py`` for why rabota gave up its own copy.
     """
     tenants: dict[str, Tenant]
+    # ``[notify] desktop_entry`` in config.toml: the desktop-file id (no ``.desktop``) that rabota's
+    # escalation notification is filed under, which makes it a doorbell for that app. Machine-
+    # specific (Sol's PWA is a Chrome install id), so it lives in this overlay, never in the repo.
+    # None = the plain notification. See ``commands/escalate.py``.
+    desktop_entry: str | None = None
+
+
+# A desktop-file id as GNOME's lookup takes it: dotted segments, no path, no space, no suffix.
+_DESKTOP_ID = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*")
+
+
+def _desktop_entry(main: Path, top: dict) -> str | None:
+    value = (top.get("notify") or {}).get("desktop_entry")
+    if value is None:
+        return None
+    if (not isinstance(value, str) or not _DESKTOP_ID.fullmatch(value)
+            or value.endswith(".desktop")):
+        raise errors.Usage(f"{main}: [notify] desktop_entry must be a desktop-file id such as "
+                           f"'chrome-<app-id>-Default' (no path, no spaces, no .desktop suffix); "
+                           f"got {value!r}")
+    return value
 
 
 def _dc(cls, data: dict):
@@ -206,7 +228,7 @@ def load(base: Path | None = None, seats_by_machine: dict[str, str] | None = Non
             raise errors.Usage(f"{path}: {e}") from None
     if not tenants:
         raise errors.Usage(f"{base}/tenants: no tenants/*.toml, so no tenant can ever be resolved")
-    return Config(tenants=tenants)
+    return Config(tenants=tenants, desktop_entry=_desktop_entry(main, top))
 
 
 def _check_dead_state_types(tenant: Tenant) -> None:

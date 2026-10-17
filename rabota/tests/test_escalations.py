@@ -52,7 +52,7 @@ class EscalateNotifiesTheDesktopTests(Base):
         self.assertEqual(out, {"id": out["id"], "notified": True, "desktop_notified": True})
         argv = desktop_calls(runner)[0]
         self.assertEqual(argv[:5], ["notify-send", "--app-name", "rabota", "--urgency", "normal"])
-        self.assertEqual(argv[5], f"ESC-{out['id']} rabota decision: merge HUB-1?")
+        self.assertEqual(argv[5], f"rabota ESC-{out['id']}: merge HUB-1?")
 
     def test_urgency_critical_reaches_notify_send(self):
         runner = FakeRunner([HERDR_OK, NOTIFY_OK])
@@ -66,7 +66,7 @@ class EscalateNotifiesTheDesktopTests(Base):
         argv = desktop_calls(runner)[0]
         self.assertEqual(argv[5:9], ["--icon", "dialog-warning", "--hint", "string:sound-name:alarm-clock-elapsed"])
         # the two positionals stay last, so the summary and body tests below hold for every urgency
-        self.assertEqual(argv[-2], f"ESC-{out['id']} rabota finding: q")
+        self.assertEqual(argv[-2], f"rabota ESC-{out['id']}: q")
 
     def test_a_normal_or_low_one_stays_silent(self):
         for urgency in ("normal", "low"):
@@ -89,7 +89,26 @@ class EscalateNotifiesTheDesktopTests(Base):
         runner = FakeRunner([HERDR_OK, NOTIFY_OK])
         out = escalate.run_escalate(self.ctx(runner), 'see <a href="x">this</a>\n& <b>that</b>', "e", [])
         summary = desktop_calls(runner)[0][-2]
-        self.assertEqual(summary, f'ESC-{out["id"]} rabota finding: see ‹a href="x"›this‹/a› ＆ ‹b›that‹/b›')
+        self.assertEqual(summary, f'rabota ESC-{out["id"]}: see ‹a href="x"›this‹/a› ＆ ‹b›that‹/b›')
+
+    def test_a_long_question_is_cut_at_a_word_boundary_with_an_ellipsis(self):
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        q = "s-233aa84f scheduler smoke: does a command run record and escalate?: fail, exit 1. Smoke run"
+        out = escalate.run_escalate(self.ctx(runner), q, "e", [])
+        summary = desktop_calls(runner)[0][-2]
+        self.assertEqual(summary, f"rabota ESC-{out['id']}: s-233aa84f scheduler smoke: does a command run record and…")
+        self.assertLessEqual(len(summary) - len(f"rabota ESC-{out['id']}: "), escalate.TITLE_CHARS + 1)
+
+    def test_a_question_with_no_space_to_cut_at_is_cut_hard(self):
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        out = escalate.run_escalate(self.ctx(runner), "x" * 200, "e", [])
+        self.assertEqual(desktop_calls(runner)[0][-2], f"rabota ESC-{out['id']}: " + "x" * escalate.TITLE_CHARS + "…")
+
+    def test_a_question_that_fits_is_not_cut(self):
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        q = "y" * escalate.TITLE_CHARS
+        out = escalate.run_escalate(self.ctx(runner), q, "e", [])
+        self.assertEqual(desktop_calls(runner)[0][-2], f"rabota ESC-{out['id']}: {q}")
 
     def test_an_unknown_urgency_is_usage_before_anything_is_written_or_sent(self):
         for dry_run in (False, True):
@@ -444,3 +463,80 @@ class SkillStatusRowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SYSTEMD_RUN_OK = (["systemd-run"], Result(0, "", ""))
+
+
+def doorbell_calls(runner):
+    return [c for c in runner.calls if c[0] == "systemd-run"]
+
+
+class DoorbellTests(Base):
+    """``[notify] desktop_entry`` set: the one notification is a doorbell filed under that app.
+
+    GNOME Shell 50.1 destroys an app-filed notification as soon as its sender leaves the bus
+    (notificationDaemon.js:342-349), so the sender is a ``notify-send --wait`` in a transient unit
+    of its own, outliving this process and any scheduled tick that called it."""
+
+    def dctx(self, runner, tenant="quantivly"):
+        c = self.ctx(runner, tenant=tenant)
+        c.cfg.desktop_entry = "sol-test"
+        return c
+
+    def test_the_doorbell_is_a_transient_unit_running_a_waiting_notify_send_under_the_app(self):
+        runner = FakeRunner([HERDR_OK, SYSTEMD_RUN_OK])
+        out = escalate.run_escalate(self.dctx(runner), "merge HUB-1?", "e", [], kind="decision")
+        self.assertEqual(desktop_calls(runner), [])            # no second, plain notification
+        (argv,) = doorbell_calls(runner)
+        eid = out["id"]
+        self.assertEqual(argv, [
+            "systemd-run", "--user", "--collect", "--quiet", f"--unit=rabota-doorbell-quantivly-{eid}",
+            "--property=RuntimeMaxSec=3d", "--",
+            "notify-send", "--wait", "--app-name", "rabota", "--urgency", "normal",
+            "--hint", "string:desktop-entry:sol-test",
+            f"rabota ESC-{eid}: merge HUB-1?",
+            f"Open in Sol. ESC-{eid}: rabota --tenant quantivly --text escalations --open"])
+        self.assertIs(out["desktop_notified"], True)
+
+    def test_a_critical_doorbell_keeps_the_sound_and_icon(self):
+        runner = FakeRunner([HERDR_OK, SYSTEMD_RUN_OK])
+        escalate.run_escalate(self.dctx(runner), "q", "e", [], urgency="critical")
+        (argv,) = doorbell_calls(runner)
+        i = argv.index("notify-send")
+        self.assertEqual(argv[i:i + 10], ["notify-send", "--wait", "--app-name", "rabota", "--urgency", "critical",
+                                          *escalate.CRITICAL_EXTRAS])
+
+    def test_a_failed_doorbell_falls_back_to_the_plain_notification(self):
+        for failure in (Result(1, "", "Unit rabota-doorbell-x already exists"), RuntimeError("no systemd")):
+            with self.subTest(failure=failure):
+                runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+                if isinstance(failure, Result):
+                    runner.responses.insert(0, (["systemd-run"], failure))
+                else:
+                    real = runner.run
+                    def run(argv, *a, _real=real, _f=failure, **k):
+                        if argv[0] == "systemd-run":
+                            runner.calls.append(list(argv)); raise _f
+                        return _real(argv, *a, **k)
+                    runner.run = run
+                out = escalate.run_escalate(self.dctx(runner), "q", "e", [])
+                self.assertEqual(len(doorbell_calls(runner)), 1)
+                (plain,) = desktop_calls(runner)
+                self.assertEqual(plain[:5], ["notify-send", "--app-name", "rabota", "--urgency", "normal"])
+                self.assertNotIn("--wait", plain)
+                self.assertIs(out["desktop_notified"], True)
+
+    def test_doorbell_and_fallback_both_failing_is_false(self):
+        runner = FakeRunner([HERDR_OK, (["systemd-run"], Result(1, "", "x")), (["notify-send"], Result(1, "", "no bus"))])
+        out = escalate.run_escalate(self.dctx(runner), "q", "e", [])
+        self.assertIs(out["desktop_notified"], False)
+
+    def test_without_the_key_nothing_changes(self):
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        escalate.run_escalate(self.ctx(runner), "q", "e", [])
+        self.assertEqual(doorbell_calls(runner), [])
+        self.assertEqual(len(desktop_calls(runner)), 1)
+
+    def test_a_unit_name_carries_only_characters_systemd_accepts(self):
+        self.assertEqual(escalate._doorbell_unit("we ird.t/x", 7), "rabota-doorbell-we_ird_t_x-7")
