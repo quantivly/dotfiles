@@ -231,6 +231,31 @@ class CensusTests(unittest.TestCase):
         self.assertEqual([r["verdict"] for r in c["worktrees"]], ["REAP", "KEEP", "REVIEW"])
         self.assertEqual([r["path"] for r in c["worktrees"] if "Projects" in r["path"]], [])
 
+    # DO-825: given a gate, wt-gc also prints, after the table, what --apply would do with each
+    # REAP row — three fields, `WOULD-REMOVE path size` / `WOULD-SKIP path reason` (shape measured
+    # live 2026-10-18). Three is under the eight a row needs, so they were dropped as noise.
+    def test_a_gate_reaches_the_one_wt_gc_call_and_each_reap_row_carries_its_answer(self):
+        tsv = ("REAP\t/lanes/q/a\t\tdetached\t0\t0\t3\tdetached HEAD; clean, every commit on a remote\n"
+               "REAP\t/elsewhere/b\tzvi/b\tMERGED\t0\t0\t9\tPR merged; clean, every commit on a remote\n"
+               "KEEP\t/lanes/q/c\tzvi/c\tOPEN\t0\t0\t0\tPR open\n"
+               "WOULD-REMOVE\t/lanes/q/a\t12M\n"
+               "WOULD-SKIP\t/elsewhere/b\toutside --scope /lanes/q\n")
+        gate = ["--scope", "/lanes/q", "--min-age", "2"]
+        runner = FakeRunner([(["wt-gc", "--tsv"], Result(0, tsv, ""))])
+        rows, unavailable = census.worktrees(runner, gate)
+        self.assertEqual(runner.calls, [["wt-gc", "--tsv", *gate]])
+        self.assertEqual(unavailable, [])
+        self.assertEqual([(r["path"], r.get("would"), r.get("would_detail")) for r in rows],
+                         [("/lanes/q/a", "remove", "12M"), ("/elsewhere/b", "skip", "outside --scope /lanes/q"),
+                          ("/lanes/q/c", None, None)])
+
+    def test_gather_hands_its_gate_to_wt_gc_and_asks_ungated_without_one(self):
+        census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None,
+                      wt_gc_gate=["--scope", "/s", "--min-age", "2"])
+        census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertEqual([a for a in self.runner.calls if a[0] == "wt-gc"],
+                         [["wt-gc", "--tsv", "--scope", "/s", "--min-age", "2"], ["wt-gc", "--tsv"]])
+
     def test_failed_wt_gc_in_default_mode_keeps_the_failure_marker_distinct_from_skip(self):
         runner = FakeRunner([
             (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),

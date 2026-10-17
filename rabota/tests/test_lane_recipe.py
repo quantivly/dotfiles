@@ -940,12 +940,13 @@ class RunRecipeTests(LocalRecipeTests):
 
     def test_a_local_lane_worktree_sits_in_the_scope_reap_hands_wt_gc(self):
         # DO-825: `reap` lets `wt-gc --apply` remove only under `--scope`, which is right only
-        # while it is the directory local lanes are actually created in, as `<scope>/<tenant>/<id>`.
+        # while it is the directory this tenant's local lanes are actually created in, as
+        # `<scope>/<id>` — the scope ends in the tenant, so no other tenant's lanes are under it.
         ctx = self.local_ctx()
         out = lane.run_recipe(ctx, budget_fn=lambda **_: self.ok_budget(),
                               **self.kw(machine="local", repo="hub"))
         argv = reap.wt_gc_apply_argv(ctx)
-        self.assertEqual(str(Path(out["worktree"]).parent.parent), argv[argv.index("--scope") + 1])
+        self.assertEqual(str(Path(out["worktree"]).parent), argv[argv.index("--scope") + 1])
 
     def test_remote_paths_use_the_resolved_home_never_a_literal_tilde(self):
         # DO-652 task-7 fix round 1: the dev fixture's state_dir and repos.hub are both

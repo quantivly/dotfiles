@@ -150,12 +150,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`rabota reap --apply --worktrees` removes only rabota's own lane worktrees (DO-825).** It ran
-  `wt-gc --apply` with no scope and no grace, so on the laptop it removed every landed worktree
-  machine-wide the moment its PR merged: herdr's, Claude Code's in-tree agent worktrees and
-  scratch checkouts under `~/.cache/tmp`. It now passes `--scope <state_dir>/worktrees
-  --min-age 2`, with the scope resolved where `lane recipe` puts local lanes. `--dry-run` still
-  calls nothing. 8 mutants, 8 deaths.
+- **`rabota reap --apply --worktrees` removes only rabota's own lane worktrees (DO-825).** It runs
+  `wt-gc --apply`, which with no scope and no grace removes every landed worktree on the laptop
+  the moment its PR merges: herdr's, Claude Code's in-tree agent worktrees and scratch checkouts
+  under `~/.cache/tmp`. It now passes `--scope <state_dir>/worktrees/<tenant> --min-age 2`, with
+  the scope resolved where `lane recipe` puts that tenant's local lanes. The read-only plan is the
+  same set: census's `wt-gc --tsv` call gets the same flags and the plan keeps only its
+  WOULD-REMOVE rows (measured: 5 listed before, 0 now, matching the scoped apply). `--dry-run`
+  still calls nothing. 15 mutants: 14 deaths, 1 equivalent.
 
 - **dev never publishes a forwarded ssh agent, and its shell's `ssh-add` probes are bounded.**
   With `ForwardAgent yes`, dev's startup relinked `~/.ssh/ssh_auth_sock` to the laptop's agent.

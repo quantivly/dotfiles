@@ -1169,9 +1169,12 @@ other one. Measured on this machine, 2026-09-28, by running both resolvers over 
 | directory | `_claude_tenant_for` | old `resolve_tenant` |
 |---|---|---|
 | `~/.dotfiles` (and its worktrees) | quantivly — `matched`, remote owner | **personal** — default |
-| `~/Projects/toysim` (`Toysim-LTD/admin-website`; `~/toysim/admin-site` since 2026-10-17) | toysim — `matched`, remote owner | **personal** — default |
+| `~/Projects/toysim` (`Toysim-LTD/admin-website`) | toysim — `matched`, remote owner | **personal** — default |
 | `~/quantivly/hub` | quantivly | quantivly |
 | `~/Projects` | personal | personal |
+
+(The `~/Projects/toysim` row was measured at that path; the clone has lived at
+`~/toysim/admin-site` since 2026-10-17.)
 
 **The issue filed it as latent. It was not.** DO-773 recorded that the two candidate tenants
 "happen to declare the same seat and the same `gh_config_dir`, so nothing is mis-billed" — true of

@@ -8,12 +8,19 @@ Spaces wait on the herdr snapshot dimension and are deferred here: listed as ``[
 nothing — *not yet implemented* is a different answer from ``--apply --sessions``'s ``Usage``
 (exit 2), which is *never*.
 
-The laptop half is ``wt-gc --apply --scope <state_dir>/worktrees --min-age 2``: only the
-directory ``lane recipe`` puts this tenant's local lanes in, and only once a PR merged at least
-two days ago. Unscoped, ``wt-gc --apply`` removes every landed worktree on the machine the moment
-its PR merges — ``~/.herdr/worktrees`` (``wt-gc-sweep``'s, under its own policy), Claude Code's
-in-tree agent worktrees, scratch checkouts under ``~/.cache/tmp`` — none of which rabota made.
-The plan (``census``'s ``wt-gc --tsv`` rows) stays machine-wide, as wt-gc's own report does.
+The laptop half is ``wt-gc --apply --scope <state_dir>/worktrees/<tenant> --min-age 2``: only
+the directory ``lane recipe`` puts this tenant's local lanes in, and only once wt-gc's two-day
+grace has passed, counted from the PR's merge or, with no merge to count from (a detached HEAD,
+a PR closed unmerged), from the HEAD commit. Unscoped, ``wt-gc --apply`` removes every landed
+worktree on the machine the moment its PR merges — ``~/.herdr/worktrees`` (``wt-gc-sweep``'s,
+under its own policy), Claude Code's in-tree agent worktrees, scratch checkouts under
+``~/.cache/tmp`` — none of which rabota made.
+
+The plan lists that same set. wt-gc's report is machine-wide, a superset of what a gated
+``--apply`` removes, which is why wt-gc prints a WOULD section once a gate is passed: census's one
+``wt-gc --tsv`` call gets the same gate (``wt_gc_gate``), and the plan takes only the REAP rows it
+answered WOULD-REMOVE. A REAP row it gave no answer for is named in ``unavailable``, never read as
+nothing to remove.
 
 A lane worktree on a REMOTE machine (``machines.dev`` and friends) is a full checkout that
 accumulates on the machine a lane ran on — ``wt-gc`` only ever looks at the laptop. This module
@@ -35,7 +42,7 @@ from datetime import datetime, timezone
 
 from rabota import cli, errors, remote
 from rabota.census import gather
-from rabota.commands.lane import RETIRED_STATUS, TERMINAL_STATUSES, WORKTREES_DIR, local_state_root
+from rabota.commands.lane import RETIRED_STATUS, TERMINAL_STATUSES, local_lane_worktrees
 from rabota.context import Context
 from rabota.store import now
 
@@ -43,16 +50,22 @@ SETTLED_STATUSES = set(TERMINAL_STATUSES) | {RETIRED_STATUS}
 
 REAP_MARKER = "---RABOTA-REAP---"
 REMOTE_REMOVE_TIMEOUT = 120  # seconds; one ssh call removing several worktrees on one machine
-# Days since the PR MERGED before wt-gc may remove its worktree, so a merge nobody has looked at
-# yet survives a reap. The same grace ``scripts/wt-gc-sweep.sh`` gives its own scope.
+# wt-gc's ``--min-age``: whole days since the PR merged (with no merge time, since the HEAD
+# commit) before it may remove the worktree, so a merge nobody has looked at yet survives a reap.
+# The same grace ``scripts/wt-gc-sweep.sh`` gives its own scope.
 WT_GC_MIN_AGE_DAYS = 2
 
 
+def wt_gc_gate(ctx) -> list[str]:
+    """What bounds the ``wt-gc --apply`` reap makes: this tenant's LOCAL lane worktrees (resolved
+    exactly as ``lane recipe`` places them) and the grace. The plan's ``wt-gc --tsv`` call is
+    given the same flags, so the plan and the apply are one set."""
+    return ["--scope", str(local_lane_worktrees(ctx.tenant)), "--min-age", str(WT_GC_MIN_AGE_DAYS)]
+
+
 def wt_gc_apply_argv(ctx) -> list[str]:
-    """The one ``wt-gc --apply`` call reap makes: scoped to this tenant's LOCAL lane worktrees
-    (resolved exactly as ``lane recipe`` places them) and held back by the merge grace."""
-    scope = local_state_root(ctx.tenant) / WORKTREES_DIR
-    return ["wt-gc", "--apply", "--scope", str(scope), "--min-age", str(WT_GC_MIN_AGE_DAYS)]
+    """The one ``wt-gc --apply`` call reap makes."""
+    return ["wt-gc", "--apply", *wt_gc_gate(ctx)]
 
 
 def _hours_since(ts: str | None) -> float | None:
@@ -140,12 +153,17 @@ def plan_reap(ctx: Context, census: dict, idle_hours: float = 24, abandoned_hour
                  "close_hint": f"kill -INT {s['pid']}  # only if you own it; rabota never does"}
                 for s in census.get("sessions", []) if s.get("owner") == "user" and (s.get("cpu_pct_5s") or 0) < 1.0
                 and (s.get("age_s") or 0) > idle_hours * 3600]
-    worktrees = [dict(w, kind="local") for w in census.get("worktrees", []) if w.get("verdict") == "REAP"]
+    # Only what the gated apply would remove (see the module docstring): an out-of-scope or
+    # still-in-grace REAP row is wt-gc's WOULD-SKIP, and no part of this plan.
+    reap_rows = [w for w in census.get("worktrees", []) if w.get("verdict") == "REAP"]
+    worktrees = [dict(w, kind="local") for w in reap_rows if w.get("would") == "remove"]
+    unanswered = sum("would" not in w for w in reap_rows)
+    wt_unanswered = [f"reap:worktrees:{unanswered}-unanswered"] if unanswered else []
     remote_worktrees, wt_unavailable = _remote_worktree_candidates(ctx)
     worktrees += remote_worktrees
     return {"abandoned": abandoned, "sessions": sessions, "spaces": [], "worktrees": worktrees,
             "unavailable": ["deferred:spaces"] + list(census.get("unavailable", []))
-                          + wt_unavailable + ts_unavailable}
+                          + wt_unanswered + wt_unavailable + ts_unavailable}
 
 
 def _repo_path_expr(config_value: str) -> str:
@@ -317,7 +335,7 @@ def _no_target_message(plan: dict) -> str:
 
 def _run(ns):
     ctx = Context.from_namespace(ns)
-    census = gather(ctx, sample_seconds=2.0)
+    census = gather(ctx, sample_seconds=2.0, wt_gc_gate=wt_gc_gate(ctx))
     plan = plan_reap(ctx, census, ns.idle_hours, ns.abandoned_hours)
     targets = {t for t in ("sessions", "spaces", "worktrees") if getattr(ns, t)}
     if not ns.apply:

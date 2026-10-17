@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from rabota import census as census_mod
 from rabota import context, errors
 from rabota.commands import reap
 from rabota.runner import FakeRunner, Result
@@ -45,10 +46,18 @@ class ReapTestCase(unittest.TestCase):
         base = {"sessions": [{"pid": 1, "cwd": "/a", "owner": "user", "age_s": 3 * 86400, "cpu_pct_5s": 0.2, "unit": None},
                              {"pid": 2, "cwd": "/b", "owner": "user", "age_s": 600, "cpu_pct_5s": 0.0, "unit": None},
                              {"pid": 3, "cwd": "/c", "owner": "sol", "age_s": 3 * 86400, "cpu_pct_5s": 0.0, "unit": "nanoclaw-orchestrate.service"}],
-                "units": [], "worktrees": [{"path": "/w1", "repo": "r", "branch": "b", "verdict": "REAP", "reason": "merged"}],
+                "units": [], "worktrees": [{"path": "/w1", "repo": "r", "branch": "b", "verdict": "REAP", "reason": "merged",
+                                             "would": "remove", "would_detail": "1M"}],
                 "machines": [], "unavailable": []}
         base.update(over)
         return base
+
+    def _ns(self, **over):
+        base = dict(tenant="quantivly", state_dir="/unused", text=False, dry_run=False,
+                    apply=False, sessions=False, spaces=False, worktrees=False,
+                    idle_hours=24, abandoned_hours=6)
+        base.update(over)
+        return argparse.Namespace(**base)
 
 
 class PlanReapTests(ReapTestCase):
@@ -173,6 +182,50 @@ class PlanReapTests(ReapTestCase):
         self.assertEqual([w for w in plan["worktrees"] if w["kind"] == "remote"], [])
         self.assertIn("reap:worktree:old:unknown-repo", plan["unavailable"])
 
+    # DO-825 review: the plan listed every landed worktree machine-wide while the apply removes
+    # only the scoped, out-of-grace ones — measured live, "would have removed 5 worktrees" from a
+    # census whose 5 REAP rows the scoped wt-gc would remove 0 of. The rows go through census's
+    # own parser, so the plan is judged on what wt-gc actually prints.
+    WT_GC_GATED_TSV = (
+        "REAP\t/lanes/quantivly/a\t\tdetached\t0\t0\t3\tdetached HEAD; clean, every commit on a remote\n"
+        "REAP\t/home/z/.herdr/worktrees/x/y\tzvi/y\tMERGED\t0\t0\t9\tPR merged; clean, every commit on a remote\n"
+        "REAP\t/lanes/quantivly/b\tzvi/b\tMERGED\t0\t0\t0\tPR merged; clean, every commit on a remote\n"
+        "WOULD-REMOVE\t/lanes/quantivly/a\t12M\n"
+        "WOULD-SKIP\t/home/z/.herdr/worktrees/x/y\toutside --scope /lanes/quantivly\n"
+        "WOULD-SKIP\t/lanes/quantivly/b\tlanded 0d ago, under the 2-day grace\n")
+
+    def gated_rows(self, tsv):
+        rows, _ = census_mod.worktrees(FakeRunner([(["wt-gc", "--tsv"], Result(0, tsv, ""))]),
+                                       ["--scope", "/lanes/quantivly", "--min-age", "2"])
+        return rows
+
+    def test_the_plan_lists_only_the_reap_rows_the_gated_apply_would_remove(self):
+        ctx = self.ctx()
+        plan = reap.plan_reap(ctx, self.census(worktrees=self.gated_rows(self.WT_GC_GATED_TSV)))
+        self.assertEqual([w["path"] for w in plan["worktrees"]], ["/lanes/quantivly/a"])
+        self.assertFalse([u for u in plan["unavailable"] if u.startswith("reap:worktrees:")])
+
+    def test_an_out_of_scope_reap_row_leaves_nothing_to_reap(self):
+        tsv = "\n".join(l for l in self.WT_GC_GATED_TSV.splitlines() if "/.herdr/" in l) + "\n"
+        ctx = self.ctx(FakeRunner([]))
+        with mock.patch("rabota.commands.reap.Context.from_namespace", return_value=ctx), \
+             mock.patch("rabota.commands.reap.gather",
+                        return_value=self.census(sessions=[], worktrees=self.gated_rows(tsv))):
+            self.assertEqual(reap._run(self._ns(text=True)), ["nothing to reap"])
+            with self.assertRaises(errors.Usage) as cm:
+                reap._run(self._ns(apply=True))
+        self.assertIn("nothing to reap", str(cm.exception))
+        self.assertEqual(ctx.runner.calls, [])
+
+    def test_a_reap_row_wt_gc_gave_no_answer_for_is_named_not_planned(self):
+        """No WOULD row means the gated question went unanswered (an ungated census, or a wt-gc
+        that stopped printing them) — read as "remove" it is the machine-wide plan again."""
+        ctx = self.ctx()
+        tsv = "\n".join(l for l in self.WT_GC_GATED_TSV.splitlines() if not l.startswith("WOULD")) + "\n"
+        plan = reap.plan_reap(ctx, self.census(worktrees=self.gated_rows(tsv)))
+        self.assertEqual(plan["worktrees"], [])
+        self.assertIn("reap:worktrees:3-unanswered", plan["unavailable"])
+
 
 class ApplyReapTests(ReapTestCase):
     def test_apply_sessions_is_usage_error(self):
@@ -210,16 +263,17 @@ class ApplyReapTests(ReapTestCase):
         self.assertIn("reaped /w1", rep["worktrees"])
 
     def test_wt_gc_apply_is_scoped_to_lane_worktrees_with_a_merge_grace(self):
-        """DO-825: a bare ``wt-gc --apply`` removed every landed worktree on the laptop the moment
-        its PR merged — herdr's, Claude Code's in-tree agent worktrees, ``~/.cache/tmp`` scratch
+        """DO-825: a bare ``wt-gc --apply`` removes every landed worktree on the laptop the moment
+        its PR merges — herdr's, Claude Code's in-tree agent worktrees, ``~/.cache/tmp`` scratch
         checkouts. FakeRunner answers by PREFIX, so the canned ``["wt-gc", "--apply"]`` would
         still answer an unscoped call: the recorded argv is what is asserted, exactly. The scope
         is built from the fixture tenant's own ``state_dir`` (``ctx.state_dir`` is a tempdir here,
-        so a scope taken from it fails), never from reap's own helper."""
+        so a scope taken from it fails), never from reap's own helper, and ends in the TENANT:
+        a scope of ``worktrees/`` alone would let one tenant's reap remove another's lanes."""
         runner = FakeRunner([(["wt-gc", "--apply"], Result(0, "", ""))])
         ctx = self.ctx(runner)
         reap.apply_reap(ctx, reap.plan_reap(ctx, self.census()), {"worktrees"})
-        scope = str(Path("~/quantivly/handoffs/rabota").expanduser() / "worktrees")
+        scope = str(Path("~/quantivly/handoffs/rabota").expanduser() / "worktrees" / "quantivly")
         self.assertEqual(runner.calls, [["wt-gc", "--apply", "--scope", scope, "--min-age", "2"]])
 
     def test_a_failed_wt_gc_call_is_reported_not_raised(self):
@@ -302,13 +356,6 @@ class RunTargetTests(ReapTestCase):
     with ``gather``/``Context.from_namespace`` patched rather than duplicating plan/apply coverage.
     """
 
-    def _ns(self, **over):
-        base = dict(tenant="quantivly", state_dir="/unused", text=False, dry_run=False,
-                    apply=False, sessions=False, spaces=False, worktrees=False,
-                    idle_hours=24, abandoned_hours=6)
-        base.update(over)
-        return argparse.Namespace(**base)
-
     def test_apply_with_no_target_refuses_and_touches_no_machine_but_still_marks_abandoned(self):
         """F1: this only ever proved runner.calls == [] — no machine was touched — while leaving
         the store's own bookkeeping unstated, even though plan_reap (called before the refusal)
@@ -345,6 +392,17 @@ class RunTargetTests(ReapTestCase):
              mock.patch("rabota.commands.reap.gather", return_value=self.census()):
             rep = reap._run(self._ns(apply=True, worktrees=True))
         self.assertIn("reaped /w1", rep["worktrees"])
+
+    def test_the_plans_wt_gc_call_carries_the_apply_calls_gate(self):
+        """The plan is the apply's set only while census asks wt-gc the same question the apply
+        acts on; a plan gathered ungated is the machine-wide superset again."""
+        runner = FakeRunner([(["wt-gc", "--apply"], Result(0, "", ""))])
+        ctx = self.ctx(runner)
+        with mock.patch("rabota.commands.reap.Context.from_namespace", return_value=ctx), \
+             mock.patch("rabota.commands.reap.gather", return_value=self.census()) as gather:
+            reap._run(self._ns(apply=True, worktrees=True))
+        self.assertEqual(gather.call_args.kwargs.get("wt_gc_gate"), runner.calls[0][2:])
+        self.assertIn("--scope", runner.calls[0])
 
     def test_dry_run_with_no_target_still_prints_the_full_plan(self):
         ctx = self.ctx(FakeRunner([]))

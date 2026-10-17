@@ -53,6 +53,13 @@ def local_state_root(tenant) -> Path:
     return Path(tenant.state_dir).expanduser()
 
 
+def local_lane_worktrees(tenant) -> Path:
+    """The directory holding this tenant's LOCAL lane worktrees, one ``<lane_id>`` each. Down to
+    the tenant, not just ``worktrees/``: two tenants sharing a state root would otherwise share a
+    reap scope, and one tenant's reap could remove the other's lanes."""
+    return local_state_root(tenant) / WORKTREES_DIR / tenant.name
+
+
 def unit_name(tenant: str, slug: str) -> str:
     """``rabota-lane-<tenant>-<slug>-<uuid8>.service``, with the slug reduced to safe characters."""
     s = SAFE.sub("-", slug).strip("-").lower() or "lane"

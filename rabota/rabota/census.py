@@ -187,9 +187,12 @@ def seats(runner) -> tuple[list[dict], list[str]]:
 #: stream — ``STRAY`` with two fields, ``DANGLING`` with five — so a row is
 #: selected by this token and anything else is skipped.
 WT_GC_VERDICTS = ("REAP", "REVIEW", "PRUNE", "HSPAWN", "KEEP")
+#: What ``--apply`` would do with one REAP row, printed only when a gate flag is passed
+#: (``WOULD-REMOVE path size`` / ``WOULD-SKIP path reason``, three fields each).
+WT_GC_WOULD = {"WOULD-REMOVE": "remove", "WOULD-SKIP": "skip"}
 
 
-def worktrees(runner) -> tuple[list[dict], list[str]]:
+def worktrees(runner, gate: list[str] = ()) -> tuple[list[dict], list[str]]:
     """``wt-gc --tsv`` worktree rows; a failed call is ``unavailable: worktrees``.
 
     The schema is ``verdict path branch pr dirty unpushed age reason``, eight
@@ -200,17 +203,28 @@ def worktrees(runner) -> tuple[list[dict], list[str]]:
     rows by their first field, never by position or column count: positioning
     mislabels every row silently the day a new row type appears, and this stream
     now has three.
+
+    ``gate`` is the ``--scope``/``--min-age`` an ``--apply`` would be given (``reap``'s
+    ``wt_gc_gate``). The rows stay machine-wide either way; with it, wt-gc also answers per REAP
+    row whether that apply would remove it, and the row carries the answer as ``would``
+    (``remove``/``skip``) and ``would_detail`` (wt-gc's size or reason). One call either way.
     """
-    res = runner.run(["wt-gc", "--tsv"], timeout=120)
+    res = runner.run(["wt-gc", "--tsv", *gate], timeout=120)
     if not res.ok:
         return [], ["worktrees"]
-    rows = []
+    rows, would = [], {}
     for line in res.out.splitlines():
         parts = line.split("\t")
+        if parts[0] in WT_GC_WOULD and len(parts) >= 2:
+            would[parts[1]] = (WT_GC_WOULD[parts[0]], parts[2] if len(parts) > 2 else "")
+            continue
         if len(parts) < 8 or parts[0] not in WT_GC_VERDICTS:
             continue
         rows.append({"verdict": parts[0], "path": parts[1], "branch": parts[2], "pr": parts[3],
                      "dirty": parts[4], "unpushed": parts[5], "age": parts[6], "reason": parts[7]})
+    for row in rows:
+        if row["path"] in would:
+            row["would"], row["would_detail"] = would[row["path"]]
     return rows, []
 
 
@@ -410,19 +424,20 @@ def machines(ctx) -> tuple[list[dict], list[str]]:
 
 
 def gather(ctx, proc: Path = Path("/proc"), sample_seconds: float = 3.0, sleeper=time.sleep,
-           include_worktrees: bool = True) -> dict:
+           include_worktrees: bool = True, wt_gc_gate: list[str] = ()) -> dict:
     """Measure everything, settle finished lanes, write ``<state_dir>/census.json`` and return it.
 
     ``include_worktrees=False`` skips the ``wt-gc`` subprocess entirely (it is the slow dimension —
     a `gh` call per worktree) and reports ``"skipped:worktrees"`` in ``unavailable[]``, distinct from
     the ``"worktrees"`` marker a failed call still uses: a reader must be able to tell "we asked and
-    it broke" from "we chose not to ask" (design §4.2).
+    it broke" from "we chose not to ask" (design §4.2). ``wt_gc_gate`` is passed to that one call
+    (see ``worktrees``).
     """
     unavailable = list(DEFERRED)
     sess, u0 = sessions(proc, sample_seconds, sleeper)
     us, u1 = units(ctx.runner); st, u2 = seats(ctx.runner)
     if include_worktrees:
-        wt, u3 = worktrees(ctx.runner)
+        wt, u3 = worktrees(ctx.runner, wt_gc_gate)
     else:
         wt, u3 = [], ["skipped:worktrees"]
     ms, u4 = machines(ctx)
