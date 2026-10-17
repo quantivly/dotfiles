@@ -38,7 +38,8 @@
 # nothing appears in --state=failed. wt-gc-sweep deletes worktrees unattended, so
 # it was armed into a system with nothing listening.
 # The SIXTH, full report only, is "TMPDIR cleanup": TMPDIR redirected to
-# ~/.cache/tmp with no tmpdir-clean.timer enabled to age it out (DO-824).
+# ~/.cache/tmp with no tmpdir-clean.timer enabled to age it out (DO-824), unless
+# TMPDIR_CLEAN_OFF says that is deliberate, which is reported and passes.
 # Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being

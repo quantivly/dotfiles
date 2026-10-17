@@ -271,28 +271,20 @@
         bash scripts/reconcile-systemd-units.sh
       fi
     - |
-      # ENABLE tmpdir-clean.timer — the one unattended deleter this file enables
-      # rather than leaving for a hand-run gate like wt-gc-sweep. It restores a
-      # cleanup the TMPDIR redirect took away, rather than adding a new one, and
-      # the one thing under ~/.cache/tmp that is not disposable, a registered git
-      # worktree, is guarded by scripts/tmpdir-clean.sh. Without it the redirect
-      # is a directory that only grows, and scripts/verify-tools.sh FAILs.
-      # `enable` without --now: the timer starts at the next boot or login, so the
-      # first, largest run is never a side effect of an install. Never `reenable`
-      # (see the reconcile step above). Gated like it: no user manager, no step.
-      if [ -L ~/.config/systemd/user/tmpdir-clean.timer ] \
-         && command -v systemctl >/dev/null 2>&1 \
-         && systemctl --user show-environment >/dev/null 2>&1; then
-        if [ "$(systemctl --user is-enabled tmpdir-clean.timer 2>/dev/null)" = enabled ]; then
-          echo "✓ tmpdir-clean.timer already enabled"
-        elif systemctl --user daemon-reload && systemctl --user enable tmpdir-clean.timer; then
-          echo "✓ Enabled tmpdir-clean.timer (ages out ~/.cache/tmp daily at 05:15)."
-          echo "  It starts at the next boot or login. To start it now — it will not run"
-          echo "  before 05:15 — read a dry run first (scripts/tmpdir-clean.sh --dry-run),"
-          echo "  then: systemctl --user start tmpdir-clean.timer"
-        else
-          echo "⚠ could not enable tmpdir-clean.timer — scripts/verify-tools.sh will FAIL until it is" >&2
-        fi
+      # ENABLE AND START tmpdir-clean.timer — the one unattended deleter this file
+      # enables rather than leaving for a hand-run gate like wt-gc-sweep. It
+      # restores a cleanup the TMPDIR redirect took away, rather than adding a new
+      # one, and the one thing under ~/.cache/tmp that is not disposable, a
+      # registered git worktree, is guarded. Without it the redirect is a
+      # directory that only grows, and scripts/verify-tools.sh FAILs. Started too:
+      # a timer enabled but not started reads as broken to check-timer-health until
+      # the next boot, and with Persistent=true and no stamp file it does not fire
+      # at start (docs/TMPDIR.md). TMPDIR_CLEAN_OFF=1 turns it off instead. The
+      # logic is `tmpdir-clean.sh --install`, where the state table reaches it; it
+      # never `disable`s or `reenable`s (see the reconcile step above), gates
+      # itself like that step, and exits 0. Relative path for the same reason.
+      if [ -f scripts/tmpdir-clean.sh ]; then
+        bash scripts/tmpdir-clean.sh --install
       fi
     - |
       # Create ~/.backup.local from template (workstation only; no-op on servers).
