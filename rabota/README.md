@@ -40,8 +40,11 @@ DO-711 it ran nowhere, and both shipped briefs pointed every dev lane at `/home/
 ## Where data lives
 
 - **Mechanism** is here, in `~/.dotfiles`. **Data** is in the private overlay
-  `~/.dotfiles-local/rabota/`: `config.toml` (cwd → tenant routes, default) and
-  `tenants/<name>.toml` (identity pins, thresholds, lane defaults).
+  `~/.dotfiles-local/rabota/`: `config.toml` and `tenants/<name>.toml` (identity pins, thresholds,
+  lane defaults). Routes and the default moved to the tenants file in DO-773; `config.toml` holds
+  only `[notify] desktop_entry`. That key is the desktop-file id an escalation's notification is
+  filed under, which turns it into a doorbell that opens that app (Sol's PWA) when clicked
+  (`commands/escalate.py`, `_desktop_notify`).
 - **State** is per tenant at `<tenant state_dir>/rabota.db` plus day directories of prose.
 
 ## Scheduled runs

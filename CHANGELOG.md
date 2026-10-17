@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A rabota escalation's desktop notification is a doorbell into Sol.**
+  - **What it does.** With `[notify] desktop_entry` set in `~/.dotfiles-local/rabota/config.toml`,
+    the one notification per escalation is filed under that app (Sol's PWA), so clicking it opens
+    Sol.
+  - **How it stays clickable.** GNOME Shell 50.1 drops an app-filed notification as soon as its
+    sender exits, so the sender is a `notify-send --wait` in its own transient unit,
+    `rabota-doorbell-<tenant>-<id>`.
+  - **Its lifetime.** The unit is capped at 3 days, because a click does not end the wait.
+  - **Its fallback.** If the unit does not start, rabota sends the plain notification.
+  - **Its title** is now `rabota ESC-<id>: <question>`, cut at a word near 60 characters.
+  - **Not covered here.** Opening one particular escalation needs click actions, which GNOME's
+    notification relay leaves unanswered on this machine. Sol's own web push is the path for
+    that.
+
 - **Desktop notifications carry what must interrupt, not agent chatter.** A 13-minute D-Bus sample
   (2026-10-14) caught 12 notifications, every one herdr's per-pane toast (~55/h with 21 panes).
   - **herdr toasts move into herdr.** `[ui.toast] delivery` is now `"herdr"`. Under Do Not
