@@ -61,7 +61,8 @@ KINDS = ("decision", "finding", "verification", "pr-blocked", "prereq", "inciden
 URGENCIES = ("low", "normal", "critical")     # notify-send's own levels; see the module docstring
 # A critical one gets a sound nothing else on the machine uses and a warning icon, so it is told apart
 # from vpn-notify's and nanoclaw's criticals; see the module docstring.
-CRITICAL_EXTRAS = ("--icon", "dialog-warning", "--hint", "string:sound-name:alarm-clock-elapsed")
+CRITICAL_SOUND = ("--hint", "string:sound-name:alarm-clock-elapsed")
+CRITICAL_EXTRAS = ("--icon", "dialog-warning", *CRITICAL_SOUND)
 TITLE_CHARS = 60          # of the question, in the notification title; see ``_title``
 DOORBELL_MAX = "3d"       # how long a doorbell's waiting notify-send lives; see ``_desktop_notify``
 
@@ -115,11 +116,15 @@ def _desktop_notify(ctx: Context, eid: int, urgency: str, stored: str) -> bool:
     title = f"rabota ESC-{eid}: {_title(stored)}"
     pointer = f"ESC-{eid}: rabota --tenant {tenant} --text escalations --open"
     entry = ctx.cfg.desktop_entry
+    # A doorbell shows the app's own icon (a Chrome PWA installs it as a theme icon named like
+    # its desktop id), not the warning icon: with the warning icon it read as "rabota", and the
+    # small header naming the app went unnoticed (2026-10-17). A critical keeps its sound.
+    sound = CRITICAL_SOUND if urgency == "critical" else ()
     if entry and _notify_best_effort(ctx, [
             "systemd-run", "--user", "--collect", "--quiet", f"--unit={_doorbell_unit(tenant, eid)}",
             f"--property=RuntimeMaxSec={DOORBELL_MAX}", "--",
-            "notify-send", "--wait", "--app-name", "rabota", "--urgency", urgency, *extras,
-            "--hint", f"string:desktop-entry:{entry}", title, f"Open in Sol. {pointer}"]):
+            "notify-send", "--wait", "--app-name", "rabota", "--urgency", urgency,
+            "--icon", entry, *sound, "--hint", f"string:desktop-entry:{entry}", title, f"Open in Sol. {pointer}"]):
         return True
     return _notify_best_effort(ctx, [
         "notify-send", "--app-name", "rabota", "--urgency", urgency, *extras, title, pointer])
