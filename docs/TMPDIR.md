@@ -22,9 +22,12 @@ scripts/tmpdir-clean.sh --check       # what scripts/verify-tools.sh asserts
 it starts ([why](#why-install-starts-the-timer-and-why-that-does-not-run-it)). Read the dry run
 before then.
 
-A log line reads `mode=apply guarded=3 rc=0 used=<bytes>-><bytes> inodes=<n>-><n> seconds=<s>`.
-`used` and `inodes` are for the whole filesystem `~/.cache/tmp` is on, so other writers move them
-too. Read them as a trend, not as what one run deleted.
+A log line reads
+`mode=apply guarded=3 chmod=12 rc=0 used=<bytes>-><bytes> inodes=<n>-><n> seconds=<s>`. `chmod` is
+how many [non-writable directories](#non-writable-directories) were given `u+w` (in a dry run, how
+many would be, each printed as `would restore u+w on <path>`). `used` and `inodes` are for the whole
+filesystem `~/.cache/tmp` is on, so other writers move them too. Read them as a trend, not as what
+one run deleted.
 
 ### Turning it off
 
@@ -48,10 +51,34 @@ guarded only by whatever the last run wrote to `$XDG_RUNTIME_DIR`.
 | `~/.cache/tmp` | 7 days | what the hand-written rule already said; upstream systemd ages `/tmp` at 10 days |
 | `~/.cache/tmp/claude-<uid>/` | 14 days | Claude Code's per-session scratchpads and task output. A session can be resumed days later and still expect its scratchpad |
 
-**An entry is deleted only when its atime, mtime, btime and (for files) ctime are all older than
-the age** (`man tmpfiles.d`, "Age"). `/` is mounted `relatime` here, so a file read inside the
-window survives. A file created inside the window survives too, whatever its mtime says, because
-btime is counted. The tool also skips a path someone holds a BSD lock on, and live unix sockets.
+**A file is deleted only when its atime, btime, ctime and mtime are all older than the age**
+(`man tmpfiles.d`, "Age"). `/` is mounted `relatime` here, so a file read inside the window
+survives. A file created inside the window survives too, whatever its mtime says, because btime is
+counted. **A directory is deleted when its btime and mtime are, once it is empty.** Each age carries
+the age-by prefix `abcmBM:` that says so: lowercase letters are the timestamps counted for files,
+uppercase for directories (systemd 248+; the dev server runs 249). The tool also skips a path someone
+holds a BSD lock on, and live unix sockets.
+
+**Directory atime is not counted, because the cleanup itself refreshes it.** The default age-by is
+`abcmABM`. With it, no directory under the root ever aged out: the worktree guard's `find` reads
+every directory before each clean, and on a `relatime` mount reading a directory whose atime is more
+than a day old updates it. systemd-tmpfiles leaves ctime out for directories by default for the
+same reason, since deleting an entry changes it. Atime protects nothing here. A directory holding a
+file that survives cannot be removed anyway, and `stat()` does not update atime. Measured:
+
+- **2026-10-18, after the first real run.** Of the top-level directories left in `~/.cache/tmp`,
+  234,175 had an mtime older than 7 days and an atime of 2026-10-17 09:52, for example
+  `clr-rule-scope-vIxbz0` (mtime 08-20). Their files had gone (`find` only stats files), and the
+  empty directory trees stayed.
+- **The cause, on systemd 259 in a fake HOME.** systemd-tmpfiles alone removed an old empty
+  directory and an old directory holding an old file. When a `find` walk ran over them first, it
+  removed neither, because the walk had made both atimes new. systemd-tmpfiles itself opens
+  directories `O_NOATIME`, and after deleting in one it restores that directory's own atime and
+  mtime (v259 `src/tmpfiles/tmpfiles.c`, `dir_cleanup()`).
+
+On a filesystem that does not record btime, statx reports none. v259 then reads btime as 0, which
+is older than any cutoff, so a directory there is judged by mtime alone. The non-writable pass
+below reads it the same way.
 
 **A path with its own line is skipped by its parent's cleanup.** That is what lets the `e` line
 give `claude-<uid>/` a longer age than the `d` line above it. Measured on systemd 259 before relying
@@ -134,13 +161,66 @@ The script exits 2 and deletes nothing when the guard might be incomplete or wro
   0 (measured), and the log would read as a clean run every night. A symlink *above* the root, such
   as `~/.cache`, is followed and is fine.
 - **A config the root cannot be read from**: no `d` line, a quoted path, a specifier other than `%h`
-  and `%U`, or a line aging a path outside the root.
+  and `%U`, a line aging a path outside the root, or an age the
+  [non-writable pass](#non-writable-directories) cannot read. That pass reads one number and one unit
+  up to weeks, after an optional age-by. `1d12h` is valid to systemd-tmpfiles and refused here.
 - **No `XDG_RUNTIME_DIR`**, or no readable config.
 - **`--dry-run` on systemd older than 256**, which has no `--dry-run`. Falling through would make a
   dry run real. The dev server runs 249.
 
 A refusal fails the unit, and `check-timer-health.sh` reports a failed unit. That is deliberate:
 a refusal that repeats every night has to be seen.
+
+## Non-writable directories
+
+Removing an entry needs write permission on the directory it is in. A file's own mode does not
+matter. So an old file in a directory with no write bit can never be aged out. Neither can an old
+directory inside one, even a non-empty one, because `rmdir` checks permission before emptiness. Go
+makes its module cache mode 555, and tests and builds put throwaway GOPATHs under `$TMPDIR`.
+
+**Measured on the first real run** (2026-10-18 01:18, systemd 259). It freed about 159G (used
+452,366,831,616 → 293,514,301,440 bytes, inodes 15,316,902 → 8,679,488, 325 s). It then exited
+`rc=73` and the unit FAILED. All 55,283 `Failed to remove … Permission denied` lines were files in
+directories this user owns with no write bit. Most were Go module caches
+(`go/pkg/mod/golang.org/x/term@v0.43.0/…`) under GOPATHs at the top level and under
+`claude-<uid>/…/scratchpad/{fh2.*,fakehome.*,tui/home}/go`. A few were 500 and 555 test fixtures
+(`state/ro`, `orch-lock-*`, `imp2628-*/home/…/sub`). Nothing would ever have changed that, so the
+timer would have been red every night.
+
+**Exit 73 comes only from the `e` line.** For a `d` line, v259's `clean_item()` drops the result of
+the clean, so a removal that fails there is logged and the run still exits 0. Measured here: a 555
+directory holding an old file exits 0 under the root's `d` line, and 73 under `claude-<uid>/`'s `e`
+line. The top-level failures were silent leftovers, and the scratchpad ones turned the unit red.
+
+**So once the guard is written, `tmpdir-clean.sh` runs `chmod u+w` on every directory under the
+root that:**
+
+- this user owns and has no user write bit on,
+- is old by the line that governs it, the deepest config line whose path is above it. That line's
+  age and directory letters are read from the config, so btime and mtime with the shipped
+  `abcmBM`, at 7 days under the root and 14 under `claude-<uid>/`,
+- and is not inside a guarded worktree.
+
+A timestamp that is not a number keeps the directory as it is, and so does a line with no age. The
+walk is `find -P -xdev`. It never follows a symlink, and it never leaves the root's filesystem,
+which systemd-tmpfiles does not do either. Like the guard's walk, it prunes directories this user
+cannot read or search, since systemd-tmpfiles cannot enter them. Unlike that walk, it does look
+inside `node_modules` and `.git`.
+
+- **It resets no one's age.** `chmod` on a directory changes only its ctime, and ctime is not
+  counted for directories, neither in `abcmBM` nor in the default. Files are not touched.
+- **After the guard, never before.** A refusal therefore leaves every mode as it was.
+- **`--dry-run` changes nothing.** It prints each directory it would change.
+- **A failure is a warning, not a refusal.** That covers a failing walk, a failing `stat`, or a
+  `chmod` that fails. All it can leave behind is a directory that is still not writable, and
+  systemd-tmpfiles reports the removal that then fails.
+- **A read-only tree in use loses its protection.** Take a Go module cache under `$TMPDIR` that is
+  still in use and whose directories have not changed in 7 days. It is made owner-writable, and from
+  then on it ages out file by file like everything else under the root. Go checks module content by
+  hash, not by mode. The rule this page backs already says such a tree does not belong here.
+- **A non-writable directory younger than its line**, holding something old, still fails that
+  removal until the directory ages too. With btime counted this needs a directory that was writable
+  inside the window.
 
 ## Choices worth knowing about
 
@@ -191,21 +271,24 @@ before and was stopped, a missed 05:15 runs at once, which is what `Persistent=t
 
 ## How it is tested
 
-State table: `scripts/test-tmpdir-clean.sh` (66 checks, in CI as `tmpdir-clean-test`).
+State table: `scripts/test-tmpdir-clean.sh` (83 checks, in CI as `tmpdir-clean-test`).
 
 The aging rows run the **real** systemd-tmpfiles. What is pinned is the guard combined with the
 semantics of the tool that reads it, and a stub would only restate what the script told it. HOME
 and the XDG directories point into a mktemp tree, and the config and guard are passed by path. A
 preflight proves `%h` resolves to the fake HOME, non-destructively, before any clean runs.
 
-The config under test is derived from the shipped one by adding an `amAM:` age-by prefix (atime and
-mtime only). btime and ctime cannot be backdated, so without it a fixture built now is never old.
-The derivation is asserted to prefix every age field and change nothing else. Each age is pinned
-from both sides: a day under it is kept, a day over it goes.
+The config under test is derived from the shipped one by taking `b`, `B`, `c` and `C` out of each
+age-by, so the shipped `abcmBM` becomes `amM`. btime cannot be backdated, and `touch` sets ctime to
+now, so with them a fixture built now is never old. The derivation is asserted to change the age-by
+letters and nothing else. Each age is pinned from both sides: a day under it is kept, a day over it
+goes.
 
 The rows that need an answer the real tools will not give on demand use stubs: a recording
 systemd-tmpfiles for `--dry-run` on 255 and exit 65, a recording `systemctl` for `--check` and
-`--install`, and a `find` that exits 1 for the one walk error left once `EACCES` is pruned.
+`--install`, and a `find` that exits 1 for the one walk error left once `EACCES` is pruned. The
+non-writable pass adds a `find` that fails only that walk, a `stat` that fails, and a `stat` that
+answers with timestamps that are not numbers.
 
 **First mutation sweep: 36 mutants, 34 killed, the 2 expected survivors surviving.** Each mutant was
 checked to apply exactly once before it ran. Each one was killed by a row naming the rule it
@@ -223,3 +306,16 @@ was a worktree at depth 1, so a `-maxdepth 2` mutant passed the whole suite. And
 skip rows shared the needle `skipped`. The survivors are `-ignore_readdir_race`, because a readdir race cannot
 be produced on demand, and the `.git`-directory prune, which only saves cost: nothing inside a
 `.git` directory is a file named `.git`.
+
+**Third sweep, for the non-writable pass and the directory age-by (DO-826): 23 mutants, 20 killed
+by the row named for them, 3 expected survivors.** Each mutant was checked to apply exactly once,
+in a temp copy. Killed: no pre-pass; the pre-pass counting directory atime; the `chmod` not counted
+in the log; no age check; guarded worktrees not pruned; the shallowest line governing instead of the
+deepest; a dry run that chmods; `find -L`; the pre-pass moved ahead of the guard; the config putting
+`A` back in the directory letters; `A` or `B` ignored when the config names them; a failing walk
+refusing; unreadable directories not pruned; a failing `stat` ignored; writable directories
+included; an unreadable age accepted; a line with no age read as age 0; days counted as hours; and a
+timestamp that is not a number read as old. The survivors cannot be produced without root or on
+demand: `-uid` (a directory owned by another user), `-xdev` (a second filesystem), and the recheck
+for a symlink just before `chmod` (a directory swapped for a symlink between the walk and the
+`chmod`).

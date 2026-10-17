@@ -16,17 +16,19 @@
 #     a preflight below proves it on this machine, non-destructively, before any
 #     clean runs: a `%h` that resolved to the real home would age out the real
 #     ~/.cache/tmp.
-#   * The config is DERIVED from config/user-tmpfiles.d/tmpdir.conf with an
-#     `amAM:` age-by prefix on each age. By default systemd-tmpfiles also counts
-#     btime and (for files) ctime, and neither can be backdated, so a fixture
-#     built now is never old. The derivation is asserted to change exactly the
-#     two age fields and nothing else, so the paths and ages under test are the
-#     shipped ones.
+#   * The config is DERIVED from config/user-tmpfiles.d/tmpdir.conf by taking
+#     b, B, c and C out of each age's age-by (or out of the default abcmABM where
+#     a line has none): btime cannot be backdated and touch sets ctime to now, so
+#     with them a fixture built now is never old. The shipped abcmBM becomes amM.
+#     The derivation is asserted to change the age-by fields and nothing else,
+#     so the paths, ages and every other letter under test are the shipped ones.
 #
 # The rows that need a version or an exit status systemd-tmpfiles will not give
 # on demand (--dry-run on systemd < 256, exit 65) use a recording stub through
 # TMPDIR_CLEAN_TMPFILES, and the one find error the walk no longer meets by
-# itself (EACCES is pruned) uses a find stub on PATH. --check and --install run
+# itself (EACCES is pruned) uses a find stub on PATH. So do the non-writable-
+# directory pass's failures: a find that fails only its walk, and two stat
+# stubs. --check and --install run
 # behind a recording systemctl stub at the front of PATH, never against a runner
 # that happens to have no user manager.
 #
@@ -60,11 +62,14 @@ H="$T/home"; R="$H/.cache/tmp"; U="$(id -u)"
 mkdir -p "$R" "$T/run" "$T/cfg" "$T/state" "$T/bin" "$T/hosts" || fatal "setup"
 
 # --- the derived config -------------------------------------------------------
-sed -E 's/^([de] .*[[:space:]])([0-9]+d)$/\1amAM:\2/' "$SHIPPED" > "$T/tmpdir.conf" || fatal "derive"
-[[ "$(diff "$SHIPPED" "$T/tmpdir.conf" | grep -c '^>')" == "$(grep -c '^[de] ' "$SHIPPED")" ]] \
-  || fatal "deriving the test config did not prefix every age field"
-[[ "$(sed 's/amAM://' "$T/tmpdir.conf")" == "$(cat "$SHIPPED")" ]] \
-  || fatal "the derived test config differs from the shipped one by more than the age-by prefix"
+sed -E -e '/^[de] /s/[[:space:]]([0-9]+[a-z]*)$/ abcmABM:\1/' \
+  -e ':a' -e 's/^([de] .*[[:space:]][aAmM]*)[bBcC]([aAbBcCmM]*:[0-9]+[a-z]*)$/\1\2/' -e 'ta' \
+  "$SHIPPED" > "$T/tmpdir.conf" || fatal "derive"
+[[ "$(grep -c -E '^[de] .*[[:space:]][aAmM]+:[0-9]+[a-z]*$' "$T/tmpdir.conf")" == "$(grep -c '^[de] ' "$SHIPPED")" ]] \
+  || fatal "deriving the test config did not leave every age field with an age-by free of b, B, c and C"
+noby() { sed -E 's/[[:space:]][aAbBcCmM]+:([0-9]+[a-z]*)$/ \1/' "$1"; }
+[[ "$(noby "$T/tmpdir.conf")" == "$(noby "$SHIPPED")" ]] \
+  || fatal "the derived test config differs from the shipped one by more than the age-by letters"
 
 # --- preflight: %h is the fake home -------------------------------------------
 probe=".tmpdir-clean-probe-$$"
@@ -103,9 +108,20 @@ case "$2" in
   *) exit 1 ;;
 esac
 STUB
-mkdir -p "$T/findbin" || fatal "setup"
+mkdir -p "$T/findbin" "$T/xdevbin" "$T/statbin" || fatal "setup"
 printf '#!/bin/sh\necho "find: simulated I/O error" >&2\nexit 1\n' > "$T/findbin/find"
-chmod +x "$T/bin/tmpfiles-stub" "$T/bin/systemctl" "$T/findbin/find" || fatal "setup"
+# Fails only the non-writable-directory walk (the one with -mindepth), so the
+# guard's walk still succeeds and the run gets that far.
+printf '#!/bin/sh\ncase " $* " in *" -mindepth "*) echo "find: simulated I/O error" >&2; exit 1 ;; esac\nexec %s "$@"\n' \
+  "$(command -v find)" > "$T/xdevbin/find"
+printf '#!/bin/sh\necho "stat: simulated failure" >&2\nexit 1\n' > "$T/statbin/stat"
+# Answers every path with timestamps that are not numbers, and exits 0.
+mkdir -p "$T/nostatbin" || fatal "setup"
+# shellcheck disable=SC2016  # the $ belongs to the stub
+printf '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done; shift\nfor f; do printf %%s "- - - - $f"; printf "\\0"; done\n' \
+  > "$T/nostatbin/stat"
+chmod +x "$T/bin/tmpfiles-stub" "$T/bin/systemctl" "$T/findbin/find" "$T/xdevbin/find" "$T/statbin/stat" \
+  "$T/nostatbin/stat" || fatal "setup"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 g() { git -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@" >/dev/null 2>&1; }
@@ -142,6 +158,9 @@ run() {  # run [args...] — env overrides come from the caller; RUN_HOME, RUN_C
 guard() { cat "$T/run/user-tmpfiles.d/tmpdir-worktrees.conf" 2>/dev/null; }
 here() { [[ -e "$1" ]] && echo kept || echo gone; }
 lnk() { [[ -L "$1" ]] && echo kept || echo gone; }
+mode() { stat -c %a -- "$1" 2>/dev/null || echo gone; }
+# An empty directory, aged $2 (a touch -d date), then given mode $3.
+mkro() { { mkdir -p "$1" && touch -d "$2" "$1" && chmod "$3" "$1"; } || fatal "mkro $1"; }
 lastlog() { sed -n '$s/^[^ ]* //p' "$T/state/tmpdir-clean/log" | sed 's/ used=.*//'; }
 
 printf 'aging, with the shipped paths and ages\n'
@@ -160,7 +179,7 @@ check "... and its .git file" "$(here "$R/wt-out/.git")" kept
 check "... and the guard names exactly that path" "$(guard | grep -c -x -F "x $R/wt-out")" 1
 check "a worktree whose host is INSIDE the root ages out with it" "$(here "$R/wt-in/uncommitted")" gone
 check "the guard has one x line in all" "$(guard | grep -c '^x ')" 1
-check "the run is logged with its mode, guard count and status" "$(lastlog)" "mode=apply guarded=1 rc=0"
+check "the run is logged with its mode, guard count and status" "$(lastlog)" "mode=apply guarded=1 chmod=0 rc=0"
 
 fresh
 cp -a "$R/wt-out" "$R/wt-copy"
@@ -243,12 +262,91 @@ rc="$(run)"
 check "a directory this user can read but not search is skipped: 0, and the clean ran" "$rc:$(here "$R/old")" "0:gone"
 chmod 700 "$R/readonly"
 
+printf '\nnon-writable directories, and how directories age\n'
+# The first real run (2026-10-18) logged 55,283 "Permission denied" removals, all
+# of files in directories this user owns with no write bit: Go module caches (555)
+# under throwaway GOPATHs. systemd-tmpfiles exits 73 for one under the e line and
+# only logs one under the d line, so the first row has one of each. Each of the
+# directories it changes has a fresh atime and an old mtime: the pre-pass, like
+# the config, must not count directory atime, which the walks bump themselves.
+# Not pinned here: a directory owned by another user (cannot be made without
+# root), and -xdev (a second filesystem cannot be mounted without root).
+fresh
+G="$R/gopath/pkg/mod/x@v1" CG="$R/claude-$U/sess/scratchpad/go/pkg/mod/y@v1"
+mkdir -p "$G/sub" "$CG/sub" "$R/emptyold" "$R/dirold" "$T/outside555/inner" || fatal "ro"
+echo m > "$G/sub/f.go"; echo m > "$CG/sub/f.go"; echo o > "$R/dirold/f"
+find "$R/gopath" "$R/emptyold" "$R/dirold" "$T/outside555" -exec touch -h -d '-10 days' {} + || fatal "age"
+find "$R/claude-$U/sess" -exec touch -h -d '-20 days' {} + || fatal "age"
+touch -a "$R/emptyold" "$R/dirold" "$G" "$CG"
+chmod 555 "$G/sub" "$G" "$CG/sub" "$CG" "$T/outside555/inner" "$T/outside555" || fatal "ro"
+{ ln -s "$T/outside555" "$R/link555" && touch -h -d '-10 days' "$R/link555"; } || fatal "link555"
+mkro "$R/young555" '-6 days' 555
+mkro "$R/wt-out/ro" '-10 days' 555
+mkro "$R/claude-$U/s/ro10" '-10 days' 555
+mkro "$R/m000" '-10 days' 000
+rc="$(run)"
+check "an old 555 dir holding an old 555 dir and an old file goes, under the root and under claude-<uid>, and the run exits 0" \
+  "$rc:$(here "$R/gopath"):$(here "$R/claude-$U/sess")" "0:gone:gone"
+check "... and the log counts the four directories given u+w" "$(lastlog)" "mode=apply guarded=1 chmod=4 rc=0"
+check "an old directory with a FRESH atime goes, empty or holding only an old file (directory atime is not counted)" \
+  "$(here "$R/emptyold"):$(here "$R/dirold")" "gone:gone"
+check "a 555 dir 6 days old keeps its mode" "$(mode "$R/young555")" 555
+check "an old 555 dir inside a guarded worktree keeps its mode" "$(mode "$R/wt-out/ro")" 555
+check "a 555 dir under claude-<uid>, 10 days old (its own line says 14), keeps its mode" "$(mode "$R/claude-$U/s/ro10")" 555
+check "a symlink to an old 555 dir is not followed: neither that dir nor the one in it changes" \
+  "$(mode "$T/outside555"):$(mode "$T/outside555/inner")" "555:555"
+check "an old dir this user cannot read (000) is pruned, as in the guard's walk, and keeps its mode" "$(mode "$R/m000")" 0
+chmod -R u+rwx "$T/outside555"
+
+# The pre-pass takes its directory letters from the config, so each one the
+# config adds keeps a directory the derived amM would have changed.
+fresh
+mkro "$R/byA" '-10 days' 555
+sed 's/ amM:7d$/ amAM:7d/' "$T/tmpdir.conf" > "$T/c-A.conf"
+rc="$(RUN_CONF="$T/c-A.conf" run)"
+check "with A in the config's age-by, a 555 dir the walk itself just read is left alone" "$(mode "$R/byA")" 555
+fresh
+mkro "$R/byB" '-10 days' 555
+sed 's/ amM:7d$/ amBM:7d/' "$T/tmpdir.conf" > "$T/c-B.conf"
+rc="$(RUN_CONF="$T/c-B.conf" run)"
+# systemd-tmpfiles reads a btime the filesystem does not record as 0, so ignores it.
+if [[ "$(stat -c %W -- "$R")" == 0 ]]; then want=gone bt="changed and removed (this filesystem records no btime)"; else want=555 bt="left alone"; fi
+check "with B in the config's age-by, an old-mtime 555 dir created today is $bt" "$(mode "$R/byB")" "$want"
+
+# A line that ages nothing (age -) governs what is under it: nothing there goes,
+# so nothing there is changed.
+fresh
+mkro "$R/keep/ro" '-10 days' 555
+{ cat "$T/tmpdir.conf"; printf 'd %%h/.cache/tmp/keep 0700 - - -\n'; } > "$T/c-keep.conf"
+rc="$(RUN_CONF="$T/c-keep.conf" run)"
+check "an old 555 dir under a line with no age keeps its mode" "$rc:$(mode "$R/keep/ro")" "0:555"
+
+# A failure in the pre-pass can only leave a directory unwritable, so it warns
+# and the clean still runs.
+fresh
+rc="$(PATH="$T/xdevbin:$PATH" run)"
+check "a failing non-writable-directory walk -> a warning naming it, and the clean runs: 0" \
+  "$rc:$(grep -c -F 'while looking for non-writable directories' "$T/err"):$(here "$R/old")" "0:1:gone"
+# The directory holds an old file, so that it cannot go and its mode can be read.
+fresh
+{ mkdir -p "$R/st555" && echo o > "$R/st555/f" && touch -d '-10 days' "$R/st555/f"; } || fatal "st555"
+mkro "$R/st555" '-10 days' 555
+rc="$(PATH="$T/statbin:$PATH" run)"
+check "a failing stat -> a warning naming it, the clean runs, and the directory keeps its mode" \
+  "$rc:$(grep -c -F 'stat failed on the non-writable directories' "$T/err"):$(here "$R/old"):$(mode "$R/st555")" \
+  "0:1:gone:555"
+rc="$(PATH="$T/nostatbin:$PATH" run)"
+check "a timestamp stat answers with something other than a number keeps the directory as it is" \
+  "$rc:$(mode "$R/st555")" "0:555"
+
 printf '\nrefusals delete nothing\n'
 fresh
 worktree "$T/hosts/out" "$R/wt sp"
+mkro "$R/ro555" '-10 days' 555
 rc="$(run)"
 check "a worktree path with a space -> 2, naming the path" "$rc:$(grep -c -F 'sp has a path an x line' "$T/err")" "2:1"
 check "... and nothing was deleted" "$(here "$R/old")" kept
+check "... and no directory was given u+w: that happens only once the guard is written" "$(mode "$R/ro555")" 555
 
 # Every character class encodable() rejects, one worktree at a time. Each one
 # that slipped through would write an x line that tmpfiles reads back as a
@@ -316,13 +414,15 @@ grep -v '^d ' "$T/tmpdir.conf" > "$T/c-nod.conf"
 sed 's#^d %h/.cache/tmp #d "%h/.cache/tmp" #' "$T/tmpdir.conf" > "$T/c-quoted.conf"
 { cat "$T/tmpdir.conf"; printf 'e %%h/.cache/tmp/%%t - - - amAM:1d\n'; } > "$T/c-spec.conf"
 { cat "$T/tmpdir.conf"; printf 'e %%h/elsewhere - - - amAM:1d\n'; } > "$T/c-out.conf"
+# 1d12h is an age systemd-tmpfiles reads; the non-writable-directory pass does not.
+{ cat "$T/tmpdir.conf"; printf 'e %%h/.cache/tmp/x - - - amM:1d12h\n'; } > "$T/c-age.conf"
 got=""
 for c in "nod:has no d line" "quoted:is not an absolute path" "spec:has a specifier" \
-         "out:the only tree the worktree guard walks"; do
+         "out:the only tree the worktree guard walks" "age:is not an age this script reads"; do
   got+="$(RUN_CONF="$T/c-${c%%:*}.conf" run):$(grep -c -F "${c#*:}" "$T/err") "
 done
-check "a config with no d line, a quoted root, a %t, or a line outside the root -> 2 each" \
-  "$got" "2:1 2:1 2:1 2:1 "
+check "a config with no d line, a quoted root, a %t, a line outside the root, or an age it cannot read -> 2 each" \
+  "$got" "2:1 2:1 2:1 2:1 2:1 "
 check "... and nothing was deleted" "$(here "$R/old")" kept
 
 fresh
@@ -338,7 +438,13 @@ check "--dry-run with the real systemd-tmpfiles deletes nothing" "$(here "$R/old
 rc="$(STUB_VER=259 TMPDIR_CLEAN_TMPFILES="$T/bin/tmpfiles-stub" run --dry-run)"
 check "--dry-run on systemd 259 passes --dry-run, and only the two files" "$(cat "$T/stub.log")" \
   "--user --clean --dry-run $T/tmpdir.conf $T/run/user-tmpfiles.d/tmpdir-worktrees.conf"
-check "... and is logged as a dry run" "$(lastlog)" "mode=dry guarded=1 rc=0"
+check "... and is logged as a dry run" "$(lastlog)" "mode=dry guarded=1 chmod=0 rc=0"
+fresh
+mkro "$R/dry555" '-10 days' 555
+rc="$(STUB_VER=259 TMPDIR_CLEAN_TMPFILES="$T/bin/tmpfiles-stub" run --dry-run)"
+check "--dry-run changes no mode, and prints each directory it would give u+w" \
+  "$(mode "$R/dry555"):$(grep -c -x -F "tmpdir-clean: would restore u+w on $R/dry555" "$T/out")" "555:1"
+check "... and logs how many it would" "$(lastlog)" "mode=dry guarded=1 chmod=1 rc=0"
 rc="$(STUB_VER=255 TMPDIR_CLEAN_TMPFILES="$T/bin/tmpfiles-stub" run --dry-run)"
 check "--dry-run on systemd 255 -> 2, naming the version" "$rc:$(grep -c 'needs systemd >= 256' "$T/err")" "2:1"
 check "... and systemd-tmpfiles is never asked to clean" "$(grep -c -- --clean "$T/stub.log")" 0
@@ -399,7 +505,7 @@ check "TMPDIR_CLEAN_OFF=1, enabled -> stopped and its .wants link removed, nothi
   "1:gone:0"
 check "... and the unit itself stays linked (systemctl disable would delete it)" "$(lnk "$UD/tmpdir-clean.timer")" kept
 
-EXPECTED_ROWS=66
+EXPECTED_ROWS=83
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".

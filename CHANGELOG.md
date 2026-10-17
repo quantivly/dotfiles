@@ -150,6 +150,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`tmpdir-clean` ages out what its first run could not (DO-826).** The first real run
+  (2026-10-18) freed about 159G and then FAILED with `rc=73`. 55,283 removals were denied, all of
+  them inside directories this user owns with no write bit, mostly Go module caches (555).
+  - **Non-writable directories get `u+w` back.** Before the clean, and after the guard is written,
+    `scripts/tmpdir-clean.sh` runs `chmod u+w` on each directory under the root that this user
+    owns and cannot write. It must be old by its own line's age and age-by, and outside every
+    guarded worktree. The walk is `find -P -xdev`. It changes only ctime, which is not counted for
+    directories, so no age is reset. `--dry-run` only lists them, and the log line gains `chmod=`.
+  - **Directories now age by btime and mtime, not atime** (`abcmBM:` on both lines). The guard's
+    own `find` refreshed every directory's atime on the `relatime` root, so no directory had ever
+    aged out: 234,175 top-level directories with an mtime older than 7 days were left behind.
+  - State table: 83 rows. 23 mutants: 20 killed, and 3 survivors that need root or a race.
+    `docs/TMPDIR.md` has the evidence.
+
 - **dev never publishes a forwarded ssh agent, and its shell's `ssh-add` probes are bounded.**
   With `ForwardAgent yes`, dev's startup relinked `~/.ssh/ssh_auth_sock` to the laptop's agent.
   While any ssh to dev stayed open, new panes' `ssh-add -l` hung on Bitwarden (2026-10-14), and

@@ -52,6 +52,32 @@
 # it too. It is a snapshot: a worktree created after the last run is unguarded
 # until the next one.
 #
+# NON-WRITABLE DIRECTORIES. Removing an entry needs write on the directory it is
+# in, so an old file in a directory with no write bit can never be aged out, and
+# neither can an old directory inside one (a non-empty one too: rmdir checks
+# permission before emptiness). Go makes its module cache mode 555, and tests put
+# throwaway GOPATHs under $TMPDIR. So once the guard is written, this script runs
+# `chmod u+w` on every directory under the root that
+#   * this user owns and has no user write bit on,
+#   * is old by the line that governs it (the deepest config line whose path is
+#     above it), by that line's own age and age-by directory letters, read from
+#     the config: with the shipped abcmBM, btime and mtime. A btime the
+#     filesystem does not record reads as 0, as it does for systemd-tmpfiles,
+#     so both judge that directory by mtime alone. A timestamp that cannot be
+#     read keeps the directory as it is, and so does a line that ages nothing,
+#   * and is not inside a guarded worktree (each is pruned).
+# The walk is find -P -xdev: like systemd-tmpfiles, it follows no symlink and
+# stays on the root's filesystem. It prunes what this user cannot read or
+# search, as the guard's walk does. Unlike that walk it does look inside
+# node_modules and .git.
+#   This changes no one's age. chmod on a directory changes its ctime only, and
+# ctime is not counted for directories (it is not in abcmBM, nor in the default
+# abcmABM, because deleting an entry changes it too). A file's mode never
+# matters to its deletion, so files are left alone. --dry-run chmods nothing; it
+# prints each directory it would change. A failed chmod, or a failing walk, is
+# a warning: what it leaves behind fails its removal, which systemd-tmpfiles
+# reports, rather than stopping a clean that is safe to run.
+#
 # ONLY THIS CHECKOUT'S RULES ARE APPLIED. systemd-tmpfiles is given the config and
 # the guard by path, so a run never applies some other user-tmpfiles.d rule for
 # the first time, unattended, as a side effect.
@@ -82,8 +108,9 @@
 # runs them. The timer never sees it; ./install turns the timer off.
 #
 # Every run appends one line to $XDG_STATE_HOME/tmpdir-clean/log: mode, guarded
-# worktrees, the systemd-tmpfiles exit status, used bytes and inodes on the
-# root's filesystem before and after, and seconds.
+# worktrees, directories given u+w (in a dry run, the ones it would), the
+# systemd-tmpfiles exit status, used bytes and inodes on the root's filesystem
+# before and after, and seconds.
 #
 # EXIT STATUS
 #   0  cleaned (systemd-tmpfiles exited 0, or 65: a line it could not parse,
@@ -92,7 +119,8 @@
 #   2  COULD NOT RUN, and nothing was deleted: an unencodable worktree path, a
 #      failing find, an unreadable .git file or back-pointer, a git dir that
 #      cannot be searched, a root that is a symlink, a config the root cannot be
-#      read from, no runtime dir, or --dry-run on systemd < 256
+#      read from (an age it cannot read included), no runtime dir, or
+#      --dry-run on systemd < 256
 #
 # Usage: scripts/tmpdir-clean.sh [--dry-run | --check | --install]
 #
@@ -220,23 +248,51 @@ fi
 # ---------------------------------------------------------------------------
 [[ -r "$CONF" ]] || refuse "cannot read the tmpfiles.d config $CONF"
 
+# A line's age as systemd-tmpfiles reads it, for the non-writable-directory
+# pass: AGE_S, its length in seconds (empty: the line ages nothing), and AGE_BY,
+# the timestamps it counts for directories (the age-by's uppercase letters; with
+# no age-by, the default abcmABM's ABM). One number and one unit are read, and
+# anything else refuses rather than guessing.
+age_of() {
+  local a="$1" by=ABM n
+  AGE_S="" AGE_BY=""
+  [[ -z "$a" || "$a" == - ]] && return 0
+  if [[ "$a" == *:* ]]; then
+    by="${a%%:*}" a="${a#*:}"
+    [[ "$by" =~ ^[aAbBcCmM]+$ ]] || return 1
+    by="${by//[abcm]/}"
+  fi
+  [[ "$a" =~ ^([0-9]+)([a-z]*)$ ]] || return 1
+  n=$((10#${BASH_REMATCH[1]}))
+  case "${BASH_REMATCH[2]}" in
+    "" | s | sec | second | seconds) ;;
+    m | min | minute | minutes) n=$((n * 60)) ;;
+    h | hr | hour | hours) n=$((n * 3600)) ;;
+    d | day | days) n=$((n * 86400)) ;;
+    w | week | weeks) n=$((n * 604800)) ;;
+    *) return 1 ;;
+  esac
+  AGE_S="$n" AGE_BY="$by"
+}
+
 # The root is the config's first `d` line, and every line must age a path inside
 # it, because that root is the only tree the guard walks. %h and %U are the only
 # specifiers expanded; any other, or a quoted path, is a refusal rather than a
 # guess at what systemd-tmpfiles would read.
 ROOT=""
-CPATHS=()
+CPATHS=() CAGES=() CBYS=()
 while IFS= read -r cl || [[ -n "$cl" ]]; do
-  ctype="" cpath=""
-  read -r ctype cpath _ <<< "$cl"
+  ctype="" cpath="" cage=""
+  read -r ctype cpath _ _ _ cage _ <<< "$cl"
   [[ -z "$ctype" || "$ctype" == \#* ]] && continue
   p="${cpath//%h/"$HOME"}"
   p="${p//%U/"$(id -u)"}"
   p="${p%/}"
   [[ "$p" == /* ]] || refuse "$CONF: '$cpath' is not an absolute path (a quoted one is not read here)"
   [[ "$p" != *%* ]] || refuse "$CONF: '$cpath' has a specifier this script does not expand (only %h and %U)"
+  age_of "$cage" || refuse "$CONF: '$cage' on $cpath is not an age this script reads (one number and one unit, up to weeks, after an optional age-by)"
   [[ "$ctype" == d && -z "$ROOT" ]] && ROOT="$p"
-  CPATHS+=("$p")
+  CPATHS+=("$p") CAGES+=("$AGE_S") CBYS+=("$AGE_BY")
 done < "$CONF"
 [[ -n "$ROOT" ]] || refuse "$CONF has no d line, so there is no root to guard"
 for p in "${CPATHS[@]}"; do
@@ -369,6 +425,67 @@ if ! {
 fi
 
 # ---------------------------------------------------------------------------
+# Give u+w back to old directories this user owns and cannot write. Only now,
+# so a refusal above has changed nothing. The rule, and why it resets no
+# one's age: NON-WRITABLE DIRECTORIES in the header.
+# ---------------------------------------------------------------------------
+NOW="$(date +%s)"
+PRE="$STATE/nonwritable.list"
+PRESTAT="$STATE/nonwritable.stat"
+PREERR="$STATE/nonwritable.err"
+pf=(find -P "$ROOT" -xdev -mindepth 1 -ignore_readdir_race)
+for wt in "${GUARDS[@]}"; do pf+=(-path "$wt" -prune -o); done
+pf+=(-type d \( ! -readable -o ! -executable \) -prune -o
+     -type d -uid "$(id -u)" ! -perm -u=w -print0)
+"${pf[@]}" > "$PRE" 2> "$PREERR"
+prc=$?
+if (( prc != 0 )); then
+  sed 's/^/  /' "$PREERR" >&2
+  printf 'tmpdir-clean: find exited %s while looking for non-writable directories under %s; a removal in one it missed will fail\n' "$prc" "$ROOT" >&2
+fi
+# %W is 0 where the filesystem records no btime, which reads as old below:
+# systemd-tmpfiles also takes an absent btime as 0, so both judge by the rest.
+xargs -0 -r stat --printf '%W %X %Y %Z %n\0' -- < "$PRE" > "$PRESTAT" 2> "$PREERR"
+src=$?
+if (( src != 0 )); then
+  sed 's/^/  /' "$PREERR" >&2
+  printf 'tmpdir-clean: stat failed on the non-writable directories (xargs exited %s); one it could not read is left as it is\n' "$src" >&2
+fi
+CHMOD=0
+while IFS= read -r -d '' rec; do
+  read -r bt at mt ct _ <<< "$rec"
+  d="${rec#* * * * }"
+  # The line that governs d: the deepest config path above it.
+  gi=-1 glen=-1
+  for i in "${!CPATHS[@]}"; do
+    [[ "$d" == "${CPATHS[i]}"/* ]] && (( ${#CPATHS[i]} > glen )) && gi=$i glen=${#CPATHS[i]}
+  done
+  { (( gi >= 0 )) && [[ -n "${CAGES[gi]}" ]]; } || continue
+  cutoff=$((NOW - CAGES[gi]))
+  old=1
+  by="${CBYS[gi]}"
+  for (( k = 0; k < ${#by}; k++ )); do
+    case "${by:k:1}" in
+      A) t="$at" ;;
+      B) t="$bt" ;;
+      C) t="$ct" ;;
+      M) t="$mt" ;;
+    esac
+    # A timestamp that is not a number keeps the directory as it is.
+    if ! [[ "$t" =~ ^[0-9]+$ ]] || (( t >= cutoff )); then old=0; break; fi
+  done
+  (( old )) || continue
+  if [[ "$MODE" == dry ]]; then
+    printf 'tmpdir-clean: would restore u+w on %s\n' "$d"
+    CHMOD=$((CHMOD + 1))
+  elif [[ -d "$d" && ! -L "$d" ]] && chmod u+w -- "$d"; then
+    CHMOD=$((CHMOD + 1))
+  else
+    printf 'tmpdir-clean: could not restore u+w on %s\n' "$d" >&2
+  fi
+done < "$PRESTAT"
+
+# ---------------------------------------------------------------------------
 # Clean.
 # ---------------------------------------------------------------------------
 usage() { df -B1 --output=used,iused "$ROOT" 2>/dev/null | awk 'NR == 2 { print $1, $2 }'; }
@@ -380,8 +497,8 @@ ARGS=(--user --clean)
 rc=$?
 
 read -r used1 inodes1 <<< "$(usage)"
-printf '%s mode=%s guarded=%s rc=%s used=%s->%s inodes=%s->%s seconds=%s\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MODE" "${#GUARDS[@]}" "$rc" \
+printf '%s mode=%s guarded=%s chmod=%s rc=%s used=%s->%s inodes=%s->%s seconds=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MODE" "${#GUARDS[@]}" "$CHMOD" "$rc" \
   "${used0:-?}" "${used1:-?}" "${inodes0:-?}" "${inodes1:-?}" "$(( SECONDS - START ))" \
   | tee -a "$STATE/log"
 
