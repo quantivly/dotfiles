@@ -41,9 +41,16 @@ along as ``desktop_notified``, with the same ``True``/``False``/``None`` meaning
 a banner can have: it bypasses Do Not Disturb, never auto-hides, auto-expands and jumps a full queue
 (``messageTray.js`` 929/1206/1166/944, read from the installed shell). It plays a sound only when the
 notification carries a ``sound-name`` hint, and a critical banner's sound plays under DND too. So
-critical adds ``CRITICAL_EXTRAS``: the freedesktop ``alarm-clock-elapsed`` sound, which nothing else
-here uses, and a ``dialog-warning`` icon. ESC-11 went out without either and was silent. Lower
-urgencies stay silent on purpose: a sound on every escalation would teach @zvi to ignore it.
+critical adds ``CRITICAL_EXTRAS``: the ``dialog-question`` sound and a ``dialog-warning`` icon. ESC-11
+went out without either and was silent.
+
+The sound is Yaru's ``dialog-question``, 0.73 s long, chosen by @zvi by ear on 2026-10-17. The first
+choice, freedesktop's ``alarm-clock-elapsed``, runs 6.1 s and was "way too long and a little
+annoying". Short sounds that other things here already play were passed over: ``bell`` is the
+terminal bell, ``message-new-instant`` belongs to chat apps, ``dialog-warning`` and ``dialog-error``
+come from system dialogs, and ``battery-low`` would be read as a real battery warning.
+
+Lower urgencies stay silent on purpose: a sound on every escalation would teach @zvi to ignore it.
 """
 import json
 import re
@@ -61,7 +68,7 @@ KINDS = ("decision", "finding", "verification", "pr-blocked", "prereq", "inciden
 URGENCIES = ("low", "normal", "critical")     # notify-send's own levels; see the module docstring
 # A critical one gets a sound nothing else on the machine uses and a warning icon, so it is told apart
 # from vpn-notify's and nanoclaw's criticals; see the module docstring.
-CRITICAL_SOUND = ("--hint", "string:sound-name:alarm-clock-elapsed")
+CRITICAL_SOUND = ("--hint", "string:sound-name:dialog-question")
 CRITICAL_EXTRAS = ("--icon", "dialog-warning", *CRITICAL_SOUND)
 TITLE_CHARS = 60          # of the question, in the notification title; see ``_title``
 DOORBELL_MAX = "3d"       # how long a doorbell's waiting notify-send lives; see ``_desktop_notify``
