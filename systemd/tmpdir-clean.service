@@ -12,7 +12,9 @@
 # WHAT IT ACTUALLY RUNS is scripts/tmpdir-clean.sh, which holds the policy: it
 # writes an `x` exclusion for every registered git worktree under the root whose
 # host repository is outside it, refuses rather than cleaning on a partial guard,
-# and only then runs systemd-tmpfiles against config/user-tmpfiles.d/tmpdir.conf.
+# gives u+w back to old directories this user owns but cannot write (else nothing
+# in them can be deleted), and only then runs systemd-tmpfiles against
+# config/user-tmpfiles.d/tmpdir.conf.
 #
 # ENABLED AND STARTED BY ./install, unlike wt-gc-sweep. That is a deliberate
 # departure from "linked, not enabled" for an unattended deleter: this restores a

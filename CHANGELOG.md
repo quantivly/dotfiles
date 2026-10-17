@@ -150,6 +150,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`tmpdir-clean` ages out what its first run could not (DO-826).** The first real run
+  (2026-10-18) freed about 159G and then FAILED with `rc=73`. 55,283 removals were denied, all of
+  them inside directories this user owns with no write bit, mostly Go module caches (555).
+  - **Non-writable directories get `u+w` back.** Before the clean, and after the guard is written,
+    `scripts/tmpdir-clean.sh` runs `chmod u+w` on each directory under the root that this user
+    owns and cannot write. It must be old by its own line's age and age-by, and outside every
+    guarded worktree. The walk is `find -P -xdev`. It changes only ctime, which is not counted for
+    directories, so no age is reset. `--dry-run` only lists them, and the log line gains `chmod=`.
+  - **Directories now age by btime and mtime, not atime** (`abcmBM:` on both lines). The guard's
+    own `find` refreshed every directory's atime on the `relatime` root, so no directory had ever
+    aged out: 234,175 top-level directories with an mtime older than 7 days were left behind.
+  - **What systemd-tmpfiles still cannot remove or open is a warning, not a red unit.** Under
+    `claude-<uid>/`'s `e` line it exits 73 for an unreadable directory, or for an old directory
+    inside a young non-writable one, every night. Its stderr is now counted into the log's
+    `failed=`, the first five are echoed, and a 73 with any counted exits 0. A 73 with none counted
+    still fails. `--check` warns when three real runs in a row left some.
+  - **The pass is safer.** Just before each `chmod`, the path must `realpath` to exactly itself
+    under the root, so a symlink swapped in at any component cannot send it outside the root or
+    into a guarded worktree. Names come from `find -printf`, byte for byte (uutils `stat` printed a
+    non-UTF-8 name lossily), and btime from `stat` by inode (GNU find reads none here). An age-by
+    with no directory letter means `ABM`, as it does to systemd-tmpfiles.
+  - **An age-by on systemd < 249 is a refusal (exit 2).** The field arrived in 249, and an older
+    one fails every line with one and exits 65, which was accepted: a nightly clean that did
+    nothing.
+  - State table: 101 rows. Mutation: 23 mutants in the first round (20 killed), then 33 after
+    review (24 new, 9 re-run on the rewritten pass), all killed, including the symlink-recheck and
+    `-uid` mutants the first round called unkillable. `-xdev` survives: it needs a second
+    filesystem. `docs/TMPDIR.md` has the evidence.
+
 - **`rabota reap --apply --worktrees` removes only rabota's own lane worktrees (DO-825).** It runs
   `wt-gc --apply`, which with no scope and no grace removes every landed worktree on the laptop
   the moment its PR merges: herdr's, Claude Code's in-tree agent worktrees and scratch checkouts
