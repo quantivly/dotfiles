@@ -104,7 +104,8 @@ worktree() { g -C "$1" worktree add -q --detach "$2" || fatal "git worktree add 
 # The baseline tree. Everything is made 10 days old, then the exceptions.
 fresh() {
   chmod -R u+rwx "$R" "$T/hosts" 2>/dev/null
-  rm -rf "$R" "$T/hosts" "$T/run" && mkdir -p "$R/claude-$U/s" "$T/hosts" "$T/run" || fatal "fresh"
+  rm -rf "$R" "$T/hosts" "$T/run" || fatal "fresh"
+  mkdir -p "$R/claude-$U/s" "$T/hosts" "$T/run" || fatal "fresh"
   echo o > "$R/old"; echo y > "$R/young"; echo r > "$R/read"
   echo c > "$R/claude-$U/s/f13"; echo c > "$R/claude-$U/s/f15"
   host "$T/hosts/out" || fatal "host out"

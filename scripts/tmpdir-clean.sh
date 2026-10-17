@@ -208,12 +208,15 @@ done < "$LIST"
 
 GUARD="$GUARD_DIR/tmpdir-worktrees.conf"
 gtmp="$(mktemp "$GUARD_DIR/.tmpdir-worktrees.XXXXXX")" || refuse "could not create a temp file in $GUARD_DIR"
-{
+if ! {
   printf '# Written by %s at %s. Registered git worktrees under %s\n' \
     "${0##*/}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ROOT"
   printf '# whose host repository is outside it. Rewritten on every run.\n'
   for wt in "${GUARDS[@]}"; do printf 'x %s\n' "$wt"; done
-} > "$gtmp" && mv -f "$gtmp" "$GUARD" || { rm -f "$gtmp"; refuse "could not write $GUARD"; }
+} > "$gtmp" || ! mv -f "$gtmp" "$GUARD"; then
+  rm -f "$gtmp"
+  refuse "could not write $GUARD"
+fi
 
 # ---------------------------------------------------------------------------
 # Clean.
