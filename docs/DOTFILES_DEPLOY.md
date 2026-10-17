@@ -40,7 +40,7 @@ worktree.** No symlink points into a worktree, so you can edit, rebase, stash an
 bisect there without changing the shell you are typing into.
 
 ```bash
-dotfiles-work my/branch      # create/enter ~/dotfiles-worktrees/my-branch
+dotfiles-work my/branch      # create/enter ~/.herdr/worktrees/.dotfiles/my-branch
 dotfiles-work --list         # list worktrees
 dotfiles-work --remove b     # remove one; deletes its branch only once its tree is on origin/main
 dotfiles-doctor              # is the live config the reviewed config?
@@ -308,7 +308,7 @@ Overrides: `DOTFILES_PIN_BRANCH`, `DOTFILES_ROOT`, `DOTFILES_WORKTREES`,
 (scalar or array), `DOTFILES_ALLOW_WORKTREE_INSTALL`, `DOTFILES_UMASK`,
 `DOTFILES_GROUP_FILE`.
 
-State table: `scripts/test-dotfiles-guard.sh` (396 checks, run in CI, hermetic — it
+State table: `scripts/test-dotfiles-guard.sh` (397 checks, run in CI, hermetic — it
 builds its own fixture repo, remote and `HOME`). Every bug found in the guard so far
 printed a green tick rather than an error, so each one is a row: a `local path`
 declaration that blanks `PATH` in zsh, a diff against a ref that did not exist, a stale

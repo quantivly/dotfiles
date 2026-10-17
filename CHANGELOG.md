@@ -100,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`dotfiles-work` creates worktrees under `~/.herdr/worktrees/.dotfiles/`**, not
+  `~/dotfiles-worktrees/`, so the nightly `wt-gc-sweep` reaps a landed one (DO-824).
+  `DOTFILES_WORKTREES` still overrides it.
+
 - **`docs/HERDR_GUIDE.md`: dev's `agents.slice` cap is now 12G/16G**, set on 2026-10-13 with
   `systemctl --user set-property`. Its drop-ins override the base file, which still says 8G/10G.
 
