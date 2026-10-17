@@ -8,6 +8,13 @@ Spaces wait on the herdr snapshot dimension and are deferred here: listed as ``[
 nothing — *not yet implemented* is a different answer from ``--apply --sessions``'s ``Usage``
 (exit 2), which is *never*.
 
+The laptop half is ``wt-gc --apply --scope <state_dir>/worktrees --min-age 2``: only the
+directory ``lane recipe`` puts this tenant's local lanes in, and only once a PR merged at least
+two days ago. Unscoped, ``wt-gc --apply`` removes every landed worktree on the machine the moment
+its PR merges — ``~/.herdr/worktrees`` (``wt-gc-sweep``'s, under its own policy), Claude Code's
+in-tree agent worktrees, scratch checkouts under ``~/.cache/tmp`` — none of which rabota made.
+The plan (``census``'s ``wt-gc --tsv`` rows) stays machine-wide, as wt-gc's own report does.
+
 A lane worktree on a REMOTE machine (``machines.dev`` and friends) is a full checkout that
 accumulates on the machine a lane ran on — ``wt-gc`` only ever looks at the laptop. This module
 removes those too, once their lane row is SETTLED (``done``/``failed``/``abandoned``/``retired``):
@@ -28,7 +35,7 @@ from datetime import datetime, timezone
 
 from rabota import cli, errors, remote
 from rabota.census import gather
-from rabota.commands.lane import RETIRED_STATUS, TERMINAL_STATUSES
+from rabota.commands.lane import RETIRED_STATUS, TERMINAL_STATUSES, WORKTREES_DIR, local_state_root
 from rabota.context import Context
 from rabota.store import now
 
@@ -36,6 +43,16 @@ SETTLED_STATUSES = set(TERMINAL_STATUSES) | {RETIRED_STATUS}
 
 REAP_MARKER = "---RABOTA-REAP---"
 REMOTE_REMOVE_TIMEOUT = 120  # seconds; one ssh call removing several worktrees on one machine
+# Days since the PR MERGED before wt-gc may remove its worktree, so a merge nobody has looked at
+# yet survives a reap. The same grace ``scripts/wt-gc-sweep.sh`` gives its own scope.
+WT_GC_MIN_AGE_DAYS = 2
+
+
+def wt_gc_apply_argv(ctx) -> list[str]:
+    """The one ``wt-gc --apply`` call reap makes: scoped to this tenant's LOCAL lane worktrees
+    (resolved exactly as ``lane recipe`` places them) and held back by the merge grace."""
+    scope = local_state_root(ctx.tenant) / WORKTREES_DIR
+    return ["wt-gc", "--apply", "--scope", str(scope), "--min-age", str(WT_GC_MIN_AGE_DAYS)]
 
 
 def _hours_since(ts: str | None) -> float | None:
@@ -248,7 +265,7 @@ def apply_reap(ctx: Context, plan: dict, targets: set[str]) -> dict:
             # and does not suppress here.
             rep["dry_run"] = True
             return rep
-        res = ctx.runner.run(["wt-gc", "--apply"], timeout=600)
+        res = ctx.runner.run(wt_gc_apply_argv(ctx), timeout=600)
         rep["worktrees"] = res.out[-2000:] if res.ok else None
         if not res.ok:
             rep["failed"].append({"worktrees": res.err[:200]})

@@ -209,6 +209,19 @@ class ApplyReapTests(ReapTestCase):
         rep = reap.apply_reap(ctx, reap.plan_reap(ctx, self.census()), {"worktrees"})
         self.assertIn("reaped /w1", rep["worktrees"])
 
+    def test_wt_gc_apply_is_scoped_to_lane_worktrees_with_a_merge_grace(self):
+        """DO-825: a bare ``wt-gc --apply`` removed every landed worktree on the laptop the moment
+        its PR merged — herdr's, Claude Code's in-tree agent worktrees, ``~/.cache/tmp`` scratch
+        checkouts. FakeRunner answers by PREFIX, so the canned ``["wt-gc", "--apply"]`` would
+        still answer an unscoped call: the recorded argv is what is asserted, exactly. The scope
+        is built from the fixture tenant's own ``state_dir`` (``ctx.state_dir`` is a tempdir here,
+        so a scope taken from it fails), never from reap's own helper."""
+        runner = FakeRunner([(["wt-gc", "--apply"], Result(0, "", ""))])
+        ctx = self.ctx(runner)
+        reap.apply_reap(ctx, reap.plan_reap(ctx, self.census()), {"worktrees"})
+        scope = str(Path("~/quantivly/handoffs/rabota").expanduser() / "worktrees")
+        self.assertEqual(runner.calls, [["wt-gc", "--apply", "--scope", scope, "--min-age", "2"]])
+
     def test_a_failed_wt_gc_call_is_reported_not_raised(self):
         runner = FakeRunner([(["wt-gc", "--apply"], Result(1, "", "wt-gc: boom"))])
         ctx = self.ctx(runner)

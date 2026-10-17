@@ -1169,7 +1169,7 @@ other one. Measured on this machine, 2026-09-28, by running both resolvers over 
 | directory | `_claude_tenant_for` | old `resolve_tenant` |
 |---|---|---|
 | `~/.dotfiles` (and its worktrees) | quantivly — `matched`, remote owner | **personal** — default |
-| `~/Projects/toysim` (`Toysim-LTD/admin-website`) | toysim — `matched`, remote owner | **personal** — default |
+| `~/Projects/toysim` (`Toysim-LTD/admin-website`; `~/toysim/admin-site` since 2026-10-17) | toysim — `matched`, remote owner | **personal** — default |
 | `~/quantivly/hub` | quantivly | quantivly |
 | `~/Projects` | personal | personal |
 
@@ -1218,7 +1218,8 @@ better beside a refusal that lists keys, and it costs this machine 31 repositori
 `~/Projects` holds 12. Which brings the second consequence, worth stating because it is a
 *regression the routing half creates on its own*: once `~/Projects/toysim` routes to `toysim` by
 remote owner, that tenant's root can reach nothing, and every local lane for it refuses until its
-`[repos]` table names the checkout. Routing and addressing had to land together.
+`[repos]` table names the checkout. Routing and addressing had to land together. (The clone has
+lived under that root, at `~/toysim/admin-site`, since 2026-10-17.)
 
 **The mutation sweep found two survivors, and both were real gaps rather than wording.** The
 `[repos]` table could be disconnected from the TOML entirely — `repos=dict(d.get("repos", {}))`

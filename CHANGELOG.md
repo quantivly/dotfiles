@@ -150,6 +150,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rabota reap --apply --worktrees` removes only rabota's own lane worktrees (DO-825).** It ran
+  `wt-gc --apply` with no scope and no grace, so on the laptop it removed every landed worktree
+  machine-wide the moment its PR merged: herdr's, Claude Code's in-tree agent worktrees and
+  scratch checkouts under `~/.cache/tmp`. It now passes `--scope <state_dir>/worktrees
+  --min-age 2`, with the scope resolved where `lane recipe` puts local lanes. `--dry-run` still
+  calls nothing. 8 mutants, 8 deaths.
+
 - **dev never publishes a forwarded ssh agent, and its shell's `ssh-add` probes are bounded.**
   With `ForwardAgent yes`, dev's startup relinked `~/.ssh/ssh_auth_sock` to the laptop's agent.
   While any ssh to dev stayed open, new panes' `ssh-add -l` hung on Bitwarden (2026-10-14), and
