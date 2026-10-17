@@ -64,7 +64,7 @@ class EscalateNotifiesTheDesktopTests(Base):
         runner = FakeRunner([HERDR_OK, NOTIFY_OK])
         out = escalate.run_escalate(self.ctx(runner), "q", "e", [], urgency="critical")
         argv = desktop_calls(runner)[0]
-        self.assertEqual(argv[5:9], ["--icon", "dialog-warning", "--hint", "string:sound-name:alarm-clock-elapsed"])
+        self.assertEqual(argv[5:9], ["--icon", "dialog-warning", "--hint", "string:sound-name:dialog-question"])
         # the two positionals stay last, so the summary and body tests below hold for every urgency
         self.assertEqual(argv[-2], f"rabota ESC-{out['id']}: q")
 

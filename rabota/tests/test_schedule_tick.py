@@ -253,7 +253,7 @@ class OutcomeTests(TickBase):
                 if urgency:
                     self.assertEqual(sent[0][sent[0].index("--urgency") + 1], urgency)
                     # only a critical one carries rabota's sound (escalate.CRITICAL_EXTRAS)
-                    self.assertEqual("string:sound-name:alarm-clock-elapsed" in sent[0], urgency == "critical")
+                    self.assertEqual("string:sound-name:dialog-question" in sent[0], urgency == "critical")
 
     def test_a_clean_pass_is_recorded_and_raises_nothing(self):
         ctx = self.tctx(); sid = self.run_once(ctx, 0, record=str(self.record), stdout="0 refusals\n")
