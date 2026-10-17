@@ -2187,7 +2187,9 @@ dotfiles-work() {
   # header). Nothing symlinks into a worktree, so you can edit, rebase, stash and
   # bisect there without changing the shell you are typing into.
   local root="${DOTFILES_ROOT}" pin="${DOTFILES_PIN_BRANCH}"
-  local base="${DOTFILES_WORKTREES:-${HOME}/dotfiles-worktrees}"
+  # Under ~/.herdr/worktrees, beside herdr's own worktrees of this repo, so the
+  # nightly wt-gc-sweep (scope ~/.herdr/worktrees) reaps a landed one (DO-824).
+  local base="${DOTFILES_WORKTREES:-${HOME}/.herdr/worktrees/.dotfiles}"
 
   case "${1:-}" in
     --list|-l)
