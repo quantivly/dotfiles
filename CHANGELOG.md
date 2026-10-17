@@ -161,8 +161,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Directories now age by btime and mtime, not atime** (`abcmBM:` on both lines). The guard's
     own `find` refreshed every directory's atime on the `relatime` root, so no directory had ever
     aged out: 234,175 top-level directories with an mtime older than 7 days were left behind.
-  - State table: 83 rows. 23 mutants: 20 killed, and 3 survivors that need root or a race.
-    `docs/TMPDIR.md` has the evidence.
+  - **What systemd-tmpfiles still cannot remove or open is a warning, not a red unit.** Under
+    `claude-<uid>/`'s `e` line it exits 73 for an unreadable directory, or for an old directory
+    inside a young non-writable one, every night. Its stderr is now counted into the log's
+    `failed=`, the first five are echoed, and a 73 with any counted exits 0. A 73 with none counted
+    still fails. `--check` warns when three real runs in a row left some.
+  - **The pass is safer.** Just before each `chmod`, the path must `realpath` to exactly itself
+    under the root, so a symlink swapped in at any component cannot send it outside the root or
+    into a guarded worktree. Names come from `find -printf`, byte for byte (uutils `stat` printed a
+    non-UTF-8 name lossily), and btime from `stat` by inode (GNU find reads none here). An age-by
+    with no directory letter means `ABM`, as it does to systemd-tmpfiles.
+  - **An age-by on systemd < 249 is a refusal (exit 2).** The field arrived in 249, and an older
+    one fails every line with one and exits 65, which was accepted: a nightly clean that did
+    nothing.
+  - State table: 101 rows. Mutation: 23 mutants in the first round (20 killed), then 33 after
+    review (24 new, 9 re-run on the rewritten pass), all killed, including the symlink-recheck and
+    `-uid` mutants the first round called unkillable. `-xdev` survives: it needs a second
+    filesystem. `docs/TMPDIR.md` has the evidence.
 
 - **dev never publishes a forwarded ssh agent, and its shell's `ssh-add` probes are bounded.**
   With `ForwardAgent yes`, dev's startup relinked `~/.ssh/ssh_auth_sock` to the laptop's agent.
