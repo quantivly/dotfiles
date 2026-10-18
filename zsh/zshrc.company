@@ -106,7 +106,18 @@ qn() {
 # Opt-in: only activates if ~/.config/gh-quantivly/ exists (created via:
 #   GH_CONFIG_DIR=~/.config/gh-quantivly gh auth login)
 
-# Token cache location and the pre-2026-09-01 nickname purge.
+# The routing tables (GH_ACCOUNT_ROUTES, GH_ACCOUNT_PATH_ROUTES,
+# GH_ACCOUNT_DEFAULT_DIR) and the token cache location (_GH_TOKEN_CACHE) are data
+# in zsh/zshrc.gh-routes, which scripts/gh-route reads too, so the `rabota
+# schedule` tick routes a command unit's gh, and loads that route's cached token,
+# from the same table and the same cache as this shell (DO-829). Relative to THIS
+# file, not ~/.dotfiles, so a worktree or a test checkout reads its own copy.
+# Sourced unguarded: a missing file must say so here, as gh-route does, rather
+# than leave every directory "no GitHub account is determined" with no cause.
+source "${${(%):-%x}:A:h}/zshrc.gh-routes"
+
+# The token cache location (in zshrc.gh-routes, above) and the pre-2026-09-01
+# nickname purge.
 #
 # DEFINED OUTSIDE THE OPT-IN GATE BELOW. They were inside it, while
 # `gh-refresh-tokens` — which calls both — is outside: on a machine with no
@@ -119,7 +130,6 @@ qn() {
 # and a command substitution there is a fork in the chpwd hot path — in a file
 # whose own notes say that path was cut to a single git fork. One assignment
 # achieves the deduplication a function was reached for.
-typeset -g _GH_TOKEN_CACHE="${HOME}/.cache/gh-token-cache"
 
 # `quantivly` and `personal` are also perfectly legal config-dir basenames, so
 # this purges by name MINUS whatever the routing table currently uses. Ordering
@@ -189,15 +199,6 @@ _gh_cache_write() {
   command rm -f -- "$tmp" 2>/dev/null
   return 1
 }
-
-# The routing tables (GH_ACCOUNT_ROUTES, GH_ACCOUNT_PATH_ROUTES,
-# GH_ACCOUNT_DEFAULT_DIR) are data in zsh/zshrc.gh-routes, which
-# scripts/gh-route reads too, so the `rabota schedule` tick routes a command
-# unit's gh from the same table as this shell (DO-829). Relative to THIS file,
-# not ~/.dotfiles, so a worktree or a test checkout reads its own copy. Sourced
-# unguarded: a missing file must say so here, as gh-route does, rather than
-# leave every directory "no GitHub account is determined" with no cause named.
-source "${${(%):-%x}:A:h}/zshrc.gh-routes"
 
 if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # The account is chosen by the repo's REMOTE and pinned with $GH_TOKEN.

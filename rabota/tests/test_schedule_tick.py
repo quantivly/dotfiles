@@ -16,11 +16,12 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from rabota import errors, scheduler, store
+from rabota import errors, scheduler, secrets, store
 from rabota.commands import brief, escalate, escalations, schedule
 from rabota.runner import Result, SubprocessRunner
 from tests.support import last_json
@@ -35,9 +36,16 @@ CANARY = "sk-canary-tick-0123456789"
 UNTRACKED = Result(1, "", "error: pathspec 'x' did not match any file(s) known to git")
 
 
-def gh_route(state, d="", why="fixture", code=0):
-    """What ``scripts/gh-route`` prints: its JSON answer, or ``code`` != 0 for one it could not give."""
-    return Result(code, json.dumps({"state": state, "dir": d, "why": why}) if code == 0 else "", why if code else "")
+def gh_route(state, d="", token_file=None, why="fixture", code=0):
+    """What ``scripts/gh-route`` prints: its JSON answer, or ``code`` != 0 for one it could not give.
+
+    ``token_file`` defaults to "" for an unrouted state and to ``d``'s file in a fixture cache for a
+    routed one; a row that needs the file to exist writes it (``GhRoutingTests.cache``).
+    """
+    if token_file is None:
+        token_file = f"{Path.home()}/.cache/gh-token-cache/{Path(d).name}" if d else ""
+    body = json.dumps({"state": state, "dir": d, "token_file": token_file, "why": why})
+    return Result(code, body if code == 0 else "", why if code else "")
 
 
 UNROUTED = gh_route("no-repo")
@@ -243,33 +251,61 @@ class ExecutorTests(TickBase):
 
 
 class GhRoutingTests(TickBase):
-    """DO-829: the unit gets the ``GH_CONFIG_DIR`` the shell's gh routing gives its cwd, through
-    ``scripts/gh-route`` (answered here by ``TickRunner``); nothing where no route applies; and a
-    refusal, never gh's default config dir, where the route cannot be resolved."""
+    """DO-829: a routed unit gets the ``GH_CONFIG_DIR`` the shell's gh routing gives its cwd and that
+    route's cached token through ``LoadCredential=`` (its PATH only); an unrouted one gets neither;
+    and a route that cannot be resolved, or has no cached token, starts nothing. ``scripts/gh-route``
+    is answered by ``TickRunner``; the token cache is a fixture under the fixture ``$HOME``."""
 
     WORK = "/fixture/.config/gh-quantivly"
 
-    def setenvs(self):
-        (argv,) = self.runner.of("systemd-run")
-        return [a for a in argv if a.startswith("--setenv=")]
+    def setUp(self):
+        super().setUp()
+        self.token = f"gho_{uuid.uuid4().hex}"       # unique per row: REGISTERED_VALUES is process-wide
+        self.addCleanup(secrets.REGISTERED_VALUES.discard, self.token)
+        self.tokfile = self.cache("gh-quantivly", self.token)
 
-    def test_a_routed_cwd_gives_the_unit_that_config_dir_asked_at_dispatch_for_the_runs_cwd(self):
+    def cache(self, name, token):
+        d = self.home / ".cache" / "gh-token-cache"; d.mkdir(parents=True, exist_ok=True)
+        f = d / name; f.write_text(token); f.chmod(0o600)
+        return f
+
+    def routed(self, state="matched"):
+        self.runner.gh_route = gh_route(state, self.WORK)
+
+    def argv(self):
+        (argv,) = self.runner.of("systemd-run")
+        return argv
+
+    def setenvs(self):
+        return [a for a in self.argv() if a.startswith("--setenv=")]
+
+    def props(self):
+        argv = self.argv()
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-p"]
+
+    def test_a_routed_cwd_gives_the_unit_its_config_dir_and_its_token_file_by_path(self):
         sub = self.work / "repo"; sub.mkdir()
-        ctx = self.tctx(); self.declare(ctx, cwd=str(sub))
-        self.runner.gh_route = gh_route("matched", self.WORK)
+        ctx = self.tctx(); sid = self.declare(ctx, cwd=str(sub))
+        self.routed()
         self.assertEqual(self.runner.of(str(scheduler.GH_ROUTER)), [])        # add asks nothing
         self.tick(ctx, DUE)
         self.assertEqual(self.runner.of(str(scheduler.GH_ROUTER)), [[str(scheduler.GH_ROUTER), str(sub.resolve())]])
         self.assertEqual(self.setenvs(), [f"--setenv=PATH={scheduler.unit_path()}",
                                           f"--setenv=GH_CONFIG_DIR={self.WORK}"])
+        self.assertEqual([p for p in self.props() if p.startswith("LoadCredential")],
+                         [f"LoadCredential=gh-token:{self.tokfile}"])
+        out_dir = Path(ctx.store.get_schedule(sid)["out_dir"])
+        self.assertEqual((out_dir / scheduler.TOKEN_PATH).read_text(), f"{self.tokfile}\n")
 
     def test_the_default_route_is_passed_as_the_shell_exports_it(self):
+        self.cache("gh-personal", self.token)
         ctx = self.tctx(); self.declare(ctx)
         self.runner.gh_route = gh_route("default", "/fixture/.config/gh-personal")
         self.tick(ctx, DUE)
         self.assertIn("--setenv=GH_CONFIG_DIR=/fixture/.config/gh-personal", self.setenvs())
+        self.assertIn(f"LoadCredential=gh-token:{self.home}/.cache/gh-token-cache/gh-personal", self.props())
 
-    def test_an_unrouted_cwd_gives_the_unit_no_gh_config_dir_and_still_runs(self):
+    def test_an_unrouted_cwd_gives_the_unit_no_config_dir_and_no_credential_and_still_runs(self):
         for state in scheduler.GH_UNROUTED:
             with self.subTest(state=state):
                 self.runner.calls.clear()
@@ -278,16 +314,18 @@ class GhRoutingTests(TickBase):
                 rep = self.tick(ctx, DUE)
                 self.assertIn(sid, [d["id"] for d in rep["dispatched"]])
                 self.assertEqual(self.setenvs(), [f"--setenv=PATH={scheduler.unit_path()}"])
+                self.assertFalse([p for p in self.props() if "Credential" in p])
+                self.assertFalse((Path(ctx.store.get_schedule(sid)["out_dir"]) / scheduler.TOKEN_PATH).exists())
                 self.finish(ctx, sid, 0)
 
-    def test_a_route_that_cannot_be_resolved_starts_nothing_retries_then_escalates(self):
-        ctx = self.tctx(); sid = self.declare(ctx)
-        self.runner.gh_route = gh_route("bad-table", code=2, why="gh-route: no gh route for '/x' (state bad-table)")
+    def _starts_nothing_then_escalates(self, ctx, sid, needle):
+        """The attempt starts nothing and is reported; it settles as could-not-run, is retried once,
+        and then escalates. Returns the final row."""
         with self.assertRaises(errors.Partial):                # reported, like a failed systemd-run
             self.tick(ctx, DUE)
         row = ctx.store.get_schedule(sid)
         self.assertEqual((row["status"], row["attempt"]), ("running", 1))
-        self.assertIn("could not be routed", row["last_reason"])
+        self.assertIn(needle, row["last_reason"])
         self.tick(ctx, DUE + 10 * MIN)                         # settled: one could-not-run, retried
         row = ctx.store.get_schedule(sid)
         self.assertEqual((row["status"], row["attempt"], self.escs(ctx)), ("pending", 1, []))
@@ -297,10 +335,44 @@ class GhRoutingTests(TickBase):
         self.tick(ctx, retry + 10 * MIN)
         row = ctx.store.get_schedule(sid)
         self.assertEqual((row["status"], row["outcome"], row["attempt"]), ("failed", "could-not-run", 2))
-        self.assertIn("state bad-table", row["last_reason"])
+        self.assertIn(needle, row["last_reason"])
         (esc,) = self.escs(ctx)
         self.assertEqual(esc["id"], row["escalation_id"])
-        self.assertEqual(self.runner.of("systemd-run"), [])    # never started with gh's default
+        self.assertEqual(self.runner.of("systemd-run"), [])    # never started with another account
+        return row
+
+    def test_a_route_that_cannot_be_resolved_starts_nothing_retries_then_escalates(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.runner.gh_route = gh_route("bad-table", code=2, why="gh-route: no gh route for '/x' (state bad-table)")
+        row = self._starts_nothing_then_escalates(ctx, sid, "could not be routed")
+        self.assertIn("state bad-table", row["last_reason"])
+
+    def test_a_route_with_no_cached_token_starts_nothing_names_it_and_never_shows_a_token(self):
+        cases = {"missing": (lambda f: f.unlink(), "is missing"), "empty": (lambda f: f.write_text("\n"), "is empty"),
+                 "a directory": (lambda f: (f.unlink(), f.mkdir()), "is not a regular file")}
+        if os.geteuid() != 0:
+            cases["unreadable"] = (lambda f: f.chmod(0), "cannot be read")
+        for name, (spoil, why) in cases.items():
+            with self.subTest(cache_file=name):
+                self.runner.calls.clear()
+                f = self.cache(f"gh-case-{name.replace(' ', '-')}", self.token)
+                ctx = self.tctx(); sid = self.declare(ctx)
+                self.runner.gh_route = gh_route("matched", f"/fixture/.config/{f.name}")
+                spoil(f)
+                self.addCleanup(lambda f=f: f.chmod(0o700) if f.exists() else None)
+                with self.assertRaises(errors.Partial):
+                    self.tick(ctx, DUE)
+                row = ctx.store.get_schedule(sid)
+                self.assertIn("has no cached token", row["last_reason"])
+                self.assertIn(f"{f} {why}", row["last_reason"])
+                self.assertNotIn(self.token, row["last_reason"])
+                self.assertEqual(self.runner.of("systemd-run"), [])
+                ctx.store.update_schedule(sid, status="failed")      # out of MAX_RUNNING_COMMANDS' count
+
+    def test_no_cached_token_is_retried_then_escalates(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.routed(); self.tokfile.unlink()
+        self._starts_nothing_then_escalates(ctx, sid, "has no cached token")
 
     def test_a_route_that_fails_once_is_started_routed_on_the_retry(self):
         ctx = self.tctx(); sid = self.declare(ctx)
@@ -308,20 +380,28 @@ class GhRoutingTests(TickBase):
         with self.assertRaises(errors.Partial):
             self.tick(ctx, DUE)
         self.tick(ctx, DUE + 10 * MIN)
-        self.runner.gh_route = gh_route("matched", self.WORK)
+        self.routed()
         rep = self.tick(ctx, DUE + 10 * MIN + schedule.RETRY_DELAY)
         self.assertEqual(rep["dispatched"], [{"id": sid, "attempt": 2, "unit": scheduler.command_unit("quantivly", sid, 2)}])
         self.assertIn(f"--setenv=GH_CONFIG_DIR={self.WORK}", self.setenvs())
 
     def test_an_answer_the_router_does_not_promise_starts_nothing(self):
+        tf = str(self.tokfile)
         bad = {"not json": Result(0, "gh-route: hello\n", ""), "a list": Result(0, "[]", ""),
-               "no state": Result(0, json.dumps({"dir": self.WORK}), ""),
-               "an unknown state": gh_route("unsupported", self.WORK),
-               "matched with no dir": gh_route("matched", ""), "matched with no dir key": Result(0, '{"state": "matched"}', ""),
-               "a relative dir": gh_route("default", ".config/gh-personal"),
-               "a dir with a newline": gh_route("matched", self.WORK + "\nGH_TOKEN=x"),
-               "unrouted naming a dir": gh_route("none", self.WORK),
-               "unrouted with no dir key": Result(0, '{"state": "no-repo"}', "")}
+               "no state": Result(0, json.dumps({"dir": self.WORK, "token_file": tf}), ""),
+               "an unknown state": gh_route("unsupported", self.WORK, tf),
+               "matched with no dir": gh_route("matched", "", tf),
+               "matched with no dir key": Result(0, json.dumps({"state": "matched", "token_file": tf}), ""),
+               "matched with no token file": gh_route("matched", self.WORK, ""),
+               "matched with no token_file key": Result(0, json.dumps({"state": "matched", "dir": self.WORK}), ""),
+               "a relative dir": gh_route("default", ".config/gh-personal", tf),
+               "a relative token file": gh_route("matched", self.WORK, ".cache/gh-token-cache/gh-quantivly"),
+               "a dir with a newline": gh_route("matched", self.WORK + "\nGH_TOKEN=x", tf),
+               "a token file with a space": gh_route("matched", self.WORK, tf + " x"),
+               "a token file with a specifier": gh_route("matched", self.WORK, tf + "%h"),
+               "unrouted naming a dir": gh_route("none", self.WORK, ""),
+               "unrouted naming a token file": gh_route("none", "", tf),
+               "unrouted with no dir key": Result(0, '{"state": "no-repo", "token_file": ""}', "")}
         for name, answer in bad.items():
             with self.subTest(answer=name):
                 ctx = self.tctx(); sid = self.declare(ctx)
@@ -334,26 +414,109 @@ class GhRoutingTests(TickBase):
                 ctx.store.update_schedule(sid, status="failed")      # out of MAX_RUNNING_COMMANDS' count
         self.assertEqual(self.runner.of("systemd-run"), [])
 
-    def test_the_unit_gets_no_token_and_no_value_from_the_ticks_environment(self):
-        # ~/.config/rabota/env is the tick's EnvironmentFile; a value from it, or a gh token, must
-        # reach neither the unit's argv nor the router's environment.
+    def test_no_token_value_in_argv_or_properties_and_nothing_from_the_ticks_environment(self):
+        # ~/.config/rabota/env is the tick's EnvironmentFile; a value from it, a gh token in the tick's
+        # environment, or the cached token itself must reach neither the unit's argv (its
+        # properties are argv elements) nor the router's environment, nor the tick's own.
         canaries = {"GH_TOKEN": CANARY + "-gh", "GITHUB_TOKEN": CANARY + "-github",
                     "LINEAR_API_KEY": CANARY + "-linear", "RABOTA_EXTRA": CANARY + "-rabota-env"}
         with mock.patch.dict(os.environ, canaries):
             ctx = self.tctx(); ctx.env.update(canaries); self.declare(ctx)
-            self.runner.gh_route = gh_route("matched", self.WORK)
+            self.routed()
             self.tick(ctx, DUE)
-        (argv,) = self.runner.of("systemd-run")
+            self.assertNotIn(self.token, "".join(os.environ.values()))
+        argv = self.argv()
         self.assertEqual([a.split("=", 2)[1] for a in self.setenvs()], ["PATH", "GH_CONFIG_DIR"])
+        self.assertFalse([a for a in argv if self.token in a], "the cached token is in the argv")
         for name, value in canaries.items():
             with self.subTest(name=name):
-                self.assertFalse([a for a in argv if name in a or value in a])
+                self.assertFalse([a for a in argv if value in a])
+                # by name only the fixed WRAPPER, which SETS GH_TOKEN from the credential, may say it
+                self.assertFalse([a for a in argv if name in a and a != scheduler.WRAPPER])
         (env,) = self.runner.gh_envs
         self.assertEqual(env, {"HOME": str(self.home), "PATH": scheduler.unit_path()})
 
+    def test_a_script_that_prints_its_token_leaves_only_the_marker_in_the_result_and_the_record(self):
+        ctx = self.tctx(); sid = self.declare(ctx, record=str(self.record))
+        self.routed()
+        self.tick(ctx, DUE)
+        self.assertNotIn(self.token, secrets.REGISTERED_VALUES)     # the settle must register it
+        self.finish(ctx, sid, 0, stdout=f"token={self.token}\n", stderr=f"GH_TOKEN={self.token}\n")
+        self.tick(ctx, DUE + 10 * MIN)
+        row = ctx.store.get_schedule(sid)
+        result = (Path(row["out_dir"]) / scheduler.RESULT).read_text()
+        for name, text in (("result.md", result), ("record", self.record.read_text())):
+            with self.subTest(file=name):
+                self.assertNotIn(self.token, text)
+                self.assertIn("token=[redacted:minted-token]", text)
+                self.assertIn("GH_TOKEN=[redacted:minted-token]", text)
+
+    def test_a_token_that_cannot_be_read_at_settle_withholds_the_output(self):
+        ctx = self.tctx(); sid = self.declare(ctx, record=str(self.record))
+        self.routed()
+        self.tick(ctx, DUE)
+        self.finish(ctx, sid, 0, stdout=f"token={self.token}\n")
+        self.tokfile.unlink()                                   # rotated away after the start
+        self.tick(ctx, DUE + 10 * MIN)
+        row = ctx.store.get_schedule(sid)
+        result = (Path(row["out_dir"]) / scheduler.RESULT).read_text()
+        for name, text in (("result.md", result), ("record", self.record.read_text())):
+            with self.subTest(file=name):
+                self.assertNotIn(self.token, text)
+                self.assertNotIn("stdout.log:", text)
+                self.assertIn("output withheld from this result and the record", text)
+        self.assertEqual(row["outcome"], "pass")                # the result is kept; only the tail is not
+
+
+class WrapperCredentialTests(unittest.TestCase):
+    """The fixed ``WRAPPER`` under ``/bin/sh``, as the unit runs it. No unit is started."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup); self.d = Path(tmp.name)
+        self.script = self.d / "s.sh"
+        self.script.write_text('#!/bin/sh\n[ "${GH_TOKEN-unset}" = "$1" ] && echo match || echo "no: ${#GH_TOKEN}"\nexit 3\n')
+        self.script.chmod(0o700)
+        self.creds = self.d / "creds"; self.creds.mkdir()
+
+    def run_wrapper(self, env, expect):
+        r = subprocess.run(["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", str(self.d / "exit-status"),
+                            str(self.script), expect], capture_output=True, text=True, timeout=10,
+                           env={"PATH": "/usr/bin:/bin", **env})
+        return r.stdout + r.stderr, (self.d / "exit-status").read_text()
+
+    def test_the_credential_becomes_the_scripts_gh_token_and_the_exit_status_is_kept(self):
+        (self.creds / scheduler.GH_CREDENTIAL).write_text("tok-0123456789\n")
+        out, status = self.run_wrapper({"CREDENTIALS_DIRECTORY": str(self.creds)}, "tok-0123456789")
+        self.assertEqual((out, status), ("match\n", "3\n"))     # nothing printed but the script's own line
+
+    def test_without_a_credential_the_script_gets_no_gh_token(self):
+        out, status = self.run_wrapper({}, "unset")
+        self.assertEqual((out, status), ("match\n", "3\n"))
+        out, _ = self.run_wrapper({"CREDENTIALS_DIRECTORY": str(self.creds)}, "unset")   # dir, no file
+        self.assertEqual(out, "match\n")
+
+    def test_the_token_reaches_the_script_and_nothing_else_the_wrapper_runs(self):
+        # A prefix assignment, not an export: the wrapper's own `mv` runs without it.
+        (self.creds / scheduler.GH_CREDENTIAL).write_text("tok-0123456789")
+        bin_ = self.d / "bin"; bin_.mkdir(); seen = self.d / "mv-saw"
+        (bin_ / "mv").write_text(f'#!/bin/sh\nprintf "%s" "${{GH_TOKEN-unset}}" > {seen}\nexec /bin/mv "$@"\n')
+        (bin_ / "mv").chmod(0o700)
+        r = subprocess.run(["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", str(self.d / "exit-status"),
+                            str(self.script), "tok-0123456789"], capture_output=True, text=True, timeout=10,
+                           env={"PATH": f"{bin_}:/usr/bin:/bin", "CREDENTIALS_DIRECTORY": str(self.creds)})
+        self.assertEqual(r.stdout, "match\n")
+        self.assertEqual((seen.read_text(), (self.d / "exit-status").read_text()), ("unset", "3\n"))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_credential_it_cannot_read_runs_nothing_and_leaves_could_not_run(self):
+        f = self.creds / scheduler.GH_CREDENTIAL; f.write_text("tok-0123456789"); f.chmod(0)
+        out, status = self.run_wrapper({"CREDENTIALS_DIRECTORY": str(self.creds)}, "tok-0123456789")
+        self.assertNotIn("match", out)
+        self.assertEqual(scheduler.command_outcome(int(status)), "could-not-run")
+
 
 class GhRouterRealTests(unittest.TestCase):
-    """``gh_config_dir`` against the REAL ``scripts/gh-route`` and the shipped ``zsh/zshrc.gh-routes``,
+    """``gh_route_for`` against the REAL ``scripts/gh-route`` and the shipped ``zsh/zshrc.gh-routes``,
     under a fixture ``$HOME``: the fakes above model the router's output, and this holds them to it.
     Runs zsh, git and jq; starts no unit. The router's own state table is ``scripts/test-gh-routing.sh``."""
 
@@ -368,16 +531,17 @@ class GhRouterRealTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(d), "remote", "add", "origin", f"git@github.com:{owner}/x.git"], check=True)
         return str(d)
 
-    def test_a_work_repo_routes_to_the_work_config_dir_and_a_personal_one_to_nothing(self):
-        self.assertEqual(scheduler.gh_config_dir(self.ctx, self.repo("quantivly")), f"{self.home}/.config/gh-quantivly")
+    def test_a_work_repo_routes_to_the_work_config_dir_and_its_cache_file_and_a_personal_one_to_nothing(self):
+        self.assertEqual(scheduler.gh_route_for(self.ctx, self.repo("quantivly")),
+                         (f"{self.home}/.config/gh-quantivly", f"{self.home}/.cache/gh-token-cache/gh-quantivly"))
         # no gh-personal dir in this HOME, so the shipped table has no default: no route applies
-        self.assertIsNone(scheduler.gh_config_dir(self.ctx, self.repo("someone")))
+        self.assertIsNone(scheduler.gh_route_for(self.ctx, self.repo("someone")))
 
     def test_a_directory_git_cannot_read_raises_rather_than_passing_nothing(self):
         d = Path(self.repo("quantivly"))
         (d / ".git" / "config").write_text("[remote \"origin\"\n\turl = broken\n")
         with self.assertRaises(errors.RabotaError) as cm:
-            scheduler.gh_config_dir(self.ctx, str(d))
+            scheduler.gh_route_for(self.ctx, str(d))
         self.assertIn("git could not read", str(cm.exception))
 
 

@@ -306,48 +306,52 @@ class RunLaterExampleAddsTests(ScheduleBase):
 
 class RunLaterGhAccountTests(TickBase):
     """DO-829: the skill says which GitHub account a run's ``gh`` uses, read from what the tick DOES
-    (the argv it builds, the refusal it makes) rather than restated."""
+    (the argv it builds, what it starts and what it does not) rather than restated."""
 
-    def test_the_variable_the_skill_names_is_the_one_the_unit_gets_and_no_token(self):
+    WORK = "/fixture/.config/gh-quantivly"
+
+    def setUp(self):
+        super().setUp()
+        d = self.home / ".cache" / "gh-token-cache"; d.mkdir(parents=True)
+        self.tokfile = d / "gh-quantivly"; self.tokfile.write_text("gho_skill_fixture_0123456789")
+
+    def test_the_account_comes_from_the_routed_config_dir_and_its_cached_token(self):
         ctx = self.tctx(); self.declare(ctx)
-        self.runner.gh_route = gh_route("matched", "/fixture/gh-work")
+        self.runner.gh_route = gh_route("matched", self.WORK)
         self.tick(ctx, DUE)
         (argv,) = self.runner.of("systemd-run")
-        names = [a.removeprefix("--setenv=").split("=", 1)[0] for a in argv if a.startswith("--setenv=")]
-        (gh_var,) = [n for n in names if f"--setenv={n}=/fixture/gh-work" in argv]
-        self.assertNotIn("GH_TOKEN", names)
+        self.assertIn(f"--setenv=GH_CONFIG_DIR={self.WORK}", argv)
+        self.assertIn(f"LoadCredential={scheduler.GH_CREDENTIAL}:{self.tokfile}", argv)
+        self.assertIn("GH_TOKEN=$t", scheduler.WRAPPER)
         flat = _flat()
-        self.assertIn(f"The tick sets it on the unit as `{gh_var}` and never sets a `GH_TOKEN`", flat)
-        # the label the skill sends an agent to look for is gh-doctor's own
-        label = "Route for this directory:"
-        self.assertIn(f'"{label}"', flat)
-        self.assertIn(f'echo "{label}"', (REPO / "zsh" / "functions" / "github.sh").read_text())
+        self.assertIn("**Its `gh` uses the account the shell's routing gives `--cwd`**, the one `gh-doctor <cwd>` "
+                      "pins there, through that route's cached token", flat)
+        self.assertIn("The tick sets the routed `GH_CONFIG_DIR` and loads the token from the shell's token "
+                      "cache with `LoadCredential=`; the script's process gets it as `GH_TOKEN`", flat)
 
-    def test_an_unresolvable_route_starts_nothing_and_is_retried_as_the_skill_says(self):
+    def test_a_route_with_no_cached_token_cannot_start_as_the_skill_says(self):
         ctx = self.tctx(); sid = self.declare(ctx)
-        self.runner.gh_route = gh_route("git-error", code=2, why="gh-route: git could not read it")
+        self.runner.gh_route = gh_route("matched", self.WORK)
+        self.tokfile.unlink()
         with self.assertRaises(scheduler.errors.Partial):
             self.tick(ctx, DUE)
         self.tick(ctx, DUE + 10 * MIN)
         row = ctx.store.get_schedule(sid)
-        self.assertEqual((row["status"], row["attempt"]), ("pending", 1))        # retried, not refused
+        self.assertEqual((row["status"], row["attempt"]), ("pending", 1))        # retried, then escalated
+        self.assertIn("has no cached token", row["last_reason"])
         self.assertEqual(self.runner.of("systemd-run"), [])
-        self.assertIn("A route that cannot be resolved (a repo git cannot read, a broken route table) starts "
-                      "nothing: that attempt is `could-not-run`, retried like any other", _flat())
+        self.assertIn("A run whose route has no cached token, or cannot be resolved (a repo git cannot read, "
+                      "a broken route table), cannot start: that attempt is `could-not-run`, retried like any "
+                      "other, then escalated", _flat())
+        self.assertIn("`gh-refresh-tokens` refills the cache", _flat())
+        self.assertIn("`gh-refresh-tokens` refills the cache", row["last_reason"])
 
-    def test_the_skill_sends_agents_to_a_real_request_not_the_route_line(self):
-        # CLAUDE.md: never conclude which account is in play from configuration (review finding).
-        flat = _flat()
-        self.assertIn("names a config dir, not an account", flat)
-        self.assertIn("`env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=<dir> gh api user --jq .login`, never from "
-                      "the route line", flat)
-
-    def test_an_unrouted_cwd_gets_no_variable_as_the_skill_says(self):
+    def test_an_unrouted_cwd_gets_neither_as_the_skill_says(self):
         ctx = self.tctx(); self.declare(ctx)
         self.tick(ctx, DUE)                                   # TickRunner's default: no route applies
         (argv,) = self.runner.of("systemd-run")
-        self.assertFalse([a for a in argv if "GH_CONFIG_DIR" in a])
-        self.assertIn("Where no route applies, the unit gets no `GH_CONFIG_DIR`", _flat())
+        self.assertFalse([a for a in argv if "GH_CONFIG_DIR" in a or "LoadCredential" in a])
+        self.assertIn("Where no route applies, it gets neither, and gh uses its default config dir", _flat())
 
 
 class RunLaterDeferralTests(TickBase):

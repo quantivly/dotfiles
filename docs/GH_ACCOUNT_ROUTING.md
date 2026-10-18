@@ -125,35 +125,48 @@ GH_ACCOUNT_DEFAULT_DIR="$HOME/.config/gh-personal"                       # empty
 ### Processes with no shell: `scripts/gh-route` (DO-829)
 
 The `rabota schedule` tick starts each `kind=command` run with `systemd-run --user`, under the user
-manager's environment, where there is no `GH_CONFIG_DIR`. gh fell to its default config dir, and
-on 2026-10-18 the first two scheduled checks against private work repositories failed on both
-attempts with `Could not resolve to a Repository`. The tick now asks `scripts/gh-route <cwd>` and
-passes the unit `--setenv=GH_CONFIG_DIR=<dir>`, and nothing else from this area — never
-`GH_TOKEN`. **That selects a config dir, not an account**, for the keyring reason this page opens
-with. Measured 2026-10-18 with no token set: `gh-quantivly` and `gh-personal` both resolved to
-one account, `gh-quantivly`'s effective account was not the one it declares, and neither could
-see a private work repository that a token-pinned shell sees. So `GH_CONFIG_DIR` alone does not
-give a unit the work account on this laptop; what it would take is an open decision on DO-829.
+manager's environment, which has no gh routing at all. gh fell to its default config dir, and on
+2026-10-18 the first two scheduled checks against private work repositories failed on both
+attempts with `Could not resolve to a Repository`. **A config dir alone could not have fixed it**,
+for the keyring reason this page opens with. Measured that day with no token set: every config dir
+authenticated as one non-work account. On this laptop only a pinned token chooses the account.
+
+So the tick routes a unit the way the shell routes a directory. It asks `scripts/gh-route <cwd>`
+for the routed config dir and that route's file in the shell's token cache, the same
+`$_GH_TOKEN_CACHE/<dir basename>` that `_update_gh_config` pins `GH_TOKEN` from. The unit then
+gets:
+
+- `--setenv=GH_CONFIG_DIR=<dir>`;
+- `-p LoadCredential=gh-token:<token file>`, which carries the file's **path** and never its
+  contents. systemd copies the file into the unit's credentials directory.
+
+The unit's fixed wrapper exports the credential as `GH_TOKEN` into the script's process alone. No
+token is in the unit's properties (`systemctl show`) or argv, nothing from the tick's environment
+is passed, and `gh-route` never opens the file. A script that prints its token cannot leak it into
+the result either. Before settling a routed attempt, the tick reads that token into memory and
+registers it with `secrets.register_value`, so `result.md` and the record carry
+`[redacted:minted-token]`. If the file can no longer be read by then, the output tails are withheld.
 
 The resolver copies nothing. It sources `github.sh` for `_gh_route_for`, `zshrc.herdr` (the tenants
 file and `claude-tenants-apply-gh`), then `zshrc.gh-routes`, then applies the tenant-derived routes:
 the shell's own order, assuming the machine's overlay calls `claude-tenants-apply-gh` as this
 laptop's does. A machine whose overlay does not would get tenant-derived routes in the tick and not
-in the shell. That is why the tables left `zshrc.company`. A second reader would otherwise
-have to source that whole file, token refresher and hooks included, or keep a copy of the tables.
+in the shell. That is why the tables and `_GH_TOKEN_CACHE` left `zshrc.company`. A second reader
+would otherwise have to source that whole file, token refresher and hooks included, or keep a copy.
 
 - **`~/.zshrc.local` is the one layer it skips.** That file holds secrets, and an answer that goes
-  into a unit's environment must not come from sourcing them. A route written there directly, not
-  in the tenants file, reaches your shell and not the tick. To compare the two, run
-  `scripts/gh-route --tables` beside the shell's `print -l $GH_ACCOUNT_ROUTES`.
-- **No route applies → no variable.** `none`, `no-repo` and `no-remotes` are exit 0 with an empty
-  dir, and the shell exports no `GH_CONFIG_DIR` there either.
-- **Could not tell → nothing is started.** `bad-table`, `git-error`, a relative dir, a sourced file
-  that does not parse or that prints to stderr, or an answer outside the promised states: exit 2
-  from the resolver. The tick starts nothing and settles that as one `could-not-run` attempt, like
-  a failed `systemd-run`, so a stalled fork heals on the retry and a broken table escalates within
-  the retry delay. Passing nothing would hand gh its default config dir, which is the failure this
-  exists to end.
+  into a unit must not come from sourcing them. A route written there directly, not in the tenants
+  file, reaches your shell and not the tick. To compare the two, run `scripts/gh-route --tables`
+  beside the shell's `print -l $GH_ACCOUNT_ROUTES`.
+- **No route applies → nothing.** `none`, `no-repo` and `no-remotes` are exit 0 with an empty dir
+  and token file. The unit gets neither, and the shell exports neither there.
+- **Could not tell, or no token → nothing is started.** The causes are `bad-table`, `git-error`, a
+  relative dir, a cache dir that is not absolute, a sourced file that does not parse or prints to
+  stderr, or an answer outside the promised states. A routed token file that is missing, empty or
+  unreadable counts too, and the tick checks that itself rather than leaving it to systemd's start.
+  Each is one `could-not-run` attempt, settled like a failed `systemd-run`, so a stalled fork heals
+  on the retry and a lasting fault escalates within the retry delay. `gh-refresh-tokens` refills
+  the cache. Starting it anyway would hand gh another account, the failure this exists to end.
 
 Traps this area has, each of which produced a green tick or a confident wrong answer:
 
@@ -300,7 +313,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   records the parse state per remote; `unparsable` counts as a GitHub remote, blocks the path
   table, and the doctor lists it as a ⚠.
 
-State table: `scripts/test-gh-routing.sh` (225 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (230 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

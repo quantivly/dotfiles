@@ -1146,6 +1146,30 @@ agree() {
 }
 check "gh-route and the interactive hook agree on every fixture directory" "$(agree)" "agree"
 
+# THE SAME TOKEN FILE: the tick loads a routed unit's token from the file the hook
+# pins GH_TOKEN from, and gh-route only names it — it never opens it.
+tokfile() {  # tokfile <home> <dir> -> the token_file gh-route answers
+  env -i PATH="/usr/bin:/bin" HOME="$1" CLAUDE_TENANTS_FILE=/nonexistent "$GHROUTE" "$2" 2>/dev/null | jq -r .token_file
+}
+check "gh-route names a routed dir's file in the shell's token cache" \
+      "$(tokfile "$HOOKHOME" "$R_QUANT")" "$HOOKHOME/.cache/gh-token-cache/gh-quantivly"
+check "...the very file the interactive hook pins GH_TOKEN from" \
+      "$(hookrun "$R_QUANT" "" 'print -r -- "${_GH_TOKEN_CACHE}/${GH_CONFIG_DIR:t}"')" "$(tokfile "$HOOKHOME" "$R_QUANT")"
+check "gh-route names no token file where no route applies" \
+      "$(tokfile "$GR_NOGATE" "$NOTREPO")" ""
+GR_NOTOK="$TMPROOT/gr-notok"; mkdir -p "$GR_NOTOK/.config/gh-quantivly"   # gate open, no cache at all
+check "gh-route names the token file by path, without opening it (none exists here)" \
+      "$(tokfile "$GR_NOTOK" "$R_QUANT")" "$GR_NOTOK/.cache/gh-token-cache/gh-quantivly"
+# A cache dir that is not absolute would put the file at /<basename> — the root,
+# the failure zshrc.company's own notes record. Only an edited data file can do
+# that, so the row runs gh-route from a copy of the tree with exactly that edit.
+GR_TREE="$TMPROOT/gr-tree"; mkdir -p "$GR_TREE/scripts" "$GR_TREE/zsh/functions"
+cp "$GHROUTE" "$GR_TREE/scripts/"; cp "$GITHUB_SH" "$GR_TREE/zsh/functions/"
+cp "$DOTFILES/zsh/zshrc.herdr" "$DOTFILES/zsh/zshrc.buildlimits" "$GR_TREE/zsh/"
+sed 's|^typeset -g _GH_TOKEN_CACHE=.*|typeset -g _GH_TOKEN_CACHE=""|' "$DOTFILES/zsh/zshrc.gh-routes" > "$GR_TREE/zsh/zshrc.gh-routes"
+check "gh-route with an empty token cache dir is exit 2, never /<basename>" \
+      "$(env -i PATH=/usr/bin:/bin HOME="$HOOKHOME" CLAUDE_TENANTS_FILE=/nonexistent "$GR_TREE/scripts/gh-route" "$R_QUANT" >/dev/null 2>&1; echo $?)|$(grep -c '^typeset -g _GH_TOKEN_CACHE=""$' "$GR_TREE/zsh/zshrc.gh-routes")" "2|1"
+
 # The tenants file's derived routes are part of the shell's tables
 # (claude-tenants-apply-gh, called by the machine's overlay), so they are part of
 # this answer too.
@@ -1195,7 +1219,7 @@ check "gh-route calls _gh_route_for and parses no remote itself" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=225
+EXPECTED_ROWS=230
 
 docs_claim() {
   local f="$DOTFILES/$1"

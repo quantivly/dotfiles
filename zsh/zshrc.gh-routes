@@ -1,5 +1,6 @@
-# GitHub account routing tables: DATA for zsh/functions/github.sh's
-# _gh_route_for, and nothing else. Assignments only — no command, no output.
+# GitHub account routing tables, and where each route's token is cached: DATA for
+# zsh/functions/github.sh's _gh_route_for and zshrc.company's token cache, and
+# nothing else. Assignments only — no command, no output.
 #
 # TWO READERS, ONE TABLE (DO-829). zsh/zshrc.company sources this for every
 # interactive shell (the chpwd hook, gh-doctor). scripts/gh-route sources it in a
@@ -12,6 +13,13 @@
 #
 # Keep it that way: anything here runs in the tick's resolver as well as in your
 # shell, and any stderr it prints makes that resolver refuse.
+
+# The shell's per-account token cache: one file per routed config dir, named by
+# the dir's BASENAME (zshrc.company's refresher writes them, its hook reads them).
+# OUTSIDE the gate, as zshrc.company explains: gh-refresh-tokens runs without it.
+# scripts/gh-route reports a route's file from this, and the tick loads that file
+# into its unit with LoadCredential= — the path, never the token (DO-829).
+typeset -g _GH_TOKEN_CACHE="${HOME}/.cache/gh-token-cache"
 
 # Opt-in gate: a route naming a config dir that does not exist on this machine
 # is a permanent ✗ in gh-doctor, and a checker that is permanently red is one

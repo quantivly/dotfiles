@@ -43,18 +43,28 @@ systemd refuses a duplicate.
 
 **The command executor** (§7) is a transient ``rabota-sched-<tenant>-<id>-a<n>.service`` under
 ``MemoryMax``, ``RuntimeMaxSec``, ``Nice=10`` and ``KillMode=control-group``, with ``PATH`` set to
-include ``~/.local/bin`` (DO-712: a transient unit gets the user manager's minimal one), and with
-``GH_CONFIG_DIR`` set to the config dir the shell's gh routing gives its cwd (DO-829): the user
-manager's environment has none, so gh used its default config dir and could not see a private work
-repository. ``scripts/gh-route`` answers from the same tables and the same ``_gh_route_for`` as an
-interactive shell. Where no route applies the unit gets no ``GH_CONFIG_DIR``, exactly as the shell
-exports none there; where the route cannot be resolved nothing is started with gh's default. The unit never gets ``GH_TOKEN`` or any other value from the tick's environment. It gets no
-seat and passes no budget gate. It runs the FROZEN script through ``WRAPPER``, a fixed ``/bin/sh``
-line whose only job is to write the script's exit status into the out_dir, atomically, once it
-exits. Every value reaches the wrapper as an argument, never as script text, and
+include ``~/.local/bin`` (DO-712: a transient unit gets the user manager's minimal one). It is
+routed to a GitHub account the way the shell routes its cwd (DO-829). The user manager's
+environment has no gh routing, so gh used its default config dir, and on this laptop every config
+dir without a token authenticates as one non-work account. ``scripts/gh-route`` answers from the
+same tables and the same ``_gh_route_for`` as an interactive shell. A routed unit gets
+``GH_CONFIG_DIR`` and ``LoadCredential=gh-token:<that route's file in the shell's token cache>``:
+the file's PATH, never its contents. Where no route applies it gets neither, exactly as the shell
+exports neither there. A route that cannot be resolved, or whose cached token is missing, starts
+nothing, and the attempt is ``could-not-run``: never a silent fallback to another account. No token
+appears in the unit's properties or argv, and nothing from the tick's environment is passed. It
+gets no seat and passes no budget gate. It runs the FROZEN script through ``WRAPPER``, a fixed
+``/bin/sh`` line. When the unit carries the credential, the wrapper exports it as ``GH_TOKEN`` into
+the script's process alone, and never prints it. Its other job is to write the script's exit status
+into the out_dir, atomically, once it exits. Every value reaches the wrapper as an argument, never as script text, and
 ``--expand-environment=no`` stops systemd rewriting a ``$`` in any of them. A ``RuntimeMaxSec`` or
 ``MemoryMax`` kill takes the wrapper with it and leaves no exit status, which is the
 ``could-not-run`` the design asks for.
+
+**A routed run's token is redacted.** ``secrets.redact`` knows only the environment's values and
+``REGISTERED_VALUES``, and a script can print its ``GH_TOKEN``. So before a routed attempt is
+settled, the tick reads the cached token named in the attempt's out_dir into memory and registers
+it. If that file cannot be read, the output tails are withheld from ``result.md`` and the record.
 
 **The record** (§6 step 3) gets one section per settled attempt, keyed
 ``<!-- rabota-schedule:<id>:<attempt> -->`` (``expired``, ``refused`` or ``decided:<esc>`` in place
@@ -132,8 +142,14 @@ AGENT_DEFERRAL = ("deferred: agent runs have no executor until phase 2 (DO-820);
                   "so it expires and escalates if none arrives in time")
 COMMAND_DEFERRAL = (f"deferred: {decl.MAX_RUNNING_COMMANDS} command runs are already running for this "
                     f"tenant (MAX_RUNNING_COMMANDS); a later tick starts it once one ends")
-# $0 names the process, $1 is the exit-status path, the rest is the frozen script and its args.
-WRAPPER = r'f=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$f.tmp" && mv -f "$f.tmp" "$f"'
+GH_CREDENTIAL = "gh-token"          # the LoadCredential= id a routed unit's token arrives under
+TOKEN_PATH = "gh-token-path"        # in a routed attempt's out_dir: which cached token to redact
+# $0 names the process, $1 is the exit-status path, the rest is the frozen script and its args. A
+# credential the unit carries becomes GH_TOKEN in the SCRIPT's environment only (a prefix
+# assignment); one it carries but cannot read runs nothing and leaves 2, could-not-run.
+WRAPPER = (r'f=$1; shift; c=${CREDENTIALS_DIRECTORY:+$CREDENTIALS_DIRECTORY/' + GH_CREDENTIAL + r'}; '
+           r'if [ -z "$c" ] || [ ! -e "$c" ]; then "$@"; elif t=$(cat -- "$c"); then GH_TOKEN=$t "$@"; '
+           r'else (exit 2); fi; rc=$?; printf "%s\n" "$rc" > "$f.tmp" && mv -f "$f.tmp" "$f"')
 
 # outcome -> (the status it leaves the row in, its escalation's urgency; None raises none)
 OUTCOMES = {"pass": ("done", None), "fail": ("done", "critical"), "inconclusive": ("done", "normal"),
@@ -156,20 +172,22 @@ def unit_path() -> str:
 
 
 # Relative to this module, not ~/.dotfiles, for tenants.ROUTER's reason: a worktree or a test
-# checkout routes through its own copy. A ROUTED state carries a config dir; an UNROUTED one, none.
+# checkout routes through its own copy. A ROUTED state carries a config dir and a token file;
+# an UNROUTED one, neither.
 GH_ROUTER = Path(__file__).resolve().parents[2] / "scripts" / "gh-route"
 GH_ROUTE_TIMEOUT = 15           # a cold `zsh -f` fork plus one git call; tenants.TIMEOUT's bound
 GH_ROUTED, GH_UNROUTED = ("matched", "default"), ("none", "no-repo", "no-remotes")
 
 
-def gh_config_dir(ctx, cwd: str) -> str | None:
-    """The ``GH_CONFIG_DIR`` the shell's gh routing gives ``cwd``, or None where no route applies.
+def gh_route_for(ctx, cwd: str) -> tuple[str, str] | None:
+    """``(GH_CONFIG_DIR, token file)`` the shell's gh routing gives ``cwd``, or None where no route applies.
 
-    Raises ``RabotaError`` when the route cannot be resolved: the router failing, or answering
-    anything but a state it promises with the dir that state promises. None is never the answer to
-    "could not tell", because a unit without the variable uses gh's default config dir. The router
-    gets ``HOME`` and the unit's ``PATH`` and nothing else, so no value from the tick's environment
-    can reach its answer.
+    The token file is that route's file in the shell's token cache, as ``scripts/gh-route`` names
+    it. Only its path is handled here. Raises ``RabotaError`` when the route cannot be resolved:
+    the router failing, or answering anything but a state it promises with the paths that state
+    promises. None never means "could not tell", because a unit with no route gets gh's default.
+    The router gets ``HOME`` and the unit's ``PATH`` and nothing else, so no value from the tick's
+    environment can reach its answer.
     """
     res = ctx.runner.run([str(GH_ROUTER), cwd], env={"HOME": str(Path.home()), "PATH": unit_path()},
                          timeout=GH_ROUTE_TIMEOUT)
@@ -180,13 +198,35 @@ def gh_config_dir(ctx, cwd: str) -> str | None:
         data = json.loads(res.out)
     except json.JSONDecodeError:
         data = None
-    state, d = (data.get("state"), data.get("dir")) if isinstance(data, dict) else (None, None)
-    if state in GH_ROUTED and isinstance(d, str) and d.startswith("/") and "\n" not in d:
-        return d
-    if state in GH_UNROUTED and d == "":
+    got = [data.get(k) for k in ("state", "dir", "token_file")] if isinstance(data, dict) else [None] * 3
+    state, d, tok = got
+    if state in GH_ROUTED and _unit_path_ok(d) and _unit_path_ok(tok):
+        return d, tok
+    if state in GH_UNROUTED and d == "" and tok == "":
         return None
     raise errors.RabotaError(f"{GH_ROUTER.name} answered {res.out.strip()[:200]!r}, which is not a "
-                             f"state it promises with the config dir that state promises")
+                             f"state it promises with the paths that state promises")
+
+
+def _unit_path_ok(p) -> bool:
+    """An absolute path that a unit property carries as itself: no whitespace, control character
+    or ``%``, which systemd would split on or expand as a specifier."""
+    return isinstance(p, str) and p.startswith("/") and not re.search(r"[\s%\x00-\x1f\x7f]", p)
+
+
+def read_route_token(path: str) -> str:
+    """The token cached at ``path``, into memory only. Raises a ``RabotaError`` that names the
+    file and what is wrong with it, never its contents."""
+    p = Path(path)
+    try:
+        if not p.is_file():
+            raise errors.RabotaError(f"{p} is {'not a regular file' if p.exists() else 'missing'}")
+        token = p.read_text().strip()
+    except OSError as e:
+        raise errors.RabotaError(f"{p} cannot be read ({e.strerror or type(e).__name__})") from None
+    if not token:
+        raise errors.RabotaError(f"{p} is empty")
+    return token
 
 
 def export_path() -> Path:
@@ -342,7 +382,7 @@ def _finish_attempt(ctx, row, outcome, detail, ended, now, rep):
     retry = outcome == "could-not-run" and attempt < most
     out_dir = Path(row["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)      # absent when the tick died between claim and start
-    body = _result_md(row, outcome, detail, retry, ended, now)
+    body = _result_md(row, outcome, detail, retry, ended, now, withheld=_register_run_token(out_dir))
     emit.write_file(out_dir / RESULT, body)
     heading = (f"{decl._local(decl._iso(ended))} scheduled run {row['id']}: {outcome}"
                + (f" (attempt {attempt} of {most}, retrying)" if retry else ""))
@@ -363,6 +403,23 @@ def _finish_attempt(ctx, row, outcome, detail, ended, now, rep):
                            "escalation": eid, "desktop_notified": sent, "record": record})
 
 
+def _register_run_token(out_dir: Path) -> str | None:
+    """Register the cached token a routed attempt ran with, so ``_redact`` replaces it.
+
+    Returns None when there is nothing to redact, or when the token is registered. Otherwise it
+    returns why the token could not be read, and the caller then withholds the output.
+    """
+    try:
+        path = (out_dir / TOKEN_PATH).read_text().strip()
+    except FileNotFoundError:
+        return None                         # an unrouted attempt, or one that never got that far
+    try:
+        secrets.register_value(read_route_token(path))
+    except errors.RabotaError as e:
+        return f"its route's cached token could not be read to redact it: {e}"
+    return None
+
+
 def _tail(p: Path) -> tuple[str, bool]:
     """The last ``TAIL_BYTES`` of ``p``, decoded, and whether anything was cut (``_result_md`` redacts)."""
     try:
@@ -381,8 +438,9 @@ def _fence(text: str) -> str:
     return f"{fence}text\n{text.rstrip()}\n{fence}"
 
 
-def _result_md(row, outcome, detail, retry, ended, now) -> str:
-    """``result.md`` for a command attempt: what ran, how it ended, and the tail of each stream."""
+def _result_md(row, outcome, detail, retry, ended, now, withheld: str | None = None) -> str:
+    """``result.md`` for a command attempt: what ran, how it ended, and the tail of each stream,
+    unless ``withheld`` says why the streams cannot be shown redacted."""
     out_dir = Path(row["out_dir"])
     nxt = f"; the next starts after {decl._local(decl._iso(now + decl.RETRY_DELAY))}" if retry else ""
     lines = [f"- **{outcome}**: {detail}",
@@ -392,7 +450,9 @@ def _result_md(row, outcome, detail, retry, ended, now) -> str:
              f"{row['unit']}, ended {decl._local(decl._iso(ended))}",
              f"- full output: {out_dir / STDOUT}, {out_dir / STDERR}"]
     parts = ["\n".join(lines)]
-    for name in (STDOUT, STDERR):
+    if withheld:
+        parts.append(f"output withheld from this result and the record: {withheld}")
+    for name in () if withheld else (STDOUT, STDERR):
         text, cut = _tail(out_dir / name)
         if text.strip():
             parts.append(f"{name}{f' (last {TAIL_BYTES} bytes)' if cut else ''}:\n\n{_fence(text)}")
@@ -461,10 +521,11 @@ def _cannot_start(ctx, row) -> tuple[str, str] | None:
     return None
 
 
-def command_argv(row: dict, unit: str, out_dir: Path, gh_dir: str | None = None) -> list[str]:
+def command_argv(row: dict, unit: str, out_dir: Path, route: tuple[str, str] | None = None) -> list[str]:
     """The ``systemd-run`` argv for one command attempt. Every value is an argv element, never text.
 
-    ``gh_dir`` is ``gh_config_dir``'s answer; None sets no ``GH_CONFIG_DIR``.
+    ``route`` is ``gh_route_for``'s answer. It adds ``GH_CONFIG_DIR`` and a ``LoadCredential=``
+    naming the token file's PATH. None adds neither.
 
     ``--expand-environment=`` is systemd 254 or later. The tick runs only on this laptop (design
     §13), which runs 259; an older systemd refuses the flag, and that surfaces as a could-not-run
@@ -472,7 +533,8 @@ def command_argv(row: dict, unit: str, out_dir: Path, gh_dir: str | None = None)
     """
     return ["systemd-run", "--user", "--collect", f"--unit={unit}", f"--working-directory={row['cwd']}",
             "--expand-environment=no", f"--setenv=PATH={unit_path()}",
-            *([f"--setenv=GH_CONFIG_DIR={gh_dir}"] if gh_dir else []),
+            *([f"--setenv=GH_CONFIG_DIR={route[0]}", "-p", f"LoadCredential={GH_CREDENTIAL}:{route[1]}"]
+              if route else []),
             "-p", f"MemoryMax={row['memory_max']}", "-p", f"RuntimeMaxSec={row['timeout_s']}",
             "-p", "Nice=10", "-p", "KillMode=control-group",
             "-p", f"StandardOutput=append:{out_dir / STDOUT}", "-p", f"StandardError=append:{out_dir / STDERR}",
@@ -497,20 +559,40 @@ def _dispatch_command(ctx, row, now, rep):
         return          # cancelled, or claimed elsewhere, since it was read: nothing to start
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
-        gh_dir = gh_config_dir(ctx, row["cwd"])
+        route = _unit_route(ctx, row)
     except errors.RabotaError as e:
-        # Not started: gh's default config dir would be a silent wrong account. Recorded as the
-        # failed systemd-run below is, so the next tick settles it as one attempt that could not run.
-        why = f"not started, because its gh account could not be routed: {e}"
-        ctx.store.update_schedule_where(row["id"], {"status": "running", "unit": unit}, last_reason=why)
-        raise errors.RabotaError(f"{why}; the next tick settles it as an attempt that could not run") from None
-    res = ctx.runner.run(command_argv(row, unit, out_dir, gh_dir), timeout=30)
+        # Not started: gh's default, or another account, would be a silent wrong account. Recorded as
+        # the failed systemd-run below is, so the next tick settles it as one could-not-run attempt.
+        ctx.store.update_schedule_where(row["id"], {"status": "running", "unit": unit}, last_reason=str(e))
+        raise errors.RabotaError(f"{e}; the next tick settles it as an attempt that could not run") from None
+    if route:
+        emit.write_file(out_dir / TOKEN_PATH, route[1] + "\n")     # a path, for settle's redaction
+    res = ctx.runner.run(command_argv(row, unit, out_dir, route), timeout=30)
     if not res.ok:
         why = f"systemd-run failed (exit {res.code}): {(res.err or res.out).strip()[:200]}"
         ctx.store.update_schedule_where(row["id"], {"status": "running", "unit": unit}, last_reason=why)
         raise errors.RabotaError(f"{why}; the next tick settles it as an attempt that could not run")
     rep["dispatched"].append({"id": row["id"], "attempt": n, "unit": unit})
     return True
+
+
+def _unit_route(ctx, row) -> tuple[str, str] | None:
+    """``gh_route_for`` the row's cwd, with the routed token's file checked before anything starts.
+
+    The check is the tick's own, not systemd's: a ``LoadCredential=`` that cannot be read fails the
+    start, but leaving that to systemd would also be a silent change if it ever stopped doing so.
+    """
+    try:
+        route = gh_route_for(ctx, row["cwd"])
+    except errors.RabotaError as e:
+        raise errors.RabotaError(f"not started, because its gh account could not be routed: {e}") from None
+    if route:
+        try:
+            read_route_token(route[1])      # read to prove it is there; the value goes nowhere
+        except errors.RabotaError as e:
+            raise errors.RabotaError(f"not started, because its gh route {route[0]} has no cached token: "
+                                     f"{e}; `gh-refresh-tokens` refills the cache") from None
+    return route
 
 
 def _refuse(ctx, row, problem, evidence, now, rep):
