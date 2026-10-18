@@ -107,8 +107,7 @@ raw="$(command zsh -f -c '
     print -r -- "__DEFAULT__$GH_ACCOUNT_DEFAULT_DIR"
     return 0
   fi
-  _gh_route_for "$5"; rc=$?
-  print -r -- "__RC__$rc"
+  _gh_route_for "$5"
   print -r -- "__STATE__${_GH_ROUTE_STATE}"
   print -r -- "__DIR__${_GH_ROUTE_DIR}"
   # Newlines squashed: `why` can carry git'"'"'s own stderr verbatim.
@@ -132,24 +131,23 @@ if (( tables_only )); then
   exit 0
 fi
 
-rc=""; state=""; rdir=""; why=""
+state=""; rdir=""; why=""
 while IFS= read -r line; do
   case "$line" in
-    __RC__*)    rc="${line#__RC__}" ;;
     __STATE__*) state="${line#__STATE__}" ;;
     __DIR__*)   rdir="${line#__DIR__}" ;;
     __WHY__*)   why="${line#__WHY__}" ;;
   esac
 done <<< "$raw"
 
-# Only the states _gh_route_for promises, each with the dir it promises. An
-# unknown state, or a known one with the wrong half missing, is the two sides
-# having drifted, and an empty dir is exactly what must never be guessed.
+# Only the states _gh_route_for answers with. Anything else — bad-table,
+# git-error, or nothing at all because the fork never got that far — is no
+# answer. A routed dir must be absolute: _gh_route_for does not check a route's
+# dir, and a relative one would be resolved against whatever cwd gh runs in.
 case "$state" in
   matched|default)
-    [[ "$rc" == 0 && "$rdir" == /* ]] || die "no gh config dir for '$dir' (state $state, rc ${rc:-none}, dir '${rdir}'): ${why:-no reason given}" ;;
-  none|no-repo|no-remotes)
-    [[ -z "$rdir" ]] || die "state $state for '$dir' named a config dir '$rdir'; it promises none" ;;
+    [[ "$rdir" == /* ]] || die "the route for '$dir' names config dir '$rdir', which is not an absolute path: ${why:-no reason given}" ;;
+  none|no-repo|no-remotes) ;;
   *)
     die "no gh route for '$dir' (state ${state:-unknown}): ${why:-no reason given}" ;;
 esac

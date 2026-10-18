@@ -1164,6 +1164,9 @@ check "gh-route: a repository git cannot read is exit 2, not the default" \
 printf "CLAUDE_TENANT_PATH_ROUTES=( 'relative/x=client' )\nCLAUDE_TENANT_GH_DIR=( client /gh-client )\n" > "$TEN/badtable.zsh"
 check "gh-route: a malformed table is exit 2, not no-route" \
       "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/badtable.zsh")" "2|"
+printf "CLAUDE_TENANT_ROUTES=( 'acme=client' )\nCLAUDE_TENANT_GH_DIR=( client relative/gh )\n" > "$TEN/reldir.zsh"
+check "gh-route: a route naming a relative config dir is exit 2, never that dir" \
+      "$(groute "$HOOKHOME" "$R_WORK" "$TEN/reldir.zsh")" "2|"
 printf 'CLAUDE_TENANT_ROUTES=( "unclosed\n' > "$TEN/noparse.zsh"
 check "gh-route: a tenants file that does not parse is named, exit 2" \
       "$(groute_err "$HOOKHOME" "$NOTREPO" "$TEN/noparse.zsh" | grep -c 'noparse.zsh does not parse')" "1"
@@ -1192,7 +1195,7 @@ check "gh-route calls _gh_route_for and parses no remote itself" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=224
+EXPECTED_ROWS=225
 
 docs_claim() {
   local f="$DOTFILES/$1"
