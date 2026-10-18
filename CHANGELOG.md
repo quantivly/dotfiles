@@ -150,6 +150,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An account dir's `projects/` can no longer fork from `~/.claude/projects` at launch, and a
+  fork is reported where it is seen (DO-835).** personal-0's `projects/` was a real directory for a
+  week from 2026-10-11, so its transcripts and memory were invisible to every other account.
+  - **Cause.** uutils coreutils' `ln` (Ubuntu 26.04's default) makes `ln -sfnT` an `unlink()`
+    then a `symlink()`, and the builder ran it on every shared link at every `claude` and `hspawn`
+    launch. A session appending its transcript in that gap re-created the directory.
+  - **The builder** now leaves a right link alone and renames a wrong one over it (`mv -fT`, an
+    atomic `rename(2)`). A directory that appears anyway is refused with a warning; a relink that
+    fails for any other reason (EIO, ENOSPC) fails the build, so `claude()` falls back instead of
+    launching into a missing `projects/`. A real file at a link path is copied aside as
+    `<name>.pre-link.<ts>` first, and a relink temp left by a killed build is removed.
+  - **Reported.** `verify-tools.sh` FAILs on a `REAL-DIR`, naming the entry. A shell's first prompt
+    says so from a verdict refreshed at most every 30 minutes by the new
+    `claude-account-dirs.sh --write-state` (`ACCOUNT_DIR_HEALTH_QUIET=1` silences it). `--check`
+    no longer reports one fork twice through a compat alias, and skips retired account dirs.
+  - **Only an entry that carries data is a fork.** `projects`, `plugins`, `skills`, `hooks` and
+    `CLAUDE.md` — one list, `scripts/claude-account-dirs.data-entries`, which `claude-doctor` reads
+    too. A real `telemetry/` or `chrome/` is Claude Code's own per-config-dir state and is only a
+    `LOCAL-DIR` ⚠, outside every exit code and the prompt line. `claude-doctor` now sends a real
+    directory to the repair procedure rather than to the builder, which refuses it by design.
+  - **The repair stays manual**: `docs/CLAUDE_ACCOUNTS.md`, "Repairing a split account dir".
+
 - **`tmpdir-clean` ages out what its first run could not (DO-826).** The first real run
   (2026-10-18) freed about 159G and then FAILED with `rc=73`. 55,283 removals were denied, all of
   them inside directories this user owns with no write bit, mostly Go module caches (555).

@@ -262,6 +262,126 @@ detail=/x'
 check "leaks no variables into the shell" "$(th_leak)"  "unset/unset/unset"
 
 echo
+echo "=== _account_dir_health_warn: a split account dir at the prompt (DO-835) ==="
+# Same shape as the timer-health line above, and the same fixture discipline:
+# the state dir and the account-dir root are fixtures, and $THROOT holds no
+# builder, so no row can read the real state file or spawn the real checker.
+ADSTATE="$TMPROOT/adstate"; mkdir -p "$ADSTATE/account-dir-health"
+ADACCT="$TMPROOT/adacct";   mkdir -p "$ADACCT"
+ADENV=""
+ad() {
+  zrun "HOME='$WARNHOME_TH' XDG_STATE_HOME='$ADSTATE' CLAUDE_ACCOUNT_DIRS_ROOT='$ADACCT' DOTFILES_ROOT='${ADROOT_OVERRIDE:-$THROOT}' $ADENV _account_dir_health_warn"
+}
+ad_stdout_only() {
+  zsh -c "source '$SYSTEM_SH'; HOME='$WARNHOME_TH' XDG_STATE_HOME='$ADSTATE' CLAUDE_ACCOUNT_DIRS_ROOT='$ADACCT' DOTFILES_ROOT='$THROOT' _account_dir_health_warn" 2>/dev/null
+}
+ad_leak() {
+  zsh -c "source '$SYSTEM_SH'; HOME='$WARNHOME_TH' XDG_STATE_HOME='$ADSTATE' CLAUDE_ACCOUNT_DIRS_ROOT='$ADACCT' DOTFILES_ROOT='$THROOT' _account_dir_health_warn >/dev/null 2>&1; print -r -- \"\${rc-unset}/\${split-unset}/\${entries-unset}\"" 2>&1
+}
+adstatus() { printf '%s\n' "$1" > "$ADSTATE/account-dir-health/status"; }
+
+[[ -x "$THROOT/scripts/claude-account-dirs.sh" ]] && \
+  fatal "the fixture root must NOT hold a real builder; rows would spawn it"
+
+rm -f "$ADSTATE/account-dir-health/status"
+check "account dirs: no state file yet: silent" "$(ad)" ""
+
+adstatus 'rc=0
+split=0
+entries='
+check "account dirs: rc=0: silent"              "$(ad)" ""
+
+adstatus 'rc=1
+split=1
+entries=personal-0/projects'
+check "account dirs: rc=1: warns"               "$(ad | grep -c 'account dirs:')"                "1"
+check "account dirs: rc=1: names the entry"     "$(ad | grep -c 'personal-0/projects')"          "1"
+check "account dirs: rc=1: names the repair"    "$(ad | grep -c 'Repairing a split account dir')" "1"
+check "account dirs: rc=1: names the mute switch" "$(ad | grep -c 'ACCOUNT_DIR_HEALTH_QUIET')"    "1"
+check "account dirs: rc=1: no literal escape"   "$(ad | grep -c '\\033')"                         "0"
+check "account dirs: rc=1: nothing on stdout"   "$(ad_stdout_only)"                              ""
+ADENV="ACCOUNT_DIR_HEALTH_QUIET=1"
+check "ACCOUNT_DIR_HEALTH_QUIET silences it"    "$(ad)"  ""
+ADENV="CLAUDE_ACCOUNT_DIRS_ROOT='$TMPROOT/no-such-root'"
+check "account dirs: no account-dir root: silent, whatever the file says" "$(ad)" ""
+ADENV=""
+# Through the real entry point, for the same reason as the timer-health rows:
+# the decision is the ORDER of two lines inside it.
+check "DOTFILES_GUARD_QUIET does NOT silence the account-dir line" \
+      "$(zrun "HOME='$WARNHOME_TH' XDG_STATE_HOME='$ADSTATE' CLAUDE_ACCOUNT_DIRS_ROOT='$ADACCT' DOTFILES_ROOT='$THROOT' DOTFILES_GUARD_QUIET=1 _dotfiles_live_config_warn" | grep -c 'account dirs:')" "1"
+
+rm -f "$ADSTATE/account-dir-health/status"; mkfifo "$ADSTATE/account-dir-health/status"
+check "account dirs: a FIFO does not hang the prompt" \
+      "$(timeout 5 zsh -c "source '$SYSTEM_SH'; HOME='$WARNHOME_TH' XDG_STATE_HOME='$ADSTATE' CLAUDE_ACCOUNT_DIRS_ROOT='$ADACCT' DOTFILES_ROOT='$THROOT' _account_dir_health_warn" 2>&1; echo "rc=$?")" "rc=0"
+rm -f "$ADSTATE/account-dir-health/status"
+
+adstatus 'rc=1
+split=notanumber
+entries=p/projects'
+check "account dirs: non-numeric count: shown as a number" \
+      "$(ad | sed -n 's/.*account dirs: \([^ ]*\) shared.*/\1/p' | grep -c '^[0-9][0-9]*$')" "1"
+check "account dirs: leaks no variables into the shell" "$(ad_leak)" "unset/unset/unset"
+# rc=2 is --check refusing to reach a verdict (it cannot read which entries carry
+# data, DO-835): not a split, and a prompt line for it would be the permanently
+# red checker the timer-health rc=2 row above is about.
+adstatus 'rc=2
+split=0
+entries='
+check "account dirs: rc=2 (could not check): silent" "$(ad)" ""
+
+# The refresh is the line's only writer: without it the warning can never fire,
+# and with it on every prompt it is a fork per shell. A stub builder records
+# what it was asked; the spawn is backgrounded, so it is polled for.
+ADROOT="$TMPROOT/adroot"; mkdir -p "$ADROOT/scripts"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/spawned"\n' "$ADROOT" > "$ADROOT/scripts/claude-account-dirs.sh"
+chmod +x "$ADROOT/scripts/claude-account-dirs.sh"
+ad_spawned() {  # $1 = how long to wait, in tenths of a second
+  local i
+  for (( i = 0; i < $1; i++ )); do [[ -s "$ADROOT/spawned" ]] && break; sleep 0.1; done
+  cat "$ADROOT/spawned" 2>/dev/null
+}
+rm -f "$ADSTATE/account-dir-health/status" "$ADROOT/spawned"
+ADROOT_OVERRIDE="$ADROOT" ad >/dev/null
+check "account dirs: no verdict yet: spawns the builder's --write-state" "$(ad_spawned 50)" "--write-state"
+adstatus 'rc=0
+split=0
+entries='
+rm -f "$ADROOT/spawned"
+ADROOT_OVERRIDE="$ADROOT" ad >/dev/null
+check "account dirs: a fresh verdict spawns nothing" "$(ad_spawned 10)" ""
+# ...and a STALE one is refreshed. Without this row the refresh could stop at the
+# first verdict ever written and every prompt after it would read that verdict
+# forever. 31 minutes, by epoch arithmetic as staleref below explains.
+touch -d "@$(( $(date +%s) - 31 * 60 ))" "$ADSTATE/account-dir-health/status"
+rm -f "$ADROOT/spawned"
+ADROOT_OVERRIDE="$ADROOT" ad >/dev/null
+check "account dirs: a 31-minute-old verdict spawns the builder's --write-state" "$(ad_spawned 50)" "--write-state"
+rm -f "$ADSTATE/account-dir-health/status"
+
+# END TO END through the REAL builder, the only writer of that file: whether the
+# prompt alarms is decided by what its --check calls a split (DO-835). Run from
+# THIS tree, never from $THROOT, which must hold no builder; against a fixture
+# HOME and the fixture state dir, so no row reads an account dir of the tester's.
+ADH="$TMPROOT/adhome"; ADH_ROOT="$ADH/.local/state/claude-account-dirs"
+mkdir -p "$ADH/.claude/projects" "$ADH/.claude/telemetry" "$ADH/.claude/chrome" \
+         "$ADH_ROOT/p1/telemetry" "$ADH_ROOT/p1/chrome"
+ln -s "$ADH/.claude/projects" "$ADH_ROOT/p1/projects"
+ad_real_state() {
+  env -u CLAUDE_ACCOUNT_DIRS_ROOT HOME="$ADH" XDG_STATE_HOME="$ADSTATE" \
+      bash "$DOTFILES/scripts/claude-account-dirs.sh" --write-state >/dev/null 2>&1
+}
+ad_e2e() {
+  zrun "HOME='$WARNHOME_TH' XDG_STATE_HOME='$ADSTATE' CLAUDE_ACCOUNT_DIRS_ROOT='$ADH_ROOT' DOTFILES_ROOT='$THROOT' _account_dir_health_warn"
+}
+ad_real_state
+check "account dirs, end to end: a real telemetry/ and chrome/ raise no alarm" "$(ad_e2e)" ""
+rm "$ADH_ROOT/p1/projects"; mkdir -p "$ADH_ROOT/p1/projects/-w"
+ad_real_state
+check "account dirs, end to end: a real projects/ does, naming it" "$(ad_e2e | grep -c 'p1/projects')" "1"
+check "...and naming nothing that carries no data"                  "$(ad_e2e | grep -c 'telemetry')"   "0"
+rm -f "$ADSTATE/account-dir-health/status"
+
+echo
 echo "=== _dotfiles_live_config_warn: what the user sees at shell startup ==="
 # Its own HOME, containing no ~/.zshrc: the warning also checks where the
 # running shell was sourced FROM (see the foreign-source rows at the end of this
@@ -1800,7 +1920,7 @@ check "every functions module parses" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=397
+EXPECTED_ROWS=418
 
 docs_claim() {
   local f="$DOTFILES/$1"

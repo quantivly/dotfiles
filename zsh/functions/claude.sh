@@ -2357,14 +2357,27 @@ claude-doctor() {
   {
     local adroot="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
     local ad name store shared tstate real_n=0 seen=0
-    local vfile verdict vdetail vage vline id_a id_s adlink
-    local -a shared_missing
+    local vfile verdict vdetail vage vline id_a id_s adlink data_list data_line
+    local -a shared_missing shared_split data_entries
 
     if [[ ! -d "$adroot" ]]; then
       # Nothing to check is not a failure: a modular adopter, or anyone who has
       # not run an isolated session, legitimately has no account dirs.
       _doctor_note "no account dirs at ${adroot/#$HOME/~} — nothing isolated yet"
     else
+      # WHICH shared entries carry data: ONE definition, the file the builder's
+      # --check reads too (DO-835), so the doctor and verify-tools cannot
+      # disagree about what a split is. Not a copy here: a list in each reader is
+      # two lists. Unreadable is "could not ask", reported, never a pass.
+      data_list="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-account-dirs.data-entries"
+      if [[ -f "$data_list" && -r "$data_list" ]]; then
+        for data_line in "${(@f)$(<$data_list)}"; do
+          [[ -z "$data_line" || "$data_line" == \#* ]] && continue
+          data_entries+=("$data_line")
+        done
+      fi
+      (( ${#data_entries} )) || \
+        _doctor_warn "cannot read ${data_list/#$HOME/~} — whether each account dir shares memory, plugins and skills is NOT CHECKED"
       # `(N-/)`, NOT `(N/)`. The `/` qualifier matches directories only, and a
       # symlink TO a directory is not one unless `-` makes the qualifiers follow
       # links. With the bare `/`, a symlinked account dir was silently never
@@ -2647,11 +2660,24 @@ claude-doctor() {
         # THE POOLED-SHARING INVARIANT. Memory, plugins, skills, hooks and the
         # user-level CLAUDE.md must stay symlinked back to ~/.claude, or accounts
         # in a pool silently stop sharing them — and a session cannot tell.
-        shared_missing=()
-        for shared in projects plugins skills hooks CLAUDE.md; do
+        #
+        # A REAL DIRECTORY is told apart from a missing or replaced link, because
+        # the remedy differs: the builder recreates a link and backs up a real
+        # file, but it refuses a real directory by design (it holds data the
+        # shared store lacks), so "re-run the builder" there changed nothing and
+        # sent the reader round in a circle.
+        shared_missing=(); shared_split=()
+        for shared in $data_entries; do
           [[ -e "$HOME/.claude/$shared" || -L "$HOME/.claude/$shared" ]] || continue
-          if [[ ! -L "$ad/$shared" ]]; then shared_missing+=("$shared"); fi
+          if [[ -d "$ad/$shared" && ! -L "$ad/$shared" ]]; then shared_split+=("$shared")
+          elif [[ ! -L "$ad/$shared" ]]; then shared_missing+=("$shared"); fi
         done
+        if (( ${#shared_split} )); then
+          _doctor_bad "$name: not sharing ${(j:, :)shared_split} with ~/.claude — a REAL directory: this account has split"
+          echo "    Its sessions write where no other account reads. The builder refuses a real"
+          echo "    directory by design, so re-running it changes nothing. Repair it by hand:"
+          echo "    ${DOTFILES_ROOT:-~/.dotfiles}/docs/CLAUDE_ACCOUNTS.md, \"Repairing a split account dir\""
+        fi
         if (( ${#shared_missing} )); then
           _doctor_bad "$name: not sharing ${(j:, :)shared_missing} with ~/.claude"
           echo "    Accounts in a pool are supposed to share memory, plugins and skills."

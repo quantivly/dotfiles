@@ -916,6 +916,69 @@ Which plugins are enabled at user scope and which are per-project — the two st
 servers cost a forked process per session, and neither settings file is in this repo, so that
 page is the only record: [docs/CLAUDE_SETUP.md](CLAUDE_SETUP.md).
 
+### Repairing a split account dir
+
+**A REAL directory where an account dir's link to shared DATA belongs is a fork, and it is
+repaired by hand** (DO-835, the nanoclaw IMP-3358 fault recurring). The entries that carry data —
+`projects` (transcripts and auto-memory), `plugins`, `skills`, `hooks`, `CLAUDE.md` — are one
+list, `scripts/claude-account-dirs.data-entries`, read by both the builder and `claude-doctor`.
+`scripts/claude-account-dirs.sh --check` names a fork as `REAL-DIR <profile>/<name>` and exits 1,
+`scripts/verify-tools.sh` FAILs on it, `claude-doctor` points here, and a shell's first prompt says
+so (`ACCOUNT_DIR_HEALTH_QUIET=1` silences that line). Until then the only report was the launching
+terminal's stderr, which is how personal-0's `projects/` stayed forked for a week from 2026-10-11.
+Every session on the account wrote transcripts and auto-memory where no other account reads them,
+so the fork holds data the shared store lacks. The repair is deliberately not automated: it merges
+two halves of live data.
+
+**A real directory at any other shared name is not a fork.** Claude Code makes `state/`,
+`telemetry/` and `chrome/` per config dir, and one session on the shared `~/.claude` (with
+`CLAUDE_ISOLATION_OFF=1`, the wrapper's fallback, `command claude`, an IDE extension) creates the
+same names there. `--check` lists those as `LOCAL-DIR`, `verify-tools.sh` as a ⚠; neither takes
+part in an exit code or the prompt line. A retired account dir (`<name>.retired-<date>`, with no
+store under that full name) is skipped, as the reconciler skips it: a tombstone gains no data.
+
+How it formed: uutils coreutils' `ln` (Ubuntu 26.04's default) makes `ln -sfnT` an `unlink()` then
+a `symlink()`; the builder ran it on every shared link at every launch; a session appending its
+transcript in that gap re-created `projects/` as a real 0700 directory (a race harness did it in 13
+runs). The builder now leaves a right link alone and renames a wrong one over atomically. It never
+removes a directory that holds anything: a real directory is skipped before any relink, and one
+born in the instant before the rename is refused by GNU `mv -T` outright, while uutils `mv -T`
+removes it only when EMPTY (`rmdir`, then the rename, which loses nothing). That case warns and the
+build goes on; a relink that fails for any other reason fails the build, so `claude()` falls back
+rather than launching into a missing `projects`. A real FILE at a link path is copied aside as
+`<name>.pre-link.<ts>` before it is replaced (`scripts/test-claude-account-dirs.sh`, sections Z2 and
+Z4–Z6).
+
+1. **Wait for zero live sessions on that account** — `herdr agent list`, each agent's
+   `tokens.acct`. A running session keeps writing into the fork. Do not close them: start new work
+   on another account and let them drain. A one-member pool never goes quiet on its own.
+2. **Snapshot the fork** (`tar`), and check with `fuser`/`lsof` that nothing holds a file in it open.
+3. **Merge into the shared store by these rules** — they are the specification; any tool used must
+   meet all of them, and none is vendored here:
+   - **Append-only. Never overwrite and never delete** anything in the shared store.
+   - A file only in the fork is copied across with its mtime.
+   - A transcript `.jsonl` in both is two append-only halves of one session. Union the lines by
+     `uuid` — a `uuid` already in the shared copy is not added twice — keeping each half's own
+     order, joined where `parentUuid` says: the fork's first `parentUuid` is the shared copy's last
+     `uuid`. Keep the shared original as `*.pre-merge`.
+   - Any other file that differs on the two sides is kept twice, the fork's copy beside the
+     shared one under a new name.
+   - A `MEMORY.md` index is unioned: the shared file's lines, then each line only the fork has.
+   - **Never restore a memory file the shared store lacks** without first grepping the shared store
+     for a ``Merged <date> from `<name>` `` section: a curator may have folded it into another note
+     on purpose.
+4. **Prove the merge.** Every `uuid` in the fork's transcripts is in the shared copy, and every
+   file in the fork exists on the shared side, under its own name or the kept-twice one.
+5. **Relink via the builder — only with ZERO live sessions on the account.** Re-check step 1, then
+   move the directory aside (`mv <dir>/projects <dir>/projects.fork-<date>`, never `rm`) and run
+   `scripts/claude-account-dirs.sh <profile>`. Between those two commands the path is empty, and a
+   session writing then re-creates the fork; with no session on the account there is nobody to
+   write, which is the only thing that makes that window harmless. An optional refinement closes
+   it altogether: build the link beside the directory and swap the two with one
+   `renameat2(RENAME_EXCHANGE)`.
+6. **Verify.** `--check` prints `OK`, and the moved-aside copy holds no file newer than the snapshot
+   (a straggler gets a second merge pass). Delete it only once nothing has been missed.
+
 ### A long suspend expires every account at once (2026-09-14)
 
 **Three accounts needed `clauth login` on the morning of 09-14, and the cause was a laptop

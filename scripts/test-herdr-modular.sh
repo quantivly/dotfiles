@@ -162,6 +162,10 @@ good_statusline() {
 
 wire() { PATH="$STUB_BIN:$PATH" HOME="$1" "$WIRE" "${@:2}" 2>&1; }
 verify() { PATH="$STUB_BIN:$PATH" HOME="$1" "$VERIFY" "${@:2}" 2>&1; }
+# The same, blind to the tester's own account dirs (the DO-835 rows).
+averify() { env -u CLAUDE_ACCOUNT_DIRS_ROOT PATH="$STUB_BIN:$PATH" HOME="$1" "$VERIFY" "${@:2}" 2>&1; }
+# ...and against a COPY of the tree ($2), --herdr: the DO-835 builder-missing rows.
+rverify() { env -u CLAUDE_ACCOUNT_DIRS_ROOT PATH="$STUB_BIN:$PATH" HOME="$1" "$2/scripts/verify-tools.sh" --herdr 2>&1; }
 
 echo
 echo "=== verify-tools --herdr: what it must NOT mention ==="
@@ -1433,6 +1437,98 @@ check "no claude row at all: does not take the exit code" "$rc" "0"
 hasnt "$(cat "$DOTFILES/scripts/verify-tools.sh")" "import tomllib" \
       "the checker does not parse TOML with python3"
 
+echo
+echo "=== verify-tools: a split account dir is a FAIL, in both modes (DO-835) ==="
+# A REAL directory where an account dir's shared link belongs is an account that
+# has forked from ~/.claude. CLAUDE_ACCOUNT_DIRS_ROOT is dropped so the builder's
+# read-only --check can only see the fixture HOME. Each fixture is WIRED, so the
+# other sections pass and the exit code is this section's alone -- the ok row
+# proves that, which is what lets the split row's rc=1 be attributed.
+acct_section() { awk '/^=== Claude account dirs/{f=1;next} /^===/{f=0} f' <<<"$1"; }
+acct_home() {  # $1 = name, $2 = link | real | none | local | both
+    local h; h="$(new_home "$1")"; wire "$h" >/dev/null
+    mkdir -p "$h/.claude/projects"
+    case "$2" in
+        link|local)
+              mkdir -p "$h/.local/state/claude-account-dirs/p1"
+              ln -s "$h/.claude/projects" "$h/.local/state/claude-account-dirs/p1/projects" ;;
+        real|both)
+              mkdir -p "$h/.local/state/claude-account-dirs/p1/projects/-w"
+              printf '{}\n' >"$h/.local/state/claude-account-dirs/p1/projects/-w/t.jsonl" ;;
+    esac
+    # Claude Code's own per-config-dir telemetry/, real in the account dir, and
+    # the same name in ~/.claude once a session ran there (the DO-835 review).
+    case "$2" in
+        local|both) mkdir -p "$h/.local/state/claude-account-dirs/p1/telemetry" "$h/.claude/telemetry" ;;
+    esac
+    printf '%s' "$h"
+}
+H="$(acct_home acct_ok link)"
+out="$(averify "$H" --herdr)"; rc=0; averify "$H" --herdr >/dev/null || rc=$?
+has   "$(acct_section "$out")" "✓"  "account dirs all linked: ✓"
+hasnt "$(acct_section "$out")" "✗"  "account dirs all linked: no FAIL"
+check "account dirs all linked: exit 0 (so the next rc=1 is this section's)" "$rc" "0"
+H="$(acct_home acct_split real)"
+out="$(averify "$H" --herdr)"; rc=0; averify "$H" --herdr >/dev/null || rc=$?
+has   "$(acct_section "$out")" "✗ FAIL" "a split account dir: FAIL"
+has   "$(acct_section "$out")" "p1/projects is a REAL directory" "...naming the profile and the entry"
+has   "$(acct_section "$out")" "Repairing a split account dir"   "...and pointing at the repair procedure"
+check "a split account dir: exit 1" "$rc" "1"
+has   "$(acct_section "$(averify "$H")")" "p1/projects is a REAL directory" \
+      "a split account dir: the FULL report fails it too"
+H="$(acct_home acct_none none)"
+out="$(acct_section "$(averify "$H" --herdr)")"
+has   "$out" "○ no account dirs" "no account dirs: reported as a skip"
+hasnt "$out" "✗"                 "no account dirs: no FAIL"
+
+# A real directory at a name that carries NO data -- Claude Code's own
+# telemetry/ -- is a ⚠ outside the exit code. Failing on it was permanent: one
+# session on the shared ~/.claude makes the name exist there.
+H="$(acct_home acct_local local)"
+out="$(averify "$H" --herdr)"; rc=0; averify "$H" --herdr >/dev/null || rc=$?
+has   "$(acct_section "$out")" "⚠" "a real telemetry/: a ⚠"
+has   "$(acct_section "$out")" "p1/telemetry is a real directory, not a link — informational" \
+      "...naming it, as informational"
+hasnt "$(acct_section "$out")" "✗" "a real telemetry/: no FAIL"
+check "a real telemetry/: exit 0" "$rc" "0"
+H="$(acct_home acct_both both)"
+out="$(acct_section "$(averify "$H" --herdr)")"
+has   "$out" "p1/projects is a REAL directory" "a real projects/ beside it: still a FAIL"
+hasnt "$out" "p1/telemetry is a REAL directory" "...and telemetry/ is still not one"
+
+# THE CHECKER ITSELF, gone or broken. verify-tools finds the builder beside
+# itself, so "missing" needs a tree without it: every entry here is a symlink into
+# this one, except verify-tools.sh, copied because it resolves its own root with
+# readlink -f. The control row proves that tree passes with the builder in it,
+# so each rc=1 below is this section's alone.
+mk_vroot() {  # $1 = name; prints the root
+    local r="$WORK/vroot.$1" e
+    rm -rf "$r"; mkdir -p "$r/scripts"
+    for e in "$DOTFILES"/* "$DOTFILES"/.[!.]*; do
+        case "${e##*/}" in scripts|.git) continue ;; esac
+        ln -s "$e" "$r/${e##*/}"
+    done
+    for e in "$DOTFILES"/scripts/*; do ln -s "$e" "$r/scripts/${e##*/}"; done
+    rm -f "$r/scripts/verify-tools.sh"; cp "$VERIFY" "$r/scripts/verify-tools.sh"
+    printf '%s' "$r"
+}
+H="$(acct_home acct_vroot link)"
+R="$(mk_vroot ok)"
+rc=0; rverify "$H" "$R" >/dev/null || rc=$?
+check "a copied tree with the builder in it: exit 0 (so the next rc=1 is this section's)" "$rc" "0"
+R="$(mk_vroot nobuilder)"; rm -f "$R/scripts/claude-account-dirs.sh"
+out="$(rverify "$H" "$R")"; rc=0; rverify "$H" "$R" >/dev/null || rc=$?
+has   "$(acct_section "$out")" "claude-account-dirs.sh missing — account dirs UNCHECKED" \
+      "the builder missing: FAIL, naming it"
+check "the builder missing: exit 1" "$rc" "1"
+R="$(mk_vroot broken)"; rm -f "$R/scripts/claude-account-dirs.sh"
+printf '#!/bin/sh\necho "claude-account-dirs: something broke" >&2\nexit 3\n' >"$R/scripts/claude-account-dirs.sh"
+chmod +x "$R/scripts/claude-account-dirs.sh"
+out="$(rverify "$H" "$R")"; rc=0; rverify "$H" "$R" >/dev/null || rc=$?
+has   "$(acct_section "$out")" "--check exited 3 without a verdict — account dirs UNCHECKED" \
+      "a checker that exits non-zero with no verdict: FAIL"
+check "a checker that exits non-zero with no verdict: exit 1" "$rc" "1"
+
 # --- the row total, and the count this suite is documented as running --------
 # The total catches a row that VANISHED (an early exit, a deleted block, an unset
 # variable under `set -u`) -- every row that still ran would pass in silence and
@@ -1443,7 +1539,7 @@ hasnt "$(cat "$DOTFILES/scripts/verify-tools.sh")" "import tomllib" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=251
+EXPECTED_ROWS=272
 
 docs_claim() {
   local f="$DOTFILES/$1"
