@@ -128,8 +128,9 @@ The `rabota schedule` tick starts each `kind=command` run with `systemd-run --us
 manager's environment, which has no gh routing at all. gh fell to its default config dir, and on
 2026-10-18 the first two scheduled checks against private work repositories failed on both
 attempts with `Could not resolve to a Repository`. **A config dir alone could not have fixed it**,
-for the keyring reason this page opens with. Measured that day with no token set: every config dir
-authenticated as one non-work account. On this laptop only a pinned token chooses the account.
+for the keyring reason this page opens with. With no token set, every config dir authenticates as
+the keyring's one host-keyed account, whichever that is at the time; measured that day, it was not
+the work account. On this laptop only a pinned token chooses the account.
 
 So the tick routes a unit the way the shell routes a directory. It asks `scripts/gh-route <cwd>`
 for the routed config dir and that route's file in the shell's token cache, the same
@@ -313,7 +314,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   records the parse state per remote; `unparsable` counts as a GitHub remote, blocks the path
   table, and the doctor lists it as a ⚠.
 
-State table: `scripts/test-gh-routing.sh` (230 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (231 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

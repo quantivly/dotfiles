@@ -17,8 +17,11 @@
 # The shell's per-account token cache: one file per routed config dir, named by
 # the dir's BASENAME (zshrc.company's refresher writes them, its hook reads them).
 # OUTSIDE the gate, as zshrc.company explains: gh-refresh-tokens runs without it.
-# scripts/gh-route reports a route's file from this, and the tick loads that file
-# into its unit with LoadCredential= — the path, never the token (DO-829).
+# A parameter, not a `$(...)` helper: _update_gh_config reads it on every `cd`,
+# and a command substitution there is a fork in the chpwd hot path — a path cut
+# to a single git fork. scripts/gh-route reports a route's file from this, and
+# the tick loads that file into its unit with LoadCredential= — the path, never
+# the token (DO-829).
 typeset -g _GH_TOKEN_CACHE="${HOME}/.cache/gh-token-cache"
 
 # Opt-in gate: a route naming a config dir that does not exist on this machine

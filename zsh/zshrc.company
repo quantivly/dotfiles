@@ -125,11 +125,6 @@ source "${${(%):-%x}:A:h}/zshrc.gh-routes"
 # for) the function hit `command not found`, took an EMPTY cache path, and then
 # wrote a live token to `/<basename>` at the filesystem root while reporting
 # `✓ … cached token` and returning 0.
-#
-# A parameter, not a `$(...)` helper: _update_gh_config reads it on every `cd`,
-# and a command substitution there is a fork in the chpwd hot path — in a file
-# whose own notes say that path was cut to a single git fork. One assignment
-# achieves the deduplication a function was reached for.
 
 # `quantivly` and `personal` are also perfectly legal config-dir basenames, so
 # this purges by name MINUS whatever the routing table currently uses. Ordering

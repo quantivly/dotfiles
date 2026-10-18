@@ -1166,9 +1166,18 @@ check "gh-route names the token file by path, without opening it (none exists he
 GR_TREE="$TMPROOT/gr-tree"; mkdir -p "$GR_TREE/scripts" "$GR_TREE/zsh/functions"
 cp "$GHROUTE" "$GR_TREE/scripts/"; cp "$GITHUB_SH" "$GR_TREE/zsh/functions/"
 cp "$DOTFILES/zsh/zshrc.herdr" "$DOTFILES/zsh/zshrc.buildlimits" "$GR_TREE/zsh/"
+grtree() {  # grtree -> "<rc>|<stderr>" of the copied tree's gh-route for the work repo
+  local err rc
+  err="$(env -i PATH=/usr/bin:/bin HOME="$HOOKHOME" CLAUDE_TENANTS_FILE=/nonexistent \
+         "$GR_TREE/scripts/gh-route" "$R_QUANT" 2>&1 >/dev/null)"; rc=$?
+  printf '%s|%s' "$rc" "$err"
+}
+# The control: the copy, unedited, answers — so the edit below is the one reason it fails.
+cp "$DOTFILES/zsh/zshrc.gh-routes" "$GR_TREE/zsh/zshrc.gh-routes"
+check "gh-route from an unedited copy of the tree answers (the control for the row below)" "$(grtree)" "0|"
 sed 's|^typeset -g _GH_TOKEN_CACHE=.*|typeset -g _GH_TOKEN_CACHE=""|' "$DOTFILES/zsh/zshrc.gh-routes" > "$GR_TREE/zsh/zshrc.gh-routes"
 check "gh-route with an empty token cache dir is exit 2, never /<basename>" \
-      "$(env -i PATH=/usr/bin:/bin HOME="$HOOKHOME" CLAUDE_TENANTS_FILE=/nonexistent "$GR_TREE/scripts/gh-route" "$R_QUANT" >/dev/null 2>&1; echo $?)|$(grep -c '^typeset -g _GH_TOKEN_CACHE=""$' "$GR_TREE/zsh/zshrc.gh-routes")" "2|1"
+      "$(grtree | cut -d'|' -f1)|$(grtree | grep -c 'names no token cache file: _GH_TOKEN_CACHE is not an absolute path')|$(grep -c '^typeset -g _GH_TOKEN_CACHE=""$' "$GR_TREE/zsh/zshrc.gh-routes")" "2|1|1"
 
 # The tenants file's derived routes are part of the shell's tables
 # (claude-tenants-apply-gh, called by the machine's overlay), so they are part of
@@ -1219,7 +1228,7 @@ check "gh-route calls _gh_route_for and parses no remote itself" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=230
+EXPECTED_ROWS=231
 
 docs_claim() {
   local f="$DOTFILES/$1"

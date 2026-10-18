@@ -8,6 +8,7 @@ it under ``/bin/sh``, which starts no unit.
 import argparse
 import configparser
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
@@ -214,7 +215,7 @@ class ExecutorTests(TickBase):
             self.assertIn(p, props)
         tail = argv[argv.index("/bin/sh"):]
         self.assertEqual(tail, ["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", f"{row['out_dir']}/exit-status",
-                                row["payload_path"], "--since", "$HOME"])
+                                scheduler.NO_CREDENTIAL, row["payload_path"], "--since", "$HOME"])
         self.assertNotEqual(row["payload_path"], str(self.script))       # the frozen copy, never the source
 
     def test_a_command_run_gets_no_seat_and_passes_no_gate(self):
@@ -227,8 +228,9 @@ class ExecutorTests(TickBase):
     def test_the_wrapper_writes_the_exit_status_and_passes_arguments_verbatim(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup); d = Path(tmp.name)
         script = d / "s.sh"; script.write_text('#!/bin/sh\nprintf "%s|" "$@"\nexit 3\n'); script.chmod(0o700)
-        r = subprocess.run(["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", str(d / "exit-status"), str(script),
-                            "$HOME", "a b", "--x"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", str(d / "exit-status"),
+                            scheduler.NO_CREDENTIAL, str(script), "$HOME", "a b", "--x"],
+                           capture_output=True, text=True, timeout=10)
         self.assertEqual(r.stdout, "$HOME|a b|--x|")
         self.assertEqual((d / "exit-status").read_text(), "3\n")
         self.assertFalse((d / "exit-status.tmp").exists())
@@ -295,7 +297,10 @@ class GhRoutingTests(TickBase):
         self.assertEqual([p for p in self.props() if p.startswith("LoadCredential")],
                          [f"LoadCredential=gh-token:{self.tokfile}"])
         out_dir = Path(ctx.store.get_schedule(sid)["out_dir"])
-        self.assertEqual((out_dir / scheduler.TOKEN_PATH).read_text(), f"{self.tokfile}\n")
+        sha = hashlib.sha256(self.token.encode()).hexdigest()
+        self.assertEqual((out_dir / scheduler.TOKEN_PATH).read_text(), f"{self.tokfile}\n{sha}\n")
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("/bin/sh") + 5], scheduler.GH_CREDENTIAL)     # a token is due
 
     def test_the_default_route_is_passed_as_the_shell_exports_it(self):
         self.cache("gh-personal", self.token)
@@ -397,6 +402,8 @@ class GhRoutingTests(TickBase):
                "a relative dir": gh_route("default", ".config/gh-personal", tf),
                "a relative token file": gh_route("matched", self.WORK, ".cache/gh-token-cache/gh-quantivly"),
                "a dir with a newline": gh_route("matched", self.WORK + "\nGH_TOKEN=x", tf),
+               "matched with neither path": gh_route("matched", "", ""),
+               "an unknown state with no paths": Result(0, json.dumps({"state": "bad-table", "dir": "", "token_file": ""}), ""),
                "a token file with a space": gh_route("matched", self.WORK, tf + " x"),
                "a token file with a specifier": gh_route("matched", self.WORK, tf + "%h"),
                "unrouted naming a dir": gh_route("none", self.WORK, ""),
@@ -467,52 +474,103 @@ class GhRoutingTests(TickBase):
                 self.assertIn("output withheld from this result and the record", text)
         self.assertEqual(row["outcome"], "pass")                # the result is kept; only the tail is not
 
+    def test_a_token_rotated_between_start_and_settle_withholds_the_output(self):
+        # Registering the NEW token would leave the one the script printed in plain text (review).
+        ctx = self.tctx(); sid = self.declare(ctx, record=str(self.record))
+        self.routed()
+        self.tick(ctx, DUE)
+        self.finish(ctx, sid, 0, stdout=f"token={self.token}\n")
+        newer = f"gho_{uuid.uuid4().hex}"; self.addCleanup(secrets.REGISTERED_VALUES.discard, newer)
+        self.tokfile.write_text(newer)
+        self.tick(ctx, DUE + 10 * MIN)
+        result = (Path(ctx.store.get_schedule(sid)["out_dir"]) / scheduler.RESULT).read_text()
+        for name, text in (("result.md", result), ("record", self.record.read_text())):
+            with self.subTest(file=name):
+                self.assertNotIn(self.token, text)
+                self.assertIn("no longer holds the token this attempt started with", text)
+
+    def test_an_unreadable_note_still_settles_with_the_output_withheld(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.routed()
+        self.tick(ctx, DUE)
+        row = self.finish(ctx, sid, 0, stdout=f"token={self.token}\n")
+        note = Path(row["out_dir"]) / scheduler.TOKEN_PATH; note.unlink(); note.mkdir()
+        self.tick(ctx, DUE + 10 * MIN)
+        row = ctx.store.get_schedule(sid)
+        self.assertEqual((row["status"], row["outcome"]), ("done", "pass"))
+        result = (Path(row["out_dir"]) / scheduler.RESULT).read_text()
+        self.assertNotIn(self.token, result)
+        self.assertIn(f"its {scheduler.TOKEN_PATH} note cannot be read", result)
+
+    def test_a_config_dir_with_a_space_is_passed_as_one_argv_element(self):
+        # Only the LoadCredential= path must avoid whitespace; --setenv= under --expand-environment=no
+        # carries the dir as itself (review finding).
+        ctx = self.tctx(); self.declare(ctx)
+        self.runner.gh_route = gh_route("matched", "/fixture/with space/gh-quantivly", str(self.tokfile))
+        self.tick(ctx, DUE)
+        self.assertIn("--setenv=GH_CONFIG_DIR=/fixture/with space/gh-quantivly", self.setenvs())
+
 
 class WrapperCredentialTests(unittest.TestCase):
-    """The fixed ``WRAPPER`` under ``/bin/sh``, as the unit runs it. No unit is started."""
+    """The fixed ``WRAPPER`` under ``/bin/sh``, as the unit runs it. No unit is started. The fixture
+    script records that it ran, says whether ``GH_TOKEN`` is the expected value, and exits 3."""
+
+    TOKEN = CANARY + "-wrapper"                # a fixture value, not a token
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup); self.d = Path(tmp.name)
+        self.ran = self.d / "ran"
         self.script = self.d / "s.sh"
-        self.script.write_text('#!/bin/sh\n[ "${GH_TOKEN-unset}" = "$1" ] && echo match || echo "no: ${#GH_TOKEN}"\nexit 3\n')
+        self.script.write_text('#!/bin/sh\n: > "$2"\n[ "${GH_TOKEN-unset}" = "$1" ] && echo match || echo no\nexit 3\n')
         self.script.chmod(0o700)
         self.creds = self.d / "creds"; self.creds.mkdir()
 
-    def run_wrapper(self, env, expect):
-        r = subprocess.run(["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", str(self.d / "exit-status"),
-                            str(self.script), expect], capture_output=True, text=True, timeout=10,
-                           env={"PATH": "/usr/bin:/bin", **env})
-        return r.stdout + r.stderr, (self.d / "exit-status").read_text()
+    def run_wrapper(self, cred, expect, env=None, path="/usr/bin:/bin"):
+        r = subprocess.run(["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", str(self.d / "exit-status"), cred,
+                            str(self.script), expect, str(self.ran)], capture_output=True, text=True, timeout=10,
+                           env={"PATH": path, **(env or {})})
+        return r.stdout, (self.d / "exit-status").read_text()
 
-    def test_the_credential_becomes_the_scripts_gh_token_and_the_exit_status_is_kept(self):
-        (self.creds / scheduler.GH_CREDENTIAL).write_text("tok-0123456789\n")
-        out, status = self.run_wrapper({"CREDENTIALS_DIRECTORY": str(self.creds)}, "tok-0123456789")
-        self.assertEqual((out, status), ("match\n", "3\n"))     # nothing printed but the script's own line
+    def routed_env(self):
+        return {"CREDENTIALS_DIRECTORY": str(self.creds)}
 
-    def test_without_a_credential_the_script_gets_no_gh_token(self):
-        out, status = self.run_wrapper({}, "unset")
-        self.assertEqual((out, status), ("match\n", "3\n"))
-        out, _ = self.run_wrapper({"CREDENTIALS_DIRECTORY": str(self.creds)}, "unset")   # dir, no file
-        self.assertEqual(out, "match\n")
+    def test_a_routed_units_credential_becomes_the_scripts_gh_token_and_the_exit_status_is_kept(self):
+        (self.creds / scheduler.GH_CREDENTIAL).write_text(self.TOKEN + "\n")
+        out = self.run_wrapper(scheduler.GH_CREDENTIAL, self.TOKEN, self.routed_env())
+        self.assertEqual(out, ("match\n", "3\n"))             # nothing printed but the script's own line
+
+    def test_an_unrouted_unit_gets_no_gh_token_even_beside_a_credential(self):
+        (self.creds / scheduler.GH_CREDENTIAL).write_text(self.TOKEN)
+        for env in ({}, self.routed_env()):
+            with self.subTest(credentials_directory=bool(env)):
+                self.assertEqual(self.run_wrapper(scheduler.NO_CREDENTIAL, "unset", env), ("match\n", "3\n"))
+
+    def test_a_routed_unit_without_a_usable_credential_runs_nothing_and_leaves_could_not_run(self):
+        # The tick says a token is due, so its absence fails closed: never the script as another account.
+        def unreadable():
+            f = self.creds / scheduler.GH_CREDENTIAL; f.write_text(self.TOKEN); f.chmod(0)
+        cases = {"no credentials directory": (lambda: None, False), "no credential file": (lambda: None, True),
+                 "an empty credential": (lambda: (self.creds / scheduler.GH_CREDENTIAL).write_text("\n"), True)}
+        if os.geteuid() != 0:
+            cases["an unreadable credential"] = (unreadable, True)
+        for name, (spoil, with_dir) in cases.items():
+            with self.subTest(case=name):
+                for f in self.creds.iterdir():
+                    f.chmod(0o600); f.unlink()
+                spoil()
+                out, status = self.run_wrapper(scheduler.GH_CREDENTIAL, self.TOKEN, self.routed_env() if with_dir else {})
+                self.assertEqual((out, status), ("", "2\n"))
+                self.assertFalse(self.ran.exists(), "the script ran without its token")
 
     def test_the_token_reaches_the_script_and_nothing_else_the_wrapper_runs(self):
         # A prefix assignment, not an export: the wrapper's own `mv` runs without it.
-        (self.creds / scheduler.GH_CREDENTIAL).write_text("tok-0123456789")
+        (self.creds / scheduler.GH_CREDENTIAL).write_text(self.TOKEN)
         bin_ = self.d / "bin"; bin_.mkdir(); seen = self.d / "mv-saw"
         (bin_ / "mv").write_text(f'#!/bin/sh\nprintf "%s" "${{GH_TOKEN-unset}}" > {seen}\nexec /bin/mv "$@"\n')
         (bin_ / "mv").chmod(0o700)
-        r = subprocess.run(["/bin/sh", "-c", scheduler.WRAPPER, "rabota-sched", str(self.d / "exit-status"),
-                            str(self.script), "tok-0123456789"], capture_output=True, text=True, timeout=10,
-                           env={"PATH": f"{bin_}:/usr/bin:/bin", "CREDENTIALS_DIRECTORY": str(self.creds)})
-        self.assertEqual(r.stdout, "match\n")
-        self.assertEqual((seen.read_text(), (self.d / "exit-status").read_text()), ("unset", "3\n"))
-
-    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
-    def test_a_credential_it_cannot_read_runs_nothing_and_leaves_could_not_run(self):
-        f = self.creds / scheduler.GH_CREDENTIAL; f.write_text("tok-0123456789"); f.chmod(0)
-        out, status = self.run_wrapper({"CREDENTIALS_DIRECTORY": str(self.creds)}, "tok-0123456789")
-        self.assertNotIn("match", out)
-        self.assertEqual(scheduler.command_outcome(int(status)), "could-not-run")
+        out = self.run_wrapper(scheduler.GH_CREDENTIAL, self.TOKEN, self.routed_env(), path=f"{bin_}:/usr/bin:/bin")
+        self.assertEqual(out, ("match\n", "3\n"))
+        self.assertEqual(seen.read_text(), "unset")
 
 
 class GhRouterRealTests(unittest.TestCase):
