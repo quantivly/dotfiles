@@ -51,7 +51,8 @@
 # WHAT IS DECLARED (everything else is dropped):
 #   PATH        ~/.local/bin (herdr, clauth, herdmates, teammux, and the
 #               bun/lazygit/yazi symlinks) : every `mise bin-paths` entry :
-#               ~/.cargo/bin : /usr/local/bin : /usr/bin : /bin. mise is called
+#               ~/.cargo/bin : the system dirs in /etc/environment's order,
+#               /usr/local/sbin through /snap/bin (see the PATH block). mise is called
 #               by absolute path (~/.local/bin/mise), from $HOME, under a scrubbed
 #               env, so the result is the GLOBAL mise config regardless of the
 #               caller's cwd or shell state (verified identical to a plain
@@ -188,7 +189,14 @@ if [[ -x "$mise_bin" ]]; then
 else
     warn "$mise_bin not found — mise-managed tools (node, python3, bun, ...) will be ABSENT from the server PATH"
 fi
-path+=":$home/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+# The system tail is the distro's own PATH (/etc/environment, which the session
+# and the systemd user manager both carry) minus the games dirs. It used to be
+# /usr/local/bin:/usr/bin:/bin, which dropped the sbin dirs and /snap/bin from
+# every pane on the machine: `tailscale` (a snap here) and the other snap apps
+# were "command not found" in herdr shells only, while a plain terminal had them.
+# These are root-owned system dirs, not caller state, so declaring them does not
+# reopen anything the env -i closes; /snap/bin is last, so it shadows nothing.
+path+=":$home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
 
 # Invariant, not a heuristic: nothing above can legitimately produce a shim dir.
 case ":$path:" in
