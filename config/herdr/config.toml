@@ -616,6 +616,10 @@ copilot = [
 delivery = "herdr"
 delay_seconds = 1
 
+[ui.toast.herdr]
+# Where the in-app toasts appear. The stock default is bottom-right.
+position = "top-right"
+
 [ui.sound]
 enabled = true
 
