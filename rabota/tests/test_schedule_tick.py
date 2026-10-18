@@ -354,7 +354,8 @@ class GhRoutingTests(TickBase):
 
     def test_a_route_with_no_cached_token_starts_nothing_names_it_and_never_shows_a_token(self):
         cases = {"missing": (lambda f: f.unlink(), "is missing"), "empty": (lambda f: f.write_text("\n"), "is empty"),
-                 "a directory": (lambda f: (f.unlink(), f.mkdir()), "is not a regular file")}
+                 "a directory": (lambda f: (f.unlink(), f.mkdir()), "is not a regular file"),
+                 "not UTF-8": (lambda f: f.write_bytes(b"\xff\xfe gho_"), "cannot be read (UnicodeDecodeError)")}
         if os.geteuid() != 0:
             cases["unreadable"] = (lambda f: f.chmod(0), "cannot be read")
         for name, (spoil, why) in cases.items():
@@ -501,6 +502,17 @@ class GhRoutingTests(TickBase):
         result = (Path(row["out_dir"]) / scheduler.RESULT).read_text()
         self.assertNotIn(self.token, result)
         self.assertIn(f"its {scheduler.TOKEN_PATH} note cannot be read", result)
+
+    def test_a_note_of_the_wrong_shape_withholds_the_output(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.routed()
+        self.tick(ctx, DUE)
+        row = self.finish(ctx, sid, 0, stdout=f"token={self.token}\n")
+        (Path(row["out_dir"]) / scheduler.TOKEN_PATH).write_text(f"{self.tokfile}\n")     # no sha256
+        self.tick(ctx, DUE + 10 * MIN)
+        result = (Path(ctx.store.get_schedule(sid)["out_dir"]) / scheduler.RESULT).read_text()
+        self.assertNotIn(self.token, result)
+        self.assertIn(f"its {scheduler.TOKEN_PATH} note is not a token file and a sha256", result)
 
     def test_a_config_dir_with_a_space_is_passed_as_one_argv_element(self):
         # Only the LoadCredential= path must avoid whitespace; --setenv= under --expand-environment=no
