@@ -23,7 +23,9 @@
 #   2. zsh/zshrc.gh-routes the gh tables, assigned wholesale (zshrc.company
 #                          sources this same file at this point in the order)
 #   3. claude-tenants-apply-gh, which derives entries from the tenants file and
-#                          only ever ADDS them (DO-599)
+#                          only ever ADDS them (DO-599). The shell gets this step
+#                          from the machine's overlay, as this laptop's does; on a
+#                          machine whose overlay does not call it, the two differ.
 #
 # ~/.zshrc.local is the one layer it does not read. It holds secrets, and a
 # resolver whose answer goes into a unit's environment must not source them. A

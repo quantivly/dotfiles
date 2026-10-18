@@ -280,13 +280,40 @@ class GhRoutingTests(TickBase):
                 self.assertEqual(self.setenvs(), [f"--setenv=PATH={scheduler.unit_path()}"])
                 self.finish(ctx, sid, 0)
 
-    def test_a_route_that_cannot_be_resolved_is_refused_never_run_with_the_default(self):
+    def test_a_route_that_cannot_be_resolved_starts_nothing_retries_then_escalates(self):
         ctx = self.tctx(); sid = self.declare(ctx)
         self.runner.gh_route = gh_route("bad-table", code=2, why="gh-route: no gh route for '/x' (state bad-table)")
-        self._refused(ctx, sid, "state bad-table")
-        self.assertIn("could not be routed", ctx.store.get_schedule(sid)["last_reason"])
+        with self.assertRaises(errors.Partial):                # reported, like a failed systemd-run
+            self.tick(ctx, DUE)
+        row = ctx.store.get_schedule(sid)
+        self.assertEqual((row["status"], row["attempt"]), ("running", 1))
+        self.assertIn("could not be routed", row["last_reason"])
+        self.tick(ctx, DUE + 10 * MIN)                         # settled: one could-not-run, retried
+        row = ctx.store.get_schedule(sid)
+        self.assertEqual((row["status"], row["attempt"], self.escs(ctx)), ("pending", 1, []))
+        retry = DUE + 10 * MIN + schedule.RETRY_DELAY
+        with self.assertRaises(errors.Partial):
+            self.tick(ctx, retry)
+        self.tick(ctx, retry + 10 * MIN)
+        row = ctx.store.get_schedule(sid)
+        self.assertEqual((row["status"], row["outcome"], row["attempt"]), ("failed", "could-not-run", 2))
+        self.assertIn("state bad-table", row["last_reason"])
+        (esc,) = self.escs(ctx)
+        self.assertEqual(esc["id"], row["escalation_id"])
+        self.assertEqual(self.runner.of("systemd-run"), [])    # never started with gh's default
 
-    def test_an_answer_the_router_does_not_promise_is_refused(self):
+    def test_a_route_that_fails_once_is_started_routed_on_the_retry(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.runner.gh_route = gh_route("none", code=124, why="timeout after 15s")
+        with self.assertRaises(errors.Partial):
+            self.tick(ctx, DUE)
+        self.tick(ctx, DUE + 10 * MIN)
+        self.runner.gh_route = gh_route("matched", self.WORK)
+        rep = self.tick(ctx, DUE + 10 * MIN + schedule.RETRY_DELAY)
+        self.assertEqual(rep["dispatched"], [{"id": sid, "attempt": 2, "unit": scheduler.command_unit("quantivly", sid, 2)}])
+        self.assertIn(f"--setenv=GH_CONFIG_DIR={self.WORK}", self.setenvs())
+
+    def test_an_answer_the_router_does_not_promise_starts_nothing(self):
         bad = {"not json": Result(0, "gh-route: hello\n", ""), "a list": Result(0, "[]", ""),
                "no state": Result(0, json.dumps({"dir": self.WORK}), ""),
                "an unknown state": gh_route("unsupported", self.WORK),
@@ -299,11 +326,12 @@ class GhRoutingTests(TickBase):
             with self.subTest(answer=name):
                 ctx = self.tctx(); sid = self.declare(ctx)
                 self.runner.gh_route = answer
-                rep = self.tick(ctx, DUE)
+                with self.assertRaises(errors.Partial):
+                    self.tick(ctx, DUE)
                 row = ctx.store.get_schedule(sid)
-                self.assertEqual((row["status"], row["outcome"]), ("failed", "could-not-run"))
+                self.assertEqual((row["status"], row["attempt"]), ("running", 1))
                 self.assertIn("could not be routed", row["last_reason"])
-                self.assertEqual([r["id"] for r in rep["refused"]], [sid])
+                ctx.store.update_schedule(sid, status="failed")      # out of MAX_RUNNING_COMMANDS' count
         self.assertEqual(self.runner.of("systemd-run"), [])
 
     def test_the_unit_gets_no_token_and_no_value_from_the_ticks_environment(self):

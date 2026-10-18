@@ -1052,7 +1052,7 @@ check "no writer truncates a live cache file in place" \
 
 echo "=== tenant-derived gh routes (claude-tenants-apply-gh, DO-599) ==="
 #
-# One table, two mechanisms. The helper is ADDITIVE ONLY, because zshrc.company
+# One table, two mechanisms. The helper is ADDITIVE ONLY, because zshrc.gh-routes
 # ASSIGNS GH_ACCOUNT_ROUTES=(…) wholesale and this runs after it — anything that
 # removed or reordered an entry would silently drop a team default, and a gh
 # route that quietly stops existing is the #127 incident over again.

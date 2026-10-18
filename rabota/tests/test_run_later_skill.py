@@ -20,7 +20,7 @@ from pathlib import Path
 from rabota import cli, scheduler
 from rabota.commands import schedule
 from tests.test_schedule import ScheduleBase
-from tests.test_schedule_tick import DUE, TickBase, gh_route
+from tests.test_schedule_tick import DUE, MIN, TickBase, gh_route
 
 REPO = Path(__file__).parents[2]
 SKILL = REPO / "claude" / "skills" / "run-later" / "SKILL.md"
@@ -323,15 +323,24 @@ class RunLaterGhAccountTests(TickBase):
         self.assertIn(f'"{label}"', flat)
         self.assertIn(f'echo "{label}"', (REPO / "zsh" / "functions" / "github.sh").read_text())
 
-    def test_an_unresolvable_route_is_refused_never_retried_as_the_skill_says(self):
+    def test_an_unresolvable_route_starts_nothing_and_is_retried_as_the_skill_says(self):
         ctx = self.tctx(); sid = self.declare(ctx)
         self.runner.gh_route = gh_route("git-error", code=2, why="gh-route: git could not read it")
-        self.tick(ctx, DUE); self.tick(ctx, DUE + scheduler.decl.RETRY_DELAY)
+        with self.assertRaises(scheduler.errors.Partial):
+            self.tick(ctx, DUE)
+        self.tick(ctx, DUE + 10 * MIN)
         row = ctx.store.get_schedule(sid)
-        self.assertEqual((row["status"], row["outcome"], row["attempt"]), ("failed", "could-not-run", 0))
+        self.assertEqual((row["status"], row["attempt"]), ("pending", 1))        # retried, not refused
         self.assertEqual(self.runner.of("systemd-run"), [])
-        self.assertIn("A route that cannot be resolved (a repo git cannot read, a broken route table) refuses "
-                      "the run: `could-not-run` at once, never retried", _flat())
+        self.assertIn("A route that cannot be resolved (a repo git cannot read, a broken route table) starts "
+                      "nothing: that attempt is `could-not-run`, retried like any other", _flat())
+
+    def test_the_skill_sends_agents_to_a_real_request_not_the_route_line(self):
+        # CLAUDE.md: never conclude which account is in play from configuration (review finding).
+        flat = _flat()
+        self.assertIn("names a config dir, not an account", flat)
+        self.assertIn("`env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=<dir> gh api user --jq .login`, never from "
+                      "the route line", flat)
 
     def test_an_unrouted_cwd_gets_no_variable_as_the_skill_says(self):
         ctx = self.tctx(); self.declare(ctx)

@@ -20,12 +20,14 @@ fails is reported, the others still move, and the tick exits 4.
    ``fail`` is a result, never re-run.
 3. **Expire** every ``pending`` row past ``expires_at``, and escalate each, naming its last reason.
 4. **Dispatch** every due ``pending`` row. A command row is checked first: its frozen payload must
-   sit in its own schedule directory and still hash to the declared sha256, its cwd must exist, and
-   ``scripts/gh-route`` must be able to say which gh config dir that cwd routes to. A row that fails
-   a check is REFUSED, terminally, with a critical escalation, because no such fault heals itself
-   and a retry would only delay the news. A row that passes is CLAIMED in one
+   sit in its own schedule directory and still hash to the declared sha256, and its cwd must exist.
+   A row that fails a check is REFUSED, terminally, with a critical escalation, because neither
+   fault heals itself and a retry would only delay the news. A row that passes is CLAIMED in one
    ``BEGIN IMMEDIATE`` conditional write that stores its attempt, unit name and out_dir, and only
-   then started with ``systemd-run``. At most ``MAX_RUNNING_COMMANDS`` command units run at once
+   then started with ``systemd-run``, once ``scripts/gh-route`` has said which gh config dir its cwd
+   routes to. A route that cannot be resolved starts nothing and is settled like a failed
+   ``systemd-run``: one ``could-not-run`` attempt, retried, because a stalled fork heals and a broken
+   table is news within ``RETRY_DELAY``. At most ``MAX_RUNNING_COMMANDS`` command units run at once
    per tenant, counting those still running from earlier ticks: a due command past the cap is
    DEFERRED (``COMMAND_DEFERRAL``) and a later tick starts it. An agent row is never dispatched
    (DO-820 brings its executor): it is DEFERRED with ``AGENT_DEFERRAL``. A deferral is not an
@@ -46,8 +48,7 @@ include ``~/.local/bin`` (DO-712: a transient unit gets the user manager's minim
 manager's environment has none, so gh used its default config dir and could not see a private work
 repository. ``scripts/gh-route`` answers from the same tables and the same ``_gh_route_for`` as an
 interactive shell. Where no route applies the unit gets no ``GH_CONFIG_DIR``, exactly as the shell
-exports none there; where the route cannot be resolved the run is refused, never started with gh's
-default. The unit never gets ``GH_TOKEN`` or any other value from the tick's environment. It gets no
+exports none there; where the route cannot be resolved nothing is started with gh's default. The unit never gets ``GH_TOKEN`` or any other value from the tick's environment. It gets no
 seat and passes no budget gate. It runs the FROZEN script through ``WRAPPER``, a fixed ``/bin/sh``
 line whose only job is to write the script's exit status into the out_dir, atomically, once it
 exits. Every value reaches the wrapper as an argument, never as script text, and
@@ -480,13 +481,7 @@ def command_argv(row: dict, unit: str, out_dir: Path, gh_dir: str | None = None)
 
 
 def _dispatch_command(ctx, row, now, rep):
-    problem, gh_dir = _cannot_start(ctx, row), None
-    if problem is None:
-        try:
-            gh_dir = gh_config_dir(ctx, row["cwd"])
-        except errors.RabotaError as e:
-            problem = (f"its gh account could not be routed, and gh's default config dir would be a "
-                       f"silent wrong account: {e}", row["cwd"])
+    problem = _cannot_start(ctx, row)
     if problem is not None:
         _refuse(ctx, row, *problem, now, rep)
         return
@@ -501,6 +496,14 @@ def _dispatch_command(ctx, row, now, rep):
     if not claimed:
         return          # cancelled, or claimed elsewhere, since it was read: nothing to start
     out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        gh_dir = gh_config_dir(ctx, row["cwd"])
+    except errors.RabotaError as e:
+        # Not started: gh's default config dir would be a silent wrong account. Recorded as the
+        # failed systemd-run below is, so the next tick settles it as one attempt that could not run.
+        why = f"not started, because its gh account could not be routed: {e}"
+        ctx.store.update_schedule_where(row["id"], {"status": "running", "unit": unit}, last_reason=why)
+        raise errors.RabotaError(f"{why}; the next tick settles it as an attempt that could not run") from None
     res = ctx.runner.run(command_argv(row, unit, out_dir, gh_dir), timeout=30)
     if not res.ok:
         why = f"systemd-run failed (exit {res.code}): {(res.err or res.out).strip()[:200]}"

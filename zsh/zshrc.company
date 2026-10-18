@@ -194,15 +194,17 @@ _gh_cache_write() {
 # GH_ACCOUNT_DEFAULT_DIR) are data in zsh/zshrc.gh-routes, which
 # scripts/gh-route reads too, so the `rabota schedule` tick routes a command
 # unit's gh from the same table as this shell (DO-829). Relative to THIS file,
-# not ~/.dotfiles, so a worktree or a test checkout reads its own copy.
-[[ -r "${${(%):-%x}:A:h}/zshrc.gh-routes" ]] && source "${${(%):-%x}:A:h}/zshrc.gh-routes"
+# not ~/.dotfiles, so a worktree or a test checkout reads its own copy. Sourced
+# unguarded: a missing file must say so here, as gh-route does, rather than
+# leave every directory "no GitHub account is determined" with no cause named.
+source "${${(%):-%x}:A:h}/zshrc.gh-routes"
 
 if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # The account is chosen by the repo's REMOTE and pinned with $GH_TOKEN.
     # ------------------------------------------------------------------------
     # Two independent decisions, and each was previously made the wrong way:
     #
-    # WHICH ACCOUNT — by remote (via GH_ACCOUNT_ROUTES above and _gh_route_for
+    # WHICH ACCOUNT — by remote (via GH_ACCOUNT_ROUTES in zshrc.gh-routes and _gh_route_for
     # in zsh/functions/github.sh), not by $PWD. $PWD is exactly the signal #67
     # moved git identity off, and keeping it here meant gh and git could
     # disagree about the same repository: a quantivly clone outside ~/quantivly/
@@ -211,7 +213,7 @@ if [[ -d "$HOME/.config/gh-quantivly" ]]; then
     # a fork whose upstream is the work repo routes the way git already signs
     # it. A directory with NO GitHub remote — a multi-repo workspace root, a
     # scratch directory — is the one case the remote cannot decide; for those,
-    # and only those, GH_ACCOUNT_PATH_ROUTES above decides by place, before the
+    # and only those, GH_ACCOUNT_PATH_ROUTES decides by place, before the
     # default. A fallback, not a return to $PWD routing: a repository under
     # ~/quantivly whose remote is personal stays personal, as git signs it.
     #

@@ -662,7 +662,7 @@ resolver but **not** the ranking inside its pool: pinning says where to bill, no
 
 `claude-tenants-apply-gh` derives the gh tables from the same data, so adding a root is one edit
 rather than two that can disagree. It is **defined in `zshrc.herdr` and deliberately never called
-there**: load order is `zshrc.herdr` → `zshrc.company`, which **assigns** `GH_ACCOUNT_ROUTES=(…)`
+there**: load order is `zshrc.herdr` → `zshrc.company`, whose `zshrc.gh-routes` **assigns** `GH_ACCOUNT_ROUTES=(…)`
 wholesale and would discard anything added first → `~/.zshrc.local` → the machine's own overlay,
 which calls it as its last line. Only that caller knows the order has ended. It is additive and
 idempotent, and never removes or reorders a team default.
