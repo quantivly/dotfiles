@@ -22,10 +22,10 @@ from unittest import mock
 
 from rabota import errors, scheduler, store
 from rabota.commands import brief, escalate, escalations, schedule
-from rabota.runner import Result
+from rabota.runner import Result, SubprocessRunner
 from tests.support import last_json
 from tests.test_brief import seq
-from tests.test_cli import run_cli
+from tests.test_cli import install_fixture_home, run_cli
 from tests.test_schedule import ENABLED, NOW, GuardFake, ScheduleBase
 
 REPO = Path(__file__).resolve().parents[2]
@@ -33,6 +33,14 @@ DUE = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)      # test_schedule.AT
 MIN = timedelta(minutes=1)
 CANARY = "sk-canary-tick-0123456789"
 UNTRACKED = Result(1, "", "error: pathspec 'x' did not match any file(s) known to git")
+
+
+def gh_route(state, d="", why="fixture", code=0):
+    """What ``scripts/gh-route`` prints: its JSON answer, or ``code`` != 0 for one it could not give."""
+    return Result(code, json.dumps({"state": state, "dir": d, "why": why}) if code == 0 else "", why if code else "")
+
+
+UNROUTED = gh_route("no-repo")
 
 
 class TickRunner(GuardFake):
@@ -46,6 +54,7 @@ class TickRunner(GuardFake):
         self.live, self.units_fail, self.tracked = set(), False, False
         self.states = {}            # unit -> ActiveState other than "active", for a listed unit
         self.start, self.on_start = Result(0, "Running as unit\n", ""), None
+        self.gh_route, self.gh_envs = UNROUTED, []      # scripts/gh-route's answer, and each call's env
 
     def run(self, argv, *, env=None, input=None, timeout=60, cwd=None):
         argv = list(argv)
@@ -61,6 +70,9 @@ class TickRunner(GuardFake):
             if self.on_start:
                 self.on_start(argv)
             return self.start
+        if argv[0] == str(scheduler.GH_ROUTER):
+            self.calls.append(argv); self.gh_envs.append(env)
+            return self.gh_route
         if argv[0] == "git":
             self.calls.append(argv)
             return Result(0, "", "") if self.tracked else UNTRACKED
@@ -113,6 +125,18 @@ class TickBase(ScheduleBase):
 
     def escs(self, ctx):
         return ctx.store.escalations("quantivly")
+
+    def _refused(self, ctx, sid, needle):
+        rep = self.tick(ctx, DUE)
+        row = ctx.store.get_schedule(sid)
+        self.assertEqual((row["status"], row["outcome"], self.runner.of("systemd-run")), ("failed", "could-not-run", []))
+        self.assertIn(needle, row["last_reason"])
+        self.assertEqual([r["id"] for r in rep["refused"]], [sid])
+        (esc,) = self.escs(ctx)
+        self.assertEqual(esc["id"], row["escalation_id"])
+        self.assertEqual(row["attempt"], 0)                    # nothing ran
+        self.tick(ctx, DUE + 10 * MIN)                         # and nothing retries it
+        self.assertEqual(self.runner.of("systemd-run"), [])
 
 
 class TimingTests(TickBase):
@@ -201,18 +225,6 @@ class ExecutorTests(TickBase):
         self.assertEqual((d / "exit-status").read_text(), "3\n")
         self.assertFalse((d / "exit-status.tmp").exists())
 
-    def _refused(self, ctx, sid, needle):
-        rep = self.tick(ctx, DUE)
-        row = ctx.store.get_schedule(sid)
-        self.assertEqual((row["status"], row["outcome"], self.runner.of("systemd-run")), ("failed", "could-not-run", []))
-        self.assertIn(needle, row["last_reason"])
-        self.assertEqual([r["id"] for r in rep["refused"]], [sid])
-        (esc,) = self.escs(ctx)
-        self.assertEqual(esc["id"], row["escalation_id"])
-        self.assertEqual(row["attempt"], 0)                    # nothing ran
-        self.tick(ctx, DUE + 10 * MIN)                         # and nothing retries it
-        self.assertEqual(self.runner.of("systemd-run"), [])
-
     def test_a_changed_frozen_payload_is_refused_never_run(self):
         ctx = self.tctx(); sid = self.declare(ctx)
         p = Path(ctx.store.get_schedule(sid)["payload_path"]); p.chmod(0o700); p.write_text("#!/bin/sh\nexit 0\n")
@@ -228,6 +240,118 @@ class ExecutorTests(TickBase):
         ctx = self.tctx(); sid = self.declare(ctx, cwd=str(sub))
         sub.rmdir()
         self._refused(ctx, sid, "is not a directory")
+
+
+class GhRoutingTests(TickBase):
+    """DO-829: the unit gets the ``GH_CONFIG_DIR`` the shell's gh routing gives its cwd, through
+    ``scripts/gh-route`` (answered here by ``TickRunner``); nothing where no route applies; and a
+    refusal, never gh's default config dir, where the route cannot be resolved."""
+
+    WORK = "/fixture/.config/gh-quantivly"
+
+    def setenvs(self):
+        (argv,) = self.runner.of("systemd-run")
+        return [a for a in argv if a.startswith("--setenv=")]
+
+    def test_a_routed_cwd_gives_the_unit_that_config_dir_asked_at_dispatch_for_the_runs_cwd(self):
+        sub = self.work / "repo"; sub.mkdir()
+        ctx = self.tctx(); self.declare(ctx, cwd=str(sub))
+        self.runner.gh_route = gh_route("matched", self.WORK)
+        self.assertEqual(self.runner.of(str(scheduler.GH_ROUTER)), [])        # add asks nothing
+        self.tick(ctx, DUE)
+        self.assertEqual(self.runner.of(str(scheduler.GH_ROUTER)), [[str(scheduler.GH_ROUTER), str(sub.resolve())]])
+        self.assertEqual(self.setenvs(), [f"--setenv=PATH={scheduler.unit_path()}",
+                                          f"--setenv=GH_CONFIG_DIR={self.WORK}"])
+
+    def test_the_default_route_is_passed_as_the_shell_exports_it(self):
+        ctx = self.tctx(); self.declare(ctx)
+        self.runner.gh_route = gh_route("default", "/fixture/.config/gh-personal")
+        self.tick(ctx, DUE)
+        self.assertIn("--setenv=GH_CONFIG_DIR=/fixture/.config/gh-personal", self.setenvs())
+
+    def test_an_unrouted_cwd_gives_the_unit_no_gh_config_dir_and_still_runs(self):
+        for state in scheduler.GH_UNROUTED:
+            with self.subTest(state=state):
+                self.runner.calls.clear()
+                ctx = self.tctx(); sid = self.declare(ctx)
+                self.runner.gh_route = gh_route(state)
+                rep = self.tick(ctx, DUE)
+                self.assertIn(sid, [d["id"] for d in rep["dispatched"]])
+                self.assertEqual(self.setenvs(), [f"--setenv=PATH={scheduler.unit_path()}"])
+                self.finish(ctx, sid, 0)
+
+    def test_a_route_that_cannot_be_resolved_is_refused_never_run_with_the_default(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.runner.gh_route = gh_route("bad-table", code=2, why="gh-route: no gh route for '/x' (state bad-table)")
+        self._refused(ctx, sid, "state bad-table")
+        self.assertIn("could not be routed", ctx.store.get_schedule(sid)["last_reason"])
+
+    def test_an_answer_the_router_does_not_promise_is_refused(self):
+        bad = {"not json": Result(0, "gh-route: hello\n", ""), "a list": Result(0, "[]", ""),
+               "no state": Result(0, json.dumps({"dir": self.WORK}), ""),
+               "an unknown state": gh_route("unsupported", self.WORK),
+               "matched with no dir": gh_route("matched", ""), "matched with no dir key": Result(0, '{"state": "matched"}', ""),
+               "a relative dir": gh_route("default", ".config/gh-personal"),
+               "a dir with a newline": gh_route("matched", self.WORK + "\nGH_TOKEN=x"),
+               "unrouted naming a dir": gh_route("none", self.WORK),
+               "unrouted with no dir key": Result(0, '{"state": "no-repo"}', "")}
+        for name, answer in bad.items():
+            with self.subTest(answer=name):
+                ctx = self.tctx(); sid = self.declare(ctx)
+                self.runner.gh_route = answer
+                rep = self.tick(ctx, DUE)
+                row = ctx.store.get_schedule(sid)
+                self.assertEqual((row["status"], row["outcome"]), ("failed", "could-not-run"))
+                self.assertIn("could not be routed", row["last_reason"])
+                self.assertEqual([r["id"] for r in rep["refused"]], [sid])
+        self.assertEqual(self.runner.of("systemd-run"), [])
+
+    def test_the_unit_gets_no_token_and_no_value_from_the_ticks_environment(self):
+        # ~/.config/rabota/env is the tick's EnvironmentFile; a value from it, or a gh token, must
+        # reach neither the unit's argv nor the router's environment.
+        canaries = {"GH_TOKEN": CANARY + "-gh", "GITHUB_TOKEN": CANARY + "-github",
+                    "LINEAR_API_KEY": CANARY + "-linear", "RABOTA_EXTRA": CANARY + "-rabota-env"}
+        with mock.patch.dict(os.environ, canaries):
+            ctx = self.tctx(); ctx.env.update(canaries); self.declare(ctx)
+            self.runner.gh_route = gh_route("matched", self.WORK)
+            self.tick(ctx, DUE)
+        (argv,) = self.runner.of("systemd-run")
+        self.assertEqual([a.split("=", 2)[1] for a in self.setenvs()], ["PATH", "GH_CONFIG_DIR"])
+        for name, value in canaries.items():
+            with self.subTest(name=name):
+                self.assertFalse([a for a in argv if name in a or value in a])
+        (env,) = self.runner.gh_envs
+        self.assertEqual(env, {"HOME": str(self.home), "PATH": scheduler.unit_path()})
+
+
+class GhRouterRealTests(unittest.TestCase):
+    """``gh_config_dir`` against the REAL ``scripts/gh-route`` and the shipped ``zsh/zshrc.gh-routes``,
+    under a fixture ``$HOME``: the fakes above model the router's output, and this holds them to it.
+    Runs zsh, git and jq; starts no unit. The router's own state table is ``scripts/test-gh-routing.sh``."""
+
+    def setUp(self):
+        install_fixture_home(self)
+        self.ctx = argparse.Namespace(runner=SubprocessRunner({}))
+        (self.home / ".config" / "gh-quantivly").mkdir(parents=True)
+
+    def repo(self, owner):
+        d = self.home / "src" / owner; d.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(["git", "-C", str(d), "remote", "add", "origin", f"git@github.com:{owner}/x.git"], check=True)
+        return str(d)
+
+    def test_a_work_repo_routes_to_the_work_config_dir_and_a_personal_one_to_nothing(self):
+        self.assertEqual(scheduler.gh_config_dir(self.ctx, self.repo("quantivly")), f"{self.home}/.config/gh-quantivly")
+        # no gh-personal dir in this HOME, so the shipped table has no default: no route applies
+        self.assertIsNone(scheduler.gh_config_dir(self.ctx, self.repo("someone")))
+
+    def test_a_directory_git_cannot_read_raises_rather_than_passing_nothing(self):
+        d = Path(self.repo("quantivly"))
+        (d / ".git" / "config").write_text("[remote \"origin\"\n\turl = broken\n")
+        with self.assertRaises(errors.RabotaError) as cm:
+            scheduler.gh_config_dir(self.ctx, str(d))
+        self.assertIn("git could not read", str(cm.exception))
+
 
 
 class OutcomeTests(TickBase):

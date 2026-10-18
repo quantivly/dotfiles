@@ -1,0 +1,158 @@
+#!/usr/bin/env zsh
+#
+# scripts/gh-route
+# ================
+#
+# WHICH gh CONFIG DIR A DIRECTORY ROUTES TO, for a process with no shell.
+#
+# An interactive shell picks the GitHub account on every `cd`: _update_gh_config
+# (zsh/zshrc.company) asks _gh_route_for (zsh/functions/github.sh) and exports
+# GH_CONFIG_DIR. Nothing does that for the `rabota schedule` tick, which starts
+# each command unit with `systemd-run --user` under the user manager's
+# environment, where there is no GH_CONFIG_DIR. gh then falls to its default
+# config dir, and on 2026-10-18 the first two scheduled checks against private
+# work repositories failed on both attempts with "Could not resolve to a
+# Repository" (DO-829). The tick asks this script, and passes the unit the
+# answer.
+#
+# NOTHING IS COPIED. This calls _gh_route_for itself, over the tables the shell
+# builds, assembled in the shell's own order:
+#
+#   1. zsh/zshrc.herdr     declares the tenant tables, sources the tenants file
+#                          and defines claude-tenants-apply-gh
+#   2. zsh/zshrc.gh-routes the gh tables, assigned wholesale (zshrc.company
+#                          sources this same file at this point in the order)
+#   3. claude-tenants-apply-gh, which derives entries from the tenants file and
+#                          only ever ADDS them (DO-599)
+#
+# ~/.zshrc.local is the one layer it does not read. It holds secrets, and a
+# resolver whose answer goes into a unit's environment must not source them. A
+# route written directly in ~/.zshrc.local, rather than in the tenants file,
+# therefore reaches your shell and not the tick. gh-doctor reads the shell's
+# tables; compare the two with `scripts/gh-route --tables`.
+#
+# Usage:
+#   gh-route [<dir>]   JSON {"state", "dir", "why"} for <dir> (default $PWD)
+#   gh-route --tables  the assembled tables, one entry per line, for comparison
+#
+# state is _gh_route_for's: matched or default carry the config dir; none,
+# no-repo and no-remotes carry "" — no route applies, and the shell exports no
+# GH_CONFIG_DIR there either.
+#
+# Exit: 0 answered · 2 could not answer · 64 usage.
+#
+# "COULD NOT ANSWER" IS NEVER AN EMPTY ANSWER. bad-table (the tables are
+# malformed) and git-error (git could not read the directory) exit 2 with the
+# resolver's own reason, because an empty dir from either would send gh to its
+# default config dir — the silent wrong account this exists to end.
+
+emit_usage() {
+  print -u2 -- "usage: gh-route [<dir>] | gh-route --tables"
+  exit 64
+}
+
+tables_only=0
+dir="$PWD"
+case "${1:-}" in
+  "")        ;;
+  --tables)  tables_only=1 ;;
+  -*)        emit_usage ;;
+  *)         dir="$1" ;;
+esac
+(( $# > 1 )) && emit_usage
+
+# Relative to THIS script, never ~/.dotfiles: rabota ships inside this repo, and
+# a worktree or a test checkout must route through its own copy. tenant-route's
+# rule, for the same reason.
+HERE="${0:A:h}"
+ROOT="${HERE:h}"
+GITHUB_SH="$ROOT/zsh/functions/github.sh"
+HERDR_SH="$ROOT/zsh/zshrc.herdr"
+ROUTES="$ROOT/zsh/zshrc.gh-routes"
+TENANTS="${CLAUDE_TENANTS_FILE:-$HOME/.config/claude-tenants.zsh}"
+
+die() { print -u2 -- "gh-route: $1"; exit 2 }
+
+# Every file the fork sources is checked here, not inside it: a `source` that
+# fails leaves the fork running with the tables empty, and the fault would
+# arrive as "no route" rather than as itself. The tenants file is optional here
+# (unlike tenant-route): without one the gh tables are the data file's alone,
+# which is what the shell has too.
+files=( "$GITHUB_SH" "$HERDR_SH" "$ROUTES" )
+[[ -e "$TENANTS" || -L "$TENANTS" ]] && files+=( "$TENANTS" )
+for f in "${files[@]}"; do
+  [[ -f "$f" && -r "$f" ]] || die "cannot read $f, which the gh routing tables come from"
+  if ! parse_err="$(command zsh -n "$f" 2>&1)"; then
+    die "$f does not parse, so nothing in it ran: ${parse_err:-zsh -n failed with no message}"
+  fi
+done
+
+command -v jq >/dev/null 2>&1 || die "jq is required to render the answer and is not on PATH"
+
+# Marked output, so a stray `print` in a sourced file cannot become the data.
+# GH_ACCOUNT_DEFAULT_DIR is unset first: github.sh keeps an INHERITED value
+# (`: "${…=}"`), and the tick's answer must come from the tables, not from
+# whatever environment the resolver happened to be started in.
+fork_err="$(command mktemp)" || die "could not create a temp file"
+raw="$(command zsh -f -c '
+  unset GH_ACCOUNT_DEFAULT_DIR
+  source "$1"            # github.sh    — _gh_route_for, the ONE rule
+  CLAUDE_TENANTS_FILE="$4"
+  source "$2"            # zshrc.herdr  — the tenants file, claude-tenants-apply-gh
+  source "$3"            # zshrc.gh-routes — the gh tables
+  claude-tenants-apply-gh
+  if [[ "$6" == 1 ]]; then
+    for e in "${GH_ACCOUNT_ROUTES[@]}"; do print -r -- "__ROUTE__$e"; done
+    for e in "${GH_ACCOUNT_PATH_ROUTES[@]}"; do print -r -- "__PATH__$e"; done
+    print -r -- "__DEFAULT__$GH_ACCOUNT_DEFAULT_DIR"
+    return 0
+  fi
+  _gh_route_for "$5"; rc=$?
+  print -r -- "__RC__$rc"
+  print -r -- "__STATE__${_GH_ROUTE_STATE}"
+  print -r -- "__DIR__${_GH_ROUTE_DIR}"
+  # Newlines squashed: `why` can carry git'"'"'s own stderr verbatim.
+  print -r -- "__WHY__${_GH_ROUTE_WHY//$'"'"'\n'"'"'/ }"' \
+  gh-route "$GITHUB_SH" "$HERDR_SH" "$ROUTES" "$TENANTS" "$dir" "$tables_only" \
+  </dev/null 2>"$fork_err")"
+fork_err_text="$(< "$fork_err")"
+command rm -f "$fork_err"
+
+# Any stderr from the fork is a fault: it declares, sources and prints, so every
+# byte came from one of the sourced files, and a command in one of them failing
+# at run time empties a table in a way neither `zsh -n` nor a status can see.
+if [[ -n "$fork_err_text" ]]; then
+  print -u2 -- "gh-route: the gh routing tables did not load cleanly, so no answer is trustworthy:"
+  print -r -- "${fork_err_text}" | command sed 's/^/    /' >&2
+  exit 2
+fi
+
+if (( tables_only )); then
+  print -r -- "$raw" | command sed -n 's/^__ROUTE__/route  /p; s/^__PATH__/path   /p; s/^__DEFAULT__/default /p'
+  exit 0
+fi
+
+rc=""; state=""; rdir=""; why=""
+while IFS= read -r line; do
+  case "$line" in
+    __RC__*)    rc="${line#__RC__}" ;;
+    __STATE__*) state="${line#__STATE__}" ;;
+    __DIR__*)   rdir="${line#__DIR__}" ;;
+    __WHY__*)   why="${line#__WHY__}" ;;
+  esac
+done <<< "$raw"
+
+# Only the states _gh_route_for promises, each with the dir it promises. An
+# unknown state, or a known one with the wrong half missing, is the two sides
+# having drifted, and an empty dir is exactly what must never be guessed.
+case "$state" in
+  matched|default)
+    [[ "$rc" == 0 && "$rdir" == /* ]] || die "no gh config dir for '$dir' (state $state, rc ${rc:-none}, dir '${rdir}'): ${why:-no reason given}" ;;
+  none|no-repo|no-remotes)
+    [[ -z "$rdir" ]] || die "state $state for '$dir' named a config dir '$rdir'; it promises none" ;;
+  *)
+    die "no gh route for '$dir' (state ${state:-unknown}): ${why:-no reason given}" ;;
+esac
+
+command jq -n --arg state "$state" --arg dir "$rdir" --arg why "$why" \
+  '{state: $state, dir: $dir, why: $why}'

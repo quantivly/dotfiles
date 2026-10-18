@@ -1103,6 +1103,85 @@ check "a default tenant with no gh dir leaves the default empty, not garbage" \
 check "the herdr layer neither defines nor edits _gh_route_for" \
       "$(grep -c '^_gh_route_for()' "$HERDR_RC")" "0"
 
+echo "=== scripts/gh-route: the same routing, for a process with no shell (DO-829) ==="
+#
+# The `rabota schedule` tick asks this for a command unit's GH_CONFIG_DIR. Every
+# row is one question: can it answer differently from the shell, or hand back an
+# empty dir — which sends gh to its default config dir — when it could not tell?
+# `env -i` so this developer's own GH_* and tenants file cannot reach a row.
+GHROUTE="$DOTFILES/scripts/gh-route"
+groute() {  # groute <home> <dir> [tenants-file] -> "<rc>|<state>|<dir>"
+  local out rc
+  out="$(env -i PATH="/usr/bin:/bin" HOME="$1" CLAUDE_TENANTS_FILE="${3:-/nonexistent}" \
+         "$GHROUTE" "$2" 2>/dev/null)"; rc=$?
+  printf '%s|%s' "$rc" "$(printf '%s' "$out" | jq -r '"\(.state)|\(.dir)"' 2>/dev/null)"
+}
+groute_err() {  # groute_err <home> <dir> [tenants-file] -> stderr only
+  # shellcheck disable=SC2069  # stderr to the pipe, stdout dropped: the order is the point
+  env -i PATH="/usr/bin:/bin" HOME="$1" CLAUDE_TENANTS_FILE="${3:-/nonexistent}" \
+    "$GHROUTE" "$2" 2>&1 >/dev/null
+}
+TEN="$TMPROOT/tenants"; mkdir -p "$TEN"
+GR_NOGATE="$TMPROOT/gr-nogate"; mkdir -p "$GR_NOGATE"     # a HOME with no gh-quantivly dir
+
+check "gh-route: a work repo routes to the work dir" \
+      "$(groute "$HOOKHOME" "$R_QUANT")" "0|matched|$HOOKHOME/.config/gh-quantivly"
+check "gh-route: a personal repo takes the default dir" \
+      "$(groute "$HOOKHOME" "$R_MINE")" "0|default|$HOOKHOME/.config/gh-personal"
+check "gh-route: a plain directory under ~/quantivly takes the path route" \
+      "$(groute "$HOOKHOME" "$HOOKHOME/quantivly/ws")" "0|matched|$HOOKHOME/.config/gh-quantivly"
+check "gh-route: without the opt-in gate no route applies, and the dir is empty" \
+      "$(groute "$GR_NOGATE" "$NOTREPO")" "0|no-repo|"
+
+# THE SAME TABLES: for every directory the hook rows use, the dir the interactive
+# hook exports and the dir gh-route answers are one and the same.
+agree() {
+  local d hook route out=""
+  for d in "$R_QUANT" "$R_MINE" "$HOOKHOME/quantivly/ws" "$HOOKHOME/quantivly-other/x" "$NOTREPO"; do
+    hook="$(hookrun "$d" "" 'print -r -- "${GH_CONFIG_DIR:-none}"')"
+    route="$(groute "$HOOKHOME" "$d" | cut -d'|' -f3)"
+    [[ "$hook" == "${route:-none}" ]] || out+="$d: shell '$hook', gh-route '${route:-none}'; "
+  done
+  printf '%s' "${out:-agree}"
+}
+check "gh-route and the interactive hook agree on every fixture directory" "$(agree)" "agree"
+
+# The tenants file's derived routes are part of the shell's tables
+# (claude-tenants-apply-gh, called by the machine's overlay), so they are part of
+# this answer too.
+printf "CLAUDE_TENANT_ROUTES=( 'acme=client' )\nCLAUDE_TENANT_GH_DIR=( client /gh-client )\n" > "$TEN/derived.zsh"
+check "gh-route: a route the tenants file derives is applied" \
+      "$(groute "$HOOKHOME" "$R_WORK" "$TEN/derived.zsh")" "0|matched|/gh-client"
+check "gh-route --tables lists the derived route after the shipped one" \
+      "$(env -i PATH=/usr/bin:/bin HOME="$HOOKHOME" CLAUDE_TENANTS_FILE="$TEN/derived.zsh" "$GHROUTE" --tables \
+           | sed -n 's/^route *\([^=]*\)=.*/\1/p' | paste -sd, -)" "quantivly,acme"
+
+# Could not tell is exit 2 and NO answer on stdout — never an empty dir.
+GR_BAD="$(mkrepo grbad "origin=git@github.com:quantivly/platform.git")"
+printf '[remote "origin"\n\turl = broken\n' > "$GR_BAD/.git/config"
+check "gh-route: a repository git cannot read is exit 2, not the default" \
+      "$(groute "$HOOKHOME" "$GR_BAD")" "2|"
+printf "CLAUDE_TENANT_PATH_ROUTES=( 'relative/x=client' )\nCLAUDE_TENANT_GH_DIR=( client /gh-client )\n" > "$TEN/badtable.zsh"
+check "gh-route: a malformed table is exit 2, not no-route" \
+      "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/badtable.zsh")" "2|"
+printf 'CLAUDE_TENANT_ROUTES=( "unclosed\n' > "$TEN/noparse.zsh"
+check "gh-route: a tenants file that does not parse is named, exit 2" \
+      "$(groute_err "$HOOKHOME" "$NOTREPO" "$TEN/noparse.zsh" | grep -c 'noparse.zsh does not parse')" "1"
+printf 'CLAUDE_TENANT_DEFAULT=home\nno_such_command_gh_route_row\n' > "$TEN/runtime.zsh"
+check "gh-route: a sourced file that errors at run time is exit 2, not an emptier table" \
+      "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/runtime.zsh")" "2|"
+ln -s "$TEN/gone.zsh" "$TEN/dangling.zsh"
+check "gh-route: a tenants symlink whose target is gone is exit 2, not 'no tenants file'" \
+      "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/dangling.zsh")" "2|"
+check "gh-route: an inherited GH_ACCOUNT_DEFAULT_DIR does not become the answer" \
+      "$(env -i PATH=/usr/bin:/bin HOME="$GR_NOGATE" CLAUDE_TENANTS_FILE=/nonexistent GH_ACCOUNT_DEFAULT_DIR=/leaked \
+           "$GHROUTE" "$NOTREPO" 2>/dev/null | jq -r .dir)" ""
+check "gh-route: two arguments are a usage error" \
+      "$("$GHROUTE" a b >/dev/null 2>&1; echo $?)" "64"
+# It must call the shell's resolver, not grow a second one.
+check "gh-route calls _gh_route_for and parses no remote itself" \
+      "$(grep -c '_gh_route_for "\$5"' "$GHROUTE")|$(grep -c 'remote\..*\.url\|_gh_url_owner' "$GHROUTE")" "1|0"
+
 # --- the row total, and the count this suite is documented as running --------
 # The total catches a row that VANISHED (an early exit, a deleted block, an unset
 # variable under `set -u`) -- every row that still ran would pass in silence and
@@ -1113,7 +1192,7 @@ check "the herdr layer neither defines nor edits _gh_route_for" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=209
+EXPECTED_ROWS=224
 
 docs_claim() {
   local f="$DOTFILES/$1"

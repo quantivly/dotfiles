@@ -1,0 +1,56 @@
+# GitHub account routing tables: DATA for zsh/functions/github.sh's
+# _gh_route_for, and nothing else. Assignments only — no command, no output.
+#
+# TWO READERS, ONE TABLE (DO-829). zsh/zshrc.company sources this for every
+# interactive shell (the chpwd hook, gh-doctor). scripts/gh-route sources it in a
+# bare `zsh -f` to answer the same question for a process that has no shell at
+# all: the `rabota schedule` tick, whose command units otherwise start with no
+# GH_CONFIG_DIR and fall to gh's default config dir. Keeping the tables in
+# zshrc.company meant a second reader had to source that whole file — its
+# token-cache refresher and its hooks included — or keep a copy of the tables,
+# and two copies that agree today are two that disagree tomorrow, silently.
+#
+# Keep it that way: anything here runs in the tick's resolver as well as in your
+# shell, and any stderr it prints makes that resolver refuse.
+
+# Opt-in gate: a route naming a config dir that does not exist on this machine
+# is a permanent ✗ in gh-doctor, and a checker that is permanently red is one
+# nobody reads. zshrc.company's account pinning sits behind the same gate.
+if [[ -d "$HOME/.config/gh-quantivly" ]]; then
+    # Keyed on the repo's GitHub OWNER, matching the git identity rules in
+    # ~/.gitconfig.local (`hasconfig:remote.*.url:...quantivly/**`, #67) so the
+    # two cannot disagree about which repository is work.
+    #
+    # Double-quoted deliberately: a single-quoted "$HOME/..." is a literal path
+    # that never exists, and the route then silently never fires. gh-doctor
+    # reports that state, but only because it checks the whole table rather than
+    # the entry that happened to match.
+    GH_ACCOUNT_ROUTES=( "quantivly=$HOME/.config/gh-quantivly" )
+
+    # Path routes, consulted only for a directory with NO GitHub remote: not a
+    # repository, a repository with no remotes, or only non-GitHub remotes. The
+    # work tree's roots that are not repositories — multi-repo workspaces such as
+    # ~/quantivly/qspace, drafts, scratch — have no remote to route on and took
+    # the personal default; on 2026-09-09 a Claude Code session started in one
+    # carried the personal token into gh AND the GitHub MCP plugin (whose token
+    # is fixed at startup), and every private work repository 404'd for the life
+    # of the session. A repository with a GitHub remote is still routed by that
+    # remote first, so gh and git identity (dev-setup's remote-based includeIf)
+    # agree on every such repository. A repository with NO remote — a fresh
+    # `git init`, a GitLab checkout — is the one place they part: gh routes it
+    # by place (work) while git commits as personal until a quantivly remote is
+    # added, the state docs/TROUBLESHOOTING.md already documents for git alone.
+    # Double-quoted for the same reason as the owner route above.
+    GH_ACCOUNT_PATH_ROUTES=( "$HOME/quantivly=$HOME/.config/gh-quantivly" )
+
+    # Everything the routes do not match. The isolated single-account personal
+    # dir when it exists (immune to `gh auth switch` flipping the shared
+    # default's active user); otherwise EMPTY — with no dir to name, the remote
+    # genuinely does not determine an account, and _update_gh_config says so
+    # rather than having a default invented for it.
+    if [[ -d "$HOME/.config/gh-personal" ]]; then
+        GH_ACCOUNT_DEFAULT_DIR="$HOME/.config/gh-personal"
+    else
+        GH_ACCOUNT_DEFAULT_DIR=""
+    fi
+fi

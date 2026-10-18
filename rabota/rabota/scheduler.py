@@ -20,9 +20,10 @@ fails is reported, the others still move, and the tick exits 4.
    ``fail`` is a result, never re-run.
 3. **Expire** every ``pending`` row past ``expires_at``, and escalate each, naming its last reason.
 4. **Dispatch** every due ``pending`` row. A command row is checked first: its frozen payload must
-   sit in its own schedule directory and still hash to the declared sha256, and its cwd must exist.
-   A row that fails a check is REFUSED, terminally, with a critical escalation, because neither
-   fault heals itself and a retry would only delay the news. A row that passes is CLAIMED in one
+   sit in its own schedule directory and still hash to the declared sha256, its cwd must exist, and
+   ``scripts/gh-route`` must be able to say which gh config dir that cwd routes to. A row that fails
+   a check is REFUSED, terminally, with a critical escalation, because no such fault heals itself
+   and a retry would only delay the news. A row that passes is CLAIMED in one
    ``BEGIN IMMEDIATE`` conditional write that stores its attempt, unit name and out_dir, and only
    then started with ``systemd-run``. At most ``MAX_RUNNING_COMMANDS`` command units run at once
    per tenant, counting those still running from earlier ticks: a due command past the cap is
@@ -40,7 +41,13 @@ systemd refuses a duplicate.
 
 **The command executor** (§7) is a transient ``rabota-sched-<tenant>-<id>-a<n>.service`` under
 ``MemoryMax``, ``RuntimeMaxSec``, ``Nice=10`` and ``KillMode=control-group``, with ``PATH`` set to
-include ``~/.local/bin`` (DO-712: a transient unit gets the user manager's minimal one). It gets no
+include ``~/.local/bin`` (DO-712: a transient unit gets the user manager's minimal one), and with
+``GH_CONFIG_DIR`` set to the config dir the shell's gh routing gives its cwd (DO-829): the user
+manager's environment has none, so gh used its default config dir and could not see a private work
+repository. ``scripts/gh-route`` answers from the same tables and the same ``_gh_route_for`` as an
+interactive shell. Where no route applies the unit gets no ``GH_CONFIG_DIR``, exactly as the shell
+exports none there; where the route cannot be resolved the run is refused, never started with gh's
+default. The unit never gets ``GH_TOKEN`` or any other value from the tick's environment. It gets no
 seat and passes no budget gate. It runs the FROZEN script through ``WRAPPER``, a fixed ``/bin/sh``
 line whose only job is to write the script's exit status into the out_dir, atomically, once it
 exits. Every value reaches the wrapper as an argument, never as script text, and
@@ -145,6 +152,40 @@ def command_unit(tenant: str, sched_id: str, attempt: int) -> str:
 def unit_path() -> str:
     """A command unit's whole PATH. systemd has no prepend, so ``~/.local/bin`` is written in (DO-712)."""
     return f"{Path.home()}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+
+# Relative to this module, not ~/.dotfiles, for tenants.ROUTER's reason: a worktree or a test
+# checkout routes through its own copy. A ROUTED state carries a config dir; an UNROUTED one, none.
+GH_ROUTER = Path(__file__).resolve().parents[2] / "scripts" / "gh-route"
+GH_ROUTE_TIMEOUT = 15           # a cold `zsh -f` fork plus one git call; tenants.TIMEOUT's bound
+GH_ROUTED, GH_UNROUTED = ("matched", "default"), ("none", "no-repo", "no-remotes")
+
+
+def gh_config_dir(ctx, cwd: str) -> str | None:
+    """The ``GH_CONFIG_DIR`` the shell's gh routing gives ``cwd``, or None where no route applies.
+
+    Raises ``RabotaError`` when the route cannot be resolved: the router failing, or answering
+    anything but a state it promises with the dir that state promises. None is never the answer to
+    "could not tell", because a unit without the variable uses gh's default config dir. The router
+    gets ``HOME`` and the unit's ``PATH`` and nothing else, so no value from the tick's environment
+    can reach its answer.
+    """
+    res = ctx.runner.run([str(GH_ROUTER), cwd], env={"HOME": str(Path.home()), "PATH": unit_path()},
+                         timeout=GH_ROUTE_TIMEOUT)
+    if not res.ok:
+        raise errors.RabotaError(f"{GH_ROUTER.name} exited {res.code}: "
+                                 f"{(res.err or res.out).strip()[:300] or 'no message'}")
+    try:
+        data = json.loads(res.out)
+    except json.JSONDecodeError:
+        data = None
+    state, d = (data.get("state"), data.get("dir")) if isinstance(data, dict) else (None, None)
+    if state in GH_ROUTED and isinstance(d, str) and d.startswith("/") and "\n" not in d:
+        return d
+    if state in GH_UNROUTED and d == "":
+        return None
+    raise errors.RabotaError(f"{GH_ROUTER.name} answered {res.out.strip()[:200]!r}, which is not a "
+                             f"state it promises with the config dir that state promises")
 
 
 def export_path() -> Path:
@@ -419,8 +460,10 @@ def _cannot_start(ctx, row) -> tuple[str, str] | None:
     return None
 
 
-def command_argv(row: dict, unit: str, out_dir: Path) -> list[str]:
+def command_argv(row: dict, unit: str, out_dir: Path, gh_dir: str | None = None) -> list[str]:
     """The ``systemd-run`` argv for one command attempt. Every value is an argv element, never text.
+
+    ``gh_dir`` is ``gh_config_dir``'s answer; None sets no ``GH_CONFIG_DIR``.
 
     ``--expand-environment=`` is systemd 254 or later. The tick runs only on this laptop (design
     §13), which runs 259; an older systemd refuses the flag, and that surfaces as a could-not-run
@@ -428,6 +471,7 @@ def command_argv(row: dict, unit: str, out_dir: Path) -> list[str]:
     """
     return ["systemd-run", "--user", "--collect", f"--unit={unit}", f"--working-directory={row['cwd']}",
             "--expand-environment=no", f"--setenv=PATH={unit_path()}",
+            *([f"--setenv=GH_CONFIG_DIR={gh_dir}"] if gh_dir else []),
             "-p", f"MemoryMax={row['memory_max']}", "-p", f"RuntimeMaxSec={row['timeout_s']}",
             "-p", "Nice=10", "-p", "KillMode=control-group",
             "-p", f"StandardOutput=append:{out_dir / STDOUT}", "-p", f"StandardError=append:{out_dir / STDERR}",
@@ -436,7 +480,13 @@ def command_argv(row: dict, unit: str, out_dir: Path) -> list[str]:
 
 
 def _dispatch_command(ctx, row, now, rep):
-    problem = _cannot_start(ctx, row)
+    problem, gh_dir = _cannot_start(ctx, row), None
+    if problem is None:
+        try:
+            gh_dir = gh_config_dir(ctx, row["cwd"])
+        except errors.RabotaError as e:
+            problem = (f"its gh account could not be routed, and gh's default config dir would be a "
+                       f"silent wrong account: {e}", row["cwd"])
     if problem is not None:
         _refuse(ctx, row, *problem, now, rep)
         return
@@ -451,7 +501,7 @@ def _dispatch_command(ctx, row, now, rep):
     if not claimed:
         return          # cancelled, or claimed elsewhere, since it was read: nothing to start
     out_dir.mkdir(parents=True, exist_ok=True)
-    res = ctx.runner.run(command_argv(row, unit, out_dir), timeout=30)
+    res = ctx.runner.run(command_argv(row, unit, out_dir, gh_dir), timeout=30)
     if not res.ok:
         why = f"systemd-run failed (exit {res.code}): {(res.err or res.out).strip()[:200]}"
         ctx.store.update_schedule_where(row["id"], {"status": "running", "unit": unit}, last_reason=why)

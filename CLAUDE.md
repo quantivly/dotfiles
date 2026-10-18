@@ -407,7 +407,7 @@ configuration; that inference *is* the bug. Run `gh-doctor`, which answers from 
   environment verbatim and the GitHub MCP plugin fixes its `Authorization` header from it at startup.
   Run writes as `zsh -ic 'gh …'`; setting `GH_CONFIG_DIR` by hand does not route.
 
-Configuration is data in `zsh/zshrc.company` — `GH_ACCOUNT_ROUTES` (owner-glob=config-dir),
+Configuration is data in `zsh/zshrc.gh-routes` — `GH_ACCOUNT_ROUTES` (owner-glob=config-dir),
 `GH_ACCOUNT_PATH_ROUTES` (absolute-prefix=config-dir), `GH_ACCOUNT_DEFAULT_DIR`. **Double** quotes: a
 single-quoted `$HOME` is a literal, and the route then silently never fires.
 

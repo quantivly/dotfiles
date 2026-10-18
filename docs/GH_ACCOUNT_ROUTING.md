@@ -113,13 +113,39 @@ gh-doctor --offline       # config only — every network answer marked NOT CHEC
 gh-doctor ~/some/repo
 ```
 
-Configuration is data, in `zsh/zshrc.company` (or `~/.zshrc.local`), read by the doctor:
+Configuration is data, in `zsh/zshrc.gh-routes` (sourced by `zsh/zshrc.company`; or
+`~/.zshrc.local`), read by the doctor:
 
 ```zsh
 GH_ACCOUNT_ROUTES=( "quantivly=$HOME/.config/gh-quantivly" )             # owner-glob=config-dir
 GH_ACCOUNT_PATH_ROUTES=( "$HOME/quantivly=$HOME/.config/gh-quantivly" )  # absolute-prefix=config-dir; only a dir with NO GitHub remote
 GH_ACCOUNT_DEFAULT_DIR="$HOME/.config/gh-personal"                       # empty = indeterminate
 ```
+
+### Processes with no shell: `scripts/gh-route` (DO-829)
+
+The `rabota schedule` tick starts each `kind=command` run with `systemd-run --user`, under the user
+manager's environment, where there is no `GH_CONFIG_DIR`. gh fell to its default config dir, and
+on 2026-10-18 the first two scheduled checks against private work repositories failed on both
+attempts with `Could not resolve to a Repository`. The tick now asks `scripts/gh-route <cwd>` and
+passes the unit `--setenv=GH_CONFIG_DIR=<dir>`, and nothing else from this area — never
+`GH_TOKEN`, so the unit's account is whatever that config dir's own login resolves to.
+
+The resolver copies nothing. It sources `github.sh` for `_gh_route_for`, `zshrc.herdr` (the tenants
+file and `claude-tenants-apply-gh`), then `zshrc.gh-routes`, then applies the tenant-derived routes:
+the shell's own order. That is why the tables left `zshrc.company`. A second reader would otherwise
+have to source that whole file, token refresher and hooks included, or keep a copy of the tables.
+
+- **`~/.zshrc.local` is the one layer it skips.** That file holds secrets, and an answer that goes
+  into a unit's environment must not come from sourcing them. A route written there directly, not
+  in the tenants file, reaches your shell and not the tick. To compare the two, run
+  `scripts/gh-route --tables` beside the shell's `print -l $GH_ACCOUNT_ROUTES`.
+- **No route applies → no variable.** `none`, `no-repo` and `no-remotes` are exit 0 with an empty
+  dir, and the shell exports no `GH_CONFIG_DIR` there either.
+- **Could not tell → refused.** `bad-table`, `git-error`, a sourced file that does not parse or that
+  prints to stderr, or an answer outside the promised states: exit 2 from the resolver. The tick
+  then refuses the run (`could-not-run`, critical, not retried), as it does for a missing `--cwd`.
+  Passing nothing would hand gh its default config dir, which is the failure this exists to end.
 
 Traps this area has, each of which produced a green tick or a confident wrong answer:
 
@@ -266,7 +292,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   records the parse state per remote; `unparsable` counts as a GitHub remote, blocks the path
   table, and the doctor lists it as a ⚠.
 
-State table: `scripts/test-gh-routing.sh` (209 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (224 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

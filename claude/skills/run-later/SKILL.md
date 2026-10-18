@@ -49,6 +49,12 @@ record file, and escalates anything but a clean pass to @zvi: a desktop notifica
   A script that calls one exits 127 on both attempts and escalates, and `--dry-run` cannot catch
   that, because it never runs the script. Call such a tool by its absolute path, or stick to
   `/usr/bin` tools.
+- **Its `gh` uses the config dir gh routing gives `--cwd`**: the one `gh-doctor <cwd>` shows
+  under "Route for this directory:". The tick sets it on the unit as `GH_CONFIG_DIR` and never
+  sets a `GH_TOKEN`. Where no route applies, the unit gets no `GH_CONFIG_DIR` and gh falls
+  back to its default config dir. A route that cannot be resolved (a
+  repo git cannot read, a broken route table) refuses the run: `could-not-run` at once, never
+  retried. So a `gh` check on a work repo needs a `--cwd` inside that repo or the work tree.
 - **It runs unconfined, as you.** Only its memory (1G) and `--timeout` (default 15 min, at most
   6 h) bound it. Keep it a read-only check: no edits, pushes, merges or messages.
 - **Print the evidence.** The last 4 KiB of stdout and of stderr go, redacted, into the result

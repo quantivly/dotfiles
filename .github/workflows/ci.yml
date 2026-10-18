@@ -64,9 +64,10 @@ jobs:
       # repo's newest executable would have no syntax check at all.
       # scripts/machines-render is the same case and named for the same reason
       # (DO-665): zsh, extensionless, excluded from both ShellCheck paths.
+      # scripts/gh-route (DO-829) is zsh and extensionless too; ShellCheck stops at SC1071.
       - name: Check zsh syntax for all modules
         run: |
-          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh scripts/claude-pick scripts/machines-render; do
+          for file in zsh/zshrc.* zsh/functions/*.sh zshrc p10k.zsh scripts/claude-pick scripts/machines-render scripts/gh-route; do
             if [ -f "$file" ]; then
               echo "Checking: $file"
               zsh -n "$file" || exit 1
@@ -809,10 +810,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install zsh
+      # jq: scripts/gh-route, the tick's resolver (DO-829), renders its answer with it.
+      - name: Install zsh and jq
         uses: ./.github/actions/apt-install
         with:
-          packages: zsh
+          packages: zsh jq
 
       # gh keys its tokens by HOST, not by config dir, so several config dirs
       # declaring different accounts can all resolve to one — while

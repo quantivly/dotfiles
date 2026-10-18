@@ -20,7 +20,7 @@ from pathlib import Path
 from rabota import cli, scheduler
 from rabota.commands import schedule
 from tests.test_schedule import ScheduleBase
-from tests.test_schedule_tick import DUE, TickBase
+from tests.test_schedule_tick import DUE, TickBase, gh_route
 
 REPO = Path(__file__).parents[2]
 SKILL = REPO / "claude" / "skills" / "run-later" / "SKILL.md"
@@ -302,6 +302,43 @@ class RunLaterExampleAddsTests(ScheduleBase):
         self.assertEqual(len(out["options"]), len(ns.option))
         self.assertTrue(any(o["action"].startswith("rerun") for o in out["options"]),
                         "the example shows no rerun option, the only way a check recurs")
+
+
+class RunLaterGhAccountTests(TickBase):
+    """DO-829: the skill says which GitHub account a run's ``gh`` uses, read from what the tick DOES
+    (the argv it builds, the refusal it makes) rather than restated."""
+
+    def test_the_variable_the_skill_names_is_the_one_the_unit_gets_and_no_token(self):
+        ctx = self.tctx(); self.declare(ctx)
+        self.runner.gh_route = gh_route("matched", "/fixture/gh-work")
+        self.tick(ctx, DUE)
+        (argv,) = self.runner.of("systemd-run")
+        names = [a.removeprefix("--setenv=").split("=", 1)[0] for a in argv if a.startswith("--setenv=")]
+        (gh_var,) = [n for n in names if f"--setenv={n}=/fixture/gh-work" in argv]
+        self.assertNotIn("GH_TOKEN", names)
+        flat = _flat()
+        self.assertIn(f"The tick sets it on the unit as `{gh_var}` and never sets a `GH_TOKEN`", flat)
+        # the label the skill sends an agent to look for is gh-doctor's own
+        label = "Route for this directory:"
+        self.assertIn(f'"{label}"', flat)
+        self.assertIn(f'echo "{label}"', (REPO / "zsh" / "functions" / "github.sh").read_text())
+
+    def test_an_unresolvable_route_is_refused_never_retried_as_the_skill_says(self):
+        ctx = self.tctx(); sid = self.declare(ctx)
+        self.runner.gh_route = gh_route("git-error", code=2, why="gh-route: git could not read it")
+        self.tick(ctx, DUE); self.tick(ctx, DUE + scheduler.decl.RETRY_DELAY)
+        row = ctx.store.get_schedule(sid)
+        self.assertEqual((row["status"], row["outcome"], row["attempt"]), ("failed", "could-not-run", 0))
+        self.assertEqual(self.runner.of("systemd-run"), [])
+        self.assertIn("A route that cannot be resolved (a repo git cannot read, a broken route table) refuses "
+                      "the run: `could-not-run` at once, never retried", _flat())
+
+    def test_an_unrouted_cwd_gets_no_variable_as_the_skill_says(self):
+        ctx = self.tctx(); self.declare(ctx)
+        self.tick(ctx, DUE)                                   # TickRunner's default: no route applies
+        (argv,) = self.runner.of("systemd-run")
+        self.assertFalse([a for a in argv if "GH_CONFIG_DIR" in a])
+        self.assertIn("Where no route applies, the unit gets no `GH_CONFIG_DIR`", _flat())
 
 
 class RunLaterDeferralTests(TickBase):
