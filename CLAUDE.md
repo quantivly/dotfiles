@@ -391,9 +391,9 @@ Read that file; it is the source of truth and this list only ever went stale aga
 
 **`GH_CONFIG_DIR` does not isolate the credential, and `gh auth status` will not tell you.** gh keys
 its tokens in the system keyring by **host**, not by config dir, so `gh auth status` reports the
-account a config dir *declares* while an API call resolves to another one — and with `GH_TOKEN` unset
-it falls back to the **work** account, in any directory. Never conclude which account is in play from
-configuration; that inference *is* the bug. Run `gh-doctor`, which answers from a real `GET /user`.
+account a config dir *declares* while an API call resolves to another; with `GH_TOKEN` unset it is
+the keyring's account (2026-10-18: no config dir saw a private work repo). Never conclude which
+account is in play from configuration; that inference *is* the bug. Run `gh-doctor` (a real `GET /user`).
 
 - **Routing follows the repo REMOTE, not `$PWD`**, and **any** remote matches, not just `origin`.
   Precedence: remote-owner route → path route → `GH_ACCOUNT_DEFAULT_DIR`, with a git error stopping
@@ -407,7 +407,7 @@ configuration; that inference *is* the bug. Run `gh-doctor`, which answers from 
   environment verbatim and the GitHub MCP plugin fixes its `Authorization` header from it at startup.
   Run writes as `zsh -ic 'gh …'`; setting `GH_CONFIG_DIR` by hand does not route.
 
-Configuration is data in `zsh/zshrc.company` — `GH_ACCOUNT_ROUTES` (owner-glob=config-dir),
+Configuration is data in `zsh/zshrc.gh-routes` — `GH_ACCOUNT_ROUTES` (owner-glob=config-dir),
 `GH_ACCOUNT_PATH_ROUTES` (absolute-prefix=config-dir), `GH_ACCOUNT_DEFAULT_DIR`. **Double** quotes: a
 single-quoted `$HOME` is a literal, and the route then silently never fires.
 

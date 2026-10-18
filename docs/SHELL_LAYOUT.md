@@ -67,7 +67,9 @@ setup_fzf() {
 9. zsh/zshrc.buildlimits (build/test worker caps)
 10. zsh/zshrc.herdr (herdr layer — before company, and independent of it:
     a modular adopter sources this one file and nothing else)
-11. zsh/zshrc.company
+11. zsh/zshrc.company, which sources zsh/zshrc.gh-routes (the gh account
+    route tables — data that scripts/gh-route reads too, DO-829) before its
+    account-pinning hook
 12. ~/.zshrc.local (machine-specific secrets)
 13. PATH additions
 14. Dotfiles live-config guard — registers a one-shot `precmd` hook that runs

@@ -454,7 +454,7 @@ _claude_tenant_for() {
 # removes or reorders a team default.
 #
 # Defined here, deliberately NOT called here. Load order is zshrc.herdr (this
-# file) -> zshrc.company, which ASSIGNS GH_ACCOUNT_ROUTES=(…) wholesale and would
+# file) -> zshrc.company, whose zshrc.gh-routes ASSIGNS GH_ACCOUNT_ROUTES=(…) wholesale and would
 # discard anything added first -> ~/.zshrc.local -> the machine's own overlay,
 # which calls this as its last line. Only that caller knows the order has ended.
 claude-tenants-apply-gh() {
