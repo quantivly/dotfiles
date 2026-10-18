@@ -18,8 +18,9 @@ your instructions and your verdict file is the whole of your reply.
 - Exception (fix lanes only): committing and pushing to the head branch of the
   **one** PR you were assigned is pre-authorized. **Never force-push** — if you
   think you need to, stop and ask.
-- Editing the body of your assigned PR to keep it current is allowed; it
-  becomes the squash commit (see the `prs` skill).
+- Editing the body of your assigned PR to keep it current is allowed; it is
+  what the reviewer reads (see the `prs` skill). The squash commit is written at
+  merge time by the orchestrator, never from the body.
 - **Never print, log, or paste credential values.** Refer to secrets by
   `file:line`. When grepping near secrets, mask by token length:
   `sed -E 's/[A-Za-z0-9_-]{20,}/<REDACTED>/g'`. Note `${VAR:-…}` expands to the
