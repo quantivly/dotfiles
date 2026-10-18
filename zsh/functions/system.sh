@@ -946,10 +946,52 @@ _timer_health_warn() {
   return 0
 }
 
+# DO-835: the ambient half of `claude-account-dirs.sh --check`. A REAL directory
+# where an account dir's shared link belongs means that account has forked from
+# ~/.claude -- its sessions write transcripts and memory no other account reads.
+# The builder's warning reached only the terminal that launched it, so
+# personal-0's fork went unseen for a week. Same shape as _timer_health_warn
+# above, and every guard there applies here for the same reasons: (N.) so a FIFO
+# cannot hang the prompt, <-> before a number is printed, stderr not stdout, and
+# no clock -- the background refresh is gated by a glob qualifier, at most every
+# 30 minutes. ACCOUNT_DIR_HEALTH_QUIET=1 silences it.
+_account_dir_health_warn() {
+  [[ -n "${ACCOUNT_DIR_HEALTH_QUIET:-}" ]] && return 0
+  # No account dirs: nothing to say and nothing to refresh. A machine that has
+  # never run an isolated session spawns no checker, at any prompt.
+  [[ -d "${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}" ]] || return 0
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/account-dir-health"
+  local line rc split entries
+  local -a st=( "$dir/status"(N.) )
+  if (( ${#st} )); then
+    for line in ${(f)"$(<$dir/status)"}; do
+      case "$line" in
+        rc=*)      rc="${line#rc=}" ;;
+        split=*)   split="${line#split=}" ;;
+        entries=*) entries="${line#entries=}" ;;
+      esac
+    done
+    if [[ "$rc" == 1 ]]; then
+      [[ "$split" == <-> ]] || split=1
+      print -ru2 -- $'\033[0;33m⚠ account dirs: '"${split}"$' shared link(s) are REAL directories — split from ~/.claude\033[0m'
+      [[ -n "$entries" ]] && print -ru2 -- "  ${entries}"
+      print -ru2 -- '  Those sessions write where no other account reads. Repair by hand, never by deleting:'
+      print -ru2 -- "  ${DOTFILES_ROOT:-~/.dotfiles}/docs/CLAUDE_ACCOUNTS.md, \"Repairing a split account dir\"; ACCOUNT_DIR_HEALTH_QUIET=1 to silence."
+    fi
+  fi
+  local -a stale=( "$dir/status"(Nmm+30) )
+  if (( ${#stale} || ${#st} == 0 )) && [[ -x "${DOTFILES_ROOT}/scripts/claude-account-dirs.sh" ]]; then
+    ( "${DOTFILES_ROOT}/scripts/claude-account-dirs.sh" --write-state >/dev/null 2>&1 & ) &!
+  fi
+  return 0
+}
+
 _dotfiles_live_config_warn() {
   # Before the DOTFILES_GUARD_QUIET return, so that switch -- whose documented
   # purpose is branch dogfooding -- cannot silently take timer health with it.
+  # Nor a split account dir (DO-835), for the same reason.
   _timer_health_warn
+  _account_dir_health_warn
   [[ -n "${DOTFILES_GUARD_QUIET:-}" ]] && return 0
   # Locals, so the helpers' results reach this function by dynamic scope and
   # then vanish, instead of parking four _D* variables in every shell.

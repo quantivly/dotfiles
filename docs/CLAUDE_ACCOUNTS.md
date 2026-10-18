@@ -916,6 +916,45 @@ Which plugins are enabled at user scope and which are per-project — the two st
 servers cost a forked process per session, and neither settings file is in this repo, so that
 page is the only record: [docs/CLAUDE_SETUP.md](CLAUDE_SETUP.md).
 
+### Repairing a split account dir
+
+**A REAL directory where an account dir's shared link belongs is a fork, and it is repaired by
+hand** (DO-835, the nanoclaw IMP-3358 fault recurring). `scripts/claude-account-dirs.sh --check`
+names it as `REAL-DIR <profile>/<name>`, `scripts/verify-tools.sh` FAILs on it, and a shell's
+first prompt says so (`ACCOUNT_DIR_HEALTH_QUIET=1` silences that line). Until then the only report
+was the launching terminal's stderr, which is how personal-0's `projects/` stayed forked for a week
+from 2026-10-11. Every session on the account wrote transcripts and auto-memory where no other
+account reads them, so the fork holds data the shared store lacks. The builder never deletes or
+replaces it, and the repair is deliberately not automated: it merges two halves of live data.
+
+How it formed: this box's `ln` is uutils, whose `ln -sfnT` is `unlink()` then `symlink()`; the
+builder ran it on every shared link at every launch; a session appending its transcript in that
+gap re-created `projects/` as a real 0700 directory (a race harness did it in 13 runs). The builder
+now leaves a right link alone and renames a wrong one over atomically, and a directory that appears
+anyway is refused with a warning (state table section Z2).
+
+1. **Wait for zero live sessions on that account** — `herdr agent list`, each agent's
+   `tokens.acct`. A running session keeps writing into the fork. Do not close them: start new work
+   on another account and let them drain. A one-member pool never goes quiet on its own.
+2. **Snapshot the fork** (`tar`), and check with `fuser`/`lsof` that nothing holds a file in it open.
+3. **Merge into the shared store, never overwrite.** A file only in the fork is copied across with
+   its mtime. A transcript `.jsonl` in both is two append-only halves of one session — the fork's
+   first `parentUuid` is the shared copy's last `uuid` — so union the lines by `uuid` in timestamp
+   order and keep the shared original as `*.pre-merge`. `merge_fork.py` from the 2026-10-13
+   reconcile does exactly this, dry run by default
+   (`~/Projects/handoffs/2026-10-13-personal-0-projects-fork/` on the machine it was written on).
+4. **Never blindly restore a memory file the shared store lacks.** A curator may have folded it into
+   another note on purpose: grep the shared store for a ``Merged <date> from `<name>` `` section
+   first. A `MEMORY.md` index is unioned (the fork's new lines appended); a note that differs on
+   both sides is kept twice, never overwritten.
+5. **Relink via the builder.** Re-check step 1, move the directory aside
+   (`mv <dir>/projects <dir>/projects.fork-<date>`, never `rm`), then run
+   `scripts/claude-account-dirs.sh <profile>`. A session starting between the two re-forks it, which
+   is what step 1 is for; the 2026-10-18 repair closed even that gap with one
+   `renameat2(RENAME_EXCHANGE)`.
+6. **Verify.** `--check` prints `OK`, and the moved-aside copy holds no file newer than the snapshot
+   (a straggler gets a second merge pass). Delete it only once nothing has been missed.
+
 ### A long suspend expires every account at once (2026-09-14)
 
 **Three accounts needed `clauth login` on the morning of 09-14, and the cause was a laptop

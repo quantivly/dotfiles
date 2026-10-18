@@ -162,6 +162,8 @@ good_statusline() {
 
 wire() { PATH="$STUB_BIN:$PATH" HOME="$1" "$WIRE" "${@:2}" 2>&1; }
 verify() { PATH="$STUB_BIN:$PATH" HOME="$1" "$VERIFY" "${@:2}" 2>&1; }
+# The same, blind to the tester's own account dirs (the DO-835 rows).
+averify() { env -u CLAUDE_ACCOUNT_DIRS_ROOT PATH="$STUB_BIN:$PATH" HOME="$1" "$VERIFY" "${@:2}" 2>&1; }
 
 echo
 echo "=== verify-tools --herdr: what it must NOT mention ==="
@@ -1433,6 +1435,43 @@ check "no claude row at all: does not take the exit code" "$rc" "0"
 hasnt "$(cat "$DOTFILES/scripts/verify-tools.sh")" "import tomllib" \
       "the checker does not parse TOML with python3"
 
+echo
+echo "=== verify-tools: a split account dir is a FAIL, in both modes (DO-835) ==="
+# A REAL directory where an account dir's shared link belongs is an account that
+# has forked from ~/.claude. CLAUDE_ACCOUNT_DIRS_ROOT is dropped so the builder's
+# read-only --check can only see the fixture HOME. Each fixture is WIRED, so the
+# other sections pass and the exit code is this section's alone -- the ok row
+# proves that, which is what lets the split row's rc=1 be attributed.
+acct_section() { awk '/^=== Claude account dirs/{f=1;next} /^===/{f=0} f' <<<"$1"; }
+acct_home() {  # $1 = name, $2 = link | real | none
+    local h; h="$(new_home "$1")"; wire "$h" >/dev/null
+    mkdir -p "$h/.claude/projects"
+    case "$2" in
+        link) mkdir -p "$h/.local/state/claude-account-dirs/p1"
+              ln -s "$h/.claude/projects" "$h/.local/state/claude-account-dirs/p1/projects" ;;
+        real) mkdir -p "$h/.local/state/claude-account-dirs/p1/projects/-w"
+              printf '{}\n' >"$h/.local/state/claude-account-dirs/p1/projects/-w/t.jsonl" ;;
+    esac
+    printf '%s' "$h"
+}
+H="$(acct_home acct_ok link)"
+out="$(averify "$H" --herdr)"; rc=0; averify "$H" --herdr >/dev/null || rc=$?
+has   "$(acct_section "$out")" "✓"  "account dirs all linked: ✓"
+hasnt "$(acct_section "$out")" "✗"  "account dirs all linked: no FAIL"
+check "account dirs all linked: exit 0 (so the next rc=1 is this section's)" "$rc" "0"
+H="$(acct_home acct_split real)"
+out="$(averify "$H" --herdr)"; rc=0; averify "$H" --herdr >/dev/null || rc=$?
+has   "$(acct_section "$out")" "✗ FAIL" "a split account dir: FAIL"
+has   "$(acct_section "$out")" "p1/projects is a REAL directory" "...naming the profile and the entry"
+has   "$(acct_section "$out")" "Repairing a split account dir"   "...and pointing at the repair procedure"
+check "a split account dir: exit 1" "$rc" "1"
+has   "$(acct_section "$(averify "$H")")" "p1/projects is a REAL directory" \
+      "a split account dir: the FULL report fails it too"
+H="$(acct_home acct_none none)"
+out="$(acct_section "$(averify "$H" --herdr)")"
+has   "$out" "○ no account dirs" "no account dirs: reported as a skip"
+hasnt "$out" "✗"                 "no account dirs: no FAIL"
+
 # --- the row total, and the count this suite is documented as running --------
 # The total catches a row that VANISHED (an early exit, a deleted block, an unset
 # variable under `set -u`) -- every row that still ran would pass in silence and
@@ -1443,7 +1482,7 @@ hasnt "$(cat "$DOTFILES/scripts/verify-tools.sh")" "import tomllib" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=251
+EXPECTED_ROWS=261
 
 docs_claim() {
   local f="$DOTFILES/$1"

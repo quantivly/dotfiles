@@ -92,6 +92,8 @@
 # Usage:
 #   scripts/claude-account-dirs.sh <profile> [<profile>...]
 #   scripts/claude-account-dirs.sh --all
+#   scripts/claude-account-dirs.sh --check         read-only; exit 1 on a REAL-DIR
+#   scripts/claude-account-dirs.sh --write-state   --check's verdict, for the prompt
 
 set -euo pipefail
 
@@ -967,7 +969,7 @@ reconcile_all() {
 }
 
 build_one() {
-    local profile="$1" pdir account_dir name entry target
+    local profile="$1" pdir account_dir name entry target tmp
     pdir="$PROFILES_DIR/$profile"
     [[ -d "$pdir" ]] || die "no clauth profile '$profile' at ${pdir/#$HOME/\~}"
     [[ -f "$pdir/credentials.json" ]] \
@@ -991,10 +993,34 @@ build_one() {
         # it loudly and leave it alone; `-T` makes the destination a file, so a
         # directory can never be entered again.
         if [[ -d "$account_dir/$name" && ! -L "$account_dir/$name" ]]; then
-            warn "$profile: $name is a REAL directory, not a link — left alone; reconcile it by hand and remove it, then rebuild (IMP-3358)"
+            warn "$profile: $name is a REAL directory, not a link — left alone; reconcile it by hand, then rebuild"
+            warn "        (docs/CLAUDE_ACCOUNTS.md, \"Repairing a split account dir\"; IMP-3358, DO-835)"
             continue
         fi
-        ln -sfnT "$entry" "$account_dir/$name"
+        # DO-835 (IMP-3358 recurring): never leave a moment with NO entry at the
+        # link path. This box's `ln` is uutils 0.8.0, whose `ln -sfnT` is unlink()
+        # then symlink() (strace). A live session that appends a transcript in that
+        # gap runs a recursive mkdir, which makes `projects` a REAL 0700 directory;
+        # this ln then fails EEXIST and `set -e` aborts the build. That is how
+        # personal-0's projects/ forked on 2026-10-11 and stayed forked a week
+        # (reproduced: a race harness forked it after 13 runs). The guard above
+        # cannot see it -- it checks BEFORE ln, and the directory is born inside ln.
+        #
+        # So a link that is already right is not touched at all -- every launch
+        # used to replace every one -- and a wrong one is built beside the target
+        # and rename(2)d over it, which is atomic. A directory that appears in
+        # between is not replaced: GNU mv -T (this box's mv) refuses a directory
+        # outright, and uutils mv -T refuses a non-empty one (an empty one it
+        # rmdirs first, which loses nothing). Either way the build warns and goes
+        # on rather than aborting.
+        if [[ -L "$account_dir/$name" && "$(readlink "$account_dir/$name")" == "$entry" ]]; then
+            continue
+        fi
+        tmp="$account_dir/.$name.relink.$$"
+        if ! { ln -sfnT "$entry" "$tmp" && mv -fT "$tmp" "$account_dir/$name"; }; then
+            rm -f "$tmp"
+            warn "$profile: could not relink $name — left as it was ('--check' says whether it is now a REAL directory)"
+        fi
     done
 
     # 2. Prune links whose source has since disappeared. A renamed source
@@ -1093,13 +1119,23 @@ build_one() {
 
 # IMP-3358: a DRY RUN over every account dir — report each shared entry that is a
 # real directory instead of a link, and any nested link inside it. Changes nothing;
-# exits 1 when it finds one, so it can gate the fix.
+# exits 1 when it finds one, so it can gate the fix. scripts/verify-tools.sh FAILs
+# on it, and --write-state below carries it to a shell's first prompt (DO-835).
 check_all() {
-    local d profile name entry rc=0 found=0
+    local d profile name entry rc=0 found=0 root_real tgt
     [[ -d "$ROOT" ]] || { warn "no account dirs at ${ROOT/#$HOME/\~}"; return 0; }
+    root_real="$(cd "$ROOT" && pwd -P)"
     shopt -s dotglob nullglob
     for d in "$ROOT"/*/; do
         profile="$(basename "$d")"
+        # A compat symlink a profile rename leaves behind (personal -> personal-0)
+        # is checked under the name it resolves to, as reconcile_all does. Walked
+        # as well, one fork read as two -- in verify-tools.sh and at the prompt,
+        # which is where it is acted on.
+        if [[ -L "${d%/}" ]]; then
+            tgt="$(cd "${d%/}" 2>/dev/null && pwd -P)" || tgt=""
+            [[ -n "$tgt" && "$tgt" == "$root_real"/* ]] && continue
+        fi
         for entry in "$GLOBAL_DIR"/*; do
             name="${entry##*/}"
             is_special "$name" && continue
@@ -1119,8 +1155,47 @@ check_all() {
     return $rc
 }
 
+# DO-835: the AMBIENT half of --check. A REAL-DIR used to reach only the terminal
+# that launched the build, so personal-0's fork went unseen for a week. This
+# records the verdict for a shell's first prompt to read (_account_dir_health_warn
+# in zsh/functions/system.sh), the way check-timer-health.sh --write-state does,
+# and writes OUTSIDE $ROOT: nothing here touches an account dir.
+#
+#   rc=0|1       what --check exited
+#   split=<n>    how many REAL-DIR lines it printed
+#   entries=<s>  their <profile>/<name>, space-separated, SANITISED -- a profile
+#                name is a directory name, and this text reaches a prompt
+#
+# Exits 0 whenever the verdict was recorded, split or not: the state file is the
+# channel, and a writer that fails while an account is split is an alarm nobody
+# reads. The temp file is made in the state dir itself, so the mv is a rename.
+health_state_dir() { printf '%s/account-dir-health\n' "${XDG_STATE_HOME:-$HOME/.local/state}"; }
+
+write_health_state() {
+    local dir out rc tmp split entries
+    dir="$(health_state_dir)"
+    mkdir -p "$dir" || { warn "cannot create $dir"; return 1; }
+    out="$(check_all 2>/dev/null)" && rc=0 || rc=$?
+    split="$(grep -c '^REAL-DIR ' <<<"$out" || true)"
+    is_uint "$split" || split=0
+    entries="$(sed -n 's/^REAL-DIR //p' <<<"$out" | tr '\n' ' ' | tr -d '\r\033' | cut -c1-200)"
+    entries="${entries% }"
+    tmp="$(mktemp -p "$dir" .status.XXXXXX)" || { warn "cannot write state in $dir"; return 1; }
+    printf 'rc=%s\nsplit=%s\nentries=%s\n' "$rc" "$split" "$entries" > "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+    mv -fT "$tmp" "$dir/status" || { rm -f "$tmp"; return 1; }
+}
+
 main() {
-    (( $# )) || { printf 'Usage: %s <profile> [<profile>...] | --all | --reconcile | --check\n' "$0" >&2; exit 2; }
+    (( $# )) || { printf 'Usage: %s <profile> [<profile>...] | --all | --reconcile | --check | --write-state\n' "$0" >&2; exit 2; }
+
+    if [[ "$1" == "--write-state" ]]; then
+        # Arity first, as check-timer-health.sh learned: reading only the first
+        # word let `--write-state --oops` pass as a normal run.
+        (( $# == 1 )) || { warn "--write-state takes no other argument"; exit 2; }
+        write_health_state
+        return $?
+    fi
 
     if [[ "$1" == "--reconcile" ]]; then
         reconcile_all

@@ -12,7 +12,7 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 #
-# EXIT CODE: non-zero if and only if one of the six ASSERTION sections FAILs:
+# EXIT CODE: non-zero if and only if one of the seven ASSERTION sections FAILs:
 # "herdr server environment hygiene" — forbidden variables in the running
 # server's environment, a teammux shim dir on its PATH, or session variables the
 # session provides that the server does not have — or "systemd user unit
@@ -40,6 +40,8 @@
 # The SIXTH, full report only, is "TMPDIR cleanup": TMPDIR redirected to
 # ~/.cache/tmp with no tmpdir-clean.timer enabled to age it out (DO-824), unless
 # TMPDIR_CLEAN_OFF says that is deliberate, which is reported and passes.
+# The SEVENTH is "Claude account dirs": a REAL directory where an account dir's
+# shared link belongs, i.e. an account that has forked from ~/.claude (DO-835).
 # Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
@@ -84,13 +86,14 @@ case "$#:${1:-}" in
 Usage: verify-tools.sh [--herdr]
   (no args)  full report: every tool this repo declares, plus the herdr checks
   --herdr    ONLY the herdr checks -- server env, unit enablement, unit
-             ExecStart, timer health, plugin deps under the server PATH, and
-             Claude Code wiring. For a machine that ran `./install --herdr` and
-             linked five files, not eighteen.
+             ExecStart, timer health, account dirs, plugin deps under the
+             server PATH, and Claude Code wiring. For a machine that ran
+             `./install --herdr` and linked five files, not eighteen.
 
 EXIT: non-zero if an assertion FAILs (server env, unit enablement, unit
-ExecStart, timer health, Claude Code wiring, and in the full report TMPDIR
-cleanup). Missing optional tools and mise drift stay informational.
+ExecStart, timer health, account dirs, Claude Code wiring, and in the full
+report TMPDIR cleanup). Missing optional tools and mise drift stay
+informational.
 USAGE
         exit 0 ;;
     *)
@@ -620,6 +623,43 @@ else
 fi
 
 echo ""
+echo -e "${BLUE}=== Claude account dirs: every shared entry is a link ===${NC}"
+# The SEVENTH assertion (see EXIT CODE in the header), both modes: the account
+# dirs are built by claude() in zsh/zshrc.herdr. A REAL directory where a shared
+# link belongs means that account has FORKED from ~/.claude -- its sessions write
+# transcripts and auto-memory where no other account reads them. personal-0 sat
+# that way for a week (DO-835) because the builder's warning reached only the
+# terminal that launched it. Delegated to the builder's read-only --check, which
+# changes nothing; the repair is by hand, so the remedy is a doc, not a command.
+account_dirs_failed=0
+acct_root="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
+acct_doc="$DOTFILES_ROOT/docs/CLAUDE_ACCOUNTS.md, \"Repairing a split account dir\""
+if [[ ! -d "$acct_root" ]]; then
+    echo "  ○ no account dirs at ${acct_root/#$HOME/\~} — nothing isolated yet; skipped"
+elif [[ ! -x "$DOTFILES_ROOT/scripts/claude-account-dirs.sh" ]]; then
+    echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/claude-account-dirs.sh missing — account dirs UNCHECKED"
+    account_dirs_failed=1
+else
+    acct_rc=0
+    acct_out="$("$DOTFILES_ROOT/scripts/claude-account-dirs.sh" --check 2>&1)" || acct_rc=$?
+    acct_split="$(sed -n 's/^REAL-DIR //p' <<<"$acct_out")"
+    if (( acct_rc == 0 )); then
+        echo -e "${GREEN}✓${NC} every shared entry in every account dir is a link"
+    elif [[ -n "$acct_split" ]]; then
+        while IFS= read -r acct_entry; do
+            echo -e "${RED}✗ FAIL:${NC} $acct_entry is a REAL directory — that account has split from ~/.claude/${acct_entry#*/}"
+        done <<<"$acct_split"
+        echo "    Its sessions write where no other account reads. Repair it by hand, never by"
+        echo "    deleting it: $acct_doc"
+        account_dirs_failed=1
+    else
+        # Non-zero with no REAL-DIR line is the checker failing, not a verdict.
+        echo -e "${RED}✗ FAIL:${NC} claude-account-dirs.sh --check exited $acct_rc without a verdict — account dirs UNCHECKED"
+        account_dirs_failed=1
+    fi
+fi
+
+echo ""
 # The SIXTH assertion (see EXIT CODE in the header), full report only: only
 # ./install links the TMPDIR redirect, never ./install --herdr. That redirect
 # moves temp files off the /tmp tmpfs and so takes away the cleanup /tmp got
@@ -1040,7 +1080,7 @@ echo ""
 # Non-zero on a herdr ASSERTION failure — see EXIT CODE in the header. Both
 # counters, not just the first: OR-ing them here is what keeps a green tick from
 # one section standing in for the other.
-if (( herdr_hygiene_failed || claude_wiring_failed || tmpdir_clean_failed )); then
+if (( herdr_hygiene_failed || claude_wiring_failed || tmpdir_clean_failed || account_dirs_failed )); then
     exit 1
 fi
 exit 0

@@ -150,7 +150,10 @@ backups_of(){ shopt -s nullglob; local g=("$1".superseded-*); shopt -u nullglob;
 
 run_sut() {
     [[ -n "${FHOME:-}" && -d "$FHOME" ]] || fatal "no fixture HOME — refusing to run against the real one"
-    OUT="$(env -u CLAUDE_ACCOUNT_DIRS_ROOT HOME="$FHOME" bash "$SUT" "$@" 2>&1)"
+    # XDG_STATE_HOME unset too: --write-state writes under it, and the tester's
+    # own is the file their live prompt reads. SUT_PATH_PREFIX puts a stub first.
+    OUT="$(env -u CLAUDE_ACCOUNT_DIRS_ROOT -u XDG_STATE_HOME HOME="$FHOME" \
+           PATH="${SUT_PATH_PREFIX:+$SUT_PATH_PREFIX:}$PATH" bash "$SUT" "$@" 2>&1)"
     RC=$?
 }
 
@@ -1526,6 +1529,7 @@ rm "$ACCOUNT_ROOT/p1/projects"; mkdir -p "$ACCOUNT_ROOT/p1/projects/keep-me"
 run_sut p1
 want_rc "a real directory does not fail the build" 0
 want_out "a real directory is refused loudly" "REAL directory"
+want_out "...and the refusal names the repair procedure" "Repairing a split account dir"
 if [[ ! -e "$ACCOUNT_ROOT/p1/projects/projects" ]]; then
     ok "no nested projects/projects link was created"
 else
@@ -1545,6 +1549,161 @@ run_sut --check
 want_rc "--check is clean once the directory is gone and the link rebuilt" 0
 want_out "--check says so" "nested projects/projects links: 0"
 
+#-----------------------------------------------------------------------------
+section "Z2. DO-835 (IMP-3358 recurring) — a rebuild never leaves the link path empty"
+#-----------------------------------------------------------------------------
+# uutils `ln -sfnT` is unlink() then symlink(); a session's recursive mkdir in
+# that gap made personal-0's projects/ a real directory on 2026-10-11. A right
+# link is therefore left untouched, and a wrong one is renamed over.
+new_home z2; mk_profile p1
+mkdir -p "$FHOME/.claude/projects"
+run_sut p1
+# The link's OWN mtime, pinned in the past: a replaced link is born now. Not the
+# inode — ext4 hands the freed inode straight back to the new link, so an
+# unlink+symlink keeps the number and an inode check passes the bug.
+touch -h -d @1000000000 "$ACCOUNT_ROOT/p1/projects"
+run_sut p1
+want_rc "a rebuild over right links succeeds" 0
+if [[ "$(stat -c %Y "$ACCOUNT_ROOT/p1/projects")" == 1000000000 ]]; then
+    ok "a link that is already right is not replaced"
+else
+    bad "a link that is already right was replaced (the unlink/symlink gap is back)"
+fi
+ln -sfnT "$FHOME/elsewhere" "$ACCOUNT_ROOT/p1/projects"
+run_sut p1
+want_rc "a rebuild over a wrong link succeeds" 0
+want_link "a wrong link is repointed at the store" \
+          "$ACCOUNT_ROOT/p1/projects" "$FHOME/.claude/projects"
+if compgen -G "$ACCOUNT_ROOT/p1/.*.relink.*" >/dev/null; then
+    bad "a .relink temp was left behind"
+else
+    ok "no .relink temp is left behind"
+fi
+
+# The rows above pass whether a WRONG link is replaced by rename or by the old
+# unlink+symlink, because nothing writes during the build. This stub is the
+# race, won every time: uutils `ln -sfnT SRC DST` on an existing DST is
+# unlink(DST) then symlink() (strace, 2026-10-18), and here a session's
+# recursive mkdir lands between the two. On a DST that does not exist there is
+# no unlink and no gap -- true of the real tool too -- so it passes through.
+STUB_REAL_LN="$(type -P ln)"; export STUB_REAL_LN
+RACE_BIN="$TMPROOT/race-bin"; mkdir -p "$RACE_BIN"
+cat > "$RACE_BIN/ln" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == -sfnT && ( -e "$3" || -L "$3" ) ]]; then
+    rm -f -- "$3"
+    mkdir -p -- "$3/-w-session" && printf '{}\n' > "$3/-w-session/t.jsonl"
+    printf "ln: failed to create symbolic link '%s': File exists\n" "$3" >&2
+    exit 1
+fi
+exec "$STUB_REAL_LN" "$@"
+STUB
+chmod +x "$RACE_BIN/ln"
+ln -sfnT "$FHOME/elsewhere" "$ACCOUNT_ROOT/p1/projects"
+SUT_PATH_PREFIX="$RACE_BIN" run_sut p1
+want_rc "a wrong link relinked while a session writes: the build succeeds" 0
+want_link "...and projects is still a link, never a real directory" \
+          "$ACCOUNT_ROOT/p1/projects" "$FHOME/.claude/projects"
+
+# And when a real directory DOES appear between the guard and the rename -- an
+# older builder's ln racing a session, during a deploy or two launches at once
+# -- the rename must refuse it, and the build must say so and go on.
+BORN_BIN="$TMPROOT/born-bin"; mkdir -p "$BORN_BIN"
+cat > "$BORN_BIN/ln" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == -sfnT && "$3" == */.*.relink.* ]]; then
+    base="${3##*/}"; base="${base#.}"; base="${base%.relink.*}"
+    final="${3%/*}/$base"
+    rm -f -- "$final"
+    mkdir -p -- "$final/-w-session" && printf '{}\n' > "$final/-w-session/t.jsonl"
+fi
+exec "$STUB_REAL_LN" "$@"
+STUB
+chmod +x "$BORN_BIN/ln"
+ln -sfnT "$FHOME/elsewhere" "$ACCOUNT_ROOT/p1/projects"
+SUT_PATH_PREFIX="$BORN_BIN" run_sut p1
+want_rc  "a directory born before the rename does not abort the build" 0
+want_out "...and the build says it could not relink" "could not relink projects"
+if [[ -f "$ACCOUNT_ROOT/p1/projects/-w-session/t.jsonl" && ! -L "$ACCOUNT_ROOT/p1/projects" ]]; then
+    ok "...and the directory, with the session's transcript, is left in place"
+else
+    bad "the directory born before the rename was replaced"
+fi
+if [[ -z "$(find "$ACCOUNT_ROOT/p1/projects" -maxdepth 1 -type l 2>/dev/null)" ]]; then
+    ok "...and no link was moved INSIDE it (mv -T)"
+else
+    bad "a link was moved inside the real directory — the IMP-3358 nesting shape"
+fi
+if compgen -G "$ACCOUNT_ROOT/p1/.*.relink.*" >/dev/null; then
+    bad "a failed relink left its .relink temp behind"
+else
+    ok "...and a failed relink leaves no .relink temp"
+fi
+
+#-----------------------------------------------------------------------------
+section "Z3. DO-835 — --check reports a fork once, and --write-state carries it"
+#-----------------------------------------------------------------------------
+new_home z3; mk_profile p1
+mkdir -p "$FHOME/.claude/projects"
+run_sut p1
+rm "$ACCOUNT_ROOT/p1/projects"; mkdir -p "$ACCOUNT_ROOT/p1/projects/keep"
+# A compat alias, as a profile rename leaves (personal -> personal-0), and one
+# that resolves OUTSIDE the root, which nothing else would ever look at.
+ln -s p1 "$ACCOUNT_ROOT/pa"
+mkdir -p "$TMPROOT/outside-z3/projects"; ln -s "$TMPROOT/outside-z3" "$ACCOUNT_ROOT/px"
+run_sut --check
+want_rc  "--check: a fork exits 1" 1
+want_out "--check names the fork under the account's own name" "REAL-DIR p1/projects"
+no_out   "...and not a second time under its compat alias" "REAL-DIR pa/projects"
+want_out "...while a link resolving outside the root is still checked" "REAL-DIR px/projects"
+rm -f "$ACCOUNT_ROOT/px"
+
+STATE="$FHOME/.local/state/account-dir-health/status"
+run_sut --write-state
+want_rc "--write-state exits 0 while an account is split" 0
+st="$(cat "$STATE" 2>/dev/null)"
+if [[ "$st" == *$'\nsplit=1\n'* && "$st" == rc=1* ]]; then
+    ok "--write-state records rc=1 and split=1"
+else
+    bad "--write-state did not record rc=1/split=1 — got: ${st//$'\n'/|}"
+fi
+if [[ "$st" == *$'\nentries=p1/projects'* ]]; then
+    ok "--write-state names the split entry"
+else
+    bad "--write-state did not name p1/projects — got: ${st//$'\n'/|}"
+fi
+root_names="$(cd "$ACCOUNT_ROOT" && shopt -s dotglob nullglob && printf '%s ' *)"
+if [[ "$root_names" == "p1 pa " ]]; then
+    ok "--write-state writes nothing under the account-dir root"
+else
+    bad "--write-state wrote under the account-dir root: $root_names"
+fi
+# A profile name is a directory name, and this text reaches a prompt.
+esc_dir="$ACCOUNT_ROOT/"$'q\033[31m'
+mkdir -p "$esc_dir/projects"
+run_sut --write-state
+if [[ "$(cat "$STATE")" != *$'\033'* ]]; then
+    ok "an escape in an account-dir name never reaches the state file"
+else
+    bad "an escape in an account-dir name reached the state file"
+fi
+rm -rf "$esc_dir"
+rm -rf "$ACCOUNT_ROOT/p1/projects"; run_sut p1
+run_sut --write-state
+if [[ "$(cat "$STATE")" == $'rc=0\nsplit=0\nentries=' ]]; then
+    ok "--write-state records a healed account as rc=0, split=0"
+else
+    bad "--write-state after the repair recorded: $(tr '\n' '|' < "$STATE")"
+fi
+rm -f "$STATE"
+run_sut --write-state extra
+want_rc "--write-state takes no other argument" 2
+if [[ ! -e "$STATE" ]]; then
+    ok "...and records nothing when refused"
+else
+    bad "--write-state extra still wrote the state file"
+fi
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -1560,7 +1719,7 @@ want_out "--check says so" "nested projects/projects links: 0"
 # whole point of it. A docs_claim row would demand it be rewritten to 159 today
 # and to something else next month, destroying the record to satisfy the guard.
 # scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=175
+EXPECTED_ROWS=200
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
