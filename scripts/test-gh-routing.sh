@@ -1174,8 +1174,8 @@ printf 'CLAUDE_TENANT_DEFAULT=home\nno_such_command_gh_route_row\n' > "$TEN/runt
 check "gh-route: a sourced file that errors at run time is exit 2, not an emptier table" \
       "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/runtime.zsh")" "2|"
 ln -s "$TEN/gone.zsh" "$TEN/dangling.zsh"
-check "gh-route: a tenants symlink whose target is gone is exit 2, not 'no tenants file'" \
-      "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/dangling.zsh")" "2|"
+check "gh-route: a tenants symlink whose target is gone is exit 2 and named, not 'no tenants file'" \
+      "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/dangling.zsh")|$(groute_err "$HOOKHOME" "$NOTREPO" "$TEN/dangling.zsh" | grep -c 'cannot read .*dangling.zsh')" "2||1"
 check "gh-route: an inherited GH_ACCOUNT_DEFAULT_DIR does not become the answer" \
       "$(env -i PATH=/usr/bin:/bin HOME="$GR_NOGATE" CLAUDE_TENANTS_FILE=/nonexistent GH_ACCOUNT_DEFAULT_DIR=/leaked \
            "$GHROUTE" "$NOTREPO" 2>/dev/null | jq -r .dir)" ""
