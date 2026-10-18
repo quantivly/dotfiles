@@ -41,7 +41,8 @@
 # ~/.cache/tmp with no tmpdir-clean.timer enabled to age it out (DO-824), unless
 # TMPDIR_CLEAN_OFF says that is deliberate, which is reported and passes.
 # The SEVENTH is "Claude account dirs": a REAL directory where an account dir's
-# shared link belongs, i.e. an account that has forked from ~/.claude (DO-835).
+# shared link to data belongs, i.e. an account that has forked from ~/.claude
+# (DO-835); a real directory at a name that carries no data is only a ⚠.
 # Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
@@ -623,7 +624,7 @@ else
 fi
 
 echo ""
-echo -e "${BLUE}=== Claude account dirs: every shared entry is a link ===${NC}"
+echo -e "${BLUE}=== Claude account dirs: every shared entry that carries data is a link ===${NC}"
 # The SEVENTH assertion (see EXIT CODE in the header), both modes: the account
 # dirs are built by claude() in zsh/zshrc.herdr. A REAL directory where a shared
 # link belongs means that account has FORKED from ~/.claude -- its sessions write
@@ -631,6 +632,12 @@ echo -e "${BLUE}=== Claude account dirs: every shared entry is a link ===${NC}"
 # that way for a week (DO-835) because the builder's warning reached only the
 # terminal that launched it. Delegated to the builder's read-only --check, which
 # changes nothing; the repair is by hand, so the remedy is a doc, not a command.
+#
+# Only an entry that CARRIES DATA fails (REAL-DIR; the list is
+# scripts/claude-account-dirs.data-entries). A real directory at any other shared
+# name (LOCAL-DIR) is Claude Code's own per-config-dir state -- telemetry/,
+# chrome/ -- which one session on the shared ~/.claude creates there too. It is a
+# ⚠ that takes no part in the exit code; failing on it would be permanent.
 account_dirs_failed=0
 acct_root="${CLAUDE_ACCOUNT_DIRS_ROOT:-$HOME/.local/state/claude-account-dirs}"
 acct_doc="$DOTFILES_ROOT/docs/CLAUDE_ACCOUNTS.md, \"Repairing a split account dir\""
@@ -643,8 +650,14 @@ else
     acct_rc=0
     acct_out="$("$DOTFILES_ROOT/scripts/claude-account-dirs.sh" --check 2>&1)" || acct_rc=$?
     acct_split="$(sed -n 's/^REAL-DIR //p' <<<"$acct_out")"
+    acct_local="$(sed -n 's/^LOCAL-DIR //p' <<<"$acct_out")"
+    if [[ -n "$acct_local" ]]; then
+        while IFS= read -r acct_entry; do
+            echo -e "${YELLOW}⚠${NC} $acct_entry is a real directory, not a link — informational: that name carries no shared data"
+        done <<<"$acct_local"
+    fi
     if (( acct_rc == 0 )); then
-        echo -e "${GREEN}✓${NC} every shared entry in every account dir is a link"
+        echo -e "${GREEN}✓${NC} every shared entry that carries data is a link in every account dir"
     elif [[ -n "$acct_split" ]]; then
         while IFS= read -r acct_entry; do
             echo -e "${RED}✗ FAIL:${NC} $acct_entry is a REAL directory — that account has split from ~/.claude/${acct_entry#*/}"

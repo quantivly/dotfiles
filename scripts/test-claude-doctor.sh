@@ -274,7 +274,11 @@ run_doctor() {
     # FIRST: env takes the first word after an assignment as the command (127).
     if [[ -n "${LKEY:-}" ]]; then pre=("LINEAR_API_KEY=$LKEY"); else pre=(-u LINEAR_API_KEY); fi
     if [[ -n "${CFGDIR:-}" ]]; then pre+=("CLAUDE_CONFIG_DIR=$CFGDIR"); else pre=(-u CLAUDE_CONFIG_DIR "${pre[@]}"); fi
-    OUT="$(env "${pre[@]}" HOME="$FHOME" \
+    # DOTFILES_ROOT is THIS tree, so the doctor reads this tree's
+    # scripts/claude-account-dirs.data-entries (DO-835) -- system.sh would
+    # otherwise default it to the fixture's own, empty, ~/.dotfiles. A row that
+    # wants another list says so with DROOT.
+    OUT="$(env "${pre[@]}" HOME="$FHOME" DOTFILES_ROOT="${DROOT:-$DOTFILES}" \
               CLAUDE_DOCTOR_PROC_ROOT="${PROC_ROOT:-$FHOME/procfix}" \
               CLAUTH_STUB_LOG="$CLAUTH_LOG" \
               CLAUDE_SETTINGS_REQUIRE="${REQUIRE:-}" \
@@ -1452,6 +1456,33 @@ mkdir -p "$FHOME/.local/state/claude-account-dirs/p1/projects"
 run_doctor
 want_out "an account dir that stopped sharing projects/ is caught" "not sharing projects"
 want_rc  "and fails the run"                                       1
+# DO-835: the builder REFUSES a real directory by design, so "re-run the builder"
+# for one sent the reader round in a circle. It names the repair instead.
+want_out "a real projects/ is named a split, with the repair procedure" "Repairing a split account dir"
+no_out   "...and not 'Re-run' the builder, which refuses it" "Re-run: ~/.dotfiles/scripts/claude-account-dirs.sh p1"
+# A MISSING link is what re-running the builder does fix.
+new_home r9b; write_cred '.'
+mk_account_dir p1 linked
+rm -f "$FHOME/.local/state/claude-account-dirs/p1/projects"
+run_doctor
+want_out "a missing projects link is caught" "not sharing projects"
+want_out "...and re-running the builder is the remedy" "Re-run: ~/.dotfiles/scripts/claude-account-dirs.sh p1"
+no_out   "...not the hand repair" "Repairing a split account dir"
+# ONE definition of the entries that carry data, read from the file the
+# builder's --check reads. A tree whose list names only plugins/ must make the
+# doctor ignore a real projects/ -- or the doctor kept a copy of its own.
+DLIST="$TMPROOT/droot"; mkdir -p "$DLIST/scripts"
+printf '# a fixture list\nplugins\n' > "$DLIST/scripts/claude-account-dirs.data-entries"
+new_home r9c; write_cred '.'
+mk_account_dir p1 linked
+rm -f "$FHOME/.local/state/claude-account-dirs/p1/projects" "$FHOME/.local/state/claude-account-dirs/p1/plugins"
+mkdir -p "$FHOME/.local/state/claude-account-dirs/p1/projects" "$FHOME/.local/state/claude-account-dirs/p1/plugins"
+DROOT="$DLIST" run_doctor
+want_out "the doctor reads which entries carry data from the builder's list" "not sharing plugins"
+no_out   "...so an entry that list leaves out is not reported" "not sharing projects"
+# ...and a list it cannot read is "could not ask", never a clean pass.
+DROOT="$TMPROOT/no-such-root" run_doctor
+want_out "an unreadable list: sharing is NOT CHECKED, and said so" "is NOT CHECKED"
 
 # A machine with no account dirs is a legitimate state, not a fault -- otherwise
 # this section is the permanently-red checker all over again.
@@ -3676,7 +3707,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=527
+EXPECTED_ROWS=535
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

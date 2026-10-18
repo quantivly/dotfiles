@@ -92,7 +92,8 @@
 # Usage:
 #   scripts/claude-account-dirs.sh <profile> [<profile>...]
 #   scripts/claude-account-dirs.sh --all
-#   scripts/claude-account-dirs.sh --check         read-only; exit 1 on a REAL-DIR
+#   scripts/claude-account-dirs.sh --check         read-only; exit 1 on a REAL-DIR,
+#                                                  2 when it could not check
 #   scripts/claude-account-dirs.sh --write-state   --check's verdict, for the prompt
 
 set -euo pipefail
@@ -116,6 +117,40 @@ die()  { warn "$*"; exit 1; }
 is_special() {
     local n
     for n in "${SPECIAL[@]}"; do [[ "$1" == "$n" ]] && return 0; done
+    return 1
+}
+
+# DO-835: which shared entries CARRY DATA, so that a real directory at that name
+# is a split from ~/.claude rather than Claude Code's own per-config-dir state
+# (state/, telemetry/, chrome/). ONE definition, in a file beside this script,
+# which claude-doctor reads too; the file says why. Located from this script's
+# own path, so a worktree's builder reads that worktree's list.
+case "${BASH_SOURCE[0]}" in
+    */*) DATA_ENTRIES_FILE="${BASH_SOURCE[0]%/*}/claude-account-dirs.data-entries" ;;
+    *)   DATA_ENTRIES_FILE="./claude-account-dirs.data-entries" ;;
+esac
+DATA_ENTRIES=()
+DATA_ENTRIES_OK=0
+
+# Builtins only: this runs at every launch.
+load_data_entries() {
+    local n
+    [[ -f "$DATA_ENTRIES_FILE" && -r "$DATA_ENTRIES_FILE" ]] || return 1
+    while IFS= read -r n || [[ -n "$n" ]]; do
+        [[ -z "$n" || "$n" == \#* ]] && continue
+        DATA_ENTRIES+=("$n")
+    done < "$DATA_ENTRIES_FILE"
+    (( ${#DATA_ENTRIES[@]} )) || return 1
+    DATA_ENTRIES_OK=1
+}
+
+# With no list, EVERY entry is treated as carrying data: the builder then warns
+# about every real directory, as it did before the list existed -- loud rather
+# than quiet. check_all does not get here without a list; it exits 2 instead.
+is_data_entry() {
+    local n
+    (( DATA_ENTRIES_OK )) || return 0
+    for n in "${DATA_ENTRIES[@]}"; do [[ "$1" == "$n" ]] && return 0; done
     return 1
 }
 
@@ -969,7 +1004,7 @@ reconcile_all() {
 }
 
 build_one() {
-    local profile="$1" pdir account_dir name entry target tmp
+    local profile="$1" pdir account_dir name entry target tmp ts bak pid
     pdir="$PROFILES_DIR/$profile"
     [[ -d "$pdir" ]] || die "no clauth profile '$profile' at ${pdir/#$HOME/\~}"
     [[ -f "$pdir/credentials.json" ]] \
@@ -992,9 +1027,18 @@ build_one() {
         # must reconcile by hand — never something this script deletes — so refuse
         # it loudly and leave it alone; `-T` makes the destination a file, so a
         # directory can never be entered again.
+        #
+        # Only an entry that CARRIES DATA is a split worth a warning at every
+        # launch (DO-835). A real state/, telemetry/ or chrome/ is Claude Code's
+        # own per-config-dir state, and appears in ~/.claude too as soon as one
+        # session runs there; warning about it would be advice to "reconcile by
+        # hand" an empty directory, forever. It is still left alone, and --check
+        # still names it, as LOCAL-DIR.
         if [[ -d "$account_dir/$name" && ! -L "$account_dir/$name" ]]; then
-            warn "$profile: $name is a REAL directory, not a link — left alone; reconcile it by hand, then rebuild"
-            warn "        (docs/CLAUDE_ACCOUNTS.md, \"Repairing a split account dir\"; IMP-3358, DO-835)"
+            if is_data_entry "$name"; then
+                warn "$profile: $name is a REAL directory, not a link — left alone; reconcile it by hand, then rebuild"
+                warn "        (docs/CLAUDE_ACCOUNTS.md, \"Repairing a split account dir\"; IMP-3358, DO-835)"
+            fi
             continue
         fi
         # DO-835 (IMP-3358 recurring): never leave a moment with NO entry at the
@@ -1011,15 +1055,51 @@ build_one() {
         # and rename(2)d over it, which is atomic. A directory that appears in
         # between is not replaced: GNU mv -T (this box's mv) refuses a directory
         # outright, and uutils mv -T refuses a non-empty one (an empty one it
-        # rmdirs first, which loses nothing). Either way the build warns and goes
-        # on rather than aborting.
+        # rmdirs first, which loses nothing).
         if [[ -L "$account_dir/$name" && "$(readlink "$account_dir/$name")" == "$entry" ]]; then
             continue
         fi
-        tmp="$account_dir/.$name.relink.$$"
+        # A real FILE here is the account's own copy -- Claude Code writes some
+        # files atomically, and a rename replaces the link (quantivly-4's
+        # .last-update-result.json, 2026-10-15). The rename below destroys it, as
+        # the `ln` before it always did, so it is copied aside first unless it is
+        # byte-identical to the shared one, which loses nothing. If it cannot be
+        # copied it is not destroyed either: left alone, said so.
+        if [[ -f "$account_dir/$name" && ! -L "$account_dir/$name" ]] \
+           && ! cmp -s -- "$account_dir/$name" "$entry" 2>/dev/null; then
+            printf -v ts '%(%Y%m%d-%H%M%S)T' -1
+            bak="$account_dir/$name.pre-link.$ts-$$"
+            if cp -p -- "$account_dir/$name" "$bak" 2>/dev/null; then
+                warn "$profile: $name was a real file, not a link — kept it as ${bak##*/} and linked ~/.claude's"
+            else
+                warn "$profile: $name is a real file and could not be copied aside — left alone"
+                continue
+            fi
+        fi
+        # At most 48 characters of the name: `.<name>.relink.<pid>` must fit in
+        # NAME_MAX (255 bytes), and a 245-character entry overflowed it, so the
+        # relink failed with ENAMETOOLONG on a name the plain `ln` used to handle.
+        # 48 characters is at most 192 bytes in UTF-8. Nothing else reads the
+        # name, and one build relinks one entry at a time.
+        tmp="$account_dir/.${name:0:48}.relink.$$"
         if ! { ln -sfnT "$entry" "$tmp" && mv -fT "$tmp" "$account_dir/$name"; }; then
-            rm -f "$tmp"
-            warn "$profile: could not relink $name — left as it was ('--check' says whether it is now a REAL directory)"
+            # `|| true`: under `set -e` a failing cleanup aborted the build
+            # (ENAMETOOLONG, above) before the decision below could be made.
+            rm -f -- "$tmp" 2>/dev/null || true
+            # The ONE failure that is safe to go on from: a real directory was
+            # born at the path between the guard and the rename -- a session's
+            # recursive mkdir racing an older builder, or two launches at once. It
+            # is left alone and --check reports it.
+            if [[ -d "$account_dir/$name" && ! -L "$account_dir/$name" ]]; then
+                warn "$profile: could not relink $name — a REAL directory appeared there; left alone ('--check' reports it)"
+                continue
+            fi
+            # Anything else -- EIO, ENOSPC, EACCES -- leaves the path wrong or
+            # MISSING, and a session launched into it has Claude Code recreate
+            # `projects` as the very fork this guards against. So the build fails,
+            # as it did before DO-835: claude() then falls back to the shared
+            # ~/.claude with a warning, and hspawn refuses.
+            die "$profile: could not relink $name (the error is above) — refusing to launch into a half-built account dir"
         fi
     done
 
@@ -1031,6 +1111,21 @@ build_one() {
         name="${entry##*/}"
         is_special "$name" && continue
         [[ -L "$entry" ]] || continue
+        # A relink temp from a build KILLED between its `ln` and its `mv`. It
+        # points into ~/.claude at something that exists, so the dangling-link
+        # prune below never removes it. Liveness, not age: another launch's
+        # in-flight temp can be older than this build, and removing it makes that
+        # build's rename fail -- which now fails the build. A live pid, ours
+        # included, is left alone; one owned by another user answers EPERM and is
+        # left alone too.
+        if [[ "$name" == .*.relink.* ]]; then
+            pid="${name##*.relink.}"
+            if is_uint "$pid" && ! kill -0 "$pid" 2>/dev/null; then
+                rm -f -- "$entry" 2>/dev/null || true
+                warn "$profile: removed '$name', a relink temp a killed build left behind"
+            fi
+            continue
+        fi
         target="$(readlink "$entry")"
         [[ "$target" == "$GLOBAL_DIR/"* ]] || continue
         [[ -e "$target" ]] && continue
@@ -1121,9 +1216,21 @@ build_one() {
 # real directory instead of a link, and any nested link inside it. Changes nothing;
 # exits 1 when it finds one, so it can gate the fix. scripts/verify-tools.sh FAILs
 # on it, and --write-state below carries it to a shell's first prompt (DO-835).
+#
+#   REAL-DIR  <profile>/<name>   an entry that CARRIES DATA (DATA_ENTRIES_FILE) is
+#                                a real directory: that account has split. Exit 1.
+#   LOCAL-DIR <profile>/<name>   any other shared name is: Claude Code's own
+#                                per-config-dir state. Informational, exit 0.
+#
+# Exit 2 when the list cannot be read: which entries carry data is then unknown,
+# and guessing either way is a verdict this could not reach.
 check_all() {
-    local d profile name entry rc=0 found=0 root_real tgt
+    local d profile name entry rc=0 found=0 local_n=0 root_real tgt
     [[ -d "$ROOT" ]] || { warn "no account dirs at ${ROOT/#$HOME/\~}"; return 0; }
+    (( DATA_ENTRIES_OK )) || {
+        warn "cannot read ${DATA_ENTRIES_FILE/#$HOME/\~} — which shared entries carry data is unknown; nothing checked"
+        return 2
+    }
     root_real="$(cd "$ROOT" && pwd -P)"
     shopt -s dotglob nullglob
     for d in "$ROOT"/*/; do
@@ -1136,22 +1243,39 @@ check_all() {
             tgt="$(cd "${d%/}" 2>/dev/null && pwd -P)" || tgt=""
             [[ -n "$tgt" && "$tgt" == "$root_real"/* ]] && continue
         fi
+        # A RETIRED account dir is skipped exactly as reconcile_all skips it, and
+        # deliberately: it is a tombstone no session launches into, so it cannot
+        # be gaining data, and whatever it held was decided when it was retired.
+        # Reported, it would be a FAIL and a prompt line nobody can clear short of
+        # deleting the tombstone. A store under the full name makes it a real
+        # profile again, and then it is checked.
+        if [[ "$profile" == *.retired-* && ! -d "$PROFILES_DIR/$profile" ]]; then
+            continue
+        fi
         for entry in "$GLOBAL_DIR"/*; do
             name="${entry##*/}"
             is_special "$name" && continue
             found=1
-            if [[ -d "$d$name" && ! -L "$d$name" ]]; then
-                printf 'REAL-DIR %s/%s\n' "$profile" "$name"
-                rc=1
-                if [[ -L "$d$name/$name" ]]; then
-                    printf 'NESTED   %s/%s/%s -> %s\n' "$profile" "$name" "$name" "$(readlink "$d$name/$name")"
-                fi
+            [[ -d "$d$name" && ! -L "$d$name" ]] || continue
+            if ! is_data_entry "$name"; then
+                printf 'LOCAL-DIR %s/%s\n' "$profile" "$name"
+                local_n=$(( local_n + 1 ))
+                continue
+            fi
+            printf 'REAL-DIR %s/%s\n' "$profile" "$name"
+            rc=1
+            if [[ -L "$d$name/$name" ]]; then
+                printf 'NESTED   %s/%s/%s -> %s\n' "$profile" "$name" "$name" "$(readlink "$d$name/$name")"
             fi
         done
     done
     shopt -u dotglob nullglob
     (( found )) || warn "no shared entries to check"
-    (( rc == 0 )) && printf 'OK: every shared entry in every account dir is a link (nested projects/projects links: 0)\n'
+    if (( rc == 0 )); then
+        printf 'OK: every shared entry that carries data is a link in every account dir (nested projects/projects links: 0)\n'
+        (( local_n == 0 )) || printf 'NOTE: %d LOCAL-DIR above: real, but at names that carry no shared data (%s) — informational\n' \
+            "$local_n" "${DATA_ENTRIES_FILE##*/}"
+    fi
     return $rc
 }
 
@@ -1161,7 +1285,7 @@ check_all() {
 # in zsh/functions/system.sh), the way check-timer-health.sh --write-state does,
 # and writes OUTSIDE $ROOT: nothing here touches an account dir.
 #
-#   rc=0|1       what --check exited
+#   rc=0|1|2     what --check exited (the prompt warns on 1 only)
 #   split=<n>    how many REAL-DIR lines it printed
 #   entries=<s>  their <profile>/<name>, space-separated, SANITISED -- a profile
 #                name is a directory name, and this text reaches a prompt
@@ -1178,7 +1302,13 @@ write_health_state() {
     out="$(check_all 2>/dev/null)" && rc=0 || rc=$?
     split="$(grep -c '^REAL-DIR ' <<<"$out" || true)"
     is_uint "$split" || split=0
-    entries="$(sed -n 's/^REAL-DIR //p' <<<"$out" | tr '\n' ' ' | tr -d '\r\033' | cut -c1-200)"
+    # Every control byte goes, not only ESC and CR: C0 and DEL, and C1 as
+    # 0x80-0x9f -- which covers the 8-bit CSI 0x9b (a terminal in an 8-bit mode
+    # reads it as ESC [) and the UTF-8 form of every C1 control, \xc2\x80 to
+    # \xc2\x9f, whose second byte is in that range. In the C locale `tr` works on
+    # bytes, so the range is a range of bytes. The price: a non-ASCII name whose
+    # UTF-8 holds a byte in that range is mangled in this one warning line.
+    entries="$(sed -n 's/^REAL-DIR //p' <<<"$out" | tr '\n' ' ' | LC_ALL=C tr -d '\000-\037\177-\237' | cut -c1-200)"
     entries="${entries% }"
     tmp="$(mktemp -p "$dir" .status.XXXXXX)" || { warn "cannot write state in $dir"; return 1; }
     printf 'rc=%s\nsplit=%s\nentries=%s\n' "$rc" "$split" "$entries" > "$tmp" \
@@ -1188,6 +1318,10 @@ write_health_state() {
 
 main() {
     (( $# )) || { printf 'Usage: %s <profile> [<profile>...] | --all | --reconcile | --check | --write-state\n' "$0" >&2; exit 2; }
+
+    # Not fatal here: a build without it warns about every real directory (see
+    # is_data_entry), and check_all refuses with exit 2.
+    load_data_entries || true
 
     if [[ "$1" == "--write-state" ]]; then
         # Arity first, as check-timer-health.sh learned: reading only the first

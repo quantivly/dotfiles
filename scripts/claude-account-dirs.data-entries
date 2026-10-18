@@ -1,0 +1,22 @@
+# The shared entries of an account dir that CARRY DATA other accounts read:
+# transcripts and auto-memory (projects), plugins, skills, hooks and the
+# user-level CLAUDE.md. One name per line; a line starting with `#` is a comment.
+#
+# ONE DEFINITION, two readers, so they cannot disagree about what a split is:
+#   scripts/claude-account-dirs.sh  a REAL directory at one of these names is a
+#                                   split (REAL-DIR, --check exits 1, verify-tools
+#                                   FAILs, the first prompt warns); a real
+#                                   directory at any OTHER shared name is
+#                                   LOCAL-DIR, informational
+#   zsh/functions/claude.sh         claude-doctor's pooled-sharing invariant
+#
+# Why a list rather than "every directory": Claude Code makes some directories
+# per config dir (state/, telemetry/, chrome/ are real in account dirs today).
+# One session on the shared ~/.claude (CLAUDE_ISOLATION_OFF=1, the wrapper's
+# fallback, `command claude`, an IDE extension) creates the same names there,
+# and every account dir would then read as split, permanently, over empty dirs.
+projects
+plugins
+skills
+hooks
+CLAUDE.md

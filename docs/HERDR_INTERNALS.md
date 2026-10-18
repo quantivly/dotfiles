@@ -551,7 +551,7 @@ Gotchas, in the order they bite:
   wirer writes the statusLine into that same file a few lines earlier. The wirer re-reads the
   status afterwards rather than trusting exit 0, and an older herdr with no `integration`
   subcommand is a ⚠, not a ✗: upgrading herdr is not a fix a report can ask for.
-- **State table:** `scripts/test-herdr-modular.sh` (261 checks, in CI as `herdr-modular-test`) —
+- **State table:** `scripts/test-herdr-modular.sh` (272 checks, in CI as `herdr-modular-test`) —
   the two commands a modular adopter runs, hermetic via a recording `herdr` stub and fake `$HOME`.
   Two defects in the suite itself are worth more than most of its rows:
   - **A row that cannot reach the branch it names is unfailable.** The row asserting `--herdr`
