@@ -202,7 +202,7 @@ for pair in "logind/lid-on-power.conf:etc/systemd/logind.conf.d/lid-on-power.con
   check "/$dst is a byte-identical copy of $src" \
     "$(cmp -s "$ROOT/$src" "$P/$dst" && echo same || echo differs)" same
 done
-check "each is installed root-owned 0644" "$(logged_re '^sudo install -m 644 -o root -g root [^ ]+ [^ ]+$')" 3
+check "each is installed root-owned 0644" "$(logged_re '^sudo install -D -m 644 -o root -g root [^ ]+ [^ ]+$')" 3
 check "the system manager re-reads its units" "$(logged 'sudo systemctl daemon-reload')" 1
 check "udevd re-reads its rules" "$(logged 'sudo udevadm control --reload')" 1
 check "logind is RELOADED, and never restarted (a restart ends every session)" \

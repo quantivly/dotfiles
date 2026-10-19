@@ -157,11 +157,12 @@ if ! systemd-analyze verify --man=no "$UNIT_SRC" >/dev/null 2>&1; then
 fi
 
 log INFO "Installing root-owned files"
-sudo install -d -m 755 -o root -g root "${PREFIX}/etc/systemd/logind.conf.d" \
-  "${PREFIX}/etc/udev/rules.d" "${PREFIX}/etc/systemd/system"
-sudo install -m 644 -o root -g root "$LOGIND_SRC" "$LOGIND_DST"
-sudo install -m 644 -o root -g root "$RULE_SRC"   "$RULE_DST"
-sudo install -m 644 -o root -g root "$UNIT_SRC"   "$UNIT_DST"
+# -D creates a missing parent (logind.conf.d does not exist on a fresh machine)
+# and leaves an existing one alone, where `install -d -m 755 -o root` would
+# chmod and chown /etc/systemd/system itself.
+sudo install -D -m 644 -o root -g root "$LOGIND_SRC" "$LOGIND_DST"
+sudo install -D -m 644 -o root -g root "$RULE_SRC"   "$RULE_DST"
+sudo install -D -m 644 -o root -g root "$UNIT_SRC"   "$UNIT_DST"
 log SUCCESS "installed $LOGIND_DST, $RULE_DST, $UNIT_DST"
 
 sudo systemctl daemon-reload
