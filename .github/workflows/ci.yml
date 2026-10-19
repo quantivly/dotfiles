@@ -348,6 +348,21 @@ jobs:
       - name: Run the VPN fail-fast state table
         run: ./scripts/test-vpn-failfast.sh
 
+  dock-lid-test:
+    name: Dock Lid Guard State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # No extra packages: udevadm and systemd-analyze ship with systemd on
+      # ubuntu-latest, and the last section needs the REAL ones (`udevadm
+      # verify` is systemd >= 254). Every privileged call goes through
+      # recording stubs at the front of PATH — this runner has passwordless
+      # sudo and a live logind, which is exactly why they have to come first.
+      - name: Run the dock lid guard state table
+        run: ./scripts/test-dock-lid.sh
+
       # Deliberately ONE step. The reporter's DST behaviour was briefly asserted
       # here as well, and that was decoration: scripts/test-vpn-failfast.sh
       # already makes exactly those assertions against exactly that fixture, so

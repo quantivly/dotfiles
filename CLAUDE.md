@@ -676,6 +676,7 @@ scripts/verify-tools.sh --herdr # The one check a modular herdr adopter runs
 backup-doctor        # START HERE for backups. Every backup-* : see Backup & Restore
 audit-status         # Tripwire armed, on, recording? Every audit-* : see Audit Tripwire
 vpn-doctor           # VPN chain health. Every vpn-* : see the VPN section
+dock-lid-setup       # Dock lid guards, COPIED to /etc; reloads logind, NEVER restarts it (--check)
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)

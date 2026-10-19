@@ -1,0 +1,36 @@
+# udev/90-dock-lid-holdoff.rules
+# ==============================
+#
+# Two rules that keep a lid closed around a Thunderbolt dock plug-in from
+# suspending into a half-enumerated dock. On 2026-10-19 that suspend hung the
+# laptop until a forced power-off.
+#
+# 1. HOLDOFF. Every USB-C partner add starts one instance of
+#    dock-lid-holdoff@.service, which blocks lid handling for 30 s. The partner
+#    device is the EARLIEST signal a plug-in gives: measured 1.8 s before logind
+#    reports external power and 3 s before the dock's Thunderbolt link. The
+#    instance is named <kernel name>-<SEQNUM>, so every plug-in gets a fresh
+#    window. If SEQNUM were ever missing the name is still valid
+#    ("port1-partner-") and only the per-plug-in freshness is lost.
+#    `add` ONLY: partners also get `change` uevents, and matching those would
+#    start a fresh 30 s instance on every one of them.
+#
+# 2. RECHECK ON POWER LOSS. logind/lid-on-power.conf makes a lid closed on
+#    external power do nothing. But logind does not watch power supplies, so
+#    pulling the charger with the lid already closed would leave the laptop
+#    awake until some unrelated logind event. A Ping to logind is such an event:
+#    logind re-checks a closed lid after every event it handles. It pings TWICE,
+#    now and 5 s later, because logind counts as "on battery" only a battery
+#    whose status reads Discharging, and the ACPI battery driver caches that
+#    status for 1 s — the first ping can still see "Not charging", and a status
+#    flip may come with no uevent of its own. The delayed ping runs from a
+#    transient systemd timer, since udev kills whatever outlives the event.
+#
+# SOURCE OF TRUTH. Copied root-owned to /etc/udev/rules.d/ by
+# scripts/setup-dock-lid.sh (never symlinked -- root's udevd reads it). Editing
+# this copy changes nothing until `dock-lid-setup` is re-run, and
+# `dock-lid-setup --check` reports the difference as drift.
+# scripts/test-dock-lid.sh asserts both rule lines exactly: udevadm verify
+# accepts a rule that never fires (a missing TAG+="systemd", a wrong unit name).
+ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="dock-lid-holdoff@%k-$env{SEQNUM}.service"
+ACTION=="change", SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="Mains|USB", ENV{POWER_SUPPLY_ONLINE}=="0", RUN+="/usr/bin/busctl call --timeout=3 org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping", RUN+="/usr/bin/systemd-run --no-block --quiet --collect --on-active=5 /usr/bin/busctl call --timeout=3 org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping"
