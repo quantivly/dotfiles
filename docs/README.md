@@ -23,6 +23,7 @@ Two audiences run through the whole tree, and mixing them is what made `CLAUDE.m
 | [TOOL_VERSION_UPDATES.md](TOOL_VERSION_UPDATES.md) | how tool versions are pinned and updated — **plus** the maintainer's record of the mise symlink and the silent drift it prevents | guide + record |
 | [GNOME_CONFIGURATION_GUIDE.md](GNOME_CONFIGURATION_GUIDE.md) | the curated GNOME desktop: what is set, how to customise it, Wayland notes — **plus** the maintainer's record of the apply mechanism and its one silent override trap | guide + record |
 | [SHELL_LAYOUT.md](SHELL_LAYOUT.md) | the zsh layer: the two tool-availability patterns with examples, and the full annotated load order | record |
+| [DOCK_LID_SUSPEND.md](DOCK_LID_SUSPEND.md) | why a lid closed while the Thunderbolt dock connects no longer suspends into it: the two root guards, installing and checking them, what they do not cover, and the measured plug-in timings behind them | guide + record |
 
 ## Terminal and multiplexer
 

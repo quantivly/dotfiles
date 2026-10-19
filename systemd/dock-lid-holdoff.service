@@ -1,0 +1,19 @@
+# systemd/dock-lid-holdoff.service — a SYSTEM unit, not linked by ./install.
+#
+# Pulled in by udev/90-dock-lid-holdoff.rules when a USB-C device is plugged in.
+# Holds a BLOCK lock on handle-lid-switch for 30 s, the same window logind's own
+# HoldoffTimeoutSec= default gives docks after boot and resume. While it is held
+# logind ignores the lid; when it lapses logind re-checks a lid that is still
+# closed and acts on it then: ignore if docked or on power, suspend on battery.
+#
+# `block`, never `delay`: a delay lock would let the suspend go ahead 30 s later
+# even if the dock had come up in the meantime.
+#
+# Copied root-owned to /etc/systemd/system/ by scripts/setup-dock-lid.sh.
+# Why: docs/DOCK_LID_SUSPEND.md.
+[Unit]
+Description=Hold off lid-switch handling while a USB-C device connects
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/systemd-inhibit --what=handle-lid-switch --mode=block --who=dock-lid-holdoff --why="USB-C device connecting" /usr/bin/sleep 30

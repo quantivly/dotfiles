@@ -3749,3 +3749,27 @@ vpn-sweeps() {
   "${root}/scripts/vpn-log-report.py" "$@" 2>&1 | "${root}/scripts/redact-secrets.sh"
   return "${pipestatus[1]}"
 }
+
+# =============================================================================
+# Dock Lid Guard Functions
+# =============================================================================
+# A lid closed within ~2 s of plugging into the Thunderbolt dock suspended the
+# laptop while the dock was still enumerating, and that suspend hung it until a
+# forced power-off (2026-10-19). Two root-owned guards close the window: a
+# logind drop-in (lid on external power does nothing) and a udev rule + unit
+# that blocks lid handling for 30 s after any USB-C plug-in.
+#
+# Functions:
+#   - dock-lid-setup:         install or resync both guards (needs sudo)
+#   - dock-lid-setup --check: read-only drift + live-logind check
+# See docs/DOCK_LID_SUSPEND.md.
+# =============================================================================
+
+# Prefer the checkout you are sitting in, as _vpn_root does, so --check from a
+# worktree compares against THAT branch. The installer itself refuses to
+# install from a worktree.
+dock-lid-setup() {
+  local root="${HOME}/.dotfiles"
+  [[ -x "${PWD}/scripts/setup-dock-lid.sh" && -f "${PWD}/udev/90-dock-lid-holdoff.rules" ]] && root="$PWD"
+  bash "${root}/scripts/setup-dock-lid.sh" "$@"
+}
