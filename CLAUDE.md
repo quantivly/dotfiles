@@ -644,13 +644,6 @@ the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
 - **Never force a drop to test** (`SO_BINDTODEVICE` probe). **Parse the log offset, never match
   it** (DST, 2026-10-25). Numbers come from the client's logs, **never Chrome history**.
 
-## Dock Lid Guard
-
-`logind/lid-on-power.conf` and a 30 s USB-C lid holdoff (`udev/90-dock-lid-holdoff.rules`,
-`systemd/dock-lid-holdoff.service`) are **copied never symlinked** by `dock-lid-setup`, which
-**reloads logind, never restarts it** — a restart ends every session.
-[docs/DOCK_LID_SUSPEND.md](docs/DOCK_LID_SUSPEND.md) · `scripts/test-dock-lid.sh`.
-
 
 ## Common Tasks & Workflows
 
@@ -683,7 +676,7 @@ scripts/verify-tools.sh --herdr # The one check a modular herdr adopter runs
 backup-doctor        # START HERE for backups. Every backup-* : see Backup & Restore
 audit-status         # Tripwire armed, on, recording? Every audit-* : see Audit Tripwire
 vpn-doctor           # VPN chain health. Every vpn-* : see the VPN section
-dock-lid-setup --check  # Dock lid guards installed and live?
+dock-lid-setup       # Dock lid guards, COPIED to /etc; reloads logind, NEVER restarts it (--check)
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)

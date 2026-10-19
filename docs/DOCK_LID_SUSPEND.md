@@ -2,7 +2,7 @@
 
 **Guide + maintainer's record.** What stops a lid closed while the Thunderbolt dock is still
 connecting from suspending into it, how to install and check it, and the evidence behind it.
-The operative rule is in [CLAUDE.md](../CLAUDE.md#dock-lid-guard).
+The operative rule is the `dock-lid-setup` line in [CLAUDE.md](../CLAUDE.md).
 
 ## What it guards against
 
@@ -28,28 +28,51 @@ firmware recorded no hardware error at the next boot: a hang, not a panic or a h
 | guard | files | covers a lid closed from |
 |---|---|---|
 | lid on external power does nothing | `logind/lid-on-power.conf` → `/etc/systemd/logind.conf.d/` | ~1.8 s after the cable connects |
-| any USB-C plug-in holds off lid handling for 30 s | `udev/90-dock-lid-holdoff.rules` → `/etc/udev/rules.d/`, `systemd/dock-lid-holdoff.service` → `/etc/systemd/system/` | ~0.1 s after the cable connects |
+| every USB-C plug-in holds off lid handling for 30 s | `udev/90-dock-lid-holdoff.rules` → `/etc/udev/rules.d/`, `systemd/dock-lid-holdoff@.service` → `/etc/systemd/system/` | ~0.1 s after the cable connects |
 
-The holdoff is a **block** lock on `handle-lid-switch`, taken by `systemd-inhibit` in a system
-unit that udev pulls in through `SYSTEMD_WANTS` when a `typec_partner` device is added. While
-it is held logind ignores the lid. When it lapses, logind re-checks a lid that is still closed —
-the same mechanism its own `HoldoffTimeoutSec=` uses after boot and resume — and acts then:
-nothing if docked or on power, suspend on battery. 30 s matches that default.
+**The holdoff.** udev starts one instance of `dock-lid-holdoff@.service` per `typec_partner`
+add, through `SYSTEMD_WANTS`. The instance is named `<kernel name>-<SEQNUM>`. Each instance
+takes a **block** lock on `handle-lid-switch` with `systemd-inhibit` for 30 s, and logind
+ignores the lid while any lock is held. When the last one lapses, logind re-checks a lid that is
+still closed and acts then: nothing if docked or on power, suspend on battery. Its own
+`HoldoffTimeoutSec=` uses the same mechanism after boot and resume, and 30 s matches that
+default.
+
+**One instance per plug-in, not one unit.** Starting a unit that is already active does
+nothing, so with a single unit a re-plug late in the window would keep the *first* plug-in's
+expiry. The lock could then lapse before the re-plugged dock's power is visible. A boot with the
+dock attached starts an instance too, because coldplug replays the `add`.
+
+**The power-loss re-check.** With the lid on external power ignored, pulling the charger while
+the lid is already closed changes nothing that logind watches: it monitors input, graphics and
+seat devices, not power supplies. The laptop would stay awake until some unrelated logind event.
+The second udev rule makes one: on a Mains or USB supply going offline it pings logind over
+D-Bus. logind re-checks a closed lid after every event it handles, sees battery, and suspends.
 
 Closing the lid on **any** charger, not only the dock, no longer suspends. That is intended.
 
 ## Install, check, remove
 
 ```bash
-cd ~/.dotfiles && dock-lid-setup   # install or resync; reloads logind and udev; then checks
-dock-lid-setup --check             # read-only: copies match the checkout, logind runs with it
-journalctl -u dock-lid-holdoff -b  # one Started / Deactivated pair, 30 s apart, per plug-in
+cd ~/.dotfiles && dock-lid-setup          # install or resync; reloads systemd, udev and logind; checks
+dock-lid-setup --check                    # read-only: see below
+journalctl -u 'dock-lid-holdoff@*' -b     # one Started / Deactivated pair, 30 s apart, per plug-in
 ```
 
 All three files are **copied** root-owned, never symlinked: root's logind, systemd and udevd
-read them. Editing the repo copy changes nothing until `dock-lid-setup` is re-run, and
-`--check` reports the difference as drift. The installer refuses to run from a worktree
-(`DOCK_LID_SETUP_ALLOW_WORKTREE=1` overrides it, to test a branch).
+read them. Editing the repo copy changes nothing until `dock-lid-setup` is re-run. The
+installer refuses to run from a worktree (`DOCK_LID_SETUP_ALLOW_WORKTREE=1` overrides it, to
+test a branch). It validates first with `udevadm verify` and `systemd-analyze verify`, prints
+the parser's own explanation on a rejection, and treats a verify that only *warns* as a
+rejection. That catches an unknown key, which `systemd-analyze` reports and then exits 0 on.
+
+`--check`, which the installer also runs last, fails on any of these:
+
+- **A copy that is a symlink.** Root would then read a file you can write.
+- **A copy that is not root-owned 0644, or differs from the checkout.**
+- **A template systemd cannot load, or one it has not re-read.** It reads `LoadState` and
+  `NeedDaemonReload` of an instance, because a template cannot be asked about.
+- **A logind not running with `HandleLidSwitchExternalPower=ignore`.**
 
 logind is **reloaded, never restarted** — a restart ends every session on the machine. Its unit
 is `Type=notify-reload`, and SIGHUP re-reads `logind.conf.d`. Where a reload does not take, the
@@ -66,6 +89,8 @@ To remove: delete the three files under `/etc`, then `sudo systemctl daemon-relo
   the moment of plug-in.
 - **The dock link dropping while the lid is already closed.** logind would see an undock and
   suspend before the re-plug's holdoff starts. Never observed in the logs.
+- **A USB-C partner that flaps more often than every 30 s** keeps a lock held continuously, so a
+  closed lid on battery would not suspend while it flaps.
 
 If the machine hangs again after a normal pause before closing the lid, suspect the kernel and
 boot the previous one to compare.
@@ -85,9 +110,34 @@ On the kernel's monotonic clock, from `udevadm monitor` and a 50 ms poll of `sys
 | +3.05 s | Thunderbolt dock device added |
 
 The 2026-10-19 lid-close came 1.81 s after the dock event, so the logind drop-in alone would
-have caught it by about 0.6 s, on one measurement. The installed holdoff, on a real plug-in,
-took its lock 0.49 s *before* the dock event and released it 30.02 s later, a margin of about
-2.3 s on the same lid-close.
+have caught it by about 0.6 s, on one measurement. The first, single-unit holdoff, on a real
+plug-in, took its lock 0.49 s *before* the dock event and released it 30.02 s later, a margin of
+about 2.3 s on the same lid-close.
+
+### What the design rests on, read in systemd v259's source
+
+A review read `src/login/` and `src/core/device.c` at tag v259 to check each claim the guards
+depend on:
+
+- **A closed lid is re-checked when a lock is released.** On `Lid closed` logind installs a
+  post-event handler that stays until the lid opens. It re-runs the lid decision, with docked,
+  external power and battery all evaluated afresh, after every event logind dispatches. The
+  inhibitor's fifo closing is such an event, and so is a D-Bus call such as the power-loss
+  `Ping`.
+- **`handle-lid-switch` is honoured unconditionally.** `LidSwitchIgnoreInhibited=yes` (the
+  default) bypasses only `sleep` locks.
+- **`HandleLidSwitchDocked` is checked before `HandleLidSwitchExternalPower`.**
+- **`systemctl reload systemd-logind` re-reads the configuration and drop-ins without touching
+  sessions.**
+- **A device unit's `Wants=` are started on every dead→plugged transition.** That is every
+  re-plug. A unit already active is skipped, which is why the holdoff is per plug-in.
+- **`$env{SEQNUM}` reads a real property.** sd-device stores a kernel uevent's `SEQNUM` as one
+  (`device-private.c`). `udevadm test` builds its event from sysfs, without one, so there it
+  substitutes as empty. That is why the instance name also carries `%k`: an empty SEQNUM still
+  gives a valid name.
+
+GNOME's gsd-power also holds a `handle-lid-switch` lock while an external monitor is attached,
+but not in the first ~3 s of a plug-in, which is the window here.
 
 ### It had happened before, and survived
 
@@ -99,18 +149,31 @@ a race.
 ### Designs not taken
 
 - **`HoldoffTimeoutSec=`** applies only after boot and resume, never after a hotplug.
-- **A `delay` lock** lets the suspend proceed when it lapses, even if the dock is up by then.
+- **A `delay` lock.** logind refuses one for any `handle-*` lock ("Delay inhibitors only
+  supported for shutdown and sleep"), and a delay on `sleep` is capped by `InhibitDelayMaxSec=`.
+- **A single holdoff unit.** A re-plug inside its window does not extend it (above).
 - **`HandleLidSwitch=ignore`** would stop the lid suspending on battery too, so a closed laptop
   in a bag stays awake.
 
 ### Tests
 
-State table: `scripts/test-dock-lid.sh` (41 checks, hermetic, CI `dock-lid-test`). It stubs
-`sudo`, `systemctl`, `busctl`, `udevadm` and `systemd-analyze`, runs `install` for real under a
-prefix the stub confines it to, and checks the shipped rule and unit with the real
-`udevadm verify` and `systemd-analyze verify`.
+State table: `scripts/test-dock-lid.sh` (56 checks, hermetic, CI `dock-lid-test`). It stubs
+`sudo`, `systemctl`, `busctl`, `udevadm` and `systemd-analyze`, and runs `install` for real under
+a prefix the stub confines it to.
 
-**Mutation sweep, 2026-10-19: 27 mutants, 27 killed.** 19 were in the installer, 8 in the
+The stubs model state rather than fixed answers:
+
+- **A daemon-reload snapshots the unit on disk at that moment**, and `systemctl show` answers
+  from the snapshot.
+- **A logind reload snapshots the drop-in's value**, and `busctl` answers from it, and only for
+  `HandleLidSwitchExternalPower`.
+
+So reloading before copying, or reading the wrong property, fails a row. The real
+`udevadm verify` and `systemd-analyze verify` check the shipped rule and unit. Both rule lines
+and the unit's `ExecStart` are asserted exactly, because `udevadm verify` accepts a rule that
+never fires.
+
+**First mutation sweep, 2026-10-19: 27 mutants, 27 killed.** 19 were in the installer, 8 in the
 shipped files. Each mutant was checked to change its file before it ran. The first round left
 two alive, both for one reason. **Bash suspends `set -e` inside a function called from an `||`
 list.** The install path calls the check as `check_installed || exit 1`, so the row that removed
@@ -124,3 +187,20 @@ validation ran the installer with the relative prefix `relative/dir`. The `sudo`
 it, because `relative/dir/etc/…` is "inside" `relative/dir`, and wrote an `/etc` tree into the
 worktree the sweep was started from. The stub now refuses a relative prefix (its own row), and
 every row runs from inside the suite's temporary directory.
+
+**The review found that suite still hollow, so a second sweep followed: 50 mutants, 48 killed, 2
+expected survivors.** Seven of the reviewer's mutants had passed 41/41:
+
+- reading `HandleLidSwitchDocked`, which also defaults to `ignore`;
+- dropping or misspelling `TAG+="systemd"`;
+- adding a match that never holds;
+- `sleep 3` in place of `sleep 30`;
+- reloading logind, or running `daemon-reload`, before the copies.
+
+The stateful stubs and the exact-line assertions now kill all seven. The two survivors:
+
+- **The real-root expected owner (`root:root 644`).** Under the test seam the copies belong to
+  whoever runs the suite, and nothing can be chowned to root without root. The comparison it
+  feeds is the one the test-seam owner's mutant exercises.
+- **Dropping `-m 755` from `install -d`.** This is equivalent: GNU `install -d` defaults to 0755
+  whatever the umask.

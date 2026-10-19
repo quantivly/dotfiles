@@ -3765,11 +3765,17 @@ vpn-sweeps() {
 # See docs/DOCK_LID_SUSPEND.md.
 # =============================================================================
 
-# Prefer the checkout you are sitting in, as _vpn_root does, so --check from a
-# worktree compares against THAT branch. The installer itself refuses to
-# install from a worktree.
+# Prefer the checkout you are sitting in, so --check from a worktree compares
+# against THAT branch — but only a checkout of ~/.dotfiles' own repository (the
+# primary or one of its worktrees), never any tree that happens to hold files of
+# these names: this runs sudo. The installer itself refuses to install from a
+# worktree.
 dock-lid-setup() {
-  local root="${HOME}/.dotfiles"
-  [[ -x "${PWD}/scripts/setup-dock-lid.sh" && -f "${PWD}/udev/90-dock-lid-holdoff.rules" ]] && root="$PWD"
+  local root="${HOME}/.dotfiles" here
+  here="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"
+  if [[ -n "$here" && -x "${here}/scripts/setup-dock-lid.sh" ]] \
+     && [[ "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" -ef "${HOME}/.dotfiles/.git" ]]; then
+    root="$here"
+  fi
   bash "${root}/scripts/setup-dock-lid.sh" "$@"
 }

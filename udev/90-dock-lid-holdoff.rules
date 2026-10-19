@@ -1,22 +1,30 @@
 # udev/90-dock-lid-holdoff.rules
 # ==============================
 #
-# Hold off logind's lid-switch handling for 30 s whenever anything is plugged
-# into a USB-C port, so a lid closed while the Thunderbolt dock is still
-# connecting cannot suspend into the half-enumerated dock. On 2026-10-19 that
-# suspend hung the laptop until a forced power-off.
+# Two rules that keep a lid closed around a Thunderbolt dock plug-in from
+# suspending into a half-enumerated dock. On 2026-10-19 that suspend hung the
+# laptop until a forced power-off.
 #
-# The USB-C partner device is the EARLIEST signal a plug-in gives: measured
-# 1.8 s before logind reports external power and 3 s before the dock's
-# Thunderbolt link. The rule only pulls in dock-lid-holdoff.service, which takes
-# the lock; when it lapses logind re-evaluates the still-closed lid itself.
+# 1. HOLDOFF. Every USB-C partner add starts one instance of
+#    dock-lid-holdoff@.service, which blocks lid handling for 30 s. The partner
+#    device is the EARLIEST signal a plug-in gives: measured 1.8 s before logind
+#    reports external power and 3 s before the dock's Thunderbolt link. The
+#    instance is named <kernel name>-<SEQNUM>, so every plug-in gets a fresh
+#    window. If SEQNUM were ever missing the name is still valid
+#    ("port1-partner-") and only the per-plug-in freshness is lost.
+#
+# 2. RECHECK ON POWER LOSS. logind/lid-on-power.conf makes a lid closed on
+#    external power do nothing. But logind does not watch power supplies, so
+#    pulling the charger with the lid already closed would leave the laptop
+#    awake until some unrelated logind event. A Ping to logind is such an event:
+#    logind re-checks a closed lid after every event it handles, and now sees
+#    battery and suspends.
 #
 # SOURCE OF TRUTH. Copied root-owned to /etc/udev/rules.d/ by
 # scripts/setup-dock-lid.sh (never symlinked -- root's udevd reads it). Editing
 # this copy changes nothing until `dock-lid-setup` is re-run, and
 # `dock-lid-setup --check` reports the difference as drift.
-#
-# The unit name below must match systemd/dock-lid-holdoff.service: a wrong name
-# yields a rule that verifies cleanly and then never fires.
-# scripts/test-dock-lid.sh asserts they agree.
-ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="dock-lid-holdoff.service"
+# scripts/test-dock-lid.sh asserts both rule lines exactly: udevadm verify
+# accepts a rule that never fires (a missing TAG+="systemd", a wrong unit name).
+ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="dock-lid-holdoff@%k-$env{SEQNUM}.service"
+ACTION=="change", SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="Mains|USB", ENV{POWER_SUPPLY_ONLINE}=="0", RUN+="/usr/bin/busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping"
