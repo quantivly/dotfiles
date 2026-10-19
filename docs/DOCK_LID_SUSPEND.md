@@ -47,7 +47,12 @@ dock attached starts an instance too, because coldplug replays the `add`.
 the lid is already closed changes nothing that logind watches: it monitors input, graphics and
 seat devices, not power supplies. The laptop would stay awake until some unrelated logind event.
 The second udev rule makes one: on a Mains or USB supply going offline it pings logind over
-D-Bus. logind re-checks a closed lid after every event it handles, sees battery, and suspends.
+D-Bus, and logind re-checks a closed lid after every event it handles.
+
+It pings **twice**, at once and 5 s later from a transient systemd timer. logind counts as "on
+battery" only a battery whose status reads `Discharging`. The ACPI battery driver caches that
+status for 1 s, so the first ping can still see `Not charging`, and the flip may come with no
+uevent of its own.
 
 Closing the lid on **any** charger, not only the dock, no longer suspends. That is intended.
 
@@ -62,17 +67,24 @@ journalctl -u 'dock-lid-holdoff@*' -b     # one Started / Deactivated pair, 30 s
 All three files are **copied** root-owned, never symlinked: root's logind, systemd and udevd
 read them. Editing the repo copy changes nothing until `dock-lid-setup` is re-run. The
 installer refuses to run from a worktree (`DOCK_LID_SETUP_ALLOW_WORKTREE=1` overrides it, to
-test a branch). It validates first with `udevadm verify` and `systemd-analyze verify`, prints
-the parser's own explanation on a rejection, and treats a verify that only *warns* as a
-rejection. That catches an unknown key, which `systemd-analyze` reports and then exits 0 on.
+test a branch). It validates first with `udevadm verify` and `systemd-analyze verify`, and
+prints the parser's own explanation on a rejection.
+
+A warning that names the unit counts as a rejection: `systemd-analyze` reports an unknown key
+and then exits 0. A warning about an *unrelated* unit does not count. `systemd-analyze` loads
+the unit's whole dependency closure (sysinit, basic, every enabled socket and timer) and reports
+on those too, so it runs with `--recursive-errors=no` and only lines naming this unit count.
 
 `--check`, which the installer also runs last, fails on any of these:
 
 - **A copy that is a symlink.** Root would then read a file you can write.
 - **A copy that is not root-owned 0644, or differs from the checkout.**
-- **A template systemd cannot load, or one it has not re-read.** It reads `LoadState` and
-  `NeedDaemonReload` of an instance, because a template cannot be asked about.
+- **A template systemd cannot load.** It reads `LoadState` of an instance, because a template
+  cannot be asked about.
 - **A logind not running with `HandleLidSwitchExternalPower=ignore`.**
+
+It does not read `NeedDaemonReload`: a never-started instance is loaded fresh on every query,
+so it always answers `no`. Every new instance reads the file on disk anyway.
 
 logind is **reloaded, never restarted** — a restart ends every session on the machine. Its unit
 is `Type=notify-reload`, and SIGHUP re-reads `logind.conf.d`. Where a reload does not take, the
@@ -91,6 +103,9 @@ To remove: delete the three files under `/etc`, then `sudo systemctl daemon-relo
   suspend before the re-plug's holdoff starts. Never observed in the logs.
 - **A USB-C partner that flaps more often than every 30 s** keeps a lock held continuously, so a
   closed lid on battery would not suspend while it flaps.
+- **A battery that takes more than 5 s to report `Discharging` after the charger is pulled, with
+  no uevent when it does.** The laptop then waits, lid closed, for logind's next unrelated event.
+  The timing on this machine has not been measured on a real unplug.
 
 If the machine hangs again after a normal pause before closing the lid, suspect the kernel and
 boot the previous one to compare.
@@ -157,18 +172,19 @@ a race.
 
 ### Tests
 
-State table: `scripts/test-dock-lid.sh` (56 checks, hermetic, CI `dock-lid-test`). It stubs
+State table: `scripts/test-dock-lid.sh` (57 checks, hermetic, CI `dock-lid-test`). It stubs
 `sudo`, `systemctl`, `busctl`, `udevadm` and `systemd-analyze`, and runs `install` for real under
 a prefix the stub confines it to.
 
-The stubs model state rather than fixed answers:
+The stubs model state rather than fixed answers, and only what the real tools do:
 
-- **A daemon-reload snapshots the unit on disk at that moment**, and `systemctl show` answers
-  from the snapshot.
-- **A logind reload snapshots the drop-in's value**, and `busctl` answers from it, and only for
-  `HandleLidSwitchExternalPower`.
-
-So reloading before copying, or reading the wrong property, fails a row. The real
+- **A logind reload snapshots the drop-in's value at that moment.** `busctl` answers from the
+  snapshot, and only for `HandleLidSwitchExternalPower`. So reloading before copying, or reading
+  the wrong property, fails a row.
+- **`systemctl show -p LoadState` answers from the template on disk.** Real systemd needs no
+  daemon-reload for that.
+- **`systemd-analyze verify` names the file in a warning**, and fails on an unrelated unit's
+  error unless `--recursive-errors=no` is given. The real
 `udevadm verify` and `systemd-analyze verify` check the shipped rule and unit. Both rule lines
 and the unit's `ExecStart` are asserted exactly, because `udevadm verify` accepts a rule that
 never fires.
@@ -204,3 +220,16 @@ The stateful stubs and the exact-line assertions now kill all seven. The two sur
   feeds is the one the test-seam owner's mutant exercises.
 - **Dropping `-m 755` from `install -d`.** This is equivalent: GNU `install -d` defaults to 0755
   whatever the umask.
+
+**A second review, of that fix, corrected the stubs themselves.** The `systemctl` stub had
+modelled `NeedDaemonReload` turning `yes` after an edit. Real systemd does not do that for a
+never-started instance, so the installer's check on it could never fire. The row and the branch
+are gone, and with them the "daemon-reload before the copies" mutant, which is harmless for real.
+
+The review also found two gaps, now fixed:
+
+- **The power-loss ping needed a delayed second ping.** The battery-status lag above is why.
+- **A strict verify blocked on any warning,** including one about an unrelated unit.
+
+**Third sweep: 54 mutants, 51 killed, 3 expected survivors.** The two above, and "daemon-reload
+before the copies". That one is equivalent too, for the reason just given.

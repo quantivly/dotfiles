@@ -15,13 +15,18 @@
 # THE STUBS MODEL STATE, not just answers, because a stub that always says
 # "ignore" passes an installer that reads the wrong property or reloads logind
 # before copying the drop-in (both measured: the first review's mutants
-# survived exactly that way). Per prefix, in <prefix>.state/:
-#   - `sudo systemctl daemon-reload` snapshots the unit file on disk NOW; the
-#     `systemctl show` stub answers LoadState / NeedDaemonReload from it.
-#   - `sudo systemctl reload systemd-logind` snapshots the drop-in's value NOW;
-#     the `busctl` stub answers from it, and only for
+# survived exactly that way). And they model only what the real tools do:
+#   - `sudo systemctl reload systemd-logind` snapshots the drop-in's value NOW,
+#     into <prefix>.state/; the `busctl` stub answers from it, and only for
 #     HandleLidSwitchExternalPower (HandleLidSwitchDocked defaults to "ignore"
 #     too, so reading it would be a false green on a real machine).
+#   - `systemctl show -p LoadState` of an instance answers from the template
+#     on disk. Real systemd needs no daemon-reload for that — it rebuilds its
+#     name map when a unit directory changes, and a never-started instance is
+#     loaded fresh on every query — so the stub does not pretend otherwise.
+#   - `systemd-analyze verify` names the file in a warning, as the real one
+#     does, and an error in an UNRELATED unit fails it unless
+#     --recursive-errors=no is given.
 # The `sudo` stub runs `install` for real, but only under an ABSOLUTE
 # DOCK_LID_SETUP_PREFIX, and refuses any destination outside it.
 #
@@ -36,7 +41,7 @@
 #
 # "Could not run" is exit 2, never a pass. The suite asserts its own row total.
 #
-# Requires: bash, git, cmp, sha256sum, stat, and systemd >= 254
+# Requires: bash, git, cmp, stat, and systemd >= 254
 # (`udevadm verify`). No sudo, no root, no network.
 #
 # Usage: scripts/test-dock-lid.sh
@@ -59,7 +64,7 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 for f in "$SETUP" "$LOGIND_SRC" "$RULE_SRC" "$UNIT_SRC"; do
   [[ -r "$f" ]] || fatal "cannot read $f"
 done
-for t in git cmp sha256sum stat systemd-analyze; do
+for t in git cmp stat systemd-analyze; do
   command -v "$t" >/dev/null || fatal "$t is required"
 done
 udevadm verify --help >/dev/null 2>&1 || fatal "udevadm has no 'verify' (systemd < 254)"
@@ -90,11 +95,6 @@ case "${1:-}" in
     [ -n "$pfx" ] || exit 0
     mkdir -p "$state" || exit 98
     case "${2:-}:${3:-}" in
-      daemon-reload:)
-        # The manager loads whatever unit file is on disk at this moment.
-        f="$pfx/etc/systemd/system/dock-lid-holdoff@.service"
-        if [ -f "$f" ]; then sha256sum <"$f" | cut -d' ' -f1 >"$state/unit-loaded"
-        else echo absent >"$state/unit-loaded"; fi ;;
       reload:systemd-logind)
         [ "${STUB_LOGIND_RELOAD_FAIL:-0}" = 1 ] && exit 1
         # logind re-reads its drop-ins at this moment: what they say now is live.
@@ -155,20 +155,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 pfx="${DOCK_LID_SETUP_PREFIX:-}"
-f="$pfx/etc/systemd/system/dock-lid-holdoff@.service"
-loaded="$(cat "${pfx}.state/unit-loaded" 2>/dev/null || echo absent)"
 # Only an INSTANCE of the template loads it; the template name itself is refused
 # by the real systemctl, and any other unit is not ours.
 case "$unit" in dock-lid-holdoff@?*.service) ours=1 ;; *) ours=0 ;; esac
 case "$prop" in
   LoadState)
     if [ -n "${STUB_LOADSTATE:-}" ]; then echo "$STUB_LOADSTATE"
-    elif [ "$ours" = 1 ] && [ "$loaded" != absent ]; then echo loaded
+    elif [ "$ours" = 1 ] && [ -f "$pfx/etc/systemd/system/dock-lid-holdoff@.service" ]; then echo loaded
     else echo not-found; fi ;;
-  NeedDaemonReload)
-    if [ "$ours" = 1 ] && [ "$loaded" != absent ] && [ -f "$f" ] \
-       && [ "$(sha256sum <"$f" | cut -d' ' -f1)" != "$loaded" ]; then echo yes
-    else echo no; fi ;;
   *) echo "systemctl stub: unmodelled property '$prop'" >&2; exit 99 ;;
 esac
 STUB
@@ -204,9 +198,15 @@ cat >"$STUBBIN/systemd-analyze" <<'STUB'
 #!/usr/bin/env bash
 printf 'systemd-analyze %s\n' "$*" >>"$STUBLOG"
 [ "${1:-}" = verify ] || exit 0
+unit="${*: -1}" recursive=1
+case " $* " in *" --recursive-errors=no "*) recursive=0 ;; esac
 case "${STUB_ANALYZE:-ok}" in
-  fail) echo "stub-analyze: Service has no ExecStart= setting. Refusing."; exit 1 ;;
-  warn) echo "stub-analyze: Unknown key 'Typo' in section [Service], ignoring." ;;
+  fail) echo "$unit: Service has no ExecStart= setting. Refusing."; exit 1 ;;
+  warn) echo "$unit:18: Unknown key 'Typo' in section [Service], ignoring." ;;
+  # The dependency closure: sysinit, basic, every enabled socket and timer.
+  warn-other) echo "/etc/systemd/system/other.timer:3: Unknown key 'Foo' in section [Timer], ignoring." ;;
+  fail-other) echo "/etc/systemd/system/other.service: Unit has no ExecStart= setting."
+              [ "$recursive" = 1 ] && exit 1 ;;
 esac
 exit 0
 STUB
@@ -288,8 +288,8 @@ check "logind is RELOADED, and never restarted (a restart ends every session)" \
   "$(logged 'sudo systemctl reload systemd-logind'):$(logged_re 'restart')" "1:0"
 check "the live logind value is read back and reported" \
   "$(out_has 'logind is running with HandleLidSwitchExternalPower=ignore')" 1
-check "the check asks systemd whether it loaded the CURRENT unit" \
-  "$(out_has 'systemd has loaded the current dock-lid-holdoff@.service')" 1
+check "the check asks systemd whether it can load the unit" \
+  "$(out_has 'systemd can load dock-lid-holdoff@.service')" 1
 check "a prefixed run says it is not touching the real /etc" "$(out_has 'NOT to the real /etc')" 1
 
 # ---------------------------------------------------------------------------
@@ -315,11 +315,17 @@ P="$(newprefix)"
 rc="$(STUB_ANALYZE=fail run_setup "$ROOT" "$P")"
 check "a unit systemd-analyze rejects: exit 1, nothing written, no install attempted" \
   "$rc:$(files_in "$P"):$(logged_re '^sudo install')" "1:0:0"
-check "... and systemd-analyze's own explanation is printed" "$(out_has 'stub-analyze: Service has no ExecStart')" 1
+check "... and systemd-analyze's own explanation is printed" "$(out_has 'Service has no ExecStart= setting. Refusing.')" 1
 P="$(newprefix)"
 rc="$(STUB_ANALYZE=warn run_setup "$ROOT" "$P")"
 check "a verify that exits 0 with a WARNING (an unknown key) is a rejection too" \
   "$rc:$(files_in "$P"):$(out_has "Unknown key 'Typo'")" "1:0:1"
+P="$(newprefix)"
+rc="$(STUB_ANALYZE=warn-other run_setup "$ROOT" "$P")"
+check "a WARNING about an unrelated unit in the closure does not block the install" "$rc:$(files_in "$P")" "0:3"
+P="$(newprefix)"
+rc="$(STUB_ANALYZE=fail-other run_setup "$ROOT" "$P")"
+check "an ERROR in an unrelated unit does not block it either (--recursive-errors=no)" "$rc:$(files_in "$P")" "0:3"
 P="$(newprefix)"
 rc="$(STUB_UDEV_NO_VERIFY=1 run_setup "$ROOT" "$P")"
 check "an udevadm with no 'verify' is named as that, not as a rejected rule" \
@@ -377,14 +383,6 @@ check "every file matching but systemd unable to load the unit: exit 1, names Lo
   "$rc:$(out_has 'LoadState=not-found')" "1:1"
 rc="$(STUB_LID_POWER='' run_setup "$ROOT" "$P" --check)"
 check "every file matching but logind not running with the value: exit 1" "$rc" 1
-R2="$T/root2"; mkroot "$R2"
-P="$(newprefix)"
-[[ "$(run_setup "$R2" "$P")" == 0 ]] || fatal "NeedDaemonReload fixture"
-echo '# edited after the reload' | tee -a "$R2/systemd/dock-lid-holdoff@.service" \
-  >>"$P/etc/systemd/system/dock-lid-holdoff@.service"
-rc="$(run_setup "$R2" "$P" --check)"
-check "copy matches the checkout but systemd still runs the old one: exit 1, names NeedDaemonReload" \
-  "$rc:$(out_has 'NeedDaemonReload=yes')" "1:1"
 
 # ---------------------------------------------------------------------------
 printf '\nthe worktree guard\n'
@@ -415,14 +413,14 @@ check "the primary checkout of the same repo is not a worktree: installs" "$rc:$
 printf '\nthe shipped files, against the real parsers and exactly\n'
 rc="$(udevadm verify --resolve-names=never "$RULE_SRC" >"$T/out" 2>&1; echo $?)"
 check "the real udevadm verify accepts the rule" "$rc" 0
-out="$(systemd-analyze verify --man=no "$UNIT_SRC" 2>&1)"; rc=$?
+out="$(systemd-analyze verify --man=no --recursive-errors=no "$UNIT_SRC" 2>&1)"; rc=$?
 check "the real systemd-analyze verify accepts the unit and prints nothing" "$rc:[$out]" "0:[]"
 # Both rule lines exactly. udevadm verify accepts all of: no TAG+="systemd" (PID 1
 # never sees the device), a wrong unit name, an extra match that never holds.
 # shellcheck disable=SC2016  # $env{SEQNUM} is udev's substitution, not the shell's
 want_rules='ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="dock-lid-holdoff@%k-$env{SEQNUM}.service"
-ACTION=="change", SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="Mains|USB", ENV{POWER_SUPPLY_ONLINE}=="0", RUN+="/usr/bin/busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping"'
-check "the rule file is exactly the two rules: holdoff per USB-C plug-in, and a logind re-check on power loss" \
+ACTION=="change", SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="Mains|USB", ENV{POWER_SUPPLY_ONLINE}=="0", RUN+="/usr/bin/busctl call --timeout=3 org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping", RUN+="/usr/bin/systemd-run --no-block --quiet --collect --on-active=5 /usr/bin/busctl call --timeout=3 org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping"'
+check "the rule file is exactly the two rules: holdoff per USB-C plug-in, and a logind re-check now and 5 s after power loss" \
   "$(grep -v '^#' "$RULE_SRC")" "$want_rules"
 check "the rule pulls in the template that ships (a wrong name verifies and never fires)" \
   "$(basename "$UNIT_SRC")" "dock-lid-holdoff@.service"
@@ -432,7 +430,7 @@ check "the unit BLOCKS handle-lid-switch for 30 s, the whole ExecStart line" \
 check "the logind drop-in is a [Login] section setting HandleLidSwitchExternalPower=ignore" \
   "$(grep -v '^#' "$LOGIND_SRC" | tr '\n' ' ')" "[Login] HandleLidSwitchExternalPower=ignore "
 
-EXPECTED_ROWS=56
+EXPECTED_ROWS=57
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".

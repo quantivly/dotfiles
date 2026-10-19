@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Lid on external power does nothing.** `logind/lid-on-power.conf` sets
     `HandleLidSwitchExternalPower=ignore`. It applies from ~1.8 s after the cable connects. On
     battery the lid still suspends, and pulling the charger with the lid already closed suspends
-    too. logind does not watch power supplies, so a udev rule pings it on power loss.
+    too. logind does not watch power supplies, so a udev rule pings it on power loss, and
+    again 5 s later for a battery status that lags the charger.
   - **Every USB-C plug-in holds off lid handling for 30 s.** `udev/90-dock-lid-holdoff.rules`
     starts one instance of `systemd/dock-lid-holdoff@.service` per plug-in, and each takes a
     `handle-lid-switch` block lock. It applies from ~0.1 s after the cable connects. A re-plug
@@ -26,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       printing the parser's reason, and a warning counts as a rejection.
     - It refuses to run from a worktree, and reloads logind (never restarts it).
     - It then checks each copy is a root-owned 0644 regular file matching the checkout, that
-      systemd has loaded the current unit, and the live logind value.
+      systemd can load the unit, and the live logind value.
     - `dock-lid-setup --check` runs that check alone, read-only.
   - State table: `scripts/test-dock-lid.sh` (hermetic, CI `dock-lid-test`), with stubs that model
     reload order. The timings, the systemd source behind the design, and what neither guard

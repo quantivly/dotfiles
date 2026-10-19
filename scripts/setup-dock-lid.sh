@@ -24,8 +24,8 @@
 #
 # Usage: setup-dock-lid.sh [--check]
 #   --check   read-only: is each installed copy a root-owned 0644 regular file
-#             matching this checkout, has systemd loaded the current unit, and
-#             is logind running with the setting? Exit 1 if not. Needs no sudo.
+#             matching this checkout, can systemd load the unit, and is logind
+#             running with the setting? Exit 1 if not. Needs no sudo.
 #
 # DOCK_LID_SETUP_PREFIX is a TEST SEAM, not an operational knob: it prefixes
 # every destination path so the state table can run the install for real. It is
@@ -107,12 +107,14 @@ live_lid_power() {
 # THE INSTALLED STATE, not the install's exit status:
 #   - every copy a regular file (a symlink back into this checkout would hand
 #     root a user-writable file), root-owned 0644, byte-identical to the checkout;
-#   - systemd has loaded the CURRENT unit: a copy it cannot load answers
-#     Result=success to everything, and one it has not re-read is not running;
+#   - systemd can load the unit: a copy it cannot load answers Result=success
+#     to everything asked of it. (Not NeedDaemonReload: a never-started instance
+#     is loaded fresh on every query, so it always says "no", and every new
+#     instance reads the file on disk anyway.)
 #   - logind running with the value: a drop-in logind has not re-read looks
 #     installed and does nothing until the next boot.
 check_installed() {
-  local bad=0 i st load stale live
+  local bad=0 i st load live
   for i in "${!SRCS[@]}"; do
     if [[ -L "${DSTS[$i]}" ]]; then
       log ERROR "${DSTS[$i]} is a SYMLINK — root would read a file you can write; re-run: dock-lid-setup"; bad=1
@@ -126,22 +128,17 @@ check_installed() {
       log SUCCESS "${DSTS[$i]} matches this checkout (${st})"
     fi
   done
-  # `|| true` on all three reads: --check calls this as a plain command, where
+  # `|| true` on both reads: --check calls this as a plain command, where
   # set -e and pipefail would make a failing systemctl or busctl end the script
   # right here, silently. (The install path calls it from an `||` list, where
   # bash suspends set -e for the whole function body.)
   load="$(systemctl show -p LoadState --value "$UNIT_PROBE" 2>/dev/null || true)"
-  stale="$(systemctl show -p NeedDaemonReload --value "$UNIT_PROBE" 2>/dev/null || true)"
   if [[ "$load" != "loaded" ]]; then
     log ERROR "systemd cannot load dock-lid-holdoff@.service (LoadState=${load:-unknown})"
-    log ERROR "  re-run: dock-lid-setup   (it copies the unit and runs daemon-reload)"
-    bad=1
-  elif [[ "$stale" != "no" ]]; then
-    log ERROR "systemd is running an older copy of dock-lid-holdoff@.service (NeedDaemonReload=${stale:-unknown})"
-    log ERROR "  sudo systemctl daemon-reload"
+    log ERROR "  re-run: dock-lid-setup"
     bad=1
   else
-    log SUCCESS "systemd has loaded the current dock-lid-holdoff@.service"
+    log SUCCESS "systemd can load dock-lid-holdoff@.service"
   fi
   live="$(live_lid_power || true)"
   if [[ "$live" == "$WANT" ]]; then
@@ -190,10 +187,14 @@ if ! out="$(udevadm verify --resolve-names=never "$RULE_SRC" 2>&1)"; then
   show_output "$out"
   exit 1
 fi
-# systemd-analyze verify exits 0 on a WARNING — "Unknown key 'Typo' in section
-# [Service], ignoring." — so a misspelled key would pass on the exit status
-# alone. A clean unit prints nothing; anything printed is a rejection.
-if ! out="$(systemd-analyze verify --man=no "$UNIT_SRC" 2>&1)" || [[ -n "$out" ]]; then
+# systemd-analyze verify exits 0 on a WARNING — "<file>:18: Unknown key 'Typo' in
+# section [Service], ignoring." — so a misspelled key would pass on the exit
+# status alone: any line naming this unit is a rejection. But it also loads the
+# unit's whole dependency closure (sysinit, basic, every enabled socket and
+# timer) and reports on those too, so --recursive-errors=no and the filter keep
+# an unrelated unit's warning from blocking the install.
+if ! out="$(systemd-analyze verify --man=no --recursive-errors=no "$UNIT_SRC" 2>&1)" \
+   || grep -q -F -e "$UNIT_SRC" -e 'dock-lid-holdoff@' <<<"$out"; then
   log ERROR "systemd-analyze verify rejects $UNIT_SRC — nothing installed:"
   show_output "$out"
   exit 1
