@@ -52,7 +52,8 @@ D-Bus, and logind re-checks a closed lid after every event it handles.
 It pings **twice**, at once and 5 s later from a transient systemd timer. logind counts as "on
 battery" only a battery whose status reads `Discharging`. The ACPI battery driver caches that
 status for 1 s, so the first ping can still see `Not charging`, and the flip may come with no
-uevent of its own.
+uevent of its own. On two real unplugs (below) the battery read `Discharging` within 1 s, so the
+5 s ping has a wide margin.
 
 Closing the lid on **any** charger, not only the dock, no longer suspends. That is intended.
 
@@ -99,13 +100,14 @@ To remove: delete the three files under `/etc`, then `sudo systemctl daemon-relo
   machine; the guards only keep the lid from starting one.
 - **Other ways to suspend in the same seconds**: Suspend from the menu, or idle-suspend firing at
   the moment of plug-in.
-- **The dock link dropping while the lid is already closed.** logind would see an undock and
-  suspend before the re-plug's holdoff starts. Never observed in the logs.
+- **The dock link dropping while the lid is already closed, for longer than GNOME's own lid
+  lock lasts after it** (~13 s, below). logind would see an undock and suspend before the
+  re-plug's holdoff starts. A shorter drop is covered by that lock. Never observed in the logs.
 - **A USB-C partner that flaps more often than every 30 s** keeps a lock held continuously, so a
   closed lid on battery would not suspend while it flaps.
 - **A battery that takes more than 5 s to report `Discharging` after the charger is pulled, with
   no uevent when it does.** The laptop then waits, lid closed, for logind's next unrelated event.
-  The timing on this machine has not been measured on a real unplug.
+  On this machine it took under 1 s on both real unplugs measured (below).
 
 If the machine hangs again after a normal pause before closing the lid, suspect the kernel and
 boot the previous one to compare.
@@ -151,8 +153,32 @@ depend on:
   substitutes as empty. That is why the instance name also carries `%k`: an empty SEQNUM still
   gives a valid name.
 
-GNOME's gsd-power also holds a `handle-lid-switch` lock while an external monitor is attached,
-but not in the first ~3 s of a plug-in, which is the window here.
+GNOME's gsd-power also holds a `handle-lid-switch` lock ("External monitor attached or
+configuration changed recently") while an external monitor is attached, but not in the first
+~3 s of a plug-in, which is the window here. It keeps the lock for a while *after* the monitors
+go, which sets when an undock with the lid closed suspends.
+
+### An undock with the lid closed, measured 2026-10-20
+
+A 250 ms poll of what logind's lid decision reads: its own `Docked` and `OnExternalPower`
+properties, and the supplies, battery and display connectors under them. Times run from the
+kernel's `thunderbolt 0-1: device disconnected`, and each is the first sample that showed the
+change, so an upper bound:
+
+| after the dock disconnects | lid closed | lid open |
+|---|---|---|
+| dock monitors gone, `Docked` false | +0.35 s | +0.54 s |
+| battery `Discharging`, `OnExternalPower` false | +0.77 s | +0.96 s |
+| `Suspending...` | +12.9 s | — |
+
+Each poll was a D-Bus call to logind, so logind re-checked the closed lid four times a second.
+For 12 s it saw an undocked lid on battery and did not act. No holdoff instance was running, and
+the only other `handle-lid-switch` lock on this machine is gsd-power's. A `handle-lid-switch`
+lock is honoured whatever logind's settings, so this delay predates the guards.
+
+That explains an earlier replug test with the lid closed. The dock was back 6.7 s after
+disconnecting, inside gsd-power's window, so the laptop never suspended, although the immediate and
+the delayed power-loss pings had both fired.
 
 ### It had happened before, and survived
 
