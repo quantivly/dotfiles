@@ -160,6 +160,24 @@ jobs:
       - name: Run the herdr quiet-shim state table
         run: ./scripts/test-herdr-quiet.sh
 
+  poetry-lazy-test:
+    name: Lazy Poetry Wrapper State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
+      # poetry is STUBBED on a PATH without /usr/bin, and $ZSH is a fake
+      # oh-my-zsh whose poetry plugin only records that it ran: the rows ask
+      # whether the plugin is sourced, never whether this runner's zsh crashes.
+      - name: Run the lazy poetry wrapper state table
+        run: ./scripts/test-poetry-lazy.sh
+
   dotfiles-guard-test:
     name: Dotfiles Live-Config Guard State Table
     runs-on: ubuntu-latest

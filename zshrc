@@ -66,8 +66,11 @@ if command -v poetry >/dev/null 2>&1; then
       # Remove this function and load the real plugin
       unfunction poetry
       plugins+=(poetry)
-      # Source the poetry plugin directly instead of calling compinit
-      if [ -f "${ZSH}/plugins/poetry/poetry.plugin.zsh" ]; then
+      # Source the poetry plugin directly instead of calling compinit.
+      # Interactive shells only: Claude Code's shell snapshot copies this
+      # function without $ZSH_CACHE_DIR, and the plugin's `=( )` then crashes
+      # zsh 5.9 (docs/TROUBLESHOOTING.md, "zsh crashed" notifications).
+      if [[ -o interactive ]] && [ -f "${ZSH}/plugins/poetry/poetry.plugin.zsh" ]; then
         source "${ZSH}/plugins/poetry/poetry.plugin.zsh"
       fi
       # Call the real poetry command
