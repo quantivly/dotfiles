@@ -174,6 +174,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Claude Code Bash-tool shells no longer crash zsh in the background on every `poetry` call.**
+  From 2026-10-09 this put 50+ "zsh crashed" apport notifications on the desktop, with no
+  details and nothing failing visibly.
+  - **Cause.** Outside a Python project, `zshrc`'s lazy `poetry()` wrapper sources the oh-my-zsh
+    poetry plugin on first use. The shell snapshot copies the function into every agent shell
+    but not `$ZSH_CACHE_DIR`. Since oh-my-zsh `95ba6ae`, the plugin's disowned
+    `=( poetry completions zsh )` puts its temp file there, so it became `/completions/…`.
+    zsh 5.9 then frees memory it never malloc'd (fixed upstream after 5.9, not in Ubuntu 26.04).
+    `poetry` itself succeeded; only the background child died. A pipeline re-fired it on every
+    call, because the left side is a subshell and its `unfunction` never reached the parent.
+  - **Fix.** The wrapper sources the plugin in interactive shells only.
+  - **Tested.** `scripts/test-poetry-lazy.sh`, 10 checks, hermetic, CI `poetry-lazy-test`. All 7
+    mutants in a sweep were killed. Running sessions keep the old function until they restart.
+  - The evidence, and the other trigger seen (`read -t N < /dev/zero` as a sleep), are in
+    `docs/TROUBLESHOOTING.md`.
+
 - **An account dir's `projects/` can no longer fork from `~/.claude/projects` at launch, and a
   fork is reported where it is seen (DO-835).** personal-0's `projects/` was a real directory for a
   week from 2026-10-11, so its transcripts and memory were invisible to every other account.

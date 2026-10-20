@@ -417,3 +417,54 @@ with `~/.dotfiles`, and `/var` not about to trip auditd's `SUSPEND` action.
 
 Note the tripwire covers `kill(-1, …)` only — see `audit/99-logout-catch.rules`
 for why `kill(0, …)` and `kill(-pgid, …)` are deliberately left out.
+
+## "zsh crashed" system-error notifications (apport)
+
+Ubuntu pops up a "System program problem detected" / internal-error notice naming
+zsh, with no details, sometimes several times a day — and no terminal you have
+open has died. The popup is apport announcing a report it wrote; the report says
+whose shell it was.
+
+```bash
+ls -la /var/crash/                                    # _usr_bin_zsh.1000.crash is the popup
+grep -a -E '^(Date|Title|SignalName|ProcCwd):' /var/crash/_usr_bin_zsh.1000.crash
+grep -a -A1 '^ProcCmdline:' /var/crash/_usr_bin_zsh.1000.crash | cut -c1-200
+grep -a 'executable: /usr/bin/zsh' /var/log/apport.log | cut -c1-200   # every crash, not just reported ones
+```
+
+- **The popups understate it.** apport writes no new report while an unseen one
+  exists, and for a day after you have seen one it logs `already crashed 2 times,
+  ignoring` instead. `/var/log/apport.log` (readable via the `adm` group) has
+  every event.
+- **A command line starting `/usr/bin/zsh -c source …/shell-snapshots/snapshot-zsh-…`
+  is a Claude Code Bash-tool shell**, not one of yours.
+
+Real example (2026-10-09 to 10-20, 50+ crashes, SIGABRT with `free(): invalid
+pointer` or `munmap_chunk(): invalid pointer`, and SIGSEGV; every one whose
+command line apport logged was an agent shell). Three things lined up:
+
+- **A zsh 5.9 bug.** When `=( … )` cannot create its temp file, `getoutputfile()`
+  frees memory zsh never malloc'd. Fixed upstream after 5.9
+  ([zsh-workers 2023/msg00854](https://zsh.org/mla/workers/2023/msg00854.html));
+  Ubuntu 26.04's `5.9-8ubuntu3` does not have it.
+  `zsh -fc 'TMPPREFIX=/tmp/xxx/zsh; echo =(<<<"")'` exits 134.
+- **oh-my-zsh `95ba6ae`** (pulled here 2026-10-02) makes its completion-generating
+  plugins put that temp file under `$ZSH_CACHE_DIR/completions/`.
+- **`zshrc`'s lazy `poetry()` wrapper** sourced the poetry plugin on first use. The
+  shell snapshot copies the function but not `$ZSH_CACHE_DIR`, so in an agent
+  shell the temp path was `/completions/._poetry…`. The plugin runs that step
+  disowned (`&|`), so `poetry` itself succeeded and only the background child
+  died. And because the left side of a pipeline is a subshell, its `unfunction
+  poetry` never reached the parent: every `poetry … | tail` fired it again.
+
+The wrapper now sources the plugin in interactive shells only. State table:
+`scripts/test-poetry-lazy.sh` (10 checks, CI `poetry-lazy-test`). A session
+started before the fix keeps the old function in its snapshot until it restarts.
+Only a function that sources an oh-my-zsh plugin *outside* oh-my-zsh can hit
+this: `gh` and `docker` use the same pattern but load at startup, where
+`$ZSH_CACHE_DIR` is set.
+
+The other trigger seen (2026-10-11): **`read -t N < /dev/zero` used as a sleep.**
+zsh's `-t` only waits for the *first* byte, and `/dev/zero` never sends a
+newline, so `read` grows its buffer until allocation fails and zsh SIGSEGVs —
+under a 400 MB `ulimit -v` that took 29 s. Use `timeout N tail -f /dev/null`.
