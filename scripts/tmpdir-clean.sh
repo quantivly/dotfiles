@@ -94,7 +94,8 @@
 # FAILED. systemd-tmpfiles logs each path it could not remove ("Failed to
 # remove") or enter ("Opening directory ... failed") and goes on. Under the
 # root's d line it then exits 0, and under claude-<uid>'s e line 73 (v259
-# clean_item() drops the d line's result). Neither is a reason to fail a clean
+# clean_item() drops the d line's result; on v255 the 73 also depends on readdir
+# order, docs/TMPDIR.md). Neither is a reason to fail a clean
 # that did everything else, and a path that keeps failing would turn the unit
 # red every night. So its stderr is copied to $STATE/tmpfiles.err on its way to
 # the journal, those lines are counted into the log line's failed=, the first

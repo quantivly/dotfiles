@@ -174,6 +174,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`dotfiles-doctor` no longer reports `~/.cache/tmp` as a link with a missing source.**
+  `_dotfiles_link_map` read every `~/…:` key as a link, whatever dotbot directive it sat under.
+  `install.conf.yaml`'s `- create:` entry `~/.cache/tmp:` therefore became a null link with the
+  inferred source `tmp`, two ✗ on every run. Links are now read only inside `- link:` blocks.
+  `scripts/test-dotfiles-guard.sh` gains 4 rows (418 → 422), and 4 of 4 mutants are killed.
+- **The tmpdir-clean CI job no longer depends on which runner image it lands on.** Two rows
+  expected `systemd-tmpfiles` to exit 73 for an unreadable directory under `claude-<uid>/`. On
+  systemd 255 that holds only if nothing else in the directory is read after the failure, because
+  `dir_cleanup()` reuses its error variable for each entry's `statx()` (v259 does not). The fixture
+  had a sibling, so the status followed ext4's per-filesystem readdir order: image `20261012.334.1`
+  gave 73 and `20261018.339.1` gave 0. Both rows now hold the failing subtree alone. Reproduced and
+  verified in a systemd 255 container in both orders; the evidence is in `docs/TMPDIR.md`.
+
 - **Claude Code Bash-tool shells no longer crash zsh in the background on every `poetry` call.**
   From 2026-10-09 this put 50+ "zsh crashed" apport notifications on the desktop, with no
   details and nothing failing visibly.
