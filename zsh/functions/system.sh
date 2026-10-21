@@ -1116,6 +1116,15 @@ _dotfiles_link_map() {
       # Blank lines are not entry boundaries; treating them as one would flush a
       # half-read expanded entry and invent a default source for it.
       if ($0 ~ /^[[:space:]]*$/) next
+      # Only `- link:` declares links. `- create:` takes the same `~/path:` keys
+      # (with `mode:` beneath), and read as links each became a null link whose
+      # inferred source is in no tree: ~/.cache/tmp, a FAIL on every run.
+      if ($0 ~ /^-[[:space:]]*[A-Za-z_]+[[:space:]]*:/) {
+        d = $0; sub(/^-[[:space:]]*/, "", d); sub(/[[:space:]]*:.*$/, "", d)
+        inlink = (d == "link")
+        next
+      }
+      if (!inlink) next
       line = trim($0); ind = indent_of($0)
       first = substr(line, 1, 1)
       qt = ((first == DQ || first == SQ) && substr(line, 2, 1) == "~")

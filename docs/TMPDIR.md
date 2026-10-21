@@ -208,6 +208,17 @@ directory holding an old file exits 0 under the root's `d` line, and 73 under `c
 line. The top-level failures were silent leftovers, and the scratchpad ones turned the unit red.
 What [still fails](#what-systemd-tmpfiles-cannot-remove) after the pass below is now a warning.
 
+**On systemd 255 even the `e` line's 73 depends on readdir order.** v255.4's `dir_cleanup()`
+assigns each entry's `statx()` result to the same `r` that holds a failure, so the failure is reported
+only if nothing else in that directory is read after it. v259 tests `statx()` without assigning it.
+Measured 2026-10-21 in an `ubuntu:24.04` container (systemd `255.4-1ubuntu8.18`): two siblings in
+`claude-<uid>/`, one holding a mode-000 directory, gave 73 in one readdir order and 0 in the other,
+each twice, with the same single `Opening directory … failed` line. On ext4 that order is a hash
+seeded per filesystem, so each CI runner image is consistent and two images can disagree: two rows
+of `scripts/test-tmpdir-clean.sh` passed on image `20261012.334.1` and failed on `20261018.339.1`.
+Their fixtures now hold the failing subtree alone. `failed=` is counted from stderr, so it is
+unaffected.
+
 **So once the guard is written, `tmpdir-clean.sh` runs `chmod u+w` on every directory under the
 root that:**
 

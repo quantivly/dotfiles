@@ -515,6 +515,31 @@ check "last entry still parsed" "$(map2 | grep -c '^~/.last.zsh last.zsh 0$')"  
 check "entry ends with its block" "$(map2 | grep -c 'NOT-A-LINK-SOURCE')"             "0"
 check "no spurious entries (2)" "$(map2 | wc -l | tr -d ' ')"                         "6"
 
+# Only `- link:` declares links. `- create:` takes the same `~/path:` keys, with
+# `mode:` beneath where a link has `path:`. Read as links, install.conf.yaml's
+# `~/.cache/tmp:` became a null link with the inferred source `tmp`, which is in
+# no tree: dotfiles-doctor failed twice on every run from DO-824 on.
+mkdir -p "$TMPROOT/conf3"
+cat > "$TMPROOT/conf3/install.conf.yaml" <<'YAML'
+- create:
+    ~/.cache/tmp:
+      mode: 0700
+    ~/.made:
+- link:
+    ~/.before: before
+- create:
+    ~/.cache/other:
+      mode: 0700
+- link:
+    ~/.after: after
+YAML
+map3() { zrun "_dotfiles_link_map '$TMPROOT/conf3'"; }
+
+check "a create: entry is not a link"     "$(map3 | grep -c -E 'cache/tmp|made|cache/other')" "0"
+check "a link: block after create: reads" "$(map3 | grep -c '^~/.before before 0$')"          "1"
+check "a second link: block reads"        "$(map3 | grep -c '^~/.after after 0$')"            "1"
+check "no spurious entries (3)"           "$(map3 | wc -l | tr -d ' ')"                       "2"
+
 # Live-but-unlinked paths. `zsh` because ~/.zshrc sources all of it; `scripts`
 # because backup-*/audit-*/gnome-apply shell out to ~/.dotfiles/scripts/... and
 # systemd/herdr-server.service ExecStarts from there — a running unit whose next
@@ -1920,7 +1945,7 @@ check "every functions module parses" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=418
+EXPECTED_ROWS=422
 
 docs_claim() {
   local f="$DOTFILES/$1"

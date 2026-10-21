@@ -316,7 +316,14 @@ chmod -R u+rwx "$T/outside555"
 # Under claude-<uid>'s e line, what systemd-tmpfiles cannot open or remove makes
 # it exit 73, and that used to turn the unit red every night. The unreadable
 # directory is never given u+rx: the guard's walk did not look inside it.
+#
+# fresh's claude-<uid>/s is removed first, here and in the next row. systemd 255
+# (CI's) reuses dir_cleanup()'s r for each entry's statx(), so a failure is
+# reported only when nothing else in that directory is read after it. With s
+# beside sess the status followed readdir order, which on ext4 is a hash seeded
+# per filesystem: runner image 20261012 gave 73 and 20261018 gave 0. v259 keeps it.
 fresh
+rm -rf "$R/claude-$U/s"
 LK="$R/claude-$U/sess/scratchpad/fx/locked"
 { mkdir -p "$LK" && echo x > "$LK/f" && chmod 000 "$LK"; } || fatal "locked"
 rc="$(run)"
@@ -327,6 +334,7 @@ check "... and the path is echoed in the warning" \
 # A non-writable directory younger than its line, holding an old one: the old
 # one is given u+w and emptied, and cannot itself be removed until its parent ages.
 fresh
+rm -rf "$R/claude-$U/s"   # the readdir-order hazard above
 PP="$R/claude-$U/sess/p"
 { mkdir -p "$PP/child" && echo x > "$PP/child/f"; } || fatal "e3"
 find "$R/claude-$U/sess" -exec touch -h -d '-20 days' {} + || fatal "age"
