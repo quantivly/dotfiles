@@ -134,8 +134,12 @@ alias c='clear'
 alias x='exit'
 
 # Disk usage
-alias df='df -h'
-alias du='du -h'
+# Not in a Claude session: an agent parses df/du output and needs the standard
+# command (see "Agent shells" in zshrc.conditionals.tools).
+if [[ -z "${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+  alias df='df -h'
+  alias du='du -h'
+fi
 alias dud='du -d 1 -h'
 alias duf='du -sh *'
 

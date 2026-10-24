@@ -17,21 +17,33 @@ elif command -v fdfind &>/dev/null; then
   _FD_CMD="fdfind"
 fi
 
+# Agent shells keep the standard cat, ls, tree, df and du. Claude Code sets
+# CLAUDECODE (and CLAUDE_CODE_SESSION_ID) in every shell it runs, including the
+# one it captures its shell snapshot from, so the replacements below never reach
+# an agent. bat, eza, duf and dust change output that scripts parse, and bat
+# prints its own error lines where a script expects cat's. The same test is in
+# scripts/herdr-server-launch.sh. The non-shadowing names (catp, la, ll, lla,
+# duf-*, dust-*) stay everywhere.
+_AGENT_SHELL=
+[[ -n "${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ]] && _AGENT_SHELL=1
+
 # bat - Better cat with syntax highlighting (managed by mise)
 if [[ -n "$_BAT_CMD" ]]; then
-  alias cat="$_BAT_CMD --style=auto"
+  [[ -z "$_AGENT_SHELL" ]] && alias cat="$_BAT_CMD --style=auto"
   alias catp="$_BAT_CMD --style=plain"
   export BAT_THEME="Monokai Extended"
 fi
 
 # eza - Modern ls replacement (managed by mise)
 if command -v eza &>/dev/null; then
-  alias ls='eza --icons --group-directories-first'
+  if [[ -z "$_AGENT_SHELL" ]]; then
+    alias ls='eza --icons --group-directories-first'
+    alias tree='eza --tree --icons'
+  fi
   alias la='eza --icons --group-directories-first -a'
   alias ll='eza --icons --group-directories-first -lh'
   alias lla='eza --icons --group-directories-first -lha'
-  alias tree='eza --tree --icons'
-else
+elif [[ -z "$_AGENT_SHELL" ]]; then
   # Fallback to standard ls
   if ls --color=auto >/dev/null 2>&1; then
     alias ls='ls --color=auto --group-directories-first'
@@ -131,7 +143,7 @@ fi
 # duf - Modern df replacement with better visualization
 # Install: apt install duf (Ubuntu 21.04+) or https://github.com/muesli/duf
 if command -v duf &>/dev/null; then
-  alias df='duf'
+  [[ -z "$_AGENT_SHELL" ]] && alias df='duf'
   alias duf-json='duf --json'       # JSON output for scripting
   alias duf-all='duf --all'         # Show all filesystems
 fi
@@ -139,7 +151,7 @@ fi
 # dust - Intuitive du replacement
 # Install: cargo install du-dust or apt install du-dust (newer Ubuntu)
 if command -v dust &>/dev/null; then
-  alias du='dust'
+  [[ -z "$_AGENT_SHELL" ]] && alias du='dust'
   alias dust-tree='dust -d 3'      # Limit depth to 3 levels
   alias dust-size='dust -s'        # Sort by size
   alias dust-files='dust -f'       # Show files, not just directories
