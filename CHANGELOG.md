@@ -174,6 +174,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`df` shows disk usage, not a directory listing (DO-848).** `zshrc.aliases` defined
+  `duf='du -sh *'`, and zsh's `command -v duf` is satisfied by an alias, so the duf gate in
+  `zshrc.conditionals.tools` always passed. `df` then ran `df -> duf -> du -sh *`, with or
+  without duf installed. The `duf` alias is removed (`dud` remains for `du -d 1 -h`), and the
+  gate now tests `$+commands[duf]`, which only a binary on PATH satisfies.
+  - **The cheat gate had the same defect.** The tldr block's `cheat='tldr'` let it pass with no
+    cheat binary, defining `cs`/`csl`/`cse` as tldr calls. With both installed the alias
+    shadowed the binary, so `cs` still ran tldr. The gate now tests `$+commands[cheat]`, and
+    `cheat='tldr'` is defined only when no cheat binary exists.
+  - State table: `scripts/test-tool-alias-gates.sh` (13 checks, CI `tool-alias-gates-test`).
+
 - **`dotfiles-doctor` no longer reports `~/.cache/tmp` as a link with a missing source.**
   `_dotfiles_link_map` read every `~/…:` key as a link, whatever dotbot directive it sat under.
   `install.conf.yaml`'s `- create:` entry `~/.cache/tmp:` therefore became a null link with the

@@ -13,6 +13,8 @@
 #
 # Decision: Use direct `command -v tool &>/dev/null` checks throughout this file.
 # This is faster, simpler, more explicit, and easier to maintain.
+# Exception (DO-848): where an alias or function of the same name can exist by
+# then, gate on `(( $+commands[tool] ))`, which only a binary on PATH satisfies.
 #
 # DO NOT re-implement tool caching without empirical benchmarks showing benefit.
 # ==============================================================================

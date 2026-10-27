@@ -142,7 +142,10 @@ fi
 
 # duf - Modern df replacement with better visualization
 # Install: apt install duf (Ubuntu 21.04+) or https://github.com/muesli/duf
-if command -v duf &>/dev/null; then
+# $+commands, not `command -v`: zsh's `command -v` is also satisfied by an
+# alias or function, so a `duf` alias would pass this gate with no binary
+# installed (DO-848: zshrc.aliases once defined duf='du -sh *', and df ran it).
+if (( $+commands[duf] )); then
   [[ -z "$_AGENT_SHELL" ]] && alias df='duf'
   alias duf-json='duf --json'       # JSON output for scripting
   alias duf-all='duf --all'         # Show all filesystems
@@ -243,7 +246,9 @@ fi
 # Install: npm install -g tldr or apt install tldr (newer Ubuntu)
 if command -v tldr &>/dev/null; then
   alias help='tldr'
-  alias cheat='tldr'
+  # Only as a stand-in: over a real cheat binary it would turn cs/csl/cse into
+  # tldr calls.
+  (( $+commands[cheat] )) || alias cheat='tldr'
 
   # Update tldr database
   alias tldr-update='tldr --update'
@@ -251,7 +256,9 @@ fi
 
 # cheat - Interactive cheatsheets
 # Install: https://github.com/cheat/cheat#installing
-if command -v cheat &>/dev/null; then
+# $+commands, not `command -v`: the cheat='tldr' alias above would satisfy
+# `command -v` with no cheat binary installed (see the duf gate).
+if (( $+commands[cheat] )); then
   alias cs='cheat'                 # cheat search
   alias csl='cheat -l'             # list cheatsheets
   alias cse='cheat -e'             # edit cheatsheet

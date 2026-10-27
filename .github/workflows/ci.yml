@@ -178,6 +178,23 @@ jobs:
       - name: Run the lazy poetry wrapper state table
         run: ./scripts/test-poetry-lazy.sh
 
+  tool-alias-gates-test:
+    name: Tool Alias Gates State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
+      # df, du, duf, tldr and cheat are STUBBED on a PATH without /usr/bin, so a
+      # row reads which stub answered, never what this runner has installed.
+      - name: Run the duf and cheat gate state table
+        run: ./scripts/test-tool-alias-gates.sh
+
   dotfiles-guard-test:
     name: Dotfiles Live-Config Guard State Table
     runs-on: ubuntu-latest
