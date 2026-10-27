@@ -23,9 +23,9 @@
 # fetched. Adding a clone dev lacks and upgrading herdr are the things only a
 # laptop run does.
 #
-# A TIMER ON DEV, NOT ON THE LAPTOP. A laptop timer needs an `aws login` session
-# for SSM, which lasts about a day and is renewed by hand, and a laptop that is
-# asleep, suspended or off the VPN. The dev timer needs neither. It reaches
+# A TIMER ON DEV, NOT ON THE LAPTOP. A laptop timer needs a laptop that is awake
+# and an SSM credential that is valid (`dev-link-doctor` answers both), and this
+# laptop is often asleep or suspended. The dev timer needs neither. It reaches
 # GitHub with gh's file-based token, which has been proven for headless units on
 # dev (docs/HERDR_GUIDE.md, "Working on dev"). It runs daily rather than weekly
 # because a run with nothing to do is a few `git ls-remote`s: every step is
@@ -1071,7 +1071,7 @@ laptop_main() {
     dotfiles_head="$($ssh_cmd "$host" 'git -C ~/.dotfiles rev-parse HEAD' 2>/dev/null </dev/null)"
     if [[ ! "$dotfiles_head" =~ $SHA_RE ]]; then
         if ! $ssh_cmd "$host" true </dev/null; then
-            echo "dev-sync: cannot reach '$host' over ssh (SSM: is your 'aws login' session current?)" >&2
+            echo "dev-sync: cannot reach '$host' over ssh (SSM ProxyCommand failed: run dev-link-doctor)" >&2
             return 2
         fi
     fi

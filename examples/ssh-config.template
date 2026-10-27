@@ -26,7 +26,7 @@
 #   ✓ ControlMaster (speeds up connections)
 #   ✓ ServerAlive (prevents disconnections)
 #   ✓ Bitwarden IdentityAgent (if using Bitwarden SSH agent)
-#   ✓ ForwardAgent for trusted hosts (dev, staging, etc.)
+#   ✓ ForwardAgent for trusted hosts (staging, etc. — never dev, see below)
 #   ✓ Many Host definitions (your work infrastructure)
 #
 # CONTEXT 2: REMOTE EC2 DEVELOPMENT MACHINE (SSH Server + Client)
@@ -135,7 +135,7 @@ Host *
 # using your laptop's SSH keys (from Bitwarden or system agent).
 #
 # Pattern: List trusted work servers
-# Host dev staging demo2 qspace qproxy
+# Host staging demo2 qspace qproxy
 #     ForwardAgent yes
 
 # Pattern: Use wildcards for consistent naming
@@ -143,8 +143,8 @@ Host *
 #     ForwardAgent yes
 
 # Pattern: Specific server with full config
-# Host dev
-#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+# Host staging
+#     HostName [REPLACE: ec2-yy-yy-yy-yy.compute-1.amazonaws.com]
 #     User ubuntu
 #     ForwardAgent yes
 #     IdentityFile ~/.ssh/id_ed25519
@@ -156,11 +156,27 @@ Host *
 # Define all work servers you connect to. Replace [REPLACE] placeholders.
 # These should NOT be committed to dotfiles - keep in your personal ~/.ssh/config.
 
-# Development server
-# Host dev
-#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+# Development server: over AWS SSM Session Manager, so no VPN and no inbound port 22.
+# The ProxyCommand pins an AWS profile whose only permission is opening an SSM session
+# to this one instance. `default` must NOT be that profile: an `aws login` session is
+# capped at 12 hours by AWS, and an explicit --profile also makes the CLI ignore any
+# AWS_PROFILE or AWS_ACCESS_KEY_ID the calling shell exports. HostKeyAlias keeps the
+# host key filed under the instance's IP, so the VPN fallback below shares it.
+# ForwardAgent stays off: dev needs no laptop key (git there is HTTPS) and a forwarded
+# agent reaches every process on the box (docs/HERDR_GUIDE.md, "Working on dev").
+# How the link is checked and kept healthy: docs/DEV_LINK.md.
+# Host dev dev-ssm
+#     HostName [REPLACE: i-0123456789abcdef0]
 #     User ubuntu
-#     ForwardAgent yes
+#     HostKeyAlias [REPLACE: 54.x.x.x — the instance's public IP]
+#     ForwardAgent no
+#     ProxyCommand aws ssm start-session --profile dev-ssm --region us-east-1 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
+#
+# Fallback through the Client VPN (the security group allows only the VPN's exit address):
+# Host dev-vpn
+#     HostName [REPLACE: 54.x.x.x]
+#     User ubuntu
+#     ForwardAgent no
 
 # Staging environment
 # Host staging
@@ -275,33 +291,33 @@ Host *
 # --------------------------------------------------
 # Automatically creates or attaches to 'admin' session on every connection.
 #
-# Host dev
-#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+# Host staging
+#     HostName [REPLACE: ec2-yy-yy-yy-yy.compute-1.amazonaws.com]
 #     User ubuntu
 #     ForwardAgent yes
 #     RequestTTY yes
 #     RemoteCommand tmux new-session -A -s admin
 #
 # Usage:
-#   ssh dev           # Auto-creates/attaches to 'admin' session
+#   ssh staging           # Auto-creates/attaches to 'admin' session
 #   # Work, then disconnect (Ctrl+Space d or connection drop)
-#   ssh dev           # Instantly resumes to exact state
+#   ssh staging           # Instantly resumes to exact state
 #
 # Pattern 2: Bypass auto-tmux (for scp, one-off commands)
 # --------------------------------------------------------
 # Create parallel host alias without RemoteCommand for times when you
 # need direct shell access (scp, rsync, quick commands).
 #
-# Host dev-shell
-#     HostName [REPLACE: ec2-xx-xx-xx-xx.compute-1.amazonaws.com]
+# Host staging-shell
+#     HostName [REPLACE: ec2-yy-yy-yy-yy.compute-1.amazonaws.com]
 #     User ubuntu
 #     ForwardAgent yes
 #     # No RequestTTY or RemoteCommand
 #
 # Usage:
-#   ssh dev-shell                     # Direct shell, no tmux
-#   scp file.txt dev-shell:/path/     # Works without tmux interference
-#   ssh -o RemoteCommand=none dev     # Alternative bypass method
+#   ssh staging-shell                     # Direct shell, no tmux
+#   scp file.txt staging-shell:/path/     # Works without tmux interference
+#   ssh -o RemoteCommand=none staging     # Alternative bypass method
 #
 # Pattern 3: Project-specific sessions (multiple tasks per server)
 # -----------------------------------------------------------------

@@ -96,15 +96,19 @@ Host *
     # Bitwarden SSH agent — follow $SSH_AUTH_SOCK, don't hardcode the install path
     IdentityAgent SSH_AUTH_SOCK
 
-# Enable agent forwarding for work servers
-Host dev staging demo2 qspace
+# Enable agent forwarding for work servers (never for dev: see its block)
+Host staging demo2 qspace
     ForwardAgent yes
 
-# Define all servers you connect to
-Host dev
-    HostName ec2-xx-xx-xx-xx.compute-1.amazonaws.com
+# Define all servers you connect to. dev is reached over AWS SSM Session Manager with a
+# dedicated least-privilege AWS profile (docs/DEV_LINK.md): no VPN, no inbound port 22,
+# no forwarded agent.
+Host dev dev-ssm
+    HostName i-0123456789abcdef0
     User ubuntu
-    ForwardAgent yes
+    HostKeyAlias 54.x.x.x
+    ForwardAgent no
+    ProxyCommand aws ssm start-session --profile dev-ssm --region us-east-1 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
 
 Host staging
     HostName ec2-yy-yy-yy-yy.compute-1.amazonaws.com

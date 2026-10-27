@@ -130,6 +130,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The secret-emission guard refuses content reads of `~/.aws/credentials` and
+  `~/.aws/login/cache/`** (metadata verbs such as `ls` and `stat` stay allowed), because the dev
+  link's SSM profile keeps a long-lived IAM access key in the first and `aws login` keeps its
+  refresh token in the second. The ssh-config template and guide now show `dev` as it is really
+  reached, over SSM with a pinned least-privilege profile and `ForwardAgent no`, and `dev-sync`
+  points a failed ssh at `dev-link-doctor` instead of `aws login`. State table:
+  `scripts/test-secret-guard.sh` 196 → 202 checks.
+
 - **`dotfiles-work` creates worktrees under `~/.herdr/worktrees/.dotfiles/`**, not
   `~/dotfiles-worktrees/`, so the nightly `wt-gc-sweep` reaps a landed one (DO-824).
   `DOTFILES_WORKTREES` still overrides it.

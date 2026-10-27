@@ -75,7 +75,10 @@ Design decisions that are load-bearing, not preferences:
   `NOTION_PAT`, both reached the transcript, and both had to be rotated — the same class as
   the incident that created the hook, six days later. The rule added for it fires on
   `~/.zshrc.local`, `~/.gitconfig.local`, `~/.backup.local` and `~/.claude/.credentials.json`
-  (and, since 2026-10-14, dev's long-lived Claude token, `~/.config/claude-oauth/token.env`)
+  (and, since 2026-10-14, dev's long-lived Claude token, `~/.config/claude-oauth/token.env`;
+  since 2026-10-28, `~/.aws/credentials` and `~/.aws/login/cache/`, because the dev link's
+  SSM profile keeps a long-lived IAM access key in the first and `aws login` keeps its
+  refresh token in the second — docs/DEV_LINK.md, which lands with `dev-link-doctor`)
   and **needs two conditions, whose split is the whole design**: the PATH matches on the raw
   command (`$probe` has quoted strings stripped, so `cat "$HOME/.zshrc.local"` — the most
   natural spelling — would escape a `$probe` match), while the VERB matches on `$probe`.
@@ -156,7 +159,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (196 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (202 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this
