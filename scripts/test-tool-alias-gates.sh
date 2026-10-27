@@ -12,8 +12,9 @@
 #
 # The rule pinned here: `df` runs duf when the duf binary is on PATH and the
 # real df otherwise, and cs/csl/cse exist only for a real cheat binary and run
-# it. Each row RUNS the command and reads which stub answered, so an alias that
-# chains to the wrong binary fails even when the gate looks right.
+# it. A row either RUNS the command and reads which stub answered, so an alias
+# that chains to the wrong binary fails even when the gate looks right, or
+# asserts with `whence -w` that a name is not defined at all.
 #
 # HERMETIC. zsh -f, env -i, and a from-scratch PATH holding only the stubs the
 # row names, so no rc file or installed tool of the developer's reaches it. The
