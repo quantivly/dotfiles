@@ -259,10 +259,17 @@ for c in \
   'head -20 /home/zvi/.backup.local' \
   'less ~/.gitconfig.local' \
   'cat ~/.claude/.credentials.json' \
-  'cat ~/.config/claude-oauth/token.env'
+  'cat ~/.config/claude-oauth/token.env' \
+  'cat ~/.aws/credentials' \
+  'grep aws_secret_access_key ~/.aws/credentials' \
+  'jq . ~/.aws/login/cache/0123abcd.json'
 do
   check "refuses: $c" "$(ask "$c")" "deny"
 done
+# ~/.aws/credentials joined the list on 2026-10-28, when the dev link's SSM profile
+# put a long-lived IAM access key there (docs/DEV_LINK.md); ~/.aws/login/cache/
+# holds `aws login`'s refresh and access tokens. Metadata verbs stay allowed on
+# them exactly as on ~/.zshrc.local -- the two `allows:` rows below pin that.
 # The QUOTED path is the row that decides whether this rule works at all.
 # $probe has quoted strings stripped, so a rule matching the path on $probe
 # would miss the most natural spelling. Hence path-on-$cmd, verb-on-$probe.
@@ -285,6 +292,8 @@ for c in \
   'test -f ~/.zshrc.local && echo yes' \
   'wc -l ~/.zshrc.local' \
   'readlink -f ~/.zshrc.local' \
+  'ls -la ~/.aws/credentials' \
+  'stat -c %y ~/.aws/credentials' \
   'cat ~/.zshrc' \
   'grep -n pathadd ~/.dotfiles/zshrc'
 do
@@ -611,7 +620,8 @@ for c in \
   'mapfile -t a < ~/.zshrc.local' \
   'readarray -t a < ~/.zshrc.local' \
   'grep KEY < ~/.zshrc.local' \
-  'tr -d x < ~/.config/claude-oauth/token.env'
+  'tr -d x < ~/.config/claude-oauth/token.env' \
+  'tr -d x < ~/.aws/credentials'
 do
   check "refuses: $c" "$(ask "$c")" "deny"
 done
@@ -800,7 +810,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=196
+EXPECTED_ROWS=202
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.
