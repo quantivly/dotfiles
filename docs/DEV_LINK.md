@@ -162,4 +162,8 @@ SURVIVED: the row meant to pin their order compared `grep -n`'s output with the 
 sorted, and `grep -n` prints in file order, so the two were always equal and the row could not
 fail. It now compares the two line numbers, and the mutant dies on it. The one documented
 survivor class is the totals guard's own blind spot: deleting a row and lowering
-`EXPECTED_ROWS` cannot be caught by the suite that does it.
+`EXPECTED_ROWS` cannot be caught by the suite that does it. The timer half's sweep, same day,
+nine mutants, all killed: exit 1 while dev is down, notify every tick, a body that interpolates
+the host and the time, no log truncation, a `Condition*` on the service, `Persistent=true` on
+the timer, a fresh ssh every tick, a fresh ssh skipped while the link is down, and the
+`notified` marker written although `notify-send` failed.
