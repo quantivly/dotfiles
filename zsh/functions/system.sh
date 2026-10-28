@@ -4058,3 +4058,14 @@ dock-lid-setup() {
   fi
   bash "${root}/scripts/setup-dock-lid.sh" "$@"
 }
+
+# The dock Wi-Fi guard (docs/DOCK_WIFI.md): same resolution rule as dock-lid-setup.
+dock-wifi-setup() {
+  local root="${HOME}/.dotfiles" here
+  here="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"
+  if [[ -n "$here" && -x "${here}/scripts/setup-dock-wifi.sh" ]] \
+     && [[ "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" -ef "${HOME}/.dotfiles/.git" ]]; then
+    root="$here"
+  fi
+  bash "${root}/scripts/setup-dock-wifi.sh" "$@"
+}

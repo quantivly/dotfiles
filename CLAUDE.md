@@ -675,6 +675,7 @@ audit-status         # Tripwire armed, on, recording? Every audit-* : see Audit 
 vpn-doctor           # VPN chain health. Every vpn-* : see the VPN section
 dev-link-doctor      # Can an agent reach dev over SSM now? credential, key age, agent, fresh ssh (--offline)
 dock-lid-setup       # Dock lid guards, COPIED to /etc; reloads logind, NEVER restarts it (--check)
+dock-wifi-setup      # Wi-Fi off while docked on wired (one uplink); --check, --remove turns it back on
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)

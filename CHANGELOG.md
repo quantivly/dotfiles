@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A docked laptop keeps one uplink.** `dock-wifi-setup` installs, root-owned and copied, a
+  NetworkManager dispatcher shim, `/usr/local/bin/dock-wifi.sh` and a `dock-wifi-sync.service`
+  oneshot: the Wi-Fi radio is off while a managed ethernet device is connected and on again when
+  none is, re-evaluated on every link event, at boot (after `network-online.target`) and after
+  resume, with a 20-second grace period while a wired device is still coming up. Measured over a fortnight,
+  four tunnel drops came exactly 20 s after a home Wi-Fi flap while the dock's wired link was up.
+  A pure function of NetworkManager's current state, no markers: NetworkManager persists
+  `radio wifi off` across reboots, so a marker design strands a laptop booted undocked.
+  `--remove` turns the radio back on. State table `scripts/test-dock-wifi.sh`; record
+  `docs/DOCK_WIFI.md`.
 - **`dev-link-probe.timer` watches the ssh-over-SSM path to dev every 10 minutes and says so when it
   has been down for 20.** `scripts/dev-link-probe.sh --once` (the same probes `dev-link-doctor`
   uses) appends one line per tick to `~/.local/state/dev-link/probe.log`, keeps `down-since` and

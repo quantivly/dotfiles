@@ -1,0 +1,20 @@
+[Unit]
+Description=Keep a docked laptop single-homed: Wi-Fi off while a wired link is connected
+Documentation=https://github.com/quantivly/dotfiles/blob/main/docs/DOCK_WIFI.md
+# Two of the three triggers. The dispatcher covers link events; this oneshot covers the two
+# moments no link event fires: boot (NetworkManager persists `radio wifi off` across reboots,
+# so a laptop shut down docked and booted undocked would stay offline) and resume from any
+# kind of sleep (the dock may have been unplugged while asleep). After=<sleep target> on a
+# unit wanted by that target is systemd's idiom for "run after resume".
+# network-online.target, not NetworkManager.service alone: NetworkManager is "active" when it
+# owns its bus name, 10-15 s before the dock's ethernet is `connected` (measured), and the
+# script's own grace period covers resume, where no target waits for devices.
+After=NetworkManager.service network-online.target suspend.target hibernate.target suspend-then-hibernate.target hybrid-sleep.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dock-wifi.sh --sync
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target suspend-then-hibernate.target hybrid-sleep.target

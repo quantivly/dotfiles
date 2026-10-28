@@ -1,0 +1,5 @@
+#!/bin/sh
+# NetworkManager dispatcher shim: every event goes to dock-wifi.sh, which acts only on the
+# actions that can change whether a wired device is connected. Installed root-owned 0755 to
+# /etc/NetworkManager/dispatcher.d by setup-dock-wifi.sh; the logic lives in /usr/local/bin.
+exec /usr/local/bin/dock-wifi.sh --dispatch "$1" "$2"
