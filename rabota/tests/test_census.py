@@ -42,6 +42,9 @@ class CensusTests(unittest.TestCase):
             # this setUp, so census.machines() asks remote.read for zero out_dirs and no stream
             # section — streams=() keeps the reply's section count matching that request.
             (["ssh"], Result(0, payload(marker=FIXED_MARKER, streams=()), "")),
+            # the fixture's dev machine declares aws_profile = "dev-ssm": an UNREACHABLE dev is
+            # classified by asking sts whether the credential behind the ProxyCommand is alive
+            (["aws", "--profile", "dev-ssm"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', "")),
         ])
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(self.tmp.name) / "s"), text=False, dry_run=False)
         self.ctx = context.Context.from_namespace(ns, cfg_base=FIX / "config", runner=self.runner, env={"PATH": "/bin"}, cwd=Path("/"))
@@ -262,6 +265,7 @@ class CensusTests(unittest.TestCase):
             (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
             (["wt-gc", "--tsv"], Result(127, "", "not found")),
             (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
+            (["aws", "--profile", "dev-ssm"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', "")),  # an unreachable dev is classified by sts; these runners parse as unreachable
         ])
         ctx = self.ctx
         ctx.runner = runner
@@ -388,6 +392,7 @@ class CensusTests(unittest.TestCase):
             (["systemctl", "--user", "list-units"], Result(0, (FIX / "census" / "units.json").read_text(), "")),
             (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
             (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
+            (["aws", "--profile", "dev-ssm"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', "")),  # an unreachable dev is classified by sts; these runners parse as unreachable
         ])
         with context.track_contexts() as opened:
             c = cmd._run(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
@@ -408,6 +413,7 @@ class CensusTests(unittest.TestCase):
             (["clauth", "status", "--json"], Result(0, (FIX / "census" / "clauth_status.json").read_text(), "")),
             (["wt-gc", "--tsv"], Result(0, (FIX / "census" / "wt_gc.tsv").read_text(), "")),
             (["ssh"], Result(0, payload(streams=()), "")),  # census.machines(): 0 out_dirs, streams=() matches
+            (["aws", "--profile", "dev-ssm"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', "")),  # an unreachable dev is classified by sts; these runners parse as unreachable
         ])
         with context.track_contexts() as opened:
             c = cmd._run(ns, cfg_base=FIX / "config", runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
@@ -474,7 +480,7 @@ class MachinesTests(unittest.TestCase):
         self.assertEqual(unavailable, [])
 
     def test_an_unreachable_machine_is_named_unavailable(self):
-        ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route"))]))
+        ctx = self.ctx(FakeRunner([(["ssh"], Result(255, "", "no route")), (["aws", "--profile", "dev-ssm"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', ""))]))
         rows, unavailable = census.machines(ctx)
         self.assertFalse(rows[0]["reachable"])
         self.assertIn("machine:dev", unavailable)
@@ -629,3 +635,26 @@ class CensusCmdTextLinesTests(unittest.TestCase):
         self.assertEqual(lines[0], "dry-run: nothing written (census.json)")
         del c["dry_run"]
         self.assertFalse(text_lines(c)[0].startswith("dry-run:"))
+
+
+class UnreachableClassificationTests(unittest.TestCase):
+    setUp = CensusTests.setUp   # the same fixtures, without re-running the whole table
+    def test_an_unreachable_dev_with_a_dead_credential_names_the_credential(self):
+        self.runner.responses.insert(0, (["ssh"], Result(255, "", "Connection closed by UNKNOWN port 65535")))
+        self.runner.responses.insert(0, (["aws"], Result(255, "", "Unable to locate credentials")))
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        row = c["machines"][0]
+        self.assertFalse(row["reachable"])
+        self.assertTrue(row["error"].startswith("SSM credentials for dev (profile dev-ssm): Unable to locate credentials"), row["error"])
+        self.assertIn("machine:dev", c["unavailable"])
+
+    def test_an_unreachable_dev_with_a_live_credential_keeps_sshs_error_and_the_hint(self):
+        self.runner.responses.insert(0, (["ssh"], Result(255, "", "Connection closed by UNKNOWN port 65535")))
+        c = census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        row = c["machines"][0]
+        self.assertFalse(row["reachable"])
+        self.assertEqual(row["error"], "Connection closed by UNKNOWN port 65535 (the ProxyCommand failed before the banner: run dev-link-doctor)")
+
+    def test_a_reachable_dev_asks_sts_nothing(self):
+        census.gather(self.ctx, proc=self.proc, sample_seconds=0.01, sleeper=lambda s: None)
+        self.assertEqual([c for c in self.runner.calls if c[:1] == ["aws"]], [])

@@ -13,6 +13,8 @@ Without `--run` this only prints the argv (a dry-run recipe), and `--machine` ma
 On a remote machine `--repo` is a **key** into `[machines.<m>].repos` (`dotfiles`, `hub`),
 not a path; locally it is a path fragment under the tenant root. The error quotes your path
 back as though a path were wanted.
+A machine reached over an SSM ProxyCommand declares `aws_profile` and `aws_user`; preflight
+checks that credential before dispatch and census names it when the machine is unreachable.
 With `--run`, `--machine dev` is **required** — the local `--run` form is not implemented and
 refuses. With `--run` it is one call, one unit: `rabota budget` gates the seat before anything starts, and the CLI refuses with the seat's
 `resets_at` when the window is spent — do not retry around a refusal, print it and continue.

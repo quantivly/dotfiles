@@ -15,6 +15,7 @@ Unreachable is a measurement, never a zero: a caller that reads a missing key as
 bug this module's shape exists to prevent.
 """
 import tempfile
+import json
 import uuid
 from pathlib import Path
 
@@ -42,6 +43,60 @@ def ssh_argv(machine, script: str) -> list[str]:
     ``script`` is the caller's problem to quote — this only wraps it, it inspects nothing.
     """
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", machine.ssh, script]
+
+
+# One sts call per machine per check: long enough for a cold CLI start, short enough that a
+# credential that stalls (IMDS, a dead endpoint) is a FAIL rather than a hang.
+CREDENTIAL_TIMEOUT_S = 15
+PROXY_DEATH_MARKERS = ("UNKNOWN port 65535", "kex_exchange_identification")
+PROXY_DEATH_HINT = " (the ProxyCommand failed before the banner: run dev-link-doctor)"
+
+
+def ssh_failure_hint(res) -> str:
+    """The one line that tells an ssh failure over an SSM ProxyCommand apart from a dead host.
+
+    ``Connection closed by UNKNOWN port 65535`` is OpenSSH reporting that its ProxyCommand exited
+    before the banner -- here, `aws ssm start-session` refusing because the credential behind
+    its --profile is dead or wrong. It reads like a network fault and is not one.
+    """
+    if res.ok:
+        return ""
+    text = f"{res.err or ''}\n{res.out or ''}"
+    return PROXY_DEATH_HINT if any(m in text for m in PROXY_DEATH_MARKERS) else ""
+
+
+def credential_argv(machine) -> list[str]:
+    """The sts call that proves the machine's ProxyCommand credential: --profile pinned (botocore
+    then ignores AWS_PROFILE / AWS_ACCESS_KEY_ID from the environment), JSON, no pager."""
+    return ["aws", "--profile", machine.aws_profile, "sts", "get-caller-identity",
+            "--output", "json", "--no-cli-pager"]
+
+
+def credential_check(runner, machine, env: dict | None = None,
+                     timeout: float = CREDENTIAL_TIMEOUT_S) -> tuple[bool, str]:
+    """``(True, "")`` when the machine declares no ``aws_profile`` or its credential resolves to the
+    declared ``aws_user``; otherwise ``(False, why)`` with the machine, the profile and the CLI's
+    own first line, never the account id. IMDS is disabled for the call so a profile that resolves
+    nothing fails in milliseconds instead of stalling on 169.254.169.254."""
+    if not machine.aws_profile:
+        return True, ""
+    call_env = dict(env or {})
+    call_env["AWS_EC2_METADATA_DISABLED"] = "true"
+    label = f"SSM credentials for {machine.name} (profile {machine.aws_profile})"
+    res = runner.run(credential_argv(machine), env=call_env, timeout=timeout)
+    if not res.ok:
+        first_line = (res.err or res.out or "").strip().splitlines()
+        return False, f"{label}: {first_line[0] if first_line else f'exit {res.code}'}"
+    try:
+        arn = json.loads(res.out).get("Arn", "")
+    except (ValueError, AttributeError):
+        arn = ""
+    if not isinstance(arn, str) or ":" not in arn:
+        return False, f"{label}: unreadable identity from sts"
+    principal = arn.rsplit(":", 1)[-1]      # user/<name> or assumed-role/<role>/<session>
+    if machine.aws_user and principal != f"user/{machine.aws_user}":
+        return False, f"{label}: identity is {principal}, expected user/{machine.aws_user}"
+    return True, ""
 
 
 def build_argv(machine, lane_out_dirs: list[str], marker: str = MARKER) -> list[str]:
@@ -139,7 +194,7 @@ def read(runner, machine, lane_out_dirs: list[str], timeout: float = 30) -> dict
     res = runner.run(build_argv(machine, lane_out_dirs, marker=marker), timeout=timeout)
     if not res.ok:
         return {"name": machine.name, "reachable": False,
-                "error": (res.err or res.out or f"exit {res.code}").strip()}
+                "error": (res.err or res.out or f"exit {res.code}").strip() + ssh_failure_hint(res)}
     try:
         return parse(machine.name, res.out, expected_sections=4 + len(lane_out_dirs), marker=marker)
     except Exception as e:  # noqa: BLE001

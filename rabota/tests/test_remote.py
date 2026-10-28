@@ -255,3 +255,83 @@ class RemoteReadTests(unittest.TestCase):
             r = remote.read(FakeRunner([(["ssh"], Result(0, empty, ""))]), MACHINE, [])
         self.assertTrue(r["reachable"])
         self.assertEqual(r["units"], [])
+
+
+def _dev(**kw):
+    fields = dict(name="dev", ssh="dev", tenants=["quantivly"], aws_profile="dev-ssm", aws_user="cilantro-dev-ssm")
+    fields.update(kw)
+    return Machine(**fields)
+
+IDENTITY_OK = '{"UserId": "AIDAX", "Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}'
+IDENTITY_ADMIN = '{"UserId": "AIDAY", "Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/AdminZvi"}'
+
+
+class CredentialCheckTests(unittest.TestCase):
+    def test_argv_pins_the_profile_and_asks_sts_for_json(self):
+        self.assertEqual(remote.credential_argv(_dev()),
+                         ["aws", "--profile", "dev-ssm", "sts", "get-caller-identity",
+                          "--output", "json", "--no-cli-pager"])
+
+    def test_a_machine_without_a_profile_is_unchecked_and_issues_no_call(self):
+        runner = FakeRunner([])
+        m = Machine(name="box", ssh="box", tenants=["toysim"])
+        self.assertEqual(remote.credential_check(runner, m), (True, ""))
+        self.assertEqual(runner.calls, [])
+
+    def test_the_expected_user_passes(self):
+        runner = FakeRunner([(["aws"], Result(0, IDENTITY_OK, ""))])
+        self.assertEqual(remote.credential_check(runner, _dev()), (True, ""))
+
+    def test_imds_is_disabled_for_the_call(self):
+        # A profile that does not resolve must fail in milliseconds, not stall on 169.254.169.254.
+        seen = {}
+        class EnvRunner(FakeRunner):
+            def run(self, argv, *, env=None, **kw):
+                seen["env"] = env; return super().run(argv, env=env, **kw)
+        runner = EnvRunner([(["aws"], Result(0, IDENTITY_OK, ""))])
+        remote.credential_check(runner, _dev(), env={"PATH": "/bin"})
+        self.assertEqual(seen["env"].get("AWS_EC2_METADATA_DISABLED"), "true")
+        self.assertEqual(seen["env"].get("PATH"), "/bin")
+
+    def test_a_failed_call_names_the_machine_the_profile_and_the_clis_reason(self):
+        runner = FakeRunner([(["aws"], Result(255, "", "Unable to locate credentials. You can configure credentials by running \"aws configure\".\n"))])
+        ok, why = remote.credential_check(runner, _dev())
+        self.assertFalse(ok)
+        self.assertTrue(why.startswith("SSM credentials for dev (profile dev-ssm): Unable to locate credentials"), why)
+
+    def test_the_wrong_identity_fails_with_both_names_and_no_account_id(self):
+        runner = FakeRunner([(["aws"], Result(0, IDENTITY_ADMIN, ""))])
+        ok, why = remote.credential_check(runner, _dev())
+        self.assertFalse(ok)
+        self.assertIn("identity is user/AdminZvi, expected user/cilantro-dev-ssm", why)
+        self.assertNotIn("123456789012", why)
+
+    def test_an_unpinned_user_accepts_any_identity(self):
+        runner = FakeRunner([(["aws"], Result(0, IDENTITY_ADMIN, ""))])
+        self.assertEqual(remote.credential_check(runner, _dev(aws_user=None)), (True, ""))
+
+    def test_unreadable_identity_json_fails(self):
+        runner = FakeRunner([(["aws"], Result(0, "not json", ""))])
+        ok, why = remote.credential_check(runner, _dev())
+        self.assertFalse(ok); self.assertIn("unreadable identity", why)
+
+    def test_a_timed_out_call_is_a_failure_not_a_hang(self):
+        runner = FakeRunner([(["aws"], Result(124, "", ""))])
+        ok, why = remote.credential_check(runner, _dev())
+        self.assertFalse(ok); self.assertIn("exit 124", why)
+
+
+class SshFailureHintTests(unittest.TestCase):
+    def test_a_proxycommand_death_is_named(self):
+        res = Result(255, "", "kex_exchange_identification: Connection closed by remote host\nConnection closed by UNKNOWN port 65535\n")
+        self.assertEqual(remote.ssh_failure_hint(res), " (the ProxyCommand failed before the banner: run dev-link-doctor)")
+
+    def test_other_failures_get_no_hint(self):
+        self.assertEqual(remote.ssh_failure_hint(Result(255, "", "ssh: connect to host dev port 22: Connection timed out\n")), "")
+        self.assertEqual(remote.ssh_failure_hint(Result(0, "ok", "")), "")
+
+    def test_read_carries_the_hint_into_the_unreachable_row(self):
+        runner = FakeRunner([(["ssh"], Result(255, "", "Connection closed by UNKNOWN port 65535\n"))])
+        row = remote.read(runner, _dev(), [])
+        self.assertFalse(row["reachable"])
+        self.assertEqual(row["error"], "Connection closed by UNKNOWN port 65535 (the ProxyCommand failed before the banner: run dev-link-doctor)")

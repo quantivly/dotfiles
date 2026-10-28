@@ -419,6 +419,11 @@ def machines(ctx) -> tuple[list[dict], list[str]]:
         row = remote.read(ctx.runner, m, out_dirs)
         if not row.get("reachable"):
             unavailable.append(f"machine:{name}")
+            # Name the dependency that failed, if the machine declares one: a dead credential
+            # behind the ProxyCommand reads, from ssh, exactly like a dead host.
+            cred_ok, why = remote.credential_check(ctx.runner, m, env=ctx.env)
+            if not cred_ok:
+                row["error"] = why
         rows.append(row)
     return rows, unavailable
 

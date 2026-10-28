@@ -161,6 +161,18 @@ def parse_show(out: str) -> dict:
     return d
 
 
+def remote_credentials(ctx) -> list[tuple[str, bool, str]]:
+    """Per machine that declares ``aws_profile``: does the credential behind its ssh ProxyCommand
+    resolve to the declared user, right now? A machine without one has no row."""
+    rows = []
+    for name, m in sorted(ctx.tenant.machines.items()):
+        if not m.aws_profile:
+            continue
+        ok, why = remote.credential_check(ctx.runner, m, env=ctx.env)
+        rows.append((name, ok, why or f"profile {m.aws_profile} is user/{m.aws_user or '<unpinned>'}"))
+    return rows
+
+
 def slice_headroom(ctx) -> list[tuple[str, bool, str]]:
     """Per remote machine: does ``max_lanes_local`` x ``lanes.memory_max`` fit inside its lane slice?
 
@@ -698,6 +710,10 @@ def run_doctor(ctx: Context, clauth_profiles=None, now: datetime.datetime | None
     for name, ok, detail in seat_rows:
         if not ok:
             problems.append(f"seat cache for machine {name!r}: {detail}")
+    credential_rows = remote_credentials(ctx)
+    for name, ok, detail in credential_rows:
+        if not ok:
+            problems.append(f"{detail} (machine {name!r}: run dev-link-doctor)")
     slice_rows = slice_headroom(ctx)
     for name, ok, detail in slice_rows:
         if not ok:
@@ -730,7 +746,7 @@ def run_doctor(ctx: Context, clauth_profiles=None, now: datetime.datetime | None
     return {"tenant": ctx.tenant.name, "state_dir": str(ctx.state_dir), "config_ok": True,
             "db_schema": schema, "links": {"rabota": link_ok}, "timer": {"state": timer_state},
             "tenant_repos": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in repo_rows],
-            "seat_cache": as_rows(seat_rows), "slice_headroom": as_rows(slice_rows),
+            "seat_cache": as_rows(seat_rows), "remote_credentials": as_rows(credential_rows), "slice_headroom": as_rows(slice_rows),
             "remote_seat": as_rows(identity_rows),
             "schedule_timers": [{"tenant": n, "ok": ok, "detail": d} for n, ok, d in timer_rows],
             "schedule_overdue": as_runs(overdue_rows), "schedule_stuck": as_runs(stuck_rows),

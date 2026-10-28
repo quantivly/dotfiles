@@ -81,13 +81,15 @@ def remote_ok():
     to the second entry and yields an account payload instead of a slice one -- which fails the
     row rather than passing it. Anything else doctor sends over ssh is the account probe.
     """
-    return [(SLICE_CALL, slice_result(20 * GIB)), (["ssh"], account_result())]
+    return [(SLICE_CALL, slice_result(20 * GIB)), (["ssh"], account_result()),
+            (["aws"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', ""))]
 
 
 def healthy_runner():
     return FakeRunner([
         (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
         (["systemctl", "--user", "is-enabled"], Result(0, "enabled\n", "")),
+        (["aws"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', "")),
     ])
 
 
@@ -134,6 +136,7 @@ class DoctorTests(unittest.TestCase):
                     # quantivly is the only fixture tenant with a seated machine (dev); the
                     # others never call claude-pick or ssh, so these are unused for them.
                     (["claude-pick"], Result(0, json.dumps({"usage": {"cache_age_s": 30}}), "")),
+                    (["aws"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', "")),
                 ] + remote_ok())
                 ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name) / "state"),
                                         text=False, dry_run=False, command="doctor")
@@ -893,6 +896,7 @@ class CrossMachineWiringTests(unittest.TestCase):
         return FakeRunner([
             (["readlink", "-f"], Result(0, str(Path.home() / ".dotfiles/scripts/rabota") + "\n", "")),
             (["systemctl", "--user", "is-enabled"], Result(0, "enabled\n", "")),
+            (["aws"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', "")),  # the fixture dev declares a credential
             (["claude-pick"], Result(0, json.dumps({"usage": {"cache_age_s": 30}}), "")),
         ] + list(extra))
 
@@ -1354,3 +1358,32 @@ class SchedulerHealthWiringTests(SchedulerHealthBase):
         }
         for kind, needle in NEEDLES.items():
             self.assertEqual([k for k, t in texts.items() if needle in t], [kind], needle)
+
+
+class RemoteCredentialRowTests(unittest.TestCase):
+    def ctx(self, runner):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        return ctx
+
+    def test_a_live_credential_is_one_green_row_naming_the_user(self):
+        runner = FakeRunner([(["aws"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', ""))])
+        rows = doctor.remote_credentials(self.ctx(runner))
+        self.assertEqual(rows, [("dev", True, "profile dev-ssm is user/cilantro-dev-ssm")])
+
+    def test_a_dead_credential_is_a_red_row_with_the_clis_reason(self):
+        runner = FakeRunner([(["aws"], Result(255, "", "Unable to locate credentials\n"))])
+        rows = doctor.remote_credentials(self.ctx(runner))
+        self.assertEqual([(n, ok) for n, ok, _ in rows], [("dev", False)])
+        self.assertTrue(rows[0][2].startswith("SSM credentials for dev (profile dev-ssm): Unable to locate credentials"))
+
+    def test_a_tenant_whose_machines_declare_no_credential_has_no_rows_and_no_calls(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ns = argparse.Namespace(tenant="toysim", state_dir=str(Path(tmp.name)), text=False, dry_run=False)
+        runner = FakeRunner([])
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env={"PATH": "/bin"}, cwd=Path("/"))
+        self.addCleanup(ctx.close)
+        self.assertEqual(doctor.remote_credentials(ctx), [])
+        self.assertEqual(runner.calls, [])

@@ -69,6 +69,14 @@ class Machine:
     # a REFUSAL rather than an override -- see _tenant -- because a second copy that merely loses
     # is still a second copy, and the losing one is the one somebody will edit.
     profile: str | None = None
+    # The AWS profile behind the machine's ssh ProxyCommand (`aws ssm start-session --profile`),
+    # and the IAM user it must resolve to. Both optional: a machine reached without SSM declares
+    # neither and is never asked. With them, preflight checks the credential BEFORE a lane is
+    # dispatched and census names it when the machine is unreachable (DEV_LINK.md in dotfiles):
+    # the credential behind the ProxyCommand was an `aws login` session capped at 12 h, and
+    # every dead-credential outage read as ssh's generic "Connection closed by UNKNOWN port".
+    aws_profile: str | None = None
+    aws_user: str | None = None
 
 
 @dataclass

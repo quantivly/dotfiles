@@ -382,7 +382,8 @@ def resolve_remote(ctx, machine) -> dict:
         # parse -- the message then named nothing at all ("could not resolve  on dev: ...").
         raise errors.Refused(
             f"could not resolve {', '.join(missing) or 'the machine (ssh failed)'} on "
-            f"{machine.name}: {(res.err or res.out or 'no paths returned').strip()}")
+            f"{machine.name}: {(res.err or res.out or 'no paths returned').strip()}"
+            f"{remote.ssh_failure_hint(res)}")
     return {"home": home, "path": path, "claude_bin": claude_bin}
 
 

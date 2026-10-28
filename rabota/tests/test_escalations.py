@@ -20,6 +20,7 @@ SKILL = Path(__file__).parents[2] / "claude" / "skills" / "rabota" / "SKILL.md"
 HERDR_OK = (["herdr", "notification", "show"], Result(0, "", ""))
 NOTIFY_OK = (["notify-send"], Result(0, "", ""))
 SSH_OK = (["ssh-add", "-l"], Result(0, "256 SHA256:abc key (ED25519)\n", ""))
+AWS_OK = (["aws", "--profile", "dev-ssm"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', ""))
 NOW = datetime(2026, 9, 16, 8, 10, tzinfo=timezone.utc)
 
 
@@ -37,7 +38,7 @@ class Base(unittest.TestCase):
             tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
             state_dir = Path(tmp.name)
         ns = argparse.Namespace(tenant=tenant, state_dir=str(state_dir), text=False, dry_run=dry_run)
-        c = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner or FakeRunner([HERDR_OK, NOTIFY_OK]),
+        c = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner or FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK]),
                                             env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(c.close)
         return c
@@ -45,7 +46,7 @@ class Base(unittest.TestCase):
 
 class EscalateNotifiesTheDesktopTests(Base):
     def test_creation_sends_one_herdr_and_one_desktop_notification(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         out = escalate.run_escalate(self.ctx(runner), "merge HUB-1?", "e", ["merge", "wait"], kind="decision")
         self.assertEqual(len(herdr_calls(runner)), 1)          # the herdr notification stays
         self.assertEqual(len(desktop_calls(runner)), 1)
@@ -55,13 +56,13 @@ class EscalateNotifiesTheDesktopTests(Base):
         self.assertEqual(argv[5], f"rabota ESC-{out['id']}: merge HUB-1?")
 
     def test_urgency_critical_reaches_notify_send(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         escalate.run_escalate(self.ctx(runner), "q", "e", [], urgency="critical")
         argv = desktop_calls(runner)[0]
         self.assertEqual(argv[argv.index("--urgency") + 1], "critical")
 
     def test_a_critical_one_carries_rabotas_own_sound_and_a_warning_icon(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         out = escalate.run_escalate(self.ctx(runner), "q", "e", [], urgency="critical")
         argv = desktop_calls(runner)[0]
         self.assertEqual(argv[5:9], ["--icon", "dialog-warning", "--hint", "string:sound-name:dialog-question"])
@@ -70,7 +71,7 @@ class EscalateNotifiesTheDesktopTests(Base):
 
     def test_a_normal_or_low_one_stays_silent(self):
         for urgency in ("normal", "low"):
-            runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+            runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
             escalate.run_escalate(self.ctx(runner), "q", "e", [], urgency=urgency)
             argv = desktop_calls(runner)[0]
             self.assertNotIn("--hint", argv, urgency)
@@ -78,7 +79,7 @@ class EscalateNotifiesTheDesktopTests(Base):
             self.assertEqual(len(argv), 7, urgency)
 
     def test_the_body_carries_no_free_text_because_gnome_renders_markup_there(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         question = 'click <a href="https://example.invalid">here</a> & go'
         out = escalate.run_escalate(self.ctx(runner), question, "e", [])
         body = desktop_calls(runner)[0][-1]
@@ -86,13 +87,13 @@ class EscalateNotifiesTheDesktopTests(Base):
         self.assertNotIn("<", body)
 
     def test_the_summary_is_one_line_and_cannot_be_read_as_markup_by_any_daemon(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         out = escalate.run_escalate(self.ctx(runner), 'see <a href="x">this</a>\n& <b>that</b>', "e", [])
         summary = desktop_calls(runner)[0][-2]
         self.assertEqual(summary, f'rabota ESC-{out["id"]}: see ‹a href="x"›this‹/a› ＆ ‹b›that‹/b›')
 
     def test_a_long_question_is_cut_at_a_word_boundary_with_an_ellipsis(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         q = "s-233aa84f scheduler smoke: does a command run record and escalate?: fail, exit 1. Smoke run"
         out = escalate.run_escalate(self.ctx(runner), q, "e", [])
         summary = desktop_calls(runner)[0][-2]
@@ -100,19 +101,19 @@ class EscalateNotifiesTheDesktopTests(Base):
         self.assertLessEqual(len(summary) - len(f"rabota ESC-{out['id']}: "), escalate.TITLE_CHARS + 1)
 
     def test_a_question_with_no_space_to_cut_at_is_cut_hard(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         out = escalate.run_escalate(self.ctx(runner), "x" * 200, "e", [])
         self.assertEqual(desktop_calls(runner)[0][-2], f"rabota ESC-{out['id']}: " + "x" * escalate.TITLE_CHARS + "…")
 
     def test_a_question_that_fits_is_not_cut(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         q = "y" * escalate.TITLE_CHARS
         out = escalate.run_escalate(self.ctx(runner), q, "e", [])
         self.assertEqual(desktop_calls(runner)[0][-2], f"rabota ESC-{out['id']}: {q}")
 
     def test_an_unknown_urgency_is_usage_before_anything_is_written_or_sent(self):
         for dry_run in (False, True):
-            runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+            runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
             ctx = self.ctx(runner, dry_run=dry_run)
             with self.assertRaises(errors.Usage):
                 escalate.run_escalate(ctx, "q", "e", [], urgency="urgent")
@@ -155,7 +156,7 @@ class EscalateNotifiesTheDesktopTests(Base):
         value = "sk-test-secret-value-not-real-1111"
         secrets.register_value(value)
         self.addCleanup(secrets.REGISTERED_VALUES.discard, value)
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         with self.assertRaises(errors.SecretLeak):
             escalate.run_escalate(self.ctx(runner), f"is {value} live?", "e", [])
         self.assertEqual(runner.calls, [])
@@ -167,7 +168,7 @@ class EscalateNotifiesTheDesktopTests(Base):
         # escalation is not created at all; the notifiers reading the stored (redacted) question
         # is defence in depth behind that, and is not separately observable while it holds.
         value = "lin-api-not-real-value-0000000000"
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         ctx = self.ctx(runner)
         with unittest.mock.patch.dict(os.environ, {"LINEAR_API_KEY": value}):
             with self.assertRaises(errors.SecretLeak):
@@ -182,7 +183,7 @@ class NotifiedOncePerEscalationTests(Base):
     open escalation is run against the same store after creation, and none of them notifies."""
 
     def test_no_reader_notifies_again(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK, AWS_OK])
         ctx = self.ctx(runner)
         escalate.run_escalate(ctx, "merge HUB-1?", "e", ["merge", "wait"], kind="decision")
         self.assertEqual(len(desktop_calls(runner)), 1)
@@ -258,7 +259,7 @@ class RedactedOnReadTests(Base):
         return value, eid
 
     def test_brief_still_prints_and_brief_md_carries_the_marker(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK, AWS_OK])
         ctx = self.ctx(runner)
         value, eid = self._leaky(ctx)
         day = ctx.state_dir / "2026-09-16"; day.mkdir(parents=True, exist_ok=True)
@@ -305,7 +306,7 @@ class EscalationsCliTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         self.home = Path(tmp.name) / "home"; shutil.copytree(FIX, self.home / ".dotfiles-local" / "rabota")
         self.state = Path(tmp.name) / "state"
-        self.runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        self.runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         p = unittest.mock.patch("rabota.context.SubprocessRunner", lambda env: self.runner)
         p.start(); self.addCleanup(p.stop)
 
@@ -425,7 +426,7 @@ class BriefNeedsYouTests(Base):
         self.assertIn("## Needs you\n- nothing open\n", md)
 
     def test_run_brief_reads_the_store_into_brief_md_and_the_terminal(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK, AWS_OK])
         ctx = self.ctx(runner)
         kinds = ("decision", "finding", "incident")
         ids = [escalate.run_escalate(ctx, f"{k}?", "e", [], kind=k)["id"] for k in kinds]
@@ -443,7 +444,7 @@ class BriefNeedsYouTests(Base):
         self.assertNotIn(f"ESC-{resolved}", needs_you)
 
     def test_a_dry_run_brief_still_shows_the_line(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, SSH_OK, AWS_OK])
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         real = self.ctx(runner, state_dir=Path(tmp.name))
         eid = escalate.run_escalate(real, "q?", "e", [])["id"]
@@ -521,7 +522,7 @@ class DoorbellTests(Base):
     def test_a_failed_doorbell_falls_back_to_the_plain_notification(self):
         for failure in (Result(1, "", "Unit rabota-doorbell-x already exists"), RuntimeError("no systemd")):
             with self.subTest(failure=failure):
-                runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+                runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
                 if isinstance(failure, Result):
                     runner.responses.insert(0, (["systemd-run"], failure))
                 else:
@@ -544,7 +545,7 @@ class DoorbellTests(Base):
         self.assertIs(out["desktop_notified"], False)
 
     def test_without_the_key_nothing_changes(self):
-        runner = FakeRunner([HERDR_OK, NOTIFY_OK])
+        runner = FakeRunner([HERDR_OK, NOTIFY_OK, AWS_OK])
         escalate.run_escalate(self.ctx(runner), "q", "e", [])
         self.assertEqual(doorbell_calls(runner), [])
         self.assertEqual(len(desktop_calls(runner)), 1)
