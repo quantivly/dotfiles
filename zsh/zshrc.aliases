@@ -141,7 +141,6 @@ if [[ -z "${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ]]; then
   alias du='du -h'
 fi
 alias dud='du -d 1 -h'
-alias duf='du -sh *'
 
 # Network
 alias ping='ping -c 5'
