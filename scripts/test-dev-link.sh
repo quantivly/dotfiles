@@ -324,6 +324,22 @@ STUB_SSH_RC=255 STUB_SSH_STDERR='Connection closed by UNKNOWN port 65535' run_pr
 want_rc   "once: a dead link is exit 0" 0
 want_out  "once: ...reported as ssh=fail with cause=proxy" "	ssh=fail	"
 want_out  "once: ...cause=proxy" "	cause=proxy	"
+# No network is not a dead credential. On battery without a network sts cannot reach its
+# endpoint (or is cut by the timeout); booking that as cause=credential would make the probe log
+# and the notification blame the key for every offline stretch.
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='Could not connect to the endpoint URL: "https://sts.us-east-1.amazonaws.com/"' run_probe --once dev
+want_out  "once: sts unable to reach its endpoint is api=fail" "	api=fail	"
+want_out  "once: ...with cause=network, not credential" "	cause=network	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='Could not connect to the endpoint URL: "https://sts.us-east-1.amazonaws.com/" (Temporary failure in name resolution)' run_probe --once dev
+want_out  "once: a DNS failure is cause=network" "	cause=network	"
+STUB_AWS_STS_RC=124 STUB_AWS_STS_ERR='killed by timeout' run_probe --once dev
+want_out  "once: sts cut by the timeout is cause=network" "	cause=network	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='An error occurred (InvalidClientTokenId) when calling the GetCallerIdentity operation: The security token included in the request is invalid.' run_probe --once dev
+want_out  "once: an invalid key is cause=credential" "	cause=credential	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: The security token included in the request is expired' run_probe --once dev
+want_out  "once: an expired token is cause=credential" "	cause=credential	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='Unable to locate credentials. You can configure credentials by running "aws configure".' run_probe --once dev
+want_out  "once: no credentials at all is cause=credential" "	cause=credential	"
 STUB_SSH_G_FILE="$G_NONE" run_probe --once dev
 want_out  "once: a host with no ProxyCommand skips the api probe (nothing to ask)" "	api=skipped	"
 want_out  "once: ...and still probes ssh" "	ssh=ok	"
@@ -528,7 +544,8 @@ check "doctor: _DOCTOR_WARN does not leak into the caller" \
 section "H. --once as the timer runs it: the log, the markers, ONE notification per outage"
 # The channel is the log line and the state dir, never the exit code: a timer-activated oneshot
 # that exits non-zero while dev is down makes check-timer-health.sh report the TIMER broken.
-# Two consecutive failures at a 10-min cadence is the 20-minute threshold.
+# At a 10-min cadence the first failing tick anchors the outage, the second is 600 s in,
+# and the THIRD, 1200 s in, notifies: "20 minutes down", three ticks, not two.
 ST="$TMPROOT/state-h"; rm -rf "$ST"
 T0=1793145600
 DEV_LINK_STATE="$ST" DEV_LINK_NOW=$T0 run_probe --once dev
@@ -651,7 +668,7 @@ check "install.conf.yaml links the service (linked, not enabled)" "$(grep -c '~/
 # shellcheck disable=SC2088  # same: literal yaml text
 check "install.conf.yaml links the timer" "$(grep -c '~/.config/systemd/user/dev-link-probe.timer: systemd/dev-link-probe.timer' "$DOTFILES/install.conf.yaml")" 1
 
-EXPECTED_ROWS=223
+EXPECTED_ROWS=230
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".

@@ -48,7 +48,8 @@
 # The API pair runs every tick; the fresh ssh runs only when the last success is older than
 # DEV_LINK_SSH_EVERY, or whenever the link is recorded as down (so recovery is seen within one
 # tick) -- 144 SSM sessions a day is CloudTrail noise for nothing.
-# One critical notification per outage, after DEV_LINK_THRESHOLD seconds down, with a
+# One critical notification per outage, after DEV_LINK_THRESHOLD seconds down (at a 10-min
+# cadence: the first failing tick anchors the outage, the third notifies), with a
 # CONSTANT body (GNOME renders markup in notification bodies; nothing derived from anything
 # goes in). The notified marker is written only when notify-send succeeded, so a failed
 # notification is retried on the next tick.
@@ -136,6 +137,19 @@ proxy_profile() {
     printf '\n'
 }
 
+# Which of the link's dependencies an sts failure names: the endpoint unreachable, a DNS
+# failure or the timeout is the NETWORK (a laptop on battery without one), not the key.
+# Everything else -- no credentials, an invalid or expired key, AccessDenied -- is the credential.
+sts_cause() {
+    local rc="$1" text="$2"
+    if (( rc == 124 )); then printf 'network\n'
+    elif [[ "$text" == *"Could not connect to the endpoint URL"* || "$text" == *"EndpointConnectionError"* \
+          || "$text" == *"Temporary failure in name resolution"* || "$text" == *"Name or service not known"* \
+          || "$text" == *"Connect timeout"* || "$text" == *"Network is unreachable"* ]]; then printf 'network\n'
+    else printf 'credential\n'
+    fi
+}
+
 # Which of the link's dependencies an ssh failure names.
 ssh_cause() {
     local rc="$1" text="$2"
@@ -183,7 +197,7 @@ mode_api() {
     if (( rc != 0 )); then
         local reason; reason="$(head -1 "$errf")"
         (( rc == 124 )) && [[ -z "$reason" ]] && reason="timed out after ${AWS_TIMEOUT}s"
-        printf 'identity=fail\nreason=%s\n' "$(redact_line "$reason")"
+        printf 'identity=fail\nidentity_rc=%s\nreason=%s\n' "$rc" "$(redact_line "$reason")"
         rm -f "$errf"; return 0
     fi
     arn="$(jq -r '.Arn // empty' <<<"$out")"
@@ -320,7 +334,8 @@ mode_once() {
         if [[ "$(field identity "$out")" == "ok" ]]; then
             api="ok"
         else
-            api="fail"; cause="credential"; detail="$(field reason "$out")"
+            api="fail"; detail="$(field reason "$out")"
+            cause="$(sts_cause "$(field identity_rc "$out")" "$detail")"
         fi
     fi
     if [[ "$api" != "fail" ]] && ssh_due "$n"; then
