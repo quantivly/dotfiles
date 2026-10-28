@@ -134,6 +134,7 @@ snapshot the CLI cannot rely on, gets its own `!` line from the CLI — you neve
 2. Is every number from a CLI result or an artifact, not from a lane's prose?
 3. Is the terminal output ≤12 lines?
 4. Did every outward action have a typed OK and a `rabota gate` record?
+   (A dev lane refused as unreachable: `dev-link-doctor`, then `rabota census`, before blaming dev.)
 5. Is anything load-bearing only in my context? If so, write it down now.
 
 ## See also

@@ -61,6 +61,7 @@ skill rather than reading the records end to end.
 |---|---|---|
 | [VPN_RESILIENCE.md](VPN_RESILIENCE.md) | setting up and operating the VPN fail-fast unit, the tunnel-down notifier, the IPv6 egress block and `vpn-sweeps`; what to do about a stale `unreachable` route | guide |
 | [VPN_INTERNALS.md](VPN_INTERNALS.md) | 33 days of measurements, the designs killed by evidence, why no runtime component may read a client log, why the IPv6 block is routes and not nftables, and the silent-zero traps in the reporter | record |
+| [DEV_LINK.md](DEV_LINK.md) | the laptop's path to dev over AWS SSM: its three dependencies, `dev-link-doctor`'s eleven rows, the dedicated credential — **plus** the maintainer's record of the 12-hour `aws login` cap, the three ways the link looked healthy while dead, and what was rejected | guide + record |
 
 ## Security
 
