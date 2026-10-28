@@ -35,3 +35,5 @@ ssh       = "dev"
 tenants   = ["quantivly"]
 repos     = { hub = "~/quantivly/hub" }
 state_dir = "~/.local/state/rabota"
+aws_profile = "dev-ssm"
+aws_user  = "cilantro-dev-ssm"

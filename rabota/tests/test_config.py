@@ -143,3 +143,24 @@ class ConfigTests(unittest.TestCase):
         # but asking for the broken one by name still fails, loudly, naming its own file
         with self.assertRaises(errors.Usage):
             config.resolve_tenant(cfg, Path("/"), {}, "bad")
+
+
+class MachineCredentialTests(unittest.TestCase):
+    def test_aws_profile_and_user_parse_from_the_machine_table(self):
+        cfg = config.load(FIX)
+        dev = cfg.tenants["quantivly"].machines["dev"]
+        self.assertEqual((dev.aws_profile, dev.aws_user), ("dev-ssm", "cilantro-dev-ssm"))
+
+    def test_a_machine_without_the_keys_has_none(self):
+        # The fixture's other tenants declare no remote machine with a credential; a machine
+        # built without the keys must read as "unchecked", never as a profile named "".
+        m = config.Machine(name="box", ssh="box", tenants=["toysim"])
+        self.assertIsNone(m.aws_profile); self.assertIsNone(m.aws_user)
+
+    def test_an_unknown_machine_key_is_still_refused(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name); shutil.copytree(FIX, base / "cfg")
+        toml = base / "cfg" / "tenants" / "quantivly.toml"
+        toml.write_text(toml.read_text().replace('aws_user  = "cilantro-dev-ssm"', 'aws_usr = "typo"'))
+        with self.assertRaises(errors.Usage):
+            config.load(base / "cfg")

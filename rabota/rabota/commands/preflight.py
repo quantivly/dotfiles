@@ -8,13 +8,13 @@ does not list is skipped and counts as ok; a tenant without Linear is not a fail
 import concurrent.futures
 from pathlib import Path
 
-from rabota import cli, emit, errors
+from rabota import cli, emit, errors, remote
 from rabota.context import Context
 from rabota.sources.github import GhClient
 from rabota.sources.linear import LinearClient
 
 GITHUB_WORKERS = 2   # whoami + the pin-repo read; independent, so they run side by side
-TOP_LEVEL_WORKERS = 3   # the github half, the linear half, and ssh-add
+TOP_LEVEL_WORKERS = 3   # the github half, the linear half, and ssh-add; plus one per remote credential
 
 
 def _check_github(ctx: Context, gh) -> tuple[dict, dict, list[str]]:
@@ -100,19 +100,27 @@ def run_preflight(ctx: Context, gh=None, lin=None) -> dict:
             # The same tuple `_check_github` returns for a client it cannot build, so the report is
             # unchanged, and no second mint is attempted inside a worker.
             gh_built_failed = ({"ok": False, "error": str(e)}, {}, [f"gh identity check failed: {e}"])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=TOP_LEVEL_WORKERS) as ex:
+    # The credential behind each remote machine's ssh ProxyCommand, checked HERE rather than
+    # discovered by the first lane's ssh dying with ssh's generic text (dotfiles DEV_LINK.md).
+    cred_machines = [m for m in ctx.tenant.machines.values() if m.aws_profile]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=TOP_LEVEL_WORKERS + len(cred_machines)) as ex:
         gh_future = None if gh_built_failed else ex.submit(_check_github, ctx, gh)
         lin_future = ex.submit(_check_linear, ctx, lin)
         ssh_future = ex.submit(ctx.runner.run, ["ssh-add", "-l"], env=ctx.env)
+        cred_futures = {m.name: ex.submit(remote.credential_check, ctx.runner, m, env=ctx.env)
+                        for m in cred_machines}
 
         report["gh"], report["gh_pin"], gh_failures = gh_built_failed or gh_future.result()
         report["linear"], lin_failures = lin_future.result()
         agent = ssh_future.result()
+        cred_results = {name: f.result() for name, f in cred_futures.items()}
 
     report["ssh_agent"] = agent.ok
     ssh_failures = [] if agent.ok else ["ssh-agent has no keys (ssh-add -l failed)"]
+    report["machines"] = {name: {"ok": ok, "detail": why} for name, (ok, why) in sorted(cred_results.items())}
+    cred_failures = [why for _, (ok, why) in sorted(cred_results.items()) if not ok]
 
-    failures = gh_failures + lin_failures + ssh_failures
+    failures = gh_failures + lin_failures + ssh_failures + cred_failures
     report["ok"], report["failures"] = not failures, failures
     return report
 

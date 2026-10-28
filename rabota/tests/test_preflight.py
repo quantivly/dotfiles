@@ -7,6 +7,7 @@ from rabota.runner import FakeRunner, Result
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 VIEWER = "00000000-0000-0000-0000-000000000001"
+AWS_IDENTITY_OK = '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}'
 
 class FakeGh:
     def __init__(self, login, pin_ok=True): self.login, self.pin_ok = login, pin_ok
@@ -66,7 +67,9 @@ class PreflightTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
         ssh = Result(0, "256 SHA256:abc key (ED25519)\n", "") if ssh_ok else Result(1, "", "The agent has no identities.")
-        runner = FakeRunner([(["ssh-add", "-l"], ssh)])
+        runner = FakeRunner([(["ssh-add", "-l"], ssh),
+                             # the fixture's dev machine declares aws_profile = "dev-ssm"
+                             (["aws", "--profile", "dev-ssm"], Result(0, AWS_IDENTITY_OK, ""))])
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=runner, env=env, cwd=Path("/"))
         self.addCleanup(ctx.close)
         return ctx
@@ -183,7 +186,7 @@ class PreflightTests(unittest.TestCase):
         including the order of ``failures`` — comes out byte-identical either way."""
         def result_with(gh_delay, lin_delay, ssh_delay):
             ctx = self.ctx("quantivly", {"PATH": "/bin"})
-            ctx.runner = DelayedRunner(FakeRunner([(["ssh-add", "-l"], Result(1, "", "no identities"))]), ssh_delay)
+            ctx.runner = DelayedRunner(FakeRunner([(["ssh-add", "-l"], Result(1, "", "no identities")), (["aws"], Result(0, AWS_IDENTITY_OK, ""))]), ssh_delay)
             return preflight.run_preflight(ctx, gh=DelayedGh("someone-else", delay=gh_delay),
                                             lin=DelayedLinear("someone-else-id", delay=lin_delay))
 
@@ -201,7 +204,7 @@ class PreflightTests(unittest.TestCase):
         gh pin call, ~1.2s total); concurrent must land near one round trip (~0.3-0.4s)."""
         delay = 0.5   # long enough that scheduling noise on a loaded CI runner is small beside it
         ctx = self.ctx("quantivly", {"PATH": "/bin"})
-        ctx.runner = DelayedRunner(FakeRunner([(["ssh-add", "-l"], Result(0, "ok\n", ""))]), delay)
+        ctx.runner = DelayedRunner(FakeRunner([(["ssh-add", "-l"], Result(0, "ok\n", "")), (["aws"], Result(0, AWS_IDENTITY_OK, ""))]), delay)
         start = time.perf_counter()
         r = preflight.run_preflight(ctx, gh=DelayedGh("work-login", delay=delay),
                                      lin=DelayedLinear(VIEWER, delay=delay))
@@ -223,6 +226,7 @@ class PreflightTests(unittest.TestCase):
                 (["gh", "api", "user", "--jq", ".login"], Result(0, "work-login\n", "")),
                 (["gh", "api", "repos/org/pin-repo"], Result(0, '{"full_name": "org/pin-repo"}', "")),
                 (["ssh-add", "-l"], Result(0, "ok\n", "")),
+                (["aws"], Result(0, AWS_IDENTITY_OK, "")),
             ])
             ns = argparse.Namespace(tenant="quantivly", state_dir=None, text=False, dry_run=False)
             tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
@@ -234,3 +238,36 @@ class PreflightTests(unittest.TestCase):
             self.assertTrue(r["ok"], r["failures"])
             self.assertEqual(r["gh"], {"login": "work-login", "expected": "work-login", "ok": True})
             self.assertEqual(r["gh_pin"], {"repo": "org/pin-repo", "ok": True})
+
+
+class RemoteCredentialLegTests(unittest.TestCase):
+    ctx = PreflightTests.ctx   # the same context helper, without inheriting the whole table
+    def test_a_healthy_remote_credential_is_reported_per_machine(self):
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        r = preflight.run_preflight(ctx, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER))
+        self.assertTrue(r["ok"], r["failures"])
+        self.assertEqual(r["machines"], {"dev": {"ok": True, "detail": ""}})
+        self.assertIn(["aws", "--profile", "dev-ssm", "sts", "get-caller-identity", "--output", "json", "--no-cli-pager"],
+                      ctx.runner.calls)
+
+    def test_a_dead_remote_credential_fails_preflight_and_is_named(self):
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        ctx.runner.responses.insert(0, (["aws"], Result(255, "", "Unable to locate credentials\n")))
+        r = preflight.run_preflight(ctx, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER))
+        self.assertFalse(r["ok"])
+        self.assertEqual([f for f in r["failures"] if f.startswith("SSM credentials for dev (profile dev-ssm): Unable to locate credentials")],
+                         r["failures"][-1:])
+        self.assertFalse(r["machines"]["dev"]["ok"])
+
+    def test_the_wrong_remote_identity_fails_preflight(self):
+        ctx = self.ctx("quantivly", {"PATH": "/bin"})
+        ctx.runner.responses.insert(0, (["aws"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/AdminZvi"}', "")))
+        r = preflight.run_preflight(ctx, gh=FakeGh("work-login"), lin=FakeLinear(VIEWER))
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("identity is user/AdminZvi, expected user/cilantro-dev-ssm" in f for f in r["failures"]), r["failures"])
+
+    def test_a_tenant_without_a_remote_credential_issues_no_aws_call(self):
+        ctx = self.ctx("toysim", {"PATH": "/bin"})
+        r = preflight.run_preflight(ctx, gh=FakeGh("personal-login"), lin=None)
+        self.assertEqual(r["machines"], {})
+        self.assertEqual([c for c in ctx.runner.calls if c[:1] == ["aws"]], [])

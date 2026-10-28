@@ -11,6 +11,8 @@ from tests.test_preflight import VIEWER, FakeGh, FakeLinear
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 SSH_OK = (["ssh-add", "-l"], Result(0, "256 SHA256:abc key (ED25519)\n", ""))
+# the fixture's dev machine declares aws_profile = "dev-ssm"; preflight checks it on every brief
+AWS_OK = (["aws", "--profile", "dev-ssm"], Result(0, '{"Arn": "arn:aws:iam::123456789012:user/cilantro-dev-ssm"}', ""))
 
 def seq(keys, generated_at="2026-09-16T08:00:00Z"):
     return {"tenant": "quantivly", "generated_at": generated_at, "failed_sources": [],
@@ -174,7 +176,7 @@ class BriefCommandTests(unittest.TestCase):
         # plus the ssh-add response preflight's own agent check makes on every call.
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
-        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK, AWS_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(ctx.close)
         self.gh, self.lin = FakeGh("work-login"), FakeLinear(VIEWER)
         return ctx
@@ -382,7 +384,7 @@ class BriefNeedsTests(unittest.TestCase):
     def ctx(self, tenant="quantivly"):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=False)
-        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK, AWS_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(ctx.close)
         return ctx
 
@@ -631,7 +633,7 @@ class BriefFirefliesNeedsTests(unittest.TestCase):
     def ctx(self, tenant="quantivly", dry_run=False):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant=tenant, state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
-        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK, AWS_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(ctx.close)
         return ctx
 
@@ -1040,7 +1042,7 @@ class BriefRerankTests(unittest.TestCase):
     def ctx(self, dry_run=False):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ns = argparse.Namespace(tenant="quantivly", state_dir=str(Path(tmp.name)), text=False, dry_run=dry_run)
-        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
+        ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([SSH_OK, AWS_OK]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(ctx.close)
         return ctx
 
