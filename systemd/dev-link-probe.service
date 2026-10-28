@@ -1,0 +1,16 @@
+[Unit]
+Description=Probe the laptop's ssh-over-SSM path to dev once and record the result
+Documentation=file://%h/.dotfiles/docs/DEV_LINK.md
+# NO Condition* here, deliberately: check-timer-health.sh reports a timer-activated unit that
+# was SKIPPED (ConditionResult=no) as a fault, exactly as it reports one that failed. Dev being
+# down is not a fault of this unit either, which is why the probe exits 0 whatever it finds --
+# the probe log and the markers under ~/.local/state/dev-link are the channel.
+
+[Service]
+Type=oneshot
+# The user manager already exports SSH_AUTH_SOCK (the Bitwarden agent) and the session bus
+# (notify-send); PATH is pinned because a oneshot inherits the manager's, not a shell's.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.dotfiles/scripts/dev-link-probe.sh --once
+# One fresh ssh (40 s cap) plus two aws calls (15 s each) is the slow path; anything longer is hung.
+TimeoutStartSec=120

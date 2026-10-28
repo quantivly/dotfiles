@@ -1,0 +1,14 @@
+[Unit]
+Description=Every 10 minutes: is the laptop's ssh-over-SSM path to dev alive?
+Documentation=file://%h/.dotfiles/docs/DEV_LINK.md
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+AccuracySec=1min
+# A laptop that was asleep must not replay the missed ticks into a burst of SSM sessions on
+# resume; the next tick is enough, and the probe's own markers carry the outage across sleep.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

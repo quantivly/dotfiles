@@ -33,19 +33,39 @@
 #   dev-link-probe.sh --api PROFILE [INSTANCE]  identity= / principal= from sts, then ping= from SSM
 #   dev-link-probe.sh --keys PROFILE            keys= matches= active= age_days= of the profile's own key
 #   dev-link-probe.sh --ssh [HOST]              one FRESH ssh (no mux): ssh= ms= [rc= cause= detail=]
-#   dev-link-probe.sh --once [HOST]             resolve, api, ssh; one TSV line for the probe log
+#   dev-link-probe.sh --once [HOST]             what the timer runs: resolve, api, ssh; append one
+#                                               TSV line to the probe log; keep the outage markers;
+#                                               notify once per outage past the threshold
+#   dev-link-probe.sh --status                  read-only: the last 24 h by cause, and the markers
+#   dev-link-probe.sh --withdraw                forget the current outage (the next one notifies again)
 #   dev-link-probe.sh --help
 #
+# THE TIMER HALF (--once)
+# -----------------------
+# The log line and the markers are the channel; the exit code is not. Dev being down is
+# exit 0: a timer-activated oneshot that exits non-zero when dev is down makes
+# check-timer-health.sh report the TIMER broken (so would a Condition* that skips it).
+# The API pair runs every tick; the fresh ssh runs only when the last success is older than
+# DEV_LINK_SSH_EVERY, or whenever the link is recorded as down (so recovery is seen within one
+# tick) -- 144 SSM sessions a day is CloudTrail noise for nothing.
+# One critical notification per outage, after DEV_LINK_THRESHOLD seconds down (at a 10-min
+# cadence: the first failing tick anchors the outage, the third notifies), with a
+# CONSTANT body (GNOME renders markup in notification bodies; nothing derived from anything
+# goes in). The notified marker is written only when notify-send succeeded, so a failed
+# notification is retried on the next tick.
+#
 # Exit codes
-#   0  the probe ran (dev's state is in the OUTPUT, never the exit code: a
-#      timer-activated oneshot that exits non-zero when dev is down would make
-#      check-timer-health.sh report the timer itself as broken)
-#   2  COULD NOT RUN -- a missing tool, an unreadable ssh config, a bad argument
+#   0  the probe ran, whatever it found
+#   1  notify-send itself failed (and the marker was not written)
+#   2  COULD NOT RUN -- a missing tool, an unreadable ssh config, an unwritable state dir
 #
 # Seams (what makes the state table hermetic):
-#   DEV_LINK_AWS_TIMEOUT  default 15   seconds per aws call
-#   DEV_LINK_SSH_TIMEOUT  default 40   seconds for the whole fresh ssh, banner included
-#   DEV_LINK_NOW          epoch seconds to use as "now" (the --once line, key age)
+#   DEV_LINK_AWS_TIMEOUT  default 15    seconds per aws call
+#   DEV_LINK_SSH_TIMEOUT  default 40    seconds for the whole fresh ssh, banner included
+#   DEV_LINK_SSH_EVERY    default 3600  seconds between fresh ssh probes while the link is up (0: every tick)
+#   DEV_LINK_THRESHOLD    default 1200  seconds down before the one notification
+#   DEV_LINK_STATE        default ${XDG_STATE_HOME:-~/.local/state}/dev-link   (log and markers)
+#   DEV_LINK_NOW          epoch seconds to use as "now"
 #   DEV_LINK_REDACTOR     path to redact-secrets.sh (default: next to this script)
 
 set -uo pipefail
@@ -53,6 +73,20 @@ set -uo pipefail
 HOST_DEFAULT="dev"
 AWS_TIMEOUT="${DEV_LINK_AWS_TIMEOUT:-15}"
 SSH_TIMEOUT="${DEV_LINK_SSH_TIMEOUT:-40}"
+SSH_EVERY="${DEV_LINK_SSH_EVERY:-3600}"
+THRESHOLD="${DEV_LINK_THRESHOLD:-1200}"
+STATE_DIR="${DEV_LINK_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/dev-link}"
+LOG_FILE="$STATE_DIR/probe.log"
+DOWN_SINCE_F="$STATE_DIR/down-since"
+NOTIFIED_F="$STATE_DIR/notified"
+LAST_SSH_OK_F="$STATE_DIR/last-ssh-ok"
+LOG_MAX_LINES=2000
+SECONDS_PER_DAY_STATUS=86400
+# THE BODY. A CONSTANT: no markup, no interpolation. Given to notify-send as separate argv
+# elements, so even a hostile IFS cannot recombine them. Detail goes to dev-link-doctor.
+NOTIFY_SUMMARY='dev link is down'
+NOTIFY_BODY='Run dev-link-doctor for detail.'
+NOTIFY_ICON='network-error-symbolic'
 # ConnectTimeout covers connect plus banner on current OpenSSH; the outer
 # `timeout` covers the aws CLI stalling BEFORE it (DNS, STS) and the plugin's
 # data channel stalling AFTER it, which ConnectTimeout cannot see.
@@ -63,12 +97,16 @@ SECONDS_PER_DAY=86400
 
 err() { printf 'dev-link-probe: %s\n' "$*" >&2; }
 
-for _v in AWS_TIMEOUT SSH_TIMEOUT; do
+for _v in AWS_TIMEOUT SSH_TIMEOUT THRESHOLD; do
     if [[ ! "${!_v}" =~ ^[0-9]+$ ]] || (( ${!_v} < 1 )); then
         err "DEV_LINK_${_v} must be a positive integer, got '${!_v}'"
         exit 2
     fi
 done
+if [[ ! "$SSH_EVERY" =~ ^[0-9]+$ ]]; then
+    err "DEV_LINK_SSH_EVERY must be a non-negative integer, got '$SSH_EVERY'"
+    exit 2
+fi
 
 # One name per call: `command -v a b` is a silent pass in bash with b missing.
 need() { command -v "$1" >/dev/null 2>&1 || { err "$1 not found on PATH; cannot run"; exit 2; }; }
@@ -97,6 +135,19 @@ proxy_profile() {
         prev="$word"
     done
     printf '\n'
+}
+
+# Which of the link's dependencies an sts failure names: the endpoint unreachable, a DNS
+# failure or the timeout is the NETWORK (a laptop on battery without one), not the key.
+# Everything else -- no credentials, an invalid or expired key, AccessDenied -- is the credential.
+sts_cause() {
+    local rc="$1" text="$2"
+    if (( rc == 124 )); then printf 'network\n'
+    elif [[ "$text" == *"Could not connect to the endpoint URL"* || "$text" == *"EndpointConnectionError"* \
+          || "$text" == *"Temporary failure in name resolution"* || "$text" == *"Name or service not known"* \
+          || "$text" == *"Connect timeout"* || "$text" == *"Network is unreachable"* ]]; then printf 'network\n'
+    else printf 'credential\n'
+    fi
 }
 
 # Which of the link's dependencies an ssh failure names.
@@ -146,7 +197,7 @@ mode_api() {
     if (( rc != 0 )); then
         local reason; reason="$(head -1 "$errf")"
         (( rc == 124 )) && [[ -z "$reason" ]] && reason="timed out after ${AWS_TIMEOUT}s"
-        printf 'identity=fail\nreason=%s\n' "$(redact_line "$reason")"
+        printf 'identity=fail\nidentity_rc=%s\nreason=%s\n' "$rc" "$(redact_line "$reason")"
         rm -f "$errf"; return 0
     fi
     arn="$(jq -r '.Arn // empty' <<<"$out")"
@@ -224,9 +275,58 @@ mode_ssh() {
 
 field() { awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,""); print; exit}' <<<"$2"; }
 
+ensure_state_dir() {
+    [[ -d "$STATE_DIR" ]] || mkdir -p "$STATE_DIR" 2>/dev/null
+    if [[ ! -d "$STATE_DIR" || ! -w "$STATE_DIR" ]]; then
+        err "state dir $STATE_DIR is not writable; cannot run"
+        return 2
+    fi
+    chmod 700 "$STATE_DIR" 2>/dev/null || true
+    return 0
+}
+
+read_epoch_file() {   # <file> -> its epoch, or 0 when absent or not a number
+    local v
+    v="$(cat "$1" 2>/dev/null)" || { printf '0\n'; return 0; }
+    [[ "$v" =~ ^[0-9]+$ ]] || { printf '0\n'; return 0; }
+    printf '%s\n' "$v"
+}
+
+append_log() {   # <line>: append, then keep the last LOG_MAX_LINES
+    local tmp
+    printf '%s\n' "$1" >> "$LOG_FILE" || return 2
+    if (( $(wc -l < "$LOG_FILE") > LOG_MAX_LINES )); then
+        tmp="$(mktemp "$STATE_DIR/.probe.log.XXXXXX")" || return 2
+        tail -n "$LOG_MAX_LINES" "$LOG_FILE" > "$tmp" && mv -f "$tmp" "$LOG_FILE"
+    fi
+    return 0
+}
+
+raise_notification() {
+    if ! command -v notify-send >/dev/null 2>&1; then
+        err "notify-send not found; cannot raise a notification"
+        return 1
+    fi
+    notify-send --urgency=critical --icon="$NOTIFY_ICON" -- "$NOTIFY_SUMMARY" "$NOTIFY_BODY" || return 1
+    return 0
+}
+
+# Is a fresh ssh due? Always while the link is recorded as down (recovery must be seen within
+# one tick); otherwise only once the last success is SSH_EVERY old.
+ssh_due() {
+    local n="$1" last
+    [[ -e "$DOWN_SINCE_F" ]] && return 0
+    (( SSH_EVERY == 0 )) && return 0
+    last="$(read_epoch_file "$LAST_SSH_OK_F")"
+    (( last == 0 || n - last >= SSH_EVERY || n < last ))
+}
+
 mode_once() {
     local host="$1" res proxy profile instance api="skipped" ssh="skipped" ms="" cause="ok" detail="" out
-    need aws; need ssh; need jq
+    local n since rc=0
+    need aws; need ssh; need jq; need mv
+    ensure_state_dir || return 2
+    n="$(now)"
     res="$(mode_resolve "$host")" || return 2
     proxy="$(field proxy "$res")"; profile="$(field profile "$res")"; instance="$(field instance "$res")"
     if [[ "$proxy" == "ssm" ]]; then
@@ -234,17 +334,69 @@ mode_once() {
         if [[ "$(field identity "$out")" == "ok" ]]; then
             api="ok"
         else
-            api="fail"; cause="credential"; detail="$(field reason "$out")"
+            api="fail"; detail="$(field reason "$out")"
+            cause="$(sts_cause "$(field identity_rc "$out")" "$detail")"
         fi
     fi
-    if [[ "$api" != "fail" ]]; then
+    if [[ "$api" != "fail" ]] && ssh_due "$n"; then
         out="$(mode_ssh "$host")" || return 2
         ssh="$(field ssh "$out")"; ms="$(field ms "$out")"
         if [[ "$ssh" != "ok" ]]; then
             cause="$(field cause "$out")"; detail="$(field detail "$out")"
         fi
     fi
-    printf '%s\tapi=%s\tssh=%s\tms=%s\tcause=%s\tdetail=%s\n' "$(now)" "$api" "$ssh" "$ms" "$cause" "$detail"
+    append_log "$(printf '%s\tapi=%s\tssh=%s\tms=%s\tcause=%s\tdetail=%s' "$n" "$api" "$ssh" "$ms" "$cause" "$detail")" || return 2
+    printf '%s\tapi=%s\tssh=%s\tms=%s\tcause=%s\tdetail=%s\n' "$n" "$api" "$ssh" "$ms" "$cause" "$detail"
+
+    if [[ "$cause" == "ok" ]]; then
+        [[ "$ssh" == "ok" ]] && printf '%s\n' "$n" > "$LAST_SSH_OK_F"
+        rm -f "$DOWN_SINCE_F" "$NOTIFIED_F" 2>/dev/null
+        return 0
+    fi
+    # Down. Anchor the outage, re-anchor on a clock that went backwards, notify once past
+    # the threshold.
+    since="$(read_epoch_file "$DOWN_SINCE_F")"
+    if (( since == 0 || n < since )); then
+        printf '%s\n' "$n" > "$DOWN_SINCE_F"
+        return 0
+    fi
+    (( n - since >= THRESHOLD )) || return 0
+    [[ -e "$NOTIFIED_F" ]] && return 0
+    if raise_notification; then
+        : > "$NOTIFIED_F"
+    else
+        rc=1
+    fi
+    return "$rc"
+}
+
+mode_status() {
+    local n since total ok_lines cause_counts cutoff
+    n="$(now)"
+    if [[ -e "$DOWN_SINCE_F" ]]; then
+        since="$(read_epoch_file "$DOWN_SINCE_F")"
+        printf 'down since: epoch %s (%s s ago)%s\n' "$since" "$(( n - since ))" \
+            "$([[ -e "$NOTIFIED_F" ]] && printf ', notified' || printf ', not yet notified')"
+    else
+        printf 'down since: not currently recorded as down\n'
+    fi
+    if [[ ! -r "$LOG_FILE" ]]; then
+        printf 'last 24 h: no probe log at %s\n' "$LOG_FILE"
+        return 0
+    fi
+    cutoff=$(( n - SECONDS_PER_DAY_STATUS ))
+    total="$(awk -F'\t' -v c="$cutoff" '$1 >= c' "$LOG_FILE" | wc -l)"
+    ok_lines="$(awk -F'\t' -v c="$cutoff" '$1 >= c && $5 == "cause=ok"' "$LOG_FILE" | wc -l)"
+    cause_counts="$(awk -F'\t' -v c="$cutoff" '$1 >= c && $5 != "cause=ok" { sub(/^cause=/, "", $5); print $5 }' "$LOG_FILE" \
+                    | sort | uniq -c | awk '{ printf "%s=%s ", $2, $1 }')"
+    printf 'last 24 h: %s probes, %s ok%s\n' "$total" "$ok_lines" \
+        "$([[ -n "$cause_counts" ]] && printf ', failures by cause: %s' "${cause_counts% }")"
+    printf 'last line: %s\n' "$(tail -1 "$LOG_FILE")"
+    return 0
+}
+
+mode_withdraw() {
+    rm -f "$DOWN_SINCE_F" "$NOTIFIED_F" 2>/dev/null || true
     return 0
 }
 
@@ -261,6 +413,8 @@ main() {
                    mode_keys "$2"; exit $? ;;
         --ssh)     mode_ssh "${2:-$HOST_DEFAULT}"; exit $? ;;
         --once)    mode_once "${2:-$HOST_DEFAULT}"; exit $? ;;
+        --status)  mode_status; exit $? ;;
+        --withdraw) mode_withdraw; exit $? ;;
         --help|-h) usage; exit 0 ;;
         *)         err "unknown mode: ${1:-<none>}"; usage >&2; exit 2 ;;
     esac

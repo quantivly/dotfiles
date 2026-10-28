@@ -60,13 +60,15 @@ done
 # the doctor use. Inheriting $PATH would find the real aws and the real ssh.
 STUBBIN="$TMPROOT/bin"; SYSBIN="$TMPROOT/sysbin"; mkdir -p "$STUBBIN" "$SYSBIN"
 for t in bash zsh jq timeout date grep sed awk sort uniq head tail cut tr wc cat printf stat \
-         mktemp rm mkdir dirname basename readlink chmod sleep env true false; do
+         mktemp rm mv mkdir dirname basename readlink chmod sleep env true false; do
   p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$SYSBIN/$t"
 done
 [[ -x "$SYSBIN/zsh" && -x "$SYSBIN/jq" && -x "$SYSBIN/timeout" ]] || fatal "could not stage the fixture PATH"
 NOAWSBIN="$TMPROOT/noawsbin"; mkdir -p "$NOAWSBIN"   # the stubs minus aws, for the could-not-run row
 
 STUB_LOG="$TMPROOT/stub.log"
+# Notifications are counted ACROSS runs, so they also go to a log run_probe never resets.
+NOTIFY_LOG="$TMPROOT/notify.log"; : > "$NOTIFY_LOG"
 FHOME="$TMPROOT/home"; mkdir -p "$FHOME/.aws"; chmod 700 "$FHOME/.aws"
 printf '[dev-ssm]\naws_access_key_id = STUBKEYID\naws_secret_access_key = STUBSECRET\n' > "$FHOME/.aws/credentials"
 chmod 600 "$FHOME/.aws/credentials"
@@ -150,8 +152,15 @@ case "$args" in
   *) exit 1 ;;
 esac
 EOF
+cat > "$STUBBIN/notify-send" <<'EOF'
+#!/usr/bin/env bash
+printf 'notify-send %s\n' "$*" >> "${STUB_LOG:?}"
+printf 'notify-send %s\n' "$*" >> "${STUB_NOTIFY_LOG:?}"
+exit "${STUB_NOTIFY_RC:-0}"
+EOF
 chmod +x "$STUBBIN"/*
 cp -a "$STUBBIN/." "$NOAWSBIN/"; rm -f "$NOAWSBIN/aws"
+NONOTIFYBIN="$TMPROOT/nonotifybin"; mkdir -p "$NONOTIFYBIN"; cp -a "$STUBBIN/." "$NONOTIFYBIN/"; rm -f "$NONOTIFYBIN/notify-send"
 
 # ssh -G fixtures: what the real `ssh -G dev` prints, trimmed to the keys that matter.
 G_SSM="$TMPROOT/g-ssm";        printf 'hostname i-0c97f437d3da87e51\nuser ubuntu\nhostkeyalias 54.166.22.221\nproxycommand aws ssm start-session --profile dev-ssm --region us-east-1 --target %%h --document-name AWS-StartSSHSession --parameters portNumber=%%p\ncontrolpersist 600\n' > "$G_SSM"
@@ -171,6 +180,9 @@ run_probe() {   # run_probe <args...>  -> OUT, RC; env from the caller's STUB_* 
            STUB_KEY_ID="${STUB_KEY_ID:-AKIASTUBSTUBSTUBSTUB}" STUB_KEY_DATE="${STUB_KEY_DATE:-2026-10-18T00:00:00+00:00}" \
            DEV_LINK_NOW="${DEV_LINK_NOW:-1793145600}" DEV_LINK_SSH_TIMEOUT="${DEV_LINK_SSH_TIMEOUT:-40}" \
            DEV_LINK_AWS_TIMEOUT="${DEV_LINK_AWS_TIMEOUT:-15}" DEV_LINK_REDACTOR="$HERE/redact-secrets.sh" \
+           DEV_LINK_STATE="${DEV_LINK_STATE:-$TMPROOT/state-default}" \
+           DEV_LINK_THRESHOLD="${DEV_LINK_THRESHOLD:-1200}" DEV_LINK_SSH_EVERY="${DEV_LINK_SSH_EVERY:-3600}" \
+           STUB_NOTIFY_RC="${STUB_NOTIFY_RC:-0}" STUB_NOTIFY_LOG="$NOTIFY_LOG" \
            bash "$PROBE" "$@" 2>&1)"; RC=$?
 }
 
@@ -312,6 +324,22 @@ STUB_SSH_RC=255 STUB_SSH_STDERR='Connection closed by UNKNOWN port 65535' run_pr
 want_rc   "once: a dead link is exit 0" 0
 want_out  "once: ...reported as ssh=fail with cause=proxy" "	ssh=fail	"
 want_out  "once: ...cause=proxy" "	cause=proxy	"
+# No network is not a dead credential. On battery without a network sts cannot reach its
+# endpoint (or is cut by the timeout); booking that as cause=credential would make the probe log
+# and the notification blame the key for every offline stretch.
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='Could not connect to the endpoint URL: "https://sts.us-east-1.amazonaws.com/"' run_probe --once dev
+want_out  "once: sts unable to reach its endpoint is api=fail" "	api=fail	"
+want_out  "once: ...with cause=network, not credential" "	cause=network	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='Could not connect to the endpoint URL: "https://sts.us-east-1.amazonaws.com/" (Temporary failure in name resolution)' run_probe --once dev
+want_out  "once: a DNS failure is cause=network" "	cause=network	"
+STUB_AWS_STS_RC=124 STUB_AWS_STS_ERR='killed by timeout' run_probe --once dev
+want_out  "once: sts cut by the timeout is cause=network" "	cause=network	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='An error occurred (InvalidClientTokenId) when calling the GetCallerIdentity operation: The security token included in the request is invalid.' run_probe --once dev
+want_out  "once: an invalid key is cause=credential" "	cause=credential	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: The security token included in the request is expired' run_probe --once dev
+want_out  "once: an expired token is cause=credential" "	cause=credential	"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='Unable to locate credentials. You can configure credentials by running "aws configure".' run_probe --once dev
+want_out  "once: no credentials at all is cause=credential" "	cause=credential	"
 STUB_SSH_G_FILE="$G_NONE" run_probe --once dev
 want_out  "once: a host with no ProxyCommand skips the api probe (nothing to ask)" "	api=skipped	"
 want_out  "once: ...and still probes ssh" "	ssh=ok	"
@@ -511,7 +539,136 @@ check "doctor: _DOCTOR_WARN does not leak into the caller" \
   "$(env -i PATH="$STUBBIN:$SYSBIN" HOME="$FHOME" DOTFILES_ROOT="$DOTFILES" DEV_LINK_ROOT="$DOTFILES" DEV_LINK_PROBE="$PROBE" STUB_LOG="$STUB_LOG" STUB_SSH_G_FILE="$G_SSM_NOPROF" STUB_KEY_ID=AKIASTUBSTUBSTUBSTUB STUB_KEY_DATE=2026-10-18T00:00:00+00:00 DEV_LINK_NOW=1793145600 DEV_LINK_REDACTOR="$HERE/redact-secrets.sh" XDG_RUNTIME_DIR="$TMPROOT/run" \
        zsh -c "source '$SYSTEMSH' >/dev/null 2>&1; _DOCTOR_WARN=5; dev-link-doctor >/dev/null 2>&1; echo \$_DOCTOR_WARN")" 5
 
-EXPECTED_ROWS=168
+
+# =============================================================================
+section "H. --once as the timer runs it: the log, the markers, ONE notification per outage"
+# The channel is the log line and the state dir, never the exit code: a timer-activated oneshot
+# that exits non-zero while dev is down makes check-timer-health.sh report the TIMER broken.
+# At a 10-min cadence the first failing tick anchors the outage, the second is 600 s in,
+# and the THIRD, 1200 s in, notifies: "20 minutes down", three ticks, not two.
+ST="$TMPROOT/state-h"; rm -rf "$ST"
+T0=1793145600
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$T0 run_probe --once dev
+want_rc   "once: a healthy run exits 0" 0
+check "once: the log holds one line" "$(wc -l < "$ST/probe.log")" 1
+check "once: ...and it is the line that was printed" "$(tail -1 "$ST/probe.log")" "$OUT"
+check "once: a healthy run leaves no down-since marker" "$([[ -e "$ST/down-since" ]] && echo present || echo absent)" absent
+check "once: ...and records when ssh last succeeded" "$(cat "$ST/last-ssh-ok" 2>/dev/null)" "$T0"
+check "once: no notification on a healthy run" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 0
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 600)) run_probe --once dev
+want_out  "once: within DEV_LINK_SSH_EVERY of a success the fresh ssh is SKIPPED (144 SSM sessions a day otherwise)" "	ssh=skipped	"
+check "once: ...and no ssh was attempted" "$(grep -c -- 'ControlPath=none' "$STUB_LOG")" 0
+want_out  "once: ...but the API pair still ran: api=ok" "	api=ok	"
+check "once: ...the log grows by one line per run" "$(wc -l < "$ST/probe.log")" 2
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 3600)) run_probe --once dev
+want_out  "once: once the last success is DEV_LINK_SSH_EVERY old, ssh is probed again" "	ssh=ok	"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 3700)) DEV_LINK_SSH_EVERY=0 run_probe --once dev
+want_out  "once: DEV_LINK_SSH_EVERY=0 probes ssh on every run" "	ssh=ok	"
+
+# An outage: dead credential at T0+7200, notified at the threshold, once.
+rm -rf "$ST"; : > "$STUB_LOG"; : > "$NOTIFY_LOG"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 7200)) STUB_AWS_STS_RC=255 run_probe --once dev
+want_rc   "outage: the first failing run exits 0" 0
+check "outage: ...records the outage start" "$(cat "$ST/down-since" 2>/dev/null)" "$((T0 + 7200))"
+check "outage: ...and does not notify below the threshold" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 0
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 7800)) STUB_AWS_STS_RC=255 run_probe --once dev
+check "outage: 600 s in, still no notification (threshold 1200)" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 0
+check "outage: ...and the start is not re-anchored" "$(cat "$ST/down-since")" "$((T0 + 7200))"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 8400)) STUB_AWS_STS_RC=255 run_probe --once dev
+want_rc   "outage: the run that notifies still exits 0" 0
+check "outage: at the threshold, exactly ONE notification" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 1
+check "outage: ...critical, with the constant summary and body, nothing interpolated" \
+  "$(grep '^notify-send' "$STUB_LOG")" \
+  "notify-send --urgency=critical --icon=network-error-symbolic -- dev link is down Run dev-link-doctor for detail."
+check "outage: ...and the notified marker is written" "$([[ -e "$ST/notified" ]] && echo present || echo absent)" present
+FIRST_NOTIFY="$(grep '^notify-send' "$STUB_LOG")"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 9000)) STUB_AWS_STS_RC=255 run_probe --once dev
+check "outage: a later failing run does NOT notify again" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 1
+# While down, ssh is probed every run so recovery is seen within one tick, not one hour.
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 9600)) STUB_SSH_RC=255 STUB_SSH_STDERR='Connection closed by UNKNOWN port 65535' run_probe --once dev
+want_out  "outage: with the credential back but ssh dead, the line says ssh=fail" "	ssh=fail	"
+check "outage: ...ssh was actually probed although the last success is recent-ish (the link is DOWN)" "$(grep -c -- 'ControlPath=none' "$STUB_LOG")" 1
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 10200)) run_probe --once dev
+want_out  "recovery: a healthy run" "	ssh=ok	"
+check "recovery: ...withdraws both markers" "$([[ -e "$ST/down-since" || -e "$ST/notified" ]] && echo present || echo absent)" absent
+check "recovery: ...so the next outage will notify again" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 1
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 20000)) STUB_AWS_STS_RC=255 run_probe --once dev
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 21200)) STUB_AWS_STS_RC=255 run_probe --once dev
+check "second outage: notified again, once" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 2
+check "second outage: the body is byte-identical to the first" "$(grep '^notify-send' "$NOTIFY_LOG" | tail -1)" "$FIRST_NOTIFY"
+
+# A clock that went backwards (resume, NTP step) re-anchors instead of notifying early.
+rm -rf "$ST"; : > "$STUB_LOG"; : > "$NOTIFY_LOG"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 5000)) STUB_AWS_STS_RC=255 run_probe --once dev
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 100)) STUB_AWS_STS_RC=255 run_probe --once dev
+check "clock backwards: the outage start is re-anchored to now" "$(cat "$ST/down-since")" "$((T0 + 100))"
+check "clock backwards: ...and nothing was notified" "$(grep -c '^notify-send' "$NOTIFY_LOG")" 0
+
+# notify-send itself failing is the ONE non-zero exit, and the marker is not written so the
+# next run tries again.
+rm -rf "$ST"; : > "$STUB_LOG"; : > "$NOTIFY_LOG"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$T0 STUB_AWS_STS_RC=255 run_probe --once dev
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 1200)) STUB_AWS_STS_RC=255 STUB_NOTIFY_RC=1 run_probe --once dev
+want_rc   "notify failure: exit 1 (the only non-zero exit while dev is merely down)" 1
+check "notify failure: ...the notified marker is NOT written" "$([[ -e "$ST/notified" ]] && echo present || echo absent)" absent
+check "notify failure: ...the log line was still written" "$(wc -l < "$ST/probe.log")" 2
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 1800)) STUB_AWS_STS_RC=255 PROBE_BIN="$NONOTIFYBIN" run_probe --once dev
+want_rc   "notify-send missing: exit 1 as well" 1
+# An unwritable state dir is could-not-run, and no line is printed as if it had been kept.
+RO="$TMPROOT/ro"; mkdir -p "$RO"; chmod 500 "$RO"
+if [[ "$(id -u)" != 0 ]]; then
+  DEV_LINK_STATE="$RO/state" DEV_LINK_NOW=$T0 run_probe --once dev
+  want_rc   "unwritable state dir: COULD NOT RUN (exit 2)" 2
+  no_out    "unwritable state dir: ...no probe line" "	api="
+else
+  ok "unwritable state dir: skipped as root (cannot be unwritable)"; ok "unwritable state dir: skipped as root (cannot be unwritable)"
+fi
+chmod 700 "$RO"
+# The log is bounded.
+rm -rf "$ST"; mkdir -p "$ST"; for i in $(seq 1 2005); do printf '%s\tapi=ok\tssh=ok\tms=1\tcause=ok\tdetail=\n' "$i"; done > "$ST/probe.log"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$T0 run_probe --once dev
+check "log: truncated to the last 2000 lines" "$(wc -l < "$ST/probe.log")" 2000
+check "log: ...and the newest line is the last" "$(tail -1 "$ST/probe.log" | cut -f1)" "$T0"
+STUB_AWS_STS_RC=255 STUB_AWS_STS_ERR='error for AKIAIOSFODNN7EXAMPLE' DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 60)) run_probe --once dev
+check "log: no key id reaches the log" "$(grep -c 'AKIAIOSFODNN7EXAMPLE' "$ST/probe.log")" 0
+
+# --status and --withdraw
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 120)) run_probe --status
+want_rc   "status: exits 0" 0
+want_out  "status: says whether the link is currently recorded as down" "down since:"
+want_out  "status: counts the last 24 h by cause" "last 24 h:"
+DEV_LINK_STATE="$ST" DEV_LINK_NOW=$((T0 + 180)) run_probe --withdraw
+check "withdraw: removes the markers" "$([[ -e "$ST/down-since" || -e "$ST/notified" ]] && echo present || echo absent)" absent
+
+# =============================================================================
+section "I. the units and the links"
+UNIT_SVC="$DOTFILES/systemd/dev-link-probe.service"; UNIT_TMR="$DOTFILES/systemd/dev-link-probe.timer"
+check "service: Type=oneshot" "$(grep -c '^Type=oneshot$' "$UNIT_SVC")" 1
+check "service: ExecStart is the probe's --once, from the checkout" "$(grep '^ExecStart=' "$UNIT_SVC")" 'ExecStart=%h/.dotfiles/scripts/dev-link-probe.sh --once'
+check "service: NO Condition* line (a skipped timer-activated unit is reported as a fault)" "$(grep -c '^Condition' "$UNIT_SVC")" 0
+check "service: a bounded run (TimeoutStartSec)" "$(grep -c '^TimeoutStartSec=120$' "$UNIT_SVC")" 1
+check "timer: fires every 10 min while active" "$(grep -c '^OnUnitActiveSec=10min$' "$UNIT_TMR")" 1
+check "timer: ...and 3 min after boot" "$(grep -c '^OnBootSec=3min$' "$UNIT_TMR")" 1
+check "timer: not Persistent (a missed tick is not replayed into a storm)" "$(grep -c '^Persistent=false$' "$UNIT_TMR")" 1
+check "timer: wanted by timers.target" "$(grep -c '^WantedBy=timers.target$' "$UNIT_TMR")" 1
+if command -v systemd-analyze >/dev/null 2>&1; then
+  # verify checks that ExecStart's command EXISTS, and %h/.dotfiles is not on a CI runner, so
+  # the service is verified through a copy whose ExecStart points at this checkout's script:
+  # the same unit text, a command that exists. The timer is verified next to it by name.
+  mkdir -p "$TMPROOT/units"
+  sed "s#^ExecStart=%h/.dotfiles/scripts/dev-link-probe.sh #ExecStart=${PROBE} #" "$UNIT_SVC" > "$TMPROOT/units/dev-link-probe.service"
+  cp "$UNIT_TMR" "$TMPROOT/units/dev-link-probe.timer"
+  check "units: systemd-analyze verify accepts both (ExecStart pointed at an existing copy)" \
+    "$(systemd-analyze verify --man=no --recursive-errors=no "$TMPROOT/units/dev-link-probe.service" "$TMPROOT/units/dev-link-probe.timer" >/dev/null 2>&1 && echo ok || echo bad)" ok
+else
+  ok "units: systemd-analyze absent here; CI runs it"
+fi
+# shellcheck disable=SC2088  # the tilde is the literal text of the yaml line, not a path
+check "install.conf.yaml links the service (linked, not enabled)" "$(grep -c '~/.config/systemd/user/dev-link-probe.service: systemd/dev-link-probe.service' "$DOTFILES/install.conf.yaml")" 1
+# shellcheck disable=SC2088  # same: literal yaml text
+check "install.conf.yaml links the timer" "$(grep -c '~/.config/systemd/user/dev-link-probe.timer: systemd/dev-link-probe.timer' "$DOTFILES/install.conf.yaml")" 1
+
+EXPECTED_ROWS=230
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".

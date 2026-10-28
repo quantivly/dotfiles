@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `radio wifi off` across reboots, so a marker design strands a laptop booted undocked.
   `--remove` turns the radio back on. State table `scripts/test-dock-wifi.sh`; record
   `docs/DOCK_WIFI.md`.
+- **`dev-link-probe.timer` watches the ssh-over-SSM path to dev every 10 minutes and says so when it
+  has been down for 20.** `scripts/dev-link-probe.sh --once` (the same probes `dev-link-doctor`
+  uses) appends one line per tick to `~/.local/state/dev-link/probe.log`, keeps `down-since` and
+  `notified` markers, raises one critical notification per outage with a constant body, and
+  exits 0 whatever dev's state, because `check-timer-health.sh` would otherwise report the timer
+  as the fault. The fresh ssh runs hourly while the link is up and every tick while it is down.
+  Linked by `./install`, armed by hand (`systemctl --user enable --now dev-link-probe.timer`).
+  State table `scripts/test-dev-link.sh` 168 → 223 checks; `--status` and `--withdraw` added.
 - **`dev-link-doctor` answers whether an agent can reach dev over SSM right now, and if not, which
   of the link's three dependencies failed.** The ProxyCommand's AWS profile was an `aws login`
   console session, which AWS caps at 12 hours; every new `ssh dev` after the cap died with
