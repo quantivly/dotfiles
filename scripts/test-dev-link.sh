@@ -635,8 +635,14 @@ check "timer: ...and 3 min after boot" "$(grep -c '^OnBootSec=3min$' "$UNIT_TMR"
 check "timer: not Persistent (a missed tick is not replayed into a storm)" "$(grep -c '^Persistent=false$' "$UNIT_TMR")" 1
 check "timer: wanted by timers.target" "$(grep -c '^WantedBy=timers.target$' "$UNIT_TMR")" 1
 if command -v systemd-analyze >/dev/null 2>&1; then
-  check "units: systemd-analyze verify accepts both" \
-    "$(systemd-analyze verify --man=no --recursive-errors=no "$UNIT_SVC" "$UNIT_TMR" >/dev/null 2>&1 && echo ok || echo bad)" ok
+  # verify checks that ExecStart's command EXISTS, and %h/.dotfiles is not on a CI runner, so
+  # the service is verified through a copy whose ExecStart points at this checkout's script:
+  # the same unit text, a command that exists. The timer is verified next to it by name.
+  mkdir -p "$TMPROOT/units"
+  sed "s#^ExecStart=%h/.dotfiles/scripts/dev-link-probe.sh #ExecStart=${PROBE} #" "$UNIT_SVC" > "$TMPROOT/units/dev-link-probe.service"
+  cp "$UNIT_TMR" "$TMPROOT/units/dev-link-probe.timer"
+  check "units: systemd-analyze verify accepts both (ExecStart pointed at an existing copy)" \
+    "$(systemd-analyze verify --man=no --recursive-errors=no "$TMPROOT/units/dev-link-probe.service" "$TMPROOT/units/dev-link-probe.timer" >/dev/null 2>&1 && echo ok || echo bad)" ok
 else
   ok "units: systemd-analyze absent here; CI runs it"
 fi
