@@ -1,0 +1,16 @@
+[Unit]
+Description=Keep a docked laptop single-homed: Wi-Fi off while a wired link is connected
+Documentation=file:///home/zvi/.dotfiles/docs/DOCK_WIFI.md
+# Two of the three triggers. The dispatcher covers link events; this oneshot covers the two
+# moments no link event fires: boot (NetworkManager persists `radio wifi off` across reboots,
+# so a laptop shut down docked and booted undocked would stay offline) and resume from sleep
+# (the dock may have been unplugged while asleep). After=suspend.target on a unit wanted by
+# suspend.target is systemd's idiom for "run after resume".
+After=NetworkManager.service suspend.target hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dock-wifi.sh --sync
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target

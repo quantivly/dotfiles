@@ -24,6 +24,7 @@ Two audiences run through the whole tree, and mixing them is what made `CLAUDE.m
 | [GNOME_CONFIGURATION_GUIDE.md](GNOME_CONFIGURATION_GUIDE.md) | the curated GNOME desktop: what is set, how to customise it, Wayland notes — **plus** the maintainer's record of the apply mechanism and its one silent override trap | guide + record |
 | [SHELL_LAYOUT.md](SHELL_LAYOUT.md) | the zsh layer: the two tool-availability patterns with examples, and the full annotated load order | record |
 | [DOCK_LID_SUSPEND.md](DOCK_LID_SUSPEND.md) | why a lid closed while the Thunderbolt dock connects no longer suspends into it: the two root guards, installing and checking them, what they do not cover, and the measured plug-in timings behind them | guide + record |
+| [DOCK_WIFI.md](DOCK_WIFI.md) | the dock Wi-Fi guard: radio off while a wired link is connected, re-evaluated on every link event, at boot and after resume — **plus** the record of the dual-homed tunnel drops, why a marker design fails closed, and the stateful `nmcli` stub | guide + record |
 
 ## Terminal and multiplexer
 

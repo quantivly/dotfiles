@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A docked laptop keeps one uplink.** `dock-wifi-setup` installs, root-owned and copied, a
+  NetworkManager dispatcher shim, `/usr/local/bin/dock-wifi.sh` and a `dock-wifi-sync.service`
+  oneshot: the Wi-Fi radio is off while a managed ethernet device is connected and on again when
+  none is, re-evaluated on every link event, at boot and after resume. Measured over a fortnight,
+  four tunnel drops came exactly 20 s after a home Wi-Fi flap while the dock's wired link was up.
+  A pure function of NetworkManager's current state, no markers: NetworkManager persists
+  `radio wifi off` across reboots, so a marker design strands a laptop booted undocked.
+  `--remove` turns the radio back on. State table `scripts/test-dock-wifi.sh`; record
+  `docs/DOCK_WIFI.md`.
 - **`dev-link-doctor` answers whether an agent can reach dev over SSM right now, and if not, which
   of the link's three dependencies failed.** The ProxyCommand's AWS profile was an `aws login`
   console session, which AWS caps at 12 hours; every new `ssh dev` after the cap died with
