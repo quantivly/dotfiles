@@ -58,6 +58,53 @@ After a fix, the order is `dev-link-doctor` → `rabota census` → `rabota budg
 `rabota/rabota/budget.py` refuses on `census:stale` and `machine:unmeasured` until a fresh census
 has seen dev, by design.
 
+## Watching it: `dev-link-probe.timer`
+
+`./install` links `systemd/dev-link-probe.{service,timer}` and does not enable them; arming a
+timer that opens an SSM session to dev every hour is a decision:
+
+```bash
+systemctl --user enable --now dev-link-probe.timer
+scripts/dev-link-probe.sh --status      # the last 24 h by cause, and the current outage markers
+journalctl --user -u dev-link-probe.service -e
+```
+
+Every 10 minutes the service runs `dev-link-probe.sh --once`: the API pair (identity, SSM
+registration) every tick, the fresh ssh only when the last success is more than an hour old or
+while the link is recorded as down (so recovery is seen within one tick, and a healthy day costs
+24 SSM sessions, not 144). Each run appends one TSV line, `epoch api= ssh= ms= cause= detail=`,
+to `~/.local/state/dev-link/probe.log` (kept to the last 2000 lines) and keeps two markers next
+to it, `down-since` and `notified`. After 20 minutes down (the first failing tick anchors the
+outage, the third failing tick, 20 minutes later, notifies) it raises one critical desktop
+notification with a constant body, "Run dev-link-doctor for detail.", and
+withdraws the markers on recovery so the next outage notifies again. A clock that went backwards
+(a resume, an NTP step) re-anchors the outage instead of notifying early.
+
+Three rules, each measured against a wrong version that looked right:
+
+- **Dev being down is exit 0.** `check-timer-health.sh` reports a timer-activated unit that
+  exits non-zero as the *timer* being broken, and so is a unit skipped by a `Condition*`. The
+  service has no `Condition*` line (the state table asserts it); the only non-zero exit is 1
+  when `notify-send` itself failed, and then the `notified` marker is not written so the next
+  tick retries.
+- **The body is a constant.** GNOME renders markup in notification bodies, so nothing derived
+  from a log line, a hostname or an error goes in; the state table compares the argv of two
+  separate outages byte for byte.
+- **`Persistent=false`.** A laptop back from sleep must not replay the missed ticks into a burst
+  of SSM sessions; the markers carry the outage across sleep.
+
+A tick that cannot reach `sts` at all (no network, DNS failure, the 15 s timeout) is logged as
+`cause=network`, never `credential`: a laptop on battery without a network must not book an
+offline stretch against the key. The notification still fires after 20 minutes of it; whether an
+offline laptop should be told its dev link is down is a decision not yet taken.
+
+Row 11 of the doctor reports the timer: linked, enabled, active, and the last run's `Result`.
+
+Two `aws` binaries live on this box: the timer's pinned `PATH` resolves `/usr/local/bin/aws`
+(aws-cli 2.35.13, root-installed), the interactive shell resolves mise's 2.34.29. "One
+definition of each probe" holds for the argv, not the binary; both are v2 and both pass the
+doctor's row 1, and `scripts/verify-tools.sh` vets only the mise one.
+
 ## The credential (Phase A of the 2026-10-27 plan)
 
 A dedicated IAM user whose only permission is opening an SSM session to the dev instance:
@@ -114,7 +161,7 @@ showed every user re-logging in about four times a day and this laptop 26 times.
 touches the SSM path; the split-tunnel proposal for the endpoint is a team decision recorded in
 `~/quantivly/handoffs/2026-10-27-dev-link/`, and docs/VPN_RESILIENCE.md covers the VPN layer.
 
-**State table.** `scripts/test-dev-link.sh` (168 checks, run in CI, hermetic: `aws`, `ssh`,
+**State table.** `scripts/test-dev-link.sh` (230 checks, run in CI, hermetic: `aws`, `ssh`,
 `ssh-add`, `systemctl` and `ip` are recording stubs at the front of a PATH built from scratch,
 and `$HOME` is a fixture, because this box has a real `aws` wired to live credentials and a real
 `ssh dev` that would spend an SSM session). Mutation sweep, 2026-10-28: fourteen mutants, each
@@ -126,4 +173,10 @@ SURVIVED: the row meant to pin their order compared `grep -n`'s output with the 
 sorted, and `grep -n` prints in file order, so the two were always equal and the row could not
 fail. It now compares the two line numbers, and the mutant dies on it. The one documented
 survivor class is the totals guard's own blind spot: deleting a row and lowering
-`EXPECTED_ROWS` cannot be caught by the suite that does it.
+`EXPECTED_ROWS` cannot be caught by the suite that does it. The timer half's sweep, same day,
+nine mutants, all killed: exit 1 while dev is down, notify every tick, a body that interpolates
+the host and the time, no log truncation, a `Condition*` on the service, `Persistent=true` on
+the timer, a fresh ssh every tick, a fresh ssh skipped while the link is down, and the
+`notified` marker written although `notify-send` failed. A fresh-context review of the branch
+then found that an offline tick was booked as `cause=credential`; classified and pinned since
+(seven rows).
