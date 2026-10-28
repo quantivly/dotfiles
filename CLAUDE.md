@@ -432,7 +432,7 @@ ordinary diagnostics. Rotation is the wrong loop to optimise; the emission is.
   credentials unless piped through the redactor: `gh auth token`, `gh auth status --show-token`, `ps`
   with full command lines, `pgrep -a`, a bare `env`/`printenv`, reads of `/proc/*/cmdline|environ`, and
   reads of the files this file sends every secret to (`~/.zshrc.local`, `~/.gitconfig.local`,
-  `~/.backup.local`, `~/.claude/.credentials.json`). It **denies** rather than asks, and **fails open**
+  `~/.backup.local`, `~/.claude/.credentials.json`, `~/.aws/credentials`). It **denies** rather than asks, and **fails open**
   — a hook that breaks the shell when it breaks gets disabled wholesale.
 - **A refusal is not proof it would have leaked; passing is not proof nothing did.** It knows a
   handful of shapes. Papercut guard, not a boundary.
@@ -595,9 +595,6 @@ utility — the system commands are all `backup-*`.
   `ssh_host_*`.** `backup-restore-system` bakes those four excludes in so an `/etc` restore can't
   break boot.
 
-Commands are all `backup-*` and tab-complete; start at `backup-doctor`. The full list, with what
-each is for, is in the guide below.
-
 Setup, the DR runbook and the verification regimen:
 [docs/BACKUP_AND_RESTORE_GUIDE.md](docs/BACKUP_AND_RESTORE_GUIDE.md). Why each guard exists and every
 trap found in them: [docs/BACKUP_INTERNALS.md](docs/BACKUP_INTERNALS.md). State table:
@@ -676,6 +673,7 @@ scripts/verify-tools.sh --herdr # The one check a modular herdr adopter runs
 backup-doctor        # START HERE for backups. Every backup-* : see Backup & Restore
 audit-status         # Tripwire armed, on, recording? Every audit-* : see Audit Tripwire
 vpn-doctor           # VPN chain health. Every vpn-* : see the VPN section
+dev-link-doctor      # Can an agent reach dev over SSM now? credential, key age, agent, fresh ssh (--offline)
 dock-lid-setup       # Dock lid guards, COPIED to /etc; reloads logind, NEVER restarts it (--check)
 ```
 

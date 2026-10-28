@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`dev-link-doctor` answers whether an agent can reach dev over SSM right now, and if not, which
+  of the link's three dependencies failed.** The ProxyCommand's AWS profile was an `aws login`
+  console session, which AWS caps at 12 hours; every new `ssh dev` after the cap died with
+  `Connection closed by UNKNOWN port 65535`, the census marked dev unreachable, every dev lane
+  refused, and nothing said why. Eleven rows: the tools, the ProxyCommand and its pinned profile
+  (read from `ssh -G`, never a constant), the identity (`user/<name>`, pinned by
+  `DEV_LINK_AWS_USER`), the key's age (never ✓ on a denied read), dev's SSM registration,
+  `~/.aws` permissions, the ssh agent (bounded at 2 s, asked before the ssh so a locked vault is
+  never a credential fault), one FRESH ssh that bypasses the mux (`ControlPersist 10m` hides a
+  dead credential for ten minutes), an open master as information, the VPN as information, and
+  the probe timer. The probes are `scripts/dev-link-probe.sh`, one definition each, shared with
+  the timer that lands next. State table `scripts/test-dev-link.sh` (168 checks), record
+  `docs/DEV_LINK.md`.
 - **A lid closed while the Thunderbolt dock is still connecting no longer suspends into it.** On
   2026-10-19 the lid closed 1.8 s after plugging in, before logind could see the dock or its
   power. logind suspended, the dock enumerated mid-suspend, and the laptop hung until a forced

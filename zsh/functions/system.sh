@@ -3773,6 +3773,276 @@ vpn-sweeps() {
 #   - dock-lid-setup --check: read-only drift + live-logind check
 # See docs/DOCK_LID_SUSPEND.md.
 # =============================================================================
+# Dev link: ssh to dev over an AWS SSM ProxyCommand
+#
+# Is the agent path to dev alive right now, and if not, which of its three
+# dependencies failed: the AWS credential behind the ProxyCommand, the ssh agent
+# and key, or the network and dev itself? The probes live in
+# scripts/dev-link-probe.sh (one definition each, shared with the probe timer);
+# this file holds the verdicts. docs/DEV_LINK.md is the record.
+# =============================================================================
+
+# Resolve the checkout to run from, same rule as _vpn_root. DEV_LINK_ROOT is the
+# state table's seam.
+_devlink_root() {
+  if [[ -n "${DEV_LINK_ROOT:-}" ]]; then
+    printf '%s\n' "$DEV_LINK_ROOT"
+  elif [[ -x "${PWD}/scripts/dev-link-probe.sh" ]]; then
+    printf '%s\n' "$PWD"
+  else
+    printf '%s\n' "${HOME}/.dotfiles"
+  fi
+}
+
+_DEVLINK_KEY_AGING_DAYS=90      # ⚠ from here: rotate soon
+_DEVLINK_KEY_OLD_DAYS=180       # ✗ from here: rotate now
+_DEVLINK_AGENT_TIMEOUT_S=2      # a Bitwarden agent with a locked vault hangs; bound it
+_DEVLINK_MASTER_PERSIST_MIN=10  # ~/.ssh/config ControlPersist 10m: how long a dead credential stays masked
+_DEVLINK_UNIT="dev-link-probe"
+
+# --- pure verdicts: every input an argument, so the state table can exercise each cell ----
+_devlink_identity_verdict() {   # <principal> <expected-user> -> ok|unpinned|mismatch|unreadable
+  local principal="$1" expected="$2"
+  [[ -z "$principal" ]] && { print unreadable; return 0; }
+  [[ -z "$expected" ]] && { print unpinned; return 0; }
+  [[ "$principal" == "user/${expected}" ]] && { print ok; return 0; }
+  print mismatch
+}
+_devlink_key_verdict() {   # <keys> <matches> <active> <age_days> -> ok|aging|old|not-ours|two-keys|unknown
+  local keys="$1" matches="$2" active="$3" age="$4"
+  [[ "$keys" == "ok" ]] || { print unknown; return 0; }
+  [[ "$matches" == "0" ]] && { print not-ours; return 0; }
+  [[ "$active" =~ ^[0-9]+$ ]] && (( active >= 2 )) && { print two-keys; return 0; }
+  [[ "$age" =~ ^[0-9]+$ ]] || { print unknown; return 0; }
+  (( age >= _DEVLINK_KEY_OLD_DAYS )) && { print old; return 0; }
+  (( age >= _DEVLINK_KEY_AGING_DAYS )) && { print aging; return 0; }
+  print ok
+}
+_devlink_ping_verdict() {   # <PingStatus|unregistered|denied|fail|''> -> online|offline|unregistered|denied|fail
+  case "$1" in
+    Online)                   print online ;;
+    denied|unregistered|fail) print -r -- "$1" ;;
+    '')                       print unregistered ;;
+    *)                        print offline ;;
+  esac
+}
+# The value of one key=value line in a probe's output; empty when absent.
+_devlink_field() {   # <key> <text>
+  local line
+  while IFS= read -r line; do
+    [[ "$line" == "$1="* ]] && { print -r -- "${line#*=}"; return 0; }
+  done <<< "$2"
+  return 1
+}
+
+dev-link-doctor() {
+  # NOTE: no local named `status` — that is read-only in zsh.
+  local _DOCTOR_FAIL=0 _DOCTOR_WARN=0
+  local offline=0 host="dev"
+  while (( $# )); do
+    case "$1" in
+      --offline)  offline=1 ;;
+      --help|-h)  echo "Usage: dev-link-doctor [--offline] [host]"; return 0 ;;
+      -*)         echo "usage: dev-link-doctor [--offline] [host]" >&2; return 2 ;;
+      *)          host="$1" ;;
+    esac
+    shift
+  done
+  local root probe
+  root="$(_devlink_root)"
+  probe="${DEV_LINK_PROBE:-${root}/scripts/dev-link-probe.sh}"
+
+  echo "Dev link (ssh over AWS SSM) — ${host}"
+  echo
+
+  # --- row 1: the tools ------------------------------------------------------
+  local missing=0 tool
+  for tool in aws session-manager-plugin ssh; do
+    if ! has_command "$tool"; then _doctor_bad "${tool} is not on PATH"; missing=1; fi
+  done
+  (( missing )) || _doctor_ok "aws and session-manager-plugin are on PATH"
+  if [[ ! -x "$probe" ]]; then
+    _doctor_bad "probe script missing or not executable: ${probe}"
+    echo
+    _doctor_summary "dev link is healthy." "Run ./install and try again."
+    return $?
+  fi
+
+  # --- row 2: what ssh -G says the path is ----------------------------------
+  # Read from the live config, never carried as constants, so the doctor and
+  # the ProxyCommand cannot disagree about which profile is in play.
+  local res proxy profile instance alias
+  if ! res="$("$probe" --resolve "$host" 2>/dev/null)"; then
+    _doctor_bad "ssh -G ${host} failed — is there a Host ${host} block in ~/.ssh/config?"
+    echo
+    _doctor_summary "dev link is healthy." "Fix the ssh config, then re-run."
+    return $?
+  fi
+  proxy="$(_devlink_field proxy "$res")"
+  profile="$(_devlink_field profile "$res")"
+  instance="$(_devlink_field instance "$res")"
+  alias="$(_devlink_field hostkeyalias "$res")"
+  local credential_rows=1
+  if [[ "$proxy" != "ssm" ]]; then
+    _doctor_warn "ssh ${host} is not an SSM ProxyCommand (proxy=${proxy}) — the credential rows do not apply"
+    credential_rows=0
+  elif [[ -z "$profile" ]]; then
+    _doctor_warn "the ProxyCommand pins no --profile: the default profile is an aws login session, capped at 12 h by AWS"
+  else
+    _doctor_ok "ssh ${host} goes over aws ssm start-session with --profile ${profile}"
+  fi
+  (( offline )) && _doctor_note "identity, key age, SSM registration and the fresh ssh skipped (--offline)"
+
+  # --- rows 3-5: the credential, its key, dev's registration ----------------
+  local expected="${DEV_LINK_AWS_USER:-}" api identity principal verdict keys key_verdict age active_keys ping
+  if (( credential_rows && ! offline )); then
+    api="$("$probe" --api "$profile" "$instance" 2>/dev/null)"
+    identity="$(_devlink_field identity "$api")"
+    if [[ "$identity" != "ok" ]]; then
+      _doctor_bad "profile ${profile:-default} resolves no identity: $(_devlink_field reason "$api")"
+    else
+      principal="$(_devlink_field principal "$api")"
+      verdict="$(_devlink_identity_verdict "$principal" "$expected")"
+      case "$verdict" in
+        ok)       _doctor_ok "profile ${profile:-default} is ${principal}" ;;
+        unpinned) _doctor_warn "profile ${profile:-default} is ${principal} — set DEV_LINK_AWS_USER in ~/.zshrc.local to pin it" ;;
+        mismatch) _doctor_bad "profile ${profile:-default} is ${principal}, expected user/${expected} — the WRONG identity" ;;
+        *)        _doctor_bad "profile ${profile:-default}: the identity is unreadable" ;;
+      esac
+
+      if [[ -n "$profile" ]]; then
+        keys="$("$probe" --keys "$profile" 2>/dev/null)"
+        age="$(_devlink_field age_days "$keys")"
+        active_keys="$(_devlink_field active "$keys")"
+        key_verdict="$(_devlink_key_verdict "$(_devlink_field keys "$keys")" \
+                       "$(_devlink_field matches "$keys")" "$active_keys" "$age")"
+        case "$key_verdict" in
+          ok)       _doctor_ok "the profile's access key is ${age} days old" ;;
+          aging)    _doctor_warn "the profile's access key is ${age} days old — rotate it before ${_DEVLINK_KEY_OLD_DAYS}" ;;
+          old)      _doctor_bad "the profile's access key is ${age} days old — rotate it" ;;
+          not-ours) _doctor_bad "the profile's access key is not among ${principal}'s keys — the profile and the identity disagree" ;;
+          two-keys) _doctor_warn "${principal} has ${active_keys} active access keys — a rotation in progress? (ours is ${age} days old)" ;;
+          *)
+            if [[ "$(_devlink_field keys "$keys")" == "denied" ]]; then
+              _doctor_warn "the key's age is UNVERIFIED (iam:ListAccessKeys denied)"
+            else
+              _doctor_warn "the key's age is UNVERIFIED ($(_devlink_field reason "$keys"))"
+            fi ;;
+        esac
+      else
+        _doctor_note "no --profile, so no key to age"
+      fi
+
+      if [[ -n "$instance" ]]; then
+        ping="$(_devlink_field ping "$api")"
+        case "$(_devlink_ping_verdict "$ping")" in
+          online)       _doctor_ok "${host} (${instance}) is registered with SSM: Online" ;;
+          unregistered) _doctor_bad "${host} (${instance}) is not registered with SSM" ;;
+          denied)       _doctor_warn "${host}'s SSM registration is UNVERIFIED (ssm:DescribeInstanceInformation denied)" ;;
+          fail)         _doctor_bad "${host}'s SSM registration could not be read: $(_devlink_field reason "$api")" ;;
+          *)            _doctor_bad "${host}'s SSM agent is ${ping} — is the instance stopped?" ;;
+        esac
+      else
+        _doctor_note "HostName is not an instance id, so SSM registration is not checked"
+      fi
+    fi
+  fi
+
+  # --- row 6: the credential file's permissions -----------------------------
+  # ~/.aws was 775 on this box (umask 002): a group member could replace the key
+  # whatever the file's own 600 said.
+  local credfile="${AWS_SHARED_CREDENTIALS_FILE:-${HOME}/.aws/credentials}" awsdir dmode fmode perm_bad=0
+  awsdir="$(dirname "$credfile")"
+  if [[ ! -d "$awsdir" ]]; then
+    _doctor_warn "no ${awsdir} directory — the profile has no credentials file"
+  else
+    dmode="$(stat -c %a "$awsdir" 2>/dev/null)"
+    if [[ "$dmode" != "700" ]]; then _doctor_bad "~/.aws is mode ${dmode} — chmod 700 ${awsdir}"; perm_bad=1; fi
+    if [[ ! -e "$credfile" ]]; then
+      _doctor_warn "no ${credfile} — the profile has no credentials file"; perm_bad=1
+    else
+      fmode="$(stat -c %a "$credfile" 2>/dev/null)"
+      if [[ "$fmode" != "600" ]]; then _doctor_bad "~/.aws/credentials is mode ${fmode} — chmod 600 ${credfile}"; perm_bad=1; fi
+    fi
+    (( perm_bad )) || _doctor_ok "~/.aws is mode 700 and credentials is mode 600"
+  fi
+
+  # --- row 7: the ssh agent, BEFORE the fresh ssh ---------------------------
+  # Ordered so a locked vault is reported as the vault, never as a credential fault.
+  local agent_out agent_rc
+  agent_out="$(timeout "$_DEVLINK_AGENT_TIMEOUT_S" ssh-add -l 2>/dev/null)"; agent_rc=$?
+  case "$agent_rc" in
+    0) _doctor_ok "the ssh agent answers ($(print -r -- "$agent_out" | grep -c .) key(s))" ;;
+    1) _doctor_bad "the ssh agent has no keys (ssh-add -l)" ;;
+    *) _doctor_bad "the ssh agent did not answer — unlock the Bitwarden vault (waited ${_DEVLINK_AGENT_TIMEOUT_S} s)" ;;
+  esac
+
+  # --- rows 8-9: a FRESH ssh, and whether a master is hiding the truth -----
+  if (( ! offline )); then
+    local sshres cause detail
+    sshres="$("$probe" --ssh "$host" 2>/dev/null)"
+    if [[ "$(_devlink_field ssh "$sshres")" == "ok" ]]; then
+      _doctor_ok "fresh ssh to ${host} succeeded in $(_devlink_field ms "$sshres") ms (no mux)"
+    else
+      cause="$(_devlink_field cause "$sshres")"
+      detail="$(_devlink_field detail "$sshres")"
+      case "$cause" in
+        proxy)   _doctor_bad "fresh ssh to ${host} FAILED: the ProxyCommand (SSM) failed — ${detail}" ;;
+        auth)    _doctor_bad "fresh ssh to ${host} FAILED: the agent or key was refused — ${detail}" ;;
+        timeout) _doctor_bad "fresh ssh to ${host} FAILED: timed out after ${DEV_LINK_SSH_TIMEOUT:-40} s" ;;
+        *)       _doctor_bad "fresh ssh to ${host} FAILED: network or ${host} itself — ${detail}" ;;
+      esac
+    fi
+    if ssh -O check "$host" >/dev/null 2>&1; then
+      _doctor_note "a control master is open for ${host}: plain ssh answers from it for up to ${_DEVLINK_MASTER_PERSIST_MIN} min after the credential dies"
+    else
+      _doctor_note "no control master is open for ${host}"
+    fi
+  fi
+
+  # --- row 10: the VPN, for information; the ProxyCommand does not use it ---
+  local vstat
+  vstat="$("${root}/scripts/vpn-notify.sh" --status 2>/dev/null | head -1)"
+  case "$vstat" in
+    *UP*)   _doctor_note "VPN tunnel: UP (irrelevant to SSM)" ;;
+    *DOWN*) _doctor_note "VPN tunnel: DOWN (irrelevant to SSM)" ;;
+    *)      _doctor_note "VPN tunnel: unknown (vpn-notify.sh --status answered nothing)" ;;
+  esac
+  if [[ -n "$alias" ]] && ip -4 route show proto "${VPN_FAILFAST_PROTO:-66}" 2>/dev/null | grep -q -- "$alias"; then
+    _doctor_note "fail-fast blackholes ${alias} while the tunnel is down — irrelevant to SSM, which goes to AWS, not to ${alias}"
+  fi
+
+  # --- row 11: the probe timer (linked-not-enabled is a DECISION) ------------
+  local uls uen uas ures plog
+  uls="$(systemctl --user show -p LoadState --value "${_DEVLINK_UNIT}.timer" 2>/dev/null)"
+  if [[ "$uls" != "loaded" ]]; then
+    _doctor_warn "${_DEVLINK_UNIT}.timer is not linked — run ./install"
+  else
+    uen="$(systemctl --user is-enabled "${_DEVLINK_UNIT}.timer" 2>/dev/null)"
+    if [[ "$uen" == "enabled" ]]; then
+      uas="$(systemctl --user show -p ActiveState --value "${_DEVLINK_UNIT}.timer" 2>/dev/null)"
+      case "$uas" in
+        active|activating) _doctor_ok "${_DEVLINK_UNIT}.timer is ${uas}" ;;
+        *) _doctor_bad "${_DEVLINK_UNIT}.timer is enabled but ${uas:-unknown}" ;;
+      esac
+      ures="$(systemctl --user show -p Result --value "${_DEVLINK_UNIT}.service" 2>/dev/null)"
+      if [[ -n "$ures" && "$ures" != "success" ]]; then
+        _doctor_bad "the last ${_DEVLINK_UNIT} run ended with ${ures} — journalctl --user -u ${_DEVLINK_UNIT}.service -e"
+      fi
+    else
+      _doctor_note "${_DEVLINK_UNIT}.timer linked, not enabled — arming it is a decision:"
+      _doctor_note "  systemctl --user enable --now ${_DEVLINK_UNIT}.timer"
+    fi
+    plog="${XDG_STATE_HOME:-${HOME}/.local/state}/dev-link/probe.log"
+    [[ -r "$plog" ]] && _doctor_note "last probe: $(tail -1 "$plog")"
+  fi
+
+  echo
+  _doctor_summary "dev link is healthy." \
+                  "Start with: ${probe} --once, then rabota census, then rabota budget --machine ${host}"
+}
+
+# =============================================================================
 
 # Prefer the checkout you are sitting in, so --check from a worktree compares
 # against THAT branch — but only a checkout of ~/.dotfiles' own repository (the

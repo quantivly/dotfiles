@@ -387,6 +387,25 @@ jobs:
       # the second copy could only ever fail at the same moment as the first
       # while being a second place to keep in step.
 
+  dev-link-test:
+    name: Dev Link State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Needs zsh for the doctor; aws, ssh, ssh-add, systemctl and ip are stubs the
+      # suite writes itself, so no AWS, no network, no secrets. The runner has none
+      # of the real ones wired to anything, which is exactly why the stubs must come
+      # first on PATH even here: the suite's claim is hermetic, not lucky.
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
+      - name: Run the dev link state table
+        run: ./scripts/test-dev-link.sh
+
   claude-doctor-test:
     name: Claude Account & MCP Doctor State Table
     runs-on: ubuntu-latest

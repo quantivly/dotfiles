@@ -1945,7 +1945,7 @@ check "every functions module parses" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=422
+EXPECTED_ROWS=423
 
 docs_claim() {
   local f="$DOTFILES/$1"
