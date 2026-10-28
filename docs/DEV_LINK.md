@@ -58,6 +58,42 @@ After a fix, the order is `dev-link-doctor` → `rabota census` → `rabota budg
 `rabota/rabota/budget.py` refuses on `census:stale` and `machine:unmeasured` until a fresh census
 has seen dev, by design.
 
+## Watching it: `dev-link-probe.timer`
+
+`./install` links `systemd/dev-link-probe.{service,timer}` and does not enable them; arming a
+timer that opens an SSM session to dev every hour is a decision:
+
+```bash
+systemctl --user enable --now dev-link-probe.timer
+scripts/dev-link-probe.sh --status      # the last 24 h by cause, and the current outage markers
+journalctl --user -u dev-link-probe.service -e
+```
+
+Every 10 minutes the service runs `dev-link-probe.sh --once`: the API pair (identity, SSM
+registration) every tick, the fresh ssh only when the last success is more than an hour old or
+while the link is recorded as down (so recovery is seen within one tick, and a healthy day costs
+24 SSM sessions, not 144). Each run appends one TSV line, `epoch api= ssh= ms= cause= detail=`,
+to `~/.local/state/dev-link/probe.log` (kept to the last 2000 lines) and keeps two markers next
+to it, `down-since` and `notified`. After 20 minutes down (two consecutive failures) it raises
+one critical desktop notification with a constant body, "Run dev-link-doctor for detail.", and
+withdraws the markers on recovery so the next outage notifies again. A clock that went backwards
+(a resume, an NTP step) re-anchors the outage instead of notifying early.
+
+Three rules, each measured against a wrong version that looked right:
+
+- **Dev being down is exit 0.** `check-timer-health.sh` reports a timer-activated unit that
+  exits non-zero as the *timer* being broken, and so is a unit skipped by a `Condition*`. The
+  service has no `Condition*` line (the state table asserts it); the only non-zero exit is 1
+  when `notify-send` itself failed, and then the `notified` marker is not written so the next
+  tick retries.
+- **The body is a constant.** GNOME renders markup in notification bodies, so nothing derived
+  from a log line, a hostname or an error goes in; the state table compares the argv of two
+  separate outages byte for byte.
+- **`Persistent=false`.** A laptop back from sleep must not replay the missed ticks into a burst
+  of SSM sessions; the markers carry the outage across sleep.
+
+Row 11 of the doctor reports the timer: linked, enabled, active, and the last run's `Result`.
+
 ## The credential (Phase A of the 2026-10-27 plan)
 
 A dedicated IAM user whose only permission is opening an SSM session to the dev instance:
@@ -114,7 +150,7 @@ showed every user re-logging in about four times a day and this laptop 26 times.
 touches the SSM path; the split-tunnel proposal for the endpoint is a team decision recorded in
 `~/quantivly/handoffs/2026-10-27-dev-link/`, and docs/VPN_RESILIENCE.md covers the VPN layer.
 
-**State table.** `scripts/test-dev-link.sh` (168 checks, run in CI, hermetic: `aws`, `ssh`,
+**State table.** `scripts/test-dev-link.sh` (223 checks, run in CI, hermetic: `aws`, `ssh`,
 `ssh-add`, `systemctl` and `ip` are recording stubs at the front of a PATH built from scratch,
 and `$HOME` is a fixture, because this box has a real `aws` wired to live credentials and a real
 `ssh dev` that would spend an SSM session). Mutation sweep, 2026-10-28: fourteen mutants, each

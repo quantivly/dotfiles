@@ -170,6 +170,12 @@
     # unit needs root and is installed by `vpn-setup`, never by ./install, which
     # never uses sudo.
     ~/.config/systemd/user/vpn-notify.service: systemd/vpn-notify.service
+    # dev-link-probe: every 10 min, is the laptop's ssh-over-SSM path to dev alive? Linked, NOT
+    # enabled: arming a timer that opens an SSM session every hour is a decision --
+    #   systemctl --user enable --now dev-link-probe.timer
+    # (docs/DEV_LINK.md). The same link-then-arm rule as vpn-notify.service above.
+    ~/.config/systemd/user/dev-link-probe.service: systemd/dev-link-probe.service
+    ~/.config/systemd/user/dev-link-probe.timer: systemd/dev-link-probe.timer
     # dev-sync: keeps dev's tooling level with the laptop's. Linked everywhere and
     # enabled only on dev, by the first `scripts/dev-sync --apply` run from the
     # laptop. That run also writes the marker the service's ConditionPathExists
