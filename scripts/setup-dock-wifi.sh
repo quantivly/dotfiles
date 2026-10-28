@@ -153,8 +153,7 @@ check_installed() {
 }
 
 if [[ "$MODE" == "check" ]]; then
-  check_installed
-  exit 0
+  if check_installed; then exit 0; else exit 1; fi
 fi
 
 if [[ "$MODE" == "remove" ]]; then

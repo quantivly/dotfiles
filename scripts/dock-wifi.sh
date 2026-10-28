@@ -42,11 +42,23 @@
 #   0  converged (or nothing to do), or printed
 #   2  COULD NOT RUN -- nmcli missing or failing; the radio is left alone
 #
-# Seams: DOCK_WIFI_NMCLI (the nmcli to use; the state table points it at a stub)
+# Seams: DOCK_WIFI_NMCLI (the nmcli to use; the state table points it at a stub),
+#        DOCK_WIFI_GRACE_S (default 20) and DOCK_WIFI_POLL_S (default 1), the grace period below
 
 set -uo pipefail
 
 NMCLI="${DOCK_WIFI_NMCLI:-nmcli}"
+# THE GRACE PERIOD. The boot and resume oneshot fires when NetworkManager is "active",
+# which is its bus name, not its devices: measured here, the dock's ethernet takes 10-15 s
+# from carrier to `connected` after a re-plug, and 6+ s after resume. With the radio off
+# and a wired device still on its way, deciding "no wired device" turns Wi-Fi on and the
+# dock's own `up` event turns it off again seconds later: the very drop this guard exists
+# to remove, now at every docked resume. So in exactly that state -- radio off, no ethernet
+# connected, an ethernet device present and not unmanaged -- the decision waits, polling,
+# for up to GRACE_S. Undocked (no such device) there is nothing to wait for; radio already
+# on, nothing to protect.
+GRACE_S="${DOCK_WIFI_GRACE_S:-20}"
+POLL_S="${DOCK_WIFI_POLL_S:-1}"
 # The dispatcher actions after which the answer can have changed. `hostname`,
 # `dhcp6-change`, `vpn-up` and the rest cannot connect or disconnect a wired
 # device, and a dispatcher that reconverges on every event is noise in the
@@ -56,6 +68,13 @@ DISPATCH_ACTIONS=" up down connectivity-change dhcp4-change "
 err() { printf 'dock-wifi: %s\n' "$*" >&2; }
 log() { printf 'dock-wifi: %s\n' "$*"; }
 
+for _v in GRACE_S POLL_S; do
+    if [[ ! "${!_v}" =~ ^[0-9]+$ ]]; then
+        err "DOCK_WIFI_${_v} must be a non-negative integer, got '${!_v}'"
+        exit 2
+    fi
+done
+
 need_nmcli() {
     command -v "$NMCLI" >/dev/null 2>&1 || { err "nmcli not found ($NMCLI); cannot run"; exit 2; }
 }
@@ -64,11 +83,18 @@ need_nmcli() {
 # nothing. `unmanaged` rows (docker's veths, a tethered container bridge) do not
 # count: NM is not routing through them. A USB-tethered phone IS an ethernet
 # device in state connected, and counts; it is a wired uplink.
-wired_connected() {
-    local rows
-    rows="$("$NMCLI" -t -f DEVICE,TYPE,STATE device 2>/dev/null)" || return 2
-    awk -F: '$2 == "ethernet" && $3 == "connected" { print $1; exit }' <<<"$rows"
-    return 0
+connected_from() {   # <rows> -> the first connected ethernet device, or nothing
+    awk -F: '$2 == "ethernet" && $3 == "connected" { print $1; exit }' <<<"$1"
+}
+
+# Is an ethernet device present that NetworkManager manages and that is not (yet) connected?
+# Uses the same listing as wired_connected, taken once; the caller passes the rows.
+wired_pending() {   # <rows>
+    awk -F: '$2 == "ethernet" && $3 != "unmanaged" && $3 != "connected" { found = 1 } END { exit !found }' <<<"$1"
+}
+
+list_devices() {
+    "$NMCLI" -t -f DEVICE,TYPE,STATE device 2>/dev/null
 }
 
 radio_wifi() {   # prints on|off
@@ -82,24 +108,37 @@ radio_wifi() {   # prints on|off
 }
 
 mode_sync() {
-    local dev wanted have
+    local dev wanted have rows waited=0 deadline
     need_nmcli
-    dev="$(wired_connected)" || { err "nmcli device failed; touching nothing"; exit 2; }
-    if [[ -n "$dev" ]]; then wanted="off"; else wanted="on"; fi
+    rows="$(list_devices)" || { err "nmcli device failed; touching nothing"; exit 2; }
+    dev="$(connected_from "$rows")"
     have="$(radio_wifi)" || { err "nmcli radio failed; touching nothing"; exit 2; }
+    if [[ -z "$dev" && "$have" == "off" && "$GRACE_S" != "0" ]] && wired_pending "$rows"; then
+        deadline=$(( SECONDS + GRACE_S ))
+        while (( SECONDS < deadline )); do
+            sleep "$POLL_S"
+            waited=1
+            rows="$(list_devices)" || { err "nmcli device failed; touching nothing"; exit 2; }
+            dev="$(connected_from "$rows")"
+            [[ -n "$dev" ]] && break
+            wired_pending "$rows" || break
+        done
+    fi
+    if [[ -n "$dev" ]]; then wanted="off"; else wanted="on"; fi
     if [[ "$have" == "$wanted" ]]; then
-        log "wifi already ${wanted} (wired: ${dev:-none})"
+        log "wifi already ${wanted} (wired: ${dev:-none})$([[ $waited == 1 ]] && printf ', waited for the wired device')"
         return 0
     fi
     "$NMCLI" radio wifi "$wanted" >/dev/null 2>&1 || { err "nmcli radio wifi ${wanted} failed"; exit 2; }
-    log "wifi ${wanted} (wired: ${dev:-none})"
+    log "wifi ${wanted} (wired: ${dev:-none})$([[ $waited == 1 ]] && printf ', after waiting for a wired device that never connected')"
     return 0
 }
 
 mode_status() {
-    local dev have
+    local dev have rows
     need_nmcli
-    dev="$(wired_connected)" || { err "nmcli device failed"; exit 2; }
+    rows="$(list_devices)" || { err "nmcli device failed"; exit 2; }
+    dev="$(connected_from "$rows")"
     have="$(radio_wifi)" || { err "nmcli radio failed"; exit 2; }
     printf 'wired:  %s\n' "${dev:-none}"
     printf 'wifi:   %s\n' "$have"

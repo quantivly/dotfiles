@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A docked laptop keeps one uplink.** `dock-wifi-setup` installs, root-owned and copied, a
   NetworkManager dispatcher shim, `/usr/local/bin/dock-wifi.sh` and a `dock-wifi-sync.service`
   oneshot: the Wi-Fi radio is off while a managed ethernet device is connected and on again when
-  none is, re-evaluated on every link event, at boot and after resume. Measured over a fortnight,
+  none is, re-evaluated on every link event, at boot (after `network-online.target`) and after
+  resume, with a 20-second grace period while a wired device is still coming up. Measured over a fortnight,
   four tunnel drops came exactly 20 s after a home Wi-Fi flap while the dock's wired link was up.
   A pure function of NetworkManager's current state, no markers: NetworkManager persists
   `radio wifi off` across reboots, so a marker design strands a laptop booted undocked.

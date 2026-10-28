@@ -12,8 +12,8 @@ the same pure function of NetworkManager's *current* state:
 | trigger | file | why it exists |
 |---|---|---|
 | every link event (`up`, `down`, `connectivity-change`, `dhcp4-change`; other actions are a no-op) | `/etc/NetworkManager/dispatcher.d/50-dock-wifi` → `/usr/local/bin/dock-wifi.sh --dispatch` | docking and undocking |
-| boot, after NetworkManager | `/etc/systemd/system/dock-wifi-sync.service` (oneshot, `After=NetworkManager.service`) | NetworkManager **persists** `radio wifi off` across reboots: shut down docked, boot undocked, and no link event will ever turn Wi-Fi on |
-| resume | the same unit, `WantedBy=suspend.target hibernate.target` with `After=` them | the dock may have been unplugged while asleep |
+| boot, after `network-online.target` | `/etc/systemd/system/dock-wifi-sync.service` (oneshot, `After=NetworkManager.service network-online.target`, `Wants=network-online.target`) | NetworkManager **persists** `radio wifi off` across reboots: shut down docked, boot undocked, and no link event will ever turn Wi-Fi on |
+| resume, from any kind of sleep | the same unit, `WantedBy=` and `After=` `suspend.target hibernate.target suspend-then-hibernate.target hybrid-sleep.target` | the dock may have been unplugged while asleep |
 
 `nmcli radio wifi on|off` is called only when the radio disagrees with the wired state, so the
 `down` event the toggle itself causes re-enters harmlessly, and `nmcli` failing is exit 2 with
@@ -26,8 +26,22 @@ dock-wifi-setup --remove   # uninstall, and turn the radio back ON
 ~/.dotfiles/scripts/dock-wifi.sh --status   # the deciding device, the radio, the wanted state
 ```
 
-To keep Wi-Fi on while docked for one session, `nmcli radio wifi on`; the next link event, boot
-or resume turns it off again. To stop that, `dock-wifi-setup --remove`.
+There is no per-session override: `nmcli radio wifi on` while docked makes a Wi-Fi profile
+autoconnect, that is an `up` event, and the dispatcher turns the radio off again within seconds.
+The two escapes are unplugging the wired link and `dock-wifi-setup --remove`. The guard also
+cannot tell a wired link with no internet from a working one (`nmcli`'s per-device state is
+plain `connected` either way), so a docked laptop on a dead wire stays single-homed until one of
+those two.
+
+**The grace period.** The boot and resume oneshot fires when NetworkManager is "active", which
+is its bus name, not its devices: measured here, the dock's ethernet takes 10-15 s from carrier
+to `connected` after a re-plug and 6 s or more after resume. In exactly one state, radio off, no
+ethernet connected, an ethernet device present and not `unmanaged`, the decision waits, polling
+once a second for up to 20 s (`DOCK_WIFI_GRACE_S`), for that device to connect. Undocked there
+is no such device and Wi-Fi returns at once; with the radio already on there is nothing to
+protect and the dock's own `up` event does the rest. At boot the unit also orders itself after
+`network-online.target`. Without the wait, every docked resume would turn Wi-Fi on and off again
+within 15 s: the very drop the guard exists to remove.
 
 ## The trade, stated honestly
 
@@ -67,7 +81,7 @@ the unit. A symlink into a user-writable checkout hands root a file the user can
 CLAUDE.md names for every root-consumed file here; `--check` refuses a symlink even when its
 bytes match.
 
-**State table.** `scripts/test-dock-wifi.sh` (90 checks, run in CI). `nmcli` is a **stateful
+**State table.** `scripts/test-dock-wifi.sh` (100 checks, run in CI). `nmcli` is a **stateful
 stub**, a device table and a radio state under a directory each row chooses, because a row that
 reached the real one would cut this laptop's Wi-Fi mid-suite; `sudo`, `systemctl` and
 `systemd-analyze` are the stubs of `scripts/test-dock-lid.sh`, with the sudo stub running
@@ -81,4 +95,8 @@ install not converging, `--check` accepting a symlink, `After=NetworkManager.ser
 the shim without `exec`: all killed on the first pass. The eleventh, a failed device listing
 treated as "no wired device", SURVIVED, because the stub failed every call and the radio read
 failed with it; the stub gained a partial-failure mode and the row that kills it: the listing
-alone failing is exit 2 with the radio untouched.
+alone failing is exit 2 with the radio untouched. A fresh-context review of the branch then found
+the race the unit's ordering left open (NetworkManager "active" before its devices are), the
+override the doc promised and the dispatcher took straight back, and a row that verified the
+shipped unit against the real `systemd-analyze` and would have gone red on this laptop the
+moment the guard was installed; all three are fixed above and pinned.

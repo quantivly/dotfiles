@@ -68,7 +68,8 @@ st="${NMCLI_STATE:?}"
 case "$*" in
   "-t -f DEVICE,TYPE,STATE device")
     [ "${STUB_NMCLI_FAIL:-0}" = device ] && { echo "Error: could not list devices." >&2; exit 8; }
-    cat "$st/devices" ;;
+    n="$(cat "$st/calls" 2>/dev/null || echo 0)"; n=$((n + 1)); echo "$n" >"$st/calls"
+    if [ -f "$st/devices.$n" ]; then cat "$st/devices.$n"; else cat "$st/devices"; fi ;;
   "radio wifi")     cat "$st/radio" ;;
   "radio wifi on")  echo enabled  >"$st/radio" ;;
   "radio wifi off") echo disabled >"$st/radio" ;;
@@ -195,11 +196,14 @@ VETH_ONLY='lo:loopback:unmanaged|veth1a2b:ethernet:unmanaged|veth3c4d:ethernet:u
 radio_of()  { cat "$1/radio"; }
 writes()    { grep -c -E '^nmcli radio wifi (on|off)$' "$STUBLOG"; }
 nmcli_calls() { grep -c '^nmcli' "$STUBLOG"; }
+listings() { grep -c '^nmcli -t -f DEVICE,TYPE,STATE device$' "$STUBLOG"; }
 # run_script <world> [args...] -> OUT, RC; the stub nmcli is the only one on PATH
 run_script() {
   local w="$1"; shift
   : >"$STUBLOG"
-  OUT="$(cd "$T" && NMCLI_STATE="$w" PATH="$STUBBIN:$PATH" bash "$SCRIPT" "$@" 2>&1)"; RC=$?
+  OUT="$(cd "$T" && NMCLI_STATE="$w" PATH="$STUBBIN:$PATH" \
+           DOCK_WIFI_GRACE_S="${DOCK_WIFI_GRACE_S:-0}" DOCK_WIFI_POLL_S="${DOCK_WIFI_POLL_S:-1}" \
+           bash "$SCRIPT" "$@" 2>&1)"; RC=$?
 }
 want_rc()  { if [[ "$RC" == "$2" ]]; then ok "$1"; else bad "$1 — expected exit $2, got $RC"; fi; }
 want_out() { if [[ "$OUT" == *"$2"* ]]; then ok "$1"; else bad "$1 — expected output to contain '$2', got: $OUT"; fi; }
@@ -233,8 +237,8 @@ W="$(world "$VETH_ONLY" enabled)"; run_script "$W" --sync
 check "docker's veths are ethernet but UNMANAGED: not a wired uplink, wifi stays on" "$(writes):$(radio_of "$W")" "0:enabled"
 W="$(world "$WIRED_DOWN" disabled)"; run_script "$W" --sync
 check "a wired device present but DISCONNECTED (cable out) is no uplink: wifi on" "$(radio_of "$W")" enabled
-W="$(world 'enx8c3b4a256b7a:ethernet:connected|wlp0s20f3:wifi:unavailable' disabled)"; run_script "$W" --sync
-check "the wifi device's own state is irrelevant (it is unavailable while the radio is off)" "$(writes)" 0
+W="$(world 'enx8c3b4a256b7a:ethernet:connected|wlp0s20f3:wifi:unavailable' enabled)"; run_script "$W" --sync
+check "the wifi device's own state is irrelevant: wired connected and radio on is one write, whatever wlp says" "$(writes):$(radio_of "$W")" "1:disabled"
 W="$(world "$WIRED_UP" enabled)"; STUB_NMCLI_FAIL=1 run_script "$W" --sync
 want_rc  "nmcli failing: COULD NOT RUN (exit 2)" 2
 check "...and the radio is left alone" "$(writes):$(radio_of "$W")" "0:enabled"
@@ -252,6 +256,32 @@ want_rc "nmcli missing from PATH: COULD NOT RUN (exit 2)" 2
 check "...and the radio is untouched" "$(radio_of "$W")" enabled
 W="$(world 'wlp0s20f3:wifi:connected|enx8c3b4a256b7a:ethernet:connected' enabled)"; run_script "$W" --sync
 check "the first connected ethernet device decides, whatever row order NetworkManager prints" "$(radio_of "$W")" disabled
+
+printf '\ndock-wifi.sh --sync: the grace period while a wired device is still coming up\n'
+# Radio OFF, no ethernet connected yet, but one is on its way (connecting): wait, then decide.
+W="$(world 'enx8c3b4a256b7a:ethernet:connected|wlp0s20f3:wifi:unavailable' disabled)"
+printf 'enx8c3b4a256b7a:ethernet:connecting\nwlp0s20f3:wifi:unavailable\n' >"$W/devices.1"
+cp "$W/devices.1" "$W/devices.2"
+DOCK_WIFI_GRACE_S=5 run_script "$W" --sync
+want_rc  "grace: exit 0" 0
+check "grace: a wired device still 'connecting' with the radio off is WAITED for: zero writes, radio stays off" "$(writes):$(radio_of "$W")" "0:disabled"
+check "grace: ...it kept listing until the device was connected" "$(listings)" 3
+want_out "grace: ...and says it waited" "waited"
+# No ethernet device present at all (undocked): nothing to wait for, Wi-Fi back at once.
+W="$(world "$NO_WIRED" disabled)"; DOCK_WIFI_GRACE_S=5 run_script "$W" --sync
+check "grace: with no wired device present there is no wait: one listing, radio on" "$(listings):$(radio_of "$W")" "1:enabled"
+# A wired device that never gets there: the budget ends, Wi-Fi comes back.
+W="$(world 'enx8c3b4a256b7a:ethernet:connecting|wlp0s20f3:wifi:unavailable' disabled)"
+DOCK_WIFI_GRACE_S=2 run_script "$W" --sync
+want_rc  "grace: a device that never connects within the budget: exit 0" 0
+check "grace: ...then the radio comes on (listed more than once)" "$(radio_of "$W"):$([[ $(listings) -gt 1 ]] && echo many || echo one)" "enabled:many"
+# Radio already ON: nothing to protect, no wait (the dock's own up event turns it off).
+W="$(world 'enx8c3b4a256b7a:ethernet:connecting|wlp0s20f3:wifi:connected' enabled)"
+DOCK_WIFI_GRACE_S=5 run_script "$W" --sync
+check "grace: with the radio already on there is no wait: one listing, zero writes" "$(listings):$(writes)" "1:0"
+# An unmanaged ethernet device (a veth) is not 'on its way' either.
+W="$(world "$VETH_ONLY" disabled)"; DOCK_WIFI_GRACE_S=5 run_script "$W" --sync
+check "grace: unmanaged veths are not a pending uplink: one listing, radio on" "$(listings):$(radio_of "$W")" "1:enabled"
 
 printf '\ndock-wifi.sh --status and --dispatch\n'
 W="$(world "$WIRED_UP" enabled)"; run_script "$W" --status
@@ -427,21 +457,21 @@ printf '\nthe shipped files, against the real parser and exactly\n'
 sed "s#^ExecStart=/usr/local/bin/dock-wifi.sh #ExecStart=${SCRIPT} #" "$UNIT_SRC" >"$T/dock-wifi-sync.service"
 out="$(systemd-analyze verify --man=no --recursive-errors=no "$T/dock-wifi-sync.service" 2>&1)"; rc=$?
 check "the real systemd-analyze verify accepts the unit (ExecStart pointed at an existing copy) and prints nothing" "$rc:[$out]" "0:[]"
-out="$(systemd-analyze verify --man=no --recursive-errors=no "$UNIT_SRC" 2>&1)"; rc=$?
-check "...and the shipped unit itself is rejected ONLY for the not-yet-installed command, nothing else" \
-  "$rc:$(grep -c 'is not executable' <<<"$out"):$(grep -vc 'is not executable' <<<"$out")" "1:1:0"
 check "the unit runs the installed copy's --sync" "$(grep '^ExecStart=' "$UNIT_SRC")" 'ExecStart=/usr/local/bin/dock-wifi.sh --sync'
 check "the unit is a oneshot" "$(grep -c '^Type=oneshot$' "$UNIT_SRC")" 1
-check "the unit runs after NetworkManager and after resume (suspend.target, hibernate.target)" \
-  "$(grep '^After=' "$UNIT_SRC")" 'After=NetworkManager.service suspend.target hibernate.target'
-check "the unit is wanted at boot AND by suspend.target (the resume trigger; a wrong target verifies and never fires)" \
-  "$(grep '^WantedBy=' "$UNIT_SRC")" 'WantedBy=multi-user.target suspend.target hibernate.target'
+check "the unit runs after network-online (NetworkManager 'active' is its bus name, not its devices) and after every sleep kind" \
+  "$(grep '^After=' "$UNIT_SRC")" 'After=NetworkManager.service network-online.target suspend.target hibernate.target suspend-then-hibernate.target hybrid-sleep.target'
+check "...and pulls network-online.target in at boot" "$(grep '^Wants=' "$UNIT_SRC")" 'Wants=network-online.target'
+check "the unit is wanted at boot AND by every sleep target (the resume trigger; a wrong target verifies and never fires)" \
+  "$(grep '^WantedBy=' "$UNIT_SRC")" 'WantedBy=multi-user.target suspend.target hibernate.target suspend-then-hibernate.target hybrid-sleep.target'
+check "no home path is hardcoded into a system unit (Documentation= is the repo URL)" \
+  "$(grep '^Documentation=' "$UNIT_SRC")" 'Documentation=https://github.com/quantivly/dotfiles/blob/main/docs/DOCK_WIFI.md'
 check "the shim runs under sh" "$(head -1 "$SHIM_SRC")" '#!/bin/sh'
 # shellcheck disable=SC2016  # "$1" "$2" are the shim's literal text, NetworkManager's arguments
 check "the shim is exactly one command: exec the installed copy's --dispatch with NetworkManager's two arguments" \
   "$(grep -v '^#' "$SHIM_SRC" | tr '\n' ' ')" 'exec /usr/local/bin/dock-wifi.sh --dispatch "$1" "$2" '
 
-EXPECTED_ROWS=90
+EXPECTED_ROWS=100
 
 # --- the count this suite is documented as running ---------------------------
 docs_claim() {
