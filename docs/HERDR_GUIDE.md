@@ -813,8 +813,9 @@ Things to know about the bell:
 - **Bells that fire together ring once** (a lock is held while one plays), and the hook returns at
   once; the player is detached.
 - **It is wired by `scripts/herdr-claude-wire.sh`,** which adds the Stop hook to
-  `~/.claude/settings.json`. Account dirs pick it up on their next refresh; a running session gets
-  it when it restarts.
+  `~/.claude/settings.json`. A session's account dir copies that file when the session is
+  launched (`scripts/claude-account-dirs.sh`, "settings.json"), not on the 2-minute credential
+  reconcile. So every new session rings, and a running one keeps the hooks it started with.
 
 State table: `scripts/test-herdr-waiting-bell.sh` (52 checks, in CI as `herdr-waiting-bell-test`),
 which also pins the mute and both install links.
