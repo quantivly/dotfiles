@@ -4,8 +4,9 @@
 # ========================
 #
 # State table for scripts/setup-dock-lid.sh and the three files it installs:
-# logind/lid-on-power.conf, udev/90-dock-lid-holdoff.rules and
-# systemd/dock-lid-holdoff@.service.
+# logind/lid-locks-never-suspends.conf, udev/90-dock-lid-holdoff.rules and
+# systemd/dock-lid-holdoff@.service — and the one it removes,
+# /etc/systemd/logind.conf.d/lid-on-power.conf.
 #
 # HERMETIC via `sudo`, `systemctl`, `busctl`, `udevadm` and `systemd-analyze`
 # stubs at the front of PATH. The machine running this has a live logind: a row
@@ -16,10 +17,13 @@
 # "ignore" passes an installer that reads the wrong property or reloads logind
 # before copying the drop-in (both measured: the first review's mutants
 # survived exactly that way). And they model only what the real tools do:
-#   - `sudo systemctl reload systemd-logind` snapshots the drop-in's value NOW,
-#     into <prefix>.state/; the `busctl` stub answers from it, and only for
-#     HandleLidSwitchExternalPower (HandleLidSwitchDocked defaults to "ignore"
-#     too, so reading it would be a false green on a real machine).
+#   - `sudo systemctl reload systemd-logind` snapshots what the drop-ins say
+#     NOW, into <prefix>.state/, reading them in name order with a later file
+#     overriding an earlier one, as logind does — so a replaced drop-in left
+#     behind wins. The `busctl` stub answers the three lid properties from the
+#     snapshot, falls back to logind's own defaults (suspend, "", ignore) for
+#     one no drop-in sets, and refuses any other property.
+#   - `sudo rm` runs for real, but only under the prefix.
 #   - `systemctl show -p LoadState` of an instance answers from the template
 #     on disk. Real systemd needs no daemon-reload for that — it rebuilds its
 #     name map when a unit directory changes, and a never-started instance is
@@ -51,7 +55,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DOTFILES="$(cd "$HERE/.." && pwd -P)"
 SETUP="$HERE/setup-dock-lid.sh"
-LOGIND_SRC="$DOTFILES/logind/lid-on-power.conf"
+LOGIND_SRC="$DOTFILES/logind/lid-locks-never-suspends.conf"
 RULE_SRC="$DOTFILES/udev/90-dock-lid-holdoff.rules"
 UNIT_SRC="$DOTFILES/systemd/dock-lid-holdoff@.service"
 
@@ -86,10 +90,11 @@ ME="$(id -un):$(id -gn)"
 cat >"$STUBBIN/sudo" <<'STUB'
 #!/usr/bin/env bash
 printf 'sudo %s\n' "$*" >>"$STUBLOG"
+export LC_ALL=C   # logind orders drop-ins by byte value, and so must the glob below
 pfx="${DOCK_LID_SETUP_PREFIX:-}"
 state="${pfx}.state"
 case "${1:-}" in
-  install) ;;
+  install | rm) ;;
   systemctl)
     # Modelled, never executed (see the header). Without a prefix: recorded only.
     [ -n "$pfx" ] || exit 0
@@ -97,9 +102,14 @@ case "${1:-}" in
     case "${2:-}:${3:-}" in
       reload:systemd-logind)
         [ "${STUB_LOGIND_RELOAD_FAIL:-0}" = 1 ] && exit 1
-        # logind re-reads its drop-ins at this moment: what they say now is live.
-        sed -n 's/^HandleLidSwitchExternalPower=//p' \
-          "$pfx/etc/systemd/logind.conf.d/lid-on-power.conf" 2>/dev/null | head -1 >"$state/logind-live" ;;
+        # logind re-reads its drop-ins at this moment, in name order, a later
+        # file overriding an earlier one: what they say now is live.
+        rm -rf "$state/logind-live" && mkdir -p "$state/logind-live" || exit 98
+        for f in "$pfx"/etc/systemd/logind.conf.d/*.conf; do
+          [ -f "$f" ] && sed -n 's/^\(HandleLidSwitch[A-Za-z]*\)=\(.*\)$/\1 \2/p' "$f"
+        done | while read -r key value; do
+          printf '%s\n' "$value" >"$state/logind-live/$key"
+        done ;;
     esac
     exit 0 ;;
   *) exit 0 ;;   # udevadm control --reload and anything else: recorded only
@@ -115,6 +125,17 @@ case "$pfx" in
   /*) ;;
   *) echo "sudo stub: REFUSED a relative prefix: $pfx" >&2; exit 97 ;;
 esac
+if [ "$1" = rm ]; then
+  shift
+  for a in "$@"; do
+    case "$a" in
+      -*) ;;
+      "$pfx"/*) ;;
+      *) echo "sudo stub: REFUSED rm outside the prefix: $a" >&2; exit 97 ;;
+    esac
+  done
+  exec rm "$@"
+fi
 shift
 has_d=0; flags=(); ops=()
 while [ $# -gt 0 ]; do
@@ -171,14 +192,25 @@ cat >"$STUBBIN/busctl" <<'STUB'
 #!/usr/bin/env bash
 printf 'busctl %s\n' "$*" >>"$STUBLOG"
 [ "${STUB_BUSCTL_FAIL:-0}" = 1 ] && exit 1
+# logind's own default for each lid property no drop-in sets. An unset
+# HandleLidSwitchExternalPower reads "" and the lid then follows HandleLidSwitch.
+case "${5:-}" in
+  HandleLidSwitch) default=suspend ;;
+  HandleLidSwitchExternalPower) default="" ;;
+  HandleLidSwitchDocked) default=ignore ;;
+  *) default=unmodelled ;;
+esac
 if [ "${1:-}" != get-property ] || [ "${4:-}" != org.freedesktop.login1.Manager ] \
-   || [ "${5:-}" != HandleLidSwitchExternalPower ]; then
+   || [ "$default" = unmodelled ]; then
   echo "busctl stub: unmodelled call: $*" >&2; exit 99
 fi
-# STUB_LID_POWER set (even to empty) overrides; otherwise what the last reload
-# made live, and "" (logind's own default) if logind has never been reloaded.
-if [ -n "${STUB_LID_POWER+set}" ]; then v="$STUB_LID_POWER"
-else v="$(cat "${DOCK_LID_SETUP_PREFIX:-}.state/logind-live" 2>/dev/null)"; fi
+# STUB_LOGIND_<property> set (even to empty) overrides; otherwise what the last
+# reload made live, and logind's default if no drop-in set it.
+override="STUB_LOGIND_$5"
+live="${DOCK_LID_SETUP_PREFIX:-}.state/logind-live/$5"
+if [ -n "${!override+set}" ]; then v="${!override}"
+elif [ -f "$live" ]; then v="$(cat "$live")"
+else v="$default"; fi
 printf 's "%s"\n' "$v"
 STUB
 
@@ -253,13 +285,26 @@ check "with no prefix the sudo stub writes nothing" "$rc:$(files_in "$P")" "1:0"
 rc="$(cd "$T" && DOCK_LID_SETUP_PREFIX='rel' stubs sudo install -D -m 644 "$RULE_SRC" "rel/x.rules" >/dev/null 2>&1; echo $?)"
 check "the sudo stub refuses a relative prefix, which confines nothing" \
   "$rc:$([[ -e $T/rel ]] && echo written || echo absent)" "97:absent"
-rc="$(DOCK_LID_SETUP_PREFIX="$P" stubs busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
-       org.freedesktop.login1.Manager HandleLidSwitchDocked >/dev/null 2>&1; echo $?)"
-check "the busctl stub refuses any property but HandleLidSwitchExternalPower" "$rc" 99
+rc="$(DOCK_LID_SETUP_PREFIX="$P" stubs sudo rm -f "$T/outside.conf" >/dev/null 2>&1; echo $?)"
+check "the sudo stub refuses an rm outside the prefix" "$rc" 97
+# What logind reports for one lid property, as the setup script asks for it.
+live_property() {
+  DOCK_LID_SETUP_PREFIX="$1" stubs busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.login1.Manager "$2"
+}
+rc="$(live_property "$P" HandlePowerKey >/dev/null 2>&1; echo $?)"
+check "the busctl stub refuses a property it does not model" "$rc" 99
 DOCK_LID_SETUP_PREFIX="$P" stubs sudo systemctl reload systemd-logind
-check "a logind reload with no drop-in on disk makes nothing live" \
-  "$(DOCK_LID_SETUP_PREFIX="$P" stubs busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
-       org.freedesktop.login1.Manager HandleLidSwitchExternalPower)" 's ""'
+check "a logind reload with no drop-in on disk leaves logind's own defaults live" \
+  "$(live_property "$P" HandleLidSwitch):$(live_property "$P" HandleLidSwitchExternalPower):$(live_property "$P" HandleLidSwitchDocked)" \
+  's "suspend":s "":s "ignore"'
+P="$(newprefix)"
+mkdir -p "$P/etc/systemd/logind.conf.d" || fatal "drop-in order fixture"
+printf '[Login]\nHandleLidSwitch=lock\n' >"$P/etc/systemd/logind.conf.d/a.conf" || fatal "drop-in order fixture"
+printf '[Login]\nHandleLidSwitch=ignore\n' >"$P/etc/systemd/logind.conf.d/b.conf" || fatal "drop-in order fixture"
+DOCK_LID_SETUP_PREFIX="$P" stubs sudo systemctl reload systemd-logind
+check "a logind reload reads drop-ins in name order, the later file winning" \
+  "$(live_property "$P" HandleLidSwitch)" 's "ignore"'
 
 # ---------------------------------------------------------------------------
 printf '\narguments\n'
@@ -274,7 +319,7 @@ printf '\ninstall\n'
 P="$(newprefix)"
 rc="$(run_setup "$ROOT" "$P")"
 check "installs, exit 0" "$rc" 0
-for pair in "logind/lid-on-power.conf:etc/systemd/logind.conf.d/lid-on-power.conf" \
+for pair in "logind/lid-locks-never-suspends.conf:etc/systemd/logind.conf.d/lid-locks-never-suspends.conf" \
             "udev/90-dock-lid-holdoff.rules:etc/udev/rules.d/90-dock-lid-holdoff.rules" \
             "systemd/dock-lid-holdoff@.service:etc/systemd/system/dock-lid-holdoff@.service"; do
   src="${pair%%:*}" dst="${pair#*:}"
@@ -286,8 +331,10 @@ check "the system manager re-reads its units" "$(logged 'sudo systemctl daemon-r
 check "udevd re-reads its rules" "$(logged 'sudo udevadm control --reload')" 1
 check "logind is RELOADED, and never restarted (a restart ends every session)" \
   "$(logged 'sudo systemctl reload systemd-logind'):$(logged_re 'restart')" "1:0"
-check "the live logind value is read back and reported" \
-  "$(out_has 'logind is running with HandleLidSwitchExternalPower=ignore')" 1
+check "every setting the drop-in makes is read back live and reported" \
+  "$(out_has 'logind is running with HandleLidSwitch=lock'):$(out_has 'logind is running with HandleLidSwitchExternalPower=lock'):$(out_has 'logind is running with HandleLidSwitchDocked=ignore')" \
+  "1:1:1"
+check "with no replaced drop-in to remove, nothing is removed" "$(logged_re '^sudo rm')" 0
 check "the check asks systemd whether it can load the unit" \
   "$(out_has 'systemd can load dock-lid-holdoff@.service')" 1
 check "a prefixed run says it is not touching the real /etc" "$(out_has 'NOT to the real /etc')" 1
@@ -303,6 +350,25 @@ install -d -m 700 "$P/etc/systemd/system" || fatal "parent fixture"
 rc="$(run_setup "$ROOT" "$P")"
 check "an existing parent is left alone: not chmod-ed, not re-created" \
   "$rc:$(stat -c %a "$P/etc/systemd/system"):$(logged_re '^sudo install -d .*/etc/systemd/system$')" "0:700:0"
+
+# ---------------------------------------------------------------------------
+printf '\nthe drop-in the lid policy replaced\n'
+SUPERSEDED_DROPIN="etc/systemd/logind.conf.d/lid-on-power.conf"
+# The file as every machine that ran dock-lid-setup before 2026-10-29 has it.
+plant_superseded() {
+  if ! { mkdir -p "$1/etc/systemd/logind.conf.d" \
+         && printf '[Login]\nHandleLidSwitchExternalPower=ignore\n' >"$1/$SUPERSEDED_DROPIN"; }; then
+    fatal "superseded drop-in fixture"
+  fi
+}
+P="$(newprefix)"
+plant_superseded "$P"
+rc="$(run_setup "$ROOT" "$P")"
+check "an install removes it, under sudo, and succeeds" \
+  "$rc:$([[ -e $P/$SUPERSEDED_DROPIN ]] && echo present || echo absent):$(logged "sudo rm -f $P/$SUPERSEDED_DROPIN")" \
+  "0:absent:1"
+check "... BEFORE the logind reload, so its ExternalPower=ignore never goes live" \
+  "$(out_has 'logind is running with HandleLidSwitchExternalPower=lock')" 1
 
 # ---------------------------------------------------------------------------
 printf '\nvalidation refuses before anything is written, and says why\n'
@@ -366,11 +432,18 @@ check "a SYMLINK back into the checkout is refused, though its bytes match" \
   "$rc:$(grep -c 'rules.d/90-dock-lid-holdoff.rules is a SYMLINK' "$T/out")" "1:1"
 rm -f "$P/etc/udev/rules.d/90-dock-lid-holdoff.rules"
 install -m 644 "$ROOT/udev/90-dock-lid-holdoff.rules" "$P/etc/udev/rules.d/" || fatal restore
-chmod 666 "$P/etc/systemd/logind.conf.d/lid-on-power.conf" || fatal chmod
+chmod 666 "$P/etc/systemd/logind.conf.d/lid-locks-never-suspends.conf" || fatal chmod
 rc="$(run_setup "$ROOT" "$P" --check)"
 check "a world-writable copy is refused, though its bytes match" \
-  "$rc:$(grep -c "lid-on-power.conf is $ME 666, not $ME 644" "$T/out")" "1:1"
-chmod 644 "$P/etc/systemd/logind.conf.d/lid-on-power.conf" || fatal chmod
+  "$rc:$(grep -c "lid-locks-never-suspends.conf is $ME 666, not $ME 644" "$T/out")" "1:1"
+chmod 644 "$P/etc/systemd/logind.conf.d/lid-locks-never-suspends.conf" || fatal chmod
+# Every live value still right, since logind has not been reloaded: only the
+# file itself can show that the next reload would undo the policy.
+plant_superseded "$P"
+rc="$(run_setup "$ROOT" "$P" --check)"
+check "the replaced lid-on-power.conf still installed: exit 1, and it names the file" \
+  "$rc:$(out_has 'lid-on-power.conf is superseded and still installed')" "1:1"
+rm -f "$P/$SUPERSEDED_DROPIN"
 rm -f "$P/etc/systemd/system/dock-lid-holdoff@.service"
 rc="$(run_setup "$ROOT" "$P" --check)"
 check "a missing installed copy: exit 1, and it says not installed" \
@@ -381,8 +454,16 @@ check "(fixture) the restored prefix checks clean again" "$rc" 0
 rc="$(STUB_LOADSTATE=not-found run_setup "$ROOT" "$P" --check)"
 check "every file matching but systemd unable to load the unit: exit 1, names LoadState" \
   "$rc:$(out_has 'LoadState=not-found')" "1:1"
-rc="$(STUB_LID_POWER='' run_setup "$ROOT" "$P" --check)"
-check "every file matching but logind not running with the value: exit 1" "$rc" 1
+# One row per setting: a check that read only the first would pass the others.
+rc="$(STUB_LOGIND_HandleLidSwitch=suspend run_setup "$ROOT" "$P" --check)"
+check "every file matching but logind still suspending on a lid-close: exit 1, names it" \
+  "$rc:$(out_has "logind is running with HandleLidSwitch='suspend', not 'lock'")" "1:1"
+rc="$(STUB_LOGIND_HandleLidSwitchExternalPower=ignore run_setup "$ROOT" "$P" --check)"
+check "every file matching but logind ignoring a lid-close on a charger: exit 1, names it" \
+  "$rc:$(out_has "logind is running with HandleLidSwitchExternalPower='ignore', not 'lock'")" "1:1"
+rc="$(STUB_LOGIND_HandleLidSwitchDocked=lock run_setup "$ROOT" "$P" --check)"
+check "every file matching but logind locking a docked lid-close: exit 1, names it" \
+  "$rc:$(out_has "logind is running with HandleLidSwitchDocked='lock', not 'ignore'")" "1:1"
 
 # ---------------------------------------------------------------------------
 printf '\nthe worktree guard\n'
@@ -415,22 +496,22 @@ rc="$(udevadm verify --resolve-names=never "$RULE_SRC" >"$T/out" 2>&1; echo $?)"
 check "the real udevadm verify accepts the rule" "$rc" 0
 out="$(systemd-analyze verify --man=no --recursive-errors=no "$UNIT_SRC" 2>&1)"; rc=$?
 check "the real systemd-analyze verify accepts the unit and prints nothing" "$rc:[$out]" "0:[]"
-# Both rule lines exactly. udevadm verify accepts all of: no TAG+="systemd" (PID 1
+# The rule line exactly. udevadm verify accepts all of: no TAG+="systemd" (PID 1
 # never sees the device), a wrong unit name, an extra match that never holds.
 # shellcheck disable=SC2016  # $env{SEQNUM} is udev's substitution, not the shell's
-want_rules='ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="dock-lid-holdoff@%k-$env{SEQNUM}.service"
-ACTION=="change", SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="Mains|USB", ENV{POWER_SUPPLY_ONLINE}=="0", RUN+="/usr/bin/busctl call --timeout=3 org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping", RUN+="/usr/bin/systemd-run --no-block --quiet --collect --on-active=5 /usr/bin/busctl call --timeout=3 org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer Ping"'
-check "the rule file is exactly the two rules: holdoff per USB-C plug-in, and a logind re-check now and 5 s after power loss" \
+want_rules='ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="dock-lid-holdoff@%k-$env{SEQNUM}.service"'
+check "the rule file is exactly one rule, a holdoff per USB-C plug-in (the power-loss ping is retired)" \
   "$(grep -v '^#' "$RULE_SRC")" "$want_rules"
 check "the rule pulls in the template that ships (a wrong name verifies and never fires)" \
   "$(basename "$UNIT_SRC")" "dock-lid-holdoff@.service"
 check "the unit BLOCKS handle-lid-switch for 30 s, the whole ExecStart line" \
   "$(grep '^ExecStart=' "$UNIT_SRC")" \
   'ExecStart=/usr/bin/systemd-inhibit --what=handle-lid-switch --mode=block --who=dock-lid-holdoff --why="USB-C device connecting (%i)" /usr/bin/sleep 30'
-check "the logind drop-in is a [Login] section setting HandleLidSwitchExternalPower=ignore" \
-  "$(grep -v '^#' "$LOGIND_SRC" | tr '\n' ' ')" "[Login] HandleLidSwitchExternalPower=ignore "
+check "the logind drop-in locks on a lid-close, on battery and on a charger, never suspends, and ignores it docked" \
+  "$(grep -v '^#' "$LOGIND_SRC" | tr '\n' ' ')" \
+  "[Login] HandleLidSwitch=lock HandleLidSwitchExternalPower=lock HandleLidSwitchDocked=ignore "
 
-EXPECTED_ROWS=57
+EXPECTED_ROWS=65
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".

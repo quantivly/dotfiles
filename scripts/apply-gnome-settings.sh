@@ -10,6 +10,7 @@
 #   - Keybindings: free Ctrl+Alt+Arrow for tmux pane-resize (GNOME -> Super-based)
 #   - Input:       one layout switch (Super+Space); no Alt+Shift group toggle
 #   - Workspaces:  fixed count, per-workspace Alt+Tab & dock (park always-on apps)
+#   - Power:       never suspend on idle, on battery or on a charger
 #
 # The committed settings here are the *portable core* (the source of truth).
 # Machine-specific bits (dock favorites, custom launch keys) live in
@@ -263,6 +264,21 @@ apply_workspaces() {
     gset org.gnome.shell.extensions.dash-to-dock isolate-workspaces     "true"
 }
 
+apply_power() {
+    # Agents run for hours with nobody at the keyboard, and GNOME counts only
+    # keyboard and mouse as activity: on battery it suspended the laptop after
+    # 15 min idle, mid-task. Sleep happens only when asked for. 'nothing' is what
+    # Settings → Power → Automatic Suspend = off writes. Screen blanking and the
+    # idle lock (org.gnome.desktop.session idle-delay) are untouched.
+    #
+    # The lid is logind's, not GNOME's: logind/lid-locks-never-suspends.conf,
+    # installed by dock-lid-setup. Why both: docs/DOCK_LID_SUSPEND.md.
+    log STEP "Power — never suspend on idle"
+    local schema="org.gnome.settings-daemon.plugins.power"
+    gset "$schema" sleep-inactive-battery-type "'nothing'"
+    gset "$schema" sleep-inactive-ac-type      "'nothing'"
+}
+
 apply_local_overrides() {
     [[ -f "$LOCAL_OVERRIDES" ]] || return 0
     log STEP "Machine-specific overrides (~/.gnome-settings.local)"
@@ -290,6 +306,7 @@ main() {
     apply_keybindings
     apply_input_sources
     apply_workspaces
+    apply_power
     apply_local_overrides
 
     log STEP "Done"

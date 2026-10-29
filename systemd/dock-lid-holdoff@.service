@@ -4,13 +4,13 @@
 # after the uevent (%i = <kernel name>-<SEQNUM>). Each instance holds a lock on
 # handle-lid-switch for 30 s, the same window logind's own HoldoffTimeoutSec=
 # default gives docks after boot and resume. While any lock is held logind
-# ignores the lid. When the last one lapses, logind re-checks a lid that is still
-# closed and acts on it then: ignore if docked or on power, suspend on battery.
+# ignores the lid, and a lid closed then stays unhandled: the lid action is
+# `lock`, which logind takes only on the lid-close edge, never on a re-check.
 #
 # One instance PER PLUG-IN, not one unit: starting a unit that is already active
 # does nothing, so a single unit would let a re-plug in the last seconds of the
 # window keep the FIRST plug-in's expiry — and the lock would lapse before the
-# re-plugged dock's power is visible.
+# re-plugged dock is visible.
 #
 # `block` is the only mode logind accepts for a handle-* lock ("Delay inhibitors
 # only supported for shutdown and sleep").

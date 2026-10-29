@@ -51,6 +51,13 @@ Everything is set via `gsettings` (the schema-validated front end to dconf). The
   | Workspace left / right | `Super+Alt+←` / `Super+Alt+→` |
   | Workspace up / down | `Super+PageUp` / `Super+PageDown` |
 
+### Power — no idle suspend
+- `sleep-inactive-battery-type` and `sleep-inactive-ac-type` are `nothing`: GNOME never suspends
+  on idle, so agents keep running with nobody at the keyboard. Screen blanking and the idle lock
+  are unchanged.
+- The **lid** is logind's, not GNOME's, so it is set by `dock-lid-setup`, not here: closing it
+  locks the screen and never suspends. See [DOCK_LID_SUSPEND.md](DOCK_LID_SUSPEND.md).
+
 ### Extensions — left as-is
 No extensions are enabled or disabled. The decluttered look comes purely from
 hiding visible items. All stock Canonical extensions stay exactly as Ubuntu ships
