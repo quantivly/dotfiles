@@ -3,9 +3,10 @@
 # scripts/herdr-claude-wire.sh
 # ============================
 #
-# Wire Claude Code to herdr: the three things `./install --herdr` links a file
+# Wire Claude Code to herdr: the four things `./install --herdr` links a file
 # for, or depends on, but cannot finish — each of which fails silently when
-# skipped (DO-563, and the third added after adoption feedback on 2026-09-04).
+# skipped (DO-563, the third added after adoption feedback on 2026-09-04, the
+# fourth with the "Waiting on you" bell on 2026-10-29).
 #
 #   1. statusLine in ~/.claude/settings.json  -> publishes model / effort /
 #      context into the herdr agent sidebar, and doubles as the in-pane status
@@ -25,6 +26,11 @@
 #      server restart brings the panes back without their conversations. The
 #      command was in none of our instructions, because this workstation has had
 #      it installed since before any of them were written (2026-09-04).
+#
+#   4. a Stop hook in ~/.claude/settings.json  -> herdr-waiting-bell.sh, which
+#      rings herdr's "needs you" sound when a turn ends with a **Waiting on you**
+#      block and you are likely away. config/herdr/config.toml mutes herdr's own
+#      per-turn sound, so without this hook a question asked in prose is silent.
 #
 # WHY A SCRIPT AND NOT A PARAGRAPH. Both were prose in the team write-up, step 4
 # of seven, with the reader hand-substituting their own home directory into a
@@ -49,6 +55,13 @@ set -uo pipefail
 SETTINGS="${HOME}/.claude/settings.json"
 HOOK="${HOME}/.claude/hooks/session-statusline.sh"
 SKILL="${HOME}/.claude/skills/herdr/SKILL.md"
+BELL_HOOK="${HOME}/.claude/hooks/herdr-waiting-bell.sh"
+# The command is stored with a literal $HOME, expanded by the shell Claude Code
+# runs hooks in: the form every guard hook in settings.json already uses, and it
+# survives the copy into each per-session account dir. The `[ -r ]` guard keeps a
+# mid-deploy checkout from failing every Stop with exit 127.
+# shellcheck disable=SC2016  # a literal command string, expanded later by Claude Code
+BELL_HOOK_COMMAND='f="$HOME/.claude/hooks/herdr-waiting-bell.sh"; [ -r "$f" ] && exec bash "$f"; exit 0'
 REFRESH=60
 
 PRINT_ONLY=false
@@ -323,6 +336,60 @@ else
                 say "      ${DIM}Run it by hand to see why — resume_agents_on_restore needs it.${OFF}"
             fi ;;
     esac
+fi
+
+# ---------------------------------------------------------------------------
+# 4. The "Waiting on you" bell (a Stop hook)
+# ---------------------------------------------------------------------------
+# Merged into .hooks.Stop beside whatever is there; "ours" is recognised by the
+# hook's file name in a command, a positive test. Same refusals as section 1: no
+# jq, an unreadable file, or a file that is not a JSON object is reported and
+# left alone. So is a `hooks` or `hooks.Stop` of the wrong shape: that is not a
+# structure this script can extend without guessing what it means.
+bell_wired_filter='[.hooks?.Stop? | .[]? | .hooks? | .[]? | .command? | strings] | any(contains("herdr-waiting-bell.sh"))'
+if ! command -v jq >/dev/null 2>&1; then
+    : # Section 1 already refused, naming jq. A second identical ✗ is noise.
+elif [[ ! -e "$BELL_HOOK" ]]; then
+    bad "no bell hook at ${BELL_HOOK/#$HOME/\~} — run ./install --herdr first"
+    say "      ${DIM}herdr-waiting-bell.sh is linked by dotbot; registering a missing file would ring nothing.${OFF}"
+elif [[ -e "$SETTINGS" && ! -r "$SETTINGS" ]]; then
+    bad "cannot read ${SETTINGS/#$HOME/\~} — the Stop hook was not added"
+elif [[ -e "$SETTINGS" ]] && ! jq -e 'type == "object"' "$SETTINGS" >/dev/null 2>&1; then
+    bad "${SETTINGS/#$HOME/\~} is not a valid JSON object — the Stop hook was not added"
+elif [[ -e "$SETTINGS" ]] \
+     && ! jq -e '(.hooks | type) as $h | ($h == "null" or $h == "object")
+                 and ((.hooks.Stop? | type) as $s | $s == "null" or $s == "array")' \
+             "$SETTINGS" >/dev/null 2>&1; then
+    bad "hooks or hooks.Stop in ${SETTINGS/#$HOME/\~} has a shape this script does not extend — not touching it"
+    say "      ${DIM}Add the Stop hook by hand: ${BELL_HOOK_COMMAND}${OFF}"
+elif [[ -e "$SETTINGS" ]] && jq -e "$bell_wired_filter" "$SETTINGS" >/dev/null 2>&1; then
+    good "\"Waiting on you\" bell already registered as a Stop hook"
+elif [[ "$PRINT_ONLY" == true ]]; then
+    warn "would add a Stop hook -> ${BELL_HOOK/#$HOME/\~}"
+else
+    tmp="$(mktemp "${SETTINGS}.wire.XXXXXX" 2>/dev/null)" || tmp=""
+    # shellcheck disable=SC2016  # $c is a jq variable, not a shell one
+    bell_entry_filter='.hooks.Stop = ((.hooks.Stop // []) + [{hooks: [{type: "command", command: $c}]}])'
+    if [[ -z "$tmp" ]]; then
+        bad "could not create a temp file beside ${SETTINGS/#$HOME/\~}"
+    elif { if [[ -e "$SETTINGS" ]]; then
+               jq --arg c "$BELL_HOOK_COMMAND" "$bell_entry_filter" "$SETTINGS" >"$tmp" 2>/dev/null
+           else
+               jq -n --arg c "$BELL_HOOK_COMMAND" "$bell_entry_filter" >"$tmp" 2>/dev/null
+           fi; }
+    then
+        # if/else, not `mv && good || bad`: see section 1.
+        if mv "$tmp" "$SETTINGS"; then
+            tmp=""
+            good "\"Waiting on you\" bell registered as a Stop hook"
+        else
+            bad "could not replace ${SETTINGS/#$HOME/\~}"
+            rm -f "$tmp"
+        fi
+    else
+        rm -f "$tmp"
+        bad "jq could not add the Stop hook to ${SETTINGS/#$HOME/\~}"
+    fi
 fi
 
 say ""

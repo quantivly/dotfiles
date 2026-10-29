@@ -160,6 +160,19 @@ jobs:
       - name: Run the herdr quiet-shim state table
         run: ./scripts/test-herdr-quiet.sh
 
+  herdr-waiting-bell-test:
+    name: herdr "Waiting on you" Bell State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # herdr, the clock and the player are STUBBED; jq, flock, setsid and
+      # coreutils come with the runner image. Also checks that the config mutes
+      # herdr's per-turn sound and that both install paths link what it needs.
+      - name: Run the waiting-bell state table
+        run: ./scripts/test-herdr-waiting-bell.sh
+
   poetry-lazy-test:
     name: Lazy Poetry Wrapper State Table
     runs-on: ubuntu-latest

@@ -33,6 +33,10 @@
     ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.config/helix/config.toml: helix/config.toml
     ~/.config/herdr/config.toml: config/herdr/config.toml
+    # Sound files config.toml names by RELATIVE path, which herdr resolves against
+    # the directory of the config.toml symlink, not the repo. Without this link
+    # done_path is missing and herdr's per-turn beep silently comes back.
+    ~/.config/herdr/sounds: config/herdr/sounds
     # Publishes model/effort/context to the herdr agent sidebar via
     # `herdr pane report-metadata`, and doubles as Claude Code's own status line.
     # Without it the sidebar's rows_by_agent.claude tokens resolve to nothing and
@@ -45,6 +49,10 @@
     # PreToolUse hook in ~/.claude/settings.json, which is user-level and not in
     # this repo. See "Keeping secrets out of transcripts" in CLAUDE.md.
     ~/.claude/hooks/secret-emission-guard.sh: claude/hooks/secret-emission-guard.sh
+    # Rings herdr's "needs you" sound when a turn ends with a **Waiting on you**
+    # block and you are likely away. Does nothing until registered as a Stop hook
+    # in ~/.claude/settings.json: scripts/herdr-claude-wire.sh does that.
+    ~/.claude/hooks/herdr-waiting-bell.sh: claude/hooks/herdr-waiting-bell.sh
     # rabota v2 skill: a console over the `rabota` CLI (WS5 task 5.3). A pre-existing
     # ~/.claude/skills/rabota directory (the v1 skill) must be moved aside before this link
     # can be created — that swap is WS5 task 5.4, gated on Zvi's typed OK, and is not done by

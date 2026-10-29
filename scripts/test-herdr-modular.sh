@@ -39,6 +39,7 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERIFY="$DOTFILES/scripts/verify-tools.sh"
 WIRE="$DOTFILES/scripts/herdr-claude-wire.sh"
 HOOK_REL="claude/hooks/session-statusline.sh"
+BELL_HOOK_REL="claude/hooks/herdr-waiting-bell.sh"
 
 PASS=0; FAIL=0
 ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
@@ -151,13 +152,34 @@ new_home() {
     mkdir -p "$h/.config/mise"
     printf '[tools]\nnode = "20"\n' >"$h/.config/mise/config.toml"
     cp "$DOTFILES/$HOOK_REL" "$h/.claude/hooks/session-statusline.sh"
+    cp "$DOTFILES/$BELL_HOOK_REL" "$h/.claude/hooks/herdr-waiting-bell.sh"
     printf '%s' "$h"
 }
 
-# statusLine block as it should end up, for a given HOME.
-good_statusline() {
+# settings.json as it should end up, for a given HOME: the statusLine, and the
+# "Waiting on you" bell as a Stop hook.
+good_settings() {
+    # shellcheck disable=SC2016  # $HOME stays literal: Claude Code's shell expands it
     jq -n --arg c "bash '$1/.claude/hooks/session-statusline.sh'" \
-        '{statusLine: {type: "command", command: $c, refreshInterval: 60}}'
+          --arg b 'f="$HOME/.claude/hooks/herdr-waiting-bell.sh"; [ -r "$f" ] && exec bash "$f"; exit 0' \
+        '{statusLine: {type: "command", command: $c, refreshInterval: 60},
+          hooks: {Stop: [{hooks: [{type: "command", command: $b}]}]}}'
+}
+
+# A settings.json with the bell's own Stop entry set aside, sorted. The wirer
+# adds that entry even when it refuses a statusLine that is not ours (the bell
+# does not depend on it), so "untouched" means untouched apart from that entry.
+without_bell() {
+    jq -cS 'if (.hooks.Stop | type) == "array" then
+              .hooks.Stop |= map(select([.hooks[]?.command? | strings
+                                         | select(contains("herdr-waiting-bell.sh"))] | length == 0))
+              | if .hooks.Stop == [] then del(.hooks.Stop) else . end
+              | if .hooks == {} then del(.hooks) else . end
+            else . end' "$1"
+}
+# How many Stop entries register the bell.
+bell_count() {
+    jq '[.hooks.Stop[]?.hooks[]?.command? | strings | select(contains("herdr-waiting-bell.sh"))] | length' "$1" 2>/dev/null
 }
 
 wire() { PATH="$STUB_BIN:$PATH" HOME="$1" "$WIRE" "${@:2}" 2>&1; }
@@ -171,7 +193,7 @@ echo
 echo "=== verify-tools --herdr: what it must NOT mention ==="
 # Every line below is something the write-up currently has to apologise for.
 H="$(new_home scope)"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 mkdir -p "$H/.claude/skills/herdr"; printf 'x\n' >"$H/.claude/skills/herdr/SKILL.md"
 OUT_HERDR="$(verify "$H" --herdr)"
 hasnt "$OUT_HERDR" "Modern CLI Tools"  "no full-install tool inventory"
@@ -226,17 +248,17 @@ has "$(wiring_line "$H")" "✗" "settings.json without statusLine is a FAIL"
 
 H="$(new_home nointerval)"
 mkdir -p "$H/.claude/skills/herdr"; printf 'x\n' >"$H/.claude/skills/herdr/SKILL.md"
-good_statusline "$H" | jq 'del(.statusLine.refreshInterval)' >"$H/.claude/settings.json"
+good_settings "$H" | jq 'del(.statusLine.refreshInterval)' >"$H/.claude/settings.json"
 out="$(wiring_line "$H")"
 has "$out" "✗"              "statusLine without refreshInterval is a FAIL"
 has "$out" "refreshInterval" "...and the message names refreshInterval"
 
 H="$(new_home noskill)"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 has "$(wiring_line "$H")" "✗" "missing SKILL.md is a FAIL"
 
 H="$(new_home emptyskill)"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 mkdir -p "$H/.claude/skills/herdr"; : >"$H/.claude/skills/herdr/SKILL.md"
 has "$(wiring_line "$H")" "✗" 'empty SKILL.md is a FAIL — "herdr --skill" only prints, so a truncated redirect is the likely state'
 
@@ -281,7 +303,7 @@ has "$(wiring_line "$H")" "✗" "herdr + ~/.claude present but unwired: still a 
 echo
 echo "=== Claude Code wiring: correct is green, and unreadable is not green ==="
 H="$(new_home good)"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 mkdir -p "$H/.claude/skills/herdr"; printf 'body\n' >"$H/.claude/skills/herdr/SKILL.md"
 out="$(wiring_line "$H")"
 has   "$out" "✓" "correctly wired is a PASS"
@@ -338,7 +360,8 @@ theirs='{"statusLine":{"type":"command","command":"/opt/orca/claude-statusline.s
 printf '%s\n' "$theirs" >"$H/.claude/settings.json"
 rc=0; out="$(wire "$H")" || rc=$?
 check "refuses a foreign statusLine" "$rc" "1"
-check "...and leaves it untouched" "$(jq -c . "$H/.claude/settings.json")" "$(jq -c . <<<"$theirs")"
+check "...and leaves it untouched (apart from the bell's Stop hook)" \
+      "$(without_bell "$H/.claude/settings.json")" "$(jq -cS . <<<"$theirs")"
 has "$out" "statusLine" "...and says which key it refused to touch"
 
 echo
@@ -363,13 +386,13 @@ hasnt "$out" "✓ statusLine" "...and never a ✓ for a check it could not run"
 # statusLine correct, but dotbot never linked the hook it points at.
 H="$(new_home nohookfile)"
 mkdir -p "$H/.claude/skills/herdr"; printf 'b\n' >"$H/.claude/skills/herdr/SKILL.md"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 rm -f "$H/.claude/hooks/session-statusline.sh"
 has "$(wiring_line "$H")" "does not exist" "checker: a statusLine pointing at a missing hook is a FAIL"
 
 # A directory named SKILL.md satisfies -e and -s. It is not a skill file.
 H="$(new_home skilldir)"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 mkdir -p "$H/.claude/skills/herdr/SKILL.md/oops"
 out="$(wiring_line "$H")"
 hasnt "$out" "✓ agent skill file present" "checker: a DIRECTORY named SKILL.md is not a skill file"
@@ -398,7 +421,8 @@ for shape_desc in string:'"/opt/other/thing.sh"' array:'["a"]' number:'42' bool:
   before="$(cat "$H/.claude/settings.json")"
   rc=0; out="$(wire "$H")" || rc=$?
   check "statusLine as a $kind: refuses (exit 1)" "$rc" "1"
-  check "statusLine as a $kind: file untouched" "$(cat "$H/.claude/settings.json")" "$before"
+  check "statusLine as a $kind: untouched apart from the bell's Stop hook" \
+        "$(without_bell "$H/.claude/settings.json")" "$(jq -cS . <<<"$before")"
   has "$out" "statusLine" "statusLine as a $kind: says which key it refused"
 done
 
@@ -429,7 +453,8 @@ for od in 'nullcmd:{"command":null}' 'othershape:{"type":"custom","script":"/opt
   before="$(cat "$H/.claude/settings.json")"
   rc=0; wire "$H" >/dev/null || rc=$?
   check "object statusLine ($kind) that is not ours: refuses" "$rc" "1"
-  check "object statusLine ($kind): file untouched" "$(cat "$H/.claude/settings.json")" "$before"
+  check "object statusLine ($kind): untouched apart from the bell's Stop hook" \
+        "$(without_bell "$H/.claude/settings.json")" "$(jq -cS . <<<"$before")"
 done
 
 echo
@@ -464,6 +489,97 @@ printf '{"statusLine": oops\n' >"$H/.claude/settings.json"
 rc=0; out="$(wire "$H")" || rc=$?
 check "unparseable settings.json exits non-zero" "$rc" "1"
 check "...and is not overwritten" "$(cat "$H/.claude/settings.json")" '{"statusLine": oops'
+
+echo
+echo "=== herdr's sounds: the bell is registered, and the per-turn sound is muted ==="
+# The wirer registers claude/hooks/herdr-waiting-bell.sh as a Stop hook; the
+# checker asserts it, and asserts that the live done_path resolves the way herdr
+# resolves it. Both fail silently otherwise, in opposite directions: the beep on
+# every turn comes back, or a question asked in prose is silent.
+H="$(new_home bell1)"
+rc=0; wire "$H" >/dev/null || rc=$?
+check "wirer: exits 0 and registers the bell exactly once" "$rc:$(bell_count "$H/.claude/settings.json")" "0:1"
+# shellcheck disable=SC2016  # a literal needle: $f is the hook command's own variable
+has "$(jq -r '.hooks.Stop[0].hooks[0].command' "$H/.claude/settings.json")" '[ -r "$f" ]' \
+    "...behind the [ -r ] guard, so a mid-deploy checkout cannot fail every Stop"
+wire "$H" >/dev/null
+check "wirer: a second run adds no duplicate" "$(bell_count "$H/.claude/settings.json")" "1"
+
+H="$(new_home bell2)"
+printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"other-stop"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"guard"}]}]}}' \
+    >"$H/.claude/settings.json"
+wire "$H" >/dev/null
+check "wirer: an existing Stop hook survives beside the bell" \
+      "$(jq -r '[.hooks.Stop[].hooks[].command] | map(select(. == "other-stop")) | length' "$H/.claude/settings.json"):$(bell_count "$H/.claude/settings.json")" "1:1"
+check "wirer: other hook events survive" "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$H/.claude/settings.json")" "guard"
+
+for sd in 'stopobject:{"hooks":{"Stop":{"x":1}}}' 'hooksstring:{"hooks":"elsewhere"}'; do
+  kind="${sd%%:*}"; val="${sd#*:}"
+  H="$(new_home "bellshape-$kind")"
+  printf '%s\n' "$val" >"$H/.claude/settings.json"
+  before="$(jq -cS 'del(.statusLine)' "$H/.claude/settings.json")"
+  rc=0; out="$(wire "$H")" || rc=$?
+  check "wirer: hooks of the wrong shape ($kind) refuses, exit 1" "$rc" "1"
+  check "wirer: hooks of the wrong shape ($kind) are left as they were" \
+        "$(jq -cS 'del(.statusLine)' "$H/.claude/settings.json")" "$before"
+done
+
+H="$(new_home bellnofile)"
+rm -f "$H/.claude/hooks/herdr-waiting-bell.sh"
+rc=0; out="$(wire "$H")" || rc=$?
+check "wirer: no bell hook file exits 1, registering nothing" "$rc:$(bell_count "$H/.claude/settings.json")" "1:0"
+has "$out" "herdr-waiting-bell.sh" "...and names the file that is not there"
+
+skilled_home() {  # a home wired except where a row says otherwise
+    local h; h="$(new_home "$1")"
+    mkdir -p "$h/.claude/skills/herdr"; printf 'b\n' >"$h/.claude/skills/herdr/SKILL.md"
+    good_settings "$h" >"$h/.claude/settings.json"
+    printf '%s' "$h"
+}
+H="$(skilled_home bellok)"
+has "$(wiring_line "$H")" '✓ "Waiting on you" bell registered' "checker: a registered bell is a PASS"
+
+H="$(skilled_home bellmissing)"
+jq 'del(.hooks)' "$H/.claude/settings.json" >"$H/s.json" && mv "$H/s.json" "$H/.claude/settings.json"
+out="$(wiring_line "$H")"; rc=0; verify "$H" --herdr >/dev/null || rc=$?
+has "$out" 'no "Waiting on you" bell' "checker: no bell among the Stop hooks is a FAIL"
+check "...and takes the exit code with it" "$rc" "1"
+
+H="$(skilled_home bellnohookfile)"
+rm -f "$H/.claude/hooks/herdr-waiting-bell.sh"
+has "$(wiring_line "$H")" "the Stop hook names" "checker: a bell registered without its file is a FAIL"
+
+H="$(skilled_home bellbadjson)"
+printf '{"hooks": oops\n' >"$H/.claude/settings.json"
+has "$(wiring_line "$H")" "bell NOT CHECKED" "checker: an unusable settings.json is NOT CHECKED for the bell, never a pass"
+
+# The live config, with and without the sounds link ./install makes.
+live_home() {  # $1 name, $2 "linked" or "unlinked"
+    local h; h="$(skilled_home "$1")"
+    mkdir -p "$h/.config/herdr"
+    cp "$DOTFILES/config/herdr/config.toml" "$h/.config/herdr/config.toml"
+    [[ "$2" == linked ]] && ln -s "$DOTFILES/config/herdr/sounds" "$h/.config/herdr/sounds"
+    printf '%s' "$h"
+}
+H="$(live_home doneok linked)"
+out="$(wiring_line "$H")"; rc=0; verify "$H" --herdr >/dev/null || rc=$?
+has   "$out" "✓ herdr's per-turn sound muted" "checker: done_path resolving through ~/.config/herdr/sounds is a PASS"
+check "...and a fully wired home with the live config exits 0" "$rc" "0"
+
+H="$(live_home doneunlinked unlinked)"
+out="$(wiring_line "$H")"; rc=0; verify "$H" --herdr >/dev/null || rc=$?
+has   "$out" "which is not a file" "checker: done_path with no sounds link is a FAIL (herdr would beep again)"
+check "...and takes the exit code with it" "$rc" "1"
+
+H="$(live_home donenotmp3 linked)"
+sed -i 's|^done_path = "sounds/silence.mp3"|done_path = "sounds/NOTICE"|' "$H/.config/herdr/config.toml"
+has "$(wiring_line "$H")" "is not an .mp3" "checker: a done_path herdr would ignore (not .mp3) is a FAIL"
+
+H="$(live_home donenone linked)"
+sed -i '/^done_path = /d' "$H/.config/herdr/config.toml"
+out="$(wiring_line "$H")"
+has   "$out" "is not muted" "checker: a live config without done_path says so"
+hasnt "$out" "✗" "...and it is consistent, not a FAIL"
 
 echo
 echo "=== housekeeping: no droppings, honest messages, honest argument errors ==="
@@ -502,7 +618,7 @@ hasnt "$out" "unknown argument '--herdr'" "...without blaming the valid flag"
 
 # Minor 18b: a stale SKILL.md is "worse than none, because it looks fine".
 H="$(new_home staleskill)"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 mkdir -p "$H/.claude/skills/herdr"
 printf -- '---\nname: herdr\n---\nOLD CONTENT FROM AN EARLIER HERDR\n' >"$H/.claude/skills/herdr/SKILL.md"
 out="$(wiring_line "$H")"
@@ -520,7 +636,7 @@ echo "=== refreshInterval: only a usable number counts ==="
 iv_row() {  # <json-value> <expect ok|fail> <label>
   local H; H="$(new_home "iv-$3")"
   mkdir -p "$H/.claude/skills/herdr"; printf 'b\n' >"$H/.claude/skills/herdr/SKILL.md"
-  good_statusline "$H" | jq --argjson v "$1" '.statusLine.refreshInterval = $v' \
+  good_settings "$H" | jq --argjson v "$1" '.statusLine.refreshInterval = $v' \
       >"$H/.claude/settings.json"
   local out; out="$(wiring_line "$H")"
   if [[ "$2" == ok ]]; then
@@ -556,7 +672,7 @@ chmod +x "$FAKEREPO/scripts/reconcile-systemd-units.sh"
 H="$(new_home enablement)"
 mkdir -p "$H/.config/systemd/user" "$H/.claude/skills/herdr"
 printf 'b\n' >"$H/.claude/skills/herdr/SKILL.md"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 ln -sf "$FAKEREPO/systemd/herdr-server.service" "$H/.config/systemd/user/herdr-server.service"
 out="$(verify "$H" --herdr)"
 has "$out" "STUB-RECONCILE-RAN" "follows the live unit link to the checkout that owns it"
@@ -566,7 +682,7 @@ has "$out" "$FAKEREPO"          "...and names that checkout, not the one it was 
 # real reconcile script (the other half of the hermeticity gap, E1).
 H="$(new_home nolinks)"
 mkdir -p "$H/.claude/skills/herdr"; printf 'b\n' >"$H/.claude/skills/herdr/SKILL.md"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 out="$(verify "$H" --herdr)"
 has   "$out" "systemd user unit enablement" "no links: section still reported"
 hasnt "$out" "STUB-RECONCILE-RAN"           "no links: nothing was executed"
@@ -580,6 +696,7 @@ echo "=== a HOME with a single quote must not produce a broken command ==="
 # fine. (Minor 13.)
 H="$WORK/ho'me"; rm -rf "$H"; mkdir -p "$H/.claude/hooks"
 cp "$DOTFILES/$HOOK_REL" "$H/.claude/hooks/session-statusline.sh"
+cp "$DOTFILES/$BELL_HOOK_REL" "$H/.claude/hooks/herdr-waiting-bell.sh"
 wire "$H" >/dev/null 2>&1
 cmd="$(jq -r '.statusLine.command' "$H/.claude/settings.json" 2>/dev/null)"
 # The recorded command must parse into words whose target file exists.
@@ -647,7 +764,7 @@ for b in herdr herdmates teammux bun node python3 jq gh notify-send lazygit yazi
     printf '#!/bin/sh\nexit 0\n' >"$NODEPS_BIN/$b"; chmod +x "$NODEPS_BIN/$b"
 done
 H2="$(new_home alldeps)"
-good_statusline "$H2" >"$H2/.claude/settings.json"
+good_settings "$H2" >"$H2/.claude/settings.json"
 mkdir -p "$H2/.claude/skills/herdr"; printf 'x\n' >"$H2/.claude/skills/herdr/SKILL.md"
 mkdir -p "$H2/.local/bin"
 cp "$NODEPS_BIN"/* "$H2/.local/bin/"
@@ -762,7 +879,7 @@ istate() { printf '%s' "$WORK/istate.$1"; }
 
 # --- verify-tools: absent is a FAIL, and it takes the exit code with it -------
 H="$(new_home integ-absent)"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 mkdir -p "$H/.claude/skills/herdr"
 herdr --skill >"$H/.claude/skills/herdr/SKILL.md" 2>/dev/null \
   || PATH="$STUB_BIN:$PATH" herdr --skill >"$H/.claude/skills/herdr/SKILL.md"
@@ -1024,7 +1141,7 @@ check "a drop-in without the reset still resolves to the checkout" "$rc" "0"
 # --- verify-tools --herdr carries the section, and it ASSERTS -------------
 H="$(new_home execstart)"
 mkdir -p "$H/.claude/skills/herdr"; printf 'b\n' >"$H/.claude/skills/herdr/SKILL.md"
-good_statusline "$H" >"$H/.claude/settings.json"
+good_settings "$H" >"$H/.claude/settings.json"
 out="$(verify "$H" --herdr)"
 has "$out" "herdr unit ExecStart" "--herdr reports the ExecStart section"
 # With nothing linked it must SKIP -- otherwise every modular adopter is red
@@ -1171,7 +1288,7 @@ strip_publisher() {
 }
 
 # 1. Both halves present: the shipped state.
-H="$(new_home acct_ok)"; good_statusline "$H" >"$H/.claude/settings.json"
+H="$(new_home acct_ok)"; good_settings "$H" >"$H/.claude/settings.json"
 # shellcheck disable=SC2016  # a literal token NAME, not an expansion
 acct_conf "$H" '$acct'
 out="$(verify "$H" --herdr)"
@@ -1180,7 +1297,7 @@ has "$out" "sidebar account token wired" "both halves present: reports wired"
 # 2. Publisher only -- the config was never updated. THE row for a half-applied
 #    deploy, which is the realistic failure: ./install relinks config.toml, and
 #    a checkout that moved without it leaves the old row in place.
-# `wire`, not `good_statusline`: a bare new_home also fails the agent-skill
+# `wire`, not `good_settings`: a bare new_home also fails the agent-skill
 # check, so rc was 1 whatever the acct half did and this row passed for the
 # WRONG reason -- green for no reason, which CLAUDE.md rates as badly as red for
 # no reason. After `wire` the fixture passes with rc 0, so the acct half is the
@@ -1204,7 +1321,7 @@ check "consumer only: takes the exit code with it" "$rc" "1"
 # 4. Neither half -- a checkout predating DO-590. Consistent, so it must NOT be
 #    a failure: this is the permanently-red checker this repo has recorded five
 #    times, and the one state where a FAIL would be unactionable.
-H="$(new_home acct_neither)"; good_statusline "$H" >"$H/.claude/settings.json"
+H="$(new_home acct_neither)"; good_settings "$H" >"$H/.claude/settings.json"
 acct_conf "$H" ''; strip_publisher "$H"
 out="$(verify "$H" --herdr)"
 has  "$out" "sidebar account token not in use" "neither half: reports a note"
@@ -1214,7 +1331,7 @@ hasnt "$out" "no claude sidebar row consumes it" "neither half: does NOT report 
 #    specifically not a FAIL. Every OTHER row in this suite also runs in this
 #    state (new_home writes no herdr config), so a check that failed here would
 #    have reddened the whole file.
-H="$(new_home acct_noconf)"; good_statusline "$H" >"$H/.claude/settings.json"
+H="$(new_home acct_noconf)"; good_settings "$H" >"$H/.claude/settings.json"
 out="$(verify "$H" --herdr)"
 has  "$out" "sidebar account token skipped" "no live config: skipped"
 hasnt "$out" "sidebar account token wired"  "no live config: does not claim it is wired"
@@ -1539,7 +1656,7 @@ check "a checker that exits non-zero with no verdict: exit 1" "$rc" "1"
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=272
+EXPECTED_ROWS=295
 
 docs_claim() {
   local f="$DOTFILES/$1"
