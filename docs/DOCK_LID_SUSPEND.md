@@ -275,7 +275,7 @@ something was working when the laptop slept.
 
 ### Tests
 
-State table: `scripts/test-dock-lid.sh` (65 checks, hermetic, CI `dock-lid-test`). It stubs
+State table: `scripts/test-dock-lid.sh` (66 checks, hermetic, CI `dock-lid-test`). It stubs
 `sudo`, `systemctl`, `busctl`, `udevadm` and `systemd-analyze`, and runs `install` and `rm` for
 real under a prefix the stub confines them to.
 

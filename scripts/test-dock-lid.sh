@@ -396,6 +396,14 @@ P="$(newprefix)"
 rc="$(STUB_UDEV_NO_VERIFY=1 run_setup "$ROOT" "$P")"
 check "an udevadm with no 'verify' is named as that, not as a rejected rule" \
   "$rc:$(files_in "$P"):$(out_has "has no 'verify' (systemd < 254)"):$(out_has 'rejects')" "1:0:1:0"
+# The live check compares each setting the drop-in makes, so one that makes none
+# would check clean having enforced nothing.
+mkroot "$T/emptyroot"
+grep '^#' "$LOGIND_SRC" >"$T/emptyroot/logind/$(basename "$LOGIND_SRC")" || fatal "empty drop-in fixture"
+P="$(newprefix)"
+rc="$(run_setup "$T/emptyroot" "$P")"
+check "a drop-in that sets nothing is refused: exit 1, nothing written, and it says so" \
+  "$rc:$(files_in "$P"):$(out_has 'lid-locks-never-suspends.conf sets nothing')" "1:0:1"
 
 # ---------------------------------------------------------------------------
 printf '\nan install logind has not picked up is not a success\n'
@@ -511,7 +519,7 @@ check "the logind drop-in locks on a lid-close, on battery and on a charger, nev
   "$(grep -v '^#' "$LOGIND_SRC" | tr '\n' ' ')" \
   "[Login] HandleLidSwitch=lock HandleLidSwitchExternalPower=lock HandleLidSwitchDocked=ignore "
 
-EXPECTED_ROWS=65
+EXPECTED_ROWS=66
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".
