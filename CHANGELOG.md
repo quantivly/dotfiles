@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **herdr makes a sound only when you are needed.** It used to beep at every turn end of every
+  background agent, and with a dozen panes none of those beeps needed you.
+  - **The per-turn `done` sound is muted.** herdr (through v0.9.5) has no per-kind switch, so
+    `[ui.sound] done_path` points at 0.1 s of silence, `config/herdr/sounds/silence.mp3`. Both
+    install paths link `~/.config/herdr/sounds`, because herdr resolves the path against the
+    `config.toml` symlink's directory. A path that does not resolve brings the beep back, so
+    `verify-tools.sh --herdr` checks it.
+  - **The `request` sound is kept.** It plays when an agent is blocked on a permission prompt,
+    AskUserQuestion, plan approval or MCP input. The in-app toasts are unchanged.
+  - **A question asked in prose still rings.** `claude/hooks/herdr-waiting-bell.sh`, a Stop hook,
+    plays herdr's own request sound (vendored, Apache-2.0) when the final message has a
+    **Waiting on you** line and you are likely away: the pane is not focused in herdr, or the turn
+    took at least 30 s (`HERDR_BELL_AWAY_AFTER_SECONDS`).
+    - It fails open, skips herdmates teammates, plays through the Do Not Disturb shim, and rings
+      once when several fire together.
+    - `scripts/herdr-claude-wire.sh` registers it, and `verify-tools.sh --herdr` asserts it.
+    - It does not use `herdr notification show`, which plays nothing while a toast is on screen.
+  - State table: `scripts/test-herdr-waiting-bell.sh` (52 checks, hermetic, CI
+    `herdr-waiting-bell-test`). `scripts/test-herdr-modular.sh` goes from 272 to 297 checks.
+  - `./install --herdr` now links seven destinations. The stale "18 links" for the full install
+    is gone; it was 43.
+
 - **A docked laptop keeps one uplink.** `dock-wifi-setup` installs, root-owned and copied, a
   NetworkManager dispatcher shim, `/usr/local/bin/dock-wifi.sh` and a `dock-wifi-sync.service`
   oneshot: the Wi-Fi radio is off while a managed ethernet device is connected and on again when

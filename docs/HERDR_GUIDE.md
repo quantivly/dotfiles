@@ -255,12 +255,12 @@ none of those variables reached the running server.
 An earlier version of this guide jumped straight to `herdr update` and never said how to get
 any of this in the first place. Full sequence:
 
-**Pick a path first.** `./install --herdr` (DO-555) links only the five destinations that
-are herdr — `config.toml`, `plugins.list`, `plugins.lock`, the statusline hook, the systemd
-unit — and leaves your `~/.zshrc`, `~/.gitconfig`, `~/.tmux.conf`, `~/.p10k.zsh` and VS Code
+**Pick a path first.** `./install --herdr` (DO-555) links only the seven destinations that
+are herdr — `config.toml`, its `sounds/`, `plugins.list`, `plugins.lock`, the statusline hook,
+the "Waiting on you" bell hook, the systemd unit — and leaves your `~/.zshrc`, `~/.gitconfig`, `~/.tmux.conf`, `~/.p10k.zsh` and VS Code
 settings alone. That is the right path for anyone adopting herdr rather than adopting this
 repo, and it is what the team-facing write-up documents. The bare `./install` below is the
-full 18-link version, correct only if you want this whole configuration.
+full version, correct only if you want this whole configuration.
 
 Two differences that matter if you take the modular path:
 
@@ -767,9 +767,57 @@ whichever is on PATH. So it is the **client's** PATH and environment that matter
 earlier version of this section said the server's, and was wrong.
 
 This is the difference between *watching* a dashboard and *being told*. Bind
-`open_notification_target` (`ctrl+alt+o`) and let the queue come to you. `[ui.sound] enabled`
-adds a second channel that needs no screen at all. GNOME's Do Not Disturb silences that sound too;
-see [Quiet herdr with Do Not Disturb](#quiet-herdr-with-do-not-disturb) below.
+`open_notification_target` (`ctrl+alt+o`) and let the queue come to you. Sound is a second channel
+that needs no screen at all, so it is kept for one thing: **you are needed**. GNOME's Do Not Disturb
+silences it; see [Quiet herdr with Do Not Disturb](#quiet-herdr-with-do-not-disturb) below.
+
+### A sound means you are needed
+
+herdr makes two sounds (`src/app/actions.rs` in herdr's source):
+
+| sound | fires when | here |
+|---|---|---|
+| `request` | the agent is **blocked** on a dialog: a permission prompt, AskUserQuestion, plan approval, MCP input. It fires even in the pane you are looking at | kept |
+| `done` | any Working→Idle in a background pane or an unfocused terminal: **every turn end** | **muted** |
+
+With a dozen agents, `done` was a beep every few seconds and none of them needed you. herdr
+(through v0.9.5) has no per-kind switch, and `[ui.sound] enabled = false` would take `request`
+with it. So `done_path` points at 0.1 s of silence, `config/herdr/sounds/silence.mp3`. The
+in-app toast for both still shows.
+
+**The mute fails loud.** A `done_path` that is missing or not an `.mp3` is only a diagnostic
+("using default sound"), and a file the player rejects falls back to the built-in sound. Either way
+the beep comes back. The path is relative to the directory of `~/.config/herdr/config.toml` itself
+(the symlink), not to this repo, which is why both install paths link `~/.config/herdr/sounds`.
+`scripts/verify-tools.sh --herdr` checks that it resolves.
+
+**One turn end does need you: a question asked in prose.** To herdr, a turn that ends "pick A or
+B?" is just `done`. The global CLAUDE.md makes every agent close with a status block whose
+**Waiting on you** heading appears only when something is blocking on you. So a Stop hook,
+`claude/hooks/herdr-waiting-bell.sh`, plays herdr's own `request` sound (vendored as
+`config/herdr/sounds/request.mp3`, so the two sound the same) when that heading opens a line of
+the final message **and you are likely away**:
+- the pane is not focused in herdr, **or**
+- the turn took at least `HERDR_BELL_AWAY_AFTER_SECONDS` (default 30). A long task rings even in
+  the focused pane, because you have probably switched to a browser. A quick back-and-forth in the
+  pane you are typing into stays silent.
+
+Things to know about the bell:
+- **It fails open.** If herdr cannot be asked, or the transcript cannot be read for the turn start,
+  it rings.
+- **Teammates are skipped.** herdmates teammates are not detected as agents, and their "Waiting on
+  you" is addressed to their lead.
+- **It does not use `herdr notification show --sound request`.** With `delivery = "herdr"` that
+  call plays nothing while any toast is on screen (`Busy`), and herdr's own "finished" toast is on
+  screen at exactly that moment.
+- **Bells that fire together ring once** (a lock is held while one plays), and the hook returns at
+  once; the player is detached.
+- **It is wired by `scripts/herdr-claude-wire.sh`,** which adds the Stop hook to
+  `~/.claude/settings.json`. Account dirs pick it up on their next refresh; a running session gets
+  it when it restarts.
+
+State table: `scripts/test-herdr-waiting-bell.sh` (52 checks, in CI as `herdr-waiting-bell-test`),
+which also pins the mute and both install links.
 
 ### Quiet herdr with Do Not Disturb
 
@@ -788,7 +836,8 @@ Things to know:
 - **It fails open.** Any answer from `gsettings` other than exactly `false` plays the sound.
 - **A client attached before this shipped is not covered** until it is detached and re-attached.
 - **It reaches the client only.** Panes come from the systemd-run server, whose PATH never
-  includes the shims.
+  includes the shims. The "Waiting on you" bell runs in a pane, so it calls the shim by path and
+  is silenced the same way.
 
 State table: `scripts/test-herdr-quiet.sh` (27 checks, in CI as `herdr-quiet-test`). It is
 hermetic: `gsettings` and the player are stubs, and PATH holds neither `/usr/bin` nor `/bin`.
@@ -1392,6 +1441,7 @@ but treat the conflict as expected rather than proven.
 | Key encoding probe | `scripts/herdr-keyprobe.sh` |
 | Sidebar publisher | `claude/hooks/session-statusline.sh` → `~/.claude/hooks/` (+ `statusLine` in `~/.claude/settings.json`, via `scripts/herdr-claude-wire.sh`) |
 | Agent skill | `~/.claude/skills/herdr/SKILL.md` (`herdr --skill`) |
+| Sounds (§7) | `config/herdr/sounds/` → `~/.config/herdr/sounds` (`done_path` mutes the per-turn sound); bell `claude/hooks/herdr-waiting-bell.sh` → `~/.claude/hooks/` (+ a `Stop` hook, via `scripts/herdr-claude-wire.sh`); DND shim `config/herdr/shims/pw-play` |
 | Server unit | `systemd/herdr-server.service` → `~/.config/systemd/user/herdr-server.service` (`systemctl --user enable --now herdr-server.service`; wanted by `graphical-session.target`, survives logout) |
 | Server launcher | `scripts/herdr-server-launch.sh` (`--print-env` shows the environment it builds) |
 | Spawn helpers | `hspawn`, `hdespawn`, `hreap` in `zsh/zshrc.herdr`; registry `~/.local/state/hspawn/` |
@@ -1400,6 +1450,6 @@ but treat the conflict as expected rather than proven.
 | Plugin list | `config/herdr/plugins/plugins.list` |
 | Local plugins | `config/herdr/plugins/local/sidebar-icons`, `config/herdr/plugins/local/pane-reaper` (log: `~/.local/state/pane-reaper/log`; CI: `pane-reaper-test`) |
 | Tool check | `scripts/verify-tools.sh` (`--herdr` for a modular install) |
-| Claude wiring | `scripts/herdr-claude-wire.sh` (statusLine + agent skill file) |
-| State table | `scripts/test-herdr-modular.sh` (CI: `herdr-modular-test`) |
+| Claude wiring | `scripts/herdr-claude-wire.sh` (statusLine, agent skill file, herdr's Claude integration, the bell's Stop hook) |
+| State table | `scripts/test-herdr-modular.sh` (CI: `herdr-modular-test`); sounds: `scripts/test-herdr-quiet.sh`, `scripts/test-herdr-waiting-bell.sh` |
 | Desktop keys | `scripts/apply-gnome-settings.sh` (`gnome-apply`) |

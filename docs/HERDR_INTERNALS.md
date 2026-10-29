@@ -20,9 +20,10 @@ Config: `config/herdr/config.toml` → `~/.config/herdr/config.toml`. Full guide
 [docs/HERDR_GUIDE.md](HERDR_GUIDE.md).
 
 **Two install paths, and the modular one is the default recommendation for anyone else
-(DO-555).** `./install --herdr` links the FIVE destinations that are actually herdr —
-`config.toml`, `plugins.list`, `plugins.lock`, the statusline hook and the systemd unit —
-and stops. The full `./install` links 18, among them `~/.zshrc`, `~/.gitconfig`,
+(DO-555).** `./install --herdr` links the SEVEN destinations that are actually herdr —
+`config.toml`, the `sounds/` it names, `plugins.list`, `plugins.lock`, the statusline hook,
+the "Waiting on you" bell hook and the systemd unit — and stops. The full `./install` links
+every destination this repo has, among them `~/.zshrc`, `~/.gitconfig`,
 `~/.tmux.conf`, `~/.p10k.zsh` and VS Code's `settings.json`; requiring all of that to run
 herdr is how an invitation becomes an ultimatum. The modular path deliberately does NOT
 link `~/.config/mise/config.toml` (it would pin ~25 tools and override whatever
@@ -567,3 +568,41 @@ Gotchas, in the order they bite:
     reason — red for no reason and green for no reason at once, under a header claiming "no
     server". Stub it, the way `test-systemd-reconcile.sh` stubs `systemctl`; never rely on the
     tool's absence, because this box has the real thing.
+
+## Sounds: the muted `done` and the "Waiting on you" bell (2026-10-29)
+
+The user-facing rules are in [HERDR_GUIDE.md §7](HERDR_GUIDE.md#a-sound-means-you-are-needed).
+This is the evidence behind them, read from herdr's source (a local checkout) and the installed
+0.9.1 binary, and checked against upstream v0.9.5.
+
+- **Which sound fires when.** `src/app/actions.rs`: `Blocked` gives `Request`, unconditionally.
+  `Idle` after a completion gives `Done`, unless the tab is active and the outer terminal focused.
+  Claude's `Blocked` is screen-detected (`src/detect/manifests/claude.toml`): permission forms,
+  AskUserQuestion, plan approval, MCP elicitation, workflow prompts.
+- **No per-kind switch.** `SoundConfig` is `enabled`, `path`, `done_path`, `request_path` and
+  per-agent `agents`, in the 0.9.1 binary's strings and in upstream `src/config/sound.rs`.
+- **Why silence and not a missing file.** `SoundConfig::diagnostics` turns a missing or non-mp3
+  path into "using default sound", and `sound::play` falls back to the built-in sound when the
+  player exits non-zero. Both bring the beep back. The silent file was checked with `pw-play`
+  (exit 0) and `volumedetect` (max −91 dB).
+- **Why the path needs a link.** `resolve_config_relative_path` joins against
+  `config_path().parent()`, the directory of the `~/.config/herdr/config.toml` symlink, not of its
+  target. `~` is not expanded.
+- **Why the bell plays the sound itself.** `notification.show` under `delivery = "herdr"`
+  returns `Busy` while `state.toast` is set (`src/app/api.rs`), and the bell fires while herdr's
+  own "finished" toast is up. The pane environment has `XDG_RUNTIME_DIR` and
+  `DBUS_SESSION_BUS_ADDRESS` (checked from a live pane), so `pw-play` and the DND shim's
+  `gsettings` both work from the hook.
+- **Why "likely away" is focus OR turn length.** `herdr pane get` reports whether a pane is
+  focused in herdr, but not whether the outer terminal has focus (`outer_terminal_focus` is
+  server-internal). Focus alone would silence the most common miss: start a task, switch to a
+  browser, and the focused pane asks you something. The turn length is read from the transcript,
+  whose format is undocumented, so an unreadable start rings.
+- **Mutation sweeps.** 19 mutants against `scripts/test-herdr-waiting-bell.sh` (the hook, the
+  config mute and the install link). Every one was killed, each by the row aimed at it. That
+  needed one fixture change first: the stub player prints to stdout and stderr, otherwise
+  deleting the hook's output redirect would be an equivalent mutant. Then 6 mutants of the wirer
+  and the checker against `scripts/test-herdr-modular.sh`. One survived: with the wirer's
+  wrong-shape refusal deleted, jq's own type error still refused the write, and the temp file
+  kept the original intact. The refusal is therefore safe either way, and what the explicit check
+  adds is its message, naming the hook to add by hand. A row now pins that message.

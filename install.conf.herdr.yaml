@@ -1,7 +1,7 @@
 # Modular herdr install — `./install --herdr` (DO-555)
 # ============================================================================
-# The five links below are the ENTIRE herdr footprint of this repo. The full
-# install.conf.yaml links 18 destinations, among them ~/.zshrc, ~/.gitconfig,
+# The seven links below are the ENTIRE herdr footprint of this repo. The full
+# install.conf.yaml links every destination this repo has, among them ~/.zshrc, ~/.gitconfig,
 # ~/.tmux.conf, ~/.p10k.zsh and VS Code's settings.json — a reasonable thing to
 # decline, and declining it should not mean declining herdr.
 #
@@ -10,7 +10,7 @@
 #   clean:            omitted, and it costs nothing -- dotbot's clean defaults to
 #                     recursive=False (dotbot/src/dotbot/plugins/clean.py:32), so
 #                     `['~','~/.config']` only sweeps those two directories' own
-#                     children. All five links below sit deeper than that, so the
+#                     children. All seven links below sit deeper than that, so the
 #                     FULL config never swept them either. (An earlier version of
 #                     this note claimed it was a scope decision. It reads well and
 #                     it is not the reason; a rationale nobody can trust is worse

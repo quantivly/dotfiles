@@ -501,7 +501,7 @@ every rule below: [docs/HERDR_INTERNALS.md](docs/HERDR_INTERNALS.md). The shell 
   it visible without a restart.
 - **`clauth start <profile>` bypasses `claude()`**, so it is not a team lead (`claude-as <profile>`
   is).
-- **A modular adopter** runs `./install --herdr` (five links, nothing else),
+- **A modular adopter** runs `./install --herdr` (seven links, nothing else),
   `scripts/herdr-claude-wire.sh`, and `scripts/verify-tools.sh --herdr` as the one check.
 - **A spawned session cannot tear down its own worktree** — removing it closes the space it
   runs in — so `wt-gc-sweep` does it daily, linked but not enabled until armed by hand after

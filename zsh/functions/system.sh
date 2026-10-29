@@ -2009,7 +2009,7 @@ _dotfiles_work_branch_of() {
 # `DOTFILES_ALLOW_WORKTREE_INSTALL=1 ./install` (or `./install --herdr`) run
 # from that worktree leaves behind, and the state in which removing it dangles
 # the live config. Enumerated, not sentinelled: the first version checked
-# ~/.zshrc alone, and `./install --herdr` never links ~/.zshrc — it links five
+# ~/.zshrc alone, and `./install --herdr` never links ~/.zshrc — it links only
 # herdr destinations, among them the systemd unit that owns every agent
 # session, and a herdr-shape install from a worktree was removed with rc 0 and
 # left the unit dangling. So: every destination BOTH confs declare, read from

@@ -10,8 +10,8 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${BASEDIR}"
 
-# --herdr: install ONLY the herdr layer (DO-555). The full config links 18
-# destinations including ~/.zshrc, ~/.gitconfig, ~/.tmux.conf and VS Code's
+# --herdr: install ONLY the herdr layer (DO-555). The full config links every
+# destination this repo has, including ~/.zshrc, ~/.gitconfig, ~/.tmux.conf and VS Code's
 # settings.json; adopting herdr should not require handing all of that over.
 # Parsed out of "$@" here because everything left in "$@" is forwarded to dotbot,
 # which would reject an unknown flag.
@@ -104,12 +104,13 @@ if (( HERDR_ONLY )); then
 
      Sets statusLine in ~/.claude/settings.json (user-level, not in this repo,
      so dotbot cannot), generates ~/.claude/skills/herdr/SKILL.md, and installs
-     herdr's own Claude integration. Without the first, every sidebar row renders
-     empty and nothing reports why; without the second, your agents have no herdr
-     CLI reference; without the third, config.toml's resume_agents_on_restore
-     cannot work and a server restart returns your panes without their
-     conversations. It refuses to touch a statusLine that belongs to something
-     else rather than overwriting it.
+     herdr's own Claude integration, and adds the "Waiting on you" bell as a Stop
+     hook. Without the first, every sidebar row renders empty and nothing reports
+     why; without the second, your agents have no herdr CLI reference; without
+     the third, config.toml's resume_agents_on_restore cannot work and a server
+     restart returns your panes without their conversations; without the fourth,
+     a question an agent asks in prose makes no sound. It refuses to touch a
+     statusLine that belongs to something else rather than overwriting it.
 
   3. Plugins and the server:
 
@@ -125,7 +126,7 @@ if (( HERDR_ONLY )); then
 
        ${BASEDIR}/scripts/verify-tools.sh --herdr
 
-  (--herdr, not a bare run: the full report covers the 18-link install, so on
+  (--herdr, not a bare run: the full report covers the full install, so on
   this machine its mise section would print a ✗ and offer a paste that pins ~25
   tools globally.)
 

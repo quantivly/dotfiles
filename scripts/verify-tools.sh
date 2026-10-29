@@ -58,7 +58,7 @@
 
 # --herdr: report ONLY what a modular herdr adopter installed (DO-563).
 #
-# Why this flag exists. `./install --herdr` links five files and deliberately does
+# Why this flag exists. `./install --herdr` links seven files and deliberately does
 # NOT link ~/.config/mise/config.toml, so on such a machine the eleven
 # full-install sections below are all noise -- and the mise-drift check is worse
 # than noise: it prints a FAIL and offers a pasteable `ln -sfn` that would pin ~25
@@ -89,7 +89,7 @@ Usage: verify-tools.sh [--herdr]
   --herdr    ONLY the herdr checks -- server env, unit enablement, unit
              ExecStart, timer health, account dirs, plugin deps under the
              server PATH, and Claude Code wiring. For a machine that ran
-             `./install --herdr` and linked five files, not eighteen.
+             `./install --herdr` and linked seven files, not the whole repo.
 
 EXIT: non-zero if an assertion FAILs (server env, unit enablement, unit
 ExecStart, timer health, account dirs, Claude Code wiring, and in the full
@@ -1129,7 +1129,7 @@ fi  # end of the Claude Code wiring section (skipped when there is nothing to wi
 echo ""
 echo -e "${BLUE}=== Summary ===${NC}"
 if [[ "$HERDR_ONLY" == true ]]; then
-    # Deliberately NOT the full report's advice: a modular adopter linked five
+    # Deliberately NOT the full report's advice: a modular adopter linked seven
     # files and no mise config, so "run mise install" and "read CLAUDE.md" are
     # instructions for a machine they did not install.
     echo "Modular herdr install."

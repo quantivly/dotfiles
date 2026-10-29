@@ -1714,7 +1714,7 @@ check "many dirty files: refused"           "$RC"                               
 check "many dirty files: listing capped"    "$(printf '%s\n' "$OUT" | grep -c 'and 2 more')"          "1"
 
 # The sentinel was ~/.zshrc alone, and `./install --herdr` never links ~/.zshrc:
-# it links five herdr destinations, among them the systemd unit that owns every
+# it links only herdr destinations, among them the systemd unit that owns every
 # agent session — so a herdr-shape install from a worktree was removed with rc 0
 # and left the unit dangling (found by the local reviewer, reproduced). The check
 # enumerates the declared links of BOTH confs instead, read from the primary and
