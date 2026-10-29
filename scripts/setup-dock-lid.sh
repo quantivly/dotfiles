@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
-# setup-dock-lid.sh — install the two lid-switch guards for the Thunderbolt dock.
+# setup-dock-lid.sh — install the lid policy and the dock holdoff.
 #
-# Closing the lid within ~2 s of plugging into the dock, before logind can see
-# the dock or its power, starts a suspend while the dock is still enumerating —
-# and on 2026-10-19 that suspend hung the laptop until a forced power-off. Two
-# guards, each covering a different part of that window:
-#
-#   /etc/systemd/logind.conf.d/lid-on-power.conf   from logind/
-#       lid closed on external power does nothing (from ~1.8 s after plug-in)
+#   /etc/systemd/logind.conf.d/lid-locks-never-suspends.conf   from logind/
+#       closing the lid locks the screen, docked it does nothing, and it never
+#       suspends: agents keep running until sleep is asked for
 #   /etc/udev/rules.d/90-dock-lid-holdoff.rules    from udev/
 #   /etc/systemd/system/dock-lid-holdoff@.service  from systemd/
 #       every USB-C plug-in blocks lid handling for 30 s (from ~0.1 s after),
-#       and losing external power makes logind re-check a closed lid
+#       so closing the lid as you dock does not lock the screen you will use
 #
 # All COPIED root-owned 0644, never symlinked: root's logind, systemd and udevd
 # read them, and a user-writable file consumed by root is the hole CLAUDE.md
-# names for resticprofile/profiles.toml and vpn-failfast. Why, the measured
-# timings and what neither guard covers: docs/DOCK_LID_SUSPEND.md.
+# names for resticprofile/profiles.toml and vpn-failfast. It also REMOVES
+# /etc/systemd/logind.conf.d/lid-on-power.conf, which the lid policy replaced:
+# logind reads drop-ins in name order, so that file's
+# HandleLidSwitchExternalPower=ignore would override the new one. Why, the
+# measured timings and what is still not covered: docs/DOCK_LID_SUSPEND.md.
 #
 # Run via `dock-lid-setup` (zsh/functions/system.sh). NEVER by ./install —
 # ./install never uses sudo. Idempotent: re-run to resync after editing the repo
@@ -24,8 +23,9 @@
 #
 # Usage: setup-dock-lid.sh [--check]
 #   --check   read-only: is each installed copy a root-owned 0644 regular file
-#             matching this checkout, can systemd load the unit, and is logind
-#             running with the setting? Exit 1 if not. Needs no sudo.
+#             matching this checkout, is the replaced drop-in gone, can systemd
+#             load the unit, and is logind running with every setting the
+#             drop-in makes? Exit 1 if not. Needs no sudo.
 #
 # DOCK_LID_SETUP_PREFIX is a TEST SEAM, not an operational knob: it prefixes
 # every destination path so the state table can run the install for real. It is
@@ -52,10 +52,13 @@ if [[ -n "$PREFIX" ]]; then
     exit 2; }
 fi
 
-LOGIND_SRC="${DOTFILES}/logind/lid-on-power.conf"
+LOGIND_SRC="${DOTFILES}/logind/lid-locks-never-suspends.conf"
 RULE_SRC="${DOTFILES}/udev/90-dock-lid-holdoff.rules"
 UNIT_SRC="${DOTFILES}/systemd/dock-lid-holdoff@.service"
-LOGIND_DST="${PREFIX}/etc/systemd/logind.conf.d/lid-on-power.conf"
+LOGIND_DST="${PREFIX}/etc/systemd/logind.conf.d/lid-locks-never-suspends.conf"
+# The drop-in LOGIND_DST replaced on 2026-10-29. It sorts after it, so while it
+# is installed its HandleLidSwitchExternalPower=ignore wins.
+SUPERSEDED_LOGIND_DST="${PREFIX}/etc/systemd/logind.conf.d/lid-on-power.conf"
 RULE_DST="${PREFIX}/etc/udev/rules.d/90-dock-lid-holdoff.rules"
 UNIT_DST="${PREFIX}/etc/systemd/system/dock-lid-holdoff@.service"
 SRCS=("$LOGIND_SRC" "$RULE_SRC" "$UNIT_SRC")
@@ -93,14 +96,15 @@ if [[ -n "$PREFIX" ]]; then
   log WARNING "DOCK_LID_SETUP_PREFIX=$PREFIX — installing under a prefix, NOT to the real /etc"
 fi
 
-# The value logind must be running with, read from the file being installed so
-# the check cannot drift from it.
-WANT="$(sed -n 's/^HandleLidSwitchExternalPower=//p' "$LOGIND_SRC" | head -1)"
-[[ -n "$WANT" ]] || { log ERROR "$LOGIND_SRC sets no HandleLidSwitchExternalPower="; exit 1; }
+# Every Key=value logind must be running with, read from the file being
+# installed so the check cannot drift from it. Each key is also the name of the
+# logind Manager property that reports it.
+mapfile -t LOGIND_SETTINGS < <(grep -E '^[A-Za-z]+=' "$LOGIND_SRC")
+(( ${#LOGIND_SETTINGS[@]} > 0 )) || { log ERROR "$LOGIND_SRC sets nothing"; exit 1; }
 
-live_lid_power() {
+live_logind_setting() {
   busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
-    org.freedesktop.login1.Manager HandleLidSwitchExternalPower 2>/dev/null \
+    org.freedesktop.login1.Manager "$1" 2>/dev/null \
     | sed -n 's/^s "\(.*\)"$/\1/p'
 }
 
@@ -111,10 +115,15 @@ live_lid_power() {
 #     to everything asked of it. (Not NeedDaemonReload: a never-started instance
 #     is loaded fresh on every query, so it always says "no", and every new
 #     instance reads the file on disk anyway.)
-#   - logind running with the value: a drop-in logind has not re-read looks
+#   - the replaced drop-in gone: it would override the new one at the next
+#     reload, while every live value still looked right;
+#   - logind running with every setting: a drop-in logind has not re-read looks
 #     installed and does nothing until the next boot.
 check_installed() {
-  local bad=0 i st load live
+  local bad=0 i st load setting key want live is_logind_stale=0
+  if [[ -e "$SUPERSEDED_LOGIND_DST" ]]; then
+    log ERROR "$SUPERSEDED_LOGIND_DST is superseded and still installed — re-run: dock-lid-setup"; bad=1
+  fi
   for i in "${!SRCS[@]}"; do
     if [[ -L "${DSTS[$i]}" ]]; then
       log ERROR "${DSTS[$i]} is a SYMLINK — root would read a file you can write; re-run: dock-lid-setup"; bad=1
@@ -140,11 +149,17 @@ check_installed() {
   else
     log SUCCESS "systemd can load dock-lid-holdoff@.service"
   fi
-  live="$(live_lid_power || true)"
-  if [[ "$live" == "$WANT" ]]; then
-    log SUCCESS "logind is running with HandleLidSwitchExternalPower=$live"
-  else
-    log ERROR "logind is running with HandleLidSwitchExternalPower='${live}', not '${WANT}'"
+  for setting in "${LOGIND_SETTINGS[@]}"; do
+    key="${setting%%=*}" want="${setting#*=}"
+    live="$(live_logind_setting "$key" || true)"
+    if [[ "$live" == "$want" ]]; then
+      log SUCCESS "logind is running with $key=$live"
+    else
+      log ERROR "logind is running with $key='${live}', not '${want}'"
+      is_logind_stale=1
+    fi
+  done
+  if (( is_logind_stale )); then
     log ERROR "  sudo systemctl reload systemd-logind   (or reboot)"
     bad=1
   fi
@@ -212,6 +227,11 @@ sudo install -m 644 -o root -g root "$LOGIND_SRC" "$LOGIND_DST"
 sudo install -m 644 -o root -g root "$RULE_SRC"   "$RULE_DST"
 sudo install -m 644 -o root -g root "$UNIT_SRC"   "$UNIT_DST"
 log SUCCESS "installed $LOGIND_DST, $RULE_DST, $UNIT_DST"
+# Before the logind reload, which would otherwise read it once more.
+if [[ -e "$SUPERSEDED_LOGIND_DST" ]]; then
+  sudo rm -f "$SUPERSEDED_LOGIND_DST"
+  log SUCCESS "removed the superseded $SUPERSEDED_LOGIND_DST"
+fi
 
 sudo systemctl daemon-reload
 sudo udevadm control --reload

@@ -674,7 +674,7 @@ backup-doctor        # START HERE for backups. Every backup-* : see Backup & Res
 audit-status         # Tripwire armed, on, recording? Every audit-* : see Audit Tripwire
 vpn-doctor           # VPN chain health. Every vpn-* : see the VPN section
 dev-link-doctor      # Can an agent reach dev over SSM now? credential, key age, agent, fresh ssh (--offline)
-dock-lid-setup       # Dock lid guards, COPIED to /etc; reloads logind, NEVER restarts it (--check)
+dock-lid-setup       # Lid locks, never suspends; COPIED to /etc; reloads logind, NEVER restarts it (--check)
 dock-wifi-setup      # Wi-Fi off while docked on wired (one uplink); --check, --remove turns it back on
 ```
 

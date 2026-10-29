@@ -161,6 +161,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The laptop sleeps only when asked to: closing the lid locks the screen, and GNOME no longer
+  suspends on idle.** Agents run for hours unattended, and from 2026-10-21 to 2026-10-28 the
+  laptop suspended ten times by three paths: a lid closed on battery, a charger pulled with the
+  lid already closed, and a D-Bus `Suspend` with the lid open, consistent with GNOME's 15-minute
+  idle timer on battery.
+  - `logind/lid-locks-never-suspends.conf` sets `HandleLidSwitch=lock` and
+    `HandleLidSwitchExternalPower=lock`, and keeps `HandleLidSwitchDocked=ignore`. logind takes
+    `lock` only on the lid-close edge, so the dock holdoff still keeps it from locking the screen
+    as you dock. It replaces `lid-on-power.conf`, which `dock-lid-setup` now removes before
+    reloading logind (left behind, it would override the new file), and `--check` fails while
+    it is installed. The check now reads back every setting the drop-in makes, not just one.
+  - `scripts/apply-gnome-settings.sh` sets `sleep-inactive-battery-type` and
+    `sleep-inactive-ac-type` to `nothing`.
+  - Run `dock-lid-setup` and `gnome-apply` once to apply. Record: `docs/DOCK_LID_SUSPEND.md`.
 - **The secret-emission guard refuses content reads of `~/.aws/credentials` and
   `~/.aws/login/cache/`** (metadata verbs such as `ls` and `stat` stay allowed), because the dev
   link's SSM profile keeps a long-lived IAM access key in the first and `aws login` keeps its
@@ -184,6 +198,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The power-loss lid re-check** (rule 2 of `udev/90-dock-lid-holdoff.rules`). It pinged logind
+  when the charger went so a lid closed on it would suspend on battery, and caused two of the
+  unasked suspends above. With the lid set to `lock`, which logind takes only on the lid-close
+  edge, a re-check can do nothing.
 - **`CLAUDE_TENANT_MACHINE_OWNED` (DO-811).** Once DO-810 removed the ownership refusals, its only
   reader was `scripts/machines-render`, which still required an OWNED entry per machine id. So
   deleting it would have failed every rabota command at load and blocked every
