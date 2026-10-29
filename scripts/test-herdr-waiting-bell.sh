@@ -48,9 +48,12 @@ for tool in jq tac head timeout readlink flock cat sleep; do
 done
 ln -s "$(command -v setsid)" "$REALSETSID/setsid"
 
-# The player shim: records its arguments, then sleeps PLAYER_SLEEP seconds.
+# The player shim: records its arguments, then sleeps PLAYER_SLEEP seconds. It
+# also prints, as a real player can: none of that may reach the hook's stdout.
 cat > "$FAKE/config/herdr/shims/pw-play" <<'EOF'
 #!/bin/sh
+echo "player chatter on stdout"
+echo "player chatter on stderr" >&2
 sleep "${PLAYER_SLEEP:-0}"
 printf '%s\n' "$@" > "$PLAYED"
 EOF
