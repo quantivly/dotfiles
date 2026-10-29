@@ -339,3 +339,14 @@ The review also found two gaps, now fixed:
 
 **Third sweep: 54 mutants, 51 killed, 3 expected survivors.** The two above, and "daemon-reload
 before the copies". That one is equivalent too, for the reason just given.
+
+**Fourth sweep, 2026-10-29, of the lock policy: 15 mutants, 15 killed, none expected to
+survive.** Each was checked to apply exactly once and its diff read before it ran. They covered
+the replaced drop-in (never removed, removed after the reload, not looked for, not counted as a
+failure), the live read-back (first setting only, one fixed property, a stale logind not
+counted, a parse of `HandleLidSwitch=` alone, an empty drop-in accepted), each line of the
+drop-in, the power-loss rule put back, and two stub mutants (drop-ins read in reverse order, a
+`busctl` that ignores the snapshot). Two of them ended the suite at a `fatal` after failing rows,
+because a later fixture's install no longer succeeded: exit 2, counted as killed since a row
+had already failed. `scripts/apply-gnome-settings.sh` has no state table; its two power keys were
+checked live on this machine.
