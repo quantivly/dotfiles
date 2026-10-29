@@ -1,0 +1,16 @@
+config/herdr/sounds/ — linked to ~/.config/herdr/sounds by ./install and ./install --herdr.
+
+request.mp3
+    herdr's own "needs attention" sound, copied unmodified from
+    https://github.com/herdrdev/herdr, assets/sounds/request.mp3 (identical at v0.9.5,
+    git blob fe4859efcc0f215243f960677b9de894d07ab9d7). herdr is licensed under the
+    Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0
+    Played by claude/hooks/herdr-waiting-bell.sh, so a prose question and a blocked
+    dialog sound the same.
+
+silence.mp3
+    0.1 s of silence, generated for this repo:
+        ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 0.1 -c:a libmp3lame -b:a 32k \
+               -map_metadata -1 -fflags +bitexact -flags:a +bitexact silence.mp3
+    It is [ui.sound] done_path in config/herdr/config.toml, which is how herdr's
+    per-turn "done" sound is muted. docs/HERDR_GUIDE.md section 7.

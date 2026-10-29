@@ -1,7 +1,7 @@
 # Modular herdr install — `./install --herdr` (DO-555)
 # ============================================================================
-# The five links below are the ENTIRE herdr footprint of this repo. The full
-# install.conf.yaml links 18 destinations, among them ~/.zshrc, ~/.gitconfig,
+# The seven links below are the ENTIRE herdr footprint of this repo. The full
+# install.conf.yaml links every destination this repo has, among them ~/.zshrc, ~/.gitconfig,
 # ~/.tmux.conf, ~/.p10k.zsh and VS Code's settings.json — a reasonable thing to
 # decline, and declining it should not mean declining herdr.
 #
@@ -10,7 +10,7 @@
 #   clean:            omitted, and it costs nothing -- dotbot's clean defaults to
 #                     recursive=False (dotbot/src/dotbot/plugins/clean.py:32), so
 #                     `['~','~/.config']` only sweeps those two directories' own
-#                     children. All five links below sit deeper than that, so the
+#                     children. All seven links below sit deeper than that, so the
 #                     FULL config never swept them either. (An earlier version of
 #                     this note claimed it was a scope decision. It reads well and
 #                     it is not the reason; a rationale nobody can trust is worse
@@ -43,6 +43,10 @@
     # The keymap and UI.
     ~/.config/herdr/config.toml: config/herdr/config.toml
 
+    # Sound files config.toml names by RELATIVE path, resolved against the
+    # config.toml symlink's directory. Without it the per-turn beep comes back.
+    ~/.config/herdr/sounds: config/herdr/sounds
+
     # Declared plugin set, read by herdr-lazy. These are symlinks INTO the repo,
     # so `herdr-lazy sync`/`update` write through to the working tree and a
     # plugin refresh shows up as a modified plugins.lock — same as the full
@@ -58,6 +62,11 @@
     # prints one command that does both: scripts/herdr-claude-wire.sh. (It used
     # to print the raw JSON for the reader to hand-edit; DO-563.)
     ~/.claude/hooks/session-statusline.sh: claude/hooks/session-statusline.sh
+
+    # The "Waiting on you" bell, a Stop hook. Like the statusline it does nothing
+    # until registered in ~/.claude/settings.json, which scripts/herdr-claude-wire.sh
+    # also does.
+    ~/.claude/hooks/herdr-waiting-bell.sh: claude/hooks/herdr-waiting-bell.sh
 
     # The server as a declared service, run from a clean environment rather than
     # inheriting whichever shell last started it. The unit's own ExecStart is

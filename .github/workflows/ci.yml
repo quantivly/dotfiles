@@ -160,6 +160,19 @@ jobs:
       - name: Run the herdr quiet-shim state table
         run: ./scripts/test-herdr-quiet.sh
 
+  herdr-waiting-bell-test:
+    name: herdr "Waiting on you" Bell State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # herdr, the clock and the player are STUBBED; jq, flock, setsid and
+      # coreutils come with the runner image. Also checks that the config mutes
+      # herdr's per-turn sound and that both install paths link what it needs.
+      - name: Run the waiting-bell state table
+        run: ./scripts/test-herdr-waiting-bell.sh
+
   poetry-lazy-test:
     name: Lazy Poetry Wrapper State Table
     runs-on: ubuntu-latest
@@ -692,7 +705,7 @@ jobs:
       # below only ever runs the full install. A typo in a source path here is
       # therefore invisible until an adopter runs it -- dotbot fails loudly with
       # "Nonexistent target", but on their machine, never on ours.
-      - name: --herdr links exactly the five herdr destinations
+      - name: --herdr links exactly the seven herdr destinations
         run: |
           set -euo pipefail
           FAKE="$(mktemp -d)"
@@ -721,7 +734,9 @@ jobs:
           # gitconfig, green forever.
           declare -A want=(
             [.claude/hooks/session-statusline.sh]=claude/hooks/session-statusline.sh
+            [.claude/hooks/herdr-waiting-bell.sh]=claude/hooks/herdr-waiting-bell.sh
             [.config/herdr/config.toml]=config/herdr/config.toml
+            [.config/herdr/sounds]=config/herdr/sounds
             [.config/herdr/plugins/config/herdr-lazy/plugins.list]=config/herdr/plugins/plugins.list
             [.config/herdr/plugins/config/herdr-lazy/plugins.lock]=config/herdr/plugins/plugins.lock
             [.config/systemd/user/herdr-server.service]=systemd/herdr-server.service

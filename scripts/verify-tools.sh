@@ -58,7 +58,7 @@
 
 # --herdr: report ONLY what a modular herdr adopter installed (DO-563).
 #
-# Why this flag exists. `./install --herdr` links five files and deliberately does
+# Why this flag exists. `./install --herdr` links seven files and deliberately does
 # NOT link ~/.config/mise/config.toml, so on such a machine the eleven
 # full-install sections below are all noise -- and the mise-drift check is worse
 # than noise: it prints a FAIL and offers a pasteable `ln -sfn` that would pin ~25
@@ -89,7 +89,7 @@ Usage: verify-tools.sh [--herdr]
   --herdr    ONLY the herdr checks -- server env, unit enablement, unit
              ExecStart, timer health, account dirs, plugin deps under the
              server PATH, and Claude Code wiring. For a machine that ran
-             `./install --herdr` and linked five files, not eighteen.
+             `./install --herdr` and linked seven files, not the whole repo.
 
 EXIT: non-zero if an assertion FAILs (server env, unit enablement, unit
 ExecStart, timer health, account dirs, Claude Code wiring, and in the full
@@ -1068,12 +1068,68 @@ else
     fi
 fi
 
+# herdr's sounds: the per-turn "done" sound muted, and the "Waiting on you" bell
+# that replaces it for the one turn end that needs you. BOTH fail silently, and
+# in opposite directions: an unresolved done_path brings back the beep on every
+# turn (herdr logs a diagnostic and plays its built-in sound), and an unregistered
+# Stop hook makes a question asked in prose silent. docs/HERDR_GUIDE.md section 7.
+#
+# done_path is read from the LIVE config and resolved the way herdr resolves it:
+# relative to the directory of ~/.config/herdr/config.toml itself (the symlink),
+# not the repo. That is why ./install links ~/.config/herdr/sounds.
+if [[ ! -e "$HERDR_LIVE_CONF" ]]; then
+    echo "  ○ no ${HERDR_LIVE_CONF/#$HOME/\~} — herdr sound config skipped (run ./install --herdr)"
+else
+    live_done_path="$(sed -n '/^\[ui\.sound\]/,/^\[/s/^done_path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                          "$HERDR_LIVE_CONF" 2>/dev/null | head -1)"
+    if [[ -z "$live_done_path" ]]; then
+        # A config predating the mute: consistent, so nothing is broken.
+        echo "  · herdr's per-turn sound is not muted (no [ui.sound] done_path in the live config)"
+    else
+        case "$live_done_path" in
+            /*) done_sound_file="$live_done_path" ;;
+            *)  done_sound_file="${HERDR_LIVE_CONF%/*}/$live_done_path" ;;
+        esac
+        if [[ "$done_sound_file" != *.[mM][pP]3 ]]; then
+            echo -e "${RED}✗ FAIL:${NC} [ui.sound] done_path is not an .mp3 — herdr ignores it and beeps on every turn"
+            claude_wiring_failed=1
+        elif [[ ! -f "$done_sound_file" ]]; then
+            echo -e "${RED}✗ FAIL:${NC} [ui.sound] done_path resolves to ${done_sound_file/#$HOME/\~}, which is not a file"
+            echo "    herdr falls back to its built-in sound, so every turn end beeps again."
+            echo "    Fix: ./install (or ./install --herdr) — it links ~/.config/herdr/sounds."
+            claude_wiring_failed=1
+        else
+            echo -e "${GREEN}✓${NC} herdr's per-turn sound muted (done_path → ${done_sound_file/#$HOME/\~})"
+        fi
+    fi
+fi
+
+CC_BELL_HOOK="$HOME/.claude/hooks/herdr-waiting-bell.sh"
+cc_bell_filter='[.hooks?.Stop? | .[]? | .hooks? | .[]? | .command? | strings] | any(contains("herdr-waiting-bell.sh"))'
+if ! command -v jq &>/dev/null; then
+    echo -e "${YELLOW}⚠${NC} jq not installed — \"Waiting on you\" bell NOT CHECKED"
+elif [[ ! -r "$CC_SETTINGS" ]] || ! jq -e 'type == "object"' "$CC_SETTINGS" &>/dev/null; then
+    # The statusLine check above has already failed on this file. Saying nothing
+    # here would read as a pass.
+    echo -e "${YELLOW}⚠${NC} ${CC_SETTINGS/#$HOME/\~} is missing or unusable — \"Waiting on you\" bell NOT CHECKED"
+elif ! jq -e "$cc_bell_filter" "$CC_SETTINGS" &>/dev/null; then
+    echo -e "${RED}✗ FAIL:${NC} no \"Waiting on you\" bell among the Stop hooks — a question asked in prose makes no sound"
+    echo "$CC_FIX"
+    claude_wiring_failed=1
+elif [[ ! -r "$CC_BELL_HOOK" ]]; then
+    echo -e "${RED}✗ FAIL:${NC} the Stop hook names ${CC_BELL_HOOK/#$HOME/\~}, which does not exist"
+    echo "    Run ./install --herdr (dotbot links it); the registered hook rings nothing without the file."
+    claude_wiring_failed=1
+else
+    echo -e "${GREEN}✓${NC} \"Waiting on you\" bell registered (Stop hook)"
+fi
+
 fi  # end of the Claude Code wiring section (skipped when there is nothing to wire)
 
 echo ""
 echo -e "${BLUE}=== Summary ===${NC}"
 if [[ "$HERDR_ONLY" == true ]]; then
-    # Deliberately NOT the full report's advice: a modular adopter linked five
+    # Deliberately NOT the full report's advice: a modular adopter linked seven
     # files and no mise config, so "run mise install" and "read CLAUDE.md" are
     # instructions for a machine they did not install.
     echo "Modular herdr install."

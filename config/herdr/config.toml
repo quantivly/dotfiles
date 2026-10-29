@@ -621,7 +621,25 @@ delay_seconds = 1
 position = "top-right"
 
 [ui.sound]
+# A sound means "you are needed", and nothing else makes one. herdr has two:
+#   request: the agent is BLOCKED on a dialog (permission prompt, AskUserQuestion,
+#            plan approval, MCP input). Kept, with the built-in sound.
+#   done:    every Working -> Idle in a background pane, i.e. EVERY turn end.
+#            Muted: one beep per turn per agent was the noise.
+# herdr (checked through v0.9.5) has no per-kind switch, and `enabled = false`
+# would take `request` with it. So `done` plays 0.1 s of silence instead.
+#
+# FAILS LOUD, NOT QUIET. A missing or non-mp3 file is only a diagnostic ("using
+# default sound"), and a file the player rejects falls back to the built-in
+# sound. Either way the beep comes back. The path is relative to THIS FILE'S
+# SYMLINK, ~/.config/herdr/, so it needs the ~/.config/herdr/sounds link that
+# ./install makes. scripts/verify-tools.sh --herdr checks that it resolves.
+#
+# A turn that ends with a prose question (a **Waiting on you** block) is a
+# `done` to herdr. claude/hooks/herdr-waiting-bell.sh rings for those, when you
+# are likely away. docs/HERDR_GUIDE.md section 7.
 enabled = true
+done_path = "sounds/silence.mp3"
 
 [session]
 # Resume agent panes into their native conversations after a server restart.

@@ -239,7 +239,7 @@ review, all of which reported success:
   has run in, and removing one would leave those links dangling; the remedy is
   `./install` from the primary, which is non-destructive. **Enumerated, not
   sentinelled:** the first version checked `~/.zshrc` alone, and `./install --herdr`
-  never links `~/.zshrc` — it links five herdr destinations including the systemd unit
+  never links `~/.zshrc` — it links only herdr destinations, including the systemd unit
   that owns every agent session, and a herdr-shape worktree was removed with rc 0 and
   left the unit dangling. Every destination in BOTH confs is checked now, read from the
   primary and from the worktree, with the mise link and `~/.zshrc` as a floor. `git submodule deinit` first was the obvious alternative and does not
