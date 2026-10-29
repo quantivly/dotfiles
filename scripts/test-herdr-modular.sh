@@ -522,6 +522,9 @@ for sd in 'stopobject:{"hooks":{"Stop":{"x":1}}}' 'hooksstring:{"hooks":"elsewhe
   check "wirer: hooks of the wrong shape ($kind) refuses, exit 1" "$rc" "1"
   check "wirer: hooks of the wrong shape ($kind) are left as they were" \
         "$(jq -cS 'del(.statusLine)' "$H/.claude/settings.json")" "$before"
+  # jq's own type error would refuse the write too, and the temp file keeps the
+  # original safe. What the explicit check adds is this line: the hook to add by hand.
+  has "$out" "does not extend" "wirer: hooks of the wrong shape ($kind) says why, and what to add by hand"
 done
 
 H="$(new_home bellnofile)"
@@ -1656,7 +1659,7 @@ check "a checker that exits non-zero with no verdict: exit 1" "$rc" "1"
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=295
+EXPECTED_ROWS=297
 
 docs_claim() {
   local f="$DOTFILES/$1"
