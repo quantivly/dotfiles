@@ -3401,6 +3401,136 @@ _vpn_v6_verdict() {
   print -r -- ok-down
 }
 
+# _vpn_status_section <header-prefix> <status-text>   -> the section's entries
+#
+# The `  - <entry>` lines under the line starting with <header-prefix>, in the
+# output of `vpn-failfast.sh --status`. That output is the interface between the
+# daemon and this doctor, so it is parsed in ONE place, and a row feeds the
+# daemon's real output through it. The list ends at the first line that is not an
+# entry, so a section printed after it can never be read as one. The prefix is a
+# literal (index(), not a regex), so its parentheses need no escaping.
+_vpn_status_section() {
+  awk -v header="$1" '
+    index($0, header) == 1 { in_section = 1; next }
+    /^  - / { if (in_section) print substr($0, 5); next }
+    { in_section = 0 }' <<<"$2"
+}
+
+# _vpn_v4_rule_findings <targets> <rules>    (both newline-separated)
+#
+# PURE. <targets> is the configured destinations, one per line, and <rules> is
+# the `--status` rules section, `<tunnel|reject> <dst>` per line. Prints one
+# finding per line, and NOTHING when every target has exactly its pair. Each
+# half-state fails a different way, so each has its own name:
+#   missing <d>      neither rule: <d> hangs instead of failing while the tunnel is down
+#   reject-only <d>  no tunnel rule: <d> is REJECTED EVEN WHILE THE TUNNEL IS UP
+#   tunnel-only <d>  no reject rule: <d> hangs instead of failing while it is down
+#   extra <d>        a rule for a destination the config does not list
+_vpn_v4_rule_findings() {
+  local targets="$1" rules="$2" kind dst
+  local -A tunnel_rule reject_rule configured reported
+  while read -r kind dst; do
+    [[ -n "$dst" ]] || continue
+    case "$kind" in
+      tunnel) tunnel_rule[$dst]=1 ;;
+      reject) reject_rule[$dst]=1 ;;
+    esac
+  done <<<"$rules"
+  while read -r dst; do
+    [[ -n "$dst" ]] || continue
+    configured[$dst]=1
+    if (( ${+tunnel_rule[$dst]} && ${+reject_rule[$dst]} )); then
+      continue
+    elif (( ${+reject_rule[$dst]} )); then print -r -- "reject-only $dst"
+    elif (( ${+tunnel_rule[$dst]} )); then print -r -- "tunnel-only $dst"
+    else print -r -- "missing $dst"
+    fi
+  done <<<"$targets"
+  for dst in ${(ok)tunnel_rule} ${(ok)reject_rule}; do
+    (( ${+configured[$dst]} || ${+reported[$dst]} )) && continue
+    reported[$dst]=1
+    print -r -- "extra $dst"
+  done
+}
+
+# _vpn_v4_probe <addr>   (sets _VPN_V4_PROBE_STATE, _VPN_V4_PROBE_DEV, _VPN_V4_PROBE_OUT)
+#
+# Sets globals and prints nothing, deliberately: called as `$(...)` it would run
+# in a subshell and the raw output a FAIL line needs would be lost with it.
+# Measured in a private netns with the host's iproute2-6.19.0: when only the
+# reject rule matches, `ip route get` prints NOTHING on stdout and
+# `RTNETLINK answers: Network is unreachable` on stderr, rc 2; when routed, rc 0
+# and the winning route on stdout, `... via <gw> dev <iface> src ...`. An
+# `unreachable` ROUTE answers differently -- `No route to host`, EHOSTUNREACH --
+# and that is the old toggle's signature (or somebody else's route), never ours.
+_vpn_v4_probe() {
+  local out rc
+  out="$(ip -4 route get "$1" 2>&1)"; rc=$?
+  _VPN_V4_PROBE_OUT="$out"
+  _VPN_V4_PROBE_DEV=""
+  if (( rc == 0 )); then
+    _VPN_V4_PROBE_STATE=routed
+    _VPN_V4_PROBE_DEV="$(sed -n 's/.* dev \([^ ]*\).*/\1/p' <<<"$out" | head -1)"
+  elif [[ "$out" == *"Network is unreachable"* ]]; then
+    _VPN_V4_PROBE_STATE=rejected
+  elif [[ "$out" == *"No route to host"* ]]; then
+    _VPN_V4_PROBE_STATE=rejected-by-route
+  else
+    _VPN_V4_PROBE_STATE=odd
+  fi
+}
+
+# _vpn_v4_canary_verdict <tunnel-up> <tunnel-iface> <pair-present> <state> [<dev>]
+#
+# PURE. `rejected` with the tunnel down is NOT a pass on its own: a machine with
+# no network at all rejects every address the same way, and a tick there would
+# credit our rules for the absence of a route. It counts only when our pair is
+# installed for that destination -- the same guard the IPv6 canary needs.
+_vpn_v4_canary_verdict() {
+  local up="$1" iface="$2" pair="$3" state="$4" dev="${5:-}"
+  case "$up:$state" in
+    1:routed)   [[ "$dev" == "$iface" ]] && { print -r -- ok-up; return; }
+                print -r -- not-via-tunnel ;;
+    1:rejected|1:rejected-by-route) print -r -- rejected-while-up ;;
+    0:rejected) (( pair )) && { print -r -- ok-down; return; }
+                print -r -- not-ours ;;
+    0:rejected-by-route) print -r -- route-not-rules ;;
+    0:routed)   print -r -- would-hang ;;
+    *)          print -r -- odd ;;
+  esac
+}
+
+# _vpn_key_expiry_verdict <expiry-epoch-or-empty> <now-epoch>  -> never | valid | expired
+#
+# PURE. The expiry is field 7 of the `pub:` line from `gpg --show-keys
+# --with-colons`; empty means the key never expires. Measured on this box: the
+# AWS key installed by the vendor's own instructions expired 2026-09-05, AWS
+# re-signed the repo with a new key, and `apt update` then rejected the source on
+# every run while printing nothing anyone read -- which froze the machine on an
+# unsupported 5.4.0 for two months. Nothing else on the box would have said so.
+_vpn_key_expiry_verdict() {
+  local expiry="$1" now="$2"
+  [[ -z "$expiry" ]] && { print -r -- never; return; }
+  (( expiry > now )) && { print -r -- valid; return; }
+  print -r -- expired
+}
+
+# _vpn_apt_key_file <sources-or-list-file>...  -> the keyring that signs the AWS repo
+#
+# The first `Signed-By:` (deb822) or `[signed-by=...]` (one-line) in the given
+# files, else the legacy trusted.gpg.d key the vendor's instructions install.
+_VPN_APT_LEGACY_KEY="/etc/apt/trusted.gpg.d/awsvpnclient_public_key.asc"
+_vpn_apt_key_file() {
+  local file signed_by
+  for file in "$@"; do
+    [[ -r "$file" ]] || continue
+    signed_by="$(sed -n -e 's/^Signed-By:[[:space:]]*\([^[:space:]]\{1,\}\).*/\1/p' \
+                        -e 's/.*signed-by=\([^] ]\{1,\}\).*/\1/p' "$file" | head -1)"
+    [[ -n "$signed_by" ]] && { print -r -- "$signed_by"; return; }
+  done
+  [[ -r "$_VPN_APT_LEGACY_KEY" ]] && print -r -- "$_VPN_APT_LEGACY_KEY"
+}
+
 # Drift on a file whose comments outnumber its directives is compared on the
 # DIRECTIVES, never byte-for-byte. This repo already worked that out once, in
 # systemd/herdr-server.service.d/10-execstart.conf: "a checker that cries wolf
@@ -3455,10 +3585,10 @@ vpn-status() {
 
 # Assert the whole chain, and exit non-zero if any of it is wrong.
 #
-# The one thing this exists for above all others: an ORPHANED unreachable route.
-# A stale one blackholes a host permanently and looks exactly like a server
-# outage, so it is checked first, reported as a FAIL, and given the one-line
-# manual removal.
+# Checked first, because each looks exactly like a server outage: a LEGACY
+# unreachable route left by the old toggle (it blackholes its host while the
+# tunnel is up), and a destination whose IPv4 rule pair is incomplete. Then the
+# canary asks the kernel which way the first destination actually goes.
 vpn-doctor() {
   # NOTE: no local named `status` — that is read-only in zsh.
   local _DOCTOR_FAIL=0 _DOCTOR_WARN=0
@@ -3476,29 +3606,82 @@ vpn-doctor() {
   # whose entire job is to find an orphan, so a v6 route this tool owns was
   # invisible to the check written to catch exactly that. `--status` is the one
   # source of truth for both questions.
-  local vstat owned tunnel_up_now=0
+  local vstat legacy v4_rules v4_targets tunnel_iface tunnel_up_now=0
   vstat="$(VPN_FAILFAST_CONF="$_VPN_CONF_ETC" "$ff" --status 2>/dev/null)"
   [[ "$vstat" == *'tunnel:  UP'* ]] && tunnel_up_now=1
-  # The `{f=0}` terminator ends the list at the first line that is not an entry,
-  # so a section printed after it can never be read as one.
-  owned="$(awk '/^installed \(proto /{f=1;next} /^  - /{if(f)print substr($0,5);next} {f=0}' <<<"$vstat")"
+  v4_targets="$(_vpn_status_section 'targets: ' "$vstat")"
+  v4_rules="$(_vpn_status_section 'ipv4 rules (proto ' "$vstat")"
+  legacy="$(_vpn_status_section 'ipv4 legacy routes (proto ' "$vstat")"
+  # From the status line, so the doctor and the daemon can never disagree about
+  # which interface the tunnel is.
+  tunnel_iface="$(sed -n 's/^tunnel:  [A-Z]* (\([^ ]*\) .*/\1/p' <<<"$vstat")"
 
   if (( tunnel_up_now )); then
-    _doctor_ok "tunnel is UP (tun0 has a gateway route)"
+    _doctor_ok "tunnel is UP (${tunnel_iface:-tun0} has a gateway route)"
   else
-    _doctor_note "tunnel is DOWN — every route finding below is expected, not a fault"
+    _doctor_note "tunnel is DOWN — the IPv4 rules below should be FAILING connections now"
   fi
 
-  # --- ORPHANS: the one real risk in this design ----------------------------
-  if [[ -n "$owned" && "$tunnel_up_now" == "1" ]]; then
-    _doctor_bad "ORPHANED unreachable route(s) while the tunnel is UP — these BLACKHOLE the host:"
-    printf '      %s\n' ${=owned}
+  # --- LEGACY ROUTES: the old toggle's leftovers ----------------------------
+  # A /32 beats the tunnel's /1, so with the tunnel UP a leftover blackholes its
+  # host. With it DOWN, a legacy route means the INSTALLED daemon is still the
+  # route toggle -- the design that crashed AWS VPN Client 5.x on reconnect.
+  if [[ -n "$legacy" && "$tunnel_up_now" == "1" ]]; then
+    _doctor_bad "LEGACY unreachable route(s) while the tunnel is UP — these BLACKHOLE the host:"
+    printf '      %s\n' ${(f)legacy}
     _doctor_bad "  Remove now:  sudo systemctl restart vpn-failfast   (it clears them at start)"
     _doctor_bad "  Or by hand:  sudo ip route del unreachable <dst> proto ${proto}"
-  elif [[ -n "$owned" ]]; then
-    _doctor_ok "fail-fast routes installed while the tunnel is down ($(printf '%s\n' ${=owned} | wc -l) destination(s))"
+  elif [[ -n "$legacy" ]]; then
+    _doctor_warn "the installed daemon still toggles unreachable ROUTES — the design that crashes"
+    _doctor_warn "  AWS VPN Client 5.x on reconnect (docs/VPN_INTERNALS.md §11). Fix: vpn-setup"
+    printf '      %s\n' ${(f)legacy}
   else
-    _doctor_ok "no unreachable routes owned by this tool (proto ${proto})"
+    _doctor_ok "no legacy unreachable routes (proto ${proto})"
+  fi
+
+  # --- THE IPv4 RULES -------------------------------------------------------
+  if [[ -n "$v4_targets" ]]; then
+    local v4_findings finding_kind finding_dst rules_need_fix=0
+    v4_findings="$(_vpn_v4_rule_findings "$v4_targets" "$v4_rules")"
+    if [[ -z "$v4_findings" ]]; then
+      _doctor_ok "IPv4 fail-fast rules in place for ${#${(f)v4_targets}} destination(s)"
+    fi
+    while read -r finding_kind finding_dst; do
+      case "$finding_kind" in
+        missing)     _doctor_bad "no fail-fast rules for $finding_dst — it HANGS instead of failing while the tunnel is down"
+                     rules_need_fix=1 ;;
+        reject-only) _doctor_bad "$finding_dst has a reject rule and no tunnel rule — it is REJECTED even while the tunnel is UP"
+                     rules_need_fix=1 ;;
+        tunnel-only) _doctor_bad "$finding_dst has no reject rule — it hangs instead of failing while the tunnel is down"
+                     rules_need_fix=1 ;;
+        extra)       _doctor_warn "a fail-fast rule for $finding_dst, which the config does not list — the daemon drops it on its next pass" ;;
+      esac
+    done <<<"$v4_findings"
+    (( rules_need_fix )) && _doctor_bad "  Fix: sudo systemctl restart vpn-failfast   (vpn-setup, if the daemon predates the rules)"
+
+    # THE CANARY: ask the kernel which way the first destination actually goes.
+    # The rule list says what exists; only `route get` says what WINS.
+    local canary_dst="${${(f)v4_targets}[1]%%/*}" canary_pair=1
+    grep -qE "^[a-z-]+ ${canary_dst//./\\.}(/|\$)" <<<"$v4_findings" && canary_pair=0
+    _vpn_v4_probe "$canary_dst"
+    case "$(_vpn_v4_canary_verdict "$tunnel_up_now" "${tunnel_iface:-tun0}" "$canary_pair" \
+                                   "$_VPN_V4_PROBE_STATE" "$_VPN_V4_PROBE_DEV")" in
+      ok-up)    _doctor_ok "$canary_dst goes through ${tunnel_iface:-tun0} (ip route get)" ;;
+      ok-down)  _doctor_ok "$canary_dst fails at once while the tunnel is down (ENETUNREACH)" ;;
+      not-via-tunnel)
+                _doctor_bad "$canary_dst is routed via ${_VPN_V4_PROBE_DEV:-?}, NOT ${tunnel_iface:-tun0}, while the tunnel is up:"
+                _doctor_bad "      ${_VPN_V4_PROBE_OUT}" ;;
+      rejected-while-up)
+                _doctor_bad "$canary_dst is REJECTED while the tunnel is up — something is blocking a reachable host" ;;
+      would-hang)
+                _doctor_bad "$canary_dst is routed via ${_VPN_V4_PROBE_DEV:-?} while the tunnel is down — it will HANG, not fail:"
+                _doctor_bad "      ${_VPN_V4_PROBE_OUT}" ;;
+      not-ours) _doctor_note "$canary_dst is unreachable, but not by our rules (no network at all?) — not exercised" ;;
+      route-not-rules)
+                _doctor_warn "$canary_dst fails fast, but by a reject ROUTE (EHOSTUNREACH), not by the rules —"
+                _doctor_warn "  the old toggle, or somebody else's route" ;;
+      *)        _doctor_warn "could not classify \`ip route get $canary_dst\`: ${_VPN_V4_PROBE_OUT}" ;;
+    esac
   fi
 
   # --- config ---------------------------------------------------------------
@@ -3572,7 +3755,7 @@ vpn-doctor() {
     dropin_val="$(sed -n 's/^Environment=VPN_FAILFAST_IPV6=//p' "$_VPN_DROPIN_ETC" | head -1)"
     [[ "$dropin_val" == "block" ]] && v6_armed=1
   fi
-  v6_owned="$(awk '/^ipv6 installed \(proto /{f=1;next} /^  - /{if(f)print substr($0,5);next} {f=0}' <<<"$vstat")"
+  v6_owned="$(_vpn_status_section 'ipv6 installed (proto ' "$vstat")"
   [[ -n "$v6_owned" ]] && v6_any=1
   v6_halves=1
   for half in "${_VPN_V6_HALVES[@]}"; do
@@ -3685,6 +3868,42 @@ vpn-doctor() {
     else
       _doctor_note "vpn-notify.service linked, not enabled — arming it is a decision:"
       _doctor_note "  systemctl --user enable --now vpn-notify.service"
+    fi
+  fi
+
+  # --- the AWS VPN Client, and the package source that updates it ----------
+  # WARN, never FAIL: none of this breaks the tunnel today. It is here because
+  # the failure it catches is SILENT for months -- an expired signing key makes
+  # `apt update` drop the AWS repo on every run, and the client simply never
+  # gets another fix. That is how this machine sat on a crashing, unsupported
+  # 5.4.0 from June to November 2026 (docs/VPN_INTERNALS.md §11).
+  local client_version client_candidate key_file key_expiry
+  client_version="$(dpkg-query -W -f='${Version}' awsvpnclient 2>/dev/null)"
+  if [[ -z "$client_version" ]]; then
+    _doctor_note "the AWS VPN Client package is not installed — skipping the client checks"
+  else
+    case "$client_version" in
+      5.*) _doctor_warn "AWS VPN Client $client_version: AWS no longer supports 5.x, and its route listener"
+           _doctor_warn "  crashes the client (docs/VPN_INTERNALS.md §11). Upgrade to 6.x." ;;
+      *)   _doctor_ok "AWS VPN Client $client_version" ;;
+    esac
+    client_candidate="$(apt-cache policy awsvpnclient 2>/dev/null | awk '/Candidate:/{print $2}')"
+    if [[ -n "$client_candidate" && "$client_candidate" != "(none)" && "$client_candidate" != "$client_version" ]]; then
+      _doctor_warn "an AWS VPN Client update is available: $client_version -> $client_candidate"
+    fi
+    key_file="$(_vpn_apt_key_file /etc/apt/sources.list.d/aws-vpn-client.sources \
+                                  /etc/apt/sources.list.d/aws-vpn-client.list)"
+    if [[ -z "$key_file" ]]; then
+      _doctor_warn "no signing key found for the AWS VPN Client apt source — it cannot be updated by apt"
+    else
+      key_expiry="$(gpg --batch --show-keys --with-colons "$key_file" 2>/dev/null \
+                    | awk -F: '/^pub:/{print $7; exit}')"
+      case "$(_vpn_key_expiry_verdict "$key_expiry" "$(date +%s)")" in
+        expired) _doctor_warn "the AWS apt signing key ($key_file) EXPIRED on $(date -d "@$key_expiry" +%F 2>/dev/null)"
+                 _doctor_warn "  apt rejects the AWS repo on every update, so no client fix can ever arrive."
+                 _doctor_warn "  Fix: install the current key (docs/VPN_RESILIENCE.md, 'Keeping the client current')" ;;
+        *)       _doctor_ok "the AWS apt signing key is current ($key_file)" ;;
+      esac
     fi
   fi
 

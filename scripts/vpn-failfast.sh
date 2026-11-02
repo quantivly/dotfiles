@@ -3,8 +3,9 @@
 # scripts/vpn-failfast.sh
 # =======================
 #
-# Make VPN-only destinations FAIL instead of HANG while the tunnel is down, by
-# installing `unreachable` routes for them and withdrawing them when it returns.
+# Make VPN-only destinations FAIL instead of HANG while the tunnel is down, with
+# two static policy rules per destination that the kernel evaluates on every
+# lookup -- so nothing is installed or withdrawn when the tunnel comes and goes.
 #
 # Why this exists
 # ---------------
@@ -26,6 +27,31 @@
 # for up to 8.8 hours: nothing FAILS, it hangs. Making it fail fast IS the
 # notification.
 #
+# HOW: TWO RULES PER DESTINATION, INSTALLED ONCE
+# ----------------------------------------------
+#   priority 6600  to D  lookup main suppress_prefixlength 0  protocol 66
+#   priority 6601  to D  unreachable                          protocol 66
+#
+# While the tunnel is up, 0.0.0.0/1 via tun0 matches D in main; it is a /1, not
+# a /0, so the first rule accepts it and D goes through the tunnel. While it is
+# down, the only match left is the LAN default -- a /0, which the first rule
+# suppresses -- so the lookup falls to the second rule and connect() gets
+# ENETUNREACH at once. The kernel makes that decision per lookup, so there is no
+# poll window, and the rules never change when the tunnel does. Measured in a
+# private netns with the host's iproute2-6.19.0 (docs/VPN_INTERNALS.md §11).
+#
+# WHY NOT THE ROUTE TOGGLE THIS REPLACED. Until 2026-11 this installed
+# `unreachable` ROUTES while the tunnel was down and withdrew them seconds after
+# it came back. AWS VPN Client 5.x listens to every IPv4 route event, and for a
+# route with no output interface -- which every IPv4 reject route is -- its
+# parser reads an UNINITIALIZED interface name and throws an unhandled
+# ArgumentException. The client crashed on about one reconnect in four, took
+# the tunnel with it, and nothing restarted it: 15 of 17 crashes with logs
+# followed one of our withdrawals. That listener subscribes to route events and
+# NOT to rule events (nl_groups 0x51, no RTMGRP_IPV4_RULE), and a rule that
+# never changes emits nothing anyway. A fail-fast that crashes the VPN it
+# guards is worse than none, so this must never go back to toggling routes.
+#
 # THE INVARIANT: this reads KERNEL STATE ONLY, never a log
 # --------------------------------------------------------
 # Both ~/.config/AWSVPNClient/logs (drwxrwxr-x zvi:zvi) and
@@ -38,20 +64,27 @@
 # log-reading designs that preceded this one. Logs are read OFFLINE, by
 # scripts/vpn-log-report.py, for reporting. Never here.
 #
-# IDENTITY, and why a stale route is the one real risk
-# ---------------------------------------------------
-# A leftover `unreachable` route blackholes a host permanently, and looks exactly
-# like a server outage. Every route this installs therefore carries a dedicated
-# route PROTOCOL (default 66), which is the identity and the only thing consulted
-# when deciding what may be removed:
+# IDENTITY, and what may be removed
+# ---------------------------------
+# Everything this installs carries a dedicated PROTOCOL (default 66), and that is
+# the only thing consulted when deciding what may be removed:
 #
-#   * `ip -j route show proto 66` lists exactly this tool's routes, and it works
-#     UNPRIVILEGED -- verified -- so vpn-doctor can find an orphan without root.
-#   * Nothing is ever deleted except by that filter. A route this tool did not
-#     create is never touched, whatever its destination.
-#   * Orphans are removed at START, before anything is added, as well as at stop
-#     (ExecStopPost=) -- because the case that leaves them is the one where the
-#     stop path did not run.
+#   * IPv4 RULES are ours when they carry protocol 66 AND sit at priority 6600 or
+#     6601 AND have one of the two shapes above. They are found by reading the
+#     WHOLE of `ip -j -4 rule show` and filtering here -- never with `ip rule show
+#     protocol 66`, which ignores its filter and prints every rule on the box
+#     (VPN_INTERNALS §10): a cleanup loop built on it would delete Tailscale's.
+#     They are deleted by their full spec, protocol included, and the kernel will
+#     not match a delete naming protocol 66 against a rule that lacks it.
+#   * ROUTES (the IPv6 block, and any IPv4 `unreachable` route left by the old
+#     toggle) are ours when `ip -j route show proto 66` lists them. A LEGACY IPv4
+#     route is always an orphan now: a /32 beats the tunnel's /1, so one left
+#     behind blackholes its host while the tunnel is UP.
+#   * Both listings work UNPRIVILEGED, so vpn-doctor can check them without root.
+#   * Route orphans are removed at START, before anything is added, as well as at
+#     stop (ExecStopPost=) -- because the case that leaves them is the one where
+#     the stop path did not run. Rules are reconciled as a delta instead: a rule
+#     that is already right is never deleted and re-added.
 #
 # CONFIG VALIDATION IS NOT DECORATION. Measured with the real `ip`:
 #
@@ -61,8 +94,10 @@
 #   ip route add unreachable 300.1.2.3   -> rejected at parse
 #
 # So `ip` will happily blackhole the entire internet from a one-character typo.
-# Every destination is validated HERE, all of them BEFORE any is installed, so a
-# bad entry can never leave a partial set behind.
+# The rules need exactly the same care: `to 0.0.0.0/0 unreachable` would reject
+# everything whenever the tunnel is down. Every destination is validated HERE,
+# all of them BEFORE any is installed, so a bad entry can never leave a partial
+# set behind.
 #
 # THE IPv6 BLOCK (DO-704), and why its polarity is the OPPOSITE of the above
 # ---------------------------------------------------------------------------
@@ -104,8 +139,8 @@
 #
 # Usage:
 #   vpn-failfast.sh --watch     daemon: converge on every link event, and poll
-#   vpn-failfast.sh --once      converge once and exit
-#   vpn-failfast.sh --clear     remove every route this tool owns, then exit
+#   vpn-failfast.sh --once      converge once and exit (the IPv4 rules stay)
+#   vpn-failfast.sh --clear     remove every rule and route this tool owns, then exit
 #   vpn-failfast.sh --status    read-only: what is true now (no root needed)
 #   vpn-failfast.sh --check     validate the config only; exit 2 if it is bad
 #
@@ -150,6 +185,13 @@ IPV6_BLOCK_DSTS=( "::/1" "8000::/1" )
 
 # Set only on the --watch path. See the --once note in the header.
 ALLOW_V6_BLOCK=0
+
+# The IPv4 rule pair, at fixed priorities: after Tailscale's 5210-5270 (so the
+# tailnet is never affected) and before the main table at 32766. Constants, not
+# knobs -- a priority is part of the identity, and an identity that a stray
+# environment variable can move is one a cleanup can lose track of.
+readonly TUNNEL_RULE_PRIORITY=6600
+readonly REJECT_RULE_PRIORITY=6601
 
 log() { printf 'vpn-failfast: %s\n' "$*"; }
 err() { printf 'vpn-failfast: %s\n' "$*" >&2; }
@@ -408,14 +450,163 @@ clear_owned() {
     return "$rc"
 }
 
-# Both families, unconditionally and regardless of the arming switch. This is
-# what --clear, the stop path and the --watch clear-at-start use: a stale v6
-# blackhole is exactly as dangerous as a stale v4 one, and "we were not armed"
-# is never a reason to leave one installed.
-clear_all() {
+# Both families of ROUTE, unconditionally and regardless of the arming switch:
+# the legacy IPv4 routes the old toggle left, and the IPv6 block. This is what
+# the --watch and --once start use: a stale v6 blackhole is exactly as dangerous
+# as a stale v4 one, and "we were not armed" is never a reason to leave one
+# installed.
+clear_routes() {
     local rc=0
     clear_owned -4 || rc=1
     clear_owned -6 || rc=1
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# The IPv4 rules
+# ---------------------------------------------------------------------------
+# The two shapes, spelled ONCE, because add and delete must agree byte for byte:
+# a delete is matched by the kernel on every selector it names, so a delete
+# spelled differently from its add is a delete of nothing.
+#
+# rule_spec <tunnel|reject> <dst>   (sets RULE_SPEC)
+RULE_SPEC=()
+rule_spec() {
+    case "$1" in
+        tunnel) RULE_SPEC=(priority "$TUNNEL_RULE_PRIORITY" to "$2"
+                           lookup main suppress_prefixlength 0 protocol "$PROTO") ;;
+        reject) RULE_SPEC=(priority "$REJECT_RULE_PRIORITY" to "$2"
+                           unreachable protocol "$PROTO") ;;
+        *) err "rule_spec: unknown kind '$1'"; return 1 ;;
+    esac
+}
+
+# The rules this tool owns, one `<tunnel|reject> <dst>` per line, with dst in
+# the same spelling read_config produces (a /32 bare, anything else with its
+# length). Measured shapes, compact and `-p` pretty alike:
+#
+#   {"priority":6600,"src":"all","dst":"3.216.24.205","table":"main","suppress_prefixlen":0,"protocol":"66"}
+#   {"priority":6601,"src":"all","dst":"10.20.0.0","dstlen":16,"action":"unreachable","protocol":"66"}
+#
+# A record is one object, split on `}` (rule objects are flat). Fields are read
+# with match(), whitespace-tolerant, because `ip -p -j` puts newlines and spaces
+# where the compact form has none, and a parser that matched only one spelling
+# would find NOTHING -- so nothing would ever be withdrawn. mawk-safe: no
+# character classes, no gawk extensions.
+owned_rules() {
+    ip -j -4 rule show 2>/dev/null | awk \
+        -v proto="$PROTO" \
+        -v tunnel_priority="$TUNNEL_RULE_PRIORITY" \
+        -v reject_priority="$REJECT_RULE_PRIORITY" '
+        function field(name,    pattern, value) {
+            pattern = "\"" name "\"[ \t\r\n]*:[ \t\r\n]*(\"[^\"]*\"|[0-9]+)"
+            if (!match($0, pattern)) return ""
+            value = substr($0, RSTART, RLENGTH)
+            sub(/^"[^"]*"[ \t\r\n]*:[ \t\r\n]*/, "", value)
+            gsub(/"/, "", value)
+            return value
+        }
+        BEGIN { RS = "}" }
+        {
+            if (field("protocol") != proto) next
+            destination = field("dst")
+            if (destination == "") next
+            prefix_length = field("dstlen")
+            if (prefix_length != "" && prefix_length != "32") destination = destination "/" prefix_length
+            priority = field("priority")
+            if (priority == tunnel_priority && field("table") == "main" && field("suppress_prefixlen") == "0")
+                print "tunnel " destination
+            else if (priority == reject_priority && field("action") == "unreachable")
+                print "reject " destination
+        }'
+}
+
+# add_rule <tunnel|reject> <dst>
+add_rule() {
+    local kind="$1" d="$2" out
+    rule_spec "$kind" "$d" || return 1
+    if out="$(ip -4 rule add "${RULE_SPEC[@]}" 2>&1)"; then
+        log "fail-fast rule ON  $kind $d"
+        return 0
+    fi
+    # Already there is success, as for routes: converge is idempotent by design.
+    [[ "$out" == *"File exists"* ]] && return 0
+    err "could not add $kind rule for $d: $out"
+    return 1
+}
+
+# del_rule <tunnel|reject> <dst>
+del_rule() {
+    local kind="$1" d="$2" out
+    rule_spec "$kind" "$d" || return 1
+    if out="$(ip -4 rule del "${RULE_SPEC[@]}" 2>&1)"; then
+        log "fail-fast rule OFF $kind $d"
+        return 0
+    fi
+    # Measured: deleting a rule that is not there answers "No such file or
+    # directory". Already gone is success; the re-read in clear_rules is what
+    # makes a delete that matched nothing loud instead of silent.
+    [[ "$out" == *"No such file or directory"* ]] && return 0
+    err "could not remove $kind rule for $d: $out"
+    return 1
+}
+
+is_configured() {
+    local want="$1" d
+    for d in "${DESTS[@]}"; do [[ "$d" == "$want" ]] && return 0; done
+    return 1
+}
+
+# Remove every rule this tool owns, REJECT RULES FIRST. The order is the safety
+# property: with the tunnel up, a reject rule whose tunnel rule has already gone
+# rejects a host that is perfectly reachable. Removing rejects first means no
+# moment exists where that is true.
+clear_rules() {
+    local rc=0 kind k d left
+    for kind in reject tunnel; do
+        while IFS=' ' read -r k d; do
+            [[ "$k" == "$kind" ]] || continue
+            del_rule "$kind" "$d" || rc=1
+        done < <(owned_rules)
+    done
+    left="$(owned_rules)"
+    if [[ -n "$left" ]]; then
+        err "rules still owned after clearing: $(tr '\n' ' ' <<<"$left")"
+        rc=1
+    fi
+    return "$rc"
+}
+
+# Reconcile the rules with DESTS as a DELTA. Never clear-then-add: a rule that is
+# already right is left alone, so a running daemon never opens a window.
+#
+# Stale rules come off first, rejects before tunnels (see clear_rules). Missing
+# rules go on per destination, TUNNEL BEFORE REJECT, for the mirror reason: a
+# reject rule added first would reject a host whose tunnel is up for as long as
+# its tunnel rule is missing.
+converge_rules() {
+    local rc=0 have kind k d
+    have="$(owned_rules)"
+    for kind in reject tunnel; do
+        while IFS=' ' read -r k d; do
+            [[ "$k" == "$kind" ]] || continue
+            is_configured "$d" && continue
+            del_rule "$kind" "$d" || rc=1
+        done <<<"$have"
+    done
+    for d in "${DESTS[@]}"; do
+        grep -qxF -- "tunnel $d" <<<"$have" || add_rule tunnel "$d" || rc=1
+        grep -qxF -- "reject $d" <<<"$have" || add_rule reject "$d" || rc=1
+    done
+    return "$rc"
+}
+
+# Everything this tool owns, in both families, unconditionally and regardless of
+# the arming switch. This is what --clear and the stop path use.
+clear_all() {
+    local rc=0
+    clear_rules || rc=1
+    clear_routes || rc=1
     return "$rc"
 }
 
@@ -458,17 +649,20 @@ converge_v6_up() {
 
 # One convergence. The config must already be in DESTS.
 #
-# THE TWO BRANCHES RUN OPPOSITE WAYS FOR THE TWO FAMILIES, and that is the whole
-# design rather than an accident:
+# IPv4 DOES NOT DEPEND ON THE TUNNEL STATE AT ALL. The rules are the same either
+# way -- the kernel decides per lookup -- so this reconciles them on every pass
+# and never adds or withdraws anything because the tunnel moved. Only the IPv6
+# block still follows the tunnel, with the opposite polarity:
 #
-#   tunnel UP   -> v4 routes come OFF (the tunnel carries them),
-#                  v6 block goes ON   (the tunnel does NOT carry v6)
-#   tunnel DOWN -> v4 routes go ON,
-#                  v6 block comes OFF (there is no tunnel to leak around)
+#   tunnel UP   -> v6 block goes ON   (the tunnel does NOT carry v6)
+#   tunnel DOWN -> v6 block comes OFF (there is no tunnel to leak around)
 converge() {
-    local d rc=0 have
+    local rc=0
+    converge_rules || rc=1
+    # A legacy IPv4 route under our proto is an orphan in EVERY state now (see
+    # the header), so it is reclaimed on every pass, not only at start.
+    clear_owned -4 || rc=1
     if tunnel_up; then
-        clear_owned -4 || rc=1
         converge_v6_up || rc=1
         return "$rc"
     fi
@@ -476,19 +670,6 @@ converge() {
     # down there is nothing to block, so a block left installed is an orphan
     # that blackholes all global IPv6 on a machine with no VPN at all.
     clear_owned -6 || rc=1
-    have="$(owned_routes -4)"
-    for d in "${DESTS[@]}"; do
-        grep -qxF -- "$d" <<<"$have" && continue
-        add_route -4 "$d" || rc=1
-    done
-    # A destination removed from the config while the tunnel is down must not be
-    # left installed: it is exactly the stale route that blackholes a host.
-    while IFS= read -r d; do
-        [[ -n "$d" ]] || continue
-        local keep=0 k
-        for k in "${DESTS[@]}"; do [[ "$k" == "$d" ]] && { keep=1; break; }; done
-        (( keep )) || del_route -4 "$d" || rc=1
-    done <<<"$have"
     return "$rc"
 }
 
@@ -507,7 +688,19 @@ print_status() {
     else
         printf 'targets: CONFIG UNUSABLE (see above)\n'
     fi
-    printf 'installed (proto %s):\n' "$PROTO"
+    # The rules, as `<tunnel|reject> <dst>`. vpn-doctor parses this section to
+    # judge each destination's pair, so its header and line shape are an
+    # interface: change them in both places or not at all.
+    printf 'ipv4 rules (proto %s, priorities %s/%s):\n' \
+        "$PROTO" "$TUNNEL_RULE_PRIORITY" "$REJECT_RULE_PRIORITY"
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        printf '  - %s\n' "$d"; n=$(( n + 1 ))
+    done < <(owned_rules)
+    (( n == 0 )) && printf '  (none)\n'
+    # Any entry here is an orphan of the old route toggle -- see the header.
+    printf 'ipv4 legacy routes (proto %s):\n' "$PROTO"
+    n=0
     while IFS= read -r d; do
         [[ -n "$d" ]] || continue
         printf '  - %s\n' "$d"; n=$(( n + 1 ))
@@ -579,14 +772,17 @@ main() {
                        log "$CONF: ${#DESTS[@]} destination(s), all valid"; exit 0 ;;
         --clear)       clear_all || exit 1; exit 0 ;;
         --once)        read_config || exit 2
-                       clear_all || exit 1
+                       clear_routes || exit 1
                        converge || exit 1
                        exit 0 ;;
         --watch)       read_config || exit 2
-                       # Orphans first, ALWAYS, and before anything is added: a
-                       # route left by a previous run under a previous config is
-                       # invisible to converge(), which only knows today's list.
-                       clear_all || exit 1
+                       # Route orphans first, ALWAYS, and before anything is
+                       # added: a route left by a previous run is invisible to
+                       # converge_v6_up, which only knows today's halves. Rules
+                       # are NOT cleared here -- converge_rules reconciles them as
+                       # a delta, so a restart never opens a window in which a
+                       # configured host hangs instead of failing.
+                       clear_routes || exit 1
                        ALLOW_V6_BLOCK=1
                        run_watch ;;
         --help|-h)     usage; exit 0 ;;

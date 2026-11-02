@@ -265,6 +265,104 @@ PY
         exit 0 ;;
     esac
     echo "ip stub: unhandled route subcommand: $sub" >&2; exit 99 ;;
+  rule)
+    # IPv4 ONLY. The subject never asks for a v6 rule, and a stub that quietly
+    # answered one would hide a family flag that went wrong.
+    [ "$fam" = "4" ] || { echo "ip stub: -6 rule is not modelled" >&2; exit 99; }
+    # One rule per line: priority, dst (a /32 bare, as the kernel reports it),
+    # shape (suppress-main | unreachable | lookup:<table>), proto ("" = none).
+    RULES="$IPSTATE/rules"
+    touch "$RULES"
+    sub="${2:-}"
+    case "$sub" in
+      show)
+        # Every rule, base ones included -- `ip rule show` has no protocol filter
+        # that works (VPN_INTERNALS §10), so the subject must filter for itself,
+        # and a stub that pre-filtered would prove that filter correct for free.
+        python3 - "$RULES" "${IPSTATE}/pretty-json" <<'PY'
+import json, os, sys
+rows = [(0, {"priority": 0, "src": "all", "table": "local"})]
+for line in open(sys.argv[1]):
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    priority, dst, shape, proto = line.split("\t")
+    rule = {"priority": int(priority), "src": "all"}
+    if dst:
+        address, _, length = dst.partition("/")
+        rule["dst"] = address
+        if length:
+            rule["dstlen"] = int(length)
+    # Field order and types exactly as measured: "suppress_prefixlen" is an
+    # integer, "protocol" is a STRING.
+    if shape == "suppress-main":
+        rule["table"] = "main"; rule["suppress_prefixlen"] = 0
+    elif shape == "unreachable":
+        rule["action"] = "unreachable"
+    elif shape.startswith("lookup:"):
+        rule["table"] = shape.split(":", 1)[1]
+    if proto:
+        rule["protocol"] = proto
+    rows.append((int(priority), rule))
+rows.append((32766, {"priority": 32766, "src": "all", "table": "main"}))
+rows.append((32767, {"priority": 32767, "src": "all", "table": "default"}))
+rows.sort(key=lambda row: row[0])
+rules = [rule for _, rule in rows]
+if os.path.exists(sys.argv[2]):
+    print(json.dumps(rules, indent=4))
+else:
+    print(json.dumps(rules, separators=(",", ":")))
+PY
+        exit 0 ;;
+      add|del)
+        # Grammar exactly as the subject spells it, and nothing looser: a token
+        # the stub does not know is exit 98, so a spec that drifted fails loudly.
+        op="$sub"; shift 2
+        priority=""; dst=""; shape=""; proto=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            priority) priority="${2:-}"; shift 2 ;;
+            to) dst="${2:-}"; shift 2 ;;
+            lookup)
+              if [ "${2:-}" = "main" ] && [ "${3:-}" = "suppress_prefixlength" ] && [ "${4:-}" = "0" ]; then
+                shape="suppress-main"; shift 4
+              else
+                echo "ip stub: unmodelled lookup: $*" >&2; exit 98
+              fi ;;
+            unreachable) shape="unreachable"; shift ;;
+            protocol) proto="${2:-}"; shift 2 ;;
+            *) echo "ip stub: unexpected rule token '$1'" >&2; exit 98 ;;
+          esac
+        done
+        [ -n "$priority" ] && [ -n "$dst" ] && [ -n "$shape" ] || {
+          echo "ip stub: incomplete rule spec" >&2; exit 98; }
+        dst="${dst%/32}"
+        if [ "$op" = "add" ]; then
+          [ -e "$IPSTATE/fail-rule-add" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
+          if awk -F'\t' -v p="$priority" -v d="$dst" -v s="$shape" -v r="$proto" \
+               '$1==p && $2==d && $3==s && $4==r{found=1} END{exit !found}' "$RULES"; then
+            echo "RTNETLINK answers: File exists" >&2; exit 2
+          fi
+          printf '%s\t%s\t%s\t%s\n' "$priority" "$dst" "$shape" "$proto" >> "$RULES"
+          exit 0
+        fi
+        [ -e "$IPSTATE/fail-rule-del" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
+        # Success that removes nothing, for the re-read guard in clear_rules.
+        [ -e "$IPSTATE/rule-del-noop" ] && exit 0
+        # The kernel matches EVERY selector the delete names, protocol included:
+        # measured, `del ... unreachable protocol 66` against a rule with no
+        # protocol answers "No such file or directory". That is what makes a
+        # foreign rule at our priority untouchable, so the stub honours it.
+        if ! awk -F'\t' -v p="$priority" -v d="$dst" -v s="$shape" -v r="$proto" \
+             '$1==p && $2==d && $3==s && $4==r{found=1} END{exit !found}' "$RULES"; then
+          echo "RTNETLINK answers: No such file or directory" >&2; exit 2
+        fi
+        awk -F'\t' -v p="$priority" -v d="$dst" -v s="$shape" -v r="$proto" \
+            'done || !($1==p && $2==d && $3==s && $4==r) {print; next} {done=1}' "$RULES" > "$IPSTATE/.rules" \
+          && mv -f "$IPSTATE/.rules" "$RULES"
+        exit 0 ;;
+    esac
+    echo "ip stub: unhandled rule subcommand: $sub" >&2; exit 99 ;;
   monitor)
     # --watch is not exercised here; a stub that streamed would hang the suite.
     exit 1 ;;
@@ -388,6 +486,7 @@ reset() {
     : > "$IPSTATE/calls.log"
     : > "$IPSTATE/routes"
     : > "$IPSTATE/routes6"
+    : > "$IPSTATE/rules"
     : > "$IPSTATE/sudo.log"
 }
 
@@ -452,14 +551,6 @@ wait_for() {
     done
     return 1
 }
-# Invoked INDIRECTLY, as `wait_for 15 has_route <dst>`, which shellcheck cannot
-# see. BOTH codes: the pinned pre-commit shellcheck (v0.9) calls this SC2317,
-# newer ones call it SC2329, and disabling only the one your local binary emits
-# passes here and fails the hook.
-# shellcheck disable=SC2317,SC2329
-has_route()  { awk -F'\t' -v d="$1" '$1==d{f=1} END{exit !f}' "$IPSTATE/routes" 2>/dev/null; }
-# shellcheck disable=SC2317,SC2329
-lacks_route() { ! has_route "$1"; }
 
 # LC_ALL=C on EVERY sort here, and it is not decoration. `::/1` and `8000::/1`
 # order DIFFERENTLY under en_US.UTF-8 (which ignores punctuation when
@@ -476,6 +567,41 @@ installed() { awk -F'\t' '{print $1}' "$IPSTATE/routes" 2>/dev/null | LC_ALL=C s
 # grep -c exits 2, the trap CLAUDE.md names.) awk answers once, always.
 installed_count() { awk 'END{print NR+0}' "$IPSTATE/routes" 2>/dev/null || printf '0\n'; }
 asked() { grep -c -- "$1" "$IPSTATE/calls.log" 2>/dev/null || true; }
+
+# The IPv4 RULES, read straight from the stub's table rather than through the
+# subject's parser, so a row cannot pass by agreeing with a parser that is wrong.
+# our_rules: "<tunnel|reject> <dst>" for every rule carrying OUR protocol at OUR
+# priority in OUR shape -- exactly what the subject is allowed to own.
+our_rules() {
+    awk -F'\t' -v p="$PROTO" '
+        $4==p && $1=="6600" && $3=="suppress-main" {print "tunnel " $2}
+        $4==p && $1=="6601" && $3=="unreachable"   {print "reject " $2}' \
+        "$IPSTATE/rules" 2>/dev/null | LC_ALL=C sort | tr '\n' ' '
+}
+# The destinations that have BOTH rules -- the only state in which a host both
+# fails fast while the tunnel is down and is reachable while it is up.
+paired() {
+    awk -F'\t' -v p="$PROTO" '
+        $4==p && $1=="6600" && $3=="suppress-main" {t[$2]=1}
+        $4==p && $1=="6601" && $3=="unreachable"   {r[$2]=1}
+        END {for (d in t) if (d in r) print d}' \
+        "$IPSTATE/rules" 2>/dev/null | LC_ALL=C sort | tr '\n' ' '
+}
+rule_count() { awk 'END{print NR+0}' "$IPSTATE/rules" 2>/dev/null || printf '0\n'; }
+# One converge = one tunnel check. awk, never `grep -c ... || echo 0`: grep -c prints 0 AND exits 1 on no match,
+# so the `||` fires too and the helper answers "0\n0".
+# shellcheck disable=SC2317,SC2329
+converged_at_least() {
+    local n; n="$(awk '/route show dev tun0/{c++} END{print c+0}' "$IPSTATE/calls.log" 2>/dev/null)"
+    [[ "${n:-0}" -ge "$1" ]]
+}
+# Invoked INDIRECTLY through wait_for. BOTH codes: v0.9 says SC2317, newer SC2329.
+# shellcheck disable=SC2317,SC2329
+has_pair() { [[ " $(paired)" == *" $1 "* ]]; }
+# shellcheck disable=SC2317,SC2329
+lacks_rules() { ! awk -F'\t' -v d="$1" '$2==d{f=1} END{exit !f}' "$IPSTATE/rules" 2>/dev/null; }
+# shellcheck disable=SC2317,SC2329
+line_of() { grep -n -- "$1" "$IPSTATE/calls.log" | head -1 | cut -d: -f1; }
 
 GOOD_CONF=(54.166.22.221 44.221.89.155 "10.20.0.0/16")
 
@@ -497,57 +623,95 @@ reset; tunnel_gone; write_conf "${GOOD_CONF[@]}"
 OUT="$(ff --status)"
 grep_ok "$OUT" 'tunnel:  DOWN' "interface absent: reported DOWN"
 
-printf '\ninstalling and withdrawing\n'
+printf '\nthe IPv4 rules — installed once, never toggled\n'
 
+# THE GUARANTEE THIS WHOLE SECTION EXISTS FOR. AWS VPN Client 5.x crashed on
+# about one reconnect in four because this daemon deleted reject routes it could
+# not parse (docs/VPN_INTERNALS.md §11). So across a full down -> up -> down
+# cycle the subject must not add or delete a single IPv4 route, and must not
+# touch its rules either once they are right.
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 OUT="$(ff --once)"; RC=$?
 check "tunnel down: exit 0" "$RC" 0
-check "tunnel down: all three destinations installed" "$(installed)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
-
-# ... and on the way back up they are ALL withdrawn.
+check "tunnel down: every destination has BOTH rules" "$(paired)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
+check "...and nothing else: exactly two rules per destination" "$(rule_count)" "6"
 tunnel_up_state
 OUT="$(ff --once)"; RC=$?
 check "tunnel back up: exit 0" "$RC" 0
-check "tunnel back up: every route withdrawn" "$(installed_count)" "0"
+check "tunnel back up: the rules are all still there" "$(paired)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
+check "tunnel back up: no rule was deleted" "$(asked 'rule del')" "0"
+tunnel_down_lingering
+ff --once >/dev/null
+check "a whole down->up->down cycle added no IPv4 route" "$(asked '-4 route add')" "0"
+check "...and deleted none" "$(asked '-4 route del')" "0"
+check "...and added each rule exactly once" "$(asked 'rule add')" "6"
 
-# Converging twice must not re-add. `ip route add` on an existing route answers
-# "File exists" and exits 2, which would otherwise be reported as a failure on
-# every single poll.
+# The rules do not wait for the tunnel to drop: a machine that boots connected
+# must be protected from the first drop onward.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(ff --once)"
+check "tunnel up from the start: the rules are installed anyway" "$(paired)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
+
+# Converging twice must not re-add. `ip rule add` on an existing rule answers
+# "File exists" and exits 2, which would otherwise be a failure on every poll.
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 ff --once >/dev/null
 OUT="$(ff --once)"; RC=$?
 check "converging twice: exit 0, not 'File exists'" "$RC" 0
-check "converging twice: still exactly three routes" "$(installed_count)" "3"
+check "converging twice: still exactly six rules" "$(rule_count)" "6"
 grep_none "$OUT" 'could not add' "converging twice: no error reported"
 
+# BYTE FOR BYTE, both shapes. This one pair of rows kills a wrong priority, a
+# wrong table, a missing suppress_prefixlength, a dropped protocol and a wrong
+# family at once -- and the delete spells the same spec, so it kills a drift
+# between the two as well (see the clear rows below).
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+ff --once >/dev/null
+grep_ok "$(cat "$IPSTATE/calls.log")" \
+        '^-4 rule add priority 6600 to 54.166.22.221 lookup main suppress_prefixlength 0 protocol 66$' \
+        "the tunnel rule's argv is exact, byte for byte"
+grep_ok "$(cat "$IPSTATE/calls.log")" \
+        '^-4 rule add priority 6601 to 54.166.22.221 unreachable protocol 66$' \
+        "the reject rule's argv is exact, byte for byte"
+# ORDER: the tunnel rule first. A reject rule added first rejects a host whose
+# tunnel is UP for as long as its tunnel rule is missing.
+TUNNEL_ADD="$(line_of 'rule add priority 6600 to 54.166.22.221')"
+REJECT_ADD="$(line_of 'rule add priority 6601 to 54.166.22.221')"
+if [[ -n "$TUNNEL_ADD" && -n "$REJECT_ADD" && "$TUNNEL_ADD" -lt "$REJECT_ADD" ]]; then
+    ok "the tunnel rule is added BEFORE the reject rule"
+else
+    bad "the tunnel rule is added BEFORE the reject rule — tunnel at '$TUNNEL_ADD', reject at '$REJECT_ADD'"
+fi
+
+# Half a pair is completed, not torn down and rebuilt.
+reset; tunnel_up_state; write_conf 54.166.22.221
+printf '6601\t54.166.22.221\tunreachable\t%s\n' "$PROTO" > "$IPSTATE/rules"
+ff --once >/dev/null
+check "a lone reject rule gets its tunnel rule" "$(paired)" "54.166.22.221 "
+check "...and the reject rule was never deleted" "$(asked 'rule del')" "0"
+
+printf '\norphans, and the rules and routes that are not ours\n'
+
+# A LEGACY IPv4 route under our proto -- what the old toggle left behind -- is
+# reclaimed whatever the tunnel state. With the tunnel UP it is the dangerous
+# one: a /32 beats the tunnel's /1, so it blackholes its host.
 reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
-OUT="$(ff --once)"
-check "tunnel up: nothing is installed" "$(installed_count)" "0"
-check "tunnel up: no route was ever added" "$(asked '-4 route add')" "0"
-
-printf '\norphans, and the routes that are not ours\n'
-
-# An orphan from a previous run under a PREVIOUS config is invisible to a
-# converge that only knows today's list. --watch and --once therefore clear
-# everything owned BEFORE adding anything.
-reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
 OUT="$(ff --once)"; RC=$?
-check "an orphan at start: exit 0" "$RC" 0
-grep_none "$(installed)" '9.9.9.9' "the orphan is gone"
-check "...and only the configured set remains" "$(installed)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
+check "a legacy route at start: exit 0" "$RC" 0
+check "the legacy route is gone" "$(installed_count)" "0"
+check "...and the rules are in place" "$(paired)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
 
-# ORDER, not just outcome: the orphan must be removed BEFORE anything is added.
-# Asserting only the end state would pass a version that added first.
+# ORDER, not just outcome: the orphan goes BEFORE anything is added.
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
 ff --once >/dev/null
-FIRST_DEL="$(grep -n -- '-4 route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
-FIRST_ADD="$(grep -n -- '-4 route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+FIRST_DEL="$(line_of '-4 route del')"
+FIRST_ADD="$(line_of 'rule add')"
 if [[ -n "$FIRST_DEL" && -n "$FIRST_ADD" && "$FIRST_DEL" -lt "$FIRST_ADD" ]]; then
-    ok "the orphan is removed BEFORE the first add"
+    ok "the legacy route is removed BEFORE the first rule is added"
 else
-    bad "the orphan is removed BEFORE the first add — del at line '$FIRST_DEL', add at '$FIRST_ADD'"
+    bad "the legacy route is removed BEFORE the first rule is added — del at line '$FIRST_DEL', add at '$FIRST_ADD'"
 fi
 
 # A route somebody else installed is never touched, whatever its destination —
@@ -556,38 +720,85 @@ reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
 printf '54.166.22.221\t111\t100\n' > "$IPSTATE/routes"
 OUT="$(ff --once)"
 check "a foreign-proto route is never deleted" "$(installed)" "54.166.22.221 "
-check "...and no delete was even attempted" "$(asked '-4 route del')" "0"
+check "...and no route delete was even attempted" "$(asked '-4 route del')" "0"
 
-# A destination dropped from the config while the tunnel is DOWN must not be
-# left installed: that is precisely the stale route that blackholes a host.
-reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
+# RULES THAT ARE NOT OURS, each a near miss on a different part of the
+# identity: Tailscale's two (no dst), a reject at OUR priority with NO protocol,
+# a reject with ANOTHER protocol, and our protocol at ANOTHER priority. --clear
+# must remove our pair and leave all five exactly as they were.
+reset; tunnel_up_state; write_conf 54.166.22.221
+{
+    printf '5250\t\tunreachable\t\n'
+    printf '5270\t\tlookup:52\t\n'
+    printf '6601\t9.9.9.9\tunreachable\t\n'
+    printf '6601\t54.166.22.221\tunreachable\t111\n'
+    printf '6602\t8.8.8.8\tunreachable\t%s\n' "$PROTO"
+} > "$IPSTATE/rules"
+ff --once >/dev/null
+check "beside five foreign rules, ours are installed" "$(paired)" "54.166.22.221 "
+OUT="$(ff --clear)"; RC=$?
+check "--clear beside foreign rules: exit 0" "$RC" 0
+check "--clear removes our pair" "$(our_rules)" ""
+check "...and leaves all five foreign rules" "$(rule_count)" "5"
+check "...and never tried to delete the protocol-less reject" "$(asked 'rule del priority 6601 to 9.9.9.9')" "0"
+
+# A destination dropped from the config loses its rules, REJECT FIRST, and the
+# destination that stays is not touched at all.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
 ff --once >/dev/null
 write_conf 54.166.22.221
+: > "$IPSTATE/calls.log"
 OUT="$(ff --once)"
-check "a destination removed from config is withdrawn" "$(installed)" "54.166.22.221 "
+check "a destination removed from config loses its rules" "$(paired)" "54.166.22.221 "
+check "...and only the remaining destination's two rules are left" "$(our_rules)" "reject 54.166.22.221 tunnel 54.166.22.221 "
+check "...and the destination that stays was not touched" "$(asked 'rule del priority 6601 to 54.166.22.221')" "0"
+REJECT_DEL="$(line_of 'rule del priority 6601 to 44.221.89.155')"
+TUNNEL_DEL="$(line_of 'rule del priority 6600 to 44.221.89.155')"
+if [[ -n "$REJECT_DEL" && -n "$TUNNEL_DEL" && "$REJECT_DEL" -lt "$TUNNEL_DEL" ]]; then
+    ok "a stale pair is withdrawn REJECT FIRST"
+else
+    bad "a stale pair is withdrawn REJECT FIRST — reject at '$REJECT_DEL', tunnel at '$TUNNEL_DEL'"
+fi
 
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 ff --once >/dev/null
+printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
 OUT="$(ff --clear)"; RC=$?
 check "--clear: exit 0" "$RC" 0
-check "--clear: removes everything owned" "$(installed_count)" "0"
+check "--clear: removes every rule owned" "$(rule_count)" "0"
+check "--clear: and every legacy route" "$(installed_count)" "0"
 
 # `ip -p -j` pretty-prints. A parser that matched only the compact spelling
-# would find no owned routes and therefore withdraw NOTHING -- silently, with no
-# error, leaving every destination blackholed after the tunnel came back. There
-# is no louder symptom than this row.
+# would find no owned rules and therefore withdraw NOTHING.
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 ff --once >/dev/null
 touch "$IPSTATE/pretty-json"
 OUT="$(ff --clear)"; RC=$?
-check "pretty-printed ip -j output: exit 0" "$RC" 0
-check "...and routes are STILL withdrawn" "$(installed_count)" "0"
+check "pretty-printed ip -j rule output: exit 0" "$RC" 0
+check "...and the rules are STILL withdrawn" "$(rule_count)" "0"
 
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
-touch "$IPSTATE/fail-add"
+touch "$IPSTATE/fail-rule-add"
 OUT="$(ff --once)"; RC=$?
-check "a route that cannot be added: exit 1, not 0" "$RC" 1
-grep_ok "$OUT" 'could not add' "failed add: named"
+check "a rule that cannot be added: exit 1, not 0" "$RC" 1
+grep_ok "$OUT" 'could not add tunnel rule' "failed rule add: named"
+
+reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
+ff --once >/dev/null
+touch "$IPSTATE/fail-rule-del"
+OUT="$(ff --clear)"; RC=$?
+check "a rule delete that fails for a REAL reason: exit 1" "$RC" 1
+grep_ok "$OUT" 'could not remove reject rule' "failed rule delete: named"
+
+# THE RE-READ GUARD. "No such file or directory" is success, so a delete that
+# matched nothing looks exactly like one that worked; only the re-read tells.
+reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
+ff --once >/dev/null
+touch "$IPSTATE/rule-del-noop"
+OUT="$(ff --clear)"; RC=$?
+rm -f "$IPSTATE/rule-del-noop"
+check "a rule delete that reports success and removes nothing: exit 1" "$RC" 1
+grep_ok "$OUT" 'rules still owned after clearing' "the surviving rules are named"
 
 printf '\nthe --watch path, which is what the unit actually runs\n'
 
@@ -603,36 +814,53 @@ printf '%s\n' '[{"dst":"0.0.0.0/1","gateway":"172.31.80.1","flags":["linkdown"]}
     > "$IPSTATE/route-dev-$IFACE"
 OUT="$(ff --status)"
 grep_ok "$OUT" 'tunnel:  DOWN' "an interface that is present but NOT UP: reported DOWN"
-OUT="$(ff --once)"
-check "...and the fail-fast routes are installed" "$(installed)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
 
-# Orphan-clear-at-start, through --watch rather than --once. The unit runs
-# --watch; a mutant removing clear_owned from THAT branch alone survived every
+# Legacy-route-clear-at-start, through --watch rather than --once. The unit runs
+# --watch; a mutant removing the clear from THAT branch alone would survive every
 # row above, because all of them go through --once.
 reset; tunnel_down_lingering; write_conf 54.166.22.221
 printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
 watch_start
-if wait_for 15 has_route 54.166.22.221; then ok "--watch converges"; else bad "--watch converges — timed out"; fi
-FIRST_DEL="$(grep -n -- '-4 route del' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
-FIRST_ADD="$(grep -n -- '-4 route add' "$IPSTATE/calls.log" | head -1 | cut -d: -f1)"
+if wait_for 15 has_pair 54.166.22.221; then ok "--watch converges"; else bad "--watch converges — timed out"; fi
+FIRST_DEL="$(line_of '-4 route del')"
+FIRST_ADD="$(line_of 'rule add')"
 if [[ -n "$FIRST_DEL" && -n "$FIRST_ADD" && "$FIRST_DEL" -lt "$FIRST_ADD" ]]; then
-    ok "--watch removes an orphan BEFORE its first add"
+    ok "--watch removes a legacy route BEFORE its first rule add"
 else
-    bad "--watch removes an orphan BEFORE its first add — del '$FIRST_DEL', add '$FIRST_ADD'"
+    bad "--watch removes a legacy route BEFORE its first rule add — del '$FIRST_DEL', add '$FIRST_ADD'"
 fi
 watch_stop
 
-# A route carrying OUR proto that appears while the daemon is running -- another
-# instance, or an operator's hand -- is reclaimed by the next converge. This is
-# the only path on which converge's own removal loop can fire: --once clears
-# everything up front, so that loop is dead code there, which is exactly why a
-# mutant gutting it survived.
+# A RESTART MUST NOT CHURN. Rules that are already right are reconciled as a
+# delta, so a daemon starting over a correct table neither deletes nor re-adds:
+# a clear-then-add start would leave every host hanging instead of failing for
+# the length of the gap, on every `vpn-setup` and every boot-time restart.
+reset; tunnel_up_state; write_conf 54.166.22.221
+printf '6600\t54.166.22.221\tsuppress-main\t%s\n6601\t54.166.22.221\tunreachable\t%s\n' \
+    "$PROTO" "$PROTO" > "$IPSTATE/rules"
+watch_start
+if wait_for 20 converged_at_least 3; then ok "--watch over correct rules keeps converging"; else bad "--watch over correct rules keeps converging — timed out"; fi
+check "...and never deleted a rule" "$(asked 'rule del')" "0"
+check "...and never re-added one" "$(asked 'rule add')" "0"
+watch_stop
+
+# A rule carrying OUR identity that appears while the daemon is running, for a
+# destination that is not configured, is reclaimed by the next converge.
 reset; tunnel_down_lingering; write_conf 54.166.22.221
 watch_start
-if wait_for 15 has_route 54.166.22.221; then ok "--watch installs the configured destination"; else bad "--watch installs the configured destination — timed out"; fi
-printf '8.8.4.4\t%s\t%s\n' "$PROTO" "$METRIC" >> "$IPSTATE/routes"
-if wait_for 15 lacks_route 8.8.4.4; then ok "a route appearing under our proto mid-run is reclaimed"; else bad "a route appearing under our proto mid-run is reclaimed — timed out"; fi
-check "...and the configured destination is untouched" "$(installed)" "54.166.22.221 "
+if wait_for 15 has_pair 54.166.22.221; then ok "--watch installs the configured pair"; else bad "--watch installs the configured pair — timed out"; fi
+printf '6601\t8.8.4.4\tunreachable\t%s\n' "$PROTO" >> "$IPSTATE/rules"
+if wait_for 15 lacks_rules 8.8.4.4; then ok "a rule appearing under our identity mid-run is reclaimed"; else bad "a rule appearing under our identity mid-run is reclaimed — timed out"; fi
+check "...and the configured pair is untouched" "$(paired)" "54.166.22.221 "
+watch_stop
+
+# ... and the mirror: a rule of ours that VANISHES mid-run -- an `ip rule flush`,
+# another tool -- is put back without a restart.
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+watch_start
+if wait_for 15 has_pair 54.166.22.221; then ok "--watch installs the pair before it is removed"; else bad "--watch installs the pair before it is removed — timed out"; fi
+: > "$IPSTATE/rules"
+if wait_for 15 has_pair 54.166.22.221; then ok "rules removed mid-run are re-installed"; else bad "rules removed mid-run are re-installed — timed out"; fi
 watch_stop
 
 printf '\nthe IPv6 block (DO-704) — and its polarity is the OPPOSITE of the above\n'
@@ -664,13 +892,6 @@ has_route6()   { awk -F'\t' -v d="$1" '$1==d{f=1} END{exit !f}' "$IPSTATE/routes
 lacks_route6() { ! has_route6 "$1"; }
 # shellcheck disable=SC2317,SC2329
 has_both_halves() { has_route6 '::/1' && has_route6 '8000::/1'; }
-# awk, never `grep -c ... || echo 0`: grep -c prints 0 AND exits 1 on no match,
-# so the `||` fires too and the helper answers "0\n0".
-# shellcheck disable=SC2317,SC2329
-converged_at_least() {
-    local n; n="$(awk '/route show dev tun0/{c++} END{print c+0}' "$IPSTATE/calls.log" 2>/dev/null)"
-    [[ "${n:-0}" -ge "$1" ]]
-}
 # shellcheck disable=SC2317,SC2329
 watch_said() { grep -q -- "$1" "$IPSTATE/watch.out" 2>/dev/null; }
 count_in() { awk -v pat="$1" 'index($0,pat){c++} END{print c+0}' "$2" 2>/dev/null; }
@@ -707,11 +928,11 @@ grep_ok "$(cat "$IPSTATE/calls.log")" '^-6 route add unreachable ::/1 proto 66 m
 watch_stop
 
 # ... and the mirror. Tunnel DOWN means there is no tunnel to leak around, so
-# the block comes OFF and the v4 fail-fast routes go ON.
+# the block comes OFF, while the v4 rules are in place either way.
 reset; tunnel_down_lingering; write_conf 54.166.22.221
 printf '::/1\t%s\t%s\n8000::/1\t%s\t%s\n' "$PROTO" "$METRIC" "$PROTO" "$METRIC" > "$IPSTATE/routes6"
 watch_start6
-if wait_for 15 has_route 54.166.22.221; then ok "armed + tunnel DOWN: the v4 half is installed"; else bad "armed + tunnel DOWN: the v4 half is installed — timed out"; fi
+if wait_for 15 has_pair 54.166.22.221; then ok "armed + tunnel DOWN: the v4 rules are installed"; else bad "armed + tunnel DOWN: the v4 rules are installed — timed out"; fi
 if wait_for 15 lacks_route6 '::/1'; then ok "armed + tunnel DOWN: the v6 block is withdrawn"; else bad "armed + tunnel DOWN: the v6 block is withdrawn — timed out"; fi
 check "...and withdrawn completely, not half of it" "$(installed6_count)" "0"
 watch_stop
@@ -723,10 +944,12 @@ watch_start6
 if wait_for 15 has_both_halves; then ok "UP: block on"; else bad "UP: block on — timed out"; fi
 tunnel_down_lingering
 if wait_for 15 lacks_route6 '::/1'; then ok "UP->DOWN: block off, without a restart"; else bad "UP->DOWN: block off — timed out"; fi
-if wait_for 15 has_route 54.166.22.221; then ok "UP->DOWN: v4 fail-fast on"; else bad "UP->DOWN: v4 fail-fast on — timed out"; fi
 tunnel_up_state
 if wait_for 15 has_both_halves; then ok "DOWN->UP: block back on"; else bad "DOWN->UP: block back on — timed out"; fi
-if wait_for 15 lacks_route 54.166.22.221; then ok "DOWN->UP: v4 fail-fast back off"; else bad "DOWN->UP: v4 fail-fast back off — timed out"; fi
+# Both transitions under one daemon, and the v4 side did not move at all: one
+# add per rule from the first converge, and nothing since.
+check "UP->DOWN->UP: each v4 rule added once and never since" "$(asked 'rule add')" "2"
+check "...and no v4 rule or route was ever deleted" "$(( $(asked 'rule del') + $(asked '-4 route del') ))" "0"
 watch_stop
 
 # IDEMPOTENCE, and it is not cosmetic. If the up-branch cleared and re-added the
@@ -756,7 +979,7 @@ grep_ok "$OUT" 'watch-only capability' "--once says WHY it refused"
 
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 OUT="$(ff6 --once)"
-check "--once still installs the IPv4 half" "$(installed)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
+check "--once still installs the IPv4 rules" "$(paired)" "10.20.0.0/16 44.221.89.155 54.166.22.221 "
 
 # --- withdrawal is UNCONDITIONAL -----------------------------------------
 # Not gated on the arming switch, anywhere. "we were not armed" is never a
@@ -773,7 +996,7 @@ ff --once >/dev/null
 printf '::/1\t%s\t%s\n8000::/1\t%s\t%s\n' "$PROTO" "$METRIC" "$PROTO" "$METRIC" > "$IPSTATE/routes6"
 OUT="$(ff --clear)"; RC=$?
 check "--clear clears BOTH families in one call: exit 0" "$RC" 0
-check "--clear: v4 empty" "$(installed_count)" "0"
+check "--clear: v4 rules empty" "$(rule_count)" "0"
 check "--clear: v6 empty" "$(installed6_count)" "0"
 
 # A v6 route this tool owns that is NOT one of today's halves is an older
@@ -827,7 +1050,7 @@ watch_stop
 # switch.
 reset; tunnel_down_lingering; write_conf 54.166.22.221
 watch_start
-if wait_for 15 has_route 54.166.22.221; then ok "disarmed + DOWN: the v4 half converged"; else bad "disarmed + DOWN: the v4 half converged — timed out"; fi
+if wait_for 15 has_pair 54.166.22.221; then ok "disarmed + DOWN: the v4 rules converged"; else bad "disarmed + DOWN: the v4 rules converged — timed out"; fi
 printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" >> "$IPSTATE/routes6"
 if wait_for 15 lacks_route6 '::/1'; then ok "a DISARMED daemon still withdraws a v6 route it owns"; else bad "a DISARMED daemon still withdraws a v6 route it owns — timed out"; fi
 watch_stop
@@ -872,7 +1095,7 @@ printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
 touch "$IPSTATE/fail-del6"
 OUT="$(ff --clear)"; RC=$?
 check "--clear fails when the v6 half fails and the v4 half SUCCEEDED: exit 1" "$RC" 1
-check "...and the v4 half really was cleared" "$(installed_count)" "0"
+check "...and the v4 rules really were cleared" "$(rule_count)" "0"
 
 # THE RE-READ GUARD. del_route treats "No such process" as success, so a delete
 # that addressed the wrong route is indistinguishable from one that worked. The
@@ -903,6 +1126,7 @@ grep_ok "$OUT" 'ipv6 installed (proto 66)' "--status: has a v6 installed section
 OUT="$(ff6 --status)"
 grep_ok "$OUT" 'ipv6:    block' "--status: reports the knob as block when set"
 check "--status adds no route in either family" "$(asked 'route add')" "0"
+check "--status adds no rule" "$(asked 'rule add')" "0"
 
 reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
 printf '::/1\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes6"
@@ -945,7 +1169,7 @@ reset; tunnel_down_lingering; write_conf "# only a comment" ""
 OUT="$(ff --once)"; RC=$?
 check "a config with no destinations: exit 2" "$RC" 2
 grep_ok "$OUT" 'lists no destinations' "empty config: refuses rather than no-opping"
-check "empty config: nothing installed" "$(installed_count)" "0"
+check "empty config: nothing installed" "$(rule_count)" "0"
 
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 chmod 000 "$CONF"
@@ -961,12 +1185,12 @@ reset; tunnel_down_lingering; write_conf 54.166.22.221 "0.0.0.0/0"
 OUT="$(ff --once)"; RC=$?
 check "0.0.0.0/0 in the config: exit 2" "$RC" 2
 grep_ok "$OUT" 'blackholes the entire internet' "0.0.0.0/0: refused with the reason"
-check "0.0.0.0/0: NOTHING installed, not even the valid line above it" "$(installed_count)" "0"
+check "0.0.0.0/0: NOTHING installed, not even the valid line above it" "$(rule_count)" "0"
 
 reset; tunnel_down_lingering; write_conf 54.166.22.221 "10.0.0.0/4"
 OUT="$(ff --once)"; RC=$?
 check "a prefix broader than the floor: exit 2" "$RC" 2
-check "...and a partial set is never installed" "$(installed_count)" "0"
+check "...and a partial set is never installed" "$(rule_count)" "0"
 
 # `ip` accepts 10.9.8.1/24 and installs the whole /24 — a typo meant as a host
 # route silently takes 256 addresses with it.
@@ -1002,19 +1226,19 @@ reset; tunnel_down_lingering; write_conf "54.166.22.221/33"
 OUT="$(ff --once)"; RC=$?
 check "a prefix length above /32: exit 2" "$RC" 2
 
-# A /32 is reported by `ip route show` WITHOUT its prefix length, so the config
-# spelling and the kernel spelling must compare equal or every converge re-adds
-# a route that is already there.
+# A /32 is reported by `ip -j rule show` WITHOUT its prefix length, so the
+# config spelling and the kernel spelling must compare equal or every converge
+# re-adds a rule that is already there.
 reset; tunnel_down_lingering; write_conf "54.166.22.221/32"
 ff --once >/dev/null
-check "a /32 is normalised to the kernel's spelling" "$(installed)" "54.166.22.221 "
+check "a /32 is normalised to the kernel's spelling" "$(paired)" "54.166.22.221 "
 ff --once >/dev/null
-check "...so a second converge adds nothing" "$(installed_count)" "1"
+check "...so a second converge adds nothing" "$(rule_count)" "2"
 
 reset; tunnel_down_lingering; write_conf "  54.166.22.221   # dev" "" "# a comment"
 OUT="$(ff --once)"; RC=$?
 check "comments and whitespace are stripped: exit 0" "$RC" 0
-check "...and the destination is installed" "$(installed)" "54.166.22.221 "
+check "...and the destination is installed" "$(paired)" "54.166.22.221 "
 
 # THE SHIPPED TEMPLATE must itself be a valid config. It is the seed vpn-init
 # copies and vpn-setup installs, so a typo in it is a unit that restart-loops to
@@ -1060,7 +1284,7 @@ grep_ok "$OUT" 'KERNEL STATE ONLY' "--help prints the header's invariant"
 reset; tunnel_down_lingering; write_conf "${GOOD_CONF[@]}"
 OUT="$(ff --check)"; RC=$?
 check "--check on a good config: exit 0" "$RC" 0
-check "--check installs nothing" "$(installed_count)" "0"
+check "--check installs nothing" "$(rule_count)" "0"
 
 printf '\nthe notifier — and its body is a CONSTANT\n'
 
@@ -1426,6 +1650,88 @@ reset
 OUT="$(PATH="$STUBBIN:$PATH" ip -6 route get 2606:4700:4700::1111 2>&1)"; RC=$?
 check "a missing route-get fixture is exit 99, never a quiet default" "$RC" 99
 
+printf '\nvpn-doctor and the IPv4 rules\n'
+
+# --- the --status contract ------------------------------------------------
+# The daemon's REAL --status, through the doctor's REAL parser. The two live in
+# different files and different languages; these rows notice when one of them
+# renames a header and the other does not. Rules list in priority order, as the
+# kernel lists them. The targets row also proves a list ENDS at the next header:
+# otherwise it would run on into the rules.
+reset; tunnel_up_state; write_conf 54.166.22.221 "10.20.0.0/16"
+ff --once >/dev/null
+printf '9.9.9.9\t%s\t%s\n' "$PROTO" "$METRIC" > "$IPSTATE/routes"
+STATUS_OUT="$(ff --status)"
+zsection() { zv6 "_vpn_status_section '$1' \"\$(cat '$T/status.out')\"" | tr '\n' ' '; }
+printf '%s\n' "$STATUS_OUT" > "$T/status.out"
+check "contract: the doctor reads the targets from --status" "$(zsection 'targets: ')" "54.166.22.221 10.20.0.0/16 "
+check "contract: ...and the rules, as '<kind> <dst>'" "$(zsection 'ipv4 rules (proto ')" \
+      "tunnel 54.166.22.221 tunnel 10.20.0.0/16 reject 54.166.22.221 reject 10.20.0.0/16 "
+check "contract: ...and the legacy routes" "$(zsection 'ipv4 legacy routes (proto ')" "9.9.9.9 "
+check "contract: an empty section, '(none)', reads as empty" "$(zsection 'ipv6 installed (proto ')" ""
+
+# --- _vpn_v4_rule_findings is PURE ---------------------------------------
+zfind() { zv6 "_vpn_v4_rule_findings \$'$1' \$'$2'" | tr '\n' ' '; }
+check "findings: every target paired -> nothing at all" \
+      "$(zfind '54.166.22.221\n10.20.0.0/16' 'tunnel 54.166.22.221\nreject 54.166.22.221\ntunnel 10.20.0.0/16\nreject 10.20.0.0/16')" ""
+check "findings: no rule at all -> missing" "$(zfind '54.166.22.221' '')" "missing 54.166.22.221 "
+# The dangerous half: a reject with no tunnel rule rejects a host that is UP.
+check "findings: reject without tunnel -> reject-only" \
+      "$(zfind '54.166.22.221' 'reject 54.166.22.221')" "reject-only 54.166.22.221 "
+check "findings: tunnel without reject -> tunnel-only" \
+      "$(zfind '54.166.22.221' 'tunnel 54.166.22.221')" "tunnel-only 54.166.22.221 "
+check "findings: a pair for an unlisted destination -> ONE extra, not two" \
+      "$(zfind '54.166.22.221' 'tunnel 54.166.22.221\nreject 54.166.22.221\ntunnel 8.8.8.8\nreject 8.8.8.8')" "extra 8.8.8.8 "
+
+# --- _vpn_v4_probe: classify rc AND the message, as measured ---------------
+reset
+zprobe() { zv6 "_vpn_v4_probe $1; print -r -- \"\$_VPN_V4_PROBE_STATE \$_VPN_V4_PROBE_DEV\""; }
+mkget 54.166.22.221 2 "" "RTNETLINK answers: Network is unreachable"
+check "_vpn_v4_probe: ENETUNREACH (our rule) is 'rejected'" "$(zprobe 54.166.22.221)" "rejected "
+mkget 54.166.22.221 2 "" "RTNETLINK answers: No route to host"
+check "_vpn_v4_probe: EHOSTUNREACH (a reject ROUTE) is told apart" "$(zprobe 54.166.22.221)" "rejected-by-route "
+mkget 54.166.22.221 0 "54.166.22.221 via 172.31.80.33 dev tun0 src 172.31.80.35 uid 1000" ""
+check "_vpn_v4_probe: rc 0 reports the winning device" "$(zprobe 54.166.22.221)" "routed tun0"
+mkget 54.166.22.221 1 "" "Error: something else entirely"
+check "_vpn_v4_probe: anything else is 'odd', never a pass" "$(zprobe 54.166.22.221)" "odd "
+grep_ok "$(cat "$IPSTATE/calls.log")" '^-4 route get 54.166.22.221$' "_vpn_v4_probe asks exactly '-4 route get <addr>'"
+
+# --- _vpn_v4_canary_verdict is PURE --------------------------------------
+zcanary() { zv6 "_vpn_v4_canary_verdict $*"; }
+check "canary: up, via the tunnel -> ok-up"                 "$(zcanary 1 tun0 1 routed tun0)" "ok-up"
+check "canary: up, via the LAN -> not-via-tunnel"           "$(zcanary 1 tun0 1 routed wlp0s20f3)" "not-via-tunnel"
+check "canary: up, rejected -> rejected-while-up"           "$(zcanary 1 tun0 1 rejected)" "rejected-while-up"
+check "canary: up, rejected by a ROUTE -> rejected-while-up" "$(zcanary 1 tun0 1 rejected-by-route)" "rejected-while-up"
+check "canary: down, rejected, pair present -> ok-down"     "$(zcanary 0 tun0 1 rejected)" "ok-down"
+# THE GUARD. No network at all rejects everything the same way; that must not be
+# credited to rules that are not even installed.
+check "canary: down, rejected, NO pair -> not-ours"         "$(zcanary 0 tun0 0 rejected)" "not-ours"
+check "canary: down, routed -> would-hang"                  "$(zcanary 0 tun0 1 routed wlp0s20f3)" "would-hang"
+check "canary: down, rejected by a ROUTE -> route-not-rules" "$(zcanary 0 tun0 1 rejected-by-route)" "route-not-rules"
+
+# --- the AWS apt signing key ---------------------------------------------
+check "key: no expiry -> never"       "$(zv6 '_vpn_key_expiry_verdict "" 1793648983')" "never"
+check "key: expires later -> valid"   "$(zv6 '_vpn_key_expiry_verdict 1814448776 1793648983')" "valid"
+# The measured case: the key the vendor's instructions installed, expired
+# 2026-09-05, read on 2026-11-02.
+check "key: expired -> expired"       "$(zv6 '_vpn_key_expiry_verdict 1788563976 1793648983')" "expired"
+check "key: expiring this second -> expired, not valid" "$(zv6 '_vpn_key_expiry_verdict 1793648983 1793648983')" "expired"
+
+printf 'Types: deb\nURIs: https://example.invalid/\nSigned-By: /etc/apt/keyrings/awsvpnclient.asc\n' > "$T/aws.sources"
+check "key file: deb822 Signed-By is read" \
+      "$(zv6 "_vpn_apt_key_file '$T/aws.sources'")" "/etc/apt/keyrings/awsvpnclient.asc"
+printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/aws.gpg] https://example.invalid/ ubuntu main\n' > "$T/aws.list"
+check "key file: one-line signed-by= is read" \
+      "$(zv6 "_vpn_apt_key_file '$T/no-such.sources' '$T/aws.list'")" "/usr/share/keyrings/aws.gpg"
+# The live machine's shape on 2026-11-02: a deb822 file with an EMPTY Signed-By,
+# so apt trusts the legacy trusted.gpg.d key -- which is the one that expired.
+printf 'Types: deb\nSigned-By: \n' > "$T/empty.sources"
+: > "$T/legacy.asc"
+check "key file: an empty Signed-By falls back to the legacy key" \
+      "$(zv6 "_VPN_APT_LEGACY_KEY='$T/legacy.asc'; _vpn_apt_key_file '$T/empty.sources'")" "$T/legacy.asc"
+check "key file: ...and to nothing when there is no legacy key either" \
+      "$(zv6 "_VPN_APT_LEGACY_KEY='$T/no-such.asc'; _vpn_apt_key_file '$T/empty.sources'")" ""
+
 printf '\nthe IPv6 block drop-in, and arming it without breaking IPv4 fail-fast\n'
 
 DROPIN_SRC="$DOTFILES/systemd/vpn-failfast.service.d/ipv6-block.conf"
@@ -1586,7 +1892,11 @@ check "no remedy anywhere tells you to sudo a zsh function" "$BAD_SUDO" ""
 
 printf '\nthe reporter — DST, the join, and refusing to invent a clean week\n'
 
-rep() { "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" "$@" 2>&1; }
+# The end of the window is PINNED, to the day after the fixture. Measured from
+# the wall clock, a 7-day window stopped containing this fixture on 2026-11-01
+# and every row below failed on an unchanged tree -- the suite had a fuse.
+FIXTURE_WINDOW_END=1792972800   # 2026-10-26T00:00:00Z
+rep() { VPN_REPORT_NOW="$FIXTURE_WINDOW_END" "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" "$@" 2>&1; }
 J="$(rep --days 7 --json)"
 jget() { printf '%s' "$J" | python3 -c "import json,sys;print(json.load(sys.stdin)['$1'])"; }
 
@@ -1625,6 +1935,65 @@ grep_ok "$OUT" 'NOT "no outages"' "empty window: refuses to read as a clean week
 OUT="$(rep --days 0)"; RC=$?
 check "--days 0: exit 2" "$RC" 2
 
+# The pin is HONOURED, not merely accepted. This window starts at 1792880000,
+# BETWEEN the fixture's two browser opens (1792869001 and 1792888201), so it must
+# count exactly one. A reporter that ignored the pin would count both or none,
+# depending on the day -- and the window cannot go stale itself, because the file
+# filter is on mtime and every checkout postdates the window's start.
+CUT_WINDOW_END=1792966400   # since = 1792880000 with --days 1
+OUT="$(VPN_REPORT_NOW="$CUT_WINDOW_END" "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --days 1 --json 2>&1)"
+check "a pinned window that cuts the fixture counts only its own half" \
+      "$(printf '%s' "$OUT" | python3 -c "import json,sys;print(json.load(sys.stdin)['browser_opens'])" 2>&1)" "1"
+OUT="$(VPN_REPORT_NOW=yesterday "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" 2>&1)"; RC=$?
+check "a malformed VPN_REPORT_NOW: exit 2, never the wall clock" "$RC" 2
+
+# --- client crashes: the number the 2026-11 fix targets --------------------
+# Against a `journalctl` STUB, never the real journal: this machine's own crash
+# history would make every one of these rows a statement about the developer's
+# laptop. The stub records its argv and answers from a fixture per mode:
+#   journal-user.out present -> print it, exit 0
+#   journal-user-none        -> `-- No entries --`, exit 1  (measured: what -g prints for no match)
+#   journal-user-fail        -> nothing, exit 2              (could not ask)
+# Every non-user query (the kernel resumes, --list-boots) gets the no-match answer.
+cat > "$STUBBIN/journalctl" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${IPSTATE:-}" ] || exit 99
+printf '%s\n' "$*" >> "$IPSTATE/journal.calls"
+case " $* " in
+  *" --user "*)
+    [ -e "$IPSTATE/journal-user-fail" ] && exit 2
+    if [ -r "$IPSTATE/journal-user.out" ]; then cat "$IPSTATE/journal-user.out"; exit 0; fi
+    echo '-- No entries --'; exit 1 ;;
+esac
+echo '-- No entries --'; exit 1
+STUB
+chmod +x "$STUBBIN/journalctl" || fatal setup
+rep_journal() { PATH="$STUBBIN:$PATH" VPN_REPORT_NOW="$FIXTURE_WINDOW_END" \
+    "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --days 7 --json 2>&1; }
+jfield() { printf '%s' "$1" | python3 -c "import json,sys;v=json.load(sys.stdin)['$2'];print(v.get('resumes_seen') if isinstance(v,dict) else v)" 2>&1; }
+
+# One crash, five minutes after the fixture's first CONNECTED (1792868400), so
+# the next CONNECTED is the fixture's 1792869020: 320 seconds later.
+reset
+printf '%s\n' '2026-10-24T22:05:00+03:00 cilantro awsvpnclient.desktop[111]: Unhandled exception. System.ArgumentException: Invalid network interface ID: input contains invalid characters.' \
+    > "$IPSTATE/journal-user.out"
+J_CRASH="$(rep_journal)"
+check "one crash in the window is counted" "$(jfield "$J_CRASH" client_crashes)" "1"
+check "...and paired with the NEXT CONNECTED, 320s later" "$(jfield "$J_CRASH" crash_to_reconnect_p50)" "320.0"
+grep_ok "$(cat "$IPSTATE/journal.calls")" '--user -t awsvpnclient.desktop --since .* -g Unhandled exception' \
+        "the crash query is the user journal, the GUI's identifier and the marker"
+
+# THE rc-1 ROW. journalctl -g exits 1 when nothing matches; reading that as
+# "could not ask" made every quiet window read NOT CHECKED, and it would have
+# made the week the fix works look like the week the probe broke.
+reset
+J_QUIET="$(rep_journal)"
+check "no crash at all reads 0, not NOT CHECKED" "$(jfield "$J_QUIET" client_crashes)" "0"
+check "...and the same answer is a count of resumes, not NOT CHECKED" "$(jfield "$J_QUIET" resume_split)" "0"
+
+reset; touch "$IPSTATE/journal-user-fail"
+check "a journal that cannot be read: NOT CHECKED, never 0" "$(jfield "$(rep_journal)" client_crashes)" "NOT CHECKED"
+
 printf '\nthe redactor covers what the reporter reads\n'
 
 RED="$DOTFILES/scripts/redact-secrets.sh"
@@ -1640,7 +2009,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=240
+EXPECTED_ROWS=305
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

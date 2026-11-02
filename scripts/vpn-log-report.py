@@ -58,6 +58,8 @@ the openvpn management interface emits itself, so it is identical in both.
 Usage:
     vpn-log-report.py [--days N] [--json] [--app-dir D] [--ovpn-dir D]
 
+    VPN_REPORT_NOW=<epoch seconds> pins the end of the window, for tests.
+
 Exit codes:
     0  produced a report
     2  COULD NOT RUN -- no log directory, or no readable logs in the window.
@@ -117,6 +119,18 @@ MARKERS = {
 }
 
 CONNECTED = 'CONNECTED'
+
+NO_ENTRIES_MARKER = '-- No entries --'
+
+# AWS VPN Client 5.x GUI crashes, as they reach the USER journal: the GUI runs in
+# a gnome-shell scope and its stdout is the journal, under this identifier. Every
+# one of the 24 crashes on record (2026-08-26 .. 2026-11-02) starts with this
+# marker; 6.x moved the tunnel into a root daemon, and its crash shape is not on
+# record yet. See docs/VPN_INTERNALS.md §11.
+CLIENT_JOURNAL_IDENTIFIER = 'awsvpnclient.desktop'
+CLIENT_CRASH_MARKER = 'Unhandled exception'
+# A crash is paired with the first CONNECTED after it inside this window.
+CRASH_TO_RECONNECT_WINDOW_SECONDS = 86400 * 3
 
 
 def auth_epoch(line, ts):
@@ -273,6 +287,11 @@ def _journalctl_iso(argv, timeout=30):
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
+    # MEASURED: with `-g`, journalctl exits 1 when nothing matches, printing only
+    # `-- No entries --`. That is an ANSWER -- zero events -- not a failure to
+    # ask, and treating it as one made every quiet window read "NOT CHECKED".
+    if r.returncode == 1 and r.stdout.strip() == NO_ENTRIES_MARKER:
+        return []
     if r.returncode != 0:
         return None
     out, candidates = [], 0
@@ -328,6 +347,20 @@ def resume_epochs(since_epoch):
     return times, journal_starts()
 
 
+def client_crash_epochs(since_epoch):
+    """Times the AWS VPN Client GUI crashed, from the USER journal, or None if
+    the journal could not be asked. [] is a real answer: no crash in the window.
+
+    THIS IS THE NUMBER THE 2026-11 FIX TARGETS. The 5.x GUI crashed on about one
+    reconnect in four, took the tunnel with it, and nothing restarted it -- a
+    median of 3.3 h to the next CONNECTED. None of that is visible in the client's
+    own logs: the dying process writes nothing there."""
+    since_iso = datetime.fromtimestamp(since_epoch, timezone.utc).astimezone() \
+        .strftime('%Y-%m-%d %H:%M:%S')
+    return _journalctl_iso(['--user', '-t', CLIENT_JOURNAL_IDENTIFIER,
+                            '--since', since_iso, '-g', CLIENT_CRASH_MARKER])
+
+
 def journal_starts():
     """Epoch of the OLDEST entry the journal still holds, or None.
 
@@ -373,6 +406,28 @@ def pair_forward(starts, ends, window):
     return matched, unmatched
 
 
+REPORT_NOW_ENV = 'VPN_REPORT_NOW'
+
+
+def report_now():
+    """The end of the window: the wall clock, or VPN_REPORT_NOW (epoch seconds)
+    when a test pins it.
+
+    THE PIN EXISTS BECAUSE ITS ABSENCE WAS A TIME BOMB. The suite's fixture is
+    dated around 2026-10-25 and asks for a 7-day window; measured from the real
+    clock, that window stopped containing the fixture on 2026-11-01, and every
+    reporter row failed on a tree nobody had changed. A malformed pin is exit 2,
+    never a silent fall-back to the wall clock, which would re-arm the bomb."""
+    pinned = os.environ.get(REPORT_NOW_ENV)
+    if pinned is None:
+        return datetime.now(timezone.utc)
+    if not re.fullmatch(r'[0-9]+', pinned):
+        print('vpn-log-report: %s must be epoch seconds, got %r'
+              % (REPORT_NOW_ENV, pinned), file=sys.stderr)
+        return None
+    return datetime.fromtimestamp(int(pinned), timezone.utc)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--days', type=int, default=7)
@@ -387,7 +442,9 @@ def main():
         print('vpn-log-report: --days must be at least 1', file=sys.stderr)
         return 2
 
-    now = datetime.now(timezone.utc)
+    now = report_now()
+    if now is None:
+        return 2
     since = (now - timedelta(days=args.days)).timestamp()
 
     app = log_files(args.app_dir, since)
@@ -448,6 +505,19 @@ def main():
         else:
             far_resume.append(d)
 
+    # Client crashes, and how long each one cost. A crash leaves no trace in the
+    # client's logs, so the reconnect it is paired with comes from the openvpn
+    # epochs the root service went on writing.
+    crashes = client_crash_epochs(since)
+    connected_epochs = sorted(epoch for (epoch, name, _d) in states
+                              if name == CONNECTED)
+    if crashes is None:
+        crash_to_reconnect, crash_no_reconnect = [], []
+    else:
+        crash_to_reconnect, crash_no_reconnect = pair_forward(
+            crashes, connected_epochs, CRASH_TO_RECONNECT_WINDOW_SECONDS)
+    ctr = sorted(d for _s, _e, d in crash_to_reconnect)
+
     # THE NUMBER THIS PR TARGETS. After SamlSessionTimedOutException the client
     # goes Disconnected and nothing retries it; the gap to the next attempt is
     # how long nobody noticed.
@@ -489,6 +559,11 @@ def main():
             'partial_journal_coverage': resume_partial,
             'journal_starts': journal_from,
         }),
+        'client_crashes': 'NOT CHECKED' if crashes is None else len(crashes),
+        'crash_to_reconnect_count': len(ctr),
+        'crash_to_reconnect_p50': pct(ctr, 0.5),
+        'crash_to_reconnect_max': ctr[-1] if ctr else None,
+        'crashes_with_no_reconnect': len(crash_no_reconnect),
         'timeout_to_next_attempt_count': len(ttn),
         'timeout_to_next_attempt_p50': pct(ttn, 0.5),
         'timeout_to_next_attempt_max': ttn[-1] if ttn else None,
@@ -503,6 +578,17 @@ def main():
     if unreadable:
         p('  ! %d log file(s) could not be read; counts below are INCOMPLETE'
           % len(unreadable))
+    p('')
+    if crashes is None:
+        p('client crashes         NOT CHECKED (the user journal could not be read)')
+    else:
+        p('client crashes         %d   (THE NUMBER THE 2026-11 FIX TARGETS)' % len(crashes))
+        if ctr:
+            p('  crash -> reconnect   p50 %s, max %s (%d paired)'
+              % (fmt_dur(report['crash_to_reconnect_p50']),
+                 fmt_dur(report['crash_to_reconnect_max']), len(ctr)))
+        if crash_no_reconnect:
+            p('  %d crash(es) with no reconnect in the window' % len(crash_no_reconnect))
     p('')
     p('outages                %d' % len(spans))
     p('total downtime         %s' % fmt_dur(total_down))
