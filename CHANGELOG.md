@@ -269,10 +269,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     client, an available update, or an expired AWS apt signing key. That last one froze this
     machine on 5.4.0, unsupported, from June: the key expired on 2026-09-05 and `apt update`
     dropped the repo on every run.
-  - **`vpn-sweeps`** leads with client crashes and crash → reconnect time.
+  - **`vpn-sweeps`** leads with client crashes and crash → reconnect time, and reads the 6.x
+    client too. That means the state transitions in its root-owned daemon log
+    (`/var/log/awsvpnclient/`) and daemon failures from systemd's own record of them, so a
+    window spanning the upgrade is one history.
+  - **The redactor and the transcript scrubber missed the 6.x re-auth challenge.** 6.x logs it
+    as `info: "CRV1:…"` with no `AUTH_FAILED` in front, and both rules anchored on
+    `AUTH_FAILED,CRV1:`. Both now anchor on `CRV1:` alone. `scripts/test-secret-guard.sh` goes
+    from 202 to 203 checks, and `scripts/test-scrub-transcript-secrets.sh` from 112 to 114.
   - New real-kernel table, `scripts/test-vpn-failfast-kernel.sh` (16 checks, private
     `docker --network none` netns, CI step in `vpn-failfast-test`). Run against the old daemon,
-    it fails 7 of 16. `scripts/test-vpn-failfast.sh` goes from 240 to 308 checks.
+    it fails 7 of 16. `scripts/test-vpn-failfast.sh` goes from 240 to 315 checks.
   - **The reporter's DST rows had a fuse.** They measured a fixed fixture against the wall clock
     and stopped passing on 2026-11-01. The window end is now pinned (`VPN_REPORT_NOW`).
     `journalctl -g` exiting 1 on no match is now read as zero, not `NOT CHECKED`.

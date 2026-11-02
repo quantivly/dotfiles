@@ -288,8 +288,15 @@ sudo install -D -m 0644 /tmp/awsvpnclient.asc /etc/apt/keyrings/awsvpnclient.asc
 # then, in /etc/apt/sources.list.d/aws-vpn-client.sources:
 #   Signed-By: /etc/apt/keyrings/awsvpnclient.asc
 sudo rm /etc/apt/trusted.gpg.d/awsvpnclient_public_key.asc     # the expired one
-sudo apt-get update && apt-cache policy awsvpnclient
+sudo apt-get update --allow-releaseinfo-change-origin --allow-releaseinfo-change-label
+apt-cache policy awsvpnclient
 ```
+
+Both `--allow-releaseinfo-change-*` flags are needed once. When AWS re-signed the repo it also
+renamed its `Origin` and `Label` (`AWS VPN Client Repository` → `AWS VPN Client`), and apt
+refuses a release-info change until it is accepted explicitly. With only the key fixed,
+`apt-get update` still fails, on that. Accept exactly those two fields, never the blanket
+`--allow-releaseinfo-change`.
 
 Check the package's sha256 against the [release notes](https://docs.aws.amazon.com/vpn/latest/clientvpn-user/client-vpn-connect-linux-release-notes.html)
 before installing. They are on docs.aws.amazon.com, a different channel from the CloudFront host
@@ -298,6 +305,10 @@ that serves both the key and the package. After a 5.x → 6.x upgrade:
 - Check that the tunnel is still `tun0` (`ip -j route show 0.0.0.0/1`). Both daemons here assume
   it.
 - If the profile did not migrate, re-import it with `aws-vpn-client import-profile`.
+- The tunnel lives in `aws-client-vpn-daemon.service` (root, `Restart=always`), which logs to
+  `/var/log/awsvpnclient/`. That directory is root-owned, unlike both 5.x log directories.
+  `vpn-sweeps` reads it alongside the old ones, so a window spanning the upgrade is one
+  history.
 
 ## What this deliberately does not do
 

@@ -882,6 +882,18 @@ C7EF CC8B` (index dated 2026-09-25). So every `apt update` rejected the source, 
 index stayed frozen at 2026-06-23. `vpn-doctor` now WARNs on all three: the expired key, an
 available update, and any 5.x.
 
+**The key was one of two blockers.** With the new key installed, `apt-get update` still failed:
+
+```
+E: Repository '…/debian-repo ubuntu InRelease' changed its 'Origin' value from 'AWS VPN Client Repository' to 'AWS VPN Client'
+E: Repository '…/debian-repo ubuntu InRelease' changed its 'Label' value from 'AWS VPN Client Repository' to 'AWS VPN Client'
+```
+
+AWS renamed the repo when it re-signed it, and apt refuses a release-info change until it is
+accepted. `--allow-releaseinfo-change-origin --allow-releaseinfo-change-label` accepts exactly
+those two fields. That is safe here: the index is signed by the key whose fingerprint was checked,
+and the package was checked against the docs hash before install.
+
 ### 6.x does not contain the code that crashed
 
 Inspected without running it: the .deb's sha256 matched the release notes, then `dpkg-deb -x`
@@ -896,6 +908,33 @@ into an isolated directory. 6.2.0 is a rewrite:
 - There is a **CLI**, `/usr/local/bin/aws-vpn-client`, with `connect`, `disconnect`,
   `get-connection-status`, `list` and `import-profile`. That supersedes §5's "headless re-trigger
   of the connection: no D-Bus actions".
+
+### The upgrade, 2026-11-02 22:11
+
+Done by hand from `~/quantivly/handoffs/2026-11-02-aws-vpn-crash/upgrade.sh`, which also wrote the
+14-day baseline:
+
+- 6.2.0 is installed. The 5.x `awsvpnclient.service` was removed by the package's own preinst,
+  and `aws-client-vpn-daemon.service` is active.
+- The `Quantivly` profile migrated automatically (`aws-vpn-client list-profiles`).
+- The tunnel is still **`tun0`**, which `vpn-failfast` and `vpn-notify` both assume.
+- The SAML callback still listens on **127.0.0.1:35001**, from the daemon log, so the ACS port
+  reservation (§7) still applies.
+
+Two things the upgrade showed about 6.x:
+
+- **Its log is trustworthy in a way 5.x's never were.** `/var/log/awsvpnclient/` is `root:root
+  0644`, not writable by the desktop user. It carries one line per state change (`ConnectionStatus
+  state transition old_state=… new_state=…`, UTC), which `vpn-sweeps` now reads.
+- **It logs the re-auth challenge as `info: "CRV1:…"`**, with no `AUTH_FAILED` in front. The
+  redactor and the transcript scrubber both anchored on `AUTH_FAILED,CRV1:`, so that shape passed
+  through untouched until both were re-anchored on `CRV1:` alone.
+
+**Not verified: whether the tunnel survives the GUI dying.** 6.x's quit dialog offers only
+"Cancel" and "Disconnect and quit", so the intended check (quit, keep the tunnel) does not exist.
+The real test is `pkill -KILL -x 'AWS VPN Client'` with the tunnel up, and it has not been run.
+The architecture predicts survival: a root daemon owns the tunnel, and the GUI is a gRPC client
+of it.
 
 ### The fix on this side: two static rules per destination
 
