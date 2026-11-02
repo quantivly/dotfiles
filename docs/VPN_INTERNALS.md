@@ -964,24 +964,40 @@ which is the property that matters. `vpn-doctor` tells them apart on purpose: EH
 means a reject **route**, which is the old toggle or somebody else's.
 
 **Identity** is priority (6600/6601) + `protocol 66` + shape, read by parsing the *whole* of
-`ip -j -4 rule show`. It is never read with `ip rule show protocol 66`, which ignores its filter
-(§10). Deletes name the full spec, protocol included. Measured: a delete naming `protocol 66`
-against an identical rule *without* a protocol answers `No such file or directory`. So a foreign
-rule at our priority is untouchable by construction. The JSON shapes the parser reads, compact and
-`-p` alike:
+`ip -N -j -4 rule show`. It is never read with `ip rule show protocol 66`, which ignores its
+filter (§10). Deletes name the full spec, protocol included. Measured: a delete naming `protocol
+66` against an identical rule *without* a protocol answers `No such file or directory`. So a
+foreign rule at our priority is untouchable by construction.
+
+**Numeric, never names.** Without `-N`, iproute2 prints a protocol by its `rt_protos` name when
+one exists: protocol 16 prints as `dhcp` here. A protocol knob with a name, or a
+`66 vpn-failfast` line added to `rt_protos` for readability, would make the tool own nothing, and
+`--clear` would exit 0 with every rule still installed. `-N` makes *every* field numeric,
+including the table and the action, so those are compared against kernel ABI constants:
+`RT_TABLE_MAIN` 254 and `FR_ACT_UNREACHABLE` 7. Comparing against the names `main` and
+`unreachable` would match nothing. The shapes the parser reads, compact and `-p` alike:
 
 ```
-{"priority":6600,"src":"all","dst":"3.216.24.205","table":"main","suppress_prefixlen":0,"protocol":"66"}
-{"priority":6601,"src":"all","dst":"10.20.0.0","dstlen":16,"action":"unreachable","protocol":"66"}
+{"priority":6600,"src":"all","dst":"3.216.24.205","table":"254","suppress_prefixlen":0,"protocol":"66"}
+{"priority":6601,"src":"all","dst":"10.20.0.0","dstlen":16,"action":"7","protocol":"66"}
 ```
 
 A /32 is reported bare, as for routes. `"protocol"` is a **string** and `"suppress_prefixlen"` an
 integer.
 
-Two orders are safety properties, not tidiness. **Add the tunnel rule before the reject rule**,
-and **remove the reject rule before the tunnel rule**. The other order leaves a moment in which a
-reachable host is rejected while the tunnel is up. Rules are reconciled as a delta on every pass,
-so a restart over a correct table deletes and adds nothing.
+**One invariant, kept on every path: a host never holds a reject rule without its tunnel rule.**
+That state rejects a reachable host while the tunnel is up. Ordering the steps (tunnel added
+before reject, reject removed before tunnel) is necessary and **not sufficient**. The independent
+review of the first version found both ends of it:
+
+- if a tunnel **add** fails, its reject must not be added at all;
+- if a reject **delete** fails, its tunnel rule must stay.
+
+The second one bites on the stop path, where nothing re-converges afterwards. So the reject is
+added only once the tunnel rule exists, and a tunnel rule is removed only after a fresh listing
+shows its reject gone. A listing that cannot be read is an error, never "no rules". Rules are
+reconciled as a delta, so a *start* over a correct table changes nothing. A full *restart* still
+opens a short window, because the stop path clears every rule.
 
 ### Two reporter faults found on the way
 

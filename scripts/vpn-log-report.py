@@ -146,6 +146,12 @@ DAEMON_UNIT = 'aws-client-vpn-daemon.service'
 DAEMON_FAILURE_MARKER = 'Failed with result'
 
 NO_ENTRIES_MARKER = '-- No entries --'
+# What journalctl prints on STDERR when the caller cannot read the system journal
+# (a user outside adm/systemd-journal). From systemd 259's own string table:
+# "Hint: You are currently not seeing messages from %s." It still exits 1 with
+# `-- No entries --` on stdout, so without this check a system query that
+# could not see anything reads as zero events.
+JOURNAL_ACCESS_HINT = 'You are currently not seeing messages from'
 
 # AWS VPN Client 5.x GUI crashes, as they reach the USER journal: the GUI runs in
 # a gnome-shell scope and its stdout is the journal, under this identifier. Every
@@ -354,6 +360,11 @@ def _journalctl_iso(argv, timeout=30):
         r = subprocess.run(['journalctl', '-o', 'short-iso', '--no-pager'] + argv,
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
+        return None
+    # A SYSTEM query by a user who cannot read the system journal saw nothing,
+    # which is not the same as nothing happening. Checked first, because that
+    # case ALSO ends in `-- No entries --` and rc 1 (found by review, 2026-11-02).
+    if '--user' not in argv and JOURNAL_ACCESS_HINT in r.stderr:
         return None
     # MEASURED: with `-g`, journalctl exits 1 when nothing matches, printing only
     # `-- No entries --`. That is an ANSWER -- zero events -- not a failure to

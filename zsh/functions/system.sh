@@ -3426,6 +3426,7 @@ _vpn_status_section() {
 #   reject-only <d>  no tunnel rule: <d> is REJECTED EVEN WHILE THE TUNNEL IS UP
 #   tunnel-only <d>  no reject rule: <d> hangs instead of failing while it is down
 #   extra <d>        a rule for a destination the config does not list
+#   extra-reject-only <d>  the same, AND rejected even while the tunnel is up
 _vpn_v4_rule_findings() {
   local targets="$1" rules="$2" kind dst
   local -A tunnel_rule reject_rule configured reported
@@ -3449,7 +3450,11 @@ _vpn_v4_rule_findings() {
   for dst in ${(ok)tunnel_rule} ${(ok)reject_rule}; do
     (( ${+configured[$dst]} || ${+reported[$dst]} )) && continue
     reported[$dst]=1
-    print -r -- "extra $dst"
+    if (( ${+reject_rule[$dst]} && ! ${+tunnel_rule[$dst]} )); then
+      print -r -- "extra-reject-only $dst"
+    else
+      print -r -- "extra $dst"
+    fi
   done
 }
 
@@ -3513,6 +3518,29 @@ _vpn_key_expiry_verdict() {
   [[ -z "$expiry" ]] && { print -r -- never; return; }
   (( expiry > now )) && { print -r -- valid; return; }
   print -r -- expired
+}
+
+# _vpn_apt_key_state <key-file>
+#   sets _VPN_APT_KEY_STATE (unreadable | unparsed | never | valid | expired) and
+#   _VPN_APT_KEY_EXPIRY, and prints nothing -- called as `$(...)` it would run in
+#   a subshell and lose both, the trap _vpn_v4_probe documents.
+#
+# A key that cannot be read is NOT a key that never expires. gpg exits 2 with no
+# output on a missing or unreadable file, and an empty expiry reads as "never"
+# -- so the first version of this check called a missing keyring "current", which
+# is exactly the state in which apt rejects the repo. Readability, gpg's exit
+# status and a `pub:` line are each required before the expiry is believed.
+_vpn_apt_key_state() {
+  local key_file="$1" colons gpg_rc
+  _VPN_APT_KEY_EXPIRY=""
+  _VPN_APT_KEY_STATE=unreadable
+  [[ -r "$key_file" ]] || return
+  colons="$(gpg --batch --show-keys --with-colons "$key_file" 2>/dev/null)"; gpg_rc=$?
+  _VPN_APT_KEY_STATE=unparsed
+  (( gpg_rc == 0 )) || return
+  [[ "$colons" == pub:* || "$colons" == *$'\n'pub:* ]] || return
+  _VPN_APT_KEY_EXPIRY="$(awk -F: '/^pub:/{print $7; exit}' <<<"$colons")"
+  _VPN_APT_KEY_STATE="$(_vpn_key_expiry_verdict "$_VPN_APT_KEY_EXPIRY" "$(date +%s)")"
 }
 
 # _vpn_apt_key_file <sources-or-list-file>...  -> the keyring that signs the AWS repo
@@ -3654,7 +3682,15 @@ vpn-doctor() {
                      rules_need_fix=1 ;;
         tunnel-only) _doctor_bad "$finding_dst has no reject rule — it hangs instead of failing while the tunnel is down"
                      rules_need_fix=1 ;;
-        extra)       _doctor_warn "a fail-fast rule for $finding_dst, which the config does not list — the daemon drops it on its next pass" ;;
+        # The daemon reads its config only at START, so a rule left by a config
+        # edit stays until a restart -- "it drops it on its next pass" was
+        # wrong, and said so by the review of the first version.
+        extra)       _doctor_warn "a fail-fast rule for $finding_dst, which the config does not list — the daemon reads"
+                     _doctor_warn "  its config only at start. Apply it: sudo systemctl restart vpn-failfast" ;;
+        extra-reject-only)
+                     _doctor_bad "$finding_dst is not in the config and has a reject rule with no tunnel rule — it is"
+                     _doctor_bad "  REJECTED even while the tunnel is UP"
+                     rules_need_fix=1 ;;
       esac
     done <<<"$v4_findings"
     (( rules_need_fix )) && _doctor_bad "  Fix: sudo systemctl restart vpn-failfast   (vpn-setup, if the daemon predates the rules)"
@@ -3877,7 +3913,7 @@ vpn-doctor() {
   # `apt update` drop the AWS repo on every run, and the client simply never
   # gets another fix. That is how this machine sat on a crashing, unsupported
   # 5.4.0 from June to November 2026 (docs/VPN_INTERNALS.md §11).
-  local client_version client_candidate key_file key_expiry
+  local client_version client_candidate key_file
   client_version="$(dpkg-query -W -f='${Version}' awsvpnclient 2>/dev/null)"
   if [[ -z "$client_version" ]]; then
     _doctor_note "the AWS VPN Client package is not installed — skipping the client checks"
@@ -3896,13 +3932,16 @@ vpn-doctor() {
     if [[ -z "$key_file" ]]; then
       _doctor_warn "no signing key found for the AWS VPN Client apt source — it cannot be updated by apt"
     else
-      key_expiry="$(gpg --batch --show-keys --with-colons "$key_file" 2>/dev/null \
-                    | awk -F: '/^pub:/{print $7; exit}')"
-      case "$(_vpn_key_expiry_verdict "$key_expiry" "$(date +%s)")" in
-        expired) _doctor_warn "the AWS apt signing key ($key_file) EXPIRED on $(date -d "@$key_expiry" +%F 2>/dev/null)"
-                 _doctor_warn "  apt rejects the AWS repo on every update, so no client fix can ever arrive."
-                 _doctor_warn "  Fix: install the current key (docs/VPN_RESILIENCE.md, 'Keeping the client current')" ;;
-        *)       _doctor_ok "the AWS apt signing key is current ($key_file)" ;;
+      _vpn_apt_key_state "$key_file"
+      case "$_VPN_APT_KEY_STATE" in
+        expired)    _doctor_warn "the AWS apt signing key ($key_file) EXPIRED on $(date -d "@$_VPN_APT_KEY_EXPIRY" +%F 2>/dev/null)"
+                    _doctor_warn "  apt rejects the AWS repo on every update, so no client fix can ever arrive."
+                    _doctor_warn "  Fix: install the current key (docs/VPN_RESILIENCE.md, 'Keeping the client current')" ;;
+        unreadable) _doctor_warn "the AWS apt source names a signing key that cannot be read: $key_file"
+                    _doctor_warn "  apt rejects the AWS repo until it can. See docs/VPN_RESILIENCE.md, 'Keeping the client current'" ;;
+        unparsed)   _doctor_warn "could not read the AWS apt signing key with gpg ($key_file) — its expiry was NOT checked" ;;
+        valid|never) _doctor_ok "the AWS apt signing key is current ($key_file)" ;;
+        *)          _doctor_warn "the AWS apt signing key check returned '$_VPN_APT_KEY_STATE' — not checked" ;;
       esac
     fi
   fi

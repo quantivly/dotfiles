@@ -95,10 +95,15 @@ printf '%s\n' "$*" >> "$IPSTATE/calls.log"
 # lets a row grep for `-6 route del`.
 json=0
 fam=4
+numeric=0
 args=()
 for a in "$@"; do
   case "$a" in
     -j|-json) json=1 ;;
+    # -N prints numbers for protocol, table and action, as the real tool does;
+    # without it they are NAMES. A subject that drops -N then fails here exactly
+    # as it would against a kernel, instead of being answered in its own terms.
+    -N) numeric=1 ;;
     -4) fam=4 ;;
     -6) fam=6 ;;
     *) args+=("$a") ;;
@@ -276,12 +281,18 @@ PY
     sub="${2:-}"
     case "$sub" in
       show)
+        [ -e "$IPSTATE/fail-rule-show" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
         # Every rule, base ones included -- `ip rule show` has no protocol filter
         # that works (VPN_INTERNALS §10), so the subject must filter for itself,
         # and a stub that pre-filtered would prove that filter correct for free.
-        python3 - "$RULES" "${IPSTATE}/pretty-json" <<'PY'
+        python3 - "$RULES" "${IPSTATE}/pretty-json" "$numeric" <<'PY'
 import json, os, sys
-rows = [(0, {"priority": 0, "src": "all", "table": "local"})]
+numeric = sys.argv[3] == "1"
+# Measured in a netns: under -N, tables and the action are their kernel numbers.
+TABLES = {"local": "255", "main": "254", "default": "253"}
+def table(name):
+    return TABLES.get(name, name) if numeric else name
+rows = [(0, {"priority": 0, "src": "all", "table": table("local")})]
 for line in open(sys.argv[1]):
     line = line.rstrip("\n")
     if not line:
@@ -296,16 +307,16 @@ for line in open(sys.argv[1]):
     # Field order and types exactly as measured: "suppress_prefixlen" is an
     # integer, "protocol" is a STRING.
     if shape == "suppress-main":
-        rule["table"] = "main"; rule["suppress_prefixlen"] = 0
+        rule["table"] = table("main"); rule["suppress_prefixlen"] = 0
     elif shape == "unreachable":
-        rule["action"] = "unreachable"
+        rule["action"] = "7" if numeric else "unreachable"
     elif shape.startswith("lookup:"):
-        rule["table"] = shape.split(":", 1)[1]
+        rule["table"] = table(shape.split(":", 1)[1])
     if proto:
         rule["protocol"] = proto
     rows.append((int(priority), rule))
-rows.append((32766, {"priority": 32766, "src": "all", "table": "main"}))
-rows.append((32767, {"priority": 32767, "src": "all", "table": "default"}))
+rows.append((32766, {"priority": 32766, "src": "all", "table": table("main")}))
+rows.append((32767, {"priority": 32767, "src": "all", "table": table("default")}))
 rows.sort(key=lambda row: row[0])
 rules = [rule for _, rule in rows]
 if os.path.exists(sys.argv[2]):
@@ -339,6 +350,9 @@ PY
         dst="${dst%/32}"
         if [ "$op" = "add" ]; then
           [ -e "$IPSTATE/fail-rule-add" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
+          # One KIND failing alone: the partial failures the ordering has to survive.
+          [ -e "$IPSTATE/fail-rule-add-tunnel" ] && [ "$priority" = "6600" ] && {
+            echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
           if awk -F'\t' -v p="$priority" -v d="$dst" -v s="$shape" -v r="$proto" \
                '$1==p && $2==d && $3==s && $4==r{found=1} END{exit !found}' "$RULES"; then
             echo "RTNETLINK answers: File exists" >&2; exit 2
@@ -347,6 +361,8 @@ PY
           exit 0
         fi
         [ -e "$IPSTATE/fail-rule-del" ] && { echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
+        [ -e "$IPSTATE/fail-rule-del-reject" ] && [ "$priority" = "6601" ] && {
+          echo "RTNETLINK answers: Operation not permitted" >&2; exit 2; }
         # Success that removes nothing, for the re-read guard in clear_rules.
         [ -e "$IPSTATE/rule-del-noop" ] && exit 0
         # The kernel matches EVERY selector the delete names, protocol included:
@@ -809,6 +825,51 @@ OUT="$(ff --clear)"; RC=$?
 rm -f "$IPSTATE/rule-del-noop"
 check "a rule delete that reports success and removes nothing: exit 1" "$RC" 1
 grep_ok "$OUT" 'rules still owned after clearing' "the surviving rules are named"
+
+# --- partial failures: the invariant ordering alone does not keep ---------
+# Found by the independent review of the first version: a tunnel add that FAILED
+# was still followed by its reject add, and a reject delete that FAILED was still
+# followed by its tunnel delete. Each leaves a host REJECTED while the tunnel is
+# up -- and on the stop path nothing re-converges to repair it.
+reset; tunnel_up_state; write_conf 54.166.22.221
+touch "$IPSTATE/fail-rule-add-tunnel"
+OUT="$(ff --once)"; RC=$?
+check "a failing tunnel add: exit 1" "$RC" 1
+check "...and its reject rule is NOT added" "$(our_rules)" ""
+check "...not even attempted" "$(asked 'rule add priority 6601')" "0"
+
+reset; tunnel_up_state; write_conf 54.166.22.221
+ff --once >/dev/null
+touch "$IPSTATE/fail-rule-del-reject"
+OUT="$(ff --clear)"; RC=$?
+check "--clear with a failing reject delete: exit 1" "$RC" 1
+check "...and the tunnel rule STAYS, so the host is never reject-only" \
+      "$(our_rules)" "reject 54.166.22.221 tunnel 54.166.22.221 "
+grep_ok "$OUT" 'keeping its tunnel rule' "...and it says why"
+
+reset; tunnel_up_state; write_conf 54.166.22.221 44.221.89.155
+ff --once >/dev/null
+write_conf 54.166.22.221
+touch "$IPSTATE/fail-rule-del-reject"
+OUT="$(ff --once)"; RC=$?
+check "a stale pair whose reject cannot be removed: exit 1" "$RC" 1
+check "...keeps its tunnel rule too" "$(paired)" "44.221.89.155 54.166.22.221 "
+
+# --- a listing that cannot be read is an error, never "no rules" ----------
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+ff --once >/dev/null
+touch "$IPSTATE/fail-rule-show"
+OUT="$(ff --clear)"; RC=$?
+check "--clear when the rules cannot be listed: exit 1, not a clean 0" "$RC" 1
+grep_ok "$OUT" 'could not list the IPv4 rules' "...and it says it could not list them"
+OUT="$(ff --status)"
+grep_ok "$OUT" 'COULD NOT LIST the rules' "--status says so too, instead of '(none)'"
+rm -f "$IPSTATE/fail-rule-show"
+
+# NUMERIC, because names come from rt_protos and can change under the tool.
+reset; tunnel_down_lingering; write_conf 54.166.22.221
+ff --once >/dev/null
+grep_ok "$(cat "$IPSTATE/calls.log")" '^-N -j -4 rule show$' "the rule listing asks for numbers (-N)"
 
 printf '\nthe --watch path, which is what the unit actually runs\n'
 
@@ -1704,6 +1765,9 @@ check "findings: tunnel without reject -> tunnel-only" \
       "$(zfind '54.166.22.221' 'tunnel 54.166.22.221')" "tunnel-only 54.166.22.221 "
 check "findings: a pair for an unlisted destination -> ONE extra, not two" \
       "$(zfind '54.166.22.221' 'tunnel 54.166.22.221\nreject 54.166.22.221\ntunnel 8.8.8.8\nreject 8.8.8.8')" "extra 8.8.8.8 "
+# An unlisted reject with no tunnel rule is a live blackhole, not a tidy-up.
+check "findings: an unlisted reject without its tunnel rule -> extra-reject-only" \
+      "$(zfind '54.166.22.221' 'tunnel 54.166.22.221\nreject 54.166.22.221\nreject 8.8.8.8')" "extra-reject-only 8.8.8.8 "
 
 # --- _vpn_v4_probe: classify rc AND the message, as measured ---------------
 reset
@@ -1753,6 +1817,13 @@ check "key file: an empty Signed-By falls back to the legacy key" \
       "$(zv6 "_VPN_APT_LEGACY_KEY='$T/legacy.asc'; _vpn_apt_key_file '$T/empty.sources'")" "$T/legacy.asc"
 check "key file: ...and to nothing when there is no legacy key either" \
       "$(zv6 "_VPN_APT_LEGACY_KEY='$T/no-such.asc'; _vpn_apt_key_file '$T/empty.sources'")" ""
+# A key that cannot be read is NOT a key that never expires: gpg prints nothing,
+# and an empty expiry reads as "never". The first version called that "current".
+zkeystate() { zv6 "_vpn_apt_key_state '$1'; print -r -- \$_VPN_APT_KEY_STATE"; }
+check "key state: a keyring that cannot be read is 'unreadable', never 'never'" \
+      "$(zkeystate "$T/no-such-key.asc")" "unreadable"
+printf 'not a key\n' > "$T/not-a-key.asc"
+check "key state: a file gpg cannot parse is 'unparsed'" "$(zkeystate "$T/not-a-key.asc")" "unparsed"
 
 printf '\nthe IPv6 block drop-in, and arming it without breaking IPv4 fail-fast\n'
 
@@ -1987,10 +2058,17 @@ case " $* " in
     if [ -r "$IPSTATE/journal-user.out" ]; then cat "$IPSTATE/journal-user.out"; exit 0; fi
     echo '-- No entries --'; exit 1 ;;
   *" -u aws-client-vpn-daemon.service "*)
+    if [ -e "$IPSTATE/journal-system-hint" ]; then
+      echo 'Hint: You are currently not seeing messages from other users and the system.' >&2
+      echo '-- No entries --'; exit 1
+    fi
     [ -e "$IPSTATE/journal-daemon-fail" ] && exit 2
     if [ -r "$IPSTATE/journal-daemon.out" ]; then cat "$IPSTATE/journal-daemon.out"; exit 0; fi
     echo '-- No entries --'; exit 1 ;;
 esac
+if [ -e "$IPSTATE/journal-system-hint" ]; then
+  echo 'Hint: You are currently not seeing messages from other users and the system.' >&2
+fi
 echo '-- No entries --'; exit 1
 STUB
 chmod +x "$STUBBIN/journalctl" || fatal setup
@@ -2031,6 +2109,13 @@ check "...and is a client crash in the total" "$(jfield "$J_DAEMON" client_crash
 reset; touch "$IPSTATE/journal-daemon-fail"
 check "a daemon journal that cannot be read: the TOTAL is NOT CHECKED" \
       "$(jfield "$(rep_journal)" client_crashes)" "NOT CHECKED"
+# A user outside adm/systemd-journal: journalctl exits 1 with `-- No entries --`
+# exactly as for a real zero, and only its stderr hint tells the two apart.
+reset; touch "$IPSTATE/journal-system-hint"
+J_HINT="$(rep_journal)"
+check "a system journal this user cannot read: daemon failures NOT CHECKED, not 0" \
+      "$(jfield "$J_HINT" daemon_failures_6x)" "NOT CHECKED"
+check "...and so are the kernel resumes" "$(jfield "$J_HINT" resume_split)" "NOT CHECKED"
 
 # --- the 6.x daemon log ----------------------------------------------------
 # 6.x moved the tunnel into a root daemon with its own, root-owned log. The
@@ -2060,7 +2145,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=315
+EXPECTED_ROWS=332
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

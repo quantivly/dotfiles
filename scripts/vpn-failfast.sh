@@ -71,7 +71,7 @@
 #
 #   * IPv4 RULES are ours when they carry protocol 66 AND sit at priority 6600 or
 #     6601 AND have one of the two shapes above. They are found by reading the
-#     WHOLE of `ip -j -4 rule show` and filtering here -- never with `ip rule show
+#     WHOLE of `ip -N -j -4 rule show` and filtering here -- never with `ip rule show
 #     protocol 66`, which ignores its filter and prints every rule on the box
 #     (VPN_INTERNALS §10): a cleanup loop built on it would delete Tailscale's.
 #     They are deleted by their full spec, protocol included, and the kernel will
@@ -483,21 +483,38 @@ rule_spec() {
 
 # The rules this tool owns, one `<tunnel|reject> <dst>` per line, with dst in
 # the same spelling read_config produces (a /32 bare, anything else with its
-# length). Measured shapes, compact and `-p` pretty alike:
+# length). Exit 1 when the rules could not be LISTED: "no rules" and "could not
+# ask" must never print the same thing, or --clear reports a clean slate over a
+# table it never saw.
 #
-#   {"priority":6600,"src":"all","dst":"3.216.24.205","table":"main","suppress_prefixlen":0,"protocol":"66"}
-#   {"priority":6601,"src":"all","dst":"10.20.0.0","dstlen":16,"action":"unreachable","protocol":"66"}
+# NUMERIC (`ip -N`), and compared against kernel constants, never names.
+# Without -N iproute2 prints a protocol by its rt_protos name when it has one
+# (16 prints as "dhcp" here), so a knob value with a name -- or somebody adding
+# `66 vpn-failfast` to rt_protos for readability -- would make this tool own
+# nothing at all, and --clear would exit 0 with every rule still installed. -N
+# prints numbers for everything; the ones read here are ABI constants:
+# RT_TABLE_MAIN is 254 and FR_ACT_UNREACHABLE is 7. Measured, compact and `-p`
+# pretty alike:
+#
+#   {"priority":6600,"src":"all","dst":"3.216.24.205","table":"254","suppress_prefixlen":0,"protocol":"66"}
+#   {"priority":6601,"src":"all","dst":"10.20.0.0","dstlen":16,"action":"7","protocol":"66"}
 #
 # A record is one object, split on `}` (rule objects are flat). Fields are read
 # with match(), whitespace-tolerant, because `ip -p -j` puts newlines and spaces
 # where the compact form has none, and a parser that matched only one spelling
 # would find NOTHING -- so nothing would ever be withdrawn. mawk-safe: no
 # character classes, no gawk extensions.
+readonly RT_TABLE_MAIN=254
+readonly FR_ACT_UNREACHABLE=7
 owned_rules() {
-    ip -j -4 rule show 2>/dev/null | awk \
+    local listing
+    listing="$(ip -N -j -4 rule show 2>/dev/null)" || return 1
+    awk \
         -v proto="$PROTO" \
         -v tunnel_priority="$TUNNEL_RULE_PRIORITY" \
-        -v reject_priority="$REJECT_RULE_PRIORITY" '
+        -v reject_priority="$REJECT_RULE_PRIORITY" \
+        -v main_table="$RT_TABLE_MAIN" \
+        -v unreachable_action="$FR_ACT_UNREACHABLE" '
         function field(name,    pattern, value) {
             pattern = "\"" name "\"[ \t\r\n]*:[ \t\r\n]*(\"[^\"]*\"|[0-9]+)"
             if (!match($0, pattern)) return ""
@@ -514,11 +531,11 @@ owned_rules() {
             prefix_length = field("dstlen")
             if (prefix_length != "" && prefix_length != "32") destination = destination "/" prefix_length
             priority = field("priority")
-            if (priority == tunnel_priority && field("table") == "main" && field("suppress_prefixlen") == "0")
+            if (priority == tunnel_priority && field("table") == main_table && field("suppress_prefixlen") == "0")
                 print "tunnel " destination
-            else if (priority == reject_priority && field("action") == "unreachable")
+            else if (priority == reject_priority && field("action") == unreachable_action)
                 print "reject " destination
-        }'
+        }' <<<"$listing"
 }
 
 # add_rule <tunnel|reject> <dst>
@@ -557,19 +574,50 @@ is_configured() {
     return 1
 }
 
-# Remove every rule this tool owns, REJECT RULES FIRST. The order is the safety
-# property: with the tunnel up, a reject rule whose tunnel rule has already gone
-# rejects a host that is perfectly reachable. Removing rejects first means no
-# moment exists where that is true.
-clear_rules() {
-    local rc=0 kind k d left
-    for kind in reject tunnel; do
-        while IFS=' ' read -r k d; do
-            [[ "$k" == "$kind" ]] || continue
-            del_rule "$kind" "$d" || rc=1
-        done < <(owned_rules)
+# withdraw_pairs <dst>...   -- remove each destination's pair, SAFELY
+#
+# THE INVARIANT EVERY PATH HERE KEEPS: a host never holds a reject rule without
+# its tunnel rule, because that host is then REJECTED WHILE THE TUNNEL IS UP.
+# So the reject goes first, and a tunnel rule is removed only once a FRESH
+# listing shows its reject really is gone. Ordering the two loops alone is not
+# enough: a reject delete that fails would otherwise be followed by the tunnel
+# delete for the same host, leaving exactly that state -- and on the stop path
+# nothing re-converges to repair it.
+withdraw_pairs() {
+    local rc=0 d listing
+    for d in "$@"; do del_rule reject "$d" || rc=1; done
+    if ! listing="$(owned_rules)"; then
+        err "could not list the IPv4 rules after removing rejects; leaving every tunnel rule in place"
+        return 1
+    fi
+    for d in "$@"; do
+        if grep -qxF -- "reject $d" <<<"$listing"; then
+            err "the reject rule for $d is still installed; keeping its tunnel rule so the host is not rejected while the tunnel is up"
+            rc=1
+            continue
+        fi
+        del_rule tunnel "$d" || rc=1
     done
-    left="$(owned_rules)"
+    return "$rc"
+}
+
+# The distinct destinations in a `<kind> <dst>` listing.
+listed_destinations() { awk '{print $2}' <<<"$1" | awk 'NF && !seen[$0]++'; }
+
+# Remove every rule this tool owns. Used by --clear and the stop path.
+clear_rules() {
+    local rc=0 have left
+    if ! have="$(owned_rules)"; then
+        err "could not list the IPv4 rules, so none were removed"
+        return 1
+    fi
+    local -a destinations=()
+    mapfile -t destinations < <(listed_destinations "$have")
+    (( ${#destinations[@]} )) && { withdraw_pairs "${destinations[@]}" || rc=1; }
+    if ! left="$(owned_rules)"; then
+        err "could not re-read the IPv4 rules after clearing"
+        return 1
+    fi
     if [[ -n "$left" ]]; then
         err "rules still owned after clearing: $(tr '\n' ' ' <<<"$left")"
         rc=1
@@ -580,22 +628,26 @@ clear_rules() {
 # Reconcile the rules with DESTS as a DELTA. Never clear-then-add: a rule that is
 # already right is left alone, so a running daemon never opens a window.
 #
-# Stale rules come off first, rejects before tunnels (see clear_rules). Missing
-# rules go on per destination, TUNNEL BEFORE REJECT, for the mirror reason: a
-# reject rule added first would reject a host whose tunnel is up for as long as
-# its tunnel rule is missing.
+# Stale destinations come off through withdraw_pairs. Missing rules go on per
+# destination, TUNNEL BEFORE REJECT, and the reject is added only once the
+# tunnel rule is known to be in place: a tunnel add that FAILS must not be
+# followed by its reject add, or the host is rejected while the tunnel is up.
 converge_rules() {
-    local rc=0 have kind k d
-    have="$(owned_rules)"
-    for kind in reject tunnel; do
-        while IFS=' ' read -r k d; do
-            [[ "$k" == "$kind" ]] || continue
-            is_configured "$d" && continue
-            del_rule "$kind" "$d" || rc=1
-        done <<<"$have"
-    done
+    local rc=0 have d
+    if ! have="$(owned_rules)"; then
+        err "could not list the IPv4 rules; changing nothing this pass"
+        return 1
+    fi
+    local -a stale=()
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        is_configured "$d" || stale+=("$d")
+    done < <(listed_destinations "$have")
+    (( ${#stale[@]} )) && { withdraw_pairs "${stale[@]}" || rc=1; }
     for d in "${DESTS[@]}"; do
-        grep -qxF -- "tunnel $d" <<<"$have" || add_rule tunnel "$d" || rc=1
+        if ! grep -qxF -- "tunnel $d" <<<"$have"; then
+            add_rule tunnel "$d" || { rc=1; continue; }
+        fi
         grep -qxF -- "reject $d" <<<"$have" || add_rule reject "$d" || rc=1
     done
     return "$rc"
@@ -693,11 +745,16 @@ print_status() {
     # interface: change them in both places or not at all.
     printf 'ipv4 rules (proto %s, priorities %s/%s):\n' \
         "$PROTO" "$TUNNEL_RULE_PRIORITY" "$REJECT_RULE_PRIORITY"
-    while IFS= read -r d; do
-        [[ -n "$d" ]] || continue
-        printf '  - %s\n' "$d"; n=$(( n + 1 ))
-    done < <(owned_rules)
-    (( n == 0 )) && printf '  (none)\n'
+    local rule_listing
+    if rule_listing="$(owned_rules)"; then
+        while IFS= read -r d; do
+            [[ -n "$d" ]] || continue
+            printf '  - %s\n' "$d"; n=$(( n + 1 ))
+        done <<<"$rule_listing"
+        (( n == 0 )) && printf '  (none)\n'
+    else
+        printf '  (COULD NOT LIST the rules: ip -N -j -4 rule show failed)\n'
+    fi
     # Any entry here is an orphan of the old route toggle -- see the header.
     printf 'ipv4 legacy routes (proto %s):\n' "$PROTO"
     n=0
@@ -779,9 +836,12 @@ main() {
                        # Route orphans first, ALWAYS, and before anything is
                        # added: a route left by a previous run is invisible to
                        # converge_v6_up, which only knows today's halves. Rules
-                       # are NOT cleared here -- converge_rules reconciles them as
-                       # a delta, so a restart never opens a window in which a
-                       # configured host hangs instead of failing.
+                       # are NOT cleared here: converge_rules reconciles them as a
+                       # delta, so a START over a correct table changes nothing.
+                       # A full RESTART still opens a short window -- the stop
+                       # path (TERM trap, ExecStopPost) removes every rule, so
+                       # hosts hang rather than fail until this start re-adds
+                       # them. That is the price of `systemctl stop` clearing.
                        clear_routes || exit 1
                        ALLOW_V6_BLOCK=1
                        run_watch ;;

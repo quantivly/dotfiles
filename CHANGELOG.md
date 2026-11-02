@@ -264,6 +264,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `protocol 66`. The kernel decides per lookup, so nothing changes at a tunnel transition and
     the 5 s poll window is gone. A blocked host now fails with ENETUNREACH instead of
     EHOSTUNREACH. The IPv6 block is unchanged. **Re-run `vpn-setup`** to install the new daemon.
+    - **A host never holds a reject rule without its tunnel rule, on any path.** The reject is
+      added only once its tunnel rule exists, and a tunnel rule is removed only after a fresh
+      listing shows its reject gone. Ordering alone did not ensure this: an independent review of
+      the first version found that a failed tunnel add, or a failed reject delete, left a host
+      rejected while the tunnel was up.
+    - **Rules are listed numerically** (`ip -N`) and matched against kernel constants (table 254,
+      action 7). iproute2 prints a protocol by its `rt_protos` name, so a named protocol would
+      have made the tool own nothing. A listing that cannot be read is an error, never "no
+      rules".
   - **`vpn-doctor`** checks each destination's rule pair and asks `ip route get` which way the
     first one actually goes. It FAILs on a legacy route left by the old toggle, and WARNs on a 5.x
     client, an available update, or an expired AWS apt signing key. That last one froze this
@@ -279,7 +288,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     from 202 to 203 checks, and `scripts/test-scrub-transcript-secrets.sh` from 112 to 114.
   - New real-kernel table, `scripts/test-vpn-failfast-kernel.sh` (16 checks, private
     `docker --network none` netns, CI step in `vpn-failfast-test`). Run against the old daemon,
-    it fails 7 of 16. `scripts/test-vpn-failfast.sh` goes from 240 to 315 checks.
+    it fails 7 of 16. `scripts/test-vpn-failfast.sh` goes from 240 to 332 checks.
   - **The reporter's DST rows had a fuse.** They measured a fixed fixture against the wall clock
     and stopped passing on 2026-11-01. The window end is now pinned (`VPN_REPORT_NOW`).
     `journalctl -g` exiting 1 on no match is now read as zero, not `NOT CHECKED`.

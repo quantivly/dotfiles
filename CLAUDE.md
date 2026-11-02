@@ -636,7 +636,7 @@ the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
   notification body is a compile-time constant (GNOME renders `<a href>` inside it).
 - **IPv4 fail-fast is two static rules per host; never toggle IPv4 reject routes** — AWS VPN
   Client 5.x crashes parsing them ([§11](docs/VPN_INTERNALS.md)). Rule identity is priority
-  6600/6601 + `protocol 66`, read from all of `ip -j -4 rule show`, never `ip rule show protocol`
+  6600/6601 + `protocol 66`, read from all of `ip -N -j -4 rule show`, never `ip rule show protocol`
   (it ignores the filter). Validate every host BEFORE installing any; a bad config is exit 2.
   **`ip route show proto 66` is IPv4-only** — owned routes are enumerated `-4` **and** `-6`.
 - **Never force a drop to test** (`SO_BINDTODEVICE` probe). **Parse the log offset, never match
