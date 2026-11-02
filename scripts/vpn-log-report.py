@@ -131,7 +131,6 @@ DAEMON_LOG_DIR = '/var/log/awsvpnclient'
 DAEMON_STATE_RE = re.compile(
     r'^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z\s.*?'
     r'ConnectionStatus state transition old_state=(?P<old>\w+) new_state=(?P<new>\w+)')
-DAEMON_CONNECTED = 'Connected'
 DAEMON_TS_RE = re.compile(r'^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z\s')
 # The 6.x spellings of two 5.x events, as measured in the daemon log: the server
 # demanding a SAML re-auth (5.x: AUTH_FAILED), and the browser's assertion
@@ -276,8 +275,9 @@ def scan_daemon(paths, since_epoch, events, states, unreadable):
     A "transition" to the SAME state (the daemon logs Connecting -> Connecting on
     every step of a connect) is dropped so the table holds only real changes. It
     is NOT load-bearing for outages(): a non-CONNECTED state cannot open a span
-    that is already open. Only the 6.x `Connected` maps to CONNECTED, which is
-    all outages() distinguishes."""
+    that is already open. Names are UPPERCASED, and that is load-bearing: it is
+    what turns the 6.x `Connected` into the 5.x CONNECTED, which is all outages()
+    distinguishes."""
     for p in paths:
         try:
             fh = open(p, 'r', errors='replace')
@@ -298,9 +298,7 @@ def scan_daemon(paths, since_epoch, events, states, unreadable):
                 m = DAEMON_STATE_RE.match(line)
                 if not m or m.group('old') == m.group('new'):
                     continue
-                new_state = m.group('new')
-                name = CONNECTED if new_state == DAEMON_CONNECTED else new_state.upper()
-                states[(int(ts), name, DAEMON_STREAM)] = ts
+                states[(int(ts), m.group('new').upper(), DAEMON_STREAM)] = ts
 
 
 def pct(sorted_vals, q):
