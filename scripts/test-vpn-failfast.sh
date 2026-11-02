@@ -767,6 +767,16 @@ OUT="$(ff --clear)"; RC=$?
 check "--clear: exit 0" "$RC" 0
 check "--clear: removes every rule owned" "$(rule_count)" "0"
 check "--clear: and every legacy route" "$(installed_count)" "0"
+# --clear runs at EVERY stop, with the tunnel most likely up -- so its order is
+# the one that matters most: reject first, or a reachable host is rejected for
+# the length of the gap.
+REJECT_DEL="$(line_of 'rule del priority 6601 to 54.166.22.221')"
+TUNNEL_DEL="$(line_of 'rule del priority 6600 to 54.166.22.221')"
+if [[ -n "$REJECT_DEL" && -n "$TUNNEL_DEL" && "$REJECT_DEL" -lt "$TUNNEL_DEL" ]]; then
+    ok "--clear withdraws REJECT FIRST"
+else
+    bad "--clear withdraws REJECT FIRST — reject at '$REJECT_DEL', tunnel at '$TUNNEL_DEL'"
+fi
 
 # `ip -p -j` pretty-prints. A parser that matched only the compact spelling
 # would find no owned rules and therefore withdraw NOTHING.
@@ -852,6 +862,18 @@ if wait_for 15 has_pair 54.166.22.221; then ok "--watch installs the configured 
 printf '6601\t8.8.4.4\tunreachable\t%s\n' "$PROTO" >> "$IPSTATE/rules"
 if wait_for 15 lacks_rules 8.8.4.4; then ok "a rule appearing under our identity mid-run is reclaimed"; else bad "a rule appearing under our identity mid-run is reclaimed — timed out"; fi
 check "...and the configured pair is untouched" "$(paired)" "54.166.22.221 "
+watch_stop
+
+# A LEGACY route appearing mid-run -- the old daemon still running during an
+# upgrade, or a hand -- is reclaimed by the next converge, not left until a
+# restart. With the tunnel UP it blackholes its host, so it cannot wait.
+reset; tunnel_up_state; write_conf 54.166.22.221
+watch_start
+if wait_for 15 has_pair 54.166.22.221; then ok "--watch installs the pair, tunnel up"; else bad "--watch installs the pair, tunnel up — timed out"; fi
+printf '54.166.22.221\t%s\t%s\n' "$PROTO" "$METRIC" >> "$IPSTATE/routes"
+# shellcheck disable=SC2317,SC2329
+no_legacy_routes() { [[ "$(installed_count)" == "0" ]]; }
+if wait_for 15 no_legacy_routes; then ok "a legacy route appearing mid-run is reclaimed"; else bad "a legacy route appearing mid-run is reclaimed — timed out"; fi
 watch_stop
 
 # ... and the mirror: a rule of ours that VANISHES mid-run -- an `ip rule flush`,
@@ -2009,7 +2031,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=305
+EXPECTED_ROWS=308
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

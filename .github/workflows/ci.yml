@@ -396,6 +396,16 @@ jobs:
       - name: Run the VPN fail-fast state table
         run: ./scripts/test-vpn-failfast.sh
 
+      # The REAL-KERNEL half: the daemon against a real routing table, in an
+      # empty `docker --network none` namespace, on the runner's own iproute2
+      # (chrooted in, never an image's BusyBox). It is the only thing that can
+      # see the property the stub suite cannot: that a tunnel transition emits
+      # no route event for a configured destination, which is what kept AWS VPN
+      # Client 5.x from crashing (docs/VPN_INTERNALS.md §11). Measured: against
+      # the old route-toggling daemon it fails 7 of its 16 rows.
+      - name: Run the VPN fail-fast kernel table
+        run: ./scripts/test-vpn-failfast-kernel.sh
+
   dock-lid-test:
     name: Dock Lid Guard State Table
     runs-on: ubuntu-latest

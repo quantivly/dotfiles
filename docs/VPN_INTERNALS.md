@@ -39,10 +39,11 @@ github 140.82.121.3:443   forced out wlp0s20f3   CONNECTED in 0.06s
 `tcp_syn_retries = 6` → retransmits at 1/2/4/8/16/32/64s, `ETIMEDOUT` at **≈127s**. An
 established socket uses `tcp_retries2 = 15`, about 15 minutes. That is the 2–3 minutes exactly.
 
-**Use this probe to verify the fix**, not a forced disconnect: after the routes are installed the
-same connect must fail immediately. **`EHOSTUNREACH` (errno 113, "No route to host"), not
-`ENETUNREACH`** — an `unreachable` route gives the host form, and an earlier draft of this page
-said otherwise. Measured below.
+**Use this probe to verify the fix**, not a forced disconnect: with the fail-fast in place the
+same connect must fail immediately. Since §11 the fail-fast is a pair of policy rules, and a
+rule's `unreachable` gives **`ENETUNREACH` (errno 101, "Network is unreachable")**. The route
+design this replaced gave `EHOSTUNREACH` (113, "No route to host"), which is what the table below
+records, and an earlier draft of this page had the two the wrong way round.
 
 ## 3. Where the recoverable time is — after two wrong answers
 
@@ -108,6 +109,11 @@ So the hang is gone, the failure is immediate and correctly typed, and the inter
 — which is the whole design in one table. The routes were withdrawn when the tunnel returned.
 
 ### The outage that was not a drop: the client PROCESS died
+
+> **Correction, 2026-11-02.** The application did not simply exit: it **crashed**, and the user
+> journal holds the exception at 16:47:11. It is the first recorded instance of §11, the vendor
+> route-listener bug, which `vpn-failfast`'s own route toggle went on to trigger about once a
+> reconnect in four.
 
 Three hours after the first one, on **2026-09-23**, a second real outage arrived — and it was a
 harder case than anything the plan anticipated. The design was built for *"the tunnel drops and
@@ -202,8 +208,10 @@ separately that it contains no URL and no markup.
   not a Desktop Entry field code** — GLib drops unknown macros silently, so the shim's `$0` became
   `/.local/bin/vpn-saml-browser`, `[ -x ]` was false, plain Chrome opened, and the feature would
   never have fired, ever, with no symptom.
-- **Headless re-trigger of the connection.** The GUI owns `com.amazonaws.vpnclient` on the user
-  bus, but `org.gtk.Actions.List` returns **`as 0` — zero actions**. There is no reconnect to call.
+- **Headless re-trigger of the connection (5.x).** The GUI owns `com.amazonaws.vpnclient` on the
+  user bus, but `org.gtk.Actions.List` returns **`as 0` — zero actions**. There is no reconnect to
+  call. **Superseded by 6.x**, which ships a CLI, `aws-vpn-client connect --profile-name <p>`
+  (§11).
 - **The root service's D-Bus** (`com.amazon.awsvpnclient.AwsVpnClientService`, root pid 2708).
   `BecomeMonitor` is `AccessDenied` for uid 1000 and the service returns malformed introspection
   XML, so neither monitoring nor enumeration works.
@@ -800,3 +808,155 @@ exactly the line above. A recording `sudo` stub now sits at the front of `PATH` 
 executes only `install`/`rm`/`rmdir`/`mkdir`, only inside `VPN_SETUP_PREFIX`, and refuses any
 destination outside it with its own exit code — `systemctl` and `sysctl` are recorded and never
 run, because the machine running the suite has a live system manager holding this very daemon.
+
+---
+
+## 11. The crash: the vendor's route listener reads an uninitialized interface name
+
+Measured read-only on `cilantro` on **2026-11-02**. The VPN "kept crashing", literally: the AWS
+VPN Client **GUI process** died, the 5.x root service took the tunnel down with it, and nothing
+restarted it. §3's "The outage that was not a drop: the client PROCESS died" (2026-09-23 16:47)
+was the first of these on record here. It was written down as "the application exited" because
+nobody read the user journal at the time.
+
+### The signature, and what it cost
+
+24 crashes between 2026-08-26 and 2026-11-02, every one the same exception, in the **user**
+journal (identifier `awsvpnclient.desktop`). The client's own logs say nothing, because the
+process that would write them is the one dying:
+
+```
+Unhandled exception. System.ArgumentException: Invalid network interface ID: input contains
+invalid characters. Only alphanumeric characters, dots, hyphens, and underscores are allowed.
+   at ACVC.Core.Utils.NetworkUtils.ValidateNetworkInterfaceId(String networkInterfaceId)
+   at ACVC.Core.DataModels.RouteInfo.set_NetworkInterfaceId(String value)
+   at ACVC.Core.Crm.GtkRoutingTableUtils.<>c__DisplayClass22_0.<StartListeningForRoutingTableEvents>b__0(...)
+```
+
+Crash to the next CONNECTED, over the 17 crashes with logs: **median 195 min, 136 h in total**.
+Daytime cases ran 4–6 h (10-19, 10-21, 10-26, 11-02). `vpn-notify` was armed and fired. A
+notification does not relaunch a client or re-run SAML, so it shortened none of them.
+
+### The mechanism: `parse_system_route` reads memory nobody wrote
+
+`/opt/awsvpnclient/gtk_routing_table_listener.dylib` is an x86-64 ELF despite its name, not
+stripped, with debug info. Its `parse_system_route` `malloc(0xd8)`s the route record and **never
+zeroes it**. It writes the interface name (offset `0x8a`) only inside
+`if (tb[RTA_OIF]) if_indextoname(oif, rec + 0x8a)`. So the name is uninitialized heap memory in
+two cases:
+
+- **the route has no `RTA_OIF`**. Every IPv4 reject route (`unreachable`, `blackhole`, `prohibit`)
+  is one: IPv4 refuses a device on those types.
+- **`if_indextoname` fails**, because the interface the route named is already gone.
+
+The .NET callback then validates that name. Sometimes the leftover memory happens to be a valid
+name and sometimes it isn't, which is why the crash is intermittent. The listener binds
+`nl_groups = 0x51` (`RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV4_ROUTE`, from the
+disassembly). It hears every IPv4 route event in every table, and **no rule events**
+(`RTMGRP_IPV4_RULE` is `0x80`).
+
+### Trigger 1, ours: 15 of the 17 crashes with logs
+
+Every one shows the same sequence in the app log: `>STATE:...,CONNECTED`, the listener starts,
+then 0.4–5 s later `RoutingTableListenerLibrary: del | Destination: 3.216.24.205 ...`. That is
+`vpn-failfast` withdrawing its IPv4 `unreachable` routes on its next poll. Across the **64**
+listener sessions that saw a withdrawal, **15 crashed** partway through the batch (1–3 deletions
+logged), and the 49 that logged all four did not: about **23% per reconnect**. Crash frequency was
+1 in the 39 days before the unit was armed (2026-09-23) and 23 in the 40 days after.
+
+**The fail-fast built to make drops visible had become the main cause of the longest ones.**
+
+### Trigger 2, the vendor's alone: 2 of 17
+
+08-26 00:58 (before `vpn-failfast` existed) and 10-28 16:47. Both are resumes where the
+Thunderbolt dock comes back as `pciehp: Slot(6): Card not present`, so routes on the vanished NIC
+fail `if_indextoname`. Nothing on this side can prevent that one.
+
+### Why it was never fixed: a signing key expired, silently
+
+5.4.0 is listed by AWS as **"No longer supported"**. 6.2.0 shipped 2026-09-28, and `apt` never
+offered it. The key installed by the vendor's own instructions,
+`/etc/apt/trusted.gpg.d/awsvpnclient_public_key.asc` (`CC9C 6627 … 4D8D 07A0 50FA CA00`),
+**expired on 2026-09-05**. AWS re-signs the repo with `F3DA CFA4 38D1 47D8 1BCA 38B3 CA08 BD64
+C7EF CC8B` (index dated 2026-09-25). So every `apt update` rejected the source, and the cached
+index stayed frozen at 2026-06-23. `vpn-doctor` now WARNs on all three: the expired key, an
+available update, and any 5.x.
+
+### 6.x does not contain the code that crashed
+
+Inspected without running it: the .deb's sha256 matched the release notes, then `dpkg-deb -x`
+into an isolated directory. 6.2.0 is a rewrite:
+
+- The tunnel moved into a **root daemon**, `aws-client-vpn-daemon.service` (`Restart=always`),
+  with embedded OpenVPN 3.
+- The GUI is an Electron app talking to the daemon over a Unix socket using gRPC. 6.0.2 "prompts
+  to disconnect on GUI app quit", so **the GUI no longer owns the tunnel**.
+- Route handling is Rust (`netlink-packet-route`). Its scanner logs `Skipping non-unicast route`,
+  and a missing interface is an `Option`, not leftover memory.
+- There is a **CLI**, `/usr/local/bin/aws-vpn-client`, with `connect`, `disconnect`,
+  `get-connection-status`, `list` and `import-profile`. That supersedes §5's "headless re-trigger
+  of the connection: no D-Bus actions".
+
+### The fix on this side: two static rules per destination
+
+`vpn-failfast` no longer installs or withdraws anything when the tunnel moves. Each destination
+gets, once:
+
+```
+priority 6600  to D  lookup main suppress_prefixlength 0  protocol 66
+priority 6601  to D  unreachable                          protocol 66
+```
+
+While the tunnel is up, `0.0.0.0/1` via `tun0` is a /1, so the first rule accepts it. While it is
+down, the only match is the LAN default, a /0. The first rule suppresses it, and the lookup falls
+to `unreachable`. All of the following was measured in `docker run --network none --cap-add
+NET_ADMIN` with the host's iproute2-6.19.0 chrooted in (`scripts/test-vpn-failfast-kernel.sh`):
+
+| | tunnel down | tunnel up |
+|---|---|---|
+| `ip route get` a configured host | rc 2, `Network is unreachable` | `via 172.31.80.33 dev tun0` |
+| `connect()` to it | **errno 101 ENETUNREACH**, at once | connects |
+| an unrelated address | via the LAN | via the tunnel |
+| route events across up → down | **only the tunnel's own four** | |
+| the same events under the OLD daemon | **8, four of them reject routes for the configured hosts** | |
+
+The errno changes from the old routes' EHOSTUNREACH (113) to ENETUNREACH (101). Both fail at once,
+which is the property that matters. `vpn-doctor` tells them apart on purpose: EHOSTUNREACH now
+means a reject **route**, which is the old toggle or somebody else's.
+
+**Identity** is priority (6600/6601) + `protocol 66` + shape, read by parsing the *whole* of
+`ip -j -4 rule show`. It is never read with `ip rule show protocol 66`, which ignores its filter
+(§10). Deletes name the full spec, protocol included. Measured: a delete naming `protocol 66`
+against an identical rule *without* a protocol answers `No such file or directory`. So a foreign
+rule at our priority is untouchable by construction. The JSON shapes the parser reads, compact and
+`-p` alike:
+
+```
+{"priority":6600,"src":"all","dst":"3.216.24.205","table":"main","suppress_prefixlen":0,"protocol":"66"}
+{"priority":6601,"src":"all","dst":"10.20.0.0","dstlen":16,"action":"unreachable","protocol":"66"}
+```
+
+A /32 is reported bare, as for routes. `"protocol"` is a **string** and `"suppress_prefixlen"` an
+integer.
+
+Two orders are safety properties, not tidiness. **Add the tunnel rule before the reject rule**,
+and **remove the reject rule before the tunnel rule**. The other order leaves a moment in which a
+reachable host is rejected while the tunnel is up. Rules are reconciled as a delta on every pass,
+so a restart over a correct table deletes and adds nothing.
+
+### Two reporter faults found on the way
+
+- **The DST rows had a fuse.** They ran a fixed fixture (dated 2026-10-24/25) through a
+  `--days 7` window measured from the wall clock. They stopped passing on 2026-11-01, on a tree
+  nobody had changed, and every PR would have failed CI. The window end is now pinned
+  (`VPN_REPORT_NOW`). A row proves the pin is honoured: a window starting between the fixture's
+  two events must count exactly one.
+- **`journalctl -g` exits 1 when nothing matches** and prints `-- No entries --`. The helper read
+  every non-zero exit as "could not ask", so a resume-free window reported `NOT CHECKED` instead
+  of 0. It would have made the week the crash fix works look like the week the probe broke.
+
+### Measuring whether it worked
+
+`vpn-sweeps` now leads with **client crashes** and crash → reconnect time. It reads the user
+journal offline: a human runs it, and it only counts. On 2026-11-02, over 14 days: **12 crashes,
+crash → reconnect p50 2.2 h, max 13.7 h**. The target is 0.

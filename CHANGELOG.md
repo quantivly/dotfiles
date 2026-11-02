@@ -253,6 +253,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The VPN fail-fast no longer crashes the AWS VPN Client.** AWS VPN Client 5.x died 24 times
+  between 2026-08-26 and 2026-11-02, and each crash took the tunnel down for a median of 3.3 h.
+  Its route listener reads an uninitialized interface name for any IPv4 route event with no
+  output interface. `vpn-failfast` withdrew exactly such routes (IPv4 `unreachable`) seconds after
+  every reconnect, and 15 of the 17 crashes with logs followed a withdrawal. Evidence:
+  `docs/VPN_INTERNALS.md` §11.
+  - **IPv4 fail-fast is now two static policy rules per destination**, installed once:
+    `lookup main suppress_prefixlength 0`, then `unreachable`, at priorities 6600/6601 with
+    `protocol 66`. The kernel decides per lookup, so nothing changes at a tunnel transition and
+    the 5 s poll window is gone. A blocked host now fails with ENETUNREACH instead of
+    EHOSTUNREACH. The IPv6 block is unchanged. **Re-run `vpn-setup`** to install the new daemon.
+  - **`vpn-doctor`** checks each destination's rule pair and asks `ip route get` which way the
+    first one actually goes. It FAILs on a legacy route left by the old toggle, and WARNs on a 5.x
+    client, an available update, or an expired AWS apt signing key. That last one froze this
+    machine on 5.4.0, unsupported, from June: the key expired on 2026-09-05 and `apt update`
+    dropped the repo on every run.
+  - **`vpn-sweeps`** leads with client crashes and crash → reconnect time.
+  - New real-kernel table, `scripts/test-vpn-failfast-kernel.sh` (16 checks, private
+    `docker --network none` netns, CI step in `vpn-failfast-test`). Run against the old daemon,
+    it fails 7 of 16. `scripts/test-vpn-failfast.sh` goes from 240 to 308 checks.
+  - **The reporter's DST rows had a fuse.** They measured a fixed fixture against the wall clock
+    and stopped passing on 2026-11-01. The window end is now pinned (`VPN_REPORT_NOW`).
+    `journalctl -g` exiting 1 on no match is now read as zero, not `NOT CHECKED`.
+
 - **`df` shows disk usage, not a directory listing (DO-848).** `zshrc.aliases` defined
   `duf='du -sh *'`, and zsh's `command -v duf` is satisfied by an alias, so the duf gate in
   `zshrc.conditionals.tools` always passed. `df` then ran `df -> duf -> du -sh *`, with or

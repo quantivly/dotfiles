@@ -628,16 +628,17 @@ the tunnel is DOWN, and (armed by `vpn-setup --block-ipv6`) blocks IPv6 egress w
 opposite polarities, because the tunnel carries no v6. `vpn-notify.service` (user; arm it by hand)
 notifies. Root pieces come from `vpn-setup`, **copied never symlinked**; `./install` links only
 the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
-[docs/VPN_INTERNALS.md](docs/VPN_INTERNALS.md) · `scripts/test-vpn-failfast.sh`.
+[docs/VPN_INTERNALS.md](docs/VPN_INTERNALS.md) · `scripts/test-vpn-failfast.sh`,
+`scripts/test-vpn-failfast-kernel.sh`.
 
 - **No component may read a client log at runtime** — both dirs are writable by any process as
-  this user and the fail-fast unit is ROOT; it reads `ip -j link` / `ip -j route` only. The
+  this user and the fail-fast unit is ROOT; it reads `ip -j link` / `route` / `rule` only. The
   notification body is a compile-time constant (GNOME renders `<a href>` inside it).
-- **A stale `unreachable` route blackholes a host permanently.** Identity is route `proto 66`,
-  nothing is deleted except by that filter, `vpn-doctor` FAILs on an orphan. Validate every
-  destination BEFORE installing any; an unusable config is exit 2, never a silent no-op.
-  **`ip route show proto 66` is IPv4-only** — every path that enumerates or withdraws owned
-  routes must ask `-4` **and** `-6`, or a v6 blackhole survives invisibly.
+- **IPv4 fail-fast is two static rules per host; never toggle IPv4 reject routes** — AWS VPN
+  Client 5.x crashes parsing them ([§11](docs/VPN_INTERNALS.md)). Rule identity is priority
+  6600/6601 + `protocol 66`, read from all of `ip -j -4 rule show`, never `ip rule show protocol`
+  (it ignores the filter). Validate every host BEFORE installing any; a bad config is exit 2.
+  **`ip route show proto 66` is IPv4-only** — owned routes are enumerated `-4` **and** `-6`.
 - **Never force a drop to test** (`SO_BINDTODEVICE` probe). **Parse the log offset, never match
   it** (DST, 2026-10-25). Numbers come from the client's logs, **never Chrome history**.
 

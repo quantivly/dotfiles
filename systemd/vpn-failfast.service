@@ -69,11 +69,13 @@ StartLimitBurst=5
 Type=simple
 ExecStart=/usr/local/bin/vpn-failfast.sh --watch
 # The withdraw path, and it runs on EVERY stop — clean, failed, killed or
-# reloaded. A leftover `unreachable` route blackholes a host permanently and
-# looks exactly like a server outage, so this is the single most important line
-# in the file. It is belt to the script's own SIGTERM trap, and braces to the
-# --watch path's "remove orphans before adding anything" at start, because the
-# case that strands routes is precisely the one where the stop path did not run.
+# reloaded. It removes the IPv4 rules and every route this tool owns. A leftover
+# IPv6 block blackholes all global IPv6, and a leftover legacy IPv4 route (from
+# the old route toggle) blackholes its host while the tunnel is up, so this is
+# the single most important line in the file. It is belt to the script's own
+# SIGTERM trap, and braces to the --watch path's "remove route orphans before
+# adding anything" at start, because the case that strands a route is precisely
+# the one where the stop path did not run.
 ExecStopPost=/usr/local/bin/vpn-failfast.sh --clear
 
 # on-failure, not always: `systemctl stop vpn-failfast` must stay stopped, and

@@ -270,10 +270,10 @@ fi
 
 if (( ! ASSUME_YES )); then
   echo
-  echo "About to enable and start vpn-failfast.service. While the tunnel is DOWN it"
-  echo "installs 'unreachable' routes for every destination in $CONF_DST,"
-  echo "so traffic to them fails instantly instead of hanging. They are withdrawn"
-  echo "when the tunnel returns, at stop, and at the next start."
+  echo "About to enable and start vpn-failfast.service. It installs two policy rules"
+  echo "for every destination in $CONF_DST, so that while the tunnel is DOWN"
+  echo "traffic to them fails instantly instead of hanging, and while it is up it goes"
+  echo "through the tunnel. The rules are removed when the unit stops."
   echo
   printf 'Enable and start it now? [y/N] '
   read -r reply
