@@ -73,7 +73,7 @@ PY="$(command -v python3)"
 # EXPECTED_RULES is read by the parity group, which runs long before it.
 # `grep -c ✗` counts row NAMES, not outcomes; only the total at the end catches
 # a check that silently stopped running.
-EXPECTED_ROWS=112
+EXPECTED_ROWS=114
 EXPECTED_RULES=16
 
 T="$(mktemp -d)" || fatal "cannot create a temp dir"
@@ -177,6 +177,7 @@ SHAPE_FIXTURES=(
     "linear-key|a token $LIN here|$LIN"
     "saml-request|GET /sso?SAMLRequest=$SAMLV&RelayState=x|$SAMLV"
     "vpn-auth-challenge|log AUTH_FAILED,CRV1:$VPNCHAL please re-auth|$VPNCHAL"
+    "vpn-auth-challenge|OvpnEvent { info: \\\"CRV1:$VPNCHAL\\\" }|$VPNCHAL"
     "bearer|curl -H 'Authorization: Bearer $BTOK' https://x|$BTOK"
     "private-key|key follows:\\n$PEMHDR\\n$PEMB64\\n$PEMFTR\\ndone|$PEMB64"
     "url-password|clone https://svc:$URLPW@git.example.com/r.git|$URLPW"

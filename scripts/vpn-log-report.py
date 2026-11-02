@@ -120,6 +120,32 @@ MARKERS = {
 
 CONNECTED = 'CONNECTED'
 
+# AWS VPN Client 6.x moved the tunnel into a root daemon, which logs to its own
+# directory -- root-owned and NOT writable by the desktop user, unlike both 5.x
+# streams. Each state change is one line, in UTC, measured on 6.2.0:
+#   2026-11-02T20:12:32.782357Z  INFO ThreadId(15) connection: ConnectionStatus
+#     state transition old_state=Connecting new_state=Connected connection_id=...
+# Transitions feed the same `states` table as the 5.x openvpn epochs, so an
+# upgrade inside the window is one continuous history rather than two reports.
+DAEMON_LOG_DIR = '/var/log/awsvpnclient'
+DAEMON_STATE_RE = re.compile(
+    r'^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z\s.*?'
+    r'ConnectionStatus state transition old_state=(?P<old>\w+) new_state=(?P<new>\w+)')
+DAEMON_CONNECTED = 'Connected'
+DAEMON_TS_RE = re.compile(r'^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z\s')
+# The 6.x spellings of two 5.x events, as measured in the daemon log: the server
+# demanding a SAML re-auth (5.x: AUTH_FAILED), and the browser's assertion
+# arriving at the local callback (5.x: SAML ACS received a request).
+DAEMON_MARKERS = {
+    'auth_failed': 'name: "DYNAMIC_CHALLENGE"',
+    'acs_request': 'SAML callback received successfully',
+}
+DAEMON_STREAM = 'daemon-6.x'
+# A 6.x daemon that dies is restarted by systemd (Restart=always), and systemd
+# itself records the death in words no vendor release can change.
+DAEMON_UNIT = 'aws-client-vpn-daemon.service'
+DAEMON_FAILURE_MARKER = 'Failed with result'
+
 NO_ENTRIES_MARKER = '-- No entries --'
 
 # AWS VPN Client 5.x GUI crashes, as they reach the USER journal: the GUI runs in
@@ -231,6 +257,50 @@ def scan(paths, since_epoch, events, states, unreadable):
                         # written once -- measured, raw count == distinct-
                         # millisecond count for all four.
                         events.setdefault(kind, {})[round(ts, 3)] = ts
+
+
+def daemon_epoch(stamp):
+    """Epoch seconds from the 6.x daemon's UTC stamp, with or without a fraction."""
+    for layout in ('%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S'):
+        try:
+            return datetime.strptime(stamp, layout).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def scan_daemon(paths, since_epoch, events, states, unreadable):
+    """Collect the 6.x daemon's state transitions into `states`, and its re-auth
+    events into `events`.
+
+    A "transition" to the SAME state (the daemon logs Connecting -> Connecting on
+    every step of a connect) is dropped so the table holds only real changes. It
+    is NOT load-bearing for outages(): a non-CONNECTED state cannot open a span
+    that is already open. Only the 6.x `Connected` maps to CONNECTED, which is
+    all outages() distinguishes."""
+    for p in paths:
+        try:
+            fh = open(p, 'r', errors='replace')
+        except OSError:
+            unreadable.append(p)
+            continue
+        with fh:
+            for line in fh:
+                stamp = DAEMON_TS_RE.match(line)
+                if not stamp:
+                    continue
+                ts = daemon_epoch(stamp.group('ts'))
+                if ts is None or ts < since_epoch:
+                    continue
+                for kind, needle in DAEMON_MARKERS.items():
+                    if needle in line:
+                        events.setdefault(kind, {})[round(ts, 3)] = ts
+                m = DAEMON_STATE_RE.match(line)
+                if not m or m.group('old') == m.group('new'):
+                    continue
+                new_state = m.group('new')
+                name = CONNECTED if new_state == DAEMON_CONNECTED else new_state.upper()
+                states[(int(ts), name, DAEMON_STREAM)] = ts
 
 
 def pct(sorted_vals, q):
@@ -361,6 +431,14 @@ def client_crash_epochs(since_epoch):
                             '--since', since_iso, '-g', CLIENT_CRASH_MARKER])
 
 
+def daemon_failure_epochs(since_epoch):
+    """Times systemd recorded the 6.x daemon FAILING, or None if not checked."""
+    since_iso = datetime.fromtimestamp(since_epoch, timezone.utc).astimezone() \
+        .strftime('%Y-%m-%d %H:%M:%S')
+    return _journalctl_iso(['-u', DAEMON_UNIT, '--since', since_iso,
+                            '-g', DAEMON_FAILURE_MARKER])
+
+
 def journal_starts():
     """Epoch of the OLDEST entry the journal still holds, or None.
 
@@ -436,6 +514,7 @@ def main():
                     default=os.path.expanduser('~/.config/AWSVPNClient/logs'))
     ap.add_argument('--ovpn-dir', default='/var/log/aws-vpn-client/%s'
                     % os.environ.get('USER', ''))
+    ap.add_argument('--daemon-dir', default=DAEMON_LOG_DIR)
     args = ap.parse_args()
 
     if args.days < 1:
@@ -449,11 +528,12 @@ def main():
 
     app = log_files(args.app_dir, since)
     ovpn = log_files(args.ovpn_dir, since)
-    if app is None and ovpn is None:
-        print('vpn-log-report: neither log directory exists:\n  %s\n  %s'
-              % (args.app_dir, args.ovpn_dir), file=sys.stderr)
+    daemon = log_files(args.daemon_dir, since)
+    if app is None and ovpn is None and daemon is None:
+        print('vpn-log-report: no log directory exists:\n  %s\n  %s\n  %s'
+              % (args.app_dir, args.ovpn_dir, args.daemon_dir), file=sys.stderr)
         return 2
-    paths = (app or []) + (ovpn or [])
+    paths = (app or []) + (ovpn or []) + (daemon or [])
     if not paths:
         print('vpn-log-report: no readable .log files modified within %d days in:\n'
               '  %s\n  %s\n'
@@ -465,6 +545,7 @@ def main():
     events, states, unreadable = {}, {}, []
     scan(app or [], since, events, states, unreadable)
     scan(ovpn or [], since, events, states, unreadable)
+    scan_daemon(daemon or [], since, events, states, unreadable)
 
     def times(kind):
         return sorted(events.get(kind, {}).values())
@@ -508,7 +589,12 @@ def main():
     # Client crashes, and how long each one cost. A crash leaves no trace in the
     # client's logs, so the reconnect it is paired with comes from the openvpn
     # epochs the root service went on writing.
-    crashes = client_crash_epochs(since)
+    gui_crashes = client_crash_epochs(since)
+    daemon_failures = daemon_failure_epochs(since)
+    # NOT CHECKED if EITHER could not be asked: a half-checked count printed as
+    # a number is the clean-looking week this report exists to refuse.
+    crashes = (None if gui_crashes is None or daemon_failures is None
+               else sorted(gui_crashes + daemon_failures))
     connected_epochs = sorted(epoch for (epoch, name, _d) in states
                               if name == CONNECTED)
     if crashes is None:
@@ -560,6 +646,8 @@ def main():
             'journal_starts': journal_from,
         }),
         'client_crashes': 'NOT CHECKED' if crashes is None else len(crashes),
+        'gui_crashes_5x': 'NOT CHECKED' if gui_crashes is None else len(gui_crashes),
+        'daemon_failures_6x': 'NOT CHECKED' if daemon_failures is None else len(daemon_failures),
         'crash_to_reconnect_count': len(ctr),
         'crash_to_reconnect_p50': pct(ctr, 0.5),
         'crash_to_reconnect_max': ctr[-1] if ctr else None,
@@ -583,6 +671,7 @@ def main():
         p('client crashes         NOT CHECKED (the user journal could not be read)')
     else:
         p('client crashes         %d   (THE NUMBER THE 2026-11 FIX TARGETS)' % len(crashes))
+        p('  5.x GUI %d, 6.x daemon %d' % (len(gui_crashes), len(daemon_failures)))
         if ctr:
             p('  crash -> reconnect   p50 %s, max %s (%d paired)'
               % (fmt_dur(report['crash_to_reconnect_p50']),

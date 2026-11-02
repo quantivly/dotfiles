@@ -1918,7 +1918,7 @@ printf '\nthe reporter — DST, the join, and refusing to invent a clean week\n'
 # the wall clock, a 7-day window stopped containing this fixture on 2026-11-01
 # and every row below failed on an unchanged tree -- the suite had a fuse.
 FIXTURE_WINDOW_END=1792972800   # 2026-10-26T00:00:00Z
-rep() { VPN_REPORT_NOW="$FIXTURE_WINDOW_END" "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" "$@" 2>&1; }
+rep() { VPN_REPORT_NOW="$FIXTURE_WINDOW_END" "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --daemon-dir "$T/no-daemon" "$@" 2>&1; }
 J="$(rep --days 7 --json)"
 jget() { printf '%s' "$J" | python3 -c "import json,sys;print(json.load(sys.stdin)['$1'])"; }
 
@@ -1945,12 +1945,12 @@ check "the vendor's 'Succesfully' spelling is matched" "$(jget assertions)" "1"
 # previous line's time; the fixture has two.
 check "untimestamped continuation lines are skipped" "$(jget acs_unclean_stops)" "1"
 
-OUT="$("$REPORT" --app-dir "$T/no-such-a" --ovpn-dir "$T/no-such-b" 2>&1)"; RC=$?
+OUT="$("$REPORT" --app-dir "$T/no-such-a" --ovpn-dir "$T/no-such-b" --daemon-dir "$T/no-such-c" 2>&1)"; RC=$?
 check "no log directory at all: exit 2, never a clean report" "$RC" 2
-grep_ok "$OUT" 'neither log directory exists' "missing dirs: named"
+grep_ok "$OUT" 'no log directory exists' "missing dirs: named"
 
 mkdir -p "$T/empty-logs"
-OUT="$("$REPORT" --app-dir "$T/empty-logs" --ovpn-dir "$T/no-such-b" 2>&1)"; RC=$?
+OUT="$("$REPORT" --app-dir "$T/empty-logs" --ovpn-dir "$T/no-such-b" --daemon-dir "$T/no-such-c" 2>&1)"; RC=$?
 check "a log dir with no logs in the window: exit 2" "$RC" 2
 grep_ok "$OUT" 'NOT "no outages"' "empty window: refuses to read as a clean week"
 
@@ -1963,10 +1963,10 @@ check "--days 0: exit 2" "$RC" 2
 # depending on the day -- and the window cannot go stale itself, because the file
 # filter is on mtime and every checkout postdates the window's start.
 CUT_WINDOW_END=1792966400   # since = 1792880000 with --days 1
-OUT="$(VPN_REPORT_NOW="$CUT_WINDOW_END" "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --days 1 --json 2>&1)"
+OUT="$(VPN_REPORT_NOW="$CUT_WINDOW_END" "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --daemon-dir "$T/no-daemon" --days 1 --json 2>&1)"
 check "a pinned window that cuts the fixture counts only its own half" \
       "$(printf '%s' "$OUT" | python3 -c "import json,sys;print(json.load(sys.stdin)['browser_opens'])" 2>&1)" "1"
-OUT="$(VPN_REPORT_NOW=yesterday "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" 2>&1)"; RC=$?
+OUT="$(VPN_REPORT_NOW=yesterday "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --daemon-dir "$T/no-daemon" 2>&1)"; RC=$?
 check "a malformed VPN_REPORT_NOW: exit 2, never the wall clock" "$RC" 2
 
 # --- client crashes: the number the 2026-11 fix targets --------------------
@@ -1986,12 +1986,16 @@ case " $* " in
     [ -e "$IPSTATE/journal-user-fail" ] && exit 2
     if [ -r "$IPSTATE/journal-user.out" ]; then cat "$IPSTATE/journal-user.out"; exit 0; fi
     echo '-- No entries --'; exit 1 ;;
+  *" -u aws-client-vpn-daemon.service "*)
+    [ -e "$IPSTATE/journal-daemon-fail" ] && exit 2
+    if [ -r "$IPSTATE/journal-daemon.out" ]; then cat "$IPSTATE/journal-daemon.out"; exit 0; fi
+    echo '-- No entries --'; exit 1 ;;
 esac
 echo '-- No entries --'; exit 1
 STUB
 chmod +x "$STUBBIN/journalctl" || fatal setup
 rep_journal() { PATH="$STUBBIN:$PATH" VPN_REPORT_NOW="$FIXTURE_WINDOW_END" \
-    "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --days 7 --json 2>&1; }
+    "$REPORT" --app-dir "$FIXTURES" --ovpn-dir "$T/no-ovpn" --daemon-dir "$T/no-daemon" --days 7 --json 2>&1; }
 jfield() { printf '%s' "$1" | python3 -c "import json,sys;v=json.load(sys.stdin)['$2'];print(v.get('resumes_seen') if isinstance(v,dict) else v)" 2>&1; }
 
 # One crash, five minutes after the fixture's first CONNECTED (1792868400), so
@@ -2016,6 +2020,31 @@ check "...and the same answer is a count of resumes, not NOT CHECKED" "$(jfield 
 reset; touch "$IPSTATE/journal-user-fail"
 check "a journal that cannot be read: NOT CHECKED, never 0" "$(jfield "$(rep_journal)" client_crashes)" "NOT CHECKED"
 
+# A 6.x DAEMON failure, as systemd records it: Restart=always brings it back, so
+# the record systemd writes is the only trace of the death.
+reset
+printf '%s\n' '2026-10-24T22:05:00+03:00 cilantro systemd[1]: aws-client-vpn-daemon.service: Failed with result '"'"'exit-code'"'"'.' \
+    > "$IPSTATE/journal-daemon.out"
+J_DAEMON="$(rep_journal)"
+check "a 6.x daemon failure is counted" "$(jfield "$J_DAEMON" daemon_failures_6x)" "1"
+check "...and is a client crash in the total" "$(jfield "$J_DAEMON" client_crashes)" "1"
+reset; touch "$IPSTATE/journal-daemon-fail"
+check "a daemon journal that cannot be read: the TOTAL is NOT CHECKED" \
+      "$(jfield "$(rep_journal)" client_crashes)" "NOT CHECKED"
+
+# --- the 6.x daemon log ----------------------------------------------------
+# 6.x moved the tunnel into a root daemon with its own, root-owned log. The
+# fixture is in its measured line shapes: a 5 s first connect, then one drop that
+# needs a SAML re-auth, closed 300 s later.
+reset
+J6="$(PATH="$STUBBIN:$PATH" VPN_REPORT_NOW="$FIXTURE_WINDOW_END" "$REPORT" --app-dir "$T/no-app" \
+      --ovpn-dir "$T/no-ovpn" --daemon-dir "$FIXTURES/daemon" --days 7 --json 2>&1)"
+check "6.x: a first connect and one drop are two outages" "$(jfield "$J6" outages)" "2"
+# Durations come from the daemon's own UTC stamps: 5 s + 300 s.
+check "6.x: the spans are measured from the daemon's UTC stamps, 5 s + 300 s" "$(jfield "$J6" downtime_seconds)" "305"
+check "6.x: the drop's DYNAMIC_CHALLENGE marks it as needing SAML" "$(jfield "$J6" needed_saml)" "1"
+check "6.x: the assertion reaching the local callback is counted" "$(jfield "$J6" acs_requests)" "1"
+
 printf '\nthe redactor covers what the reporter reads\n'
 
 RED="$DOTFILES/scripts/redact-secrets.sh"
@@ -2031,7 +2060,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=308
+EXPECTED_ROWS=315
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

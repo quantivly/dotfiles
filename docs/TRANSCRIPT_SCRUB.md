@@ -58,7 +58,7 @@ value ends.
 
 Its **shape** rules (`gho_…`, `sk-ant-…`, `lin_api_…`) match anywhere, including inside a
 JSON string, and caught most of the audit's findings. Six of the fifteen are *keyed* —
-`aws_secret_access_key=`, `SAMLRequest=`, `AUTH_FAILED,CRV1:`, `Bearer `, `-----BEGIN …
+`aws_secret_access_key=`, `SAMLRequest=`, `CRV1:`, `Bearer `, `-----BEGIN …
 PRIVATE KEY-----`, `https://user:…@` — and those need translating rather than copying,
 because their value ends where a **line** ends and here a line is a whole JSON record. Its
 **name** rules are the problem the tool was built for:
@@ -454,7 +454,7 @@ date attached and should not be load-bearing for a decision that can justify its
 
 ## State table
 
-`scripts/test-scrub-transcript-secrets.sh` (112 checks, hermetic, run in CI as
+`scripts/test-scrub-transcript-secrets.sh` (114 checks, hermetic, run in CI as
 **Transcript Scrub State Table**). It carries the same 16 rule labels as
 `scripts/redact-secrets.sh`, and a row asserts that — see *Parity* above. Every row runs against a throwaway `mktemp` tree reached
 through `SCRUB_TRANSCRIPT_ROOTS`; nothing in the file names `~/.claude/projects`. Fixture

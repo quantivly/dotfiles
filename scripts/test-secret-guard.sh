@@ -123,7 +123,12 @@ check "vpn re-auth challenge" \
 check "the challenge stops at whitespace" \
       "$(red "AUTH_FAILED,CRV1:R:instance-0a1b:${SAMLBLOB} connecting")" \
       "AUTH_FAILED,CRV1:<REDACTED:vpn-auth-challenge> connecting"
-# Belt to the two rows above: no base64-shaped run of the blob survives anywhere,
+# The 6.x daemon's spelling has no AUTH_FAILED in front of it, and the anchor the
+# 5.x shape needed let it through untouched (2026-11-02). It stops at the quote.
+check "vpn re-auth challenge, as the 6.x daemon logs it" \
+      "$(red "OvpnEvent { name: \"DYNAMIC_CHALLENGE\", info: \"CRV1:R:instance-1/1111/0000-aaaa:${SAMLBLOB}\" })")" \
+      'OvpnEvent { name: "DYNAMIC_CHALLENGE", info: "CRV1:<REDACTED:vpn-auth-challenge>" })'
+# Belt to the rows above: no base64-shaped run of the blob survives anywhere,
 # whatever the surrounding text. An equality row pins one spelling; this pins the
 # property.
 check "no 20+ char blob survives either shape" \
@@ -810,7 +815,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=202
+EXPECTED_ROWS=203
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.
