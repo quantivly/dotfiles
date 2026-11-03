@@ -212,8 +212,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Persistent=true` kept. The cost is one ~100 s sync per tick while the laptop is awake: at most 33
   ticks a day instead of 24, and weekend ticks that did not exist.
 
-||||||| parent of 18c3869 (feat(rabota): bucket 1 of the rank holds one row per key (DO-876))
-
 - **The rank's bucket 1 holds one row per key (DO-876).** The reply queue is one notification per
   comment, so a thread with twenty-four comments was twenty-four "people blocked on you" rows and
   crowded the brief's twelve lines (83 rows over 28 keys on 2026-11-03); a review request the plan
