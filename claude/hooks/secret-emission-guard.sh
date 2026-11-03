@@ -445,8 +445,9 @@ credential_file_read() {
 #
 # Two spellings of a read need care with quotes. `$(< f)` and `` `< f` `` read a file with no verb
 # and still expand inside double quotes, where the quote-stripped copy has lost them, so they are
-# looked for with only the single-quoted spans removed. And a `<word>` whose word has no `.` or `/`
-# is a placeholder in prose (`seats/<seat>.env`), not a redirection: it cannot name a token file.
+# looked for wherever the shell expands them (file_subst_expands, below). And a `<word>` whose word
+# has no `.` or `/` is a placeholder in prose (`seats/<seat>.env`), not a redirection: it cannot
+# name a token file.
 #
 # `claude-oauth-store`, the script, is not the directory: the name must end at a character that
 # cannot continue it (`/`, `;`, a quote, whitespace, the end). This RAISES THE BAR AND DOES NOT
@@ -455,9 +456,49 @@ credential_file_read() {
 # quoted for another host (`ssh dev 'cat …'`) pass it, though credential_file_read still sees a
 # file's path in its own segment. A code search that names the directory is refused, for which
 # grep -l piped through the redactor is the way through.
+#
+# 0 if segment $1 holds `$(<` or `` `< `` where the shell would expand it: outside single quotes,
+# and not after a backslash. Quote state is tracked as the shell tracks it, so a `'` inside double
+# quotes is a literal: a sed that strips every '...' pair would read `"'$(<f)'"` or
+# `"it's" "$(<f)" 'x'` as quoted and miss the read. Not a full parser: a command substitution's own
+# quotes are not tracked separately. A character loop, so the caller gates it on a cheap regex.
+file_subst_expands() {
+  # Bytes, not characters: in a UTF-8 locale ${s:i:1} counts from the start of the string at
+  # every step. No byte of a multibyte character equals the ASCII bytes this looks for.
+  local LC_ALL=C
+  local s="$1" i=0 j n ch dq=""
+  n=${#s}
+  while (( i < n )); do
+    ch="${s:i:1}"
+    case "$ch" in
+      \\) (( i += 2 )); continue ;;   # an escaped character is a literal, quoted or not
+      '"') if [[ -n "$dq" ]]; then dq=""; else dq=1; fi ;;
+      "'")
+        # Outside double quotes, a single-quoted span: skip to its close (or the end, unbalanced).
+        if [[ -z "$dq" ]]; then
+          (( i++ ))
+          while (( i < n )) && [[ "${s:i:1}" != "'" ]]; do (( i++ )); done
+        fi ;;
+      '$'|'`')
+        # String tests, not a regex: bash compiles a [[ =~ ]] pattern at every evaluation, which
+        # measured 0.8s -> 2.0s on a 7,850-character command of `$x`s, and this hook's 5s
+        # timeout fails open. `$(` or a backtick, any spaces, then `<`.
+        j=$(( i + 1 ))
+        if [[ "$ch" == '$' ]]; then
+          [[ "${s:j:1}" == '(' ]] || { (( i++ )); continue; }
+          (( j++ ))
+        fi
+        while (( j < n )) && [[ "${s:j:1}" == [[:space:]] ]]; do (( j++ )); done
+        [[ "${s:j:1}" == '<' ]] && return 0 ;;
+    esac
+    (( i++ ))
+  done
+  return 1
+}
+
 COR_WHY=""
 claude_oauth_read() {
-  local seg stripped sq first np dir_re verb_re kw_re redir_re subst_re ph_re lead path verbs
+  local seg stripped first np dir_re verb_re kw_re redir_re subst_re ph_re lead path verbs
   dir_re='claude-oauth([^A-Za-z0-9_.-]|$)'
   [[ "$cmd" =~ $dir_re ]] || return 1
   cmd_segments_ensure || return 1
@@ -470,9 +511,9 @@ claude_oauth_read() {
   # As in credential_file_read: `<` and not `<<` (a heredoc or herestring reads no file), and not
   # `<(`, a process substitution, whose own command is a segment of its own here.
   redir_re='(^|[^<])[<][[:space:]]*[^<([:space:]]'
-  # `$(<` or a backtick then `<`, but not `<<` or `<(`. In variables: an unquoted `<` inside
-  # [[ =~ ]] is parsed as a redirection.
-  subst_re='(\$\(|`)[[:space:]]*<([^<(]|$)'
+  # `$(<`, or a backtick then `<`: the cheap gate for file_subst_expands. In a variable: an
+  # unquoted `<` inside [[ =~ ]] is parsed as a redirection.
+  subst_re='(\$\(|`)[[:space:]]*<'
   # The LAST placeholder in the string, so the loop below removes one per turn and ends.
   ph_re='^(.*)<[A-Za-z][A-Za-z0-9_-]*>(.*)$'
   while IFS= read -r seg || [[ -n "$seg" ]]; do
@@ -484,13 +525,11 @@ claude_oauth_read() {
       COR_WHY="a content verb, a shell or an interpreter in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens (if this only WRITES text that mentions it, write the file with an editor tool instead)"
       return 0
     fi
-    # The raw segment gates the fork: only a segment that holds the substitution at all pays it.
-    if [[ "$seg" =~ $subst_re ]]; then
-      sq="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g")"
-      if [[ "$sq" =~ $subst_re ]]; then
-        COR_WHY="a \`\$(< file)\` read in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
-        return 0
-      fi
+    # The raw segment gates the character loop: only a segment that holds the substitution at all
+    # pays for it.
+    if [[ "$seg" =~ $subst_re ]] && file_subst_expands "$seg"; then
+      COR_WHY="a \`\$(< file)\` read in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
+      return 0
     fi
     np="$stripped"
     while [[ "$np" =~ $ph_re ]]; do np="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"; done

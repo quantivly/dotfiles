@@ -104,8 +104,10 @@ Design decisions that are load-bearing, not preferences:
     line is a segment, and a commit message that names the directory says "more" and "sort";
   - an input redirection (`tr -d x < token.env`). A `<word>` with no `.` or `/` in the word is a
     placeholder in prose (`seats/<seat>.env`), not a redirection;
-  - `$(< file)` or `` `< file` ``, outside single quotes. Inside double quotes it still expands,
-    so it is looked for before the double-quoted text is stripped.
+  - `$(< file)` or `` `< file` ``, outside single quotes and not escaped. Inside double quotes
+    it still expands, so it is looked for before the double-quoted text is stripped, by a scan
+    that tracks quotes as the shell does: a `'` inside double quotes (`"it's"`) is a literal and
+    doesn't hide it.
 
   Seat files also join the per-segment rule's path list, so a wrapper the directory rule cannot
   parse (`timeout -s KILL 5 cat …/seats/x.env`) still meets that rule when the path is whole.
@@ -200,7 +202,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (272 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (275 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this

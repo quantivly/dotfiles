@@ -806,19 +806,25 @@ do
   check "refuses: $c" "$(ask "$c")" "deny"
 done
 # `$(< file)` reads the file with no verb at all, and inside double quotes it still expands. The
-# quote-stripped copy has lost it, so it is looked for with only the single-quoted spans removed,
-# which is where no expansion happens (A1). Backticks spell the same substitution.
+# quote-stripped copy has lost it, so it is looked for wherever the shell would expand it: outside
+# single quotes, with quote state tracked as the shell does (A1). Backticks spell the same thing.
+# A `'` inside double quotes is a literal, so it must not hide the substitution (the last two).
 # shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
 for c in \
   'echo "$(< ~/.config/claude-oauth/token.env)"' \
   'cd ~/.config/claude-oauth && echo "$(<token.env)"' \
-  'cd ~/.config/claude-oauth && printf "%s\n" "`< token.env`"'
+  'cd ~/.config/claude-oauth && printf "%s\n" "`< token.env`"' \
+  "cd ~/.config/claude-oauth && echo \"'\$(<token.env)'\"" \
+  "cd ~/.config/claude-oauth && echo \"it's\" \"\$(<token.env)\" 'x'"
 do
   check "refuses: $c" "$(ask "$c")" "deny"
 done
 # shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
 check "allows: a single-quoted \$(< naming the directory, which never expands" \
       "$(ask "git commit -m 'never run \$(< ~/.config/claude-oauth/token.env)'")" "allow"
+# shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
+check "allows: an escaped \\\$(< naming the directory, which prints as written" \
+      "$(ask 'git commit -m "never run \$(< ~/.config/claude-oauth/token.env)"')" "allow"
 check "allows: a shell run on the store's script, whose name is not the directory" \
       "$(ask 'bash -n scripts/claude-oauth-store')" "allow"
 # `sh` is a whole word: `ssh` is not a shell, and dev's metadata is read this way.
@@ -965,7 +971,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=272
+EXPECTED_ROWS=275
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.
