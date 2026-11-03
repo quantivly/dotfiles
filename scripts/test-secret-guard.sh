@@ -708,6 +708,65 @@ check "uncovered (by decision): an interpreter handed the path" \
 check "refuses: writing TO the file (known, pre-existing FP)" \
       "$(ask 'cat README.md > ~/.zshrc.local')" "deny"
 
+echo
+echo "=== the token directory: a verb in ANY segment, interpreters included (F10, N10) ==="
+# ~/.config/claude-oauth/ holds the long-lived Claude tokens (token.env, and seats/*.env in the
+# seat layout), and nothing in it is edited by hand. So the rule is wider than the per-segment one:
+# a command that names the DIRECTORY anywhere, and runs a content verb or an interpreter at command
+# position, or an input redirection, in ANY segment. Per segment, `cd` into it then `cat` passed.
+# shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
+for c in \
+  'cat ~/.config/claude-oauth/seats/quantivly-5.env' \
+  'head -1 ~/.config/claude-oauth/seats/quantivly-5.env' \
+  'tr -d x < ~/.config/claude-oauth/seats/quantivly-5.env' \
+  'cd ~/.config/claude-oauth && cat token.env' \
+  'cd ~/.config/claude-oauth && cat seats/quantivly-5.env' \
+  'cd ~/.config/claude-oauth; head -c 40 token.env' \
+  'cd ~/.config/claude-oauth && tr -d x < token.env' \
+  'cd "$HOME/.config/claude-oauth" && sort seats/*.env' \
+  'cd ~/.config/claude-oauth && echo $(cat token.env)' \
+  "perl -ne 'print' ~/.config/claude-oauth/token.env" \
+  'ruby -e "puts File.read(ARGV[0])" ~/.config/claude-oauth/token.env' \
+  'node -e "process.stdout.write(require(\"fs\").readFileSync(process.argv[1]))" ~/.config/claude-oauth/token.env' \
+  'cd ~/.config/claude-oauth && python3.11 -c "import sys; print(open(sys.argv[1]).read())" token.env'
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+py_oauth='python3 -c "print(open(\"/home/zvi/.config/claude-oauth/token.env\").read())"'
+check "refuses: an interpreter handed the token file" "$(ask "$py_oauth")" "deny"
+py_seat='python3 -c "print(open(\"/home/zvi/.config/claude-oauth/seats/quantivly-5.env\").read())"'
+check "refuses: an interpreter handed a seat file" "$(ask "$py_seat")" "deny"
+# Metadata stays allowed, and so does the store's SCRIPT, whose name is not the directory.
+for c in \
+  'ls -la ~/.config/claude-oauth' \
+  'ls -la ~/.config/claude-oauth/seats' \
+  'stat -L -c %a ~/.config/claude-oauth/token.env' \
+  'readlink ~/.config/claude-oauth/token.env' \
+  'cd ~/.config/claude-oauth && ls -l seats && readlink token.env' \
+  'sed -n 1,40p ~/.dotfiles/scripts/claude-oauth-store' \
+  'grep -n TOKEN_RE scripts/claude-oauth-store' \
+  'git commit -m "read the claude-oauth date through the link"' \
+  'grep -rln "claude-oauth/" scripts | ~/.dotfiles/scripts/redact-secrets.sh'
+do
+  check "allows: $c" "$(ask "$c")" "allow"
+done
+# A verb counts only at command position, so prose that names the directory is not a read.
+msg_named=$'git commit -F - <<\'EOF\'\nThe store renews ~/.config/claude-oauth/seats/S.env, and more\nof the rows sort out a dangling link.\nEOF'
+check "allows: a heredoc message naming the directory, with verb words mid-line" "$(ask "$msg_named")" "allow"
+# A known false positive, by decision (N10): a code search that names the directory is refused.
+# The way through is grep -l piped through the redactor, the allowed row above.
+check "refuses: a code search naming the directory (known FP, by decision)" \
+      "$(ask 'grep -rn "claude-oauth/" scripts/')" "deny"
+# It raises the bar and does not block: a path the hook cannot read as the directory passes.
+# shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
+for c in \
+  "cat ~/.config/claude-o''auth/token.env" \
+  'd=claude; cat ~/.config/"$d"-oauth/token.env' \
+  'cat ~/.config/claude-oa*/token.env'
+do
+  check "uncovered (by decision): $c" "$(ask "$c")" "allow"
+done
+
 echo "=== the guard fails OPEN, always ==="
 # A hook that blocks the shell when it breaks gets disabled wholesale, taking
 # its protection with it. Every malformed input must allow.
@@ -815,7 +874,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=203
+EXPECTED_ROWS=232
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.

@@ -88,6 +88,18 @@ Design decisions that are load-bearing, not preferences:
   deliberately not verbs. A `python3` heredoc that opens the file is not caught either: it
   prints nothing by default, and refusing it would block ordinary edits to the very file
   people are told to keep their secrets in.
+- **The token directory gets a wider rule, which raises the bar and does not block**
+  (2026-11-03, the dev multi-seat design's F10 and N10). `~/.config/claude-oauth/` holds
+  year-long tokens (`token.env`, and `seats/<seat>.env` in the seat layout), and nothing edits
+  it by hand. So a command that names the *directory* anywhere, and runs a content verb or an
+  interpreter (`python`, `perl`, `ruby`, `node`) at command position, or an input redirection,
+  in **any** segment, is refused. Per segment, `cd ~/.config/claude-oauth && cat token.env`
+  passed. The verb has to be at command position because every heredoc line is a segment, and a
+  commit message that names the directory says "more" and "sort". Still missed, pinned as
+  `uncovered` rows: an obfuscated path (`claude-o''auth`, a variable, a glob). Newly refused,
+  pinned as a known false positive: a code search that names the directory, for which `grep -l`
+  piped through the redactor is the way through. A `cat >… <<EOF` that only writes text naming
+  the directory is refused too; write that file with an editor tool.
 - **The remedy the guard names did not remedy.** Immediately after the rule above shipped,
   running its own suggested `tail ~/.zshrc.local | redact-secrets` against the real file
   printed the `NOTION_PAT` in full. `NOTION_PAT` matched no name pattern (the alternation is
@@ -161,7 +173,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (203 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (232 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this

@@ -144,6 +144,10 @@ SAFE_REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
 SHA_RE='^[0-9a-f]{40}$'
 VER_RE='^[0-9]+(\.[0-9]+)+$'
 TOKEN_LINE_RE='^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat[0-9]+-[A-Za-z0-9_-]+$'
+# A seat's name, in the seat layout (token.env a link to seats/<seat>.env). A CONSTANT, never read
+# from the environment: a rule the environment could widen would let seats/../x.env through.
+# claude-oauth-store spells the same string, and a row in scripts/test-dev-sync.sh checks they agree.
+SEAT_RE='^quantivly-[a-z0-9][a-z0-9-]{0,30}$'
 
 usage() { sed -n '/^# Usage (laptop):/,/^# Exit:/p' "${SELF:-/dev/null}" 2>/dev/null | sed '$d; s/^# \{0,1\}//'; }
 
@@ -343,31 +347,61 @@ here_claude() {
 # (zshrc.company), the herdr launcher and rabota's remote lanes load it. These rows read its
 # mode, its shape and its date, never its value, and `claude auth status` for two fields.
 # Loaded into THIS process too, so dev-sync's own `claude` calls do not refresh the login.
+#
+# token.env is a regular file today. In the seat layout it is a link to seats/<seat>.env, and the
+# token's date is then seats/<seat>.created. token_layout sets TOKEN_SEAT (empty for a file),
+# TOKEN_DATE (the date file to read) and TOKEN_LINK_BAD (the target of a link that is not exactly
+# seats/<seat>.env, sanitised for printing; nothing here reads through such a link).
+token_layout() {
+    local t name
+    TOKEN_SEAT=""; TOKEN_LINK_BAD=""; TOKEN_DATE="$TOKEN_DIR/created"
+    [[ -L "$TOKEN_FILE" ]] || return 0
+    t="$(readlink "$TOKEN_FILE")"
+    name="${t#seats/}"; name="${name%.env}"
+    if [[ "$t" == "seats/$name.env" && "$name" =~ $SEAT_RE ]]; then
+        TOKEN_SEAT="$name"; TOKEN_DATE="$TOKEN_DIR/seats/$name.created"
+    else
+        TOKEN_LINK_BAD="${t//[^A-Za-z0-9._\/-]/?}"
+    fi
+}
 load_token() {
     local line=""
+    [[ -z "$TOKEN_LINK_BAD" ]] || return 1
     [[ -r "$TOKEN_FILE" ]] || return 1
     IFS= read -r line <"$TOKEN_FILE" || [[ -n "$line" ]] || return 1
     [[ "$line" =~ $TOKEN_LINE_RE ]] || return 1
     export CLAUDE_CODE_OAUTH_TOKEN="${line#CLAUDE_CODE_OAUTH_TOKEN=}"
 }
 
-# "<claude processes of this user> <of them without the token>", from /proc. Only the variable's
-# NAME is tested; a value is held in a bash variable for one comparison, never printed or piped.
+# "<claude processes of this user> <of them without the token>", from /proc. Each environment is
+# tested by ONE grep, so no entry ever passes through a bash variable, where a `set -x` while
+# debugging would print every process's token. --null-data, never -z: ugrep reads -z as
+# "decompress", and an environ is NUL-separated, so ^ anchors at each entry only with it.
 claude_procs() {
-    local d c e n=0 w=0 has
+    local d c n=0 w=0
     for d in "$PROC"/[0-9]*; do
         # A session is `claude`; one started by its versioned path (a herdmates teammate)
         # shows the version as its name.
         c="$(cat "$d/comm" 2>/dev/null)"
         [[ -O "$d" && ( "$c" == claude || "$c" =~ $VER_RE ) ]] || continue
-        n=$((n + 1)); has=0
-        while IFS= read -r -d '' e; do
-            [[ "$e" == CLAUDE_CODE_OAUTH_TOKEN=?* ]] && { has=1; break; }
-        done <"$d/environ" 2>/dev/null
-        e=""
-        (( has )) || w=$((w + 1))
+        n=$((n + 1))
+        grep -qa --null-data '^CLAUDE_CODE_OAUTH_TOKEN=.' "$d/environ" 2>/dev/null || w=$((w + 1))
     done
     printf '%d %d\n' "$n" "$w"
+}
+
+# The shared /login written back. A session started before the token, or anyone's /login, puts
+# claudeAiOauth back in .credentials.json, and every launch without the token races it again
+# (docs/HERDR_GUIDE.md, "Working on dev"). jq's exit status alone answers: only the key's presence
+# is read, and nothing of the file is printed or held in this shell.
+here_login_back() {
+    local creds="$HOME/.claude/.credentials.json" rc=1
+    [[ -e "$creds" ]] && { jq -e 'has("claudeAiOauth")' "$creds" >/dev/null 2>&1; rc=$?; }
+    case "$rc" in
+        0) row oper auth "the shared /login is back on dev (claudeAiOauth in ~/.claude/.credentials.json): restart the Claude processes that started without the token, then remove the key again" ;;
+        1) row ok auth "no shared /login on dev (claudeAiOauth absent)" ;;
+        *) row oper auth "could not tell whether the shared /login is back: ~/.claude/.credentials.json does not read as a JSON object" ;;
+    esac
 }
 
 here_auth() {
@@ -388,6 +422,13 @@ here_auth() {
     else
         row oper auth "only the shared /login ($method): sessions that start together can log every session out at once; store a long-lived token, HERDR_GUIDE.md \"Working on dev\""
     fi
+    if [[ -n "$TOKEN_LINK_BAD" ]]; then
+        row oper auth "token.env links to $TOKEN_LINK_BAD, which is not a seat (seats/<name>.env, <name> like quantivly-5): dev-sync reads nothing through it; point it at a seat, or make it a file again"
+        return 0
+    elif [[ -n "$TOKEN_SEAT" && ! -e "$TOKEN_FILE" ]]; then
+        row oper auth "token.env links to seats/$TOKEN_SEAT.env, which does not exist: new shells load no token, so claude is not logged in; store that seat again (scripts/claude-oauth-store)"
+        return 0
+    fi
     [[ -e "$TOKEN_FILE" ]] || return 0
     if [[ ! -r "$TOKEN_FILE" ]]; then
         row oper auth "$TOKEN_FILE is not readable by $(id -un); fix its owner and mode (600)"
@@ -396,13 +437,14 @@ here_auth() {
         row oper auth "$TOKEN_FILE holds no CLAUDE_CODE_OAUTH_TOKEN line of setup-token's shape; store it again (scripts/claude-oauth-store)"
         return 0
     fi
-    mode="$(stat -c %a "$TOKEN_FILE" 2>/dev/null)"
+    # -L: through a link, the mode that matters is the seat file's, not the link's 777.
+    mode="$(stat -L -c %a "$TOKEN_FILE" 2>/dev/null)"
     [[ "$mode" == 600 ]] || row oper auth "the token file is mode ${mode:-?}, not 600: chmod 600 $TOKEN_FILE"
-    created="$(cat "$TOKEN_DIR/created" 2>/dev/null)"
+    created="$(cat "$TOKEN_DATE" 2>/dev/null)"
     # Whole days between two dates, both read as UTC midnights, so a DST change cannot
     # move the count by the hour that would floor it a day short.
     if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || ! then_s="$(TZ=UTC date -d "$created" +%s 2>/dev/null)"; then
-        row oper auth "the token has no readable date in $TOKEN_DIR/created, so its expiry is unknown; store it again"
+        row oper auth "the token has no readable date in $TOKEN_DATE, so its expiry is unknown; store it again"
     else
         age=$(( ($(TZ=UTC date -d "$(date +%F)" +%s) - then_s) / 86400 )); left=$((TOKEN_LIFE_D - age))
         if (( age < 0 )); then
@@ -412,7 +454,7 @@ here_auth() {
         elif (( age >= TOKEN_WARN_D )); then
             row oper auth "the token stored $created expires in about $left day(s): mint a new one (claude setup-token) and store it"
         else
-            row ok auth "token stored $created, $age day(s) old"
+            row ok auth "token stored $created, $age day(s) old${TOKEN_SEAT:+ (seat $TOKEN_SEAT)}"
         fi
     fi
     read -r n w <<<"$(claude_procs)"
@@ -423,6 +465,7 @@ here_auth() {
     else
         row oper auth "$w of $n Claude process(es) started without the token and still refresh the shared /login; restart them when idle"
     fi
+    here_login_back
 }
 
 server_version() { "$HERDR" status server 2>/dev/null </dev/null | awk '$1=="version:"{print $2; exit}'; }
@@ -951,6 +994,7 @@ here_main() {
     # The file decides, not whatever the caller exported.
     unset CLAUDE_CODE_OAUTH_TOKEN
     TOKEN_LOADED=0
+    token_layout
     load_token && TOKEN_LOADED=1
     # A non-interactive ssh and a user unit both lack ~/.local/bin (docs/HERDR_GUIDE.md).
     export PATH="$HOME/.local/bin:$PATH"

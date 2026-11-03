@@ -420,6 +420,52 @@ credential_file_read() {
   return 1
 }
 
+# --- the token directory ----------------------------------------------------
+#
+# ~/.config/claude-oauth/ holds the long-lived Claude tokens: token.env, and in the seat layout
+# seats/<seat>.env, all a year long. Nothing in it is edited by hand (claude-oauth-store writes
+# it), so the rule here is wider than credential_file_read's, in three ways:
+#
+#   the DIRECTORY anywhere in the command, not a file name in the same segment. Per segment,
+#   `cd ~/.config/claude-oauth && cat token.env` passed, because no segment held both;
+#
+#   a verb in ANY segment -- but at COMMAND POSITION (a segment's start, or after `|`, `(` or a
+#   backtick, past sudo/xargs and the like). Every heredoc line is a segment, so a verb anywhere
+#   would refuse a commit message that names the directory and says "more" or "sort";
+#
+#   interpreters count (python, perl, ruby, node). credential_file_read leaves them out on
+#   purpose, because ~/.zshrc.local is edited that way; nothing edits this directory that way.
+#
+# `claude-oauth-store`, the script, is not the directory: the name must end at a character that
+# cannot continue it (`/`, `;`, a quote, whitespace, the end). This RAISES THE BAR AND DOES NOT BLOCK (docs/SECRET_EMISSION.md): an
+# obfuscated path passes, and a code search that names the directory is refused -- grep -l piped
+# through the redactor is the way through.
+COR_WHY=""
+claude_oauth_read() {
+  local seg stripped dir_re verb_re redir_re pre verbs
+  dir_re='claude-oauth([^A-Za-z0-9_.-]|$)'
+  [[ "$cmd" =~ $dir_re ]] || return 1
+  cmd_segments_ensure || return 1
+  pre='((sudo|command|exec|nohup|time)[[:space:]]+|xargs[[:space:]]+(-[^[:space:]]*[[:space:]]+)*)*'
+  verbs='(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|cut|base64|paste|sort|uniq|rev|fold|expand|column|jq|diff|\.|python[0-9.]*|perl|ruby|node)'
+  verb_re="(^|[|(\`])[[:space:]]*${pre}${verbs}([[:space:]]|\$)"
+  # As in credential_file_read: `<` and not `<<` (a heredoc or herestring reads no file), and not
+  # `<(`, a process substitution, whose own command is a segment of its own here.
+  redir_re='(^|[^<])[<][[:space:]]*[^<([:space:]]'
+  while IFS= read -r seg || [[ -n "$seg" ]]; do
+    [[ -n "$seg" ]] || continue
+    stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
+    if [[ "$stripped" =~ $verb_re ]]; then
+      COR_WHY="\`${BASH_REMATCH[5]}\` in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens (if this only WRITES text that mentions it, write the file with an editor tool instead)"
+      return 0
+    elif [[ "$stripped" =~ $redir_re ]]; then
+      COR_WHY="an input redirection in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
+      return 0
+    fi
+  done <<< "$CMD_SEGS"
+  return 1
+}
+
 why=""
 case "$probe" in
   # Prints a token to stdout. That is its entire purpose.
@@ -513,6 +559,8 @@ if [[ -z "$why" ]]; then
   #   anywhere. Keeping them would mean keeping that false positive; telling
   #   them apart needs real dataflow, which a command-string matcher does not
   #   have. Do not read the verb list as coverage.
+  elif claude_oauth_read; then
+    why="$COR_WHY"
   elif credential_file_read; then
     why="$CFR_WHY"
   # `printenv NAME` prints one variable's value. The bare-dump rule above

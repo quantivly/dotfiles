@@ -1128,10 +1128,23 @@ outage.
     `.credentials.json`, so two sessions refreshing or signing in together can blank Slack's or
     Notion's entry ([CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md)). The symptom is one server needing
     a sign-in again (dev-sync's `mcp` ⚠), not a logout.
-  - **Still on the shared login:** a session started before the token was stored, until it
-    restarts; a bare `ssh dev claude …`, which reads no zshrc; and any session that runs
-    `/login`, which switches that session to the stored login. Never `/login` on dev. (`--bare`
-    reads neither credential, only `ANTHROPIC_API_KEY` or `apiKeyHelper`, so it cannot race.)
+  - **Fail with "not logged in"** since 11-03 12:36Z, when the shared `/login` (`claudeAiOauth`)
+    was removed from dev's `.credentials.json` (`mcpOAuth` stays):
+    - a nested `claude` in a session's own shell, whose token Claude Code scrubs;
+    - a bare `ssh dev claude …`, which reads no zshrc;
+    - a script calling `$HOME/.local/bin/claude` directly.
+
+    Never `/login` on dev: it puts the race back. A session started before the token still holds
+    the old login, and its next refresh writes `claudeAiOauth` back, as any `/login` does.
+    `dev-sync --check` then shows ⚠ "the shared /login is back on dev" (a `jq -e` test of the key's
+    presence that reads nothing else), next to the row counting processes without the token, which
+    names the likely writer: restart those, then remove the key again. (`--bare` reads neither
+    credential, only `ANTHROPIC_API_KEY` or `apiKeyHelper`, so it cannot race.)
+  - **Ready for seats, not using them yet.** `token.env` may be a link to `seats/<seat>.env`
+    (`<seat>` like `quantivly-5`, a fixed rule). Every loader reads through it, dev-sync reports the
+    seat file's mode and `seats/<seat>.created` date and ⚠s a dangling link or a target outside
+    `seats/`, and `claude-oauth-store` renews the seat the link names, keeping the link. dev's
+    `token.env` is still a file.
 - **Two doors, not one.** **Attended:** pick `dev (EC2)` in the machine sidebar and spawn with
   herdr-draft's popup in that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the
   popup finds its own binary, but a shell invocation needs

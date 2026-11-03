@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **dev's token handling is ready for seats, with no change on dev.** `token.env` may be a link
+  to `seats/<seat>.env`, where `<seat>` matches a constant rule that no environment can widen.
+  Every loader reads through it; dev-sync reads the seat file's mode (`stat -L`) and its date,
+  and ⚠s a dangling link or a target outside `seats/`; `claude-oauth-store` renews the seat the
+  link names, keeps the link, and takes its new `.lock` only after its probe exits. dev-sync also
+  ⚠s when the shared `/login` (`claudeAiOauth`) comes back, by `jq -e` on the key alone, and its
+  `/proc` scan no longer reads environments into bash. The secret guard refuses a read of
+  anything under `~/.config/claude-oauth/` in any segment, interpreters included.
+  `scripts/test-dev-sync.sh` goes from 237 to 298 checks, `scripts/test-secret-guard.sh` from
+  203 to 232.
+
 - **herdr makes a sound only when you are needed.** It used to beep at every turn end of every
   background agent, and with a dozen panes none of those beeps needed you.
   - **The per-turn `done` sound is muted.** herdr (through v0.9.5) has no per-kind switch, so
