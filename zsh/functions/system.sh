@@ -3387,6 +3387,47 @@ _vpn_v6_canary_verdict() {   # <probe-state> <both-halves-present> -> a verdict 
   esac
 }
 
+# Addresses the block must reject: a public v6 resolver, and the well-known NAT64
+# prefix, which lies outside 2000::/3 -- on a DNS64 network every AAAA answer is
+# a 64:ff9b:: address, so a block that missed it would block nothing there.
+_VPN_V6_LEAK_CANARY_ADDRS=(2606:4700:4700::1111 64:ff9b::1)
+# POSITIVE CONTROL, which must stay reachable. Deliberately NOT this host's own
+# tailnet address -- that one resolves `local ... table local` via rule 0 and
+# would pass even with rule 5270 and table 52 deleted, proving nothing.
+_VPN_V6_TAILNET_CANARY_ADDR=fd7a:115c:a1e0::53
+
+# _vpn_v6_report_canaries <both-halves-present>
+#
+# The doctor's canary lines, run only while the block is armed AND the tunnel is
+# up -- the only conditions under which "reachable" is a fault. A function of its
+# own so a row can drive it through the `ip` stub: every line here that quotes
+# the probe's output is reachable only with a routing table in the state it
+# describes.
+_vpn_v6_report_canaries() {
+  local halves="$1" addr state
+  for addr in "${_VPN_V6_LEAK_CANARY_ADDRS[@]}"; do
+    state="$(_vpn_v6_probe "$addr")"
+    case "$(_vpn_v6_canary_verdict "$state" "$halves")" in
+      ok)      _doctor_ok "$addr is unreachable, and this tool owns both halves" ;;
+      not-ours)
+        _doctor_bad "$addr is rejected, but this tool owns neither half — something ELSE is rejecting it" ;;
+      leaking)
+        _doctor_bad "$addr is REACHABLE outside the tunnel — a more-specific route is winning:"
+        _doctor_bad "      ${_VPN_V6_PROBE_OUT}" ;;
+      not-exercised)
+        _doctor_note "$addr: no IPv6 route at all here — the block was not exercised" ;;
+      *)
+        _doctor_warn "$addr: could not classify \`ip -6 route get\` — ${_VPN_V6_PROBE_OUT}" ;;
+    esac
+  done
+  state="$(_vpn_v6_probe "$_VPN_V6_TAILNET_CANARY_ADDR")"
+  if [[ "$state" == "open" ]]; then
+    _doctor_ok "the tailnet still resolves past the block (table 52 precedes main)"
+  else
+    _doctor_warn "the tailnet canary is $state — the block may be broader than intended: ${_VPN_V6_PROBE_OUT}"
+  fi
+}
+
 _vpn_v6_verdict() {
   local armed="$1" up="$2" halves="$3" any="$4"
   if (( ! armed )); then
@@ -3859,31 +3900,7 @@ vpn-doctor() {
     # more-specific route from an RA, a second VPN or a v6-enabled Docker
     # network silently beats ours without changing the list at all.
     if (( tunnel_up_now )); then
-      local addr state
-      for addr in 2606:4700:4700::1111 64:ff9b::1; do
-        state="$(_vpn_v6_probe "$addr")"
-        case "$(_vpn_v6_canary_verdict "$state" "$v6_halves")" in
-          ok)      _doctor_ok "$addr is unreachable, and this tool owns both halves" ;;
-          not-ours)
-            _doctor_bad "$addr is rejected, but this tool owns neither half — something ELSE is rejecting it" ;;
-          leaking)
-            _doctor_bad "$addr is REACHABLE outside the tunnel — a more-specific route is winning:"
-            _doctor_bad "      ${_VPN_V6_PROBE_OUT}" ;;
-          not-exercised)
-            _doctor_note "$addr: no IPv6 route at all here — the block was not exercised" ;;
-          *)
-            _doctor_warn "$addr: could not classify \`ip -6 route get\` — ${_VPN_V6_PROBE_OUT}" ;;
-        esac
-      done
-      # POSITIVE CONTROL. fd7a:115c:a1e0::53, deliberately NOT this host's own
-      # tailnet address -- that one resolves `local ... table local` via rule 0
-      # and would pass even with rule 5270 and table 52 deleted, proving nothing.
-      state="$(_vpn_v6_probe fd7a:115c:a1e0::53)"
-      if [[ "$state" == "open" ]]; then
-        _doctor_ok "the tailnet still resolves past the block (table 52 precedes main)"
-      else
-        _doctor_warn "the tailnet canary is $state — the block may be broader than intended: ${_VPN_V6_PROBE_OUT}"
-      fi
+      _vpn_v6_report_canaries "$v6_halves"
     fi
   fi
 
